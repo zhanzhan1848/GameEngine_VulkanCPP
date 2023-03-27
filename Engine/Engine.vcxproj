@@ -1,0 +1,310 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\packages\Microsoft.Direct3D.D3D12.1.606.3\build\native\Microsoft.Direct3D.D3D12.props" Condition="Exists('..\packages\Microsoft.Direct3D.D3D12.1.606.3\build\native\Microsoft.Direct3D.D3D12.props')" />
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="DebugEditor|x64">
+      <Configuration>DebugEditor</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="ReleaseEditor|x64">
+      <Configuration>ReleaseEditor</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{DBC7D3B0-C769-FE86-B024-12DB9C6585D7}</ProjectGuid>
+    <IgnoreWarnCompileDuplicatedFilename>true</IgnoreWarnCompileDuplicatedFilename>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>Engine</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DebugEditor|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseEditor|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='DebugEditor|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='ReleaseEditor|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(Platform)\$(Configuration)\x64\Debug\Engine\</IntDir>
+    <TargetName>$(ProjectName)</TargetName>
+    <TargetExt>.lib</TargetExt>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(Platform)\$(Configuration)\x64\Release\Engine\</IntDir>
+    <TargetName>$(ProjectName)</TargetName>
+    <TargetExt>.lib</TargetExt>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DebugEditor|x64'">
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(Platform)\$(Configuration)\x64\DebugEditor\Engine\</IntDir>
+    <TargetName>$(ProjectName)</TargetName>
+    <TargetExt>.lib</TargetExt>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseEditor|x64'">
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(Platform)\$(Configuration)\x64\ReleaseEditor\Engine\</IntDir>
+    <TargetName>$(ProjectName)</TargetName>
+    <TargetExt>.lib</TargetExt>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>PRIMAL_PLUS;DEBUG;_LIB;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir)Engine;$(SolutionDir)Engine\Common;$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <Optimization>Disabled</Optimization>
+      <MinimalRebuild>false</MinimalRebuild>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <ExceptionHandling>false</ExceptionHandling>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <FloatingPointModel>Fast</FloatingPointModel>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <Lib>
+      <AdditionalOptions>/ignore:4099 %(AdditionalOptions)</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level4</WarningLevel>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <PreprocessorDefinitions>PRIMAL_PLUS;NDEBUG;_LIB;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir)Engine;$(SolutionDir)Engine\Common;$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <Optimization>Full</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <MinimalRebuild>false</MinimalRebuild>
+      <OmitFramePointers>true</OmitFramePointers>
+      <StringPooling>true</StringPooling>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <ExceptionHandling>false</ExceptionHandling>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <FloatingPointModel>Fast</FloatingPointModel>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+    <Lib>
+      <AdditionalOptions>/ignore:4099 %(AdditionalOptions)</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugEditor|x64'">
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>PRIMAL_PLUS;DEBUG;USE_WITH_EDITOR;_LIB;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir)Engine;$(SolutionDir)Engine\Common;$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <Optimization>Disabled</Optimization>
+      <MinimalRebuild>false</MinimalRebuild>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <ExceptionHandling>false</ExceptionHandling>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <FloatingPointModel>Fast</FloatingPointModel>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <Lib>
+      <AdditionalOptions>/ignore:4099 %(AdditionalOptions)</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseEditor|x64'">
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level4</WarningLevel>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <PreprocessorDefinitions>PRIMAL_PLUS;NDEBUG;USE_WITH_EDITOR;_LIB;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir)Engine;$(SolutionDir)Engine\Common;$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <Optimization>Full</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <MinimalRebuild>false</MinimalRebuild>
+      <OmitFramePointers>true</OmitFramePointers>
+      <StringPooling>true</StringPooling>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <ExceptionHandling>false</ExceptionHandling>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <FloatingPointModel>Fast</FloatingPointModel>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+    <Lib>
+      <AdditionalOptions>/ignore:4099 %(AdditionalOptions)</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="Common\CommonHeaders.h" />
+    <ClInclude Include="Common\Id.h" />
+    <ClInclude Include="Common\PrimitiveTypes.h" />
+    <ClInclude Include="Components\ComponentsCommon.h" />
+    <ClInclude Include="Components\Entity.h" />
+    <ClInclude Include="Components\Script.h" />
+    <ClInclude Include="Components\Transform.h" />
+    <ClInclude Include="Content\ContentLoader.h" />
+    <ClInclude Include="Content\ContentToEngine.h" />
+    <ClInclude Include="EngineAPI\Camera.h" />
+    <ClInclude Include="EngineAPI\GameEntity.h" />
+    <ClInclude Include="EngineAPI\ScriptComponent.h" />
+    <ClInclude Include="EngineAPI\TransformComponent.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Camera.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12CommonHeaders.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Content.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Core.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12GPass.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Helpers.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Interface.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12PostProcess.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Resources.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Shaders.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Surface.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Upload.h" />
+    <ClInclude Include="Graphics\Direct3D12\Shaders\SharedTypes.h" />
+    <ClInclude Include="Graphics\GraphicsPlatform.h" />
+    <ClInclude Include="Graphics\GraphicsPlatformInterface.h" />
+    <ClInclude Include="Graphics\Renderer.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanCamera.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanCommandBuffer.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanCommonHeaders.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanCore.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanDescriptor.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanHelpers.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanInterface.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanRenderPass.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanResources.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanSurface.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanValidation.h" />
+    <ClInclude Include="Platform\IncludeWindowCPP.h" />
+    <ClInclude Include="Platform\Platform.h" />
+    <ClInclude Include="Platform\PlatformTypes.h" />
+    <ClInclude Include="Platform\Window.h" />
+    <ClInclude Include="Utilities\FreeList.h" />
+    <ClInclude Include="Utilities\IOStream.h" />
+    <ClInclude Include="Utilities\Math.h" />
+    <ClInclude Include="Utilities\MathTypes.h" />
+    <ClInclude Include="Utilities\Utilities.h" />
+    <ClInclude Include="Utilities\Vector.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Components\Entity.cpp" />
+    <ClCompile Include="Components\Script.cpp" />
+    <ClCompile Include="Components\Transform.cpp" />
+    <ClCompile Include="Content\ContentLoaderWin32.cpp" />
+    <ClCompile Include="Content\ContentToEngine.cpp" />
+    <ClCompile Include="Core\EngineWin32.cpp" />
+    <ClCompile Include="Core\MainWin32.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Camera.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Content.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Core.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12GPass.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Helpers.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Interface.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12PostProcess.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Resources.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Shaders.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Surface.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Upload.cpp" />
+    <ClCompile Include="Graphics\GraphicsPlatform.cpp" />
+    <ClCompile Include="Graphics\Renderer.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanCamera.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanCommandBuffer.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanCore.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanDescriptor.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanHelpers.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanInterface.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanRenderPass.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanResources.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanSurface.cpp" />
+    <ClCompile Include="Platform\PlatformLinux.cpp" />
+    <ClCompile Include="Platform\PlatformWin32.cpp" />
+    <ClCompile Include="Platform\Window.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Graphics\Vulkan\Shaders\compileShaders.bat" />
+    <None Include="Graphics\Vulkan\Shaders\test01.frag.glsl" />
+    <None Include="Graphics\Vulkan\Shaders\test01.vert.glsl" />
+    <None Include="packages.config" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="..\packages\Microsoft.Direct3D.D3D12.1.608.2\build\native\Microsoft.Direct3D.D3D12.targets" Condition="Exists('..\packages\Microsoft.Direct3D.D3D12.1.608.2\build\native\Microsoft.Direct3D.D3D12.targets')" />
+  </ImportGroup>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('..\packages\Microsoft.Direct3D.D3D12.1.608.2\build\native\Microsoft.Direct3D.D3D12.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Direct3D.D3D12.1.608.2\build\native\Microsoft.Direct3D.D3D12.targets'))" />
+  </Target>
+</Project>

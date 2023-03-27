@@ -1,0 +1,286 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Common">
+      <UniqueIdentifier>{8EEA3EAC-7A8C-6982-6347-7DD64F88F0D2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Components">
+      <UniqueIdentifier>{6B7DD516-5735-1764-C03C-F0BFAC13B254}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Content">
+      <UniqueIdentifier>{60013234-CCE0-B0CF-D5F8-3BA641571731}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Core">
+      <UniqueIdentifier>{2EB4837C-1AEB-840D-C3D7-6A10AFED000F}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="EngineAPI">
+      <UniqueIdentifier>{159D8BD1-8107-4048-CA45-F1ED36EF1D9D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Graphics">
+      <UniqueIdentifier>{1653CE33-0220-293F-2B39-17E717655ECD}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Graphics\Direct3D12">
+      <UniqueIdentifier>{9A5A666C-06BC-437A-8F29-8A2CFB897A39}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Graphics\Direct3D12\Shaders">
+      <UniqueIdentifier>{7379E093-DF86-0E7A-686D-0A65D479DA30}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Graphics\Vulkan">
+      <UniqueIdentifier>{D64BCAB8-42D7-377D-4BE8-BA71B7F2937D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Platform">
+      <UniqueIdentifier>{2AC788B4-1694-E3BF-3FAD-D1672BD9184E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Utilities">
+      <UniqueIdentifier>{010A8043-6D74-34BA-B6B2-E55F225C120F}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Common\CommonHeaders.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\Id.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\PrimitiveTypes.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Components\ComponentsCommon.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="Components\Entity.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="Components\Script.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="Components\Transform.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="Content\ContentLoader.h">
+      <Filter>Content</Filter>
+    </ClInclude>
+    <ClInclude Include="Content\ContentToEngine.h">
+      <Filter>Content</Filter>
+    </ClInclude>
+    <ClInclude Include="EngineAPI\Camera.h">
+      <Filter>EngineAPI</Filter>
+    </ClInclude>
+    <ClInclude Include="EngineAPI\GameEntity.h">
+      <Filter>EngineAPI</Filter>
+    </ClInclude>
+    <ClInclude Include="EngineAPI\ScriptComponent.h">
+      <Filter>EngineAPI</Filter>
+    </ClInclude>
+    <ClInclude Include="EngineAPI\TransformComponent.h">
+      <Filter>EngineAPI</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12Camera.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12CommonHeaders.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12Content.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12Core.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12GPass.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12Helpers.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12Interface.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12PostProcess.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12Resources.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12Shaders.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12Surface.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\D3D12Upload.h">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Direct3D12\Shaders\SharedTypes.h">
+      <Filter>Graphics\Direct3D12\Shaders</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\GraphicsPlatform.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\GraphicsPlatformInterface.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Renderer.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanCommandBuffer.h">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanCommonHeaders.h">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanCore.h">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanHelpers.h">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanInterface.h">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanRenderPass.h">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanResources.h">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanSurface.h">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanValidation.h">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\IncludeWindowCPP.h">
+      <Filter>Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\Platform.h">
+      <Filter>Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\PlatformTypes.h">
+      <Filter>Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\Window.h">
+      <Filter>Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="Utilities\FreeList.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="Utilities\IOStream.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="Utilities\Math.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="Utilities\MathTypes.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="Utilities\Utilities.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="Utilities\Vector.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="Graphics\Vulkan\VulkanCamera.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanDescriptor.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Components\Entity.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="Components\Script.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="Components\Transform.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="Content\ContentLoaderWin32.cpp">
+      <Filter>Content</Filter>
+    </ClCompile>
+    <ClCompile Include="Content\ContentToEngine.cpp">
+      <Filter>Content</Filter>
+    </ClCompile>
+    <ClCompile Include="Core\EngineWin32.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Core\MainWin32.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12Camera.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12Content.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12Core.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12GPass.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12Helpers.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12Interface.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12PostProcess.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12Resources.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12Shaders.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12Surface.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Direct3D12\D3D12Upload.cpp">
+      <Filter>Graphics\Direct3D12</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\GraphicsPlatform.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Renderer.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Vulkan\VulkanCommandBuffer.cpp">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Vulkan\VulkanCore.cpp">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Vulkan\VulkanHelpers.cpp">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Vulkan\VulkanInterface.cpp">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Vulkan\VulkanRenderPass.cpp">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Vulkan\VulkanResources.cpp">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Vulkan\VulkanSurface.cpp">
+      <Filter>Graphics\Vulkan</Filter>
+    </ClCompile>
+    <ClCompile Include="Platform\PlatformLinux.cpp">
+      <Filter>Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Platform\PlatformWin32.cpp">
+      <Filter>Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Platform\Window.cpp">
+      <Filter>Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics\Vulkan\VulkanCamera.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanDescriptor.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+    <None Include="Graphics\Vulkan\Shaders\test01.vert.glsl" />
+    <None Include="Graphics\Vulkan\Shaders\test01.frag.glsl" />
+    <None Include="Graphics\Vulkan\Shaders\compileShaders.bat" />
+  </ItemGroup>
+</Project>
