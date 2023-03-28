@@ -4,6 +4,7 @@
 #include "VulkanCore.h"
 #include "VulkanResources.h"
 #include "VulkanRenderPass.h"
+#include "VulkanHelpers.h"
 
 // Own header file
 #include "VulkanDescriptor.h"
@@ -428,48 +429,6 @@ get_swapchain_details(VkPhysicalDevice device, VkSurfaceKHR surface)
 }
 
 // Own function
-uint32_t vulkan_surface::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(core::physical_device(), &memProperties);
-
-    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
-    }
-
-    throw std::runtime_error("failed to find suitable memory type!");
-}
-
-void vulkan_surface::createBuffer(VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.pNext = nullptr;
-    bufferInfo.size = size;
-    bufferInfo.usage = usage;
-    bufferInfo.queueFamilyIndexCount = 0;
-    bufferInfo.pQueueFamilyIndices = nullptr;
-    bufferInfo.flags = 0;
-    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
-        throw std::runtime_error("failed to create buffer!");
-    }
-
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.pNext = nullptr;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
-
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
-        throw std::runtime_error("failed to allocate buffer memory!");
-    }
-}
-
 void vulkan_surface::createVertexBuffer(VkDevice device, const std::vector<Vertex>& vertex, baseBuffer& buffer)
 {
     VkDeviceSize bufferSize = sizeof(Vertex) * vertex.size();
@@ -505,7 +464,7 @@ void vulkan_surface::createUniformBuffers(VkDevice device, UniformBufferObject& 
 
     vkMapMemory(device, buffer.memory, 0, bufferSize, 0, &buffer.mapped);
 
-    DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();//DirectX::XMMatrixSet(1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+    DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
     modelMatrix = DirectX::XMMatrixRotationZ(DirectX::XM_PIDIV2) * modelMatrix;
     DirectX::XMStoreFloat4x4(&ubo.model, modelMatrix);
     math::v3 eyePos{ 2.0f, 2.0f, 2.0f };

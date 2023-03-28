@@ -100,8 +100,6 @@ private:
     VkDescriptorPool                _descriptorPool;
     utl::vector<VkDescriptorSet>    _descriptorSets;
     // Own function
-    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
-    void createBuffer(VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
     void createVertexBuffer(VkDevice device, const std::vector<Vertex>& vertex, baseBuffer& buffer);
     void createIndexBuffer(VkDevice device, const std::vector<u16>& indices, baseBuffer& buffer);
     void createUniformBuffers(VkDevice device, UniformBufferObject& ubo, const u32 width, const u32 height, uniformBuffer& buffer);

@@ -9,6 +9,4 @@ namespace primal::graphics::vulkan::descriptor
 	void createDescriptorSetLayout(VkDevice device, VkDescriptorSetLayout& descriptorSetLayout);
 
 	void preparePipelines(VkDevice device, VkPipelineLayout& pipelineLayout, VkPipeline& pipeline, VkDescriptorSetLayout& descriptorSetLayout, vulkan_renderpass renderpass);
-
-	void copyBuffer(VkDevice device, const VkCommandPool& pool, const VkQueue& queue, VkBuffer& srcBuffer, VkBuffer& dstBuffer, VkDeviceSize size);
 }
