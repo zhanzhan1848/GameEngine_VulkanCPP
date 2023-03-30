@@ -12,8 +12,9 @@
     <ClInclude Include="TestWindow.h" />
     <ClInclude Include="TestRenderer.h" />
     <ClInclude Include="ShaderCompilation.h" />
+    <ClInclude Include="TestWindowLinux.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="packages.config" />
+    <Image Include="assets\images\test01.jpg" />
   </ItemGroup>
 </Project>

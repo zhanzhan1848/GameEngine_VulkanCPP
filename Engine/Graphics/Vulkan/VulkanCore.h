@@ -11,6 +11,7 @@ void shutdown();
 
 bool create_device(VkSurfaceKHR surface);
 bool create_graphics_command(u32 swapchain_framebuffer_size);
+VkCommandPool get_current_command_pool();
 bool detect_depth_format(VkPhysicalDevice physical_device);
 s32 find_memory_index(u32 type, u32 flags);
 

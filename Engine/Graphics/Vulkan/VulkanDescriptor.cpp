@@ -20,6 +20,28 @@ namespace primal::graphics::vulkan::descriptor
 			return descriptorPoolSize;
 		}
 
+		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type,
+			utl::vector<VkDescriptorSet>& sets, 
+			u32 num,
+			u32 binding,
+			VkDescriptorType dType,
+			VkDescriptorBufferInfo* buffer,
+			VkDescriptorImageInfo* image)
+		{
+			VkWriteDescriptorSet descriptorWrite;
+			descriptorWrite.sType = type;
+			descriptorWrite.pNext = VK_NULL_HANDLE;
+			descriptorWrite.dstSet = sets[num];
+			descriptorWrite.dstBinding = binding;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.descriptorType = dType;
+			descriptorWrite.pBufferInfo = buffer;
+			descriptorWrite.pImageInfo = image;
+			descriptorWrite.pTexelBufferView = nullptr;
+			return descriptorWrite;
+		}
+
 		VkDescriptorPoolCreateInfo descriptorPoolCreate(
 			u32 poolSizeCount,
 			VkDescriptorPoolSize* pPoolSizes,
@@ -269,9 +291,12 @@ namespace primal::graphics::vulkan::descriptor
 			pipelineDepthStencilStateCreateInfo.depthTestEnable = depthTestEnable;
 			pipelineDepthStencilStateCreateInfo.depthWriteEnable = depthWriteEnable;
 			pipelineDepthStencilStateCreateInfo.depthCompareOp = depthCompareOp;
+			pipelineDepthStencilStateCreateInfo.minDepthBounds = 0.0f;
+			pipelineDepthStencilStateCreateInfo.maxDepthBounds = 1.0f;
 			pipelineDepthStencilStateCreateInfo.depthBoundsTestEnable = depthBoundsTest;
 			pipelineDepthStencilStateCreateInfo.stencilTestEnable = stencilTest;
-			pipelineDepthStencilStateCreateInfo.back.compareOp = VK_COMPARE_OP_ALWAYS;
+			pipelineDepthStencilStateCreateInfo.back = {};
+			pipelineDepthStencilStateCreateInfo.front = {};
 			return pipelineDepthStencilStateCreateInfo;
 		}
 
@@ -421,7 +446,7 @@ namespace primal::graphics::vulkan::descriptor
 	} // anonymous namespace
 
 
-	void createDescriptorSets(VkDevice device, utl::vector<VkDescriptorSet>& descriptorSets, VkDescriptorSetLayout& descriptorSetLayout, VkDescriptorPool& descriptorPool, uniformBuffer& uniformBuffers)
+	void createDescriptorSets(VkDevice device, utl::vector<VkDescriptorSet>& descriptorSets, VkDescriptorSetLayout& descriptorSetLayout, VkDescriptorPool& descriptorPool, uniformBuffer& uniformBuffers, vulkan_texture tex)
 	{
 		utl::vector<VkDescriptorSetLayout> layouts(frame_buffer_count, descriptorSetLayout);
 		VkDescriptorSetAllocateInfo allocInfo;
@@ -442,7 +467,12 @@ namespace primal::graphics::vulkan::descriptor
 			bufferInfo.offset = 0;
 			bufferInfo.range = sizeof(UniformBufferObject);
 
-			VkWriteDescriptorSet descriptorWrite;
+			VkDescriptorImageInfo imageInfo;
+			imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			imageInfo.imageView = tex.view;
+			imageInfo.sampler = tex.sampler;
+
+			/*VkWriteDescriptorSet descriptorWrite;
 			descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 			descriptorWrite.pNext = VK_NULL_HANDLE;
 			descriptorWrite.dstSet = descriptorSets[i];
@@ -452,24 +482,34 @@ namespace primal::graphics::vulkan::descriptor
 			descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 			descriptorWrite.pBufferInfo = &bufferInfo;
 			descriptorWrite.pImageInfo = nullptr;
-			descriptorWrite.pTexelBufferView = nullptr;
+			descriptorWrite.pTexelBufferView = nullptr;*/
+			std::vector<VkWriteDescriptorSet> descriptorWrites = {
+				setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSets, i, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo, nullptr),
+				setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSets, i, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &imageInfo),
+			};
 
-			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+			//vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+			vkUpdateDescriptorSets(device, static_cast<u32>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 		}
 	}
 
 	void createDescriptorPool(VkDevice device, VkDescriptorPool& descriptorPool)
 	{
-		VkDescriptorPoolSize poolSize;
+		/*VkDescriptorPoolSize poolSize;
 		poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		poolSize.descriptorCount = static_cast<u32>(frame_buffer_count);
+		poolSize.descriptorCount = static_cast<u32>(frame_buffer_count);*/
+
+		std::vector<VkDescriptorPoolSize> poolSize = {
+			descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count)),
+			descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<u32>(frame_buffer_count))
+		};
 
 		VkDescriptorPoolCreateInfo poolInfo;
 		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		poolInfo.pNext = VK_NULL_HANDLE;
 		poolInfo.flags = 0;
-		poolInfo.poolSizeCount = 1;
-		poolInfo.pPoolSizes = &poolSize;
+		poolInfo.poolSizeCount = static_cast<u32>(poolSize.size());
+		poolInfo.pPoolSizes = poolSize.data();
 		poolInfo.maxSets = static_cast<u32>(frame_buffer_count);
 
 		VkResult result{ VK_SUCCESS };
@@ -480,6 +520,7 @@ namespace primal::graphics::vulkan::descriptor
 	{
 		std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings{
 			descriptorSetLayoutBinding(0, VK_SHADER_STAGE_VERTEX_BIT),
+			descriptorSetLayoutBinding(1, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
 			// descriptorSetLayoutBinding(1, VK_SHADER_STAGE_FRAGMENT_BIT),
 		};
 
@@ -503,18 +544,31 @@ namespace primal::graphics::vulkan::descriptor
 		std::vector<VkVertexInputBindingDescription> bindingDescriptions;
 		bindingDescriptions.emplace_back(bindingDescription);
 		std::vector<VkVertexInputAttributeDescription> attributeDescriptors;
-		VkVertexInputAttributeDescription attributeDescriptions_0;
+		/*VkVertexInputAttributeDescription attributeDescriptions_0;
 		attributeDescriptions_0.binding = 0;
 		attributeDescriptions_0.location = 0;
 		attributeDescriptions_0.format = VK_FORMAT_R32G32_SFLOAT;
 		attributeDescriptions_0.offset = static_cast<u32>(offsetof(Vertex, Vertex::pos));
-		attributeDescriptors.emplace_back(attributeDescriptions_0);
-		VkVertexInputAttributeDescription attributeDescriptions_1;
+		attributeDescriptors.emplace_back(attributeDescriptions_0);*/
+		/*VkVertexInputAttributeDescription attributeDescriptions_1;
 		attributeDescriptions_1.binding = 0;
 		attributeDescriptions_1.location = 1;
 		attributeDescriptions_1.format = VK_FORMAT_R32G32B32_SFLOAT;
 		attributeDescriptions_1.offset = static_cast<u32>(offsetof(Vertex, Vertex::color));
-		attributeDescriptors.emplace_back(attributeDescriptions_1);
+		attributeDescriptors.emplace_back(attributeDescriptions_1);*/
+		attributeDescriptors.emplace_back([]() {
+		VkVertexInputAttributeDescription attributeDescriptions{ 0, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<u32>(offsetof(Vertex, Vertex::pos)) };
+		return attributeDescriptions;
+		}());
+		attributeDescriptors.emplace_back([]() {
+			VkVertexInputAttributeDescription attributeDescriptions{ 1, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<u32>(offsetof(Vertex, Vertex::color)) };
+		return attributeDescriptions;
+		}());
+		attributeDescriptors.emplace_back([]() {
+			VkVertexInputAttributeDescription attributeDescriptions{ 2, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<u32>(offsetof(Vertex, Vertex::texCoord)) };
+		return attributeDescriptions;
+		}());
+		
 
 		VkPipelineVertexInputStateCreateInfo vertexInputInfo;
 		vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -534,7 +588,7 @@ namespace primal::graphics::vulkan::descriptor
 
 		std::vector<VkDynamicState> dynamicStateEnables{ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 		VkPipelineDynamicStateCreateInfo dynamicState = pipelineDynamicStateCreate(dynamicStateEnables);
-		// VkPipelineDepthStencilStateCreateInfo depthStencilState = pipelineDepthStencilStateCreateInfo(VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL);
+		VkPipelineDepthStencilStateCreateInfo depthStencilState = pipelineDepthStencilStateCreateInfo(VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL);
 		// VkPipelineVertexInputStateCreateInfo emptyInputState = pipelineVertexInputStateCreateInfo(bindingDescriptions, attributeDescriptors);
 
 		VkPipelineLayoutCreateInfo pipelineLayoutInfo;
@@ -561,7 +615,7 @@ namespace primal::graphics::vulkan::descriptor
 		pipelineCI.pViewportState = &viewportState;
 		pipelineCI.pRasterizationState = &rasterizationState;
 		pipelineCI.pMultisampleState = &multisampleState;
-		pipelineCI.pDepthStencilState = VK_NULL_HANDLE;
+		pipelineCI.pDepthStencilState = &depthStencilState;
 		pipelineCI.pColorBlendState = &colorBlendState;
 		pipelineCI.pDynamicState = &dynamicState;
 		pipelineCI.layout = pipelineLayout;

@@ -215,6 +215,7 @@
     <ClInclude Include="Components\Transform.h" />
     <ClInclude Include="Content\ContentLoader.h" />
     <ClInclude Include="Content\ContentToEngine.h" />
+    <ClInclude Include="Content\stb_image.h" />
     <ClInclude Include="EngineAPI\Camera.h" />
     <ClInclude Include="EngineAPI\GameEntity.h" />
     <ClInclude Include="EngineAPI\ScriptComponent.h" />
@@ -245,6 +246,7 @@
     <ClInclude Include="Graphics\Vulkan\VulkanRenderPass.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanResources.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanSurface.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanTexture.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanValidation.h" />
     <ClInclude Include="Platform\IncludeWindowCPP.h" />
     <ClInclude Include="Platform\Platform.h" />
@@ -287,6 +289,7 @@
     <ClCompile Include="Graphics\Vulkan\VulkanRenderPass.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanResources.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanSurface.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanTexture.cpp" />
     <ClCompile Include="Platform\PlatformLinux.cpp" />
     <ClCompile Include="Platform\PlatformWin32.cpp" />
     <ClCompile Include="Platform\Window.cpp" />

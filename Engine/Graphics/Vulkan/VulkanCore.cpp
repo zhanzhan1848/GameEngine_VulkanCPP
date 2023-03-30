@@ -14,6 +14,7 @@
 // Own header file
 #include <array>
 #include "VulkanDescriptor.h"
+#include "VulkanTexture.h"
 
 
 namespace primal::graphics::vulkan::core
@@ -47,11 +48,6 @@ public:
         MESSAGE("Found graphics queue");
         vkGetDeviceQueue(core::logical_device(), core::presentation_family_queue_index(), 0, &_presentation_queue);
         MESSAGE("Found presentation queue");
-
-        // Vertex and Index
-        /*createVertexBuffer();
-        createIndexBuffer();
-        createUniformBuffers();*/
 
         // Command buffers
         create_command_buffers(device, queue_family_idx);
@@ -136,25 +132,6 @@ public:
         // Get next swapchain image
         if (!surface->next_image_index(_image_available[frame], nullptr, std::numeric_limits<u64>::max()))
             return false;
-
-        // Setup uniformbuffer and send to GPU
-        //UniformBufferObject ubo;
-        //DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();//DirectX::XMMatrixSet(1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
-        //modelMatrix = DirectX::XMMatrixRotationZ(0.2 * frame * DirectX::XM_PIDIV2) * modelMatrix;
-        //DirectX::XMStoreFloat4x4(&ubo.model, modelMatrix);
-        //math::v3 eyePos{ 2.0f, 2.0f, 2.0f };
-        //math::v3 focusPos{ 0.0f, 0.0f, 0.0f };
-        //math::v3 axis{ 0.0f, 0.0f, 1.0f };
-        //DirectX::XMMATRIX viewMatrix = DirectX::XMMatrixLookAtLH(DirectX::XMVectorSet(2.0f, 2.0f, 2.0f, 0.0f), DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f), DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));
-        //DirectX::XMStoreFloat4x4(&ubo.view, viewMatrix);
-        //DirectX::XMMATRIX projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, (f32)surface->width() / (f32)surface->height(), 0.1f, 10.0f);
-        //projectionMatrix.r[1].m128_f32[1] *= -1;
-        //DirectX::XMStoreFloat4x4(&ubo.projection, projectionMatrix);
-        //memcpy(_uniformBuffersMapped[frame], &ubo, sizeof(ubo));
-        //vkUnmapMemory(core::logical_device(), _uniformBuffersMemory[frame]);
-
-        /*descriptor::createDescriptorPool(core::logical_device(), _descriptorPool);
-        descriptor::createDescriptorSets(core::logical_device(), _descriptorSets, surface->descriptorSetLayout(), _descriptorPool, _uniformBuffers);*/
 
         // Begin recording commands
         vulkan_cmd_buffer& cmd_buffer{ _cmd_buffers[frame] };
@@ -346,21 +323,6 @@ private:
     u32								_swapchain_image_count{ 0 };
 
     //// Own Param
-    //const std::vector<Vertex>       _vertices{ { math::v2{ -0.5f, -0.5f }, math::v3{ 1.0f, 0.0f, 0.0f } },
-    //                                            { math::v2{ 0.5f, -0.5f }, math::v3{ 0.0f, 1.0f, 0.0f } },
-    //                                            { math::v2{ 0.5f, 0.5f }, math::v3{ 0.0f, 0.0f, 1.0f } },
-    //                                            { math::v2{ -0.5f, 0.5f }, math::v3{ 1.0f, 1.0f, 1.0f } },
-    //};
-    //const std::vector<u16>          _indices{ 0, 1, 2, 2, 3, 0 };
-    //VkBuffer                        _vertexBuffer;
-    //VkDeviceMemory                  _vertexBufferMemory;
-    //VkBuffer                        _indexBuffer;
-    //VkDeviceMemory                  _indexBufferMemory;
-    //utl::vector<VkBuffer>           _uniformBuffers;
-    //utl::vector<VkDeviceMemory>     _uniformBuffersMemory;
-    //utl::vector<void*>              _uniformBuffersMapped;
-    //VkDescriptorPool                _descriptorPool;
-    //utl::vector<VkDescriptorSet>    _descriptorSets;
     
     // Own function
     
@@ -509,8 +471,6 @@ check_device_suitable(VkPhysicalDevice device, VkSurfaceKHR surface)
 
     bool extensions_supported{ check_device_extension_support(device) };
 
-
-
     bool swapchain_valid{ false };
     if (extensions_supported)
     {
@@ -518,7 +478,10 @@ check_device_suitable(VkPhysicalDevice device, VkSurfaceKHR surface)
         swapchain_valid = !swapchain_details.formats.empty() && !swapchain_details.presentation_modes.empty();
     }
 
-    return queue_family_indices.is_valid() && extensions_supported && swapchain_valid;
+    VkPhysicalDeviceFeatures supportedFeatures;
+    vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
+
+    return queue_family_indices.is_valid() && extensions_supported && swapchain_valid && supportedFeatures.samplerAnisotropy;
 }
 
 bool
@@ -594,6 +557,7 @@ create_logical_device()
 
     // Physical device features the logical device will be using
     VkPhysicalDeviceFeatures device_features{};
+    device_features.samplerAnisotropy = VK_TRUE;
 
     info.pEnabledFeatures = &device_features;					// Physical device features logical device will use
 
@@ -754,6 +718,11 @@ create_graphics_command(u32 swapchain_image_count)
     if (!gfx_command.command_pool()) return false;
 
     return true;
+}
+
+VkCommandPool get_current_command_pool()
+{
+    return gfx_command.command_pool();
 }
 
 bool

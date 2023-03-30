@@ -87,18 +87,25 @@ private:
     VkPipelineLayout                _pipelineLayout;
     VkPipeline                      _pipeline;
     VkDescriptorSetLayout           _descriptorSetLayout;
-    const std::vector<Vertex>       _vertices{ { math::v2{ -0.5f, -0.5f }, math::v3{ 1.0f, 0.0f, 0.0f } },
-                                                { math::v2{ 0.5f, -0.5f }, math::v3{ 0.0f, 1.0f, 0.0f } },
-                                                { math::v2{ 0.5f, 0.5f }, math::v3{ 0.0f, 0.0f, 1.0f } },
-                                                { math::v2{ -0.5f, 0.5f }, math::v3{ 1.0f, 1.0f, 1.0f } },
+    const std::vector<Vertex>       _vertices{ { math::v3{ -0.5f, -0.5f, 0.0f }, math::v3{ 1.0f, 0.0f, 0.0f }, math::v2{1.0f, 0.0f} },
+                                                { math::v3{ 0.5f, -0.5f, 0.0f }, math::v3{ 0.0f, 1.0f, 0.0f }, math::v2{0.0f, 0.0f} },
+                                                { math::v3{ 0.5f, 0.5f, 0.0f }, math::v3{ 0.0f, 0.0f, 1.0f }, math::v2{0.0f, 1.0f} },
+                                                { math::v3{ -0.5f, 0.5f, 0.0f }, math::v3{ 1.0f, 1.0f, 1.0f }, math::v2{1.0f, 1.0f} },
+                        
+                                                { math::v3{ -0.5f, -0.5f, -0.5f }, math::v3{ 1.0f, 0.0f, 0.0f }, math::v2{1.0f, 0.0f} },
+                                                { math::v3{ 0.5f, -0.5f, -0.5f }, math::v3{ 0.0f, 1.0f, 0.0f }, math::v2{0.0f, 0.0f} },
+                                                { math::v3{ 0.5f, 0.5f, -0.5f }, math::v3{ 0.0f, 0.0f, 1.0f }, math::v2{0.0f, 1.0f} },
+                                                { math::v3{ -0.5f, 0.5f, -0.5f }, math::v3{ 1.0f, 1.0f, 1.0f }, math::v2{1.0f, 1.0f} },
     };
-    std::vector<u16>                _indices{ 0, 1, 2, 2, 3, 0 };
+    std::vector<u16>                _indices{ 0, 1, 2, 2, 3, 0,
+                                                4, 5, 6, 6, 7, 4};
     UniformBufferObject             _ubo;
     baseBuffer                      _vertexBuffer;
     baseBuffer                      _indicesBuffer;
     uniformBuffer                   _uniformBuffer;
     VkDescriptorPool                _descriptorPool;
     utl::vector<VkDescriptorSet>    _descriptorSets;
+    vulkan_texture                  _texture;
     // Own function
     void createVertexBuffer(VkDevice device, const std::vector<Vertex>& vertex, baseBuffer& buffer);
     void createIndexBuffer(VkDevice device, const std::vector<u16>& indices, baseBuffer& buffer);

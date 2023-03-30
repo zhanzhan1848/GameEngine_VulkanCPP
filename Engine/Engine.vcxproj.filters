@@ -182,6 +182,8 @@
     </ClInclude>
     <ClInclude Include="Graphics\Vulkan\VulkanCamera.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanDescriptor.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanTexture.h" />
+    <ClInclude Include="Content\stb_image.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Components\Entity.cpp">
@@ -276,6 +278,7 @@
     </ClCompile>
     <ClCompile Include="Graphics\Vulkan\VulkanCamera.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanDescriptor.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanTexture.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

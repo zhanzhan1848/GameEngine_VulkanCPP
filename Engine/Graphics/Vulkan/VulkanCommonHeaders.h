@@ -39,6 +39,13 @@ struct vulkan_image
     u32				height;
 };
 
+struct vulkan_texture : vulkan_image
+{
+    VkSampler       sampler;
+};
+
+//constexpr vulkan_texture _texture{};
+
 struct vulkan_renderpass
 {
     enum state : u32 {
@@ -100,8 +107,9 @@ struct uniformBuffer : baseBuffer
 
 struct Vertex
 {
-    math::v2 pos;
+    math::v3 pos;
     math::v3 color;
+    math::v2 texCoord;
 };
 
 struct UniformBufferObject

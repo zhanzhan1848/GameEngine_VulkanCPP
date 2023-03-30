@@ -8,6 +8,7 @@
 
 // Own header file
 #include "VulkanDescriptor.h"
+#include "VulkanTexture.h"
 
 namespace primal::graphics::vulkan
 {
@@ -116,9 +117,11 @@ vulkan_surface::create(VkInstance instance)
     createVertexBuffer(core::logical_device(), _vertices, _vertexBuffer);
     createIndexBuffer(core::logical_device(), _indices, _indicesBuffer);
     createUniformBuffers(core::logical_device(), _ubo, width(), height(), _uniformBuffer);
-    descriptor::createDescriptorPool(core::logical_device(), _descriptorPool);
-    descriptor::createDescriptorSets(core::logical_device(), _descriptorSets, _descriptorSetLayout, _descriptorPool, _uniformBuffer);
     core::create_graphics_command((u32)_swapchain.images.size());
+    createTextureImage(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), std::string{"C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/test01.jpg"}, _texture);
+    createTextureSampler(core::physical_device(), core::logical_device(), _texture);
+    descriptor::createDescriptorPool(core::logical_device(), _descriptorPool);
+    descriptor::createDescriptorSets(core::logical_device(), _descriptorSets, _descriptorSetLayout, _descriptorPool, _uniformBuffer, _texture);
 }
 
 void
@@ -161,16 +164,19 @@ vulkan_surface::release()
     /// <summary>
     /// Own function destroy
     /// </summary>
+
     vkDestroyPipeline(core::logical_device(), _pipeline, nullptr);
     vkDestroyPipelineLayout(core::logical_device(), _pipelineLayout, nullptr);
 
-    for (u32 i{ 0 }; i < frame_buffer_count; ++i)
-    {
-        vkDestroyBuffer(core::logical_device(), _uniformBuffer.buffer, nullptr);
-        vkFreeMemory(core::logical_device(), _uniformBuffer.memory, nullptr);
-    }
+
+    vkDestroyBuffer(core::logical_device(), _uniformBuffer.buffer, nullptr);
+    vkFreeMemory(core::logical_device(), _uniformBuffer.memory, nullptr);
 
     vkDestroyDescriptorPool(core::logical_device(), _descriptorPool, nullptr);
+
+    vkDestroySampler(core::logical_device(), _texture.sampler, nullptr);
+    destroy_image(core::logical_device(), &_texture);
+
     vkDestroyDescriptorSetLayout(core::logical_device(), _descriptorSetLayout, nullptr);
 
     vkDestroyBuffer(core::logical_device(), _indicesBuffer.buffer, nullptr);
