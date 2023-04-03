@@ -216,6 +216,7 @@
     <ClInclude Include="Content\ContentLoader.h" />
     <ClInclude Include="Content\ContentToEngine.h" />
     <ClInclude Include="Content\stb_image.h" />
+    <ClInclude Include="Content\tiny_obj_loader.h" />
     <ClInclude Include="EngineAPI\Camera.h" />
     <ClInclude Include="EngineAPI\GameEntity.h" />
     <ClInclude Include="EngineAPI\ScriptComponent.h" />

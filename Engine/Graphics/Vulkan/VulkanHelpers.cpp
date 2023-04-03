@@ -7,7 +7,8 @@ namespace primal::graphics::vulkan
 {
 	bool vulkan_success(VkResult result)
 	{
-		return false;
+        return result == VK_SUCCESS;
+        //return false;
 	}
 
 	void copyBuffer(VkDevice device, u32 index, const VkCommandPool& pool, const VkQueue& queue, VkBuffer& srcBuffer, VkBuffer& dstBuffer, VkDeviceSize size) {

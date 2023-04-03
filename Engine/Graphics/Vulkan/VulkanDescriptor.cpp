@@ -544,20 +544,8 @@ namespace primal::graphics::vulkan::descriptor
 		std::vector<VkVertexInputBindingDescription> bindingDescriptions;
 		bindingDescriptions.emplace_back(bindingDescription);
 		std::vector<VkVertexInputAttributeDescription> attributeDescriptors;
-		/*VkVertexInputAttributeDescription attributeDescriptions_0;
-		attributeDescriptions_0.binding = 0;
-		attributeDescriptions_0.location = 0;
-		attributeDescriptions_0.format = VK_FORMAT_R32G32_SFLOAT;
-		attributeDescriptions_0.offset = static_cast<u32>(offsetof(Vertex, Vertex::pos));
-		attributeDescriptors.emplace_back(attributeDescriptions_0);*/
-		/*VkVertexInputAttributeDescription attributeDescriptions_1;
-		attributeDescriptions_1.binding = 0;
-		attributeDescriptions_1.location = 1;
-		attributeDescriptions_1.format = VK_FORMAT_R32G32B32_SFLOAT;
-		attributeDescriptions_1.offset = static_cast<u32>(offsetof(Vertex, Vertex::color));
-		attributeDescriptors.emplace_back(attributeDescriptions_1);*/
-		attributeDescriptors.emplace_back([]() {
-		VkVertexInputAttributeDescription attributeDescriptions{ 0, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<u32>(offsetof(Vertex, Vertex::pos)) };
+		/*attributeDescriptors.emplace_back([]() {
+			VkVertexInputAttributeDescription attributeDescriptions{ 0, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<u32>(offsetof(Vertex, Vertex::pos)) };
 		return attributeDescriptions;
 		}());
 		attributeDescriptors.emplace_back([]() {
@@ -567,7 +555,14 @@ namespace primal::graphics::vulkan::descriptor
 		attributeDescriptors.emplace_back([]() {
 			VkVertexInputAttributeDescription attributeDescriptions{ 2, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<u32>(offsetof(Vertex, Vertex::texCoord)) };
 		return attributeDescriptions;
-		}());
+		}());*/
+		for (u32 i{ 0 }; i < (sizeof(Vertex) / sizeof(math::v3)); ++i)
+		{
+			attributeDescriptors.emplace_back([i]() {
+				VkVertexInputAttributeDescription attributeDescriptions{ i, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
+			return attributeDescriptions;
+			}());
+		}
 		
 
 		VkPipelineVertexInputStateCreateInfo vertexInputInfo;

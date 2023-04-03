@@ -9,11 +9,32 @@
 // Own header file
 #include "VulkanDescriptor.h"
 #include "VulkanTexture.h"
+#define TINYOBJLOADER_IMPLEMENTATION
+#include "Content/tiny_obj_loader.h"
+#include <unordered_map>
 
 namespace primal::graphics::vulkan
 {
 namespace
 {
+    struct equal_idx
+    {
+        bool operator()(const tinyobj::index_t& a, const tinyobj::index_t& b) const
+        {
+            return a.vertex_index == b.vertex_index
+                && a.texcoord_index == b.texcoord_index
+                && a.normal_index == b.normal_index;
+        }
+    };
+
+    struct hash_idx
+    {
+        size_t operator()(const tinyobj::index_t& a) const
+        {
+            return ((a.vertex_index ^ a.texcoord_index << 1) >> 1) ^ (a.normal_index << 1);
+        }
+    };
+
 VkSurfaceFormatKHR
 choose_best_surface_format(const utl::vector<VkSurfaceFormatKHR>& formats)
 {
@@ -114,11 +135,12 @@ vulkan_surface::create(VkInstance instance)
     descriptor::createDescriptorSetLayout(core::logical_device(), _descriptorSetLayout);
     descriptor::preparePipelines(core::logical_device(), _pipelineLayout, _pipeline, _descriptorSetLayout, _renderpass);
     recreate_framebuffers();
+    loadModel(modelPath);
     createVertexBuffer(core::logical_device(), _vertices, _vertexBuffer);
     createIndexBuffer(core::logical_device(), _indices, _indicesBuffer);
     createUniformBuffers(core::logical_device(), _ubo, width(), height(), _uniformBuffer);
     core::create_graphics_command((u32)_swapchain.images.size());
-    createTextureImage(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), std::string{"C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/test01.jpg"}, _texture);
+    createTextureImage(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), std::string{"C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/viking_room.png"}, _texture);
     createTextureSampler(core::physical_device(), core::logical_device(), _texture);
     descriptor::createDescriptorPool(core::logical_device(), _descriptorPool);
     descriptor::createDescriptorSets(core::logical_device(), _descriptorSets, _descriptorSetLayout, _descriptorPool, _uniformBuffer, _texture);
@@ -483,4 +505,53 @@ void vulkan_surface::createUniformBuffers(VkDevice device, UniformBufferObject& 
     DirectX::XMStoreFloat4x4(&ubo.projection, projectionMatrix);
     memcpy(buffer.mapped, &ubo, sizeof(ubo));
 }
+
+/// <summary>
+/// TODO：重构读取模型函数，或重构成单独的class
+/// </summary>
+/// <param name="path"> obj文件路径 </param>
+void vulkan_surface::loadModel(std::string path)
+{
+    tinyobj::attrib_t attrib;
+    std::vector<tinyobj::shape_t> shapes;
+    std::vector<tinyobj::material_t> materials;
+    std::string warn, err;
+
+    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str()))
+    {
+        throw std::runtime_error(warn + err);
+    }
+
+    std::unordered_map<tinyobj::index_t, size_t, hash_idx, equal_idx> uniqueVertices;
+
+    _vertices.clear();
+    _indices.clear();
+    for(const auto& shape : shapes)
+        for (const auto& index : shape.mesh.indices)
+        {
+            Vertex vertex;
+            vertex.pos = math::v3{
+                attrib.vertices[3 * index.vertex_index + 0],
+                attrib.vertices[3 * index.vertex_index + 1],
+                attrib.vertices[3 * index.vertex_index + 2]
+            };
+
+            vertex.color = math::v3{ 1.0f, 1.0f, 1.0f };
+
+            vertex.texCoord = math::v3{
+                attrib.texcoords[2 * index.texcoord_index + 0],
+                1.0f - attrib.texcoords[2 * index.texcoord_index + 1],
+                0.0f
+            };
+
+            if (uniqueVertices.count(index) == 0)
+            {
+                uniqueVertices[index] = (u32)_vertices.size();
+                _vertices.emplace_back(vertex);
+            }
+
+            _indices.emplace_back((u32)uniqueVertices[index]);
+        }
+}
+
 }

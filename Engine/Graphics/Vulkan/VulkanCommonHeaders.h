@@ -25,7 +25,6 @@
 // NOTE: volk comes with Vulkan SDK.
 #include <volk/volk.h>
 
-
 namespace primal::graphics::vulkan {
 
 constexpr u32 frame_buffer_count{ 3 };
@@ -109,7 +108,7 @@ struct Vertex
 {
     math::v3 pos;
     math::v3 color;
-    math::v2 texCoord;
+    math::v3 texCoord;
 };
 
 struct UniformBufferObject
@@ -119,6 +118,7 @@ struct UniformBufferObject
     math::m4x4 projection;
 };
 }
+
 
 #ifdef _DEBUG
 #ifndef VkCall

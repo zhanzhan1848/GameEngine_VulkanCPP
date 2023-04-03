@@ -87,18 +87,19 @@ private:
     VkPipelineLayout                _pipelineLayout;
     VkPipeline                      _pipeline;
     VkDescriptorSetLayout           _descriptorSetLayout;
-    const std::vector<Vertex>       _vertices{ { math::v3{ -0.5f, -0.5f, 0.0f }, math::v3{ 1.0f, 0.0f, 0.0f }, math::v2{1.0f, 0.0f} },
-                                                { math::v3{ 0.5f, -0.5f, 0.0f }, math::v3{ 0.0f, 1.0f, 0.0f }, math::v2{0.0f, 0.0f} },
-                                                { math::v3{ 0.5f, 0.5f, 0.0f }, math::v3{ 0.0f, 0.0f, 1.0f }, math::v2{0.0f, 1.0f} },
-                                                { math::v3{ -0.5f, 0.5f, 0.0f }, math::v3{ 1.0f, 1.0f, 1.0f }, math::v2{1.0f, 1.0f} },
+    std::vector<Vertex>             _vertices{ { math::v3{ -0.5f, -0.5f, 0.0f }, math::v3{ 1.0f, 0.0f, 0.0f }, math::v3{1.0f, 0.0f, 0.0f} },
+                                                { math::v3{ 0.5f, -0.5f, 0.0f }, math::v3{ 0.0f, 1.0f, 0.0f }, math::v3{0.0f, 0.0f, 0.0f} },
+                                                { math::v3{ 0.5f, 0.5f, 0.0f }, math::v3{ 0.0f, 0.0f, 1.0f }, math::v3{0.0f, 1.0f, 0.0f} },
+                                                { math::v3{ -0.5f, 0.5f, 0.0f }, math::v3{ 1.0f, 1.0f, 1.0f }, math::v3{1.0f, 1.0f, 0.0f} },
                         
-                                                { math::v3{ -0.5f, -0.5f, -0.5f }, math::v3{ 1.0f, 0.0f, 0.0f }, math::v2{1.0f, 0.0f} },
-                                                { math::v3{ 0.5f, -0.5f, -0.5f }, math::v3{ 0.0f, 1.0f, 0.0f }, math::v2{0.0f, 0.0f} },
-                                                { math::v3{ 0.5f, 0.5f, -0.5f }, math::v3{ 0.0f, 0.0f, 1.0f }, math::v2{0.0f, 1.0f} },
-                                                { math::v3{ -0.5f, 0.5f, -0.5f }, math::v3{ 1.0f, 1.0f, 1.0f }, math::v2{1.0f, 1.0f} },
+                                                { math::v3{ -0.5f, -0.5f, -0.5f }, math::v3{ 1.0f, 0.0f, 0.0f }, math::v3{1.0f, 0.0f, 0.0f} },
+                                                { math::v3{ 0.5f, -0.5f, -0.5f }, math::v3{ 0.0f, 1.0f, 0.0f }, math::v3{0.0f, 0.0f, 0.0f} },
+                                                { math::v3{ 0.5f, 0.5f, -0.5f }, math::v3{ 0.0f, 0.0f, 1.0f }, math::v3{0.0f, 1.0f, 0.0f} },
+                                                { math::v3{ -0.5f, 0.5f, -0.5f }, math::v3{ 1.0f, 1.0f, 1.0f }, math::v3{1.0f, 1.0f, 0.0f} },
     };
     std::vector<u16>                _indices{ 0, 1, 2, 2, 3, 0,
                                                 4, 5, 6, 6, 7, 4};
+    std::string                     modelPath{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/models/viking_room.obj" };
     UniformBufferObject             _ubo;
     baseBuffer                      _vertexBuffer;
     baseBuffer                      _indicesBuffer;
@@ -110,6 +111,7 @@ private:
     void createVertexBuffer(VkDevice device, const std::vector<Vertex>& vertex, baseBuffer& buffer);
     void createIndexBuffer(VkDevice device, const std::vector<u16>& indices, baseBuffer& buffer);
     void createUniformBuffers(VkDevice device, UniformBufferObject& ubo, const u32 width, const u32 height, uniformBuffer& buffer);
+    void loadModel(std::string path);
 
 
     // Function Pointers
