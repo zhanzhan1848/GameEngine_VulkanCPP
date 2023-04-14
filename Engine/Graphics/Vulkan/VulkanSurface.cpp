@@ -12,6 +12,8 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "Content/tiny_obj_loader.h"
 #include <unordered_map>
+#include "VulkanContent.h"
+
 
 namespace primal::graphics::vulkan
 {
@@ -140,10 +142,9 @@ vulkan_surface::create(VkInstance instance)
     createIndexBuffer(core::logical_device(), _indices, _indicesBuffer);
     createUniformBuffers(core::logical_device(), _ubo, width(), height(), _uniformBuffer);
     core::create_graphics_command((u32)_swapchain.images.size());
-    createTextureImage(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), std::string{"C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/viking_room.png"}, _texture);
-    createTextureSampler(core::physical_device(), core::logical_device(), _texture);
+    _texture.loadTexture(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/viking_room.png" });
     descriptor::createDescriptorPool(core::logical_device(), _descriptorPool);
-    descriptor::createDescriptorSets(core::logical_device(), _descriptorSets, _descriptorSetLayout, _descriptorPool, _uniformBuffer, _texture);
+    descriptor::createDescriptorSets(core::logical_device(), _descriptorSets, _descriptorSetLayout, _descriptorPool, _uniformBuffer, _texture.getTexture());
 }
 
 void
@@ -196,8 +197,8 @@ vulkan_surface::release()
 
     vkDestroyDescriptorPool(core::logical_device(), _descriptorPool, nullptr);
 
-    vkDestroySampler(core::logical_device(), _texture.sampler, nullptr);
-    destroy_image(core::logical_device(), &_texture);
+    /*vkDestroySampler(core::logical_device(), _texture.sampler, nullptr);
+    destroy_image(core::logical_device(), &_texture);*/
 
     vkDestroyDescriptorSetLayout(core::logical_device(), _descriptorSetLayout, nullptr);
 
@@ -330,8 +331,17 @@ vulkan_surface::create_swapchain()
     }
 
     // Create depthbuffer image and view
-    if (!create_image(core::logical_device(), VK_IMAGE_TYPE_2D, _swapchain.extent.width, _swapchain.extent.height, core::depth_format(), VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true, VK_IMAGE_ASPECT_DEPTH_BIT, _swapchain.depth_attachment))
+    image_init_info image_info;
+    image_info.image_type = VK_IMAGE_TYPE_2D;
+    image_info.width = _swapchain.extent.width;
+    image_info.height = _swapchain.extent.height;
+    image_info.format = core::depth_format();
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage_flags = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    image_info.memory_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    image_info.create_view = true;
+    image_info.view_aspect_flags = VK_IMAGE_ASPECT_DEPTH_BIT;
+    if (!create_image(core::logical_device(), &image_info, _swapchain.depth_attachment))
         return false;
 
 

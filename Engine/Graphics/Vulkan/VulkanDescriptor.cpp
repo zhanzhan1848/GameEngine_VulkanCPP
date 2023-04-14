@@ -544,18 +544,6 @@ namespace primal::graphics::vulkan::descriptor
 		std::vector<VkVertexInputBindingDescription> bindingDescriptions;
 		bindingDescriptions.emplace_back(bindingDescription);
 		std::vector<VkVertexInputAttributeDescription> attributeDescriptors;
-		/*attributeDescriptors.emplace_back([]() {
-			VkVertexInputAttributeDescription attributeDescriptions{ 0, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<u32>(offsetof(Vertex, Vertex::pos)) };
-		return attributeDescriptions;
-		}());
-		attributeDescriptors.emplace_back([]() {
-			VkVertexInputAttributeDescription attributeDescriptions{ 1, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<u32>(offsetof(Vertex, Vertex::color)) };
-		return attributeDescriptions;
-		}());
-		attributeDescriptors.emplace_back([]() {
-			VkVertexInputAttributeDescription attributeDescriptions{ 2, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<u32>(offsetof(Vertex, Vertex::texCoord)) };
-		return attributeDescriptions;
-		}());*/
 		for (u32 i{ 0 }; i < (sizeof(Vertex) / sizeof(math::v3)); ++i)
 		{
 			attributeDescriptors.emplace_back([i]() {
@@ -584,7 +572,8 @@ namespace primal::graphics::vulkan::descriptor
 		std::vector<VkDynamicState> dynamicStateEnables{ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 		VkPipelineDynamicStateCreateInfo dynamicState = pipelineDynamicStateCreate(dynamicStateEnables);
 		VkPipelineDepthStencilStateCreateInfo depthStencilState = pipelineDepthStencilStateCreateInfo(VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL);
-		// VkPipelineVertexInputStateCreateInfo emptyInputState = pipelineVertexInputStateCreateInfo(bindingDescriptions, attributeDescriptors);
+
+		// TODO: Add a push constant range info
 
 		VkPipelineLayoutCreateInfo pipelineLayoutInfo;
 		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -597,7 +586,6 @@ namespace primal::graphics::vulkan::descriptor
 		VkResult result{ VK_SUCCESS };
 		VkCall(result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout), "Failed to create pipeline layout...");
 
-		//VkGraphicsPipelineCreateInfo pipelineCI = pipelineCreate(pipelineLayout, renderpass.render_pass);
 		VkGraphicsPipelineCreateInfo pipelineCI;
 		pipelineCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 		pipelineCI.pNext = nullptr;

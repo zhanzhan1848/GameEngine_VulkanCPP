@@ -240,6 +240,7 @@
     <ClInclude Include="Graphics\Vulkan\VulkanCamera.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanCommandBuffer.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanCommonHeaders.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanContent.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanCore.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanDescriptor.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanHelpers.h" />
@@ -283,6 +284,7 @@
     <ClCompile Include="Graphics\Renderer.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanCamera.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanCommandBuffer.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanContent.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanCore.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanDescriptor.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanHelpers.cpp" />

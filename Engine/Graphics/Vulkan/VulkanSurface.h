@@ -2,6 +2,7 @@
 // Distributed under the MIT license. See the LICENSE file in the project root for more information.
 #pragma once
 #include "VulkanCommonHeaders.h"
+#include "VulkanContent.h"
 
 namespace primal::graphics::vulkan
 {
@@ -64,6 +65,12 @@ public:
     [[nodiscard]] constexpr baseBuffer& VertexBuffer() { return _vertexBuffer; }
     [[nodiscard]] constexpr baseBuffer& IndexBuffer() { return _indicesBuffer; }
     [[nodiscard]] constexpr std::vector<u16>& Indices() { return _indices; }
+    [[nodiscard]] constexpr uniformBuffer& getUniformBuffer() { return _uniformBuffer; }
+    constexpr void setUBO(UniformBufferObject ubo) { _ubo = ubo; }
+    constexpr void setProjection(math::m4x4 projection) { _ubo.projection = projection; }
+    constexpr void setView(math::m4x4 view) { _ubo.view = view; }
+    constexpr void setModel(math::m4x4 model) { _ubo.model = model; }
+    void flushUBO() { memcpy(_uniformBuffer.mapped, &_ubo, sizeof(UniformBufferObject)); }
 
 private:
     void create_surface(VkInstance instance);
@@ -106,7 +113,7 @@ private:
     uniformBuffer                   _uniformBuffer;
     VkDescriptorPool                _descriptorPool;
     utl::vector<VkDescriptorSet>    _descriptorSets;
-    vulkan_texture                  _texture;
+    texture::vulkan_texture_2d      _texture;
     // Own function
     void createVertexBuffer(VkDevice device, const std::vector<Vertex>& vertex, baseBuffer& buffer);
     void createIndexBuffer(VkDevice device, const std::vector<u16>& indices, baseBuffer& buffer);

@@ -1,8 +1,8 @@
 #include "VulkanTexture.h"
 #include "VulkanHelpers.h"
 #include "VulkanResources.h"
-#define STB_IMAGE_IMPLEMENTATION
-#include "Content/stb_image.h"
+//#define STB_IMAGE_IMPLEMENTATION
+//#include "Content/stb_image.h"
 
 namespace primal::graphics::vulkan
 {
@@ -13,7 +13,7 @@ namespace primal::graphics::vulkan
 
 	void createTextureImage(VkDevice device, u32 index, VkCommandPool pool, std::string filePath, vulkan_texture& tex)
 	{
-		int texWidth, texHeight, texChannels;
+		/*int texWidth, texHeight, texChannels;
 		void* pixels = stbi_load(filePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 		VkDeviceSize imageSize = 0;
 		VkFormat imageFormat = VK_FORMAT_UNDEFINED;
@@ -48,14 +48,24 @@ namespace primal::graphics::vulkan
 
 		stbi_image_free(pixels);
 
-		create_image(device, VK_IMAGE_TYPE_2D, texWidth, texHeight, imageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-		    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true, VK_IMAGE_ASPECT_COLOR_BIT, tex);
+		image_init_info image_info{};
+		image_info.image_type = VK_IMAGE_TYPE_2D;
+		image_info.width = texWidth;
+		image_info.height = texHeight;
+		image_info.format = imageFormat;
+		image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+		image_info.usage_flags = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		image_info.memory_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		image_info.create_view = true;
+		image_info.view_aspect_flags = VK_IMAGE_ASPECT_COLOR_BIT;
+
+		create_image(device, &image_info, tex);
 		transitionImageLayout(device, index, pool, tex.image, imageFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 		copyBufferToImage(device, index, pool, staging.buffer, tex.image, static_cast<u32>(texWidth), static_cast<u32>(texHeight));
 		transitionImageLayout(device, index, pool, tex.image, imageFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 		vkDestroyBuffer(device, staging.buffer, nullptr);
-		vkFreeMemory(device, staging.memory, nullptr);
+		vkFreeMemory(device, staging.memory, nullptr);*/
 	}
 
 	void transitionImageLayout(VkDevice device, u32 index, VkCommandPool pool, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout)

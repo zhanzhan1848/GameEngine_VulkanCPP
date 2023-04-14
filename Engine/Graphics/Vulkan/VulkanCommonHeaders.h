@@ -43,8 +43,6 @@ struct vulkan_texture : vulkan_image
     VkSampler       sampler;
 };
 
-//constexpr vulkan_texture _texture{};
-
 struct vulkan_renderpass
 {
     enum state : u32 {

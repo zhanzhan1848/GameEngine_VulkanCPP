@@ -15,6 +15,7 @@
 #include <array>
 #include "VulkanDescriptor.h"
 #include "VulkanTexture.h"
+#include <chrono>
 
 
 namespace primal::graphics::vulkan::core
@@ -167,10 +168,19 @@ public:
         u32 frame{ surface->current_frame() };
         vulkan_cmd_buffer& cmd_buffer{ _cmd_buffers[frame] };
 
+        static auto startTime = std::chrono::high_resolution_clock::now();
+
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        f32 time = std::chrono::duration<f32, std::chrono::seconds::period>(currentTime - startTime).count();
+        math::m4x4 m;
+        DirectX::XMMATRIX model = DirectX::XMMatrixRotationZ(time);
+        DirectX::XMStoreFloat4x4(&m, model);
+        surface->setModel(m);
+        surface->flushUBO();
+
         vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, surface->pipeline());
-        VkBuffer vertexBuffers[] = { surface->VertexBuffer().buffer};
         VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(cmd_buffer.cmd_buffer, 0, 1, vertexBuffers, offsets);
+        vkCmdBindVertexBuffers(cmd_buffer.cmd_buffer, 0, 1, &surface->VertexBuffer().buffer, offsets);
         vkCmdBindIndexBuffer(cmd_buffer.cmd_buffer, surface->IndexBuffer().buffer, 0, VK_INDEX_TYPE_UINT16);
         vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, surface->pipelineLayout(), 0, 1, &surface->DescriptorSets()[frame], 0, nullptr);
         vkCmdDrawIndexed(cmd_buffer.cmd_buffer, static_cast<uint32_t>(surface->Indices().size()), 1, 0, 0, 0);

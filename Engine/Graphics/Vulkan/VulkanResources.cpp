@@ -11,27 +11,26 @@ namespace
 } // anonymous namespace
 
 bool
-create_image(VkDevice device, VkImageType type, u32 width, u32 height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage,
-    VkMemoryPropertyFlags memory_flags, bool create_view, VkImageAspectFlags view_aspect_flags, vulkan_image& image)
+create_image(VkDevice device, const image_init_info *const init_info, vulkan_image& image)
 {
     VkResult result{ VK_SUCCESS };
-    image.width = width;
-    image.height = height;
+    image.width = init_info->width;
+    image.height = init_info->height;
 
     // Create image
     {
         VkImageCreateInfo info{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         info.pNext = nullptr;
-        info.imageType = VK_IMAGE_TYPE_2D;					// TODO: This should be configurable
-        info.extent.width = width;
-        info.extent.height = height;
+        info.imageType = init_info->image_type;					// TODO: This should be configurable
+        info.extent.width = init_info->width;
+        info.extent.height = init_info->height;
         info.extent.depth = 1;								// TODO: should be configurable and supported
         info.mipLevels = 1;									// TODO: should be configurable, and need to support mip maps
         info.arrayLayers = 1;								// TODO: should be configurable and offer image layer support
-        info.format = format;
-        info.tiling = tiling;
+        info.format = init_info->format;
+        info.tiling = init_info->tiling;
         info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        info.usage = usage;
+        info.usage = init_info->usage_flags;
         info.samples = VK_SAMPLE_COUNT_1_BIT;				// TODO: make configurable
         info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;		// TODO: make configurable
 
@@ -43,7 +42,7 @@ create_image(VkDevice device, VkImageType type, u32 width, u32 height, VkFormat 
     VkMemoryRequirements memory_reqs;
     vkGetImageMemoryRequirements(device, image.image, &memory_reqs);
 
-    s32 index{ core::find_memory_index(memory_reqs.memoryTypeBits, memory_flags) };
+    s32 index{ core::find_memory_index(memory_reqs.memoryTypeBits, init_info->memory_flags) };
     if (index == -1)
     {
         ERROR_MSSG("The required memory type was not found...");
@@ -63,10 +62,10 @@ create_image(VkDevice device, VkImageType type, u32 width, u32 height, VkFormat 
     VkCall(result = vkBindImageMemory(device, image.image, image.memory, 0), "Failed to bind image memory...");
     if (result != VK_SUCCESS) return false;
 
-    if (create_view)
+    if (init_info->create_view)
     {
         image.view = nullptr;
-        if (!create_image_view(device, format, &image, view_aspect_flags)) return false;
+        if (!create_image_view(device, init_info->format, &image, init_info->view_aspect_flags)) return false;
     }
 
     return true;
