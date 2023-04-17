@@ -10,7 +10,7 @@
 #define TEST_WINDOW 0
 #define TEST_RENDERER 1
 
-class test
+class Test
 {
 public:
 #ifdef _WIN64

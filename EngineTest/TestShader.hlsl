@@ -12,8 +12,12 @@ struct VertexOut
 struct ElementStaticNormalTexture
 {
 	uint		ColorTSign;
-	uint16_t2	Normal;
-	uint16_t2	Tangent;
+	//uint16_t2	Normal;
+	//uint16_t2	Tangent;
+	uint32_t	Normalx;
+	uint32_t	Normaly;
+	uint32_t	Targentx;
+	uint32_t	Targenty;
 	float2		UV;
 };
 
@@ -38,15 +42,18 @@ VertexOut TestShaderVS(in uint VertexIdx: SV_VertexID)
 	float4 worldPosition = mul(PerObjectBuffer.World, position);
 
 	uint signs = 0;
-	uint16_t2 packedNormal = 0;
+	//uint16_t2 packedNormal = 0;
+	uint32_t packedNormalx = 0;
+	uint32_t packedNormaly = 0;
 	ElementStaticNormalTexture element = Elements[VertexIdx];
 	signs = (element.ColorTSign >> 24) & 0xff;
-	packedNormal = element.Normal;
+	packedNormalx = element.Normalx;
+	packedNormaly = element.Normaly;
 
 	float nSign = float(signs & 0x02) - 1;
 	float3 normal;
-	normal.x = packedNormal.x * InvIntervals - 1.f;
-	normal.y = packedNormal.y * InvIntervals - 1.f;
+	normal.x = packedNormalx * InvIntervals - 1.f;
+	normal.y = packedNormaly * InvIntervals - 1.f;
 	normal.z = sqrt(saturate(1.f - dot(normal.xy, normal.xy))) * nSign;
 
 	vsOut.HomogeneousPosition = mul(PerObjectBuffer.WorldViewProjection, position);

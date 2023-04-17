@@ -369,6 +369,9 @@ namespace primal::graphics::d3d12::core
 		DXCall(hr = D3D12CreateDevice(main_adapter.Get(), max_feature_level, IID_PPV_ARGS(&main_device)));
 		if (FAILED(hr)) return failed_init();
 
+		//D3D12_FEATURE_DATA_D3D12_OPTIONS4 getSupport{};
+		//DXCall(hr = main_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &getSupport, sizeof(getSupport)));
+
 #ifdef _DEBUG
 		{
 			ComPtr<ID3D12InfoQueue> info_queue;

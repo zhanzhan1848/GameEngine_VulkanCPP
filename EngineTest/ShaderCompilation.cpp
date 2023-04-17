@@ -90,7 +90,7 @@ namespace
 				L"-E", func.c_str(),					// Entry function
 				L"-T", prof.c_str(),					// Target profile
 				L"-I", inc.c_str(),						// Include path
-				L"-enable-16bit-types",
+				//L"-enable-16bit-types",
 				DXC_ARG_ALL_RESOURCES_BOUND,
 #if _DEBUG
 				DXC_ARG_DEBUG,
@@ -191,6 +191,7 @@ namespace
 	{
 		// get the path to the compiled shaders binary file
 		auto engine_shaders_path = get_engine_shaders_path();
+		auto path1 = std::filesystem::absolute(engine_shaders_path);
 		if (!std::filesystem::exists(engine_shaders_path)) return false;
 		auto shaders_compilation_time = std::filesystem::last_write_time(engine_shaders_path);
 
@@ -281,6 +282,7 @@ bool compile_shaders()
 
 		full_path = shaders_source_path;
 		full_path += file.info.file_name;
+		auto p1 = std::filesystem::absolute(full_path);
 		if (!std::filesystem::exists(full_path)) return false;
 		dxc_compiled_shader compiled_shader{ compiler.compile(file.info, full_path) };
 		if (compiled_shader.byte_code && compiled_shader.byte_code->GetBufferPointer() && compiled_shader.byte_code->GetBufferSize())

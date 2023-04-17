@@ -1,7 +1,7 @@
 #pragma once
 #include "Test.h"
 
-class Engine_Test : public test
+class Engine_Test : public Test
 {
 public :
 	bool initialize() override;

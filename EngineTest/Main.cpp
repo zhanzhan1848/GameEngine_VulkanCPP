@@ -37,7 +37,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
-    set_current_directory_to_executable_path();
+    //set_current_directory_to_executable_path();
     Engine_Test test{};
     if (test.initialize())
     {

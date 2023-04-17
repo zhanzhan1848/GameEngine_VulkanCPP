@@ -284,9 +284,9 @@
     <ClCompile Include="Graphics\Vulkan\VulkanContent.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="packages.config" />
     <None Include="Graphics\Vulkan\Shaders\test01.vert.glsl" />
     <None Include="Graphics\Vulkan\Shaders\test01.frag.glsl" />
     <None Include="Graphics\Vulkan\Shaders\compileShaders.bat" />
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>

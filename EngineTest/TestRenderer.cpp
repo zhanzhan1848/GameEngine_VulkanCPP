@@ -215,14 +215,21 @@ void destroy_camera_surface(camera_surface& surface)
 
 bool test_initialize()
 {
-	//while (!compile_shaders())
-	//{
-	//	// Pop up a message box allowing the user to retry compilation.
-	//	if (MessageBox(nullptr, L"Failed to compile engine shaders.", L"Shader Compilation Error", MB_RETRYCANCEL) != IDRETRY)
-	//		return false;
-	//}
+#define GRAPHICS_API graphics::graphics_platform::vulkan_1
 
-	if (!graphics::initialize(graphics::graphics_platform::vulkan_1)) return false;
+	if constexpr (GRAPHICS_API == graphics::graphics_platform::direct3d12)
+	{
+		while (!compile_shaders())
+		{
+			// Pop up a message box allowing the user to retry compilation.
+			if (MessageBox(nullptr, L"Failed to compile engine shaders.", L"Shader Compilation Error", MB_RETRYCANCEL) != IDRETRY)
+				return false;
+		}
+	}
+	else
+	{ }
+
+	if (!graphics::initialize(GRAPHICS_API)) return false;
 
 	platform::window_init_info info[]
 	{
@@ -236,17 +243,34 @@ bool test_initialize()
 	for (u32 i{ 0 }; i < _countof(_surfaces); ++i)
 		create_camera_surface(_surfaces[i], info[i]);
 
-	// load test model
-	std::unique_ptr<u8[]> model;
-	u64 size{ 0 };
-	// if (!read_file("model.model", model, size)) return false;
+	if constexpr (GRAPHICS_API == graphics::graphics_platform::vulkan_1)
+	{
+		// load test model
+		std::unique_ptr<u8[]> model;
+		u64 size{ 0 };
+		// if (!read_file("model.model", model, size)) return false;
 
-	//model_id = content::create_resource(model.get(), content::asset_type::mesh);
-	// if (!id::is_valid(model_id)) return false;
+		//model_id = content::create_resource(model.get(), content::asset_type::mesh);
+		// if (!id::is_valid(model_id)) return false;
 
-	// init_test_workers(buffer_test_worker);
+		// init_test_workers(buffer_test_worker);
 
-	//item_id = create_render_item(create_one_game_entity(false).get_id());
+		//item_id = create_render_item(create_one_game_entity(false).get_id());
+	}
+	else
+	{
+		// load test model
+		std::unique_ptr<u8[]> model;
+		u64 size{ 0 };
+		 if (!read_file("model.model", model, size)) return false;
+
+		model_id = content::create_resource(model.get(), content::asset_type::mesh);
+		 if (!id::is_valid(model_id)) return false;
+
+		 init_test_workers(buffer_test_worker);
+
+		item_id = create_render_item(create_one_game_entity(false).get_id());
+	}
 
 	is_restarting = false;
 	return true;

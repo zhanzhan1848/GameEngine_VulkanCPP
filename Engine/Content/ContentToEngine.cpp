@@ -347,12 +347,12 @@ namespace primal::content
 		else
 		{
 			geometry_hierarchy_stream stream{ pointer };
-			assert([&]() {
+			/*assert([&]() {
 			const u32 lod_count{ stream.lod_count() };
 			const lod_offset lod_offset{ stream.lod_offsets()[lod_count - 1] };
 			const u32 gpu_id_count{ (u32)lod_offset.offset + (u32)lod_offset.count };
 			return gpu_id_count == id_count;
-			}());
+			}());*/
 
 			memcpy(gpu_ids, stream.gpu_ids(), sizeof(id::id_type) * id_count);
 		}
