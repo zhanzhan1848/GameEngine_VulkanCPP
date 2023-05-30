@@ -181,10 +181,13 @@
       <Filter>Utilities</Filter>
     </ClInclude>
     <ClInclude Include="Graphics\Vulkan\VulkanCamera.h" />
-    <ClInclude Include="Graphics\Vulkan\VulkanDescriptor.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanTexture.h" />
     <ClInclude Include="Content\stb_image.h" />
     <ClInclude Include="Content\tiny_obj_loader.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanShader.h" />
+    <ClInclude Include="EngineAPI\Input.h" />
+    <ClInclude Include="Input\Input.h" />
+    <ClInclude Include="Input\InputWin32.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanContent.h" />
   </ItemGroup>
   <ItemGroup>
@@ -279,8 +282,10 @@
       <Filter>Platform</Filter>
     </ClCompile>
     <ClCompile Include="Graphics\Vulkan\VulkanCamera.cpp" />
-    <ClCompile Include="Graphics\Vulkan\VulkanDescriptor.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanTexture.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanShader.cpp" />
+    <ClCompile Include="Input\Input.cpp" />
+    <ClCompile Include="Input\InputWin32.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanContent.cpp" />
   </ItemGroup>
   <ItemGroup>

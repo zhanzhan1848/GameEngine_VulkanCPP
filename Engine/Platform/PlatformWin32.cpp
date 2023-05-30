@@ -1,5 +1,6 @@
 #include "Platform.h"
 #include "PlatformTypes.h"
+#include "Input/InputWin32.h"
 
 namespace primal::platform
 {
@@ -56,6 +57,8 @@ namespace primal::platform
 			default:
 				break;
 			}
+
+			input::process_input_message(hwnd, msg, wparam, lparam);
 
 			if (resized && GetAsyncKeyState(VK_LBUTTON) >= 0)
 			{

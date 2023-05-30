@@ -21,6 +21,27 @@ namespace primal::graphics::vulkan::descriptor
 		}
 
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type,
+			VkDescriptorSet& set,
+			u32 binding,
+			VkDescriptorType dType,
+			VkDescriptorBufferInfo* buffer,
+			VkDescriptorImageInfo* image)
+		{
+			VkWriteDescriptorSet descriptorWrite;
+			descriptorWrite.sType = type;
+			descriptorWrite.pNext = VK_NULL_HANDLE;
+			descriptorWrite.dstSet = set;
+			descriptorWrite.dstBinding = binding;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.descriptorType = dType;
+			descriptorWrite.pBufferInfo = buffer;
+			descriptorWrite.pImageInfo = image;
+			descriptorWrite.pTexelBufferView = nullptr;
+			return descriptorWrite;
+		}
+
+		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type,
 			utl::vector<VkDescriptorSet>& sets, 
 			u32 num,
 			u32 binding,

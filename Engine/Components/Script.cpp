@@ -1,13 +1,21 @@
 #include "Script.h"
 #include "Entity.h"
+#include "Transform.h"
+
+#define USE_TRANSFORM_CACHE_MAP 1
 
 namespace primal::script {
 	namespace {
-		utl::vector<detail::script_ptr>		entity_scripts;
-		utl::vector<id::id_type>			id_mapping;
+		utl::vector<detail::script_ptr>				entity_scripts;
+		utl::vector<id::id_type>					id_mapping;
 
-		utl::vector<id::generation_type>	generations;
-		utl::deque<script_id>				free_ids;
+		utl::vector<id::generation_type>			generations;
+		utl::deque<script_id>						free_ids;
+
+		utl::vector<transform::component_cache>		transform_cache;
+#if USE_TRANSFORM_CACHE_MAP
+		std::unordered_map<id::id_type, u32>		cache_map;
+#endif
 
 		using script_registry = std::unordered_map<size_t, detail::script_creator>;
 
@@ -30,6 +38,52 @@ namespace primal::script {
 				entity_scripts[id_mapping[index]] &&
 				entity_scripts[id_mapping[index]]->is_valid();
 		}
+
+#if USE_TRANSFORM_CACHE_MAP
+		transform::component_cache *const get_cache_ptr(const game_entity::entity *const entity)
+		{
+			assert(game_entity::is_alive((*entity).get_id()));
+			const transform::transform_id id{ (*entity).transform().get_id() };
+
+			u32 index{ u32_invalid_id };
+			auto pair = cache_map.try_emplace(id, id::invalid_id);
+
+			//  cache_map didn't have an entry for this id, new entity inserted
+			if (pair.second)
+			{
+				index = (u32)transform_cache.size();
+				transform_cache.emplace_back();
+				transform_cache.back().id = id;
+				cache_map[id] = index;
+			}
+			else
+			{
+				index = cache_map[id];
+			}
+
+			assert(index < transform_cache.size());
+			return &transform_cache[index];
+		}
+#else
+		transform::component_cache *const get_cache_ptr(const game_entity::entity *const entity)
+		{
+			assert(game_entity::is_alive((*entity).get_id()));
+			const transform::transform_id id{ (*entity).transform().get_id() };
+
+			for (auto& cache : transform_cache)
+			{
+				if (cache.id == id)
+				{
+					return &cache;
+				}
+
+				transform_cache.emplace_back();
+				transform_cache.back().id = id;
+
+				return &transform_cache.back();
+			}
+		}
+#endif
 	} // anonymous namespace
 
 	namespace detail {
@@ -39,7 +93,23 @@ namespace primal::script {
 			assert(result);
 			return result;
 		}
-	}
+
+		script_creator get_script_creator(size_t tag)
+		{
+			auto script = primal::script::registry().find(tag);
+			assert(script != primal::script::registry().end() && script->first == tag);
+			return script->second;
+		}
+
+#ifdef USE_WITH_EDITOR
+		u8 add_script_name(const char* name)
+		{
+			script_names().emplace_back(name);
+			return true;
+		}
+#endif // USE_WITH_EDITOR
+
+	} // namespace detail
 
 	component create(init_info info, game_entity::entity entity)
 	{
@@ -80,4 +150,67 @@ namespace primal::script {
 		id_mapping[id::index(last_id)] = index;
 		id_mapping[id::index(id)] = id::invalid_id;
 	}
+
+	void update(f32 dt)
+	{
+		for (auto& ptr : entity_scripts)
+		{
+			ptr->update(dt);
+		}
+
+		if (transform_cache.size())
+		{
+			transform::update(transform_cache.data(), (u32)transform_cache.size());
+			transform_cache.clear();
+#if USE_TRANSFORM_CACHE_MAP
+			cache_map.clear();
+#endif
+		}
+	}
+
+	void entity_script::set_rotation(const game_entity::entity *const entity, math::v4 rotation_quaternion)
+	{
+		transform::component_cache& cache{ *get_cache_ptr(entity) };
+		cache.flags |= transform::component_flags::rotation;
+		cache.rotation = rotation_quaternion;
+	}
+
+	void entity_script::set_orientation(const game_entity::entity *const entity, math::v3 orientation_vector)
+	{
+		transform::component_cache& cache{ *get_cache_ptr(entity) };
+		cache.flags |= transform::component_flags::orientation;
+		cache.orientation = orientation_vector;
+	}
+
+	void entity_script::set_position(const game_entity::entity *const entity, math::v3 position)
+	{
+		transform::component_cache& cache{ *get_cache_ptr(entity) };
+		cache.flags |= transform::component_flags::position;
+		cache.position = position;
+	}
+
+	void entity_script::set_scale(const game_entity::entity *const entity, math::v3 scale)
+	{
+		transform::component_cache& cache{ *get_cache_ptr(entity) };
+		cache.flags |= transform::component_flags::scale;
+		cache.scale = scale;
+	}
+
+} // namespace primal::script
+
+#ifdef USE_WITH_EDITOR
+#include <atlsafe.h>
+
+extern "C" __declspec(dllexport)
+LPSAFEARRAY get_script_names()
+{
+	const u32 size{ (u32)primal::script::script_names().size() };
+	if (!size) return nullptr;
+	CComSafeArray<BSTR> names(size);
+	for (u32 i{ 0 }; i < size; ++i)
+	{
+		names.SetAt(i, A2BSTR_EX(primal::script::script_names()[i].c_str()), false);
+	}
+	return names.Detach();
 }
+#endif // USE_WITH_EDITOR

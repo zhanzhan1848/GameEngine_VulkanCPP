@@ -159,9 +159,10 @@ namespace primal::graphics
 	struct material_init_info
 	{
 		material_type::type			type;
-		u32							texturte_count; // NOTE: textures are optional, so , texture count may be 0 and textures_ids may be nullptr
+		u32							texture_count; // NOTE: textures are optional, so , texture count may be 0 and textures_ids may be nullptr
 		id::id_type					shader_ids[shader_type::count]{ id::invalid_id, id::invalid_id, id::invalid_id, id::invalid_id, id::invalid_id, id::invalid_id, id::invalid_id, id::invalid_id };
 		id::id_type*				texture_ids;
+		utl::vector<id::id_type>	vk_texture_ids;	// Use ptr is so difficute to save which texture in this material
 	};
 
 	struct primitive_topology

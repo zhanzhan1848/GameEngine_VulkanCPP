@@ -91,7 +91,7 @@ namespace primal::graphics::d3d12::content
 					sizeof(id::id_type) +														// root signature id
 					sizeof(u32) +																// texture count
 					sizeof(id::id_type) * shader_count +										// shader ids
-					sizeof(id::id_type) + sizeof(u32) * info.texturte_count						// texture ids and descriptor indices(maybe 0 if no texture used).
+					sizeof(id::id_type) + sizeof(u32) * info.texture_count						// texture ids and descriptor indices(maybe 0 if no texture used).
 				};
 
 				material_buffer = std::make_unique<u8[]>(buffer_size);
@@ -101,14 +101,14 @@ namespace primal::graphics::d3d12::content
 				*(material_type::type*)buffer = info.type;
 				*(shader_flags::flags*)(&buffer[shader_flags_index]) = (shader_flags::flags)flags;
 				*(id::id_type*)(&buffer[root_signature_index]) = create_root_signature(info.type, (shader_flags::flags)flags);
-				*(u32*)(&buffer[texture_count_index]) = info.texturte_count;
+				*(u32*)(&buffer[texture_count_index]) = info.texture_count;
 
 				initialize();
 
-				if (info.texturte_count)
+				if (info.texture_count)
 				{
-					memcpy(_texture_ids, info.texture_ids, info.texturte_count * sizeof(id::id_type));
-					texture::get_descriptor_indices(_texture_ids, info.texturte_count, _descriptor_inidices);
+					memcpy(_texture_ids, info.texture_ids, info.texture_count * sizeof(id::id_type));
+					texture::get_descriptor_indices(_texture_ids, info.texture_count, _descriptor_inidices);
 				}
 
 				u32 shader_index{ 0 };

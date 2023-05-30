@@ -109,6 +109,13 @@ struct Vertex
     math::v3 texCoord;
 };
 
+struct InstanceData
+{
+    math::v3 translate{0.0f, 0.0f, 0.0f};
+    math::v3 rotate{0.0f, 0.0f, 0.0f};
+    math::v3 scale{1.0f, 1.0f, 1.0f};
+};
+
 struct UniformBufferObject
 {
     math::m4x4 model;

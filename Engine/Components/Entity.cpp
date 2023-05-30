@@ -17,7 +17,7 @@ namespace primal::game_entity {
 
 	entity create(entity_info info)
 	{
-		assert(info.transform); //All game entities must havw a transform component
+		assert(info.transform); //All game entities must have a transform component
 		if (!info.transform) return entity{};
 
 		entity_id id;

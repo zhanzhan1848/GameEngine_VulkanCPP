@@ -7,35 +7,17 @@
 #include "VulkanHelpers.h"
 
 // Own header file
-#include "VulkanDescriptor.h"
 #include "VulkanTexture.h"
-#define TINYOBJLOADER_IMPLEMENTATION
-#include "Content/tiny_obj_loader.h"
 #include <unordered_map>
 #include "VulkanContent.h"
+#include "Components/Transform.h"
+#include "Components/Entity.h"
 
 
 namespace primal::graphics::vulkan
 {
 namespace
 {
-    struct equal_idx
-    {
-        bool operator()(const tinyobj::index_t& a, const tinyobj::index_t& b) const
-        {
-            return a.vertex_index == b.vertex_index
-                && a.texcoord_index == b.texcoord_index
-                && a.normal_index == b.normal_index;
-        }
-    };
-
-    struct hash_idx
-    {
-        size_t operator()(const tinyobj::index_t& a) const
-        {
-            return ((a.vertex_index ^ a.texcoord_index << 1) >> 1) ^ (a.normal_index << 1);
-        }
-    };
 
 VkSurfaceFormatKHR
 choose_best_surface_format(const utl::vector<VkSurfaceFormatKHR>& formats)
@@ -134,17 +116,25 @@ vulkan_surface::create(VkInstance instance)
 
     create_swapchain();
     create_render_pass();
-    descriptor::createDescriptorSetLayout(core::logical_device(), _descriptorSetLayout);
-    descriptor::preparePipelines(core::logical_device(), _pipelineLayout, _pipeline, _descriptorSetLayout, _renderpass);
     recreate_framebuffers();
-    loadModel(modelPath);
-    createVertexBuffer(core::logical_device(), _vertices, _vertexBuffer);
-    createIndexBuffer(core::logical_device(), _indices, _indicesBuffer);
-    createUniformBuffers(core::logical_device(), _ubo, width(), height(), _uniformBuffer);
+
     core::create_graphics_command((u32)_swapchain.images.size());
-    _texture.loadTexture(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/viking_room.png" });
-    descriptor::createDescriptorPool(core::logical_device(), _descriptorPool);
-    descriptor::createDescriptorSets(core::logical_device(), _descriptorSets, _descriptorSetLayout, _descriptorPool, _uniformBuffer, _texture.getTexture());
+    auto model_id = submesh::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/models/viking_room.obj" });
+    auto texture_id = textures::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/viking_room.png" });
+    auto vs_id = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/test01.vert.spv" }, shader_type::vertex);
+    auto fs_id = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/test01.frag.spv" }, shader_type::pixel);
+    auto material_id = materials::add({ material_type::type::opauqe, 1, {vs_id, id::invalid_id, id::invalid_id, id::invalid_id, fs_id, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr, utl::vector<id::id_type>(texture_id) });
+
+    _scene.add_model_instance(model_id);
+    _scene.add_material(model_id, material_id);
+    _scene.createDescriptorSetLayout();
+    _scene.createPipeline(_renderpass);
+    
+    _scene.createUniformBuffer(_window.width(), _window.height());
+    
+    _scene.createDescriptorPool();
+    _scene.createDescriptorSets();
+
 }
 
 void
@@ -187,26 +177,8 @@ vulkan_surface::release()
     /// <summary>
     /// Own function destroy
     /// </summary>
+    _scene.~vulkan_scene();
 
-    vkDestroyPipeline(core::logical_device(), _pipeline, nullptr);
-    vkDestroyPipelineLayout(core::logical_device(), _pipelineLayout, nullptr);
-
-
-    vkDestroyBuffer(core::logical_device(), _uniformBuffer.buffer, nullptr);
-    vkFreeMemory(core::logical_device(), _uniformBuffer.memory, nullptr);
-
-    vkDestroyDescriptorPool(core::logical_device(), _descriptorPool, nullptr);
-
-    /*vkDestroySampler(core::logical_device(), _texture.sampler, nullptr);
-    destroy_image(core::logical_device(), &_texture);*/
-
-    vkDestroyDescriptorSetLayout(core::logical_device(), _descriptorSetLayout, nullptr);
-
-    vkDestroyBuffer(core::logical_device(), _indicesBuffer.buffer, nullptr);
-    vkFreeMemory(core::logical_device(), _indicesBuffer.memory, nullptr);
-
-    vkDestroyBuffer(core::logical_device(), _vertexBuffer.buffer, nullptr);
-    vkFreeMemory(core::logical_device(), _vertexBuffer.memory, nullptr);
 
     for (u32 i{ 0 }; i < _swapchain.images.size(); ++i)
     {
@@ -464,104 +436,6 @@ get_swapchain_details(VkPhysicalDevice device, VkSurfaceKHR surface)
     }
 
     return details;
-}
-
-// Own function
-void vulkan_surface::createVertexBuffer(VkDevice device, const std::vector<Vertex>& vertex, baseBuffer& buffer)
-{
-    VkDeviceSize bufferSize = sizeof(Vertex) * vertex.size();
-
-    createBuffer(device, bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, buffer.buffer, buffer.memory);
-
-    void* data;
-    vkMapMemory(device, buffer.memory, 0, bufferSize, 0, &data);
-    memcpy(data, vertex.data(), (size_t)bufferSize);
-    vkUnmapMemory(device, buffer.memory);
-    vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0);
-}
-
-void vulkan_surface::createIndexBuffer(VkDevice device, const std::vector<u16>& indices, baseBuffer& buffer) {
-    VkDeviceSize bufferSize = sizeof(uint16_t) * indices.size();
-
-    createBuffer(device, bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, buffer.buffer, buffer.memory);
-
-    void* data;
-    vkMapMemory(device, buffer.memory, 0, bufferSize, 0, &data);
-    memcpy(data, indices.data(), (size_t)bufferSize);
-    vkUnmapMemory(device, buffer.memory);
-
-    vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0);
-}
-
-void vulkan_surface::createUniformBuffers(VkDevice device, UniformBufferObject& ubo, const u32 width, const u32 height, uniformBuffer& buffer) {
-    VkDeviceSize bufferSize = sizeof(ubo);
-
-    createBuffer(device, bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, buffer.buffer, buffer.memory);
-
-    vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0);
-
-    vkMapMemory(device, buffer.memory, 0, bufferSize, 0, &buffer.mapped);
-
-    DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
-    modelMatrix = DirectX::XMMatrixRotationZ(DirectX::XM_PIDIV2) * modelMatrix;
-    DirectX::XMStoreFloat4x4(&ubo.model, modelMatrix);
-    math::v3 eyePos{ 2.0f, 2.0f, 2.0f };
-    math::v3 focusPos{ 0.0f, 0.0f, 0.0f };
-    math::v3 axis{ 0.0f, 0.0f, 1.0f };
-    DirectX::XMMATRIX viewMatrix = DirectX::XMMatrixLookAtLH(DirectX::XMVectorSet(2.0f, 2.0f, 2.0f, 0.0f), DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f), DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));
-    DirectX::XMStoreFloat4x4(&ubo.view, viewMatrix);
-    DirectX::XMMATRIX projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, (f32)width / (f32)height, 0.1f, 10.0f);
-    projectionMatrix.r[1].m128_f32[1] *= -1;
-    DirectX::XMStoreFloat4x4(&ubo.projection, projectionMatrix);
-    memcpy(buffer.mapped, &ubo, sizeof(ubo));
-}
-
-/// <summary>
-/// TODO：重构读取模型函数，或重构成单独的class
-/// </summary>
-/// <param name="path"> obj文件路径 </param>
-void vulkan_surface::loadModel(std::string path)
-{
-    tinyobj::attrib_t attrib;
-    std::vector<tinyobj::shape_t> shapes;
-    std::vector<tinyobj::material_t> materials;
-    std::string warn, err;
-
-    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str()))
-    {
-        throw std::runtime_error(warn + err);
-    }
-
-    std::unordered_map<tinyobj::index_t, size_t, hash_idx, equal_idx> uniqueVertices;
-
-    _vertices.clear();
-    _indices.clear();
-    for(const auto& shape : shapes)
-        for (const auto& index : shape.mesh.indices)
-        {
-            Vertex vertex;
-            vertex.pos = math::v3{
-                attrib.vertices[3 * index.vertex_index + 0],
-                attrib.vertices[3 * index.vertex_index + 1],
-                attrib.vertices[3 * index.vertex_index + 2]
-            };
-
-            vertex.color = math::v3{ 1.0f, 1.0f, 1.0f };
-
-            vertex.texCoord = math::v3{
-                attrib.texcoords[2 * index.texcoord_index + 0],
-                1.0f - attrib.texcoords[2 * index.texcoord_index + 1],
-                0.0f
-            };
-
-            if (uniqueVertices.count(index) == 0)
-            {
-                uniqueVertices[index] = (u32)_vertices.size();
-                _vertices.emplace_back(vertex);
-            }
-
-            _indices.emplace_back((u32)uniqueVertices[index]);
-        }
 }
 
 }

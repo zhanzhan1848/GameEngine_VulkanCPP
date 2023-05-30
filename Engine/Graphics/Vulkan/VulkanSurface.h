@@ -3,6 +3,7 @@
 #pragma once
 #include "VulkanCommonHeaders.h"
 #include "VulkanContent.h"
+#include "VulkanContent.h"
 
 namespace primal::graphics::vulkan
 {
@@ -58,19 +59,8 @@ public:
     constexpr const VkRect2D& scissor_rect() const {}*/
 
     // Own function
-    [[nodiscard]] constexpr VkPipeline& pipeline() { return _pipeline; }
-    [[nodiscard]] constexpr VkPipelineLayout& pipelineLayout() { return _pipelineLayout; }
-    [[nodiscard]] constexpr VkDescriptorSetLayout& descriptorSetLayout() { return _descriptorSetLayout; }
-    [[nodiscard]] constexpr utl::vector<VkDescriptorSet>& DescriptorSets() { return _descriptorSets; }
-    [[nodiscard]] constexpr baseBuffer& VertexBuffer() { return _vertexBuffer; }
-    [[nodiscard]] constexpr baseBuffer& IndexBuffer() { return _indicesBuffer; }
-    [[nodiscard]] constexpr std::vector<u16>& Indices() { return _indices; }
-    [[nodiscard]] constexpr uniformBuffer& getUniformBuffer() { return _uniformBuffer; }
-    constexpr void setUBO(UniformBufferObject ubo) { _ubo = ubo; }
-    constexpr void setProjection(math::m4x4 projection) { _ubo.projection = projection; }
-    constexpr void setView(math::m4x4 view) { _ubo.view = view; }
-    constexpr void setModel(math::m4x4 model) { _ubo.model = model; }
-    void flushUBO() { memcpy(_uniformBuffer.mapped, &_ubo, sizeof(UniformBufferObject)); }
+    [[nodiscard]] constexpr scene::vulkan_scene& getScene() { return _scene; }
+    void updateUniformBuffer(u32 width, u32 height) { _scene.updateUniformBuffer(width, height); }
 
 private:
     void create_surface(VkInstance instance);
@@ -91,34 +81,7 @@ private:
     u32								_frame_index{ 0 };
 
     // Own param
-    VkPipelineLayout                _pipelineLayout;
-    VkPipeline                      _pipeline;
-    VkDescriptorSetLayout           _descriptorSetLayout;
-    std::vector<Vertex>             _vertices{ { math::v3{ -0.5f, -0.5f, 0.0f }, math::v3{ 1.0f, 0.0f, 0.0f }, math::v3{1.0f, 0.0f, 0.0f} },
-                                                { math::v3{ 0.5f, -0.5f, 0.0f }, math::v3{ 0.0f, 1.0f, 0.0f }, math::v3{0.0f, 0.0f, 0.0f} },
-                                                { math::v3{ 0.5f, 0.5f, 0.0f }, math::v3{ 0.0f, 0.0f, 1.0f }, math::v3{0.0f, 1.0f, 0.0f} },
-                                                { math::v3{ -0.5f, 0.5f, 0.0f }, math::v3{ 1.0f, 1.0f, 1.0f }, math::v3{1.0f, 1.0f, 0.0f} },
-                        
-                                                { math::v3{ -0.5f, -0.5f, -0.5f }, math::v3{ 1.0f, 0.0f, 0.0f }, math::v3{1.0f, 0.0f, 0.0f} },
-                                                { math::v3{ 0.5f, -0.5f, -0.5f }, math::v3{ 0.0f, 1.0f, 0.0f }, math::v3{0.0f, 0.0f, 0.0f} },
-                                                { math::v3{ 0.5f, 0.5f, -0.5f }, math::v3{ 0.0f, 0.0f, 1.0f }, math::v3{0.0f, 1.0f, 0.0f} },
-                                                { math::v3{ -0.5f, 0.5f, -0.5f }, math::v3{ 1.0f, 1.0f, 1.0f }, math::v3{1.0f, 1.0f, 0.0f} },
-    };
-    std::vector<u16>                _indices{ 0, 1, 2, 2, 3, 0,
-                                                4, 5, 6, 6, 7, 4};
-    std::string                     modelPath{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/models/viking_room.obj" };
-    UniformBufferObject             _ubo;
-    baseBuffer                      _vertexBuffer;
-    baseBuffer                      _indicesBuffer;
-    uniformBuffer                   _uniformBuffer;
-    VkDescriptorPool                _descriptorPool;
-    utl::vector<VkDescriptorSet>    _descriptorSets;
-    texture::vulkan_texture_2d      _texture;
-    // Own function
-    void createVertexBuffer(VkDevice device, const std::vector<Vertex>& vertex, baseBuffer& buffer);
-    void createIndexBuffer(VkDevice device, const std::vector<u16>& indices, baseBuffer& buffer);
-    void createUniformBuffers(VkDevice device, UniformBufferObject& ubo, const u32 width, const u32 height, uniformBuffer& buffer);
-    void loadModel(std::string path);
+    scene::vulkan_scene             _scene;
 
 
     // Function Pointers
