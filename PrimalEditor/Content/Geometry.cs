@@ -213,7 +213,7 @@ namespace PrimalEditor.Content
             get => _smoothAngle;
             set
             {
-                if (_smoothAngle != value)
+                if (!_smoothAngle.IsTheSameAs(value))
                 {
                     _smoothAngle = value;
                     OnPropertyChanged(nameof(SmoothAngle));

@@ -162,7 +162,7 @@ namespace primal::graphics::vulkan::camera
 			*entity_id = camera.entity_id();
 		}
 
-		void dummy_set(vulkan_camera&, const void *const, u32) {}
+		constexpr void dummy_set(vulkan_camera&, const void *const, u32) {}
 
 		using set_function = void(*)(vulkan_camera&, const void *const, u32);
 		using get_function = void(*)(vulkan_camera&, void *const, u32);

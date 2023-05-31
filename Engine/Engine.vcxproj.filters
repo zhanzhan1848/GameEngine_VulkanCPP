@@ -189,6 +189,8 @@
     <ClInclude Include="Input\Input.h" />
     <ClInclude Include="Input\InputWin32.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanContent.h" />
+    <ClInclude Include="EngineAPI\Light.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12Light.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Components\Entity.cpp">
@@ -287,6 +289,7 @@
     <ClCompile Include="Input\Input.cpp" />
     <ClCompile Include="Input\InputWin32.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanContent.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12Light.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Graphics\Vulkan\Shaders\test01.vert.glsl" />

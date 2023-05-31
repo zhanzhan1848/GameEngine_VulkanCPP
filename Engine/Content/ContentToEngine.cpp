@@ -56,6 +56,17 @@ namespace primal::content
 			u32											_lod_count;
 		};
 
+		// NOTE: This is needed to maintain compatibility with STL vector
+		struct noexcept_map
+		{
+			std::unordered_map<u32, std::unique_ptr<u8[]>>				map;
+			noexcept_map() = default;
+			noexcept_map(const noexcept_map&) = default;
+			noexcept_map(noexcept_map&&) noexcept = default;
+			noexcept_map& operator=(const noexcept_map&) = default;
+			noexcept_map& operator=(noexcept_map&&) noexcept = default;
+		};
+
 		// This constant indicates that an element in geometry_hierarchy is not a pointer bu a gpu_id
 		constexpr uintptr_t								single_mesh_marker{ (uintptr_t)0x01 };
 		utl::free_list<u8*>								geometry_hierarchies;
@@ -292,6 +303,23 @@ namespace primal::content
 
 		return id;
 	}
+
+	//id::id_type add_shader_group(const u8* const* shaders, u32 num_shaders, const u32* const keys)
+	//{
+	//	assert(shaders && num_shaders, keys);
+	//	noexcept_map group;
+	//	for (u32 i{ 0 }; i < num_shaders; ++i)
+	//	{
+	//		assert(shaders[i]);
+	//		const compiled_shader_ptr shader_ptr{ (const compiled_shader_ptr)shaders[i] };
+	//		const u64 size{ shader_ptr->buffer_size() };
+	//		std::unique_ptr<u8[]> shader{ std::make_unique<u8[]>(size) };
+	//		memcpy(shader.get(), shaders[i], size);
+	//		group.map[keys[i]] = std::move(shader);
+	//	}
+	//	std::lock_guard lock{ shader_mutex };
+	//	return shader_groups.add(std::move(group));
+	//}
 
 	void destroy_resource(id::id_type id, asset_type::type type)
 	{

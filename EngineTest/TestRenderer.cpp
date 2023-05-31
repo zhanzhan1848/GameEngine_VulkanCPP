@@ -75,6 +75,8 @@ bool test_initialize();
 void test_shutdown();
 id::id_type create_render_item(id::id_type entity_id);
 void destory_render_item(id::id_type item_id);
+void generate_lights();
+void remove_lights();
 
 LRESULT win_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
@@ -280,6 +282,8 @@ bool test_initialize()
 		 init_test_workers(buffer_test_worker);
 
 		 item_id = create_render_item(create_one_game_entity({}, {}, nullptr).get_id());
+
+		 generate_lights();
 	}
 
 	input::input_source source{};
@@ -318,6 +322,7 @@ bool test_initialize()
 
 void test_shutdown()
 {
+	remove_lights();
 	input::unbind(std::hash<std::string>()("move"));
 	destory_render_item(item_id);
 	join_test_workers();

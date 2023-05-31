@@ -2,6 +2,7 @@
 #include "D3D12Core.h"
 #include "D3D12Shaders.h"
 #include "D3D12Content.h"
+#include "D3D12Light.h"
 #include "D3D12Camera.h"
 #include "Shaders/SharedTypes.h"
 #include "Components/Entity.h"
@@ -24,6 +25,13 @@ namespace primal::graphics::d3d12::gpass
 #else
 		constexpr f32						clear_value[4]{ };
 #endif // _DEBUG
+
+		//NOTE (to myself): don't forget to #undef CONSTEXPR when you copy/paste this block of code!
+#if USE_STL_VECTOR
+#define CONSTEXPR
+#else
+#define CONSTEXPR constexpr
+#endif
 
 		struct gpass_cache
 		{
@@ -132,6 +140,8 @@ namespace primal::graphics::d3d12::gpass
 
 			utl::vector<u8>					_buffer;
 		} frame_cache;
+
+#undef CONSTEXPR
 
 		bool create_buffers(math::u32v2 size)
 		{
@@ -340,6 +350,7 @@ namespace primal::graphics::d3d12::gpass
 				current_root_signature = cache.root_signature[i];
 				cmd_list->SetGraphicsRootSignature(current_root_signature);
 				cmd_list->SetGraphicsRootConstantBufferView(opaque_root_parameter::global_shader_data, d3d12_info.global_shader_data);
+				cmd_list->SetGraphicsRootShaderResourceView(opaque_root_parameter::directional_lights, light::non_cullable_light_buffer(d3d12_info.frame_index));
 			}
 			if (current_pipeline_state != cache.gpass_pipeline_states[i])
 			{
