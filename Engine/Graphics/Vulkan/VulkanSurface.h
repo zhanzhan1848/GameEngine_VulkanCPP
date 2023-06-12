@@ -3,10 +3,14 @@
 #pragma once
 #include "VulkanCommonHeaders.h"
 #include "VulkanContent.h"
-#include "VulkanContent.h"
+#include "VulkanCore.h"
+#include "VulkanHelpers.h"
+#include "VulkanGBuffer.h"
 
 namespace primal::graphics::vulkan
 {
+    class vulkan_shadowmapping;
+
 struct swapchain_details
 {
     VkSurfaceCapabilitiesKHR		surface_capabilities;	// Surface properties, e.g. image size/extent
@@ -28,6 +32,57 @@ struct vulkan_swapchain
     VkExtent2D						extent;
     utl::vector<swapchain_image>	images;
     vulkan_image					depth_attachment;
+};
+
+struct vulkan_layout_and_pool
+{
+    VkDescriptorSetLayout								descriptorSetLayout;
+    VkDescriptorPool									descriptorPool;
+    VkPipelineLayout									pipelineLayout;
+
+    void createDescriptorPool()
+    {
+        std::vector<VkDescriptorPoolSize> poolSize = {
+            descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count)),
+            descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<u32>(frame_buffer_count))
+        };
+
+        VkDescriptorPoolCreateInfo poolInfo;
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.pNext = VK_NULL_HANDLE;
+        poolInfo.flags = 0;
+        poolInfo.poolSizeCount = static_cast<u32>(poolSize.size());
+        poolInfo.pPoolSizes = poolSize.data();
+        poolInfo.maxSets = static_cast<u32>(frame_buffer_count);
+
+        VkResult result{ VK_SUCCESS };
+        VkCall(result = vkCreateDescriptorPool(core::logical_device(), &poolInfo, nullptr, &descriptorPool), "Failed to create descriptor pool...");
+    }
+
+    void createDescriptorSetLayout()
+    {
+        std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings{
+            descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_VERTEX_BIT),
+            descriptor::descriptorSetLayoutBinding(1, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+            descriptor::descriptorSetLayoutBinding(2, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+        };
+
+        VkDescriptorSetLayoutCreateInfo descriptorLayout = descriptor::descriptorSetLayoutCreate(setLayoutBindings);
+
+        VkResult result{ VK_SUCCESS };
+        VkCall(result = vkCreateDescriptorSetLayout(core::logical_device(), &descriptorLayout, nullptr, &descriptorSetLayout), "Failed to create descriptor set layout...");
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo;
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.pNext = nullptr;
+        pipelineLayoutInfo.flags = 0;
+        pipelineLayoutInfo.setLayoutCount = 1;
+        pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+        pipelineLayoutInfo.pushConstantRangeCount = 0;
+        pipelineLayoutInfo.pPushConstantRanges = VK_NULL_HANDLE;
+        result = { VK_SUCCESS };
+        VkCall(result = vkCreatePipelineLayout(core::logical_device(), &pipelineLayoutInfo, nullptr, &pipelineLayout), "Failed to create pipeline layout...");
+    }
 };
 
 class vulkan_surface
@@ -55,6 +110,7 @@ public:
     constexpr u32 current_frame() const { return _frame_index; }
     constexpr bool is_recreating() const { return _is_recreating; }
     constexpr bool is_resized() const { return _framebuffer_resized; }
+    [[nodiscard]] constexpr vulkan_layout_and_pool& layout_and_pool() { return _layout_and_pool; }
     /*constexpr const VkViewport& viewport() const {}
     constexpr const VkRect2D& scissor_rect() const {}*/
 
@@ -82,7 +138,8 @@ private:
 
     // Own param
     scene::vulkan_scene             _scene;
-
+    vulkan_layout_and_pool          _layout_and_pool;
+    
 
     // Function Pointers
     PFN_vkCreateSwapchainKHR		fpCreateSwapchainKHR;

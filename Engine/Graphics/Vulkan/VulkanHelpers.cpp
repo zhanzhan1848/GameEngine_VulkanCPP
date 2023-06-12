@@ -591,4 +591,18 @@ namespace primal::graphics::vulkan
 
         vkFreeCommandBuffers(device, pool, 1, &commandBuffer);
     }
+
+	u32 formatIsFilterable(VkPhysicalDevice physicalDevice, VkFormat format, VkImageTiling tilling)
+	{
+		VkFormatProperties formatProps;
+		vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &formatProps);
+
+		if (tilling == VK_IMAGE_TILING_OPTIMAL)
+			return formatProps.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+
+		if (tilling == VK_IMAGE_TILING_LINEAR)
+			return formatProps.linearTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+
+		return false;
+	}
 }

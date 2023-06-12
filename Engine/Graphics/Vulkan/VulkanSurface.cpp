@@ -118,23 +118,34 @@ vulkan_surface::create(VkInstance instance)
     create_render_pass();
     recreate_framebuffers();
 
+    _scene.getShadowmap().setupFramebuffer();
+
     core::create_graphics_command((u32)_swapchain.images.size());
+
+    _layout_and_pool.createDescriptorPool();
+    _layout_and_pool.createDescriptorSetLayout();
+
+    _scene.getShadowmap().createUniformBuffer();
+    _scene.getShadowmap().setupPipeline(_layout_and_pool.pipelineLayout, _framebuffers.font());
+    _scene.getShadowmap().setupDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
+
     auto model_id = submesh::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/models/viking_room.obj" });
     auto texture_id = textures::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/viking_room.png" });
     auto vs_id = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/test01.vert.spv" }, shader_type::vertex);
     auto fs_id = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/test01.frag.spv" }, shader_type::pixel);
-    auto material_id = materials::add({ material_type::type::opauqe, 1, {vs_id, id::invalid_id, id::invalid_id, id::invalid_id, fs_id, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr, utl::vector<id::id_type>(texture_id) });
+    id::id_type texture_ids[] = { texture_id };
+    auto material_id = materials::add({ material_type::type::opauqe, 0, {vs_id, id::invalid_id, id::invalid_id, id::invalid_id, fs_id, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
+    materials::get_material(material_id).add_texture(texture_id);
 
     _scene.add_model_instance(model_id);
     _scene.add_material(model_id, material_id);
-    _scene.createDescriptorSetLayout();
-    _scene.createPipeline(_renderpass);
+    //_scene.createDescriptorSetLayout();
+    _scene.createPipeline(_renderpass, _layout_and_pool.pipelineLayout);
     
     _scene.createUniformBuffer(_window.width(), _window.height());
     
-    _scene.createDescriptorPool();
-    _scene.createDescriptorSets();
-
+    //_scene.createDescriptorPool();
+    _scene.createDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
 }
 
 void
@@ -174,18 +185,21 @@ vulkan_surface::release()
 
     vkDeviceWaitIdle(core::logical_device());
 
-    /// <summary>
-    /// Own function destroy
-    /// </summary>
-    _scene.~vulkan_scene();
-
-
     for (u32 i{ 0 }; i < _swapchain.images.size(); ++i)
     {
         destroy_framebuffer(core::logical_device(), _framebuffers[i]);
     }
     renderpass::destroy_renderpass(core::logical_device(), _renderpass);
     clean_swapchain();
+
+    /// <summary>
+    /// Own function destroy
+    /// </summary>
+    _scene.~vulkan_scene();
+    vkDestroyPipelineLayout(core::logical_device(), _layout_and_pool.pipelineLayout, nullptr);
+    vkDestroyDescriptorPool(core::logical_device(), _layout_and_pool.descriptorPool, nullptr);
+    vkDestroyDescriptorSetLayout(core::logical_device(), _layout_and_pool.descriptorSetLayout, nullptr);
+
     vkDestroySurfaceKHR(core::get_instance(), _surface, nullptr);
 }
 

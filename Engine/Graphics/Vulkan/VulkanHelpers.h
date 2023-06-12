@@ -35,14 +35,16 @@ namespace primal::graphics::vulkan
 		VkVertexInputBindingDescription vertexInputBindingDescription(u32 binding, u32 stride, VkVertexInputRate inputRate);
 	}
 
-bool vulkan_success(VkResult result);
+	bool vulkan_success(VkResult result);
 
-void copyBuffer(VkDevice device, u32 index, const VkCommandPool& pool, VkBuffer& srcBuffer, VkBuffer& dstBuffer, VkDeviceSize size);
+	void copyBuffer(VkDevice device, u32 index, const VkCommandPool& pool, VkBuffer& srcBuffer, VkBuffer& dstBuffer, VkDeviceSize size);
 
-void createBuffer(VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
+	void createBuffer(VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
 
-VkCommandBuffer beginSingleCommand(VkDevice device, const VkCommandPool& pool);
+	VkCommandBuffer beginSingleCommand(VkDevice device, const VkCommandPool& pool);
 
-void endSingleCommand(VkDevice device, u32 index, const VkCommandPool& pool, VkCommandBuffer commandBuffer);
+	void endSingleCommand(VkDevice device, u32 index, const VkCommandPool& pool, VkCommandBuffer commandBuffer);
+
+	u32 formatIsFilterable(VkPhysicalDevice physicalDevice, VkFormat format, VkImageTiling tilling);
 
 }

@@ -140,6 +140,8 @@ public:
         reset_cmd_buffer(cmd_buffer);
         begin_cmd_buffer(cmd_buffer, false, false, false);
 
+        surface->getScene().getShadowmap().runRenderpass(cmd_buffer, surface);
+
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
@@ -170,7 +172,7 @@ public:
         vulkan_cmd_buffer& cmd_buffer{ _cmd_buffers[frame] };
 
         surface->getScene().updateView(frame_info);
-        surface->getScene().flushBuffer(cmd_buffer);
+        surface->getScene().flushBuffer(cmd_buffer, surface->layout_and_pool().pipelineLayout);
 
         renderpass::end_renderpass(cmd_buffer.cmd_buffer, cmd_buffer.cmd_state, surface->renderpass());
         end_cmd_buffer(cmd_buffer);

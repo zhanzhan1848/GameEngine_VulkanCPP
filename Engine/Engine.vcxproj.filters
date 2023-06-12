@@ -191,6 +191,7 @@
     <ClInclude Include="Graphics\Vulkan\VulkanContent.h" />
     <ClInclude Include="EngineAPI\Light.h" />
     <ClInclude Include="Graphics\Direct3D12\D3D12Light.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanGBuffer.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Components\Entity.cpp">
@@ -290,11 +291,14 @@
     <ClCompile Include="Input\InputWin32.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanContent.cpp" />
     <ClCompile Include="Graphics\Direct3D12\D3D12Light.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanGBuffer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Graphics\Vulkan\Shaders\test01.vert.glsl" />
     <None Include="Graphics\Vulkan\Shaders\test01.frag.glsl" />
     <None Include="Graphics\Vulkan\Shaders\compileShaders.bat" />
     <None Include="packages.config" />
+    <None Include="Graphics\Vulkan\Shaders\shadowmapping.vert.glsl" />
+    <None Include="Graphics\Vulkan\Shaders\shadowmapping.frag.glsl" />
   </ItemGroup>
 </Project>

@@ -246,6 +246,7 @@
     <ClInclude Include="Graphics\Vulkan\VulkanCommonHeaders.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanContent.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanCore.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanGBuffer.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanHelpers.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanInterface.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanRenderPass.h" />
@@ -293,6 +294,7 @@
     <ClCompile Include="Graphics\Vulkan\VulkanCommandBuffer.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanContent.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanCore.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanGBuffer.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanHelpers.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanInterface.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanRenderPass.cpp" />
@@ -308,6 +310,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Graphics\Vulkan\Shaders\compileShaders.bat" />
+    <None Include="Graphics\Vulkan\Shaders\shadowmapping.frag.glsl" />
+    <None Include="Graphics\Vulkan\Shaders\shadowmapping.vert.glsl" />
     <None Include="Graphics\Vulkan\Shaders\test01.frag.glsl" />
     <None Include="Graphics\Vulkan\Shaders\test01.vert.glsl" />
     <None Include="packages.config" />

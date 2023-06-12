@@ -91,7 +91,7 @@ create_renderpass(VkDevice device, VkFormat swapchain_image_format, VkFormat dep
 
     // Let subpass know about the depth attachment
     subpass.pDepthStencilAttachment = &depth_attach_ref;
-    subpass.pDepthStencilAttachment = VK_NULL_HANDLE;
+    //subpass.pDepthStencilAttachment = VK_NULL_HANDLE;
 
     // TODO: there are othere possible attachment types needed to configure here;
     //		 input, resolve, preserve...
