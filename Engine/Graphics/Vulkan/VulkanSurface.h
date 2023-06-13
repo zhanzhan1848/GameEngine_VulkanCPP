@@ -116,7 +116,6 @@ public:
 
     // Own function
     [[nodiscard]] constexpr scene::vulkan_scene& getScene() { return _scene; }
-    void updateUniformBuffer(u32 width, u32 height) { _scene.updateUniformBuffer(width, height); }
 
 private:
     void create_surface(VkInstance instance);

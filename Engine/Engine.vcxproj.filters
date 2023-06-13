@@ -300,5 +300,7 @@
     <None Include="packages.config" />
     <None Include="Graphics\Vulkan\Shaders\shadowmapping.vert.glsl" />
     <None Include="Graphics\Vulkan\Shaders\shadowmapping.frag.glsl" />
+    <None Include="Graphics\Vulkan\Shaders\floor.vert.glsl" />
+    <None Include="Graphics\Vulkan\Shaders\floor.frag.glsl" />
   </ItemGroup>
 </Project>

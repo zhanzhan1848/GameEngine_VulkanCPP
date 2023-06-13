@@ -11,63 +11,6 @@ namespace primal::graphics::vulkan
 
 	} // anontmous namespace
 
-	void createTextureImage(VkDevice device, u32 index, VkCommandPool pool, std::string filePath, vulkan_texture& tex)
-	{
-		/*int texWidth, texHeight, texChannels;
-		void* pixels = stbi_load(filePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-		VkDeviceSize imageSize = 0;
-		VkFormat imageFormat = VK_FORMAT_UNDEFINED;
-
-		switch (texChannels)
-		{
-		case 3:
-		{
-			imageSize = texWidth * texHeight * 4;
-			imageFormat = VK_FORMAT_R8G8B8A8_SRGB;
-		}break;
-		case 4:
-		{
-			imageSize = texWidth * texHeight * 4;
-			imageFormat = VK_FORMAT_R8G8B8A8_SRGB;
-		}break;
-		default:
-			throw std::runtime_error("The texture do not support...");
-			break;
-		}
-
-		if (!pixels) throw std::runtime_error("Failed to load texture data...");
-
-		baseBuffer staging;
-		createBuffer(device, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging.buffer, staging.memory);
-		vkBindBufferMemory(device, staging.buffer, staging.memory, 0);
-
-		void* data;
-		vkMapMemory(device, staging.memory, 0, imageSize, 0, &data);
-		memcpy(data, pixels, static_cast<size_t>(imageSize));
-		vkUnmapMemory(device, staging.memory);
-
-		stbi_image_free(pixels);
-
-		image_init_info image_info{};
-		image_info.image_type = VK_IMAGE_TYPE_2D;
-		image_info.width = texWidth;
-		image_info.height = texHeight;
-		image_info.format = imageFormat;
-		image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-		image_info.usage_flags = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-		image_info.memory_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-		image_info.create_view = true;
-		image_info.view_aspect_flags = VK_IMAGE_ASPECT_COLOR_BIT;
-
-		create_image(device, &image_info, tex);
-		transitionImageLayout(device, index, pool, tex.image, imageFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		copyBufferToImage(device, index, pool, staging.buffer, tex.image, static_cast<u32>(texWidth), static_cast<u32>(texHeight));
-		transitionImageLayout(device, index, pool, tex.image, imageFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-		vkDestroyBuffer(device, staging.buffer, nullptr);
-		vkFreeMemory(device, staging.memory, nullptr);*/
-	}
-
 	void transitionImageLayout(VkDevice device, u32 index, VkCommandPool pool, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout)
 	{
 		VkCommandBuffer commandBuffer = beginSingleCommand(device, pool);

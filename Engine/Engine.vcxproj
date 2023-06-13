@@ -310,6 +310,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Graphics\Vulkan\Shaders\compileShaders.bat" />
+    <None Include="Graphics\Vulkan\Shaders\floor.frag.glsl" />
+    <None Include="Graphics\Vulkan\Shaders\floor.vert.glsl" />
     <None Include="Graphics\Vulkan\Shaders\shadowmapping.frag.glsl" />
     <None Include="Graphics\Vulkan\Shaders\shadowmapping.vert.glsl" />
     <None Include="Graphics\Vulkan\Shaders\test01.frag.glsl" />

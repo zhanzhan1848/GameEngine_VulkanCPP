@@ -3,7 +3,6 @@
 
 namespace primal::graphics::vulkan
 {
-	void createTextureImage(VkDevice device, u32 index, VkCommandPool pool, std::string filePath, vulkan_texture& tex);
 
 	void transitionImageLayout(VkDevice device, u32 index, VkCommandPool pool, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout);
 

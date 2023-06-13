@@ -72,7 +72,7 @@ namespace primal::graphics::d3d12::light
 
 				if (owner.type == graphics::light::directional)
 				{
-					_non_cullable_owners[owner.data_index] == light_id{ id::invalid_id };
+					_non_cullable_owners[owner.data_index] = light_id{ id::invalid_id };
 				}
 				else
 				{

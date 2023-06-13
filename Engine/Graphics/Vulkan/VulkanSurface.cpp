@@ -133,16 +133,49 @@ vulkan_surface::create(VkInstance instance)
     auto texture_id = textures::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/viking_room.png" });
     auto vs_id = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/test01.vert.spv" }, shader_type::vertex);
     auto fs_id = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/test01.frag.spv" }, shader_type::pixel);
-    id::id_type texture_ids[] = { texture_id };
     auto material_id = materials::add({ material_type::type::opauqe, 0, {vs_id, id::invalid_id, id::invalid_id, id::invalid_id, fs_id, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
     materials::get_material(material_id).add_texture(texture_id);
 
-    _scene.add_model_instance(model_id);
-    _scene.add_material(model_id, material_id);
+    transform::init_info transform_info{};
+    math::v3 rotation{ 0.f, 0.f, 0.f };
+    math::v3 position{ 3.f, 0.f, 0.f };
+    DirectX::XMVECTOR quat{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation)) };
+    math::v4a rot_quat;
+    DirectX::XMStoreFloat4A(&rot_quat, quat);
+    memcpy(&transform_info.rotation[0], &rot_quat.x, sizeof(transform_info.rotation));
+    memcpy(&transform_info.position[0], &position.x, sizeof(transform_info.position));
+
+    game_entity::entity_info entity_info{};
+    entity_info.transform = &transform_info;
+    game_entity::entity ntt{ game_entity::create(entity_info) };
+
+    auto id1 = _scene.add_model_instance(ntt, model_id);
+    _scene.add_material(id1, material_id);
+
+    auto floor = submesh::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/models/floor.obj" });
+    auto floor_vs = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/floor.vert.spv" }, shader_type::vertex);
+    auto floor_fs = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/floor.frag.spv" }, shader_type::pixel);
+    auto floor_material = materials::add({ material_type::opauqe, 0, {floor_vs, id::invalid_id, id::invalid_id, id::invalid_id, floor_fs, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
+    
+    transform::init_info transform_info1{};
+    math::v3 rotation1{ 0.f, 0.f, 0.f };
+    math::v3 position1{ 0.f, 0.f, 0.f };
+    DirectX::XMVECTOR quat1{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation1)) };
+    math::v4a rot_quat1;
+    DirectX::XMStoreFloat4A(&rot_quat1, quat1);
+    memcpy(&transform_info1.rotation[0], &rot_quat1.x, sizeof(transform_info1.rotation));
+    memcpy(&transform_info1.position[0], &position1.x, sizeof(transform_info1.position));
+
+    game_entity::entity_info entity_info1{};
+    entity_info1.transform = &transform_info1;
+    game_entity::entity ntt1{ game_entity::create(entity_info1) };
+
+    auto id2 = _scene.add_model_instance(ntt1, floor);
+    _scene.add_material(id2, floor_material);
     //_scene.createDescriptorSetLayout();
     _scene.createPipeline(_renderpass, _layout_and_pool.pipelineLayout);
     
-    _scene.createUniformBuffer(_window.width(), _window.height());
+    _scene.createUniformBuffer();
     
     //_scene.createDescriptorPool();
     _scene.createDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);

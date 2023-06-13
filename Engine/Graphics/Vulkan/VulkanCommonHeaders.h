@@ -111,9 +111,9 @@ struct Vertex
 
 struct InstanceData
 {
-    math::v3 translate{0.0f, 0.0f, 0.0f};
-    math::v3 rotate{0.0f, 0.0f, 0.0f};
-    math::v3 scale{1.0f, 1.0f, 1.0f};
+    math::v3 transform;
+    math::v3 rotate;
+    math::v3 scale;
 };
 
 struct UniformBufferObject

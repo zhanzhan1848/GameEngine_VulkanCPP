@@ -306,8 +306,8 @@ namespace primal::graphics::vulkan
 		VkViewport viewport;
 		viewport.x = 0.0f;
 		viewport.y = 0.0f;
-		viewport.width = _shadowmapping_dim;
-		viewport.height = _shadowmapping_dim;
+		viewport.width = (f32)_shadowmapping_dim;
+		viewport.height = (f32)_shadowmapping_dim;
 		viewport.minDepth = 0.f;
 		viewport.maxDepth = 1.f;
 		vkCmdSetViewport(cmd_buffer.cmd_buffer, 0, 1, &viewport);

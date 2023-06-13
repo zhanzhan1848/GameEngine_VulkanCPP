@@ -26,14 +26,14 @@ namespace primal::utl
 			resize(count, value);
 		}
 
-		/*template<typename it, std::enable_if_t<std::_Is_iterator_v<it>, int> = 0>
+		template<typename it, std::enable_if_t<std::_Is_iterator_v<it>, int> = 0>
 		constexpr explicit vector(it first, it last)
 		{
 			for (; first != last; ++first)
 			{
 				emplace_back(*first);
 			}
-		}*/
+		}
 
 		// Copy-constructor, Constructs by copying another vector. The items
 		// in the copied vector must be copyable

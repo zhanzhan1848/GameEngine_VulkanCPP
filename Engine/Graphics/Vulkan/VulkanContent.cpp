@@ -3,6 +3,7 @@
 #include "VulkanResources.h"
 #include "VulkanCore.h"
 #include "VulkanTexture.h"
+#include "Components/Transform.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "Content/stb_image.h"
 #include "Utilities/FreeList.h"
@@ -375,7 +376,7 @@ namespace primal::graphics::vulkan
 						_vertices.emplace_back(vertex);
 					}
 
-					_indices.emplace_back((u32)uniqueVertices[index]);
+					_indices.emplace_back((u16)uniqueVertices[index]);
 				}
 		}
 
@@ -422,7 +423,13 @@ namespace primal::graphics::vulkan
 
 		void vulkan_instance_model::create_instance_buffer()
 		{
-			size_t bufferSize = sizeof(InstanceData);
+			std::vector<InstanceData> datas;
+			//datas.resize(_model.getIndicesCount());
+			for(u32 i{0}; i < _model.getIndicesCount(); ++i)
+			{
+				datas.emplace_back(_instanceData);
+			}
+			size_t bufferSize = sizeof(InstanceData) * datas.size();
 
 			VkBuffer stagingBuffer;
 			VkDeviceMemory stagingBufferMemory;
@@ -430,7 +437,7 @@ namespace primal::graphics::vulkan
 
 			void* data;
 			vkMapMemory(core::logical_device(), stagingBufferMemory, 0, bufferSize, 0, &data);
-			memcpy(data, &_instanceData, sizeof(InstanceData));
+			memcpy(data, datas.data(), bufferSize);
 			vkUnmapMemory(core::logical_device(), stagingBufferMemory);
 
 			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, _instanceBuffer.buffer, _instanceBuffer.memory);
@@ -444,6 +451,15 @@ namespace primal::graphics::vulkan
 		vulkan_instance_model::vulkan_instance_model(id::id_type model_id) : _model{ get_model(model_id)}
 		{
 			_model.create_model_buffer();
+			create_instance_buffer();
+		}
+
+		vulkan_instance_model::vulkan_instance_model(game_entity::entity entity, id::id_type model_id) : _model{ get_model(model_id) }, _id{ entity.get_id() }
+		{
+			_model.create_model_buffer();
+			_instanceData.transform = entity.position();
+			_instanceData.rotate = { entity.rotation().x, entity.rotation().y, entity.rotation().z };
+			_instanceData.scale = entity.scale();
 			create_instance_buffer();
 		}
 
@@ -575,7 +591,7 @@ namespace primal::graphics::vulkan
 
 		id::id_type add(std::string path)
 		{
-			return _models.add(vulkan_model(path));
+			return _models.add(path);
 		}
 
 		void remove_model(id::id_type id)
@@ -593,28 +609,30 @@ namespace primal::graphics::vulkan
 	{
 		namespace
 		{
-			
+			utl::free_list<submesh::vulkan_instance_model>		instance_models;
 		}
 
 		vulkan_scene::~vulkan_scene()
 		{
-			for (auto& instance : _instance_models)
+			for (auto instance : _instance_ids)
 			{
-				instance.~vulkan_instance_model();
+				remove_model_instance(instance);
 			}
 			_shadowmap.~vulkan_shadowmapping();
 		}
 
-		void vulkan_scene::add_model_instance(id::id_type model_id)
+		id::id_type vulkan_scene::add_model_instance(game_entity::entity entity, id::id_type model_id)
 		{
-			// Use model_id in _models to create a instance model in scene
-			//submesh::vulkan_instance_model model(model_id);
-			_instance_models.emplace_back(model_id);
+			auto instance_id = instance_models.add(entity, model_id);
+			_instance_ids.emplace_back(instance_id);
+			return instance_id;
 		}
 
-		void vulkan_scene::remove_modeel_instance(id::id_type id)
+		void vulkan_scene::remove_model_instance(id::id_type id)
 		{
-			_instance_models.erase(id);
+			//_instance_models.erase(id);
+			_instance_ids.erase(id);
+			instance_models[id].~vulkan_instance_model();
 		}
 
 		void vulkan_scene::add_camera(camera_init_info info)
@@ -632,66 +650,59 @@ namespace primal::graphics::vulkan
 
 		void vulkan_scene::add_material(id::id_type model_id, id::id_type material_id)
 		{
-			_instance_models[0].add_material(material_id);
+			instance_models[model_id].add_material(material_id);
 		}
 
 		void vulkan_scene::remove_material(id::id_type model_id)
 		{
-			_instance_models[model_id].remove_material();
+			instance_models[model_id].remove_material();
 		}
 
-		void vulkan_scene::createUniformBuffer(u32 width, u32 height) {
+		void vulkan_scene::createUniformBuffer() {
 			VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 
 			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, _uniformBuffer.buffer, _uniformBuffer.memory);
 
-			//vkBindBufferMemory(core::logical_device(), _uniformBuffer.buffer, _uniformBuffer.memory, 0);
-
 			vkMapMemory(core::logical_device(), _uniformBuffer.memory, 0, bufferSize, 0, &_uniformBuffer.mapped);
-
-			//add_camera({ 128, graphics::camera::type::perspective, math::v3{0, 1, 0}, 1280, 720, 0.01, 10000 });
-
-			DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
-			//modelMatrix = DirectX::XMMatrixMultiply(DirectX::XMMatrixRotationY(DirectX::XM_PIDIV2), modelMatrix);
-			DirectX::XMStoreFloat4x4(&_ubo.model, modelMatrix);
-			DirectX::XMMATRIX viewMatrix = DirectX::XMMatrixLookAtLH({ 2, 2, 2 }, { 0, 0, 0 }, { 0, 0, 1 });
-			DirectX::XMStoreFloat4x4(&_ubo.view, viewMatrix);
-			DirectX::XMMATRIX projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, (f32)width / (f32)height, 0.01, 1000.0);
-			projectionMatrix.r[1].m128_f32[1] *= -1;
-			DirectX::XMStoreFloat4x4(&_ubo.projection, projectionMatrix);
-			memcpy(_uniformBuffer.mapped, &_ubo, sizeof(UniformBufferObject));
 		}
 
 		void vulkan_scene::createDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout)
 		{
-			for (auto& instance : _instance_models)
+			for (auto& instance : _instance_ids)
 			{
-				instance.createDescriptorSet(pool, layout);
-				_descriptorSets.emplace_back(instance.getDescriptorSet());
-				auto descriptorSet = instance.getDescriptorSet();
+				instance_models[instance].createDescriptorSet(pool, layout);
+				_descriptorSets.emplace_back(instance_models[instance].getDescriptorSet());
+				auto descriptorSet = instance_models[instance].getDescriptorSet();
+				std::vector<VkWriteDescriptorSet> descriptorWrites;
 
 				VkDescriptorBufferInfo bufferInfo;
 				bufferInfo.buffer = _uniformBuffer.buffer;
 				bufferInfo.offset = 0;
 				bufferInfo.range = sizeof(UniformBufferObject);
+				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo, nullptr));
 
-				VkDescriptorImageInfo imageInfo;
-				imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-				auto texture_id = materials::get_material(instance.getMaterialID()).getTextureIDS().font();
-				imageInfo.imageView = textures::get_texture(texture_id).getTexture().view;
-				imageInfo.sampler = textures::get_texture(texture_id).getTexture().sampler;
+				if (!materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().empty())
+				{
+					VkDescriptorImageInfo imageInfo;
+					imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+					auto texture_id = materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().font();
+					imageInfo.imageView = textures::get_texture(texture_id).getTexture().view;
+					imageInfo.sampler = textures::get_texture(texture_id).getTexture().sampler;
+					descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &imageInfo));
+				}
 
 				VkDescriptorImageInfo shadowInfo;
 				shadowInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 				shadowInfo.imageView = _shadowmap.getTexture().view;
 				shadowInfo.sampler = _shadowmap.getTexture().sampler;
+				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &shadowInfo));
 
-				std::vector<VkWriteDescriptorSet> descriptorWrites = {
-					descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo, nullptr),
-					//descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &modelMatrixInfo, nullptr),
-					descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &imageInfo),
-					descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &shadowInfo),
-				};
+				//std::vector<VkWriteDescriptorSet> descriptorWrites = {
+				//	descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo, nullptr),
+				//	//descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &modelMatrixInfo, nullptr),
+				//	descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &imageInfo),
+				//	descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &shadowInfo),
+				//};
 
 				vkUpdateDescriptorSets(core::logical_device(), static_cast<u32>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 			}
@@ -699,10 +710,10 @@ namespace primal::graphics::vulkan
 
 		void vulkan_scene::createPipeline(vulkan_renderpass render_pass, VkPipelineLayout layout)
 		{
-			for (auto& instance : _instance_models)
+			for (auto& instance : _instance_ids)
 			{
-				instance.createPipeline(layout, render_pass);
-				_pipelines.emplace_back(instance.getPipeline());
+				instance_models[instance].createPipeline(layout, render_pass);
+				_pipelines.emplace_back(instance_models[instance].getPipeline());
 			}
 		}
 
@@ -710,9 +721,9 @@ namespace primal::graphics::vulkan
 		{
 			_camera_ids.emplace_back(info.camera_id);
 			graphics::vulkan::camera::get(info.camera_id).update();
-			//DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
+			DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
 			//modelMatrix = DirectX::XMMatrixRotationZ(DirectX::XM_PIDIV2) * modelMatrix;
-			//DirectX::XMStoreFloat4x4(&_ubo.model, modelMatrix);
+			DirectX::XMStoreFloat4x4(&_ubo.model, modelMatrix);
 			DirectX::XMStoreFloat4x4(&_ubo.view, graphics::vulkan::camera::get(info.camera_id).view());
 			DirectX::XMStoreFloat4x4(&_ubo.projection, graphics::vulkan::camera::get(info.camera_id).projection());
 			memcpy(_uniformBuffer.mapped, &_ubo, sizeof(UniformBufferObject));
@@ -721,34 +732,22 @@ namespace primal::graphics::vulkan
 		void vulkan_scene::flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)
 		{
 			
-			for (auto& instance : _instance_models)
+			for (auto& instance : _instance_ids)
 			{
-				auto descriptorSet = instance.getDescriptorSet();
+				auto descriptorSet = instance_models[instance].getDescriptorSet();
 				vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
-				vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, instance.getPipeline());
-				instance.flushBuffer(cmd_buffer);
-				instance.draw(cmd_buffer);
+				vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, instance_models[instance].getPipeline());
+				instance_models[instance].flushBuffer(cmd_buffer);
+				instance_models[instance].draw(cmd_buffer);
 			}
 		}
 		void vulkan_scene::drawGBuffer(vulkan_cmd_buffer cmd_buffer)
 		{
-			for (auto& instance : _instance_models)
+			for (auto& instance : _instance_ids)
 			{
-				instance.flushBuffer(cmd_buffer);
-				instance.draw(cmd_buffer);
+				instance_models[instance].flushBuffer(cmd_buffer);
+				instance_models[instance].draw(cmd_buffer);
 			}
-		}
-		void vulkan_scene::updateUniformBuffer(u32 width, u32 height)
-		{
-			DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
-			//modelMatrix = DirectX::XMMatrixMultiply(DirectX::XMMatrixRotationY(DirectX::XM_PIDIV2), modelMatrix);
-			DirectX::XMStoreFloat4x4(&_ubo.model, modelMatrix);
-			DirectX::XMMATRIX viewMatrix = DirectX::XMMatrixLookAtLH({ 2, 2, 2 }, { 0, 0, 0 }, { 0, 0, 1 });
-			DirectX::XMStoreFloat4x4(&_ubo.view, viewMatrix);
-			DirectX::XMMATRIX projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, (f32)width / (f32)height, 0.01, 1000.0);
-			projectionMatrix.r[1].m128_f32[1] *= -1;
-			DirectX::XMStoreFloat4x4(&_ubo.projection, projectionMatrix);
-			memcpy(_uniformBuffer.mapped, &_ubo, sizeof(UniformBufferObject));
 		}
 		
 	} // primai::graphics::vulkan::scene

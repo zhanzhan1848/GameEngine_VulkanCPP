@@ -149,7 +149,7 @@ namespace primal::graphics::vulkan
 
 			explicit vulkan_instance_model(id::id_type model_id);
 
-			explicit vulkan_instance_model(game_entity::entity_id id);
+			explicit vulkan_instance_model(game_entity::entity entity, id::id_type model_id);
 
 			~vulkan_instance_model();
 
@@ -179,12 +179,22 @@ namespace primal::graphics::vulkan
 			// TODO: Make a configuration to bind id
 			void getVertexInputAttributeDescriptor() 
 			{
-				for (u32 i{ 0 }; i < ((sizeof(Vertex) + sizeof(InstanceData)) / sizeof(math::v3)); ++i)
+				for (u32 i{ 0 }; i < (sizeof(Vertex) + sizeof(InstanceData)) / sizeof(math::v3); ++i)
 				{
-					_attributeDescriptions.emplace_back([i]() {
-						VkVertexInputAttributeDescription attributeDescriptions{ i, (i < sizeof(Vertex) / sizeof(math::v3)) ? 0 : 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
-					return attributeDescriptions;
-					}());
+					if (i < sizeof(Vertex) / sizeof(math::v3))
+					{
+						_attributeDescriptions.emplace_back([i]() {
+							VkVertexInputAttributeDescription attributeDescriptions{ i, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
+						return attributeDescriptions;
+						}());
+					}
+					else
+					{
+						_attributeDescriptions.emplace_back([i]() {
+							VkVertexInputAttributeDescription attributeDescriptions{ i, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * (i - 3) };
+						return attributeDescriptions;
+						}());
+					}
 				}
 			}
 
@@ -205,6 +215,8 @@ namespace primal::graphics::vulkan
 			[[nodiscard]] VkPipeline& getPipeline() { return _pipeline; }
 			[[nodiscard]] utl::vector<VkVertexInputBindingDescription> vertexInputBinding() { return _bindingDescription; }
 			[[nodiscard]] utl::vector<VkVertexInputAttributeDescription> vertexinputAttribute() { return _attributeDescriptions; }
+			[[nodiscard]] constexpr InstanceData getInstanceData() const { return _instanceData; }
+			[[nodiscard]] constexpr uniformBuffer getInstanceBuffer() const { return _instanceBuffer; }
 
 			/// <summary>
 			//  ! Transform component
@@ -226,7 +238,7 @@ namespace primal::graphics::vulkan
 		private:
 			game_entity::entity_id									_id;
 			vulkan_model											_model;
-			baseBuffer												_instanceBuffer;
+			uniformBuffer											_instanceBuffer;
 			id::id_type												_material_id;
 			VkDescriptorSet											_descriptorSet;
 			utl::vector<VkVertexInputBindingDescription>			_bindingDescription;
@@ -254,19 +266,18 @@ namespace primal::graphics::vulkan
 
 			~vulkan_scene();
 
-			void add_model_instance(id::id_type model_id);
-			void remove_modeel_instance(id::id_type id);
+			id::id_type add_model_instance(game_entity::entity entity, id::id_type model_id);
+			void remove_model_instance(id::id_type id);
 			void add_camera(camera_init_info info);
 			void remove_camera(id::id_type id);
 			void add_material(id::id_type model_id, id::id_type material_id);
 			void remove_material(id::id_type model_id);
 
-			void createUniformBuffer(u32 width, u32 height);
+			void createUniformBuffer();
 			//void createDescriptorPool();
 			//void createDescriptorSetLayout();
 			void createDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout);
 			void createPipeline(vulkan_renderpass render_pass, VkPipelineLayout layout);
-			void updateUniformBuffer(u32 width, u32 height);
 
 			void updateView(frame_info info);
 			void flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout);
@@ -275,7 +286,7 @@ namespace primal::graphics::vulkan
 			[[nodiscard]] constexpr vulkan_shadowmapping& getShadowmap() { return _shadowmap; }
 
 		private:
-			utl::vector<submesh::vulkan_instance_model>			_instance_models;
+			utl::vector<id::id_type>							_instance_ids;
 			utl::vector<camera_id>								_camera_ids;
 			utl::vector<VkPipeline>								_pipelines;
 			utl::vector<VkDescriptorSet>						_descriptorSets;

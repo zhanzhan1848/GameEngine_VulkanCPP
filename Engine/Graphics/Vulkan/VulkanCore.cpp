@@ -117,7 +117,6 @@ public:
             if (!surface->recreate_swapchain())
                 return false;
 
-            surface->getScene().updateUniformBuffer(surface->width(), surface->height());
             MESSAGE("Resized");
             return false;
         }
