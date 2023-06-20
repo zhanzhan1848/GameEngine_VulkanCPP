@@ -113,12 +113,14 @@
   <ItemGroup>
     <ClInclude Include="FbxImporter.h" />
     <ClInclude Include="Geometry.h" />
+    <ClInclude Include="ObjImporter.h" />
     <ClInclude Include="PrimitiveMesh.h" />
     <ClInclude Include="ToolsCommon.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="FbxImporter.cpp" />
     <ClCompile Include="Geometry.cpp" />
+    <ClCompile Include="ObjImporter.cpp" />
     <ClCompile Include="PrimitiveMesh.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

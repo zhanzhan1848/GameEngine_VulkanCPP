@@ -366,7 +366,7 @@ namespace primal::graphics::vulkan
 
 					vertex.texCoord = math::v3{
 						attrib.texcoords[2 * index.texcoord_index + 0],
-						1.0f - attrib.texcoords[2 * index.texcoord_index + 1],
+						1.0f - attrib.texcoords[2 * index.texcoord_index + 1], // 1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
 						0.0f
 					};
 
@@ -485,7 +485,7 @@ namespace primal::graphics::vulkan
 		void vulkan_instance_model::createDescriptorSet(VkDescriptorPool pool, VkDescriptorSetLayout layout)
 		{
 			VkDescriptorSetAllocateInfo allocInfo;
-			utl::vector<VkWriteDescriptorSet> writeDescriptors;
+			// utl::vector<VkWriteDescriptorSet> writeDescriptors;
 
 			allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 			allocInfo.pNext = VK_NULL_HANDLE;
@@ -582,10 +582,10 @@ namespace primal::graphics::vulkan
 			VkResult result{ VK_SUCCESS };
 			VkCall(result = vkCreateGraphicsPipelines(core::logical_device(), VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &_pipeline), "Failed to create graphics pipelines...");
 
-			for (auto shaderModule : _shaderStages)
-			{
-				vkDestroyShaderModule(core::logical_device(), shaderModule.module, nullptr);
-			}
+			//for (auto shaderModule : _shaderStages)
+			//{
+			//	vkDestroyShaderModule(core::logical_device(), shaderModule.module, nullptr);
+			//}
 
 		}
 
@@ -659,7 +659,7 @@ namespace primal::graphics::vulkan
 		}
 
 		void vulkan_scene::createUniformBuffer() {
-			VkDeviceSize bufferSize = sizeof(UniformBufferObject);
+			VkDeviceSize bufferSize = sizeof(UniformBufferObjectPlus);
 
 			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, _uniformBuffer.buffer, _uniformBuffer.memory);
 
@@ -678,8 +678,8 @@ namespace primal::graphics::vulkan
 				VkDescriptorBufferInfo bufferInfo;
 				bufferInfo.buffer = _uniformBuffer.buffer;
 				bufferInfo.offset = 0;
-				bufferInfo.range = sizeof(UniformBufferObject);
-				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo, nullptr));
+				bufferInfo.range = sizeof(UniformBufferObjectPlus);
+				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo));
 
 				if (!materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().empty())
 				{
@@ -688,21 +688,14 @@ namespace primal::graphics::vulkan
 					auto texture_id = materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().font();
 					imageInfo.imageView = textures::get_texture(texture_id).getTexture().view;
 					imageInfo.sampler = textures::get_texture(texture_id).getTexture().sampler;
-					descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &imageInfo));
+					descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo));
 				}
 
 				VkDescriptorImageInfo shadowInfo;
 				shadowInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 				shadowInfo.imageView = _shadowmap.getTexture().view;
 				shadowInfo.sampler = _shadowmap.getTexture().sampler;
-				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &shadowInfo));
-
-				//std::vector<VkWriteDescriptorSet> descriptorWrites = {
-				//	descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo, nullptr),
-				//	//descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &modelMatrixInfo, nullptr),
-				//	descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &imageInfo),
-				//	descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &shadowInfo),
-				//};
+				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &shadowInfo));
 
 				vkUpdateDescriptorSets(core::logical_device(), static_cast<u32>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 			}
@@ -722,11 +715,16 @@ namespace primal::graphics::vulkan
 			_camera_ids.emplace_back(info.camera_id);
 			graphics::vulkan::camera::get(info.camera_id).update();
 			DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
-			//modelMatrix = DirectX::XMMatrixRotationZ(DirectX::XM_PIDIV2) * modelMatrix;
 			DirectX::XMStoreFloat4x4(&_ubo.model, modelMatrix);
 			DirectX::XMStoreFloat4x4(&_ubo.view, graphics::vulkan::camera::get(info.camera_id).view());
 			DirectX::XMStoreFloat4x4(&_ubo.projection, graphics::vulkan::camera::get(info.camera_id).projection());
-			memcpy(_uniformBuffer.mapped, &_ubo, sizeof(UniformBufferObject));
+			_ubo.lightModel = _shadowmap.getDepthMVP().model;
+			_ubo.lightView = _shadowmap.getDepthMVP().view;
+			_ubo.lightProjection = _shadowmap.getDepthMVP().projection;
+			_ubo.lightPos = _shadowmap.lightPos();
+			_ubo.lightNear = _shadowmap.lightNear();
+			_ubo.lightFar = _shadowmap.lightFar();
+			memcpy(_uniformBuffer.mapped, &_ubo, sizeof(UniformBufferObjectPlus));
 		}
 
 		void vulkan_scene::flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)

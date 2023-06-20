@@ -31,7 +31,6 @@ namespace primal::graphics::vulkan::shaders
 			VkShaderStageFlagBits stage;
 			if (type == shader_type::vertex) stage = VK_SHADER_STAGE_VERTEX_BIT;
 			if (type == shader_type::pixel) stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-			else stage = VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
 
 			VkShaderModule shaderModule;
 			VkShaderModuleCreateInfo moduleCreateInfo;

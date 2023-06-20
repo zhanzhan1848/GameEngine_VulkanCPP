@@ -1,10 +1,13 @@
 #version 450
 
 layout(location = 0) in vec3 inPosition;
+layout(location = 1) in vec3 inTexcoord;
 
 layout(location = 3) in vec3 transform;
 layout(location = 4) in vec3 rotate;
 layout(location = 5) in vec3 scale;
+
+layout(location = 0) out vec2 fragTexCoord;
 
 layout(binding = 0) uniform UniformBufferObject{
     mat4 model;
@@ -55,4 +58,6 @@ void main() {
     vec4 pos = vec4((locPos.xyz * scale) + transform, 1.0);
 
     gl_Position = ubo.proj * ubo.view * gRotMat * pos;
+    //gl_Position = -gl_Position;
+    fragTexCoord = inTexcoord.xy;
 }

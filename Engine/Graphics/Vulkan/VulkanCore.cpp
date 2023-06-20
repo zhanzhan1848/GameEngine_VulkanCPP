@@ -137,7 +137,7 @@ public:
         // Begin recording commands
         vulkan_cmd_buffer& cmd_buffer{ _cmd_buffers[frame] };
         reset_cmd_buffer(cmd_buffer);
-        begin_cmd_buffer(cmd_buffer, false, false, false);
+        begin_cmd_buffer(cmd_buffer, true, false, false);
 
         surface->getScene().getShadowmap().runRenderpass(cmd_buffer, surface);
 
@@ -159,6 +159,8 @@ public:
         vkCmdSetScissor(cmd_buffer.cmd_buffer, 0, 1, &scissor);
 
         surface->set_renderpass_render_area({ 0, 0, surface->width(), surface->height() });
+        surface->set_renderpass_depth(1.0f);
+        surface->set_renderpass_stencil(0);
         surface->set_renderpass_clear_color({ 0.0f, 0.0f, 0.0f, 0.0f });
         renderpass::begin_renderpass(cmd_buffer.cmd_buffer, cmd_buffer.cmd_state, surface->renderpass(), surface->current_framebuffer());
 
@@ -193,7 +195,7 @@ public:
         info.pSignalSemaphores = &_render_finished[frame];
         info.waitSemaphoreCount = 1;
         info.pWaitSemaphores = &_image_available[frame];
-        VkPipelineStageFlags flags[1]{ VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+        VkPipelineStageFlags flags[3]{ VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT ,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         info.pWaitDstStageMask = flags;
 
         VkResult result{ VK_SUCCESS };

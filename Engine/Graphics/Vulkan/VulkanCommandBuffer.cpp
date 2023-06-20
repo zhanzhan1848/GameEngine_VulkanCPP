@@ -38,7 +38,9 @@ void
 begin_cmd_buffer(vulkan_cmd_buffer& cmd_buffer, bool single_use, bool renderpass_continue, bool simultaneous_use)
 {
     VkCommandBufferBeginInfo info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    info.pNext = nullptr;
     info.flags = 0;
+    info.pInheritanceInfo = nullptr;
 
     // NOTE: Single use cannot be used more than once, and will be reset and recorded again between each submission
     //		 Renderpass continue indicates it is a secondary buffer entirely inside a render pass. It is ignored for primary buffers

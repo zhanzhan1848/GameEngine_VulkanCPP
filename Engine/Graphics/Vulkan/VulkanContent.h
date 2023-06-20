@@ -284,13 +284,14 @@ namespace primal::graphics::vulkan
 			void drawGBuffer(vulkan_cmd_buffer cmd_buffer);
 
 			[[nodiscard]] constexpr vulkan_shadowmapping& getShadowmap() { return _shadowmap; }
+			[[nodiscard]] constexpr u64 const getDescriptorSetsCount() const { return _instance_ids.size(); }
 
 		private:
 			utl::vector<id::id_type>							_instance_ids;
 			utl::vector<camera_id>								_camera_ids;
 			utl::vector<VkPipeline>								_pipelines;
 			utl::vector<VkDescriptorSet>						_descriptorSets;
-			UniformBufferObject									_ubo;
+			UniformBufferObjectPlus								_ubo;
 			uniformBuffer										_uniformBuffer;
 			vulkan_shadowmapping								_shadowmap;
 		};

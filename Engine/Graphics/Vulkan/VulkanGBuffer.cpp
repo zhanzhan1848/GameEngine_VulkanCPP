@@ -2,6 +2,10 @@
 #include "VulkanHelpers.h"
 #include "VulkanCore.h"
 #include "VulkanSurface.h"
+#include "VulkanCamera.h"
+
+#include "EngineAPI/GameEntity.h"
+#include "Components/Transform.h"
 
 #include <array>
 
@@ -9,7 +13,21 @@ namespace primal::graphics::vulkan
 {
 	namespace
 	{
-	
+		game_entity::entity create_one_game_entity(math::v3 position, math::v3 rotation)
+		{
+			transform::init_info transform_info{};
+			DirectX::XMVECTOR quat{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation)) };
+			math::v4a rot_quat;
+			DirectX::XMStoreFloat4A(&rot_quat, quat);
+			memcpy(&transform_info.rotation[0], &rot_quat.x, sizeof(transform_info.rotation));
+			memcpy(&transform_info.position[0], &position.x, sizeof(transform_info.position));
+
+			game_entity::entity_info entity_info{};
+			entity_info.transform = &transform_info;
+			game_entity::entity ntt{ game_entity::create(entity_info) };
+			assert(ntt.is_valid());
+			return ntt;
+		}
 	} // anonymous namespace
 
 
@@ -41,14 +59,23 @@ namespace primal::graphics::vulkan
 
 		vkMapMemory(core::logical_device(), _uniformbuffer.memory, 0, bufferSize, 0, &_uniformbuffer.mapped);
 
+
+		game_entity::entity entity1{ create_one_game_entity({0.f, 5.f, 0.f}, {1.5f, 0.f, -0.5f})}; // {1.5f, 0.f, -0.5f}
+		graphics::camera cam{ graphics::create_camera(graphics::perspective_camera_init_info{ entity1.get_id() }) };
+		cam.field_of_view(0.75f);
+		cam.aspect_ratio(1.0f);
+		camera::get(cam.get_id()).update();
+		_lightPos = entity1.position();
 		//add_camera({ 128, graphics::camera::type::perspective, math::v3{0, 1, 0}, 1280, 720, 0.01, 10000 });
 		DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
 		//modelMatrix = DirectX::XMMatrixMultiply(DirectX::XMMatrixRotationY(DirectX::XM_PIDIV2), modelMatrix);
 		DirectX::XMStoreFloat4x4(&_ubo.model, modelMatrix);
-		DirectX::XMMATRIX viewMatrix = DirectX::XMMatrixLookAtLH({ 0.f, 5.f, 0.f }, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 1.f });
-		DirectX::XMStoreFloat4x4(&_ubo.view, viewMatrix);
-		DirectX::XMMATRIX projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, (f32)_shadowmapping_dim / (f32)_shadowmapping_dim, 0.01, 1000.0);
-		DirectX::XMStoreFloat4x4(&_ubo.projection, projectionMatrix);
+		DirectX::XMMATRIX viewMatrix = DirectX::XMMatrixLookAtLH({ 0.f, 3.f, 0.f }, { 0.f, 0.f, 0.f }, { 1.f, 0.f, 0.f });
+		//DirectX::XMStoreFloat4x4(&_ubo.view, cam.view());
+		_ubo.view = cam.view();
+		DirectX::XMMATRIX projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, (f32)_shadowmapping_dim / (f32)_shadowmapping_dim, _near, _far);
+		//DirectX::XMStoreFloat4x4(&_ubo.projection, cam.projection());
+		_ubo.projection = cam.projection();
 		memcpy(_uniformbuffer.mapped, &_ubo, sizeof(UniformBufferObject));
 	}
 
@@ -113,8 +140,8 @@ namespace primal::graphics::vulkan
 		info.dependencyCount = static_cast<u32>(dependencies.size());
 		info.pDependencies = dependencies.data();
 
-		_renderpass.clear_color = { 0.0f, 0.0f, 0.0f, 0.0f };
-		_renderpass.render_area = { _shadowmapping_dim, 0, 0, _shadowmapping_dim };
+		_renderpass.clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+		_renderpass.render_area = { 0, 0, _shadowmapping_dim, _shadowmapping_dim };
 		_renderpass.depth = 1.f;
 		_renderpass.stencil = 0;
 		VkResult result{ VK_SUCCESS };
@@ -135,6 +162,7 @@ namespace primal::graphics::vulkan
 		image.samples = VK_SAMPLE_COUNT_1_BIT;
 		image.tiling = VK_IMAGE_TILING_OPTIMAL;
 		image.format = VK_FORMAT_D16_UNORM;
+		image.flags = 0;
 		image.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; // ! VK_IMAGE_USAGE_SAMPLED_BIT use to sample directly from the depth attachment for shadow mapping
 		VkResult result{ VK_SUCCESS };
 		VkCall(result = vkCreateImage(core::logical_device(), &image, nullptr, &_image.image), "Failed to create GBuffer(shadow mapping) image...");
@@ -154,7 +182,6 @@ namespace primal::graphics::vulkan
 		imageView.pNext = nullptr;
 		imageView.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		imageView.format = VK_FORMAT_D16_UNORM;
-		imageView.subresourceRange = {};
 		imageView.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 		imageView.subresourceRange.baseMipLevel = 0;
 		imageView.subresourceRange.levelCount = 1;
@@ -169,11 +196,14 @@ namespace primal::graphics::vulkan
 		VkFilter filter = formatIsFilterable(core::physical_device(), VK_FORMAT_D16_UNORM, VK_IMAGE_TILING_OPTIMAL) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
 		VkSamplerCreateInfo sampler{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
 		sampler.pNext = nullptr;
-		sampler.magFilter = filter;
-		sampler.minFilter = filter;
+		sampler.magFilter = VK_FILTER_LINEAR;
+		sampler.minFilter = VK_FILTER_LINEAR;
 		sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-		sampler.addressModeW = sampler.addressModeV = sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		sampler.addressModeV = sampler.addressModeU;
+		sampler.addressModeW = sampler.addressModeU;
 		sampler.mipLodBias = 0.f;
+		sampler.maxAnisotropy = 1.f;
 		sampler.minLod = 0.f;
 		sampler.maxLod = 1.f;
 		sampler.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
@@ -188,8 +218,8 @@ namespace primal::graphics::vulkan
 		framebuffer.renderPass = _renderpass.render_pass;
 		framebuffer.attachmentCount = 1;
 		framebuffer.pAttachments = &_image.view;
-		framebuffer.width = _image.width;
-		framebuffer.height = _image.height;
+		framebuffer.width = _shadowmapping_dim;
+		framebuffer.height = _shadowmapping_dim;
 		framebuffer.layers = 1;
 		result = VK_SUCCESS;
 		VkCall(result = vkCreateFramebuffer(core::logical_device(), &framebuffer, nullptr, &_framebuffer.framebuffer), "Failed to create GBuffer(shadow mapping) framebuffer...");
@@ -217,21 +247,21 @@ namespace primal::graphics::vulkan
 
 
 		std::vector<VkWriteDescriptorSet> descriptorWrites = {
-			descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, _descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo, nullptr),
+			descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, _descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo),
 		};
 
 		vkUpdateDescriptorSets(core::logical_device(), static_cast<u32>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 	}
 
-	void vulkan_shadowmapping::setupPipeline(VkPipelineLayout layout, vulkan_framebuffer framebuffer)
+	void vulkan_shadowmapping::setupPipeline(VkPipelineLayout layout)
 	{
 		VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = descriptor::pipelineInputAssemblyStateCreate(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, VK_FALSE);
 		VkPipelineViewportStateCreateInfo viewportState = descriptor::pipelineViewportStateCreate(1, 1);
-		VkPipelineRasterizationStateCreateInfo rasterizationState = descriptor::pipelineRasterizationStateCreate(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+		VkPipelineRasterizationStateCreateInfo rasterizationState = descriptor::pipelineRasterizationStateCreate(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, 0);
 		rasterizationState.depthBiasEnable = VK_TRUE;
 		VkPipelineMultisampleStateCreateInfo multisampleState = descriptor::pipelineMultisampleStateCreate(VK_SAMPLE_COUNT_1_BIT);
-		VkPipelineColorBlendAttachmentState blendAttachmentState = descriptor::pipelineColorBlendAttachmentState(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT, VK_FALSE);
-		VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(1, blendAttachmentState);
+		VkPipelineColorBlendAttachmentState blendAttachmentState = descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE);
+		VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(0, blendAttachmentState);
 
 		std::vector<VkDynamicState> dynamicStateEnables{ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS };
 		VkPipelineDynamicStateCreateInfo dynamicState = descriptor::pipelineDynamicStateCreate(dynamicStateEnables);
@@ -242,11 +272,28 @@ namespace primal::graphics::vulkan
 			VkVertexInputBindingDescription bBind{ 0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX };
 		return bBind;
 		}());
-		utl::vector<VkVertexInputAttributeDescription>			attributeDescriptions;
-		attributeDescriptions.emplace_back([]() {
-			VkVertexInputAttributeDescription attributeDescriptions{ 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
-		return attributeDescriptions;
+		bindingDescription.emplace_back([]() {
+			VkVertexInputBindingDescription bBind{ 1, sizeof(InstanceData), VK_VERTEX_INPUT_RATE_VERTEX };
+		return bBind;
 		}());
+		utl::vector<VkVertexInputAttributeDescription>			attributeDescriptions;
+		for (u32 i{ 0 }; i < (sizeof(Vertex) + sizeof(InstanceData)) / sizeof(math::v3); ++i)
+		{
+			if (i < sizeof(Vertex) / sizeof(math::v3))
+			{
+				attributeDescriptions.emplace_back([i]() {
+					VkVertexInputAttributeDescription attributeDescriptions{ i, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
+				return attributeDescriptions;
+				}());
+			}
+			else
+			{
+				attributeDescriptions.emplace_back([i]() {
+					VkVertexInputAttributeDescription attributeDescriptions{ i, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * (i - 3) };
+				return attributeDescriptions;
+				}());
+			}
+		}
 
 		VkPipelineVertexInputStateCreateInfo vertexInputInfo;
 		vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -259,6 +306,8 @@ namespace primal::graphics::vulkan
 
 		_shader.loadFile(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/shadowmapping.vert.spv" }, shader_type::vertex);
 		auto stage = _shader.getShaderStage();
+
+		rasterizationState.depthBiasEnable = VK_TRUE;
 
 		VkGraphicsPipelineCreateInfo pipelineCI;
 		pipelineCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -273,7 +322,7 @@ namespace primal::graphics::vulkan
 		pipelineCI.pRasterizationState = &rasterizationState;
 		pipelineCI.pMultisampleState = &multisampleState;
 		pipelineCI.pDepthStencilState = &depthStencilState;
-		pipelineCI.pColorBlendState = &colorBlendState;
+		pipelineCI.pColorBlendState = nullptr;
 		pipelineCI.pDynamicState = &dynamicState;
 		pipelineCI.layout = layout;
 		pipelineCI.renderPass = _renderpass.render_pass;
@@ -290,6 +339,7 @@ namespace primal::graphics::vulkan
 	void vulkan_shadowmapping::runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface* surface)
 	{
 		VkClearValue clearValue;
+		//clearValue.color = { 0.f, 0.f, 0.f, 0.f };
 		clearValue.depthStencil = { 1.f, 0 };
 
 		VkRenderPassBeginInfo info{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
@@ -300,8 +350,6 @@ namespace primal::graphics::vulkan
 		info.renderArea.extent.height = _shadowmapping_dim;
 		info.clearValueCount = 1;
 		info.pClearValues = &clearValue;
-
-		vkCmdBeginRenderPass(cmd_buffer.cmd_buffer, &info, VK_SUBPASS_CONTENTS_INLINE);
 
 		VkViewport viewport;
 		viewport.x = 0.0f;
@@ -319,10 +367,12 @@ namespace primal::graphics::vulkan
 		scissor.offset.y = 0;
 		vkCmdSetScissor(cmd_buffer.cmd_buffer, 0, 1, &scissor);
 
-		vkCmdSetDepthBias(cmd_buffer.cmd_buffer, 1.25f, 0.f, 1.75f);
+		vkCmdBeginRenderPass(cmd_buffer.cmd_buffer, &info, VK_SUBPASS_CONTENTS_INLINE);
 
-		vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, _pipeline);
+		vkCmdSetDepthBias(cmd_buffer.cmd_buffer, 0.25f, 0.f, 1.25f);
+
 		vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, surface->layout_and_pool().pipelineLayout, 0, 1, &_descriptorSet, 0, nullptr);
+		vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, _pipeline);
 
 		surface->getScene().drawGBuffer(cmd_buffer);
 

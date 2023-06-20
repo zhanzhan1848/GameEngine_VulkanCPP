@@ -5,10 +5,12 @@
     <ClInclude Include="PrimitiveMesh.h" />
     <ClInclude Include="Geometry.h" />
     <ClInclude Include="FbxImporter.h" />
+    <ClInclude Include="ObjImporter.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="PrimitiveMesh.cpp" />
     <ClCompile Include="Geometry.cpp" />
     <ClCompile Include="FbxImporter.cpp" />
+    <ClCompile Include="ObjImporter.cpp" />
   </ItemGroup>
 </Project>

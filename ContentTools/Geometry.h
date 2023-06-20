@@ -161,7 +161,7 @@ namespace primal::tools {
 		u8										calculate_tangents;
 		u8										reverse_handedness;
 		u8										import_embeded_textures;
-		u8										imprt_animations;
+		u8										import_animations;
 	};
 
 	struct  scene_data

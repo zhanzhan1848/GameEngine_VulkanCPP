@@ -210,7 +210,7 @@ void create_camera_surface(camera_surface& surface, platform::window_init_info i
 {
 	surface.surface.window = platform::create_window(&info);
 	surface.surface.surface = graphics::create_surface(surface.surface.window);
-	surface.entity = create_one_game_entity({ 0.5f, 0.f, 0.0f }, { 0.f, 0.5f, 0.f }, "camera_script");
+	surface.entity = create_one_game_entity({ -3.f, 0.f, -3.0f }, { 0.0f, 0.0f, 1.0f }, "camera_script");
 	surface.camera = graphics::create_camera(graphics::perspective_camera_init_info{ surface.entity.get_id() });
 	surface.camera.aspect_ratio((f32)surface.surface.window.width() / surface.surface.window.height());
 }

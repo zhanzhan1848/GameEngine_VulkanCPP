@@ -25,8 +25,7 @@ namespace primal::graphics::vulkan
 			VkDescriptorSet& set,
 			u32 binding,
 			VkDescriptorType dType,
-			VkDescriptorBufferInfo* buffer,
-			VkDescriptorImageInfo* image)
+			VkDescriptorBufferInfo* buffer)
 		{
 			VkWriteDescriptorSet descriptorWrite;
 			descriptorWrite.sType = type;
@@ -37,6 +36,22 @@ namespace primal::graphics::vulkan
 			descriptorWrite.descriptorCount = 1;
 			descriptorWrite.descriptorType = dType;
 			descriptorWrite.pBufferInfo = buffer;
+			descriptorWrite.pImageInfo = nullptr;
+			descriptorWrite.pTexelBufferView = nullptr;
+			return descriptorWrite;
+		}
+
+		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet & set, u32 binding, VkDescriptorType dType, VkDescriptorImageInfo * image)
+		{
+			VkWriteDescriptorSet descriptorWrite;
+			descriptorWrite.sType = type;
+			descriptorWrite.pNext = VK_NULL_HANDLE;
+			descriptorWrite.dstSet = set;
+			descriptorWrite.dstBinding = binding;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.descriptorType = dType;
+			descriptorWrite.pBufferInfo = nullptr;
 			descriptorWrite.pImageInfo = image;
 			descriptorWrite.pTexelBufferView = nullptr;
 			return descriptorWrite;
@@ -48,7 +63,7 @@ namespace primal::graphics::vulkan
 			u32 binding,
 			VkDescriptorType dType,
 			VkDescriptorBufferInfo* buffer,
-			VkDescriptorImageInfo* image)
+			VkDescriptorImageInfo * image)
 		{
 			VkWriteDescriptorSet descriptorWrite;
 			descriptorWrite.sType = type;
@@ -318,6 +333,7 @@ namespace primal::graphics::vulkan
 			pipelineDepthStencilStateCreateInfo.depthBoundsTestEnable = depthBoundsTest;
 			pipelineDepthStencilStateCreateInfo.stencilTestEnable = stencilTest;
 			pipelineDepthStencilStateCreateInfo.back = {};
+			pipelineDepthStencilStateCreateInfo.back.compareOp = VK_COMPARE_OP_ALWAYS;
 			pipelineDepthStencilStateCreateInfo.front = {};
 			return pipelineDepthStencilStateCreateInfo;
 		}

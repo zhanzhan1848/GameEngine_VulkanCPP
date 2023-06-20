@@ -8,7 +8,8 @@ namespace primal::graphics::vulkan
 	namespace descriptor
 	{
 		VkDescriptorPoolSize descriptorPoolSize(VkDescriptorType type, u32 descriptorCount);
-		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, VkDescriptorBufferInfo * buffer, VkDescriptorImageInfo * image);
+		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, VkDescriptorBufferInfo * buffer);
+		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, VkDescriptorImageInfo * image);
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, utl::vector<VkDescriptorSet>& sets, u32 num, u32 binding, VkDescriptorType dType, VkDescriptorBufferInfo * buffer, VkDescriptorImageInfo * image);
 		VkDescriptorPoolCreateInfo descriptorPoolCreate(u32 poolSizeCount, VkDescriptorPoolSize * pPoolSizes, u32 maxSets);
 		VkDescriptorPoolCreateInfo descriptorPoolCreate(const std::vector<VkDescriptorPoolSize>& poolSizes, u32 maxSets);

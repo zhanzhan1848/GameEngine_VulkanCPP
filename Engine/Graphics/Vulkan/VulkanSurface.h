@@ -40,7 +40,7 @@ struct vulkan_layout_and_pool
     VkDescriptorPool									descriptorPool;
     VkPipelineLayout									pipelineLayout;
 
-    void createDescriptorPool()
+    void createDescriptorPool(u64 count)
     {
         std::vector<VkDescriptorPoolSize> poolSize = {
             descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count)),
@@ -53,7 +53,7 @@ struct vulkan_layout_and_pool
         poolInfo.flags = 0;
         poolInfo.poolSizeCount = static_cast<u32>(poolSize.size());
         poolInfo.pPoolSizes = poolSize.data();
-        poolInfo.maxSets = static_cast<u32>(frame_buffer_count);
+        poolInfo.maxSets = static_cast<u64>(frame_buffer_count) + count;
 
         VkResult result{ VK_SUCCESS };
         VkCall(result = vkCreateDescriptorPool(core::logical_device(), &poolInfo, nullptr, &descriptorPool), "Failed to create descriptor pool...");
@@ -62,7 +62,7 @@ struct vulkan_layout_and_pool
     void createDescriptorSetLayout()
     {
         std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings{
-            descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_VERTEX_BIT),
+            descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT),
             descriptor::descriptorSetLayoutBinding(1, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
             descriptor::descriptorSetLayoutBinding(2, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
         };
@@ -102,6 +102,8 @@ public:
     bool next_image_index(VkSemaphore image_available, VkFence fence, u64 timeout);
     constexpr void set_renderpass_render_area(math::u32v4 render_area) { _renderpass.render_area = render_area; }
     constexpr void set_renderpass_clear_color(math::v4 clear_color) { _renderpass.clear_color = clear_color; }
+    constexpr void set_renderpass_depth(f32 depth) { _renderpass.depth = depth; }
+    constexpr void set_renderpass_stencil(u32 stencil) { _renderpass.stencil = stencil; }
 
     [[nodiscard]] constexpr VkFramebuffer& current_framebuffer() { return _framebuffers[_image_index].framebuffer; }
     [[nodiscard]] constexpr vulkan_renderpass& renderpass() { return _renderpass; }

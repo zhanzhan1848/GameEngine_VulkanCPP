@@ -1,6 +1,6 @@
 #version 450
 
-layout(location = 0) in vec3 inPosition;
+layout(location = 0) in vec3 inPos;
 layout(location = 1) in vec3 inColor;
 layout(location = 2) in vec3 inTexCoord;
 
@@ -8,17 +8,22 @@ layout(location = 3) in vec3 transform;
 layout(location = 4) in vec3 rotate;
 layout(location = 5) in vec3 scale;
 
-layout(location = 0) out vec3 fragColor;
-layout(location = 1) out vec2 fragTexCoord;
+layout(location = 0) out vec3 outPos;
 
-layout(binding = 0) uniform UniformBufferObject{
-    mat4 model;
-    mat4 view;
-    mat4 proj;
+layout(binding = 0) uniform UniformBufferObject
+{
+	mat4	model;
+	mat4	view;
+	mat4	projection;
 } ubo;
 
-void main() {
+out gl_PerVertex
+{
+    vec4 gl_Position;
+};
 
+void main()
+{
     mat3 mx, my, mz;
     float s = sin(rotate.x);
     float c = cos(rotate.x);
@@ -50,11 +55,10 @@ void main() {
     gRotMat[2] = vec4(-s, 0.0, c, 0.0);
     gRotMat[3] = vec4(0.0, 0.0, 0.0, 1.0);
 
-    vec4 locPos = vec4(rotMat * inPosition.xyz, 1.0);
+    vec4 locPos = vec4(rotMat * inPos.xyz, 1.0);
     vec4 pos = vec4((locPos.xyz * scale) + transform, 1.0);
-    //vec4 pos = ubo.model * vec4(inPosition, 1.0);
+    //vec4 pos = ubo.model * vec4(inPos, 1.0);
 
-    gl_Position = ubo.proj * ubo.view * gRotMat * pos;
-    fragColor = inColor;
-    fragTexCoord = inTexCoord.xy;
-}
+    gl_Position = ubo.projection * ubo.view * gRotMat * pos;
+    outPos = (ubo.projection * ubo.view * gRotMat * pos).rgb
+;}

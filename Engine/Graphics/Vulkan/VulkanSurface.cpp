@@ -122,13 +122,6 @@ vulkan_surface::create(VkInstance instance)
 
     core::create_graphics_command((u32)_swapchain.images.size());
 
-    _layout_and_pool.createDescriptorPool();
-    _layout_and_pool.createDescriptorSetLayout();
-
-    _scene.getShadowmap().createUniformBuffer();
-    _scene.getShadowmap().setupPipeline(_layout_and_pool.pipelineLayout, _framebuffers.font());
-    _scene.getShadowmap().setupDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
-
     auto model_id = submesh::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/models/viking_room.obj" });
     auto texture_id = textures::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/viking_room.png" });
     auto vs_id = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/test01.vert.spv" }, shader_type::vertex);
@@ -138,19 +131,30 @@ vulkan_surface::create(VkInstance instance)
 
     transform::init_info transform_info{};
     math::v3 rotation{ 0.f, 0.f, 0.f };
-    math::v3 position{ 3.f, 0.f, 0.f };
+    math::v3 position{ 3.f, 0.f, -2.f };
     DirectX::XMVECTOR quat{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation)) };
     math::v4a rot_quat;
     DirectX::XMStoreFloat4A(&rot_quat, quat);
     memcpy(&transform_info.rotation[0], &rot_quat.x, sizeof(transform_info.rotation));
     memcpy(&transform_info.position[0], &position.x, sizeof(transform_info.position));
-
     game_entity::entity_info entity_info{};
     entity_info.transform = &transform_info;
     game_entity::entity ntt{ game_entity::create(entity_info) };
-
     auto id1 = _scene.add_model_instance(ntt, model_id);
     _scene.add_material(id1, material_id);
+
+    rotation = { 0.f, 0.f, 0.f };
+    position = { 1.f, 0.f, 0.f };
+    math::v3 scale{ 2.0f, 2.0f, 2.0f };
+    quat = { DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation)) };
+    DirectX::XMStoreFloat4A(&rot_quat, quat);
+    memcpy(&transform_info.scale[0], &scale.x, sizeof(transform_info.scale));
+    memcpy(&transform_info.rotation[0], &rot_quat.x, sizeof(transform_info.rotation));
+    memcpy(&transform_info.position[0], &position.x, sizeof(transform_info.position));
+    entity_info.transform = &transform_info;
+    game_entity::entity ntt3{ game_entity::create(entity_info) };
+    auto id4 = _scene.add_model_instance(ntt3, model_id);
+    _scene.add_material(id4, material_id);
 
     auto floor = submesh::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/models/floor.obj" });
     auto floor_vs = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/floor.vert.spv" }, shader_type::vertex);
@@ -159,10 +163,12 @@ vulkan_surface::create(VkInstance instance)
     
     transform::init_info transform_info1{};
     math::v3 rotation1{ 0.f, 0.f, 0.f };
-    math::v3 position1{ 0.f, 0.f, 0.f };
+    math::v3 position1{ 0.f, -2.f, 0.f };
+    scale = { 0.3f, 0.3f, 0.3f };
     DirectX::XMVECTOR quat1{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation1)) };
     math::v4a rot_quat1;
     DirectX::XMStoreFloat4A(&rot_quat1, quat1);
+    memcpy(&transform_info1.scale[0], &scale.x, sizeof(transform_info1.scale));
     memcpy(&transform_info1.rotation[0], &rot_quat1.x, sizeof(transform_info1.rotation));
     memcpy(&transform_info1.position[0], &position1.x, sizeof(transform_info1.position));
 
@@ -172,6 +178,13 @@ vulkan_surface::create(VkInstance instance)
 
     auto id2 = _scene.add_model_instance(ntt1, floor);
     _scene.add_material(id2, floor_material);
+
+    _layout_and_pool.createDescriptorPool(_scene.getDescriptorSetsCount() * 2);
+    _layout_and_pool.createDescriptorSetLayout();
+
+    _scene.getShadowmap().createUniformBuffer();
+    _scene.getShadowmap().setupPipeline(_layout_and_pool.pipelineLayout);
+    _scene.getShadowmap().setupDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
     //_scene.createDescriptorSetLayout();
     _scene.createPipeline(_renderpass, _layout_and_pool.pipelineLayout);
     

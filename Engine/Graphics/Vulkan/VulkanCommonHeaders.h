@@ -122,6 +122,16 @@ struct UniformBufferObject
     math::m4x4 view;
     math::m4x4 projection;
 };
+
+struct UniformBufferObjectPlus : UniformBufferObject
+{
+    math::m4x4  lightModel;
+    math::m4x4  lightView;
+    math::m4x4  lightProjection;
+    math::v3    lightPos;
+    f32         lightNear;
+    f32         lightFar;
+};
 }
 
 
