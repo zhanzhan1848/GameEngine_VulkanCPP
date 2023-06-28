@@ -143,9 +143,9 @@ public:
 
         VkViewport viewport{};
         viewport.x = 0.0f;
-        viewport.y = 0.0f;
+        viewport.y = (f32)surface->height();
         viewport.width = (f32)surface->width();
-        viewport.height = (f32)surface->height();
+        viewport.height = (f32)surface->height() * -1.f;
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
 

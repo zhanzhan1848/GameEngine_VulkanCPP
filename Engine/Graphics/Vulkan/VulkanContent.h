@@ -191,7 +191,7 @@ namespace primal::graphics::vulkan
 					else
 					{
 						_attributeDescriptions.emplace_back([i]() {
-							VkVertexInputAttributeDescription attributeDescriptions{ i, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * (i - 3) };
+							VkVertexInputAttributeDescription attributeDescriptions{ i, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * (i - (sizeof(Vertex) / sizeof(math::v3))) };
 						return attributeDescriptions;
 						}());
 					}

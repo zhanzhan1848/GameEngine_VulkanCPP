@@ -192,6 +192,7 @@
     <ClInclude Include="EngineAPI\Light.h" />
     <ClInclude Include="Graphics\Direct3D12\D3D12Light.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanGBuffer.h" />
+    <ClInclude Include="Components\PythonAPI.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Components\Entity.cpp">
@@ -303,5 +304,6 @@
     <None Include="Graphics\Vulkan\Shaders\floor.vert.glsl" />
     <None Include="Graphics\Vulkan\Shaders\floor.frag.glsl" />
     <None Include="Graphics\Vulkan\Shaders\compileShaders2.bat" />
+    <None Include="Python_Scripts\compileShaders.py" />
   </ItemGroup>
 </Project>

@@ -107,6 +107,7 @@ struct Vertex
     math::v3 pos;
     math::v3 color;
     math::v3 texCoord;
+    math::v3 normal;
 };
 
 struct InstanceData

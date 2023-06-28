@@ -238,6 +238,10 @@ bool test_initialize()
 				return false;
 		}
 	}
+	else if constexpr(GRAPHICS_API == graphics::graphics_platform::vulkan_1)
+	{ 
+		system("python C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Python_Scripts/compileShaders.py");
+	}
 	else
 	{ }
 

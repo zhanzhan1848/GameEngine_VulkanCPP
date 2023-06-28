@@ -1,16 +1,20 @@
 #version 450
 
 layout(location = 0) in vec3 inPos;
+layout(location = 1) in vec3 inColor;
+layout(location = 2) in vec3 inTexCoord;
 
 layout(location = 3) in vec3 transform;
 layout(location = 4) in vec3 rotate;
 layout(location = 5) in vec3 scale;
 
+layout(location = 0) out vec3 outPos;
+
 layout(binding = 0) uniform UniformBufferObject
 {
-	mat4	model;
-	mat4	view;
-	mat4	projection;
+    mat4	model;
+    mat4	view;
+    mat4	projection;
 } ubo;
 
 out gl_PerVertex
@@ -56,4 +60,6 @@ void main()
     //vec4 pos = ubo.model * vec4(inPos, 1.0);
 
     gl_Position = ubo.projection * ubo.view * gRotMat * pos;
+    outPos = (ubo.projection * ubo.view * gRotMat * pos).rgb
+        ;
 }

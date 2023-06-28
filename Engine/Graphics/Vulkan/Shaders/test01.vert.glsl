@@ -15,6 +15,12 @@ layout(binding = 0) uniform UniformBufferObject{
     mat4 model;
     mat4 view;
     mat4 proj;
+    mat4 lightModel;
+    mat4 lightView;
+    mat4 lightProj;
+    vec3 lightPos;
+    float near;
+    float far;
 } ubo;
 
 void main() {
