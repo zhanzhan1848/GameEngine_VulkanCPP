@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets >
+	<CodeSnippet Format="1.0.0">
+		<Header>
+			<Title>vk_descriptor_buffer_info</Title>
+			<Shortcut>vk_descriptor_buffer_info</Shortcut>
+			<Description>Vulkan Descriptor Buffer Info 代码片段</Description>
+			<Author>Myself</Author>
+			<SnippetTypes>
+				<SnippetType>Expansion</SnippetType>
+				<SnippetType>SurroundsWith</SnippetType>
+			</SnippetTypes>
+		</Header>
+		<Snippet>
+			<Declarations>
+				<Literal>
+					<ID>vk_descriptor_buffer_info</ID>
+					<ToolTip>自动填入Vulkan Descriptor Buffer Info需要的信息</ToolTip>
+					<Default>struct</Default>
+				</Literal>
+			</Declarations>
+			<Code Language="cpp"><![CDATA[
+			// Vulkan Descriptor Buffer Info
+            &buffer,                                                                        //buffer
+            0,                                                                              //offset
+            sizeof(buffer)                                                                  //range
+]]>
+			</Code>
+		</Snippet>
+	</CodeSnippet>
+</CodeSnippets>

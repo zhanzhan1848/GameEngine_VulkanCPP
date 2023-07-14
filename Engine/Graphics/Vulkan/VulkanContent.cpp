@@ -3,6 +3,8 @@
 #include "VulkanResources.h"
 #include "VulkanCore.h"
 #include "VulkanTexture.h"
+#include "VulkanPipeline.h"
+#include "VulkanDescriptor.h"
 #include "Components/Transform.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "Content/stb_image.h"
@@ -11,6 +13,7 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "Content/tiny_obj_loader.h"
 #include <unordered_map>
+#include <array>
 
 namespace primal::graphics::vulkan
 {
@@ -32,6 +35,11 @@ namespace primal::graphics::vulkan
 		vulkan_texture_2d::vulkan_texture_2d(std::string path)
 		{
 			loadTexture(path);
+		}
+
+		vulkan_texture_2d::vulkan_texture_2d(vulkan_texture tex)
+		{
+			_texture = tex;
 		}
 
 		vulkan_texture_2d::~vulkan_texture_2d()
@@ -133,6 +141,11 @@ namespace primal::graphics::vulkan
 			return textures.add(path);
 		}
 
+		id::id_type add(vulkan_texture tex)
+		{
+			return textures.add(tex);
+		}
+
 		/// <summary>
 		// ！ 删除图片原始ID
 		///	1、 执行关联的所有material里的remove_texture 操作
@@ -180,7 +193,7 @@ namespace primal::graphics::vulkan
 		/// <summary>
 		// ！ 删除shader原始ID
 		///	1、 执行关联的所有material里的remove_shader 操作
-		///   2、 执行删除shader原始ID的操作
+		/// 2、 执行删除shader原始ID的操作
 		/// </summary>
 		/// <param name="id"></param>
 		void remove(id::id_type id)
@@ -206,7 +219,7 @@ namespace primal::graphics::vulkan
 			std::mutex							material_mutex;
 
 			utl::free_list<textures::vulkan_texture_2d>			material_textures;
-			utl::free_list<shaders::vulkan_shader>			material_shaders;
+			utl::free_list<shaders::vulkan_shader>				material_shaders;
 		} // anonymous namespace
 
 		vulkan_material::~vulkan_material()
@@ -235,7 +248,7 @@ namespace primal::graphics::vulkan
 		void vulkan_material::add_texture(id::id_type texture_id)
 		{
 			auto copy_id = material_textures.add(textures::get_texture(texture_id));
-			_texture_ids.emplace_back(copy_id); // (texture_id << 16) |
+			_texture_ids.emplace_back(texture_id); // (texture_id << 16) |
 			_texture_count++;
 		}
 
@@ -473,7 +486,7 @@ namespace primal::graphics::vulkan
 		{
 			vkDeviceWaitIdle(core::logical_device());
 
-			vkDestroyPipeline(core::logical_device(), _pipeline, nullptr);
+			pipeline::remove_pipeline(_pipeline_ids.at(render_type::forward).font());
 
 			for (auto texture_id : materials::get_material(_material_id).getTextureIDS())
 			{
@@ -491,7 +504,6 @@ namespace primal::graphics::vulkan
 		void vulkan_instance_model::createDescriptorSet(VkDescriptorPool pool, VkDescriptorSetLayout layout)
 		{
 			VkDescriptorSetAllocateInfo allocInfo;
-			// utl::vector<VkWriteDescriptorSet> writeDescriptors;
 
 			allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 			allocInfo.pNext = VK_NULL_HANDLE;
@@ -499,27 +511,7 @@ namespace primal::graphics::vulkan
 			allocInfo.descriptorSetCount = 1;
 			allocInfo.pSetLayouts = &layout;
 
-			VkResult result{ VK_SUCCESS };
-			VkCall(result = vkAllocateDescriptorSets(core::logical_device(), &allocInfo, &_descriptorSet), "Failed to create descriptor set...");
-
-			// TODO: Unlock this to access instance's private attribute to translate to GPU
-			/*VkDescriptorBufferInfo bufferInfo;
-			bufferInfo.buffer = _uniformBuffer.buffer;
-			bufferInfo.offset = 0;
-			bufferInfo.range = sizeof(math::m4x4);
-			writeDescriptors.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, this->_descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo, nullptr));
-
-			int iter_num = 0;
-			for (auto iter : materials::get_material(this->getMaterialID()).getTextureIDS())
-			{
-				++iter_num;
-				VkDescriptorImageInfo imageInfo;
-				imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-				imageInfo.imageView = textures::get_texture(iter).getTexture().view;
-				imageInfo.sampler = textures::get_texture(iter).getTexture().sampler;
-				writeDescriptors.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, this->_descriptorSet, iter_num, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &imageInfo));
-			}
-			vkUpdateDescriptorSets(core::logical_device(), static_cast<u32>(writeDescriptors.size()), writeDescriptors.data(), 0, nullptr);*/
+			_descriptorSet_ids[render_type::forward].emplace_back(descriptor::add(allocInfo));
 		}
 
 		void vulkan_instance_model::flushBuffer(vulkan_cmd_buffer cmd_buffer)
@@ -550,17 +542,18 @@ namespace primal::graphics::vulkan
 			VkPipelineDynamicStateCreateInfo dynamicState = descriptor::pipelineDynamicStateCreate(dynamicStateEnables);
 			VkPipelineDepthStencilStateCreateInfo depthStencilState = descriptor::pipelineDepthStencilStateCreateInfo(VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL);
 
-			getVertexInputBindDescriptor();
-			getVertexInputAttributeDescriptor();
+
+			auto bind = getVertexInputBindDescriptor();
+			auto attr = getVertexInputAttributeDescriptor();
 
 			VkPipelineVertexInputStateCreateInfo vertexInputInfo;
 			vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 			vertexInputInfo.pNext = nullptr;
 			vertexInputInfo.flags = 0;
-			vertexInputInfo.vertexBindingDescriptionCount = static_cast<u32>(_bindingDescription.size());
-			vertexInputInfo.pVertexBindingDescriptions = _bindingDescription.data();
-			vertexInputInfo.vertexAttributeDescriptionCount = static_cast<u32>(_attributeDescriptions.size());
-			vertexInputInfo.pVertexAttributeDescriptions = _attributeDescriptions.data();
+			vertexInputInfo.vertexBindingDescriptionCount = static_cast<u32>(bind.size());
+			vertexInputInfo.pVertexBindingDescriptions = bind.data();
+			vertexInputInfo.vertexAttributeDescriptionCount = static_cast<u32>(attr.size());
+			vertexInputInfo.pVertexAttributeDescriptions = attr.data();
 
 			getShaderStage();
 
@@ -585,13 +578,7 @@ namespace primal::graphics::vulkan
 			pipelineCI.basePipelineHandle = VK_NULL_HANDLE;
 			pipelineCI.basePipelineIndex = -1;
 
-			VkResult result{ VK_SUCCESS };
-			VkCall(result = vkCreateGraphicsPipelines(core::logical_device(), VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &_pipeline), "Failed to create graphics pipelines...");
-
-			//for (auto shaderModule : _shaderStages)
-			//{
-			//	vkDestroyShaderModule(core::logical_device(), shaderModule.module, nullptr);
-			//}
+			_pipeline_ids[render_type::forward].emplace_back(pipeline::add_pipeline(pipelineCI));
 
 		}
 
@@ -677,8 +664,7 @@ namespace primal::graphics::vulkan
 			for (auto& instance : _instance_ids)
 			{
 				instance_models[instance].createDescriptorSet(pool, layout);
-				_descriptorSets.emplace_back(instance_models[instance].getDescriptorSet());
-				auto descriptorSet = instance_models[instance].getDescriptorSet();
+				auto descriptorSet = descriptor::get(instance_models[instance].get_descriptor_set_ids(render_type::forward).font());
 				std::vector<VkWriteDescriptorSet> descriptorWrites;
 
 				VkDescriptorBufferInfo bufferInfo;
@@ -689,16 +675,21 @@ namespace primal::graphics::vulkan
 
 				if (!materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().empty())
 				{
-					VkDescriptorImageInfo imageInfo;
-					imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-					auto texture_id = materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().font();
-					imageInfo.imageView = textures::get_texture(texture_id).getTexture().view;
-					imageInfo.sampler = textures::get_texture(texture_id).getTexture().sampler;
-					descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo));
+					u32 count{ 0 };
+					for (u32 i{ 0 }; i < materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().size(); ++i)
+					{
+						VkDescriptorImageInfo imageInfo;
+						imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+						auto texture_id = materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS()[i];
+						imageInfo.imageView = textures::get_texture(texture_id).getTexture().view;
+						imageInfo.sampler = textures::get_texture(texture_id).getTexture().sampler;
+						descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo));
+						count++;
+					}
 				}
 
 				VkDescriptorImageInfo shadowInfo;
-				shadowInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+				shadowInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
 				shadowInfo.imageView = _shadowmap.getTexture().view;
 				shadowInfo.sampler = _shadowmap.getTexture().sampler;
 				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &shadowInfo));
@@ -707,13 +698,88 @@ namespace primal::graphics::vulkan
 			}
 		}
 
+		void vulkan_scene::createDeferDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout)
+		{
+			VkDescriptorSetAllocateInfo allocInfo;
+
+			allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			allocInfo.pNext = VK_NULL_HANDLE;
+			allocInfo.descriptorPool = pool;
+			allocInfo.descriptorSetCount = 1;
+			allocInfo.pSetLayouts = &layout;
+
+			_descriptor_set_id = descriptor::add(allocInfo);
+
+			auto descriptorSet = descriptor::get(_descriptor_set_id);
+			std::vector<VkWriteDescriptorSet> descriptorWrites;
+
+			VkDescriptorImageInfo imageInfo1;
+			imageInfo1.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			imageInfo1.imageView = textures::get_texture(_offscreen.getTexture()[0]).getTexture().view;
+			imageInfo1.sampler = textures::get_texture(_offscreen.getTexture()[0]).getTexture().sampler;
+			descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo1));
+
+			VkDescriptorImageInfo imageInfo2;
+			imageInfo2.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			imageInfo2.imageView = textures::get_texture(_offscreen.getTexture()[1]).getTexture().view;
+			imageInfo2.sampler = textures::get_texture(_offscreen.getTexture()[1]).getTexture().sampler;
+			descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo2));
+
+			VkDescriptorImageInfo imageInfo3;
+			imageInfo3.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			imageInfo3.imageView = textures::get_texture(_offscreen.getTexture()[2]).getTexture().view;
+			imageInfo3.sampler = textures::get_texture(_offscreen.getTexture()[2]).getTexture().sampler;
+			descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo3));
+
+			VkDescriptorImageInfo imageInfo4;
+			imageInfo4.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			imageInfo4.imageView = textures::get_texture(_offscreen.getTexture()[4]).getTexture().view;
+			imageInfo4.sampler = textures::get_texture(_offscreen.getTexture()[4]).getTexture().sampler;
+			descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo4));
+
+			vkUpdateDescriptorSets(core::logical_device(), static_cast<u32>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+		}
+
 		void vulkan_scene::createPipeline(vulkan_renderpass render_pass, VkPipelineLayout layout)
 		{
 			for (auto& instance : _instance_ids)
 			{
 				instance_models[instance].createPipeline(layout, render_pass);
-				_pipelines.emplace_back(instance_models[instance].getPipeline());
 			}
+		}
+
+		void vulkan_scene::createDeferPipeline(vulkan_renderpass render_pass, VkPipelineLayout layout)
+		{
+			VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = descriptor::pipelineInputAssemblyStateCreate(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, VK_FALSE);
+			VkPipelineRasterizationStateCreateInfo rasterizationState = descriptor::pipelineRasterizationStateCreate(VK_POLYGON_MODE_FILL, VK_CULL_MODE_FRONT_BIT);
+			VkPipelineColorBlendAttachmentState blendAttachmentState = descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE);
+			VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(1, blendAttachmentState);
+			VkPipelineDepthStencilStateCreateInfo depthStencilState = descriptor::pipelineDepthStencilStateCreateInfo(VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL);
+			VkPipelineViewportStateCreateInfo viewportState = descriptor::pipelineViewportStateCreate(1, 1, 0);
+			VkPipelineMultisampleStateCreateInfo multisampleState = descriptor::pipelineMultisampleStateCreate();
+			std::vector<VkDynamicState> dynamicStateEnables = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+			VkPipelineDynamicStateCreateInfo dynamicState = descriptor::pipelineDynamicStateCreate(dynamicStateEnables);
+			VkPipelineVertexInputStateCreateInfo emptyVertexInputState{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO , nullptr, 0, 0, nullptr, 0, nullptr };
+			std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages;
+			shaderStages[0] = shaders::get_shader(shaders::add("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/fullscreen.vert.spv", shader_type::vertex)).getShaderStage();
+			shaderStages[1] = shaders::get_shader(shaders::add("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/composition.frag.spv", shader_type::pixel)).getShaderStage();
+
+			VkGraphicsPipelineCreateInfo pipelineCreateInfo{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+			pipelineCreateInfo.layout = layout;
+			pipelineCreateInfo.pNext = nullptr;
+			pipelineCreateInfo.renderPass = render_pass.render_pass;
+			pipelineCreateInfo.flags = 0;
+			pipelineCreateInfo.pInputAssemblyState = &inputAssemblyState;
+			pipelineCreateInfo.pRasterizationState = &rasterizationState;
+			pipelineCreateInfo.pColorBlendState = &colorBlendState;
+			pipelineCreateInfo.pMultisampleState = &multisampleState;
+			pipelineCreateInfo.pViewportState = &viewportState;
+			pipelineCreateInfo.pDepthStencilState = &depthStencilState;
+			pipelineCreateInfo.pDynamicState = &dynamicState;
+			pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+			pipelineCreateInfo.pStages = shaderStages.data();
+			pipelineCreateInfo.pVertexInputState = &emptyVertexInputState;
+			_pipeline_id = pipeline::add_pipeline(pipelineCreateInfo);
 		}
 
 		void vulkan_scene::updateView(frame_info info)
@@ -730,7 +796,20 @@ namespace primal::graphics::vulkan
 			_ubo.lightPos = _shadowmap.lightPos();
 			_ubo.lightNear = _shadowmap.lightNear();
 			_ubo.lightFar = _shadowmap.lightFar();
+			uboGBuffer ubo1;
+			DirectX::XMStoreFloat4x4(&ubo1.model, modelMatrix);
+			DirectX::XMStoreFloat4x4(&ubo1.view, graphics::vulkan::camera::get(info.camera_id).view());
+			DirectX::XMStoreFloat4x4(&ubo1.projection, graphics::vulkan::camera::get(info.camera_id).projection());
+			ubo1.nearPlane = graphics::vulkan::camera::get(info.camera_id).near_z();
+			ubo1.farPlane = graphics::vulkan::camera::get(info.camera_id).far_z();
 			memcpy(_uniformBuffer.mapped, &_ubo, sizeof(UniformBufferObjectPlus));
+			memcpy(_offscreen.get_uniform_buffer().mapped, &ubo1, sizeof(uboGBuffer));
+			uboSSAOParam ubo2;
+			ubo2.ssao = 1;
+			ubo2.ssaoOnly = 0;
+			ubo2.ssaoblur = 0;
+			DirectX::XMStoreFloat4x4(&ubo2.projection, graphics::vulkan::camera::get(info.camera_id).projection());
+			memcpy(_offscreen.get_ssao_param().mapped, &ubo2, sizeof(uboSSAOParam));
 		}
 
 		void vulkan_scene::flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)
@@ -738,13 +817,15 @@ namespace primal::graphics::vulkan
 			
 			for (auto& instance : _instance_ids)
 			{
-				auto descriptorSet = instance_models[instance].getDescriptorSet();
+				auto descriptorSet = descriptor::get(instance_models[instance].get_descriptor_set_ids(render_type::forward).font());
+				auto pipeline = pipeline::get_pipeline(instance_models[instance].get_pipeline_ids(render_type::forward).font());
 				vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
-				vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, instance_models[instance].getPipeline());
+				vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 				instance_models[instance].flushBuffer(cmd_buffer);
 				instance_models[instance].draw(cmd_buffer);
 			}
 		}
+
 		void vulkan_scene::drawGBuffer(vulkan_cmd_buffer cmd_buffer)
 		{
 			for (auto& instance : _instance_ids)
@@ -752,6 +833,15 @@ namespace primal::graphics::vulkan
 				instance_models[instance].flushBuffer(cmd_buffer);
 				instance_models[instance].draw(cmd_buffer);
 			}
+		}
+
+		void vulkan_scene::drawDefer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)
+		{
+			auto descriptorSet = descriptor::get(_descriptor_set_id);
+			auto pipeline = pipeline::get_pipeline(_pipeline_id);
+			vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
+			vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			vkCmdDraw(cmd_buffer.cmd_buffer, 3, 1, 0, 0);
 		}
 		
 	} // primai::graphics::vulkan::scene

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets >
+	<CodeSnippet Format="1.0.0">
+		<Header>
+			<Title>vk_pipeline_multisample_state_create_info</Title>
+			<Shortcut>vk_pipeline_multisample_state_create_info</Shortcut>
+			<Description>Vulkan Pipeline Multisample State Create Info 代码片段</Description>
+			<Author>Myself</Author>
+			<SnippetTypes>
+				<SnippetType>Expansion</SnippetType>
+				<SnippetType>SurroundsWith</SnippetType>
+			</SnippetTypes>
+		</Header>
+		<Snippet>
+			<Declarations>
+				<Literal>
+					<ID>vk_pipeline_multisample_state_create_info</ID>
+					<ToolTip>自动填入Vulkan Pipeline Multisample State Create Info需要的信息</ToolTip>
+					<Default>struct</Default>
+				</Literal>
+			</Declarations>
+			<Code Language="cpp"><![CDATA[
+			// Vulkan Pipeline Multisample State Create Info
+			VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,                                   //sType
+            nullptr,                                                                                    //pNext
+            0,                                                                                          //flags
+            VK_SAMPLE_COUNT_1_BIT,                                                                      //rasterizationSamples
+            VK_FALSE,                                                                                   //sampleShadingEnable
+            1.f,                                                                                        //minSampleShading
+            nullptr,                                                                                    //pSampleMask
+            VK_FALSE,                                                                                   //alphaToCoverageEnable
+            VK_FALSE                                                                                    //alphaToOneEnable
+]]>
+			</Code>
+		</Snippet>
+	</CodeSnippet>
+</CodeSnippets>

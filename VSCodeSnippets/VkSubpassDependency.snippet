@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets >
+	<CodeSnippet Format="1.0.0">
+		<Header>
+			<Title>vk_subpass_dependency</Title>
+			<Shortcut>vk_subpass_dependency</Shortcut>
+			<Description>Vulkan Subpass Dependency 代码片段</Description>
+			<Author>Myself</Author>
+			<SnippetTypes>
+				<SnippetType>Expansion</SnippetType>
+				<SnippetType>SurroundsWith</SnippetType>
+			</SnippetTypes>
+		</Header>
+		<Snippet>
+			<Declarations>
+				<Literal>
+					<ID>vk_subpass_dependency</ID>
+					<ToolTip>自动填入Vulkan Subpass Dependency需要的信息</ToolTip>
+					<Default>struct</Default>
+				</Literal>
+			</Declarations>
+			<Code Language="cpp"><![CDATA[
+			// Vulkan Subpass Dependency
+			VK_SUBPASS_EXTERNAL,                                                        //srcSubpass
+            0,                                                                          //dstSubpass
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,                              //srcStageMask
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,                              //dstStageMask
+            0,                                                                          //srcAccessMask
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,                                       //dstAccessMask
+            0                                                                           //dependencyFlags
+]]>
+			</Code>
+		</Snippet>
+	</CodeSnippet>
+</CodeSnippets>

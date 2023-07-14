@@ -1,12 +1,22 @@
 #pragma once
-
 #include "VulkanCommonHeaders.h"
 
 namespace primal::graphics::vulkan::descriptor
 {
-	void createDescriptorSets(VkDevice device, utl::vector<VkDescriptorSet>& descriptorSets, VkDescriptorSetLayout& descriptorSetLayout, OUT VkDescriptorPool& descriptorPool, uniformBuffer& uniformBuffers, vulkan_texture tex);
-	void createDescriptorPool(VkDevice device, VkDescriptorPool& descriptorPool);
-	void createDescriptorSetLayout(VkDevice device, VkDescriptorSetLayout& descriptorSetLayout);
+	void initialize();
+	void shutdown();
 
-	void preparePipelines(VkDevice device, VkPipelineLayout& pipelineLayout, VkPipeline& pipeline, VkDescriptorSetLayout& descriptorSetLayout, vulkan_renderpass renderpass);
+	VkDescriptorPool get_pool();
+
+	// Descriptor Set Layout
+	id::id_type add_layout(VkDescriptorSetLayoutCreateInfo);
+	id::id_type add_layout(VkDescriptorSetLayout);
+	void remove_layout(id::id_type);
+	VkDescriptorSetLayout get_layout(id::id_type);
+
+	// Descriptor Sets
+	id::id_type add(VkDescriptorSetAllocateInfo);
+	id::id_type add(VkDescriptorSet set);
+	void remove(id::id_type);
+	VkDescriptorSet get(id::id_type);
 }

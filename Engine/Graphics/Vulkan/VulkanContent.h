@@ -23,6 +23,8 @@ namespace primal::graphics::vulkan
 
 			explicit vulkan_texture_2d(std::string path);
 
+			explicit vulkan_texture_2d(vulkan_texture);
+
 			~vulkan_texture_2d();
 
 			void loadTexture(std::string path);
@@ -34,6 +36,8 @@ namespace primal::graphics::vulkan
 		};
 
 		id::id_type add(std::string path);
+
+		id::id_type add(vulkan_texture);
 
 		void remove(id::id_type id);
 
@@ -156,47 +160,9 @@ namespace primal::graphics::vulkan
 			/// <summary>
 			//  ! Create descriptor , bind buffer , draw command
 			/// </summary>
-			//void createUniformBuffer();
 			void createDescriptorSet(VkDescriptorPool pool, VkDescriptorSetLayout layout);
 			void flushBuffer(vulkan_cmd_buffer cmd_buffer);
 			void draw(vulkan_cmd_buffer cmd_buffer);
-
-			//[[nodiscard]] constexpr uniformBuffer getUniformBuffer() const { return _uniformBuffer; }
-			[[nodiscard]] VkDescriptorSet& getDescriptorSet() { return _descriptorSet; }
-			// TODO: Make a configuration to bind id
-			void getVertexInputBindDescriptor() 
-			{
-				_bindingDescription.emplace_back([]() {
-					VkVertexInputBindingDescription bBind{ 0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX };
-				return bBind;
-				}());
-				_bindingDescription.emplace_back([]() {
-					VkVertexInputBindingDescription bBind{ 1, sizeof(InstanceData), VK_VERTEX_INPUT_RATE_VERTEX };
-				return bBind;
-				}());
-			}
-
-			// TODO: Make a configuration to bind id
-			void getVertexInputAttributeDescriptor() 
-			{
-				for (u32 i{ 0 }; i < (sizeof(Vertex) + sizeof(InstanceData)) / sizeof(math::v3); ++i)
-				{
-					if (i < sizeof(Vertex) / sizeof(math::v3))
-					{
-						_attributeDescriptions.emplace_back([i]() {
-							VkVertexInputAttributeDescription attributeDescriptions{ i, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
-						return attributeDescriptions;
-						}());
-					}
-					else
-					{
-						_attributeDescriptions.emplace_back([i]() {
-							VkVertexInputAttributeDescription attributeDescriptions{ i, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * (i - (sizeof(Vertex) / sizeof(math::v3))) };
-						return attributeDescriptions;
-						}());
-					}
-				}
-			}
 
 			void getShaderStage() 
 			{
@@ -212,19 +178,8 @@ namespace primal::graphics::vulkan
 			}
 
 			void createPipeline(VkPipelineLayout pipelineLayout, vulkan_renderpass render_pass);
-			[[nodiscard]] VkPipeline& getPipeline() { return _pipeline; }
-			[[nodiscard]] utl::vector<VkVertexInputBindingDescription> vertexInputBinding() { return _bindingDescription; }
-			[[nodiscard]] utl::vector<VkVertexInputAttributeDescription> vertexinputAttribute() { return _attributeDescriptions; }
 			[[nodiscard]] constexpr InstanceData getInstanceData() const { return _instanceData; }
 			[[nodiscard]] constexpr uniformBuffer getInstanceBuffer() const { return _instanceBuffer; }
-
-			/// <summary>
-			//  ! Transform component
-			/// </summary>
-			//void flushModelMatrix();
-			/*void transform(const math::v3& pos) { _instanceData.translate= pos; flushModelMatrix(); }
-			void rotate(const math::v3& rot) { _rot = rot; flushModelMatrix(); }
-			void scale(const math::v3& scale) { _scale = scale; flushModelMatrix(); }*/
 
 			/// <summary>
 			//  ! add a material to a instance model
@@ -234,18 +189,18 @@ namespace primal::graphics::vulkan
 			void remove_material() { _material_id = id::invalid_id; }
 			[[nodiscard]] constexpr id::id_type const getMaterialID() const { return _material_id; }
 			[[nodiscard]] constexpr id::id_type const getEntityID() const { return _id; }
+			[[nodiscard]] utl::vector<id::id_type> const get_pipeline_ids(render_type::type type) const { return _pipeline_ids.at(type); }
+			[[nodiscard]] utl::vector<id::id_type> const get_descriptor_set_ids(render_type::type type) const { return _descriptorSet_ids.at(type); }
 
 		private:
 			game_entity::entity_id									_id;
 			vulkan_model											_model;
 			uniformBuffer											_instanceBuffer;
 			id::id_type												_material_id;
-			VkDescriptorSet											_descriptorSet;
-			utl::vector<VkVertexInputBindingDescription>			_bindingDescription;
-			utl::vector<VkVertexInputAttributeDescription>			_attributeDescriptions;
 			utl::vector<VkPipelineShaderStageCreateInfo>			_shaderStages;
+			std::map<render_type::type, utl::vector<id::id_type>>	_pipeline_ids;
+			std::map<render_type::type, utl::vector<id::id_type>>	_descriptorSet_ids;
 			InstanceData											_instanceData;
-			VkPipeline												_pipeline;
 
 			void create_instance_buffer();
 		};
@@ -274,26 +229,28 @@ namespace primal::graphics::vulkan
 			void remove_material(id::id_type model_id);
 
 			void createUniformBuffer();
-			//void createDescriptorPool();
-			//void createDescriptorSetLayout();
 			void createDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout);
+			void createDeferDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout);
 			void createPipeline(vulkan_renderpass render_pass, VkPipelineLayout layout);
+			void createDeferPipeline(vulkan_renderpass render_pass, VkPipelineLayout layout);
 
 			void updateView(frame_info info);
 			void flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout);
 			void drawGBuffer(vulkan_cmd_buffer cmd_buffer);
+			void drawDefer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout);
 
 			[[nodiscard]] constexpr vulkan_shadowmapping& getShadowmap() { return _shadowmap; }
-			[[nodiscard]] constexpr u64 const getDescriptorSetsCount() const { return _instance_ids.size(); }
+			[[nodiscard]] constexpr vulkan_offscreen& getOffscreen() { return _offscreen; }
 
 		private:
 			utl::vector<id::id_type>							_instance_ids;
 			utl::vector<camera_id>								_camera_ids;
-			utl::vector<VkPipeline>								_pipelines;
-			utl::vector<VkDescriptorSet>						_descriptorSets;
 			UniformBufferObjectPlus								_ubo;
 			uniformBuffer										_uniformBuffer;
 			vulkan_shadowmapping								_shadowmap;
+			vulkan_offscreen									_offscreen;
+			id::id_type											_pipeline_id;
+			id::id_type											_descriptor_set_id;
 		};
 	}
 }

@@ -65,7 +65,7 @@ struct camera_surface
 id::id_type item_id{ id::invalid_id };
 id::id_type model_id{ id::invalid_id };
 
-camera_surface _surfaces[4]{};
+camera_surface _surfaces[1]{};
 time_it timer{};
 
 bool resized{ false };
@@ -240,7 +240,7 @@ bool test_initialize()
 	}
 	else if constexpr(GRAPHICS_API == graphics::graphics_platform::vulkan_1)
 	{ 
-		system("python C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Python_Scripts/compileShaders.py");
+		system("python C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Python_Scripts/compileShaders.py");
 	}
 	else
 	{ }
@@ -249,10 +249,10 @@ bool test_initialize()
 
 	platform::window_init_info info[]
 	{
-		{&win_proc, nullptr, L"Render Window 1", 100, 100, 400, 800},
-		{&win_proc, nullptr, L"Render Window 2", 150, 150, 800, 400},
-		{&win_proc, nullptr, L"Render Window 3", 200, 200, 400, 400},
-		{&win_proc, nullptr, L"Render Window 4", 250, 250, 800, 600},
+		{&win_proc, nullptr, L"Render Window 1", 100, 100, 1600, 900},
+		//{&win_proc, nullptr, L"Render Window 2", 150, 150, 800, 400},
+		//{&win_proc, nullptr, L"Render Window 3", 200, 200, 400, 400},
+		//{&win_proc, nullptr, L"Render Window 4", 250, 250, 800, 600},
 	};
 	static_assert(_countof(info) == _countof(_surfaces));
 

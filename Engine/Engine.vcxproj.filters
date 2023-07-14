@@ -193,6 +193,9 @@
     <ClInclude Include="Graphics\Direct3D12\D3D12Light.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanGBuffer.h" />
     <ClInclude Include="Components\PythonAPI.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanUtility.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanDescriptor.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanPipeline.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Components\Entity.cpp">
@@ -293,6 +296,9 @@
     <ClCompile Include="Graphics\Vulkan\VulkanContent.cpp" />
     <ClCompile Include="Graphics\Direct3D12\D3D12Light.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanGBuffer.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanUtility.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanDescriptor.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanPipeline.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Graphics\Vulkan\Shaders\test01.vert.glsl" />
@@ -305,5 +311,10 @@
     <None Include="Graphics\Vulkan\Shaders\floor.frag.glsl" />
     <None Include="Graphics\Vulkan\Shaders\compileShaders2.bat" />
     <None Include="Python_Scripts\compileShaders.py" />
+    <None Include="Graphics\Vulkan\Shaders\gbuffer.vert" />
+    <None Include="Graphics\Vulkan\Shaders\gbuffer.frag" />
+    <None Include="Graphics\Vulkan\Shaders\fullscreen.vert" />
+    <None Include="Graphics\Vulkan\Shaders\ssao.frag" />
+    <None Include="Graphics\Vulkan\Shaders\composition.frag" />
   </ItemGroup>
 </Project>

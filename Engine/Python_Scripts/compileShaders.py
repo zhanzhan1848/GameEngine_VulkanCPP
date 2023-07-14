@@ -9,7 +9,7 @@ parser.add_argument('--g', action = 'store_true', help = 'compile with debug sym
 args = parser.parse_args()
 
 glslc_path = os.getenv("VULKAN_SDK") + "\\bin\\glslc.exe"
-dir_path = "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders"
+dir_path = "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders"
 for root, dirs, files in os.walk(dir_path):
     for file in files:
         if file.endswith(".vert") or file.endswith(".frag") or file.endswith(".comp") or file.endswith(".geom") or file.endswith(".tesc") or file.endswith(".tese") or file.endswith(".rgen") or file.endswith(".rchit") or file.endswith(".rmiss"):

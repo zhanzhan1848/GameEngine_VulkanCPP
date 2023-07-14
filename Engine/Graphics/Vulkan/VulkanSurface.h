@@ -53,7 +53,7 @@ struct vulkan_layout_and_pool
         poolInfo.flags = 0;
         poolInfo.poolSizeCount = static_cast<u32>(poolSize.size());
         poolInfo.pPoolSizes = poolSize.data();
-        poolInfo.maxSets = static_cast<u64>(frame_buffer_count) + count;
+        poolInfo.maxSets = static_cast<u32>(frame_buffer_count) + count;
 
         VkResult result{ VK_SUCCESS };
         VkCall(result = vkCreateDescriptorPool(core::logical_device(), &poolInfo, nullptr, &descriptorPool), "Failed to create descriptor pool...");
@@ -61,10 +61,17 @@ struct vulkan_layout_and_pool
 
     void createDescriptorSetLayout()
     {
+        //std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings{
+        //    descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT),
+        //    descriptor::descriptorSetLayoutBinding(1, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+        //    descriptor::descriptorSetLayoutBinding(2, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+        //};
+
         std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings{
-            descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT),
+            descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
             descriptor::descriptorSetLayoutBinding(1, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
             descriptor::descriptorSetLayoutBinding(2, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+            descriptor::descriptorSetLayoutBinding(3, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
         };
 
         VkDescriptorSetLayoutCreateInfo descriptorLayout = descriptor::descriptorSetLayoutCreate(setLayoutBindings);
@@ -113,8 +120,6 @@ public:
     constexpr bool is_recreating() const { return _is_recreating; }
     constexpr bool is_resized() const { return _framebuffer_resized; }
     [[nodiscard]] constexpr vulkan_layout_and_pool& layout_and_pool() { return _layout_and_pool; }
-    /*constexpr const VkViewport& viewport() const {}
-    constexpr const VkRect2D& scissor_rect() const {}*/
 
     // Own function
     [[nodiscard]] constexpr scene::vulkan_scene& getScene() { return _scene; }

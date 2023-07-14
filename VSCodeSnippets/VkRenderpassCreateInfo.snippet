@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets >
+	<CodeSnippet Format="1.0.0">
+		<Header>
+			<Title>vk_renderpass_create_info</Title>
+			<Shortcut>vk_renderpass_create_info</Shortcut>
+			<Description>Vulkan Renderpass Create Info 代码片段</Description>
+			<Author>Myself</Author>
+			<SnippetTypes>
+				<SnippetType>Expansion</SnippetType>
+				<SnippetType>SurroundsWith</SnippetType>
+			</SnippetTypes>
+		</Header>
+		<Snippet>
+			<Declarations>
+				<Literal>
+					<ID>vk_renderpass_create_info</ID>
+					<ToolTip>自动填入Vulkan Renderpass Create Info需要的信息</ToolTip>
+					<Default>struct</Default>
+				</Literal>
+			</Declarations>
+			<Code Language="cpp"><![CDATA[
+			// Vulkan Renderpass Create Info
+			VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,                                      //sType
+            nullptr,                                                                        //pNext
+            0,                                                                              //flags
+            count,                                                                          //attachmentCount
+            desc,                                                                           //pAttachments
+            1,                                                                              //subpassCount
+            &subpass,                                                                       //pSubpasses
+            size,                                                                           //dependencyCount
+            data                                                                            //pDependencies
+]]>
+			</Code>
+		</Snippet>
+	</CodeSnippet>
+</CodeSnippets>

@@ -12,6 +12,8 @@
 #include "VulkanContent.h"
 #include "Components/Transform.h"
 #include "Components/Entity.h"
+#include "VulkanDescriptor.h"
+#include "VulkanPipeline.h"
 
 
 namespace primal::graphics::vulkan
@@ -118,14 +120,16 @@ vulkan_surface::create(VkInstance instance)
     create_render_pass();
     recreate_framebuffers();
 
-    _scene.getShadowmap().setupFramebuffer();
+    //_scene.getShadowmap().setupFramebuffer();
+    _scene.getOffscreen().setSize(this->width(), this->height());
+    _scene.getOffscreen().setupFramebuffer();
 
     core::create_graphics_command((u32)_swapchain.images.size());
 
-    auto model_id = submesh::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/models/viking_room.obj" });
-    auto texture_id = textures::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/images/viking_room.png" });
-    auto vs_id = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/test01.vert.spv" }, shader_type::vertex);
-    auto fs_id = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/test01.frag.spv" }, shader_type::pixel);
+    auto model_id = submesh::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/models/viking_room.obj" });
+    auto texture_id = textures::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/images/viking_room.png" });
+    auto vs_id = shaders::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/test01.vert.spv" }, shader_type::vertex);
+    auto fs_id = shaders::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/test01.frag.spv" }, shader_type::pixel);
     auto material_id = materials::add({ material_type::type::opauqe, 0, {vs_id, id::invalid_id, id::invalid_id, id::invalid_id, fs_id, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
     materials::get_material(material_id).add_texture(texture_id);
 
@@ -156,9 +160,9 @@ vulkan_surface::create(VkInstance instance)
     auto id4 = _scene.add_model_instance(ntt3, model_id);
     _scene.add_material(id4, material_id);
 
-    auto floor = submesh::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/EngineTest/assets/models/floor.obj" });
-    auto floor_vs = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/floor.vert.spv" }, shader_type::vertex);
-    auto floor_fs = shaders::add(std::string{ "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/floor.frag.spv" }, shader_type::pixel);
+    auto floor = submesh::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/models/floor.obj" });
+    auto floor_vs = shaders::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/floor.vert.spv" }, shader_type::vertex);
+    auto floor_fs = shaders::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/floor.frag.spv" }, shader_type::pixel);
     auto floor_material = materials::add({ material_type::opauqe, 0, {floor_vs, id::invalid_id, id::invalid_id, id::invalid_id, floor_fs, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
     
     transform::init_info transform_info1{};
@@ -179,19 +183,23 @@ vulkan_surface::create(VkInstance instance)
     auto id2 = _scene.add_model_instance(ntt1, floor);
     _scene.add_material(id2, floor_material);
 
-    _layout_and_pool.createDescriptorPool(_scene.getDescriptorSetsCount() * 2);
+    _layout_and_pool.createDescriptorPool(24);
     _layout_and_pool.createDescriptorSetLayout();
 
-    _scene.getShadowmap().createUniformBuffer();
-    _scene.getShadowmap().setupPipeline(_layout_and_pool.pipelineLayout);
-    _scene.getShadowmap().setupDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
+    //_scene.getShadowmap().createUniformBuffer();
+    //_scene.getShadowmap().setupPipeline(_layout_and_pool.pipelineLayout);
+    //_scene.getShadowmap().setupDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
+    _scene.getOffscreen().createUniformBuffer();
+    _scene.getOffscreen().setupDescriptorSets(_layout_and_pool.descriptorPool, texture_id);
+    _scene.getOffscreen().setupPipeline();
     //_scene.createDescriptorSetLayout();
-    _scene.createPipeline(_renderpass, _layout_and_pool.pipelineLayout);
+    _scene.createDeferPipeline(_renderpass, _layout_and_pool.pipelineLayout);
     
     _scene.createUniformBuffer();
     
     //_scene.createDescriptorPool();
-    _scene.createDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
+    _scene.createDeferDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
+
 }
 
 void

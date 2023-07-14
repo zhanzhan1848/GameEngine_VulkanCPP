@@ -11,8 +11,6 @@ namespace primal::graphics::vulkan
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, VkDescriptorBufferInfo * buffer);
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, VkDescriptorImageInfo * image);
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, utl::vector<VkDescriptorSet>& sets, u32 num, u32 binding, VkDescriptorType dType, VkDescriptorBufferInfo * buffer, VkDescriptorImageInfo * image);
-		VkDescriptorPoolCreateInfo descriptorPoolCreate(u32 poolSizeCount, VkDescriptorPoolSize * pPoolSizes, u32 maxSets);
-		VkDescriptorPoolCreateInfo descriptorPoolCreate(const std::vector<VkDescriptorPoolSize>& poolSizes, u32 maxSets);
 		VkDescriptorSetAllocateInfo descriptorSetAllocate(VkDescriptorPool descriptorPool, const VkDescriptorSetLayout * pSetLayouts, u32 descriptorSetCount);
 		VkWriteDescriptorSet writeDescriptorSets(VkDescriptorSet dstSet, VkDescriptorType type, u32 binding, VkDescriptorBufferInfo * bufferInfo, u32 descriptorCount);
 		VkDescriptorSetLayoutBinding descriptorSetLayoutBinding(u32 binding, VkShaderStageFlags stageFlags, VkDescriptorType type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VkSampler * sampler = nullptr, u32 descriptorCount = 1);
@@ -48,4 +46,7 @@ namespace primal::graphics::vulkan
 
 	u32 formatIsFilterable(VkPhysicalDevice physicalDevice, VkFormat format, VkImageTiling tilling);
 
+	utl::vector<VkVertexInputBindingDescription> getVertexInputBindDescriptor();
+
+	utl::vector<VkVertexInputAttributeDescription> getVertexInputAttributeDescriptor();
 }

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets >
+	<CodeSnippet Format="1.0.0">
+		<Header>
+			<Title>vk_framebuffer_create_info</Title>
+			<Shortcut>vk_framebuffer_create_info</Shortcut>
+			<Description>Vulkan Framebuffer Create Info 代码片段</Description>
+			<Author>Myself</Author>
+			<SnippetTypes>
+				<SnippetType>Expansion</SnippetType>
+				<SnippetType>SurroundsWith</SnippetType>
+			</SnippetTypes>
+		</Header>
+		<Snippet>
+			<Declarations>
+				<Literal>
+					<ID>vk_framebuffer_create_info</ID>
+					<ToolTip>自动填入Vulkan Framebuffer Create Info需要的信息</ToolTip>
+					<Default>struct</Default>
+				</Literal>
+			</Declarations>
+			<Code Language="cpp"><![CDATA[
+			// Vulkan Framebuffer Create Info
+			VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,                                      //sType
+            nullptr,                                                                        //pNext
+            0,                                                                              //flags
+            renderpass,                                                                     //renderPass
+            0,                                                                              //attachmentCount
+            nullptr,                                                                        //pAttachments
+            800,                                                                            //width
+            600,                                                                            //height
+            1                                                                               //layers
+]]>
+			</Code>
+		</Snippet>
+	</CodeSnippet>
+</CodeSnippets>

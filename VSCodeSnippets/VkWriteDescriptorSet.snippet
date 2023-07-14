@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets >
+	<CodeSnippet Format="1.0.0">
+		<Header>
+			<Title>vk_write_descriptor_set</Title>
+			<Shortcut>vk_write_descriptor_set</Shortcut>
+			<Description>Vulkan Write Descriptor Set 代码片段</Description>
+			<Author>Myself</Author>
+			<SnippetTypes>
+				<SnippetType>Expansion</SnippetType>
+				<SnippetType>SurroundsWith</SnippetType>
+			</SnippetTypes>
+		</Header>
+		<Snippet>
+			<Declarations>
+				<Literal>
+					<ID>vk_write_descriptor_set</ID>
+					<ToolTip>自动填入Vulkan Write Descriptor Set需要的信息</ToolTip>
+					<Default>struct</Default>
+				</Literal>
+			</Declarations>
+			<Code Language="cpp"><![CDATA[
+			// Vulkan Write Descriptor Set
+			VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,                                     //sType
+            nullptr,                                                                    //pNext
+            dstSet,                                                                     //dstSet
+            0,                                                                          //dstBinding
+            0,                                                                          //dstArrayElement
+            1,                                                                          //descriptorCount
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,                                          //descriptorType
+            nullptr,                                                                    //pImageInfo
+            &buffer,                                                                    //pBufferInfo
+            nullptr                                                                     //pTexelBufferView
+]]>
+			</Code>
+		</Snippet>
+	</CodeSnippet>
+</CodeSnippets>

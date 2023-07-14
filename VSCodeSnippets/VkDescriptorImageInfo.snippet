@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets >
+	<CodeSnippet Format="1.0.0">
+		<Header>
+			<Title>vk_descriptor_image_info</Title>
+			<Shortcut>vk_descriptor_image_info</Shortcut>
+			<Description>Vulkan Descriptor Image Info 代码片段</Description>
+			<Author>Myself</Author>
+			<SnippetTypes>
+				<SnippetType>Expansion</SnippetType>
+				<SnippetType>SurroundsWith</SnippetType>
+			</SnippetTypes>
+		</Header>
+		<Snippet>
+			<Declarations>
+				<Literal>
+					<ID>vk_descriptor_image_info</ID>
+					<ToolTip>自动填入Vulkan Descriptor Image Info需要的信息</ToolTip>
+					<Default>struct</Default>
+				</Literal>
+			</Declarations>
+			<Code Language="cpp"><![CDATA[
+			// Vulkan Descriptor Image Info
+			&sampler,                                                                       //sampler
+            &view,                                                                          //imageView
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL                                        //imageLayout
+]]>
+			</Code>
+		</Snippet>
+	</CodeSnippet>
+</CodeSnippets>

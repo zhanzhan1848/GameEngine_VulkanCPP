@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets >
+	<CodeSnippet Format="1.0.0">
+		<Header>
+			<Title>vk_descriptor_set_allocate_info</Title>
+			<Shortcut>vk_descriptor_set_allocate_info</Shortcut>
+			<Description>Vulkan Descriptor Set Allocate Info 代码片段</Description>
+			<Author>Myself</Author>
+			<SnippetTypes>
+				<SnippetType>Expansion</SnippetType>
+				<SnippetType>SurroundsWith</SnippetType>
+			</SnippetTypes>
+		</Header>
+		<Snippet>
+			<Declarations>
+				<Literal>
+					<ID>vk_descriptor_set_allocate_info</ID>
+					<ToolTip>自动填入Vulkan Descriptor Set Allocate Info需要的信息</ToolTip>
+					<Default>struct</Default>
+				</Literal>
+			</Declarations>
+			<Code Language="cpp"><![CDATA[
+			// Vulkan Descriptor Set Allocate Info
+			VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,                                 //sType
+            nullptr,                                                                        //pNext
+            pool,                                                                           //descriptorPool
+            0,                                                                              //descriptorSetCount
+            nullptr                                                                         //pSetLayouts
+]]>
+			</Code>
+		</Snippet>
+	</CodeSnippet>
+</CodeSnippets>

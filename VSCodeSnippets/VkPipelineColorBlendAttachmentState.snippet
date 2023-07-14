@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets >
+	<CodeSnippet Format="1.0.0">
+		<Header>
+			<Title>vk_pipeline_color_blend_attachment_state</Title>
+			<Shortcut>vk_pipeline_color_blend_attachment_state</Shortcut>
+			<Description>Vulkan Pipeline Color Blend Attachment State 代码片段</Description>
+			<Author>Myself</Author>
+			<SnippetTypes>
+				<SnippetType>Expansion</SnippetType>
+				<SnippetType>SurroundsWith</SnippetType>
+			</SnippetTypes>
+		</Header>
+		<Snippet>
+			<Declarations>
+				<Literal>
+					<ID>vk_pipeline_color_blend_attachment_state</ID>
+					<ToolTip>自动填入Vulkan Pipeline Color Blend Attachment State需要的信息</ToolTip>
+					<Default>struct</Default>
+				</Literal>
+			</Declarations>
+			<Code Language="cpp"><![CDATA[
+			// Vulkan Pipeline Color Blend Attachment State
+			Vk_FALSE,                                                                                   //blendEnable
+            VK_BLEND_FACTOR_ONE,                                                                        //srcColorBlendFactor
+            VK_BLEND_FACTOR_ONE,                                                                        //dstColorBlendFactor
+            VK_BLEND_OP_ADD,                                                                            //colorBlendOp
+            VK_BLEND_FACTOR_ONE,                                                                        //srcAlphaBlendFactor
+            VK_BLEND_FACTOR_ONE,                                                                        //dstAlphaBlendFactor
+            VK_BLEND_OP_ADD,                                                                            //alphaBlendOp
+            VK_COLOR_COMPONENT_R_BIT 
+            | VK_COLOR_COMPONENT_G_BIT 
+            | VK_COLOR_COMPONENT_B_BIT 
+            | VK_COLOR_COMPONENT_A_BIT,                                                                 //colorWriteMask
+]]>
+			</Code>
+		</Snippet>
+	</CodeSnippet>
+</CodeSnippets>

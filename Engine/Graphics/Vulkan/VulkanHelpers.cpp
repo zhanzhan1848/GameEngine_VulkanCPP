@@ -79,32 +79,15 @@ namespace primal::graphics::vulkan
 			return descriptorWrite;
 		}
 
-		VkDescriptorPoolCreateInfo descriptorPoolCreate(
-			u32 poolSizeCount,
-			VkDescriptorPoolSize* pPoolSizes,
-			u32 maxSets)
+		VkDescriptorPoolCreateInfo descriptorPoolCreate(std::tuple<utl::vector<VkDescriptorPoolSize>, u32> info)
 		{
 			VkDescriptorPoolCreateInfo descriptorPoolInfo;
 			descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 			descriptorPoolInfo.pNext = nullptr;
 			descriptorPoolInfo.flags = 0;
-			descriptorPoolInfo.maxSets = maxSets;
-			descriptorPoolInfo.poolSizeCount = poolSizeCount;
-			descriptorPoolInfo.pPoolSizes = pPoolSizes;
-			return descriptorPoolInfo;
-		}
-
-		VkDescriptorPoolCreateInfo descriptorPoolCreate(
-			const std::vector<VkDescriptorPoolSize>& poolSizes,
-			u32 maxSets)
-		{
-			VkDescriptorPoolCreateInfo descriptorPoolInfo;
-			descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-			descriptorPoolInfo.pNext = nullptr;
-			descriptorPoolInfo.flags = 0;
-			descriptorPoolInfo.maxSets = maxSets;
-			descriptorPoolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
-			descriptorPoolInfo.pPoolSizes = poolSizes.data();
+			descriptorPoolInfo.maxSets = std::get<1>(info);
+			descriptorPoolInfo.poolSizeCount = static_cast<u32>(std::get<0>(info).size());
+			descriptorPoolInfo.pPoolSizes = std::get<0>(info).data();
 			return descriptorPoolInfo;
 		}
 
@@ -199,18 +182,18 @@ namespace primal::graphics::vulkan
 			return pipelineLayoutCreateInfo;
 		}
 
-		//inline VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo(
-		//	u32 setLayoutCount = 1,
-		//	u32 pushCount = 0,
-		//	VkPushConstantRange* constant = nullptr)
-		//{
-		//	VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
-		//	pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		//	pipelineLayoutCreateInfo.setLayoutCount = setLayoutCount;
-		//	pipelineLayoutCreateInfo.pushConstantRangeCount = pushCount;
-		//	pipelineLayoutCreateInfo.pPushConstantRanges = constant;
-		//	return pipelineLayoutCreateInfo;
-		//}
+		VkPipelineLayoutCreateInfo pipelineLayoutCreate(std::tuple<utl::vector<VkDescriptorSetLayout>, utl::vector<VkPushConstantRange>> info)
+		{
+			VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
+			pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipelineLayoutCreateInfo.pNext = nullptr;
+			pipelineLayoutCreateInfo.flags = 0;
+			pipelineLayoutCreateInfo.setLayoutCount = std::get<0>(info).size();
+			pipelineLayoutCreateInfo.pSetLayouts = std::get<0>(info).data();
+			pipelineLayoutCreateInfo.pushConstantRangeCount = std::get<1>(info).size();
+			pipelineLayoutCreateInfo.pPushConstantRanges = std::get<1>(info).data();
+			return pipelineLayoutCreateInfo;
+		}
 
 		VkPipelineVertexInputStateCreateInfo pipelineVertexInputStateCreate(
 			const std::vector<VkVertexInputBindingDescription> &vertexBindingDescriptions = std::vector<VkVertexInputBindingDescription>(),
@@ -620,5 +603,44 @@ namespace primal::graphics::vulkan
 			return formatProps.linearTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 
 		return false;
+	}
+
+	utl::vector<VkVertexInputBindingDescription> getVertexInputBindDescriptor()
+	{
+		utl::vector<VkVertexInputBindingDescription> _bindingDescription;
+		_bindingDescription.emplace_back([]() {
+			VkVertexInputBindingDescription bBind{ 0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX };
+			return bBind;
+			}());
+		_bindingDescription.emplace_back([]() {
+			VkVertexInputBindingDescription bBind{ 1, sizeof(InstanceData), VK_VERTEX_INPUT_RATE_VERTEX };
+			return bBind;
+			}());
+
+		return _bindingDescription;
+	}
+
+	// TODO: Make a configuration to bind id
+	utl::vector<VkVertexInputAttributeDescription> getVertexInputAttributeDescriptor()
+	{
+		utl::vector<VkVertexInputAttributeDescription> _attributeDescriptions;
+		for (u32 i{ 0 }; i < (sizeof(Vertex) + sizeof(InstanceData)) / sizeof(math::v3); ++i)
+		{
+			if (i < sizeof(Vertex) / sizeof(math::v3))
+			{
+				_attributeDescriptions.emplace_back([i]() {
+					VkVertexInputAttributeDescription attributeDescriptions{ i, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
+					return attributeDescriptions;
+					}());
+			}
+			else
+			{
+				_attributeDescriptions.emplace_back([i]() {
+					VkVertexInputAttributeDescription attributeDescriptions{ i, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * (i - (sizeof(Vertex) / sizeof(math::v3))) };
+					return attributeDescriptions;
+					}());
+			}
+		}
+		return _attributeDescriptions;
 	}
 }

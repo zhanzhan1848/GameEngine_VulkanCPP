@@ -133,6 +133,19 @@ struct UniformBufferObjectPlus : UniformBufferObject
     f32         lightNear;
     f32         lightFar;
 };
+
+struct render_type
+{
+    enum type : u32
+    {
+        forward,
+        defer,
+        both,
+        custom,
+        
+        count
+    };
+};
 }
 
 
