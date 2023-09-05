@@ -251,6 +251,7 @@
     <ClInclude Include="Graphics\Vulkan\VulkanGBuffer.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanHelpers.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanInterface.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanLight.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanPipeline.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanRenderPass.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanResources.h" />
@@ -302,6 +303,7 @@
     <ClCompile Include="Graphics\Vulkan\VulkanGBuffer.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanHelpers.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanInterface.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanLight.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanPipeline.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanRenderPass.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanResources.cpp" />

@@ -18,7 +18,7 @@ void main()
 	 
 	float ssao = texture(samplerSSAO, flip_y_uv).r;
 
-	vec3 lightPos = vec3(15.0);
+	vec3 lightPos = vec3(5.0);
 	vec3 L = normalize(lightPos - fragPos);
 	float NdotL = max(0.5, dot(normal, L));
 

@@ -134,6 +134,17 @@ struct UniformBufferObjectPlus : UniformBufferObject
     f32         lightFar;
 };
 
+struct GPULightData
+{
+    math::m4x4*  mvp;
+    math::m4x4*  affine;
+    math::v3*    position;
+    math::v4*    direction;
+    math::v3*    color;
+    f32*         falloff;
+    u32          light_count;
+};
+
 struct render_type
 {
     enum type : u32

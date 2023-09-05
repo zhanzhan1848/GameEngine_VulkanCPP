@@ -15,6 +15,7 @@
     <ClInclude Include="TestRenderer.h" />
     <ClInclude Include="ShaderCompilation.h" />
     <ClInclude Include="TestWindowLinux.h" />
+    <ClInclude Include="PythonScript.h" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="assets\images\test01.jpg" />

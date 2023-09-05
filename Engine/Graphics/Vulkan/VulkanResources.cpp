@@ -7,7 +7,7 @@ namespace primal::graphics::vulkan
 {
 namespace
 {
-
+    utl::free_list<VkFramebuffer>   framebuffer_list;
 } // anonymous namespace
 
 bool
@@ -151,5 +151,25 @@ destroy_framebuffer(VkDevice device, vulkan_framebuffer& framebuffer)
     framebuffer.attach_count = 0;
 
     MESSAGE("Destroyed framebuffer");
+}
+
+id::id_type create(VkFramebufferCreateInfo info)
+{
+    VkFramebuffer fb;
+    VkResult result{ VK_SUCCESS };
+    VkCall(result = vkCreateFramebuffer(core::logical_device(), &info, nullptr, &fb), "Failed to create framebuffer...");
+    if (result != VK_SUCCESS) return id::invalid_id;
+    MESSAGE("Created frambuffer");
+    return framebuffer_list.add(fb);
+}
+
+void remove(id::id_type id)
+{
+    framebuffer_list.remove(id);
+}
+
+VkFramebuffer get(id::id_type id)
+{
+    return framebuffer_list[id];
 }
 }

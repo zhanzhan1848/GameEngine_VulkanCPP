@@ -42,6 +42,26 @@ namespace primal::graphics::vulkan
 			_texture = tex;
 		}
 
+		vulkan_texture_2d::vulkan_texture_2d(VkImageCreateInfo img_info, VkImageViewCreateInfo view_info)
+		{
+			VkResult result{ VK_SUCCESS };
+			VkCall(result = vkCreateImage(core::logical_device(), &img_info, nullptr, &_texture.image), "Failed to create image...");
+
+			view_info.image = _texture.image;
+			VkCall(result = vkCreateImageView(core::logical_device(), &view_info, nullptr, &_texture.view), "Failed to create image view...");
+		}
+
+		vulkan_texture_2d::vulkan_texture_2d(VkImageCreateInfo img_info, VkImageViewCreateInfo view_info, VkSamplerCreateInfo sampler_info)
+		{
+			VkResult result{ VK_SUCCESS };
+			VkCall(result = vkCreateImage(core::logical_device(), &img_info, nullptr, &_texture.image), "Failed to create image...");
+
+			view_info.image = _texture.image;
+			VkCall(result = vkCreateImageView(core::logical_device(), &view_info, nullptr, &_texture.view), "Failed to create image view...");
+
+			VkCall(result = vkCreateSampler(core::logical_device(), &sampler_info, nullptr, &_texture.sampler), "Failed to create sampler...");
+		}
+
 		vulkan_texture_2d::~vulkan_texture_2d()
 		{
 			vkDestroySampler(core::logical_device(), _texture.sampler, nullptr);
@@ -131,6 +151,12 @@ namespace primal::graphics::vulkan
 			VkCall(result = vkCreateSampler(core::logical_device(), &samplerInfo, nullptr, &_texture.sampler), "Failed to create texture sampler...");
 		}
 
+		void vulkan_texture_2d::create_sampler(VkSamplerCreateInfo info)
+		{
+			VkResult result{ VK_SUCCESS };
+			VkCall(result = vkCreateSampler(core::logical_device(), &info, nullptr, &_texture.sampler), "Failed to create sampler ....");
+		}
+
 		/// <summary>
 		// ! 生成图片原始ID
 		/// </summary>
@@ -144,6 +170,16 @@ namespace primal::graphics::vulkan
 		id::id_type add(vulkan_texture tex)
 		{
 			return textures.add(tex);
+		}
+
+		id::id_type add(VkImageCreateInfo img_info, VkImageViewCreateInfo view_info)
+		{
+			return textures.add(img_info, view_info);
+		}
+
+		id::id_type add(VkImageCreateInfo img_info, VkImageViewCreateInfo view_info, VkSamplerCreateInfo sampler_info)
+		{
+			return textures.add(img_info, view_info, sampler_info);
 		}
 
 		/// <summary>

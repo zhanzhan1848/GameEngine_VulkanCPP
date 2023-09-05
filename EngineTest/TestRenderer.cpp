@@ -13,6 +13,8 @@
 #include <fstream>
 #include <iostream>
 
+#include "PythonScript.h"
+
 #if TEST_RENDERER
 
 using namespace primal;
@@ -240,12 +242,14 @@ bool test_initialize()
 	}
 	else if constexpr(GRAPHICS_API == graphics::graphics_platform::vulkan_1)
 	{ 
-		system("python C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Python_Scripts/compileShaders.py");
+		//system("python C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Python_Scripts/compileShaders.py");
+		pyscript();
 	}
 	else
 	{ }
 
 	if (!graphics::initialize(GRAPHICS_API)) return false;
+
 
 	platform::window_init_info info[]
 	{

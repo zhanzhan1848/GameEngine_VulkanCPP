@@ -1382,7 +1382,7 @@ namespace primal::graphics::vulkan
 
 	void vulkan_offscreen::setupPipeline()
 	{
-		VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = descriptor::pipelineInputAssemblyStateCreate(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, VK_FALSE);
+		PE_vk_pipeline_input_assemble_info inputAssemble;
 		VkPipelineRasterizationStateCreateInfo rasterizationState = descriptor::pipelineRasterizationStateCreate(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE);
 		std::vector<VkPipelineColorBlendAttachmentState> blendAttachmentState = { descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE), descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE), descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE) };
 		VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(static_cast<u32>(blendAttachmentState.size()), *blendAttachmentState.data());
@@ -1412,7 +1412,7 @@ namespace primal::graphics::vulkan
 		pipelineCreateInfo.pNext = nullptr;
 		pipelineCreateInfo.renderPass = _renderpasses[0].render_pass;
 		pipelineCreateInfo.flags = 0;
-		pipelineCreateInfo.pInputAssemblyState = &inputAssemblyState;
+		pipelineCreateInfo.pInputAssemblyState = &inputAssemble.info;
 		pipelineCreateInfo.pRasterizationState = &rasterizationState;
 		pipelineCreateInfo.pColorBlendState = &colorBlendState;
 		pipelineCreateInfo.pMultisampleState = &multisampleState;

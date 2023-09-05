@@ -5,7 +5,7 @@ layout (binding = 1) uniform sampler2D samplerNormal;
 layout (binding = 2) uniform sampler2D ssaoNoise;
 
 layout (constant_id = 0) const int SSAO_KERNEL_SIZE = 64;
-layout (constant_id = 1) const float SSAO_RADIUS = 0.5;
+layout (constant_id = 1) const float SSAO_RADIUS = 0.3;
 
 layout (binding = 3) uniform UBOSSAOKernel
 {
@@ -24,7 +24,6 @@ layout (location = 0) out float outFragColor;
 void main() 
 {
 	// Get G-Buffer values
-	vec2 uv = vec2(inUV.x, 1.0 - inUV.y);
 	vec3 fragPos = texture(samplerPositionDepth, inUV).rgb;
 	vec3 normal = normalize(texture(samplerNormal, inUV).rgb * 2.0 - 1.0);
 

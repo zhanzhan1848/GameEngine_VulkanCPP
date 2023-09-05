@@ -25,11 +25,19 @@ namespace primal::graphics::vulkan
 
 			explicit vulkan_texture_2d(vulkan_texture);
 
+			explicit vulkan_texture_2d(VkImageCreateInfo, VkImageViewCreateInfo);
+
+			explicit vulkan_texture_2d(VkImageCreateInfo, VkImageViewCreateInfo, VkSamplerCreateInfo);
+
 			~vulkan_texture_2d();
 
 			void loadTexture(std::string path);
 
+			void create_sampler(VkSamplerCreateInfo);
+
 			[[nodiscard]] vulkan_texture& getTexture() { return _texture; }
+
+			[[nodiscard]] VkDescriptorImageInfo get_descriptor_info() { return { _texture.sampler, _texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }; }
 
 		private:
 			vulkan_texture								_texture;
@@ -38,6 +46,10 @@ namespace primal::graphics::vulkan
 		id::id_type add(std::string path);
 
 		id::id_type add(vulkan_texture);
+
+		id::id_type add(VkImageCreateInfo, VkImageViewCreateInfo);
+
+		id::id_type add(VkImageCreateInfo, VkImageViewCreateInfo, VkSamplerCreateInfo);
 
 		void remove(id::id_type id);
 

@@ -9,6 +9,9 @@ namespace primal::graphics::vulkan::renderpass
 {
     namespace
     {
+        utl::free_list<VkRenderPass>            renderpass_list;
+
+
         VkSubpassDependency createSubpassDependency(
             VkPipelineStageFlags srcStageMask,
             VkPipelineStageFlags dstStageMask,
@@ -183,5 +186,23 @@ end_renderpass(VkCommandBuffer cmd_buffer, vulkan_cmd_buffer::state state, vulka
 {
     vkCmdEndRenderPass(cmd_buffer);
     state = vulkan_cmd_buffer::CMD_RECORDING;
+}
+
+id::id_type create(VkRenderPassCreateInfo info)
+{
+    VkRenderPass pass;
+    VkResult result{VK_SUCCESS};
+    VkCall(result = vkCreateRenderPass(core::logical_device(), &info, nullptr, &pass), "Failed to create render pass...");
+    return renderpass_list.add(pass);
+}
+
+void remove(id::id_type id)
+{
+    renderpass_list.remove(id);
+}
+
+VkRenderPass get(id::id_type id)
+{
+    return renderpass_list[id];
 }
 }

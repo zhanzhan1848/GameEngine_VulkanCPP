@@ -33,7 +33,7 @@ void main()
 	outUV = inUV;
 
 	// Vertex position in view space
-	outPos = vec3(ubo.view * ubo.model * inPos);
+	outPos = vec3(ubo.view * ubo.model * gRotMat * pos);
 
 	// Normal in view space
 	mat3 normalMatrix = transpose(inverse(mat3(ubo.view * ubo.model)));

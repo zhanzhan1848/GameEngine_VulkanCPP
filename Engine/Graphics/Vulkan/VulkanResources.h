@@ -29,4 +29,7 @@ void destroy_image(VkDevice device, vulkan_image* image);
 bool create_framebuffer(VkDevice device, vulkan_renderpass& renderpass, u32 width, u32 height, u32 attach_count, utl::vector<VkImageView> attachments, vulkan_framebuffer& framebuffer);
 void destroy_framebuffer(VkDevice device, vulkan_framebuffer& framebuffer);
 
+id::id_type create(VkFramebufferCreateInfo);
+void remove(id::id_type);
+VkFramebuffer get(id::id_type);
 }

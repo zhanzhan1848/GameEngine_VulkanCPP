@@ -50,8 +50,8 @@ namespace primal::graphics::vulkan
 		id::id_type										_pipeline_id;
 		shaders::vulkan_shader							_shader;
 		math::v3										_lightPos;
-		f32												_near{ 0.01f };
-		f32												_far{ 1000.f };
+		f32												_near{ 0.1f };
+		f32												_far{ 64.f };
 	};
 
 	struct uboSSAOParam
