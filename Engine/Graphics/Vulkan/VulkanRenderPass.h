@@ -9,8 +9,4 @@ vulkan_renderpass create_renderpass(VkDevice device, VkFormat swapchain_image_fo
 void destroy_renderpass(VkDevice device, vulkan_renderpass& renderpass);
 void begin_renderpass(VkCommandBuffer cmd_buffer, vulkan_cmd_buffer::state state, vulkan_renderpass& renderpass, VkFramebuffer frame_buffer);
 void end_renderpass(VkCommandBuffer cmd_buffer, vulkan_cmd_buffer::state state, vulkan_renderpass& renderpass);
-
-id::id_type create(VkRenderPassCreateInfo);
-void remove(id::id_type);
-VkRenderPass get(id::id_type);
 }

@@ -119,4 +119,68 @@ namespace primal::graphics::vulkan
 		id::id_type										_ssao_descriptorSet_id;
 		id::id_type										_ssao_pipeline_id;
 	};
+
+	class vulkan_geometry_pass
+	{
+	public:
+		vulkan_geometry_pass() = default;
+
+		explicit vulkan_geometry_pass(u32 width, u32 height) : _width{ width }, _height{ height } {}
+
+		DISABLE_COPY_AND_MOVE(vulkan_geometry_pass);
+
+		~vulkan_geometry_pass();
+
+		void setSize(u32 width, u32 height) { _width = width; _height = height; }
+
+		void createUniformBuffer();
+
+		void setupRenderpassAndFramebuffer();
+
+		void runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface* surface);
+
+
+		[[nodiscard]] utl::vector<id::id_type> getTexture() { return _image_ids; }
+
+	private:
+		u32												_width;
+		u32												_height;
+		id::id_type										_ub_id;
+		id::id_type										_framebuffer_id;
+		id::id_type										_renderpass_id;
+		utl::vector<id::id_type>						_image_ids;
+		id::id_type										_descriptorSet_id;
+		id::id_type										_pipeline_id;
+		utl::vector<id::id_type>						_descriptorSet_layout_id;
+		id::id_type										_pipeline_layout_id;
+	};
+
+	class vulkan_final_pass
+	{
+	public:
+		vulkan_final_pass() = default;
+
+		explicit vulkan_final_pass(u32 width, u32 height) : _width{ width }, _height{ height } {}
+
+		DISABLE_COPY_AND_MOVE(vulkan_final_pass);
+
+		~vulkan_final_pass();
+
+		void setSize(u32 width, u32 height) { _width = width; _height = height; }
+
+		void setupDescriptorSets(std::initializer_list<id::id_type> image_id);
+
+		void setupPipeline(vulkan_renderpass renderpass);
+
+		void render(vulkan_cmd_buffer cmd_buffer);
+
+	private:
+		u32												_width;
+		u32												_height;
+		id::id_type										_descriptor_pool_id;
+		id::id_type										_descriptorSet_id;
+		id::id_type										_pipeline_id;
+		id::id_type										_descriptorSet_layout_id;
+		id::id_type										_pipeline_layout_id;
+	};
 }

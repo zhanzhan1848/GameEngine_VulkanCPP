@@ -40,7 +40,7 @@ struct vulkan_layout_and_pool
     VkDescriptorPool									descriptorPool;
     VkPipelineLayout									pipelineLayout;
 
-    void createDescriptorPool(u64 count)
+    void createDescriptorPool(u32 count)
     {
         std::vector<VkDescriptorPoolSize> poolSize = {
             descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count)),

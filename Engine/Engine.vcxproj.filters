@@ -197,6 +197,7 @@
     <ClInclude Include="Graphics\Vulkan\VulkanDescriptor.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanPipeline.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanLight.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanData.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Components\Entity.cpp">
@@ -301,6 +302,7 @@
     <ClCompile Include="Graphics\Vulkan\VulkanDescriptor.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanPipeline.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanLight.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanData.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Graphics\Vulkan\Shaders\test01.vert.glsl" />

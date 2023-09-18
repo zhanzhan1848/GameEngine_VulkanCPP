@@ -201,7 +201,7 @@ namespace primal::graphics::vulkan
 			void remove_material() { _material_id = id::invalid_id; }
 			[[nodiscard]] constexpr id::id_type const getMaterialID() const { return _material_id; }
 			[[nodiscard]] constexpr id::id_type const getEntityID() const { return _id; }
-			[[nodiscard]] utl::vector<id::id_type> const get_pipeline_ids(render_type::type type) const { return _pipeline_ids.at(type); }
+			[[nodiscard]] id::id_type const get_pipeline_ids() const { return _pipeline_id; }
 			[[nodiscard]] utl::vector<id::id_type> const get_descriptor_set_ids(render_type::type type) const { return _descriptorSet_ids.at(type); }
 
 		private:
@@ -210,7 +210,7 @@ namespace primal::graphics::vulkan
 			uniformBuffer											_instanceBuffer;
 			id::id_type												_material_id;
 			utl::vector<VkPipelineShaderStageCreateInfo>			_shaderStages;
-			std::map<render_type::type, utl::vector<id::id_type>>	_pipeline_ids;
+			id::id_type												_pipeline_id;
 			std::map<render_type::type, utl::vector<id::id_type>>	_descriptorSet_ids;
 			InstanceData											_instanceData;
 
@@ -253,6 +253,7 @@ namespace primal::graphics::vulkan
 
 			[[nodiscard]] constexpr vulkan_shadowmapping& getShadowmap() { return _shadowmap; }
 			[[nodiscard]] constexpr vulkan_offscreen& getOffscreen() { return _offscreen; }
+			[[nodiscard]] utl::vector<id::id_type> getInstance() { return _instance_ids; }
 
 		private:
 			utl::vector<id::id_type>							_instance_ids;
@@ -264,5 +265,7 @@ namespace primal::graphics::vulkan
 			id::id_type											_pipeline_id;
 			id::id_type											_descriptor_set_id;
 		};
+
+		submesh::vulkan_instance_model& get_instance(id::id_type);
 	}
 }

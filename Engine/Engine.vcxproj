@@ -97,7 +97,7 @@
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel>
-      <PreprocessorDefinitions>PRIMAL_PLUS;DEBUG;_LIB;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>PRIMAL_PLUS;DEBUG;_LIB;_HAS_EXCEPTIONS=0;MY_PROJECT_DIR="$(ProjectDir)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Common;$(VULKAN_SDK)\Include</AdditionalIncludeDirectories>
       <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
@@ -247,6 +247,7 @@
     <ClInclude Include="Graphics\Vulkan\VulkanCommonHeaders.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanContent.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanCore.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanData.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanDescriptor.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanGBuffer.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanHelpers.h" />
@@ -299,6 +300,7 @@
     <ClCompile Include="Graphics\Vulkan\VulkanCommandBuffer.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanContent.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanCore.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanData.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanDescriptor.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanGBuffer.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanHelpers.cpp" />

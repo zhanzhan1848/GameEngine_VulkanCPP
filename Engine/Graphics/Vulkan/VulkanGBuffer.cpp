@@ -8,6 +8,8 @@
 #include "VulkanDescriptor.h"
 #include "VulkanResources.h"
 #include "VulkanUtility.h"
+#include "VulkanData.h"
+#include "VulkanData.cpp"
 
 #include "EngineAPI/GameEntity.h"
 #include "Components/Transform.h"
@@ -357,6 +359,84 @@ namespace primal::graphics::vulkan
 			// Update descriptor image info member that can be used for setting up descriptor sets
 			//updateDescriptor();
 		}
+
+		id::id_type createOffscreenTexture(u32 width, u32 height, bool isPosition, bool singleChannel, OUT utl::vector<VkAttachmentDescription>& attach)
+		{
+			vulkan_texture tex;
+
+			VkImageCreateInfo image{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+			image.imageType = VK_IMAGE_TYPE_2D;
+			image.extent.height = height;
+			image.extent.width = width;
+			image.extent.depth = 1;
+			image.mipLevels = 1;
+			image.arrayLayers = 1;
+			image.samples = VK_SAMPLE_COUNT_1_BIT;
+			image.tiling = VK_IMAGE_TILING_OPTIMAL;
+			image.format = singleChannel ? VK_FORMAT_D16_UNORM : (isPosition ? VK_FORMAT_R32G32B32A32_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM);
+			image.flags = 0;
+			image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; // ! VK_IMAGE_USAGE_SAMPLED_BIT use to sample directly from the depth attachment for shadow mapping
+			VkResult result{ VK_SUCCESS };
+			VkCall(result = vkCreateImage(core::logical_device(), &image, nullptr, &tex.image), "Failed to create GBuffer(shadow mapping) image...");
+
+			VkMemoryRequirements memReq;
+			vkGetImageMemoryRequirements(core::logical_device(), tex.image, &memReq);
+			VkMemoryAllocateInfo alloc{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+			alloc.pNext = nullptr;
+			alloc.allocationSize = memReq.size;
+			alloc.memoryTypeIndex = core::find_memory_index(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+			result = VK_SUCCESS;
+			VkCall(result = vkAllocateMemory(core::logical_device(), &alloc, nullptr, &tex.memory), "Failed to allocate GBuffer(shadow mapping) memory...");
+			result = VK_SUCCESS;
+			VkCall(result = vkBindImageMemory(core::logical_device(), tex.image, tex.memory, 0), "Failed to bind GBuffer(shadow mapping) to memory...");
+
+			VkImageViewCreateInfo imageView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+			imageView.pNext = nullptr;
+			imageView.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			imageView.format = singleChannel ? VK_FORMAT_D16_UNORM : (isPosition ? VK_FORMAT_R32G32B32A32_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM);
+			imageView.subresourceRange.aspectMask = singleChannel ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+			imageView.subresourceRange.baseMipLevel = 0;
+			imageView.subresourceRange.levelCount = 1;
+			imageView.subresourceRange.baseArrayLayer = 0;
+			imageView.subresourceRange.layerCount = 1;
+			imageView.image = tex.image;
+			result = VK_SUCCESS;
+			VkCall(result = vkCreateImageView(core::logical_device(), &imageView, nullptr, &tex.view), "Failed to create GBuffer(shadow mapping) image view...");
+
+			// Create sampler to sample from to depth attachment
+			// Used to sample in the fragment shader for shadowed rendering
+			VkSamplerCreateInfo sampler{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+			sampler.pNext = nullptr;
+			sampler.magFilter = VK_FILTER_LINEAR;
+			sampler.minFilter = VK_FILTER_LINEAR;
+			sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+			sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			sampler.addressModeV = sampler.addressModeU;
+			sampler.addressModeW = sampler.addressModeU;
+			sampler.mipLodBias = 0.f;
+			sampler.maxAnisotropy = 1.f;
+			sampler.minLod = 0.f;
+			sampler.maxLod = 1.f;
+			sampler.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+			result = VK_SUCCESS;
+			VkCall(result = vkCreateSampler(core::logical_device(), &sampler, nullptr, &tex.sampler), "Failed to create GBuffer(shadow mapping) image sampler...");
+
+			VkAttachmentDescription attachDesc{
+				0,
+				singleChannel ? VK_FORMAT_D16_UNORM : (isPosition ? VK_FORMAT_R32G32B32A32_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM),
+				VK_SAMPLE_COUNT_1_BIT,
+				VK_ATTACHMENT_LOAD_OP_CLEAR,
+				VK_ATTACHMENT_STORE_OP_STORE,
+				VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+				VK_ATTACHMENT_STORE_OP_DONT_CARE,
+				VK_IMAGE_LAYOUT_UNDEFINED,
+				singleChannel ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+				};
+
+			attach.emplace_back(attachDesc);
+
+			return textures::add(tex);
+		}
 	} // anonymous namespace
 
 
@@ -518,7 +598,6 @@ namespace primal::graphics::vulkan
 
 		// Create sampler to sample from to depth attachment
 		// Used to sample in the fragment shader for shadowed rendering
-		VkFilter filter = formatIsFilterable(core::physical_device(), VK_FORMAT_D16_UNORM, VK_IMAGE_TILING_OPTIMAL) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
 		VkSamplerCreateInfo sampler{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
 		sampler.pNext = nullptr;
 		sampler.magFilter = VK_FILTER_LINEAR;
@@ -775,277 +854,20 @@ namespace primal::graphics::vulkan
 	{
 		_renderpasses.resize(2);
 
-		{
-			// Position
-			vulkan_texture tex;
-
-			VkImageCreateInfo image{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-			image.imageType = VK_IMAGE_TYPE_2D;
-			image.extent.height = _height;
-			image.extent.width = _width;
-			image.extent.depth = 1;
-			image.mipLevels = 1;
-			image.arrayLayers = 1;
-			image.samples = VK_SAMPLE_COUNT_1_BIT;
-			image.tiling = VK_IMAGE_TILING_OPTIMAL;
-			image.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-			image.flags = 0;
-			image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; // ! VK_IMAGE_USAGE_SAMPLED_BIT use to sample directly from the depth attachment for shadow mapping
-			VkResult result{ VK_SUCCESS };
-			VkCall(result = vkCreateImage(core::logical_device(), &image, nullptr, &tex.image), "Failed to create GBuffer(shadow mapping) image...");
-
-			VkMemoryRequirements memReq;
-			vkGetImageMemoryRequirements(core::logical_device(), tex.image, &memReq);
-			VkMemoryAllocateInfo alloc{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-			alloc.pNext = nullptr;
-			alloc.allocationSize = memReq.size;
-			alloc.memoryTypeIndex = core::find_memory_index(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-			result = VK_SUCCESS;
-			VkCall(result = vkAllocateMemory(core::logical_device(), &alloc, nullptr, &tex.memory), "Failed to allocate GBuffer(shadow mapping) memory...");
-			result = VK_SUCCESS;
-			VkCall(result = vkBindImageMemory(core::logical_device(), tex.image, tex.memory, 0), "Failed to bind GBuffer(shadow mapping) to memory...");
-
-			VkImageViewCreateInfo imageView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-			imageView.pNext = nullptr;
-			imageView.viewType = VK_IMAGE_VIEW_TYPE_2D;
-			imageView.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-			imageView.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-			imageView.subresourceRange.baseMipLevel = 0;
-			imageView.subresourceRange.levelCount = 1;
-			imageView.subresourceRange.baseArrayLayer = 0;
-			imageView.subresourceRange.layerCount = 1;
-			imageView.image = tex.image;
-			result = VK_SUCCESS;
-			VkCall(result = vkCreateImageView(core::logical_device(), &imageView, nullptr, &tex.view), "Failed to create GBuffer(shadow mapping) image view...");
-
-			// Create sampler to sample from to depth attachment
-			// Used to sample in the fragment shader for shadowed rendering
-			VkSamplerCreateInfo sampler{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-			sampler.pNext = nullptr;
-			sampler.magFilter = VK_FILTER_LINEAR;
-			sampler.minFilter = VK_FILTER_LINEAR;
-			sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-			sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-			sampler.addressModeV = sampler.addressModeU;
-			sampler.addressModeW = sampler.addressModeU;
-			sampler.mipLodBias = 0.f;
-			sampler.maxAnisotropy = 1.f;
-			sampler.minLod = 0.f;
-			sampler.maxLod = 1.f;
-			sampler.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-			result = VK_SUCCESS;
-			VkCall(result = vkCreateSampler(core::logical_device(), &sampler, nullptr, &tex.sampler), "Failed to create GBuffer(shadow mapping) image sampler...");
-
-			_image_ids.emplace_back(textures::add(tex)); 
-		}
-		{
-			// Normal
-			vulkan_texture tex;
-
-			VkImageCreateInfo image{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-			image.imageType = VK_IMAGE_TYPE_2D;
-			image.extent.height = _height;
-			image.extent.width = _width;
-			image.extent.depth = 1;
-			image.mipLevels = 1;
-			image.arrayLayers = 1;
-			image.samples = VK_SAMPLE_COUNT_1_BIT;
-			image.tiling = VK_IMAGE_TILING_OPTIMAL;
-			image.format = VK_FORMAT_R8G8B8A8_UNORM;
-			image.flags = 0;
-			image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; // ! VK_IMAGE_USAGE_SAMPLED_BIT use to sample directly from the depth attachment for shadow mapping
-			VkResult result{ VK_SUCCESS };
-			VkCall(result = vkCreateImage(core::logical_device(), &image, nullptr, &tex.image), "Failed to create GBuffer(shadow mapping) image...");
-
-			VkMemoryRequirements memReq;
-			vkGetImageMemoryRequirements(core::logical_device(), tex.image, &memReq);
-			VkMemoryAllocateInfo alloc{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-			alloc.pNext = nullptr;
-			alloc.allocationSize = memReq.size;
-			alloc.memoryTypeIndex = core::find_memory_index(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-			result = VK_SUCCESS;
-			VkCall(result = vkAllocateMemory(core::logical_device(), &alloc, nullptr, &tex.memory), "Failed to allocate GBuffer(shadow mapping) memory...");
-			result = VK_SUCCESS;
-			VkCall(result = vkBindImageMemory(core::logical_device(), tex.image, tex.memory, 0), "Failed to bind GBuffer(shadow mapping) to memory...");
-
-			VkImageViewCreateInfo imageView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-			imageView.pNext = nullptr;
-			imageView.viewType = VK_IMAGE_VIEW_TYPE_2D;
-			imageView.format = VK_FORMAT_R8G8B8A8_UNORM;
-			imageView.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-			imageView.subresourceRange.baseMipLevel = 0;
-			imageView.subresourceRange.levelCount = 1;
-			imageView.subresourceRange.baseArrayLayer = 0;
-			imageView.subresourceRange.layerCount = 1;
-			imageView.image = tex.image;
-			result = VK_SUCCESS;
-			VkCall(result = vkCreateImageView(core::logical_device(), &imageView, nullptr, &tex.view), "Failed to create GBuffer(shadow mapping) image view...");
-
-			// Create sampler to sample from to depth attachment
-			// Used to sample in the fragment shader for shadowed rendering
-			VkSamplerCreateInfo sampler{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-			sampler.pNext = nullptr;
-			sampler.magFilter = VK_FILTER_LINEAR;
-			sampler.minFilter = VK_FILTER_LINEAR;
-			sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-			sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-			sampler.addressModeV = sampler.addressModeU;
-			sampler.addressModeW = sampler.addressModeU;
-			sampler.mipLodBias = 0.f;
-			sampler.maxAnisotropy = 1.f;
-			sampler.minLod = 0.f;
-			sampler.maxLod = 1.f;
-			sampler.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-			result = VK_SUCCESS;
-			VkCall(result = vkCreateSampler(core::logical_device(), &sampler, nullptr, &tex.sampler), "Failed to create GBuffer(shadow mapping) image sampler...");
-
-			_image_ids.emplace_back(textures::add(tex));
-		}
-		{
-			// Color
-			vulkan_texture tex;
-
-			VkImageCreateInfo image{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-			image.imageType = VK_IMAGE_TYPE_2D;
-			image.extent.height = _height;
-			image.extent.width = _width;
-			image.extent.depth = 1;
-			image.mipLevels = 1;
-			image.arrayLayers = 1;
-			image.samples = VK_SAMPLE_COUNT_1_BIT;
-			image.tiling = VK_IMAGE_TILING_OPTIMAL;
-			image.format = VK_FORMAT_R8G8B8A8_UNORM;
-			image.flags = 0;
-			image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; // ! VK_IMAGE_USAGE_SAMPLED_BIT use to sample directly from the depth attachment for shadow mapping
-			VkResult result{ VK_SUCCESS };
-			VkCall(result = vkCreateImage(core::logical_device(), &image, nullptr, &tex.image), "Failed to create GBuffer(shadow mapping) image...");
-
-			VkMemoryRequirements memReq;
-			vkGetImageMemoryRequirements(core::logical_device(), tex.image, &memReq);
-			VkMemoryAllocateInfo alloc{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-			alloc.pNext = nullptr;
-			alloc.allocationSize = memReq.size;
-			alloc.memoryTypeIndex = core::find_memory_index(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-			result = VK_SUCCESS;
-			VkCall(result = vkAllocateMemory(core::logical_device(), &alloc, nullptr, &tex.memory), "Failed to allocate GBuffer(shadow mapping) memory...");
-			result = VK_SUCCESS;
-			VkCall(result = vkBindImageMemory(core::logical_device(), tex.image, tex.memory, 0), "Failed to bind GBuffer(shadow mapping) to memory...");
-
-			VkImageViewCreateInfo imageView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-			imageView.pNext = nullptr;
-			imageView.viewType = VK_IMAGE_VIEW_TYPE_2D;
-			imageView.format = VK_FORMAT_R8G8B8A8_UNORM;
-			imageView.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-			imageView.subresourceRange.baseMipLevel = 0;
-			imageView.subresourceRange.levelCount = 1;
-			imageView.subresourceRange.baseArrayLayer = 0;
-			imageView.subresourceRange.layerCount = 1;
-			imageView.image = tex.image;
-			result = VK_SUCCESS;
-			VkCall(result = vkCreateImageView(core::logical_device(), &imageView, nullptr, &tex.view), "Failed to create GBuffer(shadow mapping) image view...");
-
-			// Create sampler to sample from to depth attachment
-			// Used to sample in the fragment shader for shadowed rendering
-			VkSamplerCreateInfo sampler{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-			sampler.pNext = nullptr;
-			sampler.magFilter = VK_FILTER_LINEAR;
-			sampler.minFilter = VK_FILTER_LINEAR;
-			sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-			sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-			sampler.addressModeV = sampler.addressModeU;
-			sampler.addressModeW = sampler.addressModeU;
-			sampler.mipLodBias = 0.f;
-			sampler.maxAnisotropy = 1.f;
-			sampler.minLod = 0.f;
-			sampler.maxLod = 1.f;
-			sampler.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-			result = VK_SUCCESS;
-			VkCall(result = vkCreateSampler(core::logical_device(), &sampler, nullptr, &tex.sampler), "Failed to create GBuffer(shadow mapping) image sampler...");
-
-			_image_ids.emplace_back(textures::add(tex));
-		}
-		{
-			// Depth
-			vulkan_texture tex;
-
-			VkImageCreateInfo image{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-			image.imageType = VK_IMAGE_TYPE_2D;
-			image.extent.height = _height;
-			image.extent.width = _width;
-			image.extent.depth = 1;
-			image.mipLevels = 1;
-			image.arrayLayers = 1;
-			image.samples = VK_SAMPLE_COUNT_1_BIT;
-			image.tiling = VK_IMAGE_TILING_OPTIMAL;
-			image.format = VK_FORMAT_D16_UNORM;
-			image.flags = 0;
-			image.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; // ! VK_IMAGE_USAGE_SAMPLED_BIT use to sample directly from the depth attachment for shadow mapping
-			VkResult result{ VK_SUCCESS };
-			VkCall(result = vkCreateImage(core::logical_device(), &image, nullptr, &tex.image), "Failed to create GBuffer(shadow mapping) image...");
-
-			VkMemoryRequirements memReq;
-			vkGetImageMemoryRequirements(core::logical_device(), tex.image, &memReq);
-			VkMemoryAllocateInfo alloc{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-			alloc.pNext = nullptr;
-			alloc.allocationSize = memReq.size;
-			alloc.memoryTypeIndex = core::find_memory_index(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-			result = VK_SUCCESS;
-			VkCall(result = vkAllocateMemory(core::logical_device(), &alloc, nullptr, &tex.memory), "Failed to allocate GBuffer(shadow mapping) memory...");
-			result = VK_SUCCESS;
-			VkCall(result = vkBindImageMemory(core::logical_device(), tex.image, tex.memory, 0), "Failed to bind GBuffer(shadow mapping) to memory...");
-
-			VkImageViewCreateInfo imageView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-			imageView.pNext = nullptr;
-			imageView.viewType = VK_IMAGE_VIEW_TYPE_2D;
-			imageView.format = VK_FORMAT_D16_UNORM;
-			imageView.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-			imageView.subresourceRange.baseMipLevel = 0;
-			imageView.subresourceRange.levelCount = 1;
-			imageView.subresourceRange.baseArrayLayer = 0;
-			imageView.subresourceRange.layerCount = 1;
-			imageView.image = tex.image;
-			result = VK_SUCCESS;
-			VkCall(result = vkCreateImageView(core::logical_device(), &imageView, nullptr, &tex.view), "Failed to create GBuffer(shadow mapping) image view...");
-
-			// Create sampler to sample from to depth attachment
-			// Used to sample in the fragment shader for shadowed rendering
-			VkSamplerCreateInfo sampler{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-			sampler.pNext = nullptr;
-			sampler.magFilter = VK_FILTER_LINEAR;
-			sampler.minFilter = VK_FILTER_LINEAR;
-			sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-			sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-			sampler.addressModeV = sampler.addressModeU;
-			sampler.addressModeW = sampler.addressModeU;
-			sampler.mipLodBias = 0.f;
-			sampler.maxAnisotropy = 1.f;
-			sampler.minLod = 0.f;
-			sampler.maxLod = 1.f;
-			sampler.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-			result = VK_SUCCESS;
-			VkCall(result = vkCreateSampler(core::logical_device(), &sampler, nullptr, &tex.sampler), "Failed to create GBuffer(shadow mapping) image sampler...");
-
-			_image_ids.emplace_back(textures::add(tex));
-		}
-
 		utl::vector<VkAttachmentDescription>	attachmentDescs;
-		attachmentDescs.resize(4);
 
-		for (u32 i{ 0 }; i < 4; ++i)
-		{
-			attachmentDescs[i].samples = VK_SAMPLE_COUNT_1_BIT;
-			attachmentDescs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			attachmentDescs[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-			attachmentDescs[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachmentDescs[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachmentDescs[i].finalLayout = (i == 3) ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		}
+		// Position
+		_image_ids.emplace_back(createOffscreenTexture(_width, _height, true, false, attachmentDescs));
+		
+		// Normal
+		_image_ids.emplace_back(createOffscreenTexture(_width, _height, false, false, attachmentDescs));
+		
+		// Color
+		_image_ids.emplace_back(createOffscreenTexture(_width, _height, false, false, attachmentDescs));
+		
+		// Depth
+		_image_ids.emplace_back(createOffscreenTexture(_width, _height, false, true, attachmentDescs));
 
-		// Formats
-		attachmentDescs[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-		attachmentDescs[1].format = VK_FORMAT_R8G8B8A8_UNORM;
-		attachmentDescs[2].format = VK_FORMAT_R8G8B8A8_UNORM;
-		attachmentDescs[3].format = VK_FORMAT_D16_UNORM;
 
 		utl::vector<VkAttachmentReference> colorReferences;
 		colorReferences.push_back({ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
@@ -1115,7 +937,7 @@ namespace primal::graphics::vulkan
 			image.format = VK_FORMAT_R8_UNORM;
 			image.flags = 0;
 			image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; // ! VK_IMAGE_USAGE_SAMPLED_BIT use to sample directly from the depth attachment for shadow mapping
-			VkResult result{ VK_SUCCESS };
+			result =  VK_SUCCESS ;
 			VkCall(result = vkCreateImage(core::logical_device(), &image, nullptr, &tex.image), "Failed to create GBuffer(shadow mapping) image...");
 
 			VkMemoryRequirements memReq;
@@ -1298,7 +1120,8 @@ namespace primal::graphics::vulkan
 		pipLayoutInfo.pPushConstantRanges = &push;
 		result = VK_SUCCESS;
 		VkCall(result = vkCreatePipelineLayout(core::logical_device(), &pipLayoutInfo, nullptr, &pipelineLayout), "Failed to create GBuffer(offscreen) pipeline layout...");
-		_pipeline_layout_ids.emplace_back(pipeline::add_layout(pipelineLayout));
+		//_pipeline_layout_ids.emplace_back(pipeline::add_layout(pipelineLayout));
+		_pipeline_layout_ids.emplace_back(create_data(engine_vulkan_data::data_type::vulkan_pipeline_layout, static_cast<void*>(&pipLayoutInfo), 0));
 
 		VkDescriptorSet set;
 		VkDescriptorSetAllocateInfo descriptorSetInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -1408,7 +1231,8 @@ namespace primal::graphics::vulkan
 		vertexInputInfo.pVertexAttributeDescriptions = attr.data();
 
 		VkGraphicsPipelineCreateInfo pipelineCreateInfo{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-		pipelineCreateInfo.layout = pipeline::get_layout(_pipeline_layout_ids[0]);
+		// pipelineCreateInfo.layout = pipeline::get_layout(_pipeline_layout_ids[0]);
+		pipelineCreateInfo.layout = get_data<VkPipelineLayout>(_pipeline_layout_ids[0]);
 		pipelineCreateInfo.pNext = nullptr;
 		pipelineCreateInfo.renderPass = _renderpasses[0].render_pass;
 		pipelineCreateInfo.flags = 0;
@@ -1485,12 +1309,17 @@ namespace primal::graphics::vulkan
 
 		auto set = descriptor::get(_descriptorSet_id);
 		auto color_set = descriptor::get(_descriptorSet_color_id);
-		auto pipelineLayout = pipeline::get_layout(_pipeline_layout_ids[0]);
+		auto pipelineLayout = get_data<VkPipelineLayout>(_pipeline_layout_ids[0]);
 		//vkCmdPushConstants(cmd_buffer.cmd_buffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(InstanceData), 
 		vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &set, 0, nullptr);
 		vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &color_set, 0, nullptr);
 		auto pipeline = pipeline::get_pipeline(_pipeline_id);
 		vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+		//for (auto instance : surface->getScene().getInstance())
+		//{
+		//	auto iPipeline = pipeline::get_pipeline(scene::get_instance(instance).get_pipeline_ids());
+		//	vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, iPipeline);
+		//}
 
 		surface->getScene().drawGBuffer(cmd_buffer);
 
@@ -1533,6 +1362,295 @@ namespace primal::graphics::vulkan
 		vkCmdDraw(cmd_buffer.cmd_buffer, 3, 1, 0, 0);
 
 		vkCmdEndRenderPass(cmd_buffer.cmd_buffer);
+	}
+	
+	void vulkan_geometry_pass::createUniformBuffer()
+	{
+		uboGBuffer ubo;
+		game_entity::entity entity1{ create_one_game_entity({ 0.f, 5.f, 0.f }, { 1.5f, 0.f, -0.5f })};
+		graphics::camera cam{ graphics::create_camera(graphics::perspective_camera_init_info{ entity1.get_id() }) };
+		cam.field_of_view(0.75f);
+		cam.aspect_ratio(1.0f);
+		camera::get(cam.get_id()).update();
+		DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
+		DirectX::XMStoreFloat4x4(&ubo.model, modelMatrix);
+		DirectX::XMMATRIX viewMatrix = DirectX::XMMatrixLookAtLH({ 0.f, 3.f, 0.f }, { 0.f, 0.f, 0.f }, { 1.f, 0.f, 0.f });
+		ubo.view = cam.view();
+		DirectX::XMMATRIX projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, (f32)_width / (f32)_height, 0.1f, 64.f);
+		ubo.projection = cam.projection();
+		ubo.nearPlane = 0.1f;
+		ubo.farPlane = 64.0f;
+		_ub_id = create_data(engine_vulkan_data::vulkan_uniform_buffer, static_cast<void*>(&ubo), sizeof(uboGBuffer));
+	}
+
+	void vulkan_geometry_pass::setupRenderpassAndFramebuffer()
+	{
+		utl::vector<VkAttachmentDescription>	attachmentDescs;
+
+		// Position
+		_image_ids.emplace_back(createOffscreenTexture(_width, _height, true, false, attachmentDescs));
+
+		// Normal
+		_image_ids.emplace_back(createOffscreenTexture(_width, _height, false, false, attachmentDescs));
+
+		// Color
+		_image_ids.emplace_back(createOffscreenTexture(_width, _height, false, false, attachmentDescs));
+
+		// Depth
+		_image_ids.emplace_back(createOffscreenTexture(_width, _height, false, true, attachmentDescs));
+
+
+		utl::vector<VkAttachmentReference> colorReferences;
+		colorReferences.push_back({ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+		colorReferences.push_back({ 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+		colorReferences.push_back({ 2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+
+		VkAttachmentReference depthReference = {};
+		depthReference.attachment = 3;
+		depthReference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+		VkSubpassDescription subpass;
+		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.flags = 0;
+		subpass.pColorAttachments = colorReferences.data();
+		subpass.colorAttachmentCount = static_cast<uint32_t>(colorReferences.size());
+		subpass.pDepthStencilAttachment = &depthReference;
+		subpass.inputAttachmentCount = 0;
+		subpass.pInputAttachments = nullptr;
+		subpass.pPreserveAttachments = nullptr;
+		subpass.preserveAttachmentCount = 0;
+		subpass.pResolveAttachments = nullptr;
+
+		utl::vector<VkSubpassDependency> dependencies;
+		dependencies.resize(2);
+
+		dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+		dependencies[0].dstSubpass = 0;
+		dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+		dependencies[1].srcSubpass = 0;
+		dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+		dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+		VkRenderPassCreateInfo renderPassInfo = {};
+		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		renderPassInfo.pAttachments = attachmentDescs.data();
+		renderPassInfo.attachmentCount = static_cast<uint32_t>(attachmentDescs.size());
+		renderPassInfo.subpassCount = 1;
+		renderPassInfo.pSubpasses = &subpass;
+		renderPassInfo.dependencyCount = 2;
+		renderPassInfo.pDependencies = dependencies.data();
+
+		_renderpass_id = create_data(engine_vulkan_data::vulkan_renderpass, static_cast<void*>(&renderPassInfo), 0);
+
+		utl::vector<VkImageView> attachments;
+		attachments.resize(4);
+		attachments[0] = textures::get_texture(_image_ids[0]).getTexture().view;
+		attachments[1] = textures::get_texture(_image_ids[1]).getTexture().view;
+		attachments[2] = textures::get_texture(_image_ids[2]).getTexture().view;
+		attachments[3] = textures::get_texture(_image_ids[3]).getTexture().view;
+
+		// Create frame buffer
+		VkFramebufferCreateInfo framebuffer{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+		framebuffer.pNext = nullptr;
+		framebuffer.renderPass = get_data<VkRenderPass>(_renderpass_id);
+		framebuffer.attachmentCount = static_cast<u32>(attachments.size());
+		framebuffer.pAttachments = attachments.data();
+		framebuffer.width = _width;
+		framebuffer.height = _height;
+		framebuffer.layers = 1;
+		_framebuffer_id = create_data(engine_vulkan_data::vulkan_framebuffer, static_cast<void*>(&framebuffer), 0);
+	}
+
+	void vulkan_geometry_pass::runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface * surface)
+	{
+		// Clear values for all attachments written in the fragment shader
+		std::vector<VkClearValue> clearValues(4);
+		clearValues[0].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+		clearValues[1].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+		clearValues[2].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+		clearValues[3].depthStencil = { 1.0f, 0 };
+
+		VkRenderPassBeginInfo info{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+		info.pNext = nullptr;
+		info.renderPass = get_data<VkRenderPass>(_renderpass_id);
+		info.framebuffer = get_data<VkFramebuffer>(_framebuffer_id);
+		info.renderArea.extent.width = _width;
+		info.renderArea.extent.height = _height;
+		info.clearValueCount = static_cast<u32>(clearValues.size());
+		info.pClearValues = clearValues.data();
+
+		VkViewport viewport;
+		viewport.x = 0.0f;
+		viewport.y = (f32)surface->height();
+		viewport.width = (f32)surface->width();
+		viewport.height = (f32)surface->height() * -1.f;
+		viewport.minDepth = 0.f;
+		viewport.maxDepth = 1.f;
+		vkCmdSetViewport(cmd_buffer.cmd_buffer, 0, 1, &viewport);
+
+		VkRect2D scissor;
+		scissor.extent.height = _height;
+		scissor.extent.width = _width;
+		scissor.offset.x = 0;
+		scissor.offset.y = 0;
+		vkCmdSetScissor(cmd_buffer.cmd_buffer, 0, 1, &scissor);
+
+		vkCmdBeginRenderPass(cmd_buffer.cmd_buffer, &info, VK_SUBPASS_CONTENTS_INLINE);
+
+		/*auto set = descriptor::get(_descriptorSet_id);
+		auto color_set = descriptor::get(_descriptorSet_color_id);
+		auto pipelineLayout = get_data<VkPipelineLayout>(_pipeline_layout_ids[0]);
+		vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &set, 0, nullptr);
+		vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &color_set, 0, nullptr);
+		auto pipeline = pipeline::get_pipeline(_pipeline_id);
+		vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);*/
+		//for (auto instance : surface->getScene().getInstance())
+		//{
+		//	auto iPipeline = pipeline::get_pipeline(scene::get_instance(instance).get_pipeline_ids());
+		//	vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, iPipeline);
+		//}
+
+		surface->getScene().drawGBuffer(cmd_buffer);
+
+		vkCmdEndRenderPass(cmd_buffer.cmd_buffer);
+	}
+
+	void vulkan_final_pass::setupDescriptorSets(std::initializer_list<id::id_type> image_id)
+	{
+		std::vector<VkDescriptorPoolSize> poolSize = {
+			descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<u32>(image_id.size())
+		};
+
+		VkDescriptorPoolCreateInfo poolInfo;
+		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		poolInfo.pNext = VK_NULL_HANDLE;
+		poolInfo.flags = 0;
+		poolInfo.poolSizeCount = static_cast<u32>(poolSize.size());
+		poolInfo.pPoolSizes = poolSize.data();
+		poolInfo.maxSets = static_cast<u32>(image_id.size());
+		_descriptor_pool_id = create_data(engine_vulkan_data::vulkan_descriptor_pool, static_cast<void*>(&poolInfo), 0);
+
+		std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings;
+		
+		for (u32 i{ 0 }; i < image_id.size(); ++i)
+		{
+			setLayoutBindings.emplace_back(descriptor::descriptorSetLayoutBinding(i, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER));
+		}
+
+		VkDescriptorSetLayoutCreateInfo descriptorLayout = descriptor::descriptorSetLayoutCreate(setLayoutBindings);
+
+		_descriptorSet_layout_id = create_data(engine_vulkan_data::vulkan_descriptor_set_layout, static_cast<void*>(&descriptorLayout), 0);
+
+		VkPipelineLayoutCreateInfo pipelineLayoutInfo;
+		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		pipelineLayoutInfo.pNext = nullptr;
+		pipelineLayoutInfo.flags = 0;
+		pipelineLayoutInfo.setLayoutCount = 1;
+		pipelineLayoutInfo.pSetLayouts = &get_data<VkDescriptorSetLayout>(_descriptorSet_layout_id);
+		pipelineLayoutInfo.pushConstantRangeCount = 0;
+		pipelineLayoutInfo.pPushConstantRanges = VK_NULL_HANDLE;
+		_pipeline_layout_id = create_data(engine_vulkan_data::vulkan_pipeline_layout, static_cast<void*>(&pipelineLayoutInfo), 0);
+
+		VkDescriptorSetAllocateInfo allocInfo;
+
+		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocInfo.pNext = VK_NULL_HANDLE;
+		allocInfo.descriptorPool = get_data<VkDescriptorPool>(_descriptor_pool_id);
+		allocInfo.descriptorSetCount = 1;
+		allocInfo.pSetLayouts = &get_data<VkDescriptorSetLayout>(_descriptorSet_layout_id);
+
+		_descriptorSet_id = create_data(engine_vulkan_data::vulkan_descriptor_sets, static_cast<void*>(&allocInfo), 0);
+
+		std::vector<VkWriteDescriptorSet> descriptorWrites;
+
+		/*VkDescriptorImageInfo imageInfo1;
+		imageInfo1.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		imageInfo1.imageView = textures::get_texture(_offscreen.getTexture()[0]).getTexture().view;
+		imageInfo1.sampler = textures::get_texture(_offscreen.getTexture()[0]).getTexture().sampler;
+		descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, get_data<VkDescriptorSet>(_descriptorSet_id), 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo1));
+
+		VkDescriptorImageInfo imageInfo2;
+		imageInfo2.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		imageInfo2.imageView = textures::get_texture(_offscreen.getTexture()[1]).getTexture().view;
+		imageInfo2.sampler = textures::get_texture(_offscreen.getTexture()[1]).getTexture().sampler;
+		descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, get_data<VkDescriptorSet>(_descriptorSet_id), 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo2));
+
+		VkDescriptorImageInfo imageInfo3;
+		imageInfo3.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		imageInfo3.imageView = textures::get_texture(_offscreen.getTexture()[2]).getTexture().view;
+		imageInfo3.sampler = textures::get_texture(_offscreen.getTexture()[2]).getTexture().sampler;
+		descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, get_data<VkDescriptorSet>(_descriptorSet_id), 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo3));
+
+		VkDescriptorImageInfo imageInfo4;
+		imageInfo4.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		imageInfo4.imageView = textures::get_texture(_offscreen.getTexture()[4]).getTexture().view;
+		imageInfo4.sampler = textures::get_texture(_offscreen.getTexture()[4]).getTexture().sampler;
+		descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, get_data<VkDescriptorSet>(_descriptorSet_id), 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo4));*/
+
+		u32 count = 0;
+		for (auto id : image_id)
+		{
+			VkDescriptorImageInfo imageInfo4;
+			imageInfo4.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			imageInfo4.imageView = textures::get_texture(id).getTexture().view;
+			imageInfo4.sampler = textures::get_texture(id).getTexture().sampler;
+			descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, get_data<VkDescriptorSet>(_descriptorSet_id), count, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo4));
+			count++;
+		}
+
+		vkUpdateDescriptorSets(core::logical_device(), static_cast<u32>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+	}
+
+	void vulkan_final_pass::setupPipeline(vulkan_renderpass renderpass)
+	{
+		VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = descriptor::pipelineInputAssemblyStateCreate(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, VK_FALSE);
+		VkPipelineRasterizationStateCreateInfo rasterizationState = descriptor::pipelineRasterizationStateCreate(VK_POLYGON_MODE_FILL, VK_CULL_MODE_FRONT_BIT);
+		VkPipelineColorBlendAttachmentState blendAttachmentState = descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE);
+		VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(1, blendAttachmentState);
+		VkPipelineDepthStencilStateCreateInfo depthStencilState = descriptor::pipelineDepthStencilStateCreateInfo(VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL);
+		VkPipelineViewportStateCreateInfo viewportState = descriptor::pipelineViewportStateCreate(1, 1, 0);
+		VkPipelineMultisampleStateCreateInfo multisampleState = descriptor::pipelineMultisampleStateCreate();
+		std::vector<VkDynamicState> dynamicStateEnables = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+		VkPipelineDynamicStateCreateInfo dynamicState = descriptor::pipelineDynamicStateCreate(dynamicStateEnables);
+		VkPipelineVertexInputStateCreateInfo emptyVertexInputState{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO , nullptr, 0, 0, nullptr, 0, nullptr };
+		std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages;
+		shaderStages[0] = shaders::get_shader(shaders::add("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/fullscreen.vert.spv", shader_type::vertex)).getShaderStage();
+		shaderStages[1] = shaders::get_shader(shaders::add("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/composition.frag.spv", shader_type::pixel)).getShaderStage();
+
+		VkGraphicsPipelineCreateInfo pipelineCreateInfo{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+		pipelineCreateInfo.layout = get_data<VkPipelineLayout>(_pipeline_layout_id);
+		pipelineCreateInfo.pNext = nullptr;
+		pipelineCreateInfo.renderPass = renderpass.render_pass;
+		pipelineCreateInfo.flags = 0;
+		pipelineCreateInfo.pInputAssemblyState = &inputAssemblyState;
+		pipelineCreateInfo.pRasterizationState = &rasterizationState;
+		pipelineCreateInfo.pColorBlendState = &colorBlendState;
+		pipelineCreateInfo.pMultisampleState = &multisampleState;
+		pipelineCreateInfo.pViewportState = &viewportState;
+		pipelineCreateInfo.pDepthStencilState = &depthStencilState;
+		pipelineCreateInfo.pDynamicState = &dynamicState;
+		pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+		pipelineCreateInfo.pStages = shaderStages.data();
+		pipelineCreateInfo.pVertexInputState = &emptyVertexInputState;
+		_pipeline_id = create_data(engine_vulkan_data::vulkan_pipeline, static_cast<void*>(&pipelineCreateInfo), 0);
+	}
+
+	void vulkan_final_pass::render(vulkan_cmd_buffer cmd_buffer)
+	{
+		auto descriptorSet = get_data<VkDescriptorSet>(_descriptorSet_id);
+		auto pipeline = get_data<VkPipeline>(_pipeline_id);
+		vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, get_data<VkPipelineLayout>(_pipeline_layout_id), 0, 1, &descriptorSet, 0, nullptr);
+		vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+		vkCmdDraw(cmd_buffer.cmd_buffer, 3, 1, 0, 0);
 	}
 
 }

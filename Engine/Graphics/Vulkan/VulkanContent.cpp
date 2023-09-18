@@ -283,7 +283,7 @@ namespace primal::graphics::vulkan
 
 		void vulkan_material::add_texture(id::id_type texture_id)
 		{
-			auto copy_id = material_textures.add(textures::get_texture(texture_id));
+			//auto copy_id = material_textures.add(textures::get_texture(texture_id));
 			_texture_ids.emplace_back(texture_id); // (texture_id << 16) |
 			_texture_count++;
 		}
@@ -522,7 +522,7 @@ namespace primal::graphics::vulkan
 		{
 			vkDeviceWaitIdle(core::logical_device());
 
-			pipeline::remove_pipeline(_pipeline_ids.at(render_type::forward).font());
+			pipeline::remove_pipeline(_pipeline_id);
 
 			for (auto texture_id : materials::get_material(_material_id).getTextureIDS())
 			{
@@ -614,7 +614,7 @@ namespace primal::graphics::vulkan
 			pipelineCI.basePipelineHandle = VK_NULL_HANDLE;
 			pipelineCI.basePipelineIndex = -1;
 
-			_pipeline_ids[render_type::forward].emplace_back(pipeline::add_pipeline(pipelineCI));
+			_pipeline_id = pipeline::add_pipeline(pipelineCI);
 
 		}
 
@@ -854,7 +854,7 @@ namespace primal::graphics::vulkan
 			for (auto& instance : _instance_ids)
 			{
 				auto descriptorSet = descriptor::get(instance_models[instance].get_descriptor_set_ids(render_type::forward).font());
-				auto pipeline = pipeline::get_pipeline(instance_models[instance].get_pipeline_ids(render_type::forward).font());
+				auto pipeline = pipeline::get_pipeline(instance_models[instance].get_pipeline_ids());
 				vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
 				vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 				instance_models[instance].flushBuffer(cmd_buffer);
@@ -880,5 +880,9 @@ namespace primal::graphics::vulkan
 			vkCmdDraw(cmd_buffer.cmd_buffer, 3, 1, 0, 0);
 		}
 		
+		submesh::vulkan_instance_model& get_instance(id::id_type id)
+		{
+			return instance_models[id];
+		}
 	} // primai::graphics::vulkan::scene
 }
