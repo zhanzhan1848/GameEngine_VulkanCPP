@@ -88,7 +88,7 @@ public:
         release();
     }
 
-    bool begin_frame(vulkan_surface* surface)
+    bool begin_frame(vulkan_surface* surface, frame_info info)
     {
 
         // Are we currently recreating the swapchain?
@@ -139,8 +139,8 @@ public:
         reset_cmd_buffer(cmd_buffer);
         begin_cmd_buffer(cmd_buffer, true, false, false);
 
-        //surface->getScene().getShadowmap().runRenderpass(cmd_buffer, surface);
-        surface->getScene().getOffscreen().runRenderpass(cmd_buffer, surface);
+        surface->getScene().updateView(info);
+        surface->getGeometryPass().runRenderpass(cmd_buffer, surface);
 
         VkViewport viewport{};
         viewport.x = 0.0f;
@@ -173,9 +173,7 @@ public:
         u32 frame{ surface->current_frame() };
         vulkan_cmd_buffer& cmd_buffer{ _cmd_buffers[frame] };
 
-        surface->getScene().updateView(frame_info);
-        //surface->getScene().flushBuffer(cmd_buffer, surface->layout_and_pool().pipelineLayout);
-        surface->getScene().drawDefer(cmd_buffer, surface->layout_and_pool().pipelineLayout);
+        surface->getFinalPass().render(cmd_buffer);
 
         renderpass::end_renderpass(cmd_buffer.cmd_buffer, cmd_buffer.cmd_state, surface->renderpass());
         end_cmd_buffer(cmd_buffer);
@@ -839,7 +837,7 @@ surface_height(surface_id id)
 void
 render_surface(surface_id id, frame_info info)
 {
-    if (gfx_command.begin_frame(&surfaces[id]))
+    if (gfx_command.begin_frame(&surfaces[id], info))
     {
         //
         // ....

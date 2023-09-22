@@ -189,7 +189,7 @@ namespace primal::graphics::vulkan
 				} 
 			}
 
-			void createPipeline(VkPipelineLayout pipelineLayout, vulkan_renderpass render_pass);
+			void createPipeline(VkPipelineLayout pipelineLayout, VkRenderPass render_pass);
 			[[nodiscard]] constexpr InstanceData getInstanceData() const { return _instanceData; }
 			[[nodiscard]] constexpr uniformBuffer getInstanceBuffer() const { return _instanceBuffer; }
 
@@ -201,8 +201,8 @@ namespace primal::graphics::vulkan
 			void remove_material() { _material_id = id::invalid_id; }
 			[[nodiscard]] constexpr id::id_type const getMaterialID() const { return _material_id; }
 			[[nodiscard]] constexpr id::id_type const getEntityID() const { return _id; }
-			[[nodiscard]] id::id_type const get_pipeline_ids() const { return _pipeline_id; }
-			[[nodiscard]] utl::vector<id::id_type> const get_descriptor_set_ids(render_type::type type) const { return _descriptorSet_ids.at(type); }
+			[[nodiscard]] constexpr id::id_type const getPipelineID() const { return _pipeline_id; }
+			[[nodiscard]] constexpr id::id_type const getDescriptorSet() const { return _descriptorSet_id; }
 
 		private:
 			game_entity::entity_id									_id;
@@ -211,7 +211,7 @@ namespace primal::graphics::vulkan
 			id::id_type												_material_id;
 			utl::vector<VkPipelineShaderStageCreateInfo>			_shaderStages;
 			id::id_type												_pipeline_id;
-			std::map<render_type::type, utl::vector<id::id_type>>	_descriptorSet_ids;
+			id::id_type												_descriptorSet_id;
 			InstanceData											_instanceData;
 
 			void create_instance_buffer();
@@ -243,16 +243,14 @@ namespace primal::graphics::vulkan
 			void createUniformBuffer();
 			void createDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout);
 			void createDeferDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout);
-			void createPipeline(vulkan_renderpass render_pass, VkPipelineLayout layout);
-			void createDeferPipeline(vulkan_renderpass render_pass, VkPipelineLayout layout);
+			void createPipeline(VkRenderPass render_pass, VkPipelineLayout layout);
+			void createDeferPipeline(VkRenderPass render_pass, VkPipelineLayout layout);
 
 			void updateView(frame_info info);
 			void flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout);
 			void drawGBuffer(vulkan_cmd_buffer cmd_buffer);
 			void drawDefer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout);
 
-			[[nodiscard]] constexpr vulkan_shadowmapping& getShadowmap() { return _shadowmap; }
-			[[nodiscard]] constexpr vulkan_offscreen& getOffscreen() { return _offscreen; }
 			[[nodiscard]] utl::vector<id::id_type> getInstance() { return _instance_ids; }
 
 		private:
@@ -260,8 +258,6 @@ namespace primal::graphics::vulkan
 			utl::vector<camera_id>								_camera_ids;
 			UniformBufferObjectPlus								_ubo;
 			uniformBuffer										_uniformBuffer;
-			vulkan_shadowmapping								_shadowmap;
-			vulkan_offscreen									_offscreen;
 			id::id_type											_pipeline_id;
 			id::id_type											_descriptor_set_id;
 		};

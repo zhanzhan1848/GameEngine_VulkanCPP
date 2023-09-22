@@ -1,4 +1,3 @@
-#pragma once
 #include "VulkanData.h"
 
 #include "Utilities/FreeList.h"
@@ -47,7 +46,7 @@ namespace primal::graphics::vulkan
 		{
 			VkRenderPassCreateInfo info{ *(VkRenderPassCreateInfo*)data };
 			VkRenderPass pass;
-			VkResult result{VK_SUCCESS};
+			VkResult result{ VK_SUCCESS };
 			VkCall(result = vkCreateRenderPass(core::logical_device(), &info, nullptr, &pass), "Failed to create render pass...");
 			MESSAGE("Created renderpass");
 			return renderpass_list.add(pass);
@@ -198,7 +197,7 @@ namespace primal::graphics::vulkan
 
 		using create_function = id::id_type(*)(const void* const, u32);
 		using remove_function = void(*)(id::id_type);
-		
+
 		constexpr create_function create_functions[]
 		{
 			create_renderpass,
@@ -225,10 +224,9 @@ namespace primal::graphics::vulkan
 		};
 		static_assert(_countof(remove_functions) == engine_vulkan_data::data_type::count);
 
- 	} // anonymous namespace
+	} // anonymous namespace
 
-	
-	id::id_type create_data(engine_vulkan_data::data_type type, const void * const data, [[maybe_unused]] u32 size)
+	id::id_type create_data(engine_vulkan_data::data_type type, const void* const data, [[maybe_unused]] u32 size)
 	{
 		return create_functions[type](data, size);
 	}
@@ -278,4 +276,13 @@ namespace primal::graphics::vulkan
 			return T{};
 		}
 	}
+
+	template UniformBuffer& get_data(id::id_type id);
+	template VkRenderPass& get_data(id::id_type id);
+	template VkFramebuffer& get_data(id::id_type id);
+	template VkDescriptorPool& get_data(id::id_type id);
+	template VkDescriptorSetLayout& get_data(id::id_type id);
+	template VkDescriptorSet& get_data(id::id_type id);
+	template VkPipelineLayout& get_data(id::id_type id);
+	template VkPipeline& get_data(id::id_type id);
 }

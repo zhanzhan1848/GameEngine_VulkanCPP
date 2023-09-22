@@ -15,6 +15,8 @@
 #include "VulkanDescriptor.h"
 #include "VulkanPipeline.h"
 
+#include "VulkanData.h"
+
 
 namespace primal::graphics::vulkan
 {
@@ -120,9 +122,10 @@ vulkan_surface::create(VkInstance instance)
     create_render_pass();
     recreate_framebuffers();
 
-    //_scene.getShadowmap().setupFramebuffer();
-    _scene.getOffscreen().setSize(this->width(), this->height());
-    _scene.getOffscreen().setupFramebuffer();
+    _geometry.setSize(this->width(), this->height());
+    _geometry.setupPoolAndLayout();
+    _geometry.setupRenderpassAndFramebuffer();
+    _final.setSize(this->width(), this->height());
 
     core::create_graphics_command((u32)_swapchain.images.size());
 
@@ -186,20 +189,14 @@ vulkan_surface::create(VkInstance instance)
     _layout_and_pool.createDescriptorPool(24);
     _layout_and_pool.createDescriptorSetLayout();
 
-    //_scene.getShadowmap().createUniformBuffer();
-    //_scene.getShadowmap().setupPipeline(_layout_and_pool.pipelineLayout);
-    //_scene.getShadowmap().setupDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
-    _scene.getOffscreen().createUniformBuffer();
-    _scene.getOffscreen().setupDescriptorSets(_layout_and_pool.descriptorPool, texture_id);
-    _scene.getOffscreen().setupPipeline();
-    //_scene.createDescriptorSetLayout();
-    _scene.createDeferPipeline(_renderpass, _layout_and_pool.pipelineLayout);
+
+    _scene.createPipeline(get_data<VkRenderPass>(_geometry.getRenderpass()), get_data<VkPipelineLayout>(_geometry.getPipelineLayout()));
     
     _scene.createUniformBuffer();
     
-    //_scene.createDescriptorPool();
-    _scene.createDeferDescriptorSets(_layout_and_pool.descriptorPool, _layout_and_pool.descriptorSetLayout);
-
+    _scene.createDescriptorSets(get_data<VkDescriptorPool>(_geometry.getDescriptorPool()), get_data<VkDescriptorSetLayout>(_geometry.getDescriptorSetLayout()));
+    _final.setupDescriptorSets(_geometry.getTexture());
+    _final.setupPipeline(_renderpass);
 }
 
 void

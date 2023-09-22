@@ -123,6 +123,8 @@ public:
 
     // Own function
     [[nodiscard]] constexpr scene::vulkan_scene& getScene() { return _scene; }
+    [[nodiscard]] vulkan_geometry_pass& getGeometryPass() { return _geometry; }
+    [[nodiscard]] vulkan_final_pass& getFinalPass() { return _final; }
 
 private:
     void create_surface(VkInstance instance);
@@ -145,6 +147,8 @@ private:
     // Own param
     scene::vulkan_scene             _scene;
     vulkan_layout_and_pool          _layout_and_pool;
+    vulkan_geometry_pass            _geometry;
+    vulkan_final_pass               _final;
     
 
     // Function Pointers

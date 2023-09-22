@@ -18,7 +18,7 @@ layout (set = 0, binding = 0) uniform UBO
 	float farPlane;
 } ubo;
 
-layout (set = 1, binding = 0) uniform sampler2D samplerColormap;
+layout (set = 0, binding = 1) uniform sampler2D samplerColormap;
 
 float linearDepth(float depth)
 {

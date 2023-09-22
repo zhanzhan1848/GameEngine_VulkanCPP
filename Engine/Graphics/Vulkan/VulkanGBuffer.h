@@ -68,56 +68,13 @@ namespace primal::graphics::vulkan
 		float farPlane = 64.0f;
 	};
 
-	class vulkan_offscreen
+	class vulkan_base_pass
 	{
 	public:
-		vulkan_offscreen() = default;
-
-		explicit vulkan_offscreen(u32 width, u32 height) : _width{width},  _height{height} {}
-
-		DISABLE_COPY_AND_MOVE(vulkan_offscreen);
-
-		~vulkan_offscreen();
-
-		void setSize(u32 width, u32 height) { _width = width; _height = height; }
-
-		void createUniformBuffer();
-
-		void updateUniformBuffer();
-
-		void setupRenderpass();
-
-		void setupFramebuffer();
-
-		void setupDescriptorSets(VkDescriptorPool pool, id::id_type id);
-
-		void setupPipeline();
-
-		void runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface* surface);
-
-		[[nodiscard]] uniformBuffer& get_uniform_buffer() { return _ub; }
-		[[nodiscard]] uniformBuffer& get_ssao_param() { return _ssaoParams_ub; }
-
-		[[nodiscard]] utl::vector<id::id_type> getTexture() { return _image_ids; }
-
-	private:
-		u32												_width;
-		u32												_height;
-		uboGBuffer										_ubo;
-		uboSSAOParam									_ssaoParams_ubo;
-		uniformBuffer									_ub;
-		uniformBuffer									_ssaoKernel_ub;
-		uniformBuffer									_ssaoParams_ub;
-		utl::vector<vulkan_framebuffer>					_framebuffers;
-		utl::vector<vulkan_renderpass>					_renderpasses;
-		utl::vector<id::id_type>						_image_ids;
-		id::id_type										_descriptorSet_id;
-		id::id_type										_descriptorSet_color_id;
-		id::id_type										_pipeline_id;
-		utl::vector<id::id_type>						_descriptorSet_layout_ids;
-		utl::vector<id::id_type>						_pipeline_layout_ids;
-		id::id_type										_ssao_descriptorSet_id;
-		id::id_type										_ssao_pipeline_id;
+		virtual void createUniformbuffer() = 0;
+		virtual void setupRenderpassAndFramebuffer() = 0;
+		virtual void setupPoolAndLayout() = 0;
+		virtual void runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface* surface) = 0;
 	};
 
 	class vulkan_geometry_pass
@@ -137,10 +94,24 @@ namespace primal::graphics::vulkan
 
 		void setupRenderpassAndFramebuffer();
 
+		void setupPoolAndLayout();
+
 		void runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface* surface);
 
 
 		[[nodiscard]] utl::vector<id::id_type> getTexture() { return _image_ids; }
+
+		[[nodiscard]] constexpr id::id_type getFramebuffer() { return _framebuffer_id; }
+
+		[[nodiscard]] constexpr id::id_type getRenderpass() { return _renderpass_id; }
+
+		[[nodiscard]] constexpr id::id_type getDescriptorPool() { return _descriptor_pool_id; }
+
+		[[nodiscard]] constexpr id::id_type getDescriptorSetLayout() { return _descriptor_set_layout_id; }
+
+		[[nodiscard]] constexpr id::id_type getPipelineLayout() { return _pipeline_layout_id; }
+
+		[[nodiscard]] constexpr id::id_type getUniformbuffer() { return _ub_id; }
 
 	private:
 		u32												_width;
@@ -148,11 +119,12 @@ namespace primal::graphics::vulkan
 		id::id_type										_ub_id;
 		id::id_type										_framebuffer_id;
 		id::id_type										_renderpass_id;
-		utl::vector<id::id_type>						_image_ids;
-		id::id_type										_descriptorSet_id;
-		id::id_type										_pipeline_id;
-		utl::vector<id::id_type>						_descriptorSet_layout_id;
+		id::id_type										_descriptor_pool_id;
+		id::id_type										_descriptor_set_layout_id;
 		id::id_type										_pipeline_layout_id;
+
+		// Output
+		utl::vector<id::id_type>						_image_ids;
 	};
 
 	class vulkan_final_pass
@@ -168,7 +140,7 @@ namespace primal::graphics::vulkan
 
 		void setSize(u32 width, u32 height) { _width = width; _height = height; }
 
-		void setupDescriptorSets(std::initializer_list<id::id_type> image_id);
+		void setupDescriptorSets(utl::vector<id::id_type> image_id);
 
 		void setupPipeline(vulkan_renderpass renderpass);
 
