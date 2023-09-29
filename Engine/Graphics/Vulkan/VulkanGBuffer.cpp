@@ -1049,8 +1049,9 @@ namespace primal::graphics::vulkan
 		VkPipelineDynamicStateCreateInfo dynamicState = descriptor::pipelineDynamicStateCreate(dynamicStateEnables);
 		VkPipelineVertexInputStateCreateInfo emptyVertexInputState{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO , nullptr, 0, 0, nullptr, 0, nullptr };
 		std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages;
-		shaderStages[0] = shaders::get_shader(shaders::add("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/fullscreen.vert.spv", shader_type::vertex)).getShaderStage();
-		shaderStages[1] = shaders::get_shader(shaders::add("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/composition.frag.spv", shader_type::pixel)).getShaderStage();
+		std::string base_dir{ SOLUTION_DIR };
+		shaderStages[0] = shaders::get_shader(shaders::add(base_dir + "Engine\\Graphics\\Vulkan\\Shaders\\fullscreen.vert.spv", shader_type::vertex)).getShaderStage();
+		shaderStages[1] = shaders::get_shader(shaders::add(base_dir + "Engine\\Graphics\\Vulkan\\Shaders\\composition.frag.spv", shader_type::pixel)).getShaderStage();
 
 		VkGraphicsPipelineCreateInfo pipelineCreateInfo{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
 		pipelineCreateInfo.layout = get_data<VkPipelineLayout>(_pipeline_layout_id);

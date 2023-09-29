@@ -70,7 +70,7 @@ public:
         }
     }
 private:
-    float           _dt_avg{ 16.7f };
+    float           _dt_avg{ 16.667f };
     float		    _us_avg{ 0.0f };
     int			    _counter{ 1 };
     time_stamp	    _start;

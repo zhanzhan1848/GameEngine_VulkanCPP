@@ -360,13 +360,17 @@ void Engine_Test::run()
 	{
 		if (_surfaces[i].surface.surface.is_valid())
 		{
-			f32 threshold{ 10 };
+			f32 thresholds[3]{};
 
 			graphics::frame_info info{};
 			info.render_item_ids = &item_id;
 			info.render_item_count = 1;
-			info.thresholds = &threshold;
+			info.thresholds = &thresholds[0];
+			info.light_set_key = 0;
+			info.average_frame_time = timer.dt_avg();
 			info.camera_id = _surfaces[i].camera.get_id();
+
+			assert(_countof(thresholds) >= info.render_item_count);
 			_surfaces[i].surface.surface.render(info);
 		}
 	}

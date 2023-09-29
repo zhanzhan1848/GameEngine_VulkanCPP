@@ -72,6 +72,7 @@ namespace primal::content
 		utl::free_list<u8*>								geometry_hierarchies;
 		std::mutex										geometry_mutex;
 
+		utl::free_list<noexcept_map>					shader_groups;
 		utl::free_list<std::unique_ptr<u8[]>>			shaders;
 		std::mutex										shader_mutex;
 

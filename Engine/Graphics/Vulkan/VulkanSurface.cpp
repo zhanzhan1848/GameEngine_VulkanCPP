@@ -129,10 +129,12 @@ vulkan_surface::create(VkInstance instance)
 
     core::create_graphics_command((u32)_swapchain.images.size());
 
-    auto model_id = submesh::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/models/viking_room.obj" });
-    auto texture_id = textures::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/images/viking_room.png" });
-    auto vs_id = shaders::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/test01.vert.spv" }, shader_type::vertex);
-    auto fs_id = shaders::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/test01.frag.spv" }, shader_type::pixel);
+    std::string base_dir{ SOLUTION_DIR };
+
+    auto model_id = submesh::add(base_dir + std::string{ "EngineTest\\assets\\models\\viking_room.obj" });
+    auto texture_id = textures::add(base_dir + std::string{ "EngineTest\\assets\\images\\viking_room.png" });
+    auto vs_id = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\test01.vert.spv" }, shader_type::vertex);
+    auto fs_id = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\test01.frag.spv" }, shader_type::pixel);
     auto material_id = materials::add({ material_type::type::opauqe, 0, {vs_id, id::invalid_id, id::invalid_id, id::invalid_id, fs_id, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
     materials::get_material(material_id).add_texture(texture_id);
 
@@ -163,9 +165,9 @@ vulkan_surface::create(VkInstance instance)
     auto id4 = _scene.add_model_instance(ntt3, model_id);
     _scene.add_material(id4, material_id);
 
-    auto floor = submesh::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/models/floor.obj" });
-    auto floor_vs = shaders::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/floor.vert.spv" }, shader_type::vertex);
-    auto floor_fs = shaders::add(std::string{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/floor.frag.spv" }, shader_type::pixel);
+    auto floor = submesh::add(base_dir + std::string{ "EngineTest\\assets\\models\\floor.obj" });
+    auto floor_vs = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\floor.vert.spv" }, shader_type::vertex);
+    auto floor_fs = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\floor.frag.spv" }, shader_type::pixel);
     auto floor_material = materials::add({ material_type::opauqe, 0, {floor_vs, id::invalid_id, id::invalid_id, id::invalid_id, floor_fs, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
     
     transform::init_info transform_info1{};

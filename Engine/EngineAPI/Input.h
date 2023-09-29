@@ -148,6 +148,7 @@ namespace primal::input
 
 			key_numlock,
 			key_scrollock,
+			key_tilde,
 		};
 	};
 
@@ -157,7 +158,7 @@ namespace primal::input
 		{
 			keyboard,
 			mouse,
-			controler,
+			controller,
 			raw,
 
 			count

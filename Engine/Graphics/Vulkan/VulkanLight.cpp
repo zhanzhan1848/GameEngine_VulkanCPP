@@ -12,7 +12,7 @@ namespace primal::graphics::vulkan::light
 		struct light_owner
 		{
 			game_entity::entity_id			id{ id::invalid_id };
-			u32								data_index;
+			u32								data_index{ u32_invalid_id };
 			graphics::light::type			type;
 			bool							is_enabled;
 		};
