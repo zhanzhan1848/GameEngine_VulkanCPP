@@ -12,11 +12,9 @@
 #include "VulkanContent.h"
 #include "Components/Transform.h"
 #include "Components/Entity.h"
-#include "VulkanDescriptor.h"
-#include "VulkanPipeline.h"
 
 #include "VulkanData.h"
-
+#include "VulkanLight.h"
 
 namespace primal::graphics::vulkan
 {
@@ -129,8 +127,11 @@ vulkan_surface::create(VkInstance instance)
 
     core::create_graphics_command((u32)_swapchain.images.size());
 
+    light::initialize();
+
     std::string base_dir{ SOLUTION_DIR };
 
+    auto build_id = submesh::add(base_dir + std::string{"EngineTest\\assets\\models\\sponza.obj"});
     auto model_id = submesh::add(base_dir + std::string{ "EngineTest\\assets\\models\\viking_room.obj" });
     auto texture_id = textures::add(base_dir + std::string{ "EngineTest\\assets\\images\\viking_room.png" });
     auto vs_id = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\test01.vert.spv" }, shader_type::vertex);
@@ -366,6 +367,12 @@ vulkan_surface::create_swapchain()
     if (!core::detect_depth_format(core::physical_device()))
     {
         ERROR_MSSG("Failed to find a supported depth format...");
+        return false;
+    }
+
+    if (!core::detect_push_descriptor(core::physical_device()))
+    {
+        ERROR_MSSG("Failed to use push descriptor set feature...");
         return false;
     }
 

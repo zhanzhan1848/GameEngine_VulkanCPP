@@ -18,13 +18,18 @@ namespace primal::graphics::vulkan
 		{
 			UniformBuffer ub;
 
-			createBuffer(core::logical_device(), size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, ub.buffer, ub.memory);
+			createBuffer(core::logical_device(), size <= 0 ? 1 : size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, ub.buffer, ub.memory);
 
-			vkMapMemory(core::logical_device(), ub.memory, 0, size, 0, &ub.mapped);
+			if (data)
+			{
+				vkMapMemory(core::logical_device(), ub.memory, 0, size, 0, &ub.mapped);
 
-			memcpy(ub.mapped, data, size);
+				memcpy(ub.mapped, data, size);
 
-			ub.size = size;
+				vkUnmapMemory(core::logical_device(), ub.memory);
+			}
+
+			ub.size = size <= 0 ? 1 : size;
 
 			return uniformBuffer_list.add(ub);
 		}
@@ -225,6 +230,30 @@ namespace primal::graphics::vulkan
 		static_assert(_countof(remove_functions) == engine_vulkan_data::data_type::count);
 
 	} // anonymous namespace
+
+	void UniformBuffer::update(const void* const data, size_t size)
+	{
+		assert(size <= this->size);
+
+		vkMapMemory(core::logical_device(), this->memory, 0, size, 0, &this->mapped);
+
+		memcpy(this->mapped, data, size);
+
+		vkUnmapMemory(core::logical_device(), this->memory);
+	}
+
+	void UniformBuffer::resize(size_t size)
+	{
+		assert(size != this->size);
+		assert(this->buffer && this->memory);
+
+		vkDestroyBuffer(core::logical_device(), this->buffer, nullptr);
+		vkFreeMemory(core::logical_device(), this->memory, nullptr);
+
+		createBuffer(core::logical_device(), size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, this->buffer, this->memory);
+
+		this->size = size;
+	}
 
 	id::id_type create_data(engine_vulkan_data::data_type type, const void* const data, [[maybe_unused]] u32 size)
 	{

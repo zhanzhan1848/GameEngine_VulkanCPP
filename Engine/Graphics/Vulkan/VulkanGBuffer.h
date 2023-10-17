@@ -109,6 +109,8 @@ namespace primal::graphics::vulkan
 
 		[[nodiscard]] constexpr id::id_type getDescriptorSetLayout() { return _descriptor_set_layout_id; }
 
+		[[nodiscard]] constexpr id::id_type getLightDescriptorSetLayout() { return _light_descriptor_set_layout_id; }
+
 		[[nodiscard]] constexpr id::id_type getPipelineLayout() { return _pipeline_layout_id; }
 
 		[[nodiscard]] constexpr id::id_type getUniformbuffer() { return _ub_id; }
@@ -121,6 +123,7 @@ namespace primal::graphics::vulkan
 		id::id_type										_renderpass_id;
 		id::id_type										_descriptor_pool_id;
 		id::id_type										_descriptor_set_layout_id;
+		id::id_type										_light_descriptor_set_layout_id;
 		id::id_type										_pipeline_layout_id;
 
 		// Output

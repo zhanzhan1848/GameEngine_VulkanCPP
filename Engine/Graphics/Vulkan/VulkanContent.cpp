@@ -3,8 +3,6 @@
 #include "VulkanResources.h"
 #include "VulkanCore.h"
 #include "VulkanTexture.h"
-#include "VulkanPipeline.h"
-#include "VulkanDescriptor.h"
 #include "Components/Transform.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "Content/stb_image.h"
@@ -16,6 +14,8 @@
 #include <array>
 
 #include "VulkanData.h"
+#include "VulkanLight.h"
+#include "Shaders/ShaderTypes.h"
 
 namespace primal::graphics::vulkan
 {
@@ -480,29 +480,7 @@ namespace primal::graphics::vulkan
 
 		void vulkan_instance_model::create_instance_buffer()
 		{
-			std::vector<InstanceData> datas;
-			//datas.resize(_model.getIndicesCount());
-			for(u32 i{0}; i < _model.getIndicesCount(); ++i)
-			{
-				datas.emplace_back(_instanceData);
-			}
-			size_t bufferSize = sizeof(InstanceData) * datas.size();
-
-			VkBuffer stagingBuffer;
-			VkDeviceMemory stagingBufferMemory;
-			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-
-			void* data;
-			vkMapMemory(core::logical_device(), stagingBufferMemory, 0, bufferSize, 0, &data);
-			memcpy(data, datas.data(), bufferSize);
-			vkUnmapMemory(core::logical_device(), stagingBufferMemory);
-
-			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, _instanceBuffer.buffer, _instanceBuffer.memory);
-
-			copyBuffer(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), stagingBuffer, _instanceBuffer.buffer, bufferSize);
-
-			vkDestroyBuffer(core::logical_device(), stagingBuffer, nullptr);
-			vkFreeMemory(core::logical_device(), stagingBufferMemory, nullptr);
+			_modelMatrx_id = create_data(engine_vulkan_data::vulkan_uniform_buffer, static_cast<void*>(&_modelMatrix), sizeof(math::m4x4));
 		}
 
 		vulkan_instance_model::vulkan_instance_model(id::id_type model_id) : _model{ get_model(model_id)}
@@ -514,9 +492,15 @@ namespace primal::graphics::vulkan
 		vulkan_instance_model::vulkan_instance_model(game_entity::entity entity, id::id_type model_id) : _model{ get_model(model_id) }, _id{ entity.get_id() }
 		{
 			_model.create_model_buffer();
-			_instanceData.transform = entity.position();
-			_instanceData.rotate = { entity.rotation().x, entity.rotation().y, entity.rotation().z };
-			_instanceData.scale = entity.scale();
+			math::v3 scale = entity.scale();
+			math::v4 rotation = entity.rotation();
+			math::v3 transform = entity.position();
+			DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixAffineTransformation(
+				DirectX::XMLoadFloat3(&scale),
+				{ 0.f, 0.f, 0.f, 1.f },
+				DirectX::XMLoadFloat4(&rotation),
+				DirectX::XMLoadFloat3(&transform));
+			DirectX::XMStoreFloat4x4(&_modelMatrix, modelMatrix);
 			create_instance_buffer();
 		}
 
@@ -534,8 +518,7 @@ namespace primal::graphics::vulkan
 				materials::get_material(_material_id).remove_texture(texture_id);
 			}
 
-			vkDestroyBuffer(core::logical_device(), _instanceBuffer.buffer, nullptr);
-			vkFreeMemory(core::logical_device(), _instanceBuffer.memory, nullptr);
+			remove_data(engine_vulkan_data::vulkan_uniform_buffer, _modelMatrx_id);
 
 			_model.~vulkan_model();
 		}
@@ -559,7 +542,6 @@ namespace primal::graphics::vulkan
 			auto vertexBuffer = _model.getVertexBuffer();
 			auto indexBuffer = _model.getIndexBuffer();
 			vkCmdBindVertexBuffers(cmd_buffer.cmd_buffer, 0, 1, &vertexBuffer.buffer, offset);
-			vkCmdBindVertexBuffers(cmd_buffer.cmd_buffer, 1, 1, &_instanceBuffer.buffer, offset);
 			vkCmdBindIndexBuffer(cmd_buffer.cmd_buffer, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT16);
 		}
 
@@ -697,11 +679,7 @@ namespace primal::graphics::vulkan
 		}
 
 		void vulkan_scene::createUniformBuffer() {
-			VkDeviceSize bufferSize = sizeof(UniformBufferObjectPlus);
-
-			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, _uniformBuffer.buffer, _uniformBuffer.memory);
-
-			vkMapMemory(core::logical_device(), _uniformBuffer.memory, 0, bufferSize, 0, &_uniformBuffer.mapped);
+			_ubo_id = create_data(engine_vulkan_data::vulkan_uniform_buffer, nullptr, sizeof(UniformBufferObjectPlus));
 		}
 
 		void vulkan_scene::createDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout)
@@ -709,18 +687,25 @@ namespace primal::graphics::vulkan
 			for (auto& instance : _instance_ids)
 			{
 				instance_models[instance].createDescriptorSet(pool, layout);
+
 				auto descriptorSet = get_data<VkDescriptorSet>(instance_models[instance].getDescriptorSet());
 				std::vector<VkWriteDescriptorSet> descriptorWrites;
 
 				VkDescriptorBufferInfo bufferInfo;
-				bufferInfo.buffer = _uniformBuffer.buffer;
+				bufferInfo.buffer = get_data<UniformBuffer>(_ubo_id).buffer;
 				bufferInfo.offset = 0;
-				bufferInfo.range = sizeof(UniformBufferObjectPlus);
+				bufferInfo.range = get_data<UniformBuffer>(_ubo_id).size;
 				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo));
 
+				VkDescriptorBufferInfo modelBufferInfo;
+				modelBufferInfo.buffer = get_data<UniformBuffer>(instance_models[instance].getModelMatrixID()).buffer;
+				modelBufferInfo.offset = 0;
+				modelBufferInfo.range = get_data<UniformBuffer>(instance_models[instance].getModelMatrixID()).size;
+				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &modelBufferInfo));
+
+				u32 count{ 2 };
 				if (!materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().empty())
 				{
-					u32 count{ 1 };
 					for (u32 i{ 0 }; i < materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().size(); ++i)
 					{
 						VkDescriptorImageInfo imageInfo;
@@ -732,12 +717,6 @@ namespace primal::graphics::vulkan
 						count++;
 					}
 				}
-
-				//VkDescriptorImageInfo shadowInfo;
-				//shadowInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
-				//shadowInfo.imageView = _shadowmap.getTexture().view;
-				//shadowInfo.sampler = _shadowmap.getTexture().sampler;
-				//descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &shadowInfo));
 
 				vkUpdateDescriptorSets(core::logical_device(), static_cast<u32>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 			}
@@ -824,20 +803,22 @@ namespace primal::graphics::vulkan
 			pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
 			pipelineCreateInfo.pStages = shaderStages.data();
 			pipelineCreateInfo.pVertexInputState = &emptyVertexInputState;
-			_pipeline_id = pipeline::add_pipeline(pipelineCreateInfo);
+			_pipeline_id = create_data(engine_vulkan_data::vulkan_pipeline, static_cast<const void* const>(&pipelineCreateInfo), 0);
 		}
 
 		void vulkan_scene::updateView(frame_info info)
 		{
-			_camera_ids.emplace_back(info.camera_id);
+			UniformBufferObjectPlus data;
 			graphics::vulkan::camera::get(info.camera_id).update();
+
 			DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
-			DirectX::XMStoreFloat4x4(&_ubo.model, modelMatrix);
-			DirectX::XMStoreFloat4x4(&_ubo.view, graphics::vulkan::camera::get(info.camera_id).view());
-			DirectX::XMStoreFloat4x4(&_ubo.projection, graphics::vulkan::camera::get(info.camera_id).projection());
-			_ubo.lightNear = graphics::vulkan::camera::get(info.camera_id).near_z();
-			_ubo.lightFar = graphics::vulkan::camera::get(info.camera_id).far_z();
-			memcpy(_uniformBuffer.mapped, &_ubo, sizeof(UniformBufferObjectPlus));
+			DirectX::XMStoreFloat4x4(&data.model, modelMatrix);
+			DirectX::XMStoreFloat4x4(&data.view, graphics::vulkan::camera::get(info.camera_id).view());
+			DirectX::XMStoreFloat4x4(&data.projection, graphics::vulkan::camera::get(info.camera_id).projection());
+			DirectX::XMStoreFloat3(&data.cameraDirection, graphics::vulkan::camera::get(info.camera_id).direction());
+			data.lightNear = graphics::vulkan::camera::get(info.camera_id).near_z();
+			data.lightFar = graphics::vulkan::camera::get(info.camera_id).far_z();
+			get_data<UniformBuffer>(_ubo_id).update(static_cast<void*>(&data), sizeof(UniformBufferObjectPlus));
 		}
 
 		void vulkan_scene::flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)
@@ -845,11 +826,26 @@ namespace primal::graphics::vulkan
 			
 			for (auto& instance : _instance_ids)
 			{
-				// auto descriptorSet = descriptor::get(instance_models[instance].get_descriptor_set_ids(render_type::forward).font());
 				auto descriptorSet = get_data<VkDescriptorSet>(instance_models[instance].getDescriptorSet());
-				// auto pipeline = pipeline::get_pipeline(instance_models[instance].getPipelineID());
 				auto pipeline = get_data<VkPipeline>(instance_models[instance].getPipelineID());
+
 				vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
+
+				VkWriteDescriptorSet write;
+				VkDescriptorBufferInfo lightBuffer;
+				lightBuffer.buffer = get_data<UniformBuffer>(light::non_cullable_light_buffer_id()).buffer;
+				lightBuffer.offset = 0;
+				lightBuffer.range = get_data<UniformBuffer>(light::non_cullable_light_buffer_id()).size;
+				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				write.pNext = nullptr;
+				write.dstSet = 0;
+				write.dstBinding = 0;
+				write.descriptorCount = 1;
+				write.dstArrayElement = 0;
+				write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				write.pBufferInfo = &lightBuffer;
+				vkCmdPushDescriptorSetKHR(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &write);
+
 				vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 				instance_models[instance].flushBuffer(cmd_buffer);
 				instance_models[instance].draw(cmd_buffer);
@@ -867,8 +863,8 @@ namespace primal::graphics::vulkan
 
 		void vulkan_scene::drawDefer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)
 		{
-			auto descriptorSet = descriptor::get(_descriptor_set_id);
-			auto pipeline = pipeline::get_pipeline(_pipeline_id);
+			auto descriptorSet = get_data<VkDescriptorSet>(_descriptor_set_id);
+			auto pipeline = get_data<VkPipeline>(_pipeline_id);
 			vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
 			vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 			vkCmdDraw(cmd_buffer.cmd_buffer, 3, 1, 0, 0);

@@ -4,10 +4,7 @@
 #include "VulkanSurface.h"
 #include "VulkanCamera.h"
 #include "VulkanContent.h"
-#include "VulkanPipeline.h"
-#include "VulkanDescriptor.h"
 #include "VulkanResources.h"
-#include "VulkanUtility.h"
 #include "VulkanData.h"
 
 #include "EngineAPI/GameEntity.h"
@@ -447,7 +444,7 @@ namespace primal::graphics::vulkan
 
 		vkDestroyRenderPass(core::logical_device(),_renderpass.render_pass, nullptr);
 
-		pipeline::remove_pipeline(_pipeline_id);
+		remove_data(engine_vulkan_data::vulkan_pipeline, _pipeline_id);
 
 		vkDestroyBuffer(core::logical_device(), _uniformbuffer.buffer, nullptr);
 		vkFreeMemory(core::logical_device(), _uniformbuffer.memory, nullptr);
@@ -642,14 +639,14 @@ namespace primal::graphics::vulkan
 		allocInfo.descriptorSetCount = 1;
 		allocInfo.pSetLayouts = &layout;
 
-		_descriptorSet_id =  descriptor::add(allocInfo);
+		_descriptorSet_id =  create_data(engine_vulkan_data::vulkan_descriptor_sets, static_cast<void*>(&allocInfo), 0);
 
 		VkDescriptorBufferInfo bufferInfo;
 		bufferInfo.buffer = _uniformbuffer.buffer;
 		bufferInfo.offset = 0;
 		bufferInfo.range = sizeof(UniformBufferObject);
 
-		VkDescriptorSet set = descriptor::get(_descriptorSet_id);
+		VkDescriptorSet set = get_data<VkDescriptorSet>(_descriptorSet_id);
 
 		std::vector<VkWriteDescriptorSet> descriptorWrites = {
 			descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, set, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo),
@@ -710,7 +707,7 @@ namespace primal::graphics::vulkan
 		pipelineCI.basePipelineHandle = VK_NULL_HANDLE;
 		pipelineCI.basePipelineIndex = -1;
 
-		_pipeline_id = pipeline::add_pipeline(pipelineCI);
+		_pipeline_id = create_data(engine_vulkan_data::vulkan_pipeline, static_cast<const void* const>(&pipelineCI), 0);
 
 		_shader.~vulkan_shader();
 	}
@@ -750,9 +747,9 @@ namespace primal::graphics::vulkan
 
 		vkCmdSetDepthBias(cmd_buffer.cmd_buffer, 0.25f, 0.f, 1.25f);
 
-		auto set = descriptor::get(_descriptorSet_id);
+		auto set = get_data<VkDescriptorSet>(_descriptorSet_id);
 		vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, surface->layout_and_pool().pipelineLayout, 0, 1, &set, 0, nullptr);
-		auto pipeline = pipeline::get_pipeline(_pipeline_id);
+		auto pipeline = get_data<VkPipeline>(_pipeline_id);
 		vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
 		surface->getScene().drawGBuffer(cmd_buffer);
@@ -797,6 +794,14 @@ namespace primal::graphics::vulkan
 		ubo.nearPlane = 0.1f;
 		ubo.farPlane = 64.0f;
 		_ub_id = create_data(engine_vulkan_data::vulkan_uniform_buffer, static_cast<void*>(&ubo), sizeof(uboGBuffer));
+
+		//XMVECTOR S = XMLoadFloat3(&Keyframes.front().Scale);
+		//XMVECTOR P = XMLoadFloat3(&Keyframes.front().Translation);
+		//XMVECTOR Q = XMLoadFloat4(&Keyframes.front().RotationQuat);
+
+		//XMVECTOR zero = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+		//// 将变化过程转为矩阵
+		//XMStoreFloat4x4(&M, XMMatrixAffineTransformation(S, zero, Q, P));
 	}
 
 	void vulkan_geometry_pass::setupRenderpassAndFramebuffer()
@@ -889,7 +894,7 @@ namespace primal::graphics::vulkan
 	void vulkan_geometry_pass::setupPoolAndLayout()
 	{
 		std::vector<VkDescriptorPoolSize> poolSize = {
-			descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count)),
+			descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count * 3)),
 			descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<u32>(frame_buffer_count) + (u32)12)
 		};
 
@@ -903,21 +908,34 @@ namespace primal::graphics::vulkan
 
 		_descriptor_pool_id = create_data(engine_vulkan_data::vulkan_descriptor_pool, static_cast<void*>(&poolInfo), 0);
 
-		std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings{
-		    descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT),
-		    descriptor::descriptorSetLayoutBinding(1, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
-		};
+		{
+			// Constant Descriptor Set Layout
+			std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings{
+				descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+				descriptor::descriptorSetLayoutBinding(1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+				descriptor::descriptorSetLayoutBinding(2, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+			};
+			VkDescriptorSetLayoutCreateInfo descriptorLayout = descriptor::descriptorSetLayoutCreate(setLayoutBindings);
+			_descriptor_set_layout_id = create_data(engine_vulkan_data::vulkan_descriptor_set_layout, static_cast<void*>(&descriptorLayout), 0);
+		}
 
-		VkDescriptorSetLayoutCreateInfo descriptorLayout = descriptor::descriptorSetLayoutCreate(setLayoutBindings);
-		_descriptor_set_layout_id = create_data(engine_vulkan_data::vulkan_descriptor_set_layout, static_cast<void*>(&descriptorLayout), 0);
+		{
+			// Mutable Descriptor Set Layout
+			VkDescriptorSetLayoutBinding lightSetLayoutBindings = descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+			VkDescriptorSetLayoutCreateInfo lightDescriptorLayout = descriptor::descriptorSetLayoutCreate(&lightSetLayoutBindings, 1);
+			lightDescriptorLayout.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+			_light_descriptor_set_layout_id = create_data(engine_vulkan_data::vulkan_descriptor_set_layout, static_cast<void*>(&lightDescriptorLayout), 0);
+		}
 
-		// VkPushConstantRange push{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(InstanceData) };
+		std::vector<VkDescriptorSetLayout> descriptorSetArray{ get_data<VkDescriptorSetLayout>(_descriptor_set_layout_id), get_data<VkDescriptorSetLayout>(_light_descriptor_set_layout_id) };
+
+		// VkPushConstantRange push{ VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32) };
 		VkPipelineLayoutCreateInfo pipelineLayoutInfo;
 		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 		pipelineLayoutInfo.pNext = nullptr;
 		pipelineLayoutInfo.flags = 0;
-		pipelineLayoutInfo.setLayoutCount = 1;
-		pipelineLayoutInfo.pSetLayouts = &(get_data<VkDescriptorSetLayout>(_descriptor_set_layout_id));
+		pipelineLayoutInfo.setLayoutCount = (u32)descriptorSetArray.size();
+		pipelineLayoutInfo.pSetLayouts = descriptorSetArray.data();
 		pipelineLayoutInfo.pushConstantRangeCount = 0;
 		pipelineLayoutInfo.pPushConstantRanges = nullptr;
 		_pipeline_layout_id = create_data(engine_vulkan_data::vulkan_pipeline_layout, static_cast<void*>(&pipelineLayoutInfo), 0);

@@ -126,10 +126,10 @@ struct UniformBufferObject
 
 struct UniformBufferObjectPlus : UniformBufferObject
 {
-    math::m4x4  lightModel;
-    math::m4x4  lightView;
-    math::m4x4  lightProjection;
-    math::v3    lightPos;
+    //math::m4x4  lightModel;
+    //math::m4x4  lightView;
+    //math::m4x4  lightProjection;
+    math::v3    cameraDirection;
     f32         lightNear;
     f32         lightFar;
 };

@@ -12,11 +12,9 @@ namespace primal::graphics::vulkan
 		void* mapped;
 		size_t	size;
 
-		void update(const void* const data, size_t size)
-		{
-			assert(size == this->size);
+		void update(const void* const data, size_t size);
 
-		}
+		void resize(size_t size);
 	};
 
 	struct engine_vulkan_data

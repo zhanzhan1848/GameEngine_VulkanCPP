@@ -18,7 +18,7 @@ namespace
 	constexpr math::v3 rgb_to_color(u8 r, u8 g, u8 b) { return { r / 255.f, g / 255.f, b / 255.f }; }
 } // anonymous namespace
 
-void genarate_lights()
+void generate_lights()
 {
 	// LEFT_SET
 	graphics::light_init_info info{};

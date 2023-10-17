@@ -13,8 +13,10 @@ bool create_device(VkSurfaceKHR surface);
 bool create_graphics_command(u32 swapchain_framebuffer_size);
 VkCommandPool get_current_command_pool();
 bool detect_depth_format(VkPhysicalDevice physical_device);
+bool detect_push_descriptor(VkPhysicalDevice physical_device);
 s32 find_memory_index(u32 type, u32 flags);
 
+u32 get_frame_index();
 u32 graphics_family_queue_index();
 u32 presentation_family_queue_index();
 VkFormat depth_format();

@@ -14,8 +14,8 @@
 // Own header file
 #include <array>
 #include "VulkanTexture.h"
-#include <chrono>
 #include <string>
+#include "VulkanLight.h"
 
 
 namespace primal::graphics::vulkan::core
@@ -138,6 +138,8 @@ public:
         vulkan_cmd_buffer& cmd_buffer{ _cmd_buffers[frame] };
         reset_cmd_buffer(cmd_buffer);
         begin_cmd_buffer(cmd_buffer, true, false, false);
+
+        light::update_light_buffers(info);
 
         surface->getScene().updateView(info);
         surface->getGeometryPass().runRenderpass(cmd_buffer, surface);
@@ -342,7 +344,8 @@ struct device_group
 
 using surface_collection = utl::free_list<vulkan_surface>;
 
-const utl::vector<const char*>	device_extensions{ 1, VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+//const utl::vector<const char*>	device_extensions{ 1, VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+const std::vector<const char*>  device_extensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME };
 VkInstance						instance{ nullptr };
 VkFormat						device_depth_format{ VK_FORMAT_UNDEFINED };
 vulkan_command					gfx_command;
@@ -581,6 +584,9 @@ PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR	fpGetPhysicalDeviceSurfaceCapabili
 PFN_vkGetPhysicalDeviceSurfaceFormatsKHR		fpGetPhysicalDeviceSurfaceFormatsKHR;
 PFN_vkGetPhysicalDeviceSurfacePresentModesKHR	fpGetPhysicalDeviceSurfacePresentModesKHR;
 
+PFN_vkGetPhysicalDeviceProperties2KHR           fpGetPhysicalDeviceProperties2KHR;
+PFN_vkCmdPushDescriptorSetKHR                   vkCmdPushDescriptorSetKHR;
+
 bool
 initialize()
 {
@@ -620,6 +626,9 @@ initialize()
     // If validation enabled, add extension to report debug info
     if (enable_validation_layers)
         instance_ext.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+    // Check Push Descriptor Set instance ext
+    instance_ext.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
     // Check to see if instance extensions are supported
     if (!check_instance_ext_support(&instance_ext))
@@ -750,6 +759,28 @@ detect_depth_format(VkPhysicalDevice physical_device)
     return false;
 }
 
+bool detect_push_descriptor(VkPhysicalDevice physical_device)
+{
+    vkCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(core::logical_device(), "vkCmdPushDescriptorSetKHR");
+    if (!vkCmdPushDescriptorSetKHR) {
+        ERROR_MSSG("Could not get a valid function pointer for vkCmdPushDescriptorSetKHR");
+    }
+
+    // Get device push descriptor properties (to display them)
+    PFN_vkGetPhysicalDeviceProperties2KHR vkGetPhysicalDeviceProperties2KHR = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2KHR>(vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2KHR"));
+    if (!vkGetPhysicalDeviceProperties2KHR) {
+        ERROR_MSSG("Could not get a valid function pointer for vkGetPhysicalDeviceProperties2KHR");
+    }
+    VkPhysicalDevicePushDescriptorPropertiesKHR pushDescriptorProps{};
+    VkPhysicalDeviceProperties2KHR deviceProp2{};
+    pushDescriptorProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR;
+    deviceProp2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR;
+    deviceProp2.pNext = &pushDescriptorProps;
+    vkGetPhysicalDeviceProperties2KHR(physical_device, &deviceProp2);
+
+    return true;
+}
+
 s32
 find_memory_index(u32 type, u32 flags)
 {
@@ -764,6 +795,12 @@ find_memory_index(u32 type, u32 flags)
 
     MESSAGE("Cannot find memory type...");
     return -1;
+}
+
+u32 get_frame_index()
+{
+    // Now has only one surface
+    return surfaces[0].current_frame();
 }
 
 u32

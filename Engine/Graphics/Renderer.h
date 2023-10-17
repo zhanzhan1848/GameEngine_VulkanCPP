@@ -164,6 +164,20 @@ namespace primal::graphics
 		}
 	};
 
+	struct light_camera_init_info : public camera_init_info
+	{
+		explicit light_camera_init_info(id::id_type id)
+		{
+			assert(id::is_valid(id));
+			entity_id = id;
+			type = camera::orthographic;
+			up = { 0.f, 1.f, 0.f };
+			view_width = view_height = 5000;
+			near_z = 0.01f;
+			far_z = 1000.0f;
+		}
+	};
+
 	struct shader_flags
 	{
 		enum flags : u32

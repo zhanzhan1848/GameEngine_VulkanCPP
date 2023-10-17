@@ -612,10 +612,10 @@ namespace primal::graphics::vulkan
 			VkVertexInputBindingDescription bBind{ 0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX };
 			return bBind;
 			}());
-		_bindingDescription.emplace_back([]() {
-			VkVertexInputBindingDescription bBind{ 1, sizeof(InstanceData), VK_VERTEX_INPUT_RATE_VERTEX };
-			return bBind;
-			}());
+		//_bindingDescription.emplace_back([]() {
+		//	VkVertexInputBindingDescription bBind{ 1, sizeof(InstanceData), VK_VERTEX_INPUT_RATE_VERTEX };
+		//	return bBind;
+		//	}());
 
 		return _bindingDescription;
 	}
@@ -624,22 +624,29 @@ namespace primal::graphics::vulkan
 	utl::vector<VkVertexInputAttributeDescription> getVertexInputAttributeDescriptor()
 	{
 		utl::vector<VkVertexInputAttributeDescription> _attributeDescriptions;
-		for (u32 i{ 0 }; i < (sizeof(Vertex) + sizeof(InstanceData)) / sizeof(math::v3); ++i)
+		//for (u32 i{ 0 }; i < (sizeof(Vertex) + sizeof(InstanceData)) / sizeof(math::v3); ++i)
+		//{
+		//	if (i < sizeof(Vertex) / sizeof(math::v3))
+		//	{
+		//		_attributeDescriptions.emplace_back([i]() {
+		//			VkVertexInputAttributeDescription attributeDescriptions{ i, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
+		//			return attributeDescriptions;
+		//			}());
+		//	}
+		//	else
+		//	{
+		//		_attributeDescriptions.emplace_back([i]() {
+		//			VkVertexInputAttributeDescription attributeDescriptions{ i, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * (i - (sizeof(Vertex) / sizeof(math::v3))) };
+		//			return attributeDescriptions;
+		//			}());
+		//	}
+		//}
+		for (u32 i{ 0 }; i < sizeof(Vertex) / sizeof(math::v3); ++i)
 		{
-			if (i < sizeof(Vertex) / sizeof(math::v3))
-			{
-				_attributeDescriptions.emplace_back([i]() {
-					VkVertexInputAttributeDescription attributeDescriptions{ i, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
-					return attributeDescriptions;
-					}());
-			}
-			else
-			{
-				_attributeDescriptions.emplace_back([i]() {
-					VkVertexInputAttributeDescription attributeDescriptions{ i, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * (i - (sizeof(Vertex) / sizeof(math::v3))) };
-					return attributeDescriptions;
-					}());
-			}
+			_attributeDescriptions.emplace_back([i]() {
+				VkVertexInputAttributeDescription attributeDescriptions{ i, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
+				return attributeDescriptions;
+			}());
 		}
 		return _attributeDescriptions;
 	}

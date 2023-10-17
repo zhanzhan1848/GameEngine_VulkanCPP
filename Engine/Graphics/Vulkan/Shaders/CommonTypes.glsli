@@ -1,0 +1,58 @@
+#if !defined(PRIMAL_COMMON_GLSLI) && !defined(__cplusplus)
+#error Do not include this header directly in shader files. Only include this file via Common.h
+#endif
+
+struct MVPMatrix
+{
+	mat4		model;
+	mat4		view;
+	mat4		projection;
+};
+
+// Contains light cullign data that's formatted and ready to be copied
+// to a Vulkan constant/structured buffer as contiguous chunk
+struct LightCullingLightInfo
+{
+	vec3		Position;
+	float		Range;
+
+	vec3		Direction;
+	float		ConeRadius;
+
+	int			Type;
+	vec3		_pad;
+};
+
+// Contains light data that's formatted and ready to be copy
+// to a Vulkan constant/structured buffer as a contiguous chunk
+struct LightParameters
+{
+	vec3		Position;
+	float		Intensity;
+
+	vec3		Direction;
+	int			Type;
+
+	vec3		Color;
+	float		Range;
+
+	vec3		Attenuation;
+	float		CosUmbra;			// Cosine of the half angle of umbra
+
+	float		CosPenumbra;		// Cosine of the half angle of penumbra
+	vec3		_pad;
+};
+
+struct DirectionalLightParameters
+{
+	vec3	Direction;
+	float	Intensity;
+
+	vec3	Color;
+	float	_pad;
+};
+
+#ifdef __cplusplus
+static_assert((sizeof(LightParameters) % 16) == 0, "Make sure LightParameters is formatted in 16-byte chunks without any implicit padding.");
+static_assert((sizeof(DirectionalLightParameters) % 16) == 0, "Make sure DirectionalLightParameters is formatted in 16-byte chunks without any implicit padding.");
+#endif // __cplusplus

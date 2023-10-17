@@ -2,8 +2,11 @@
 #include "Graphics/Renderer.h"
 #include "EngineAPI/Light.h"
 #include "EngineAPI/GameEntity.h"
-#include "VulkanUtility.h"
 #include "VulkanContent.h"
+#include "VulkanData.h"
+#include "Shaders/ShaderTypes.h"
+#include "VulkanSurface.h"
+
 
 namespace primal::graphics::vulkan::light
 {
@@ -15,22 +18,6 @@ namespace primal::graphics::vulkan::light
 			u32								data_index{ u32_invalid_id };
 			graphics::light::type			type;
 			bool							is_enabled;
-		};
-
-		struct light_data
-		{
-			math::v3						position;
-			math::v3						direction;
-			math::m4x4						affine;
-			math::m4x4						mvp;
-			f32								intensity;
-			math::v3						color;
-			// input
-			// utl::vector<id::id_type>		input_tex;
-			f32								falloff;
-			// output
-			// for RSM : depth, position, normal, flux(this is the reflecter of the scene, p.s. this is diffuse shading)
-			utl::vector<id::id_type>		output_tex;
 		};
 
 #if USE_STL_VECTOR
@@ -63,14 +50,9 @@ namespace primal::graphics::vulkan::light
 						_non_cullable_lights.emplace_back();
 					}
 
-					light_data& data{ _non_cullable_lights[index] };
-					data.color = info.color;
-					data.intensity = info.intensity;
-					data.falloff = 0.f;
-					for (u32 i{ 0 }; i < 4; ++i)
-					{
-						data.output_tex.emplace_back(create_output_tex());
-					}
+					glsl::DirectionalLightParameters& params{ _non_cullable_lights[index] };
+					params.Color = info.color;
+					params.Intensity = info.intensity;
 					
 					light_owner owner{ game_entity::entity_id{info.entity_id}, index, info.type, info.is_enabled };
 					const light_id id{ _owners.add(owner) };
@@ -113,19 +95,8 @@ namespace primal::graphics::vulkan::light
 					if (owner.is_enabled)
 					{
 						const game_entity::entity entity{ game_entity::entity_id{ owner.id } };
-						light_data& params{ _non_cullable_lights[owner.data_index] };
-						params.position = entity.position();
-						params.direction = entity.orientation();
-						using namespace DirectX;
-						XMVECTOR translate{ entity.position().x, entity.position().y, entity.position().z };
-						XMVECTOR rotate{ entity.rotation().x, entity.rotation().y, entity.rotation().z, entity.rotation().w };
-						XMVECTOR scale{ entity.scale().x, entity.scale().y, entity.scale().z };
-						XMMATRIX aff = XMMatrixAffineTransformation(scale, { 0, 0, 0 }, rotate, translate);
-						XMStoreFloat4x4(&params.affine, aff);
-						XMMATRIX model = XMMatrixIdentity();
-						XMMATRIX view = XMMatrixLookAtRH(translate, { entity.orientation().x , entity.orientation().y, entity.orientation().z }, { 0, 1, 0 });
-						XMMATRIX projection = XMMatrixOrthographicRH(2048, 2048, 0.1f, 64.f);
-						XMStoreFloat4x4(&params.mvp, XMMatrixMultiply(projection, XMMatrixMultiply(view, model)));
+						glsl::DirectionalLightParameters& params{ _non_cullable_lights[owner.data_index] };
+						params.Direction = entity.orientation();
 					}
 				}
 
@@ -154,7 +125,7 @@ namespace primal::graphics::vulkan::light
 				if (_owners[id].type == graphics::light::directional)
 				{
 					assert(index < _non_cullable_lights.size());
-					_non_cullable_lights[index].intensity = intensity;
+					_non_cullable_lights[index].Intensity = intensity;
 				}
 				else
 				{
@@ -173,25 +144,7 @@ namespace primal::graphics::vulkan::light
 				if (_owners[id].type == graphics::light::directional)
 				{
 					assert(index < _non_cullable_lights.size());
-					_non_cullable_lights[index].color = color;
-				}
-				else
-				{
-					// TODO: cullable lights
-				}
-			}
-
-			constexpr void color(light_id id, f32 falloff)
-			{
-				assert(falloff);
-
-				const light_owner& owner{ _owners[id] };
-				const u32 index{ owner.data_index };
-
-				if (_owners[id].type == graphics::light::directional)
-				{
-					assert(index < _non_cullable_lights.size());
-					_non_cullable_lights[index].falloff = falloff;
+					_non_cullable_lights[index].Color = color;
 				}
 				else
 				{
@@ -212,7 +165,7 @@ namespace primal::graphics::vulkan::light
 				if (_owners[id].type == graphics::light::directional)
 				{
 					assert(index < _non_cullable_lights.size());
-					return _non_cullable_lights[index].intensity;
+					return _non_cullable_lights[index].Intensity;
 				}
 				// TODO: cullable lights
 
@@ -227,37 +180,7 @@ namespace primal::graphics::vulkan::light
 				if (_owners[id].type == graphics::light::directional)
 				{
 					assert(index < _non_cullable_lights.size());
-					return _non_cullable_lights[index].color;
-				}
-				// TODO: cullable lights
-
-				return {};
-			}
-
-			constexpr f32 falloff(light_id id)
-			{
-				const light_owner& owner{ _owners[id] };
-				const u32 index{ owner.data_index };
-
-				if (_owners[id].type == graphics::light::directional)
-				{
-					assert(index < _non_cullable_lights.size());
-					return _non_cullable_lights[index].falloff;
-				}
-				// TODO: cullable lights
-
-				return {};
-			}
-
-			utl::vector<id::id_type> output_tex(light_id id)
-			{
-				const light_owner& owner{ _owners[id] };
-				const u32 index{ owner.data_index };
-
-				if (_owners[id].type == graphics::light::directional)
-				{
-					assert(index < _non_cullable_lights.size());
-					return _non_cullable_lights[index].output_tex;
+					return _non_cullable_lights[index].Color;
 				}
 				// TODO: cullable lights
 
@@ -286,8 +209,9 @@ namespace primal::graphics::vulkan::light
 				return count;
 			}
 
-			CONSTEXPR void non_cullable_lights(light_data* const lights, [[maybe_unused]] u32 buffer_size)
+			CONSTEXPR void non_cullable_lights(glsl::DirectionalLightParameters* const lights, [[maybe_unused]] u32 buffer_size)
 			{
+				// TODO: Maybe change to vulkan model!!!!!!!!!!!!!!!!!!!!
 				//assert(buffer_size == math::align_size_up<D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT>(non_cullable_light_count() * sizeof(light_data)));
 				const u32 count{ (u32)_non_cullable_owners.size() };
 				u32 index{ 0 };
@@ -310,23 +234,102 @@ namespace primal::graphics::vulkan::light
 				return _owners.size() > 0;
 			}
 
-			id::id_type create_output_tex()
+		private:
+			utl::free_list<light_owner>								_owners;
+			utl::vector<glsl::DirectionalLightParameters>			_non_cullable_lights;
+			utl::vector<light_id>									_non_cullable_owners;
+		};
+
+		class vulkan_light_buffer
+		{
+		public:
+			vulkan_light_buffer() = default;
+			~vulkan_light_buffer() {}
+
+			void init_buffer()
 			{
-				PE_vk_image_info img_info;
-				PE_vk_image_view_info view_info;
-				PE_vk_image_sampler_info sampler_info;
-				return textures::add(img_info.info, view_info.info, sampler_info.info);
+				_buffers[light_buffer::non_cullable_light].buffer_id = create_data(engine_vulkan_data::vulkan_uniform_buffer, nullptr, sizeof(glsl::DirectionalLightParameters));
 			}
 
+			void update_light_buffers(light_set& set, u64 light_set_key, u32 frame_index)
+			{
+				if (!id::is_valid(_buffers[light_buffer::non_cullable_light].buffer_id))
+				{
+					_buffers[light_buffer::non_cullable_light].buffer_id = create_data(engine_vulkan_data::vulkan_uniform_buffer, nullptr, set.non_cullable_light_count() * sizeof(glsl::DirectionalLightParameters));
+				}
+
+				u32 sizes[light_buffer::count]{};
+				sizes[light_buffer::non_cullable_light] = set.non_cullable_light_count() * sizeof(glsl::DirectionalLightParameters);
+
+				u32 currennt_size[light_buffer::count]{};
+				currennt_size[light_buffer::non_cullable_light] = get_data<UniformBuffer>(_buffers[light_buffer::non_cullable_light].buffer_id).size;
+
+				if (currennt_size[light_buffer::non_cullable_light] < sizes[light_buffer::non_cullable_light])
+				{
+					resize_buffer(light_buffer::non_cullable_light, sizes[light_buffer::non_cullable_light], frame_index);
+				}
+
+				_buffers[light_buffer::non_cullable_light].data = malloc(sizes[light_buffer::non_cullable_light]);
+
+				set.non_cullable_lights((glsl::DirectionalLightParameters *const)_buffers[light_buffer::non_cullable_light].data,
+					sizes[light_buffer::non_cullable_light]);
+
+				get_data<UniformBuffer>(_buffers[light_buffer::non_cullable_light].buffer_id).update(_buffers[light_buffer::non_cullable_light].data,
+					sizes[light_buffer::non_cullable_light]);
+
+				// TODO: cullable lights
+			}
+
+			constexpr void release()
+			{
+				for (u32 i{ 0 }; i < light_buffer::count; ++i)
+				{
+					remove_data(engine_vulkan_data::vulkan_uniform_buffer, _buffers[i].buffer_id);
+					_buffers[i].buffer_id = u32_invalid_id;
+				}
+			}
+
+			constexpr id::id_type non_cullable_lights() const { return _buffers[light_buffer::non_cullable_light].buffer_id; }
+
 		private:
-			utl::free_list<light_owner>		_owners;
-			utl::vector<light_data>			_non_cullable_lights;
-			utl::vector<light_id>			_non_cullable_owners;
+			struct light_buffer
+			{
+				enum type : u32
+				{
+					non_cullable_light,
+					cullable_light,
+					culling_info,
+
+					count
+				};
+
+				id::id_type		buffer_id{ u32_invalid_id };
+				void*			data{ nullptr };
+			};
+
+			void resize_buffer(light_buffer::type type, u32 size, [[maybe_unused]] u32 frame_index)
+			{
+				assert(type < light_buffer::count);
+				if (!size) return;
+
+				get_data<UniformBuffer>(_buffers[type].buffer_id).resize(size);
+			}
+
+			u32 max_buffer_size()
+			{
+				VkPhysicalDeviceProperties properties;
+				vkGetPhysicalDeviceProperties(core::physical_device(), &properties);
+				return properties.limits.maxUniformBufferRange;
+			}
+
+			light_buffer		_buffers[light_buffer::count];
+			u64					_current_light_set_key{ 0 };
 		};
 
 #undef CONSTEXPR
 
 		std::unordered_map<u64, light_set>			light_sets;
+		vulkan_light_buffer							light_buffers[frame_buffer_count];
 
 		constexpr void set_is_enabled(light_set& set, light_id id, const void* const data, [[maybe_unused]] u32 size)
 		{
@@ -391,13 +394,6 @@ namespace primal::graphics::vulkan::light
 			*entity_id = set.entity_id(id);
 		}
 
-		constexpr void get_output_tex(light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
-		{
-			id::id_type* const entity_id{ (id::id_type* const)data };
-			assert(sizeof(id::id_type) == size);
-			*entity_id = *set.output_tex(id).data();
-		}
-
 		constexpr void dummy_set(light_set&, light_id, const void* const, u32) {}
 
 		using set_function = void(*)(light_set&, light_id, const void* const, u32);
@@ -424,6 +420,16 @@ namespace primal::graphics::vulkan::light
 
 		static_assert(_countof(get_functions) == light_parameter::count);
 	} // anonymous namespace
+
+	bool initialize()
+	{
+		for (auto& b : light_buffers)
+		{
+			b.init_buffer();
+		}
+
+		return true;
+	}
 
 	graphics::light create(light_init_info info)
 	{
@@ -453,11 +459,6 @@ namespace primal::graphics::vulkan::light
 		get_functions[parameter](light_sets[light_set_key], id, data, data_size);
 	}
 
-	utl::vector<id::id_type> get_light_tex(light_id id, u64 light_set_key)
-	{
-		return light_sets[light_set_key].output_tex(id);
-	}
-
 	void update_light_buffers(const frame_info& info)
 	{
 		const u64 light_set_key{ info.light_set_key };
@@ -466,6 +467,21 @@ namespace primal::graphics::vulkan::light
 		if (!set.has_lights()) return;
 
 		set.update_transforms();
+		const u32 frame_index{ core::get_frame_index() };
+		vulkan_light_buffer& light_buffer{ light_buffers[frame_index] };
+		light_buffer.update_light_buffers(set, light_set_key, frame_index);
+	}
+
+	id::id_type non_cullable_light_buffer_id()
+	{
+		const vulkan_light_buffer& light_buffer{ light_buffers[core::get_frame_index()]};
+		return light_buffer.non_cullable_lights();
+	}
+
+	id::id_type non_cullable_light_buffer_id(vulkan_surface* surface)
+	{
+		const vulkan_light_buffer& light_buffer{ light_buffers[surface->current_frame()] };
+		return light_buffer.non_cullable_lights();
 	}
 
 	u32 non_cullable_light_count(u64 light_set_key)

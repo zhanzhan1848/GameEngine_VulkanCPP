@@ -190,8 +190,6 @@ namespace primal::graphics::vulkan
 			}
 
 			void createPipeline(VkPipelineLayout pipelineLayout, VkRenderPass render_pass);
-			[[nodiscard]] constexpr InstanceData getInstanceData() const { return _instanceData; }
-			[[nodiscard]] constexpr uniformBuffer getInstanceBuffer() const { return _instanceBuffer; }
 
 			/// <summary>
 			//  ! add a material to a instance model
@@ -203,16 +201,20 @@ namespace primal::graphics::vulkan
 			[[nodiscard]] constexpr id::id_type const getEntityID() const { return _id; }
 			[[nodiscard]] constexpr id::id_type const getPipelineID() const { return _pipeline_id; }
 			[[nodiscard]] constexpr id::id_type const getDescriptorSet() const { return _descriptorSet_id; }
+			[[nodiscard]] constexpr id::id_type const getLightDescriptorSet() const { return _light_descriptorSet_id; }
+			[[nodiscard]] constexpr math::m4x4 const getModelMatrix() const { return _modelMatrix; }
+			[[nodiscard]] constexpr id::id_type const getModelMatrixID() const { return _modelMatrx_id; }
 
 		private:
 			game_entity::entity_id									_id;
 			vulkan_model											_model;
-			uniformBuffer											_instanceBuffer;
 			id::id_type												_material_id;
 			utl::vector<VkPipelineShaderStageCreateInfo>			_shaderStages;
 			id::id_type												_pipeline_id;
 			id::id_type												_descriptorSet_id;
-			InstanceData											_instanceData;
+			id::id_type												_light_descriptorSet_id;
+			math::m4x4												_modelMatrix;
+			id::id_type												_modelMatrx_id;
 
 			void create_instance_buffer();
 		};
@@ -256,8 +258,7 @@ namespace primal::graphics::vulkan
 		private:
 			utl::vector<id::id_type>							_instance_ids;
 			utl::vector<camera_id>								_camera_ids;
-			UniformBufferObjectPlus								_ubo;
-			uniformBuffer										_uniformBuffer;
+			id::id_type											_ubo_id;
 			id::id_type											_pipeline_id;
 			id::id_type											_descriptor_set_id;
 		};

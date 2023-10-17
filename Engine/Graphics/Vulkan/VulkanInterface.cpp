@@ -4,6 +4,7 @@
 #include "VulkanInterface.h"
 #include "VulkanCore.h"
 #include "VulkanCamera.h"
+#include "VulkanLight.h"
 #include "Graphics/GraphicsPlatformInterface.h"
 
 namespace primal::graphics::vulkan {
@@ -19,6 +20,11 @@ namespace primal::graphics::vulkan {
         pi.surface.width = core::surface_width;
         pi.surface.height = core::surface_height;
         pi.surface.render = core::render_surface;
+
+        pi.light.create = light::create;
+        pi.light.remove = light::remove;
+        pi.light.set_parameter = light::set_parameter;
+        pi.light.get_parameter = light::get_parameter;
 
         pi.camera.create = camera::create;
         pi.camera.remove = camera::remove;

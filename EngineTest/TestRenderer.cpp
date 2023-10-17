@@ -276,6 +276,8 @@ bool test_initialize()
 		// init_test_workers(buffer_test_worker);
 
 		//item_id = create_render_item(create_one_game_entity(false).get_id());
+
+		generate_lights();
 	}
 	else
 	{

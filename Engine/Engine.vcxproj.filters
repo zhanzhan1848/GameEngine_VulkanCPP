@@ -193,11 +193,10 @@
     <ClInclude Include="Graphics\Direct3D12\D3D12Light.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanGBuffer.h" />
     <ClInclude Include="Components\PythonAPI.h" />
-    <ClInclude Include="Graphics\Vulkan\VulkanUtility.h" />
-    <ClInclude Include="Graphics\Vulkan\VulkanDescriptor.h" />
-    <ClInclude Include="Graphics\Vulkan\VulkanPipeline.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanLight.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanData.h" />
+    <ClInclude Include="Graphics\Vulkan\Shaders\ShaderTypes.h" />
+    <ClInclude Include="Graphics\Vulkan\Shaders\Common.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Components\Entity.cpp">
@@ -298,9 +297,6 @@
     <ClCompile Include="Graphics\Vulkan\VulkanContent.cpp" />
     <ClCompile Include="Graphics\Direct3D12\D3D12Light.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanGBuffer.cpp" />
-    <ClCompile Include="Graphics\Vulkan\VulkanUtility.cpp" />
-    <ClCompile Include="Graphics\Vulkan\VulkanDescriptor.cpp" />
-    <ClCompile Include="Graphics\Vulkan\VulkanPipeline.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanLight.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanData.cpp" />
   </ItemGroup>
