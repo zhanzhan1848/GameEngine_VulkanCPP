@@ -225,7 +225,6 @@ namespace primal::graphics::d3d12::content
 			{
 				using params = gpass::opaque_root_parameter;
 				d3dx::d3d12_root_parameter parameters[params::count]{};
-				parameters[params::global_shader_data].as_cbv(D3D12_SHADER_VISIBILITY_ALL, 0);
 
 				D3D12_SHADER_VISIBILITY buffer_visibility{};
 				D3D12_SHADER_VISIBILITY data_visibility{};
@@ -252,11 +251,15 @@ namespace primal::graphics::d3d12::content
 					data_visibility = D3D12_SHADER_VISIBILITY_ALL;
 				}
 
+				parameters[params::global_shader_data].as_cbv(D3D12_SHADER_VISIBILITY_ALL, 0);
+				parameters[params::per_object_data].as_cbv(data_visibility, 1);
 				parameters[params::position_buffer].as_srv(buffer_visibility, 0);
 				parameters[params::element_buffer].as_srv(buffer_visibility, 1);
 				parameters[params::srv_indices].as_srv(D3D12_SHADER_VISIBILITY_PIXEL, 2); // TODO: needs to be visible to any stages that need to sample textures.
 				parameters[params::directional_lights].as_srv(D3D12_SHADER_VISIBILITY_PIXEL, 3);
-				parameters[params::per_object_data].as_cbv(data_visibility, 1);
+				parameters[params::cullable_lights].as_srv(D3D12_SHADER_VISIBILITY_PIXEL, 4);
+				parameters[params::light_grid].as_srv(D3D12_SHADER_VISIBILITY_PIXEL, 5);
+				parameters[params::light_index_list].as_srv(D3D12_SHADER_VISIBILITY_PIXEL, 6);
 
 				root_signature = d3dx::d3d12_root_signature_desc{ &parameters[0], _countof(parameters), get_root_signature_flags(flags) }.create();
 			}
@@ -294,6 +297,15 @@ namespace primal::graphics::d3d12::content
 			return id;
 		}
 
+#pragma intrinsic(_BitScanForward)
+		shader_type::type get_shader_type(u32 flag)
+		{
+			assert(flag);
+			unsigned long index;
+			_BitScanForward(&index, flag);
+			return (shader_type::type)index;
+		}
+
 		pso_id create_pso(id::id_type material_id, D3D12_PRIMITIVE_TOPOLOGY primitive_topology, u32 elements_type)
 		{
 			std::lock_guard	lock{ material_mutex };
@@ -325,7 +337,10 @@ namespace primal::graphics::d3d12::content
 			{
 				if (flags & (1 << i))
 				{
-					primal::content::compiled_shader_ptr shader{ primal::content::get_shader(material.shader_ids()[shader_index]) };
+					// NOTE: each type of shader may have keys that are generated from different properties of the submesh or material.
+					//		 At the moment, we only have different kinds of vertex shaders depending on element_type
+					const u32 key{ get_shader_type(flags & (1 << i)) == shader_type::vertex ? elements_type : u32_invalid_id };
+					primal::content::compiled_shader_ptr shader{ primal::content::get_shader(material.shader_ids()[shader_index], key) };
 					assert(shader);
 					shaders[i].pShaderBytecode = shader->byte_code();
 					shaders[i].BytecodeLength = shader->byte_code_size();

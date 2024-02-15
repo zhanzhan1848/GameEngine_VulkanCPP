@@ -108,6 +108,39 @@ struct Vertex
     math::v3 color;
     math::v3 texCoord;
     math::v3 normal;
+    math::v3 tangent;
+
+    bool operator==(Vertex& v)
+    {
+        const f32 epsilon = 1.192e-07f;
+        return abs(this->pos.x - v.pos.x) < epsilon && abs(this->pos.y - v.pos.y) < epsilon && abs(this->pos.z - v.pos.z) < epsilon &&
+            abs(this->color.x - v.color.x) < epsilon && abs(this->color.y - v.color.y) < epsilon && abs(this->color.z - v.color.z) < epsilon &&
+            abs(this->texCoord.x - v.texCoord.x) < epsilon && abs(this->texCoord.y - v.texCoord.y) < epsilon && abs(this->texCoord.z - v.texCoord.z) < epsilon &&
+            abs(this->normal.x - v.normal.x) < epsilon && abs(this->normal.y - v.normal.y) < epsilon && abs(this->normal.z - v.normal.z) < epsilon;
+    }
+};
+
+struct geometry_config
+{
+    u32						vertex_size;
+    u32						vertex_count;
+    utl::vector<Vertex>		vertices;
+
+    u32						index_size;
+    u32						index_count;
+    utl::vector<u32>		indices;
+
+    math::v3				center;
+    math::v3				min_extents;
+    math::v3				max_extents;
+
+    char					name[256];
+    char					material_name[256];
+    char                    amibent_map[256];
+    char                    diffuse_map[256];
+    char                    specular_map[256];
+    char                    alpha_map[256];
+    char                    normal_map[256];
 };
 
 struct InstanceData
@@ -130,8 +163,11 @@ struct UniformBufferObjectPlus : UniformBufferObject
     //math::m4x4  lightView;
     //math::m4x4  lightProjection;
     math::v3    cameraDirection;
+    math::v3    cameraPosition;
     f32         lightNear;
     f32         lightFar;
+    f32         time;
+    f32         pading;
 };
 
 struct GPULightData

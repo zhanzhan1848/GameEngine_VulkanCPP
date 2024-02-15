@@ -8,6 +8,10 @@ namespace primal::graphics::vulkan::shaders
 {
 	namespace
 	{
+		utl::free_list<shaders::vulkan_shader>				shaders;
+
+		std::mutex											shader_mutex;
+
 		const std::string absolutePath = "C:/Users/27042/Desktop/DX_Test/PrimalMerge/Engine/Graphics/Vulkan/Shaders/";
 	} // anonymous namespace
 
@@ -41,6 +45,10 @@ namespace primal::graphics::vulkan::shaders
 				case shader_type::pixel:
 				{
 					stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+				}	break;
+				case shader_type::compute:
+				{
+					stage = VK_SHADER_STAGE_COMPUTE_BIT;
 				}	break;
 				default:
 					stage = VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
@@ -82,5 +90,38 @@ namespace primal::graphics::vulkan::shaders
 		//_entity_id = id::invalid_id;
 		//_path = nullptr;
 		//freeModule();
+	}
+
+	/// <summary>
+		// ! 生成shader原始ID
+		/// </summary>
+		/// <param name="path"></param>
+		/// <returns></returns>
+	id::id_type add(std::string path, shader_type::type type)
+	{
+		vulkan_shader shader;
+		shader.loadFile(path, type);
+		std::lock_guard lock{ shader_mutex };
+		return shaders.add(shader);
+	}
+
+	/// <summary>
+	// ！ 删除shader原始ID
+	///	1、 执行关联的所有material里的remove_shader 操作
+	/// 2、 执行删除shader原始ID的操作
+	/// </summary>
+	/// <param name="id"></param>
+	void remove(id::id_type id)
+	{
+		std::lock_guard lock{ shader_mutex };
+		assert(id::is_valid(id));
+		shaders.remove(id);
+	}
+
+	vulkan_shader& get_shader(id::id_type id)
+	{
+		std::lock_guard lock{ shader_mutex };
+		assert(id::is_valid(id));
+		return shaders[id];
 	}
 }

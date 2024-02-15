@@ -121,9 +121,9 @@ public:
 		using namespace DirectX;
 		if (_move_magnitude > math::epsilon)
 		{
-			const f32 fps_scale{ 0.05f }; //dt / 0.016667f
+			const f32 fps_scale{ 0.05f }; // dt / 0.016667f
 			math::v4 rot{ rotation() };
-			XMVECTOR d{ XMVector3Rotate(_move * 0.05f * fps_scale, XMLoadFloat4(&rot)) };
+			XMVECTOR d{ XMVector3Rotate(_move * 0.5f * fps_scale, XMLoadFloat4(&rot)) };
 			if (_position_acceleration < 1.f) _position_acceleration += (0.02f * fps_scale);
 			_descired_position += (d * _position_acceleration);
 			_move_position = true;
@@ -187,7 +187,7 @@ private:
 		_move_rotation = (XMVectorGetX(XMVector3Length(o)) > math::epsilon);
 		_move_position = (XMVectorGetX(XMVector3Length(p)) > math::epsilon);
 
-		const f32 scale{ 0.2f }; // * dt / 0.016667f
+		const f32 scale{ 0.2f * dt / 0.016667f }; // * dt / 0.016667f
 
 		if (_move_position)
 		{

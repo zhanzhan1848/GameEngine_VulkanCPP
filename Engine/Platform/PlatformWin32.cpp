@@ -68,6 +68,12 @@ namespace primal::platform
 				resized = false;
 			}
 
+			// 关闭alt键打开系统菜单功能
+			if (msg == WM_SYSCOMMAND && wparam == SC_KEYMENU)
+			{
+				return 0;
+			}
+
 			LONG_PTR long_ptr{ GetWindowLongPtr(hwnd, 0) };
 			return long_ptr
 				? ((window_proc)long_ptr)(hwnd, msg, wparam, lparam)

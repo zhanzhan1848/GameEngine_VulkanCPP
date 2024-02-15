@@ -2,6 +2,7 @@
 // Distributed under the MIT license. See the LICENSE file in the project root for more information.
 #include "VulkanHelpers.h"
 #include "VulkanCore.h"
+#include "VulkanContent.h"
 
 #include <iostream>
 #include <fstream>
@@ -41,7 +42,7 @@ namespace primal::graphics::vulkan
 			return descriptorWrite;
 		}
 
-		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet & set, u32 binding, VkDescriptorType dType, VkDescriptorImageInfo * image)
+		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet & set, u32 binding, VkDescriptorType dType, const VkDescriptorImageInfo* const image)
 		{
 			VkWriteDescriptorSet descriptorWrite;
 			descriptorWrite.sType = type;
@@ -50,6 +51,22 @@ namespace primal::graphics::vulkan
 			descriptorWrite.dstBinding = binding;
 			descriptorWrite.dstArrayElement = 0;
 			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.descriptorType = dType;
+			descriptorWrite.pBufferInfo = nullptr;
+			descriptorWrite.pImageInfo = image;
+			descriptorWrite.pTexelBufferView = nullptr;
+			return descriptorWrite;
+		}
+
+		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet & set, u32 binding, u32 count, VkDescriptorType dType, const VkDescriptorImageInfo* const image)
+		{
+			VkWriteDescriptorSet descriptorWrite;
+			descriptorWrite.sType = type;
+			descriptorWrite.pNext = VK_NULL_HANDLE;
+			descriptorWrite.dstSet = set;
+			descriptorWrite.dstBinding = binding;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorCount = count;
 			descriptorWrite.descriptorType = dType;
 			descriptorWrite.pBufferInfo = nullptr;
 			descriptorWrite.pImageInfo = image;
@@ -583,13 +600,40 @@ namespace primal::graphics::vulkan
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffer;
 
-        VkQueue graphicsQueue;
-        vkGetDeviceQueue(device, index, 0, &graphicsQueue);
-        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(graphicsQueue);
+		// Create fence to ensure that the command buffer has finished executing
+		VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0 };
+
+        VkQueue queue;
+        vkGetDeviceQueue(device, index, 0, &queue);
+        vkQueueSubmit(queue, 1, &submitInfo, nullptr);
+		vkQueueWaitIdle(queue);
 
         vkFreeCommandBuffers(device, pool, 1, &commandBuffer);
     }
+
+	void endSingleCommand_1(VkDevice device, u32 index, const VkCommandPool& pool, VkCommandBuffer commandBuffer)
+	{
+		vkEndCommandBuffer(commandBuffer);
+
+		VkSubmitInfo submitInfo{};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.pNext = nullptr;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+
+		// Create fence to ensure that the command buffer has finished executing
+		VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0 };
+		VkFence fence;
+		vkCreateFence(device, &fenceInfo, nullptr, &fence);
+
+		VkQueue queue;
+		vkGetDeviceQueue(device, index, 0, &queue);
+		vkQueueSubmit(queue, 1, &submitInfo, fence);
+		vkWaitForFences(device, 1, &fence, VK_TRUE, 1);
+		vkDestroyFence(device, fence, nullptr);
+
+		vkFreeCommandBuffers(device, pool, 1, &commandBuffer);
+	}
 
 	u32 formatIsFilterable(VkPhysicalDevice physicalDevice, VkFormat format, VkImageTiling tilling)
 	{
@@ -605,6 +649,250 @@ namespace primal::graphics::vulkan
 		return false;
 	}
 
+	void setImageLayout(
+		VkCommandBuffer cmdbuffer,
+		VkImage image,
+		VkImageLayout oldImageLayout,
+		VkImageLayout newImageLayout,
+		VkImageSubresourceRange subresourceRange,
+		VkPipelineStageFlags srcStageMask,
+		VkPipelineStageFlags dstStageMask)
+	{
+		// Create an image barrier object
+		VkImageMemoryBarrier imageMemoryBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr };
+		imageMemoryBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imageMemoryBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imageMemoryBarrier.oldLayout = oldImageLayout;
+		imageMemoryBarrier.newLayout = newImageLayout;
+		imageMemoryBarrier.image = image;
+		imageMemoryBarrier.subresourceRange = subresourceRange;
+
+		// Source layouts (old)
+		// Source access mask controls actions that have to be finished on the old layout
+		// before it will be transitioned to the new layout
+		switch (oldImageLayout)
+		{
+		case VK_IMAGE_LAYOUT_UNDEFINED:
+			// Image layout is undefined (or does not matter)
+			// Only valid as initial layout
+			// No flags required, listed only for completeness
+			imageMemoryBarrier.srcAccessMask = 0;
+			break;
+
+		case VK_IMAGE_LAYOUT_PREINITIALIZED:
+			// Image is preinitialized
+			// Only valid as initial layout for linear images, preserves memory contents
+			// Make sure host writes have been finished
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+			// Image is a color attachment
+			// Make sure any writes to the color buffer have been finished
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+			// Image is a depth/stencil attachment
+			// Make sure any writes to the depth/stencil buffer have been finished
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+			// Image is a transfer source
+			// Make sure any reads from the image have been finished
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+			// Image is a transfer destination
+			// Make sure any writes to the image have been finished
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+			// Image is read by a shader
+			// Make sure any shader reads from the image have been finished
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			break;
+		default:
+			// Other source layouts aren't handled (yet)
+			break;
+		}
+
+		// Target layouts (new)
+		// Destination access mask controls the dependency for the new image layout
+		switch (newImageLayout)
+		{
+		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+			// Image will be used as a transfer destination
+			// Make sure any writes to the image have been finished
+			imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+			// Image will be used as a transfer source
+			// Make sure any reads from the image have been finished
+			imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+			// Image will be used as a color attachment
+			// Make sure any writes to the color buffer have been finished
+			imageMemoryBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+			// Image layout will be used as a depth/stencil attachment
+			// Make sure any writes to depth/stencil buffer have been finished
+			imageMemoryBarrier.dstAccessMask = imageMemoryBarrier.dstAccessMask | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+			// Image will be read in a shader (sampler, input attachment)
+			// Make sure any writes to the image have been finished
+			if (imageMemoryBarrier.srcAccessMask == 0)
+			{
+				imageMemoryBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+			}
+			imageMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			break;
+		default:
+			// Other source layouts aren't handled (yet)
+			break;
+		}
+
+		// Put barrier inside setup command buffer
+		vkCmdPipelineBarrier(
+			cmdbuffer,
+			srcStageMask,
+			dstStageMask,
+			0,
+			0, nullptr,
+			0, nullptr,
+			1, &imageMemoryBarrier);
+	}
+
+	void createImageFromBufferData(void* data, VkDeviceSize bufferSize,
+		VkFormat format, u32 width, u32 height, VkCommandPool pool, VkFilter filter,
+		VkImageUsageFlags imageUsageFlags, VkImageLayout imageLayout, OUT id::id_type& tex_id)
+	{
+		assert(data);
+
+		u32 miplevels = 1;
+
+		VkMemoryAllocateInfo memAllocInfo{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+		VkMemoryRequirements memReqs;
+
+		// Use a separate command buffer for texture loading
+		VkCommandBuffer copyCmd = beginSingleCommand(core::logical_device(), pool);
+
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingMemory;
+
+		createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingMemory);
+
+		void* imageData;
+		vkMapMemory(core::logical_device(), stagingMemory, 0, bufferSize, 0, (void**)&imageData);
+		memcpy(imageData, data, bufferSize);
+		vkUnmapMemory(core::logical_device(), stagingMemory);
+
+		VkBufferImageCopy bufferCopyRegion = {};
+		bufferCopyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		bufferCopyRegion.imageSubresource.mipLevel = 0;
+		bufferCopyRegion.imageSubresource.baseArrayLayer = 0;
+		bufferCopyRegion.imageSubresource.layerCount = 1;
+		bufferCopyRegion.imageExtent.width = width;
+		bufferCopyRegion.imageExtent.height = height;
+		bufferCopyRegion.imageExtent.depth = 1;
+		bufferCopyRegion.bufferOffset = 0;
+
+		VkImageCreateInfo imageCreateInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+		imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageCreateInfo.format = format;
+		imageCreateInfo.mipLevels = miplevels;
+		imageCreateInfo.arrayLayers = 1;
+		imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageCreateInfo.extent = { width, height, 1 };
+		imageCreateInfo.usage = imageUsageFlags;
+
+		VkSamplerCreateInfo samplerCreateInfo = {};
+		samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerCreateInfo.magFilter = filter;
+		samplerCreateInfo.minFilter = filter;
+		samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerCreateInfo.mipLodBias = 0.0f;
+		samplerCreateInfo.compareOp = VK_COMPARE_OP_NEVER;
+		samplerCreateInfo.minLod = 0.0f;
+		samplerCreateInfo.maxLod = 0.0f;
+		samplerCreateInfo.maxAnisotropy = 1.0f;
+
+		VkImageViewCreateInfo viewCreateInfo = {};
+		viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewCreateInfo.pNext = NULL;
+		viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewCreateInfo.format = format;
+		viewCreateInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		viewCreateInfo.subresourceRange.levelCount = 1;
+		tex_id = textures::add(imageCreateInfo, viewCreateInfo, samplerCreateInfo);
+
+		textures::vulkan_texture_2d texture{ textures::get_texture(tex_id) };
+
+		vkGetImageMemoryRequirements(core::logical_device(), texture.getTexture().image, &memReqs);
+
+		VkDeviceMemory deviceMemory;
+		memAllocInfo.allocationSize = memReqs.size;
+		memAllocInfo.memoryTypeIndex = core::find_memory_index(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		vkAllocateMemory(core::logical_device(), &memAllocInfo, nullptr, &deviceMemory);
+		vkBindImageMemory(core::logical_device(), texture.getTexture().image, deviceMemory, 0);
+
+		VkImageSubresourceRange subresourceRange = {};
+		subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		subresourceRange.baseMipLevel = 0;
+		subresourceRange.levelCount = miplevels;
+		subresourceRange.layerCount = 1;
+
+		// Image barrier for optimal image (target)
+		// Optimal image will be used as destination for the copy
+		setImageLayout(
+			copyCmd,
+			texture.getTexture().image,
+			VK_IMAGE_LAYOUT_UNDEFINED,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			subresourceRange);
+
+		// Copy mip levels from staging buffer
+		vkCmdCopyBufferToImage(
+			copyCmd,
+			stagingBuffer,
+			texture.getTexture().image,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			1,
+			&bufferCopyRegion
+		);
+
+		// Change texture image layout to shader read after all mip levels have been copied
+		//this->imageLayout = imageLayout;
+		setImageLayout(
+			copyCmd,
+			texture.getTexture().image,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			imageLayout,
+			subresourceRange);
+
+		endSingleCommand_1(core::logical_device(), 0, pool, copyCmd);
+
+		// Clean up staging resources
+		vkFreeMemory(core::logical_device(), stagingMemory, nullptr);
+		vkDestroyBuffer(core::logical_device(), stagingBuffer, nullptr);
+	}
+
 	utl::vector<VkVertexInputBindingDescription> getVertexInputBindDescriptor()
 	{
 		utl::vector<VkVertexInputBindingDescription> _bindingDescription;
@@ -612,10 +900,6 @@ namespace primal::graphics::vulkan
 			VkVertexInputBindingDescription bBind{ 0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX };
 			return bBind;
 			}());
-		//_bindingDescription.emplace_back([]() {
-		//	VkVertexInputBindingDescription bBind{ 1, sizeof(InstanceData), VK_VERTEX_INPUT_RATE_VERTEX };
-		//	return bBind;
-		//	}());
 
 		return _bindingDescription;
 	}
@@ -624,23 +908,6 @@ namespace primal::graphics::vulkan
 	utl::vector<VkVertexInputAttributeDescription> getVertexInputAttributeDescriptor()
 	{
 		utl::vector<VkVertexInputAttributeDescription> _attributeDescriptions;
-		//for (u32 i{ 0 }; i < (sizeof(Vertex) + sizeof(InstanceData)) / sizeof(math::v3); ++i)
-		//{
-		//	if (i < sizeof(Vertex) / sizeof(math::v3))
-		//	{
-		//		_attributeDescriptions.emplace_back([i]() {
-		//			VkVertexInputAttributeDescription attributeDescriptions{ i, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * i };
-		//			return attributeDescriptions;
-		//			}());
-		//	}
-		//	else
-		//	{
-		//		_attributeDescriptions.emplace_back([i]() {
-		//			VkVertexInputAttributeDescription attributeDescriptions{ i, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(math::v3) * (i - (sizeof(Vertex) / sizeof(math::v3))) };
-		//			return attributeDescriptions;
-		//			}());
-		//	}
-		//}
 		for (u32 i{ 0 }; i < sizeof(Vertex) / sizeof(math::v3); ++i)
 		{
 			_attributeDescriptions.emplace_back([i]() {

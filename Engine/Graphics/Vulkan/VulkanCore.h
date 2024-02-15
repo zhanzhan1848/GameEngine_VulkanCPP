@@ -19,6 +19,8 @@ s32 find_memory_index(u32 type, u32 flags);
 u32 get_frame_index();
 u32 graphics_family_queue_index();
 u32 presentation_family_queue_index();
+u32 compute_family_queue_index();
+u32 transfer_family_queue_index();
 VkFormat depth_format();
 VkPhysicalDevice physical_device();
 VkDevice logical_device();

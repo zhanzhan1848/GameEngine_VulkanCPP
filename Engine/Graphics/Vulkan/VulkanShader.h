@@ -31,4 +31,7 @@ namespace primal::graphics::vulkan::shaders
 		VkPipelineShaderStageCreateInfo			_shaderstage;
 	};
 
+	id::id_type add(std::string path, shader_type::type type);
+	void remove(id::id_type id);
+	vulkan_shader& get_shader(id::id_type id);
 }

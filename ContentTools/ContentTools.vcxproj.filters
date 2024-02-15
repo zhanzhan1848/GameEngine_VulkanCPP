@@ -6,6 +6,7 @@
     <ClInclude Include="Geometry.h" />
     <ClInclude Include="FbxImporter.h" />
     <ClInclude Include="ObjImporter.h" />
+    <ClInclude Include="TemplateShader\PBR_Template_Shader_v1.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="PrimitiveMesh.cpp" />

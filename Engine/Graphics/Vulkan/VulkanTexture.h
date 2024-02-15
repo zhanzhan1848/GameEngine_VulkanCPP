@@ -9,4 +9,6 @@ namespace primal::graphics::vulkan
 	void copyBufferToImage(VkDevice device, u32 index, VkCommandPool pool, VkBuffer buffer, VkImage image, u32 width, u32 height);
 
 	void createTextureSampler(VkPhysicalDevice physicalDevice, VkDevice device, vulkan_texture& tex);
+
+
 }

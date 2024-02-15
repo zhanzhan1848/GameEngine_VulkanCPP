@@ -56,13 +56,6 @@ namespace primal::graphics::vulkan
 		vulkan_texture_2d& get_texture(id::id_type id);
 	}
 
-	namespace shaders
-	{
-		id::id_type add(std::string path, shader_type::type type);
-		void remove(id::id_type id);
-		vulkan_shader& get_shader(id::id_type id);
-	}
-
 	namespace materials
 	{
 		class vulkan_material
@@ -133,6 +126,7 @@ namespace primal::graphics::vulkan
 		public:
 			vulkan_model() = default;
 			explicit vulkan_model(std::string path);
+			explicit vulkan_model(const void* const data);
 
 			~vulkan_model();
 
@@ -140,15 +134,15 @@ namespace primal::graphics::vulkan
 			void create_model_buffer();
 
 			// ! Readonly function -> Two Buffers of Model are both readonly after load model
-			[[nodiscard]] constexpr baseBuffer const getVertexBuffer() const { return _vertexBuffer; }
-			[[nodiscard]] constexpr baseBuffer const getIndexBuffer() const { return _indexBuffer; }
+			[[nodiscard]] constexpr id::id_type const getVertexBuffer() const { return _vertexBuffer_id; }
+			[[nodiscard]] constexpr id::id_type const getIndexBuffer() const { return _indexBuffer_id; }
 			[[nodiscard]] constexpr u64 const getIndicesCount() const { return _indices.size(); }
 
 		private:
 			utl::vector<Vertex>			_vertices;
-			utl::vector<u16>			_indices;
-			baseBuffer					_vertexBuffer;
-			baseBuffer					_indexBuffer;
+			utl::vector<u32>			_indices;
+			id::id_type					_vertexBuffer_id;
+			id::id_type					_indexBuffer_id;
 			void create_vertex_buffer();
 			void create_index_buffer();
 		};
@@ -222,6 +216,7 @@ namespace primal::graphics::vulkan
 		// TODO: complete the parameter
 		// ! When load model to engine, call this function to get vulkan model id
 		id::id_type add(std::string path);
+		id::id_type add(const void* const data);
 		void remove(id::id_type id);
 		vulkan_model get_model(id::id_type id);
 	}
@@ -254,6 +249,7 @@ namespace primal::graphics::vulkan
 			void drawDefer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout);
 
 			[[nodiscard]] utl::vector<id::id_type> getInstance() { return _instance_ids; }
+			[[nodiscard]] constexpr id::id_type const getUboID() const { return _ubo_id;  }
 
 		private:
 			utl::vector<id::id_type>							_instance_ids;

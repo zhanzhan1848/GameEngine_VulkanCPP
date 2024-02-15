@@ -130,7 +130,7 @@ LRESULT win_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 		}
 	}
 
-	if ((resized && GetAsyncKeyState(VK_LBUTTON) >= 0) || toggle_fullscreen)
+	if ((resized && GetKeyState(VK_LBUTTON) >= 0) || toggle_fullscreen)
 	{
 		platform::window win{ platform::window_id{ (id::id_type)GetWindowLongPtr(hwnd, GWLP_USERDATA) } };
 		for (u32 i{ 0 }; i < _countof(_surfaces); ++i)
@@ -242,6 +242,18 @@ bool test_initialize()
 	}
 	else if constexpr(GRAPHICS_API == graphics::graphics_platform::vulkan_1)
 	{ 
+		typedef void(*ptrSub)(const char*, const char*);
+		HMODULE hMod = LoadLibraryA("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/x64/DebugEditor/ContentTools.dll");
+		ptrSub obj_loader = (ptrSub)GetProcAddress(hMod, "ImportObj");
+		if (obj_loader != nullptr)
+		{
+			std::filesystem::path kms_file{"C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/kms/sponza/shaders"};
+			if (!std::filesystem::exists(kms_file))
+			{
+				obj_loader("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/models/sponza.obj", "sponza");
+			}
+		}
+
 		//system("python C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Python_Scripts/compileShaders.py");
 		pyscript();
 	}
@@ -355,6 +367,11 @@ bool Engine_Test::initialize()
 
 void Engine_Test::run()
 {
+	static u32 counter{ 0 };
+	static u32 light_set_key{ 0 };
+	++counter;
+	// if ((counter % 90) == 0) light_set_key = (light_set_key + 1) % 2;
+
 	timer.begin();
 	//std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	script::update(timer.dt_avg());
@@ -368,7 +385,7 @@ void Engine_Test::run()
 			info.render_item_ids = &item_id;
 			info.render_item_count = 1;
 			info.thresholds = &thresholds[0];
-			info.light_set_key = 0;
+			info.light_set_key = light_set_key;
 			info.average_frame_time = timer.dt_avg();
 			info.camera_id = _surfaces[i].camera.get_id();
 

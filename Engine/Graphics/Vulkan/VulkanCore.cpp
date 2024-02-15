@@ -16,6 +16,7 @@
 #include "VulkanTexture.h"
 #include <string>
 #include "VulkanLight.h"
+#include "VulkanCompute.h"
 
 
 namespace primal::graphics::vulkan::core
@@ -49,6 +50,8 @@ public:
         MESSAGE("Found graphics queue");
         vkGetDeviceQueue(core::logical_device(), core::presentation_family_queue_index(), 0, &_presentation_queue);
         MESSAGE("Found presentation queue");
+        /*vkGetDeviceQueue(core::logical_device(), core::compute_family_queue_index(), 0, &_compute_queue);
+        MESSAGE("Found compute queue");*/
 
         // Command buffers
         create_command_buffers(device, queue_family_idx);
@@ -71,7 +74,7 @@ public:
                     goto _error;
                 }
             }
-
+            
             // NOTE: The in flight fences should not exist yet, so we start with a clear list. They are stored as pointers
             //		 as their initial state should be 0, and will be 0 when they are not in use. Actual fences are not stored
             //		 in this list.
@@ -165,6 +168,33 @@ public:
         surface->set_renderpass_depth(1.0f);
         surface->set_renderpass_stencil(0);
         surface->set_renderpass_clear_color({ 0.0f, 0.0f, 0.0f, 0.0f });
+
+        // Compute pass output image
+        /*VkImageMemoryBarrier imageMemortBarrier;
+        imageMemortBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        imageMemortBarrier.pNext = nullptr;
+        imageMemortBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        imageMemortBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        imageMemortBarrier.image = textures::get_texture(compute::get_output_tex_id()).getTexture().image;
+        imageMemortBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        imageMemortBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        imageMemortBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        imageMemortBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        imageMemortBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        vkCmdPipelineBarrier(cmd_buffer.cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imageMemortBarrier);*/
+
+        /*VkBufferMemoryBarrier memoryBarrier;
+        memoryBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        memoryBarrier.pNext = nullptr;
+        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        memoryBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memoryBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memoryBarrier.buffer = compute::get_output_buffer();
+        memoryBarrier.offset = 0;
+        memoryBarrier.size = sizeof(math::v4) * 150 * 2400;
+        vkCmdPipelineBarrier(cmd_buffer.cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 1, &memoryBarrier, 0, nullptr);*/
+
         renderpass::begin_renderpass(cmd_buffer.cmd_buffer, cmd_buffer.cmd_state, surface->renderpass(), surface->current_framebuffer());
 
         return true;
@@ -175,6 +205,7 @@ public:
         u32 frame{ surface->current_frame() };
         vulkan_cmd_buffer& cmd_buffer{ _cmd_buffers[frame] };
 
+        //compute::outputImageData();
         surface->getFinalPass().render(cmd_buffer);
 
         renderpass::end_renderpass(cmd_buffer.cmd_buffer, cmd_buffer.cmd_state, surface->renderpass());
@@ -190,14 +221,21 @@ public:
         // Reset the femce for use in next frame
         reset_fence(core::logical_device(), _draw_fences[frame]);
 
+        // Compute Pass Submit
+        compute::submit();
+
+        // use compute semaphore
+        VkSemaphore graphicsWaitSemaphores[]{ compute::get_compute_semaphore(), _image_available[frame] };
+        VkSemaphore graphicsSignalSemaphores[]{ _render_finished[frame] };
+
         VkSubmitInfo info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
         info.commandBufferCount = 1;
         info.pCommandBuffers = &cmd_buffer.cmd_buffer;
-        info.signalSemaphoreCount = 1;
-        info.pSignalSemaphores = &_render_finished[frame];
-        info.waitSemaphoreCount = 1;
-        info.pWaitSemaphores = &_image_available[frame];
-        VkPipelineStageFlags flags[3]{ VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT ,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+        info.signalSemaphoreCount = 1; // 1
+        info.pSignalSemaphores = &_render_finished[frame]; // &_render_finished[frame]
+        info.waitSemaphoreCount = 2; // 1
+        info.pWaitSemaphores = graphicsWaitSemaphores; // &_image_available[frame]
+        VkPipelineStageFlags flags[4]{ VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT ,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT };
         info.pWaitDstStageMask = flags;
 
         VkResult result{ VK_SUCCESS };
@@ -331,9 +369,11 @@ struct queue_family_indices
 {
     u32 graphics_family{ u32_invalid_id };			// Location of Graphics Queue Family
     u32 presentation_family{ u32_invalid_id };		// Location of Presentation Queue Family
+    u32 compute_family{ u32_invalid_id };           // Location of Compute Queue Family
+    u32 transfer_family{ u32_invalid_id };          // Location of Transfer Queue Family
 
     // Check if queue families are valid
-    bool is_valid() { return graphics_family >= 0 && presentation_family >= 0; }
+    bool is_valid() { return graphics_family >= 0 && presentation_family >= 0 && compute_family >= 0 && transfer_family >= 0; }
 } queue_family_indices;
 
 struct device_group
@@ -423,6 +463,18 @@ get_queue_families(VkPhysicalDevice device, VkSurfaceKHR surface)
         // Check if queue is presentation type (can be both graphics and presentation)
         if (queue_family.queueCount > 0 && presentation_support)
             queue_family_indices.presentation_family = i;
+
+        // Check if queue family supports compute
+        if (queue_family.queueCount > 0 && (queue_family.queueFlags & VK_QUEUE_COMPUTE_BIT))
+        {
+            queue_family_indices.compute_family = i;
+        }
+
+        // Check if queue family supports transfer
+        if (queue_family.queueCount > 0 && (queue_family.queueFlags & VK_QUEUE_TRANSFER_BIT))
+        {
+            queue_family_indices.transfer_family = i;
+        }
 
         if (queue_family_indices.is_valid()) break;		// If queue family indices are in a valid state, break loop
 
@@ -813,6 +865,16 @@ u32
 presentation_family_queue_index()
 {
     return queue_family_indices.presentation_family;
+}
+
+u32 compute_family_queue_index()
+{
+    return queue_family_indices.compute_family;
+}
+
+u32 transfer_family_queue_index()
+{
+    return queue_family_indices.transfer_family;
 }
 
 VkPhysicalDevice

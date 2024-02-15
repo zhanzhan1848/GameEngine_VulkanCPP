@@ -8,18 +8,141 @@
 
 // Own header file
 #include "VulkanTexture.h"
-#include <unordered_map>
 #include "VulkanContent.h"
 #include "Components/Transform.h"
 #include "Components/Entity.h"
 
 #include "VulkanData.h"
 #include "VulkanLight.h"
+#include "VulkanCompute.h"
+#include <fstream>
+#include <filesystem>
+#include <exception>
 
 namespace primal::graphics::vulkan
 {
 namespace
 {
+    bool load_kms_file(const char* file, utl::vector<geometry_config>& out_geometry_array)
+    {
+        //std::unique_ptr<std::ifstream, std::function<void(std::ifstream*)>> infile(new std::ifstream{ file, std::ios::binary }, [](std::ifstream *fptr) {fptr->close(); delete fptr; });
+
+        std::ifstream infile(file, std::ios::in | std::ios::binary);
+        // infile.open(file, std::ios::in | std::ios::binary);
+
+        if (!infile.is_open()) 
+        {
+            //OutputDebugStringA(std::strerror(errno));
+            //OutputDebugStringA("\n");
+            return false;
+        }
+
+        u64 address = 0;
+
+        infile.seekg(address, std::ios::beg);
+        u32 geometry_count;
+        infile.read(reinterpret_cast<char*>(&geometry_count), sizeof(geometry_count)); address += sizeof(u32);
+        infile.seekg(address, std::ios::beg);
+
+        // Each geometry
+        for (u32 i{ 0 }; i < geometry_count; ++i)
+        {
+            geometry_config g{};
+
+            // Vertices (size/count/array)
+            infile.read(reinterpret_cast<char*>(&g.vertex_size), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.vertex_count), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            //g.vertices.resize(g.vertex_count);
+            for (u32 x{ 0 }; x < g.vertex_count; ++x)
+            {
+                Vertex vertex;
+                infile.read(reinterpret_cast<char*>(&vertex), sizeof(Vertex)); address += sizeof(Vertex);
+                infile.seekg(address, std::ios::beg);
+                g.vertices.emplace_back(vertex);
+            }
+
+            // Indices (size/count/array)
+            infile.read(reinterpret_cast<char*>(&g.index_size), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.index_count), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            for (u32 y{ 0 }; y < g.index_count; ++y)
+            {
+                u32 index{ 0 };
+                infile.read(reinterpret_cast<char*>(&index), sizeof(u32)); address += sizeof(u32);
+                infile.seekg(address, std::ios::beg);
+                g.indices.emplace_back(index);
+            }
+
+            // Name
+            u32 g_name_lenght = 0;
+            infile.read(reinterpret_cast<char*>(&g_name_lenght), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.name), g_name_lenght * sizeof(char)); address += g_name_lenght * sizeof(char);
+            infile.seekg(address, std::ios::beg);
+
+            // Material Name
+            u32 m_name_lenght = 0;
+            infile.read(reinterpret_cast<char*>(&m_name_lenght), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.material_name), m_name_lenght * sizeof(char)); address += m_name_lenght * sizeof(char);
+            infile.seekg(address, std::ios::beg);
+            
+            // Ambient Map Name
+            u32 ambient_map_lenght = 0;
+            infile.read(reinterpret_cast<char*>(&ambient_map_lenght), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.amibent_map), ambient_map_lenght * sizeof(char)); address += ambient_map_lenght * sizeof(char);
+            infile.seekg(address, std::ios::beg);
+
+            // Diffuse Map Name
+            u32 diffuse_map_lenght = 0;
+            infile.read(reinterpret_cast<char*>(&diffuse_map_lenght), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.diffuse_map), diffuse_map_lenght * sizeof(char)); address += diffuse_map_lenght * sizeof(char);
+            infile.seekg(address, std::ios::beg);
+
+            // Specular Map Name
+            u32 specular_map_lenght = 0;
+            infile.read(reinterpret_cast<char*>(&specular_map_lenght), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.specular_map), specular_map_lenght * sizeof(char)); address += specular_map_lenght * sizeof(char);
+            infile.seekg(address, std::ios::beg);
+
+            // Alpha Map Name
+            u32 alpha_map_lenght = 0;
+            infile.read(reinterpret_cast<char*>(&alpha_map_lenght), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.alpha_map), alpha_map_lenght * sizeof(char)); address += alpha_map_lenght * sizeof(char);
+            infile.seekg(address, std::ios::beg);
+
+            // Normal Map Name
+            u32 normal_map_lenght = 0;
+            infile.read(reinterpret_cast<char*>(&normal_map_lenght), sizeof(u32)); address += sizeof(u32);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.normal_map), normal_map_lenght * sizeof(char)); address += normal_map_lenght * sizeof(char);
+            infile.seekg(address, std::ios::beg);
+
+            // Center
+            infile.read(reinterpret_cast<char*>(&g.center), sizeof(math::v3)); address += sizeof(math::v3);
+            infile.seekg(address, std::ios::beg);
+
+            // Extents (min/max)
+            infile.read(reinterpret_cast<char*>(&g.min_extents), sizeof(math::v3)); address += sizeof(math::v3);
+            infile.seekg(address, std::ios::beg);
+            infile.read(reinterpret_cast<char*>(&g.max_extents), sizeof(math::v3)); address += sizeof(math::v3);
+            infile.seekg(address, std::ios::beg);
+
+            out_geometry_array.emplace_back(g);
+        }
+
+        infile.clear();
+        infile.close();
+
+        return true;
+    }
 
 VkSurfaceFormatKHR
 choose_best_surface_format(const utl::vector<VkSurfaceFormatKHR>& formats)
@@ -120,6 +243,8 @@ vulkan_surface::create(VkInstance instance)
     create_render_pass();
     recreate_framebuffers();
 
+    data::initialize();
+
     _geometry.setSize(this->width(), this->height());
     _geometry.setupPoolAndLayout();
     _geometry.setupRenderpassAndFramebuffer();
@@ -129,10 +254,73 @@ vulkan_surface::create(VkInstance instance)
 
     light::initialize();
 
-    std::string base_dir{ SOLUTION_DIR };
+    const std::string base_dir{ SOLUTION_DIR };
 
-    auto build_id = submesh::add(base_dir + std::string{"EngineTest\\assets\\models\\sponza.obj"});
-    auto model_id = submesh::add(base_dir + std::string{ "EngineTest\\assets\\models\\viking_room.obj" });
+    // auto build_id = submesh::add(base_dir + std::string{"EngineTest\\assets\\models\\sponza.obj"});
+    /*utl::vector<geometry_config> model_2;
+    auto kms_file = base_dir + std::string{"EngineTest\\assets\\kms\\sponza.kms"};
+    load_kms_file(kms_file.c_str(), model_2);
+    void* model_2_data = &model_2;
+    auto build_2_id = submesh::add(model_2_data);*/
+
+    std::string sponza_package{ base_dir };
+    sponza_package.append("EngineTest\\assets\\kms\\sponza\\");
+    for (const auto& file : std::filesystem::directory_iterator(sponza_package))
+    {
+        //load_kms_file("C:\\Users\\zy\\Desktop\\PrimalMerge\\PrimalEngine\\EngineTest\\assets\\kms\\sponza\\sponza_247_sponza_247_column_b.kms", model_2);
+        if (file.path().has_extension())
+        {
+            utl::vector<geometry_config> model_2;
+            load_kms_file(file.path().string().c_str(), model_2);
+            void* model_2_data = &model_2;
+            auto sponza_sub_id = submesh::add(model_2_data);
+            u32 diffuse_map_id{ id::invalid_id };
+            u32 specular_map_id{ id::invalid_id };
+            u32 normal_map_id{ id::invalid_id };
+            if (model_2[0].diffuse_map != nullptr && model_2[0].diffuse_map[0] != '\0')
+            {
+                diffuse_map_id = textures::add(base_dir + std::string{"EngineTest\\assets\\"} + std::string{ model_2[0].diffuse_map });
+            }
+            if (model_2[0].specular_map != nullptr && model_2[0].specular_map[0] != '\0')
+            {
+                specular_map_id = textures::add(base_dir + std::string{"EngineTest\\assets\\"} + std::string{ model_2[0].specular_map });
+            }
+            if (model_2[0].normal_map != nullptr && model_2[0].normal_map[0] != '\0')
+            {
+                normal_map_id = textures::add(base_dir + std::string{"EngineTest\\assets\\"} + std::string{ model_2[0].normal_map });
+            }
+            auto sponza_vs_id = shaders::add(base_dir + std::string({ "Engine\\Graphics\\Vulkan\\Shaders\\spv\\" }) + std::string({ model_2[0].material_name }) + std::string({ ".vert.spv" }), shader_type::vertex);
+            auto sponza_frag_id = shaders::add(base_dir + std::string({ "Engine\\Graphics\\Vulkan\\Shaders\\spv\\" }) + std::string({ model_2[0].material_name }) + std::string({ ".frag.spv" }), shader_type::pixel);
+            auto sponza_material_id = materials::add({ material_type::opauqe, 0, {sponza_vs_id, id::invalid_id, id::invalid_id, id::invalid_id, sponza_frag_id, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
+            if (id::is_valid(diffuse_map_id))    materials::get_material(sponza_material_id).add_texture(diffuse_map_id);
+            if (id::is_valid(specular_map_id))    materials::get_material(sponza_material_id).add_texture(specular_map_id);
+            if (id::is_valid(normal_map_id))    materials::get_material(sponza_material_id).add_texture(normal_map_id);
+
+            transform::init_info sponza_transform_info{};
+            math::v3 sponza_rotation{ 0.f, 0.f, 0.f };
+            math::v3 sponza_position{ 0.f, 0.f, 0.f };
+            math::v3 sponza_scale{ 0.01f, 0.01f, 0.01f };
+            DirectX::XMVECTOR sponza_quat{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&sponza_rotation)) };
+            math::v4a sponza_rot_quat;
+            DirectX::XMStoreFloat4A(&sponza_rot_quat, sponza_quat);
+            memcpy(&sponza_transform_info.scale[0], &sponza_scale.x, sizeof(sponza_transform_info.scale));
+            memcpy(&sponza_transform_info.rotation[0], &sponza_rot_quat.x, sizeof(sponza_transform_info.rotation));
+            memcpy(&sponza_transform_info.position[0], &sponza_position.x, sizeof(sponza_transform_info.position));
+            game_entity::entity_info sponza_entity_info{};
+            sponza_entity_info.transform = &sponza_transform_info;
+            game_entity::entity sponza_ntt{ game_entity::create(sponza_entity_info) };
+
+            auto sponza_sub_instance_id = _scene.add_model_instance(sponza_ntt, sponza_sub_id);
+            _scene.add_material(sponza_sub_instance_id, sponza_material_id);
+            model_2.clear();
+        }
+        else
+        {
+            continue;
+        }
+    }
+
+    /*auto model_id = submesh::add(base_dir + std::string{ "EngineTest\\assets\\models\\viking_room.obj" });
     auto texture_id = textures::add(base_dir + std::string{ "EngineTest\\assets\\images\\viking_room.png" });
     auto vs_id = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\test01.vert.spv" }, shader_type::vertex);
     auto fs_id = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\test01.frag.spv" }, shader_type::pixel);
@@ -187,18 +375,23 @@ vulkan_surface::create(VkInstance instance)
     game_entity::entity ntt1{ game_entity::create(entity_info1) };
 
     auto id2 = _scene.add_model_instance(ntt1, floor);
-    _scene.add_material(id2, floor_material);
+    _scene.add_material(id2, floor_material);*/
 
-    _layout_and_pool.createDescriptorPool(24);
-    _layout_and_pool.createDescriptorSetLayout();
+    //auto id_3 = _scene.add_model_instance(ntt, build_2_id);
+    //_scene.add_material(id_3, material_id);
+
+    if (!compute::initialize())
+    {
+        MESSAGE("Failed to initialize compute pass...");
+    }
 
 
-    _scene.createPipeline(get_data<VkRenderPass>(_geometry.getRenderpass()), get_data<VkPipelineLayout>(_geometry.getPipelineLayout()));
+    _scene.createPipeline(data::get_data<VkRenderPass>(_geometry.getRenderpass()), data::get_data<VkPipelineLayout>(_geometry.getPipelineLayout()));
     
     _scene.createUniformBuffer();
     
-    _scene.createDescriptorSets(get_data<VkDescriptorPool>(_geometry.getDescriptorPool()), get_data<VkDescriptorSetLayout>(_geometry.getDescriptorSetLayout()));
-    _final.setupDescriptorSets(_geometry.getTexture());
+    _scene.createDescriptorSets(data::get_data<VkDescriptorPool>(_geometry.getDescriptorPool()), data::get_data<VkDescriptorSetLayout>(_geometry.getDescriptorSetLayout()));
+    _final.setupDescriptorSets(_geometry.getTexture(), _scene.getUboID());
     _final.setupPipeline(_renderpass);
 }
 
@@ -216,7 +409,7 @@ vulkan_surface::present(VkSemaphore image_available, VkSemaphore render_finished
     result = vkQueuePresentKHR(presentation_queue, &info);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR /*|| _framebuffer_resized*/)
     {
-        // _framebuffer_resized = false;
+        _framebuffer_resized = false;
         recreate_swapchain();
     }
     else if (result != VK_SUCCESS)
@@ -239,6 +432,8 @@ vulkan_surface::release()
 
     vkDeviceWaitIdle(core::logical_device());
 
+    compute::shutdown();
+
     for (u32 i{ 0 }; i < _swapchain.images.size(); ++i)
     {
         destroy_framebuffer(core::logical_device(), _framebuffers[i]);
@@ -250,11 +445,10 @@ vulkan_surface::release()
     /// Own function destroy
     /// </summary>
     _scene.~vulkan_scene();
-    vkDestroyPipelineLayout(core::logical_device(), _layout_and_pool.pipelineLayout, nullptr);
-    vkDestroyDescriptorPool(core::logical_device(), _layout_and_pool.descriptorPool, nullptr);
-    vkDestroyDescriptorSetLayout(core::logical_device(), _layout_and_pool.descriptorSetLayout, nullptr);
 
     vkDestroySurfaceKHR(core::get_instance(), _surface, nullptr);
+
+    data::shutdown();
 }
 
 void
@@ -340,6 +534,18 @@ vulkan_surface::create_swapchain()
     if (supported == VK_FALSE)
     {
         ERROR_MSSG("Physical device doesn't support presentation family queue for this surface...");
+        return false;
+    }
+    vkGetPhysicalDeviceSurfaceSupportKHR(core::physical_device(), core::compute_family_queue_index(), _surface, &supported);
+    if (supported == VK_FALSE)
+    {
+        ERROR_MSSG("Physical device doesn't support compute family queue for this surface...");
+        return false;
+    }
+    vkGetPhysicalDeviceSurfaceSupportKHR(core::physical_device(), core::transfer_family_queue_index(), _surface, &supported);
+    if (supported == VK_FALSE)
+    {
+        ERROR_MSSG("Physical device doesn't support transfer family queue for this surface...");
         return false;
     }
 

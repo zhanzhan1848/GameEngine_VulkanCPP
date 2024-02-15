@@ -9,13 +9,13 @@
 /// </summary>
 
 #if _DEBUG
-#pragma comment(lib, "D:\\AutoDesk\\2020.2.1\\lib\\vs2019\\x64\\debug\\libfbxsdk-md.lib")
-#pragma comment(lib, "D:\\AutoDesk\\2020.2.1\\lib\\vs2019\\x64\\debug\\libxml2-md.lib")
-#pragma comment(lib, "D:\\AutoDesk\\2020.2.1\\lib\\vs2019\\x64\\debug\\zlib-md.lib")
+#pragma comment(lib, "C:\\Program Files\\Autodesk\\FBX\\FBX SDK\\2020.3.4\\lib\\vs2022\\x64\\debug\\libfbxsdk-md.lib")
+#pragma comment(lib, "C:\\Program Files\\Autodesk\\FBX\\FBX SDK\\2020.3.4\\lib\\vs2022\\x64\\debug\\libxml2-md.lib")
+#pragma comment(lib, "C:\\Program Files\\Autodesk\\FBX\\FBX SDK\\2020.3.4\\lib\\vs2022\\x64\\debug\\zlib-md.lib")
 #else
-#pragma comment(lib, "D:\\AutoDesk\\2020.2.1\\lib\\vs2019\\x64\\release\\libfbxsdk-md.lib")
-#pragma comment(lib, "D:\\AutoDesk\\2020.2.1\\lib\\vs2019\\x64\\release\\libxml2-md.lib")
-#pragma comment(lib, "D:\\AutoDesk\\2020.2.1\\lib\\vs2019\\x64\\release\\zlib-md.lib")
+#pragma comment(lib, "C:\\Program Files\\Autodesk\\FBX\\FBX SDK\\2020.3.4\\lib\\vs2022\\x64\\release\\libfbxsdk-md.lib")
+#pragma comment(lib, "C:\\Program Files\\Autodesk\\FBX\\FBX SDK\\2020.3.4\\lib\\vs2022\\x64\\release\\libxml2-md.lib")
+#pragma comment(lib, "C:\\Program Files\\Autodesk\\FBX\\FBX SDK\\2020.3.4\\lib\\vs2022\\x64\\release\\zlib-md.lib")
 #endif //_DEBUG
 // LINK4099 PDB not found warnings can be resolved either by installing FBX SDK PDBs (separate download) or
 // by disabling this warning in linker options (Linker command line: /ignore:4099).

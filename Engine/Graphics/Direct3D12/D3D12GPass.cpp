@@ -4,6 +4,7 @@
 #include "D3D12Content.h"
 #include "D3D12Light.h"
 #include "D3D12Camera.h"
+#include "D3D12LightCulling.h"
 #include "Shaders/SharedTypes.h"
 #include "Components/Entity.h"
 #include "Components/Transform.h"
@@ -82,17 +83,17 @@ namespace primal::graphics::d3d12::gpass
 				};
 			}
 
-			constexpr u32 size() const
+			CONSTEXPR u32 size() const
 			{
 				return (u32)d3d12_render_item_ids.size();
 			}
 
-			constexpr void clear()
+			CONSTEXPR void clear()
 			{
 				d3d12_render_item_ids.clear();
 			}
 
-			constexpr void resize()
+			CONSTEXPR void resize()
 			{
 				const u64 items_count{ d3d12_render_item_ids.size() };
 				const u64 new_buffer_size{ items_count * struct_size };
@@ -339,6 +340,8 @@ namespace primal::graphics::d3d12::gpass
 	{
 		const gpass_cache& cache{ frame_cache };
 		const u32 items_count{ cache.size() };
+		const u32 frame_index{ d3d12_info.frame_index };
+		const id::id_type light_culling_id{ d3d12_info.light_culling_id };
 
 		ID3D12RootSignature* current_root_signature{ nullptr };
 		ID3D12PipelineState* current_pipeline_state{ nullptr };
@@ -347,10 +350,14 @@ namespace primal::graphics::d3d12::gpass
 		{
 			if (current_root_signature != cache.root_signature[i])
 			{
+				using idx = opaque_root_parameter;
 				current_root_signature = cache.root_signature[i];
 				cmd_list->SetGraphicsRootSignature(current_root_signature);
-				cmd_list->SetGraphicsRootConstantBufferView(opaque_root_parameter::global_shader_data, d3d12_info.global_shader_data);
-				cmd_list->SetGraphicsRootShaderResourceView(opaque_root_parameter::directional_lights, light::non_cullable_light_buffer(d3d12_info.frame_index));
+				cmd_list->SetGraphicsRootConstantBufferView(idx::global_shader_data, d3d12_info.global_shader_data);
+				cmd_list->SetGraphicsRootShaderResourceView(idx::directional_lights, light::non_cullable_light_buffer(frame_index));
+				cmd_list->SetGraphicsRootShaderResourceView(idx::cullable_lights, light::cullable_light_buffer(frame_index));
+				cmd_list->SetGraphicsRootShaderResourceView(idx::light_grid, delight::light_grid_opaque(light_culling_id, frame_index));
+				cmd_list->SetGraphicsRootShaderResourceView(idx::light_index_list, delight::light_index_list_opaque(light_culling_id, frame_index));
 			}
 			if (current_pipeline_state != cache.gpass_pipeline_states[i])
 			{

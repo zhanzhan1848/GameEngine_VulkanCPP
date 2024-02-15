@@ -197,6 +197,10 @@
     <ClInclude Include="Graphics\Vulkan\VulkanData.h" />
     <ClInclude Include="Graphics\Vulkan\Shaders\ShaderTypes.h" />
     <ClInclude Include="Graphics\Vulkan\Shaders\Common.h" />
+    <ClInclude Include="Graphics\Direct3D12\D3D12LightCulling.h" />
+    <ClInclude Include="Graphics\Vulkan\VulkanCompute.h" />
+    <ClInclude Include="Utilities\Hash.h" />
+    <ClInclude Include="Utilities\ThreadPool.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Components\Entity.cpp">
@@ -299,12 +303,13 @@
     <ClCompile Include="Graphics\Vulkan\VulkanGBuffer.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanLight.cpp" />
     <ClCompile Include="Graphics\Vulkan\VulkanData.cpp" />
+    <ClCompile Include="Graphics\Direct3D12\D3D12LightCulling.cpp" />
+    <ClCompile Include="Graphics\Vulkan\VulkanCompute.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Graphics\Vulkan\Shaders\test01.vert.glsl" />
     <None Include="Graphics\Vulkan\Shaders\test01.frag.glsl" />
     <None Include="Graphics\Vulkan\Shaders\compileShaders.bat" />
-    <None Include="packages.config" />
     <None Include="Graphics\Vulkan\Shaders\shadowmapping.vert.glsl" />
     <None Include="Graphics\Vulkan\Shaders\shadowmapping.frag.glsl" />
     <None Include="Graphics\Vulkan\Shaders\floor.vert.glsl" />
@@ -316,5 +321,6 @@
     <None Include="Graphics\Vulkan\Shaders\fullscreen.vert" />
     <None Include="Graphics\Vulkan\Shaders\ssao.frag" />
     <None Include="Graphics\Vulkan\Shaders\composition.frag" />
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>

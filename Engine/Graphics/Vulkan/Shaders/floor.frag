@@ -6,6 +6,7 @@ layout (location = 0) in vec3 inNormal;
 layout (location = 1) in vec2 inUV;
 layout (location = 2) in vec3 inColor;
 layout (location = 3) in vec3 inPos;
+layout (location = 4) in vec3 inTangent;
 
 layout (location = 0) out vec4 outPosition;
 layout (location = 1) out vec4 outNormal;
@@ -17,6 +18,7 @@ layout (set = 0, binding = 0) uniform UBO
 	mat4 view;
 	mat4 projection;
 	vec3 cameraDir;
+	vec3 cameraPos;
 	float nearPlane;
 	float farPlane;
 } ubo;
@@ -26,12 +28,15 @@ layout(set = 0, binding = 1) uniform Model
 	mat4 model;
 } model;
 
-// layout (binding = 1) uniform sampler2D samplerColormap;
-
 layout(set = 1, binding = 0) uniform DirectionalLightParameter
 {
-	DirectionalLightParameters param[3];
+	DirectionalLightParameters param[256];
 } directionalLight;
+
+layout(push_constant) uniform light_nums
+{
+	int light_num;
+} light_Nums;
 
 float linearDepth(float depth)
 {
@@ -42,7 +47,7 @@ float linearDepth(float depth)
 void main() 
 {
 	vec3 color = inColor;
-	for(int i = 0; i < 3; ++i)
+	for(int i = 0; i < light_Nums.light_num; ++i)
 	{
 		vec3 lightDir = directionalLight.param[i].Direction;
 		if(abs(lightDir.z - 1.0) < 0.001)
@@ -58,7 +63,7 @@ void main()
 	}
 	float ambient = 10 / 255.0;
 	color = clamp(color + ambient, 0.0, 1.0);
-	outPosition = vec4(inPos, 1.0); //linearDepth(gl_FragCoord.z)
+	outPosition = vec4(inPos, 1.0);
 	outNormal = vec4(normalize(inNormal) * 0.5 + 0.5, 1.0);
 	outAlbedo = vec4(color, 1.0);
 }

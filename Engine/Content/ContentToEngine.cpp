@@ -305,22 +305,45 @@ namespace primal::content
 		return id;
 	}
 
-	//id::id_type add_shader_group(const u8* const* shaders, u32 num_shaders, const u32* const keys)
-	//{
-	//	assert(shaders && num_shaders, keys);
-	//	noexcept_map group;
-	//	for (u32 i{ 0 }; i < num_shaders; ++i)
-	//	{
-	//		assert(shaders[i]);
-	//		const compiled_shader_ptr shader_ptr{ (const compiled_shader_ptr)shaders[i] };
-	//		const u64 size{ shader_ptr->buffer_size() };
-	//		std::unique_ptr<u8[]> shader{ std::make_unique<u8[]>(size) };
-	//		memcpy(shader.get(), shaders[i], size);
-	//		group.map[keys[i]] = std::move(shader);
-	//	}
-	//	std::lock_guard lock{ shader_mutex };
-	//	return shader_groups.add(std::move(group));
-	//}
+	id::id_type add_shader_group(const u8* const* shaders, u32 num_shaders, const u32* const keys)
+	{
+		assert(shaders && num_shaders, keys);
+		noexcept_map group;
+		for (u32 i{ 0 }; i < num_shaders; ++i)
+		{
+			assert(shaders[i]);
+			const compiled_shader_ptr shader_ptr{ (const compiled_shader_ptr)shaders[i] };
+			const u64 size{ compiled_shader::buffer_size(shader_ptr->byte_code_size()) };
+			std::unique_ptr<u8[]> shader{ std::make_unique<u8[]>(size) };
+			memcpy(shader.get(), shaders[i], size);
+			group.map[keys[i]] = std::move(shader);
+		}
+		std::lock_guard lock{ shader_mutex };
+		return shader_groups.add(std::move(group));
+	}
+
+	void remove_shader_group(id::id_type id)
+	{
+		std::lock_guard lock{ shader_mutex };
+		assert(id::is_valid(id));
+
+		shader_groups[id].map.clear();
+		shader_groups.remove(id);
+	}
+
+	compiled_shader_ptr get_shader(id::id_type id, u32 shader_key)
+	{
+		std::lock_guard lock{ shader_mutex };
+		assert(id::is_valid(id));
+
+		for (const auto& [key, value] : shader_groups[id].map)
+		{
+			if (key == shader_key)
+			{
+				return (const compiled_shader_ptr)value.get();
+			}
+		}
+	}
 
 	void destroy_resource(id::id_type id, asset_type::type type)
 	{

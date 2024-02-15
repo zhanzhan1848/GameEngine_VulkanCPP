@@ -60,49 +60,49 @@ namespace primal::graphics::vulkan::camera
 			camera.far_z(far_z);
 		}
 
-		void get_view(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		void get_view(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			math::m4x4 *const matrix{ (math::m4x4 *const)data };
 			assert(sizeof(math::m4x4) == size);
 			DirectX::XMStoreFloat4x4(matrix, camera.view());
 		}
 
-		void get_projection(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		void get_projection(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			math::m4x4 *const matrix{ (math::m4x4 *const)data };
 			assert(sizeof(math::m4x4) == size);
 			DirectX::XMStoreFloat4x4(matrix, camera.projection());
 		}
 
-		void get_inverse_projection(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		void get_inverse_projection(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			math::m4x4 *const matrix{ (math::m4x4 *const)data };
 			assert(sizeof(math::m4x4) == size);
 			DirectX::XMStoreFloat4x4(matrix, camera.inverse_projection());
 		}
 
-		void get_view_projection(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		void get_view_projection(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			math::m4x4 *const matrix{ (math::m4x4 *const)data };
 			assert(sizeof(math::m4x4) == size);
 			DirectX::XMStoreFloat4x4(matrix, camera.view_projection());
 		}
 
-		void get_inverse_view_projection(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		void get_inverse_view_projection(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			math::m4x4 *const matrix{ (math::m4x4 *const)data };
 			assert(sizeof(math::m4x4) == size);
 			DirectX::XMStoreFloat4x4(matrix, camera.inverse_view_projection());
 		}
 
-		void get_up_vector(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		void get_up_vector(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			math::v3 *const up_vector{ (math::v3 *const)data };
 			assert(sizeof(math::v3) == size);
 			DirectX::XMStoreFloat3(up_vector, camera.up());
 		}
 
-		constexpr void get_field_of_view(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		constexpr void get_field_of_view(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			assert(camera.projection_type() == graphics::camera::perspective);
 			f32 *const fov{ (f32 *const)data };
@@ -110,7 +110,7 @@ namespace primal::graphics::vulkan::camera
 			*fov = camera.field_of_view();
 		}
 
-		constexpr void get_aspect_ratio(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		constexpr void get_aspect_ratio(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			assert(camera.projection_type() == graphics::camera::perspective);
 			f32 *const aspect_ratio{ (f32 *const)data };
@@ -118,7 +118,7 @@ namespace primal::graphics::vulkan::camera
 			*aspect_ratio = camera.aspect_ratio();
 		}
 
-		constexpr void get_view_width(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		constexpr void get_view_width(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			assert(camera.projection_type() == graphics::camera::orthographic);
 			f32 *const view_width{ (f32 *const)data };
@@ -126,7 +126,7 @@ namespace primal::graphics::vulkan::camera
 			*view_width = camera.view_width();
 		}
 
-		constexpr void get_view_height(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		constexpr void get_view_height(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			assert(camera.projection_type() == graphics::camera::orthographic);
 			f32 *const view_height{ (f32 *const)data };
@@ -134,28 +134,28 @@ namespace primal::graphics::vulkan::camera
 			*view_height = camera.view_height();
 		}
 
-		constexpr void get_near_z(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		constexpr void get_near_z(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			f32 *const near_z{ (f32 *const)data };
 			assert(sizeof(f32) == size);
 			*near_z = camera.near_z();
 		}
 
-		constexpr void get_far_z(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		constexpr void get_far_z(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			f32 *const far_z{ (f32 *const)data };
 			assert(sizeof(f32) == size);
 			*far_z = camera.far_z();
 		}
 
-		constexpr void get_project_type(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		constexpr void get_project_type(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			graphics::camera::type *const type{ (graphics::camera::type *const)data };
 			assert(sizeof(graphics::camera::type) == size);
 			*type = camera.projection_type();
 		}
 
-		constexpr void get_entity_id(vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
+		constexpr void get_entity_id(const vulkan_camera& camera, void *const data, [[maybe_unused]] u32 size)
 		{
 			id::id_type *const entity_id{ (id::id_type *const)data };
 			assert(sizeof(id::id_type) == size);
@@ -165,7 +165,7 @@ namespace primal::graphics::vulkan::camera
 		constexpr void dummy_set(vulkan_camera&, const void *const, u32) {}
 
 		using set_function = void(*)(vulkan_camera&, const void *const, u32);
-		using get_function = void(*)(vulkan_camera&, void *const, u32);
+		using get_function = void(*)(const vulkan_camera&, void *const, u32);
 		constexpr set_function set_functions[]
 		{
 			set_up_vector,

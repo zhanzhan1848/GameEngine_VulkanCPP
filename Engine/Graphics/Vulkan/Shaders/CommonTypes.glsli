@@ -2,6 +2,26 @@
 #error Do not include this header directly in shader files. Only include this file via Common.h
 #endif
 
+struct GlobalShaderData
+{
+	mat4		View;
+	mat4		Projection;
+	mat4		InvProjection;
+	mat4		ViewProjection;
+	mat4		InvViewProjection;
+
+	vec3		CameraPositon;
+	int			ViewWidth;
+
+	vec3		CameraDirection;
+	int			ViewHeight;
+
+	float		NearPlane;
+	float		FarPlane;
+	float		DeltaTime;
+	float		_pading;
+};
+
 struct MVPMatrix
 {
 	mat4		model;
@@ -54,5 +74,6 @@ struct DirectionalLightParameters
 
 #ifdef __cplusplus
 static_assert((sizeof(LightParameters) % 16) == 0, "Make sure LightParameters is formatted in 16-byte chunks without any implicit padding.");
+static_assert((sizeof(LightCullingLightInfo) % 16) == 0, "Make sure LightCullingLightInfo is formatted in 16-byte chunks without any implicit padding.");
 static_assert((sizeof(DirectionalLightParameters) % 16) == 0, "Make sure DirectionalLightParameters is formatted in 16-byte chunks without any implicit padding.");
 #endif // __cplusplus

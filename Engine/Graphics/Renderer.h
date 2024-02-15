@@ -84,6 +84,10 @@ namespace primal::graphics
 			is_enabled,
 			intensity,
 			color,
+			attenuation,
+			range,
+			umbra,
+			penumbra,
 			type,
 			entity_id,
 
@@ -174,7 +178,7 @@ namespace primal::graphics
 			up = { 0.f, 1.f, 0.f };
 			view_width = view_height = 5000;
 			near_z = 0.01f;
-			far_z = 1000.0f;
+			far_z = 128.0f;
 		}
 	};
 

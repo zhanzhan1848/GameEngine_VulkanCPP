@@ -9,7 +9,8 @@ namespace primal::graphics::vulkan
 	{
 		VkDescriptorPoolSize descriptorPoolSize(VkDescriptorType type, u32 descriptorCount);
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, VkDescriptorBufferInfo * buffer);
-		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, VkDescriptorImageInfo * image);
+		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, const VkDescriptorImageInfo* const image);
+		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, u32 count, VkDescriptorType dType, const VkDescriptorImageInfo* const image);
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, utl::vector<VkDescriptorSet>& sets, u32 num, u32 binding, VkDescriptorType dType, VkDescriptorBufferInfo * buffer, VkDescriptorImageInfo * image);
 		VkDescriptorSetAllocateInfo descriptorSetAllocate(VkDescriptorPool descriptorPool, const VkDescriptorSetLayout * pSetLayouts, u32 descriptorSetCount);
 		VkWriteDescriptorSet writeDescriptorSets(VkDescriptorSet dstSet, VkDescriptorType type, u32 binding, VkDescriptorBufferInfo * bufferInfo, u32 descriptorCount);
@@ -49,4 +50,6 @@ namespace primal::graphics::vulkan
 	utl::vector<VkVertexInputBindingDescription> getVertexInputBindDescriptor();
 
 	utl::vector<VkVertexInputAttributeDescription> getVertexInputAttributeDescriptor();
+
+	void setImageLayout(VkCommandBuffer cmdbuffer, VkImage image, VkImageLayout oldImageLayout, VkImageLayout newImageLayout, VkImageSubresourceRange subresourceRange, VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 }

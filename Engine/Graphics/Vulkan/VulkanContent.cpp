@@ -16,12 +16,19 @@
 #include "VulkanData.h"
 #include "VulkanLight.h"
 #include "Shaders/ShaderTypes.h"
+#include "Utilities/IOStream.h"
+#include "VulkanCompute.h"
 
 namespace primal::graphics::vulkan
 {
 	namespace
 	{
-
+		std::string GetFileExt(std::string &strFile, int isLower = 0)
+		{
+			std::string::size_type pos = strFile.rfind('.');
+			std::string strExt = strFile.substr(pos == std::string::npos ? strFile.length() : pos + 1);
+			return strExt;
+		}
 	} // anonymous namespace
 
 	namespace textures
@@ -73,22 +80,52 @@ namespace primal::graphics::vulkan
 		void vulkan_texture_2d::loadTexture(std::string path)
 		{
 			int texWidth, texHeight, texChannels;
-			void* pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+			void* pixels;
+
+			if (GetFileExt(path) == "jpg" || GetFileExt(path) == "png")
+			{
+				pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+			}
+			else if (GetFileExt(path) == "tga")
+			{
+				FILE *f = stbi__fopen(path.c_str(), "rb");
+				if (!f) return;
+				stbi__context context;
+				stbi__start_file(&context, f);
+				stbi__result_info result;
+				pixels = stbi__tga_load(&context, &texWidth, &texHeight, &texChannels, 4, &result);
+				fclose(f);
+			}
+			else
+			{
+				return;
+			}
+			
 			VkDeviceSize imageSize = 0;
 			VkFormat imageFormat = VK_FORMAT_UNDEFINED;
 
 			switch (texChannels)
 			{
+			case 1:
+			{
+				imageSize = texWidth * texHeight;
+				imageFormat = VK_FORMAT_R8_SRGB;
+			}	break;
+			case 2:
+			{
+				imageSize = texWidth * texHeight * 2;
+				imageFormat = VK_FORMAT_R8G8_SRGB;
+			}	break;
 			case 3:
 			{
 				imageSize = texWidth * texHeight * 4;
 				imageFormat = VK_FORMAT_R8G8B8A8_SRGB;
-			}break;
+			}	break;
 			case 4:
 			{
 				imageSize = texWidth * texHeight * 4;
 				imageFormat = VK_FORMAT_R8G8B8A8_SRGB;
-			}break;
+			}	break;
 			default:
 				throw std::runtime_error("The texture do not support...");
 				break;
@@ -205,50 +242,6 @@ namespace primal::graphics::vulkan
 		}
 	} // primai::graphics::vulkan::texture
 
-	namespace shaders
-	{
-		namespace
-		{
-			// ！此freelist存储并生成shader的原始ID
-			utl::free_list<shaders::vulkan_shader>				shaders;
-
-			std::mutex											shader_mutex;
-		} // anonymous namesapce
-
-		/// <summary>
-		// ! 生成shader原始ID
-		/// </summary>
-		/// <param name="path"></param>
-		/// <returns></returns>
-		id::id_type add(std::string path, shader_type::type type)
-		{
-			vulkan_shader shader;
-			shader.loadFile(path, type);
-			std::lock_guard lock{ shader_mutex };
-			return shaders.add(shader);
-		}
-
-		/// <summary>
-		// ！ 删除shader原始ID
-		///	1、 执行关联的所有material里的remove_shader 操作
-		/// 2、 执行删除shader原始ID的操作
-		/// </summary>
-		/// <param name="id"></param>
-		void remove(id::id_type id)
-		{
-			std::lock_guard lock{ shader_mutex };
-			assert(id::is_valid(id));
-			shaders.remove(id);
-		}
-
-		vulkan_shader& get_shader(id::id_type id)
-		{
-			std::lock_guard lock{ shader_mutex };
-			assert(id::is_valid(id));
-			return shaders[id];
-		}
-	} // primai::graphics::vulkan::shader
-
 	namespace materials
 	{
 		namespace
@@ -298,7 +291,7 @@ namespace primal::graphics::vulkan
 		{
 			if (_texture_ids.size() < 2) _texture_ids.clear();
 			else _texture_ids.erase(id);
-			material_textures.remove((id & 0xFFFF));
+			material_textures.remove((id));
 			_texture_count--;
 		}
 
@@ -375,26 +368,47 @@ namespace primal::graphics::vulkan
 			create_vertex_buffer();
 			create_index_buffer();
 		}
+		
+		vulkan_model::vulkan_model(const void* const data)
+		{
+			utl::vector<geometry_config>* geos{ (utl::vector<geometry_config>*)data };
+
+			for (u32 i{ 0 }; i < geos->size(); ++i)
+			{
+				for (u32 j{ 0 }; j < (*geos)[i].vertex_count; ++j)
+				{
+					_vertices.emplace_back((*geos)[i].vertices[j]);
+				}
+				for (u32 k{ 0 }; k < (*geos)[i].index_count; ++k)
+				{
+					_indices.emplace_back((*geos)[i].indices[k]);
+				}
+			}
+
+			create_vertex_buffer();
+			create_index_buffer();
+		}
 
 		vulkan_model::~vulkan_model()
 		{
-			vkDestroyBuffer(core::logical_device(), _vertexBuffer.buffer, nullptr);
-			vkFreeMemory(core::logical_device(), _vertexBuffer.memory, nullptr);
+			data::remove_data(data::engine_vulkan_data::vulkan_buffer, _vertexBuffer_id);
+			data::remove_data(data::engine_vulkan_data::vulkan_buffer, _indexBuffer_id);
 
-			vkDestroyBuffer(core::logical_device(), _indexBuffer.buffer, nullptr);
-			vkFreeMemory(core::logical_device(), _indexBuffer.memory, nullptr);
 			_vertices.clear();
 			_indices.clear();
 		}
 
 		void vulkan_model::load_model(std::string path)
 		{
+			int pos = path.rfind("\\", path.length());
+			std::string base_path{ path.substr(0, pos) };
+
 			tinyobj::attrib_t attrib;
 			std::vector<tinyobj::shape_t> shapes;
 			std::vector<tinyobj::material_t> materials;
 			std::string warn, err;
 
-			if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str()))
+			if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str(), base_path.c_str()))
 			{
 				throw std::runtime_error(warn + err);
 			}
@@ -433,7 +447,7 @@ namespace primal::graphics::vulkan
 						_vertices.emplace_back(vertex);
 					}
 
-					_indices.emplace_back((u16)uniqueVertices[index]);
+					_indices.emplace_back((u32)uniqueVertices[index]);
 				}
 		}
 
@@ -447,40 +461,34 @@ namespace primal::graphics::vulkan
 		{
 			VkDeviceSize bufferSize = sizeof(Vertex) * _vertices.size();
 
-			VkBuffer stagingBuffer;
-			VkDeviceMemory stagingBufferMemory;
-			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+			auto flags = data::vulkan_buffer::static_vertex_buffer;
 
-			void* data;
-			vkMapMemory(core::logical_device(), stagingBufferMemory, 0, bufferSize, 0, &data);
-			memcpy(data, _vertices.data(), (size_t)bufferSize);
-			vkUnmapMemory(core::logical_device(), stagingBufferMemory);
+			_vertexBuffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), bufferSize);
 
-			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, _vertexBuffer.buffer, _vertexBuffer.memory);
+			data::get_data<data::vulkan_buffer>(_vertexBuffer_id).update((void*)(_vertices.data()), bufferSize);
 
-			copyBuffer(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), stagingBuffer, _vertexBuffer.buffer, bufferSize);
+			data::get_data<data::vulkan_buffer>(_vertexBuffer_id).convert_to_local_device_buffer();
 		}
 
 		void vulkan_model::create_index_buffer() {
-			VkDeviceSize bufferSize = sizeof(u16) * _indices.size();
+			VkDeviceSize bufferSize = sizeof(u32) * _indices.size();
 
-			VkBuffer stagingBuffer;
-			VkDeviceMemory stagingBufferMemory;
-			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+			auto flags = data::vulkan_buffer::static_index_buffer;
 
-			void* data;
-			vkMapMemory(core::logical_device(), stagingBufferMemory, 0, bufferSize, 0, &data);
-			memcpy(data, _indices.data(), (size_t)bufferSize);
-			vkUnmapMemory(core::logical_device(), stagingBufferMemory);
+			_indexBuffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), bufferSize);
 
-			createBuffer(core::logical_device(), bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, _indexBuffer.buffer, _indexBuffer.memory);
+			data::get_data<data::vulkan_buffer>(_indexBuffer_id).update((void*)(_indices.data()), bufferSize);
 
-			copyBuffer(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), stagingBuffer, _indexBuffer.buffer, bufferSize);
+			data::get_data<data::vulkan_buffer>(_indexBuffer_id).convert_to_local_device_buffer();
 		}
 
 		void vulkan_instance_model::create_instance_buffer()
 		{
-			_modelMatrx_id = create_data(engine_vulkan_data::vulkan_uniform_buffer, static_cast<void*>(&_modelMatrix), sizeof(math::m4x4));
+			auto flags = data::vulkan_buffer::static_uniform_buffer;
+			_modelMatrx_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), sizeof(math::m4x4));
+			data::get_data<data::vulkan_buffer>(_modelMatrx_id).update((void*)(&_modelMatrix), sizeof(math::m4x4));
+
+			data::get_data<data::vulkan_buffer>(_modelMatrx_id).convert_to_local_device_buffer();
 		}
 
 		vulkan_instance_model::vulkan_instance_model(id::id_type model_id) : _model{ get_model(model_id)}
@@ -508,8 +516,8 @@ namespace primal::graphics::vulkan
 		{
 			vkDeviceWaitIdle(core::logical_device());
 
-			remove_data(engine_vulkan_data::vulkan_pipeline, _pipeline_id);
-			remove_data(engine_vulkan_data::vulkan_descriptor_sets, _descriptorSet_id);
+			data::remove_data(data::engine_vulkan_data::vulkan_pipeline, _pipeline_id);
+			data::remove_data(data::engine_vulkan_data::vulkan_descriptor_sets, _descriptorSet_id);
 
 			for (auto texture_id : materials::get_material(_material_id).getTextureIDS())
 			{
@@ -518,7 +526,7 @@ namespace primal::graphics::vulkan
 				materials::get_material(_material_id).remove_texture(texture_id);
 			}
 
-			remove_data(engine_vulkan_data::vulkan_uniform_buffer, _modelMatrx_id);
+			data::remove_data(data::engine_vulkan_data::vulkan_buffer, _modelMatrx_id);
 
 			_model.~vulkan_model();
 		}
@@ -533,16 +541,17 @@ namespace primal::graphics::vulkan
 			allocInfo.descriptorSetCount = 1;
 			allocInfo.pSetLayouts = &layout;
 
-			_descriptorSet_id = create_data(engine_vulkan_data::vulkan_descriptor_sets, static_cast<void*>(&allocInfo), 0);
+			_descriptorSet_id = data::create_data(data::engine_vulkan_data::vulkan_descriptor_sets, static_cast<void*>(&allocInfo), 0);
 		}
 
 		void vulkan_instance_model::flushBuffer(vulkan_cmd_buffer cmd_buffer)
 		{
 			VkDeviceSize offset[] = { 0 };
-			auto vertexBuffer = _model.getVertexBuffer();
-			auto indexBuffer = _model.getIndexBuffer();
-			vkCmdBindVertexBuffers(cmd_buffer.cmd_buffer, 0, 1, &vertexBuffer.buffer, offset);
-			vkCmdBindIndexBuffer(cmd_buffer.cmd_buffer, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT16);
+			auto vertexBuffer = data::get_data<data::vulkan_buffer>(_model.getVertexBuffer());
+			auto indexBuffer = data::get_data<data::vulkan_buffer>(_model.getIndexBuffer());
+			vkCmdBindVertexBuffers(cmd_buffer.cmd_buffer, 0, 1, &vertexBuffer.gpu_address, offset);
+			vkCmdBindIndexBuffer(cmd_buffer.cmd_buffer, indexBuffer.gpu_address, 0, VK_INDEX_TYPE_UINT32);	// !!!! NOTE: If indices is sizeof(u16), use VK_INDEX_TYPE_UINT16 !!!
+																											// !!!! NOTE: If indices is sizeof(u32), use VK_INDEX_TYPE_UINT32 !!!
 		}
 
 		void vulkan_instance_model::draw(vulkan_cmd_buffer cmd_buffer)
@@ -605,13 +614,18 @@ namespace primal::graphics::vulkan
 			pipelineCI.basePipelineHandle = VK_NULL_HANDLE;
 			pipelineCI.basePipelineIndex = -1;
 
-			_pipeline_id = create_data(engine_vulkan_data::vulkan_pipeline, static_cast<void*>(&pipelineCI), 0);
+			_pipeline_id = data::create_data(data::engine_vulkan_data::vulkan_pipeline, static_cast<void*>(&pipelineCI), 0);
 
 		}
 
 		id::id_type add(std::string path)
 		{
 			return _models.add(path);
+		}
+
+		id::id_type add(const void* const data)
+		{
+			return _models.add(data);
 		}
 
 		void remove_model(id::id_type id)
@@ -679,7 +693,8 @@ namespace primal::graphics::vulkan
 		}
 
 		void vulkan_scene::createUniformBuffer() {
-			_ubo_id = create_data(engine_vulkan_data::vulkan_uniform_buffer, nullptr, sizeof(UniformBufferObjectPlus));
+			auto flags = data::vulkan_buffer::per_frame_update_uniform_buffer;
+			_ubo_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), sizeof(UniformBufferObjectPlus));
 		}
 
 		void vulkan_scene::createDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout)
@@ -688,22 +703,23 @@ namespace primal::graphics::vulkan
 			{
 				instance_models[instance].createDescriptorSet(pool, layout);
 
-				auto descriptorSet = get_data<VkDescriptorSet>(instance_models[instance].getDescriptorSet());
+				auto descriptorSet = data::get_data<VkDescriptorSet>(instance_models[instance].getDescriptorSet());
 				std::vector<VkWriteDescriptorSet> descriptorWrites;
 
 				VkDescriptorBufferInfo bufferInfo;
-				bufferInfo.buffer = get_data<UniformBuffer>(_ubo_id).buffer;
+				bufferInfo.buffer = data::get_data<data::vulkan_buffer>(_ubo_id).cpu_address;
 				bufferInfo.offset = 0;
-				bufferInfo.range = get_data<UniformBuffer>(_ubo_id).size;
+				bufferInfo.range = data::get_data<data::vulkan_buffer>(_ubo_id).size;
 				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo));
 
 				VkDescriptorBufferInfo modelBufferInfo;
-				modelBufferInfo.buffer = get_data<UniformBuffer>(instance_models[instance].getModelMatrixID()).buffer;
+				modelBufferInfo.buffer = data::get_data<data::vulkan_buffer>(instance_models[instance].getModelMatrixID()).gpu_address;
 				modelBufferInfo.offset = 0;
-				modelBufferInfo.range = get_data<UniformBuffer>(instance_models[instance].getModelMatrixID()).size;
+				modelBufferInfo.range = data::get_data<data::vulkan_buffer>(instance_models[instance].getModelMatrixID()).size;
 				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &modelBufferInfo));
 
 				u32 count{ 2 };
+				utl::vector<VkDescriptorImageInfo> imageInfos;
 				if (!materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().empty())
 				{
 					for (u32 i{ 0 }; i < materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().size(); ++i)
@@ -713,9 +729,11 @@ namespace primal::graphics::vulkan
 						auto texture_id = materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS()[i];
 						imageInfo.imageView = textures::get_texture(texture_id).getTexture().view;
 						imageInfo.sampler = textures::get_texture(texture_id).getTexture().sampler;
-						descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, count, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo));
-						count++;
+						imageInfos.emplace_back(imageInfo);
+						//descriptorWrites.push_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, count, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo));
+						//count++;
 					}
+					descriptorWrites.push_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, count, materials::get_material(instance_models[instance].getMaterialID()).getTextureIDS().size(), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, imageInfos.data()));
 				}
 
 				vkUpdateDescriptorSets(core::logical_device(), static_cast<u32>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
@@ -803,7 +821,7 @@ namespace primal::graphics::vulkan
 			pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
 			pipelineCreateInfo.pStages = shaderStages.data();
 			pipelineCreateInfo.pVertexInputState = &emptyVertexInputState;
-			_pipeline_id = create_data(engine_vulkan_data::vulkan_pipeline, static_cast<const void* const>(&pipelineCreateInfo), 0);
+			_pipeline_id = data::create_data(data::engine_vulkan_data::vulkan_pipeline, static_cast<const void* const>(&pipelineCreateInfo), 0);
 		}
 
 		void vulkan_scene::updateView(frame_info info)
@@ -815,10 +833,14 @@ namespace primal::graphics::vulkan
 			DirectX::XMStoreFloat4x4(&data.model, modelMatrix);
 			DirectX::XMStoreFloat4x4(&data.view, graphics::vulkan::camera::get(info.camera_id).view());
 			DirectX::XMStoreFloat4x4(&data.projection, graphics::vulkan::camera::get(info.camera_id).projection());
+			DirectX::XMStoreFloat3(&data.cameraPosition, graphics::vulkan::camera::get(info.camera_id).position());
 			DirectX::XMStoreFloat3(&data.cameraDirection, graphics::vulkan::camera::get(info.camera_id).direction());
 			data.lightNear = graphics::vulkan::camera::get(info.camera_id).near_z();
 			data.lightFar = graphics::vulkan::camera::get(info.camera_id).far_z();
-			get_data<UniformBuffer>(_ubo_id).update(static_cast<void*>(&data), sizeof(UniformBufferObjectPlus));
+			data.time = graphics::vulkan::camera::get(info.camera_id).near_z();
+			data.pading = info.average_frame_time;
+			data::get_data<data::vulkan_buffer>(_ubo_id).update((void*)(&data), sizeof(data));
+			compute::run(static_cast<void*>(&data), sizeof(data));
 		}
 
 		void vulkan_scene::flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)
@@ -826,16 +848,16 @@ namespace primal::graphics::vulkan
 			
 			for (auto& instance : _instance_ids)
 			{
-				auto descriptorSet = get_data<VkDescriptorSet>(instance_models[instance].getDescriptorSet());
-				auto pipeline = get_data<VkPipeline>(instance_models[instance].getPipelineID());
+				auto descriptorSet = data::get_data<VkDescriptorSet>(instance_models[instance].getDescriptorSet());
+				auto pipeline = data::get_data<VkPipeline>(instance_models[instance].getPipelineID());
 
 				vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
 
 				VkWriteDescriptorSet write;
 				VkDescriptorBufferInfo lightBuffer;
-				lightBuffer.buffer = get_data<UniformBuffer>(light::non_cullable_light_buffer_id()).buffer;
+				lightBuffer.buffer = data::get_data<data::vulkan_buffer>(light::non_cullable_light_buffer_id()).cpu_address;
 				lightBuffer.offset = 0;
-				lightBuffer.range = get_data<UniformBuffer>(light::non_cullable_light_buffer_id()).size;
+				lightBuffer.range = data::get_data<data::vulkan_buffer>(light::non_cullable_light_buffer_id()).size;
 				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 				write.pNext = nullptr;
 				write.dstSet = 0;
@@ -845,6 +867,8 @@ namespace primal::graphics::vulkan
 				write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 				write.pBufferInfo = &lightBuffer;
 				vkCmdPushDescriptorSetKHR(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &write);
+				u32 light_num = light::non_cullable_light_count(0);
+				vkCmdPushConstants(cmd_buffer.cmd_buffer, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32), static_cast<void*>(&light_num));
 
 				vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 				instance_models[instance].flushBuffer(cmd_buffer);
@@ -863,8 +887,8 @@ namespace primal::graphics::vulkan
 
 		void vulkan_scene::drawDefer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)
 		{
-			auto descriptorSet = get_data<VkDescriptorSet>(_descriptor_set_id);
-			auto pipeline = get_data<VkPipeline>(_pipeline_id);
+			auto descriptorSet = data::get_data<VkDescriptorSet>(_descriptor_set_id);
+			auto pipeline = data::get_data<VkPipeline>(_pipeline_id);
 			vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
 			vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 			vkCmdDraw(cmd_buffer.cmd_buffer, 3, 1, 0, 0);

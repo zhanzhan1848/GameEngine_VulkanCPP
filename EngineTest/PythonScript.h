@@ -11,9 +11,9 @@ int pyscript()
 {
 	Py_Initialize();
 
-	PyRun_SimpleString("print(hello!!!)\n");
-	PyRun_SimpleString("import os\n");
-	PyRun_SimpleString("print(os.getcwd())\n");
+	//PyRun_SimpleString("print(hello!!!)\n");
+	//PyRun_SimpleString("import os\n");
+	//PyRun_SimpleString("print(os.getcwd())\n");
 
 	PyObject *obj = Py_BuildValue("s", "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Python_Scripts/compileShaders.py");
 	FILE* fp = _Py_fopen_obj(obj, "r");

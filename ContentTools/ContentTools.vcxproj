@@ -60,8 +60,8 @@
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel>
-      <PreprocessorDefinitions>PRIMAL_PLUS;DEBUG;USE_WITH_EDITOR;CONTENTTOOLS_EXPORTS;_WINDOWS;_USRDLL;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(SolutionDir)Engine;$(SolutionDir)Engine\Common;D:\AutoDesk\2020.2.1\include</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>PRIMAL_PLUS;DEBUG;USE_WITH_EDITOR;CONTENTTOOLS_EXPORTS;_WINDOWS;_USRDLL;_HAS_EXCEPTIONS=0;TOOLS_SOLUTION_DIR=R"($(SolutionDir))";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir)Engine;$(SolutionDir)Engine\Common;C:\Program Files\Autodesk\FBX\FBX SDK\2020.3.4\include</AdditionalIncludeDirectories>
       <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
@@ -115,6 +115,7 @@
     <ClInclude Include="Geometry.h" />
     <ClInclude Include="ObjImporter.h" />
     <ClInclude Include="PrimitiveMesh.h" />
+    <ClInclude Include="TemplateShader\PBR_Template_Shader_v1.h" />
     <ClInclude Include="ToolsCommon.h" />
   </ItemGroup>
   <ItemGroup>
