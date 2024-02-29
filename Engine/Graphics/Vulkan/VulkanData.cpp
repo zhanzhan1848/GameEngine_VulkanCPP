@@ -28,6 +28,7 @@ namespace primal::graphics::vulkan::data
 
 		void remove_vulkan_buffer(id::id_type id)
 		{
+			vulkan_buffer_list[id].release();
 			vulkan_buffer_list.remove(id);
 		}
 
@@ -53,6 +54,7 @@ namespace primal::graphics::vulkan::data
 
 		void remove_renderpass(id::id_type id)
 		{
+			vkDestroyRenderPass(core::logical_device(), renderpass_list[id], nullptr);
 			renderpass_list.remove(id);
 		}
 
@@ -78,6 +80,7 @@ namespace primal::graphics::vulkan::data
 
 		void remove_framebuffer(id::id_type id)
 		{
+			vkDestroyFramebuffer(core::logical_device(), framebuffer_list[id], nullptr);
 			framebuffer_list.remove(id);
 		}
 
@@ -102,6 +105,7 @@ namespace primal::graphics::vulkan::data
 
 		void remove_descriptor_pool(id::id_type id)
 		{
+			vkDestroyDescriptorPool(core::logical_device(), descriptor_pool_list[id], nullptr);
 			descriptor_pool_list.remove(id);
 		}
 
@@ -126,6 +130,7 @@ namespace primal::graphics::vulkan::data
 
 		void remove_descriptor_set_layout(id::id_type id)
 		{
+			vkDestroyDescriptorSetLayout(core::logical_device(), descriptor_set_layout_list[id], nullptr);
 			descriptor_set_layout_list.remove(id);
 		}
 
@@ -174,6 +179,7 @@ namespace primal::graphics::vulkan::data
 
 		void remove_pipeline_layout(id::id_type id)
 		{
+			vkDestroyPipelineLayout(core::logical_device(), pipeline_layout_list[id], nullptr);
 			pipeline_layout_list.remove(id);
 		}
 
@@ -206,6 +212,7 @@ namespace primal::graphics::vulkan::data
 
 		void remove_pipeline(id::id_type id)
 		{
+			vkDestroyPipeline(core::logical_device(), pipeline_list[id], nullptr);
 			pipeline_list.remove(id);
 		}
 
@@ -356,7 +363,7 @@ namespace primal::graphics::vulkan::data
 
 	void vulkan_buffer::convert_to_local_device_buffer()
 	{
-		u32 flag;
+		u32 flag = VK_BUFFER_USAGE_FLAG_BITS_MAX_ENUM;
 		switch (this->own_type)
 		{
 		case primal::graphics::vulkan::data::vulkan_buffer::static_vertex_buffer:							flag = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -375,6 +382,7 @@ namespace primal::graphics::vulkan::data
 			break;
 		}
 
+		assert(flag != VK_BUFFER_USAGE_FLAG_BITS_MAX_ENUM);
 		createBuffer(core::logical_device(), this->size, flag, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, this->gpu_address, this->gpu_memory);
 		copyBuffer(core::logical_device(), core::transfer_family_queue_index(), _transfer_cmd_pool, this->cpu_address, this->gpu_address, size);
 		vkDestroyBuffer(core::logical_device(), this->cpu_address, nullptr);
@@ -393,6 +401,27 @@ namespace primal::graphics::vulkan::data
 		createBuffer(core::logical_device(), size , this->flags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, this->cpu_address, this->cpu_memory);
 
 		this->size = size;
+	}
+
+	vulkan_buffer::~vulkan_buffer()
+	{
+		 /*vkFreeMemory(core::logical_device(), this->gpu_memory, nullptr);
+		 vkFreeMemory(core::logical_device(), this->cpu_memory, nullptr);
+		 
+		 vkDestroyBuffer(core::logical_device(), this->gpu_address, nullptr);
+		 vkDestroyBuffer(core::logical_device(), this->cpu_address, nullptr);*/
+	}
+
+	void vulkan_buffer::release()
+	{
+		vkFreeMemory(core::logical_device(), this->gpu_memory, nullptr);
+		vkFreeMemory(core::logical_device(), this->cpu_memory, nullptr);
+
+		vkDestroyBuffer(core::logical_device(), this->gpu_address, nullptr);
+		vkDestroyBuffer(core::logical_device(), this->cpu_address, nullptr);
+
+		this->flags = id::invalid_id;
+		this->data = nullptr;
 	}
 
 	void UniformBuffer::update(const void* const data, size_t size)

@@ -22,12 +22,51 @@ struct GlobalShaderData
 	float		_pading;
 };
 
-struct MVPMatrix
+struct PerObjectData
 {
-	mat4		model;
-	mat4		view;
-	mat4		projection;
+	mat4		World;
+	mat4		InvWorld;
+	mat4		WorldViewProjection;
 };
+
+struct Plane
+{
+	vec3		Normal;
+	float		Distance;
+};
+
+struct Sphere
+{
+	vec3		Center;
+	float		Radius;
+};
+
+struct Cone
+{
+	vec3		Tip;
+	float		Height;
+
+	vec3		Direction;
+	float		Radius;
+};
+
+// View frustum planes ( in view space)
+// Plane order: left, right, top, bottom
+// Front and back planes are computed in light culling compute shader
+struct Frustum
+{
+	Plane		Planes[4];
+};
+
+#ifndef __cplusplus
+struct ComputeShaderInput
+{
+    vec3		GroupID;           //gl_WorkGroupID				SV_GroupID           ---- 3D index of the thread group in the dispatch.
+    vec3		GroupThreadID;     //gl_LocalInvocationID		SV_GroupThreadID     ---- 3D index of local thread ID in a thread group.
+    vec3		DispatchThreadID;  //gl_GlobalInvocationID		SV_DispatchThreadID  ---- 3D index of global thread ID in the dispatch.
+    uint		GroupIndex;        //gl_LocalInvocationIndex	SV_GroupIndex        ---- Flattened local index of the thread within a thread group.
+};
+#endif
 
 // Contains light cullign data that's formatted and ready to be copied
 // to a Vulkan constant/structured buffer as contiguous chunk

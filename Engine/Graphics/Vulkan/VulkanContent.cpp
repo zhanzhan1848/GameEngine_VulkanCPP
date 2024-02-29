@@ -8,8 +8,6 @@
 #include "Content/stb_image.h"
 #include "Utilities/FreeList.h"
 #include <iostream>
-#define TINYOBJLOADER_IMPLEMENTATION
-#include "Content/tiny_obj_loader.h"
 #include <unordered_map>
 #include <array>
 
@@ -18,6 +16,7 @@
 #include "Shaders/ShaderTypes.h"
 #include "Utilities/IOStream.h"
 #include "VulkanCompute.h"
+#include "Shaders/ShaderTypes.h"
 
 namespace primal::graphics::vulkan
 {
@@ -132,6 +131,8 @@ namespace primal::graphics::vulkan
 			}
 
 			if (!pixels) throw std::runtime_error("Failed to load texture data...");
+
+			_texture.format = imageFormat;
 
 			baseBuffer staging;
 			createBuffer(core::logical_device(), imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging.buffer, staging.memory);
@@ -341,34 +342,9 @@ namespace primal::graphics::vulkan
 	{
 		namespace 
 		{
-			struct equal_idx
-			{
-				bool operator()(const tinyobj::index_t& a, const tinyobj::index_t& b) const
-				{
-					return a.vertex_index == b.vertex_index
-						&& a.texcoord_index == b.texcoord_index
-						&& a.normal_index == b.normal_index;
-				}
-			};
-
-			struct hash_idx
-			{
-				size_t operator()(const tinyobj::index_t& a) const
-				{
-					return ((a.vertex_index ^ a.texcoord_index << 1) >> 1) ^ (a.normal_index << 1);
-				}
-			};
-
 			utl::free_list<vulkan_model>							_models;
 		} // anonymous namespace
-
-		vulkan_model::vulkan_model(std::string path)
-		{
-			load_model(path);
-			create_vertex_buffer();
-			create_index_buffer();
-		}
-		
+	
 		vulkan_model::vulkan_model(const void* const data)
 		{
 			utl::vector<geometry_config>* geos{ (utl::vector<geometry_config>*)data };
@@ -396,59 +372,6 @@ namespace primal::graphics::vulkan
 
 			_vertices.clear();
 			_indices.clear();
-		}
-
-		void vulkan_model::load_model(std::string path)
-		{
-			int pos = path.rfind("\\", path.length());
-			std::string base_path{ path.substr(0, pos) };
-
-			tinyobj::attrib_t attrib;
-			std::vector<tinyobj::shape_t> shapes;
-			std::vector<tinyobj::material_t> materials;
-			std::string warn, err;
-
-			if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str(), base_path.c_str()))
-			{
-				throw std::runtime_error(warn + err);
-			}
-
-			std::unordered_map<tinyobj::index_t, size_t, hash_idx, equal_idx> uniqueVertices;
-
-			_vertices.clear();
-			_indices.clear();
-			for (const auto& shape : shapes)
-				for (const auto& index : shape.mesh.indices)
-				{
-					Vertex vertex;
-					vertex.pos = math::v3{
-						attrib.vertices[3 * index.vertex_index + 0],
-						attrib.vertices[3 * index.vertex_index + 1],
-						attrib.vertices[3 * index.vertex_index + 2]
-					};
-
-					vertex.color = math::v3{ 1.0f, 1.0f, 1.0f };
-
-					vertex.texCoord = math::v3{
-						attrib.texcoords[2 * index.texcoord_index + 0],
-						1.0f - attrib.texcoords[2 * index.texcoord_index + 1], // 1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
-						0.0f
-					};
-
-					vertex.normal = math::v3{
-						attrib.normals[3 * index.normal_index + 0],
-						attrib.normals[3 * index.normal_index + 1],
-						attrib.normals[3 * index.normal_index + 2]
-					};
-
-					if (uniqueVertices.count(index) == 0)
-					{
-						uniqueVertices[index] = (u32)_vertices.size();
-						_vertices.emplace_back(vertex);
-					}
-
-					_indices.emplace_back((u32)uniqueVertices[index]);
-				}
 		}
 
 		void vulkan_model::create_model_buffer()
@@ -485,8 +408,13 @@ namespace primal::graphics::vulkan
 		void vulkan_instance_model::create_instance_buffer()
 		{
 			auto flags = data::vulkan_buffer::static_uniform_buffer;
-			_modelMatrx_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), sizeof(math::m4x4));
-			data::get_data<data::vulkan_buffer>(_modelMatrx_id).update((void*)(&_modelMatrix), sizeof(math::m4x4));
+			_modelMatrx_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), sizeof(model_data));
+		}
+
+		void vulkan_instance_model::update_model_data(bool isReflect)
+		{
+			_modelData.is_reflect = isReflect;
+			data::get_data<data::vulkan_buffer>(_modelMatrx_id).update((void*)(&_modelData), sizeof(model_data));
 
 			data::get_data<data::vulkan_buffer>(_modelMatrx_id).convert_to_local_device_buffer();
 		}
@@ -508,7 +436,8 @@ namespace primal::graphics::vulkan
 				{ 0.f, 0.f, 0.f, 1.f },
 				DirectX::XMLoadFloat4(&rotation),
 				DirectX::XMLoadFloat3(&transform));
-			DirectX::XMStoreFloat4x4(&_modelMatrix, modelMatrix);
+			DirectX::XMStoreFloat4x4(&_modelData.model_matrix, modelMatrix);
+			_modelData.is_reflect = 0;
 			create_instance_buffer();
 		}
 
@@ -522,12 +451,13 @@ namespace primal::graphics::vulkan
 			for (auto texture_id : materials::get_material(_material_id).getTextureIDS())
 			{
 				//textures::get_texture(texture_id).~vulkan_texture_2d();
-				//textures::remove(texture_id);
-				materials::get_material(_material_id).remove_texture(texture_id);
+				textures::remove(texture_id);
+				//materials::get_material(_material_id).remove_texture(texture_id);
 			}
 
 			data::remove_data(data::engine_vulkan_data::vulkan_buffer, _modelMatrx_id);
 
+			game_entity::remove(_id);
 			_model.~vulkan_model();
 		}
 
@@ -570,7 +500,8 @@ namespace primal::graphics::vulkan
 			// VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(1, blendAttachmentState);
 			std::vector<VkPipelineColorBlendAttachmentState> blendAttachmentState = { descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE),
 																					descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE),
-																					descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE) };
+																					descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE),
+																					descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE), };
 			VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(static_cast<u32>(blendAttachmentState.size()), *blendAttachmentState.data());
 
 
@@ -618,11 +549,6 @@ namespace primal::graphics::vulkan
 
 		}
 
-		id::id_type add(std::string path)
-		{
-			return _models.add(path);
-		}
-
 		id::id_type add(const void* const data)
 		{
 			return _models.add(data);
@@ -665,7 +591,7 @@ namespace primal::graphics::vulkan
 		void vulkan_scene::remove_model_instance(id::id_type id)
 		{
 			//_instance_models.erase(id);
-			_instance_ids.erase(id);
+			//_instance_ids.erase(id);
 			instance_models[id].~vulkan_instance_model();
 		}
 
@@ -682,9 +608,11 @@ namespace primal::graphics::vulkan
 			graphics::vulkan::camera::remove((camera_id)id);
 		}
 
-		void vulkan_scene::add_material(id::id_type model_id, id::id_type material_id)
+		void vulkan_scene::add_material(id::id_type model_id, id::id_type material_id, bool isReflect)
 		{
 			instance_models[model_id].add_material(material_id);
+
+			instance_models[model_id].update_model_data(isReflect);
 		}
 
 		void vulkan_scene::remove_material(id::id_type model_id)
@@ -694,7 +622,7 @@ namespace primal::graphics::vulkan
 
 		void vulkan_scene::createUniformBuffer() {
 			auto flags = data::vulkan_buffer::per_frame_update_uniform_buffer;
-			_ubo_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), sizeof(UniformBufferObjectPlus));
+			_ubo_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), sizeof(glsl::GlobalShaderData));
 		}
 
 		void vulkan_scene::createDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout)
@@ -826,21 +754,25 @@ namespace primal::graphics::vulkan
 
 		void vulkan_scene::updateView(frame_info info)
 		{
-			UniformBufferObjectPlus data;
+			glsl::GlobalShaderData data;
 			graphics::vulkan::camera::get(info.camera_id).update();
 
-			DirectX::XMMATRIX modelMatrix = DirectX::XMMatrixIdentity();
-			DirectX::XMStoreFloat4x4(&data.model, modelMatrix);
-			DirectX::XMStoreFloat4x4(&data.view, graphics::vulkan::camera::get(info.camera_id).view());
-			DirectX::XMStoreFloat4x4(&data.projection, graphics::vulkan::camera::get(info.camera_id).projection());
-			DirectX::XMStoreFloat3(&data.cameraPosition, graphics::vulkan::camera::get(info.camera_id).position());
-			DirectX::XMStoreFloat3(&data.cameraDirection, graphics::vulkan::camera::get(info.camera_id).direction());
-			data.lightNear = graphics::vulkan::camera::get(info.camera_id).near_z();
-			data.lightFar = graphics::vulkan::camera::get(info.camera_id).far_z();
-			data.time = graphics::vulkan::camera::get(info.camera_id).near_z();
-			data.pading = info.average_frame_time;
+			DirectX::XMStoreFloat4x4(&data.View, graphics::vulkan::camera::get(info.camera_id).view());
+			DirectX::XMStoreFloat4x4(&data.Projection, graphics::vulkan::camera::get(info.camera_id).projection());
+			DirectX::XMStoreFloat4x4(&data.InvProjection, graphics::vulkan::camera::get(info.camera_id).inverse_projection());
+			DirectX::XMStoreFloat4x4(&data.ViewProjection, graphics::vulkan::camera::get(info.camera_id).view_projection());
+			DirectX::XMStoreFloat4x4(&data.InvViewProjection, graphics::vulkan::camera::get(info.camera_id).inverse_view_projection());
+			DirectX::XMStoreFloat3(&data.CameraPositon, graphics::vulkan::camera::get(info.camera_id).position());
+			DirectX::XMStoreFloat3(&data.CameraDirection, graphics::vulkan::camera::get(info.camera_id).direction());
+			data.NearPlane = graphics::vulkan::camera::get(info.camera_id).near_z();
+			data.FarPlane = graphics::vulkan::camera::get(info.camera_id).far_z();
+			data.ViewHeight = 900;
+			data.ViewWidth = 1600;
+			data.DeltaTime = info.average_frame_time;
+			data._pading = 0.0;
 			data::get_data<data::vulkan_buffer>(_ubo_id).update((void*)(&data), sizeof(data));
-			compute::run(static_cast<void*>(&data), sizeof(data));
+			// compute::run(static_cast<void*>(&data), sizeof(data));
+			data::get_data<data::vulkan_buffer>(compute::get_input_buffer_id()).update((void*)(&data), sizeof(data));
 		}
 
 		void vulkan_scene::flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)
@@ -853,7 +785,7 @@ namespace primal::graphics::vulkan
 
 				vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
 
-				VkWriteDescriptorSet write;
+				/*VkWriteDescriptorSet write;
 				VkDescriptorBufferInfo lightBuffer;
 				lightBuffer.buffer = data::get_data<data::vulkan_buffer>(light::non_cullable_light_buffer_id()).cpu_address;
 				lightBuffer.offset = 0;
@@ -868,30 +800,12 @@ namespace primal::graphics::vulkan
 				write.pBufferInfo = &lightBuffer;
 				vkCmdPushDescriptorSetKHR(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &write);
 				u32 light_num = light::non_cullable_light_count(0);
-				vkCmdPushConstants(cmd_buffer.cmd_buffer, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32), static_cast<void*>(&light_num));
+				vkCmdPushConstants(cmd_buffer.cmd_buffer, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32), static_cast<void*>(&light_num));*/
 
 				vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 				instance_models[instance].flushBuffer(cmd_buffer);
 				instance_models[instance].draw(cmd_buffer);
 			}
-		}
-
-		void vulkan_scene::drawGBuffer(vulkan_cmd_buffer cmd_buffer)
-		{
-			for (auto& instance : _instance_ids)
-			{
-				instance_models[instance].flushBuffer(cmd_buffer);
-				instance_models[instance].draw(cmd_buffer);
-			}
-		}
-
-		void vulkan_scene::drawDefer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)
-		{
-			auto descriptorSet = data::get_data<VkDescriptorSet>(_descriptor_set_id);
-			auto pipeline = data::get_data<VkPipeline>(_pipeline_id);
-			vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
-			vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-			vkCmdDraw(cmd_buffer.cmd_buffer, 3, 1, 0, 0);
 		}
 		
 		submesh::vulkan_instance_model& get_instance(id::id_type id)

@@ -1,50 +1,27 @@
 #version 450
+precision highp float;
+#include "Common.h"
 
-struct Plane
+layout (set = 0, binding = 0) uniform GlobalShaderDataBlock
 {
-	vec3 normal;
-	float distance;
-};
+	GlobalShaderData ubo;
+} uboBlock;
 
-struct Frustum
-{
-	Plane Planes[4];
-};
-
-struct Result
-{
-	bool IsHit;
-
-	vec2 UV;
-	vec3 pos;
-
-	int IterationCount;
-};
-
-struct Ray
-{
-	vec3 origin;
-	vec3 direction;
-};
-
-layout (set = 0, binding = 0) uniform UBO 
-{
-	mat4 model;
-	mat4 view;
-	mat4 projection;
-	vec3 cameraPos;
-	vec3 cameraDir;
-	float farPlane;
-	float nearPlane;
-	float time;
-} ubo;
-
-layout (binding = 1) uniform sampler2D samplers[3];
+layout (binding = 1) uniform sampler2D samplers[4];
 //layout (binding = 1) uniform sampler2D samplerCompute;
 layout(set = 0, binding = 2) buffer InFrustum
 {
 	Frustum Frustums[];
 } inFrustum;
+
+layout(set = 1, binding = 0) uniform DirectionalLightParameter
+{
+    DirectionalLightParameters param[256];
+} directionalLight;
+layout(push_constant) uniform light_nums
+{
+    int light_num;
+} light_Nums;
 
 layout (location = 0) in vec2 inUV;
 
@@ -52,42 +29,28 @@ layout (location = 0) out vec4 outFragColor;
 
 uint GetGridIndex(vec2 posXY, float viewWidth)
 {
-	return uint(posXY.x / 16) + (100 * uint(posXY.y / 16));
+	vec2 pos = vec2(posXY);
+	uint tileX = uint(ceil(viewWidth / 16));
+	return uint(posXY.x / 16) + (tileX * uint(posXY.y / 16));
 }
 
-vec4 projectToScreenSpace(vec3 point)
+bool query(vec2 z, vec2 uv, int width, int height)
 {
-	return ubo.projection * vec4(point, 1.0);
-}
-
-vec3 projectToViewSpace(vec3 point)
-{
-	return (ubo.view * vec4(point, 1.0)).xyz;
-}
-
-float distanceSquared(vec2 A, vec2 B)
-{
-	A -= B;
-	return dot(A, A);
-}
-
-bool query(vec2 z, vec2 uv)
-{
-	float depths = texture(samplers[0], uv / vec2(1600, 900)).a;
+	float depths = -texture(samplers[0], uv / vec2(width, height)).a;
 	return z.y < depths && z.x > depths;
 }
 
-Result RayMarching(Ray r)
+Result RayMarching(Ray r, int width, int height)
 {
 	Result result;
 	vec3 Begin = r.origin;
 	vec3 End = r.origin + r.direction * 10000;
 
-	vec3 v0 = projectToViewSpace(Begin);
-	vec3 v1 = projectToViewSpace(End);
+	vec3 v0 = projectToViewSpace(Begin, uboBlock.ubo.View);
+	vec3 v1 = projectToViewSpace(End, uboBlock.ubo.View);
 
-	vec4 H0 = projectToScreenSpace(v0);
-	vec4 H1 = projectToScreenSpace(v1);
+	vec4 H0 = projectToScreenSpace(v0, uboBlock.ubo.Projection);
+	vec4 H1 = projectToScreenSpace(v1, uboBlock.ubo.Projection);
 
 	float k0 = 1.0 / H0.w;
 	float k1 = 1.0 / H1.w;
@@ -98,7 +61,7 @@ Result RayMarching(Ray r)
 	vec2 P0 = H0.xy * k0;
 	vec2 P1 = H1.xy * k1;
 
-	vec2 Size = vec2(1600, 900);
+	vec2 Size = vec2(width, height);
 	P0 = (P0 + 1) / 2 * Size;
 	P1 = (P1 + 1) / 2 * Size;
 
@@ -141,11 +104,11 @@ Result RayMarching(Ray r)
 		{
 			Depths.xy = Depths.yx;
 		}
-		if(result.UV.x > 1600 || result.UV.x < 0 || result.UV.y > 900 || result.UV.y < 0)
+		if(result.UV.x > width || result.UV.x < 0 || result.UV.y > height || result.UV.y < 0)
 		{
 			break;
 		}
-		result.IsHit = query(Depths, result.UV);
+		result.IsHit = query(Depths, result.UV, width, height);
 		if(result.IsHit) { break; }
 	}
 
@@ -156,23 +119,101 @@ void main()
 {
 	vec2 flip_y_uv = vec2(inUV.x, 1.0 - inUV.y);
 	vec3 fragPos = texture(samplers[0], flip_y_uv).rgb;
-	vec3 normal = normalize(texture(samplers[1], flip_y_uv).rgb * 2.0 - 1.0);
+	vec3 normal = texture(samplers[1], flip_y_uv).rgb; //normalize(texture(samplers[1], flip_y_uv).rgb * 2.0 - 1.0);
 	vec4 albedo = texture(samplers[2], flip_y_uv);
+	vec3 specular = texture(samplers[3], flip_y_uv).rgb;
+	float mid = texture(samplers[1], flip_y_uv).a;
+	float is_reflect = texture(samplers[3], flip_y_uv).a;
 
-	vec3 viewDir = normalize(ubo.cameraPos - fragPos);
-	vec3 reflectDir = normalize(reflect(-viewDir, normal));
-	Ray ray;
-	ray.origin = fragPos;
-	ray.direction = reflectDir;
-	Result result = RayMarching(ray);
-	
-	if(result.IsHit)
+	float w = uboBlock.ubo.ViewWidth;
+	vec4 screen_pos = uboBlock.ubo.Projection * uboBlock.ubo.View * vec4(fragPos, 1.0);
+	//screen_pos.xy /= screen_pos.w;
+	screen_pos.xy = screen_pos.xy * 2.0 + 100.0;
+	uint gridIndex = GetGridIndex(screen_pos.xy, w);
+	Frustum f = inFrustum.Frustums[gridIndex];
+	uint halfTile = 8;
+	vec3 f_color = vec3(0.0);
+
+	if (GetGridIndex(vec2(screen_pos.x + halfTile, screen_pos.y), w) == gridIndex && GetGridIndex(vec2(screen_pos.x, screen_pos.y + halfTile), w) == gridIndex)
+    {
+        f_color = abs(f.Planes[0].Normal);
+    }
+    else if (GetGridIndex(vec2(screen_pos.x + halfTile, screen_pos.y), w) != gridIndex && GetGridIndex(vec2(screen_pos.x, screen_pos.y + halfTile), w) == gridIndex)
+    {
+        f_color = abs(f.Planes[2].Normal);
+    }
+    else if (GetGridIndex(vec2(screen_pos.x + halfTile, screen_pos.y), w) == gridIndex && GetGridIndex(vec2(screen_pos.x, screen_pos.y + halfTile), w) != gridIndex)
+    {
+        f_color = abs(f.Planes[3].Normal);
+    }
+	else
 	{
-		outFragColor = vec4(texture(samplers[2], result.UV / vec2(1600, 900)).xyz, 1);
+		f_color = abs(f.Planes[1].Normal);
+	}
+
+	float roughness = 0.25;
+	vec3 V = normalize(uboBlock.ubo.CameraPositon - fragPos);
+	vec3 F0 = mix(vec3(0.04), albedo.xyz, vec3(0.35));
+
+	vec3 color = vec3(0.0);
+	
+	if(is_reflect == 0.0)
+	{
+		for(int i = 0; i < light_Nums.light_num; ++i)
+		{
+			vec3 lightPos = normalize(directionalLight.param[i].Direction - vec3(0.0)) * 5.0;
+
+			vec3 L = normalize(lightPos - fragPos);
+			vec3 H = normalize(V + L);
+			float distance = length(lightPos - fragPos);
+			float attenuation = max(dot(directionalLight.param[i].Direction, normal), 0.0); //1.0 / (distance * distance);
+			vec3 radiance = directionalLight.param[i].Color * attenuation * directionalLight.param[i].Intensity * 5.0;
+
+			float NDF = DistributionGGX(normal, H, roughness);
+			float G = GeometrySmith(normal, V, L, roughness);
+			vec3 F = fresnelSchlick(clamp(dot(H, V), 0.0, 1.0), F0);
+
+			vec3 nominator = NDF * G * F;
+			float denominator = 4.0 * max(dot(normal, V), 0.0) * max(dot(normal, L), 0.0);
+			vec3 specular_1 = nominator / max(denominator, 0.001);
+
+			vec3 kS = F;
+			vec3 kD = vec3(1.0) - kS;
+			kD *= (1.0 - 0.35);
+
+			float NdotL = max(dot(normal, L), 0.0);
+		
+			color += (kD * albedo.xyz / PI + specular_1) * radiance * NdotL;
+		}
+
+		vec3 ambient = vec3(0.03) * albedo.xyz;
+
+		color = ambient + color;
 	}
 	else
 	{
-		outFragColor = albedo;
+		// vec3 reflectDir = normalize(reflect(-V, normal));
+		// Ray ray;
+		// ray.origin = fragPos;
+		// ray.direction = reflectDir;
+		// Result result = RayMarching(ray, uboBlock.ubo.ViewWidth, uboBlock.ubo.ViewHeight);
+		// 
+		// if(result.IsHit)
+		// {
+		// 	color = texture(samplers[2], result.UV / vec2(uboBlock.ubo.ViewWidth, uboBlock.ubo.ViewHeight)).xyz;
+		// }
+		// else
+		// {
+		// 	vec4 p = uboBlock.ubo.Projection * uboBlock.ubo.View * vec4(fragPos, 1.0);
+		// 	p.xy /= p.w;
+		// 	p.xy = p.xy * 0.5 + 0.5;
+		// 	color = texture(samplers[2], vec2(p.x, 1.0 - p.y)).xyz;
+		// }
 	}
-	//outFragColor = albedo;
+
+	color = color / (color + vec3(1.0));
+
+	color = pow(color, vec3(1.0 / 2.2));
+
+	outFragColor = vec4(color, 1.0) * 0.8 + vec4(f_color, 1.0) * 0.2;
 }

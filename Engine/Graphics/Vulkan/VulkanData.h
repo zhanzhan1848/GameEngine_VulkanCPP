@@ -31,11 +31,12 @@ namespace primal::graphics::vulkan::data
 
 		vulkan_buffer() = delete;
 		vulkan_buffer(type type, [[maybe_unused]] u32 size = 0);
-		//~vulkan_buffer();
+		~vulkan_buffer();
 
 		void resize(u64 size);
 		void update(const void* const data, u64 size);
 		void convert_to_local_device_buffer();
+		void release();
 
 		id::id_type convert_to_image();
 	};

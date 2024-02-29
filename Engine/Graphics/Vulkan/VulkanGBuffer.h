@@ -6,26 +6,11 @@ namespace primal::graphics::vulkan
 {
 	class vulkan_surface;
 
-	struct uboSSAOParam
-	{
-		math::m4x4		projection;
-		u32				ssao = true;
-		u32				ssaoOnly = false;
-		u32				ssaoblur = true;
-	};
-
-	struct uboGBuffer : UniformBufferObject
-	{
-		float nearPlane = 0.1f;
-		float farPlane = 64.0f;
-	};
-
 	class vulkan_base_pass
 	{
 	public:
-		virtual void createUniformbuffer() = 0;
-		virtual void setupRenderpassAndFramebuffer() = 0;
-		virtual void setupPoolAndLayout() = 0;
+		virtual void createRenderpassAndFramebuffer() = 0;
+		virtual void createPoolAndLayout() = 0;
 		virtual void runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface* surface) = 0;
 	};
 
@@ -44,11 +29,15 @@ namespace primal::graphics::vulkan
 
 		void createUniformBuffer();
 
+		void create_semaphore();
+
 		void setupRenderpassAndFramebuffer();
 
 		void setupPoolAndLayout();
 
 		void runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface* surface);
+
+		void submit(vulkan_cmd_buffer cmd_buffer, VkQueue graphics_queue);
 
 
 		[[nodiscard]] utl::vector<id::id_type> getTexture() { return _image_ids; }
@@ -65,18 +54,19 @@ namespace primal::graphics::vulkan
 
 		[[nodiscard]] constexpr id::id_type getPipelineLayout() { return _pipeline_layout_id; }
 
-		[[nodiscard]] constexpr id::id_type getUniformbuffer() { return _ub_id; }
+		[[nodiscard]] constexpr VkSemaphore const get_signal_semaphore() const { return _signal_semaphore; }
 
 	private:
 		u32												_width;
 		u32												_height;
-		id::id_type										_ub_id;
 		id::id_type										_framebuffer_id;
 		id::id_type										_renderpass_id;
 		id::id_type										_descriptor_pool_id;
 		id::id_type										_descriptor_set_layout_id;
 		id::id_type										_light_descriptor_set_layout_id;
 		id::id_type										_pipeline_layout_id;
+		VkSemaphore										_signal_semaphore;
+		VkSemaphore										_wait_semaphore;
 
 		// Output
 		utl::vector<id::id_type>						_image_ids;
@@ -95,6 +85,8 @@ namespace primal::graphics::vulkan
 
 		void setSize(u32 width, u32 height) { _width = width; _height = height; }
 
+		void create_semaphore();
+
 		void setupDescriptorSets(utl::vector<id::id_type> image_id, id::id_type ubo_id);
 
 		void setupPipeline(vulkan_renderpass renderpass);
@@ -109,5 +101,6 @@ namespace primal::graphics::vulkan
 		id::id_type										_pipeline_id;
 		id::id_type										_descriptorSet_layout_id;
 		id::id_type										_pipeline_layout_id;
+		id::id_type										_light_descriptor_set_layout_id;
 	};
 }

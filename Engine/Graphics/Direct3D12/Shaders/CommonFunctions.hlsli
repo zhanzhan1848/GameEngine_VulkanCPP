@@ -54,10 +54,10 @@ bool SphereInsideFrustum(Sphere sphere, Frustum frustum, float zNear, float zFar
     // Note: Here, the view vector points in the -Z axis so the
     // far depth value will be approaching -infinity.
     return !((sphere.Center.z - sphere.Radius > zNear || sphere.Center.z + sphere.Radius < zFar) ||
-                (SphereInsidePlane(sphere, frustum.Planes[0]) ||
-                (SphereInsidePlane(sphere, frustum.Planes[1]) ||
-                (SphereInsidePlane(sphere, frustum.Planes[2]) ||
-                (SphereInsidePlane(sphere, frustum.Planes[3]));
+                SphereInsidePlane(sphere, frustum.Planes[0]) ||
+                SphereInsidePlane(sphere, frustum.Planes[1]) ||
+                SphereInsidePlane(sphere, frustum.Planes[2]) ||
+                SphereInsidePlane(sphere, frustum.Planes[3]));
 }
 
 bool ConeInsideFrustum(Cone cone, Frustum frustum, float zNear, float zFar)

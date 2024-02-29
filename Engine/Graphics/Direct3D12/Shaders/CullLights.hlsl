@@ -9,7 +9,7 @@ groupshared uint                _minDepthVS;                                    
 groupshared uint                _maxDepthVS;                                            // tile's maximum depth in view-space
 groupshared uint                _lightCount;                                            // number of lights that affect pixels in this tile
 groupshared uint                _lightIndexStartOffset;                                 // offset in the global light index list where we copy _lightIndexList
-groupshared uint                _lightIndexList[MaxLightsPerGroup]; // indices of lights that affect this tile
+groupshared uint                _lightIndexList[MaxLightsPerGroup];                     // indices of lights that affect this tile
 
 ConstantBuffer<GlobalShaderData>                                GlobalData              :   register(b0, space0);
 ConstantBuffer<LightCullingDispatchParameters>                  ShaderParams            :   register(b1, space0);

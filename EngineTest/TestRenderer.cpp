@@ -245,12 +245,14 @@ bool test_initialize()
 		typedef void(*ptrSub)(const char*, const char*);
 		HMODULE hMod = LoadLibraryA("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/x64/DebugEditor/ContentTools.dll");
 		ptrSub obj_loader = (ptrSub)GetProcAddress(hMod, "ImportObj");
+		ptrSub single_obj_loader = (ptrSub)GetProcAddress(hMod, "ImportSimgleObj");
 		if (obj_loader != nullptr)
 		{
 			std::filesystem::path kms_file{"C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/kms/sponza/shaders"};
 			if (!std::filesystem::exists(kms_file))
 			{
 				obj_loader("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/models/sponza.obj", "sponza");
+				single_obj_loader("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/models/EngineSphere.obj", "sphere");
 			}
 		}
 

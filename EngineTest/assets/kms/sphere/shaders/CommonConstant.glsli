@@ -1,0 +1,3 @@
+const float PI = 3.1415926535897932384626433832795;
+const float half_PI = PI / 2;
+const float epsilon = 0.00001;

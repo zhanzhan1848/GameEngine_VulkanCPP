@@ -11,6 +11,7 @@
 #include "VulkanContent.h"
 #include "Components/Transform.h"
 #include "Components/Entity.h"
+#include "Shaders/ShaderTypes.h"
 
 #include "VulkanData.h"
 #include "VulkanLight.h"
@@ -248,6 +249,7 @@ vulkan_surface::create(VkInstance instance)
     _geometry.setSize(this->width(), this->height());
     _geometry.setupPoolAndLayout();
     _geometry.setupRenderpassAndFramebuffer();
+    _geometry.create_semaphore();
     _final.setSize(this->width(), this->height());
 
     core::create_graphics_command((u32)_swapchain.images.size());
@@ -255,13 +257,6 @@ vulkan_surface::create(VkInstance instance)
     light::initialize();
 
     const std::string base_dir{ SOLUTION_DIR };
-
-    // auto build_id = submesh::add(base_dir + std::string{"EngineTest\\assets\\models\\sponza.obj"});
-    /*utl::vector<geometry_config> model_2;
-    auto kms_file = base_dir + std::string{"EngineTest\\assets\\kms\\sponza.kms"};
-    load_kms_file(kms_file.c_str(), model_2);
-    void* model_2_data = &model_2;
-    auto build_2_id = submesh::add(model_2_data);*/
 
     std::string sponza_package{ base_dir };
     sponza_package.append("EngineTest\\assets\\kms\\sponza\\");
@@ -311,7 +306,7 @@ vulkan_surface::create(VkInstance instance)
             game_entity::entity sponza_ntt{ game_entity::create(sponza_entity_info) };
 
             auto sponza_sub_instance_id = _scene.add_model_instance(sponza_ntt, sponza_sub_id);
-            _scene.add_material(sponza_sub_instance_id, sponza_material_id);
+            _scene.add_material(sponza_sub_instance_id, sponza_material_id, false);
             model_2.clear();
         }
         else
@@ -320,75 +315,51 @@ vulkan_surface::create(VkInstance instance)
         }
     }
 
-    /*auto model_id = submesh::add(base_dir + std::string{ "EngineTest\\assets\\models\\viking_room.obj" });
-    auto texture_id = textures::add(base_dir + std::string{ "EngineTest\\assets\\images\\viking_room.png" });
-    auto vs_id = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\test01.vert.spv" }, shader_type::vertex);
-    auto fs_id = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\test01.frag.spv" }, shader_type::pixel);
-    auto material_id = materials::add({ material_type::type::opauqe, 0, {vs_id, id::invalid_id, id::invalid_id, id::invalid_id, fs_id, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
-    materials::get_material(material_id).add_texture(texture_id);
-
-    transform::init_info transform_info{};
-    math::v3 rotation{ 0.f, 0.f, 0.f };
-    math::v3 position{ 3.f, 0.f, -2.f };
-    DirectX::XMVECTOR quat{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation)) };
-    math::v4a rot_quat;
-    DirectX::XMStoreFloat4A(&rot_quat, quat);
-    memcpy(&transform_info.rotation[0], &rot_quat.x, sizeof(transform_info.rotation));
-    memcpy(&transform_info.position[0], &position.x, sizeof(transform_info.position));
-    game_entity::entity_info entity_info{};
-    entity_info.transform = &transform_info;
-    game_entity::entity ntt{ game_entity::create(entity_info) };
-    auto id1 = _scene.add_model_instance(ntt, model_id);
-    _scene.add_material(id1, material_id);
-
-    rotation = { 0.f, 0.f, 0.f };
-    position = { 1.f, 0.f, 0.f };
-    math::v3 scale{ 2.0f, 2.0f, 2.0f };
-    quat = { DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation)) };
-    DirectX::XMStoreFloat4A(&rot_quat, quat);
-    memcpy(&transform_info.scale[0], &scale.x, sizeof(transform_info.scale));
-    memcpy(&transform_info.rotation[0], &rot_quat.x, sizeof(transform_info.rotation));
-    memcpy(&transform_info.position[0], &position.x, sizeof(transform_info.position));
-    entity_info.transform = &transform_info;
-    game_entity::entity ntt3{ game_entity::create(entity_info) };
-    auto id4 = _scene.add_model_instance(ntt3, model_id);
-    _scene.add_material(id4, material_id);
-
-    auto floor = submesh::add(base_dir + std::string{ "EngineTest\\assets\\models\\floor.obj" });
-    auto floor_vs = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\floor.vert.spv" }, shader_type::vertex);
-    auto floor_fs = shaders::add(base_dir + std::string{ "Engine\\Graphics\\Vulkan\\Shaders\\floor.frag.spv" }, shader_type::pixel);
-    auto floor_material = materials::add({ material_type::opauqe, 0, {floor_vs, id::invalid_id, id::invalid_id, id::invalid_id, floor_fs, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
-    
-    transform::init_info transform_info1{};
-    math::v3 rotation1{ 0.f, 0.f, 0.f };
-    math::v3 position1{ 0.f, -2.f, 0.f };
-    scale = { 0.3f, 0.3f, 0.3f };
-    DirectX::XMVECTOR quat1{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation1)) };
-    math::v4a rot_quat1;
-    DirectX::XMStoreFloat4A(&rot_quat1, quat1);
-    memcpy(&transform_info1.scale[0], &scale.x, sizeof(transform_info1.scale));
-    memcpy(&transform_info1.rotation[0], &rot_quat1.x, sizeof(transform_info1.rotation));
-    memcpy(&transform_info1.position[0], &position1.x, sizeof(transform_info1.position));
-
-    game_entity::entity_info entity_info1{};
-    entity_info1.transform = &transform_info1;
-    game_entity::entity ntt1{ game_entity::create(entity_info1) };
-
-    auto id2 = _scene.add_model_instance(ntt1, floor);
-    _scene.add_material(id2, floor_material);*/
-
-    //auto id_3 = _scene.add_model_instance(ntt, build_2_id);
-    //_scene.add_material(id_3, material_id);
-
-    if (!compute::initialize())
+    std::string sphere_package{ base_dir };
+    sphere_package.append("EngineTest\\assets\\kms\\sphere\\");
+    for (const auto& file : std::filesystem::directory_iterator(sphere_package))
     {
-        MESSAGE("Failed to initialize compute pass...");
+        //load_kms_file("C:\\Users\\zy\\Desktop\\PrimalMerge\\PrimalEngine\\EngineTest\\assets\\kms\\sponza\\sponza_247_sponza_247_column_b.kms", model_2);
+        if (file.path().has_extension())
+        {
+            utl::vector<geometry_config> model_2;
+            load_kms_file(file.path().string().c_str(), model_2);
+            void* model_2_data = &model_2;
+            auto sphere_sub_id = submesh::add(model_2_data);
+            auto sphere_vs_id = shaders::add(base_dir + std::string({ "Engine\\Graphics\\Vulkan\\Shaders\\spv\\sphere.vert.spv" }), shader_type::vertex);
+            auto sphere_frag_id = shaders::add(base_dir + std::string({ "Engine\\Graphics\\Vulkan\\Shaders\\spv\\sphere.frag.spv" }), shader_type::pixel);
+            auto sphere_material_id = materials::add({ material_type::opauqe, 0, {sphere_vs_id, id::invalid_id, id::invalid_id, id::invalid_id, sphere_frag_id, id::invalid_id, id::invalid_id, id::invalid_id}, nullptr });
+
+            transform::init_info sphere_transform_info{};
+            math::v3 sphere_rotation{ 0.f, 0.f, 0.f };
+            math::v3 sphere_position{ 0.f, 0.5f, 0.f };
+            math::v3 sphere_scale{ 0.3f, 0.3f, 0.3f };
+            DirectX::XMVECTOR sphere_quat{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&sphere_rotation)) };
+            math::v4a sphere_rot_quat;
+            DirectX::XMStoreFloat4A(&sphere_rot_quat, sphere_quat);
+            memcpy(&sphere_transform_info.scale[0], &sphere_scale.x, sizeof(sphere_transform_info.scale));
+            memcpy(&sphere_transform_info.rotation[0], &sphere_rot_quat.x, sizeof(sphere_transform_info.rotation));
+            memcpy(&sphere_transform_info.position[0], &sphere_position.x, sizeof(sphere_transform_info.position));
+            game_entity::entity_info sphere_entity_info{};
+            sphere_entity_info.transform = &sphere_transform_info;
+            game_entity::entity sphere_ntt{ game_entity::create(sphere_entity_info) };
+
+            auto sphere_sub_instance_id = _scene.add_model_instance(sphere_ntt, sphere_sub_id);
+            _scene.add_material(sphere_sub_instance_id, sphere_material_id, true);
+            model_2.clear();
+        }
+        else
+        {
+            continue;
+        }
     }
+
+    _scene.createUniformBuffer();
+    compute::initialize();
 
 
     _scene.createPipeline(data::get_data<VkRenderPass>(_geometry.getRenderpass()), data::get_data<VkPipelineLayout>(_geometry.getPipelineLayout()));
     
-    _scene.createUniformBuffer();
     
     _scene.createDescriptorSets(data::get_data<VkDescriptorPool>(_geometry.getDescriptorPool()), data::get_data<VkDescriptorSetLayout>(_geometry.getDescriptorSetLayout()));
     _final.setupDescriptorSets(_geometry.getTexture(), _scene.getUboID());

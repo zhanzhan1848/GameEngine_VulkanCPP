@@ -125,7 +125,7 @@ namespace primal::graphics::d3d12::delight
 				NAME_D3D12_OBJECT_INDEXED(culler.frustums.buffer(), frustum_count, L"Light Grid Frustums Buffer - count");
 			}
 
-			if (light_grid_and_index_list_buffer_size > culler.light_grid_and_index_list.gpu_address())
+			if (light_grid_and_index_list_buffer_size > culler.light_grid_and_index_list.size())
 			{
 				info.size = light_grid_and_index_list_buffer_size;
 				culler.light_grid_and_index_list = d3d12_buffer{ info, false };
@@ -282,10 +282,12 @@ namespace primal::graphics::d3d12::delight
 		cmd_list->SetComputeRootSignature(light_culling_root_signature);
 		cmd_list->SetPipelineState(light_culling_pso);
 		using param = light_culling_root_parameter;
+		// Input
 		cmd_list->SetComputeRootConstantBufferView(param::global_shader_data, d3d12_info.global_shader_data);
 		cmd_list->SetComputeRootConstantBufferView(param::constants, cbuffer.gpu_address(buffer));
 		cmd_list->SetComputeRootUnorderedAccessView(param::frustums_out_or_index_counter, culler.light_index_counter.gpu_address());
 		cmd_list->SetComputeRootShaderResourceView(param::frustums_in, culler.frustums.gpu_address());
+		// Output
 		cmd_list->SetComputeRootShaderResourceView(param::culling_info, light::culling_info_buffer(d3d12_info.frame_index));
 		cmd_list->SetComputeRootUnorderedAccessView(param::light_grid_opaque, culler.light_grid_and_index_list.gpu_address());
 		cmd_list->SetComputeRootUnorderedAccessView(param::light_index_list_opaque, culler.light_index_list_opaque_buffer);

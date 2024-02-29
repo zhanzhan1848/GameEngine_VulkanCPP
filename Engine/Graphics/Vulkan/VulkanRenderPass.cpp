@@ -90,8 +90,8 @@ create_renderpass(VkDevice device, VkFormat swapchain_image_format, VkFormat dep
     depth_attach_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     // Let subpass know about the depth attachment
-    subpass.pDepthStencilAttachment = &depth_attach_ref;
-    //subpass.pDepthStencilAttachment = VK_NULL_HANDLE;
+    // subpass.pDepthStencilAttachment = &depth_attach_ref;
+    subpass.pDepthStencilAttachment = VK_NULL_HANDLE;
 
     // TODO: there are othere possible attachment types needed to configure here;
     //		 input, resolve, preserve...
@@ -109,10 +109,10 @@ create_renderpass(VkDevice device, VkFormat swapchain_image_format, VkFormat dep
     // Render pass dependencies.
     // TODO: this need to be configurable
     std::vector<VkSubpassDependency> dependencies{
-        createSubpassDependency(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        /*createSubpassDependency(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT),
+                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT),*/
 
         createSubpassDependency(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,

@@ -125,12 +125,10 @@ namespace primal::graphics::vulkan
 		{
 		public:
 			vulkan_model() = default;
-			explicit vulkan_model(std::string path);
 			explicit vulkan_model(const void* const data);
 
 			~vulkan_model();
 
-			void load_model(std::string path);
 			void create_model_buffer();
 
 			// ! Readonly function -> Two Buffers of Model are both readonly after load model
@@ -189,17 +187,25 @@ namespace primal::graphics::vulkan
 			//  ! add a material to a instance model
 			/// </summary>
 			/// <param name="id">material ID</param>
-			void add_material(id::id_type id) { _material_id = id; }
+			void add_material(id::id_type id) { _material_id = id; _modelData.material_id = id; }
 			void remove_material() { _material_id = id::invalid_id; }
+			void update_model_data(bool isReflect);
 			[[nodiscard]] constexpr id::id_type const getMaterialID() const { return _material_id; }
 			[[nodiscard]] constexpr id::id_type const getEntityID() const { return _id; }
 			[[nodiscard]] constexpr id::id_type const getPipelineID() const { return _pipeline_id; }
 			[[nodiscard]] constexpr id::id_type const getDescriptorSet() const { return _descriptorSet_id; }
 			[[nodiscard]] constexpr id::id_type const getLightDescriptorSet() const { return _light_descriptorSet_id; }
-			[[nodiscard]] constexpr math::m4x4 const getModelMatrix() const { return _modelMatrix; }
 			[[nodiscard]] constexpr id::id_type const getModelMatrixID() const { return _modelMatrx_id; }
 
 		private:
+
+			struct model_data
+			{
+				math::m4x4											model_matrix;
+				u32													material_id;
+				u32													is_reflect;
+			};
+
 			game_entity::entity_id									_id;
 			vulkan_model											_model;
 			id::id_type												_material_id;
@@ -207,7 +213,7 @@ namespace primal::graphics::vulkan
 			id::id_type												_pipeline_id;
 			id::id_type												_descriptorSet_id;
 			id::id_type												_light_descriptorSet_id;
-			math::m4x4												_modelMatrix;
+			model_data												_modelData;
 			id::id_type												_modelMatrx_id;
 
 			void create_instance_buffer();
@@ -215,7 +221,6 @@ namespace primal::graphics::vulkan
 
 		// TODO: complete the parameter
 		// ! When load model to engine, call this function to get vulkan model id
-		id::id_type add(std::string path);
 		id::id_type add(const void* const data);
 		void remove(id::id_type id);
 		vulkan_model get_model(id::id_type id);
@@ -234,7 +239,7 @@ namespace primal::graphics::vulkan
 			void remove_model_instance(id::id_type id);
 			void add_camera(camera_init_info info);
 			void remove_camera(id::id_type id);
-			void add_material(id::id_type model_id, id::id_type material_id);
+			void add_material(id::id_type model_id, id::id_type material_id, bool isReflect);
 			void remove_material(id::id_type model_id);
 
 			void createUniformBuffer();
@@ -245,8 +250,6 @@ namespace primal::graphics::vulkan
 
 			void updateView(frame_info info);
 			void flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout);
-			void drawGBuffer(vulkan_cmd_buffer cmd_buffer);
-			void drawDefer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout);
 
 			[[nodiscard]] utl::vector<id::id_type> getInstance() { return _instance_ids; }
 			[[nodiscard]] constexpr id::id_type const getUboID() const { return _ubo_id;  }

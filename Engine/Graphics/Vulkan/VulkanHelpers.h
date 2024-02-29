@@ -17,6 +17,7 @@ namespace primal::graphics::vulkan
 		VkDescriptorSetLayoutBinding descriptorSetLayoutBinding(u32 binding, VkShaderStageFlags stageFlags, VkDescriptorType type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VkSampler * sampler = nullptr, u32 descriptorCount = 1);
 		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreate(const VkDescriptorSetLayoutBinding * pBindings, u32 bindingCount);
 		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreate(const std::vector<VkDescriptorSetLayoutBinding>& bindings);
+		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreate(const utl::vector<VkDescriptorSetLayoutBinding>& bindings);
 		VkPipelineLayoutCreateInfo pipelineLayoutCreate(u32 setLayoutCount, const VkDescriptorSetLayout * pSetLayouts, u32 pushCount, VkPushConstantRange * constant);
 		VkPipelineVertexInputStateCreateInfo pipelineVertexInputStateCreate(const std::vector<VkVertexInputBindingDescription>& vertexBindingDescriptions, const std::vector<VkVertexInputAttributeDescription>& vertexAttributeDescriptions);
 		VkPushConstantRange pushConstantRange(VkShaderStageFlags stageFlags, u32 size, u32 offset);

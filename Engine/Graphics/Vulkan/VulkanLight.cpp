@@ -423,7 +423,7 @@ namespace primal::graphics::vulkan::light
 			CONSTEXPR void non_cullable_lights(glsl::DirectionalLightParameters* const lights, [[maybe_unused]] u32 buffer_size)
 			{
 				// TODO: Maybe change to vulkan model!!!!!!!!!!!!!!!!!!!!
-				//assert(buffer_size == math::align_size_up<D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT>(non_cullable_light_count() * sizeof(light_data)));
+				assert(buffer_size == non_cullable_light_count() * sizeof(glsl::DirectionalLightParameters));
 				const u32 count{ (u32)_non_cullable_owners.size() };
 				u32 index{ 0 };
 				for (u32 i{ 0 }; i < count; ++i)
@@ -524,43 +524,66 @@ namespace primal::graphics::vulkan::light
 			void swap_cullable_lights(u32 index1, u32 index2)
 			{
 				assert(index1 != index2);
-
-				// swap light parameter indices
 				assert(index1 < _cullable_owners.size());
 				assert(index2 < _cullable_owners.size());
-				light_owner& owner1{ _owners[_cullable_owners[index1]] };
-				light_owner& owner2{ _owners[_cullable_owners[index2]] };
-				assert(owner1.data_index == index1);
-				assert(owner2.data_index == index2);
-				owner1.data_index = index2;
-				owner2.data_index = index1;
-
-				// swap light parameters
 				assert(index1 < _cullable_lights.size());
 				assert(index2 < _cullable_lights.size());
-				std::swap(_cullable_lights[index1], _cullable_lights[index2]);
-
-				// swap culling info
 				assert(index1 < _culling_info.size());
 				assert(index2 < _culling_info.size());
-				std::swap(_culling_info[index1], _culling_info[index2]);
-
-				// swap light entity ids
 				assert(index1 < _cullable_entity_ids.size());
 				assert(index2 < _cullable_entity_ids.size());
-				std::swap(_cullable_entity_ids[index1], _cullable_entity_ids[index2]);
+				assert(id::is_valid(_cullable_owners[index1]) || id::is_valid(_cullable_owners[index2]));
 
-				// swap owner indices
-				std::swap(_cullable_owners[index1], _cullable_owners[index2]);
+				if (!id::is_valid(_cullable_owners[index2]))
+				{
+					std::swap(index1, index2);
+				}
 
-				assert(_owners[_cullable_owners[index1]].id == _cullable_entity_ids[index1]);
-				assert(_owners[_cullable_owners[index2]].id == _cullable_entity_ids[index2]);
+				if (!id::is_valid(_cullable_owners[index1]))
+				{
+					light_owner& owner2{ _owners[_cullable_owners[index2]] };
+					assert(owner2.data_index == index2);
+					owner2.data_index = index1;
 
-				// set dirty bits
-				assert(index1 < _dirty_bits.size());
-				assert(index2 < _dirty_bits.size());
-				_dirty_bits[index1] = dirty_bits_mask;
-				_dirty_bits[index2] = dirty_bits_mask;
+					_cullable_lights[index1] = _cullable_lights[index2];
+					_culling_info[index1] = _culling_info[index2];
+					_cullable_entity_ids[index1] = _cullable_entity_ids[index2];
+					std::swap(_cullable_owners[index1], _cullable_owners[index2]);
+					_dirty_bits[index1] = dirty_bits_mask;
+					assert(_owners[_cullable_owners[index1]].id == _cullable_entity_ids[index1]);
+					assert(id::is_valid(_cullable_owners[index2]));
+				}
+				else
+				{
+					// swap light parameter indices
+					light_owner& owner1{ _owners[_cullable_owners[index1]] };
+					light_owner& owner2{ _owners[_cullable_owners[index2]] };
+					assert(owner1.data_index == index1);
+					assert(owner2.data_index == index2);
+					owner1.data_index = index2;
+					owner2.data_index = index1;
+
+					// swap light parameters
+					std::swap(_cullable_lights[index1], _cullable_lights[index2]);
+
+					// swap culling info
+					std::swap(_culling_info[index1], _culling_info[index2]);
+
+					// swap light entity ids
+					std::swap(_cullable_entity_ids[index1], _cullable_entity_ids[index2]);
+
+					// swap owner indices
+					std::swap(_cullable_owners[index1], _cullable_owners[index2]);
+
+					assert(_owners[_cullable_owners[index1]].id == _cullable_entity_ids[index1]);
+					assert(_owners[_cullable_owners[index2]].id == _cullable_entity_ids[index2]);
+
+					// set dirty bits
+					assert(index1 < _dirty_bits.size());
+					assert(index2 < _dirty_bits.size());
+					_dirty_bits[index1] = dirty_bits_mask;
+					_dirty_bits[index2] = dirty_bits_mask;
+				}
 			}
 
 			// NOTE: these are NOT tightly packed
@@ -954,15 +977,27 @@ namespace primal::graphics::vulkan::light
 		return light_buffer.non_cullable_lights();
 	}
 
-	id::id_type non_cullable_light_buffer_id(vulkan_surface* surface)
+	id::id_type cullable_light_buffer_id()
 	{
-		const vulkan_light_buffer& light_buffer{ light_buffers[surface->current_frame()] };
-		return light_buffer.non_cullable_lights();
+		const vulkan_light_buffer& light_buffer{ light_buffers[core::get_frame_index()] };
+		return light_buffer.cullable_lights();
+	}
+
+	id::id_type culling_info_buffer_id()
+	{
+		const vulkan_light_buffer& light_buffer{ light_buffers[core::get_frame_index()] };
+		return light_buffer.culling_info();
 	}
 
 	u32 non_cullable_light_count(u64 light_set_key)
 	{
 		assert(light_sets.count(light_set_key));
 		return light_sets[light_set_key].non_cullable_light_count();
+	}
+
+	u32 cullable_light_count(u64 light_set_key)
+	{
+		assert(light_sets.count(light_set_key));
+		return light_sets[light_set_key].cullable_light_count();
 	}
 }

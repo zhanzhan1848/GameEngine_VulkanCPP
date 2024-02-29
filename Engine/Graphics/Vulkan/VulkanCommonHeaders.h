@@ -41,6 +41,7 @@ struct vulkan_image
 struct vulkan_texture : vulkan_image
 {
     VkSampler       sampler;
+    VkFormat        format;
 };
 
 struct vulkan_renderpass
@@ -168,17 +169,6 @@ struct UniformBufferObjectPlus : UniformBufferObject
     f32         lightFar;
     f32         time;
     f32         pading;
-};
-
-struct GPULightData
-{
-    math::m4x4*  mvp;
-    math::m4x4*  affine;
-    math::v3*    position;
-    math::v4*    direction;
-    math::v3*    color;
-    f32*         falloff;
-    u32          light_count;
 };
 
 struct render_type

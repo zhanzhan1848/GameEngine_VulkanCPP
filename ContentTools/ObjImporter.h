@@ -65,37 +65,4 @@ namespace primal::tools
         }
     };
 
-    struct mtl_config
-    {
-        char				name[256];
-        char				shader_name[512];
-        u8					auto_release;
-        f32					IOR;
-        math::v4			ambient_color;
-        math::v4			diffuse_color;
-        math::v4			specular_color;
-        math::v4			transmission;
-        f32					shininess;
-        char				diffuse_map_name[256];
-        char				specular_map_name[256];
-        char				normal_map_name[256];
-    };
-
-	struct mesh_vertex_index_data
-	{
-		u32					position_index;
-		u32					normal_index;
-		u32					texcoord_index;
-	};
-
-	struct mesh_face_data
-	{
-		mesh_vertex_index_data	vertices[3];
-	};
-
-	struct mesh_group_data
-	{
-		utl::vector<mesh_face_data>		faces;
-	};
-
 }

@@ -507,6 +507,24 @@ namespace primal::tools
 			std::ofstream shadertypedst(shadertype_dst, std::ios::binary);
 
 			shadertypedst << shadertypesrc.rdbuf();
+
+			std::string shaderfunction_src{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/CommonFunction.glsli" };
+			std::string shaderfunction_dst{ file_package };
+			shaderfunction_dst.append("\\").append("shaders\\").append("CommonFunction.glsli");
+
+			std::ifstream shaderfunctionsrc(shaderfunction_src, std::ios::binary);
+			std::ofstream shaderfunctiondst(shaderfunction_dst, std::ios::binary);
+
+			shaderfunctiondst << shaderfunctionsrc.rdbuf();
+
+			std::string shaderconstant_src{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/CommonConstant.glsli" };
+			std::string shaderconstant_dst{ file_package };
+			shaderconstant_dst.append("\\").append("shaders\\").append("CommonConstant.glsli");
+
+			std::ifstream shaderconstantsrc(shaderconstant_src, std::ios::binary);
+			std::ofstream shaderconstantdst(shaderconstant_dst, std::ios::binary);
+
+			shaderconstantdst << shaderconstantsrc.rdbuf();
 		}
 	} // anonymous namespace
 
@@ -661,9 +679,138 @@ namespace primal::tools
 		return true;
 	}
 
+	bool load_single_obj_model(std::string path, const char* out_ksm_file_package)
+	{
+		size_t pos = path.rfind("/", path.length());
+		std::string base_file_path{ path.substr(0, pos) };
+		// size_t last{ path.find_last_of("/\\") };
+		// size_t ext_string{ path.find_last_of(".") };
+		//std::string filename;
+		//if (last != std::string::npos)
+		//{
+		//	filename = path.substr(last + 1);
+		//	size_t ext_string{ filename.find_last_of(".") };
+		//	filename = filename.substr(0, ext_string);
+		//}
+
+		std::string file_package_path{ out_model_path + std::string{ out_ksm_file_package } };
+		if (_access(file_package_path.c_str(), 0) == -1)
+			OutputDebugStringA(std::to_string(_mkdir(file_package_path.c_str())).c_str());
+
+		tinyobj::attrib_t attrib;
+		std::vector<tinyobj::shape_t> shapes;
+		std::vector<tinyobj::material_t> materials;
+		std::string warn, err;
+
+		utl::vector<Vertex>	globalvertices;
+		utl::vector<geometry_config> out_geometry_darray;
+
+		if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str(), base_file_path.c_str()))
+		{
+			throw std::runtime_error(warn + err);
+		}
+
+		for (auto material : materials)
+		{
+			if (!generate_shader(static_cast<void*>(&material), file_package_path.c_str()))
+			{
+				OutputDebugStringA("Failed to write shader");
+			}
+		}
+
+		std::unordered_map<tinyobj::index_t, size_t, hash_idx, equal_idx> uniqueVertices;
+		std::map<u32, geometry_config>						geo_per_material_id;
+		std::map<u32, utl::vector<Vertex>>					vertices;
+		std::map<u32, utl::vector<u32>>						indices;
+
+		globalvertices.clear();
+		vertices.clear();
+		indices.clear();
+
+		for (const auto& shape : shapes)
+		{
+			out_geometry_darray.clear();
+			u32 material_id = shape.mesh.material_ids[0];
+			for (const auto& index : shape.mesh.indices)
+			{
+				Vertex vertex;
+				vertex.pos = math::v3{
+					attrib.vertices[3 * index.vertex_index + 0],
+					attrib.vertices[3 * index.vertex_index + 1],
+					attrib.vertices[3 * index.vertex_index + 2]
+				};
+
+				vertex.color = math::v3{ 1.0f, 1.0f, 1.0f };
+
+				vertex.texCoord = math::v3{
+					attrib.texcoords[2 * index.texcoord_index + 0],
+					1.0f - attrib.texcoords[2 * index.texcoord_index + 1], // 1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
+					0.0f
+				};
+
+				vertex.normal = math::v3{
+					attrib.normals[3 * index.normal_index + 0],
+					attrib.normals[3 * index.normal_index + 1],
+					attrib.normals[3 * index.normal_index + 2]
+				};
+
+				if (uniqueVertices.count(index) == 0)
+				{
+					//uniqueVertices[index] = (u32)globalvertices.size();
+					//globalvertices.emplace_back(vertex);
+					uniqueVertices[index] = (u32)vertices[material_id].size();
+					vertices[material_id].emplace_back(vertex);
+				}
+
+				indices[material_id].emplace_back((u32)uniqueVertices[index]);
+			}
+
+			geometry_config g;
+			g.vertex_size = sizeof(Vertex);
+			g.vertex_count = (u32)vertices[material_id].size();
+			//g.vertices.swap(vertices[material_id]);
+			g.index_size = sizeof(u32);
+			g.index_count = (u32)indices[material_id].size();
+			//g.indices.swap(indices[material_id]);
+			memcpy_s(g.name, 256, shape.name.c_str(), 256);
+			//generate_bounding_box_and_center(&g);
+			//generate_tangents(&g);
+
+			geo_per_material_id[material_id] = g;
+			//out_geometry_darray.emplace_back(g);
+			//write_kms_file(file_package_path.c_str(), g.name, (u32)out_geometry_darray.size(), out_geometry_darray);
+			//g.clear();
+		}
+
+		for (std::map<u32, geometry_config>::iterator iter = geo_per_material_id.begin(); iter != geo_per_material_id.end(); ++iter)
+		{
+			std::string filename{ out_ksm_file_package };
+			filename.append("_").append(std::to_string(iter->first));
+
+			u32 material_id = iter->first;
+
+			geometry_config g{ geo_per_material_id[material_id] };
+			g.vertices = vertices[material_id];
+			g.indices = indices[material_id];
+
+			generate_bounding_box_and_center(&g);
+			generate_tangents(&g);
+
+			write_kms_file(file_package_path.c_str(), filename.c_str(), g);
+		}
+
+		return true;
+	}
+
 	EDITOR_INTERFACE void ImportObj(const char* file, const char* kms_name)
 	{
 		assert(file);
 		load_obj_model(file, kms_name);
+	}
+
+	EDITOR_INTERFACE void ImportSimgleObj(const char* file, const char* kms_name)
+	{
+		assert(file);
+		load_single_obj_model(file, kms_name);
 	}
 }

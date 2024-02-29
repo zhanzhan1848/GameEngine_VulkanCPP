@@ -529,10 +529,10 @@ namespace primal::graphics::vulkan
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffer;
 
-        VkQueue graphicsQueue;
-        vkGetDeviceQueue(device, index, 0, &graphicsQueue);
-        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(graphicsQueue);
+        VkQueue transferQueue;
+        vkGetDeviceQueue(device, index, core::transfer_family_queue_index(), &transferQueue);
+        vkQueueSubmit(transferQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(transferQueue);
 
         vkFreeCommandBuffers(device, pool, 1, &commandBuffer);
 	}

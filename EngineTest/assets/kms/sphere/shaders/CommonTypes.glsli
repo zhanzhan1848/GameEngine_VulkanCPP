@@ -1,0 +1,118 @@
+#if !defined(PRIMAL_COMMON_GLSLI) && !defined(__cplusplus)
+#error Do not include this header directly in shader files. Only include this file via Common.h
+#endif
+
+struct GlobalShaderData
+{
+	mat4		View;
+	mat4		Projection;
+	mat4		InvProjection;
+	mat4		ViewProjection;
+	mat4		InvViewProjection;
+
+	vec3		CameraPositon;
+	int			ViewWidth;
+
+	vec3		CameraDirection;
+	int			ViewHeight;
+
+	float		NearPlane;
+	float		FarPlane;
+	float		DeltaTime;
+	float		_pading;
+};
+
+struct PerObjectData
+{
+	mat4		World;
+	mat4		InvWorld;
+	mat4		WorldViewProjection;
+};
+
+struct Plane
+{
+	vec3		Normal;
+	float		Distance;
+};
+
+struct Sphere
+{
+	vec3		Center;
+	float		Radius;
+};
+
+struct Cone
+{
+	vec3		Tip;
+	float		Height;
+
+	vec3		Direction;
+	float		Radius;
+};
+
+// View frustum planes ( in view space)
+// Plane order: left, right, top, bottom
+// Front and back planes are computed in light culling compute shader
+struct Frustum
+{
+	Plane		Planes[4];
+};
+
+#ifndef __cplusplus
+struct ComputeShaderInput
+{
+    vec3		GroupID;           //gl_WorkGroupID				---- 3D index of the thread group in the dispatch.
+    vec3		GroupThreadID;     //gl_LocalInvocationID		---- 3D index of local thread ID in a thread group.
+    vec3		DispatchThreadID;  //gl_GlobalInvocationID		---- 3D index of global thread ID in the dispatch.
+    uint		GroupIndex;        //gl_LocalInvocationIndex		---- Flattened local index of the thread within a thread group.
+};
+#endif
+
+// Contains light cullign data that's formatted and ready to be copied
+// to a Vulkan constant/structured buffer as contiguous chunk
+struct LightCullingLightInfo
+{
+	vec3		Position;
+	float		Range;
+
+	vec3		Direction;
+	float		ConeRadius;
+
+	int			Type;
+	vec3		_pad;
+};
+
+// Contains light data that's formatted and ready to be copy
+// to a Vulkan constant/structured buffer as a contiguous chunk
+struct LightParameters
+{
+	vec3		Position;
+	float		Intensity;
+
+	vec3		Direction;
+	int			Type;
+
+	vec3		Color;
+	float		Range;
+
+	vec3		Attenuation;
+	float		CosUmbra;			// Cosine of the half angle of umbra
+
+	float		CosPenumbra;		// Cosine of the half angle of penumbra
+	vec3		_pad;
+};
+
+struct DirectionalLightParameters
+{
+	vec3	Direction;
+	float	Intensity;
+
+	vec3	Color;
+	float	_pad;
+};
+
+#ifdef __cplusplus
+static_assert((sizeof(LightParameters) % 16) == 0, "Make sure LightParameters is formatted in 16-byte chunks without any implicit padding.");
+static_assert((sizeof(LightCullingLightInfo) % 16) == 0, "Make sure LightCullingLightInfo is formatted in 16-byte chunks without any implicit padding.");
+static_assert((sizeof(DirectionalLightParameters) % 16) == 0, "Make sure DirectionalLightParameters is formatted in 16-byte chunks without any implicit padding.");
+#endif // __cplusplus

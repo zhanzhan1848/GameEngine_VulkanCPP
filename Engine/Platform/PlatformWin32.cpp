@@ -60,7 +60,7 @@ namespace primal::platform
 
 			input::process_input_message(hwnd, msg, wparam, lparam);
 
-			if (resized && GetAsyncKeyState(VK_LBUTTON) >= 0)
+			if (resized && GetKeyState(VK_LBUTTON) >= 0)
 			{
 				window_info& info{ get_from_handle(hwnd) };
 				assert(info.hwnd);

@@ -17,6 +17,8 @@ namespace primal::graphics::vulkan::light
 
 	void update_light_buffers(const frame_info& info);
 	u32 non_cullable_light_count(u64 light_set_key);
+	u32 cullable_light_count(u64 light_set_key);
 	id::id_type non_cullable_light_buffer_id();
-	id::id_type non_cullable_light_buffer_id(vulkan_surface* surface);
+	id::id_type cullable_light_buffer_id();
+	id::id_type culling_info_buffer_id();
 }
