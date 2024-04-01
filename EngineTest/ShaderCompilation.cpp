@@ -312,7 +312,7 @@ bool compile_shaders()
 		{
 			// TODO: get TILE_SIZE valuye from d3d12
 			extra_args.emplace_back(L"-D");
-			extra_args.emplace_back(L"TILE_SIZE=16");
+			extra_args.emplace_back(L"TILE_SIZE=32");
 		}
 
 		dxc_compiled_shader compiled_shader{ compiler.compile(file.info, full_path, extra_args) };

@@ -20,7 +20,7 @@ for dir_path in dir_paths:
                 input_file = os.path.join(root, file)
                 output_file = os.path.join(output_path, file) + ".spv" #input_file + ".spv"
 
-                add_params = ""
+                add_params = "--target-env=vulkan1.3"
                 # if args.g:
                 #     add_params = "-g"
 
@@ -32,6 +32,7 @@ for dir_path in dir_paths:
                     print("%s OJ8K" % (output_file))
                 except Exception as e:
                     print(e)
+                    continue
                 # res = subprocess.call([glslang_path, '-V', input_file, '-o', output_file, add_params], shell=True)
                 if res != 0:
                     sys.exit()

@@ -147,7 +147,7 @@ namespace primal::graphics
 			type = camera::perspective;
 			up = { 0.f, 1.f, 0.f };
 			field_of_view = 0.25f;
-			aspect_ratio = 16.f / 10.f;
+			aspect_ratio = 16.f / 9.f; // 10.f
 			near_z = 0.1f;
 			far_z = 64.f;
 		}

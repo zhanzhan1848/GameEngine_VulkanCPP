@@ -15,31 +15,23 @@ layout(set = 0, binding = 1) writeonly buffer OutputFrustum
 	Frustum Frustums[];
 } outputFrustum;
 
-Plane ComputePlane(vec3 p0, vec3 p1, vec3 p2)
+#if USE_BOUNDING_SPHERES
+void main()
 {
-	Plane plane;
-	vec3 v0 = p1 - p0;
-	vec3 v2 = p2 - p0;
+	if(gl_GlobalInvocationID.x >= 100 || gl_GlobalInvocationID.y >= 57) return;
 
-	plane.Normal = normalize(cross(v0, v2));
-	plane.Distance = dot(plane.Normal, p0);
-	return plane;
+	vec2 invViewDimensions = 16 / vec2(global_data.ubo.ViewWidth, global_data.ubo.ViewHeight);
+	vec2 topLeft = gl_GlobalInvocationID.xy * invViewDimensions;
+	vec2 center = topLeft + (invViewDimensions * 0.5);
+
+	vec3 topLeftVS = UnprojectUV(topLeft, 0, global_data.ubo.InvProjection).xyz;
+	vec3 centerVS = UnprojectUV(center, 0, global_data.ubo.InvProjection).xyz;
+
+	float farClipRcp = -global_data.ubo.InvProjection[3][3];
+	Frustum frustum = { normalize(centerVS), distance(centerVS, topLeftVS) * farClipRcp };
+	outputFrustum.Frustums[gl_GlobalInvocationID.x + (gl_GlobalInvocationID.y * 100)] = frustum;
 }
-
-vec4 ClipToView(vec4 clip, mat4 inverseProjection)
-{
-	vec4 view = inverseProjection * clip;
-	view /= view.w;
-	return view;
-}
-
-vec4 ScreenToView(vec4 screen, vec2 invViewDimensions, mat4 inverseProjection)
-{
-	vec2 texCoord = screen.xy * invViewDimensions;
-	vec4 clip = vec4(vec2(texCoord.x, 1.0 - texCoord.y) * 2.0 - 1.0, screen.z, screen.w);
-	return ClipToView(clip, inverseProjection);
-}
-
+#else
 void main()
 {
 	uint x = gl_GlobalInvocationID.x;
@@ -53,7 +45,7 @@ void main()
 	screenSpace[2] = vec4(vec2(x, y + 1) * 16, 0.0, 1.0);
 	screenSpace[3] = vec4(vec2(x + 1, y + 1) * 16, 0.0, 1.0);
 	
-	vec2 invViewDimensions = vec2(1.0) / vec2(1600.0, 900.0);
+	vec2 invViewDimensions = vec2(1.0) / vec2(global_data.ubo.ViewWidth, global_data.ubo.ViewHeight);
 	
 	vec3 viewSpace[4];
 	viewSpace[0] = ScreenToView(screenSpace[0], invViewDimensions, global_data.ubo.InvProjection).xyz;
@@ -63,6 +55,11 @@ void main()
 	
 	vec3 eyePos =  vec3(0.0);
 	Frustum frustum;
+	// frustum.Planes[0] = ComputePlane(eyePos, viewSpace[2], viewSpace[0]);
+	// frustum.Planes[1] = ComputePlane(eyePos, viewSpace[1], viewSpace[3]);
+	// frustum.Planes[2] = ComputePlane(eyePos, viewSpace[0], viewSpace[1]);
+	// frustum.Planes[3] = ComputePlane(eyePos, viewSpace[3], viewSpace[2]);
+
 	frustum.Planes[0] = ComputePlane(viewSpace[0], eyePos, viewSpace[2]);
 	frustum.Planes[1] = ComputePlane(viewSpace[3], eyePos, viewSpace[1]);
 	frustum.Planes[2] = ComputePlane(viewSpace[1], eyePos, viewSpace[0]);
@@ -72,3 +69,4 @@ void main()
 
 	// imageStore(OutputImage, ivec2(gl_GlobalInvocationID.xy), vec4(frustum.Planes[(x + (y * 100)) % 4].normal, 1.0));
 }
+#endif

@@ -9,7 +9,7 @@ ConstantBuffer<GlobalShaderData>							GlobalData					: register(b0, space0);
 ConstantBuffer<PostProcessConstants>						ShaderParams				: register(b1, space0);
 
 // TODO: temporary for visualizing light culling frustums grid
-#define TILE_SIZE 16
+#define TILE_SIZE 32
 StructuredBuffer<Frustum>									Frustums					: register(t0, space0);
 StructuredBuffer<uint2>									    LightGridOpaque				: register(t1, space0);
 
@@ -25,7 +25,12 @@ float4 Heatmap(StructuredBuffer<uint2> buffer, float2 posXY, float blend)
 {
     const float w = GlobalData.ViewWidth;
     const uint gridIndex = GetGridIndex(posXY, w);
-    const uint numLights = buffer[gridIndex].y;
+    uint numLights = buffer[gridIndex].y;
+#if USE_BOUNDING_SPHERES
+    const uint numPointLights = numLights >> 16;
+    const uint numSpotLights = numLights & 0xffff;
+    numLights = numPointLights + numSpotLights;
+#endif
     
     const float3 mapTex[] =
     {
@@ -55,6 +60,9 @@ float4 PostProcessPS(in noperspective float4 Position : SV_Position,
     const float w = GlobalData.ViewWidth;
     const uint gridIndex = GetGridIndex(Position.xy, w);
     const Frustum f = Frustums[gridIndex];
+#if USE_BOUNDING_SPHERES
+    float3 color = abs(f.ConeDirection);
+#else
     const uint halfTile = TILE_SIZE / 2;
     float3 color = abs(f.Planes[1].normal);
 	
@@ -70,6 +78,7 @@ float4 PostProcessPS(in noperspective float4 Position : SV_Position,
     {
         float3 color = abs(f.Planes[3].normal);
     }
+#endif
     
     Texture2D gpassMain = ResourceDescriptorHeap[ShaderParams.GPassMainBufferIndex];
     color = lerp(gpassMain[Position.xy].xyz, color, 0.75f);

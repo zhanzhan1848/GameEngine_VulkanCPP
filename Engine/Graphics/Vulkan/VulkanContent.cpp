@@ -773,6 +773,8 @@ namespace primal::graphics::vulkan
 			data::get_data<data::vulkan_buffer>(_ubo_id).update((void*)(&data), sizeof(data));
 			// compute::run(static_cast<void*>(&data), sizeof(data));
 			data::get_data<data::vulkan_buffer>(compute::get_input_buffer_id()).update((void*)(&data), sizeof(data));
+			u32 light_count{ light::cullable_light_count(info.light_set_key) };
+			data::get_data<data::vulkan_buffer>(compute::culling_in_light_count_id()).update((void*)(&light_count), sizeof(u32));
 		}
 
 		void vulkan_scene::flushBuffer(vulkan_cmd_buffer cmd_buffer, VkPipelineLayout layout)

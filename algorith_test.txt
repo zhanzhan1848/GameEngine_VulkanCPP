@@ -1,0 +1,18 @@
+
+lights count				bounding spheres(without D / (depth + C), GPU):	
+8000							95
+17576							53
+
+
+light count				bounding spheres(without D / (depth + C), CPU):
+8000							123
+17576							80
+
+
+light count				bounding spheres(without D / (depth + C), CPU, Intersect AABB GPU):
+8000							145
+17576							98
+
+light count				bounding spheres(with D / (depth + C), CPU, Intersect AABB GPU, Wave intrinsics):
+8000							236
+17576							96

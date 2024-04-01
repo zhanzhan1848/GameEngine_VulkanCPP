@@ -97,11 +97,13 @@ namespace primal::graphics::vulkan::light
 						index = (u32)_cullable_owners.size();
 						_cullable_lights.emplace_back();
 						_culling_info.emplace_back();
+						_bounding_spheres.emplace_back();
 						_cullable_entity_ids.emplace_back();
 						_cullable_owners.emplace_back();
 						_dirty_bits.emplace_back();
 						assert(_cullable_owners.size() == _cullable_lights.size());
 						assert(_cullable_owners.size() == _culling_info.size());
+						assert(_cullable_owners.size() == _bounding_spheres.size());
 						assert(_cullable_owners.size() == _cullable_entity_ids.size());
 						assert(_cullable_owners.size() == _dirty_bits.size());
 					}
@@ -111,7 +113,7 @@ namespace primal::graphics::vulkan::light
 					const light_id id{ _owners.add(light_owner{game_entity::entity_id{info.entity_id}, index, info.type, info.is_enabled}) };
 					_cullable_entity_ids[index] = _owners[id].id;
 					_cullable_owners[index] = id;
-					_dirty_bits[index] = dirty_bits_mask;
+					make_dirty(index);
 					enable(id, info.is_enabled);
 					update_transform(index);
 
@@ -206,7 +208,7 @@ namespace primal::graphics::vulkan::light
 					const u32 last{ count - 1 };
 					if (data_index < last)
 					{
-						swap_cullable_lights(data_index, count);
+						swap_cullable_lights(data_index, last);
 						--count;
 					}
 					else if (data_index == last)
@@ -233,7 +235,7 @@ namespace primal::graphics::vulkan::light
 					assert(_owners[_cullable_owners[index]].data_index == index);
 					assert(index < _cullable_lights.size());
 					_cullable_lights[index].Intensity = intensity;
-					_dirty_bits[index] = dirty_bits_mask;
+					make_dirty(index);
 				}
 			}
 
@@ -255,7 +257,7 @@ namespace primal::graphics::vulkan::light
 					assert(_owners[_cullable_owners[index]].data_index == index);
 					assert(index < _cullable_lights.size());
 					_cullable_lights[index].Color = color;
-					_dirty_bits[index] = dirty_bits_mask;
+					make_dirty(index);
 				}
 			}
 
@@ -269,7 +271,7 @@ namespace primal::graphics::vulkan::light
 				assert(owner.type != graphics::light::directional);
 				assert(index < _cullable_lights.size());
 				_cullable_lights[index].Attenuation = attenuation;
-				_dirty_bits[index] = dirty_bits_mask;
+				make_dirty(index);
 			}
 
 			CONSTEXPR void range(light_id id, f32 range)
@@ -283,11 +285,21 @@ namespace primal::graphics::vulkan::light
 				assert(index < _cullable_lights.size());
 				_cullable_lights[index].Range = range;
 				_culling_info[index].Range = range;
-				_dirty_bits[index] = dirty_bits_mask;
+				
+#if USE_BOUNDING_SPHERES
+				_culling_info[index].CosPenumbra = -1.f;
+#endif
+				_bounding_spheres[index].Radius = range;
+				make_dirty(index);
 
 				if (owner.type == graphics::light::spot)
 				{
+					calculate_cone_bounding_sphere(_cullable_lights[index], _bounding_spheres[index]);
+#if USE_BOUNDING_SPHERES
+					_culling_info[index].CosPenumbra = _cullable_lights[index].CosPenumbra;
+#else
 					_culling_info[index].ConeRadius = calculate_cone_radius(range, _cullable_lights[index].CosPenumbra);
+#endif
 				}
 			}
 
@@ -301,7 +313,7 @@ namespace primal::graphics::vulkan::light
 
 				umbra = math::clamp(umbra, 0.f, math::pi);
 				_cullable_lights[index].CosUmbra = DirectX::XMScalarCos(umbra * 0.5f);
-				_dirty_bits[index] = dirty_bits_mask;
+				make_dirty(index);
 
 				if (penumbra(id) < umbra)
 				{
@@ -319,8 +331,14 @@ namespace primal::graphics::vulkan::light
 
 				penumbra = math::clamp(penumbra, umbra(id), math::pi);
 				_cullable_lights[index].CosPenumbra = DirectX::XMScalarCos(penumbra * 0.5f);
+				calculate_cone_bounding_sphere(_cullable_lights[index], _bounding_spheres[index]);
+
+#if USE_BOUNDING_SPHERES
+				_culling_info[index].CosPenumbra = _cullable_lights[index].CosPenumbra;
+#else
 				_culling_info[index].ConeRadius = calculate_cone_radius(range(id), _cullable_lights[index].CosPenumbra);
-				_dirty_bits[index] = dirty_bits_mask;
+#endif
+				make_dirty(index);
 			}
 
 			constexpr bool is_enabled(light_id id) const
@@ -343,7 +361,7 @@ namespace primal::graphics::vulkan::light
 				return _cullable_lights[index].Intensity;
 			}
 
-			constexpr math::v3 color(light_id id)
+			constexpr math::v3 color(light_id id) const
 			{
 				const light_owner& owner{ _owners[id] };
 				const u32 index{ owner.data_index };
@@ -398,12 +416,12 @@ namespace primal::graphics::vulkan::light
 				return DirectX::XMScalarACos(_cullable_lights[index].CosPenumbra) * 2.f;
 			}
 
-			constexpr graphics::light::type type(light_id id)
+			constexpr graphics::light::type type(light_id id) const
 			{
 				return _owners[id].type;
 			}
 
-			constexpr id::id_type entity_id(light_id id)
+			constexpr id::id_type entity_id(light_id id) const
 			{
 				return _owners[id].id;
 			}
@@ -420,7 +438,7 @@ namespace primal::graphics::vulkan::light
 				return count;
 			}
 
-			CONSTEXPR void non_cullable_lights(glsl::DirectionalLightParameters* const lights, [[maybe_unused]] u32 buffer_size)
+			CONSTEXPR void non_cullable_lights(glsl::DirectionalLightParameters* const lights, [[maybe_unused]] u32 buffer_size) const
 			{
 				// TODO: Maybe change to vulkan model!!!!!!!!!!!!!!!!!!!!
 				assert(buffer_size == non_cullable_light_count() * sizeof(glsl::DirectionalLightParameters));
@@ -458,6 +476,28 @@ namespace primal::graphics::vulkan::light
 				return sin_penumbra * range;
 			}
 
+			void calculate_cone_bounding_sphere(const glsl::LightParameters& params, glsl::Sphere& sphere)
+			{
+				using namespace DirectX;
+
+				XMVECTOR tip{ XMLoadFloat3(&params.Position) };
+				XMVECTOR direction{ XMLoadFloat3(&params.Direction) };
+				const f32 cone_cos{ params.CosPenumbra };
+				assert(cone_cos > 0.f);
+
+				if (cone_cos >= 0.707107f)
+				{
+					sphere.Radius = params.Range / (2.f * cone_cos);
+					XMStoreFloat3(&sphere.Center, tip + sphere.Radius * direction);
+				}
+				else
+				{
+					XMStoreFloat3(&sphere.Center, tip + cone_cos * params.Range * direction);
+					const f32 cone_sin{ sqrt(1.f - cone_cos * cone_cos) };
+					sphere.Radius = cone_sin * params.Range;
+				}
+			}
+
 			void update_transform(u32 index)
 			{
 				const game_entity::entity entity{ game_entity::entity_id{ _cullable_entity_ids[index] } };
@@ -465,14 +505,15 @@ namespace primal::graphics::vulkan::light
 				params.Position = entity.position();
 
 				glsl::LightCullingLightInfo& culling_info{ _culling_info[index] };
-				culling_info.Position = params.Position;
+				culling_info.Position = _bounding_spheres[index].Center = params.Position;
 
-				if (params.Type == graphics::light::spot)
+				if (_owners[_cullable_owners[index]].type == graphics::light::spot)
 				{
 					culling_info.Direction = params.Direction = entity.orientation();
+					calculate_cone_bounding_sphere(params, _bounding_spheres[index]);
 				}
 
-				_dirty_bits[index] = dirty_bits_mask;
+				make_dirty(index);
 			}
 
 			CONSTEXPR void add_cullable_light_parameters(const light_init_info& info, u32 index)
@@ -481,18 +522,20 @@ namespace primal::graphics::vulkan::light
 				assert(info.type != light::directional && index < _cullable_lights.size());
 
 				glsl::LightParameters& params{ _cullable_lights[index] };
+#if !USE_BOUNDING_SPHERES
 				params.Type = info.type;
 				assert(params.Type < light::count);
+#endif
 				params.Color = info.color;
 				params.Intensity = info.intensity;
 
-				if (params.Type == light::point)
+				if (info.type == light::point)
 				{
 					const point_light_params& p{ info.point_param };
 					params.Attenuation = p.attenuation;
 					params.Range = p.range;
 				}
-				else if (params.Type == light::spot)
+				else if (info.type == light::spot)
 				{
 					const spot_light_params& p{ info.spot_param };
 					params.Attenuation = p.attenuation;
@@ -507,17 +550,25 @@ namespace primal::graphics::vulkan::light
 				using graphics::light;
 				assert(info.type != light::directional && index < _culling_info.size());
 
-				glsl::LightParameters& params{ _cullable_lights[index] };
-				assert(params.Type == info.type);
+				const glsl::LightParameters& params{ _cullable_lights[index] };
 
 				glsl::LightCullingLightInfo& culling_info{ _culling_info[index] };
-				culling_info.Range = params.Range;
+				culling_info.Range = _bounding_spheres[index].Radius = params.Range;
 
+#if USE_BOUNDING_SPHERES
+				culling_info.CosPenumbra = -1.f;
+#else
+				assert(params.Type == info.type);
 				culling_info.Type = params.Type;
+#endif
 
 				if (info.type == light::spot)
 				{
+#if USE_BOUNDING_SPHERES
+					culling_info.CosPenumbra = params.CosPenumbra;
+#else
 					culling_info.ConeRadius = calculate_cone_radius(params.Range, params.CosPenumbra);
+#endif
 				}
 			}
 
@@ -530,6 +581,8 @@ namespace primal::graphics::vulkan::light
 				assert(index2 < _cullable_lights.size());
 				assert(index1 < _culling_info.size());
 				assert(index2 < _culling_info.size());
+				assert(index1 < _bounding_spheres.size());
+				assert(index2 < _bounding_spheres.size());
 				assert(index1 < _cullable_entity_ids.size());
 				assert(index2 < _cullable_entity_ids.size());
 				assert(id::is_valid(_cullable_owners[index1]) || id::is_valid(_cullable_owners[index2]));
@@ -547,11 +600,12 @@ namespace primal::graphics::vulkan::light
 
 					_cullable_lights[index1] = _cullable_lights[index2];
 					_culling_info[index1] = _culling_info[index2];
+					_bounding_spheres[index1] = _bounding_spheres[index2];
 					_cullable_entity_ids[index1] = _cullable_entity_ids[index2];
 					std::swap(_cullable_owners[index1], _cullable_owners[index2]);
-					_dirty_bits[index1] = dirty_bits_mask;
+					make_dirty(index1);
 					assert(_owners[_cullable_owners[index1]].id == _cullable_entity_ids[index1]);
-					assert(id::is_valid(_cullable_owners[index2]));
+					assert(!id::is_valid(_cullable_owners[index2]));
 				}
 				else
 				{
@@ -569,6 +623,9 @@ namespace primal::graphics::vulkan::light
 					// swap culling info
 					std::swap(_culling_info[index1], _culling_info[index2]);
 
+					// swap bounding spheres
+					std::swap(_bounding_spheres[index1], _bounding_spheres[index2]);
+
 					// swap light entity ids
 					std::swap(_cullable_entity_ids[index1], _cullable_entity_ids[index2]);
 
@@ -579,11 +636,15 @@ namespace primal::graphics::vulkan::light
 					assert(_owners[_cullable_owners[index2]].id == _cullable_entity_ids[index2]);
 
 					// set dirty bits
-					assert(index1 < _dirty_bits.size());
-					assert(index2 < _dirty_bits.size());
-					_dirty_bits[index1] = dirty_bits_mask;
-					_dirty_bits[index2] = dirty_bits_mask;
+					make_dirty(index1);
+					make_dirty(index2);
 				}
+			}
+
+			CONSTEXPR void make_dirty(u32 index)
+			{
+				assert(index < _dirty_bits.size());
+				_something_is_dirty = _dirty_bits[index] = dirty_bits_mask;
 			}
 
 			// NOTE: these are NOT tightly packed
@@ -594,6 +655,7 @@ namespace primal::graphics::vulkan::light
 			// NOTE: there are tightly packed
 			utl::vector<glsl::LightParameters>						_cullable_lights;
 			utl::vector<glsl::LightCullingLightInfo>				_culling_info;
+			utl::vector<glsl::Sphere>								_bounding_spheres;
 			utl::vector<game_entity::entity_id>						_cullable_entity_ids;
 			utl::vector<light_id>									_cullable_owners;
 			utl::vector<u8>											_dirty_bits;
@@ -601,6 +663,8 @@ namespace primal::graphics::vulkan::light
 			utl::vector<u8>											_transform_flags_cache;
 			// number of cullable lights
 			u32														_enabled_light_count{ 0 }; 
+			// flag is set if any of cullable lights were changed.
+			u8														_something_is_dirty{ 0 };
 
 			friend class vulkan_light_buffer;
 		};
@@ -614,110 +678,116 @@ namespace primal::graphics::vulkan::light
 			void init_buffer()
 			{
 				auto type1 = data::vulkan_buffer::static_uniform_buffer;
-				auto type2 = data::vulkan_buffer::per_frame_update_uniform_buffer;
+				auto type2 = data::vulkan_buffer::per_frame_update_storage_buffer;
 				_buffers[light_buffer::non_cullable_light].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type1), sizeof(glsl::DirectionalLightParameters));
 				_buffers[light_buffer::cullable_light].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type2), sizeof(glsl::LightParameters));
 				_buffers[light_buffer::culling_info].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type2), sizeof(glsl::LightCullingLightInfo));
+				_buffers[light_buffer::bounding_spheres].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type2), sizeof(glsl::Sphere));
 			}
 
 			void update_light_buffers(light_set& set, u64 light_set_key, u32 frame_index)
 			{
 				auto type1 = data::vulkan_buffer::static_uniform_buffer;
-				auto type2 = data::vulkan_buffer::per_frame_update_uniform_buffer;
+				auto type2 = data::vulkan_buffer::per_frame_update_storage_buffer;
+				const u32 non_cullable_light_count{ set.non_cullable_light_count() };
+				const u32 cullable_light_count{ set.cullable_light_count() };
 				if (!id::is_valid(_buffers[light_buffer::non_cullable_light].buffer_id))
 				{
-					_buffers[light_buffer::non_cullable_light].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type1), set.non_cullable_light_count() * sizeof(glsl::DirectionalLightParameters));
+					_buffers[light_buffer::non_cullable_light].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type1), non_cullable_light_count * sizeof(glsl::DirectionalLightParameters));
 				}
 
 				if (!id::is_valid(_buffers[light_buffer::cullable_light].buffer_id))
 				{
-					_buffers[light_buffer::cullable_light].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type2), set.cullable_light_count() * sizeof(glsl::LightParameters));
+					_buffers[light_buffer::cullable_light].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type2), cullable_light_count * sizeof(glsl::LightParameters));
 				}
 
 				if (!id::is_valid(_buffers[light_buffer::culling_info].buffer_id))
 				{
-					_buffers[light_buffer::culling_info].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type2), set.cullable_light_count() * sizeof(glsl::LightCullingLightInfo));
+					_buffers[light_buffer::culling_info].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type2), cullable_light_count * sizeof(glsl::LightCullingLightInfo));
 				}
 
-				u32 sizes[light_buffer::count]{};
-				sizes[light_buffer::non_cullable_light] = set.non_cullable_light_count() * sizeof(glsl::DirectionalLightParameters);
-				sizes[light_buffer::cullable_light] = set.cullable_light_count() * sizeof(glsl::LightParameters);
-				sizes[light_buffer::culling_info] = set.cullable_light_count() * sizeof(glsl::LightCullingLightInfo);
-
-				u32 currennt_size[light_buffer::count]{};
-				currennt_size[light_buffer::non_cullable_light] = data::get_data<data::vulkan_buffer>(_buffers[light_buffer::non_cullable_light].buffer_id).size;
-				currennt_size[light_buffer::cullable_light] = data::get_data<data::vulkan_buffer>(_buffers[light_buffer::cullable_light].buffer_id).size;
-				currennt_size[light_buffer::culling_info] = data::get_data<data::vulkan_buffer>(_buffers[light_buffer::culling_info].buffer_id).size;
-
-				if (currennt_size[light_buffer::non_cullable_light] < sizes[light_buffer::non_cullable_light])
+				if (!id::is_valid(_buffers[light_buffer::bounding_spheres].buffer_id))
 				{
-					resize_buffer(light_buffer::non_cullable_light, sizes[light_buffer::non_cullable_light], core::get_frame_index());
+					_buffers[light_buffer::bounding_spheres].buffer_id = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&type2), cullable_light_count * sizeof(glsl::Sphere));
 				}
 
-				_buffers[light_buffer::non_cullable_light].data = (u8*)malloc(sizes[light_buffer::non_cullable_light]);
+				if (non_cullable_light_count)
+				{
+					const u32 needed_size{ non_cullable_light_count * sizeof(glsl::DirectionalLightParameters) };
+					const u32 current_size{ data::get_data<data::vulkan_buffer>(_buffers[light_buffer::non_cullable_light].buffer_id).size };
+					
+					if (current_size < needed_size)
+					{
+						resize_buffer(light_buffer::non_cullable_light, needed_size, core::get_frame_index());
+					}
 
-				set.non_cullable_lights((glsl::DirectionalLightParameters *const)_buffers[light_buffer::non_cullable_light].data,
-					sizes[light_buffer::non_cullable_light]);
-				data::get_data<data::vulkan_buffer>(_buffers[light_buffer::non_cullable_light].buffer_id).update(_buffers[light_buffer::non_cullable_light].data,
-					sizes[light_buffer::non_cullable_light]);
-
-				//data::get_data<data::vulkan_buffer>(_buffers[light_buffer::non_cullable_light].buffer_id).convert_to_local_device_buffer();
+					set.non_cullable_lights((glsl::DirectionalLightParameters *const)_buffers[light_buffer::non_cullable_light].data,
+						needed_size);
+					data::get_data<data::vulkan_buffer>(_buffers[light_buffer::non_cullable_light].buffer_id).update(_buffers[light_buffer::non_cullable_light].data,
+						needed_size);
+				}
 
 				// TODO: cullable lights
-				bool buffers_resized{ false };
-				if (currennt_size[light_buffer::cullable_light] < sizes[light_buffer::cullable_light])
+				if (cullable_light_count)
 				{
-					assert(currennt_size[light_buffer::culling_info] < sizes[light_buffer::culling_info]);
-					resize_buffer(light_buffer::cullable_light, sizes[light_buffer::cullable_light], core::get_frame_index());
-					resize_buffer(light_buffer::culling_info, sizes[light_buffer::culling_info], core::get_frame_index());
-					buffers_resized = true;
-				}
+					const u32 needed_light_buffer_sizes{ cullable_light_count * sizeof(glsl::LightParameters) };
+					const u32 needed_culling_buffer_sizes{ cullable_light_count * sizeof(glsl::LightCullingLightInfo) };
+					const u32 needed_spheres_buffer_sizes{ cullable_light_count * sizeof(glsl::Sphere) };
+					const u32 current_light_buffer_size{ data::get_data<data::vulkan_buffer>(_buffers[light_buffer::cullable_light].buffer_id).size };
 
-				bool all_lights_updated{ false };
-				if (buffers_resized || _current_light_set_key != light_set_key)
-				{
-					data::get_data<data::vulkan_buffer>(_buffers[light_buffer::cullable_light].buffer_id).update(set._cullable_lights.data(),
-						sizes[light_buffer::cullable_light]);
-					data::get_data<data::vulkan_buffer>(_buffers[light_buffer::culling_info].buffer_id).update(set._culling_info.data(),
-						sizes[light_buffer::culling_info]);
-					_current_light_set_key = light_set_key;
-					all_lights_updated = true;
-				}
-
-				assert(_current_light_set_key == light_set_key);
-				const u32 index_mask{ 1UL << core::get_frame_index() };
-
-				if (all_lights_updated)
-				{
-					for (u32 i{ 0 }; i < set.cullable_light_count(); ++i)
+					bool buffers_resized{ false };
+					if (current_light_buffer_size < needed_light_buffer_sizes)
 					{
-						set._dirty_bits[i] &= ~index_mask;
+						resize_buffer(light_buffer::cullable_light, (needed_light_buffer_sizes * 3) >> 1, core::get_frame_index());
+						resize_buffer(light_buffer::culling_info, (needed_culling_buffer_sizes * 3) >> 1, core::get_frame_index());
+						resize_buffer(light_buffer::bounding_spheres, (needed_spheres_buffer_sizes * 3) >> 1, core::get_frame_index());
+						buffers_resized = true;
 					}
-				}
-				else
-				{
-					/*data::vulkan_buffer& cullable_light{ data::get_data<data::vulkan_buffer>(_buffers[light_buffer::cullable_light].buffer_id) };
-					void* culling_info = data::get_data<data::vulkan_buffer>(_buffers[light_buffer::culling_info].buffer_id).data;*/
-					/*void *const light_dst{ (void*)malloc(set.cullable_light_count() * sizeof(glsl::LightParameters)) };
-					void *const info_dst{ (void*)malloc(set.cullable_light_count() * sizeof(glsl::LightCullingLightInfo)) };*/
-					for (u32 i{ 0 }; i < set.cullable_light_count(); ++i)
+
+					const u32 index_mask{ 1UL << core::get_frame_index() };
+					if (buffers_resized || _current_light_set_key != light_set_key)
 					{
-						if(set._dirty_bits[i] & index_mask)
+						data::get_data<data::vulkan_buffer>(_buffers[light_buffer::cullable_light].buffer_id).update(set._cullable_lights.data(),
+							needed_light_buffer_sizes);
+						data::get_data<data::vulkan_buffer>(_buffers[light_buffer::culling_info].buffer_id).update(set._culling_info.data(),
+							needed_culling_buffer_sizes);
+						data::get_data<data::vulkan_buffer>(_buffers[light_buffer::bounding_spheres].buffer_id).update(set._bounding_spheres.data(),
+							needed_spheres_buffer_sizes);
+						_current_light_set_key = light_set_key;
+
+						for (u32 i{ 0 }; i < cullable_light_count; ++i)
 						{
-							assert(i * sizeof(glsl::LightParameters) < sizes[light_buffer::cullable_light]);
-							assert(i * sizeof(glsl::LightCullingLightInfo) < sizes[light_buffer::culling_info]);
-							u8* const light_src{ _buffers[light_buffer::cullable_light].data + i * sizeof(glsl::LightParameters) };
-							u8* const info_src{ _buffers[light_buffer::culling_info].data + i * sizeof(glsl::LightCullingLightInfo) };
-							memcpy(light_src, &set._cullable_lights[i], sizeof(glsl::LightParameters));
-							memcpy(info_src, &set._culling_info[i], sizeof(glsl::LightCullingLightInfo));
 							set._dirty_bits[i] &= ~index_mask;
 						}
 					}
-					data::get_data<data::vulkan_buffer>(_buffers[light_buffer::cullable_light].buffer_id).update((void*)_buffers[light_buffer::cullable_light].data,
-								sizes[light_buffer::cullable_light]);
-					data::get_data<data::vulkan_buffer>(_buffers[light_buffer::culling_info].buffer_id).update((void*)_buffers[light_buffer::culling_info].data,
-						sizes[light_buffer::culling_info]);
+					else if(set._something_is_dirty)
+					{
+						for (u32 i{ 0 }; i < cullable_light_count; ++i)
+						{
+							if (set._dirty_bits[i] & index_mask)
+							{
+								assert(i * sizeof(glsl::LightParameters) < needed_light_buffer_sizes);
+								assert(i * sizeof(glsl::LightCullingLightInfo) < needed_culling_buffer_sizes);
+								u8* const light_src{ _buffers[light_buffer::cullable_light].data + (i * sizeof(glsl::LightParameters)) };
+								u8* const info_src{ _buffers[light_buffer::culling_info].data + (i * sizeof(glsl::LightCullingLightInfo)) };
+								u8* const bounding_src{ _buffers[light_buffer::bounding_spheres].data + (i * sizeof(glsl::Sphere)) };
+								memcpy(light_src, &set._cullable_lights[i], sizeof(glsl::LightParameters));
+								memcpy(info_src, &set._culling_info[i], sizeof(glsl::LightCullingLightInfo));
+								memcpy(bounding_src, &set._bounding_spheres[i], sizeof(glsl::Sphere));
+								set._dirty_bits[i] &= ~index_mask;
+							}
+						}
+						data::get_data<data::vulkan_buffer>(_buffers[light_buffer::cullable_light].buffer_id).update((void*)_buffers[light_buffer::cullable_light].data,
+							needed_light_buffer_sizes);
+						data::get_data<data::vulkan_buffer>(_buffers[light_buffer::culling_info].buffer_id).update((void*)_buffers[light_buffer::culling_info].data,
+							needed_culling_buffer_sizes);
+						data::get_data<data::vulkan_buffer>(_buffers[light_buffer::bounding_spheres].buffer_id).update((void*)_buffers[light_buffer::bounding_spheres].data,
+							needed_spheres_buffer_sizes);
+					}
+					set._something_is_dirty &= ~index_mask;
+					assert(_current_light_set_key == light_set_key);
 				}
+				
 			}
 
 			constexpr void release()
@@ -732,6 +802,7 @@ namespace primal::graphics::vulkan::light
 			constexpr id::id_type non_cullable_lights() const { return _buffers[light_buffer::non_cullable_light].buffer_id; }
 			constexpr id::id_type cullable_lights() const { return _buffers[light_buffer::cullable_light].buffer_id; }
 			constexpr id::id_type culling_info() const { return _buffers[light_buffer::culling_info].buffer_id; }
+			constexpr id::id_type bounding_spheres() const { return _buffers[light_buffer::bounding_spheres].buffer_id; }
 
 		private:
 			struct light_buffer
@@ -741,6 +812,7 @@ namespace primal::graphics::vulkan::light
 					non_cullable_light,
 					cullable_light,
 					culling_info,
+					bounding_spheres,
 
 					count
 				};
@@ -754,6 +826,7 @@ namespace primal::graphics::vulkan::light
 				assert(type < light_buffer::count);
 				if (!size) return;
 
+				_buffers[type].data = nullptr;
 				data::get_data<data::vulkan_buffer>(_buffers[type].buffer_id).resize(size);
 				_buffers[type].data = (u8*)malloc(size);
 			}
@@ -821,63 +894,63 @@ namespace primal::graphics::vulkan::light
 			set.penumbra(id, penumbra);
 		}
 
-		constexpr void get_is_enabled(light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
+		constexpr void get_is_enabled(const light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
 		{
 			bool* const is_enabled{ (bool* const)data };
 			assert(sizeof(bool) == size);
 			*is_enabled = set.is_enabled(id);
 		}
 
-		constexpr void get_intensity(light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
+		constexpr void get_intensity(const light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
 		{
 			f32* const intensity{ (f32* const)data };
 			assert(sizeof(f32) == size);
 			*intensity = set.intensity(id);
 		}
 
-		constexpr void get_color(light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
+		constexpr void get_color(const light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
 		{
 			math::v3* const color{ (math::v3* const)data };
 			assert(sizeof(math::v3) == size);
 			*color = set.color(id);
 		}
 
-		CONSTEXPR void get_attenuation(light_set& set, light_id id, void *const data, [[maybe_unused]] u32 size)
+		CONSTEXPR void get_attenuation(const light_set& set, light_id id, void *const data, [[maybe_unused]] u32 size)
 		{
 			math::v3 *const attenuation{ (math::v3 *const)data };
 			assert(sizeof(math::v3) == size);
 			*attenuation = set.attenuation(id);
 		}
 
-		CONSTEXPR void get_range(light_set& set, light_id id, void *const data, [[maybe_unused]] u32 size)
+		CONSTEXPR void get_range(const light_set& set, light_id id, void *const data, [[maybe_unused]] u32 size)
 		{
 			f32 *const range{ (f32 *const)data };
 			assert(sizeof(f32) == size);
 			*range = set.range(id);
 		}
 
-		void get_umbra(light_set& set, light_id id, void *const data, [[maybe_unused]] u32 size)
+		void get_umbra(const light_set& set, light_id id, void *const data, [[maybe_unused]] u32 size)
 		{
 			f32 *const umbra{ (f32 *const)data };
 			assert(sizeof(f32) == size);
 			*umbra = set.umbra(id);
 		}
 
-		void get_penumbra(light_set& set, light_id id, void *const data, [[maybe_unused]] u32 size)
+		void get_penumbra(const light_set& set, light_id id, void *const data, [[maybe_unused]] u32 size)
 		{
 			f32 *const penumbra{ (f32 *const)data };
 			assert(sizeof(f32) == size);
 			*penumbra = set.penumbra(id);
 		}
 
-		constexpr void get_type(light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
+		constexpr void get_type(const light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
 		{
 			graphics::light::type* const type{ (graphics::light::type* const)data };
 			assert(sizeof(graphics::light::type) == size);
 			*type = set.type(id);
 		}
 
-		constexpr void get_entity_id(light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
+		constexpr void get_entity_id(const light_set& set, light_id id, void* const data, [[maybe_unused]] u32 size)
 		{
 			id::id_type* const entity_id{ (id::id_type* const)data };
 			assert(sizeof(id::id_type) == size);
@@ -887,7 +960,7 @@ namespace primal::graphics::vulkan::light
 		constexpr void dummy_set(light_set&, light_id, const void* const, u32) {}
 
 		using set_function = void(*)(light_set&, light_id, const void* const, u32);
-		using get_function = void(*)(light_set&, light_id, void* const, u32);
+		using get_function = void(*)(const light_set&, light_id, void* const, u32);
 		constexpr set_function set_functions[]
 		{
 			set_is_enabled,
@@ -979,14 +1052,20 @@ namespace primal::graphics::vulkan::light
 
 	id::id_type cullable_light_buffer_id()
 	{
-		const vulkan_light_buffer& light_buffer{ light_buffers[core::get_frame_index()] };
+		const vulkan_light_buffer& light_buffer{ light_buffers[core::get_frame_index()] };	// core::get_frame_index()
 		return light_buffer.cullable_lights();
 	}
 
 	id::id_type culling_info_buffer_id()
 	{
-		const vulkan_light_buffer& light_buffer{ light_buffers[core::get_frame_index()] };
+		const vulkan_light_buffer& light_buffer{ light_buffers[core::get_frame_index()] };  // core::get_frame_index()
 		return light_buffer.culling_info();
+	}
+
+	id::id_type bounding_spheres_buffer_id()
+	{
+		const vulkan_light_buffer& light_buffer{ light_buffers[core::get_frame_index()] };  // core::get_frame_index()
+		return light_buffer.bounding_spheres();
 	}
 
 	u32 non_cullable_light_count(u64 light_set_key)

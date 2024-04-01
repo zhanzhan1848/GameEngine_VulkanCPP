@@ -182,6 +182,18 @@ namespace primal::graphics::vulkan
 			return descriptorSetLayoutCreateInfo;
 		}
 
+		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreate(
+			const utl::vector<VkDescriptorSetLayoutBinding>& bindings)
+		{
+			VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo{};
+			descriptorSetLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+			descriptorSetLayoutCreateInfo.pNext = nullptr;
+			descriptorSetLayoutCreateInfo.flags = 0;
+			descriptorSetLayoutCreateInfo.bindingCount = static_cast<u32>(bindings.size());
+			descriptorSetLayoutCreateInfo.pBindings = bindings.data();
+			return descriptorSetLayoutCreateInfo;
+		}
+
 		VkPipelineLayoutCreateInfo pipelineLayoutCreate(
 			u32 setLayoutCount = 0,
 			const VkDescriptorSetLayout* pSetLayouts = nullptr,

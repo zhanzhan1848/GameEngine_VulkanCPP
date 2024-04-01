@@ -142,11 +142,7 @@ public:
         reset_cmd_buffer(cmd_buffer);
         begin_cmd_buffer(cmd_buffer, true, false, false);
 
-        light::update_light_buffers(info);
-
-        surface->getScene().updateView(info);
-        compute::run(nullptr, 0);
-        surface->getGeometryPass().runRenderpass(cmd_buffer, surface);
+        //surface->getGeometryPass().runRenderpass(cmd_buffer, surface);
 
         VkViewport viewport{};
         viewport.x = 0.0f;
@@ -200,8 +196,9 @@ public:
         // compute::submit();
 
         // use compute semaphore
-        VkSemaphore graphicsWaitSemaphores[]{ compute::get_compute_signal_semaphore(), _image_available[frame] };
-        //VkSemaphore graphicsWaitSemaphores2[]{ _image_available[frame], surface->getGeometryPass().get_signal_semaphore() };
+        VkSemaphore graphicsWaitSemaphores[]{ compute::get_compute_signal_semaphore(),
+            _image_available[frame], surface->getGeometryPass().get_signal_semaphore() };
+        VkSemaphore graphicsWaitSemaphores2[]{ _image_available[frame], compute::get_culling_signal_semaphore()};
         VkSemaphore graphicsSignalSemaphores[]{ _render_finished[frame] };
 
         VkSubmitInfo info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -209,14 +206,16 @@ public:
         info.pCommandBuffers = &cmd_buffer.cmd_buffer;
         info.signalSemaphoreCount = 1; // 1
         info.pSignalSemaphores = &_render_finished[frame]; // &_render_finished[frame]
-        info.waitSemaphoreCount = compute::is_rendered() ? 1 : 2; // 1
-        info.pWaitSemaphores = compute::is_rendered() ? &_image_available[frame] : graphicsWaitSemaphores; // &_image_available[frame]
+        info.waitSemaphoreCount = _is_first_frame ? 3 : 2; // 1
+        info.pWaitSemaphores = _is_first_frame ? graphicsWaitSemaphores : graphicsWaitSemaphores2; // &_image_available[frame]
         VkPipelineStageFlags flags[4]{ VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT ,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT };
         info.pWaitDstStageMask = flags;
 
         VkResult result{ VK_SUCCESS };
         VkCall(result = vkQueueSubmit(_graphics_queue, 1, &info, _draw_fences[frame].fence), "Failed to submit queue...");
         if (result != VK_SUCCESS) return false;
+
+        _is_first_frame = false;
 
         update_cmd_buffer_submitted(cmd_buffer);
 
@@ -337,6 +336,7 @@ private:
     utl::vector<VkSemaphore>		_render_finished;
     u32								_swapchain_image_count{ 0 };
     
+    bool                            _is_first_frame{ true };
 };
 
 // Indices (locations) of Queue Families (if they exist at all)
@@ -360,7 +360,7 @@ struct device_group
 using surface_collection = utl::free_list<vulkan_surface>;
 
 //const utl::vector<const char*>	device_extensions{ 1, VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-const std::vector<const char*>  device_extensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME };
+const std::vector<const char*>  device_extensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, "VK_KHR_maintenance4" };
 VkInstance						instance{ nullptr };
 VkFormat						device_depth_format{ VK_FORMAT_UNDEFINED };
 vulkan_command					gfx_command;
@@ -582,11 +582,25 @@ create_logical_device()
     info.enabledExtensionCount = (u32)device_extensions.size();	// NUmber of enabled logical device extensions
     info.ppEnabledExtensionNames = device_extensions.data();		// List of enabled logical device extensions
 
-    // Physical device features the logical device will be using
-    VkPhysicalDeviceFeatures device_features{};
-    device_features.samplerAnisotropy = VK_TRUE;
+    // Physical device features --- Maintenance4 Features KHR
+    VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4_features{};
+    maintenance4_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES_KHR;
+    maintenance4_features.pNext = nullptr;
+    // maintenance4_features.maintenance4 = VK_TRUE;
 
-    info.pEnabledFeatures = &device_features;					// Physical device features logical device will use
+    // Physical device features the logical device will be using
+    // VkPhysicalDeviceFeatures device_features{};
+    // device_features.samplerAnisotropy = VK_TRUE;
+    VkPhysicalDeviceFeatures2 device_features{};
+    device_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    device_features.pNext = &maintenance4_features;
+    vkGetPhysicalDeviceFeatures2(device_group.physical_device, &device_features);
+
+    device_features.features.samplerAnisotropy = VK_TRUE;
+
+    // set Maintenance4 Features KHR in VkDeviceCreateInfo::pNext to enable Maintenance4
+    info.pNext = &maintenance4_features;
+    info.pEnabledFeatures = &device_features.features;					// Physical device features logical device will use
 
     VkResult result{ VK_SUCCESS };
     VkCall(result = vkCreateDevice(device_group.physical_device, &info, nullptr, &device_group.logical_device), "Failed to create a logical device...");
@@ -638,7 +652,7 @@ initialize()
     app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);		// custom version of app
     app_info.pEngineName = "Primal";							//custom name of engine
     app_info.engineVersion = VK_MAKE_VERSION(1, 0, 0);			// custom version of engine
-    app_info.apiVersion = VK_API_VERSION_1_2;					// Version of Vulkan API
+    app_info.apiVersion = VK_API_VERSION_1_3;					// Version of Vulkan API
 
     // List of instance extensions we need to have available
     utl::vector<const char*> instance_ext{ 1, VK_KHR_SURFACE_EXTENSION_NAME };
@@ -809,6 +823,23 @@ bool detect_push_descriptor(VkPhysicalDevice physical_device)
     return true;
 }
 
+bool detect_subgroup(VkPhysicalDevice physical_device)
+{
+    VkPhysicalDeviceSubgroupProperties subgroupProperties{};
+    subgroupProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+    subgroupProperties.pNext = nullptr;
+    subgroupProperties.subgroupSize = 16;
+    subgroupProperties.supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
+    subgroupProperties.supportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
+
+    VkPhysicalDeviceProperties2 physicalDeviceProperties;
+    physicalDeviceProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    physicalDeviceProperties.pNext = &subgroupProperties;
+    vkGetPhysicalDeviceProperties2(physical_device, &physicalDeviceProperties);
+
+    return true;
+}
+
 s32
 find_memory_index(u32 type, u32 flags)
 {
@@ -912,6 +943,25 @@ surface_height(surface_id id)
 void
 render_surface(surface_id id, frame_info info)
 {
+    // update each frame data
+    light::update_light_buffers(info);
+    surfaces[id].getScene().updateView(info);
+
+    // frustum pass -- run once
+    compute::frustum_run();
+    compute::frustum_submit();
+
+    // Geometry pass
+    // geometry_run(&surfaces[id]);
+    // geometry_submit();
+    surfaces[id].getGeometryPass().run(&surfaces[id]);
+    surfaces[id].getGeometryPass().submit(&surfaces[id]);
+
+    // Culling pass
+    compute::culling_light_run();
+    VkSemaphore wait_signal_one = surfaces[id].getGeometryPass().get_signal_semaphore();
+    compute::culling_light_submit(1, &wait_signal_one);
+
     if (gfx_command.begin_frame(&surfaces[id], info))
     {
         //

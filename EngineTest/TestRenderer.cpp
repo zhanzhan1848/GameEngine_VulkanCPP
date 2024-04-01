@@ -79,6 +79,7 @@ id::id_type create_render_item(id::id_type entity_id);
 void destory_render_item(id::id_type item_id);
 void generate_lights();
 void remove_lights();
+void test_lights(f32 dt);
 
 LRESULT win_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
@@ -212,7 +213,7 @@ void create_camera_surface(camera_surface& surface, platform::window_init_info i
 {
 	surface.surface.window = platform::create_window(&info);
 	surface.surface.surface = graphics::create_surface(surface.surface.window);
-	surface.entity = create_one_game_entity({ -3.f, 0.f, -3.0f }, { 0.0f, 0.0f, 1.0f }, "camera_script");
+	surface.entity = create_one_game_entity({ 2.f, 0.8f, 1.0f }, { 0.0f, 0.0f, 1.0f }, "camera_script");
 	surface.camera = graphics::create_camera(graphics::perspective_camera_init_info{ surface.entity.get_id() });
 	surface.camera.aspect_ratio((f32)surface.surface.window.width() / surface.surface.window.height());
 }
@@ -376,7 +377,9 @@ void Engine_Test::run()
 
 	timer.begin();
 	//std::this_thread::sleep_for(std::chrono::milliseconds(10));
-	script::update(timer.dt_avg());
+	const f32 dt{ timer.dt_avg() };
+	script::update(dt);
+	// test_lights(dt);
 	for (u32 i{ 0 }; i < _countof(_surfaces); ++i)
 	{
 		if (_surfaces[i].surface.surface.is_valid())
@@ -388,7 +391,7 @@ void Engine_Test::run()
 			info.render_item_count = 1;
 			info.thresholds = &thresholds[0];
 			info.light_set_key = light_set_key;
-			info.average_frame_time = timer.dt_avg();
+			info.average_frame_time = dt;
 			info.camera_id = _surfaces[i].camera.get_id();
 
 			assert(_countof(thresholds) >= info.render_item_count);

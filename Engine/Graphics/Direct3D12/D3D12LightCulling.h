@@ -8,7 +8,7 @@ namespace primal::graphics::d3d12
 
 namespace primal::graphics::d3d12::delight
 {
-	constexpr u32 light_culling_tile_szie{ 16 };
+	constexpr u32 light_culling_tile_szie{ 32 };
 
 	bool initialize();
 	void shutdown();

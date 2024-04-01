@@ -2,6 +2,10 @@
 precision highp float;
 #include "Common.h"
 
+#if USE_BOUNDING_SPHERES
+
+#extension GL_KHR_shader_subgroup_arithmetic       : enable
+
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 // Input
@@ -15,27 +19,32 @@ layout(set = 0, binding = 1) buffer InFrustum
 	Frustum Frustums[];
 } inFrustum;
 
-layout(set = 0, binding = 2) buffer InLightCullingLightInfo
+layout(set = 1, binding = 0) buffer InLightCullingLightInfo
 {
 	LightCullingLightInfo LightInfo[];
 } inLights;
+
+layout(set = 1, binding = 3) buffer BoundingSpheres
+{
+	Sphere spheres[];
+} boundingSpheres;
 
 layout(set = 0, binding = 3) buffer light_nums
 {
     uint light_num;
 } light_Nums;
 
-layout(set = 0, binding = 4, rgba32f) readonly uniform image2D worldTex;
+layout(set = 0, binding = 4) uniform sampler2D worldTex;
 
-// Outout
-layout(set = 1, binding = 0) buffer LightCount
+layout(set = 0, binding = 5, std430) coherent buffer LightCount
 {
 	uint counter[];
 } LightIndexCounter;
 
+// Outout
 layout(set = 1, binding = 1) writeonly buffer LightGrid
 {
-	vec2 opaque[];
+	uvec2 opaque[];
 } LightGridOpaque;
 
 layout(set = 1, binding = 2) writeonly buffer LightList
@@ -47,7 +56,257 @@ layout(set = 1, binding = 2) writeonly buffer LightList
 // NOTE: this constant is larger than max_lights_per_tile in light culling module (defined to be 256)
 //       This is because 256 is the maximum for the *average* number of lights per tile, whereas
 //       this constant is the maximum lights per tile
-const uint MaxLightPerGroup = 1024;
+//const uint MaxLightPerGroup = 1024;
+layout(constant_id = 0) const uint MaxLightPerGroup = 1024;
+
+shared uint		_minDepthVS;									// tile's minimum depth in view-space
+shared uint		_maxDepthVS;									// tile's maximum depth in view-space
+shared uint		_lightCount;									// number of lights that affect pixels in this tile
+shared uint		_lightIndexStartOffset;							// offset in the global light index list where we copy _lightIndexList
+shared uint		_lightIndexList[MaxLightPerGroup];				// indices of lights that affect this tile
+shared uint		_lightFlagOpaque[MaxLightPerGroup];				// flags the lights in the tile that are actually affecting pixels
+shared uint		_spotLightStartOffset;
+shared uvec2	_opaqueLightIndex;								// x for point lights and y for spot lights
+
+// Implementation of Cull Lights shader is based on
+// "Forward vs Deferred vs Forward+ Rendering with DirectX 11" (2015) by Jeremiah van Dosten.
+// https://www.3dgep.com/forward-plus/#light-culling
+//
+// NOTE: TILE_SIZE is defined by the engine at compile-time.
+
+Sphere GetConeBoundingSphere(vec3 tip, float range, vec3 direction, float cosPenumbra)
+{
+	Sphere sphere;
+	sphere.Radius = range / (2.0 * cosPenumbra);
+	sphere.Center = tip + sphere.Radius * direction;
+
+    if(cosPenumbra < 0.707107)
+    {
+        float coneSin = sqrt(1.0 - cosPenumbra * cosPenumbra);
+        sphere.Center = tip + cosPenumbra * range * direction;
+        sphere.Radius = coneSin * range;
+    }
+    return sphere;
+}
+
+bool Intersect(Frustum frustum, Sphere sphere, float minDepth, float maxDepth)
+{
+	if((sphere.Center.z - sphere.Radius > minDepth) || (sphere.Center.z + sphere.Radius < maxDepth)) return false;
+
+	vec3 lightRejection = sphere.Center - dot(sphere.Center, frustum.ConeDirection) * frustum.ConeDirection;
+	float distSq = dot(lightRejection, lightRejection);
+	float radius = sphere.Center.z * frustum.UnitRadius + sphere.Radius;
+	float radiusSq = radius * radius;
+
+	return distSq <= radiusSq;
+}
+
+void main()
+{
+	// INITIALIZATION SECTION
+	//
+    // For our right-handed coordinate system, column-major projection matrices are:
+    //
+    //      Projection:                         Inverse Projection:
+    //      |   A   0   0   0   |               | 1/A   0   0   0   | 
+    //      |   0   B   0   0   |               |   0  1/B  0   0   |
+    //      |   0   0   C   D   |               |   0   0   0   -1  |
+    //      |   0   0   -1  0   |               |   0   0  1/D  C/D |
+    //
+    // To transform a position vector v from clip to view-space
+    //
+    // q = mul(inverse_projection, v)
+    // v_viewSpace = q / q.w
+    //
+    // However, we only need the z-component of v_viewSpace (for v = (0, 0, depth, 1))
+    // 
+    // v_viewSpace = -D / (depth + C)
+    //
+	// DEPTH MIN/MAX SECTION
+	ivec2 texCoord = ivec2(gl_GlobalInvocationID.xy);
+	float depth = texelFetch(worldTex, texCoord, 0).r;
+	// vec2 texCoord = vec2(gl_GlobalInvocationID.x / global_data.ubo.ViewWidth, gl_GlobalInvocationID.y / global_data.ubo.ViewHeight); // gl_GlobalInvocationID.xy;
+	// float depth = texture(worldTex, texCoord).r;
+	float C = global_data.ubo.Projection[2][2];
+	float D = global_data.ubo.Projection[3][2];
+	uint gridIndex = gl_WorkGroupID.x + (gl_WorkGroupID.y * (global_data.ubo.ViewWidth / 16));
+	Frustum frustum = inFrustum.Frustums[gridIndex];
+
+    // only the first thread in the group need to initialize groupshared memory
+	if(gl_LocalInvocationIndex == 0)
+	{
+		_minDepthVS = 0x7f7fffff;  // FLT_MAX as uint
+		_maxDepthVS = 0;
+		_lightCount = 0;
+		_opaqueLightIndex = uvec2(0);
+	}
+
+	groupMemoryBarrier();
+	barrier();
+
+	uint i = 0, index = 0;  // reusable index variables
+	for(i = gl_LocalInvocationIndex; i < MaxLightPerGroup; i += gl_WorkGroupSize.x * gl_WorkGroupSize.y)
+	{
+		_lightFlagOpaque[i] = 0;
+	}
+
+	float depthVS = ClipToView(vec4(0.0, 0.0, depth, 1.0), global_data.ubo.InvProjection).z;
+
+	if(depth != 0.0) // don't include far plane
+	{
+		// uint z = floatBitsToUint(-depthVS); //  as uint   D / (depth + C)
+		// atomicMin(_minDepthVS, z);
+		// atomicMax(_maxDepthVS, z);
+		float depthMin = subgroupMax(depth);
+		float depthMax = subgroupMin(depth);
+		// Negate depth because of right-handed coorinates (negative z-axis)
+		// This make the comparisons easier to understand
+		if(subgroupElect())
+		{
+			uint zMin = floatBitsToUint(D / (depthMin + C));
+			uint zMax = floatBitsToUint(D / (depthMax + C));
+			atomicMin(_minDepthVS, zMin);
+			atomicMax(_maxDepthVS, zMax);
+		}
+	}
+
+	// LIGHT CULLING SECTION
+	groupMemoryBarrier();
+	barrier();
+	
+	// Negate view-space min/max again.
+	float minDepthVS = -uintBitsToFloat(_minDepthVS);
+	float maxDepthVS = -uintBitsToFloat(_maxDepthVS);
+
+	// uint begin = uint(gl_LocalInvocationIndex);
+	for(i = gl_LocalInvocationIndex; i < light_Nums.light_num; i += gl_WorkGroupSize.x * gl_WorkGroupSize.y)
+	{
+		Sphere sphere = boundingSpheres.spheres[i];
+		sphere.Center = (global_data.ubo.View * vec4(sphere.Center, 1.0)).xyz;
+
+		if(Intersect(frustum, sphere, minDepthVS, maxDepthVS))
+		{
+			index = atomicAdd(_lightCount, 1);
+			if(index < MaxLightPerGroup) _lightIndexList[index] = i;
+		}
+	}
+
+	// LIGHT PRUNING SECTION
+    groupMemoryBarrier();
+	barrier();
+
+	uint lightCount = min(_lightCount, MaxLightPerGroup);
+	vec2 invViewDimensions = 1.0 / vec2(global_data.ubo.ViewWidth, global_data.ubo.ViewHeight);
+	// Get World position of this pixel
+	vec3 pos = UnprojectUV(gl_GlobalInvocationID.xy * invViewDimensions, depth, global_data.ubo.InvViewProjection).xyz;
+	
+	for(i = 0; i < lightCount; ++i)
+	{
+		index = _lightIndexList[i];
+		LightCullingLightInfo light = inLights.LightInfo[index];
+		vec3 d = pos - light.Position;
+		float distSq = dot(d, d);
+	
+		if(distSq <= (light.Range * light.Range))
+		{
+			// NOTE: -1 meant the light is a point light. It's a spotlight otherwise.
+			bool isPointLight = light.CosPenumbra == -1.0;
+			if(isPointLight || (dot(d * inversesqrt(distSq), light.Direction) >= light.CosPenumbra))
+			{
+				_lightFlagOpaque[i] = 2 - uint(isPointLight);
+			}
+		}
+	}
+
+	//  UPDATE LIGHT GRID SECTION
+	groupMemoryBarrier();
+	barrier();
+	if(gl_LocalInvocationIndex == 0)
+	{
+		uint numPointLights = 0;
+		uint numSpotLights = 0;
+	
+		for(i = 0; i < lightCount; ++i)
+		{
+			numPointLights += (_lightFlagOpaque[i] & 1);
+			numSpotLights += (_lightFlagOpaque[i] >> 1);
+		}
+
+		_lightIndexStartOffset = atomicAdd(LightIndexCounter.counter[0], numPointLights + numSpotLights);
+		_spotLightStartOffset = _lightIndexStartOffset + numPointLights;
+		LightGridOpaque.opaque[gridIndex] = uvec2(_lightIndexStartOffset, (numPointLights << 16) | numSpotLights);
+	}
+
+	// UPDATE LIGHT INDEX LIST SECTION
+    groupMemoryBarrier();
+	barrier();
+
+	uint pointIndex, spotIndex;
+
+	for(i = gl_LocalInvocationIndex; i < lightCount; i += gl_WorkGroupSize.x * gl_WorkGroupSize.y)
+	{
+		if(_lightFlagOpaque[i] == 1)
+		{
+			pointIndex = atomicAdd(_opaqueLightIndex.x, 1);
+			LightIndexListOpaque.index[_lightIndexStartOffset + pointIndex] = _lightIndexList[i];
+		}
+		else if(_lightFlagOpaque[i] == 2)
+		{
+			spotIndex = atomicAdd(_opaqueLightIndex.y, 1);
+			LightIndexListOpaque.index[_spotLightStartOffset + spotIndex] = _lightIndexList[i];
+		}
+	}
+}
+
+#else
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Input
+layout(set = 0, binding = 0) buffer StorageBuffer
+{
+	GlobalShaderData ubo;
+} global_data;
+
+layout(set = 0, binding = 1) buffer InFrustum
+{
+	Frustum Frustums[];
+} inFrustum;
+
+layout(set = 1, binding = 0) buffer InLightCullingLightInfo
+{
+	LightCullingLightInfo LightInfo[];
+} inLights;
+
+layout(set = 0, binding = 3) buffer light_nums
+{
+    uint light_num;
+} light_Nums;
+
+layout(set = 0, binding = 4) uniform sampler2D worldTex;
+
+layout(set = 0, binding = 5, std430) coherent buffer LightCount
+{
+	uint counter[];
+} LightIndexCounter;
+
+// Outout
+layout(set = 1, binding = 1) writeonly buffer LightGrid
+{
+	uvec2 opaque[];
+} LightGridOpaque;
+
+layout(set = 1, binding = 2) writeonly buffer LightList
+{
+	uint index[];
+} LightIndexListOpaque;
+
+
+// NOTE: this constant is larger than max_lights_per_tile in light culling module (defined to be 256)
+//       This is because 256 is the maximum for the *average* number of lights per tile, whereas
+//       this constant is the maximum lights per tile
+//const uint MaxLightPerGroup = 1024;
+layout(constant_id = 0) const uint MaxLightPerGroup = 1024;
 
 shared uint _minDepthVS;									// tile's minimum depth in view-space
 shared uint _maxDepthVS;									// tile's maximum depth in view-space
@@ -61,13 +320,6 @@ shared uint _lightIndexList[MaxLightPerGroup];				// indices of lights that affe
 //
 // NOTE: TILE_SIZE is defined by the engine at compile-time.
 
-vec4 ClipToView(vec4 clip, mat4 inverseProjection)
-{
-	vec4 view = inverseProjection * clip;
-	view /= view.w;
-	return view;
-}
-
 void main()
 {
 	// INITIALIZATION SECTION
@@ -79,80 +331,84 @@ void main()
 		_lightCount = 0;
 	}
 
+	groupMemoryBarrier();
+	barrier();
+
 	uint i = 0, index = 0;  // reusable index variables
 
 	// DEPTH MIN/MAX SECTION
-	barrier();
-
 	ivec2 texCoord = ivec2(gl_GlobalInvocationID.xy);
-	const float depth = imageLoad(worldTex, texCoord).w;
-	const float depthVS = ClipToView(vec4(0.0, 0.0, depth, 1.0), global_data.ubo.InvProjection).z;
+	float depth = texelFetch(worldTex, texCoord, 0).r;
+	// vec2 texCoord = vec2(gl_GlobalInvocationID.x / global_data.ubo.ViewWidth, gl_GlobalInvocationID.y / global_data.ubo.ViewHeight); // gl_GlobalInvocationID.xy;
+	// float depth = texture(worldTex, texCoord).r;
+	float depthVS = ClipToView(vec4(0.0, 0.0, depth, 1.0), global_data.ubo.InvProjection).z;
 
 	// Negate depth because of right-handed coorinates (negative z-axis)
     // This make the comparisons easier to understand
-	const uint z = floatBitsToUint(-depthVS);
+	uint z = floatBitsToUint(-depthVS);
 
-	if(depth != 0) // don't include far plane
+	if(depth != 0.0) // don't include far plane
 	{
-		_minDepthVS = atomicMin(_minDepthVS, z);
-		_maxDepthVS = atomicMax(_maxDepthVS, z);
+		atomicMin(_minDepthVS, z);
+		atomicMax(_maxDepthVS, z);
 	}
 
 	// LIGHT CULLING SECTION
+	groupMemoryBarrier();
 	barrier();
 
-	const uint gridIndex = gl_WorkGroupID.x + (gl_WorkGroupID.y * (global_data.ubo.ViewWidth / 16));
-	const Frustum frustum = inFrustum.Frustums[gridIndex];
+	uint gridIndex = gl_WorkGroupID.x + (gl_WorkGroupID.y * (global_data.ubo.ViewWidth / 16));
+	Frustum frustum = inFrustum.Frustums[gridIndex];
 	// Negate view-space min/max again.
-	const float minDepthVS = -uintBitsToFloat(_minDepthVS);
-	const float maxDepthVS = -uintBitsToFloat(_maxDepthVS);
+	float minDepthVS = -uintBitsToFloat(_minDepthVS);
+	float maxDepthVS = -uintBitsToFloat(_maxDepthVS);
 
-	int begin = int(gl_LocalInvocationIndex);
-	for(int i = begin; i < light_Nums.light_num; i += 16 * 16)
+	// uint begin = uint(gl_LocalInvocationIndex);
+	for(i = gl_LocalInvocationIndex; i < light_Nums.light_num; i += gl_WorkGroupSize.x * gl_WorkGroupSize.y)
 	{
-		const LightCullingLightInfo light = inLights.LightInfo[i];
-		const vec3 lightPositionVS = (global_data.ubo.View * vec4(light.Position, 1.0)).xyz;
+		LightCullingLightInfo light = inLights.LightInfo[i];
+		vec3 lightPositionVS = (global_data.ubo.View * vec4(light.Position, 1.0)).xyz;
 
 		if(light.Type == 1)
 		{
-			const Sphere sphere = Sphere(lightPositionVS, light.Range);
+			Sphere sphere = Sphere(lightPositionVS, light.Range);
 			if(SphereInsideFrustum(sphere, frustum, minDepthVS, maxDepthVS))
 			{
-				index = _lightCount;
-				_lightCount = atomicAdd(_lightCount, 1);
+				index = atomicAdd(_lightCount, 1);
 				if(index < MaxLightPerGroup) _lightIndexList[index] = i;
 			}
 		}
 		else if(light.Type == 2)
 		{
-			const vec3 lightDirectionVS = (global_data.ubo.View * vec4(light.Direction, 0.0)).xyz;
-			const Cone cone = Cone(lightPositionVS, light.Range, lightDirectionVS, light.ConeRadius);
+			vec3 lightDirectionVS = (global_data.ubo.View * vec4(light.Direction, 0.0)).xyz;
+			Cone cone = Cone(lightPositionVS, light.Range, lightDirectionVS, light.ConeRadius);
 			if(ConeInsideFrustum(cone, frustum, minDepthVS, maxDepthVS))
 			{
-				index = _lightCount;
-				_lightCount = atomicAdd(_lightCount, 1);
+				index = atomicAdd(_lightCount, 1);
 				if(index < MaxLightPerGroup) _lightIndexList[index] = i;
 			}
 		}
 	}
 
 	// UPDATE LIGHT GRID SECTION
-    barrier();
+    groupMemoryBarrier();
+	barrier();
 
-	const uint lightCount = min(_lightCount, MaxLightPerGroup - 1);
+	uint lightCount = min(_lightCount, MaxLightPerGroup);
 
 	if(gl_LocalInvocationIndex == 0)
 	{
-		_lightIndexStartOffset = LightIndexCounter.counter[0];
-		LightIndexCounter.counter[0] = atomicAdd(LightIndexCounter.counter[0], lightCount);
-		LightGridOpaque.opaque[gridIndex] = vec2(_lightIndexStartOffset, lightCount);
+		_lightIndexStartOffset = atomicAdd(LightIndexCounter.counter[0], lightCount);
+		LightGridOpaque.opaque[gridIndex] = uvec2(_lightIndexStartOffset, lightCount);
 	}
 
 	// UPDATE LIGHT INDEX LIST SECTION
-    barrier();
+    groupMemoryBarrier();
+	barrier();
 
-	for(int i = begin; i < lightCount; i += 16 * 16)
+	for(i = gl_LocalInvocationIndex; i < lightCount; i += gl_WorkGroupSize.x * gl_WorkGroupSize.y)
 	{
-		LightIndexListOpaque.index[_lightIndexStartOffset + 1] = _lightIndexList[i];
+		LightIndexListOpaque.index[_lightIndexStartOffset + i] = _lightIndexList[i];
 	}
 }
+#endif

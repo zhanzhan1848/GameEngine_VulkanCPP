@@ -2,6 +2,8 @@
 #error Do not include this header directly in shader files. Only include this file via Common.h
 #endif
 
+#define USE_BOUNDING_SPHERES 1
+
 struct GlobalShaderData
 {
 	mat4		View;
@@ -11,10 +13,10 @@ struct GlobalShaderData
 	mat4		InvViewProjection;
 
 	vec3		CameraPositon;
-	int			ViewWidth;
+	uint		ViewWidth;
 
 	vec3		CameraDirection;
-	int			ViewHeight;
+	uint		ViewHeight;
 
 	float		NearPlane;
 	float		FarPlane;
@@ -50,6 +52,14 @@ struct Cone
 	float		Radius;
 };
 
+#if USE_BOUNDING_SPHERES
+// Frustum cone in view space
+struct Frustum
+{
+    vec3	ConeDirection;
+    float	UnitRadius;
+};
+#else
 // View frustum planes ( in view space)
 // Plane order: left, right, top, bottom
 // Front and back planes are computed in light culling compute shader
@@ -57,6 +67,7 @@ struct Frustum
 {
 	Plane		Planes[4];
 };
+#endif
 
 #ifndef __cplusplus
 struct ComputeShaderInput
@@ -76,10 +87,14 @@ struct LightCullingLightInfo
 	float		Range;
 
 	vec3		Direction;
+#if USE_BOUNDING_SPHERES
+	float		CosPenumbra;
+#else
 	float		ConeRadius;
 
-	int			Type;
-	vec3		_pad;
+	vec3		_pading;
+	uint		Type;
+#endif
 };
 
 // Contains light data that's formatted and ready to be copy
@@ -90,16 +105,19 @@ struct LightParameters
 	float		Intensity;
 
 	vec3		Direction;
-	int			Type;
-
-	vec3		Color;
 	float		Range;
 
-	vec3		Attenuation;
+
+	vec3		Color;
 	float		CosUmbra;			// Cosine of the half angle of umbra
 
+	vec3		Attenuation;
 	float		CosPenumbra;		// Cosine of the half angle of penumbra
-	vec3		_pad;
+
+#if !USE_BOUNDING_SPHERES
+	vec3		_pading;
+	uint		Type;
+#endif
 };
 
 struct DirectionalLightParameters
@@ -108,7 +126,7 @@ struct DirectionalLightParameters
 	float	Intensity;
 
 	vec3	Color;
-	float	_pad;
+	float	_pading;
 };
 
 #ifdef __cplusplus

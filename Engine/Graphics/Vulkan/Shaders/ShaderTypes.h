@@ -12,6 +12,7 @@ namespace primal::graphics::vulkan::glsl
 	using ivec4 = math::u32v4;
 	using ivec3 = math::u32v3;
 	using ivec2 = math::u32v2;
+	using uint = u32;
 	
 #include "CommonTypes.glsli"
 }

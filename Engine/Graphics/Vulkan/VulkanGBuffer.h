@@ -6,14 +6,6 @@ namespace primal::graphics::vulkan
 {
 	class vulkan_surface;
 
-	class vulkan_base_pass
-	{
-	public:
-		virtual void createRenderpassAndFramebuffer() = 0;
-		virtual void createPoolAndLayout() = 0;
-		virtual void runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface* surface) = 0;
-	};
-
 	class vulkan_geometry_pass
 	{
 	public:
@@ -25,7 +17,7 @@ namespace primal::graphics::vulkan
 
 		~vulkan_geometry_pass();
 
-		void setSize(u32 width, u32 height) { _width = width; _height = height; }
+		void setSize(u32 width, u32 height);
 
 		void createUniformBuffer();
 
@@ -35,9 +27,13 @@ namespace primal::graphics::vulkan
 
 		void setupPoolAndLayout();
 
+		void create_command_buffer();
+
 		void runRenderpass(vulkan_cmd_buffer cmd_buffer, vulkan_surface* surface);
 
-		void submit(vulkan_cmd_buffer cmd_buffer, VkQueue graphics_queue);
+		void run(vulkan_surface* surface);
+
+		void submit(vulkan_surface * surface);
 
 
 		[[nodiscard]] utl::vector<id::id_type> getTexture() { return _image_ids; }
@@ -67,9 +63,19 @@ namespace primal::graphics::vulkan
 		id::id_type										_pipeline_layout_id;
 		VkSemaphore										_signal_semaphore;
 		VkSemaphore										_wait_semaphore;
+		VkQueue											_graphics_queue;
+
+		utl::vector<vulkan_cmd_buffer>					_cmd_buffers;
+		utl::vector<vulkan_fence>						_draw_fences;
+		vulkan_fence**									_fences_in_flight;
 
 		// Output
 		utl::vector<id::id_type>						_image_ids;
+	private:
+		void reset_fence(VkDevice device, vulkan_fence& fence);
+		bool wait_for_fence(VkDevice device, vulkan_fence& fence, u64 timeout);
+		void destroy_fence(VkDevice device, vulkan_fence& fence);
+		bool create_fence(VkDevice device, bool signaled, vulkan_fence& fence);
 	};
 
 	class vulkan_final_pass
@@ -103,4 +109,14 @@ namespace primal::graphics::vulkan
 		id::id_type										_pipeline_layout_id;
 		id::id_type										_light_descriptor_set_layout_id;
 	};
+
+
+	void geometry_initialize(u32 width, u32 height);
+	void geometry_run(vulkan_surface* surface);
+	void geometry_submit();
+	VkSemaphore geometry_semaphore();
+	id::id_type geometry_descriptor_pool();
+	id::id_type geometry_descriptor_setlayout();
+	id::id_type geometry_renderpass();
+	id::id_type geometry_pipeline_layout();
 }

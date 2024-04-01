@@ -25,7 +25,7 @@ namespace primal::graphics::vulkan::data
 		VkDeviceMemory				gpu_memory;
 
 		void*						data{ nullptr };
-		u64							size;
+		u32							size;
 		u32							flags;
 		type						own_type;
 
@@ -34,7 +34,7 @@ namespace primal::graphics::vulkan::data
 		~vulkan_buffer();
 
 		void resize(u64 size);
-		void update(const void* const data, u64 size);
+		void update(const void* const data, size_t size, u32 offset_count = 0);
 		void convert_to_local_device_buffer();
 		void release();
 

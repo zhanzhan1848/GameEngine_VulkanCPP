@@ -21,4 +21,5 @@ namespace primal::graphics::vulkan::light
 	id::id_type non_cullable_light_buffer_id();
 	id::id_type cullable_light_buffer_id();
 	id::id_type culling_info_buffer_id();
+	id::id_type bounding_spheres_buffer_id();
 }

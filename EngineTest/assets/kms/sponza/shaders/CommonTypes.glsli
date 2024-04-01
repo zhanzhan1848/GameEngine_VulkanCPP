@@ -11,10 +11,10 @@ struct GlobalShaderData
 	mat4		InvViewProjection;
 
 	vec3		CameraPositon;
-	int			ViewWidth;
+	uint		ViewWidth;
 
 	vec3		CameraDirection;
-	int			ViewHeight;
+	uint		ViewHeight;
 
 	float		NearPlane;
 	float		FarPlane;
@@ -61,10 +61,10 @@ struct Frustum
 #ifndef __cplusplus
 struct ComputeShaderInput
 {
-    vec3		GroupID;           //gl_WorkGroupID				---- 3D index of the thread group in the dispatch.
-    vec3		GroupThreadID;     //gl_LocalInvocationID		---- 3D index of local thread ID in a thread group.
-    vec3		DispatchThreadID;  //gl_GlobalInvocationID		---- 3D index of global thread ID in the dispatch.
-    uint		GroupIndex;        //gl_LocalInvocationIndex		---- Flattened local index of the thread within a thread group.
+    vec3		GroupID;           //gl_WorkGroupID				SV_GroupID           ---- 3D index of the thread group in the dispatch.
+    vec3		GroupThreadID;     //gl_LocalInvocationID		SV_GroupThreadID     ---- 3D index of local thread ID in a thread group.
+    vec3		DispatchThreadID;  //gl_GlobalInvocationID		SV_DispatchThreadID  ---- 3D index of global thread ID in the dispatch.
+    uint		GroupIndex;        //gl_LocalInvocationIndex	SV_GroupIndex        ---- Flattened local index of the thread within a thread group.
 };
 #endif
 
@@ -78,8 +78,8 @@ struct LightCullingLightInfo
 	vec3		Direction;
 	float		ConeRadius;
 
-	int			Type;
-	vec3		_pad;
+	vec3		_pading;
+	uint		Type;
 };
 
 // Contains light data that's formatted and ready to be copy
@@ -90,7 +90,7 @@ struct LightParameters
 	float		Intensity;
 
 	vec3		Direction;
-	int			Type;
+	uint		Type;
 
 	vec3		Color;
 	float		Range;
@@ -98,8 +98,8 @@ struct LightParameters
 	vec3		Attenuation;
 	float		CosUmbra;			// Cosine of the half angle of umbra
 
+	vec3		_pading;
 	float		CosPenumbra;		// Cosine of the half angle of penumbra
-	vec3		_pad;
 };
 
 struct DirectionalLightParameters
@@ -108,7 +108,7 @@ struct DirectionalLightParameters
 	float	Intensity;
 
 	vec3	Color;
-	float	_pad;
+	float	_pading;
 };
 
 #ifdef __cplusplus

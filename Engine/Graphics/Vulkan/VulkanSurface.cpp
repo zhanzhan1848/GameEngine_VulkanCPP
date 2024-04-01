@@ -253,6 +253,8 @@ vulkan_surface::create(VkInstance instance)
     _final.setSize(this->width(), this->height());
 
     core::create_graphics_command((u32)_swapchain.images.size());
+    _geometry.create_command_buffer();
+    //geometry_initialize(this->width(), this->height());
 
     light::initialize();
 
@@ -294,7 +296,7 @@ vulkan_surface::create(VkInstance instance)
             transform::init_info sponza_transform_info{};
             math::v3 sponza_rotation{ 0.f, 0.f, 0.f };
             math::v3 sponza_position{ 0.f, 0.f, 0.f };
-            math::v3 sponza_scale{ 0.01f, 0.01f, 0.01f };
+            math::v3 sponza_scale{ 0.02f, 0.02f, 0.02f };
             DirectX::XMVECTOR sponza_quat{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&sponza_rotation)) };
             math::v4a sponza_rot_quat;
             DirectX::XMStoreFloat4A(&sponza_rot_quat, sponza_quat);
@@ -355,13 +357,15 @@ vulkan_surface::create(VkInstance instance)
     }
 
     _scene.createUniformBuffer();
-    compute::initialize();
+    compute::initialize(&_geometry);
 
 
     _scene.createPipeline(data::get_data<VkRenderPass>(_geometry.getRenderpass()), data::get_data<VkPipelineLayout>(_geometry.getPipelineLayout()));
+    //_scene.createPipeline(data::get_data<VkRenderPass>(geometry_renderpass()), data::get_data<VkPipelineLayout>(geometry_pipeline_layout()));
     
     
     _scene.createDescriptorSets(data::get_data<VkDescriptorPool>(_geometry.getDescriptorPool()), data::get_data<VkDescriptorSetLayout>(_geometry.getDescriptorSetLayout()));
+    //_scene.createDescriptorSets(data::get_data<VkDescriptorPool>(geometry_descriptor_pool()), data::get_data<VkDescriptorSetLayout>(geometry_pipeline_layout()));
     _final.setupDescriptorSets(_geometry.getTexture(), _scene.getUboID());
     _final.setupPipeline(_renderpass);
 }
@@ -550,6 +554,12 @@ vulkan_surface::create_swapchain()
     if (!core::detect_push_descriptor(core::physical_device()))
     {
         ERROR_MSSG("Failed to use push descriptor set feature...");
+        return false;
+    }
+
+    if (!core::detect_subgroup(core::physical_device()))
+    {
+        ERROR_MSSG("Failed to use subgroup for compute shader feature...");
         return false;
     }
 

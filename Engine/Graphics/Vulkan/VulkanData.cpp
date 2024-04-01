@@ -298,11 +298,11 @@ namespace primal::graphics::vulkan::data
 			break;
 		case primal::graphics::vulkan::data::vulkan_buffer::static_uniform_buffer:							this->flags = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 			break;
-		case primal::graphics::vulkan::data::vulkan_buffer::per_frame_update_uniform_buffer:				this->flags = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+		case primal::graphics::vulkan::data::vulkan_buffer::per_frame_update_uniform_buffer:				this->flags = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 			break;
 		case primal::graphics::vulkan::data::vulkan_buffer::static_storage_buffer:							this->flags = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 			break;
-		case primal::graphics::vulkan::data::vulkan_buffer::per_frame_update_storage_buffer:				this->flags = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		case primal::graphics::vulkan::data::vulkan_buffer::per_frame_update_storage_buffer:				this->flags = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 			break;
 		}
 
@@ -327,7 +327,7 @@ namespace primal::graphics::vulkan::data
 		}
 	}
 
-	void vulkan_buffer::update(const void* const data, size_t size)
+	void vulkan_buffer::update(const void* const data, size_t size, u32 offset_count)
 	{
 		assert(this->cpu_address);
 		assert(size <= this->size);
