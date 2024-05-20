@@ -243,6 +243,7 @@
     <ClInclude Include="Graphics\GraphicsPlatform.h" />
     <ClInclude Include="Graphics\GraphicsPlatformInterface.h" />
     <ClInclude Include="Graphics\Renderer.h" />
+    <ClInclude Include="Graphics\Utilities\BVH.hpp" />
     <ClInclude Include="Graphics\Vulkan\Shaders\Common.h" />
     <ClInclude Include="Graphics\Vulkan\Shaders\ShaderTypes.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanCamera.h" />

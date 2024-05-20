@@ -183,7 +183,7 @@ void main()
 		//	
 		//	vec3 L = normalize(lightPos - fragPos);
 		//	vec3 H = normalize(V + L);
-		//	float distance = length(lightPos - fragPos);
+		//	float distance = distance(lightPos, fragPos); // length(lightPos - fragPos);
 		//	float attenuation = max(dot(directionalLight.param[i].Direction, normal), 0.0); //1.0 / (distance * distance);
 		//	vec3 radiance = directionalLight.param[i].Color * attenuation * directionalLight.param[i].Intensity * 5.0;
 		//	

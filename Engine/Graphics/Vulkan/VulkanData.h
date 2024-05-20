@@ -84,4 +84,7 @@ namespace primal::graphics::vulkan::data
 }
 
 
-
+namespace primal::graphics::vulkan
+{
+	
+}

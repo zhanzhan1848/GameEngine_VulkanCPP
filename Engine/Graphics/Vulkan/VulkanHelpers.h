@@ -7,7 +7,6 @@ namespace primal::graphics::vulkan
 {
 	namespace descriptor
 	{
-		VkDescriptorPoolSize descriptorPoolSize(VkDescriptorType type, u32 descriptorCount);
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, VkDescriptorBufferInfo * buffer);
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, VkDescriptorType dType, const VkDescriptorImageInfo* const image);
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type, VkDescriptorSet& set, u32 binding, u32 count, VkDescriptorType dType, const VkDescriptorImageInfo* const image);
@@ -53,4 +52,52 @@ namespace primal::graphics::vulkan
 	utl::vector<VkVertexInputAttributeDescription> getVertexInputAttributeDescriptor();
 
 	void setImageLayout(VkCommandBuffer cmdbuffer, VkImage image, VkImageLayout oldImageLayout, VkImageLayout newImageLayout, VkImageSubresourceRange subresourceRange, VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+
+	struct Engine_Descriptor_Pool_Size : public VkDescriptorPoolSize
+	{
+		Engine_Descriptor_Pool_Size(VkDescriptorType type, u32 count) : VkDescriptorPoolSize{ type, count } {}
+		~Engine_Descriptor_Pool_Size() = default;
+	};
+
+	struct Engine_Descriptor_Pool_Info : public VkDescriptorPoolCreateInfo
+	{
+		Engine_Descriptor_Pool_Info() :
+			VkDescriptorPoolCreateInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+			nullptr,
+			VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
+			0,
+			0,
+			nullptr } {}
+		Engine_Descriptor_Pool_Info(u32 max_set) :
+			VkDescriptorPoolCreateInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+			nullptr,
+			VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
+			max_set,
+			0,
+			nullptr } {}
+		Engine_Descriptor_Pool_Info(u32 max_set, utl::vector<Engine_Descriptor_Pool_Size> size_info) : 
+			VkDescriptorPoolCreateInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+			nullptr, 
+			VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
+			max_set,
+			(u32)size_info.size(),
+			size_info.data() } {}
+		~Engine_Descriptor_Pool_Info() = default;
+
+		Engine_Descriptor_Pool_Info& add(u32 max_set)
+		{
+			this->maxSets = max_set;
+			return *this;
+		}
+
+		Engine_Descriptor_Pool_Info& add(const Engine_Descriptor_Pool_Size& pSize)
+		{
+			utl::vector<Engine_Descriptor_Pool_Size> sizes;
+			sizes.emplace_back(Engine_Descriptor_Pool_Size(this->pPoolSizes->type, this->pPoolSizes->descriptorCount));
+			sizes.emplace_back(pSize);
+			this->poolSizeCount = sizes.size();
+			this->pPoolSizes = sizes.data();
+			return *this;
+		}
+	};
 }

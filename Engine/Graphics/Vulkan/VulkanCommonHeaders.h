@@ -92,17 +92,6 @@ struct vulkan_fence
 };
 
 // Own param
-struct baseBuffer
-{
-    VkBuffer    buffer;
-    VkDeviceMemory memory;
-};
-
-struct uniformBuffer : baseBuffer
-{
-    void*   mapped;
-};
-
 struct Vertex
 {
     math::v3 pos;

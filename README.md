@@ -1,5 +1,6 @@
-# PrimalPlus
-Contains platform and API specific code written by Primal community members.
+![image](cullable_lights_result.png)
+
+This is the result, rendering with Vulkan API and 17000+ cullable lights.
 
 # How to use
 The general idea is to simply copy the files from this repository over on top of your Primal Engine code and it should work. It's possible you'll need to install platform-specific SDKs/APIs such as Vulkan SDK.
@@ -32,6 +33,3 @@ Note: The Editor is currently Windows only, so this will only build the engine, 
 
 ## Caveats
 We're using Premake 5.0 to generate C++ project files. However, it doesn't cover all options offered by Visual Studio C++ compiler and linker. When necessary, you can tweak the project settings afterwards to set any options that are missing.
-
-# How to contribute
-In order to make it as easy as possible for everyone to integrate the code in their engine, contributions should use the same folder structure and naming conventions as Primal Engine's code base. We're looking forward to seeing your contributions.

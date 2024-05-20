@@ -447,9 +447,9 @@ namespace primal::graphics::vulkan
 				utl::vector<VkDescriptorPoolSize> poolSize;
 
 				if (_input_buffers.size() > 0)
-					poolSize.emplace_back(descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count * 3 * _input_buffers.size())));
+					poolSize.emplace_back(Engine_Descriptor_Pool_Size(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count * 3 * _input_buffers.size())));
 				if (_input_images.size() > 0)
-					poolSize.emplace_back(descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<u32>(frame_buffer_count * 3 * _input_images.size())));
+					poolSize.emplace_back(Engine_Descriptor_Pool_Size(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<u32>(frame_buffer_count * 3 * _input_images.size())));
 
 				VkDescriptorPoolCreateInfo poolInfo;
 				poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -967,8 +967,8 @@ namespace primal::graphics::vulkan
 	void vulkan_geometry_pass::setupPoolAndLayout()
 	{
 		std::vector<VkDescriptorPoolSize> poolSize = {
-			descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count * 3) + (u32)100),
-			descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<u32>(frame_buffer_count) + (u32)100),
+			Engine_Descriptor_Pool_Size(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frame_buffer_count * 3 + 100),
+			Engine_Descriptor_Pool_Size(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, frame_buffer_count * 3 + 100)
 		};
 
 		VkDescriptorPoolCreateInfo poolInfo;
@@ -1274,10 +1274,10 @@ namespace primal::graphics::vulkan
 	void vulkan_final_pass::setupDescriptorSets(utl::vector<id::id_type> image_id, id::id_type ubo_id)
 	{
 		std::vector<VkDescriptorPoolSize> poolSize = {
-			descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<u32>(frame_buffer_count * 3)),
-			descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<u32>(image_id.size()) + 10),
-			descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, static_cast<u32>(image_id.size()) + 10)
-			//descriptor::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, static_cast<u32>(image_id.size()))
+			Engine_Descriptor_Pool_Size(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frame_buffer_count * 3),
+			Engine_Descriptor_Pool_Size(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, image_id.size() + 10),
+			Engine_Descriptor_Pool_Size(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, image_id.size() + 10)
+
 		};
 
 		VkDescriptorPoolCreateInfo poolInfo;
@@ -1293,8 +1293,6 @@ namespace primal::graphics::vulkan
 			descriptor::descriptorSetLayoutBinding(0, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
 			descriptor::descriptorSetLayoutBinding(1, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, 4),
 			descriptor::descriptorSetLayoutBinding(2, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
-			/*descriptor::descriptorSetLayoutBinding(3, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
-			descriptor::descriptorSetLayoutBinding(4, VK_SHADER_STAGE_FRAGMENT_BIT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),*/
 		};
 
 		VkDescriptorSetLayoutCreateInfo descriptorLayout = descriptor::descriptorSetLayoutCreate(setLayoutBindings);

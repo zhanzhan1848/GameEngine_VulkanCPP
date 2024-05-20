@@ -12,16 +12,6 @@ namespace primal::graphics::vulkan
 
     namespace descriptor
     {
-		VkDescriptorPoolSize descriptorPoolSize(
-			VkDescriptorType type,
-			u32 descriptorCount)
-		{
-			VkDescriptorPoolSize descriptorPoolSize;
-			descriptorPoolSize.type = type;
-			descriptorPoolSize.descriptorCount = descriptorCount;
-			return descriptorPoolSize;
-		}
-
 		VkWriteDescriptorSet setWriteDescriptorSet(VkStructureType type,
 			VkDescriptorSet& set,
 			u32 binding,

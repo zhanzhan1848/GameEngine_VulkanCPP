@@ -16,7 +16,7 @@ namespace primal::graphics::d3d12::d3dx
 
 		const D3D12_HEAP_PROPERTIES upload_heap
 		{
-			D3D12_HEAP_TYPE_UPLOAD,								// Type;
+			D3D12_HEAP_TYPE_UPLOAD,									// Type;
 			D3D12_CPU_PAGE_PROPERTY_UNKNOWN,						// CPUPageProperty;
 			D3D12_MEMORY_POOL_UNKNOWN,								// MemoryPoolProperty;
 			0,														// CreationModeMask;

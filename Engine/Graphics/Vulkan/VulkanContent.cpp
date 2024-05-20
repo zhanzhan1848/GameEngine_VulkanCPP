@@ -134,14 +134,15 @@ namespace primal::graphics::vulkan
 
 			_texture.format = imageFormat;
 
-			baseBuffer staging;
-			createBuffer(core::logical_device(), imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging.buffer, staging.memory);
+			VkBuffer stagingBuffer;
+			VkDeviceMemory stagingMemory;
+			createBuffer(core::logical_device(), imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingMemory);
 			//vkBindBufferMemory(core::logical_device(), staging.buffer, staging.memory, 0);
 
 			void* data;
-			vkMapMemory(core::logical_device(), staging.memory, 0, imageSize, 0, &data);
+			vkMapMemory(core::logical_device(), stagingMemory, 0, imageSize, 0, &data);
 			memcpy(data, pixels, static_cast<size_t>(imageSize));
-			vkUnmapMemory(core::logical_device(), staging.memory);
+			vkUnmapMemory(core::logical_device(), stagingMemory);
 
 			stbi_image_free(pixels);
 
@@ -158,11 +159,11 @@ namespace primal::graphics::vulkan
 
 			create_image(core::logical_device(), &image_info, _texture);
 			transitionImageLayout(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), _texture.image, imageFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-			copyBufferToImage(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), staging.buffer, _texture.image, static_cast<u32>(texWidth), static_cast<u32>(texHeight));
+			copyBufferToImage(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), stagingBuffer, _texture.image, static_cast<u32>(texWidth), static_cast<u32>(texHeight));
 			transitionImageLayout(core::logical_device(), core::graphics_family_queue_index(), core::get_current_command_pool(), _texture.image, imageFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-			vkDestroyBuffer(core::logical_device(), staging.buffer, nullptr);
-			vkFreeMemory(core::logical_device(), staging.memory, nullptr);
+			vkDestroyBuffer(core::logical_device(), stagingBuffer, nullptr);
+			vkFreeMemory(core::logical_device(), stagingMemory, nullptr);
 
 			VkPhysicalDeviceProperties properties;
 			vkGetPhysicalDeviceProperties(core::physical_device(), &properties);
@@ -493,15 +494,15 @@ namespace primal::graphics::vulkan
 		{
 			VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = descriptor::pipelineInputAssemblyStateCreate(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, VK_FALSE);
 			VkPipelineViewportStateCreateInfo viewportState = descriptor::pipelineViewportStateCreate(1, 1);
-			VkPipelineRasterizationStateCreateInfo rasterizationState = descriptor::pipelineRasterizationStateCreate(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+			VkPipelineRasterizationStateCreateInfo rasterizationState = descriptor::pipelineRasterizationStateCreate(VK_POLYGON_MODE_FILL, VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_COUNTER_CLOCKWISE);
 			VkPipelineMultisampleStateCreateInfo multisampleState = descriptor::pipelineMultisampleStateCreate(VK_SAMPLE_COUNT_1_BIT);
 			// ¡ý two for forward render(single color attachment)
 			// VkPipelineColorBlendAttachmentState blendAttachmentState = descriptor::pipelineColorBlendAttachmentState(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT, VK_FALSE);
 			// VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(1, blendAttachmentState);
-			std::vector<VkPipelineColorBlendAttachmentState> blendAttachmentState = { descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE),
-																					descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE),
-																					descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE),
-																					descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE), };
+			std::vector<VkPipelineColorBlendAttachmentState> blendAttachmentState = { descriptor::pipelineColorBlendAttachmentState(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT, VK_FALSE),
+																					descriptor::pipelineColorBlendAttachmentState(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT, VK_FALSE),
+																					descriptor::pipelineColorBlendAttachmentState(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT, VK_FALSE),
+																					descriptor::pipelineColorBlendAttachmentState(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT, VK_FALSE), };
 			VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(static_cast<u32>(blendAttachmentState.size()), *blendAttachmentState.data());
 
 
@@ -578,7 +579,6 @@ namespace primal::graphics::vulkan
 			{
 				remove_model_instance(instance);
 			}
-			// _shadowmap.~vulkan_shadowmapping();
 		}
 
 		id::id_type vulkan_scene::add_model_instance(game_entity::entity entity, id::id_type model_id)
@@ -597,7 +597,6 @@ namespace primal::graphics::vulkan
 
 		void vulkan_scene::add_camera(camera_init_info info)
 		{
-			//camera::vulkan_camera cam(info);
 			_camera_ids.emplace_back(graphics::create_camera(info).get_id());
 			graphics::vulkan::camera::get(_camera_ids.back()).update();
 		}
@@ -668,88 +667,12 @@ namespace primal::graphics::vulkan
 			}
 		}
 
-		/*void vulkan_scene::createDeferDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout)
-		{
-			VkDescriptorSetAllocateInfo allocInfo;
-
-			allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-			allocInfo.pNext = VK_NULL_HANDLE;
-			allocInfo.descriptorPool = pool;
-			allocInfo.descriptorSetCount = 1;
-			allocInfo.pSetLayouts = &layout;
-
-			_descriptor_set_id = descriptor::add(allocInfo);
-
-			auto descriptorSet = descriptor::get(_descriptor_set_id);
-			std::vector<VkWriteDescriptorSet> descriptorWrites;
-
-			VkDescriptorImageInfo imageInfo1;
-			imageInfo1.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			imageInfo1.imageView = textures::get_texture(_offscreen.getTexture()[0]).getTexture().view;
-			imageInfo1.sampler = textures::get_texture(_offscreen.getTexture()[0]).getTexture().sampler;
-			descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo1));
-
-			VkDescriptorImageInfo imageInfo2;
-			imageInfo2.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			imageInfo2.imageView = textures::get_texture(_offscreen.getTexture()[1]).getTexture().view;
-			imageInfo2.sampler = textures::get_texture(_offscreen.getTexture()[1]).getTexture().sampler;
-			descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo2));
-
-			VkDescriptorImageInfo imageInfo3;
-			imageInfo3.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			imageInfo3.imageView = textures::get_texture(_offscreen.getTexture()[2]).getTexture().view;
-			imageInfo3.sampler = textures::get_texture(_offscreen.getTexture()[2]).getTexture().sampler;
-			descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo3));
-
-			VkDescriptorImageInfo imageInfo4;
-			imageInfo4.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			imageInfo4.imageView = textures::get_texture(_offscreen.getTexture()[4]).getTexture().view;
-			imageInfo4.sampler = textures::get_texture(_offscreen.getTexture()[4]).getTexture().sampler;
-			descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo4));
-
-			vkUpdateDescriptorSets(core::logical_device(), static_cast<u32>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
-		}*/
-
 		void vulkan_scene::createPipeline(VkRenderPass render_pass, VkPipelineLayout layout)
 		{
 			for (auto& instance : _instance_ids)
 			{
 				instance_models[instance].createPipeline(layout, render_pass);
 			}
-		}
-
-		void vulkan_scene::createDeferPipeline(VkRenderPass render_pass, VkPipelineLayout layout)
-		{
-			VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = descriptor::pipelineInputAssemblyStateCreate(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, VK_FALSE);
-			VkPipelineRasterizationStateCreateInfo rasterizationState = descriptor::pipelineRasterizationStateCreate(VK_POLYGON_MODE_FILL, VK_CULL_MODE_FRONT_BIT);
-			VkPipelineColorBlendAttachmentState blendAttachmentState = descriptor::pipelineColorBlendAttachmentState(0xf, VK_FALSE);
-			VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(1, blendAttachmentState);
-			VkPipelineDepthStencilStateCreateInfo depthStencilState = descriptor::pipelineDepthStencilStateCreateInfo(VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_COMPARE_OP_LESS_OR_EQUAL);
-			VkPipelineViewportStateCreateInfo viewportState = descriptor::pipelineViewportStateCreate(1, 1, 0);
-			VkPipelineMultisampleStateCreateInfo multisampleState = descriptor::pipelineMultisampleStateCreate();
-			std::vector<VkDynamicState> dynamicStateEnables = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-			VkPipelineDynamicStateCreateInfo dynamicState = descriptor::pipelineDynamicStateCreate(dynamicStateEnables);
-			VkPipelineVertexInputStateCreateInfo emptyVertexInputState{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO , nullptr, 0, 0, nullptr, 0, nullptr };
-			std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages;
-			shaderStages[0] = shaders::get_shader(shaders::add("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/fullscreen.vert.spv", shader_type::vertex)).getShaderStage();
-			shaderStages[1] = shaders::get_shader(shaders::add("C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/composition.frag.spv", shader_type::pixel)).getShaderStage();
-
-			VkGraphicsPipelineCreateInfo pipelineCreateInfo{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-			pipelineCreateInfo.layout = layout;
-			pipelineCreateInfo.pNext = nullptr;
-			pipelineCreateInfo.renderPass = render_pass;
-			pipelineCreateInfo.flags = 0;
-			pipelineCreateInfo.pInputAssemblyState = &inputAssemblyState;
-			pipelineCreateInfo.pRasterizationState = &rasterizationState;
-			pipelineCreateInfo.pColorBlendState = &colorBlendState;
-			pipelineCreateInfo.pMultisampleState = &multisampleState;
-			pipelineCreateInfo.pViewportState = &viewportState;
-			pipelineCreateInfo.pDepthStencilState = &depthStencilState;
-			pipelineCreateInfo.pDynamicState = &dynamicState;
-			pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-			pipelineCreateInfo.pStages = shaderStages.data();
-			pipelineCreateInfo.pVertexInputState = &emptyVertexInputState;
-			_pipeline_id = data::create_data(data::engine_vulkan_data::vulkan_pipeline, static_cast<const void* const>(&pipelineCreateInfo), 0);
 		}
 
 		void vulkan_scene::updateView(frame_info info)
@@ -786,23 +709,6 @@ namespace primal::graphics::vulkan
 				auto pipeline = data::get_data<VkPipeline>(instance_models[instance].getPipelineID());
 
 				vkCmdBindDescriptorSets(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptorSet, 0, nullptr);
-
-				/*VkWriteDescriptorSet write;
-				VkDescriptorBufferInfo lightBuffer;
-				lightBuffer.buffer = data::get_data<data::vulkan_buffer>(light::non_cullable_light_buffer_id()).cpu_address;
-				lightBuffer.offset = 0;
-				lightBuffer.range = data::get_data<data::vulkan_buffer>(light::non_cullable_light_buffer_id()).size;
-				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				write.pNext = nullptr;
-				write.dstSet = 0;
-				write.dstBinding = 0;
-				write.descriptorCount = 1;
-				write.dstArrayElement = 0;
-				write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-				write.pBufferInfo = &lightBuffer;
-				vkCmdPushDescriptorSetKHR(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &write);
-				u32 light_num = light::non_cullable_light_count(0);
-				vkCmdPushConstants(cmd_buffer.cmd_buffer, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32), static_cast<void*>(&light_num));*/
 
 				vkCmdBindPipeline(cmd_buffer.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 				instance_models[instance].flushBuffer(cmd_buffer);
