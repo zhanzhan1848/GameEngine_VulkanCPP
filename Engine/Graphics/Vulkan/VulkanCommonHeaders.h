@@ -245,3 +245,42 @@ __builtin_trap()
         throw std::runtime_error("vkGetDeviceProcAddr failed to find vk"#entry);    \
 }
 #endif // !GET_DEVICE_PROC_ADDR
+
+#ifndef ENGINE_VULKAN_CREATE_DECLARE
+#define ENGINE_VULKAN_CREATE_DECLARE(object, type)                                                                                  \
+	struct Engine_Vulkan_##object##_Info : public Vk##object##CreateInfo                                                            \
+{                                                                                                                                   \
+    Engine_Vulkan_##object##_Info() :  Vk##object##CreateInfo{                                                                      \
+        VK_STRUCTURE_TYPE_##type##_CREATE_INFO,                                                                                     \
+        nullptr } {}                                                                                                                \
+                                                                                                                                    \
+    ~Engine_Vulkan_##object##_Info() = default;                                                                                     \
+};                                                                                                                                  \
+                                                                                                                                    \
+struct Engine_Vulkan_##object##_Deleter                                                                                             \
+{                                                                                                                                   \
+    Engine_Vulkan_##object##_Deleter(VkDevice device) : _device{ device } {}                                                        \
+                                                                                                                                    \
+    void operator()(Vk##object## *pointer) const                                                                                    \
+    {                                                                                                                               \
+        if (pointer != VK_NULL_HANDLE)                                                                                              \
+        {                                                                                                                           \
+            vkDestroy##object##(_device, *pointer, nullptr);                                                                        \
+        }                                                                                                                           \
+    }                                                                                                                               \
+                                                                                                                                    \
+    VkDevice _device;                                                                                                               \
+};                                                                                                                                  \
+                                                                                                                                    \
+class Engine_Vulkan_##object## : public std::unique_ptr<Vk##object##, Engine_Vulkan_##object##_Deleter>                             \
+{                                                                                                                                   \
+public:                                                                                                                             \
+    Engine_Vulkan_##object##(VkDevice device, Engine_Vulkan_##object##_Info info)                                                   \
+        : std::unique_ptr<Vk##object##, Engine_Vulkan_##object##_Deleter>(new Vk##object##,                                         \
+            Engine_Vulkan_##object##_Deleter(device))                                                                               \
+    {                                                                                                                               \
+        VkResult result{ VK_SUCCESS };                                                                                              \
+        VkCall(result = vkCreate##object##(device, &info, nullptr, this->get()), "Failed to create descriptor pool...");            \
+    }                                                                                                                               \
+};
+#endif // !ENGINE_VULKAN_CREATE_DECLARE

@@ -569,6 +569,8 @@
     <ClInclude Include="Simulation\SimulationCommonHeaders.h" />
     <ClInclude Include="TaskScheduler\LockLessMultiReadPipe.h" />
     <ClInclude Include="TaskScheduler\TaskScheduler.h" />
+    <ClInclude Include="Graphics\Utilities\BVH.hpp" />
+    <ClInclude Include="Utilities\Macros.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Components\Entity.cpp">

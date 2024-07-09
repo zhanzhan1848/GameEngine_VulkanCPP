@@ -32,7 +32,7 @@ namespace PrimalEditor.GameProject
     class NewProject : ViewModelBase
     {
         //TODO: get the path from the installation location
-        private readonly string _templatePath = @"C:\Users\27042\Desktop\DX_Test\Primal\PrimalEditor\ProjectTemplates";
+        private readonly string _templatePath = @"C:\Users\zy\Desktop\PrimalMerge\PrimalEngine\PrimalEditor\ProjectTemplates";
         private string _projectName = "NewProject";
         public string ProjectName
         {

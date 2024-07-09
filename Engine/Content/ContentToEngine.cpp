@@ -307,7 +307,7 @@ namespace primal::content
 
 	id::id_type add_shader_group(const u8* const* shaders, u32 num_shaders, const u32* const keys)
 	{
-		assert(shaders && num_shaders, keys);
+		assert(shaders && num_shaders && keys);
 		noexcept_map group;
 		for (u32 i{ 0 }; i < num_shaders; ++i)
 		{

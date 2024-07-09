@@ -368,6 +368,7 @@ namespace primal::graphics::vulkan
 
 		vulkan_model::~vulkan_model()
 		{
+			if (_vertices.data() == nullptr && _indices.data() == nullptr) return;
 			data::remove_data(data::engine_vulkan_data::vulkan_buffer, _vertexBuffer_id);
 			data::remove_data(data::engine_vulkan_data::vulkan_buffer, _indexBuffer_id);
 

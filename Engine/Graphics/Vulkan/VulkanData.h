@@ -82,9 +82,3 @@ namespace primal::graphics::vulkan::data
 	template<typename T>
 	T& get_data(id::id_type id);
 }
-
-
-namespace primal::graphics::vulkan
-{
-	
-}

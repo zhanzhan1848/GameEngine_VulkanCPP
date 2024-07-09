@@ -27,6 +27,16 @@ namespace primal::script {
 			static script_registry reg;
 			return reg;
 		}
+#ifdef USE_WITH_EDITOR
+		utl::vector<std::string>& script_names()
+		{
+			// NOTE: we put this static variable in a function beacuse of
+			//		the initialization order of static data. This way, we can
+			//		be certain that the data is initialized before accessing it.
+			static utl::vector<std::string> names;
+			return names;
+		}
+#endif
 
 		bool exists(script_id id)
 		{
