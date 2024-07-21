@@ -44,6 +44,9 @@
   <ItemGroup>
     <None Include="Graphics\Shader\GLSL\shader.frag" />
     <None Include="Graphics\Shader\GLSL\shader.vert" />
+    <None Include="Resources\TextureEditor\ChannelSelectShader.hlsl">
+      <Generator>MSBuild:Compile</Generator>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
@@ -57,6 +60,7 @@
   <ItemGroup>
     <Resource Include="Resources\ContentBrowser\ListView.png" />
     <Resource Include="Resources\ContentBrowser\TileView.png" />
+    <Resource Include="Resources\ContentBrowser\OpenImportCfg.png" />
   </ItemGroup>
 
   <ItemGroup>
@@ -76,6 +80,11 @@
   <ItemGroup>
     <Resource Include="Resources\ContentBrowser\FolderLarge.png" />
     <Resource Include="Resources\ContentBrowser\FolderSmall.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Resources\TextureEditor\CheckerBoard.jpg" />
+    <Resource Include="Resources\TextureEditor\ChannelSelectShader.cso" />
   </ItemGroup>
 
   <!--<ItemGroup>

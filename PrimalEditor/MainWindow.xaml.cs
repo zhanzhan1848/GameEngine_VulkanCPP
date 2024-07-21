@@ -15,6 +15,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Navigation;
 using PrimalEditor.Content;
+using PrimalEditor.DllWrappers;
 using PrimalEditor.GameProject;
 
 namespace PrimalEditor
@@ -25,13 +26,6 @@ namespace PrimalEditor
     public partial class MainWindow : Window
     {
         public static string PrimalPath { get; private set; }
-
-        public MainWindow()
-        {
-            InitializeComponent();
-            Loaded += OnMainWindowLoaded;
-            Closing += OnMainWindowClosing;
-        }
 
         private void OnMainWindowLoaded(object sender, RoutedEventArgs e)
         {
@@ -79,6 +73,7 @@ namespace PrimalEditor
                 Closing -= OnMainWindowClosing;
                 Project.Current?.Unload();
                 DataContext= null;
+                ContentToolsAPI.ShutDownContentTools();
             }
         }
 
@@ -97,6 +92,13 @@ namespace PrimalEditor
                 ContentWatcher.Reset(project.ContentPath, project.Path);
                 DataContext = project;
             }
+        }
+
+        public MainWindow()
+        {
+            InitializeComponent();
+            Loaded += OnMainWindowLoaded;
+            Closing += OnMainWindowClosing;
         }
     }
 }

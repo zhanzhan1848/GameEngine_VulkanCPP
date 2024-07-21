@@ -19,13 +19,39 @@ namespace PrimalEditor.Content
         Texture,
     }
 
+    interface IAssetImportSettings
+    {
+        void ToBinary(BinaryWriter writer);
+
+        void FromBinary(BinaryReader reader);
+
+        static void CopyImportSettings(IAssetImportSettings fromSettings,  IAssetImportSettings toSettings)
+        {
+            if(fromSettings == null || toSettings == null)
+            {
+                throw new ArgumentNullException("Arguments should not be null.");
+            }
+            else if(fromSettings.GetType() != toSettings.GetType())
+            {
+                throw new ArgumentException("Arguments should be of the same type.");
+            }
+
+            using BinaryWriter writer = new(new MemoryStream());
+            fromSettings.ToBinary(writer);
+            writer.Flush();
+            var bytes = (writer.BaseStream as MemoryStream).ToArray();
+
+            using BinaryReader reader = new(new MemoryStream(bytes));
+            toSettings.FromBinary(reader);
+        }
+    }
+
     sealed class AssetInfo
     {
         public AssetType Type { get; set; }
         public byte[] Icon { get; set; }
         public string FullPath { get; set; }
         public string FileName => Path.GetFileNameWithoutExtension(FullPath);
-        public string SourcePath { get; set; }
         public DateTime RegisterTime { get; set; }
         public DateTime ImportDate { get; set; }
         public Guid Guid { get; set; }
@@ -35,9 +61,8 @@ namespace PrimalEditor.Content
     abstract class Asset : ViewModelBase
     {
         public static string AssetFileExtension => ".asset";
-        public AssetType Type { get; private set; }
+        public AssetType Type { get; }
         public byte[] Icon { get; protected set; }
-        public string SourcePath { get; protected set; }
 
         private string _fullPath;
         public string FullPath
@@ -58,8 +83,8 @@ namespace PrimalEditor.Content
         public DateTime ImportDate { get; protected set; }
         public byte[] Hash { get; protected set; }
 
-        public abstract void Import(string file);
-        public abstract void Load(string file);
+        public abstract bool Import(string file);
+        public abstract bool Load(string file);
         public abstract IEnumerable<string> Save(string file);
         public abstract byte[] PackForEngine();
 
@@ -76,7 +101,6 @@ namespace PrimalEditor.Content
             {
                 info.Hash= reader.ReadBytes(hashSize);
             }
-            info.SourcePath= reader.ReadString();
             var iconSize = reader.ReadInt32();
             info.Icon = reader.ReadBytes(iconSize);
 
@@ -122,7 +146,6 @@ namespace PrimalEditor.Content
                 writer.Write(0);
             }
 
-            writer.Write(SourcePath ?? "");
             writer.Write(Icon.Length);
             writer.Write(Icon);
         }
@@ -135,7 +158,6 @@ namespace PrimalEditor.Content
             Guid = info.Guid;
             ImportDate = info.ImportDate;
             Hash = info.Hash;
-            SourcePath = info.SourcePath;
             Icon = info.Icon;
         }
 

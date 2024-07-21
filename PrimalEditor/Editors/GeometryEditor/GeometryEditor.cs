@@ -88,7 +88,7 @@ namespace PrimalEditor.Editors
     {
         public ObservableCollection<MeshRendererVertexData> Meshes { get; } = new ObservableCollection<MeshRendererVertexData>();
 
-        private Vector3D _cameraDirection = new Vector3D(0, 0, -10);
+        private Vector3D _cameraDirection = new(0, 0, -10);
         public Vector3D CameraDirection
         {
             get => _cameraDirection;
@@ -102,7 +102,7 @@ namespace PrimalEditor.Editors
             }
         }
 
-        private Point3D _cameraPosition = new Point3D(0, 0, 10);
+        private Point3D _cameraPosition = new(0, 0, 10);
         public Point3D CameraPosition
         {
             get => _cameraPosition;
@@ -118,7 +118,7 @@ namespace PrimalEditor.Editors
             }
         }
 
-        private Point3D _cameraTarget = new Point3D(0, 0, 0);
+        private Point3D _cameraTarget = new(0, 0, 0);
         public Point3D CameraTarget
         {
             get => _cameraTarget;
@@ -134,7 +134,7 @@ namespace PrimalEditor.Editors
         }
 
         public Point3D OffsetCameraPosition =>
-            new Point3D(CameraPosition.X + CameraTarget.X, CameraPosition.Y + CameraTarget.Y, CameraPosition.Z + CameraTarget.Z);
+            new(CameraPosition.X + CameraTarget.X, CameraPosition.Y + CameraTarget.Y, CameraPosition.Z + CameraTarget.Z);
 
         private Color _keyLight = (Color)ColorConverter.ConvertFromString("#ffaeaeae");
         public Color KeyLight
@@ -199,7 +199,7 @@ namespace PrimalEditor.Editors
             // this object is that we're rendering. Hence, we need to know its bounding box.
             double minX, minY, minZ; minX = minY = minZ = double.MaxValue;
             double maxX, maxY, maxZ; maxX = maxY = maxZ = double.MinValue;
-            Vector3D avgNormal = new Vector3D();
+            Vector3D avgNormal = new();
             // This is to unpack the packed normals
             var intervals = 2.0f / ((1 << 16) - 1);
             
@@ -312,13 +312,28 @@ namespace PrimalEditor.Editors
 
     class GeometryEditor : ViewModelBase, IAssetEditor
     {
+        private AssetEditorState _state;
+        public AssetEditorState State
+        {
+            get => _state;
+            private set
+            {
+                if(_state != value)
+                {
+                    _state = value;
+                    OnPropertyChanged(nameof(State));
+                }
+            }
+        }
+
+        public Guid AssetGuid {  get; private set; }
         Asset IAssetEditor.Asset => Geometry;
 
         private Content.Geometry _geometry;
         public Content.Geometry Geometry
         {
             get => _geometry;
-            set
+            private set
             {
                 if (_geometry != value)
                 {
@@ -408,6 +423,7 @@ namespace PrimalEditor.Editors
             Debug.Assert(asset is Content.Geometry);
             if(asset is Content.Geometry geometry)
             {
+                AssetGuid = asset.Guid;
                 Geometry = geometry;
                 var numLods = geometry.GetLODGroup().LODs.Count;
                 if(LODIndex >= numLods)
@@ -425,6 +441,7 @@ namespace PrimalEditor.Editors
         {
             try
             {
+                AssetGuid = info.Guid;
                 Debug.Assert(info != null && File.Exists(info.FullPath));
                 var geometry = new Content.Geometry();
                 await Task.Run(() =>

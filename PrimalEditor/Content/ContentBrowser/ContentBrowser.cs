@@ -9,19 +9,96 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Input;
 
 namespace PrimalEditor.Content
 {
-    sealed class ContentInfo
+    sealed class ContentInfo : ViewModelBase
     {
         public static int IconWidth => 90;
         public byte[] Icon { get; }
         public byte[] IconSmall { get; }
-        public string FullPath { get; }
+        public string FullPath { get; private set; }
         public string FileName => Path.GetFileNameWithoutExtension(FullPath);
         public bool IsDirectory { get; }
-        public DateTime DateModified { get; }
+        public DateTime DateModified { get; private set; }
         public long? Size { get; }
+
+        public ICommand RenameCommand { get; private set; }
+
+        private void Rename(string newFileName)
+        {
+            if(string.IsNullOrEmpty(newFileName.Trim())) return;
+
+            var extension = IsDirectory ? string.Empty : Asset.AssetFileExtension;
+            var path = $@"{Path.GetDirectoryName(FullPath)}{Path.DirectorySeparatorChar}{newFileName}{extension}";
+
+            if (!Validate(path, newFileName)) return;
+
+            try
+            {
+                if(IsDirectory)
+                {
+                    Directory.Move(FullPath, path);
+                }
+                else
+                {
+                    File.Move(FullPath, path);
+                }
+
+                FullPath = path;
+                var info = new FileInfo(FullPath);
+                DateModified = info.LastWriteTime;
+
+                OnPropertyChanged(nameof(FullPath));
+                OnPropertyChanged(nameof(DateModified));
+            }
+            catch(Exception ex) { Debug.WriteLine(ex.Message); }
+        }
+
+        private bool Validate(string path, string newFileName)
+        {
+            var fileName = Path.GetFileName(path);
+            var dirName = IsDirectory ? path : Path.GetDirectoryName(path);
+            var errorMsg = string.Empty;
+
+            if(!string.IsNullOrEmpty(Path.GetDirectoryName(newFileName)))
+            {
+                errorMsg = "File and folder names may not include sub-directories.";
+            }
+
+            if(!IsDirectory)
+            {
+                if(fileName.IndexOfAny(Path.GetInvalidFileNameChars()) != -1)
+                {
+                    errorMsg = "Invalid character(s) used in the file name.";
+                }
+
+                if(File.Exists(path))
+                {
+                    errorMsg = "A file already exixsts with the same name.";
+                }
+            }
+            else
+            {
+                if(Directory.Exists(path))
+                {
+                    errorMsg = "A directory already exixsts with the same name.";
+                }
+            }
+
+            if(dirName.IndexOfAny(Path.GetInvalidPathChars()) != -1)
+            {
+                errorMsg = "Invalid character(s) used in the path name.";
+            }
+
+            if(!string.IsNullOrEmpty(errorMsg))
+            {
+                MessageBox.Show(errorMsg, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+
+            return string.IsNullOrEmpty(errorMsg);
+        }
 
         public ContentInfo(string fullpath, byte[] icon = null, byte[] smallIcon = null, DateTime? lastModified = null)
         {
@@ -33,16 +110,18 @@ namespace PrimalEditor.Content
             Icon = icon;
             IconSmall = smallIcon ?? icon;
             FullPath = fullpath;
+
+            RenameCommand = new RelayCommand<string>(x => Rename(x));
         }
     }
     class ContentBrowser : ViewModelBase, IDisposable
     {
         
-        private readonly DelayEventTimer _refreshTimer = new DelayEventTimer(TimeSpan.FromMilliseconds(250));
+        private readonly DelayEventTimer _refreshTimer = new(TimeSpan.FromMilliseconds(250));
 
         
         public string ContentFolder { get; }
-        private readonly ObservableCollection<ContentInfo> _folderContent = new ObservableCollection<ContentInfo>();
+        private readonly ObservableCollection<ContentInfo> _folderContent = new();
         public ReadOnlyObservableCollection<ContentInfo> FolderContent { get; }
 
         private string _selectedFolder;
@@ -102,8 +181,6 @@ namespace PrimalEditor.Content
                 // Get files
                 foreach (var file in Directory.GetFiles(path, $"*{Asset.AssetFileExtension}"))
                 {
-                    var fileInfo = new FileInfo(file);
-
                     folderContent.Add(ContentInfoCache.Add(file));
                 }
             }
@@ -125,7 +202,6 @@ namespace PrimalEditor.Content
             Debug.Assert(!string.IsNullOrEmpty(contentFolder.Trim()));
             contentFolder = Path.TrimEndingDirectorySeparator(contentFolder);
             ContentFolder = contentFolder;
-            SelectedFolder = contentFolder;
             FolderContent = new ReadOnlyObservableCollection<ContentInfo>(_folderContent);
 
             ContentWatcher.ContentModified += OnContentModified;

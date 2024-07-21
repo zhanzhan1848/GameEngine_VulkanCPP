@@ -21,8 +21,6 @@ namespace primal::graphics::vulkan::data
 		};
 		VkBuffer					cpu_address;
 		VkDeviceMemory				cpu_memory;
-		VkBuffer					gpu_address;
-		VkDeviceMemory				gpu_memory;
 
 		void*						data{ nullptr };
 		u32							size;
@@ -34,11 +32,9 @@ namespace primal::graphics::vulkan::data
 		~vulkan_buffer();
 
 		void resize(u64 size);
-		void update(const void* const data, size_t size, u32 offset_count = 0);
+		void update(const void* const data, u64 size, u32 offset_count = 0);
 		void convert_to_local_device_buffer();
 		void release();
-
-		id::id_type convert_to_image();
 	};
 
 	struct UniformBuffer

@@ -327,7 +327,7 @@ namespace primal::graphics::vulkan::data
 		}
 	}
 
-	void vulkan_buffer::update(const void* const data, size_t size, u32 offset_count)
+	void vulkan_buffer::update(const void* const data, u64 size, u32 offset_count)
 	{
 		assert(this->cpu_address);
 		assert(size <= this->size);
@@ -383,24 +383,31 @@ namespace primal::graphics::vulkan::data
 		}
 
 		assert(flag != VK_BUFFER_USAGE_FLAG_BITS_MAX_ENUM);
-		createBuffer(core::logical_device(), this->size, flag, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, this->gpu_address, this->gpu_memory);
-		copyBuffer(core::logical_device(), core::transfer_family_queue_index(), _transfer_cmd_pool, this->cpu_address, this->gpu_address, size);
-		vkDestroyBuffer(core::logical_device(), this->cpu_address, nullptr);
-		vkFreeMemory(core::logical_device(), this->cpu_memory, nullptr);
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingMemory;
+		createBuffer(core::logical_device(), this->size, flag, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stagingBuffer, stagingMemory);
+		copyBuffer(core::logical_device(), core::transfer_family_queue_index(), _transfer_cmd_pool, this->cpu_address, stagingBuffer, size);
+		std::swap(this->cpu_address, stagingBuffer);
+		std::swap(this->cpu_memory, stagingMemory);
+		vkDestroyBuffer(core::logical_device(), stagingBuffer, nullptr);
+		vkFreeMemory(core::logical_device(), stagingMemory, nullptr);
 	}
 
-	void vulkan_buffer::resize(size_t size)
+	void vulkan_buffer::resize(u64 size)
 	{
 		assert(size != this->size);
 		
 		assert(this->cpu_address && this->cpu_memory);
 
-		vkDestroyBuffer(core::logical_device(), this->cpu_address, nullptr);
-		vkFreeMemory(core::logical_device(), this->cpu_memory, nullptr);
+		if (size != this->size)
+		{
+			vkDestroyBuffer(core::logical_device(), this->cpu_address, nullptr);
+			vkFreeMemory(core::logical_device(), this->cpu_memory, nullptr);
 
-		createBuffer(core::logical_device(), size , this->flags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, this->cpu_address, this->cpu_memory);
+			createBuffer(core::logical_device(), size, this->flags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, this->cpu_address, this->cpu_memory);
 
-		this->size = size;
+			this->size = size;
+		}
 	}
 
 	vulkan_buffer::~vulkan_buffer()
@@ -414,10 +421,8 @@ namespace primal::graphics::vulkan::data
 
 	void vulkan_buffer::release()
 	{
-		vkFreeMemory(core::logical_device(), this->gpu_memory, nullptr);
 		vkFreeMemory(core::logical_device(), this->cpu_memory, nullptr);
 
-		vkDestroyBuffer(core::logical_device(), this->gpu_address, nullptr);
 		vkDestroyBuffer(core::logical_device(), this->cpu_address, nullptr);
 
 		this->flags = id::invalid_id;

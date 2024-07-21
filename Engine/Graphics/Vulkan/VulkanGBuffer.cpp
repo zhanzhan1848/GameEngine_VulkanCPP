@@ -13,6 +13,7 @@
 #include "VulkanCompute.h"
 #include "Shaders/ShaderTypes.h"
 #include "VulkanLight.h"
+#include "VulkanTexture.h"
 
 #include <array>
 #include <random>
@@ -23,7 +24,12 @@ namespace primal::graphics::vulkan
 	{
 		id::id_type createOffscreenTexture(u32 width, u32 height, bool isPosition, bool singleChannel, OUT utl::vector<VkAttachmentDescription>& attach)
 		{
-			vulkan_texture tex;
+			/*image_init_info init_info;
+			init_info.width = width;
+			init_info.height = height;
+			init_info.format = singleChannel ? VK_FORMAT_D32_SFLOAT : (isPosition ? VK_FORMAT_R32G32B32A32_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM);
+			init_info.view_aspect_flags = singleChannel ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;*/
+			vulkan_texture tex;// { &init_info, vulkan_texture::type::texture_2D };
 			tex.format = singleChannel ? VK_FORMAT_D32_SFLOAT : (isPosition ? VK_FORMAT_R32G32B32A32_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM);
 
 			VkImageCreateInfo image{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };

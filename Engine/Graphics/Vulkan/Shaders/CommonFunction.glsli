@@ -72,7 +72,7 @@ vec3 PointLight(vec3 N, vec3 worldPos, vec3 V, LightParameters light)
     {
         float dRcp = inversesqrt(dSq);
         L *= dRcp;
-        color = clamp(dot(N, L), 0.0, 1.0) * light.Color * light.Intensity * 0.2;
+        color = clamp(dot(N, L), 0.0, 1.0) * light.Color * light.Intensity * 0.01;
     }
 #else
     if(dSq < (light.Range * light.Range))
@@ -80,7 +80,7 @@ vec3 PointLight(vec3 N, vec3 worldPos, vec3 V, LightParameters light)
         float dRcp = inversesqrt(dSq);
         L *= dRcp;
         float attenuation = 1.0 - smoothstep(-light.Range, light.Range, 1.0 / dRcp);
-        color = CalculateLighting(N, L, V, attenuation * light.Color * light.Intensity);
+        color = CalculateLighting(N, L, V, attenuation * light.Color * light.Intensity * 0.2);
     }
 #endif
 
@@ -101,7 +101,7 @@ vec3 SpotLight(vec3 N, vec3 worldPos, vec3 V, LightParameters light)
         L *= dRcp;
         float CosAngleToLight = clamp(dot(-L, light.Direction), 0.0, 1.0);
         float angularAttenuation = float(light.CosPenumbra < CosAngleToLight);
-        color = clamp(dot(N, L), 0.0, 1.0) * light.Color * light.Intensity * angularAttenuation * 0.2;
+        color = clamp(dot(N, L), 0.0, 1.0) * light.Color * light.Intensity * angularAttenuation * 0.01;
     }
 #else
     if(dSq < (light.Range * light.Range))
@@ -111,7 +111,7 @@ vec3 SpotLight(vec3 N, vec3 worldPos, vec3 V, LightParameters light)
         float attenuation = 1.0 - smoothstep(-light.Range, light.Range, 1.0 / dRcp);
         float CosAngleToLight = clamp(dot(-L, light.Direction), 0.0, 1.0);
         float angularAttenuation = smoothstep(light.CosPenumbra, light.CosUmbra, CosAngleToLight);
-        color = CalculateLighting(N, L, V, attenuation * light.Color * light.Intensity * angularAttenuation);
+        color = CalculateLighting(N, L, V, attenuation * light.Color * light.Intensity * angularAttenuation * 0.2);
     }
 #endif
 

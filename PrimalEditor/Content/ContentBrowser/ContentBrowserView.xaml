@@ -57,7 +57,7 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type GridViewColumnHeader}">
                         <Grid SnapsToDevicePixels="true">
-                            <Border Name="HeaderBorder" BorderThickness="0,1"
+                            <Border x:Name="HeaderBorder" BorderThickness="0,1"
                                     BorderBrush="{TemplateBinding BorderBrush}"
                                     Background="{TemplateBinding Background}"
                                     Padding="{TemplateBinding Padding}">
@@ -114,7 +114,7 @@
                     <Setter Property="Template">
                         <Setter.Value>
                             <ControlTemplate TargetType="{x:Type GridViewColumnHeader}">
-                                <Border Name="HeaderBorder" BorderThickness="0"
+                                <Border x:Name="HeaderBorder" BorderThickness="0"
                                     BorderBrush="{TemplateBinding BorderBrush}"
                                     Background="{TemplateBinding Background}"/>
                                 <ControlTemplate.Triggers>
@@ -194,6 +194,12 @@
                     <DataTemplate>
                         <DockPanel>
                             <Image Style="{StaticResource SmallIconStyle}" Width="18" Margin="5, 0" VerticalAlignment="Center" />
+                            <Grid VerticalAlignment="Center" HorizontalAlignment="Stretch">
+                                <TextBlock Text="{Binding FileName}" Margin="5,2,0,2" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                <TextBox Margin="0,-2" HorizontalAlignment="Stretch" Padding="2,0,0,0" Style="{StaticResource TextBoxStyle_WithRename}"
+                                         Tag="{Binding RenameCommand}" Text="{Binding FileName, UpdateSourceTrigger=Explicit, Mode=OneWay}"
+                                         Visibility="Collapsed" />
+                            </Grid>
                             <TextBlock Text="{Binding FileName}" Margin="5, 2, 0, 2" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                         </DockPanel>
                     </DataTemplate>
@@ -221,9 +227,18 @@
 
         <DataTemplate x:Key="tileTemplate">
             <StackPanel Width="96" HorizontalAlignment="Center" Margin="-4, 0, 0, 0">
-                <Image Style="{StaticResource LargeIconStyle}" Width="90" HorizontalAlignment="Center" />
-                <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis" TextWrapping="Wrap"
-                           Foreground="{StaticResource Editor.FontBrush}" HorizontalAlignment="Center" Margin="2, 0" MaxHeight="60" />
+                <Border MinHeight="{StaticResource AssetIconWidth}">
+                    <Image Style="{StaticResource LargeIconStyle}" HorizontalAlignment="Center"
+                           Width="{StaticResource AssetIconWidth}" Height="{StaticResource AssetIconWidth}" />
+                </Border>
+                <Grid>
+                    <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis" TextWrapping="Wrap"
+                               Foreground="{StaticResource Editor.FontBrush}" HorizontalAlignment="Center" TextAlignment="Center"
+                               Margin="2, 0" MaxHeight="60" />
+                    <TextBox Margin="0,-2" HorizontalContentAlignment="Center" Padding="0" Style="{StaticResource TextBoxStyle_WithRename}"
+                             Tag="{Binding RenameCommand}" Text="{Binding FileName, UpdateSourceTrigger=Explicit, Mode=OneWay}"
+                             Visibility="Collapsed" VerticalAlignment="Stretch" TextWrapping="Wrap" />
+                </Grid>
             </StackPanel>
         </DataTemplate>
 
@@ -236,33 +251,34 @@
             </local:PlainView.ItemContainerStyle>
         </local:PlainView>
 
-        <Style TargetType="{x:Type ToggleButton}" x:Key="ListViewToggleButtonStyle">
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="BorderBrush" Value="{StaticResource Editor.Window.GrayBrush4}" />
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Padding" Value="2" />
-            <Setter Property="Margin" Value="5, 0" />
+        <Style TargetType="{x:Type ToggleButton}" x:Key="ListViewToggleButtonStyle" BasedOn="{StaticResource PrimalButtonStyle}">
             <Setter Property="Focusable" Value="False" />
-            <Setter Property="Template">
+            <Setter Property="Content">
                 <Setter.Value>
-                    <ControlTemplate TargetType="{x:Type ToggleButton}">
-                        <Border x:Name="border" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                                Background="{TemplateBinding Background}" SnapsToDevicePixels="True">
-                            <Image x:Name="image" Source="pack://application:,,,/Resources/ContentBrowser/ListView.png" Width="16" Opacity="0.8" />
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsChecked" Value="True">
-                                <Setter Property="Source" TargetName="image" Value="/PrimalEditor;component/Resources/ContentBrowser/TileView.png" />
-                                <Setter Property="ToolTip" TargetName="border" Value="Tile view" />
-                            </Trigger>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter Property="BorderBrush" TargetName="border" Value="{StaticResource Editor.MouseOver.BorderBrush}" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
+                    <Image Source="pack://application:,,,/Resources/ContentBrowser/ListView.png" Width="32" Opacity="0.8" />
                 </Setter.Value>
             </Setter>
+            <Setter Property="ToolTip" Value="Toggle list view" />
+            <Style.Triggers>
+                <Trigger Property="IsChecked" Value="True">
+                    <Setter Property="Content">
+                        <Setter.Value>
+                            <Image Source="pack://application:,,,/Resources/ContentBrowser/ListView.png" Width="32" Opacity="0.8" />
+                        </Setter.Value>
+                    </Setter>
+                    <Setter Property="ToolTip" Value="Toggle tile view" />
+                </Trigger>
+            </Style.Triggers>
         </Style>
+
+        <ContextMenu x:Key="contextMenu">
+            <MenuItem Header="New">
+                <MenuItem Header="Folder" Click="OnCreateNewFolder" />
+                <Separator />
+                <MenuItem Header="Texture" />
+                <MenuItem Header="Material" />
+            </MenuItem>
+        </ContextMenu>
     </UserControl.Resources>
     
     <Grid Background="{StaticResource Editor.Window.GrayBrush2}">
@@ -272,16 +288,17 @@
         </Grid.RowDefinitions>
 
         <ListView ItemsSource="{Binding FolderContent}" Grid.Row="1" x:Name="folderListView"
-                  IsTextSearchEnabled="True" TextSearch.TextPath="FileName"
-                  SelectionChanged="OnFolderContent_ListView_SelectionChanged"
-                  Drop="OnFolderContent_ListView_Drop">
+                  ContextMenu="{StaticResource contextMenu}" IsTextSearchEnabled="True" 
+                  TextSearch.TextPath="FileName">
             <ListView.Style>
                 <Style TargetType="{x:Type ListView}">
                     <Setter Property="Background" Value="{StaticResource Editor.Window.GrayBrush2}" />
                     <Setter Property="ListBox.BorderThickness" Value="0" />
-                    <Setter Property="AllowDrop" Value="{Binding Path=AllowDrop, RelativeSource={RelativeSource Mode=FindAncestor, AncestorType={x:Type local:ContentBrowserView}}}" />
+                    <Setter Property="AllowDrop" Value="{Binding Path=AllowImport, RelativeSource={RelativeSource Mode=FindAncestor, AncestorType={x:Type local:ContentBrowserView}}}" />
                     <Setter Property="View" Value="{StaticResource gridView}" />
                     <Setter Property="SelectionMode" Value="{Binding Path=SelectionMode, RelativeSource={RelativeSource Mode=FindAncestor, AncestorType={x:Type local:ContentBrowserView}}}" />
+                    <EventSetter Event="DragEnter" Handler="OnFolderContent_ListView_DragEnter" />
+                    <EventSetter Event="SelectionChanged" Handler="OnFolderContent_ListView_SelectionChanged" />
                     <Style.Triggers>
                         <DataTrigger Binding="{Binding Path=IsChecked, ElementName=listViewToggle}" Value="False">
                             <Setter Property="View" Value="{StaticResource tileView}" />
@@ -291,14 +308,111 @@
             </ListView.Style>
         </ListView>
 
+        <Border Visibility="Collapsed" d:Visibility="Visible" Background="Transparent"
+                x:Name="dropBorder" AllowDrop="{Binding Path=AllowDrop, ElementName=folderListView}" Grid.Row="1"
+                DragLeave="OnDropBorder_DragLeave" Drop="OnDropBorder_Drop">
+            <Grid>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition />
+                        <RowDefinition />
+                    </Grid.RowDefinitions>
+                    <Border x:Name="filesDrop" Background="Transparent" Grid.Row="0" />
+                    <Border x:Name="cfgDrop" Background="Transparent" Grid.Row="1" />
+                </Grid>
+                <Border BorderBrush="{StaticResource Editor.OrangeBrush}" BorderThickness="2" CornerRadius="50" Background="#66000000"
+                        SnapsToDevicePixels="True" UseLayoutRounding="True" IsHitTestVisible="False">
+                    <Border Background="#cc000000" VerticalAlignment="Center" HorizontalAlignment="Center"
+                            CornerRadius="20" BorderBrush="{StaticResource Editor.OrangeBrush}" BorderThickness="2">
+                        <StackPanel>
+                            <Border CornerRadius="16,16,0,0" HorizontalAlignment="Center" Width="250" x:Name="filesBorder" Background="Transparent">
+                                <TextBlock x:Name="filesText" Text="Import Individual Files" FontFamily="Bahnschrift condensed" FontSize="24"
+                                           Foreground="{StaticResource Editor.FontBrush}" Margin="20" HorizontalAlignment="Center" />
+                            </Border>
+                            <Border CornerRadius="0,0,16,16" HorizontalAlignment="Center" Width="250" x:Name="cfgBorder" Background="Transparent">
+                                <TextBlock x:Name="cfgText" Text="Configure Import Settings" FontFamily="Bahnschrift condensed" FontSize="24"
+                                            Foreground="{StaticResource Editor.FontBrush}" Margin="20" HorizontalAlignment="Center" />
+                            </Border>
+                        </StackPanel>
+                    </Border>
+                </Border>
+            </Grid>
+            <Border.Triggers>
+                <EventTrigger RoutedEvent="DragEnter" SourceName="filesDrop">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <ColorAnimation Storyboard.TargetName="filesBorder" Storyboard.TargetProperty="Background.Color"
+                                            From="Transparent" To="{StaticResource Editor.OrangeColor}" Duration="0:0:0.2" />
+                            <DoubleAnimation Storyboard.TargetName="filesBorder" Storyboard.TargetProperty="Background.Opacity"
+                                             From="0" To="0.6" Duration="0:0:0.2" />
+                            <ColorAnimation Storyboard.TargetName="filesText" Storyboard.TargetProperty="Foreground.Color"
+                                            From="{StaticResource Editor.FontColor}" To="White" Duration="0:0:0.2" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+                <EventTrigger RoutedEvent="DragLeave" SourceName="filesDrop">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <ColorAnimation Storyboard.TargetName="filesBorder" Storyboard.TargetProperty="Background.Color"
+                            From="{StaticResource Editor.OrangeColor}" To="Transparent" Duration="0:0:0.2" />
+                            <DoubleAnimation Storyboard.TargetName="filesBorder" Storyboard.TargetProperty="Background.Opacity"
+                             From="0.6" To="0" Duration="0:0:0.2" />
+                            <ColorAnimation Storyboard.TargetName="filesText" Storyboard.TargetProperty="Foreground.Color"
+                            From="White" To="{StaticResource Editor.FontColor}" Duration="0:0:0.2" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+                <EventTrigger RoutedEvent="DragEnter" SourceName="cfgDrop">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <ColorAnimation Storyboard.TargetName="cfgBorder" Storyboard.TargetProperty="Background.Color"
+                                            From="Transparent" To="{StaticResource Editor.OrangeColor}" Duration="0:0:0.2" />
+                            <DoubleAnimation Storyboard.TargetName="cfgBorder" Storyboard.TargetProperty="Background.Opacity"
+                                            From="0" To="0.6" Duration="0:0:0.2" />
+                            <ColorAnimation Storyboard.TargetName="cfgText" Storyboard.TargetProperty="Foreground.Color"
+                                            From="{StaticResource Editor.FontColor}" To="White" Duration="0:0:0.2" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+                <EventTrigger RoutedEvent="DragLeave" SourceName="cfgDrop">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <ColorAnimation Storyboard.TargetName="cfgBorder" Storyboard.TargetProperty="Background.Color"
+                                            From="{StaticResource Editor.OrangeColor}" To="Transparent" Duration="0:0:0.2" />
+                            <DoubleAnimation Storyboard.TargetName="cfgBorder" Storyboard.TargetProperty="Background.Opacity"
+                                             From="0.6" To="0" Duration="0:0:0.2" />
+                            <ColorAnimation Storyboard.TargetName="cfgText" Storyboard.TargetProperty="Foreground.Color"
+                                            From="White" To="{StaticResource Editor.FontColor}" Duration="0:0:0.2" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+            </Border.Triggers>
+        </Border>
         <Border Background="{StaticResource Editor.Window.GrayBrush3}" VerticalAlignment="Top">
             <Border.Effect>
                 <DropShadowEffect Opacity="0.3" BlurRadius="10" ShadowDepth="0" />
             </Border.Effect>
             <DockPanel>
                 <DockPanel Margin="5" DockPanel.Dock="Top">
-                    <ToggleButton DockPanel.Dock="Right" Style="{StaticResource ListViewToggleButtonStyle}" x:Name="listViewToggle" />
-                    <TextBlock />
+                    <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" Margin="5,0">
+                        <Button Padding="2" Margin="0,0,5,0" Focusable="False" Click="OnOpenImportSettingsConfigurator_Button_Click">
+                            <Button.Style>
+                                <Style TargetType="{x:Type Button}" BasedOn="{StaticResource PrimalButtonStyle}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Path=AllowImport, RelativeSource={RelativeSource Mode=FindAncestor, AncestorType={x:Type local:ContentBrowserView}}}" Value="False">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                            <Button.Content>
+                                <Image Width="32" Source="pack://application:,,,/Resources/ContentBrowser/OpenImportCfg.png" />
+                            </Button.Content>
+                        </Button>
+                        <ToggleButton Padding="2" Focusable="False" Style="{StaticResource ListViewToggleButtonStyle}" 
+                                      x:Name="listViewToggle" d:IsChecked="True" />
+                    </StackPanel>
+                    <TextBlock VerticalAlignment="Stretch" />
                 </DockPanel>
                 <StackPanel Orientation="Horizontal" x:Name="pathStack" Margin="0, 0, 0, 5">
                     <StackPanel.Resources>
@@ -352,7 +466,7 @@
                             <Setter Property="VerticalAlignment" Value="Center" />
                         </Style>
                     </StackPanel.Resources>
-                    <Image Source="pack:\\application:,,,/Resources/ContentBrowser/FolderSmall.png" Width="18" Margin="5, 0, 0, 2" />
+                    <Image Source="pack:\\application:,,,/Resources/ContentBrowser/FolderSmall.png" Width="24" Margin="5, 0, 0, 2" />
                 </StackPanel>
             </DockPanel>
         </Border>

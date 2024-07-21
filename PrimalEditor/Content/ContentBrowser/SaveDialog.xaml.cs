@@ -24,6 +24,11 @@ namespace PrimalEditor.Content
         public SaveDialog()
         {
             InitializeComponent();
+            contentBrowserView.Loaded += (_, _) =>
+            {
+                var contentBrowser = contentBrowserView.DataContext as ContentBrowser;
+                contentBrowser.SelectedFolder = contentBrowser.ContentFolder;
+            };
             Closing += OnSaveDialogClosing;
         }
 

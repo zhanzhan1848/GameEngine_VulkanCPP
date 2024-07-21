@@ -89,7 +89,6 @@ namespace PrimalEditor.Ultilities.Controls
                 {
                     textBox.Visibility = Visibility.Visible;
                     textBox.Focus();
-                    textBox.SelectAll();
                 }
             }
         }

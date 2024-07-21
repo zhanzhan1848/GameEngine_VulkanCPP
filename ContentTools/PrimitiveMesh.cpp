@@ -292,8 +292,8 @@ namespace primal::tools
 		scene scene{};
 		creators[info->type](scene, *info);
 
-		data->settings.calculate_normals = 1;
-		process_scene(scene, data->settings);
+		progression progression{};
+		process_scene(scene, data->settings, &progression);
 		pack_data(scene, *data);
 	}
 }

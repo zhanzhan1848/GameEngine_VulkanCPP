@@ -481,8 +481,8 @@ namespace primal::graphics::vulkan
 			VkDeviceSize offset[] = { 0 };
 			auto vertexBuffer = data::get_data<data::vulkan_buffer>(_model.getVertexBuffer());
 			auto indexBuffer = data::get_data<data::vulkan_buffer>(_model.getIndexBuffer());
-			vkCmdBindVertexBuffers(cmd_buffer.cmd_buffer, 0, 1, &vertexBuffer.gpu_address, offset);
-			vkCmdBindIndexBuffer(cmd_buffer.cmd_buffer, indexBuffer.gpu_address, 0, VK_INDEX_TYPE_UINT32);	// !!!! NOTE: If indices is sizeof(u16), use VK_INDEX_TYPE_UINT16 !!!
+			vkCmdBindVertexBuffers(cmd_buffer.cmd_buffer, 0, 1, &vertexBuffer.cpu_address, offset);
+			vkCmdBindIndexBuffer(cmd_buffer.cmd_buffer, indexBuffer.cpu_address, 0, VK_INDEX_TYPE_UINT32);	// !!!! NOTE: If indices is sizeof(u16), use VK_INDEX_TYPE_UINT16 !!!
 																											// !!!! NOTE: If indices is sizeof(u32), use VK_INDEX_TYPE_UINT32 !!!
 		}
 
@@ -641,7 +641,7 @@ namespace primal::graphics::vulkan
 				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bufferInfo));
 
 				VkDescriptorBufferInfo modelBufferInfo;
-				modelBufferInfo.buffer = data::get_data<data::vulkan_buffer>(instance_models[instance].getModelMatrixID()).gpu_address;
+				modelBufferInfo.buffer = data::get_data<data::vulkan_buffer>(instance_models[instance].getModelMatrixID()).cpu_address;
 				modelBufferInfo.offset = 0;
 				modelBufferInfo.range = data::get_data<data::vulkan_buffer>(instance_models[instance].getModelMatrixID()).size;
 				descriptorWrites.emplace_back(descriptor::setWriteDescriptorSet(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, descriptorSet, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &modelBufferInfo));

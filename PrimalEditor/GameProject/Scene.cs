@@ -47,7 +47,7 @@ namespace PrimalEditor.GameProject
             }
         }
         [DataMember(Name = nameof(GameEntities))]
-        private ObservableCollection<GameEntity> _gameEntities = new ObservableCollection<GameEntity>();
+        private ObservableCollection<GameEntity> _gameEntities = new();
         public ReadOnlyObservableCollection<GameEntity> GameEntities { get; private set; }
 
         public ICommand AddGameEntityCommand { get; private set; }

@@ -27,7 +27,7 @@ namespace PrimalEditor.Content
     /// </summary>
     public partial class PrimitiveMeshDislog : Window
     {
-        private static readonly List<ImageBrush> _textures = new List<ImageBrush>();
+        private static readonly List<ImageBrush> _textures = new();
         private void OnPrimitiveType_ComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdatePrimitive();
 
         private void OnSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e) => UpdatePrimitive();
@@ -52,8 +52,8 @@ namespace PrimalEditor.Content
             {
                 case PrimitiveMeshType.Plane:
                     {
-                        info.SegmentX = (int)xSliderPlane.Value;
-                        info.SegmentZ = (int)zSliderPlane.Value;
+                        info.SegmentsX = (int)xSliderPlane.Value;
+                        info.SegmentsZ = (int)zSliderPlane.Value;
                         info.Size.X = Value(widthScalarBoxPlane, 0.001f);
                         info.Size.Z = Value(lengthScalarBoxPlane, 0.001f);
                         break;
@@ -62,8 +62,8 @@ namespace PrimalEditor.Content
                     return;
                 case PrimitiveMeshType.UvSphere:
                     {
-                        info.SegmentX = (int)xSliderUvSphere.Value;
-                        info.SegmentY = (int)ySliderUvSphere.Value;
+                        info.SegmentsX = (int)xSliderUvSphere.Value;
+                        info.SegmentsY = (int)ySliderUvSphere.Value;
                         info.Size.X = Value(xScalarBoxUvSphere, 0.001f);
                         info.Size.Y = Value(yScalarBoxUvSphere, 0.001f);
                         info.Size.Z = Value(zScalarBoxUvSphere, 0.001f);
@@ -80,7 +80,7 @@ namespace PrimalEditor.Content
                     break;
             }
             var geometry = new Geometry();
-            geometry.ImportSettings.SmoothAngle = smoothingAngle;
+            geometry.ImportSettings.SmoothingAngle = smoothingAngle;
             ContentToolsAPI.CreatePrimitiveMesh(geometry, info);
             (DataContext as GeometryEditor).SetAsset(geometry);
             OnTexture_CheckBox_Click(textureCheckBox, null);
@@ -90,9 +90,9 @@ namespace PrimalEditor.Content
         {
             var uris = new List<Uri>
             {
-                new Uri("pack://application:,,,/Resources/PrimitiveMeshView/uv1.png"),
-                new Uri("pack://application:,,,/Resources/PrimitiveMeshView/uv1.png"),
-                new Uri("pack://application:,,,/Resources/PrimitiveMeshView/uv1.png"),
+                new("pack://application:,,,/Resources/PrimitiveMeshView/uv1.png"),
+                new("pack://application:,,,/Resources/PrimitiveMeshView/uv1.png"),
+                new("pack://application:,,,/Resources/PrimitiveMeshView/uv1.png"),
             };
 
             _textures.Clear();

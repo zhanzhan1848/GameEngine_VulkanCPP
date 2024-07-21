@@ -13,10 +13,10 @@ namespace primal::tools
 	class fbx_context
 	{
 	public:
-		fbx_context(const char* file, scene* scene, scene_data* data)
-			: _scene{ scene }, _scene_data{ data }
+		fbx_context(const char* file, scene* scene, scene_data* data, progression *const progression)
+			: _scene{ scene }, _scene_data{ data }, _progression{ progression }
 		{
-			assert(file && _scene && _scene_data);
+			assert(file && _scene && _scene_data && _progression);
 			if (initialize_fbx())
 			{
 				load_fbx_file(file);
@@ -35,6 +35,7 @@ namespace primal::tools
 
 		constexpr bool is_valid() const { return _fbx_manager && _fbx_scene; }
 		constexpr f32 scene_scale() const { return _scene_scale; }
+		constexpr progression* get_progression() const { return _progression; }
 
 	private:
 
@@ -49,6 +50,7 @@ namespace primal::tools
 		scene_data*						_scene_data{ nullptr };
 		FbxManager*						_fbx_manager{ nullptr };
 		FbxScene*						_fbx_scene{ nullptr };
+		progression*					_progression{ nullptr };
 		f32								_scene_scale{ 1.0f };
 	};
 }

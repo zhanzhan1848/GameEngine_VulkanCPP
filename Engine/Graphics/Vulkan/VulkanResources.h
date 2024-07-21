@@ -11,6 +11,8 @@ namespace primal::graphics::vulkan
         VkImageType             image_type;
         u32                     width;
         u32                     height;
+        u32                     mipmap;
+        u32                     layer_count;
         VkFormat                format;
         VkImageTiling           tiling;
         VkImageUsageFlags       usage_flags;
@@ -18,7 +20,7 @@ namespace primal::graphics::vulkan
         bool                    create_view;
         VkImageAspectFlags      view_aspect_flags;
 
-        image_init_info() : image_type{ VK_IMAGE_TYPE_2D }, width{ 800 }, height{ 600 }, format{ VK_FORMAT_R8G8_SRGB }, tiling{ VK_IMAGE_TILING_OPTIMAL }, usage_flags{ VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT },
+        image_init_info() : image_type{ VK_IMAGE_TYPE_2D }, width{ 800 }, height{ 600 }, mipmap{ 1 }, layer_count{ 1 }, format{VK_FORMAT_R8G8_SRGB}, tiling{VK_IMAGE_TILING_OPTIMAL}, usage_flags{VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT},
             memory_flags{ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT }, create_view{ true }, view_aspect_flags{ VK_IMAGE_ASPECT_COLOR_BIT } {}
     };
 

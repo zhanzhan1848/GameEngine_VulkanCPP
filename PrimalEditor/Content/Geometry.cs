@@ -8,10 +8,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 
 namespace PrimalEditor.Content
 {
@@ -45,7 +42,7 @@ namespace PrimalEditor.Content
 
     class Mesh : ViewModelBase
     {
-        public static int PositionSize = sizeof(float) * 3;
+        public static int PositionSize => sizeof(float) * 3;
         private int _elementSize;
         public int ElementSize
         {
@@ -177,7 +174,7 @@ namespace PrimalEditor.Content
         public ObservableCollection<MeshLOD> LODs { get; } = new ObservableCollection<MeshLOD>();
     }
 
-    class GeometryImportSettings : ViewModelBase
+    class GeometryImportSettings : ViewModelBase, IAssetImportSettings
     {
         private bool _calculateNormals;
         public bool CalculateNormals
@@ -207,16 +204,16 @@ namespace PrimalEditor.Content
             }
         }
 
-        private float _smoothAngle;
-        public float SmoothAngle
+        private float _smoothingAngle;
+        public float SmoothingAngle
         {
-            get => _smoothAngle;
+            get => _smoothingAngle;
             set
             {
-                if (!_smoothAngle.IsTheSameAs(value))
+                if (!_smoothingAngle.IsTheSameAs(value))
                 {
-                    _smoothAngle = value;
-                    OnPropertyChanged(nameof(SmoothAngle));
+                    _smoothingAngle = value;
+                    OnPropertyChanged(nameof(SmoothingAngle));
                 }
             }
         }
@@ -263,43 +260,60 @@ namespace PrimalEditor.Content
             }
         }
 
+        private bool _coalesceMeshes;
+        public bool CoalesceMeshes
+        {
+            get => _coalesceMeshes;
+            set
+            {
+                if(_coalesceMeshes != value)
+                {
+                    _coalesceMeshes = value;
+                    OnPropertyChanged(nameof(CoalesceMeshes));
+                }
+            }
+        }
+
         public GeometryImportSettings()
         {
             CalculateNormals = false;
             CalculateTangents = false;
-            SmoothAngle = 178f;
+            SmoothingAngle = 178f;
             ReverseHandedness = false;
             ImportEmbeddedTextures = true;
             ImportAnimation = true;
+            CoalesceMeshes = false;
         }
 
         public void ToBinary(BinaryWriter writer)
         {
             writer.Write(CalculateNormals);
             writer.Write(CalculateTangents);
-            writer.Write(SmoothAngle);
+            writer.Write(SmoothingAngle);
             writer.Write(ReverseHandedness);
             writer.Write(ImportEmbeddedTextures);
             writer.Write(ImportAnimation);
+            writer.Write(CoalesceMeshes);
         }
 
         public void FromBinary(BinaryReader reader)
         {
             CalculateNormals = reader.ReadBoolean();
             CalculateTangents = reader.ReadBoolean();
-            SmoothAngle = reader.ReadSingle();
+            SmoothingAngle = reader.ReadSingle();
             ReverseHandedness = reader.ReadBoolean();
             ImportEmbeddedTextures = reader.ReadBoolean();
             ImportAnimation = reader.ReadBoolean();
+            CoalesceMeshes = reader.ReadBoolean();
         }
     }
 
     class Geometry : Asset
     {
-        private readonly List<LodGroup> _lodGroups = new List<LodGroup>();
-        private readonly object _lock = new object();
+        private readonly List<LodGroup> _lodGroups = new();
+        private readonly object _lock = new();
 
-        public GeometryImportSettings ImportSettings { get; } = new GeometryImportSettings();
+        public GeometryImportSettings ImportSettings { get; } = new();
 
         public LodGroup GetLODGroup(int lodGroup = 0)
         {
@@ -384,11 +398,11 @@ namespace PrimalEditor.Content
             mesh.IndexCount = reader.ReadInt32();
             var lodThreshold = reader.ReadSingle();
 
-            var elementBufferSize = mesh.ElementSize * mesh.VertexCount;
+            var elementsBufferSize = mesh.ElementSize * mesh.VertexCount;
             var indexBufferSize = mesh.IndexSize * mesh.IndexCount;
 
             mesh.Positions = reader.ReadBytes(Mesh.PositionSize * mesh.VertexCount);
-            mesh.Elements = reader.ReadBytes(elementBufferSize);
+            mesh.Elements = reader.ReadBytes(elementsBufferSize);
             mesh.Indices = reader.ReadBytes(indexBufferSize);
 
             MeshLOD lod;
@@ -407,35 +421,25 @@ namespace PrimalEditor.Content
             lod.Meshes.Add(mesh);
         }
 
-        public override void Import(string file)
+        public override bool Import(string file)
         {
             Debug.Assert(File.Exists(file));
             Debug.Assert(!string.IsNullOrEmpty(FullPath));
             var ext = Path.GetExtension(file).ToLower();
 
-            SourcePath = file;
+            if(ext == ".fbx")
+            {
+                return ImportFbx(file);
+            }
 
-            try
-            {
-                if(ext == ".fbx")
-                {
-                    ImportFbx(file);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine(ex.Message);
-                var msg = $"Failed to read {file} for import.";
-                Debug.WriteLine(msg);
-                Logger.Log(MessageType.Error, msg);
-            }
+            return false;
         }
 
-        private void ImportFbx(string file)
+        private bool ImportFbx(string file)
         {
             Logger.Log(MessageType.Info, $"Importing FBX file {file}");
             var tempPath = Application.Current.Dispatcher.Invoke(() => Project.Current.TempFolder);
-            if (string.IsNullOrEmpty(tempPath)) return;
+            if (string.IsNullOrEmpty(tempPath)) return false;
 
             lock(_lock)
             {
@@ -444,10 +448,36 @@ namespace PrimalEditor.Content
 
             var tempFile = $"{tempPath}{ContentHelper.GetRandomString()}.fbx";
             File.Copy(file, tempFile, true);
-            ContentToolsAPI.ImportFbx(tempFile, this);
+            bool result = false;
+
+            try
+            {
+                ContentToolsAPI.ImportFbx(tempFile, this);
+                result = true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+                var msg = $"Failed to read {file} for import";
+                Debug.WriteLine(msg);
+                Logger.Log(MessageType.Error, msg );
+            }
+
+            if(ImportSettings.ImportEmbeddedTextures)
+            {
+                var embeddedMediaDir = $@"{tempPath}{Path.GetFileNameWithoutExtension(tempFile)}.fbm{Path.DirectorySeparatorChar}";
+                if(Directory.Exists(embeddedMediaDir))
+                {
+                    Debug.Assert(!string.IsNullOrEmpty(FullPath));
+                    var files = Directory.GetFiles(embeddedMediaDir);
+                    new ConfigureImportSettings(files, Path.GetDirectoryName(FullPath)).Import();
+                }
+            }
+
+            return result;
         }
 
-        public override void Load(string file)
+        public override bool Load(string file)
         {
             Debug.Assert(File.Exists(file));
             Debug.Assert(Path.GetExtension(file).ToLower() == AssetFileExtension);
@@ -468,7 +498,7 @@ namespace PrimalEditor.Content
 
                 using(var reader = new BinaryReader(new MemoryStream(data)))
                 {
-                    LodGroup lodGroup = new LodGroup();
+                    LodGroup lodGroup = new();
                     lodGroup.Name = reader.ReadString();
                     var lodCount = reader.ReadInt32();
 
@@ -481,14 +511,17 @@ namespace PrimalEditor.Content
                 }
 
                 // For testing
-                PackForEngine();
+                // PackForEngine();
                 // For testing
+                return true;
             }
             catch(Exception ex)
             {
                 Debug.WriteLine(ex.Message);
                 Logger.Log(MessageType.Error, $"Failed to load geometry asset from file: {file}");
             }
+            
+            return false;
         }
 
         public override IEnumerable<string> Save(string file)
@@ -541,6 +574,8 @@ namespace PrimalEditor.Content
                     Logger.Log(MessageType.Info, $"Saved geometry to {meshFileName}");
                     savedFiles.Add(meshFileName);
                 }
+
+                FullPath = file;
             }
             catch (Exception ex)
             {
@@ -681,33 +716,32 @@ namespace PrimalEditor.Content
             return lod;
         }
 
-        private byte[] GenerateIcon(MeshLOD lod)
+        private static byte[] GenerateIcon(MeshLOD lod)
         {
             var width = ContentInfo.IconWidth * 4;
-
-            using var memStream = new MemoryStream();
-            BitmapSource bmp = null;
+            byte[] icon = null;
 
             //Note: it's not good practice to use a WPF control (view) in the ViewModel
             //      Butwe need to make an exception for this case, for as long as we don't
             //      have a graphics renderer that we can use for screenshots.
             Application.Current.Dispatcher.Invoke(() =>
             {
-                bmp = Editors.GeometryView.RenderToBitmap(new Editors.MeshRenderer(lod, null), width, width);
-                bmp = new TransformedBitmap(bmp, new ScaleTransform(0.25, 0.25, 0.5, 0.5));
-
-                memStream.SetLength(0);
-
-                var encoder = new PngBitmapEncoder();
-                encoder.Frames.Add(BitmapFrame.Create(bmp));
-                encoder.Save(memStream);
+                // Create an image that's 4x larger, so it's softened when it's scaled down.
+                var bmp = Editors.GeometryView.RenderToBitmap(new Editors.MeshRenderer(lod, null), width, width);
+                icon = BitmapHelper.CreateThumbnail(bmp, ContentInfo.IconWidth, ContentInfo.IconWidth);
             });
 
-            return memStream.ToArray();
+            return icon;
         }
 
         public Geometry() : base(AssetType.Mesh)
         {
+        }
+
+        public Geometry(IAssetImportSettings importSettings) : this()
+        {
+            Debug.Assert(importSettings is GeometryImportSettings);
+            ImportSettings = (GeometryImportSettings)importSettings;
         }
     }
 }

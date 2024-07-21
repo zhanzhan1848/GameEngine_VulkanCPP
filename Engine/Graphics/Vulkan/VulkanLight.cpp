@@ -1003,8 +1003,31 @@ namespace primal::graphics::vulkan::light
 		return true;
 	}
 
+	void shutdown()
+	{
+		assert(light_sets.empty());
+		for (u32 i{ 0 }; i < frame_buffer_count; ++i)
+		{
+			light_buffers[i].release();
+		}
+	}
+
+	void create_light_set(u64 light_set_key)
+	{
+		assert(!light_sets.count(light_set_key));
+		light_sets[light_set_key] = {};
+	}
+
+	void remove_light_set(u64 light_set_key)
+	{
+		assert(light_sets.count(light_set_key));
+		assert(!light_sets[light_set_key].has_lights());
+		light_sets.erase(light_set_key);
+	}
+
 	graphics::light create(light_init_info info)
 	{
+		assert(light_sets.count(info.light_set_key));
 		assert(id::is_valid(info.entity_id));
 		return light_sets[info.light_set_key].add(info);
 	}

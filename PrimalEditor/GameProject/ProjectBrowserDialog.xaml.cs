@@ -20,7 +20,7 @@ namespace PrimalEditor.GameProject
     /// </summary>
     public partial class ProjectBrowserDialog : Window
     {
-        private readonly CubicEase _esing = new CubicEase() { EasingMode = EasingMode.EaseInOut };
+        private readonly CubicEase _esing = new() { EasingMode = EasingMode.EaseInOut };
 
         public static bool GotoNewProjectTab { get; set; }
 

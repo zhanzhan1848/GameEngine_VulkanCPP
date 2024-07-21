@@ -13,5 +13,11 @@
     <ClCompile Include="Geometry.cpp" />
     <ClCompile Include="FbxImporter.cpp" />
     <ClCompile Include="ObjImporter.cpp" />
+    <ClCompile Include="TextureImporter.cpp" />
+    <ClCompile Include="NormalMapIdentification.cpp" />
+    <ClCompile Include="ContentTools.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>
