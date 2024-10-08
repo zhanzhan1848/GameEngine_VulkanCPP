@@ -403,6 +403,15 @@ namespace PrimalEditor.DllWrappers
             ProgressCallback callback = item != null ? item.SetProgress : null;
             GeometryFromSceneData(geometry, (sceneData) => ImportFbx(file, sceneData, callback), $"Failed to import fram FBX file: {file}");
         }
+
+        [DllImport(_toolsDLL)]
+        private static extern void ImportObjAPI(string file, [In, Out] SceneData data, ProgressCallback callback);
+        public static void ImportObj(string file, Content.Geometry geometry)
+        {
+            var item = ImportingItemCollection.GetItem(geometry);
+            ProgressCallback callback = item != null ? item.SetProgress : null;
+            GeometryFromSceneData(geometry, (sceneData) => ImportObjAPI(file, sceneData, callback), $"Failed to import fram OBJ file: {file}");
+        }
         #endregion 
     }
 }

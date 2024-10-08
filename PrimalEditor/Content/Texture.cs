@@ -145,6 +145,7 @@ namespace PrimalEditor.Content
     }
 
     // NOTE: should be the same as primal::content::texture_flags::flags enumeration in ContentToEngine.h
+    [Flags]
     enum TextureFlags : int
     {
         IsHDR = 0x01,
@@ -473,7 +474,7 @@ namespace PrimalEditor.Content
             }
             else if(arrayOrDepth > MaxArraySize)
             {
-                Logger.Log(MessageType.Error, $"2D texture dimensions greater than {MaxArraySize}! (file: {file})");
+                Logger.Log(MessageType.Error, $"2D texture array size greater than {MaxArraySize}! (file: {file})");
                 result = false;
             }
 
@@ -563,6 +564,10 @@ namespace PrimalEditor.Content
                 HasValidDimensions(Width, Height, ArraySize, IsVolumeMap, file);
                 FullPath = file;
 
+                // For testing
+                PackForEngine();
+                // For testing
+
                 return true;
             }
             catch(Exception ex)
@@ -574,9 +579,56 @@ namespace PrimalEditor.Content
             return false;
         }
 
+        /// <summary>
+        /// Packs the texture into a byte array which can be used by the engine
+        /// </summary>
+        /// <returns>
+        /// struct {
+        ///         u32 width, height, array_size(or depth), flags, mip_levels, format,
+        ///         struct{
+        ///             u32 width, height, row_pitch, slice_pitch,
+        ///             u8 image[slice_pitch],
+        ///         } images[]
+        /// } texture
+        /// </returns>
         public override byte[] PackForEngine()
         {
-            throw new NotImplementedException();
+            using var writer = new BinaryWriter(new MemoryStream());
+            writer.Write(Width);
+            writer.Write(Height);
+            writer.Write(ArraySize);
+            writer.Write((int)Flags);
+            writer.Write(MipLevels);
+            writer.Write((int)Format);
+
+            Debug.Assert(Slices?.Any() == true);
+            foreach(var arraySlice in Slices)
+            {
+                foreach(var miplevel in arraySlice)
+                {
+                    foreach(var slice in miplevel)
+                    {
+                        writer.Write(slice.Width);
+                        writer.Write(slice.Height);
+                        writer.Write(slice.RowPitch);
+                        writer.Write(slice.SlicePitch);
+                        writer.Write(slice.RawContent);
+                    }
+                }
+            }
+
+            writer.Flush();
+            var data = (writer.BaseStream as MemoryStream)?.ToArray();
+            Debug.Assert(data?.Length > 0);
+
+            // For testing 
+            using (var fs = new FileStream(@"..\..\x64\texxture.img", FileMode.Create))
+            {
+                fs.Write(data, 0, data.Length);
+            }
+            // For testing
+
+            return data;
         }
 
         public override IEnumerable<string> Save(string file)

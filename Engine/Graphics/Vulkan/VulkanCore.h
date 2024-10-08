@@ -15,6 +15,7 @@ VkCommandPool get_current_command_pool();
 bool detect_depth_format(VkPhysicalDevice physical_device);
 bool detect_push_descriptor(VkPhysicalDevice physical_device);
 bool detect_subgroup(VkPhysicalDevice physical_device);
+VkPhysicalDeviceProperties get_physical_properties();
 s32 find_memory_index(u32 type, u32 flags);
 
 u32 get_frame_index();

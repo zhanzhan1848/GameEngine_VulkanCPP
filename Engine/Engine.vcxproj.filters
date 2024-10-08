@@ -693,5 +693,6 @@
     <None Include="Graphics\Vulkan\Shaders\ssao.frag" />
     <None Include="Graphics\Vulkan\Shaders\composition.frag" />
     <None Include="packages.config" />
+    <None Include=".gitignore" />
   </ItemGroup>
 </Project>

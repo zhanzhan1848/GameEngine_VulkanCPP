@@ -431,6 +431,10 @@ namespace PrimalEditor.Content
             {
                 return ImportFbx(file);
             }
+            else if(ext == ".obj")
+            {
+                return ImportObj(file);
+            }
 
             return false;
         }
@@ -477,6 +481,57 @@ namespace PrimalEditor.Content
             return result;
         }
 
+        private bool ImportObj(string file)
+        {
+            Logger.Log(MessageType.Info, $"Importing OBJ file {file}");
+            var tempPath = Application.Current.Dispatcher.Invoke(() => Project.Current.TempFolder);
+            if (string.IsNullOrEmpty(tempPath)) return false;
+
+            lock (_lock)
+            {
+                if (!Directory.Exists(tempPath)) Directory.CreateDirectory(tempPath);
+            }
+
+            // Get MTL File path and name
+            var originFileName = Path.GetFileNameWithoutExtension(file);
+            var mtlFile = file.Replace(".obj", ".mtl");
+
+            var tempFileName = $"{tempPath}{ContentHelper.GetRandomString()}";
+            var tempFile = $"{tempFileName}.obj";
+            var tempMtlFile = $"{tempFileName}.mtl";
+            var originMtlFile = $"{tempPath}{originFileName}.mtl";
+            File.Copy(file, tempFile, true);
+            File.Copy(mtlFile, tempMtlFile, true);
+            File.Copy(mtlFile, originMtlFile, true);
+            bool result = false;
+
+            try
+            {
+                ContentToolsAPI.ImportObj(tempFile, this);
+                result = true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+                var msg = $"Failed to read {file} for import";
+                Debug.WriteLine(msg);
+                Logger.Log(MessageType.Error, msg);
+            }
+
+            if (ImportSettings.ImportEmbeddedTextures)
+            {
+                var embeddedMediaDir = $@"{tempPath}{Path.GetFileNameWithoutExtension(tempFile)}.fbm{Path.DirectorySeparatorChar}";
+                if (Directory.Exists(embeddedMediaDir))
+                {
+                    Debug.Assert(!string.IsNullOrEmpty(FullPath));
+                    var files = Directory.GetFiles(embeddedMediaDir);
+                    new ConfigureImportSettings(files, Path.GetDirectoryName(FullPath)).Import();
+                }
+            }
+
+            return result;
+        }
+
         public override bool Load(string file)
         {
             Debug.Assert(File.Exists(file));
@@ -511,7 +566,7 @@ namespace PrimalEditor.Content
                 }
 
                 // For testing
-                // PackForEngine();
+                PackForEngine();
                 // For testing
                 return true;
             }
@@ -650,7 +705,7 @@ namespace PrimalEditor.Content
             Debug.Assert(data?.Length > 0);
 
             // For testing 
-            using(var fs = new FileStream(@"..\..\EngineTest\model.model", FileMode.Create))
+            using(var fs = new FileStream(@"..\..\x64\model.model", FileMode.Create))
             {
                 fs.Write(data, 0, data.Length);
             }

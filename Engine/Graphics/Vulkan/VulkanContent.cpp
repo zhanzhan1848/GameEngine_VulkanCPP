@@ -165,9 +165,6 @@ namespace primal::graphics::vulkan
 			vkDestroyBuffer(core::logical_device(), stagingBuffer, nullptr);
 			vkFreeMemory(core::logical_device(), stagingMemory, nullptr);
 
-			VkPhysicalDeviceProperties properties;
-			vkGetPhysicalDeviceProperties(core::physical_device(), &properties);
-
 			VkSamplerCreateInfo samplerInfo;
 			samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
 			samplerInfo.pNext = nullptr;
@@ -181,7 +178,7 @@ namespace primal::graphics::vulkan
 			samplerInfo.minLod = 0.0f;
 			samplerInfo.maxLod = 0.0f;
 			samplerInfo.anisotropyEnable = VK_TRUE;
-			samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
+			samplerInfo.maxAnisotropy = core::get_physical_properties().limits.maxSamplerAnisotropy;
 			samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
 			samplerInfo.unnormalizedCoordinates = VK_FALSE;
 			samplerInfo.compareEnable = VK_FALSE;
@@ -343,9 +340,18 @@ namespace primal::graphics::vulkan
 	{
 		namespace 
 		{
+			struct vulkan_submesh_buffer
+			{
+				id::id_type					positions_buffer;
+				id::id_type					elements_buffer;
+				id::id_type					indices_buffer;
+			};
+
+			utl::free_list<vulkan_submesh_buffer>					_submeshes;
+
 			utl::free_list<vulkan_model>							_models;
 		} // anonymous namespace
-	
+
 		vulkan_model::vulkan_model(const void* const data)
 		{
 			utl::vector<geometry_config>* geos{ (utl::vector<geometry_config>*)data };
@@ -556,7 +562,50 @@ namespace primal::graphics::vulkan
 			return _models.add(data);
 		}
 
-		void remove_model(id::id_type id)
+		id::id_type add(const u8*& data)
+		{
+			utl::blob_stream_reader blob{ (const u8*)data };
+
+			const u32 element_size{ blob.read<u32>() };
+			const u32 vertex_count{ blob.read<u32>() };
+			const u32 index_count{ blob.read<u32>() };
+			const u32 elements_type{ blob.read<u32>() };
+			const u32 primitive_topology{ blob.read<u32>() };
+			const u32 index_size{ (vertex_count < (1 << 16)) ? sizeof(u16) : sizeof(u32) };
+
+			// NOTE: element size may be 0, for position-only vertex formats.
+			const u32 position_buffer_size{ sizeof(math::v3) * vertex_count };
+			const u32 element_buffer_size{ element_size * vertex_count };
+			const u32 index_buffer_size{ index_size * index_count };
+
+			const u64 alignment{ core::get_physical_properties().limits.minMemoryMapAlignment };
+			const u32 aligned_position_buffer_size{ (u32)math::align_size_up(position_buffer_size, alignment) };
+			const u32 aligned_element_buffer_size{ (u32)math::align_size_up(element_buffer_size, alignment) };
+			const u32 total_buffer_size{ aligned_position_buffer_size + aligned_element_buffer_size + index_buffer_size };
+
+			vulkan_submesh_buffer buffer{};
+			auto flags = data::vulkan_buffer::static_vertex_buffer;
+			buffer.positions_buffer = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), position_buffer_size);
+			data::get_data<data::vulkan_buffer>(buffer.positions_buffer).update(blob.position(), position_buffer_size);
+			data::get_data<data::vulkan_buffer>(buffer.positions_buffer).convert_to_local_device_buffer();
+			blob.skip(position_buffer_size);
+
+			buffer.elements_buffer = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags), element_buffer_size);
+			data::get_data<data::vulkan_buffer>(buffer.elements_buffer).update(blob.position(), element_buffer_size);
+			data::get_data<data::vulkan_buffer>(buffer.elements_buffer).convert_to_local_device_buffer();
+			blob.skip(element_buffer_size);
+
+			auto flags2 = data::vulkan_buffer::static_index_buffer;
+			buffer.indices_buffer = data::create_data(data::engine_vulkan_data::vulkan_buffer, (void*)(&flags2), index_buffer_size);
+			data::get_data<data::vulkan_buffer>(buffer.indices_buffer).update(blob.position(), index_buffer_size);
+			data::get_data<data::vulkan_buffer>(buffer.indices_buffer).convert_to_local_device_buffer();
+			blob.skip(index_buffer_size);
+			data = blob.position();
+
+			return _submeshes.add(buffer);
+		}
+
+		void remove(id::id_type id)
 		{
 			_models.remove(id);
 		}

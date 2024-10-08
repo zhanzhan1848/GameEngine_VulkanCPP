@@ -361,6 +361,7 @@ using surface_collection = utl::free_list<vulkan_surface>;
 
 //const utl::vector<const char*>	device_extensions{ 1, VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 const std::vector<const char*>  device_extensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, "VK_KHR_maintenance4" };
+VkPhysicalDeviceProperties      physical_properties;
 VkInstance						instance{ nullptr };
 VkFormat						device_depth_format{ VK_FORMAT_UNDEFINED };
 vulkan_command					gfx_command;
@@ -549,6 +550,8 @@ get_physical_device(VkSurfaceKHR surface)
         MESSAGE("Failed to find suitable physical device...");
         return false;
     }
+
+    vkGetPhysicalDeviceProperties(core::physical_device(), &physical_properties);
 
     MESSAGE("Physical device found successfully");
 
@@ -838,6 +841,11 @@ bool detect_subgroup(VkPhysicalDevice physical_device)
     vkGetPhysicalDeviceProperties2(physical_device, &physicalDeviceProperties);
 
     return true;
+}
+
+VkPhysicalDeviceProperties get_physical_properties()
+{
+    return physical_properties;
 }
 
 s32

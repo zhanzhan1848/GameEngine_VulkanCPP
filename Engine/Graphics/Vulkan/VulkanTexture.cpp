@@ -106,7 +106,7 @@ namespace primal::graphics::vulkan
 		samplerInfo.minLod = 0.0f;
 		samplerInfo.maxLod = 0.0f;
 		samplerInfo.anisotropyEnable = VK_TRUE;
-		samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
+		samplerInfo.maxAnisotropy = core::get_physical_properties().limits.maxSamplerAnisotropy;
 		samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
 		samplerInfo.unnormalizedCoordinates = VK_FALSE;
 		samplerInfo.compareEnable = VK_FALSE;

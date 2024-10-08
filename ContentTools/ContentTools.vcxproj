@@ -81,6 +81,9 @@
       <ImportLibrary>$(ProjectName).lib</ImportLibrary>
       <AdditionalOptions>/ignore:4099 %(AdditionalOptions)</AdditionalOptions>
     </Link>
+    <PostBuildEvent>
+      <Command>C:\Users\zy\Desktop\Analysis_toolkit\TscanCode\TscanCode\trunk\bin\tscancode.exe --enable=all -q $(ProjectDir)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseEditor|x64'">
     <ClCompile>
@@ -115,6 +118,7 @@
   <ItemGroup>
     <ClInclude Include="FbxImporter.h" />
     <ClInclude Include="Geometry.h" />
+    <ClInclude Include="meshoptimizer\meshoptimizer.h" />
     <ClInclude Include="ObjImporter.h" />
     <ClInclude Include="PrimitiveMesh.h" />
     <ClInclude Include="TemplateShader\PBR_Template_Shader_v1.h" />
@@ -124,12 +128,29 @@
     <ClCompile Include="ContentTools.cpp" />
     <ClCompile Include="FbxImporter.cpp" />
     <ClCompile Include="Geometry.cpp" />
+    <ClCompile Include="meshoptimizer\allocator.cpp" />
+    <ClCompile Include="meshoptimizer\clusterizer.cpp" />
+    <ClCompile Include="meshoptimizer\indexcodec.cpp" />
+    <ClCompile Include="meshoptimizer\indexgenerator.cpp" />
+    <ClCompile Include="meshoptimizer\overdrawanalyzer.cpp" />
+    <ClCompile Include="meshoptimizer\overdrawoptimizer.cpp" />
+    <ClCompile Include="meshoptimizer\quantization.cpp" />
+    <ClCompile Include="meshoptimizer\simplifier.cpp" />
+    <ClCompile Include="meshoptimizer\spatialorder.cpp" />
+    <ClCompile Include="meshoptimizer\stripifier.cpp" />
+    <ClCompile Include="meshoptimizer\vcacheanalyzer.cpp" />
+    <ClCompile Include="meshoptimizer\vcacheoptimizer.cpp" />
+    <ClCompile Include="meshoptimizer\vertexcodec.cpp" />
+    <ClCompile Include="meshoptimizer\vertexfilter.cpp" />
+    <ClCompile Include="meshoptimizer\vfetchanalyzer.cpp" />
+    <ClCompile Include="meshoptimizer\vfetchoptimizer.cpp" />
     <ClCompile Include="NormalMapIdentification.cpp" />
     <ClCompile Include="ObjImporter.cpp" />
     <ClCompile Include="PrimitiveMesh.cpp" />
     <ClCompile Include="TextureImporter.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include=".gitignore" />
     <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -6,6 +6,7 @@
 #include "VulkanCamera.h"
 #include "VulkanLight.h"
 #include "Graphics/GraphicsPlatformInterface.h"
+#include "VulkanContent.h"
 
 namespace primal::graphics::vulkan {
 
@@ -32,8 +33,8 @@ namespace primal::graphics::vulkan {
         pi.camera.remove = camera::remove;
         pi.camera.set_parameter = camera::set_parameter;
         pi.camera.get_parameter = camera::get_parameter;
-        /*pi.resources.add_submesh = content::submesh::add;
-        pi.resources.remove_submesh = content::submesh::remove;*/
+        pi.resources.add_submesh = submesh::add;
+        pi.resources.remove_submesh = submesh::remove;
 
         pi.platform = graphics_platform::vulkan_1;
     }

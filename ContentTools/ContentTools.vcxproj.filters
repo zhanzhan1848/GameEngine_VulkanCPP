@@ -7,6 +7,7 @@
     <ClInclude Include="FbxImporter.h" />
     <ClInclude Include="ObjImporter.h" />
     <ClInclude Include="TemplateShader\PBR_Template_Shader_v1.h" />
+    <ClInclude Include="meshoptimizer\meshoptimizer.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="PrimitiveMesh.cpp" />
@@ -16,8 +17,25 @@
     <ClCompile Include="TextureImporter.cpp" />
     <ClCompile Include="NormalMapIdentification.cpp" />
     <ClCompile Include="ContentTools.cpp" />
+    <ClCompile Include="meshoptimizer\allocator.cpp" />
+    <ClCompile Include="meshoptimizer\clusterizer.cpp" />
+    <ClCompile Include="meshoptimizer\indexcodec.cpp" />
+    <ClCompile Include="meshoptimizer\indexgenerator.cpp" />
+    <ClCompile Include="meshoptimizer\overdrawanalyzer.cpp" />
+    <ClCompile Include="meshoptimizer\overdrawoptimizer.cpp" />
+    <ClCompile Include="meshoptimizer\quantization.cpp" />
+    <ClCompile Include="meshoptimizer\simplifier.cpp" />
+    <ClCompile Include="meshoptimizer\spatialorder.cpp" />
+    <ClCompile Include="meshoptimizer\stripifier.cpp" />
+    <ClCompile Include="meshoptimizer\vcacheanalyzer.cpp" />
+    <ClCompile Include="meshoptimizer\vcacheoptimizer.cpp" />
+    <ClCompile Include="meshoptimizer\vertexcodec.cpp" />
+    <ClCompile Include="meshoptimizer\vertexfilter.cpp" />
+    <ClCompile Include="meshoptimizer\vfetchanalyzer.cpp" />
+    <ClCompile Include="meshoptimizer\vfetchoptimizer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
+    <None Include=".gitignore" />
   </ItemGroup>
 </Project>

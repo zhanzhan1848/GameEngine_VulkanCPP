@@ -694,6 +694,7 @@
     <ClCompile Include="TaskScheduler\TaskScheduler.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include=".gitignore" />
     <None Include="Graphics\Vulkan\Shaders\compileShaders.bat" />
     <None Include="Graphics\Vulkan\Shaders\compileShaders2.bat" />
     <None Include="Graphics\Vulkan\Shaders\composition.frag" />

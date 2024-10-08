@@ -222,6 +222,7 @@ namespace primal::graphics::vulkan
 		// TODO: complete the parameter
 		// ! When load model to engine, call this function to get vulkan model id
 		id::id_type add(const void* const data);
+		id::id_type add(const u8*& data);
 		void remove(id::id_type id);
 		vulkan_model get_model(id::id_type id);
 	}

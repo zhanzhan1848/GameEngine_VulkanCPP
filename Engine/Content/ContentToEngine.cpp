@@ -33,13 +33,13 @@ namespace primal::content
 
 			u32 lod_from_threshold(f32 threshold)
 			{
-				assert(threshold > 0);
+				assert(threshold >= 0);
 				if (_lod_count == 1) return 0;
 				for (u32 i{ _lod_count - 1 }; i > 0; --i)
 				{
 					if (_thresholds[i] <= threshold) return i;
 				}
-				assert(false); // shouldn't ever get here.
+				// assert(false); // shouldn't ever get here.
 				return 0;
 			}
 
@@ -230,7 +230,7 @@ namespace primal::content
 		// (gpu_id << 32) | 0x01
 		//
 
-		id::id_type create_geometry_resource(const void *const data)
+		[[nodiscard]] id::id_type create_geometry_resource(const void *const data)
 		{
 			assert(data);
 			return is_single_mesh(data) ? create_single_submesh(data) : create_mesh_hierarchy(data);
@@ -271,7 +271,7 @@ namespace primal::content
 		//  id::id_type			shader_ids[shader_type::count];
 		//  id::id_type*		texture_ids;
 		//	} material_init_info;
-		id::id_type create_material_resource(const void *const data)
+		[[nodiscard]] id::id_type create_material_resource(const void *const data)
 		{
 			assert(data);
 			return graphics::add_material(*(const graphics::material_init_info *const)data);
@@ -280,6 +280,25 @@ namespace primal::content
 		void destory_material_resource(id::id_type id)
 		{
 			graphics::remove_material(id);
+		}
+
+		// NOTE: expects data to contain
+		// struct {
+		//         u32 width, height, array_size(or depth), flags, mip_levels, format,
+		//         struct{
+		//             u32 width, height, row_pitch, slice_pitch,
+		//             u8 image[slice_pitch],
+		//         } images[]
+		// } texture
+		[[nodiscard]] id::id_type create_texture_resource(const void *const data)
+		{
+			assert(data);
+			return graphics::add_texture((const u8 *const)data);
+		}
+
+		void destory_texture_resource(id::id_type id)
+		{
+			graphics::remove_texture(id);
 		}
 
 	} // anonymous namespace
@@ -296,8 +315,7 @@ namespace primal::content
 		case asset_type::material:			id = create_material_resource(data);						break;
 		case asset_type::mesh:				id = create_geometry_resource(data);						break;
 		case asset_type::skeleton:																		break;
-		case asset_type::texture:																		break;
-		case asset_type::count:																			break;
+		case asset_type::texture:			id = create_texture_resource(data);							break;
 		}
 
 		assert(id::is_valid(id));
@@ -305,6 +323,25 @@ namespace primal::content
 		return id;
 	}
 
+	void destroy_resource(id::id_type id, asset_type::type type)
+	{
+		assert(id::is_valid(id));
+		switch (type)
+		{
+		case asset_type::animation:																		break;
+		case asset_type::audio:																			break;
+		case asset_type::material:			destory_material_resource(id);								break;
+		case asset_type::mesh:				destory_geometry_resource(id);								break;
+		case asset_type::skeleton:																		break;
+		case asset_type::texture:			destory_texture_resource(id);								break;
+		default:
+			assert(false);
+			break;
+		}
+	}
+
+	// NOTE: expect shaders to be an array of pointers to compiled_shaders
+	// NOTE: the editor is responsible for making sure that there are no duplicate shaders. If there are, we'll happily add them!
 	id::id_type add_shader_group(const u8* const* shaders, u32 num_shaders, const u32* const keys)
 	{
 		assert(shaders && num_shaders && keys);
@@ -342,24 +379,6 @@ namespace primal::content
 			{
 				return (const compiled_shader_ptr)value.get();
 			}
-		}
-	}
-
-	void destroy_resource(id::id_type id, asset_type::type type)
-	{
-		assert(id::is_valid(id));
-		switch (type)
-		{
-		case asset_type::animation:																		break;
-		case asset_type::audio:																			break;
-		case asset_type::material:			destory_material_resource(id);								break;
-		case asset_type::mesh:				destory_geometry_resource(id);								break;
-		case asset_type::skeleton:																		break;
-		case asset_type::texture:																		break;
-		case asset_type::count:																			break;
-		default:
-			assert(false);
-			break;
 		}
 	}
 

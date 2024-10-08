@@ -60,7 +60,7 @@ namespace PrimalEditor
 
     public static class ContentHelper
     {
-        public static string[] MeshFileExtensions { get; } = { ".fbx" };
+        public static string[] MeshFileExtensions { get; } = { ".fbx", ".obj" };
         public static string[] ImageFileExtensions { get; } = { ".bmp", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".tga", ".dds", ".hdr" };
         public static string[] AudioFileExtensions { get; } = { ".ogg", ".wav" };
 

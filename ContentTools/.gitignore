@@ -1,0 +1,4 @@
+meshoptimizer/*
+CMakeLists.txt
+ContentTools.exp
+ContentTools.lib

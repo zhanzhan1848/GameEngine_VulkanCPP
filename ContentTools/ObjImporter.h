@@ -2,8 +2,54 @@
 
 #include "ToolsCommon.h"
 
+#define TINYOBJLOADER_IMPLEMENTATION
+#include "Content/tiny_obj_loader.h"
+
 namespace primal::tools
 {
+    struct scene_data;
+    struct scene;
+    struct mesh;
+    struct lod_group;
+    struct geeometry_import_settings;
+
+    class obj_context
+    {
+    public:
+        obj_context(const char* file, scene* scene, scene_data* data, progression *const progression)
+            : _scene{ scene }, _scene_data{ data }, _progression{ progression }
+        {
+            assert(file && _scene && _scene_data && _progression);
+            load_obj_file(file);
+        }
+
+        ~obj_context()
+        {
+            ZeroMemory(this, sizeof(obj_context));
+        }
+
+        void get_scene();
+
+        constexpr f32 scene_scale() const { return _scene_scale; }
+        constexpr progression* get_progression() const { return _progression; }
+
+    private:
+
+        void load_obj_file(const char* file);
+        void get_meshes(utl::vector<mesh>& meshes, u32 lod_id, f32 lod_threshold);
+        void get_mesh(utl::vector<mesh>& meshes, u32 lod_id, f32 lod_threshold);
+        void get_lod_group(const utl::vector<mesh>& meshes, u32 lod_id, f32 lod_threshold);
+        bool get_mesh_data(tinyobj::shape_t* shape, mesh& m);
+
+        scene*							        _scene{ nullptr };
+        scene_data*						        _scene_data{ nullptr };
+        progression*					        _progression{ nullptr };
+        f32								        _scene_scale{ 1.0f };
+        tinyobj::attrib_t                       _attribute;
+        std::vector<tinyobj::shape_t>           _shapes;
+        std::vector<tinyobj::material_t>        _materials;
+    };
+
     struct Vertex
     {
         math::v3 pos;

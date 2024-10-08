@@ -1,17 +1,18 @@
 #include "ObjImporter.h"
 
-#define TINYOBJLOADER_IMPLEMENTATION
-#include "Content/tiny_obj_loader.h"
 #include <unordered_map>
 #include <direct.h>
 #include <io.h>
+#include "Geometry.h"
 
 #include <stdio.h>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <string>
 #include "../Engine/Utilities/IOStream.h"
 #include "TemplateShader/PBR_Template_Shader_v1.h"
+#include "meshoptimizer/meshoptimizer.h"
 
 namespace primal::tools
 {
@@ -526,21 +527,316 @@ namespace primal::tools
 
 			shaderconstantdst << shaderconstantsrc.rdbuf();
 		}
+
+		/// <summary>
+		/// Mesh Optimizing Pipeline (Use meshoptimizer library)
+		/// https://github.com/zeux/meshoptimizer
+		/// 
+		/// Pipeline(the order is important!):
+		/// 1. Indexing
+		/// 2. (optional) Simplification (Use to generate lod)
+		/// 3. Vertex cache optimization
+		/// 4. Overdraw optimization
+		/// 5. Vertex fetch optimization
+		/// 6. Vertex quantization
+		/// 7. Shadow indexing
+		/// 8. (optional) Vertex/Index buffer compression (maybe do this in graphics core)
+		/// 
+		/// Meshes input, output meshes after optimize and generate next level lod
+		/// </summary>
+		/*void Mesh_Optimiziong(mesh& mesh, const f32 lod_precent, lod_group& lod)
+		{
+			u32 index_count = mesh.raw_indices.size();
+			u32 unindexed_vertex_count = mesh.raw_indices.size() / 3;
+
+			utl::vector<u32> remap{ index_count };
+			u32 vertex_count = meshopt_generatevertexremap(&remap[0], mesh.raw_indices.data(), index_count, mesh.positions.data(), unindexed_vertex_count, sizeof(math::v3));
+		}*/
 	} // anonymous namespace
+
+	void obj_context::load_obj_file(const char* file)
+	{
+		std::string path{ file };
+		size_t pos = path.rfind("\\", path.length());
+		std::string base_file_path{ path.substr(0, pos) };
+
+		std::string warn, err;
+
+		if (!tinyobj::LoadObj(&_attribute, &_shapes, &_materials, &warn, &err, file, base_file_path.c_str()))
+		{
+			throw std::runtime_error(warn + err);
+		}
+	}
+
+	void obj_context::get_scene()
+	{
+		if (_scene_data->settings.coalesce_meshes)
+		{
+			lod_group lod{};
+			get_meshes(lod.meshes, 0, -1.f);
+
+			if (lod.meshes.size())
+			{
+				lod.name = lod.meshes[0].name;
+				mesh combined_mesh{};
+				if (coalesce_meshes(lod, combined_mesh, _progression))
+				{
+					lod.meshes.clear();
+					lod.meshes.emplace_back(combined_mesh);
+				}
+				_scene->lod_groups.emplace_back(lod);
+			}
+
+			get_lod_group(lod.meshes, 1, 20.f);
+		}
+		else
+		{
+
+			lod_group lod{};
+			get_meshes(lod.meshes, 0, -1.f);
+			if (lod.meshes.size())
+			{
+				lod.name = lod.meshes[0].name;
+				_scene->lod_groups.emplace_back(lod);
+			}
+
+			get_lod_group(lod.meshes, 1, 20.f);
+		}
+	}
+
+	void obj_context::get_lod_group(const utl::vector<mesh>& meshes, u32 lod_id, f32 lod_threshold)
+	{
+		// Generate LOD group using meshoptimizer library
+		// size_t meshopt_simplify(unsigned int* destination, 
+		//						   const unsigned int* indices,	
+		//						   size_t index_count, 
+		//						   const float* vertex_positions, 
+		//						   size_t vertex_count, 
+		//						   size_t vertex_positions_stride, 
+		//						   size_t target_index_count, 
+		//						   float target_error, 
+		//						   unsigned int options, 
+		//						   float* result_error)
+		if (lod_id > 5) return;
+		lod_group lod{};
+		lod.name = meshes[0].name;
+		for (auto& m : meshes)
+		{
+			mesh submesh{};
+			submesh.positions = m.positions;
+			submesh.name = m.name;
+			submesh.lod_id = lod_id;
+			submesh.lod_threshold = lod_threshold;
+			submesh.colors = m.colors;
+			submesh.normals = m.normals;
+			submesh.tangents = m.tangents;
+			submesh.uv_sets = m.uv_sets;
+			submesh.material_indices = m.material_indices;
+			submesh.material_used = m.material_used;
+			if (m.raw_indices.size() > 24)
+			{
+				u32 target_index_count{ static_cast<u32>(std::floor(m.raw_indices.size() * 0.8f)) - static_cast<u32>(std::floor(m.raw_indices.size() * 0.8f)) % 3 };
+				utl::vector<u32> dst_indices(m.raw_indices.size());
+				f32 error;
+				u64 simplify_indices_count = meshopt_simplify(dst_indices.data(),
+					m.raw_indices.data(),
+					m.raw_indices.size(),
+					reinterpret_cast<f32*>(m.positions.data()), // 由于math::v3是DirectX::FLOAT3,是一个结构体，成员x、y、z是内存连续的，所以可以通过这个方式访问
+					m.positions.size(),
+					sizeof(math::v3),
+					(u64)target_index_count,
+					(f32)0.01,
+					(u32)0,
+					&error);
+				dst_indices.resize(simplify_indices_count);
+				submesh.raw_indices = dst_indices;
+			}
+			else
+			{
+				submesh.raw_indices = m.raw_indices;
+			}
+			
+			lod.meshes.emplace_back(submesh);
+		}
+		if (lod.meshes.size()) _scene->lod_groups.emplace_back(lod);
+		get_lod_group(lod.meshes, lod_id + 1, lod_threshold + 20.f);
+	}
+
+	void obj_context::get_meshes(utl::vector<mesh>& meshes, u32 lod_id, f32 lod_threshold)
+	{
+		assert(lod_id != u32_invalid_id);
+
+		get_mesh(meshes, lod_id, lod_threshold);
+	}
+
+	void obj_context::get_mesh(utl::vector<mesh>& meshes, u32 lod_id, f32 lod_threshold)
+	{
+		assert(lod_id != u32_invalid_id);
+		u32 num_shapes{ (u32)_shapes.size() };
+		
+		for (u32 i{ 0 }; i < num_shapes; ++i)
+		{
+			mesh m;
+			m.lod_id = lod_id;
+			m.lod_threshold = lod_threshold;
+			m.name = _shapes[i].name.c_str();
+
+
+			if (get_mesh_data(&_shapes[i], m))
+			{
+				meshes.emplace_back(m);
+				_progression->callback(_progression->value(), _progression->max_value() + 1);
+			}
+		}
+	}
+
+	bool obj_context::get_mesh_data(tinyobj::shape_t* shape, mesh& m)
+	{
+		const s32 num_polys{ (s32)shape->mesh.num_face_vertices.size() };
+		if (num_polys <= 0) return false;
+
+		// Get vertices
+		utl::vector<math::v4> vertices;
+		// const s32 num_indices{ (s32)shape->mesh.indices.size() };
+		utl::vector<s32> indices;
+		m.uv_sets.resize((u64)1);
+		std::unordered_map<tinyobj::index_t, size_t, hash_idx, equal_idx> uniqueVertices;
+		for (const auto& index : shape->mesh.indices)
+		{
+			math::v3 pos = math::v3{
+				_attribute.vertices[3 * index.vertex_index + 0],
+				_attribute.vertices[3 * index.vertex_index + 1],
+				_attribute.vertices[3 * index.vertex_index + 2]
+			};
+
+			math::v3 color = math::v3{ 1.0f, 1.0f, 1.0f };
+
+			math::v2 texCoord = math::v2{
+				_attribute.texcoords[2 * index.texcoord_index + 0],
+				1.0f - _attribute.texcoords[2 * index.texcoord_index + 1] // 1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
+			};
+
+			math::v3 normal = math::v3{
+				_attribute.normals[3 * index.normal_index + 0],
+				_attribute.normals[3 * index.normal_index + 1],
+				_attribute.normals[3 * index.normal_index + 2]
+			};
+
+			if (uniqueVertices.count(index) == 0)
+			{
+				uniqueVertices[index] = (u32)m.positions.size();
+				m.positions.emplace_back(pos);
+			}
+
+			m.colors.emplace_back(color);
+			m.normals.emplace_back(normal);
+			m.uv_sets[0].emplace_back(texCoord);
+			m.raw_indices.emplace_back((u32)uniqueVertices[index]);
+		}
+
+		assert(m.raw_indices.size() % 3 == 0);
+
+		// Get material index per polygon
+		assert(num_polys > 0);
+		const s32 mtl_index{ shape->mesh.material_ids[0] };
+		assert(mtl_index >= 0);
+		m.material_indices.emplace_back((u32)mtl_index);
+		if (std::find(m.material_used.begin(), m.material_used.end(), (u32)mtl_index) == m.material_used.end())
+		{
+			m.material_used.emplace_back((u32)mtl_index);
+		}
+
+		// Importing normals is ON by default
+		const bool import_normals{ !_scene_data->settings.calculate_normals };
+		// Importing tangents is OFF by default
+		const bool import_tangents{ !_scene_data->settings.calculate_tangents };
+
+		// Import normals
+		if (import_normals)
+		{
+			// Calculate normals using OBJ's built-in method, but only if no normal data is already there.
+			if (m.normals.empty())
+			{
+				for (s32 i{ 0 }; i < indices.size() / 3; ++i)
+				{
+					s32 index{ shape->mesh.indices[i].normal_index };
+					math::v4 n{ _attribute.normals[index * 3],
+								_attribute.normals[index * 3 + 1],
+								_attribute.normals[index * 3 + 2],
+								1.f };
+					DirectX::XMVECTOR N = DirectX::XMLoadFloat4(&n);
+					DirectX::XMStoreFloat4(&n, DirectX::XMVector4Normalize(N));
+					m.normals.emplace_back((f32)n.x, (f32)n.y, (f32)n.z);
+				}
+			}
+			else
+			{
+				// something went wrong wtith importing normals from FBX.
+				// Fall back to our normal calculation method
+				_scene_data->settings.calculate_normals = true;
+			}
+		}
+
+		// Import tangents
+		if (import_tangents)
+		{
+			// Calculate tangents using function.
+			assert(m.raw_indices.size() % 3 == 0);
+			for (u32 i{ 0 }; i < m.raw_indices.size(); i += 3)
+			{
+				u32 i0{ m.raw_indices[i] };
+				u32 i1{ m.raw_indices[i + 1] };
+				u32 i2{ m.raw_indices[i + 2] };
+
+				math::v3 v0{ m.positions[i0] };
+				math::v3 v1{ m.positions[i1] };
+				math::v3 v2{ m.positions[i2] };
+
+				math::v2 uv0{ m.uv_sets[0][i0] };
+				math::v2 uv1{ m.uv_sets[0][i1] };
+				math::v2 uv2{ m.uv_sets[0][i2] };
+
+				math::v3 edge1{ v1.x - v0.x,
+					v1.y - v0.y,
+					v1.z - v0.z };
+				math::v3 edge2{ v2.x - v0.x,
+					v2.y - v0.y,
+					v2.z - v0.z };
+
+				f32 deltaU1 = uv1.x - uv0.x;
+				f32 deltaV1 = uv1.y - uv0.y;
+
+				f32 deltaU2 = uv2.x - uv0.x;
+				f32 deltaV2 = uv2.y - uv0.y;
+
+				f32 dividend = (deltaU1 * deltaV2 - deltaU2 * deltaV1);
+				f32 fc = 1.f / dividend;
+
+				math::v3 tangent{ fc * (deltaV2 * edge1.x - deltaV1 * edge2.x),
+					fc * (deltaV2 * edge1.y - deltaV1 * edge2.y),
+					fc * (deltaV2 * edge1.z - deltaV1 * edge2.z) };
+
+				DirectX::XMVECTOR tang = XMLoadFloat3(&tangent);
+				tang = DirectX::XMVector3Normalize(tang);
+				DirectX::XMStoreFloat3(&tangent, tang);
+
+				f32 sx = deltaU1, sy = deltaU2;
+				f32 tx = deltaV1, ty = deltaV2;
+				f32 handedness = ((tx * sy - ty * sx) < 0.f) ? -1.f : 1.f;
+				math::v4 t4{ tangent.x * handedness, tangent.y * handedness, tangent.z * handedness, 0.f };
+				m.tangents.emplace_back(t4);
+				m.tangents.emplace_back(t4);
+				m.tangents.emplace_back(t4);
+			}
+		}
+
+		return true;
+	}
 
 	bool load_obj_model(std::string path, const char* out_ksm_file_package)
 	{
 		size_t pos = path.rfind("/", path.length());
 		std::string base_file_path{ path.substr(0, pos) };
-		// size_t last{ path.find_last_of("/\\") };
-		// size_t ext_string{ path.find_last_of(".") };
-		//std::string filename;
-		//if (last != std::string::npos)
-		//{
-		//	filename = path.substr(last + 1);
-		//	size_t ext_string{ filename.find_last_of(".") };
-		//	filename = filename.substr(0, ext_string);
-		//}
 
 		std::string file_package_path{ out_model_path + std::string{ out_ksm_file_package } };
 		if (_access(file_package_path.c_str(), 0) == -1)
@@ -812,5 +1108,26 @@ namespace primal::tools
 	{
 		assert(file);
 		load_single_obj_model(file, kms_name);
+	}
+
+	EDITOR_INTERFACE void ImportObjAPI(const char* file, scene_data* data, progression::progress_callback callback)
+	{
+		assert(file && data);
+		scene scene{};
+		progression progression{ callback };
+		// NOTE: anything that involves using the rapidobj should be single-threaded
+		{
+			std::lock_guard lock{ obj_mutex };
+			obj_context obj_model_context{ file, &scene, data, &progression };
+			obj_model_context.get_scene();
+		}
+		if (scene.lod_groups.empty())
+		{
+			// TODO: send fasilure log message to editor
+			return;
+		}
+
+		process_scene(scene, data->settings, &progression);
+		pack_data(scene, *data);
 	}
 }

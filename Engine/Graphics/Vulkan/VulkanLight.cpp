@@ -833,9 +833,7 @@ namespace primal::graphics::vulkan::light
 
 			u32 max_buffer_size()
 			{
-				VkPhysicalDeviceProperties properties;
-				vkGetPhysicalDeviceProperties(core::physical_device(), &properties);
-				return properties.limits.maxUniformBufferRange;
+				return core::get_physical_properties().limits.maxUniformBufferRange;
 			}
 
 			light_buffer		_buffers[light_buffer::count];

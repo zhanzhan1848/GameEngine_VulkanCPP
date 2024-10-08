@@ -20,6 +20,30 @@ namespace
 
 	std::unordered_map<id::id_type, id::id_type> render_item_entity_map;
 
+	[[nodiscard]] id::id_type load_model(const char* path)
+	{
+		// load test model
+		std::unique_ptr<u8[]> model;
+		u64 size{ 0 };
+		read_file(path, model, size);
+
+		const id::id_type model_id{ content::create_resource(model.get(), content::asset_type::mesh) };
+		assert(id::is_valid(model_id));
+		return model_id;
+	}
+
+	[[nodiscard]] id::id_type load_texture(const char* path)
+	{
+		// load test texture
+		std::unique_ptr<u8[]> texture;
+		u64 size{ 0 };
+		read_file(path, texture, size);
+
+		const id::id_type texture_id{ content::create_resource(texture.get(), content::asset_type::texture) };
+		assert(id::is_valid(texture_id));
+		return texture_id;
+	}
+
 	void load_model()
 	{
 		std::unique_ptr<u8[]> model;
