@@ -40,6 +40,7 @@ namespace primal::tools
         void get_mesh(utl::vector<mesh>& meshes, u32 lod_id, f32 lod_threshold);
         void get_lod_group(const utl::vector<mesh>& meshes, u32 lod_id, f32 lod_threshold);
         bool get_mesh_data(tinyobj::shape_t* shape, mesh& m);
+        void generate_shader();
 
         scene*							        _scene{ nullptr };
         scene_data*						        _scene_data{ nullptr };

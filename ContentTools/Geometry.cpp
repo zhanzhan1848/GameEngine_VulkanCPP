@@ -580,6 +580,7 @@ namespace primal::tools
 		utl::blob_stream_writer blob{ data.buffer, data.buffer_size };
 
 		// scene name
+		auto scene_name_size{ scene.name.size() };
 		blob.write((u32)scene.name.size());
 		blob.write(scene.name.c_str(), scene.name.size());
 		// number of LODS

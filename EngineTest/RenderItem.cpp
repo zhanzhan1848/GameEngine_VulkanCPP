@@ -16,8 +16,26 @@ namespace
 	id::id_type model_id{ id::invalid_id };
 	id::id_type vs_id{ id::invalid_id };
 	id::id_type ps_id{ id::invalid_id };
+	id::id_type textured_ps_id{ id::invalid_id };
 	id::id_type mtl_id{ id::invalid_id };
+	id::id_type textured_mtl_id{ id::invalid_id };
 
+	struct texture_usage 
+	{
+		enum usage : u32 
+		{
+			ambient_occlusion = 0,
+			base_color,
+			emissive,
+			metal_rough,
+			normal,
+
+			count
+		};
+	};
+
+	id::id_type texture_ids[texture_usage::count];
+	
 	std::unordered_map<id::id_type, id::id_type> render_item_entity_map;
 
 	[[nodiscard]] id::id_type load_model(const char* path)
@@ -84,14 +102,25 @@ namespace
 
 		info.function = "TestShaderPS";
 		info.type = shader_type::pixel;
+		utl::vector<std::unique_ptr<u8[]>> pixel_shaders;
 
-		auto pixel_shader = compile_shader(info, shader_path, extra_args);
-		assert(pixel_shader.get());
+		pixel_shaders.emplace_back(compile_shader(info, shader_path, extra_args));
+		assert(pixel_shaders.back().get());
+
+		defines[0] = L"TEXTURED_MTL=1";
+		extra_args.emplace_back(L"-D");
+		extra_args.emplace_back(defines[0]);
+
+		pixel_shaders.emplace_back(compile_shader(info, shader_path, extra_args));
+		assert(pixel_shaders.back().get());
 
 		vs_id = content::add_shader_group(vertex_shader_pointers.data(), (u32)vertex_shader_pointers.size(), keys.data());
 
-		const u8* pixel_shaders[]{ pixel_shader.get() };
-		ps_id = content::add_shader_group(&pixel_shaders[0], 1, &u32_invalid_id);
+		const u8* pixel_shader_pointer[]{ pixel_shaders[0].get()};
+		ps_id = content::add_shader_group(pixel_shader_pointer, 1, &u32_invalid_id);
+
+		pixel_shader_pointer[0] = pixel_shaders[1].get();
+		textured_ps_id = content::add_shader_group(pixel_shader_pointer, 1, &u32_invalid_id);
 	}
 
 	void create_material()
@@ -101,21 +130,30 @@ namespace
 		info.shader_ids[graphics::shader_type::pixel] = ps_id;
 		info.type = graphics::material_type::opauqe;
 		mtl_id = content::create_resource(&info, content::asset_type::material);
+
+		info.shader_ids[graphics::shader_type::pixel] = textured_ps_id;
+		info.texture_count = texture_usage::count;
+		info.texture_ids = &texture_ids[0];
+		textured_mtl_id = content::create_resource(&info, content::asset_type::material);
 	}
 
 } // anonymous namespace
 
 id::id_type create_render_item(id::id_type entity_id)
 {
-	// load a model, pretend it belongs to entity_id
-	auto _1 = std::thread{ [] { load_model(); } };
-	// load material:
-	// 1) load texture, oh nooooo we dion't have any, but that's ok.
-	// 2) load shaders for that material
-	auto _2 = std::thread{ [] { load_shaders(); } };
 
-	_1.join();
-	_2.join();
+	memset(&texture_ids[0], 0xff, sizeof(id::id_type) * _countof(texture_ids));
+
+	std::thread threads[]{
+		std::thread{ [] { model_id = load_model("..\\..\\x64\\model.model"); } },
+		std::thread{ [] { texture_ids[texture_usage::ambient_occlusion] = load_model("..\\..\\x64\\texture.texture"); }},
+		std::thread{ [] { load_shaders();  } }
+	};
+
+	for (auto& t : threads)
+	{
+		t.join();
+	}
 
 	// add a render item using the model and its materials
 	create_material();
@@ -148,7 +186,21 @@ void destory_render_item(id::id_type item_id)
 		content::destroy_resource(mtl_id, content::asset_type::material);
 	}
 
-	// remove shaders and textures
+	if (id::is_valid(textured_mtl_id))
+	{
+		content::destroy_resource(textured_mtl_id, content::asset_type::material);
+	}
+
+	// remove textures
+	for (id::id_type id : texture_ids)
+	{
+		if (id::is_valid(id))
+		{
+			content::destroy_resource(id, content::asset_type::texture);
+		}
+	}
+
+	// remove shaders
 	if (id::is_valid(vs_id))
 	{
 		content::remove_shader_group(vs_id);
@@ -159,9 +211,20 @@ void destory_render_item(id::id_type item_id)
 		content::remove_shader_group(ps_id);
 	}
 
+	if (id::is_valid(textured_ps_id))
+	{
+		content::remove_shader_group(textured_ps_id);
+	}
+
 	// remove model
 	if (id::is_valid(model_id))
 	{
 		content::destroy_resource(model_id, content::asset_type::mesh);
 	}
+}
+
+void get_render_items(id::id_type* items, [[maybe_unused]] u32 count)
+{
+	assert(count != 0);
+	items[0] = 0;
 }

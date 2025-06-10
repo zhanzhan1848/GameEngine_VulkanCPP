@@ -10,8 +10,7 @@ namespace primal::content
 		{
 		public:
 			DISABLE_COPY_AND_MOVE(geometry_hierarchy_stream);
-			geometry_hierarchy_stream(u8 *const buffer, u32 lods = u32_invalid_id)
-				: _buffer{ buffer }
+			explicit geometry_hierarchy_stream(u8 *const buffer, u32 lods = u32_invalid_id)
 			{
 				assert(buffer && lods);
 				if (lods != u32_invalid_id)
@@ -39,7 +38,6 @@ namespace primal::content
 				{
 					if (_thresholds[i] <= threshold) return i;
 				}
-				// assert(false); // shouldn't ever get here.
 				return 0;
 			}
 
@@ -49,7 +47,6 @@ namespace primal::content
 			[[nodiscard]] constexpr id::id_type* gpu_ids() const { return _gpu_ids; }
 
 		private:
-			u8 *const									_buffer;
 			f32*										_thresholds;
 			lod_offset*									_lod_offsets;
 			id::id_type*								_gpu_ids;
@@ -286,8 +283,8 @@ namespace primal::content
 		// struct {
 		//         u32 width, height, array_size(or depth), flags, mip_levels, format,
 		//         struct{
-		//             u32 width, height, row_pitch, slice_pitch,
-		//             u8 image[slice_pitch],
+		//             u32 row_pitch, slice_pitch,
+		//             u8 image[mip_level][slice_pitch * depth_per_mip],
 		//         } images[]
 		// } texture
 		[[nodiscard]] id::id_type create_texture_resource(const void *const data)
@@ -418,12 +415,12 @@ namespace primal::content
 		else
 		{
 			geometry_hierarchy_stream stream{ pointer };
-			/*assert([&]() {
+			assert([&]() {
 			const u32 lod_count{ stream.lod_count() };
 			const lod_offset lod_offset{ stream.lod_offsets()[lod_count - 1] };
 			const u32 gpu_id_count{ (u32)lod_offset.offset + (u32)lod_offset.count };
 			return gpu_id_count == id_count;
-			}());*/
+			}());
 
 			memcpy(gpu_ids, stream.gpu_ids(), sizeof(id::id_type) * id_count);
 		}

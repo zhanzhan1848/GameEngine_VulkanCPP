@@ -80,6 +80,7 @@ void destory_render_item(id::id_type item_id);
 void generate_lights();
 void remove_lights();
 void test_lights(f32 dt);
+void get_render_items(id::id_type* items, [[maybe_unused]] u32 count);
 
 LRESULT win_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
@@ -386,9 +387,12 @@ void Engine_Test::run()
 		{
 			f32 thresholds[3]{};
 
+			id::id_type render_items[3]{};
+			get_render_items(&render_items[0], 3);
+
 			graphics::frame_info info{};
-			info.render_item_ids = &item_id;
-			info.render_item_count = 1;
+			info.render_item_ids = &render_items[0];
+			info.render_item_count = 3;
 			info.thresholds = &thresholds[0];
 			info.light_set_key = light_set_key;
 			info.average_frame_time = dt;

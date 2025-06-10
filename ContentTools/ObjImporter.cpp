@@ -13,6 +13,7 @@
 #include "../Engine/Utilities/IOStream.h"
 #include "TemplateShader/PBR_Template_Shader_v1.h"
 #include "meshoptimizer/meshoptimizer.h"
+#include "../Engine/Utilities/Hash.h"
 
 namespace primal::tools
 {
@@ -619,7 +620,8 @@ namespace primal::tools
 		//						   float* result_error)
 		if (lod_id > 5) return;
 		lod_group lod{};
-		lod.name = meshes[0].name;
+		lod.name = meshes[0].name + "_LODS" + std::to_string(lod_id);
+		// lod.name = (lod_id > 0) ? meshes[0].name + "_LODS" + std::to_string(lod_id) : meshes[0].name;
 		for (auto& m : meshes)
 		{
 			mesh submesh{};
@@ -688,6 +690,7 @@ namespace primal::tools
 				_progression->callback(_progression->value(), _progression->max_value() + 1);
 			}
 		}
+		generate_shader();
 	}
 
 	bool obj_context::get_mesh_data(tinyobj::shape_t* shape, mesh& m)
@@ -737,13 +740,16 @@ namespace primal::tools
 		assert(m.raw_indices.size() % 3 == 0);
 
 		// Get material index per polygon
+		// Use materials' name to generate hash to connect shader file
 		assert(num_polys > 0);
 		const s32 mtl_index{ shape->mesh.material_ids[0] };
+		u32 mtl_name_hash;
+		utl::MurmurHash3_x86_32(static_cast<void*>(&_materials[mtl_index].name), (u32)_materials[mtl_index].name.length(), (u32)123, &mtl_name_hash);
 		assert(mtl_index >= 0);
-		m.material_indices.emplace_back((u32)mtl_index);
-		if (std::find(m.material_used.begin(), m.material_used.end(), (u32)mtl_index) == m.material_used.end())
+		m.material_indices.emplace_back((u32)mtl_name_hash);
+		if (std::find(m.material_used.begin(), m.material_used.end(), (u32)mtl_name_hash) == m.material_used.end())
 		{
-			m.material_used.emplace_back((u32)mtl_index);
+			m.material_used.emplace_back((u32)mtl_name_hash);
 		}
 
 		// Importing normals is ON by default
@@ -831,6 +837,193 @@ namespace primal::tools
 		}
 
 		return true;
+	}
+
+	void obj_context::generate_shader()
+	{
+		assert(_materials.size());
+		std::string shader_file_package{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/x64" };
+		copy_shader_header(shader_file_package.c_str());
+		for (auto m : _materials)
+		{
+			u32 m_name;
+			utl::MurmurHash3_x86_32((void*)m.name.c_str(), (u32)m.name.length(), 0, (void*)&m_name);
+			{
+				std::string out_vertex_shader_name{ shader_file_package };
+				out_vertex_shader_name.append("//").append("shaders");
+				if (_access(out_vertex_shader_name.c_str(), 0) == -1)
+					OutputDebugStringA(std::to_string(_mkdir(out_vertex_shader_name.c_str())).c_str());
+				out_vertex_shader_name.append("\\").append(std::to_string(m_name)).append(".vert");
+				std::ofstream vert_shader{ out_vertex_shader_name };
+				if (!vert_shader.is_open())
+				{
+					OutputDebugStringA("Failed to open vertex shader to write!");
+					return;
+				}
+				vert_shader << PBR_Template_Vertex_Shader;
+				vert_shader.close();
+			}
+
+			{
+				std::string out_fragment_shader_name{ shader_file_package };
+				out_fragment_shader_name.append("//").append("shaders");
+				if (_access(out_fragment_shader_name.c_str(), 0) == -1)
+					OutputDebugStringA(std::to_string(_mkdir(out_fragment_shader_name.c_str())).c_str());
+				out_fragment_shader_name.append("\\").append(std::to_string(m_name)).append(".frag");
+				std::ofstream fragment_shader{ out_fragment_shader_name };
+				if (!fragment_shader.is_open())
+				{
+					OutputDebugStringA("Failed to open fragment shader to write!");
+					return;
+				}
+
+				std::string fragment_template_string{ PBR_Template_Fragment_Shader };
+
+				size_t ns_pos = fragment_template_string.find("{{Ns}}");
+				if (ns_pos != std::string::npos)
+				{
+					std::string ns{ std::to_string(m.shininess) };
+					fragment_template_string.replace(ns_pos, 6, ns);
+				}
+
+				size_t ni_pos = fragment_template_string.find("{{Ni}}");
+				if (ni_pos != std::string::npos)
+				{
+					std::string ni{ std::to_string(m.ior) };
+					fragment_template_string.replace(ni_pos, 6, ni);
+				}
+
+				size_t d_pos = fragment_template_string.find("{{d}}");
+				if (d_pos != std::string::npos)
+				{
+					std::string d{ std::to_string(m.dissolve) };
+					fragment_template_string.replace(d_pos, 5, d);
+				}
+
+				size_t tr_pos = fragment_template_string.find("{{Tr}}");
+				if (tr_pos != std::string::npos)
+				{
+					std::string tr{ std::to_string(1.f - m.dissolve) };
+					fragment_template_string.replace(tr_pos, 6, tr);
+				}
+
+				size_t tf_pos = fragment_template_string.find("{{Tf}}");
+				if (tf_pos != std::string::npos)
+				{
+					std::string tf;
+					tf.append("vec3(").append(std::to_string(m.transmittance[0])).append(",").append(std::to_string(m.transmittance[1])).append(",")
+						.append(std::to_string(m.transmittance[2])).append(")");
+					fragment_template_string.replace(tf_pos, 6, tf);
+				}
+
+				size_t ka_pos = fragment_template_string.find("{{Ka}}");
+				if (ka_pos != std::string::npos)
+				{
+					std::string ka;
+					ka.append("vec3(").append(std::to_string(m.ambient[0])).append(",").append(std::to_string(m.ambient[1])).append(",")
+						.append(std::to_string(m.ambient[2])).append(")");
+					fragment_template_string.replace(ka_pos, 6, ka);
+				}
+
+				size_t kd_pos = fragment_template_string.find("{{Kd}}");
+				if (kd_pos != std::string::npos)
+				{
+					std::string kd;
+					kd.append("vec3(").append(std::to_string(m.diffuse[0])).append(",").append(std::to_string(m.diffuse[1])).append(",")
+						.append(std::to_string(m.diffuse[2])).append(")");
+					fragment_template_string.replace(kd_pos, 6, kd);
+				}
+
+				size_t ks_pos = fragment_template_string.find("{{Ks}}");
+				if (ks_pos != std::string::npos)
+				{
+					std::string ks;
+					ks.append("vec3(").append(std::to_string(m.specular[0])).append(",").append(std::to_string(m.specular[1])).append(",")
+						.append(std::to_string(m.specular[2])).append(")");
+					fragment_template_string.replace(ks_pos, 6, ks);
+				}
+
+				size_t ke_pos = fragment_template_string.find("{{Ke}}");
+				if (ks_pos != std::string::npos)
+				{
+					std::string ke;
+					ke.append("vec3(").append(std::to_string(m.emission[0])).append(",").append(std::to_string(m.emission[1])).append(",")
+						.append(std::to_string(m.emission[2])).append(")");
+					fragment_template_string.replace(ke_pos, 6, ke);
+				}
+
+				size_t dc_pos = fragment_template_string.find("{{diffuse_color}}");
+				if (dc_pos != std::string::npos)
+				{
+					std::string dc;
+					dc.append("vec3(").append(std::to_string(m.diffuse[0])).append(",").append(std::to_string(m.diffuse[1])).append(",")
+						.append(std::to_string(m.diffuse[2])).append(")");
+					fragment_template_string.replace(dc_pos, 17, dc);
+				}
+
+				size_t image_pos = fragment_template_string.find("{{images}}");
+				if (image_pos != std::string::npos)
+				{
+					std::string image;
+					u32 count{ 0 };
+					if (!m.diffuse_texname.empty())
+					{
+						//image.append("layout(set = 0, binding = ").append(std::to_string(count).c_str()).append(") uniform sampler2D diffuseMap;\n");
+						count++;
+					}
+					else
+					{
+						std::string re{ "texture(samplers[SAMP_DIFFUSE], in_dto.tex_coord)" };
+						size_t re_pos;
+						while ((re_pos = fragment_template_string.find(re)) != std::string::npos)
+						{
+							fragment_template_string.replace(fragment_template_string.find(re), re.length(), "vec4(1.0)");
+						}
+					}
+					if (!m.specular_texname.empty())
+					{
+						//image.append("layout(set = 0, binding = ").append(std::to_string(count).c_str()).append(") uniform sampler2D specularMap;\n");
+						count++;
+					}
+					else
+					{
+						std::string re{ "texture(samplers[SAMP_SPECULAR], in_dto.tex_coord).rgb" };
+						size_t re_pos;
+						while ((re_pos = fragment_template_string.find(re)) != std::string::npos)
+						{
+							fragment_template_string.replace(fragment_template_string.find(re), re.length(), "vec3(1.0)");
+						}
+					}
+					if (!m.bump_texname.empty())
+					{
+						//image.append("layout(set = 0, binding = ").append(std::to_string(count).c_str()).append(") uniform sampler2D normalMap;\n");
+						count++;
+					}
+					else
+					{
+						std::string re{ "texture(samplers[SAMP_NORMAL], in_dto.tex_coord).rgb" };
+						size_t re_pos;
+						while ((re_pos = fragment_template_string.find(re)) != std::string::npos)
+						{
+							fragment_template_string.replace(fragment_template_string.find(re), re.length(), "vec3(1.0)");
+						}
+					}
+
+					if (count == 0)
+					{
+						fragment_template_string.replace(image_pos, 10, "");
+					}
+					else
+					{
+						image.append("layout(set = 0, binding = 2) uniform sampler2D samplers[").append(std::to_string(count)).append("];");
+						fragment_template_string.replace(image_pos, 10, image);
+					}
+				}
+
+				fragment_shader << fragment_template_string;
+				fragment_shader.close();
+			}
+		}
 	}
 
 	bool load_obj_model(std::string path, const char* out_ksm_file_package)

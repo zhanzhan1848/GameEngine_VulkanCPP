@@ -668,8 +668,9 @@ namespace PrimalEditor.Content
         {
             using var writer = new BinaryWriter(new MemoryStream());
 
-            writer.Write(GetLODGroup().LODs.Count);
-            foreach (var lod in GetLODGroup().LODs)
+            var lods = GetLODGroup();
+            writer.Write(lods.LODs.Count);
+            foreach (var lod in lods.LODs)
             {
                 writer.Write(lod.LodThreshold);
                 writer.Write(lod.Meshes.Count);

@@ -11,7 +11,9 @@ args = parser.parse_args()
 glslc_path = os.getenv("VULKAN_SDK") + "\\bin\\glslc.exe"
 dir_paths = ["C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders", 
              "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/kms/sponza/shaders",
-             "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/kms/sphere/shaders"]
+             "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/EngineTest/assets/kms/sphere/shaders",
+             "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/x64/shaders"
+             ]
 output_path = "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/Engine/Graphics/Vulkan/Shaders/spv"
 for dir_path in dir_paths:
     for root, dirs, files in os.walk(dir_path):
