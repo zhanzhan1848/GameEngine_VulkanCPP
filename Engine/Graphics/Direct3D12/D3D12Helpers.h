@@ -476,6 +476,15 @@ namespace primal::graphics::d3d12::d3dx
 		}
 	};
 
+	constexpr struct 
+	{
+		const D3D12_STATIC_SAMPLER_DESC static_point
+		{
+
+		};
+	} sampler_state;
+	
+
 #pragma warning(push)
 #pragma warning(disable : 4324) // disable padding warning
 

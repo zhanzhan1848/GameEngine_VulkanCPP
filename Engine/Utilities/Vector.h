@@ -26,7 +26,9 @@ namespace primal::utl
 			resize(count, value);
 		}
 
-		template<typename it, std::enable_if_t<std::_Is_iterator_v<it>, int> = 0>
+		template<typename it,
+			typename = typename std::enable_if_t<
+				!std::is_same_v<typename std::iterator_traits<it>::value_type, void>>>
 		constexpr explicit vector(it first, it last)
 		{
 			for (; first != last; ++first)

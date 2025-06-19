@@ -1,3 +1,4 @@
+#if defined(_MSC_VER)
 #include "Common.h"
 #include "CommonHeaders.h"
 #include "../Graphics/Renderer.h"
@@ -65,3 +66,67 @@ EDITOR_INTERFACE void ResizeRenderSurface(u32 id)
 	assert(id < surfaces.size());
 	surfaces[id].window.resize(0, 0);
 }
+
+#elif defined(__clang__)
+#include "Common.h"
+#include "CommonHeaders.h"
+#include "../Graphics/Renderer.h"
+#include "../Platform/PlatformTypes.h"
+#include "../Platform/Platform.h"
+#include <dlfcn.h>
+
+using namespace primal;
+
+namespace {
+	void* game_code_dll{ nullptr };
+
+	utl::vector<graphics::render_surface> surfaces;
+}// anonymous namespace
+
+EDITOR_INTERFACE u32 LoadGameCodeDll(const char* dll_path)
+{
+	if (game_code_dll) return 0;
+	game_code_dll = dlopen(dll_path, RTLD_NOW);
+	assert(game_code_dll);
+
+	return game_code_dll ? 1 : 0;
+}
+
+EDITOR_INTERFACE u32 UnloadGameCodeDll([[maybe_unused]] const char* dll_path)
+{
+	if (!game_code_dll) return 0;
+	assert(game_code_dll);
+	int result{ dlclose(game_code_dll) };
+	assert(result == 0);
+	game_code_dll = nullptr;
+	return 1;
+}
+
+EDITOR_INTERFACE u32 CreateRenderSurface(void* host, s32 width, s32 height)
+{
+	assert(host);
+	platform::window_init_info info{ nullptr, host, nullptr, 0, 0, width, height };
+	graphics::render_surface surface{ platform::create_window(&info), {} };
+	assert(surface.window.is_valid());
+	surfaces.emplace_back(surface);
+	return (s32)surfaces.size() - 1;
+}
+
+EDITOR_INTERFACE void RemoveRenderSurface(u32 id)
+{
+	assert(id < surfaces.size());
+	platform::remove_window(surfaces[id].window.get_id());
+}
+
+EDITOR_INTERFACE void* GetWindowHandle(u32 id)
+{
+	assert(id < surfaces.size());
+	return surfaces[id].window.handle();
+}
+
+EDITOR_INTERFACE void ResizeRenderSurface(u32 id)
+{
+	assert(id < surfaces.size());
+	surfaces[id].window.resize(0, 0);
+}
+#endif

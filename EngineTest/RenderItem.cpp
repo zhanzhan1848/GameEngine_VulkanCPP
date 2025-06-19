@@ -6,6 +6,7 @@
 #include "Components/Entity.h"
 #include "../ContentTools/Geometry.h"
 
+#include <thread>
 
 using namespace primal;
 
@@ -66,7 +67,7 @@ namespace
 	{
 		std::unique_ptr<u8[]> model;
 		u64 size{ 0 };
-		read_file("model.model", model, size);
+		read_file("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/model.model", model, size);
 
 		model_id = content::create_resource(model.get(), content::asset_type::mesh);
 		assert(id::is_valid(model_id));
@@ -138,6 +139,72 @@ namespace
 	}
 
 } // anonymous namespace
+
+id::id_type create_metarial(id::id_type entity_id)
+{
+
+	memset(&texture_ids[0], 0xff, sizeof(id::id_type) * _countof(texture_ids));
+
+	auto _t = std::thread{ [] {
+		texture_ids[0] = load_texture("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/fbx_textures_encode/Lion_Albedo_1.asset");
+	}};
+
+	auto _1 = std::thread{ [] { 
+		shader_file_info info{};
+		info.file_name = "TestShader.metal";
+		info.function = "vertex_main";
+		info.type = shader_type::vertex;
+
+		const char* shader_path{ "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/" };  // "../EngineTest"
+
+		std::wstring defines[]{ L"ELEMENT_TYPE=1" };
+		utl::vector<u32> keys;
+		// keys.emplace_back(tools::elements::elements_type::skeletal_normal);
+		keys.emplace_back(tools::elements::elements_type::static_normal_texture);
+
+		utl::vector<std::wstring> extra_args{};
+		utl::vector<std::unique_ptr<u8[]>> vertex_shaders;
+		utl::vector<u8*> vertex_shader_pointers;
+		for (u32 i{ 0 }; i < _countof(defines); ++i)
+		{
+			extra_args.clear();
+			// extra_args.emplace_back(L"-D");
+			vertex_shaders.emplace_back(std::move(compile_shader(info, shader_path, extra_args)));
+			assert(vertex_shaders.back().get());
+			vertex_shader_pointers.emplace_back(vertex_shaders.back().get());
+		}
+		extra_args.clear();
+
+		info.function = "fragment_main";
+		info.type = shader_type::pixel;
+
+		auto pixel_shader = compile_shader(info, shader_path, extra_args);
+		assert(pixel_shader.get());
+
+		vs_id = content::add_shader_group(vertex_shader_pointers.data(), (u32)vertex_shader_pointers.size(), keys.data());
+		content::add_shader_function_name(vs_id, "vertex_main");
+
+		const u8* pixel_shaders[]{ pixel_shader.get() };
+		ps_id = content::add_shader_group(&pixel_shaders[0], 1, &u32_invalid_id);
+		content::add_shader_function_name(ps_id, "fragment_main");
+	 } };
+
+	auto _2 = std::thread{ [] {
+		load_model();
+	}};
+
+	_1.join();
+	_2.join();
+	_t.join();
+
+	create_material();
+	id::id_type materials[]{ mtl_id };
+
+	id::id_type item_id{ graphics::add_render_item(entity_id, model_id, _countof(materials), &materials[0]) };
+	render_item_entity_map[item_id] = entity_id;
+
+	return item_id;
+}
 
 id::id_type create_render_item(id::id_type entity_id)
 {

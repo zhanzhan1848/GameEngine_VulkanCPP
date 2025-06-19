@@ -385,7 +385,7 @@ namespace primal::graphics::d3d12::content
 		//         u32 width, height, array_size(or depth), flags, mip_levels, format,
 		//         struct{
 		//             u32 row_pitch, slice_pitch,
-		//             u8 image[mip_level][slice_pitch * depth_per_mip],
+		//             u8 image[mip_level][slice_pitch * mip_per_depth],
 		//         } images[]
 		// } texture
 		d3d12_texture create_resource_from_texture_data(const u8 *const data)
@@ -437,8 +437,9 @@ namespace primal::graphics::d3d12::content
 						slice_pitch
 						});
 
-					// skip the rest of slices.
 					blob.skip(slice_pitch * depth_per_mip_level[j]);
+
+					// skip the rest of the slices of 3d textures with depth > 1
 				}
 			}
 
@@ -458,10 +459,9 @@ namespace primal::graphics::d3d12::content
 			assert(!(flags & primal::content::texture_flags::is_cube_map && (array_size % 6)));
 			const u32 subresource_count{ array_size * mip_levels };
 			assert(subresource_count);
-
 			const u32 footprint_data_size{ (sizeof(D3D12_PLACED_SUBRESOURCE_FOOTPRINT) + sizeof(u32) + sizeof(u64)) * subresource_count };
 			std::unique_ptr<u8[]> footprint_data{ std::make_unique<u8[]>(footprint_data_size) };
-
+			
 			D3D12_PLACED_SUBRESOURCE_FOOTPRINT *const layouts{ (D3D12_PLACED_SUBRESOURCE_FOOTPRINT *const)footprint_data.get()};
 			u32 *const num_rows{ (u32 *const)&layouts[subresource_count]};
 			u64 *const row_sizes{ (u64 *const)&num_rows[subresource_count]};
@@ -681,7 +681,7 @@ namespace primal::graphics::d3d12::content
 		//         u32 width, height, array_size(or depth), flags, mip_levels, format,
 		//         struct{
 		//             u32 row_pitch, slice_pitch,
-		//             u8 image[mip_level][slice_pitch * depth_per_mip],
+		//             u8 image[mip_level][slice_pitch * mip_per_depth],
 		//         } images[]
 		// } texture
 
@@ -800,7 +800,7 @@ namespace primal::graphics::d3d12::content
 
 			for (u32 i{ 0 }; i < material_count; ++i)
 			{
-				d3d12_render_item& item{ d3d12_items[i] };
+				d3d12_render_item& item{ d3d12_items[i]};
 				item.entity_id = entity_id;
 				item.submesh_gpu_id = gpu_ids[i];
 				item.material_id = material_ids[i];
@@ -810,9 +810,9 @@ namespace primal::graphics::d3d12::content
 
 				assert(id::is_valid(item.submesh_gpu_id) && id::is_valid(item.material_id));
 			}
-
+			
 			std::lock_guard lock{ render_item_mutex };
-
+			
 			for (u32 i{ 0 }; i < material_count; ++i)
 			{
 				item_ids[i] = render_items.add(d3d12_items[i]);

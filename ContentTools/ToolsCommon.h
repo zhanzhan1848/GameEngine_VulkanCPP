@@ -6,10 +6,18 @@
 #define NOMINMAX
 #endif
 
+#if defined(_MSC_VER)
 #include <wrl.h>
+#elif defined(__clang__)
+#include <sys/stat.h>
+#endif
 
 #ifndef EDITOR_INTERFACE
+#if defined(_WIN32)
 #define EDITOR_INTERFACE extern "C" __declspec(dllexport)
+#elif defined(__APPLE__)
+#define EDITOR_INTERFACE extern "C" __attribute__((visibility("default")))
+#endif
 #endif // !EDITOR_INTERFACE
 
 class progression
@@ -38,8 +46,13 @@ private:
 
 inline bool file_exists(const char* file)
 {
+#ifdef _WIN32
 	const DWORD attr{ GetFileAttributesA(file) };
 	return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+#else
+	struct stat buffer;
+	return stat(file, &buffer) == 0 && !(buffer.st_mode & S_IFDIR);
+#endif
 }
 
 inline std::wstring to_wstring(const char* cstr)

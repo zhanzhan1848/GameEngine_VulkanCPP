@@ -34,7 +34,7 @@ namespace primal::content
 			{
 				assert(threshold >= 0);
 				if (_lod_count == 1) return 0;
-				for (u32 i{ _lod_count - 1 }; i > 0; --i)
+				for (u32 i{ _lod_count - 1 }; i >= 0; --i)
 				{
 					if (_thresholds[i] <= threshold) return i;
 				}
@@ -72,6 +72,9 @@ namespace primal::content
 		utl::free_list<noexcept_map>					shader_groups;
 		utl::free_list<std::unique_ptr<u8[]>>			shaders;
 		std::mutex										shader_mutex;
+#if defined(__APPLE__)
+		std::unordered_map<id::id_type, std::string>	shader_function_name;
+#endif
 
 		// NOTE: Expects the same data as create_geometry_resource()
 		u32 get_geometry_hierarchy_buffer_size(const void *const data)
@@ -81,7 +84,11 @@ namespace primal::content
 			const u32 lod_count{ blob.read<u32>() };
 			assert(lod_count);
 			// add size or lod_count, thresholds and lod offsets to the size of hierarchy.
+#if defined(_WIN32)
 			u32 size{ sizeof(u32) + (sizeof(f32) + sizeof(lod_offset)) * lod_count };
+#elif defined(__APPLE__)
+			u32 size{ static_cast<u32>(sizeof(u32) + (sizeof(f32) + sizeof(lod_offset)) * lod_count) };
+#endif
 
 			for (u32 lod_idx{ 0 }; lod_idx < lod_count; ++lod_idx)
 			{
@@ -179,6 +186,7 @@ namespace primal::content
 			return submesh_count == 1;
 		}
 
+#if defined(_WIN32)
 		constexpr id::id_type gpu_id_from_fake_pointer(u8 *const pointer)
 		{
 			assert((uintptr_t)pointer & single_mesh_marker);
@@ -186,6 +194,15 @@ namespace primal::content
 			constexpr u8 shift_bits{ (sizeof(uintptr_t) - sizeof(id::id_type)) << 3 };
 			return (((uintptr_t)pointer) >> shift_bits) & (uintptr_t)id::invalid_id; // '& (uintptr_t)id::invalid_id' is to clear the higher bits. Probably not necessary for x64
 		}
+#elif defined(__APPLE__)
+		id::id_type gpu_id_from_fake_pointer(u8 *const pointer)
+		{
+			assert((uintptr_t)pointer & single_mesh_marker);
+			static_assert(sizeof(uintptr_t) > sizeof(id::id_type));
+			constexpr u8 shift_bits{ (sizeof(uintptr_t) - sizeof(id::id_type)) << 3 };
+			return (((uintptr_t)pointer) >> shift_bits) & (uintptr_t)id::invalid_id; // '& (uintptr_t)id::invalid_id' is to clear the higher bits. Probably not necessary for x64
+		}
+#endif
 
 		// NOTE: Expects 'data' to contain:
 		// struct
@@ -284,7 +301,7 @@ namespace primal::content
 		//         u32 width, height, array_size(or depth), flags, mip_levels, format,
 		//         struct{
 		//             u32 row_pitch, slice_pitch,
-		//             u8 image[mip_level][slice_pitch * depth_per_mip],
+		//             u8 image[mip_level][slice_pitch * mip_per_depth],
 		//         } images[]
 		// } texture
 		[[nodiscard]] id::id_type create_texture_resource(const void *const data)
@@ -402,6 +419,29 @@ namespace primal::content
 		assert(id::is_valid(id));
 		return (const compiled_shader_ptr)(shaders[id].get());
 	}
+
+#if defined(__APPLE__)
+	void add_shader_function_name(id::id_type shader_group_id, const char* name)
+	{
+		std::lock_guard lock{ shader_mutex };
+		assert(id::is_valid(shader_group_id));
+		shader_function_name[shader_group_id] = std::string{ name };
+	}
+
+	const char* get_shader_function_name(id::id_type shader_group_id)
+	{
+		std::lock_guard lock{ shader_mutex };
+		assert(id::is_valid(shader_group_id));
+		return shader_function_name[shader_group_id].c_str();
+	}
+
+	void remove_shader_function_name(id::id_type shader_group_id)
+	{
+		std::lock_guard lock{ shader_mutex };
+		assert(id::is_valid(shader_group_id));
+		shader_function_name[shader_group_id].clear();
+	}
+#endif
 
 	void get_submesh_gpu_ids(id::id_type geometry_content_id, u32 id_count, id::id_type * const gpu_ids)
 	{

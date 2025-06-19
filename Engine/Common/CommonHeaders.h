@@ -8,7 +8,7 @@
 // NOTE: don't put here any headers that include std::vector or std::deque
 #include <cstdint>
 #include <assert.h>
-#include <typeInfo>
+#include <typeinfo>
 #include <memory>
 #include <unordered_map>
 #include <mutex>
@@ -16,6 +16,13 @@
 
 #if defined(_WIN64)
 #include <DirectXMath.h>
+#elif defined(__APPLE__)
+#endif
+
+#ifdef __APPLE__
+#define ENGINE_INTERFACE extern "C" __attribute__((visibility("default")))
+#else
+#define ENGINE_INTERFACE 
 #endif
 
 #ifndef DISABLE_COPY

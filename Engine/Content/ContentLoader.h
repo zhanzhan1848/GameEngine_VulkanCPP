@@ -1,7 +1,7 @@
 #pragma once
 #include "CommonHeaders.h"
 
-#if !defined(SHIPPING) && defined(_WIN64)
+#if !defined(SHIPPING)
 namespace primal::content
 {
 	bool load_game();

@@ -23,6 +23,7 @@ public:
 	void begin_play() override {}
 	void update(f32 dt) override
 	{
+#if defined(_MSC_VER)
 		_angle += 0.25f * dt * math::two_pi;
 		if (_angle > math::two_pi) _angle -= math::two_pi;
 		math::v3a rot{ 0.f, _angle, 0.f };
@@ -30,6 +31,21 @@ public:
 		math::v4 rot_quat{};
 		DirectX::XMStoreFloat4(&rot_quat, quat);
 		set_rotation(rot_quat);
+#elif defined(__clang__)
+		_angle += 0.25f * dt * math::two_pi;
+		if (_angle > math::two_pi) _angle -= math::two_pi;
+
+		Eigen::AngleAxisf rotation{ _angle, Eigen::Vector3f::UnitY() };
+		Eigen::Quaternionf qt{ rotation };
+
+		math::v4 rot_quat{
+			static_cast<f32>(qt.x()),
+			static_cast<f32>(qt.y()),
+			static_cast<f32>(qt.z()),
+			static_cast<f32>(qt.w())
+		};
+		set_rotation(rot_quat);
+#endif
 	}
 
 private:
@@ -47,6 +63,7 @@ public:
 	void begin_play() override {}
 	void update(f32 dt) override
 	{
+#if defined(_MSC_VER)
 		_angle -= 1.0f * dt * math::two_pi;
 		if (_angle > math::two_pi) _angle += math::two_pi;
 		math::v3a rot{ 0.f, _angle, 0.f };
@@ -54,6 +71,21 @@ public:
 		math::v4 rot_quat{};
 		DirectX::XMStoreFloat4(&rot_quat, quat);
 		set_rotation(rot_quat);
+#elif defined(__clang__)
+		_angle -= 1.f * dt * math::two_pi;
+		if (_angle > math::two_pi) _angle += math::two_pi;
+
+		Eigen::AngleAxisf rotation{ _angle, Eigen::Vector3f::UnitY() };
+		Eigen::Quaternionf qt{ rotation };
+
+		math::v4 rot_quat{
+			static_cast<f32>(qt.x()),
+			static_cast<f32>(qt.y()),
+			static_cast<f32>(qt.z()),
+			static_cast<f32>(qt.w())
+		};
+		set_rotation(rot_quat);
+#endif
 	}
 
 private:
@@ -71,6 +103,7 @@ public:
 	void begin_play() override {}
 	void update(f32 dt) override
 	{
+#if defined(_MSC_VER)
 		_angle -= 0.01f * dt * math::two_pi;
 		if (_angle > math::two_pi) _angle += math::two_pi;
 		f32 x{ _angle * 2.0f - math::pi };
@@ -86,6 +119,33 @@ public:
 		math::v3 pos{ position() };
 		pos.y = 1.3f + 0.2f * std::sin(x) * std::sin(std::sin(x / 1.62f) + std::sin(1.62f * x) + std::sin(3.24f * x));
 		set_position(pos);
+#elif defined(__clang__)
+		_angle -= 0.01f * dt * math::two_pi;
+		if (_angle > math::two_pi) _angle += math::two_pi;
+		f32 x{ _angle * 2.0f - math::pi };
+		const f32 s1{ 0.05f * std::sin(x) * std::sin(std::sin(x / 1.62f) + std::sin(1.62f * x) + std::sin(3.24f * x)) };
+		x = _angle;
+		const f32 s2{ 0.05f * std::sin(x) * std::sin(std::sin(x / 1.62f) + std::sin(1.62f * x) + std::sin(3.24f * x)) };
+
+		// 使用 Eigen 创建旋转
+		Eigen::Vector3f euler(s1, 0.f, s2);
+		Eigen::Quaternionf quat;
+		quat = Eigen::AngleAxisf(euler.x(), Eigen::Vector3f::UnitX()) *
+			Eigen::AngleAxisf(euler.y(), Eigen::Vector3f::UnitY()) *
+			Eigen::AngleAxisf(euler.z(), Eigen::Vector3f::UnitZ());
+
+		math::v4 rot_quat{
+			static_cast<f32>(quat.x()),
+			static_cast<f32>(quat.y()),
+			static_cast<f32>(quat.z()),
+			static_cast<f32>(quat.w())
+		};
+		set_rotation(rot_quat);
+
+		math::v3 pos{ position() };
+		pos.y() = 1.3f + 0.2f * std::sin(x) * std::sin(std::sin(x / 1.62f) + std::sin(1.62f * x) + std::sin(3.24f * x));
+		set_position(pos);
+#endif
 	}
 
 private:
@@ -105,6 +165,7 @@ public:
 		const u64 binding{ std::hash<std::string>()("move") };
 		_input_system.add_handler(binding, this, &camera_script::on_move);
 
+#if defined(_MAC_VER)
 		math::v3 pos{ position() };
 		_descired_position = _position = DirectX::XMLoadFloat3(&pos);
 
@@ -113,11 +174,22 @@ public:
 		f32 phi{ std::atan2(-dir.z, dir.x) };
 		math::v3 rot{ theta - math::half_pi, phi + math::half_pi, 0.f };
 		_descired_spherical = _spherical = DirectX::XMLoadFloat3(&rot);
+#elif defined(__clang__)
+		math::v3 pos{ position() };
+		_descired_position = _position = pos;
+
+		math::v3 dir{ orientation() };
+		f32 theta{ std::cos(dir.y()) };
+		f32 phi{ std::atan2(-dir.z(), dir.x()) };
+		math::v3 rot{ theta - math::half_pi, phi + math::half_pi, 0.f };
+		_descired_spherical = _spherical = rot;
+#endif
 	}
 
 	void begin_play() override {}
 	void update(f32 dt) override
 	{
+#if defined(_MSC_VER)
 		using namespace DirectX;
 		if (_move_magnitude > math::epsilon)
 		{
@@ -132,26 +204,53 @@ public:
 		{
 			_position_acceleration = 0.f;
 		}
+#elif defined(__clang__)
+		if (_move_magnitude > math::epsilon)
+		{
+			const f32 fps_scale{ 0.1f }; // dt / 0.016667f
+			math::v4 rot{ rotation() };
+			
+			// 创建旋转四元数
+			Eigen::Quaternionf rotation_quat(rot.w(), rot.x(), rot.y(), rot.z());
+			// 旋转向量
+			Eigen::Vector3f rotated = rotation_quat * (_move * 0.5f * fps_scale);
+			
+			if (_position_acceleration < 1.f) _position_acceleration += (0.02f * fps_scale);
+			_descired_position += rotated * _position_acceleration;
+			_move_position = true;
+		}
+		else if (_move_position)
+		{
+			_position_acceleration = 0.f;
+		}
+#endif
 
 
 		if (_move_position || _move_rotation)
 		{
 			camera_seek(dt);
 		}
+
 	}
 
 private:
 
 	void on_move(u64 binding, const input::input_value& value)
 	{
+#if defined(_MSC_VER)
 		using namespace DirectX;
 
 		_move = XMLoadFloat3(&value.current);
 		_move_magnitude = XMVectorGetX(XMVector3LengthSq(_move));
+#elif defined(__clang__)
+		_move = value.current;
+		_move_magnitude = _move.squaredNorm();
+#endif
 	}
 
 	void mouse_move(input::input_source::type type, input::input_code::code code, const input::input_value& mouse_pos)
 	{
+#if defined(_MSC_VER)
 		using namespace DirectX;
 
 		if (code == input::input_code::mouse_position)
@@ -172,12 +271,41 @@ private:
 
 			_descired_spherical = DirectX::XMLoadFloat3(&spherical);
 			_move_rotation = true;
-			
 		}
+#elif defined(__clang__)
+		if (code == input::input_code::mouse_position)
+		{
+			input::input_value value;
+			input::get(input::input_source::mouse, input::input_code::mouse_left, value);
+			if (value.current.z() == 0.f) return;
+
+			const f32 scale{ 0.005f };
+			const f32 dx{ (mouse_pos.current.x() - mouse_pos.previous.x()) * scale };
+			const f32 dy{ (mouse_pos.current.y() - mouse_pos.previous.y()) * scale };
+
+			math::v3 spherical{ _descired_spherical };
+			spherical.x() += dy;
+			spherical.y() -= dx;
+			spherical.x() = math::clamp(spherical.x(), 0.0001f - math::half_pi, math::half_pi - 0.0001f);
+
+			_descired_spherical = spherical;
+			_move_rotation = true;
+		}
+#endif
+	}
+
+	void camera_auto(f32 dt)
+	{
+		f32 time{ 32.0f + dt * 1.5f};
+		math::v3 move{ 4.5f + std::cos(0.7f * time), 0.0f, std::sin(0.7f * time) };
+		_position += move;
+		math::v3 new_pos = _position;
+		set_position(new_pos);
 	}
 
 	void camera_seek(f32 dt)
 	{
+#if defined(_MSC_VER)
 		using namespace DirectX;
 		XMVECTOR o{ _descired_spherical - _spherical };
 		XMVECTOR p{ _descired_position - _position };
@@ -210,16 +338,60 @@ private:
 			XMStoreFloat4(&rot_quat, quat);
 			set_rotation(rot_quat);
 		}
-		
+#elif defined(__clang__)
+		math::v3 o{ _descired_spherical - _spherical };
+		math::v3 p{ _descired_position - _position };
+
+		auto a = o.norm();
+		auto b = p.norm();
+		_move_rotation = a > math::epsilon;
+		_move_position = b > math::epsilon;
+
+		const f32 scale{ 0.5f * dt / 0.016667f }; // * dt / 0.016667f
+
+		if (_move_position)
+		{
+			_position += (p * scale);
+			math::v3 new_pos = _position;
+			set_position(new_pos);
+		}
+
+		if (_move_rotation)
+		{
+			_spherical += (o * scale);
+			math::v3 new_rot = _spherical;
+			new_rot.x() = math::clamp(new_rot.x(), 0.0001f - math::half_pi, math::half_pi - 0.0001f);
+			_spherical = new_rot;
+
+			Eigen::Quaternionf quat = Eigen::AngleAxisf(new_rot.x(), Eigen::Vector3f::UnitX()) *
+                             Eigen::AngleAxisf(new_rot.y(), Eigen::Vector3f::UnitY()) *
+                             Eigen::AngleAxisf(new_rot.z(), Eigen::Vector3f::UnitZ());
+			math::v4 rot_quat{
+				static_cast<f32>(quat.x()),
+				static_cast<f32>(quat.y()),
+				static_cast<f32>(quat.z()),
+				static_cast<f32>(quat.w())
+			};
+			set_rotation(rot_quat);
+		}
+#endif
 	}
 
 	input::input_system<camera_script>						_input_system{};
 
+#if defined(_MSC_VER)
 	DirectX::XMVECTOR										_descired_position;
 	DirectX::XMVECTOR										_descired_spherical;
 	DirectX::XMVECTOR										_position;
 	DirectX::XMVECTOR										_spherical;
 	DirectX::XMVECTOR										_move{};
+#elif defined(__clang__)
+	Eigen::Vector3f											_descired_position;
+	Eigen::Vector3f											_descired_spherical;
+	Eigen::Vector3f											_position;
+	Eigen::Vector3f											_spherical;
+	Eigen::Vector3f											_move{};
+#endif
 	f32														_move_magnitude{ 0.f };
 	f32														_position_acceleration{ 0.f };
 	bool													_move_rotation{ false };

@@ -1,0 +1,36 @@
+#pragma once
+
+/**
+ * @file EngineConfig.h
+ * @brief 引擎配置文件 - 由CMake自动生成，请勿手动修改
+ */
+
+// 引擎根目录
+#define ENGINE_ROOT_DIR "@ENGINE_ROOT_DIR@"
+
+// 引擎二进制文件目录
+#define ENGINE_BINARY_DIR "@ENGINE_BINARY_DIR@"
+
+// 引擎资源目录
+#define ENGINE_ASSETS_DIR "@ENGINE_ASSETS_DIR@"
+
+// 引擎着色器目录
+#define ENGINE_SHADERS_DIR "@ENGINE_SHADERS_DIR@"
+
+// 引擎资源目录
+#define ENGINE_RESOURCES_DIR "@ENGINE_RESOURCES_DIR@"
+
+// 版本信息
+#define ENGINE_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define ENGINE_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define ENGINE_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define ENGINE_VERSION "@PROJECT_VERSION@"
+
+// 平台定义
+#cmakedefine APPLE
+#cmakedefine WIN32
+#cmakedefine LINUX
+
+// 构建类型
+#cmakedefine DEBUG
+#cmakedefine NDEBUG

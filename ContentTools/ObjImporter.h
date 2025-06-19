@@ -25,7 +25,11 @@ namespace primal::tools
 
         ~obj_context()
         {
-            ZeroMemory(this, sizeof(obj_context));
+#if defined(_MSC_VER)
+			ZeroMemory(this, sizeof(obj_context));
+#elif defined(__clang__)
+			memset(this, 0, sizeof(obj_context));
+#endif
         }
 
         void get_scene();
@@ -62,10 +66,17 @@ namespace primal::tools
         bool operator==(Vertex& v)
         {
             const f32 epsilon = 1.192e-07f;
+#if defined(_MSC_VER)
             return abs(this->pos.x - v.pos.x) <= epsilon && abs(this->pos.y - v.pos.y) <= epsilon && abs(this->pos.z - v.pos.z) <= epsilon &&
                 abs(this->color.x - v.color.x) <= epsilon && abs(this->color.y - v.color.y) <= epsilon && abs(this->color.z - v.color.z) <= epsilon &&
                 abs(this->texCoord.x - v.texCoord.x) <= epsilon && abs(this->texCoord.y - v.texCoord.y) <= epsilon && abs(this->texCoord.z - v.texCoord.z) <= epsilon &&
                 abs(this->normal.x - v.normal.x) <= epsilon && abs(this->normal.y - v.normal.y) <= epsilon && abs(this->normal.z - v.normal.z) <= epsilon;
+#elif defined(__clang__)
+            return abs(this->pos.x() - v.pos.x()) <= epsilon && abs(this->pos.y() - v.pos.y()) <= epsilon && abs(this->pos.z() - v.pos.z()) <= epsilon &&
+                abs(this->color.x() - v.color.x()) <= epsilon && abs(this->color.y() - v.color.y()) <= epsilon && abs(this->color.z() - v.color.z()) <= epsilon &&
+                abs(this->texCoord.x() - v.texCoord.x()) <= epsilon && abs(this->texCoord.y() - v.texCoord.y()) <= epsilon && abs(this->texCoord.z() - v.texCoord.z()) <= epsilon &&
+                abs(this->normal.x() - v.normal.x()) <= epsilon && abs(this->normal.y() - v.normal.y()) <= epsilon && abs(this->normal.z() - v.normal.z()) <= epsilon;
+#endif
         }
     };
 

@@ -19,7 +19,11 @@ namespace
 	utl::vector<graphics::light>	lights;
 	utl::vector<graphics::light>	disabled_lights;
 
+#if defined(_MSC_VER)
 	constexpr math::v3 rgb_to_color(u8 r, u8 g, u8 b) { return { r / 255.f, g / 255.f, b / 255.f }; }
+#elif defined(__clang__)
+	math::v3 rgb_to_color(u8 r, u8 g, u8 b) { return { r / 255.f, g / 255.f, b / 255.f }; }
+#endif
 	f32 random(f32 min = 0.f) { return std::max(min, rand() * inv_rand_max); }
 
 	void create_light(math::v3 position, math::v3 rotation, graphics::light::type type, u64 light_set_key)
@@ -116,18 +120,31 @@ void generate_lights()
 	srand(37);
 
 	constexpr f32 scale1{ 2.f };
+#if defined(_MSC_VER)
 	constexpr math::v3 scale{ 1.f * scale1, 0.5f * scale1, 1.f * scale1 };
-	constexpr s32 dim{ 10 };
+#elif defined(__clang__)
+	math::v3 scale{ 1.f * scale1, 0.5f * scale1, 1.f * scale1 };
+#endif
+	constexpr s32 dim{ 13 };
 	for(s32 x{-dim}; x < dim; ++x)
 		for(s32 y{0}; y < 2 * dim; ++y)
 			for (s32 z{ -dim }; z < dim; ++z)
 			{
+#if defined(_MSC_VER)
 				create_light({ (f32)(x * scale.x), (f32)(y * scale.y), (f32)(z * scale.z) },
 					{ random() * 3.14f, random() * 3.14f, random() * 3.14f },
 					random() > 0.5 ? graphics::light::spot : graphics::light::point, left_set);
 				create_light({ (f32)(x * scale.x), (f32)(y * scale.y), (f32)(z * scale.z) },
 					{ random() * 3.14f, random() * 3.14f, random() * 3.14f },
 					random() > 0.5 ? graphics::light::spot : graphics::light::point, right_set);
+#elif defined(__clang__)
+				create_light({ (f32)(x * scale.x()), (f32)(y * scale.y()), (f32)(z * scale.z()) },
+					{ ::random() * 3.14f, ::random() * 3.14f, ::random() * 3.14f },
+					::random() > 0.5 ? graphics::light::spot : graphics::light::point, left_set);
+				create_light({ (f32)(x * scale.x()), (f32)(y * scale.y()), (f32)(z * scale.z()) },
+					{ ::random() * 3.14f, ::random() * 3.14f, ::random() * 3.14f },
+					::random() > 0.5 ? graphics::light::spot : graphics::light::point, right_set);
+#endif
 			}
 #endif
 }
@@ -155,14 +172,18 @@ void remove_lights()
 	graphics::remove_light_set(right_set);
 }
 
-void test_lights(f32 dt)
+void test_lights([[maybe_unused]] f32 dt)
 {
 #if 1
 	static f32 t{ 0 };
 	t += 0.05f;
 	for (u32 i{ 0 }; i < (u32)lights.size(); ++i)
 	{
+#if defined(_MSC_VER)
 		f32 sine{ DirectX::XMScalarSin(t + lights[i].get_id()) };
+#elif defined(__clang__)
+		f32 sine{ std::sin(t + lights[i].get_id()) };
+#endif
 		sine *= sine;
 		lights[i].intensity(2.f * sine);
 	}

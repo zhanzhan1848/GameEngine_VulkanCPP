@@ -18,7 +18,11 @@ public:
     void set_fullscreen(bool is_fullscreen) const;
     bool is_fullscreen() const;
     void* handle() const;
+#if defined(_MSC_VER)
     void set_caption(const wchar_t* caption) const;
+#elif defined(__clang__)
+    void set_caption(const char* caption) const;
+#endif
     math::u32v4 size() const;
     void resize(u32 width, u32 height) const;
     u32 width() const;

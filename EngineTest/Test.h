@@ -19,6 +19,9 @@ public:
 #elif __linux__
     virtual bool initialize(void* disp) = 0;
     virtual void run(void* disp) = 0;
+#else
+    virtual bool initialize() = 0;
+    virtual void run() = 0;
 #endif
     virtual void shutdown() = 0;
 };
@@ -60,7 +63,7 @@ public:
             OutputDebugStringA("\n");
 #else
             std::cout << "Avg. frame (ms): ";
-            std::cout << std::to_string(_ms_avg).c_str();
+            std::cout << std::to_string(_us_avg).c_str();
             std::cout << (" " + std::to_string(_counter)).c_str();
             std::cout << " fps" << std::endl;
 #endif // _WIN64

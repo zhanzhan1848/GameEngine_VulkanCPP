@@ -1,12 +1,20 @@
 #pragma once
 
+#if defined(_WIN64)
 #include "CommonHeaders.h"
+#elif defined(__APPLE__)
+#include "../Common/PrimitiveTypes.h"
+#endif
+
+#if defined(__APPLE__)
+#include <Eigen/Dense>
+#endif
 
 namespace primal::math {
-	constexpr f32 pi{ 3.1415926535897932384626433832795f };
-	constexpr f32 half_pi{ pi * 0.5f };
-	constexpr f32 two_pi{ 2.f * pi };
-	constexpr f32 epsilon{ 1e-5f };
+constexpr f32 pi{ 3.1415926535897932384626433832795f };
+constexpr f32 half_pi{ pi * 0.5f };
+constexpr f32 two_pi{ 2.f * pi };
+constexpr f32 epsilon{ 1e-5f };
 
 #if defined(_WIN64)
 	using v2 = DirectX::XMFLOAT2;
@@ -24,5 +32,23 @@ namespace primal::math {
 	using m3x3 = DirectX::XMFLOAT3X3;
 	using m4x4 = DirectX::XMFLOAT4X4;
 	using m4x4a = DirectX::XMFLOAT4X4A;
+#endif
+
+#if defined(__APPLE__)
+	using v2 = Eigen::Vector2f;
+	using v2a = Eigen::Vector2f;
+	using v3 = Eigen::Vector3f;
+	using v3a = Eigen::Vector3f;
+	using v4 = Eigen::Vector4f;
+	using v4a = Eigen::Vector4f;
+	using u32v2 = Eigen::Matrix<u32, 2, 1>;
+	using u32v3 = Eigen::Matrix<u32, 3, 1>;
+	using u32v4 = Eigen::Matrix<u32, 4, 1>;
+	using s32v2 = Eigen::Matrix<s32, 2, 1>;
+	using s32v3 = Eigen::Matrix<s32, 3, 1>;
+	using s32v4 = Eigen::Matrix<s32, 4, 1>;
+	using m3x3 = Eigen::Matrix3f;
+	using m4x4 = Eigen::Matrix4f;
+	using m4x4a = Eigen::Matrix<f32, 4, 4>;
 #endif
 }

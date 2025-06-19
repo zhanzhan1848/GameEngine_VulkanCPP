@@ -252,7 +252,8 @@ namespace primal::graphics
 	{
 		direct3d12 = 0,
 		vulkan_1,
-		//open_gl = 2,
+		metal,
+		//open_gl = 3,
 	};
 #else
 #include "Graphics/GraphicsPlatform.h"
@@ -275,7 +276,11 @@ namespace primal::graphics
 	void create_light_set(u64 light_set_key);
 	void remove_light_set(u64 light_set_key);
 
+#if defined(_MSC_VER)
 	light create_light(light_init_info info);
+#elif defined(__clang__)
+	light create_light(const light_init_info& info);
+#endif
 	void remove_light(light_id id, u64 light_set_key);
 
 	camera create_camera(camera_init_info info);

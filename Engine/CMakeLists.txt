@@ -1,709 +1,378 @@
+cmake_minimum_required(VERSION 3.20)
+
+# 项目名称
 set(PROJECT_NAME Engine)
+project(${PROJECT_NAME})
 
-################################################################################
-# Source groups
-################################################################################
-set(no_group_source_files
-    "Components/PythonAPI.h"
-    "Content/stb_image.h"
-    "Content/tiny_obj_loader.h"
-    "EngineAPI/Input.h"
-    "EngineAPI/Light.h"
-    "Graphics/Direct3D12/D3D12Light.cpp"
-    "Graphics/Direct3D12/D3D12Light.h"
-    "Graphics/Direct3D12/D3D12LightCulling.cpp"
-    "Graphics/Direct3D12/D3D12LightCulling.h"
-    "Graphics/Vulkan/Shaders/Common.h"
-    "Graphics/Vulkan/Shaders/compileShaders.bat"
-    "Graphics/Vulkan/Shaders/compileShaders2.bat"
-    "Graphics/Vulkan/Shaders/composition.frag"
-    "Graphics/Vulkan/Shaders/floor.frag.glsl"
-    "Graphics/Vulkan/Shaders/floor.vert.glsl"
-    "Graphics/Vulkan/Shaders/fullscreen.vert"
-    "Graphics/Vulkan/Shaders/gbuffer.frag"
-    "Graphics/Vulkan/Shaders/gbuffer.vert"
-    "Graphics/Vulkan/Shaders/ShaderTypes.h"
-    "Graphics/Vulkan/Shaders/shadowmapping.frag.glsl"
-    "Graphics/Vulkan/Shaders/shadowmapping.vert.glsl"
-    "Graphics/Vulkan/Shaders/ssao.frag"
-    "Graphics/Vulkan/Shaders/test01.frag.glsl"
-    "Graphics/Vulkan/Shaders/test01.vert.glsl"
-    "Graphics/Vulkan/VulkanCamera.cpp"
-    "Graphics/Vulkan/VulkanCamera.h"
-    "Graphics/Vulkan/VulkanCompute.cpp"
-    "Graphics/Vulkan/VulkanCompute.h"
-    "Graphics/Vulkan/VulkanContent.cpp"
-    "Graphics/Vulkan/VulkanContent.h"
-    "Graphics/Vulkan/VulkanData.cpp"
-    "Graphics/Vulkan/VulkanData.h"
-    "Graphics/Vulkan/VulkanGBuffer.cpp"
-    "Graphics/Vulkan/VulkanGBuffer.h"
-    "Graphics/Vulkan/VulkanLight.cpp"
-    "Graphics/Vulkan/VulkanLight.h"
-    "Graphics/Vulkan/VulkanShader.cpp"
-    "Graphics/Vulkan/VulkanShader.h"
-    "Graphics/Vulkan/VulkanTexture.cpp"
-    "Graphics/Vulkan/VulkanTexture.h"
-    "Input/Input.cpp"
-    "Input/Input.h"
-    "Input/InputWin32.cpp"
-    "Input/InputWin32.h"
-    "Python_Scripts/compileShaders.py"
-    "Simulation/include/characterkinematic/PxBoxController.h"
-    "Simulation/include/characterkinematic/PxCapsuleController.h"
-    "Simulation/include/characterkinematic/PxController.h"
-    "Simulation/include/characterkinematic/PxControllerBehavior.h"
-    "Simulation/include/characterkinematic/PxControllerManager.h"
-    "Simulation/include/characterkinematic/PxControllerObstacles.h"
-    "Simulation/include/characterkinematic/PxExtended.h"
-    "Simulation/include/collision/PxCollisionDefs.h"
-    "Simulation/include/common/PxBase.h"
-    "Simulation/include/common/PxCollection.h"
-    "Simulation/include/common/PxCoreUtilityTypes.h"
-    "Simulation/include/common/PxInsertionCallback.h"
-    "Simulation/include/common/PxMetaData.h"
-    "Simulation/include/common/PxMetaDataFlags.h"
-    "Simulation/include/common/PxPhysXCommonConfig.h"
-    "Simulation/include/common/PxProfileZone.h"
-    "Simulation/include/common/PxRenderBuffer.h"
-    "Simulation/include/common/PxRenderOutput.h"
-    "Simulation/include/common/PxSerialFramework.h"
-    "Simulation/include/common/PxSerializer.h"
-    "Simulation/include/common/PxStringTable.h"
-    "Simulation/include/common/PxTolerancesScale.h"
-    "Simulation/include/common/PxTypeInfo.h"
-    "Simulation/include/common/windows/PxWindowsDelayLoadHook.h"
-    "Simulation/include/cooking/PxBVH33MidphaseDesc.h"
-    "Simulation/include/cooking/PxBVH34MidphaseDesc.h"
-    "Simulation/include/cooking/PxBVHDesc.h"
-    "Simulation/include/cooking/Pxc.h"
-    "Simulation/include/cooking/PxConvexMeshDesc.h"
-    "Simulation/include/cooking/PxCooking.h"
-    "Simulation/include/cooking/PxCookingInternal.h"
-    "Simulation/include/cooking/PxMidphaseDesc.h"
-    "Simulation/include/cooking/PxSDFDesc.h"
-    "Simulation/include/cooking/PxTetrahedronMeshDesc.h"
-    "Simulation/include/cooking/PxTriangleMeshDesc.h"
-    "Simulation/include/cudamanager/PxCudaContext.h"
-    "Simulation/include/cudamanager/PxCudaContextManager.h"
-    "Simulation/include/cudamanager/PxCudaTypes.h"
-    "Simulation/include/extensions/PxBinaryConverter.h"
-    "Simulation/include/extensions/PxBroadPhaseExt.h"
-    "Simulation/include/extensions/PxCollectionExt.h"
-    "Simulation/include/extensions/PxConstraintExt.h"
-    "Simulation/include/extensions/PxContactJoint.h"
-    "Simulation/include/extensions/PxConvexMeshExt.h"
-    "Simulation/include/extensions/PxCustomGeometryExt.h"
-    "Simulation/include/extensions/PxCustomSceneQuerySystem.h"
-    "Simulation/include/extensions/PxD6Joint.h"
-    "Simulation/include/extensions/PxD6JointCreate.h"
-    "Simulation/include/extensions/PxDefaultAllocator.h"
-    "Simulation/include/extensions/PxDefaultCpuDispatcher.h"
-    "Simulation/include/extensions/PxDefaultErrorCallback.h"
-    "Simulation/include/extensions/PxDefaultSimulationFilterShader.h"
-    "Simulation/include/extensions/PxDefaultStreams.h"
-    "Simulation/include/extensions/PxDistanceJoint.h"
-    "Simulation/include/extensions/PxExtensionsAPI.h"
-    "Simulation/include/extensions/PxFixedJoint.h"
-    "Simulation/include/extensions/PxGearJoint.h"
-    "Simulation/include/extensions/PxGjkQueryExt.h"
-    "Simulation/include/extensions/PxJoint.h"
-    "Simulation/include/extensions/PxJointLimit.h"
-    "Simulation/include/extensions/PxMassProperties.h"
-    "Simulation/include/extensions/PxParticleClothCooker.h"
-    "Simulation/include/extensions/PxParticleExt.h"
-    "Simulation/include/extensions/PxPrismaticJoint.h"
-    "Simulation/include/extensions/PxRackAndPinionJoint.h"
-    "Simulation/include/extensions/PxRaycastCCD.h"
-    "Simulation/include/extensions/PxRemeshingExt.h"
-    "Simulation/include/extensions/PxRepXSerializer.h"
-    "Simulation/include/extensions/PxRepXSimpleType.h"
-    "Simulation/include/extensions/PxRevoluteJoint.h"
-    "Simulation/include/extensions/PxRigidActorExt.h"
-    "Simulation/include/extensions/PxRigidBodyExt.h"
-    "Simulation/include/extensions/PxSamplingExt.h"
-    "Simulation/include/extensions/PxSceneQueryExt.h"
-    "Simulation/include/extensions/PxSceneQuerySystemExt.h"
-    "Simulation/include/extensions/PxSerialization.h"
-    "Simulation/include/extensions/PxShapeExt.h"
-    "Simulation/include/extensions/PxSimpleFactory.h"
-    "Simulation/include/extensions/PxSmoothNormals.h"
-    "Simulation/include/extensions/PxSoftBodyExt.h"
-    "Simulation/include/extensions/PxSphericalJoint.h"
-    "Simulation/include/extensions/PxStringTableExt.h"
-    "Simulation/include/extensions/PxTetMakerExt.h"
-    "Simulation/include/extensions/PxTetrahedronMeshAnalysisResult.h"
-    "Simulation/include/extensions/PxTetrahedronMeshExt.h"
-    "Simulation/include/extensions/PxTriangleMeshAnalysisResult.h"
-    "Simulation/include/extensions/PxTriangleMeshExt.h"
-    "Simulation/include/filebuf/PxFileBuf.h"
-    "Simulation/include/foundation/Px.h"
-    "Simulation/include/foundation/PxAlignedMalloc.h"
-    "Simulation/include/foundation/PxAlloca.h"
-    "Simulation/include/foundation/PxAllocator.h"
-    "Simulation/include/foundation/PxAllocatorCallback.h"
-    "Simulation/include/foundation/PxAoS.h"
-    "Simulation/include/foundation/PxArray.h"
-    "Simulation/include/foundation/PxAssert.h"
-    "Simulation/include/foundation/PxAtomic.h"
-    "Simulation/include/foundation/PxBasicTemplates.h"
-    "Simulation/include/foundation/PxBitAndData.h"
-    "Simulation/include/foundation/PxBitMap.h"
-    "Simulation/include/foundation/PxBitUtils.h"
-    "Simulation/include/foundation/PxBounds3.h"
-    "Simulation/include/foundation/PxBroadcast.h"
-    "Simulation/include/foundation/PxErrorCallback.h"
-    "Simulation/include/foundation/PxErrors.h"
-    "Simulation/include/foundation/PxFlags.h"
-    "Simulation/include/foundation/PxFoundation.h"
-    "Simulation/include/foundation/PxFoundationConfig.h"
-    "Simulation/include/foundation/PxFPU.h"
-    "Simulation/include/foundation/PxHash.h"
-    "Simulation/include/foundation/PxHashInternals.h"
-    "Simulation/include/foundation/PxHashMap.h"
-    "Simulation/include/foundation/PxHashSet.h"
-    "Simulation/include/foundation/PxInlineAllocator.h"
-    "Simulation/include/foundation/PxInlineAoS.h"
-    "Simulation/include/foundation/PxInlineArray.h"
-    "Simulation/include/foundation/PxIntrinsics.h"
-    "Simulation/include/foundation/PxIO.h"
-    "Simulation/include/foundation/PxMat33.h"
-    "Simulation/include/foundation/PxMat34.h"
-    "Simulation/include/foundation/PxMat44.h"
-    "Simulation/include/foundation/PxMath.h"
-    "Simulation/include/foundation/PxMathIntrinsics.h"
-    "Simulation/include/foundation/PxMathUtils.h"
-    "Simulation/include/foundation/PxMemory.h"
-    "Simulation/include/foundation/PxMutex.h"
-    "Simulation/include/foundation/PxPhysicsVersion.h"
-    "Simulation/include/foundation/PxPinnedArray.h"
-    "Simulation/include/foundation/PxPlane.h"
-    "Simulation/include/foundation/PxPool.h"
-    "Simulation/include/foundation/PxPreprocessor.h"
-    "Simulation/include/foundation/PxProfiler.h"
-    "Simulation/include/foundation/PxQuat.h"
-    "Simulation/include/foundation/PxSIMDHelpers.h"
-    "Simulation/include/foundation/PxSimpleTypes.h"
-    "Simulation/include/foundation/PxSList.h"
-    "Simulation/include/foundation/PxSocket.h"
-    "Simulation/include/foundation/PxSort.h"
-    "Simulation/include/foundation/PxSortInternals.h"
-    "Simulation/include/foundation/PxStrideIterator.h"
-    "Simulation/include/foundation/PxString.h"
-    "Simulation/include/foundation/PxSync.h"
-    "Simulation/include/foundation/PxTempAllocator.h"
-    "Simulation/include/foundation/PxThread.h"
-    "Simulation/include/foundation/PxTime.h"
-    "Simulation/include/foundation/PxTransform.h"
-    "Simulation/include/foundation/PxUnionCast.h"
-    "Simulation/include/foundation/PxUserAllocated.h"
-    "Simulation/include/foundation/PxUtilities.h"
-    "Simulation/include/foundation/PxVec2.h"
-    "Simulation/include/foundation/PxVec3.h"
-    "Simulation/include/foundation/PxVec4.h"
-    "Simulation/include/foundation/PxVecMath.h"
-    "Simulation/include/foundation/PxVecMathAoSScalar.h"
-    "Simulation/include/foundation/PxVecMathAoSScalarInline.h"
-    "Simulation/include/foundation/PxVecMathSSE.h"
-    "Simulation/include/foundation/PxVecQuat.h"
-    "Simulation/include/foundation/PxVecTransform.h"
-    "Simulation/include/foundation/unix/neon/PxUnixNeonAoS.h"
-    "Simulation/include/foundation/unix/neon/PxUnixNeonInlineAoS.h"
-    "Simulation/include/foundation/unix/PxUnixAoS.h"
-    "Simulation/include/foundation/unix/PxUnixFPU.h"
-    "Simulation/include/foundation/unix/PxUnixInlineAoS.h"
-    "Simulation/include/foundation/unix/PxUnixIntrinsics.h"
-    "Simulation/include/foundation/unix/PxUnixMathIntrinsics.h"
-    "Simulation/include/foundation/unix/PxUnixTrigConstants.h"
-    "Simulation/include/foundation/unix/sse2/PxUnixSse2AoS.h"
-    "Simulation/include/foundation/unix/sse2/PxUnixSse2InlineAoS.h"
-    "Simulation/include/foundation/windows/PxWindowsAoS.h"
-    "Simulation/include/foundation/windows/PxWindowsFPU.h"
-    "Simulation/include/foundation/windows/PxWindowsInclude.h"
-    "Simulation/include/foundation/windows/PxWindowsInlineAoS.h"
-    "Simulation/include/foundation/windows/PxWindowsIntrinsics.h"
-    "Simulation/include/foundation/windows/PxWindowsMathIntrinsics.h"
-    "Simulation/include/foundation/windows/PxWindowsTrigConstants.h"
-    "Simulation/include/geometry/PxBoxGeometry.h"
-    "Simulation/include/geometry/PxBVH.h"
-    "Simulation/include/geometry/PxBVHBuildStrategy.h"
-    "Simulation/include/geometry/PxCapsuleGeometry.h"
-    "Simulation/include/geometry/PxConvexMesh.h"
-    "Simulation/include/geometry/PxConvexMeshGeometry.h"
-    "Simulation/include/geometry/PxCustomGeometry.h"
-    "Simulation/include/geometry/PxGeometry.h"
-    "Simulation/include/geometry/PxGeometryHelpers.h"
-    "Simulation/include/geometry/PxGeometryHit.h"
-    "Simulation/include/geometry/PxGeometryInternal.h"
-    "Simulation/include/geometry/PxGeometryQuery.h"
-    "Simulation/include/geometry/PxGeometryQueryContext.h"
-    "Simulation/include/geometry/PxGeometryQueryFlags.h"
-    "Simulation/include/geometry/PxGjkQuery.h"
-    "Simulation/include/geometry/PxHairSystemDesc.h"
-    "Simulation/include/geometry/PxHairSystemGeometry.h"
-    "Simulation/include/geometry/PxHeightField.h"
-    "Simulation/include/geometry/PxHeightFieldDesc.h"
-    "Simulation/include/geometry/PxHeightFieldFlag.h"
-    "Simulation/include/geometry/PxHeightFieldGeometry.h"
-    "Simulation/include/geometry/PxHeightFieldSample.h"
-    "Simulation/include/geometry/PxMeshQuery.h"
-    "Simulation/include/geometry/PxMeshScale.h"
-    "Simulation/include/geometry/PxParticleSystemGeometry.h"
-    "Simulation/include/geometry/PxPlaneGeometry.h"
-    "Simulation/include/geometry/PxReportCallback.h"
-    "Simulation/include/geometry/PxSimpleTriangleMesh.h"
-    "Simulation/include/geometry/PxSphereGeometry.h"
-    "Simulation/include/geometry/PxTetrahedron.h"
-    "Simulation/include/geometry/PxTetrahedronMesh.h"
-    "Simulation/include/geometry/PxTetrahedronMeshGeometry.h"
-    "Simulation/include/geometry/PxTriangle.h"
-    "Simulation/include/geometry/PxTriangleMesh.h"
-    "Simulation/include/geometry/PxTriangleMeshGeometry.h"
-    "Simulation/include/geomutils/PxContactBuffer.h"
-    "Simulation/include/geomutils/PxContactPoint.h"
-    "Simulation/include/gpu/PxGpu.h"
-    "Simulation/include/gpu/PxPhysicsGpu.h"
-    "Simulation/include/omnipvd/PxOmniPvd.h"
-    "Simulation/include/pvd/PxPvd.h"
-    "Simulation/include/pvd/PxPvdSceneClient.h"
-    "Simulation/include/pvd/PxPvdTransport.h"
-    "Simulation/include/PxActor.h"
-    "Simulation/include/PxActorData.h"
-    "Simulation/include/PxAggregate.h"
-    "Simulation/include/PxAnisotropy.h"
-    "Simulation/include/PxArrayConverter.h"
-    "Simulation/include/PxArticulationFlag.h"
-    "Simulation/include/PxArticulationJointReducedCoordinate.h"
-    "Simulation/include/PxArticulationLink.h"
-    "Simulation/include/PxArticulationReducedCoordinate.h"
-    "Simulation/include/PxArticulationTendon.h"
-    "Simulation/include/PxArticulationTendonData.h"
-    "Simulation/include/PxAttachment.h"
-    "Simulation/include/PxBaseMaterial.h"
-    "Simulation/include/PxBroadPhase.h"
-    "Simulation/include/PxClient.h"
-    "Simulation/include/PxConeLimitedConstraint.h"
-    "Simulation/include/PxConfig.h"
-    "Simulation/include/PxConstraint.h"
-    "Simulation/include/PxConstraintDesc.h"
-    "Simulation/include/PxContact.h"
-    "Simulation/include/PxContactModifyCallback.h"
-    "Simulation/include/PxDeletionListener.h"
-    "Simulation/include/PxFEMClothFlags.h"
-    "Simulation/include/PxFEMClothMaterial.h"
-    "Simulation/include/PxFEMMaterial.h"
-    "Simulation/include/PxFEMParameter.h"
-    "Simulation/include/PxFEMSoftBodyMaterial.h"
-    "Simulation/include/PxFiltering.h"
-    "Simulation/include/PxFLIPMaterial.h"
-    "Simulation/include/PxForceMode.h"
-    "Simulation/include/PxHairSystemFlag.h"
-    "Simulation/include/PxImmediateMode.h"
-    "Simulation/include/PxIsosurfaceExtraction.h"
-    "Simulation/include/PxLineStripSkinning.h"
-    "Simulation/include/PxLockedData.h"
-    "Simulation/include/PxMaterial.h"
-    "Simulation/include/PxMPMMaterial.h"
-    "Simulation/include/PxNodeIndex.h"
-    "Simulation/include/PxParticleBuffer.h"
-    "Simulation/include/PxParticleGpu.h"
-    "Simulation/include/PxParticleMaterial.h"
-    "Simulation/include/PxParticleNeighborhoodProvider.h"
-    "Simulation/include/PxParticleSolverType.h"
-    "Simulation/include/PxParticleSystem.h"
-    "Simulation/include/PxParticleSystemFlag.h"
-    "Simulation/include/PxPBDMaterial.h"
-    "Simulation/include/PxPBDParticleSystem.h"
-    "Simulation/include/PxPhysics.h"
-    "Simulation/include/PxPhysicsAPI.h"
-    "Simulation/include/PxPhysicsSerialization.h"
-    "Simulation/include/PxPhysXConfig.h"
-    "Simulation/include/PxPruningStructure.h"
-    "Simulation/include/PxQueryFiltering.h"
-    "Simulation/include/PxQueryReport.h"
-    "Simulation/include/PxRigidActor.h"
-    "Simulation/include/PxRigidBody.h"
-    "Simulation/include/PxRigidDynamic.h"
-    "Simulation/include/PxRigidStatic.h"
-    "Simulation/include/PxScene.h"
-    "Simulation/include/PxSceneDesc.h"
-    "Simulation/include/PxSceneLock.h"
-    "Simulation/include/PxSceneQueryDesc.h"
-    "Simulation/include/PxSceneQuerySystem.h"
-    "Simulation/include/PxSDFBuilder.h"
-    "Simulation/include/PxShape.h"
-    "Simulation/include/PxSimulationEventCallback.h"
-    "Simulation/include/PxSimulationStatistics.h"
-    "Simulation/include/PxSmoothing.h"
-    "Simulation/include/PxSoftBody.h"
-    "Simulation/include/PxSoftBodyFlag.h"
-    "Simulation/include/PxSparseGridParams.h"
-    "Simulation/include/PxVisualizationParameter.h"
-    "Simulation/include/solver/PxSolverDefs.h"
-    "Simulation/include/task/PxCpuDispatcher.h"
-    "Simulation/include/task/PxTask.h"
-    "Simulation/include/task/PxTaskManager.h"
-    "Simulation/include/vehicle/PxVehicleComponents.h"
-    "Simulation/include/vehicle/PxVehicleDrive.h"
-    "Simulation/include/vehicle/PxVehicleDrive4W.h"
-    "Simulation/include/vehicle/PxVehicleDriveNW.h"
-    "Simulation/include/vehicle/PxVehicleDriveTank.h"
-    "Simulation/include/vehicle/PxVehicleNoDrive.h"
-    "Simulation/include/vehicle/PxVehicleSDK.h"
-    "Simulation/include/vehicle/PxVehicleShaders.h"
-    "Simulation/include/vehicle/PxVehicleTireFriction.h"
-    "Simulation/include/vehicle/PxVehicleUpdate.h"
-    "Simulation/include/vehicle/PxVehicleUtil.h"
-    "Simulation/include/vehicle/PxVehicleUtilControl.h"
-    "Simulation/include/vehicle/PxVehicleUtilSetup.h"
-    "Simulation/include/vehicle/PxVehicleUtilTelemetry.h"
-    "Simulation/include/vehicle/PxVehicleWheels.h"
-    "Simulation/include/vehicle2/braking/PxVehicleBrakingFunctions.h"
-    "Simulation/include/vehicle2/braking/PxVehicleBrakingParams.h"
-    "Simulation/include/vehicle2/commands/PxVehicleCommandHelpers.h"
-    "Simulation/include/vehicle2/commands/PxVehicleCommandParams.h"
-    "Simulation/include/vehicle2/commands/PxVehicleCommandStates.h"
-    "Simulation/include/vehicle2/drivetrain/PxVehicleDrivetrainComponents.h"
-    "Simulation/include/vehicle2/drivetrain/PxVehicleDrivetrainFunctions.h"
-    "Simulation/include/vehicle2/drivetrain/PxVehicleDrivetrainHelpers.h"
-    "Simulation/include/vehicle2/drivetrain/PxVehicleDrivetrainParams.h"
-    "Simulation/include/vehicle2/drivetrain/PxVehicleDrivetrainStates.h"
-    "Simulation/include/vehicle2/physxActor/PxVehiclePhysXActorComponents.h"
-    "Simulation/include/vehicle2/physxActor/PxVehiclePhysXActorFunctions.h"
-    "Simulation/include/vehicle2/physxActor/PxVehiclePhysXActorHelpers.h"
-    "Simulation/include/vehicle2/physxActor/PxVehiclePhysXActorStates.h"
-    "Simulation/include/vehicle2/physxConstraints/PxVehiclePhysXConstraintComponents.h"
-    "Simulation/include/vehicle2/physxConstraints/PxVehiclePhysXConstraintFunctions.h"
-    "Simulation/include/vehicle2/physxConstraints/PxVehiclePhysXConstraintHelpers.h"
-    "Simulation/include/vehicle2/physxConstraints/PxVehiclePhysXConstraintParams.h"
-    "Simulation/include/vehicle2/physxConstraints/PxVehiclePhysXConstraintStates.h"
-    "Simulation/include/vehicle2/physxRoadGeometry/PxVehiclePhysXRoadGeometryComponents.h"
-    "Simulation/include/vehicle2/physxRoadGeometry/PxVehiclePhysXRoadGeometryFunctions.h"
-    "Simulation/include/vehicle2/physxRoadGeometry/PxVehiclePhysXRoadGeometryHelpers.h"
-    "Simulation/include/vehicle2/physxRoadGeometry/PxVehiclePhysXRoadGeometryParams.h"
-    "Simulation/include/vehicle2/physxRoadGeometry/PxVehiclePhysXRoadGeometryState.h"
-    "Simulation/include/vehicle2/pvd/PxVehiclePvdComponents.h"
-    "Simulation/include/vehicle2/pvd/PxVehiclePvdFunctions.h"
-    "Simulation/include/vehicle2/pvd/PxVehiclePvdHelpers.h"
-    "Simulation/include/vehicle2/PxVehicleAPI.h"
-    "Simulation/include/vehicle2/PxVehicleComponent.h"
-    "Simulation/include/vehicle2/PxVehicleComponentSequence.h"
-    "Simulation/include/vehicle2/PxVehicleFunctions.h"
-    "Simulation/include/vehicle2/PxVehicleLimits.h"
-    "Simulation/include/vehicle2/PxVehicleMaths.h"
-    "Simulation/include/vehicle2/PxVehicleParams.h"
-    "Simulation/include/vehicle2/rigidBody/PxVehicleRigidBodyComponents.h"
-    "Simulation/include/vehicle2/rigidBody/PxVehicleRigidBodyFunctions.h"
-    "Simulation/include/vehicle2/rigidBody/PxVehicleRigidBodyParams.h"
-    "Simulation/include/vehicle2/rigidBody/PxVehicleRigidBodyStates.h"
-    "Simulation/include/vehicle2/roadGeometry/PxVehicleRoadGeometryState.h"
-    "Simulation/include/vehicle2/steering/PxVehicleSteeringFunctions.h"
-    "Simulation/include/vehicle2/steering/PxVehicleSteeringParams.h"
-    "Simulation/include/vehicle2/suspension/PxVehicleSuspensionComponents.h"
-    "Simulation/include/vehicle2/suspension/PxVehicleSuspensionFunctions.h"
-    "Simulation/include/vehicle2/suspension/PxVehicleSuspensionHelpers.h"
-    "Simulation/include/vehicle2/suspension/PxVehicleSuspensionParams.h"
-    "Simulation/include/vehicle2/suspension/PxVehicleSuspensionStates.h"
-    "Simulation/include/vehicle2/tire/PxVehicleTireComponents.h"
-    "Simulation/include/vehicle2/tire/PxVehicleTireFunctions.h"
-    "Simulation/include/vehicle2/tire/PxVehicleTireHelpers.h"
-    "Simulation/include/vehicle2/tire/PxVehicleTireParams.h"
-    "Simulation/include/vehicle2/tire/PxVehicleTireStates.h"
-    "Simulation/include/vehicle2/wheel/PxVehicleWheelComponents.h"
-    "Simulation/include/vehicle2/wheel/PxVehicleWheelFunctions.h"
-    "Simulation/include/vehicle2/wheel/PxVehicleWheelHelpers.h"
-    "Simulation/include/vehicle2/wheel/PxVehicleWheelParams.h"
-    "Simulation/include/vehicle2/wheel/PxVehicleWheelStates.h"
-    "Simulation/SimulationCommonHeaders.h"
-    "TaskScheduler/LockLessMultiReadPipe.h"
-    "TaskScheduler/TaskScheduler.cpp"
-    "TaskScheduler/TaskScheduler.h"
-    "Utilities/Hash.h"
-    "Utilities/ThreadPool.hpp"
-)
-source_group("" FILES ${no_group_source_files})
 
-set(Common
-    "Common/CommonHeaders.h"
-    "Common/Id.h"
-    "Common/PrimitiveTypes.h"
-)
-source_group("Common" FILES ${Common})
-
-set(Components
-    "Components/ComponentsCommon.h"
-    "Components/Entity.cpp"
-    "Components/Entity.h"
-    "Components/Script.cpp"
-    "Components/Script.h"
-    "Components/Transform.cpp"
-    "Components/Transform.h"
-)
-source_group("Components" FILES ${Components})
-
-set(Content
-    "Content/ContentLoader.h"
-    "Content/ContentLoaderWin32.cpp"
-    "Content/ContentToEngine.cpp"
-    "Content/ContentToEngine.h"
-)
-source_group("Content" FILES ${Content})
-
-set(Core
-    "Core/EngineWin32.cpp"
-    "Core/MainWin32.cpp"
-)
-source_group("Core" FILES ${Core})
-
-set(EngineAPI
-    "EngineAPI/Camera.h"
-    "EngineAPI/GameEntity.h"
-    "EngineAPI/ScriptComponent.h"
-    "EngineAPI/TransformComponent.h"
-)
-source_group("EngineAPI" FILES ${EngineAPI})
-
-set(Graphics
-    "Graphics/GraphicsPlatform.cpp"
-    "Graphics/GraphicsPlatform.h"
-    "Graphics/GraphicsPlatformInterface.h"
-    "Graphics/Renderer.cpp"
-    "Graphics/Renderer.h"
-)
-source_group("Graphics" FILES ${Graphics})
-
-set(Graphics__Direct3D12
-    "Graphics/Direct3D12/D3D12Camera.cpp"
-    "Graphics/Direct3D12/D3D12Camera.h"
-    "Graphics/Direct3D12/D3D12CommonHeaders.h"
-    "Graphics/Direct3D12/D3D12Content.cpp"
-    "Graphics/Direct3D12/D3D12Content.h"
-    "Graphics/Direct3D12/D3D12Core.cpp"
-    "Graphics/Direct3D12/D3D12Core.h"
-    "Graphics/Direct3D12/D3D12GPass.cpp"
-    "Graphics/Direct3D12/D3D12GPass.h"
-    "Graphics/Direct3D12/D3D12Helpers.cpp"
-    "Graphics/Direct3D12/D3D12Helpers.h"
-    "Graphics/Direct3D12/D3D12Interface.cpp"
-    "Graphics/Direct3D12/D3D12Interface.h"
-    "Graphics/Direct3D12/D3D12PostProcess.cpp"
-    "Graphics/Direct3D12/D3D12PostProcess.h"
-    "Graphics/Direct3D12/D3D12Resources.cpp"
-    "Graphics/Direct3D12/D3D12Resources.h"
-    "Graphics/Direct3D12/D3D12Shaders.cpp"
-    "Graphics/Direct3D12/D3D12Shaders.h"
-    "Graphics/Direct3D12/D3D12Surface.cpp"
-    "Graphics/Direct3D12/D3D12Surface.h"
-    "Graphics/Direct3D12/D3D12Upload.cpp"
-    "Graphics/Direct3D12/D3D12Upload.h"
-)
-source_group("Graphics\\Direct3D12" FILES ${Graphics__Direct3D12})
-
-set(Graphics__Direct3D12__Shaders
-    "Graphics/Direct3D12/Shaders/SharedTypes.h"
-)
-source_group("Graphics\\Direct3D12\\Shaders" FILES ${Graphics__Direct3D12__Shaders})
-
-set(Graphics__Vulkan
-    "Graphics/Vulkan/VulkanCommandBuffer.cpp"
-    "Graphics/Vulkan/VulkanCommandBuffer.h"
-    "Graphics/Vulkan/VulkanCommonHeaders.h"
-    "Graphics/Vulkan/VulkanCore.cpp"
-    "Graphics/Vulkan/VulkanCore.h"
-    "Graphics/Vulkan/VulkanHelpers.cpp"
-    "Graphics/Vulkan/VulkanHelpers.h"
-    "Graphics/Vulkan/VulkanInterface.cpp"
-    "Graphics/Vulkan/VulkanInterface.h"
-    "Graphics/Vulkan/VulkanRenderPass.cpp"
-    "Graphics/Vulkan/VulkanRenderPass.h"
-    "Graphics/Vulkan/VulkanResources.cpp"
-    "Graphics/Vulkan/VulkanResources.h"
-    "Graphics/Vulkan/VulkanSurface.cpp"
-    "Graphics/Vulkan/VulkanSurface.h"
-    "Graphics/Vulkan/VulkanValidation.h"
-)
-source_group("Graphics\\Vulkan" FILES ${Graphics__Vulkan})
-
-set(Platform
-    "Platform/IncludeWindowCPP.h"
-    "Platform/Platform.h"
-    "Platform/PlatformLinux.cpp"
-    "Platform/PlatformTypes.h"
-    "Platform/PlatformWin32.cpp"
-    "Platform/Window.cpp"
-    "Platform/Window.h"
-)
-source_group("Platform" FILES ${Platform})
-
-set(Utilities
-    "Utilities/FreeList.h"
-    "Utilities/IOStream.h"
-    "Utilities/Math.h"
-    "Utilities/MathTypes.h"
-    "Utilities/Utilities.h"
-    "Utilities/Vector.h"
-)
-source_group("Utilities" FILES ${Utilities})
-
-set(ALL_FILES
-    ${no_group_source_files}
-    ${Common}
-    ${Components}
-    ${Content}
-    ${Core}
-    ${EngineAPI}
-    ${Graphics}
-    ${Graphics__Direct3D12}
-    ${Graphics__Direct3D12__Shaders}
-    ${Graphics__Vulkan}
-    ${Platform}
-    ${Utilities}
-)
-
-################################################################################
-# Target
-################################################################################
-add_library(${PROJECT_NAME} STATIC ${ALL_FILES})
-
-use_props(${PROJECT_NAME} "${CMAKE_CONFIGURATION_TYPES}" "${DEFAULT_CXX_PROPS}")
-set(ROOT_NAMESPACE Engine)
-
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    VS_GLOBAL_KEYWORD "Win32Proj"
-)
-################################################################################
-# Target name
-################################################################################
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    TARGET_NAME_DEBUG         "${PROJECT_NAME}"
-    TARGET_NAME_DEBUGEDITOR   "${PROJECT_NAME}"
-    TARGET_NAME_RELEASE       "${PROJECT_NAME}"
-    TARGET_NAME_RELEASEEDITOR "${PROJECT_NAME}"
-)
-################################################################################
-# Output directory
-################################################################################
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    OUTPUT_DIRECTORY_DEBUG         "${CMAKE_SOURCE_DIR}/${CMAKE_VS_PLATFORM_NAME}/$<CONFIG>/"
-    OUTPUT_DIRECTORY_DEBUGEDITOR   "${CMAKE_SOURCE_DIR}/${CMAKE_VS_PLATFORM_NAME}/$<CONFIG>/"
-    OUTPUT_DIRECTORY_RELEASE       "${CMAKE_SOURCE_DIR}/${CMAKE_VS_PLATFORM_NAME}/$<CONFIG>/"
-    OUTPUT_DIRECTORY_RELEASEEDITOR "${CMAKE_SOURCE_DIR}/${CMAKE_VS_PLATFORM_NAME}/$<CONFIG>/"
-)
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    INTERPROCEDURAL_OPTIMIZATION_RELEASE       "TRUE"
-    INTERPROCEDURAL_OPTIMIZATION_RELEASEEDITOR "TRUE"
-)
-################################################################################
-# MSVC runtime library
-################################################################################
-get_property(MSVC_RUNTIME_LIBRARY_DEFAULT TARGET ${PROJECT_NAME} PROPERTY MSVC_RUNTIME_LIBRARY)
-string(CONCAT "MSVC_RUNTIME_LIBRARY_STR"
-    $<$<CONFIG:Debug>:
-        MultiThreadedDebugDLL
-    >
-    $<$<CONFIG:DebugEditor>:
-        MultiThreadedDebugDLL
-    >
-    $<$<CONFIG:Release>:
-        MultiThreadedDLL
-    >
-    $<$<CONFIG:ReleaseEditor>:
-        MultiThreadedDLL
-    >
-    $<$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:DebugEditor>,$<CONFIG:Release>,$<CONFIG:ReleaseEditor>>>:${MSVC_RUNTIME_LIBRARY_DEFAULT}>
-)
-set_target_properties(${PROJECT_NAME} PROPERTIES MSVC_RUNTIME_LIBRARY ${MSVC_RUNTIME_LIBRARY_STR})
-
-################################################################################
-# Include directories
-################################################################################
-target_include_directories(${PROJECT_NAME} PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/.;"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Common;"
-    "$ENV{VULKAN_SDK}/Include"
-)
-
-################################################################################
-# Compile definitions
-################################################################################
-target_compile_definitions(${PROJECT_NAME} PRIVATE
-    "$<$<CONFIG:Debug>:"
-        "DEBUG;"
-        "SOLUTION_DIR=R\"(${CMAKE_SOURCE_DIR}\\)\""
-    ">"
-    "$<$<CONFIG:DebugEditor>:"
-        "DEBUG;"
-        "USE_WITH_EDITOR"
-    ">"
-    "$<$<CONFIG:Release>:"
-        "NDEBUG"
-    ">"
-    "$<$<CONFIG:ReleaseEditor>:"
-        "NDEBUG;"
-        "USE_WITH_EDITOR"
-    ">"
-    "PRIMAL_PLUS;"
-    "_LIB;"
-    "_HAS_EXCEPTIONS=0;"
-    "UNICODE;"
-    "_UNICODE"
-)
-
-################################################################################
-# Compile and link options
-################################################################################
-if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE
-        $<$<CONFIG:Debug>:
-            /Od;
-            /ZI;
-            /GS-
-        >
-        $<$<CONFIG:DebugEditor>:
-            /Od;
-            /ZI
-        >
-        $<$<CONFIG:Release>:
-            /Ox;
-            /Oi;
-            /GF;
-            /Oy;
-            /Gy;
-            ${DEFAULT_CXX_DEBUG_INFORMATION_FORMAT};
-            /GS-
-        >
-        $<$<CONFIG:ReleaseEditor>:
-            /Ox;
-            /Oi;
-            /GF;
-            /Oy;
-            /Gy;
-            ${DEFAULT_CXX_DEBUG_INFORMATION_FORMAT};
-            /GS-
-        >
-        /permissive-;
-        /MP;
-        /std:c++17;
-        /Gm-;
-        /W4;
-        /fp:fast;
-        /GR-;
-        /Y-
+# 设置C++标准
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+execute_process(
+        COMMAND xcrun --sdk macosx --show-sdk-path
+        OUTPUT_VARIABLE MACOSX_PREFIX
+        OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-    target_link_options(${PROJECT_NAME} PRIVATE
-        $<$<CONFIG:Release>:
-            /OPT:REF;
-            /OPT:ICF
-        >
-        $<$<CONFIG:ReleaseEditor>:
-            /OPT:REF;
-            /OPT:ICF
-        >
-        /SUBSYSTEM:WINDOWS
+set(CMAKE_OSX_SYSROOT "${MACOSX_PREFIX}")
+set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
+
+# 根据平台分别收集源文件
+file(GLOB_RECURSE PLATFORM_UTILS
+    "${CMAKE_CURRENT_SOURCE_DIR}/Platform/Window.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Platform/Window.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Platform/Platform.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformTypes.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Platform/IncludeWindowCPP.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Input/Input.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Input/Input.cpp"
+)
+if(WIN32)
+    file(GLOB_RECURSE PLATFORM_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformWin32.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputWin32.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputWin32.cpp"
+    )
+elseif(APPLE)
+    file(GLOB_RECURSE PLATFORM_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformMac.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputMac.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputMac.mm"
+    )
+elseif(LINUX)
+    file(GLOB_RECURSE PLATFORM_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformLinux.cpp"
     )
 endif()
 
-################################################################################
-# Dependencies
-################################################################################
-use_package(${PROJECT_NAME} Microsoft.Direct3D.D3D12 1.611.2)
+# 根据平台分别收集图形部分代码文件
+file(GLOB_RECURSE GRAPHICS_UTILS
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/GraphicsPlatform.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/GraphicsPlatform.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/GraphicsPlatformInterface.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Renderer.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Renderer.cpp"
+    # "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/GraphicsHandle.hpp"
+)
+if(WIN32)
+    file(GLOB_RECURSE GRAPHICS_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
+    )
+elseif(APPLE)
+    file(GLOB_RECURSE GRAPHICS_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Metal/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Metal/*.cpp"
+    )
+elseif(LINUX)
+    file(GLOB_RECURSE GRAPHICS_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
+    )
+endif()
+
+# 收集通用源文件（排除平台特定文件）
+file(GLOB_RECURSE COMMON_SOURCES 
+    "${CMAKE_CURRENT_SOURCE_DIR}/Common/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Common/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Components/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Components/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Core/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Core/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/EngineAPI/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/EngineAPI/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Utilities/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Content/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Content/*.cpp"
+)
+
+# 根据编译器排除特定文件
+if(MSVC)
+    # MSVC编译器特定的源文件
+    file(GLOB_RECURSE COMPILER_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/Compiler/MSVC/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Compiler/MSVC/*.h"
+    )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Clang编译器特定的源文件
+    file(GLOB_RECURSE COMPILER_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/Compiler/Clang/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Compiler/Clang/*.h"
+    )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    # GCC编译器特定的源文件
+    file(GLOB_RECURSE COMPILER_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/Compiler/GCC/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Compiler/GCC/*.h"
+    )
+endif()
+
+# 手动排除特定文件（如果需要）
+list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*_test\\.cpp$")  # 排除测试文件
+# list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*/Platform/.*")   # 排除所有平台相关文件
+
+# 合并所有源文件
+set(ALL_SOURCES
+    ${COMMON_SOURCES}
+    ${PLATFORM_SOURCES}
+    ${COMPILER_SOURCES}
+    ${PLATFORM_UTILS}
+    ${GRAPHICS_UTILS}
+    ${GRAPHICS_SOURCES}
+)
+
+# 创建静态库
+add_library(${PROJECT_NAME} STATIC ${ALL_SOURCES})
+
+# 禁用某些可能导致问题的功能
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    SKIP_BUILD_RPATH TRUE
+    BUILD_WITH_INSTALL_RPATH TRUE
+)
+
+# 设置完整的包含路径
+get_target_property(ENGINE_SOURCE_DIR ${PROJECT_NAME} SOURCE_DIR)
+
+# 添加包含目录
+if(WIN32)
+    target_include_directories(${PROJECT_NAME} PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Common
+        $ENV{VULKAN_SDK}/include
+    )
+elseif(APPLE)
+    # 查找Eigen库路径
+    execute_process(
+        COMMAND brew --prefix eigen
+        OUTPUT_VARIABLE EIGEN_PREFIX
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    set(EIGEN3_INCLUDE_DIR "${EIGEN_PREFIX}/include/eigen3")
+    
+    if(NOT EXISTS "${EIGEN3_INCLUDE_DIR}")
+        message(FATAL_ERROR "Eigen库未找到。请使用命令安装: brew install eigen")
+    endif()
+    
+    if(NOT EXISTS "${EIGEN3_INCLUDE_DIR}/Eigen/Dense")
+        message(FATAL_ERROR "Eigen/Dense头文件未找到。预期位置: ${EIGEN3_INCLUDE_DIR}/Eigen/Dense")
+    endif()
+    
+    # 设置LLVM编译器
+    set(CMAKE_CXX_COMPILER /opt/homebrew/Cellar/llvm/19.1.7/bin/clang++)
+    
+    # 设置编译器标志
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++17")
+    
+    # 设置Objective-C++标志
+    set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -std=c++17")
+    
+    # 设置链接器标志
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L/opt/homebrew/Cellar/llvm/19.1.7/lib -Wl,-rpath,/opt/homebrew/Cellar/llvm/19.1.7/lib")
+    
+    # 添加系统头文件目录（顺序很重要）
+    include_directories(SYSTEM BEFORE
+        /opt/homebrew/Cellar/llvm/19.1.7/include/c++/v1
+        /opt/homebrew/Cellar/llvm/19.1.7/lib/clang/19/include
+        ${MACOSX_PREFIX}/usr/include
+        ${MACOSX_PREFIX}/System/Library/Frameworks
+    )
+    
+    # 添加项目头文件
+    target_include_directories(${PROJECT_NAME} PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Common
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    
+    # 添加Eigen头文件
+    target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
+        ${EIGEN3_INCLUDE_DIR}
+    )
+    
+    # 添加编译器选项
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        -Wall
+        -Wextra
+        -Wno-deprecated-declarations
+        -Wno-unused-parameter
+        -Wno-c++17-extensions
+    )
+endif()
+
+# Eigen库设置
+if(APPLE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        EIGEN_MPL2_ONLY                 # 使用MPL2许可证
+        EIGEN_MAX_ALIGN_BYTES=32        # 设置内存对齐
+        EIGEN_MAX_STATIC_ALIGN_BYTES=32 # 设置静态内存对齐
+        EIGEN_NO_DEBUG
+    )
+endif()
+
+# 编译定义
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        DEBUG 
+        _DEBUG
+    )
+else()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NDEBUG)
+endif()
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    PRIMAL_PLUS
+    _LIB
+    _HAS_EXCEPTIONS=0
+)
+
+# 编译选项
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        /W4
+        /MP
+        /GS-
+        /fp:fast
+        /GR-
+        /Y-
+    )
+    
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(${PROJECT_NAME} PRIVATE /Od /ZI)
+    else()
+        target_compile_options(${PROJECT_NAME} PRIVATE /Ox /Oi /GF /Oy /Gy)
+    endif()
+    
+    target_link_options(${PROJECT_NAME} PRIVATE /SUBSYSTEM:WINDOWS)
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_link_options(${PROJECT_NAME} PRIVATE /OPT:REF /OPT:ICF)
+    endif()
+    
+    # Windows平台需要D3D12
+    find_package(Microsoft.Direct3D.D3D12 CONFIG)
+    if(Microsoft.Direct3D.D3D12_FOUND)
+        target_link_libraries(${PROJECT_NAME} PRIVATE Microsoft::Direct3D-D3D12)
+    endif()
+else()
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
+        target_compile_options(${PROJECT_NAME} PRIVATE
+            -Wall
+            -Wextra
+            -ffast-math
+            -fno-exceptions
+            -fno-rtti
+            -fno-strict-aliasing  # 放宽别名规则
+            -msse4.2              # 启用SSE4.2指令集
+            -mavx                 # 启用AVX指令集
+            -Wno-ignored-attributes  # 忽略特定属性警告
+            -faligned-new        # 确保new操作符使用对齐内存
+        )
+    else()
+        target_compile_options(${PROJECT_NAME} PRIVATE
+            -Wall
+            -Wextra
+            -ffast-math
+            -fno-exceptions
+            -fno-rtti
+            -fvisibility=hidden
+        )
+    endif()
+    
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(${PROJECT_NAME} PRIVATE -O0 -g)
+    else()
+        target_compile_options(${PROJECT_NAME} PRIVATE -O3)
+    endif()
+endif()
+
+# 根据平台添加编译定义
+if(WIN32)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        WIN32
+        _WINDOWS
+        SOLUTION_DIR="${CMAKE_SOURCE_DIR}/"
+    )
+elseif(APPLE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        __APPLE__
+    )
+elseif(UNIX AND NOT APPLE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        __linux__
+    )
+endif()
+
+# Vulkan支持
+# find_package(Vulkan REQUIRED)
+# target_link_libraries(${PROJECT_NAME} PRIVATE
+#     Vulkan::Vulkan
+# )
+
+# 添加平台相关库
+if(UNIX AND NOT APPLE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        X11
+        dl
+        pthread
+    )
+elseif(APPLE)
+    find_library(FOUNDATION_LIBRARY Foundation)
+    find_library(COCOA_LIBRARY Cocoa)
+    find_library(METAL_LIBRARY Metal)
+    find_library(METALKIT_LIBRARY MetalKit)
+    find_library(QUARTZCORE_LIBRARY QuartzCore)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        ${FOUNDATION_LIBRARY}
+        ${COCOA_LIBRARY}
+        ${METAL_LIBRARY}
+        ${METALKIT_LIBRARY}
+        ${QUARTZCORE_LIBRARY}
+    )
+
+    # find_library(ACCELERATE Accelerate)
+    # target_link_libraries(${PROJECT_NAME} PRIVATE
+    #     ${ACCELERATE}
+    # )
+    
+endif()
+
+# 输出目录
+# set_target_properties(${PROJECT_NAME} PROPERTIES
+#     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR}"
+#     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR}"
+# )
+
+# 源文件分组 (方便在IDE中查看)
+source_group(TREE ${CMAKE_SOURCE_DIR} PREFIX "Source" FILES ${ALL_SOURCES})
+
+# 添加编译器定义
+if(MSVC)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        COMPILER_MSVC=1
+    )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        COMPILER_CLANG=1
+    )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        COMPILER_GCC=1
+    )
+endif()
+
+# 添加平台定义（虽然已经有内置的定义，但有时候可能需要自定义）
+if(WIN32)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        PLATFORM_WINDOWS=1
+    )
+elseif(APPLE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        PLATFORM_MAC=1
+    )
+elseif(UNIX)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        PLATFORM_LINUX=1
+    )
+endif()

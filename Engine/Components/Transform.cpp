@@ -20,7 +20,7 @@ namespace primal::transform {
 			assert(rotations.size() >= index);
 			assert(positions.size() >= index);
 			assert(scales.size() >= index);
-
+#if defined(_WIN32)
 			using namespace DirectX;
 			XMVECTOR r{ XMLoadFloat4(&rotations[index]) };
 			XMVECTOR t{ XMLoadFloat3(&positions[index]) };
@@ -33,18 +33,42 @@ namespace primal::transform {
 			world.r[3] = XMVectorSet(0.f, 0.f, 0.f, 1.f);
 			XMMATRIX inverse_world{ XMMatrixInverse(nullptr, world) };
 			XMStoreFloat4x4(&inv_world[index], inverse_world);
+#elif defined(__APPLE__)
+			using namespace Eigen;
+			Quaternionf r{ rotations[index].w(), rotations[index].x(), rotations[index].y(), rotations[index].z() };
+			math::v3 t{ positions[index] };
+			math::v3 s{ scales[index] };
+
+			math::m4x4 world{ Matrix4f::Identity() };
+			world.block<3,3>(0, 0) = r.toRotationMatrix() * s.asDiagonal();
+			world.block<3,1>(0, 3) = t;
+
+			memcpy(&to_world[index], world.data(), sizeof(math::m4x4));
+
+			world.row(3) = math::v4{ 0.f, 0.f, 0.f, 1.f };
+			math::m4x4 inverse_world{ world.inverse() };
+			memcpy(&inv_world[index], inverse_world.data(), sizeof(math::m4x4));
+#endif
 
 			has_transform[index] = 1;
 		}
 
 		math::v3 calculate_orientation(math::v4 rotations)
 		{
+#if defined(_WIN32)
 			using namespace DirectX;
 			XMVECTOR rotation_quat{ XMLoadFloat4(&rotations) };
 			XMVECTOR front{ XMVectorSet(0.f, 0.f, 1.f, 0.f) };
 			math::v3 orientation;
 			XMStoreFloat3(&orientation, XMVector3Rotate(front, rotation_quat));
 			return orientation;
+#elif defined(__APPLE__)
+			using namespace Eigen;
+			Quaternionf r{ rotations.w(), rotations.x(), rotations.y(), rotations.z() };
+			math::v3 front{ 0.f, 0.f, 1.f };
+			math::v3 orientation{ r * front };
+			return orientation;
+#endif
 		}
 
 		void set_rotation(transform_id id, const math::v4& rotation_quaternion)

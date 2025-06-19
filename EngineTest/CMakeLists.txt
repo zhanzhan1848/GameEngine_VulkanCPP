@@ -1,211 +1,162 @@
+# 设置项目名称
 set(PROJECT_NAME EngineTest)
 
-################################################################################
-# Source groups
-################################################################################
-set(no_group_source_files
-    "Lights.cpp"
+# CMake最低版本要求
+cmake_minimum_required(VERSION 3.20)
+
+# 设置编译器标志
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++17")
+    
+# 设置Objective-C++标志
+set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -std=c++17")
+set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
+
+# 源文件列表
+set(SOURCE_FILES
+    # "Lights.cpp"
     "Main.cpp"
-    "PythonScript.h"
     "RenderItem.cpp"
     "Scripts.cpp"
     "ShaderCompilation.cpp"
+    # "TestRenderer.cpp"
+    "TestRendererMac.cpp"
+    "MacKeyboard.mm"
+)
+
+# 头文件列表
+set(HEADER_FILES
+    "PythonScript.h"
     "ShaderCompilation.h"
     "Test.h"
     "TestEntityComponents.h"
-    "TestRenderer.cpp"
     "TestRenderer.h"
     "TestWindow.h"
     "TestWindowLinux.h"
-)
-source_group("" FILES ${no_group_source_files})
-
-set(ALL_FILES
-    ${no_group_source_files}
+    "MacKeyboard.h"
 )
 
-################################################################################
-# Target
-################################################################################
-add_executable(${PROJECT_NAME} ${ALL_FILES})
+# 添加可执行文件目标
+add_executable(${PROJECT_NAME} ${SOURCE_FILES} ${HEADER_FILES})
 
-use_props(${PROJECT_NAME} "${CMAKE_CONFIGURATION_TYPES}" "${DEFAULT_CXX_PROPS}")
-set(ROOT_NAMESPACE EngineTest)
-
+# 设置C++标准
 set_target_properties(${PROJECT_NAME} PROPERTIES
-    VS_GLOBAL_KEYWORD "Win32Proj"
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
 )
-################################################################################
-# Target name
-################################################################################
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    TARGET_NAME_DEBUG         "${PROJECT_NAME}"
-    TARGET_NAME_DEBUGEDITOR   "${PROJECT_NAME}"
-    TARGET_NAME_RELEASE       "${PROJECT_NAME}"
-    TARGET_NAME_RELEASEEDITOR "${PROJECT_NAME}"
-)
-################################################################################
-# Output directory
-################################################################################
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    OUTPUT_DIRECTORY_DEBUG         "${CMAKE_SOURCE_DIR}/${CMAKE_VS_PLATFORM_NAME}/$<CONFIG>/"
-    OUTPUT_DIRECTORY_DEBUGEDITOR   "${CMAKE_SOURCE_DIR}/${CMAKE_VS_PLATFORM_NAME}/$<CONFIG>/"
-    OUTPUT_DIRECTORY_RELEASE       "${CMAKE_SOURCE_DIR}/${CMAKE_VS_PLATFORM_NAME}/$<CONFIG>/"
-    OUTPUT_DIRECTORY_RELEASEEDITOR "${CMAKE_SOURCE_DIR}/${CMAKE_VS_PLATFORM_NAME}/$<CONFIG>/"
-)
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    INTERPROCEDURAL_OPTIMIZATION_RELEASE       "TRUE"
-)
-################################################################################
-# MSVC runtime library
-################################################################################
-get_property(MSVC_RUNTIME_LIBRARY_DEFAULT TARGET ${PROJECT_NAME} PROPERTY MSVC_RUNTIME_LIBRARY)
-string(CONCAT "MSVC_RUNTIME_LIBRARY_STR"
-    $<$<CONFIG:Debug>:
-        MultiThreadedDebugDLL
-    >
-    $<$<CONFIG:DebugEditor>:
-        MultiThreadedDebugDLL
-    >
-    $<$<CONFIG:Release>:
-        MultiThreadedDLL
-    >
-    $<$<CONFIG:ReleaseEditor>:
-        MultiThreadedDebugDLL
-    >
-    $<$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:DebugEditor>,$<CONFIG:Release>,$<CONFIG:ReleaseEditor>>>:${MSVC_RUNTIME_LIBRARY_DEFAULT}>
-)
-set_target_properties(${PROJECT_NAME} PROPERTIES MSVC_RUNTIME_LIBRARY ${MSVC_RUNTIME_LIBRARY_STR})
 
-################################################################################
-# Include directories
-################################################################################
+# 设置输出目录
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/"
+)
+
+# 包含目录
 target_include_directories(${PROJECT_NAME} PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Engine;"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../Engine"
     "${CMAKE_CURRENT_SOURCE_DIR}/../Engine/Common"
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC/
 )
 
-################################################################################
-# Compile definitions
-################################################################################
-target_compile_definitions(${PROJECT_NAME} PRIVATE
-    "$<$<CONFIG:Debug>:"
-        "DEBUG"
-    ">"
-    "$<$<CONFIG:DebugEditor>:"
-        "DEBUG"
-    ">"
-    "$<$<CONFIG:Release>:"
-        "NDEBUG"
-    ">"
-    "$<$<CONFIG:ReleaseEditor>:"
-        "DEBUG"
-    ">"
-    "PRIMAL_PLUS;"
-    "_CONSOLE;"
-    "_HAS_EXCEPTIONS=0;"
-    "UNICODE;"
-    "_UNICODE"
-)
-
-################################################################################
-# Compile and link options
-################################################################################
-if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE
-        $<$<CONFIG:Debug>:
-            /Od;
-            /sdl;
-            /W3;
-            /ZI
-        >
-        $<$<CONFIG:DebugEditor>:
-            /Od;
-            /sdl;
-            /W3;
-            /ZI
-        >
-        $<$<CONFIG:Release>:
-            /Ox;
-            /Oi;
-            /GF;
-            /Oy;
-            /Gy;
-            /W4;
-            ${DEFAULT_CXX_DEBUG_INFORMATION_FORMAT};
-            /GS-
-        >
-        $<$<CONFIG:ReleaseEditor>:
-            /Od;
-            /sdl;
-            /W3;
-            /ZI
-        >
-        /permissive-;
-        /MP;
-        /std:c++17;
-        /Gm-;
-        /fp:fast;
-        /GR-;
-        /Y-
+# 平台特定设置
+if(WIN32)
+    # Windows特定的编译选项和定义
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        "PRIMAL_PLUS"
+        "_CONSOLE"
+        "_HAS_EXCEPTIONS=0"
+        "UNICODE"
+        "_UNICODE"
+        "$<$<CONFIG:Debug>:DEBUG>"
+        "$<$<CONFIG:Release>:NDEBUG>"
     )
+    
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        /W3
+        /MP
+        /GR-             # 禁用RTTI
+        /fp:fast         # 快速浮点运算
+        /EHs-c-         # 禁用异常处理
+        $<$<CONFIG:Debug>:/Od /Zi>
+        $<$<CONFIG:Release>:/O2>
+    )
+
     target_link_options(${PROJECT_NAME} PRIVATE
-        $<$<CONFIG:Debug>:
-            /DEBUG;
-            /INCREMENTAL
-        >
-        $<$<CONFIG:DebugEditor>:
-            /DEBUG;
-            /INCREMENTAL
-        >
-        $<$<CONFIG:Release>:
-            /DEBUG:FULL;
-            /OPT:REF;
-            /OPT:ICF;
-            /INCREMENTAL:NO
-        >
-        $<$<CONFIG:ReleaseEditor>:
-            /DEBUG;
-            /INCREMENTAL
-        >
-        /SUBSYSTEM:WINDOWS;
-        /ignore:4099
+        /SUBSYSTEM:WINDOWS
+        /IGNORE:4099
+        $<$<CONFIG:Debug>:/DEBUG>
+        $<$<CONFIG:Release>:/INCREMENTAL:NO /OPT:REF /OPT:ICF>
+    )
+elseif(APPLE)
+    # macOS特定的编译选项和定义
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        "PRIMAL_PLUS"
+        "$<$<CONFIG:Debug>:DEBUG>"
+        "$<$<CONFIG:Release>:NDEBUG>"
+    )
+    
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        -Wall
+        -fno-rtti              # 禁用RTTI
+        -ffast-math            # 快速浮点运算
+        # -fno-exceptions        # 禁用异常处理
+        -pthread
+        $<$<CONFIG:Debug>:-O0 -g>
+        $<$<CONFIG:Release>:-O3>
+    )
+
+    # macOS特定的框架
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        "-framework Cocoa"
+        "-framework Metal"
+        "-framework QuartzCore"
+        "-framework AppKit"
+    )
+else()
+    # Linux特定的编译选项和定义
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        "PRIMAL_PLUS"
+        "$<$<CONFIG:Debug>:DEBUG>"
+        "$<$<CONFIG:Release>:NDEBUG>"
+    )
+    
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        -Wall
+        -fno-rtti              # 禁用RTTI
+        -ffast-math            # 快速浮点运算
+        -fno-exceptions        # 禁用异常处理
+        $<$<CONFIG:Debug>:-O0 -g>
+        $<$<CONFIG:Release>:-O3>
+    )
+
+    # Linux特定的库
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        X11
+        vulkan
     )
 endif()
 
-################################################################################
-# Pre build events
-################################################################################
-add_custom_command_if(
-    TARGET ${PROJECT_NAME}
-    PRE_BUILD
-    COMMANDS
-    COMMAND         $<CONFIG:Debug> powershell -ExecutionPolicy Bypass -File $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>GetDXC.ps1 $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler
-    COMMAND         $<CONFIG:Debug> xcopy /Y /D $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler\\bin\\x64\\dxcompiler.dll $<SHELL_PATH:${OUTPUT_DIRECTORY}>
-    COMMAND         $<CONFIG:Debug> xcopy /Y /D $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler\\bin\\x64\\dxil.dll $<SHELL_PATH:${OUTPUT_DIRECTORY}>
-    COMMAND   $<CONFIG:DebugEditor> powershell -ExecutionPolicy Bypass -File $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>GetDXC.ps1 $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler
-    COMMAND   $<CONFIG:DebugEditor> xcopy /Y /D $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler\\bin\\x64\\dxcompiler.dll $<SHELL_PATH:${OUTPUT_DIRECTORY}>
-    COMMAND   $<CONFIG:DebugEditor> xcopy /Y /D $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler\\bin\\x64\\dxil.dll $<SHELL_PATH:${OUTPUT_DIRECTORY}>
-    COMMAND       $<CONFIG:Release> powershell -ExecutionPolicy Bypass -File $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>GetDXC.ps1 $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler
-    COMMAND       $<CONFIG:Release> xcopy /Y /D $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler\\bin\\x64\\dxcompiler.dll $<SHELL_PATH:${OUTPUT_DIRECTORY}>
-    COMMAND       $<CONFIG:Release> xcopy /Y /D $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler\\bin\\x64\\dxil.dll $<SHELL_PATH:${OUTPUT_DIRECTORY}>
-    COMMAND $<CONFIG:ReleaseEditor> powershell -ExecutionPolicy Bypass -File $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>GetDXC.ps1 $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler
-    COMMAND $<CONFIG:ReleaseEditor> xcopy /Y /D $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler\\bin\\x64\\dxcompiler.dll $<SHELL_PATH:${OUTPUT_DIRECTORY}>
-    COMMAND $<CONFIG:ReleaseEditor> xcopy /Y /D $<SHELL_PATH:${CMAKE_SOURCE_DIR}/>packages\\DirectXShaderCompiler\\bin\\x64\\dxil.dll $<SHELL_PATH:${OUTPUT_DIRECTORY}>
-    COMMENT "If packages\DirectXShaderCompiler\ folder doesn't exist or is empty then download the latest release of DXC"
-)
-
-################################################################################
-# Dependencies
-################################################################################
-add_dependencies(${PROJECT_NAME}
-    ContentTools
+# 链接依赖项
+target_link_libraries(${PROJECT_NAME} PRIVATE
     Engine
-    EngineDLL
+    ContentTools
 )
 
-target_link_directories(${PROJECT_NAME} PRIVATE
-    "${OUTPUT_DIRECTORY}"
+# 配置编译器特性
+if(MSVC)
+    target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
+else()
+    target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
+    target_compile_options(${PROJECT_NAME} PRIVATE -fPIC)
+endif()
+
+# 复制着色器和资源文件
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders
+    $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
 )
 
-use_package(${PROJECT_NAME} Microsoft.Direct3D.D3D12 1.608.0)
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_CURRENT_SOURCE_DIR}/assets
+    $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets
+)

@@ -2,6 +2,7 @@
 #include "GraphicsPlatformInterface.h"
 #include "Direct3D12//D3D12Interface.h"
 #include "Vulkan/VulkanInterface.h"
+#include "Metal/MetalInterface.h"
 
 namespace primal::graphics
 {
@@ -12,6 +13,8 @@ namespace primal::graphics
 		constexpr const char* engine_shader_paths[]
 		{
 			"./shaders/d3d12/shaders.bin",
+			"./shaders/vulkan/shaders.bin", 
+			"/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Debug/shaders/metal/shaders.metallib", // "./shaders/metal/shaders.metallib"
 			// "./shaders/vulkan/shaders.bin", 
 			//etc
 		};
@@ -26,6 +29,12 @@ namespace primal::graphics
 			{
 			case graphics_platform::direct3d12:
 				d3d12::get_platform_interface(gfx);
+				break;
+			case graphics_platform::vulkan_1:
+				vulkan::get_platform_interface(gfx);
+				break;
+			case graphics_platform::metal:
+				metal::get_platform_interface(gfx);
 				break;
 			default:
 				return false;
@@ -108,10 +117,17 @@ namespace primal::graphics
 		gfx.light.remove_light_set(light_set_key);
 	}
 
+#if defined(_MSC_VER)
 	light create_light(light_init_info info)
 	{
 		return gfx.light.create(info);
 	}
+#elif defined(__clang__)
+	// light create_light(const light_init_info& info)
+	// {
+	// 	return gfx.light.create(info);
+	// }
+#endif
 
 	void remove_light(light_id id, u64 light_set_key)
 	{

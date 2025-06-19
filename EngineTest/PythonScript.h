@@ -1,4 +1,5 @@
 #pragma once
+#if defined(_MSC_VER)
 #include <C:/Users/zy/AppData/Local/Programs/Python/Python310/include/Python.h>
 
 #ifdef _DEBUG
@@ -26,3 +27,10 @@ int pyscript()
 
 	return 0;
 }
+
+#elif defined(__clang__)
+int pyscript()
+{
+	return 0;
+}
+#endif

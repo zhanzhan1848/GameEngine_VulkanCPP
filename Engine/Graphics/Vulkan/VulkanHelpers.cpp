@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <tuple>
 
 namespace primal::graphics::vulkan
 {

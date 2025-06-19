@@ -47,3 +47,23 @@ struct window_init_info
 };
 }
 #endif // __linux__
+
+#ifdef __APPLE__
+
+namespace primal::platform {
+
+using window_proc = void*;
+using window_handle = void*;
+
+struct window_init_info
+{
+    [[maybe_unused]] window_proc     callback{ nullptr };
+    [[maybe_unused]] window_handle   parent{ nullptr };
+    const char*     caption{ nullptr };    // macOS 使用 UTF-8 字符串
+    s32             left{ 0 };
+    s32             top{ 0 };
+    s32             width{ 1920 };
+    s32             height{ 1080 };
+};
+}
+#endif // __APPLE__

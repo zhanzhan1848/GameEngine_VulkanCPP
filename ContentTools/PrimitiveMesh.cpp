@@ -7,7 +7,10 @@ namespace primal::tools
 	namespace
 	{
 		using namespace math;
+#if defined(_MSC_VER)
 		using namespace DirectX;
+#elif defined(__clang__)
+#endif
 		using primitive_mesh_creator = void(*)(scene&, const primitive_init_info& info);
 
 		void create_plane(scene& scene, const primitive_init_info& info);
@@ -54,8 +57,13 @@ namespace primal::tools
 			const u32 vertical_count{ clamp(info.segments[vertical_index], 1u, 10u) };
 			const f32 horizontal_step{ 1.f / horizontal_count };
 			const f32 vertical_step{ 1.f / vertical_count };
+#if defined(_MSC_VER)
 			const f32 u_step{ (u_range.y - u_range.x) / horizontal_count };
 			const f32 v_step{ (v_range.y - v_range.x) / vertical_count };
+#elif defined(__clang__)
+			const f32 u_step{ (u_range.y() - u_range.x()) / horizontal_count };
+			const f32 v_step{ (v_range.y() - v_range.x()) / vertical_count };
+#endif
 
 			mesh m{};
 			utl::vector<v2> uvs;
@@ -63,6 +71,7 @@ namespace primal::tools
 			for(u32 j{ 0 }; j <= vertical_count; ++j)
 				for (u32 i{ 0 }; i <= horizontal_count; ++i)
 				{
+#if defined(_MSC_VER)
 					v3 position{ offset };
 					f32* const as_array{ &position.x };
 					as_array[horizontal_index] += i * horizontal_step;
@@ -74,6 +83,19 @@ namespace primal::tools
 					uv.x += i * u_step;
 					uv.y -= j * v_step;
 					uvs.emplace_back(uv);
+#elif defined(__clang__)
+					v3 position{ offset };
+					f32* const as_array{ &position.x() };
+					as_array[horizontal_index] += i * horizontal_step;
+					as_array[vertical_index] += j * vertical_step;
+					m.positions.emplace_back(position.x() * info.size.x(), position.y() * info.size.y(), position.z() * info.size.z());
+					//m.positions.emplace_back(as_array[horizontal_index], 0, as_array[vertical_index]);
+
+					v2 uv{ u_range.x(), 1.f - v_range.x() };
+					uv.x() += i * u_step;
+					uv.y() -= j * v_step;
+					uvs.emplace_back(uv);
+#endif
 				}
 
 			assert(m.positions.size() == (((u64)horizontal_count + 1) * ((u64)vertical_count + 1)));
@@ -127,7 +149,11 @@ namespace primal::tools
 
 			// Add the top vertex
 			u32 c{ 0 };
+#if defined(_MSC_VER)
 			m.positions[c++] = { 0.f, info.size.y, 0.f };
+#elif defined(__clang__)
+			m.positions[c++] = { 0.f, info.size.y(), 0.f };
+#endif
 
 			for (u32 j{ 1 }; j <= (theta_count - 1); ++j)
 			{
@@ -135,16 +161,28 @@ namespace primal::tools
 				for (u32 i{ 0 }; i < phi_count; ++i)
 				{
 					const f32 phi{ i * phi_step };
+#if defined(_MSC_VER)
 					m.positions[c++] = {
 						info.size.x * XMScalarSin(theta) * XMScalarCos(phi),
 						info.size.y * XMScalarCos(theta),
 						-info.size.z * XMScalarSin(theta) * XMScalarSin(phi),
 					};
+#elif defined(__clang__)
+					m.positions[c++] = {
+						info.size.x() * std::sin(theta) * std::cos(phi),
+						info.size.y() * std::cos(theta),
+						-info.size.z() * std::sin(theta) * std::sin(phi),
+					};
+#endif
 				}
 			}
 
 			// Add the bottom vertex
+#if defined(_MSC_VER)
 			m.positions[c++] = { 0.f, -info.size.y, 0.f };
+#elif defined(__clang__)
+			m.positions[c++] = { 0.f, -info.size.y(), 0.f };
+#endif
 			assert(c == num_vertices);
 			
 			c = 0;

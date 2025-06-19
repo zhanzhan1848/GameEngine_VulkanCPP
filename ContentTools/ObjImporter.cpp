@@ -1,8 +1,13 @@
 #include "ObjImporter.h"
 
 #include <unordered_map>
+#if defined(_MSC_VER)
 #include <direct.h>
 #include <io.h>
+#elif defined(__clang__)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include "Geometry.h"
 
 #include <stdio.h>
@@ -51,7 +56,7 @@ namespace primal::tools
 			}
 		};
 
-		bool write_kms_file(const char* file_package, const char* filename, u32 count, utl::vector<geometry_config>& out_geometry_darray)
+		bool write_kms_file(const char* file_package, const char* filename, u32 count, [[maybe_unused]] utl::vector<geometry_config>& out_geometry_darray)
 		{
 			std::fstream outfile;
 
@@ -228,6 +233,7 @@ namespace primal::tools
 
 		void generate_bounding_box_and_center(geometry_config* geo)
 		{
+#if defined(_MSC_VER)
 			geo->min_extents = math::v3{ 0, 0, 0 };
 			geo->max_extents = math::v3{ 0, 0, 0 };
 
@@ -262,10 +268,47 @@ namespace primal::tools
 			geo->center.x = (geo->min_extents.x + geo->max_extents.x) / 2.f;
 			geo->center.y = (geo->min_extents.y + geo->max_extents.y) / 2.f;
 			geo->center.z = (geo->min_extents.z + geo->max_extents.z) / 2.f;
+#elif defined(__clang__)
+			geo->min_extents = math::v3{ 0, 0, 0 };
+			geo->max_extents = math::v3{ 0, 0, 0 };
+
+			for (u32 i{ 0 }; i < geo->vertex_count; ++i)
+			{
+				if (geo->vertices[i].pos.x() < geo->min_extents.x())
+				{
+					geo->min_extents.x() = geo->vertices[i].pos.x();
+				}
+				if (geo->vertices[i].pos.y() < geo->min_extents.y())
+				{
+					geo->min_extents.y() = geo->vertices[i].pos.y();
+				}
+				if (geo->vertices[i].pos.z() < geo->min_extents.z())
+				{
+					geo->min_extents.z() = geo->vertices[i].pos.z();
+				}
+
+				if (geo->vertices[i].pos.x() > geo->max_extents.x())
+				{
+					geo->max_extents.x() = geo->vertices[i].pos.x();
+				}
+				if (geo->vertices[i].pos.y() > geo->max_extents.y())
+				{
+					geo->max_extents.y() = geo->vertices[i].pos.y();
+				}
+				if (geo->vertices[i].pos.z() > geo->max_extents.z())
+				{
+					geo->max_extents.z() = geo->vertices[i].pos.z();
+				}
+			}
+			geo->center.x() = (geo->min_extents.x() + geo->max_extents.x()) / 2.f;
+			geo->center.y() = (geo->min_extents.y() + geo->max_extents.y()) / 2.f;
+			geo->center.z() = (geo->min_extents.z() + geo->max_extents.z()) / 2.f;
+#endif
 		}
 
 		void generate_tangents(geometry_config* geos)
 		{
+#if defined(_MSC_VER)
 			assert(geos->index_count % 3 == 0);
 			using namespace DirectX;
 			for (u32 i{ 0 }; i < geos->index_count; i += 3)
@@ -306,6 +349,45 @@ namespace primal::tools
 				geos->vertices[i1].tangent = t4;
 				geos->vertices[i2].tangent = t4;
 			}
+#elif defined(__clang__)
+			assert(geos->index_count % 3 == 0);
+			for (u32 i{ 0 }; i < geos->index_count; i += 3)
+			{
+				u32 i0 = geos->indices[i];
+				u32 i1 = geos->indices[i + 1];
+				u32 i2 = geos->indices[i + 2];
+
+				math::v3 edge1{ geos->vertices[i1].pos.x() - geos->vertices[i0].pos.x(),
+					geos->vertices[i1].pos.y() - geos->vertices[i0].pos.y(),
+					geos->vertices[i1].pos.z() - geos->vertices[i0].pos.z() };
+				math::v3 edge2{ geos->vertices[i2].pos.x() - geos->vertices[i0].pos.x(),
+					geos->vertices[i2].pos.y() - geos->vertices[i0].pos.y(),
+					geos->vertices[i2].pos.z() - geos->vertices[i0].pos.z() };
+
+				f32 deltaU1 = geos->vertices[i1].texCoord.x() - geos->vertices[i0].texCoord.x();
+				f32 deltaV1 = geos->vertices[i1].texCoord.y() - geos->vertices[i0].texCoord.y();
+
+				f32 deltaU2 = geos->vertices[i2].texCoord.x() - geos->vertices[i0].texCoord.x();
+				f32 deltaV2 = geos->vertices[i2].texCoord.y() - geos->vertices[i0].texCoord.y();
+
+				f32 dividend = (deltaU1 * deltaV2 - deltaU2 * deltaV1);
+				f32 fc = 1.f / dividend;
+
+				math::v3 tangent{ fc * (deltaV2 * edge1.x() - deltaV1 * edge2.x()),
+					fc * (deltaV2 * edge1.y() - deltaV1 * edge2.y()),
+					fc * (deltaV2 * edge1.z() - deltaV1 * edge2.z())};
+
+				tangent.normalize();
+
+				f32 sx = deltaU1, sy = deltaU2;
+				f32 tx = deltaV1, ty = deltaV2;
+				f32 handedness = ((tx * sy - ty * sx) < 0.f) ? -1.f : 1.f;
+				math::v3 t4{ tangent.x() * handedness, tangent.y() * handedness, tangent.z() * handedness };
+				geos->vertices[i0].tangent = t4;
+				geos->vertices[i1].tangent = t4;
+				geos->vertices[i2].tangent = t4;
+			}
+#endif
 		}
 
 		bool generate_shader(const void* const data, const char* file_package)
@@ -315,13 +397,25 @@ namespace primal::tools
 			{
 				std::string out_vertex_shader_name{ file_package };
 				out_vertex_shader_name.append("//").append("shaders");
+#if defined(_MSC_VER)
 				if (_access(out_vertex_shader_name.c_str(), 0) == -1)
 					OutputDebugStringA(std::to_string(_mkdir(out_vertex_shader_name.c_str())).c_str());
+					
+#elif defined(__clang__)
+				if (access(out_vertex_shader_name.c_str(), 0) == -1)
+				{
+					std::cerr << std::to_string(mkdir(out_vertex_shader_name.c_str(), 0777)).c_str() << std::endl;
+				}
+#endif
 				out_vertex_shader_name.append("\\").append(material_data.name.c_str()).append(".vert");
 				std::ofstream vert_shader{ out_vertex_shader_name };
 				if (!vert_shader.is_open())
 				{
+#if defined(_MSC_VER)
 					OutputDebugStringA("Failed to open vertex shader to write!");
+#elif defined(__clang__)
+					std::cerr << "Failed to open vertex shader to write!" << std::endl;
+#endif
 					return false;
 				}
 				vert_shader << PBR_Template_Vertex_Shader;
@@ -331,13 +425,24 @@ namespace primal::tools
 			{
 				std::string out_fragment_shader_name{ file_package };
 				out_fragment_shader_name.append("//").append("shaders");
+#if defined(_MSC_VER)
 				if (_access(out_fragment_shader_name.c_str(), 0) == -1)
 					OutputDebugStringA(std::to_string(_mkdir(out_fragment_shader_name.c_str())).c_str());
+#elif defined(__clang__)
+				if (access(out_fragment_shader_name.c_str(), 0) == -1)
+				{
+					std::cerr << std::to_string(mkdir(out_fragment_shader_name.c_str(), 0777)).c_str() << std::endl;
+				}
+#endif
 				out_fragment_shader_name.append("\\").append(material_data.name.c_str()).append(".frag");
 				std::ofstream fragment_shader{ out_fragment_shader_name };
 				if (!fragment_shader.is_open())
 				{
+#if defined(_MSC_VER)
 					OutputDebugStringA("Failed to open fragment shader to write!");
+#elif defined(__clang__)
+					std::cerr << "Failed to open fragment shader to write!" << std::endl;
+#endif
 					return false;
 				}
 
@@ -565,7 +670,12 @@ namespace primal::tools
 
 		if (!tinyobj::LoadObj(&_attribute, &_shapes, &_materials, &warn, &err, file, base_file_path.c_str()))
 		{
+#if defined(_MSC_VER)
 			throw std::runtime_error(warn + err);
+#elif defined(__clang__)
+			std::cerr << "Error loading OBJ file: " <<
+			warn << "  --  " << err << std::endl;
+#endif
 		}
 	}
 
@@ -643,7 +753,7 @@ namespace primal::tools
 				u64 simplify_indices_count = meshopt_simplify(dst_indices.data(),
 					m.raw_indices.data(),
 					m.raw_indices.size(),
-					reinterpret_cast<f32*>(m.positions.data()), // ÓÉÓÚmath::v3ÊÇDirectX::FLOAT3,ÊÇÒ»¸ö½á¹¹Ìå£¬³ÉÔ±x¡¢y¡¢zÊÇÄÚ´æÁ¬ÐøµÄ£¬ËùÒÔ¿ÉÒÔÍ¨¹ýÕâ¸ö·½Ê½·ÃÎÊ
+					reinterpret_cast<f32*>(m.positions.data()), // ï¿½ï¿½ï¿½ï¿½math::v3ï¿½ï¿½DirectX::FLOAT3,ï¿½ï¿½Ò»ï¿½ï¿½ï¿½á¹¹ï¿½å£¬ï¿½ï¿½Ô±xï¿½ï¿½yï¿½ï¿½zï¿½ï¿½ï¿½Ú´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½Ô¿ï¿½ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½
 					m.positions.size(),
 					sizeof(math::v3),
 					(u64)target_index_count,
@@ -770,9 +880,14 @@ namespace primal::tools
 								_attribute.normals[index * 3 + 1],
 								_attribute.normals[index * 3 + 2],
 								1.f };
+#if defined(_MSC_VER)
 					DirectX::XMVECTOR N = DirectX::XMLoadFloat4(&n);
 					DirectX::XMStoreFloat4(&n, DirectX::XMVector4Normalize(N));
 					m.normals.emplace_back((f32)n.x, (f32)n.y, (f32)n.z);
+#elif defined(__clang__)
+					n.normalize();
+					m.normals.emplace_back((f32)n.x(), (f32)n.y(), (f32)n.z());
+#endif
 				}
 			}
 			else
@@ -790,6 +905,7 @@ namespace primal::tools
 			assert(m.raw_indices.size() % 3 == 0);
 			for (u32 i{ 0 }; i < m.raw_indices.size(); i += 3)
 			{
+#if defined(_MSC_VER)
 				u32 i0{ m.raw_indices[i] };
 				u32 i1{ m.raw_indices[i + 1] };
 				u32 i2{ m.raw_indices[i + 2] };
@@ -833,6 +949,49 @@ namespace primal::tools
 				m.tangents.emplace_back(t4);
 				m.tangents.emplace_back(t4);
 				m.tangents.emplace_back(t4);
+#elif defined(__clang__)
+				u32 i0{ m.raw_indices[i] };
+				u32 i1{ m.raw_indices[i + 1] };
+				u32 i2{ m.raw_indices[i + 2] };
+
+				math::v3 v0{ m.positions[i0] };
+				math::v3 v1{ m.positions[i1] };
+				math::v3 v2{ m.positions[i2] };
+
+				math::v2 uv0{ m.uv_sets[0][i0] };
+				math::v2 uv1{ m.uv_sets[0][i1] };
+				math::v2 uv2{ m.uv_sets[0][i2] };
+
+				math::v3 edge1{ v1.x() - v0.x(),
+					v1.y() - v0.y(),
+					v1.z() - v0.z() };
+				math::v3 edge2{ v2.x() - v0.x(),
+					v2.y() - v0.y(),
+					v2.z() - v0.z() };
+
+				f32 deltaU1 = uv1.x() - uv0.x();
+				f32 deltaV1 = uv1.y() - uv0.y();
+
+				f32 deltaU2 = uv2.x() - uv0.x();
+				f32 deltaV2 = uv2.y() - uv0.y();
+
+				f32 dividend = (deltaU1 * deltaV2 - deltaU2 * deltaV1);
+				f32 fc = 1.f / dividend;
+
+				math::v3 tangent{ fc * (deltaV2 * edge1.x() - deltaV1 * edge2.x()),
+					fc * (deltaV2 * edge1.y() - deltaV1 * edge2.y()),
+					fc * (deltaV2 * edge1.z() - deltaV1 * edge2.z()) };
+
+				tangent.normalize();
+
+				f32 sx = deltaU1, sy = deltaU2;
+				f32 tx = deltaV1, ty = deltaV2;
+				f32 handedness = ((tx * sy - ty * sx) < 0.f) ? -1.f : 1.f;
+				math::v4 t4{ tangent.x() * handedness, tangent.y() * handedness, tangent.z() * handedness, 0.f };
+				m.tangents.emplace_back(t4);
+				m.tangents.emplace_back(t4);
+				m.tangents.emplace_back(t4);
+#endif
 			}
 		}
 
@@ -1032,9 +1191,15 @@ namespace primal::tools
 		std::string base_file_path{ path.substr(0, pos) };
 
 		std::string file_package_path{ out_model_path + std::string{ out_ksm_file_package } };
+#if defined(_MSC_VER)
 		if (_access(file_package_path.c_str(), 0) == -1)
 			OutputDebugStringA(std::to_string(_mkdir(file_package_path.c_str())).c_str());
-
+#elif defined(__clang__)
+		if (access(file_package_path.c_str(), 0) == -1)
+		{
+			std::cerr << std::to_string(mkdir(file_package_path.c_str(), 0777)).c_str() << std::endl;
+		}
+#endif
 		tinyobj::attrib_t attrib;
 		std::vector<tinyobj::shape_t> shapes;
 		std::vector<tinyobj::material_t> materials;
@@ -1045,14 +1210,24 @@ namespace primal::tools
 
 		if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str(), base_file_path.c_str()))
 		{
+#if defined(_MSC_VER)
 			throw std::runtime_error(warn + err);
+#elif defined(__clang__)
+			std::cerr << "Error loading OBJ file: " <<
+			warn << "  --  " << err << std::endl;
+			return false;
+#endif
 		}
 
 		for (auto material : materials)
 		{
 			if (!generate_shader(static_cast<void*>(&material), file_package_path.c_str()))
 			{
+#if defined(_MSC_VER)
 				OutputDebugStringA("Failed to write shader");
+#elif defined(__clang__)
+				std::cerr << "Failed to write shader" << std::endl;
+#endif
 			}
 		}
 
@@ -1112,8 +1287,15 @@ namespace primal::tools
 			g.index_size = sizeof(u32);
 			g.index_count = (u32)indices[material_id].size();
 			//g.indices.swap(indices[material_id]);
+#if defined(_MSC_VER)
 			memcpy_s(g.name, 256, shape.name.c_str(), 256);
 			memcpy_s(g.material_name, 256, materials[material_id].name.c_str(), 256);
+#elif defined(__clang__)
+			strncpy(g.name, shape.name.c_str(), 256);
+			g.name[255] = '\0';
+			strncpy(g.material_name, materials[material_id].name.c_str(), 256);
+			g.material_name[255] = '\0';
+#endif
 			if (!materials[material_id].ambient_texname.empty())
 			{
 				g.ambient_map = materials[material_id].ambient_texname;
@@ -1183,9 +1365,15 @@ namespace primal::tools
 		//}
 
 		std::string file_package_path{ out_model_path + std::string{ out_ksm_file_package } };
+#if defined(_MSC_VER)
 		if (_access(file_package_path.c_str(), 0) == -1)
 			OutputDebugStringA(std::to_string(_mkdir(file_package_path.c_str())).c_str());
-
+#elif defined(__clang__)
+		if (access(file_package_path.c_str(), 0) == -1)
+		{
+			std::cerr << std::to_string(mkdir(file_package_path.c_str(), 0777)).c_str() << std::endl;
+		}
+#endif
 		tinyobj::attrib_t attrib;
 		std::vector<tinyobj::shape_t> shapes;
 		std::vector<tinyobj::material_t> materials;
@@ -1196,14 +1384,24 @@ namespace primal::tools
 
 		if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str(), base_file_path.c_str()))
 		{
+#if defined(_MSC_VER)
 			throw std::runtime_error(warn + err);
+#elif defined(__clang__)
+			std::cerr << "Error loading OBJ file: " <<
+			warn << "  --  " << err << std::endl;
+			return false;
+#endif
 		}
 
 		for (auto material : materials)
 		{
 			if (!generate_shader(static_cast<void*>(&material), file_package_path.c_str()))
 			{
+#if defined(_MSC_VER)
 				OutputDebugStringA("Failed to write shader");
+#elif defined(__clang__)
+				std::cerr << "Failed to write shader" << std::endl;
+#endif
 			}
 		}
 
@@ -1261,7 +1459,12 @@ namespace primal::tools
 			g.index_size = sizeof(u32);
 			g.index_count = (u32)indices[material_id].size();
 			//g.indices.swap(indices[material_id]);
+#if defined(_MSC_VER)
 			memcpy_s(g.name, 256, shape.name.c_str(), 256);
+#elif defined(__clang__)
+			strncpy(g.name, shape.name.c_str(), 256);
+			g.name[255] = '\0';
+#endif
 			//generate_bounding_box_and_center(&g);
 			//generate_tangents(&g);
 

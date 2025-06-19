@@ -15,6 +15,7 @@ namespace {
 
 		transform::init_info to_init_info()
 		{
+#if defined(_MSC_VER)
 			using namespace DirectX;
 			transform::init_info info{};
 			memcpy(&info.position[0], &position[0], sizeof(position));
@@ -25,6 +26,25 @@ namespace {
 			XMStoreFloat4A(&rot_quat, quat);
 			memcpy(&info.rotation, &rot_quat.x, sizeof(info.rotation));
 			return info;
+#elif defined(__clang__)
+			transform::init_info info{};
+			memcpy(&info.position[0], &position[0], sizeof(position));
+			memcpy(&info.scale[0], &scale[0], sizeof(scale));
+			
+			math::v3 euler_angle{ rotation[0], rotation[1], rotation[2] };
+			Eigen::Quaternionf quat{
+				Eigen::AngleAxisf(euler_angle.x(), math::v3::UnitX()) * 
+				Eigen::AngleAxisf(euler_angle.y(), math::v3::UnitY()) *
+				Eigen::AngleAxisf(euler_angle.z(), math::v3::UnitZ())
+			};
+
+			info.rotation[0] = quat.x();
+			info.rotation[1] = quat.y();
+			info.rotation[2] = quat.z();
+			info.rotation[3] = quat.w();
+
+			return info;
+#endif
 		}
 	};
 
@@ -34,7 +54,7 @@ namespace {
 	};
 
 
-	game_entity::entity entity_from_id(id::id_type id)
+	[[maybe_unused]] game_entity::entity entity_from_id(id::id_type id)
 	{
 		return game_entity::entity{ game_entity::entity_id(id) };
 	}

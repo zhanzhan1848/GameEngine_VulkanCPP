@@ -144,7 +144,6 @@ float3 PhongBRDF(float3 N, float3 L, float3 V, float3 diffuseColor, float3 specu
 float3 CalculateLighting(Surface S, float3 L, float3 V, float3 lightColor)
 {
     const float NoL = saturate(dot(N, L));
-	
 	return PhongBRDF(S.Normal, L, S.BaseColor, 1.f, (1 - S.PerceptualRoughness) * 100.f) * (NoL / PI) * lightColor;
 }
 
@@ -202,35 +201,35 @@ float3 SpotLight(Surface S, float3 worldPosition, float3 V, LightParameters ligh
     return color;
 }
 
-float4 Sample(uint index, SamplerState s, float2 uv)
+float4 Sampler(uint index, SamplerState s, float2 uv)
 {
 	return Texture2D(ResourceDescriptorHeap[SrvIndices[index]]).Sample(s, uv);
 }
 
-Surface GetSurface(VertexOut psIn) 
+Surface GetSurface(VertexOut psIn)
 {
-	float2 uv = psIn.UV;
-	Surface S;
-	S.BaseColor = 1.f;
-	S.Metallic = 0.f;
-	S.Normal = psIn.WorldNormal;
-	S.PerceptualRoughness = 1.f;
-	S.EmissiveColor = 0.f;
-	S.EmissiveIntensity = 1.f;
-	S.AmbientOcclusion = 1.f;
+	Surface surface;
+	surface.BaseColor = 1.f;
+	surface.Metallic = 0.f;
+	surface.Normal = 1.f;
+	surface.PerceptualRoughness = 0.f;
+	surface.EmissiveColor = 0.f;
+	surface.EmissiveIntensity = 1.f;
+	surface.AmbientOcclusion = 1.f;
 
 #if TEXTURED_MTL
-	S.AmbientOcclusion = Sample(0, LinearSampler, uv).r;
-	S.BaseColor = Sample(1, LinearSampler, uv).rgb;
-	S.EmissiveColor = Sample(2, LinearSampler, uv).rgb;
+	surface.AmbientOcclusion = Sample(0, LinearSampler, uv).r;
+	surface.BaseColor = Sample(1, LinearSampler, uv).rgb;
+	surface.EmissiveColor = Sample(2, LinearSampler, uv).rgb;
 	float2 metalRough = Sample(3, LinearSampler, uv)rg;
-	S.Metallic = metalRough.r;
-	S.PerceptualRoughness = metalRough.g;
-	S.EmissiveIntensity = 1.f;
+	surface.Metallic = metalRough.r;
+	surface.PerceptualRoughness = metalRough.g;
+	surface.EmissiveIntensity = 1.f;
 	float3 n = Sample(4, LinearSampler, uv).rgb;
-	S.Normal = psIn.WorldNormal;
+	surface.Normal = psIn.WorldNormal;
 #endif
-	return S;
+
+	return surface;
 }
 
 uint GetGridIndex(float2 posXY, float viewWidth)
@@ -255,12 +254,11 @@ PixelOut TestShaderPS(in VertexOut psIn)
 		DirectionalLightParameters light = DirectionalLights[i];
 
 		float3 lightDirection = light.Direction;
-		// if(abs(lightDirection.z - 1.f) < 0.001f)
-		// {
-		// 	lightDirection = GlobalData.CameraDirection;
-		// }
-
-        color += CalculateLighting(S, -lightDirection, viewDir, light.Color * light.Intensity);
+		if(abs(lightDirection.z - 1.f) < 0.001f)
+		{
+			lightDirection = GlobalData.CameraDirection;
+		}
+        color += 0.1f * CalculateLighting(S, -lightDirection, viewDir, light.Color * light.Intensity);
     }
 	
     const uint gridIndex = GetGridIndex(psIn.HomogeneousPosition.xy, GlobalData.ViewWidth);

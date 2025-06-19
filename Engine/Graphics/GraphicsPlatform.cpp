@@ -3,6 +3,7 @@
 #include "GraphicsPlatformInterface.h"
 #include "Direct3D12/D3D12Interface.h"
 #include "Vulkan/VulkanInterface.h"
+#include "Metal/MetalInterface.h"
 
 namespace primal::graphics {
 #include "GraphicsPlatform.h"
@@ -12,14 +13,16 @@ set_platform_interface(graphics_platform platform, platform_interface& pi)
 {
     switch (platform)
     {
+#ifndef __APPLE__
     case graphics_platform::direct3d12:
         d3d12::get_platform_interface(pi);
         break;
     case graphics_platform::vulkan_1:
         vulkan::get_platform_interface(pi);
         break;
-    case graphics_platform::myVulkan:
-        
+#endif
+    case graphics_platform::metal:
+        metal::get_platform_interface(pi);
         break;
     default:
         return false;

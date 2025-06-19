@@ -59,6 +59,11 @@ namespace primal::content
 	id::id_type add_shader_group(const u8* const* shaders, u32 num_shaders, const u32 *const keys);
 	void remove_shader_group(id::id_type id);
 	compiled_shader_ptr get_shader(id::id_type id, u32 shader_key);
+#if defined(__APPLE__)
+	void add_shader_function_name(id::id_type shader_group_id, const char* name);
+	const char* get_shader_function_name(id::id_type shader_group_id);
+	void remove_shader_function_name(id::id_type shader_group_id);
+#endif
 
 	void get_submesh_gpu_ids(id::id_type geometry_content_id, u32 id_count, id::id_type *const gpu_ids);
 	void get_lod_offsets(const id::id_type *const geometry_ids, const f32 *const thresholds, u32 id_count, utl::vector<lod_offset>& offsets);

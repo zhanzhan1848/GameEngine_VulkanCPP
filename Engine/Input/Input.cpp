@@ -1,5 +1,7 @@
 #include "Input.h"
 
+#include <iostream>
+
 namespace primal::input
 {
 	namespace
@@ -135,8 +137,13 @@ namespace primal::input
 		}
 
 		utl::vector<input_source>& sources{ input_binding.sources };
+#if defined(_MSC_VER)
 		input_value sub_value{};
 		input_value result{};
+#elif defined(__clang__)
+		input_value sub_value{Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero()};
+		input_value result{Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero()};
+#endif
 
 		for (const auto& source : sources)
 		{
@@ -145,14 +152,35 @@ namespace primal::input
 			assert(source.axis <= axis::z);
 			if (source.source_type == input_source::mouse)
 			{
+#if defined(_MSC_VER)
 				const f32 current{ (&sub_value.current.x)[source.source_axis] };
 				const f32 previous{ (&sub_value.previous.x)[source.source_axis] };
 				(&result.current.x)[source.axis] += (current - previous) * source.multiplier;
+#elif defined(__clang__)
+				const f32* curr_ptr = &sub_value.current[0];
+				const f32* prev_ptr = &sub_value.previous[0];
+				f32* result_curr_ptr = &result.current[0];
+				// f32* result_prev_ptr = &result.previous[0];
+
+				const f32 current{ curr_ptr[source.source_axis] };
+				const f32 previous{ prev_ptr[source.source_axis] };
+				result_curr_ptr[source.axis] += (current - previous) * source.multiplier;
+#endif
 			}
 			else
 			{
+#if defined(_MSC_VER)
 				(&result.previous.x)[source.axis] += (&sub_value.previous.x)[source.source_axis] * source.multiplier;
 				(&result.current.x)[source.axis] += (&sub_value.current.x)[source.source_axis] * source.multiplier;
+#elif defined(__clang__)
+				const f32* curr_ptr = &sub_value.current[0];
+				const f32* prev_ptr = &sub_value.previous[0];
+				f32* result_curr_ptr = &result.current[0];
+				f32* result_prev_ptr = &result.previous[0];
+
+				result_prev_ptr[source.axis] += prev_ptr[source.source_axis] * source.multiplier;
+				result_curr_ptr[source.axis] += curr_ptr[source.source_axis] * source.multiplier;
+#endif
 			}
 		}
 

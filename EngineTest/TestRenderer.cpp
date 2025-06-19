@@ -1,7 +1,6 @@
 #include "Platform/PlatformTypes.h"
 #include "Platform/Platform.h"
 #include "Graphics/Renderer.h"
-#include "Graphics/Direct3D12/D3D12Core.h"
 #include "Content/ContentToEngine.h"
 #include "Components/Entity.h"
 #include "Components/Transform.h"
@@ -14,6 +13,11 @@
 #include <iostream>
 
 #include "PythonScript.h"
+
+#if defined(_MSC_VER)
+#include "Graphics/Direct3D12/D3D12Core.h"
+
+#endif
 
 #if TEST_RENDERER
 
@@ -30,6 +34,8 @@ utl::vector<u8>	null_buffer(1024 * 1024, 0);
 // Test worker for upload context
 void buffer_test_worker()
 {
+#if defined(_MSC_VER)
+	// NOTE: We can also use core::release(resource) since we're not using the buffer for rendering,
 	while(!shutdown)
 	{
 		auto* resource = graphics::d3d12::d3dx::create_buffer(null_buffer.data(), (u32)null_buffer.size());
@@ -37,6 +43,7 @@ void buffer_test_worker()
 		//		 However, this is a nice test for deferred_release functionality.
 		graphics::d3d12::core::deferred_release(resource);
 	}
+#endif
 }
 
 template<class FnPtr, class... Args>
@@ -64,8 +71,8 @@ struct camera_surface
 	graphics::render_surface surface{};
 };
 
-id::id_type item_id{ id::invalid_id };
-id::id_type model_id{ id::invalid_id };
+primal::id::id_type item_id{ primal::id::invalid_id };
+primal::id::id_type model_id{ primal::id::invalid_id };
 
 camera_surface _surfaces[1]{};
 time_it timer{};
@@ -75,13 +82,14 @@ bool is_restarting{ false };
 void destroy_camera_surface(camera_surface& surface);
 bool test_initialize();
 void test_shutdown();
-id::id_type create_render_item(id::id_type entity_id);
-void destory_render_item(id::id_type item_id);
+primal::id::id_type create_render_item(primal::id::id_type entity_id);
+void destory_render_item(primal::id::id_type item_id);
 void generate_lights();
 void remove_lights();
 void test_lights(f32 dt);
 void get_render_items(id::id_type* items, [[maybe_unused]] u32 count);
 
+#if defined(_MSC_VER)
 LRESULT win_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
 	bool toggle_fullscreen{ false };
@@ -162,15 +170,31 @@ LRESULT win_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 
 	return DefWindowProc(hwnd, msg, wparam, lparam);
 }
+#endif
 
 game_entity::entity create_one_game_entity(math::v3 position, math::v3 rotation, const char* name)
 {
+#if defined(_MSC_VER)
 	transform::init_info transform_info{};
 	DirectX::XMVECTOR quat{ DirectX::XMQuaternionRotationRollPitchYawFromVector(DirectX::XMLoadFloat3(&rotation)) };
 	math::v4a rot_quat;
 	DirectX::XMStoreFloat4A(&rot_quat, quat);
 	memcpy(&transform_info.rotation[0], &rot_quat.x, sizeof(transform_info.rotation));
 	memcpy(&transform_info.position[0], &position.x, sizeof(transform_info.position));
+#elif defined(__clang__)
+	transform::init_info transform_info{};
+    Eigen::Quaternionf quat = Eigen::AngleAxisf(rotation.x(), Eigen::Vector3f::UnitX()) *
+                             Eigen::AngleAxisf(rotation.y(), Eigen::Vector3f::UnitY()) *
+                             Eigen::AngleAxisf(rotation.z(), Eigen::Vector3f::UnitZ());
+    math::v4 rot_quat{
+		static_cast<f32>(quat.x()),
+		static_cast<f32>(quat.y()),
+		static_cast<f32>(quat.z()),
+		static_cast<f32>(quat.w())
+	};
+	memcpy(&transform_info.rotation[0], &rot_quat.x(), sizeof(transform_info.rotation));
+    memcpy(&transform_info.position[0], &position.x(), sizeof(transform_info.position));
+#endif
 
 	script::init_info script_info{};
 	if (name)
@@ -231,6 +255,7 @@ void destroy_camera_surface(camera_surface& surface)
 
 bool test_initialize()
 {
+#if defined(_MSC_VER)
 #define GRAPHICS_API graphics::graphics_platform::vulkan_1
 
 	if constexpr (GRAPHICS_API == graphics::graphics_platform::direct3d12)
@@ -344,6 +369,20 @@ bool test_initialize()
 
 	is_restarting = false;
 	return true;
+#elif defined(__clang__)
+	platform::window_init_info info[]
+	{
+		{nullptr, nullptr, "Render Window 1", 100, 100, 1600, 900},
+		//{&win_proc, nullptr, L"Render Window 2", 150, 150, 800, 400},
+		//{&win_proc, nullptr, L"Render Window 3", 200, 200, 400, 400},
+		//{&win_proc, nullptr, L"Render Window 4", 250, 250, 800, 600},
+	};
+	static_assert(_countof(info) == _countof(_surfaces));
+
+	for (u32 i{ 0 }; i < _countof(_surfaces); ++i)
+		create_camera_surface(_surfaces[i], info[i]);
+	return true;
+#endif
 }
 
 void test_shutdown()
@@ -353,7 +392,7 @@ void test_shutdown()
 	destory_render_item(item_id);
 	join_test_workers();
 
-	if (id::is_valid(model_id))
+	if (primal::id::is_valid(model_id))
 	{
 		content::destroy_resource(model_id, content::asset_type::mesh);
 	}
@@ -371,6 +410,7 @@ bool Engine_Test::initialize()
 
 void Engine_Test::run()
 {
+#ifndef __APPLE__
 	static u32 counter{ 0 };
 	static u32 light_set_key{ 0 };
 	++counter;
@@ -403,11 +443,14 @@ void Engine_Test::run()
 		}
 	}
 	timer.end();
+#endif
 }
 
 void Engine_Test::shutdown()
 {
+#ifndef __APPLE__
 	test_shutdown();
+#endif
 }
 
 

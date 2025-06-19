@@ -2,6 +2,7 @@
 
 #include "ToolsCommon.h"
 #include <fbxsdk.h>
+#include <cstring>
 
 namespace primal::tools
 {
@@ -28,7 +29,11 @@ namespace primal::tools
 		{
 			_fbx_scene->Destroy();
 			_fbx_manager->Destroy();
+#if defined(_MSC_VER)
 			ZeroMemory(this, sizeof(fbx_context));
+#elif defined(__clang__)
+			memset(this, 0, sizeof(fbx_context));
+#endif
 		}
 
 		void get_scene(FbxNode* root = nullptr);

@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef _WIN64
+
 #include "Test.h"
 #include "../Platform/PlatformTypes.h"
 #include "../Platform/Platform.h"
@@ -74,3 +76,4 @@ public:
 		}
 	}
 };
+#endif

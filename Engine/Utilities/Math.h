@@ -3,6 +3,15 @@
 #include "CommonHeaders.h"
 #include "MathTypes.h"
 
+#if defined(_MSC_VER)
+    #include <intrin.h>
+// #elif !defined(__GNUC__) || !defined(__clang__)
+//     #include <x86intrin.h>
+#elif defined(__APPLE__)
+	#include <arm_neon.h>
+	#include "CRC64Table.h"
+#endif
+
 namespace primal::math
 {
 	constexpr bool is_equal(f32 a, f32 b, f32 eps = epsilon)
@@ -95,12 +104,34 @@ namespace primal::math
 		assert(size >= sizeof(u64));
 		u64 crc{ 0 };
 		const u8* at{ data };
-		const u8 *const end{ data + align_size_down<sizeof(u64)>(size) };
+		const u8 *const end{ data + align_size_down(size, sizeof(u64)) };
+		
+	#if defined(_MSC_VER)
 		while (at < end)
 		{
 			crc = _mm_crc32_u64(crc, *((const u64*)at));
 			at += sizeof(u64);
 		}
+	#elif defined(__APPLE__)
+		while (at < end)
+		{
+			const u64 val = *((const u64*)at);
+			// 使用查找表来计算CRC64
+			for(int i = 0; i < 8; ++i)
+			{
+				const u8 byte = (val >> (i * 8)) & 0xFF;
+				crc = (crc >> 8) ^ primal::math::crc64_tab[(crc ^ byte) & 0xFF];
+			}
+			at += sizeof(u64);
+		}
+	#else
+		// Linux和其他平台使用SSE4.2指令
+		while (at < end)
+		{
+			crc = _mm_crc32_u64(crc, *((const u64*)at));
+			at += sizeof(u64);
+		}
+	#endif
 
 		return crc;
 	}

@@ -1,9 +1,10 @@
 #include <fstream>
 #include <filesystem>
+#include "ShaderCompilation.h"
 
+#if defined(_MSC_VER)
 #include "Graphics/Direct3D12/D3D12Core.h"
 #include "Graphics/Direct3D12/D3D12Shaders.h"
-#include "ShaderCompilation.h"
 
 #include "../packages/DirectXShaderCompiler/inc/dxcapi.h"
 #include "../packages/DirectXShaderCompiler/inc/d3d12shader.h"
@@ -328,3 +329,365 @@ bool compile_shaders()
 
 	return save_compiled_shaders(shaders);
 }
+#elif defined(__clang__)
+#include "Graphics/Metal/MetalCore.h"
+#include "Graphics/Metal/MetalShader.h"
+
+#include "Content/ContentToEngine.h"
+#include "Utilities/IOStream.h"
+
+#include <functional>
+#include <iostream>
+#include <thread>
+
+using namespace primal;
+using namespace primal::graphics::metal::shader;
+
+	namespace
+	{
+		// constexpr const char* shaders_source_path{ "../../Engine/Graphics/Metal/shaders/" };
+		constexpr const char* shaders_source_path{ "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/" };
+
+		struct engine_shader_info
+		{
+			engine_shader::id		id;
+			shader_file_info		info;
+		};
+
+		constexpr engine_shader_info engine_shader_files[]
+		{
+			{ engine_shader::fullscreen_triangle_vs,		{ "FullScreenTriangle.metal", "FullScreenTriangleVS", shader_type::vertex } },
+			// { engine_shader::fill_color_ps,					{ "FillColor.hlsl", "FillColorPS", shader_type::pixel } },
+			{ engine_shader::post_process_ps,				{ "PostProcess.metal", "PostProcessPS", shader_type::pixel } },
+			// { engine_shader::grid_frustums_cs,				{ "GridFrustums.hlsl", "ComputeGridFrustumsCS", shader_type::compute } },
+			// { engine_shader::light_culling_cs,				{ "CullingLights.hlsl", "CullLightsCS", shader_type::compute } }
+		};
+
+		static_assert(_countof(engine_shader_files) == engine_shader::count);
+
+		decltype(auto) get_engine_shaders_path() { return std::filesystem::path{ graphics::get_engine_shaders_path(graphics::graphics_platform::metal) }; }
+
+		std::wstring to_wstring(const char* c)
+		{
+			std::string s{ c };
+			return { s.begin(), s.end() };
+		}
+
+		struct metal_compiled_shader
+		{
+			utl::vector<u8> byte_code{}; 											// 编译后的 Metal 着色器字节码
+			std::array<u8, content::compiled_shader::hash_length> hash{};         	// 哈希值，与 compiled_shader 的 hash_length 一致
+		};
+
+		class shader_compiler
+		{
+		public:
+			shader_compiler() = default;
+			DISABLE_COPY_AND_MOVE(shader_compiler);
+
+			metal_compiled_shader compile(shader_file_info info, std::filesystem::path full_path, primal::utl::vector<std::wstring>& extra_args)
+			{
+				// 读取着色器源文件
+				std::ifstream file(full_path, std::ios::in);
+				if (!file.is_open()) return {};
+				
+				std::stringstream buffer;
+				buffer << file.rdbuf();
+				std::string source = buffer.str();
+				file.close();
+				
+				if (source.empty()) return {};
+			
+				std::cout << "Compiling " << info.file_name << " : " << info.function << "\n";
+				
+				return compile(source, get_args(info, extra_args));
+			}
+
+			metal_compiled_shader compile(const std::string& source, primal::utl::vector<std::string> compiler_args)
+			{
+				metal_compiled_shader result{};
+				
+				// 创建临时源文件
+				std::string temp_source_file = "/tmp/shader_temp.metal";
+				std::ofstream source_file(temp_source_file);
+				if (!source_file.is_open()) return result;
+				source_file << source;
+				source_file.close();
+				
+				// 创建临时IR文件和metallib文件
+				std::string temp_ir_file = "/tmp/shader_temp.ir";
+				std::string temp_metalar_file = "/tmp/shader_temp.metalar";
+				std::string temp_metallib_file = "/tmp/shader_temp.metallib";
+				
+				// 步骤1: 使用metal命令编译为IR
+				std::string compile_cmd = "xcrun -sdk macosx metal -o " + temp_ir_file + " -c " + temp_source_file;
+				
+				// 添加编译参数
+				for (const auto& arg : compiler_args)
+				{
+					compile_cmd += " " + arg;
+				}
+				
+				// 执行编译命令并捕获输出
+				std::string output;
+				FILE* pipe = popen((compile_cmd + " 2>&1").c_str(), "r");
+				if (!pipe) {
+					std::cout << "无法执行Metal编译命令" << std::endl;
+					std::remove(temp_source_file.c_str());
+					return result;
+				}
+				
+				char buffer[512];
+				while (!feof(pipe)) {
+					if (fgets(buffer, 512, pipe) != nullptr)
+						output += buffer;
+				}
+				int compile_result = pclose(pipe);
+				
+				if (compile_result != 0) {
+					std::cout << "\nShader compilation error: \n" << output << std::endl;
+					std::cout << "Compilation command: " << compile_cmd << std::endl;
+					std::remove(temp_source_file.c_str());
+					return result;
+				}
+				else {
+					std::cout << " [ IR编译成功 ]\n";
+				}
+				
+				// 步骤2: 使用metal-ar创建metalar文件
+				std::string ar_cmd = "xcrun -sdk macosx metal-ar -q " + temp_metalar_file + " " + temp_ir_file;
+				pipe = popen((ar_cmd + " 2>&1").c_str(), "r");
+				if (!pipe) {
+					std::cout << "无法执行Metal-ar命令" << std::endl;
+					std::remove(temp_source_file.c_str());
+					std::remove(temp_ir_file.c_str());
+					return result;
+				}
+				
+				output.clear();
+				while (!feof(pipe)) {
+					if (fgets(buffer, 512, pipe) != nullptr)
+						output += buffer;
+				}
+				int ar_result = pclose(pipe);
+				
+				if (ar_result != 0) {
+					std::cout << "\nMetal-ar error: \n" << output << std::endl;
+					std::cout << "AR command: " << ar_cmd << std::endl;
+					std::remove(temp_source_file.c_str());
+					std::remove(temp_ir_file.c_str());
+					return result;
+				}
+				else {
+					std::cout << " [ Metal-ar成功 ]\n";
+				}
+				
+				// 步骤3: 使用metallib创建最终的metallib文件
+				std::string lib_cmd = "xcrun -sdk macosx metallib -o " + temp_metallib_file + " " + temp_metalar_file;
+				pipe = popen((lib_cmd + " 2>&1").c_str(), "r");
+				if (!pipe) {
+					std::cout << "无法执行Metallib命令" << std::endl;
+					std::remove(temp_source_file.c_str());
+					std::remove(temp_ir_file.c_str());
+					std::remove(temp_metalar_file.c_str());
+					return result;
+				}
+				
+				output.clear();
+				while (!feof(pipe)) {
+					if (fgets(buffer, 512, pipe) != nullptr)
+						output += buffer;
+				}
+				int lib_result = pclose(pipe);
+				
+				if (lib_result != 0) {
+					std::cout << "\nMetallib error: \n" << output << std::endl;
+					std::cout << "Lib command: " << lib_cmd << std::endl;
+				}
+				else {
+					std::cout << " [ Metallib成功 ]\n";
+				}
+				
+				// 如果编译成功，读取metallib文件
+				if (lib_result == 0) {
+					std::ifstream metallib_file(temp_metallib_file, std::ios::binary);
+					if (metallib_file.is_open()) {
+						metallib_file.seekg(0, std::ios::end);
+						size_t size = metallib_file.tellg();
+						metallib_file.seekg(0, std::ios::beg);
+						
+						result.byte_code.resize(size);
+						metallib_file.read(reinterpret_cast<char*>(result.byte_code.data()), size);
+						metallib_file.close();
+						
+						// 计算哈希值
+						std::hash<std::string> hasher;
+						u64 hash_value = hasher(std::string(result.byte_code.begin(), result.byte_code.end()));
+						
+						std::cout << "Shader hash: ";
+						for (u64 i{ 0 }; i < content::compiled_shader::hash_length && i < sizeof(hash_value); ++i) {
+							result.hash[i] = (hash_value >> (i * 8)) & 0xFF;
+							char hash_bytes[3]{};
+							sprintf(hash_bytes, "%02x", (u32)result.hash[i]);
+							std::cout << hash_bytes << " ";
+						}
+						std::cout << "\n";
+					}
+				}
+				
+				// 清理临时文件
+				std::remove(temp_source_file.c_str());
+				std::remove(temp_ir_file.c_str());
+				std::remove(temp_metalar_file.c_str());
+				std::remove(temp_metallib_file.c_str());
+				
+				return result;
+			}
+
+		private:
+			utl::vector<std::string> get_args(const shader_file_info& info, utl::vector<std::wstring>& extra_args)
+			{
+				utl::vector<std::string> args{};
+				
+				// Metal编译器基本参数
+				// args.emplace_back("-std=macos-metal2.4");     // 使用Metal 2.4标准
+				args.emplace_back("-Wall");                   // 启用所有警告
+				args.emplace_back("-Wno-unused-variable");    // 禁用未使用变量警告
+				args.emplace_back("-I " + std::string(shaders_source_path)); // Include路径
+				
+			#if _DEBUG
+				args.emplace_back("-gline-tables-only");      // 添加调试信息
+				args.emplace_back("-frecord-sources");        // 记录源文件信息
+				args.emplace_back("-O0");                     // 禁用优化
+			#else
+				args.emplace_back("-O3");                     // 最高优化级别
+			#endif
+				
+				// 添加额外的编译参数
+				for (const auto& arg : extra_args)
+				{
+					args.emplace_back(std::string(arg.begin(), arg.end()));
+				}
+				
+				return args;
+			}
+		};
+
+		bool compiled_shaders_are_up_to_date()
+		{
+			// get the path to the compiled shaders binary file
+			auto engine_shaders_path = get_engine_shaders_path();
+			auto path1 = std::filesystem::absolute(engine_shaders_path);
+			if (!std::filesystem::exists(path1)) return false;
+			auto shaders_compilation_time = std::filesystem::last_write_time(engine_shaders_path);
+
+			std::filesystem::path full_path{};
+
+			//// Check if either of engine shader source files is newer than the compiled shader file.
+			//// In that case, we need to recompile.
+			for(u32 i{ 0 }; i < engine_shader::count; ++i)
+			{
+				auto& file = engine_shader_files[i];
+				full_path = shaders_source_path;
+				full_path += file.info.file_name;
+				if (!std::filesystem::exists(full_path)) return false;
+				auto shader_file_time = std::filesystem::last_write_time(full_path);
+				if (shader_file_time > shaders_compilation_time)
+				{
+					return false;
+				}
+			}
+			for (const auto& entry : std::filesystem::directory_iterator{ shaders_source_path })
+			{
+				if (entry.last_write_time() > shaders_compilation_time)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		
+
+		bool save_compiled_shaders(utl::vector<metal_compiled_shader>& shaders)
+		{
+			auto engine_shaders_path = get_engine_shaders_path();
+			std::filesystem::create_directories(engine_shaders_path.parent_path());
+			std::ofstream file(engine_shaders_path, std::ios::out | std::ios::binary);
+			if (!file || !std::filesystem::exists(engine_shaders_path))
+			{
+				file.close();
+				return false;
+			}
+
+			for (const auto& shader : shaders)
+			{
+				// 写入 compiled_shader 格式的数据
+				u64 byte_code_size = shader.byte_code.size();
+				file.write(reinterpret_cast<const char*>(&byte_code_size), sizeof(u64)); // _byte_code_size
+				file.write(reinterpret_cast<const char*>(shader.hash.data()), content::compiled_shader::hash_length); // _hash
+				file.write(reinterpret_cast<const char*>(shader.byte_code.data()), byte_code_size); // _byte_code
+			}
+			file.close();
+			return true;
+		}
+	} // anonymous namespace
+
+	std::unique_ptr<u8[]> compile_shader(shader_file_info info, const char* file_path, primal::utl::vector<std::wstring>& extra_args)
+	{
+		std::filesystem::path full_path{ file_path };
+		full_path += info.file_name;
+		std::filesystem::path absolute_path{ std::filesystem::absolute(full_path) };
+		if (!std::filesystem::exists(full_path)) return {};
+
+		shader_compiler compiler{};
+		metal_compiled_shader compiled_shader{ compiler.compile(info, full_path, extra_args) };
+
+		if (!compiled_shader.byte_code.empty())
+		{
+			const u64 buffer_size{ sizeof(u64) + content::compiled_shader::hash_length + compiled_shader.byte_code.size() };
+			std::unique_ptr<u8[]> buffer{ std::make_unique<u8[]>(buffer_size) };
+			utl::blob_stream_writer blob{ buffer.get(), buffer_size };
+			
+			blob.write(compiled_shader.byte_code.size()); // _byte_code_size
+        	blob.write(compiled_shader.hash.data(), content::compiled_shader::hash_length); // _hash
+        	blob.write(compiled_shader.byte_code.data(), compiled_shader.byte_code.size()); // _byte_code
+
+			assert(blob.offset() == buffer_size);
+			return buffer;
+		}
+
+		return {};
+	}
+
+	bool compile_shaders()
+	{
+		if (compiled_shaders_are_up_to_date()) return true;
+
+		shader_compiler compiler{};
+		utl::vector<metal_compiled_shader> shaders{};
+		std::filesystem::path full_path{};
+		
+		for (u32 i{ 0 }; i < engine_shader::count; ++i)
+		{
+			auto& file = engine_shader_files[i];
+	
+			full_path = shaders_source_path;
+			full_path += file.info.file_name;
+			auto p1 = std::filesystem::absolute(full_path);
+			if (!std::filesystem::exists(full_path)) return false;
+			utl::vector<std::wstring> extra_args{};
+	
+			metal_compiled_shader compiled_shader{ compiler.compile(file.info, full_path, extra_args) };
+			if (!compiled_shader.byte_code.empty())
+			{
+				shaders.emplace_back(std::move(compiled_shader));
+			}
+			else
+			{
+				return false;
+			}
+		}
+
+		return save_compiled_shaders(shaders);
+	}
+#endif

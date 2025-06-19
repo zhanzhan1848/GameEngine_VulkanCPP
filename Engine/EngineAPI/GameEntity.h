@@ -54,7 +54,7 @@ namespace primal {
 		class my_player_character : public entity_script
 		{
 		public:
-			void update(float dt) override
+			void update([[maybe_unused]] float dt) override
 			{
 				// do player character update
 			}

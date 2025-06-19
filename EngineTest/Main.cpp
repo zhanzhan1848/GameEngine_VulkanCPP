@@ -2,7 +2,9 @@
 // Distributed under the MIT license. See the LICENSE file in the project root for more information.
 #include "Test.h"
 
+#if defined(_MSC_VER)
 #pragma comment(lib, "Engine.lib")
+#endif
 
 #if TEST_ENTITY_COMPONENTS
 #include "TestEntityComponents.h"
@@ -113,5 +115,34 @@ int main(int argc, char* argv[])
         XCloseDisplay(display);
         return 0;
     }
+}
+
+#elif __APPLE__
+#include <iostream>
+
+#define NS_PRIVATE_IMPLEMENTATION
+#define CA_PRIVATE_IMPLEMENTATION
+#include <AppKit/AppKit.hpp>
+#include "MacKeyboard.h"
+
+int main(int argc, char* argv[])
+{
+    std::cout << "Hello, World!" << std::endl;
+    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+    try
+    {
+        Engine_Test test{};
+        NS::Application* app = NS::Application::sharedApplication();
+        monitorKeyboardInput();
+        app->setDelegate(&test);
+        app->run();
+    }
+    catch(const std::exception& e)
+    {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+    
+    pool->release();
+    return 0;
 }
 #endif // platforms
