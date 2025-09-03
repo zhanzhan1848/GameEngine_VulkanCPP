@@ -231,8 +231,8 @@ namespace primal::tools
 			const f32 v_length_sq{ v.x * v.x + v.y * v.y + v.z * v.z };
 			return (v.z < 0.f || v_length_sq < vector_length_sq_rejection_threshold) ? -1 : 1;
 #elif defined(__clang__)
-			const f32 v_length_sq{ v.x() * v.x() + v.y() * v.y() + v.z() * v.z() };
-			return (v.z() < 0.f || v_length_sq < vector_length_sq_rejection_threshold) ? -1 : 1;
+			const f32 v_length_sq{ v.x * v.x + v.y * v.y + v.z * v.z };
+			return (v.z < 0.f || v_length_sq < vector_length_sq_rejection_threshold) ? -1 : 1;
 #endif
 		}
 
@@ -277,8 +277,8 @@ namespace primal::tools
 				const f32 avg_length{ sqrt(v.x * v.x + v.y * v.y + v.z * v.z) };
 				const f32 avg_normalized_z{ v.z / avg_length };
 #elif defined(__clang__)
-				const f32 avg_length{ sqrt(v.x() * v.x() + v.y() * v.y() + v.z() * v.z()) };
-				const f32 avg_normalized_z{ v.z() / avg_length };
+				const f32 avg_length{ sqrt(v.x * v.x + v.y * v.y + v.z * v.z) };
+				const f32 avg_normalized_z{ v.z / avg_length };
 #endif
 
 				return 

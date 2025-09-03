@@ -197,7 +197,7 @@ namespace primal::tools
 				FbxVector4 v = transform.MultT(vertices[v_idx]) * _scene_scale;
 				m.raw_indices[i] = (u32)m.positions.size();
 				vertex_ref[v_idx] = m.raw_indices[i];
-				m.positions.emplace_back((f32)v[0], (f32)v[1], (f32)v[2]);
+				m.positions.emplace_back(math::v3{ (f32)v[0], (f32)v[1], (f32)v[2] });
 			}
 		}
 
@@ -238,7 +238,7 @@ namespace primal::tools
 				{
 					FbxVector4 n{ inverse_transpose.MultT(normals[i]) };
 					n.Normalize();
-					m.normals.emplace_back((f32)n[0], (f32)n[1], (f32)n[2]);
+					m.normals.emplace_back(math::v3{ (f32)n[0], (f32)n[1], (f32)n[2] });
 				}
 			}
 			else
@@ -266,7 +266,7 @@ namespace primal::tools
 					t[3] = 0.0;
 					t = transform.MultT(t);
 					t.Normalize();
-					m.tangents.emplace_back((f32)t[0], (f32)t[1], (f32)t[2], handedness);
+					m.tangents.emplace_back(math::v4{ (f32)t[0], (f32)t[1], (f32)t[2], handedness });
 				}
 			}
 			else
@@ -292,7 +292,7 @@ namespace primal::tools
 				const s32 num_uvs{ uvs.Size() };
 				for (s32 j{ 0 }; j < num_uvs; ++j)
 				{
-					m.uv_sets[i].emplace_back((f32)uvs[j][0], (f32)uvs[j][1]);
+					m.uv_sets[i].emplace_back(math::v2{ (f32)uvs[j][0], (f32)uvs[j][1] });
 				}
 			}
 		}

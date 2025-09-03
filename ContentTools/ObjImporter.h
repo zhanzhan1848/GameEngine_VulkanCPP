@@ -72,10 +72,10 @@ namespace primal::tools
                 abs(this->texCoord.x - v.texCoord.x) <= epsilon && abs(this->texCoord.y - v.texCoord.y) <= epsilon && abs(this->texCoord.z - v.texCoord.z) <= epsilon &&
                 abs(this->normal.x - v.normal.x) <= epsilon && abs(this->normal.y - v.normal.y) <= epsilon && abs(this->normal.z - v.normal.z) <= epsilon;
 #elif defined(__clang__)
-            return abs(this->pos.x() - v.pos.x()) <= epsilon && abs(this->pos.y() - v.pos.y()) <= epsilon && abs(this->pos.z() - v.pos.z()) <= epsilon &&
-                abs(this->color.x() - v.color.x()) <= epsilon && abs(this->color.y() - v.color.y()) <= epsilon && abs(this->color.z() - v.color.z()) <= epsilon &&
-                abs(this->texCoord.x() - v.texCoord.x()) <= epsilon && abs(this->texCoord.y() - v.texCoord.y()) <= epsilon && abs(this->texCoord.z() - v.texCoord.z()) <= epsilon &&
-                abs(this->normal.x() - v.normal.x()) <= epsilon && abs(this->normal.y() - v.normal.y()) <= epsilon && abs(this->normal.z() - v.normal.z()) <= epsilon;
+            return abs(this->pos.x - v.pos.x) <= epsilon && abs(this->pos.y - v.pos.y) <= epsilon && abs(this->pos.z - v.pos.z) <= epsilon &&
+                abs(this->color.x - v.color.x) <= epsilon && abs(this->color.y - v.color.y) <= epsilon && abs(this->color.z - v.color.z) <= epsilon &&
+                abs(this->texCoord.x - v.texCoord.x) <= epsilon && abs(this->texCoord.y - v.texCoord.y) <= epsilon && abs(this->texCoord.z - v.texCoord.z) <= epsilon &&
+                abs(this->normal.x - v.normal.x) <= epsilon && abs(this->normal.y - v.normal.y) <= epsilon && abs(this->normal.z - v.normal.z) <= epsilon;
 #endif
         }
     };

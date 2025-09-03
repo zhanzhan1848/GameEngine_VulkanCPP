@@ -61,8 +61,8 @@ namespace primal::tools
 			const f32 u_step{ (u_range.y - u_range.x) / horizontal_count };
 			const f32 v_step{ (v_range.y - v_range.x) / vertical_count };
 #elif defined(__clang__)
-			const f32 u_step{ (u_range.y() - u_range.x()) / horizontal_count };
-			const f32 v_step{ (v_range.y() - v_range.x()) / vertical_count };
+			const f32 u_step{ (u_range.y - u_range.x) / horizontal_count };
+			const f32 v_step{ (v_range.y - v_range.x) / vertical_count };
 #endif
 
 			mesh m{};
@@ -85,15 +85,15 @@ namespace primal::tools
 					uvs.emplace_back(uv);
 #elif defined(__clang__)
 					v3 position{ offset };
-					f32* const as_array{ &position.x() };
-					as_array[horizontal_index] += i * horizontal_step;
-					as_array[vertical_index] += j * vertical_step;
-					m.positions.emplace_back(position.x() * info.size.x(), position.y() * info.size.y(), position.z() * info.size.z());
+					// 使用simd库的索引访问方式替代指针访问
+					position[horizontal_index] += i * horizontal_step;
+					position[vertical_index] += j * vertical_step;
+					m.positions.emplace_back(math::v3{ position.x * info.size.x, position.y * info.size.y, position.z * info.size.z });
 					//m.positions.emplace_back(as_array[horizontal_index], 0, as_array[vertical_index]);
 
-					v2 uv{ u_range.x(), 1.f - v_range.x() };
-					uv.x() += i * u_step;
-					uv.y() -= j * v_step;
+					v2 uv{ u_range.x, 1.f - v_range.x };
+					uv.x += i * u_step;
+					uv.y -= j * v_step;
 					uvs.emplace_back(uv);
 #endif
 				}
@@ -152,7 +152,7 @@ namespace primal::tools
 #if defined(_MSC_VER)
 			m.positions[c++] = { 0.f, info.size.y, 0.f };
 #elif defined(__clang__)
-			m.positions[c++] = { 0.f, info.size.y(), 0.f };
+			m.positions[c++] = { 0.f, info.size.y, 0.f };
 #endif
 
 			for (u32 j{ 1 }; j <= (theta_count - 1); ++j)
@@ -169,9 +169,9 @@ namespace primal::tools
 					};
 #elif defined(__clang__)
 					m.positions[c++] = {
-						info.size.x() * std::sin(theta) * std::cos(phi),
-						info.size.y() * std::cos(theta),
-						-info.size.z() * std::sin(theta) * std::sin(phi),
+						info.size.x * std::sin(theta) * std::cos(phi),
+						info.size.y * std::cos(theta),
+						-info.size.z * std::sin(theta) * std::sin(phi),
 					};
 #endif
 				}
@@ -181,7 +181,7 @@ namespace primal::tools
 #if defined(_MSC_VER)
 			m.positions[c++] = { 0.f, -info.size.y, 0.f };
 #elif defined(__clang__)
-			m.positions[c++] = { 0.f, -info.size.y(), 0.f };
+			m.positions[c++] = { 0.f, -info.size.y, 0.f };
 #endif
 			assert(c == num_vertices);
 			

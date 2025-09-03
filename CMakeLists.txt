@@ -128,12 +128,12 @@ else()
         -fno-rtti              # 禁用RTTI
         # -fno-exceptions        # 禁用异常处理
         -ffast-math           # 快速浮点计算
+        -Wunused-parameter
     )
 endif()
 
 # 查找必要的包
 # find_package(Vulkan REQUIRED)
-find_package(Eigen3 REQUIRED)
 
 # 设置全局包含目录
 include_directories(
@@ -141,7 +141,6 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
     ${CMAKE_SOURCE_DIR}/OSAPI/MAC
-    ${EIGEN3_INCLUDE_DIR}
 )
 
 # 添加子项目

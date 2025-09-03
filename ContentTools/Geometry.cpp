@@ -11,7 +11,7 @@ namespace primal::tools
 #if defined(_MSC_VER)
 		using namespace DirectX;
 #elif defined(__clang__)
-		using namespace Eigen;
+		using namespace simd;
 #endif
 
 		void recalculate_normals(mesh& m)
@@ -36,16 +36,16 @@ namespace primal::tools
 
 				XMStoreFloat3(&m.normals[i], n);
 #elif defined(__clang__)
-				math::v3 v0{ m.positions[i0].x(), m.positions[i0].y(), m.positions[i0].z() };
-				math::v3 v1{ m.positions[i1].x(), m.positions[i1].y(), m.positions[i1].z() };
-				math::v3 v2{ m.positions[i2].x(), m.positions[i2].y(), m.positions[i2].z() };
+				math::v3 v0{ m.positions[i0].x, m.positions[i0].y, m.positions[i0].z };
+				math::v3 v1{ m.positions[i1].x, m.positions[i1].y, m.positions[i1].z };
+				math::v3 v2{ m.positions[i2].x, m.positions[i2].y, m.positions[i2].z };
 
 				math::v3 e0{ v1 - v0 };
 				math::v3 e1{ v2 - v0 };
 
-				math::v3 n{ e0.cross(e1) };
-				n.normalize();
-				m.normals[i] = { n.x(), n.y(), n.z() };
+				math::v3 n{ simd_cross(e0, e1) };
+				n = simd_normalize(n);
+				m.normals[i] = { n.x, n.y, n.z };
 #endif
 				m.normals[i - 1] = m.normals[i];
 				m.normals[i - 2] = m.normals[i];
@@ -130,16 +130,17 @@ namespace primal::tools
 					vertex& v{ m.vertices.emplace_back() };
 					v.position = m.positions[m.raw_indices[refs[j]]];
 
-					math::v3 n1{ m.normals[refs[j]].x(), m.normals[refs[j]].y(), m.normals[refs[j]].z() };
+					math::v3 n1{ m.normals[refs[j]].x, m.normals[refs[j]].y, m.normals[refs[j]].z };
 					if(!is_hard_edge)
 					{
 						for(u32 k{ j + 1 }; k < num_refs; ++k)
 						{
 							f32 cos_theta{ 0.f };
-							math::v3 n2{ m.normals[refs[k]].x(), m.normals[refs[k]].y(), m.normals[refs[k]].z() };
+							math::v3 n2{ m.normals[refs[k]].x, m.normals[refs[k]].y, m.normals[refs[k]].z };
 							if(!is_soft_edge)
 							{
-								cos_theta = n1.dot(n2) / (n1.norm() + n2.norm());
+
+								cos_theta = simd_dot(n1, n2) / (simd_length(n1) + simd_length(n2));
 							}
 							
 							if(is_soft_edge || cos_theta >= cos_alpha)
@@ -152,8 +153,8 @@ namespace primal::tools
 							}
 						}
 					}
-					n1.normalize();
-					v.normal = { n1.x(), n1.y(), n1.z() };
+					n1 = simd_normalize(n1);
+					v.normal = { n1.x, n1.y, n1.z };
 				}
 			}
 #endif
@@ -191,8 +192,8 @@ namespace primal::tools
 						if (XMScalarNearEqual(v.uv.x, uv1.x, epsilon) &&
 							XMScalarNearEqual(v.uv.y, uv1.y, epsilon))
 #elif defined(__clang__)
-						if (std::abs(v.uv.x() - uv1.x()) < epsilon &&
-							std::abs(v.uv.y() - uv1.y()) < epsilon)
+						if (std::abs(v.uv.x - uv1.x) < epsilon &&
+							std::abs(v.uv.y - uv1.y) < epsilon)
 #endif
 						{
 							m.indices[refs[k]] = m.indices[refs[j]];
@@ -261,8 +262,8 @@ namespace primal::tools
 					t_signs[i] = (u8)((v.normal.z > 0.f) << 1);
 					normals[i] = { (u16)pack_float<16>(v.normal.x, -1.f, 1.f), (u16)pack_float<16>(v.normal.y, -1.f, 1.f) };
 #elif defined(__clang__)
-					t_signs[i] = (u8)((v.normal.z() > 0.f) << 1);
-					normals[i] = { (u16)pack_float<16>(v.normal.x(), -1.f, 1.f), (u16)pack_float<16>(v.normal.y(), -1.f, 1.f) };
+					t_signs[i] = (u8)((v.normal.z > 0.f) << 1);
+					normals[i] = { (u16)pack_float<16>(v.normal.x, -1.f, 1.f), (u16)pack_float<16>(v.normal.y, -1.f, 1.f) };
 #endif
 				}
 
@@ -276,8 +277,8 @@ namespace primal::tools
 						t_signs[i] = (u8)((v.tangent.w > 0.f) && (v.tangent.z > 0.f));
 						tangents[i] = { (u16)pack_float<16>(v.tangent.x, -1.f, 1.f), (u16)pack_float<16>(v.tangent.y, -1.f, 1.f) };
 #elif defined(__clang__)
-						t_signs[i] = (u8)((v.tangent.w() > 0.f) && (v.tangent.z() > 0.f));
-						tangents[i] = { (u16)pack_float<16>(v.tangent.x(), -1.f, 1.f), (u16)pack_float<16>(v.tangent.y(), -1.f, 1.f) };
+						t_signs[i] = (u8)((v.tangent.w > 0.f) && (v.tangent.z > 0.f));
+						tangents[i] = { (u16)pack_float<16>(v.tangent.x, -1.f, 1.f), (u16)pack_float<16>(v.tangent.y, -1.f, 1.f) };
 #endif	
 					}
 				}
@@ -297,9 +298,9 @@ namespace primal::tools
 					};
 #elif defined(__clang__)
 					joint_weights[i] = {
-						(u8)pack_unit_float<8>(v.joint_weights.x()),
-						(u8)pack_unit_float<8>(v.joint_weights.y()),
-						(u8)pack_unit_float<8>(v.joint_weights.z())
+						(u8)pack_unit_float<8>(v.joint_weights.x),
+						(u8)pack_unit_float<8>(v.joint_weights.y),
+						(u8)pack_unit_float<8>(v.joint_weights.z)
 					};
 #endif
 
@@ -349,7 +350,7 @@ namespace primal::tools
 #if defined(_MSC_VER)
 					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #elif defined(__clang__)
-					const u16 indices[4]{ (u16)v.joint_indices.x(), (u16)v.joint_indices.y(), (u16)v.joint_indices.z(), (u16)v.joint_indices.w() };
+					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #endif
 					element_buffer[i] = { {joint_weights[i].x, joint_weights[i].y, joint_weights[i].z}, {}, {indices[0], indices[1], indices[2], indices[3]} };
 				}
@@ -363,7 +364,7 @@ namespace primal::tools
 #if defined(_MSC_VER)
 					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #elif defined(__clang__)
-					const u16 indices[4]{ (u16)v.joint_indices.x(), (u16)v.joint_indices.y(), (u16)v.joint_indices.z(), (u16)v.joint_indices.w() };
+					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #endif
 					element_buffer[i] = { {joint_weights[i].x, joint_weights[i].y, joint_weights[i].z}, {},
 						{indices[0], indices[1], indices[2], indices[3]}, {v.red, v.green, v.blue}, {} };
@@ -378,7 +379,7 @@ namespace primal::tools
 #if defined(_MSC_VER)
 					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #elif defined(__clang__)
-					const u16 indices[4]{ (u16)v.joint_indices.x(), (u16)v.joint_indices.y(), (u16)v.joint_indices.z(), (u16)v.joint_indices.w() };
+					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #endif
 					element_buffer[i] = { {joint_weights[i].x, joint_weights[i].y, joint_weights[i].z}, t_signs[i],
 						{indices[0], indices[1], indices[2], indices[3]}, {normals[i].x, normals[i].y} };
@@ -393,7 +394,7 @@ namespace primal::tools
 #if defined(_MSC_VER)
 					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #elif defined(__clang__)
-					const u16 indices[4]{ (u16)v.joint_indices.x(), (u16)v.joint_indices.y(), (u16)v.joint_indices.z(), (u16)v.joint_indices.w() };
+					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #endif
 					element_buffer[i] = { {joint_weights[i].x, joint_weights[i].y, joint_weights[i].z}, t_signs[i],
 						{indices[0], indices[1], indices[2], indices[3]}, {normals[i].x, normals[i].y}, {v.red, v.green, v.blue}, {} };
@@ -408,7 +409,7 @@ namespace primal::tools
 #if defined(_MSC_VER)
 					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #elif defined(__clang__)
-					const u16 indices[4]{ (u16)v.joint_indices.x(), (u16)v.joint_indices.y(), (u16)v.joint_indices.z(), (u16)v.joint_indices.w() };
+					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #endif
 					element_buffer[i] = { {joint_weights[i].x, joint_weights[i].y, joint_weights[i].z}, t_signs[i],
 						{indices[0], indices[1], indices[2], indices[3]}, {normals[i].x, normals[i].y}, {tangents[i].x, tangents[i].y}, v.uv };
@@ -423,7 +424,7 @@ namespace primal::tools
 #if defined(_MSC_VER)
 					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #elif defined(__clang__)
-					const u16 indices[4]{ (u16)v.joint_indices.x(), (u16)v.joint_indices.y(), (u16)v.joint_indices.z(), (u16)v.joint_indices.w() };
+					const u16 indices[4]{ (u16)v.joint_indices.x, (u16)v.joint_indices.y, (u16)v.joint_indices.z, (u16)v.joint_indices.w };
 #endif
 					element_buffer[i] = { {joint_weights[i].x, joint_weights[i].y, joint_weights[i].z}, t_signs[i],
 						{indices[0], indices[1], indices[2], indices[3]}, {normals[i].x, normals[i].y}, {tangents[i].x, tangents[i].y}, v.uv, {v.red, v.green, v.blue}, {} };

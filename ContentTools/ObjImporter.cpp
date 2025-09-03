@@ -274,35 +274,35 @@ namespace primal::tools
 
 			for (u32 i{ 0 }; i < geo->vertex_count; ++i)
 			{
-				if (geo->vertices[i].pos.x() < geo->min_extents.x())
+				if (geo->vertices[i].pos.x < geo->min_extents.x)
 				{
-					geo->min_extents.x() = geo->vertices[i].pos.x();
+					geo->min_extents.x = geo->vertices[i].pos.x;
 				}
-				if (geo->vertices[i].pos.y() < geo->min_extents.y())
+				if (geo->vertices[i].pos.y < geo->min_extents.y)
 				{
-					geo->min_extents.y() = geo->vertices[i].pos.y();
+					geo->min_extents.y = geo->vertices[i].pos.y;
 				}
-				if (geo->vertices[i].pos.z() < geo->min_extents.z())
+				if (geo->vertices[i].pos.z < geo->min_extents.z)
 				{
-					geo->min_extents.z() = geo->vertices[i].pos.z();
+					geo->min_extents.z = geo->vertices[i].pos.z;
 				}
 
-				if (geo->vertices[i].pos.x() > geo->max_extents.x())
+				if (geo->vertices[i].pos.x > geo->max_extents.x)
 				{
-					geo->max_extents.x() = geo->vertices[i].pos.x();
+					geo->max_extents.x = geo->vertices[i].pos.x;
 				}
-				if (geo->vertices[i].pos.y() > geo->max_extents.y())
+				if (geo->vertices[i].pos.y > geo->max_extents.y)
 				{
-					geo->max_extents.y() = geo->vertices[i].pos.y();
+					geo->max_extents.y = geo->vertices[i].pos.y;
 				}
-				if (geo->vertices[i].pos.z() > geo->max_extents.z())
+				if (geo->vertices[i].pos.z > geo->max_extents.z)
 				{
-					geo->max_extents.z() = geo->vertices[i].pos.z();
+					geo->max_extents.z = geo->vertices[i].pos.z;
 				}
 			}
-			geo->center.x() = (geo->min_extents.x() + geo->max_extents.x()) / 2.f;
-			geo->center.y() = (geo->min_extents.y() + geo->max_extents.y()) / 2.f;
-			geo->center.z() = (geo->min_extents.z() + geo->max_extents.z()) / 2.f;
+			geo->center.x = (geo->min_extents.x + geo->max_extents.x) / 2.f;
+			geo->center.y = (geo->min_extents.y + geo->max_extents.y) / 2.f;
+			geo->center.z = (geo->min_extents.z + geo->max_extents.z) / 2.f;
 #endif
 		}
 
@@ -357,32 +357,32 @@ namespace primal::tools
 				u32 i1 = geos->indices[i + 1];
 				u32 i2 = geos->indices[i + 2];
 
-				math::v3 edge1{ geos->vertices[i1].pos.x() - geos->vertices[i0].pos.x(),
-					geos->vertices[i1].pos.y() - geos->vertices[i0].pos.y(),
-					geos->vertices[i1].pos.z() - geos->vertices[i0].pos.z() };
-				math::v3 edge2{ geos->vertices[i2].pos.x() - geos->vertices[i0].pos.x(),
-					geos->vertices[i2].pos.y() - geos->vertices[i0].pos.y(),
-					geos->vertices[i2].pos.z() - geos->vertices[i0].pos.z() };
+				math::v3 edge1{ geos->vertices[i1].pos.x - geos->vertices[i0].pos.x,
+					geos->vertices[i1].pos.y - geos->vertices[i0].pos.y,
+					geos->vertices[i1].pos.z - geos->vertices[i0].pos.z };
+				math::v3 edge2{ geos->vertices[i2].pos.x - geos->vertices[i0].pos.x,
+					geos->vertices[i2].pos.y - geos->vertices[i0].pos.y,
+					geos->vertices[i2].pos.z - geos->vertices[i0].pos.z };
 
-				f32 deltaU1 = geos->vertices[i1].texCoord.x() - geos->vertices[i0].texCoord.x();
-				f32 deltaV1 = geos->vertices[i1].texCoord.y() - geos->vertices[i0].texCoord.y();
+				f32 deltaU1 = geos->vertices[i1].texCoord.x - geos->vertices[i0].texCoord.x;
+				f32 deltaV1 = geos->vertices[i1].texCoord.y - geos->vertices[i0].texCoord.y;
 
-				f32 deltaU2 = geos->vertices[i2].texCoord.x() - geos->vertices[i0].texCoord.x();
-				f32 deltaV2 = geos->vertices[i2].texCoord.y() - geos->vertices[i0].texCoord.y();
+				f32 deltaU2 = geos->vertices[i2].texCoord.x - geos->vertices[i0].texCoord.x;
+				f32 deltaV2 = geos->vertices[i2].texCoord.y - geos->vertices[i0].texCoord.y;
 
 				f32 dividend = (deltaU1 * deltaV2 - deltaU2 * deltaV1);
 				f32 fc = 1.f / dividend;
 
-				math::v3 tangent{ fc * (deltaV2 * edge1.x() - deltaV1 * edge2.x()),
-					fc * (deltaV2 * edge1.y() - deltaV1 * edge2.y()),
-					fc * (deltaV2 * edge1.z() - deltaV1 * edge2.z())};
+				math::v3 tangent{ fc * (deltaV2 * edge1.x - deltaV1 * edge2.x),
+					fc * (deltaV2 * edge1.y - deltaV1 * edge2.y),
+					fc * (deltaV2 * edge1.z - deltaV1 * edge2.z)};
 
-				tangent.normalize();
+				tangent = simd_normalize(tangent);
 
 				f32 sx = deltaU1, sy = deltaU2;
 				f32 tx = deltaV1, ty = deltaV2;
 				f32 handedness = ((tx * sy - ty * sx) < 0.f) ? -1.f : 1.f;
-				math::v3 t4{ tangent.x() * handedness, tangent.y() * handedness, tangent.z() * handedness };
+				math::v3 t4{ tangent.x * handedness, tangent.y * handedness, tangent.z * handedness };
 				geos->vertices[i0].tangent = t4;
 				geos->vertices[i1].tangent = t4;
 				geos->vertices[i2].tangent = t4;
@@ -885,8 +885,8 @@ namespace primal::tools
 					DirectX::XMStoreFloat4(&n, DirectX::XMVector4Normalize(N));
 					m.normals.emplace_back((f32)n.x, (f32)n.y, (f32)n.z);
 #elif defined(__clang__)
-					n.normalize();
-					m.normals.emplace_back((f32)n.x(), (f32)n.y(), (f32)n.z());
+					n = simd_normalize(n);
+					m.normals.emplace_back(math::v3{ (f32)n.x, (f32)n.y, (f32)n.z });
 #endif
 				}
 			}
@@ -962,32 +962,32 @@ namespace primal::tools
 				math::v2 uv1{ m.uv_sets[0][i1] };
 				math::v2 uv2{ m.uv_sets[0][i2] };
 
-				math::v3 edge1{ v1.x() - v0.x(),
-					v1.y() - v0.y(),
-					v1.z() - v0.z() };
-				math::v3 edge2{ v2.x() - v0.x(),
-					v2.y() - v0.y(),
-					v2.z() - v0.z() };
+				math::v3 edge1{ v1.x - v0.x,
+					v1.y - v0.y,
+					v1.z - v0.z };
+				math::v3 edge2{ v2.x - v0.x,
+					v2.y - v0.y,
+					v2.z - v0.z };
 
-				f32 deltaU1 = uv1.x() - uv0.x();
-				f32 deltaV1 = uv1.y() - uv0.y();
+				f32 deltaU1 = uv1.x - uv0.x;
+				f32 deltaV1 = uv1.y - uv0.y;
 
-				f32 deltaU2 = uv2.x() - uv0.x();
-				f32 deltaV2 = uv2.y() - uv0.y();
+				f32 deltaU2 = uv2.x - uv0.x;
+				f32 deltaV2 = uv2.y - uv0.y;
 
 				f32 dividend = (deltaU1 * deltaV2 - deltaU2 * deltaV1);
 				f32 fc = 1.f / dividend;
 
-				math::v3 tangent{ fc * (deltaV2 * edge1.x() - deltaV1 * edge2.x()),
-					fc * (deltaV2 * edge1.y() - deltaV1 * edge2.y()),
-					fc * (deltaV2 * edge1.z() - deltaV1 * edge2.z()) };
+				math::v3 tangent{ fc * (deltaV2 * edge1.x - deltaV1 * edge2.x),
+					fc * (deltaV2 * edge1.y - deltaV1 * edge2.y),
+					fc * (deltaV2 * edge1.z - deltaV1 * edge2.z) };
 
-				tangent.normalize();
+				tangent = simd_normalize(tangent);
 
 				f32 sx = deltaU1, sy = deltaU2;
 				f32 tx = deltaV1, ty = deltaV2;
 				f32 handedness = ((tx * sy - ty * sx) < 0.f) ? -1.f : 1.f;
-				math::v4 t4{ tangent.x() * handedness, tangent.y() * handedness, tangent.z() * handedness, 0.f };
+				math::v4 t4{ tangent.x * handedness, tangent.y * handedness, tangent.z * handedness, 0.f };
 				m.tangents.emplace_back(t4);
 				m.tangents.emplace_back(t4);
 				m.tangents.emplace_back(t4);
@@ -1010,13 +1010,22 @@ namespace primal::tools
 			{
 				std::string out_vertex_shader_name{ shader_file_package };
 				out_vertex_shader_name.append("//").append("shaders");
+#if defined(_MSC_VER)
 				if (_access(out_vertex_shader_name.c_str(), 0) == -1)
 					OutputDebugStringA(std::to_string(_mkdir(out_vertex_shader_name.c_str())).c_str());
+#else
+				if (access(out_vertex_shader_name.c_str(), 0) == -1)
+					std::cout << std::to_string(mkdir(out_vertex_shader_name.c_str(), 0755)).c_str() << std::endl;
+#endif
 				out_vertex_shader_name.append("\\").append(std::to_string(m_name)).append(".vert");
 				std::ofstream vert_shader{ out_vertex_shader_name };
 				if (!vert_shader.is_open())
 				{
+#if defined(_MSC_VER)
 					OutputDebugStringA("Failed to open vertex shader to write!");
+#else
+					std::cout << "Failed to open vertex shader to write!" << std::endl;
+#endif
 					return;
 				}
 				vert_shader << PBR_Template_Vertex_Shader;
@@ -1026,13 +1035,22 @@ namespace primal::tools
 			{
 				std::string out_fragment_shader_name{ shader_file_package };
 				out_fragment_shader_name.append("//").append("shaders");
+#if defined(_MSC_VER)
 				if (_access(out_fragment_shader_name.c_str(), 0) == -1)
 					OutputDebugStringA(std::to_string(_mkdir(out_fragment_shader_name.c_str())).c_str());
+#else
+				if (access(out_fragment_shader_name.c_str(), 0) == -1)
+					std::cout << std::to_string(mkdir(out_fragment_shader_name.c_str(), 0755)).c_str() << std::endl;
+#endif				
 				out_fragment_shader_name.append("\\").append(std::to_string(m_name)).append(".frag");
 				std::ofstream fragment_shader{ out_fragment_shader_name };
 				if (!fragment_shader.is_open())
 				{
+#if defined(_MSC_VER)
 					OutputDebugStringA("Failed to open fragment shader to write!");
+#else
+					std::cout << "Failed to open fragment shader to write!" << std::endl;
+#endif
 					return;
 				}
 
