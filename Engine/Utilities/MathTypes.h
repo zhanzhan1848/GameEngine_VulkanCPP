@@ -7,7 +7,7 @@
 #endif
 
 #if defined(__APPLE__)
-#include <Eigen/Dense>
+#include <simd/simd.h>
 #endif
 
 namespace primal::math {
@@ -35,20 +35,20 @@ constexpr f32 epsilon{ 1e-5f };
 #endif
 
 #if defined(__APPLE__)
-	using v2 = Eigen::Vector2f;
-	using v2a = Eigen::Vector2f;
-	using v3 = Eigen::Vector3f;
-	using v3a = Eigen::Vector3f;
-	using v4 = Eigen::Vector4f;
-	using v4a = Eigen::Vector4f;
-	using u32v2 = Eigen::Matrix<u32, 2, 1>;
-	using u32v3 = Eigen::Matrix<u32, 3, 1>;
-	using u32v4 = Eigen::Matrix<u32, 4, 1>;
-	using s32v2 = Eigen::Matrix<s32, 2, 1>;
-	using s32v3 = Eigen::Matrix<s32, 3, 1>;
-	using s32v4 = Eigen::Matrix<s32, 4, 1>;
-	using m3x3 = Eigen::Matrix3f;
-	using m4x4 = Eigen::Matrix4f;
-	using m4x4a = Eigen::Matrix<f32, 4, 4>;
+	using v2 = simd::float2;
+	using v2a = simd::float2;
+	using v3 = simd::float3;
+	using v3a = simd::float3;
+	using v4 = simd::float4;
+	using v4a = simd::float4;
+	using u32v2 = simd::uint2;
+	using u32v3 = simd::uint3;
+	using u32v4 = simd::uint4;
+	using s32v2 = simd::int2;
+	using s32v3 = simd::int3;
+	using s32v4 = simd::int4;
+	using m3x3 = simd::float3x3;
+	using m4x4 = simd::float4x4;
+	using m4x4a = simd::float4x4;
 #endif
 }

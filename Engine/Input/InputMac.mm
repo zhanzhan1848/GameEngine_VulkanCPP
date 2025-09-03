@@ -155,12 +155,12 @@ namespace primal::input
         void set_modifier_input(NSEvent* event, input_code::code code, modifier_flags::flags flag) {
             if (event.modifierFlags & flag) 
             {
-                set(input_source::keyboard, code, { 1.f, 0.f, 0.f });
+                set(input_source::keyboard, code, math::v3{ 1.f, 0.f, 0.f });
                 modifier_keys_state |= flag;
             } 
             else if (modifier_keys_state & flag) 
             {
-                set(input_source::keyboard, code, { 0.f, 0.f, 0.f });
+                set(input_source::keyboard, code, math::v3{ 0.f, 0.f, 0.f });
                 modifier_keys_state &= ~flag;
             }
         }
@@ -203,7 +203,7 @@ namespace primal::input
                     input_code::code code = static_cast<input_code::code>(vk_mapping[keyCode]);
                     if (code != u32_invalid_id) 
                     {
-                        set(input_source::keyboard, code, {1.0f, 0.0f, 0.0f});
+                        set(input_source::keyboard, code, math::v3{ 1.0f, 0.0f, 0.0f });
                         set_modifier_inputs(event, code);
                     }
                 }
@@ -217,7 +217,7 @@ namespace primal::input
                     input_code::code code = static_cast<input_code::code>(vk_mapping[keyCode]);
                     if (code != u32_invalid_id) 
                     {
-                        set(input_source::keyboard, code, {0.0f, 0.0f, 0.0f});
+                        set(input_source::keyboard, code, math::v3{ 0.0f, 0.0f, 0.0f });
                         set_modifier_inputs(event, code);
                     }
                 }
@@ -229,51 +229,51 @@ namespace primal::input
             case NSEventTypeOtherMouseDragged: 
             {
                 math::v2 pos = get_mouse_position(event);
-                set(input_source::mouse, input_code::mouse_position_x, { pos.x(), 0.f, 0.f });
-                set(input_source::mouse, input_code::mouse_position_y, { pos.y(), 0.f, 0.f });
-                set(input_source::mouse, input_code::mouse_position, { pos.x(), pos.y(), 0.f });
+                set(input_source::mouse, input_code::mouse_position_x, math::v3{ pos.x, 0.f, 0.f });
+                set(input_source::mouse, input_code::mouse_position_y, math::v3{ pos.y, 0.f, 0.f });
+                set(input_source::mouse, input_code::mouse_position, math::v3{ pos.x, pos.y, 0.f });
                 break;
             }
             case NSEventTypeLeftMouseDown: 
             {
                 math::v2 pos = get_mouse_position(event);
-                set(input_source::mouse, input_code::mouse_left, { pos.x(), pos.y(), 1.f });
+                set(input_source::mouse, input_code::mouse_left, math::v3{ pos.x, pos.y, 1.f });
                 break;
             }
             case NSEventTypeLeftMouseUp: 
             {
                 math::v2 pos = get_mouse_position(event);
-                set(input_source::mouse, input_code::mouse_left, { pos.x(), pos.y(), 0.f });
+                set(input_source::mouse, input_code::mouse_left, math::v3{ pos.x, pos.y, 0.f });
                 break;
             }
             case NSEventTypeRightMouseDown: 
             {
                 math::v2 pos = get_mouse_position(event);
-                set(input_source::mouse, input_code::mouse_rigth, { pos.x(), pos.y(), 1.f });
+                set(input_source::mouse, input_code::mouse_rigth, math::v3{ pos.x, pos.y, 1.f });
                 break;
             }
             case NSEventTypeRightMouseUp: 
             {
                 math::v2 pos = get_mouse_position(event);
-                set(input_source::mouse, input_code::mouse_rigth, { pos.x(), pos.y(), 0.f });
+                set(input_source::mouse, input_code::mouse_rigth, math::v3{ pos.x, pos.y, 0.f });
                 break;
             }
             case NSEventTypeOtherMouseDown: 
             { // Middle mouse button
                 math::v2 pos = get_mouse_position(event);
-                set(input_source::mouse, input_code::mouse_middle, { pos.x(), pos.y(), 1.f });
+                set(input_source::mouse, input_code::mouse_middle, math::v3{ pos.x, pos.y, 1.f });
                 break;
             }
             case NSEventTypeOtherMouseUp: 
             {
                 math::v2 pos = get_mouse_position(event);
-                set(input_source::mouse, input_code::mouse_middle, { pos.x(), pos.y(), 0.f });
+                set(input_source::mouse, input_code::mouse_middle, math::v3{ pos.x, pos.y, 0.f });
                 break;
             }
             case NSEventTypeScrollWheel: 
             {
                 float deltaY = [event scrollingDeltaY];
-                set(input_source::mouse, input_code::mouse_wheel, { deltaY, 0.f, 0.f });
+                set(input_source::mouse, input_code::mouse_wheel, math::v3{ deltaY, 0.f, 0.f });
                 break;
             }
             default:

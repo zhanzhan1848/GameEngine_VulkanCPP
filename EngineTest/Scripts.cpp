@@ -35,14 +35,15 @@ public:
 		_angle += 0.25f * dt * math::two_pi;
 		if (_angle > math::two_pi) _angle -= math::two_pi;
 
-		Eigen::AngleAxisf rotation{ _angle, Eigen::Vector3f::UnitY() };
-		Eigen::Quaternionf qt{ rotation };
+		// 使用simd库创建Y轴旋转四元数
+		using namespace simd;
+		simd::quatf qt = simd_quaternion(_angle, simd_make_float3(0.0f, 1.0f, 0.0f));
 
 		math::v4 rot_quat{
-			static_cast<f32>(qt.x()),
-			static_cast<f32>(qt.y()),
-			static_cast<f32>(qt.z()),
-			static_cast<f32>(qt.w())
+			qt.vector.x,
+			qt.vector.y,
+			qt.vector.z,
+			qt.vector.w
 		};
 		set_rotation(rot_quat);
 #endif
@@ -75,14 +76,15 @@ public:
 		_angle -= 1.f * dt * math::two_pi;
 		if (_angle > math::two_pi) _angle += math::two_pi;
 
-		Eigen::AngleAxisf rotation{ _angle, Eigen::Vector3f::UnitY() };
-		Eigen::Quaternionf qt{ rotation };
+		// 使用simd库创建Y轴旋转四元数
+		using namespace simd;
+		simd::quatf qt = simd_quaternion(_angle, simd_make_float3(0.0f, 1.0f, 0.0f));
 
 		math::v4 rot_quat{
-			static_cast<f32>(qt.x()),
-			static_cast<f32>(qt.y()),
-			static_cast<f32>(qt.z()),
-			static_cast<f32>(qt.w())
+			qt.vector.x,
+			qt.vector.y,
+			qt.vector.z,
+			qt.vector.w
 		};
 		set_rotation(rot_quat);
 #endif
@@ -127,23 +129,25 @@ public:
 		x = _angle;
 		const f32 s2{ 0.05f * std::sin(x) * std::sin(std::sin(x / 1.62f) + std::sin(1.62f * x) + std::sin(3.24f * x)) };
 
-		// 使用 Eigen 创建旋转
-		Eigen::Vector3f euler(s1, 0.f, s2);
-		Eigen::Quaternionf quat;
-		quat = Eigen::AngleAxisf(euler.x(), Eigen::Vector3f::UnitX()) *
-			Eigen::AngleAxisf(euler.y(), Eigen::Vector3f::UnitY()) *
-			Eigen::AngleAxisf(euler.z(), Eigen::Vector3f::UnitZ());
+		// 使用simd库创建欧拉角旋转
+		using namespace simd;
+		simd::quatf quat_x = simd_quaternion(s1, simd_make_float3(1.0f, 0.0f, 0.0f)); // X轴旋转
+		simd::quatf quat_y = simd_quaternion(0.0f, simd_make_float3(0.0f, 1.0f, 0.0f)); // Y轴旋转
+		simd::quatf quat_z = simd_quaternion(s2, simd_make_float3(0.0f, 0.0f, 1.0f)); // Z轴旋转
+		
+		// 组合旋转：Z * Y * X
+		simd::quatf quat = simd_mul(simd_mul(quat_z, quat_y), quat_x);
 
 		math::v4 rot_quat{
-			static_cast<f32>(quat.x()),
-			static_cast<f32>(quat.y()),
-			static_cast<f32>(quat.z()),
-			static_cast<f32>(quat.w())
+			quat.vector.x,
+			quat.vector.y,
+			quat.vector.z,
+			quat.vector.w
 		};
 		set_rotation(rot_quat);
 
 		math::v3 pos{ position() };
-		pos.y() = 1.3f + 0.2f * std::sin(x) * std::sin(std::sin(x / 1.62f) + std::sin(1.62f * x) + std::sin(3.24f * x));
+		pos.y = 1.3f + 0.2f * std::sin(x) * std::sin(std::sin(x / 1.62f) + std::sin(1.62f * x) + std::sin(3.24f * x));
 		set_position(pos);
 #endif
 	}
@@ -176,13 +180,13 @@ public:
 		_descired_spherical = _spherical = DirectX::XMLoadFloat3(&rot);
 #elif defined(__clang__)
 		math::v3 pos{ position() };
-		_descired_position = _position = pos;
+		_descired_position = _position = simd_make_float3(pos.x, pos.y, pos.z);
 
 		math::v3 dir{ orientation() };
-		f32 theta{ std::cos(dir.y()) };
-		f32 phi{ std::atan2(-dir.z(), dir.x()) };
+		f32 theta{ std::cos(dir.y) };
+		f32 phi{ std::atan2(-dir.z, dir.x) };
 		math::v3 rot{ theta - math::half_pi, phi + math::half_pi, 0.f };
-		_descired_spherical = _spherical = rot;
+		_descired_spherical = _spherical = simd_make_float3(rot.x, rot.y, rot.z);
 #endif
 	}
 
@@ -210,13 +214,15 @@ public:
 			const f32 fps_scale{ 0.1f }; // dt / 0.016667f
 			math::v4 rot{ rotation() };
 			
-			// 创建旋转四元数
-			Eigen::Quaternionf rotation_quat(rot.w(), rot.x(), rot.y(), rot.z());
+			// 使用simd库创建旋转四元数和旋转向量
+			using namespace simd;
+			simd::quatf rotation_quat = simd_quaternion(rot.w, simd_make_float3(rot.x, rot.y, rot.z));
+			simd::float3 move_vec = simd_make_float3(_move.x, _move.y, _move.z) * (0.5f * fps_scale);
 			// 旋转向量
-			Eigen::Vector3f rotated = rotation_quat * (_move * 0.5f * fps_scale);
+			simd::float3 rotated = simd_act(rotation_quat, move_vec);
 			
 			if (_position_acceleration < 1.f) _position_acceleration += (0.02f * fps_scale);
-			_descired_position += rotated * _position_acceleration;
+			_descired_position = _descired_position + (rotated * _position_acceleration);
 			_move_position = true;
 		}
 		else if (_move_position)
@@ -235,7 +241,7 @@ public:
 
 private:
 
-	void on_move(u64 binding, const input::input_value& value)
+	void on_move(u64 binding, [[maybe_unused]] const input::input_value& value)
 	{
 #if defined(_MSC_VER)
 		using namespace DirectX;
@@ -243,12 +249,12 @@ private:
 		_move = XMLoadFloat3(&value.current);
 		_move_magnitude = XMVectorGetX(XMVector3LengthSq(_move));
 #elif defined(__clang__)
-		_move = value.current;
-		_move_magnitude = _move.squaredNorm();
+		_move = simd_make_float3(value.current.x, value.current.y, value.current.z);
+		_move_magnitude = simd_length_squared(_move);
 #endif
 	}
 
-	void mouse_move(input::input_source::type type, input::input_code::code code, const input::input_value& mouse_pos)
+	void mouse_move([[maybe_unused]] input::input_source::type type, input::input_code::code code, const input::input_value& mouse_pos)
 	{
 #if defined(_MSC_VER)
 		using namespace DirectX;
@@ -277,16 +283,18 @@ private:
 		{
 			input::input_value value;
 			input::get(input::input_source::mouse, input::input_code::mouse_left, value);
-			if (value.current.z() == 0.f) return;
+			if (value.current.z == 0.f) return;
 
 			const f32 scale{ 0.005f };
-			const f32 dx{ (mouse_pos.current.x() - mouse_pos.previous.x()) * scale };
-			const f32 dy{ (mouse_pos.current.y() - mouse_pos.previous.y()) * scale };
+			const f32 dx{ (mouse_pos.current.x - mouse_pos.previous.x) * scale };
+			const f32 dy{ (mouse_pos.current.y - mouse_pos.previous.y) * scale };
 
-			math::v3 spherical{ _descired_spherical };
-			spherical.x() += dy;
-			spherical.y() -= dx;
-			spherical.x() = math::clamp(spherical.x(), 0.0001f - math::half_pi, math::half_pi - 0.0001f);
+			// 使用simd库处理球面坐标
+			using namespace simd;
+			simd::float3 spherical = _descired_spherical;
+			spherical.x += dy;
+			spherical.y -= dx;
+			spherical.x = math::clamp(spherical.x, 0.0001f - math::half_pi, math::half_pi - 0.0001f);
 
 			_descired_spherical = spherical;
 			_move_rotation = true;
@@ -339,11 +347,13 @@ private:
 			set_rotation(rot_quat);
 		}
 #elif defined(__clang__)
-		math::v3 o{ _descired_spherical - _spherical };
-		math::v3 p{ _descired_position - _position };
+		// 使用simd库处理向量运算
+		using namespace simd;
+		simd::float3 o = _descired_spherical - _spherical;
+		simd::float3 p = _descired_position - _position;
 
-		auto a = o.norm();
-		auto b = p.norm();
+		auto a = simd_length(o);
+		auto b = simd_length(p);
 		_move_rotation = a > math::epsilon;
 		_move_position = b > math::epsilon;
 
@@ -351,26 +361,29 @@ private:
 
 		if (_move_position)
 		{
-			_position += (p * scale);
-			math::v3 new_pos = _position;
+			_position = _position + (p * scale);
+			math::v3 new_pos{ _position.x, _position.y, _position.z };
 			set_position(new_pos);
 		}
 
 		if (_move_rotation)
 		{
-			_spherical += (o * scale);
-			math::v3 new_rot = _spherical;
-			new_rot.x() = math::clamp(new_rot.x(), 0.0001f - math::half_pi, math::half_pi - 0.0001f);
+			_spherical = _spherical + (o * scale);
+			simd::float3 new_rot = _spherical;
+			new_rot.x = math::clamp(new_rot.x, 0.0001f - math::half_pi, math::half_pi - 0.0001f);
 			_spherical = new_rot;
 
-			Eigen::Quaternionf quat = Eigen::AngleAxisf(new_rot.x(), Eigen::Vector3f::UnitX()) *
-                             Eigen::AngleAxisf(new_rot.y(), Eigen::Vector3f::UnitY()) *
-                             Eigen::AngleAxisf(new_rot.z(), Eigen::Vector3f::UnitZ());
+			// 使用simd库创建欧拉角四元数
+			simd::quatf quat_x = simd_quaternion(new_rot.x, simd_make_float3(1.0f, 0.0f, 0.0f));
+			simd::quatf quat_y = simd_quaternion(new_rot.y, simd_make_float3(0.0f, 1.0f, 0.0f));
+			simd::quatf quat_z = simd_quaternion(new_rot.z, simd_make_float3(0.0f, 0.0f, 1.0f));
+			simd::quatf quat = simd_mul(simd_mul(quat_z, quat_y), quat_x);
+			
 			math::v4 rot_quat{
-				static_cast<f32>(quat.x()),
-				static_cast<f32>(quat.y()),
-				static_cast<f32>(quat.z()),
-				static_cast<f32>(quat.w())
+				quat.vector.x,
+				quat.vector.y,
+				quat.vector.z,
+				quat.vector.w
 			};
 			set_rotation(rot_quat);
 		}
@@ -386,11 +399,11 @@ private:
 	DirectX::XMVECTOR										_spherical;
 	DirectX::XMVECTOR										_move{};
 #elif defined(__clang__)
-	Eigen::Vector3f											_descired_position;
-	Eigen::Vector3f											_descired_spherical;
-	Eigen::Vector3f											_position;
-	Eigen::Vector3f											_spherical;
-	Eigen::Vector3f											_move{};
+	simd::float3											_descired_position;
+	simd::float3											_descired_spherical;
+	simd::float3											_position;
+	simd::float3											_spherical;
+	simd::float3											_move{};
 #endif
 	f32														_move_magnitude{ 0.f };
 	f32														_position_acceleration{ 0.f };

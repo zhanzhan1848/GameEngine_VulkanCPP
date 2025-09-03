@@ -8,6 +8,9 @@
 #include "MetalCamera.h"
 #include "MetalGPass.h"
 #include "MetalContent.h"
+#include "MetalLight.h"
+#include "MetalPreProcess.h"
+#include "MetalSSAO.h"
 
 namespace primal::graphics::metal::core
 {
@@ -40,9 +43,27 @@ namespace primal::graphics::metal::core
             bool end_frame(metal_surface* surface)
             {
                 MTK::View* pView{ surface->view() };
-                _cmd_buffer->presentDrawable( pView->currentDrawable() );
-                _cmd_buffer->commit();
+                MTL::Drawable* drawable{ pView->currentDrawable() };
 
+                // Schedule a present once the framebuffer is complete using the current drawable
+                if( drawable )
+                {
+                    // Create a scheduled handler functor for Metal to present the drawable when the command
+                    // buffer has been scheduled by the kernel.
+
+                    drawable->retain();
+                    _cmd_buffer->addScheduledHandler( [drawable]( MTL::CommandBuffer* ){
+                        drawable->present();
+                        drawable->release();
+                    });
+                }
+                // _cmd_buffer->presentDrawable( pView->currentDrawable() );
+                _cmd_buffer->commit();
+                // _cmd_buffer->waitUntilCompleted();
+
+                // 在手动渲染模式下，必须调用 draw() 来更新 currentDrawable 到下一帧
+                // 这确保了下一次调用 currentDrawable 时能获取到新的 drawable
+                // 而不是已经 presented 的旧 drawable
                 pView->draw();
                 
                 _frame_index = (_frame_index + 1) % frame_buffer_count;
@@ -123,8 +144,8 @@ namespace primal::graphics::metal::core
 			data.InvProjection = camera.inverse_projection();
 			data.ViewProjection = camera.view_projection();
 			data.InvViewProjection = camera.inverse_view_projection();
-			data.CameraPositionAndViewWidth = math::v4{ camera.position().x(), camera.position().y(), camera.position().z(), (f32)surface.width() };
-			data.CameraDirectionAndViewHeight = math::v4{ camera.direction().x(), camera.direction().y(), camera.direction().z(), (f32)surface.height() };
+			data.CameraPositionAndViewWidth = math::v4{ camera.position().x, camera.position().y, camera.position().z, (f32)surface.width() };
+			data.CameraDirectionAndViewHeight = math::v4{ camera.direction().x, camera.direction().y, camera.direction().z, (f32)surface.height() };
 			data.NumDirectionalLights = static_cast<u32>(info.light_set_key);
 			data.DeltaTime = delta_time;
 
@@ -166,7 +187,7 @@ namespace primal::graphics::metal::core
 
         for (u32 i{ 0 }; i < frame_buffer_count; ++i)
 		{
-			new (&constants_buffer[i]) constant_buffer{ constant_buffer::get_default_init_info(1024 * 1024) };
+			new (&constants_buffer[i]) constant_buffer{ constant_buffer::get_default_init_info(2048 * 2048) };
 			NAME_METAL_OBJECT_INDEXED(constants_buffer[i].buffer(), i, "Global Constant Buffer");
 		}
 
@@ -175,7 +196,10 @@ namespace primal::graphics::metal::core
         if(!(shader::initialize() 
             && gpass::initialize()
             && fx::initialize()
+            && prepass::initialize()
+            && ssao::initialize()
             && content::initialize()
+            && light::initialize()
         )) return false;
 
         return true;
@@ -193,7 +217,10 @@ namespace primal::graphics::metal::core
 			process_deferred_release(i);
 		}
         
+        light::shutdown();
         content::shutdown();
+        prepass::shutdown();
+        ssao::shutdown();
         fx::shutdown();
         gpass::shutdown();
         shader::shutdown();
@@ -270,6 +297,8 @@ namespace primal::graphics::metal::core
 
         gpass::set_size({ metal_info.surface_width, metal_info.surface_height });
 
+        ssao::set_size({ metal_info.surface_width, metal_info.surface_height });
+
         if (gfx_command.begin_frame())
         {
             //
@@ -279,11 +308,21 @@ namespace primal::graphics::metal::core
             // Record commands
             MTL::CommandBuffer* cmd_buffer{ gfx_command.command_buffer() };
 
+            // Update light buffer
+            light::update_light_buffers(metal_info);
+
             // Depth prepass
             gpass::depth_prepass(cmd_buffer, metal_info);
 
+            // Shadow mapping
+            prepass::prepass(cmd_buffer, metal_info);
+
             // Geometry pass
             gpass::render(cmd_buffer, metal_info);
+
+            // SSAO pass
+            ssao::ssao_pass(cmd_buffer, metal_info);
+            ssao::ssao_blur(cmd_buffer, metal_info);
 
             // Post process
             fx::post_process(cmd_buffer, surface, cbuffer);

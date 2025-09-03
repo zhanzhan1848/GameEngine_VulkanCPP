@@ -19,6 +19,7 @@
 #elif defined(__clang__)
 #define NS_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
+#include <simd/simd.h>
 
 #endif
 
@@ -50,22 +51,30 @@ camera_surface _surfaces[1]{};
 
 primal::id::id_type create_render_item(primal::id::id_type entity_id);
 void destory_render_item(primal::id::id_type item_id);
+void get_render_items(primal::id::id_type* items, [[maybe_unused]] u32 count);
 primal::id::id_type create_metarial(primal::id::id_type item_id);
+void generate_lights();
+void remove_lights();
 
 game_entity::entity create_one_game_entity(math::v3 position, math::v3 rotation, const char* name)
 {
 	transform::init_info transform_info{};
-    Eigen::Quaternionf quat = Eigen::AngleAxisf(rotation.x(), Eigen::Vector3f::UnitX()) *
-                             Eigen::AngleAxisf(rotation.y(), Eigen::Vector3f::UnitY()) *
-                             Eigen::AngleAxisf(rotation.z(), Eigen::Vector3f::UnitZ());
+    // 使用simd库创建四元数：先创建各轴的旋转四元数，然后相乘
+    simd_quatf quat_y = simd_quaternion(rotation.y, simd_make_float3(0, 1, 0)); // yaw
+	simd_quatf quat_x = simd_quaternion(rotation.x, simd_make_float3(1, 0, 0)); // pitch
+	simd_quatf quat_z = simd_quaternion(rotation.z, simd_make_float3(0, 0, 1)); // roll
+
+	// 注意右乘顺序：roll * pitch * yaw
+	simd_quatf quat = simd_mul(quat_z, simd_mul(quat_x, quat_y));
+    
     math::v4 rot_quat{
-		static_cast<f32>(quat.x()),
-		static_cast<f32>(quat.y()),
-		static_cast<f32>(quat.z()),
-		static_cast<f32>(quat.w())
+		quat.vector.x,
+		quat.vector.y,
+		quat.vector.z,
+		quat.vector.w
 	};
-	memcpy(&transform_info.rotation[0], &rot_quat.x(), sizeof(transform_info.rotation));
-    memcpy(&transform_info.position[0], &position.x(), sizeof(transform_info.position));
+	memcpy(&transform_info.rotation[0], &rot_quat, sizeof(transform_info.rotation));
+    memcpy(&transform_info.position[0], &position, sizeof(transform_info.position));
 
 	script::init_info script_info{};
 	if (name)
@@ -91,7 +100,7 @@ void create_camera_surface(camera_surface& surface, platform::window_init_info i
 {
 	surface.surface.window = platform::create_window(&info);
 	surface.surface.surface = graphics::create_surface(surface.surface.window);
-	surface.entity = create_one_game_entity({ 1.f, 1.f, -1.0f }, { 0.0f, 0.0f, 1.0f }, "camera_script");
+	surface.entity = create_one_game_entity(math::v3{ 1.f, 1.f, -1.0f }, math::v3{ 0.f, 0.f, 1.f }, "camera_script");
 	surface.camera = graphics::create_camera(graphics::perspective_camera_init_info{ surface.entity.get_id() });
 	surface.camera.aspect_ratio((f32)surface.surface.window.width() / surface.surface.window.height());
 }
@@ -169,8 +178,11 @@ bool test_initialize()
 	// model shader material
 	// auto material_id = create_metarial();
 
-	item_id = create_metarial(create_one_game_entity({ 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f }, nullptr).get_id());
+	item_id = create_metarial(create_one_game_entity(math::v3{ 0.f, 0.f, 0.f }, math::v3{ 0.f, 0.f, 0.f }, nullptr).get_id());
 	assert(primal::id::is_valid(item_id));
+
+	// Lights
+	generate_lights();
 
 	input::input_source source{};
 	source.binding = std::hash<std::string>()("move");
@@ -208,6 +220,8 @@ bool test_initialize()
 
 void test_shutdown()
 {
+	remove_lights();
+
 	input::unbind(std::hash<std::string>()("move"));
 	destory_render_item(item_id);
 
@@ -229,7 +243,7 @@ bool Engine_Test::initialize()
 
 void Engine_Test::run()
 {
-	static u32 counter{ 0 };
+	[[maybe_unused]] static u32 counter{ 0 };
 	static u32 light_set_key{ 0 };
 	++counter;
 	// if ((counter % 90) == 0) light_set_key = (light_set_key + 1) % 2;
@@ -250,6 +264,7 @@ void Engine_Test::run()
 			info.render_item_ids = &item_id;
 			info.render_item_count = 1;
 			info.thresholds = &thresholds[0];
+			info.light_set_key = light_set_key;
 			info.camera_id = _surfaces[i].camera.get_id();
 
 			assert(_countof(thresholds) >= info.render_item_count);

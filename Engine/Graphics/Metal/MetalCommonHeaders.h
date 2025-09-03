@@ -7,6 +7,7 @@
 
 #include <Metal/Metal.hpp>
 #include <MetalKit/MetalKit.hpp>
+#include <QuartzCore/QuartzCore.hpp>
 
 
 namespace primal::graphics::metal

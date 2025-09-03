@@ -132,7 +132,7 @@ namespace primal::graphics::metal::content
 			[[nodiscard]] constexpr shader_flags::flags shader_flags() const { return _shader_flags; }
 			[[nodiscard]] constexpr id::id_type arg_buffer_id() const { return _argument_buffer_id; }
 			[[nodiscard]] constexpr id::id_type* texture_ids() const { return _texture_ids; }
-			[[nodiscard]] constexpr u32* desctriptor_indices() const { return _descriptor_inidices; }
+			[[nodiscard]] constexpr u32* descriptor_indices() const { return _descriptor_inidices; }
 			[[nodiscard]] constexpr id::id_type* shader_ids() const { return _shader_ids; }
 		private:
 			void initialize()
@@ -145,7 +145,7 @@ namespace primal::graphics::metal::content
 				_argument_buffer_id = *(id::id_type*)(&buffer[argument_buffer_index]);
 				_texture_count = *(u32*)(&buffer[texture_count_index]);
 
-				_shader_ids = (id::id_type*)(&buffer[texture_count_index * sizeof(u32)]);
+				_shader_ids = (id::id_type*)(&buffer[texture_count_index + sizeof(u32)]);
 				_texture_ids = _texture_count ? &_shader_ids[__builtin_popcount(_shader_flags)] : nullptr;
 				_descriptor_inidices = _texture_count ? (u32*)(&_texture_ids[_texture_count]) : nullptr;
 			}
@@ -201,8 +201,8 @@ namespace primal::graphics::metal::content
 				// TODO: Add shader use resources
 				using params = gpass::opaque_root_parameter;
 
-				MTL::ResourceUsage buffer_visibility{ MTL::ResourceUsageRead };
-				MTL::ResourceUsage data_visibility{ MTL::ResourceUsageRead };
+				// MTL::ResourceUsage buffer_visibility{ MTL::ResourceUsageRead };
+				// MTL::ResourceUsage data_visibility{ MTL::ResourceUsageRead };
 
 				MTL::ArgumentDescriptor* global_data_arg_desc{MTL::ArgumentDescriptor::alloc()->init()};
 				global_data_arg_desc->setIndex(params::global_shader_data);
@@ -224,12 +224,23 @@ namespace primal::graphics::metal::content
 				element_buffer_arg_desc->setDataType(MTL::DataTypePointer);
 				element_buffer_arg_desc->setAccess(MTL::ArgumentAccessReadOnly);
 
-				NS::Object* descs[4]{ global_data_arg_desc, per_object_data_arg_desc, position_buffer_arg_desc, element_buffer_arg_desc };
-				argArray = NS::Array::array(descs, 4);
+				MTL::ArgumentDescriptor* srv_indices_arg_desc{MTL::ArgumentDescriptor::alloc()->init()};
+				srv_indices_arg_desc->setIndex(params::srv_indices);
+				srv_indices_arg_desc->setDataType(MTL::DataTypePointer);
+				srv_indices_arg_desc->setAccess(MTL::ArgumentAccessReadOnly);
+
+				MTL::ArgumentDescriptor* directional_light_arg_desc{MTL::ArgumentDescriptor::alloc()->init()};
+				directional_light_arg_desc->setIndex(params::directional_lights);
+				directional_light_arg_desc->setDataType(MTL::DataTypePointer);
+				directional_light_arg_desc->setAccess(MTL::ArgumentAccessReadOnly);
+
+				NS::Object* descs[6]{ global_data_arg_desc, per_object_data_arg_desc, position_buffer_arg_desc, element_buffer_arg_desc, srv_indices_arg_desc, directional_light_arg_desc };
+				argArray = NS::Array::array(descs, 6);
 				
 				argArray->retain();
 			}
 			break;
+			default: break;
 			}
 
 			assert(argArray);
@@ -288,10 +299,27 @@ namespace primal::graphics::metal::content
 			color_attachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
 			color_attachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
 			color_attachment->setSourceAlphaBlendFactor(MTL::BlendFactorSourceAlpha);
+			// Create normal depth attachment for SSAO
+			MTL::RenderPipelineColorAttachmentDescriptor* normal_depth_attachment{ MTL::RenderPipelineColorAttachmentDescriptor::alloc()->init() };
+			normal_depth_attachment->setPixelFormat(gpass::main_buffer_format);
+			normal_depth_attachment->setBlendingEnabled(true);
+			normal_depth_attachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+			normal_depth_attachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+			normal_depth_attachment->setSourceAlphaBlendFactor(MTL::BlendFactorSourceAlpha);
+			// Create albedo attachment for SSDO
+			MTL::RenderPipelineColorAttachmentDescriptor* albedo_attachment{ MTL::RenderPipelineColorAttachmentDescriptor::alloc()->init() };
+			albedo_attachment->setPixelFormat(gpass::main_buffer_format);
+			albedo_attachment->setBlendingEnabled(true);
+			albedo_attachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+			albedo_attachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+			albedo_attachment->setSourceAlphaBlendFactor(MTL::BlendFactorSourceAlpha);
+			
 			METAL_COLOR_ATTACHMENT_ARRAY color_attachments{};
 			color_attachments.descs[0] = color_attachment;
-			color_attachments.count = 1;
-
+			color_attachments.descs[1] = normal_depth_attachment;
+			color_attachments.descs[2] = albedo_attachment;
+			color_attachments.count = 3;
+			
 			stream.color_attachments = color_attachments;
 			stream.depth_attachment_format = gpass::depth_buffer_format;
 			stream.primitive_topology = primitive_topology;
@@ -360,6 +388,7 @@ namespace primal::graphics::metal::content
 			color_attachments_depth.count = 0;
 			stream.color_attachments = color_attachments_depth;
 			stream.fragment_function = nullptr;
+			// stream.input_primitive_topology = MTL::PrimitiveTopologyClassTriangle;
 			id_pair.depth_pso_id = create_pso_if_needed(stream_ptr, aligned_stream_size, true);
 
 			// 释放资源
@@ -431,37 +460,15 @@ namespace primal::graphics::metal::content
 			{
 				for (u32 j{ 0 }; j < mip_levels; ++j)
 				{
-					blob.skip(2 * sizeof(u32)); // skip width and height
 					const u32 row_pitch{ blob.read<u32>() };
 					const u32 slice_pitch{ blob.read<u32>() };
 
-					u8* pTextureData = (u8 *)alloca( width * height * 4 );
-					for ( u64 y{ 0 }; y < height; ++y )
-					{
-						for ( u64 x{ 0 }; x < width; ++x )
-						{
-							bool isWhite = (x^y) & 0b1000000;
-							u8 c = isWhite ? 0xFF : 0xA;
-
-							u64 i = y * width + x;
-
-							pTextureData[ i * 4 + 0 ] = c;
-							pTextureData[ i * 4 + 1 ] = c;
-							pTextureData[ i * 4 + 2 ] = c;
-							pTextureData[ i * 4 + 3 ] = 0xFF;
-						}
-					}
-
 					texture->replaceRegion(MTL::Region{ 0, 0, 0, width, height, depth_per_mip_level[j] },
-						j, pTextureData, width * 4);
+						j, blob.position(), row_pitch);
 
-					blob.skip(slice_pitch);
+					blob.skip(slice_pitch * depth_per_mip_level[j]);
 
 					// skip the rest of the slices of 3d textures with depth > 1
-					for (u32 k{ 1 }; k < depth_per_mip_level[j]; ++k)
-					{
-						blob.skip(4 * sizeof(u32) + slice_pitch);
-					}
 				}
 			}
 			metal_texture_init_info info{};
@@ -519,7 +526,10 @@ namespace primal::graphics::metal::content
 			const u32 index_size{ static_cast<u32>((vertex_count < (1 << 16)) ? sizeof(u16) : sizeof(u32)) };
 
 			// NOTE: element size may be 0, for position-only vertex formats.
-			const u32 position_buffer_size{ static_cast<u32>(sizeof(math::v3) * vertex_count) };
+			// TODO: remove this hard code about sizeof math::v3
+			const u32 position_buffer_size{ static_cast<u32>(12 * vertex_count) };
+			// sizeof(math::v3) = 16
+			// const u32 position_buffer_size{ static_cast<u32>(sizeof(math::v3) * vertex_count) };
 			const u32 element_buffer_size{ element_size * vertex_count };
 			const u32 index_buffer_size{ index_size * index_count };
 
@@ -538,7 +548,7 @@ namespace primal::graphics::metal::content
 			submesh_view view{};
 			view.position_buffer_view.offset = 0;
 			view.position_buffer_view.size = position_buffer_size;
-			view.position_buffer_view.stride = sizeof(math::v3);
+			view.position_buffer_view.stride = 12; //sizeof(math::v3); 
 
 			if( element_size ) 
 			{
@@ -549,7 +559,7 @@ namespace primal::graphics::metal::content
 
 			view.index_buffer_view.offset = aligned_position_buffer_size + aligned_element_buffer_size;
 			view.index_buffer_view.size = index_buffer_size;
-			view.index_buffer_view.stride = (index_size == sizeof(u16)) ? 1 : 2;
+			view.index_buffer_view.stride = index_size;
 			
 			view.elements_type = elements_type;
 			view.primitive_topology = get_metal_primitive_topology_type((primitive_topology::type)primitive_topology);
@@ -589,6 +599,16 @@ namespace primal::graphics::metal::content
 
     namespace texture
     {
+		utl::vector<MTL::Texture*> get_texture_array()
+		{
+			utl::vector<MTL::Texture*> texture_array;
+			for(u32 i { 0 }; i < textures.size(); ++i)
+			{
+				texture_array.push_back(textures[i].texture());
+			}
+			return texture_array;
+		}
+
 		// NOTE: expects data to contain
 		// struct {
 		//         u32 width, height, array_size(or depth), flags, mip_levels, format,
@@ -605,7 +625,7 @@ namespace primal::graphics::metal::content
 
 			std::lock_guard lock{ texture_mutex };
 			const id::id_type id{ textures.add(std::move(texture)) };
-			descriptor_indices.add((u32)descriptor_indices.size());
+			descriptor_indices.add(id);
 			assert(id::is_valid(id));
 			return id;
 		}
@@ -656,18 +676,25 @@ namespace primal::graphics::metal::content
 			materials.remove(id);
 		}
 
-		void get_materials(const id::id_type *const material_ids, u32 material_count, const materials_cache& cache)
+		void get_materials(const id::id_type *const material_ids, u32 material_count, const materials_cache& cache, u32& descriptor_index_count)
 		{
 			assert(material_ids && material_count);
 			assert(cache.argument_buffer_layouts && cache.material_types);
 			std::lock_guard lock{ material_mutex };
 
+			u32 total_index_count{ 0 };
 			for (u32 i{ 0 }; i < material_count; ++i)
 			{
 				const metal_material_stream stream{ materials[material_ids[i]].get() };
 				cache.argument_buffer_layouts[i] = argument_buffer_layouts[stream.arg_buffer_id()];
 				cache.material_types[i] = stream.material_type();
+				cache.descriptor_indices[i] = stream.descriptor_indices();
+				cache.texture_count[i] = stream.texture_count();
+
+				total_index_count += stream.texture_count();
 			}
+
+			descriptor_index_count = total_index_count;
 		}
 
     } // material namespace
@@ -762,7 +789,7 @@ namespace primal::graphics::metal::content
 			u32 metal_render_item_count{ 0 };
 			for (u32 i{ 0 }; i < count; ++i)
 			{
-				metal_render_item_count += 1; // frame_cache.lod_offsets[i].count;
+				metal_render_item_count += frame_cache.lod_offsets[i].count;; // frame_cache.lod_offsets[i].count;
 			}
 
 			assert(metal_render_item_count);
@@ -774,7 +801,7 @@ namespace primal::graphics::metal::content
 				const id::id_type *const item_ids{ &render_item_ids[info.render_item_ids[i]][1] };
 				const primal::content::lod_offset& lod_offset{ frame_cache.lod_offsets[i] };
 				memcpy(&metal_render_item_ids[item_index], &item_ids[lod_offset.offset], sizeof(id::id_type) * lod_offset.count);
-				item_index += 1; // lod_offset.count;
+				item_index += lod_offset.count;; // lod_offset.count;
 				assert(item_index <= metal_render_item_count);
 			}
 

@@ -2,77 +2,14 @@
 
 #include "EngineAPI/GameEntity.h"
 
-#define M_PI 3.14159265358979323846
+// Defined in MacOS SDK
+// #define M_PI 3.14159265358979323846
 
 namespace primal::graphics::metal::camera
 {
     namespace
     {
         utl::free_list<metal_camera>						cameras;
-
-        //////////////////////////////////////// Math Functions /////////////////////////////////////
-		// Metal 使用 左手坐标系
-		//////
-		math::m4x4 createLookToLH(
-            const math::v3& eyePosition,
-            const math::v3& eyeDirection,
-            const math::v3& upDirection)
-        {
-            // 标准化方向向量（Z 轴指向摄像机前方，左手系中Z轴是正向的）
-            math::v3 zAxis{ eyeDirection.normalized() };
-        
-            // 计算右向量（X 轴）
-            math::v3 xAxis{ upDirection.cross(zAxis).normalized() };
-            
-            // 修正上向量（Y 轴）
-            math::v3 yAxis{ zAxis.cross(xAxis) };
-            
-            // 构建旋转矩阵（3x3）
-            math::m3x3 rotation;
-            rotation << xAxis.x(), xAxis.y(), xAxis.z(),
-                        yAxis.x(), yAxis.y(), yAxis.z(),
-                        zAxis.x(), zAxis.y(), zAxis.z();
-            
-            // 构建 4x4 视图矩阵
-            math::m4x4 viewMatrix{ Eigen::Matrix4f::Identity() };
-            viewMatrix.block<3, 3>(0, 0) = rotation.transpose(); // 旋转部分的转置
-            viewMatrix.block<3, 1>(0, 3) = -rotation.transpose() * eyePosition; // 平移部分
-            
-            return viewMatrix;
-        }
-    
-        math::m4x4 createPerspectiveFovLH(float fovY, float aspectRatio, float nearZ, float farZ)
-        {
-            float tanHalfFovY = std::tan(fovY * 0.5f);
-            float f = 1.0f / tanHalfFovY;  // 焦距缩放因子
-    
-            math::m4x4 proj{ Eigen::Matrix4f::Zero() };
-            proj(0, 0) = f / aspectRatio;  // X 缩放
-            proj(1, 1) = f;                // Y 缩放
-            proj(2, 2) = farZ / (farZ - nearZ);  // Z 缩放（左手系）
-            proj(3, 2) = 1.0f;                   // Z 透视分量（左手系为正）
-            proj(2, 3) = -(nearZ * farZ) / (farZ - nearZ);  // 平移分量
-
-			// 添加深度范围调整
-			// math::m4x4 depthAdjust{ Eigen::Matrix4f::Identity() };
-			// depthAdjust(2, 2) = 0.5f;
-			// depthAdjust(2, 3) = 0.5f;
-    
-            return proj;
-        }
-    
-        math::m4x4 createOrthographicLH(float width, float height, float nearZ, float farZ)
-        {
-            math::m4x4 proj{ Eigen::Matrix4f::Identity() };
-            proj(0, 0) = 2.0f / width;              // X 缩放
-            proj(1, 1) = 2.0f / height;             // Y 缩放
-            proj(2, 2) = 1.0f / (farZ - nearZ);     // Z 缩放（左手系）
-            proj(2, 3) = -nearZ / (farZ - nearZ);   // Z 平移
-    
-            return proj;
-        }
-
-        //////////////////////////////////////// Math Functions /////////////////////////////////////
 
 		void set_up_vector(metal_camera& camera, const void *const data, [[maybe_unused]] u32 size)
 		{
@@ -291,19 +228,19 @@ namespace primal::graphics::metal::camera
 		math::v3 dir{ entity.transform().orientation() };
 		_position = entity.transform().position();
 		_direction = entity.transform().orientation();
-		_view = createLookToLH(_position, _direction, _up);
+		_view = math::createLookToLH(_position, _direction, _up);
 
 		if (_is_dirty)
 		{
 			_projection = (_projection_type == graphics::camera::perspective) ?
-				createPerspectiveFovLH(_field_of_view * M_PI, _aspect_ratio, _near_z, _far_z) :
-				createOrthographicLH(_view_width, _view_height, _near_z, _far_z);
-			_inverse_projection = _projection.inverse();
+				math::createPerspectiveFovLH(_field_of_view * M_PI, _aspect_ratio, _near_z, _far_z) :
+				math::createOrthographicLH(_view_width, _view_height, _near_z, _far_z);
+			_inverse_projection = simd_inverse(_projection);
 			_is_dirty = false;
 		}
 
 		_view_projection = _projection * _view;
-		_inverse_view_projection = _view_projection.inverse();
+		_inverse_view_projection = simd_inverse(_view_projection);
 	}
 
 	void metal_camera::up(math::v3 up) 

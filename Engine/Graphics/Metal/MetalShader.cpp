@@ -28,7 +28,10 @@ namespace primal::graphics::metal::shader
 			NS::Error* pError{ nullptr };
 			static const char* shader_names[] = {
 				"fullscreen_triangle_vs",
-				"post_process_ps"
+				"post_process_ps",
+				"shadow_mapping_vs",
+				"ssao_pass",
+				"ssao_blur",
 			};
 
 			assert(!engine_shaders_blob);

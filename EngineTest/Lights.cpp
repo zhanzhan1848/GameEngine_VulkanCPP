@@ -3,6 +3,7 @@
 #include "EngineAPI/TransformComponent.h"
 #include "Graphics/Renderer.h"
 
+#define CULLABLE_LIGHTS 0
 #define RANDOM_LIGHTS 1
 
 using namespace primal;
@@ -26,7 +27,7 @@ namespace
 #endif
 	f32 random(f32 min = 0.f) { return std::max(min, rand() * inv_rand_max); }
 
-	void create_light(math::v3 position, math::v3 rotation, graphics::light::type type, u64 light_set_key)
+	[[maybe_unused]] void create_light(math::v3 position, math::v3 rotation, graphics::light::type type, u64 light_set_key)
 	{
 		const char* scripy_name{ nullptr }; // { type == graphics::light::spot ? "rotate_script" : nullptr };
 		game_entity::entity_id entity_id{ create_one_game_entity(position, rotation, scripy_name).get_id() };
@@ -66,7 +67,7 @@ namespace
 			info.spot_param.penumbra = info.spot_param.umbra + (0.1f * math::pi);
 			info.spot_param.attenuation = { 1, 1, 1 };
 		}
-#endif
+#endif // RANDOM_LIGHTS
 		graphics::light light{ graphics::create_light(info) };
 		assert(light.is_valid());
 		lights.push_back(light);
@@ -79,7 +80,7 @@ void generate_lights()
 	graphics::create_light_set(right_set);
 	// LEFT_SET
 	graphics::light_init_info info{};
-	info.entity_id = create_one_game_entity({}, { 0, 0, 0 }, nullptr).get_id();
+	info.entity_id = create_one_game_entity({}, math::v3{ 0, 0, math::pi * 0.5f }, nullptr).get_id();
 	info.type = graphics::light::directional;
 	info.light_set_key = left_set;
 	info.intensity = 10.f;
@@ -87,35 +88,38 @@ void generate_lights()
 
 	lights.emplace_back(graphics::create_light(info));
 
-	info.entity_id = create_one_game_entity({}, { math::pi * 0.5f, 0, 0 }, nullptr).get_id();
-	info.color = rgb_to_color(17, 27, 48);
+	// y轴正方向
+	info.entity_id = create_one_game_entity({}, math::v3{ math::pi * 0.5f, 0, 0 }, nullptr).get_id();
+	info.color = rgb_to_color(85, 135, 240); // 增强蓝色环境光
 	lights.emplace_back(graphics::create_light(info));
 
-	info.entity_id = create_one_game_entity({}, { -math::pi * 0.5f, 0, 0 }, nullptr).get_id();
-	info.color = rgb_to_color(63, 47, 30);
+	// y轴负方向
+	info.entity_id = create_one_game_entity({}, math::v3{ -math::pi * 0.5f, 0, 0 }, nullptr).get_id();
+	info.color = rgb_to_color(126, 94, 60); // 增强暖色环境光
 	lights.emplace_back(graphics::create_light(info));
 
 	// RIGHT_SET
-	info.entity_id = create_one_game_entity({}, { 0, 0, 0 }, nullptr).get_id();
+	info.entity_id = create_one_game_entity({}, math::v3{ 0, 0, 0 }, nullptr).get_id();
 	info.color = rgb_to_color(150, 100, 200);
 	info.light_set_key = right_set;
 	lights.emplace_back(graphics::create_light(info));
 
-	info.entity_id = create_one_game_entity({}, { math::pi * 0.5f, 0, 0 }, nullptr).get_id();
-	info.color = rgb_to_color(17, 27, 48);
+	info.entity_id = create_one_game_entity({}, math::v3{ math::pi * 0.5f, 0, 0 }, nullptr).get_id();
+	info.color = rgb_to_color(85, 135, 240); // 增强蓝色环境光
 	lights.emplace_back(graphics::create_light(info));
 
-	info.entity_id = create_one_game_entity({}, { -math::pi * 0.5f, 0, 0 }, nullptr).get_id();
-	info.color = rgb_to_color(163, 47, 30);
+	info.entity_id = create_one_game_entity({}, math::v3{ -math::pi * 0.5f, 0, 0 }, nullptr).get_id();
+	info.color = rgb_to_color(255, 94, 60); // 增强暖色环境光
 	lights.emplace_back(graphics::create_light(info));
 
+#if CULLABLE_LIGHTS
 #if !RANDOM_LIGHTS
-	create_light({ 0, -3, 0 }, {}, graphics::light::point, left_set);
-	create_light({ 0, 0.2f, 1.f }, {}, graphics::light::point, left_set);
-	create_light({ 0, 1.2f, 2.f }, {}, graphics::light::point, left_set);
-	create_light({ 0, 3, 2.5f }, {}, graphics::light::point, left_set);
-	create_light({ 0, 5, 5.f }, {}, graphics::light::point, left_set);
-	create_light({ 0, 0.1f, 7 }, { 0, 3.14f, 0}, graphics::light::spot, left_set);
+	create_light(math::v3{ 0, -3, 0 }, {}, graphics::light::point, left_set);
+	create_light(math::v3{ 0, 0.2f, 1.f }, {}, graphics::light::point, left_set);
+	create_light(math::v3{ 0, 1.2f, 2.f }, {}, graphics::light::point, left_set);
+	create_light(math::v3{ 0, 3, 2.5f }, {}, graphics::light::point, left_set);
+	create_light(math::v3{ 0, 5, 5.f }, {}, graphics::light::point, left_set);
+	create_light(math::v3{ 0, 0.1f, 7 }, math::v3{ 0, 3.14f, 0}, graphics::light::spot, left_set);
 #else
 	srand(37);
 
@@ -138,15 +142,16 @@ void generate_lights()
 					{ random() * 3.14f, random() * 3.14f, random() * 3.14f },
 					random() > 0.5 ? graphics::light::spot : graphics::light::point, right_set);
 #elif defined(__clang__)
-				create_light({ (f32)(x * scale.x()), (f32)(y * scale.y()), (f32)(z * scale.z()) },
-					{ ::random() * 3.14f, ::random() * 3.14f, ::random() * 3.14f },
+				create_light(math::v3{ (f32)(x * scale.x()), (f32)(y * scale.y()), (f32)(z * scale.z()) },
+					math::v3{ ::random() * 3.14f, ::random() * 3.14f, ::random() * 3.14f },
 					::random() > 0.5 ? graphics::light::spot : graphics::light::point, left_set);
-				create_light({ (f32)(x * scale.x()), (f32)(y * scale.y()), (f32)(z * scale.z()) },
-					{ ::random() * 3.14f, ::random() * 3.14f, ::random() * 3.14f },
+				create_light(math::v3{ (f32)(x * scale.x()), (f32)(y * scale.y()), (f32)(z * scale.z()) },
+					math::v3{ ::random() * 3.14f, ::random() * 3.14f, ::random() * 3.14f },
 					::random() > 0.5 ? graphics::light::spot : graphics::light::point, right_set);
 #endif
 			}
-#endif
+#endif // RANDOM_LIGHTS
+#endif // CULLABLE_LIGHTS
 }
 
 void remove_lights()

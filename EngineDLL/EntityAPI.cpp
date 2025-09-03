@@ -31,17 +31,21 @@ namespace {
 			memcpy(&info.position[0], &position[0], sizeof(position));
 			memcpy(&info.scale[0], &scale[0], sizeof(scale));
 			
-			math::v3 euler_angle{ rotation[0], rotation[1], rotation[2] };
-			Eigen::Quaternionf quat{
-				Eigen::AngleAxisf(euler_angle.x(), math::v3::UnitX()) * 
-				Eigen::AngleAxisf(euler_angle.y(), math::v3::UnitY()) *
-				Eigen::AngleAxisf(euler_angle.z(), math::v3::UnitZ())
-			};
+			// 使用simd库进行欧拉角到四元数的转换
+			using namespace simd;
+			
+			// 创建旋转四元数（Roll-Pitch-Yaw顺序）
+			simd::quatf quat_x = simd_quaternion(rotation[0], simd_make_float3(1.0f, 0.0f, 0.0f)); // Roll (X轴)
+			simd::quatf quat_y = simd_quaternion(rotation[1], simd_make_float3(0.0f, 1.0f, 0.0f)); // Pitch (Y轴)
+			simd::quatf quat_z = simd_quaternion(rotation[2], simd_make_float3(0.0f, 0.0f, 1.0f)); // Yaw (Z轴)
+			
+			// 组合旋转：Z * Y * X（与Eigen的顺序保持一致）
+			simd::quatf quat = simd_mul(simd_mul(quat_z, quat_y), quat_x);
 
-			info.rotation[0] = quat.x();
-			info.rotation[1] = quat.y();
-			info.rotation[2] = quat.z();
-			info.rotation[3] = quat.w();
+			info.rotation[0] = quat.vector.x;
+			info.rotation[1] = quat.vector.y;
+			info.rotation[2] = quat.vector.z;
+			info.rotation[3] = quat.vector.w;
 
 			return info;
 #endif

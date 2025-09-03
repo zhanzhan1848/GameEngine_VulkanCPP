@@ -156,4 +156,113 @@ namespace primal::math
 //		free(data);
 //#endif
 //	}
+
+#if defined(__APPLE__)
+	/**
+	 * @brief 创建左手坐标系的LookTo视图矩阵
+	 * @param eyePosition 摄像机位置
+	 * @param eyeDirection 摄像机朝向（已归一化）
+	 * @param upDirection 上方向向量
+	 * @return 4x4视图矩阵
+	 * 
+	 * 注意：当eyeDirection和upDirection平行时，会自动选择替代的上方向向量以避免数值不稳定
+	 */
+	[[nodiscard]] constexpr math::m4x4 createLookToLH(
+        const math::v3& eyePosition,
+        const math::v3& eyeDirection,
+        const math::v3& upDirection)
+    {
+        using namespace simd;
+        
+        // 标准化方向向量（Z 轴指向摄像机前方，左手系中Z轴是正向的）
+        simd::float3 eye_pos = simd_make_float3(eyePosition.x, eyePosition.y, eyePosition.z);
+        simd::float3 eye_dir = simd_make_float3(eyeDirection.x, eyeDirection.y, eyeDirection.z);
+        simd::float3 up_dir = simd_make_float3(upDirection.x, upDirection.y, upDirection.z);
+        
+        simd::float3 zAxis = simd_normalize(eye_dir);
+    
+        // 检查eyeDirection和upDirection是否平行，避免叉积为零向量
+        simd::float3 cross_product = simd_cross(up_dir, zAxis);
+        float cross_length_sq = simd_length_squared(cross_product);
+        
+        // 如果叉积长度的平方小于阈值，说明两向量接近平行
+        if (cross_length_sq < 1e-6f) {
+            // 选择一个替代的上方向向量
+            // 如果zAxis主要沿Y轴，则使用X轴作为替代
+            if (abs(zAxis.y) > 0.9f) {
+                up_dir = simd_make_float3(1.0f, 0.0f, 0.0f);
+            } else {
+                up_dir = simd_make_float3(0.0f, 1.0f, 0.0f);
+            }
+            cross_product = simd_cross(up_dir, zAxis);
+        }
+        
+        // 计算右向量（X 轴）
+        simd::float3 xAxis = simd_normalize(cross_product);
+        
+        // 修正上向量（Y 轴）
+        simd::float3 yAxis = simd_cross(zAxis, xAxis);
+        
+        // 构建旋转矩阵的转置（用于视图矩阵）
+        simd::float3x3 rotation_transpose = simd_matrix(
+            simd_make_float3(xAxis.x, yAxis.x, zAxis.x),
+            simd_make_float3(xAxis.y, yAxis.y, zAxis.y),
+            simd_make_float3(xAxis.z, yAxis.z, zAxis.z)
+        );
+        
+        // 计算平移部分
+        simd::float3 translation = simd_mul(rotation_transpose, -eye_pos);
+        
+        // 构建 4x4 视图矩阵
+        simd::float4x4 viewMatrix = simd_matrix(
+            simd_make_float4(rotation_transpose.columns[0].x, rotation_transpose.columns[0].y, rotation_transpose.columns[0].z, 0.0f),
+            simd_make_float4(rotation_transpose.columns[1].x, rotation_transpose.columns[1].y, rotation_transpose.columns[1].z, 0.0f),
+            simd_make_float4(rotation_transpose.columns[2].x, rotation_transpose.columns[2].y, rotation_transpose.columns[2].z, 0.0f),
+            simd_make_float4(translation.x, translation.y, translation.z, 1.0f)
+        );
+        
+        return viewMatrix;
+    }
+
+    [[nodiscard]] constexpr math::m4x4 createPerspectiveFovLH(float fovY, float aspectRatio, float nearZ, float farZ)
+    {
+        using namespace simd;
+        
+        float tanHalfFovY = std::tan(fovY * 0.5f);
+        float f = 1.0f / tanHalfFovY;  // 焦距缩放因子
+
+        // 构建透视投影矩阵（左手系）
+        simd::float4x4 proj = simd_matrix(
+            simd_make_float4(f / aspectRatio, 0.0f, 0.0f, 0.0f),  // X 缩放
+            simd_make_float4(0.0f, f, 0.0f, 0.0f),                // Y 缩放
+            simd_make_float4(0.0f, 0.0f, farZ / (farZ - nearZ), 1.0f),  // Z 缩放和透视分量
+            simd_make_float4(0.0f, 0.0f, -(nearZ * farZ) / (farZ - nearZ), 0.0f)  // 平移分量
+        );
+
+        // 添加深度范围调整
+        // simd::float4x4 depthAdjust = simd_matrix(
+        //     simd_make_float4(1.0f, 0.0f, 0.0f, 0.0f),
+        //     simd_make_float4(0.0f, 1.0f, 0.0f, 0.0f),
+        //     simd_make_float4(0.0f, 0.0f, 0.5f, 0.0f),
+        //     simd_make_float4(0.0f, 0.0f, 0.5f, 1.0f)
+        // );
+
+        return proj;
+    }
+
+    [[nodiscard]] constexpr math::m4x4 createOrthographicLH(float width, float height, float nearZ, float farZ)
+    {
+        using namespace simd;
+        
+        // 构建正交投影矩阵（左手系）
+        simd::float4x4 proj = simd_matrix(
+            simd_make_float4(2.0f / width, 0.0f, 0.0f, 0.0f),              // X 缩放
+            simd_make_float4(0.0f, 2.0f / height, 0.0f, 0.0f),             // Y 缩放
+            simd_make_float4(0.0f, 0.0f, 1.0f / (farZ - nearZ), 0.0f),     // Z 缩放（左手系）
+            simd_make_float4(0.0f, 0.0f, -nearZ / (farZ - nearZ), 1.0f)    // Z 平移
+        );
+
+        return proj;
+    }
+#endif
 }

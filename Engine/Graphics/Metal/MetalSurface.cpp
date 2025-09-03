@@ -1,6 +1,7 @@
 #include "MetalSurface.h"
 
 #include <iostream>
+#include <CoreGraphics/CoreGraphics.h>
 #include "MetalCore.h"
 
 namespace primal::graphics::metal
@@ -28,6 +29,10 @@ namespace primal::graphics::metal
         _mtk_view->setClearColor( MTL::ClearColor::Make( 1.0, 0.0, 0.0, 1.0 ) );
         _mtk_view->setPaused( true );
         _mtk_view->setEnableSetNeedsDisplay( true );
+        
+        // 设置颜色空间以确保正确的颜色显示和调试一致性
+        // 对于HDR内容使用扩展sRGB颜色空间，确保Xcode调试器和实际窗口显示一致
+        // _mtk_view->setColorSpace(CGColorSpaceCreateWithName(kCGColorSpaceLinearSRGB));
 
         // _view_delegate = new metal_surface_delegate();
         // _mtk_view->setDelegate( _view_delegate );

@@ -1,5 +1,4 @@
 #include "Common.h"
-#include "CommonTypes.metal"
 #include "BuildinMaterial.metal"
 #include "SDFBasicShape.metal"
 
@@ -278,6 +277,7 @@ fragment float4 post_process_ps(VertexOutput fragInput [[stage_in]],
                                 constant GlobalShaderData* globalData [[buffer(0)]],
                                 texture2d<float, access::sample> depth_tex [[texture(0)]],
                                 texture2d<float, access::sample> gpass_tex [[texture(1)]],
+                                texture2d<float, access::sample> ssao_tex [[texture(2)]],
                                 sampler s [[sampler(0)]])
 {
     // // 翻转y坐标
@@ -313,7 +313,16 @@ fragment float4 post_process_ps(VertexOutput fragInput [[stage_in]],
     // final_color += color;
     // return float4(final_color, 1.0f);
     float2 uv = fragInput.uv;
-    float d = depth_tex.sample(s, uv).r;
-    float3 c = gpass_tex.sample(s, uv).rgb;
-    return float4(c, 1.0);
+    uv = float2(uv.x, 1.f - uv.y);
+    float3 color = gpass_tex.sample(s, uv).rgb;
+    float4 ssdo = ssao_tex.sample(s, uv);
+    float3 indirect = ssdo.rgb;
+    float ao = ssdo.a;
+
+    color = color * ao; // + indirect;
+    
+    // 应用gamma校正以获得正确的颜色显示
+    // color = pow(color, float3(0.4545)); // 1/2.2 ≈ 0.4545
+    
+    return float4(color, 1.0);
 }

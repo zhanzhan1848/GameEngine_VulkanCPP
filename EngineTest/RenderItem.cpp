@@ -15,9 +15,12 @@ bool read_file(std::filesystem::path, std::unique_ptr<u8[]>&, u64&);
 namespace 
 {
 	id::id_type model_id{ id::invalid_id };
+	id::id_type dp_vs_id{ id::invalid_id };
+	id::id_type dp_ps_id{ id::invalid_id };
 	id::id_type vs_id{ id::invalid_id };
 	id::id_type ps_id{ id::invalid_id };
 	id::id_type textured_ps_id{ id::invalid_id };
+	id::id_type dp_mtl_id{ id::invalid_id };
 	id::id_type mtl_id{ id::invalid_id };
 	id::id_type textured_mtl_id{ id::invalid_id };
 
@@ -67,7 +70,7 @@ namespace
 	{
 		std::unique_ptr<u8[]> model;
 		u64 size{ 0 };
-		read_file("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/model.model", model, size);
+		read_file("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/model_win_engine.model", model, size);
 
 		model_id = content::create_resource(model.get(), content::asset_type::mesh);
 		assert(id::is_valid(model_id));
@@ -124,41 +127,55 @@ namespace
 		textured_ps_id = content::add_shader_group(pixel_shader_pointer, 1, &u32_invalid_id);
 	}
 
-	void create_material()
+	void load_shaders_metal_depth_pass()
 	{
-		graphics::material_init_info info{};
-		info.shader_ids[graphics::shader_type::vertex] = vs_id;
-		info.shader_ids[graphics::shader_type::pixel] = ps_id;
-		info.type = graphics::material_type::opauqe;
-		mtl_id = content::create_resource(&info, content::asset_type::material);
+		const char* shader_path{ "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/" };  // "../EngineTest"
 
-		info.shader_ids[graphics::shader_type::pixel] = textured_ps_id;
-		info.texture_count = texture_usage::count;
-		info.texture_ids = &texture_ids[0];
-		textured_mtl_id = content::create_resource(&info, content::asset_type::material);
+#pragma region DepthPassShader.metal
+		shader_file_info info{};
+		info.file_name = "DepthPassShader.metal";
+		info.function = "depth_pass_vertex_main";
+		info.type = shader_type::vertex;
+
+		utl::vector<std::wstring> dp_extra_args{};
+		utl::vector<std::unique_ptr<u8[]>> dp_vertex_shaders;
+		utl::vector<u8*> dp_vertex_shader_pointers;
+		utl::vector<u32> keys;
+		keys.emplace_back(tools::elements::elements_type::static_normal_texture);
+		
+		dp_vertex_shaders.emplace_back(std::move(compile_shader(info, shader_path, dp_extra_args)));
+		assert(dp_vertex_shaders.back().get());
+		dp_vertex_shader_pointers.emplace_back(dp_vertex_shaders.back().get());
+
+		dp_vs_id = content::add_shader_group(dp_vertex_shader_pointers.data(), (u32)dp_vertex_shader_pointers.size(), keys.data());
+		content::add_shader_function_name(dp_vs_id, info.function);
+
+		info.function = "depth_pass_fs_main";
+		info.type = shader_type::pixel;
+		utl::vector<std::unique_ptr<u8[]>> dp_pixel_shaders;
+		dp_pixel_shaders.emplace_back(compile_shader(info, shader_path, dp_extra_args));
+		assert(dp_pixel_shaders.back().get());
+		const u8* dp_pixel_shader_pointer[]{ dp_pixel_shaders[0].get()};
+		dp_ps_id = content::add_shader_group(dp_pixel_shader_pointer, 1, &u32_invalid_id);
+		content::add_shader_function_name(dp_ps_id, info.function);
+#pragma endregion
 	}
 
-} // anonymous namespace
-
-id::id_type create_metarial(id::id_type entity_id)
-{
-
-	memset(&texture_ids[0], 0xff, sizeof(id::id_type) * _countof(texture_ids));
-
-	auto _t = std::thread{ [] {
-		texture_ids[0] = load_texture("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/fbx_textures_encode/Lion_Albedo_1.asset");
-	}};
-
-	auto _1 = std::thread{ [] { 
+	void load_shaders_metal_gpass()
+	{
+		const char* shader_path{ "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/" };  // "../EngineTest"
 		shader_file_info info{};
+#pragma region TestShader.metal
 		info.file_name = "TestShader.metal";
 		info.function = "vertex_main";
 		info.type = shader_type::vertex;
 
-		const char* shader_path{ "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/" };  // "../EngineTest"
+		utl::vector<std::wstring> dp_extra_args{};
+		utl::vector<std::unique_ptr<u8[]>> dp_vertex_shaders;
+		utl::vector<u8*> dp_vertex_shader_pointers;
+		utl::vector<u32> keys;
 
 		std::wstring defines[]{ L"ELEMENT_TYPE=1" };
-		utl::vector<u32> keys;
 		// keys.emplace_back(tools::elements::elements_type::skeletal_normal);
 		keys.emplace_back(tools::elements::elements_type::static_normal_texture);
 
@@ -177,28 +194,76 @@ id::id_type create_metarial(id::id_type entity_id)
 
 		info.function = "fragment_main";
 		info.type = shader_type::pixel;
+		utl::vector<std::unique_ptr<u8[]>> pixel_shaders;
 
-		auto pixel_shader = compile_shader(info, shader_path, extra_args);
-		assert(pixel_shader.get());
+		pixel_shaders.emplace_back(compile_shader(info, shader_path, extra_args));
+		assert(pixel_shaders.back().get());
+
+		defines[0] = L"TEXTURED_MTL=1";
+		// extra_args.emplace_back(L"-D");
+		// extra_args.emplace_back(defines[0]);
+
+		pixel_shaders.emplace_back(compile_shader(info, shader_path, extra_args));
+		assert(pixel_shaders.back().get());
 
 		vs_id = content::add_shader_group(vertex_shader_pointers.data(), (u32)vertex_shader_pointers.size(), keys.data());
 		content::add_shader_function_name(vs_id, "vertex_main");
 
-		const u8* pixel_shaders[]{ pixel_shader.get() };
-		ps_id = content::add_shader_group(&pixel_shaders[0], 1, &u32_invalid_id);
+		const u8* pixel_shader_pointer[]{ pixel_shaders[0].get()};
+		ps_id = content::add_shader_group(pixel_shader_pointer, 1, &u32_invalid_id);
 		content::add_shader_function_name(ps_id, "fragment_main");
-	 } };
 
-	auto _2 = std::thread{ [] {
-		load_model();
-	}};
+		// pixel_shader_pointer[0] = pixel_shaders[1].get();
+		// textured_ps_id = content::add_shader_group(pixel_shader_pointer, 1, &u32_invalid_id);
+		// content::add_shader_function_name(textured_ps_id, "fragment_main");
+#pragma endregion
+	}
 
-	_1.join();
-	_2.join();
-	_t.join();
+	void create_material()
+	{
+		graphics::material_init_info info{};
+#pragma region DepthPassShader.metal
+		// info.shader_ids[graphics::shader_type::vertex] = dp_vs_id;
+		// info.shader_ids[graphics::shader_type::pixel] = dp_ps_id;
+		// info.type = graphics::material_type::opauqe;
+		// dp_mtl_id = content::create_resource(&info, content::asset_type::material);
+#pragma endregion
+
+#pragma region TestShader.metal
+		info.shader_ids[graphics::shader_type::vertex] = vs_id;
+		info.shader_ids[graphics::shader_type::pixel] = ps_id;
+		info.type = graphics::material_type::opauqe;
+		mtl_id = content::create_resource(&info, content::asset_type::material);
+#pragma endregion
+
+		// info.shader_ids[graphics::shader_type::pixel] = textured_ps_id;
+		// info.texture_count = 1; //texture_usage::count;
+		// info.texture_ids = &texture_ids[0];
+		// textured_mtl_id = content::create_resource(&info, content::asset_type::material);
+	}
+
+} // anonymous namespace
+
+id::id_type create_metarial(id::id_type entity_id)
+{
+
+	memset(&texture_ids[0], 0xff, sizeof(id::id_type) * _countof(texture_ids));
+
+	std::thread threads[]
+	{
+		std::thread{ [] { texture_ids[0] = load_texture("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/fbx_textures_encode/Lion_Albedo_1.asset"); } },
+		// std::thread{ [] { load_shaders_metal_depth_pass(); } },
+		std::thread{ [] { load_shaders_metal_gpass(); } },
+		std::thread{ [] { load_model();  } }
+	};
+
+	for (auto& t : threads)
+	{
+		t.join();
+	}
 
 	create_material();
-	id::id_type materials[]{ mtl_id };
+	id::id_type materials[]{ mtl_id, mtl_id }; // , textured_mtl_id
 
 	id::id_type item_id{ graphics::add_render_item(entity_id, model_id, _countof(materials), &materials[0]) };
 	render_item_entity_map[item_id] = entity_id;
@@ -213,7 +278,7 @@ id::id_type create_render_item(id::id_type entity_id)
 
 	std::thread threads[]{
 		std::thread{ [] { model_id = load_model("..\\..\\x64\\model.model"); } },
-		std::thread{ [] { texture_ids[texture_usage::ambient_occlusion] = load_model("..\\..\\x64\\texture.texture"); }},
+		std::thread{ [] { texture_ids[texture_usage::ambient_occlusion] = load_texture("..\\..\\x64\\texture.texture"); }},
 		std::thread{ [] { load_shaders();  } }
 	};
 

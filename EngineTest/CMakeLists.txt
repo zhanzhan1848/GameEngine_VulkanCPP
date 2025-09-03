@@ -12,28 +12,66 @@ set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -std=c++17")
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
 
 # 源文件列表
-set(SOURCE_FILES
-    # "Lights.cpp"
-    "Main.cpp"
-    "RenderItem.cpp"
-    "Scripts.cpp"
-    "ShaderCompilation.cpp"
-    # "TestRenderer.cpp"
-    "TestRendererMac.cpp"
-    "MacKeyboard.mm"
-)
+if(WIN32)
+    set(SOURCE_FILES
+        "Lights.cpp"
+        "Main.cpp"
+        "RenderItem.cpp"
+        "Scripts.cpp"
+        "ShaderCompilation.cpp"
+        "TestRenderer.cpp"
+    )
 
-# 头文件列表
-set(HEADER_FILES
-    "PythonScript.h"
-    "ShaderCompilation.h"
-    "Test.h"
-    "TestEntityComponents.h"
-    "TestRenderer.h"
-    "TestWindow.h"
-    "TestWindowLinux.h"
-    "MacKeyboard.h"
-)
+    # 头文件列表
+    set(HEADER_FILES
+        "PythonScript.h"
+        "ShaderCompilation.h"
+        "Test.h"
+        "TestEntityComponents.h"
+        "TestRenderer.h"
+        "TestWindow.h"
+    )
+elseif(LINUX)
+    set(SOURCE_FILES
+        "Lights.cpp"
+        "Main.cpp"
+        "RenderItem.cpp"
+        "Scripts.cpp"
+        "ShaderCompilation.cpp"
+        "TestRenderer.cpp"
+    )
+
+    # 头文件列表
+    set(HEADER_FILES
+        "PythonScript.h"
+        "ShaderCompilation.h"
+        "Test.h"
+        "TestEntityComponents.h"
+        "TestRenderer.h"
+        "TestWindowLinux.h"
+    )
+elseif(APPLE)
+    set(SOURCE_FILES
+        "Lights.cpp"
+        "Main.cpp"
+        "RenderItem.cpp"
+        "Scripts.cpp"
+        "ShaderCompilation.cpp"
+        "TestRendererMac.cpp"
+        "MacKeyboard.mm"
+    )
+
+    # 头文件列表
+    set(HEADER_FILES
+        "PythonScript.h"
+        "ShaderCompilation.h"
+        "Test.h"
+        "TestEntityComponents.h"
+        "TestRenderer.h"
+        "TestWindow.h"
+        "MacKeyboard.h"
+    )
+endif()
 
 # 添加可执行文件目标
 add_executable(${PROJECT_NAME} ${SOURCE_FILES} ${HEADER_FILES})
@@ -101,6 +139,7 @@ elseif(APPLE)
         -pthread
         $<$<CONFIG:Debug>:-O0 -g>
         $<$<CONFIG:Release>:-O3>
+        -Wunused-parameter
     )
 
     # macOS特定的框架

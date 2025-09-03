@@ -145,7 +145,7 @@ namespace primal::graphics::d3d12::content
 				_root_signature_id = *(id::id_type*)(&buffer[root_signature_index]);
 				_texture_count = *(u32*)(&buffer[texture_count_index]);
 
-				_shader_ids = (id::id_type*)(&buffer[texture_count_index * sizeof(u32)]);
+				_shader_ids = (id::id_type*)(&buffer[texture_count_index + sizeof(u32)]);
 				_texture_ids = _texture_count ? &_shader_ids[_mm_popcnt_u32(_shader_flags)] : nullptr;
 				_descriptor_inidices = _texture_count ? (u32*)(&_texture_ids[_texture_count]) : nullptr;
 			}

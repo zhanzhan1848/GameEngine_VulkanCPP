@@ -1,5 +1,8 @@
 #include <fstream>
 #include <filesystem>
+#include <random>
+#include <sstream>
+#include <iomanip>
 #include "ShaderCompilation.h"
 
 #if defined(_MSC_VER)
@@ -359,6 +362,9 @@ using namespace primal::graphics::metal::shader;
 			{ engine_shader::fullscreen_triangle_vs,		{ "FullScreenTriangle.metal", "FullScreenTriangleVS", shader_type::vertex } },
 			// { engine_shader::fill_color_ps,					{ "FillColor.hlsl", "FillColorPS", shader_type::pixel } },
 			{ engine_shader::post_process_ps,				{ "PostProcess.metal", "PostProcessPS", shader_type::pixel } },
+			{ engine_shader::shadow_mapping_vs,				{ "DepthPassShader.metal", "shadow_mapping_vs", shader_type::vertex } },
+			{ engine_shader::ssao_calculate,				{ "SSAOShader.metal", "ssao_pass", shader_type::compute } },
+			{ engine_shader::ssao_blur,						{ "SSAOShader.metal", "ssao_blur", shader_type::compute } },
 			// { engine_shader::grid_frustums_cs,				{ "GridFrustums.hlsl", "ComputeGridFrustumsCS", shader_type::compute } },
 			// { engine_shader::light_culling_cs,				{ "CullingLights.hlsl", "CullLightsCS", shader_type::compute } }
 		};
@@ -367,7 +373,7 @@ using namespace primal::graphics::metal::shader;
 
 		decltype(auto) get_engine_shaders_path() { return std::filesystem::path{ graphics::get_engine_shaders_path(graphics::graphics_platform::metal) }; }
 
-		std::wstring to_wstring(const char* c)
+		[[maybe_unused]] std::wstring to_wstring(const char* c)
 		{
 			std::string s{ c };
 			return { s.begin(), s.end() };
@@ -407,17 +413,25 @@ using namespace primal::graphics::metal::shader;
 			{
 				metal_compiled_shader result{};
 				
+				// 生成随机文件名后缀
+				std::random_device rd;
+				std::mt19937 gen(rd());
+				std::uniform_int_distribution<> dis(100000, 999999);
+				std::stringstream ss;
+				ss << std::hex << dis(gen);
+				std::string random_suffix = ss.str();
+				
 				// 创建临时源文件
-				std::string temp_source_file = "/tmp/shader_temp.metal";
+				std::string temp_source_file = "/tmp/shader_temp_" + random_suffix + ".metal";
 				std::ofstream source_file(temp_source_file);
 				if (!source_file.is_open()) return result;
 				source_file << source;
 				source_file.close();
 				
 				// 创建临时IR文件和metallib文件
-				std::string temp_ir_file = "/tmp/shader_temp.ir";
-				std::string temp_metalar_file = "/tmp/shader_temp.metalar";
-				std::string temp_metallib_file = "/tmp/shader_temp.metallib";
+				std::string temp_ir_file = "/tmp/shader_temp_" + random_suffix + ".ir";
+				std::string temp_metalar_file = "/tmp/shader_temp_" + random_suffix + ".metalar";
+				std::string temp_metallib_file = "/tmp/shader_temp_" + random_suffix + ".metallib";
 				
 				// 步骤1: 使用metal命令编译为IR
 				std::string compile_cmd = "xcrun -sdk macosx metal -o " + temp_ir_file + " -c " + temp_source_file;
@@ -545,7 +559,7 @@ using namespace primal::graphics::metal::shader;
 			}
 
 		private:
-			utl::vector<std::string> get_args(const shader_file_info& info, utl::vector<std::wstring>& extra_args)
+			utl::vector<std::string> get_args([[maybe_unused]] const shader_file_info& info, utl::vector<std::wstring>& extra_args)
 			{
 				utl::vector<std::string> args{};
 				

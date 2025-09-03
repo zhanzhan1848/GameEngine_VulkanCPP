@@ -123,10 +123,10 @@ namespace primal::graphics
 		return gfx.light.create(info);
 	}
 #elif defined(__clang__)
-	// light create_light(const light_init_info& info)
-	// {
-	// 	return gfx.light.create(info);
-	// }
+	light create_light(light_init_info& info)
+	{
+		return gfx.light.create(info);
+	}
 #endif
 
 	void remove_light(light_id id, u64 light_set_key)

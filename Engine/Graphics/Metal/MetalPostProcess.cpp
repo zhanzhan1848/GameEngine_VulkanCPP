@@ -6,6 +6,7 @@
 #include "MetalSurface.h"
 #include "MetalResource.h"
 #include "MetalGPass.h"
+#include "MetalSSAO.h"
 
 namespace primal::graphics::metal::fx
 {
@@ -59,13 +60,19 @@ namespace primal::graphics::metal::fx
     {
         assert(post_process_pipeline);
         MTK::View* view{ surface->view() };
+        CA::MetalDrawable* drawable{ view->currentDrawable() };
         MTL::RenderPassDescriptor* postRpd = view->currentRenderPassDescriptor();
+        postRpd->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(0.0f, 0.0f, 0.0f, 1.0f));
+        postRpd->colorAttachments()->object(0)->setLoadAction(MTL::LoadAction::LoadActionClear);
+        postRpd->colorAttachments()->object(0)->setStoreAction(MTL::StoreAction::StoreActionStore);
+        postRpd->colorAttachments()->object(0)->setTexture(drawable->texture());
         MTL::RenderCommandEncoder* postEnc = buffer->renderCommandEncoder(postRpd);
         postEnc->setRenderPipelineState( post_process_pipeline );
         postEnc->setFragmentBuffer( cbuffer.buffer(), 0, 0 );
         postEnc->setFragmentSamplerState( sampler, 0 );
         postEnc->setFragmentTexture( gpass::get_depth_buffer().texture(), 0 );
         postEnc->setFragmentTexture( gpass::get_main_buffer().texture(), 1 );
+        postEnc->setFragmentTexture( ssao::get_ssao_blur_texture().texture(), 2 );
         postEnc->drawPrimitives( MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6) );
         postEnc->endEncoding();
     }

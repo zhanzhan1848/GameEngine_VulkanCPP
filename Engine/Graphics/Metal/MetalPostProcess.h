@@ -15,4 +15,5 @@ namespace primal::graphics::metal::fx
     void shutdown();
 
     void post_process(MTL::CommandBuffer* buffer, metal_surface* surface, const constant_buffer& cbuffer);
+    void blit_process(MTL::CommandBuffer* buffer, metal_surface* surface, const constant_buffer& cbuffer);
 }

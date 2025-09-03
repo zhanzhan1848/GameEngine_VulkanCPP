@@ -34,20 +34,39 @@ namespace primal::transform {
 			XMMATRIX inverse_world{ XMMatrixInverse(nullptr, world) };
 			XMStoreFloat4x4(&inv_world[index], inverse_world);
 #elif defined(__APPLE__)
-			using namespace Eigen;
-			Quaternionf r{ rotations[index].w(), rotations[index].x(), rotations[index].y(), rotations[index].z() };
-			math::v3 t{ positions[index] };
-			math::v3 s{ scales[index] };
+			using namespace simd;
+			// 构建四元数 (w, x, y, z)
+			simd::quatf r = simd_quaternion(rotations[index].x, rotations[index].y, rotations[index].z, rotations[index].w);
+			math::v3 t = positions[index];
+			math::v3 s = scales[index];
 
-			math::m4x4 world{ Matrix4f::Identity() };
-			world.block<3,3>(0, 0) = r.toRotationMatrix() * s.asDiagonal();
-			world.block<3,1>(0, 3) = t;
+			// 从四元数创建旋转矩阵
+			simd::float3x3 rotation_matrix = simd_matrix3x3(r);
+			
+			// 应用缩放
+			simd::float3x3 scale_matrix = simd_matrix(
+				simd_make_float3(s.x, 0.0f, 0.0f),
+				simd_make_float3(0.0f, s.y, 0.0f),
+				simd_make_float3(0.0f, 0.0f, s.z)
+			);
+			
+			simd::float3x3 rs_matrix = simd_mul(rotation_matrix, scale_matrix);
+			
+			// 构建4x4变换矩阵
+			simd::float4x4 world = simd_matrix(
+				simd_make_float4(rs_matrix.columns[0].x, rs_matrix.columns[0].y, rs_matrix.columns[0].z, 0.0f),
+				simd_make_float4(rs_matrix.columns[1].x, rs_matrix.columns[1].y, rs_matrix.columns[1].z, 0.0f),
+				simd_make_float4(rs_matrix.columns[2].x, rs_matrix.columns[2].y, rs_matrix.columns[2].z, 0.0f),
+				simd_make_float4(t.x, t.y, t.z, 1.0f)
+			);
 
-			memcpy(&to_world[index], world.data(), sizeof(math::m4x4));
+			to_world[index] = world;
 
-			world.row(3) = math::v4{ 0.f, 0.f, 0.f, 1.f };
-			math::m4x4 inverse_world{ world.inverse() };
-			memcpy(&inv_world[index], inverse_world.data(), sizeof(math::m4x4));
+			// 计算逆矩阵
+			simd::float4x4 world_for_inverse = world;
+			world_for_inverse.columns[3] = simd_make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+			simd::float4x4 inverse_world = simd_inverse(world_for_inverse);
+			inv_world[index] = inverse_world;
 #endif
 
 			has_transform[index] = 1;
@@ -63,10 +82,15 @@ namespace primal::transform {
 			XMStoreFloat3(&orientation, XMVector3Rotate(front, rotation_quat));
 			return orientation;
 #elif defined(__APPLE__)
-			using namespace Eigen;
-			Quaternionf r{ rotations.w(), rotations.x(), rotations.y(), rotations.z() };
-			math::v3 front{ 0.f, 0.f, 1.f };
-			math::v3 orientation{ r * front };
+			using namespace simd;
+			// 构建四元数 (w, x, y, z)
+			simd::quatf r = simd_quaternion(rotations.x, rotations.y, rotations.z, rotations.w);
+			// 前向向量
+			simd::float3 front = simd_make_float3(0.0f, 0.0f, 1.0f);
+			// 使用四元数旋转向量
+			simd::float3 rotated_front = simd_act(r, front);
+			// 转换为math::v3类型
+			math::v3 orientation = simd_make_float3(rotated_front.x, rotated_front.y, rotated_front.z);
 			return orientation;
 #endif
 		}
@@ -111,21 +135,21 @@ namespace primal::transform {
 
 		if (positions.size() > entity_index)
 		{
-			math::v4 rotation{ info.rotation };
+			math::v4 rotation{ info.rotation[0], info.rotation[1], info.rotation[2], info.rotation[3] };
 			rotations[entity_index] = rotation;
 			orientations[entity_index] = calculate_orientation(rotation);
-			positions[entity_index] = math::v3{ info.position };
-			scales[entity_index] = math::v3{ info.scale };
+			positions[entity_index] = math::v3{ info.position[0], info.position[1], info.position[2] };
+			scales[entity_index] = math::v3{ info.scale[0], info.scale[1], info.scale[2] };
 			has_transform[entity_index] = 0;
 			changes_from_previous_frame[entity_index] = (u8)component_flags::all;
 		}
 		else
 		{
 			assert(positions.size() == entity_index);
-			positions.emplace_back(info.position);
-			orientations.emplace_back(calculate_orientation(math::v4{ info.rotation }));
-			rotations.emplace_back(info.rotation);
-			scales.emplace_back(info.scale);
+			positions.emplace_back(math::v3{ info.position[0], info.position[1], info.position[2] });
+			orientations.emplace_back(calculate_orientation(math::v4{ info.rotation[0], info.rotation[1], info.rotation[2], info.rotation[3] }));
+			rotations.emplace_back(math::v4{ info.rotation[0], info.rotation[1], info.rotation[2], info.rotation[3] });
+			scales.emplace_back(math::v3{ info.scale[0], info.scale[1], info.scale[2] });
 			has_transform.emplace_back((u8)0);
 			to_world.emplace_back();
 			inv_world.emplace_back();

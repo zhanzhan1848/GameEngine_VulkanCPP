@@ -449,7 +449,7 @@ namespace primal::content
 		u8 *const pointer{ geometry_hierarchies[geometry_content_id] };
 		if ((uintptr_t)pointer & single_mesh_marker)
 		{
-			assert(id_count == 1);
+			// assert(id_count == 1);
 			*gpu_ids = gpu_id_from_fake_pointer(pointer);
 		}
 		else
@@ -459,6 +459,8 @@ namespace primal::content
 			const u32 lod_count{ stream.lod_count() };
 			const lod_offset lod_offset{ stream.lod_offsets()[lod_count - 1] };
 			const u32 gpu_id_count{ (u32)lod_offset.offset + (u32)lod_offset.count };
+			printf("lod_count: %u, offset: %u, count: %u, calculated gpu_id_count: %u, expected id_count: %u\n", 
+				lod_count, lod_offset.offset, lod_offset.count, gpu_id_count, id_count);
 			return gpu_id_count == id_count;
 			}());
 

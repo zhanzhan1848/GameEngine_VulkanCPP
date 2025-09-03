@@ -59,7 +59,11 @@ namespace primal::graphics::metal
 
 		constexpr void reset()
 		{
-			_buffer->release();
+			if (_buffer)
+			{
+				_buffer->release();
+				_buffer = nullptr;
+			}
 			_size = 0;
 		}
 

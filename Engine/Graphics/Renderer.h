@@ -279,7 +279,7 @@ namespace primal::graphics
 #if defined(_MSC_VER)
 	light create_light(light_init_info info);
 #elif defined(__clang__)
-	light create_light(const light_init_info& info);
+	light create_light(light_init_info& info);
 #endif
 	void remove_light(light_id id, u64 light_set_key);
 

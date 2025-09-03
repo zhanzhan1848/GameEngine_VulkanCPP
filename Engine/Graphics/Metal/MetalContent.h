@@ -35,6 +35,8 @@ namespace primal::graphics::metal::content
 
 	namespace texture
 	{
+		utl::vector<MTL::Texture*> get_texture_array();
+
 		id::id_type add(const u8* const);
 		void remove(id::id_type);
 		void get_descriptor_indices(const id::id_type *const texture_ids, u32 id_count, u32 *const indices);
@@ -46,11 +48,13 @@ namespace primal::graphics::metal::content
 		{
 			NS::Array* *const							argument_buffer_layouts;
 			material_type::type *const					material_types;
+			u32* *const									descriptor_indices;
+			u32 *const									texture_count;
 		};
 
 		id::id_type add(material_init_info info);
 		void remove(id::id_type id);
-		void get_materials(const id::id_type *const material_ids, u32 material_count, const materials_cache& cache);
+		void get_materials(const id::id_type *const material_ids, u32 material_count, const materials_cache& cache, u32& descriptor_index_count);
 	} // namespace material
 
 	namespace render_item

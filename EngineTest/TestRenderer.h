@@ -56,7 +56,7 @@ public :
 		pApp->setActivationPolicy( NS::ActivationPolicy::ActivationPolicyRegular );
 	}
 
-	virtual bool applicationShouldTerminateAfterLastWindowClosed( NS::Application* pSender ) override
+	virtual bool applicationShouldTerminateAfterLastWindowClosed([[maybe_unused]] NS::Application* pSender ) override
 	{
 		shutdown();
 		return true;

@@ -5,6 +5,7 @@
 #include "MetalCore.h"
 #include "MetalCamera.h"
 #include "MetalContent.h"
+#include "MetalLight.h"
 
 
 namespace primal::graphics::metal
@@ -14,6 +15,7 @@ namespace primal::graphics::metal
         pi.initialize = core::initialize;
         pi.shutdown = core::shutdown;
 
+        // Basic
         pi.surface.create = core::create_surface;
         pi.surface.remove = core::remove_surface;
         pi.surface.resize = core::resize_surface;
@@ -21,11 +23,21 @@ namespace primal::graphics::metal
         pi.surface.height = core::surface_height;
         pi.surface.render = core::render_surface;
 
+        // Light
+        pi.light.create_light_set = light::create_light_set;
+		pi.light.remove_light_set = light::remove_light_set;
+		pi.light.create = light::create;
+		pi.light.remove = light::remove;
+		pi.light.set_parameter = light::set_parameter;
+		pi.light.get_parameter = light::get_parameter;
+
+        // Camera
         pi.camera.create = camera::create;
 		pi.camera.remove = camera::remove;
 		pi.camera.set_parameter = camera::set_parameter;
 		pi.camera.get_parameter = camera::get_parameter;
 
+        // Resources
         pi.resources.add_submesh = content::submesh::add;
 		pi.resources.remove_submesh = content::submesh::remove;
 		pi.resources.add_texture = content::texture::add;

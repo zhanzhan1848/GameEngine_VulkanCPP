@@ -20,7 +20,8 @@ namespace primal::graphics::metal::gpass
 			per_object_data,
 			position_buffer,
 			element_buffer,
-			// directional_lights,
+			srv_indices,
+			directional_lights,
 			// cullable_lights,
 			// light_grid,
 			// light_index_list,
@@ -34,6 +35,8 @@ namespace primal::graphics::metal::gpass
 
     [[nodiscard]] const metal_render_texture& get_main_buffer();
     [[nodiscard]] const metal_texture& get_depth_buffer();
+	[[nodiscard]] const metal_render_texture& get_normal_depth_buffer();
+	[[nodiscard]] const metal_render_texture& get_albedo_buffer();
     
     // NOTE: call this every frame before rendering anything in gpass
 	void set_size(math::u32v2 size);

@@ -143,24 +143,9 @@ if(WIN32)
         $ENV{VULKAN_SDK}/include
     )
 elseif(APPLE)
-    # 查找Eigen库路径
-    execute_process(
-        COMMAND brew --prefix eigen
-        OUTPUT_VARIABLE EIGEN_PREFIX
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    set(EIGEN3_INCLUDE_DIR "${EIGEN_PREFIX}/include/eigen3")
-    
-    if(NOT EXISTS "${EIGEN3_INCLUDE_DIR}")
-        message(FATAL_ERROR "Eigen库未找到。请使用命令安装: brew install eigen")
-    endif()
-    
-    if(NOT EXISTS "${EIGEN3_INCLUDE_DIR}/Eigen/Dense")
-        message(FATAL_ERROR "Eigen/Dense头文件未找到。预期位置: ${EIGEN3_INCLUDE_DIR}/Eigen/Dense")
-    endif()
     
     # 设置LLVM编译器
-    set(CMAKE_CXX_COMPILER /opt/homebrew/Cellar/llvm/19.1.7/bin/clang++)
+    # set(CMAKE_CXX_COMPILER /opt/homebrew/Cellar/llvm/20.1.5/bin/clang++)
     
     # 设置编译器标志
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++17")
@@ -169,12 +154,12 @@ elseif(APPLE)
     set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -std=c++17")
     
     # 设置链接器标志
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L/opt/homebrew/Cellar/llvm/19.1.7/lib -Wl,-rpath,/opt/homebrew/Cellar/llvm/19.1.7/lib")
+    # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L/opt/homebrew/Cellar/llvm/20.1.5/lib -Wl,-rpath,/opt/homebrew/Cellar/llvm/20.1.5/lib")
     
     # 添加系统头文件目录（顺序很重要）
     include_directories(SYSTEM BEFORE
-        /opt/homebrew/Cellar/llvm/19.1.7/include/c++/v1
-        /opt/homebrew/Cellar/llvm/19.1.7/lib/clang/19/include
+        # /opt/homebrew/Cellar/llvm/20.1.5/include/c++/v1
+        # /opt/homebrew/Cellar/llvm/20.1.5/lib/clang/19/include
         ${MACOSX_PREFIX}/usr/include
         ${MACOSX_PREFIX}/System/Library/Frameworks
     )
@@ -187,11 +172,6 @@ elseif(APPLE)
         ${CMAKE_SOURCE_DIR}/OSAPI/MAC
     )
     
-    # 添加Eigen头文件
-    target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
-        ${EIGEN3_INCLUDE_DIR}
-    )
-    
     # 添加编译器选项
     target_compile_options(${PROJECT_NAME} PRIVATE
         -Wall
@@ -199,16 +179,7 @@ elseif(APPLE)
         -Wno-deprecated-declarations
         -Wno-unused-parameter
         -Wno-c++17-extensions
-    )
-endif()
-
-# Eigen库设置
-if(APPLE)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE
-        EIGEN_MPL2_ONLY                 # 使用MPL2许可证
-        EIGEN_MAX_ALIGN_BYTES=32        # 设置内存对齐
-        EIGEN_MAX_STATIC_ALIGN_BYTES=32 # 设置静态内存对齐
-        EIGEN_NO_DEBUG
+        -Wignored-qualifiers
     )
 endif()
 

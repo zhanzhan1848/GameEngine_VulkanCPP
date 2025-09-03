@@ -218,14 +218,14 @@ Surface GetSurface(VertexOut psIn)
 	surface.AmbientOcclusion = 1.f;
 
 #if TEXTURED_MTL
-	surface.AmbientOcclusion = Sample(0, LinearSampler, uv).r;
-	surface.BaseColor = Sample(1, LinearSampler, uv).rgb;
-	surface.EmissiveColor = Sample(2, LinearSampler, uv).rgb;
-	float2 metalRough = Sample(3, LinearSampler, uv)rg;
+	surface.AmbientOcclusion = Sampler(0, LinearSampler, uv).r;
+	surface.BaseColor = Sampler(1, LinearSampler, uv).rgb;
+	surface.EmissiveColor = Sampler(2, LinearSampler, uv).rgb;
+	float2 metalRough = Sampler(3, LinearSampler, uv)rg;
 	surface.Metallic = metalRough.r;
 	surface.PerceptualRoughness = metalRough.g;
 	surface.EmissiveIntensity = 1.f;
-	float3 n = Sample(4, LinearSampler, uv).rgb;
+	float3 n = Sampler(4, LinearSampler, uv).rgb;
 	surface.Normal = psIn.WorldNormal;
 #endif
 

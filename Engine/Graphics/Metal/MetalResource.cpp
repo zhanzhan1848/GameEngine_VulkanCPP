@@ -23,7 +23,7 @@ namespace primal::graphics::metal
 
 	void metal_buffer::release()
 	{
-		core::deferred_release(_buffer);
+        core::deferred_release(_buffer);
 		_size = 0;
 	}
 
@@ -78,6 +78,97 @@ namespace primal::graphics::metal
             _texture = device->newTexture(info.texture_desc);
         }
 
+        if(_texture)
+        {
+            const NS::UInteger width{ info.texture_desc->width() };
+            const NS::UInteger height{ info.texture_desc->height() };
+            const NS::UInteger array_size{ info.texture_desc->arrayLength() };
+            
+            // 根据像素格式计算每个像素的字节数
+            u32 bytes_per_pixel{ 4 }; // 默认RGBA8格式
+            MTL::PixelFormat pixel_format{ info.texture_desc->pixelFormat() };
+            
+            switch(pixel_format)
+            {
+                case MTL::PixelFormatRGBA16Float:
+                    bytes_per_pixel = 8; // 4个通道 × 2字节
+                    break;
+                case MTL::PixelFormatDepth32Float:
+                    bytes_per_pixel = 4; // 1个通道 × 4字节
+                    break;
+                case MTL::PixelFormatRGBA8Unorm:
+                default:
+                    bytes_per_pixel = 4; // 4个通道 × 1字节
+                    break;
+            }
+            
+            // 计算单个纹理层所需的内存大小
+            const u64 bytes_per_row{ static_cast<u64>(width * bytes_per_pixel) };
+            const u64 bytes_per_image{ static_cast<u64>(bytes_per_row * height) };
+            
+            // 使用动态内存分配而不是alloca，避免大纹理时的栈溢出
+            std::unique_ptr<u8[]> texture_data{ std::make_unique<u8[]>(bytes_per_image) };
+            u8* pTextureData = texture_data.get();
+            
+            // 根据像素格式填充纹理数据
+            if(pixel_format == MTL::PixelFormatRGBA16Float)
+            {
+                // RGBA16Float格式：每个通道2字节的半精度浮点数
+                u16* pData16 = reinterpret_cast<u16*>(pTextureData);
+                for(u32 h{ 0 }; h < static_cast<u32>(height); ++h)
+                {
+                    for(u32 w{ 0 }; w < static_cast<u32>(width); ++w)
+                    {
+                        u64 i = h * width + w;
+                        // 将浮点值转换为半精度浮点数（简化处理，直接使用浮点值的位表示）
+                        pData16[i * 4 + 0] = static_cast<u16>(clear_color.red * 65535);
+                        pData16[i * 4 + 1] = static_cast<u16>(clear_color.green * 65535);
+                        pData16[i * 4 + 2] = static_cast<u16>(clear_color.blue * 65535);
+                        pData16[i * 4 + 3] = static_cast<u16>(clear_color.alpha * 65535);
+                    }
+                }
+            }
+            else if(pixel_format == MTL::PixelFormatDepth32Float)
+            {
+                // Depth32Float格式：每个像素4字节的浮点深度值
+                f32* pDataFloat = reinterpret_cast<f32*>(pTextureData);
+                for(u32 h{ 0 }; h < static_cast<u32>(height); ++h)
+                {
+                    for(u32 w{ 0 }; w < static_cast<u32>(width); ++w)
+                    {
+                        u64 i = h * width + w;
+                        pDataFloat[i] = static_cast<f32>(clear_color.red); // 深度值使用red通道
+                    }
+                }
+            }
+            else
+            {
+                // RGBA8Unorm格式：每个通道1字节的无符号整数
+                for(u32 h{ 0 }; h < static_cast<u32>(height); ++h)
+                {
+                    for(u32 w{ 0 }; w < static_cast<u32>(width); ++w)
+                    {
+                        u64 i = h * width + w;
+                        pTextureData[i * 4 + 0] = static_cast<u8>(clear_color.red * 255);
+                        pTextureData[i * 4 + 1] = static_cast<u8>(clear_color.green * 255);
+                        pTextureData[i * 4 + 2] = static_cast<u8>(clear_color.blue * 255);
+                        pTextureData[i * 4 + 3] = static_cast<u8>(clear_color.alpha * 255);
+                    }
+                }
+            }
+
+            // 为每个数组层上传相同的纹理数据
+            for (NS::UInteger z{ 0 }; z < array_size; ++z)
+            {
+                _texture->replaceRegion( 
+                    MTL::Region( 0, 0, 0, width, height, 1 ), 
+                    0, z, 
+                    pTextureData, 
+                    bytes_per_row, bytes_per_image 
+                );
+            }
+        }
+
         // assert(_texture);
     }
 
@@ -92,7 +183,7 @@ namespace primal::graphics::metal
         : _texture{ info }
     {
     	assert(info.texture_desc);
-        _mip_count = texture()->mipmapLevelCount();
+        _mip_count = static_cast<u32>(texture()->mipmapLevelCount());
         assert(_mip_count && _mip_count <= metal_texture::max_mips);
 
         // auto *const device{ core::get_device() };

@@ -53,7 +53,7 @@ namespace primal::platform
 #if defined(_MSC_VER)
 		return s.z - s.x;
 #elif defined(__clang__)
-		return s.z() - s.x();
+		return s.z - s.x;
 #endif
 	}
 
@@ -63,7 +63,7 @@ namespace primal::platform
 #if defined(_MSC_VER)
 		return s.w - s.y;
 #elif defined(__clang__)
-		return s.w() - s.y();
+		return s.w - s.y;
 #endif
 	}
 

@@ -12,6 +12,10 @@ namespace primal::graphics::metal::shader
 		{
 			fullscreen_triangle_vs = 0,
 			post_process_ps,
+			shadow_mapping_vs,
+			ssao_calculate,
+			ssao_blur,
+			
 
 			count
 		};

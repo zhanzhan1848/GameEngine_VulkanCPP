@@ -23,7 +23,11 @@ namespace primal::graphics {
 		{
 			void(*create_light_set)(u64);
 			void(*remove_light_set)(u64);
+#if defined(_MSC_VER)
 			light(*create)(light_init_info);
+#elif defined(__clang__)
+			light(*create)(light_init_info&);
+#endif
 			void(*remove)(light_id, u64);
 			void(*set_parameter)(light_id, u64, light_parameter::parameter, const void *const, u32);
 			void(*get_parameter)(light_id, u64, light_parameter::parameter, void *const, u32);

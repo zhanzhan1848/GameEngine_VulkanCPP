@@ -125,7 +125,7 @@ int main(int argc, char* argv[])
 #include <AppKit/AppKit.hpp>
 #include "MacKeyboard.h"
 
-int main(int argc, char* argv[])
+int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[])
 {
     std::cout << "Hello, World!" << std::endl;
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();

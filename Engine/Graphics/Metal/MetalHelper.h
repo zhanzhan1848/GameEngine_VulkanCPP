@@ -35,6 +35,7 @@ namespace primal::graphics::metal
 		TessellationParams,
 		RenderPass,
 		PrimitiveTopology,
+		InputPrimitiveTopology,
 		ComputeFunction,
 		ViewInstancing,
 		CachedPSO,
@@ -72,6 +73,7 @@ namespace primal::graphics::metal
 	METAL_PSS(tessellation_params, MetalPipelineSubobjectType::TessellationParams, MTL::TessellationPartitionMode);
 	METAL_PSS(render_pass, MetalPipelineSubobjectType::RenderPass, MTL::RenderPipelineColorAttachmentDescriptorArray*);
 	METAL_PSS(primitive_topology, MetalPipelineSubobjectType::PrimitiveTopology, MTL::PrimitiveType);
+	METAL_PSS(input_primitive_topology, MetalPipelineSubobjectType::InputPrimitiveTopology, MTL::PrimitiveTopologyClass);
 	METAL_PSS(compute_function, MetalPipelineSubobjectType::ComputeFunction, MTL::Function*);
 	METAL_PSS(view_instancing, MetalPipelineSubobjectType::ViewInstancing, MTL::RenderPipelineDescriptor*); // 占位
 	METAL_PSS(cached_pso, MetalPipelineSubobjectType::CachedPSO, NS::Data*);
@@ -94,6 +96,7 @@ namespace primal::graphics::metal
 		metal_pipeline_subobject_tessellation_params tessellation_params{ MTL::TessellationPartitionModePow2 };
 		metal_pipeline_subobject_render_pass render_pass{ nullptr };
 		metal_pipeline_subobject_primitive_topology primitive_topology{ MTL::PrimitiveTypeTriangle };
+		metal_pipeline_subobject_input_primitive_topology input_primitive_topology{ MTL::PrimitiveTopologyClassTriangle };
 		metal_pipeline_subobject_compute_function compute_function{ nullptr };
 		metal_pipeline_subobject_view_instancing view_instancing{ nullptr }; // 占位
 		metal_pipeline_subobject_cached_pso cached_pso{ nullptr };
@@ -121,7 +124,12 @@ namespace primal::graphics::metal
 				{
 					auto color_attachment{ color_attachments.value().descs[i] };
 					descriptor->colorAttachments()->setObject(color_attachment, i);
+					// descriptor->colorAttachments()->object(i)->setPixelFormat(MTL::PixelFormat::PixelFormatRGBA16Float);
 				}			
+			}
+			if (input_primitive_topology.value())
+			{
+				descriptor->setInputPrimitiveTopology(input_primitive_topology.value());
 			}
 			if (cached_pso.value()) {
 				// 序列化支持（需要额外实现）
