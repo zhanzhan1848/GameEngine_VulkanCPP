@@ -11,6 +11,7 @@
 #include "MetalLight.h"
 #include "MetalPreProcess.h"
 #include "MetalSSAO.h"
+#include "MetalSSGI.h"
 
 namespace primal::graphics::metal::core
 {
@@ -67,6 +68,7 @@ namespace primal::graphics::metal::core
                 pView->draw();
                 
                 _frame_index = (_frame_index + 1) % frame_buffer_count;
+                _frame_count++;
 
                 return true;
             }
@@ -74,6 +76,7 @@ namespace primal::graphics::metal::core
             void flush()
 			{
 				_frame_index = 0;
+                _frame_count = 0;
 			}
 
             void release()
@@ -85,6 +88,7 @@ namespace primal::graphics::metal::core
 
             [[nodiscard]] constexpr MTL::CommandBuffer* command_buffer() const { return _cmd_buffer; }
             [[nodiscard]] constexpr u32 frame_index() const { return _frame_index; }
+            [[nodiscard]] constexpr u32 frame_count() const { return _frame_count; }
             
         private:
             MTL::Device*                        _device{};
@@ -92,6 +96,7 @@ namespace primal::graphics::metal::core
             NS::AutoreleasePool*                _pool{};
             MTL::CommandBuffer*                 _cmd_buffer;
             u32									_frame_index{ 0 };
+            u32									_frame_count{ 0 };
             dispatch_semaphore_t                _semaphore;
         };
 
@@ -133,21 +138,28 @@ namespace primal::graphics::metal::core
 			}
 		}
 
-        metal_frame_info get_metal_frame_info(frame_info info, constant_buffer& cbuffer, const metal_surface& surface, u32 frame_idx, f32 delta_time)
+        metal_frame_info get_metal_frame_info(frame_info info, constant_buffer& cbuffer, const metal_surface& surface, u32 frame_idx, u32 frame_count, f32 delta_time)
         {
             camera::metal_camera& camera{ camera::get(info.camera_id) };
-			camera.update();
 			msl::GlobalShaderData data{};
 
+            data.PreviousViewProjection = camera.view_projection();
+            
+			camera.update();
 			data.View = camera.view();
 			data.Projection = camera.projection();
 			data.InvProjection = camera.inverse_projection();
 			data.ViewProjection = camera.view_projection();
+            if(frame_count == 0)
+            {
+                data.PreviousViewProjection = data.ViewProjection;
+            }
 			data.InvViewProjection = camera.inverse_view_projection();
 			data.CameraPositionAndViewWidth = math::v4{ camera.position().x, camera.position().y, camera.position().z, (f32)surface.width() };
 			data.CameraDirectionAndViewHeight = math::v4{ camera.direction().x, camera.direction().y, camera.direction().z, (f32)surface.height() };
-			data.NumDirectionalLights = static_cast<u32>(info.light_set_key);
+			data.NumDirectionalLights = static_cast<u32>(light::non_cullable_light_count(info.light_set_key));
 			data.DeltaTime = delta_time;
+            data.FrameCount = frame_count;
 
             // NOTE: be careful not to read from this buffer. Reads are really really slow
 			msl::GlobalShaderData *const shader_data{ cbuffer.allocate<msl::GlobalShaderData>() };
@@ -198,6 +210,7 @@ namespace primal::graphics::metal::core
             && fx::initialize()
             && prepass::initialize()
             && ssao::initialize()
+            && ssgi::initialize()
             && content::initialize()
             && light::initialize()
         )) return false;
@@ -221,6 +234,7 @@ namespace primal::graphics::metal::core
         content::shutdown();
         prepass::shutdown();
         ssao::shutdown();
+        ssgi::shutdown();
         fx::shutdown();
         gpass::shutdown();
         shader::shutdown();
@@ -292,12 +306,14 @@ namespace primal::graphics::metal::core
 
         const metal_frame_info metal_info
         { 
-            get_metal_frame_info(info, cbuffer, *surface, frame_idx, 16.7f) 
+            get_metal_frame_info(info, cbuffer, *surface, frame_idx, gfx_command.frame_count(), 16.7f) 
         };
 
         gpass::set_size({ metal_info.surface_width, metal_info.surface_height });
 
         ssao::set_size({ metal_info.surface_width, metal_info.surface_height });
+
+        ssgi::set_size({ metal_info.surface_width, metal_info.surface_height });
 
         if (gfx_command.begin_frame())
         {
@@ -323,6 +339,10 @@ namespace primal::graphics::metal::core
             // SSAO pass
             ssao::ssao_pass(cmd_buffer, metal_info);
             ssao::ssao_blur(cmd_buffer, metal_info);
+
+            // SSGI pass
+            ssgi::ssgi_pass(cmd_buffer, metal_info);
+            ssgi::ssgi_blur(cmd_buffer, metal_info);
 
             // Post process
             fx::post_process(cmd_buffer, surface, cbuffer);

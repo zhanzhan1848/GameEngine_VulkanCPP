@@ -32,6 +32,8 @@ namespace primal::graphics::metal::shader
 				"shadow_mapping_vs",
 				"ssao_pass",
 				"ssao_blur",
+				"ssgi_pass",
+				"ssgi_blur"
 			};
 
 			assert(!engine_shaders_blob);

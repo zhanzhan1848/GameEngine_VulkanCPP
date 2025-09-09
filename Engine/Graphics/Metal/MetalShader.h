@@ -15,6 +15,8 @@ namespace primal::graphics::metal::shader
 			shadow_mapping_vs,
 			ssao_calculate,
 			ssao_blur,
+			ssgi_pass,
+			ssgi_blur,
 			
 
 			count

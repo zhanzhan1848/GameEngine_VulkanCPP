@@ -365,6 +365,8 @@ using namespace primal::graphics::metal::shader;
 			{ engine_shader::shadow_mapping_vs,				{ "DepthPassShader.metal", "shadow_mapping_vs", shader_type::vertex } },
 			{ engine_shader::ssao_calculate,				{ "SSAOShader.metal", "ssao_pass", shader_type::compute } },
 			{ engine_shader::ssao_blur,						{ "SSAOShader.metal", "ssao_blur", shader_type::compute } },
+			{ engine_shader::ssgi_pass,						{ "SSGIShader.metal", "ssgi_pass", shader_type::compute } },
+			{ engine_shader::ssgi_blur,						{ "SSGIShader.metal", "ssgi_blur", shader_type::compute } },
 			// { engine_shader::grid_frustums_cs,				{ "GridFrustums.hlsl", "ComputeGridFrustumsCS", shader_type::compute } },
 			// { engine_shader::light_culling_cs,				{ "CullingLights.hlsl", "CullLightsCS", shader_type::compute } }
 		};

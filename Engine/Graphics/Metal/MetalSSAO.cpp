@@ -35,6 +35,7 @@ namespace primal::graphics::metal::ssao
         {
             assert(size.x != 0 && size.y != 0);
 			ssao_texture.release();
+            ssao_blur_texture.release();
 
             MTL::TextureDescriptor* desc{ MTL::TextureDescriptor::alloc()->init() };
             desc->setWidth(size.x);
@@ -77,7 +78,7 @@ namespace primal::graphics::metal::ssao
 
         void resize(ssao_parameters& culler)
 		{
-			constexpr u32 tile_size{ ssao_tile_szie };
+			constexpr u32 tile_size{ ssao_tile_size };
 			assert(culler.view_width >= tile_size && culler.view_height >= tile_size);
 			const math::u32v2 tile_count
 			{
@@ -166,7 +167,7 @@ namespace primal::graphics::metal::ssao
         encoder->setBuffer(metal_info.global_shader_data, 0, 0);
         encoder->setBuffer(current_non_cullable_light_buffer, 0, 1);
 
-        encoder->dispatchThreads(MTL::Size::Make(ssao_params.ssao_dispatch_params.NumThreads.x, ssao_params.ssao_dispatch_params.NumThreads.y, 1), MTL::Size::Make(8, 8, 1));
+        encoder->dispatchThreads(MTL::Size::Make(ssao_params.ssao_dispatch_params.NumThreads.x, ssao_params.ssao_dispatch_params.NumThreads.y, 1), MTL::Size::Make(ssao_tile_size, ssao_tile_size, 1));
         encoder->endEncoding();
     }
 
@@ -185,7 +186,7 @@ namespace primal::graphics::metal::ssao
         encoder->setTexture(ssao_blur_texture.texture(), 1);
         encoder->setTexture(gpass::get_normal_depth_buffer().texture(), 2);
         encoder->setBuffer(metal_info.global_shader_data, 0, 0);
-        encoder->dispatchThreads(MTL::Size::Make(ssao_params.ssao_dispatch_params.NumThreads.x, ssao_params.ssao_dispatch_params.NumThreads.y, 1), MTL::Size::Make(8, 8, 1));
+        encoder->dispatchThreads(MTL::Size::Make(ssao_params.ssao_dispatch_params.NumThreads.x, ssao_params.ssao_dispatch_params.NumThreads.y, 1), MTL::Size::Make(ssao_tile_size, ssao_tile_size, 1));
         encoder->endEncoding();
     }
 }

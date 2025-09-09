@@ -278,6 +278,7 @@ fragment float4 post_process_ps(VertexOutput fragInput [[stage_in]],
                                 texture2d<float, access::sample> depth_tex [[texture(0)]],
                                 texture2d<float, access::sample> gpass_tex [[texture(1)]],
                                 texture2d<float, access::sample> ssao_tex [[texture(2)]],
+                                texture2d<float, access::sample> ssgi_tex [[texture(3)]],
                                 sampler s [[sampler(0)]])
 {
     // // 翻转y坐标
@@ -314,15 +315,30 @@ fragment float4 post_process_ps(VertexOutput fragInput [[stage_in]],
     // return float4(final_color, 1.0f);
     float2 uv = fragInput.uv;
     uv = float2(uv.x, 1.f - uv.y);
-    float3 color = gpass_tex.sample(s, uv).rgb;
-    float4 ssdo = ssao_tex.sample(s, uv);
-    float3 indirect = ssdo.rgb;
-    float ao = ssdo.a;
-
-    color = color * ao; // + indirect;
     
-    // 应用gamma校正以获得正确的颜色显示
-    // color = pow(color, float3(0.4545)); // 1/2.2 ≈ 0.4545
+    // 采样基础颜色和光照信息
+    float3 base_color = gpass_tex.sample(s, uv).rgb;
     
-    return float4(color, 1.0);
+    // 采样SSAO结果 (RGBA: RGB=间接光照, A=AO因子)
+    float4 ssao_result = ssao_tex.sample(s, uv);
+    float3 ssao_indirect = ssao_result.rgb;
+    float ao_factor = ssao_result.a;
+    
+    // 采样SSGI结果 (RGBA: RGB=间接光照, A=置信度)
+    float4 ssgi_result = ssgi_tex.sample(s, uv);
+    float3 ssgi_indirect = ssgi_result.rgb;
+    float ssgi_confidence = ssgi_result.a;
+    
+    // 合成间接光照：根据SSGI置信度混合SSAO和SSGI
+    // 高置信度区域使用SSGI，低置信度区域回退到SSAO
+    float3 final_indirect = mix(ssao_indirect, ssgi_indirect, ssgi_confidence);; // 
+    
+    // 最终颜色合成：基础颜色 * AO + 间接光照
+    float3 final_color = base_color * ao_factor + final_indirect; // 
+    
+    // 可选：应用色调映射和gamma校正
+    // final_color = final_color / (final_color + 1.0); // Reinhard色调映射
+    // final_color = pow(final_color, float3(0.4545)); // Gamma校正
+    
+    return float4(final_color, 1.0);
 }

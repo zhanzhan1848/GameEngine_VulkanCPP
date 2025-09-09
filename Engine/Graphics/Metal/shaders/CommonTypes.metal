@@ -8,6 +8,7 @@ struct GlobalShaderData
 	float4x4			Projection;
 	float4x4			InvProjection;
 	float4x4			ViewProjection;
+	float4x4			PreviousViewProjection;
 	float4x4			InvViewProjection;
 
 	float4				CameraPositionAndViewWidth;
@@ -16,7 +17,8 @@ struct GlobalShaderData
 
 	uint				NumDirectionalLights;
 	float				DeltaTime;
-	float2 				padding;
+	float				FrameCount;
+	float 				padding;
 };
 
 struct PerObjectData
@@ -132,6 +134,17 @@ struct DirectionalLightParameters
 };
 
 struct SSAODispatchParameters
+{
+	// Number of groups dispatched. (This parameter is not available as an MSL system value!)
+    uint2   NumThreadGroups;
+
+    // Total number of threads dispatched. (Also not available as an MSL system value!)
+    // NOTE: This value may be less than the actual number of threads executed 
+    //       if the screen size is not evenly divisible by the block size.
+    uint2   NumThreads;
+};
+
+struct SSGIDispatchParameters
 {
 	// Number of groups dispatched. (This parameter is not available as an MSL system value!)
     uint2   NumThreadGroups;

@@ -7,6 +7,7 @@
 #include "MetalResource.h"
 #include "MetalGPass.h"
 #include "MetalSSAO.h"
+#include "MetalSSGI.h"
 
 namespace primal::graphics::metal::fx
 {
@@ -73,6 +74,7 @@ namespace primal::graphics::metal::fx
         postEnc->setFragmentTexture( gpass::get_depth_buffer().texture(), 0 );
         postEnc->setFragmentTexture( gpass::get_main_buffer().texture(), 1 );
         postEnc->setFragmentTexture( ssao::get_ssao_blur_texture().texture(), 2 );
+        postEnc->setFragmentTexture( ssgi::get_ssgi_blur_texture().texture(), 3 );
         postEnc->drawPrimitives( MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6) );
         postEnc->endEncoding();
     }

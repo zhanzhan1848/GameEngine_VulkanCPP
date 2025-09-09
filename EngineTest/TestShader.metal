@@ -98,7 +98,7 @@ Surface GetSurface(VertexOut psIn)
 float LinearizeDepth(float depth)
 {
     float nearClip = 0.1f;
-    float farClip = 1000.f;
+    float farClip = 64.f;
     return (2.0 * nearClip * farClip) / (farClip + nearClip - depth * (farClip - nearClip));
 }
 
@@ -139,7 +139,7 @@ VertexOut vertex vertex_main(device const GlobalData* global_data [[buffer(0)]],
     float tSign = float(signs & 0x01) - 1; // 假设切线符号在位 0
     float3 tangent = float3(tXY.x, tXY.y, sqrt(clamp(1.f - dot(tXY, tXY), 0.f, 1.f)) * tSign);
 
-    vsOut.HomogeneousPosition = global_data->per_object_data->WorldViewProjection * pos;
+    vsOut.HomogeneousPosition = global_data->per_object_data->WorldViewProjection * worldPosition;
     vsOut.WorldPosition	  = worldPosition.xyz;
     vsOut.WorldNormal	  = (global_data->per_object_data->InvWorld * float4(normal, 0.f)).xyz;
     vsOut.WorldTangent	  = (global_data->per_object_data->World * float4(tangent, 0.f)).xyz;;
@@ -228,9 +228,10 @@ PixelOut fragment fragment_main(VertexOut vsOut [[stage_in]],
     psOut.Color = float4(color, 1.f);
     psOut.Albedo = float4(S.BaseColor, 1.f);
     // 输出法线和深度
-    float depth = vsOut.HomogeneousPosition.z / vsOut.HomogeneousPosition.w;
-    float linearDepth = (2.0 * 0.1f * 64.f) / (64.f + 0.1f - depth * (64.f - 0.1f));
-    psOut.Normal_Depth = float4(vsOut.WorldNormal, linearDepth);
+    float depth = vsOut.HomogeneousPosition.z;
+    // 使用正确的线性深度计算函数
+    float linearDepth = LinearizeDepth(depth);
+    psOut.Normal_Depth = float4(normalize(vsOut.WorldNormal), linearDepth);
     
     return psOut;
 }

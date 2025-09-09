@@ -8,7 +8,7 @@ namespace primal::graphics::metal
 
 namespace primal::graphics::metal::ssao
 {
-    constexpr u32 ssao_tile_szie{ 32 };
+    constexpr u32 ssao_tile_size{ 32 };
     constexpr MTL::PixelFormat ssao_texture_format{ MTL::PixelFormatRGBA16Float };
     
     bool initialize();
