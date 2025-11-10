@@ -13,10 +13,13 @@ on:
     branches:
       - dev
       - 'feature/**'
+      - 'ci/**'        # 新增：允许在 ci/cicd 等验证分支上推送即触发
+      - 'ci/cicd'      # 兼容单独命名分支
   pull_request:
     branches:
       - dev
       - 'feature/**'
+  workflow_dispatch:   # 新增：允许在GitHub界面手动触发工作流，便于验证
 
 permissions:
   contents: write
