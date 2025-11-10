@@ -1,0 +1,210 @@
+name: PrimalEngine CI
+
+# 文件级注释：
+# 该工作流定义了项目在 GitHub Actions 上的持续集成流程，覆盖 dev 与 feature/* 分支。
+# 包含三类任务：
+# 1) C++核心层构建与测试，生成测试报告并上传制品；
+# 2) C++核心层代码审查（基础静态检查与编译日志解析）；
+# 3) C# UI 层代码审查（优先 Avalonia 项目，若无 csproj 则进行静态审查）。
+# 注意：本工作流尽量依赖系统内置工具（clang、python、dotnet），不引入第三方库。
+
+on:
+  push:
+    branches:
+      - dev
+      - 'feature/**'
+  pull_request:
+    branches:
+      - dev
+      - 'feature/**'
+
+permissions:
+  contents: write
+
+jobs:
+  cpp-build-test:
+    name: C++ 构建与测试 (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 打印环境信息
+        run: |
+          uname -a
+          clang --version || true
+          cmake --version
+          python3 --version
+
+      - name: 配置CMake (Release)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: 构建项目 (Engine, ContentTools, EngineDLL, EngineTest)
+        run: |
+          cmake --build build --config Release --parallel
+        env:
+          CMAKE_COLOR_DIAGNOSTICS: "ON"
+
+      - name: 运行EngineTest并保存输出
+        shell: bash
+        run: |
+          set -e
+          mkdir -p ci_outputs
+          # 寻找可执行文件路径（优先CMake设定的 ${CMAKE_SOURCE_DIR}/Darwin/Release/）
+          TEST_BIN="Darwin/Release/EngineTest"
+          if [[ ! -x "$TEST_BIN" ]]; then
+            # 兜底搜索build目录
+            TEST_BIN=$(find build -type f -name "EngineTest" | head -n 1)
+          fi
+          echo "EngineTest Path: $TEST_BIN"
+          if [[ -z "$TEST_BIN" ]]; then
+            echo "未找到EngineTest可执行文件" | tee ci_outputs/cpp_test_output.txt
+            echo 1 > ci_outputs/test_exit_code.txt
+          else
+            # 运行测试并记录返回码
+            set +e
+            "$TEST_BIN" 2>&1 | tee ci_outputs/cpp_test_output.txt
+            EXIT_CODE=${PIPESTATUS[0]}
+            echo $EXIT_CODE > ci_outputs/test_exit_code.txt
+            set -e
+          fi
+
+      - name: 生成Markdown测试报告
+        run: |
+          python3 Engine/Python_Scripts/generate_test_report.py \
+            --input ci_outputs/cpp_test_output.txt \
+            --exit-code-file ci_outputs/test_exit_code.txt \
+            --out Docs/CI/TestReports/${{ github.run_id }}_test_report.md \
+            --branch "${{ github.ref_name }}" \
+            --commit "${{ github.sha }}"
+
+      - name: 上传测试日志与报告制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-test-outputs
+          path: |
+            ci_outputs/cpp_test_output.txt
+            ci_outputs/test_exit_code.txt
+            Docs/CI/TestReports/${{ github.run_id }}_test_report.md
+
+      - name: 将测试报告提交到当前分支（仅 push 事件）
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git add Docs/CI/TestReports/${{ github.run_id }}_test_report.md
+          git commit -m "CI: 更新测试报告 ${{ github.run_id }}" || echo "无变更可提交"
+          git push
+
+  cpp-code-review:
+    name: C++ 代码审查 (静态检查 + 编译日志解析)
+    runs-on: macos-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 配置CMake (Debug，强化警告)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic"
+
+      - name: 构建并收集编译日志
+        shell: bash
+        run: |
+          set +e
+          cmake --build build --config Debug --parallel 2>&1 | tee ci_outputs/cpp_build_review.log
+          echo ${PIPESTATUS[0]} > ci_outputs/cpp_build_exit.txt
+          set -e
+          ls -lah ci_outputs || true
+        env:
+          CMAKE_COLOR_DIAGNOSTICS: "ON"
+
+      - name: 运行自研 C++ 审查脚本并生成报告
+        run: |
+          python3 Engine/Python_Scripts/cpp_review.py \
+            --source-dir Engine \
+            --build-log ci_outputs/cpp_build_review.log \
+            --out Docs/CodeReview/CppReview_${{ github.run_id }}.md
+
+      - name: 上传审查报告制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-review-outputs
+          path: |
+            ci_outputs/cpp_build_review.log
+            ci_outputs/cpp_build_exit.txt
+            Docs/CodeReview/CppReview_${{ github.run_id }}.md
+
+      - name: 将审查报告提交到当前分支（仅 push 事件）
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git add Docs/CodeReview/CppReview_${{ github.run_id }}.md
+          git commit -m "CI: 更新C++代码审查报告 ${{ github.run_id }}" || echo "无变更可提交"
+          git push
+
+  csharp-ui-review:
+    name: C# UI 代码审查 (Avalonia优先)
+    runs-on: macos-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 尝试构建 Avalonia 项目（若存在 csproj）
+        shell: bash
+        run: |
+          mkdir -p ci_outputs
+          CS_PROJ=$(find PrimalEditor_Avalonia -name "*.csproj" | head -n 1)
+          if [[ -n "$CS_PROJ" ]]; then
+            echo "检测到 Avalonia 项目: $CS_PROJ"
+            set +e
+            dotnet restore "$CS_PROJ" 2>&1 | tee ci_outputs/csharp_restore.log
+            dotnet build "$CS_PROJ" -c Release --nologo 2>&1 | tee ci_outputs/csharp_build.log
+            echo ${PIPESTATUS[0]} > ci_outputs/csharp_build_exit.txt
+            set -e
+          else
+            echo "未检测到 Avalonia csproj，跳过编译，仅进行静态审查" | tee ci_outputs/csharp_build.log
+            echo 0 > ci_outputs/csharp_build_exit.txt
+          fi
+
+      - name: 运行自研 C# 审查脚本并生成报告
+        run: |
+          python3 Engine/Python_Scripts/csharp_review.py \
+            --source-dirs PrimalEditor PrimalEditor_Avalonia \
+            --build-log ci_outputs/csharp_build.log \
+            --out Docs/CodeReview/CSharpReview_${{ github.run_id }}.md
+
+      - name: 上传审查报告制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: csharp-review-outputs
+          path: |
+            ci_outputs/csharp_build.log
+            ci_outputs/csharp_build_exit.txt
+            Docs/CodeReview/CSharpReview_${{ github.run_id }}.md
+
+      - name: 将审查报告提交到当前分支（仅 push 事件）
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git add Docs/CodeReview/CSharpReview_${{ github.run_id }}.md
+          git commit -m "CI: 更新C#代码审查报告 ${{ github.run_id }}" || echo "无变更可提交"
+          git push
