@@ -69,14 +69,79 @@ jobs:
             set -e
           fi
 
-      - name: 生成Markdown测试报告
+      - name: 生成Markdown测试报告（内联脚本，无外部依赖）
         run: |
-          python3 Engine/Python_Scripts/generate_test_report.py \
-            --input ci_outputs/cpp_test_output.txt \
-            --exit-code-file ci_outputs/test_exit_code.txt \
-            --out Docs/CI/TestReports/${{ github.run_id }}_test_report.md \
-            --branch "${{ github.ref_name }}" \
-            --commit "${{ github.sha }}"
+          python3 - << 'PY'
+          #!/usr/bin/env python3
+          # 文件级注释：
+          # 该脚本在 GitHub Actions 步骤中内联执行，负责读取 EngineTest 的输出与退出码，
+          # 并生成 Markdown 测试报告到 Docs/CI/TestReports/ 目录。
+          # 不依赖第三方库，仅使用 Python 标准库，兼容项目自研测试框架的输出格式。
+
+          import os, sys, re, datetime
+
+          def read_text(path: str) -> str:
+              """函数级注释：读取文本文件内容，若不存在则返回空字符串。"""
+              try:
+                  with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                      return f.read()
+              except Exception:
+                  return ""
+
+          def read_exit_code(path: str) -> int:
+              """函数级注释：读取退出码文件中的整数值，默认返回1表示失败。"""
+              try:
+                  with open(path, 'r') as f:
+                      return int(f.read().strip())
+              except Exception:
+                  return 1
+
+          def parse_summary(output: str) -> tuple[int, int]:
+              """函数级注释：粗略解析测试输出中的用例统计（pass/fail）。"""
+              passed = sum(1 for _ in re.finditer(r"\b(pass|passed)\b", output, re.IGNORECASE))
+              failed = sum(1 for _ in re.finditer(r"\b(fail|failed)\b", output, re.IGNORECASE))
+              return passed, failed
+
+          def main():
+              """函数级注释：主流程——读取输入、生成报告并写入文件。"""
+              input_log = 'ci_outputs/cpp_test_output.txt'
+              exit_code_file = 'ci_outputs/test_exit_code.txt'
+
+              output = read_text(input_log)
+              exit_code = read_exit_code(exit_code_file)
+              passed, failed = parse_summary(output)
+
+              run_id = os.environ.get('GITHUB_RUN_ID', 'local')
+              branch = os.environ.get('GITHUB_REF_NAME', '')
+              commit = os.environ.get('GITHUB_SHA', '')
+
+              out_dir = os.path.join('Docs', 'CI', 'TestReports')
+              os.makedirs(out_dir, exist_ok=True)
+              out_path = os.path.join(out_dir, f"{run_id}_test_report.md")
+
+              now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+              status = 'SUCCESS' if exit_code == 0 else 'FAILURE'
+
+              report = []
+              report.append(f"# EngineTest 测试报告 (Run {run_id})")
+              report.append("")
+              report.append(f"- 时间: {now}")
+              report.append(f"- 分支: {branch}")
+              report.append(f"- 提交: {commit}")
+              report.append(f"- 退出码: {exit_code} ({status})")
+              report.append(f"- 解析统计: 通过 {passed}，失败 {failed}")
+              report.append("")
+              report.append("## 原始输出")
+              report.append("```")
+              report.append(output)
+              report.append("```")
+
+              with open(out_path, 'w', encoding='utf-8') as f:
+                  f.write('\n'.join(report))
+
+          if __name__ == '__main__':
+              main()
+          PY
 
       - name: 上传测试日志与报告制品
         uses: actions/upload-artifact@v4
@@ -123,12 +188,125 @@ jobs:
         env:
           CMAKE_COLOR_DIAGNOSTICS: "ON"
 
-      - name: 运行自研 C++ 审查脚本并生成报告
+      - name: 运行 C++ 审查（内联脚本：文件/函数注释、TODO/FIXME、编译日志）
         run: |
-          python3 Engine/Python_Scripts/cpp_review.py \
-            --source-dir Engine \
-            --build-log ci_outputs/cpp_build_review.log \
-            --out Docs/CodeReview/CppReview_${{ github.run_id }}.md
+          python3 - << 'PY'
+          #!/usr/bin/env python3
+          # 文件级注释：
+          # 内联 C++ 审查脚本，检查：
+          # 1) 源文件是否包含文件级注释；
+          # 2) 是否包含 TODO/FIXME；
+          # 3) 解析编译日志中的警告与错误；
+          # 输出 Markdown 报告到 Docs/CodeReview/。
+
+          import os, re, datetime
+
+          def read_text(path: str) -> str:
+              """函数级注释：读取文本文件内容。"""
+              try:
+                  with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                      return f.read()
+              except Exception:
+                  return ""
+
+          def list_cpp_files(root: str) -> list[str]:
+              """函数级注释：递归列出 C/C++ 源文件。"""
+              exts = {'.h', '.hpp', '.hh', '.c', '.cpp', '.cc'}
+              files = []
+              for dirpath, _, filenames in os.walk(root):
+                  for fn in filenames:
+                      if os.path.splitext(fn)[1].lower() in exts:
+                          files.append(os.path.join(dirpath, fn))
+              return files
+
+          def has_file_header(text: str) -> bool:
+              """函数级注释：判断文件是否存在文件级注释。"""
+              head = text[:512]
+              return head.strip().startswith(('//', '/*'))
+
+          def find_tags(text: str) -> list[str]:
+              """函数级注释：查找 TODO/FIXME 标签。"""
+              tags = []
+              for i, line in enumerate(text.splitlines(), 1):
+                  if re.search(r'\bTODO\b', line):
+                      tags.append(f"TODO:{i}:{line.strip()}")
+                  if re.search(r'\bFIXME\b', line):
+                      tags.append(f"FIXME:{i}:{line.strip()}")
+              return tags
+
+          def parse_build_log(log: str) -> tuple[list[str], list[str]]:
+              """函数级注释：解析编译日志，提取警告与错误行。"""
+              warns, errs = [], []
+              for line in log.splitlines():
+                  lower = line.lower()
+                  if 'warning' in lower:
+                      warns.append(line)
+                  if any(k in lower for k in ['error', 'fatal error']):
+                      errs.append(line)
+              return warns, errs
+
+          def main():
+              """函数级注释：主流程——扫描代码、解析日志并生成报告。"""
+              build_log = read_text('ci_outputs/cpp_build_review.log')
+              warns, errs = parse_build_log(build_log)
+
+              files = list_cpp_files('Engine')
+              missing_headers, tag_entries = [], []
+              for fp in files:
+                  txt = read_text(fp)
+                  if not has_file_header(txt):
+                      missing_headers.append(fp)
+                  tag_entries.extend([f"{fp}:{t}" for t in find_tags(txt)])
+
+              run_id = os.environ.get('GITHUB_RUN_ID', 'local')
+              out_dir = os.path.join('Docs', 'CodeReview')
+              os.makedirs(out_dir, exist_ok=True)
+              out_path = os.path.join(out_dir, f"CppReview_{run_id}.md")
+
+              now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+              lines = []
+              lines.append(f"# C++ 代码审查报告 (Run {run_id})")
+              lines.append("")
+              lines.append(f"- 时间: {now}")
+              lines.append(f"- 扫描文件数: {len(files)}")
+              lines.append(f"- 警告数: {len(warns)}，错误数: {len(errs)}")
+              lines.append("")
+              lines.append("## 缺少文件级注释的文件")
+              if missing_headers:
+                  for fp in missing_headers:
+                      lines.append(f"- {fp}")
+              else:
+                  lines.append("- 无")
+              lines.append("")
+              lines.append("## TODO/FIXME 标记")
+              if tag_entries:
+                  for t in tag_entries:
+                      lines.append(f"- {t}")
+              else:
+                  lines.append("- 无")
+              lines.append("")
+              lines.append("## 编译日志警告")
+              if warns:
+                  lines.append("```")
+                  lines.extend(warns)
+                  lines.append("```")
+              else:
+                  lines.append("- 无")
+              lines.append("")
+              lines.append("## 编译日志错误")
+              if errs:
+                  lines.append("```")
+                  lines.extend(errs)
+                  lines.append("```")
+              else:
+                  lines.append("- 无")
+
+              with open(out_path, 'w', encoding='utf-8') as f:
+                  f.write('\n'.join(lines))
+
+          if __name__ == '__main__':
+              main()
+          PY
 
       - name: 上传审查报告制品
         uses: actions/upload-artifact@v4
@@ -180,12 +358,128 @@ jobs:
             echo 0 > ci_outputs/csharp_build_exit.txt
           fi
 
-      - name: 运行自研 C# 审查脚本并生成报告
+      - name: 运行 C# 审查（内联脚本：文件/方法注释、TODO/FIXME、构建日志）
         run: |
-          python3 Engine/Python_Scripts/csharp_review.py \
-            --source-dirs PrimalEditor PrimalEditor_Avalonia \
-            --build-log ci_outputs/csharp_build.log \
-            --out Docs/CodeReview/CSharpReview_${{ github.run_id }}.md
+          python3 - << 'PY'
+          #!/usr/bin/env python3
+          # 文件级注释：
+          # 内联 C# 审查脚本，检查：
+          # 1) C# 源文件是否包含文件级注释；
+          # 2) 是否包含 TODO/FIXME；
+          # 3) 解析 dotnet 构建日志中的警告与错误；
+          # 输出 Markdown 报告到 Docs/CodeReview/。
+
+          import os, re, datetime
+
+          def read_text(path: str) -> str:
+              """函数级注释：读取文本文件内容。"""
+              try:
+                  with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                      return f.read()
+              except Exception:
+                  return ""
+
+          def list_cs_files(root: str) -> list[str]:
+              """函数级注释：递归列出 C# 源文件。"""
+              files = []
+              for dirpath, _, filenames in os.walk(root):
+                  for fn in filenames:
+                      if fn.lower().endswith('.cs'):
+                          files.append(os.path.join(dirpath, fn))
+              return files
+
+          def has_file_header(text: str) -> bool:
+              """函数级注释：判断文件是否存在文件级注释。"""
+              head = text[:512]
+              return head.strip().startswith(('//', '/*', '///'))
+
+          def find_tags(text: str) -> list[str]:
+              """函数级注释：查找 TODO/FIXME 标签。"""
+              tags = []
+              for i, line in enumerate(text.splitlines(), 1):
+                  if re.search(r'\bTODO\b', line):
+                      tags.append(f"TODO:{i}:{line.strip()}")
+                  if re.search(r'\bFIXME\b', line):
+                      tags.append(f"FIXME:{i}:{line.strip()}")
+              return tags
+
+          def parse_build_log(log: str) -> tuple[list[str], list[str]]:
+              """函数级注释：解析构建日志，提取警告与错误行。"""
+              warns, errs = [], []
+              for line in log.splitlines():
+                  lower = line.lower()
+                  if 'warning' in lower:
+                      warns.append(line)
+                  if any(k in lower for k in ['error', 'fatal error']):
+                      errs.append(line)
+              return warns, errs
+
+          def main():
+              """函数级注释：主流程——扫描代码、解析日志并生成报告。"""
+              build_log = read_text('ci_outputs/csharp_build.log')
+              warns, errs = parse_build_log(build_log)
+
+              sources = []
+              for root in ['PrimalEditor', 'PrimalEditor_Avalonia']:
+                  if os.path.isdir(root):
+                      sources.extend(list_cs_files(root))
+
+              missing_headers, tag_entries = [], []
+              for fp in sources:
+                  txt = read_text(fp)
+                  if not has_file_header(txt):
+                      missing_headers.append(fp)
+                  tag_entries.extend([f"{fp}:{t}" for t in find_tags(txt)])
+
+              run_id = os.environ.get('GITHUB_RUN_ID', 'local')
+              out_dir = os.path.join('Docs', 'CodeReview')
+              os.makedirs(out_dir, exist_ok=True)
+              out_path = os.path.join(out_dir, f"CSharpReview_{run_id}.md")
+
+              now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+              lines = []
+              lines.append(f"# C# 代码审查报告 (Run {run_id})")
+              lines.append("")
+              lines.append(f"- 时间: {now}")
+              lines.append(f"- 扫描文件数: {len(sources)}")
+              lines.append(f"- 警告数: {len(warns)}，错误数: {len(errs)}")
+              lines.append("")
+              lines.append("## 缺少文件级注释的文件")
+              if missing_headers:
+                  for fp in missing_headers:
+                      lines.append(f"- {fp}")
+              else:
+                  lines.append("- 无")
+              lines.append("")
+              lines.append("## TODO/FIXME 标记")
+              if tag_entries:
+                  for t in tag_entries:
+                      lines.append(f"- {t}")
+              else:
+                  lines.append("- 无")
+              lines.append("")
+              lines.append("## 构建日志警告")
+              if warns:
+                  lines.append("```")
+                  lines.extend(warns)
+                  lines.append("```")
+              else:
+                  lines.append("- 无")
+              lines.append("")
+              lines.append("## 构建日志错误")
+              if errs:
+                  lines.append("```")
+                  lines.extend(errs)
+                  lines.append("```")
+              else:
+                  lines.append("- 无")
+
+              with open(out_path, 'w', encoding='utf-8') as f:
+                  f.write('\n'.join(lines))
+
+          if __name__ == '__main__':
+              main()
+          PY
 
       - name: 上传审查报告制品
         uses: actions/upload-artifact@v4
