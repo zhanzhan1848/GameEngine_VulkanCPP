@@ -2,7 +2,7 @@
  * @file SSGIShader.metal
  * @brief 屏幕空间全局光照(SSGI)着色器实现
  * @author GameEngine Team
- * @date 2025-09-07
+ * @date 2024
  * 
  * 实现功能:
  * - 多次光照反弹计算
@@ -80,7 +80,6 @@ kernel void ssgi_pass(
     // 计算UV坐标
     float2 texel_size = 1.0f / float2(gd.CameraPositionAndViewWidth.w, gd.CameraDirectionAndViewHeight.w);
     float2 uv = (float2(tid) + 0.5f) * texel_size;
-    uv.y = 1.f - uv.y;
     
     // 读取G-Buffer数据
     float4 normal_depth = normal_depth_texture.read(tid);
@@ -195,13 +194,13 @@ kernel void ssgi_pass(
         for (int i = 0; i < bounce_samples; ++i) {
             float2 noise_seed = uv + float2(i);
             float3 sample_dir = sampleHemisphere(world_normal, noise_seed + float2(bounce * 0.1f), i);
-            float3 sample_pos = view_pos + sample_dir * SSGI_RADIUS * (1.0f + bounce * 0.5f);
+            float3 sample_pos = world_pos + sample_dir * SSGI_RADIUS * (1.0f + bounce * 0.5f);
             
             // 投影和采样逻辑与第一次反弹相同
             float4 sample_clip = gd.Projection * float4(sample_pos, 1.0f);
             float3 sample_ndc = sample_clip.xyz / sample_clip.w;
             float2 sample_uv = sample_ndc.xy * 0.5f + 0.5f;
-            sample_uv.y = 1.0f - sample_uv.y;
+            // sample_uv.y = 1.0f - sample_uv.y;
             
             if (any(sample_uv < 0.0f) || any(sample_uv > 1.0f)) {
                 continue;

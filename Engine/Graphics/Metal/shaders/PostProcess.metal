@@ -331,14 +331,14 @@ fragment float4 post_process_ps(VertexOutput fragInput [[stage_in]],
     
     // 合成间接光照：根据SSGI置信度混合SSAO和SSGI
     // 高置信度区域使用SSGI，低置信度区域回退到SSAO
-    float3 final_indirect = mix(ssao_indirect, ssgi_indirect, ssgi_confidence); // 
+    float3 final_indirect = mix(ssao_indirect, ssgi_indirect, ssgi_confidence);; // 
     
     // 最终颜色合成：基础颜色 * AO + 间接光照
-    float3 final_color = base_color * ao_factor + final_indirect; // + final_indirect; // * ao_factor
+    float3 final_color = base_color * ao_factor + final_indirect; // 
     
     // 可选：应用色调映射和gamma校正
-    final_color = final_color / (final_color + 1.0); // Reinhard色调映射
-    final_color = pow(final_color, float3(0.4545)); // Gamma校正
+    // final_color = final_color / (final_color + 1.0); // Reinhard色调映射
+    // final_color = pow(final_color, float3(0.4545)); // Gamma校正
     
     return float4(final_color, 1.0);
 }

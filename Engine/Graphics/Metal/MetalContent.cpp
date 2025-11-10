@@ -313,20 +313,12 @@ namespace primal::graphics::metal::content
 			albedo_attachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
 			albedo_attachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
 			albedo_attachment->setSourceAlphaBlendFactor(MTL::BlendFactorSourceAlpha);
-			// Create Motion Vector attachment
-			MTL::RenderPipelineColorAttachmentDescriptor* motion_vector_attachment{ MTL::RenderPipelineColorAttachmentDescriptor::alloc()->init() };
-			motion_vector_attachment->setPixelFormat(gpass::main_buffer_format);
-			motion_vector_attachment->setBlendingEnabled(true);
-			motion_vector_attachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
-			motion_vector_attachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
-			motion_vector_attachment->setSourceAlphaBlendFactor(MTL::BlendFactorSourceAlpha);
 			
 			METAL_COLOR_ATTACHMENT_ARRAY color_attachments{};
 			color_attachments.descs[0] = color_attachment;
 			color_attachments.descs[1] = normal_depth_attachment;
 			color_attachments.descs[2] = albedo_attachment;
-			color_attachments.descs[3] = motion_vector_attachment;
-			color_attachments.count = 4;
+			color_attachments.count = 3;
 			
 			stream.color_attachments = color_attachments;
 			stream.depth_attachment_format = gpass::depth_buffer_format;

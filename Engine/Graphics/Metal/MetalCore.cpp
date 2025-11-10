@@ -10,6 +10,8 @@
 #include "MetalContent.h"
 #include "MetalLight.h"
 #include "MetalPreProcess.h"
+#include "MetalSSAO.h"
+#include "MetalSSGI.h"
 
 namespace primal::graphics::metal::core
 {
@@ -207,7 +209,6 @@ namespace primal::graphics::metal::core
             && gpass::initialize()
             && fx::initialize()
             && prepass::initialize()
-            && taa::initialize()
             && ssao::initialize()
             && ssgi::initialize()
             && content::initialize()
@@ -232,10 +233,9 @@ namespace primal::graphics::metal::core
         light::shutdown();
         content::shutdown();
         prepass::shutdown();
-        fx::shutdown();
-        taa::shutdown();
         ssao::shutdown();
         ssgi::shutdown();
+        fx::shutdown();
         gpass::shutdown();
         shader::shutdown();
 
@@ -311,10 +311,6 @@ namespace primal::graphics::metal::core
 
         gpass::set_size({ metal_info.surface_width, metal_info.surface_height });
 
-        fx::set_size({ metal_info.surface_width, metal_info.surface_height });
-
-        taa::set_size({ metal_info.surface_width, metal_info.surface_height });
-
         ssao::set_size({ metal_info.surface_width, metal_info.surface_height });
 
         ssgi::set_size({ metal_info.surface_width, metal_info.surface_height });
@@ -339,12 +335,6 @@ namespace primal::graphics::metal::core
 
             // Geometry pass
             gpass::render(cmd_buffer, metal_info);
-
-            // Compose pass
-            fx::compose_pass(cmd_buffer, metal_info);
-
-            // TAA pass
-            taa::taa_pass(cmd_buffer, metal_info);
 
             // SSAO pass
             ssao::ssao_pass(cmd_buffer, metal_info);

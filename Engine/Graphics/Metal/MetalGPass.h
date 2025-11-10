@@ -33,11 +33,10 @@ namespace primal::graphics::metal::gpass
     bool initialize();
 	void shutdown();
 
-    [[nodiscard]] const metal_render_texture& get_world_pos_buffer();
+    [[nodiscard]] const metal_render_texture& get_main_buffer();
     [[nodiscard]] const metal_texture& get_depth_buffer();
 	[[nodiscard]] const metal_render_texture& get_normal_depth_buffer();
 	[[nodiscard]] const metal_render_texture& get_albedo_buffer();
-	[[nodiscard]] const metal_render_texture& get_motion_vector_buffer();
     
     // NOTE: call this every frame before rendering anything in gpass
 	void set_size(math::u32v2 size);

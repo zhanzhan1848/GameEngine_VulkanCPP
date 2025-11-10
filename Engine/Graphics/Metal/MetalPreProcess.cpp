@@ -198,21 +198,11 @@ namespace primal::graphics::metal::prepass
             NS::Error* pError{ nullptr };
             MTL::RenderPipelineDescriptor* info{ MTL::RenderPipelineDescriptor::alloc()->init() };
 
-            // 获取阴影映射顶点着色器并检查有效性
-            auto vertex_shader = shader::get_engine_shader( shader::engine_shader::shadow_mapping_vs );
-            if (!vertex_shader.get()) {
-                info->release();
-                return false;
-            }
-
-            info->setVertexFunction( vertex_shader.get() );
+            info->setVertexFunction( shader::get_engine_shader( shader::engine_shader::shadow_mapping_vs ).get()  );
             info->setInputPrimitiveTopology(MTL::PrimitiveTopologyClassTriangle);
 			info->setDepthAttachmentPixelFormat(MTL::PixelFormat::PixelFormatDepth32Float);
             shadow_mapping_pipeline = device->newRenderPipelineState( info, &pError );
             MTL_CHECK_ERROR(pError)
-
-            // 为阴影映射管线状态设置名称
-            NAME_METAL_OBJECT(shadow_mapping_pipeline, "shadow_mapping_pipeline");
 
             info->release();
 
@@ -314,11 +304,7 @@ namespace primal::graphics::metal::prepass
 		}
 		argument_buffers.clear();
 
-        if(shadow_mapping_pipeline)
-        {
-            shadow_mapping_pipeline->release();
-            shadow_mapping_pipeline = nullptr;
-        }
+        shadow_mapping_pipeline->release();
     }
 
     const metal_render_texture& prepass_texture()
