@@ -359,14 +359,16 @@ using namespace primal::graphics::metal::shader;
 
 		constexpr engine_shader_info engine_shader_files[]
 		{
-			{ engine_shader::fullscreen_triangle_vs,		{ "FullScreenTriangle.metal", "FullScreenTriangleVS", shader_type::vertex } },
+			{ engine_shader::fullscreen_triangle_vs,		{ "FullScreenTriangle.metal", "fullscreen_triangle_vs", shader_type::vertex } },
 			// { engine_shader::fill_color_ps,					{ "FillColor.hlsl", "FillColorPS", shader_type::pixel } },
-			{ engine_shader::post_process_ps,				{ "PostProcess.metal", "PostProcessPS", shader_type::pixel } },
+			{ engine_shader::post_process_ps,				{ "PostProcess.metal", "post_process_ps", shader_type::pixel } },
 			{ engine_shader::shadow_mapping_vs,				{ "DepthPassShader.metal", "shadow_mapping_vs", shader_type::vertex } },
 			{ engine_shader::ssao_calculate,				{ "SSAOShader.metal", "ssao_pass", shader_type::compute } },
 			{ engine_shader::ssao_blur,						{ "SSAOShader.metal", "ssao_blur", shader_type::compute } },
 			{ engine_shader::ssgi_pass,						{ "SSGIShader.metal", "ssgi_pass", shader_type::compute } },
 			{ engine_shader::ssgi_blur,						{ "SSGIShader.metal", "ssgi_blur", shader_type::compute } },
+			{ engine_shader::taa_pass,						{ "TAAShader.metal", "taa_pass", shader_type::pixel } },
+			{ engine_shader::compose_pass,					{ "Compose.metal", "compose_pass", shader_type::pixel } },
 			// { engine_shader::grid_frustums_cs,				{ "GridFrustums.hlsl", "ComputeGridFrustumsCS", shader_type::compute } },
 			// { engine_shader::light_culling_cs,				{ "CullingLights.hlsl", "CullLightsCS", shader_type::compute } }
 		};

@@ -1,4 +1,4 @@
-name: PrimalEngine CI
+name: PrimalEngine CI (Reusable)
 
 # 文件级注释：
 # 该工作流定义了项目在 GitHub Actions 上的持续集成流程，覆盖 dev 与 feature/* 分支。
@@ -9,17 +9,11 @@ name: PrimalEngine CI
 # 注意：本工作流尽量依赖系统内置工具（clang、python、dotnet），不引入第三方库。
 
 on:
-  push:
-    branches:
-      - dev
-      - 'feature/**'
-      - 'ci/**'        # 新增：允许在 ci/cicd 等验证分支上推送即触发
-      - 'ci/cicd'      # 兼容单独命名分支
-  pull_request:
-    branches:
-      - dev
-      - 'feature/**'
-  workflow_dispatch:   # 新增：允许在GitHub界面手动触发工作流，便于验证
+  # 作为可复用工作流被其他分支调用
+  workflow_call:
+    inputs: {}
+  # 允许在 cicd 分支上手动触发以进行验证
+  workflow_dispatch:
 
 permissions:
   contents: write

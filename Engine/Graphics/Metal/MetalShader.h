@@ -17,7 +17,8 @@ namespace primal::graphics::metal::shader
 			ssao_blur,
 			ssgi_pass,
 			ssgi_blur,
-			
+			taa_pass,
+			compose_pass,
 
 			count
 		};

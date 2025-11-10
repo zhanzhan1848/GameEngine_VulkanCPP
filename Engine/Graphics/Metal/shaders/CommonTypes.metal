@@ -48,6 +48,17 @@ struct Cone
 	float	Radius;
 };
 
+struct Surface
+{
+	float3 BaseColor;
+	float Metallic;
+	float3 Normal;
+	float PerceptualRoughness;
+	float3 EmissiveColor;
+	float EmissiveIntensity;
+	float AmbientOcclusion;
+};
+
 #if USE_BOUNDING_SPHERES
 // Frustum cone in view space
 struct Frustum
