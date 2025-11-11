@@ -11,12 +11,14 @@ on:
       - main
       - dev
       - 'feature/**'
+      - 'features/**'
   pull_request:
     branches:
       - master
       - main
       - dev
       - 'feature/**'
+      - 'features/**'
 
 permissions:
   contents: write
