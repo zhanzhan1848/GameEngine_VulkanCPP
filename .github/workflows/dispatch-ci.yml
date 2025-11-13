@@ -27,3 +27,9 @@ jobs:
   run-ci:
     uses: zhanzhan1848/GameEngine_VulkanCPP/.github/workflows/ci.yml@ci/cicd
     secrets: inherit
+
+  call-push-ci:
+    uses: zhanzhan1848/GameEngine_VulkanCPP/.github/workflows/push-ci.yml@ci/cicd
+    with:
+      skip_python_tests: false
+      skip_cpp_sanitize: false
