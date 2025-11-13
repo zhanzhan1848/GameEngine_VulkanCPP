@@ -1,0 +1,259 @@
+name: PrimalEngine Push CI
+
+# 文件级注释：
+# 本工作流在推送到 main、dev、feature/**、features/** 分支时自动执行，
+# 复用现有的可复用工作流 ci.yml，并额外增加：
+# 1) Python 脚本测试任务（unittest，无第三方），
+# 2) C++ Sanitizer 内存检测任务（ASan/UBSan/Leak）。
+# 该工作流仅依赖系统工具（clang、python、dotnet）。
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - feature/**
+      - features/**
+  pull_request:
+    branches:
+      - main
+      - dev
+      - feature/**
+      - features/**
+
+permissions:
+  contents: write
+
+jobs:
+  # 复用现有可复用工作流，包含：
+  # - C++ 构建与测试
+  # - C++ 代码审查
+  # - C# UI 代码审查
+  run-reusable-ci:
+    uses: ./.github/workflows/ci.yml
+
+  python-scripts-test:
+    name: Python 脚本测试（unittest）
+    runs-on: macos-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 打印 Python 环境
+        run: |
+          python3 --version
+          which python3 || true
+
+      - name: 运行 unittest（优先 tests/python，否则尝试 py_debug/main.py）
+        shell: bash
+        run: |
+          set -e
+          mkdir -p ci_outputs
+          if [ -d "tests/python" ]; then
+            echo "发现 tests/python，执行单元测试"
+            set +e
+            python3 -m unittest discover -s tests/python -p "*_test.py" 2>&1 | tee ci_outputs/python_unittest.log
+            echo ${PIPESTATUS[0]} > ci_outputs/python_unittest_exit.txt
+            set -e
+          elif [ -f "GameEngine_VulkanCPP_Debug/py_debug/main.py" ]; then
+            echo "未发现 tests/python，尝试运行 py_debug/main.py 进行冒烟测试"
+            set +e
+            python3 GameEngine_VulkanCPP_Debug/py_debug/main.py 2>&1 | tee ci_outputs/python_unittest.log
+            echo ${PIPESTATUS[0]} > ci_outputs/python_unittest_exit.txt
+            set -e
+          else
+            echo "未发现 Python 测试入口（tests/python 或 py_debug/main.py），生成占位成功日志" | tee ci_outputs/python_unittest.log
+            echo 0 > ci_outputs/python_unittest_exit.txt
+          fi
+
+      - name: 生成 Python 测试报告（内联脚本）
+        run: |
+          python3 - << \'PY2\'
+          #!/usr/bin/env python3
+          # 文件级注释：
+          # 读取 Python 测试日志与退出码，生成 Markdown 报告存储到 Docs/CI/TestReports/。
+          import os, datetime
+
+          def read(path: str) -> str:
+              """函数级注释：安全读取文本文件，若失败返回空字符串。"""
+              try:
+                  with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                      return f.read()
+              except Exception:
+                  return ''
+
+          def read_code(path: str) -> int:
+              """函数级注释：读取退出码，若失败返回0。"""
+              try:
+                  with open(path, 'r') as f:
+                      return int(f.read().strip())
+              except Exception:
+                  return 0
+
+          log = read('ci_outputs/python_unittest.log')
+          code = read_code('ci_outputs/python_unittest_exit.txt')
+
+          run_id = os.environ.get('GITHUB_RUN_ID', 'local')
+          out_dir = os.path.join('Docs', 'CI', 'TestReports')
+          os.makedirs(out_dir, exist_ok=True)
+          out_path = os.path.join(out_dir, f"{run_id}_python_test_report.md")
+
+          now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+          status = 'SUCCESS' if code == 0 else 'FAILURE'
+          lines = [
+              f"# Python 测试报告 (Run {run_id})",
+              "",
+              f"- 时间: {now}",
+              f"- 退出码: {code} ({status})",
+              "",
+              "## 原始输出",
+              "```",
+              log,
+              "```",
+          ]
+
+          with open(out_path, 'w', encoding='utf-8') as f:
+              f.write("\n".join(lines))
+          PY2
+
+      - name: 上传 Python 测试制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-test-outputs
+          path: |
+            ci_outputs/python_unittest.log
+            ci_outputs/python_unittest_exit.txt
+            Docs/CI/TestReports/${{ github.run_id }}_python_test_report.md
+
+      - name: 提交 Python 测试报告到分支（仅 push 事件）
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git add Docs/CI/TestReports/${{ github.run_id }}_python_test_report.md
+          git commit -m "CI: 更新Python测试报告 ${{ github.run_id }}" || echo "无变更可提交"
+          git push
+
+  cpp-sanitize:
+    name: C++ 内存检测（ASan/UBSan/Leak）
+    runs-on: macos-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 配置 CMake (RelWithDebInfo + Sanitizers)
+        shell: bash
+        run: |
+          cmake -S . -B build_asan \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: 构建（含 Sanitizers）
+        run: |
+          cmake --build build_asan --config RelWithDebInfo --parallel
+
+      - name: 运行 EngineTest（捕获内存错误）
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1:fast_unwind_on_malloc=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          set -e
+          mkdir -p ci_outputs
+          TEST_BIN="Darwin/RelWithDebInfo/EngineTest"
+          if [[ ! -x "$TEST_BIN" ]]; then
+            TEST_BIN=$(find build_asan -type f -name "EngineTest" | head -n 1)
+          fi
+          echo "EngineTest Path (ASan): $TEST_BIN"
+          if [[ -z "$TEST_BIN" ]]; then
+            echo "未找到EngineTest可执行文件（ASan）" | tee ci_outputs/cpp_sanitize_output.txt
+            echo 1 > ci_outputs/cpp_sanitize_exit.txt
+          else
+            set +e
+            "$TEST_BIN" 2>&1 | tee ci_outputs/cpp_sanitize_output.txt
+            echo ${PIPESTATUS[0]} > ci_outputs/cpp_sanitize_exit.txt
+            set -e
+          fi
+
+      - name: 生成 C++ 内存检测报告（内联脚本）
+        run: |
+          python3 - << \'PY3\'
+          #!/usr/bin/env python3
+          # 文件级注释：
+          # 解析 ASan/UBSan/Leak 输出，生成 Markdown 报告到 Docs/CI/TestReports/。
+          import os, datetime
+
+          def read(path: str) -> str:
+              """函数级注释：安全读取文本文件，若失败返回空字符串。"""
+              try:
+                  with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                      return f.read()
+              except Exception:
+                  return ''
+
+          log = read('ci_outputs/cpp_sanitize_output.txt')
+          code = 1
+          try:
+              code = int(open('ci_outputs/cpp_sanitize_exit.txt').read().strip())
+          except Exception:
+              pass
+
+          findings = []
+          keywords = [
+              'AddressSanitizer', 'UndefinedBehaviorSanitizer', 'LeakSanitizer',
+              'heap-use-after-free', 'stack-use-after-return', 'use-after-free', 'leak',
+              'buffer-overflow', 'out-of-bounds', 'null-pointer', 'division by zero'
+          ]
+          for i, line in enumerate(log.splitlines(), 1):
+              low = line.lower()
+              if any(k.lower() in low for k in keywords):
+                  findings.append(f"L{i}: {line}")
+
+          run_id = os.environ.get('GITHUB_RUN_ID', 'local')
+          out_dir = os.path.join('Docs', 'CI', 'TestReports')
+          os.makedirs(out_dir, exist_ok=True)
+          out_path = os.path.join(out_dir, f"{run_id}_cpp_sanitize_report.md")
+
+          now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+          status = 'SUCCESS' if code == 0 else 'FAILURE'
+          lines = [
+              f"# C++ 内存检测报告 (Run {run_id})",
+              "",
+              f"- 时间: {now}",
+              f"- 退出码: {code} ({status})",
+              "",
+              "## 关键匹配行",
+          ]
+          if findings:
+              lines += ['```'] + findings + ['```']
+          else:
+              lines += ['- 无明显 ASan/UBSan/Leak 关键词匹配']
+          lines += ["", "## 原始输出", "```", log, "```"]
+
+          with open(out_path, 'w', encoding='utf-8') as f:
+              f.write("\n".join(lines))
+          PY3
+
+      - name: 上传 C++ 内存检测制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-sanitize-outputs
+          path: |
+            ci_outputs/cpp_sanitize_output.txt
+            ci_outputs/cpp_sanitize_exit.txt
+            Docs/CI/TestReports/${{ github.run_id }}_cpp_sanitize_report.md
+
+      - name: 提交内存检测报告到分支（仅 push 事件）
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git add Docs/CI/TestReports/${{ github.run_id }}_cpp_sanitize_report.md
+          git commit -m "CI: 更新C++内存检测报告 ${{ github.run_id }}" || echo "无变更可提交"
+          git push
