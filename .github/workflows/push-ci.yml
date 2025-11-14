@@ -1,22 +1,39 @@
-name: PrimalEngine Push CI
+name: PrimalEngine Push CI (Reusable)
 
 # 文件级注释：
-# 本工作流在推送到 main、dev、feature/**、features/** 分支时自动执行，
-# 复用现有的可复用工作流 ci.yml，并额外增加：
-# 1) Python 脚本测试任务（unittest，无第三方），
-# 2) C++ Sanitizer 内存检测任务（ASan/UBSan/Leak）。
-# 该工作流仅依赖系统工具（clang、python、dotnet）。
+# 本工作流既可在 push/PR 到 main、master、dev、feature/**、features/** 时自动执行，
+# 也可作为可复用工作流被其它工作流调用（workflow_call）。
+# 在复用本工作流时可通过 inputs 控制是否跳过 Python unittest 与 C++ Sanitizer 检测，
+# 并自动根据分支名解析 FEATURE_NAME（用于定位 tests/python/<feature-name>/ 与标注报告）。
+# 该工作流仅依赖系统工具（clang、python、dotnet），不引入第三方库。
 
 on:
+  workflow_call:
+    inputs:
+      skip_python_tests:
+        description: '跳过 Python 脚本测试（unittest）'
+        required: false
+        type: boolean
+      skip_cpp_sanitize:
+        description: '跳过 C++ Sanitizer 内存检测（ASan/UBSan/Leak）'
+        required: false
+        type: boolean
+      feature_name:
+        description: '可选：显式指定 feature 名（覆盖自动解析）'
+        required: false
+        type: string
+
   push:
     branches:
       - main
+      - master
       - dev
       - feature/**
       - features/**
   pull_request:
     branches:
       - main
+      - master
       - dev
       - feature/**
       - features/**
@@ -25,34 +42,71 @@ permissions:
   contents: write
 
 jobs:
-  # 复用现有可复用工作流，包含：
-  # - C++ 构建与测试
-  # - C++ 代码审查
-  # - C# UI 代码审查
   run-reusable-ci:
     uses: ./.github/workflows/ci.yml
 
-  python-scripts-test:
-    name: Python 脚本测试（unittest）
+  derive-feature-name:
+    name: 解析 FEATURE_NAME
     runs-on: macos-latest
+    outputs:
+      feature: ${{ steps.setenv.outputs.feature }}
+    steps:
+      - name: 计算 FEATURE_NAME（优先 inputs.feature_name，其次按分支名提取）
+        id: setenv
+        shell: bash
+        run: |
+          # 文件级注释：本步骤从分支名自动推导 FEATURE_NAME，并作为输出传递给后续任务。
+          # 函数级注释：解析逻辑——若输入存在则覆盖，否则从 github.ref_name 提取。
+          BR="${GITHUB_REF_NAME}"
+          FEAT="${{ inputs.feature_name }}"
+          if [ -z "${FEAT}" ]; then
+            if [[ "${BR}" == feature/* ]]; then
+              FEAT="${BR#feature/}"
+            elif [[ "${BR}" == features/* ]]; then
+              FEAT="${BR#features/}"
+            else
+              FEAT="${BR}"
+            fi
+          fi
+          echo "feature=${FEAT}" >> "$GITHUB_OUTPUT"
+
+  python-scripts-test:
+    name: Python 脚本测试（按分支目录）
+    needs: derive-feature-name
+    if: ${{ github.event_name != 'workflow_call' || inputs.skip_python_tests != true }}
+    runs-on: macos-latest
+    env:
+      FEATURE: ${{ needs.derive-feature-name.outputs.feature }}
+      RUN_ID: ${{ github.run_id }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      - name: 显示解析到的 FEATURE_NAME
+        run: echo "FEATURE_NAME=${{ env.FEATURE }}"
 
       - name: 打印 Python 环境
         run: |
           python3 --version
           which python3 || true
 
-      - name: 运行 unittest（优先 tests/python，否则尝试 py_debug/main.py）
+      - name: 运行 unittest（优先 tests/python/${FEATURE}，否则回退 tests/python，再次失败则冒烟或占位）
         shell: bash
+        env:
+          FEATURE: ${{ env.FEATURE }}
         run: |
           set -e
           mkdir -p ci_outputs
-          if [ -d "tests/python" ]; then
-            echo "发现 tests/python，执行单元测试"
+          if [ -d "tests/python/${FEATURE}" ]; then
+            echo "发现分支专属目录 tests/python/${FEATURE}，执行单元测试"
             set +e
-            python3 -m unittest discover -s tests/python -p "*_test.py" 2>&1 | tee ci_outputs/python_unittest.log
+            python3 -m unittest discover -s "tests/python/${FEATURE}" -p "*_test.py" 2>&1 | tee ci_outputs/python_unittest.log
+            echo ${PIPESTATUS[0]} > ci_outputs/python_unittest_exit.txt
+            set -e
+          elif [ -d "tests/python" ]; then
+            echo "未发现分支专属目录，回退执行 tests/python"
+            set +e
+            python3 -m unittest discover -s "tests/python" -p "*_test.py" 2>&1 | tee ci_outputs/python_unittest.log
             echo ${PIPESTATUS[0]} > ci_outputs/python_unittest_exit.txt
             set -e
           elif [ -f "GameEngine_VulkanCPP_Debug/py_debug/main.py" ]; then
@@ -66,12 +120,13 @@ jobs:
             echo 0 > ci_outputs/python_unittest_exit.txt
           fi
 
-      - name: 生成 Python 测试报告（内联脚本）
+      - name: 生成 Python 测试报告（含 FEATURE）
+        env:
+          FEATURE: ${{ env.FEATURE }}
         run: |
-          python3 - << \'PY2\'
+          python3 - << 'PY2'
           #!/usr/bin/env python3
-          # 文件级注释：
-          # 读取 Python 测试日志与退出码，生成 Markdown 报告存储到 Docs/CI/TestReports/。
+          # 文件级注释：读取日志与退出码，生成 Markdown 报告并包含 FEATURE。
           import os, datetime
 
           def read(path: str) -> str:
@@ -92,11 +147,12 @@ jobs:
 
           log = read('ci_outputs/python_unittest.log')
           code = read_code('ci_outputs/python_unittest_exit.txt')
-
           run_id = os.environ.get('GITHUB_RUN_ID', 'local')
+          feature = os.environ.get('FEATURE', 'unknown')
           out_dir = os.path.join('Docs', 'CI', 'TestReports')
           os.makedirs(out_dir, exist_ok=True)
-          out_path = os.path.join(out_dir, f"{run_id}_python_test_report.md")
+          out_name = f"{run_id}_{feature}_python_test_report.md"
+          out_path = os.path.join(out_dir, out_name)
 
           now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
           status = 'SUCCESS' if code == 0 else 'FAILURE'
@@ -104,6 +160,7 @@ jobs:
               f"# Python 测试报告 (Run {run_id})",
               "",
               f"- 时间: {now}",
+              f"- Feature: {feature}",
               f"- 退出码: {code} ({status})",
               "",
               "## 原始输出",
@@ -116,6 +173,12 @@ jobs:
               f.write("\n".join(lines))
           PY2
 
+      - name: 设置 Python 报告路径环境变量
+        run: |
+          REPORT_PY="Docs/CI/TestReports/${RUN_ID}_${FEATURE}"
+          REPORT_PY="${REPORT_PY}_python_test_report.md"
+          echo "REPORT_PY=${REPORT_PY}" >> "$GITHUB_ENV"
+
       - name: 上传 Python 测试制品
         uses: actions/upload-artifact@v4
         with:
@@ -123,7 +186,7 @@ jobs:
           path: |
             ci_outputs/python_unittest.log
             ci_outputs/python_unittest_exit.txt
-            Docs/CI/TestReports/${{ github.run_id }}_python_test_report.md
+            ${{ env.REPORT_PY }}
 
       - name: 提交 Python 测试报告到分支（仅 push 事件）
         if: ${{ github.event_name == 'push' }}
@@ -131,13 +194,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase
-          git add Docs/CI/TestReports/${{ github.run_id }}_python_test_report.md
-          git commit -m "CI: 更新Python测试报告 ${{ github.run_id }}" || echo "无变更可提交"
+          git add ${{ env.REPORT_PY }}
+          git commit -m "CI: Python报告 ${RUN_ID} [${FEATURE}]" || echo "无变更可提交"
           git push
 
   cpp-sanitize:
     name: C++ 内存检测（ASan/UBSan/Leak）
+    needs: derive-feature-name
+    if: ${{ github.event_name != 'workflow_call' || inputs.skip_cpp_sanitize != true }}
     runs-on: macos-latest
+    env:
+      FEATURE: ${{ needs.derive-feature-name.outputs.feature }}
+      RUN_ID: ${{ github.run_id }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -157,11 +225,12 @@ jobs:
         run: |
           cmake --build build_asan --config RelWithDebInfo --parallel
 
-      - name: 运行 EngineTest（捕获内存错误）
+      - name: 运行 EngineTest（捕获内存错误，传递 FEATURE 用于过滤）
         shell: bash
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1:fast_unwind_on_malloc=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          FEATURE: ${{ env.FEATURE }}
         run: |
           set -e
           mkdir -p ci_outputs
@@ -180,12 +249,13 @@ jobs:
             set -e
           fi
 
-      - name: 生成 C++ 内存检测报告（内联脚本）
+      - name: 生成 C++ 内存检测报告（含 FEATURE）
+        env:
+          FEATURE: ${{ env.FEATURE }}
         run: |
-          python3 - << \'PY3\'
+          python3 - << 'PY3'
           #!/usr/bin/env python3
-          # 文件级注释：
-          # 解析 ASan/UBSan/Leak 输出，生成 Markdown 报告到 Docs/CI/TestReports/。
+          # 文件级注释：解析 ASan/UBSan 输出并生成报告，标注 FEATURE。
           import os, datetime
 
           def read(path: str) -> str:
@@ -197,11 +267,10 @@ jobs:
                   return ''
 
           log = read('ci_outputs/cpp_sanitize_output.txt')
-          code = 1
           try:
               code = int(open('ci_outputs/cpp_sanitize_exit.txt').read().strip())
           except Exception:
-              pass
+              code = 1
 
           findings = []
           keywords = [
@@ -215,9 +284,11 @@ jobs:
                   findings.append(f"L{i}: {line}")
 
           run_id = os.environ.get('GITHUB_RUN_ID', 'local')
+          feature = os.environ.get('FEATURE', 'unknown')
           out_dir = os.path.join('Docs', 'CI', 'TestReports')
           os.makedirs(out_dir, exist_ok=True)
-          out_path = os.path.join(out_dir, f"{run_id}_cpp_sanitize_report.md")
+          out_name = f"{run_id}_{feature}_cpp_sanitize_report.md"
+          out_path = os.path.join(out_dir, out_name)
 
           now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
           status = 'SUCCESS' if code == 0 else 'FAILURE'
@@ -225,6 +296,7 @@ jobs:
               f"# C++ 内存检测报告 (Run {run_id})",
               "",
               f"- 时间: {now}",
+              f"- Feature: {feature}",
               f"- 退出码: {code} ({status})",
               "",
               "## 关键匹配行",
@@ -239,6 +311,12 @@ jobs:
               f.write("\n".join(lines))
           PY3
 
+      - name: 设置 C++ 报告路径环境变量
+        run: |
+          REPORT_CPP_SAN="Docs/CI/TestReports/${RUN_ID}_${FEATURE}"
+          REPORT_CPP_SAN="${REPORT_CPP_SAN}_cpp_sanitize_report.md"
+          echo "REPORT_CPP_SAN=${REPORT_CPP_SAN}" >> "$GITHUB_ENV"
+
       - name: 上传 C++ 内存检测制品
         uses: actions/upload-artifact@v4
         with:
@@ -246,7 +324,7 @@ jobs:
           path: |
             ci_outputs/cpp_sanitize_output.txt
             ci_outputs/cpp_sanitize_exit.txt
-            Docs/CI/TestReports/${{ github.run_id }}_cpp_sanitize_report.md
+            ${{ env.REPORT_CPP_SAN }}
 
       - name: 提交内存检测报告到分支（仅 push 事件）
         if: ${{ github.event_name == 'push' }}
@@ -254,6 +332,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase
-          git add Docs/CI/TestReports/${{ github.run_id }}_cpp_sanitize_report.md
-          git commit -m "CI: 更新C++内存检测报告 ${{ github.run_id }}" || echo "无变更可提交"
+          git add ${{ env.REPORT_CPP_SAN }}
+          git commit -m "CI: C++San报告 ${RUN_ID} [${FEATURE}]" || echo "无变更可提交"
           git push

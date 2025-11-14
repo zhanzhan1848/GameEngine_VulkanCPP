@@ -1,5 +1,6 @@
 .trae/
 .vscode/
+.venv/ s
 astc-encoder/
 build/
 ContentTools/
