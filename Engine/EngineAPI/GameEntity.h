@@ -3,6 +3,7 @@
 #include "Components/ComponentsCommon.h"
 #include "TransformComponent.h"
 #include "ScriptComponent.h"
+#include "MeshComponent.h"
 
 namespace primal {
 
@@ -19,6 +20,7 @@ namespace primal {
 
 			[[nodiscard]]  transform::component transform() const;
 			[[nodiscard]]  script::component script() const;
+			[[nodiscard]]  mesh::component mesh() const;
 
 			[[nodiscard]] math::v4 rotation() const { return transform().rotation(); }
 			[[nodiscard]] math::v3 orientation() const { return transform().orientation(); }

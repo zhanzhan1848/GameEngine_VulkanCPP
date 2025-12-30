@@ -12,13 +12,13 @@
 #define ENGINE_BINARY_DIR ""
 
 // 引擎资源目录
-#define ENGINE_ASSETS_DIR "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Debug/Assets"
+#define ENGINE_ASSETS_DIR "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Release/Assets"
 
 // 引擎着色器目录
-#define ENGINE_SHADERS_DIR "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Debug/Shaders"
+#define ENGINE_SHADERS_DIR "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Release/Shaders"
 
 // 引擎资源目录
-#define ENGINE_RESOURCES_DIR "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Debug/Resources"
+#define ENGINE_RESOURCES_DIR "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Release/Resources"
 
 // 版本信息
 #define ENGINE_VERSION_MAJOR 1

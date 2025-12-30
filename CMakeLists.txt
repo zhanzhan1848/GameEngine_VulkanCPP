@@ -125,7 +125,7 @@ else()
         -Wall
         -Wextra
         # -Werror
-        -fno-rtti              # 禁用RTTI
+        # -fno-rtti              # 禁用RTTI
         # -fno-exceptions        # 禁用异常处理
         -ffast-math           # 快速浮点计算
         -Wunused-parameter
@@ -152,10 +152,9 @@ add_subdirectory(EngineTest)
 # 设置构建顺序依赖
 add_dependencies(ContentTools Engine)
 add_dependencies(EngineDLL Engine ContentTools)
-add_dependencies(EngineTest Engine ContentTools EngineDLL)
 
 # 配置安装规则
-install(TARGETS Engine EngineDLL ContentTools EngineTest
+install(TARGETS Engine EngineDLL ContentTools
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib

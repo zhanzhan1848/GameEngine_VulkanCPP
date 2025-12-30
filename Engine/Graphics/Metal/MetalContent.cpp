@@ -1,5 +1,6 @@
 #include "MetalContent.h"
 
+#include <iostream>
 #include "MetalResource.h"
 #include "Utilities/IOStream.h"
 #include "Content/ContentToEngine.h"

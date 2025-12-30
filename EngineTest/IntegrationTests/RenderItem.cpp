@@ -1,9 +1,13 @@
+// 文件说明: RenderItem 测试与资源加载示例。
+// 新增: 基于 ECS 的 MeshComponent 用法示例函数，展示 CPU→GPU 的几何资源绑定与渲染项创建。
+// 平台: MacOS，渲染后端: Metal-CPP（框架参照 D3D12）。
 #include <filesystem>
 #include "CommonHeaders.h"
 #include "Content//ContentToEngine.h"
 #include "Graphics/Renderer.h"
 #include "ShaderCompilation.h"
 #include "Components/Entity.h"
+#include "Components/Mesh.h"
 #include "../ContentTools/Geometry.h"
 
 #include <thread>
@@ -298,6 +302,50 @@ id::id_type create_render_item(id::id_type entity_id)
 
 	return item_id;
 }
+
+// 函数说明: 使用 ECS MeshComponent 创建实体并在创建时绑定几何与材质。
+// 步骤概要:
+// 1) 并行加载模型与着色器，创建材质；
+// 2) 构造 Transform 与 Mesh 组件初始化信息；
+// 3) 通过 game_entity::create 创建实体（内部自动创建渲染项，无需显式调用 graphics::add_render_item）。
+// 返回: 新建实体的 id（与 MeshComponent 的 id 对齐）。
+// id::id_type create_entity_with_mesh_component_example()
+// {
+//     // 1) 并行加载资源（模型 + 着色器），随后创建材质
+//     memset(&texture_ids[0], 0xff, sizeof(id::id_type) * _countof(texture_ids));
+
+//     std::thread threads[]{
+//         std::thread{ [] { load_shaders_metal_gpass(); } },
+//         std::thread{ [] { load_model(); } }
+//     };
+//     for (auto& t : threads) { t.join(); }
+//     create_material();
+
+//     // 2) 组件初始化信息：Transform + Mesh
+//     transform::init_info tinfo{};
+//     tinfo.position[0] = 0.f; tinfo.position[1] = 0.f; tinfo.position[2] = 0.f;
+//     tinfo.rotation[0] = 0.f; tinfo.rotation[1] = 0.f; tinfo.rotation[2] = 0.f; tinfo.rotation[3] = 1.f;
+//     tinfo.scale[0] = 1.f; tinfo.scale[1] = 1.f; tinfo.scale[2] = 1.f;
+
+//     id::id_type materials[]{ mtl_id };
+//     mesh::init_info minfo{};
+//     minfo.geometry_content_id = model_id;        // Content 层创建的几何资源 id
+//     minfo.material_ids = &materials[0];          // 与几何 submesh 顺序一致
+//     minfo.material_count = _countof(materials);  // 本示例仅一个子网格/材质
+//     minfo.keep_cpu_copy = true;                  // 如需后续 CPU 优化与重上传
+//     minfo.lod_bias = 0.f;                        // LOD 策略示例参数
+//     minfo.forced_lod = -1;                       // -1: 自动选择
+
+//     game_entity::entity_info einfo{};
+//     einfo.transform = &tinfo;
+//     einfo.script = nullptr;
+//     einfo.mesh = &minfo;
+
+//     // 3) 创建实体（内部完成 Transform/Mesh 组件创建与渲染项绑定）
+//     const game_entity::entity e = game_entity::create(einfo);
+//     assert(e.is_valid());
+//     return id::id_type(e.get_id());
+// }
 
 void destory_render_item(id::id_type item_id)
 {

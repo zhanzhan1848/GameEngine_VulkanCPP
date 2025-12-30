@@ -382,11 +382,9 @@ GameEngine_VulkanCPP_Debug/
 *.metallib
 *.metalar
 *.ir
-astc-encoder/
 *.model
 *.texture
 EngineTest/assets/
-astc-encoder/
 .trae/
 
 TODO*

@@ -52,8 +52,21 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/GraphicsPlatformInterface.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Renderer.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Renderer.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/PlatformTraits.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/RHI.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/RHITypes.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/RHIEnums.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/PlatformEnumMapping.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Resources/Resource.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Resources/ResourceFactory.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Resources/RHITypeErased.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Core/RHIInterface.h"
     # "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/GraphicsHandle.hpp"
 )
+
+# 检查是否启用WebGPU支持
+option(ENABLE_WEBGPU "Enable WebGPU support via Dawn library" OFF)
+
 if(WIN32)
     file(GLOB_RECURSE GRAPHICS_SOURCES 
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.cpp"
@@ -65,12 +78,66 @@ elseif(APPLE)
     file(GLOB_RECURSE GRAPHICS_SOURCES 
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Metal/*.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Metal/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/Metal/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/Metal/*.h"
     )
 elseif(LINUX)
     file(GLOB_RECURSE GRAPHICS_SOURCES 
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
     )
+endif()
+
+# 添加WebGPU平台支持（如果启用）
+if(ENABLE_WEBGPU)
+    # 设置Dawn库路径
+    set(DAWN_ROOT_DIR ${CMAKE_SOURCE_DIR}/third_party/dawn)
+    
+    # 检查Dawn库是否存在
+    if(EXISTS ${DAWN_ROOT_DIR})
+        message(STATUS "Found Dawn library at: ${DAWN_ROOT_DIR}")
+        
+        # 添加Dawn库作为子项目
+        add_subdirectory(${DAWN_ROOT_DIR} third_party/dawn_build)
+        
+        # 设置Dawn库目标
+        set(DAWN_LIBRARIES
+            dawn_native
+            dawn_proc
+            dawn_wire
+            dawn_platform
+            dawn_common
+            dawn_utils
+        )
+        
+        # 设置Dawn包含目录
+        set(DAWN_INCLUDE_DIRS
+            ${DAWN_ROOT_DIR}/include
+            ${DAWN_ROOT_DIR}/src
+            ${DAWN_ROOT_DIR}/src/include
+            ${DAWN_ROOT_DIR}/gen
+        )
+        
+        # 收集WebGPU平台源文件
+        file(GLOB_RECURSE WEBGPU_SOURCES 
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/WebGPU/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/WebGPU/*.cpp"
+        )
+        
+        # 将WebGPU源文件添加到图形源文件列表
+        list(APPEND GRAPHICS_SOURCES ${WEBGPU_SOURCES})
+        
+        # 添加WebGPU平台定义
+        add_definitions(-DENABLE_WEBGPU=1)
+        
+        message(STATUS "WebGPU platform configured successfully")
+    else()
+        message(WARNING "Dawn library not found at: ${DAWN_ROOT_DIR}")
+        message(WARNING "WebGPU support will be disabled")
+        set(ENABLE_WEBGPU OFF)
+    endif()
+else()
+    message(STATUS "WebGPU support disabled")
 endif()
 
 # 收集通用源文件（排除平台特定文件）
@@ -233,7 +300,7 @@ else()
             -Wextra
             -ffast-math
             -fno-exceptions
-            -fno-rtti
+            # -fno-rtti
             -fno-strict-aliasing  # 放宽别名规则
             -msse4.2              # 启用SSE4.2指令集
             -mavx                 # 启用AVX指令集
@@ -246,7 +313,7 @@ else()
             -Wextra
             -ffast-math
             -fno-exceptions
-            -fno-rtti
+            # -fno-rtti
             -fvisibility=hidden
         )
     endif()
@@ -307,6 +374,75 @@ elseif(APPLE)
     #     ${ACCELERATE}
     # )
     
+endif()
+
+# === moodycamel::ConcurrentQueue 支持 ===
+
+# 设置moodycamel库路径
+set(MOODYCAMEL_ROOT_DIR ${CMAKE_SOURCE_DIR}/third_party/moodycamel-ConcurrentQueue)
+
+# 检查moodycamel库是否存在
+if(EXISTS ${MOODYCAMEL_ROOT_DIR})
+    message(STATUS "Found moodycamel ConcurrentQueue at: ${MOODYCAMEL_ROOT_DIR}")
+    
+    # 设置moodycamel包含目录
+    set(MOODYCAMEL_INCLUDE_DIRS ${MOODYCAMEL_ROOT_DIR})
+    
+    # 添加moodycamel包含目录
+    target_include_directories(${PROJECT_NAME} PRIVATE ${MOODYCAMEL_INCLUDE_DIRS})
+    
+    # 添加moodycamel相关编译定义
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        ENABLE_MOODYCAMEL_CONCURRENT_QUEUE=1
+    )
+    
+    message(STATUS "moodycamel ConcurrentQueue configured successfully")
+else()
+    message(WARNING "moodycamel ConcurrentQueue not found at: ${MOODYCAMEL_ROOT_DIR}")
+    message(WARNING "MPSC queue performance will be degraded")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        ENABLE_MOODYCAMEL_CONCURRENT_QUEUE=0
+    )
+endif()
+
+# 添加WebGPU/Dawn库支持（如果启用）
+if(ENABLE_WEBGPU)
+    # 添加Dawn包含目录
+    target_include_directories(${PROJECT_NAME} PRIVATE ${DAWN_INCLUDE_DIRS})
+    
+    # 链接Dawn库
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${DAWN_LIBRARIES})
+    
+    # 根据平台添加特定的Dawn依赖
+    if(WIN32)
+        # Windows特定依赖
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            d3d12
+            dxgi
+            dxguid
+        )
+    elseif(APPLE)
+        # macOS特定依赖
+        find_library(METAL_LIBRARY Metal)
+        find_library(QUARTZCORE_LIBRARY QuartzCore)
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            ${METAL_LIBRARY}
+            ${QUARTZCORE_LIBRARY}
+        )
+    elseif(UNIX)
+        # Linux特定依赖
+        find_package(X11 REQUIRED)
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            ${X11_LIBRARIES}
+            pthread
+            dl
+        )
+    endif()
+    
+    # 添加WebGPU平台定义
+    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+        PLATFORM_WEBGPU=1
+    )
 endif()
 
 # 输出目录
