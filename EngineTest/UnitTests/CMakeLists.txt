@@ -38,6 +38,15 @@ set_target_properties(StandaloneRHI_Resource_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_Resource_Test PRIVATE DEBUG _DEBUG)
 
+# 创建RHI自适应内存池测试
+add_executable(StandaloneRHI_AdaptiveMemoryPool_Test RHI/Core/TestRHIAdaptiveMemoryPool.cpp)
+# 不依赖任何Engine头文件或库，完全独立
+add_test(NAME StandaloneRHI_AdaptiveMemoryPool_Test COMMAND StandaloneRHI_AdaptiveMemoryPool_Test)
+set_target_properties(StandaloneRHI_AdaptiveMemoryPool_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_AdaptiveMemoryPool_Test PRIVATE DEBUG _DEBUG)
+
 # 创建RHI命令队列测试
 add_executable(StandaloneRHI_Queue_Test RHI/Core/TestRHIQueue.cpp)
 # 不依赖任何Engine头文件或库，完全独立
@@ -81,11 +90,12 @@ add_test(NAME MpscQueueSimpleTest COMMAND MpscQueueSimpleTest)
 # 创建测试集合目标
 # ======================
 
-# 创建一个宏来运行所有RHI测试
+## 创建一个宏来运行所有RHI测试
 add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_Test
     COMMAND StandaloneRHI_Device_Test
     COMMAND StandaloneRHI_Resource_Test
+    COMMAND StandaloneRHI_AdaptiveMemoryPool_Test
     COMMAND StandaloneRHI_Queue_Test
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
@@ -96,6 +106,7 @@ set_target_properties(StandaloneRHI_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Device_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Resource_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Queue_Test PROPERTIES FOLDER "Tests/RHI")
+set_target_properties(StandaloneRHI_AdaptiveMemoryPool_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(MpscQueueSimpleTest PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(RHI_All_Tests PROPERTIES FOLDER "Tests/RHI")
 
