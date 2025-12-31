@@ -9,10 +9,8 @@
 
 #pragma once
 
+#include "CommonHeaders.h"
 #include "RHITypes.h"
-#include "../../../Utilities/Vector.h"
-#include "../../../Utilities/MathTypes.h"
-#include "../../../Utilities/Math.h"
 
 namespace primal::graphics::rhi::math {
 

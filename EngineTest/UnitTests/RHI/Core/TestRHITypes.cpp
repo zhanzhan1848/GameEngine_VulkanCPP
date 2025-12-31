@@ -1,33 +1,89 @@
 /**
  * @file TestRHITypes.cpp
  * @brief RHI类型系统独立测试
- * @note 完全独立的测试文件，不依赖任何Engine头文件
+ * @note 严格遵循项目技术规范，基于CommonHeaders.h，完全移除string/iostream依赖
  */
 
-#include <iostream>
-#include <fstream>
-#include <vector>
+#include "CommonHeaders.h"
+#include <cstdio>
 #include <cstdint>
-#include <string>
+// === 测试框架定义 ===
 
-// 测试结果输出到文件的宏
+/**
+ * @brief 测试输出句柄
+ * @details 使用C标准IO，完全避免iostream依赖
+ */
+static FILE* g_testOutput = nullptr;
+
+/**
+ * @brief 初始化测试输出
+ */
+static bool InitTestOutput(const char* filename) {
+    if (!filename) {
+        g_testOutput = stdout;
+        return true;
+    }
+    g_testOutput = fopen(filename, "w");
+    return g_testOutput != nullptr;
+}
+
+/**
+ * @brief 关闭测试输出
+ */
+static void CloseTestOutput() {
+    if (g_testOutput && g_testOutput != stdout) {
+        fclose(g_testOutput);
+        g_testOutput = nullptr;
+    }
+}
+
+/**
+ * @brief 测试断言宏（相等检查）
+ */
 #define TEST_ASSERT_EQ(a, b, msg) \
     do { \
         if ((a) != (b)) { \
-            output << "✗ " << msg << " (expected: " << static_cast<uint64_t>(b) << ", actual: " << static_cast<uint64_t>(a) << ")" << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✗ %s (expected: %llu, actual: %llu)\n", \
+                        msg, static_cast<unsigned long long>(b), static_cast<unsigned long long>(a)); \
+                fflush(g_testOutput); \
+            } \
             return false; \
         } else { \
-            output << "✓ " << msg << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✓ %s\n", msg); \
+                fflush(g_testOutput); \
+            } \
         } \
     } while(0)
 
+/**
+ * @brief 测试断言宏（真值检查）
+ */
 #define TEST_ASSERT_TRUE(cond, msg) \
     do { \
         if (!(cond)) { \
-            output << "✗ " << msg << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✗ %s\n", msg); \
+                fflush(g_testOutput); \
+            } \
             return false; \
         } else { \
-            output << "✓ " << msg << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✓ %s\n", msg); \
+                fflush(g_testOutput); \
+            } \
+        } \
+    } while(0)
+
+/**
+ * @brief 输出测试标题
+ */
+#define TEST_SECTION(title) \
+    do { \
+        if (g_testOutput) { \
+            fprintf(g_testOutput, "=== %s ===\n", title); \
+            fflush(g_testOutput); \
         } \
     } while(0)
 
@@ -161,20 +217,20 @@ struct BufferDesc {
 
 using namespace primal::graphics::rhi;
 
-// 测试函数声明
-bool TestHandleTypes(std::ofstream& output);
-bool TestEnums(std::ofstream& output);
-bool TestStructs(std::ofstream& output);
-bool TestResourceTypes(std::ofstream& output);
-bool TestPixelFormat(std::ofstream& output);
-bool TestDescriptorTypes(std::ofstream& output);
-bool TestSamplerStates(std::ofstream& output);
+// === 测试函数声明 ===
+bool TestHandleTypes();
+bool TestEnums();
+bool TestStructs();
+bool TestResourceTypes();
+bool TestPixelFormat();
+bool TestDescriptorTypes();
+bool TestSamplerStates();
 
 /**
  * @brief 测试句柄类型定义
  */
-bool TestHandleTypes(std::ofstream& output) {
-    output << "=== 测试句柄类型定义 ===" << std::endl;
+bool TestHandleTypes() {
+    TEST_SECTION("测试句柄类型定义");
     
     // 测试句柄大小
     TEST_ASSERT_EQ(sizeof(RHIDeviceHandle), 8, "RHIDeviceHandle应该为8字节");
@@ -188,15 +244,18 @@ bool TestHandleTypes(std::ofstream& output) {
     RHIResourceHandle resourceHandle = 2;
     TEST_ASSERT_TRUE(deviceHandle != resourceHandle, "不同类型句柄应该有不同的值");
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试枚举类型定义
  */
-bool TestEnums(std::ofstream& output) {
-    output << "=== 测试枚举类型定义 ===" << std::endl;
+bool TestEnums() {
+    TEST_SECTION("测试枚举类型定义");
     
     // 测试资源类型枚举
     TEST_ASSERT_EQ(static_cast<int>(ResourceType::Buffer), 0, "Buffer类型值应该为0");
@@ -210,15 +269,18 @@ bool TestEnums(std::ofstream& output) {
     TEST_ASSERT_EQ(static_cast<uint32_t>(ResourceUsage::Dynamic), 0x00000002, "Dynamic使用标志应该为2");
     TEST_ASSERT_EQ(static_cast<uint32_t>(ResourceUsage::Staging), 0x00000004, "Staging使用标志应该为4");
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试结构体定义
  */
-bool TestStructs(std::ofstream& output) {
-    output << "=== 测试结构体定义 ===" << std::endl;
+bool TestStructs() {
+    TEST_SECTION("测试结构体定义");
     
     // 测试TextureDesc结构体
     TextureDesc texDesc;
@@ -237,15 +299,18 @@ bool TestStructs(std::ofstream& output) {
     TEST_ASSERT_EQ(bufDesc.usage, ResourceUsage::Default, "BufferDesc默认usage应该为Default");
     TEST_ASSERT_EQ(bufDesc.binding, ResourceBinding::None, "BufferDesc默认binding应该为None");
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试资源类型组合
  */
-bool TestResourceTypes(std::ofstream& output) {
-    output << "=== 测试资源类型组合 ===" << std::endl;
+bool TestResourceTypes() {
+    TEST_SECTION("测试资源类型组合");
     
     // 创建纹理描述
     TextureDesc texture2D;
@@ -271,15 +336,18 @@ bool TestResourceTypes(std::ofstream& output) {
     TEST_ASSERT_EQ(constantBuffer.usage, ResourceUsage::Dynamic, "缓冲区使用应该为Dynamic");
     TEST_ASSERT_EQ(constantBuffer.binding, ResourceBinding::ConstantBuffer, "缓冲区绑定应该为ConstantBuffer");
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试像素格式
  */
-bool TestPixelFormat(std::ofstream& output) {
-    output << "=== 测试像素格式 ===" << std::endl;
+bool TestPixelFormat() {
+    TEST_SECTION("测试像素格式");
     
     // 测试像素格式枚举值
     TEST_ASSERT_EQ(static_cast<int>(PixelFormat::Unknown), 0, "Unknown格式应该为0");
@@ -293,19 +361,23 @@ bool TestPixelFormat(std::ofstream& output) {
     
     // 测试深度格式识别
     PixelFormat depthFormats[] = {PixelFormat::D24_UNorm_S8_UInt, PixelFormat::D32_Float};
-    for (auto format : depthFormats) {
+    for (uint32_t i = 0; i < 2; ++i) {
+        PixelFormat format = depthFormats[i];
         TEST_ASSERT_TRUE(format == PixelFormat::D24_UNorm_S8_UInt || format == PixelFormat::D32_Float, "应该是深度格式");
     }
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试描述符类型
  */
-bool TestDescriptorTypes(std::ofstream& output) {
-    output << "=== 测试描述符类型 ===" << std::endl;
+bool TestDescriptorTypes() {
+    TEST_SECTION("测试描述符类型");
     
     // 测试描述符堆类型
     TEST_ASSERT_EQ(static_cast<int>(DescriptorHeapType::CBV_SRV_UAV), 0, "CBV_SRV_UAV应该为0");
@@ -317,15 +389,18 @@ bool TestDescriptorTypes(std::ofstream& output) {
     // 测试描述符堆数量
     TEST_ASSERT_TRUE(static_cast<int>(DescriptorHeapType::NumTypes) == 4, "描述符堆类型总数应该为4");
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试采样器状态
  */
-bool TestSamplerStates(std::ofstream& output) {
-    output << "=== 测试采样器状态 ===" << std::endl;
+bool TestSamplerStates() {
+    TEST_SECTION("测试采样器状态");
     
     // 测试过滤器类型
     TEST_ASSERT_EQ(static_cast<int>(FilterType::Point), 0, "Point过滤器应该为0");
@@ -343,7 +418,10 @@ bool TestSamplerStates(std::ofstream& output) {
     TEST_ASSERT_EQ(static_cast<int>(ComparisonFunc::Never), 0, "Never比较应该为0");
     TEST_ASSERT_EQ(static_cast<int>(ComparisonFunc::Always), 7, "Always比较应该为7");
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
@@ -351,34 +429,45 @@ bool TestSamplerStates(std::ofstream& output) {
  * @brief 主测试函数
  */
 int main() {
-    std::ofstream output("rhi_test_results.txt");
-    if (!output.is_open()) {
-        std::cout << "无法创建输出文件" << std::endl;
+    // 初始化测试输出
+    if (!InitTestOutput("rhi_test_results.txt")) {
         return 1;
     }
     
-    output << "🚀 开始RHI类型系统独立测试" << std::endl;
-    output << "测试时间: " << __DATE__ << " " << __TIME__ << std::endl << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "🚀 开始RHI类型系统独立测试\n");
+        fprintf(g_testOutput, "测试时间: %s %s\n\n", __DATE__, __TIME__);
+        fflush(g_testOutput);
+    }
     
     bool allPassed = true;
     
     // 运行所有测试
-    allPassed &= TestHandleTypes(output);
-    allPassed &= TestEnums(output);
-    allPassed &= TestStructs(output);
-    allPassed &= TestResourceTypes(output);
-    allPassed &= TestPixelFormat(output);
-    allPassed &= TestDescriptorTypes(output);
-    allPassed &= TestSamplerStates(output);
+    allPassed &= TestHandleTypes();
+    allPassed &= TestEnums();
+    allPassed &= TestStructs();
+    allPassed &= TestResourceTypes();
+    allPassed &= TestPixelFormat();
+    allPassed &= TestDescriptorTypes();
+    allPassed &= TestSamplerStates();
     
-    output << "=== 测试总结 ===" << std::endl;
-    if (allPassed) {
-        output << "🎉 所有RHI类型系统测试通过！" << std::endl;
-        std::cout << "✅ 测试完成，所有测试通过！结果已保存到 rhi_test_results.txt" << std::endl;
-        return 0;
-    } else {
-        output << "❌ 部分测试失败" << std::endl;
-        std::cout << "❌ 测试完成，部分测试失败。结果已保存到 rhi_test_results.txt" << std::endl;
-        return 1;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "=== 测试总结 ===\n");
+        if (allPassed) {
+            fprintf(g_testOutput, "🎉 所有RHI类型系统测试通过！\n");
+        } else {
+            fprintf(g_testOutput, "❌ 部分测试失败\n");
+        }
+        fflush(g_testOutput);
     }
+    
+    // 输出最终结果到控制台
+    if (allPassed) {
+        printf("✅ 测试完成，所有测试通过！结果已保存到 rhi_test_results.txt\n");
+    } else {
+        printf("❌ 测试完成，部分测试失败。结果已保存到 rhi_test_results.txt\n");
+    }
+    
+    CloseTestOutput();
+    return allPassed ? 0 : 1;
 }

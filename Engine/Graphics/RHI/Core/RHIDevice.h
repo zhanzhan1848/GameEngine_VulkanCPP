@@ -9,8 +9,8 @@
 
 #pragma once
 
+#include "CommonHeaders.h"
 #include "RHITypes.h"
-#include "../../../Utilities/Vector.h"
 
 namespace primal::graphics::rhi {
 

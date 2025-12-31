@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <cstring>
+#include <atomic>
 
 #if defined(_WIN64)
 #include <DirectXMath.h>

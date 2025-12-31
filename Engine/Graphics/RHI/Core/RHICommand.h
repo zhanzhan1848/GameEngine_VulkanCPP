@@ -9,11 +9,9 @@
 
 #pragma once
 
+#include "CommonHeaders.h"
 #include "RHITypes.h"
 #include "RHIResource.h"
-#include "../../../Utilities/Vector.h"
-#include <atomic>
-#include <memory>
 
 namespace primal::graphics::rhi {
 
@@ -106,16 +104,16 @@ struct RenderPassDesc {
     struct Attachment {
         ResourceHandle texture;           ///< 渲染目标纹理
         DataFormat format;                ///< 数据格式
-        LoadAction loadOp;                ///< 加载操作
-        StoreAction storeOp;              ///< 存储操作
+        MTL::LoadAction loadOp;                ///< 加载操作
+        MTL::StoreAction storeOp;              ///< 存储操作
         ClearValue clearValue;            ///< 清除值
-        SampleCount sampleCount;           ///< 采样数量
+        u32 sampleCount;           ///< 采样数量
         uint8_t mipLevel;                 ///< Mip层级
         uint16_t arrayLayer;              ///< 数组层级
         
         Attachment() : texture(handles::INVALID_RESOURCE), format(DataFormat::Unknown),
-                      loadOp(LoadAction::DontCare), storeOp(StoreAction::DontCare),
-                      sampleCount(SampleCount::Count1), mipLevel(0), arrayLayer(0) {}
+                      loadOp(MTL::LoadAction::DontCare), storeOp(MTL::StoreAction::Store),
+                      sampleCount(1), mipLevel(0), arrayLayer(0) {}
     };
     
     utl::vector<Attachment> colorAttachments;   ///< 颜色附件

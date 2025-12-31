@@ -9,10 +9,8 @@
 
 #pragma once
 
+#include "CommonHeaders.h"
 #include "RHITypes.h"
-#include "../../../Utilities/Vector.h"
-#include <atomic>
-#include <memory>
 
 namespace primal::graphics::rhi {
 

@@ -47,32 +47,35 @@ set_target_properties(StandaloneRHI_Queue_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_Queue_Test PRIVATE DEBUG _DEBUG)
 
-# 创建MPSC队列性能测试（需要Engine库支持）
-add_executable(MpscQueuePerformanceTest MpscQueuePerformanceTest.cpp)
-# 需要链接Engine库来使用RHI类
-target_link_libraries(MpscQueuePerformanceTest PRIVATE Engine)
-add_test(NAME MpscQueuePerformanceTest COMMAND MpscQueuePerformanceTest)
-set_target_properties(MpscQueuePerformanceTest PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
-)
-target_compile_definitions(MpscQueuePerformanceTest PRIVATE DEBUG _DEBUG)
-# 包含Engine头文件
-target_include_directories(MpscQueuePerformanceTest PRIVATE
-    ${CMAKE_SOURCE_DIR}/Engine
-    ${CMAKE_SOURCE_DIR}
-)
 
-# MPSC队列简化验证测试 (仅测试 moodycamel)
-add_executable(SimpleMpscTest SimpleMpscTest.cpp)
-target_include_directories(SimpleMpscTest PRIVATE 
+
+# 设置moodycamel库路径
+set(MOODYCAMEL_ROOT ${CMAKE_SOURCE_DIR}/third_party/moodycamel-ConcurrentQueue)
+set(MOODYCAMEL_INCLUDE_DIRS ${MOODYCAMEL_ROOT})
+
+# MPSC队列简化验证测试 (符合技术规范)
+add_executable(MpscQueueSimpleTest MpscQueueSimpleTest.cpp)
+# 包含头文件目录
+target_include_directories(MpscQueueSimpleTest PRIVATE 
     ${MOODYCAMEL_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
 )
-set_target_properties(SimpleMpscTest PROPERTIES
+# 设置编译定义
+target_compile_definitions(MpscQueueSimpleTest PRIVATE 
+    DEBUG 
+    _DEBUG
+)
+set_target_properties(MpscQueueSimpleTest PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
+# 添加pthread支持
+target_link_libraries(MpscQueueSimpleTest PRIVATE pthread)
+# 添加到测试集合
+add_test(NAME MpscQueueSimpleTest COMMAND MpscQueueSimpleTest)
 
 # ======================
 # 创建测试集合目标
@@ -84,7 +87,7 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_Device_Test
     COMMAND StandaloneRHI_Resource_Test
     COMMAND StandaloneRHI_Queue_Test
-    COMMAND SimpleMpscTest
+    COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
 
@@ -93,8 +96,7 @@ set_target_properties(StandaloneRHI_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Device_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Resource_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Queue_Test PROPERTIES FOLDER "Tests/RHI")
-set_target_properties(MpscQueuePerformanceTest PROPERTIES FOLDER "Tests/RHI")
-set_target_properties(SimpleMpscTest PROPERTIES FOLDER "Tests/RHI")
+set_target_properties(MpscQueueSimpleTest PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(RHI_All_Tests PROPERTIES FOLDER "Tests/RHI")
 
 # 输出构建信息

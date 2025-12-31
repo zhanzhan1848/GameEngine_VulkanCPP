@@ -9,8 +9,7 @@
 
 #pragma once
 
-#include "../../../Common/PrimitiveTypes.h"
-#include "../../../Utilities/MathTypes.h"
+#include "CommonHeaders.h"
 
 namespace primal::graphics::rhi {
 

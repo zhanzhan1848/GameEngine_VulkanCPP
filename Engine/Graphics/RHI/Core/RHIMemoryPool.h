@@ -9,12 +9,9 @@
 
 #pragma once
 
+#include "CommonHeaders.h"
 #include "RHITypes.h"
-#include "../../../Utilities/Vector.h"
-#include <atomic>
-#include <mutex>
-#include <unordered_map>
-#include <memory>
+
 
 namespace primal::graphics::rhi {
 

@@ -9,15 +9,11 @@
 
 #pragma once
 
+#include "CommonHeaders.h"
 #include "RHITypes.h"
 #include "RHICommand.h"
-#include "../../../Utilities/Vector.h"
-#include <atomic>
-#include <mutex>
 #include <condition_variable>
 #include <thread>
-#include <memory>
-#include <unordered_map>
 
 // 集成moodycamel::ConcurrentQueue
 #include "../../../../third_party/moodycamel-ConcurrentQueue/concurrentqueue.h"
@@ -213,7 +209,7 @@ public:
                 Stop();
             }
             
-            device_ = other.device_;
+            device_ = std::move(other.device_);
             config_ = std::move(other.config_);
             stats_ = other.stats_;
             running_.store(other.running_.load());

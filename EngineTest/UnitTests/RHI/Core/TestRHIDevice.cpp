@@ -1,44 +1,98 @@
 /**
  * @file TestRHIDevice.cpp
  * @brief RHI设备管理独立测试
- * @note 完全独立的测试文件，不依赖任何Engine头文件
+ * @note 严格遵循项目技术规范，基于CommonHeaders.h，完全移除string/iostream依赖
  */
 
-#include <iostream>
-#include <fstream>
-#include <vector>
+#include "CommonHeaders.h"
+#include <cstdio>
 #include <cstdint>
-#include <string>
-#include <cassert>
+#include <cstring>
 
-// 测试结果输出到文件的宏
+// === 测试框架定义 ===
+static FILE* g_testOutput = nullptr;
+
+/**
+ * @brief 初始化测试输出
+ * @param filename 输出文件名
+ * @return 是否成功初始化
+ */
+bool InitTestOutput(const char* filename) {
+    g_testOutput = fopen(filename, "w");
+    if (!g_testOutput) {
+        printf("无法创建输出文件: %s\n", filename);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief 关闭测试输出
+ */
+void CloseTestOutput() {
+    if (g_testOutput) {
+        fclose(g_testOutput);
+        g_testOutput = nullptr;
+    }
+}
+
+/**
+ * @brief 测试节输出
+ */
+#define TEST_SECTION(name) \
+    do { \
+        if (g_testOutput) { \
+            fprintf(g_testOutput, "=== %s ===\n", name); \
+            fflush(g_testOutput); \
+        } \
+    } while(0)
+
+// 测试断言宏
 #define TEST_ASSERT_EQ(a, b, msg) \
     do { \
         if ((a) != (b)) { \
-            output << "✗ " << msg << " (expected: " << static_cast<uint64_t>(b) << ", actual: " << static_cast<uint64_t>(a) << ")" << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✗ %s (expected: %llu, actual: %llu)\n", msg, static_cast<unsigned long long>(b), static_cast<unsigned long long>(a)); \
+                fflush(g_testOutput); \
+            } \
             return false; \
         } else { \
-            output << "✓ " << msg << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✓ %s\n", msg); \
+                fflush(g_testOutput); \
+            } \
         } \
     } while(0)
 
 #define TEST_ASSERT_TRUE(cond, msg) \
     do { \
         if (!(cond)) { \
-            output << "✗ " << msg << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✗ %s\n", msg); \
+                fflush(g_testOutput); \
+            } \
             return false; \
         } else { \
-            output << "✓ " << msg << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✓ %s\n", msg); \
+                fflush(g_testOutput); \
+            } \
         } \
     } while(0)
 
 #define TEST_ASSERT_NULL(ptr, msg) \
     do { \
         if ((ptr) != nullptr) { \
-            output << "✗ " << msg << " (expected: nullptr, actual: " << static_cast<const void*>(ptr) << ")" << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✗ %s (expected: nullptr, actual: %p)\n", msg, static_cast<const void*>(ptr)); \
+                fflush(g_testOutput); \
+            } \
             return false; \
         } else { \
-            output << "✓ " << msg << std::endl; \
+            if (g_testOutput) { \
+                fprintf(g_testOutput, "✓ %s\n", msg); \
+                fflush(g_testOutput); \
+            } \
         } \
     } while(0)
 
@@ -116,8 +170,11 @@ public:
     explicit MockDevice(const DeviceDesc& desc) : desc_(desc), isValid_(false), currentFrame_(0) {
         // 模拟设备信息
         info_.platform = desc.platform;
-        strcpy(info_.deviceName, "Mock RHI Device");
-        strcpy(info_.driverVersion, "1.0.0");
+        // 使用memcpy替代strcpy，符合性能规范
+        const char* deviceName = "Mock RHI Device";
+        const char* driverVersion = "1.0.0";
+        memcpy(info_.deviceName, deviceName, strlen(deviceName) + 1);
+        memcpy(info_.driverVersion, driverVersion, strlen(driverVersion) + 1);
         info_.dedicatedVideoMemory = 8ULL * 1024 * 1024 * 1024; // 8GB
         info_.sharedSystemMemory = 16ULL * 1024 * 1024 * 1024; // 16GB
         info_.maxTexture1DSize = 16384;
@@ -178,19 +235,19 @@ public:
 using namespace primal::graphics::rhi;
 
 // 测试函数声明
-bool TestDeviceDesc(std::ofstream& output);
-bool TestDeviceInfo(std::ofstream& output);
-bool TestDeviceCreation(std::ofstream& output);
-bool TestDeviceLifecycle(std::ofstream& output);
-bool TestDeviceFrameManagement(std::ofstream& output);
-bool TestDeviceCapabilities(std::ofstream& output);
-bool TestDeviceValidation(std::ofstream& output);
+bool TestDeviceDesc();
+bool TestDeviceInfo();
+bool TestDeviceCreation();
+bool TestDeviceLifecycle();
+bool TestDeviceFrameManagement();
+bool TestDeviceCapabilities();
+bool TestDeviceValidation();
 
 /**
  * @brief 测试设备描述符
  */
-bool TestDeviceDesc(std::ofstream& output) {
-    output << "=== 测试设备描述符 ===" << std::endl;
+bool TestDeviceDesc() {
+    TEST_SECTION("测试设备描述符");
     
     // 测试默认构造
     DeviceDesc desc1;
@@ -214,15 +271,18 @@ bool TestDeviceDesc(std::ofstream& output) {
     TEST_ASSERT_EQ(desc2.adapterIndex, 1, "适配器索引应该为1");
     TEST_ASSERT_EQ(desc2.maxFramesInFlight, 2, "最大帧数应该为2");
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试设备信息
  */
-bool TestDeviceInfo(std::ofstream& output) {
-    output << "=== 测试设备信息 ===" << std::endl;
+bool TestDeviceInfo() {
+    TEST_SECTION("测试设备信息");
     
     DeviceInfo info;
     
@@ -237,15 +297,18 @@ bool TestDeviceInfo(std::ofstream& output) {
     TEST_ASSERT_TRUE(!info.supportsMeshShaders, "默认不支持网格着色器");
     TEST_ASSERT_TRUE(!info.supportsVariableRateShading, "默认不支持可变速率着色");
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试设备创建
  */
-bool TestDeviceCreation(std::ofstream& output) {
-    output << "=== 测试设备创建 ===" << std::endl;
+bool TestDeviceCreation() {
+    TEST_SECTION("测试设备创建");
     
     // 测试有效设备创建
     DeviceDesc validDesc;
@@ -283,15 +346,18 @@ bool TestDeviceCreation(std::ofstream& output) {
     
     delete invalidDevice;
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试设备生命周期
  */
-bool TestDeviceLifecycle(std::ofstream& output) {
-    output << "=== 测试设备生命周期 ===" << std::endl;
+bool TestDeviceLifecycle() {
+    TEST_SECTION("测试设备生命周期");
     
     DeviceDesc desc;
     desc.platform = RHIPlatform::Windows;
@@ -317,15 +383,18 @@ bool TestDeviceLifecycle(std::ofstream& output) {
     // 测试重复关闭
     device.Shutdown(); // 应该不会崩溃
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试设备帧管理
  */
-bool TestDeviceFrameManagement(std::ofstream& output) {
-    output << "=== 测试设备帧管理 ===" << std::endl;
+bool TestDeviceFrameManagement() {
+    TEST_SECTION("测试设备帧管理");
     
     DeviceDesc desc;
     desc.platform = RHIPlatform::Linux;
@@ -355,15 +424,18 @@ bool TestDeviceFrameManagement(std::ofstream& output) {
     
     device.Shutdown();
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试设备能力
  */
-bool TestDeviceCapabilities(std::ofstream& output) {
-    output << "=== 测试设备能力 ===" << std::endl;
+bool TestDeviceCapabilities() {
+    TEST_SECTION("测试设备能力");
     
     DeviceDesc desc;
     desc.platform = RHIPlatform::MacOS;
@@ -387,15 +459,18 @@ bool TestDeviceCapabilities(std::ofstream& output) {
     TEST_ASSERT_TRUE(info.dedicatedVideoMemory >= 1024*1024*1024, "显存应该至少1GB");
     TEST_ASSERT_TRUE(info.sharedSystemMemory >= 1024*1024*1024, "共享内存应该至少1GB");
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
 /**
  * @brief 测试设备验证
  */
-bool TestDeviceValidation(std::ofstream& output) {
-    output << "=== 测试设备验证 ===" << std::endl;
+bool TestDeviceValidation() {
+    TEST_SECTION("测试设备验证");
     
     DeviceDesc desc;
     desc.platform = RHIPlatform::Windows;
@@ -415,7 +490,10 @@ bool TestDeviceValidation(std::ofstream& output) {
     // 关闭设备后测试
     device.Shutdown();
     
-    output << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "\n");
+        fflush(g_testOutput);
+    }
     return true;
 }
 
@@ -423,34 +501,45 @@ bool TestDeviceValidation(std::ofstream& output) {
  * @brief 主测试函数
  */
 int main() {
-    std::ofstream output("rhi_device_test_results.txt");
-    if (!output.is_open()) {
-        std::cout << "无法创建输出文件" << std::endl;
+    // 初始化测试输出
+    if (!InitTestOutput("rhi_device_test_results.txt")) {
         return 1;
     }
     
-    output << "🚀 开始RHI设备管理独立测试" << std::endl;
-    output << "测试时间: " << __DATE__ << " " << __TIME__ << std::endl << std::endl;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "🚀 开始RHI设备管理独立测试\n");
+        fprintf(g_testOutput, "测试时间: %s %s\n\n", __DATE__, __TIME__);
+        fflush(g_testOutput);
+    }
     
     bool allPassed = true;
     
     // 运行所有测试
-    allPassed &= TestDeviceDesc(output);
-    allPassed &= TestDeviceInfo(output);
-    allPassed &= TestDeviceCreation(output);
-    allPassed &= TestDeviceLifecycle(output);
-    allPassed &= TestDeviceFrameManagement(output);
-    allPassed &= TestDeviceCapabilities(output);
-    allPassed &= TestDeviceValidation(output);
+    allPassed &= TestDeviceDesc();
+    allPassed &= TestDeviceInfo();
+    allPassed &= TestDeviceCreation();
+    allPassed &= TestDeviceLifecycle();
+    allPassed &= TestDeviceFrameManagement();
+    allPassed &= TestDeviceCapabilities();
+    allPassed &= TestDeviceValidation();
     
-    output << "=== 测试总结 ===" << std::endl;
-    if (allPassed) {
-        output << "🎉 所有RHI设备管理测试通过！" << std::endl;
-        std::cout << "✅ 测试完成，所有测试通过！结果已保存到 rhi_device_test_results.txt" << std::endl;
-        return 0;
-    } else {
-        output << "❌ 部分测试失败" << std::endl;
-        std::cout << "❌ 测试完成，部分测试失败。结果已保存到 rhi_device_test_results.txt" << std::endl;
-        return 1;
+    if (g_testOutput) {
+        fprintf(g_testOutput, "=== 测试总结 ===\n");
+        if (allPassed) {
+            fprintf(g_testOutput, "🎉 所有RHI设备管理测试通过！\n");
+        } else {
+            fprintf(g_testOutput, "❌ 部分测试失败\n");
+        }
+        fflush(g_testOutput);
     }
+    
+    // 输出最终结果到控制台
+    if (allPassed) {
+        printf("✅ 测试完成，所有测试通过！结果已保存到 rhi_device_test_results.txt\n");
+    } else {
+        printf("❌ 测试完成，部分测试失败。结果已保存到 rhi_device_test_results.txt\n");
+    }
+    
+    CloseTestOutput();
+    return allPassed ? 0 : 1;
 }
