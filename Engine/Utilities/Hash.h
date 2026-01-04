@@ -59,7 +59,7 @@ namespace primal::utl
 
     //-----------------------------------------------------------------------------
 
-    void MurmurHash3_x86_32(const void * key, int len,
+    inline void MurmurHash3_x86_32(const void * key, int len,
         u32 seed, void * out)
     {
         const u8 * data = (const u8*)key;
@@ -116,7 +116,7 @@ namespace primal::utl
 
     //-----------------------------------------------------------------------------
 
-    void MurmurHash3_x86_128(const void * key, const int len,
+    inline void MurmurHash3_x86_128(const void * key, const int len,
         u32 seed, void * out)
     {
         const u8 * data = (const u8*)key;
@@ -222,7 +222,7 @@ namespace primal::utl
 
     //-----------------------------------------------------------------------------
 
-    void MurmurHash3_x64_128(const void * key, const int len,
+    inline void MurmurHash3_x64_128(const void * key, const int len,
         const u32 seed, void * out)
     {
         const u8 * data = (const u8*)key;

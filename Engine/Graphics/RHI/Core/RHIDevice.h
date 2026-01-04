@@ -67,13 +67,96 @@ struct DeviceInfo {
                   supportsVariableRateShading(false) {}
 };
 
+
+// === 管线描述符结构体（前向声明） ===
+
+/**
+ * @brief 图形管线描述符
+ */
+struct GraphicsPipelineDesc {
+    ShaderHandle vertexShader;          ///< 顶点着色器
+    ShaderHandle pixelShader;           ///< 像素着色器
+    ShaderHandle geometryShader;        ///< 几何着色器
+    ShaderHandle hullShader;            ///< 外壳着色器
+    ShaderHandle domainShader;          ///< 域着色器
+    
+    utl::vector<VertexInputAttribute> vertexAttributes; ///< 顶点输入属性
+    utl::vector<VertexInputBinding> vertexBindings;     ///< 顶点输入绑定
+    
+    PrimitiveTopology topology;         ///< 图元拓扑
+    FillMode fillMode;                  ///< 填充模式
+    CullMode cullMode;                  ///< 裁剪模式
+    
+    DataFormat renderTargetFormats[constants::MAX_RENDER_TARGETS]; ///< 渲染目标格式
+    uint32_t renderTargetCount;         ///< 渲染目标数量
+    DataFormat depthStencilFormat;       ///< 深度模板格式
+    
+    bool enableDepthTest;               ///< 是否启用深度测试
+    bool enableDepthWrite;              ///< 是否启用深度写入
+    ComparisonFunc depthFunc;           ///< 深度比较函数
+    
+    bool enableStencilTest;             ///< 是否启用模板测试
+    uint8_t stencilReadMask;           ///< 模板读取掩码
+    uint8_t stencilWriteMask;           ///< 模板写入掩码
+    
+    bool enableBlend;                   ///< 是否启用混合
+    BlendFactor srcBlend;               ///< 源混合因子
+    BlendFactor destBlend;              ///< 目标混合因子
+    BlendOp blendOp;                    ///< 混合操作
+    
+    math::v4 blendConstants;            ///< 混合常量
+    
+    GraphicsPipelineDesc() : vertexShader(handles::INVALID_SHADER), 
+                            pixelShader(handles::INVALID_SHADER),
+                            geometryShader(handles::INVALID_SHADER),
+                            hullShader(handles::INVALID_SHADER),
+                            domainShader(handles::INVALID_SHADER),
+                            topology(PrimitiveTopology::TriangleList),
+                            fillMode(FillMode::Solid), cullMode(CullMode::Back),
+                            renderTargetCount(0), depthStencilFormat(DataFormat::Unknown),
+                            enableDepthTest(true), enableDepthWrite(true),
+                            depthFunc(ComparisonFunc::Less), enableStencilTest(false),
+                            stencilReadMask(0xFF), stencilWriteMask(0xFF),
+                            enableBlend(false), srcBlend(BlendFactor::One),
+                            destBlend(BlendFactor::Zero), blendOp(BlendOp::Add),
+                            blendConstants{1.0f, 1.0f, 1.0f, 1.0f} {
+        for (uint32_t i = 0; i < constants::MAX_RENDER_TARGETS; ++i) {
+            renderTargetFormats[i] = DataFormat::Unknown;
+        }
+    }
+};
+
+/**
+ * @brief 计算管线描述符
+ */
+struct ComputePipelineDesc {
+    ShaderHandle computeShader;         ///< 计算着色器
+    
+    ComputePipelineDesc() : computeShader(handles::INVALID_SHADER) {}
+};
+
+
+/**
+ * @brief RHI设备接口基类
+ * @details 提供非模板的设备接口，用于需要类型擦除的场景
+ */
+class RHIDeviceBase {
+public:
+    virtual ~RHIDeviceBase() = default;
+    virtual bool IsValid() const = 0;
+    virtual const DeviceInfo& GetDeviceInfo() const = 0;
+    virtual const DeviceDesc& GetDesc() const = 0;
+    virtual void WaitIdle() const = 0;
+    virtual void Shutdown() = 0;
+};
+
 /**
  * @brief RHI设备基类（CRTP模式）
  * @tparam Derived 派生类类型
  * @details 使用CRTP实现编译时多态，避免虚函数调用开销
  */
 template<typename Derived>
-class RHIDevice {
+class RHIDevice : public RHIDeviceBase {
 public:
     using DerivedType = Derived;
     
@@ -341,71 +424,44 @@ private:
     friend Derived;
 };
 
-// === 管线描述符结构体（前向声明） ===
-
 /**
- * @brief 图形管线描述符
+ * @brief RHI设备管理器
+ * @details 管理所有RHI设备的注册和注销
  */
-struct GraphicsPipelineDesc {
-    ShaderHandle vertexShader;          ///< 顶点着色器
-    ShaderHandle pixelShader;           ///< 像素着色器
-    ShaderHandle geometryShader;        ///< 几何着色器
-    ShaderHandle hullShader;            ///< 外壳着色器
-    ShaderHandle domainShader;          ///< 域着色器
+class RHIDeviceManager {
+public:
+    /**
+     * @brief 注册设备
+     * @param device 设备指针
+     * @return 设备ID
+     */
+    uint32_t RegisterDevice(RHIDeviceBase* device);
     
-    utl::vector<VertexInputAttribute> vertexAttributes; ///< 顶点输入属性
-    utl::vector<VertexInputBinding> vertexBindings;     ///< 顶点输入绑定
+    /**
+     * @brief 注销设备
+     * @param deviceId 设备ID
+     */
+    void UnregisterDevice(uint32_t deviceId);
     
-    PrimitiveTopology topology;         ///< 图元拓扑
-    FillMode fillMode;                  ///< 填充模式
-    CullMode cullMode;                  ///< 裁剪模式
+    /**
+     * @brief 获取设备数量
+     * @return 设备数量
+     */
+    size_t GetDeviceCount() const;
     
-    DataFormat renderTargetFormats[constants::MAX_RENDER_TARGETS]; ///< 渲染目标格式
-    uint32_t renderTargetCount;         ///< 渲染目标数量
-    DataFormat depthStencilFormat;       ///< 深度模板格式
+    /**
+     * @brief 获取设备
+     * @param deviceId 设备ID
+     * @return 设备指针
+     */
+    RHIDeviceBase* GetDevice(uint32_t deviceId) const;
     
-    bool enableDepthTest;               ///< 是否启用深度测试
-    bool enableDepthWrite;              ///< 是否启用深度写入
-    ComparisonFunc depthFunc;           ///< 深度比较函数
-    
-    bool enableStencilTest;             ///< 是否启用模板测试
-    uint8_t stencilReadMask;           ///< 模板读取掩码
-    uint8_t stencilWriteMask;           ///< 模板写入掩码
-    
-    bool enableBlend;                   ///< 是否启用混合
-    BlendFactor srcBlend;               ///< 源混合因子
-    BlendFactor destBlend;              ///< 目标混合因子
-    BlendOp blendOp;                    ///< 混合操作
-    
-    math::v4 blendConstants;            ///< 混合常量
-    
-    GraphicsPipelineDesc() : vertexShader(handles::INVALID_SHADER), 
-                            pixelShader(handles::INVALID_SHADER),
-                            geometryShader(handles::INVALID_SHADER),
-                            hullShader(handles::INVALID_SHADER),
-                            domainShader(handles::INVALID_SHADER),
-                            topology(PrimitiveTopology::TriangleList),
-                            fillMode(FillMode::Solid), cullMode(CullMode::Back),
-                            renderTargetCount(0), depthStencilFormat(DataFormat::Unknown),
-                            enableDepthTest(true), enableDepthWrite(true),
-                            depthFunc(ComparisonFunc::Less), enableStencilTest(false),
-                            stencilReadMask(0xFF), stencilWriteMask(0xFF),
-                            enableBlend(false), srcBlend(BlendFactor::One),
-                            destBlend(BlendFactor::Zero), blendOp(BlendOp::Add),
-                            blendConstants{1.0f, 1.0f, 1.0f, 1.0f} {
-        for (uint32_t i = 0; i < constants::MAX_RENDER_TARGETS; ++i) {
-            renderTargetFormats[i] = DataFormat::Unknown;
-        }
-    }
+private:
+    primal::utl::vector<std::pair<uint32_t, RHIDeviceBase*>> devices_;
+    uint32_t nextDeviceId_ = 1;
 };
 
-/**
- * @brief 计算管线描述符
- */
-struct ComputePipelineDesc {
-    ShaderHandle computeShader;         ///< 计算着色器
-    
-    ComputePipelineDesc() : computeShader(handles::INVALID_SHADER) {}
-};
+// 全局设备管理器实例
+extern RHIDeviceManager g_deviceManager;
 
 } // namespace primal::graphics::rhi

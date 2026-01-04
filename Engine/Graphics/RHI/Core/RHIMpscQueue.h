@@ -11,18 +11,20 @@
 
 #include "CommonHeaders.h"
 #include "RHITypes.h"
-#include "RHICommand.h"
-#include <condition_variable>
-#include <thread>
+#include <memory>    // for shared_ptr
+#include <cstring>   // for memset
 
-// 集成moodycamel::ConcurrentQueue
+// 包含moodycamel并发队列
+#ifdef ENABLE_MOODYCAMEL_CONCURRENT_QUEUE
 #include "../../../../third_party/moodycamel-ConcurrentQueue/concurrentqueue.h"
+#endif
 
 namespace primal::graphics::rhi {
 
-// === 前向声明 ===
 
-class RHIDevice;
+// 前向声明
+class RHIDeviceBase;
+
 
 /**
  * @brief 工作项类型枚举
@@ -92,15 +94,158 @@ struct WorkItem {
         
         struct {
             void* userData;                      ///< 用户数据
-            std::function<void()> callback;       ///< 回调函数
+            std::shared_ptr<std::function<void()>> callback;  ///< 回调函数（使用shared_ptr使其可拷贝）
         } callbackData;
     };
     
     void* context;                ///< 上下文数据
-    std::function<void()> completionCallback;  ///< 完成回调
+    std::shared_ptr<std::function<void()>> completionCallback;  ///< 完成回调
     
+    // === 构造函数和析构函数 ===
     WorkItem() : type(WorkItemType::Unknown), priority(WorkPriority::Normal), 
                 state(WorkItemState::Pending), id(0), timestamp(0), timeoutMs(0), context(nullptr) {}
+    
+    // 拷贝构造函数
+    WorkItem(const WorkItem& other) 
+        : type(other.type), priority(other.priority), state(other.state), 
+          id(other.id), timestamp(other.timestamp), timeoutMs(other.timeoutMs), 
+          context(other.context), completionCallback(other.completionCallback) {
+        // 拷贝union数据
+        switch (type) {
+            case WorkItemType::CommandBuffer:
+                commandData.commandBuffer = other.commandData.commandBuffer;
+                break;
+            case WorkItemType::ResourceUpdate:
+                resourceData.resource = other.resourceData.resource;
+                resourceData.data = other.resourceData.data;
+                resourceData.dataSize = other.resourceData.dataSize;
+                break;
+            case WorkItemType::MemoryOperation:
+                memoryData.srcPtr = other.memoryData.srcPtr;
+                memoryData.dstPtr = other.memoryData.dstPtr;
+                memoryData.size = other.memoryData.size;
+                break;
+            case WorkItemType::CustomCallback:
+                callbackData.userData = other.callbackData.userData;
+                callbackData.callback = other.callbackData.callback;
+                break;
+            default:
+                break;
+        }
+    }
+    
+    // 拷贝赋值操作符
+    WorkItem& operator=(const WorkItem& other) {
+        if (this != &other) {
+            type = other.type;
+            priority = other.priority;
+            state = other.state;
+            id = other.id;
+            timestamp = other.timestamp;
+            timeoutMs = other.timeoutMs;
+            context = other.context;
+            completionCallback = other.completionCallback;
+            
+            // 拷贝union数据
+            switch (type) {
+                case WorkItemType::CommandBuffer:
+                    commandData.commandBuffer = other.commandData.commandBuffer;
+                    break;
+                case WorkItemType::ResourceUpdate:
+                    resourceData.resource = other.resourceData.resource;
+                    resourceData.data = other.resourceData.data;
+                    resourceData.dataSize = other.resourceData.dataSize;
+                    break;
+                case WorkItemType::MemoryOperation:
+                    memoryData.srcPtr = other.memoryData.srcPtr;
+                    memoryData.dstPtr = other.memoryData.dstPtr;
+                    memoryData.size = other.memoryData.size;
+                    break;
+                case WorkItemType::CustomCallback:
+                    callbackData.userData = other.callbackData.userData;
+                    callbackData.callback = other.callbackData.callback;
+                    break;
+                default:
+                    break;
+            }
+        }
+        return *this;
+    }
+    
+    // 移动构造函数
+    WorkItem(WorkItem&& other) noexcept 
+        : type(other.type), priority(other.priority), state(other.state), 
+          id(other.id), timestamp(other.timestamp), timeoutMs(other.timeoutMs), 
+          context(other.context), completionCallback(std::move(other.completionCallback)) {
+        // 移动union数据
+        switch (type) {
+            case WorkItemType::CommandBuffer:
+                commandData.commandBuffer = other.commandData.commandBuffer;
+                break;
+            case WorkItemType::ResourceUpdate:
+                resourceData.resource = other.resourceData.resource;
+                resourceData.data = other.resourceData.data;
+                resourceData.dataSize = other.resourceData.dataSize;
+                break;
+            case WorkItemType::MemoryOperation:
+                memoryData.srcPtr = other.memoryData.srcPtr;
+                memoryData.dstPtr = other.memoryData.dstPtr;
+                memoryData.size = other.memoryData.size;
+                break;
+            case WorkItemType::CustomCallback:
+                callbackData.userData = other.callbackData.userData;
+                callbackData.callback = std::move(other.callbackData.callback);
+                break;
+            default:
+                break;
+        }
+    }
+    
+    // 移动赋值操作符
+    WorkItem& operator=(WorkItem&& other) noexcept {
+        if (this != &other) {
+            type = other.type;
+            priority = other.priority;
+            state = other.state;
+            id = other.id;
+            timestamp = other.timestamp;
+            timeoutMs = other.timeoutMs;
+            context = other.context;
+            completionCallback = std::move(other.completionCallback);
+            
+            // 移动union数据
+            switch (type) {
+                case WorkItemType::CommandBuffer:
+                    commandData.commandBuffer = other.commandData.commandBuffer;
+                    break;
+                case WorkItemType::ResourceUpdate:
+                    resourceData.resource = other.resourceData.resource;
+                    resourceData.data = other.resourceData.data;
+                    resourceData.dataSize = other.resourceData.dataSize;
+                    break;
+                case WorkItemType::MemoryOperation:
+                    memoryData.srcPtr = other.memoryData.srcPtr;
+                    memoryData.dstPtr = other.memoryData.dstPtr;
+                    memoryData.size = other.memoryData.size;
+                    break;
+                case WorkItemType::CustomCallback:
+                    callbackData.userData = other.callbackData.userData;
+                    callbackData.callback = std::move(other.callbackData.callback);
+                    break;
+                default:
+                    break;
+            }
+        }
+        return *this;
+    }
+    
+    // 析构函数
+    ~WorkItem() {
+        // 手动清理union数据中的shared_ptr
+        if (type == WorkItemType::CustomCallback) {
+            callbackData.callback.~shared_ptr();
+        }
+    }
 };
 
 /**
@@ -129,6 +274,21 @@ struct QueueStats {
         currentQueueSize.store(0);
         maxQueueSize.store(0);
         totalProcessingTime.store(0);
+    }
+    
+    // 构造函数，用于GetStats()返回值
+    QueueStats(uint64_t enqueued, uint64_t dequeued, uint64_t processed, 
+               uint64_t completed, uint64_t failed, uint64_t cancelled,
+               uint32_t currentSize, uint32_t maxSize, uint64_t processingTime) {
+        totalEnqueued.store(enqueued);
+        totalDequeued.store(dequeued);
+        totalProcessed.store(processed);
+        totalCompleted.store(completed);
+        totalFailed.store(failed);
+        totalCancelled.store(cancelled);
+        currentQueueSize.store(currentSize);
+        maxQueueSize.store(maxSize);
+        totalProcessingTime.store(processingTime);
     }
     
     QueueStats& operator=(const QueueStats& other) {
@@ -178,7 +338,7 @@ public:
      * @param device 设备引用
      * @param config 队列配置
      */
-    explicit RHIMpscQueue(RHIDevice& device, const QueueConfig& config)
+    explicit RHIMpscQueue(RHIDeviceBase& device, const QueueConfig& config)
         : device_(device), config_(config), stats_(), 
           running_(false), nextWorkId_(1) {}
     
@@ -197,29 +357,20 @@ public:
     RHIMpscQueue& operator=(const RHIMpscQueue&) = delete;
     
     RHIMpscQueue(RHIMpscQueue&& other) noexcept
-        : device_(other.device_), config_(std::move(other.config_)), stats_(other.stats_),
+        : device_(other.device_), config_(std::move(other.config_)), 
           running_(other.running_.load()), nextWorkId_(other.nextWorkId_.load()) {
+        // 手动拷贝原子统计信息
+        stats_.totalEnqueued.store(other.stats_.totalEnqueued.load());
+        stats_.totalDequeued.store(other.stats_.totalDequeued.load());
+        stats_.totalCompleted.store(other.stats_.totalCompleted.load());
+        stats_.totalFailed.store(other.stats_.totalFailed.load());
+        stats_.currentQueueSize.store(other.stats_.currentQueueSize.load());
+        
         other.running_ = false;
         other.nextWorkId_ = 1;
     }
     
-    RHIMpscQueue& operator=(RHIMpscQueue&& other) noexcept {
-        if (this != &other) {
-            if (running_) {
-                Stop();
-            }
-            
-            device_ = std::move(other.device_);
-            config_ = std::move(other.config_);
-            stats_ = other.stats_;
-            running_.store(other.running_.load());
-            nextWorkId_.store(other.nextWorkId_.load());
-            
-            other.running_ = false;
-            other.nextWorkId_ = 1;
-        }
-        return *this;
-    }
+    RHIMpscQueue& operator=(RHIMpscQueue&& other) noexcept;
     
     // === 核心接口方法 ===
     
@@ -430,7 +581,7 @@ protected:
     
     // === 受保护的成员变量 ===
     
-    RHIDevice& device_;                 ///< 设备引用
+    RHIDeviceBase& device_;                 ///< 设备引用
     QueueConfig config_;                ///< 队列配置
     QueueStats stats_;                  ///< 统计信息
     std::atomic<bool> running_;         ///< 运行状态
@@ -499,7 +650,7 @@ protected:
         
         // 调用完成回调
         if (workItem.completionCallback) {
-            workItem.completionCallback();
+            (*workItem.completionCallback)();
         }
     }
     
@@ -536,7 +687,7 @@ public:
      * @param device 设备引用
      * @param config 队列配置
      */
-    explicit DefaultMpscQueue(RHIDevice& device, const QueueConfig& config);
+    explicit DefaultMpscQueue(RHIDeviceBase& device, const QueueConfig& config);
     
     /**
      * @brief 析构函数
@@ -666,14 +817,22 @@ private:
     
     // === 私有成员变量 ===
     
+#ifdef ENABLE_MOODYCAMEL_CONCURRENT_QUEUE
     moodycamel::ConcurrentQueue<WorkItem> workQueue_;     ///< moodycamel无锁队列
-    std::thread workerThread_;                            ///< 工作线程
-    std::atomic<bool> shutdownRequested_;                 ///< 关闭请求标志
-    std::atomic<bool> initialized_;                       ///< 初始化标志
-    
     // 优先级队列 - 使用多个队列实现优先级
     static constexpr uint32_t PRIORITY_LEVELS = 4;        ///< 优先级层级数
     moodycamel::ConcurrentQueue<WorkItem> priorityQueues_[PRIORITY_LEVELS]; ///< 优先级队列数组
+#else
+    // 替代实现（使用标准库队列）
+    std::queue<WorkItem> workQueue_;                      ///< 标准库队列
+    static constexpr uint32_t PRIORITY_LEVELS = 4;        ///< 优先级层级数
+    std::queue<WorkItem> priorityQueues_[PRIORITY_LEVELS]; ///< 优先级队列数组
+    std::mutex queueMutex_;                               ///< 队列互斥锁
+#endif
+    
+    std::thread workerThread_;                            ///< 工作线程
+    std::atomic<bool> shutdownRequested_;                 ///< 关闭请求标志
+    std::atomic<bool> initialized_;                       ///< 初始化标志
     
     // 工作项状态跟踪（用于状态查询和等待）
     mutable std::unordered_map<uint64_t, WorkItemState> workItemStates_;    ///< 工作项状态映射
@@ -746,7 +905,7 @@ public:
      * @param config 队列配置
      * @return 队列指针，失败返回nullptr
      */
-    static std::unique_ptr<RHIMpscQueue> CreateQueue(RHIDevice& device, const QueueConfig& config);
+    static std::unique_ptr<RHIMpscQueue> CreateQueue(RHIDeviceBase& device, const QueueConfig& config);
     
     /**
      * @brief 获取推荐的队列配置

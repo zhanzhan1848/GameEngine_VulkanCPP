@@ -10,8 +10,6 @@
 #pragma once
 
 #include "CommonHeaders.h"
-#include <mutex>
-#include <vector>
 
 namespace primal::graphics::rhi::debug {
 
@@ -23,7 +21,7 @@ namespace primal::graphics::rhi::debug {
  */
 enum class DebugLevel : uint8_t {
     TRACE = 0,    ///< 跟踪级别：详细的执行流程信息
-    DEBUG = 1,    ///< 调试级别：开发和调试信息
+    DEBUG_LEVEL = 1,    ///< 调试级别：开发和调试信息
     INFO = 2,     ///< 信息级别：重要状态变更
     WARN = 3,     ///< 警告级别：潜在问题
     ERROR = 4,    ///< 错误级别：严重错误
@@ -109,10 +107,10 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, uint32_t line
  */
 #define RHI_DEBUG(fmt, ...) \
     DEBUG_OP( \
-        if (RHI_SHOULD_LOG(DebugLevel::DEBUG)) { \
+        if (RHI_SHOULD_LOG(DebugLevel::DEBUG_LEVEL)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
             snprintf(buffer, sizeof(buffer), fmt, ##__VA_ARGS__); \
-            OutputDebugMessage(DebugLevel::DEBUG, __FILE__, __LINE__, __FUNCTION__, buffer); \
+            OutputDebugMessage(DebugLevel::DEBUG_LEVEL, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
 

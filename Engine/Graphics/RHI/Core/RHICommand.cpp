@@ -9,11 +9,68 @@
 
 #include "RHICommand.h"
 #include "RHIDevice.h"
+#include "RHIResource.h"
 #include <algorithm>
 #include <unordered_map>
 #include <mutex>
 
 namespace primal::graphics::rhi {
+
+// === 前向声明 ===
+bool IsValidStateTransition(ResourceState from, ResourceState to);
+
+// === 格式检查工具函数 ===
+
+/**
+ * @brief 检查是否为深度格式
+ * @param format 数据格式
+ * @return 是否为深度格式
+ */
+bool IsDepthFormat(DataFormat format) {
+    switch (format) {
+        case DataFormat::D16_UNorm:
+        case DataFormat::D24_UNorm_S8_UInt:
+        case DataFormat::D32_Float:
+        case DataFormat::D32_Float_S8X24_UInt:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/**
+ * @brief 检查是否为模板格式
+ * @param format 数据格式
+ * @return 是否为模板格式
+ */
+bool IsStencilFormat(DataFormat format) {
+    switch (format) {
+        case DataFormat::D24_UNorm_S8_UInt:
+        case DataFormat::D32_Float_S8X24_UInt:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// === RHICommandBuffer 移动赋值操作符 ===
+
+RHICommandBuffer& RHICommandBuffer::operator=(RHICommandBuffer&& other) noexcept {
+    if (this != &other) {
+        Destroy();
+        
+        device_ = other.device_;
+        type_ = other.type_;
+        handle_ = other.handle_;
+        state_ = other.state_;
+        stats_ = other.stats_;
+        
+        other.handle_ = handles::INVALID_COMMAND_BUFFER;
+        other.state_ = CommandBufferState::Invalid;
+        other.stats_ = CommandStats();
+    }
+    return *this;
+}
 
 // === 命令缓冲区管理器 ===
 
@@ -112,7 +169,7 @@ public:
      * @return 命令缓冲区指针，失败返回nullptr
      */
     template<typename CommandType>
-    static std::unique_ptr<CommandType> CreateCommandBuffer(RHIDevice& device, CommandQueueType type) {
+    static std::unique_ptr<CommandType> CreateCommandBuffer(RHIDeviceBase& device, CommandQueueType type) {
         std::unique_ptr<CommandType> commandBuffer = std::make_unique<CommandType>(device, type);
         if (commandBuffer && commandBuffer->Initialize()) {
             return commandBuffer;
@@ -153,7 +210,7 @@ bool ValidateRenderPassDesc(const RenderPassDesc& desc) {
             return false;
         }
         
-        if (attachment.sampleCount == SampleCount::Unknown) {
+        if (attachment.sampleCount == static_cast<u32>(SampleCount::Unknown)) {
             return false;
         }
     }
@@ -421,7 +478,7 @@ void PrintCommandBufferInfo(const RHICommandBuffer* commandBuffer, bool verbose)
  */
 void PrintRenderPassDesc(const RenderPassDesc& desc) {
     printf("RenderPass Description:\n");
-    printf("  Color Attachments (%zu):\n", desc.colorAttachments.size());
+    printf("  Color Attachments (%llu):\n", static_cast<unsigned long long>(desc.colorAttachments.size()));
     for (size_t i = 0; i < desc.colorAttachments.size(); ++i) {
         const auto& attachment = desc.colorAttachments[i];
         printf("    [%zu]: Texture=0x%016llx, Format=%d, LoadOp=%d, StoreOp=%d\n",
@@ -447,8 +504,9 @@ void PrintRenderPassDesc(const RenderPassDesc& desc) {
            desc.viewport.topLeft.x, desc.viewport.topLeft.y,
            desc.viewport.size.x, desc.viewport.size.y);
     printf("  Scissor: (%d,%d)-(%d,%d)\n",
-           desc.scissor.left, desc.scissor.top,
-           desc.scissor.right, desc.scissor.bottom);
+           desc.scissor.offset.x, desc.scissor.offset.y,
+           desc.scissor.offset.x + static_cast<int>(desc.scissor.extent.x), 
+           desc.scissor.offset.y + static_cast<int>(desc.scissor.extent.y));
 }
 
 } // namespace primal::graphics::rhi

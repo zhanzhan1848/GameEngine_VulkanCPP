@@ -52,15 +52,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/GraphicsPlatformInterface.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Renderer.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Renderer.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/PlatformTraits.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/RHI.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/RHITypes.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/RHIEnums.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/PlatformEnumMapping.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Resources/Resource.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Resources/ResourceFactory.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Resources/RHITypeErased.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Core/RHIInterface.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Core/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Core/*.cpp"
     # "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/GraphicsHandle.hpp"
 )
 

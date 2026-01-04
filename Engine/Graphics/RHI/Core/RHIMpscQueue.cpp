@@ -12,7 +12,8 @@
 #include "RHIDevice.h"
 #include "RHICommand.h"
 #include "RHIMemoryPool.h"
-#include "../../../../../Engine/Utilities/Logger.h"
+#include "RHIDebug.h"
+#include "../../../../third_party/moodycamel-ConcurrentQueue/concurrentqueue.h"
 
 #include <thread>
 #include <chrono>
@@ -21,9 +22,30 @@
 
 namespace primal::graphics::rhi {
 
+// === RHIMpscQueue基类方法实现 ===
+
+RHIMpscQueue& RHIMpscQueue::operator=(RHIMpscQueue&& other) noexcept {
+    if (this != &other) {
+        if (running_) {
+            Stop();
+        }
+        
+        device_ = other.device_;
+        config_ = std::move(other.config_);
+        stats_ = other.stats_;
+        running_.store(other.running_.load());
+        nextWorkId_.store(other.nextWorkId_.load());
+        
+        other.running_ = false;
+        other.nextWorkId_ = 1;
+        other.stats_ = QueueStats{};
+    }
+    return *this;
+}
+
 // === DefaultMpscQueue 实现 ===
 
-DefaultMpscQueue::DefaultMpscQueue(RHIDevice& device, const QueueConfig& config)
+DefaultMpscQueue::DefaultMpscQueue(RHIDeviceBase& device, const QueueConfig& config)
     : RHIMpscQueue(device, config)
     , workQueue_()
     , workerThread_()
@@ -37,73 +59,59 @@ DefaultMpscQueue::DefaultMpscQueue(RHIDevice& device, const QueueConfig& config)
 }
 
 DefaultMpscQueue::~DefaultMpscQueue() {
-    Stop();
+    if (running_.load()) {
+        stopImpl();
+        running_ = false;
+    }
 }
 
 bool DefaultMpscQueue::Initialize() {
     if (initialized_) {
-        Logger::Warn("DefaultMpscQueue::Initialize - 队列已经初始化");
         return true;
     }
 
-    try {
-        // 预分配工作队列空间
-        workQueue_ = moodycamel::ConcurrentQueue<WorkItem>(config_.maxQueueSize);
-        
-        // 重置统计信息
-        stats_.totalEnqueued.store(0);
-        stats_.totalDequeued.store(0);
-        stats_.totalProcessed.store(0);
-        stats_.totalCompleted.store(0);
-        stats_.totalFailed.store(0);
-        stats_.totalCancelled.store(0);
-        stats_.currentQueueSize.store(0);
-        stats_.maxQueueSize.store(0);
-        stats_.totalProcessingTime.store(0);
-        
-        // 清空工作项状态映射
-        {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            workItemStates_.clear();
-        }
-        
-        initialized_ = true;
-        
-        Logger::Info("DefaultMpscQueue::Initialize - MPSC队列初始化成功，最大队列大小: {}", config_.maxQueueSize);
-        return true;
+    // 预分配工作队列空间
+    workQueue_ = moodycamel::ConcurrentQueue<WorkItem>(config_.maxQueueSize);
+    
+    // 重置统计信息
+    stats_.totalEnqueued.store(0);
+    stats_.totalDequeued.store(0);
+    stats_.totalProcessed.store(0);
+    stats_.totalCompleted.store(0);
+    stats_.totalFailed.store(0);
+    stats_.totalCancelled.store(0);
+    stats_.currentQueueSize.store(0);
+    stats_.maxQueueSize.store(0);
+    stats_.totalProcessingTime.store(0);
+    
+    // 清空工作项状态映射
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        workItemStates_.clear();
     }
-    catch (const std::exception& e) {
-        Logger::Error("DefaultMpscQueue::Initialize - 初始化失败: {}", e.what());
-        return false;
-    }
+    
+    initialized_ = true;
+    
+    return true;
 }
 
 bool DefaultMpscQueue::Start() {
     if (!initialized_) {
-        Logger::Error("DefaultMpscQueue::Start - 队列未初始化");
         return false;
     }
 
     if (running_.load()) {
-        Logger::Warn("DefaultMpscQueue::Start - 队列已在运行");
         return true;
     }
 
-    try {
-        shutdownRequested_.store(false);
-        
-        // 启动工作线程
-        workerThread_ = std::thread(&DefaultMpscQueue::workerThreadFunc, this);
-        
-        running_.store(true);
-        
-        Logger::Info("DefaultMpscQueue::Start - MPSC队列启动成功");
-        return true;
-    }
-    catch (const std::exception& e) {
-        Logger::Error("DefaultMpscQueue::Start - 启动失败: {}", e.what());
-        return false;
-    }
+    shutdownRequested_.store(false);
+    
+    // 启动工作线程
+    workerThread_ = std::thread(&DefaultMpscQueue::workerThreadFunc, this);
+    
+    running_.store(true);
+    
+    return true;
 }
 
 void DefaultMpscQueue::stopImpl() {
@@ -113,7 +121,6 @@ void DefaultMpscQueue::stopImpl() {
         workerThread_.join();
     }
     
-    Logger::Info("DefaultMpscQueue::stopImpl - MPSC队列已停止");
 }
 
 void DefaultMpscQueue::destroyImpl() {
@@ -133,19 +140,16 @@ void DefaultMpscQueue::destroyImpl() {
     
     initialized_.store(false);
     
-    Logger::Info("DefaultMpscQueue::destroyImpl - MPSC队列已销毁");
 }
 
 uint64_t DefaultMpscQueue::Enqueue(const WorkItem& workItem) {
     if (!initialized_ || !running_.load()) {
-        Logger::Error("DefaultMpscQueue::Enqueue - 队列未初始化或未运行");
         return 0;
     }
 
     // 检查队列大小限制
     uint32_t currentSize = GetCurrentSize();
     if (currentSize >= config_.maxQueueSize) {
-        Logger::Warn("DefaultMpscQueue::Enqueue - 队列已满，无法提交工作项");
         stats_.totalFailed.fetch_add(1);
         return 0;
     }
@@ -155,7 +159,6 @@ uint64_t DefaultMpscQueue::Enqueue(const WorkItem& workItem) {
 
 uint32_t DefaultMpscQueue::EnqueueBatch(const WorkItem* workItems, uint32_t count) {
     if (!initialized_ || !running_.load() || !workItems) {
-        Logger::Error("DefaultMpscQueue::EnqueueBatch - 参数无效或队列未就绪");
         return 0;
     }
 
@@ -169,7 +172,6 @@ uint32_t DefaultMpscQueue::EnqueueBatch(const WorkItem* workItems, uint32_t coun
         }
     }
     
-    Logger::Debug("DefaultMpscQueue::EnqueueBatch - 批量提交完成，成功: {}/{}", successCount, count);
     return successCount;
 }
 
@@ -206,7 +208,6 @@ bool DefaultMpscQueue::CancelWork(uint64_t workId) {
         it->second = WorkItemState::Cancelled;
         stats_.totalCancelled.fetch_add(1);
         
-        Logger::Debug("DefaultMpscQueue::CancelWork - 工作项已取消: {}", workId);
         return true;
     }
     
@@ -221,7 +222,7 @@ WorkItemState DefaultMpscQueue::GetWorkState(uint64_t workId) const {
         return it->second;
     }
     
-    return WorkItemState::Unknown;
+    return WorkItemState::Pending;
 }
 
 bool DefaultMpscQueue::WaitForWork(uint64_t workId, uint32_t timeoutMs) {
@@ -258,7 +259,6 @@ bool DefaultMpscQueue::WaitForWork(uint64_t workId, uint32_t timeoutMs) {
         });
         
         if (!result) {
-            Logger::Warn("DefaultMpscQueue::WaitForWork - 等待超时: {}", workId);
             return false;
         }
     }
@@ -280,8 +280,6 @@ bool DefaultMpscQueue::Validate() const {
     }
     
     // 验证统计信息的一致性
-    uint64_t enqueued = stats_.totalEnqueued.load();
-    uint64_t dequeued = stats_.totalDequeued.load();
     uint64_t processed = stats_.totalProcessed.load();
     uint64_t completed = stats_.totalCompleted.load();
     uint64_t failed = stats_.totalFailed.load();
@@ -289,8 +287,7 @@ bool DefaultMpscQueue::Validate() const {
     
     // 处理的数量应该等于完成+失败+取消的数量
     if (processed != (completed + failed + cancelled)) {
-        Logger::Error("DefaultMpscQueue::Validate - 统计信息不一致: processed={}, completed+failed+cancelled={}", 
-                     processed, completed + failed + cancelled);
+                     
         return false;
     }
     
@@ -320,7 +317,6 @@ void DefaultMpscQueue::Clear() {
     stats_.totalDequeued.fetch_add(currentSize);
     stats_.currentQueueSize.store(0);
     
-    Logger::Info("DefaultMpscQueue::Clear - 清空队列，清除 {} 个工作项", currentSize);
 }
 
 bool DefaultMpscQueue::IsEmpty() const {
@@ -343,7 +339,17 @@ uint32_t DefaultMpscQueue::GetQueueSize() const {
 }
 
 QueueStats DefaultMpscQueue::GetStats() const {
-    return stats_;
+    return QueueStats {
+        stats_.totalEnqueued.load(),
+        stats_.totalDequeued.load(),
+        stats_.totalProcessed.load(),
+        stats_.totalCompleted.load(),
+        stats_.totalFailed.load(),
+        stats_.totalCancelled.load(),
+        stats_.currentQueueSize.load(),
+        stats_.maxQueueSize.load(),
+        stats_.totalProcessingTime.load()
+    };
 }
 
 void DefaultMpscQueue::ResetStats() {
@@ -357,7 +363,6 @@ void DefaultMpscQueue::ResetStats() {
     stats_.maxQueueSize.store(0);
     stats_.totalProcessingTime.store(0);
     
-    Logger::Info("DefaultMpscQueue::ResetStats - 统计信息已重置");
 }
 
 // === 私有辅助方法实现 ===
@@ -389,11 +394,8 @@ uint64_t DefaultMpscQueue::enqueueByPriority(const WorkItem& workItem) {
         stats_.currentQueueSize.fetch_add(1);
         UpdateMaxQueueSize();
         
-        Logger::Debug("DefaultMpscQueue::enqueueByPriority - 工作项入队成功: ID={}, Priority={}", 
-                     newWorkItem.id, static_cast<uint32_t>(workItem.priority));
         return newWorkItem.id;
     } else {
-        Logger::Error("DefaultMpscQueue::enqueueByPriority - 入队失败");
         return 0;
     }
 }
@@ -412,8 +414,6 @@ bool DefaultMpscQueue::dequeueByPriority(WorkItem& workItem) {
             stats_.totalDequeued.fetch_add(1);
             stats_.currentQueueSize.fetch_sub(1);
             
-            Logger::Debug("DefaultMpscQueue::dequeueByPriority - 工作项出队成功: ID={}, Priority={}", 
-                         workItem.id, static_cast<uint32_t>(workItem.priority));
             return true;
         }
     }
@@ -422,154 +422,124 @@ bool DefaultMpscQueue::dequeueByPriority(WorkItem& workItem) {
 }
 
 void DefaultMpscQueue::workerThreadFunc() {
-    Logger::Info("DefaultMpscQueue::workerThreadFunc - 工作线程启动");
     
     while (!shutdownRequested_.load()) {
         WorkItem workItem;
+        bool hasWorkItem = false;
+        auto startTime = GetCurrentTimestamp();
         
         // 尝试获取工作项
         if (dequeueByPriority(workItem)) {
-            auto startTime = GetCurrentTimestamp();
+            hasWorkItem = true;
             
-            try {
-                // 处理工作项
-                processWorkItem(workItem);
-                
-                // 更新状态为完成
-                {
-                    std::lock_guard<std::mutex> lock(stateMutex_);
-                    workItemStates_[workItem.id] = WorkItemState::Completed;
-                }
-                
-                stats_.totalCompleted.fetch_add(1);
-                
-                // 通知等待的线程
-                auto condIt = workConditions_.find(workItem.id);
-                if (condIt != workConditions_.end() && condIt->second) {
-                    condIt->second->notify_all();
-                }
-            }
-            catch (const std::exception& e) {
-                Logger::Error("DefaultMpscQueue::workerThreadFunc - 处理工作项异常: {}", e.what());
-                
-                // 更新状态为失败
-                {
-                    std::lock_guard<std::mutex> lock(stateMutex_);
-                    workItemStates_[workItem.id] = WorkItemState::Failed;
-                }
-                
-                stats_.totalFailed.fetch_add(1);
-                
-                // 通知等待的线程
-                auto condIt = workConditions_.find(workItem.id);
-                if (condIt != workConditions_.end() && condIt->second) {
-                    condIt->second->notify_all();
-                }
+            // 处理工作项
+            processWorkItem(workItem);
+            
+            // 更新状态为完成
+            { 
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                workItemStates_[workItem.id] = WorkItemState::Completed;
             }
             
-            auto endTime = GetCurrentTimestamp();
-            uint64_t processingTime = endTime - startTime;
-            stats_.totalProcessingTime.fetch_add(processingTime);
-            stats_.totalProcessed.fetch_add(1);
+            stats_.totalCompleted.fetch_add(1);
+            
+            // 通知等待的线程
+            auto condIt = workConditions_.find(workItem.id);
+            if (condIt != workConditions_.end() && condIt->second) {
+                condIt->second->notify_all();
+            }
             
             // 调用完成回调
             if (workItem.completionCallback) {
-                workItem.completionCallback();
+                (*workItem.completionCallback)();
             }
         } else {
             // 没有工作项时短暂休眠
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
-    }
-    
-    Logger::Info("DefaultMpscQueue::workerThreadFunc - 工作线程退出");
-}
-
-void DefaultMpscQueue::processWorkItem(const WorkItem& workItem) {
-    try {
-        switch (workItem.type) {
-            case WorkItemType::CommandBuffer:
-                processCommandBuffer(workItem);
-                break;
-                
-            case WorkItemType::ResourceUpdate:
-                processResourceUpdate(workItem);
-                break;
-                
-            case WorkItemType::MemoryOperation:
-                processMemoryOperation(workItem);
-                break;
-                
-            case WorkItemType::SyncOperation:
-                processSyncOperation(workItem);
-                break;
-                
-            case WorkItemType::CustomCallback:
-                processCustomCallback(workItem);
-                break;
-                
-            default:
-                Logger::Warn("DefaultMpscQueue::processWorkItem - 未知工作项类型: {}", static_cast<uint8_t>(workItem.type));
-                break;
+        
+        if (hasWorkItem) {
+            auto endTime = GetCurrentTimestamp();
+            uint64_t processingTime = endTime - startTime;
+            stats_.totalProcessingTime.fetch_add(processingTime);
+            stats_.totalProcessed.fetch_add(1);
         }
     }
-    catch (const std::exception& e) {
-        Logger::Error("DefaultMpscQueue::processWorkItem - 处理工作项时发生异常: {}", e.what());
-        throw;
+    
+}
+
+void primal::graphics::rhi::DefaultMpscQueue::processWorkItem(const WorkItem& workItem) {
+    switch (workItem.type) {
+        case WorkItemType::CommandBuffer:
+            processCommandBuffer(workItem);
+            break;
+            
+        case WorkItemType::ResourceUpdate:
+            processResourceUpdate(workItem);
+            break;
+            
+        case WorkItemType::MemoryOperation:
+            processMemoryOperation(workItem);
+            break;
+            
+        case WorkItemType::SyncOperation:
+            processSyncOperation(workItem);
+            break;
+            
+        case WorkItemType::CustomCallback:
+            processCustomCallback(workItem);
+            break;
+            
+        default:
+            break;
     }
 }
 
-void DefaultMpscQueue::processCommandBuffer(const WorkItem& workItem) {
-    Logger::Debug("DefaultMpscQueue::processCommandBuffer - 处理命令缓冲区工作项，ID: {}", workItem.id);
+void primal::graphics::rhi::DefaultMpscQueue::processCommandBuffer(const WorkItem& workItem) {
     
     // TODO: 调用RHI命令系统的相关接口
     // 例如：提交命令缓冲区到GPU
 }
 
-void DefaultMpscQueue::processResourceUpdate(const WorkItem& workItem) {
-    Logger::Debug("DefaultMpscQueue::processResourceUpdate - 处理资源更新工作项，ID: {}", workItem.id);
+void primal::graphics::rhi::DefaultMpscQueue::processResourceUpdate(const WorkItem& workItem) {
     
     // TODO: 调用RHI资源系统的相关接口
     // 例如：更新纹理数据、缓冲区数据等
 }
 
-void DefaultMpscQueue::processMemoryOperation(const WorkItem& workItem) {
-    Logger::Debug("DefaultMpscQueue::processMemoryOperation - 处理内存操作工作项，ID: {}", workItem.id);
+void primal::graphics::rhi::DefaultMpscQueue::processMemoryOperation(const WorkItem& workItem) {
     
     // TODO: 调用RHI内存池系统的相关接口
     // 例如：分配GPU内存、释放GPU内存等
 }
 
-void DefaultMpscQueue::processSyncOperation(const WorkItem& workItem) {
-    Logger::Debug("DefaultMpscQueue::processSyncOperation - 处理同步操作工作项，ID: {}", workItem.id);
+void primal::graphics::rhi::DefaultMpscQueue::processSyncOperation(const WorkItem& workItem) {
     
     // TODO: 调用RHI同步系统的相关接口
     // 例如：创建Fence、等待Fence等
 }
 
-void DefaultMpscQueue::processCustomCallback(const WorkItem& workItem) {
-    Logger::Debug("DefaultMpscQueue::processCustomCallback - 处理自定义回调工作项，ID: {}", workItem.id);
+void primal::graphics::rhi::DefaultMpscQueue::processCustomCallback(const WorkItem& workItem) {
     
     // 调用用户自定义的回调函数
     if (workItem.callbackData.callback) {
-        workItem.callbackData.callback();
+        (*workItem.callbackData.callback)();
     }
 }
 
 // === 工厂函数实现 ===
 
-std::unique_ptr<RHIMpscQueue> MpscQueueFactory::CreateQueue(RHIDevice& device, const QueueConfig& config) {
+std::unique_ptr<primal::graphics::rhi::RHIMpscQueue> primal::graphics::rhi::MpscQueueFactory::CreateQueue(RHIDeviceBase& device, const QueueConfig& config) {
     auto queue = std::make_unique<DefaultMpscQueue>(device, config);
     
     if (!queue->Initialize()) {
-        Logger::Error("MpscQueueFactory::CreateQueue - 创建MPSC队列失败");
         return nullptr;
     }
     
     return queue;
 }
 
-QueueConfig MpscQueueFactory::GetRecommendedConfig(const char* usage, const char* expectedLoad) {
+primal::graphics::rhi::QueueConfig primal::graphics::rhi::MpscQueueFactory::GetRecommendedConfig(const char* usage, const char* expectedLoad) {
     QueueConfig config;
     
     // 根据使用场景推荐配置

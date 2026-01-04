@@ -41,6 +41,32 @@ namespace constants {
 // === 向量扩展函数 ===
 
 /**
+ * @brief 计算向量的点积
+ * @tparam T 向量类型
+ * @param a 第一个向量
+ * @param b 第二个向量
+ * @return 向量点积
+ */
+template<typename T>
+float dot(const T& a, const T& b) {
+    float result = 0.0f;
+    if constexpr (std::is_same_v<T, simd::float3>) {
+        result = a.x * b.x + a.y * b.y + a.z * b.z;
+    } else if constexpr (std::is_same_v<T, simd::float4>) {
+        result = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    } else if constexpr (std::is_same_v<T, simd::float2>) {
+        result = a.x * b.x + a.y * b.y;
+    } else {
+        // 通用实现，假设支持[]
+        constexpr int size = sizeof(T) / sizeof(float);
+        for (int i = 0; i < size; ++i) {
+            result += a[i] * b[i];
+        }
+    }
+    return result;
+}
+
+/**
  * @brief 计算向量的长度
  * @param v 输入向量
  * @return 向量长度
@@ -139,7 +165,7 @@ float Angle(const T& a, const T& b) {
         return 0.0f;
     }
     float cosAngle = Dot(a, b) / (lenA * lenB);
-    cosAngle = Clamp(cosAngle, -1.0f, 1.0f);
+    cosAngle = clamp(cosAngle, -1.0f, 1.0f);
     return acosf(cosAngle);
 }
 
@@ -164,7 +190,7 @@ T Lerp(const T& a, const T& b, float t) {
  */
 template<typename T>
 T SmoothLerp(const T& a, const T& b, float t) {
-    t = Clamp(t, 0.0f, 1.0f);
+    t = clamp(t, 0.0f, 1.0f);
     t = t * t * (3.0f - 2.0f * t);  // Smoothstep函数
     return Lerp(a, b, t);
 }
@@ -355,10 +381,10 @@ inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
  */
 inline m4x4 Transpose(const m4x4& mat) {
     return m4x4{
-        v4{mat[0][0], mat[1][0], mat[2][0], mat[3][0]},
-        v4{mat[0][1], mat[1][1], mat[2][1], mat[3][1]},
-        v4{mat[0][2], mat[1][2], mat[2][2], mat[3][2]},
-        v4{mat[0][3], mat[1][3], mat[2][3], mat[3][3]}
+        v4{mat.columns[0][0], mat.columns[1][0], mat.columns[2][0], mat.columns[3][0]},
+        v4{mat.columns[0][1], mat.columns[1][1], mat.columns[2][1], mat.columns[3][1]},
+        v4{mat.columns[0][2], mat.columns[1][2], mat.columns[2][2], mat.columns[3][2]},
+        v4{mat.columns[0][3], mat.columns[1][3], mat.columns[2][3], mat.columns[3][3]}
     };
 }
 
@@ -369,13 +395,13 @@ inline m4x4 Transpose(const m4x4& mat) {
  */
 inline m4x4 Inverse(const m4x4& mat) {
     // 提取平移、旋转、缩放分量
-    v3 translation{mat[3][0], mat[3][1], mat[3][2]};
+    v3 translation{mat.columns[3][0], mat.columns[3][1], mat.columns[3][2]};
     
     // 提取3x3旋转缩放矩阵并求逆
     v3 scale{
-        Length(v3{mat[0][0], mat[0][1], mat[0][2]}),
-        Length(v3{mat[1][0], mat[1][1], mat[1][2]}),
-        Length(v3{mat[2][0], mat[2][1], mat[2][2]})
+        Length(v3{mat.columns[0][0], mat.columns[0][1], mat.columns[0][2]}),
+        Length(v3{mat.columns[1][0], mat.columns[1][1], mat.columns[1][2]}),
+        Length(v3{mat.columns[2][0], mat.columns[2][1], mat.columns[2][2]})
     };
     
     // 避免除零
@@ -385,16 +411,16 @@ inline m4x4 Inverse(const m4x4& mat) {
     
     // 构建旋转矩阵的转置
     m4x4 invMat{
-        v4{mat[0][0] * scale.x, mat[1][0] * scale.y, mat[2][0] * scale.z, 0.0f},
-        v4{mat[0][1] * scale.x, mat[1][1] * scale.y, mat[2][1] * scale.z, 0.0f},
-        v4{mat[0][2] * scale.x, mat[1][2] * scale.y, mat[2][2] * scale.z, 0.0f},
+        v4{mat.columns[0][0] * scale.x, mat.columns[1][0] * scale.y, mat.columns[2][0] * scale.z, 0.0f},
+        v4{mat.columns[0][1] * scale.x, mat.columns[1][1] * scale.y, mat.columns[2][1] * scale.z, 0.0f},
+        v4{mat.columns[0][2] * scale.x, mat.columns[1][2] * scale.y, mat.columns[2][2] * scale.z, 0.0f},
         v4{0.0f, 0.0f, 0.0f, 1.0f}
     };
     
     // 应用反向平移
-    invMat[3][0] = -(mat[3][0] * invMat[0][0] + mat[3][1] * invMat[1][0] + mat[3][2] * invMat[2][0]);
-    invMat[3][1] = -(mat[3][0] * invMat[0][1] + mat[3][1] * invMat[1][1] + mat[3][2] * invMat[2][1]);
-    invMat[3][2] = -(mat[3][0] * invMat[0][2] + mat[3][1] * invMat[1][2] + mat[3][2] * invMat[2][2]);
+    invMat.columns[3][0] = -(mat.columns[3][0] * invMat.columns[0][0] + mat.columns[3][1] * invMat.columns[1][0] + mat.columns[3][2] * invMat.columns[2][0]);
+    invMat.columns[3][1] = -(mat.columns[3][0] * invMat.columns[0][1] + mat.columns[3][1] * invMat.columns[1][1] + mat.columns[3][2] * invMat.columns[2][1]);
+    invMat.columns[3][2] = -(mat.columns[3][0] * invMat.columns[0][2] + mat.columns[3][1] * invMat.columns[1][2] + mat.columns[3][2] * invMat.columns[2][2]);
     
     return invMat;
 }
@@ -407,9 +433,9 @@ inline m4x4 Inverse(const m4x4& mat) {
  */
 inline v3 TransformVector(const m4x4& mat, const v3& vec) {
     return v3{
-        mat[0][0] * vec.x + mat[1][0] * vec.y + mat[2][0] * vec.z,
-        mat[0][1] * vec.x + mat[1][1] * vec.y + mat[2][1] * vec.z,
-        mat[0][2] * vec.x + mat[1][2] * vec.y + mat[2][2] * vec.z
+        mat.columns[0][0] * vec.x + mat.columns[1][0] * vec.y + mat.columns[2][0] * vec.z,
+        mat.columns[0][1] * vec.x + mat.columns[1][1] * vec.y + mat.columns[2][1] * vec.z,
+        mat.columns[0][2] * vec.x + mat.columns[1][2] * vec.y + mat.columns[2][2] * vec.z
     };
 }
 
@@ -421,9 +447,9 @@ inline v3 TransformVector(const m4x4& mat, const v3& vec) {
  */
 inline v3 TransformPoint(const m4x4& mat, const v3& point) {
     return v3{
-        mat[0][0] * point.x + mat[1][0] * point.y + mat[2][0] * point.z + mat[3][0],
-        mat[0][1] * point.x + mat[1][1] * point.y + mat[2][1] * point.z + mat[3][1],
-        mat[0][2] * point.x + mat[1][2] * point.y + mat[2][2] * point.z + mat[3][2]
+        mat.columns[0][0] * point.x + mat.columns[1][0] * point.y + mat.columns[2][0] * point.z + mat.columns[3][0],
+        mat.columns[0][1] * point.x + mat.columns[1][1] * point.y + mat.columns[2][1] * point.z + mat.columns[3][1],
+        mat.columns[0][2] * point.x + mat.columns[1][2] * point.y + mat.columns[2][2] * point.z + mat.columns[3][2]
     };
 }
 
@@ -436,9 +462,9 @@ inline v3 TransformPoint(const m4x4& mat, const v3& point) {
 inline v3 TransformNormal(const m4x4& mat, const v3& normal) {
     // 使用3x3旋转部分的转置变换法向量
     return Normalize(v3{
-        mat[0][0] * normal.x + mat[0][1] * normal.y + mat[0][2] * normal.z,
-        mat[1][0] * normal.x + mat[1][1] * normal.y + mat[1][2] * normal.z,
-        mat[2][0] * normal.x + mat[2][1] * normal.y + mat[2][2] * normal.z
+        mat.columns[0][0] * normal.x + mat.columns[1][0] * normal.y + mat.columns[2][0] * normal.z,
+        mat.columns[0][1] * normal.x + mat.columns[1][1] * normal.y + mat.columns[2][1] * normal.z,
+        mat.columns[0][2] * normal.x + mat.columns[1][2] * normal.y + mat.columns[2][2] * normal.z
     });
 }
 
@@ -477,8 +503,8 @@ inline v3 LinearToRGB(const v3& linear) {
  * @return HSV颜色值
  */
 inline v3 RGBToHSV(const v3& rgb) {
-    float maxVal = max(max(rgb.x, rgb.y), rgb.z);
-    float minVal = min(min(rgb.x, rgb.y), rgb.z);
+    float maxVal = std::max(std::max(rgb.x, rgb.y), rgb.z);
+    float minVal = std::min(std::min(rgb.x, rgb.y), rgb.z);
     float delta = maxVal - minVal;
     
     v3 hsv;
@@ -531,6 +557,75 @@ inline v3 HSVToRGB(const v3& hsv) {
     }
     
     return rgb + v3{m, m, m};
+}
+
+// === 矩阵扩展函数 ===
+
+/**
+ * @brief 创建4x4单位矩阵
+ * @return 4x4单位矩阵
+ */
+inline m4x4 MatrixIdentity() {
+#if defined(__APPLE__)
+    return matrix_identity_float4x4;
+#elif defined(_WIN32)
+    return DirectX::XMMatrixIdentity();
+#else
+    // 默认实现：手动构造单位矩阵
+    m4x4 result{};
+    // 根据具体的m4x4类型进行初始化
+    // 这里假设m4x4有合适的构造函数或成员访问方式
+    return result;
+#endif
+}
+
+/**
+ * @brief 创建透视投影矩阵
+ * @param fovY 垂直视野角度（弧度）
+ * @param aspect 宽高比
+ * @param nearZ 近裁剪面距离
+ * @param farZ 远裁剪面距离
+ * @return 透视投影矩阵
+ */
+inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ) {
+#if defined(__APPLE__)
+    // 手动实现透视矩阵
+    float f = 1.0f / std::tanf(fovY * 0.5f);
+    simd::float4x4 result{};
+    result.columns[0] = simd::float4{f / aspect, 0.0f, 0.0f, 0.0f};
+    result.columns[1] = simd::float4{0.0f, f, 0.0f, 0.0f};
+    result.columns[2] = simd::float4{0.0f, 0.0f, (farZ + nearZ) / (nearZ - farZ), -1.0f};
+    result.columns[3] = simd::float4{0.0f, 0.0f, (2.0f * farZ * nearZ) / (nearZ - farZ), 0.0f};
+    return result;
+#elif defined(_WIN32)
+    return DirectX::XMMatrixPerspectiveFovLH(fovY, aspect, nearZ, farZ);
+#else
+    // 默认实现：手动构造透视矩阵
+    m4x4 result{};
+    // 这里需要根据具体的m4x4类型手动构造
+    return result;
+#endif
+}
+
+/**
+ * @brief 创建平移矩阵
+ * @param translation 平移向量
+ * @return 平移矩阵
+ */
+inline m4x4 MatrixTranslation(const v3& translation) {
+#if defined(__APPLE__)
+    return simd::float4x4(simd::float4{1.0f, 0.0f, 0.0f, 0.0f},
+                          simd::float4{0.0f, 1.0f, 0.0f, 0.0f},
+                          simd::float4{0.0f, 0.0f, 1.0f, 0.0f},
+                          simd::float4{translation.x, translation.y, translation.z, 1.0f});
+#elif defined(_WIN32)
+    return DirectX::XMMatrixTranslation(translation.x, translation.y, translation.z);
+#else
+    // 默认实现：手动构造平移矩阵
+    m4x4 result{};
+    // 这里需要根据具体的m4x4类型手动构造
+    return result;
+#endif
 }
 
 } // namespace primal::graphics::rhi::math

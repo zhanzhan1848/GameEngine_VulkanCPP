@@ -16,8 +16,7 @@
 namespace primal::graphics::rhi {
 
 // === 前向声明 ===
-
-class RHIDevice;
+class RHIDeviceBase;
 
 /**
  * @brief 内存分配策略枚举
@@ -78,7 +77,7 @@ struct MemoryPoolDesc {
     const char* name;                    ///< 内存池名称
     
     MemoryPoolDesc() : poolSize(64 * 1024 * 1024), blockSize(1024), alignment(256),
-                      strategy(MemoryAllocationStrategy::FreeList), usage(GPUMemoryUsage::Default),
+                      strategy(MemoryAllocationStrategy::FreeList), usage(GPUMemoryUsage::Unknown),
                       allowGrowth(false), threadSafe(true), maxBlocks(1024), name("RHIMemoryPool") {}
 };
 
@@ -119,7 +118,7 @@ public:
      * @param device 设备引用
      * @param desc 内存池描述符
      */
-    explicit RHIMemoryPool(RHIDevice& device, const MemoryPoolDesc& desc)
+    explicit RHIMemoryPool(RHIDeviceBase& device, const MemoryPoolDesc& desc)
         : device_(device), desc_(desc), stats_(), initialized_(false) {}
     
     /**
@@ -143,22 +142,7 @@ public:
         other.stats_ = MemoryStats();
     }
     
-    RHIMemoryPool& operator=(RHIMemoryPool&& other) noexcept {
-        if (this != &other) {
-            if (initialized_) {
-                Destroy();
-            }
-            
-            device_ = other.device_;
-            desc_ = std::move(other.desc_);
-            stats_ = other.stats_;
-            initialized_ = other.initialized_;
-            
-            other.initialized_ = false;
-            other.stats_ = MemoryStats();
-        }
-        return *this;
-    }
+    RHIMemoryPool& operator=(RHIMemoryPool&& other) noexcept;
     
     // === 核心接口方法 ===
     
@@ -185,7 +169,7 @@ public:
      * @param usage 内存用途
      * @return 内存块句柄，失败返回0
      */
-    virtual uint32_t Allocate(uint64_t size, uint64_t alignment = 0, GPUMemoryUsage usage = GPUMemoryUsage::Default) = 0;
+    virtual uint32_t Allocate(uint64_t size, uint64_t alignment = 0, GPUMemoryUsage usage = GPUMemoryUsage::Unknown) = 0;
     
     /**
      * @brief 释放内存块
@@ -345,7 +329,7 @@ protected:
     
     // === 受保护的成员变量 ===
     
-    RHIDevice& device_;                 ///< 设备引用
+    RHIDeviceBase& device_;                 ///< 设备引用
     MemoryPoolDesc desc_;               ///< 内存池描述符
     MemoryStats stats_;                 ///< 统计信息
     bool initialized_;                   ///< 初始化状态

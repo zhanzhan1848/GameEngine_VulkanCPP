@@ -11,17 +11,18 @@
 
 #include "CommonHeaders.h"
 #include "RHITypes.h"
+
 #include "RHIMemoryPool.h"
-#include <unordered_map>
-#include <deque>
-#include <chrono>
-#include <memory>
 
 namespace primal::graphics::rhi {
 
 // === 前向声明 ===
 
-class RHIDevice;
+class RHIDeviceBaseBase;
+struct AdaptiveConfig;
+struct UsagePatternData;    
+struct HotspotInfo;
+struct MemoryAllocationRecord;
 
 /**
  * @brief 内存使用模式枚举
@@ -61,7 +62,7 @@ struct AllocationRecord {
     MemoryHotspotLevel hotspotLevel; ///< 热点级别
     
     AllocationRecord() : timestamp(0), deallocationTimestamp(0), size(0), 
-                        alignment(0), usage(GPUMemoryUsage::Default), accessCount(0),
+                        alignment(0), usage(GPUMemoryUsage::Unknown), accessCount(0),
                         totalAccessTime(0), hotspotLevel(MemoryHotspotLevel::Cold) {}
 };
 
@@ -147,6 +148,8 @@ struct AdaptiveMetrics {
     f32 memoryEfficiency;               ///< 内存效率
     f32 allocationSuccessRate;          ///< 分配成功率
     u32 failedAllocationCount;          ///< 失败分配次数
+    u32 allocationCount;                ///< 总分配次数
+    u32 deallocationCount;              ///< 总释放次数
     
     AdaptiveMetrics() : detectedPattern(MemoryUsagePattern::Unknown), 
                        patternConfidence(0.0f), patternStartTime(0), 
@@ -155,7 +158,7 @@ struct AdaptiveMetrics {
                        defragmentationCount(0), totalDefragmentationTime(0),
                        averageAllocationTime(0.0f), averageDeallocationTime(0.0f),
                        memoryEfficiency(0.0f), allocationSuccessRate(1.0f), 
-                       failedAllocationCount(0) {}
+                       failedAllocationCount(0), allocationCount(0), deallocationCount(0) {}
 };
 
 /**
@@ -172,7 +175,7 @@ public:
      * @param desc 基础内存池描述符
      * @param config 自适应配置参数
      */
-    explicit RHIAdaptiveMemoryPool(RHIDevice& device, const MemoryPoolDesc& desc, 
+    explicit RHIAdaptiveMemoryPool(RHIDeviceBase& device, const MemoryPoolDesc& desc, 
                                   const AdaptiveConfig& config = AdaptiveConfig());
     
     /**
@@ -200,7 +203,7 @@ public:
      * @param usage 内存用途
      * @return 内存块句柄，失败返回0
      */
-    u32 Allocate(u64 size, u64 alignment = 0, GPUMemoryUsage usage = GPUMemoryUsage::Default) override;
+    u32 Allocate(u64 size, u64 alignment = 0, GPUMemoryUsage usage = GPUMemoryUsage::Unknown) override;
     
     /**
      * @brief 释放内存块（增强版）
@@ -375,6 +378,11 @@ private:
     u64 analysisStartTime_;                         ///< 分析开始时间
     u64 lastPatternAnalysis_;                       ///< 上次模式分析时间
     
+    // 实际内存管理
+    primal::utl::vector<MemoryBlock> memoryBlocks_; ///< 内存块列表
+    primal::utl::vector<u32> freeBlocks_;           ///< 空闲块列表
+    u64 nextBlockHandle_;                            ///< 下一个块句柄
+    
     // 分配记录跟踪
     std::unordered_map<u32, AllocationRecord> allocationRecords_; ///< 分配记录映射
     primal::utl::vector<u32> activeAllocations_;   ///< 活跃分配列表
@@ -424,6 +432,8 @@ private:
     // 工具方法
     u64 getCurrentTimestamp() const;
     u32 findFreePreallocatedBlock(u64 size, u64 alignment);
+    u32 allocateFromMemoryPool(u64 size, u64 alignment, GPUMemoryUsage usage);
+    void deallocateFromMemoryPool(u32 blockHandle);
     void addToPreallocatedPool(u32 blockHandle);
     void removeFromPreallocatedPool(u32 blockHandle);
     

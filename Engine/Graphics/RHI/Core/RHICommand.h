@@ -11,13 +11,39 @@
 
 #include "CommonHeaders.h"
 #include "RHITypes.h"
-#include "RHIResource.h"
 
 namespace primal::graphics::rhi {
 
 // === 前向声明 ===
+class RHIDeviceBase;
+class RHIBuffer;
+class RHITexture;
+struct Rect;
+struct Viewport;
+struct ColorBlendState;
+struct DepthStencilState;
+struct RasterizerState;
 
-class RHIDevice;
+
+
+/**
+ * @brief 加载操作枚举
+ * @details 定义渲染目标加载时的操作类型
+ */
+enum class LoadAction {
+    Load = 0,           ///< 加载现有内容
+    Clear = 1,          ///< 清除为指定值
+    DontCare = 2        ///< 不关心原有内容
+};
+
+/**
+ * @brief 存储操作枚举
+ * @details 定义渲染目标存储时的操作类型
+ */
+enum class StoreAction {
+    Store = 0,          ///< 存储渲染结果
+    DontCare = 1        ///< 不关心渲染结果
+};
 
 /**
  * @brief 命令缓冲区状态枚举
@@ -104,15 +130,15 @@ struct RenderPassDesc {
     struct Attachment {
         ResourceHandle texture;           ///< 渲染目标纹理
         DataFormat format;                ///< 数据格式
-        MTL::LoadAction loadOp;                ///< 加载操作
-        MTL::StoreAction storeOp;              ///< 存储操作
+        LoadAction loadOp;                ///< 加载操作
+        StoreAction storeOp;              ///< 存储操作
         ClearValue clearValue;            ///< 清除值
         u32 sampleCount;           ///< 采样数量
         uint8_t mipLevel;                 ///< Mip层级
         uint16_t arrayLayer;              ///< 数组层级
         
         Attachment() : texture(handles::INVALID_RESOURCE), format(DataFormat::Unknown),
-                      loadOp(MTL::LoadAction::DontCare), storeOp(MTL::StoreAction::Store),
+                      loadOp(LoadAction::DontCare), storeOp(StoreAction::Store),
                       sampleCount(1), mipLevel(0), arrayLayer(0) {}
     };
     
@@ -192,7 +218,7 @@ public:
      * @param device 设备引用
      * @param type 命令队列类型
      */
-    explicit RHICommandBuffer(RHIDevice& device, CommandQueueType type)
+    explicit RHICommandBuffer(RHIDeviceBase& device, CommandQueueType type)
         : device_(device), type_(type), handle_(handles::INVALID_COMMAND_BUFFER),
           state_(CommandBufferState::Reset), stats_() {}
     
@@ -218,22 +244,7 @@ public:
         other.stats_ = CommandStats();
     }
     
-    RHICommandBuffer& operator=(RHICommandBuffer&& other) noexcept {
-        if (this != &other) {
-            Destroy();
-            
-            device_ = other.device_;
-            type_ = other.type_;
-            handle_ = other.handle_;
-            state_ = other.state_;
-            stats_ = other.stats_;
-            
-            other.handle_ = handles::INVALID_COMMAND_BUFFER;
-            other.state_ = CommandBufferState::Invalid;
-            other.stats_ = CommandStats();
-        }
-        return *this;
-    }
+    RHICommandBuffer& operator=(RHICommandBuffer&& other) noexcept;
     
     // === 核心接口方法 ===
     
@@ -520,7 +531,7 @@ protected:
     
     // === 受保护的成员变量 ===
     
-    RHIDevice& device_;                   ///< 设备引用
+    RHIDeviceBase& device_;                   ///< 设备引用
     CommandQueueType type_;               ///< 命令队列类型
     CommandBufferHandle handle_;          ///< 命令缓冲区句柄
     CommandBufferState state_;            ///< 当前状态

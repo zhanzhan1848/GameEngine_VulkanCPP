@@ -47,6 +47,32 @@ set_target_properties(StandaloneRHI_AdaptiveMemoryPool_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_AdaptiveMemoryPool_Test PRIVATE DEBUG _DEBUG)
 
+# 创建哈希基准测试
+add_executable(HashBenchmark RHI/Core/HashBenchmark.cpp)
+# 不依赖任何Engine头文件或库，完全独立
+add_test(NAME HashBenchmark COMMAND HashBenchmark)
+set_target_properties(HashBenchmark PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+# 创建RHI批渲染提交测试
+add_executable(StandaloneRHI_BatchRenderer_Test RHI/Core/TestRHIBatchRenderer.cpp)
+# 添加Engine头文件包含路径
+target_include_directories(StandaloneRHI_BatchRenderer_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+# 链接Engine库以获取RHIBatchRenderer实现
+target_link_libraries(StandaloneRHI_BatchRenderer_Test PRIVATE Engine)
+add_test(NAME StandaloneRHI_BatchRenderer_Test COMMAND StandaloneRHI_BatchRenderer_Test)
+set_target_properties(StandaloneRHI_BatchRenderer_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_BatchRenderer_Test PRIVATE DEBUG _DEBUG)
+
+
+
 # 创建RHI命令队列测试
 add_executable(StandaloneRHI_Queue_Test RHI/Core/TestRHIQueue.cpp)
 # 不依赖任何Engine头文件或库，完全独立

@@ -35,7 +35,7 @@ namespace counters {
 static const char* GetDebugLevelName(DebugLevel level) {
     switch (level) {
         case DebugLevel::TRACE: return "TRACE";
-        case DebugLevel::DEBUG: return "DEBUG";
+        case DebugLevel::DEBUG_LEVEL: return "DEBUG";
         case DebugLevel::INFO:  return "INFO ";
         case DebugLevel::WARN:  return "WARN ";
         case DebugLevel::ERROR: return "ERROR";

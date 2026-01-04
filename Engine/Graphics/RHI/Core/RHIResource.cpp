@@ -17,6 +17,120 @@
 
 namespace primal::graphics::rhi {
 
+/**
+ * @brief 获取数据格式的字节大小
+ * @param format 数据格式
+ * @return 字节大小
+ */
+uint32_t GetFormatSize(DataFormat format) {
+    switch (format) {
+        case DataFormat::Unknown:
+            return 0;
+        case DataFormat::R8_UNorm:
+        case DataFormat::R8_SNorm:
+        case DataFormat::R8_UInt:
+        case DataFormat::R8_SInt:
+            return 1;
+        case DataFormat::R16_UNorm:
+        case DataFormat::R16_SNorm:
+        case DataFormat::R16_UInt:
+        case DataFormat::R16_SInt:
+        case DataFormat::R16_Float:
+            return 2;
+        case DataFormat::RG8_UNorm:
+        case DataFormat::RG8_SNorm:
+        case DataFormat::RG8_UInt:
+        case DataFormat::RG8_SInt:
+            return 2;
+        case DataFormat::R32_UNorm:
+        case DataFormat::R32_SNorm:
+        case DataFormat::R32_UInt:
+        case DataFormat::R32_SInt:
+        case DataFormat::R32_Float:
+            return 4;
+        case DataFormat::RG16_UNorm:
+        case DataFormat::RG16_SNorm:
+        case DataFormat::RG16_UInt:
+        case DataFormat::RG16_SInt:
+        case DataFormat::RG16_Float:
+            return 4;
+        case DataFormat::RG8B8A8_UNorm:
+        case DataFormat::RG8B8A8_SNorm:
+        case DataFormat::RG8B8A8_UInt:
+        case DataFormat::RG8B8A8_SInt:
+            return 4;
+        case DataFormat::RG32_UNorm:
+        case DataFormat::RG32_SNorm:
+        case DataFormat::RG32_UInt:
+        case DataFormat::RG32_SInt:
+        case DataFormat::RG32_Float:
+            return 8;
+        case DataFormat::RGB32_UNorm:
+        case DataFormat::RGB32_SNorm:
+        case DataFormat::RGB32_UInt:
+        case DataFormat::RGB32_SInt:
+        case DataFormat::RGB32_Float:
+            return 12;
+        case DataFormat::RGBA32_UNorm:
+        case DataFormat::RGBA32_SNorm:
+        case DataFormat::RGBA32_UInt:
+        case DataFormat::RGBA32_SInt:
+        case DataFormat::RGBA32_Float:
+            return 16;
+        case DataFormat::R8G8B8_UNorm:
+        case DataFormat::R8G8B8_SNorm:
+        case DataFormat::R8G8B8_UInt:
+        case DataFormat::R8G8B8_SInt:
+            return 3;
+        case DataFormat::BGRA8_UNorm:
+        case DataFormat::BGRA8_SNorm:
+        case DataFormat::BGRA8_UInt:
+        case DataFormat::BGRA8_SInt:
+            return 4;
+        case DataFormat::BC1_UNorm:
+        case DataFormat::BC1_sRGB:
+            return 8;  // 每个块4x4像素，每像素0.5字节
+        case DataFormat::BC2_UNorm:
+        case DataFormat::BC2_sRGB:
+        case DataFormat::BC3_UNorm:
+        case DataFormat::BC3_sRGB:
+            return 16; // 每个块4x4像素，每像素1字节
+        case DataFormat::BC4_UNorm:
+        case DataFormat::BC4_SNorm:
+            return 8;  // 每个块4x4像素，每像素0.5字节
+        case DataFormat::BC5_UNorm:
+        case DataFormat::BC5_SNorm:
+            return 16; // 每个块4x4像素，每像素1字节
+        case DataFormat::BC6H_UF16:
+        case DataFormat::BC6H_SF16:
+        case DataFormat::BC7_UNorm:
+        case DataFormat::BC7_sRGB:
+            return 16; // 每个块4x4像素，每像素1字节
+        default:
+            return 0;
+    }
+}
+
+RHIResource& RHIResource::operator=(RHIResource&& other) noexcept {
+    if (this != &other) {
+        Destroy();
+        
+        device_ = other.device_;
+        refCount_ = other.refCount_.exchange(0);
+        desc_ = other.desc_;
+        handle_ = other.handle_;
+        state_ = other.state_;
+        refCount_ = other.refCount_.load();
+        mappedData_ = other.mappedData_;
+        
+        other.handle_ = handles::INVALID_RESOURCE;
+        other.state_ = ResourceState::Destroyed;
+        other.refCount_ = 0;
+        other.mappedData_ = nullptr;
+    }
+    return *this;
+}
+
 // === 资源工厂 ===
 
 /**
@@ -31,7 +145,7 @@ public:
      * @param desc 缓冲区描述符
      * @return 资源指针，失败返回nullptr
      */
-    static std::unique_ptr<RHIResource> CreateBuffer(RHIDevice& device, const BufferDesc& desc) {
+    static std::unique_ptr<RHIResource> CreateBuffer(RHIDeviceBase& device, const BufferDesc& desc) {
         // 这里应该根据平台创建对应的缓冲区资源
         // 目前返回nullptr，需要在派生类中实现
         (void)device;
@@ -45,7 +159,7 @@ public:
      * @param desc 纹理描述符
      * @return 资源指针，失败返回nullptr
      */
-    static std::unique_ptr<RHIResource> CreateTexture(RHIDevice& device, const TextureDesc& desc) {
+    static std::unique_ptr<RHIResource> CreateTexture(RHIDeviceBase& device, const TextureDesc& desc) {
         // 这里应该根据平台创建对应的纹理资源
         // 目前返回nullptr，需要在派生类中实现
         (void)device;
@@ -103,16 +217,16 @@ uint64_t CalculateBufferSize(const BufferDesc& desc) {
     
     switch (desc.type) {
         case BufferType::Vertex:
-            size = static_cast<uint64_t>(desc.vertexCount) * desc.vertexStride;
+            size = static_cast<uint64_t>(desc.vertex.vertexCount) * desc.vertex.vertexStride;
             break;
         case BufferType::Index:
-            size = static_cast<uint64_t>(desc.indexCount) * GetFormatSize(desc.format);
+            size = static_cast<uint64_t>(desc.index.indexCount) * GetFormatSize(desc.index.format);
             break;
         case BufferType::Constant:
             size = desc.size;
             break;
         case BufferType::Structured:
-            size = static_cast<uint64_t>(desc.elementCount) * desc.elementStride;
+            size = static_cast<uint64_t>(desc.structured.elementCount) * desc.structured.elementStride;
             break;
         case BufferType::Raw:
             size = desc.size;
@@ -187,19 +301,20 @@ bool ValidateResourceDesc(const ResourceDesc& desc) {
  */
 bool ValidateBufferDesc(const BufferDesc& desc) {
     // 基础验证
-    if (!ValidateResourceDesc(ResourceDesc(ResourceType::Buffer, desc.usage, desc.memoryUsage, 0, desc.name))) {
+    ResourceUsage usage = static_cast<ResourceUsage>(desc.bindFlags);
+    if (!ValidateResourceDesc(ResourceDesc(ResourceType::Buffer, usage, desc.memoryUsage, 0, desc.name.c_str()))) {
         return false;
     }
     
     switch (desc.type) {
         case BufferType::Vertex:
-            if (desc.vertexCount == 0 || desc.vertexStride == 0) return false;
+            if (desc.vertex.vertexCount == 0 || desc.vertex.vertexStride == 0) return false;
             break;
             
         case BufferType::Index:
-            if (desc.indexCount == 0) return false;
-            if (desc.format != DataFormat::R16_UINT && 
-                desc.format != DataFormat::R32_UINT) {
+            if (desc.index.indexCount == 0) return false;
+            if (desc.index.format != DataFormat::R16_UInt && 
+                desc.index.format != DataFormat::R32_UInt) {
                 return false;
             }
             break;
@@ -210,7 +325,7 @@ bool ValidateBufferDesc(const BufferDesc& desc) {
             break;
             
         case BufferType::Structured:
-            if (desc.elementCount == 0 || desc.elementStride == 0) return false;
+            if (desc.structured.elementCount == 0 || desc.structured.elementStride == 0) return false;
             break;
             
         case BufferType::Raw:
@@ -230,8 +345,19 @@ bool ValidateBufferDesc(const BufferDesc& desc) {
  * @return 描述符是否有效
  */
 bool ValidateTextureDesc(const TextureDesc& desc) {
-    // 基础验证
-    if (!ValidateResourceDesc(ResourceDesc(ResourceType::Texture, desc.usage, desc.memoryUsage, 0, desc.name))) {
+    // 基础验证 - 纹理的ResourceUsage根据TextureUsage推断
+    ResourceUsage usage = ResourceUsage::None;
+    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(TextureUsage::ShaderResource)) {
+        usage = usage | ResourceUsage::ShaderResource;
+    }
+    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(TextureUsage::RenderTarget)) {
+        usage = usage | ResourceUsage::RenderTarget;
+    }
+    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(TextureUsage::DepthStencil)) {
+        usage = usage | ResourceUsage::DepthStencil;
+    }
+    
+    if (!ValidateResourceDesc(ResourceDesc(ResourceType::Texture, usage, desc.memoryUsage, 0, desc.name.c_str()))) {
         return false;
     }
     

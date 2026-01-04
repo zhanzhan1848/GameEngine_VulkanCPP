@@ -15,23 +15,7 @@
 namespace primal::graphics::rhi {
 
 // === 前向声明 ===
-
-class RHIDevice;
-
-/**
- * @brief 资源状态枚举
- * @details 描述资源的当前状态和生命周期
- */
-enum class ResourceState : uint8_t {
-    Unknown = 0,        ///< 未知状态
-    Created = 1,        ///< 已创建，但未分配GPU内存
-    Allocated = 2,      ///< 已分配GPU内存
-    PendingUpload = 3,  ///< 等待数据上传
-    Ready = 4,          ///< 资源就绪，可以使用
-    InUse = 5,          ///< 正在被GPU使用
-    PendingDestroy = 6,  ///< 等待销毁
-    Destroyed = 7       ///< 已销毁
-};
+class RHIDeviceBase;
 
 /**
  * @brief 资源使用标志位
@@ -142,9 +126,9 @@ public:
      * @param device 设备引用
      * @param desc 资源描述符
      */
-    RHIResource(RHIDevice& device, const ResourceDesc& desc)
+    RHIResource(RHIDeviceBase& device, const ResourceDesc& desc)
         : device_(device), desc_(desc), handle_(handles::INVALID_RESOURCE),
-          state_(ResourceState::Created), refCount_(1), mappedData_(nullptr) {}
+          state_(ResourceState::Created), refCount_(0), mappedData_(nullptr) {}
     
     /**
      * @brief 虚析构函数
@@ -162,31 +146,14 @@ public:
     
     RHIResource(RHIResource&& other) noexcept
         : device_(other.device_), desc_(other.desc_), handle_(other.handle_),
-          state_(other.state_), refCount_(other.refCount_.load()), mappedData_(other.mappedData_) {
+          state_(other.state_), refCount_(other.refCount_.exchange(0)), mappedData_(other.mappedData_) {
         other.handle_ = handles::INVALID_RESOURCE;
         other.state_ = ResourceState::Destroyed;
         other.refCount_ = 0;
         other.mappedData_ = nullptr;
     }
     
-    RHIResource& operator=(RHIResource&& other) noexcept {
-        if (this != &other) {
-            Destroy();
-            
-            device_ = other.device_;
-            desc_ = other.desc_;
-            handle_ = other.handle_;
-            state_ = other.state_;
-            refCount_ = other.refCount_.load();
-            mappedData_ = other.mappedData_;
-            
-            other.handle_ = handles::INVALID_RESOURCE;
-            other.state_ = ResourceState::Destroyed;
-            other.refCount_ = 0;
-            other.mappedData_ = nullptr;
-        }
-        return *this;
-    }
+    RHIResource& operator=(RHIResource&& other) noexcept;
     
     // === 核心接口方法 ===
     
@@ -386,7 +353,7 @@ protected:
     
     // === 受保护的成员变量 ===
     
-    RHIDevice& device_;              ///< 设备引用
+    RHIDeviceBase& device_;              ///< 设备引用
     ResourceDesc desc_;               ///< 资源描述符
     ResourceHandle handle_;           ///< 资源句柄
     ResourceState state_;             ///< 资源状态

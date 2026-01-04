@@ -37,7 +37,7 @@ public:
      * @param device 设备指针
      * @return 设备ID
      */
-    uint32_t RegisterDevice(RHIDevice<void>* device) {
+    uint32_t RegisterDevice(RHIDeviceBase* device) {
         uint32_t id = nextDeviceId_++;
         devices_.emplace_back(id, device);
         return id;
@@ -48,10 +48,12 @@ public:
      * @param deviceId 设备ID
      */
     void UnregisterDevice(uint32_t deviceId) {
-        devices_.erase(std::remove_if(devices_.begin(), devices_.end(),
-            [deviceId](const auto& pair) {
-                return pair.first == deviceId;
-            }), devices_.end());
+        for (u64 i = 0; i < devices_.size(); ++i) {
+            if (devices_[i].first == deviceId) {
+                devices_.erase(i);
+                break;
+            }
+        }
     }
     
     /**
@@ -107,7 +109,7 @@ private:
     DeviceManager() = default;
     ~DeviceManager() = default;
     
-    utl::vector<std::pair<uint32_t, RHIDevice<void>*>> devices_;
+    utl::vector<std::pair<uint32_t, RHIDeviceBase*>> devices_;
     uint32_t nextDeviceId_{1};
 };
 
@@ -329,5 +331,22 @@ void LogDeviceMessage(DeviceDebugLevel level, uint32_t deviceId, const char* mes
     (void)deviceId;
     (void)message;
 }
+
+/**
+ * @brief 获取设备
+ * @param deviceId 设备ID
+ * @return 设备指针
+ */
+RHIDeviceBase* RHIDeviceManager::GetDevice(uint32_t deviceId) const {
+    for (const auto& [id, device] : devices_) {
+        if (id == deviceId) {
+            return device;
+        }
+    }
+    return nullptr;
+}
+
+// 全局设备管理器实例定义
+RHIDeviceManager g_deviceManager;
 
 } // namespace primal::graphics::rhi

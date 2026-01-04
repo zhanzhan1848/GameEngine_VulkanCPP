@@ -28,7 +28,7 @@ public:
      * @param desc 内存池描述符
      * @return 内存池指针，失败返回nullptr
      */
-    static std::unique_ptr<RHIMemoryPool> CreateMemoryPool(RHIDevice& device, const MemoryPoolDesc& desc) {
+    static std::unique_ptr<RHIMemoryPool> CreateMemoryPool(RHIDeviceBase& device, const MemoryPoolDesc& desc) {
         // 根据策略类型创建不同的内存池
         // 这里返回nullptr，需要在具体平台实现中创建对应的内存池
         (void)device;
@@ -46,7 +46,7 @@ public:
         MemoryPoolDesc desc;
         
         switch (usage) {
-            case GPUMemoryUsage::Immutable:
+            case GPUMemoryUsage::Static:
                 desc.strategy = MemoryAllocationStrategy::Linear;
                 desc.allowGrowth = false;
                 desc.alignment = 256;
@@ -89,11 +89,26 @@ public:
 
 // === 内存池工厂静态方法 ===
 
-std::unique_ptr<RHIMemoryPool> MemoryPoolFactory::CreateMemoryPool(RHIDevice& device, const MemoryPoolDesc& desc) {
-    return MemoryPoolFactoryImpl::CreateMemoryPool(device, desc);
-}
+// 注意：MemoryPoolFactory 类需要在具体平台实现中定义
 
 // === RHIMemoryPool基类方法实现 ===
+
+RHIMemoryPool& RHIMemoryPool::operator=(RHIMemoryPool&& other) noexcept {
+    if (this != &other) {
+        if (initialized_) {
+            Destroy();
+        }
+        
+        device_ = other.device_;
+        desc_ = std::move(other.desc_);
+        stats_ = other.stats_;
+        initialized_ = other.initialized_;
+        
+        other.initialized_ = false;
+        other.stats_ = MemoryStats();
+    }
+    return *this;
+}
 
 void RHIMemoryPool::PrintStats() const {
     const auto& stats = GetStats();
@@ -350,7 +365,7 @@ MemoryAllocationStrategy GetRecommendedAllocationStrategy(GPUMemoryUsage usage,
                                                           const char* expectedUsage) {
     // 根据内存用途和使用模式推荐策略
     switch (usage) {
-        case GPUMemoryUsage::Immutable:
+        case GPUMemoryUsage::Static:
             return MemoryAllocationStrategy::Linear;
             
         case GPUMemoryUsage::Dynamic:

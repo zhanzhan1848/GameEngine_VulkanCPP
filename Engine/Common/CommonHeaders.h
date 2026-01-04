@@ -14,6 +14,10 @@
 #include <mutex>
 #include <cstring>
 #include <atomic>
+#include <deque>
+#include <condition_variable>
+#include <thread>
+#include <algorithm>
 
 #if defined(_WIN64)
 #include <DirectXMath.h>
@@ -53,6 +57,7 @@
 #include "../Utilities/Math.h"
 #include "../Utilities/Utilities.h"
 #include "../Utilities/MathTypes.h"
+#include "../Utilities/Hash.h"
 #include "Id.h"
 
 

@@ -15,7 +15,6 @@ namespace primal::graphics::rhi {
 
 // === 前向声明 ===
 
-class RHIDevice;
 class RHIResource;
 class RHICommandBuffer;
 class RHIShader;
@@ -87,16 +86,32 @@ enum class ResourceType : uint8_t {
 };
 
 /**
+ * @brief 资源状态枚举
+ * @details 描述资源的当前状态和生命周期
+ */
+enum class ResourceState : uint8_t {
+    Unknown = 0,        ///< 未知状态
+    Created = 1,        ///< 已创建，但未分配GPU内存
+    Allocated = 2,      ///< 已分配GPU内存
+    PendingUpload = 3,  ///< 等待数据上传
+    Ready = 4,          ///< 资源就绪，可以使用
+    InUse = 5,          ///< 正在被GPU使用
+    PendingDestroy = 6,  ///< 等待销毁
+    Destroyed = 7       ///< 已销毁
+};
+
+/**
  * @brief 缓冲区类型
  */
 enum class BufferType : uint8_t {
-    Unknown     = 0,    ///< 未知类型
-    Vertex      = 1,    ///< 顶点缓冲区
-    Index       = 2,    ///< 索引缓冲区
-    Constant    = 3,    ///< 常量缓冲区
-    Structured  = 4,    ///< 结构化缓冲区
-    Raw         = 5,    ///< 原始缓冲区
-    Indirect    = 6     ///< 间接绘制缓冲区
+    Unknown             = 0,    ///< 未知类型
+    Vertex              = 1,    ///< 顶点缓冲区
+    Index               = 2,    ///< 索引缓冲区
+    Constant            = 3,    ///< 常量缓冲区
+    Structured          = 4,    ///< 结构化缓冲区
+    Raw                 = 5,    ///< 原始缓冲区
+    Indirect            = 6,    ///< 间接绘制缓冲区
+    AccelerationStructure = 7   ///< 加速结构缓冲区
 };
 
 /**
@@ -253,7 +268,8 @@ enum class GPUMemoryUsage : uint8_t {
     Static = 1,    ///< 静态内存，CPU只写一次，GPU多次读取
     Dynamic = 2,   ///< 动态内存，CPU频繁更新，GPU多次读取
     Staging = 3,   ///< 暂存内存，用于CPU到GPU的数据传输
-    Readback = 4   ///< 回读内存，用于GPU到CPU的数据传输
+    Readback = 4,  ///< 回读内存，用于GPU到CPU的数据传输
+    Immutable = 5  ///< 不可变内存，CPU写一次后不再修改
 };
 
 /**
@@ -518,11 +534,61 @@ struct BufferDesc {
     uint64_t size;           ///< 缓冲区大小（字节）
     BufferType type;         ///< 缓冲区类型
     GPUMemoryUsage usage;    ///< 内存使用模式
+    GPUMemoryUsage memoryUsage; ///< 内存使用方式（兼容字段）
     uint32_t bindFlags;      ///< 绑定标志位
     
-    BufferDesc() : size(0), type(BufferType::Unknown), usage(GPUMemoryUsage::Unknown), bindFlags(0) {}
+    // 扩展字段用于具体缓冲区类型
+    union {
+        struct {
+            uint32_t vertexCount;     ///< 顶点数量
+            uint32_t vertexStride;    ///< 顶点步长
+        } vertex;
+        
+        struct {
+            uint32_t indexCount;      ///< 索引数量
+            DataFormat format;       ///< 索引格式
+        } index;
+        
+        struct {
+            uint32_t elementCount;    ///< 元素数量
+            uint32_t elementStride;  ///< 元素步长
+        } structured;
+    };
+    
+    std::string name;         ///< 缓冲区名称（调试用）
+    
+    BufferDesc() : size(0), type(BufferType::Unknown), usage(GPUMemoryUsage::Unknown), 
+                   memoryUsage(GPUMemoryUsage::Unknown), bindFlags(0) {
+        vertex.vertexCount = 0;
+        vertex.vertexStride = 0;
+        index.indexCount = 0;
+        index.format = DataFormat::Unknown;
+        structured.elementCount = 0;
+        structured.elementStride = 0;
+    }
+    
     BufferDesc(uint64_t sz, BufferType tp, GPUMemoryUsage us, uint32_t flags = 0)
-        : size(sz), type(tp), usage(us), bindFlags(flags) {}
+        : size(sz), type(tp), usage(us), memoryUsage(us), bindFlags(flags) {
+        vertex.vertexCount = 0;
+        vertex.vertexStride = 0;
+        index.indexCount = 0;
+        index.format = DataFormat::Unknown;
+        structured.elementCount = 0;
+        structured.elementStride = 0;
+    }
+};
+
+/**
+ * @brief 采样数量枚举
+ * @details 定义多重采样支持的采样数量
+ */
+enum class SampleCount : uint8_t {
+    Unknown = 0,    ///< 未知采样数量
+    Samples1 = 1,   ///< 1个采样点
+    Samples2 = 2,   ///< 2个采样点
+    Samples4 = 4,   ///< 4个采样点
+    Samples8 = 8,   ///< 8个采样点
+    Samples16 = 16  ///< 16个采样点
 };
 
 /**
@@ -535,13 +601,16 @@ struct TextureDesc {
     DataFormat format;       ///< 数据格式
     TextureType type;        ///< 纹理类型
     TextureUsage usage;      ///< 纹理用途
+    GPUMemoryUsage memoryUsage; ///< 内存使用方式
+    std::string name;        ///< 纹理名称
     
     TextureDesc() : size{0, 0, 0}, mipLevels(1), arraySize(1), 
-                   format(DataFormat::Unknown), type(TextureType::Unknown) {}
+                   format(DataFormat::Unknown), type(TextureType::Unknown), 
+                   memoryUsage(GPUMemoryUsage::Unknown) {}
     TextureDesc(uint32_t width, uint32_t height, uint32_t depth, 
                 uint32_t mips, uint32_t array, DataFormat fmt, TextureType tp)
         : size{width, height, depth}, mipLevels(mips), arraySize(array), 
-          format(fmt), type(tp) {}
+          format(fmt), type(tp), memoryUsage(GPUMemoryUsage::Unknown) {}
 };
 
 } // namespace primal::graphics::rhi
