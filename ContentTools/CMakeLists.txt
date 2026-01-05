@@ -118,8 +118,8 @@ elseif(APPLE)
 
     target_link_libraries(${PROJECT_NAME} 
         PRIVATE 
-        debug ${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib
-        optimized ${FBX_SDK_ROOT}/lib/clang/release/libfbxsdk.dylib
+        debug ${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib
+        optimized ${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib
         ${FOUNDATION_LIBRARY}
         ${COCOA_LIBRARY}
         ${METAL_LIBRARY}
