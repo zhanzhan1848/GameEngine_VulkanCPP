@@ -176,27 +176,27 @@ elseif(APPLE)
         include_directories("${FBX_SDK_ROOT}/include")
         
         # 添加FBX SDK库路径
-        if(EXISTS "${FBX_SDK_ROOT}/lib/clang/debug")
-            link_directories("${FBX_SDK_ROOT}/lib/clang/debug")
+        if(EXISTS "${FBX_SDK_ROOT}/lib/debug")
+            link_directories("${FBX_SDK_ROOT}/lib/debug")
         elseif(EXISTS "${FBX_SDK_ROOT}/lib/debug")
             link_directories("${FBX_SDK_ROOT}/lib/debug")
         endif()
 
-        if(EXISTS "${FBX_SDK_ROOT}/lib/clang/release")
-            link_directories("${FBX_SDK_ROOT}/lib/clang/release")
+        if(EXISTS "${FBX_SDK_ROOT}/lib/release")
+            link_directories("${FBX_SDK_ROOT}/lib/release")
         elseif(EXISTS "${FBX_SDK_ROOT}/lib/release")
             link_directories("${FBX_SDK_ROOT}/lib/release")
         endif()
         
         # 复制FBX SDK动态库到输出目录
-        if(EXISTS "${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib")
-            file(COPY "${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib" 
+        if(EXISTS "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib")
+            file(COPY "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib" 
                  DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
         elseif(EXISTS "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib")
             file(COPY "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib" 
                  DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
-        elseif(EXISTS "${FBX_SDK_ROOT}/lib/clang/release/libfbxsdk.dylib")
-            file(COPY "${FBX_SDK_ROOT}/lib/clang/release/libfbxsdk.dylib" 
+        elseif(EXISTS "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib")
+            file(COPY "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib" 
                  DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
         elseif(EXISTS "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib")
             file(COPY "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib" 
