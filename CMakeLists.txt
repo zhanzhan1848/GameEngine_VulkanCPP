@@ -99,11 +99,20 @@ elseif(APPLE)
     foreach(PATH ${FBX_SDK_POSSIBLE_PATHS})
         if(EXISTS "${PATH}/include/fbxsdk.h")
             message(STATUS "Found FBX SDK at: ${PATH}")
-            set(FBX_SDK_ROOT ${PATH})
+            set(FBX_SDK_ROOT "${PATH}")
             set(FBX_SDK_FOUND TRUE)
             break()
         endif()
     endforeach()
+
+    # 检查 submodule 是否已初始化
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src/meshoptimizer.h")
+        message(FATAL_ERROR 
+            "Git submodules not initialized!\n"
+            "Please run the following command to initialize submodules:\n"
+            "    git submodule update --init --recursive"
+        )
+    endif()
     
     # 如果没有找到FBX SDK，提供安装指导
     if(NOT FBX_SDK_FOUND)
