@@ -1,11 +1,11 @@
-[submodule "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/third_party/WebGPU"]
-	path = /Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/third_party/WebGPU
+[submodule "third_party/WebGPU"]
+	path = third_party/WebGPU
 	url = https://github.com/webgpu-native/webgpu-headers.git
-[submodule "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/third_party/astc-encoder"]
-	path = /Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/third_party/astc-encoder
+[submodule "third_party/astc-encoder"]
+	path = third_party/astc-encoder
 	url = https://github.com/ARM-software/astc-encoder.git
-[submodule "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/third_party/dawn"]
-	path = /Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/third_party/dawn
+[submodule "third_party/dawn"]
+	path = third_party/dawn
 	url = https://github.com/google/dawn.git
 [submodule "third_party/moodycamel-ConcurrentQueue"]
 	path = third_party/moodycamel-ConcurrentQueue
