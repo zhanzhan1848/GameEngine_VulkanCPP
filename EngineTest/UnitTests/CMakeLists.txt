@@ -71,6 +71,39 @@ set_target_properties(StandaloneRHI_BatchRenderer_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_BatchRenderer_Test PRIVATE DEBUG _DEBUG)
 
+# 创建RHI确定性预取测试
+add_executable(StandaloneRHI_DeterministicPrefetch_Test RHI/Core/TestRHIDeterministicPrefetch.cpp)
+# 添加Engine头文件包含路径
+target_include_directories(StandaloneRHI_DeterministicPrefetch_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+# 链接Engine库以获取RHIDeterministicPrefetch实现
+target_link_libraries(StandaloneRHI_DeterministicPrefetch_Test PRIVATE Engine)
+add_test(NAME StandaloneRHI_DeterministicPrefetch_Test COMMAND StandaloneRHI_DeterministicPrefetch_Test)
+set_target_properties(StandaloneRHI_DeterministicPrefetch_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_DeterministicPrefetch_Test PRIVATE DEBUG _DEBUG)
+
+# 创建RHI GPU优化器测试
+add_executable(StandaloneRHI_GPUOptimizer_Test RHI/Core/TestRHIGPUOptimizer.cpp)
+# 添加Engine头文件包含路径
+target_include_directories(StandaloneRHI_GPUOptimizer_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+# 链接Engine库以获取RHIGPUOptimizer实现
+target_link_libraries(StandaloneRHI_GPUOptimizer_Test PRIVATE Engine)
+add_test(NAME StandaloneRHI_GPUOptimizer_Test COMMAND StandaloneRHI_GPUOptimizer_Test)
+set_target_properties(StandaloneRHI_GPUOptimizer_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_GPUOptimizer_Test PRIVATE DEBUG _DEBUG)
+
 
 
 # 创建RHI命令队列测试
@@ -123,6 +156,8 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_Resource_Test
     COMMAND StandaloneRHI_AdaptiveMemoryPool_Test
     COMMAND StandaloneRHI_Queue_Test
+    COMMAND StandaloneRHI_DeterministicPrefetch_Test
+    COMMAND StandaloneRHI_GPUOptimizer_Test
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
@@ -133,6 +168,8 @@ set_target_properties(StandaloneRHI_Device_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Resource_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Queue_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_AdaptiveMemoryPool_Test PROPERTIES FOLDER "Tests/RHI")
+set_target_properties(StandaloneRHI_DeterministicPrefetch_Test PROPERTIES FOLDER "Tests/RHI")
+set_target_properties(StandaloneRHI_GPUOptimizer_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(MpscQueueSimpleTest PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(RHI_All_Tests PROPERTIES FOLDER "Tests/RHI")
 
@@ -142,4 +179,6 @@ message(STATUS "  - StandaloneRHI_Test: Type system tests")
 message(STATUS "  - StandaloneRHI_Device_Test: Device management tests") 
 message(STATUS "  - StandaloneRHI_Resource_Test: Resource management tests")
 message(STATUS "  - StandaloneRHI_Queue_Test: Command queue tests")
+message(STATUS "  - StandaloneRHI_DeterministicPrefetch_Test: Deterministic prefetch tests")
+message(STATUS "  - StandaloneRHI_GPUOptimizer_Test: GPU optimizer tests")
 message(STATUS "  - RHI_All_Tests: Run all RHI tests")

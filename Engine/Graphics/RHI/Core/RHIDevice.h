@@ -148,6 +148,9 @@ public:
     virtual const DeviceDesc& GetDesc() const = 0;
     virtual void WaitIdle() const = 0;
     virtual void Shutdown() = 0;
+    virtual bool SubmitCommandBuffer(CommandBufferHandle handle) = 0;
+    virtual SyncHandle CreateSync() = 0;
+    virtual bool WaitForSync(SyncHandle handle, u32 timeoutMs) = 0;
 };
 
 /**
@@ -413,6 +416,42 @@ protected:
      */
     const Derived& derived() const { return static_cast<const Derived&>(*this); }
     
+    // === 基础接口实现 ===
+    
+    const DeviceInfo& GetDeviceInfo() const override { return info_; }
+    
+    // === 命令提交接口 ===
+    
+    /**
+     * @brief 提交命令缓冲区
+     * @param handle 命令缓冲区句柄
+     * @return 提交是否成功
+     */
+    bool SubmitCommandBuffer(CommandBufferHandle handle) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().submitCommandBufferImpl(handle);
+    }
+    
+    /**
+     * @brief 创建同步对象
+     * @return 同步对象句柄
+     */
+    SyncHandle CreateSync() override {
+        assert(isValid_ && "Device not initialized");
+        return derived().createSyncImpl();
+    }
+    
+    /**
+     * @brief 等待同步对象
+     * @param handle 同步对象句柄
+     * @param timeoutMs 超时时间（毫秒）
+     * @return 是否成功
+     */
+    bool WaitForSync(SyncHandle handle, u32 timeoutMs) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().waitForSyncImpl(handle, timeoutMs);
+    }
+    
     // === 成员变量 ===
     
     DeviceDesc desc_;                    ///< 设备描述符
@@ -457,7 +496,7 @@ public:
     RHIDeviceBase* GetDevice(uint32_t deviceId) const;
     
 private:
-    primal::utl::vector<std::pair<uint32_t, RHIDeviceBase*>> devices_;
+    utl::vector<std::pair<uint32_t, RHIDeviceBase*>> devices_;
     uint32_t nextDeviceId_ = 1;
 };
 

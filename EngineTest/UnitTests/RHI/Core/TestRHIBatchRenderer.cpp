@@ -26,45 +26,92 @@ using namespace primal::graphics::rhi;
 // === 模拟设备类 ===
 
 // 简单的RHIDevice实现用于测试
-class MockRHIDevice : public RHIDeviceBase {
+class MockRHIDevice : public RHIDevice<MockRHIDevice> {
 public:
-    MockRHIDevice() : isValid_(false) {
-        strcpy(deviceInfo_.deviceName, "MockDevice");
-        strcpy(deviceInfo_.driverVersion, "1.0.0");
-        
-        deviceDesc_.platform = RHIPlatform::Metal;
-        deviceDesc_.enableDebug = false;
+    MockRHIDevice() : RHIDevice<MockRHIDevice>(DeviceDesc{}) {
+        auto& desc = const_cast<DeviceDesc&>(GetDesc());
+        desc.platform = RHIPlatform::Metal;
+        desc.enableDebug = false;
+        // 初始化设备
+        Initialize();
     }
     
-    bool Initialize() {
-        isValid_ = true;
+    // === CRTP实现方法 ===
+    bool initializeImpl() {
         return true;
     }
     
-    void Shutdown() {
-        isValid_ = false;
+    void queryDeviceInfo(DeviceInfo& info) {
+        strcpy(info.deviceName, "MockDevice");
+        strcpy(info.driverVersion, "1.0.0");
     }
     
-    void WaitIdle() const override {
+    uint32_t getCurrentFrameIndexImpl() const {
+        return 0;
+    }
+    
+    void waitIdleImpl() const {
         // Mock implementation
     }
     
-    bool IsValid() const override {
-        return isValid_;
+    void shutdownImpl() {
+        // Mock implementation
     }
     
-    const DeviceInfo& GetDeviceInfo() const override {
-        return deviceInfo_;
+    // 资源创建实现（测试用，返回无效句柄）
+    ResourceHandle createBufferImpl(const BufferDesc& desc) {
+        return handles::INVALID_RESOURCE;
     }
     
-    const DeviceDesc& GetDesc() const override {
-        return deviceDesc_;
+    ResourceHandle createTextureImpl(const TextureDesc& desc) {
+        return handles::INVALID_RESOURCE;
     }
     
-private:
-    bool isValid_ = false;
-    DeviceInfo deviceInfo_;
-    DeviceDesc deviceDesc_;
+    ShaderHandle createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint) {
+        return handles::INVALID_SHADER;
+    }
+    
+    PipelineHandle createGraphicsPipelineImpl(const GraphicsPipelineDesc& desc) {
+        return handles::INVALID_PIPELINE;
+    }
+    
+    PipelineHandle createComputePipelineImpl(const ComputePipelineDesc& desc) {
+        return handles::INVALID_PIPELINE;
+    }
+    
+    CommandBufferHandle createCommandBufferImpl(CommandQueueType type) {
+        return handles::INVALID_COMMAND_BUFFER;
+    }
+    
+    // 资源销毁实现（测试用，空实现）
+    void destroyBufferImpl(ResourceHandle handle) {}
+    void destroyTextureImpl(ResourceHandle handle) {}
+    void destroyShaderImpl(ShaderHandle handle) {}
+    void destroyPipelineImpl(PipelineHandle handle) {}
+    void destroyCommandBufferImpl(CommandBufferHandle handle) {}
+    
+    // 命令提交实现
+    bool submitCommandBufferImpl(CommandBufferHandle handle) {
+        return true; // Mock实现，总是返回成功
+    }
+    
+    // 同步对象创建实现
+    SyncHandle createSyncImpl() {
+        return nextSyncHandle_++;
+    }
+    
+    // 同步等待实现
+    bool waitForSyncImpl(SyncHandle handle, u32 timeoutMs) {
+        return WaitForSync(handle, timeoutMs);
+    }
+    
+    SyncHandle CreateSync() {
+        return 1; // Mock实现，返回固定句柄
+    }
+    
+    bool WaitForSync(SyncHandle handle, u32 timeoutMs) {
+        return true; // Mock实现，总是返回成功
+    }
 };
 
 // === 模拟命令缓冲区类 ===
