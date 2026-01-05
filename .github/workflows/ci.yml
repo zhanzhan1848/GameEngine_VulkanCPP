@@ -35,13 +35,6 @@ jobs:
           cmake --version
           python3 --version
 
-      - name: Install FBX SDK (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          chmod +x scripts/install_fbx_sdk_macos.sh
-          ./scripts/install_fbx_sdk_macos.sh
-          # 或者使用 brew install --cask fbx-sdk
-
       - name: 配置CMake (Release)
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON
