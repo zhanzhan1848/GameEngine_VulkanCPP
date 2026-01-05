@@ -28,25 +28,25 @@ set(PROJECTION_SOURCES
     NormalMapIdentification.h
 )
 
+set(MESHOPT_DIR "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src")
 set(MESHOPT_SOURCES
-    meshoptimizer/meshoptimizer.h
-    meshoptimizer/allocator.cpp
-    meshoptimizer/clusterizer.cpp
-    meshoptimizer/indexcodec.cpp
-    meshoptimizer/indexgenerator.cpp
-    meshoptimizer/overdrawanalyzer.cpp
-    meshoptimizer/overdrawoptimizer.cpp
-    meshoptimizer/partition.cpp
-    meshoptimizer/simplifier.cpp
-    meshoptimizer/quantization.cpp
-    meshoptimizer/spatialorder.cpp
-    meshoptimizer/stripifier.cpp
-    meshoptimizer/vcacheoptimizer.cpp
-    meshoptimizer/vcacheanalyzer.cpp
-    meshoptimizer/vertexcodec.cpp
-    meshoptimizer/vertexfilter.cpp
-    meshoptimizer/vfetchoptimizer.cpp
-    meshoptimizer/vfetchanalyzer.cpp
+    ${MESHOPT_DIR}/meshoptimizer.h
+    ${MESHOPT_DIR}/allocator.cpp
+    ${MESHOPT_DIR}/clusterizer.cpp
+    ${MESHOPT_DIR}/indexanalyzer.cpp
+    ${MESHOPT_DIR}/indexcodec.cpp
+    ${MESHOPT_DIR}/indexgenerator.cpp
+    ${MESHOPT_DIR}/overdrawoptimizer.cpp
+    ${MESHOPT_DIR}/partition.cpp
+    ${MESHOPT_DIR}/quantization.cpp
+    ${MESHOPT_DIR}/rasterizer.cpp
+    ${MESHOPT_DIR}/simplifier.cpp
+    ${MESHOPT_DIR}/spatialorder.cpp
+    ${MESHOPT_DIR}/stripifier.cpp
+    ${MESHOPT_DIR}/vcacheoptimizer.cpp
+    ${MESHOPT_DIR}/vertexcodec.cpp
+    ${MESHOPT_DIR}/vertexfilter.cpp
+    ${MESHOPT_DIR}/vfetchoptimizer.cpp
 )
 
 set(SOURCES
@@ -59,7 +59,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
-    ${CMAKE_CURRENT_SOURCE_DIR}/meshoptimizer
+    ${MESHOPT_DIR}
     ${CMAKE_SOURCE_DIR}/OSAPI/MAC/
     ${MACOSX_PREFIX}/usr/include
     ${MACOSX_PREFIX}/System/Library/Frameworks
@@ -98,6 +98,11 @@ elseif(APPLE)
     # 查找必要的框架
     find_library(FOUNDATION_LIBRARY Foundation)
     find_library(COCOA_LIBRARY Cocoa)
+
+    # 链接 FBX SDK
+    if(FBX_SDK_FOUND)
+        target_link_libraries(${PROJECT_NAME} PRIVATE fbxsdk)
+    endif()
     find_library(METAL_LIBRARY Metal)
     find_library(METALKIT_LIBRARY MetalKit)
     find_library(QUARTZ_CORE_LIBRARY QuartzCore)
