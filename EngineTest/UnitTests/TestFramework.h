@@ -223,6 +223,16 @@ private:
         } \
     } while(0)
 
+#define TEST_ASSERT_STR_EQ(expected, actual, message) \
+    do { \
+        if (std::string(expected) != std::string(actual)) { \
+            std::cout << "断言失败: " << message << std::endl; \
+            std::cout << "期望值: " << (expected) << ", 实际值: " << (actual) << std::endl; \
+            std::cout << "文件: " << __FILE__ << ", 行: " << __LINE__ << std::endl; \
+            return Engine::Test::TestResult::Failed; \
+        } \
+    } while(0)
+
 #define TEST_ASSERT_NULL(ptr, message) \
     do { \
         if ((ptr) != nullptr) { \

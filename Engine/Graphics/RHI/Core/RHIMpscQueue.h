@@ -94,7 +94,7 @@ struct WorkItem {
         
         struct {
             void* userData;                      ///< 用户数据
-            std::shared_ptr<std::function<void()>> callback;  ///< 回调函数（使用shared_ptr使其可拷贝）
+            std::function<void()>* callback;     ///< 回调函数指针
         } callbackData;
     };
     
@@ -127,7 +127,7 @@ struct WorkItem {
                 break;
             case WorkItemType::CustomCallback:
                 callbackData.userData = other.callbackData.userData;
-                callbackData.callback = other.callbackData.callback;
+                callbackData.callback = other.callbackData.callback ? new std::function<void()>(*other.callbackData.callback) : nullptr;
                 break;
             default:
                 break;
@@ -163,7 +163,8 @@ struct WorkItem {
                     break;
                 case WorkItemType::CustomCallback:
                     callbackData.userData = other.callbackData.userData;
-                    callbackData.callback = other.callbackData.callback;
+                    delete callbackData.callback;
+                    callbackData.callback = other.callbackData.callback ? new std::function<void()>(*other.callbackData.callback) : nullptr;
                     break;
                 default:
                     break;
@@ -194,7 +195,8 @@ struct WorkItem {
                 break;
             case WorkItemType::CustomCallback:
                 callbackData.userData = other.callbackData.userData;
-                callbackData.callback = std::move(other.callbackData.callback);
+                callbackData.callback = other.callbackData.callback;
+                other.callbackData.callback = nullptr;
                 break;
             default:
                 break;
@@ -230,7 +232,9 @@ struct WorkItem {
                     break;
                 case WorkItemType::CustomCallback:
                     callbackData.userData = other.callbackData.userData;
-                    callbackData.callback = std::move(other.callbackData.callback);
+                    delete callbackData.callback;
+                    callbackData.callback = other.callbackData.callback;
+                    other.callbackData.callback = nullptr;
                     break;
                 default:
                     break;
@@ -241,9 +245,9 @@ struct WorkItem {
     
     // 析构函数
     ~WorkItem() {
-        // 手动清理union数据中的shared_ptr
-        if (type == WorkItemType::CustomCallback) {
-            callbackData.callback.~shared_ptr();
+        if (type == WorkItemType::CustomCallback && callbackData.callback) {
+            delete callbackData.callback;
+            callbackData.callback = nullptr;
         }
     }
 };
@@ -312,7 +316,9 @@ struct QueueStats {
  */
 struct QueueConfig {
     uint32_t maxQueueSize;          ///< 最大队列大小
+    uint32_t maxWorkItemSize;       ///< 最大工作项大小
     uint32_t batchSize;             ///< 批处理大小
+    bool enableBatching;            ///< 是否启用批处理
     uint32_t workerThreadCount;    ///< 工作线程数量
     bool enablePriorityQueue;       ///< 是否启用优先级队列
     bool enableTimeout;             ///< 是否启用超时机制
@@ -320,9 +326,9 @@ struct QueueConfig {
     bool enableStatistics;          ///< 是否启用统计信息
     const char* name;               ///< 队列名称
     
-    QueueConfig() : maxQueueSize(10000), batchSize(32), workerThreadCount(1),
-                    enablePriorityQueue(true), enableTimeout(true), defaultTimeoutMs(5000),
-                    enableStatistics(true), name("RHIMpscQueue") {}
+    QueueConfig() : maxQueueSize(10000), maxWorkItemSize(1024), batchSize(32), enableBatching(true),
+                    workerThreadCount(1), enablePriorityQueue(true), enableTimeout(true), 
+                    defaultTimeoutMs(5000), enableStatistics(true), name("RHIMpscQueue") {}
 };
 
 /**
@@ -429,12 +435,24 @@ public:
     virtual bool Dequeue(WorkItem& workItem) = 0;
     
     /**
+     * @brief 尝试获取下一个工作项（非阻塞）
+     * @param workItem 输出工作项
+     * @return 是否获取成功
+     */
+    virtual bool TryDequeue(WorkItem& workItem) = 0;
+    
+    /**
      * @brief 批量获取工作项
      * @param workItems 输出工作项数组
      * @param maxCount 最大数量
      * @return 实际获取的数量
      */
     virtual uint32_t DequeueBatch(WorkItem* workItems, uint32_t maxCount) = 0;
+    
+    /**
+     * @brief 唤醒所有等待的消费者线程
+     */
+    virtual void WakeUpAllConsumers() = 0;
     
     /**
      * @brief 取消工作项
@@ -731,12 +749,24 @@ public:
     bool Dequeue(WorkItem& workItem) override;
     
     /**
+     * @brief 尝试获取下一个工作项（非阻塞）
+     * @param workItem 输出工作项
+     * @return 是否获取成功
+     */
+    bool TryDequeue(WorkItem& workItem) override;
+    
+    /**
      * @brief 批量获取工作项
      * @param workItems 输出工作项数组
      * @param maxCount 最大数量
      * @return 实际获取的数量
      */
     uint32_t DequeueBatch(WorkItem* workItems, uint32_t maxCount) override;
+    
+    /**
+     * @brief 唤醒所有等待的消费者线程
+     */
+    void WakeUpAllConsumers() override;
     
     /**
      * @brief 取消工作项
@@ -767,13 +797,6 @@ public:
     bool Validate() const override;
     
     // === 扩展方法 ===
-    
-    /**
-     * @brief 尝试获取工作项（非阻塞）
-     * @param workItem 输出工作项
-     * @return 是否获取成功
-     */
-    bool TryDequeue(WorkItem& workItem);
     
     /**
      * @brief 等待队列为空
@@ -833,6 +856,9 @@ private:
     std::thread workerThread_;                            ///< 工作线程
     std::atomic<bool> shutdownRequested_;                 ///< 关闭请求标志
     std::atomic<bool> initialized_;                       ///< 初始化标志
+    
+    // 线程同步
+    std::condition_variable conditionVariable_;         ///< 主条件变量，用于唤醒等待的消费者线程
     
     // 工作项状态跟踪（用于状态查询和等待）
     mutable std::unordered_map<uint64_t, WorkItemState> workItemStates_;    ///< 工作项状态映射

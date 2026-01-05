@@ -77,17 +77,121 @@ elseif(APPLE)
     # macOS特定设置
     set(CMAKE_MACOSX_RPATH ON)
 
-    # FBX
-    set(FBX_SDK_ROOT /Applications/Autodesk/FBX\ SDK/2020.3.7)
-    include_directories(${FBX_SDK_ROOT}/include)
-
-    # 添加 FBX SDK 库路径
-    link_directories(
-        "${FBX_SDK_ROOT}/lib/clang/debug"
-        "${FBX_SDK_ROOT}/lib/clang/release"
+    # FBX SDK 自动检测和安装
+    set(FBX_SDK_VERSION "2020.3.7")
+    set(FBX_SDK_ROOT "/Applications/Autodesk/FBX SDK/${FBX_SDK_VERSION}")
+    set(FBX_SDK_FOUND FALSE)
+    
+    # 检查多个可能的FBX SDK安装路径
+    set(FBX_SDK_POSSIBLE_PATHS
+        "${FBX_SDK_ROOT}"
+        "/Applications/Autodesk/FBX SDK/2020.3.4"
+        "/Applications/Autodesk/FBX SDK/2020.3.2"
+        "/Applications/Autodesk/FBX SDK/2020.3.1"
+        "/Applications/Autodesk/FBX SDK/2020.0.1"
+        "/usr/local/fbx-sdk"
+        "/opt/fbx-sdk"
     )
-
-    file(COPY "${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib" DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+    
+    # 检查FBX SDK是否已安装
+    foreach(PATH ${FBX_SDK_POSSIBLE_PATHS})
+        if(EXISTS "${PATH}/include/fbxsdk.h")
+            message(STATUS "Found FBX SDK at: ${PATH}")
+            set(FBX_SDK_ROOT ${PATH})
+            set(FBX_SDK_FOUND TRUE)
+            break()
+        endif()
+    endforeach()
+    
+    # 如果没有找到FBX SDK，提供安装指导
+    if(NOT FBX_SDK_FOUND)
+        message(WARNING "FBX SDK not found in any standard location.")
+        message(STATUS "FBX SDK is required for FBX file support.")
+        message(STATUS "Please install FBX SDK manually using one of the following methods:")
+        message(STATUS "1. Download from Autodesk Developer Network:")
+        message(STATUS "   https://aps.autodesk.com/developer/overview/fbx-sdk")
+        message(STATUS "   Choose 'Download SDK for mac' and install to /Applications/Autodesk/FBX SDK/")
+        message(STATUS "")
+        message(STATUS "2. Using Homebrew (if available):")
+        message(STATUS "   brew install --cask fbx-sdk")
+        message(STATUS "")
+        message(STATUS "3. Manual installation:")
+        message(STATUS "   Download the macOS Clang (Universal Binary) package")
+        message(STATUS "   Extract to: ${FBX_SDK_ROOT}")
+        message(STATUS "")
+        message(STATUS "After installation, re-run CMake to detect FBX SDK.")
+        
+        # 可选：自动下载（需要用户确认）
+        option(AUTO_DOWNLOAD_FBX_SDK "Automatically download FBX SDK if not found" OFF)
+        if(AUTO_DOWNLOAD_FBX_SDK)
+            message(STATUS "Attempting to download FBX SDK automatically...")
+            
+            # 创建外部项目来下载FBX SDK
+            include(ExternalProject)
+            
+            # 设置下载和安装目录
+            set(FBX_SDK_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/fbx-sdk")
+            
+            # 创建FBX SDK安装目录
+            file(MAKE_DIRECTORY "/Applications/Autodesk/FBX SDK")
+            
+            # 配置外部项目下载FBX SDK（使用Autodesk官方下载页面）
+            ExternalProject_Add(fbx_sdk_download
+                URL "https://aps.autodesk.com/fbx-sdk"
+                DOWNLOAD_DIR "${FBX_SDK_DOWNLOAD_DIR}"
+                SOURCE_DIR "${FBX_SDK_DOWNLOAD_DIR}/fbx-sdk-source"
+                BUILD_IN_SOURCE ON
+                CONFIGURE_COMMAND ""
+                BUILD_COMMAND ""
+                INSTALL_COMMAND ""
+                LOG_DOWNLOAD ON
+                LOG_CONFIGURE ON
+                LOG_BUILD ON
+                LOG_INSTALL ON
+                # 由于需要登录下载，自动下载可能失败
+            )
+            
+            message(WARNING "Automatic download requires Autodesk account login.")
+            message(WARNING "Please download manually from the Autodesk website.")
+        endif()
+        
+        # 设置FBX SDK为未找到
+        set(FBX_SDK_FOUND FALSE)
+    endif()
+    
+    # 如果FBX SDK找到，配置包含目录和库
+    if(FBX_SDK_FOUND)
+        # 包含FBX SDK头文件
+        include_directories("${FBX_SDK_ROOT}/include")
+        
+        # 添加FBX SDK库路径
+        if(EXISTS "${FBX_SDK_ROOT}/lib/clang/debug")
+            link_directories("${FBX_SDK_ROOT}/lib/clang/debug")
+        endif()
+        if(EXISTS "${FBX_SDK_ROOT}/lib/clang/release")
+            link_directories("${FBX_SDK_ROOT}/lib/clang/release")
+        endif()
+        
+        # 复制FBX SDK动态库到输出目录
+        if(EXISTS "${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib")
+            file(COPY "${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib" 
+                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+        elseif(EXISTS "${FBX_SDK_ROOT}/lib/clang/release/libfbxsdk.dylib")
+            file(COPY "${FBX_SDK_ROOT}/lib/clang/release/libfbxsdk.dylib" 
+                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+        elseif(EXISTS "${FBX_SDK_ROOT}/lib/libfbxsdk.dylib")
+            file(COPY "${FBX_SDK_ROOT}/lib/libfbxsdk.dylib" 
+                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+        endif()
+        
+        # 添加FBX SDK编译定义
+        add_definitions(-DENABLE_FBX_SDK=1)
+        
+        message(STATUS "FBX SDK configured successfully at: ${FBX_SDK_ROOT}")
+    else()
+        message(STATUS "FBX SDK support disabled - Install FBX SDK to enable FBX file support")
+        add_definitions(-DENABLE_FBX_SDK=0)
+    endif()
     
 else()
     add_definitions(

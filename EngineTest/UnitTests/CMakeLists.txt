@@ -104,6 +104,25 @@ set_target_properties(StandaloneRHI_GPUOptimizer_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_GPUOptimizer_Test PRIVATE DEBUG _DEBUG)
 
+# 创建RHI多线程命令生成器测试
+add_executable(StandaloneRHI_MultiThreadedCommandGenerator_Test RHI/Core/TestRHIMultiThreadedCommandGenerator.cpp)
+# 添加Engine头文件包含路径
+target_include_directories(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+# 链接Engine库以获取RHIMultiThreadedCommandGenerator实现
+target_link_libraries(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE Engine)
+# 添加pthread支持用于多线程测试
+target_link_libraries(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE pthread)
+add_test(NAME StandaloneRHI_MultiThreadedCommandGenerator_Test COMMAND StandaloneRHI_MultiThreadedCommandGenerator_Test)
+set_target_properties(StandaloneRHI_MultiThreadedCommandGenerator_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE DEBUG _DEBUG)
+
 
 
 # 创建RHI命令队列测试
@@ -158,6 +177,7 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_Queue_Test
     COMMAND StandaloneRHI_DeterministicPrefetch_Test
     COMMAND StandaloneRHI_GPUOptimizer_Test
+    COMMAND StandaloneRHI_MultiThreadedCommandGenerator_Test
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
@@ -170,6 +190,7 @@ set_target_properties(StandaloneRHI_Queue_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_AdaptiveMemoryPool_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_DeterministicPrefetch_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_GPUOptimizer_Test PROPERTIES FOLDER "Tests/RHI")
+set_target_properties(StandaloneRHI_MultiThreadedCommandGenerator_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(MpscQueueSimpleTest PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(RHI_All_Tests PROPERTIES FOLDER "Tests/RHI")
 
@@ -181,4 +202,5 @@ message(STATUS "  - StandaloneRHI_Resource_Test: Resource management tests")
 message(STATUS "  - StandaloneRHI_Queue_Test: Command queue tests")
 message(STATUS "  - StandaloneRHI_DeterministicPrefetch_Test: Deterministic prefetch tests")
 message(STATUS "  - StandaloneRHI_GPUOptimizer_Test: GPU optimizer tests")
+message(STATUS "  - StandaloneRHI_MultiThreadedCommandGenerator_Test: Multi-threaded command generator tests")
 message(STATUS "  - RHI_All_Tests: Run all RHI tests")

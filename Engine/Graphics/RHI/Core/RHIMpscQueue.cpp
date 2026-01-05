@@ -117,10 +117,18 @@ bool DefaultMpscQueue::Start() {
 void DefaultMpscQueue::stopImpl() {
     shutdownRequested_.store(true);
     
+    // 唤醒所有等待的消费者线程
+    WakeUpAllConsumers();
+    
     if (workerThread_.joinable()) {
         workerThread_.join();
     }
     
+}
+
+void DefaultMpscQueue::WakeUpAllConsumers() {
+    // 通知所有等待的线程
+    conditionVariable_.notify_all();
 }
 
 void DefaultMpscQueue::destroyImpl() {

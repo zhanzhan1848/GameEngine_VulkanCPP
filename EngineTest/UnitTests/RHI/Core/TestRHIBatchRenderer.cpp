@@ -19,6 +19,7 @@
 #include <sstream>
 #include <unordered_set>
 #include <cstring>
+#include <atomic>
 
 using namespace Engine::Test;
 using namespace primal::graphics::rhi;
@@ -112,6 +113,10 @@ public:
     bool WaitForSync(SyncHandle handle, u32 timeoutMs) {
         return true; // Mock实现，总是返回成功
     }
+    
+private:
+    // === 私有成员变量 ===
+    std::atomic<uint64_t> nextSyncHandle_{1};
 };
 
 // === 模拟命令缓冲区类 ===
