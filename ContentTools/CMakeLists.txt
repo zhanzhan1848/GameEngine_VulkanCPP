@@ -29,6 +29,12 @@ set(PROJECTION_SOURCES
 )
 
 set(MESHOPT_DIR "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src")
+
+# 检查meshoptimizer是否存在
+if(NOT EXISTS "${MESHOPT_DIR}/meshoptimizer.h")
+    message(FATAL_ERROR "meshoptimizer submodule not found at ${MESHOPT_DIR}. Please run 'git submodule update --init --recursive'.")
+endif()
+
 set(MESHOPT_SOURCES
     ${MESHOPT_DIR}/meshoptimizer.h
     ${MESHOPT_DIR}/allocator.cpp
@@ -49,10 +55,13 @@ set(MESHOPT_SOURCES
     ${MESHOPT_DIR}/vfetchoptimizer.cpp
 )
 
-set(SOURCES
+set(CONTENT_TOOLS_SOURCES
     ${PROJECTION_SOURCES}
     ${MESHOPT_SOURCES}
 )
+
+# 调试信息
+message(STATUS "ContentTools Sources: ${CONTENT_TOOLS_SOURCES}")
 
 # 添加头文件目录
 include_directories(
@@ -66,7 +75,7 @@ include_directories(
 )
 
 # 创建库
-add_library(${PROJECT_NAME} SHARED ${SOURCES})
+add_library(${PROJECT_NAME} SHARED ${CONTENT_TOOLS_SOURCES})
 
 # 平台特定设置
 if(WIN32)
