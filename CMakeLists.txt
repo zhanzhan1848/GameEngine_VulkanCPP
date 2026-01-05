@@ -84,7 +84,9 @@ elseif(APPLE)
     
     # 检查多个可能的FBX SDK安装路径
     set(FBX_SDK_POSSIBLE_PATHS
+        "${CMAKE_SOURCE_DIR}/third_party/FBX_SDK/Mac"
         "${FBX_SDK_ROOT}"
+        "/Applications/Autodesk/FBX SDK/2020.3.7"
         "/Applications/Autodesk/FBX SDK/2020.3.4"
         "/Applications/Autodesk/FBX SDK/2020.3.2"
         "/Applications/Autodesk/FBX SDK/2020.3.1"
@@ -167,17 +169,28 @@ elseif(APPLE)
         # 添加FBX SDK库路径
         if(EXISTS "${FBX_SDK_ROOT}/lib/clang/debug")
             link_directories("${FBX_SDK_ROOT}/lib/clang/debug")
+        elseif(EXISTS "${FBX_SDK_ROOT}/lib/debug")
+            link_directories("${FBX_SDK_ROOT}/lib/debug")
         endif()
+
         if(EXISTS "${FBX_SDK_ROOT}/lib/clang/release")
             link_directories("${FBX_SDK_ROOT}/lib/clang/release")
+        elseif(EXISTS "${FBX_SDK_ROOT}/lib/release")
+            link_directories("${FBX_SDK_ROOT}/lib/release")
         endif()
         
         # 复制FBX SDK动态库到输出目录
         if(EXISTS "${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib")
             file(COPY "${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib" 
                  DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+        elseif(EXISTS "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib")
+            file(COPY "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib" 
+                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
         elseif(EXISTS "${FBX_SDK_ROOT}/lib/clang/release/libfbxsdk.dylib")
             file(COPY "${FBX_SDK_ROOT}/lib/clang/release/libfbxsdk.dylib" 
+                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+        elseif(EXISTS "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib")
+            file(COPY "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib" 
                  DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
         elseif(EXISTS "${FBX_SDK_ROOT}/lib/libfbxsdk.dylib")
             file(COPY "${FBX_SDK_ROOT}/lib/libfbxsdk.dylib" 
