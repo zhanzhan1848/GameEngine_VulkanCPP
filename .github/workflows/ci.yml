@@ -37,13 +37,112 @@ jobs:
 
       - name: 配置CMake (Release)
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON
       - name: 构建项目 (Engine, ContentTools, EngineDLL, EngineTest)
         run: |
           cmake --build build --config Release --parallel
         env:
           CMAKE_COLOR_DIAGNOSTICS: "ON"
+
+      - name: 运行单元测试套件
+        shell: bash
+        run: |
+          set -e
+          mkdir -p ci_outputs
+          
+          echo "==================================="
+          echo "开始运行单元测试套件"
+          echo "==================================="
+          
+          # 定义单元测试列表
+          UNIT_TESTS=(
+            "StandaloneRHI_Test"
+            "StandaloneRHI_Device_Test"
+            "StandaloneRHI_Resource_Test"
+            "StandaloneRHI_AdaptiveMemoryPool_Test"
+            "StandaloneRHI_Queue_Test"
+            "StandaloneRHI_DeterministicPrefetch_Test"
+            "StandaloneRHI_GPUOptimizer_Test"
+            "StandaloneRHI_BatchRenderer_Test"
+            "MpscQueueSimpleTest"
+          )
+          
+          # 设置测试输出文件
+          UNIT_TEST_OUTPUT="ci_outputs/unit_test_output.txt"
+          UNIT_TEST_EXIT="ci_outputs/unit_test_exit_code.txt"
+          
+          # 初始化输出文件
+          echo "=== 单元测试执行日志 ===" > "$UNIT_TEST_OUTPUT"
+          echo "开始时间: $(date)" >> "$UNIT_TEST_OUTPUT"
+          echo "" >> "$UNIT_TEST_OUTPUT"
+          
+          TOTAL_TESTS=0
+          PASSED_TESTS=0
+          FAILED_TESTS=0
+          OVERALL_EXIT_CODE=0
+          
+          # 运行每个单元测试
+          for test in "${UNIT_TESTS[@]}"; do
+            TOTAL_TESTS=$((TOTAL_TESTS + 1))
+            echo "--- 运行 $test ---" >> "$UNIT_TEST_OUTPUT"
+            
+            # 查找测试可执行文件
+            TEST_BIN="build/Tests/UnitTests/$test"
+            if [[ ! -x "$TEST_BIN" ]]; then
+              # 兜底搜索build目录
+              TEST_BIN=$(find build -type f -name "$test" | head -n 1)
+            fi
+            
+            if [[ -z "$TEST_BIN" || ! -x "$TEST_BIN" ]]; then
+              echo "❌ $test: 未找到可执行文件" >> "$UNIT_TEST_OUTPUT"
+              FAILED_TESTS=$((FAILED_TESTS + 1))
+              OVERALL_EXIT_CODE=1
+              continue
+            fi
+            
+            echo "🔍 执行: $TEST_BIN" >> "$UNIT_TEST_OUTPUT"
+            
+            # 运行测试并捕获输出
+            set +e
+            TEST_OUTPUT=$("$TEST_BIN" 2>&1)
+            TEST_EXIT_CODE=$?
+            set -e
+            
+            echo "$TEST_OUTPUT" >> "$UNIT_TEST_OUTPUT"
+            echo "退出码: $TEST_EXIT_CODE" >> "$UNIT_TEST_OUTPUT"
+            
+            if [[ $TEST_EXIT_CODE -eq 0 ]]; then
+              echo "✅ $test: 通过" >> "$UNIT_TEST_OUTPUT"
+              PASSED_TESTS=$((PASSED_TESTS + 1))
+            else
+              echo "❌ $test: 失败 (退出码: $TEST_EXIT_CODE)" >> "$UNIT_TEST_OUTPUT"
+              FAILED_TESTS=$((FAILED_TESTS + 1))
+              OVERALL_EXIT_CODE=1
+            fi
+            
+            echo "" >> "$UNIT_TEST_OUTPUT"
+          done
+          
+          # 输出测试摘要
+          echo "=== 单元测试摘要 ===" >> "$UNIT_TEST_OUTPUT"
+          echo "总测试数: $TOTAL_TESTS" >> "$UNIT_TEST_OUTPUT"
+          echo "通过: $PASSED_TESTS" >> "$UNIT_TEST_OUTPUT"
+          echo "失败: $FAILED_TESTS" >> "$UNIT_TEST_OUTPUT"
+          echo "完成时间: $(date)" >> "$UNIT_TEST_OUTPUT"
+          
+          # 保存退出码
+          echo $OVERALL_EXIT_CODE > "$UNIT_TEST_EXIT"
+          
+          # 输出到控制台
+          cat "$UNIT_TEST_OUTPUT"
+          
+          # 如果有失败测试，退出CI
+          if [[ $OVERALL_EXIT_CODE -ne 0 ]]; then
+            echo "❌ 单元测试失败，CI中断"
+            exit $OVERALL_EXIT_CODE
+          else
+            echo "✅ 所有单元测试通过"
+          fi
 
       - name: 运行EngineTest并保存输出
         shell: bash
@@ -67,6 +166,12 @@ jobs:
             EXIT_CODE=${PIPESTATUS[0]}
             echo $EXIT_CODE > ci_outputs/test_exit_code.txt
             set -e
+            
+            # 如果集成测试失败，也中断CI
+            if [[ $EXIT_CODE -ne 0 ]]; then
+              echo "❌ 集成测试失败，CI中断"
+              exit $EXIT_CODE
+            fi
           fi
 
       - name: 生成Markdown测试报告（内联脚本，无外部依赖）
@@ -74,7 +179,7 @@ jobs:
           python3 - << 'PY'
           #!/usr/bin/env python3
           # 文件级注释：
-          # 该脚本在 GitHub Actions 步骤中内联执行，负责读取 EngineTest 的输出与退出码，
+          # 该脚本在 GitHub Actions 步骤中内联执行，负责读取单元测试和集成测试的输出与退出码，
           # 并生成 Markdown 测试报告到 Docs/CI/TestReports/ 目录。
           # 不依赖第三方库，仅使用 Python 标准库，兼容项目自研测试框架的输出格式。
 
@@ -96,20 +201,41 @@ jobs:
               except Exception:
                   return 1
 
-          def parse_summary(output: str) -> tuple[int, int]:
-              """函数级注释：粗略解析测试输出中的用例统计（pass/fail）。"""
+          def parse_unit_test_summary(output: str) -> tuple[int, int]:
+              """函数级注释：解析单元测试输出中的用例统计。"""
+              lines = output.split('\n')
+              total, passed, failed = 0, 0, 0
+              
+              for line in lines:
+                  if '总测试数:' in line:
+                      total = int(re.search(r'总测试数:\s*(\d+)', line).group(1))
+                  elif '通过:' in line and '单元测试摘要' not in line:
+                      passed = int(re.search(r'通过:\s*(\d+)', line).group(1))
+                  elif '失败:' in line and '单元测试摘要' not in line:
+                      failed = int(re.search(r'失败:\s*(\d+)', line).group(1))
+              
+              return passed, failed
+
+          def parse_integration_test_summary(output: str) -> tuple[int, int]:
+              """函数级注释：解析集成测试输出中的用例统计（pass/fail）。"""
               passed = sum(1 for _ in re.finditer(r"\b(pass|passed)\b", output, re.IGNORECASE))
               failed = sum(1 for _ in re.finditer(r"\b(fail|failed)\b", output, re.IGNORECASE))
               return passed, failed
 
           def main():
               """函数级注释：主流程——读取输入、生成报告并写入文件。"""
-              input_log = 'ci_outputs/cpp_test_output.txt'
-              exit_code_file = 'ci_outputs/test_exit_code.txt'
+              unit_test_log = 'ci_outputs/unit_test_output.txt'
+              unit_test_exit_file = 'ci_outputs/unit_test_exit_code.txt'
+              integration_test_log = 'ci_outputs/cpp_test_output.txt'
+              integration_test_exit_file = 'ci_outputs/test_exit_code.txt'
 
-              output = read_text(input_log)
-              exit_code = read_exit_code(exit_code_file)
-              passed, failed = parse_summary(output)
+              unit_output = read_text(unit_test_log)
+              unit_exit_code = read_exit_code(unit_test_exit_file)
+              unit_passed, unit_failed = parse_unit_test_summary(unit_output)
+
+              integration_output = read_text(integration_test_log)
+              integration_exit_code = read_exit_code(integration_test_exit_file)
+              integration_passed, integration_failed = parse_integration_test_summary(integration_output)
 
               run_id = os.environ.get('GITHUB_RUN_ID', 'local')
               branch = os.environ.get('GITHUB_REF_NAME', '')
@@ -120,20 +246,41 @@ jobs:
               out_path = os.path.join(out_dir, f"{run_id}_test_report.md")
 
               now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
-              status = 'SUCCESS' if exit_code == 0 else 'FAILURE'
+              overall_status = 'SUCCESS' if (unit_exit_code == 0 and integration_exit_code == 0) else 'FAILURE'
 
               report = []
-              report.append(f"# EngineTest 测试报告 (Run {run_id})")
+              report.append(f"# 完整测试报告 (Run {run_id})")
               report.append("")
               report.append(f"- 时间: {now}")
               report.append(f"- 分支: {branch}")
               report.append(f"- 提交: {commit}")
-              report.append(f"- 退出码: {exit_code} ({status})")
-              report.append(f"- 解析统计: 通过 {passed}，失败 {failed}")
+              report.append(f"- 总体状态: {overall_status}")
               report.append("")
-              report.append("## 原始输出")
+              
+              # 单元测试摘要
+              report.append("## 🧪 单元测试摘要")
+              report.append(f"- 退出码: {unit_exit_code}")
+              report.append(f"- 通过: {unit_passed}")
+              report.append(f"- 失败: {unit_failed}")
+              report.append("")
+              
+              # 集成测试摘要
+              report.append("## 🔧 集成测试摘要")
+              report.append(f"- 退出码: {integration_exit_code}")
+              report.append(f"- 解析统计: 通过 {integration_passed}，失败 {integration_failed}")
+              report.append("")
+              
+              # 单元测试详细输出
+              report.append("## 📋 单元测试详细输出")
               report.append("```")
-              report.append(output)
+              report.append(unit_output)
+              report.append("```")
+              report.append("")
+              
+              # 集成测试详细输出
+              report.append("## 🔧 集成测试详细输出")
+              report.append("```")
+              report.append(integration_output)
               report.append("```")
 
               with open(out_path, 'w', encoding='utf-8') as f:
@@ -146,8 +293,10 @@ jobs:
       - name: 上传测试日志与报告制品
         uses: actions/upload-artifact@v4
         with:
-          name: cpp-test-outputs
+          name: test-outputs
           path: |
+            ci_outputs/unit_test_output.txt
+            ci_outputs/unit_test_exit_code.txt
             ci_outputs/cpp_test_output.txt
             ci_outputs/test_exit_code.txt
             Docs/CI/TestReports/${{ github.run_id }}_test_report.md
