@@ -112,14 +112,14 @@ elseif(APPLE)
     find_library(FBX_LIB_DEBUG
         NAMES fbxsdk
         HINTS ${FBX_SDK_ROOT}/lib
-        PATH_SUFFIXES debug clang/debug
+        PATH_SUFFIXES debug debug
         NO_DEFAULT_PATH
     )
     
     find_library(FBX_LIB_RELEASE
         NAMES fbxsdk
         HINTS ${FBX_SDK_ROOT}/lib
-        PATH_SUFFIXES release clang/release
+        PATH_SUFFIXES release release
         NO_DEFAULT_PATH
     )
 
