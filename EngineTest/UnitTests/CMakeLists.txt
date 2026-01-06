@@ -123,6 +123,22 @@ set_target_properties(StandaloneRHI_MultiThreadedCommandGenerator_Test PROPERTIE
 )
 target_compile_definitions(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE DEBUG _DEBUG)
 
+# 创建RHI分配器测试
+add_executable(StandaloneRHI_Allocator_Test RHI/Core/TestRHIAllocator.cpp)
+# 添加Engine头文件包含路径
+target_include_directories(StandaloneRHI_Allocator_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+# 链接Engine库
+target_link_libraries(StandaloneRHI_Allocator_Test PRIVATE Engine pthread)
+add_test(NAME StandaloneRHI_Allocator_Test COMMAND StandaloneRHI_Allocator_Test)
+set_target_properties(StandaloneRHI_Allocator_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_Allocator_Test PRIVATE DEBUG _DEBUG)
+
 
 
 # 创建RHI命令队列测试
@@ -178,6 +194,7 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_DeterministicPrefetch_Test
     COMMAND StandaloneRHI_GPUOptimizer_Test
     COMMAND StandaloneRHI_MultiThreadedCommandGenerator_Test
+    COMMAND StandaloneRHI_Allocator_Test
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
@@ -191,6 +208,7 @@ set_target_properties(StandaloneRHI_AdaptiveMemoryPool_Test PROPERTIES FOLDER "T
 set_target_properties(StandaloneRHI_DeterministicPrefetch_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_GPUOptimizer_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_MultiThreadedCommandGenerator_Test PROPERTIES FOLDER "Tests/RHI")
+set_target_properties(StandaloneRHI_Allocator_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(MpscQueueSimpleTest PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(RHI_All_Tests PROPERTIES FOLDER "Tests/RHI")
 
