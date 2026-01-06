@@ -387,3 +387,8 @@ EngineTest/assets/
 .trae/
 
 TODO*
+
+# Exceptions for third_party libraries
+!third_party/FBX_SDK/Mac/lib/
+!third_party/FBX_SDK/Mac/lib/debug/
+!third_party/FBX_SDK/Mac/lib/release/
