@@ -108,6 +108,25 @@ elseif(APPLE)
     find_library(FOUNDATION_LIBRARY Foundation)
     find_library(COCOA_LIBRARY Cocoa)
 
+    # 动态查找 FBX SDK 库
+    find_library(FBX_LIB_DEBUG
+        NAMES fbxsdk
+        HINTS ${FBX_SDK_ROOT}/lib
+        PATH_SUFFIXES debug clang/debug
+        NO_DEFAULT_PATH
+    )
+    
+    find_library(FBX_LIB_RELEASE
+        NAMES fbxsdk
+        HINTS ${FBX_SDK_ROOT}/lib
+        PATH_SUFFIXES release clang/release
+        NO_DEFAULT_PATH
+    )
+
+    if (NOT FBX_LIB_DEBUG OR NOT FBX_LIB_RELEASE)
+        message(FATAL_ERROR "Could not find FBX SDK libraries in ${FBX_SDK_ROOT}/lib. Checked debug/clang/debug and release/clang/release.")
+    endif()
+
     # 链接 FBX SDK
     if(FBX_SDK_FOUND)
         target_link_libraries(${PROJECT_NAME} PRIVATE fbxsdk)
@@ -118,8 +137,8 @@ elseif(APPLE)
 
     target_link_libraries(${PROJECT_NAME} 
         PRIVATE 
-        debug ${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib
-        optimized ${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib
+        debug ${FBX_LIB_DEBUG}
+        optimized ${FBX_LIB_RELEASE}
         ${FOUNDATION_LIBRARY}
         ${COCOA_LIBRARY}
         ${METAL_LIBRARY}
