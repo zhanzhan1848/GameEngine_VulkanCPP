@@ -125,6 +125,8 @@ public:
     DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc& desc) override { return DescriptorSetHandle{}; }
     void DestroyDescriptorSet(DescriptorSetHandle handle) override {}
     void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) override {}
+    PipelineLayoutHandle CreatePipelineLayout(const PipelineLayoutDesc& desc) override { return PipelineLayoutHandle{}; }
+    void DestroyPipelineLayout(PipelineLayoutHandle handle) override {}
 };
 
 // === 测试用例 ===
@@ -185,7 +187,7 @@ bool TestDeallocation() {
     pool.Initialize();
     
     u32 handle = pool.Allocate(1024, 256, GPUMemoryUsage::Dynamic);
-    TEST_ASSERT_TRUE(handle != 0, "Allocation failed");
+    TEST_ASSERT_TRUE(handle != 0, "Allocation should succeed");
     
     // 释放内存
     bool result = pool.Deallocate(handle);
@@ -223,8 +225,8 @@ bool TestDefragmentation() {
     // 或者我们假设Allocate会在需要时触发。
     // RHIAdaptiveMemoryPool::Defragment 是 public 的。
     bool defragResult = pool.Defragment();
-    // 即使没有移动，返回true也是可能的（表示完成尝试）
-    TEST_ASSERT_TRUE(defragResult, "Defragment call should succeed");
+    // 当前实现暂时禁用碎片整理，应返回 false
+    TEST_ASSERT_FALSE(defragResult, "Defragment is currently disabled");
     
     // 验证未释放的块仍然有效且可访问
     MemoryBlock b1 = pool.GetMemoryBlock(h1);

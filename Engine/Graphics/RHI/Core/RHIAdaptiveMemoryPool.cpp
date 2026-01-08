@@ -69,6 +69,7 @@ RHIAdaptiveMemoryPool::RHIAdaptiveMemoryPool(RHIDeviceBase& device, const Memory
 RHIAdaptiveMemoryPool::~RHIAdaptiveMemoryPool() {
     StopAdaptiveAnalysis();
     logAdaptiveEvent("RHIAdaptiveMemoryPool销毁");
+    Destroy();
 }
 
 // === RHIMemoryPool接口实现 ===

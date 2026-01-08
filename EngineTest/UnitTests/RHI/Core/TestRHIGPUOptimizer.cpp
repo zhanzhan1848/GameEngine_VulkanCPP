@@ -94,6 +94,10 @@ public:
     SamplerHandle createSamplerImpl(const SamplerDesc& desc) { return handles::INVALID_SAMPLER; }
     void destroySamplerImpl(SamplerHandle handle) {}
 
+    // 管线布局创建/销毁
+    PipelineLayoutHandle createPipelineLayoutImpl(const PipelineLayoutDesc& desc) { return handles::INVALID_PIPELINE_LAYOUT; }
+    void destroyPipelineLayoutImpl(PipelineLayoutHandle handle) {}
+
     DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc) { return handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
     void destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle) {}
 

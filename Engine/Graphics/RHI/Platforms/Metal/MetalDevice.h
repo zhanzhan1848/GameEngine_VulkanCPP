@@ -105,6 +105,22 @@ public:
     MetalPipeline* GetPipeline(PipelineHandle handle);
 
     /**
+     * @brief 注册管线对 Shader 的依赖
+     */
+    void RegisterPipelineDependency(PipelineHandle pipeline, ShaderHandle shader);
+
+    /**
+     * @brief 注销管线对 Shader 的依赖
+     */
+    void UnregisterPipelineDependency(PipelineHandle pipeline);
+
+    /**
+     * @brief 热重载 Shader
+     * @details 更新 Shader 内容并重建所有依赖的 Pipeline
+     */
+    bool ReloadShader(ShaderHandle shader, const void* data, size_t size);
+
+    /**
      * @brief 获取采样器对象 (内部使用)
      */
     MetalSampler* GetSampler(SamplerHandle handle);
@@ -270,6 +286,11 @@ private:
     MTL::CommandQueue* graphicsQueue_{nullptr}; ///< 图形命令队列
     MTL::CommandQueue* computeQueue_{nullptr};  ///< 计算命令队列
     MTL::CommandQueue* transferQueue_{nullptr}; ///< 传输命令队列
+    
+    // Shader 依赖图: ShaderHandle -> [PipelineHandle]
+    std::mutex pipelineDependencyMutex_;
+    std::unordered_map<ShaderHandle, utl::vector<PipelineHandle>> shaderToPipelines_;
+
     // === 显存管理 ===
     class RHIAdaptiveMemoryPool* memoryPool_{nullptr}; ///< 自适应内存池 (Shared)
     MTL::Heap* heap_{nullptr};                         ///< Metal堆 (Shared)

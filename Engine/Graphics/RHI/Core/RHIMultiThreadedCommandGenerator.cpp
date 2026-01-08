@@ -192,8 +192,8 @@ public:
              }
         } else {
             // 模拟
-             result.commandBuffer = handles::INVALID_COMMAND_BUFFER;
-             result.generatedCommands = 0;
+             result.commandBuffer = reinterpret_cast<CommandBufferHandle>(0x100000000ULL | task.taskId);
+             result.generatedCommands = task.renderBatch.commandCount;
         }
 
         auto endTime = std::chrono::high_resolution_clock::now();

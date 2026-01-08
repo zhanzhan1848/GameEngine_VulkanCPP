@@ -78,7 +78,7 @@ public:
     }
     
     CommandBufferHandle createCommandBufferImpl(CommandQueueType type) {
-        return handles::INVALID_COMMAND_BUFFER;
+        return nextCommandBufferHandle_++;
     }
     
     // 资源销毁实现（测试用，空实现）
@@ -109,6 +109,9 @@ public:
     DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc) { return handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
     void destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle) {}
 
+    PipelineLayoutHandle createPipelineLayoutImpl(const PipelineLayoutDesc& desc) { return handles::INVALID_PIPELINE_LAYOUT; }
+    void destroyPipelineLayoutImpl(PipelineLayoutHandle handle) {}
+
     DescriptorSetHandle createDescriptorSetImpl(const DescriptorSetDesc& desc) { return handles::INVALID_DESCRIPTOR_SET; }
     void destroyDescriptorSetImpl(DescriptorSetHandle handle) {}
 
@@ -130,6 +133,7 @@ public:
 private:
     // === 私有成员变量 ===
     std::atomic<uint64_t> nextSyncHandle_{1};
+    std::atomic<uint64_t> nextCommandBufferHandle_{1};
 };
 
 /**

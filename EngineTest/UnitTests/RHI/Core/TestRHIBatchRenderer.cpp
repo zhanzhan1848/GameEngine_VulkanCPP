@@ -80,6 +80,11 @@ public:
         return handles::INVALID_PIPELINE;
     }
     
+    // 创建管线布局实现（测试用）
+    PipelineLayoutHandle createPipelineLayoutImpl(const PipelineLayoutDesc& desc) {
+        return handles::INVALID_PIPELINE_LAYOUT;
+    }
+
     DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc) {
         return handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     }
@@ -106,6 +111,8 @@ public:
     void destroyShaderImpl(ShaderHandle handle) {}
     void destroyPipelineImpl(PipelineHandle handle) {}
     void destroyCommandBufferImpl(CommandBufferHandle handle) {}
+    // 销毁管线布局实现
+    void destroyPipelineLayoutImpl(PipelineLayoutHandle handle) {}
     void destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle) {}
     void destroyDescriptorSetImpl(DescriptorSetHandle handle) {}
     void destroySamplerImpl(SamplerHandle handle) {}
@@ -182,6 +189,12 @@ protected:
     
     void BeginRenderPass(const RenderPassDesc& desc) override { 
         (void)desc; 
+        currentState_ = CommandBufferState::Recording;
+    }
+
+    // 开始渲染通道（使用句柄）
+    void BeginRenderPass(RenderPassHandle renderPass) override { 
+        (void)renderPass; 
         currentState_ = CommandBufferState::Recording;
     }
     
@@ -327,6 +340,7 @@ TestResult TestBatchRendererBasicFunctionality() {
     primal::math::m4x4 projMatrix = primal::graphics::rhi::math::MatrixIdentity();
     
     u32 batchCount = batchRenderer.ProcessBatches(viewMatrix, projMatrix);
+    (void)batchCount;
     TEST_ASSERT(batchCount > 0, "处理批次应该产生至少一个批次");
     
     // 测试统计信息
@@ -363,7 +377,7 @@ TestResult TestRenderItemClassification() {
     primal::math::m4x4 viewMatrix = primal::graphics::rhi::math::MatrixIdentity();
     primal::math::m4x4 projMatrix = primal::graphics::rhi::math::MatrixIdentity();
     
-    u32 batchCount = batchRenderer.ProcessBatches(viewMatrix, projMatrix);
+    batchRenderer.ProcessBatches(viewMatrix, projMatrix);
     
     // 验证分类结果
     const auto& batches = batchRenderer.GetBatches();
@@ -411,7 +425,7 @@ TestResult TestBatchOptimization() {
     primal::math::m4x4 viewMatrix = primal::graphics::rhi::math::MatrixIdentity();
     primal::math::m4x4 projMatrix = primal::graphics::rhi::math::MatrixIdentity();
     
-    u32 batchCount = batchRenderer.ProcessBatches(viewMatrix, projMatrix);
+    batchRenderer.ProcessBatches(viewMatrix, projMatrix);
     
     // 验证批次分割
     const BatchStats& stats = batchRenderer.GetStats();
@@ -452,7 +466,7 @@ TestResult TestInstancedRendering() {
     primal::math::m4x4 viewMatrix = primal::graphics::rhi::math::MatrixIdentity();
     primal::math::m4x4 projMatrix = primal::graphics::rhi::math::MatrixIdentity();
     
-    u32 batchCount = batchRenderer.ProcessBatches(viewMatrix, projMatrix);
+    batchRenderer.ProcessBatches(viewMatrix, projMatrix);
     
     // 验证实例化批次
     const BatchStats& stats = batchRenderer.GetStats();
@@ -503,7 +517,7 @@ TestResult TestFrustumCulling() {
     primal::math::m4x4 projMatrix = primal::graphics::rhi::math::MatrixPerspective(
         45.0f, 1.0f, 0.1f, 100.0f);
     
-    u32 batchCount = batchRenderer.ProcessBatches(viewMatrix, projMatrix);
+    batchRenderer.ProcessBatches(viewMatrix, projMatrix);
     
     // 验证剔除效果
     const BatchStats& stats = batchRenderer.GetStats();
@@ -542,7 +556,7 @@ TestResult TestDepthSorting() {
     primal::math::m4x4 viewMatrix = primal::graphics::rhi::math::MatrixIdentity();
     primal::math::m4x4 projMatrix = primal::graphics::rhi::math::MatrixIdentity();
     
-    u32 batchCount = batchRenderer.ProcessBatches(viewMatrix, projMatrix);
+    batchRenderer.ProcessBatches(viewMatrix, projMatrix);
     
     // 验证深度排序
     const auto& batches = batchRenderer.GetBatches();
@@ -635,6 +649,7 @@ TestResult TestPerformanceAndStatistics() {
     primal::math::m4x4 projMatrix = primal::graphics::rhi::math::MatrixIdentity();
     
     u32 batchCount = batchRenderer.ProcessBatches(viewMatrix, projMatrix);
+    (void)batchCount;
     
     auto endTime = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);

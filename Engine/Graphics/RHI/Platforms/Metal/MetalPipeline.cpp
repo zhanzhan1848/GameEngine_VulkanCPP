@@ -15,24 +15,120 @@ namespace primal::graphics::rhi {
 
 namespace {
     MTL::PixelFormat ToMTLPixelFormat(DataFormat format) {
-        // Simple mapping, needs full implementation
         switch (format) {
-            case DataFormat::BGRA8_UNorm: return MTL::PixelFormatBGRA8Unorm;
-            case DataFormat::RGBA8_UNorm: return MTL::PixelFormatRGBA8Unorm;
             case DataFormat::R8_UNorm: return MTL::PixelFormatR8Unorm;
+            case DataFormat::R8_SNorm: return MTL::PixelFormatR8Snorm;
+            case DataFormat::R8_UInt: return MTL::PixelFormatR8Uint;
+            case DataFormat::R8_SInt: return MTL::PixelFormatR8Sint;
+            
+            case DataFormat::R16_UNorm: return MTL::PixelFormatR16Unorm;
+            case DataFormat::R16_SNorm: return MTL::PixelFormatR16Snorm;
+            case DataFormat::R16_UInt: return MTL::PixelFormatR16Uint;
+            case DataFormat::R16_SInt: return MTL::PixelFormatR16Sint;
+            case DataFormat::R16_Float: return MTL::PixelFormatR16Float;
+            
+            case DataFormat::RG8_UNorm: return MTL::PixelFormatRG8Unorm;
+            case DataFormat::RG8_SNorm: return MTL::PixelFormatRG8Snorm;
+            case DataFormat::RG8_UInt: return MTL::PixelFormatRG8Uint;
+            case DataFormat::RG8_SInt: return MTL::PixelFormatRG8Sint;
+            
+            case DataFormat::R32_UInt: return MTL::PixelFormatR32Uint;
+            case DataFormat::R32_SInt: return MTL::PixelFormatR32Sint;
+            case DataFormat::R32_Float: return MTL::PixelFormatR32Float;
+            
+            case DataFormat::RG16_UNorm: return MTL::PixelFormatRG16Unorm;
+            case DataFormat::RG16_SNorm: return MTL::PixelFormatRG16Snorm;
+            case DataFormat::RG16_UInt: return MTL::PixelFormatRG16Uint;
+            case DataFormat::RG16_SInt: return MTL::PixelFormatRG16Sint;
+            case DataFormat::RG16_Float: return MTL::PixelFormatRG16Float;
+            
+            case DataFormat::RGBA8_UNorm: return MTL::PixelFormatRGBA8Unorm;
+            case DataFormat::RGBA8_SNorm: return MTL::PixelFormatRGBA8Snorm;
+            case DataFormat::RGBA8_UInt: return MTL::PixelFormatRGBA8Uint;
+            case DataFormat::RGBA8_SInt: return MTL::PixelFormatRGBA8Sint;
+            case DataFormat::RGBA8_sRGB: return MTL::PixelFormatRGBA8Unorm_sRGB;
+            
+            case DataFormat::BGRA8_UNorm: return MTL::PixelFormatBGRA8Unorm;
+            
+            case DataFormat::RG32_UInt: return MTL::PixelFormatRG32Uint;
+            case DataFormat::RG32_SInt: return MTL::PixelFormatRG32Sint;
+            case DataFormat::RG32_Float: return MTL::PixelFormatRG32Float;
+            
+            case DataFormat::RGBA16_UNorm: return MTL::PixelFormatRGBA16Unorm;
+            case DataFormat::RGBA16_SNorm: return MTL::PixelFormatRGBA16Snorm;
+            case DataFormat::RGBA16_UInt: return MTL::PixelFormatRGBA16Uint;
+            case DataFormat::RGBA16_SInt: return MTL::PixelFormatRGBA16Sint;
+            case DataFormat::RGBA16_Float: return MTL::PixelFormatRGBA16Float;
+            
+            case DataFormat::RGBA32_UInt: return MTL::PixelFormatRGBA32Uint;
+            case DataFormat::RGBA32_SInt: return MTL::PixelFormatRGBA32Sint;
+            case DataFormat::RGBA32_Float: return MTL::PixelFormatRGBA32Float;
+            
             case DataFormat::D32_Float: return MTL::PixelFormatDepth32Float;
+            case DataFormat::D16_UNorm: return MTL::PixelFormatDepth16Unorm;
+            case DataFormat::D24_UNorm_S8_UInt: return MTL::PixelFormatDepth24Unorm_Stencil8;
             case DataFormat::D32_Float_S8X24_UInt: return MTL::PixelFormatDepth32Float_Stencil8;
+            
             default: return MTL::PixelFormatInvalid;
         }
     }
 
     MTL::VertexFormat ToMTLVertexFormat(DataFormat format) {
-        // Simple mapping, needs full implementation
         switch (format) {
-            case DataFormat::RGB32_Float: return MTL::VertexFormatFloat3;
-            case DataFormat::RGBA32_Float: return MTL::VertexFormatFloat4;
-            case DataFormat::RG32_Float: return MTL::VertexFormatFloat2;
+            case DataFormat::R8_UNorm: return MTL::VertexFormatUCharNormalized;
+            case DataFormat::R8_SNorm: return MTL::VertexFormatCharNormalized;
+            case DataFormat::R8_UInt: return MTL::VertexFormatUChar;
+            case DataFormat::R8_SInt: return MTL::VertexFormatChar;
+            
+            case DataFormat::RG8_UNorm: return MTL::VertexFormatUChar2Normalized;
+            case DataFormat::RG8_SNorm: return MTL::VertexFormatChar2Normalized;
+            case DataFormat::RG8_UInt: return MTL::VertexFormatUChar2;
+            case DataFormat::RG8_SInt: return MTL::VertexFormatChar2;
+
+            case DataFormat::R8G8B8_UNorm: return MTL::VertexFormatUChar3Normalized;
+            case DataFormat::R8G8B8_SNorm: return MTL::VertexFormatChar3Normalized;
+            case DataFormat::R8G8B8_UInt: return MTL::VertexFormatUChar3;
+            case DataFormat::R8G8B8_SInt: return MTL::VertexFormatChar3;
+
+            case DataFormat::RGBA8_UNorm: return MTL::VertexFormatUChar4Normalized;
+            case DataFormat::RGBA8_SNorm: return MTL::VertexFormatChar4Normalized;
+            case DataFormat::RGBA8_UInt: return MTL::VertexFormatUChar4;
+            case DataFormat::RGBA8_SInt: return MTL::VertexFormatChar4;
+
+            case DataFormat::R16_UNorm: return MTL::VertexFormatUShortNormalized;
+            case DataFormat::R16_SNorm: return MTL::VertexFormatShortNormalized;
+            case DataFormat::R16_UInt: return MTL::VertexFormatUShort;
+            case DataFormat::R16_SInt: return MTL::VertexFormatShort;
+            case DataFormat::R16_Float: return MTL::VertexFormatHalf;
+
+            case DataFormat::RG16_UNorm: return MTL::VertexFormatUShort2Normalized;
+            case DataFormat::RG16_SNorm: return MTL::VertexFormatShort2Normalized;
+            case DataFormat::RG16_UInt: return MTL::VertexFormatUShort2;
+            case DataFormat::RG16_SInt: return MTL::VertexFormatShort2;
+            case DataFormat::RG16_Float: return MTL::VertexFormatHalf2;
+
+            case DataFormat::RGBA16_UNorm: return MTL::VertexFormatUShort4Normalized;
+            case DataFormat::RGBA16_SNorm: return MTL::VertexFormatShort4Normalized;
+            case DataFormat::RGBA16_UInt: return MTL::VertexFormatUShort4;
+            case DataFormat::RGBA16_SInt: return MTL::VertexFormatShort4;
+            case DataFormat::RGBA16_Float: return MTL::VertexFormatHalf4;
+
+            case DataFormat::R32_UInt: return MTL::VertexFormatUInt;
+            case DataFormat::R32_SInt: return MTL::VertexFormatInt;
             case DataFormat::R32_Float: return MTL::VertexFormatFloat;
+
+            case DataFormat::RG32_UInt: return MTL::VertexFormatUInt2;
+            case DataFormat::RG32_SInt: return MTL::VertexFormatInt2;
+            case DataFormat::RG32_Float: return MTL::VertexFormatFloat2;
+
+            case DataFormat::RGB32_UInt: return MTL::VertexFormatUInt3;
+            case DataFormat::RGB32_SInt: return MTL::VertexFormatInt3;
+            case DataFormat::RGB32_Float: return MTL::VertexFormatFloat3;
+
+            case DataFormat::RGBA32_UInt: return MTL::VertexFormatUInt4;
+            case DataFormat::RGBA32_SInt: return MTL::VertexFormatInt4;
+            case DataFormat::RGBA32_Float: return MTL::VertexFormatFloat4;
+
             default: return MTL::VertexFormatInvalid;
         }
     }
@@ -184,6 +280,19 @@ bool MetalPipeline::Initialize(const ComputePipelineDesc& desc) {
     }
 
     return true;
+}
+
+bool MetalPipeline::Recreate() {
+    // 创建临时副本以避免自我赋值问题（虽然通常是安全的，但为了保险）
+    if (isCompute_) {
+        ComputePipelineDesc desc = computeDesc_;
+        Destroy();
+        return Initialize(desc);
+    } else {
+        GraphicsPipelineDesc desc = graphicsDesc_;
+        Destroy();
+        return Initialize(desc);
+    }
 }
 
 MTL::DepthStencilState* MetalPipeline::CreateDepthStencilState(const GraphicsPipelineDesc& desc) {

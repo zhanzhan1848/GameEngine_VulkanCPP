@@ -72,6 +72,20 @@ bool MetalShader::Initialize() {
     return true;
 }
 
+bool MetalShader::Reload(const void* data, size_t size) {
+    if (!data || size == 0) return false;
+    
+    // 销毁旧资源
+    Destroy();
+    
+    // 更新数据指针
+    data_ = data;
+    size_ = size;
+    
+    // 重新初始化
+    return Initialize();
+}
+
 void MetalShader::Destroy() {
     if (function_) {
         function_->release();

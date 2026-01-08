@@ -39,11 +39,20 @@ set_target_properties(StandaloneRHI_Resource_Test PROPERTIES
 target_compile_definitions(StandaloneRHI_Resource_Test PRIVATE DEBUG _DEBUG)
 
 # 创建RHI自适应内存池测试
-add_executable(StandaloneRHI_AdaptiveMemoryPool_Test RHI/Core/TestRHIAdaptiveMemoryPool.cpp)
+add_executable(StandaloneRHI_AdaptiveMemoryPool_Test 
+    RHI/Core/TestRHIAdaptiveMemoryPool.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIAdaptiveMemoryPool.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIMemoryPool.cpp
+)
 # 不依赖任何Engine头文件或库，完全独立
 add_test(NAME StandaloneRHI_AdaptiveMemoryPool_Test COMMAND StandaloneRHI_AdaptiveMemoryPool_Test)
 set_target_properties(StandaloneRHI_AdaptiveMemoryPool_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_include_directories(StandaloneRHI_AdaptiveMemoryPool_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
 )
 target_compile_definitions(StandaloneRHI_AdaptiveMemoryPool_Test PRIVATE DEBUG _DEBUG)
 
@@ -324,6 +333,37 @@ if(APPLE)
     set_target_properties(TestMetalDescriptorSet PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
+
+    # 创建Metal命令编码测试
+    add_executable(TestMetalCommandEncoding Graphics/Metal/TestMetalCommandEncoding.cpp)
+    target_include_directories(TestMetalCommandEncoding PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalCommandEncoding PRIVATE Engine "-framework Foundation" "-framework Metal" "-framework MetalKit" "-framework QuartzCore")
+    add_test(NAME TestMetalCommandEncoding COMMAND TestMetalCommandEncoding)
+    set_target_properties(TestMetalCommandEncoding PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    target_compile_definitions(TestMetalCommandEncoding PRIVATE DEBUG _DEBUG)
+
+    # 创建Metal Shader 熱重载测试
+    add_executable(TestMetalHotReload Graphics/Metal/TestMetalHotReload.cpp)
+    target_include_directories(TestMetalHotReload PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalHotReload PRIVATE Engine "-framework Foundation" "-framework Metal" "-framework MetalKit" "-framework QuartzCore")
+    add_test(NAME TestMetalHotReload COMMAND TestMetalHotReload)
+    set_target_properties(TestMetalHotReload PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    target_compile_definitions(TestMetalHotReload PRIVATE DEBUG _DEBUG)
+    
 endif()
 
 # RHI GPU优化测试

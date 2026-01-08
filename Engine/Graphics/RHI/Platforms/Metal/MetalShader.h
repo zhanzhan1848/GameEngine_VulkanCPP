@@ -21,6 +21,12 @@ public:
     ~MetalShader();
 
     bool Initialize();
+    
+    /**
+     * @brief 热重载 Shader
+     */
+    bool Reload(const void* data, size_t size);
+    
     void Destroy();
 
     MTL::Function* GetFunction() const { return function_; }

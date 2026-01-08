@@ -177,6 +177,56 @@ MetalRenderPass* MetalDevice::GetRenderPass(RenderPassHandle handle) {
     return renderPassAllocator_.Get(handle);
 }
 
+void MetalDevice::RegisterPipelineDependency(PipelineHandle pipeline, ShaderHandle shader) {
+    if (shader != handles::INVALID_SHADER) {
+        std::lock_guard<std::mutex> lock(pipelineDependencyMutex_);
+        shaderToPipelines_[shader].push_back(pipeline);
+    }
+}
+
+void MetalDevice::UnregisterPipelineDependency(PipelineHandle pipeline) {
+    std::lock_guard<std::mutex> lock(pipelineDependencyMutex_);
+    for (auto& pair : shaderToPipelines_) {
+        auto& pipelines = pair.second;
+        for (size_t i = 0; i < pipelines.size(); ++i) {
+            if (pipelines[i] == pipeline) {
+                pipelines.erase_unordered(i);
+                break;
+            }
+        }
+    }
+}
+
+bool MetalDevice::ReloadShader(ShaderHandle shaderHandle, const void* data, size_t size) {
+    MetalShader* shader = GetShader(shaderHandle);
+    if (!shader) return false;
+    
+    // Reload shader module
+    if (!shader->Reload(data, size)) {
+        std::cerr << "[MetalDevice] Failed to reload shader: " << shaderHandle << std::endl;
+        return false;
+    }
+    
+    // Recreate dependent pipelines
+    std::lock_guard<std::mutex> lock(pipelineDependencyMutex_);
+    auto it = shaderToPipelines_.find(shaderHandle);
+    if (it != shaderToPipelines_.end()) {
+        for (PipelineHandle pipelineHandle : it->second) {
+            MetalPipeline* pipeline = GetPipeline(pipelineHandle);
+            if (pipeline) {
+                if (!pipeline->Recreate()) {
+                    std::cerr << "[MetalDevice] Failed to recreate pipeline: " << pipelineHandle 
+                              << " during shader reload." << std::endl;
+                } else {
+                    std::cout << "[MetalDevice] Recreated pipeline: " << pipelineHandle << std::endl;
+                }
+            }
+        }
+    }
+    
+    return true;
+}
+
 // === CRTP 实现接口 ===
 
 bool MetalDevice::submitCommandBufferImpl(CommandBufferHandle handle) {
@@ -338,6 +388,15 @@ PipelineHandle MetalDevice::createGraphicsPipelineImpl(const GraphicsPipelineDes
     MetalPipeline* pipeline = pipelineAllocator_.Get(id);
     if (pipeline && pipeline->Initialize(desc)) {
         pipeline->SetHandle(PipelineHandle(id));
+        
+        // 注册管线对Shader的依赖，用于热更新
+        if (desc.vertexShader != handles::INVALID_SHADER) {
+            RegisterPipelineDependency(PipelineHandle(id), desc.vertexShader);
+        }
+        if (desc.pixelShader != handles::INVALID_SHADER) {
+            RegisterPipelineDependency(PipelineHandle(id), desc.pixelShader);
+        }
+        
         return PipelineHandle(id);
     }
     pipelineAllocator_.Free(id);
@@ -349,6 +408,12 @@ PipelineHandle MetalDevice::createComputePipelineImpl(const ComputePipelineDesc&
     MetalPipeline* pipeline = pipelineAllocator_.Get(id);
     if (pipeline && pipeline->Initialize(desc)) {
         pipeline->SetHandle(PipelineHandle(id));
+        
+        // 注册管线对Shader的依赖，用于热更新
+        if (desc.computeShader != handles::INVALID_SHADER) {
+            RegisterPipelineDependency(PipelineHandle(id), desc.computeShader);
+        }
+        
         return PipelineHandle(id);
     }
     pipelineAllocator_.Free(id);
@@ -443,6 +508,7 @@ void MetalDevice::destroyShaderImpl(ShaderHandle handle) {
     shaderAllocator_.Free(static_cast<uint32_t>(handle));
 }
 void MetalDevice::destroyPipelineImpl(PipelineHandle handle) {
+    UnregisterPipelineDependency(handle);
     pipelineAllocator_.Free(static_cast<uint32_t>(handle));
 }
 void MetalDevice::destroySamplerImpl(SamplerHandle handle) {

@@ -28,6 +28,12 @@ public:
     // Initialize compute pipeline
     bool Initialize(const ComputePipelineDesc& desc);
 
+    /**
+     * @brief 重新创建管线
+     * @details 使用保存的描述符重新创建 PSO (用于热重载)
+     */
+    bool Recreate();
+
     void Destroy();
 
     MTL::RenderPipelineState* GetRenderPipelineState() const { return renderPipelineState_; }

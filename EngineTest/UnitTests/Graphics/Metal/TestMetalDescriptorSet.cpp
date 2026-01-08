@@ -74,9 +74,17 @@ TestResult TestDescriptorSetUpdate() {
     
     const auto& bindings = mtlSet->GetBindings();
     TEST_ASSERT(bindings.size() == 1, "Binding count mismatch");
-    TEST_ASSERT(bindings.count(0) == 1, "Binding 0 not found");
-    TEST_ASSERT(bindings.at(0).resource == buffer, "Buffer handle mismatch");
-    TEST_ASSERT(bindings.at(0).type == DescriptorType::UniformBuffer, "Descriptor type mismatch");
+    bool bindingFound = false;
+    for (const auto& binding : bindings) {
+        if (binding.binding == 0) {
+            bindingFound = true;
+            TEST_ASSERT(!binding.resources.empty(), "No resources bound");
+            TEST_ASSERT(binding.resources[0] == buffer, "Buffer handle mismatch");
+            TEST_ASSERT(binding.type == DescriptorType::UniformBuffer, "Descriptor type mismatch");
+            break;
+        }
+    }
+    TEST_ASSERT(bindingFound, "Binding 0 not found");
 
     // 6. Bind (requires CommandBuffer)
     CommandBufferHandle cmdHandle = device.CreateCommandBuffer(CommandQueueType::Graphics);
