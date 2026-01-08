@@ -84,6 +84,20 @@ public:
     }
 
     /**
+     * @brief 关闭分配器并释放所有活跃资源
+     * @details 主动释放所有未释放的资源，防止内存泄漏。通常在设备关闭时调用。
+     */
+    void Shutdown() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        uint32_t cap = _pool.capacity();
+        for (uint32_t i = 0; i < cap; ++i) {
+            if (_pool.is_valid(i)) {
+                FreeInternal(i);
+            }
+        }
+    }
+
+    /**
      * @brief 分配对象
      * @tparam Args 构造参数类型
      * @param args 构造参数
@@ -105,13 +119,7 @@ public:
      */
     void Free(uint32_t id) {
         std::lock_guard<std::mutex> lock(_mutex);
-        // 简单的范围检查
-        if (id >= _pool.capacity()) return;
-        
-        _pool.remove(id);
-        _stats.totalFreed++;
-        _stats.activeAllocations--;
-        _stats.totalBytesAllocated -= sizeof(T);
+        FreeInternal(id);
     }
 
     /**
@@ -121,6 +129,8 @@ public:
      */
     T* Get(uint32_t id) {
         std::lock_guard<std::mutex> lock(_mutex);
+        if (id >= _pool.capacity()) return nullptr;
+        if (!_pool.is_valid(id)) return nullptr;
         // free_list operator[] 包含断言检查
         return &_pool[id];
     }
@@ -158,6 +168,19 @@ public:
     }
 
 private:
+    /**
+     * @brief 内部释放实现（无锁）
+     */
+    void FreeInternal(uint32_t id) {
+        // 简单的范围检查
+        if (id >= _pool.capacity()) return;
+        
+        _pool.remove(id);
+        _stats.totalFreed++;
+        _stats.activeAllocations--;
+        _stats.totalBytesAllocated -= sizeof(T);
+    }
+
     primal::utl::free_list<T> _pool;
     mutable std::mutex _mutex;
     AllocatorStats _stats;

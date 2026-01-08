@@ -10,6 +10,7 @@
 #pragma once
 
 #include "CommonHeaders.h"
+#include "../../../Platform/PlatformTypes.h"
 
 namespace primal::graphics::rhi {
 
@@ -17,6 +18,7 @@ namespace primal::graphics::rhi {
 
 class RHIResource;
 class RHICommandBuffer;
+class RHISwapChain;
 class RHIShader;
 class RHIPipeline;
 
@@ -27,6 +29,12 @@ class RHIPipeline;
  * @details 64位句柄，包含设备类型和唯一标识符
  */
 using DeviceHandle = uint64_t;
+
+/**
+ * @brief RHI交换链句柄
+ * @details 64位句柄，用于标识交换链对象
+ */
+using SwapChainHandle = uint64_t;
 
 /**
  * @brief RHI资源句柄
@@ -53,10 +61,57 @@ using ShaderHandle = uint64_t;
 using PipelineHandle = uint64_t;
 
 /**
+ * @brief RHI采样器句柄
+ * @details 64位句柄，用于标识采样器状态
+ */
+using SamplerHandle = uint64_t;
+
+/**
  * @brief RHI同步对象句柄
  * @details 64位句柄，用于标识围栏、信号量等同步对象
  */
 using SyncHandle = uint64_t;
+
+/**
+ * @brief RHI查询池句柄
+ * @details 64位句柄，用于标识查询池对象
+ */
+using QueryPoolHandle = uint64_t;
+
+/**
+ * @brief RHI描述符集布局句柄
+ * @details 64位句柄，用于标识描述符集布局对象
+ */
+using DescriptorSetLayoutHandle = uint64_t;
+
+/**
+ * @brief RHI描述符集句柄
+ * @details 64位句柄，用于标识描述符集对象
+ */
+using DescriptorSetHandle = uint64_t;
+
+/**
+ * @brief RHI管线布局句柄
+ * @details 64位句柄，用于标识管线布局对象
+ */
+using PipelineLayoutHandle = uint64_t;
+
+/**
+ * @brief 无效句柄常量
+ */
+namespace handles {
+    constexpr DeviceHandle INVALID_DEVICE = static_cast<DeviceHandle>(-1);
+    constexpr ResourceHandle INVALID_RESOURCE = static_cast<ResourceHandle>(-1);
+    constexpr CommandBufferHandle INVALID_COMMAND_BUFFER = static_cast<CommandBufferHandle>(-1);
+    constexpr ShaderHandle INVALID_SHADER = static_cast<ShaderHandle>(-1);
+    constexpr PipelineHandle INVALID_PIPELINE = static_cast<PipelineHandle>(-1);
+    constexpr PipelineLayoutHandle INVALID_PIPELINE_LAYOUT = static_cast<PipelineLayoutHandle>(-1);
+    constexpr SamplerHandle INVALID_SAMPLER = static_cast<SamplerHandle>(-1);
+    constexpr SyncHandle INVALID_SYNC = static_cast<SyncHandle>(-1);
+    constexpr QueryPoolHandle INVALID_QUERY_POOL = static_cast<QueryPoolHandle>(-1);
+    constexpr DescriptorSetLayoutHandle INVALID_DESCRIPTOR_SET_LAYOUT = static_cast<DescriptorSetLayoutHandle>(-1);
+    constexpr DescriptorSetHandle INVALID_DESCRIPTOR_SET = static_cast<DescriptorSetHandle>(-1);
+}
 
 // === 枚举定义 ===
 
@@ -82,7 +137,28 @@ enum class ResourceType : uint8_t {
     DepthStencil = 4,   ///< 深度模板缓冲
     Pipeline    = 5,    ///< 管线
     Shader      = 6,    ///< 着色器
-    Sampler     = 7     ///< 采样器
+    Sampler     = 7,    ///< 采样器
+    QueryPool   = 8,    ///< 查询池
+    SwapChain   = 9,    ///< 交换链
+    DescriptorSetLayout = 10, ///< 描述符集布局
+    DescriptorSet = 11  ///< 描述符集
+};
+
+/**
+ * @brief 管线绑定点
+ */
+enum class PipelineBindPoint : uint8_t {
+    Graphics = 0,   ///< 图形管线
+    Compute = 1     ///< 计算管线
+};
+
+/**
+ * @brief 查询类型
+ */
+enum class QueryType : uint8_t {
+    Timestamp,  ///< 时间戳查询
+    Occlusion,  ///< 遮挡查询
+    PipelineStatistics ///< 管线统计查询
 };
 
 /**
@@ -269,7 +345,8 @@ enum class GPUMemoryUsage : uint8_t {
     Dynamic = 2,   ///< 动态内存，CPU频繁更新，GPU多次读取
     Staging = 3,   ///< 暂存内存，用于CPU到GPU的数据传输
     Readback = 4,  ///< 回读内存，用于GPU到CPU的数据传输
-    Immutable = 5  ///< 不可变内存，CPU写一次后不再修改
+    Immutable = 5, ///< 不可变内存，CPU写一次后不再修改
+    SwapChain = 6  ///< 交换链内存，由交换链管理，不直接创建
 };
 
 /**
@@ -309,6 +386,100 @@ enum class ShaderStage : uint8_t {
     Hull = 4,       ///< 外壳着色器
     Domain = 5,     ///< 域着色器
     Compute = 6     ///< 计算着色器
+};
+
+/**
+ * @brief 描述符类型
+ */
+enum class DescriptorType : uint8_t {
+    Unknown = 0,
+    Sampler = 1,
+    CombinedImageSampler = 2,
+    SampledImage = 3,
+    StorageImage = 4,
+    UniformTexelBuffer = 5,
+    StorageTexelBuffer = 6,
+    UniformBuffer = 7,
+    StorageBuffer = 8,
+    UniformBufferDynamic = 9,
+    StorageBufferDynamic = 10,
+    InputAttachment = 11
+};
+
+/**
+ * @brief 描述符集布局绑定
+ */
+struct DescriptorSetLayoutBinding {
+    uint32_t binding;
+    DescriptorType descriptorType;
+    uint32_t descriptorCount;
+    ShaderStage stageFlags;
+    const SamplerHandle* immutableSamplers;
+    
+    DescriptorSetLayoutBinding() : binding(0), descriptorType(DescriptorType::Unknown), 
+                                  descriptorCount(0), stageFlags(ShaderStage::Unknown), 
+                                  immutableSamplers(nullptr) {}
+};
+
+/**
+ * @brief 描述符集布局描述符
+ */
+struct DescriptorSetLayoutDesc {
+    uint32_t bindingCount;
+    const DescriptorSetLayoutBinding* bindings;
+    
+    DescriptorSetLayoutDesc() : bindingCount(0), bindings(nullptr) {}
+};
+
+/**
+ * @brief 描述符集描述符
+ */
+struct DescriptorSetDesc {
+    DescriptorSetLayoutHandle layout;
+    
+    DescriptorSetDesc() : layout(0) {}
+};
+
+/**
+ * @brief 描述符图像信息
+ */
+struct DescriptorImageInfo {
+    SamplerHandle sampler;
+    ResourceHandle imageView; // 纹理句柄
+    ResourceState imageLayout;
+    
+    DescriptorImageInfo() : sampler(handles::INVALID_SAMPLER), 
+                           imageView(handles::INVALID_RESOURCE), 
+                           imageLayout(ResourceState::Unknown) {}
+};
+
+/**
+ * @brief 描述符缓冲区信息
+ */
+struct DescriptorBufferInfo {
+    ResourceHandle buffer;
+    uint64_t offset;
+    uint64_t range;
+    
+    DescriptorBufferInfo() : buffer(handles::INVALID_RESOURCE), offset(0), range(0) {}
+};
+
+/**
+ * @brief 写描述符集
+ */
+struct WriteDescriptorSet {
+    DescriptorSetHandle dstSet;
+    uint32_t dstBinding;
+    uint32_t dstArrayElement;
+    uint32_t descriptorCount;
+    DescriptorType descriptorType;
+    const DescriptorImageInfo* imageInfo;
+    const DescriptorBufferInfo* bufferInfo;
+    
+    WriteDescriptorSet() : dstSet(handles::INVALID_RESOURCE), dstBinding(0), 
+                          dstArrayElement(0), descriptorCount(0), 
+                          descriptorType(DescriptorType::Unknown), 
+                          imageInfo(nullptr), bufferInfo(nullptr) {}
 };
 
 /**
@@ -418,6 +589,16 @@ enum class TextureAddressMode : uint8_t {
     MirrorOnce = 5      ///< 单次镜像
 };
 
+/**
+ * @brief 呈现模式
+ */
+enum class PresentMode : uint8_t {
+    Immediate = 0,      ///< 立即呈现（可能撕裂）
+    Mailbox = 1,        ///< 邮箱模式（三缓冲，低延迟，无撕裂）
+    FIFO = 2,           ///< 先进先出（垂直同步，标准）
+    FIFO_Relaxed = 3    ///< 宽松FIFO（如果错过垂直同步，则立即呈现）
+};
+
 // === 常量定义 ===
 
 /**
@@ -442,17 +623,7 @@ namespace constants {
     constexpr float MAX_ANISOTROPY = 16.0f;              ///< 最大各向异性
 }
 
-/**
- * @brief 无效句柄常量
- */
-namespace handles {
-    constexpr DeviceHandle INVALID_DEVICE = 0;
-    constexpr ResourceHandle INVALID_RESOURCE = 0;
-    constexpr CommandBufferHandle INVALID_COMMAND_BUFFER = 0;
-    constexpr ShaderHandle INVALID_SHADER = 0;
-    constexpr PipelineHandle INVALID_PIPELINE = 0;
-    constexpr SyncHandle INVALID_SYNC = 0;
-}
+
 
 // === 基础结构体定义 ===
 
@@ -611,6 +782,57 @@ struct TextureDesc {
                 uint32_t mips, uint32_t array, DataFormat fmt, TextureType tp)
         : size{width, height, depth}, mipLevels(mips), arraySize(array), 
           format(fmt), type(tp), memoryUsage(GPUMemoryUsage::Unknown) {}
+};
+
+/**
+ * @brief 交换链描述符
+ */
+struct SwapChainDesc {
+    platform::window_handle window;  ///< 窗口句柄
+    uint32_t width;                  ///< 宽度
+    uint32_t height;                 ///< 高度
+    DataFormat format;               ///< 颜色格式
+    uint32_t bufferCount;            ///< 缓冲区数量
+    PresentMode presentMode;         ///< 呈现模式
+    bool enableVsync;                ///< 是否开启垂直同步（辅助字段，优先使用presentMode）
+    
+    SwapChainDesc() : window(nullptr), width(0), height(0), 
+                     format(DataFormat::BGRA8_UNorm), bufferCount(3), 
+                     presentMode(PresentMode::FIFO), enableVsync(true) {}
+};
+
+/**
+ * @brief 采样器描述符
+ */
+struct SamplerDesc {
+    FilterMode minFilter;        ///< 缩小过滤模式
+    FilterMode magFilter;        ///< 放大过滤模式
+    FilterMode mipFilter;        ///< Mipmap过滤模式
+    TextureAddressMode addressU; ///< U轴寻址模式
+    TextureAddressMode addressV; ///< V轴寻址模式
+    TextureAddressMode addressW; ///< W轴寻址模式
+    float mipLodBias;            ///< Mipmap LOD偏差
+    uint32_t maxAnisotropy;      ///< 最大各向异性
+    ComparisonFunc comparisonFunc; ///< 比较函数
+    math::v4 borderColor;        ///< 边框颜色
+    float minLod;                ///< 最小LOD
+    float maxLod;                ///< 最大LOD
+
+    SamplerDesc() : minFilter(FilterMode::Linear), magFilter(FilterMode::Linear), 
+                   mipFilter(FilterMode::Linear), addressU(TextureAddressMode::Wrap), 
+                   addressV(TextureAddressMode::Wrap), addressW(TextureAddressMode::Wrap), 
+                   mipLodBias(0.0f), maxAnisotropy(1), comparisonFunc(ComparisonFunc::Always), 
+                   borderColor{0.0f, 0.0f, 0.0f, 0.0f}, minLod(0.0f), maxLod(1000.0f) {}
+};
+
+/**
+ * @brief 计算管线描述符
+ */
+struct ComputePipelineDesc {
+    ShaderHandle computeShader;         ///< 计算着色器
+    math::u32v3 threadGroupSize;        ///< 线程组大小 (x, y, z)
+    
+    ComputePipelineDesc() : computeShader(handles::INVALID_SHADER), threadGroupSize{1, 1, 1} {}
 };
 
 } // namespace primal::graphics::rhi

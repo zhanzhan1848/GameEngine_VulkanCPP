@@ -50,13 +50,20 @@ elseif(LINUX)
         "TestWindowLinux.h"
     )
 elseif(APPLE)
+    # set(SOURCE_FILES
+    #     "Lights.cpp"
+    #     "Main.cpp"
+    #     "RenderItem.cpp"
+    #     "Scripts.cpp"
+    #     "ShaderCompilation.cpp"
+    #     "TestRendererMac.cpp"
+    #     "TestMetalRenderer.cpp"
+    #     "MacKeyboard.mm"
+    # )
+
     set(SOURCE_FILES
-        "Lights.cpp"
         "Main.cpp"
-        "RenderItem.cpp"
-        "Scripts.cpp"
-        "ShaderCompilation.cpp"
-        "TestRendererMac.cpp"
+        "TestMetalRenderer.cpp"
         "MacKeyboard.mm"
     )
 

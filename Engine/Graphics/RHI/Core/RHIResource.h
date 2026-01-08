@@ -282,7 +282,9 @@ public:
     bool CanUpdate() const {
         return IsValid() && 
                (desc_.memoryUsage == GPUMemoryUsage::Dynamic || 
-                desc_.memoryUsage == GPUMemoryUsage::Staging) &&
+                desc_.memoryUsage == GPUMemoryUsage::Staging ||
+                desc_.memoryUsage == GPUMemoryUsage::Static ||
+                desc_.memoryUsage == GPUMemoryUsage::Immutable) &&
                state_ != ResourceState::InUse;
     }
     
@@ -327,7 +329,7 @@ protected:
     /**
      * @brief 销毁资源的派生类实现
      */
-    virtual void destroyImpl() = 0;
+    virtual void destroyImpl() {}
     
     /**
      * @brief 映射资源的派生类实现

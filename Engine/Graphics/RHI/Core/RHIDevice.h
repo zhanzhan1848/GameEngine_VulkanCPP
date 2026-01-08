@@ -17,6 +17,7 @@ namespace primal::graphics::rhi {
 // === 前向声明 ===
 
 class RHIResource;
+class RHISwapChain;
 class RHICommandBuffer;
 class RHIShader;
 class RHIPipeline;
@@ -100,9 +101,12 @@ struct GraphicsPipelineDesc {
     uint8_t stencilWriteMask;           ///< 模板写入掩码
     
     bool enableBlend;                   ///< 是否启用混合
-    BlendFactor srcBlend;               ///< 源混合因子
-    BlendFactor destBlend;              ///< 目标混合因子
-    BlendOp blendOp;                    ///< 混合操作
+    BlendFactor srcColorBlendFactor;    ///< 源颜色混合因子
+    BlendFactor dstColorBlendFactor;    ///< 目标颜色混合因子
+    BlendOp colorBlendOp;               ///< 颜色混合操作
+    BlendFactor srcAlphaBlendFactor;    ///< 源Alpha混合因子
+    BlendFactor dstAlphaBlendFactor;    ///< 目标Alpha混合因子
+    BlendOp alphaBlendOp;               ///< Alpha混合操作
     
     math::v4 blendConstants;            ///< 混合常量
     
@@ -117,8 +121,9 @@ struct GraphicsPipelineDesc {
                             enableDepthTest(true), enableDepthWrite(true),
                             depthFunc(ComparisonFunc::Less), enableStencilTest(false),
                             stencilReadMask(0xFF), stencilWriteMask(0xFF),
-                            enableBlend(false), srcBlend(BlendFactor::One),
-                            destBlend(BlendFactor::Zero), blendOp(BlendOp::Add),
+                            enableBlend(false), 
+                            srcColorBlendFactor(BlendFactor::One), dstColorBlendFactor(BlendFactor::Zero), colorBlendOp(BlendOp::Add),
+                            srcAlphaBlendFactor(BlendFactor::One), dstAlphaBlendFactor(BlendFactor::Zero), alphaBlendOp(BlendOp::Add),
                             blendConstants{1.0f, 1.0f, 1.0f, 1.0f} {
         for (uint32_t i = 0; i < constants::MAX_RENDER_TARGETS; ++i) {
             renderTargetFormats[i] = DataFormat::Unknown;
@@ -129,10 +134,16 @@ struct GraphicsPipelineDesc {
 /**
  * @brief 计算管线描述符
  */
-struct ComputePipelineDesc {
-    ShaderHandle computeShader;         ///< 计算着色器
+// struct ComputePipelineDesc is defined in RHITypes.h
+
+/**
+ * @brief 查询池描述符
+ */
+struct QueryPoolDesc {
+    QueryType type;                     ///< 查询类型
+    uint32_t queryCount;                ///< 查询数量
     
-    ComputePipelineDesc() : computeShader(handles::INVALID_SHADER) {}
+    QueryPoolDesc() : type(QueryType::Timestamp), queryCount(0) {}
 };
 
 
@@ -151,6 +162,16 @@ public:
     virtual bool SubmitCommandBuffer(CommandBufferHandle handle) = 0;
     virtual SyncHandle CreateSync() = 0;
     virtual bool WaitForSync(SyncHandle handle, u32 timeoutMs) = 0;
+    virtual void DestroySync(SyncHandle handle) = 0;
+    virtual QueryPoolHandle CreateQueryPool(const QueryPoolDesc& desc) = 0;
+    virtual void DestroyQueryPool(QueryPoolHandle handle) = 0;
+    virtual SamplerHandle CreateSampler(const SamplerDesc& desc) = 0;
+    virtual void DestroySampler(SamplerHandle handle) = 0;
+    virtual DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) = 0;
+    virtual void DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) = 0;
+    virtual DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc& desc) = 0;
+    virtual void DestroyDescriptorSet(DescriptorSetHandle handle) = 0;
+    virtual void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) = 0;
 };
 
 /**
@@ -204,7 +225,7 @@ public:
     /**
      * @brief 销毁设备
      */
-    void Shutdown() {
+    void Shutdown() override {
         if (!isValid_) return;
         
         derived().shutdownImpl();
@@ -214,7 +235,7 @@ public:
     /**
      * @brief 等待设备空闲
      */
-    void WaitIdle() const {
+    void WaitIdle() const override {
         assert(isValid_ && "Device not initialized");
         derived().waitIdleImpl();
     }
@@ -245,6 +266,27 @@ public:
     
     // === 资源创建接口 ===
     
+    /**
+     * @brief 创建交换链
+     * @param desc 交换链描述符
+     * @return 交换链指针，失败返回nullptr
+     */
+    RHISwapChain* CreateSwapChain(const SwapChainDesc& desc) {
+        assert(isValid_ && "Device not initialized");
+        return derived().createSwapChainImpl(desc);
+    }
+
+    /**
+     * @brief 销毁交换链
+     * @param swapChain 交换链指针
+     */
+    void DestroySwapChain(RHISwapChain* swapChain) {
+        assert(isValid_ && "Device not initialized");
+        if (swapChain) {
+            derived().destroySwapChainImpl(swapChain);
+        }
+    }
+
     /**
      * @brief 创建缓冲区
      * @param desc 缓冲区描述符
@@ -300,6 +342,78 @@ public:
     }
     
     /**
+     * @brief 创建查询池
+     * @param desc 查询池描述符
+     * @return 查询池句柄
+     */
+    QueryPoolHandle CreateQueryPool(const QueryPoolDesc& desc) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().createQueryPoolImpl(desc);
+    }
+
+    /**
+     * @brief 创建采样器
+     * @param desc 采样器描述符
+     * @return 采样器句柄
+     */
+    SamplerHandle CreateSampler(const SamplerDesc& desc) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().createSamplerImpl(desc);
+    }
+
+    /**
+     * @brief 创建描述符集布局
+     * @param desc 描述符集布局描述符
+     * @return 描述符集布局句柄
+     */
+    DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().createDescriptorSetLayoutImpl(desc);
+    }
+
+    /**
+     * @brief 销毁描述符集布局
+     * @param handle 描述符集布局句柄
+     */
+    void DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) override {
+        assert(isValid_ && "Device not initialized");
+        if (handle != handles::INVALID_RESOURCE) {
+            derived().destroyDescriptorSetLayoutImpl(handle);
+        }
+    }
+
+    /**
+     * @brief 创建描述符集
+     * @param desc 描述符集描述符
+     * @return 描述符集句柄
+     */
+    DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc& desc) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().createDescriptorSetImpl(desc);
+    }
+
+    /**
+     * @brief 销毁描述符集
+     * @param handle 描述符集句柄
+     */
+    void DestroyDescriptorSet(DescriptorSetHandle handle) override {
+        assert(isValid_ && "Device not initialized");
+        if (handle != handles::INVALID_RESOURCE) {
+            derived().destroyDescriptorSetImpl(handle);
+        }
+    }
+
+    /**
+     * @brief 更新描述符集
+     * @param writeCount 更新数量
+     * @param writes 更新操作数组
+     */
+    void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) override {
+        assert(isValid_ && "Device not initialized");
+        derived().updateDescriptorSetsImpl(writeCount, writes);
+    }
+
+    /**
      * @brief 创建命令缓冲区
      * @param type 命令队列类型
      * @return 命令缓冲区句柄，失败返回INVALID_COMMAND_BUFFER
@@ -309,6 +423,36 @@ public:
         return derived().createCommandBufferImpl(type);
     }
     
+    /**
+     * @brief 提交命令缓冲区
+     * @param handle 命令缓冲区句柄
+     * @return 提交是否成功
+     */
+    bool SubmitCommandBuffer(CommandBufferHandle handle) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().submitCommandBufferImpl(handle);
+    }
+    
+    /**
+     * @brief 创建同步对象
+     * @return 同步对象句柄
+     */
+    SyncHandle CreateSync() override {
+        assert(isValid_ && "Device not initialized");
+        return derived().createSyncImpl();
+    }
+    
+    /**
+     * @brief 等待同步对象
+     * @param handle 同步对象句柄
+     * @param timeoutMs 超时时间（毫秒）
+     * @return 是否成功
+     */
+    bool WaitForSync(SyncHandle handle, u32 timeoutMs) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().waitForSyncImpl(handle, timeoutMs);
+    }
+
     // === 资源销毁接口 ===
     
     /**
@@ -365,6 +509,39 @@ public:
             derived().destroyCommandBufferImpl(handle);
         }
     }
+
+    /**
+     * @brief 销毁同步对象
+     * @param handle 同步对象句柄
+     */
+    void DestroySync(SyncHandle handle) override {
+        assert(isValid_ && "Device not initialized");
+        if (handle != handles::INVALID_SYNC) {
+            derived().destroySyncImpl(handle);
+        }
+    }
+
+    /**
+     * @brief 销毁查询池
+     * @param handle 查询池句柄
+     */
+    void DestroyQueryPool(QueryPoolHandle handle) override {
+        assert(isValid_ && "Device not initialized");
+        if (handle != handles::INVALID_QUERY_POOL) {
+            derived().destroyQueryPoolImpl(handle);
+        }
+    }
+
+    /**
+     * @brief 销毁采样器
+     * @param handle 采样器句柄
+     */
+    void DestroySampler(SamplerHandle handle) override {
+        assert(isValid_ && "Device not initialized");
+        if (handle != handles::INVALID_SAMPLER) {
+            derived().destroySamplerImpl(handle);
+        }
+    }
     
     // === 访问器方法 ===
     
@@ -372,7 +549,7 @@ public:
      * @brief 获取设备描述符
      * @return 设备描述符的常量引用
      */
-    const DeviceDesc& GetDesc() const { return desc_; }
+    const DeviceDesc& GetDesc() const override { return desc_; }
     
     /**
      * @brief 获取设备信息
@@ -384,7 +561,7 @@ public:
      * @brief 检查设备是否有效
      * @return 设备是否已初始化且有效
      */
-    bool IsValid() const { return isValid_; }
+    bool IsValid() const override { return isValid_; }
     
     /**
      * @brief 获取当前帧索引
@@ -422,35 +599,8 @@ protected:
     
     // === 命令提交接口 ===
     
-    /**
-     * @brief 提交命令缓冲区
-     * @param handle 命令缓冲区句柄
-     * @return 提交是否成功
-     */
-    bool SubmitCommandBuffer(CommandBufferHandle handle) override {
-        assert(isValid_ && "Device not initialized");
-        return derived().submitCommandBufferImpl(handle);
-    }
-    
-    /**
-     * @brief 创建同步对象
-     * @return 同步对象句柄
-     */
-    SyncHandle CreateSync() override {
-        assert(isValid_ && "Device not initialized");
-        return derived().createSyncImpl();
-    }
-    
-    /**
-     * @brief 等待同步对象
-     * @param handle 同步对象句柄
-     * @param timeoutMs 超时时间（毫秒）
-     * @return 是否成功
-     */
-    bool WaitForSync(SyncHandle handle, u32 timeoutMs) override {
-        assert(isValid_ && "Device not initialized");
-        return derived().waitForSyncImpl(handle, timeoutMs);
-    }
+    // 移至 public 区域
+
     
     // === 成员变量 ===
     

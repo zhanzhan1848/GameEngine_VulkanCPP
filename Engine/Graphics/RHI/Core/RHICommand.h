@@ -394,6 +394,24 @@ public:
      * @param offset 偏移量
      */
     virtual void BindIndexBuffer(ResourceHandle buffer, DataFormat format, uint64_t offset = 0) = 0;
+
+    /**
+     * @brief 绑定描述符集
+     * @param bindPoint 绑定点（图形/计算）
+     * @param pipelineLayout 管线布局句柄
+     * @param firstSet 第一个描述符集索引
+     * @param setCount 描述符集数量
+     * @param descriptorSets 描述符集句柄数组
+     * @param dynamicOffsetCount 动态偏移数量
+     * @param dynamicOffsets 动态偏移数组
+     */
+    virtual void BindDescriptorSets(PipelineBindPoint bindPoint,
+                                   PipelineLayoutHandle pipelineLayout,
+                                   uint32_t firstSet,
+                                   uint32_t setCount,
+                                   const DescriptorSetHandle* descriptorSets,
+                                   uint32_t dynamicOffsetCount,
+                                   const uint32_t* dynamicOffsets) = 0;
     
     /**
      * @brief 绘制
@@ -522,7 +540,7 @@ public:
 protected:
     // === 派生类必须实现的虚函数 ===
     
-    virtual void destroyImpl() = 0;
+    virtual void destroyImpl() {}
     virtual bool resetImpl() = 0;
     virtual bool beginImpl() = 0;
     virtual bool endImpl() = 0;

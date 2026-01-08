@@ -132,6 +132,9 @@ _APPKIT_PRIVATE_DEF_SEL( initWithFrame_,
 _APPKIT_PRIVATE_DEF_SEL( initWithTitle_,
 						"initWithTitle:" );
 
+_APPKIT_PRIVATE_DEF_SEL( contentView,
+						"contentView" );
+
 _APPKIT_PRIVATE_DEF_SEL( setContentView_,
 						"setContentView:" );
 

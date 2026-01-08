@@ -1,0 +1,75 @@
+/**
+ * @file MetalSwapChain.h
+ * @brief Metal 交换链实现
+ * @author GameEngine VulkanCPP Team
+ * @date 2026-01-07
+ * @version 0.1.0
+ */
+
+#pragma once
+
+#include "../../Core/RHISwapChain.h"
+#include "MetalCommon.h"
+#include <vector>
+
+namespace primal::graphics::rhi {
+
+class MetalDevice;
+
+class MetalSwapChain : public RHISwapChain {
+public:
+    MetalSwapChain(MetalDevice& device, const SwapChainDesc& desc);
+    ~MetalSwapChain() override;
+
+    bool Initialize() override;
+    void Destroy() override;
+    /**
+     * @brief 调整交换链大小
+     * @param width 宽度
+     * @param height 高度
+     */
+    void Resize(uint32_t width, uint32_t height) override;
+
+    /**
+     * @brief 获取下一个图像索引
+     * @param imageIndex 输出图像索引
+     * @param semaphore 信号量
+     * @param fence 栅栏
+     * @return 是否成功
+     */
+    bool AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore = handles::INVALID_SYNC, SyncHandle fence = handles::INVALID_SYNC);
+
+    /**
+     * @brief 呈现画面
+     * @param vsync 是否开启垂直同步
+     */
+    void Present(bool vsync) override;
+    uint32_t GetCurrentBackBufferIndex() const override;
+    ResourceHandle GetBackBuffer(uint32_t index) const override;
+
+    /**
+     * @brief 获取当前帧的Drawable
+     * @details 每次调用 currentDrawable 都会获取一个新的
+     */
+    MTL::Drawable* GetCurrentDrawable();
+
+protected:
+    // === RHIResource 接口实现 ===
+    void* mapImpl(uint64_t offset, uint64_t size) override;
+    void unmapImpl() override;
+    bool updateDataImpl(const void* data, uint64_t size, uint64_t offset) override;
+
+private:
+    MetalDevice& metalDevice_;
+    MTK::View* mtkView_{nullptr};
+    MTL::Drawable* currentDrawable_{nullptr};
+    
+    // 后台缓冲区句柄
+    // Metal 不像 Vulkan 那样暴露固定的 SwapChain Image 列表
+    // 但为了适配接口，我们维护一组 Handle，每一帧更新当前 Handle 对应的底层 Texture
+    std::vector<ResourceHandle> backBufferHandles_;
+    
+    uint32_t currentFrameIndex_{0};
+};
+
+} // namespace primal::graphics::rhi

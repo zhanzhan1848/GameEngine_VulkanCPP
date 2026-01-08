@@ -71,8 +71,8 @@ elseif(APPLE)
     file(GLOB_RECURSE GRAPHICS_SOURCES 
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Metal/*.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Metal/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/Metal/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/Metal/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.h"
     )
 elseif(LINUX)
     file(GLOB_RECURSE GRAPHICS_SOURCES 

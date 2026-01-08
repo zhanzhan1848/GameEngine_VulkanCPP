@@ -180,6 +180,30 @@ TestResult TestDefragment() {
     return TestResult::Passed;
 }
 
+TestResult TestShutdownLeak() {
+    RHIAllocator<TestData> allocator;
+    allocator.Initialize();
+    
+    // 分配一些对象但不释放
+    allocator.Allocate(1, 1.0f);
+    allocator.Allocate(2, 2.0f);
+    allocator.Allocate(3, 3.0f);
+    
+    AllocatorStats stats = allocator.GetStats();
+    TEST_ASSERT_EQ(3ull, stats.activeAllocations.load(), "Should have 3 active allocations");
+    
+    // 调用 Shutdown
+    allocator.Shutdown();
+    
+    stats = allocator.GetStats();
+    TEST_ASSERT_EQ(0ull, stats.activeAllocations.load(), "Active allocations should be 0 after Shutdown");
+    
+    // Destroy 不应触发断言
+    allocator.Destroy();
+    
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("RHIAllocatorTests");
     suite.AddTestCase(TestCase("BasicAllocation", TestBasicAllocation, "Test basic allocate and free"));
@@ -187,6 +211,7 @@ int main() {
     suite.AddTestCase(TestCase("Stats", TestAllocatorStats, "Test statistics"));
     suite.AddTestCase(TestCase("Defragment", TestDefragment, "Test defragmentation interface"));
     suite.AddTestCase(TestCase("MathCompatibility", TestMathTypesCompatibility, "Test math types compatibility"));
+    suite.AddTestCase(TestCase("ShutdownLeak", TestShutdownLeak, "Test Shutdown mechanism"));
     
     TestStats stats = suite.RunAllTests();
     return stats.failedTests > 0 ? 1 : 0;

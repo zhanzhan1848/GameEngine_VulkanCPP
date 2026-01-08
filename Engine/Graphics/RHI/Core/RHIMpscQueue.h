@@ -137,6 +137,12 @@ struct WorkItem {
     // 拷贝赋值操作符
     WorkItem& operator=(const WorkItem& other) {
         if (this != &other) {
+            // 先根据旧类型清理资源
+            if (type == WorkItemType::CustomCallback && callbackData.callback) {
+                delete callbackData.callback;
+                callbackData.callback = nullptr;
+            }
+
             type = other.type;
             priority = other.priority;
             state = other.state;
@@ -163,7 +169,6 @@ struct WorkItem {
                     break;
                 case WorkItemType::CustomCallback:
                     callbackData.userData = other.callbackData.userData;
-                    delete callbackData.callback;
                     callbackData.callback = other.callbackData.callback ? new std::function<void()>(*other.callbackData.callback) : nullptr;
                     break;
                 default:
@@ -206,6 +211,12 @@ struct WorkItem {
     // 移动赋值操作符
     WorkItem& operator=(WorkItem&& other) noexcept {
         if (this != &other) {
+            // 先根据旧类型清理资源
+            if (type == WorkItemType::CustomCallback && callbackData.callback) {
+                delete callbackData.callback;
+                callbackData.callback = nullptr;
+            }
+
             type = other.type;
             priority = other.priority;
             state = other.state;
@@ -232,7 +243,6 @@ struct WorkItem {
                     break;
                 case WorkItemType::CustomCallback:
                     callbackData.userData = other.callbackData.userData;
-                    delete callbackData.callback;
                     callbackData.callback = other.callbackData.callback;
                     other.callbackData.callback = nullptr;
                     break;

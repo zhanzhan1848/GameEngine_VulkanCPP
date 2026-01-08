@@ -50,7 +50,8 @@ struct RenderScene {
     f32 boundingSphereRadius;                     ///< 包围球半径
     math::v3 boundingBoxMin;                ///< 包围盒最小值
     math::v3 boundingBoxMax;                ///< 包围盒最大值
-    
+    ResourceHandle renderTarget{handles::INVALID_RESOURCE}; ///< 渲染目标
+
     /**
      * @brief 构造函数
      */
@@ -88,6 +89,7 @@ struct MultiThreadRenderBatch {
     std::vector<math::m4x4> batchTransforms; ///< 批次变换列表
     std::vector<u32> batchMaterialIndices;       ///< 批次材质索引
     u64 commandCount;                           ///< 预估命令数量
+    ResourceHandle renderTarget{handles::INVALID_RESOURCE}; ///< 渲染目标
     
     /**
      * @brief 构造函数
@@ -106,6 +108,7 @@ struct CommandGenerationTask {
     u32 priority;                                ///< 任务优先级
     MultiThreadRenderBatch renderBatch;         ///< 渲染批次数据
     std::function<void(const CommandGenerationResult&)> callback; ///< 完成回调
+    std::function<CommandBufferHandle(const MultiThreadRenderBatch&)> taskFunction; ///< 实际命令生成函数
     
     /**
      * @brief 构造函数
@@ -275,6 +278,12 @@ public:
      */
     bool GenerateCommandBuffer(const RenderScene& scene, 
                               CommandBufferHandle& commandBuffer);
+                              
+    /**
+     * @brief 设置自定义命令生成回调
+     * @param callback 回调函数
+     */
+    void SetCommandGenerationCallback(std::function<CommandBufferHandle(const MultiThreadRenderBatch&)> callback);
     
     // === 线程管理接口 ===
     
@@ -366,6 +375,8 @@ public:
     const char* GetSystemStatus() const;
     
 private:
+    std::function<CommandBufferHandle(const MultiThreadRenderBatch&)> customGenerationFunc_;
+
     // === 内部实现方法 ===
     
     /**

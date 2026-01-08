@@ -160,13 +160,46 @@ public:
     }
     
     /**
+     * @brief 获取并清除结果
+     * @return 结果列表
+     */
+    std::vector<CommandGenerationResult> GetAndClearResults() {
+        std::lock_guard<std::mutex> lock(resultMutex_);
+        std::vector<CommandGenerationResult> results = std::move(completedResults_);
+        completedResults_.clear();
+        return results;
+    }
+
+    /**
      * @brief 为单个任务生成命令
      * @param task 命令生成任务
      */
     void GenerateCommandsForTask(const CommandGenerationTask& task) {
-        // 在实际实现中，这里会生成真正的RHI命令
-        // 目前作为占位符实现
-        (void)task; // 抑制未使用参数警告
+        CommandGenerationResult result;
+        result.taskId = task.taskId;
+        // 获取当前线程ID（简单模拟）
+        result.threadId = 0; 
+        result.success = true;
+        
+        auto startTime = std::chrono::high_resolution_clock::now();
+
+        if (task.taskFunction) {
+             result.commandBuffer = task.taskFunction(task.renderBatch);
+             if (result.commandBuffer == handles::INVALID_COMMAND_BUFFER) {
+                 result.success = false;
+             } else {
+                 result.generatedCommands = task.renderBatch.commandCount;
+             }
+        } else {
+            // 模拟
+             result.commandBuffer = handles::INVALID_COMMAND_BUFFER;
+             result.generatedCommands = 0;
+        }
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        result.generationTimeMs = std::chrono::duration<f64, std::milli>(endTime - startTime).count();
+        
+        StoreResult(result);
     }
     
     /**
@@ -259,12 +292,28 @@ private:
         result.threadId = threadId;
         result.success = true;
         
-        // 在实际实现中，这里应该根据任务内容生成具体的命令缓冲区
-        // 目前使用模拟实现
-        result.generatedCommands = task.renderBatch.commandCount;
+        auto startTime = std::chrono::high_resolution_clock::now();
         
-        // 模拟命令缓冲区创建
-        result.commandBuffer = reinterpret_cast<CommandBufferHandle>(0x100000000ULL | task.taskId);
+        if (task.taskFunction) {
+            // 使用自定义回调生成命令
+            result.commandBuffer = task.taskFunction(task.renderBatch);
+            
+            // 如果返回了无效句柄，视为失败
+            if (result.commandBuffer == handles::INVALID_COMMAND_BUFFER) {
+                result.success = false;
+            } else {
+                // 假设生成了一些命令，这里简单设置为批次命令数
+                // 实际应该从 CommandBuffer 获取
+                result.generatedCommands = task.renderBatch.commandCount;
+            }
+        } else {
+            // 默认模拟逻辑
+            result.generatedCommands = task.renderBatch.commandCount;
+            result.commandBuffer = reinterpret_cast<CommandBufferHandle>(0x100000000ULL | task.taskId);
+        }
+        
+        auto endTime = std::chrono::high_resolution_clock::now();
+        result.generationTimeMs = std::chrono::duration<f64, std::milli>(endTime - startTime).count();
         
         return result;
     }
@@ -347,6 +396,7 @@ public:
             batch.batchId = batchId;
             batch.startDrawCallIndex = startDrawCall;
             batch.endDrawCallIndex = endDrawCall;
+            batch.renderTarget = scene.renderTarget;
             
             // 计算网格索引范围（简化实现）
             batch.startMeshIndex = startDrawCall;
@@ -723,7 +773,10 @@ bool RHIMultiThreadedCommandGenerator::GenerateCommandsParallel(const RenderScen
         }
         
         // 提交任务到线程池
-    for (const auto& task : tasks) {
+    for (auto& task : tasks) {
+        // 设置回调函数
+        task.taskFunction = customGenerationFunc_;
+        
         // 使用简单的自旋重试机制处理队列满的情况
         // 在实际引擎中，这里可能需要更复杂的背压控制或丢帧策略
         while (!workerPool_->SubmitTask(task)) {
@@ -736,19 +789,12 @@ bool RHIMultiThreadedCommandGenerator::GenerateCommandsParallel(const RenderScen
         workerPool_->WaitForAllTasks();
         
         // 收集任务结果
-        std::vector<CommandGenerationResult> results;
-        // 在实际实现中，这里应该从线程安全的结果收集器获取结果
-        // 目前使用模拟数据
-        results.reserve(tasks.size());
-        for (const auto& task : tasks) {
-            CommandGenerationResult result;
-            result.taskId = task.taskId;
-            result.threadId = 0; // 简化实现
-            result.success = true;
-            result.generatedCommands = task.renderBatch.commandCount;
-            result.commandBuffer = reinterpret_cast<CommandBufferHandle>(0x100000000ULL | task.taskId);
-            result.generationTimeMs = 1.0; // 模拟时间
-            results.push_back(result);
+        std::vector<CommandGenerationResult> results = workerPool_->GetAndClearResults();
+        
+        // 验证结果数量
+        if (results.size() != tasks.size()) {
+             // 处理结果丢失的情况
+             std::cerr << "Warning: Expected " << tasks.size() << " results, got " << results.size() << std::endl;
         }
         
         // 合并结果
@@ -776,16 +822,22 @@ bool RHIMultiThreadedCommandGenerator::GenerateCommandsParallel(const RenderScen
 }
 
 bool RHIMultiThreadedCommandGenerator::GenerateCommandBuffer(const RenderScene& scene, 
-                                                            CommandBufferHandle& commandBuffer) {
+                                                           CommandBufferHandle& commandBuffer) {
+    // 简化实现：重用并行逻辑，但只用一个线程
+    // 实际生产代码可能会有专门的单线程优化路径
     std::vector<CommandBufferHandle> outputs;
-    if (!GenerateCommandsParallel(scene, outputs)) {
-        commandBuffer = handles::INVALID_COMMAND_BUFFER;
-        return false;
+    bool result = GenerateCommandsParallel(scene, outputs);
+    
+    if (result && !outputs.empty()) {
+        commandBuffer = outputs[0];
+        return true;
     }
     
-    // 返回第一个命令缓冲区（简化实现）
-    commandBuffer = outputs.empty() ? handles::INVALID_COMMAND_BUFFER : outputs[0];
-    return commandBuffer != handles::INVALID_COMMAND_BUFFER;
+    return false;
+}
+
+void RHIMultiThreadedCommandGenerator::SetCommandGenerationCallback(std::function<CommandBufferHandle(const MultiThreadRenderBatch&)> callback) {
+    customGenerationFunc_ = std::move(callback);
 }
 
 void RHIMultiThreadedCommandGenerator::SetWorkerThreadCount(u32 count) {

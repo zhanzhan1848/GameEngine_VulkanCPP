@@ -80,6 +80,22 @@ public:
         return handles::INVALID_PIPELINE;
     }
     
+    DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc) {
+        return handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
+
+    DescriptorSetHandle createDescriptorSetImpl(const DescriptorSetDesc& desc) {
+        return handles::INVALID_DESCRIPTOR_SET;
+    }
+
+    SamplerHandle createSamplerImpl(const SamplerDesc& desc) {
+        return handles::INVALID_SAMPLER;
+    }
+
+    QueryPoolHandle createQueryPoolImpl(const QueryPoolDesc& desc) {
+        return handles::INVALID_QUERY_POOL;
+    }
+
     CommandBufferHandle createCommandBufferImpl(CommandQueueType type) {
         return handles::INVALID_COMMAND_BUFFER;
     }
@@ -90,6 +106,14 @@ public:
     void destroyShaderImpl(ShaderHandle handle) {}
     void destroyPipelineImpl(PipelineHandle handle) {}
     void destroyCommandBufferImpl(CommandBufferHandle handle) {}
+    void destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle) {}
+    void destroyDescriptorSetImpl(DescriptorSetHandle handle) {}
+    void destroySamplerImpl(SamplerHandle handle) {}
+    void destroyQueryPoolImpl(QueryPoolHandle handle) {}
+    void destroySyncImpl(SyncHandle handle) {}
+
+    void updateDescriptorSetsImpl(uint32_t writeCount, const WriteDescriptorSet* writes) {}
+
     
     // 命令提交实现
     bool submitCommandBufferImpl(CommandBufferHandle handle) {
@@ -213,6 +237,9 @@ protected:
     
     void DrawIndirect(ResourceHandle buffer, uint64_t offset, uint32_t drawCount) override { (void)buffer; (void)offset; (void)drawCount; }
     void BindComputePipeline(PipelineHandle pipeline) override { (void)pipeline; }
+    void BindDescriptorSets(PipelineBindPoint bindPoint, PipelineLayoutHandle pipelineLayout, uint32_t firstSet, uint32_t setCount, const DescriptorSetHandle* descriptorSets, uint32_t dynamicOffsetCount, const uint32_t* dynamicOffsets) override {
+        (void)bindPoint; (void)pipelineLayout; (void)firstSet; (void)setCount; (void)descriptorSets; (void)dynamicOffsetCount; (void)dynamicOffsets;
+    }
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override { (void)groupCountX; (void)groupCountY; (void)groupCountZ; }
     void DispatchIndirect(ResourceHandle buffer, uint64_t offset) override { (void)buffer; (void)offset; }
     void CopyBuffer(ResourceHandle src, ResourceHandle dst, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) override { (void)src; (void)dst; (void)srcOffset; (void)dstOffset; (void)size; }

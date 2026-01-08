@@ -98,6 +98,22 @@ public:
         return nextSyncHandle_++;
     }
     
+    void destroySyncImpl(SyncHandle handle) {}
+
+    QueryPoolHandle createQueryPoolImpl(const QueryPoolDesc& desc) { return handles::INVALID_QUERY_POOL; }
+    void destroyQueryPoolImpl(QueryPoolHandle handle) {}
+
+    SamplerHandle createSamplerImpl(const SamplerDesc& desc) { return handles::INVALID_SAMPLER; }
+    void destroySamplerImpl(SamplerHandle handle) {}
+
+    DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc) { return handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
+    void destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle) {}
+
+    DescriptorSetHandle createDescriptorSetImpl(const DescriptorSetDesc& desc) { return handles::INVALID_DESCRIPTOR_SET; }
+    void destroyDescriptorSetImpl(DescriptorSetHandle handle) {}
+
+    void updateDescriptorSetsImpl(uint32_t writeCount, const WriteDescriptorSet* writes) {}
+
     // 同步等待实现
     bool waitForSyncImpl(SyncHandle handle, u32 timeoutMs) {
         return WaitForSync(handle, timeoutMs);

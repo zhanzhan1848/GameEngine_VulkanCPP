@@ -87,7 +87,210 @@ set_target_properties(StandaloneRHI_DeterministicPrefetch_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_DeterministicPrefetch_Test PRIVATE DEBUG _DEBUG)
 
-# 创建RHI GPU优化器测试
+
+# 创建Metal数学库测试
+if(APPLE)
+    add_executable(TestMetalMath Graphics/Metal/TestMetalMath.cpp)
+    target_include_directories(TestMetalMath PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    # MetalMath是header-only的，不需要链接Metal框架，只需要Foundation等
+    target_link_libraries(TestMetalMath PRIVATE 
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalMath COMMAND TestMetalMath)
+    set_target_properties(TestMetalMath PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建Metal设备测试
+    add_executable(TestMetalDevice Graphics/Metal/TestMetalDevice.cpp)
+    target_include_directories(TestMetalDevice PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalDevice PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalDevice COMMAND TestMetalDevice)
+    set_target_properties(TestMetalDevice PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建Metal资源测试
+    add_executable(TestMetalResource Graphics/Metal/TestMetalResource.cpp)
+    target_include_directories(TestMetalResource PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalResource PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalResource COMMAND TestMetalResource)
+    set_target_properties(TestMetalResource PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建Metal纹理测试
+    add_executable(TestMetalTexture Graphics/Metal/TestMetalTexture.cpp)
+    target_include_directories(TestMetalTexture PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalTexture PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalTexture COMMAND TestMetalTexture)
+    set_target_properties(TestMetalTexture PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建Metal命令缓冲区测试
+    add_executable(TestMetalCommandBuffer Graphics/Metal/TestMetalCommandBuffer.cpp)
+    target_include_directories(TestMetalCommandBuffer PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalCommandBuffer PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalCommandBuffer COMMAND TestMetalCommandBuffer)
+    set_target_properties(TestMetalCommandBuffer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建Metal同步和查询测试
+    add_executable(TestMetalSyncQuery Graphics/Metal/TestMetalSyncQuery.cpp)
+    target_include_directories(TestMetalSyncQuery PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalSyncQuery PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalSyncQuery COMMAND TestMetalSyncQuery)
+    set_target_properties(TestMetalSyncQuery PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建Metal混合状态测试
+    add_executable(TestMetalBlendState Graphics/Metal/TestMetalBlendState.cpp)
+    target_include_directories(TestMetalBlendState PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalBlendState PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalBlendState COMMAND TestMetalBlendState)
+    set_target_properties(TestMetalBlendState PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建Metal交换链测试
+    add_executable(TestMetalSwapChain Graphics/Metal/TestMetalSwapChain.cpp)
+    target_include_directories(TestMetalSwapChain PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalSwapChain PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalSwapChain COMMAND TestMetalSwapChain)
+    set_target_properties(TestMetalSwapChain PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建Metal着色器和管线测试
+    add_executable(TestMetalShaderPipeline Graphics/Metal/TestMetalShaderPipeline.cpp)
+    target_include_directories(TestMetalShaderPipeline PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalShaderPipeline PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalShaderPipeline COMMAND TestMetalShaderPipeline)
+    set_target_properties(TestMetalShaderPipeline PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建 Metal Descriptor Set 测试
+    add_executable(TestMetalDescriptorSet Graphics/Metal/TestMetalDescriptorSet.cpp)
+    target_include_directories(TestMetalDescriptorSet PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalDescriptorSet PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalDescriptorSet COMMAND TestMetalDescriptorSet)
+    set_target_properties(TestMetalDescriptorSet PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+endif()
+
+# RHI GPU优化测试
 add_executable(StandaloneRHI_GPUOptimizer_Test RHI/Core/TestRHIGPUOptimizer.cpp)
 # 添加Engine头文件包含路径
 target_include_directories(StandaloneRHI_GPUOptimizer_Test PRIVATE 

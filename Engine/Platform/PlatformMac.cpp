@@ -114,8 +114,10 @@ namespace primal::platform
 
 		if (info.hwnd)
 		{
+			NS::Window* nsWindow = static_cast<NS::Window*>(info.hwnd);
 			// if (callback) SetWindowLongPtr(info.hwnd, 0, (LONG_PTR)callback);
-			static_cast<NS::Window*>(info.hwnd)->setTitle(init_info->caption);
+			nsWindow->setTitle(init_info->caption);
+			nsWindow->makeKeyAndOrderFront(nullptr);
 
 			window_id id{ (id::id_type)windows.add(info) };
 

@@ -63,7 +63,7 @@ namespace rhi {
 using RHIResourceHandle = uint64_t;
 
 namespace handles {
-    constexpr RHIResourceHandle INVALID_RESOURCE = 0;
+    constexpr RHIResourceHandle INVALID_RESOURCE = static_cast<RHIResourceHandle>(-1);
 }
 
 // 资源类型枚举

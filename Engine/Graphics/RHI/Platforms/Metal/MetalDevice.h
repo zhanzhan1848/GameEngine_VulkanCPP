@@ -1,0 +1,247 @@
+/**
+ * @file MetalDevice.h
+ * @brief Metal 设备实现
+ * @details 遵循 CRTP 模式，实现 Metal 图形设备接口
+ * @author GameEngine VulkanCPP Team
+ * @date 2026-01-06
+ * @version 0.1.0
+ */
+
+#pragma once
+
+#include "MetalCommon.h"
+#include "MetalBuffer.h"
+#include "MetalTexture.h"
+#include "MetalCommandBuffer.h"
+#include "MetalSync.h"
+#include "MetalQuery.h"
+#include "MetalShader.h"
+#include "MetalPipeline.h"
+#include "MetalSampler.h"
+#include "MetalDescriptorSet.h"
+#include "../../Core/RHIDevice.h"
+#include "../../Core/RHIAllocator.h"
+#include <iostream>
+
+namespace primal::graphics::rhi {
+
+/**
+ * @brief Metal 设备实现类
+ * @details 继承自 RHIDevice<MetalDevice>，通过 CRTP 实现多态
+ */
+class MetalDevice : public RHIDevice<MetalDevice> {
+    friend class RHIDevice<MetalDevice>;
+
+public:
+    /**
+     * @brief 构造函数
+     * @param desc 设备描述符
+     */
+    explicit MetalDevice(const DeviceDesc& desc);
+
+    /**
+     * @brief 析构函数
+     */
+    ~MetalDevice() override;
+
+    /**
+     * @brief 获取Metal设备对象
+     */
+    MTL::Device* GetNativeDevice() const { return mtlDevice_; }
+
+    /**
+     * @brief 获取图形队列
+     */
+    MTL::CommandQueue* GetGraphicsQueue() const { return graphicsQueue_; }
+
+    /**
+     * @brief 获取计算队列
+     */
+    MTL::CommandQueue* GetComputeQueue() const { return computeQueue_; }
+
+    /**
+     * @brief 获取传输队列
+     */
+    MTL::CommandQueue* GetTransferQueue() const { return transferQueue_; }
+
+    /**
+     * @brief 获取缓冲区对象 (内部使用)
+     */
+    MetalBuffer* GetBuffer(ResourceHandle handle);
+
+    /**
+     * @brief 获取纹理对象 (内部使用)
+     */
+    MetalTexture* GetTexture(ResourceHandle handle);
+
+    /**
+     * @brief 获取命令缓冲区对象 (内部使用)
+     */
+    MetalCommandBuffer* GetCommandBuffer(CommandBufferHandle handle);
+
+    /**
+     * @brief 获取同步对象 (内部使用)
+     */
+    MetalSync* GetSync(SyncHandle handle);
+
+    /**
+     * @brief 获取查询池对象 (内部使用)
+     */
+    MetalQueryPool* GetQueryPool(QueryPoolHandle handle);
+
+    /**
+     * @brief 获取着色器对象 (内部使用)
+     */
+    MetalShader* GetShader(ShaderHandle handle);
+
+    /**
+     * @brief 获取管线对象 (内部使用)
+     */
+    MetalPipeline* GetPipeline(PipelineHandle handle);
+
+    /**
+     * @brief 获取采样器对象 (内部使用)
+     */
+    MetalSampler* GetSampler(SamplerHandle handle);
+
+    /**
+     * @brief 获取描述符集布局对象 (内部使用)
+     */
+    MetalDescriptorSetLayout* GetDescriptorSetLayout(DescriptorSetLayoutHandle handle);
+
+    /**
+     * @brief 获取描述符集对象 (内部使用)
+     */
+    MetalDescriptorSet* GetDescriptorSet(DescriptorSetHandle handle);
+
+protected:
+    // === CRTP 实现接口 ===
+
+    /**
+     * @brief 初始化设备实现
+     * @return 初始化是否成功
+     */
+    bool initializeImpl();
+
+    /**
+     * @brief 销毁设备实现
+     */
+    void shutdownImpl();
+
+    /**
+     * @brief 等待设备空闲实现
+     */
+    void waitIdleImpl() const;
+
+    /**
+     * @brief 开始新帧实现
+     */
+    void beginFrameImpl();
+
+    /**
+     * @brief 结束当前帧实现
+     */
+    void endFrameImpl();
+
+    /**
+     * @brief 呈现实现
+     */
+    void presentImpl();
+
+    /**
+     * @brief 查询设备信息实现
+     * @param info 设备信息结构体引用
+     */
+    void queryDeviceInfo(DeviceInfo& info);
+
+    /**
+     * @brief 获取当前帧索引实现
+     * @return 当前帧索引
+     */
+    uint32_t getCurrentFrameIndexImpl() const;
+    
+    /**
+     * @brief 提交命令缓冲区实现
+     */
+    bool submitCommandBufferImpl(CommandBufferHandle handle);
+    
+    /**
+     * @brief 创建同步对象实现
+     */
+    SyncHandle createSyncImpl();
+    
+    /**
+     * @brief 等待同步对象实现
+     */
+    bool waitForSyncImpl(SyncHandle handle, u32 timeoutMs);
+
+    /**
+     * @brief 销毁同步对象实现
+     */
+    void destroySyncImpl(SyncHandle handle);
+
+    /**
+     * @brief 创建查询池实现
+     */
+    QueryPoolHandle createQueryPoolImpl(const QueryPoolDesc& desc);
+
+    /**
+     * @brief 销毁查询池实现
+     */
+    void destroyQueryPoolImpl(QueryPoolHandle handle);
+
+    /**
+     * @brief 创建交换链实现
+     */
+    RHISwapChain* createSwapChainImpl(const SwapChainDesc& desc);
+
+    /**
+     * @brief 销毁交换链实现
+     */
+    void destroySwapChainImpl(RHISwapChain* swapChain);
+
+    // === 资源创建接口实现 ===
+    
+    ResourceHandle createBufferImpl(const BufferDesc& desc);
+    ResourceHandle createTextureImpl(const TextureDesc& desc);
+    ShaderHandle createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint);
+    PipelineHandle createGraphicsPipelineImpl(const GraphicsPipelineDesc& desc);
+    PipelineHandle createComputePipelineImpl(const ComputePipelineDesc& desc);
+    CommandBufferHandle createCommandBufferImpl(CommandQueueType type);
+    SamplerHandle createSamplerImpl(const SamplerDesc& desc);
+    DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc);
+    DescriptorSetHandle createDescriptorSetImpl(const DescriptorSetDesc& desc);
+    void updateDescriptorSetsImpl(uint32_t writeCount, const WriteDescriptorSet* writes);
+
+    // === 资源销毁接口实现 ===
+
+    void destroyBufferImpl(ResourceHandle handle);
+    void destroyTextureImpl(ResourceHandle handle);
+    void destroyShaderImpl(ShaderHandle handle);
+    void destroyPipelineImpl(PipelineHandle handle);
+    void destroyCommandBufferImpl(CommandBufferHandle handle);
+    void destroySamplerImpl(SamplerHandle handle);
+    void destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle);
+    void destroyDescriptorSetImpl(DescriptorSetHandle handle);
+
+private:
+    MTL::Device* mtlDevice_{nullptr};           ///< Metal 设备对象
+    MTL::CommandQueue* graphicsQueue_{nullptr}; ///< 图形命令队列
+    MTL::CommandQueue* computeQueue_{nullptr};  ///< 计算命令队列
+    MTL::CommandQueue* transferQueue_{nullptr}; ///< 传输命令队列
+    
+    uint32_t currentFrameIndex_{0};             ///< 当前帧索引
+    
+    RHIAllocator<MetalBuffer> bufferAllocator_; ///< 缓冲区分配器
+    RHIAllocator<MetalTexture> textureAllocator_; ///< 纹理分配器
+    RHIAllocator<MetalCommandBuffer> commandBufferAllocator_; ///< 命令缓冲区分配器
+    RHIAllocator<MetalSync> syncAllocator_; ///< 同步对象分配器
+    RHIAllocator<MetalQueryPool> queryPoolAllocator_; ///< 查询池分配器
+    RHIAllocator<MetalShader> shaderAllocator_; ///< 着色器分配器
+    RHIAllocator<MetalPipeline> pipelineAllocator_; ///< 管线分配器
+    RHIAllocator<MetalSampler> samplerAllocator_; ///< 采样器分配器
+    RHIAllocator<MetalDescriptorSetLayout> descriptorSetLayoutAllocator_; ///< 描述符集布局分配器
+    RHIAllocator<MetalDescriptorSet> descriptorSetAllocator_; ///< 描述符集分配器
+};
+
+} // namespace primal::graphics::rhi

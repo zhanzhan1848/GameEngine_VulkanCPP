@@ -74,6 +74,12 @@ namespace primal::utl
 			return _size == 0;
 		}
 
+		constexpr bool is_valid(u32 id) const
+		{
+			if (id >= _array.size()) return false;
+			return !already_removed(id, false);
+		}
+
 		[[nodiscard]] constexpr T& operator[](u32 id)
 		{
 			assert(id < _array.size() && !already_removed(id, false));
