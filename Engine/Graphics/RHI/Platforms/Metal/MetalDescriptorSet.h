@@ -1,84 +1,41 @@
 #pragma once
-
 #include "MetalCommon.h"
-#include "../../Core/RHITypes.h"
-#include "../../Core/RHIResource.h"
-#include <map>
-#include <vector>
+#include "Engine/Graphics/RHI/Core/RHIDescriptorSet.h"
 
 namespace primal::graphics::rhi {
 
 class MetalDevice;
+class MetalDescriptorSetLayout;
 
-/**
- * @brief Metal 描述符集布局实现
- */
-class MetalDescriptorSetLayout : public RHIResource {
-    friend class MetalDevice;
-public:
-    MetalDescriptorSetLayout(MetalDevice& device, const DescriptorSetLayoutDesc& desc);
-    ~MetalDescriptorSetLayout() override;
-
-    bool Initialize() override { return true; }
-    void Destroy() override {}
-
-    const DescriptorSetLayoutDesc& GetDesc() const { return desc_; }
-    const std::vector<DescriptorSetLayoutBinding>& GetBindings() const { return bindings_; }
-
-protected:
-    void* mapImpl(uint64_t /*offset*/, uint64_t /*size*/) override { return nullptr; }
-    void unmapImpl() override {}
-    bool updateDataImpl(const void* /*data*/, uint64_t /*size*/, uint64_t /*offset*/) override { return false; }
-
-private:
-    MetalDevice& device_;
-    DescriptorSetLayoutDesc desc_;
-    std::vector<DescriptorSetLayoutBinding> bindings_;
-};
-
-/**
- * @brief Metal 描述符绑定信息
- */
 struct MetalDescriptorBinding {
+    uint32_t binding;
     DescriptorType type;
-    ResourceHandle resource; // Buffer or Texture view
-    SamplerHandle sampler;
-    uint64_t offset;
-    uint64_t range;
-    ResourceState imageLayout;
+    uint32_t count;
+    ShaderStage stageFlags;
     
-    MetalDescriptorBinding() : type(DescriptorType::Unknown), 
-                              resource(handles::INVALID_RESOURCE), 
-                              sampler(handles::INVALID_SAMPLER),
-                              offset(0), range(0),
-                              imageLayout(ResourceState::Unknown) {}
+    utl::vector<ResourceHandle> resources;
+    utl::vector<SamplerHandle> samplers;
+    utl::vector<uint64_t> bufferOffsets;
 };
 
-/**
- * @brief Metal 描述符集实现
- */
-class MetalDescriptorSet : public RHIResource {
-    friend class MetalDevice;
+class MetalDescriptorSet : public RHIDescriptorSet {
 public:
     MetalDescriptorSet(MetalDevice& device, const DescriptorSetDesc& desc);
     ~MetalDescriptorSet() override;
-
-    bool Initialize() override { return true; }
-    void Destroy() override {}
-
-    void Update(uint32_t writeCount, const WriteDescriptorSet* writes);
     
-    const std::map<uint32_t, MetalDescriptorBinding>& GetBindings() const { return bindings_; }
-
-protected:
-    void* mapImpl(uint64_t /*offset*/, uint64_t /*size*/) override { return nullptr; }
-    void unmapImpl() override {}
-    bool updateDataImpl(const void* /*data*/, uint64_t /*size*/, uint64_t /*offset*/) override { return false; }
+    bool Initialize() override;
+    void Destroy() override;
+    bool updateDataImpl(const void* data, uint64_t size, uint64_t offset) override;
+    
+    void* mapImpl(uint64_t offset, uint64_t size) override;
+    void unmapImpl() override;
+    
+    void Update(const WriteDescriptorSet* writes, uint32_t count);
+    
+    const utl::vector<MetalDescriptorBinding>& GetBindings() const { return bindings_; }
 
 private:
-    MetalDevice& device_;
-    DescriptorSetDesc desc_;
-    std::map<uint32_t, MetalDescriptorBinding> bindings_; // binding -> info
+    utl::vector<MetalDescriptorBinding> bindings_;
 };
 
-} // namespace primal::graphics::rhi
+}

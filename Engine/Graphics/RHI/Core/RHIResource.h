@@ -16,6 +16,7 @@ namespace primal::graphics::rhi {
 
 // === 前向声明 ===
 class RHIDeviceBase;
+template<typename T> class RHIAllocator;
 
 /**
  * @brief 资源使用标志位
@@ -118,6 +119,7 @@ struct ResourceStats {
  * @details 管理GPU资源的生命周期，提供自动资源清理
  */
 class RHIResource {
+    template<typename T> friend class RHIAllocator;
 public:
     // === 构造函数和析构函数 ===
     

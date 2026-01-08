@@ -11,6 +11,11 @@
 
 #include "CommonHeaders.h"
 #include "Utilities/FreeList.h"
+#include "RHIResource.h"
+#include "RHICommand.h"
+#include <shared_mutex>
+#include <mutex>
+#include <type_traits>
 
 namespace primal::graphics::rhi {
 
@@ -73,7 +78,7 @@ public:
      * @brief 销毁分配器并检查泄漏
      */
     void Destroy() {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::unique_lock<std::shared_mutex> lock(_mutex);
         if (_stats.activeAllocations > 0) {
             // 在调试模式下输出警告
             // 由于这里没有日志系统，且不能使用cout（根据规范），我们仅依赖断言
@@ -88,7 +93,7 @@ public:
      * @details 主动释放所有未释放的资源，防止内存泄漏。通常在设备关闭时调用。
      */
     void Shutdown() {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::unique_lock<std::shared_mutex> lock(_mutex);
         uint32_t cap = _pool.capacity();
         for (uint32_t i = 0; i < cap; ++i) {
             if (_pool.is_valid(i)) {
@@ -105,8 +110,16 @@ public:
      */
     template<typename... Args>
     uint32_t Allocate(Args&&... args) {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::unique_lock<std::shared_mutex> lock(_mutex);
         uint32_t id = _pool.add(std::forward<Args>(args)...);
+        
+        // 如果是 RHIResource 的子类，自动设置 Handle
+        if constexpr (std::is_base_of_v<RHIResource, T>) {
+            _pool[id].SetHandle(ResourceHandle(id));
+        } else if constexpr (std::is_base_of_v<RHICommandBuffer, T>) {
+            _pool[id].SetHandle(CommandBufferHandle(id));
+        }
+        
         _stats.totalAllocated++;
         _stats.activeAllocations++;
         _stats.totalBytesAllocated += sizeof(T);
@@ -118,7 +131,7 @@ public:
      * @param id 对象的Handle
      */
     void Free(uint32_t id) {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::unique_lock<std::shared_mutex> lock(_mutex);
         FreeInternal(id);
     }
 
@@ -128,7 +141,7 @@ public:
      * @return 对象指针，如果ID无效可能触发断言（取决于free_list实现）
      */
     T* Get(uint32_t id) {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::shared_lock<std::shared_mutex> lock(_mutex);
         if (id >= _pool.capacity()) return nullptr;
         if (!_pool.is_valid(id)) return nullptr;
         // free_list operator[] 包含断言检查
@@ -143,7 +156,7 @@ public:
         // 由于 AllocatorStats 内部是 atomic，直接拷贝是安全的（通过自定义拷贝构造）
         // 但为了保证一致性快照，我们不需要锁整个 _mutex，因为 atomic 保证了单个字段的原子性
         // 但不保证字段间的一致性。为了精确快照，还是加锁比较好。
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::shared_lock<std::shared_mutex> lock(_mutex);
         return _stats;
     }
 
@@ -152,7 +165,7 @@ public:
      * @return 容量大小
      */
     uint32_t Capacity() const {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::shared_lock<std::shared_mutex> lock(_mutex);
         return _pool.capacity();
     }
 
@@ -161,7 +174,7 @@ public:
      * @details 尝试缩减未使用的内存。注意：由于依赖底层实现，可能不会物理移动对象。
      */
     void Defragment() {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::unique_lock<std::shared_mutex> lock(_mutex);
         // 目前 utl::free_list 不支持 shrink_to_fit。
         // 如果将来 utl::free_list 支持，可以在此调用。
         // 这是一个预留接口。
@@ -182,7 +195,7 @@ private:
     }
 
     primal::utl::free_list<T> _pool;
-    mutable std::mutex _mutex;
+    mutable std::shared_mutex _mutex;
     AllocatorStats _stats;
 };
 

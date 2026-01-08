@@ -9,6 +9,7 @@
 #include "MetalSwapChain.h"
 #include "MetalDevice.h"
 #include "MetalTexture.h"
+#include "MetalSync.h"
 #include "Engine/Platform/PlatformTypes.h"
 
 // 使用 Objective-C 运行时或 Metal-CPP 的桥接
@@ -123,73 +124,76 @@ void MetalSwapChain::Destroy() {
     RHISwapChain::Destroy();
 }
 
-void MetalSwapChain::Present(bool vsync) {
+bool MetalSwapChain::AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore, SyncHandle fence) {
+    // 1. 获取 Drawable
     if (!currentDrawable_) {
         GetCurrentDrawable();
     }
-    
+    if (!currentDrawable_) return false;
+
+    // 2. 更新当前帧索引
+    uint32_t index = currentFrameIndex_;
+    if (imageIndex) {
+        *imageIndex = index;
+    }
+
+    // 3. 更新 Texture Handle 的底层资源
+    if (index < backBufferHandles_.size()) {
+        ResourceHandle handle = backBufferHandles_[index];
+        MetalTexture* texture = metalDevice_.GetTexture(handle);
+        if (texture) {
+            // Cast MTL::Drawable to CA::MetalDrawable to access texture
+            CA::MetalDrawable* metalDrawable = reinterpret_cast<CA::MetalDrawable*>(currentDrawable_);
+            texture->SetNativeTexture(metalDrawable->texture());
+        }
+    }
+
+    // 4. 处理信号量同步
+    if (semaphore != handles::INVALID_SYNC) {
+        MetalSync* sync = metalDevice_.GetSync(semaphore);
+        if (sync) {
+            // 简单递增信号量值，模拟 Signal 行为
+            uint64_t val = sync->GetValue();
+            sync->SetValue(val + 1);
+        }
+    }
+
+    return true;
+}
+
+void MetalSwapChain::Present(SyncHandle semaphore) {
     if (!currentDrawable_) return;
     
-    // 获取当前命令缓冲区
-    // 在 Metal 中，Present 通常是 CommandBuffer 的最后一个操作
-    // 我们需要获取一个 CommandBuffer 来执行 Present
-    
-    // 这里有两种策略：
-    // 1. 从 MetalDevice 获取当前正在录制的 CommandBuffer（如果有）
-    // 2. 创建一个新的 CommandBuffer 仅用于 Present
-    
-    // 用户提供的代码片段显示 Present 是添加到 cmdBuffer 的 scheduled handler
-    // _cmd_buffer->addScheduledHandler(...)
-    
-    // 我们假设 MetalDevice 维护了当前的 CommandBuffer
-    // 但是 MetalDevice 只有 CreateCommandBuffer，没有 GetCurrent
-    
-    // 简单实现：创建一个新的 CommandBuffer 用于 Present
-    // 这可能不是最高效的，但能工作
     MTL::CommandQueue* queue = metalDevice_.GetGraphicsQueue();
     if (!queue) {
         std::cerr << "[MetalSwapChain] Graphics queue is null!" << std::endl;
         return;
     }
+    
     MTL::CommandBuffer* cmdBuffer = queue->commandBuffer();
     if (!cmdBuffer) {
         std::cerr << "[MetalSwapChain] Failed to create command buffer!" << std::endl;
         return;
     }
     
-    if (!mtkView_) {
-        std::cerr << "[MetalSwapChain] mtkView_ is null!" << std::endl;
-        return;
-    }
-
-    MTL::Drawable* drawable = currentDrawable_;
-    if (!drawable) {
-        std::cerr << "[MetalSwapChain] currentDrawable_ is null!" << std::endl;
-        return;
+    // 等待渲染完成信号量
+    if (semaphore != handles::INVALID_SYNC) {
+        MetalSync* sync = metalDevice_.GetSync(semaphore);
+        if (sync && sync->GetNativeEvent()) {
+             // 等待当前信号量的值
+             cmdBuffer->encodeSignalEvent(sync->GetNativeEvent(), sync->GetValue());
+        }
     }
     
-    // std::cout << "[MetalSwapChain] Presenting drawable..." << std::endl;
-    cmdBuffer->presentDrawable(drawable);
+    cmdBuffer->presentDrawable(currentDrawable_);
     cmdBuffer->commit();
-    
-    if (vsync) {
-        cmdBuffer->waitUntilCompleted();
-    }
-    
-    // 在手动渲染模式下，必须调用 draw() 来更新 currentDrawable 到下一帧
-    // 这确保了下一次调用 currentDrawable 时能获取到新的 drawable
-    // 而不是已经 presented 的旧 drawable
-    if (mtkView_) {
-        mtkView_->draw();
-    }
-
-    // 释放当前 drawable
-    // std::cout << "[MetalSwapChain] Releasing drawable..." << std::endl;
-    currentDrawable_->release();
-    currentDrawable_ = nullptr;
     
     // 更新帧索引
     currentFrameIndex_ = (currentFrameIndex_ + 1) % swapChainDesc_.bufferCount;
+    
+    // 释放当前 drawable
+    currentDrawable_->release();
+    currentDrawable_ = nullptr;
 }
 
 void MetalSwapChain::Resize(uint32_t width, uint32_t height) {
@@ -201,22 +205,6 @@ void MetalSwapChain::Resize(uint32_t width, uint32_t height) {
         size.height = height;
         mtkView_->setDrawableSize(size);
     }
-}
-
-bool MetalSwapChain::AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore, SyncHandle fence) {
-    // 确保获取了当前的可绘制对象
-    // 这对于 Metal 很重要，因为我们需要在渲染之前获取 Drawable 并更新底层的 Native Texture
-    if (!GetCurrentDrawable()) {
-        std::cerr << "[MetalSwapChain] Failed to acquire next drawable" << std::endl;
-        return false;
-    }
-    
-    // 返回当前的后台缓冲区索引
-    if (imageIndex) {
-        *imageIndex = currentFrameIndex_;
-    }
-    
-    return true;
 }
 
 uint32_t MetalSwapChain::GetCurrentBackBufferIndex() const {

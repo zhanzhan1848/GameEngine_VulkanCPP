@@ -81,6 +81,8 @@ struct GraphicsPipelineDesc {
     ShaderHandle hullShader;            ///< 外壳着色器
     ShaderHandle domainShader;          ///< 域着色器
     
+    PipelineLayoutHandle layout;        ///< 管线布局
+    
     utl::vector<VertexInputAttribute> vertexAttributes; ///< 顶点输入属性
     utl::vector<VertexInputBinding> vertexBindings;     ///< 顶点输入绑定
     
@@ -115,6 +117,7 @@ struct GraphicsPipelineDesc {
                             geometryShader(handles::INVALID_SHADER),
                             hullShader(handles::INVALID_SHADER),
                             domainShader(handles::INVALID_SHADER),
+                            layout(handles::INVALID_PIPELINE_LAYOUT),
                             topology(PrimitiveTopology::TriangleList),
                             fillMode(FillMode::Solid), cullMode(CullMode::Back),
                             renderTargetCount(0), depthStencilFormat(DataFormat::Unknown),
@@ -169,6 +172,8 @@ public:
     virtual void DestroySampler(SamplerHandle handle) = 0;
     virtual DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) = 0;
     virtual void DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) = 0;
+    virtual PipelineLayoutHandle CreatePipelineLayout(const PipelineLayoutDesc& desc) = 0;
+    virtual void DestroyPipelineLayout(PipelineLayoutHandle handle) = 0;
     virtual DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc& desc) = 0;
     virtual void DestroyDescriptorSet(DescriptorSetHandle handle) = 0;
     virtual void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) = 0;
@@ -411,6 +416,27 @@ public:
     void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) override {
         assert(isValid_ && "Device not initialized");
         derived().updateDescriptorSetsImpl(writeCount, writes);
+    }
+
+    /**
+     * @brief 创建渲染通道
+     * @param desc 渲染通道描述符
+     * @return 渲染通道句柄
+     */
+    RenderPassHandle CreateRenderPass(const RenderPassDesc& desc) {
+        assert(isValid_ && "Device not initialized");
+        return derived().createRenderPassImpl(desc);
+    }
+
+    /**
+     * @brief 销毁渲染通道
+     * @param handle 渲染通道句柄
+     */
+    void DestroyRenderPass(RenderPassHandle handle) {
+        assert(isValid_ && "Device not initialized");
+        if (handle != handles::INVALID_RESOURCE) {
+            derived().destroyRenderPassImpl(handle);
+        }
     }
 
     /**

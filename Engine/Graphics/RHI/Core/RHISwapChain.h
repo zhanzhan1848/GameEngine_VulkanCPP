@@ -50,11 +50,20 @@ public:
     // === 交换链特定接口 ===
 
     /**
+     * @brief 获取下一个图像索引
+     * @param imageIndex 输出图像索引
+     * @param semaphore 信号量
+     * @param fence 栅栏
+     * @return 是否成功
+     */
+    virtual bool AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore = handles::INVALID_SYNC, SyncHandle fence = handles::INVALID_SYNC) = 0;
+
+    /**
      * @brief 呈现当前后台缓冲区
      * @details 将渲染完成的图像呈现到屏幕
-     * @param vsync 是否开启垂直同步
+     * @param semaphore 等待的信号量
      */
-    virtual void Present(bool vsync) = 0;
+    virtual void Present(SyncHandle semaphore) = 0;
 
     /**
      * @brief 调整交换链大小

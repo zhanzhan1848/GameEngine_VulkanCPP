@@ -8,6 +8,7 @@
 
 #include "MetalBuffer.h"
 #include "MetalDevice.h"
+#include "../../Core/RHIAdaptiveMemoryPool.h"
 
 namespace primal::graphics::rhi {
 
@@ -56,8 +57,14 @@ MetalBuffer::MetalBuffer(MetalDevice& device, const BufferDesc& desc)
 }
 
 MetalBuffer::MetalBuffer(MetalBuffer&& other) noexcept
-    : RHIResource(std::move(other)), mtlBuffer_(other.mtlBuffer_) {
+    : RHIResource(std::move(other)), mtlBuffer_(other.mtlBuffer_),
+      heap_(other.heap_), heapOffset_(other.heapOffset_),
+      pool_(other.pool_), poolHandle_(other.poolHandle_) {
     other.mtlBuffer_ = nullptr;
+    other.heap_ = nullptr;
+    other.heapOffset_ = 0;
+    other.pool_ = nullptr;
+    other.poolHandle_ = 0;
 }
 
 MetalBuffer& MetalBuffer::operator=(MetalBuffer&& other) noexcept {
@@ -68,7 +75,16 @@ MetalBuffer& MetalBuffer::operator=(MetalBuffer&& other) noexcept {
         RHIResource::operator=(std::move(other));
         // 移动成员
         mtlBuffer_ = other.mtlBuffer_;
+        heap_ = other.heap_;
+        heapOffset_ = other.heapOffset_;
+        pool_ = other.pool_;
+        poolHandle_ = other.poolHandle_;
+        
         other.mtlBuffer_ = nullptr;
+        other.heap_ = nullptr;
+        other.heapOffset_ = 0;
+        other.pool_ = nullptr;
+        other.poolHandle_ = 0;
     }
     return *this;
 }
@@ -93,11 +109,17 @@ bool MetalBuffer::Initialize() {
     }
 
     // 创建 Metal 缓冲区
-    mtlBuffer_ = mtlDevice->newBuffer(desc_.size, options);
+    if (heap_) {
+        mtlBuffer_ = heap_->newBuffer(desc_.size, options, heapOffset_);
+    } else {
+        mtlBuffer_ = mtlDevice->newBuffer(desc_.size, options);
+    }
+    
     if (!mtlBuffer_) {
         std::cerr << "[MetalBuffer] Failed to create buffer: " << GetName() 
                   << " Size: " << desc_.size 
-                  << " Options: " << options << std::endl;
+                  << " Options: " << options 
+                  << (heap_ ? " (From Heap)" : "") << std::endl;
         return false;
     }
 
@@ -115,6 +137,20 @@ void MetalBuffer::destroyImpl() {
         mtlBuffer_->release();
         mtlBuffer_ = nullptr;
     }
+    if (pool_ && poolHandle_ != 0) {
+        pool_->Deallocate(poolHandle_);
+        pool_ = nullptr;
+        poolHandle_ = 0;
+    }
+    heap_ = nullptr;
+    heapOffset_ = 0;
+}
+
+void MetalBuffer::SetHeapAllocation(MTL::Heap* heap, uint64_t offset, RHIAdaptiveMemoryPool* pool, uint32_t handle) {
+    heap_ = heap;
+    heapOffset_ = offset;
+    pool_ = pool;
+    poolHandle_ = handle;
 }
 
 void* MetalBuffer::mapImpl(uint64_t offset, uint64_t size) {

@@ -91,6 +91,12 @@ using DescriptorSetLayoutHandle = uint64_t;
 using DescriptorSetHandle = uint64_t;
 
 /**
+ * @brief RHI渲染通道句柄
+ * @details 64位句柄，用于标识渲染通道对象
+ */
+using RenderPassHandle = uint64_t;
+
+/**
  * @brief RHI管线布局句柄
  * @details 64位句柄，用于标识管线布局对象
  */
@@ -141,7 +147,9 @@ enum class ResourceType : uint8_t {
     QueryPool   = 8,    ///< 查询池
     SwapChain   = 9,    ///< 交换链
     DescriptorSetLayout = 10, ///< 描述符集布局
-    DescriptorSet = 11  ///< 描述符集
+    DescriptorSet = 11, ///< 描述符集
+    RenderPass  = 12,   ///< 渲染通道
+    PipelineLayout = 13 ///< 管线布局
 };
 
 /**
@@ -833,6 +841,75 @@ struct ComputePipelineDesc {
     math::u32v3 threadGroupSize;        ///< 线程组大小 (x, y, z)
     
     ComputePipelineDesc() : computeShader(handles::INVALID_SHADER), threadGroupSize{1, 1, 1} {}
+};
+
+/**
+ * @brief 加载操作枚举
+ * @details 定义渲染目标加载时的操作类型
+ */
+enum class LoadAction {
+    Load = 0,           ///< 加载现有内容
+    Clear = 1,          ///< 清除为指定值
+    DontCare = 2        ///< 不关心原有内容
+};
+
+/**
+ * @brief 存储操作枚举
+ * @details 定义渲染目标存储时的操作类型
+ */
+enum class StoreAction {
+    Store = 0,          ///< 存储渲染结果
+    DontCare = 1        ///< 不关心渲染结果
+};
+
+struct PushConstantRange {
+    ShaderStage stageFlags;
+    uint32_t offset;
+    uint32_t size;
+    
+    PushConstantRange() : stageFlags(ShaderStage::Unknown), offset(0), size(0) {}
+};
+
+struct PipelineLayoutDesc {
+    uint32_t setLayoutCount;
+    const DescriptorSetLayoutHandle* setLayouts;
+    uint32_t pushConstantRangeCount;
+    const PushConstantRange* pushConstantRanges;
+    
+    PipelineLayoutDesc() : setLayoutCount(0), setLayouts(nullptr), 
+                          pushConstantRangeCount(0), pushConstantRanges(nullptr) {}
+};
+
+/**
+ * @brief 渲染通道描述符
+ * @details 定义渲染通道的配置参数
+ */
+struct RenderPassDesc {
+    struct Attachment {
+        ResourceHandle texture;           ///< 渲染目标纹理
+        DataFormat format;                ///< 数据格式
+        LoadAction loadOp;                ///< 加载操作
+        StoreAction storeOp;              ///< 存储操作
+        ClearValue clearValue;            ///< 清除值
+        u32 sampleCount;                  ///< 采样数量
+        uint8_t mipLevel;                 ///< Mip层级
+        uint16_t arrayLayer;              ///< 数组层级
+        
+        Attachment() : texture(handles::INVALID_RESOURCE), format(DataFormat::Unknown),
+                      loadOp(LoadAction::DontCare), storeOp(StoreAction::Store),
+                      sampleCount(1), mipLevel(0), arrayLayer(0) {}
+    };
+    
+    utl::vector<Attachment> colorAttachments;   ///< 颜色附件
+    Attachment depthAttachment;                 ///< 深度附件
+    Attachment stencilAttachment;              ///< 模板附件
+    
+    ViewportDesc viewport;                       ///< 视口
+    Rect scissor;                               ///< 裁剪矩形
+    
+    RenderPassDesc() {
+        colorAttachments.reserve(constants::MAX_RENDER_TARGETS);
+    }
 };
 
 } // namespace primal::graphics::rhi

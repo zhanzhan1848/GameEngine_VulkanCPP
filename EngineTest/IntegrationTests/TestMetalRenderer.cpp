@@ -224,11 +224,8 @@ bool Engine_Test::initialize()
     
     pipelineDesc.topology = PrimitiveTopology::TriangleList;
     pipelineDesc.vertexAttributes.clear();
-    // DISABLE Vertex Descriptor to ensure pure Pull Model (Direct Buffer Access)
-    // pipelineDesc.vertexAttributes.push_back(attrPos);
-    // pipelineDesc.vertexAttributes.push_back(attrColor);
+    // 使用 Pull Model (直接 Buffer 访问)，禁用 Vertex Descriptor
     pipelineDesc.vertexBindings.clear();
-    // pipelineDesc.vertexBindings.push_back(bindingDesc);
     pipelineDesc.fillMode = FillMode::Solid;
     pipelineDesc.cullMode = CullMode::None;
     pipelineDesc.enableBlend = false;
@@ -322,8 +319,78 @@ void Engine_Test::run()
     // 5. 生成命令
     std::vector<CommandBufferHandle> cmdBuffers;
     
-    // 使用多线程生成命令
-    g_Ctx.cmdGenerator->GenerateCommandsParallel(scene, cmdBuffers);
+    // --- 使用新的 Metal 并行渲染编码器 ---
+    CommandBufferHandle mainCmdHandle = g_Ctx.device->CreateCommandBuffer(CommandQueueType::Graphics);
+    if (mainCmdHandle != handles::INVALID_COMMAND_BUFFER) {
+        MetalCommandBuffer* mainCmd = static_cast<MetalCommandBuffer*>(g_Ctx.device->GetCommandBuffer(mainCmdHandle));
+        if (mainCmd && mainCmd->Begin()) {
+            // 准备 RenderPassDesc
+            RenderPassDesc passDesc;
+            passDesc.colorAttachments.resize(1);
+            passDesc.colorAttachments[0].texture = scene.renderTarget;
+            passDesc.colorAttachments[0].loadOp = LoadAction::Clear;
+            passDesc.colorAttachments[0].storeOp = StoreAction::Store;
+            passDesc.colorAttachments[0].clearValue.color = primal::math::v4{
+                0.1f * (sin(g_Ctx.rotationAngle) + 1.0f),
+                0.1f,
+                0.1f,
+                1.0f
+            }; // 动态背景色证明在运行
+
+            passDesc.viewport.size.x = static_cast<float>(g_Ctx.window.width());
+            passDesc.viewport.size.y = static_cast<float>(g_Ctx.window.height());
+            passDesc.viewport.minDepth = 0.0f;
+            passDesc.viewport.maxDepth = 1.0f;
+            
+            passDesc.scissor.offset = {0, 0};
+            passDesc.scissor.extent = {g_Ctx.window.width(), g_Ctx.window.height()};
+
+            // 创建 RenderPass 对象
+            RenderPassHandle renderPassHandle = g_Ctx.device->CreateRenderPass(passDesc);
+
+            // 开始并行 RenderPass (使用 Handle)
+            mainCmd->BeginParallelRenderPass(renderPassHandle);
+            
+            // 启动并行线程
+            const int numThreads = 4;
+            std::vector<std::thread> threads;
+            
+            for (int i = 0; i < numThreads; ++i) {
+                threads.emplace_back([mainCmd, passDesc]() {
+                    // 创建子命令缓冲区
+                    MetalCommandBuffer* subCmd = mainCmd->CreateSecondaryCommandBuffer();
+                    if (subCmd) {
+                        // 子编码器需要设置状态
+                        subCmd->SetViewport(passDesc.viewport);
+                        subCmd->SetScissor(passDesc.scissor);
+                        subCmd->BindGraphicsPipeline(g_Ctx.pipeline);
+                        
+                        uint64_t vOffset = 0;
+                        subCmd->BindVertexBuffers(2, 1, &g_Ctx.vertexBuffer, &vOffset);
+                        
+                        // 简单的偏移绘制，虽然顶点是固定的，但我们多次绘制
+                        subCmd->Draw(3, 0, 1, 0);
+                        
+                        subCmd->EndRenderPass(); // 结束子编码器
+                        delete subCmd; // 销毁临时对象
+                    }
+                });
+            }
+            
+            for (auto& t : threads) {
+                t.join();
+            }
+            
+            // 结束并行 Pass
+            mainCmd->EndRenderPass();
+            mainCmd->End();
+            
+            cmdBuffers.push_back(mainCmdHandle);
+        }
+    }
+    
+    // 原有逻辑注释掉
+    // g_Ctx.cmdGenerator->GenerateCommandsParallel(scene, cmdBuffers);
     
     if (cmdBuffers.empty()) {
         std::cerr << "Failed to generate command buffers!" << std::endl;

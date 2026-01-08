@@ -1,6 +1,8 @@
 #include "../../TestFramework.h"
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalSwapChain.h"
+#include "Graphics/RHI/Platforms/Metal/MetalSync.h"
+#include "Graphics/RHI/Core/RHICommand.h"
 #include "Engine/Platform/Platform.h"
 #include "Engine/Platform/PlatformTypes.h"
 
@@ -70,7 +72,7 @@ TestResult TestCreateSwapChain_ValidWindow() {
         TEST_ASSERT(actualDesc.width == 800, "Width mismatch");
         TEST_ASSERT(actualDesc.height == 600, "Height mismatch");
         
-        swapChain->Present(false); 
+        swapChain->Present(handles::INVALID_SYNC); 
         device.DestroySwapChain(swapChain);
     }
     

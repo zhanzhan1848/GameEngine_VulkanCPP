@@ -17,6 +17,7 @@
 #include "MetalSwapChain.h"
 #include "MetalQuery.h"
 #include "MetalSync.h"
+#include "MetalRenderPass.h"
 #include <iostream>
 
 namespace primal::graphics::rhi {
@@ -50,10 +51,13 @@ bool MetalDevice::initializeImpl() {
     computeQueue_ = mtlDevice_->newCommandQueue();
     transferQueue_ = mtlDevice_->newCommandQueue();
 
+    initializeMemoryPool();
+
     return true;
 }
 
 void MetalDevice::shutdownImpl() {
+    shutdownMemoryPool();
     // 释放所有分配的资源
     commandBufferAllocator_.Shutdown();
     bufferAllocator_.Shutdown();
@@ -62,6 +66,7 @@ void MetalDevice::shutdownImpl() {
     queryPoolAllocator_.Shutdown();
     shaderAllocator_.Shutdown();
     pipelineAllocator_.Shutdown();
+    pipelineLayoutAllocator_.Shutdown();
     samplerAllocator_.Shutdown();
     descriptorSetLayoutAllocator_.Shutdown();
     descriptorSetAllocator_.Shutdown();
@@ -143,6 +148,7 @@ MetalCommandBuffer* MetalDevice::GetCommandBuffer(CommandBufferHandle handle) {
 }
 
 MetalSync* MetalDevice::GetSync(SyncHandle handle) {
+    if (handle == handles::INVALID_SYNC) return nullptr;
     return syncAllocator_.Get(static_cast<uint32_t>(handle));
 }
 
@@ -160,6 +166,11 @@ MetalPipeline* MetalDevice::GetPipeline(PipelineHandle handle) {
 
 MetalSampler* MetalDevice::GetSampler(SamplerHandle handle) {
     return samplerAllocator_.Get(static_cast<uint32_t>(handle));
+}
+
+MetalRenderPass* MetalDevice::GetRenderPass(RenderPassHandle handle) {
+    if (handle == handles::INVALID_RESOURCE) return nullptr;
+    return renderPassAllocator_.Get(handle);
 }
 
 // === CRTP 实现接口 ===
@@ -207,10 +218,76 @@ bool MetalDevice::waitForSyncImpl(SyncHandle handle, u32 timeoutMs) {
     return false; 
 }
 
+void MetalDevice::initializeMemoryPool() {
+    if (!mtlDevice_) return;
+    
+    // 创建 Heap (256MB Shared)
+    // 注意：实际应用中应该根据显存大小和需求动态配置
+    MTL::HeapDescriptor* heapDesc = MTL::HeapDescriptor::alloc()->init();
+    heapDesc->setSize(256 * 1024 * 1024); // 256MB
+    heapDesc->setStorageMode(MTL::StorageModeShared);
+    heapDesc->setCpuCacheMode(MTL::CPUCacheModeDefaultCache);
+    // 使用 Placement 堆，因为 RHIAdaptiveMemoryPool 会手动管理内存块和偏移
+    heapDesc->setType(MTL::HeapTypePlacement);
+    
+    heap_ = mtlDevice_->newHeap(heapDesc);
+    heapDesc->release();
+    
+    if (heap_) {
+        // 创建 RHIAdaptiveMemoryPool
+        MemoryPoolDesc poolDesc;
+        poolDesc.poolSize = 256 * 1024 * 1024;
+        poolDesc.blockSize = 256; // 最小块大小
+        poolDesc.name = "MetalSharedPool";
+        
+        memoryPool_ = new RHIAdaptiveMemoryPool(*this, poolDesc);
+        if (memoryPool_->Initialize()) {
+            std::cout << "[MetalDevice] Memory Pool Initialized (256MB Shared)" << std::endl;
+        } else {
+            std::cerr << "[MetalDevice] Failed to initialize Memory Pool" << std::endl;
+        }
+    } else {
+        std::cerr << "[MetalDevice] Failed to create MTLHeap" << std::endl;
+    }
+}
+
+void MetalDevice::shutdownMemoryPool() {
+    if (memoryPool_) {
+        memoryPool_->Destroy();
+        delete memoryPool_;
+        memoryPool_ = nullptr;
+    }
+    if (heap_) {
+        heap_->release();
+        heap_ = nullptr;
+    }
+}
+
 ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
     uint32_t id = bufferAllocator_.Allocate(*this, desc);
     MetalBuffer* buffer = bufferAllocator_.Get(id);
     if (buffer) {
+        // 尝试从内存池分配 (仅针对 Shared/Dynamic/Staging 内存)
+        // Static 内存通常使用 Private 模式，需要单独的 Heap 或者独立分配
+        if (memoryPool_ && heap_) {
+             bool usePool = false;
+             // 根据 MetalBuffer::getResourceOptions 的逻辑，Dynamic, Staging, Readback 都是 Shared
+             if (desc.memoryUsage == GPUMemoryUsage::Dynamic || 
+                 desc.memoryUsage == GPUMemoryUsage::Staging || 
+                 desc.memoryUsage == GPUMemoryUsage::Readback) {
+                 
+                 // 检查大小是否适合池分配 (留一点余量或者限制最大分配)
+                 if (desc.size <= memoryPool_->GetDesc().poolSize) {
+                     u32 handle = memoryPool_->Allocate(desc.size, 256, desc.memoryUsage);
+                     if (handle != 0) {
+                         MemoryBlock block = memoryPool_->GetMemoryBlock(handle);
+                         buffer->SetHeapAllocation(heap_, block.offset, memoryPool_, handle);
+                         usePool = true;
+                     }
+                 }
+             }
+        }
+
         if (buffer->Initialize()) {
             buffer->SetHandle(ResourceHandle(id));
             return ResourceHandle(id);
@@ -289,18 +366,26 @@ DescriptorSetLayoutHandle MetalDevice::createDescriptorSetLayoutImpl(const Descr
     uint32_t id = descriptorSetLayoutAllocator_.Allocate(*this, desc);
     MetalDescriptorSetLayout* layout = descriptorSetLayoutAllocator_.Get(id);
     if (layout && layout->Initialize()) {
-        layout->SetHandle(ResourceHandle(id));
         return DescriptorSetLayoutHandle(id);
     }
     descriptorSetLayoutAllocator_.Free(id);
     return static_cast<DescriptorSetLayoutHandle>(handles::INVALID_RESOURCE);
 }
 
+PipelineLayoutHandle MetalDevice::createPipelineLayoutImpl(const PipelineLayoutDesc& desc) {
+    uint32_t id = pipelineLayoutAllocator_.Allocate(*this, desc);
+    MetalPipelineLayout* layout = pipelineLayoutAllocator_.Get(id);
+    if (layout && layout->Initialize()) {
+        return PipelineLayoutHandle(id);
+    }
+    pipelineLayoutAllocator_.Free(id);
+    return static_cast<PipelineLayoutHandle>(handles::INVALID_PIPELINE_LAYOUT);
+}
+
 DescriptorSetHandle MetalDevice::createDescriptorSetImpl(const DescriptorSetDesc& desc) {
     uint32_t id = descriptorSetAllocator_.Allocate(*this, desc);
     MetalDescriptorSet* set = descriptorSetAllocator_.Get(id);
     if (set && set->Initialize()) {
-        set->SetHandle(ResourceHandle(id));
         return DescriptorSetHandle(id);
     }
     descriptorSetAllocator_.Free(id);
@@ -323,7 +408,7 @@ void MetalDevice::updateDescriptorSetsImpl(uint32_t writeCount, const WriteDescr
         MetalDescriptorSet* set = GetDescriptorSet(write.dstSet);
         if (set) {
             // We pass a single write to the set
-            set->Update(1, &write);
+            set->Update(&write, 1);
         }
     }
 }
@@ -333,10 +418,9 @@ CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) 
     MetalCommandBuffer* cmdBuf = commandBufferAllocator_.Get(id);
     if (cmdBuf) {
         if (cmdBuf->Initialize()) {
-            cmdBuf->SetHandle(CommandBufferHandle(id));
             return CommandBufferHandle(id);
         } else {
-             std::cerr << "[MetalDevice] CommandBuffer Initialize failed for id: " << id << std::endl;
+            std::cerr << "[MetalDevice] CommandBuffer Initialize failed for id: " << id << std::endl;
         }
     } else {
         std::cerr << "[MetalDevice] CommandBuffer allocation failed" << std::endl;
@@ -424,5 +508,32 @@ void MetalDevice::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
 void MetalDevice::destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle) {
     descriptorSetLayoutAllocator_.Free(static_cast<uint32_t>(handle));
 }
+
+void MetalDevice::destroyPipelineLayoutImpl(PipelineLayoutHandle handle) {
+    pipelineLayoutAllocator_.Free(static_cast<uint32_t>(handle));
+}
+
+RenderPassHandle MetalDevice::createRenderPassImpl(const RenderPassDesc& desc) {
+    RenderPassHandle handle = renderPassAllocator_.Allocate(*this, desc);
+    if (handle == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
+
+    MetalRenderPass* pass = renderPassAllocator_.Get(handle);
+    if (!pass || !pass->Initialize()) {
+        renderPassAllocator_.Free(handle);
+        return handles::INVALID_RESOURCE;
+    }
+
+    return handle;
+}
+
+void MetalDevice::destroyRenderPassImpl(RenderPassHandle handle) {
+    if (handle == handles::INVALID_RESOURCE) return;
+
+    MetalRenderPass* pass = renderPassAllocator_.Get(handle);
+    if (pass) {
+        renderPassAllocator_.Free(handle);
+    }
+}
+
 
 } // namespace primal::graphics::rhi

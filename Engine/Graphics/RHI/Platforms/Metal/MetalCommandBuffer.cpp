@@ -9,6 +9,7 @@
 #include "MetalCommandBuffer.h"
 #include "MetalDevice.h"
 #include "MetalBuffer.h"
+#include "MetalSync.h"
 #include <iostream>
 
 namespace primal::graphics::rhi {
@@ -16,25 +17,57 @@ namespace primal::graphics::rhi {
 MetalCommandBuffer::MetalCommandBuffer(MetalDevice& device, CommandQueueType type)
     : RHICommandBuffer(device, type) {}
 
+MetalCommandBuffer::MetalCommandBuffer(MetalDevice& device, CommandQueueType type, MTL::RenderCommandEncoder* encoder)
+    : RHICommandBuffer(device, type), isSecondary_(true) {
+    currentEncoder_ = encoder;
+    currentEncoderType_ = EncoderType::Render;
+    // Secondary buffer starts in Recording state
+    state_ = CommandBufferState::Recording;
+}
+
 MetalCommandBuffer::~MetalCommandBuffer() {
     Destroy();
 }
 
 bool MetalCommandBuffer::Initialize() {
+    if (state_ != CommandBufferState::Invalid) return true;
+    
+    if (isSecondary_) return true;
+
+    // Create Guard Event for synchronization
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    guardEventHandle_ = metalDevice.CreateSync();
+    if (guardEventHandle_ == handles::INVALID_SYNC) return false;
+    
+    state_ = CommandBufferState::Reset;
     return true;
 }
 
 void MetalCommandBuffer::destroyImpl() {
+    if (isSecondary_) {
+        // Secondary buffers don't own the encoder or command buffer
+        currentEncoder_ = nullptr;
+        currentEncoderType_ = EncoderType::None;
+        return;
+    }
+
+    endCurrentEncoder();
+
     if (mtlCommandBuffer_) {
         mtlCommandBuffer_->release();
         mtlCommandBuffer_ = nullptr;
     }
+    
     if (pool_) {
         pool_->release();
         pool_ = nullptr;
     }
-    currentEncoder_ = nullptr;
-    currentEncoderType_ = EncoderType::None;
+
+    if (guardEventHandle_ != handles::INVALID_SYNC) {
+        MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+        metalDevice.DestroySync(guardEventHandle_);
+        guardEventHandle_ = handles::INVALID_SYNC;
+    }
 }
 
 bool MetalCommandBuffer::resetImpl() {
@@ -102,6 +135,24 @@ bool MetalCommandBuffer::endImpl() {
 bool MetalCommandBuffer::submitImpl(uint32_t waitFlags) {
     if (!mtlCommandBuffer_) return false;
 
+    // Process wait semaphores
+    for (const auto& semInfo : waitSemaphores_) {
+        MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+        MetalSync* sync = metalDevice.GetSync(semInfo.semaphore);
+        if (sync && sync->GetNativeEvent()) {
+            mtlCommandBuffer_->encodeSignalEvent(sync->GetNativeEvent(), semInfo.value);
+        }
+    }
+
+    // Process signal semaphores
+    for (const auto& semInfo : signalSemaphores_) {
+        MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+        MetalSync* sync = metalDevice.GetSync(semInfo.semaphore);
+        if (sync && sync->GetNativeEvent()) {
+            mtlCommandBuffer_->encodeSignalEvent(sync->GetNativeEvent(), semInfo.value);
+        }
+    }
+
     mtlCommandBuffer_->commit();
     
     return true;
@@ -155,6 +206,8 @@ MTL::ComputeCommandEncoder* MetalCommandBuffer::getComputeEncoder() {
 // === Render Commands ===
 
 void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
+    if (isSecondary_) return;
+
     endCurrentEncoder();
     
     // Construct MTLRenderPassDescriptor
@@ -185,20 +238,44 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
                 }
                 ca->setStoreAction(metalStoreAction);
                 
-                MTL::ClearColor clearColor(attachment.clearValue.color.r, 
-                                          attachment.clearValue.color.g, 
-                                          attachment.clearValue.color.b, 
-                                          attachment.clearValue.color.a);
-                ca->setClearColor(clearColor);
-                
-                // Mip/Layer setup if needed
-                ca->setLevel(attachment.mipLevel);
-                ca->setSlice(attachment.arrayLayer);
+                if (attachment.loadOp == LoadAction::Clear) {
+                    ca->setClearColor(MTL::ClearColor(
+                        attachment.clearValue.color.r,
+                        attachment.clearValue.color.g,
+                        attachment.clearValue.color.b,
+                        attachment.clearValue.color.a
+                    ));
+                }
             }
         }
     }
     
-    // Setup depth/stencil attachments (TODO)
+    // Setup depth/stencil attachments
+    if (desc.depthAttachment.texture != handles::INVALID_RESOURCE) {
+        MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+        MetalTexture* texture = metalDevice.GetTexture(desc.depthAttachment.texture);
+        
+        if (texture && texture->GetNativeTexture()) {
+            MTL::RenderPassDepthAttachmentDescriptor* da = passDesc->depthAttachment();
+            da->setTexture(texture->GetNativeTexture());
+            
+            MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
+            switch (desc.depthAttachment.loadOp) {
+                case LoadAction::Load: metalLoadAction = MTL::LoadActionLoad; break;
+                case LoadAction::Clear: metalLoadAction = MTL::LoadActionClear; break;
+                case LoadAction::DontCare: metalLoadAction = MTL::LoadActionDontCare; break;
+            }
+            da->setLoadAction(metalLoadAction);
+            da->setClearDepth(desc.depthAttachment.clearValue.depth);
+            
+            MTL::StoreAction metalStoreAction = MTL::StoreActionDontCare;
+            switch (desc.depthAttachment.storeOp) {
+                case StoreAction::Store: metalStoreAction = MTL::StoreActionStore; break;
+                case StoreAction::DontCare: metalStoreAction = MTL::StoreActionDontCare; break;
+            }
+            da->setStoreAction(metalStoreAction);
+        }
+    }
     
     if (mtlCommandBuffer_) {
         MTL::RenderCommandEncoder* encoder = mtlCommandBuffer_->renderCommandEncoder(passDesc);
@@ -213,8 +290,167 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     // Descriptor is autoreleased
 }
 
+void MetalCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
+    if (isSecondary_) return;
+
+    endCurrentEncoder();
+    
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    MetalRenderPass* pass = metalDevice.GetRenderPass(renderPass);
+    if (!pass) {
+        std::cerr << "[MetalCommandBuffer] Invalid RenderPass handle" << std::endl;
+        return;
+    }
+
+    MTL::RenderPassDescriptor* passDesc = pass->GetNativeRenderPassDescriptor();
+    if (!passDesc) {
+        std::cerr << "[MetalCommandBuffer] Failed to get native RenderPass descriptor" << std::endl;
+        return;
+    }
+
+    if (mtlCommandBuffer_) {
+        MTL::RenderCommandEncoder* encoder = mtlCommandBuffer_->renderCommandEncoder(passDesc);
+        currentEncoder_ = encoder;
+        currentEncoderType_ = EncoderType::Render;
+        
+        // Initial state setup (viewport, scissor)
+        const auto& desc = pass->GetDesc();
+        SetViewport(desc.viewport);
+        SetScissor(desc.scissor);
+    }
+}
+
+void MetalCommandBuffer::BeginParallelRenderPass(const RenderPassDesc& desc) {
+    if (isSecondary_) return;
+    
+    endCurrentEncoder();
+    
+    // Construct MTLRenderPassDescriptor
+    MTL::RenderPassDescriptor* passDesc = MTL::RenderPassDescriptor::renderPassDescriptor();
+    
+    // Setup color attachments
+    for (size_t i = 0; i < desc.colorAttachments.size(); ++i) {
+        const auto& attachment = desc.colorAttachments[i];
+        if (attachment.texture != handles::INVALID_RESOURCE) {
+            MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+            MetalTexture* texture = metalDevice.GetTexture(attachment.texture);
+            
+            if (texture && texture->GetNativeTexture()) {
+                MTL::RenderPassColorAttachmentDescriptor* ca = passDesc->colorAttachments()->object(i);
+                ca->setTexture(texture->GetNativeTexture());
+                MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
+                switch (attachment.loadOp) {
+                    case LoadAction::Load: metalLoadAction = MTL::LoadActionLoad; break;
+                    case LoadAction::Clear: metalLoadAction = MTL::LoadActionClear; break;
+                    case LoadAction::DontCare: metalLoadAction = MTL::LoadActionDontCare; break;
+                }
+                ca->setLoadAction(metalLoadAction);
+
+                MTL::StoreAction metalStoreAction = MTL::StoreActionDontCare;
+                switch (attachment.storeOp) {
+                    case StoreAction::Store: metalStoreAction = MTL::StoreActionStore; break;
+                    case StoreAction::DontCare: metalStoreAction = MTL::StoreActionDontCare; break;
+                }
+                ca->setStoreAction(metalStoreAction);
+                
+                if (attachment.loadOp == LoadAction::Clear) {
+                    ca->setClearColor(MTL::ClearColor(
+                        attachment.clearValue.color.r,
+                        attachment.clearValue.color.g,
+                        attachment.clearValue.color.b,
+                        attachment.clearValue.color.a
+                    ));
+                }
+                
+                // Mip/Layer setup if needed
+                ca->setLevel(attachment.mipLevel);
+                ca->setSlice(attachment.arrayLayer);
+            }
+        }
+    }
+    
+    // Setup depth/stencil attachments
+    if (desc.depthAttachment.texture != handles::INVALID_RESOURCE) {
+        MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+        MetalTexture* texture = metalDevice.GetTexture(desc.depthAttachment.texture);
+        
+        if (texture && texture->GetNativeTexture()) {
+            MTL::RenderPassDepthAttachmentDescriptor* da = passDesc->depthAttachment();
+            da->setTexture(texture->GetNativeTexture());
+            
+            MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
+            switch (desc.depthAttachment.loadOp) {
+                case LoadAction::Load: metalLoadAction = MTL::LoadActionLoad; break;
+                case LoadAction::Clear: metalLoadAction = MTL::LoadActionClear; break;
+                case LoadAction::DontCare: metalLoadAction = MTL::LoadActionDontCare; break;
+            }
+            da->setLoadAction(metalLoadAction);
+            da->setClearDepth(desc.depthAttachment.clearValue.depth);
+            
+            MTL::StoreAction metalStoreAction = MTL::StoreActionDontCare;
+            switch (desc.depthAttachment.storeOp) {
+                case StoreAction::Store: metalStoreAction = MTL::StoreActionStore; break;
+                case StoreAction::DontCare: metalStoreAction = MTL::StoreActionDontCare; break;
+            }
+            da->setStoreAction(metalStoreAction);
+        }
+    }
+
+    if (mtlCommandBuffer_) {
+        parallelRenderEncoder_ = mtlCommandBuffer_->parallelRenderCommandEncoder(passDesc);
+        currentEncoderType_ = EncoderType::Render;
+        currentEncoder_ = nullptr;
+    }
+}
+
+void MetalCommandBuffer::BeginParallelRenderPass(RenderPassHandle renderPass) {
+    if (isSecondary_) return;
+
+    endCurrentEncoder();
+    
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    MetalRenderPass* pass = metalDevice.GetRenderPass(renderPass);
+    if (!pass) {
+        std::cerr << "[MetalCommandBuffer] Invalid RenderPass handle" << std::endl;
+        return;
+    }
+
+    MTL::RenderPassDescriptor* passDesc = pass->GetNativeRenderPassDescriptor();
+    if (!passDesc) {
+        std::cerr << "[MetalCommandBuffer] Failed to get native RenderPass descriptor" << std::endl;
+        return;
+    }
+
+    if (mtlCommandBuffer_) {
+        parallelRenderEncoder_ = mtlCommandBuffer_->parallelRenderCommandEncoder(passDesc);
+        currentEncoderType_ = EncoderType::Render;
+        currentEncoder_ = nullptr;
+    }
+}
+
+MetalCommandBuffer* MetalCommandBuffer::CreateSecondaryCommandBuffer() {
+    if (!parallelRenderEncoder_) return nullptr;
+    
+    MTL::RenderCommandEncoder* subEncoder = parallelRenderEncoder_->renderCommandEncoder();
+    if (!subEncoder) return nullptr;
+    
+    return new MetalCommandBuffer(static_cast<MetalDevice&>(device_), type_, subEncoder);
+}
+
 void MetalCommandBuffer::EndRenderPass() {
-    if (currentEncoderType_ == EncoderType::Render) {
+    if (isSecondary_) {
+        if (currentEncoder_) {
+            currentEncoder_->endEncoding();
+            currentEncoder_ = nullptr;
+        }
+        return;
+    }
+
+    if (parallelRenderEncoder_) {
+        parallelRenderEncoder_->endEncoding();
+        parallelRenderEncoder_ = nullptr;
+        currentEncoderType_ = EncoderType::None;
+    } else if (currentEncoderType_ == EncoderType::Render) {
         endCurrentEncoder();
     }
 }
@@ -346,10 +582,10 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
         if (!set) continue;
         
         const auto& bindings = set->GetBindings();
-        for (const auto& [bindingIndex, binding] : bindings) {
+        for (const auto& binding : bindings) {
             // Simple mapping: binding index = slot index
             // In a real engine, we might remap this based on PipelineLayout or SPIR-V reflection
-            uint32_t slot = bindingIndex; 
+            uint32_t slot = binding.binding; 
             
             // Apply dynamic offset if needed
             uint32_t dynamicOffset = 0;
@@ -367,9 +603,10 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                 case DescriptorType::UniformBufferDynamic:
                 case DescriptorType::StorageBuffer:
                 case DescriptorType::StorageBufferDynamic: {
-                    MetalBuffer* buffer = metalDevice.GetBuffer(binding.resource);
+                    if (binding.resources.empty()) break;
+                    MetalBuffer* buffer = metalDevice.GetBuffer(binding.resources[0]);
                     if (buffer && buffer->GetNativeBuffer()) {
-                        uint64_t offset = binding.offset + dynamicOffset;
+                        uint64_t offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
                         if (renderEncoder) {
                             renderEncoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, slot);
                             renderEncoder->setFragmentBuffer(buffer->GetNativeBuffer(), offset, slot);
@@ -383,7 +620,8 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                 case DescriptorType::StorageImage: 
                 case DescriptorType::CombinedImageSampler: 
                 case DescriptorType::InputAttachment: {
-                    MetalTexture* texture = metalDevice.GetTexture(binding.resource);
+                    if (binding.resources.empty()) break;
+                    MetalTexture* texture = metalDevice.GetTexture(binding.resources[0]);
                     if (texture && texture->GetNativeTexture()) {
                         if (renderEncoder) {
                             renderEncoder->setFragmentTexture(texture->GetNativeTexture(), slot);
@@ -393,8 +631,8 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                         }
                     }
                     
-                    if (binding.type == DescriptorType::CombinedImageSampler && binding.sampler != handles::INVALID_SAMPLER) {
-                        MetalSampler* sampler = metalDevice.GetSampler(binding.sampler);
+                    if (binding.type == DescriptorType::CombinedImageSampler && !binding.samplers.empty()) {
+                        MetalSampler* sampler = metalDevice.GetSampler(binding.samplers[0]);
                         if (sampler && sampler->GetSamplerState()) {
                              if (renderEncoder) {
                                 renderEncoder->setFragmentSamplerState(sampler->GetSamplerState(), slot);
@@ -407,7 +645,8 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     break;
                 }
                 case DescriptorType::Sampler: {
-                     MetalSampler* sampler = metalDevice.GetSampler(binding.sampler);
+                     if (binding.samplers.empty()) break;
+                     MetalSampler* sampler = metalDevice.GetSampler(binding.samplers[0]);
                      if (sampler && sampler->GetSamplerState()) {
                          if (renderEncoder) {
                             renderEncoder->setFragmentSamplerState(sampler->GetSamplerState(), slot);
@@ -427,7 +666,6 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
 
 void MetalCommandBuffer::Draw(uint32_t vertexCount, uint32_t startVertex, uint32_t instanceCount, uint32_t startInstance) {
     if (currentEncoderType_ == EncoderType::Render) {
-        // std::cout << "MetalCommandBuffer::Draw: count=" << vertexCount << " start=" << startVertex << std::endl;
         static_cast<MTL::RenderCommandEncoder*>(currentEncoder_)->drawPrimitives(
             currentPrimitiveType_,
             (NS::UInteger)startVertex,

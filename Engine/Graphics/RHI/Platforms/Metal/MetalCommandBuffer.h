@@ -50,6 +50,21 @@ protected:
 public:
     // === 渲染命令 ===
     void BeginRenderPass(const RenderPassDesc& desc) override;
+    void BeginRenderPass(RenderPassHandle renderPass) override;
+    
+    /**
+     * @brief 开始并行渲染通道
+     * @details 使用 MTLParallelRenderCommandEncoder 并行记录渲染命令
+     */
+    void BeginParallelRenderPass(const RenderPassDesc& desc);
+    void BeginParallelRenderPass(RenderPassHandle renderPass);
+
+    /**
+     * @brief 创建并行子命令缓冲区
+     * @return 用于并行记录的子命令缓冲区
+     */
+    MetalCommandBuffer* CreateSecondaryCommandBuffer();
+
     void EndRenderPass() override;
     void SetViewport(const ViewportDesc& viewport) override;
     void SetScissor(const Rect& scissor) override;
@@ -80,8 +95,12 @@ public:
     void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override;
 
 private:
+    SyncHandle guardEventHandle_ = handles::INVALID_SYNC;
+    uint64_t guardValue_ = 0;
+
     /**
      * @brief 结束当前编码器
+     * @details 如果有活跃的编码器，结束它
      */
     void endCurrentEncoder();
 
@@ -96,9 +115,16 @@ private:
     MTL::ComputeCommandEncoder* getComputeEncoder();
     
     // 注意: RenderEncoder必须通过BeginRenderPass创建
+    /**
+     * @brief 私有构造函数，用于创建Secondary CommandBuffer
+     */
+    MetalCommandBuffer(MetalDevice& device, CommandQueueType type, MTL::RenderCommandEncoder* encoder);
 
     MTL::CommandBuffer* mtlCommandBuffer_{nullptr}; ///< Metal命令缓冲区
     NS::AutoreleasePool* pool_{nullptr};            ///< 自动释放池
+     // 并行渲染支持
+    MTL::ParallelRenderCommandEncoder* parallelRenderEncoder_{nullptr};
+    bool isSecondary_{false};
     
     // 当前活动编码器状态
     enum class EncoderType { None, Render, Compute, Blit };

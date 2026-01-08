@@ -19,9 +19,14 @@
 #include "MetalPipeline.h"
 #include "MetalSampler.h"
 #include "MetalDescriptorSet.h"
+#include "MetalDescriptorSetLayout.h"
+#include "MetalPipelineLayout.h"
+#include "MetalRenderPass.h"
 #include "../../Core/RHIDevice.h"
 #include "../../Core/RHIAllocator.h"
+#include "../../Core/RHIAdaptiveMemoryPool.h"
 #include <iostream>
+#include <atomic>
 
 namespace primal::graphics::rhi {
 
@@ -114,6 +119,11 @@ public:
      */
     MetalDescriptorSet* GetDescriptorSet(DescriptorSetHandle handle);
 
+    /**
+     * @brief 获取渲染通道对象 (内部使用)
+     */
+    MetalRenderPass* GetRenderPass(RenderPassHandle handle);
+
 protected:
     // === CRTP 实现接口 ===
 
@@ -205,32 +215,55 @@ protected:
     ResourceHandle createBufferImpl(const BufferDesc& desc);
     ResourceHandle createTextureImpl(const TextureDesc& desc);
     ShaderHandle createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint);
+
+    /**
+     * @brief 创建图形管线实现
+     */
     PipelineHandle createGraphicsPipelineImpl(const GraphicsPipelineDesc& desc);
     PipelineHandle createComputePipelineImpl(const ComputePipelineDesc& desc);
     CommandBufferHandle createCommandBufferImpl(CommandQueueType type);
     SamplerHandle createSamplerImpl(const SamplerDesc& desc);
     DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc);
+    PipelineLayoutHandle createPipelineLayoutImpl(const PipelineLayoutDesc& desc);
     DescriptorSetHandle createDescriptorSetImpl(const DescriptorSetDesc& desc);
     void updateDescriptorSetsImpl(uint32_t writeCount, const WriteDescriptorSet* writes);
+
+    /**
+     * @brief 创建渲染通道实现
+     */
+    RenderPassHandle createRenderPassImpl(const RenderPassDesc& desc);
 
     // === 资源销毁接口实现 ===
 
     void destroyBufferImpl(ResourceHandle handle);
     void destroyTextureImpl(ResourceHandle handle);
+
+    /**
+     * @brief 销毁着色器实现
+     */
     void destroyShaderImpl(ShaderHandle handle);
     void destroyPipelineImpl(PipelineHandle handle);
     void destroyCommandBufferImpl(CommandBufferHandle handle);
     void destroySamplerImpl(SamplerHandle handle);
     void destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle);
+    void destroyPipelineLayoutImpl(PipelineLayoutHandle handle);
     void destroyDescriptorSetImpl(DescriptorSetHandle handle);
+
+    /**
+     * @brief 销毁渲染通道实现
+     */
+    void destroyRenderPassImpl(RenderPassHandle handle);
 
 private:
     MTL::Device* mtlDevice_{nullptr};           ///< Metal 设备对象
     MTL::CommandQueue* graphicsQueue_{nullptr}; ///< 图形命令队列
     MTL::CommandQueue* computeQueue_{nullptr};  ///< 计算命令队列
     MTL::CommandQueue* transferQueue_{nullptr}; ///< 传输命令队列
+    // === 显存管理 ===
+    class RHIAdaptiveMemoryPool* memoryPool_{nullptr}; ///< 自适应内存池 (Shared)
+    MTL::Heap* heap_{nullptr};                         ///< Metal堆 (Shared)
     
-    uint32_t currentFrameIndex_{0};             ///< 当前帧索引
+    std::atomic<uint32_t> currentFrameIndex_{0};             ///< 当前帧索引
     
     RHIAllocator<MetalBuffer> bufferAllocator_; ///< 缓冲区分配器
     RHIAllocator<MetalTexture> textureAllocator_; ///< 纹理分配器
@@ -241,7 +274,12 @@ private:
     RHIAllocator<MetalPipeline> pipelineAllocator_; ///< 管线分配器
     RHIAllocator<MetalSampler> samplerAllocator_; ///< 采样器分配器
     RHIAllocator<MetalDescriptorSetLayout> descriptorSetLayoutAllocator_; ///< 描述符集布局分配器
+    RHIAllocator<MetalPipelineLayout> pipelineLayoutAllocator_; ///< 管线布局分配器
     RHIAllocator<MetalDescriptorSet> descriptorSetAllocator_; ///< 描述符集分配器
+    RHIAllocator<MetalRenderPass> renderPassAllocator_; ///< 渲染通道分配器
+    
+    void initializeMemoryPool();
+    void shutdownMemoryPool();
 };
 
 } // namespace primal::graphics::rhi

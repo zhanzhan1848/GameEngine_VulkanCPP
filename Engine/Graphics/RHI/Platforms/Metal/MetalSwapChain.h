@@ -37,13 +37,13 @@ public:
      * @param fence 栅栏
      * @return 是否成功
      */
-    bool AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore = handles::INVALID_SYNC, SyncHandle fence = handles::INVALID_SYNC);
+    bool AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore = handles::INVALID_SYNC, SyncHandle fence = handles::INVALID_SYNC) override;
 
     /**
      * @brief 呈现画面
-     * @param vsync 是否开启垂直同步
+     * @param semaphore 等待的信号量
      */
-    void Present(bool vsync) override;
+    void Present(SyncHandle semaphore) override;
     uint32_t GetCurrentBackBufferIndex() const override;
     ResourceHandle GetBackBuffer(uint32_t index) const override;
 

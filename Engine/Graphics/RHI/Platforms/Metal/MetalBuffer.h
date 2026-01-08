@@ -42,6 +42,15 @@ public:
     bool Initialize() override;
 
     /**
+     * @brief 设置堆分配信息
+     * @param heap Metal堆对象
+     * @param offset 堆内偏移
+     * @param pool 来源内存池（用于释放）
+     * @param handle 内存池分配句柄
+     */
+    void SetHeapAllocation(MTL::Heap* heap, uint64_t offset, class RHIAdaptiveMemoryPool* pool, uint32_t handle);
+
+    /**
      * @brief 获取Metal缓冲区对象
      * @return MTLBuffer指针
      */
@@ -58,6 +67,12 @@ protected:
 private:
     MTL::Buffer* mtlBuffer_{nullptr};   ///< Metal缓冲区对象
     
+    // 堆分配信息
+    MTL::Heap* heap_{nullptr};          ///< 来源堆
+    uint64_t heapOffset_{0};            ///< 堆内偏移
+    class RHIAdaptiveMemoryPool* pool_{nullptr}; ///< 来源内存池
+    uint32_t poolHandle_{0};            ///< 内存池分配句柄
+
     // 辅助函数
     MTL::ResourceOptions getResourceOptions() const;
 };

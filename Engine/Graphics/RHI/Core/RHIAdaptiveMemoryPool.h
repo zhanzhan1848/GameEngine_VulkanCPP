@@ -385,6 +385,7 @@ private:
     
     // 分配记录跟踪
     std::unordered_map<u32, AllocationRecord> allocationRecords_; ///< 分配记录映射
+    std::unordered_map<u32, u32> handleToBlockIndex_;             ///< 句柄到内存块索引的映射
     primal::utl::vector<u32> activeAllocations_;   ///< 活跃分配列表
     u64 totalAllocationTime_;                       ///< 总分配时间
     u64 totalDeallocationTime_;                     ///< 总释放时间

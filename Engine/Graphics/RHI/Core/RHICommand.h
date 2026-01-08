@@ -17,33 +17,13 @@ namespace primal::graphics::rhi {
 // === 前向声明 ===
 class RHIDeviceBase;
 class RHIBuffer;
+template<typename T> class RHIAllocator;
 class RHITexture;
 struct Rect;
 struct Viewport;
 struct ColorBlendState;
 struct DepthStencilState;
 struct RasterizerState;
-
-
-
-/**
- * @brief 加载操作枚举
- * @details 定义渲染目标加载时的操作类型
- */
-enum class LoadAction {
-    Load = 0,           ///< 加载现有内容
-    Clear = 1,          ///< 清除为指定值
-    DontCare = 2        ///< 不关心原有内容
-};
-
-/**
- * @brief 存储操作枚举
- * @details 定义渲染目标存储时的操作类型
- */
-enum class StoreAction {
-    Store = 0,          ///< 存储渲染结果
-    DontCare = 1        ///< 不关心渲染结果
-};
 
 /**
  * @brief 命令缓冲区状态枚举
@@ -122,37 +102,6 @@ enum class CommandType : uint16_t {
     ImmediateExecute = 1000
 };
 
-/**
- * @brief 渲染通道描述符
- * @details 定义渲染通道的配置参数
- */
-struct RenderPassDesc {
-    struct Attachment {
-        ResourceHandle texture;           ///< 渲染目标纹理
-        DataFormat format;                ///< 数据格式
-        LoadAction loadOp;                ///< 加载操作
-        StoreAction storeOp;              ///< 存储操作
-        ClearValue clearValue;            ///< 清除值
-        u32 sampleCount;           ///< 采样数量
-        uint8_t mipLevel;                 ///< Mip层级
-        uint16_t arrayLayer;              ///< 数组层级
-        
-        Attachment() : texture(handles::INVALID_RESOURCE), format(DataFormat::Unknown),
-                      loadOp(LoadAction::DontCare), storeOp(StoreAction::Store),
-                      sampleCount(1), mipLevel(0), arrayLayer(0) {}
-    };
-    
-    utl::vector<Attachment> colorAttachments;   ///< 颜色附件
-    Attachment depthAttachment;                 ///< 深度附件
-    Attachment stencilAttachment;              ///< 模板附件
-    
-    ViewportDesc viewport;                       ///< 视口
-    Rect scissor;                               ///< 裁剪矩形
-    
-    RenderPassDesc() {
-        colorAttachments.reserve(constants::MAX_RENDER_TARGETS);
-    }
-};
 
 /**
  * @brief 描述符集绑定信息
@@ -210,6 +159,7 @@ struct CommandStats {
  * @details 提供命令记录和执行的核心接口
  */
 class RHICommandBuffer {
+    template<typename T> friend class RHIAllocator;
 public:
     // === 构造函数和析构函数 ===
     
@@ -346,6 +296,24 @@ public:
         return result;
     }
     
+    /**
+     * @brief 添加等待信号量
+     * @param semaphore 信号量句柄
+     * @param value 等待值
+     */
+    void AddWaitSemaphore(SyncHandle semaphore, uint64_t value) {
+        waitSemaphores_.push_back({semaphore, value});
+    }
+
+    /**
+     * @brief 添加发送信号量
+     * @param semaphore 信号量句柄
+     * @param value 发送值
+     */
+    void AddSignalSemaphore(SyncHandle semaphore, uint64_t value) {
+        signalSemaphores_.push_back({semaphore, value});
+    }
+
     // === 渲染命令 ===
     
     /**
@@ -353,6 +321,12 @@ public:
      * @param desc 渲染通道描述符
      */
     virtual void BeginRenderPass(const RenderPassDesc& desc) = 0;
+
+    /**
+     * @brief 开始渲染通道 (使用句柄)
+     * @param renderPass 渲染通道句柄
+     */
+    virtual void BeginRenderPass(RenderPassHandle renderPass) = 0;
     
     /**
      * @brief 结束渲染通道
@@ -549,7 +523,14 @@ protected:
     
     // === 受保护的成员变量 ===
     
-    RHIDeviceBase& device_;                   ///< 设备引用
+    struct SemaphoreInfo {
+        SyncHandle semaphore;
+        uint64_t value;
+    };
+    std::vector<SemaphoreInfo> waitSemaphores_;
+    std::vector<SemaphoreInfo> signalSemaphores_;
+
+    RHIDeviceBase& device_;              ///< 设备引用
     CommandQueueType type_;               ///< 命令队列类型
     CommandBufferHandle handle_;          ///< 命令缓冲区句柄
     CommandBufferState state_;            ///< 当前状态

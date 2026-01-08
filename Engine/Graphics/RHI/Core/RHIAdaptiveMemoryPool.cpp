@@ -222,6 +222,12 @@ bool RHIAdaptiveMemoryPool::Defragment() {
         return false;
     }
     
+    // TODO: 实现安全的碎片整理
+    // 当前实现使用了 std::sort，这会破坏 handleToBlockIndex_ 映射（因为它是基于索引的）。
+    // 在找到安全的重建映射方法之前，暂时禁用碎片整理。
+    return false;
+
+    /*
     const u64 startTime = getCurrentTimestamp();
     
     // 简单的碎片整理实现：合并相邻的空闲块
@@ -244,6 +250,15 @@ bool RHIAdaptiveMemoryPool::Defragment() {
                 
                 block.size += memoryBlocks_[i + 1].size;
                 memoryBlocks_.erase(memoryBlocks_.begin() + i + 1);
+                
+                // 更新映射：所有位于删除索引之后的块，其索引都需要减1
+                u32 erasedIndex = static_cast<u32>(i + 1);
+                for (auto& pair : handleToBlockIndex_) {
+                    if (pair.second > erasedIndex) {
+                        pair.second--;
+                    }
+                }
+                
                 --i; // 重新检查当前块
             }
             freeBlocks_.push_back(static_cast<u32>(i));
@@ -263,6 +278,7 @@ bool RHIAdaptiveMemoryPool::Defragment() {
     }
     
     return success;
+    */
 }
 
 bool RHIAdaptiveMemoryPool::Clear() {
@@ -288,6 +304,7 @@ bool RHIAdaptiveMemoryPool::Clear() {
     // 清空所有分配记录
     allocationRecords_.clear();
     activeAllocations_.clear();
+    handleToBlockIndex_.clear();
     accessTimestamps_.clear();
     
     // 清空热点和预分配块
@@ -308,14 +325,18 @@ bool RHIAdaptiveMemoryPool::Clear() {
 }
 
 MemoryBlock RHIAdaptiveMemoryPool::GetMemoryBlock(u32 blockHandle) const {
-    // 简化实现：返回一个空的内存块
-    // 实际实现需要维护句柄到块索引的映射
+    auto it = handleToBlockIndex_.find(blockHandle);
+    if (it != handleToBlockIndex_.end()) {
+        u32 blockIndex = it->second;
+        if (blockIndex < memoryBlocks_.size()) {
+            return memoryBlocks_[blockIndex];
+        }
+    }
     return MemoryBlock{};
 }
 
 bool RHIAdaptiveMemoryPool::IsValidBlock(u32 blockHandle) const {
-    // 简化实现：检查句柄范围
-    return blockHandle > 0 && blockHandle < nextBlockHandle_;
+    return handleToBlockIndex_.find(blockHandle) != handleToBlockIndex_.end();
 }
 
 bool RHIAdaptiveMemoryPool::Validate() const {
@@ -331,6 +352,7 @@ void RHIAdaptiveMemoryPool::destroyImpl() {
     // 清理所有自适应数据
     allocationRecords_.clear();
     activeAllocations_.clear();
+    handleToBlockIndex_.clear();
     accessTimestamps_.clear();
     hotspotBlocks_.clear();
     preallocatedBlocks_.clear();
@@ -1119,43 +1141,64 @@ u32 RHIAdaptiveMemoryPool::allocateFromMemoryPool(u64 size, u64 alignment, GPUMe
         u32 blockIndex = freeBlocks_[i];
         if (blockIndex >= memoryBlocks_.size()) continue;
         
-        MemoryBlock& block = memoryBlocks_[blockIndex];
+        // 注意：不要在这里获取引用，因为 push_back 可能导致 vector 扩容使引用失效
+        // MemoryBlock& block = memoryBlocks_[blockIndex];
         
         // 检查块是否空闲且大小足够
-        if (block.state == MemoryBlockState::Free && block.size >= alignedSize) {
-            // 检查对齐要求
-            u64 alignedOffset = RHIMemoryPool::AlignSize(block.offset, alignment ? alignment : 256);
-            u64 alignmentGap = alignedOffset - block.offset;
+        if (memoryBlocks_[blockIndex].state == MemoryBlockState::Free) {
+            u64 currentOffset = memoryBlocks_[blockIndex].offset;
+            u64 currentSize = memoryBlocks_[blockIndex].size;
+            u64 currentAlignment = memoryBlocks_[blockIndex].alignment;
             
-            if (alignmentGap <= block.size) {
-                // 标记为已分配
-                block.state = MemoryBlockState::Allocated;
-                block.usage = usage;
+            // 计算对齐后的起始位置
+            u64 alignedOffset = RHIMemoryPool::AlignSize(currentOffset, alignment ? alignment : 256);
+            u64 alignmentGap = alignedOffset - currentOffset;
+            
+            // 检查包含 Gap 后是否仍然足够
+            if (currentSize >= alignedSize + alignmentGap) {
+                // 1. 处理 Gap (如果有)
+                if (alignmentGap > 0) {
+                    MemoryBlock gapBlock;
+                    gapBlock.offset = currentOffset;
+                    gapBlock.size = alignmentGap;
+                    gapBlock.alignment = currentAlignment;
+                    gapBlock.state = MemoryBlockState::Free;
+                    gapBlock.usage = GPUMemoryUsage::Unknown;
+                    
+                    // 添加到 memoryBlocks_ 末尾
+                    memoryBlocks_.push_back(gapBlock);
+                    // 添加到 freeBlocks_
+                    freeBlocks_.push_back(static_cast<u32>(memoryBlocks_.size() - 1));
+                }
                 
-                // 如果有剩余空间，创建新的空闲块
-                if (block.size > alignedSize + alignmentGap) {
+                // 2. 处理剩余部分 (如果有)
+                u64 remainingSize = currentSize - alignmentGap - alignedSize;
+                if (remainingSize > 0) {
                     MemoryBlock remainderBlock;
                     remainderBlock.offset = alignedOffset + alignedSize;
-                    remainderBlock.size = block.size - alignedSize - alignmentGap;
-                    remainderBlock.alignment = block.alignment;
+                    remainderBlock.size = remainingSize;
+                    remainderBlock.alignment = currentAlignment;
                     remainderBlock.state = MemoryBlockState::Free;
                     remainderBlock.usage = GPUMemoryUsage::Unknown;
                     
-                    // 更新当前块大小
-                    block.size = alignedSize + alignmentGap;
-                    block.offset = alignedOffset;
-                    
-                    // 添加新块到内存块列表
-                    u32 newBlockIndex = static_cast<u32>(memoryBlocks_.size());
                     memoryBlocks_.push_back(remainderBlock);
-                    freeBlocks_.push_back(newBlockIndex);
+                    freeBlocks_.push_back(static_cast<u32>(memoryBlocks_.size() - 1));
                 }
                 
-                // 从空闲列表中移除
+                // 3. 更新当前块为 Allocated
+                // 此时再次通过索引访问是安全的
+                memoryBlocks_[blockIndex].offset = alignedOffset;
+                memoryBlocks_[blockIndex].size = alignedSize;
+                memoryBlocks_[blockIndex].state = MemoryBlockState::Allocated;
+                memoryBlocks_[blockIndex].usage = usage;
+                
+                // 从 freeBlocks_ 中移除当前块
                 freeBlocks_.erase(freeBlocks_.begin() + i);
                 
-                // 返回块句柄
-                return nextBlockHandle_++;
+                // 返回 Handle
+                u32 handle = nextBlockHandle_++;
+                handleToBlockIndex_[handle] = blockIndex;
+                return handle;
             }
         }
     }
@@ -1164,13 +1207,27 @@ u32 RHIAdaptiveMemoryPool::allocateFromMemoryPool(u64 size, u64 alignment, GPUMe
 }
 
 void RHIAdaptiveMemoryPool::deallocateFromMemoryPool(u32 blockHandle) {
-    // 简单实现：将块标记为空闲并添加到空闲列表
-    if (blockHandle == 0 || blockHandle >= nextBlockHandle_) {
+    auto it = handleToBlockIndex_.find(blockHandle);
+    if (it == handleToBlockIndex_.end()) {
         return; // 无效句柄
     }
     
-    // 这里简化处理，实际需要维护句柄到块索引的映射
-    // 暂时不实现具体的释放逻辑
+    u32 blockIndex = it->second;
+    if (blockIndex >= memoryBlocks_.size()) {
+        // 异常情况，清理映射
+        handleToBlockIndex_.erase(it);
+        return;
+    }
+    
+    MemoryBlock& block = memoryBlocks_[blockIndex];
+    block.state = MemoryBlockState::Free;
+    block.usage = GPUMemoryUsage::Unknown;
+    
+    // 添加到空闲列表
+    freeBlocks_.push_back(blockIndex);
+    
+    // 移除映射
+    handleToBlockIndex_.erase(it);
 }
 
 void RHIAdaptiveMemoryPool::logAdaptiveEvent(const char* event, const char* details) const {
