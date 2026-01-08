@@ -72,6 +72,19 @@ struct DeviceInfo {
 // === 管线描述符结构体（前向声明） ===
 
 /**
+ * @brief 模板操作描述符
+ */
+struct StencilOpDesc {
+    StencilOp failOp;       ///< 模板测试失败操作
+    StencilOp depthFailOp;  ///< 深度测试失败操作
+    StencilOp passOp;       ///< 模板/深度测试通过操作
+    ComparisonFunc func;    ///< 比较函数
+    
+    StencilOpDesc() : failOp(StencilOp::Keep), depthFailOp(StencilOp::Keep), 
+                      passOp(StencilOp::Keep), func(ComparisonFunc::Always) {}
+};
+
+/**
  * @brief 图形管线描述符
  */
 struct GraphicsPipelineDesc {
@@ -101,6 +114,9 @@ struct GraphicsPipelineDesc {
     bool enableStencilTest;             ///< 是否启用模板测试
     uint8_t stencilReadMask;           ///< 模板读取掩码
     uint8_t stencilWriteMask;           ///< 模板写入掩码
+    
+    StencilOpDesc frontStencil;         ///< 正面模板操作
+    StencilOpDesc backStencil;          ///< 背面模板操作
     
     bool enableBlend;                   ///< 是否启用混合
     BlendFactor srcColorBlendFactor;    ///< 源颜色混合因子
@@ -384,6 +400,27 @@ public:
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_RESOURCE) {
             derived().destroyDescriptorSetLayoutImpl(handle);
+        }
+    }
+
+    /**
+     * @brief 创建管线布局
+     * @param desc 管线布局描述符
+     * @return 管线布局句柄
+     */
+    PipelineLayoutHandle CreatePipelineLayout(const PipelineLayoutDesc& desc) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().createPipelineLayoutImpl(desc);
+    }
+
+    /**
+     * @brief 销毁管线布局
+     * @param handle 管线布局句柄
+     */
+    void DestroyPipelineLayout(PipelineLayoutHandle handle) override {
+        assert(isValid_ && "Device not initialized");
+        if (handle != handles::INVALID_PIPELINE_LAYOUT) {
+            derived().destroyPipelineLayoutImpl(handle);
         }
     }
 

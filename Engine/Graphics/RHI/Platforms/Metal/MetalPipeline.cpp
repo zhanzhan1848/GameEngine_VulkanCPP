@@ -84,6 +84,20 @@ namespace {
             default: return MTL::BlendFactorOne;
         }
     }
+
+    MTL::StencilOperation ToMTLStencilOperation(StencilOp op) {
+        switch (op) {
+            case StencilOp::Keep: return MTL::StencilOperationKeep;
+            case StencilOp::Zero: return MTL::StencilOperationZero;
+            case StencilOp::Replace: return MTL::StencilOperationReplace;
+            case StencilOp::IncSat: return MTL::StencilOperationIncrementClamp;
+            case StencilOp::DecSat: return MTL::StencilOperationDecrementClamp;
+            case StencilOp::Invert: return MTL::StencilOperationInvert;
+            case StencilOp::Inc: return MTL::StencilOperationIncrementWrap;
+            case StencilOp::Dec: return MTL::StencilOperationDecrementWrap;
+            default: return MTL::StencilOperationKeep;
+        }
+    }
 }
 
 MetalPipeline::MetalPipeline(MetalDevice& device) : device_(device) {}
@@ -183,7 +197,27 @@ MTL::DepthStencilState* MetalPipeline::CreateDepthStencilState(const GraphicsPip
         depthStencilDesc->setDepthWriteEnabled(false);
     }
     
-    // TODO: Stencil support
+    if (desc.enableStencilTest) {
+        MTL::StencilDescriptor* frontDesc = MTL::StencilDescriptor::alloc()->init();
+        frontDesc->setStencilCompareFunction(ToMTLCompareFunction(desc.frontStencil.func));
+        frontDesc->setStencilFailureOperation(ToMTLStencilOperation(desc.frontStencil.failOp));
+        frontDesc->setDepthFailureOperation(ToMTLStencilOperation(desc.frontStencil.depthFailOp));
+        frontDesc->setDepthStencilPassOperation(ToMTLStencilOperation(desc.frontStencil.passOp));
+        frontDesc->setReadMask(desc.stencilReadMask);
+        frontDesc->setWriteMask(desc.stencilWriteMask);
+        depthStencilDesc->setFrontFaceStencil(frontDesc);
+        frontDesc->release();
+
+        MTL::StencilDescriptor* backDesc = MTL::StencilDescriptor::alloc()->init();
+        backDesc->setStencilCompareFunction(ToMTLCompareFunction(desc.backStencil.func));
+        backDesc->setStencilFailureOperation(ToMTLStencilOperation(desc.backStencil.failOp));
+        backDesc->setDepthFailureOperation(ToMTLStencilOperation(desc.backStencil.depthFailOp));
+        backDesc->setDepthStencilPassOperation(ToMTLStencilOperation(desc.backStencil.passOp));
+        backDesc->setReadMask(desc.stencilReadMask);
+        backDesc->setWriteMask(desc.stencilWriteMask);
+        depthStencilDesc->setBackFaceStencil(backDesc);
+        backDesc->release();
+    }
 
     MTL::DepthStencilState* state = device_.GetNativeDevice()->newDepthStencilState(depthStencilDesc);
     depthStencilDesc->release();

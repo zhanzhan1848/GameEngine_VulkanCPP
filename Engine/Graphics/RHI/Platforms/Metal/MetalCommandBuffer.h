@@ -139,6 +139,9 @@ private:
     
     // 计算状态跟踪
     MTL::Size currentThreadGroupSize_{1, 1, 1};
+
+    // 线程调试
+    std::thread::id recordingThreadId_;
 };
 
 } // namespace primal::graphics::rhi

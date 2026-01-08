@@ -59,6 +59,11 @@ namespace primal::utl
 			--_size;
 		}
 
+        constexpr void reserve(u32 count)
+        {
+            _array.reserve(count);
+        }
+
 		constexpr u32 size() const
 		{
 			return _size;

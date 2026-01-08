@@ -75,6 +75,15 @@ public:
     }
 
     /**
+     * @brief 预分配容量
+     * @param count 容量大小
+     */
+    void Reserve(uint32_t count) {
+        std::unique_lock<std::shared_mutex> lock(_mutex);
+        _pool.reserve(count);
+    }
+
+    /**
      * @brief 销毁分配器并检查泄漏
      */
     void Destroy() {

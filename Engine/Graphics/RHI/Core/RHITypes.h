@@ -838,9 +838,10 @@ struct SamplerDesc {
  */
 struct ComputePipelineDesc {
     ShaderHandle computeShader;         ///< 计算着色器
+    PipelineLayoutHandle layout;        ///< 管线布局
     math::u32v3 threadGroupSize;        ///< 线程组大小 (x, y, z)
     
-    ComputePipelineDesc() : computeShader(handles::INVALID_SHADER), threadGroupSize{1, 1, 1} {}
+    ComputePipelineDesc() : computeShader(handles::INVALID_SHADER), layout(handles::INVALID_PIPELINE_LAYOUT), threadGroupSize{1, 1, 1} {}
 };
 
 /**

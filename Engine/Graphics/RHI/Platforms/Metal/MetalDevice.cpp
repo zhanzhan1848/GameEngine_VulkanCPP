@@ -53,6 +53,10 @@ bool MetalDevice::initializeImpl() {
 
     initializeMemoryPool();
 
+    // 预分配资源以避免多线程扩容导致指针失效
+    // 尤其是 CommandBuffer，在多线程渲染中非常关键
+    commandBufferAllocator_.Reserve(256);
+
     return true;
 }
 

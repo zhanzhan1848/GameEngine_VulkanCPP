@@ -39,13 +39,14 @@ bool MetalShader::Initialize() {
         if (error) {
             // std::cerr << "[MetalShader] Failed to create library from binary: " 
             //           << error->localizedDescription()->utf8String() << std::endl;
-            error->release();
+            // Error is autoreleased, do not release manually
             error = nullptr;
         }
 
-        NS::String* source = NS::String::string(static_cast<const char*>(data_), NS::UTF8StringEncoding);
+        NS::String* source = NS::String::alloc()->init(static_cast<const char*>(data_), NS::UTF8StringEncoding);
         MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();
         library_ = device_.GetNativeDevice()->newLibrary(source, options, &error);
+        source->release();
         options->release();
     }
 
@@ -53,14 +54,15 @@ bool MetalShader::Initialize() {
         if (error) {
             std::cerr << "[MetalShader] Failed to create library: " 
                       << error->localizedDescription()->utf8String() << std::endl;
-            error->release();
+            // Error is autoreleased, do not release manually
         }
         return false;
     }
 
     // Get entry point function
-    NS::String* nsEntryPoint = NS::String::string(entryPoint_.c_str(), NS::UTF8StringEncoding);
+    NS::String* nsEntryPoint = NS::String::alloc()->init(entryPoint_.c_str(), NS::UTF8StringEncoding);
     function_ = library_->newFunction(nsEntryPoint);
+    nsEntryPoint->release();
     
     if (!function_) {
         std::cerr << "[MetalShader] Failed to find entry point: " << entryPoint_ << std::endl;

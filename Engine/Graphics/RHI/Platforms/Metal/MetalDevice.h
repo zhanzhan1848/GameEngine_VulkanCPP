@@ -212,6 +212,9 @@ protected:
 
     // === 资源创建接口实现 ===
     
+    /**
+     * @brief 创建缓冲区实现
+     */
     ResourceHandle createBufferImpl(const BufferDesc& desc);
     ResourceHandle createTextureImpl(const TextureDesc& desc);
     ShaderHandle createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint);
@@ -220,6 +223,10 @@ protected:
      * @brief 创建图形管线实现
      */
     PipelineHandle createGraphicsPipelineImpl(const GraphicsPipelineDesc& desc);
+
+    /**
+     * @brief 创建计算管线实现
+     */
     PipelineHandle createComputePipelineImpl(const ComputePipelineDesc& desc);
     CommandBufferHandle createCommandBufferImpl(CommandQueueType type);
     SamplerHandle createSamplerImpl(const SamplerDesc& desc);
@@ -242,6 +249,10 @@ protected:
      * @brief 销毁着色器实现
      */
     void destroyShaderImpl(ShaderHandle handle);
+
+    /**
+     * @brief 销毁管线实现
+     */
     void destroyPipelineImpl(PipelineHandle handle);
     void destroyCommandBufferImpl(CommandBufferHandle handle);
     void destroySamplerImpl(SamplerHandle handle);

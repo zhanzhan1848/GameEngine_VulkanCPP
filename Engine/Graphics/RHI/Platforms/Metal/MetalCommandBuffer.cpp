@@ -10,7 +10,10 @@
 #include "MetalDevice.h"
 #include "MetalBuffer.h"
 #include "MetalSync.h"
+#include "MetalDescriptorSet.h"
+#include "MetalTexture.h"
 #include <iostream>
+#include <thread>
 
 namespace primal::graphics::rhi {
 
@@ -59,7 +62,13 @@ void MetalCommandBuffer::destroyImpl() {
     }
     
     if (pool_) {
-        pool_->release();
+        if (std::this_thread::get_id() == recordingThreadId_) {
+            pool_->release();
+        } else {
+            std::cerr << "[MetalCommandBuffer] Warning: destroyImpl called on wrong thread (" 
+                      << std::this_thread::get_id() << "), expected " << recordingThreadId_ 
+                      << ". Leaking pool." << std::endl;
+        }
         pool_ = nullptr;
     }
 
@@ -80,6 +89,9 @@ bool MetalCommandBuffer::beginImpl() {
     if (mtlCommandBuffer_) {
         return false; // Already recording or recorded
     }
+
+    recordingThreadId_ = std::this_thread::get_id();
+    // std::cout << "[MetalCommandBuffer] BeginImpl: " << this << " Thread: " << recordingThreadId_ << std::endl;
 
     // Create autorelease pool for the recording session
     pool_ = NS::AutoreleasePool::alloc()->init();
@@ -122,10 +134,18 @@ bool MetalCommandBuffer::beginImpl() {
 bool MetalCommandBuffer::endImpl() {
     endCurrentEncoder();
     
+    // std::cout << "[MetalCommandBuffer] EndImpl: " << this << " Thread: " << std::this_thread::get_id() << std::endl;
+
     // Release the autorelease pool created in Begin()
     // This MUST be done on the same thread that called Begin()
     if (pool_) {
-        pool_->release();
+        if (std::this_thread::get_id() == recordingThreadId_) {
+            pool_->release();
+        } else {
+            std::cerr << "[MetalCommandBuffer] Error: EndImpl called on wrong thread (" 
+                      << std::this_thread::get_id() << "), expected " << recordingThreadId_ 
+                      << ". Leaking pool." << std::endl;
+        }
         pool_ = nullptr;
     }
     
@@ -561,6 +581,11 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                                            const uint32_t* dynamicOffsets) {
     if (setCount == 0 || !descriptorSets) return;
 
+    if (std::this_thread::get_id() != recordingThreadId_) {
+         std::cerr << "[MetalCommandBuffer] Error: BindDescriptorSets called on wrong thread (" 
+                   << std::this_thread::get_id() << "), expected " << recordingThreadId_ << std::endl;
+    }
+
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     
     // Determine encoder based on bindPoint
@@ -608,10 +633,13 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     if (buffer && buffer->GetNativeBuffer()) {
                         uint64_t offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
                         if (renderEncoder) {
-                            renderEncoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, slot);
-                            renderEncoder->setFragmentBuffer(buffer->GetNativeBuffer(), offset, slot);
+                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                                renderEncoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, slot);
+                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                                renderEncoder->setFragmentBuffer(buffer->GetNativeBuffer(), offset, slot);
                         } else if (computeEncoder) {
-                            computeEncoder->setBuffer(buffer->GetNativeBuffer(), offset, slot);
+                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                                computeEncoder->setBuffer(buffer->GetNativeBuffer(), offset, slot);
                         }
                     }
                     break;
@@ -624,10 +652,13 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     MetalTexture* texture = metalDevice.GetTexture(binding.resources[0]);
                     if (texture && texture->GetNativeTexture()) {
                         if (renderEncoder) {
-                            renderEncoder->setFragmentTexture(texture->GetNativeTexture(), slot);
-                            renderEncoder->setVertexTexture(texture->GetNativeTexture(), slot);
+                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                                renderEncoder->setVertexTexture(texture->GetNativeTexture(), slot);
+                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                                renderEncoder->setFragmentTexture(texture->GetNativeTexture(), slot);
                         } else if (computeEncoder) {
-                            computeEncoder->setTexture(texture->GetNativeTexture(), slot);
+                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                                computeEncoder->setTexture(texture->GetNativeTexture(), slot);
                         }
                     }
                     
@@ -635,10 +666,13 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                         MetalSampler* sampler = metalDevice.GetSampler(binding.samplers[0]);
                         if (sampler && sampler->GetSamplerState()) {
                              if (renderEncoder) {
-                                renderEncoder->setFragmentSamplerState(sampler->GetSamplerState(), slot);
-                                renderEncoder->setVertexSamplerState(sampler->GetSamplerState(), slot);
+                                if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                                    renderEncoder->setVertexSamplerState(sampler->GetSamplerState(), slot);
+                                if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                                    renderEncoder->setFragmentSamplerState(sampler->GetSamplerState(), slot);
                             } else if (computeEncoder) {
-                                computeEncoder->setSamplerState(sampler->GetSamplerState(), slot);
+                                if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                                    computeEncoder->setSamplerState(sampler->GetSamplerState(), slot);
                             }
                         }
                     }
@@ -649,10 +683,13 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                      MetalSampler* sampler = metalDevice.GetSampler(binding.samplers[0]);
                      if (sampler && sampler->GetSamplerState()) {
                          if (renderEncoder) {
-                            renderEncoder->setFragmentSamplerState(sampler->GetSamplerState(), slot);
-                            renderEncoder->setVertexSamplerState(sampler->GetSamplerState(), slot);
+                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                                renderEncoder->setVertexSamplerState(sampler->GetSamplerState(), slot);
+                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                                renderEncoder->setFragmentSamplerState(sampler->GetSamplerState(), slot);
                         } else if (computeEncoder) {
-                            computeEncoder->setSamplerState(sampler->GetSamplerState(), slot);
+                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                                computeEncoder->setSamplerState(sampler->GetSamplerState(), slot);
                         }
                     }
                     break;

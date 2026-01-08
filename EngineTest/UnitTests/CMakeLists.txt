@@ -98,6 +98,22 @@ if(APPLE)
         ${CMAKE_SOURCE_DIR}/OSAPI/MAC
     )
     # MetalMath是header-only的，不需要链接Metal框架，只需要Foundation等
+
+    # 创建Metal Pipeline测试
+    add_executable(TestMetalPipeline Graphics/Metal/TestMetalPipeline.cpp)
+    target_include_directories(TestMetalPipeline PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    # 链接 Engine 库 (包含 Metal RHI 实现)
+    target_link_libraries(TestMetalPipeline PRIVATE Engine)
+    add_test(NAME TestMetalPipeline COMMAND TestMetalPipeline)
+    set_target_properties(TestMetalPipeline PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
     target_link_libraries(TestMetalMath PRIVATE 
         "-framework Foundation"
         "-framework Metal"
@@ -186,6 +202,26 @@ if(APPLE)
     )
     add_test(NAME TestMetalCommandBuffer COMMAND TestMetalCommandBuffer)
     set_target_properties(TestMetalCommandBuffer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建Metal资源绑定测试
+    add_executable(TestMetalResourceBinding Graphics/Metal/TestMetalResourceBinding.cpp)
+    target_include_directories(TestMetalResourceBinding PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalResourceBinding PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalResourceBinding COMMAND TestMetalResourceBinding)
+    set_target_properties(TestMetalResourceBinding PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
 
