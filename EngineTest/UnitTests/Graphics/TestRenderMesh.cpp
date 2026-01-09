@@ -102,6 +102,15 @@ public:
     void CopyBuffer(ResourceHandle /*src*/, ResourceHandle /*dst*/, uint64_t /*srcOffset*/, uint64_t /*dstOffset*/, uint64_t /*size*/) override {
         calls.push_back("CopyBuffer");
     }
+    void CopyBufferToTexture(ResourceHandle /*srcBuffer*/, ResourceHandle /*dstTexture*/, const BufferTextureCopyRegion* /*regions*/, uint32_t /*regionCount*/) override {
+        calls.push_back("CopyBufferToTexture");
+    }
+    void CopyTextureToBuffer(ResourceHandle /*srcTexture*/, ResourceHandle /*dstBuffer*/, const BufferTextureCopyRegion* /*regions*/, uint32_t /*regionCount*/) override {
+        calls.push_back("CopyTextureToBuffer");
+    }
+    void BlitTexture(ResourceHandle /*src*/, ResourceHandle /*dst*/, const TextureBlitRegion* /*regions*/, uint32_t /*regionCount*/, FilterMode /*filter*/) override {
+        calls.push_back("BlitTexture");
+    }
     void InsertBarrier(const ResourceBarrier* /*barriers*/, uint32_t /*barrierCount*/) override {
         calls.push_back("InsertBarrier");
     }
@@ -152,8 +161,8 @@ public:
     
     void DestroyTexture(ResourceHandle /*handle*/) override {}
 
-    // Helper for test (not in RHIDeviceBase)
-    CommandBufferHandle CreateCommandBuffer() { return reinterpret_cast<CommandBufferHandle>(new MockCommandBuffer(*this)); }
+    // Helper for test (overrides RHIDeviceBase)
+    CommandBufferHandle CreateCommandBuffer(CommandQueueType type = CommandQueueType::Graphics) override { return reinterpret_cast<CommandBufferHandle>(new MockCommandBuffer(*this)); }
     void DestroyCommandBuffer(CommandBufferHandle cmd) { delete reinterpret_cast<MockCommandBuffer*>(cmd); }
 
 private:

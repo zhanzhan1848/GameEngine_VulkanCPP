@@ -509,4 +509,16 @@ void PrintRenderPassDesc(const RenderPassDesc& desc) {
            desc.scissor.offset.y + static_cast<int>(desc.scissor.extent.y));
 }
 
+RHICommandBuffer* GetCommandBuffer(CommandBufferHandle handle) {
+    return CommandBufferManager::Instance().GetCommandBuffer(handle);
+}
+
+void RegisterCommandBuffer(RHICommandBuffer* cmd) {
+    CommandBufferManager::Instance().RegisterCommandBuffer(cmd);
+}
+
+void UnregisterCommandBuffer(CommandBufferHandle handle) {
+    CommandBufferManager::Instance().UnregisterCommandBuffer(handle);
+}
+
 } // namespace primal::graphics::rhi

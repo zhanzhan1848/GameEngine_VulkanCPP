@@ -680,6 +680,76 @@ struct ClearValue {
 };
 
 /**
+ * @brief 纹理子资源层
+ */
+struct TextureSubresourceLayers {
+    uint32_t mipLevel;       ///< Mip层级
+    uint32_t baseArrayLayer; ///< 起始数组层
+    uint32_t layerCount;     ///< 数组层数量
+    
+    TextureSubresourceLayers() : mipLevel(0), baseArrayLayer(0), layerCount(1) {}
+};
+
+/**
+ * @brief 3D 偏移量
+ */
+struct Offset3D {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    
+    Offset3D() : x(0), y(0), z(0) {}
+    Offset3D(int32_t _x, int32_t _y, int32_t _z) : x(_x), y(_y), z(_z) {}
+};
+
+/**
+ * @brief 3D 范围
+ */
+struct Extent3D {
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    
+    Extent3D() : width(0), height(0), depth(0) {}
+    Extent3D(uint32_t w, uint32_t h, uint32_t d) : width(w), height(h), depth(d) {}
+};
+
+/**
+ * @brief 缓冲区到纹理的复制区域
+ */
+struct BufferTextureCopyRegion {
+    uint64_t bufferOffset;       ///< 缓冲区偏移量
+    uint32_t bufferRowLength;    ///< 缓冲区行长（像素），0表示紧密排列
+    uint32_t bufferImageHeight;  ///< 缓冲区图像高度（像素），0表示紧密排列
+    TextureSubresourceLayers imageSubresource; ///< 纹理子资源
+    Offset3D imageOffset;        ///< 纹理偏移
+    Extent3D imageExtent;        ///< 纹理范围
+    
+    BufferTextureCopyRegion() : bufferOffset(0), bufferRowLength(0), bufferImageHeight(0) {}
+};
+
+/**
+ * @brief 纹理复制区域
+ */
+struct TextureCopyRegion {
+    TextureSubresourceLayers srcSubresource;
+    Offset3D srcOffset;
+    TextureSubresourceLayers dstSubresource;
+    Offset3D dstOffset;
+    Extent3D extent;
+};
+
+/**
+ * @brief 纹理Blit区域
+ */
+struct TextureBlitRegion {
+    TextureSubresourceLayers srcSubresource;
+    Offset3D srcOffsets[2];  ///< 源区域 [min, max]
+    TextureSubresourceLayers dstSubresource;
+    Offset3D dstOffsets[2];  ///< 目标区域 [min, max]
+};
+
+/**
  * @brief 顶点输入属性描述符
  */
 struct VertexInputAttribute {

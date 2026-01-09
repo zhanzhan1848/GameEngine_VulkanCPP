@@ -26,6 +26,25 @@ struct DepthStencilState;
 struct RasterizerState;
 
 /**
+ * @brief 获取命令缓冲区实例
+ * @param handle 命令缓冲区句柄
+ * @return 命令缓冲区指针，如果无效则返回nullptr
+ */
+RHICommandBuffer* GetCommandBuffer(CommandBufferHandle handle);
+
+/**
+ * @brief 注册命令缓冲区
+ * @param cmd 命令缓冲区指针
+ */
+void RegisterCommandBuffer(RHICommandBuffer* cmd);
+
+/**
+ * @brief 注销命令缓冲区
+ * @param handle 命令缓冲区句柄
+ */
+void UnregisterCommandBuffer(CommandBufferHandle handle);
+
+/**
  * @brief 命令缓冲区状态枚举
  * @details 描述命令缓冲区的记录状态
  */
@@ -453,6 +472,38 @@ public:
     virtual void CopyBuffer(ResourceHandle src, ResourceHandle dst,
                             uint64_t srcOffset = 0, uint64_t dstOffset = 0, uint64_t size = 0) = 0;
     
+    /**
+     * @brief 复制缓冲区到纹理
+     * @param srcBuffer 源缓冲区
+     * @param dstTexture 目标纹理
+     * @param regions 复制区域数组
+     * @param regionCount 区域数量
+     */
+    virtual void CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture,
+                                     const BufferTextureCopyRegion* regions, uint32_t regionCount) = 0;
+
+    /**
+     * @brief 复制纹理到缓冲区
+     * @param srcTexture 源纹理
+     * @param dstBuffer 目标缓冲区
+     * @param regions 复制区域数组
+     * @param regionCount 区域数量
+     */
+    virtual void CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer,
+                                     const BufferTextureCopyRegion* regions, uint32_t regionCount) = 0;
+
+    /**
+     * @brief 纹理Blit
+     * @param src 源纹理
+     * @param dst 目标纹理
+     * @param regions Blit区域数组
+     * @param regionCount 区域数量
+     * @param filter 过滤模式
+     */
+    virtual void BlitTexture(ResourceHandle src, ResourceHandle dst,
+                             const TextureBlitRegion* regions, uint32_t regionCount,
+                             FilterMode filter) = 0;
+
     /**
      * @brief 插入资源屏障
      * @param barrier 屏障描述符

@@ -449,6 +449,29 @@ target_compile_definitions(StandaloneGraphics_RenderMesh_Test PRIVATE DEBUG _DEB
 set_target_properties(StandaloneGraphics_RenderMesh_Test PROPERTIES FOLDER "Tests/Graphics")
 
 
+# 创建RenderTexture测试
+add_executable(StandaloneGraphics_RenderTexture_Test 
+    Graphics/TestRenderTexture.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderTexture.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+)
+# 添加Engine头文件包含路径
+target_include_directories(StandaloneGraphics_RenderTexture_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+# 不链接Engine库，使用源码编译以确保符号可见
+# target_link_libraries(StandaloneGraphics_RenderTexture_Test PRIVATE Engine)
+add_test(NAME StandaloneGraphics_RenderTexture_Test COMMAND StandaloneGraphics_RenderTexture_Test)
+set_target_properties(StandaloneGraphics_RenderTexture_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneGraphics_RenderTexture_Test PRIVATE DEBUG _DEBUG)
+set_target_properties(StandaloneGraphics_RenderTexture_Test PROPERTIES FOLDER "Tests/Graphics")
+
+
 # 设置moodycamel库路径
 set(MOODYCAMEL_ROOT ${CMAKE_SOURCE_DIR}/third_party/moodycamel-ConcurrentQueue)
 set(MOODYCAMEL_INCLUDE_DIRS ${MOODYCAMEL_ROOT})

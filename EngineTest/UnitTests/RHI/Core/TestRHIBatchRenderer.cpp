@@ -256,6 +256,9 @@ protected:
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override { (void)groupCountX; (void)groupCountY; (void)groupCountZ; }
     void DispatchIndirect(ResourceHandle buffer, uint64_t offset) override { (void)buffer; (void)offset; }
     void CopyBuffer(ResourceHandle src, ResourceHandle dst, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) override { (void)src; (void)dst; (void)srcOffset; (void)dstOffset; (void)size; }
+    void CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture, const BufferTextureCopyRegion* regions, uint32_t regionCount) override { (void)srcBuffer; (void)dstTexture; (void)regions; (void)regionCount; }
+    void CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer, const BufferTextureCopyRegion* regions, uint32_t regionCount) override { (void)srcTexture; (void)dstBuffer; (void)regions; (void)regionCount; }
+    void BlitTexture(ResourceHandle src, ResourceHandle dst, const TextureBlitRegion* regions, uint32_t regionCount, FilterMode filter) override { (void)src; (void)dst; (void)regions; (void)regionCount; (void)filter; }
     void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override { (void)barriers; (void)barrierCount; }
     
     void destroyImpl() override {}

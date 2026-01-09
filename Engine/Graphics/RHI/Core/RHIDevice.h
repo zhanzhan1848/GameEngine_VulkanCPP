@@ -195,6 +195,7 @@ public:
     virtual void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) = 0;
     virtual ResourceHandle CreateBuffer(const BufferDesc& desc) = 0;
     virtual ResourceHandle CreateTexture(const TextureDesc& desc) = 0;
+    virtual CommandBufferHandle CreateCommandBuffer(CommandQueueType type) = 0;
     virtual void DestroyBuffer(ResourceHandle handle) = 0;
     virtual void DestroyTexture(ResourceHandle handle) = 0;
 };

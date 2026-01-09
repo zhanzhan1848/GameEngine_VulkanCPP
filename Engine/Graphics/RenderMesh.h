@@ -86,11 +86,6 @@ public:
      */
     rhi::ResourceHandle GetIndexBuffer() const { return indexBuffer_; }
 
-    /**
-     * @brief 获取关联的实体ID
-     * @return 实体ID
-     */
-    primal::id::id_type GetEntityId() const { return entityId_; }
 
     /**
      * @brief 获取顶点数量

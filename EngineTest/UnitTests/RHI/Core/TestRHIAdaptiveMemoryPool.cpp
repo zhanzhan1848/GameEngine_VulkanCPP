@@ -127,6 +127,13 @@ public:
     void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) override {}
     PipelineLayoutHandle CreatePipelineLayout(const PipelineLayoutDesc& desc) override { return PipelineLayoutHandle{}; }
     void DestroyPipelineLayout(PipelineLayoutHandle handle) override {}
+    
+    // Implement missing pure virtuals
+    ResourceHandle CreateBuffer(const BufferDesc& desc) override { return handles::INVALID_RESOURCE; }
+    ResourceHandle CreateTexture(const TextureDesc& desc) override { return handles::INVALID_RESOURCE; }
+    CommandBufferHandle CreateCommandBuffer(CommandQueueType type) override { return handles::INVALID_COMMAND_BUFFER; }
+    void DestroyBuffer(ResourceHandle handle) override {}
+    void DestroyTexture(ResourceHandle handle) override {}
 };
 
 // === 测试用例 ===

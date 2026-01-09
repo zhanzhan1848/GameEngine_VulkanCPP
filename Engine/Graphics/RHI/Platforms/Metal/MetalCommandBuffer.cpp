@@ -839,4 +839,143 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
     // For now, empty.
 }
 
+// Helper for pixel format bytes
+static uint32_t GetBytesPerPixel(MTL::PixelFormat format) {
+    switch (format) {
+        case MTL::PixelFormatR8Unorm: return 1;
+        case MTL::PixelFormatRG8Unorm: return 2;
+        case MTL::PixelFormatRGBA8Unorm: 
+        case MTL::PixelFormatBGRA8Unorm:
+        case MTL::PixelFormatRGBA8Unorm_sRGB:
+        case MTL::PixelFormatBGRA8Unorm_sRGB: return 4;
+        case MTL::PixelFormatRGBA32Float: return 16;
+        case MTL::PixelFormatRGBA16Float: return 8;
+        case MTL::PixelFormatR32Float: return 4;
+        case MTL::PixelFormatDepth32Float: return 4;
+        default: return 4; // Fallback
+    }
+}
+
+void MetalCommandBuffer::CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture,
+                                             const BufferTextureCopyRegion* regions, uint32_t regionCount) {
+    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
+    if (!encoder) return;
+
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    MetalBuffer* src = metalDevice.GetBuffer(srcBuffer);
+    MetalTexture* dst = metalDevice.GetTexture(dstTexture);
+
+    if (src && dst && src->GetNativeBuffer() && dst->GetNativeTexture()) {
+        MTL::Texture* mtlTexture = dst->GetNativeTexture();
+        MTL::PixelFormat format = mtlTexture->pixelFormat();
+        uint32_t bpp = GetBytesPerPixel(format);
+
+        for (uint32_t i = 0; i < regionCount; ++i) {
+            const auto& region = regions[i];
+            
+            MTL::Origin origin(region.imageOffset.x, region.imageOffset.y, region.imageOffset.z);
+            MTL::Size size(region.imageExtent.width, region.imageExtent.height, region.imageExtent.depth);
+            
+            NS::UInteger rowLength = region.bufferRowLength > 0 ? region.bufferRowLength : region.imageExtent.width;
+            NS::UInteger imageHeight = region.bufferImageHeight > 0 ? region.bufferImageHeight : region.imageExtent.height;
+            
+            NS::UInteger bytesPerRow = rowLength * bpp;
+            NS::UInteger bytesPerImage = imageHeight * bytesPerRow;
+            
+            encoder->copyFromBuffer(
+                src->GetNativeBuffer(),
+                region.bufferOffset,
+                bytesPerRow,
+                bytesPerImage,
+                size,
+                mtlTexture,
+                region.imageSubresource.baseArrayLayer,
+                region.imageSubresource.mipLevel,
+                origin
+            );
+        }
+    }
+}
+
+void MetalCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer,
+                                             const BufferTextureCopyRegion* regions, uint32_t regionCount) {
+    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
+    if (!encoder) return;
+
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    MetalTexture* src = metalDevice.GetTexture(srcTexture);
+    MetalBuffer* dst = metalDevice.GetBuffer(dstBuffer);
+
+    if (src && dst && src->GetNativeTexture() && dst->GetNativeBuffer()) {
+        MTL::Texture* mtlTexture = src->GetNativeTexture();
+        MTL::PixelFormat format = mtlTexture->pixelFormat();
+        uint32_t bpp = GetBytesPerPixel(format);
+
+        for (uint32_t i = 0; i < regionCount; ++i) {
+            const auto& region = regions[i];
+            
+            MTL::Origin origin(region.imageOffset.x, region.imageOffset.y, region.imageOffset.z);
+            MTL::Size size(region.imageExtent.width, region.imageExtent.height, region.imageExtent.depth);
+            
+            NS::UInteger rowLength = region.bufferRowLength > 0 ? region.bufferRowLength : region.imageExtent.width;
+            NS::UInteger imageHeight = region.bufferImageHeight > 0 ? region.bufferImageHeight : region.imageExtent.height;
+            
+            NS::UInteger bytesPerRow = rowLength * bpp;
+            NS::UInteger bytesPerImage = imageHeight * bytesPerRow;
+            
+            encoder->copyFromTexture(
+                mtlTexture,
+                region.imageSubresource.baseArrayLayer,
+                region.imageSubresource.mipLevel,
+                origin,
+                size,
+                dst->GetNativeBuffer(),
+                region.bufferOffset,
+                bytesPerRow,
+                bytesPerImage
+            );
+        }
+    }
+}
+
+void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
+                                     const TextureBlitRegion* regions, uint32_t regionCount,
+                                     FilterMode filter) {
+    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
+    if (!encoder) return;
+
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    MetalTexture* srcTex = metalDevice.GetTexture(src);
+    MetalTexture* dstTex = metalDevice.GetTexture(dst);
+
+    if (srcTex && dstTex && srcTex->GetNativeTexture() && dstTex->GetNativeTexture()) {
+        for (uint32_t i = 0; i < regionCount; ++i) {
+            const auto& region = regions[i];
+            
+            MTL::Origin srcOrigin(region.srcOffsets[0].x, region.srcOffsets[0].y, region.srcOffsets[0].z);
+            MTL::Size srcSize(
+                region.srcOffsets[1].x - region.srcOffsets[0].x,
+                region.srcOffsets[1].y - region.srcOffsets[0].y,
+                region.srcOffsets[1].z - region.srcOffsets[0].z
+            );
+            
+            MTL::Origin dstOrigin(region.dstOffsets[0].x, region.dstOffsets[0].y, region.dstOffsets[0].z);
+            
+            // MTLBlitCommandEncoder copyFromTexture does not support scaling.
+            // This implementation assumes 1:1 copy for now.
+            encoder->copyFromTexture(
+                srcTex->GetNativeTexture(),
+                region.srcSubresource.baseArrayLayer,
+                region.srcSubresource.mipLevel,
+                srcOrigin,
+                srcSize,
+                dstTex->GetNativeTexture(),
+                region.dstSubresource.baseArrayLayer,
+                region.dstSubresource.mipLevel,
+                dstOrigin
+            );
+        }
+    }
+}
+
 } // namespace primal::graphics::rhi
