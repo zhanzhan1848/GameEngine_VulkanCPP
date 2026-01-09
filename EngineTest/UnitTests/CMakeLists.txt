@@ -419,7 +419,6 @@ set_target_properties(StandaloneRHI_Allocator_Test PROPERTIES
 target_compile_definitions(StandaloneRHI_Allocator_Test PRIVATE DEBUG _DEBUG)
 
 
-
 # 创建RHI命令队列测试
 add_executable(StandaloneRHI_Queue_Test RHI/Core/TestRHIQueue.cpp)
 # 不依赖任何Engine头文件或库，完全独立
@@ -429,6 +428,25 @@ set_target_properties(StandaloneRHI_Queue_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_Queue_Test PRIVATE DEBUG _DEBUG)
 
+
+# 创建RenderMesh测试
+add_executable(StandaloneGraphics_RenderMesh_Test 
+    Graphics/TestRenderMesh.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderMesh.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+)
+target_include_directories(StandaloneGraphics_RenderMesh_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME StandaloneGraphics_RenderMesh_Test COMMAND StandaloneGraphics_RenderMesh_Test)
+set_target_properties(StandaloneGraphics_RenderMesh_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneGraphics_RenderMesh_Test PRIVATE DEBUG _DEBUG)
+set_target_properties(StandaloneGraphics_RenderMesh_Test PROPERTIES FOLDER "Tests/Graphics")
 
 
 # 设置moodycamel库路径

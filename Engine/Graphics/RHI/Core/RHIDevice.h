@@ -193,6 +193,10 @@ public:
     virtual DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc& desc) = 0;
     virtual void DestroyDescriptorSet(DescriptorSetHandle handle) = 0;
     virtual void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) = 0;
+    virtual ResourceHandle CreateBuffer(const BufferDesc& desc) = 0;
+    virtual ResourceHandle CreateTexture(const TextureDesc& desc) = 0;
+    virtual void DestroyBuffer(ResourceHandle handle) = 0;
+    virtual void DestroyTexture(ResourceHandle handle) = 0;
 };
 
 /**
@@ -313,7 +317,7 @@ public:
      * @param desc 缓冲区描述符
      * @return 资源句柄，失败返回INVALID_RESOURCE
      */
-    ResourceHandle CreateBuffer(const BufferDesc& desc) {
+    ResourceHandle CreateBuffer(const BufferDesc& desc) override {
         assert(isValid_ && "Device not initialized");
         return derived().createBufferImpl(desc);
     }
@@ -323,7 +327,7 @@ public:
      * @param desc 纹理描述符
      * @return 资源句柄，失败返回INVALID_RESOURCE
      */
-    ResourceHandle CreateTexture(const TextureDesc& desc) {
+    ResourceHandle CreateTexture(const TextureDesc& desc) override {
         assert(isValid_ && "Device not initialized");
         return derived().createTextureImpl(desc);
     }
@@ -522,7 +526,7 @@ public:
      * @brief 销毁缓冲区
      * @param handle 缓冲区句柄
      */
-    void DestroyBuffer(ResourceHandle handle) {
+    void DestroyBuffer(ResourceHandle handle) override {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_RESOURCE) {
             derived().destroyBufferImpl(handle);
@@ -533,7 +537,7 @@ public:
      * @brief 销毁纹理
      * @param handle 纹理句柄
      */
-    void DestroyTexture(ResourceHandle handle) {
+    void DestroyTexture(ResourceHandle handle) override {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_RESOURCE) {
             derived().destroyTextureImpl(handle);
