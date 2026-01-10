@@ -46,6 +46,12 @@ public:
      */
     void SetValue(uint64_t value);
 
+    /**
+     * @brief 释放原生事件的所有权
+     * @return 原生事件指针，调用者负责释放
+     */
+    MTL::SharedEvent* DetachNativeEvent();
+
 private:
     MTL::SharedEvent* event_{nullptr}; ///< Metal 共享事件对象
 };

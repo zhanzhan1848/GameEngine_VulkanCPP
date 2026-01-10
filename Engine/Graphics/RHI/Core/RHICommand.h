@@ -104,6 +104,7 @@ enum class CommandType : uint16_t {
     CopyTextureToBuffer = 703,
     BlitTexture = 704,
     ResolveTexture = 705,
+    GenerateMipmaps = 706,
     
     // === 清除命令 ===
     ClearRenderTarget = 800,
@@ -505,6 +506,12 @@ public:
                              FilterMode filter) = 0;
 
     /**
+     * @brief 生成Mipmap
+     * @param texture 纹理句柄
+     */
+    virtual void GenerateMipmaps(ResourceHandle texture) = 0;
+
+    /**
      * @brief 插入资源屏障
      * @param barrier 屏障描述符
      * @param barrierCount 屏障数量
@@ -629,6 +636,7 @@ protected:
             case CommandType::CopyTextureToBuffer:
             case CommandType::BlitTexture:
             case CommandType::ResolveTexture:
+            case CommandType::GenerateMipmaps:
                 stats_.copyCommandCount++;
                 break;
                 

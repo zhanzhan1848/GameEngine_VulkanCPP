@@ -515,10 +515,21 @@ void MetalDevice::destroySamplerImpl(SamplerHandle handle) {
     samplerAllocator_.Free(static_cast<uint32_t>(handle));
 }
 void MetalDevice::destroyCommandBufferImpl(CommandBufferHandle handle) {
+    if (handle == handles::INVALID_COMMAND_BUFFER) return;
+    std::cout << "[MetalDevice] destroying command buffer " << static_cast<uint32_t>(handle) << std::endl;
     commandBufferAllocator_.Free(static_cast<uint32_t>(handle));
 }
 
 void MetalDevice::destroySyncImpl(SyncHandle handle) {
+    MetalSync* sync = syncAllocator_.Get(static_cast<uint32_t>(handle));
+    if (sync) {
+        MTL::SharedEvent* event = sync->DetachNativeEvent();
+        if (event) {
+            gc_.DeferredDestroy([event]() {
+                event->release();
+            });
+        }
+    }
     syncAllocator_.Free(static_cast<uint32_t>(handle));
 }
 

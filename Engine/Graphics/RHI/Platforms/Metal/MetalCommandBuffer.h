@@ -95,6 +95,7 @@ public:
     void CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture, const BufferTextureCopyRegion* regions, uint32_t regionCount) override;
     void CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer, const BufferTextureCopyRegion* regions, uint32_t regionCount) override;
     void BlitTexture(ResourceHandle src, ResourceHandle dst, const TextureBlitRegion* regions, uint32_t regionCount, FilterMode filter) override;
+    void GenerateMipmaps(ResourceHandle texture) override;
     void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override;
 
 private:

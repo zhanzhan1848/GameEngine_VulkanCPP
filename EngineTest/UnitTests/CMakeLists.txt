@@ -418,6 +418,22 @@ set_target_properties(StandaloneRHI_Allocator_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_Allocator_Test PRIVATE DEBUG _DEBUG)
 
+# 创建RHI垃圾回收器测试
+add_executable(StandaloneRHI_GarbageCollector_Test RHI/Core/TestRHIGarbageCollector.cpp)
+# 添加Engine头文件包含路径
+target_include_directories(StandaloneRHI_GarbageCollector_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+# 链接Engine库
+target_link_libraries(StandaloneRHI_GarbageCollector_Test PRIVATE Engine pthread)
+add_test(NAME StandaloneRHI_GarbageCollector_Test COMMAND StandaloneRHI_GarbageCollector_Test)
+set_target_properties(StandaloneRHI_GarbageCollector_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_GarbageCollector_Test PRIVATE DEBUG _DEBUG)
+
 
 # 创建RHI命令队列测试
 add_executable(StandaloneRHI_Queue_Test RHI/Core/TestRHIQueue.cpp)
@@ -515,6 +531,7 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_GPUOptimizer_Test
     COMMAND StandaloneRHI_MultiThreadedCommandGenerator_Test
     COMMAND StandaloneRHI_Allocator_Test
+    COMMAND StandaloneRHI_GarbageCollector_Test
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
@@ -529,6 +546,7 @@ set_target_properties(StandaloneRHI_DeterministicPrefetch_Test PROPERTIES FOLDER
 set_target_properties(StandaloneRHI_GPUOptimizer_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_MultiThreadedCommandGenerator_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Allocator_Test PROPERTIES FOLDER "Tests/RHI")
+set_target_properties(StandaloneRHI_GarbageCollector_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(MpscQueueSimpleTest PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(RHI_All_Tests PROPERTIES FOLDER "Tests/RHI")
 
@@ -541,4 +559,6 @@ message(STATUS "  - StandaloneRHI_Queue_Test: Command queue tests")
 message(STATUS "  - StandaloneRHI_DeterministicPrefetch_Test: Deterministic prefetch tests")
 message(STATUS "  - StandaloneRHI_GPUOptimizer_Test: GPU optimizer tests")
 message(STATUS "  - StandaloneRHI_MultiThreadedCommandGenerator_Test: Multi-threaded command generator tests")
+message(STATUS "  - StandaloneRHI_Allocator_Test: RHI Allocator tests")
+message(STATUS "  - StandaloneRHI_GarbageCollector_Test: RHI Garbage Collector tests")
 message(STATUS "  - RHI_All_Tests: Run all RHI tests")

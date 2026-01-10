@@ -11,6 +11,7 @@
 
 #include "CommonHeaders.h"
 #include "RHITypes.h"
+#include "RHIGarbageCollector.h"
 
 namespace primal::graphics::rhi {
 
@@ -198,6 +199,12 @@ public:
     virtual CommandBufferHandle CreateCommandBuffer(CommandQueueType type) = 0;
     virtual void DestroyBuffer(ResourceHandle handle) = 0;
     virtual void DestroyTexture(ResourceHandle handle) = 0;
+
+    /**
+     * @brief 获取垃圾回收器
+     * @return 垃圾回收器引用
+     */
+    virtual RHIGarbageCollector& GetGarbageCollector() = 0;
 };
 
 /**
@@ -239,6 +246,9 @@ public:
     bool Initialize() {
         if (isValid_) return true;
         
+        frameCount_ = 0;
+        gc_.Initialize();
+
         // 调用派生类的初始化实现
         bool result = derived().initializeImpl();
         if (result) {
@@ -254,6 +264,8 @@ public:
     void Shutdown() override {
         if (!isValid_) return;
         
+        // 先清理所有待销毁的资源，因为它们可能依赖于设备对象
+        gc_.Shutdown();
         derived().shutdownImpl();
         isValid_ = false;
     }
@@ -264,6 +276,7 @@ public:
     void WaitIdle() const override {
         assert(isValid_ && "Device not initialized");
         derived().waitIdleImpl();
+        const_cast<RHIDevice*>(this)->gc_.Flush();
     }
     
     /**
@@ -271,6 +284,8 @@ public:
      */
     void BeginFrame() {
         assert(isValid_ && "Device not initialized");
+        frameCount_++;
+        gc_.SetCurrentFrame(frameCount_);
         derived().beginFrameImpl();
     }
     
@@ -280,6 +295,10 @@ public:
     void EndFrame() {
         assert(isValid_ && "Device not initialized");
         derived().endFrameImpl();
+        
+        // 假设最大飞行帧数为 2 (MaxFramesInFlight - 1)
+        uint64_t completedFrame = frameCount_ > 2 ? frameCount_ - 2 : 0;
+        gc_.Update(completedFrame);
     }
     
     /**
@@ -404,7 +423,9 @@ public:
     void DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) override {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_RESOURCE) {
-            derived().destroyDescriptorSetLayoutImpl(handle);
+            gc_.DeferredDestroy([this, handle]() {
+                derived().destroyDescriptorSetLayoutImpl(handle);
+            });
         }
     }
 
@@ -425,7 +446,9 @@ public:
     void DestroyPipelineLayout(PipelineLayoutHandle handle) override {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_PIPELINE_LAYOUT) {
-            derived().destroyPipelineLayoutImpl(handle);
+            gc_.DeferredDestroy([this, handle]() {
+                derived().destroyPipelineLayoutImpl(handle);
+            });
         }
     }
 
@@ -446,7 +469,9 @@ public:
     void DestroyDescriptorSet(DescriptorSetHandle handle) override {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_RESOURCE) {
-            derived().destroyDescriptorSetImpl(handle);
+            gc_.DeferredDestroy([this, handle]() {
+                derived().destroyDescriptorSetImpl(handle);
+            });
         }
     }
 
@@ -477,7 +502,9 @@ public:
     void DestroyRenderPass(RenderPassHandle handle) {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_RESOURCE) {
-            derived().destroyRenderPassImpl(handle);
+            gc_.DeferredDestroy([this, handle]() {
+                derived().destroyRenderPassImpl(handle);
+            });
         }
     }
 
@@ -486,7 +513,7 @@ public:
      * @param type 命令队列类型
      * @return 命令缓冲区句柄，失败返回INVALID_COMMAND_BUFFER
      */
-    CommandBufferHandle CreateCommandBuffer(CommandQueueType type = CommandQueueType::Graphics) {
+    CommandBufferHandle CreateCommandBuffer(CommandQueueType type = CommandQueueType::Graphics) override {
         assert(isValid_ && "Device not initialized");
         return derived().createCommandBufferImpl(type);
     }
@@ -646,6 +673,12 @@ public:
      */
     RHIPlatform GetPlatform() const { return desc_.platform; }
     
+    /**
+     * @brief 获取垃圾回收器
+     * @return 垃圾回收器引用
+     */
+    RHIGarbageCollector& GetGarbageCollector() override { return gc_; }
+
 protected:
     // === CRTP辅助方法 ===
     
@@ -675,6 +708,8 @@ protected:
     DeviceDesc desc_;                    ///< 设备描述符
     DeviceInfo info_;                    ///< 设备信息
     bool isValid_;                       ///< 设备是否有效
+    RHIGarbageCollector gc_;             ///< 垃圾回收器
+    uint64_t frameCount_ = 0;            ///< 帧计数器
     
 private:
     // === 友元声明 ===

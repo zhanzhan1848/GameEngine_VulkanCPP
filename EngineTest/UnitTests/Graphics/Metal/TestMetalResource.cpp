@@ -44,6 +44,9 @@ TestResult TestMetalBufferCreation() {
     
     device.DestroyBuffer(handle);
     
+    // 强制刷新GC，确保资源被销毁
+    device.WaitIdle();
+    
     // 验证销毁后无法获取
     TEST_ASSERT(device.GetBuffer(handle) == nullptr, "Buffer should be null after destruction");
     
@@ -88,6 +91,7 @@ TestResult TestMetalStaticBufferUpdate() {
     }
     
     device.DestroyBuffer(handle);
+    device.WaitIdle();
     device.Shutdown();
     return TestResult::Passed;
 }
@@ -126,6 +130,7 @@ TestResult TestMetalTextureCreation() {
     }
     
     device.DestroyTexture(handle);
+    device.WaitIdle();
     TEST_ASSERT(device.GetTexture(handle) == nullptr, "Texture should be null after destruction");
     
     device.Shutdown();

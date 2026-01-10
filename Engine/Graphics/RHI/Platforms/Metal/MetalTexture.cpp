@@ -300,8 +300,11 @@ bool MetalTexture::Initialize() {
 }
 
 void MetalTexture::destroyImpl() {
-    if (mtlTexture_) {
-        mtlTexture_->release();
+    auto mtlTexture = mtlTexture_;
+    if (mtlTexture) {
+        device_.GetGarbageCollector().DeferredDestroy([mtlTexture]() {
+            mtlTexture->release();
+        });
         mtlTexture_ = nullptr;
     }
     state_ = ResourceState::Destroyed;

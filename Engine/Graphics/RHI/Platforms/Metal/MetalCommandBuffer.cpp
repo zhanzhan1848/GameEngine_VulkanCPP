@@ -57,7 +57,10 @@ void MetalCommandBuffer::destroyImpl() {
     endCurrentEncoder();
 
     if (mtlCommandBuffer_) {
-        mtlCommandBuffer_->release();
+        auto mtlCmdBuf = mtlCommandBuffer_;
+        device_.GetGarbageCollector().DeferredDestroy([mtlCmdBuf]() {
+            mtlCmdBuf->release();
+        });
         mtlCommandBuffer_ = nullptr;
     }
     
@@ -649,47 +652,74 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                 case DescriptorType::CombinedImageSampler: 
                 case DescriptorType::InputAttachment: {
                     if (binding.resources.empty()) break;
-                    MetalTexture* texture = metalDevice.GetTexture(binding.resources[0]);
-                    if (texture && texture->GetNativeTexture()) {
-                        if (renderEncoder) {
-                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
-                                renderEncoder->setVertexTexture(texture->GetNativeTexture(), slot);
-                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
-                                renderEncoder->setFragmentTexture(texture->GetNativeTexture(), slot);
-                        } else if (computeEncoder) {
-                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
-                                computeEncoder->setTexture(texture->GetNativeTexture(), slot);
+
+                    // Support for Descriptor Arrays
+                    utl::vector<MTL::Texture*> mtlTextures;
+                    mtlTextures.reserve(binding.resources.size());
+                    
+                    for (auto handle : binding.resources) {
+                         MetalTexture* texture = metalDevice.GetTexture(handle);
+                         mtlTextures.push_back((texture && texture->GetNativeTexture()) ? texture->GetNativeTexture() : nullptr);
+                    }
+                    
+                    utl::vector<MTL::SamplerState*> mtlSamplers;
+                    if (binding.type == DescriptorType::CombinedImageSampler && !binding.samplers.empty()) {
+                        mtlSamplers.reserve(binding.samplers.size());
+                        for (auto handle : binding.samplers) {
+                             MetalSampler* sampler = metalDevice.GetSampler(handle);
+                             mtlSamplers.push_back((sampler && sampler->GetSamplerState()) ? sampler->GetSamplerState() : nullptr);
                         }
                     }
                     
-                    if (binding.type == DescriptorType::CombinedImageSampler && !binding.samplers.empty()) {
-                        MetalSampler* sampler = metalDevice.GetSampler(binding.samplers[0]);
-                        if (sampler && sampler->GetSamplerState()) {
-                             if (renderEncoder) {
-                                if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
-                                    renderEncoder->setVertexSamplerState(sampler->GetSamplerState(), slot);
-                                if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
-                                    renderEncoder->setFragmentSamplerState(sampler->GetSamplerState(), slot);
-                            } else if (computeEncoder) {
-                                if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
-                                    computeEncoder->setSamplerState(sampler->GetSamplerState(), slot);
-                            }
+                    NS::Range range(slot, mtlTextures.size());
+                    
+                    if (renderEncoder) {
+                        if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                            renderEncoder->setVertexTextures(mtlTextures.data(), range);
+                        if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                            renderEncoder->setFragmentTextures(mtlTextures.data(), range);
+                    } else if (computeEncoder) {
+                        if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                            computeEncoder->setTextures(mtlTextures.data(), range);
+                    }
+                    
+                    // Bind Samplers (Array)
+                    if (!mtlSamplers.empty()) {
+                        NS::Range samplerRange(slot, mtlSamplers.size());
+                        if (renderEncoder) {
+                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                                renderEncoder->setVertexSamplerStates(mtlSamplers.data(), samplerRange);
+                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                                renderEncoder->setFragmentSamplerStates(mtlSamplers.data(), samplerRange);
+                        } else if (computeEncoder) {
+                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                                computeEncoder->setSamplerStates(mtlSamplers.data(), samplerRange);
                         }
                     }
+                    
                     break;
                 }
                 case DescriptorType::Sampler: {
                      if (binding.samplers.empty()) break;
-                     MetalSampler* sampler = metalDevice.GetSampler(binding.samplers[0]);
-                     if (sampler && sampler->GetSamplerState()) {
+                     
+                     utl::vector<MTL::SamplerState*> mtlSamplers;
+                     mtlSamplers.reserve(binding.samplers.size());
+                     
+                     for (auto handle : binding.samplers) {
+                         MetalSampler* sampler = metalDevice.GetSampler(handle);
+                         mtlSamplers.push_back((sampler && sampler->GetSamplerState()) ? sampler->GetSamplerState() : nullptr);
+                     }
+                     
+                     if (!mtlSamplers.empty()) {
+                         NS::Range range(slot, mtlSamplers.size());
                          if (renderEncoder) {
                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
-                                renderEncoder->setVertexSamplerState(sampler->GetSamplerState(), slot);
+                                renderEncoder->setVertexSamplerStates(mtlSamplers.data(), range);
                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
-                                renderEncoder->setFragmentSamplerState(sampler->GetSamplerState(), slot);
+                                renderEncoder->setFragmentSamplerStates(mtlSamplers.data(), range);
                         } else if (computeEncoder) {
                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
-                                computeEncoder->setSamplerState(sampler->GetSamplerState(), slot);
+                                computeEncoder->setSamplerStates(mtlSamplers.data(), range);
                         }
                     }
                     break;
@@ -839,104 +869,168 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
     // For now, empty.
 }
 
-// Helper for pixel format bytes
-static uint32_t GetBytesPerPixel(MTL::PixelFormat format) {
-    switch (format) {
-        case MTL::PixelFormatR8Unorm: return 1;
-        case MTL::PixelFormatRG8Unorm: return 2;
-        case MTL::PixelFormatRGBA8Unorm: 
-        case MTL::PixelFormatBGRA8Unorm:
-        case MTL::PixelFormatRGBA8Unorm_sRGB:
-        case MTL::PixelFormatBGRA8Unorm_sRGB: return 4;
-        case MTL::PixelFormatRGBA32Float: return 16;
-        case MTL::PixelFormatRGBA16Float: return 8;
-        case MTL::PixelFormatR32Float: return 4;
-        case MTL::PixelFormatDepth32Float: return 4;
-        default: return 4; // Fallback
+    // Helper to get pixel format info for block-based calculation
+    struct PixelFormatInfo {
+        uint32_t bytesPerBlock;
+        uint32_t blockWidth;
+        uint32_t blockHeight;
+    };
+
+    static PixelFormatInfo GetPixelFormatInfo(MTL::PixelFormat format) {
+        switch (format) {
+            // Uncompressed formats
+            case MTL::PixelFormatRGBA8Unorm:
+            case MTL::PixelFormatRGBA8Unorm_sRGB:
+            case MTL::PixelFormatBGRA8Unorm:
+            case MTL::PixelFormatBGRA8Unorm_sRGB:
+                return {4, 1, 1};
+            case MTL::PixelFormatRGBA16Float:
+                return {8, 1, 1};
+            case MTL::PixelFormatRGBA32Float:
+                return {16, 1, 1};
+            case MTL::PixelFormatR32Float:
+                return {4, 1, 1};
+            
+            // Compressed formats (BC/DXT)
+            case MTL::PixelFormatBC1_RGBA:
+            case MTL::PixelFormatBC1_RGBA_sRGB:
+            case MTL::PixelFormatBC4_RUnorm:
+            case MTL::PixelFormatBC4_RSnorm:
+                return {8, 4, 4};
+            case MTL::PixelFormatBC2_RGBA:
+            case MTL::PixelFormatBC2_RGBA_sRGB:
+            case MTL::PixelFormatBC3_RGBA:
+            case MTL::PixelFormatBC3_RGBA_sRGB:
+            case MTL::PixelFormatBC5_RGUnorm:
+            case MTL::PixelFormatBC5_RGSnorm:
+            case MTL::PixelFormatBC6H_RGBFloat:
+            case MTL::PixelFormatBC6H_RGBUfloat:
+            case MTL::PixelFormatBC7_RGBAUnorm:
+            case MTL::PixelFormatBC7_RGBAUnorm_sRGB:
+                return {16, 4, 4};
+            
+            // ETC2 / EAC
+            case MTL::PixelFormatEAC_R11Unorm:
+            case MTL::PixelFormatEAC_R11Snorm:
+            case MTL::PixelFormatETC2_RGB8:
+            case MTL::PixelFormatETC2_RGB8_sRGB:
+            case MTL::PixelFormatETC2_RGB8A1:
+            case MTL::PixelFormatETC2_RGB8A1_sRGB:
+                return {8, 4, 4};
+            case MTL::PixelFormatEAC_RG11Unorm:
+            case MTL::PixelFormatEAC_RG11Snorm:
+            case MTL::PixelFormatEAC_RGBA8:
+            case MTL::PixelFormatEAC_RGBA8_sRGB:
+                return {16, 4, 4};
+            
+            // ASTC (4x4)
+            case MTL::PixelFormatASTC_4x4_sRGB:
+            case MTL::PixelFormatASTC_4x4_LDR:
+                return {16, 4, 4};
+            
+            // Add more as needed
+            default:
+                return {0, 0, 0};
+        }
     }
-}
 
-void MetalCommandBuffer::CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture,
-                                             const BufferTextureCopyRegion* regions, uint32_t regionCount) {
-    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
-    if (!encoder) return;
+    void MetalCommandBuffer::CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture, const BufferTextureCopyRegion* regions, uint32_t regionCount) {
+        MTL::BlitCommandEncoder* encoder = getBlitEncoder();
+        if (!encoder) return;
 
-    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
-    MetalBuffer* src = metalDevice.GetBuffer(srcBuffer);
-    MetalTexture* dst = metalDevice.GetTexture(dstTexture);
+        MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+        MetalBuffer* buffer = metalDevice.GetBuffer(srcBuffer);
+        MetalTexture* texture = metalDevice.GetTexture(dstTexture);
 
-    if (src && dst && src->GetNativeBuffer() && dst->GetNativeTexture()) {
-        MTL::Texture* mtlTexture = dst->GetNativeTexture();
-        MTL::PixelFormat format = mtlTexture->pixelFormat();
-        uint32_t bpp = GetBytesPerPixel(format);
+        if (!buffer || !texture) return;
+
+        PixelFormatInfo info = GetPixelFormatInfo(texture->GetNativeTexture()->pixelFormat());
+        if (info.bytesPerBlock == 0) {
+            std::cerr << "[MetalCommandBuffer] Unsupported pixel format for copy: " 
+                      << (uint64_t)texture->GetNativeTexture()->pixelFormat() << std::endl;
+            return;
+        }
 
         for (uint32_t i = 0; i < regionCount; ++i) {
             const auto& region = regions[i];
             
             MTL::Origin origin(region.imageOffset.x, region.imageOffset.y, region.imageOffset.z);
             MTL::Size size(region.imageExtent.width, region.imageExtent.height, region.imageExtent.depth);
+
+            // Calculate bytesPerRow and bytesPerImage using block-based logic
+            NS::UInteger rowLength = region.bufferRowLength ? region.bufferRowLength : region.imageExtent.width;
+            NS::UInteger imageHeight = region.bufferImageHeight ? region.bufferImageHeight : region.imageExtent.height;
+
+            NS::UInteger rowLengthInBlocks = (rowLength + info.blockWidth - 1) / info.blockWidth;
+            NS::UInteger bytesPerRow = rowLengthInBlocks * info.bytesPerBlock;
             
-            NS::UInteger rowLength = region.bufferRowLength > 0 ? region.bufferRowLength : region.imageExtent.width;
-            NS::UInteger imageHeight = region.bufferImageHeight > 0 ? region.bufferImageHeight : region.imageExtent.height;
-            
-            NS::UInteger bytesPerRow = rowLength * bpp;
-            NS::UInteger bytesPerImage = imageHeight * bytesPerRow;
-            
-            encoder->copyFromBuffer(
-                src->GetNativeBuffer(),
-                region.bufferOffset,
-                bytesPerRow,
-                bytesPerImage,
-                size,
-                mtlTexture,
-                region.imageSubresource.baseArrayLayer,
-                region.imageSubresource.mipLevel,
-                origin
-            );
+            NS::UInteger imageHeightInBlocks = (imageHeight + info.blockHeight - 1) / info.blockHeight;
+            NS::UInteger bytesPerImage = imageHeightInBlocks * bytesPerRow;
+
+            for (uint32_t layer = 0; layer < region.imageSubresource.layerCount; ++layer) {
+                encoder->copyFromBuffer(
+                    buffer->GetNativeBuffer(),
+                    region.bufferOffset + layer * bytesPerImage,
+                    bytesPerRow,
+                    bytesPerImage,
+                    size,
+                    texture->GetNativeTexture(),
+                    region.imageSubresource.baseArrayLayer + layer,
+                    region.imageSubresource.mipLevel,
+                    origin
+                );
+            }
         }
     }
-}
 
-void MetalCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer,
-                                             const BufferTextureCopyRegion* regions, uint32_t regionCount) {
-    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
-    if (!encoder) return;
+    void MetalCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer, const BufferTextureCopyRegion* regions, uint32_t regionCount) {
+        MTL::BlitCommandEncoder* encoder = getBlitEncoder();
+        if (!encoder) return;
 
-    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
-    MetalTexture* src = metalDevice.GetTexture(srcTexture);
-    MetalBuffer* dst = metalDevice.GetBuffer(dstBuffer);
+        MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+        MetalTexture* texture = metalDevice.GetTexture(srcTexture);
+        MetalBuffer* buffer = metalDevice.GetBuffer(dstBuffer);
 
-    if (src && dst && src->GetNativeTexture() && dst->GetNativeBuffer()) {
-        MTL::Texture* mtlTexture = src->GetNativeTexture();
-        MTL::PixelFormat format = mtlTexture->pixelFormat();
-        uint32_t bpp = GetBytesPerPixel(format);
+        if (!texture || !buffer) return;
+
+        PixelFormatInfo info = GetPixelFormatInfo(texture->GetNativeTexture()->pixelFormat());
+        if (info.bytesPerBlock == 0) {
+            std::cerr << "[MetalCommandBuffer] Unsupported pixel format for copy: " 
+                      << (uint64_t)texture->GetNativeTexture()->pixelFormat() << std::endl;
+            return;
+        }
 
         for (uint32_t i = 0; i < regionCount; ++i) {
             const auto& region = regions[i];
             
             MTL::Origin origin(region.imageOffset.x, region.imageOffset.y, region.imageOffset.z);
             MTL::Size size(region.imageExtent.width, region.imageExtent.height, region.imageExtent.depth);
+
+            // Calculate bytesPerRow and bytesPerImage using block-based logic
+            NS::UInteger rowLength = region.bufferRowLength ? region.bufferRowLength : region.imageExtent.width;
+            NS::UInteger imageHeight = region.bufferImageHeight ? region.bufferImageHeight : region.imageExtent.height;
+
+            NS::UInteger rowLengthInBlocks = (rowLength + info.blockWidth - 1) / info.blockWidth;
+            NS::UInteger bytesPerRow = rowLengthInBlocks * info.bytesPerBlock;
             
-            NS::UInteger rowLength = region.bufferRowLength > 0 ? region.bufferRowLength : region.imageExtent.width;
-            NS::UInteger imageHeight = region.bufferImageHeight > 0 ? region.bufferImageHeight : region.imageExtent.height;
-            
-            NS::UInteger bytesPerRow = rowLength * bpp;
-            NS::UInteger bytesPerImage = imageHeight * bytesPerRow;
-            
-            encoder->copyFromTexture(
-                mtlTexture,
-                region.imageSubresource.baseArrayLayer,
-                region.imageSubresource.mipLevel,
-                origin,
-                size,
-                dst->GetNativeBuffer(),
-                region.bufferOffset,
-                bytesPerRow,
-                bytesPerImage
-            );
+            NS::UInteger imageHeightInBlocks = (imageHeight + info.blockHeight - 1) / info.blockHeight;
+            NS::UInteger bytesPerImage = imageHeightInBlocks * bytesPerRow;
+
+            for (uint32_t layer = 0; layer < region.imageSubresource.layerCount; ++layer) {
+                encoder->copyFromTexture(
+                    texture->GetNativeTexture(),
+                    region.imageSubresource.baseArrayLayer + layer,
+                    region.imageSubresource.mipLevel,
+                    origin,
+                    size,
+                    buffer->GetNativeBuffer(),
+                    region.bufferOffset + layer * bytesPerImage,
+                    bytesPerRow,
+                    bytesPerImage
+                );
+            }
         }
     }
-}
 
 void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                                      const TextureBlitRegion* regions, uint32_t regionCount,
@@ -975,6 +1069,18 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                 dstOrigin
             );
         }
+    }
+}
+
+void MetalCommandBuffer::GenerateMipmaps(ResourceHandle texture) {
+    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
+    if (!encoder) return;
+    
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    MetalTexture* tex = metalDevice.GetTexture(texture);
+    
+    if (tex && tex->GetNativeTexture()) {
+        encoder->generateMipmaps(tex->GetNativeTexture());
     }
 }
 

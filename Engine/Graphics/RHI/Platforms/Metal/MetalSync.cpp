@@ -36,4 +36,10 @@ void MetalSync::SetValue(uint64_t value) {
     }
 }
 
+MTL::SharedEvent* MetalSync::DetachNativeEvent() {
+    MTL::SharedEvent* temp = event_;
+    event_ = nullptr;
+    return temp;
+}
+
 } // namespace primal::graphics::rhi

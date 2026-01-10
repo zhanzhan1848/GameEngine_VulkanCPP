@@ -133,15 +133,24 @@ bool MetalBuffer::Initialize() {
 }
 
 void MetalBuffer::destroyImpl() {
-    if (mtlBuffer_) {
-        mtlBuffer_->release();
-        mtlBuffer_ = nullptr;
+    auto mtlBuffer = mtlBuffer_;
+    auto pool = pool_;
+    auto poolHandle = poolHandle_;
+
+    if (mtlBuffer || (pool && poolHandle != 0)) {
+        device_.GetGarbageCollector().DeferredDestroy([mtlBuffer, pool, poolHandle]() {
+            if (mtlBuffer) {
+                mtlBuffer->release();
+            }
+            if (pool && poolHandle != 0) {
+                pool->Deallocate(poolHandle);
+            }
+        });
     }
-    if (pool_ && poolHandle_ != 0) {
-        pool_->Deallocate(poolHandle_);
-        pool_ = nullptr;
-        poolHandle_ = 0;
-    }
+
+    mtlBuffer_ = nullptr;
+    pool_ = nullptr;
+    poolHandle_ = 0;
     heap_ = nullptr;
     heapOffset_ = 0;
 }
