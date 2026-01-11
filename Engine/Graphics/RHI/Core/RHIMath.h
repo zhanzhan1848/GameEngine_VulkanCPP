@@ -394,9 +394,6 @@ inline m4x4 Transpose(const m4x4& mat) {
  * @return 逆矩阵，如果矩阵不可逆则返回单位矩阵
  */
 inline m4x4 Inverse(const m4x4& mat) {
-    // 提取平移、旋转、缩放分量
-    v3 translation{mat.columns[3][0], mat.columns[3][1], mat.columns[3][2]};
-    
     // 提取3x3旋转缩放矩阵并求逆
     v3 scale{
         Length(v3{mat.columns[0][0], mat.columns[0][1], mat.columns[0][2]}),

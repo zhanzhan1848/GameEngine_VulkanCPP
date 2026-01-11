@@ -513,6 +513,24 @@ set_target_properties(StandaloneGraphics_RenderTexture_Test PROPERTIES
 target_compile_definitions(StandaloneGraphics_RenderTexture_Test PRIVATE DEBUG _DEBUG)
 set_target_properties(StandaloneGraphics_RenderTexture_Test PROPERTIES FOLDER "Tests/Graphics")
 
+# 创建RenderProxy测试
+add_executable(StandaloneGraphics_RenderProxy_Test 
+    Graphics/TestRenderProxy.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderProxy.cpp
+)
+target_include_directories(StandaloneGraphics_RenderProxy_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME StandaloneGraphics_RenderProxy_Test COMMAND StandaloneGraphics_RenderProxy_Test)
+set_target_properties(StandaloneGraphics_RenderProxy_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneGraphics_RenderProxy_Test PRIVATE DEBUG _DEBUG)
+set_target_properties(StandaloneGraphics_RenderProxy_Test PROPERTIES FOLDER "Tests/Graphics")
+
 
 # 设置moodycamel库路径
 set(MOODYCAMEL_ROOT ${CMAKE_SOURCE_DIR}/third_party/moodycamel-ConcurrentQueue)
