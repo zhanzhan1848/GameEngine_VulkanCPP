@@ -79,6 +79,9 @@ public:
     PipelineHandle createComputePipelineImpl(const ComputePipelineDesc& desc) {
         return handles::INVALID_PIPELINE;
     }
+
+    void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) { return nullptr; }
+    void unmapBufferImpl(ResourceHandle handle) {}
     
     // 创建管线布局实现（测试用）
     PipelineLayoutHandle createPipelineLayoutImpl(const PipelineLayoutDesc& desc) {
@@ -259,6 +262,7 @@ protected:
     void CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture, const BufferTextureCopyRegion* regions, uint32_t regionCount) override { (void)srcBuffer; (void)dstTexture; (void)regions; (void)regionCount; }
     void CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer, const BufferTextureCopyRegion* regions, uint32_t regionCount) override { (void)srcTexture; (void)dstBuffer; (void)regions; (void)regionCount; }
     void BlitTexture(ResourceHandle src, ResourceHandle dst, const TextureBlitRegion* regions, uint32_t regionCount, FilterMode filter) override { (void)src; (void)dst; (void)regions; (void)regionCount; (void)filter; }
+    void GenerateMipmaps(ResourceHandle texture) override { (void)texture; }
     void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override { (void)barriers; (void)barrierCount; }
     
     void destroyImpl() override {}

@@ -86,6 +86,8 @@ public:
     void destroyTextureImpl(ResourceHandle handle) {}
     void destroyShaderImpl(ShaderHandle handle) {}
     void destroyPipelineImpl(PipelineHandle handle) {}
+    void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) { return nullptr; }
+    void unmapBufferImpl(ResourceHandle handle) {}
     void destroyCommandBufferImpl(CommandBufferHandle handle) {}
     
     // 命令提交实现

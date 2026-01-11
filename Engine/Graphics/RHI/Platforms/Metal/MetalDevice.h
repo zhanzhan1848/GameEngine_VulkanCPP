@@ -259,6 +259,8 @@ protected:
     // === 资源销毁接口实现 ===
 
     void destroyBufferImpl(ResourceHandle handle);
+    void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size);
+    void unmapBufferImpl(ResourceHandle handle);
     void destroyTextureImpl(ResourceHandle handle);
 
     /**

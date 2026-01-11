@@ -73,19 +73,6 @@ struct DeviceInfo {
 // === 管线描述符结构体（前向声明） ===
 
 /**
- * @brief 模板操作描述符
- */
-struct StencilOpDesc {
-    StencilOp failOp;       ///< 模板测试失败操作
-    StencilOp depthFailOp;  ///< 深度测试失败操作
-    StencilOp passOp;       ///< 模板/深度测试通过操作
-    ComparisonFunc func;    ///< 比较函数
-    
-    StencilOpDesc() : failOp(StencilOp::Keep), depthFailOp(StencilOp::Keep), 
-                      passOp(StencilOp::Keep), func(ComparisonFunc::Always) {}
-};
-
-/**
  * @brief 图形管线描述符
  */
 struct GraphicsPipelineDesc {
@@ -196,9 +183,16 @@ public:
     virtual void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) = 0;
     virtual ResourceHandle CreateBuffer(const BufferDesc& desc) = 0;
     virtual ResourceHandle CreateTexture(const TextureDesc& desc) = 0;
+    virtual ShaderHandle CreateShader(const void* data, size_t size, ShaderStage stage, const char* entryPoint = "main") = 0;
+    virtual PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
+    virtual PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) = 0;
     virtual CommandBufferHandle CreateCommandBuffer(CommandQueueType type) = 0;
     virtual void DestroyBuffer(ResourceHandle handle) = 0;
     virtual void DestroyTexture(ResourceHandle handle) = 0;
+    virtual void DestroyShader(ShaderHandle handle) = 0;
+    virtual void DestroyPipeline(PipelineHandle handle) = 0;
+    virtual void* MapBuffer(ResourceHandle handle, u64 offset = 0, u64 size = 0) = 0;
+    virtual void UnmapBuffer(ResourceHandle handle) = 0;
 
     /**
      * @brief 获取垃圾回收器
@@ -360,7 +354,7 @@ public:
      * @param entryPoint 入口点函数名
      * @return 着色器句柄，失败返回INVALID_SHADER
      */
-    ShaderHandle CreateShader(const void* data, size_t size, ShaderStage stage, const char* entryPoint = "main") {
+    ShaderHandle CreateShader(const void* data, size_t size, ShaderStage stage, const char* entryPoint = "main") override {
         assert(isValid_ && "Device not initialized");
         assert(data && size > 0 && "Invalid shader data");
         return derived().createShaderImpl(data, size, stage, entryPoint);
@@ -371,7 +365,7 @@ public:
      * @param desc 管线描述符
      * @return 管线句柄，失败返回INVALID_PIPELINE
      */
-    PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) {
+    PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override {
         assert(isValid_ && "Device not initialized");
         return derived().createGraphicsPipelineImpl(desc);
     }
@@ -381,7 +375,7 @@ public:
      * @param desc 管线描述符
      * @return 管线句柄，失败返回INVALID_PIPELINE
      */
-    PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) {
+    PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) override {
         assert(isValid_ && "Device not initialized");
         return derived().createComputePipelineImpl(desc);
     }
@@ -576,7 +570,7 @@ public:
      * @brief 销毁着色器
      * @param handle 着色器句柄
      */
-    void DestroyShader(ShaderHandle handle) {
+    void DestroyShader(ShaderHandle handle) override {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_SHADER) {
             derived().destroyShaderImpl(handle);
@@ -587,11 +581,27 @@ public:
      * @brief 销毁管线
      * @param handle 管线句柄
      */
-    void DestroyPipeline(PipelineHandle handle) {
+    void DestroyPipeline(PipelineHandle handle) override {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_PIPELINE) {
             derived().destroyPipelineImpl(handle);
         }
+    }
+
+    /**
+     * @brief 映射缓冲区
+     */
+    void* MapBuffer(ResourceHandle handle, u64 offset = 0, u64 size = 0) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().mapBufferImpl(handle, offset, size);
+    }
+
+    /**
+     * @brief 取消映射缓冲区
+     */
+    void UnmapBuffer(ResourceHandle handle) override {
+        assert(isValid_ && "Device not initialized");
+        derived().unmapBufferImpl(handle);
     }
     
     /**

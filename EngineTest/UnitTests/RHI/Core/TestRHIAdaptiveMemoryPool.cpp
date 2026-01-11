@@ -134,6 +134,18 @@ public:
     CommandBufferHandle CreateCommandBuffer(CommandQueueType type) override { return handles::INVALID_COMMAND_BUFFER; }
     void DestroyBuffer(ResourceHandle handle) override {}
     void DestroyTexture(ResourceHandle handle) override {}
+    ShaderHandle CreateShader(const void* data, size_t size, ShaderStage stage, const char* entryPoint = "main") override { return handles::INVALID_SHADER; }
+    void DestroyShader(ShaderHandle handle) override {}
+    PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override { return handles::INVALID_PIPELINE; }
+    PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) override { return handles::INVALID_PIPELINE; }
+    void DestroyPipeline(PipelineHandle handle) override {}
+    void* MapBuffer(ResourceHandle handle, u64 offset = 0, u64 size = 0) override { return nullptr; }
+    void UnmapBuffer(ResourceHandle handle) override {}
+    
+    RHIGarbageCollector& GetGarbageCollector() override {
+        static RHIGarbageCollector gc;
+        return gc;
+    }
 };
 
 // === 测试用例 ===

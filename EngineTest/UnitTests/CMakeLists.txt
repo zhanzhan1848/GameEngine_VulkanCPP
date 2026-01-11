@@ -43,6 +43,7 @@ add_executable(StandaloneRHI_AdaptiveMemoryPool_Test
     RHI/Core/TestRHIAdaptiveMemoryPool.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIAdaptiveMemoryPool.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIMemoryPool.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
 )
 # 不依赖任何Engine头文件或库，完全独立
 add_test(NAME StandaloneRHI_AdaptiveMemoryPool_Test COMMAND StandaloneRHI_AdaptiveMemoryPool_Test)
@@ -363,6 +364,29 @@ if(APPLE)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
     target_compile_definitions(TestMetalHotReload PRIVATE DEBUG _DEBUG)
+
+    # 创建Material测试
+    add_executable(StandaloneGraphics_Material_Test 
+        Graphics/TestMaterial.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Material.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/MaterialInstance.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+    )
+    target_include_directories(StandaloneGraphics_Material_Test PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    # 不链接Engine库，使用源码编译以确保符号可见
+    # target_link_libraries(StandaloneGraphics_Material_Test PRIVATE Engine)
+    add_test(NAME StandaloneGraphics_Material_Test COMMAND StandaloneGraphics_Material_Test)
+    set_target_properties(StandaloneGraphics_Material_Test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    target_compile_definitions(StandaloneGraphics_Material_Test PRIVATE DEBUG _DEBUG)
+    set_target_properties(StandaloneGraphics_Material_Test PROPERTIES FOLDER "Tests/Graphics")
     
 endif()
 
@@ -450,6 +474,7 @@ add_executable(StandaloneGraphics_RenderMesh_Test
     Graphics/TestRenderMesh.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderMesh.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
 )
 target_include_directories(StandaloneGraphics_RenderMesh_Test PRIVATE 
     ${CMAKE_SOURCE_DIR}
@@ -471,6 +496,7 @@ add_executable(StandaloneGraphics_RenderTexture_Test
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderTexture.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
 )
 # 添加Engine头文件包含路径
 target_include_directories(StandaloneGraphics_RenderTexture_Test PRIVATE 

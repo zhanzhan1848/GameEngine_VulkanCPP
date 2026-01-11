@@ -220,6 +220,12 @@ public:
     }
     
     /**
+     * @brief 获取资源描述符
+     * @return 资源描述符引用
+     */
+    const ResourceDesc& GetDesc() const { return desc_; }
+
+    /**
      * @brief 获取资源大小
      * @return 资源大小（字节）
      */

@@ -111,6 +111,9 @@ public:
     void BlitTexture(ResourceHandle /*src*/, ResourceHandle /*dst*/, const TextureBlitRegion* /*regions*/, uint32_t /*regionCount*/, FilterMode /*filter*/) override {
         calls.push_back("BlitTexture");
     }
+    void GenerateMipmaps(ResourceHandle /*texture*/) override {
+        calls.push_back("GenerateMipmaps");
+    }
     void InsertBarrier(const ResourceBarrier* /*barriers*/, uint32_t /*barrierCount*/) override {
         calls.push_back("InsertBarrier");
     }
@@ -160,6 +163,20 @@ public:
     }
     
     void DestroyTexture(ResourceHandle /*handle*/) override {}
+    
+    ShaderHandle CreateShader(const void* /*data*/, size_t /*size*/, ShaderStage /*stage*/, const char* /*entryPoint*/) override { return handles::INVALID_SHADER; }
+    void DestroyShader(ShaderHandle /*handle*/) override {}
+    
+    PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& /*desc*/) override { return handles::INVALID_PIPELINE; }
+    PipelineHandle CreateComputePipeline(const ComputePipelineDesc& /*desc*/) override { return handles::INVALID_PIPELINE; }
+    void DestroyPipeline(PipelineHandle /*handle*/) override {}
+    void* MapBuffer(ResourceHandle /*handle*/, u64 /*offset*/, u64 /*size*/) override { return nullptr; }
+    void UnmapBuffer(ResourceHandle /*handle*/) override {}
+
+    RHIGarbageCollector& GetGarbageCollector() override {
+        static RHIGarbageCollector gc;
+        return gc;
+    }
 
     // Helper for test (overrides RHIDeviceBase)
     CommandBufferHandle CreateCommandBuffer(CommandQueueType type = CommandQueueType::Graphics) override { return reinterpret_cast<CommandBufferHandle>(new MockCommandBuffer(*this)); }

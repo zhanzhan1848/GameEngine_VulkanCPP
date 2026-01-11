@@ -501,6 +501,42 @@ CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) 
 void MetalDevice::destroyBufferImpl(ResourceHandle handle) {
     bufferAllocator_.Free(static_cast<uint32_t>(handle));
 }
+
+void* MetalDevice::mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) {
+    MetalBuffer* buffer = GetBuffer(handle);
+    if (!buffer) return nullptr;
+    
+    // 如果 size 为 0，则映射从 offset 到缓冲区末尾
+    if (size == 0) {
+        size = buffer->GetDesc().size - offset;
+    }
+    
+    // 获取底层 MTLBuffer
+    MTL::Buffer* mtlBuffer = buffer->GetNativeBuffer();
+    if (!mtlBuffer) return nullptr;
+    
+    // 获取缓冲区内容指针并偏移
+    uint8_t* ptr = static_cast<uint8_t*>(mtlBuffer->contents());
+    if (!ptr) return nullptr;
+    
+    return ptr + offset;
+}
+
+void MetalDevice::unmapBufferImpl(ResourceHandle handle) {
+    MetalBuffer* buffer = GetBuffer(handle);
+    if (!buffer) return;
+    
+    MTL::Buffer* mtlBuffer = buffer->GetNativeBuffer();
+    if (!mtlBuffer) return;
+    
+#if defined(PRIMAL_PLATFORM_MACOS)
+    // 如果缓冲区是 Managed 模式，需要通知 Metal 修改了范围
+    if (mtlBuffer->storageMode() == MTL::StorageModeManaged) {
+        mtlBuffer->didModifyRange(NS::Range::Make(0, mtlBuffer->length()));
+    }
+#endif
+}
+
 void MetalDevice::destroyTextureImpl(ResourceHandle handle) {
     textureAllocator_.Free(static_cast<uint32_t>(handle));
 }

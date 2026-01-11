@@ -633,6 +633,73 @@ namespace constants {
 
 
 
+// === 状态描述符结构体 ===
+
+/**
+ * @brief 模板操作描述符
+ */
+struct StencilOpDesc {
+    StencilOp failOp;       ///< 模板测试失败操作
+    StencilOp depthFailOp;  ///< 深度测试失败操作
+    StencilOp passOp;       ///< 模板/深度测试通过操作
+    ComparisonFunc func;    ///< 比较函数
+    
+    StencilOpDesc() : failOp(StencilOp::Keep), depthFailOp(StencilOp::Keep), 
+                      passOp(StencilOp::Keep), func(ComparisonFunc::Always) {}
+};
+
+/**
+ * @brief 混合状态描述符
+ */
+struct BlendState {
+    bool enableBlend;                   ///< 是否启用混合
+    BlendFactor srcColorBlendFactor;    ///< 源颜色混合因子
+    BlendFactor dstColorBlendFactor;    ///< 目标颜色混合因子
+    BlendOp colorBlendOp;               ///< 颜色混合操作
+    BlendFactor srcAlphaBlendFactor;    ///< 源Alpha混合因子
+    BlendFactor dstAlphaBlendFactor;    ///< 目标Alpha混合因子
+    BlendOp alphaBlendOp;               ///< Alpha混合操作
+    math::v4 blendConstants;            ///< 混合常量
+
+    BlendState() : enableBlend(false),
+                   srcColorBlendFactor(BlendFactor::One), dstColorBlendFactor(BlendFactor::Zero), colorBlendOp(BlendOp::Add),
+                   srcAlphaBlendFactor(BlendFactor::One), dstAlphaBlendFactor(BlendFactor::Zero), alphaBlendOp(BlendOp::Add),
+                   blendConstants{1.0f, 1.0f, 1.0f, 1.0f} {}
+};
+
+/**
+ * @brief 深度模板状态描述符
+ */
+struct DepthStencilState {
+    bool enableDepthTest;               ///< 是否启用深度测试
+    bool enableDepthWrite;              ///< 是否启用深度写入
+    ComparisonFunc depthFunc;           ///< 深度比较函数
+    
+    bool enableStencilTest;             ///< 是否启用模板测试
+    uint8_t stencilReadMask;           ///< 模板读取掩码
+    uint8_t stencilWriteMask;           ///< 模板写入掩码
+    
+    StencilOpDesc frontStencil;         ///< 正面模板操作
+    StencilOpDesc backStencil;          ///< 背面模板操作
+
+    DepthStencilState() : enableDepthTest(true), enableDepthWrite(true), depthFunc(ComparisonFunc::Less),
+                          enableStencilTest(false), stencilReadMask(0xFF), stencilWriteMask(0xFF) {}
+};
+
+/**
+ * @brief 光栅化状态描述符
+ */
+struct RasterizerState {
+    FillMode fillMode;                  ///< 填充模式
+    CullMode cullMode;                  ///< 裁剪模式
+    PrimitiveTopology topology;         ///< 图元拓扑 (注意：通常这属于 Input Assembly，但这里方便管理放在一起，或者 Material 单独管理 Topology)
+    
+    // 注意：GraphicsPipelineDesc 中 topology 是单独字段，fillMode/cullMode 是单独字段
+    // 这里为了 Material 方便，我们将 Topology 也包含进来，或者 Material 单独有 SetTopology
+    
+    RasterizerState() : fillMode(FillMode::Solid), cullMode(CullMode::Back), topology(PrimitiveTopology::TriangleList) {}
+};
+
 // === 基础结构体定义 ===
 
 /**

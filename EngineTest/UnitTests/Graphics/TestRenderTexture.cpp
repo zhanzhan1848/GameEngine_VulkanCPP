@@ -104,6 +104,7 @@ public:
     void CopyBufferToTexture(ResourceHandle, ResourceHandle, const BufferTextureCopyRegion*, uint32_t) override {}
     void CopyTextureToBuffer(ResourceHandle, ResourceHandle, const BufferTextureCopyRegion*, uint32_t) override {}
     void BlitTexture(ResourceHandle, ResourceHandle, const TextureBlitRegion*, uint32_t, FilterMode) override {}
+    void GenerateMipmaps(ResourceHandle) override {}
     // ResolveTexture not in base
     // CopyTexture not in base (use CopyTextureToTexture if needed, or Blit)
 
@@ -203,6 +204,21 @@ public:
         DestroyBuffer(h); // Same logic
     }
     
+    ShaderHandle CreateShader(const void* /*data*/, size_t /*size*/, ShaderStage /*stage*/, const char* /*entryPoint*/) override { return handles::INVALID_SHADER; }
+    void DestroyShader(ShaderHandle /*handle*/) override {}
+    
+    PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& /*desc*/) override { return handles::INVALID_PIPELINE; }
+    PipelineHandle CreateComputePipeline(const ComputePipelineDesc& /*desc*/) override { return handles::INVALID_PIPELINE; }
+    void DestroyPipeline(PipelineHandle /*handle*/) override {}
+    
+    void* MapBuffer(ResourceHandle /*handle*/, u64 /*offset*/, u64 /*size*/) override { return nullptr; }
+    void UnmapBuffer(ResourceHandle /*handle*/) override {}
+
+    RHIGarbageCollector& GetGarbageCollector() override {
+        static RHIGarbageCollector gc;
+        return gc;
+    }
+
     // Command Buffer
     CommandBufferHandle CreateCommandBuffer(CommandQueueType type) override {
         static uint64_t nextHandle = 1;
