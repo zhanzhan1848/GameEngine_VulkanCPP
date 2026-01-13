@@ -361,8 +361,8 @@ inline m4x4 CreateOrthographicMatrix(float left, float right, float bottom, floa
  */
 inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
     v3 forward = Normalize(target - eye);
-    v3 right = Normalize(Cross(up, forward));
-    v3 newUp = Cross(forward, right);
+    v3 right = Normalize(Cross(forward, up));
+    v3 newUp = Cross(right, forward);
     
     return m4x4{
         v4{right.x, newUp.x, -forward.x, 0.0f},

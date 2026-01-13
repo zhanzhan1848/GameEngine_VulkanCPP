@@ -350,7 +350,9 @@ u32 RHIGPUOptimizer::SubmitCommandBuffersBatchInternal(const CommandBufferHandle
     std::cout << "Debug: SubmitCommandBuffersBatchInternal - count: " << count << std::endl;
     for (u32 i = 0; i < count; ++i) {
         std::cout << "Debug: Submitting buffer " << i << "/" << count << " with handle " << commandBuffers[i] << std::endl;
-        bool submitResult = device_.SubmitCommandBuffer(commandBuffers[i]);
+        QueueSubmitInfo submitInfo{};
+        submitInfo.cmdBuffer = commandBuffers[i];
+        bool submitResult = device_.Submit(submitInfo);
         std::cout << "Debug: SubmitCommandBuffer returned " << (submitResult ? "true" : "false") << std::endl;
         if (submitResult) {
             std::cout << "Debug: Adding to queue (no lock needed)..." << std::endl;
@@ -458,7 +460,9 @@ bool RHIGPUOptimizer::SubmitCommandBuffer(CommandBufferHandle commandBuffer) {
     // 提交命令缓冲区到设备
     std::lock_guard<std::mutex> lock(cacheMutex_);
     commandBufferQueue_.push(commandBuffer);
-    return device_.SubmitCommandBuffer(commandBuffer);
+    QueueSubmitInfo submitInfo{};
+    submitInfo.cmdBuffer = commandBuffer;
+    return device_.Submit(submitInfo);
 }
 
 void RHIGPUOptimizer::ClearPendingBuffers() {

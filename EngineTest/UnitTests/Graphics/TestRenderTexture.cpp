@@ -131,10 +131,12 @@ public:
     void WaitIdle() const override {}
     void Shutdown() override {}
     
-    bool SubmitCommandBuffer(CommandBufferHandle handle) override {
-        auto* cmd = rhi::GetCommandBuffer(handle);
-        if (cmd) {
-            return cmd->Submit();
+    bool Submit(const QueueSubmitInfo& info) override {
+        if (info.cmdBuffer != handles::INVALID_COMMAND_BUFFER) {
+            auto* cmd = rhi::GetCommandBuffer(info.cmdBuffer);
+            if (cmd) {
+                return cmd->Submit();
+            }
         }
         return false;
     }
@@ -162,6 +164,8 @@ public:
     DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc&) override { return handles::INVALID_DESCRIPTOR_SET; }
     void DestroyDescriptorSet(DescriptorSetHandle) override {}
     void UpdateDescriptorSets(uint32_t, const WriteDescriptorSet*) override {}
+    RHISwapChain* CreateSwapChain(const SwapChainDesc& /*desc*/) override { return nullptr; }
+    void DestroySwapChain(RHISwapChain* /*swapChain*/) override {}
     
     // Resources
     ResourceHandle CreateBuffer(const BufferDesc& desc) override {

@@ -568,6 +568,14 @@ public:
      * @return 统计信息的常量引用
      */
     const CommandStats& GetStats() const { return stats_; }
+
+    /**
+     * @brief 设置状态
+     * @param state 新状态
+     */
+    void SetState(CommandBufferState state) {
+        state_ = state;
+    }
     
 protected:
     // === 派生类必须实现的虚函数 ===
@@ -600,14 +608,6 @@ protected:
      */
     void SetHandle(CommandBufferHandle handle) {
         handle_ = handle;
-    }
-    
-    /**
-     * @brief 设置状态
-     * @param state 新状态
-     */
-    void SetState(CommandBufferState state) {
-        state_ = state;
     }
     
     /**

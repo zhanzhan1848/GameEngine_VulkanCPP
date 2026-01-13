@@ -11,6 +11,7 @@
 
 #include "CommonHeaders.h"
 #include "RHIMath.h"
+#include "RHIGeometry.h"
 
 namespace primal::graphics::rhi {
 
@@ -210,36 +211,6 @@ struct BatchStats {
     BatchStats() : totalRenderItems(0), totalBatches(0), instancedBatches(0),
                    mergedBatches(0), culledItems(0), averageBatchSize(0.0f),
                    batchingEfficiency(0.0f), totalProcessingTime(0.0), memoryUsage(0) {}
-};
-
-/**
- * @brief 视锥体
- * @details 用于视锥剔除
- */
-struct Frustum {
-    math::v4 planes[6];                 ///< 6个裁剪平面
-    
-    /**
-     * @brief 从视图投影矩阵构造视锥
-     * @param viewProjection 视图投影矩阵
-     */
-    void FromMatrix(const math::m4x4& viewProjection);
-    
-    /**
-     * @brief 检查球体是否在视锥内
-     * @param center 球心
-     * @param radius 球半径
-     * @return 是否在视锥内
-     */
-    bool IsSphereVisible(const math::v3& center, f32 radius) const;
-    
-    /**
-     * @brief 检查包围盒是否在视锥内
-     * @param min 最小点
-     * @param max 最大点
-     * @return 是否在视锥内
-     */
-    bool IsBoxVisible(const math::v3& min, const math::v3& max) const;
 };
 
 /**

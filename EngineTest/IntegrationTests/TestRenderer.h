@@ -46,7 +46,7 @@ public :
         setupCustomRunLoop();
         
         // 启动主运行循环
-        CFRunLoopRun();
+        // CFRunLoopRun();
 	}
 
 	virtual void applicationWillFinishLaunching(NS::Notification* notification) override
@@ -64,11 +64,12 @@ public :
 private:
 	[[maybe_unused]] CFRunLoopTimerRef _displayLink{ nullptr };
 	CFRunLoopRef _runLoop{ nullptr };
-	CFRunLoopSourceRef _runLoopSource{ nullptr };
+	// CFRunLoopSourceRef _runLoopSource{ nullptr };
 
 	// 自定义运行时循环方法
     void setupCustomRunLoop()
 	{
+        std::cout << "Setting up custom run loop..." << std::endl;
 		// 获取主线程的RunLoop
 		_runLoop = CFRunLoopGetMain();
     
@@ -86,6 +87,7 @@ private:
 		);
 		// 将定时器添加到主RunLoop
 		CFRunLoopAddTimer(_runLoop, _displayLink, kCFRunLoopCommonModes);
+        std::cout << "Timer added to run loop." << std::endl;
 
 		// // 创建一个RunLoopSource，而不是定时器
         // CFRunLoopSourceContext sourceContext = { 0 };
@@ -113,6 +115,12 @@ private:
 
     static void displayLinkCallback([[maybe_unused]] CFRunLoopTimerRef timer, void* info)
 	{
+        static bool printed = false;
+        if (!printed) {
+            std::cout << "DisplayLink callback fired!" << std::endl;
+            printed = true;
+        }
+
 		// 从上下文中获取Engine_Test实例
 		Engine_Test* test = static_cast<Engine_Test*>(info);
 		

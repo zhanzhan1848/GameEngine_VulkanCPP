@@ -1,12 +1,35 @@
 #include "CommonHeaders.h"
 #include "Graphics/RenderProxy.h"
+#include "Graphics/RenderMesh.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/RHI/Core/RHIGeometry.h"
 #include "TestFramework.h"
 #include <iostream>
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
 using namespace Engine::Test;
+
+// --- Helper for mocking RenderMesh ---
+namespace primal::graphics {
+    class RenderMeshTestHelper {
+    public:
+        static RenderMesh* CreateMockMesh(primal::id::id_type entityId, const AABB& localAABB) {
+            RenderMesh* mesh = new RenderMesh();
+            mesh->entityId_ = entityId;
+            mesh->localAABB_ = localAABB;
+            mesh->Register();
+            return mesh;
+        }
+
+        static void DestroyMockMesh(RenderMesh* mesh) {
+            if (mesh) {
+                mesh->Unregister();
+                delete mesh;
+            }
+        }
+    };
+}
 
 // --- Test Cases ---
 
@@ -55,8 +78,6 @@ TestResult TestRenderProxyUpdateTransform() {
     RenderProxy proxy;
     
     // Verify initial transform is identity/zero translation
-    // Note: Comparing floats directly is risky, but we just set it.
-    // Ideally use a matrix comparison helper, but for now simple check.
     
     math::v3 newTranslation{10.f, 20.f, 30.f};
     math::m4x4 newTransform = math::CreateTranslationMatrix(newTranslation);
@@ -83,6 +104,72 @@ TestResult TestRenderProxySetMaterial() {
     return TestResult::Passed;
 }
 
+TestResult TestRenderProxyAABB() {
+    // 1. Test Default AABB (No Mesh)
+    {
+        RenderProxy proxy = RenderProxy::Create(1, 999, 1); // Mesh 999 doesn't exist
+        // Default AABB is usually small around origin, transformed by identity
+        TEST_ASSERT(proxy.worldAABB.IsValid(), "Default AABB should be valid");
+        
+        // Update transform and check if AABB moves
+        math::v3 translation{100.f, 0.f, 0.f};
+        proxy.UpdateTransform(math::CreateTranslationMatrix(translation));
+        
+        math::v3 center = proxy.worldAABB.Center();
+        TEST_ASSERT(std::abs(center.x - 100.f) < 0.2f, "Default AABB should move with transform");
+    }
+
+    // 2. Test AABB with Mock Mesh
+    {
+        primal::id::id_type meshId = 888;
+        // Create a mesh with known AABB: [-1, -1, -1] to [1, 1, 1]
+        AABB localAABB(math::v3{-1.f, -1.f, -1.f}, math::v3{1.f, 1.f, 1.f});
+        RenderMesh* mockMesh = RenderMeshTestHelper::CreateMockMesh(meshId, localAABB);
+
+        RenderProxy proxy = RenderProxy::Create(2, meshId, 1);
+        
+        // Initial check (Identity transform)
+        TEST_ASSERT(proxy.worldAABB.min.x == -1.f && proxy.worldAABB.max.x == 1.f, "Initial World AABB should match Local AABB for Identity transform");
+
+        // Scale by 2 and Translate by (10, 0, 0)
+        // Matrix: Scale(2) -> Translate(10)
+        // Point (1, 1, 1) -> (2, 2, 2) -> (12, 2, 2)
+        // Point (-1, -1, -1) -> (-2, -2, -2) -> (8, -2, -2)
+        
+        // Manually construct identity-like matrix
+        math::m4x4 scale;
+        memset(&scale, 0, sizeof(scale));
+        scale.columns[0][0] = 2.f;
+        scale.columns[1][1] = 2.f;
+        scale.columns[2][2] = 2.f;
+        scale.columns[3][3] = 1.f;
+        
+        // math::m4x4 translation = math::CreateTranslationMatrix(math::v3{10.f, 0.f, 0.f});
+        
+        // Construct combined matrix manually
+        math::m4x4 combined;
+        memset(&combined, 0, sizeof(combined));
+        combined.columns[0][0] = 2.f;
+        combined.columns[1][1] = 2.f;
+        combined.columns[2][2] = 2.f;
+        combined.columns[3] = math::v4{10.f, 0.f, 0.f, 1.f};
+
+        proxy.UpdateTransform(combined);
+        
+        // Check new AABB
+        // Min should be roughly (8, -2, -2)
+        // Max should be roughly (12, 2, 2)
+        
+        // Allow some epsilon for floating point
+        TEST_ASSERT(std::abs(proxy.worldAABB.min.x - 8.f) < 0.001f, "AABB Min X incorrect after transform");
+        TEST_ASSERT(std::abs(proxy.worldAABB.max.x - 12.f) < 0.001f, "AABB Max X incorrect after transform");
+
+        RenderMeshTestHelper::DestroyMockMesh(mockMesh);
+    }
+    
+    return TestResult::Passed;
+}
+
 int main() {
     auto suite = std::make_shared<TestSuite>("RenderProxy Tests");
     TEST_CASE((*suite), "TestRenderProxyCreation", TestRenderProxyCreation);
@@ -90,6 +177,7 @@ int main() {
     TEST_CASE((*suite), "TestRenderProxyFactory", TestRenderProxyFactory);
     TEST_CASE((*suite), "TestRenderProxyUpdateTransform", TestRenderProxyUpdateTransform);
     TEST_CASE((*suite), "TestRenderProxySetMaterial", TestRenderProxySetMaterial);
+    TEST_CASE((*suite), "TestRenderProxyAABB", TestRenderProxyAABB);
     
     TestRunner::RegisterTestSuite(suite);
     TestStats stats = TestRunner::RunAllSuites();

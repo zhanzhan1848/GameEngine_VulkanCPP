@@ -132,7 +132,7 @@ public:
     const DeviceDesc& GetDesc() const override { return desc_; }
     void WaitIdle() const override {}
     void Shutdown() override {}
-    bool SubmitCommandBuffer(CommandBufferHandle /*handle*/) override { return true; }
+    bool Submit(const QueueSubmitInfo& /*info*/) override { return true; }
     SyncHandle CreateSync() override { return handles::INVALID_SYNC; }
     bool WaitForSync(SyncHandle /*handle*/, uint32_t /*timeoutMs*/) override { return true; }
     void DestroySync(SyncHandle /*handle*/) override {}
@@ -147,6 +147,8 @@ public:
     DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc& /*desc*/) override { return handles::INVALID_DESCRIPTOR_SET; }
     void DestroyDescriptorSet(DescriptorSetHandle /*handle*/) override {}
     void UpdateDescriptorSets(uint32_t /*writeCount*/, const WriteDescriptorSet* /*writes*/) override {}
+    RHISwapChain* CreateSwapChain(const SwapChainDesc& /*desc*/) override { return nullptr; }
+    void DestroySwapChain(RHISwapChain* /*swapChain*/) override {}
     
     ResourceHandle CreateBuffer(const BufferDesc& desc) override {
         auto* res = new MockResource(*this, ResourceDesc(ResourceType::Buffer, (ResourceUsage)desc.bindFlags, desc.usage, desc.size));

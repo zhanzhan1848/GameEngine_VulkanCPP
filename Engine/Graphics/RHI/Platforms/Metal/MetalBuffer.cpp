@@ -129,6 +129,8 @@ bool MetalBuffer::Initialize() {
         mtlBuffer_->setLabel(name);
     }
 
+    state_ = ResourceState::Ready;
+    // std::cout << "[MetalBuffer] Initialized at address: " << this << " Handle: " << handle_ << std::endl;
     return true;
 }
 
@@ -138,6 +140,7 @@ void MetalBuffer::destroyImpl() {
     auto poolHandle = poolHandle_;
 
     if (mtlBuffer || (pool && poolHandle != 0)) {
+        std::cout << "[MetalBuffer] Destroying buffer at " << mtlBuffer << std::endl;
         device_.GetGarbageCollector().DeferredDestroy([mtlBuffer, pool, poolHandle]() {
             if (mtlBuffer) {
                 mtlBuffer->release();
@@ -176,8 +179,14 @@ void* MetalBuffer::mapImpl(uint64_t offset, uint64_t size) {
     
     uint8_t* bufferContents = static_cast<uint8_t*>(mtlBuffer_->contents());
     if (!bufferContents) {
-         std::cerr << "[MetalBuffer] mapImpl failed: contents() returned null. StorageMode: " 
-                   << mtlBuffer_->storageMode() << std::endl;
+         static bool loggedMapFail = false;
+         if (!loggedMapFail) {
+             std::cerr << "[MetalBuffer] mapImpl failed: contents() returned null. StorageMode: " 
+                       << (int)mtlBuffer_->storageMode() 
+                       << " Size: " << desc_.size
+                       << " Name: " << GetName() << std::endl;
+             loggedMapFail = true;
+         }
          return nullptr;
     }
     
@@ -190,7 +199,7 @@ void MetalBuffer::unmapImpl() {
     // 对于 Managed 模式，需要通知 Metal 数据已修改
     // Shared 模式在 Apple Silicon 上是 Coherent 的，但为了保险起见（以及兼容 Intel Mac），也进行通知
 #if defined(__APPLE__) || defined(__MAC_OS_X_VERSION_MAX_ALLOWED)
-        if (mtlBuffer_->storageMode() == MTL::StorageModeManaged || mtlBuffer_->storageMode() == MTL::StorageModeShared) {
+        if (mtlBuffer_->storageMode() == MTL::StorageModeManaged) {
             mtlBuffer_->didModifyRange(NS::Range(0, desc_.size));
         }
 #endif
@@ -198,11 +207,9 @@ void MetalBuffer::unmapImpl() {
 
 bool MetalBuffer::updateDataImpl(const void* data, uint64_t size, uint64_t offset) {
     if (!mtlBuffer_ || !data) {
-        std::cerr << "[MetalBuffer] updateDataImpl failed: mtlBuffer_ or data is null" << std::endl;
         return false;
     }
     if (offset + size > desc_.size) {
-        std::cerr << "[MetalBuffer] updateDataImpl failed: offset + size > desc_.size" << std::endl;
         return false;
     }
 
@@ -212,28 +219,43 @@ bool MetalBuffer::updateDataImpl(const void* data, uint64_t size, uint64_t offse
         if (ptr) {
             memcpy(ptr, data, size);
             unmapImpl();
-            return true;
-        }
-    }
-    
-    // 如果不可映射（如 Private 存储模式），使用 Staging Buffer
+            
+            static bool loggedFastPath = false;
+                    if (!loggedFastPath) {
+                        // Safe log: avoid calling GetName() if potential risk, just log address or skip name
+                        std::cerr << "[MetalBuffer] updateDataImpl used Fast Path (Map) for buffer at " << this << std::endl;
+                        loggedFastPath = true;
+                    }
+                    return true;
+                }
+            }
+
+            // 如果不可映射（如 Private 存储模式），使用 Staging Buffer
+            static bool loggedSlowPath = false;
+            if (!loggedSlowPath) {
+                std::cerr << "[MetalBuffer] updateDataImpl used SLOW Path (Staging) for buffer at " << this
+                          << " CanMap: " << CanMap() 
+                          << " MemoryUsage: " << (int)desc_.memoryUsage 
+                          << std::endl;
+                loggedSlowPath = true;
+            }
+
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     MTL::Device* mtlDevice = metalDevice.GetNativeDevice();
     MTL::CommandQueue* transferQueue = metalDevice.GetTransferQueue();
-    
+
     if (!mtlDevice || !transferQueue) {
         std::cerr << "[MetalBuffer] updateDataImpl failed: mtlDevice or transferQueue is null. Device: " << mtlDevice << " Queue: " << transferQueue << std::endl;
         return false;
     }
-    
+
     // 1. 创建暂存缓冲区 (Shared Mode)
-    // 注意：在实际引擎中，应该使用 StagingBufferPool 来复用缓冲区，避免频繁创建销毁
     MTL::Buffer* stagingBuffer = mtlDevice->newBuffer(size, MTL::ResourceStorageModeShared);
     if (!stagingBuffer) {
         std::cerr << "[MetalBuffer] updateDataImpl failed: Failed to create staging buffer. Size: " << size << std::endl;
         return false;
     }
-    
+
     // 2. 将数据拷贝到暂存缓冲区
     memcpy(stagingBuffer->contents(), data, size);
     
@@ -251,20 +273,18 @@ bool MetalBuffer::updateDataImpl(const void* data, uint64_t size, uint64_t offse
         stagingBuffer->release();
         return false;
     }
-    
+
     // 4. 编码拷贝命令
     blitEncoder->copyFromBuffer(stagingBuffer, 0, mtlBuffer_, offset, size);
     blitEncoder->endEncoding();
-    
+
     // 5. 提交并等待完成
-    // 注意：这是一个同步操作，会阻塞当前线程直到 GPU 完成拷贝
-    // 也可以优化为异步，但这需要 RHI 接口支持 Fence 或回调
     cmdBuffer->commit();
     cmdBuffer->waitUntilCompleted();
-    
+
     // 6. 释放暂存缓冲区
     stagingBuffer->release();
-    
+
     return true;
 }
 

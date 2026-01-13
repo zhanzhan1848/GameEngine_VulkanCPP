@@ -45,8 +45,9 @@ public:
     /**
      * @brief 更新GC状态，执行可回收资源的销毁
      * @param completedFrame GPU已完成的帧索引
+     * @param maxDurationMs 最大执行时间(ms)，0表示不限制
      */
-    void Update(uint64_t completedFrame);
+    void Update(uint64_t completedFrame, double maxDurationMs = 0.0);
 
     /**
      * @brief 设置当前CPU正在录制的帧索引

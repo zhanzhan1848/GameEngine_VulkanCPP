@@ -16,6 +16,7 @@
 #include <shared_mutex>
 #include <mutex>
 #include <type_traits>
+#include <iostream>
 
 namespace primal::graphics::rhi {
 
@@ -104,11 +105,13 @@ public:
     void Shutdown() {
         std::unique_lock<std::shared_mutex> lock(_mutex);
         uint32_t cap = _pool.capacity();
+        // std::cout << "[RHIAllocator] Shutdown: capacity=" << cap << ", size=" << _pool.size() << std::endl;
         for (uint32_t i = 0; i < cap; ++i) {
             if (_pool.is_valid(i)) {
                 FreeInternal(i);
             }
         }
+        // std::cout << "[RHIAllocator] Shutdown complete. Final size=" << _pool.size() << std::endl;
     }
 
     /**

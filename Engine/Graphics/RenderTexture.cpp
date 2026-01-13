@@ -154,7 +154,9 @@ bool RenderTexture::UploadDataAsync(rhi::RHIDeviceBase* device, const void* data
     cmd->End();
     
     // 5. Submit and Wait (Synchronous for now)
-    device->SubmitCommandBuffer(cmdHandle);
+    rhi::QueueSubmitInfo submitInfo{};
+    submitInfo.cmdBuffer = cmdHandle;
+    device->Submit(submitInfo);
     cmd->WaitForCompletion();
     
     // 6. Cleanup
@@ -200,7 +202,9 @@ bool RenderTexture::ReadBack(rhi::RHIDeviceBase* device, void* data, uint64_t si
     cmd->End();
     
     // 3. Submit and Wait
-    device->SubmitCommandBuffer(cmdHandle);
+    rhi::QueueSubmitInfo submitInfo{};
+    submitInfo.cmdBuffer = cmdHandle;
+    device->Submit(submitInfo);
     cmd->WaitForCompletion();
     
     // 4. Map and Copy
@@ -260,7 +264,9 @@ bool RenderTexture::GenerateMipmaps(rhi::RHIDeviceBase* device) {
     }
     
     cmd->End();
-    device->SubmitCommandBuffer(cmdHandle);
+    rhi::QueueSubmitInfo submitInfo{};
+    submitInfo.cmdBuffer = cmdHandle;
+    device->Submit(submitInfo);
     cmd->WaitForCompletion();
     
     return true;

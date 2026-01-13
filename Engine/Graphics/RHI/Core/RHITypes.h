@@ -119,6 +119,17 @@ namespace handles {
     constexpr DescriptorSetHandle INVALID_DESCRIPTOR_SET = static_cast<DescriptorSetHandle>(-1);
 }
 
+/**
+ * @brief 队列提交信息
+ * @details 描述提交到命令队列的命令缓冲区和同步原语
+ */
+struct QueueSubmitInfo {
+    CommandBufferHandle cmdBuffer{handles::INVALID_COMMAND_BUFFER};
+    SyncHandle waitSemaphore{handles::INVALID_SYNC};   ///< 等待的信号量 (GPU wait)
+    SyncHandle signalSemaphore{handles::INVALID_SYNC}; ///< 发出的信号量 (GPU signal)
+    SyncHandle signalFence{handles::INVALID_SYNC};     ///< 发出的栅栏 (CPU wait)
+};
+
 // === 枚举定义 ===
 
 /**

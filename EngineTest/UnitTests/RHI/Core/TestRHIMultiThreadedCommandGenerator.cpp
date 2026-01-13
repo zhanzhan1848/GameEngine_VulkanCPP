@@ -91,10 +91,18 @@ public:
     void destroyCommandBufferImpl(CommandBufferHandle handle) {}
     
     // 命令提交实现
-    bool submitCommandBufferImpl(CommandBufferHandle handle) {
+    bool submitImpl(const QueueSubmitInfo& info) {
         return true; // Mock实现，总是返回成功
     }
     
+    // SwapChain 实现
+    RHISwapChain* createSwapChainImpl(const SwapChainDesc& desc) {
+        return nullptr;
+    }
+
+    void destroySwapChainImpl(RHISwapChain* swapChain) {
+    }
+
     // 同步对象创建实现
     SyncHandle createSyncImpl() {
         return nextSyncHandle_++;

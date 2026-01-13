@@ -69,8 +69,8 @@ public:
     void destroyCommandBufferImpl(CommandBufferHandle handle) {}
     
     // 命令提交实现
-    bool submitCommandBufferImpl(CommandBufferHandle handle) {
-        std::cout << "Debug: MockRHIDevice::submitCommandBufferImpl called with handle " << handle << std::endl;
+    bool submitImpl(const QueueSubmitInfo& info) {
+        std::cout << "Debug: MockRHIDevice::submitImpl called" << std::endl;
         std::cout << "Debug: MockRHIDevice::isValid_ = " << isValid_ << std::endl;
         
         if (!isValid_) {
@@ -78,9 +78,21 @@ public:
             return false;
         }
         
-        submittedCommandBuffers_.push_back(handle);
-        std::cout << "Debug: MockRHIDevice::submitCommandBufferImpl returning true" << std::endl;
+        // 模拟提交
+        if (info.cmdBuffer != handles::INVALID_COMMAND_BUFFER) {
+            submittedCommandBuffers_.push_back(info.cmdBuffer);
+        }
+        
+        std::cout << "Debug: MockRHIDevice::submitImpl returning true" << std::endl;
         return true;
+    }
+    
+    // SwapChain 实现
+    RHISwapChain* createSwapChainImpl(const SwapChainDesc& desc) {
+        return nullptr;
+    }
+
+    void destroySwapChainImpl(RHISwapChain* swapChain) {
     }
     
     // 同步对象创建实现

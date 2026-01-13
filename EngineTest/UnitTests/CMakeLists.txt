@@ -517,6 +517,10 @@ set_target_properties(StandaloneGraphics_RenderTexture_Test PROPERTIES FOLDER "T
 add_executable(StandaloneGraphics_RenderProxy_Test 
     Graphics/TestRenderProxy.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderProxy.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderMesh.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
 )
 target_include_directories(StandaloneGraphics_RenderProxy_Test PRIVATE 
     ${CMAKE_SOURCE_DIR}
@@ -530,6 +534,82 @@ set_target_properties(StandaloneGraphics_RenderProxy_Test PROPERTIES
 )
 target_compile_definitions(StandaloneGraphics_RenderProxy_Test PRIVATE DEBUG _DEBUG)
 set_target_properties(StandaloneGraphics_RenderProxy_Test PROPERTIES FOLDER "Tests/Graphics")
+
+# 创建RenderScene测试
+add_executable(StandaloneGraphics_RenderScene_Test 
+    Graphics/TestRenderScene.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderScene.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderProxy.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderMesh.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
+)
+target_include_directories(StandaloneGraphics_RenderScene_Test PRIVATE    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME StandaloneGraphics_RenderScene_Test COMMAND StandaloneGraphics_RenderScene_Test)
+set_target_properties(StandaloneGraphics_RenderScene_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneGraphics_RenderScene_Test PRIVATE DEBUG _DEBUG)
+set_target_properties(StandaloneGraphics_RenderScene_Test PROPERTIES FOLDER "Tests/Graphics")
+
+# 创建RenderView测试
+add_executable(StandaloneGraphics_RenderView_Test 
+    Graphics/TestRenderView.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderView.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderScene.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderProxy.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderMesh.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
+)
+target_include_directories(StandaloneGraphics_RenderView_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME StandaloneGraphics_RenderView_Test COMMAND StandaloneGraphics_RenderView_Test)
+set_target_properties(StandaloneGraphics_RenderView_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneGraphics_RenderView_Test PRIVATE DEBUG _DEBUG)
+set_target_properties(StandaloneGraphics_RenderView_Test PROPERTIES FOLDER "Tests/Graphics")
+
+# 创建RenderSystem测试
+add_executable(StandaloneGraphics_RenderSystem_Test 
+    Graphics/TestRenderSystem.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Systems/RenderSystem.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderView.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderScene.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderProxy.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderMesh.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Material.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/MaterialInstance.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHISwapChain.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
+)
+target_include_directories(StandaloneGraphics_RenderSystem_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME StandaloneGraphics_RenderSystem_Test COMMAND StandaloneGraphics_RenderSystem_Test)
+set_target_properties(StandaloneGraphics_RenderSystem_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneGraphics_RenderSystem_Test PRIVATE DEBUG _DEBUG)
+set_target_properties(StandaloneGraphics_RenderSystem_Test PROPERTIES FOLDER "Tests/Graphics")
+
 
 
 # 设置moodycamel库路径

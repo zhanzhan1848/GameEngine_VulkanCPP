@@ -106,7 +106,9 @@ private:
         std::cout << "[Test] CommandBuffer End called" << std::endl;
 
         // 4. 提交
-        device_->SubmitCommandBuffer(cmdBufferHandle);
+        QueueSubmitInfo submitInfo;
+        submitInfo.cmdBuffer = cmdBufferHandle;
+        device_->Submit(submitInfo);
         std::cout << "[Test] Submit called" << std::endl;
         
         // 清理
@@ -138,7 +140,9 @@ private:
         cmdBuffer->End();
         std::cout << "[Test] CommandBuffer End called" << std::endl;
         
-        device_->SubmitCommandBuffer(cmdBufferHandle);
+        QueueSubmitInfo submitInfo;
+        submitInfo.cmdBuffer = cmdBufferHandle;
+        device_->Submit(submitInfo);
         std::cout << "[Test] Submit called" << std::endl;
         
         device_->DestroyBuffer(buf1);
@@ -215,7 +219,9 @@ private:
 
         cmdBuffer->End();
         
-        device_->SubmitCommandBuffer(cmdBufferHandle);
+        QueueSubmitInfo submitInfo;
+        submitInfo.cmdBuffer = cmdBufferHandle;
+        device_->Submit(submitInfo);
         std::cout << "[Test] Submit called" << std::endl;
 
         device_->DestroyBuffer(buf1);

@@ -15,8 +15,8 @@ namespace primal::graphics {
         ~MaterialInstance();
 
         DISABLE_COPY(MaterialInstance);
-        MaterialInstance(MaterialInstance&&) = default;
-        MaterialInstance& operator=(MaterialInstance&&) = default;
+        MaterialInstance(MaterialInstance&& other) noexcept;
+        MaterialInstance& operator=(MaterialInstance&& other) noexcept;
 
         /**
          * @brief Initialize the material instance
@@ -47,15 +47,26 @@ namespace primal::graphics {
         void SetUniformData(u32 offset, const void* data, u32 size);
 
         /**
+         * @brief Set the current frame index for multi-buffering
+         * @param frameIndex Current frame index (0 to MAX_FRAMES_IN_FLIGHT-1)
+         */
+        void SetCurrentFrame(u32 frameIndex);
+
+        /**
          * @brief Update descriptor set on GPU
          * @details Applies pending texture/sampler updates. Uniform data is updated immediately if mapped.
          */
         void Update(rhi::RHIDeviceBase* device);
 
         /**
-         * @brief Get the descriptor set handle
+         * @brief Get the descriptor set handle for the current frame
          */
-        rhi::DescriptorSetHandle GetDescriptorSet() const { return descriptorSet_; }
+        rhi::DescriptorSetHandle GetDescriptorSet() const { 
+            if (currentFrameIndex_ < descriptorSets_.size()) {
+                return descriptorSets_[currentFrameIndex_];
+            }
+            return rhi::handles::INVALID_RESOURCE;
+        }
 
         /**
          * @brief Get the parent material
@@ -64,10 +75,15 @@ namespace primal::graphics {
 
     private:
         Material* material_{nullptr};
-        rhi::DescriptorSetHandle descriptorSet_{rhi::handles::INVALID_RESOURCE};
-        rhi::ResourceHandle uniformBuffer_{rhi::handles::INVALID_RESOURCE};
-        void* uniformBufferMapped_{nullptr};
+        utl::vector<rhi::DescriptorSetHandle> descriptorSets_;
         
+        // Triple buffering for uniforms to avoid CPU-GPU sync stalls
+        static constexpr u32 MAX_FRAMES_IN_FLIGHT = 3;
+        utl::vector<rhi::ResourceHandle> uniformBuffers_;
+        utl::vector<void*> uniformBuffersMapped_;
+        u32 currentFrameIndex_{0};
+        bool uniformDirty_{false};
+
         struct TextureUpdate {
             u32 binding;
             rhi::ResourceHandle texture;
@@ -77,8 +93,8 @@ namespace primal::graphics {
             rhi::SamplerHandle sampler;
         };
         
-        std::vector<TextureUpdate> pendingTextures_;
-        std::vector<SamplerUpdate> pendingSamplers_;
+        utl::vector<TextureUpdate> pendingTextures_;
+        utl::vector<SamplerUpdate> pendingSamplers_;
         
         rhi::RHIDeviceBase* device_{nullptr}; // Cached for destruction
     };

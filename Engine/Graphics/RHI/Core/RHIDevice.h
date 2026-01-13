@@ -166,7 +166,7 @@ public:
     virtual const DeviceDesc& GetDesc() const = 0;
     virtual void WaitIdle() const = 0;
     virtual void Shutdown() = 0;
-    virtual bool SubmitCommandBuffer(CommandBufferHandle handle) = 0;
+    virtual bool Submit(const QueueSubmitInfo& info) = 0;
     virtual SyncHandle CreateSync() = 0;
     virtual bool WaitForSync(SyncHandle handle, u32 timeoutMs) = 0;
     virtual void DestroySync(SyncHandle handle) = 0;
@@ -181,6 +181,8 @@ public:
     virtual DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc& desc) = 0;
     virtual void DestroyDescriptorSet(DescriptorSetHandle handle) = 0;
     virtual void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) = 0;
+    virtual RHISwapChain* CreateSwapChain(const SwapChainDesc& desc) = 0;
+    virtual void DestroySwapChain(RHISwapChain* swapChain) = 0;
     virtual ResourceHandle CreateBuffer(const BufferDesc& desc) = 0;
     virtual ResourceHandle CreateTexture(const TextureDesc& desc) = 0;
     virtual ShaderHandle CreateShader(const void* data, size_t size, ShaderStage stage, const char* entryPoint = "main") = 0;
@@ -310,7 +312,7 @@ public:
      * @param desc 交换链描述符
      * @return 交换链指针，失败返回nullptr
      */
-    RHISwapChain* CreateSwapChain(const SwapChainDesc& desc) {
+    RHISwapChain* CreateSwapChain(const SwapChainDesc& desc) override {
         assert(isValid_ && "Device not initialized");
         return derived().createSwapChainImpl(desc);
     }
@@ -319,7 +321,7 @@ public:
      * @brief 销毁交换链
      * @param swapChain 交换链指针
      */
-    void DestroySwapChain(RHISwapChain* swapChain) {
+    void DestroySwapChain(RHISwapChain* swapChain) override {
         assert(isValid_ && "Device not initialized");
         if (swapChain) {
             derived().destroySwapChainImpl(swapChain);
@@ -514,12 +516,12 @@ public:
     
     /**
      * @brief 提交命令缓冲区
-     * @param handle 命令缓冲区句柄
+     * @param info 提交信息
      * @return 提交是否成功
      */
-    bool SubmitCommandBuffer(CommandBufferHandle handle) override {
+    bool Submit(const QueueSubmitInfo& info) override {
         assert(isValid_ && "Device not initialized");
-        return derived().submitCommandBufferImpl(handle);
+        return derived().submitImpl(info);
     }
     
     /**

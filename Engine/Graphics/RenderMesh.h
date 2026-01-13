@@ -14,6 +14,7 @@
 #include "RHI/Core/RHITypes.h"
 #include "RHI/Core/RHIDevice.h"
 #include "RHI/Core/RHICommand.h"
+#include "RHI/Core/RHIGeometry.h"
 #include <unordered_map>
 #include <mutex>
 
@@ -100,6 +101,12 @@ public:
     uint32_t GetIndexCount() const { return indexCount_; }
 
     /**
+     * @brief 获取局部包围盒
+     * @return 局部AABB
+     */
+    const rhi::AABB& GetLocalAABB() const { return localAABB_; }
+
+    /**
      * @brief 获取关联的实体ID
      * @return 实体ID
      */
@@ -122,7 +129,8 @@ private:
      */
     rhi::ResourceHandle CreateBuffer(rhi::RHIDeviceBase* device, const void* data, uint64_t size, rhi::BufferType type);
 
-private:
+    friend class RenderMeshTestHelper;
+
     rhi::ResourceHandle vertexBuffer_;      ///< 顶点缓冲区句柄
     rhi::ResourceHandle indexBuffer_;       ///< 索引缓冲区句柄
     primal::id::id_type entityId_;          ///< 关联的ECS实体ID
@@ -130,6 +138,7 @@ private:
     uint32_t indexCount_;                   ///< 索引数量
     uint32_t vertexStride_;                 ///< 顶点步长
     rhi::DataIndexType indexType_;          ///< 索引类型
+    rhi::AABB localAABB_;                   ///< 局部坐标系下的包围盒
 
     // 静态注册表
     static std::unordered_map<primal::id::id_type, RenderMesh*> registry_;

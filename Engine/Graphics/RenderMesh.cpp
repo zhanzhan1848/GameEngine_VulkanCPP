@@ -83,11 +83,29 @@ bool RenderMesh::Create(rhi::RHIDeviceBase* device,
     indexCount_ = indexCount;
     indexType_ = indexType;
 
+    // 计算AABB
+    localAABB_ = rhi::AABB(); // 重置为无效
+    const uint8_t* vertexData = static_cast<const uint8_t*>(vertices);
+    for (uint32_t i = 0; i < vertexCount; ++i) {
+        // 假设前3个float是位置
+        const float* pos = reinterpret_cast<const float*>(vertexData + i * vertexStride);
+        localAABB_.Expand(rhi::math::v3{pos[0], pos[1], pos[2]});
+    }
+
     // 创建顶点缓冲区
+    // Metal要求缓冲区大小必须是256字节对齐，否则可能会导致访问越界或性能问题
     uint64_t vertexBufferSize = static_cast<uint64_t>(vertexCount) * vertexStride;
-    vertexBuffer_ = CreateBuffer(device, vertices, vertexBufferSize, rhi::BufferType::Vertex);
+    uint64_t alignedVertexSize = (vertexBufferSize + 255) & ~255;
+    vertexBuffer_ = CreateBuffer(device, vertices, alignedVertexSize, rhi::BufferType::Vertex);
     
-    if (vertexBuffer_ == rhi::handles::INVALID_RESOURCE) {
+    if (vertexBuffer_ != rhi::handles::INVALID_RESOURCE) {
+        // 更新缓冲区数据
+        // 注意：只更新实际数据大小，保留对齐填充部分的未初始化状态
+        rhi::RHIResource* resource = rhi::ResourceManager::Instance().GetResource(vertexBuffer_);
+        if (resource) {
+            resource->UpdateData(vertices, vertexBufferSize);
+        }
+    } else {
         return false;
     }
 
@@ -95,7 +113,25 @@ bool RenderMesh::Create(rhi::RHIDeviceBase* device,
     if (indices && indexCount > 0) {
         uint64_t indexStride = (indexType == rhi::DataIndexType::UInt32) ? 4 : 2;
         uint64_t indexBufferSize = static_cast<uint64_t>(indexCount) * indexStride;
-        indexBuffer_ = CreateBuffer(device, indices, indexBufferSize, rhi::BufferType::Index);
+        
+        // 对齐缓冲区大小到256字节，符合Metal最佳实践并避免越界警告
+        uint64_t alignedSize = (indexBufferSize + 255) & ~255;
+
+        rhi::BufferDesc desc;
+        desc.size = alignedSize;
+        desc.type = rhi::BufferType::Index;
+        desc.usage = rhi::GPUMemoryUsage::Dynamic; // 使用动态内存以便调试
+        desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        desc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::IndexBuffer) | static_cast<uint32_t>(rhi::ResourceUsage::CopyDest);
+        
+        indexBuffer_ = device->CreateBuffer(desc);
+        
+        if (indexBuffer_ != rhi::handles::INVALID_RESOURCE) {
+            rhi::RHIResource* resource = rhi::ResourceManager::Instance().GetResource(indexBuffer_);
+            if (resource) {
+                resource->UpdateData(indices, indexBufferSize);
+            }
+        }
         
         if (indexBuffer_ == rhi::handles::INVALID_RESOURCE) {
             Destroy(device);
@@ -151,7 +187,8 @@ rhi::ResourceHandle RenderMesh::CreateBuffer(rhi::RHIDeviceBase* device, const v
     desc.size = size;
     desc.type = type;
     // 优先使用静态内存以获得最佳性能
-    desc.usage = rhi::GPUMemoryUsage::Static;
+    desc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed from Static to Dynamic for debugging
+    desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     
     // 设置绑定标志
     desc.bindFlags = (type == rhi::BufferType::Vertex) 
@@ -174,6 +211,7 @@ rhi::ResourceHandle RenderMesh::CreateBuffer(rhi::RHIDeviceBase* device, const v
                 device->DestroyBuffer(handle);
                 
                 desc.usage = rhi::GPUMemoryUsage::Dynamic;
+                desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
                 handle = device->CreateBuffer(desc);
                 
                 if (handle != rhi::handles::INVALID_RESOURCE) {

@@ -32,6 +32,7 @@ public:
     void SetTopology(rhi::PrimitiveTopology topology);
 
     void SetPipelineLayout(rhi::PipelineLayoutHandle layout);
+    rhi::PipelineLayoutHandle GetPipelineLayout() const { return layout_; }
     void SetDescriptorSetLayout(rhi::DescriptorSetLayoutHandle layout);
     rhi::DescriptorSetLayoutHandle GetDescriptorSetLayout() const { return descriptorSetLayout_; }
 

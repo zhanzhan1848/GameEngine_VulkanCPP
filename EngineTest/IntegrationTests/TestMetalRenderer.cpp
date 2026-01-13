@@ -1,426 +1,459 @@
-// ============================================================================
-// 文件：TestMetalRenderer.cpp
-// 描述：Engine_Test 类的 MacOS/Metal 实现
-//       包含 Metal 设备初始化、资源管理和渲染循环
-//       演示了多线程渲染命令生成、资源管理和性能监控
-// 作者：AI助手
-// ============================================================================
+/**
+ * @file TestMetalRenderer.cpp
+ * @brief Metal 渲染器集成测试
+ * @details 验证 RenderSystem、Forward Renderer 和 Metal RHI 的集成流程
+ * @author GameEngine VulkanCPP Team
+ * @date 2026-01-12
+ */
 
 #ifdef __APPLE__
 
 #include "TestRenderer.h"
-#include "Engine/Graphics/RHI/Platforms/Metal/MetalDevice.h"
-#include "Engine/Graphics/RHI/Platforms/Metal/MetalSwapChain.h"
-#include "Engine/Graphics/RHI/Core/RHICommand.h"
-#include "Engine/Graphics/RHI/Core/RHIMultiThreadedCommandGenerator.h"
-#include "Engine/Platform/Window.h"
-#include "Engine/Platform/Platform.h"
-#include <memory>
+#include "Graphics/RHI/Systems/RenderSystem.h"
+#include "Graphics/RenderScene.h"
+#include "Graphics/RenderView.h"
+#include "Graphics/RenderMesh.h"
+#include "Graphics/Material.h"
+#include "Graphics/MaterialInstance.h"
+#include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#include "Graphics/RHI/Core/RHIMath.h"
+#include "Platform/Platform.h"
+#include "Platform/Window.h"
 #include <iostream>
+#include <fstream>
 #include <vector>
-#include <cmath>
-#include <string>
-#include <chrono>
 
 using namespace primal;
+using namespace primal::graphics;
 using namespace primal::graphics::rhi;
-using namespace primal::platform;
+using namespace primal::graphics::rhi::math;
 
-namespace {
-    // 简单的 MSL Shader 源码
-    const char* kShaderSource = R"(
-        #include <metal_stdlib>
-        using namespace metal;
+// Define the shader source here or load from file
+const char* kSimpleColorShader = R"(
+#include <metal_stdlib>
+using namespace metal;
 
-        struct Vertex {
-            float4 position;
-            float4 color;
-        };
+struct VertexIn {
+    float3 position [[attribute(0)]];
+    float3 color [[attribute(1)]];
+};
 
-        struct VertexOut {
-            float4 position [[position]];
-            float4 color;
-        };
-        
-        // 调试修改：直接使用 buffer(2) 读取顶点数据，绕过 stage_in 和 VertexDescriptor
-        // 使用 device 地址空间，更通用
-        vertex VertexOut vertexMain(uint vID [[vertex_id]], device const Vertex* vertices [[buffer(2)]]) {
-            VertexOut out;
-            Vertex v = vertices[vID];
-            out.position = v.position;
-            out.color = v.color;
-            return out;
-        }
-        
-        fragment float4 fragmentMain(VertexOut in [[stage_in]]) {
-            return in.color;
-        }
-    )";
+struct VertexOut {
+    float4 position [[position]];
+    float4 color;
+};
 
-    struct alignas(16) Vertex {
-        float position[4];
-        float color[4];
-    };
-    
-    struct Uniforms {
-        float modelMatrix[16];
-    };
+struct Uniforms {
+    float4x4 viewProjectionMatrix;
+    float4x4 modelMatrix;
+};
 
-    // 辅助函数：创建单位矩阵
-    void MatrixIdentity(float* m) {
-        for(int i=0; i<16; ++i) m[i] = 0;
-        m[0] = m[5] = m[10] = m[15] = 1.0f;
-    }
-
-    // 辅助函数：创建旋转矩阵
-    void CreateRotationMatrix(float angle, float* matrix) {
-        float c = cos(angle);
-        float s = sin(angle);
-        MatrixIdentity(matrix);
-        // Z轴旋转
-        matrix[0] = c; matrix[1] = s;
-        matrix[4] = -s; matrix[5] = c;
-    }
-
-    struct MetalTestContext {
-        platform::window window;
-        std::unique_ptr<MetalDevice> device;
-        std::unique_ptr<MetalSwapChain> swapChain;
-        std::unique_ptr<RHIMultiThreadedCommandGenerator> cmdGenerator;
-        
-        // 渲染相关
-        ShaderHandle vertexShader{handles::INVALID_SHADER};
-        ShaderHandle pixelShader{handles::INVALID_SHADER};
-        PipelineHandle pipeline{handles::INVALID_PIPELINE};
-        ResourceHandle vertexBuffer{handles::INVALID_RESOURCE};
-        ResourceHandle uniformBuffer{handles::INVALID_RESOURCE};
-        
-        // 动画状态
-        float rotationAngle = 0.0f;
-        
-        // 性能统计
-        uint32_t frameCount = 0;
-        std::chrono::high_resolution_clock::time_point lastTime;
-        std::chrono::high_resolution_clock::time_point startTime;
-        float fps = 0.0f;
-        
-        bool initialized = false;
-    };
-    
-    MetalTestContext g_Ctx;
-}
-
-#include <mutex>
-
-static std::mutex g_cmdMutex;
-
-/**
- * @brief 命令生成回调
- * @details 由 RHIMultiThreadedCommandGenerator 在工作线程调用
- */
-CommandBufferHandle GenerateCommandsCallback(const MultiThreadRenderBatch& batch) {
-    std::lock_guard<std::mutex> lock(g_cmdMutex);
-
-    // 1. 创建命令缓冲区
-    // 注意：在多线程环境下，CreateCommandBuffer 需要是线程安全的
-    // 这里我们假设 RHI 层的分配器是线程安全的
-    CommandBufferHandle cmdHandle = g_Ctx.device->CreateCommandBuffer(CommandQueueType::Graphics);
-    if (cmdHandle == handles::INVALID_COMMAND_BUFFER) return handles::INVALID_COMMAND_BUFFER;
-
-    auto* cmdBuffer = g_Ctx.device->GetCommandBuffer(cmdHandle);
-    if (!cmdBuffer) return handles::INVALID_COMMAND_BUFFER;
-
-    cmdBuffer->Begin();
-    
-    // 2. 准备渲染通道
-    RenderPassDesc passDesc;
-    RenderPassDesc::Attachment colorAtt;
-    colorAtt.texture = batch.renderTarget; // 使用 batch 中的 renderTarget
-    colorAtt.loadOp = LoadAction::Clear;
-    colorAtt.storeOp = StoreAction::Store;
-    colorAtt.clearValue = ClearValue(0.0f, 0.0f, 0.5f, 1.0f); // 蓝色
-    passDesc.colorAttachments.push_back(colorAtt);
-    
-    // 手动设置视口
-    passDesc.viewport.topLeft = {0.0f, 0.0f};
-    passDesc.viewport.size = {static_cast<float>(g_Ctx.window.width()), static_cast<float>(g_Ctx.window.height())};
-    passDesc.viewport.minDepth = 0.0f;
-    passDesc.viewport.maxDepth = 1.0f;
-    
-    passDesc.scissor.offset = {0, 0};
-    passDesc.scissor.extent = {g_Ctx.window.width(), g_Ctx.window.height()};
-
-    cmdBuffer->BeginRenderPass(passDesc);
-    
-    // 3. 绑定管线
-    cmdBuffer->BindGraphicsPipeline(g_Ctx.pipeline);
-    
-    // 4. 绑定顶点缓冲区
-    uint64_t vOffset = 0;
-    // 使用 Slot 2 以避开 VertexDescriptor (通常使用 Slot 0/1) 的潜在干扰，并配合 Shader 的 buffer(2)
-    cmdBuffer->BindVertexBuffers(2, 1, &g_Ctx.vertexBuffer, &vOffset);
-    
-    // 5. 绘制
-    cmdBuffer->Draw(3, 0, 1, 0);
-    
-    cmdBuffer->EndRenderPass();
-    cmdBuffer->End();
-    
-    return cmdHandle;
-}
-
-bool Engine_Test::initialize()
+vertex VertexOut vertexMain(
+    VertexIn in [[stage_in]],
+    constant Uniforms& uniforms [[buffer(1)]])
 {
-    // 1. 创建窗口
-    window_init_info info{};
-    info.caption = "Metal RHI Test Scene";
+    VertexOut out;
+    float4 worldPos = uniforms.modelMatrix * float4(in.position, 1.0);
+    out.position = uniforms.viewProjectionMatrix * worldPos;
+    out.color = float4(in.color, 1.0);
+    return out;
+}
+
+fragment float4 fragmentMain(VertexOut in [[stage_in]]) {
+    return in.color;
+}
+)";
+
+struct Engine_Test_Impl {
+    platform::window window;
+    RenderSystem renderSystem;
+    RenderScene scene;
+    RenderView view;
+    
+    RenderMesh* mesh = nullptr;
+    Material* material = nullptr;
+    MaterialInstance* materialInstance = nullptr;
+    
+    // Keep resources alive
+    std::unique_ptr<RHIDeviceBase> device;
+    
+    // Test state
+    float rotationAngle = 0.0f;
+};
+
+static std::unique_ptr<Engine_Test_Impl> g_Test;
+
+// Uniform Data Structure
+struct UniformData {
+    m4x4 viewProjectionMatrix;
+    m4x4 modelMatrix;
+};
+
+bool Engine_Test::initialize() {
+    g_Test = std::make_unique<Engine_Test_Impl>();
+    
+    // 1. Create Window
+    platform::window_init_info info{};
+    info.caption = "RenderSystem Integration Test";
     info.width = 1280;
     info.height = 720;
+    g_Test->window = platform::create_window(&info);
     
-    g_Ctx.window = create_window(&info);
-    if (!g_Ctx.window.is_valid()) {
-        std::cerr << "[MetalTest] Failed to create window!" << std::endl;
+    if (!g_Test->window.is_valid()) {
+        std::cerr << "Failed to create window" << std::endl;
         return false;
     }
 
-    // 2. 初始化 Metal 设备
+    // 2. Create Device
     DeviceDesc deviceDesc{};
     deviceDesc.platform = RHIPlatform::Metal;
-    deviceDesc.maxFramesInFlight = 3;
-    deviceDesc.enableDebug = true;
+    auto metalDevice = std::make_unique<MetalDevice>(deviceDesc);
+    if (!metalDevice->Initialize()) {
+        std::cerr << "Failed to initialize device" << std::endl;
+        return false;
+    }
+    g_Test->device = std::move(metalDevice);
+
+    // 3. Initialize RenderSystem
+    RenderSystemInitInfo sysInfo;
+    sysInfo.device = g_Test->device.get();
+    sysInfo.window = g_Test->window.handle();
+    sysInfo.width = info.width;
+    sysInfo.height = info.height;
     
-    g_Ctx.device = std::make_unique<MetalDevice>(deviceDesc);
-    if (!g_Ctx.device || !g_Ctx.device->Initialize()) {
-        std::cerr << "[MetalTest] Failed to initialize Metal device!" << std::endl;
+    if (!g_Test->renderSystem.Initialize(sysInfo)) {
+        std::cerr << "Failed to initialize RenderSystem" << std::endl;
         return false;
     }
 
-    // 3. 创建交换链
-    SwapChainDesc swapChainDesc{};
-    swapChainDesc.window = g_Ctx.window.handle();
-    swapChainDesc.width = g_Ctx.window.width();
-    swapChainDesc.height = g_Ctx.window.height();
-    swapChainDesc.format = DataFormat::BGRA8_UNorm;
-    swapChainDesc.bufferCount = 3;
-    swapChainDesc.presentMode = PresentMode::FIFO;
+    // 4. Create Material & Shader
+    g_Test->material = new Material();
+    
+    // Vertex Attributes
+    utl::vector<VertexInputAttribute> attrs;
+    attrs.push_back({0, 0, DataFormat::RGB32_Float, 0}); // Position
+    attrs.push_back({1, 0, DataFormat::RGB32_Float, 12}); // Color
+    g_Test->material->SetVertexAttributes(attrs);
+    
+    utl::vector<VertexInputBinding> bindings;
+    bindings.push_back({0, 24, true}); // Stride = 24, perVertex = true
+    g_Test->material->SetVertexBindings(bindings);
+    
+    // Shader
+    g_Test->material->SetShader(ShaderStage::Vertex, kSimpleColorShader, strlen(kSimpleColorShader), "vertexMain");
+    g_Test->material->SetShader(ShaderStage::Pixel, kSimpleColorShader, strlen(kSimpleColorShader), "fragmentMain");
+    
+    // Set Formats for Pipeline Creation
+    utl::vector<DataFormat> colorFormats;
+    colorFormats.push_back(DataFormat::BGRA8_UNorm);
+    g_Test->material->SetRenderTargetFormats(colorFormats, DataFormat::D32_Float);
+    
+    // Set Rasterizer State (Back face culling)
+    RasterizerState rasterState{};
+    rasterState.cullMode = CullMode::Back;
+    // rasterState.frontFace = FrontFace::CounterClockwise; // Not supported in current RHI
+    // If we set CullMode::None, frontFace doesn't matter for culling.
+    g_Test->material->SetRasterizerState(rasterState);
+    
+    // Set Depth State
+    DepthStencilState depthState{};
+    depthState.enableDepthTest = false; // Disable for debugging
+    depthState.enableDepthWrite = false;
+    depthState.depthFunc = ComparisonFunc::Always; // Always pass
+    g_Test->material->SetDepthStencilState(depthState);
 
-    g_Ctx.swapChain = std::make_unique<MetalSwapChain>(*g_Ctx.device, swapChainDesc);
-    if (!g_Ctx.swapChain->Initialize()) {
-        std::cerr << "[MetalTest] Failed to initialize swap chain!" << std::endl;
+    // Setup Uniforms
+    g_Test->material->SetUniformBlockSize(sizeof(UniformData));
+    g_Test->material->SetUniformBufferBinding(1); // Bind to buffer(1) matching shader
+
+    // Create Descriptor Set Layout
+    rhi::DescriptorSetLayoutBinding layoutBinding{};
+    layoutBinding.binding = 1;
+    layoutBinding.descriptorType = rhi::DescriptorType::UniformBuffer;
+    layoutBinding.descriptorCount = 1;
+    layoutBinding.stageFlags = rhi::ShaderStage::Vertex;
+    
+    rhi::DescriptorSetLayoutDesc layoutDesc{};
+    layoutDesc.bindings = &layoutBinding;
+    layoutDesc.bindingCount = 1;
+    
+    rhi::DescriptorSetLayoutHandle dsLayout = g_Test->device->CreateDescriptorSetLayout(layoutDesc);
+    if (dsLayout == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "Failed to create DescriptorSetLayout" << std::endl;
+        return false;
+    }
+    g_Test->material->SetDescriptorSetLayout(dsLayout);
+
+    // Create Pipeline Layout
+    rhi::PipelineLayoutDesc pipelineLayoutDesc{};
+    pipelineLayoutDesc.setLayouts = &dsLayout;
+    pipelineLayoutDesc.setLayoutCount = 1;
+    
+    rhi::PipelineLayoutHandle pipelineLayout = g_Test->device->CreatePipelineLayout(pipelineLayoutDesc);
+    if (pipelineLayout == rhi::handles::INVALID_PIPELINE_LAYOUT) {
+        std::cerr << "Failed to create PipelineLayout" << std::endl;
+        return false;
+    }
+    g_Test->material->SetPipelineLayout(pipelineLayout);
+
+    g_Test->materialInstance = new MaterialInstance(g_Test->material);
+    if (!g_Test->materialInstance->Initialize(g_Test->device.get())) {
+        std::cerr << "Failed to initialize MaterialInstance" << std::endl;
         return false;
     }
 
-    // 4. 创建着色器和管线
-    g_Ctx.vertexShader = g_Ctx.device->CreateShader(kShaderSource, strlen(kShaderSource), ShaderStage::Vertex, "vertexMain");
-    g_Ctx.pixelShader = g_Ctx.device->CreateShader(kShaderSource, strlen(kShaderSource), ShaderStage::Pixel, "fragmentMain");
-    
-    GraphicsPipelineDesc pipelineDesc{};
-    pipelineDesc.vertexShader = g_Ctx.vertexShader;
-    pipelineDesc.pixelShader = g_Ctx.pixelShader;
-    
-    VertexInputAttribute attrPos{0, 1, DataFormat::RGBA32_Float, offsetof(Vertex, position)}; // Binding 1
-    VertexInputAttribute attrColor{1, 1, DataFormat::RGBA32_Float, offsetof(Vertex, color)};  // Binding 1
-    VertexInputBinding bindingDesc{1, sizeof(Vertex), true}; // Binding 1
-    
-    pipelineDesc.topology = PrimitiveTopology::TriangleList;
-    pipelineDesc.vertexAttributes.clear();
-    // 使用 Pull Model (直接 Buffer 访问)，禁用 Vertex Descriptor
-    pipelineDesc.vertexBindings.clear();
-    pipelineDesc.fillMode = FillMode::Solid;
-    pipelineDesc.cullMode = CullMode::None;
-    pipelineDesc.enableBlend = false;
-    pipelineDesc.renderTargetCount = 1;
-    pipelineDesc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
-    
-    g_Ctx.pipeline = g_Ctx.device->CreateGraphicsPipeline(pipelineDesc);
-
-    // 5. 创建并上传顶点数据
-    // 使用全屏三角形覆盖 -> 改为屏幕中心小三角形，顺时针
-    Vertex vertices[] = {
-        { {  0.0f,  0.5f, 0.5f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } }, // Top, Red
-        { {  0.5f, -0.5f, 0.5f, 1.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } }, // Bottom Right, Green
-        { { -0.5f, -0.5f, 0.5f, 1.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } }  // Bottom Left, Blue
+    // 5. Create Mesh (Cube)
+    // Vertices (Pos + Color)
+    // Need full cube vertices for proper box but for simple test one quad is enough? 
+    // Let's use 8 vertices with indices for a cube.
+    // 8 corners:
+    // 0: - - + (Red)
+    // 1: + - + (Green)
+    // 2: + + + (Blue)
+    // 3: - + + (Yellow)
+    // 4: - - - (Cyan)
+    // 5: + - - (Magenta)
+    // 6: + + - (White)
+    // 7: - + - (Black)
+    float cubeVertices[] = {
+        -0.5f, -0.5f,  0.5f,  1.0f, 0.0f, 0.0f, // 0
+         0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 0.0f, // 1
+         0.5f,  0.5f,  0.5f,  0.0f, 0.0f, 1.0f, // 2
+        -0.5f,  0.5f,  0.5f,  1.0f, 1.0f, 0.0f, // 3
+        -0.5f, -0.5f, -0.5f,  0.0f, 1.0f, 1.0f, // 4
+         0.5f, -0.5f, -0.5f,  1.0f, 0.0f, 1.0f, // 5
+         0.5f,  0.5f, -0.5f,  1.0f, 1.0f, 1.0f, // 6
+        -0.5f,  0.5f, -0.5f,  0.0f, 0.0f, 0.0f  // 7
     };
     
-    // 5. 创建顶点缓冲区
-    BufferDesc vDesc{};
-    vDesc.size = sizeof(vertices);
-    vDesc.type = BufferType::Vertex;
-    // 使用 Dynamic 模式以支持 Map/Unmap 操作
-    vDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-    vDesc.usage = GPUMemoryUsage::Dynamic;
-    vDesc.name = "TestVertexBuffer";
-    g_Ctx.vertexBuffer = g_Ctx.device->CreateBuffer(vDesc);
-    if (g_Ctx.vertexBuffer != handles::INVALID_RESOURCE) {
-        auto* buffer = g_Ctx.device->GetBuffer(g_Ctx.vertexBuffer);
-        if (buffer) {
-            void* data = buffer->Map();
-            if (data) {
-                memcpy(data, vertices, sizeof(vertices));
-                buffer->Unmap();
-            } else {
-                std::cerr << "Failed to map vertex buffer!" << std::endl;
-            }
-        }
-    } else {
-        std::cerr << "Failed to create vertex buffer!" << std::endl;
+    // CCW Winding
+    uint32_t indices[] = {
+        0, 1, 2, 2, 3, 0, // Front
+        1, 5, 6, 6, 2, 1, // Right
+        5, 4, 7, 7, 6, 5, // Back
+        4, 0, 3, 3, 7, 4, // Left
+        3, 2, 6, 6, 7, 3, // Top
+        4, 5, 1, 1, 0, 4  // Bottom
+    };
+    
+    primal::id::id_type meshId = 100;
+    primal::id::id_type entityId = 200;
+    primal::id::id_type materialId = 300;
+
+    g_Test->mesh = new RenderMesh();
+    if (!g_Test->mesh->Create(g_Test->device.get(), meshId, cubeVertices, 8, 24, indices, 36, DataIndexType::UInt32)) {
+        std::cerr << "Failed to create RenderMesh" << std::endl;
+        return false;
     }
 
-    // 6. 初始化多线程命令生成器
-    g_Ctx.cmdGenerator = std::make_unique<RHIMultiThreadedCommandGenerator>(*g_Ctx.device);
-    g_Ctx.cmdGenerator->Initialize();
-    g_Ctx.cmdGenerator->SetCommandGenerationCallback(GenerateCommandsCallback);
+    // 6. Setup Scene & Proxy
+    RenderProxy proxy = RenderProxy::Create(entityId, meshId, materialId);
+    g_Test->scene.AddProxy(proxy);
+    
+    // Register Material
+    g_Test->renderSystem.RegisterMaterialInstance(materialId, g_Test->materialInstance);
 
-    g_Ctx.startTime = std::chrono::high_resolution_clock::now();
-    g_Ctx.lastTime = g_Ctx.startTime;
-    g_Ctx.initialized = true;
-    std::cout << "[MetalTest] Initialization successful!" << std::endl;
+    // 7. Setup View
+    // Try standard RH coordinate system: Eye at +Z looking at -Z
+    v3 eye = {0.0f, 0.0f, 5.0f}; // Moved to positive Z for standard LookAt
+    v3 target = {0.0f, 0.0f, 0.0f};
+    v3 up = {0.0f, 1.0f, 0.0f};
+    
+    m4x4 viewMat = CreateLookAtMatrix(eye, target, up);
+    m4x4 projMat = CreatePerspectiveMatrix(60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD, 1280.0f/720.0f, 0.1f, 100.0f);
+    
+    // Debug print matrices
+    std::cout << "View Matrix:" << std::endl;
+    for(int i=0; i<4; i++) {
+        for(int j=0; j<4; j++) std::cout << viewMat.columns[i][j] << " ";
+        std::cout << std::endl;
+    }
+    std::cout << "Projection Matrix:" << std::endl;
+    for(int i=0; i<4; i++) {
+        for(int j=0; j<4; j++) std::cout << projMat.columns[i][j] << " ";
+        std::cout << std::endl;
+    }
+
+    g_Test->view.SetViewMatrix(viewMat);
+    g_Test->view.SetProjectionMatrix(projMat);
+    
     return true;
 }
 
-void Engine_Test::run()
-{
-    if (!g_Ctx.initialized || g_Ctx.window.is_closed()) {
-        shutdown();
+void Engine_Test::run() {
+    if (!g_Test) return;
+
+    // Create an autorelease pool for this frame to ensure Metal resources are released immediately
+    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+
+    if (!g_Test->window.is_valid()) {
+        pool->release();
         return;
     }
 
-    // 1. 更新性能统计
-    g_Ctx.frameCount++;
+    // Poll events (Assuming platform::window has some mechanism, or we just rely on OS event loop in real app)
+    // Since we don't have a clear poll API exposed in window, we might need to assume it's handled or this is a blocking test.
+    // But for integration test loop:
+    
+    // Update Rotation using Delta Time
+    static auto lastTime = std::chrono::high_resolution_clock::now();
+    static int frameCount = 0;
+    static double accumulatedTime = 0.0;
+    
     auto currentTime = std::chrono::high_resolution_clock::now();
-    float deltaTime = std::chrono::duration<float>(currentTime - g_Ctx.lastTime).count();
-    if (deltaTime >= 1.0f) {
-        g_Ctx.fps = static_cast<float>(g_Ctx.frameCount) / deltaTime;
-        std::cout << "[MetalTest] FPS: " << g_Ctx.fps << std::endl;
-        g_Ctx.frameCount = 0;
-        g_Ctx.lastTime = currentTime;
+    std::chrono::duration<float> deltaTime = currentTime - lastTime;
+    lastTime = currentTime;
+    
+    // Log FPS every second
+    accumulatedTime += deltaTime.count();
+    frameCount++;
+    
+    // Detect slow frames (stuttering)
+    /*
+    if (deltaTime.count() > 0.020f) { // > 20ms
+        std::cout << "[Performance] Slow frame detected: " << deltaTime.count() * 1000.0f << " ms (Frame " << frameCount << ")" << std::endl;
+    }
+    */
+
+    if (accumulatedTime >= 1.0) {
+        // std::cout << "FPS: " << frameCount << " | Frame Time: " << (accumulatedTime / frameCount) * 1000.0 << " ms" << std::endl;
+        frameCount = 0;
+        accumulatedTime = 0.0;
     }
 
-    // 2. 准备帧
-    g_Ctx.device->BeginFrame();
+    // Rotation speed: 60 degrees per second (approx 1.0 radian/sec)
+    float rotationSpeed = 2.0f; 
     
-    // 3. 获取当前交换链图像
-    uint32_t backBufferIndex;
-    if (!g_Ctx.swapChain->AcquireNextImage(&backBufferIndex, handles::INVALID_SYNC, handles::INVALID_SYNC)) {
-        return;
-    }
-    ResourceHandle backBuffer = g_Ctx.swapChain->GetBackBuffer(backBufferIndex);
-
-    // 4. 构建渲染场景
-    RenderScene scene;
-    scene.renderTarget = backBuffer;
-    if (scene.renderTarget == handles::INVALID_RESOURCE) {
-        std::cerr << "Invalid render target!" << std::endl;
-        g_Ctx.device->EndFrame();
-        return;
-    }
-    scene.totalDrawCalls = 1; // 演示用，1个DrawCall
+    // Smooth delta time to avoid visual stuttering from jittery frame times
+    // Simple exponential moving average (EMA)
+    static float smoothedDeltaTime = 0.016f;
+    smoothedDeltaTime = smoothedDeltaTime * 0.9f + deltaTime.count() * 0.1f;
     
-    // 5. 生成命令
-    std::vector<CommandBufferHandle> cmdBuffers;
+    // Use smoothed delta time for animation update, but bound it to avoid spiraling
+    float animationDelta = smoothedDeltaTime;
+    if (animationDelta > 0.05f) animationDelta = 0.05f; // Cap at 50ms to prevent huge jumps
     
-    // --- 使用新的 Metal 并行渲染编码器 ---
-    CommandBufferHandle mainCmdHandle = g_Ctx.device->CreateCommandBuffer(CommandQueueType::Graphics);
-    if (mainCmdHandle != handles::INVALID_COMMAND_BUFFER) {
-        MetalCommandBuffer* mainCmd = static_cast<MetalCommandBuffer*>(g_Ctx.device->GetCommandBuffer(mainCmdHandle));
-        if (mainCmd && mainCmd->Begin()) {
-            // 准备 RenderPassDesc
-            RenderPassDesc passDesc;
-            passDesc.colorAttachments.resize(1);
-            passDesc.colorAttachments[0].texture = scene.renderTarget;
-            passDesc.colorAttachments[0].loadOp = LoadAction::Clear;
-            passDesc.colorAttachments[0].storeOp = StoreAction::Store;
-            passDesc.colorAttachments[0].clearValue.color = primal::math::v4{
-                0.1f * (sin(g_Ctx.rotationAngle) + 1.0f),
-                0.1f,
-                0.1f,
-                1.0f
-            }; // 动态背景色证明在运行
-
-            passDesc.viewport.size.x = static_cast<float>(g_Ctx.window.width());
-            passDesc.viewport.size.y = static_cast<float>(g_Ctx.window.height());
-            passDesc.viewport.minDepth = 0.0f;
-            passDesc.viewport.maxDepth = 1.0f;
-            
-            passDesc.scissor.offset = {0, 0};
-            passDesc.scissor.extent = {g_Ctx.window.width(), g_Ctx.window.height()};
-
-            // 创建 RenderPass 对象
-            RenderPassHandle renderPassHandle = g_Ctx.device->CreateRenderPass(passDesc);
-
-            // 开始并行 RenderPass (使用 Handle)
-            mainCmd->BeginParallelRenderPass(renderPassHandle);
-            
-            // 启动并行线程
-            const int numThreads = 4;
-            std::vector<std::thread> threads;
-            
-            for (int i = 0; i < numThreads; ++i) {
-                threads.emplace_back([mainCmd, passDesc]() {
-                    // 创建子命令缓冲区
-                    MetalCommandBuffer* subCmd = mainCmd->CreateSecondaryCommandBuffer();
-                    if (subCmd) {
-                        // 子编码器需要设置状态
-                        subCmd->SetViewport(passDesc.viewport);
-                        subCmd->SetScissor(passDesc.scissor);
-                        subCmd->BindGraphicsPipeline(g_Ctx.pipeline);
-                        
-                        uint64_t vOffset = 0;
-                        subCmd->BindVertexBuffers(2, 1, &g_Ctx.vertexBuffer, &vOffset);
-                        
-                        // 简单的偏移绘制，虽然顶点是固定的，但我们多次绘制
-                        subCmd->Draw(3, 0, 1, 0);
-                        
-                        subCmd->EndRenderPass(); // 结束子编码器
-                        delete subCmd; // 销毁临时对象
-                    }
-                });
-            }
-            
-            for (auto& t : threads) {
-                t.join();
-            }
-            
-            // 结束并行 Pass
-            mainCmd->EndRenderPass();
-            mainCmd->End();
-            
-            cmdBuffers.push_back(mainCmdHandle);
-        }
+    g_Test->rotationAngle += rotationSpeed * animationDelta;
+    
+    // Log rotation angle every 60 frames to verify smoothness
+    if (frameCount % 60 == 0) {
+        // std::cout << "[Anim] Angle: " << g_Test->rotationAngle << " (Delta: " << animationDelta * 1000.0f << "ms)" << std::endl;
     }
     
-    // 原有逻辑注释掉
-    // g_Ctx.cmdGenerator->GenerateCommandsParallel(scene, cmdBuffers);
+    m4x4 modelMat = CreateRotationMatrixY(g_Test->rotationAngle);
     
-    if (cmdBuffers.empty()) {
-        std::cerr << "Failed to generate command buffers!" << std::endl;
-    }
+    // Log Model Matrix for debugging rotation smoothness
+    std::cout << "[Matrix] Frame " << frameCount << " Model[0][0]: " << modelMat.columns[0][0] 
+              << " Angle: " << g_Test->rotationAngle << std::endl;
     
-    // 6. 提交命令
-    for (auto cmd : cmdBuffers) {
-        if (cmd != handles::INVALID_COMMAND_BUFFER) {
-            auto* buffer = g_Ctx.device->GetCommandBuffer(cmd);
-            if (buffer) buffer->Submit();
-        }
+    // Update Proxy Transform
+    // Note: We need to update the proxy in the scene if we want culling to work correctly with moving objects
+    // But here we just update the Uniform which is used for drawing.
+    // Wait, RenderSystem uses Proxy transform? 
+    // RenderSystem::Render logic:
+    // mesh->Draw(cmdBuffer_); 
+    // It does NOT use proxy.transform to set push constants or anything (yet).
+    // It relies on MaterialInstance uniforms.
+    
+    // Update Uniforms
+    UniformData ubo;
+    ubo.viewProjectionMatrix = g_Test->view.GetViewProjectionMatrix(); // View * Proj
+    ubo.modelMatrix = modelMat;
+    
+    // std::cout << "Updating Uniforms. Rotation: " << g_Test->rotationAngle << std::endl;
+    
+    // Set current frame for MaterialInstance before updating uniforms
+    static uint32_t frameIndex = 0;
+    uint32_t currentFrame = frameIndex % 3; // MAX_FRAMES_IN_FLIGHT = 3
+    
+    // Wait for previous frame resources to be available
+    auto startWait = std::chrono::high_resolution_clock::now();
+    g_Test->renderSystem.Wait(frameIndex);
+    auto endWait = std::chrono::high_resolution_clock::now();
+
+    g_Test->materialInstance->SetCurrentFrame(currentFrame);
+    g_Test->materialInstance->SetUniformData(0, &ubo, sizeof(UniformData));
+    
+    // Debug print uniform data
+    // std::cout << "Uniform Data Preview:" << std::endl;
+    // std::cout << "  ViewProj[0][0]: " << ubo.viewProjectionMatrix.columns[0][0] << std::endl;
+    // std::cout << "  Model[0][0]: " << ubo.modelMatrix.columns[0][0] << std::endl;
+    
+    auto startUpdate = std::chrono::high_resolution_clock::now();
+    g_Test->materialInstance->Update(g_Test->device.get()); // Upload to GPU
+    auto endUpdate = std::chrono::high_resolution_clock::now();
+    
+    // Perform Culling to populate visible proxies
+    auto startCull = std::chrono::high_resolution_clock::now();
+    g_Test->view.Cull(g_Test->scene);
+    auto endCull = std::chrono::high_resolution_clock::now();
+
+    // Render
+    // std::cout << "Frame Start" << std::endl;
+    auto startRender = std::chrono::high_resolution_clock::now();
+    g_Test->renderSystem.Render(g_Test->scene, g_Test->view, frameIndex);
+    auto endRender = std::chrono::high_resolution_clock::now();
+    // std::cout << "Frame End" << std::endl;
+
+    if (deltaTime.count() > 0.020f) {
+        std::chrono::duration<double, std::milli> waitTime = endWait - startWait;
+        std::chrono::duration<double, std::milli> updateTime = endUpdate - startUpdate;
+        std::chrono::duration<double, std::milli> cullTime = endCull - startCull;
+        std::chrono::duration<double, std::milli> renderTime = endRender - startRender;
+        
+        std::cout << "[Performance Detail] Frame " << frameCount << " Breakdown:" << std::endl;
+        std::cout << "  - Wait: " << waitTime.count() << " ms" << std::endl;
+        std::cout << "  - Update: " << updateTime.count() << " ms" << std::endl;
+        std::cout << "  - Cull (External): " << cullTime.count() << " ms" << std::endl;
+        std::cout << "  - Render: " << renderTime.count() << " ms" << std::endl;
     }
 
-    // 7. 呈现
-    g_Ctx.swapChain->Present(true);
-    
-    // 8. 结束帧
-    g_Ctx.device->EndFrame();
+    frameIndex++;
+
+    // Release the pool at the end of the frame
+    auto startPool = std::chrono::high_resolution_clock::now();
+    pool->release();
+    auto endPool = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> poolTime = endPool - startPool;
+    if (poolTime.count() > 0.1) {
+         std::cout << "[Performance] pool->release() slow: " << poolTime.count() << " ms (Frame " << frameIndex - 1 << ")" << std::endl;
+    }
+
+    if (frameIndex > 600) {
+        // Stop after 600 frames (approx 10 seconds)
+        std::cout << "[Test] 600 frames reached. Shutting down..." << std::endl;
+        
+        // Proper shutdown to ensure resources are released before allocator destruction
+        Engine_Test::shutdown();
+        
+        exit(0);
+    }
 }
 
-void Engine_Test::shutdown()
-{
-    std::cout << "[MetalTest] Shutting down..." << std::endl;
+void Engine_Test::shutdown() {
+    if (g_Test) {
+        // Manually destroy GPU resources before deleting objects
+        // Must be done before RenderSystem Shutdown or Device destruction
+        if (g_Test->mesh) g_Test->mesh->Destroy(g_Test->device.get());
+        
+        // MaterialInstance and Material destructors handle their own cleanup
+        // assuming they have valid device pointer cached.
+        
+        g_Test->renderSystem.Shutdown();
+        
+        if (g_Test->window.is_valid()) {
+            platform::remove_window(g_Test->window.get_id());
+        }
 
-    if (g_Ctx.cmdGenerator) g_Ctx.cmdGenerator->Shutdown();
-    if (g_Ctx.swapChain) g_Ctx.swapChain->Destroy();
-    if (g_Ctx.device) g_Ctx.device->Shutdown();
-    if (g_Ctx.window.is_valid()) primal::platform::remove_window(g_Ctx.window.get_id());
-    
-    g_Ctx.initialized = false;
+        delete g_Test->mesh;
+        g_Test->mesh = nullptr;
+        delete g_Test->materialInstance;
+        g_Test->materialInstance = nullptr;
+        delete g_Test->material;
+        g_Test->material = nullptr;
+        
+        g_Test.reset();
+    }
 }
 
 #endif // __APPLE__

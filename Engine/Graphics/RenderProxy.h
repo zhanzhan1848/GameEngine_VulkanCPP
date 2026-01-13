@@ -1,6 +1,7 @@
 #pragma once
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/RHI/Core/RHIGeometry.h"
 
 namespace primal::graphics {
 
@@ -10,6 +11,7 @@ namespace primal::graphics {
  */
 struct RenderProxy {
     math::m4x4 transform;       ///< 世界空间变换矩阵
+    rhi::AABB worldAABB;        ///< 世界空间包围盒
     id::id_type meshId;         ///< 引用 RenderMesh 的 ID
     id::id_type materialId;     ///< 引用 MaterialInstance 的 ID
     id::id_type entityId;       ///< 对应的 GamePlay Entity ID
@@ -37,6 +39,12 @@ struct RenderProxy {
      * @param newMaterialId 新的材质ID
      */
     void SetMaterial(id::id_type newMaterialId);
+
+private:
+    /**
+     * @brief 重新计算世界空间包围盒
+     */
+    void RecalculateWorldAABB();
 };
 
 } // namespace primal::graphics

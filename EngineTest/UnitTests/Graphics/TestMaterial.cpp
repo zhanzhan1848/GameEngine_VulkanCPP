@@ -127,7 +127,7 @@ public:
     
     // Abstract methods implementation for compilation
     
-    bool SubmitCommandBuffer(CommandBufferHandle) override { return true; }
+    bool Submit(const QueueSubmitInfo& /*info*/) override { return true; }
     
     SyncHandle CreateSync() override { return handles::INVALID_SYNC; }
     bool WaitForSync(SyncHandle, u32) override { return true; }
@@ -135,6 +135,9 @@ public:
 
     QueryPoolHandle CreateQueryPool(const QueryPoolDesc&) override { return handles::INVALID_QUERY_POOL; }
     // DestroyQueryPool is already defined above
+    
+    RHISwapChain* CreateSwapChain(const SwapChainDesc& /*desc*/) override { return nullptr; }
+    void DestroySwapChain(RHISwapChain* /*swapChain*/) override {}
 
     // Explicitly implementing pure virtuals from RHIDeviceBase
     bool IsValid() const override { return true; }

@@ -28,9 +28,9 @@ public:
 protected:
     void destroyImpl() override;
 
-    void* mapImpl(uint64_t offset, uint64_t size) override { return nullptr; }
+    void* mapImpl(uint64_t /*offset*/, uint64_t /*size*/) override { return nullptr; }
     void unmapImpl() override {}
-    bool updateDataImpl(const void* data, uint64_t size, uint64_t offset) override { return false; }
+    bool updateDataImpl(const void* /*data*/, uint64_t /*size*/, uint64_t /*offset*/) override { return false; }
 
 private:
     /**

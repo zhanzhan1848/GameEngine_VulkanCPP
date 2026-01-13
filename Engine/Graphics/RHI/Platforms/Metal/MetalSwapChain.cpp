@@ -18,6 +18,7 @@
 #include <QuartzCore/CAMetalDrawable.hpp>
 #include <iostream>
 #include <objc/runtime.h>
+#include <objc/message.h>
 
 namespace primal::graphics::rhi {
 
@@ -77,6 +78,47 @@ bool MetalSwapChain::Initialize() {
     // 禁用内部循环，完全由外部控制渲染
     mtkView_->setPaused(true);
     mtkView_->setEnableSetNeedsDisplay(true);
+    
+    // Handle Retina Display / High DPI
+    // Get Screen Scale
+    CGFloat scale = 1.0;
+    
+    ::id windowId = reinterpret_cast<::id>(window);
+    ::SEL screenSel = sel_registerName("screen");
+    
+    // Cast objc_msgSend
+    using ObjectMsgSend = ::id (*)(::id, ::SEL);
+    auto objMsg = reinterpret_cast<ObjectMsgSend>(objc_msgSend);
+    ::id screen = objMsg(windowId, screenSel);
+    
+    if (screen) {
+        ::SEL scaleSel = sel_registerName("backingScaleFactor");
+        using ScaleMsgSend = CGFloat (*)(::id, ::SEL);
+        auto scaleMsg = reinterpret_cast<ScaleMsgSend>(objc_msgSend);
+        scale = scaleMsg(screen, scaleSel);
+    }
+    
+    // Set Layer Contents Scale
+    ::id viewId = reinterpret_cast<::id>(mtkView_);
+    ::SEL layerSel = sel_registerName("layer");
+    ::id layer = objMsg(viewId, layerSel);
+    
+    if (layer) {
+        ::SEL setScaleSel = sel_registerName("setContentsScale:");
+        using SetScaleMsgSend = void (*)(::id, ::SEL, CGFloat);
+        auto setScaleMsg = reinterpret_cast<SetScaleMsgSend>(objc_msgSend);
+        setScaleMsg(layer, setScaleSel, scale);
+    }
+    
+    // Update SwapChainDesc with actual drawable size
+    CGSize drawableSize = mtkView_->drawableSize();
+    swapChainDesc_.width = static_cast<uint32_t>(drawableSize.width);
+    swapChainDesc_.height = static_cast<uint32_t>(drawableSize.height);
+    
+    CGRect windowFrame = window->frame();
+    std::cout << "[MetalSwapChain] Window Logical Size: " << windowFrame.size.width << "x" << windowFrame.size.height 
+              << ", Scale: " << scale 
+              << ", Drawable Size: " << drawableSize.width << "x" << drawableSize.height << std::endl;
     
     window->makeKeyAndOrderFront(nullptr);
     
@@ -187,6 +229,13 @@ void MetalSwapChain::Present(SyncHandle semaphore) {
     
     cmdBuffer->presentDrawable(currentDrawable_);
     cmdBuffer->commit();
+    
+    // static int presentCounter = 0;
+    // if (presentCounter++ % 60 == 0) {
+    //     std::cout << "[MetalSwapChain] Presented frame " << currentFrameIndex_ << std::endl;
+    // }
+
+    mtkView_->draw();
     
     // 更新帧索引
     currentFrameIndex_ = (currentFrameIndex_ + 1) % swapChainDesc_.bufferCount;

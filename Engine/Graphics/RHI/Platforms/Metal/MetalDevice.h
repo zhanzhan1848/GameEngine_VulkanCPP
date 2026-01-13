@@ -189,7 +189,7 @@ protected:
     /**
      * @brief 提交命令缓冲区实现
      */
-    bool submitCommandBufferImpl(CommandBufferHandle handle);
+    bool submitImpl(const QueueSubmitInfo& info);
     
     /**
      * @brief 创建同步对象实现

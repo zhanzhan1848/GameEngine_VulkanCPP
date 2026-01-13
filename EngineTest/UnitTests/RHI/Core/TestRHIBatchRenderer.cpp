@@ -124,9 +124,16 @@ public:
 
     void updateDescriptorSetsImpl(uint32_t writeCount, const WriteDescriptorSet* writes) {}
 
+    // SwapChain 实现
+    RHISwapChain* createSwapChainImpl(const SwapChainDesc& desc) {
+        return nullptr;
+    }
+
+    void destroySwapChainImpl(RHISwapChain* swapChain) {
+    }
     
     // 命令提交实现
-    bool submitCommandBufferImpl(CommandBufferHandle handle) {
+    bool submitImpl(const QueueSubmitInfo& info) {
         return true; // Mock实现，总是返回成功
     }
     
@@ -238,6 +245,7 @@ protected:
     }
     
     void DrawIndexed(uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex, uint32_t instanceCount, uint32_t startInstance) override { 
+        (void)startInstance;
         DrawCall call;
         call.pipeline = currentPipeline_;
         call.vertexBuffer = currentVertexBuffer_;

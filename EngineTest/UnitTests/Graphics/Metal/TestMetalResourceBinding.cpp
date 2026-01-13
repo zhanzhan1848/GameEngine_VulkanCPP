@@ -123,7 +123,9 @@ private:
         // 目前先假设不崩溃即通过。
 
         cmdBuffer->End();
-        device_->SubmitCommandBuffer(cmdBufferHandle);
+        QueueSubmitInfo submitInfo{};
+        submitInfo.cmdBuffer = cmdBufferHandle;
+        device_->Submit(submitInfo);
 
         // 清理
         device_->DestroyCommandBuffer(cmdBufferHandle);
@@ -211,7 +213,9 @@ private:
         DescriptorSetHandle sets[] = { setHandle };
         cmdBuffer->BindDescriptorSets(PipelineBindPoint::Graphics, plHandle, 0, 1, sets, 0, nullptr);
         cmdBuffer->End();
-        device_->SubmitCommandBuffer(cmdBufferHandle);
+        QueueSubmitInfo submitInfo{};
+        submitInfo.cmdBuffer = cmdBufferHandle;
+        device_->Submit(submitInfo);
 
         // 清理
         device_->DestroyCommandBuffer(cmdBufferHandle);
@@ -285,7 +289,9 @@ private:
                     DescriptorSetHandle sets[] = { setHandle };
                     cmdBuffer->BindDescriptorSets(PipelineBindPoint::Graphics, plHandle, 0, 1, sets, 0, nullptr);
                     cmdBuffer->End();
-                    device_->SubmitCommandBuffer(cmdBufferHandle);
+                    QueueSubmitInfo submitInfo{};
+                    submitInfo.cmdBuffer = cmdBufferHandle;
+                    device_->Submit(submitInfo);
                     device_->DestroyCommandBuffer(cmdBufferHandle);
                 } else {
                     success = false;

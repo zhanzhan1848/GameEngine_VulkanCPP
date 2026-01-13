@@ -19,6 +19,7 @@
 #include "MetalSync.h"
 #include "MetalRenderPass.h"
 #include <iostream>
+#include <dispatch/dispatch.h>
 
 namespace primal::graphics::rhi {
 
@@ -55,25 +56,65 @@ bool MetalDevice::initializeImpl() {
 
     // 预分配资源以避免多线程扩容导致指针失效
     // 尤其是 CommandBuffer，在多线程渲染中非常关键
+    // 同时分配其他资源以防止 Resize 导致的指针失效 (因为 ResourceManager 缓存了指针)
     commandBufferAllocator_.Reserve(256);
+    bufferAllocator_.Reserve(1024);
+    textureAllocator_.Reserve(512);
+    pipelineAllocator_.Reserve(256);
+    descriptorSetAllocator_.Reserve(1024);
+    descriptorSetLayoutAllocator_.Reserve(128);
+    pipelineLayoutAllocator_.Reserve(128);
+    shaderAllocator_.Reserve(256);
+    samplerAllocator_.Reserve(64);
+    renderPassAllocator_.Reserve(64);
+    syncAllocator_.Reserve(64);
+    queryPoolAllocator_.Reserve(16);
+
+    std::cout << "[MetalDevice] Allocators reserved. Buffers: 1024, Textures: 512" << std::endl;
 
     return true;
 }
 
 void MetalDevice::shutdownImpl() {
-    shutdownMemoryPool();
-    // 释放所有分配的资源
+    // std::cout << "[MetalDevice] Shutdown started." << std::endl;
+    // 1. 清理所有延迟销毁的资源 (必须在 Allocator Shutdown 之前，否则会导致 Double Free)
+    // std::cout << "[MetalDevice] Shutting down GC..." << std::endl;
+    gc_.Shutdown();
+
+    // 2. 释放所有分配的资源
+    // std::cout << "[MetalDevice] Shutting down allocators..." << std::endl;
+    // std::cout << "  CommandBuffer..." << std::endl; 
     commandBufferAllocator_.Shutdown();
+    // std::cout << "  Buffer..." << std::endl; 
     bufferAllocator_.Shutdown();
+    // std::cout << "  Texture..." << std::endl; 
     textureAllocator_.Shutdown();
+    // std::cout << "  Sync..." << std::endl; 
     syncAllocator_.Shutdown();
+    // std::cout << "  QueryPool..." << std::endl; 
     queryPoolAllocator_.Shutdown();
+    // std::cout << "  Shader..." << std::endl; 
     shaderAllocator_.Shutdown();
+    // std::cout << "  Pipeline..." << std::endl; 
     pipelineAllocator_.Shutdown();
+    // std::cout << "  PipelineLayout..." << std::endl; 
     pipelineLayoutAllocator_.Shutdown();
+    // std::cout << "  Sampler..." << std::endl; 
     samplerAllocator_.Shutdown();
+    // std::cout << "  DescriptorSetLayout..." << std::endl; 
     descriptorSetLayoutAllocator_.Shutdown();
+    // std::cout << "  DescriptorSet..." << std::endl; 
     descriptorSetAllocator_.Shutdown();
+
+    // 3. 再次清理 GC，处理 Allocator Shutdown 产生的新垃圾 (关键修复：防止 MemoryPool 销毁后 GC 回调访问悬空指针)
+    // std::cout << "[MetalDevice] Shutting down GC (Pass 2)..." << std::endl;
+    gc_.Shutdown();
+
+    // 4. 销毁内存池
+    // std::cout << "[MetalDevice] Shutting down memory pool..." << std::endl;
+    shutdownMemoryPool();
+    // std::cout << "[MetalDevice] Shutdown finished." << std::endl;
+
 
     if (transferQueue_) {
         transferQueue_->release();
@@ -94,7 +135,19 @@ void MetalDevice::shutdownImpl() {
 }
 
 void MetalDevice::waitIdleImpl() const {
-    // Simplified: Metal usually waits on command buffers
+    auto waitQueue = [](MTL::CommandQueue* queue) {
+        if (queue) {
+            MTL::CommandBuffer* cmdBuf = queue->commandBuffer();
+            if (cmdBuf) {
+                cmdBuf->commit();
+                cmdBuf->waitUntilCompleted();
+            }
+        }
+    };
+
+    waitQueue(graphicsQueue_);
+    waitQueue(computeQueue_);
+    waitQueue(transferQueue_);
 }
 
 void MetalDevice::beginFrameImpl() {
@@ -229,9 +282,29 @@ bool MetalDevice::ReloadShader(ShaderHandle shaderHandle, const void* data, size
 
 // === CRTP 实现接口 ===
 
-bool MetalDevice::submitCommandBufferImpl(CommandBufferHandle handle) {
-    MetalCommandBuffer* cmdBuf = commandBufferAllocator_.Get(static_cast<uint32_t>(handle));
+bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
+    MetalCommandBuffer* cmdBuf = commandBufferAllocator_.Get(static_cast<uint32_t>(info.cmdBuffer));
     if (cmdBuf) {
+        if (info.waitSemaphore != handles::INVALID_SYNC) {
+            // Default value 1 for binary semaphore simulation if not specified
+            cmdBuf->AddWaitSemaphore(info.waitSemaphore, 1);
+        }
+        if (info.signalSemaphore != handles::INVALID_SYNC) {
+            cmdBuf->AddSignalSemaphore(info.signalSemaphore, 1);
+        }
+        
+        if (info.signalFence != handles::INVALID_SYNC) {
+            MetalSync* sync = GetSync(info.signalFence);
+            if (sync && sync->GetNativeEvent()) {
+                 uint64_t nextVal = sync->GetValue() + 1;
+                 // 直接访问 MetalCommandBuffer 的私有成员，因为是 friend
+                 if (cmdBuf->mtlCommandBuffer_) {
+                     cmdBuf->mtlCommandBuffer_->encodeSignalEvent(sync->GetNativeEvent(), nextVal);
+                     sync->SetValue(nextVal);
+                 }
+            }
+        }
+        
         return cmdBuf->Submit();
     }
     return false; 
@@ -242,6 +315,8 @@ SyncHandle MetalDevice::createSyncImpl() {
     return SyncHandle(id);
 }
 
+
+
 bool MetalDevice::waitForSyncImpl(SyncHandle handle, u32 timeoutMs) {
     MetalSync* sync = GetSync(handle);
     if (!sync) return false;
@@ -249,27 +324,31 @@ bool MetalDevice::waitForSyncImpl(SyncHandle handle, u32 timeoutMs) {
     // Metal SharedEvent 等待通常需要通过 CommandBuffer 提交 wait 命令，
     // 或者使用 waitUntilSignaledValue (CPU 等待)
     MTL::SharedEvent* event = sync->GetNativeEvent();
-    if (event) {
-        // 假设我们等待任何非零值，或者当前值 + 1
-        // 这里需要更具体的语义。RHIDevice::WaitForSync 通常是指 CPU 等待 GPU。
-        // 如果 Sync 对象封装了 SharedEvent，我们可以等待特定的值。
-        // 由于接口只有 handle 和 timeout，没有 value，我们假设等待当前已设定的目标值？
-        // 实际上，通常 CreateSync 返回的是一个 fence，初始为 unsignaled。
-        // 提交命令后会 signal 它。CPU Wait 等待它变成 signaled。
-        
-        // 获取当前值
-        uint64_t value = sync->GetValue();
-        // 这里简化实现，假设我们等待的值是 value (如果它已经是 signaled 的话)
-        // 真正的实现可能需要配合 CommandBuffer 的 SignalSync。
-        // 为了简单起见，这里假设 SyncHandle 对应一个 value 为 1 的状态。
-        
-        // 注意：MTLSharedEvent 的 notifyListener 也是一种方式。
-        // 这是一个阻塞调用
-        
-        // 临时实现：直接返回 true，因为没有传入等待的 value
-        return true; 
-    }
-    return false; 
+    if (!event) return false;
+
+    // 获取当前期望的目标值 (假设由 Submit 递增)
+    uint64_t value = sync->GetValue();
+    if (value == 0) return true; // 初始状态，视为已完成
+
+    // 使用 dispatch_semaphore 实现同步等待
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    dispatch_retain(sema); // Retain for the block
+    
+    MTL::SharedEventListener* listener = MTL::SharedEventListener::alloc()->init();
+    
+    // 注册监听器
+    event->notifyListener(listener, value, ^(MTL::SharedEvent* evt, uint64_t val) {
+        dispatch_semaphore_signal(sema);
+        dispatch_release(sema);
+    });
+    
+    // 等待信号量
+    long result = dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, timeoutMs * NSEC_PER_MSEC));
+    
+    listener->release();
+    dispatch_release(sema);
+    
+    return result == 0;
 }
 
 void MetalDevice::initializeMemoryPool() {
@@ -344,6 +423,8 @@ ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
 
         if (buffer->Initialize()) {
             buffer->SetHandle(ResourceHandle(id));
+            ResourceManager::Instance().RegisterResource(buffer);
+            // std::cerr << "[MetalDevice] Created Buffer - ID: " << id << " Address: " << buffer << std::endl;
             return ResourceHandle(id);
         } else {
              std::cerr << "[MetalDevice] Buffer Initialize failed for id: " << id << std::endl;
@@ -487,6 +568,8 @@ CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) 
     MetalCommandBuffer* cmdBuf = commandBufferAllocator_.Get(id);
     if (cmdBuf) {
         if (cmdBuf->Initialize()) {
+            // Register with global manager
+            RegisterCommandBuffer(cmdBuf);
             return CommandBufferHandle(id);
         } else {
             std::cerr << "[MetalDevice] CommandBuffer Initialize failed for id: " << id << std::endl;
@@ -499,6 +582,9 @@ CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) 
 }
 
 void MetalDevice::destroyBufferImpl(ResourceHandle handle) {
+    if (handle == handles::INVALID_RESOURCE) return;
+    // std::cout << "[MetalDevice] Destroying Buffer - ID: " << (uint32_t)handle << std::endl;
+    ResourceManager::Instance().UnregisterResource(handle);
     bufferAllocator_.Free(static_cast<uint32_t>(handle));
 }
 
@@ -538,6 +624,7 @@ void MetalDevice::unmapBufferImpl(ResourceHandle handle) {
 }
 
 void MetalDevice::destroyTextureImpl(ResourceHandle handle) {
+    ResourceManager::Instance().UnregisterResource(handle);
     textureAllocator_.Free(static_cast<uint32_t>(handle));
 }
 void MetalDevice::destroyShaderImpl(ShaderHandle handle) {
@@ -552,7 +639,10 @@ void MetalDevice::destroySamplerImpl(SamplerHandle handle) {
 }
 void MetalDevice::destroyCommandBufferImpl(CommandBufferHandle handle) {
     if (handle == handles::INVALID_COMMAND_BUFFER) return;
-    std::cout << "[MetalDevice] destroying command buffer " << static_cast<uint32_t>(handle) << std::endl;
+    
+    // Unregister from global manager
+    UnregisterCommandBuffer(handle);
+    
     commandBufferAllocator_.Free(static_cast<uint32_t>(handle));
 }
 

@@ -84,7 +84,36 @@ void MetalCommandBuffer::destroyImpl() {
 
 bool MetalCommandBuffer::resetImpl() {
     // Release existing resources but keep the object ready for Begin()
-    destroyImpl();
+    // Do NOT call destroyImpl() as it destroys the guardEventHandle_ which is needed for reuse
+    
+    if (isSecondary_) {
+        // Secondary buffers don't own the encoder or command buffer
+        currentEncoder_ = nullptr;
+        currentEncoderType_ = EncoderType::None;
+        return true;
+    }
+
+    endCurrentEncoder();
+
+    if (mtlCommandBuffer_) {
+        auto mtlCmdBuf = mtlCommandBuffer_;
+        device_.GetGarbageCollector().DeferredDestroy([mtlCmdBuf]() {
+            mtlCmdBuf->release();
+        });
+        mtlCommandBuffer_ = nullptr;
+    }
+    
+    if (pool_) {
+        if (std::this_thread::get_id() == recordingThreadId_) {
+            pool_->release();
+        } else {
+            std::cerr << "[MetalCommandBuffer] Warning: resetImpl called on wrong thread (" 
+                      << std::this_thread::get_id() << "), expected " << recordingThreadId_ 
+                      << ". Leaking pool." << std::endl;
+        }
+        pool_ = nullptr;
+    }
+
     return true;
 }
 
@@ -163,7 +192,7 @@ bool MetalCommandBuffer::submitImpl(uint32_t waitFlags) {
         MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
         MetalSync* sync = metalDevice.GetSync(semInfo.semaphore);
         if (sync && sync->GetNativeEvent()) {
-            mtlCommandBuffer_->encodeSignalEvent(sync->GetNativeEvent(), semInfo.value);
+            mtlCommandBuffer_->encodeWait(sync->GetNativeEvent(), semInfo.value);
         }
     }
 
@@ -246,6 +275,7 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
             if (texture && texture->GetNativeTexture()) {
                 MTL::RenderPassColorAttachmentDescriptor* ca = passDesc->colorAttachments()->object(i);
                 ca->setTexture(texture->GetNativeTexture());
+                // std::cout << "[MetalCommandBuffer] Bound color attachment " << i << " to texture " << texture->GetNativeTexture() << std::endl;
                 MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
                 switch (attachment.loadOp) {
                     case LoadAction::Load: metalLoadAction = MTL::LoadActionLoad; break;
@@ -269,6 +299,8 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
                         attachment.clearValue.color.a
                     ));
                 }
+            } else {
+                 std::cerr << "[MetalCommandBuffer] Failed to bind color attachment " << i << ": Texture or NativeTexture is null" << std::endl;
             }
         }
     }
@@ -550,28 +582,41 @@ void MetalCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
 void MetalCommandBuffer::BindVertexBuffers(uint32_t firstSlot, uint32_t slotCount, const ResourceHandle* buffers, const uint64_t* offsets) {
     if (currentEncoderType_ != EncoderType::Render) return;
     
-    MTL::RenderCommandEncoder* encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
+    // std::cout << "[MetalCommandBuffer] BindVertexBuffers: first=" << firstSlot << " count=" << slotCount << std::endl;
+
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
-    
+
     for (uint32_t i = 0; i < slotCount; ++i) {
         if (buffers[i] != handles::INVALID_RESOURCE) {
             MetalBuffer* buffer = metalDevice.GetBuffer(buffers[i]);
             if (buffer && buffer->GetNativeBuffer()) {
-                NS::UInteger offset = offsets ? offsets[i] : 0;
-                encoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, firstSlot + i);
+                uint64_t offset = offsets ? offsets[i] : 0;
+                static_cast<MTL::RenderCommandEncoder*>(currentEncoder_)->setVertexBuffer(
+                    buffer->GetNativeBuffer(),
+                    offset,
+                    firstSlot + i
+                );
+    // std::cout << "[MetalCommandBuffer] Bound vertex buffer " << (firstSlot + i) << " (Size: " << buffer->GetDesc().size << ")" << std::endl;
+            } else {
+                 std::cerr << "[MetalCommandBuffer] Failed to bind vertex buffer " << (firstSlot + i) << ": Buffer is null" << std::endl;
             }
         }
     }
 }
 
 void MetalCommandBuffer::BindIndexBuffer(ResourceHandle buffer, DataFormat format, uint64_t offset) {
-    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
-    MetalBuffer* mtlBuffer = metalDevice.GetBuffer(buffer);
+    if (currentEncoderType_ != EncoderType::Render) return;
     
-    if (mtlBuffer && mtlBuffer->GetNativeBuffer()) {
-        currentIndexBuffer_ = mtlBuffer->GetNativeBuffer();
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    MetalBuffer* metalBuffer = metalDevice.GetBuffer(buffer);
+    
+    if (metalBuffer && metalBuffer->GetNativeBuffer()) {
+        currentIndexBuffer_ = metalBuffer->GetNativeBuffer();
         currentIndexBufferOffset_ = offset;
         currentIndexType_ = (format == DataFormat::R16_UInt) ? MTL::IndexTypeUInt16 : MTL::IndexTypeUInt32;
+    // std::cout << "[MetalCommandBuffer] Bound index buffer (Offset: " << offset << ")" << std::endl;
+    } else {
+         std::cerr << "[MetalCommandBuffer] Failed to bind index buffer: Buffer is null" << std::endl;
     }
 }
 
@@ -634,10 +679,12 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     if (binding.resources.empty()) break;
                     MetalBuffer* buffer = metalDevice.GetBuffer(binding.resources[0]);
                     if (buffer && buffer->GetNativeBuffer()) {
-                        uint64_t offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
-                        if (renderEncoder) {
-                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
-                                renderEncoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, slot);
+                                uint64_t offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
+                                if (renderEncoder) {
+                                    if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex)) {
+                                        renderEncoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, slot);
+                                        // std::cout << "[MetalCommandBuffer] Bound uniform buffer to vertex slot " << slot << std::endl;
+                                    }
                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
                                 renderEncoder->setFragmentBuffer(buffer->GetNativeBuffer(), offset, slot);
                         } else if (computeEncoder) {

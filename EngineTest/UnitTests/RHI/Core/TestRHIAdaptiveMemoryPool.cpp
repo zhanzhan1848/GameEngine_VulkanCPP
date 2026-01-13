@@ -19,81 +19,12 @@
 #include <thread>
 
 using namespace primal::graphics::rhi;
+using namespace Engine::Test;
 
-// === 测试框架定义 ===
-static FILE* g_testOutput = nullptr;
-
-bool InitTestOutput(const char* filename) {
-    g_testOutput = fopen(filename, "w");
-    if (!g_testOutput) {
-        printf("无法创建输出文件: %s\n", filename);
-        return false;
-    }
-    return true;
-}
-
-void CloseTestOutput() {
-    if (g_testOutput) {
-        fclose(g_testOutput);
-        g_testOutput = nullptr;
-    }
-}
-
-#define TEST_SECTION(name) \
-    do { \
-        if (g_testOutput) { \
-            fprintf(g_testOutput, "=== %s ===\n", name); \
-            fflush(g_testOutput); \
-        } \
-    } while(0)
-
-#define TEST_ASSERT_EQ(a, b, msg) \
-    do { \
-        if ((a) != (b)) { \
-            if (g_testOutput) { \
-                fprintf(g_testOutput, "✗ %s (expected: %llu, actual: %llu)\n", msg, static_cast<unsigned long long>(b), static_cast<unsigned long long>(a)); \
-                fflush(g_testOutput); \
-            } \
-            return false; \
-        } else { \
-            if (g_testOutput) { \
-                fprintf(g_testOutput, "✓ %s\n", msg); \
-                fflush(g_testOutput); \
-            } \
-        } \
-    } while(0)
-
-#define TEST_ASSERT_TRUE(cond, msg) \
-    do { \
-        if (!(cond)) { \
-            if (g_testOutput) { \
-                fprintf(g_testOutput, "✗ %s\n", msg); \
-                fflush(g_testOutput); \
-            } \
-            return false; \
-        } else { \
-            if (g_testOutput) { \
-                fprintf(g_testOutput, "✓ %s\n", msg); \
-                fflush(g_testOutput); \
-            } \
-        } \
-    } while(0)
-
-#define TEST_ASSERT_FALSE(cond, msg) \
-    do { \
-        if ((cond)) { \
-            if (g_testOutput) { \
-                fprintf(g_testOutput, "✗ %s\n", msg); \
-                fflush(g_testOutput); \
-            } \
-            return false; \
-        } else { \
-            if (g_testOutput) { \
-                fprintf(g_testOutput, "✓ %s\n", msg); \
-                fflush(g_testOutput); \
-            } \
-        } \
-    } while(0)
+// === Compatibility Macros ===
+#define TEST_ASSERT_TRUE(cond, msg) TEST_ASSERT(cond, msg)
+#define TEST_ASSERT_FALSE(cond, msg) TEST_ASSERT(!(cond), msg)
+#define TEST_SECTION(name) std::cout << "\n[SECTION] " << name << std::endl;
 
 // === Mock Device Implementation ===
 class MockRHIDevice : public RHIDeviceBase {
@@ -112,7 +43,7 @@ public:
     const DeviceDesc& GetDesc() const override { return desc; }
     void WaitIdle() const override {}
     void Shutdown() override {}
-    bool SubmitCommandBuffer(CommandBufferHandle handle) override { return true; }
+    bool Submit(const QueueSubmitInfo& info) override { return true; }
     SyncHandle CreateSync() override { return SyncHandle{}; }
     bool WaitForSync(SyncHandle handle, u32 timeoutMs) override { return true; }
     void DestroySync(SyncHandle handle) override {}
@@ -129,6 +60,9 @@ public:
     void DestroyPipelineLayout(PipelineLayoutHandle handle) override {}
     
     // Implement missing pure virtuals
+    RHISwapChain* CreateSwapChain(const SwapChainDesc& desc) override { return nullptr; }
+    void DestroySwapChain(RHISwapChain* swapChain) override {}
+    
     ResourceHandle CreateBuffer(const BufferDesc& desc) override { return handles::INVALID_RESOURCE; }
     ResourceHandle CreateTexture(const TextureDesc& desc) override { return handles::INVALID_RESOURCE; }
     CommandBufferHandle CreateCommandBuffer(CommandQueueType type) override { return handles::INVALID_COMMAND_BUFFER; }
@@ -150,7 +84,7 @@ public:
 
 // === 测试用例 ===
 
-bool TestInitialization() {
+TestResult TestInitialization() {
     TEST_SECTION("Initialization");
     
     MockRHIDevice device;
@@ -162,10 +96,10 @@ bool TestInitialization() {
     
     TEST_ASSERT_TRUE(pool.Initialize(), "Pool initialization should succeed");
     
-    return true;
+    return TestResult::Passed;
 }
 
-bool TestAllocationAndHandleMapping() {
+TestResult TestAllocationAndHandleMapping() {
     TEST_SECTION("Allocation and Handle Mapping");
     
     MockRHIDevice device;
@@ -189,13 +123,14 @@ bool TestAllocationAndHandleMapping() {
     TEST_ASSERT_TRUE(handle2 != 0, "Second allocation should return valid handle");
     TEST_ASSERT_TRUE(handle1 != handle2, "Handles should be unique");
     
+    // 验证句柄映射
     MemoryBlock block2 = pool.GetMemoryBlock(handle2);
     TEST_ASSERT_EQ(block2.size, 512, "Block 2 size should match");
     
-    return true;
+    return TestResult::Passed;
 }
 
-bool TestDeallocation() {
+TestResult TestDeallocation() {
     TEST_SECTION("Deallocation");
     
     MockRHIDevice device;
@@ -218,10 +153,10 @@ bool TestDeallocation() {
     // 如果映射被移除，GetMemoryBlock应该返回默认构造的MemoryBlock (size=0)
     TEST_ASSERT_EQ(block.size, 0, "Block should not be retrievalbe after deallocation");
     
-    return true;
+    return TestResult::Passed;
 }
 
-bool TestDefragmentation() {
+TestResult TestDefragmentation() {
     TEST_SECTION("Defragmentation (Simulated)");
     
     MockRHIDevice device;
@@ -254,28 +189,24 @@ bool TestDefragmentation() {
     MemoryBlock b3 = pool.GetMemoryBlock(h3);
     TEST_ASSERT_EQ(b3.size, 1024, "Block 3 should still be accessible");
     
-    return true;
+    return TestResult::Passed;
 }
 
 int main() {
-    if (!InitTestOutput("TestRHIAdaptiveMemoryPool_Output.txt")) {
-        return 1;
-    }
+    std::cout << "Running TestRHIAdaptiveMemoryPool..." << std::endl;
     
     bool allPassed = true;
     
-    if (!TestInitialization()) allPassed = false;
-    if (!TestAllocationAndHandleMapping()) allPassed = false;
-    if (!TestDeallocation()) allPassed = false;
-    if (!TestDefragmentation()) allPassed = false;
-    
-    CloseTestOutput();
+    if (TestInitialization() != TestResult::Passed) allPassed = false;
+    if (TestAllocationAndHandleMapping() != TestResult::Passed) allPassed = false;
+    if (TestDeallocation() != TestResult::Passed) allPassed = false;
+    if (TestDefragmentation() != TestResult::Passed) allPassed = false;
     
     if (allPassed) {
-        printf("All tests passed!\n");
+        std::cout << "All tests passed!" << std::endl;
         return 0;
     } else {
-        printf("Some tests failed. Check output file for details.\n");
+        std::cerr << "Some tests failed!" << std::endl;
         return 1;
     }
 }

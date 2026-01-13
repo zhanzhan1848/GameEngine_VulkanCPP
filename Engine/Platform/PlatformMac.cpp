@@ -86,7 +86,7 @@ namespace primal::platform
 		{
 			window_info& info{ get_from_id(id) };
 
-			return { (u32)info.client_area.origin.x, (u32)info.client_area.origin.x, (u32)(info.client_area.size.width + info.client_area.origin.x), (u32)(info.client_area.size.height + info.client_area.origin.y) };
+			return { (u32)info.client_area.origin.x, (u32)info.client_area.origin.y, (u32)(info.client_area.size.width + info.client_area.origin.x), (u32)(info.client_area.size.height + info.client_area.origin.y) };
 		}
 
 		bool is_window_closed(window_id id)

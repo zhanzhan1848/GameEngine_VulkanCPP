@@ -33,7 +33,7 @@ void RHIGarbageCollector::Flush() {
     }
     
     if (!currentQueue.empty()) {
-        std::cout << "[GC] Flushing " << currentQueue.size() << " items" << std::endl;
+        // std::cout << "[GC] Flushing " << currentQueue.size() << " items" << std::endl;
         for (const auto& item : currentQueue) {
             if (item.callback) {
                 item.callback();
@@ -56,13 +56,14 @@ void RHIGarbageCollector::DeferredDestroy(std::function<void()>&& callback) {
     if (!callback) return;
 
     std::lock_guard<std::mutex> lock(mutex_);
-    std::cout << "[GC] DeferredDestroy queued frame=" << currentFrame_ << std::endl;
+    // std::cout << "[GC] DeferredDestroy queued frame=" << currentFrame_ << std::endl;
     garbageQueue_.push_back({currentFrame_, std::move(callback)});
 }
 
-void RHIGarbageCollector::Update(uint64_t completedFrame) {
+void RHIGarbageCollector::Update(uint64_t completedFrame, double maxDurationMs) {
     std::vector<std::function<void()>> callbacksToRun;
     
+    // 1. Collect all valid candidates
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -74,6 +75,7 @@ void RHIGarbageCollector::Update(uint64_t completedFrame) {
             // 如果项目的帧索引小于等于已完成的帧索引，说明可以安全销毁
             if (item.frameIndex <= completedFrame) {
                 if (item.callback) {
+                    // std::cout << "[GC] Queuing callback for frame " << item.frameIndex << std::endl;
                     callbacksToRun.push_back(item.callback);
                 }
                 garbageQueue_.pop_front();
@@ -84,9 +86,39 @@ void RHIGarbageCollector::Update(uint64_t completedFrame) {
         }
     }
 
-    // 在锁外执行回调，避免死锁
-    for (const auto& callback : callbacksToRun) {
-        callback();
+    // 2. Execute with time budget
+    if (!callbacksToRun.empty()) {
+        auto startTime = std::chrono::high_resolution_clock::now();
+        size_t executedCount = 0;
+        
+        for (const auto& callback : callbacksToRun) {
+            callback();
+            executedCount++;
+
+            // Check budget if enabled
+            if (maxDurationMs > 0.0) {
+                auto now = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double, std::milli> elapsed = now - startTime;
+                if (elapsed.count() >= maxDurationMs) {
+                    // Re-queue remaining callbacks
+                    if (executedCount < callbacksToRun.size()) {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        // Push remaining items back to the FRONT of the queue to maintain order
+                        // Note: Using push_front iterates in reverse to keep original order
+                        for (size_t i = callbacksToRun.size(); i > executedCount; --i) {
+                            // We use completedFrame as the frameIndex because these were already ripe for deletion
+                            garbageQueue_.push_front({completedFrame, callbacksToRun[i-1]});
+                        }
+                    }
+                    // std::cout << "[GC] Time limit reached (" << elapsed.count() << " ms). Executed " << executedCount << "/" << callbacksToRun.size() << " callbacks." << std::endl;
+                    break;
+                }
+            }
+        }
+        
+        if (maxDurationMs <= 0.0 || executedCount == callbacksToRun.size()) {
+             // std::cout << "[GC] Executing " << executedCount << " callbacks for frame <= " << completedFrame << std::endl;
+        }
     }
 }
 
