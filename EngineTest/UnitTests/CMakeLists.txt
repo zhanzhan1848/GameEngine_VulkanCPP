@@ -557,6 +557,29 @@ set_target_properties(StandaloneGraphics_RenderScene_Test PROPERTIES
 target_compile_definitions(StandaloneGraphics_RenderScene_Test PRIVATE DEBUG _DEBUG)
 set_target_properties(StandaloneGraphics_RenderScene_Test PROPERTIES FOLDER "Tests/Graphics")
 
+# Create RenderScene Light Test
+add_executable(StandaloneGraphics_RenderSceneLight_Test 
+    Graphics/TestRenderSceneLight.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderScene.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderProxy.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderMesh.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
+)
+target_include_directories(StandaloneGraphics_RenderSceneLight_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME StandaloneGraphics_RenderSceneLight_Test COMMAND StandaloneGraphics_RenderSceneLight_Test)
+set_target_properties(StandaloneGraphics_RenderSceneLight_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneGraphics_RenderSceneLight_Test PRIVATE DEBUG _DEBUG)
+set_target_properties(StandaloneGraphics_RenderSceneLight_Test PROPERTIES FOLDER "Tests/Graphics")
+
 # 创建RenderView测试
 add_executable(StandaloneGraphics_RenderView_Test 
     Graphics/TestRenderView.cpp
@@ -585,6 +608,7 @@ set_target_properties(StandaloneGraphics_RenderView_Test PROPERTIES FOLDER "Test
 add_executable(StandaloneGraphics_RenderSystem_Test 
     Graphics/TestRenderSystem.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Systems/RenderSystem.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/ForwardRenderer.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderView.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderScene.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderProxy.cpp

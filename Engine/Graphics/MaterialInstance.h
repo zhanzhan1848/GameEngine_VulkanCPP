@@ -78,7 +78,6 @@ namespace primal::graphics {
         utl::vector<rhi::DescriptorSetHandle> descriptorSets_;
         
         // Triple buffering for uniforms to avoid CPU-GPU sync stalls
-        static constexpr u32 MAX_FRAMES_IN_FLIGHT = 3;
         utl::vector<rhi::ResourceHandle> uniformBuffers_;
         utl::vector<void*> uniformBuffersMapped_;
         u32 currentFrameIndex_{0};

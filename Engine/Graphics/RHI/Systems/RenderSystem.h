@@ -2,6 +2,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
+#include "Graphics/ForwardRenderer.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHISwapChain.h"
@@ -65,8 +66,6 @@ public:
     uint32_t GetCurrentFrameIndex() const { return currentFrameIndex_; }
 
 private:
-    static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
-
     rhi::RHIDeviceBase* device_{nullptr};
     rhi::RHISwapChain* swapChain_{nullptr};
     
@@ -78,6 +77,8 @@ private:
 
     rhi::ResourceHandle depthStencilTexture_{rhi::handles::INVALID_RESOURCE};
     std::unordered_map<id::id_type, MaterialInstance*> materialInstances_;
+
+    ForwardRenderer forwardRenderer_;
 };
 
 } // namespace primal::graphics

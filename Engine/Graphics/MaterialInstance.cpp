@@ -9,9 +9,9 @@ namespace primal::graphics {
 
 MaterialInstance::MaterialInstance(Material* material)
     : material_(material) {
-    uniformBuffers_.resize(MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_RESOURCE);
-    uniformBuffersMapped_.resize(MAX_FRAMES_IN_FLIGHT, nullptr);
-    descriptorSets_.resize(MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_RESOURCE);
+    uniformBuffers_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_RESOURCE);
+    uniformBuffersMapped_.resize(rhi::MAX_FRAMES_IN_FLIGHT, nullptr);
+    descriptorSets_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_RESOURCE);
 }
 
 MaterialInstance::MaterialInstance(MaterialInstance&& other) noexcept
@@ -101,7 +101,7 @@ bool MaterialInstance::Initialize(rhi::RHIDeviceBase* device) {
         bufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
         bufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
         
-        for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             uniformBuffers_[i] = device->CreateBuffer(bufferDesc);
             if (uniformBuffers_[i] == rhi::handles::INVALID_RESOURCE) {
                 return false;
@@ -117,7 +117,7 @@ bool MaterialInstance::Initialize(rhi::RHIDeviceBase* device) {
         rhi::DescriptorSetDesc setDesc;
         setDesc.layout = layout;
         
-        for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             descriptorSets_[i] = device->CreateDescriptorSet(setDesc);
             if (descriptorSets_[i] == rhi::handles::INVALID_RESOURCE) {
                 return false;
@@ -184,7 +184,7 @@ void MaterialInstance::SetUniformData(u32 offset, const void* data, u32 size) {
 }
 
 void MaterialInstance::SetCurrentFrame(u32 frameIndex) {
-    if (frameIndex < MAX_FRAMES_IN_FLIGHT) {
+    if (frameIndex < rhi::MAX_FRAMES_IN_FLIGHT) {
         currentFrameIndex_ = frameIndex;
     }
 }

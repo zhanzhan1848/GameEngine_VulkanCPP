@@ -108,7 +108,7 @@ void Material::SetRenderTargetFormats(const utl::vector<rhi::DataFormat>& format
     InvalidatePipelinesLocked();
 }
 
-rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::RenderPassHandle renderPass, u32 permutationId) {
+rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::RenderPassHandle renderPass, u32 permutationId, PipelineFlags flags) {
     if (!device) return rhi::handles::INVALID_PIPELINE;
 
     std::lock_guard<std::mutex> lock(pipelineMutex_);
@@ -128,7 +128,7 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     }
 
     // 2. Check Cache
-    PipelineKey key{renderPass, permutationId};
+    PipelineKey key{renderPass, permutationId, flags};
     if (auto it = pipelineCache_.find(key); it != pipelineCache_.end()) {
         return it->second;
     }
@@ -137,7 +137,11 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     rhi::GraphicsPipelineDesc desc;
     
     if (stageMap.count(rhi::ShaderStage::Vertex)) desc.vertexShader = stageMap[rhi::ShaderStage::Vertex].handle;
-    if (stageMap.count(rhi::ShaderStage::Pixel)) desc.pixelShader = stageMap[rhi::ShaderStage::Pixel].handle;
+    
+    bool isDepthOnly = (flags & PipelineFlags::DepthOnly) != PipelineFlags::None;
+    bool isDepthEqual = (flags & PipelineFlags::DepthEqual) != PipelineFlags::None;
+
+    if (!isDepthOnly && stageMap.count(rhi::ShaderStage::Pixel)) desc.pixelShader = stageMap[rhi::ShaderStage::Pixel].handle;
     if (stageMap.count(rhi::ShaderStage::Geometry)) desc.geometryShader = stageMap[rhi::ShaderStage::Geometry].handle;
     if (stageMap.count(rhi::ShaderStage::Hull)) desc.hullShader = stageMap[rhi::ShaderStage::Hull].handle;
     if (stageMap.count(rhi::ShaderStage::Domain)) desc.domainShader = stageMap[rhi::ShaderStage::Domain].handle;
@@ -159,7 +163,19 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     desc.frontStencil = depthStencilState_.frontStencil;
     desc.backStencil = depthStencilState_.backStencil;
     
-    desc.enableBlend = blendState_.enableBlend;
+    if (isDepthOnly) {
+        desc.enableDepthWrite = true;
+        desc.depthFunc = rhi::ComparisonFunc::Less;
+        desc.renderTargetCount = 0;
+        desc.enableBlend = false;
+    } else if (isDepthEqual) {
+        desc.enableDepthWrite = false;
+        desc.depthFunc = rhi::ComparisonFunc::Equal;
+        desc.enableBlend = blendState_.enableBlend;
+    } else {
+        desc.enableBlend = blendState_.enableBlend;
+    }
+
     desc.srcColorBlendFactor = blendState_.srcColorBlendFactor;
     desc.dstColorBlendFactor = blendState_.dstColorBlendFactor;
     desc.colorBlendOp = blendState_.colorBlendOp;
@@ -168,9 +184,11 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     desc.alphaBlendOp = blendState_.alphaBlendOp;
     desc.blendConstants = blendState_.blendConstants;
     
-    desc.renderTargetCount = static_cast<uint32_t>(renderTargetFormats_.size());
-    for (size_t i = 0; i < renderTargetFormats_.size() && i < rhi::constants::MAX_RENDER_TARGETS; ++i) {
-        desc.renderTargetFormats[i] = renderTargetFormats_[i];
+    if (!isDepthOnly) {
+        desc.renderTargetCount = static_cast<uint32_t>(renderTargetFormats_.size());
+        for (size_t i = 0; i < renderTargetFormats_.size() && i < rhi::constants::MAX_RENDER_TARGETS; ++i) {
+            desc.renderTargetFormats[i] = renderTargetFormats_[i];
+        }
     }
     desc.depthStencilFormat = depthStencilFormat_;
 

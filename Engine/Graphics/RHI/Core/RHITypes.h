@@ -14,6 +14,13 @@
 
 namespace primal::graphics::rhi {
 
+// === 常量定义 ===
+
+/**
+ * @brief 最大同时在飞行的帧数（多缓冲）
+ */
+constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
+
 // === 前向声明 ===
 
 class RHIResource;

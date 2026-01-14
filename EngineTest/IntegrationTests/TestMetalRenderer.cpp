@@ -44,8 +44,10 @@ struct VertexOut {
 };
 
 struct Uniforms {
+    float4x4 worldMatrix;
+    float4x4 viewMatrix;
+    float4x4 projectionMatrix;
     float4x4 viewProjectionMatrix;
-    float4x4 modelMatrix;
 };
 
 vertex VertexOut vertexMain(
@@ -53,7 +55,7 @@ vertex VertexOut vertexMain(
     constant Uniforms& uniforms [[buffer(1)]])
 {
     VertexOut out;
-    float4 worldPos = uniforms.modelMatrix * float4(in.position, 1.0);
+    float4 worldPos = uniforms.worldMatrix * float4(in.position, 1.0);
     out.position = uniforms.viewProjectionMatrix * worldPos;
     out.color = float4(in.color, 1.0);
     return out;
@@ -85,8 +87,10 @@ static std::unique_ptr<Engine_Test_Impl> g_Test;
 
 // Uniform Data Structure
 struct UniformData {
-    m4x4 viewProjectionMatrix;
-    m4x4 modelMatrix;
+    m4x4 world;
+    m4x4 view;
+    m4x4 proj;
+    m4x4 viewProj;
 };
 
 bool Engine_Test::initialize() {
@@ -347,40 +351,31 @@ void Engine_Test::run() {
               << " Angle: " << g_Test->rotationAngle << std::endl;
     
     // Update Proxy Transform
-    // Note: We need to update the proxy in the scene if we want culling to work correctly with moving objects
-    // But here we just update the Uniform which is used for drawing.
-    // Wait, RenderSystem uses Proxy transform? 
-    // RenderSystem::Render logic:
-    // mesh->Draw(cmdBuffer_); 
-    // It does NOT use proxy.transform to set push constants or anything (yet).
-    // It relies on MaterialInstance uniforms.
-    
-    // Update Uniforms
-    UniformData ubo;
-    ubo.viewProjectionMatrix = g_Test->view.GetViewProjectionMatrix(); // View * Proj
-    ubo.modelMatrix = modelMat;
-    
-    // std::cout << "Updating Uniforms. Rotation: " << g_Test->rotationAngle << std::endl;
-    
+    if (!g_Test->scene.GetProxies().empty()) {
+        RenderProxy proxy = g_Test->scene.GetProxies()[0];
+        proxy.transform = modelMat;
+        // Simple AABB update (naive, just keeping it valid)
+        // For a rotating cube at origin, the bounds [-0.866, 0.866] covers all orientations (sqrt(0.5^2 + 0.5^2 + 0.5^2) ~= 0.866)
+        proxy.worldAABB = rhi::AABB(
+            rhi::math::v3{-1.0f, -1.0f, -1.0f}, 
+            rhi::math::v3{1.0f, 1.0f, 1.0f}
+        );
+        g_Test->scene.UpdateProxy(proxy.entityId, proxy);
+    }
+
     // Set current frame for MaterialInstance before updating uniforms
     static uint32_t frameIndex = 0;
-    uint32_t currentFrame = frameIndex % 3; // MAX_FRAMES_IN_FLIGHT = 3
+    // uint32_t currentFrame = frameIndex % 3; // MAX_FRAMES_IN_FLIGHT = 3
     
     // Wait for previous frame resources to be available
     auto startWait = std::chrono::high_resolution_clock::now();
     g_Test->renderSystem.Wait(frameIndex);
     auto endWait = std::chrono::high_resolution_clock::now();
 
-    g_Test->materialInstance->SetCurrentFrame(currentFrame);
-    g_Test->materialInstance->SetUniformData(0, &ubo, sizeof(UniformData));
-    
-    // Debug print uniform data
-    // std::cout << "Uniform Data Preview:" << std::endl;
-    // std::cout << "  ViewProj[0][0]: " << ubo.viewProjectionMatrix.columns[0][0] << std::endl;
-    // std::cout << "  Model[0][0]: " << ubo.modelMatrix.columns[0][0] << std::endl;
+    // Note: RenderSystem::Render -> ForwardRenderer will handle Uniform Data update
     
     auto startUpdate = std::chrono::high_resolution_clock::now();
-    g_Test->materialInstance->Update(g_Test->device.get()); // Upload to GPU
+    // Material update handled by ForwardRenderer
     auto endUpdate = std::chrono::high_resolution_clock::now();
     
     // Perform Culling to populate visible proxies

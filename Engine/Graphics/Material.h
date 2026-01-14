@@ -5,6 +5,14 @@
 
 namespace primal::graphics {
 
+enum class PipelineFlags : u8 {
+    None = 0,
+    DepthOnly = 1 << 0,
+    DepthEqual = 1 << 1
+};
+inline PipelineFlags operator|(PipelineFlags a, PipelineFlags b) { return static_cast<PipelineFlags>(static_cast<u8>(a) | static_cast<u8>(b)); }
+inline PipelineFlags operator&(PipelineFlags a, PipelineFlags b) { return static_cast<PipelineFlags>(static_cast<u8>(a) & static_cast<u8>(b)); }
+
 namespace rhi {
     class RHIDeviceBase;
 }
@@ -27,9 +35,13 @@ public:
     void SetVertexBindings(const utl::vector<rhi::VertexInputBinding>& bindings);
 
     void SetBlendState(const rhi::BlendState& state);
+    const rhi::BlendState& GetBlendState() const { return blendState_; }
     void SetDepthStencilState(const rhi::DepthStencilState& state);
+    const rhi::DepthStencilState& GetDepthStencilState() const { return depthStencilState_; }
     void SetRasterizerState(const rhi::RasterizerState& state);
+    const rhi::RasterizerState& GetRasterizerState() const { return rasterizerState_; }
     void SetTopology(rhi::PrimitiveTopology topology);
+    rhi::PrimitiveTopology GetTopology() const { return topology_; }
 
     void SetPipelineLayout(rhi::PipelineLayoutHandle layout);
     rhi::PipelineLayoutHandle GetPipelineLayout() const { return layout_; }
@@ -44,7 +56,7 @@ public:
 
     void SetRenderTargetFormats(const utl::vector<rhi::DataFormat>& formats, rhi::DataFormat depthStencilFormat = rhi::DataFormat::Unknown);
 
-    rhi::PipelineHandle GetPipeline(rhi::RHIDeviceBase* device, rhi::RenderPassHandle renderPass, u32 permutationId = 0);
+    rhi::PipelineHandle GetPipeline(rhi::RHIDeviceBase* device, rhi::RenderPassHandle renderPass, u32 permutationId = 0, PipelineFlags flags = PipelineFlags::None);
     void InvalidatePipelines();
 
 private:
@@ -73,8 +85,9 @@ private:
     struct PipelineKey {
         rhi::RenderPassHandle renderPass;
         u32 permutationId;
+        PipelineFlags flags;
         bool operator==(const PipelineKey& other) const {
-            return renderPass == other.renderPass && permutationId == other.permutationId;
+            return renderPass == other.renderPass && permutationId == other.permutationId && flags == other.flags;
         }
     };
 
@@ -82,7 +95,8 @@ private:
         std::size_t operator()(const PipelineKey& k) const {
             std::size_t h1 = std::hash<u64>{}(k.renderPass);
             std::size_t h2 = std::hash<u32>{}(k.permutationId);
-            return h1 ^ (h2 << 1);
+            std::size_t h3 = std::hash<u8>{}(static_cast<u8>(k.flags));
+            return h1 ^ (h2 << 1) ^ (h3 << 2);
         }
     };
 

@@ -62,9 +62,9 @@ public:
     bool submitImpl(uint32_t) override { submitCalled = true; return true; }
     bool waitForCompletionImpl() override { return true; }
     
-    void BeginRenderPass(const RenderPassDesc&) override {}
-    void BeginRenderPass(RenderPassHandle) override {}
-    void EndRenderPass() override {}
+    void BeginRenderPass(const RenderPassDesc&) override { beginRenderPassCount++; }
+    void BeginRenderPass(RenderPassHandle) override { beginRenderPassCount++; }
+    void EndRenderPass() override { endRenderPassCount++; }
     void SetViewport(const ViewportDesc&) override {}
     void SetScissor(const Rect&) override {}
     void BindGraphicsPipeline(PipelineHandle) override {}
@@ -73,6 +73,7 @@ public:
     void BindDescriptorSets(PipelineBindPoint, PipelineLayoutHandle, uint32_t, uint32_t, const DescriptorSetHandle*, uint32_t, const uint32_t*) override {}
     void Draw(uint32_t vertexCount, uint32_t startVertex, uint32_t instanceCount, uint32_t startInstance) override {
         drawCalled = true;
+        drawCallCount++;
         lastDrawVertexCount = vertexCount;
     }
     void DrawIndexed(uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex, uint32_t instanceCount, uint32_t startInstance) override {
@@ -84,9 +85,13 @@ public:
 
     // Tracking flags
     bool drawCalled = false;
+    uint32_t drawCallCount = 0;
     uint32_t lastDrawVertexCount = 0;
     bool drawIndexedCalled = false;
     uint32_t lastDrawIndexCount = 0;
+
+    uint32_t beginRenderPassCount = 0;
+    uint32_t endRenderPassCount = 0;
 
     void Dispatch(uint32_t, uint32_t, uint32_t) override {}
     void DispatchIndirect(ResourceHandle, uint64_t) override {}
@@ -136,7 +141,7 @@ public:
         }
         return false;
     }
-    SyncHandle createSyncImpl() { return handles::INVALID_SYNC; }
+    SyncHandle createSyncImpl() { return (SyncHandle)54321; }
     bool waitForSyncImpl(SyncHandle, u32) { return true; }
     void destroySyncImpl(SyncHandle) {}
     
@@ -154,7 +159,7 @@ public:
     ResourceHandle createBufferImpl(const BufferDesc&) { return (ResourceHandle)1001; }
     ResourceHandle createTextureImpl(const TextureDesc&) { return (ResourceHandle)2002; }
     ShaderHandle createShaderImpl(const void*, size_t, ShaderStage, const char*) { return handles::INVALID_SHADER; }
-    PipelineHandle createGraphicsPipelineImpl(const GraphicsPipelineDesc&) { return handles::INVALID_PIPELINE; }
+    PipelineHandle createGraphicsPipelineImpl(const GraphicsPipelineDesc&) { return (PipelineHandle)666; }
     PipelineHandle createComputePipelineImpl(const ComputePipelineDesc&) { return handles::INVALID_PIPELINE; }
     RenderPassHandle createRenderPassImpl(const RenderPassDesc&) { return handles::INVALID_RESOURCE; }
     void destroyRenderPassImpl(RenderPassHandle) {}
@@ -237,9 +242,22 @@ TestResult TestRenderSystemRender() {
     if (!mesh.Create(&mockDevice, meshEntityId, vertices, 3, sizeof(float) * 3)) {
         return TestResult::Failed;
     }
+
+    // Setup Material
+    Material material;
+    rhi::BlendState blendState{};
+    blendState.enableBlend = false;
+    material.SetBlendState(blendState);
+    
+    MaterialInstance materialInstance(&material);
+    materialInstance.Initialize(&mockDevice);
+    
+    // Register Material
+    primal::id::id_type materialId = (primal::id::id_type)300;
+    system.RegisterMaterialInstance(materialId, &materialInstance);
     
     // Add proxy pointing to this mesh
-    RenderProxy proxy = RenderProxy::Create((primal::id::id_type)200, meshEntityId, (primal::id::id_type)300);
+    RenderProxy proxy = RenderProxy::Create((primal::id::id_type)200, meshEntityId, materialId);
     scene.AddProxy(proxy);
     
     // Render
@@ -256,6 +274,12 @@ TestResult TestRenderSystemRender() {
         
         // Check if Draw was called
         TEST_ASSERT(mockDevice.mockCmdBuffer->drawCalled, "Draw should be called for visible proxy");
+        
+        // Verify Z-Prepass integration
+        // Expect 2 RenderPasses: 1 for DepthPrePass, 1 for MainPass
+        TEST_ASSERT(mockDevice.mockCmdBuffer->beginRenderPassCount == 2, "Should have 2 RenderPasses (DepthPrePass + Main)");
+        // Expect 2 Draw calls: 1 for DepthPrePass, 1 for OpaquePass
+        TEST_ASSERT(mockDevice.mockCmdBuffer->drawCallCount == 2, "Should have 2 Draw calls (1 DepthPrePass + 1 Main)");
     } else {
         mesh.Destroy(&mockDevice);
         return TestResult::Failed;

@@ -205,7 +205,8 @@ TestResult TestMaterialInstanceInit() {
     
     // Verify UpdateDescriptorSets was called for Uniform Buffer
     // Initialize calls UpdateDescriptorSets if uniform buffer exists
-    TEST_ASSERT_EQ(device.updates.size(), 1, "Should have 1 update (Uniform Buffer)");
+    // MAX_FRAMES_IN_FLIGHT is 3, so we expect 3 updates
+    TEST_ASSERT_EQ(device.updates.size(), MAX_FRAMES_IN_FLIGHT, "Should have 3 updates (Uniform Buffer)");
     if (!device.updates.empty()) {
         TEST_ASSERT_EQ(device.updates[0].binding, 0, "Binding should be 0");
         TEST_ASSERT_EQ((int)device.updates[0].type, (int)DescriptorType::UniformBuffer, "Type should be UniformBuffer");

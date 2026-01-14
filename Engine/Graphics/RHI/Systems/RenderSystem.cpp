@@ -69,11 +69,11 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
     }
 
     // Create Command Buffers for Multi-Buffering
-    cmdBufferHandles_.resize(MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_COMMAND_BUFFER);
-    cmdBuffers_.resize(MAX_FRAMES_IN_FLIGHT, nullptr);
-    frameFences_.resize(MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_SYNC);
+    cmdBufferHandles_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_COMMAND_BUFFER);
+    cmdBuffers_.resize(rhi::MAX_FRAMES_IN_FLIGHT, nullptr);
+    frameFences_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_SYNC);
 
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         cmdBufferHandles_[i] = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
         if (cmdBufferHandles_[i] == rhi::handles::INVALID_COMMAND_BUFFER) {
             std::cerr << "RenderSystem::Initialize failed: Could not create command buffer " << i << std::endl;
@@ -92,10 +92,17 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
         }
     }
 
+    if (!forwardRenderer_.Initialize(device_)) {
+        std::cerr << "RenderSystem::Initialize failed: ForwardRenderer initialization failed." << std::endl;
+        return false;
+    }
+
     return true;
 }
 
 void RenderSystem::Shutdown() {
+    forwardRenderer_.Shutdown();
+
     if (depthStencilTexture_ != rhi::handles::INVALID_RESOURCE) {
         device_->DestroyTexture(depthStencilTexture_);
         depthStencilTexture_ = rhi::handles::INVALID_RESOURCE;
@@ -133,7 +140,7 @@ void RenderSystem::RegisterMaterialInstance(id::id_type id, MaterialInstance* ma
 void RenderSystem::Wait(uint32_t frameIndex) {
     if (!device_ || frameFences_.empty()) return;
     
-    uint32_t idx = frameIndex % MAX_FRAMES_IN_FLIGHT;
+    uint32_t idx = frameIndex % rhi::MAX_FRAMES_IN_FLIGHT;
     rhi::SyncHandle fence = frameFences_[idx];
     if (fence != rhi::handles::INVALID_SYNC) {
         auto waitStart = std::chrono::high_resolution_clock::now();
@@ -154,7 +161,7 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view, uint32_t frameIn
     auto renderStart = std::chrono::high_resolution_clock::now();
 
     // Ensure frameIndex is within bounds
-    currentFrameIndex_ = frameIndex % MAX_FRAMES_IN_FLIGHT;
+    currentFrameIndex_ = frameIndex % rhi::MAX_FRAMES_IN_FLIGHT;
 
     if (!device_ || cmdBuffers_.empty() || !cmdBuffers_[currentFrameIndex_] || !swapChain_) {
         std::cerr << "RenderSystem: Invalid state." << std::endl;
@@ -171,9 +178,9 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view, uint32_t frameIn
         gc.SetCurrentFrame(frameCount);
         
         // In triple buffering, frame N-3 is definitely done if we are starting frame N.
-        if (frameCount >= MAX_FRAMES_IN_FLIGHT) {
+        if (frameCount >= rhi::MAX_FRAMES_IN_FLIGHT) {
             // Budget GC time to 2.0ms to prevent spikes
-            gc.Update(frameCount - MAX_FRAMES_IN_FLIGHT, 2.0);
+            gc.Update(frameCount - rhi::MAX_FRAMES_IN_FLIGHT, 2.0);
         }
     }
     auto gcEnd = std::chrono::high_resolution_clock::now();
@@ -226,90 +233,10 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view, uint32_t frameIn
         return;
     }
 
-    // Begin Render Pass
-    rhi::RenderPassDesc passDesc;
+    // Forward Rendering
     const auto& swapDesc = swapChain_->GetDesc();
-    passDesc.viewport.topLeft = {0.0f, 0.0f};
-    passDesc.viewport.size = {static_cast<float>(swapDesc.width), static_cast<float>(swapDesc.height)};
-    passDesc.viewport.minDepth = 0.0f;
-    passDesc.viewport.maxDepth = 1.0f;
-    
-    // Debug Viewport size (once per second or first frame)
-    if (frameCount == 1) {
-        std::cout << "RenderSystem: Viewport Size: " << swapDesc.width << "x" << swapDesc.height << std::endl;
-    }
-
-    passDesc.scissor.offset = {0, 0};
-    passDesc.scissor.extent = {swapDesc.width, swapDesc.height};
-    
-    // Color Attachment
-    rhi::RenderPassDesc::Attachment colorAtt;
-    colorAtt.texture = swapChain_->GetBackBuffer(imageIndex);
-    colorAtt.loadOp = rhi::LoadAction::Clear;
-    colorAtt.storeOp = rhi::StoreAction::Store;
-    colorAtt.clearValue = rhi::ClearValue(0.1f, 0.1f, 0.1f, 1.0f); // Debug: Magenta clear color
-    passDesc.colorAttachments.push_back(colorAtt);
-    
-    // Depth Attachment
-    if (depthStencilTexture_ != rhi::handles::INVALID_RESOURCE) {
-        rhi::RenderPassDesc::Attachment depthAtt;
-        depthAtt.texture = depthStencilTexture_;
-        depthAtt.loadOp = rhi::LoadAction::Clear;
-        depthAtt.storeOp = rhi::StoreAction::DontCare;
-        depthAtt.clearValue = rhi::ClearValue(1.0f, 0); // Depth 1.0
-        passDesc.depthAttachment = depthAtt;
-    }
-    
-    cmdBuffer->BeginRenderPass(passDesc);
-    
-    const auto& visibleProxies = view.GetVisibleProxies();
-    
-    rhi::PipelineHandle currentPipeline = rhi::handles::INVALID_PIPELINE;
-    MaterialInstance* currentMaterialInstance = nullptr;
-
-    for (const auto* proxy : visibleProxies) {
-        if (!proxy) continue;
-        
-        // Retrieve Mesh
-        RenderMesh* mesh = RenderMesh::GetByEntityId(proxy->meshId);
-        if (!mesh || !mesh->IsValid()) continue;
-
-        // Retrieve Material
-        MaterialInstance* matInst = nullptr;
-        auto it = materialInstances_.find(proxy->materialId);
-        if (it != materialInstances_.end()) {
-            matInst = it->second;
-        }
-        
-        if (matInst) {
-            matInst->SetCurrentFrame(currentFrameIndex_);
-
-            rhi::PipelineHandle pipeline = matInst->GetMaterial()->GetPipeline(device_, rhi::handles::INVALID_RESOURCE);
-            
-            if (pipeline != currentPipeline) {
-                if (pipeline == rhi::handles::INVALID_PIPELINE) {
-                    std::cerr << "RenderSystem: Invalid pipeline for material " << proxy->materialId << std::endl;
-                } else {
-                    cmdBuffer->BindGraphicsPipeline(pipeline);
-                    currentPipeline = pipeline;
-                }
-            }
-            
-            rhi::DescriptorSetHandle ds = matInst->GetDescriptorSet();
-            if (ds != rhi::handles::INVALID_RESOURCE && (matInst != currentMaterialInstance || ds != currentMaterialInstance->GetDescriptorSet())) {
-                rhi::PipelineLayoutHandle layout = matInst->GetMaterial()->GetPipelineLayout();
-                if (layout != rhi::handles::INVALID_PIPELINE_LAYOUT) {
-                    cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, layout, 0, 1, &ds, 0, nullptr);
-                    currentMaterialInstance = matInst;
-                }
-            }
-        }
-
-        // Draw Mesh
-        mesh->Draw(cmdBuffer);
-    }
-
-    cmdBuffer->EndRenderPass();
+    rhi::ResourceHandle backBuffer = swapChain_->GetBackBuffer(imageIndex);
+    forwardRenderer_.Render(cmdBuffer, scene, view, backBuffer, depthStencilTexture_, materialInstances_, currentFrameIndex_, swapDesc.width, swapDesc.height);
     cmdBuffer->End();
     auto recordEnd = std::chrono::high_resolution_clock::now();
     

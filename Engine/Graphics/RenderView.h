@@ -45,7 +45,7 @@ public:
     const math::m4x4& GetProjectionMatrix() const { return projectionMatrix_; }
     const math::m4x4& GetViewProjectionMatrix() const { return viewProjectionMatrix_; }
     const rhi::Frustum& GetFrustum() const { return frustum_; }
-    const std::vector<const RenderProxy*>& GetVisibleProxies() const { return visibleProxies_; }
+    const utl::vector<const RenderProxy*>& GetVisibleProxies() const { return visibleProxies_; }
 
 private:
     math::m4x4 viewMatrix_;
@@ -53,7 +53,7 @@ private:
     math::m4x4 viewProjectionMatrix_;
     rhi::Frustum frustum_;
 
-    std::vector<const RenderProxy*> visibleProxies_;
+    utl::vector<const RenderProxy*> visibleProxies_;
 };
 
 } // namespace primal::graphics

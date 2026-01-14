@@ -10,13 +10,12 @@ void RenderScene::AddProxy(const RenderProxy& proxy) {
 
 void RenderScene::RemoveProxy(id::id_type entityId) {
     std::lock_guard<std::mutex> lock(mutex_);
-    // 使用 erase-remove idiom
-    proxies_.erase(
-        std::remove_if(proxies_.begin(), proxies_.end(),
-            [entityId](const RenderProxy& proxy) {
-                return proxy.entityId == entityId;
-            }),
-        proxies_.end());
+    for (u64 i = 0; i < proxies_.size(); ++i) {
+        if (proxies_[i].entityId == entityId) {
+            proxies_.erase(i);
+            return;
+        }
+    }
 }
 
 void RenderScene::UpdateProxy(id::id_type entityId, const RenderProxy& newProxy) {
@@ -29,17 +28,43 @@ void RenderScene::UpdateProxy(id::id_type entityId, const RenderProxy& newProxy)
             return;
         }
     }
-    // 如果未找到，可以选择添加或忽略，这里选择添加以保证一致性
+    // If not found, add it to maintain consistency
     proxies_.push_back(newProxy);
 }
 
-std::vector<const RenderProxy*> RenderScene::Cull(const rhi::Frustum& frustum) const {
-    std::vector<const RenderProxy*> visibleProxies;
+void RenderScene::AddLight(const RenderLight& light) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    lights_.push_back(light);
+}
+
+void RenderScene::RemoveLight(id::id_type entityId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (u64 i = 0; i < lights_.size(); ++i) {
+        if (lights_[i].entityId == entityId) {
+            lights_.erase(i);
+            return;
+        }
+    }
+}
+
+void RenderScene::UpdateLight(id::id_type entityId, const RenderLight& newLight) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& light : lights_) {
+        if (light.entityId == entityId) {
+            light = newLight;
+            return;
+        }
+    }
+    lights_.push_back(newLight);
+}
+
+utl::vector<const RenderProxy*> RenderScene::Cull(const rhi::Frustum& frustum) const {
+    utl::vector<const RenderProxy*> visibleProxies;
     Cull(frustum, visibleProxies);
     return visibleProxies;
 }
 
-void RenderScene::Cull(const rhi::Frustum& frustum, std::vector<const RenderProxy*>& outProxies) const {
+void RenderScene::Cull(const rhi::Frustum& frustum, utl::vector<const RenderProxy*>& outProxies) const {
     std::lock_guard<std::mutex> lock(mutex_);
     // 预估容量，避免频繁分配
     if (outProxies.capacity() < outProxies.size() + proxies_.size()) {
@@ -67,6 +92,7 @@ void RenderScene::Cull(const rhi::Frustum& frustum, std::vector<const RenderProx
 void RenderScene::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     proxies_.clear();
+    lights_.clear();
 }
 
 } // namespace primal::graphics
