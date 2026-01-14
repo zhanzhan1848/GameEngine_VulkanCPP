@@ -565,8 +565,8 @@ void MetalCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
         else if (desc.cullMode == CullMode::Back) cullMode = MTL::CullModeBack;
         encoder->setCullMode(cullMode);
         
-        // 默认顺时针，RHI目前没有暴露FrontFace
-        encoder->setFrontFacingWinding(MTL::WindingClockwise);
+        // 默认逆时针为正面，符合Vulkan/OpenGL习惯
+        encoder->setFrontFacingWinding(MTL::WindingCounterClockwise);
         
         MTL::TriangleFillMode fillMode = (desc.fillMode == FillMode::Wireframe) ? MTL::TriangleFillModeLines : MTL::TriangleFillModeFill;
         encoder->setTriangleFillMode(fillMode);

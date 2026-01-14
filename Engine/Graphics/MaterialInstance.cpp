@@ -161,6 +161,15 @@ void MaterialInstance::SetSampler(u32 binding, rhi::SamplerHandle sampler) {
     pendingSamplers_.push_back(update);
 }
 
+void MaterialInstance::SetBuffer(u32 binding, rhi::ResourceHandle buffer, u32 size, u32 offset) {
+    BufferUpdate update;
+    update.binding = binding;
+    update.buffer = buffer;
+    update.size = size;
+    update.offset = offset;
+    pendingBuffers_.push_back(update);
+}
+
 void MaterialInstance::SetUniformData(u32 offset, const void* data, u32 size) {
     if (uniformBuffers_.empty() || currentFrameIndex_ >= uniformBuffers_.size() || !data || size == 0) {
         return;
@@ -193,16 +202,19 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
     // Only update textures/samplers if needed. 
     // Uniform buffers are bound statically in Initialize, so we don't need to re-bind them here.
     
-    bool needsUpdate = !pendingTextures_.empty() || !pendingSamplers_.empty();
+    bool needsUpdate = !pendingTextures_.empty() || !pendingSamplers_.empty() || !pendingBuffers_.empty();
     
     rhi::DescriptorSetHandle currentSet = GetDescriptorSet();
     if (!needsUpdate || currentSet == rhi::handles::INVALID_RESOURCE) return;
 
     std::vector<rhi::WriteDescriptorSet> writes;
-    writes.reserve(pendingTextures_.size() + pendingSamplers_.size());
+    writes.reserve(pendingTextures_.size() + pendingSamplers_.size() + pendingBuffers_.size());
     
     std::vector<rhi::DescriptorImageInfo> imageInfos;
     imageInfos.reserve(pendingTextures_.size() + pendingSamplers_.size());
+
+    std::vector<rhi::DescriptorBufferInfo> bufferInfos;
+    bufferInfos.reserve(pendingBuffers_.size());
 
     for (const auto& tex : pendingTextures_) {
         rhi::DescriptorImageInfo info;
@@ -242,6 +254,25 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
         writes.push_back(write);
     }
 
+    for (const auto& buf : pendingBuffers_) {
+        rhi::DescriptorBufferInfo info;
+        info.buffer = buf.buffer;
+        info.offset = buf.offset;
+        info.range = buf.size;
+        
+        bufferInfos.push_back(info);
+        
+        rhi::WriteDescriptorSet write;
+        write.dstSet = currentSet;
+        write.dstBinding = buf.binding;
+        write.dstArrayElement = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = rhi::DescriptorType::UniformBuffer;
+        write.bufferInfo = &bufferInfos.back(); 
+        
+        writes.push_back(write);
+    }
+
     if (!writes.empty()) {
         device->UpdateDescriptorSets(static_cast<u32>(writes.size()), writes.data());
     }
@@ -250,6 +281,7 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
     // In a full engine, we might want to propagate to all sets or track state per set.
     pendingTextures_.clear();
     pendingSamplers_.clear();
+    pendingBuffers_.clear();
     
     // We do NOT auto-increment currentFrameIndex_ anymore. 
     // It should be set via SetCurrentFrame() by the renderer.

@@ -406,13 +406,21 @@ enum class PrimitiveTopology : uint8_t {
  */
 enum class ShaderStage : uint8_t {
     Unknown = 0,
-    Vertex = 1,     ///< 顶点着色器
-    Pixel = 2,      ///< 像素着色器
-    Geometry = 3,   ///< 几何着色器
-    Hull = 4,       ///< 外壳着色器
-    Domain = 5,     ///< 域着色器
-    Compute = 6     ///< 计算着色器
+    Vertex = 1 << 0,     ///< 顶点着色器
+    Pixel = 1 << 1,      ///< 像素着色器
+    Geometry = 1 << 2,   ///< 几何着色器
+    Hull = 1 << 3,       ///< 外壳着色器
+    Domain = 1 << 4,     ///< 域着色器
+    Compute = 1 << 5     ///< 计算着色器
 };
+
+inline ShaderStage operator|(ShaderStage a, ShaderStage b) {
+    return static_cast<ShaderStage>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
+
+inline ShaderStage operator&(ShaderStage a, ShaderStage b) {
+    return static_cast<ShaderStage>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
+}
 
 /**
  * @brief 描述符类型

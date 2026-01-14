@@ -8,6 +8,7 @@
 #include "Graphics/RHI/Core/RHISwapChain.h"
 #include "Graphics/MaterialInstance.h"
 #include "Platform/PlatformTypes.h"
+#include <chrono>
 
 namespace primal::graphics {
 
@@ -64,6 +65,8 @@ public:
      * @brief 获取当前帧索引 (0 to MAX_FRAMES_IN_FLIGHT-1)
      */
     uint32_t GetCurrentFrameIndex() const { return currentFrameIndex_; }
+
+    ForwardRenderer& GetRenderer() { return forwardRenderer_; }
 
 private:
     rhi::RHIDeviceBase* device_{nullptr};

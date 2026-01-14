@@ -32,6 +32,15 @@ namespace primal::graphics {
         void SetTexture(u32 binding, rhi::ResourceHandle texture);
 
         /**
+         * @brief Set buffer parameter
+         * @param binding Binding index in the shader
+         * @param buffer Buffer resource handle
+         * @param size Size of the buffer range to bind
+         * @param offset Offset into the buffer
+         */
+        void SetBuffer(u32 binding, rhi::ResourceHandle buffer, u32 size, u32 offset = 0);
+
+        /**
          * @brief Set sampler parameter
          * @param binding Binding index in the shader
          * @param sampler Sampler handle
@@ -91,9 +100,16 @@ namespace primal::graphics {
             u32 binding;
             rhi::SamplerHandle sampler;
         };
+        struct BufferUpdate {
+            u32 binding;
+            rhi::ResourceHandle buffer;
+            u32 offset;
+            u32 size;
+        };
         
         utl::vector<TextureUpdate> pendingTextures_;
         utl::vector<SamplerUpdate> pendingSamplers_;
+        utl::vector<BufferUpdate> pendingBuffers_;
         
         rhi::RHIDeviceBase* device_{nullptr}; // Cached for destruction
     };
