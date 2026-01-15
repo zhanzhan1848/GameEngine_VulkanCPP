@@ -39,6 +39,10 @@ public:
     MTL::RenderPipelineState* GetRenderPipelineState() const { return renderPipelineState_; }
     MTL::ComputePipelineState* GetComputePipelineState() const { return computePipelineState_; }
     MTL::DepthStencilState* GetDepthStencilState() const { return depthStencilState_; }
+
+    float GetDepthBias() const { return graphicsDesc_.depthBias; }
+    float GetDepthBiasClamp() const { return graphicsDesc_.depthBiasClamp; }
+    float GetSlopeScaledDepthBias() const { return graphicsDesc_.slopeScaledDepthBias; }
     MTL::Size GetThreadGroupSize() const { return threadGroupSize_; }
     
     // Helper to convert primitive topology

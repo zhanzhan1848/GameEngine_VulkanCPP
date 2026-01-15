@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RHI/Core/RHIResource.h"
 #include "Graphics/RHI/Core/RHIShaderCommon.h"
+#include "Graphics/RHI/Utils/ShadowUtils.h"
 #include <unordered_map>
 
 namespace primal::graphics {
@@ -17,6 +18,7 @@ class MaterialInstance;
 constexpr uint32_t PER_OBJECT_BINDING = 10;
 constexpr uint32_t FRAME_DATA_BINDING = 11;
 constexpr uint32_t LIGHT_DATA_BINDING = 12;
+constexpr uint32_t SHADOW_MAP_BINDING = 13;
 
 class ForwardRenderer {
 public:
@@ -46,7 +48,19 @@ private:
                      uint32_t width,
                      uint32_t height);
 
-    void SetupLights(const RenderScene& scene, uint32_t frameIndex, rhi::GlobalShaderData* globalData);
+    void ShadowPass(rhi::RHICommandBuffer* cmdBuffer, 
+                   const RenderView& view, 
+                   rhi::ResourceHandle shadowMap,
+                   const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
+                   const utl::vector<const RenderProxy*>& proxies,
+                   uint32_t frameIndex,
+                   uint32_t cascadeIndex);
+
+    void SetupLights(const RenderScene& scene, 
+                    uint32_t frameIndex, 
+                    rhi::GlobalShaderData* globalData,
+                    const utl::vector<RenderView>& shadowViews,
+                    const utl::vector<float>& splits);
 
     void OpaquePass(rhi::RHICommandBuffer* cmdBuffer, 
                    const RenderView& view, 
@@ -66,6 +80,14 @@ private:
     // Global Descriptor Set (Set 0)
     rhi::DescriptorSetLayoutHandle globalDescriptorSetLayout_{rhi::handles::INVALID_RESOURCE};
     rhi::DescriptorSetHandle globalDescriptorSets_[rhi::MAX_FRAMES_IN_FLIGHT]{};
+
+    // Shadow Pipeline
+    rhi::PipelineLayoutHandle shadowPipelineLayout_{rhi::handles::INVALID_RESOURCE};
+    rhi::PipelineHandle shadowPipeline_{rhi::handles::INVALID_PIPELINE};
+
+    // Shadow Resources
+    rhi::ResourceHandle shadowMapArray_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle shadowMapSampler_{rhi::handles::INVALID_RESOURCE};
 
     // Multi-frame buffers to avoid CPU-GPU sync stalls
     rhi::ResourceHandle lightBuffers_[rhi::MAX_FRAMES_IN_FLIGHT]{};

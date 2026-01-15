@@ -277,9 +277,10 @@ void Engine_Test::run()
 void Engine_Test::shutdown()
 {
     test_shutdown();
-	if (_runLoopSource) {
-		CFRunLoopRemoveSource(_runLoop, _runLoopSource, kCFRunLoopCommonModes);
-		CFRelease(_runLoopSource);
-		_runLoopSource = nullptr;
+	if (_displayLink) {
+		CFRunLoopTimerInvalidate(_displayLink);
+		CFRunLoopRemoveTimer(_runLoop, _displayLink, kCFRunLoopCommonModes);
+		CFRelease(_displayLink);
+		_displayLink = nullptr;
 	}
 }

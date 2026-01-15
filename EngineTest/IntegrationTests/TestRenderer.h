@@ -64,7 +64,7 @@ public :
 private:
 	[[maybe_unused]] CFRunLoopTimerRef _displayLink{ nullptr };
 	CFRunLoopRef _runLoop{ nullptr };
-	// CFRunLoopSourceRef _runLoopSource{ nullptr };
+    CFRunLoopSourceRef _runLoopSource{ nullptr };
 
 	// 自定义运行时循环方法
     void setupCustomRunLoop()

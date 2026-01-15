@@ -313,6 +313,8 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
         if (texture && texture->GetNativeTexture()) {
             MTL::RenderPassDepthAttachmentDescriptor* da = passDesc->depthAttachment();
             da->setTexture(texture->GetNativeTexture());
+            da->setSlice(desc.depthAttachment.arrayLayer);
+            da->setLevel(desc.depthAttachment.mipLevel);
             
             MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
             switch (desc.depthAttachment.loadOp) {
@@ -556,6 +558,9 @@ void MetalCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
         if (mtlPipeline->GetDepthStencilState()) {
             encoder->setDepthStencilState(mtlPipeline->GetDepthStencilState());
         }
+
+        // Set Depth Bias
+        encoder->setDepthBias(mtlPipeline->GetDepthBias(), mtlPipeline->GetSlopeScaledDepthBias(), mtlPipeline->GetDepthBiasClamp());
         
         // 设置光栅化状态
         const auto& desc = mtlPipeline->GetGraphicsDesc();
@@ -571,8 +576,7 @@ void MetalCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
         MTL::TriangleFillMode fillMode = (desc.fillMode == FillMode::Wireframe) ? MTL::TriangleFillModeLines : MTL::TriangleFillModeFill;
         encoder->setTriangleFillMode(fillMode);
 
-        // 深度偏差和深度裁剪目前未在 GraphicsPipelineDesc 中暴露
-        // encoder->setDepthBias(0, 0, 0);
+        // Depth Clip Mode (Default to Clip)
         // encoder->setDepthClipMode(MTL::DepthClipModeClip);
     } else {
         std::cerr << "BindGraphicsPipeline: Failed to get PSO! Pipeline: " << pipeline << " Ptr: " << mtlPipeline << std::endl;
@@ -681,10 +685,8 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     if (buffer && buffer->GetNativeBuffer()) {
                                 uint64_t offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
                                 if (renderEncoder) {
-                                    if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex)) {
+                                    if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
                                         renderEncoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, slot);
-                                        // std::cout << "[MetalCommandBuffer] Bound uniform buffer to vertex slot " << slot << std::endl;
-                                    }
                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
                                 renderEncoder->setFragmentBuffer(buffer->GetNativeBuffer(), offset, slot);
                         } else if (computeEncoder) {

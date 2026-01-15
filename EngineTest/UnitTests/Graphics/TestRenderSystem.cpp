@@ -156,7 +156,29 @@ public:
     DescriptorSetHandle createDescriptorSetImpl(const DescriptorSetDesc&) { return handles::INVALID_DESCRIPTOR_SET; }
     void destroyDescriptorSetImpl(DescriptorSetHandle) {}
     void updateDescriptorSetsImpl(uint32_t, const WriteDescriptorSet*) {}
-    ResourceHandle createBufferImpl(const BufferDesc&) { return (ResourceHandle)1001; }
+    // Mock Buffer Storage
+    std::unordered_map<uint64_t, std::vector<uint8_t>> bufferStorage;
+    uint64_t nextBufferHandle = 1000;
+
+    ResourceHandle createBufferImpl(const BufferDesc& desc) { 
+        ResourceHandle handle = (ResourceHandle)++nextBufferHandle;
+        bufferStorage[(uint64_t)handle].resize(desc.size);
+        return handle; 
+    }
+    
+    void destroyBufferImpl(ResourceHandle handle) {
+        bufferStorage.erase((uint64_t)handle);
+    }
+    
+    void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) { 
+        if (bufferStorage.find((uint64_t)handle) != bufferStorage.end()) {
+            return bufferStorage[(uint64_t)handle].data() + offset;
+        }
+        return nullptr; 
+    }
+    
+    void unmapBufferImpl(ResourceHandle) {}
+
     ResourceHandle createTextureImpl(const TextureDesc&) { return (ResourceHandle)2002; }
     ShaderHandle createShaderImpl(const void*, size_t, ShaderStage, const char*) { return handles::INVALID_SHADER; }
     PipelineHandle createGraphicsPipelineImpl(const GraphicsPipelineDesc&) { return (PipelineHandle)666; }
@@ -188,13 +210,13 @@ public:
         return mockCmdBuffer->GetHandle();
     }
     
-    void destroyBufferImpl(ResourceHandle) {}
+    // void destroyBufferImpl(ResourceHandle) {} // Removed as it is now implemented above
     void destroyTextureImpl(ResourceHandle) {}
     void destroyShaderImpl(ShaderHandle) {}
     void destroyPipelineImpl(PipelineHandle) {}
     
-    void* mapBufferImpl(ResourceHandle, u64, u64) { return nullptr; }
-    void unmapBufferImpl(ResourceHandle) {}
+    // void* mapBufferImpl(ResourceHandle, u64, u64) { return nullptr; } // Removed as it is now implemented above
+    // void unmapBufferImpl(ResourceHandle) {} // Removed as it is now implemented above
 
     // Base class overrides if any needed
 };

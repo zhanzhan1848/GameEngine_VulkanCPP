@@ -140,8 +140,9 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     
     bool isDepthOnly = (flags & PipelineFlags::DepthOnly) != PipelineFlags::None;
     bool isDepthEqual = (flags & PipelineFlags::DepthEqual) != PipelineFlags::None;
+    bool isShadow = (flags & PipelineFlags::Shadow) != PipelineFlags::None;
 
-    if (!isDepthOnly && stageMap.count(rhi::ShaderStage::Pixel)) desc.pixelShader = stageMap[rhi::ShaderStage::Pixel].handle;
+    if (!isDepthOnly && !isShadow && stageMap.count(rhi::ShaderStage::Pixel)) desc.pixelShader = stageMap[rhi::ShaderStage::Pixel].handle;
     if (stageMap.count(rhi::ShaderStage::Geometry)) desc.geometryShader = stageMap[rhi::ShaderStage::Geometry].handle;
     if (stageMap.count(rhi::ShaderStage::Hull)) desc.hullShader = stageMap[rhi::ShaderStage::Hull].handle;
     if (stageMap.count(rhi::ShaderStage::Domain)) desc.domainShader = stageMap[rhi::ShaderStage::Domain].handle;
@@ -153,6 +154,9 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
 
     desc.fillMode = rasterizerState_.fillMode;
     desc.cullMode = rasterizerState_.cullMode;
+    desc.depthBias = rasterizerState_.depthBias;
+    desc.depthBiasClamp = rasterizerState_.depthBiasClamp;
+    desc.slopeScaledDepthBias = rasterizerState_.slopeScaledDepthBias;
     
     desc.enableDepthTest = depthStencilState_.enableDepthTest;
     desc.enableDepthWrite = depthStencilState_.enableDepthWrite;
@@ -163,7 +167,25 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     desc.frontStencil = depthStencilState_.frontStencil;
     desc.backStencil = depthStencilState_.backStencil;
     
-    if (isDepthOnly) {
+    // Default Depth Format
+    desc.depthStencilFormat = depthStencilFormat_;
+
+    if (isShadow) {
+        // Shadow Pass: Invert Cull Mode for better shadow stability (unless None)
+        if (desc.cullMode == rhi::CullMode::Back) desc.cullMode = rhi::CullMode::Front;
+        else if (desc.cullMode == rhi::CullMode::Front) desc.cullMode = rhi::CullMode::Back;
+        
+        desc.enableDepthWrite = true;
+        desc.depthFunc = rhi::ComparisonFunc::Less;
+        desc.renderTargetCount = 0;
+        desc.enableBlend = false;
+        
+        // Shadow Pass uses D32_Float
+        desc.depthStencilFormat = rhi::DataFormat::D32_Float;
+        
+        // Bias is typically handled via SetDepthBias cmd, but can be set here if rasterizerState supports it
+        // We assume command buffer sets dynamic depth bias
+    } else if (isDepthOnly) {
         desc.enableDepthWrite = true;
         desc.depthFunc = rhi::ComparisonFunc::Less;
         desc.renderTargetCount = 0;
@@ -184,13 +206,13 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     desc.alphaBlendOp = blendState_.alphaBlendOp;
     desc.blendConstants = blendState_.blendConstants;
     
-    if (!isDepthOnly) {
+    if (!isDepthOnly && !isShadow) {
         desc.renderTargetCount = static_cast<uint32_t>(renderTargetFormats_.size());
         for (size_t i = 0; i < renderTargetFormats_.size() && i < rhi::constants::MAX_RENDER_TARGETS; ++i) {
             desc.renderTargetFormats[i] = renderTargetFormats_[i];
         }
     }
-    desc.depthStencilFormat = depthStencilFormat_;
+    // desc.depthStencilFormat = depthStencilFormat_; // Moved up
 
     rhi::PipelineHandle pipeline = device->CreateGraphicsPipeline(desc);
     if (pipeline != rhi::handles::INVALID_PIPELINE) {

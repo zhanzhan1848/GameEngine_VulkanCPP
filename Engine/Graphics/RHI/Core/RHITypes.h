@@ -199,7 +199,21 @@ enum class ResourceState : uint8_t {
     Ready = 4,          ///< 资源就绪，可以使用
     InUse = 5,          ///< 正在被GPU使用
     PendingDestroy = 6,  ///< 等待销毁
-    Destroyed = 7       ///< 已销毁
+    Destroyed = 7,       ///< 已销毁
+    
+    // 资源布局状态 (Pipeline States)
+    General = 8,         ///< 通用状态 (Vulkan: GENERAL, D3D12: COMMON)
+    ShaderResource = 9,  ///< 着色器资源 (Vulkan: SHADER_READ_ONLY_OPTIMAL, D3D12: PIXEL/NON_PIXEL_SHADER_RESOURCE)
+    RenderTarget = 10,   ///< 渲染目标 (Vulkan: COLOR_ATTACHMENT_OPTIMAL, D3D12: RENDER_TARGET)
+    DepthStencil = 11,   ///< 深度模板读写 (Vulkan: DEPTH_STENCIL_ATTACHMENT_OPTIMAL, D3D12: DEPTH_WRITE)
+    DepthStencilReadOnly = 12, ///< 深度模板只读 (Vulkan: DEPTH_STENCIL_READ_ONLY_OPTIMAL, D3D12: DEPTH_READ)
+    UnorderedAccess = 13, ///< 无序访问 (Vulkan: GENERAL, D3D12: UNORDERED_ACCESS)
+    CopySource = 14,     ///< 复制源 (Vulkan: TRANSFER_SRC_OPTIMAL, D3D12: COPY_SOURCE)
+    CopyDest = 15,       ///< 复制目标 (Vulkan: TRANSFER_DST_OPTIMAL, D3D12: COPY_DEST)
+    Present = 16,        ///< 呈现 (Vulkan: PRESENT_SRC_KHR, D3D12: PRESENT)
+    ResolveSource = 17,  ///< 解析源
+    ResolveDest = 18,    ///< 解析目标
+    IndirectArgument = 19 ///< 间接参数
 };
 
 /**
@@ -245,6 +259,14 @@ enum class TextureUsage : uint32_t {
     ResolveDest = 0x00000080,        ///< 解析目标
     Present = 0x00000100             ///< 呈现目标
 };
+
+inline TextureUsage operator|(TextureUsage a, TextureUsage b) {
+    return static_cast<TextureUsage>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+inline TextureUsage operator&(TextureUsage a, TextureUsage b) {
+    return static_cast<TextureUsage>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+}
 
 /**
  * @brief 数据格式枚举
@@ -720,10 +742,16 @@ struct RasterizerState {
     CullMode cullMode;                  ///< 裁剪模式
     PrimitiveTopology topology;         ///< 图元拓扑 (注意：通常这属于 Input Assembly，但这里方便管理放在一起，或者 Material 单独管理 Topology)
     
+    // Depth Bias
+    float depthBias;                    ///< 深度偏差常数因子
+    float depthBiasClamp;               ///< 深度偏差截断
+    float slopeScaledDepthBias;         ///< 深度偏差斜率因子
+
     // 注意：GraphicsPipelineDesc 中 topology 是单独字段，fillMode/cullMode 是单独字段
     // 这里为了 Material 方便，我们将 Topology 也包含进来，或者 Material 单独有 SetTopology
     
-    RasterizerState() : fillMode(FillMode::Solid), cullMode(CullMode::Back), topology(PrimitiveTopology::TriangleList) {}
+    RasterizerState() : fillMode(FillMode::Solid), cullMode(CullMode::Back), topology(PrimitiveTopology::TriangleList),
+                        depthBias(0.0f), depthBiasClamp(0.0f), slopeScaledDepthBias(0.0f) {}
 };
 
 // === 基础结构体定义 ===

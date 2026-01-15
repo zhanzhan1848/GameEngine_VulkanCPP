@@ -55,11 +55,12 @@ struct LightParameters
 // 对应 Metal 中的 DirectionalLightParameters
 struct DirectionalLightParameters
 {
-    math::m4x4 lightMVP; // Shadow Mapping Matrix
-
+    math::m4x4 viewProjections[4]; // Cascade ViewProjection matrices
+    math::v4 splits;               // Cascade split distances
+    
     math::v4 directionAndIntensity; // xyz: direction, w: intensity
     
-    math::v4 color; // rgb: color, a: padding
+    math::v4 colorAndShadow; // rgb: color, a: shadow enabled (float 1.0 or 0.0)
 };
 
 // 用于 Forward Renderer 的统一光照缓冲区

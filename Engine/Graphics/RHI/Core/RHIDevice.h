@@ -91,6 +91,10 @@ struct GraphicsPipelineDesc {
     FillMode fillMode;                  ///< 填充模式
     CullMode cullMode;                  ///< 裁剪模式
     
+    float depthBias;                    ///< 深度偏差常数因子
+    float depthBiasClamp;               ///< 深度偏差截断
+    float slopeScaledDepthBias;         ///< 深度偏差斜率因子
+    
     DataFormat renderTargetFormats[constants::MAX_RENDER_TARGETS]; ///< 渲染目标格式
     uint32_t renderTargetCount;         ///< 渲染目标数量
     DataFormat depthStencilFormat;       ///< 深度模板格式

@@ -97,6 +97,20 @@ set_target_properties(StandaloneRHI_DeterministicPrefetch_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_DeterministicPrefetch_Test PRIVATE DEBUG _DEBUG)
 
+# 创建ShadowUtils测试
+add_executable(StandaloneRHI_ShadowUtils_Test Graphics/TestShadowUtils.cpp)
+target_include_directories(StandaloneRHI_ShadowUtils_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(StandaloneRHI_ShadowUtils_Test PRIVATE Engine)
+add_test(NAME StandaloneRHI_ShadowUtils_Test COMMAND StandaloneRHI_ShadowUtils_Test)
+set_target_properties(StandaloneRHI_ShadowUtils_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_ShadowUtils_Test PRIVATE DEBUG _DEBUG)
+
 
 # 创建Metal数学库测试
 if(APPLE)
@@ -609,6 +623,7 @@ add_executable(StandaloneGraphics_RenderSystem_Test
     Graphics/TestRenderSystem.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Systems/RenderSystem.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/ForwardRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Utils/ShadowUtils.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderView.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderScene.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderProxy.cpp

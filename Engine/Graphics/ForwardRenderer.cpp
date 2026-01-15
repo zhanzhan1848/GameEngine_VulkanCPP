@@ -10,6 +10,7 @@
 #include "Graphics/RHI/Core/RHIDescriptorSet.h"
 #include "Graphics/RHI/Core/RHIDescriptorSetLayout.h"
 #include "Graphics/RHI/Core/RHIPipelineLayout.h"
+#include "Graphics/RHI/Utils/ShadowUtils.h"
 
 #include <algorithm>
 #include <iostream>
@@ -65,7 +66,8 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     // 4. Create Global Descriptor Set Layout (Set 0)
     // Binding 0: Frame Data (GlobalShaderData)
     // Binding 2: Light Data (ForwardLightBuffer)
-    utl::vector<rhi::DescriptorSetLayoutBinding> globalBindings(2);
+    // Binding 3: Shadow Map (Texture2DArray)
+    utl::vector<rhi::DescriptorSetLayoutBinding> globalBindings(3);
     globalBindings[0].binding = FRAME_DATA_BINDING;
     globalBindings[0].descriptorType = rhi::DescriptorType::UniformBuffer;
     globalBindings[0].descriptorCount = 1;
@@ -76,8 +78,13 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     globalBindings[1].descriptorCount = 1;
     globalBindings[1].stageFlags = rhi::ShaderStage::Pixel;
 
+    globalBindings[2].binding = SHADOW_MAP_BINDING;
+    globalBindings[2].descriptorType = rhi::DescriptorType::CombinedImageSampler;
+    globalBindings[2].descriptorCount = 1;
+    globalBindings[2].stageFlags = rhi::ShaderStage::Pixel;
+
     rhi::DescriptorSetLayoutDesc globalLayoutDesc;
-    globalLayoutDesc.bindingCount = 2;
+    globalLayoutDesc.bindingCount = 3;
     globalLayoutDesc.bindings = globalBindings.data();
     globalDescriptorSetLayout_ = device->CreateDescriptorSetLayout(globalLayoutDesc);
 
@@ -94,7 +101,34 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     perObjectLayoutDesc.bindings = perObjectBindings.data();
     perObjectDescriptorSetLayout_ = device->CreateDescriptorSetLayout(perObjectLayoutDesc);
 
-    // 6. Allocate and Update Descriptor Sets
+    // 6. Create Shadow Map Resources
+    rhi::TextureDesc shadowMapDesc{};
+    shadowMapDesc.size = {2048, 2048, 1};
+    shadowMapDesc.arraySize = 4; // 4 Cascades
+    shadowMapDesc.mipLevels = 1;
+    shadowMapDesc.format = rhi::DataFormat::D32_Float;
+    shadowMapDesc.type = rhi::TextureType::Texture2DArray;
+    shadowMapDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+    shadowMapDesc.memoryUsage = rhi::GPUMemoryUsage::Static; // GPU Only
+    shadowMapDesc.name = "ShadowMapArray";
+    
+    shadowMapArray_ = device->CreateTexture(shadowMapDesc);
+    if (shadowMapArray_ == rhi::handles::INVALID_RESOURCE) return false;
+
+    rhi::SamplerDesc shadowSamplerDesc{};
+    shadowSamplerDesc.minFilter = rhi::FilterMode::Linear;
+    shadowSamplerDesc.magFilter = rhi::FilterMode::Linear;
+    shadowSamplerDesc.addressU = rhi::TextureAddressMode::Clamp;
+    shadowSamplerDesc.addressV = rhi::TextureAddressMode::Clamp;
+    shadowSamplerDesc.addressW = rhi::TextureAddressMode::Clamp;
+    shadowSamplerDesc.comparisonFunc = rhi::ComparisonFunc::Less; // For PCF
+    shadowSamplerDesc.borderColor = {1.0f, 1.0f, 1.0f, 1.0f};
+    
+    shadowMapSampler_ = device->CreateSampler(shadowSamplerDesc);
+    // Note: Sampler might not be strictly needed here if we bind it in descriptor set, 
+    // but good to have.
+
+    // 7. Allocate and Update Descriptor Sets
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         // Global Set
         rhi::DescriptorSetDesc globalSetDesc;
@@ -125,8 +159,20 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         writeLight.descriptorCount = 1;
         writeLight.bufferInfo = &lightInfo;
 
-        rhi::WriteDescriptorSet writes[] = {writeFrame, writeLight};
-        device->UpdateDescriptorSets(2, writes);
+        rhi::DescriptorImageInfo shadowInfo;
+        shadowInfo.sampler = shadowMapSampler_;
+        shadowInfo.imageView = shadowMapArray_;
+        shadowInfo.imageLayout = rhi::ResourceState::ShaderResource;
+
+        rhi::WriteDescriptorSet writeShadow;
+        writeShadow.dstSet = globalDescriptorSets_[i];
+        writeShadow.dstBinding = SHADOW_MAP_BINDING;
+        writeShadow.descriptorType = rhi::DescriptorType::CombinedImageSampler;
+        writeShadow.descriptorCount = 1;
+        writeShadow.imageInfo = &shadowInfo;
+
+        rhi::WriteDescriptorSet writes[] = {writeFrame, writeLight, writeShadow};
+        device->UpdateDescriptorSets(3, writes);
 
         // Per-Object Set
         rhi::DescriptorSetDesc perObjectSetDesc;
@@ -178,11 +224,87 @@ void ForwardRenderer::Shutdown() {
         if (perObjectDescriptorSetLayout_ != rhi::handles::INVALID_RESOURCE) {
             device_->DestroyDescriptorSetLayout(perObjectDescriptorSetLayout_);
         }
+        
+        if (shadowMapArray_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(shadowMapArray_);
+        }
+        if (shadowMapSampler_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroySampler(shadowMapSampler_);
+        }
     }
     device_ = nullptr;
 }
 
-void ForwardRenderer::SetupLights(const RenderScene& scene, uint32_t frameIndex, rhi::GlobalShaderData* globalData) {
+void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer, 
+                                 const RenderView& view, 
+                                 rhi::ResourceHandle shadowMap,
+                                 const std::unordered_map<id::id_type, MaterialInstance*>& materials,
+                                 const utl::vector<const RenderProxy*>& proxies,
+                                 uint32_t frameIndex,
+                                 uint32_t cascadeIndex) {
+    if (proxies.empty()) return;
+
+    rhi::RenderPassDesc passDesc{};
+    passDesc.depthAttachment.texture = shadowMap;
+    passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear; 
+    passDesc.depthAttachment.storeOp = rhi::StoreAction::Store;
+    passDesc.depthAttachment.clearValue = rhi::ClearValue(1.0f, 0);
+    passDesc.depthAttachment.arrayLayer = static_cast<uint16_t>(cascadeIndex);
+
+    cmdBuffer->BeginRenderPass(passDesc);
+
+    // Set Viewport and Scissor from View
+    cmdBuffer->SetViewport(view.GetViewport());
+    cmdBuffer->SetScissor(view.GetScissor());
+
+    // Bind Global Set (Set 0)
+    cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, 
+                                  materials.empty() ? rhi::handles::INVALID_PIPELINE_LAYOUT : materials.begin()->second->GetMaterial()->GetPipelineLayout(), 
+                                  0, 1, &globalDescriptorSets_[frameIndex], 0, nullptr);
+
+    for (const auto* proxy : proxies) {
+        auto it = materials.find(proxy->materialId);
+        if (it == materials.end() || !it->second) continue;
+        MaterialInstance* mi = it->second;
+        Material* mat = mi->GetMaterial();
+        
+        // Shadow Pipeline (Depth Only + Shadow Flag)
+        rhi::PipelineHandle pipeline = mat->GetPipeline(device_, rhi::handles::INVALID_RESOURCE, 0, PipelineFlags::Shadow);
+        cmdBuffer->BindGraphicsPipeline(pipeline);
+
+        // Update Per-Object Data for Shadow View
+        u32 alignedSize = (sizeof(rhi::PerObjectData) + 255) & ~255;
+        if (perObjectBufferOffset_ + alignedSize > MAX_PER_OBJECT_SIZE) break;
+
+        auto* perObjectData = reinterpret_cast<rhi::PerObjectData*>(
+            static_cast<u8*>(perObjectBuffersMapped_[frameIndex]) + perObjectBufferOffset_);
+        
+        perObjectData->world = proxy->transform;
+        perObjectData->invWorld = rhi::math::Inverse(proxy->transform);
+        perObjectData->worldViewProjection = view.GetViewProjectionMatrix() * proxy->transform;
+
+        // Bind Per-Object Set (Set 1) with Dynamic Offset
+        u32 dynamicOffset = perObjectBufferOffset_;
+        cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, mat->GetPipelineLayout(), 1, 1, &perObjectDescriptorSets_[frameIndex], 1, &dynamicOffset);
+
+        // Draw
+        RenderMesh* mesh = RenderMesh::GetByEntityId(proxy->meshId);
+        if (mesh && mesh->IsValid()) {
+            mesh->Draw(cmdBuffer);
+        }
+
+        perObjectBufferOffset_ += alignedSize;
+    }
+
+    cmdBuffer->EndRenderPass();
+}
+
+
+void ForwardRenderer::SetupLights(const RenderScene& scene, 
+                                  uint32_t frameIndex, 
+                                  rhi::GlobalShaderData* globalData,
+                                  const utl::vector<RenderView>& shadowViews,
+                                  const utl::vector<float>& splits) {
     if (frameIndex >= rhi::MAX_FRAMES_IN_FLIGHT || !lightBuffersMapped_[frameIndex]) return;
 
     auto* buffer = static_cast<rhi::ForwardLightBuffer*>(lightBuffersMapped_[frameIndex]);
@@ -194,9 +316,24 @@ void ForwardRenderer::SetupLights(const RenderScene& scene, uint32_t frameIndex,
         if (light.type == LightType::Directional) {
             if (buffer->directionalLightCount < 4) {
                 auto& dl = buffer->directionalLights[buffer->directionalLightCount++];
-                // dl.lightMVP = ...; // Calculate shadow matrix if needed
+                
+                if (!shadowViews.empty()) {
+                    for (size_t i = 0; i < std::min<size_t>(shadowViews.size(), 4); ++i) {
+                        dl.viewProjections[i] = shadowViews[i].GetViewProjectionMatrix();
+                    }
+                }
+                
+                if (!splits.empty()) {
+                    dl.splits = {
+                        splits.size() > 0 ? splits[0] : 0.0f,
+                        splits.size() > 1 ? splits[1] : 0.0f,
+                        splits.size() > 2 ? splits[2] : 0.0f,
+                        splits.size() > 3 ? splits[3] : 0.0f
+                    };
+                }
+
                 dl.directionAndIntensity = {light.direction.x, light.direction.y, light.direction.z, light.intensity};
-                dl.color = {light.color.x, light.color.y, light.color.z, 1.0f};
+                dl.colorAndShadow = {light.color.x, light.color.y, light.color.z, 1.0f}; // Shadow Enabled
             }
         } else {
             if (buffer->punctualLightCount < 128) {
@@ -237,6 +374,38 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     // Reset Per-Object Buffer Offset
     perObjectBufferOffset_ = 0;
 
+    // Shadow Pass (Before Main Pass)
+    utl::vector<RenderView> shadowViews;
+    utl::vector<float> cascadeSplits;
+
+    // Find Directional Light
+    const auto& allLights = scene.GetLights();
+    rhi::math::v3 lightDir = {0, -1, 0};
+    bool hasDirectionalLight = false;
+    for (const auto& light : allLights) {
+        if (light.type == LightType::Directional) {
+            lightDir = light.direction;
+            hasDirectionalLight = true;
+            break;
+        }
+    }
+
+    if (hasDirectionalLight && shadowMapArray_ != rhi::handles::INVALID_RESOURCE) {
+        utils::CascadeConfig config;
+        config.shadowMapSize = 2048; // Should match texture
+        config.splitLambda = 0.5f;
+        config.cascadeCount = 4;
+        
+        utils::CalculateCascadeSplits(config, cascadeSplits);
+        utils::CreateCascadeViews(view, lightDir, config, shadowViews);
+
+        for (uint32_t i = 0; i < shadowViews.size(); ++i) {
+            auto& shadowView = shadowViews[i];
+            shadowView.Cull(scene);
+            ShadowPass(cmdBuffer, shadowView, shadowMapArray_, materials, shadowView.GetVisibleProxies(), frameIndex, i);
+        }
+    }
+
     // 0. Update Frame Data
     if (frameIndex < rhi::MAX_FRAMES_IN_FLIGHT && frameBuffersMapped_[frameIndex]) {
         rhi::GlobalShaderData* frameData = static_cast<rhi::GlobalShaderData*>(frameBuffersMapped_[frameIndex]);
@@ -247,12 +416,12 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         rhi::math::m4x4 viewInv = rhi::math::Inverse(view.GetViewMatrix());
         rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
         rhi::math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
-frameData->deltaTime = deltaTime_;
+        frameData->deltaTime = deltaTime_;
         frameData->frameCount = static_cast<float>(frameNumber_);
         frameData->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, static_cast<float>(width)};
         frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
         
-        SetupLights(scene, frameIndex, frameData);
+        SetupLights(scene, frameIndex, frameData, shadowViews, cascadeSplits);
     }
 
     // 1. Filter and Sort Proxies
