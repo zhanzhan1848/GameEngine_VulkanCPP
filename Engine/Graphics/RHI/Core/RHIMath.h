@@ -18,6 +18,17 @@ namespace primal::graphics::rhi::math {
 
 using namespace primal::math;  // 使用项目现有的数学库
 
+// Expose types for RHI usage
+using m4x4 = primal::math::m4x4;
+using m4x4a = primal::math::m4x4a;
+using v2 = primal::math::v2;
+using v3 = primal::math::v3;
+using v4 = primal::math::v4;
+using v2a = primal::math::v2a;
+using v3a = primal::math::v3a;
+using v4a = primal::math::v4a;
+
+
 // === RHI特定的数学常量 ===
 
 /**

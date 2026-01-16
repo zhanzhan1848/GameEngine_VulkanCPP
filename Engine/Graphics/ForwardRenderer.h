@@ -19,6 +19,7 @@ constexpr uint32_t PER_OBJECT_BINDING = 10;
 constexpr uint32_t FRAME_DATA_BINDING = 11;
 constexpr uint32_t LIGHT_DATA_BINDING = 12;
 constexpr uint32_t SHADOW_MAP_BINDING = 13;
+constexpr uint32_t SHADOW_CUBE_MAP_BINDING = 14;
 
 class ForwardRenderer {
 public:
@@ -54,13 +55,15 @@ private:
                    const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
                    const utl::vector<const RenderProxy*>& proxies,
                    uint32_t frameIndex,
-                   uint32_t cascadeIndex);
+                   uint32_t arrayLayer);
 
-    void SetupLights(const RenderScene& scene, 
+    void SetupLights(const RenderScene& scene,  
                     uint32_t frameIndex, 
                     rhi::GlobalShaderData* globalData,
                     const utl::vector<RenderView>& shadowViews,
-                    const utl::vector<float>& splits);
+                    const utl::vector<float>& splits,
+                    const std::unordered_map<uint32_t, int>& lightShadowIndices,
+                    const std::unordered_map<uint32_t, rhi::math::m4x4>& lightViewProjs);
 
     void OpaquePass(rhi::RHICommandBuffer* cmdBuffer, 
                    const RenderView& view, 
@@ -88,6 +91,10 @@ private:
     // Shadow Resources
     rhi::ResourceHandle shadowMapArray_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle shadowMapSampler_{rhi::handles::INVALID_RESOURCE};
+    // Shared depth buffer for shadow rendering
+    rhi::ResourceHandle shadowDepthBuffer_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle shadowCubeMapArray_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle shadowCubeMapSampler_{rhi::handles::INVALID_RESOURCE};
 
     // Multi-frame buffers to avoid CPU-GPU sync stalls
     rhi::ResourceHandle lightBuffers_[rhi::MAX_FRAMES_IN_FLIGHT]{};

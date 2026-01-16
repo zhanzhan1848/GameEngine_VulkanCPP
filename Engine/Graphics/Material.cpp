@@ -115,7 +115,15 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     device_ = device;
 
     // 1. Ensure Shaders are created for this permutation
-    auto& stageMap = shaderVariants_[permutationId];
+    u32 effectivePermutationId = permutationId;
+
+    bool isShadow = (flags & PipelineFlags::Shadow) != PipelineFlags::None;
+    // Check if Shadow Permutation (ID=1) exists and we are in Shadow Pass
+    if (isShadow && shaderVariants_.count(1) && !shaderVariants_[1].empty()) {
+        effectivePermutationId = 1;
+    }
+
+    auto& stageMap = shaderVariants_[effectivePermutationId];
     for (auto& [stage, entry] : stageMap) {
         if (entry.handle == rhi::handles::INVALID_SHADER && !entry.bytecode.empty()) {
             entry.handle = device->CreateShader(
@@ -128,7 +136,7 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     }
 
     // 2. Check Cache
-    PipelineKey key{renderPass, permutationId, flags};
+    PipelineKey key{renderPass, effectivePermutationId, flags};
     if (auto it = pipelineCache_.find(key); it != pipelineCache_.end()) {
         return it->second;
     }
@@ -140,7 +148,7 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     
     bool isDepthOnly = (flags & PipelineFlags::DepthOnly) != PipelineFlags::None;
     bool isDepthEqual = (flags & PipelineFlags::DepthEqual) != PipelineFlags::None;
-    bool isShadow = (flags & PipelineFlags::Shadow) != PipelineFlags::None;
+    // bool isShadow = ... moved up
 
     if (!isDepthOnly && !isShadow && stageMap.count(rhi::ShaderStage::Pixel)) desc.pixelShader = stageMap[rhi::ShaderStage::Pixel].handle;
     if (stageMap.count(rhi::ShaderStage::Geometry)) desc.geometryShader = stageMap[rhi::ShaderStage::Geometry].handle;
@@ -177,7 +185,23 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
         
         desc.enableDepthWrite = true;
         desc.depthFunc = rhi::ComparisonFunc::Less;
-        desc.renderTargetCount = 0;
+        
+        // VSM Check (Permutation 1)
+        if (effectivePermutationId == 1) {
+            // VSM Shadow Pass
+            desc.renderTargetCount = 1;
+            desc.renderTargetFormats[0] = rhi::DataFormat::RG32_Float; // VSM Format
+            
+            // Enable Pixel Shader for VSM
+            if (stageMap.count(rhi::ShaderStage::Pixel)) {
+                desc.pixelShader = stageMap[rhi::ShaderStage::Pixel].handle;
+            }
+        } else {
+            // Traditional Depth-Only Shadow Pass
+            desc.renderTargetCount = 0;
+            // desc.enableBlend = false; // Handled below
+        }
+        
         desc.enableBlend = false;
         
         // Shadow Pass uses D32_Float

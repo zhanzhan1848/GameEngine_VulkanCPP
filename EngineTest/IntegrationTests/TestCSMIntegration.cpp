@@ -127,6 +127,11 @@ bool Engine_Test::initialize() {
     
     g_Test->material->SetShader(ShaderStage::Vertex, shaderSource.c_str(), shaderSource.length(), "vertexMain");
     g_Test->material->SetShader(ShaderStage::Pixel, shaderSource.c_str(), shaderSource.length(), "fragment_main");
+
+    // Register VSM Shadow Pass Shaders (Permutation 1)
+    // This allows Material::GetPipeline to automatically select these shaders when PipelineFlags::Shadow is set
+    g_Test->material->SetShader(ShaderStage::Vertex, shaderSource.c_str(), shaderSource.length(), "vertexShadowVSM", 1);
+    g_Test->material->SetShader(ShaderStage::Pixel, shaderSource.c_str(), shaderSource.length(), "fragmentShadowVSM", 1);
     
     // Set Formats for Pipeline Creation
     utl::vector<DataFormat> colorFormats;
@@ -200,7 +205,7 @@ bool Engine_Test::initialize() {
         std::cerr << "Failed to initialize Floor MaterialInstance" << std::endl;
         return false;
     }
-    MaterialUniformData floorUniforms{0.7f, 0.7f, 0.7f, 1.0f};
+    MaterialUniformData floorUniforms{0.5f, 0.5f, 0.5f, 1.0f}; // Darker grey floor
     g_Test->floorMaterialInstance->SetUniformData(0, &floorUniforms, sizeof(MaterialUniformData));
 
     primal::id::id_type cubeMaterialId = 300;
@@ -294,14 +299,35 @@ bool Engine_Test::initialize() {
     directionalLight.direction.y /= len;
     directionalLight.direction.z /= len;
     
-    directionalLight.color = {1.0f, 1.0f, 1.0f};
-    directionalLight.intensity = 2.0f; // Increase intensity
+    directionalLight.color = {1.0f, 0.95f, 0.8f}; // Warm Sunlight
+    directionalLight.intensity = 1.0f; // Normal intensity
     g_Test->scene.AddLight(directionalLight);
+
+    // 6.4 Spot Light
+    RenderLight spotLight;
+    spotLight.type = LightType::Spot;
+    spotLight.position = {3.0f, 5.0f, 0.0f};
+    spotLight.direction = {0.0f, -1.0f, 0.0f};
+    spotLight.range = 15.0f;
+    spotLight.outerCone = cos(0.785f); // 45 degrees
+    spotLight.innerCone = cos(0.6f);
+    spotLight.color = {0.8f, 0.8f, 1.0f}; // Cool Spot Light
+    spotLight.intensity = 2.0f;
+    g_Test->scene.AddLight(spotLight);
+
+    // 6.5 Point Light
+    RenderLight pointLight;
+    pointLight.type = LightType::Point;
+    pointLight.position = {-3.0f, 2.0f, 0.0f};
+    pointLight.range = 10.0f;
+    pointLight.color = {0.8f, 1.0f, 0.8f}; // Green-ish Point Light
+    pointLight.intensity = 1.0f;
+    g_Test->scene.AddLight(pointLight);
 
     // Register Materials (Done above)
 
     // 7. Setup View
-    v3 eye = {0.0f, 3.0f, 6.0f}; 
+    v3 eye = {0.0f, 5.0f, 10.0f};  // Moved back and up
     v3 target = {0.0f, 0.0f, 0.0f};
     v3 up = {0.0f, 1.0f, 0.0f};
     
@@ -360,7 +386,7 @@ void Engine_Test::run() {
 
     // Update Material Uniforms
     MaterialUniformData cubeUniformData{1.0f, 1.0f, 1.0f, 1.0f};
-    MaterialUniformData floorUniformData{0.7f, 0.7f, 0.7f, 1.0f};
+    MaterialUniformData floorUniformData{0.5f, 0.5f, 0.5f, 1.0f}; // Sync with init
     
     g_Test->materialInstance->SetCurrentFrame(frameIndex);
     g_Test->materialInstance->SetUniformData(0, &cubeUniformData, sizeof(MaterialUniformData));

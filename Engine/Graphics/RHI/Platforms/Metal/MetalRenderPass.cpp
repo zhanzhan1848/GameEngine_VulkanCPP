@@ -88,6 +88,8 @@ void MetalRenderPass::buildDescriptor() {
                 
                 MTL::RenderPassColorAttachmentDescriptor* ca = mtlPassDesc_->colorAttachments()->object(i);
                 ca->setTexture(nativeTex);
+                ca->setSlice(attachment.arrayLayer);
+                ca->setLevel(attachment.mipLevel);
                 
                 MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
                 switch (attachment.loadOp) {
@@ -124,6 +126,8 @@ void MetalRenderPass::buildDescriptor() {
             
             MTL::RenderPassDepthAttachmentDescriptor* da = mtlPassDesc_->depthAttachment();
             da->setTexture(cachedDepthAttachment_.nativeTexture);
+            da->setSlice(desc_.depthAttachment.arrayLayer);
+            da->setLevel(desc_.depthAttachment.mipLevel);
             
             MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
             switch (desc_.depthAttachment.loadOp) {
@@ -152,6 +156,8 @@ void MetalRenderPass::buildDescriptor() {
             
             MTL::RenderPassStencilAttachmentDescriptor* sa = mtlPassDesc_->stencilAttachment();
             sa->setTexture(cachedStencilAttachment_.nativeTexture);
+            sa->setSlice(desc_.stencilAttachment.arrayLayer);
+            sa->setLevel(desc_.stencilAttachment.mipLevel);
             
             MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
             switch (desc_.stencilAttachment.loadOp) {

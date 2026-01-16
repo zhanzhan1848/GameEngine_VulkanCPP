@@ -35,4 +35,36 @@ void CreateCascadeViews(
     utl::vector<RenderView>& outViews
 );
 
+/**
+ * @brief Create shadow view for a spot light
+ * @param lightPos Position of the light
+ * @param lightDir Direction of the light
+ * @param outerCone Cosine of the outer cone angle
+ * @param range Light range
+ * @param shadowMapSize Resolution of the shadow map
+ * @param outView Output RenderView
+ */
+void CreateSpotShadowView(
+    const math::v3& lightPos,
+    const math::v3& lightDir,
+    float outerCone,
+    float range,
+    uint32_t shadowMapSize,
+    RenderView& outView
+);
+
+/**
+ * @brief Create shadow views for a point light (Cube Map)
+ * @param lightPos Position of the light
+ * @param range Light range
+ * @param shadowMapSize Resolution of one face of the shadow map
+ * @param outViews Output vector of RenderViews (6 views for cube faces)
+ */
+void CreatePointShadowViews(
+    const math::v3& lightPos,
+    float range,
+    uint32_t shadowMapSize,
+    utl::vector<RenderView>& outViews
+);
+
 } // namespace primal::graphics::utils

@@ -15,9 +15,9 @@ struct GlobalShaderData
     float4 cameraDirectionAndViewHeight;
 
     uint numDirectionalLights;
+    uint numPunctualLights;
     float deltaTime;
     float frameCount;
-    float padding;
 };
 
 struct PerObjectData
@@ -40,6 +40,12 @@ struct LightParameters
 
     float3 attenuation;
     float cosPenumbra;
+
+    int lightType;
+    int shadowIndex;
+    float padding;
+    
+    float4x4 viewProjection;
 };
 
 // 更新后的结构体，支持 CSM
@@ -98,6 +104,157 @@ float SampleShadowPCF(depth2d_array<float> shadowMap, sampler shadowSampler, flo
     return shadow / ((2.0 * radius + 1.0) * (2.0 * radius + 1.0));
 }
 
+// Chebyshev Upper Bound for VSM
+float ChebyshevUpperBound(float2 moments, float t, float minVariance) {
+    // t is the current depth (dist to light)
+    if (t <= moments.x) return 1.0;
+    
+    float variance = moments.y - (moments.x * moments.x);
+    variance = max(variance, minVariance);
+    
+    float d = t - moments.x;
+    float p_max = variance / (variance + d * d);
+    
+    // Reduce light bleeding
+    // 恢复下限到 0.05 以保留接触阴影细节，减少悬浮感
+    return smoothstep(0.05, 1.0, p_max);
+}
+
+// Interleaved Gradient Noise for dithering
+float InterleavedGradientNoise(float2 position_screen) {
+    float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(position_screen, magic.xy)));
+}
+
+// VSM Filter Helper with Poisson Sampling
+float SampleShadowVSM(texture2d_array<float> shadowMap, sampler shadowSampler, float3 shadowCoord, float layer, float minVariance, float2 screenPos) {
+    // 16-Tap Poisson Disk Samples (Unit Circle)
+    const float2 poissonDisk[16] = {
+        float2( -0.94201624, -0.39906216 ), float2( 0.94558609, -0.76890725 ), float2( -0.09418410, -0.92938870 ), float2( 0.34495938, 0.29387760 ),
+        float2( -0.91588581, 0.45771432 ), float2( -0.81544232, -0.87912464 ), float2( -0.38277543, 0.27676845 ), float2( 0.97484398, 0.75648379 ),
+        float2( 0.44323325, -0.97511554 ), float2( 0.53742981, -0.47373420 ), float2( -0.26496911, -0.41893023 ), float2( 0.79197514, 0.19090188 ),
+        float2( -0.24188840, 0.99706507 ), float2( -0.81409955, 0.91437590 ), float2( 0.19984126, 0.78641367 ), float2( 0.14383161, -0.14100790 )
+    };
+
+    float2 moments = float2(0.0);
+    float spread = 0.0015; // Filter radius
+
+    // Random Rotation
+    float noise = InterleavedGradientNoise(screenPos);
+    float angle = noise * 6.28318530718;
+    float s = sin(angle);
+    float c = cos(angle);
+
+    // Accumulate moments from samples
+    for (int i = 0; i < 16; ++i) {
+        float2 diskOffset = poissonDisk[i];
+        float2 rotatedOffset = float2(
+            diskOffset.x * c - diskOffset.y * s,
+            diskOffset.x * s + diskOffset.y * c
+        );
+        float2 offset = rotatedOffset * spread;
+        moments += shadowMap.sample(shadowSampler, shadowCoord.xy + offset, uint(layer)).xy;
+    }
+    moments /= 16.0;
+
+    return ChebyshevUpperBound(moments, shadowCoord.z, minVariance);
+}
+
+// Point Shadow Helper (Cube)
+float SamplePointShadow(depthcube_array<float> shadowMap, sampler shadowSampler, float3 dir, float dist, float near, float far, float bias, int layer) {
+    // Calculate depth value for the given distance in shadow map space
+    // Standard perspective projection: A + B/z => depth = F/(F-N) - (F*N)/(dist*(F-N))
+    float depth = far / (far - near) - (far * near) / (dist * (far - near));
+    
+    // Sample with comparison
+    return shadowMap.sample_compare(shadowSampler, dir, uint(layer), depth - bias);
+}
+
+// Point Shadow Helper for VSM
+float SamplePointShadowVSM(texturecube_array<float> shadowMap, sampler shadowSampler, float3 dir, float dist, float near, float far, float minVariance, int layer, float2 screenPos) {
+    // Calculate linear depth [0, 1]
+    float linearDepth = (dist - near) / (far - near);
+    
+    // 16-Tap Poisson Disk Samples
+    const float2 poissonDisk[16] = {
+        float2( -0.94201624, -0.39906216 ), float2( 0.94558609, -0.76890725 ), float2( -0.09418410, -0.92938870 ), float2( 0.34495938, 0.29387760 ),
+        float2( -0.91588581, 0.45771432 ), float2( -0.81544232, -0.87912464 ), float2( -0.38277543, 0.27676845 ), float2( 0.97484398, 0.75648379 ),
+        float2( 0.44323325, -0.97511554 ), float2( 0.53742981, -0.47373420 ), float2( -0.26496911, -0.41893023 ), float2( 0.79197514, 0.19090188 ),
+        float2( -0.24188840, 0.99706507 ), float2( -0.81409955, 0.91437590 ), float2( 0.19984126, 0.78641367 ), float2( 0.14383161, -0.14100790 )
+    };
+
+    float3 L = normalize(dir);
+    
+    // Build basis (Tangent Frame)
+    float3 up = abs(L.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+    float3 right = normalize(cross(up, L));
+    up = cross(L, right);
+    
+    // Random Rotation
+    float noise = InterleavedGradientNoise(screenPos);
+    float angle = noise * 6.28318530718;
+    float s = sin(angle);
+    float c = cos(angle);
+    
+    float2 moments = float2(0.0);
+    float spread = 0.003; // Slightly increased from 0.002 for softer noise
+
+    for (int i = 0; i < 16; ++i) {
+        float2 diskOffset = poissonDisk[i];
+        
+        // Rotate offset
+        float2 rotatedOffset = float2(
+            diskOffset.x * c - diskOffset.y * s,
+            diskOffset.x * s + diskOffset.y * c
+        );
+        
+        float3 offset = (right * rotatedOffset.x + up * rotatedOffset.y) * spread;
+        moments += shadowMap.sample(shadowSampler, L + offset, uint(layer)).xy;
+    }
+    moments /= 16.0;
+
+    return ChebyshevUpperBound(moments, linearDepth, minVariance);
+}
+
+// --- Shadow Generation Shaders (VSM) ---
+
+struct ShadowVertexOut {
+    float4 position [[position]];
+    float4 worldPos;
+};
+
+vertex ShadowVertexOut vertexShadowVSM(VertexIn in [[stage_in]],
+                                       constant PerObjectData& perObject [[buffer(10)]])
+{
+    ShadowVertexOut out;
+    out.position = perObject.worldViewProjection * float4(in.position, 1.0);
+    out.worldPos = perObject.world * float4(in.position, 1.0);
+    return out;
+}
+
+struct ShadowFragmentOut {
+    float2 moments [[color(0)]];
+};
+
+fragment ShadowFragmentOut fragmentShadowVSM(ShadowVertexOut in [[stage_in]])
+{
+    // Depth is in in.position.z (Screen space [0, 1])
+    float depth = in.position.z;
+    
+    // Compute moments
+    float moment1 = depth;
+    float moment2 = depth * depth;
+    
+    // Adjust 2nd moment using partial derivatives to reduce acne
+    float dx = dfdx(depth);
+    float dy = dfdy(depth);
+    moment2 += 0.25 * (dx * dx + dy * dy);
+    
+    ShadowFragmentOut out;
+    out.moments = float2(moment1, moment2);
+    return out;
+}
+
 vertex VertexOut vertexMain(
     VertexIn in [[stage_in]],
     constant PerObjectData& perObject [[buffer(10)]],
@@ -111,7 +268,6 @@ vertex VertexOut vertexMain(
     out.color = in.color;
     
     // Calculate View Space Depth for Cascade Selection
-    // View Space Z = (View * WorldPos).z
     float4 viewPos = globalData.view * worldPos;
     out.viewDepth = -viewPos.z; // Positive depth
     
@@ -122,16 +278,10 @@ vertex VertexOut vertexMain(
 fragment float4 fragment_main(VertexOut in [[stage_in]],
                             constant ForwardLightBuffer& lightData [[buffer(12)]],
                             constant MaterialUniforms& material [[buffer(3)]],
-                            depth2d_array<float> shadowMap [[texture(13)]],
+                            texture2d_array<float> shadowMap [[texture(13)]],
+                            texturecube_array<float> shadowCubeMap [[texture(14)]],
                             sampler shadowSampler [[sampler(13)]]) {
     
-    // Debug Configuration
-    // 0: Normal Lighting
-    // 1: Cascade Colors (Red=0, Green=1, Blue=2, Yellow=3)
-    // 2: Shadow Factor Only (Black=Shadow, White=Lit)
-    // 3: NdotL Only (Lighting check)
-    int debugMode = 0; 
-
     // Extract Directional Light (Assume index 0)
     DirectionalLightParameters light = lightData.directionalLights[0];
 
@@ -143,30 +293,23 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
     
     // Shadow Calculation
     float shadowFactor = 1.0;
-    float3 debugColor = float3(0.0);
     
-    // Lift declarations for debug access
     uint cascadeIndex = 0;
     float4 shadowCoord = float4(0.0);
     float2 shadowUV = float2(0.0);
+    float minVariance = 0.00002; // VSM Minimum Variance to avoid numeric instability
 
-    if (light.colorAndShadow.a > 0.0 || debugMode == 2) {
+    if (light.colorAndShadow.a > 0.0) {
         // Select Cascade
         cascadeIndex = 3;
-        float3 cascadeColor = float3(1.0, 1.0, 0.0); // Yellow for last cascade
         
         if (in.viewDepth < light.splits[0]) {
             cascadeIndex = 0;
-            cascadeColor = float3(1.0, 0.0, 0.0); // Red
         } else if (in.viewDepth < light.splits[1]) {
             cascadeIndex = 1;
-            cascadeColor = float3(0.0, 1.0, 0.0); // Green
         } else if (in.viewDepth < light.splits[2]) {
             cascadeIndex = 2;
-            cascadeColor = float3(0.0, 0.0, 1.0); // Blue
         }
-        
-        debugColor = cascadeColor;
         
         // Project to Light Space
         shadowCoord = light.viewProjections[cascadeIndex] * float4(in.worldPos, 1.0);
@@ -180,46 +323,96 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
                 shadowUV.x >= 0.0 && shadowUV.x <= 1.0 && 
                 shadowUV.y >= 0.0 && shadowUV.y <= 1.0 && 
                 shadowCoord.z >= 0.0 && shadowCoord.z <= 1.0) {
-                 float2 texelSize = float2(1.0 / 2048.0, 1.0 / 2048.0); // Assume 2048x2048
                  
-                 // Calculate adaptive bias based on slope
-                 // float bias = max(0.005 * (1.0 - NdotL), 0.0005);
-                 // Increased bias to fix shadow acne (stripes)
-                 float bias = max(0.005 * (1.0 - NdotL), 0.002);
-                 if (cascadeIndex == 0) bias *= 0.5; // Finer bias for first cascade
-                 
-                 shadowFactor = SampleShadowPCF(shadowMap, shadowSampler, float3(shadowUV, shadowCoord.z), float(cascadeIndex), texelSize, bias);
+                 // Sample VSM with Poisson Distribution
+                 shadowFactor = SampleShadowVSM(shadowMap, shadowSampler, float3(shadowUV, shadowCoord.z), float(cascadeIndex), minVariance, in.position.xy);
             }
         }
 
-        // Debug Output Overrides
-        if (debugMode == 1) {
-            // Overlay shadows on top of cascade colors
-            return float4(debugColor * (0.5 + 0.5 * shadowFactor), 1.0);
-        } else if (debugMode == 2) {
-            // Visualize Shadow vs Lit with Cascade Color
-            uint2 debugCoord = uint2(shadowUV * 2048.0);
-            float mapDepth = shadowMap.read(debugCoord, cascadeIndex);
-            float refZ = shadowCoord.z;
-            
-            float bias = max(0.005 * (1.0 - NdotL), 0.002);
-            bool isShadow = refZ > mapDepth + bias;
-            
-            float3 color = debugColor; // Cascade Color (R, G, B, Y)
-            if (isShadow) {
-                color *= 0.2; // Darken for shadow
+    // Accumulate Lighting
+    float3 totalDiffuse = material.color.rgb * light.colorAndShadow.rgb * NdotL * shadowFactor;
+    
+    // DEBUG: Visualize Shadow Factor
+    // return float4(float3(shadowFactor), 1.0);
+    
+    // DEBUG: Visualize Cascade Index
+    /*
+    if (cascadeIndex == 0) return float4(1.0, 0.0, 0.0, 1.0);
+    if (cascadeIndex == 1) return float4(0.0, 1.0, 0.0, 1.0);
+    if (cascadeIndex == 2) return float4(0.0, 0.0, 1.0, 1.0);
+    return float4(1.0, 1.0, 0.0, 1.0);
+    */
+
+    // DEBUG: Visualize Shadow Coord Z
+    // return float4(shadowCoord.z, shadowCoord.z, shadowCoord.z, 1.0);
+
+    // DEBUG: Visualize Moments
+    /*
+    float2 m = shadowMap.sample(shadowSampler, shadowCoord.xy, uint(cascadeIndex)).xy;
+    return float4(m.x, m.y, 0.0, 1.0);
+    */
+
+    
+    // Punctual Lights Loop
+    for (uint i = 0; i < lightData.punctualLightCount; ++i) {
+        LightParameters pLight = lightData.lights[i];
+        
+        float3 L_vec = pLight.position - in.worldPos;
+        float dist = length(L_vec);
+        float3 L_dir = normalize(L_vec);
+        
+        if (dist > pLight.range) continue;
+        
+        // Attenuation
+        float distSq = dist * dist;
+        float rangeSq = pLight.range * pLight.range;
+        float att = max(0.0, 1.0 - distSq*distSq/(rangeSq*rangeSq));
+        att *= att;
+        
+        // Spot Light Cone
+        if (pLight.lightType == 2) { // Spot
+            float cosAngle = dot(-L_dir, normalize(pLight.direction));
+            if (cosAngle < pLight.cosUmbra) {
+                 att = 0.0;
             } else {
-                // Lit: Keep color bright
+                 float t = (cosAngle - pLight.cosUmbra) / (pLight.cosPenumbra - pLight.cosUmbra);
+                 att *= smoothstep(0.0, 1.0, t);
             }
+        }
+        
+        if (att <= 0.0) continue;
+        
+        float NdotL_p = max(dot(N, L_dir), 0.0);
+        float pShadow = 1.0;
+        
+        if (pLight.shadowIndex >= 0) {
             
-            return float4(color, 1.0);
-        } else if (debugMode == 3) {
-        return float4(NdotL, NdotL, NdotL, 1.0);
+            if (pLight.lightType == 2) { // Spot Shadow
+                 float4 pShadowCoord = pLight.viewProjection * float4(in.worldPos, 1.0);
+                 pShadowCoord.xyz /= pShadowCoord.w;
+                 
+                 float2 pShadowUV;
+                 pShadowUV.x = pShadowCoord.x * 0.5 + 0.5;
+                 pShadowUV.y = -pShadowCoord.y * 0.5 + 0.5;
+                 
+                 if (pShadowUV.x >= 0.0 && pShadowUV.x <= 1.0 && 
+                     pShadowUV.y >= 0.0 && pShadowUV.y <= 1.0 && 
+                     pShadowCoord.z >= 0.0 && pShadowCoord.z <= 1.0) {
+                      pShadow = SampleShadowVSM(shadowMap, shadowSampler, float3(pShadowUV, pShadowCoord.z), float(pLight.shadowIndex), minVariance, in.position.xy);
+                 } else {
+                      pShadow = 1.0;
+                 }
+            } else if (pLight.lightType == 1) { // Point Shadow
+                 // Direction from light to pixel
+                 float3 dir = in.worldPos - pLight.position;
+                 pShadow = SamplePointShadowVSM(shadowCubeMap, shadowSampler, dir, dist, 0.1, pLight.range, minVariance, pLight.shadowIndex, in.position.xy);
+            }
+        }
+        
+        totalDiffuse += material.color.rgb * pLight.color * pLight.intensity * att * NdotL_p * pShadow;
     }
 
-    // Normal Lighting
-    float3 diffuse = material.color.rgb * light.colorAndShadow.rgb * NdotL * shadowFactor;
     float3 ambient = material.color.rgb * 0.2; // 0.2 Ambient
     
-    return float4(diffuse + ambient, 1.0);
+    return float4(totalDiffuse + ambient, 1.0);
 }

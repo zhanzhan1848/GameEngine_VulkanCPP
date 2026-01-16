@@ -276,6 +276,9 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
                 MTL::RenderPassColorAttachmentDescriptor* ca = passDesc->colorAttachments()->object(i);
                 ca->setTexture(texture->GetNativeTexture());
                 // std::cout << "[MetalCommandBuffer] Bound color attachment " << i << " to texture " << texture->GetNativeTexture() << std::endl;
+                ca->setSlice(attachment.arrayLayer);
+                ca->setLevel(attachment.mipLevel);
+
                 MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
                 switch (attachment.loadOp) {
                     case LoadAction::Load: metalLoadAction = MTL::LoadActionLoad; break;
@@ -434,6 +437,8 @@ void MetalCommandBuffer::BeginParallelRenderPass(const RenderPassDesc& desc) {
         if (texture && texture->GetNativeTexture()) {
             MTL::RenderPassDepthAttachmentDescriptor* da = passDesc->depthAttachment();
             da->setTexture(texture->GetNativeTexture());
+            da->setSlice(desc.depthAttachment.arrayLayer);
+            da->setLevel(desc.depthAttachment.mipLevel);
             
             MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
             switch (desc.depthAttachment.loadOp) {

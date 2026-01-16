@@ -111,6 +111,21 @@ set_target_properties(StandaloneRHI_ShadowUtils_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_ShadowUtils_Test PRIVATE DEBUG _DEBUG)
 
+# 创建SamplingUtils测试
+add_executable(StandaloneRHI_SamplingUtils_Test Graphics/TestSamplingUtils.cpp)
+target_include_directories(StandaloneRHI_SamplingUtils_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest
+)
+target_link_libraries(StandaloneRHI_SamplingUtils_Test PRIVATE Engine)
+add_test(NAME StandaloneRHI_SamplingUtils_Test COMMAND StandaloneRHI_SamplingUtils_Test)
+set_target_properties(StandaloneRHI_SamplingUtils_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_SamplingUtils_Test PRIVATE DEBUG _DEBUG)
+
 
 # 创建Metal数学库测试
 if(APPLE)

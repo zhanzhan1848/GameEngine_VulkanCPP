@@ -21,9 +21,9 @@ struct GlobalShaderData
     math::v4 cameraDirectionAndViewHeight; // xyz: direction, w: viewHeight
 
     uint32_t numDirectionalLights;
+    uint32_t numPunctualLights;
     float deltaTime;
     float frameCount;
-    float padding;
 };
 
 struct PerObjectData
@@ -48,8 +48,10 @@ struct LightParameters
     math::v3 attenuation;
     float cosPenumbra;    // Cosine of the half angle of penumbra (Spot Light)
 
-    // math::v3 padding;
-    // uint32_t type;        // 0: Directional, 1: Point, 2: Spot (如果不分离 Directional)
+    int lightType;        // 1: Point, 2: Spot
+    int shadowIndex;      // -1: No shadow, >=0: Index
+    float padding;        // Padding to 16 bytes
+    math::m4x4 viewProjection; // Spot Light Shadow Matrix
 };
 
 // 对应 Metal 中的 DirectionalLightParameters

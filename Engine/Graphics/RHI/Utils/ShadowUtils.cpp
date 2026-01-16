@@ -134,7 +134,15 @@ void CreateCascadeViews(
         minZ -= 100.0f; 
         maxZ += 100.0f;
         
-        auto lightProj = math::CreateOrthographicMatrix(minX, maxX, minY, maxY, minZ, maxZ);
+        // Convert to Near/Far distances for CreateOrthographicMatrix
+        // CreateOrthographicMatrix maps -Near to 0 and -Far to 1
+        // We want maxZ (closest) to map to 0, and minZ (furthest) to map to 1
+        // Extend the Z range to include potential casters that are outside the camera frustum
+        // but between the light and the frustum.
+        float nearDist = -maxZ - 1000.0f; 
+        float farDist = -minZ + 1000.0f;
+
+        auto lightProj = math::CreateOrthographicMatrix(minX, maxX, minY, maxY, nearDist, farDist);
         
         RenderView shadowView;
         shadowView.SetType(ViewType::ShadowMap);
@@ -159,6 +167,99 @@ void CreateCascadeViews(
         shadowView.SetShadowInfo(info);
         
         outViews.push_back(shadowView);
+    }
+}
+
+void CreateSpotShadowView(
+    const math::v3& lightPos,
+    const math::v3& lightDir,
+    float outerCone,
+    float range,
+    uint32_t shadowMapSize,
+    RenderView& outView
+) {
+    // 1. Calculate FOV
+    // outerCone is cos(theta), so theta = acos(outerCone)
+    // FOV = 2 * theta
+    float cosTheta = std::clamp(outerCone, -1.0f, 1.0f);
+    float theta = std::acos(cosTheta);
+    float fov = 2.0f * theta;
+
+    // 2. Create Projection Matrix
+    // Aspect ratio 1.0 for shadow map
+    // Near plane 0.1f (tweakable)
+    float nearPlane = 0.1f;
+    math::m4x4 proj = math::CreatePerspectiveMatrix(fov, 1.0f, nearPlane, range);
+
+    // 3. Create View Matrix
+    math::v3 up = {0.0f, 1.0f, 0.0f};
+    if (std::abs(math::Dot(up, lightDir)) > 0.99f) {
+        up = {0.0f, 0.0f, 1.0f};
+    }
+    math::m4x4 view = math::CreateLookAtMatrix(lightPos, lightPos + lightDir, up);
+
+    // 4. Set to RenderView
+    outView.SetType(ViewType::ShadowMap);
+    outView.SetViewMatrix(view);
+    outView.SetProjectionMatrix(proj);
+    outView.UpdateFrustum();
+    
+    rhi::Rect rect{0, 0, shadowMapSize, shadowMapSize};
+    rhi::ViewportDesc viewport;
+    viewport.size = {static_cast<float>(shadowMapSize), static_cast<float>(shadowMapSize)};
+    viewport.topLeft = {0.0f, 0.0f};
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    outView.SetViewport(viewport);
+    outView.SetScissor(rect);
+}
+
+void CreatePointShadowViews(
+    const math::v3& lightPos,
+    float range,
+    uint32_t shadowMapSize,
+    utl::vector<RenderView>& outViews
+) {
+    outViews.clear();
+    outViews.resize(6);
+
+    // Projection is same for all faces: 90 degree FOV, aspect 1.0
+    float fov = math::constants::HALF_PI; // 90 degrees
+    float nearPlane = 0.1f;
+    math::m4x4 proj = math::CreatePerspectiveMatrix(fov, 1.0f, nearPlane, range);
+
+    // Define the 6 directions and up vectors for CubeMap faces
+    // Order: +X, -X, +Y, -Y, +Z, -Z
+    // Standard CubeMap conventions (RenderMan/OpenGL/Metal usually compatible regarding direction)
+    struct FaceConfig {
+        math::v3 targetOffset;
+        math::v3 up;
+    };
+
+    FaceConfig faces[6] = {
+        {{ 1.0f,  0.0f,  0.0f}, {0.0f, -1.0f,  0.0f}}, // +X (Right)
+        {{-1.0f,  0.0f,  0.0f}, {0.0f, -1.0f,  0.0f}}, // -X (Left)
+        {{ 0.0f,  1.0f,  0.0f}, {0.0f,  0.0f,  1.0f}}, // +Y (Top)
+        {{ 0.0f, -1.0f,  0.0f}, {0.0f,  0.0f, -1.0f}}, // -Y (Bottom)
+        {{ 0.0f,  0.0f,  1.0f}, {0.0f, -1.0f,  0.0f}}, // +Z (Front)
+        {{ 0.0f,  0.0f, -1.0f}, {0.0f, -1.0f,  0.0f}}  // -Z (Back)
+    };
+
+    rhi::Rect rect{0, 0, shadowMapSize, shadowMapSize};
+    rhi::ViewportDesc viewport((float)0, (float)0, (float)shadowMapSize, (float)shadowMapSize);
+
+    // 6 Faces
+    for (uint32_t i = 0; i < 6; ++i) {
+        math::v3 target = lightPos + faces[i].targetOffset;
+        math::m4x4 view = math::CreateLookAtMatrix(lightPos, target, faces[i].up);
+
+        outViews[i].SetType(ViewType::CubeMap);
+        outViews[i].SetViewMatrix(view);
+        outViews[i].SetProjectionMatrix(proj);
+        outViews[i].UpdateFrustum();
+        
+        outViews[i].SetViewport(viewport);
+        outViews[i].SetScissor(rect);
     }
 }
 
