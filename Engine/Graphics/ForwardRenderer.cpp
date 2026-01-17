@@ -134,12 +134,17 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     shadowMapDesc.mipLevels = 1;
     shadowMapDesc.format = rhi::DataFormat::RG32_Float;
     shadowMapDesc.type = rhi::TextureType::Texture2DArray;
-    shadowMapDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    shadowMapDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
     shadowMapDesc.memoryUsage = rhi::GPUMemoryUsage::Static; // GPU Only
     shadowMapDesc.name = "ShadowMapArray";
     
     shadowMapArray_ = device->CreateTexture(shadowMapDesc);
     if (shadowMapArray_ == rhi::handles::INVALID_RESOURCE) return false;
+
+    // Shadow Map Temp Array (For Blur Pass)
+    shadowMapDesc.name = "ShadowMapTempArray";
+    shadowMapTempArray_ = device->CreateTexture(shadowMapDesc);
+    if (shadowMapTempArray_ == rhi::handles::INVALID_RESOURCE) return false;
 
     // Create Shadow Cube Map Array (VSM Color Target)
     rhi::TextureDesc shadowCubeMapDesc{};
@@ -247,10 +252,18 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         device->UpdateDescriptorSets(1, &writePerObject);
     }
 
+    // 8. Initialize Passes
+    if (!blurPass_.Initialize(device_)) {
+        std::cerr << "ForwardRenderer: Failed to initialize BlurPass" << std::endl;
+        return false;
+    }
+
     return true;
 }
 
 void ForwardRenderer::Shutdown() {
+    blurPass_.Shutdown();
+
     if (device_) {
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             // Buffers
@@ -531,6 +544,34 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         }
     }
 
+    // Execute Blur Pass for VSM (ShadowMapArray -> Temp -> ShadowMapArray)
+    if (shadowMapArray_ != rhi::handles::INVALID_RESOURCE && shadowMapTempArray_ != rhi::handles::INVALID_RESOURCE) {
+        // Ensure ShadowMapArray is in ShaderResource state (it was RenderTarget)
+        // Note: The RenderPass end automatically transitions attachments to ShaderResource? 
+        // Metal usually handles this, but for explicit barriers in Vulkan style RHI:
+        
+        rhi::ResourceBarrier barrier;
+        barrier.resource = shadowMapArray_;
+        barrier.beforeState = rhi::ResourceState::RenderTarget; // It was written to
+        barrier.afterState = rhi::ResourceState::ShaderResource; // Read in Compute
+        barrier.subresource = rhi::RHI_ALL_SUBRESOURCES;
+        cmdBuffer->InsertBarrier(&barrier, 1);
+
+        // Execute Blur
+        // VSM usually needs a small blur radius to smooth out moments
+        blurPass_.Execute(cmdBuffer, 
+                          shadowMapArray_,      // Input
+                          shadowMapArray_,      // Output (Ping-Pong via Temp inside)
+                          shadowMapTempArray_,  // Temp
+                          2048, 2048,           // Size
+                          SHADOW_MAP_ARRAY_SIZE,// Layers
+                          frameIndex,
+                          3, 1.0f);             // Radius 3, Sigma 1.0
+        
+        // Barrier for Pixel Shader Read (already handled at end of BlurPass? No, BlurPass ends with Output as ShaderResource)
+        // BlurPass leaves Output in ShaderResource state, so we are good for Main Pass sampling.
+    }
+
     // 0. Update Frame Data
     if (frameIndex < rhi::MAX_FRAMES_IN_FLIGHT && frameBuffersMapped_[frameIndex]) {
         rhi::GlobalShaderData* frameData = static_cast<rhi::GlobalShaderData*>(frameBuffersMapped_[frameIndex]);
@@ -606,6 +647,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         passDesc.depthAttachment.storeOp = rhi::StoreAction::Store;
     }
 
+    std::cout << "ForwardRenderer: Beginning Main RenderPass" << std::endl;
     cmdBuffer->BeginRenderPass(passDesc);
 
     rhi::ViewportDesc viewport{};
@@ -621,10 +663,13 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     cmdBuffer->SetScissor(scissor);
 
     bool useDepthEqual = (depthStencil != rhi::handles::INVALID_RESOURCE);
+    // std::cout << "ForwardRenderer: Calling OpaquePass" << std::endl;
     OpaquePass(cmdBuffer, view, materials, opaqueProxies, frameIndex, useDepthEqual);
+    // std::cout << "ForwardRenderer: Calling TransparentPass" << std::endl;
     TransparentPass(cmdBuffer, view, materials, transparentProxies, frameIndex);
 
     cmdBuffer->EndRenderPass();
+    // std::cout << "ForwardRenderer: Main RenderPass Ended" << std::endl;
 }
 
 void ForwardRenderer::DepthPrePass(rhi::RHICommandBuffer* cmdBuffer, 

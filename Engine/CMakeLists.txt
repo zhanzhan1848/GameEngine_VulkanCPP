@@ -74,6 +74,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Systems/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Utils/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Utils/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Passes/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Passes/*.cpp"
     # "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/GraphicsHandle.hpp"
 )
 

@@ -5,6 +5,7 @@
 #include "Graphics/RHI/Core/RHIResource.h"
 #include "Graphics/RHI/Core/RHIShaderCommon.h"
 #include "Graphics/RHI/Utils/ShadowUtils.h"
+#include "Graphics/Passes/BlurPass.h"
 #include <unordered_map>
 
 namespace primal::graphics {
@@ -82,19 +83,21 @@ private:
     
     // Global Descriptor Set (Set 0)
     rhi::DescriptorSetLayoutHandle globalDescriptorSetLayout_{rhi::handles::INVALID_RESOURCE};
-    rhi::DescriptorSetHandle globalDescriptorSets_[rhi::MAX_FRAMES_IN_FLIGHT]{};
-
-    // Shadow Pipeline
-    rhi::PipelineLayoutHandle shadowPipelineLayout_{rhi::handles::INVALID_RESOURCE};
-    rhi::PipelineHandle shadowPipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::DescriptorSetLayoutHandle globalDescriptorSets_[rhi::MAX_FRAMES_IN_FLIGHT]{};
 
     // Shadow Resources
     rhi::ResourceHandle shadowMapArray_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle shadowMapSampler_{rhi::handles::INVALID_RESOURCE};
     // Shared depth buffer for shadow rendering
     rhi::ResourceHandle shadowDepthBuffer_{rhi::handles::INVALID_RESOURCE};
+    // Temporary Shadow Map Array for Blur Pass (VSM)
+    rhi::ResourceHandle shadowMapTempArray_{rhi::handles::INVALID_RESOURCE};
+
     rhi::ResourceHandle shadowCubeMapArray_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle shadowCubeMapSampler_{rhi::handles::INVALID_RESOURCE};
+
+    // Passes
+    BlurPass blurPass_;
 
     // Multi-frame buffers to avoid CPU-GPU sync stalls
     rhi::ResourceHandle lightBuffers_[rhi::MAX_FRAMES_IN_FLIGHT]{};

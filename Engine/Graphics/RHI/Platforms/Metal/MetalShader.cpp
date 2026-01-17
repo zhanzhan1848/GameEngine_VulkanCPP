@@ -43,7 +43,12 @@ bool MetalShader::Initialize() {
             error = nullptr;
         }
 
+        // std::cout << "[MetalShader] Compiling from source..." << std::endl;
         NS::String* source = NS::String::alloc()->init(static_cast<const char*>(data_), NS::UTF8StringEncoding);
+        if (!source) {
+             std::cerr << "[MetalShader] Failed to create NS::String from source data" << std::endl;
+             return false;
+        }
         MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();
         library_ = device_.GetNativeDevice()->newLibrary(source, options, &error);
         source->release();
@@ -51,10 +56,12 @@ bool MetalShader::Initialize() {
     }
 
     if (!library_) {
+        std::cerr << "[MetalShader] Library creation failed." << std::endl;
         if (error) {
-            std::cerr << "[MetalShader] Failed to create library: " 
+            std::cerr << "[MetalShader] Error: " 
                       << error->localizedDescription()->utf8String() << std::endl;
-            // Error is autoreleased, do not release manually
+        } else {
+             std::cerr << "[MetalShader] Unknown error (error object is null)" << std::endl;
         }
         return false;
     }
@@ -66,6 +73,17 @@ bool MetalShader::Initialize() {
     
     if (!function_) {
         std::cerr << "[MetalShader] Failed to find entry point: " << entryPoint_ << std::endl;
+        
+        // List all function names in the library for debugging
+        NS::Array* functionNames = library_->functionNames();
+        if (functionNames) {
+            std::cerr << "[MetalShader] Available functions: ";
+            for (int i = 0; i < functionNames->count(); ++i) {
+                NS::String* name = reinterpret_cast<NS::String*>(functionNames->object(i));
+                std::cerr << name->utf8String() << " ";
+            }
+            std::cerr << std::endl;
+        }
         return false;
     }
 

@@ -21,6 +21,11 @@ namespace primal::graphics::rhi {
  */
 constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
 
+/**
+ * @brief 所有子资源掩码
+ */
+constexpr uint32_t RHI_ALL_SUBRESOURCES = ~0u;
+
 // === 前向声明 ===
 
 class RHIResource;

@@ -638,6 +638,7 @@ add_executable(StandaloneGraphics_RenderSystem_Test
     Graphics/TestRenderSystem.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Systems/RenderSystem.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/ForwardRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Passes/BlurPass.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Utils/ShadowUtils.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderView.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderScene.cpp
