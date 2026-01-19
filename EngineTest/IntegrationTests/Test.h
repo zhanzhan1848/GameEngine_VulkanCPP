@@ -4,11 +4,32 @@
 #include <thread>
 #include <chrono>
 #include <string>
+#include <iostream>
 
 // What test are we performing?
+#ifndef TEST_ENTITY_COMPONENTS
 #define TEST_ENTITY_COMPONENTS 0
+#endif
+
+#ifndef TEST_WINDOW
 #define TEST_WINDOW 0
-#define TEST_RENDERER 1
+#endif
+
+#ifndef TEST_RENDERER
+#define TEST_RENDERER 0
+#endif
+
+#ifndef TEST_STANDARD_PIPELINE
+#define TEST_STANDARD_PIPELINE 0
+#endif
+
+#ifndef TEST_CSM_INTEGRATION
+#define TEST_CSM_INTEGRATION 0
+#endif
+
+#ifndef TEST_CSM_RENDERGRAPH
+#define TEST_CSM_RENDERGRAPH 1
+#endif
 
 class Test
 {

@@ -66,6 +66,7 @@ public:
     ResourceHandle CreateBuffer(const BufferDesc& desc) override { return handles::INVALID_RESOURCE; }
     ResourceHandle CreateTexture(const TextureDesc& desc) override { return handles::INVALID_RESOURCE; }
     CommandBufferHandle CreateCommandBuffer(CommandQueueType type) override { return handles::INVALID_COMMAND_BUFFER; }
+    void DestroyCommandBuffer(CommandBufferHandle handle) override {}
     void DestroyBuffer(ResourceHandle handle) override {}
     void DestroyTexture(ResourceHandle handle) override {}
     ShaderHandle CreateShader(const void* data, size_t size, ShaderStage stage, const char* entryPoint = "main") override { return handles::INVALID_SHADER; }

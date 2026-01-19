@@ -186,7 +186,10 @@ bool MetalSwapChain::AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore
         if (texture) {
             // Cast MTL::Drawable to CA::MetalDrawable to access texture
             CA::MetalDrawable* metalDrawable = reinterpret_cast<CA::MetalDrawable*>(currentDrawable_);
-            texture->SetNativeTexture(metalDrawable->texture());
+            MTL::Texture* mtlTex = metalDrawable->texture();
+            texture->SetNativeTexture(mtlTex);
+        } else {
+            std::cerr << "[MetalSwapChain] Failed to get texture for handle " << handle << std::endl;
         }
     }
 

@@ -237,6 +237,8 @@ public:
         
         return handle;
     }
+
+    void DestroyCommandBuffer(CommandBufferHandle handle) override {}
     
 private:
     std::vector<std::unique_ptr<MockCommandBuffer>> commandBuffers_;

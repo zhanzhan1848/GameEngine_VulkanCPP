@@ -10,8 +10,14 @@
 #include "TestEntityComponents.h"
 #elif TEST_WINDOW
 #include "TestWindow.h"
+#elif TEST_STANDARD_PIPELINE
+#include "TestStandardPipeline.h"
 #elif TEST_RENDERER
 #include "TestRenderer.h"
+#elif TEST_CSM_INTEGRATION
+#include "TestCSMIntegration.h"
+#elif TEST_CSM_RENDERGRAPH
+#include "TestCSMIntegrationRenderGraph.h"
 #else
 #error One of the tests need to be enabled
 #endif

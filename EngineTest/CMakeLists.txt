@@ -18,14 +18,14 @@ add_subdirectory(IntegrationTests)
 # 创建自定义目标来运行所有测试
 add_custom_target(run_all_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS RHI_UnitTests IntegrationTests
+    DEPENDS RHI_All_Tests IntegrationTests
     COMMENT "Running all tests (Unit Tests + Integration Tests)"
 )
 
 # 创建自定义目标来运行单元测试
 add_custom_target(run_unit_tests
-    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R RHI_Unit_Tests
-    DEPENDS RHI_UnitTests
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R RHI_All_Tests
+    DEPENDS RHI_All_Tests
     COMMENT "Running Unit Tests only"
 )
 

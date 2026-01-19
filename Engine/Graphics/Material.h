@@ -56,6 +56,8 @@ public:
     u32 GetUniformBufferBinding() const { return uniformBufferBinding_; }
 
     void SetRenderTargetFormats(const utl::vector<rhi::DataFormat>& formats, rhi::DataFormat depthStencilFormat = rhi::DataFormat::Unknown);
+    
+    rhi::ShaderHandle GetShader(rhi::ShaderStage stage, u32 permutationId = 0) const;
 
     rhi::PipelineHandle GetPipeline(rhi::RHIDeviceBase* device, rhi::RenderPassHandle renderPass, u32 permutationId = 0, PipelineFlags flags = PipelineFlags::None);
     void InvalidatePipelines();

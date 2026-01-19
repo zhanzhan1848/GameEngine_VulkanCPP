@@ -119,7 +119,8 @@ public:
     }
 
     // Other unimplemented
-    CommandBufferHandle CreateCommandBuffer(CommandQueueType) override { return handles::INVALID_COMMAND_BUFFER; }
+    CommandBufferHandle CreateCommandBuffer(CommandQueueType type) override { return handles::INVALID_COMMAND_BUFFER; }
+    void DestroyCommandBuffer(CommandBufferHandle handle) override {}
     void DestroySync(SyncHandle) override {}
     void DestroyQueryPool(QueryPoolHandle) override {}
     void DestroySampler(SamplerHandle) override {}

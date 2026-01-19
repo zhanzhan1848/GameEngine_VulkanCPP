@@ -101,6 +101,17 @@ void Material::SetUniformBufferBinding(u32 binding) {
     uniformBufferBinding_ = binding;
 }
 
+rhi::ShaderHandle Material::GetShader(rhi::ShaderStage stage, u32 permutationId) const {
+    auto it = shaderVariants_.find(permutationId);
+    if (it != shaderVariants_.end()) {
+        auto stageIt = it->second.find(stage);
+        if (stageIt != it->second.end()) {
+            return stageIt->second.handle;
+        }
+    }
+    return rhi::handles::INVALID_SHADER;
+}
+
 void Material::SetRenderTargetFormats(const utl::vector<rhi::DataFormat>& formats, rhi::DataFormat depthStencilFormat) {
     std::lock_guard<std::mutex> lock(pipelineMutex_);
     renderTargetFormats_ = formats;

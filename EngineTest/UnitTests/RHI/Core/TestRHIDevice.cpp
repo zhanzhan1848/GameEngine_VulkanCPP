@@ -221,6 +221,10 @@ public:
         assert(isValid_ && "Device not initialized");
         // 模拟结束帧
     }
+
+    RHICommandHandle CreateCommandBuffer(uint32_t type) { return 0; }
+    void DestroyCommandBuffer(RHICommandHandle handle) {}
+    void DestroyBuffer(RHIResourceHandle handle) {}
     
     bool IsValid() const { return isValid_; }
     const DeviceDesc& GetDesc() const { return desc_; }

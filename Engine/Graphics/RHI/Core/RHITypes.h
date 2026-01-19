@@ -129,6 +129,7 @@ namespace handles {
     constexpr QueryPoolHandle INVALID_QUERY_POOL = static_cast<QueryPoolHandle>(-1);
     constexpr DescriptorSetLayoutHandle INVALID_DESCRIPTOR_SET_LAYOUT = static_cast<DescriptorSetLayoutHandle>(-1);
     constexpr DescriptorSetHandle INVALID_DESCRIPTOR_SET = static_cast<DescriptorSetHandle>(-1);
+    constexpr RenderPassHandle INVALID_RENDER_PASS = static_cast<RenderPassHandle>(-1);
 }
 
 /**

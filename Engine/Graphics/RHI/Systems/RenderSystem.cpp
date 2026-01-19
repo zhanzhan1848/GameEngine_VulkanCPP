@@ -137,6 +137,14 @@ void RenderSystem::RegisterMaterialInstance(id::id_type id, MaterialInstance* ma
     }
 }
 
+MaterialInstance* RenderSystem::GetMaterialInstance(id::id_type id) const {
+    auto it = materialInstances_.find(id);
+    if (it != materialInstances_.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
 void RenderSystem::Wait(uint32_t frameIndex) {
     if (!device_ || frameFences_.empty()) return;
     
@@ -155,16 +163,88 @@ void RenderSystem::Wait(uint32_t frameIndex) {
     }
 }
 
-void RenderSystem::Render(RenderScene& scene, RenderView& view, uint32_t frameIndex) {
+void RenderSystem::Resize(uint32_t width, uint32_t height) {
+    if (swapChain_) {
+        device_->WaitIdle();
+        swapChain_->Resize(width, height);
+        
+        // Resize Depth Buffer
+        if (depthStencilTexture_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(depthStencilTexture_);
+        }
+        
+        rhi::TextureDesc depthDesc{};
+        depthDesc.size.x = width;
+        depthDesc.size.y = height;
+        depthDesc.size.z = 1;
+        depthDesc.format = rhi::DataFormat::D32_Float;
+        depthDesc.type = rhi::TextureType::Texture2D;
+        depthDesc.usage = rhi::TextureUsage::DepthStencil;
+        depthDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
+        
+        depthStencilTexture_ = device_->CreateTexture(depthDesc);
+    }
+}
+
+bool RenderSystem::BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandle& outSignalFence) {
+    if (!device_ || !swapChain_) return false;
+
+    // Internal Frame Sync
+    Wait(currentFrameIndex_);
+
+    // Acquire Next Image
+    if (!swapChain_->AcquireNextImage(&currentImageIndex_)) {
+        std::cerr << "RenderSystem: Failed to acquire next image." << std::endl;
+        return false;
+    }
+    
+    outBackBuffer = swapChain_->GetBackBuffer(currentImageIndex_);
+    outSignalFence = frameFences_[currentFrameIndex_];
+    return true;
+}
+
+void RenderSystem::EndFrame() {
+    if (swapChain_) {
+        swapChain_->Present(rhi::handles::INVALID_SYNC);
+        // Advance frame index
+        currentFrameIndex_ = (currentFrameIndex_ + 1) % rhi::MAX_FRAMES_IN_FLIGHT;
+    }
+}
+
+rhi::TextureDesc RenderSystem::GetBackBufferDesc() const {
+    rhi::TextureDesc desc{};
+    if (swapChain_) {
+        const auto& scDesc = swapChain_->GetDesc();
+        desc.size.x = scDesc.width;
+        desc.size.y = scDesc.height;
+        desc.size.z = 1;
+        desc.format = scDesc.format;
+        desc.type = rhi::TextureType::Texture2D;
+        desc.usage = rhi::TextureUsage::RenderTarget;
+        desc.arraySize = 1;
+        desc.mipLevels = 1;
+    }
+    return desc;
+}
+
+void RenderSystem::Render(RenderScene& scene, RenderView& view) {
+    // Note: frameIndex argument is now effectively ignored for sync purposes 
+    // as RenderSystem manages it internally via BeginFrame/EndFrame, 
+    // but we can still use it for passed-in state if needed.
+    // Ideally, we should deprecate the frameIndex argument or verify it matches.
+    
     static uint64_t frameCount = 0;
     frameCount++;
     auto renderStart = std::chrono::high_resolution_clock::now();
 
-    // Ensure frameIndex is within bounds
-    currentFrameIndex_ = frameIndex % rhi::MAX_FRAMES_IN_FLIGHT;
+    rhi::ResourceHandle backBuffer;
+    rhi::SyncHandle signalFence;
+    if (!BeginFrame(backBuffer, signalFence)) {
+        return;
+    }
 
-    if (!device_ || cmdBuffers_.empty() || !cmdBuffers_[currentFrameIndex_] || !swapChain_) {
-        std::cerr << "RenderSystem: Invalid state." << std::endl;
+    if (cmdBuffers_.empty() || !cmdBuffers_[currentFrameIndex_]) {
+        std::cerr << "RenderSystem: Invalid command buffer state." << std::endl;
         return;
     }
 
@@ -177,22 +257,11 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view, uint32_t frameIn
         auto& gc = device_->GetGarbageCollector();
         gc.SetCurrentFrame(frameCount);
         
-        // In triple buffering, frame N-3 is definitely done if we are starting frame N.
         if (frameCount >= rhi::MAX_FRAMES_IN_FLIGHT) {
-            // Budget GC time to 2.0ms to prevent spikes
             gc.Update(frameCount - rhi::MAX_FRAMES_IN_FLIGHT, 2.0);
         }
     }
     auto gcEnd = std::chrono::high_resolution_clock::now();
-
-    // 1. Acquire Next Image
-    uint32_t imageIndex = 0;
-    auto acquireStart = std::chrono::high_resolution_clock::now();
-    if (!swapChain_->AcquireNextImage(&imageIndex)) {
-        std::cerr << "RenderSystem: Failed to acquire next image." << std::endl;
-        return;
-    }
-    auto acquireEnd = std::chrono::high_resolution_clock::now();
 
     // 2. Update View & 3. Cull
     auto cullStart = std::chrono::high_resolution_clock::now();
@@ -203,26 +272,6 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view, uint32_t frameIn
     // 4. Command Buffer Recording
     auto recordStart = std::chrono::high_resolution_clock::now();
     
-    // Wait for the PREVIOUS use of this specific command buffer/frame resources to finish.
-    rhi::SyncHandle fence = frameFences_[currentFrameIndex_];
-    double fenceWaitTimeMs = 0.0;
-    if (fence != rhi::handles::INVALID_SYNC) {
-        auto waitStart = std::chrono::high_resolution_clock::now();
-        if (!device_->WaitForSync(fence, 1000)) {
-            static bool loggedTimeout = false;
-            if (!loggedTimeout) {
-                 std::cerr << "RenderSystem: WaitForSync timed out for frame " << currentFrameIndex_ << " (Logged once)" << std::endl;
-                 loggedTimeout = true;
-            }
-        }
-        auto waitEnd = std::chrono::high_resolution_clock::now();
-        fenceWaitTimeMs = std::chrono::duration<double, std::milli>(waitEnd - waitStart).count();
-
-        if (cmdBuffer->GetState() == rhi::CommandBufferState::Submitted) {
-            cmdBuffer->SetState(rhi::CommandBufferState::Executed);
-        }
-    }
-
     if (!cmdBuffer->Reset()) {
         std::cerr << "RenderSystem: Failed to reset command buffer." << std::endl;
         return;
@@ -235,7 +284,6 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view, uint32_t frameIn
 
     // Forward Rendering
     const auto& swapDesc = swapChain_->GetDesc();
-    rhi::ResourceHandle backBuffer = swapChain_->GetBackBuffer(imageIndex);
     forwardRenderer_.Render(cmdBuffer, scene, view, backBuffer, depthStencilTexture_, materialInstances_, currentFrameIndex_, swapDesc.width, swapDesc.height);
     cmdBuffer->End();
     auto recordEnd = std::chrono::high_resolution_clock::now();
@@ -243,44 +291,18 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view, uint32_t frameIn
     // Submit
     rhi::QueueSubmitInfo submitInfo{};
     submitInfo.cmdBuffer = cmdBufferHandle;
-    submitInfo.signalFence = fence;
+    submitInfo.signalFence = frameFences_[currentFrameIndex_]; // Use current frame fence
     auto submitStart = std::chrono::high_resolution_clock::now();
     device_->Submit(submitInfo);
     auto submitEnd = std::chrono::high_resolution_clock::now();
     
     // 5. Present
     auto presentStart = std::chrono::high_resolution_clock::now();
-    swapChain_->Present(rhi::handles::INVALID_SYNC);
+    EndFrame();
     auto presentEnd = std::chrono::high_resolution_clock::now();
 
     auto renderEnd = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> renderTime = renderEnd - renderStart;
-    
-    // Detailed profiling log
-    // Only log if total frame time > 20ms (dropping below 50 FPS) or periodically
-    static int logCounter = 0;
-    logCounter++;
-    
-    /*
-    if (renderTime.count() > 20.0 || logCounter % 60 == 0) {
-        std::chrono::duration<double, std::milli> gcTime = gcEnd - gcStart;
-        std::chrono::duration<double, std::milli> acquireTime = acquireEnd - acquireStart;
-        std::chrono::duration<double, std::milli> cullTime = cullEnd - cullStart;
-        std::chrono::duration<double, std::milli> recordTime = recordEnd - recordStart;
-        std::chrono::duration<double, std::milli> submitTime = submitEnd - submitStart;
-        std::chrono::duration<double, std::milli> presentTime = presentEnd - presentStart;
-        
-        double cpuWorkTime = renderTime.count() - fenceWaitTimeMs - acquireTime.count();
-
-        std::cout << "[Profile] Frame " << frameCount 
-                  << " | Total: " << renderTime.count() << "ms"
-                  << " | Wait: " << fenceWaitTimeMs << "ms"
-                  << " | Acquire: " << acquireTime.count() << "ms"
-                  << " | Work: " << cpuWorkTime << "ms"
-                  << " | GC: " << gcTime.count() << "ms"
-                  << std::endl;
-    }
-    */
 }
 
 

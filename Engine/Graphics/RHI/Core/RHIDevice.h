@@ -192,7 +192,10 @@ public:
     virtual ShaderHandle CreateShader(const void* data, size_t size, ShaderStage stage, const char* entryPoint = "main") = 0;
     virtual PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
     virtual PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) = 0;
+    virtual RenderPassHandle CreateRenderPass(const RenderPassDesc& desc) = 0;
+    virtual void DestroyRenderPass(RenderPassHandle handle) = 0;
     virtual CommandBufferHandle CreateCommandBuffer(CommandQueueType type) = 0;
+    virtual void DestroyCommandBuffer(CommandBufferHandle handle) = 0;
     virtual void DestroyBuffer(ResourceHandle handle) = 0;
     virtual void DestroyTexture(ResourceHandle handle) = 0;
     virtual void DestroyShader(ShaderHandle handle) = 0;
@@ -614,7 +617,7 @@ public:
      * @brief 销毁命令缓冲区
      * @param handle 命令缓冲区句柄
      */
-    void DestroyCommandBuffer(CommandBufferHandle handle) {
+    void DestroyCommandBuffer(CommandBufferHandle handle) override {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_COMMAND_BUFFER) {
             derived().destroyCommandBufferImpl(handle);

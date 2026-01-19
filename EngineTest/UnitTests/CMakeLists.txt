@@ -666,6 +666,32 @@ target_compile_definitions(StandaloneGraphics_RenderSystem_Test PRIVATE DEBUG _D
 set_target_properties(StandaloneGraphics_RenderSystem_Test PROPERTIES FOLDER "Tests/Graphics")
 
 
+# 创建 RenderGraph 测试
+add_executable(TestRenderGraph 
+    Graphics/RenderGraph/TestRenderGraph.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderGraph/RenderGraph.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderGraph/RenderGraphBuilder.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHISwapChain.cpp
+)
+target_include_directories(TestRenderGraph PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME TestRenderGraph COMMAND TestRenderGraph)
+set_target_properties(TestRenderGraph PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestRenderGraph PRIVATE DEBUG _DEBUG)
+set_target_properties(TestRenderGraph PROPERTIES FOLDER "Tests/Graphics")
+
+
+
 
 # 设置moodycamel库路径
 set(MOODYCAMEL_ROOT ${CMAKE_SOURCE_DIR}/third_party/moodycamel-ConcurrentQueue)

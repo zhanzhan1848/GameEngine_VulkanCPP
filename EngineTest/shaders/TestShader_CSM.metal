@@ -221,24 +221,16 @@ float SamplePointShadowVSM(texturecube_array<float> shadowMap, sampler shadowSam
 struct ShadowVertexOut {
     float4 position [[position]];
     float4 worldPos;
-    uint layer [[render_target_array_index]];
 };
 
 vertex ShadowVertexOut vertexShadowVSM(VertexIn in [[stage_in]],
                                        constant PerObjectData& perObject [[buffer(10)]],
-                                       constant GlobalShaderData& globalData [[buffer(11)]],
-                                       constant ForwardLightBuffer& lightData [[buffer(12)]],
-                                       uint instanceID [[instance_id]])
+                                       constant GlobalShaderData& globalData [[buffer(11)]])
 {
     ShadowVertexOut out;
     float4 worldPos = perObject.world * float4(in.position, 1.0);
-    
-    // Use instanceID to select cascade ViewProjection
-    // Assuming 4 instances are drawn, one for each cascade of the first directional light
-    out.position = lightData.directionalLights[0].viewProjections[instanceID] * worldPos;
-    
+    out.position = globalData.viewProjection * worldPos;
     out.worldPos = worldPos;
-    out.layer = instanceID;
     return out;
 }
 
@@ -283,9 +275,8 @@ vertex VertexOut vertexMain(
     out.worldNormal = normalize((perObject.world * float4(in.normal, 0.0)).xyz);
     out.color = in.color;
     
-    // View Space Depth (positive) for Cascade Selection
-    // In RH View Space, forward is -Z, so we negate Z to get positive depth.
-    out.viewDepth = -(globalData.view * worldPos).z;
+    // Linear View Depth for Shadow Map Selection
+    out.viewDepth = (globalData.view * worldPos).z;
     
     return out;
 }
@@ -299,7 +290,7 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
                             sampler shadowSampler [[sampler(13)]]) {
     
     // DEBUG: Force Red Color to verify Geometry
-    // return float4(1.0, 0.0, 0.0, 1.0);
+    return float4(1.0, 0.0, 0.0, 1.0);
 
     
     // Extract Directional Light (Assume index 0)
@@ -337,7 +328,7 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
         
         // Convert to texture coordinates [0, 1]
         shadowUV.x = shadowCoord.x * 0.5 + 0.5;
-        shadowUV.y = -shadowCoord.y * 0.5 + 0.5; // Metal Texture V is flipped relative to NDC Y
+        shadowUV.y = -shadowCoord.y * 0.5 + 0.5; // Metal Y is down
         
         if (light.colorAndShadow.a > 0.0 && 
                 shadowUV.x >= 0.0 && shadowUV.x <= 1.0 && 
@@ -351,10 +342,6 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
 
     // Accumulate Lighting
     float3 totalDiffuse = material.color.rgb * light.colorAndShadow.rgb * NdotL * shadowFactor;
-
-    // DEBUG: Visualize Moments
-    // float2 m = shadowMap.sample(shadowSampler, shadowUV, uint(cascadeIndex)).xy;
-    // return float4(m.x, m.y, 0.0, 1.0);
     
     // DEBUG: Visualize Shadow Factor
     // return float4(float3(shadowFactor), 1.0);
@@ -370,8 +357,13 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
     // DEBUG: Visualize Shadow Coord Z
     // return float4(shadowCoord.z, shadowCoord.z, shadowCoord.z, 1.0);
 
+    // DEBUG: Visualize Moments
+    /*
+    float2 m = shadowMap.sample(shadowSampler, shadowCoord.xy, uint(cascadeIndex)).xy;
+    return float4(m.x, m.y, 0.0, 1.0);
+    */
 
-
+    
     // Punctual Lights Loop
     for (uint i = 0; i < lightData.punctualLightCount; ++i) {
         LightParameters pLight = lightData.lights[i];

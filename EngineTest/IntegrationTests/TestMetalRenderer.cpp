@@ -494,9 +494,9 @@ void Engine_Test::run() {
     frameIndex = (frameIndex + 1) % primal::graphics::rhi::MAX_FRAMES_IN_FLIGHT;
     
     // Wait for previous frame resources to be available
-    auto startWait = std::chrono::high_resolution_clock::now();
-    g_Test->renderSystem.Wait(frameIndex);
-    auto endWait = std::chrono::high_resolution_clock::now();
+    // auto startWait = std::chrono::high_resolution_clock::now();
+    // g_Test->renderSystem.Wait(frameIndex);
+    // auto endWait = std::chrono::high_resolution_clock::now();
 
     // Update Uniforms for the Cube
     MaterialUniformData uniformData{};
@@ -550,18 +550,18 @@ void Engine_Test::run() {
     // Render
     // std::cout << "Frame Start" << std::endl;
     auto startRender = std::chrono::high_resolution_clock::now();
-    g_Test->renderSystem.Render(g_Test->scene, g_Test->view, frameIndex);
+    g_Test->renderSystem.Render(g_Test->scene, g_Test->view);
     auto endRender = std::chrono::high_resolution_clock::now();
     // std::cout << "Frame End" << std::endl;
 
     if (deltaTime.count() > 0.020f) {
-        std::chrono::duration<double, std::milli> waitTime = endWait - startWait;
+        // std::chrono::duration<double, std::milli> waitTime = endWait - startWait;
         std::chrono::duration<double, std::milli> updateTime = endUpdate - startUpdate;
         std::chrono::duration<double, std::milli> cullTime = endCull - startCull;
         std::chrono::duration<double, std::milli> renderTime = endRender - startRender;
         
         std::cout << "[Performance Detail] Frame " << frameCount << " Breakdown:" << std::endl;
-        std::cout << "  - Wait: " << waitTime.count() << " ms" << std::endl;
+        // std::cout << "  - Wait: " << waitTime.count() << " ms" << std::endl;
         std::cout << "  - Update: " << updateTime.count() << " ms" << std::endl;
         std::cout << "  - Cull (External): " << cullTime.count() << " ms" << std::endl;
         std::cout << "  - Render: " << renderTime.count() << " ms" << std::endl;

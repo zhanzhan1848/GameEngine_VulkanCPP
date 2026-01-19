@@ -86,6 +86,13 @@ bool MetalCommandBuffer::resetImpl() {
     // Release existing resources but keep the object ready for Begin()
     // Do NOT call destroyImpl() as it destroys the guardEventHandle_ which is needed for reuse
     
+    // Reset state tracking
+    currentPrimitiveType_ = MTL::PrimitiveTypeTriangle;
+    currentIndexType_ = MTL::IndexTypeUInt32;
+    currentIndexBuffer_ = nullptr;
+    currentIndexBufferOffset_ = 0;
+    currentThreadGroupSize_ = MTL::Size::Make(1, 1, 1);
+    
     if (isSecondary_) {
         // Secondary buffers don't own the encoder or command buffer
         currentEncoder_ = nullptr;
@@ -204,6 +211,28 @@ bool MetalCommandBuffer::submitImpl(uint32_t waitFlags) {
             mtlCommandBuffer_->encodeSignalEvent(sync->GetNativeEvent(), semInfo.value);
         }
     }
+
+    // Add completion handler for GPU timing
+    if (mtlCommandBuffer_) {
+        // Capture stats_ by reference? No, RHICommandBuffer might be destroyed.
+        // Capture this? RHICommandBuffer needs to stay alive until completion.
+        // Usually CommandBuffers are pooled and not destroyed immediately.
+        // But if they are reused, stats might be overwritten.
+        // For now, assume it's safe to write to stats_ if the object is alive.
+        // To be safe, we can use a weak_ptr or similar if we had one, but we don't.
+        // We will assume the command buffer is not destroyed until completion (which is true for pooled ones usually).
+        
+        MetalCommandBuffer* self = this;
+         mtlCommandBuffer_->addCompletedHandler([self](MTL::CommandBuffer* buffer) {
+             CFTimeInterval start = buffer->GPUStartTime();
+             CFTimeInterval end = buffer->GPUEndTime();
+             // GPUStartTime/EndTime are 0 if not supported or not waited?
+             // On macOS, they should be valid.
+             if (start != 0 && end != 0) {
+                  self->stats_.commandExecutionTime = (float)((end - start) * 1000.0); // Seconds to ms
+             }
+         });
+     }
 
     mtlCommandBuffer_->commit();
     
@@ -338,14 +367,22 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     }
     
     if (mtlCommandBuffer_) {
-        MTL::RenderCommandEncoder* encoder = mtlCommandBuffer_->renderCommandEncoder(passDesc);
-        currentEncoder_ = encoder;
-        currentEncoderType_ = EncoderType::Render;
-        
-        // Initial state setup (viewport, scissor)
-        SetViewport(desc.viewport);
-        SetScissor(desc.scissor);
-    }
+                MTL::RenderCommandEncoder* encoder = mtlCommandBuffer_->renderCommandEncoder(passDesc);
+                if (!encoder) {
+                    std::cerr << "[MetalCommandBuffer] Failed to create render command encoder!" << std::endl;
+                    if (passDesc->colorAttachments()->object(0)->texture() == nullptr) {
+                         std::cerr << "  Color Attachment 0 texture is null" << std::endl;
+                    }
+                }
+                currentEncoder_ = encoder;
+                currentEncoderType_ = EncoderType::Render;
+                
+                // Initial state setup (viewport, scissor)
+                SetViewport(desc.viewport);
+                SetScissor(desc.scissor);
+            } else {
+                std::cerr << "[MetalCommandBuffer] mtlCommandBuffer_ is null in BeginRenderPass!" << std::endl;
+            }
     
     // Descriptor is autoreleased
 }
@@ -626,6 +663,7 @@ void MetalCommandBuffer::BindIndexBuffer(ResourceHandle buffer, DataFormat forma
     // std::cout << "[MetalCommandBuffer] Bound index buffer (Offset: " << offset << ")" << std::endl;
     } else {
          std::cerr << "[MetalCommandBuffer] Failed to bind index buffer: Buffer is null" << std::endl;
+         currentIndexBuffer_ = nullptr;
     }
 }
 

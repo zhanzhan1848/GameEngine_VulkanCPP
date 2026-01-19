@@ -241,7 +241,7 @@ public:
      */
     virtual bool Reset() {
         if (state_ == CommandBufferState::Invalid) return false;
-        if (state_ == CommandBufferState::Submitted) return false;
+        // if (state_ == CommandBufferState::Submitted) return false;
         
         bool result = resetImpl();
         if (result) {

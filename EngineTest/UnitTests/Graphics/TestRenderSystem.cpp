@@ -209,6 +209,16 @@ public:
         }
         return mockCmdBuffer->GetHandle();
     }
+
+    void destroyCommandBufferImpl(CommandBufferHandle handle) {
+        if (mockCmdBuffer && mockCmdBuffer->GetHandle() == handle) {
+            if (handle != handles::INVALID_COMMAND_BUFFER) {
+                UnregisterCommandBuffer(handle);
+            }
+            delete mockCmdBuffer;
+            mockCmdBuffer = nullptr;
+        }
+    }
     
     // void destroyBufferImpl(ResourceHandle) {} // Removed as it is now implemented above
     void destroyTextureImpl(ResourceHandle) {}
@@ -288,7 +298,7 @@ TestResult TestRenderSystemRender() {
     
     // Render
     // This should not crash and should internally cull and iterate
-    system.Render(scene, view, 0);
+    system.Render(scene, view);
     std::cout << "TestRenderSystem: Render Completed" << std::endl;
     
     // Verify command buffer calls

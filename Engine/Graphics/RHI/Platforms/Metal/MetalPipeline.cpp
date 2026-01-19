@@ -396,6 +396,26 @@ MTL::RenderPipelineDescriptor* MetalPipeline::CreateRenderPipelineDescriptor(con
         }
     }
 
+    // Input Primitive Topology
+    MTL::PrimitiveTopologyClass topologyClass = MTL::PrimitiveTopologyClassUnspecified;
+    switch (desc.topology) {
+        case PrimitiveTopology::PointList: 
+            topologyClass = MTL::PrimitiveTopologyClassPoint; 
+            break;
+        case PrimitiveTopology::LineList:
+        case PrimitiveTopology::LineStrip: 
+            topologyClass = MTL::PrimitiveTopologyClassLine; 
+            break;
+        case PrimitiveTopology::TriangleList:
+        case PrimitiveTopology::TriangleStrip: 
+            topologyClass = MTL::PrimitiveTopologyClassTriangle; 
+            break;
+        default: 
+            topologyClass = MTL::PrimitiveTopologyClassUnspecified;
+            break;
+    }
+    pipelineDesc->setInputPrimitiveTopology(topologyClass);
+
     return pipelineDesc;
 }
 

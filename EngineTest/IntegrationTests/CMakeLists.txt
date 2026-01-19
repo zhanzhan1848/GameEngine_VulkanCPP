@@ -135,8 +135,29 @@ if(APPLE)
     )
     setup_test_target(TestCSMIntegration)
 
+    # 4. TestStandardPipeline
+    add_executable(TestStandardPipeline
+        "Main.cpp"
+        "TestStandardPipeline.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestStandardPipeline)
+    target_compile_definitions(TestStandardPipeline PRIVATE "TEST_STANDARD_PIPELINE=1" "TEST_RENDERER=0")
+
+    # 5. TestCSMIntegrationRenderGraph
+    add_executable(TestCSMIntegrationRenderGraph
+        "Main.cpp"
+        "TestCSMIntegrationRenderGraph.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestCSMIntegrationRenderGraph)
+    target_compile_definitions(TestCSMIntegrationRenderGraph PRIVATE "TEST_CSM_RENDERGRAPH=1" "TEST_RENDERER=0")
+
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer
