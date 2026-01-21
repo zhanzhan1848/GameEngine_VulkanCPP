@@ -12,6 +12,7 @@
 #include "MetalSync.h"
 #include "MetalDescriptorSet.h"
 #include "MetalTexture.h"
+#include "MetalQuery.h"
 #include <iostream>
 #include <thread>
 
@@ -363,6 +364,22 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
                 case StoreAction::DontCare: metalStoreAction = MTL::StoreActionDontCare; break;
             }
             da->setStoreAction(metalStoreAction);
+        }
+    }
+
+    // Setup Timestamp Query
+    if (desc.enableTimestamp && desc.timestampQueryPool != handles::INVALID_QUERY_POOL) {
+        MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+        MetalQueryPool* pool = metalDevice.GetQueryPool(desc.timestampQueryPool);
+        
+        if (pool && pool->GetType() == MetalQueryType::Timestamp) {
+            MTL::CounterSampleBuffer* buffer = pool->GetNativeBuffer();
+            if (buffer) {
+                MTL::RenderPassSampleBufferAttachmentDescriptor* attachment = passDesc->sampleBufferAttachments()->object(0);
+                attachment->setSampleBuffer(buffer);
+                attachment->setStartOfVertexSampleIndex(desc.beginTimestampIndex);
+                attachment->setEndOfFragmentSampleIndex(desc.endTimestampIndex);
+            }
         }
     }
     
@@ -820,6 +837,43 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     break;
             }
         }
+    }
+}
+
+void MetalCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) {
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    MetalQueryPool* pool = metalDevice.GetQueryPool(queryPool);
+    if (!pool || pool->GetType() != MetalQueryType::Timestamp) return;
+    
+    MTL::CounterSampleBuffer* buffer = pool->GetNativeBuffer();
+    if (!buffer) return;
+    
+    if (currentEncoderType_ == EncoderType::None) {
+        getBlitEncoder();
+    }
+    
+    switch (currentEncoderType_) {
+        case EncoderType::Render: {
+            auto encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
+            // Apple Silicon devices do not support sampleCountersInBuffer in Render Encoder.
+            // Use RenderPassDesc sampleBufferAttachments instead.
+            // encoder->sampleCountersInBuffer(buffer, queryIndex, true);
+            break;
+        }
+        case EncoderType::Compute: {
+            auto encoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
+            // Similarly for Compute
+            // encoder->sampleCountersInBuffer(buffer, queryIndex, true);
+            break;
+        }
+        case EncoderType::Blit: {
+            auto encoder = static_cast<MTL::BlitCommandEncoder*>(currentEncoder_);
+            // Similarly for Blit
+            // encoder->sampleCountersInBuffer(buffer, queryIndex, true);
+            break;
+        }
+        default:
+            break;
     }
 }
 

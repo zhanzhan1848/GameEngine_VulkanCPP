@@ -78,6 +78,7 @@ public:
                            const DescriptorSetHandle* descriptorSets,
                            uint32_t dynamicOffsetCount,
                            const uint32_t* dynamicOffsets) override;
+    void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override;
     void Draw(uint32_t vertexCount, uint32_t startVertex, uint32_t instanceCount, uint32_t startInstance) override;
     void DrawIndexed(uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex, uint32_t instanceCount, uint32_t startInstance) override;
     void DrawIndirect(ResourceHandle buffer, uint64_t offset, uint32_t drawCount) override;

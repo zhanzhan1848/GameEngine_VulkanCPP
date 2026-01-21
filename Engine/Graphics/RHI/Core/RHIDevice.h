@@ -200,8 +200,10 @@ public:
     virtual void DestroyTexture(ResourceHandle handle) = 0;
     virtual void DestroyShader(ShaderHandle handle) = 0;
     virtual void DestroyPipeline(PipelineHandle handle) = 0;
+    virtual bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) = 0;
     virtual void* MapBuffer(ResourceHandle handle, u64 offset = 0, u64 size = 0) = 0;
     virtual void UnmapBuffer(ResourceHandle handle) = 0;
+    virtual double GetTimestampPeriod() const = 0;
 
     /**
      * @brief 获取垃圾回收器
@@ -597,6 +599,11 @@ public:
         }
     }
 
+    bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().getQueryPoolResultsImpl(handle, firstQuery, queryCount, data, stride);
+    }
+
     /**
      * @brief 映射缓冲区
      */
@@ -608,11 +615,17 @@ public:
     /**
      * @brief 取消映射缓冲区
      */
-    void UnmapBuffer(ResourceHandle handle) override {
+   void UnmapBuffer(ResourceHandle handle) override {
         assert(isValid_ && "Device not initialized");
         derived().unmapBufferImpl(handle);
     }
+
+    double GetTimestampPeriod() const override {
+        assert(isValid_ && "Device not initialized");
+        return derived().getTimestampPeriodImpl();
+    }
     
+    // === 辅助方法 ===
     /**
      * @brief 销毁命令缓冲区
      * @param handle 命令缓冲区句柄

@@ -406,6 +406,13 @@ public:
                                    const DescriptorSetHandle* descriptorSets,
                                    uint32_t dynamicOffsetCount,
                                    const uint32_t* dynamicOffsets) = 0;
+
+    /**
+     * @brief 写入时间戳
+     * @param queryPool 查询池句柄
+     * @param queryIndex 查询索引
+     */
+    virtual void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) = 0;
     
     /**
      * @brief 绘制

@@ -752,6 +752,53 @@ add_test(NAME MpscQueueSimpleTest COMMAND MpscQueueSimpleTest)
 # 创建测试集合目标
 # ======================
 
+# 创建RHI时间戳测试
+add_executable(StandaloneRHI_Timestamp_Test RHI/Core/TestRHITimestamp.cpp)
+target_include_directories(StandaloneRHI_Timestamp_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+target_link_libraries(StandaloneRHI_Timestamp_Test PRIVATE Engine "-framework Foundation" "-framework Metal" "-framework MetalKit" "-framework QuartzCore")
+add_test(NAME StandaloneRHI_Timestamp_Test COMMAND StandaloneRHI_Timestamp_Test)
+set_target_properties(StandaloneRHI_Timestamp_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(StandaloneRHI_Timestamp_Test PRIVATE DEBUG _DEBUG)
+
+# 创建 RenderGraph Timestamp Integration 测试
+add_executable(TestRenderGraphTimestamp 
+    Graphics/RenderGraph/TestRenderGraphTimestamp.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderGraph/RenderGraph.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderGraph/RenderGraphBuilder.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHISwapChain.cpp
+)
+target_include_directories(TestRenderGraphTimestamp PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+target_link_libraries(TestRenderGraphTimestamp PRIVATE 
+    Engine 
+    "-framework Foundation" 
+    "-framework Metal" 
+    "-framework MetalKit" 
+    "-framework QuartzCore"
+)
+add_test(NAME TestRenderGraphTimestamp COMMAND TestRenderGraphTimestamp)
+set_target_properties(TestRenderGraphTimestamp PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestRenderGraphTimestamp PRIVATE DEBUG _DEBUG)
+set_target_properties(TestRenderGraphTimestamp PROPERTIES FOLDER "Tests/Graphics")
+
 ## 创建一个宏来运行所有RHI测试
 add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_Test
@@ -764,6 +811,7 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_MultiThreadedCommandGenerator_Test
     COMMAND StandaloneRHI_Allocator_Test
     COMMAND StandaloneRHI_GarbageCollector_Test
+    COMMAND StandaloneRHI_Timestamp_Test
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
@@ -779,6 +827,7 @@ set_target_properties(StandaloneRHI_GPUOptimizer_Test PROPERTIES FOLDER "Tests/R
 set_target_properties(StandaloneRHI_MultiThreadedCommandGenerator_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Allocator_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_GarbageCollector_Test PROPERTIES FOLDER "Tests/RHI")
+set_target_properties(StandaloneRHI_Timestamp_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(MpscQueueSimpleTest PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(RHI_All_Tests PROPERTIES FOLDER "Tests/RHI")
 

@@ -14,10 +14,22 @@ bool StandardRenderPipeline::Initialize(rhi::RHIDeviceBase* device) {
     if (!device) return false;
     device_ = device;
     renderGraph_ = std::make_unique<rendergraph::RenderGraph>(*device);
+    
+    // 初始化 GPU 优化器
+    gpuOptimizer_ = std::make_unique<rhi::RHIGPUOptimizer>(*device);
+    if (!gpuOptimizer_->Initialize()) {
+        std::cerr << "Failed to initialize GPU Optimizer" << std::endl;
+        // 允许失败，非关键组件
+    }
+    
     return true;
 }
 
 void StandardRenderPipeline::Shutdown() {
+    if (gpuOptimizer_) {
+        gpuOptimizer_->Shutdown();
+        gpuOptimizer_.reset();
+    }
     renderGraph_.reset();
     device_ = nullptr;
 }
@@ -80,6 +92,21 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
             stats_.drawCallCount = cmdStats.drawCallCount;
             stats_.gpuFrameTimeMs = cmdStats.commandExecutionTime;
             
+            // Get GPU time from queries
+            stats_.passExecutionTimes = renderGraph_->GetPassExecutionTimes();
+
+            // Feed metrics to GPU Optimizer
+            if (gpuOptimizer_) {
+                for (const auto& [passName, timeMs] : stats_.passExecutionTimes) {
+                    gpuOptimizer_->RecordPassExecutionTime(passName, timeMs);
+                }
+                
+                // Update optimizer per frame
+                // Assuming ~16.6ms per frame for now or calculate actual delta time
+                // Here we use CPU time as an approximation or fixed step
+                gpuOptimizer_->Update(frameCount_, 16.6f / 1000.0f);
+            }
+
             // Calculate CPU time
             auto endTime = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double, std::milli> cpuTime = endTime - startTime;

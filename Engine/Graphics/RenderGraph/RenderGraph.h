@@ -89,6 +89,9 @@ public:
 
     RenderGraphResource* GetResource(RGResourceHandle handle);
 
+    // 获取上一帧各Pass的GPU耗时 (ms)
+    const std::unordered_map<std::string, double>& GetPassExecutionTimes() const { return passExecutionTimes_; }
+
 private:
     void CleanupPool();
     void RegisterResourceRead(RenderGraphPass* pass, RGResourceHandle handle, rhi::ResourceState state);
@@ -122,6 +125,20 @@ private:
     // 资源池
     utl::vector<PooledResource> resourcePool_;
     uint64_t currentFrame_ = 0;
+
+    // GPU时间戳查询
+    struct FrameQueryData {
+        rhi::QueryPoolHandle queryPool = rhi::handles::INVALID_QUERY_POOL;
+        uint32_t capacity = 0;
+        std::vector<std::string> passNames; // Index i corresponds to queries 2*i and 2*i+1
+        bool ready = false;
+    };
+    FrameQueryData queryFrames_[2]; // Ping-pong
+    uint32_t currentQueryFrameIndex_ = 0;
+    
+    std::unordered_map<std::string, double> passExecutionTimes_;
+
+    void ResolveTimestamps();
 };
 
 } // namespace primal::graphics::rendergraph

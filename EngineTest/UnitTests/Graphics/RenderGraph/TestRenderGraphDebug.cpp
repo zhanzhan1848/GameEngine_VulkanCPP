@@ -26,6 +26,7 @@ public:
     virtual bool IsValid() const override { return true; }
     virtual const DeviceInfo& GetDeviceInfo() const override { static DeviceInfo info; return info; }
     virtual const DeviceDesc& GetDesc() const override { static DeviceDesc desc; return desc; }
+    virtual double GetTimestampPeriod() const override { return 1.0; }
     virtual void WaitIdle() const override {}
     virtual void Shutdown() override {}
     virtual bool Submit(const QueueSubmitInfo& info) override { return true; }
@@ -34,6 +35,7 @@ public:
     virtual void DestroySync(SyncHandle handle) override {}
     virtual QueryPoolHandle CreateQueryPool(const QueryPoolDesc& desc) override { return handles::INVALID_QUERY_POOL; }
     virtual void DestroyQueryPool(QueryPoolHandle handle) override {}
+    virtual bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override { return false; }
     
     // Return valid handles to simulate successful creation
     virtual SamplerHandle CreateSampler(const SamplerDesc& desc) override { return {1}; }
@@ -130,6 +132,7 @@ public:
     virtual void BlitTexture(ResourceHandle src, ResourceHandle dst, const TextureBlitRegion* regions, uint32_t regionCount, FilterMode filter) override {}
     virtual void GenerateMipmaps(ResourceHandle texture) override {}
     virtual void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override {}
+    virtual void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {}
     virtual bool Initialize() override { return true; }
 
 protected:

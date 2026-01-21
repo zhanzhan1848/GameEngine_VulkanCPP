@@ -117,6 +117,10 @@ public:
     void InsertBarrier(const ResourceBarrier* /*barriers*/, uint32_t /*barrierCount*/) override {
         calls.push_back("InsertBarrier");
     }
+
+    void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {
+        calls.push_back("WriteTimestamp");
+    }
 };
 
 class MockDevice : public RHIDeviceBase {
@@ -130,6 +134,7 @@ public:
     bool IsValid() const override { return true; }
     const DeviceInfo& GetDeviceInfo() const override { return info_; }
     const DeviceDesc& GetDesc() const override { return desc_; }
+    double GetTimestampPeriod() const override { return 1.0; }
     void WaitIdle() const override {}
     void Shutdown() override {}
     bool Submit(const QueueSubmitInfo& /*info*/) override { return true; }
@@ -138,6 +143,7 @@ public:
     void DestroySync(SyncHandle /*handle*/) override {}
     QueryPoolHandle CreateQueryPool(const QueryPoolDesc& /*desc*/) override { return handles::INVALID_QUERY_POOL; }
     void DestroyQueryPool(QueryPoolHandle /*handle*/) override {}
+    bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override { return false; }
     SamplerHandle CreateSampler(const SamplerDesc& /*desc*/) override { return handles::INVALID_SAMPLER; }
     void DestroySampler(SamplerHandle /*handle*/) override {}
     DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& /*desc*/) override { return handles::INVALID_DESCRIPTOR_SET_LAYOUT; }

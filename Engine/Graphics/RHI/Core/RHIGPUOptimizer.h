@@ -68,11 +68,15 @@ struct GPUPerformanceMetrics {
     f64 averageCommandLatency;        ///< 平均命令延迟（毫秒）
     u32 syncPointsPerFrame;           ///< 每帧同步点数量
     f64 cpuToGpuLatency;              ///< CPU到GPU延迟（毫秒）
-    u64 memoryAllocations;            ///< 内存分配次数
-    u64 memoryDeallocations;          ///< 内存释放次数
-    u64 currentMemoryUsage;           ///< 当前内存使用量（字节）
-    u64 peakMemoryUsage;              ///< 峰值内存使用量（字节）
+    // Memory metrics
+    u64 memoryAllocations;
+    u64 memoryDeallocations;
+    u64 currentMemoryUsage;
+    u64 peakMemoryUsage;
     
+    // Per-pass GPU execution time in milliseconds
+    std::unordered_map<std::string, double> passExecutionTimes;
+
     GPUPerformanceMetrics() : frameTime(0.0), gpuUtilization(0.0), 
                               memoryBandwidthUtilization(0.0), commandBufferExecutionTime(0.0),
                               pendingCommandBuffers(0), totalCommandsSubmitted(0), totalCommandsExecuted(0),
@@ -267,6 +271,13 @@ public:
      * @return 时间戳（毫秒）
      */
     f64 GetCurrentTimestamp();
+
+    /**
+     * @brief 记录Pass执行时间
+     * @param passName Pass名称
+     * @param timeMs 执行时间（毫秒）
+     */
+    void RecordPassExecutionTime(const std::string& passName, f64 timeMs);
     
     // === 资源管理优化 ===
     

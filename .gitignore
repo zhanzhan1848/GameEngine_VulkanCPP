@@ -385,6 +385,7 @@ GameEngine_VulkanCPP_Debug/
 *.texture
 EngineTest/assets/
 .trae/
+.venv/
 
 TODO*
 

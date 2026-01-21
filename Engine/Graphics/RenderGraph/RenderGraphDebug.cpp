@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <queue>
 #include <map>
+#include <chrono>
+#include <iomanip>
 
 namespace primal::graphics::rendergraph {
 
@@ -390,6 +392,78 @@ void RenderGraphDebug::BuildGraphMesh(const RenderGraph& graph) {
     }
 }
 
+void RenderGraphDebug::BuildTimelineMesh(const RenderGraph& graph, float width, float height) {
+    const auto& times = graph.GetPassExecutionTimes();
+    if (times.empty()) return;
+
+    // Sort passes by execution order (activePasses_)
+    const auto& passes = graph.GetPasses();
+
+    // Filter active passes that have timing info
+    std::vector<std::pair<RenderGraphPass*, double>> activeTimes;
+    double totalTime = 0.0;
+
+    for (auto* pass : passes) {
+        if (times.count(pass->GetName())) {
+            double t = times.at(pass->GetName());
+            activeTimes.push_back({pass, t});
+            totalTime += t;
+        }
+    }
+
+    if (activeTimes.empty()) return;
+
+    // Layout constants
+    float barHeight = 20.0f;
+    float startX = 50.0f;
+    float startY = height - 50.0f; // Bottom of screen
+    float availableWidth = width - 100.0f;
+
+    // Scale factor: pixels per ms
+    float scaleX = (totalTime > 0.001) ? (availableWidth / static_cast<float>(totalTime)) : 1000.0f;
+
+    // Helper to add quad
+    auto addQuad = [&](math::v2 p, math::v2 s, math::v4 c) {
+        vertices_.push_back({p, c});
+        vertices_.push_back({{p.x + s.x, p.y}, c});
+        vertices_.push_back({{p.x, p.y + s.y}, c});
+        
+        vertices_.push_back({{p.x + s.x, p.y}, c});
+        vertices_.push_back({{p.x + s.x, p.y + s.y}, c});
+        vertices_.push_back({{p.x, p.y + s.y}, c});
+    };
+
+    float currentX = startX;
+
+    for (const auto& [pass, time] : activeTimes) {
+        float w = static_cast<float>(time) * scaleX;
+
+        // Color based on category
+        math::v4 color = {0.5f, 0.5f, 0.5f, 1.0f};
+        if (layoutCache_.count(pass->GetName())) {
+             color = layoutCache_[pass->GetName()].color;
+        } else {
+             switch (pass->GetCategory()) {
+                case RGPassCategory::Visibility: color = {0.2f, 0.4f, 0.8f, 1.0f}; break;
+                case RGPassCategory::Depth: color = {0.2f, 0.8f, 0.8f, 1.0f}; break;
+                case RGPassCategory::Main: color = {0.2f, 0.8f, 0.2f, 1.0f}; break;
+                case RGPassCategory::Lighting: color = {0.8f, 0.8f, 0.2f, 1.0f}; break;
+                case RGPassCategory::PostProcess: color = {0.8f, 0.5f, 0.2f, 1.0f}; break;
+                case RGPassCategory::UI: color = {0.8f, 0.2f, 0.8f, 1.0f}; break;
+                case RGPassCategory::Present: color = {0.8f, 0.2f, 0.2f, 1.0f}; break;
+                default: break;
+            }
+        }
+
+        addQuad(math::v2{currentX, startY}, math::v2{w, barHeight}, color);
+
+        // Separator
+        addQuad(math::v2{currentX + w, startY}, math::v2{1.0f, barHeight}, math::v4{0.0f, 0.0f, 0.0f, 1.0f});
+
+        currentX += w;
+    }
+}
+
 void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph& graph, uint32_t width, uint32_t height) {
     if (!enabled_) {
         // std::cout << "RenderGraphDebug disabled." << std::endl; // Optional spam
@@ -402,7 +476,37 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
     
     // Always rebuild for now (dynamic graph support)
     BuildGraphMesh(graph);
+    BuildTimelineMesh(graph, static_cast<float>(width), static_cast<float>(height));
     
+    // Log Profiling Data (every 1 second)
+    static auto lastTime = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTime).count() >= 1000) {
+        lastTime = now;
+        
+        const auto& times = graph.GetPassExecutionTimes();
+        if (!times.empty()) {
+            double total = 0.0;
+            std::cout << "\n=== GPU Frame Profiler (ms) ===" << std::endl;
+            
+            // Sort by order in passes list for consistent output
+            const auto& passes = graph.GetPasses();
+            for (auto* pass : passes) {
+                if (times.count(pass->GetName())) {
+                    double t = times.at(pass->GetName());
+                    std::cout << std::left << std::setw(30) << pass->GetName() << ": " 
+                              << std::fixed << std::setprecision(3) << t << " ms" << std::endl;
+                    total += t;
+                }
+            }
+            std::cout << "-----------------------------------" << std::endl;
+            std::cout << std::left << std::setw(30) << "Total GPU Time" << ": " 
+                      << std::fixed << std::setprecision(3) << total << " ms" 
+                      << " (" << std::setprecision(1) << (total > 0.0 ? 1000.0 / total : 0.0) << " FPS)" << std::endl;
+            std::cout << "===================================" << std::endl;
+        }
+    }
+
     std::cout << "RenderGraphDebug: Drawing " << vertices_.size() << " vertices. Passes: " << graph.GetPasses().size() 
               << " Screen: " << width << "x" << height 
               << " Scale: " << scale_ << " Offset: " << offset_.x << "," << offset_.y << std::endl;

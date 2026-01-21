@@ -39,6 +39,8 @@ public:
     
     virtual void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override {}
 
+    virtual void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {}
+
     virtual bool Initialize() override { return true; }
 
 protected:
@@ -55,6 +57,7 @@ public:
     virtual bool IsValid() const override { return true; }
     virtual const DeviceInfo& GetDeviceInfo() const override { static DeviceInfo info; return info; }
     virtual const DeviceDesc& GetDesc() const override { static DeviceDesc desc; return desc; }
+    virtual double GetTimestampPeriod() const override { return 1.0; }
     virtual void WaitIdle() const override {}
     virtual void Shutdown() override {}
     virtual bool Submit(const QueueSubmitInfo& info) override { return true; }
@@ -97,6 +100,7 @@ public:
     virtual void DestroyPipeline(PipelineHandle) override {}
     virtual void* MapBuffer(ResourceHandle, u64 = 0, u64 = 0) override { return nullptr; }
     virtual void UnmapBuffer(ResourceHandle) override {}
+    virtual bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override { return false; }
     virtual RHIGarbageCollector& GetGarbageCollector() override { static RHIGarbageCollector gc; return gc; }
 
 private:

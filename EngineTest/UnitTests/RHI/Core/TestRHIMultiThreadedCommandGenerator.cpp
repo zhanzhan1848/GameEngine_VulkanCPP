@@ -117,6 +117,7 @@ public:
 
     QueryPoolHandle createQueryPoolImpl(const QueryPoolDesc& desc) { return handles::INVALID_QUERY_POOL; }
     void destroyQueryPoolImpl(QueryPoolHandle handle) {}
+    bool getQueryPoolResultsImpl(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) { return false; }
 
     SamplerHandle createSamplerImpl(const SamplerDesc& desc) { return handles::INVALID_SAMPLER; }
     void destroySamplerImpl(SamplerHandle handle) {}
@@ -144,6 +145,8 @@ public:
     bool WaitForSync(SyncHandle handle, u32 timeoutMs) {
         return true; // Mock实现，总是返回成功
     }
+
+    double getTimestampPeriodImpl() const { return 1.0; }
     
 private:
     // === 私有成员变量 ===

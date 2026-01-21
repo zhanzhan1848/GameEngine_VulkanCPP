@@ -78,7 +78,10 @@ public:
     void DestroyRenderPass(RenderPassHandle handle) override {}
     void* MapBuffer(ResourceHandle handle, u64 offset = 0, u64 size = 0) override { return nullptr; }
     void UnmapBuffer(ResourceHandle handle) override {}
+    bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override { return false; }
     
+    double GetTimestampPeriod() const override { return 1.0; }
+
     RHIGarbageCollector& GetGarbageCollector() override {
         static RHIGarbageCollector gc;
         return gc;

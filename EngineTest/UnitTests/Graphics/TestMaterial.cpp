@@ -136,6 +136,7 @@ public:
 
     QueryPoolHandle CreateQueryPool(const QueryPoolDesc&) override { return handles::INVALID_QUERY_POOL; }
     // DestroyQueryPool is already defined above
+    bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override { return false; }
     
     RHISwapChain* CreateSwapChain(const SwapChainDesc& /*desc*/) override { return nullptr; }
     void DestroySwapChain(RHISwapChain* /*swapChain*/) override {}
@@ -147,6 +148,7 @@ public:
     bool IsValid() const override { return true; }
     const DeviceInfo& GetDeviceInfo() const override { static DeviceInfo info; return info; }
     const DeviceDesc& GetDesc() const override { static DeviceDesc desc; return desc; }
+    double GetTimestampPeriod() const override { return 1.0; }
     
     void WaitIdle() const override {}
     void Shutdown() override {}

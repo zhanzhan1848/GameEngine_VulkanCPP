@@ -194,6 +194,23 @@ enum class QueryType : uint8_t {
 };
 
 /**
+ * @brief 查询结果标志
+ */
+enum class QueryResultFlags : uint8_t {
+    None = 0,
+    Wait = 1 << 0,      ///< 等待结果可用
+    v64 = 1 << 1        ///< 结果为64位
+};
+
+inline QueryResultFlags operator|(QueryResultFlags a, QueryResultFlags b) {
+    return static_cast<QueryResultFlags>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
+
+inline QueryResultFlags operator&(QueryResultFlags a, QueryResultFlags b) {
+    return static_cast<QueryResultFlags>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
+}
+
+/**
  * @brief 资源状态枚举
  * @details 描述资源的当前状态和生命周期
  */
@@ -235,6 +252,30 @@ enum class BufferType : uint8_t {
     Indirect            = 6,    ///< 间接绘制缓冲区
     AccelerationStructure = 7   ///< 加速结构缓冲区
 };
+
+/**
+ * @brief 缓冲区用途标志
+ */
+enum class BufferUsageFlags : uint32_t {
+    None = 0,
+    TransferSrc = 1 << 0,
+    TransferDst = 1 << 1,
+    UniformTexel = 1 << 2,
+    StorageTexel = 1 << 3,
+    Uniform = 1 << 4,
+    Storage = 1 << 5,
+    Index = 1 << 6,
+    Vertex = 1 << 7,
+    Indirect = 1 << 8
+};
+
+inline BufferUsageFlags operator|(BufferUsageFlags a, BufferUsageFlags b) {
+    return static_cast<BufferUsageFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+inline BufferUsageFlags operator&(BufferUsageFlags a, BufferUsageFlags b) {
+    return static_cast<BufferUsageFlags>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+}
 
 /**
  * @brief 纹理类型
@@ -1105,6 +1146,12 @@ struct RenderPassDesc {
     ViewportDesc viewport;                       ///< 视口
     Rect scissor;                               ///< 裁剪矩形
     
+    // Timestamp Queries
+    QueryPoolHandle timestampQueryPool{handles::INVALID_QUERY_POOL};
+    uint32_t beginTimestampIndex{0};
+    uint32_t endTimestampIndex{0};
+    bool enableTimestamp{false};
+
     RenderPassDesc() {
         colorAttachments.reserve(constants::MAX_RENDER_TARGETS);
     }

@@ -967,6 +967,13 @@ void CSMIntegrationRenderGraphTestCase::Run() {
         
         cmd->End();
         cmd->Submit();
+        
+        // Wait for completion before destroying to ensure no async callbacks write to the memory
+        cmd->WaitForCompletion();
+        
+        // Destroy Command Buffer immediately after submission
+        // In a real engine, this might be deferred or pooled, but here we prevent leak
+        device->DestroyCommandBuffer(cmdHandle);
     }
 
     // Input Update

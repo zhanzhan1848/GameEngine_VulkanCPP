@@ -97,6 +97,8 @@ public:
     void destroySwapChainImpl(RHISwapChain* swapChain) {
     }
     
+    double getTimestampPeriodImpl() const { return 1.0; }
+
     // 同步对象创建实现
     SyncHandle createSyncImpl() {
         return nextSyncHandle_++;
@@ -106,6 +108,7 @@ public:
 
     QueryPoolHandle createQueryPoolImpl(const QueryPoolDesc& desc) { return handles::INVALID_QUERY_POOL; }
     void destroyQueryPoolImpl(QueryPoolHandle handle) {}
+    bool getQueryPoolResultsImpl(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) { return false; }
 
     SamplerHandle createSamplerImpl(const SamplerDesc& desc) { return handles::INVALID_SAMPLER; }
     void destroySamplerImpl(SamplerHandle handle) {}

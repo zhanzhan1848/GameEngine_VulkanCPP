@@ -3,6 +3,8 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
+#include <unordered_map>
+#include <string>
 
 namespace primal::graphics {
 
@@ -11,6 +13,9 @@ struct PipelineStatistics {
     double gpuFrameTimeMs{0.0};
     uint32_t drawCallCount{0};
     uint32_t triangleCount{0};
+    
+    // Per-pass GPU execution time in milliseconds
+    std::unordered_map<std::string, double> passExecutionTimes;
 };
 
 class RenderPipeline {

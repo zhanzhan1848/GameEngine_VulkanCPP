@@ -12,10 +12,20 @@ RenderGraph::RenderGraph(rhi::RHIDeviceBase& device) : device_(device) {
 
 RenderGraph::~RenderGraph() {
     Clear();
+    // Cleanup Query Pools
+    for (int i = 0; i < 2; ++i) {
+        if (queryFrames_[i].queryPool != rhi::handles::INVALID_QUERY_POOL) {
+            device_.DestroyQueryPool(queryFrames_[i].queryPool);
+            queryFrames_[i].queryPool = rhi::handles::INVALID_QUERY_POOL;
+        }
+    }
 }
 
 
 void RenderGraph::Clear() {
+    ResolveTimestamps();
+    currentQueryFrameIndex_ = 1 - currentQueryFrameIndex_;
+
     passes_.clear();
     resources_.clear();
     resourceMap_.clear();
@@ -138,6 +148,37 @@ void RenderGraph::Compile() {
 
     // 4. 插入 Barriers
     InsertBarriers();
+
+    // 5. 准备 Timestamp Query Pool
+    auto& currentFrameData = queryFrames_[currentQueryFrameIndex_];
+    uint32_t requiredQueries = static_cast<uint32_t>(activePasses_.size() * 2);
+
+    // 记录 Pass Names
+    currentFrameData.passNames.clear();
+    currentFrameData.passNames.reserve(activePasses_.size());
+    for(auto* pass : activePasses_) {
+        currentFrameData.passNames.push_back(pass->GetName());
+    }
+
+    // 检查并创建/重建 QueryPool
+    if (requiredQueries > 0) {
+        if (currentFrameData.queryPool == rhi::handles::INVALID_QUERY_POOL || currentFrameData.capacity < requiredQueries) {
+            if (currentFrameData.queryPool != rhi::handles::INVALID_QUERY_POOL) {
+                device_.DestroyQueryPool(currentFrameData.queryPool);
+            }
+
+            uint32_t newCapacity = std::max(requiredQueries, 64u); // 最小 64，避免频繁重建
+            // 向上取整到 64 的倍数
+            newCapacity = (newCapacity + 63) & ~63;
+
+            rhi::QueryPoolDesc desc;
+            desc.type = rhi::QueryType::Timestamp;
+            desc.queryCount = newCapacity;
+            currentFrameData.queryPool = device_.CreateQueryPool(desc);
+            currentFrameData.capacity = newCapacity;
+        }
+    }
+    currentFrameData.ready = false;
 }
 
 void RenderGraph::CullPasses() {
@@ -426,7 +467,21 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
     context.cmdBuffer = cmdBuffer;
     context.graph = this;
 
-    for (auto* pass : activePasses_) {
+    auto& currentFrameData = queryFrames_[currentQueryFrameIndex_];
+    rhi::QueryPoolHandle queryPool = currentFrameData.queryPool;
+    bool enableTimestamp = (queryPool != rhi::handles::INVALID_QUERY_POOL);
+
+    for (size_t i = 0; i < activePasses_.size(); ++i) {
+        auto* pass = activePasses_[i];
+        
+        bool hasRenderPass = pass->GetRenderPassDesc().has_value();
+
+        // 1. Write Begin Timestamp
+        // Only write manually if NOT using RenderPass (RenderPass handles it via desc to support Apple Silicon)
+        if (enableTimestamp && !hasRenderPass) {
+            cmdBuffer->WriteTimestamp(queryPool, static_cast<uint32_t>(i * 2));
+        }
+
         // 执行 Pre-Pass Barriers
         const auto& barriers = pass->GetBarriers();
         if (!barriers.empty()) {
@@ -434,16 +489,15 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         }
 
         // 处理自动 RenderPass Begin/End
-        bool hasRenderPass = pass->GetRenderPassDesc().has_value();
         if (hasRenderPass) {
             const auto& rgDesc = pass->GetRenderPassDesc().value();
             rhi::RenderPassDesc desc;
             
             // 转换 Color Attachments
             desc.colorAttachments.resize(rgDesc.colors.size());
-            for (size_t i = 0; i < rgDesc.colors.size(); ++i) {
-                const auto& src = rgDesc.colors[i];
-                auto& dst = desc.colorAttachments[i];
+            for (size_t k = 0; k < rgDesc.colors.size(); ++k) {
+                const auto& src = rgDesc.colors[k];
+                auto& dst = desc.colorAttachments[k];
                 
                 auto* res = GetResource(src.texture);
                 if (res) {
@@ -476,6 +530,14 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
                 desc.stencilAttachment.clearValue = rhi::ClearValue(1.0f, rgDesc.depthStencil.clearStencil); // Stencil clear value
             }
 
+            // Timestamp in RenderPass (Metal optimization)
+            if (enableTimestamp) {
+                desc.enableTimestamp = true;
+                desc.timestampQueryPool = queryPool;
+                desc.beginTimestampIndex = static_cast<uint32_t>(i * 2);
+                desc.endTimestampIndex = static_cast<uint32_t>(i * 2 + 1);
+            }
+
             // Begin RenderPass
             cmdBuffer->BeginRenderPass(desc);
         }
@@ -485,6 +547,18 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         if (hasRenderPass) {
             cmdBuffer->EndRenderPass();
         }
+
+        // 2. Write End Timestamp (only if NOT in RenderPass, because RenderPass handles it automatically via desc)
+        // BUT wait, WriteTimestamp in MetalCommandBuffer.cpp is disabled for RenderPassEncoder on Apple Silicon.
+        // So we rely on RenderPassDesc to capture timestamps.
+        // However, if the pass is NOT a RenderPass (e.g. Compute), we MUST use WriteTimestamp.
+        if (enableTimestamp && !hasRenderPass) {
+            cmdBuffer->WriteTimestamp(queryPool, static_cast<uint32_t>(i * 2 + 1));
+        }
+    }
+
+    if (enableTimestamp) {
+        currentFrameData.ready = true;
     }
 }
 
@@ -546,6 +620,43 @@ std::string RenderGraph::DumpGraphViz() const {
 
     ss << "}\n";
     return ss.str();
+}
+
+void RenderGraph::ResolveTimestamps() {
+    uint32_t prevFrameIndex = 1 - currentQueryFrameIndex_;
+    auto& frameData = queryFrames_[prevFrameIndex];
+
+    if (!frameData.ready || frameData.queryPool == rhi::handles::INVALID_QUERY_POOL) {
+        return;
+    }
+
+    uint32_t passCount = static_cast<uint32_t>(frameData.passNames.size());
+    if (passCount == 0) return;
+
+    std::vector<uint64_t> results(passCount * 2);
+    // 使用 0 作为 offset (假设 RHI 实现正确处理)
+    // 注意：GetQueryPoolResults 是我们刚添加到 RHIDevice 的接口
+    if (device_.GetQueryPoolResults(frameData.queryPool, 0, passCount * 2, results.data(), sizeof(uint64_t))) {
+        passExecutionTimes_.clear();
+        
+        // 假设 1 tick = 1 nanosecond (Apple Silicon Metal)
+        // 转换为毫秒: / 1,000,000.0
+        double timestampPeriod = device_.GetTimestampPeriod();
+        
+        for (uint32_t i = 0; i < passCount; ++i) {
+            uint64_t start = results[2 * i];
+            uint64_t end = results[2 * i + 1];
+            
+            // 简单的溢出检查和有效性检查
+            if (end > start && start != 0) {
+                double durationMs = static_cast<double>(end - start) * timestampPeriod / 1000000.0;
+                passExecutionTimes_[frameData.passNames[i]] = durationMs;
+            }
+        }
+    }
+    
+    frameData.ready = false;
+    // frameData.passNames.clear(); // 不在这里清除，而在 Compile 开始时清除并重新填充
 }
 
 } // namespace primal::graphics::rendergraph

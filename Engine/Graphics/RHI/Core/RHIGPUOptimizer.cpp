@@ -85,7 +85,7 @@ void RHIGPUOptimizer::Shutdown() {
     }
     
     // 等待所有待提交的命令缓冲区完成
-    device_.WaitIdle();
+    // device_.WaitIdle();
     
     // 清理资源
     std::lock_guard<std::mutex> cacheLock(cacheMutex_);
@@ -477,6 +477,11 @@ f64 RHIGPUOptimizer::GetCurrentTimestamp() {
     return std::chrono::duration<double, std::milli>(duration).count();
 }
 
+void RHIGPUOptimizer::RecordPassExecutionTime(const std::string& passName, f64 timeMs) {
+    std::lock_guard<std::mutex> metricsLock(metricsMutex_);
+    currentMetrics_.passExecutionTimes[passName] = timeMs;
+}
+
 bool RHIGPUOptimizer::CacheResourceBinding(ResourceHandle resource, u32 bindSlot) {
     if (!config_.enableResourceBindingCache || resource == handles::INVALID_RESOURCE) {
         return false;
@@ -564,6 +569,13 @@ const char* RHIGPUOptimizer::GetOptimizationStatistics() const {
     oss << "当前内存使用: " << (currentMetrics_.currentMemoryUsage / 1024 / 1024) << " MB\n";
     oss << "峰值内存使用: " << (currentMetrics_.peakMemoryUsage / 1024 / 1024) << " MB\n";
     
+    if (!currentMetrics_.passExecutionTimes.empty()) {
+        oss << "=== Pass Execution Times ===\n";
+        for (const auto& pair : currentMetrics_.passExecutionTimes) {
+            oss << pair.first << ": " << std::fixed << std::setprecision(3) << pair.second << " ms\n";
+        }
+    }
+
     {
         std::lock_guard<std::mutex> cacheLock(cacheMutex_);
         oss << "缓存的命令缓冲区: " << commandBufferCache_.size() << "\n";

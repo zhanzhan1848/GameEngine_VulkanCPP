@@ -98,7 +98,8 @@ public:
     // Dispatch
     void Dispatch(uint32_t, uint32_t, uint32_t) override {}
     void DispatchIndirect(ResourceHandle, uint64_t) override {}
-    
+
+    void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {} 
     // Resource Ops
     void CopyBuffer(ResourceHandle, ResourceHandle, uint64_t, uint64_t, uint64_t) override {}
     void CopyBufferToTexture(ResourceHandle, ResourceHandle, const BufferTextureCopyRegion*, uint32_t) override {}
@@ -128,6 +129,7 @@ public:
     bool IsValid() const override { return true; }
     const DeviceInfo& GetDeviceInfo() const override { static DeviceInfo info; return info; }
     const DeviceDesc& GetDesc() const override { static DeviceDesc desc; return desc; }
+    double GetTimestampPeriod() const override { return 1.0; }
     void WaitIdle() const override {}
     void Shutdown() override {}
     
@@ -149,6 +151,7 @@ public:
     // QueryPool
     QueryPoolHandle CreateQueryPool(const QueryPoolDesc&) override { return handles::INVALID_QUERY_POOL; }
     void DestroyQueryPool(QueryPoolHandle) override {}
+    bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override { return false; }
     
     // Sampler
     SamplerHandle CreateSampler(const SamplerDesc&) override { return handles::INVALID_SAMPLER; }

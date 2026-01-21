@@ -216,6 +216,14 @@ protected:
      */
     void destroyQueryPoolImpl(QueryPoolHandle handle);
 
+    bool getQueryPoolResultsImpl(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride);
+
+    /**
+     * @brief 获取时间戳周期实现
+     * @return 时间戳周期（纳秒）
+     */
+    double getTimestampPeriodImpl() const { return 1.0; }
+
     /**
      * @brief 创建交换链实现
      */
@@ -259,6 +267,8 @@ protected:
     // === 资源销毁接口实现 ===
 
     void destroyBufferImpl(ResourceHandle handle);
+    
+    // 内存管理辅助
     void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size);
     void unmapBufferImpl(ResourceHandle handle);
     void destroyTextureImpl(ResourceHandle handle);

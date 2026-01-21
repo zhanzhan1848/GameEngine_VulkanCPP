@@ -83,6 +83,8 @@ public:
     void DrawIndirect(ResourceHandle, uint64_t, uint32_t) override {}
     void BindComputePipeline(PipelineHandle) override {}
 
+    void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {}
+
     // Tracking flags
     bool drawCalled = false;
     uint32_t drawCallCount = 0;
@@ -129,6 +131,7 @@ public:
     // Implement required methods for RHIDevice<Derived>
     bool initializeImpl() { return true; }
     void shutdownImpl() {}
+    double getTimestampPeriodImpl() const { return 1.0; }
     void waitIdleImpl() const {}
     void beginFrameImpl() {}
     void endFrameImpl() {}
@@ -147,6 +150,7 @@ public:
     
     QueryPoolHandle createQueryPoolImpl(const QueryPoolDesc&) { return handles::INVALID_QUERY_POOL; }
     void destroyQueryPoolImpl(QueryPoolHandle) {}
+    bool getQueryPoolResultsImpl(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) { return false; }
     SamplerHandle createSamplerImpl(const SamplerDesc&) { return (SamplerHandle)7001; }
     void destroySamplerImpl(SamplerHandle) {}
     DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc&) { return (DescriptorSetLayoutHandle)4001; }

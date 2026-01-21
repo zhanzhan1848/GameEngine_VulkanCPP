@@ -683,6 +683,12 @@ void MetalDevice::destroyQueryPoolImpl(QueryPoolHandle handle) {
     queryPoolAllocator_.Free(static_cast<uint32_t>(handle));
 }
 
+bool MetalDevice::getQueryPoolResultsImpl(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) {
+    MetalQueryPool* pool = GetQueryPool(handle);
+    if (!pool) return false;
+    return pool->GetResults(firstQuery, queryCount, data, stride);
+}
+
 RHISwapChain* MetalDevice::createSwapChainImpl(const SwapChainDesc& desc) {
     MetalSwapChain* swapChain = new MetalSwapChain(*this, desc);
     if (swapChain && swapChain->Initialize()) {

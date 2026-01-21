@@ -58,6 +58,8 @@ public:
     void shutdownImpl() {
         // Mock implementation
     }
+
+    double getTimestampPeriodImpl() const { return 1.0; }
     
     // 资源创建实现（测试用，返回无效句柄）
     ResourceHandle createBufferImpl(const BufferDesc& desc) {
@@ -106,6 +108,10 @@ public:
 
     QueryPoolHandle createQueryPoolImpl(const QueryPoolDesc& desc) {
         return handles::INVALID_QUERY_POOL;
+    }
+    
+    bool getQueryPoolResultsImpl(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) {
+        return false;
     }
 
     CommandBufferHandle createCommandBufferImpl(CommandQueueType type) {
@@ -217,6 +223,8 @@ protected:
         currentState_ = CommandBufferState::RecordingEnded;
     }
     
+    void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {}
+
     void SetViewport(const ViewportDesc& viewport) override { (void)viewport; }
     void SetScissor(const Rect& scissor) override { (void)scissor; }
     void BindGraphicsPipeline(PipelineHandle pipeline) override { 

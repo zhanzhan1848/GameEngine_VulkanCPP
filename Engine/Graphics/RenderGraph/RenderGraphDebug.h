@@ -25,6 +25,7 @@ public:
 private:
     void CreatePipeline();
     void BuildGraphMesh(const RenderGraph& graph);
+    void BuildTimelineMesh(const RenderGraph& graph, float width, float height);
 
     rhi::RHIDeviceBase& device_;
     std::string shaderPath_;
@@ -76,6 +77,9 @@ private:
         math::v4 color;
     };
     std::unordered_map<std::string, NodeLayout> layoutCache_;
+
+    // Timing
+    // double lastLogTime_ = 0.0; // Removed unused warning
 };
 
 }
