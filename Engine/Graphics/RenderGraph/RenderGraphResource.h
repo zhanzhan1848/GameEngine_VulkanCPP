@@ -13,13 +13,14 @@ class RenderGraphPass;
  */
 class RenderGraphResource {
 public:
-    RenderGraphResource(const std::string& name, RGResourceHandle handle)
-        : name_(name), handle_(handle) {}
+    RenderGraphResource(const std::string& name, RGResourceHandle handle, RGResourceType type)
+        : name_(name), handle_(handle), type_(type) {}
     
     virtual ~RenderGraphResource() = default;
 
     const std::string& GetName() const { return name_; }
     RGResourceHandle GetHandle() const { return handle_; }
+    RGResourceType GetType() const { return type_; }
     
     void SetImportedResource(rhi::ResourceHandle handle) {
         physicalHandle_ = handle;
@@ -49,6 +50,7 @@ public:
 protected:
     std::string name_;
     RGResourceHandle handle_;
+    RGResourceType type_;
     RGResourceFlags flags_ = RGResourceFlags::None;
 
     rhi::ResourceHandle physicalHandle_ = rhi::handles::INVALID_RESOURCE; // 实际分配或导入的资源句柄
@@ -66,7 +68,7 @@ protected:
 class RenderGraphTexture : public RenderGraphResource {
 public:
     RenderGraphTexture(const std::string& name, RGResourceHandle handle, const rhi::TextureDesc& desc)
-        : RenderGraphResource(name, handle), desc_(desc) {}
+        : RenderGraphResource(name, handle, RGResourceType::Texture), desc_(desc) {}
 
     const rhi::TextureDesc& GetDesc() const { return desc_; }
 
@@ -80,7 +82,7 @@ private:
 class RenderGraphBuffer : public RenderGraphResource {
 public:
     RenderGraphBuffer(const std::string& name, RGResourceHandle handle, const rhi::BufferDesc& desc)
-        : RenderGraphResource(name, handle), desc_(desc) {}
+        : RenderGraphResource(name, handle, RGResourceType::Buffer), desc_(desc) {}
 
     const rhi::BufferDesc& GetDesc() const { return desc_; }
 

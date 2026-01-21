@@ -24,13 +24,19 @@ public:
     RGResourceHandle Write(RGResourceHandle handle, rhi::ResourceState state = rhi::ResourceState::RenderTarget);
 
     // 创建临时纹理
-    RGResourceHandle CreateTexture(const std::string& name, const rhi::TextureDesc& desc);
+    RGResourceHandle CreateTexture(const std::string& name, const rhi::TextureDesc& desc, rhi::ResourceState state = rhi::ResourceState::RenderTarget);
 
     // 创建临时缓冲区
-    RGResourceHandle CreateBuffer(const std::string& name, const rhi::BufferDesc& desc);
+    RGResourceHandle CreateBuffer(const std::string& name, const rhi::BufferDesc& desc, rhi::ResourceState state = rhi::ResourceState::UnorderedAccess);
+
+    // 声明 Render Pass 描述符 (用于 Graphics Pass)
+    void DeclareRenderPass(const RGRenderPassDesc& desc);
 
     // 标记 Pass 有副作用 (防止被剔除)
     void SideEffect();
+
+    RenderGraph& GetGraph() { return graph_; }
+    const RenderGraph& GetGraph() const { return graph_; }
 
 private:
     RenderGraph& graph_;

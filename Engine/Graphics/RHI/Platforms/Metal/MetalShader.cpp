@@ -46,7 +46,15 @@ bool MetalShader::Initialize() {
         // std::cout << "[MetalShader] Compiling from source..." << std::endl;
         NS::String* source = NS::String::alloc()->init(static_cast<const char*>(data_), NS::UTF8StringEncoding);
         if (!source) {
-             std::cerr << "[MetalShader] Failed to create NS::String from source data" << std::endl;
+             std::cerr << "[MetalShader] Failed to create NS::String from source data (UTF8). Trying ASCII..." << std::endl;
+             source = NS::String::alloc()->init(static_cast<const char*>(data_), NS::ASCIIStringEncoding);
+        }
+        if (!source) {
+             std::cerr << "[MetalShader] Failed to create NS::String from source data (ASCII). Trying MacOSRoman..." << std::endl;
+             source = NS::String::alloc()->init(static_cast<const char*>(data_), NS::MacOSRomanStringEncoding);
+        }
+        if (!source) {
+             std::cerr << "[MetalShader] Failed to create NS::String from source data (All encodings failed)." << std::endl;
              return false;
         }
         MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();

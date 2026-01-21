@@ -80,6 +80,10 @@ public:
         return handles::INVALID_PIPELINE;
     }
 
+    RenderPassHandle createRenderPassImpl(const RenderPassDesc& desc) {
+        return handles::INVALID_RENDER_PASS;
+    }
+
     void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) { return nullptr; }
     void unmapBufferImpl(ResourceHandle handle) {}
     
@@ -113,6 +117,7 @@ public:
     void destroyTextureImpl(ResourceHandle handle) {}
     void destroyShaderImpl(ShaderHandle handle) {}
     void destroyPipelineImpl(PipelineHandle handle) {}
+    void destroyRenderPassImpl(RenderPassHandle handle) {}
     void destroyCommandBufferImpl(CommandBufferHandle handle) {}
     // 销毁管线布局实现
     void destroyPipelineLayoutImpl(PipelineLayoutHandle handle) {}

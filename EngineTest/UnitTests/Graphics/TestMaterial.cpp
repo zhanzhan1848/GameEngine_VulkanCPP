@@ -140,6 +140,9 @@ public:
     RHISwapChain* CreateSwapChain(const SwapChainDesc& /*desc*/) override { return nullptr; }
     void DestroySwapChain(RHISwapChain* /*swapChain*/) override {}
 
+    RenderPassHandle CreateRenderPass(const RenderPassDesc& /*desc*/) override { return handles::INVALID_RENDER_PASS; }
+    void DestroyRenderPass(RenderPassHandle /*handle*/) override {}
+
     // Explicitly implementing pure virtuals from RHIDeviceBase
     bool IsValid() const override { return true; }
     const DeviceInfo& GetDeviceInfo() const override { static DeviceInfo info; return info; }

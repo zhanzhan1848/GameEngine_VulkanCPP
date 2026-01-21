@@ -33,6 +33,18 @@ enum class RGPassType {
     AsyncCopy
 };
 
+// Pass 分类
+enum class RGPassCategory {
+    None,
+    Visibility,     // Z-Prepass / Visibility Buffer
+    Depth,          // Shadow Maps
+    Main,           // GBuffer / Forward Lighting
+    Lighting,       // Deferred Lighting / Global Illumination (SSAO, SSGI)
+    PostProcess,    // Bloom, ToneMapping, Color Grading
+    UI,             // User Interface
+    Present         // Final Blit
+};
+
 // 资源访问类型
 enum class RGAccessType {
     Read,
@@ -48,6 +60,13 @@ enum class RGResourceFlags {
     Transient = 1 << 2  // 临时资源 (自动管理生命周期)
 };
 
+// 资源类型
+enum class RGResourceType {
+    Unknown,
+    Texture,
+    Buffer
+};
+
 inline RGResourceFlags operator|(RGResourceFlags a, RGResourceFlags b) {
     return static_cast<RGResourceFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
 }
@@ -56,4 +75,37 @@ inline bool HasFlag(RGResourceFlags flags, RGResourceFlags flag) {
     return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(flag)) != 0;
 }
 
+struct RGAttachmentDesc {
+    RGResourceHandle texture = kInvalidRGResourceHandle;
+    uint32_t level = 0;
+    uint32_t slice = 0;
+    rhi::LoadAction loadOp = rhi::LoadAction::DontCare;
+    rhi::StoreAction storeOp = rhi::StoreAction::DontCare;
+    rhi::ClearValue clearColor = {0, 0, 0, 0};
+    
+    // Depth/Stencil specific
+    rhi::LoadAction depthLoadOp = rhi::LoadAction::DontCare;
+    rhi::StoreAction depthStoreOp = rhi::StoreAction::DontCare;
+    rhi::LoadAction stencilLoadOp = rhi::LoadAction::DontCare;
+    rhi::StoreAction stencilStoreOp = rhi::StoreAction::DontCare;
+    float clearDepth = 1.0f;
+    uint8_t clearStencil = 0;
+};
+
+struct RGRenderPassDesc {
+    std::vector<RGAttachmentDesc> colors;
+    RGAttachmentDesc depthStencil;
+};
+
 } // namespace primal::graphics::rendergraph
+
+namespace std {
+    template<>
+    struct hash<primal::graphics::rendergraph::RGResourceHandle> {
+        size_t operator()(const primal::graphics::rendergraph::RGResourceHandle& handle) const {
+            // Combine index and version
+            // A simple hash combination
+            return std::hash<uint32_t>()(handle.index) ^ (std::hash<uint32_t>()(handle.version) << 1);
+        }
+    };
+}

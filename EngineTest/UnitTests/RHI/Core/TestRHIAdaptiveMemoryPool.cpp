@@ -74,6 +74,8 @@ public:
     PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override { return handles::INVALID_PIPELINE; }
     PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) override { return handles::INVALID_PIPELINE; }
     void DestroyPipeline(PipelineHandle handle) override {}
+    RenderPassHandle CreateRenderPass(const RenderPassDesc& desc) override { return handles::INVALID_RENDER_PASS; }
+    void DestroyRenderPass(RenderPassHandle handle) override {}
     void* MapBuffer(ResourceHandle handle, u64 offset = 0, u64 size = 0) override { return nullptr; }
     void UnmapBuffer(ResourceHandle handle) override {}
     

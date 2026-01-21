@@ -290,13 +290,22 @@ vertex VertexOut vertexMain(
     return out;
 }
 
+struct FragmentOut {
+    float4 color [[color(0)]];
+    float4 worldPos [[color(1)]];
+    float4 normal [[color(2)]];
+    float4 uv [[color(3)]];
+};
+
 // Fragment Shader
-fragment float4 fragment_main(VertexOut in [[stage_in]],
+fragment FragmentOut fragment_main(VertexOut in [[stage_in]],
                             constant ForwardLightBuffer& lightData [[buffer(12)]],
                             constant MaterialUniforms& material [[buffer(3)]],
                             texture2d_array<float> shadowMap [[texture(13)]],
                             // texturecube_array<float> shadowCubeMap [[texture(14)]], // Removed
                             sampler shadowSampler [[sampler(13)]]) {
+    
+    FragmentOut out;
     
     // DEBUG: Force Red Color to verify Geometry
     // return float4(1.0, 0.0, 0.0, 1.0);
@@ -347,98 +356,15 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
                  // Sample VSM with Poisson Distribution
                  shadowFactor = SampleShadowVSM(shadowMap, shadowSampler, float3(shadowUV, shadowCoord.z), float(cascadeIndex), minVariance, in.position.xy);
             }
-        }
-
-    // Accumulate Lighting
-    float3 totalDiffuse = material.color.rgb * light.colorAndShadow.rgb * NdotL * shadowFactor;
-
-    // DEBUG: Visualize Moments
-    // float2 m = shadowMap.sample(shadowSampler, shadowUV, uint(cascadeIndex)).xy;
-    // return float4(m.x, m.y, 0.0, 1.0);
-    
-    // DEBUG: Visualize Shadow Factor
-    // return float4(float3(shadowFactor), 1.0);
-    
-    // DEBUG: Visualize Cascade Index
-    /*
-    if (cascadeIndex == 0) return float4(1.0, 0.0, 0.0, 1.0);
-    if (cascadeIndex == 1) return float4(0.0, 1.0, 0.0, 1.0);
-    if (cascadeIndex == 2) return float4(0.0, 0.0, 1.0, 1.0);
-    return float4(1.0, 1.0, 0.0, 1.0);
-    */
-
-    // DEBUG: Visualize Shadow Coord Z
-    // return float4(shadowCoord.z, shadowCoord.z, shadowCoord.z, 1.0);
-
-
-
-    // Punctual Lights Loop
-    for (uint i = 0; i < lightData.punctualLightCount; ++i) {
-        LightParameters pLight = lightData.lights[i];
-        
-        float3 L_vec = pLight.position - in.worldPos;
-        float dist = length(L_vec);
-        float3 L_dir = normalize(L_vec);
-        
-        if (dist > pLight.range) continue;
-        
-        // Attenuation
-        float distSq = dist * dist;
-        float rangeSq = pLight.range * pLight.range;
-        float att = max(0.0, 1.0 - distSq*distSq/(rangeSq*rangeSq));
-        att *= att;
-        
-        // Spot Light Cone
-        if (pLight.lightType == 2) { // Spot
-            float cosAngle = dot(-L_dir, normalize(pLight.direction));
-            if (cosAngle < pLight.cosUmbra) {
-                 att = 0.0;
-            } else {
-                 float t = (cosAngle - pLight.cosUmbra) / (pLight.cosPenumbra - pLight.cosUmbra);
-                 att *= smoothstep(0.0, 1.0, t);
-            }
-        }
-        
-        if (att <= 0.0) continue;
-        
-        float NdotL_p = max(dot(N, L_dir), 0.0);
-        float pShadow = 1.0;
-        
-        if (pLight.shadowIndex >= 0) {
-            
-            if (pLight.lightType == 2) { // Spot Shadow
-                 float4 pShadowCoord = pLight.viewProjection * float4(in.worldPos, 1.0);
-                 pShadowCoord.xyz /= pShadowCoord.w;
-                 
-                 float2 pShadowUV;
-                 pShadowUV.x = pShadowCoord.x * 0.5 + 0.5;
-                 pShadowUV.y = -pShadowCoord.y * 0.5 + 0.5;
-                 
-                 if (pShadowUV.x >= 0.0 && pShadowUV.x <= 1.0 && 
-                     pShadowUV.y >= 0.0 && pShadowUV.y <= 1.0 && 
-                     pShadowCoord.z >= 0.0 && pShadowCoord.z <= 1.0) {
-                      pShadow = SampleShadowVSM(shadowMap, shadowSampler, float3(pShadowUV, pShadowCoord.z), float(pLight.shadowIndex), minVariance, in.position.xy);
-                 } else {
-                      pShadow = 1.0;
-                 }
-            } else if (pLight.lightType == 1) { // Point Shadow
-                 // Direction from light to pixel
-                 // float3 dir = in.worldPos - pLight.position;
-                 // pShadow = SamplePointShadowVSM(shadowCubeMap, shadowSampler, dir, dist, 0.1, pLight.range, minVariance, pLight.shadowIndex, in.position.xy);
-                 pShadow = 1.0;
-            }
-        }
-        
-        totalDiffuse += material.color.rgb * pLight.color * pLight.intensity * att * NdotL_p * pShadow;
     }
-
-    float3 ambient = material.color.rgb * 0.2; // 0.2 Ambient
     
-    // DEBUG: Force Red Color
-    // return float4(1.0, 0.0, 0.0, 1.0);
+    float3 diffuse = material.color.rgb * NdotL * shadowFactor;
+    float3 ambient = material.color.rgb * 0.2;
     
-    // Test NdotL only
-    // return float4(material.color.rgb * NdotL, 1.0);
+    out.color = float4(diffuse + ambient, 1.0);
+    out.worldPos = float4(in.worldPos, 1.0);
+    out.normal = float4(N * 0.5 + 0.5, 1.0); // Map -1..1 to 0..1
+    out.uv = float4(0.0, 0.0, 0.0, 1.0); // No UV in this test yet
     
-    return float4(totalDiffuse + ambient, 1.0);
+    return out;
 }

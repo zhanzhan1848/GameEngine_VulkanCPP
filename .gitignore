@@ -392,3 +392,5 @@ TODO*
 !third_party/FBX_SDK/Mac/lib/
 !third_party/FBX_SDK/Mac/lib/debug/
 !third_party/FBX_SDK/Mac/lib/release/
+
+!Engine/Graphics/RenderPipeline/RenderPasses/Debug/

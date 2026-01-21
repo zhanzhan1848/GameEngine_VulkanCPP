@@ -29,25 +29,25 @@ void RenderGraph::CleanupPool() {
     // Keep resources for some frames to reduce thrashing
     const uint64_t kKeepFrames = 30; 
     
-    auto it = std::remove_if(resourcePool_.begin(), resourcePool_.end(), 
-        [this, kKeepFrames](const PooledResource& res) {
-            if (currentFrame_ > res.lastUsedFrame + kKeepFrames) {
-                if (res.isTexture) {
-                    device_.DestroyTexture(res.handle);
-                } else {
-                    device_.DestroyBuffer(res.handle);
-                }
-                return true;
+    // Manually iterate and erase since custom vector might not support remove_if+erase(iterator)
+    for (size_t i = 0; i < resourcePool_.size(); ) {
+        const auto& res = resourcePool_[i];
+        if (currentFrame_ > res.lastUsedFrame + kKeepFrames) {
+            if (res.isTexture) {
+                device_.DestroyTexture(res.handle);
+            } else {
+                device_.DestroyBuffer(res.handle);
             }
-            return false;
-        });
-    
-    resourcePool_.erase(it, resourcePool_.end());
+            resourcePool_.erase(i);
+        } else {
+            ++i;
+        }
+    }
 }
 
 RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::ResourceHandle resource) {
     RGResourceHandle handle = {static_cast<uint32_t>(resources_.size() + 1), 0};
-    auto rgResource = std::make_unique<RenderGraphResource>(name, handle);
+    auto rgResource = std::make_unique<RenderGraphResource>(name, handle, RGResourceType::Unknown);
     rgResource->SetImportedResource(resource);
     
     resources_.push_back(std::move(rgResource));
@@ -254,8 +254,8 @@ void RenderGraph::AllocateResources() {
     // 2. Build Allocation/Deallocation Events
     // resourcesStartingAt[i] contains resources that are FIRST used in pass i
     // resourcesEndingAt[i] contains resources that are LAST used in pass i
-    std::vector<std::vector<RenderGraphResource*>> resourcesStartingAt(activePasses_.size());
-    std::vector<std::vector<RenderGraphResource*>> resourcesEndingAt(activePasses_.size());
+    utl::vector<utl::vector<RenderGraphResource*>> resourcesStartingAt(activePasses_.size());
+    utl::vector<utl::vector<RenderGraphResource*>> resourcesEndingAt(activePasses_.size());
 
     for (const auto& resource : resources_) {
         // Only manage transient resources that are not imported
@@ -276,7 +276,7 @@ void RenderGraph::AllocateResources() {
 
     // 3. Track pool usage for current frame
     // poolLocked[k] == true means resourcePool_[k] is assigned to a resource in the current active interval
-    std::vector<bool> poolLocked(resourcePool_.size(), false);
+    utl::vector<bool> poolLocked(resourcePool_.size(), false);
 
     // 4. Simulate Execution to Allocate Resources with Aliasing
     for (uint32_t i = 0; i < activePasses_.size(); ++i) {
@@ -364,7 +364,7 @@ void RenderGraph::AllocateResources() {
 void RenderGraph::InsertBarriers() {
     // 追踪每个资源的当前状态
     // index -> state
-    std::vector<rhi::ResourceState> resourceStates(resources_.size() + 1, rhi::ResourceState::Unknown);
+    utl::vector<rhi::ResourceState> resourceStates(resources_.size() + 1, rhi::ResourceState::Unknown);
 
     for (auto* pass : activePasses_) {
         // 处理输入资源 (Read)
@@ -433,8 +433,119 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
             cmdBuffer->InsertBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
         }
 
+        // 处理自动 RenderPass Begin/End
+        bool hasRenderPass = pass->GetRenderPassDesc().has_value();
+        if (hasRenderPass) {
+            const auto& rgDesc = pass->GetRenderPassDesc().value();
+            rhi::RenderPassDesc desc;
+            
+            // 转换 Color Attachments
+            desc.colorAttachments.resize(rgDesc.colors.size());
+            for (size_t i = 0; i < rgDesc.colors.size(); ++i) {
+                const auto& src = rgDesc.colors[i];
+                auto& dst = desc.colorAttachments[i];
+                
+                auto* res = GetResource(src.texture);
+                if (res) {
+                    dst.texture = res->GetPhysicalHandle();
+                }
+                dst.mipLevel = src.level;
+                dst.arrayLayer = src.slice; // Assuming slice maps to arrayLayer
+                dst.loadOp = src.loadOp;
+                dst.storeOp = src.storeOp;
+                dst.clearValue = src.clearColor;
+            }
+            
+            // 转换 Depth/Stencil Attachment
+            if (rgDesc.depthStencil.texture.IsValid()) {
+                auto* res = GetResource(rgDesc.depthStencil.texture);
+                if (res) {
+                    desc.depthAttachment.texture = res->GetPhysicalHandle();
+                    desc.stencilAttachment.texture = res->GetPhysicalHandle(); // Same texture for depth/stencil
+                }
+                desc.depthAttachment.mipLevel = rgDesc.depthStencil.level;
+                desc.depthAttachment.arrayLayer = rgDesc.depthStencil.slice;
+                desc.depthAttachment.loadOp = rgDesc.depthStencil.depthLoadOp;
+                desc.depthAttachment.storeOp = rgDesc.depthStencil.depthStoreOp;
+                desc.depthAttachment.clearValue = rhi::ClearValue(rgDesc.depthStencil.clearDepth, 0); // Depth clear value
+                
+                desc.stencilAttachment.mipLevel = rgDesc.depthStencil.level;
+                desc.stencilAttachment.arrayLayer = rgDesc.depthStencil.slice;
+                desc.stencilAttachment.loadOp = rgDesc.depthStencil.stencilLoadOp;
+                desc.stencilAttachment.storeOp = rgDesc.depthStencil.stencilStoreOp;
+                desc.stencilAttachment.clearValue = rhi::ClearValue(1.0f, rgDesc.depthStencil.clearStencil); // Stencil clear value
+            }
+
+            // Begin RenderPass
+            cmdBuffer->BeginRenderPass(desc);
+        }
+
         pass->Execute(context);
+
+        if (hasRenderPass) {
+            cmdBuffer->EndRenderPass();
+        }
     }
+}
+
+
+// Helper for Debug
+static std::string GetResourceStateString(rhi::ResourceState state) {
+    switch (state) {
+        case rhi::ResourceState::Unknown: return "Unknown";
+        case rhi::ResourceState::General: return "General";
+        case rhi::ResourceState::ShaderResource: return "ShaderResource";
+        case rhi::ResourceState::RenderTarget: return "RenderTarget";
+        case rhi::ResourceState::DepthStencilReadOnly: return "DepthStencilReadOnly";
+        case rhi::ResourceState::DepthStencil: return "DepthStencil";
+        case rhi::ResourceState::UnorderedAccess: return "UnorderedAccess";
+        case rhi::ResourceState::CopyDest: return "CopyDest";
+        case rhi::ResourceState::CopySource: return "CopySource";
+        case rhi::ResourceState::Present: return "Present";
+        default: return "Unknown";
+    }
+}
+
+std::string RenderGraph::DumpGraphViz() const {
+    std::stringstream ss;
+    ss << "digraph RenderGraph {\n";
+    ss << "  rankdir=LR;\n";
+    ss << "  node [shape=box, style=filled, fontname=\"Helvetica\"];\n";
+
+    // Passes
+    for (const auto* pass : activePasses_) {
+        std::string color = "lightgrey";
+        switch (pass->GetCategory()) {
+            case RGPassCategory::Visibility: color = "lightblue"; break;
+            case RGPassCategory::Depth: color = "lightcyan"; break;
+            case RGPassCategory::Main: color = "lightgreen"; break;
+            case RGPassCategory::Lighting: color = "yellow"; break;
+            case RGPassCategory::PostProcess: color = "orange"; break;
+            case RGPassCategory::UI: color = "pink"; break;
+            case RGPassCategory::Present: color = "red"; break;
+            default: break;
+        }
+        ss << "  \"" << pass->GetName() << "\" [fillcolor=\"" << color << "\"];\n";
+    }
+
+    // Resources and Edges
+    for (const auto* pass : activePasses_) {
+        // Inputs
+        for (const auto& input : pass->GetInputs()) {
+            auto* res = input.resource;
+            ss << "  \"" << res->GetName() << "\" -> \"" << pass->GetName() << "\" [label=\"" << GetResourceStateString(input.state) << "\"];\n";
+            ss << "  \"" << res->GetName() << "\" [shape=ellipse, fillcolor=white];\n";
+        }
+        // Outputs
+        for (const auto& output : pass->GetOutputs()) {
+            auto* res = output.resource;
+            ss << "  \"" << pass->GetName() << "\" -> \"" << res->GetName() << "\" [label=\"" << GetResourceStateString(output.state) << "\"];\n";
+            ss << "  \"" << res->GetName() << "\" [shape=ellipse, fillcolor=white];\n";
+        }
+    }
+
+    ss << "}\n";
+    return ss.str();
 }
 
 } // namespace primal::graphics::rendergraph

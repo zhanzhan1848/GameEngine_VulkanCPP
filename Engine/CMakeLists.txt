@@ -80,6 +80,14 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Debug/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Debug/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/PostProcess/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/PostProcess/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Visibility/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Visibility/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utils/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utils/*.cpp"
     # "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/GraphicsHandle.hpp"
 )
 

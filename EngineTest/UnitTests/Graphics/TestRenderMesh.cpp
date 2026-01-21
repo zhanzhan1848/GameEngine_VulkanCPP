@@ -150,6 +150,9 @@ public:
     RHISwapChain* CreateSwapChain(const SwapChainDesc& /*desc*/) override { return nullptr; }
     void DestroySwapChain(RHISwapChain* /*swapChain*/) override {}
     
+    RenderPassHandle CreateRenderPass(const RenderPassDesc& /*desc*/) override { return handles::INVALID_RENDER_PASS; }
+    void DestroyRenderPass(RenderPassHandle /*handle*/) override {}
+
     ResourceHandle CreateBuffer(const BufferDesc& desc) override {
         auto* res = new MockResource(*this, ResourceDesc(ResourceType::Buffer, (ResourceUsage)desc.bindFlags, desc.usage, desc.size));
         ResourceHandle h = reinterpret_cast<ResourceHandle>(res);

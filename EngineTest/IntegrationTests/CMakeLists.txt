@@ -151,6 +151,7 @@ if(APPLE)
         "TestCSMIntegrationRenderGraph.cpp"
         "MacKeyboard.mm"
         ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Input/InputMac.mm"
     )
     setup_test_target(TestCSMIntegrationRenderGraph)
     target_compile_definitions(TestCSMIntegrationRenderGraph PRIVATE "TEST_CSM_RENDERGRAPH=1" "TEST_RENDERER=0")

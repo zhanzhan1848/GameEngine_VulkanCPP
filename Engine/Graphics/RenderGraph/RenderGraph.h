@@ -15,6 +15,7 @@ namespace primal::graphics::rendergraph {
  * @details 负责管理 Pass、资源以及图的编译和执行
  */
 class RenderGraph {
+    friend class RenderGraphBuilder;
 public:
     RenderGraph(rhi::RHIDeviceBase& device);
     ~RenderGraph();
@@ -26,8 +27,8 @@ public:
      * @brief 添加一个 Pass
      */
     template<typename Data, typename SetupFn, typename ExecuteFn>
-    const Data& AddPass(const std::string& name, RGPassType type, SetupFn setup, ExecuteFn execute) {
-        auto pass = std::make_unique<RenderGraphPassImpl<Data>>(name, type, setup, execute);
+    const Data& AddPass(const std::string& name, RGPassType type, RGPassCategory category, SetupFn setup, ExecuteFn execute) {
+        auto pass = std::make_unique<RenderGraphPassImpl<Data>>(name, type, category, setup, execute);
         auto* passPtr = pass.get();
         passes_.push_back(std::move(pass));
 
@@ -35,6 +36,14 @@ public:
         passPtr->Setup(builder);
 
         return passPtr->GetData();
+    }
+
+    /**
+     * @brief 添加一个 Pass (Legacy)
+     */
+    template<typename Data, typename SetupFn, typename ExecuteFn>
+    const Data& AddPass(const std::string& name, RGPassType type, SetupFn setup, ExecuteFn execute) {
+        return AddPass<Data>(name, type, RGPassCategory::None, setup, execute);
     }
 
     /**
@@ -69,9 +78,19 @@ public:
     void Execute(rhi::RHICommandBuffer* cmdBuffer);
 
     // 内部接口供 Builder 使用
+    rhi::RHIDeviceBase& GetDevice() { return device_; }
     RGResourceHandle CreateTexture(const std::string& name, const rhi::TextureDesc& desc);
     RGResourceHandle CreateBuffer(const std::string& name, const rhi::BufferDesc& desc);
+
+    // Debug 接口
+    const utl::vector<RenderGraphPass*>& GetPasses() const { return activePasses_; }
+    const utl::vector<std::unique_ptr<RenderGraphResource>>& GetResources() const { return resources_; }
+    std::string DumpGraphViz() const;
+
     RenderGraphResource* GetResource(RGResourceHandle handle);
+
+private:
+    void CleanupPool();
     void RegisterResourceRead(RenderGraphPass* pass, RGResourceHandle handle, rhi::ResourceState state);
     void RegisterResourceWrite(RenderGraphPass* pass, RGResourceHandle handle, rhi::ResourceState state);
 
@@ -90,25 +109,18 @@ private:
     void AllocateResources();
     void InsertBarriers();
 
-    // 资源池辅助方法
-    rhi::ResourceHandle AllocateTexture(const rhi::TextureDesc& desc);
-    rhi::ResourceHandle AllocateBuffer(const rhi::BufferDesc& desc);
-    void ReleaseResource(rhi::ResourceHandle handle);
-    void CleanupPool();
-
     rhi::RHIDeviceBase& device_;
-
-    std::vector<std::unique_ptr<RenderGraphPass>> passes_;
-    std::vector<std::unique_ptr<RenderGraphResource>> resources_;
+    utl::vector<std::unique_ptr<RenderGraphPass>> passes_;
+    utl::vector<std::unique_ptr<RenderGraphResource>> resources_;
     
     // 资源查找表 (Name -> Handle) - 仅用于调试或查找
     std::unordered_map<std::string, RGResourceHandle> resourceMap_;
 
     // 执行顺序 (经过拓扑排序和剔除后)
-    std::vector<RenderGraphPass*> activePasses_;
+    utl::vector<RenderGraphPass*> activePasses_;
 
     // 资源池
-    std::vector<PooledResource> resourcePool_;
+    utl::vector<PooledResource> resourcePool_;
     uint64_t currentFrame_ = 0;
 };
 

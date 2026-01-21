@@ -1,9 +1,11 @@
 #include "TestCSMIntegrationRenderGraph.h"
+#include "Graphics/RenderPipeline/RenderPasses/Debug/DebugPass.h"
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
 #include "Engine/Graphics/RHI/Core/RHIShaderCommon.h"
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalMath.h"
 #include "Engine/Graphics/RenderMesh.h"
+#include "Engine/Input/Input.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -23,7 +25,7 @@ struct MaterialUniformData {
 
 // Engine_Test Implementation
 Engine_Test::Engine_Test() 
-    : primal::test::RenderTestRunner(std::unique_ptr<primal::test::RenderTestCase>(static_cast<primal::test::RenderTestCase*>(new CSMIntegrationRenderGraphTestCase()))) 
+    : primal::test::RenderTestRunner(std::make_unique<CSMIntegrationRenderGraphTestCase>()) 
 {}
 
 
@@ -281,6 +283,9 @@ bool CSMIntegrationRenderGraphTestCase::Initialize() {
     // We hardcode BGRA8_UNORM (standard swapchain format) and D32_Float here.
     utl::vector<DataFormat> rtFormats{}; 
     rtFormats.push_back(DataFormat::BGRA8_UNorm);
+    rtFormats.push_back(DataFormat::RGBA32_Float); // WorldPos
+    rtFormats.push_back(DataFormat::RGBA32_Float); // Normal
+    rtFormats.push_back(DataFormat::RGBA32_Float); // UV
     material->SetRenderTargetFormats(rtFormats, DataFormat::D32_Float);
 
     std::cout << "Step 7b: Shadow Pipeline Configured" << std::endl;
@@ -494,6 +499,15 @@ bool CSMIntegrationRenderGraphTestCase::Initialize() {
     directionalLight.color = {1.0f, 0.95f, 0.8f};
     directionalLight.intensity = 1.0f;
     scene.AddLight(directionalLight);
+
+    // Setup Input
+    using namespace primal::input;
+    input_source source{};
+    source.binding = std::hash<std::string>()("debug_toggle");
+    source.source_type = input_source::keyboard;
+    source.code = input_code::key_f1;
+    source.multiplier = 1.0f;
+    bind(source);
 
     // View
     v3 eye = {0.0f, 5.0f, 10.0f};
@@ -751,7 +765,7 @@ void CSMIntegrationRenderGraphTestCase::Run() {
 
     const auto& shadowData = renderGraph->AddPass<ShadowPassData>("ShadowPass", RGPassType::Graphics,
         [&](ShadowPassData& data, RenderGraphBuilder& builder) {
-            std::cout << "Setup ShadowPass" << std::endl;
+            // std::cout << "Setup ShadowPass" << std::endl;
             // Create Shadow Map (Moments)
             TextureDesc descMoments{};
             descMoments.size = {2048, 2048, 1};
@@ -811,16 +825,34 @@ void CSMIntegrationRenderGraphTestCase::Run() {
 
     struct MainPassData {
         RGResourceHandle backBuffer;
+        RGResourceHandle worldPosBuffer;
+        RGResourceHandle normalBuffer;
+        RGResourceHandle uvBuffer;
         RGResourceHandle shadowMoments;
         RGResourceHandle depthBuffer;
     };
 
-    renderGraph->AddPass<MainPassData>("MainPass", RGPassType::Graphics,
+    const auto& mainPassData = renderGraph->AddPass<MainPassData>("MainPass", RGPassType::Graphics,
         [&](MainPassData& data, RenderGraphBuilder& builder) {
             // Import BackBuffer
             data.backBuffer = renderGraph->ImportTexture("BackBuffer", backBuffer, backBufferDesc);
             data.backBuffer = builder.Write(data.backBuffer, ResourceState::RenderTarget);
             
+            // Create GBuffer Textures
+            TextureDesc descGBuffer{};
+            descGBuffer.size = backBufferDesc.size;
+            descGBuffer.format = DataFormat::RGBA32_Float; // High precision for debug
+            descGBuffer.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource; // Ensure shader resource usage for debug sampling
+            
+            data.worldPosBuffer = builder.CreateTexture("WorldPos", descGBuffer);
+            data.worldPosBuffer = builder.Write(data.worldPosBuffer, ResourceState::RenderTarget);
+            
+            data.normalBuffer = builder.CreateTexture("Normal", descGBuffer);
+            data.normalBuffer = builder.Write(data.normalBuffer, ResourceState::RenderTarget);
+            
+            data.uvBuffer = builder.CreateTexture("UV", descGBuffer);
+            data.uvBuffer = builder.Write(data.uvBuffer, ResourceState::RenderTarget);
+
             // Read Shadow Map (Moments)
             data.shadowMoments = builder.Read(shadowData.shadowMoments, ResourceState::ShaderResource);
 
@@ -853,16 +885,36 @@ void CSMIntegrationRenderGraphTestCase::Run() {
             }
 
             RenderPassDesc desc{};
-            desc.colorAttachments.resize(1);
+            desc.colorAttachments.resize(4);
+            
+            // 0: BackBuffer
             desc.colorAttachments[0].texture = context.graph->GetResource(data.backBuffer)->GetPhysicalHandle();
             desc.colorAttachments[0].loadOp = LoadAction::Clear;
             desc.colorAttachments[0].storeOp = StoreAction::Store;
             desc.colorAttachments[0].clearValue = ClearValue(0.2f, 0.3f, 0.4f, 1.0f);
             
+            // 1: WorldPos
+            desc.colorAttachments[1].texture = context.graph->GetResource(data.worldPosBuffer)->GetPhysicalHandle();
+            desc.colorAttachments[1].loadOp = LoadAction::Clear;
+            desc.colorAttachments[1].storeOp = StoreAction::Store;
+            desc.colorAttachments[1].clearValue = ClearValue(0.0f, 0.0f, 0.0f, 0.0f);
+
+            // 2: Normal
+            desc.colorAttachments[2].texture = context.graph->GetResource(data.normalBuffer)->GetPhysicalHandle();
+            desc.colorAttachments[2].loadOp = LoadAction::Clear;
+            desc.colorAttachments[2].storeOp = StoreAction::Store;
+            desc.colorAttachments[2].clearValue = ClearValue(0.0f, 0.0f, 0.0f, 0.0f);
+            
+            // 3: UV
+            desc.colorAttachments[3].texture = context.graph->GetResource(data.uvBuffer)->GetPhysicalHandle();
+            desc.colorAttachments[3].loadOp = LoadAction::Clear;
+            desc.colorAttachments[3].storeOp = StoreAction::Store;
+            desc.colorAttachments[3].clearValue = ClearValue(0.0f, 0.0f, 0.0f, 0.0f);
+            
             // Depth Buffer
             desc.depthAttachment.texture = context.graph->GetResource(data.depthBuffer)->GetPhysicalHandle();
             desc.depthAttachment.loadOp = LoadAction::Clear;
-            desc.depthAttachment.storeOp = StoreAction::DontCare;
+            desc.depthAttachment.storeOp = StoreAction::Store;
             desc.depthAttachment.clearValue = ClearValue(1.0f, 0);
             
             context.cmdBuffer->BeginRenderPass(desc);
@@ -883,6 +935,17 @@ void CSMIntegrationRenderGraphTestCase::Run() {
             context.cmdBuffer->EndRenderPass();
         }
     );
+
+    // Add Debug Pass
+    std::vector<primal::graphics::DebugResource> debugResources;
+    debugResources.push_back({"ShadowMoments", shadowData.shadowMoments});
+    debugResources.push_back({"ShadowDepth", shadowData.shadowDepth});
+    debugResources.push_back({"MainDepth", mainPassData.depthBuffer});
+    debugResources.push_back({"WorldPos", mainPassData.worldPosBuffer});
+    debugResources.push_back({"Normal", mainPassData.normalBuffer});
+    debugResources.push_back({"UV", mainPassData.uvBuffer});
+    
+    primal::graphics::AddDebugPass(*renderGraph, mainPassData.backBuffer, debugResources);
 
     renderGraph->Compile();
     
@@ -906,32 +969,103 @@ void CSMIntegrationRenderGraphTestCase::Run() {
         cmd->Submit();
     }
 
+    // Input Update
+    primal::input::input_value val;
+    val.previous = val.current;
+    // Note: In a real engine, the platform layer (Window/OS) updates the 'current' value via events.
+    // The 'previous' value should be updated at the end of the frame to prepare for the next frame.
+    // However, primal::input doesn't seem to have a frame-end update function exposed.
+    // It relies on events updating 'current'.
+    // The issue with F1 toggling too fast is that 'previous' is not being updated to 'current' at frame boundaries.
+    // But since primal::input::get reads from internal state, we can't easily fix the internal 'previous' state from here without access.
+    // Wait, primal::input::get returns a value struct that has both previous and current.
+    // The input system implementation (Input.cpp/h) manages the state.
+    // If the input system is event-based (MacKeyboard.mm), it updates 'current' when key is pressed/released.
+    // It does NOT automatically update 'previous' every frame unless there is an explicit 'Update()' call in the engine loop.
+    // Since there is no Input::Update(), 'previous' might only be updated when an event occurs?
+    // Let's look at Input.cpp... (Not visible here, but based on typical behavior)
+    
+    // Actually, for the test to work with the "Toggle" logic in RenderGraphDebug::Update:
+    // It checks (current > 0 && previous == 0).
+    // If 'previous' is never updated to match 'current' after the first frame of press,
+    // then (current > 0 && previous == 0) will be true ONLY for the first frame if 'previous' starts at 0.
+    // BUT, if 'previous' is NOT updated, it remains 0?
+    // If the input system updates 'previous' = 'current' only on events, then holding the key:
+    // Frame 1: Event Down -> current=1. previous (was 0). Logic: 1 > 0 && 0 == 0 -> Toggle!
+    // Frame 2: No Event. current=1. previous? If system didn't update it, it's still 0? -> Toggle again!
+    
+    // To fix this in the Test environment without changing the Engine core deeply:
+    // We rely on the fix we made in RenderGraphDebug.cpp where we added 'f1_pressed_' state.
+    // That fix handles the toggle logic locally regardless of 'previous' state issues.
+    // So we just need to ensure events are processed.
+    // MacKeyboard.mm processes events via callbacks.
+    
     renderSystem.EndFrame();
 }
 
 void CSMIntegrationRenderGraphTestCase::Shutdown() {
-    std::cout << "Shutting down..." << std::endl;
-    device->WaitIdle();
+    // 1. Wait for GPU
+    if (device) {
+        device->WaitIdle();
+    }
     
-    if (cubeMesh) { cubeMesh->Destroy(device.get()); delete cubeMesh; }
-    if (materialInstance) delete materialInstance;
-    if (floorMaterialInstance) delete floorMaterialInstance;
-    if (material) delete material;
-    
-    if (materialSetLayout != handles::INVALID_RESOURCE) device->DestroyDescriptorSetLayout(materialSetLayout);
-    if (pipelineLayout != handles::INVALID_RESOURCE) device->DestroyPipelineLayout(pipelineLayout);
-    if (shadowPipelineLayout != handles::INVALID_RESOURCE) device->DestroyPipelineLayout(shadowPipelineLayout);
-    // shadowPipeline is usually destroyed by device or we can explicitly destroy it if needed.
-    // Assuming device tracks it or we leak it? RHIDevice should track.
-    // But better explicit if API supports it. 
-    // device->DestroyPipeline(shadowPipeline); // RHIDevice.h has DestroyPipeline? No, DestroyGraphicsPipeline.
-    // Let's check RHIDevice.h for DestroyGraphicsPipeline.
-    
-    if (shadowVS != handles::INVALID_SHADER) device->DestroyShader(shadowVS);
-    if (shadowPS != handles::INVALID_SHADER) device->DestroyShader(shadowPS);
-    
+    // 2. Destroy Render Graph (cleans up its resources)
     renderGraph.reset();
+    
+    // 3. Shutdown Debug Pass Static Renderer (Important! Before device destruction)
+    primal::graphics::ShutdownDebugPass();
+
+    // 4. Destroy Scene Resources
+    if (cubeMesh) {
+        delete cubeMesh;
+        cubeMesh = nullptr;
+    }
+    
+    if (materialInstance) {
+        delete materialInstance;
+        materialInstance = nullptr;
+    }
+    
+    if (floorMaterialInstance) {
+        delete floorMaterialInstance;
+        floorMaterialInstance = nullptr;
+    }
+    
+    if (material) {
+        delete material;
+        material = nullptr;
+    }
+    
+    // 5. Destroy RHI Resources
+    if (device) {
+        if (globalSet != handles::INVALID_DESCRIPTOR_SET) device->DestroyDescriptorSet(globalSet);
+        if (shadowGlobalSet != handles::INVALID_DESCRIPTOR_SET) device->DestroyDescriptorSet(shadowGlobalSet);
+        if (perObjectSet != handles::INVALID_DESCRIPTOR_SET) device->DestroyDescriptorSet(perObjectSet);
+        
+        if (globalSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) device->DestroyDescriptorSetLayout(globalSetLayout);
+        if (perObjectSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) device->DestroyDescriptorSetLayout(perObjectSetLayout);
+        if (materialSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) device->DestroyDescriptorSetLayout(materialSetLayout);
+        
+        if (pipelineLayout != handles::INVALID_PIPELINE_LAYOUT) device->DestroyPipelineLayout(pipelineLayout);
+        if (shadowPipelineLayout != handles::INVALID_PIPELINE_LAYOUT) device->DestroyPipelineLayout(shadowPipelineLayout);
+        
+        if (shadowPipeline != handles::INVALID_PIPELINE) device->DestroyPipeline(shadowPipeline);
+        if (shadowVS != handles::INVALID_SHADER) device->DestroyShader(shadowVS);
+        if (shadowPS != handles::INVALID_SHADER) device->DestroyShader(shadowPS);
+        
+        if (globalBuffer != handles::INVALID_RESOURCE) device->DestroyBuffer(globalBuffer);
+        if (shadowGlobalBuffer != handles::INVALID_RESOURCE) device->DestroyBuffer(shadowGlobalBuffer);
+        if (lightBuffer != handles::INVALID_RESOURCE) device->DestroyBuffer(lightBuffer);
+        if (perObjectBuffer != handles::INVALID_RESOURCE) device->DestroyBuffer(perObjectBuffer);
+        
+        if (shadowSampler != handles::INVALID_SAMPLER) device->DestroySampler(shadowSampler);
+    }
+    
     renderSystem.Shutdown();
-    if (window.is_valid()) platform::remove_window(window.get_id());
-    device.reset();
+    
+    if (window.is_valid()) {
+        platform::remove_window(window.get_id());
+    }
+    
+    device.reset(); // Destroy Device Last
 }

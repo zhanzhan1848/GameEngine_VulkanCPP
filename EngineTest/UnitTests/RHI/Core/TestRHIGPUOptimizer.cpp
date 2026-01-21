@@ -57,6 +57,7 @@ public:
     ShaderHandle createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint) { return handles::INVALID_SHADER; }
     PipelineHandle createGraphicsPipelineImpl(const GraphicsPipelineDesc& desc) { return handles::INVALID_PIPELINE; }
     PipelineHandle createComputePipelineImpl(const ComputePipelineDesc& desc) { return handles::INVALID_PIPELINE; }
+    RenderPassHandle createRenderPassImpl(const RenderPassDesc& desc) { return handles::INVALID_RENDER_PASS; }
     CommandBufferHandle createCommandBufferImpl(CommandQueueType type) { return handles::INVALID_COMMAND_BUFFER; }
     
     // 资源销毁实现（测试用，空实现）
@@ -64,6 +65,7 @@ public:
     void destroyTextureImpl(ResourceHandle handle) {}
     void destroyShaderImpl(ShaderHandle handle) {}
     void destroyPipelineImpl(PipelineHandle handle) {}
+    void destroyRenderPassImpl(RenderPassHandle handle) {}
     void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) { return nullptr; }
     void unmapBufferImpl(ResourceHandle handle) {}
     void destroyCommandBufferImpl(CommandBufferHandle handle) {}

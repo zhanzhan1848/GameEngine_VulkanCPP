@@ -77,6 +77,10 @@ public:
         return handles::INVALID_PIPELINE;
     }
     
+    RenderPassHandle createRenderPassImpl(const RenderPassDesc& desc) {
+        return handles::INVALID_RENDER_PASS;
+    }
+
     CommandBufferHandle createCommandBufferImpl(CommandQueueType type) {
         return nextCommandBufferHandle_++;
     }
@@ -86,6 +90,7 @@ public:
     void destroyTextureImpl(ResourceHandle handle) {}
     void destroyShaderImpl(ShaderHandle handle) {}
     void destroyPipelineImpl(PipelineHandle handle) {}
+    void destroyRenderPassImpl(RenderPassHandle handle) {}
     void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) { return nullptr; }
     void unmapBufferImpl(ResourceHandle handle) {}
     void destroyCommandBufferImpl(CommandBufferHandle handle) {}
