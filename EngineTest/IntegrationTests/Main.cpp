@@ -18,6 +18,8 @@
 #include "TestCSMIntegration.h"
 #elif TEST_CSM_RENDERGRAPH
 #include "TestCSMIntegrationRenderGraph.h"
+#elif TEST_MULTIVIEW
+#include "TestMultiView.h"
 #else
 #error One of the tests need to be enabled
 #endif

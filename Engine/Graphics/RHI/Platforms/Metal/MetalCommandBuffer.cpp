@@ -367,6 +367,11 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
         }
     }
 
+    // Set Render Target Array Length (For Layered Rendering)
+    if (desc.renderTargetArrayLength > 1) {
+        passDesc->setRenderTargetArrayLength(desc.renderTargetArrayLength);
+    }
+
     // Setup Timestamp Query
     if (desc.enableTimestamp && desc.timestampQueryPool != handles::INVALID_QUERY_POOL) {
         MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
@@ -880,12 +885,12 @@ void MetalCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, uint32_t quer
 void MetalCommandBuffer::Draw(uint32_t vertexCount, uint32_t startVertex, uint32_t instanceCount, uint32_t startInstance) {
     if (currentEncoderType_ == EncoderType::Render) {
         static_cast<MTL::RenderCommandEncoder*>(currentEncoder_)->drawPrimitives(
-            currentPrimitiveType_,
-            (NS::UInteger)startVertex,
-            (NS::UInteger)vertexCount,
-            (NS::UInteger)instanceCount,
-            (NS::UInteger)startInstance
-        );
+                currentPrimitiveType_,
+                (NS::UInteger)startVertex,
+                (NS::UInteger)vertexCount,
+                (NS::UInteger)instanceCount,
+                (NS::UInteger)startInstance
+            );
     } else {
         std::cerr << "MetalCommandBuffer::Draw: Not in render pass! Type: " << (int)currentEncoderType_ << std::endl;
     }
@@ -906,6 +911,12 @@ void MetalCommandBuffer::DrawIndexed(uint32_t indexCount, uint32_t startIndex, u
             (NS::UInteger)baseVertex,
             (NS::UInteger)startInstance
         );
+    } else {
+        if (currentEncoderType_ != EncoderType::Render) {
+             std::cerr << "MetalCommandBuffer::DrawIndexed: Not in render pass! Type: " << (int)currentEncoderType_ << std::endl;
+        } else if (!currentIndexBuffer_) {
+             std::cerr << "MetalCommandBuffer::DrawIndexed: No Index Buffer Bound!" << std::endl;
+        }
     }
 }
 

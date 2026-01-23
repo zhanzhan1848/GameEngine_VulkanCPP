@@ -73,6 +73,11 @@ void MetalRenderPass::buildDescriptor() {
     mtlPassDesc_ = MTL::RenderPassDescriptor::alloc()->init();
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     
+    // Set Render Target Array Length for Layered Rendering
+    if (desc_.renderTargetArrayLength > 0) {
+        mtlPassDesc_->setRenderTargetArrayLength(desc_.renderTargetArrayLength);
+    }
+    
     cachedColorAttachments_.clear();
     cachedColorAttachments_.reserve(desc_.colorAttachments.size());
 

@@ -28,7 +28,7 @@ function(setup_test_target target_name)
     )
     
     # 定义测试宏
-    target_compile_definitions(${target_name} PRIVATE "PRIMAL_PLUS" "TEST_RENDERER=1")
+    target_compile_definitions(${target_name} PRIVATE "PRIMAL_PLUS")
     
     if(APPLE)
         set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
@@ -156,9 +156,20 @@ if(APPLE)
     setup_test_target(TestCSMIntegrationRenderGraph)
     target_compile_definitions(TestCSMIntegrationRenderGraph PRIVATE "TEST_CSM_RENDERGRAPH=1" "TEST_RENDERER=0")
 
+    # 6. TestMultiView
+    add_executable(TestMultiView
+        "Main.cpp"
+        "TestMultiView.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Input/InputMac.mm"
+    )
+    setup_test_target(TestMultiView)
+    target_compile_definitions(TestMultiView PRIVATE "TEST_MULTIVIEW=1" "TEST_RENDERER=0")
+
 
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph TestMultiView)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

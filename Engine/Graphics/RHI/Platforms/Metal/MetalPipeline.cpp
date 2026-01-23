@@ -377,6 +377,9 @@ MTL::RenderPipelineDescriptor* MetalPipeline::CreateRenderPipelineDescriptor(con
         MTL::RenderPipelineColorAttachmentDescriptor* colorDesc = pipelineDesc->colorAttachments()->object(i);
         colorDesc->setPixelFormat(ToMTLPixelFormat(desc.renderTargetFormats[i]));
         
+        // Force WriteMask All
+        colorDesc->setWriteMask(MTL::ColorWriteMaskAll);
+
         if (desc.enableBlend) {
             colorDesc->setBlendingEnabled(true);
             colorDesc->setRgbBlendOperation(ToMTLBlendOperation(desc.colorBlendOp));

@@ -1152,6 +1152,9 @@ struct RenderPassDesc {
     uint32_t endTimestampIndex{0};
     bool enableTimestamp{false};
 
+    // Multi-View / Layered Rendering
+    uint32_t renderTargetArrayLength{1};
+
     RenderPassDesc() {
         colorAttachments.reserve(constants::MAX_RENDER_TARGETS);
     }

@@ -28,7 +28,11 @@
 #endif
 
 #ifndef TEST_CSM_RENDERGRAPH
-#define TEST_CSM_RENDERGRAPH 1
+#define TEST_CSM_RENDERGRAPH 0
+#endif
+
+#ifndef TEST_MULTIVIEW
+#define TEST_MULTIVIEW 0
 #endif
 
 class Test

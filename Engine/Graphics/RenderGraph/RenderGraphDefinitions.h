@@ -95,6 +95,7 @@ struct RGAttachmentDesc {
 struct RGRenderPassDesc {
     std::vector<RGAttachmentDesc> colors;
     RGAttachmentDesc depthStencil;
+    uint32_t renderTargetArrayLength = 0; // Default to 0 (No Layered Rendering)
 };
 
 } // namespace primal::graphics::rendergraph

@@ -530,6 +530,9 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
                 desc.stencilAttachment.clearValue = rhi::ClearValue(1.0f, rgDesc.depthStencil.clearStencil); // Stencil clear value
             }
 
+            // Set Multi-View / Layered Rendering
+            desc.renderTargetArrayLength = rgDesc.renderTargetArrayLength;
+
             // Timestamp in RenderPass (Metal optimization)
             if (enableTimestamp) {
                 desc.enableTimestamp = true;
