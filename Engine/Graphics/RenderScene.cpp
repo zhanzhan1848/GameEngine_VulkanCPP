@@ -58,6 +58,32 @@ void RenderScene::UpdateLight(id::id_type entityId, const RenderLight& newLight)
     lights_.push_back(newLight);
 }
 
+void RenderScene::AddReflectionPlane(const RenderReflectionPlane& plane) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    reflectionPlanes_.push_back(plane);
+}
+
+void RenderScene::RemoveReflectionPlane(id::id_type entityId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (u64 i = 0; i < reflectionPlanes_.size(); ++i) {
+        if (reflectionPlanes_[i].entityId == entityId) {
+            reflectionPlanes_.erase(i);
+            return;
+        }
+    }
+}
+
+void RenderScene::UpdateReflectionPlane(id::id_type entityId, const RenderReflectionPlane& newPlane) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& plane : reflectionPlanes_) {
+        if (plane.entityId == entityId) {
+            plane = newPlane;
+            return;
+        }
+    }
+    reflectionPlanes_.push_back(newPlane);
+}
+
 utl::vector<const RenderProxy*> RenderScene::Cull(const rhi::Frustum& frustum) const {
     utl::vector<const RenderProxy*> visibleProxies;
     Cull(frustum, visibleProxies);

@@ -10,23 +10,42 @@ struct VertexIn {
     float3 color    [[attribute(3)]]; // Added Color
 };
 
+struct FragmentIn {
+    float4 position [[position]];
+    float4 worldPos [[user(loc10)]];
+    float4 normal [[user(loc11)]];
+    float4 uv [[user(loc12)]];
+    float4 color [[user(loc13)]]; // Pass Color
+    float4 currentClipPos [[user(loc14)]]; // For Screen Space UV
+    float4 previousClipPos [[user(loc15)]]; // For Reprojection UV
+};
+
 struct VertexOut {
     float4 position [[position]];
-    float3 worldPos;
-    float3 normal;
-    float2 uv;
-    float3 color; // Pass Color
-    uint layer [[render_target_array_index]]; // Selects which face to render to
+    float4 worldPos [[user(loc10)]];
+    float4 normal [[user(loc11)]];
+    float4 uv [[user(loc12)]];
+    float4 color [[user(loc13)]]; // Pass Color
+    float4 currentClipPos [[user(loc14)]]; // For Screen Space UV
+    float4 previousClipPos [[user(loc15)]]; // For Reprojection UV
+    uint layer [[render_target_array_index]]; // REMOVED FOR DEBUGGING
 };
 
 struct Uniforms {
     float4x4 viewProjections[6];
+    float4x4 previousViewProjections[6]; // Added for Reprojection UV
 };
 
 struct SceneData {
     float4x4 model;
     float4 lightPos;
     float4 lightColor;
+    float4 reflectionPlane;
+    float4 reflectionPlane2;
+    float4 reflectionPlane3;
+    float4x4 previousModel; // Added for Motion Vectors
+    float2 jitter; // Added for TAA
+    float2 padding;
 };
 
 // Alias PushConstants to SceneData for compatibility
@@ -39,15 +58,25 @@ struct VertexOutSingle {
     float3 normal;
     float2 uv;
     float3 color;
+    float4 currentClipPos;
+    float4 previousClipPos;
+};
+
+// Output structure for Main Pass (Color + Velocity)
+struct FragmentOutSingle {
+    float4 color [[color(0)]];
+    float2 velocity [[color(1)]];
 };
 
 // Reflection Pass Vertex Shader (with Clip Distance)
 struct VertexOutReflection {
     float4 position [[position]];
-    float3 worldPos;
-    float3 normal;
-    float2 uv;
-    float3 color;
+    float4 worldPos [[user(loc10)]];
+    float4 normal   [[user(loc11)]];
+    float4 uv       [[user(loc12)]];
+    float4 color    [[user(loc13)]];
+    float4 currentClipPos [[user(loc14)]];
+    float4 previousClipPos [[user(loc15)]];
     float clipDistance [[clip_distance]];
 };
 
@@ -63,17 +92,21 @@ vertex VertexOutReflection vertexMainReflection(VertexIn in [[stage_in]],
     
     // Model Matrix
     float4 worldPos = scene.model * float4(in.position, 1.0);
-    out.worldPos = worldPos.xyz;
+    out.worldPos = worldPos;
     
     // Normal Matrix
-    out.normal = (scene.model * float4(in.normal, 0.0)).xyz;
+    out.normal = scene.model * float4(in.normal, 0.0);
     
-    out.uv = in.uv;
-    out.color = in.color;
+    out.uv = float4(in.uv, 0.0, 0.0);
+    out.color = float4(in.color, 1.0);
     
     // Use View 0 (Reflection View stored in slot 0 of this special uniform buffer or just reuse existing Uniforms if we update it)
     // We will assume 'uniforms' passed here contains the Reflection View Matrix in viewProjections[0]
     out.position = uniforms.viewProjections[0] * worldPos;
+    
+    // Fill unused attributes to match FragmentIn
+    out.currentClipPos = out.position;
+    out.previousClipPos = out.position; // No motion vectors for reflection pass yet
     
     // Calculate Clip Distance
     // Distance = dot(plane.xyz, worldPos.xyz) + plane.w
@@ -110,26 +143,63 @@ vertex VertexOutMirror vertexMainMirror(VertexIn in [[stage_in]],
 // Mirror Object Fragment Shader
 fragment float4 fragmentMainMirror(VertexOutMirror in [[stage_in]],
                                    texture2d<float> reflectionTex [[texture(0)]],
+                                   texture2d<float> reflectionTex2 [[texture(3)]],
+                                   texture2d<float> reflectionTex3 [[texture(4)]],
                                    constant SceneData& scene [[buffer(2)]]) {
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     
-    // Calculate Screen Space UV
-    // Clip Space: (-1 to 1) -> UV: (0 to 1)
-    float2 uv = (in.clipPos.xy / in.clipPos.w) * 0.5 + 0.5;
-    uv.y = 1.0 - uv.y; // Flip Y for Metal texture sampling
-    
-    float4 reflectionColor = reflectionTex.sample(s, uv);
-    
-    // Simple mixing or Fresnel could be added here
-    // For now, pure reflection mixed with base color
     float3 N = normalize(in.normal);
+    float3 planeN = normalize(scene.reflectionPlane.xyz);
+    float3 planeN2 = normalize(scene.reflectionPlane2.xyz);
+    float3 planeN3 = normalize(scene.reflectionPlane3.xyz);
+    
     float3 L = normalize(scene.lightPos.xyz - in.worldPos);
     float diff = max(dot(N, L), 0.0);
-    
-    // Tint with a bit of blue/glassy look
     float4 baseColor = float4(0.1, 0.1, 0.2, 1.0);
     
-    return mix(baseColor * diff, reflectionColor, 0.8);
+    // Check alignment. Plane Normal and Surface Normal should be parallel.
+    // Relaxed threshold to 0.5 (approx 60 degrees) to account for interpolation errors or slight misalignments
+    if (dot(N, planeN) > 0.5) {
+        // Calculate Screen Space UV
+        // Clip Space: (-1 to 1) -> UV: (0 to 1)
+        float2 uv = (in.clipPos.xy / in.clipPos.w) * 0.5 + 0.5;
+        uv.y = 1.0 - uv.y; // Flip Y for Metal texture sampling
+        
+        float4 reflectionColor = reflectionTex.sample(s, uv);
+        
+        // Return Reflection + Base, Alpha 0 to disable SSR overlap on this face
+        return float4(mix(baseColor.rgb * diff, reflectionColor.rgb, 0.8), 0.0);
+    } else if (dot(N, planeN2) > 0.5) {
+        // Second Reflection Plane
+        float2 uv = (in.clipPos.xy / in.clipPos.w) * 0.5 + 0.5;
+        uv.y = 1.0 - uv.y; 
+        uv.x = 1.0 - uv.x; // Fix Left/Right inversion for Right Face
+        
+        float4 reflectionColor = reflectionTex2.sample(s, uv);
+        
+        return float4(mix(baseColor.rgb * diff, reflectionColor.rgb, 0.8), 0.0);
+    } else if (dot(N, planeN3) > 0.5) {
+        // Third Reflection Plane (Top Face)
+        float2 uv = (in.clipPos.xy / in.clipPos.w) * 0.5 + 0.5;
+        uv.y = 1.0 - uv.y; 
+        uv.x = 1.0 - uv.x; // Fix Left/Right inversion for Top Face
+        
+        float4 reflectionColor = reflectionTex3.sample(s, uv);
+        
+        return float4(mix(baseColor.rgb * diff, reflectionColor.rgb, 0.8), 0.0);
+    } else {
+        // Standard Rendering for other faces (fallback to SSR)
+                // Add Specular for better light reaction
+                // Actually, let's use a fixed view vector or just Blinn-Phong with constant view
+                float3 viewDir = normalize(float3(0.0, 0.0, 18.0) - in.worldPos); // Main camera pos
+                float3 H = normalize(L + viewDir);
+                float spec = pow(max(dot(N, H), 0.0), 32.0);
+                
+                float3 finalColor = baseColor.rgb * diff * scene.lightColor.rgb + float3(1.0) * spec * scene.lightColor.rgb;
+                
+                // Return Base Color + Specular, Alpha 1 to enable SSR
+                return float4(finalColor, 1.0);
+            }
 }
 
 vertex VertexOutSingle vertexMainSingle(VertexIn in [[stage_in]],
@@ -147,14 +217,27 @@ vertex VertexOutSingle vertexMainSingle(VertexIn in [[stage_in]],
     out.uv = in.uv;
     out.color = in.color;
     
-    // Use View 0 (Main View)
+    // Use View 0 (Main View) - This is Jittered
     out.position = uniforms.viewProjections[0] * worldPos;
+    
+    // Unjittered Current Position for Velocity
+    // We assume uniforms.viewProjections[0] HAS jitter.
+    // We subtract it to get unjittered position.
+    out.currentClipPos = out.position;
+    out.currentClipPos.xy -= scene.jitter * out.position.w;
+    
+    // Previous Position (Unjittered)
+    // We assume uniforms.previousViewProjections[0] has NO jitter.
+    float4 prevWorldPos = scene.previousModel * float4(in.position, 1.0);
+    out.previousClipPos = uniforms.previousViewProjections[0] * prevWorldPos;
     
     return out;
 }
 
-fragment float4 fragmentMainSingle(VertexOutSingle in [[stage_in]],
+fragment FragmentOutSingle fragmentMainSingle(VertexOutSingle in [[stage_in]],
                                    constant SceneData& scene [[buffer(2)]]) {
+    FragmentOutSingle out;
+
     // Light
     float3 N = normalize(in.normal);
     float3 lightDir = normalize(scene.lightPos.xyz - in.worldPos);
@@ -181,11 +264,35 @@ fragment float4 fragmentMainSingle(VertexOutSingle in [[stage_in]],
     float spec = pow(max(dot(N, halfwayDir), 0.0), 32.0);
     float3 specular = scene.lightColor.rgb * spec * atten;
     
-    return float4(ambient + diffuse + specular, 1.0);
+    out.color = float4(ambient + diffuse + specular, 1.0);
+    
+    // Velocity Calculation
+    float2 screenUV = (in.currentClipPos.xy / in.currentClipPos.w) * 0.5 + 0.5;
+    screenUV.y = 1.0 - screenUV.y; // Flip Y
+    
+    float2 prevScreenUV = (in.previousClipPos.xy / in.previousClipPos.w) * 0.5 + 0.5;
+    prevScreenUV.y = 1.0 - prevScreenUV.y;
+    
+    out.velocity = screenUV - prevScreenUV;
+    
+    return out;
 }
 
 
-// Standard Multi-View Shader
+/**
+ * @brief Multi-View Vertex Shader.
+ * 
+ * Handles:
+ * - World Space transformation.
+ * - View-Projection for specific CubeMap face (based on InstanceID).
+ * - Previous Frame Position calculation for Motion Vectors.
+ * 
+ * @param in Vertex Input attributes.
+ * @param uniforms View-Projection matrices (Current and Previous).
+ * @param scene Scene Data (Model Matrix, Light, etc.).
+ * @param instanceID Used to select the CubeMap face (0-5).
+ * @return VertexOut Transformed vertex data.
+ */
 vertex VertexOut vertexMain(VertexIn in [[stage_in]],
                             constant Uniforms& uniforms [[buffer(1)]],
                             constant SceneData& scene [[buffer(2)]],
@@ -194,44 +301,74 @@ vertex VertexOut vertexMain(VertexIn in [[stage_in]],
     
     // Calculate World Position
     float4 worldPos = scene.model * float4(in.position, 1.0);
-    out.worldPos = worldPos.xyz;
-    out.normal = (scene.model * float4(in.normal, 0.0)).xyz;
-    out.uv = in.uv;
-    out.color = in.color; // Pass Color
+    out.worldPos = worldPos;
+    out.normal = scene.model * float4(in.normal, 0.0);
+    out.uv = float4(in.uv, 0.0, 0.0);
+    out.color = float4(in.color, 1.0); // Pass Color
     
     // Select ViewProjection based on Instance ID (0-5)
     // instanceID corresponds to the face index
     out.position = uniforms.viewProjections[instanceID] * worldPos;
     out.layer = instanceID; // Route to correct array layer
     
+    // Pass Clip Positions for UV Generation
+    out.currentClipPos = out.position;
+    
+    // Calculate Previous Frame Position
+    float4 prevWorldPos = scene.previousModel * float4(in.position, 1.0);
+    out.previousClipPos = uniforms.previousViewProjections[instanceID] * prevWorldPos;
+    
     return out;
 }
 
-fragment float4 fragmentMain(VertexOut in [[stage_in]],
+/**
+ * @brief Multi-View Fragment Shader Output.
+ */
+struct FragmentOut {
+    float4 color [[color(0)]];
+    float2 velocity [[color(1)]];
+};
+
+/**
+ * @brief Multi-View Fragment Shader.
+ * 
+ * Handles:
+ * - Phong Lighting (Ambient + Diffuse + Specular).
+ * - Tone Mapping.
+ * - Screen Space UV Generation (Independent per View).
+ * - Reprojection UV / Motion Vector Calculation.
+ * - Debug Visualization (Toggleable via scene.lightColor.w).
+ * 
+ * @param in Interpolated vertex data.
+ * @param scene Scene Data (Light, Debug Flags).
+ * @return FragmentOut Final pixel color and velocity.
+ */
+fragment FragmentOut fragmentMain(FragmentIn in [[stage_in]],
                              constant SceneData& scene [[buffer(2)]]) {
+    FragmentOut out;
+
     // Cornell Box Lighting
-    float3 N = normalize(in.normal);
+    
+    float3 N = normalize(in.normal.xyz);
     
     float3 lightPos = scene.lightPos.xyz;
     float3 lightColor = scene.lightColor.xyz;
     
-    float3 L = normalize(lightPos - in.worldPos);
-    float distToLight = length(lightPos - in.worldPos);
+    float3 L = normalize(lightPos - in.worldPos.xyz);
+    float distToLight = length(lightPos - in.worldPos.xyz);
     float atten = 1.0 / (1.0 + 0.1 * distToLight + 0.01 * distToLight * distToLight);
     
     float diff = max(dot(N, L), 0.0);
     
     // Specular
-    float3 V = normalize(-in.worldPos); // View vector (approx relative to origin camera, but this is multi-view, so View is actually uniforms.viewProjections[in.layer] origin... wait)
-    // The camera position for each view is at 0,0,0 (MultiViewTestCase).
-    // So V = normalize(0 - worldPos) is correct.
+    float3 V = normalize(-in.worldPos.xyz); // View vector
     
     float3 H = normalize(L + V);
     float spec = pow(max(dot(N, H), 0.0), 32.0);
     
     // Combine
-    float3 ambient = float3(0.4, 0.4, 0.4) * in.color; // Increased Ambient
-    float3 diffuse = diff * in.color * lightColor * atten * 1.5; 
+    float3 ambient = float3(0.4, 0.4, 0.4) * in.color.xyz; // Increased Ambient
+    float3 diffuse = diff * in.color.xyz * lightColor * atten * 1.5; 
     float3 specular = spec * lightColor * atten * 0.8;
     
     float3 finalColor = ambient + diffuse + specular;
@@ -239,7 +376,28 @@ fragment float4 fragmentMain(VertexOut in [[stage_in]],
     // Tone mapping (Simple Reinhard)
     finalColor = finalColor / (finalColor + float3(1.0));
     
-    return float4(finalColor, 1.0);
+    // float3 finalColor = float3(in.uv.xy, 0.0);
+    // float3 finalColor = float3(in.uv.xy, 0.0);
+    
+    out.color = float4(finalColor, 1.0);
+    
+    // --- Multi-View UV Generation Logic ---
+    float2 screenUV = (in.currentClipPos.xy / in.currentClipPos.w) * 0.5 + 0.5;
+    screenUV.y = 1.0 - screenUV.y; // Flip Y for Metal Texture Coordinates
+    
+    float2 prevScreenUV = (in.previousClipPos.xy / in.previousClipPos.w) * 0.5 + 0.5;
+    prevScreenUV.y = 1.0 - prevScreenUV.y;
+    
+    out.velocity = screenUV - prevScreenUV;
+    
+    // Debug Visualization Control
+    if (scene.lightColor.w > 1.5) {
+        out.color = float4(abs(out.velocity.x) * 100.0, abs(out.velocity.y) * 100.0, 0.0, 1.0);
+    } else if (scene.lightColor.w > 0.5) {
+        out.color = float4(screenUV.x, screenUV.y, 0.0, 1.0);
+    }
+    
+    return out;
 }
 
 // Simple Shader for Direct Render Pass (Debugging)
@@ -328,7 +486,7 @@ vertex BlitVertexOut blitVertex(uint vertexID [[vertex_id]]) {
         float2(-1, -1), float2( 1, -1), float2( 1,  1),
         float2(-1, -1), float2( 1,  1), float2(-1,  1)
     };
-    out.position = float4(positions[vertexID], 0.0, 1.0);
+    out.position = float4(positions[vertexID], 0.5, 1.0); // Z=0.5 to avoid clipping
     out.uv = positions[vertexID] * 0.5 + 0.5;
     out.uv.y = 1.0 - out.uv.y; // Flip Y for Metal
     return out;
@@ -353,6 +511,13 @@ fragment float4 blitFragment(BlitVertexOut in [[stage_in]],
     float4 color = cubeMap.sample(s, rotatedDir);
     
     return color;
+}
+
+// 2D Blit Shader (for Composite Pass)
+fragment float4 blitFragment2D(BlitVertexOut in [[stage_in]],
+                               texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler s(mag_filter::linear, min_filter::linear);
+    return tex.sample(s, in.uv);
 }
 
 // ================================================================================================

@@ -1,3 +1,13 @@
+/**
+ * @file TestMultiView.cpp
+ * @brief Integration test for Multi-View Rendering.
+ * 
+ * This test case demonstrates:
+ * 1. Multi-View Rendering (rendering to a CubeMap).
+ * 2. Mirror Box integration using Reflection Plane.
+ * 3. Screen Space Reflection (SSR) integration.
+ * 4. Composite Pass blending Main View, SSR, and Debug Overlay.
+ */
 #include "TestMultiView.h"
 #include "Engine/Graphics/RHI/Core/RHICommand.h"
 #include "Engine/Graphics/RenderGraph/RenderGraphBuilder.h"
@@ -19,6 +29,37 @@ using namespace primal::graphics::rhi;
 using namespace primal::graphics::rendergraph;
 using namespace primal::graphics::rhi::math;
 
+    // Halton Sequence for TAA Jitter
+    float Halton(int index, int base) {
+        float f = 1.0f;
+        float r = 0.0f;
+        while (index > 0) {
+            f /= (float)base;
+            r += f * (index % base);
+            index /= base;
+        }
+        return r;
+    }
+
+    // Scene Data Structure (must match Shader)
+    struct SceneData {
+        m4x4 model;
+        v4 lightPos;
+        v4 lightColor;
+        v4 reflectionPlane;
+        v4 reflectionPlane2;
+        v4 reflectionPlane3;
+        m4x4 previousModel; // Added for Motion Vectors
+        v2 jitter; // Added for TAA
+        v2 previousJitter; // Added for TAA
+        v2 padding; // Padding to align to 16 bytes (vec4) if needed, but here v2+v2 = v4
+    };
+    
+    // Global Descriptor Set for Present Pass (to avoid conflict with Debug Overlay)
+    static DescriptorSetHandle presentDescriptorSet = handles::INVALID_DESCRIPTOR_SET;
+    static ResourceHandle presentUniformBuffer = handles::INVALID_RESOURCE;
+
+
     // Helper Math Functions for Metal (Column-Major)
     m4x4 CreatePerspective(float fov, float aspect, float zNear, float zFar) {
         float tanHalfFov = tan(fov / 2.0f);
@@ -29,6 +70,30 @@ using namespace primal::graphics::rhi::math;
             primal::math::v4{0.0f, 0.0f, -(zFar * zNear) / (zFar - zNear), 0.0f}
         );
         return result;
+    }
+
+    m4x4 CreateRotationY(float angle) {
+        float c = cos(angle);
+        float s = sin(angle);
+        return simd_matrix(
+            primal::math::v4{c, 0.0f, -s, 0.0f},
+            primal::math::v4{0.0f, 1.0f, 0.0f, 0.0f},
+            primal::math::v4{s, 0.0f, c, 0.0f},
+            primal::math::v4{0.0f, 0.0f, 0.0f, 1.0f}
+        );
+    }
+
+    m4x4 CreateTranslation(v3 t) {
+        return simd_matrix(
+            primal::math::v4{1.0f, 0.0f, 0.0f, 0.0f},
+            primal::math::v4{0.0f, 1.0f, 0.0f, 0.0f},
+            primal::math::v4{0.0f, 0.0f, 1.0f, 0.0f},
+            primal::math::v4{t.x, t.y, t.z, 1.0f}
+        );
+    }
+    
+    m4x4 MatrixMultiply(m4x4 a, m4x4 b) {
+        return a * b;
     }
     
     m4x4 CreateLookAt(v3 eye, v3 center, v3 up) {
@@ -47,7 +112,12 @@ using namespace primal::graphics::rhi::math;
     
     Engine_Test::Engine_Test() : RenderTestRunner(std::make_unique<MultiViewTestCase>()) {}
     
-    void MultiViewTestCase::CreateCubeMesh() {
+    /**
+ * @brief Creates the cube mesh (Skybox/Environment) and the Mirror Box mesh.
+ * 
+ * Sets up vertex and index buffers for the scene geometry.
+ */
+void MultiViewTestCase::CreateCubeMesh() {
         // Cornell Box Geometry
         // Struct updated with Color
         struct Vertex {
@@ -225,7 +295,7 @@ using namespace primal::graphics::rhi::math;
             // Define Rotated Basis Vectors (45 deg around Y and X)
             // Approx values for normalized vectors
             // Right (X')
-            primal::math::v3 right = {0.707f, 0.0f, -0.707f};
+            // primal::math::v3 right = {0.707f, 0.0f, -0.707f};
             // Up (Y') - Rotated 45 deg around X axis relative to world? 
             // Let's just use an arbitrary rotation matrix manually
             // Rot Y 45: X=(0.707, 0, -0.707), Y=(0,1,0), Z=(0.707, 0, 0.707)
@@ -300,6 +370,18 @@ using namespace primal::graphics::rhi::math;
         std::cout << "DEBUG: CreateCubeMesh Complete. Vertices: " << vertices.size() << ", Indices: " << indexCount << std::endl;
     }
 
+/**
+ * @brief Initializes the Multi-View Test Case.
+ * 
+ * Sets up:
+ * - RHI Device and Window
+ * - RenderGraph
+ * - Scene Geometry (CubeMesh)
+ * - Pipelines (MultiView, Main, Blit, Debug, SSR)
+ * - Resources (Textures, Buffers, Descriptors)
+ * 
+ * @return true if initialization succeeds, false otherwise.
+ */
 bool MultiViewTestCase::Initialize() {
     std::cout << ">>> STARTING MULTI-VIEW TEST (DIRECT RENDER MODE - DEBUG) <<<" << std::endl;
     // 1. Initialize Window
@@ -502,6 +584,8 @@ bool MultiViewTestCase::Initialize() {
     // Update Target Format to match BackBuffer
     TextureDesc swapchainDesc = renderSystem.GetBackBufferDesc();
     mainPipeDesc.renderTargetFormats[0] = swapchainDesc.format;
+    mainPipeDesc.renderTargetFormats[1] = DataFormat::RG16_Float; // Velocity
+    mainPipeDesc.renderTargetCount = 2;
     
     // Ensure Layout is correct (should be same as pipelineLayout)
     mainPipeDesc.layout = pipelineLayout;
@@ -516,7 +600,9 @@ bool MultiViewTestCase::Initialize() {
 
     // 7.1 Create Blit Shaders & Pipeline
     blitVertexShader = device->CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Vertex, "blitVertex");
-    blitPixelShader = device->CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Pixel, "blitFragment");
+    // Use blitFragment2D for Texture2D sampling
+    blitPixelShader = device->CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Pixel, "blitFragment2D");
+    if (blitPixelShader == handles::INVALID_SHADER) std::cout << "CRITICAL: Failed to create blitFragment2D shader" << std::endl;
     
     DescriptorSetLayoutDesc blitDSDesc{};
     DescriptorSetLayoutBinding blitBindings[2];
@@ -569,6 +655,42 @@ bool MultiViewTestCase::Initialize() {
         device->UpdateDescriptorSets(1, &bufUpdate);
     }
     
+    // Create Present Uniform Buffer (Identity)
+    {
+        BufferDesc bubDesc;
+        bubDesc.size = sizeof(math::m4x4);
+        bubDesc.usage = GPUMemoryUsage::Dynamic;
+        bubDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        bubDesc.type = BufferType::Constant;
+        bubDesc.bindFlags = static_cast<uint32_t>(BufferUsageFlags::Uniform);
+        presentUniformBuffer = device->CreateBuffer(bubDesc);
+        
+        m4x4 identity = rhi::math::MatrixIdentity();
+        void* data = device->MapBuffer(presentUniformBuffer);
+        if (data) {
+            memcpy(data, &identity, sizeof(m4x4));
+            device->UnmapBuffer(presentUniformBuffer);
+        }
+    }
+
+    // Create Present Descriptor Set
+    presentDescriptorSet = device->CreateDescriptorSet(blitSetDesc);
+    {
+        WriteDescriptorSet bufUpdate{};
+        DescriptorBufferInfo bufInfo{};
+        bufInfo.buffer = presentUniformBuffer; // Use Present Uniform Buffer
+        bufInfo.offset = 0;
+        bufInfo.range = sizeof(math::m4x4);
+        
+        bufUpdate.dstSet = presentDescriptorSet;
+        bufUpdate.dstBinding = 1; // Binding 1
+        bufUpdate.descriptorCount = 1;
+        bufUpdate.descriptorType = DescriptorType::UniformBuffer;
+        bufUpdate.bufferInfo = &bufInfo;
+        
+        device->UpdateDescriptorSets(1, &bufUpdate);
+    }
+    
     PipelineLayoutDesc blitPLDesc{};
     blitPLDesc.setLayouts = &blitDSLayout;
     blitPLDesc.setLayoutCount = 1;
@@ -579,9 +701,12 @@ bool MultiViewTestCase::Initialize() {
     blitPipeDesc.pixelShader = blitPixelShader;
     blitPipeDesc.layout = blitPipelineLayout;
     blitPipeDesc.cullMode = CullMode::None;
+    blitPipeDesc.enableDepthTest = false; // Explicitly disable depth test
+    blitPipeDesc.enableDepthWrite = false;
     blitPipeDesc.renderTargetCount = 1;
     blitPipeDesc.renderTargetFormats[0] = renderSystem.GetBackBufferDesc().format; // Use correct format
     blitPipeDesc.depthStencilFormat = DataFormat::Unknown;
+    blitPipeDesc.topology = PrimitiveTopology::TriangleList; // CRITICAL FIX
     blitPipeline = device->CreateGraphicsPipeline(blitPipeDesc);
     
     if (blitPipeline == handles::INVALID_PIPELINE) {
@@ -611,10 +736,33 @@ bool MultiViewTestCase::Initialize() {
     } else {
         std::cout << "DEBUG: Debug Pipeline Created Successfully." << std::endl;
     }
+
+    // 7.3 Create SSR Composite Pipeline (Additive Blending)
+    GraphicsPipelineDesc ssrCompDesc = blitPipeDesc;
+    ssrCompDesc.vertexShader = blitVertexShader;
+    ssrCompDesc.pixelShader = blitPixelShader;
+    ssrCompDesc.enableDepthTest = false;
+    ssrCompDesc.enableDepthWrite = false;
+    
+    // Enable Additive Blending
+    ssrCompDesc.enableBlend = true;
+    ssrCompDesc.srcColorBlendFactor = BlendFactor::One;
+    ssrCompDesc.dstColorBlendFactor = BlendFactor::One;
+    ssrCompDesc.colorBlendOp = BlendOp::Add;
+    ssrCompDesc.srcAlphaBlendFactor = BlendFactor::One;
+    ssrCompDesc.dstAlphaBlendFactor = BlendFactor::One;
+    ssrCompDesc.alphaBlendOp = BlendOp::Add;
+
+    ssrCompositePipeline = device->CreateGraphicsPipeline(ssrCompDesc);
+    if (ssrCompositePipeline == handles::INVALID_PIPELINE) {
+        std::cout << "CRITICAL: Failed to create SSR Composite Pipeline!" << std::endl;
+    } else {
+        std::cout << "DEBUG: SSR Composite Pipeline Created Successfully." << std::endl;
+    }
     
     // 8. Create Uniform Buffers
     BufferDesc ubDesc;
-    ubDesc.size = sizeof(math::m4x4) * 6; // View Uniforms (6 ViewProjs)
+    ubDesc.size = sizeof(math::m4x4) * 12; // View Uniforms (6 ViewProjs + 6 PreviousViewProjs)
     ubDesc.usage = GPUMemoryUsage::Dynamic;
     ubDesc.memoryUsage = GPUMemoryUsage::Dynamic;
     ubDesc.type = BufferType::Constant;
@@ -638,6 +786,7 @@ bool MultiViewTestCase::Initialize() {
             std::cout << "DEBUG: Projection Matrix:" << std::endl;
             // ... (Simple print logic if needed)
 
+            // Current Frame Matrices
             // +X
             matrices[0] = proj * CreateLookAt(eye, primal::math::v3{1, 0, 0}, primal::math::v3{0, -1, 0});
             // -X
@@ -650,6 +799,11 @@ bool MultiViewTestCase::Initialize() {
             matrices[4] = proj * CreateLookAt(eye, primal::math::v3{0, 0, 1}, primal::math::v3{0, -1, 0});
             // -Z
             matrices[5] = proj * CreateLookAt(eye, primal::math::v3{0, 0, -1}, primal::math::v3{0, -1, 0});
+
+            // Previous Frame Matrices (Initialize to same as Current)
+            for(int i=0; i<6; ++i) {
+                matrices[6+i] = matrices[i];
+            }
             
             device->UnmapBuffer(viewUniformBuffer);
         }
@@ -658,7 +812,7 @@ bool MultiViewTestCase::Initialize() {
     // 8.1 Create Main View Uniform Buffer
     {
         BufferDesc bufDesc;
-        bufDesc.size = sizeof(math::m4x4) * 6;
+        bufDesc.size = sizeof(math::m4x4) * 12;
         bufDesc.usage = GPUMemoryUsage::Dynamic;
         bufDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         bufDesc.type = BufferType::Constant;
@@ -686,22 +840,39 @@ bool MultiViewTestCase::Initialize() {
         }
         std::cout << "DEBUG: Creating Main Depth Texture: " << bbDesc.size.x << "x" << bbDesc.size.y << std::endl;
 
+        // Main View Color
+        TextureDesc colorDesc = bbDesc;
+        colorDesc.format = DataFormat::BGRA8_UNorm;
+        colorDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+        mainColorTexture = device->CreateTexture(colorDesc);
+
+        // Create TAA Textures
+        TextureDesc velocityDesc = bbDesc;
+        velocityDesc.format = DataFormat::RG16_Float;
+        velocityDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+        mainVelocityTexture = device->CreateTexture(velocityDesc);
+        
+        TextureDesc taaDesc = bbDesc;
+        taaDesc.format = DataFormat::BGRA8_UNorm;
+        taaDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+        taaHistoryTexture = device->CreateTexture(taaDesc);
+        taaResultTexture = device->CreateTexture(taaDesc);
+        
+        // Initialize TAA Pass
+        if (!taaPass.Initialize(device, bbDesc.size.x, bbDesc.size.y, taaDesc.format)) {
+             std::cout << "Failed to initialize TAA Pass" << std::endl;
+             return false;
+        }
+
         TextureDesc mainDepthDesc{};
         mainDepthDesc.size = {bbDesc.size.x, bbDesc.size.y, 1};
         mainDepthDesc.mipLevels = 1;
         mainDepthDesc.arraySize = 1;
         mainDepthDesc.format = DataFormat::D32_Float;
         mainDepthDesc.type = TextureType::Texture2D;
-        mainDepthDesc.usage = TextureUsage::DepthStencil;
+        mainDepthDesc.usage = TextureUsage::DepthStencil | TextureUsage::ShaderResource;
         mainDepthTexture = device->CreateTexture(mainDepthDesc);
     }
-    
-    // Scene Data Structure (must match Shader)
-    struct SceneData {
-        m4x4 model;
-        v4 lightPos;
-        v4 lightColor;
-    };
 
     ubDesc.size = sizeof(SceneData); // Instance Uniforms + Light Data
     instanceUniformBuffer = device->CreateBuffer(ubDesc);
@@ -711,6 +882,8 @@ bool MultiViewTestCase::Initialize() {
         void* data = device->MapBuffer(instanceUniformBuffer);
         if (data) {
             SceneData* sceneData = static_cast<SceneData*>(data);
+            
+            // Calculate Model Matrix: Translation * Rotation
             sceneData->model = primal::graphics::rhi::math::MatrixIdentity();
             sceneData->lightPos = {0.0f, 4.0f, 0.0f, 1.0f}; // Top Light
             sceneData->lightColor = {1.0f, 1.0f, 1.0f, 1.0f}; // White
@@ -730,7 +903,7 @@ bool MultiViewTestCase::Initialize() {
     DescriptorBufferInfo bufInfo0;
     bufInfo0.buffer = viewUniformBuffer;
     bufInfo0.offset = 0;
-    bufInfo0.range = sizeof(math::m4x4) * 6;
+    bufInfo0.range = sizeof(math::m4x4) * 12;
 
     updates[0].dstSet = descriptorSet;
     updates[0].dstBinding = 1;
@@ -755,7 +928,7 @@ bool MultiViewTestCase::Initialize() {
     DescriptorBufferInfo bufInfoMain;
     bufInfoMain.buffer = mainViewUniformBuffer;
     bufInfoMain.offset = 0;
-    bufInfoMain.range = sizeof(math::m4x4) * 6;
+    bufInfoMain.range = sizeof(math::m4x4) * 12;
 
     updates[2].dstSet = mainDescriptorSet;
     updates[2].dstBinding = 1;
@@ -794,9 +967,136 @@ bool MultiViewTestCase::Initialize() {
     
     if (!CreateReflectionResources()) return false;
 
+    // 13. Initialize SSR Pass
+    if (!ssrPass.Initialize(device)) {
+        std::cout << "Failed to initialize SSR Pass" << std::endl;
+        return false;
+    }
+
+    // Generate Halton Sequence (Base 2, 3) - 16 samples
+    auto halton = [](uint32_t index, uint32_t base) {
+        float f = 1.0f;
+        float r = 0.0f;
+        while (index > 0) {
+            f = f / (float)base;
+            r = r + f * (float)(index % base);
+            index = index / base;
+        }
+        return r;
+    };
+    
+    jitterSamples.resize(16);
+    for (uint32_t i = 0; i < 16; ++i) {
+        // Range [-0.5, 0.5]
+        jitterSamples[i].x = (halton(i + 1, 2) - 0.5f);
+        jitterSamples[i].y = (halton(i + 1, 3) - 0.5f);
+    }
+    
+    // Initialize TAA Pass
+    if (!taaPass.Initialize(device, 1280 * 2, 720 * 2, DataFormat::BGRA8_UNorm)) {
+        std::cout << "Failed to initialize TAA Pass" << std::endl;
+        return false;
+    }
+    
+    // 14. Create SSR Output Texture
+    TextureDesc ssrDesc = renderSystem.GetBackBufferDesc();
+    if (ssrDesc.size.x == 0) ssrDesc.size = {1280*2, 720*2, 1}; // Fallback
+    ssrDesc.format = DataFormat::RGBA8_UNorm; // Use RGBA8 for storage compatibility
+    ssrDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource;
+    ssrOutputTexture = device->CreateTexture(ssrDesc);
+    
+    if (ssrOutputTexture == handles::INVALID_RESOURCE) {
+        std::cout << "Failed to create SSR Output Texture" << std::endl;
+        return false;
+    }
+
+    // 14.5 Setup Composite Descriptor Sets
+    DescriptorSetDesc compSetDesc;
+    compSetDesc.layout = blitDSLayout;
+
+    // Main Composite Set
+    mainCompositeDescriptorSet = device->CreateDescriptorSet(compSetDesc);
+    {
+        DescriptorImageInfo imageInfo{};
+        imageInfo.imageView = mainColorTexture;
+        imageInfo.sampler = handles::INVALID_SAMPLER;
+        imageInfo.imageLayout = ResourceState::ShaderResource;
+
+        WriteDescriptorSet updates[2];
+        updates[0].dstSet = mainCompositeDescriptorSet;
+        updates[0].dstBinding = 0;
+        updates[0].dstArrayElement = 0;
+        updates[0].descriptorCount = 1;
+        updates[0].descriptorType = DescriptorType::SampledImage;
+        updates[0].imageInfo = &imageInfo;
+
+        DescriptorBufferInfo bufInfo{};
+        bufInfo.buffer = blitUniformBuffer;
+        bufInfo.offset = 0;
+        bufInfo.range = sizeof(math::m4x4);
+
+        updates[1].dstSet = mainCompositeDescriptorSet;
+        updates[1].dstBinding = 1;
+        updates[1].dstArrayElement = 0;
+        updates[1].descriptorCount = 1;
+        updates[1].descriptorType = DescriptorType::UniformBuffer;
+        updates[1].bufferInfo = &bufInfo;
+
+        device->UpdateDescriptorSets(2, updates);
+    }
+
+    // SSR Composite Set
+    ssrCompositeDescriptorSet = device->CreateDescriptorSet(compSetDesc);
+    {
+        DescriptorImageInfo imageInfo{};
+        imageInfo.imageView = ssrOutputTexture;
+        imageInfo.sampler = handles::INVALID_SAMPLER;
+        imageInfo.imageLayout = ResourceState::ShaderResource;
+
+        WriteDescriptorSet updates[2];
+        updates[0].dstSet = ssrCompositeDescriptorSet;
+        updates[0].dstBinding = 0;
+        updates[0].dstArrayElement = 0;
+        updates[0].descriptorCount = 1;
+        updates[0].descriptorType = DescriptorType::SampledImage;
+        updates[0].imageInfo = &imageInfo;
+
+        DescriptorBufferInfo bufInfo{};
+        bufInfo.buffer = blitUniformBuffer;
+        bufInfo.offset = 0;
+        bufInfo.range = sizeof(math::m4x4);
+
+        updates[1].dstSet = ssrCompositeDescriptorSet;
+        updates[1].dstBinding = 1;
+        updates[1].dstArrayElement = 0;
+        updates[1].descriptorCount = 1;
+        updates[1].descriptorType = DescriptorType::UniformBuffer;
+        updates[1].bufferInfo = &bufInfo;
+
+        device->UpdateDescriptorSets(2, updates);
+    }
+
+    // 15. Add Reflection Plane to Scene - REMOVED (Handled by ID 101 below)
+
+
+
+    
+    // 15. Setup Initial Reflection Plane (Mirror Box)
+    {
+        reflectionPlane.entityId = 101;
+        // Logic will be handled in Run() updates
+        scene.AddReflectionPlane(reflectionPlane);
+    }
+
     return true;
 }
 
+/**
+ * @brief Helper to read shader source code from a file.
+ * 
+ * @param filepath Absolute or relative path to the shader file.
+ * @return std::string Content of the shader file, or empty string if failed.
+ */
 std::string MultiViewTestCase::ReadShaderFile(const std::string& filepath) {
     std::ifstream file(filepath);
     if (!file.is_open()) return "";
@@ -805,24 +1105,35 @@ std::string MultiViewTestCase::ReadShaderFile(const std::string& filepath) {
     return buffer.str();
 }
 
+/**
+ * @brief Creates resources specifically for Reflection and Mirror rendering.
+ * 
+ * Includes:
+ * - Reflection Texture and Depth
+ * - Reflection and Mirror Pipelines/Shaders
+ * - Uniform Buffers for Reflection Camera and Plane
+ * 
+ * @return true if creation succeeds.
+ */
 bool MultiViewTestCase::CreateReflectionResources() {
-    std::cout << "DEBUG: Creating Reflection Resources..." << std::endl;
-    
-    // 1. Textures
-    TextureDesc texDesc = renderSystem.GetBackBufferDesc();
-    if (texDesc.size.x == 0) texDesc.size = {1280*2, 720*2, 1}; // Fallback
-    
-    // Reflection Map (Half Res)
-    texDesc.size.x /= 2;
-    texDesc.size.y /= 2;
+    TextureDesc texDesc;
+    texDesc.size = {1280, 720, 1}; // Default size
+    texDesc.mipLevels = 1;
+    texDesc.arraySize = 1;
+    texDesc.type = TextureType::Texture2D;
+
     texDesc.format = DataFormat::BGRA8_UNorm;
     texDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
     reflectionTexture = device->CreateTexture(texDesc);
+    reflectionTexture2 = device->CreateTexture(texDesc);
+    reflectionTexture3 = device->CreateTexture(texDesc);
     
     // Depth
     texDesc.format = DataFormat::D32_Float;
     texDesc.usage = TextureUsage::DepthStencil;
     reflectionDepthTexture = device->CreateTexture(texDesc);
+    reflectionDepthTexture2 = device->CreateTexture(texDesc);
+    reflectionDepthTexture3 = device->CreateTexture(texDesc);
     
     // 2. Buffers
     BufferDesc ubDesc;
@@ -832,9 +1143,29 @@ bool MultiViewTestCase::CreateReflectionResources() {
     ubDesc.type = BufferType::Constant;
     ubDesc.bindFlags = static_cast<uint32_t>(BufferUsageFlags::Uniform);
     reflectionUniformBuffer = device->CreateBuffer(ubDesc);
+    reflectionUniformBuffer2 = device->CreateBuffer(ubDesc);
+    reflectionUniformBuffer3 = device->CreateBuffer(ubDesc);
     
     ubDesc.size = sizeof(math::v4); // Plane Equation
     reflectionPlaneBuffer = device->CreateBuffer(ubDesc);
+    reflectionPlaneBuffer2 = device->CreateBuffer(ubDesc);
+    reflectionPlaneBuffer3 = device->CreateBuffer(ubDesc);
+    
+    ubDesc.size = sizeof(SceneData); // Mirror Instance Data
+    mirrorUniformBuffer = device->CreateBuffer(ubDesc);
+    
+    // Initialize Mirror Uniform Buffer
+    {
+        void* data = device->MapBuffer(mirrorUniformBuffer);
+        if (data) {
+            SceneData* sceneData = static_cast<SceneData*>(data);
+            sceneData->model = primal::graphics::rhi::math::MatrixIdentity();
+            sceneData->lightPos = {0.0f, 4.0f, 0.0f, 1.0f};
+            sceneData->lightColor = {1.0f, 1.0f, 1.0f, 1.0f};
+            sceneData->reflectionPlane = {0.0f, 1.0f, 0.0f, 0.0f}; // Default Plane
+            device->UnmapBuffer(mirrorUniformBuffer);
+        }
+    }
     
     // 3. Shaders
     std::string shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/MultiView.metal"; 
@@ -879,6 +1210,7 @@ bool MultiViewTestCase::CreateReflectionResources() {
     reflPipeDesc.depthStencilFormat = DataFormat::D32_Float;
     reflPipeDesc.renderTargetCount = 1;
     reflPipeDesc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+    reflPipeDesc.cullMode = CullMode::None; // Disable culling for reflection passes to see backfaces of walls from outside
     
     // Vertex Input (Standard)
     reflPipeDesc.vertexBindings.push_back({0, sizeof(float)*11, true});
@@ -891,13 +1223,15 @@ bool MultiViewTestCase::CreateReflectionResources() {
     
     // --- Mirror Pipeline ---
     // Layout: Binding 0: Texture, Binding 1: View, Binding 2: Scene
-    DescriptorSetLayoutBinding mirBindings[3];
+    DescriptorSetLayoutBinding mirBindings[5];
     mirBindings[0].binding = 1; mirBindings[0].descriptorType = DescriptorType::UniformBuffer; mirBindings[0].descriptorCount = 1; mirBindings[0].stageFlags = ShaderStage::Vertex;
     mirBindings[1].binding = 2; mirBindings[1].descriptorType = DescriptorType::UniformBuffer; mirBindings[1].descriptorCount = 1; mirBindings[1].stageFlags = ShaderStage::Vertex | ShaderStage::Pixel;
     mirBindings[2].binding = 0; mirBindings[2].descriptorType = DescriptorType::SampledImage; mirBindings[2].descriptorCount = 1; mirBindings[2].stageFlags = ShaderStage::Pixel;
+    mirBindings[3].binding = 3; mirBindings[3].descriptorType = DescriptorType::SampledImage; mirBindings[3].descriptorCount = 1; mirBindings[3].stageFlags = ShaderStage::Pixel; // Texture 2
+    mirBindings[4].binding = 4; mirBindings[4].descriptorType = DescriptorType::SampledImage; mirBindings[4].descriptorCount = 1; mirBindings[4].stageFlags = ShaderStage::Pixel; // Texture 3
     
     DescriptorSetLayoutDesc mirLayoutDesc;
-    mirLayoutDesc.bindingCount = 3;
+    mirLayoutDesc.bindingCount = 5;
     mirLayoutDesc.bindings = mirBindings;
     DescriptorSetLayoutHandle mirDSLayout = device->CreateDescriptorSetLayout(mirLayoutDesc);
     
@@ -911,6 +1245,7 @@ bool MultiViewTestCase::CreateReflectionResources() {
     mirPipeDesc.pixelShader = mirrorPixelShader;
     mirPipeDesc.layout = mirrorPipelineLayout;
     mirPipeDesc.renderTargetFormats[0] = renderSystem.GetBackBufferDesc().format; // Main Pass Format
+    mirPipeDesc.cullMode = CullMode::Back; // Restore backface culling for the mirror object itself
     
     mirrorPipeline = device->CreateGraphicsPipeline(mirPipeDesc);
     
@@ -918,6 +1253,8 @@ bool MultiViewTestCase::CreateReflectionResources() {
     DescriptorSetDesc setDesc;
     setDesc.layout = reflDSLayout;
     reflectionDescriptorSet = device->CreateDescriptorSet(setDesc);
+    reflectionDescriptorSet2 = device->CreateDescriptorSet(setDesc);
+    reflectionDescriptorSet3 = device->CreateDescriptorSet(setDesc);
     
     setDesc.layout = mirDSLayout;
     mirrorDescriptorSet = device->CreateDescriptorSet(setDesc);
@@ -927,6 +1264,9 @@ bool MultiViewTestCase::CreateReflectionResources() {
         m4x4 model;
         v4 lightPos;
         v4 lightColor;
+        v4 reflectionPlane;
+        v4 reflectionPlane2;
+        v4 reflectionPlane3;
     };
     
     // Update Reflection Descriptor Set
@@ -941,25 +1281,62 @@ bool MultiViewTestCase::CreateReflectionResources() {
         updates[2].dstSet = reflectionDescriptorSet; updates[2].dstBinding = 3; updates[2].descriptorCount = 1; updates[2].descriptorType = DescriptorType::UniformBuffer; updates[2].bufferInfo = &info3;
         
         device->UpdateDescriptorSets(3, updates);
+
+        // Update Reflection Descriptor Set 2
+        info1.buffer = reflectionUniformBuffer2;
+        info3.buffer = reflectionPlaneBuffer2;
+        
+        updates[0].dstSet = reflectionDescriptorSet2; updates[0].bufferInfo = &info1;
+        updates[1].dstSet = reflectionDescriptorSet2; // Instance buffer shared
+        updates[2].dstSet = reflectionDescriptorSet2; updates[2].bufferInfo = &info3;
+        
+        device->UpdateDescriptorSets(3, updates);
+        
+        // Update Reflection Descriptor Set 3
+        info1.buffer = reflectionUniformBuffer3;
+        info3.buffer = reflectionPlaneBuffer3;
+        
+        updates[0].dstSet = reflectionDescriptorSet3; updates[0].bufferInfo = &info1;
+        updates[1].dstSet = reflectionDescriptorSet3; // Instance buffer shared
+        updates[2].dstSet = reflectionDescriptorSet3; updates[2].bufferInfo = &info3;
+        
+        device->UpdateDescriptorSets(3, updates);
     }
     
     // Update Mirror Descriptor Set
     {
-        WriteDescriptorSet updates[3];
+        WriteDescriptorSet updates[5];
         DescriptorBufferInfo info1{}; info1.buffer = mainViewUniformBuffer; info1.offset = 0; info1.range = sizeof(math::m4x4)*6;
-        DescriptorBufferInfo info2{}; info2.buffer = instanceUniformBuffer; info2.offset = 0; info2.range = sizeof(SceneData);
+        DescriptorBufferInfo info2{}; info2.buffer = mirrorUniformBuffer; info2.offset = 0; info2.range = sizeof(SceneData); // Use Mirror Buffer
         DescriptorImageInfo infoTex{}; infoTex.imageView = reflectionTexture; infoTex.sampler = handles::INVALID_RESOURCE; // Metal uses inline sampler
+        DescriptorImageInfo infoTex2{}; infoTex2.imageView = reflectionTexture2; infoTex2.sampler = handles::INVALID_RESOURCE;
+        DescriptorImageInfo infoTex3{}; infoTex3.imageView = reflectionTexture3; infoTex3.sampler = handles::INVALID_RESOURCE;
         
         updates[0].dstSet = mirrorDescriptorSet; updates[0].dstBinding = 1; updates[0].descriptorCount = 1; updates[0].descriptorType = DescriptorType::UniformBuffer; updates[0].bufferInfo = &info1;
         updates[1].dstSet = mirrorDescriptorSet; updates[1].dstBinding = 2; updates[1].descriptorCount = 1; updates[1].descriptorType = DescriptorType::UniformBuffer; updates[1].bufferInfo = &info2;
         updates[2].dstSet = mirrorDescriptorSet; updates[2].dstBinding = 0; updates[2].descriptorCount = 1; updates[2].descriptorType = DescriptorType::SampledImage; updates[2].imageInfo = &infoTex;
+        updates[3].dstSet = mirrorDescriptorSet; updates[3].dstBinding = 3; updates[3].descriptorCount = 1; updates[3].descriptorType = DescriptorType::SampledImage; updates[3].imageInfo = &infoTex2;
+        updates[4].dstSet = mirrorDescriptorSet; updates[4].dstBinding = 4; updates[4].descriptorCount = 1; updates[4].descriptorType = DescriptorType::SampledImage; updates[4].imageInfo = &infoTex3;
         
-        device->UpdateDescriptorSets(3, updates);
+        device->UpdateDescriptorSets(5, updates);
     }
     
     return true;
 }
 
+/**
+ * @brief Main Render Loop.
+ * 
+ * Executes per frame:
+ * 1. Updates Scene Logic (Lights, Reflection Plane).
+ * 2. Builds RenderGraph:
+ *    - Reflection Pass: Renders scene from reflection camera.
+ *    - MultiView Pass: Renders scene to CubeMap.
+ *    - Main Pass: Renders scene from main camera (with Mirror).
+ *    - SSR Pass: Computes screen-space reflections.
+ *    - Composite Pass: Blends Main, SSR, and Debug Overlay.
+ * 3. Compiles and Executes RenderGraph.
+ */
 void MultiViewTestCase::Run() {
     if (!window.is_valid()) return;
     // std::cout << "DEBUG: RUNNING MULTI-VIEW TEST (RenderGraph)" << std::endl;
@@ -968,6 +1345,21 @@ void MultiViewTestCase::Run() {
     SyncHandle fence;
     
     // Animate Light
+    static float time = 0.0f;
+    time += 0.02f;
+
+    // TAA Jitter Management
+    static uint32_t frameIndex = 0;
+    math::v2 currentJitter = jitterSamples[frameIndex % 16];
+    math::v2 previousJitter = jitterSamples[(frameIndex + 15) % 16]; // Previous frame jitter
+    
+    // Scale jitter by resolution (e.g. 1/Width, 1/Height)
+    // For 1280x720, pixel size is ~0.00078, ~0.00138
+    // TAA Jitter is typically < 1 pixel
+    math::v2 jitterScale = { 1.0f / 1280.0f, 1.0f / 720.0f }; // Should match Render Target size
+    math::v2 appliedJitter = { currentJitter.x * jitterScale.x, currentJitter.y * jitterScale.y };
+    math::v2 appliedPrevJitter = { previousJitter.x * jitterScale.x, previousJitter.y * jitterScale.y };
+
     {
         // Toggle Debug Overlay with F1
         using namespace primal::input;
@@ -977,21 +1369,18 @@ void MultiViewTestCase::Run() {
         static bool wasF1Down = false;
         bool isF1Down = (val.current.x > 0.0f);
         
+        static int debugMode = 0; // 0: Off, 1: ScreenUV, 2: MotionVectors
+
         if (isF1Down && !wasF1Down) {
-            showDebugOverlay = !showDebugOverlay;
-            std::cout << "Debug Overlay: " << (showDebugOverlay ? "ON" : "OFF") << std::endl;
+            debugMode = (debugMode + 1) % 3;
+            std::cout << "Debug Mode: " << debugMode << " (0: Off, 1: ScreenUV, 2: MotionVectors)" << std::endl;
         }
         wasF1Down = isF1Down;
-
-        static float time = 0.0f;
-        time += 0.02f;
         
-        // Define struct again or move to header (local is fine)
-        struct SceneData {
-            m4x4 model;
-            v4 lightPos;
-            v4 lightColor;
-        };
+        // Define struct again or move to header (local is fine) - REMOVED (Using global definition)
+        // struct SceneData { ... };
+
+        static m4x4 s_previousModel = primal::graphics::rhi::math::MatrixIdentity();
 
         void* data = device->MapBuffer(instanceUniformBuffer);
         if (data) {
@@ -1006,7 +1395,23 @@ void MultiViewTestCase::Run() {
             sceneData->lightColor.x = (sin(time) * 0.3f + 0.7f);
             sceneData->lightColor.y = (sin(time + 2.09f) * 0.3f + 0.7f);
             sceneData->lightColor.z = (sin(time + 4.18f) * 0.3f + 0.7f);
+
+            // Pass Debug Flag in lightColor.w
+            sceneData->lightColor.w = (float)debugMode;
+
+
+            sceneData->reflectionPlane = {0.0f, 0.0f, 0.0f, 0.0f}; // Unused for standard objects
+            sceneData->reflectionPlane2 = {0.0f, 0.0f, 0.0f, 0.0f};
+            sceneData->reflectionPlane3 = {0.0f, 0.0f, 0.0f, 0.0f};
             
+            // TAA Jitter Update for Scene Data (Vertex Shader Jitter)
+            sceneData->jitter = appliedJitter;
+            sceneData->previousJitter = appliedPrevJitter;
+            
+            // Store previous model (Identity for now for main scene objects as they don't move)
+            sceneData->previousModel = s_previousModel;
+            s_previousModel = sceneData->model;
+
             device->UnmapBuffer(instanceUniformBuffer);
         }
     }
@@ -1017,11 +1422,9 @@ void MultiViewTestCase::Run() {
     {
         // 1. Calculate Mirror Plane
         // MirrorBox parameters from CreateCubeMesh (addBox call)
-        // Center: (2.0, -2.0, 1.0)
-        // Size: (3.0, 6.0, 3.0) -> HalfSize: (1.5, 3.0, 1.5)
-        // Angle: -0.3
-        v3 mirrorPos = v3{2.0f, -2.0f, 1.0f}; 
-        float angle = -0.3f;
+        // Center: (2.0, -2.0, 1.0) -> Adjusted to show more side
+        v3 mirrorPos = v3{2.0f, -2.0f, 0.0f}; 
+        float angle = -0.8f; // Rotate to ~45 degrees to show two faces
         
         float c = cos(angle);
         float s = sin(angle);
@@ -1037,15 +1440,83 @@ void MultiViewTestCase::Run() {
         // HalfSize.z = 1.5f (since full Z size is 3.0f)
         v3 planePoint = mirrorPos + planeNormal * 1.5f; 
         
+        // Second Plane (Right Face, Local +X)
+        // Normal 2: (c, 0, -s) -> Rotated +X
+        // This direction corresponds to the Right Face of the Mirror Box.
+        // We use this normal for the Reflection Camera and the Shader Plane Check.
+        v3 planeNormal2 = v3{c, 0.0f, -s}; 
+        planeNormal2 = Normalize(planeNormal2);
+        v3 planePoint2 = mirrorPos + planeNormal2 * 1.5f;
+
+        // Update Reflection Plane Struct
+        reflectionPlane.position = planePoint;
+        reflectionPlane.normal = planeNormal;
+        scene.UpdateReflectionPlane(reflectionPlane.entityId, reflectionPlane);
+
         // Plane Eq: dot(N, P) + D = 0 => D = -dot(N, P)
-        float planeD = -Dot(planeNormal, planePoint);
-        v4 planeEq = {planeNormal.x, planeNormal.y, planeNormal.z, planeD};
+        float planeD = -Dot(reflectionPlane.normal, reflectionPlane.position);
+        v4 planeEq = {reflectionPlane.normal.x, reflectionPlane.normal.y, reflectionPlane.normal.z, planeD};
         
+        // Plane Eq 2
+        float planeD2 = -Dot(planeNormal2, planePoint2);
+        v4 planeEq2 = {planeNormal2.x, planeNormal2.y, planeNormal2.z, planeD2};
+
+        // 3. Reflection Plane 3 (Top Face)
+        // Normal: (0, 1, 0)
+        // Point: Center + (0, 1.5, 0) -> Correct Half Height
+        // Fixed: Previously using 3.0f offset which was incorrect.
+        v3 planeNormal3 = v3{0.0f, 1.0f, 0.0f};
+        v3 planePoint3 = mirrorPos + v3{0.0f, 1.5f, 0.0f}; 
+
+        float planeD3 = -Dot(planeNormal3, planePoint3);
+        v4 planeEq3 = {planeNormal3.x, planeNormal3.y, planeNormal3.z, planeD3};
+
         // Update Plane Buffer
         void* data = device->MapBuffer(reflectionPlaneBuffer);
         if (data) {
             memcpy(data, &planeEq, sizeof(v4));
             device->UnmapBuffer(reflectionPlaneBuffer);
+        }
+        
+        // Update Plane Buffer 2
+        data = device->MapBuffer(reflectionPlaneBuffer2);
+        if (data) {
+            memcpy(data, &planeEq2, sizeof(v4));
+            device->UnmapBuffer(reflectionPlaneBuffer2);
+        }
+
+        // Update Plane Buffer 3
+        data = device->MapBuffer(reflectionPlaneBuffer3);
+        if (data) {
+            memcpy(data, &planeEq3, sizeof(v4));
+            device->UnmapBuffer(reflectionPlaneBuffer3);
+        }
+        
+        // Update Mirror Uniform Buffer (for Shader Masking)
+        data = device->MapBuffer(mirrorUniformBuffer);
+        if (data) {
+            SceneData* sceneData = static_cast<SceneData*>(data);
+            
+            // Calculate Model Matrix: Translation * Rotation
+            // Note: Metal uses Column-Major. Multiply order depends on library.
+            // We want Translate * Rotate * v.
+            m4x4 rot = CreateRotationY(angle);
+            m4x4 trans = CreateTranslation(mirrorPos);
+            sceneData->model = MatrixMultiply(trans, rot);
+            
+            // Sync Light
+            sceneData->lightPos.x = sin(time) * 3.0f;
+            sceneData->lightPos.z = cos(time) * 3.0f;
+            sceneData->lightPos.y = 4.0f + sin(time * 0.5f);
+            sceneData->lightColor.x = (sin(time) * 0.3f + 0.7f);
+            sceneData->lightColor.y = (sin(time + 2.09f) * 0.3f + 0.7f);
+            sceneData->lightColor.z = (sin(time + 4.18f) * 0.3f + 0.7f);
+            
+            sceneData->reflectionPlane = planeEq;
+            sceneData->reflectionPlane2 = planeEq2;
+            sceneData->reflectionPlane3 = planeEq3;
+            
+            device->UnmapBuffer(mirrorUniformBuffer);
         }
         
         // 2. Calculate Reflection Camera
@@ -1056,8 +1527,8 @@ void MultiViewTestCase::Run() {
         
         // Reflection Function
         auto Reflect = [&](v3 p) {
-            float dist = Dot(p, planeNormal) + planeD;
-            return p - planeNormal * (2.0f * dist);
+            float dist = Dot(p, reflectionPlane.normal) + planeD;
+            return p - reflectionPlane.normal * (2.0f * dist);
         };
         
         v3 eyeRefl = Reflect(eye);
@@ -1065,8 +1536,8 @@ void MultiViewTestCase::Run() {
         
         // Reflect Up Vector (Direction only)
         // R_dir = Dir - 2 * dot(Dir, N) * N
-        float upDot = Dot(up, planeNormal);
-        v3 upRefl = up - planeNormal * (2.0f * upDot);
+        float upDot = Dot(up, reflectionPlane.normal);
+        v3 upRefl = up - reflectionPlane.normal * (2.0f * upDot);
         
         m4x4 viewRefl = CreateLookAt(eyeRefl, centerRefl, upRefl);
         
@@ -1082,10 +1553,74 @@ void MultiViewTestCase::Run() {
             matrices[0] = projRefl * viewRefl;
             device->UnmapBuffer(reflectionUniformBuffer);
         }
+        
+        // Reflection Camera 2
+        v3 eyeRefl2 = eye - planeNormal2 * (2.0f * (Dot(eye, planeNormal2) + planeD2));
+        v3 centerRefl2 = center - planeNormal2 * (2.0f * (Dot(center, planeNormal2) + planeD2));
+        
+        float upDot2 = Dot(up, planeNormal2);
+        v3 upRefl2 = up - planeNormal2 * (2.0f * upDot2);
+        
+        m4x4 viewRefl2 = CreateLookAt(eyeRefl2, centerRefl2, upRefl2);
+        
+        // Update Reflection View Buffer 2
+        data = device->MapBuffer(reflectionUniformBuffer2);
+        if (data) {
+            m4x4* matrices = static_cast<m4x4*>(data);
+            matrices[0] = projRefl * viewRefl2;
+            device->UnmapBuffer(reflectionUniformBuffer2);
+        }
+
+        // 3. Reflection Plane 3 (Top Face)
+        // (Moved calculation up)
+
+        // Reflection Camera 3
+        v3 eyeRefl3 = eye - planeNormal3 * (2.0f * (Dot(eye, planeNormal3) + planeD3));
+        v3 centerRefl3 = center - planeNormal3 * (2.0f * (Dot(center, planeNormal3) + planeD3));
+        v3 upRefl3 = up - planeNormal3 * (2.0f * Dot(up, planeNormal3));
+        
+        // Ensure Up vector is not parallel to View Direction (Eye -> Center)
+        // Eye is (0,0,18), Center is (0,0,0). Direction is -Z.
+        // UpRefl is -Y (since Normal is Y).
+        // So they are perpendicular. No fix needed.
+
+        m4x4 viewRefl3 = CreateLookAt(eyeRefl3, centerRefl3, upRefl3);
+
+        // Update Reflection View Buffer 3
+        data = device->MapBuffer(reflectionUniformBuffer3);
+        if (data) {
+            m4x4* matrices = static_cast<m4x4*>(data);
+            matrices[0] = projRefl * viewRefl3;
+            device->UnmapBuffer(reflectionUniformBuffer3);
+        }
     }
 
     // Update Main View Camera (Fixed External View)
     {
+        // 1. Calculate Jitter
+        frameCount++;
+        int jitterIndex = frameCount % 16;
+        float jitterX = (Halton(jitterIndex + 1, 2) - 0.5f);
+        float jitterY = (Halton(jitterIndex + 1, 3) - 0.5f);
+        
+        float texelWidth = 1.0f / (float)renderSystem.GetBackBufferDesc().size.x;
+        float texelHeight = 1.0f / (float)renderSystem.GetBackBufferDesc().size.y;
+        
+        // Jitter in Clip Space
+        // Halton gives [-0.5, 0.5]. We map to pixel offset.
+        // Clip Space = PixelOffset * 2.0 / Resolution.
+        v2 jitter = {jitterX * 2.0f * texelWidth, jitterY * 2.0f * texelHeight};
+        
+        // Update Global SceneData Jitter
+        {
+             void* data = device->MapBuffer(instanceUniformBuffer);
+             if (data) {
+                 SceneData* sceneData = static_cast<SceneData*>(data);
+                 sceneData->jitter = jitter;
+                 device->UnmapBuffer(instanceUniformBuffer);
+             }
+        }
+
         void* data = device->MapBuffer(mainViewUniformBuffer);
         if (data) {
             m4x4* matrices = static_cast<m4x4*>(data);
@@ -1094,29 +1629,33 @@ void MultiViewTestCase::Run() {
             float aspect = (float)renderSystem.GetBackBufferDesc().size.x / (float)renderSystem.GetBackBufferDesc().size.y;
             if (aspect < 0.1f) aspect = 1280.0f / 720.0f; // Fallback
             
-            // Use narrower FOV (45 degrees) to reduce distortion and make the box look more natural
+            // Use narrower FOV (45 degrees)
             m4x4 proj = CreatePerspective(math::constants::PI / 4.0f, aspect, 0.1f, 100.0f);
             
-            // View: Look from outside (0, 0, 18) towards (0, 0, 0)
-            // Moved back to accommodate narrower FOV
+            // Apply Jitter to Projection Matrix
+            m4x4 jitteredProj = proj;
+            jitteredProj.columns[2][0] += jitter.x;
+            jitteredProj.columns[2][1] += jitter.y;
+            
             v3 eye = primal::math::v3{0, 0, 18.0f}; 
             v3 center = primal::math::v3{0, 0, 0};
             v3 up = primal::math::v3{0, 1, 0};
             
             m4x4 view = CreateLookAt(eye, center, up);
             
-            // Set into index 0 (as Main View shader uses viewProjections[0])
-            matrices[0] = proj * view;
+            // Set Jittered VP into index 0
+            matrices[0] = jitteredProj * view;
             
-            static int logCounter = 0;
-            if (logCounter++ < 5) {
-                std::cout << "DEBUG: Main View Matrix Update:" << std::endl;
-                std::cout << "Aspect: " << aspect << std::endl;
-                std::cout << "Proj[0][0]: " << proj.columns[0][0] << ", Proj[1][1]: " << proj.columns[1][1] << ", Proj[2][2]: " << proj.columns[2][2] << std::endl;
-                std::cout << "View Pos: " << eye.z << std::endl;
-                std::cout << "Final Matrix[0][0]: " << matrices[0].columns[0][0] << std::endl;
-                std::cout << "Final Matrix[3][3]: " << matrices[0].columns[3][3] << std::endl;
+            // Initialize Previous VP
+            if (frameCount == 1) {
+                previousViewProjection = proj * view;
             }
+            
+            // Set Previous Unjittered VP into index 6
+            matrices[6] = previousViewProjection;
+            
+            // Update Previous VP for next frame
+            previousViewProjection = proj * view;
             
             device->UnmapBuffer(mainViewUniformBuffer);
         }
@@ -1174,7 +1713,7 @@ void MultiViewTestCase::Run() {
             colorAtt.texture = data.output;
             colorAtt.loadOp = LoadAction::Clear;
             colorAtt.storeOp = StoreAction::Store;
-            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 1.0f);
+            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 0.0f);
             rpDesc.colors.push_back(colorAtt);
             
             RGAttachmentDesc depthAtt;
@@ -1224,6 +1763,126 @@ void MultiViewTestCase::Run() {
         RGResourceHandle cubeMap;
     };
     
+    // Pass 0.5: Reflection Pass 2
+    RGResourceHandle rgReflectionTex2 = renderGraph->ImportTexture("ReflectionTex2", reflectionTexture2, reflDesc);
+    RGResourceHandle rgReflectionDepth2 = renderGraph->ImportTexture("ReflectionDepth2", reflectionDepthTexture2, reflDepthDesc);
+    
+    auto& reflData2 = renderGraph->AddPass<ReflectionPassData>("ReflectionPass2", RGPassType::Graphics, RGPassCategory::Main,
+        [&](ReflectionPassData& data, RenderGraphBuilder& builder) {
+            data.output = builder.Write(rgReflectionTex2);
+            data.depth = builder.Write(rgReflectionDepth2);
+            
+            RGRenderPassDesc rpDesc;
+            
+            RGAttachmentDesc colorAtt;
+            colorAtt.texture = data.output;
+            colorAtt.loadOp = LoadAction::Clear;
+            colorAtt.storeOp = StoreAction::Store;
+            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 0.0f);
+            rpDesc.colors.push_back(colorAtt);
+            
+            RGAttachmentDesc depthAtt;
+            depthAtt.texture = data.depth;
+            depthAtt.loadOp = LoadAction::Clear;
+            depthAtt.storeOp = StoreAction::Store;
+            depthAtt.clearDepth = 1.0f;
+            rpDesc.depthStencil = depthAtt;
+            
+            builder.DeclareRenderPass(rpDesc);
+        },
+        [&](const ReflectionPassData&, RenderGraphContext& context) {
+            RHICommandBuffer* cmd = context.cmdBuffer;
+            
+            uint32_t w = renderSystem.GetBackBufferDesc().size.x / 2;
+            uint32_t h = renderSystem.GetBackBufferDesc().size.y / 2;
+            
+            rhi::ViewportDesc viewport;
+            viewport.topLeft = {0, 0};
+            viewport.size = {(float)w, (float)h};
+            viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
+            cmd->SetViewport(viewport);
+            
+            rhi::Rect scissor;
+            scissor.offset = {0, 0};
+            scissor.extent = {w, h};
+            cmd->SetScissor(scissor);
+            
+            cmd->BindGraphicsPipeline(reflectionPipeline);
+            
+            const DescriptorSetHandle sets[] = { reflectionDescriptorSet2 };
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, reflectionPipelineLayout, 0, 1, sets, 0, nullptr);
+            
+            uint64_t offsets[] = {0};
+            cmd->BindVertexBuffers(0, 1, &vertexBuffer, offsets);
+            cmd->BindIndexBuffer(indexBuffer, DataFormat::R32_UInt, 0);
+            
+            for (auto& [name, range] : drawRanges) {
+                if (name == "MirrorBox") continue; 
+                cmd->DrawIndexed(range.count, range.start, 0, 1, 0);
+            }
+        }
+    );
+
+    // Pass 0.7: Reflection Pass 3
+    RGResourceHandle rgReflectionTex3 = renderGraph->ImportTexture("ReflectionTex3", reflectionTexture3, reflDesc);
+    RGResourceHandle rgReflectionDepth3 = renderGraph->ImportTexture("ReflectionDepth3", reflectionDepthTexture3, reflDepthDesc);
+    
+    auto& reflData3 = renderGraph->AddPass<ReflectionPassData>("ReflectionPass3", RGPassType::Graphics, RGPassCategory::Main,
+        [&](ReflectionPassData& data, RenderGraphBuilder& builder) {
+            data.output = builder.Write(rgReflectionTex3);
+            data.depth = builder.Write(rgReflectionDepth3);
+            
+            RGRenderPassDesc rpDesc;
+            
+            RGAttachmentDesc colorAtt;
+            colorAtt.texture = data.output;
+            colorAtt.loadOp = LoadAction::Clear;
+            colorAtt.storeOp = StoreAction::Store;
+            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 0.0f);
+            rpDesc.colors.push_back(colorAtt);
+            
+            RGAttachmentDesc depthAtt;
+            depthAtt.texture = data.depth;
+            depthAtt.loadOp = LoadAction::Clear;
+            depthAtt.storeOp = StoreAction::Store;
+            depthAtt.clearDepth = 1.0f;
+            rpDesc.depthStencil = depthAtt;
+            
+            builder.DeclareRenderPass(rpDesc);
+        },
+        [&](const ReflectionPassData&, RenderGraphContext& context) {
+            RHICommandBuffer* cmd = context.cmdBuffer;
+            
+            uint32_t w = renderSystem.GetBackBufferDesc().size.x / 2;
+            uint32_t h = renderSystem.GetBackBufferDesc().size.y / 2;
+            
+            rhi::ViewportDesc viewport;
+            viewport.topLeft = {0, 0};
+            viewport.size = {(float)w, (float)h};
+            viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
+            cmd->SetViewport(viewport);
+            
+            rhi::Rect scissor;
+            scissor.offset = {0, 0};
+            scissor.extent = {w, h};
+            cmd->SetScissor(scissor);
+            
+            cmd->BindGraphicsPipeline(reflectionPipeline);
+            
+            const DescriptorSetHandle sets[] = { reflectionDescriptorSet3 };
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, reflectionPipelineLayout, 0, 1, sets, 0, nullptr);
+            
+            uint64_t offsets[] = {0};
+            cmd->BindVertexBuffers(0, 1, &vertexBuffer, offsets);
+            cmd->BindIndexBuffer(indexBuffer, DataFormat::R32_UInt, 0);
+            
+            for (auto& [name, range] : drawRanges) {
+                if (name == "MirrorBox") continue; 
+                cmd->DrawIndexed(range.count, range.start, 0, 1, 0);
+            }
+        }
+    );
+
     // Pass 1: Multi-View Rendering (Render to CubeMap)
     auto& mvData = renderGraph->AddPass<MultiViewPassData>("MultiViewPass", RGPassType::Graphics, RGPassCategory::Main,
         [&](MultiViewPassData& data, RenderGraphBuilder& builder) {
@@ -1307,21 +1966,35 @@ void MultiViewTestCase::Run() {
         }
     );
     
-    // Pass 2: Main View (Fixed External Camera) + Debug Overlay
-    struct PresentPassData {
-        RGResourceHandle input;
+    // Ensure Scene Color Texture exists
+    if (sceneColorTexture == handles::INVALID_RESOURCE) {
+        TextureDesc sceneColorDesc = backBufferDesc;
+        sceneColorDesc.format = DataFormat::BGRA8_UNorm;
+        sceneColorDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+        sceneColorTexture = device->CreateTexture(sceneColorDesc);
+    }
+
+    // Pass 2: Main View (Render to mainColorTexture)
+    struct MainPassData {
         RGResourceHandle output;
+        RGResourceHandle velocity;
+        RGResourceHandle depth;
     };
-    
-    renderGraph->AddPass<PresentPassData>("PresentPass", RGPassType::Graphics, RGPassCategory::Present,
-        [&](PresentPassData& data, RenderGraphBuilder& builder) {
-            data.input = builder.Read(mvData.cubeMap, ResourceState::ShaderResource); // Read CubeMap as Texture
-            
-            // Add Reflection Dependency
-            builder.Read(reflData.output, ResourceState::ShaderResource);
-            
-            data.output = builder.Write(rgBackBuffer); // Write to BackBuffer
-            
+
+    auto& mainData = renderGraph->AddPass<MainPassData>("MainPass", RGPassType::Graphics, RGPassCategory::Main,
+        [&](MainPassData& data, RenderGraphBuilder& builder) {
+            // Import Main Color Texture
+            TextureDesc colorDesc = backBufferDesc;
+            colorDesc.format = DataFormat::BGRA8_UNorm;
+            colorDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+            RGResourceHandle rgMainColor = renderGraph->ImportTexture("MainColor", mainColorTexture, colorDesc);
+
+            // Import Main Velocity Texture
+            TextureDesc velocityDesc = backBufferDesc;
+            velocityDesc.format = DataFormat::RG16_Float;
+            velocityDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+            RGResourceHandle rgMainVelocity = renderGraph->ImportTexture("MainVelocity", mainVelocityTexture, velocityDesc);
+
             // Import Main Depth Texture
             TextureDesc mainDepthDesc{};
             mainDepthDesc.size = {backBufferDesc.size.x, backBufferDesc.size.y, 1};
@@ -1332,49 +2005,66 @@ void MultiViewTestCase::Run() {
             mainDepthDesc.usage = TextureUsage::DepthStencil;
             RGResourceHandle rgMainDepth = renderGraph->ImportTexture("MainDepth", mainDepthTexture, mainDepthDesc);
 
-            // Declare Render Pass
+            data.output = builder.Write(rgMainColor);
+            data.velocity = builder.Write(rgMainVelocity);
+            data.depth = builder.Write(rgMainDepth);
+
+            // Read Reflection Texture for Mirror Box
+            builder.Read(reflData.output, ResourceState::ShaderResource);
+            builder.Read(reflData2.output, ResourceState::ShaderResource);
+            builder.Read(reflData3.output, ResourceState::ShaderResource);
+
             RGRenderPassDesc rpDesc;
-            
             RGAttachmentDesc colorAtt;
             colorAtt.texture = data.output;
             colorAtt.loadOp = LoadAction::Clear;
             colorAtt.storeOp = StoreAction::Store;
-            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 1.0f); // Dark Gray Clear Color
+            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 0.0f);
             rpDesc.colors.push_back(colorAtt);
-            
-            // Main Depth Attachment
+
+            RGAttachmentDesc velocityAtt;
+            velocityAtt.texture = data.velocity;
+            velocityAtt.loadOp = LoadAction::Clear;
+            velocityAtt.storeOp = StoreAction::Store;
+            velocityAtt.clearColor = ClearValue(0.0f, 0.0f, 0.0f, 0.0f);
+            rpDesc.colors.push_back(velocityAtt);
+
             RGAttachmentDesc depthAtt;
-            depthAtt.texture = rgMainDepth;
+            depthAtt.texture = data.depth;
             depthAtt.loadOp = LoadAction::Clear;
-            depthAtt.storeOp = StoreAction::DontCare; // Don't need to store depth
+            depthAtt.storeOp = StoreAction::Store; // Need to store for SSR
             depthAtt.clearDepth = 1.0f;
             rpDesc.depthStencil = depthAtt;
-            
+
             builder.DeclareRenderPass(rpDesc);
         },
-        [&](const PresentPassData& data, RenderGraphContext& context) {
+        [&](const MainPassData& data, RenderGraphContext& context) {
+            // std::cout << "DEBUG: Executing MainPass" << std::endl;
             RHICommandBuffer* cmd = context.cmdBuffer;
             
-            // 0. Set Viewport & Scissor
+            // Viewport & Scissor
             rhi::ViewportDesc viewport;
             viewport.topLeft = primal::math::v2{0, 0};
             viewport.size = primal::math::v2{(float)backBufferDesc.size.x, (float)backBufferDesc.size.y};
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
+            viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
             cmd->SetViewport(viewport);
-
+            
+            // Apply TAA Jitter to Projection Matrix (Vertex Shader Jitter)
+            // But we need to keep the viewport unjittered to avoid edge artifacts.
+            // The jitter is already applied in the SceneData uniform buffer (sceneData->jitter).
+            
             rhi::Rect scissor;
             scissor.offset = primal::math::s32v2{0, 0};
             scissor.extent = primal::math::u32v2{backBufferDesc.size.x, backBufferDesc.size.y};
             cmd->SetScissor(scissor);
-            
-            // --- Part A: Render Scene Geometry ---
-            
+
+
+            // Bind Vertex Buffers
             uint64_t offsets[] = {0};
             cmd->BindVertexBuffers(0, 1, &vertexBuffer, offsets);
             cmd->BindIndexBuffer(indexBuffer, DataFormat::R32_UInt, 0);
-            
-            // Iterate Ranges
+
+            // Draw
             for (auto& [name, range] : drawRanges) {
                 if (name == "MirrorBox") {
                     cmd->BindGraphicsPipeline(mirrorPipeline);
@@ -1387,11 +2077,106 @@ void MultiViewTestCase::Run() {
                 }
                 cmd->DrawIndexed(range.count, range.start, 0, 1, 0);
             }
+        }
+    );
+
+    // Pass 3: SSR Pass
+    struct SSRPassData {
+        RGResourceHandle sceneColor;
+        RGResourceHandle sceneDepth;
+        RGResourceHandle output;
+    };
+
+    auto& ssrData = renderGraph->AddPass<SSRPassData>("SSRPass", RGPassType::Compute, RGPassCategory::Main,
+        [&](SSRPassData& data, RenderGraphBuilder& builder) {
+            data.sceneColor = builder.Read(mainData.output, ResourceState::ShaderResource);
+            data.sceneDepth = builder.Read(mainData.depth, ResourceState::ShaderResource);
+
+            // SSR Output
+            TextureDesc ssrDesc = backBufferDesc;
+            ssrDesc.format = DataFormat::RGBA8_UNorm;
+            ssrDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource;
+            RGResourceHandle rgSSROutput = renderGraph->ImportTexture("SSROutput", ssrOutputTexture, ssrDesc);
+            data.output = builder.Write(rgSSROutput); 
+        },
+        [&](const SSRPassData& data, RenderGraphContext& context) {
+            // Reconstruct View/Proj Matrix for SSR
+            float aspect = (float)backBufferDesc.size.x / (float)backBufferDesc.size.y;
+            if (aspect < 0.1f) aspect = 1280.0f / 720.0f;
+            m4x4 projMatrix = CreatePerspective(math::constants::PI / 4.0f, aspect, 0.1f, 100.0f);
+            v3 eye = primal::math::v3{0, 0, 18.0f}; 
+            v3 center = primal::math::v3{0, 0, 0};
+            v3 up = primal::math::v3{0, 1, 0};
+            m4x4 viewMatrix = CreateLookAt(eye, center, up);
+
+            ssrPass.Execute(context.cmdBuffer, 
+                            mainColorTexture, 
+                            mainDepthTexture, 
+                            ssrOutputTexture, 
+                            backBufferDesc.size.x, backBufferDesc.size.y, 
+                            renderSystem.GetCurrentFrameIndex(),
+                            viewMatrix, projMatrix);
+        }
+    );
+
+    // Pass 4: Composite Pass (Writes to SceneColor)
+    struct CompositePassData {
+        RGResourceHandle mainColor;
+        RGResourceHandle ssrColor;
+        RGResourceHandle cubeMap; // For Debug Overlay
+        RGResourceHandle output;
+    };
+
+    auto& compData = renderGraph->AddPass<CompositePassData>("CompositePass", RGPassType::Graphics, RGPassCategory::Main,
+        [&](CompositePassData& data, RenderGraphBuilder& builder) {
+            data.mainColor = builder.Read(mainData.output, ResourceState::ShaderResource);
+            data.ssrColor = builder.Read(ssrData.output, ResourceState::ShaderResource);
+            data.cubeMap = builder.Read(mvData.cubeMap, ResourceState::ShaderResource);
+
+            RGResourceHandle rgSceneColor = renderGraph->ImportTexture("SceneColor", sceneColorTexture, backBufferDesc);
+            data.output = builder.Write(rgSceneColor);
+
+            RGRenderPassDesc rpDesc;
+            RGAttachmentDesc colorAtt;
+            colorAtt.texture = data.output;
+            colorAtt.loadOp = LoadAction::Clear;
+            colorAtt.storeOp = StoreAction::Store;
+            colorAtt.clearColor = ClearValue(0.0f, 0.0f, 0.0f, 1.0f);
+            rpDesc.colors.push_back(colorAtt);
             
-            // --- Part B: Render Debug Overlay (CubeMap Faces) ---
+            builder.DeclareRenderPass(rpDesc);
+        },
+        [&](const CompositePassData& data, RenderGraphContext& context) {
+            RHICommandBuffer* cmd = context.cmdBuffer;
+            
+            // Viewport
+            rhi::ViewportDesc viewport;
+            viewport.topLeft = primal::math::v2{0, 0};
+            viewport.size = primal::math::v2{(float)backBufferDesc.size.x, (float)backBufferDesc.size.y};
+            viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
+            cmd->SetViewport(viewport);
+
+            rhi::Rect scissor;
+            scissor.offset = primal::math::s32v2{0, 0};
+            scissor.extent = primal::math::u32v2{backBufferDesc.size.x, backBufferDesc.size.y};
+            cmd->SetScissor(scissor);
+
+            // 1. Draw Main Color (Opaque)
+            cmd->BindGraphicsPipeline(blitPipeline); 
+            const DescriptorSetHandle mainSets[] = { mainCompositeDescriptorSet };
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, blitPipelineLayout, 0, 1, mainSets, 0, nullptr);
+            cmd->Draw(6, 0, 1, 0); // Fullscreen Quad
+
+            // 2. Draw SSR (Additive)
+            cmd->BindGraphicsPipeline(ssrCompositePipeline);
+            const DescriptorSetHandle ssrSets[] = { ssrCompositeDescriptorSet };
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, blitPipelineLayout, 0, 1, ssrSets, 0, nullptr);
+            cmd->Draw(6, 0, 1, 0);
+
+            // 3. Debug Overlay
             if (showDebugOverlay) {
                 // 1. Get CubeMap Texture Handle
-                RenderGraphResource* res = context.graph->GetResource(data.input);
+                RenderGraphResource* res = context.graph->GetResource(data.cubeMap);
                 if (!res) return;
                 ResourceHandle cubeMapHandle = res->GetPhysicalHandle();
                 
@@ -1404,10 +2189,10 @@ void MultiViewTestCase::Run() {
                 uint32_t frameIndex = renderSystem.GetCurrentFrameIndex();
                 DescriptorSetHandle currentSet = blitDescriptorSets[frameIndex];
                 
-                // Update Uniform Buffer (Rotation) - Still used for visual effect if needed, but not for main view
+                // Update Uniform Buffer (Rotation)
                 {
                     static float angle = 0.0f;
-                    angle += 0.005f; // Slow rotation
+                    angle += 0.005f; 
                     m4x4 rot = rhi::math::CreateRotationMatrixY(angle);
                     
                     void* data = device->MapBuffer(blitUniformBuffer);
@@ -1427,18 +2212,121 @@ void MultiViewTestCase::Run() {
                 
                 device->UpdateDescriptorSets(1, &updateDesc);
                 
-                // 3. Bind Debug Pipeline (No Depth Test)
+                // 3. Bind Debug Pipeline
                 cmd->BindGraphicsPipeline(debugPipeline);
-                
                 const DescriptorSetHandle sets[] = { currentSet };
                 cmd->BindDescriptorSets(PipelineBindPoint::Graphics, blitPipelineLayout, 0, 1, sets, 0, nullptr);
-                
-                // 4. Draw Debug Overlay (6 faces, 6 vertices each)
-                cmd->Draw(6, 0, 6, 0); // 6 vertices, 6 instances
+                cmd->Draw(6, 0, 6, 0); 
             }
         }
     );
+
+    // Pass 5: TAA Pass
+    struct TAAPassData {
+        RGResourceHandle colorInput;
+        RGResourceHandle historyInput;
+        RGResourceHandle velocityInput;
+        RGResourceHandle output;
+    };
     
+    auto& taaData = renderGraph->AddPass<TAAPassData>("TAAPass", RGPassType::Graphics, RGPassCategory::Main,
+        [&](TAAPassData& data, RenderGraphBuilder& builder) {
+            data.colorInput = builder.Read(compData.output, ResourceState::ShaderResource);
+            data.velocityInput = builder.Read(mainData.velocity, ResourceState::ShaderResource);
+            
+            RGResourceHandle rgHistory = renderGraph->ImportTexture("TAAHistory", taaHistoryTexture, backBufferDesc);
+            data.historyInput = builder.Read(rgHistory, ResourceState::ShaderResource);
+            
+            RGResourceHandle rgResult = renderGraph->ImportTexture("TAAResult", taaResultTexture, backBufferDesc);
+            data.output = builder.Write(rgResult);
+            
+            RGRenderPassDesc rpDesc;
+            RGAttachmentDesc colorAtt;
+            colorAtt.texture = data.output;
+            colorAtt.loadOp = LoadAction::DontCare; // Optimization: We overwrite everything
+            colorAtt.storeOp = StoreAction::Store;
+            rpDesc.colors.push_back(colorAtt);
+            
+            builder.DeclareRenderPass(rpDesc);
+        },
+        [&](const TAAPassData& data, RenderGraphContext& context) {
+             taaPass.Execute(context.cmdBuffer, 
+                             sceneColorTexture, 
+                             taaHistoryTexture, 
+                             mainVelocityTexture, 
+                             taaResultTexture, 
+                             backBufferDesc.size.x, backBufferDesc.size.y,
+                             renderSystem.GetCurrentFrameIndex(),
+                             appliedJitter.x, appliedJitter.y,
+                             appliedPrevJitter.x, appliedPrevJitter.y);
+        }
+    );
+
+    // Pass 6: Present Pass (Blit TAA Result to BackBuffer)
+    struct PresentPassData {
+        RGResourceHandle input;
+        RGResourceHandle backBuffer;
+    };
+    
+    renderGraph->AddPass<PresentPassData>("PresentPass", RGPassType::Graphics, RGPassCategory::Present,
+        [&](PresentPassData& data, RenderGraphBuilder& builder) {
+            data.input = builder.Read(taaData.output, ResourceState::ShaderResource);
+            // data.input = builder.Read(compData.output, ResourceState::ShaderResource); // DIRECT OUTPUT
+            data.backBuffer = builder.Write(rgBackBuffer);
+            
+            RGRenderPassDesc rpDesc;
+            RGAttachmentDesc colorAtt;
+            colorAtt.texture = data.backBuffer;
+            colorAtt.loadOp = LoadAction::DontCare;
+            colorAtt.storeOp = StoreAction::Store;
+            rpDesc.colors.push_back(colorAtt);
+            builder.DeclareRenderPass(rpDesc);
+        },
+        [&](const PresentPassData& data, RenderGraphContext& context) {
+            RHICommandBuffer* cmd = context.cmdBuffer;
+            
+            rhi::ViewportDesc viewport;
+            viewport.topLeft = primal::math::v2{0, 0};
+            viewport.size = primal::math::v2{(float)backBufferDesc.size.x, (float)backBufferDesc.size.y};
+            viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
+            cmd->SetViewport(viewport);
+
+            rhi::Rect scissor;
+            scissor.offset = primal::math::s32v2{0, 0};
+            scissor.extent = primal::math::u32v2{backBufferDesc.size.x, backBufferDesc.size.y};
+            cmd->SetScissor(scissor);
+            
+            // Use Blit Pipeline
+            cmd->BindGraphicsPipeline(blitPipeline); 
+            
+            // Use Present Descriptor Set
+            DescriptorSetHandle presentSet = presentDescriptorSet;
+            
+            // Update to point to TAA Result (Ping-Pong) -> NOW POINTING TO SCENE COLOR
+            DescriptorImageInfo imageInfo{};
+            imageInfo.imageView = taaResultTexture;
+            // imageInfo.imageView = sceneColorTexture; // DIRECT OUTPUT
+            imageInfo.sampler = handles::INVALID_SAMPLER;
+            imageInfo.imageLayout = ResourceState::ShaderResource;
+            
+            WriteDescriptorSet updateDesc{};
+            updateDesc.dstSet = presentSet;
+            updateDesc.dstBinding = 0;
+            updateDesc.dstArrayElement = 0;
+            updateDesc.descriptorCount = 1;
+            updateDesc.descriptorType = DescriptorType::SampledImage;
+            updateDesc.imageInfo = &imageInfo;
+            
+            // Binding 1 is already presentUniformBuffer (Identity), so no update needed.
+            
+            device->UpdateDescriptorSets(1, &updateDesc);
+            
+            const DescriptorSetHandle sets[] = { presentSet };
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, blitPipelineLayout, 0, 1, sets, 0, nullptr);
+            cmd->Draw(6, 0, 1, 0); 
+        }
+    );
+
     // Compile & Execute
     renderGraph->Compile();
     
@@ -1461,12 +2349,19 @@ void MultiViewTestCase::Run() {
             cmd->WaitForCompletion();
             
             device->DestroyCommandBuffer(cmdHandle);
+            
+            // Swap History
+            std::swap(taaHistoryTexture, taaResultTexture);
         }
     }
-    
+ 
+
     renderSystem.EndFrame();
 }
 
+/**
+ * @brief Cleans up all created resources.
+ */
 void MultiViewTestCase::Shutdown() {
     // Unbind Input
     primal::input::unbind(std::hash<std::string>()("debug_toggle"));
@@ -1500,6 +2395,12 @@ void MultiViewTestCase::Shutdown() {
         
         device->DestroyTexture(multiViewDepthTexture); // New
         device->DestroyTexture(mainDepthTexture); // New
+        device->DestroyTexture(mainColorTexture); // New
+        device->DestroyTexture(mainVelocityTexture); // New
+        device->DestroyTexture(taaHistoryTexture); // New
+        device->DestroyTexture(taaResultTexture); // New
+
+        taaPass.Shutdown(); // Shutdown TAA Pass
         
         device->DestroyDescriptorSetLayout(dsLayout);
         device->DestroyDescriptorSet(descriptorSet);
@@ -1511,6 +2412,15 @@ void MultiViewTestCase::Shutdown() {
         device->DestroyShader(pixelShader);
 
         // 7. Destroy Blit Resources
+        // Cleanup SSR Resources
+        ssrPass.Shutdown();
+        device->DestroyTexture(ssrOutputTexture);
+        device->DestroyPipeline(ssrCompositePipeline);
+        device->DestroyDescriptorSet(ssrCompositeDescriptorSet);
+        device->DestroyDescriptorSet(mainCompositeDescriptorSet);
+        device->DestroyDescriptorSet(presentDescriptorSet);
+        device->DestroyBuffer(presentUniformBuffer);
+
         device->DestroyPipeline(blitPipeline);
         device->DestroyPipelineLayout(blitPipelineLayout);
         for(auto set : blitDescriptorSets) {
@@ -1549,4 +2459,5 @@ void MultiViewTestCase::Shutdown() {
     // 9. Close Window
     primal::platform::remove_window(window.get_id());
 }
+
 

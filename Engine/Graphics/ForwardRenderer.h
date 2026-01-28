@@ -6,6 +6,8 @@
 #include "Graphics/RHI/Core/RHIShaderCommon.h"
 #include "Graphics/RHI/Utils/ShadowUtils.h"
 #include "Graphics/Passes/BlurPass.h"
+#include "Graphics/Passes/SSRPass.h"
+#include "Graphics/Material.h"
 #include <unordered_map>
 
 namespace primal::graphics {
@@ -50,6 +52,12 @@ private:
                      uint32_t width,
                      uint32_t height);
 
+    void RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
+                          const RenderScene& scene,
+                          const RenderView& mainView,
+                          const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
+                          uint32_t frameIndex);
+
     void ShadowPass(rhi::RHICommandBuffer* cmdBuffer, 
                    const RenderView& view, 
                    rhi::ResourceHandle shadowMap,
@@ -71,7 +79,9 @@ private:
                    const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
                    const utl::vector<const RenderProxy*>& proxies,
                    uint32_t frameIndex,
-                   bool useDepthEqual);
+                   bool useDepthEqual,
+                   rhi::DescriptorSetHandle overrideGlobalSet = rhi::handles::INVALID_DESCRIPTOR_SET,
+                   PipelineFlags extraFlags = PipelineFlags::None);
 
     void TransparentPass(rhi::RHICommandBuffer* cmdBuffer, 
                         const RenderView& view, 
@@ -96,8 +106,27 @@ private:
     rhi::ResourceHandle shadowCubeMapArray_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle shadowCubeMapSampler_{rhi::handles::INVALID_RESOURCE};
 
+    // SSR Resources
+    rhi::ResourceHandle ssrOutput_{rhi::handles::INVALID_RESOURCE};
+    rhi::PipelineLayoutHandle compositePipelineLayout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineHandle compositePipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::DescriptorSetLayoutHandle compositeDescriptorSetLayout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::DescriptorSetHandle compositeDescriptorSet_{rhi::handles::INVALID_RESOURCE};
+
+    // Planar Reflection Resources
+    struct ReflectionResource {
+        rhi::ResourceHandle texture{rhi::handles::INVALID_RESOURCE};
+        rhi::ResourceHandle depth{rhi::handles::INVALID_RESOURCE};
+        rhi::ResourceHandle frameBuffer{rhi::handles::INVALID_RESOURCE};
+        void* frameBufferMapped{nullptr};
+        rhi::DescriptorSetHandle descriptorSet{rhi::handles::INVALID_DESCRIPTOR_SET};
+    };
+    std::unordered_map<id::id_type, ReflectionResource> reflectionResources_;
+    rhi::SamplerHandle reflectionSampler_{rhi::handles::INVALID_RESOURCE};
+
     // Passes
     BlurPass blurPass_;
+    SSRPass ssrPass_;
 
     // Multi-frame buffers to avoid CPU-GPU sync stalls
     rhi::ResourceHandle lightBuffers_[rhi::MAX_FRAMES_IN_FLIGHT]{};

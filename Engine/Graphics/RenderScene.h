@@ -81,6 +81,21 @@ public:
      */
     void UpdateLight(id::id_type entityId, const RenderLight& light);
 
+    // --- Reflection Plane Management ---
+
+    struct RenderReflectionPlane {
+        id::id_type entityId{id::invalid_id};
+        math::v3 position;
+        math::v3 normal;
+        math::v2 size;
+        f32 bias{0.0f};
+    };
+
+    void AddReflectionPlane(const RenderReflectionPlane& plane);
+    void RemoveReflectionPlane(id::id_type entityId);
+    void UpdateReflectionPlane(id::id_type entityId, const RenderReflectionPlane& plane);
+    const utl::vector<RenderReflectionPlane>& GetReflectionPlanes() const { return reflectionPlanes_; }
+
     /**
      * @brief Get all lights
      * @return Const reference to all lights
@@ -115,6 +130,7 @@ public:
 private:
     utl::vector<RenderProxy> proxies_;      ///< Store all RenderProxies linearly
     utl::vector<RenderLight> lights_;       ///< Store all RenderLights linearly
+    utl::vector<RenderReflectionPlane> reflectionPlanes_;
     mutable std::mutex mutex_;              ///< Thread safety mutex
 };
 

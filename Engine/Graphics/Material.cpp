@@ -189,6 +189,12 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     // Default Depth Format
     desc.depthStencilFormat = depthStencilFormat_;
 
+    bool isReflection = (flags & PipelineFlags::Reflection) != PipelineFlags::None;
+    if (isReflection) {
+        if (desc.cullMode == rhi::CullMode::Back) desc.cullMode = rhi::CullMode::Front;
+        else if (desc.cullMode == rhi::CullMode::Front) desc.cullMode = rhi::CullMode::Back;
+    }
+
     if (isShadow) {
         // Shadow Pass: Invert Cull Mode for better shadow stability (unless None)
         if (desc.cullMode == rhi::CullMode::Back) desc.cullMode = rhi::CullMode::Front;

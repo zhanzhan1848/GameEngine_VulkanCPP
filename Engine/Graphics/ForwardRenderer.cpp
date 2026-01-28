@@ -1,3 +1,14 @@
+/**
+ * @file ForwardRenderer.cpp
+ * @brief Forward Rendering implementation.
+ * 
+ * Implements a standard forward rendering pipeline with support for:
+ * - Depth Pre-pass
+ * - Main Render Pass (Opaque)
+ * - Transparent Pass
+ * - Screen Space Reflection (SSR)
+ * - Post-processing (Composite)
+ */
 #include "ForwardRenderer.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RenderMesh.h"
@@ -14,6 +25,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <fstream>
 #include <vector>
 
 namespace primal::graphics {
@@ -35,6 +47,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     lightBufferDesc.size = sizeof(rhi::ForwardLightBuffer);
     lightBufferDesc.type = rhi::BufferType::Constant;
     lightBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    lightBufferDesc.usage = rhi::GPUMemoryUsage::Dynamic;
     lightBufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
 
     // 2. Create Frame Buffers (GlobalShaderData)
@@ -42,6 +55,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     frameBufferDesc.size = sizeof(rhi::GlobalShaderData);
     frameBufferDesc.type = rhi::BufferType::Constant;
     frameBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    frameBufferDesc.usage = rhi::GPUMemoryUsage::Dynamic;
     frameBufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
 
     // 3. Create Per-Object Buffers
@@ -49,6 +63,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     perObjectBufferDesc.size = MAX_PER_OBJECT_SIZE;
     perObjectBufferDesc.type = rhi::BufferType::Constant; // Using Dynamic Offset
     perObjectBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    perObjectBufferDesc.usage = rhi::GPUMemoryUsage::Dynamic;
     perObjectBufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
 
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -258,13 +273,99 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         return false;
     }
 
+    // Initialize SSR Pass
+    if (!ssrPass_.Initialize(device_)) {
+        std::cerr << "ForwardRenderer: Failed to initialize SSRPass" << std::endl;
+        return false;
+    }
+
+    // Initialize Composite Pipeline (SSR Blending)
+    {
+        // Layout
+        rhi::DescriptorSetLayoutBinding binding;
+        binding.binding = 0;
+        binding.descriptorType = rhi::DescriptorType::CombinedImageSampler;
+        binding.descriptorCount = 1;
+        binding.stageFlags = rhi::ShaderStage::Pixel;
+        
+        rhi::DescriptorSetLayoutDesc layoutDesc;
+        layoutDesc.bindings = &binding;
+        layoutDesc.bindingCount = 1;
+        compositeDescriptorSetLayout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        
+        rhi::PipelineLayoutDesc plDesc;
+        plDesc.setLayouts = &compositeDescriptorSetLayout_;
+        plDesc.setLayoutCount = 1;
+        compositePipelineLayout_ = device_->CreatePipelineLayout(plDesc);
+        
+        // Shader Loading (SSRComposite.metal)
+        std::string shaderPath = "Engine/Graphics/Metal/shaders/SSRComposite.metal";
+        std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+             shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
+             file.open(shaderPath, std::ios::ate | std::ios::binary);
+        }
+        if (file.is_open()) {
+            size_t size = file.tellg();
+            std::vector<char> buf(size + 1);
+            file.seekg(0);
+            file.read(buf.data(), size);
+            buf[size] = 0;
+            
+            rhi::ShaderHandle vs = device_->CreateShader(buf.data(), size, rhi::ShaderStage::Vertex, "vertexMain");
+            
+            rhi::ShaderHandle fs = device_->CreateShader(buf.data(), size, rhi::ShaderStage::Pixel, "fragmentMain");
+            
+            if (vs != rhi::handles::INVALID_SHADER && fs != rhi::handles::INVALID_SHADER) {
+                rhi::GraphicsPipelineDesc pDesc;
+                pDesc.vertexShader = vs;
+                pDesc.pixelShader = fs;
+                pDesc.layout = compositePipelineLayout_;
+                
+                // Additive Blending
+                pDesc.enableBlend = true;
+                pDesc.srcColorBlendFactor = rhi::BlendFactor::One; // Add
+                pDesc.dstColorBlendFactor = rhi::BlendFactor::One; // Add
+                pDesc.colorBlendOp = rhi::BlendOp::Add;
+                pDesc.srcAlphaBlendFactor = rhi::BlendFactor::One;
+                pDesc.dstAlphaBlendFactor = rhi::BlendFactor::One;
+                pDesc.alphaBlendOp = rhi::BlendOp::Add;
+                
+                // No Depth Test for fullscreen quad usually, or Always pass
+                pDesc.enableDepthTest = false;
+                pDesc.enableDepthWrite = false;
+                
+                pDesc.cullMode = rhi::CullMode::None;
+                
+                pDesc.renderTargetCount = 1;
+                pDesc.renderTargetFormats[0] = rhi::DataFormat::BGRA8_UNorm;
+                
+                compositePipeline_ = device_->CreateGraphicsPipeline(pDesc);
+            }
+        }
+    }
+
     return true;
 }
 
 void ForwardRenderer::Shutdown() {
     blurPass_.Shutdown();
+    ssrPass_.Shutdown();
 
     if (device_) {
+        if (ssrOutput_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(ssrOutput_);
+        }
+        if (compositePipeline_ != rhi::handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(compositePipeline_);
+        }
+        if (compositePipelineLayout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+            device_->DestroyPipelineLayout(compositePipelineLayout_);
+        }
+        if (compositeDescriptorSetLayout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            device_->DestroyDescriptorSetLayout(compositeDescriptorSetLayout_);
+        }
+
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             // Buffers
             if (lightBuffers_[i] != rhi::handles::INVALID_RESOURCE) {
@@ -308,6 +409,206 @@ void ForwardRenderer::Shutdown() {
         }
     }
     device_ = nullptr;
+}
+
+void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
+                                        const RenderScene& scene,
+                                        const RenderView& mainView,
+                                        const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
+                                        uint32_t frameIndex) {
+    const auto& planes = scene.GetReflectionPlanes();
+    if (planes.empty()) return;
+
+    if (reflectionSampler_ == rhi::handles::INVALID_RESOURCE) {
+        rhi::SamplerDesc desc{};
+        desc.minFilter = rhi::FilterMode::Linear;
+        desc.magFilter = rhi::FilterMode::Linear;
+        desc.addressU = rhi::TextureAddressMode::Clamp;
+        desc.addressV = rhi::TextureAddressMode::Clamp;
+        reflectionSampler_ = device_->CreateSampler(desc);
+    }
+
+    for (const auto& plane : planes) {
+        ReflectionResource& res = reflectionResources_[plane.entityId];
+        
+        // 1. Create Resources if needed
+        if (res.texture == rhi::handles::INVALID_RESOURCE) {
+             rhi::TextureDesc desc;
+             desc.size = {1024, 1024, 1}; // Fixed size for reflection
+             desc.format = rhi::DataFormat::BGRA8_UNorm;
+             desc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+             desc.name = "ReflectionTexture";
+             res.texture = device_->CreateTexture(desc);
+
+             desc.format = rhi::DataFormat::D32_Float;
+             desc.usage = rhi::TextureUsage::DepthStencil;
+             desc.name = "ReflectionDepth";
+             res.depth = device_->CreateTexture(desc);
+        }
+
+        // 2. Calculate Reflection Matrix
+        rhi::math::v3 N = plane.normal;
+        rhi::math::v3 P = plane.position;
+        float d = -rhi::math::dot(N, P);
+        
+        float nx = N.x; float ny = N.y; float nz = N.z;
+        rhi::math::m4x4 reflectionMat;
+        reflectionMat.columns[0] = {1.0f - 2.0f*nx*nx, -2.0f*ny*nx, -2.0f*nz*nx, 0.0f};
+        reflectionMat.columns[1] = {-2.0f*nx*ny, 1.0f - 2.0f*ny*ny, -2.0f*nz*ny, 0.0f};
+        reflectionMat.columns[2] = {-2.0f*nx*nz, -2.0f*ny*nz, 1.0f - 2.0f*nz*nz, 0.0f};
+        reflectionMat.columns[3] = {-2.0f*nx*d, -2.0f*ny*d, -2.0f*nz*d, 1.0f};
+
+        rhi::math::m4x4 mainViewMat = mainView.GetViewMatrix();
+        rhi::math::m4x4 reflectionViewMat = mainViewMat * reflectionMat;
+        
+        // Create View
+        RenderView reflectionView;
+        reflectionView.SetViewMatrix(reflectionViewMat);
+        reflectionView.SetProjectionMatrix(mainView.GetProjectionMatrix());
+        
+        rhi::ViewportDesc viewport{};
+        viewport.topLeft = {0.0f, 0.0f};
+        viewport.size = {1024.0f, 1024.0f};
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        reflectionView.SetViewport(viewport);
+        
+        rhi::Rect scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = {1024, 1024};
+        reflectionView.SetScissor(scissor);
+        
+        // Cull Scene
+        reflectionView.Cull(scene);
+        
+        // 3. Prepare Global Data
+        if (res.frameBuffer == rhi::handles::INVALID_RESOURCE) {
+            rhi::BufferDesc bDesc;
+            bDesc.size = sizeof(rhi::GlobalShaderData);
+            bDesc.type = rhi::BufferType::Constant;
+            bDesc.usage = rhi::GPUMemoryUsage::Dynamic;
+            bDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
+            res.frameBuffer = device_->CreateBuffer(bDesc);
+            res.frameBufferMapped = device_->MapBuffer(res.frameBuffer);
+            
+            rhi::DescriptorSetDesc dsDesc;
+            dsDesc.layout = globalDescriptorSetLayout_;
+            res.descriptorSet = device_->CreateDescriptorSet(dsDesc);
+            
+            // Bind Buffer
+            rhi::DescriptorBufferInfo bufferInfo;
+            bufferInfo.buffer = res.frameBuffer;
+            bufferInfo.offset = 0;
+            bufferInfo.range = sizeof(rhi::GlobalShaderData);
+
+            rhi::WriteDescriptorSet update;
+            update.dstSet = res.descriptorSet;
+            update.dstBinding = FRAME_DATA_BINDING;
+            update.descriptorType = rhi::DescriptorType::UniformBuffer;
+            update.descriptorCount = 1;
+            update.bufferInfo = &bufferInfo;
+            
+            // Bind Lights (reuse main light buffer)
+            rhi::DescriptorBufferInfo lightBufferInfo;
+            lightBufferInfo.buffer = lightBuffers_[frameIndex];
+            lightBufferInfo.offset = 0;
+            lightBufferInfo.range = sizeof(rhi::ForwardLightBuffer);
+
+            rhi::WriteDescriptorSet lightUpdate;
+            lightUpdate.dstSet = res.descriptorSet;
+            lightUpdate.dstBinding = LIGHT_DATA_BINDING;
+            lightUpdate.descriptorType = rhi::DescriptorType::UniformBuffer;
+            lightUpdate.descriptorCount = 1;
+            lightUpdate.bufferInfo = &lightBufferInfo;
+            
+            // Bind Shadows (reuse main shadow maps)
+            rhi::DescriptorImageInfo shadowInfo;
+            shadowInfo.imageView = shadowMapArray_;
+            shadowInfo.sampler = shadowMapSampler_;
+            shadowInfo.imageLayout = rhi::ResourceState::ShaderResource;
+
+            rhi::WriteDescriptorSet shadowUpdate;
+            shadowUpdate.dstSet = res.descriptorSet;
+            shadowUpdate.dstBinding = SHADOW_MAP_BINDING;
+            shadowUpdate.descriptorType = rhi::DescriptorType::CombinedImageSampler;
+            shadowUpdate.descriptorCount = 1;
+            shadowUpdate.imageInfo = &shadowInfo;
+            
+            rhi::DescriptorImageInfo shadowCubeInfo;
+            shadowCubeInfo.imageView = shadowCubeMapArray_;
+            shadowCubeInfo.sampler = shadowCubeMapSampler_;
+            shadowCubeInfo.imageLayout = rhi::ResourceState::ShaderResource;
+
+            rhi::WriteDescriptorSet shadowCubeUpdate;
+            shadowCubeUpdate.dstSet = res.descriptorSet;
+            shadowCubeUpdate.dstBinding = SHADOW_CUBE_MAP_BINDING;
+            shadowCubeUpdate.descriptorType = rhi::DescriptorType::CombinedImageSampler;
+            shadowCubeUpdate.descriptorCount = 1;
+            shadowCubeUpdate.imageInfo = &shadowCubeInfo;
+            
+            rhi::WriteDescriptorSet updates[] = {update, lightUpdate, shadowUpdate, shadowCubeUpdate};
+            device_->UpdateDescriptorSets(4, updates);
+        }
+        
+        // Update Frame Buffer Content
+        if (res.frameBufferMapped && frameBuffersMapped_[frameIndex]) {
+             rhi::GlobalShaderData* data = static_cast<rhi::GlobalShaderData*>(res.frameBufferMapped);
+             rhi::GlobalShaderData* mainData = static_cast<rhi::GlobalShaderData*>(frameBuffersMapped_[frameIndex]);
+             *data = *mainData; // Copy lights etc
+             
+             data->view = reflectionView.GetViewMatrix();
+             data->projection = reflectionView.GetProjectionMatrix();
+             data->viewProjection = reflectionView.GetViewProjectionMatrix();
+             
+             rhi::math::m4x4 viewInv = rhi::math::Inverse(data->view);
+             rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
+             rhi::math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+             data->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, 1024.0f};
+             data->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, 1024.0f};
+        }
+
+        // 4. Render Pass
+        rhi::RenderPassDesc passDesc{};
+        passDesc.colorAttachments.resize(1);
+        passDesc.colorAttachments[0].texture = res.texture;
+        passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
+        passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
+        passDesc.colorAttachments[0].clearValue = rhi::ClearValue(0.1f, 0.1f, 0.1f, 1.0f);
+        
+        passDesc.depthAttachment.texture = res.depth;
+        passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
+        passDesc.depthAttachment.storeOp = rhi::StoreAction::DontCare;
+        passDesc.depthAttachment.clearValue = rhi::ClearValue(1.0f, 0);
+        
+        cmdBuffer->BeginRenderPass(passDesc);
+        cmdBuffer->SetViewport(viewport);
+        cmdBuffer->SetScissor(scissor);
+        
+        OpaquePass(cmdBuffer, reflectionView, materials, reflectionView.GetVisibleProxies(), frameIndex, false, res.descriptorSet, PipelineFlags::Reflection);
+                
+                cmdBuffer->EndRenderPass();
+
+                // Transition Reflection Texture to ShaderResource for sampling in Main Pass
+                rhi::ResourceBarrier barrier;
+                barrier.resource = res.texture;
+                barrier.beforeState = rhi::ResourceState::RenderTarget;
+                barrier.afterState = rhi::ResourceState::ShaderResource;
+                barrier.subresource = rhi::RHI_ALL_SUBRESOURCES;
+                cmdBuffer->InsertBarrier(&barrier, 1);
+                
+                // 5. Update Material
+        for (const auto& proxy : scene.GetProxies()) {
+             if (proxy.entityId == plane.entityId) {
+                 auto it = materials.find(proxy.materialId);
+                 if (it != materials.end()) {
+                     it->second->SetTexture(2, res.texture); // Binding 2
+                     it->second->SetSampler(2, reflectionSampler_);
+                     it->second->Update(device_);
+                 }
+                 break;
+             }
+        }
+    }
 }
 
 void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer, 
@@ -572,6 +873,9 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         // BlurPass leaves Output in ShaderResource state, so we are good for Main Pass sampling.
     }
 
+    // Render Planar Reflections (uses Shadow Maps)
+    RenderReflections(cmdBuffer, scene, view, materials, frameIndex);
+
     // 0. Update Frame Data
     if (frameIndex < rhi::MAX_FRAMES_IN_FLIGHT && frameBuffersMapped_[frameIndex]) {
         rhi::GlobalShaderData* frameData = static_cast<rhi::GlobalShaderData*>(frameBuffersMapped_[frameIndex]);
@@ -633,7 +937,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         DepthPrePass(cmdBuffer, view, depthStencil, materials, opaqueProxies, frameIndex, width, height);
     }
 
-    // 3. Main Pass (Opaque + Transparent)
+    // 3. Main Pass Part 1 (Opaque)
     rhi::RenderPassDesc passDesc{};
     passDesc.colorAttachments.resize(1);
     passDesc.colorAttachments[0].texture = renderTarget;
@@ -647,7 +951,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         passDesc.depthAttachment.storeOp = rhi::StoreAction::Store;
     }
 
-    std::cout << "ForwardRenderer: Beginning Main RenderPass" << std::endl;
+    // std::cout << "ForwardRenderer: Beginning Main RenderPass (Opaque)" << std::endl;
     cmdBuffer->BeginRenderPass(passDesc);
 
     rhi::ViewportDesc viewport{};
@@ -665,9 +969,81 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     bool useDepthEqual = (depthStencil != rhi::handles::INVALID_RESOURCE);
     // std::cout << "ForwardRenderer: Calling OpaquePass" << std::endl;
     OpaquePass(cmdBuffer, view, materials, opaqueProxies, frameIndex, useDepthEqual);
+    
+    cmdBuffer->EndRenderPass();
+
+    // 4. SSR Pass
+    if (ssrOutput_ == rhi::handles::INVALID_RESOURCE) {
+        rhi::TextureDesc desc;
+        desc.size = {width, height, 1};
+        desc.format = rhi::DataFormat::RGBA16_Float;
+        desc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+        desc.name = "SSROutput";
+        ssrOutput_ = device_->CreateTexture(desc);
+        
+        rhi::DescriptorSetDesc dsDesc;
+        dsDesc.layout = compositeDescriptorSetLayout_;
+        compositeDescriptorSet_ = device_->CreateDescriptorSet(dsDesc);
+        
+        rhi::DescriptorImageInfo updateInfo;
+        updateInfo.imageView = ssrOutput_;
+        updateInfo.sampler = shadowMapSampler_; // Reuse linear sampler
+        updateInfo.imageLayout = rhi::ResourceState::ShaderResource;
+
+        rhi::WriteDescriptorSet update;
+        update.dstSet = compositeDescriptorSet_;
+        update.dstBinding = 0;
+        update.descriptorType = rhi::DescriptorType::CombinedImageSampler;
+        update.descriptorCount = 1;
+        update.imageInfo = &updateInfo;
+        
+        device_->UpdateDescriptorSets(1, &update);
+    }
+
+    {
+        rhi::ResourceBarrier barriers[2];
+        barriers[0].resource = renderTarget;
+        barriers[0].beforeState = rhi::ResourceState::RenderTarget;
+        barriers[0].afterState = rhi::ResourceState::ShaderResource;
+        barriers[1].resource = depthStencil;
+        barriers[1].beforeState = rhi::ResourceState::DepthStencil; // Corrected from DepthStencilWrite
+        barriers[1].afterState = rhi::ResourceState::ShaderResource;
+        cmdBuffer->InsertBarrier(barriers, 2);
+    }
+
+    ssrPass_.Execute(cmdBuffer, renderTarget, depthStencil, ssrOutput_, width, height, frameIndex, view.GetViewMatrix(), view.GetProjectionMatrix());
+
+    {
+        rhi::ResourceBarrier barriers[3];
+        barriers[0].resource = renderTarget;
+        barriers[0].beforeState = rhi::ResourceState::ShaderResource;
+        barriers[0].afterState = rhi::ResourceState::RenderTarget;
+        barriers[1].resource = depthStencil;
+        barriers[1].beforeState = rhi::ResourceState::ShaderResource;
+        barriers[1].afterState = rhi::ResourceState::DepthStencil; // Corrected from DepthStencilWrite
+        barriers[2].resource = ssrOutput_;
+        barriers[2].beforeState = rhi::ResourceState::UnorderedAccess;
+        barriers[2].afterState = rhi::ResourceState::ShaderResource;
+        cmdBuffer->InsertBarrier(barriers, 3);
+    }
+
+    // 5. Main Pass Part 2 (Composite + Transparent)
+    passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Load;
+    passDesc.depthAttachment.loadOp = rhi::LoadAction::Load;
+    
+    // std::cout << "ForwardRenderer: Beginning Main RenderPass (Composite + Transparent)" << std::endl;
+    cmdBuffer->BeginRenderPass(passDesc);
+    cmdBuffer->SetViewport(viewport);
+    cmdBuffer->SetScissor(scissor);
+
+    if (compositePipeline_ != rhi::handles::INVALID_PIPELINE && compositeDescriptorSet_ != rhi::handles::INVALID_RESOURCE) {
+        cmdBuffer->BindGraphicsPipeline(compositePipeline_);
+        cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, compositePipelineLayout_, 0, 1, &compositeDescriptorSet_, 0, nullptr);
+        cmdBuffer->Draw(3, 1, 0, 0);
+    }
+
     // std::cout << "ForwardRenderer: Calling TransparentPass" << std::endl;
     TransparentPass(cmdBuffer, view, materials, transparentProxies, frameIndex);
-
     cmdBuffer->EndRenderPass();
     // std::cout << "ForwardRenderer: Main RenderPass Ended" << std::endl;
 }
@@ -754,7 +1130,9 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
                                  const std::unordered_map<id::id_type, MaterialInstance*>& materials,
                                  const utl::vector<const RenderProxy*>& proxies,
                                  uint32_t frameIndex,
-                                 bool useDepthEqual) {
+                                 bool useDepthEqual,
+                                 rhi::DescriptorSetHandle overrideGlobalSet,
+                                 PipelineFlags extraFlags) {
     for (const auto* proxy : proxies) {
         auto it = materials.find(proxy->materialId);
         if (it == materials.end() || !it->second) continue;
@@ -762,11 +1140,13 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
         Material* mat = mi->GetMaterial();
 
         PipelineFlags flags = useDepthEqual ? PipelineFlags::DepthEqual : PipelineFlags::None;
+        flags = flags | extraFlags;
         rhi::PipelineHandle pipeline = mat->GetPipeline(device_, rhi::handles::INVALID_RESOURCE, 0, flags);
         cmdBuffer->BindGraphicsPipeline(pipeline);
 
         // Bind Sets
-        cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, mat->GetPipelineLayout(), 0, 1, &globalDescriptorSets_[frameIndex], 0, nullptr);
+        rhi::DescriptorSetHandle globalSet = (overrideGlobalSet != rhi::handles::INVALID_DESCRIPTOR_SET) ? overrideGlobalSet : globalDescriptorSets_[frameIndex];
+        cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, mat->GetPipelineLayout(), 0, 1, &globalSet, 0, nullptr);
         
         u32 alignedSize = (sizeof(rhi::PerObjectData) + 255) & ~255;
         if (perObjectBufferOffset_ + alignedSize > MAX_PER_OBJECT_SIZE) break;

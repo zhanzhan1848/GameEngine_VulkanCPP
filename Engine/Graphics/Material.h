@@ -9,7 +9,8 @@ enum class PipelineFlags : u8 {
     None = 0,
     DepthOnly = 1 << 0,
     DepthEqual = 1 << 1,
-    Shadow = 1 << 2
+    Shadow = 1 << 2,
+    Reflection = 1 << 3
 };
 inline PipelineFlags operator|(PipelineFlags a, PipelineFlags b) { return static_cast<PipelineFlags>(static_cast<u8>(a) | static_cast<u8>(b)); }
 inline PipelineFlags operator&(PipelineFlags a, PipelineFlags b) { return static_cast<PipelineFlags>(static_cast<u8>(a) & static_cast<u8>(b)); }
