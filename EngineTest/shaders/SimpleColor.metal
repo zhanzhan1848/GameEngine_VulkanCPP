@@ -6,8 +6,7 @@
  * @date 2026-01-12
  */
 
-#include <metal_stdlib>
-using namespace metal;
+#include "../../Engine/Graphics/RHI/Shaders/RHIShaderCommon.metal"
 
 /**
  * @brief 顶点输入结构体

@@ -1,4 +1,5 @@
-#include <metal_stdlib>
+#define RHI_ENABLE_PBR
+#include "../../Engine/Graphics/RHI/Shaders/RHIShaderCommon.metal"
 #include <simd/simd.h>
 
 using namespace metal;
@@ -347,37 +348,56 @@ fragment FragmentOut fragmentMain(FragmentIn in [[stage_in]],
                              constant SceneData& scene [[buffer(2)]]) {
     FragmentOut out;
 
-    // Cornell Box Lighting
-    
+    // PBR Properties
     float3 N = normalize(in.normal.xyz);
+    float3 V = normalize(-in.worldPos.xyz); // Assuming Camera/Probe at (0,0,0)
     
     float3 lightPos = scene.lightPos.xyz;
-    float3 lightColor = scene.lightColor.xyz;
-    
+    float3 lightColor = scene.lightColor.rgb;
     float3 L = normalize(lightPos - in.worldPos.xyz);
+    float3 H = normalize(V + L);
+    
     float distToLight = length(lightPos - in.worldPos.xyz);
-    float atten = 1.0 / (1.0 + 0.1 * distToLight + 0.01 * distToLight * distToLight);
+    float attenuation = 1.0 / (1.0 + 0.1 * distToLight + 0.01 * distToLight * distToLight);
+    float3 radiance = lightColor * attenuation;
+
+    // Material Parameters (Hardcoded for test scene)
+    float3 albedo = in.color.rgb; 
+    float roughness = 0.4;
+    float metallic = 0.0; // Non-metal
+    float3 F0 = float3(0.04); 
+    F0 = mix(F0, albedo, metallic);
+
+    // Calculate PBR Terms
+    // 1. Specular Term (Cook-Torrance)
+    // SpecularBRDF returns (D * G * F) / (4 * N.V * N.L)
+    // Note: We need to recalculate F separately for Fresnel mix (kS) if we want exact energy conservation,
+    // but SpecularBRDF already includes F in its result.
+    // To properly blend Diffuse and Specular, we need kS (Fresnel).
     
-    float diff = max(dot(N, L), 0.0);
+    float3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
+    float3 kS = F;
+    float3 kD = float3(1.0) - kS;
+    kD *= 1.0 - metallic;
+
+    float NdotL = max(dot(N, L), 0.0);
     
-    // Specular
-    float3 V = normalize(-in.worldPos.xyz); // View vector
+    // Specular Contribution
+    float3 specular = SpecularBRDF(N, V, L, roughness, F0);
     
-    float3 H = normalize(L + V);
-    float spec = pow(max(dot(N, H), 0.0), 32.0);
+    // Diffuse Contribution (Lambert)
+    float3 diffuse = albedo * INV_PI; // albedo / PI
     
-    // Combine
-    float3 ambient = float3(0.4, 0.4, 0.4) * in.color.xyz; // Increased Ambient
-    float3 diffuse = diff * in.color.xyz * lightColor * atten * 1.5; 
-    float3 specular = spec * lightColor * atten * 0.8;
+    // Combine (Lo)
+    float3 Lo = (kD * diffuse + specular) * radiance * NdotL;
     
-    float3 finalColor = ambient + diffuse + specular;
+    // Ambient (Simple)
+    float3 ambient = float3(0.03) * albedo;
+    
+    float3 finalColor = ambient + Lo;
     
     // Tone mapping (Simple Reinhard)
-    finalColor = finalColor / (finalColor + float3(1.0));
-    
-    // float3 finalColor = float3(in.uv.xy, 0.0);
-    // float3 finalColor = float3(in.uv.xy, 0.0);
+    finalColor = ToneMapReinhard(finalColor);
     
     out.color = float4(finalColor, 1.0);
     

@@ -1,5 +1,4 @@
-#include <metal_stdlib>
-using namespace metal;
+#include "../../Engine/Graphics/RHI/Shaders/RHIShaderCommon.metal"
 
 struct VertexOut {
     float4 position [[position]];
@@ -17,16 +16,7 @@ struct TAAUniforms {
 // Fullscreen Triangle Vertex Shader
 vertex VertexOut vertexMain(uint vertexID [[vertex_id]]) {
     VertexOut out;
-    
-    // Standard Fullscreen Triangle logic
-    float2 pos;
-    pos.x = (vertexID == 2) ? 3.0 : -1.0;
-    pos.y = (vertexID == 1) ? 3.0 : -1.0;
-    
-    out.position = float4(pos, 0.0, 1.0);
-    out.uv = pos * 0.5 + 0.5;
-    out.uv.y = 1.0 - out.uv.y; // Flip Y to match Metal texture coordinates (0,0 at top-left)
-    
+    GetFullScreenTrianglePosUV(vertexID, out.position, out.uv);
     return out;
 }
 
