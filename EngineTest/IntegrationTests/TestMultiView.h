@@ -14,6 +14,9 @@
 #include <map>
 #include <string>
 
+#include "Graphics/RHI/Utils/IBLPrecomputer.h"
+#include "Graphics/MaterialInstance.h"
+
 class MultiViewTestCase : public primal::test::RenderTestCase {
 public:
     bool Initialize() override;
@@ -88,6 +91,30 @@ protected:
     primal::graphics::rhi::ShaderHandle mirrorVertexShader = primal::graphics::rhi::handles::INVALID_SHADER;
     primal::graphics::rhi::ShaderHandle mirrorPixelShader = primal::graphics::rhi::handles::INVALID_SHADER;
 
+
+    // Skybox Resources
+    primal::graphics::rhi::ResourceHandle skyboxTexture = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::PipelineHandle skyboxPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
+    primal::graphics::rhi::PipelineLayoutHandle skyboxPipelineLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
+    primal::graphics::rhi::DescriptorSetLayoutHandle skyboxDSLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    primal::graphics::rhi::DescriptorSetHandle skyboxDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
+    primal::graphics::rhi::DescriptorSetHandle skyboxReflDescriptorSet1 = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
+    primal::graphics::rhi::DescriptorSetHandle skyboxReflDescriptorSet2 = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
+    primal::graphics::rhi::DescriptorSetHandle skyboxReflDescriptorSet3 = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
+
+    // ShortBox Descriptor Sets
+    primal::graphics::rhi::DescriptorSetHandle shortBoxMainDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
+    primal::graphics::rhi::DescriptorSetHandle shortBoxReflDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
+    primal::graphics::rhi::DescriptorSetHandle shortBoxReflDescriptorSet2 = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
+    primal::graphics::rhi::DescriptorSetHandle shortBoxReflDescriptorSet3 = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
+    primal::graphics::rhi::ResourceHandle skyboxUniformBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ShaderHandle skyboxVertexShader = primal::graphics::rhi::handles::INVALID_SHADER;
+    primal::graphics::rhi::ShaderHandle skyboxPixelShader = primal::graphics::rhi::handles::INVALID_SHADER;
+
+    // ShortBox Resources
+    primal::graphics::rhi::ResourceHandle shortBoxUniformBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::DescriptorSetHandle shortBoxDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
+    
     // TAA Resources
     primal::graphics::TAAPass taaPass;
     primal::graphics::rhi::ResourceHandle taaHistoryTexture = primal::graphics::rhi::handles::INVALID_RESOURCE;
@@ -121,6 +148,10 @@ protected:
     std::vector<primal::graphics::rhi::DescriptorSetHandle> blitDescriptorSets;
     primal::graphics::rhi::ResourceHandle blitUniformBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
 
+    // SH Coefficients
+    primal::math::v4 computedSH[9];
+    void ProjectCubemapToSH(unsigned char* pixels[6], int width, int height);
+
     // Debug Overlay Pipeline Resources
     primal::graphics::rhi::PipelineHandle debugPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
     primal::graphics::rhi::ShaderHandle debugVertexShader = primal::graphics::rhi::handles::INVALID_SHADER;
@@ -142,9 +173,41 @@ protected:
     // Command Buffer
     std::vector<primal::graphics::rhi::CommandBufferHandle> commandBuffers;
 
+    // IBL Resources
+    std::unique_ptr<primal::graphics::rhi::IBLPrecomputer> iblPrecomputer;
+    primal::graphics::rhi::ResourceHandle envMap = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ResourceHandle irradianceMap = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ResourceHandle prefilteredMap = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ResourceHandle brdfLUT = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    
+    // PBR Material
+    std::unique_ptr<primal::graphics::Material> pbrMaterial;
+    std::unique_ptr<primal::graphics::MaterialInstance> pbrMaterialInstance;
+    
+    // PBR Resources (Buffers)
+    primal::graphics::rhi::PipelineHandle pbrPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
+    primal::graphics::rhi::PipelineLayoutHandle pbrPipelineLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
+    primal::graphics::rhi::DescriptorSetLayoutHandle pbrDSLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    primal::graphics::rhi::ResourceHandle pbrSpherePerObjectBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ResourceHandle pbrLightBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::SamplerHandle pbrDefaultSampler = primal::graphics::rhi::handles::INVALID_SAMPLER;
+    primal::graphics::rhi::SamplerHandle pbrBRDFSampler = primal::graphics::rhi::handles::INVALID_SAMPLER;
+    
+    // Sphere Mesh for PBR
+    primal::graphics::rhi::ResourceHandle sphereVertexBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ResourceHandle sphereIndexBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    uint32_t sphereIndexCount = 0;
+
 private:
     bool CreateReflectionResources();
+
+    // Helper to load Cubemap
+    primal::graphics::rhi::ResourceHandle LoadCubemap(const std::vector<std::string>& filenames);
+
     void CreateCubeMesh();
+    void CreateSphereMesh();
+    bool SetupIBL();
+    bool CreatePBRResources();
     std::string ReadShaderFile(const std::string& filepath);
 };
 

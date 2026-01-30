@@ -1031,7 +1031,24 @@ struct TextureDesc {
 };
 
 /**
- * @brief 交换链描述符
+ * @brief 纹理视图描述符
+ */
+struct TextureViewDesc {
+    ResourceHandle texture;           ///< 原始纹理句柄
+    TextureType viewType;             ///< 视图类型
+    DataFormat format;                ///< 数据格式
+    uint32_t mostDetailedMip;         ///< 起始Mip层级
+    uint32_t mipCount;                ///< Mip层级数量
+    uint32_t firstArraySlice;         ///< 起始数组层
+    uint32_t arraySize;               ///< 数组层数量
+    
+    TextureViewDesc() : texture(handles::INVALID_RESOURCE), viewType(TextureType::Unknown), 
+                       format(DataFormat::Unknown), mostDetailedMip(0), mipCount(1), 
+                       firstArraySlice(0), arraySize(1) {}
+};
+
+/**
+ * @brief 采样器描述符
  */
 struct SwapChainDesc {
     platform::window_handle window;  ///< 窗口句柄

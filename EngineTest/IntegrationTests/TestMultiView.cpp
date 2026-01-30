@@ -17,10 +17,15 @@
 #include "Engine/Graphics/RenderScene.h"
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
 #include "Engine/Platform/Platform.h" // For create_window
-#include "TestMultiView.h"
+#include "Engine/Utilities/SphericalHarmonics.h"
 #include "Engine/Input/Input.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "third_party/astc-encoder/Source/ThirdParty/stb_image.h"
+
 #include <cmath>
 #include <vector>
+#include <set>
 #include <fstream>
 #include <sstream>
 
@@ -28,6 +33,231 @@ using namespace primal::graphics;
 using namespace primal::graphics::rhi;
 using namespace primal::graphics::rendergraph;
 using namespace primal::graphics::rhi::math;
+
+void MultiViewTestCase::ProjectCubemapToSH(unsigned char* pixels[6], int width, int height) {
+    // Initialize coefficients
+    for(int i=0; i<9; ++i) computedSH[i] = {0,0,0,0};
+    
+    float invWidth = 1.0f / width;
+    float invHeight = 1.0f / height;
+    
+    // Normalization factor for SH basis
+    // We will sum (Radiance * Basis * dOmega)
+    // Then normalization is done by 1 (if dOmega sums to 4Pi) or 4Pi/TotalWeight
+    
+    float totalWeight = 0.0f;
+    
+    for (int face = 0; face < 6; ++face) {
+        for (int y = 0; y < height; ++y) {
+            // Map y to [-1, 1]
+            // Note: Standard Cubemap UV:
+            // +X (Right): u=z, v=y (flipped?) -> Check stbi load order
+            // Assuming standard OpenGL/Vulkan cubemap faces:
+            // +X, -X, +Y, -Y, +Z, -Z
+            // Center of pixel
+            float v = (y + 0.5f) * invHeight * 2.0f - 1.0f; 
+            
+            for (int x = 0; x < width; ++x) {
+                float u = (x + 0.5f) * invWidth * 2.0f - 1.0f;
+                
+                float xDir, yDir, zDir;
+                // Calculate direction based on face
+                // +Y is Up, -Y is Down. +Z is Front?
+                // Vulkan Cubemap:
+                // +X (Right), -X (Left), +Y (Up), -Y (Down), +Z (Front), -Z (Back)
+                // Wait, Vulkan +Y is down in screen space, but for Cubemaps?
+                // Usually:
+                // +X: Z points left?
+                // Let's stick to standard vector construction
+                switch(face) {
+                    case 0: // +X
+                        xDir = 1.0f; yDir = -v; zDir = -u; break;
+                    case 1: // -X
+                        xDir = -1.0f; yDir = -v; zDir = u; break;
+                    case 2: // +Y
+                        xDir = u; yDir = 1.0f; zDir = v; break;
+                    case 3: // -Y
+                        xDir = u; yDir = -1.0f; zDir = -v; break;
+                    case 4: // +Z
+                        xDir = u; yDir = -v; zDir = 1.0f; break;
+                    case 5: // -Z
+                        xDir = -u; yDir = -v; zDir = -1.0f; break;
+                }
+                
+                float lenSq = xDir*xDir + yDir*yDir + zDir*zDir;
+                float len = std::sqrt(lenSq);
+                
+                float dirX = xDir / len;
+                float dirY = yDir / len;
+                float dirZ = zDir / len;
+                
+                // Solid Angle approximation
+                // dOmega = 4 / ((1 + u^2 + v^2)^1.5)
+                // Note: u, v here are essentially tangent plane coords [-1, 1]
+                float dOmega = 4.0f / std::pow(1.0f + u*u + v*v, 1.5f);
+                
+                // Sample Color (Linearize)
+                int idx = (y * width + x) * 4;
+                float r = std::pow(pixels[face][idx] / 255.0f, 2.2f);
+                float g = std::pow(pixels[face][idx+1] / 255.0f, 2.2f);
+                float b = std::pow(pixels[face][idx+2] / 255.0f, 2.2f);
+                
+                // SH Basis Functions (Real SH)
+                // l=0
+                float Y00 = 0.282095f;
+                // l=1
+                float Y1_1 = 0.488603f * dirY;
+                float Y10  = 0.488603f * dirZ;
+                float Y11  = 0.488603f * dirX;
+                // l=2
+                float Y2_2 = 1.092548f * dirX * dirY;
+                float Y2_1 = 1.092548f * dirY * dirZ;
+                float Y20  = 0.315392f * (3.0f * dirZ * dirZ - 1.0f);
+                float Y21  = 1.092548f * dirX * dirZ;
+                float Y22  = 0.546274f * (dirX * dirX - dirY * dirY);
+                
+                float bases[9] = {Y00, Y1_1, Y10, Y11, Y2_2, Y2_1, Y20, Y21, Y22};
+                
+                for(int i=0; i<9; ++i) {
+                    computedSH[i].x += r * bases[i] * dOmega;
+                    computedSH[i].y += g * bases[i] * dOmega;
+                    computedSH[i].z += b * bases[i] * dOmega;
+                }
+                
+                totalWeight += dOmega;
+            }
+        }
+    }
+    
+    // Normalize
+    // The integral over sphere is 4Pi.
+    // Our weighted sum approximates Integral(L * Y * dOmega)
+    // The sum of dOmega should be 4Pi.
+    // So we just need to ensure scale is correct.
+    // If sum(dOmega) is not exactly 4Pi due to discretization, we can scale by (4Pi / totalWeight).
+    float normFactor = (4.0f * 3.14159265359f) / totalWeight;
+    
+    // Scale down by 1/PI to convert from Irradiance to Diffuse Color (assuming Shader multiplies by Albedo)
+    // E = Pi * L. If we want the final pixel color to match the texture color (approx),
+    // we should divide by Pi because the shader calculates Irradiance E.
+    // Standard Diffuse: Color = (E * Albedo) / Pi.
+    // Our Shader: Color = E * Albedo.
+    // So we pre-multiply coefficients by 1/Pi.
+    // 
+    // Additionally, we apply an Exposure Control factor.
+    // The Skybox is likely very bright (L ~ 1.0).
+    // Plus we have a Point Light in the scene.
+    // Without Tone Mapping, (Ambient + Diffuse) > 1.0 leads to clipping (pure white).
+    // We scale SH down to allow lighting variation to be visible.
+    float exposure = 0.3f; 
+    float userScale = (1.0f / 3.14159265359f) * exposure;
+    
+    std::cout << "ProjectCubemapToSH: TotalWeight=" << totalWeight << " NormFactor=" << normFactor << " UserScale=" << userScale << std::endl;
+
+    for(int i=0; i<9; ++i) {
+        computedSH[i].x *= (normFactor * userScale);
+        computedSH[i].y *= (normFactor * userScale);
+        computedSH[i].z *= (normFactor * userScale);
+        computedSH[i].w = 1.0f;
+    }
+    
+    std::cout << "Computed SH Coefficients from Cubemap:" << std::endl;
+    for(int i=0; i<9; ++i) {
+        std::cout << "SH[" << i << "]: " << computedSH[i].x << ", " << computedSH[i].y << ", " << computedSH[i].z << std::endl;
+    }
+}
+
+primal::graphics::rhi::ResourceHandle MultiViewTestCase::LoadCubemap(const std::vector<std::string>& filenames) {
+    if (filenames.size() != 6) return primal::graphics::rhi::handles::INVALID_RESOURCE;
+
+    int width, height, channels;
+    stbi_uc* pixels[6];
+    
+    for (int i = 0; i < 6; ++i) {
+        pixels[i] = stbi_load(filenames[i].c_str(), &width, &height, &channels, 4); // Force RGBA
+        if (!pixels[i]) {
+            std::cout << "Failed to load cubemap face: " << filenames[i] << std::endl;
+            // Cleanup previous
+            for(int j=0; j<i; ++j) stbi_image_free(pixels[j]);
+            return primal::graphics::rhi::handles::INVALID_RESOURCE;
+        }
+    }
+    
+    // Compute SH Coefficients before upload/free
+    ProjectCubemapToSH(pixels, width, height);
+
+    // Create Texture
+    primal::graphics::rhi::TextureDesc desc{};
+    desc.type = primal::graphics::rhi::TextureType::TextureCube;
+    desc.size = {(uint32_t)width, (uint32_t)height, 1};
+    desc.mipLevels = 1;
+    desc.arraySize = 1; // For TextureCube, arraySize is 1 (it has 6 faces implicit)
+    desc.format = primal::graphics::rhi::DataFormat::RGBA8_UNorm;
+    desc.usage = primal::graphics::rhi::TextureUsage::ShaderResource | primal::graphics::rhi::TextureUsage::CopyDest;
+
+    primal::graphics::rhi::ResourceHandle texture = device->CreateTexture(desc);
+
+    // Upload Data
+    // For simplicity, we create a staging buffer for all faces or one by one.
+    // Let's do one large buffer.
+    uint64_t faceSize = width * height * 4;
+    uint64_t totalSize = faceSize * 6;
+
+    primal::graphics::rhi::BufferDesc stageDesc{};
+    stageDesc.size = totalSize;
+    stageDesc.usage = primal::graphics::rhi::GPUMemoryUsage::Staging; // Correct usage for CPU->GPU upload
+    stageDesc.bindFlags = (uint32_t)primal::graphics::rhi::BufferUsageFlags::TransferSrc; // Correct binding flag
+    
+    primal::graphics::rhi::ResourceHandle stagingBuffer = device->CreateBuffer(stageDesc);
+    
+    void* data = device->MapBuffer(stagingBuffer);
+    if (data) {
+        uint8_t* dst = static_cast<uint8_t*>(data);
+        for (int i = 0; i < 6; ++i) {
+            memcpy(dst + i * faceSize, pixels[i], faceSize);
+        }
+        device->UnmapBuffer(stagingBuffer);
+    }
+
+    // Copy Command
+    primal::graphics::rhi::CommandBufferHandle cmdHandle = device->CreateCommandBuffer(primal::graphics::rhi::CommandQueueType::Graphics);
+    primal::graphics::rhi::RHICommandBuffer* cmd = primal::graphics::rhi::GetCommandBuffer(cmdHandle);
+    
+    if (cmd && cmd->Begin()) {
+        std::vector<primal::graphics::rhi::BufferTextureCopyRegion> regions;
+        for (int i = 0; i < 6; ++i) {
+            primal::graphics::rhi::BufferTextureCopyRegion region{};
+            region.bufferOffset = i * faceSize;
+            region.imageSubresource.mipLevel = 0;
+            region.imageSubresource.baseArrayLayer = i;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = {(uint32_t)width, (uint32_t)height, 1};
+            regions.push_back(region);
+        }
+        
+        cmd->CopyBufferToTexture(stagingBuffer, texture, regions.data(), 6);
+        
+        // Transition to Shader Read
+        primal::graphics::rhi::ResourceBarrier barrier{};
+        barrier.resource = texture;
+        barrier.beforeState = primal::graphics::rhi::ResourceState::CopyDest;
+        barrier.afterState = primal::graphics::rhi::ResourceState::ShaderResource;
+        barrier.subresource = primal::graphics::rhi::RHI_ALL_SUBRESOURCES;
+        
+        cmd->InsertBarrier(&barrier, 1);
+        
+        cmd->End();
+        cmd->Submit();
+        cmd->WaitForCompletion();
+    }
+    
+    device->DestroyCommandBuffer(cmdHandle);
+    device->DestroyBuffer(stagingBuffer);
+
+    for (int i = 0; i < 6; ++i) stbi_image_free(pixels[i]);
+
+    return texture;
+}
 
     // Halton Sequence for TAA Jitter
     float Halton(int index, int base) {
@@ -52,7 +282,7 @@ using namespace primal::graphics::rhi::math;
         m4x4 previousModel; // Added for Motion Vectors
         v2 jitter; // Added for TAA
         v2 previousJitter; // Added for TAA
-        v2 padding; // Padding to align to 16 bytes (vec4) if needed, but here v2+v2 = v4
+        v4 shCoeffs[9]; // Added SH Coefficients
     };
     
     // Global Descriptor Set for Present Pass (to avoid conflict with Debug Overlay)
@@ -255,37 +485,34 @@ void MultiViewTestCase::CreateCubeMesh() {
     drawRanges["Room"] = {sceneStart, sceneEnd - sceneStart};
     
     // Tall Box (Right) -> Make this the Mirror
-    addBox(v3{2.0f, -2.0f, 1.0f}, v3{3.0f, 6.0f, 3.0f}, -0.3f, white, "MirrorBox");
+    addBox(v3{0.0f, 0.0f, 0.0f}, v3{3.0f, 6.0f, 3.0f}, 0.0f, white, "MirrorBox");
     
     // Short Box (Left)
-    addBox(v3{-2.0f, -3.5f, -1.0f}, v3{3.0f, 3.0f, 3.0f}, 0.3f, white, "ShortBox");
+    addBox(v3{0.0f, 0.0f, 0.0f}, v3{3.0f, 3.0f, 3.0f}, 0.0f, white, "ShortBox");
 
     
-    /*
-    // Create Skybox-like Cube (Inside View)
-    // Center at 0,0,0. Size 10.
-    // Normals point INWARD.
-    
-    float d = 10.0f;
-    
-    // Front (+Z) - Center (0,0,d) - Normal (0,0,-1) - Up (0,1,0) - Right (-1,0,0) [Looking from inside]
-    // Let's stick to standard external normals but reverse winding or just rely on culling being None.
-    // Since we set CullMode::None, geometry is visible from both sides.
-    // We just need to place faces surrounding the origin.
-    
-    // Front (+Z)
-    addFace(primal::math::v3{0, 0, -1}, primal::math::v3{d, 0, 0}, primal::math::v3{0, d, 0}, primal::math::v3{0, 0, d});
-    // Back (-Z)
-    addFace(primal::math::v3{0, 0, 1}, primal::math::v3{-d, 0, 0}, primal::math::v3{0, d, 0}, primal::math::v3{0, 0, -d});
-    // Right (+X)
-    addFace(primal::math::v3{-1, 0, 0}, primal::math::v3{0, 0, -d}, primal::math::v3{0, d, 0}, primal::math::v3{d, 0, 0});
-    // Left (-X)
-    addFace(primal::math::v3{1, 0, 0}, primal::math::v3{0, 0, d}, primal::math::v3{0, d, 0}, primal::math::v3{-d, 0, 0});
-    // Top (+Y)
-    addFace(primal::math::v3{0, -1, 0}, primal::math::v3{d, 0, 0}, primal::math::v3{0, 0, -d}, primal::math::v3{0, d, 0});
-    // Bottom (-Y)
-    addFace(primal::math::v3{0, 1, 0}, primal::math::v3{d, 0, 0}, primal::math::v3{0, 0, d}, primal::math::v3{0, -d, 0});
-    */
+    // Skybox Mesh
+    {
+        uint32_t skyboxStart = (uint32_t)indices.size();
+        float d = 50.0f;
+        v3 skyboxColor{0.5f, 0.5f, 0.5f};
+        // Front (+Z)
+        addQuad(v3{-d, -d, d}, v3{ d, -d, d}, v3{ d,  d, d}, v3{-d,  d, d}, v3{0, 0, -1}, skyboxColor);
+        // Back (-Z)
+        addQuad(v3{ d, -d, -d}, v3{-d, -d, -d}, v3{-d,  d, -d}, v3{ d,  d, -d}, v3{0, 0, 1}, skyboxColor);
+        // Left (-X)
+        addQuad(v3{-d, -d, -d}, v3{-d, -d,  d}, v3{-d,  d,  d}, v3{-d,  d, -d}, v3{1, 0, 0}, skyboxColor);
+        // Right (+X)
+        addQuad(v3{ d, -d,  d}, v3{ d, -d, -d}, v3{ d,  d, -d}, v3{ d,  d,  d}, v3{-1, 0, 0}, skyboxColor);
+        // Top (+Y)
+        addQuad(v3{-d,  d, -d}, v3{-d,  d,  d}, v3{ d,  d,  d}, v3{ d,  d, -d}, v3{0, -1, 0}, skyboxColor);
+        // Bottom (-Y)
+        addQuad(v3{-d, -d,  d}, v3{-d, -d, -d}, v3{ d, -d, -d}, v3{ d, -d,  d}, v3{0, 1, 0}, skyboxColor);
+        
+        uint32_t skyboxEnd = (uint32_t)indices.size();
+        drawRanges["Skybox"] = {skyboxStart, skyboxEnd - skyboxStart};
+    }
+
 
     // Add a floating small cube at (0, 0, 5) inside the +Z view
         {
@@ -342,8 +569,8 @@ void MultiViewTestCase::CreateCubeMesh() {
         vbDesc.size = vertices.size() * sizeof(Vertex);
         vbDesc.vertex.vertexStride = sizeof(Vertex);
         vbDesc.type = BufferType::Vertex;
-        vbDesc.usage = GPUMemoryUsage::Static;
-        vbDesc.memoryUsage = GPUMemoryUsage::Static;
+        vbDesc.usage = GPUMemoryUsage::Dynamic;
+        vbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         vbDesc.bindFlags = static_cast<uint32_t>(BufferUsageFlags::Vertex);
 
         vertexBuffer = device->CreateBuffer(vbDesc);
@@ -367,8 +594,384 @@ void MultiViewTestCase::CreateCubeMesh() {
         device->UnmapBuffer(indexBuffer);
         
         indexCount = (uint32_t)indices.size();
-        std::cout << "DEBUG: CreateCubeMesh Complete. Vertices: " << vertices.size() << ", Indices: " << indexCount << std::endl;
+    std::cout << "DEBUG: CreateCubeMesh Complete. Vertices: " << vertices.size() << ", Indices: " << indexCount << std::endl;
+}
+
+void MultiViewTestCase::CreateSphereMesh() {
+    // Generate UV Sphere
+    struct Vertex {
+        float position[3];
+        float normal[3];
+        float uv[2];
+        float tangent[4]; // Add Tangent for PBR
+    };
+    
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+    
+    const int X_SEGMENTS = 64;
+    const int Y_SEGMENTS = 64;
+    const float PI = 3.14159265359f;
+    
+    for (int y = 0; y <= Y_SEGMENTS; ++y) {
+        for (int x = 0; x <= X_SEGMENTS; ++x) {
+            float xSegment = (float)x / (float)X_SEGMENTS;
+            float ySegment = (float)y / (float)Y_SEGMENTS;
+            float xPos = std::cos(xSegment * 2.0f * PI) * std::sin(ySegment * PI);
+            float yPos = std::cos(ySegment * PI);
+            float zPos = std::sin(xSegment * 2.0f * PI) * std::sin(ySegment * PI);
+            
+            Vertex v;
+            v.position[0] = xPos; v.position[1] = yPos; v.position[2] = zPos;
+            v.normal[0] = xPos; v.normal[1] = yPos; v.normal[2] = zPos;
+            v.uv[0] = xSegment; v.uv[1] = ySegment;
+            
+            // Tangent calculation (simplified for sphere)
+            // T = (-sin(theta)sin(phi), 0, cos(theta)sin(phi)) -> normalized
+            v.tangent[0] = -std::sin(xSegment * 2.0f * PI);
+            v.tangent[1] = 0.0f;
+            v.tangent[2] = std::cos(xSegment * 2.0f * PI);
+            v.tangent[3] = 1.0f;
+            
+            vertices.push_back(v);
+        }
     }
+    
+    for (int y = 0; y < Y_SEGMENTS; ++y) {
+        for (int x = 0; x < X_SEGMENTS; ++x) {
+            indices.push_back((y + 1) * (X_SEGMENTS + 1) + x);
+            indices.push_back(y * (X_SEGMENTS + 1) + x);
+            indices.push_back(y * (X_SEGMENTS + 1) + x + 1);
+            
+            indices.push_back((y + 1) * (X_SEGMENTS + 1) + x);
+            indices.push_back(y * (X_SEGMENTS + 1) + x + 1);
+            indices.push_back((y + 1) * (X_SEGMENTS + 1) + x + 1);
+        }
+    }
+    
+    BufferDesc vbDesc;
+    vbDesc.size = vertices.size() * sizeof(Vertex);
+    vbDesc.vertex.vertexStride = sizeof(Vertex);
+    vbDesc.type = BufferType::Vertex;
+    vbDesc.usage = GPUMemoryUsage::Dynamic;
+    vbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    vbDesc.bindFlags = static_cast<uint32_t>(BufferUsageFlags::Vertex);
+
+    sphereVertexBuffer = device->CreateBuffer(vbDesc);
+    
+    void* vbData = device->MapBuffer(sphereVertexBuffer);
+    memcpy(vbData, vertices.data(), vbDesc.size);
+    device->UnmapBuffer(sphereVertexBuffer);
+    
+    BufferDesc ibDesc;
+    ibDesc.size = indices.size() * sizeof(uint32_t);
+    ibDesc.index.format = DataFormat::R32_UInt;
+    ibDesc.type = BufferType::Index;
+    ibDesc.usage = GPUMemoryUsage::Dynamic;
+    ibDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    ibDesc.bindFlags = static_cast<uint32_t>(BufferUsageFlags::Index);
+    
+    sphereIndexBuffer = device->CreateBuffer(ibDesc);
+    
+    void* ibData = device->MapBuffer(sphereIndexBuffer);
+    memcpy(ibData, indices.data(), ibDesc.size);
+    device->UnmapBuffer(sphereIndexBuffer);
+    
+    sphereIndexCount = (uint32_t)indices.size();
+    std::cout << "DEBUG: CreateSphereMesh Complete. Vertices: " << vertices.size() << ", Indices: " << sphereIndexCount << std::endl;
+}
+
+bool MultiViewTestCase::SetupIBL() {
+    std::cout << ">>> Setting up IBL <<<" << std::endl;
+    iblPrecomputer = std::make_unique<IBLPrecomputer>(device);
+    if (!iblPrecomputer->Initialize()) {
+        std::cout << "Failed to initialize IBLPrecomputer" << std::endl;
+        return false;
+    }
+
+    // 1. Create Dummy Env Map (Cube)
+    // For now, create a 1x1 cubemap with different colors
+    // Or better, 32x32 to have some gradients
+    uint32_t envSize = 32;
+    TextureDesc desc{};
+    desc.size = {envSize, envSize, 1};
+    desc.mipLevels = 1; // Base only
+    desc.arraySize = 1;
+    desc.format = DataFormat::RGBA8_UNorm;
+    desc.type = TextureType::TextureCube;
+    desc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    
+    envMap = device->CreateTexture(desc);
+    
+    // Upload data (Gradient)
+    std::vector<uint32_t> pixels(envSize * envSize);
+    for (int face = 0; face < 6; ++face) {
+        for (uint32_t i = 0; i < envSize * envSize; ++i) {
+            // R: Face ID, G: X, B: Y
+            uint8_t r = face * 40;
+            uint8_t g = (i % envSize) * 255 / envSize;
+            uint8_t b = (i / envSize) * 255 / envSize;
+            pixels[i] = 0xFF000000 | (b << 16) | (g << 8) | r;
+        }
+        // device->UpdateTexture(envMap, pixels.data(), face, 0); // Need UpdateTexture helper that supports slices
+        // Assuming we don't have UpdateTexture for Cube slices easily exposed in RHI wrapper yet?
+        // Let's assume UpdateTexture handles it or we map it. 
+        // Checking MetalDevice... MapTexture works for Shared/Managed.
+        // Assuming we can copy buffer to texture.
+        // For simplicity, let's skip upload if complicated and just rely on cleared color (black) -> IBL will be dark.
+        // Wait, IBLPrecomputer needs something to process.
+        // Let's rely on CreateTexture with initial data if possible? No.
+        
+        // Use CopyBufferToTexture
+        BufferDesc stageDesc;
+        stageDesc.size = pixels.size() * 4;
+        stageDesc.bindFlags = static_cast<uint32_t>(BufferUsageFlags::TransferSrc);
+        stageDesc.usage = GPUMemoryUsage::Staging;
+        stageDesc.memoryUsage = GPUMemoryUsage::Staging; // Staging heap for CPU->GPU
+        
+        ResourceHandle stagingBuf = device->CreateBuffer(stageDesc);
+        void* ptr = device->MapBuffer(stagingBuf);
+        memcpy(ptr, pixels.data(), stageDesc.size);
+        device->UnmapBuffer(stagingBuf);
+        
+        CommandBufferHandle cmdHandle = device->CreateCommandBuffer(CommandQueueType::Graphics);
+        if (cmdHandle != handles::INVALID_COMMAND_BUFFER) {
+            RHICommandBuffer* cmd = rhi::GetCommandBuffer(cmdHandle);
+            if (cmd && cmd->Begin()) {
+                BufferTextureCopyRegion region;
+                region.bufferOffset = 0;
+                region.bufferRowLength = 0;
+                region.bufferImageHeight = 0;
+                region.imageSubresource.mipLevel = 0;
+                region.imageSubresource.baseArrayLayer = face;
+                region.imageSubresource.layerCount = 1;
+                region.imageOffset = {0, 0, 0};
+                region.imageExtent = {envSize, envSize, 1};
+                
+                cmd->CopyBufferToTexture(stagingBuf, envMap, &region, 1);
+                cmd->End();
+                cmd->Submit();
+                device->WaitIdle(); // Simple sync
+            }
+            device->DestroyCommandBuffer(cmdHandle);
+        }
+        device->DestroyBuffer(stagingBuf);
+    }
+
+    std::cout << "Computing Irradiance Map..." << std::endl;
+    irradianceMap = iblPrecomputer->ComputeIrradianceMap(envMap);
+    
+    std::cout << "Computing Prefiltered Map..." << std::endl;
+    prefilteredMap = iblPrecomputer->ComputePrefilteredEnvironmentMap(envMap);
+    
+    std::cout << "Computing BRDF LUT..." << std::endl;
+    brdfLUT = iblPrecomputer->ComputeBRDFIntegrationMap();
+    
+    return true;
+}
+
+// Matches StandardPBR.metal PBRMaterialParameters
+struct PBRMaterialParameters {
+    v4 baseColorFactor;
+    v3 emissiveFactor;
+    float _pad0; // Padding to match Metal float3 size (16 bytes)
+    float roughnessFactor;
+    float metallicFactor;
+    float normalScale;
+    float occlusionStrength;
+    float padding;
+
+    int hasBaseColorTexture;
+    int hasNormalTexture;
+    int hasMetallicRoughnessTexture;
+    int hasOcclusionTexture;
+    int hasEmissiveTexture;
+    int padding2[3];
+};
+
+bool MultiViewTestCase::CreatePBRResources() {
+    std::cout << ">>> Creating PBR Resources <<<" << std::endl;
+    
+    // 1. Load Shader
+    std::string shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/StandardPBR.metal";
+    std::string shaderSource = ReadShaderFile(shaderPath);
+    if (shaderSource.empty()) return false;
+    
+    // 2. Create Descriptor Set Layout (Still needed for Material configuration)
+    // Matches StandardPBR.metal bindings
+    // Buffer 0: Vertices (handled by VertexInput)
+    // Buffer 1: ViewUniforms
+    // Buffer 2: InstanceUniforms
+    // Buffer 3: MaterialParams
+    // Textures 0-4: PBR Maps
+    // Textures 5-7: IBL Maps
+    // Samplers 0-1
+    
+    std::vector<DescriptorSetLayoutBinding> bindings;
+    
+    // View Uniforms (Set 0, Binding 1)
+    DescriptorSetLayoutBinding viewUniformBinding;
+    viewUniformBinding.binding = 1;
+    viewUniformBinding.descriptorType = DescriptorType::UniformBuffer;
+    viewUniformBinding.descriptorCount = 1;
+    viewUniformBinding.stageFlags = ShaderStage::Vertex | ShaderStage::Pixel;
+    bindings.push_back(viewUniformBinding);
+
+    // Instance Uniforms (Set 0, Binding 2)
+    DescriptorSetLayoutBinding instanceUniformBinding;
+    instanceUniformBinding.binding = 2;
+    instanceUniformBinding.descriptorType = DescriptorType::UniformBuffer;
+    instanceUniformBinding.descriptorCount = 1;
+    instanceUniformBinding.stageFlags = ShaderStage::Vertex | ShaderStage::Pixel;
+    bindings.push_back(instanceUniformBinding);
+
+    // Material Params (Set 0, Binding 3)
+    DescriptorSetLayoutBinding materialParamsBinding;
+    materialParamsBinding.binding = 3;
+    materialParamsBinding.descriptorType = DescriptorType::UniformBuffer;
+    materialParamsBinding.descriptorCount = 1;
+    materialParamsBinding.stageFlags = ShaderStage::Vertex | ShaderStage::Pixel;
+    bindings.push_back(materialParamsBinding);
+    
+    // Textures (0-7)
+    for(int i=0; i<=7; ++i) {
+        DescriptorSetLayoutBinding textureBinding;
+        textureBinding.binding = (uint32_t)i;
+        textureBinding.descriptorType = DescriptorType::SampledImage;
+        textureBinding.descriptorCount = 1;
+        textureBinding.stageFlags = ShaderStage::Pixel;
+        bindings.push_back(textureBinding);
+    }
+    
+    // Samplers (0-1)
+    DescriptorSetLayoutBinding sampler0Binding;
+    sampler0Binding.binding = 0;
+    sampler0Binding.descriptorType = DescriptorType::Sampler;
+    sampler0Binding.descriptorCount = 1;
+    sampler0Binding.stageFlags = ShaderStage::Pixel;
+    bindings.push_back(sampler0Binding);
+
+    DescriptorSetLayoutBinding sampler1Binding;
+    sampler1Binding.binding = 1;
+    sampler1Binding.descriptorType = DescriptorType::Sampler;
+    sampler1Binding.descriptorCount = 1;
+    sampler1Binding.stageFlags = ShaderStage::Pixel;
+    bindings.push_back(sampler1Binding);
+    
+    DescriptorSetLayoutDesc layoutDesc;
+    layoutDesc.bindingCount = bindings.size();
+    layoutDesc.bindings = bindings.data();
+    
+    pbrDSLayout = device->CreateDescriptorSetLayout(layoutDesc);
+    
+    // 3. Create Pipeline Layout
+    PipelineLayoutDesc plDesc;
+    plDesc.setLayoutCount = 1;
+    plDesc.setLayouts = &pbrDSLayout;
+    pbrPipelineLayout = device->CreatePipelineLayout(plDesc);
+    
+    // 4. Create Material
+    pbrMaterial = std::make_unique<Material>();
+    pbrMaterial->SetShader(ShaderStage::Vertex, shaderSource.data(), shaderSource.size(), "vertexMain");
+    pbrMaterial->SetShader(ShaderStage::Pixel, shaderSource.data(), shaderSource.size(), "fragmentMain");
+    
+    pbrMaterial->SetDescriptorSetLayout(pbrDSLayout);
+    pbrMaterial->SetPipelineLayout(pbrPipelineLayout);
+    
+    pbrMaterial->SetUniformBufferBinding(3);
+    pbrMaterial->SetUniformBlockSize(sizeof(PBRMaterialParameters));
+    
+    // 5. Create Pipeline (Manual creation for Test Framework compatibility)
+    // Note: In a full engine, Material would help create this, but here we do it manually to ensure we have the handle.
+    // However, Material stores the state, so we should sync it.
+    
+    GraphicsPipelineDesc pipeDesc{};
+    pipeDesc.layout = pbrPipelineLayout;
+    pipeDesc.topology = PrimitiveTopology::TriangleList;
+    pipeDesc.cullMode = CullMode::Back;
+    pipeDesc.enableDepthTest = true;
+    pipeDesc.enableDepthWrite = true;
+    pipeDesc.depthStencilFormat = DataFormat::D32_Float;
+    
+    // Set Shaders from Device (Material::SetShader stores data, doesn't return handle here easily without compiling)
+    // So we compile them again or assume Material cached them? 
+    // Material doesn't compile until GetPipeline.
+    // Let's just re-compile or use the ones from Material if we could.
+    // For simplicity, compile here as before.
+    ShaderHandle vs = device->CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Vertex, "vertexMain");
+    ShaderHandle fs = device->CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Pixel, "fragmentMain");
+    pipeDesc.vertexShader = vs;
+    pipeDesc.pixelShader = fs;
+    
+    TextureDesc bbDesc = renderSystem.GetBackBufferDesc();
+    pipeDesc.renderTargetCount = 1;
+    pipeDesc.renderTargetFormats[0] = bbDesc.format;
+    
+    // Vertex Input (StandardPBR.metal VertexIn)
+    VertexInputBinding vBinding;
+    vBinding.binding = 0;
+    vBinding.stride = sizeof(float) * (3+3+2+4); // 12 floats
+    vBinding.perVertex = true;
+    pipeDesc.vertexBindings.push_back(vBinding);
+    
+    VertexInputAttribute attrs[4];
+    attrs[0] = {0, 0, DataFormat::RGB32_Float, 0}; // Pos
+    attrs[1] = {1, 0, DataFormat::RGB32_Float, sizeof(float)*3}; // Normal
+    attrs[2] = {2, 0, DataFormat::RG32_Float, sizeof(float)*6}; // UV
+    attrs[3] = {3, 0, DataFormat::RGBA32_Float, sizeof(float)*8}; // Tangent
+    
+    for(auto& attr : attrs) pipeDesc.vertexAttributes.push_back(attr);
+    
+    pbrPipeline = device->CreateGraphicsPipeline(pipeDesc);
+    if (pbrPipeline == handles::INVALID_PIPELINE) {
+        std::cout << "Failed to create PBR Pipeline" << std::endl;
+        return false;
+    }
+    
+    // 6. Create Material Instance
+    pbrMaterialInstance = std::make_unique<MaterialInstance>(pbrMaterial.get());
+    if (!pbrMaterialInstance->Initialize(device)) {
+        std::cout << "Failed to initialize PBR MaterialInstance" << std::endl;
+        return false;
+    }
+    
+    // 7. Set Initial Parameters
+    PBRMaterialParameters params{};
+    params.baseColorFactor = {1.0f, 0.0f, 0.0f, 1.0f}; // Red Sphere
+    params.roughnessFactor = 0.1f; // Shiny
+    params.metallicFactor = 1.0f; // Metal
+    params.normalScale = 1.0f;
+    params.occlusionStrength = 1.0f;
+    params.emissiveFactor = {0,0,0};
+    
+    pbrMaterialInstance->SetUniformData(0, &params, sizeof(params));
+    
+    // 8. Bind Resources to Material Instance
+    // Bind View/Instance Buffers (Binding 1 & 2)
+    pbrMaterialInstance->SetBuffer(1, viewUniformBuffer, sizeof(math::m4x4)*12, 0);
+    pbrMaterialInstance->SetBuffer(2, instanceUniformBuffer, sizeof(SceneData), 0);
+    
+    // Bind Textures (5, 6, 7)
+    if (irradianceMap != handles::INVALID_RESOURCE) pbrMaterialInstance->SetTexture(5, irradianceMap);
+    if (prefilteredMap != handles::INVALID_RESOURCE) pbrMaterialInstance->SetTexture(6, prefilteredMap);
+    if (brdfLUT != handles::INVALID_RESOURCE) pbrMaterialInstance->SetTexture(7, brdfLUT);
+    
+    // Bind Samplers (0, 1)
+    SamplerDesc sampDesc{};
+    sampDesc.minFilter = FilterMode::Linear;
+    sampDesc.magFilter = FilterMode::Linear;
+    sampDesc.addressU = TextureAddressMode::Wrap;
+    sampDesc.addressV = TextureAddressMode::Wrap;
+    pbrDefaultSampler = device->CreateSampler(sampDesc);
+    
+    pbrMaterialInstance->SetSampler(0, pbrDefaultSampler);
+    pbrMaterialInstance->SetSampler(1, pbrDefaultSampler);
+    
+    // Initial Update
+    pbrMaterialInstance->Update(device);
+    
+    return true;
+}
 
 /**
  * @brief Initializes the Multi-View Test Case.
@@ -887,6 +1490,11 @@ bool MultiViewTestCase::Initialize() {
             sceneData->model = primal::graphics::rhi::math::MatrixIdentity();
             sceneData->lightPos = {0.0f, 4.0f, 0.0f, 1.0f}; // Top Light
             sceneData->lightColor = {1.0f, 1.0f, 1.0f, 1.0f}; // White
+            
+            // Initialize SH Coefficients (Neutral Ambient)
+            for(int i=0; i<9; ++i) sceneData->shCoeffs[i] = {0,0,0,0};
+            sceneData->shCoeffs[0] = {0.1f, 0.1f, 0.1f, 1.0f}; // Low ambient gray
+            
             device->UnmapBuffer(instanceUniformBuffer);
         }
     }
@@ -949,6 +1557,9 @@ bool MultiViewTestCase::Initialize() {
     
     // 10. Create Cube Mesh
     CreateCubeMesh();
+    CreateSphereMesh();
+    SetupIBL();
+    CreatePBRResources();
     
     // 11. Create Command Buffers (Per Frame)
     // commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -964,8 +1575,160 @@ bool MultiViewTestCase::Initialize() {
     source.code = input_code::key_f1;
     source.multiplier = 1.0f;
     bind(source);
+
+    // Bind F2 for SH Toggle
+    source.binding = std::hash<std::string>()("sh_toggle");
+    source.code = input_code::key_f2;
+    bind(source);
     
     if (!CreateReflectionResources()) return false;
+
+    // 12.1 Initialize Skybox Resources
+    std::vector<std::string> skyboxFaces = {
+        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/images/skybox_r.jpg", // +X
+        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/images/skybox_l.jpg", // -X
+        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/images/skybox_u.jpg", // +Y
+        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/images/skybox_d.jpg", // -Y
+        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/images/skybox_f.jpg", // +Z
+        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/images/skybox_b.jpg"  // -Z
+    };
+    
+    primal::graphics::rhi::ResourceHandle skyboxTexture = LoadCubemap(skyboxFaces);
+    if (skyboxTexture == primal::graphics::rhi::handles::INVALID_RESOURCE) {
+        std::cout << "Failed to load Skybox Texture!" << std::endl;
+    } else {
+        std::cout << "Skybox Texture Loaded Successfully." << std::endl;
+        
+        // Create Skybox Shaders
+        skyboxVertexShader = device->CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Vertex, "vertexSkybox");
+        skyboxPixelShader = device->CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Pixel, "fragmentSkybox");
+        
+        // Create Skybox DS Layout
+        DescriptorSetLayoutBinding skyboxBindings[3];
+        // Binding 0: Uniforms (Buffer 1) -> Metal uses [[buffer(1)]]
+        skyboxBindings[0].binding = 1; 
+        skyboxBindings[0].descriptorType = DescriptorType::UniformBuffer;
+        skyboxBindings[0].descriptorCount = 1;
+        skyboxBindings[0].stageFlags = ShaderStage::Vertex;
+        
+        // Binding 1: SceneData (Buffer 2) -> Metal uses [[buffer(2)]]
+        skyboxBindings[1].binding = 2;
+        skyboxBindings[1].descriptorType = DescriptorType::UniformBuffer;
+        skyboxBindings[1].descriptorCount = 1;
+        skyboxBindings[1].stageFlags = ShaderStage::Vertex;
+        
+        // Binding 2: Cubemap (Texture 0) -> Metal uses [[texture(0)]]
+        skyboxBindings[2].binding = 0; 
+        skyboxBindings[2].descriptorType = DescriptorType::SampledImage; 
+        skyboxBindings[2].descriptorCount = 1;
+        skyboxBindings[2].stageFlags = ShaderStage::Pixel;
+        
+        DescriptorSetLayoutDesc skyboxDSDesc;
+        skyboxDSDesc.bindingCount = 3;
+        skyboxDSDesc.bindings = skyboxBindings;
+        skyboxDSLayout = device->CreateDescriptorSetLayout(skyboxDSDesc);
+        
+        // Create Skybox Pipeline Layout
+        PipelineLayoutDesc skyboxPLDesc;
+        skyboxPLDesc.setLayoutCount = 1;
+        skyboxPLDesc.setLayouts = &skyboxDSLayout;
+        skyboxPipelineLayout = device->CreatePipelineLayout(skyboxPLDesc);
+        
+        // Create Skybox Pipeline
+        GraphicsPipelineDesc skyboxPipeDesc = pipelineDesc;
+        skyboxPipeDesc.vertexShader = skyboxVertexShader;
+        skyboxPipeDesc.pixelShader = skyboxPixelShader;
+        skyboxPipeDesc.layout = skyboxPipelineLayout;
+        skyboxPipeDesc.cullMode = CullMode::None; // Render inside
+        skyboxPipeDesc.enableDepthTest = true;
+        skyboxPipeDesc.enableDepthWrite = false; // Background
+        skyboxPipeDesc.depthFunc = primal::graphics::rhi::ComparisonFunc::LessEqual;
+        
+        skyboxPipeline = device->CreateGraphicsPipeline(skyboxPipeDesc);
+        
+        // Create Descriptor Set
+        DescriptorSetDesc setDesc;
+        setDesc.layout = skyboxDSLayout;
+        skyboxDescriptorSet = device->CreateDescriptorSet(setDesc);
+        
+        // Update Descriptor Set
+        WriteDescriptorSet updates[3];
+        DescriptorBufferInfo bufInfo0; bufInfo0.buffer = viewUniformBuffer; bufInfo0.offset = 0; bufInfo0.range = sizeof(math::m4x4) * 12;
+        DescriptorBufferInfo bufInfo1; bufInfo1.buffer = instanceUniformBuffer; bufInfo1.offset = 0; bufInfo1.range = sizeof(SceneData);
+        DescriptorImageInfo imgInfo; imgInfo.imageView = skyboxTexture; imgInfo.imageLayout = ResourceState::ShaderResource;
+        
+        updates[0].dstSet = skyboxDescriptorSet; updates[0].dstBinding = 1; updates[0].descriptorType = DescriptorType::UniformBuffer; updates[0].bufferInfo = &bufInfo0; updates[0].descriptorCount = 1;
+        updates[1].dstSet = skyboxDescriptorSet; updates[1].dstBinding = 2; updates[1].descriptorType = DescriptorType::UniformBuffer; updates[1].bufferInfo = &bufInfo1; updates[1].descriptorCount = 1;
+        updates[2].dstSet = skyboxDescriptorSet; updates[2].dstBinding = 0; updates[2].descriptorType = DescriptorType::SampledImage; updates[2].imageInfo = &imgInfo; updates[2].descriptorCount = 1;
+        
+        device->UpdateDescriptorSets(3, updates);
+
+        // Create Reflection Skybox Descriptor Sets
+        skyboxReflDescriptorSet1 = device->CreateDescriptorSet(setDesc);
+        skyboxReflDescriptorSet2 = device->CreateDescriptorSet(setDesc);
+        skyboxReflDescriptorSet3 = device->CreateDescriptorSet(setDesc);
+        
+        // Update Refl 1
+        WriteDescriptorSet updates1[3];
+        DescriptorBufferInfo bufInfoR1; bufInfoR1.buffer = reflectionUniformBuffer; bufInfoR1.offset = 0; bufInfoR1.range = sizeof(math::m4x4) * 12;
+        updates1[0].dstSet = skyboxReflDescriptorSet1; updates1[0].dstBinding = 1; updates1[0].descriptorType = DescriptorType::UniformBuffer; updates1[0].bufferInfo = &bufInfoR1; updates1[0].descriptorCount = 1;
+        updates1[1].dstSet = skyboxReflDescriptorSet1; updates1[1].dstBinding = 2; updates1[1].descriptorType = DescriptorType::UniformBuffer; updates1[1].bufferInfo = &bufInfo1; updates1[1].descriptorCount = 1; 
+        updates1[2].dstSet = skyboxReflDescriptorSet1; updates1[2].dstBinding = 0; updates1[2].descriptorType = DescriptorType::SampledImage; updates1[2].imageInfo = &imgInfo; updates1[2].descriptorCount = 1; 
+        device->UpdateDescriptorSets(3, updates1);
+
+        // Update Refl 2
+        WriteDescriptorSet updates2[3];
+        DescriptorBufferInfo bufInfoR2; bufInfoR2.buffer = reflectionUniformBuffer2; bufInfoR2.offset = 0; bufInfoR2.range = sizeof(math::m4x4) * 12;
+        updates2[0].dstSet = skyboxReflDescriptorSet2; updates2[0].dstBinding = 1; updates2[0].descriptorType = DescriptorType::UniformBuffer; updates2[0].bufferInfo = &bufInfoR2; updates2[0].descriptorCount = 1;
+        updates2[1].dstSet = skyboxReflDescriptorSet2; updates2[1].dstBinding = 2; updates2[1].descriptorType = DescriptorType::UniformBuffer; updates2[1].bufferInfo = &bufInfo1; updates2[1].descriptorCount = 1;
+        updates2[2].dstSet = skyboxReflDescriptorSet2; updates2[2].dstBinding = 0; updates2[2].descriptorType = DescriptorType::SampledImage; updates2[2].imageInfo = &imgInfo; updates2[2].descriptorCount = 1;
+        device->UpdateDescriptorSets(3, updates2);
+
+        // Update Refl 3
+        WriteDescriptorSet updates3[3];
+        DescriptorBufferInfo bufInfoR3; bufInfoR3.buffer = reflectionUniformBuffer3; bufInfoR3.offset = 0; bufInfoR3.range = sizeof(math::m4x4) * 12;
+        updates3[0].dstSet = skyboxReflDescriptorSet3; updates3[0].dstBinding = 1; updates3[0].descriptorType = DescriptorType::UniformBuffer; updates3[0].bufferInfo = &bufInfoR3; updates3[0].descriptorCount = 1;
+        updates3[1].dstSet = skyboxReflDescriptorSet3; updates3[1].dstBinding = 2; updates3[1].descriptorType = DescriptorType::UniformBuffer; updates3[1].bufferInfo = &bufInfo1; updates3[1].descriptorCount = 1;
+        updates3[2].dstSet = skyboxReflDescriptorSet3; updates3[2].dstBinding = 0; updates3[2].descriptorType = DescriptorType::SampledImage; updates3[2].imageInfo = &imgInfo; updates3[2].descriptorCount = 1;
+        device->UpdateDescriptorSets(3, updates3);
+    }
+
+    // 12.2 Initialize ShortBox Resources (Independent Movement & SH)
+    {
+        BufferDesc ubDesc;
+        ubDesc.size = sizeof(SceneData);
+        ubDesc.type = BufferType::Constant;
+        ubDesc.usage = GPUMemoryUsage::Dynamic;
+        ubDesc.bindFlags = (uint32_t)BufferUsageFlags::Uniform;
+        shortBoxUniformBuffer = device->CreateBuffer(ubDesc);
+        
+        DescriptorSetDesc setDesc;
+        setDesc.layout = dsLayout; // Reuse main layout
+        shortBoxDescriptorSet = device->CreateDescriptorSet(setDesc);
+        
+        WriteDescriptorSet updates[2];
+        DescriptorBufferInfo bufInfo0; bufInfo0.buffer = viewUniformBuffer; bufInfo0.offset = 0; bufInfo0.range = sizeof(math::m4x4) * 12;
+        DescriptorBufferInfo bufInfo1; bufInfo1.buffer = shortBoxUniformBuffer; bufInfo1.offset = 0; bufInfo1.range = sizeof(SceneData);
+        
+        updates[0].dstSet = shortBoxDescriptorSet; updates[0].dstBinding = 1; updates[0].descriptorType = DescriptorType::UniformBuffer; updates[0].bufferInfo = &bufInfo0; updates[0].descriptorCount = 1;
+        updates[1].dstSet = shortBoxDescriptorSet; updates[1].dstBinding = 2; updates[1].descriptorType = DescriptorType::UniformBuffer; updates[1].bufferInfo = &bufInfo1; updates[1].descriptorCount = 1;
+        
+        device->UpdateDescriptorSets(2, updates);
+
+        // Create ShortBox Main Descriptor Set (For Main Pass)
+        DescriptorSetDesc setDescMain;
+        setDescMain.layout = dsLayout; // Main Layout (View + Instance)
+        shortBoxMainDescriptorSet = device->CreateDescriptorSet(setDescMain);
+        
+        WriteDescriptorSet updatesMain[2];
+        DescriptorBufferInfo bufInfoMainView; bufInfoMainView.buffer = mainViewUniformBuffer; bufInfoMainView.offset = 0; bufInfoMainView.range = sizeof(math::m4x4) * 12;
+        DescriptorBufferInfo bufInfoShortBox; bufInfoShortBox.buffer = shortBoxUniformBuffer; bufInfoShortBox.offset = 0; bufInfoShortBox.range = sizeof(SceneData);
+        
+        updatesMain[0].dstSet = shortBoxMainDescriptorSet; updatesMain[0].dstBinding = 1; updatesMain[0].descriptorType = DescriptorType::UniformBuffer; updatesMain[0].bufferInfo = &bufInfoMainView; updatesMain[0].descriptorCount = 1;
+        updatesMain[1].dstSet = shortBoxMainDescriptorSet; updatesMain[1].dstBinding = 2; updatesMain[1].descriptorType = DescriptorType::UniformBuffer; updatesMain[1].bufferInfo = &bufInfoShortBox; updatesMain[1].descriptorCount = 1;
+        
+        device->UpdateDescriptorSets(2, updatesMain);
+    }
 
     // 13. Initialize SSR Pass
     if (!ssrPass.Initialize(device)) {
@@ -1097,12 +1860,60 @@ bool MultiViewTestCase::Initialize() {
  * @param filepath Absolute or relative path to the shader file.
  * @return std::string Content of the shader file, or empty string if failed.
  */
+
+namespace {
+    std::string ReadShaderFileRecursive(const std::string& filepath, std::set<std::string>& includedFiles) {
+        if (includedFiles.find(filepath) != includedFiles.end()) {
+            return "";
+        }
+        includedFiles.insert(filepath);
+
+        std::string finalPath = filepath;
+        std::ifstream file(finalPath);
+        if (!file.is_open()) {
+            // Try common shader directory
+            finalPath = "Engine/Graphics/RHI/Shaders/" + filepath;
+            file.open(finalPath);
+            if (!file.is_open()) {
+                 // Try test shader directory
+                 finalPath = "EngineTest/shaders/" + filepath;
+                 file.open(finalPath);
+                 if (!file.is_open()) {
+                    std::cout << "Failed to find shader file: " << filepath << std::endl;
+                    return "";
+                 }
+            }
+        }
+    
+        std::stringstream buffer;
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.find("#include") != std::string::npos && line.find("\"") != std::string::npos) {
+                size_t start = line.find("\"");
+                size_t end = line.rfind("\"");
+                if (start != std::string::npos && end != std::string::npos && end > start) {
+                    std::string includeFile = line.substr(start + 1, end - start - 1);
+                    std::string includedSource = ReadShaderFileRecursive(includeFile, includedFiles);
+                    if (!includedSource.empty()) {
+                        buffer << "\n// Included from " << includeFile << "\n";
+                        buffer << includedSource << "\n";
+                    }
+                } else {
+                    buffer << line << "\n";
+                }
+            } else {
+                if (line.find("#pragma once") == std::string::npos) {
+                    buffer << line << "\n";
+                }
+            }
+        }
+        return buffer.str();
+    }
+}
+
 std::string MultiViewTestCase::ReadShaderFile(const std::string& filepath) {
-    std::ifstream file(filepath);
-    if (!file.is_open()) return "";
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
+    std::set<std::string> includedFiles;
+    return ReadShaderFileRecursive(filepath, includedFiles);
 }
 
 /**
@@ -1256,18 +2067,16 @@ bool MultiViewTestCase::CreateReflectionResources() {
     reflectionDescriptorSet2 = device->CreateDescriptorSet(setDesc);
     reflectionDescriptorSet3 = device->CreateDescriptorSet(setDesc);
     
+    // Create ShortBox Reflection Descriptor Sets
+    shortBoxReflDescriptorSet = device->CreateDescriptorSet(setDesc);
+    shortBoxReflDescriptorSet2 = device->CreateDescriptorSet(setDesc);
+    shortBoxReflDescriptorSet3 = device->CreateDescriptorSet(setDesc);
+    
     setDesc.layout = mirDSLayout;
     mirrorDescriptorSet = device->CreateDescriptorSet(setDesc);
     
-    // Define SceneData locally
-    struct SceneData {
-        m4x4 model;
-        v4 lightPos;
-        v4 lightColor;
-        v4 reflectionPlane;
-        v4 reflectionPlane2;
-        v4 reflectionPlane3;
-    };
+    // Define SceneData locally - REMOVED (Using global definition)
+    // struct SceneData { ... };
     
     // Update Reflection Descriptor Set
     {
@@ -1282,13 +2091,29 @@ bool MultiViewTestCase::CreateReflectionResources() {
         
         device->UpdateDescriptorSets(3, updates);
 
+        // Update ShortBox Reflection Descriptor Set (Uses ShortBox Buffer)
+        DescriptorBufferInfo infoShortBox{}; infoShortBox.buffer = shortBoxUniformBuffer; infoShortBox.offset = 0; infoShortBox.range = sizeof(SceneData);
+        
+        updates[0].dstSet = shortBoxReflDescriptorSet; // View Buffer (Same)
+        updates[1].dstSet = shortBoxReflDescriptorSet; updates[1].bufferInfo = &infoShortBox; // ShortBox Buffer
+        updates[2].dstSet = shortBoxReflDescriptorSet; // Plane Buffer (Same)
+        
+        device->UpdateDescriptorSets(3, updates);
+
         // Update Reflection Descriptor Set 2
         info1.buffer = reflectionUniformBuffer2;
         info3.buffer = reflectionPlaneBuffer2;
         
         updates[0].dstSet = reflectionDescriptorSet2; updates[0].bufferInfo = &info1;
-        updates[1].dstSet = reflectionDescriptorSet2; // Instance buffer shared
+        updates[1].dstSet = reflectionDescriptorSet2; updates[1].bufferInfo = &info2; // Instance buffer shared
         updates[2].dstSet = reflectionDescriptorSet2; updates[2].bufferInfo = &info3;
+        
+        device->UpdateDescriptorSets(3, updates);
+
+        // Update ShortBox Reflection Descriptor Set 2
+        updates[0].dstSet = shortBoxReflDescriptorSet2; // View Buffer 2
+        updates[1].dstSet = shortBoxReflDescriptorSet2; updates[1].bufferInfo = &infoShortBox; // ShortBox Buffer
+        updates[2].dstSet = shortBoxReflDescriptorSet2; // Plane Buffer 2
         
         device->UpdateDescriptorSets(3, updates);
         
@@ -1297,8 +2122,15 @@ bool MultiViewTestCase::CreateReflectionResources() {
         info3.buffer = reflectionPlaneBuffer3;
         
         updates[0].dstSet = reflectionDescriptorSet3; updates[0].bufferInfo = &info1;
-        updates[1].dstSet = reflectionDescriptorSet3; // Instance buffer shared
+        updates[1].dstSet = reflectionDescriptorSet3; updates[1].bufferInfo = &info2; // Instance buffer shared
         updates[2].dstSet = reflectionDescriptorSet3; updates[2].bufferInfo = &info3;
+        
+        device->UpdateDescriptorSets(3, updates);
+
+        // Update ShortBox Reflection Descriptor Set 3
+        updates[0].dstSet = shortBoxReflDescriptorSet3; // View Buffer 3
+        updates[1].dstSet = shortBoxReflDescriptorSet3; updates[1].bufferInfo = &infoShortBox; // ShortBox Buffer
+        updates[2].dstSet = shortBoxReflDescriptorSet3; // Plane Buffer 3
         
         device->UpdateDescriptorSets(3, updates);
     }
@@ -1360,6 +2192,9 @@ void MultiViewTestCase::Run() {
     math::v2 appliedJitter = { currentJitter.x * jitterScale.x, currentJitter.y * jitterScale.y };
     math::v2 appliedPrevJitter = { previousJitter.x * jitterScale.x, previousJitter.y * jitterScale.y };
 
+    static int debugMode = 0; // 0: Off, 1: ScreenUV, 2: MotionVectors
+    static bool useComputedSH = false;
+
     {
         // Toggle Debug Overlay with F1
         using namespace primal::input;
@@ -1369,13 +2204,26 @@ void MultiViewTestCase::Run() {
         static bool wasF1Down = false;
         bool isF1Down = (val.current.x > 0.0f);
         
-        static int debugMode = 0; // 0: Off, 1: ScreenUV, 2: MotionVectors
-
         if (isF1Down && !wasF1Down) {
             debugMode = (debugMode + 1) % 3;
             std::cout << "Debug Mode: " << debugMode << " (0: Off, 1: ScreenUV, 2: MotionVectors)" << std::endl;
         }
         wasF1Down = isF1Down;
+
+        // Toggle SH Mode with F2
+        input_value valF2;
+        get(std::hash<std::string>()("sh_toggle"), valF2); // Assuming "sh_toggle" mapped to F2 or add mapping
+        // If not mapped, we can check key code directly if input system allows, or just map it.
+        // Input system uses hashing. Let's map F2.
+        
+        static bool wasF2Down = false;
+        bool isF2Down = (valF2.current.x > 0.0f); // Need to bind F2 first
+        
+        if (isF2Down && !wasF2Down) {
+            useComputedSH = !useComputedSH;
+            std::cout << "SH Mode: " << (useComputedSH ? "Computed (Skybox)" : "Manual (Cornell Box)") << std::endl;
+        }
+        wasF2Down = isF2Down;
         
         // Define struct again or move to header (local is fine) - REMOVED (Using global definition)
         // struct SceneData { ... };
@@ -1416,13 +2264,74 @@ void MultiViewTestCase::Run() {
         }
     }
     
+    // Update ShortBox Uniform Buffer (Animation + SH)
+    if (shortBoxUniformBuffer != primal::graphics::rhi::handles::INVALID_RESOURCE) {
+        void* data = device->MapBuffer(shortBoxUniformBuffer);
+        if (data) {
+            SceneData* sd = static_cast<SceneData*>(data);
+            
+            // Sync Light from Main Scene (re-calculate as we don't have easy access to instanceUniformBuffer data here)
+            sd->lightPos.x = sin(time) * 3.0f;
+            sd->lightPos.z = cos(time) * 3.0f;
+            sd->lightPos.y = 4.0f + sin(time * 0.5f);
+            sd->lightColor.x = (sin(time) * 0.3f + 0.7f);
+            sd->lightColor.y = (sin(time + 2.09f) * 0.3f + 0.7f);
+            sd->lightColor.z = (sin(time + 4.18f) * 0.3f + 0.7f);
+            sd->lightColor.w = (float)debugMode;
+            
+            // Animate ShortBox (Up/Down)
+            float yOffset = std::sin(time * 2.0f) * 0.5f;
+            
+            // Reconstruct Transform (since geometry is now at origin)
+            // Fix Clipping: Raise basePos.y from -3.5f to -3.0f so min Y = -3.0 - 0.5 - 1.5 = -5.0 (Floor level)
+            v3 basePos = {-2.0f, -3.0f, -1.0f};
+            m4x4 rot = CreateRotationY(0.3f);
+            m4x4 trans = CreateTranslation(v3{basePos.x, basePos.y + yOffset, basePos.z});
+            
+            sd->model = MatrixMultiply(trans, rot);
+            sd->previousModel = sd->model;
+            
+            sd->jitter = appliedJitter;
+            sd->previousJitter = appliedPrevJitter;
+            
+            if (useComputedSH) {
+                // Use Computed SH from Skybox
+                for(int i=0; i<9; ++i) {
+                    sd->shCoeffs[i] = computedSH[i];
+                }
+            } else {
+                // Set SH Coefficients (Approximating Cornell Box Environment)
+                // Left Wall: Red, Right Wall: Green, Ceiling: White Light, Floor: White, Back: White
+                for(int i=0; i<9; ++i) sd->shCoeffs[i] = {0,0,0,0};
+                
+                // L0,0 - Ambient: Average of all walls (Warm White base)
+                sd->shCoeffs[0] = {0.4f, 0.4f, 0.4f, 1.0f}; 
+                
+                // L1,-1 - Y Gradient: Top is Bright Light (+), Bottom is Shadowed (-)
+                sd->shCoeffs[1] = {0.2f, 0.2f, 0.2f, 1.0f}; 
+                
+                // L1,0 - Z Gradient: Back Wall (-Z) is White/Bright, Front (+Z) is Open/Skybox (Darker)
+                // So +Z direction gets negative coefficient (darker), -Z gets positive (brighter)
+                sd->shCoeffs[2] = {-0.1f, -0.1f, -0.1f, 1.0f};
+                
+                // L1,1 - X Gradient: Right (+X) is Green, Left (-X) is Red
+                // Normal +X: Base + Coeff -> Should be Greenish (-Red, +Green)
+                // Normal -X: Base - Coeff -> Should be Reddish (+Red, -Green)
+                // So Coeff should be {-Red, +Green, 0}
+                sd->shCoeffs[3] = {-0.3f, 0.3f, 0.0f, 1.0f};
+            }
+            
+            device->UnmapBuffer(shortBoxUniformBuffer);
+        }
+    }
+
     // ---------------------------------------------------------
     // REFLECTION UPDATE
     // ---------------------------------------------------------
     {
         // 1. Calculate Mirror Plane
-        // MirrorBox parameters from CreateCubeMesh (addBox call)
-        // Center: (2.0, -2.0, 1.0) -> Adjusted to show more side
+        // MirrorBox Geometry is at Origin. We apply Model Matrix here.
+        // Target Position: (2.0, -2.0, 0.0)
         v3 mirrorPos = v3{2.0f, -2.0f, 0.0f}; 
         float angle = -0.8f; // Rotate to ~45 degrees to show two faces
         
@@ -1754,7 +2663,37 @@ void MultiViewTestCase::Run() {
             
             for (auto& [name, range] : drawRanges) {
                 if (name == "MirrorBox") continue; // Don't render mirror in reflection
+
+                if (name == "Skybox") {
+                    cmd->BindGraphicsPipeline(skyboxPipeline);
+                    const DescriptorSetHandle sets[] = { skyboxReflDescriptorSet1 };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, skyboxPipelineLayout, 0, 1, sets, 0, nullptr);
+                } else if (name == "ShortBox") {
+                    cmd->BindGraphicsPipeline(reflectionPipeline);
+                    const DescriptorSetHandle sets[] = { shortBoxReflDescriptorSet };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, reflectionPipelineLayout, 0, 1, sets, 0, nullptr);
+                } else {
+                    cmd->BindGraphicsPipeline(reflectionPipeline);
+                    const DescriptorSetHandle sets[] = { reflectionDescriptorSet };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, reflectionPipelineLayout, 0, 1, sets, 0, nullptr);
+                }
                 cmd->DrawIndexed(range.count, range.start, 0, 1, 0);
+            }
+            
+            // Draw PBR Sphere
+            if (pbrPipeline != handles::INVALID_PIPELINE && sphereIndexCount > 0) {
+                cmd->BindGraphicsPipeline(pbrPipeline);
+                
+                // Bind PBR Material Set
+                const DescriptorSetHandle pbrSets[] = { pbrMaterialInstance->GetDescriptorSet() };
+                cmd->BindDescriptorSets(PipelineBindPoint::Graphics, pbrPipelineLayout, 0, 1, pbrSets, 0, nullptr);
+                
+                // Bind Sphere Mesh
+                uint64_t sphereOffsets[] = {0};
+                cmd->BindVertexBuffers(0, 1, &sphereVertexBuffer, sphereOffsets);
+                cmd->BindIndexBuffer(sphereIndexBuffer, DataFormat::R32_UInt, 0);
+                
+                cmd->DrawIndexed(sphereIndexCount, 0, 0, 1, 0);
             }
         }
     );
@@ -1818,7 +2757,40 @@ void MultiViewTestCase::Run() {
             
             for (auto& [name, range] : drawRanges) {
                 if (name == "MirrorBox") continue; 
+
+                if (name == "Skybox") {
+                    cmd->BindGraphicsPipeline(skyboxPipeline);
+                    const DescriptorSetHandle sets[] = { skyboxReflDescriptorSet2 };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, skyboxPipelineLayout, 0, 1, sets, 0, nullptr);
+                } else if (name == "ShortBox") {
+                    cmd->BindGraphicsPipeline(reflectionPipeline);
+                    const DescriptorSetHandle sets[] = { shortBoxReflDescriptorSet2 };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, reflectionPipelineLayout, 0, 1, sets, 0, nullptr);
+                } else {
+                    cmd->BindGraphicsPipeline(reflectionPipeline);
+                    const DescriptorSetHandle sets[] = { reflectionDescriptorSet2 };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, reflectionPipelineLayout, 0, 1, sets, 0, nullptr);
+                }
                 cmd->DrawIndexed(range.count, range.start, 0, 1, 0);
+            }
+
+            // Draw PBR Sphere
+            if (pbrPipeline != handles::INVALID_PIPELINE && pbrMaterialInstance) {
+                cmd->BindGraphicsPipeline(pbrPipeline);
+                
+                // Bind PBR Material Descriptor Set
+                DescriptorSetHandle pbrSet = pbrMaterialInstance->GetDescriptorSet();
+                if (pbrSet != handles::INVALID_DESCRIPTOR_SET) {
+                    const DescriptorSetHandle pbrSets[] = { pbrSet };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, pbrPipelineLayout, 0, 1, pbrSets, 0, nullptr);
+                }
+                
+                uint64_t offsets[] = {0};
+                cmd->BindVertexBuffers(0, 1, &sphereVertexBuffer, offsets);
+                cmd->BindIndexBuffer(sphereIndexBuffer, DataFormat::R32_UInt, 0);
+                
+                // Draw Sphere (1 Instance)
+                cmd->DrawIndexed(sphereIndexCount, 0, 0, 1, 0);
             }
         }
     );
@@ -1878,6 +2850,20 @@ void MultiViewTestCase::Run() {
             
             for (auto& [name, range] : drawRanges) {
                 if (name == "MirrorBox") continue; 
+
+                if (name == "Skybox") {
+                    cmd->BindGraphicsPipeline(skyboxPipeline);
+                    const DescriptorSetHandle sets[] = { skyboxReflDescriptorSet3 };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, skyboxPipelineLayout, 0, 1, sets, 0, nullptr);
+                } else if (name == "ShortBox") {
+                    cmd->BindGraphicsPipeline(reflectionPipeline);
+                    const DescriptorSetHandle sets[] = { shortBoxReflDescriptorSet3 };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, reflectionPipelineLayout, 0, 1, sets, 0, nullptr);
+                } else {
+                    cmd->BindGraphicsPipeline(reflectionPipeline);
+                    const DescriptorSetHandle sets[] = { reflectionDescriptorSet3 };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, reflectionPipelineLayout, 0, 1, sets, 0, nullptr);
+                }
                 cmd->DrawIndexed(range.count, range.start, 0, 1, 0);
             }
         }
@@ -2070,6 +3056,14 @@ void MultiViewTestCase::Run() {
                     cmd->BindGraphicsPipeline(mirrorPipeline);
                     const DescriptorSetHandle mirrorSets[] = { mirrorDescriptorSet };
                     cmd->BindDescriptorSets(PipelineBindPoint::Graphics, mirrorPipelineLayout, 0, 1, mirrorSets, 0, nullptr);
+                } else if (name == "ShortBox") {
+            cmd->BindGraphicsPipeline(mainPipeline);
+            const DescriptorSetHandle sets[] = { shortBoxMainDescriptorSet };
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, pipelineLayout, 0, 1, sets, 0, nullptr);
+        } else if (name == "Skybox") {
+                    cmd->BindGraphicsPipeline(skyboxPipeline);
+                    const DescriptorSetHandle sets[] = { skyboxDescriptorSet };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, skyboxPipelineLayout, 0, 1, sets, 0, nullptr);
                 } else {
                     cmd->BindGraphicsPipeline(mainPipeline);
                     const DescriptorSetHandle mainSets[] = { mainDescriptorSet };
@@ -2454,6 +3448,23 @@ void MultiViewTestCase::Shutdown() {
     }
     
     // 8. Destroy Device
+    
+    // Destroy PBR Resources
+    device->DestroyBuffer(sphereVertexBuffer);
+    device->DestroyBuffer(sphereIndexBuffer);
+    device->DestroyTexture(envMap);
+    device->DestroyTexture(irradianceMap);
+    device->DestroyTexture(prefilteredMap);
+    device->DestroyTexture(brdfLUT);
+    device->DestroyPipeline(pbrPipeline);
+    device->DestroyPipelineLayout(pbrPipelineLayout);
+    device->DestroyDescriptorSetLayout(pbrDSLayout);
+    device->DestroySampler(pbrDefaultSampler);
+    device->DestroySampler(pbrBRDFSampler);
+    pbrMaterialInstance.reset();
+    pbrMaterial.reset();
+    iblPrecomputer.reset();
+
     device_ownership.reset();
     
     // 9. Close Window

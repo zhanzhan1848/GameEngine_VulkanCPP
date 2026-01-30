@@ -134,6 +134,91 @@ void MetalDevice::shutdownImpl() {
     }
 }
 
+// 辅助函数：将 DataFormat 转换为 MTLPixelFormat
+static MTL::PixelFormat ToMTLPixelFormat(DataFormat format) {
+    switch (format) {
+        case DataFormat::R8_UNorm: return MTL::PixelFormatR8Unorm;
+        case DataFormat::R8_SNorm: return MTL::PixelFormatR8Snorm;
+        case DataFormat::R8_UInt: return MTL::PixelFormatR8Uint;
+        case DataFormat::R8_SInt: return MTL::PixelFormatR8Sint;
+        
+        case DataFormat::R16_UNorm: return MTL::PixelFormatR16Unorm;
+        case DataFormat::R16_SNorm: return MTL::PixelFormatR16Snorm;
+        case DataFormat::R16_UInt: return MTL::PixelFormatR16Uint;
+        case DataFormat::R16_SInt: return MTL::PixelFormatR16Sint;
+        case DataFormat::R16_Float: return MTL::PixelFormatR16Float;
+        
+        case DataFormat::RG8_UNorm: return MTL::PixelFormatRG8Unorm;
+        case DataFormat::RG8_SNorm: return MTL::PixelFormatRG8Snorm;
+        case DataFormat::RG8_UInt: return MTL::PixelFormatRG8Uint;
+        case DataFormat::RG8_SInt: return MTL::PixelFormatRG8Sint;
+        
+        case DataFormat::R32_UNorm: return MTL::PixelFormatR32Float; 
+        case DataFormat::R32_SNorm: return MTL::PixelFormatR32Float; 
+        case DataFormat::R32_UInt: return MTL::PixelFormatR32Uint;
+        case DataFormat::R32_SInt: return MTL::PixelFormatR32Sint;
+        case DataFormat::R32_Float: return MTL::PixelFormatR32Float;
+        
+        case DataFormat::RG16_UNorm: return MTL::PixelFormatRG16Unorm;
+        case DataFormat::RG16_SNorm: return MTL::PixelFormatRG16Snorm;
+        case DataFormat::RG16_UInt: return MTL::PixelFormatRG16Uint;
+        case DataFormat::RG16_SInt: return MTL::PixelFormatRG16Sint;
+        case DataFormat::RG16_Float: return MTL::PixelFormatRG16Float;
+        
+        case DataFormat::RG8B8A8_UNorm: return MTL::PixelFormatRGBA8Unorm;
+        case DataFormat::RG8B8A8_SNorm: return MTL::PixelFormatRGBA8Snorm;
+        case DataFormat::RG8B8A8_UInt: return MTL::PixelFormatRGBA8Uint;
+        case DataFormat::RG8B8A8_SInt: return MTL::PixelFormatRGBA8Sint;
+        
+        case DataFormat::BGRA8_UNorm: return MTL::PixelFormatBGRA8Unorm;
+        
+        case DataFormat::RGBA8_UNorm: return MTL::PixelFormatRGBA8Unorm;
+        case DataFormat::RGBA8_SNorm: return MTL::PixelFormatRGBA8Snorm;
+        case DataFormat::RGBA8_UInt: return MTL::PixelFormatRGBA8Uint;
+        case DataFormat::RGBA8_SInt: return MTL::PixelFormatRGBA8Sint;
+        case DataFormat::RGBA8_sRGB: return MTL::PixelFormatRGBA8Unorm_sRGB;
+        
+        case DataFormat::RG32_UNorm: return MTL::PixelFormatRG32Float;
+        case DataFormat::RG32_SNorm: return MTL::PixelFormatRG32Float;
+        case DataFormat::RG32_UInt: return MTL::PixelFormatRG32Uint;
+        case DataFormat::RG32_SInt: return MTL::PixelFormatRG32Sint;
+        case DataFormat::RG32_Float: return MTL::PixelFormatRG32Float;
+        
+        case DataFormat::RGBA16_UNorm: return MTL::PixelFormatRGBA16Unorm;
+        case DataFormat::RGBA16_SNorm: return MTL::PixelFormatRGBA16Snorm;
+        case DataFormat::RGBA16_UInt: return MTL::PixelFormatRGBA16Uint;
+        case DataFormat::RGBA16_SInt: return MTL::PixelFormatRGBA16Sint;
+        case DataFormat::RGBA16_Float: return MTL::PixelFormatRGBA16Float;
+        
+        case DataFormat::RGBA32_UNorm: return MTL::PixelFormatRGBA32Float;
+        case DataFormat::RGBA32_SNorm: return MTL::PixelFormatRGBA32Float;
+        case DataFormat::RGBA32_UInt: return MTL::PixelFormatRGBA32Uint;
+        case DataFormat::RGBA32_SInt: return MTL::PixelFormatRGBA32Sint;
+        case DataFormat::RGBA32_Float: return MTL::PixelFormatRGBA32Float;
+        
+        case DataFormat::D16_UNorm: return MTL::PixelFormatDepth16Unorm;
+        case DataFormat::D32_Float: return MTL::PixelFormatDepth32Float;
+        case DataFormat::D24_UNorm_S8_UInt: return MTL::PixelFormatDepth24Unorm_Stencil8;
+        case DataFormat::D32_Float_S8X24_UInt: return MTL::PixelFormatDepth32Float_Stencil8;
+
+        default: return MTL::PixelFormatInvalid;
+    }
+}
+
+// 辅助函数：将 TextureType 转换为 MTLTextureType
+static MTL::TextureType ToMTLTextureType(TextureType type) {
+    switch (type) {
+        case TextureType::Texture1D: return MTL::TextureType1D;
+        case TextureType::Texture2D: return MTL::TextureType2D;
+        case TextureType::Texture3D: return MTL::TextureType3D;
+        case TextureType::TextureCube: return MTL::TextureTypeCube;
+        case TextureType::Texture1DArray: return MTL::TextureType1DArray;
+        case TextureType::Texture2DArray: return MTL::TextureType2DArray;
+        case TextureType::TextureCubeArray: return MTL::TextureTypeCubeArray;
+        default: return MTL::TextureType2D;
+    }
+}
+
 void MetalDevice::waitIdleImpl() const {
     auto waitQueue = [](MTL::CommandQueue* queue) {
         if (queue) {
@@ -451,6 +536,74 @@ ResourceHandle MetalDevice::createTextureImpl(const TextureDesc& desc) {
     }
     textureAllocator_.Free(id);
     return handles::INVALID_RESOURCE; 
+}
+
+ResourceHandle MetalDevice::createTextureViewImpl(const TextureViewDesc& desc) {
+    // 1. 获取源纹理
+    MetalTexture* sourceTexture = textureAllocator_.Get(uint32_t(desc.texture));
+    if (!sourceTexture) {
+        std::cerr << "[MetalDevice] Invalid source texture for view creation" << std::endl;
+        return handles::INVALID_RESOURCE;
+    }
+    
+    MTL::Texture* mtlSource = sourceTexture->GetNativeTexture();
+    if (!mtlSource) {
+        std::cerr << "[MetalDevice] Source texture has no native object" << std::endl;
+        return handles::INVALID_RESOURCE;
+    }
+
+    // 2. 构建 TextureDesc
+    TextureDesc textureDesc;
+    textureDesc.name = "TextureView";
+    textureDesc.type = desc.viewType;
+    textureDesc.format = desc.format;
+    
+    // 计算视图的尺寸
+    uint32_t width = std::max(1u, (uint32_t)mtlSource->width() >> desc.mostDetailedMip);
+    uint32_t height = std::max(1u, (uint32_t)mtlSource->height() >> desc.mostDetailedMip);
+    uint32_t depth = std::max(1u, (uint32_t)mtlSource->depth());
+    if (sourceTexture->textureDesc_.type == TextureType::Texture3D) {
+        depth = std::max(1u, depth >> desc.mostDetailedMip);
+    }
+    
+    textureDesc.size = {width, height, depth};
+    textureDesc.mipLevels = desc.mipCount;
+    textureDesc.arraySize = desc.arraySize;
+    textureDesc.usage = sourceTexture->textureDesc_.usage;
+    textureDesc.memoryUsage = sourceTexture->textureDesc_.memoryUsage;
+    
+    // 3. 分配 MetalTexture 对象
+    uint32_t id = textureAllocator_.Allocate(*this, textureDesc);
+    MetalTexture* viewTexture = textureAllocator_.Get(id);
+    
+    if (viewTexture) {
+        // 4. 创建 Metal 视图
+        MTL::PixelFormat pixelFormat = ToMTLPixelFormat(desc.format);
+        MTL::TextureType textureType = ToMTLTextureType(desc.viewType);
+        
+        NS::Range levelRange(desc.mostDetailedMip, desc.mipCount);
+        NS::Range sliceRange(desc.firstArraySlice, desc.arraySize);
+        
+        MTL::Texture* mtlView = mtlSource->newTextureView(pixelFormat, textureType, levelRange, sliceRange);
+        
+        if (mtlView) {
+            viewTexture->SetNativeTexture(mtlView);
+            viewTexture->SetHandle(ResourceHandle(id));
+            viewTexture->SetState(ResourceState::Allocated);
+            
+            // SetNativeTexture retains, newTextureView creates with +1 retain count
+            mtlView->release();
+            
+            return ResourceHandle(id);
+        } else {
+             std::cerr << "[MetalDevice] Failed to create MTLTexture view" << std::endl;
+             textureAllocator_.Free(id);
+        }
+    } else {
+        std::cerr << "[MetalDevice] Texture view allocation failed" << std::endl;
+    }
+    
+    return handles::INVALID_RESOURCE;
 }
 
 ShaderHandle MetalDevice::createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint) {

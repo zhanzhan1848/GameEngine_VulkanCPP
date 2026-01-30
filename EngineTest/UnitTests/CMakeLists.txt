@@ -98,18 +98,48 @@ set_target_properties(StandaloneRHI_DeterministicPrefetch_Test PROPERTIES
 target_compile_definitions(StandaloneRHI_DeterministicPrefetch_Test PRIVATE DEBUG _DEBUG)
 
 # 创建ShadowUtils测试
-add_executable(StandaloneRHI_ShadowUtils_Test Graphics/TestShadowUtils.cpp)
+add_executable(StandaloneRHI_ShadowUtils_Test 
+    Graphics/TestShadowUtils.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Utils/ShadowUtils.h
+)
+# 不依赖任何Engine头文件或库，完全独立
+add_test(NAME StandaloneRHI_ShadowUtils_Test COMMAND StandaloneRHI_ShadowUtils_Test)
+set_target_properties(StandaloneRHI_ShadowUtils_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
 target_include_directories(StandaloneRHI_ShadowUtils_Test PRIVATE 
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
 )
-target_link_libraries(StandaloneRHI_ShadowUtils_Test PRIVATE Engine)
-add_test(NAME StandaloneRHI_ShadowUtils_Test COMMAND StandaloneRHI_ShadowUtils_Test)
-set_target_properties(StandaloneRHI_ShadowUtils_Test PROPERTIES
+target_compile_definitions(StandaloneRHI_ShadowUtils_Test PRIVATE DEBUG _DEBUG)
+
+# 创建 Spherical Harmonics 测试
+add_executable(TestSphericalHarmonics Graphics/TestSphericalHarmonics.cpp)
+add_test(NAME TestSphericalHarmonics COMMAND TestSphericalHarmonics)
+set_target_properties(TestSphericalHarmonics PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_ShadowUtils_Test PRIVATE DEBUG _DEBUG)
+target_include_directories(TestSphericalHarmonics PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_compile_definitions(TestSphericalHarmonics PRIVATE DEBUG _DEBUG)
+
+# 创建 PRT Baker 测试
+add_executable(TestPRTBaker Graphics/TestPRTBaker.cpp)
+target_include_directories(TestPRTBaker PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(TestPRTBaker PRIVATE Engine)
+add_test(NAME TestPRTBaker COMMAND TestPRTBaker)
+set_target_properties(TestPRTBaker PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestPRTBaker PRIVATE DEBUG _DEBUG)
 
 # 创建SamplingUtils测试
 add_executable(StandaloneRHI_SamplingUtils_Test Graphics/TestSamplingUtils.cpp)
@@ -394,6 +424,21 @@ if(APPLE)
     )
     target_compile_definitions(TestMetalHotReload PRIVATE DEBUG _DEBUG)
 
+    # 创建 IBL Shader 测试
+    add_executable(StandaloneGraphics_IBL_Test Graphics/TestIBLShaders.cpp)
+    target_include_directories(StandaloneGraphics_IBL_Test PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_compile_definitions(StandaloneGraphics_IBL_Test PRIVATE DEBUG _DEBUG STANDALONE_TEST PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
+    add_test(NAME StandaloneGraphics_IBL_Test COMMAND StandaloneGraphics_IBL_Test)
+    set_target_properties(StandaloneGraphics_IBL_Test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    set_target_properties(StandaloneGraphics_IBL_Test PROPERTIES FOLDER "Tests/Graphics")
+
     # 创建Material测试
     add_executable(StandaloneGraphics_Material_Test 
         Graphics/TestMaterial.cpp
@@ -417,6 +462,31 @@ if(APPLE)
     target_compile_definitions(StandaloneGraphics_Material_Test PRIVATE DEBUG _DEBUG)
     set_target_properties(StandaloneGraphics_Material_Test PROPERTIES FOLDER "Tests/Graphics")
     
+    # 创建 Metal PRT 测试
+    add_executable(TestMetalPRT Graphics/Metal/TestMetalPRT.cpp)
+    target_include_directories(TestMetalPRT PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalPRT PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    target_compile_definitions(TestMetalPRT PRIVATE 
+        DEBUG 
+        _DEBUG 
+        PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+    )
+    add_test(NAME TestMetalPRT COMMAND TestMetalPRT)
+    set_target_properties(TestMetalPRT PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
 endif()
 
 # RHI GPU优化测试
@@ -496,7 +566,6 @@ set_target_properties(StandaloneRHI_Queue_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 target_compile_definitions(StandaloneRHI_Queue_Test PRIVATE DEBUG _DEBUG)
-
 
 # 创建RenderMesh测试
 add_executable(StandaloneGraphics_RenderMesh_Test 
@@ -752,6 +821,42 @@ add_test(NAME MpscQueueSimpleTest COMMAND MpscQueueSimpleTest)
 # 创建测试集合目标
 # ======================
 
+# 创建 GPUBufferComponent 测试
+add_executable(StandaloneRHI_GPUBufferComponent_Test 
+    RHI/Components/TestGPUBufferComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+)
+target_include_directories(StandaloneRHI_GPUBufferComponent_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+add_test(NAME StandaloneRHI_GPUBufferComponent_Test COMMAND StandaloneRHI_GPUBufferComponent_Test)
+set_target_properties(StandaloneRHI_GPUBufferComponent_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/RHI/Components"
+)
+target_compile_definitions(StandaloneRHI_GPUBufferComponent_Test PRIVATE DEBUG _DEBUG)
+
+
+# 创建 TextureComponent 测试
+add_executable(StandaloneRHI_TextureComponent_Test 
+    RHI/Components/TestTextureComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Components/TextureComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+)
+target_include_directories(StandaloneRHI_TextureComponent_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+add_test(NAME StandaloneRHI_TextureComponent_Test COMMAND StandaloneRHI_TextureComponent_Test)
+set_target_properties(StandaloneRHI_TextureComponent_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/RHI/Components" 
+)
+target_compile_definitions(StandaloneRHI_TextureComponent_Test PRIVATE DEBUG _DEBUG)
+
 # 创建RHI时间戳测试
 add_executable(StandaloneRHI_Timestamp_Test RHI/Core/TestRHITimestamp.cpp)
 target_include_directories(StandaloneRHI_Timestamp_Test PRIVATE 
@@ -812,6 +917,7 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_Allocator_Test
     COMMAND StandaloneRHI_GarbageCollector_Test
     COMMAND StandaloneRHI_Timestamp_Test
+    COMMAND StandaloneRHI_GPUBufferComponent_Test
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
@@ -828,6 +934,7 @@ set_target_properties(StandaloneRHI_MultiThreadedCommandGenerator_Test PROPERTIE
 set_target_properties(StandaloneRHI_Allocator_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_GarbageCollector_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Timestamp_Test PROPERTIES FOLDER "Tests/RHI")
+set_target_properties(StandaloneRHI_GPUBufferComponent_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(MpscQueueSimpleTest PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(RHI_All_Tests PROPERTIES FOLDER "Tests/RHI")
 
@@ -842,4 +949,36 @@ message(STATUS "  - StandaloneRHI_GPUOptimizer_Test: GPU optimizer tests")
 message(STATUS "  - StandaloneRHI_MultiThreadedCommandGenerator_Test: Multi-threaded command generator tests")
 message(STATUS "  - StandaloneRHI_Allocator_Test: RHI Allocator tests")
 message(STATUS "  - StandaloneRHI_GarbageCollector_Test: RHI Garbage Collector tests")
+message(STATUS "  - StandaloneRHI_GPUBufferComponent_Test: GPU Buffer Component tests")
 message(STATUS "  - RHI_All_Tests: Run all RHI tests")
+
+# 创建RealTime PRT测试
+add_executable(TestRealTimePRT Graphics/TestRealTimePRT.cpp)
+target_include_directories(TestRealTimePRT PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME TestRealTimePRT COMMAND TestRealTimePRT)
+set_target_properties(TestRealTimePRT PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestRealTimePRT PRIVATE DEBUG _DEBUG)
+
+# 创建 Light Probe 测试
+add_executable(TestLightProbe 
+    Graphics/TestLightProbe.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Lighting/LightProbeManager.cpp
+)
+target_include_directories(TestLightProbe PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+add_test(NAME TestLightProbe COMMAND TestLightProbe)
+set_target_properties(TestLightProbe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestLightProbe PRIVATE DEBUG _DEBUG)
+

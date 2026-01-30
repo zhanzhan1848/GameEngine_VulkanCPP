@@ -31,6 +31,7 @@ struct PerObjectData
     math::m4x4 world;
     math::m4x4 invWorld;
     math::m4x4 worldViewProjection;
+    math::v4 sh_coeffs[9]; // SH9 Color coefficients (RGB + padding/alpha)
 };
 
 // 对应 Metal 中的 LightParameters

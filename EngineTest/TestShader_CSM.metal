@@ -23,8 +23,9 @@ struct GlobalShaderData
 struct PerObjectData
 {
     float4x4 world;
-    // float4x4 invWorld;
-    // float4x4 worldViewProjection; // Moved to Global calculation
+    float4x4 invWorld;
+    float4x4 worldViewProjection;
+    float4 sh_coeffs[9];
 };
 
 struct LightParameters

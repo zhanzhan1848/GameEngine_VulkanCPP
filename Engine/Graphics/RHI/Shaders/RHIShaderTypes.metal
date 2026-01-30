@@ -42,6 +42,7 @@ struct PerObjectData
     float4x4 world;
     float4x4 invWorld;
     float4x4 worldViewProjection;
+    float4 sh_coeffs[9];
 };
 
 /**
@@ -97,4 +98,25 @@ struct ForwardLightBuffer {
  */
 struct MaterialUniforms {
     float4 color;
+};
+
+/**
+ * @brief PBR 材质参数
+ */
+struct PBRMaterialParameters {
+    float4 baseColorFactor;
+    float3 emissiveFactor;
+    float roughnessFactor;
+    float metallicFactor;
+    float normalScale;
+    float occlusionStrength;
+    float padding;
+    
+    // 纹理开关 (0: 关, 1: 开)
+    int hasBaseColorTexture;
+    int hasNormalTexture;
+    int hasMetallicRoughnessTexture;
+    int hasOcclusionTexture;
+    int hasEmissiveTexture;
+    int padding2[3];
 };

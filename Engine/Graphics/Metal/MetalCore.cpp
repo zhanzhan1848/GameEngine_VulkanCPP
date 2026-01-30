@@ -168,6 +168,7 @@ namespace primal::graphics::metal::core
 			{
 				&info,
 				&camera,
+                info.light_probe_manager,
                 cbuffer.buffer(),
 				surface.width(),
 				surface.height(),

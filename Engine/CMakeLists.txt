@@ -74,6 +74,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Systems/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Utils/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Utils/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Components/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Components/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Passes/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Passes/*.cpp"
     # Ensure SSRPass is included (GLOB_RECURSE should pick it up, but touching file forces rescan)
@@ -89,6 +91,9 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Visibility/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utils/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utils/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/*.cpp"
     # "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/GraphicsHandle.hpp"
 )
 

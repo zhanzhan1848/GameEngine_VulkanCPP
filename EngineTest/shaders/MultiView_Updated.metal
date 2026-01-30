@@ -236,25 +236,6 @@ vertex VertexOutSingle vertexMainSingle(VertexIn in [[stage_in]],
     return out;
 }
 
-// SH Irradiance Calculation (L2)
-float3 calculateIrradiance(float3 N, constant SceneData& scene) {
-    float3 c[9];
-    for(int i=0; i<9; ++i) c[i] = scene.shCoeffs[i].rgb;
-    
-    const float C1 = 0.429043;
-    const float C2 = 0.511664;
-    const float C3 = 0.743125;
-    const float C4 = 0.886227;
-    const float C5 = 0.247708;
-
-    float3 result = C4 * c[0] - C5 * c[6] 
-                  + 2.0 * C2 * (c[3] * N.x + c[1] * N.y + c[2] * N.z)
-                  + 2.0 * C1 * (c[8] * (N.x*N.x - N.y*N.y) + c[7] * N.x*N.z + c[5] * N.y*N.z + c[4] * N.x*N.y)
-                  + C3 * c[6] * N.z*N.z;
-                  
-    return max(result, float3(0.0));
-}
-
 fragment FragmentOutSingle fragmentMainSingle(VertexOutSingle in [[stage_in]],
                                    constant SceneData& scene [[buffer(2)]]) {
     FragmentOutSingle out;
@@ -267,8 +248,8 @@ fragment FragmentOutSingle fragmentMainSingle(VertexOutSingle in [[stage_in]],
     // DEBUG: Output Normal
     // return float4(N * 0.5 + 0.5, 1.0);
     
-    // Ambient (SH Irradiance)
-    float3 ambient = calculateIrradiance(N, scene) * in.color;
+    // Ambient
+    float3 ambient = float3(0.05, 0.05, 0.05) * in.color;
     
     // Diffuse
     float diff = max(dot(N, lightDir), 0.0);
@@ -581,7 +562,6 @@ fragment float4 blitFragment(BlitVertexOut in [[stage_in]],
     
     // Base Direction (Looking at +Z)
     float3 dir = float3(in.uv * 2.0 - 1.0, 1.0); 
-    dir.y = -dir.y; // Flip Y to match Cubemap coordinate system
     dir = normalize(dir);
     
     // Apply Rotation from Uniform Buffer

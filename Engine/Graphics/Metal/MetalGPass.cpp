@@ -8,6 +8,7 @@
 #include "Components/Entity.h"
 #include "Components/Transform.h"
 #include "MetalPreProcess.h"
+#include "Graphics/Lighting/LightProbeManager.h"
 
 namespace primal::graphics::metal::gpass
 {
@@ -398,6 +399,16 @@ namespace primal::graphics::metal::gpass
 					msl::PerObjectData data{};
 					transform::get_transform_matrices(game_entity::entity_id{ current_entity_id }, data.World, data.InvWorld);
 					data.WorldViewProjection = metal_info.camera->view_projection() * data.World;
+
+					if (metal_info.light_probe_manager)
+					{
+						math::v3 position{ data.World.columns[3].x, data.World.columns[3].y, data.World.columns[3].z };
+						auto sh_color = metal_info.light_probe_manager->GetInterpolatedSH(position);
+						for (int k = 0; k < 9; ++k)
+						{
+							data.sh_coeffs[k] = math::v4{ sh_color.coeffs[k].x, sh_color.coeffs[k].y, sh_color.coeffs[k].z, 0.0f };
+						}
+					}
 
 					current_data_pointer = cbuffer.allocate<msl::PerObjectData>();
 					memcpy(current_data_pointer, &data, sizeof(msl::PerObjectData));

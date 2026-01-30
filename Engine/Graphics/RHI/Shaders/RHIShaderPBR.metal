@@ -52,6 +52,22 @@ inline float GeometrySchlickGGX(float NdotV, float roughness) {
 }
 
 /**
+ * @brief 几何遮蔽函数 (Geometry) - Schlick-GGX (IBL)
+ * @param NdotV 法线与视角的点积
+ * @param roughness 粗糙度
+ * @return 几何遮蔽因子 [0, 1]
+ */
+inline float GeometrySchlickGGX_IBL(float NdotV, float roughness) {
+    float a = roughness;
+    float k = (a * a) / 2.0;
+
+    float nom   = NdotV;
+    float denom = NdotV * (1.0 - k) + k;
+
+    return nom / max(denom, 0.0000001);
+}
+
+/**
  * @brief 几何遮蔽函数 (Geometry) - Smith Method
  * @details 结合了视线方向和光照方向的遮蔽
  * @param N 法线向量
@@ -65,6 +81,24 @@ inline float GeometrySmith(float3 N, float3 V, float3 L, float roughness) {
     float NdotL = max(dot(N, L), 0.0);
     float ggx2 = GeometrySchlickGGX(NdotV, roughness);
     float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+
+    return ggx1 * ggx2;
+}
+
+/**
+ * @brief 几何遮蔽函数 (Geometry) - Smith Method (IBL)
+ * @details 结合了视线方向和光照方向的遮蔽，使用 IBL 的 k 值
+ * @param N 法线向量
+ * @param V 视角向量
+ * @param L 光照向量
+ * @param roughness 粗糙度
+ * @return 综合几何遮蔽因子
+ */
+inline float GeometrySmith_IBL(float3 N, float3 V, float3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2 = GeometrySchlickGGX_IBL(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX_IBL(NdotL, roughness);
 
     return ggx1 * ggx2;
 }

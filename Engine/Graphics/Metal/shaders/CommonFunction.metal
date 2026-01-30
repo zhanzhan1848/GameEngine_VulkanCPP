@@ -86,7 +86,42 @@ float LinearDepthToNDC(float linearDepth, float nearPlane, float farPlane)
 //     float3x3 TBN     = float3x3(tangent, bitangent, N);
 
 //     return normalize(TBN * float3(x, y, z));
-// }
+}
+
+// SH9 Irradiance Evaluation
+template<typename T>
+float3 EvalSH9Irradiance(float3 N, const T sh_coeffs)
+{
+    // Constants
+    const float A0 = 3.14159265;
+    const float A1 = 2.09439510;
+    const float A2 = 0.78539816;
+
+    const float C0 = 0.28209479;
+    const float C1 = 0.48860251;
+    const float C2_0 = 1.09254843;
+    const float C2_1 = 0.31539156;
+    const float C2_2 = 0.54627421;
+
+    float3 result = float3(0.0);
+
+    // L0
+    result += sh_coeffs[0].xyz * (A0 * C0);
+
+    // L1
+    result += sh_coeffs[1].xyz * (A1 * -C1 * N.y);
+    result += sh_coeffs[2].xyz * (A1 * C1 * N.z);
+    result += sh_coeffs[3].xyz * (A1 * -C1 * N.x);
+
+    // L2
+    result += sh_coeffs[4].xyz * (A2 * C2_0 * N.x * N.y);
+    result += sh_coeffs[5].xyz * (A2 * -C2_0 * N.y * N.z);
+    result += sh_coeffs[6].xyz * (A2 * C2_1 * (3.0 * N.z * N.z - 1.0));
+    result += sh_coeffs[7].xyz * (A2 * -C2_0 * N.x * N.z);
+    result += sh_coeffs[8].xyz * (A2 * C2_2 * (N.x * N.x - N.y * N.y));
+
+    return max(result, float3(0.0));
+}
 
 /**
  * @brief 改进的半球采样函数，使用Hammersley序列生成更均匀的随机分布

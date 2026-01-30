@@ -8,11 +8,14 @@
 
 namespace primal::graphics
 {
+    namespace lighting { class LightProbeManager; }
+
 	struct frame_info
 	{
 		id::id_type*						render_item_ids{ nullptr };
 		f32*								thresholds{ nullptr };
 		u64									light_set_key{ 0 };
+        lighting::LightProbeManager*        light_probe_manager{ nullptr };
 		f32									last_frame_time{ 16.7f };
 		f32									average_frame_time{ 16.7f };
 		u32									render_item_count{ 0 };

@@ -132,9 +132,14 @@ PixelOut fragment fragment_main(VertexOut vsOut [[stage_in]],
 
     Surface S = GetSurface(vsOut);
 
+    // Evaluate SH Irradiance
+    float3 N = normalize(vsOut.WorldNormal);
+    float3 irradiance = EvalSH9Irradiance(N, global_data->per_object_data->sh_coeffs);
+    float3 ambient = S.BaseColor * irradiance;
+
     // 输出颜色
     psOut.World_Position = float4(vsOut.WorldPosition, 1.f);
-    psOut.Albedo = float4(S.BaseColor + S.EmissiveColor * S.EmissiveIntensity, 1.f);
+    psOut.Albedo = float4(S.BaseColor + S.EmissiveColor * S.EmissiveIntensity + ambient, 1.f);
     // 输出法线和深度
     float depth = vsOut.HomogeneousPosition.z;
     // 使用正确的线性深度计算函数

@@ -241,6 +241,7 @@ protected:
      */
     ResourceHandle createBufferImpl(const BufferDesc& desc);
     ResourceHandle createTextureImpl(const TextureDesc& desc);
+    ResourceHandle createTextureViewImpl(const TextureViewDesc& desc);
     ShaderHandle createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint);
 
     /**

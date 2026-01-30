@@ -189,6 +189,7 @@ public:
     virtual void DestroySwapChain(RHISwapChain* swapChain) = 0;
     virtual ResourceHandle CreateBuffer(const BufferDesc& desc) = 0;
     virtual ResourceHandle CreateTexture(const TextureDesc& desc) = 0;
+    virtual ResourceHandle CreateTextureView(const TextureViewDesc& desc) = 0;
     virtual ShaderHandle CreateShader(const void* data, size_t size, ShaderStage stage, const char* entryPoint = "main") = 0;
     virtual PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
     virtual PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) = 0;
@@ -356,7 +357,17 @@ public:
         assert(isValid_ && "Device not initialized");
         return derived().createTextureImpl(desc);
     }
-    
+
+    /**
+     * @brief 创建纹理视图
+     * @param desc 纹理视图描述符
+     * @return 资源句柄，失败返回INVALID_RESOURCE
+     */
+    ResourceHandle CreateTextureView(const TextureViewDesc& desc) override {
+        assert(isValid_ && "Device not initialized");
+        return derived().createTextureViewImpl(desc);
+    }
+
     /**
      * @brief 创建着色器
      * @param data 着色器数据

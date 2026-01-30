@@ -1,53 +1,7 @@
-#include <metal_stdlib>
-using namespace metal;
+#include "Common.h"
 
-struct GlobalShaderData
-{
-    float4x4 view;
-    float4x4 projection;
-    float4x4 invProjection;
-    float4x4 viewProjection;
-    float4x4 previousViewProjection;
-    float4x4 invViewProjection;
-
-    float4 cameraPositionAndViewWidth;
-    float4 cameraDirectionAndViewHeight;
-
-    uint numDirectionalLights;
-    float deltaTime;
-    float frameCount;
-    float padding;
-};
-
-struct PerObjectData
-{
-    float4x4 world;
-    float4x4 invWorld;
-    float4x4 worldViewProjection;
-};
-
-struct LightParameters
-{
-    float3 position;
-    float intensity;
-
-    float3 direction;
-    float range;
-
-    float3 color;
-    float cosUmbra;
-
-    float3 attenuation;
-    float cosPenumbra;
-};
-
-struct DirectionalLightParameters
-{
-    float4x4 lightMVP;
-    float4 directionAndIntensity;
-    float4 color;
-};
-
+// ForwardLightBuffer is not in CommonTypes.metal, so we define it here.
+// But we use the types from CommonTypes.metal for its members.
 struct ForwardLightBuffer {
     uint directionalLightCount;
     uint punctualLightCount;
@@ -78,21 +32,15 @@ vertex VertexOut vertexMain(
     constant PerObjectData& perObject [[buffer(10)]])
 {
     VertexOut out;
-    float4 worldPos = perObject.world * float4(in.position, 1.0);
-    out.position = perObject.worldViewProjection * float4(in.position, 1.0);
+    float4 worldPos = perObject.World * float4(in.position, 1.0);
+    out.position = perObject.WorldViewProjection * float4(in.position, 1.0);
     out.worldPos = worldPos.xyz;
-    // For proper normal transformation, use inverse transpose of world matrix
-    // perObject.invWorld is Inverse(World). Transpose(Inverse(World)) is needed.
-    // However, if we assume uniform scaling, we can use World (3x3).
-    // Let's use invWorld to be correct (Inverse Transpose).
-    // Note: matrix in Metal is column-major.
-    // Transpose of InvWorld is what we need.
-    // float3x3 normalMatrix = float3x3(perObject.invWorld[0].xyz, perObject.invWorld[1].xyz, perObject.invWorld[2].xyz); // This is just upper 3x3 of InvWorld
-    // We want Transpose(InvWorld).
-    // float3x3 normalMatrix = transpose(float3x3(perObject.invWorld[0].xyz, perObject.invWorld[1].xyz, perObject.invWorld[2].xyz));
     
-    // Simplification: just use world matrix for now (assuming no non-uniform scale)
-    out.worldNormal = (perObject.world * float4(in.normal, 0.0)).xyz;
+    // Use InvWorld (Inverse) and transpose it for normals.
+    // Metal matrices are column-major.
+    // transpose(InvWorld) * normal
+    out.worldNormal = (transpose(perObject.InvWorld) * float4(in.normal, 0.0)).xyz;
+    
     out.color = in.color;
     return out;
 }
@@ -101,21 +49,23 @@ fragment float4 fragmentMain(
     VertexOut in [[stage_in]],
     constant GlobalShaderData& globalData [[buffer(11)]],
     constant ForwardLightBuffer& lightData [[buffer(12)]],
-    constant MaterialUniforms& material [[buffer(3)]])
+    constant MaterialUniforms& material [[buffer(3)]],
+    constant PerObjectData& perObject [[buffer(10)]])
 {
     float3 N = normalize(in.worldNormal);
-    float3 V = normalize(globalData.cameraPositionAndViewWidth.xyz - in.worldPos);
+    float3 V = normalize(globalData.CameraPositionAndViewWidth.xyz - in.worldPos);
     
     float3 totalDiffuse = float3(0.0);
     float3 totalSpecular = float3(0.0);
     float3 albedo = in.color * material.color.rgb;
     
     // Directional Lights
-    for(uint i = 0; i < globalData.numDirectionalLights; ++i) {
-        DirectionalLightParameters light = lightData.directionalLights[i];
-        float3 L = normalize(-light.directionAndIntensity.xyz);
-        float intensity = light.directionAndIntensity.w;
-        float3 lightColor = light.color.rgb * intensity;
+    for(uint i = 0; i < globalData.NumDirectionalLights; ++i) {
+        // Use referencing to avoid copy
+        constant DirectionalLightParameters& light = lightData.directionalLights[i];
+        float3 L = normalize(-light.DirectionAndIntensity.xyz);
+        float intensity = light.DirectionAndIntensity.w;
+        float3 lightColor = light.Color.rgb * intensity;
         
         // Diffuse
         float NdotL = max(dot(N, L), 0.0);
@@ -131,19 +81,19 @@ fragment float4 fragmentMain(
     }
 
     // Point Lights
+    // Note: ForwardLightBuffer defines 'punctualLightCount' but GlobalShaderData has 'NumDirectionalLights'.
+    // We trust lightData.punctualLightCount here.
     for(uint i = 0; i < lightData.punctualLightCount; ++i) {
-        LightParameters light = lightData.lights[i];
-        float3 lightDir = light.position - in.worldPos;
+        constant LightParameters& light = lightData.lights[i];
+        float3 lightDir = light.Position - in.worldPos;
         float distance = length(lightDir);
         float3 L = normalize(lightDir);
         
-        // Simple linear attenuation: 1 - (dist/range)
-        float attenuation = max(0.0, 1.0 - (distance / light.range));
-        
-        // Standard quadratic attenuation can be used too: 1.0 / (1.0 + 0.1*dist + 0.01*dist*dist)
+        // Simple linear attenuation
+        float attenuation = max(0.0, 1.0 - (distance / light.Range));
         
         if (attenuation > 0.0) {
-            float3 lightColor = light.color * light.intensity * attenuation;
+            float3 lightColor = light.Color * light.Intensity * attenuation;
             
             // Diffuse
             float NdotL = max(dot(N, L), 0.0);
@@ -159,8 +109,10 @@ fragment float4 fragmentMain(
         }
     }
     
-    // Ambient
-    float3 ambient = albedo * 0.1;
+    // Ambient (SH)
+    // EvalSH9Irradiance is defined in CommonFunction.metal (included via Common.h)
+    float3 irradiance = EvalSH9Irradiance(N, perObject.sh_coeffs);
+    float3 ambient = albedo * irradiance;
     
     float3 finalColor = ambient + albedo * totalDiffuse + totalSpecular;
     
