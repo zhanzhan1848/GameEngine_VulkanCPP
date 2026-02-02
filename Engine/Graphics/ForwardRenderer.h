@@ -37,7 +37,7 @@ public:
                 const RenderView& view, 
                 rhi::ResourceHandle renderTarget, 
                 rhi::ResourceHandle depthStencil,
-                const std::unordered_map<id::id_type, MaterialInstance*>& materials,
+                const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                 uint32_t frameIndex,
                 uint32_t width,
                 uint32_t height);
@@ -46,7 +46,7 @@ private:
     void DepthPrePass(rhi::RHICommandBuffer* cmdBuffer, 
                      const RenderView& view, 
                      rhi::ResourceHandle depthStencil,
-                     const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
+                     const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                      const utl::vector<const RenderProxy*>& proxies,
                      uint32_t frameIndex,
                      uint32_t width,
@@ -55,13 +55,13 @@ private:
     void RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
                           const RenderScene& scene,
                           const RenderView& mainView,
-                          const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
+                          const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                           uint32_t frameIndex);
 
     void ShadowPass(rhi::RHICommandBuffer* cmdBuffer, 
                    const RenderView& view, 
                    rhi::ResourceHandle shadowMap,
-                   const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
+                   const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                    const utl::vector<const RenderProxy*>& proxies,
                    uint32_t frameIndex,
                    uint32_t arrayLayer);
@@ -76,7 +76,7 @@ private:
 
     void OpaquePass(rhi::RHICommandBuffer* cmdBuffer, 
                    const RenderView& view, 
-                   const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
+                   const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                    const utl::vector<const RenderProxy*>& proxies,
                    uint32_t frameIndex,
                    bool useDepthEqual,
@@ -85,7 +85,7 @@ private:
 
     void TransparentPass(rhi::RHICommandBuffer* cmdBuffer, 
                         const RenderView& view, 
-                        const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
+                        const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                         const utl::vector<const RenderProxy*>& proxies,
                         uint32_t frameIndex);
 

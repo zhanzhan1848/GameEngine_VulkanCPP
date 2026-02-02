@@ -66,6 +66,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Material.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialInstance.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialInstance.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/SceneDataAdapter.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/SceneDataAdapter.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ForwardRenderer.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ForwardRenderer.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Core/*.h"

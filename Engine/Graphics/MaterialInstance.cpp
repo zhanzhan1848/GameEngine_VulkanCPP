@@ -147,16 +147,18 @@ bool MaterialInstance::Initialize(rhi::RHIDeviceBase* device) {
     return true;
 }
 
-void MaterialInstance::SetTexture(u32 binding, rhi::ResourceHandle texture) {
+void MaterialInstance::SetTexture(u32 binding, rhi::ResourceHandle texture, u32 arrayElement) {
     TextureUpdate update;
     update.binding = binding;
+    update.arrayElement = arrayElement;
     update.texture = texture;
     pendingTextures_.push_back(update);
 }
 
-void MaterialInstance::SetSampler(u32 binding, rhi::SamplerHandle sampler) {
+void MaterialInstance::SetSampler(u32 binding, rhi::SamplerHandle sampler, u32 arrayElement) {
     SamplerUpdate update;
     update.binding = binding;
+    update.arrayElement = arrayElement;
     update.sampler = sampler;
     pendingSamplers_.push_back(update);
 }
@@ -227,7 +229,7 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
         rhi::WriteDescriptorSet write;
         write.dstSet = currentSet;
         write.dstBinding = tex.binding;
-        write.dstArrayElement = 0;
+        write.dstArrayElement = tex.arrayElement;
         write.descriptorCount = 1;
         write.descriptorType = rhi::DescriptorType::SampledImage;
         write.imageInfo = &imageInfos.back(); 
@@ -246,7 +248,7 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
         rhi::WriteDescriptorSet write;
         write.dstSet = currentSet;
         write.dstBinding = samp.binding;
-        write.dstArrayElement = 0;
+        write.dstArrayElement = samp.arrayElement;
         write.descriptorCount = 1;
         write.descriptorType = rhi::DescriptorType::Sampler;
         write.imageInfo = &imageInfos.back(); 

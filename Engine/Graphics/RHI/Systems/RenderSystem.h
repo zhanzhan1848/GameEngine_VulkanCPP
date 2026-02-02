@@ -65,18 +65,18 @@ public:
     uint32_t GetCurrentFrameIndex() const { return currentFrameIndex_; }
 
     /**
-     * @brief 注册材质实例（临时，用于查找）
+     * @brief 注册材质实例
      * @param id 材质ID
-     * @param materialInstance 材质实例指针
+     * @param materialInstance 材质实例指针 (共享所有权)
      */
-    void RegisterMaterialInstance(id::id_type id, MaterialInstance* materialInstance);
+    void RegisterMaterialInstance(id::id_type id, std::shared_ptr<MaterialInstance> materialInstance);
 
     /**
      * @brief 获取材质实例
      * @param id 材质ID
      * @return 材质实例指针，若不存在返回nullptr
      */
-    MaterialInstance* GetMaterialInstance(id::id_type id) const;
+    std::shared_ptr<MaterialInstance> GetMaterialInstance(id::id_type id) const;
 
     /**
      * @brief 获取当前帧索引 (0 to MAX_FRAMES_IN_FLIGHT-1)
@@ -136,7 +136,7 @@ private:
     uint32_t currentImageIndex_{0}; // Index of the swapchain image acquired for the current frame
 
     rhi::ResourceHandle depthStencilTexture_{rhi::handles::INVALID_RESOURCE};
-    std::unordered_map<id::id_type, MaterialInstance*> materialInstances_;
+    std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>> materialInstances_;
 
     ForwardRenderer forwardRenderer_;
 

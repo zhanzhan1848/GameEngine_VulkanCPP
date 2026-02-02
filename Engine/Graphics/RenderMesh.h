@@ -76,6 +76,12 @@ public:
     void Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount = 1, uint32_t startInstance = 0);
 
     /**
+     * @brief 设置实体ID并更新注册表
+     * @param id 新的实体ID
+     */
+    void SetEntityId(primal::id::id_type id);
+
+    /**
      * @brief 获取顶点缓冲区句柄
      * @return 顶点缓冲区句柄
      */

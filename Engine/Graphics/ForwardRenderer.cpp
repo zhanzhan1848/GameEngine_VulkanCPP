@@ -415,7 +415,7 @@ void ForwardRenderer::Shutdown() {
 void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
                                         const RenderScene& scene,
                                         const RenderView& mainView,
-                                        const std::unordered_map<id::id_type, class MaterialInstance*>& materials,
+                                        const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                         uint32_t frameIndex) {
     const auto& planes = scene.GetReflectionPlanes();
     if (planes.empty()) return;
@@ -615,7 +615,7 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
 void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer, 
                                  const RenderView& view, 
                                  rhi::ResourceHandle shadowMap,
-                                 const std::unordered_map<id::id_type, MaterialInstance*>& materials,
+                                 const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                  const utl::vector<const RenderProxy*>& proxies,
                                  uint32_t frameIndex,
                                  uint32_t cascadeIndex) {
@@ -653,7 +653,7 @@ void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     for (const auto* proxy : proxies) {
         auto it = materials.find(proxy->materialId);
         if (it == materials.end() || !it->second) continue;
-        MaterialInstance* mi = it->second;
+        MaterialInstance* mi = it->second.get();
         Material* mat = mi->GetMaterial();
         
         // Shadow Pipeline (Depth Only + Shadow Flag)
@@ -768,7 +768,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
                              const RenderView& view, 
                              rhi::ResourceHandle renderTarget, 
                              rhi::ResourceHandle depthStencil,
-                             const std::unordered_map<id::id_type, MaterialInstance*>& materials,
+                             const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                              uint32_t frameIndex,
                              uint32_t width,
                              uint32_t height) {
@@ -1052,7 +1052,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 void ForwardRenderer::DepthPrePass(rhi::RHICommandBuffer* cmdBuffer, 
                                    const RenderView& view, 
                                    rhi::ResourceHandle depthStencil,
-                                   const std::unordered_map<id::id_type, MaterialInstance*>& materials,
+                                   const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                    const utl::vector<const RenderProxy*>& proxies,
                                    uint32_t frameIndex,
                                    uint32_t width,
@@ -1089,7 +1089,7 @@ void ForwardRenderer::DepthPrePass(rhi::RHICommandBuffer* cmdBuffer,
     for (const auto* proxy : proxies) {
         auto it = materials.find(proxy->materialId);
         if (it == materials.end() || !it->second) continue;
-        MaterialInstance* mi = it->second;
+        MaterialInstance* mi = it->second.get();
         Material* mat = mi->GetMaterial();
         
         // Depth Only Pipeline
@@ -1128,7 +1128,7 @@ void ForwardRenderer::DepthPrePass(rhi::RHICommandBuffer* cmdBuffer,
 
 void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer, 
                                  const RenderView& view, 
-                                 const std::unordered_map<id::id_type, MaterialInstance*>& materials,
+                                 const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                  const utl::vector<const RenderProxy*>& proxies,
                                  uint32_t frameIndex,
                                  bool useDepthEqual,
@@ -1137,7 +1137,7 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
     for (const auto* proxy : proxies) {
         auto it = materials.find(proxy->materialId);
         if (it == materials.end() || !it->second) continue;
-        MaterialInstance* mi = it->second;
+        MaterialInstance* mi = it->second.get();
         Material* mat = mi->GetMaterial();
 
         rhi::PipelineHandle pipeline = rhi::handles::INVALID_PIPELINE;
@@ -1193,13 +1193,13 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
 
 void ForwardRenderer::TransparentPass(rhi::RHICommandBuffer* cmdBuffer, 
                                       const RenderView& view, 
-                                      const std::unordered_map<id::id_type, MaterialInstance*>& materials,
+                                      const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                       const utl::vector<const RenderProxy*>& proxies,
                                       uint32_t frameIndex) {
     for (const auto* proxy : proxies) {
         auto it = materials.find(proxy->materialId);
         if (it == materials.end() || !it->second) continue;
-        MaterialInstance* mi = it->second;
+        MaterialInstance* mi = it->second.get();
         Material* mat = mi->GetMaterial();
 
         rhi::PipelineHandle pipeline = rhi::handles::INVALID_PIPELINE;

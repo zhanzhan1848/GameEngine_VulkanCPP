@@ -34,7 +34,9 @@ public:
     void SetShader(rhi::ShaderStage stage, const ShaderBytecode& bytecode, const char* entryPoint = "main", u32 permutationId = 0);
 
     void SetVertexAttributes(const utl::vector<rhi::VertexInputAttribute>& attributes);
+    const utl::vector<rhi::VertexInputAttribute>& GetVertexAttributes() const { return vertexAttributes_; }
     void SetVertexBindings(const utl::vector<rhi::VertexInputBinding>& bindings);
+    const utl::vector<rhi::VertexInputBinding>& GetVertexBindings() const { return vertexBindings_; }
 
     void SetBlendState(const rhi::BlendState& state);
     const rhi::BlendState& GetBlendState() const { return blendState_; }

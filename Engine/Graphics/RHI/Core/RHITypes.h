@@ -285,6 +285,25 @@ inline BufferUsageFlags operator&(BufferUsageFlags a, BufferUsageFlags b) {
 }
 
 /**
+ * @brief 描述符绑定标志
+ */
+enum class DescriptorBindingFlags : uint32_t {
+    None = 0,
+    UpdateAfterBind = 1 << 0,           ///< 绑定后更新
+    UpdateUnusedWhilePending = 1 << 1,  ///< 挂起时更新未使用
+    PartiallyBound = 1 << 2,            ///< 部分绑定 (Bindless)
+    VariableDescriptorCount = 1 << 3    ///< 可变描述符数量
+};
+
+inline DescriptorBindingFlags operator|(DescriptorBindingFlags a, DescriptorBindingFlags b) {
+    return static_cast<DescriptorBindingFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+inline DescriptorBindingFlags operator&(DescriptorBindingFlags a, DescriptorBindingFlags b) {
+    return static_cast<DescriptorBindingFlags>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+}
+
+/**
  * @brief 纹理类型
  */
 enum class TextureType : uint8_t {
@@ -525,10 +544,11 @@ struct DescriptorSetLayoutBinding {
     uint32_t descriptorCount;
     ShaderStage stageFlags;
     const SamplerHandle* immutableSamplers;
+    DescriptorBindingFlags flags;
     
     DescriptorSetLayoutBinding() : binding(0), descriptorType(DescriptorType::Unknown), 
                                   descriptorCount(0), stageFlags(ShaderStage::Unknown), 
-                                  immutableSamplers(nullptr) {}
+                                  immutableSamplers(nullptr), flags(DescriptorBindingFlags::None) {}
 };
 
 /**

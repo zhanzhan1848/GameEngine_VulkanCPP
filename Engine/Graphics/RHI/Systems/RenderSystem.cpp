@@ -135,13 +135,13 @@ void RenderSystem::Shutdown() {
     device_ = nullptr;
 }
 
-void RenderSystem::RegisterMaterialInstance(id::id_type id, MaterialInstance* materialInstance) {
+void RenderSystem::RegisterMaterialInstance(id::id_type id, std::shared_ptr<MaterialInstance> materialInstance) {
     if (materialInstance) {
         materialInstances_[id] = materialInstance;
     }
 }
 
-MaterialInstance* RenderSystem::GetMaterialInstance(id::id_type id) const {
+std::shared_ptr<MaterialInstance> RenderSystem::GetMaterialInstance(id::id_type id) const {
     auto it = materialInstances_.find(id);
     if (it != materialInstances_.end()) {
         return it->second;

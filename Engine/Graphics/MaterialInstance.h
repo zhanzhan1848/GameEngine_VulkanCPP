@@ -28,8 +28,9 @@ namespace primal::graphics {
          * @brief Set texture parameter
          * @param binding Binding index in the shader
          * @param texture Texture resource handle
+         * @param arrayElement Array element index (default 0)
          */
-        void SetTexture(u32 binding, rhi::ResourceHandle texture);
+        void SetTexture(u32 binding, rhi::ResourceHandle texture, u32 arrayElement = 0);
 
         /**
          * @brief Set buffer parameter
@@ -44,8 +45,9 @@ namespace primal::graphics {
          * @brief Set sampler parameter
          * @param binding Binding index in the shader
          * @param sampler Sampler handle
+         * @param arrayElement Array element index (default 0)
          */
-        void SetSampler(u32 binding, rhi::SamplerHandle sampler);
+        void SetSampler(u32 binding, rhi::SamplerHandle sampler, u32 arrayElement = 0);
 
         /**
          * @brief Set uniform data
@@ -94,10 +96,12 @@ namespace primal::graphics {
 
         struct TextureUpdate {
             u32 binding;
+            u32 arrayElement;
             rhi::ResourceHandle texture;
         };
         struct SamplerUpdate {
             u32 binding;
+            u32 arrayElement;
             rhi::SamplerHandle sampler;
         };
         struct BufferUpdate {

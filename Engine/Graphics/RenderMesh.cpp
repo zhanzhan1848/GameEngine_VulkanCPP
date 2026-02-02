@@ -158,6 +158,13 @@ void RenderMesh::Destroy(rhi::RHIDeviceBase* device) {
     Unregister();
 }
 
+void RenderMesh::SetEntityId(primal::id::id_type id) {
+    if (entityId_ == id) return;
+    Unregister();
+    entityId_ = id;
+    Register();
+}
+
 void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount, uint32_t startInstance) {
     if (!cmdBuffer || !IsValid()) return;
 

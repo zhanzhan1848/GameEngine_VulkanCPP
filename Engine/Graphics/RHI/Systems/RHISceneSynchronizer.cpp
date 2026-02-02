@@ -60,24 +60,14 @@ namespace primal::graphics::rhi {
             }
             
             // 检查材质是否变化
-            if (proxy.materialId != id::invalid_id) {
-                MaterialInstance* matInst = renderSystem_->GetMaterialInstance(proxy.materialId);
-                // 如果 MaterialComponent 当前持有的实例不同，则更新
-                // 注意：这里需要 MaterialComponent 支持从 MaterialInstance 指针更新
-                // 目前 MaterialComponent 只有 shared_ptr<MaterialInstance> 成员
-                // 我们假设 MaterialInstance 的生命周期由外部管理（如 ContentManager），或者我们需要 shared_ptr
-                // RenderSystem::GetMaterialInstance 返回裸指针，这可能是一个所有权问题
-                // 暂时假设我们创建一个 shared_ptr 包装它 (不拥有所有权) 或者 MaterialComponent 需要修改以支持 weak_ptr 或 raw ptr
-                // 为了安全，我们假设 GetMaterialInstance 返回的对象在这一帧是有效的。
-                // 最好 MaterialComponent 持有 shared_ptr。
-                // 如果 RenderSystem 持有 ownership，我们可以用 aliasing constructor or empty deleter
-                if (matInst) {
-                    if (!materialComp->materialInstance || materialComp->materialInstance.get() != matInst) {
-                         // 使用空删除器，因为所有权在 RenderSystem 或 ContentManager
-                        materialComp->materialInstance = std::shared_ptr<MaterialInstance>(matInst, [](MaterialInstance*){});
-                    }
+        if (proxy.materialId != id::invalid_id) {
+            std::shared_ptr<MaterialInstance> matInst = renderSystem_->GetMaterialInstance(proxy.materialId);
+            if (matInst) {
+                if (!materialComp->materialInstance || materialComp->materialInstance != matInst) {
+                    materialComp->materialInstance = matInst;
                 }
             }
+        }
 
             // GPUBufferComponent
             auto* bufferComp = entityManager_->GetComponent<GPUBufferComponent>(rhiEntityId);

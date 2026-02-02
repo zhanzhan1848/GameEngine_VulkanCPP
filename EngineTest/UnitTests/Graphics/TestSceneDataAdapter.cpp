@@ -81,7 +81,7 @@ public:
     bool GetQueryPoolResults(QueryPoolHandle, uint32_t, uint32_t, void*, size_t) override { return false; }
     SamplerHandle CreateSampler(const SamplerDesc&) override { return handles::INVALID_SAMPLER; }
     void DestroySampler(SamplerHandle) override {}
-    DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc&) override { return handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
+    DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc&) override { return (DescriptorSetLayoutHandle)1; }
     void DestroyDescriptorSetLayout(DescriptorSetLayoutHandle) override {}
     PipelineLayoutHandle CreatePipelineLayout(const PipelineLayoutDesc&) override { return handles::INVALID_PIPELINE_LAYOUT; }
     void DestroyPipelineLayout(PipelineLayoutHandle) override {}
@@ -128,6 +128,7 @@ private:
 class TestSceneDataAdapter : public TestSuite {
 public:
     TestSceneDataAdapter() : TestSuite("SceneDataAdapter Tests") {
+        AddTestCase({"LoadMaterialTest", [this]() { return LoadMaterialTest(); }});
         AddTestCase({"LoadSimpleScene", [this]() { return LoadSimpleScene(); }});
     }
 
@@ -145,6 +146,109 @@ private:
         buffer.insert(buffer.end(), ptr, ptr + sizeof(T));
     }
 
+    TestResult LoadMaterialTest() {
+        MockDevice device;
+        SceneDataAdapter adapter;
+
+        // Construct Mock Material Data
+        std::vector<uint8_t> data;
+
+        // Header
+        Write<uint32_t>(data, 0x4C54414D); // Magic 'MATL'
+        Write<uint32_t>(data, 1);          // Version 1
+        Write<uint32_t>(data, 1);          // Shader Count
+
+        // Shader 0
+        Write<uint32_t>(data, (uint32_t)ShaderStage::Vertex); // Stage
+        uint32_t bytecodeSize = 4;
+        Write<uint32_t>(data, bytecodeSize); // Bytecode Size
+        
+        std::string entryPoint = "main";
+        Write<uint32_t>(data, (uint32_t)entryPoint.length()); // EntryPoint Size
+        data.insert(data.end(), entryPoint.begin(), entryPoint.end()); // EntryPoint
+
+        // Bytecode (dummy)
+        Write<uint32_t>(data, 0xDEADBEEF);
+
+        // Pipeline States
+        BlendState blendState;
+        blendState.enableBlend = true;
+        Write<BlendState>(data, blendState);
+
+        DepthStencilState depthState;
+        depthState.enableDepthTest = true;
+        Write<DepthStencilState>(data, depthState);
+
+        RasterizerState rasterState;
+        rasterState.cullMode = CullMode::Back;
+        Write<RasterizerState>(data, rasterState);
+
+        Write<uint32_t>(data, (uint32_t)PrimitiveTopology::TriangleList);
+
+        // Vertex Attributes
+        Write<uint32_t>(data, 1);
+        VertexInputAttribute attr;
+        attr.location = 0;
+        attr.binding = 0;
+        attr.format = DataFormat::RGB32_Float;
+        attr.offset = 0;
+        Write<VertexInputAttribute>(data, attr);
+
+        // Vertex Bindings
+        Write<uint32_t>(data, 1);
+        VertexInputBinding binding;
+        binding.binding = 0;
+        binding.stride = 12;
+        binding.perVertex = true;
+        Write<VertexInputBinding>(data, binding);
+
+        // Descriptor Binding Count
+        Write<uint32_t>(data, 1);
+        Write<uint32_t>(data, 0); // Binding 0
+        Write<rhi::DescriptorType>(data, rhi::DescriptorType::UniformBuffer);
+        Write<uint32_t>(data, 1); // Count 1
+        Write<rhi::ShaderStage>(data, rhi::ShaderStage::Vertex);
+        Write<rhi::DescriptorBindingFlags>(data, rhi::DescriptorBindingFlags::PartiallyBound | rhi::DescriptorBindingFlags::UpdateAfterBind);
+
+            // Execute
+        std::shared_ptr<Material> material = adapter.LoadMaterial(&device, data.data(), (uint32_t)data.size());
+
+        // Verify
+        if (!material) {
+            std::cout << "Failed to load material" << std::endl;
+            return TestResult::Failed;
+        }
+
+        if (material->GetVertexBindings().size() != 1) {
+             std::cout << "Vertex bindings size mismatch: " << material->GetVertexBindings().size() << std::endl;
+             return TestResult::Failed;
+        }
+
+        // Verify Bindless Flags
+        if (device.lastBindings.empty()) {
+             std::cout << "No bindings recorded in mock device" << std::endl;
+             return TestResult::Failed;
+        }
+
+        auto flags = device.lastBindings[0].flags;
+        if (!(flags & rhi::DescriptorBindingFlags::PartiallyBound)) {
+             std::cout << "PartiallyBound flag missing" << std::endl;
+             return TestResult::Failed;
+        }
+        if (!(flags & rhi::DescriptorBindingFlags::UpdateAfterBind)) {
+             std::cout << "UpdateAfterBind flag missing" << std::endl;
+             return TestResult::Failed;
+        }
+
+        if (material->GetDescriptorSetLayout() == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            std::cout << "Descriptor Set Layout not created" << std::endl;
+            return TestResult::Failed;
+        }
+
+
+        return TestResult::Passed;
+    }
+
     TestResult LoadSimpleScene() {
         MockDevice device;
         SceneDataAdapter adapter;
@@ -154,6 +258,9 @@ private:
         
         // Scene Name
         WriteString(data, "TestScene");
+
+        // Num Materials
+        Write<uint32_t>(data, 0);
         
         // Num LOD Groups
         Write<uint32_t>(data, 1);
@@ -195,6 +302,9 @@ private:
         Write<uint16_t>(data, 0);
         Write<uint16_t>(data, 1);
         Write<uint16_t>(data, 2);
+
+        // Material Index
+        Write<int32_t>(data, -1);
 
         // Execute
         auto results = adapter.Load(&device, data.data(), (uint32_t)data.size());
