@@ -10,10 +10,14 @@
 #include "Platform/PlatformTypes.h"
 #include <chrono>
 
+#include "Graphics/RHI/Core/RHISystem.h"
+#include "Graphics/RHI/Core/RHIEntityManager.h"
+
 namespace primal::graphics {
 
 struct RenderSystemInitInfo {
     rhi::RHIDeviceBase* device{nullptr};
+    rhi::RHIEntityManager* entityManager{nullptr};
     platform::window_handle window{nullptr};
     uint32_t width{0};
     uint32_t height{0};
@@ -23,10 +27,10 @@ struct RenderSystemInitInfo {
  * @brief 渲染系统核心类
  * @details 负责每帧的渲染逻辑调度，包括场景剔除、DrawPacket生成和提交
  */
-class RenderSystem {
+class RenderSystem : public rhi::RHISystem {
 public:
     RenderSystem();
-    ~RenderSystem();
+    ~RenderSystem() override;
 
     /**
      * @brief 初始化渲染系统
@@ -34,6 +38,12 @@ public:
      * @return 初始化是否成功
      */
     bool Initialize(const RenderSystemInitInfo& info);
+
+    using RHISystem::Initialize;
+
+    // RHISystem 接口实现
+    void Update(float deltaTime) override;
+    void Render(rhi::RHICommandBuffer* cmdBuffer) override;
 
     /**
      * @brief 关闭渲染系统
@@ -93,6 +103,13 @@ public:
     rhi::TextureDesc GetBackBufferDesc() const;
 
     /**
+     * @brief 设置当前渲染使用的 RenderPass
+     * @details 用于 Material::GetPipeline 获取正确的 Pipeline
+     * @param renderPass RenderPass 句柄
+     */
+    void SetCurrentRenderPass(rhi::RenderPassHandle renderPass) { currentRenderPass_ = renderPass; }
+
+    /**
      * @brief 处理窗口大小改变
      * @param width 新宽度
      * @param height 新高度
@@ -122,6 +139,9 @@ private:
     std::unordered_map<id::id_type, MaterialInstance*> materialInstances_;
 
     ForwardRenderer forwardRenderer_;
+
+    // 当前渲染使用的 RenderPass
+    rhi::RenderPassHandle currentRenderPass_{rhi::handles::INVALID_RESOURCE};
 };
 
 } // namespace primal::graphics

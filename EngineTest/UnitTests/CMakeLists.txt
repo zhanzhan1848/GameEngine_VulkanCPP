@@ -453,14 +453,34 @@ if(APPLE)
         ${CMAKE_SOURCE_DIR}/Engine/Common
         ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
     )
-    # 不链接Engine库，使用源码编译以确保符号可见
-    # target_link_libraries(StandaloneGraphics_Material_Test PRIVATE Engine)
+    target_compile_definitions(StandaloneGraphics_Material_Test PRIVATE DEBUG _DEBUG STANDALONE_TEST PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
     add_test(NAME StandaloneGraphics_Material_Test COMMAND StandaloneGraphics_Material_Test)
     set_target_properties(StandaloneGraphics_Material_Test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    target_compile_definitions(StandaloneGraphics_Material_Test PRIVATE DEBUG _DEBUG)
     set_target_properties(StandaloneGraphics_Material_Test PROPERTIES FOLDER "Tests/Graphics")
+
+    # 创建 RHISceneSynchronizer 测试
+    add_executable(TestRHISceneSynchronizer
+        Graphics/TestRHISceneSynchronizer.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Systems/RHISceneSynchronizer.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIEntityManager.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Components/RenderLayerComponent.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Components/MaterialComponent.cpp
+    )
+    target_include_directories(TestRHISceneSynchronizer PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestRHISceneSynchronizer PRIVATE Engine)
+    target_compile_definitions(TestRHISceneSynchronizer PRIVATE DEBUG _DEBUG)
+    add_test(NAME TestRHISceneSynchronizer COMMAND TestRHISceneSynchronizer)
+    set_target_properties(TestRHISceneSynchronizer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    set_target_properties(TestRHISceneSynchronizer PROPERTIES FOLDER "Tests/Graphics")
     
     # 创建 Metal PRT 测试
     add_executable(TestMetalPRT Graphics/Metal/TestMetalPRT.cpp)
@@ -586,6 +606,34 @@ set_target_properties(StandaloneGraphics_RenderMesh_Test PROPERTIES
 )
 target_compile_definitions(StandaloneGraphics_RenderMesh_Test PRIVATE DEBUG _DEBUG)
 set_target_properties(StandaloneGraphics_RenderMesh_Test PROPERTIES FOLDER "Tests/Graphics")
+
+# 创建 Pipeline Component 测试
+add_executable(TestPipelineComponent Components/TestPipelineComponent.cpp)
+target_include_directories(TestPipelineComponent PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(TestPipelineComponent PRIVATE Engine)
+add_test(NAME TestPipelineComponent COMMAND TestPipelineComponent)
+set_target_properties(TestPipelineComponent PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestPipelineComponent PRIVATE DEBUG _DEBUG)
+
+# 创建 CommandBuffer Component 测试
+add_executable(TestCommandBufferComponent Components/TestCommandBufferComponent.cpp)
+target_include_directories(TestCommandBufferComponent PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(TestCommandBufferComponent PRIVATE Engine)
+add_test(NAME TestCommandBufferComponent COMMAND TestCommandBufferComponent)
+set_target_properties(TestCommandBufferComponent PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestCommandBufferComponent PRIVATE DEBUG _DEBUG)
 
 
 # 创建RenderTexture测试
@@ -857,6 +905,46 @@ set_target_properties(StandaloneRHI_TextureComponent_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_TextureComponent_Test PRIVATE DEBUG _DEBUG)
 
+# 创建 RenderLayerComponent 测试
+add_executable(StandaloneRHI_RenderLayerComponent_Test 
+    RHI/Components/TestRenderLayerComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Components/RenderLayerComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+)
+target_include_directories(StandaloneRHI_RenderLayerComponent_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+add_test(NAME StandaloneRHI_RenderLayerComponent_Test COMMAND StandaloneRHI_RenderLayerComponent_Test)
+set_target_properties(StandaloneRHI_RenderLayerComponent_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/RHI/Components"
+)
+target_compile_definitions(StandaloneRHI_RenderLayerComponent_Test PRIVATE DEBUG _DEBUG)
+
+# 创建 MaterialComponent 测试
+add_executable(StandaloneRHI_MaterialComponent_Test 
+    RHI/Components/TestMaterialComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Components/MaterialComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Material.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/MaterialInstance.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+)
+target_include_directories(StandaloneRHI_MaterialComponent_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME StandaloneRHI_MaterialComponent_Test COMMAND StandaloneRHI_MaterialComponent_Test)
+set_target_properties(StandaloneRHI_MaterialComponent_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/RHI/Components"
+)
+target_compile_definitions(StandaloneRHI_MaterialComponent_Test PRIVATE DEBUG _DEBUG)
+
 # 创建RHI时间戳测试
 add_executable(StandaloneRHI_Timestamp_Test RHI/Core/TestRHITimestamp.cpp)
 target_include_directories(StandaloneRHI_Timestamp_Test PRIVATE 
@@ -904,6 +992,78 @@ set_target_properties(TestRenderGraphTimestamp PROPERTIES
 target_compile_definitions(TestRenderGraphTimestamp PRIVATE DEBUG _DEBUG)
 set_target_properties(TestRenderGraphTimestamp PROPERTIES FOLDER "Tests/Graphics")
 
+# 创建RHI实体管理器测试
+add_executable(RHI_EntityManager_Test 
+    RHI/Core/TestRHIEntityManager.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIEntityManager.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Components/RenderLayerComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Components/MaterialComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Material.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/MaterialInstance.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+)
+target_include_directories(RHI_EntityManager_Test PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+# 链接Engine库 (或者不链接，只用源码，但如果依赖Engine其他部分可能需要链接)
+# 这里尝试只包含源码，类似于其他测试
+# 但如果RHIEntityManager依赖Engine的其他部分(如Memory)，可能需要链接Engine。
+# 参考StandaloneRHI_MaterialComponent_Test，它没有链接Engine，只是包含了cpp文件。
+# 但是 MaterialInstance.cpp 可能依赖其他东西。
+# 让我们先试着像 MaterialComponent 测试那样包含 cpp 文件。
+# 我需要包含所有相关的cpp文件。
+# RHIEntityManager.cpp, RenderLayerComponent.cpp, MaterialComponent.cpp
+# Material.cpp, MaterialInstance.cpp (because MaterialComponent uses them)
+# RHIResource.cpp (Material uses handles)
+# RHIGarbageCollector.cpp
+add_test(NAME RHI_EntityManager_Test COMMAND RHI_EntityManager_Test)
+set_target_properties(RHI_EntityManager_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/RHI/Core"
+)
+target_compile_definitions(RHI_EntityManager_Test PRIVATE DEBUG _DEBUG)
+
+# 创建 RHI RenderSystem ECS Integration 测试
+add_executable(TestRenderSystemECS 
+    Graphics/TestRenderSystemECS.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Systems/RenderSystem.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIEntityManager.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Components/Pipeline.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Components/RenderLayerComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Components/MaterialComponent.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/ForwardRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Passes/BlurPass.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Passes/SSRPass.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Utils/ShadowUtils.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderView.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderScene.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderProxy.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderMesh.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Material.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/MaterialInstance.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHISwapChain.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
+)
+target_include_directories(TestRenderSystemECS PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME TestRenderSystemECS COMMAND TestRenderSystemECS)
+set_target_properties(TestRenderSystemECS PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/Graphics"
+)
+target_compile_definitions(TestRenderSystemECS PRIVATE DEBUG _DEBUG)
+
 ## 创建一个宏来运行所有RHI测试
 add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_Test
@@ -918,6 +1078,10 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_GarbageCollector_Test
     COMMAND StandaloneRHI_Timestamp_Test
     COMMAND StandaloneRHI_GPUBufferComponent_Test
+    COMMAND StandaloneRHI_RenderLayerComponent_Test
+    COMMAND RHI_EntityManager_Test
+    COMMAND TestRenderSystemECS
+    COMMAND TestSceneDataAdapter
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
@@ -950,6 +1114,7 @@ message(STATUS "  - StandaloneRHI_MultiThreadedCommandGenerator_Test: Multi-thre
 message(STATUS "  - StandaloneRHI_Allocator_Test: RHI Allocator tests")
 message(STATUS "  - StandaloneRHI_GarbageCollector_Test: RHI Garbage Collector tests")
 message(STATUS "  - StandaloneRHI_GPUBufferComponent_Test: GPU Buffer Component tests")
+message(STATUS "  - StandaloneRHI_RenderLayerComponent_Test: Render Layer Component tests")
 message(STATUS "  - RHI_All_Tests: Run all RHI tests")
 
 # 创建RealTime PRT测试
@@ -981,4 +1146,26 @@ set_target_properties(TestLightProbe PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 target_compile_definitions(TestLightProbe PRIVATE DEBUG _DEBUG)
+
+# 创建SceneDataAdapter测试
+add_executable(TestSceneDataAdapter 
+    Graphics/TestSceneDataAdapter.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/SceneDataAdapter.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
+)
+target_include_directories(TestSceneDataAdapter PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestSceneDataAdapter PRIVATE Engine)
+add_test(NAME TestSceneDataAdapter COMMAND TestSceneDataAdapter)
+set_target_properties(TestSceneDataAdapter PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestSceneDataAdapter PRIVATE DEBUG _DEBUG)
+
 

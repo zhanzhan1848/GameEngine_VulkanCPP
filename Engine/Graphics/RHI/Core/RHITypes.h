@@ -103,6 +103,13 @@ using DescriptorSetLayoutHandle = uint64_t;
 using DescriptorSetHandle = uint64_t;
 
 /**
+ * @brief RHI ECS 实体 ID
+ * @details 32位整数，用于标识 RHI ECS 中的实体
+ */
+using RHIEntityID = uint32_t;
+constexpr RHIEntityID INVALID_RHI_ENTITY_ID = 0xFFFFFFFF;
+
+/**
  * @brief RHI渲染通道句柄
  * @details 64位句柄，用于标识渲染通道对象
  */

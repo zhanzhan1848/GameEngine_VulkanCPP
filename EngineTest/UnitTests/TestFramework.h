@@ -17,6 +17,7 @@
 #include <iostream>
 #include <chrono>
 #include <sstream>
+#include <memory>
 
 namespace Engine {
 namespace Test {
@@ -252,6 +253,19 @@ private:
             return Engine::Test::TestResult::Failed; \
         } \
     } while(0)
+
+#define TEST_ASSERT_FLOAT_EQ(expected, actual, epsilon, message) \
+    do { \
+        float diff = (expected) - (actual); \
+        if (diff < 0) diff = -diff; \
+        if (diff > (epsilon)) { \
+            std::cout << "断言失败: " << message << std::endl; \
+            std::cout << "期望值: " << (expected) << ", 实际值: " << (actual) << ", 误差: " << diff << std::endl; \
+            std::cout << "文件: " << __FILE__ << ", 行: " << __LINE__ << std::endl; \
+            return Engine::Test::TestResult::Failed; \
+        } \
+    } while(0)
+
 
 #define TEST_SKIP(message) \
     do { \

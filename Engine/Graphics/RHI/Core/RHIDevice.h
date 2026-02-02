@@ -506,7 +506,7 @@ public:
      * @param desc 渲染通道描述符
      * @return 渲染通道句柄
      */
-    RenderPassHandle CreateRenderPass(const RenderPassDesc& desc) {
+    RenderPassHandle CreateRenderPass(const RenderPassDesc& desc) override {
         assert(isValid_ && "Device not initialized");
         return derived().createRenderPassImpl(desc);
     }
@@ -515,7 +515,7 @@ public:
      * @brief 销毁渲染通道
      * @param handle 渲染通道句柄
      */
-    void DestroyRenderPass(RenderPassHandle handle) {
+    void DestroyRenderPass(RenderPassHandle handle) override {
         assert(isValid_ && "Device not initialized");
         if (handle != handles::INVALID_RESOURCE) {
             gc_.DeferredDestroy([this, handle]() {

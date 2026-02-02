@@ -18,6 +18,7 @@
 #include "Graphics/RenderView.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Components/Pipeline.h"
 #include "Graphics/RHI/Core/RHIDescriptorSet.h"
 #include "Graphics/RHI/Core/RHIDescriptorSetLayout.h"
 #include "Graphics/RHI/Core/RHIPipelineLayout.h"
@@ -1139,9 +1140,21 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
         MaterialInstance* mi = it->second;
         Material* mat = mi->GetMaterial();
 
-        PipelineFlags flags = useDepthEqual ? PipelineFlags::DepthEqual : PipelineFlags::None;
-        flags = flags | extraFlags;
-        rhi::PipelineHandle pipeline = mat->GetPipeline(device_, rhi::handles::INVALID_RESOURCE, 0, flags);
+        rhi::PipelineHandle pipeline = rhi::handles::INVALID_PIPELINE;
+
+        // 1. Try to get pipeline from PipelineComponent (ECS)
+        pipeline::component pipelineComp{ pipeline::pipeline_id{proxy->entityId} };
+        if (pipeline::is_valid(pipelineComp)) {
+            pipeline = pipeline::get_pipeline_handle(pipelineComp);
+        }
+
+        // 2. Fallback to Material System if no component override
+        if (pipeline == rhi::handles::INVALID_PIPELINE) {
+            PipelineFlags flags = useDepthEqual ? PipelineFlags::DepthEqual : PipelineFlags::None;
+            flags = flags | extraFlags;
+            pipeline = mat->GetPipeline(device_, rhi::handles::INVALID_RESOURCE, 0, flags);
+        }
+
         cmdBuffer->BindGraphicsPipeline(pipeline);
 
         // Bind Sets
@@ -1189,7 +1202,19 @@ void ForwardRenderer::TransparentPass(rhi::RHICommandBuffer* cmdBuffer,
         MaterialInstance* mi = it->second;
         Material* mat = mi->GetMaterial();
 
-        rhi::PipelineHandle pipeline = mat->GetPipeline(device_, rhi::handles::INVALID_RESOURCE, 0, PipelineFlags::None);
+        rhi::PipelineHandle pipeline = rhi::handles::INVALID_PIPELINE;
+
+        // 1. Try to get pipeline from PipelineComponent (ECS)
+        pipeline::component pipelineComp{ pipeline::pipeline_id{proxy->entityId} };
+        if (pipeline::is_valid(pipelineComp)) {
+            pipeline = pipeline::get_pipeline_handle(pipelineComp);
+        }
+
+        // 2. Fallback to Material System
+        if (pipeline == rhi::handles::INVALID_PIPELINE) {
+            pipeline = mat->GetPipeline(device_, rhi::handles::INVALID_RESOURCE, 0, PipelineFlags::None);
+        }
+
         cmdBuffer->BindGraphicsPipeline(pipeline);
 
         // Bind Global Set (Set 0)
