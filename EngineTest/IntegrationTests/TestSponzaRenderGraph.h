@@ -12,6 +12,7 @@
 #include "Graphics/SceneDataAdapter.h"
 #include "Engine/Platform/Platform.h"
 #include "ShaderCompilation.h"
+#include "Engine/Graphics/RHI/Components/RHICamera.h"
 
 #include <unordered_map>
 #include <string>
@@ -133,6 +134,10 @@ private:
     primal::graphics::rhi::DescriptorSetHandle taaDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
     primal::graphics::rhi::SamplerHandle taaSampler = primal::graphics::rhi::handles::INVALID_SAMPLER;
     primal::graphics::rhi::ResourceHandle taaUniformBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
+
+    // Camera
+    primal::graphics::rhi::RHICamera m_camera;
+    std::chrono::steady_clock::time_point lastFrameTime;
 
     // Helper Functions
     bool CreateUniformBuffers();

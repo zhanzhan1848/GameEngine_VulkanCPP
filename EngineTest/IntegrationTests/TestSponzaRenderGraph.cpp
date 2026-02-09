@@ -291,6 +291,12 @@ bool TestSponzaRenderGraph::Initialize() {
     // 10. Initialize TAA Resources
     // historyTexture is already created in CreateUniformBuffers
     
+    // Initialize Camera
+    // Position matches original "eye", Rotation 0,0,0 means Forward along +X (matches original "center" {10,5,0})
+    m_camera.Initialize({0.0f, 5.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
+    m_camera.SetSpeed(10.0f, 0.1f);
+    lastFrameTime = std::chrono::steady_clock::now();
+
     return true;
 }
 
@@ -1706,36 +1712,18 @@ void UpdateBuffer(RHIDeviceBase* device, ResourceHandle buffer, const void* data
 
 void TestSponzaRenderGraph::UpdateScene() {
     // 1. Update Camera (ViewData)
-    // Adjust camera to a wider view to find the model
-    // Sponza Bounds: X[-19, 18], Y[-1, 14], Z[-11, 11]. Center approx (0, 6, 0).
-    // Try center view looking along X axis
-    // Move Camera to a better spot
-    // Center Atrium, looking down the hall (Z-axis in Sponza)
-    // Sponza is aligned with X axis usually.
-    // Let's try to stand in the middle and look towards X+ or X-
-    primal::math::v3 eye = {0.0f, 5.0f, 0.0f}; // Center
-    // Look along X axis (Sponza Atrium)
-    primal::math::v3 center = {10.0f, 5.0f, 0.0f}; 
-    primal::math::v3 up = {0.0f, 1.0f, 0.0f};
     
-    // Manual LookAt Implementation (RHS) to ensure correctness
-    // Forward (z) = normalize(center - eye) -> This is actually -Z in Camera Space
-    // In RHS, Camera looks down -Z. So Forward vector is -Z.
-    // Z (Basis) = -Forward = normalize(eye - center).
+    // Calculate Delta Time
+    auto currentTime = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(currentTime - lastFrameTime).count();
+    lastFrameTime = currentTime;
+
+    // Update Camera
+    m_camera.Update(dt);
+
+    primal::math::m4x4 view = m_camera.GetViewMatrix();
+    primal::math::v3 eye = m_camera.GetPosition();
     
-    primal::math::v3 f = primal::graphics::rhi::math::Normalize(center - eye); // Direction to Target
-    primal::math::v3 s = primal::graphics::rhi::math::Normalize(primal::graphics::rhi::math::Cross(f, up)); // Right
-    primal::math::v3 u = primal::graphics::rhi::math::Cross(s, f); // Real Up
-    
-    primal::math::m4x4 view = primal::graphics::rhi::math::MatrixIdentity();
-    view.columns[0][0] = s.x; view.columns[1][0] = s.y; view.columns[2][0] = s.z;
-    view.columns[0][1] = u.x; view.columns[1][1] = u.y; view.columns[2][1] = u.z;
-    view.columns[0][2] = -f.x; view.columns[1][2] = -f.y; view.columns[2][2] = -f.z;
-    view.columns[3][0] = -primal::graphics::rhi::math::Dot(s, eye);
-    view.columns[3][1] = -primal::graphics::rhi::math::Dot(u, eye);
-    view.columns[3][2] = primal::graphics::rhi::math::Dot(f, eye);
-        
-    // primal::math::m4x4 view = primal::graphics::rhi::math::CreateLookAtMatrix(eye, center, up);
     float aspect = (float)renderWidth / (float)renderHeight;
     primal::math::m4x4 proj = primal::graphics::rhi::math::CreatePerspectiveMatrix(45.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD, aspect, 0.1f, 10000.0f);
     
@@ -1794,7 +1782,7 @@ void TestSponzaRenderGraph::UpdateScene() {
     if (frameCount == 1) {
         std::cout << "DEBUG: Frame " << frameCount << " Camera Info:" << std::endl;
         std::cout << "  Eye: " << eye.x << ", " << eye.y << ", " << eye.z << std::endl;
-        std::cout << "  Center: " << center.x << ", " << center.y << ", " << center.z << std::endl;
+        // std::cout << "  Center: " << center.x << ", " << center.y << ", " << center.z << std::endl;
         std::cout << "DEBUG: ViewProjection Matrix:" << std::endl;
         for (int i = 0; i < 4; ++i) {
             std::cout << "  Row " << i << ": " 
