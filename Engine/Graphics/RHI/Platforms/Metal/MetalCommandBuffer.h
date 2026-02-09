@@ -78,6 +78,8 @@ public:
                            const DescriptorSetHandle* descriptorSets,
                            uint32_t dynamicOffsetCount,
                            const uint32_t* dynamicOffsets) override;
+    void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
+                      uint32_t offset, uint32_t size, const void* pValues) override;
     void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override;
     void Draw(uint32_t vertexCount, uint32_t startVertex, uint32_t instanceCount, uint32_t startInstance) override;
     void DrawIndexed(uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex, uint32_t instanceCount, uint32_t startInstance) override;
@@ -90,6 +92,8 @@ public:
     
     // Metal 特有扩展
     void BindComputeBuffers(uint32_t firstSlot, uint32_t slotCount, const ResourceHandle* buffers, const uint64_t* offsets);
+
+    MTL::RenderCommandEncoder* GetCurrentRenderEncoder() const { return (MTL::RenderCommandEncoder*)currentEncoder_; }
 
     // === 资源命令 ===
     void CopyBuffer(ResourceHandle src, ResourceHandle dst, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) override;

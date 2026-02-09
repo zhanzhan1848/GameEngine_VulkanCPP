@@ -125,6 +125,10 @@ public:
         std::unique_lock<std::shared_mutex> lock(_mutex);
         uint32_t id = _pool.add(std::forward<Args>(args)...);
         
+        if (sizeof(T) == 232) { // Trace MetalCommandBuffer
+             printf("Allocator Alloc: id=%u, T size=%zu\n", id, sizeof(T));
+        }
+
         // 如果是 RHIResource 的子类，自动设置 Handle
         if constexpr (std::is_base_of_v<RHIResource, T>) {
             _pool[id].SetHandle(ResourceHandle(id));
@@ -200,6 +204,10 @@ private:
         // 简单的范围检查
         if (id >= _pool.capacity()) return;
         
+        if (sizeof(T) == 232) { // Trace MetalCommandBuffer
+             printf("Allocator Free: id=%u, T size=%zu\n", id, sizeof(T));
+        }
+
         _pool.remove(id);
         _stats.totalFreed++;
         _stats.activeAllocations--;

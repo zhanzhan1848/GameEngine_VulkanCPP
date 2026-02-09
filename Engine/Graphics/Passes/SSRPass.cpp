@@ -87,11 +87,13 @@ bool SSRPass::Initialize(rhi::RHIDeviceBase* device) {
     // 4. Create Resources per frame
     for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         // Param Buffer
-        rhi::BufferDesc paramDesc;
-        paramDesc.size = sizeof(SSRParams);
-        paramDesc.type = rhi::BufferType::Constant;
-        paramDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-        paramDesc.bindFlags = (uint32_t)rhi::ResourceUsage::ConstantBuffer;
+        rhi::BufferDesc paramDesc{
+            sizeof(SSRParams),
+            rhi::BufferType::Constant,
+            rhi::GPUMemoryUsage::Dynamic,
+            rhi::GPUMemoryUsage::Dynamic,
+            0
+        };
         
         paramBuffer_[i] = device_->CreateBuffer(paramDesc);
         paramBufferMapped_[i] = device_->MapBuffer(paramBuffer_[i]);

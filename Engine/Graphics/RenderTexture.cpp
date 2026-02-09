@@ -86,11 +86,13 @@ bool RenderTexture::UploadDataAsync(rhi::RHIDeviceBase* device, const void* data
     if (!device || !IsValid() || !data || size == 0) return false;
 
     // 1. Create Staging Buffer
-    rhi::BufferDesc bufDesc;
-    bufDesc.size = size;
-    bufDesc.type = rhi::BufferType::Unknown; // Generic buffer, used for transfer
-    bufDesc.usage = rhi::GPUMemoryUsage::Staging; 
-    bufDesc.bindFlags = 0; // Not bound to pipeline
+    rhi::BufferDesc bufDesc{
+        size,
+        rhi::BufferType::Unknown, // Generic buffer, used for transfer
+        rhi::GPUMemoryUsage::Staging, 
+        rhi::GPUMemoryUsage::Staging,
+        0,
+    };
     
     rhi::ResourceHandle stagingBuffer = device->CreateBuffer(bufDesc);
     if (stagingBuffer == rhi::handles::INVALID_RESOURCE) return false;
@@ -169,10 +171,13 @@ bool RenderTexture::ReadBack(rhi::RHIDeviceBase* device, void* data, uint64_t si
     if (!device || !IsValid() || !data || size == 0) return false;
     
     // 1. Create Readback Buffer
-    rhi::BufferDesc bufDesc;
-    bufDesc.size = size;
-    bufDesc.type = rhi::BufferType::Unknown;
-    bufDesc.usage = rhi::GPUMemoryUsage::Readback;
+    rhi::BufferDesc bufDesc{
+        size,
+        rhi::BufferType::Unknown,
+        rhi::GPUMemoryUsage::Readback,
+        rhi::GPUMemoryUsage::Readback,
+        0,
+    };
     
     rhi::ResourceHandle readbackBuffer = device->CreateBuffer(bufDesc);
     if (readbackBuffer == rhi::handles::INVALID_RESOURCE) return false;
@@ -187,15 +192,12 @@ bool RenderTexture::ReadBack(rhi::RHIDeviceBase* device, void* data, uint64_t si
     
     cmd->Begin();
     
-    rhi::BufferTextureCopyRegion region;
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = {0, 0, 0};
-    region.imageExtent = {desc_.size.x, desc_.size.y, desc_.size.z};
+    rhi::BufferTextureCopyRegion region{
+        0, 0, 0,
+        { 0, 0, 1 },
+        rhi::Offset3D{0, 0, 0},
+        rhi::Extent3D{ desc_.size.x, desc_.size.y, desc_.size.z },
+    };
     
     cmd->CopyTextureToBuffer(textureHandle_, readbackBuffer, &region, 1);
     
@@ -236,23 +238,16 @@ bool RenderTexture::GenerateMipmaps(rhi::RHIDeviceBase* device) {
     int32_t depth = desc_.size.z;
     
     for (uint32_t i = 0; i < desc_.mipLevels - 1; ++i) {
-        rhi::TextureBlitRegion region;
-        region.srcSubresource.mipLevel = i;
-        region.srcSubresource.baseArrayLayer = 0;
-        region.srcSubresource.layerCount = 1;
-        region.srcOffsets[0] = {0, 0, 0};
-        region.srcOffsets[1] = {width, height, depth};
-        
         // Next level dims
         int32_t nextWidth = std::max(1, width / 2);
         int32_t nextHeight = std::max(1, height / 2);
         int32_t nextDepth = std::max(1, depth / 2);
-        
-        region.dstSubresource.mipLevel = i + 1;
-        region.dstSubresource.baseArrayLayer = 0;
-        region.dstSubresource.layerCount = 1;
-        region.dstOffsets[0] = {0, 0, 0};
-        region.dstOffsets[1] = {nextWidth, nextHeight, nextDepth};
+        rhi::TextureBlitRegion region{
+            .srcSubresource = {i, 0, 1},
+            .dstSubresource = {i + 1, 0, 1},
+            .srcOffsets = {rhi::Offset3D{0, 0, 0}, rhi::Offset3D{width, height, depth}},
+            .dstOffsets = {rhi::Offset3D{0, 0, 0}, rhi::Offset3D{nextWidth, nextHeight, nextDepth}},
+        };
         
         // Blit
         cmd->BlitTexture(textureHandle_, textureHandle_, &region, 1, rhi::FilterMode::Linear);

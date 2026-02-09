@@ -95,11 +95,13 @@ bool MaterialInstance::Initialize(rhi::RHIDeviceBase* device) {
     // 1. Create Uniform Buffers if needed
     u32 blockSize = material_->GetUniformBlockSize();
     if (blockSize > 0) {
-        rhi::BufferDesc bufferDesc;
-        bufferDesc.size = blockSize;
-        bufferDesc.type = rhi::BufferType::Constant;
-        bufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-        bufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
+        rhi::BufferDesc bufferDesc{
+            blockSize,
+            rhi::BufferType::Constant,
+            rhi::GPUMemoryUsage::Dynamic,
+            rhi::GPUMemoryUsage::Dynamic,
+            
+        };
         
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             uniformBuffers_[i] = device->CreateBuffer(bufferDesc);

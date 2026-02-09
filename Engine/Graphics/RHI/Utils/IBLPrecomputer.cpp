@@ -46,10 +46,29 @@ namespace {
         }
         includedFiles.insert(filename);
 
-        std::string path = "Engine/Graphics/RHI/Shaders/" + filename;
-        std::ifstream file(path);
-        if (!file.is_open()) {
-            std::cerr << "[IBLPrecomputer] Failed to open shader file: " << path << std::endl;
+        std::vector<std::string> searchPaths = {
+            "shaders/",
+            "Engine/Graphics/RHI/Shaders/",
+            "../Engine/Graphics/RHI/Shaders/",
+            "../../Engine/Graphics/RHI/Shaders/" // Just in case deeper in build dir
+        };
+
+        std::string path;
+        std::ifstream file;
+        bool found = false;
+
+        for (const auto& prefix : searchPaths) {
+            path = prefix + filename;
+            file.open(path);
+            if (file.is_open()) {
+                found = true;
+                break;
+            }
+            file.clear();
+        }
+
+        if (!found) {
+            std::cerr << "[IBLPrecomputer] Failed to open shader file: " << filename << std::endl;
             return "";
         }
         
@@ -262,12 +281,13 @@ ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, uint3
         tempTextures.push_back(faceView);
         
         // Create Params Buffer
-        BufferDesc bufDesc;
-        bufDesc.size = sizeof(IrradianceParams);
-        bufDesc.type = BufferType::Constant;
-        bufDesc.usage = GPUMemoryUsage::Dynamic;
-        bufDesc.bindFlags = static_cast<uint32_t>(BufferUsageFlags::Uniform);
-        bufDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        BufferDesc bufDesc{
+            sizeof(IrradianceParams),
+            BufferType::Constant,
+            GPUMemoryUsage::Dynamic,
+            GPUMemoryUsage::Dynamic,
+            static_cast<uint32_t>(BufferUsageFlags::Uniform)
+        };
         ResourceHandle paramBuffer = device_->CreateBuffer(bufDesc);
         tempBuffers.push_back(paramBuffer);
         
@@ -418,12 +438,13 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
             ResourceHandle faceView = device_->CreateTextureView(viewDesc);
             tempTextures.push_back(faceView);
             
-            BufferDesc bufDesc;
-            bufDesc.size = sizeof(PrefilterParams);
-            bufDesc.type = BufferType::Constant;
-            bufDesc.usage = GPUMemoryUsage::Dynamic;
-            bufDesc.bindFlags = static_cast<uint32_t>(BufferUsageFlags::Uniform);
-            bufDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            BufferDesc bufDesc{
+                sizeof(PrefilterParams),
+                BufferType::Constant,
+                GPUMemoryUsage::Dynamic,
+                GPUMemoryUsage::Dynamic,
+                static_cast<uint32_t>(BufferUsageFlags::Uniform)
+            };
             ResourceHandle paramBuffer = device_->CreateBuffer(bufDesc);
             tempBuffers.push_back(paramBuffer);
             

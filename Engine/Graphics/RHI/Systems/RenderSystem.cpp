@@ -105,18 +105,23 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
 }
 
 void RenderSystem::Shutdown() {
+    std::cout << "[RenderSystem] Shutdown Start" << std::endl;
     forwardRenderer_.Shutdown();
+    std::cout << "[RenderSystem] ForwardRenderer Shutdown Done" << std::endl;
 
     if (depthStencilTexture_ != rhi::handles::INVALID_RESOURCE) {
+        std::cout << "[RenderSystem] Destroying DepthStencilTexture" << std::endl;
         device_->DestroyTexture(depthStencilTexture_);
         depthStencilTexture_ = rhi::handles::INVALID_RESOURCE;
     }
 
     if (swapChain_) {
+        std::cout << "[RenderSystem] Destroying SwapChain" << std::endl;
         device_->DestroySwapChain(swapChain_);
         swapChain_ = nullptr;
     }
     
+    std::cout << "[RenderSystem] Destroying CommandBuffers" << std::endl;
     for (uint32_t i = 0; i < cmdBuffers_.size(); ++i) {
         if (cmdBuffers_[i]) {
             cmdBuffers_[i]->Destroy();
@@ -127,12 +132,14 @@ void RenderSystem::Shutdown() {
     cmdBufferHandles_.clear();
     cmdBuffers_.clear();
 
+    std::cout << "[RenderSystem] Destroying Fences" << std::endl;
     for (auto fence : frameFences_) {
         device_->DestroySync(fence);
     }
     frameFences_.clear();
 
     device_ = nullptr;
+    std::cout << "[RenderSystem] Shutdown End" << std::endl;
 }
 
 void RenderSystem::RegisterMaterialInstance(id::id_type id, std::shared_ptr<MaterialInstance> materialInstance) {

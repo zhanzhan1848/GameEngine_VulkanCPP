@@ -83,13 +83,20 @@ namespace primal::graphics::rhi::metal {
         // -1 = a*1080 + 1 => a = -2/1080
         // scale = -2 / (bottom - top) = 2 / (top - bottom)
         
-        float zScale = 1.0f / fsn;
-        float xOffset = -ral / rsl;
-        float yOffset = -tab / (top - bottom); // (0+1080)/(0-1080) * 2 ? No.
-        // b = -(top+bottom)/(top-bottom) ?
-        // if top=0, bottom=H. -(H)/(-H) = 1. Correct.
+        // 如果 View Space 是 Right-Handed (Z向屏幕外), 物体在 -Z 方向 (Negative Z)
+        // 我们希望映射 [-near, -far] 到 [0, 1] (Metal Depth)
+        // 0 = A * (-near) + B
+        // 1 = A * (-far) + B
+        // B = A * near
+        // 1 = A * (-far) + A * near = A * (near - far)
+        // A = 1 / (near - far) = -1 / (far - near)
+        // B = near / (near - far) = -near / (far - near)
         
+        float zScale = -1.0f / fsn; 
         float zOffset = -near / fsn;
+
+        float xOffset = -(right + left) / rsl;
+        float yOffset = -(top + bottom) / (top - bottom);
 
         simd::float4 col0 = { xScale, 0.0f, 0.0f, 0.0f };
         simd::float4 col1 = { 0.0f, yScale, 0.0f, 0.0f };
@@ -103,7 +110,7 @@ namespace primal::graphics::rhi::metal {
      * @brief LookAt矩阵 (右手系)
      */
     inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& center, const v3& up) {
-        v3 zaxis = simd::normalize(center - eye); // Forward (Right Hand: Camera looks -Z, so Forward is -Z?)
+        // v3 zaxis = simd::normalize(center - eye); // Forward (Right Hand: Camera looks -Z, so Forward is -Z?)
         // RH LookAt: usually Camera looks at -Z. 
         // So Forward vector (eye to center) is -Z direction.
         // zaxis (base) = normalize(eye - center)

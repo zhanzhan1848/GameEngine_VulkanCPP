@@ -35,6 +35,10 @@
 #define TEST_MULTIVIEW 0
 #endif
 
+#ifndef TEST_SPONZA_RENDERGRAPH
+#define TEST_SPONZA_RENDERGRAPH 1
+#endif
+
 class Test
 {
 public:

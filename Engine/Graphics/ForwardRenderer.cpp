@@ -44,7 +44,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     device_ = device;
 
     // 1. Create Light Buffers
-    rhi::BufferDesc lightBufferDesc;
+    rhi::BufferDesc lightBufferDesc{};
     lightBufferDesc.size = sizeof(rhi::ForwardLightBuffer);
     lightBufferDesc.type = rhi::BufferType::Constant;
     lightBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
@@ -52,7 +52,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     lightBufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
 
     // 2. Create Frame Buffers (GlobalShaderData)
-    rhi::BufferDesc frameBufferDesc;
+    rhi::BufferDesc frameBufferDesc{};
     frameBufferDesc.size = sizeof(rhi::GlobalShaderData);
     frameBufferDesc.type = rhi::BufferType::Constant;
     frameBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
@@ -60,7 +60,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     frameBufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
 
     // 3. Create Per-Object Buffers
-    rhi::BufferDesc perObjectBufferDesc;
+    rhi::BufferDesc perObjectBufferDesc{};
     perObjectBufferDesc.size = MAX_PER_OBJECT_SIZE;
     perObjectBufferDesc.type = rhi::BufferType::Constant; // Using Dynamic Offset
     perObjectBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
@@ -130,29 +130,31 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 
     // 6. Create Shadow Map Resources
     // Shared Depth Buffer (Transient for Shadow Passes)
-    rhi::TextureDesc shadowDepthDesc{};
-    shadowDepthDesc.size = {2048, 2048, 1};
-    shadowDepthDesc.mipLevels = 1;
-    shadowDepthDesc.arraySize = 1;
-    shadowDepthDesc.format = rhi::DataFormat::D32_Float;
-    shadowDepthDesc.type = rhi::TextureType::Texture2D;
-    shadowDepthDesc.usage = rhi::TextureUsage::DepthStencil; // Only for depth test, not sampled
-    shadowDepthDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
-    shadowDepthDesc.name = "ShadowDepthBuffer";
+    rhi::TextureDesc shadowDepthDesc{
+        { 2048, 2048, 1 },
+        1,
+        1,
+        rhi::DataFormat::D32_Float,
+        rhi::TextureType::Texture2D,
+        rhi::TextureUsage::DepthStencil, // Only for depth test, not sampled
+        rhi::GPUMemoryUsage::Static,
+        "ShadowDepthBuffer"
+    };
     
     shadowDepthBuffer_ = device->CreateTexture(shadowDepthDesc);
     if (shadowDepthBuffer_ == rhi::handles::INVALID_RESOURCE) return false;
 
     // Shadow Map Array (VSM Color Target: Depth, Depth^2)
-    rhi::TextureDesc shadowMapDesc{};
-    shadowMapDesc.size = {2048, 2048, 1};
-    shadowMapDesc.arraySize = SHADOW_MAP_ARRAY_SIZE; // Cascades + Spot Shadows
-    shadowMapDesc.mipLevels = 1;
-    shadowMapDesc.format = rhi::DataFormat::RG32_Float;
-    shadowMapDesc.type = rhi::TextureType::Texture2DArray;
-    shadowMapDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
-    shadowMapDesc.memoryUsage = rhi::GPUMemoryUsage::Static; // GPU Only
-    shadowMapDesc.name = "ShadowMapArray";
+    rhi::TextureDesc shadowMapDesc{
+        { 2048, 2048, 1 },
+        1,
+        SHADOW_MAP_ARRAY_SIZE, // Cascades + Spot Shadows
+        rhi::DataFormat::RG32_Float,
+        rhi::TextureType::Texture2DArray,
+        rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess,
+        rhi::GPUMemoryUsage::Static, // GPU Only
+        "ShadowMapArray"
+    };
     
     shadowMapArray_ = device->CreateTexture(shadowMapDesc);
     if (shadowMapArray_ == rhi::handles::INVALID_RESOURCE) return false;
@@ -163,15 +165,16 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     if (shadowMapTempArray_ == rhi::handles::INVALID_RESOURCE) return false;
 
     // Create Shadow Cube Map Array (VSM Color Target)
-    rhi::TextureDesc shadowCubeMapDesc{};
-    shadowCubeMapDesc.size = {1024, 1024, 1}; // Point Shadows might be smaller
-    shadowCubeMapDesc.arraySize = MAX_POINT_SHADOWS * 6; // Total faces
-    shadowCubeMapDesc.mipLevels = 1;
-    shadowCubeMapDesc.format = rhi::DataFormat::RG32_Float;
-    shadowCubeMapDesc.type = rhi::TextureType::TextureCubeArray;
-    shadowCubeMapDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    shadowCubeMapDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
-    shadowCubeMapDesc.name = "ShadowCubeMapArray";
+    rhi::TextureDesc shadowCubeMapDesc{
+        { 1024, 1024, 1 },
+        1,
+        MAX_POINT_SHADOWS * 6, // Total faces
+        rhi::DataFormat::RG32_Float,
+        rhi::TextureType::TextureCubeArray,
+        rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource,
+        rhi::GPUMemoryUsage::Static,
+        "ShadowCubeMapArray"
+    };
 
     shadowCubeMapArray_ = device->CreateTexture(shadowCubeMapDesc);
     if (shadowCubeMapArray_ == rhi::handles::INVALID_RESOURCE) return false;
@@ -434,11 +437,16 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
         
         // 1. Create Resources if needed
         if (res.texture == rhi::handles::INVALID_RESOURCE) {
-             rhi::TextureDesc desc;
-             desc.size = {1024, 1024, 1}; // Fixed size for reflection
-             desc.format = rhi::DataFormat::BGRA8_UNorm;
-             desc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-             desc.name = "ReflectionTexture";
+             rhi::TextureDesc desc{
+                 { 1024, 1024, 1 },
+                 1,
+                 1,
+                 rhi::DataFormat::BGRA8_UNorm,
+                 rhi::TextureType::Texture2D,
+                 rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource,
+                 rhi::GPUMemoryUsage::Static,
+                 "ReflectionTexture"
+             };
              res.texture = device_->CreateTexture(desc);
 
              desc.format = rhi::DataFormat::D32_Float;
@@ -467,14 +475,14 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
         reflectionView.SetViewMatrix(reflectionViewMat);
         reflectionView.SetProjectionMatrix(mainView.GetProjectionMatrix());
         
-        rhi::ViewportDesc viewport{};
+        rhi::ViewportDesc viewport;
         viewport.topLeft = {0.0f, 0.0f};
         viewport.size = {1024.0f, 1024.0f};
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
         reflectionView.SetViewport(viewport);
         
-        rhi::Rect scissor{};
+        rhi::Rect scissor;
         scissor.offset = {0, 0};
         scissor.extent = {1024, 1024};
         reflectionView.SetScissor(scissor);
@@ -484,7 +492,7 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
         
         // 3. Prepare Global Data
         if (res.frameBuffer == rhi::handles::INVALID_RESOURCE) {
-            rhi::BufferDesc bDesc;
+            rhi::BufferDesc bDesc{};
             bDesc.size = sizeof(rhi::GlobalShaderData);
             bDesc.type = rhi::BufferType::Constant;
             bDesc.usage = rhi::GPUMemoryUsage::Dynamic;
@@ -574,12 +582,12 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
         passDesc.colorAttachments[0].texture = res.texture;
         passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
         passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
-        passDesc.colorAttachments[0].clearValue = rhi::ClearValue(0.1f, 0.1f, 0.1f, 1.0f);
+        passDesc.colorAttachments[0].clearValue = rhi::ClearValue{ math::v4{ 0.1f, 0.1f, 0.1f, 1.0f } };
         
         passDesc.depthAttachment.texture = res.depth;
         passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
         passDesc.depthAttachment.storeOp = rhi::StoreAction::DontCare;
-        passDesc.depthAttachment.clearValue = rhi::ClearValue(1.0f, 0);
+        passDesc.depthAttachment.clearValue = rhi::ClearValue{ math::v4{ 1.0f, 0.0f, 0.0f, 1.0f } };
         
         cmdBuffer->BeginRenderPass(passDesc);
         cmdBuffer->SetViewport(viewport);
@@ -630,13 +638,13 @@ void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     passDesc.colorAttachments[0].texture = shadowMap;
     passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear; 
     passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
-    passDesc.colorAttachments[0].clearValue = rhi::ClearValue(1.0f, 1.0f, 1.0f, 1.0f);
+    passDesc.colorAttachments[0].clearValue = rhi::ClearValue{ math::v4{ 1.0f, 1.0f, 1.0f, 1.0f } };
     passDesc.colorAttachments[0].arrayLayer = static_cast<uint16_t>(cascadeIndex);
 
     passDesc.depthAttachment.texture = shadowDepthBuffer_;
     passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear; 
     passDesc.depthAttachment.storeOp = rhi::StoreAction::DontCare;
-    passDesc.depthAttachment.clearValue = rhi::ClearValue(1.0f, 0);
+    passDesc.depthAttachment.clearValue = rhi::ClearValue{ math::v4{ 1.0f, 0.0f } };
     passDesc.depthAttachment.arrayLayer = 0;
 
     cmdBuffer->BeginRenderPass(passDesc);
@@ -944,7 +952,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     passDesc.colorAttachments[0].texture = renderTarget;
     passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
     passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
-    passDesc.colorAttachments[0].clearValue = rhi::ClearValue(0.1f, 0.1f, 0.1f, 1.0f); 
+    passDesc.colorAttachments[0].clearValue = rhi::ClearValue{ math::v4{ 0.1f, 0.1f, 0.1f, 1.0f } }; 
 
     if (depthStencil != rhi::handles::INVALID_RESOURCE) {
         passDesc.depthAttachment.texture = depthStencil;
@@ -955,14 +963,14 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     // std::cout << "ForwardRenderer: Beginning Main RenderPass (Opaque)" << std::endl;
     cmdBuffer->BeginRenderPass(passDesc);
 
-    rhi::ViewportDesc viewport{};
+    rhi::ViewportDesc viewport;
     viewport.topLeft = {0.0f, 0.0f};
     viewport.size = {static_cast<float>(width), static_cast<float>(height)};
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     cmdBuffer->SetViewport(viewport);
 
-    rhi::Rect scissor{};
+    rhi::Rect scissor;
     scissor.offset = {0, 0};
     scissor.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
     cmdBuffer->SetScissor(scissor);
@@ -975,11 +983,16 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 
     // 4. SSR Pass
     if (ssrOutput_ == rhi::handles::INVALID_RESOURCE) {
-        rhi::TextureDesc desc;
-        desc.size = {width, height, 1};
-        desc.format = rhi::DataFormat::RGBA16_Float;
-        desc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
-        desc.name = "SSROutput";
+        rhi::TextureDesc desc{
+            {width, height, 1},
+            1,
+            1,
+            rhi::DataFormat::RGBA16_Float,
+            rhi::TextureType::Texture2D,
+            rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess,
+            rhi::GPUMemoryUsage::Static,
+            "SSROutput"
+        };
         ssrOutput_ = device_->CreateTexture(desc);
         
         rhi::DescriptorSetDesc dsDesc;
@@ -1063,20 +1076,14 @@ void ForwardRenderer::DepthPrePass(rhi::RHICommandBuffer* cmdBuffer,
     passDesc.depthAttachment.texture = depthStencil;
     passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
     passDesc.depthAttachment.storeOp = rhi::StoreAction::Store;
-    passDesc.depthAttachment.clearValue = rhi::ClearValue(1.0f, 0);
+    passDesc.depthAttachment.clearValue = rhi::ClearValue{ math::v4{ 1.0f, 0.0f, 0.0f, 1.0f } };
 
     cmdBuffer->BeginRenderPass(passDesc);
 
-    rhi::ViewportDesc viewport{};
-    viewport.topLeft = {0.0f, 0.0f};
-    viewport.size = {static_cast<float>(width), static_cast<float>(height)};
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
+    rhi::ViewportDesc viewport{ {0.0f, 0.0f}, {static_cast<float>(width), static_cast<float>(height)}, 0.0f, 1.0f };
     cmdBuffer->SetViewport(viewport);
 
-    rhi::Rect scissor{};
-    scissor.offset = {0, 0};
-    scissor.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    rhi::Rect scissor{{0, 0}, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}};
     cmdBuffer->SetScissor(scissor);
 
     // Bind Global Set (Set 0)

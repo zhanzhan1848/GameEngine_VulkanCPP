@@ -349,7 +349,7 @@ using namespace primal::graphics::metal::shader;
 	namespace
 	{
 		// constexpr const char* shaders_source_path{ "../../Engine/Graphics/Metal/shaders/" };
-		constexpr const char* shaders_source_path{ "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/" };
+		constexpr const char* shaders_source_path{ "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/" };
 
 		struct engine_shader_info
 		{

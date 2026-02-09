@@ -109,12 +109,10 @@ void RenderGraphDebug::CreatePipeline() {
         desc.vertexShader = CreateShaderFromSource(device_, source, rhi::ShaderStage::Vertex, "debug_vs");
         desc.pixelShader = CreateShaderFromSource(device_, source, rhi::ShaderStage::Pixel, "debug_fs");
         
-        desc.vertexAttributes.resize(2);
-        desc.vertexAttributes[0] = {0, 0, rhi::DataFormat::RG32_Float, 0}; // Position
-        desc.vertexAttributes[1] = {1, 0, rhi::DataFormat::RGBA32_Float, 8}; // Color
+        desc.vertexAttributes.emplace_back(VertexInputAttribute{0, 0, rhi::DataFormat::RG32_Float, 0}); // Position
+        desc.vertexAttributes.emplace_back(VertexInputAttribute{1, 0, rhi::DataFormat::RGBA32_Float, 8}); // Color
         
-        desc.vertexBindings.resize(1);
-        desc.vertexBindings[0] = {0, sizeof(Vertex), true};
+        desc.vertexBindings.emplace_back(VertexInputBinding{0, sizeof(Vertex), true});
         
         desc.enableBlend = true;
         desc.srcColorBlendFactor = rhi::BlendFactor::SrcAlpha;
@@ -170,13 +168,11 @@ void RenderGraphDebug::CreatePipeline() {
         desc.vertexShader = CreateShaderFromSource(device_, source, rhi::ShaderStage::Vertex, "debug_texture_vs");
         desc.pixelShader = CreateShaderFromSource(device_, source, rhi::ShaderStage::Pixel, "debug_texture_fs");
         
-        desc.vertexAttributes.resize(3);
-        desc.vertexAttributes[0] = {0, 0, rhi::DataFormat::RG32_Float, 0}; // Position
-        desc.vertexAttributes[1] = {1, 0, rhi::DataFormat::RG32_Float, 8}; // UV
-        desc.vertexAttributes[2] = {2, 0, rhi::DataFormat::R32_Float, 16}; // Type
+        desc.vertexAttributes.emplace_back(VertexInputAttribute{0, 0, rhi::DataFormat::RG32_Float, 0}); // Position
+        desc.vertexAttributes.emplace_back(VertexInputAttribute{1, 0, rhi::DataFormat::RG32_Float, 8}); // UV
+        desc.vertexAttributes.emplace_back(VertexInputAttribute{2, 0, rhi::DataFormat::R32_Float, 16}); // Type
         
-        desc.vertexBindings.resize(1);
-        desc.vertexBindings[0] = {0, sizeof(TextureVertex), true};
+        desc.vertexBindings.emplace_back(VertexInputBinding{0, sizeof(TextureVertex), true});
         
         desc.enableBlend = true;
         desc.srcColorBlendFactor = rhi::BlendFactor::SrcAlpha;
@@ -532,11 +528,12 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
              if (vertexBuffer_ != rhi::handles::INVALID_RESOURCE) {
                 device_.DestroyBuffer(vertexBuffer_);
             }
-            rhi::BufferDesc vDesc;
-            vDesc.size = requiredSize;
-            vDesc.type = rhi::BufferType::Vertex;
-            vDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-            vDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic; // Dynamic
+            rhi::BufferDesc vDesc{
+                .size = requiredSize,
+                .type = rhi::BufferType::Vertex,
+                .usage = rhi::GPUMemoryUsage::Dynamic,
+                .memoryUsage = rhi::GPUMemoryUsage::Dynamic, // Dynamic
+            };
             vertexBuffer_ = device_.CreateBuffer(vDesc);
             vertexBufferSize_ = requiredSize;
         }
@@ -557,11 +554,12 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
         
         // Uniform Buffer
         if (uniformBuffer_ == rhi::handles::INVALID_RESOURCE) {
-            rhi::BufferDesc uDesc;
-            uDesc.size = sizeof(DebugUniforms);
-            uDesc.type = rhi::BufferType::Constant;
-            uDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-            uDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+            rhi::BufferDesc uDesc{
+                .size = sizeof(DebugUniforms),
+                .type = rhi::BufferType::Constant,
+                .usage = rhi::GPUMemoryUsage::Dynamic,
+                .memoryUsage = rhi::GPUMemoryUsage::Dynamic,
+            };
             uniformBuffer_ = device_.CreateBuffer(uDesc);
         }
         
@@ -689,11 +687,12 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
                 if (textureVertexBuffer_ != rhi::handles::INVALID_RESOURCE) {
                     device_.DestroyBuffer(textureVertexBuffer_);
                 }
-                rhi::BufferDesc tvDesc;
-                tvDesc.size = requiredSize;
-                tvDesc.type = rhi::BufferType::Vertex;
-                tvDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-                tvDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+                rhi::BufferDesc tvDesc{
+                    .size = requiredSize,
+                    .type = rhi::BufferType::Vertex,
+                    .usage = rhi::GPUMemoryUsage::Dynamic,
+                    .memoryUsage = rhi::GPUMemoryUsage::Dynamic,
+                };
                 textureVertexBuffer_ = device_.CreateBuffer(tvDesc);
                 textureVertexBufferSize_ = requiredSize;
             }
@@ -711,11 +710,12 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
             hudUniforms.screenSize = {static_cast<float>(width), static_cast<float>(height)};
             
             if (textureUniformBuffer_ == rhi::handles::INVALID_RESOURCE) {
-                rhi::BufferDesc huDesc;
-                huDesc.size = sizeof(DebugUniforms);
-                huDesc.type = rhi::BufferType::Constant;
-                huDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-                huDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+                rhi::BufferDesc huDesc{
+                    .size = sizeof(DebugUniforms),
+                    .type = rhi::BufferType::Constant,
+                    .usage = rhi::GPUMemoryUsage::Dynamic,
+                    .memoryUsage = rhi::GPUMemoryUsage::Dynamic,
+                };
                 textureUniformBuffer_ = device_.CreateBuffer(huDesc);
             }
             

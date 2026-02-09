@@ -71,15 +71,14 @@ fragment float4 fragmentMain(VertexOut in [[stage_in]],
     
     // 6. Blend
     // If offscreen, trust current frame 100%
-    // Otherwise, blend history and current
+    // 6. Blend
     float feedback = uniforms.feedback; // e.g. 0.95
     if (isOffScreen) feedback = 0.0;
     
-    // Reduce feedback if velocity is high (optional, helps with trailing)
-    // float speed = length(velocity * uniforms.resolution);
-    // feedback = mix(feedback, 0.8, saturate(speed / 10.0));
-    
     float3 resolved = mix(color, history, feedback);
     
+    // DEBUG: Output current frame color directly to verify input
+    // return float4(1.0, 0.0, 0.0, 1.0); // RED DEBUG
+    // return float4(color, 1.0);
     return float4(resolved, 1.0);
 }

@@ -117,12 +117,13 @@ bool RenderMesh::Create(rhi::RHIDeviceBase* device,
         // 对齐缓冲区大小到256字节，符合Metal最佳实践并避免越界警告
         uint64_t alignedSize = (indexBufferSize + 255) & ~255;
 
-        rhi::BufferDesc desc;
-        desc.size = alignedSize;
-        desc.type = rhi::BufferType::Index;
-        desc.usage = rhi::GPUMemoryUsage::Dynamic; // 使用动态内存以便调试
-        desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::IndexBuffer) | static_cast<uint32_t>(rhi::ResourceUsage::CopyDest);
+        rhi::BufferDesc desc{
+            .size = alignedSize,
+            .type = rhi::BufferType::Index,
+            .usage = rhi::GPUMemoryUsage::Dynamic, // 使用动态内存以便调试
+            .memoryUsage = rhi::GPUMemoryUsage::Dynamic,
+            .bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::IndexBuffer) | static_cast<uint32_t>(rhi::ResourceUsage::CopyDest),
+        };
         
         indexBuffer_ = device->CreateBuffer(desc);
         
@@ -165,13 +166,13 @@ void RenderMesh::SetEntityId(primal::id::id_type id) {
     Register();
 }
 
-void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount, uint32_t startInstance) {
+void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount, uint32_t startInstance, uint32_t bindingSlot) {
     if (!cmdBuffer || !IsValid()) return;
 
     // 绑定顶点缓冲区
     rhi::ResourceHandle buffers[] = { vertexBuffer_ };
     uint64_t offsets[] = { 0 };
-    cmdBuffer->BindVertexBuffers(0, 1, buffers, offsets);
+    cmdBuffer->BindVertexBuffers(bindingSlot, 1, buffers, offsets);
 
     if (indexBuffer_ != rhi::handles::INVALID_RESOURCE && indexCount_ > 0) {
         // 绑定索引缓冲区
@@ -190,12 +191,13 @@ void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount, 
 }
 
 rhi::ResourceHandle RenderMesh::CreateBuffer(rhi::RHIDeviceBase* device, const void* data, uint64_t size, rhi::BufferType type) {
-    rhi::BufferDesc desc;
-    desc.size = size;
-    desc.type = type;
-    // 优先使用静态内存以获得最佳性能
-    desc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed from Static to Dynamic for debugging
-    desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    rhi::BufferDesc desc{
+        .size = size,
+        .type = type,
+        // 优先使用静态内存以获得最佳性能
+        .usage = rhi::GPUMemoryUsage::Dynamic, // Changed from Static to Dynamic for debugging
+        .memoryUsage = rhi::GPUMemoryUsage::Dynamic,
+    };
     
     // 设置绑定标志
     desc.bindFlags = (type == rhi::BufferType::Vertex) 

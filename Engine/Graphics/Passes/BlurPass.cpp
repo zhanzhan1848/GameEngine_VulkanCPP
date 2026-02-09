@@ -99,11 +99,13 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     }
     
     // 5. Create Param Buffers
-    rhi::BufferDesc bufferDesc;
-    bufferDesc.size = MAX_PARAM_BUFFER_SIZE;
-    bufferDesc.type = rhi::BufferType::Constant;
-    bufferDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-    bufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
+    rhi::BufferDesc bufferDesc{
+        MAX_PARAM_BUFFER_SIZE,
+        rhi::BufferType::Constant,
+        rhi::GPUMemoryUsage::Dynamic,
+        rhi::GPUMemoryUsage::Dynamic,
+        0
+    };
     
     for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         paramBuffer_[i] = device_->CreateBuffer(bufferDesc);

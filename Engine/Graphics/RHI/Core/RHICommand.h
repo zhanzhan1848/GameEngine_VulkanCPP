@@ -408,6 +408,17 @@ public:
                                    const uint32_t* dynamicOffsets) = 0;
 
     /**
+     * @brief 推送常量
+     * @param layout 管线布局句柄
+     * @param stageFlags 着色器阶段
+     * @param offset 偏移量
+     * @param size 大小
+     * @param pValues 数据指针
+     */
+    virtual void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
+                              uint32_t offset, uint32_t size, const void* pValues) = 0;
+
+    /**
      * @brief 写入时间戳
      * @param queryPool 查询池句柄
      * @param queryIndex 查询索引

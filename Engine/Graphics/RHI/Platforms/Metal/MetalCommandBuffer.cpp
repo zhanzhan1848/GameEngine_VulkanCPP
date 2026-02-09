@@ -213,27 +213,22 @@ bool MetalCommandBuffer::submitImpl(uint32_t waitFlags) {
         }
     }
 
-    // Add completion handler for GPU timing
+    // Add completion handler for GPU timing - REMOVED due to Use-After-Free risk
+    // Accessing 'this' in the completion handler is unsafe because the CommandBuffer object
+    // might be destroyed/pooled before the GPU finishes execution.
+    // Timing stats will be updated in WaitForCompletion() instead.
+    /*
     if (mtlCommandBuffer_) {
-        // Capture stats_ by reference? No, RHICommandBuffer might be destroyed.
-        // Capture this? RHICommandBuffer needs to stay alive until completion.
-        // Usually CommandBuffers are pooled and not destroyed immediately.
-        // But if they are reused, stats might be overwritten.
-        // For now, assume it's safe to write to stats_ if the object is alive.
-        // To be safe, we can use a weak_ptr or similar if we had one, but we don't.
-        // We will assume the command buffer is not destroyed until completion (which is true for pooled ones usually).
-        
         MetalCommandBuffer* self = this;
          mtlCommandBuffer_->addCompletedHandler([self](MTL::CommandBuffer* buffer) {
              CFTimeInterval start = buffer->GPUStartTime();
              CFTimeInterval end = buffer->GPUEndTime();
-             // GPUStartTime/EndTime are 0 if not supported or not waited?
-             // On macOS, they should be valid.
              if (start != 0 && end != 0) {
-                  self->stats_.commandExecutionTime = (float)((end - start) * 1000.0); // Seconds to ms
+                  self->stats_.commandExecutionTime = (float)((end - start) * 1000.0);
              }
          });
      }
+    */
 
     mtlCommandBuffer_->commit();
     
@@ -244,6 +239,14 @@ bool MetalCommandBuffer::waitForCompletionImpl() {
     if (!mtlCommandBuffer_) return false;
     
     mtlCommandBuffer_->waitUntilCompleted();
+    
+    // Update execution time stats safely here
+    CFTimeInterval start = mtlCommandBuffer_->GPUStartTime();
+    CFTimeInterval end = mtlCommandBuffer_->GPUEndTime();
+    if (start != 0 && end != 0) {
+        stats_.commandExecutionTime = (float)((end - start) * 1000.0);
+    }
+    
     return true;
 }
 
@@ -954,6 +957,38 @@ void MetalCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
     if (mtlPipeline && mtlPipeline->GetComputePipelineState()) {
         encoder->setComputePipelineState(mtlPipeline->GetComputePipelineState());
         currentThreadGroupSize_ = mtlPipeline->GetThreadGroupSize();
+    }
+}
+
+void MetalCommandBuffer::PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
+                                     uint32_t offset, uint32_t size, const void* pValues) {
+    // Metal assumes push constants are passed as bytes at a reserved index (e.g. 0 or based on reflection)
+    // Since MetalPipelineLayout doesn't currently store this info, we'll try a convention or just warn.
+    // For now, let's assume index 0 for push constants if they are small enough (< 4KB).
+    // Note: This might conflict with other buffers if not managed carefully.
+    
+    // Convention: Push constants often mapped to buffer index 0 or a high index. 
+    // Without reflection data, we can't be sure.
+    // However, to satisfy the linker and provide basic functionality:
+    
+    // Only support max 4KB as per Metal set*Bytes limit
+    if (size > 4096) {
+        std::cerr << "MetalCommandBuffer::PushConstants: Size too large (" << size << ")" << std::endl;
+        return;
+    }
+    
+    if (currentEncoderType_ == EncoderType::Render) {
+        auto encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
+        if (static_cast<uint32_t>(stageFlags) & static_cast<uint32_t>(ShaderStage::Vertex)) {
+            // Assuming index 2 for now to avoid conflict with SceneData(0) and ViewData(1)
+             encoder->setVertexBytes(pValues, size, 2); 
+        }
+        if (static_cast<uint32_t>(stageFlags) & static_cast<uint32_t>(ShaderStage::Pixel)) {
+             encoder->setFragmentBytes(pValues, size, 2);
+        }
+    } else if (currentEncoderType_ == EncoderType::Compute) {
+        auto encoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
+        encoder->setBytes(pValues, size, 2);
     }
 }
 

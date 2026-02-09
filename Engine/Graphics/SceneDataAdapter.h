@@ -34,6 +34,15 @@ public:
     std::vector<SceneDataMeshInfo> Load(rhi::RHIDeviceBase* device, const void* data, uint32_t size);
 
     /**
+     * @brief 加载 RenderItem 格式的场景数据 (ContentToEngine 格式)
+     * @param device RHI设备
+     * @param data 原始数据指针
+     * @param size 数据大小
+     * @return 创建的 Mesh 信息列表
+     */
+    std::vector<SceneDataMeshInfo> LoadRenderItemData(rhi::RHIDeviceBase* device, const void* data, uint32_t size);
+
+    /**
      * @brief 预编译材质数据结构头
      */
     struct CompiledMaterialHeader {

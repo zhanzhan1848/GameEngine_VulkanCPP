@@ -2,6 +2,7 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include <algorithm>
 #include <iostream>
+#include <sstream>
 #include <stack>
 #include <unordered_set>
 
@@ -344,11 +345,13 @@ void RenderGraph::AllocateResources() {
                     // Create new
                     rhi::ResourceHandle handle = device_.CreateTexture(tex->GetDesc());
                     
-                    PooledResource pooled;
-                    pooled.handle = handle;
-                    pooled.texDesc = tex->GetDesc();
-                    pooled.isTexture = true;
-                    pooled.lastUsedFrame = currentFrame_;
+                    PooledResource pooled{
+                        handle,
+                        tex->GetDesc(),
+                        {},
+                        static_cast<uint32_t>(currentFrame_),
+                        true
+                    };
                     
                     resourcePool_.push_back(pooled);
                     poolLocked.push_back(true);
@@ -374,11 +377,13 @@ void RenderGraph::AllocateResources() {
                     // Create new
                     rhi::ResourceHandle handle = device_.CreateBuffer(buf->GetDesc());
                     
-                    PooledResource pooled;
-                    pooled.handle = handle;
-                    pooled.bufDesc = buf->GetDesc();
-                    pooled.isTexture = false;
-                    pooled.lastUsedFrame = currentFrame_;
+                    PooledResource pooled{
+                        handle,
+                        {},
+                        buf->GetDesc(),
+                        static_cast<uint32_t>(currentFrame_),
+                        false
+                    };
                     
                     resourcePool_.push_back(pooled);
                     poolLocked.push_back(true);
@@ -474,6 +479,8 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
     for (size_t i = 0; i < activePasses_.size(); ++i) {
         auto* pass = activePasses_[i];
         
+        // std::cout << "RenderGraph: Preparing Pass " << pass->GetName() << std::endl;
+
         bool hasRenderPass = pass->GetRenderPassDesc().has_value();
 
         // 1. Write Begin Timestamp
@@ -485,11 +492,13 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         // 执行 Pre-Pass Barriers
         const auto& barriers = pass->GetBarriers();
         if (!barriers.empty()) {
+            // std::cout << "RenderGraph: Inserting Barriers for " << pass->GetName() << std::endl;
             cmdBuffer->InsertBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
         }
 
         // 处理自动 RenderPass Begin/End
         if (hasRenderPass) {
+            // std::cout << "RenderGraph: BeginRenderPass for " << pass->GetName() << std::endl;
             const auto& rgDesc = pass->GetRenderPassDesc().value();
             rhi::RenderPassDesc desc;
             
@@ -521,13 +530,13 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
                 desc.depthAttachment.arrayLayer = rgDesc.depthStencil.slice;
                 desc.depthAttachment.loadOp = rgDesc.depthStencil.depthLoadOp;
                 desc.depthAttachment.storeOp = rgDesc.depthStencil.depthStoreOp;
-                desc.depthAttachment.clearValue = rhi::ClearValue(rgDesc.depthStencil.clearDepth, 0); // Depth clear value
+                desc.depthAttachment.clearValue = rhi::ClearValue{ math::v4{ static_cast<float>(rgDesc.depthStencil.clearDepth), 0.f, 0.f, 1.f } }; // Depth clear value
                 
                 desc.stencilAttachment.mipLevel = rgDesc.depthStencil.level;
                 desc.stencilAttachment.arrayLayer = rgDesc.depthStencil.slice;
                 desc.stencilAttachment.loadOp = rgDesc.depthStencil.stencilLoadOp;
                 desc.stencilAttachment.storeOp = rgDesc.depthStencil.stencilStoreOp;
-                desc.stencilAttachment.clearValue = rhi::ClearValue(1.0f, rgDesc.depthStencil.clearStencil); // Stencil clear value
+                desc.stencilAttachment.clearValue = rhi::ClearValue{ math::v4{ 1.0f, static_cast<float>(rgDesc.depthStencil.clearStencil), 0.f, 1.f } }; // Stencil clear value
             }
 
             // Set Multi-View / Layered Rendering
@@ -543,9 +552,12 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
 
             // Begin RenderPass
             cmdBuffer->BeginRenderPass(desc);
+            // std::cout << "RenderGraph: BeginRenderPass Done" << std::endl;
         }
 
+        // std::cout << "RenderGraph: Executing Pass " << pass->GetName() << std::endl;
         pass->Execute(context);
+        // std::cout << "RenderGraph: Finished Pass " << pass->GetName() << std::endl;
 
         if (hasRenderPass) {
             cmdBuffer->EndRenderPass();

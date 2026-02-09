@@ -72,8 +72,9 @@ public:
      * @param cmdBuffer 命令缓冲区指针
      * @param instanceCount 实例数量（默认1）
      * @param startInstance 起始实例（默认0）
+     * @param bindingSlot 顶点缓冲区绑定槽位（默认0）
      */
-    void Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount = 1, uint32_t startInstance = 0);
+    void Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount = 1, uint32_t startInstance = 0, uint32_t bindingSlot = 0);
 
     /**
      * @brief 设置实体ID并更新注册表
@@ -99,6 +100,12 @@ public:
      * @return 顶点数量
      */
     uint32_t GetVertexCount() const { return vertexCount_; }
+
+    /**
+     * @brief 获取顶点步长
+     * @return 顶点步长（字节）
+     */
+    uint32_t GetVertexStride() const { return vertexStride_; }
 
     /**
      * @brief 获取索引数量

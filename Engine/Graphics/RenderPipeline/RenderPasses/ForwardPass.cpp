@@ -39,7 +39,7 @@ RGResourceHandle AddPass(RenderGraph& graph, RenderScene& scene, RenderView& vie
             passDesc.colorAttachments[0].texture = rtResource->GetPhysicalHandle();
             passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
             passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
-            passDesc.colorAttachments[0].clearValue = {0.1f, 0.1f, 0.1f, 1.0f}; // Dark gray background
+            passDesc.colorAttachments[0].clearValue = rhi::ClearValue{ math::v4{ 0.1f, 0.1f, 0.1f, 1.0f } }; // Dark gray background
             
             passDesc.viewport = view.GetViewport();
             passDesc.scissor = view.GetScissor();

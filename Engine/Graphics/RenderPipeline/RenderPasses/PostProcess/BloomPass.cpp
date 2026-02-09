@@ -92,7 +92,7 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
             passDesc.colorAttachments[0].texture = texRes->GetPhysicalHandle();
             passDesc.colorAttachments[0].loadOp = LoadAction::Clear;
             passDesc.colorAttachments[0].storeOp = StoreAction::Store;
-            passDesc.colorAttachments[0].clearValue = {0,0,0,0};
+            passDesc.colorAttachments[0].clearValue = ClearValue{ math::v4{ 0.0f, 0.0f, 0.0f, 0.0f } };
 
             ViewportDesc viewport;
             viewport.size.x = (float)texRes->GetDesc().size.x;
@@ -101,7 +101,7 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
 
             cmd->BeginRenderPass(passDesc);
             cmd->SetViewport(viewport);
-            cmd->SetScissor({0, 0, (uint32_t)viewport.size.x, (uint32_t)viewport.size.y});
+            cmd->SetScissor({ { 0, 0 }, { (uint32_t)viewport.size.x, (uint32_t)viewport.size.y } });
             cmd->BindGraphicsPipeline(s_BrightPassPipeline);
             // TODO: Bind inputColor
             cmd->Draw(3, 0, 1, 0);

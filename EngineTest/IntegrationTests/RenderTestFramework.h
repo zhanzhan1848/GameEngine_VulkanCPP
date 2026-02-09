@@ -29,6 +29,11 @@ public:
     virtual void Run() = 0;
 
     /**
+     * @brief 处理窗口大小调整
+     */
+    virtual void Resize(uint32_t width, uint32_t height) {}
+
+    /**
      * @brief 清理资源
      */
     virtual void Shutdown() = 0;

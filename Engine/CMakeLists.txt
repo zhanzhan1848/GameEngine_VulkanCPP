@@ -38,6 +38,9 @@ elseif(APPLE)
         "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformMac.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputMac.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputMac.mm"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.mm"
     )
 elseif(LINUX)
     file(GLOB_RECURSE PLATFORM_SOURCES 
@@ -91,6 +94,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/PostProcess/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Visibility/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Visibility/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lighting/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lighting/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utils/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utils/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/*.h"

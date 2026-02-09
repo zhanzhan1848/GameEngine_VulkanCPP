@@ -65,7 +65,7 @@ const VisibilityPassData& AddVisibilityPass(RenderGraph& graph) {
             passDesc.colors[0].texture = data.visibilityBuffer;
             passDesc.colors[0].loadOp = LoadAction::Clear;
             passDesc.colors[0].storeOp = StoreAction::Store;
-            passDesc.colors[0].clearColor = { 0.0f, 0.0f, 0.0f, 0.0f }; // Clear ID to 0
+            passDesc.colors[0].clearColor = ClearValue{ math::v4{ 0.0f, 0.0f, 0.0f, 0.0f } }; // Clear ID to 0
             
             passDesc.depthStencil.texture = depthBuffer;
             passDesc.depthStencil.depthLoadOp = LoadAction::Clear;

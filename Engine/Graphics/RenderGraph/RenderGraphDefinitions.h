@@ -42,6 +42,7 @@ enum class RGPassCategory {
     Lighting,       // Deferred Lighting / Global Illumination (SSAO, SSGI)
     PostProcess,    // Bloom, ToneMapping, Color Grading
     UI,             // User Interface
+    Copy,           // Copy / Blit
     Present         // Final Blit
 };
 
@@ -81,7 +82,7 @@ struct RGAttachmentDesc {
     uint32_t slice = 0;
     rhi::LoadAction loadOp = rhi::LoadAction::DontCare;
     rhi::StoreAction storeOp = rhi::StoreAction::DontCare;
-    rhi::ClearValue clearColor = {0, 0, 0, 0};
+    rhi::ClearValue clearColor = {math::v4{0, 0, 0, 0}};
     
     // Depth/Stencil specific
     rhi::LoadAction depthLoadOp = rhi::LoadAction::DontCare;

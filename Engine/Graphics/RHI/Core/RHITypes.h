@@ -318,6 +318,25 @@ enum class TextureType : uint8_t {
 };
 
 /**
+ * @brief 纹理方面掩码
+ */
+enum class TextureAspect : uint8_t {
+    Unknown = 0,
+    Color = 1,          ///< 颜色分量
+    Depth = 2,          ///< 深度分量
+    Stencil = 4,        ///< 模板分量
+    Metadata = 8        ///< 元数据
+};
+
+inline TextureAspect operator|(TextureAspect a, TextureAspect b) {
+    return static_cast<TextureAspect>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
+
+inline TextureAspect operator&(TextureAspect a, TextureAspect b) {
+    return static_cast<TextureAspect>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
+}
+
+/**
  * @brief 纹理用途
  */
 enum class TextureUsage : uint32_t {
@@ -539,77 +558,58 @@ enum class DescriptorType : uint8_t {
  * @brief 描述符集布局绑定
  */
 struct DescriptorSetLayoutBinding {
-    uint32_t binding;
-    DescriptorType descriptorType;
-    uint32_t descriptorCount;
-    ShaderStage stageFlags;
-    const SamplerHandle* immutableSamplers;
-    DescriptorBindingFlags flags;
-    
-    DescriptorSetLayoutBinding() : binding(0), descriptorType(DescriptorType::Unknown), 
-                                  descriptorCount(0), stageFlags(ShaderStage::Unknown), 
-                                  immutableSamplers(nullptr), flags(DescriptorBindingFlags::None) {}
+    uint32_t binding{ 0 };
+    DescriptorType descriptorType{ DescriptorType::Unknown };
+    uint32_t descriptorCount{ 0 };
+    ShaderStage stageFlags{ ShaderStage::Unknown };
+    const SamplerHandle* immutableSamplers{ nullptr };
+    DescriptorBindingFlags flags{ DescriptorBindingFlags::None };
 };
 
 /**
  * @brief 描述符集布局描述符
  */
 struct DescriptorSetLayoutDesc {
-    uint32_t bindingCount;
-    const DescriptorSetLayoutBinding* bindings;
-    
-    DescriptorSetLayoutDesc() : bindingCount(0), bindings(nullptr) {}
+    uint32_t bindingCount{ 0 };
+    const DescriptorSetLayoutBinding* bindings{ nullptr };
 };
 
 /**
  * @brief 描述符集描述符
  */
 struct DescriptorSetDesc {
-    DescriptorSetLayoutHandle layout;
-    
-    DescriptorSetDesc() : layout(0) {}
+    DescriptorSetLayoutHandle layout{ handles::INVALID_RESOURCE };
 };
 
 /**
  * @brief 描述符图像信息
  */
 struct DescriptorImageInfo {
-    SamplerHandle sampler;
-    ResourceHandle imageView; // 纹理句柄
-    ResourceState imageLayout;
-    
-    DescriptorImageInfo() : sampler(handles::INVALID_SAMPLER), 
-                           imageView(handles::INVALID_RESOURCE), 
-                           imageLayout(ResourceState::Unknown) {}
+    SamplerHandle sampler{ handles::INVALID_SAMPLER };
+    ResourceHandle imageView{ handles::INVALID_RESOURCE }; // 纹理句柄
+    ResourceState imageLayout{ ResourceState::Unknown };
 };
 
 /**
  * @brief 描述符缓冲区信息
  */
 struct DescriptorBufferInfo {
-    ResourceHandle buffer;
-    uint64_t offset;
-    uint64_t range;
-    
-    DescriptorBufferInfo() : buffer(handles::INVALID_RESOURCE), offset(0), range(0) {}
+    ResourceHandle buffer{ handles::INVALID_RESOURCE };
+    uint64_t offset{ 0 };
+    uint64_t range{ 0 };
 };
 
 /**
  * @brief 写描述符集
  */
 struct WriteDescriptorSet {
-    DescriptorSetHandle dstSet;
-    uint32_t dstBinding;
-    uint32_t dstArrayElement;
-    uint32_t descriptorCount;
-    DescriptorType descriptorType;
-    const DescriptorImageInfo* imageInfo;
-    const DescriptorBufferInfo* bufferInfo;
-    
-    WriteDescriptorSet() : dstSet(handles::INVALID_RESOURCE), dstBinding(0), 
-                          dstArrayElement(0), descriptorCount(0), 
-                          descriptorType(DescriptorType::Unknown), 
-                          imageInfo(nullptr), bufferInfo(nullptr) {}
+    DescriptorSetHandle dstSet{ handles::INVALID_RESOURCE };
+    uint32_t dstBinding{ 0 };
+    uint32_t dstArrayElement{ 0 };
+    uint32_t descriptorCount{ 0 };
+    DescriptorType descriptorType{ DescriptorType::Unknown };
+    const DescriptorImageInfo* imageInfo{ nullptr };
+    const DescriptorBufferInfo* bufferInfo{ nullptr };
 };
 
 /**
@@ -704,7 +704,8 @@ enum class FilterMode : uint8_t {
     Unknown = 0,
     Point = 1,          ///< 点过滤
     Linear = 2,         ///< 线性过滤
-    Anisotropic = 3     ///< 各向异性过滤
+    Anisotropic = 3,    ///< 各向异性过滤
+    Nearest = 1         ///< 最近邻过滤 (Point)
 };
 
 /**
@@ -761,71 +762,54 @@ namespace constants {
  * @brief 模板操作描述符
  */
 struct StencilOpDesc {
-    StencilOp failOp;       ///< 模板测试失败操作
-    StencilOp depthFailOp;  ///< 深度测试失败操作
-    StencilOp passOp;       ///< 模板/深度测试通过操作
-    ComparisonFunc func;    ///< 比较函数
-    
-    StencilOpDesc() : failOp(StencilOp::Keep), depthFailOp(StencilOp::Keep), 
-                      passOp(StencilOp::Keep), func(ComparisonFunc::Always) {}
+    StencilOp failOp{ StencilOp::Keep };       ///< 模板测试失败操作
+    StencilOp depthFailOp{ StencilOp::Keep };  ///< 深度测试失败操作
+    StencilOp passOp{ StencilOp::Keep };       ///< 模板/深度测试通过操作
+    ComparisonFunc func{ ComparisonFunc::Always };    ///< 比较函数
 };
 
 /**
  * @brief 混合状态描述符
  */
 struct BlendState {
-    bool enableBlend;                   ///< 是否启用混合
-    BlendFactor srcColorBlendFactor;    ///< 源颜色混合因子
-    BlendFactor dstColorBlendFactor;    ///< 目标颜色混合因子
-    BlendOp colorBlendOp;               ///< 颜色混合操作
-    BlendFactor srcAlphaBlendFactor;    ///< 源Alpha混合因子
-    BlendFactor dstAlphaBlendFactor;    ///< 目标Alpha混合因子
-    BlendOp alphaBlendOp;               ///< Alpha混合操作
-    math::v4 blendConstants;            ///< 混合常量
-
-    BlendState() : enableBlend(false),
-                   srcColorBlendFactor(BlendFactor::One), dstColorBlendFactor(BlendFactor::Zero), colorBlendOp(BlendOp::Add),
-                   srcAlphaBlendFactor(BlendFactor::One), dstAlphaBlendFactor(BlendFactor::Zero), alphaBlendOp(BlendOp::Add),
-                   blendConstants{1.0f, 1.0f, 1.0f, 1.0f} {}
+    bool enableBlend{ false };                   ///< 是否启用混合
+    BlendFactor srcColorBlendFactor{ BlendFactor::One };    ///< 源颜色混合因子
+    BlendFactor dstColorBlendFactor{ BlendFactor::Zero };    ///< 目标颜色混合因子
+    BlendOp colorBlendOp{ BlendOp::Add };               ///< 颜色混合操作
+    BlendFactor srcAlphaBlendFactor{ BlendFactor::One };    ///< 源Alpha混合因子
+    BlendFactor dstAlphaBlendFactor{ BlendFactor::Zero };    ///< 目标Alpha混合因子
+    BlendOp alphaBlendOp{ BlendOp::Add };               ///< Alpha混合操作
+    math::v4 blendConstants{1.0f, 1.0f, 1.0f, 1.0f};            ///< 混合常量
 };
 
 /**
  * @brief 深度模板状态描述符
  */
 struct DepthStencilState {
-    bool enableDepthTest;               ///< 是否启用深度测试
-    bool enableDepthWrite;              ///< 是否启用深度写入
-    ComparisonFunc depthFunc;           ///< 深度比较函数
+    bool enableDepthTest{ true };               ///< 是否启用深度测试
+    bool enableDepthWrite{ true };              ///< 是否启用深度写入
+    ComparisonFunc depthFunc{ ComparisonFunc::Less };           ///< 深度比较函数
     
-    bool enableStencilTest;             ///< 是否启用模板测试
-    uint8_t stencilReadMask;           ///< 模板读取掩码
-    uint8_t stencilWriteMask;           ///< 模板写入掩码
+    bool enableStencilTest{ false };             ///< 是否启用模板测试
+    uint8_t stencilReadMask{ 0xFF };           ///< 模板读取掩码
+    uint8_t stencilWriteMask{ 0xFF };           ///< 模板写入掩码
     
-    StencilOpDesc frontStencil;         ///< 正面模板操作
-    StencilOpDesc backStencil;          ///< 背面模板操作
-
-    DepthStencilState() : enableDepthTest(true), enableDepthWrite(true), depthFunc(ComparisonFunc::Less),
-                          enableStencilTest(false), stencilReadMask(0xFF), stencilWriteMask(0xFF) {}
+    StencilOpDesc frontStencil{};         ///< 正面模板操作
+    StencilOpDesc backStencil{};          ///< 背面模板操作
 };
 
 /**
  * @brief 光栅化状态描述符
  */
 struct RasterizerState {
-    FillMode fillMode;                  ///< 填充模式
-    CullMode cullMode;                  ///< 裁剪模式
-    PrimitiveTopology topology;         ///< 图元拓扑 (注意：通常这属于 Input Assembly，但这里方便管理放在一起，或者 Material 单独管理 Topology)
+    FillMode fillMode{ FillMode::Solid };                  ///< 填充模式
+    CullMode cullMode{ CullMode::Back };                  ///< 裁剪模式
+    PrimitiveTopology topology{ PrimitiveTopology::TriangleList };         ///< 图元拓扑 (注意：通常这属于 Input Assembly，但这里方便管理放在一起，或者 Material 单独管理 Topology)
     
     // Depth Bias
-    float depthBias;                    ///< 深度偏差常数因子
-    float depthBiasClamp;               ///< 深度偏差截断
-    float slopeScaledDepthBias;         ///< 深度偏差斜率因子
-
-    // 注意：GraphicsPipelineDesc 中 topology 是单独字段，fillMode/cullMode 是单独字段
-    // 这里为了 Material 方便，我们将 Topology 也包含进来，或者 Material 单独有 SetTopology
-    
-    RasterizerState() : fillMode(FillMode::Solid), cullMode(CullMode::Back), topology(PrimitiveTopology::TriangleList),
-                        depthBias(0.0f), depthBiasClamp(0.0f), slopeScaledDepthBias(0.0f) {}
+    float depthBias{ 0.0f };                    ///< 深度偏差常数因子
+    float depthBiasClamp{ 0.0f };               ///< 深度偏差截断
+    float slopeScaledDepthBias{ 0.0f };         ///< 深度偏差斜率因子
 };
 
 // === 基础结构体定义 ===
@@ -834,26 +818,18 @@ struct RasterizerState {
  * @brief 视口描述符
  */
 struct ViewportDesc {
-    math::v2 topLeft;        ///< 视口左上角坐标 (x, y)
-    math::v2 size;           ///< 视口大小 (width, height)
-    float minDepth;          ///< 最小深度值
-    float maxDepth;          ///< 最大深度值
-    
-    ViewportDesc() : topLeft{0.0f, 0.0f}, size{1.0f, 1.0f}, minDepth(0.0f), maxDepth(1.0f) {}
-    ViewportDesc(float x, float y, float width, float height, float minD = 0.0f, float maxD = 1.0f)
-        : topLeft{x, y}, size{width, height}, minDepth(minD), maxDepth(maxD) {}
+    math::v2 topLeft{ 0.0f, 0.0f };        ///< 视口左上角坐标 (x, y)
+    math::v2 size{ 1.0f, 1.0f };           ///< 视口大小 (width, height)
+    float minDepth{ 0.0f };          ///< 最小深度值
+    float maxDepth{ 1.0f };          ///< 最大深度值
 };
 
 /**
  * @brief 裁剪矩形描述符
  */
 struct Rect {
-    math::s32v2 offset;      ///< 裁剪矩形偏移量 (x, y)
-    math::u32v2 extent;      ///< 裁剪矩形大小 (width, height)
-    
-    Rect() : offset{0, 0}, extent{0, 0} {}
-    Rect(int32_t x, int32_t y, uint32_t width, uint32_t height)
-        : offset{x, y}, extent{width, height} {}
+    math::s32v2 offset{ 0, 0 };      ///< 裁剪矩形偏移量 (x, y)
+    math::u32v2 extent{ 0, 0 };      ///< 裁剪矩形大小 (width, height)
 };
 
 /**
@@ -868,79 +844,65 @@ struct ClearValue {
         };
         math::v4 depthStencil; ///< 深度模板清除值
     };
-    
-    ClearValue() : color{0.0f, 0.0f, 0.0f, 1.0f} {}
-    ClearValue(float r, float g, float b, float a) : color{r, g, b, a} {}
-    ClearValue(float d, uint32_t s) : depth(d), stencil(s) {}
 };
 
 /**
  * @brief 纹理子资源层
  */
 struct TextureSubresourceLayers {
-    uint32_t mipLevel;       ///< Mip层级
-    uint32_t baseArrayLayer; ///< 起始数组层
-    uint32_t layerCount;     ///< 数组层数量
-    
-    TextureSubresourceLayers() : mipLevel(0), baseArrayLayer(0), layerCount(1) {}
+    uint32_t mipLevel{ 0 };       ///< Mip层级
+    uint32_t baseArrayLayer{ 0 }; ///< 起始数组层
+    uint32_t layerCount{ 1 };     ///< 数组层数量
 };
 
 /**
  * @brief 3D 偏移量
  */
 struct Offset3D {
-    int32_t x;
-    int32_t y;
-    int32_t z;
-    
-    Offset3D() : x(0), y(0), z(0) {}
-    Offset3D(int32_t _x, int32_t _y, int32_t _z) : x(_x), y(_y), z(_z) {}
+    int32_t x{ 0 };
+    int32_t y{ 0 };
+    int32_t z{ 0 };
 };
 
 /**
  * @brief 3D 范围
  */
 struct Extent3D {
-    uint32_t width;
-    uint32_t height;
-    uint32_t depth;
-    
-    Extent3D() : width(0), height(0), depth(0) {}
-    Extent3D(uint32_t w, uint32_t h, uint32_t d) : width(w), height(h), depth(d) {}
+    uint32_t width{ 0 };
+    uint32_t height{ 0 };
+    uint32_t depth{ 0 };
 };
 
 /**
  * @brief 缓冲区到纹理的复制区域
  */
 struct BufferTextureCopyRegion {
-    uint64_t bufferOffset;       ///< 缓冲区偏移量
-    uint32_t bufferRowLength;    ///< 缓冲区行长（像素），0表示紧密排列
-    uint32_t bufferImageHeight;  ///< 缓冲区图像高度（像素），0表示紧密排列
-    TextureSubresourceLayers imageSubresource; ///< 纹理子资源
-    Offset3D imageOffset;        ///< 纹理偏移
-    Extent3D imageExtent;        ///< 纹理范围
-    
-    BufferTextureCopyRegion() : bufferOffset(0), bufferRowLength(0), bufferImageHeight(0) {}
+    uint64_t bufferOffset{ 0 };       ///< 缓冲区偏移量
+    uint32_t bufferRowLength{ 0 };    ///< 缓冲区行长（像素），0表示紧密排列
+    uint32_t bufferImageHeight{ 0 };  ///< 缓冲区图像高度（像素），0表示紧密排列
+    TextureSubresourceLayers imageSubresource{ 0, 0, 1 }; ///< 纹理子资源
+    Offset3D imageOffset{ 0, 0, 0 };        ///< 纹理偏移
+    Extent3D imageExtent{ 0, 0, 0 };        ///< 纹理范围
 };
 
 /**
  * @brief 纹理复制区域
  */
 struct TextureCopyRegion {
-    TextureSubresourceLayers srcSubresource;
-    Offset3D srcOffset;
-    TextureSubresourceLayers dstSubresource;
-    Offset3D dstOffset;
-    Extent3D extent;
+    TextureSubresourceLayers srcSubresource{ 0, 0, 1 }; ///< 源纹理子资源
+    Offset3D srcOffset{ 0, 0, 0 };        ///< 源纹理偏移
+    TextureSubresourceLayers dstSubresource{ 0, 0, 1 }; ///< 目标纹理子资源
+    Offset3D dstOffset{ 0, 0, 0 };        ///< 目标纹理偏移
+    Extent3D extent{ 0, 0, 0 };        ///< 复制范围
 };
 
 /**
  * @brief 纹理Blit区域
  */
 struct TextureBlitRegion {
-    TextureSubresourceLayers srcSubresource;
+    TextureSubresourceLayers srcSubresource{ 0, 0, 1 }; ///< 源纹理子资源
     Offset3D srcOffsets[2];  ///< 源区域 [min, max]
-    TextureSubresourceLayers dstSubresource;
+    TextureSubresourceLayers dstSubresource{ 0, 0, 1 }; ///< 目标纹理子资源
     Offset3D dstOffsets[2];  ///< 目标区域 [min, max]
 };
 
@@ -948,78 +910,50 @@ struct TextureBlitRegion {
  * @brief 顶点输入属性描述符
  */
 struct VertexInputAttribute {
-    uint32_t location;       ///< 着色器中的位置
-    uint32_t binding;        ///< 绑定点
-    DataFormat format;       ///< 数据格式
-    uint32_t offset;         ///< 在缓冲区中的字节偏移量
-    
-    VertexInputAttribute() : location(0), binding(0), format(DataFormat::Unknown), offset(0) {}
-    VertexInputAttribute(uint32_t loc, uint32_t bind, DataFormat fmt, uint32_t off)
-        : location(loc), binding(bind), format(fmt), offset(off) {}
+    uint32_t location{ 0 };       ///< 着色器中的位置
+    uint32_t binding{ 0 };        ///< 绑定点
+    DataFormat format{ DataFormat::Unknown };       ///< 数据格式
+    uint32_t offset{ 0 };         ///< 在缓冲区中的字节偏移量
 };
 
 /**
  * @brief 顶点输入绑定描述符
  */
 struct VertexInputBinding {
-    uint32_t binding;        ///< 绑定点
-    uint32_t stride;         ///< 顶点步长（字节）
-    bool perVertex;          ///< true=每个顶点，false=每个实例
-    
-    VertexInputBinding() : binding(0), stride(0), perVertex(true) {}
-    VertexInputBinding(uint32_t bind, uint32_t str, bool perVert = true)
-        : binding(bind), stride(str), perVertex(perVert) {}
+    uint32_t binding{ 0 };        ///< 绑定点
+    uint32_t stride{ 0 };         ///< 顶点步长（字节）
+    bool perVertex{ true };          ///< true=每个顶点，false=每个实例
 };
 
 /**
  * @brief 缓冲区描述符
  */
 struct BufferDesc {
-    uint64_t size;           ///< 缓冲区大小（字节）
-    BufferType type;         ///< 缓冲区类型
-    GPUMemoryUsage usage;    ///< 内存使用模式
-    GPUMemoryUsage memoryUsage; ///< 内存使用方式（兼容字段）
-    uint32_t bindFlags;      ///< 绑定标志位
+    uint64_t size{ 0 };           ///< 缓冲区大小（字节）
+    BufferType type{ BufferType::Unknown };         ///< 缓冲区类型
+    GPUMemoryUsage usage{ GPUMemoryUsage::Unknown };    ///< 内存使用模式
+    GPUMemoryUsage memoryUsage{ GPUMemoryUsage::Unknown }; ///< 内存使用方式（兼容字段）
+    uint32_t bindFlags{ 0 };      ///< 绑定标志位
     
     // 扩展字段用于具体缓冲区类型
     union {
         struct {
-            uint32_t vertexCount;     ///< 顶点数量
-            uint32_t vertexStride;    ///< 顶点步长
+            uint32_t vertexCount{ 0 };     ///< 顶点数量
+            uint32_t vertexStride{ 0 };    ///< 顶点步长
         } vertex;
         
         struct {
-            uint32_t indexCount;      ///< 索引数量
-            DataFormat format;       ///< 索引格式
+            uint32_t indexCount{ 0 };      ///< 索引数量
+            DataFormat format{ DataFormat::Unknown };       ///< 索引格式
         } index;
         
         struct {
-            uint32_t elementCount;    ///< 元素数量
-            uint32_t elementStride;  ///< 元素步长
+            uint32_t elementCount{ 0 };    ///< 元素数量
+            uint32_t elementStride{ 0 };  ///< 元素步长
         } structured;
     };
     
-    std::string name;         ///< 缓冲区名称（调试用）
-    
-    BufferDesc() : size(0), type(BufferType::Unknown), usage(GPUMemoryUsage::Unknown), 
-                   memoryUsage(GPUMemoryUsage::Unknown), bindFlags(0) {
-        vertex.vertexCount = 0;
-        vertex.vertexStride = 0;
-        index.indexCount = 0;
-        index.format = DataFormat::Unknown;
-        structured.elementCount = 0;
-        structured.elementStride = 0;
-    }
-    
-    BufferDesc(uint64_t sz, BufferType tp, GPUMemoryUsage us, uint32_t flags = 0)
-        : size(sz), type(tp), usage(us), memoryUsage(us), bindFlags(flags) {
-        vertex.vertexCount = 0;
-        vertex.vertexStride = 0;
-        index.indexCount = 0;
-        index.format = DataFormat::Unknown;
-        structured.elementCount = 0;
-        structured.elementStride = 0;
-    }
+    std::string name{};         ///< 缓冲区名称（调试用）
 };
 
 /**
@@ -1039,91 +973,67 @@ enum class SampleCount : uint8_t {
  * @brief 纹理描述符
  */
 struct TextureDesc {
-    math::u32v3 size;        ///< 纹理尺寸 (width, height, depth)
-    uint32_t mipLevels;      ///< Mip层级数
-    uint32_t arraySize;      ///< 数组大小
-    DataFormat format;       ///< 数据格式
-    TextureType type;        ///< 纹理类型
-    TextureUsage usage;      ///< 纹理用途
-    GPUMemoryUsage memoryUsage; ///< 内存使用方式
-    std::string name;        ///< 纹理名称
-    
-    TextureDesc() : size{0, 0, 0}, mipLevels(1), arraySize(1), 
-                   format(DataFormat::Unknown), type(TextureType::Unknown), 
-                   memoryUsage(GPUMemoryUsage::Unknown) {}
-    TextureDesc(uint32_t width, uint32_t height, uint32_t depth, 
-                uint32_t mips, uint32_t array, DataFormat fmt, TextureType tp)
-        : size{width, height, depth}, mipLevels(mips), arraySize(array), 
-          format(fmt), type(tp), memoryUsage(GPUMemoryUsage::Unknown) {}
+    math::u32v3 size{ 0, 0, 0 };        ///< 纹理尺寸 (width, height, depth)
+    uint32_t mipLevels{ 1 };      ///< Mip层级数
+    uint32_t arraySize{ 1 };      ///< 数组大小
+    DataFormat format{ DataFormat::Unknown };       ///< 数据格式
+    TextureType type{ TextureType::Unknown };        ///< 纹理类型
+    TextureUsage usage{ TextureUsage::Unknown };      ///< 纹理用途
+    GPUMemoryUsage memoryUsage{ GPUMemoryUsage::Unknown }; ///< 内存使用方式
+    std::string name{};        ///< 纹理名称
 };
 
 /**
  * @brief 纹理视图描述符
  */
 struct TextureViewDesc {
-    ResourceHandle texture;           ///< 原始纹理句柄
-    TextureType viewType;             ///< 视图类型
-    DataFormat format;                ///< 数据格式
-    uint32_t mostDetailedMip;         ///< 起始Mip层级
-    uint32_t mipCount;                ///< Mip层级数量
-    uint32_t firstArraySlice;         ///< 起始数组层
-    uint32_t arraySize;               ///< 数组层数量
-    
-    TextureViewDesc() : texture(handles::INVALID_RESOURCE), viewType(TextureType::Unknown), 
-                       format(DataFormat::Unknown), mostDetailedMip(0), mipCount(1), 
-                       firstArraySlice(0), arraySize(1) {}
+    ResourceHandle texture{ handles::INVALID_RESOURCE };           ///< 原始纹理句柄
+    TextureType viewType{ TextureType::Unknown };             ///< 视图类型
+    DataFormat format{ DataFormat::Unknown };                ///< 数据格式
+    uint32_t mostDetailedMip{ 0 };         ///< 起始Mip层级
+    uint32_t mipCount{ 1 };                ///< Mip层级数量
+    uint32_t firstArraySlice{ 0 };         ///< 起始数组层
+    uint32_t arraySize{ 1 };               ///< 数组层数量
 };
 
 /**
  * @brief 采样器描述符
  */
 struct SwapChainDesc {
-    platform::window_handle window;  ///< 窗口句柄
-    uint32_t width;                  ///< 宽度
-    uint32_t height;                 ///< 高度
-    DataFormat format;               ///< 颜色格式
-    uint32_t bufferCount;            ///< 缓冲区数量
-    PresentMode presentMode;         ///< 呈现模式
-    bool enableVsync;                ///< 是否开启垂直同步（辅助字段，优先使用presentMode）
-    
-    SwapChainDesc() : window(nullptr), width(0), height(0), 
-                     format(DataFormat::BGRA8_UNorm), bufferCount(3), 
-                     presentMode(PresentMode::FIFO), enableVsync(true) {}
+    platform::window_handle window{ nullptr };  ///< 窗口句柄
+    uint32_t width{ 0 };                  ///< 宽度
+    uint32_t height{ 0 };                 ///< 高度
+    DataFormat format{ DataFormat::BGRA8_UNorm };               ///< 颜色格式
+    uint32_t bufferCount{ 3 };            ///< 缓冲区数量
+    PresentMode presentMode{ PresentMode::FIFO };         ///< 呈现模式
+    bool enableVsync{ true };                ///< 是否开启垂直同步（辅助字段，优先使用presentMode）
 };
 
 /**
  * @brief 采样器描述符
  */
 struct SamplerDesc {
-    FilterMode minFilter;        ///< 缩小过滤模式
-    FilterMode magFilter;        ///< 放大过滤模式
-    FilterMode mipFilter;        ///< Mipmap过滤模式
-    TextureAddressMode addressU; ///< U轴寻址模式
-    TextureAddressMode addressV; ///< V轴寻址模式
-    TextureAddressMode addressW; ///< W轴寻址模式
-    float mipLodBias;            ///< Mipmap LOD偏差
-    uint32_t maxAnisotropy;      ///< 最大各向异性
-    ComparisonFunc comparisonFunc; ///< 比较函数
-    math::v4 borderColor;        ///< 边框颜色
-    float minLod;                ///< 最小LOD
-    float maxLod;                ///< 最大LOD
-
-    SamplerDesc() : minFilter(FilterMode::Linear), magFilter(FilterMode::Linear), 
-                   mipFilter(FilterMode::Linear), addressU(TextureAddressMode::Wrap), 
-                   addressV(TextureAddressMode::Wrap), addressW(TextureAddressMode::Wrap), 
-                   mipLodBias(0.0f), maxAnisotropy(1), comparisonFunc(ComparisonFunc::Always), 
-                   borderColor{0.0f, 0.0f, 0.0f, 0.0f}, minLod(0.0f), maxLod(1000.0f) {}
+    FilterMode minFilter{ FilterMode::Linear };        ///< 缩小过滤模式
+    FilterMode magFilter{ FilterMode::Linear };        ///< 放大过滤模式
+    FilterMode mipFilter{ FilterMode::Linear };        ///< Mipmap过滤模式
+    TextureAddressMode addressU{ TextureAddressMode::Wrap }; ///< U轴寻址模式
+    TextureAddressMode addressV{ TextureAddressMode::Wrap }; ///< V轴寻址模式
+    TextureAddressMode addressW{ TextureAddressMode::Wrap }; ///< W轴寻址模式
+    float mipLodBias{ 0.0f };            ///< Mipmap LOD偏差
+    uint32_t maxAnisotropy{ 1 };      ///< 最大各向异性
+    ComparisonFunc comparisonFunc{ ComparisonFunc::Always }; ///< 比较函数
+    math::v4 borderColor{ 0.0f, 0.0f, 0.0f, 0.0f };        ///< 边框颜色
+    float minLod{ 0.0f };                ///< 最小LOD
+    float maxLod{ 1000.0f };                ///< 最大LOD
 };
 
 /**
  * @brief 计算管线描述符
  */
 struct ComputePipelineDesc {
-    ShaderHandle computeShader;         ///< 计算着色器
-    PipelineLayoutHandle layout;        ///< 管线布局
-    math::u32v3 threadGroupSize;        ///< 线程组大小 (x, y, z)
-    
-    ComputePipelineDesc() : computeShader(handles::INVALID_SHADER), layout(handles::INVALID_PIPELINE_LAYOUT), threadGroupSize{1, 1, 1} {}
+    ShaderHandle computeShader{ handles::INVALID_SHADER };         ///< 计算着色器
+    PipelineLayoutHandle layout{ handles::INVALID_PIPELINE_LAYOUT };        ///< 管线布局
+    math::u32v3 threadGroupSize{ 1, 1, 1 };        ///< 线程组大小 (x, y, z)
 };
 
 /**
@@ -1146,21 +1056,16 @@ enum class StoreAction {
 };
 
 struct PushConstantRange {
-    ShaderStage stageFlags;
-    uint32_t offset;
-    uint32_t size;
-    
-    PushConstantRange() : stageFlags(ShaderStage::Unknown), offset(0), size(0) {}
+    ShaderStage stageFlags{ ShaderStage::Unknown };
+    uint32_t offset{ 0 };
+    uint32_t size{ 0 };
 };
 
 struct PipelineLayoutDesc {
-    uint32_t setLayoutCount;
-    const DescriptorSetLayoutHandle* setLayouts;
-    uint32_t pushConstantRangeCount;
-    const PushConstantRange* pushConstantRanges;
-    
-    PipelineLayoutDesc() : setLayoutCount(0), setLayouts(nullptr), 
-                          pushConstantRangeCount(0), pushConstantRanges(nullptr) {}
+    uint32_t setLayoutCount{ 0 };
+    const DescriptorSetLayoutHandle* setLayouts{ nullptr };
+    uint32_t pushConstantRangeCount{ 0 };
+    const PushConstantRange* pushConstantRanges{ nullptr };
 };
 
 /**
@@ -1169,26 +1074,22 @@ struct PipelineLayoutDesc {
  */
 struct RenderPassDesc {
     struct Attachment {
-        ResourceHandle texture;           ///< 渲染目标纹理
-        DataFormat format;                ///< 数据格式
-        LoadAction loadOp;                ///< 加载操作
-        StoreAction storeOp;              ///< 存储操作
+        ResourceHandle texture{ handles::INVALID_RESOURCE };           ///< 渲染目标纹理
+        DataFormat format{ DataFormat::Unknown };                ///< 数据格式
+        LoadAction loadOp{ LoadAction::DontCare };                ///< 加载操作
+        StoreAction storeOp{ StoreAction::Store };              ///< 存储操作
         ClearValue clearValue;            ///< 清除值
-        u32 sampleCount;                  ///< 采样数量
-        uint8_t mipLevel;                 ///< Mip层级
-        uint16_t arrayLayer;              ///< 数组层级
-        
-        Attachment() : texture(handles::INVALID_RESOURCE), format(DataFormat::Unknown),
-                      loadOp(LoadAction::DontCare), storeOp(StoreAction::Store),
-                      sampleCount(1), mipLevel(0), arrayLayer(0) {}
+        u32 sampleCount{ 1 };                  ///< 采样数量
+        uint8_t mipLevel{ 0 };                 ///< Mip层级
+        uint16_t arrayLayer{ 0 };              ///< 数组层级
     };
     
     utl::vector<Attachment> colorAttachments;   ///< 颜色附件
-    Attachment depthAttachment;                 ///< 深度附件
-    Attachment stencilAttachment;              ///< 模板附件
+    Attachment depthAttachment{ handles::INVALID_RESOURCE };                 ///< 深度附件
+    Attachment stencilAttachment{ handles::INVALID_RESOURCE };              ///< 模板附件
     
-    ViewportDesc viewport;                       ///< 视口
-    Rect scissor;                               ///< 裁剪矩形
+    ViewportDesc viewport{ {0.0f, 0.0f}, {0.0f, 0.0f}, 0.0f, 1.0f };                       ///< 视口
+    Rect scissor{ {0, 0}, {0, 0} };                               ///< 裁剪矩形
     
     // Timestamp Queries
     QueryPoolHandle timestampQueryPool{handles::INVALID_QUERY_POOL};
@@ -1198,10 +1099,6 @@ struct RenderPassDesc {
 
     // Multi-View / Layered Rendering
     uint32_t renderTargetArrayLength{1};
-
-    RenderPassDesc() {
-        colorAttachments.reserve(constants::MAX_RENDER_TARGETS);
-    }
 };
 
 } // namespace primal::graphics::rhi

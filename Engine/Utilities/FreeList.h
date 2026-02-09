@@ -1,6 +1,8 @@
 #pragma once
 
 #include "CommonHeaders.h"
+#include <cstdio>
+#include <algorithm>
 
 namespace primal::utl
 {
@@ -40,6 +42,32 @@ namespace primal::utl
 			else
 			{
 				id = _next_free_index;
+                if (!(id < _array.size() && already_removed(id, true))) {
+                    printf("FreeList Corruption Detected! T: %s, size: %zu\n", typeid(T).name(), sizeof(T));
+                    printf("id: %u, size: %u, next_free: %u\n", id, (unsigned)_array.size(), _next_free_index);
+                    if (id < _array.size()) {
+                         const u8 *const p{ (const u8 *const)std::addressof(_array[id]) };
+                         // Find first non-CC byte starting from offset 4
+                         int first_corrupt = -1;
+                         for(size_t k = 4; k < sizeof(T); ++k) {
+                             if (p[k] != 0xcc) {
+                                 first_corrupt = (int)k;
+                                 break;
+                             }
+                         }
+                         if (first_corrupt != -1) {
+                             printf("First corruption at offset %d: 0x%02X\n", first_corrupt, p[first_corrupt]);
+                             // Dump surrounding bytes
+                             printf("Dump around offset %d: ", first_corrupt);
+                             int start = std::max(0, first_corrupt - 8);
+                             int end = std::min((int)sizeof(T), first_corrupt + 8);
+                             for(int k=start; k<end; ++k) printf("%02X ", p[k]);
+                             printf("\n");
+                         } else {
+                             printf("No corruption found in byte scan? already_removed logic mismatch?\n");
+                         }
+                    }
+                }
 				assert(id < _array.size() && already_removed(id, true));
 				_next_free_index = *(const u32 *const)std::addressof(_array[id]);
 				new (std::addressof(_array[id])) T(std::forward<params>(p)...);
@@ -50,6 +78,9 @@ namespace primal::utl
 
 		constexpr void remove(u32 id)
 		{
+            if (!(id < _array.size() && !already_removed(id, false))) {
+                 printf("FreeList Remove Error! T: %s, id: %u, size: %u\n", typeid(T).name(), id, (unsigned)_array.size());
+            }
 			assert(id < _array.size() && !already_removed(id, false));
 			T& item{ _array[id] };
 			item.~T();

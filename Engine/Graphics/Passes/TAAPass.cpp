@@ -122,11 +122,13 @@ bool TAAPass::Initialize(rhi::RHIDeviceBase* device, uint32_t width, uint32_t he
         desc.layout = descriptorSetLayout_;
         descriptorSets_[i] = device_->CreateDescriptorSet(desc);
         
-        rhi::BufferDesc bufDesc;
-        bufDesc.size = sizeof(TAAUniforms);
-        bufDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-        bufDesc.type = rhi::BufferType::Constant;
-        bufDesc.bindFlags = (uint32_t)rhi::BufferUsageFlags::Uniform;
+        rhi::BufferDesc bufDesc{
+            sizeof(TAAUniforms),
+            rhi::BufferType::Constant,
+            rhi::GPUMemoryUsage::Dynamic,
+            rhi::GPUMemoryUsage::Dynamic,
+            (uint32_t)rhi::BufferUsageFlags::Uniform
+        };
         uniformBuffers_[i] = device_->CreateBuffer(bufDesc);
         
         uniformBuffersMapped_[i] = device_->MapBuffer(uniformBuffers_[i]);

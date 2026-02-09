@@ -204,12 +204,12 @@ void CreateSpotShadowView(
     outView.SetProjectionMatrix(proj);
     outView.UpdateFrustum();
     
-    rhi::Rect rect{0, 0, shadowMapSize, shadowMapSize};
-    rhi::ViewportDesc viewport;
-    viewport.size = {static_cast<float>(shadowMapSize), static_cast<float>(shadowMapSize)};
-    viewport.topLeft = {0.0f, 0.0f};
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
+    rhi::Rect rect{ { 0, 0 }, { shadowMapSize, shadowMapSize } };
+    rhi::ViewportDesc viewport{
+        {0.0f, 0.0f},
+        {static_cast<float>(shadowMapSize), static_cast<float>(shadowMapSize)},
+        0.0f, 1.0f
+    };
     outView.SetViewport(viewport);
     outView.SetScissor(rect);
 }
@@ -245,8 +245,12 @@ void CreatePointShadowViews(
         {{ 0.0f,  0.0f, -1.0f}, {0.0f, -1.0f,  0.0f}}  // -Z (Back)
     };
 
-    rhi::Rect rect{0, 0, shadowMapSize, shadowMapSize};
-    rhi::ViewportDesc viewport((float)0, (float)0, (float)shadowMapSize, (float)shadowMapSize);
+    rhi::Rect rect{ { 0, 0 }, { shadowMapSize, shadowMapSize } };
+    rhi::ViewportDesc viewport{
+        {0.0f, 0.0f},
+        {static_cast<float>(shadowMapSize), static_cast<float>(shadowMapSize)},
+        0.0f, 1.0f
+    };
 
     // 6 Faces
     for (uint32_t i = 0; i < 6; ++i) {
