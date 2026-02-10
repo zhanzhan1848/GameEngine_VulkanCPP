@@ -197,7 +197,26 @@ target_link_options(${PROJECT_NAME} PRIVATE
 
 # 安装目标
 install(TARGETS ${PROJECT_NAME}
+    RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
-    RUNTIME DESTINATION bin
 )
+
+# CLI Tool for converting FBX to intermediate binary format
+if(APPLE OR UNIX)
+    add_executable(ContentToolsCLI main.cpp)
+    
+    target_include_directories(ContentToolsCLI PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${MESHOPT_DIR}
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC/
+    )
+
+    target_link_libraries(ContentToolsCLI PRIVATE ${PROJECT_NAME})
+    
+    if(APPLE)
+        target_compile_options(ContentToolsCLI PRIVATE -std=c++17 -stdlib=libc++)
+    endif()
+endif()

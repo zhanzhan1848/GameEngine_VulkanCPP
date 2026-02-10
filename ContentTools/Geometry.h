@@ -126,6 +126,7 @@ namespace primal::tools {
 		utl::vector<u32>						material_indices;
 		utl::vector<u32>						material_used;
 
+		u32										material_idx{ u32_invalid_id };
 		utl::vector<u32>						raw_indices;
 
 		// Intermediate data
@@ -148,10 +149,18 @@ namespace primal::tools {
 		utl::vector<mesh>						meshes;
 	};
 
+	struct material
+	{
+		std::string								name;
+		std::string								diffuse_texture;
+		std::string								normal_texture;
+	};
+
 	struct scene
 	{
 		std::string								name;
 		utl::vector<lod_group>					lod_groups;
+		utl::vector<material>					materials;
 	};
 
 	struct geometry_import_settings

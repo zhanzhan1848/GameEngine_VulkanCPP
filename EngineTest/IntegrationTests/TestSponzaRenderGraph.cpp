@@ -991,7 +991,7 @@ bool TestSponzaRenderGraph::CreatePersistentResources() {
 }
 
 bool TestSponzaRenderGraph::LoadScene() {
-    std::string modelPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/model_win_engine.model";
+    std::string modelPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Sponza.model";
     std::ifstream file(modelPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         std::cerr << "Failed to open model file: " << modelPath << std::endl;
@@ -1024,6 +1024,7 @@ bool TestSponzaRenderGraph::LoadScene() {
     uint32_t matIdCounter = 2000;
     uint32_t entityIdCounter = 3000;
     std::unordered_map<primal::graphics::MaterialInstance*, primal::id::id_type> materialMap;
+    std::string assetBaseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
 
     for (size_t i = 0; i < sceneMeshes.size(); ++i) {
         auto& meshInfo = sceneMeshes[i];
@@ -1031,6 +1032,44 @@ bool TestSponzaRenderGraph::LoadScene() {
         // Register Mesh ID (Fake)
         primal::id::id_type meshId = meshIdCounter++;
         // meshInfo.mesh->SetEntityId(meshId); // Cannot set on null mesh
+
+        // Load Textures and Update Material Instance
+        /*
+        if (meshInfo.materialInstance) {
+            bool texturesUpdated = false;
+            
+            // Diffuse Texture
+            if (!meshInfo.diffuseTexturePath.empty()) {
+                std::string fullPath = assetBaseDir + meshInfo.diffuseTexturePath;
+                // Normalize path separators
+                std::replace(fullPath.begin(), fullPath.end(), '\\', '/');
+                
+                ResourceHandle tex = LoadTextureFromFile(fullPath, false);
+                if (tex != handles::INVALID_RESOURCE) {
+                    // Assuming Binding 0 is Albedo in MaterialInstance
+                    meshInfo.materialInstance->SetTexture(0, tex);
+                    texturesUpdated = true;
+                }
+            }
+            
+            // Normal Texture
+            if (!meshInfo.normalTexturePath.empty()) {
+                std::string fullPath = assetBaseDir + meshInfo.normalTexturePath;
+                std::replace(fullPath.begin(), fullPath.end(), '\\', '/');
+                
+                ResourceHandle tex = LoadTextureFromFile(fullPath, true);
+                if (tex != handles::INVALID_RESOURCE) {
+                    // Assuming Binding 1 is Normal in MaterialInstance
+                    meshInfo.materialInstance->SetTexture(1, tex);
+                    texturesUpdated = true;
+                }
+            }
+            
+            if (texturesUpdated) {
+                meshInfo.materialInstance->Update(device);
+            }
+        }
+        */
 
         // Register Material ID
         primal::id::id_type matId = primal::id::invalid_id;
@@ -1057,6 +1096,44 @@ bool TestSponzaRenderGraph::LoadScene() {
     std::cout << "Scene loaded with " << sceneMeshes.size() << " meshes (Content System)." << std::endl;
     
     return true;
+}
+
+primal::graphics::rhi::ResourceHandle TestSponzaRenderGraph::LoadTextureFromFile(const std::string& path, bool isNormalMap) {
+    // Check Cache
+    if (textureCache.find(path) != textureCache.end()) {
+        return textureCache[path];
+    }
+
+    std::cout << "Loading Texture: " << path << std::endl;
+
+    int width, height, channels;
+    // Vulkan/Metal usually expect top-left origin, but STB loads top-left by default.
+    // However, some engines/shaders expect bottom-left. 
+    // Let's assume standard behavior for now. If textures are flipped, we can toggle this.
+    // stbi_set_flip_vertically_on_load(true); 
+
+    unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4); // Force RGBA
+    if (!data) {
+        std::cerr << "Failed to load texture file: " << path << std::endl;
+        return handles::INVALID_RESOURCE;
+    }
+
+    TextureDesc desc{};
+    desc.size = { (uint32_t)width, (uint32_t)height, 1 };
+    desc.format = DataFormat::RGBA8_UNorm; // Use UNorm for now. If SRGB is needed for Albedo, we might need RGBA8_SRGB.
+    desc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    desc.type = TextureType::Texture2D;
+
+    ResourceHandle texture = device->CreateTexture(desc);
+    if (texture != handles::INVALID_RESOURCE) {
+        WriteTexture(texture, data, (uint64_t)(width * height * 4), (uint32_t)width, (uint32_t)height, 0);
+        textureCache[path] = texture;
+    } else {
+        std::cerr << "Failed to create texture resource for: " << path << std::endl;
+    }
+
+    stbi_image_free(data);
+    return texture;
 }
 
 bool TestSponzaRenderGraph::SetupIBL() {

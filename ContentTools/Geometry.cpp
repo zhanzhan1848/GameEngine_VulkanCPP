@@ -1,10 +1,11 @@
 #include "Geometry.h"
 #include "../Engine/Utilities/IOStream.h"
-
+#include <cmath>
+#include <iostream>
+#include <algorithm> // for std::clamp in C++17
 
 namespace primal::tools
 {
-
 	namespace 
 	{
 		using namespace math;
@@ -44,7 +45,14 @@ namespace primal::tools
 				math::v3 e1{ v2 - v0 };
 
 				math::v3 n{ simd_cross(e0, e1) };
-				n = simd_normalize(n);
+				if (simd_length_squared(n) > epsilon)
+				{
+					n = simd_normalize(n);
+				}
+				else
+				{
+					n = { 0.f, 0.f, 0.f };
+				}
 				m.normals[i] = { n.x, n.y, n.z };
 #endif
 				m.normals[i - 1] = m.normals[i];
@@ -153,7 +161,14 @@ namespace primal::tools
 							}
 						}
 					}
-					n1 = simd_normalize(n1);
+					if (simd_length_squared(n1) > epsilon)
+					{
+						n1 = simd_normalize(n1);
+					}
+					else
+					{
+						n1 = { 0.f, 1.f, 0.f };
+					}
 					v.normal = { n1.x, n1.y, n1.z };
 				}
 			}
@@ -230,12 +245,14 @@ namespace primal::tools
 			const u32 num_vertices{ (u32)m.vertices.size() };
 			assert(num_vertices);
 
-			m.position_buffer.resize(sizeof(math::v3) * num_vertices);
-			math::v3 *const position_buffer{ (math::v3 *const)m.position_buffer.data() };
+			m.position_buffer.resize(12 * num_vertices);
+			f32* position_buffer{ (f32*)m.position_buffer.data() };
 
 			for (u32 i{ 0 }; i < num_vertices; ++i)
 			{
-				position_buffer[i] = m.vertices[i].position;
+				position_buffer[i * 3 + 0] = m.vertices[i].position.x;
+				position_buffer[i * 3 + 1] = m.vertices[i].position.y;
+				position_buffer[i * 3 + 2] = m.vertices[i].position.z;
 			}
 
 			struct u16v2
@@ -260,10 +277,14 @@ namespace primal::tools
 					vertex& v{ m.vertices[i] };
 #if defined(_MSC_VER)
 					t_signs[i] = (u8)((v.normal.z > 0.f) << 1);
-					normals[i] = { (u16)pack_float<16>(v.normal.x, -1.f, 1.f), (u16)pack_float<16>(v.normal.y, -1.f, 1.f) };
+					normals[i] = { (u16)pack_float<16>(clamp(v.normal.x, -1.f, 1.f), -1.f, 1.f), (u16)pack_float<16>(clamp(v.normal.y, -1.f, 1.f), -1.f, 1.f) };
 #elif defined(__clang__)
+					if (!std::isfinite(v.normal.x) || !std::isfinite(v.normal.y) || !std::isfinite(v.normal.z))
+					{
+						v.normal = { 0.f, 1.f, 0.f };
+					}
 					t_signs[i] = (u8)((v.normal.z > 0.f) << 1);
-					normals[i] = { (u16)pack_float<16>(v.normal.x, -1.f, 1.f), (u16)pack_float<16>(v.normal.y, -1.f, 1.f) };
+					normals[i] = { (u16)pack_float<16>(math::clamp(v.normal.x, -1.f, 1.f), -1.f, 1.f), (u16)pack_float<16>(math::clamp(v.normal.y, -1.f, 1.f), -1.f, 1.f) };
 #endif
 				}
 
@@ -275,10 +296,14 @@ namespace primal::tools
 						vertex& v{ m.vertices[i] };
 #if defined(_MSC_VER)
 						t_signs[i] = (u8)((v.tangent.w > 0.f) && (v.tangent.z > 0.f));
-						tangents[i] = { (u16)pack_float<16>(v.tangent.x, -1.f, 1.f), (u16)pack_float<16>(v.tangent.y, -1.f, 1.f) };
+						tangents[i] = { (u16)pack_float<16>(clamp(v.tangent.x, -1.f, 1.f), -1.f, 1.f), (u16)pack_float<16>(clamp(v.tangent.y, -1.f, 1.f), -1.f, 1.f) };
 #elif defined(__clang__)
+						if (!std::isfinite(v.tangent.x) || !std::isfinite(v.tangent.y) || !std::isfinite(v.tangent.z))
+						{
+							v.tangent = { 0.f, 1.f, 0.f, 1.f };
+						}
 						t_signs[i] = (u8)((v.tangent.w > 0.f) && (v.tangent.z > 0.f));
-						tangents[i] = { (u16)pack_float<16>(v.tangent.x, -1.f, 1.f), (u16)pack_float<16>(v.tangent.y, -1.f, 1.f) };
+						tangents[i] = { (u16)pack_float<16>(math::clamp(v.tangent.x, -1.f, 1.f), -1.f, 1.f), (u16)pack_float<16>(math::clamp(v.tangent.y, -1.f, 1.f), -1.f, 1.f) };
 #endif	
 					}
 				}
@@ -297,10 +322,14 @@ namespace primal::tools
 						(u8)pack_unit_float<8>(v.joint_weights.z)
 					};
 #elif defined(__clang__)
+					if (!std::isfinite(v.joint_weights.x) || !std::isfinite(v.joint_weights.y) || !std::isfinite(v.joint_weights.z))
+					{
+						v.joint_weights = { 0.f, 0.f, 0.f };
+					}
 					joint_weights[i] = {
-						(u8)pack_unit_float<8>(v.joint_weights.x),
-						(u8)pack_unit_float<8>(v.joint_weights.y),
-						(u8)pack_unit_float<8>(v.joint_weights.z)
+						(u8)pack_unit_float<8>(math::clamp(v.joint_weights.x, 0.f, 1.f)),
+						(u8)pack_unit_float<8>(math::clamp(v.joint_weights.y, 0.f, 1.f)),
+						(u8)pack_unit_float<8>(math::clamp(v.joint_weights.z, 0.f, 1.f))
 					};
 #endif
 
@@ -480,7 +509,7 @@ namespace primal::tools
 		{
 			const u64 num_vertices{ m.vertices.size() };
 			const u64 position_buffer_size{ m.position_buffer.size() };
-			assert(position_buffer_size == sizeof(math::v3) * num_vertices);
+			assert(position_buffer_size == 12 * num_vertices);
 			const u64 element_buffer_size{ m.element_buffer.size() };
 			assert(element_buffer_size == get_vertex_element_size(m.elements_type) * num_vertices);
 			
@@ -490,6 +519,7 @@ namespace primal::tools
 			const u64 size{
 				su32 + m.name.size() +							// mesh name lenght and room for mesh name string
 				su32 +											// LOD id
+				su32 +											// material index
 				su32 +											// vertex element size (vertex size excluding position element)
 				su32 +											// element type enumeration
 				su32 +											// number of vertices
@@ -510,8 +540,17 @@ namespace primal::tools
 			{
 				su32 +											// name length
 				scene.name.size() +								// room for scene name string
-				su32											// number of LODs
+				su32											// number of materials
 			};
+
+			for (const auto& m : scene.materials)
+			{
+				size += su32 + m.name.size();
+				size += su32 + m.diffuse_texture.size();
+				size += su32 + m.normal_texture.size();
+			}
+
+			size += su32;										// number of LODs
 
 			for (const auto& lod : scene.lod_groups)
 			{
@@ -539,6 +578,8 @@ namespace primal::tools
 			blob.write(m.name.c_str(), m.name.size());
 			// Lod id
 			blob.write(m.lod_id);
+			// material id
+			blob.write(m.material_idx);
 			// vertex elements size
 			const u32 elements_size{ (u32)get_vertex_element_size(m.elements_type) };
 			blob.write(elements_size);
@@ -556,7 +597,7 @@ namespace primal::tools
 			// LOD threshold
 			blob.write(m.lod_threshold);
 			// position buffer
-			assert(m.position_buffer.size() == sizeof(math::v3) * num_vertices);
+			assert(m.position_buffer.size() == 12 * num_vertices);
 			blob.write(m.position_buffer.data(), m.position_buffer.size());
 			// element buffer
 			assert(m.element_buffer.size() == elements_size * num_vertices);
@@ -580,6 +621,7 @@ namespace primal::tools
 			submesh.name = m.name;
 			submesh.lod_threshold = m.lod_threshold;
 			submesh.lod_id = m.lod_id;
+			submesh.material_idx = material_idx;
 			submesh.material_used.emplace_back(material_idx);
 			submesh.uv_sets.resize(m.uv_sets.size());
 
@@ -657,7 +699,12 @@ namespace primal::tools
 					}
 					else
 					{
-						new_meshes.emplace_back(m);
+						mesh copy = m;
+						if (num_materials == 1)
+						{
+							copy.material_idx = m.material_used[0];
+						}
+						new_meshes.emplace_back(copy);
 					}
 				}
 				progression->callback(progression->value(), progression->max_value() + (u32)new_meshes.size());
@@ -704,6 +751,17 @@ namespace primal::tools
 		auto scene_name_size{ scene.name.size() };
 		blob.write((u32)scene.name.size());
 		blob.write(scene.name.c_str(), scene.name.size());
+		// number of materials
+		blob.write((u32)scene.materials.size());
+		for (const auto& m : scene.materials)
+		{
+			blob.write((u32)m.name.size());
+			blob.write(m.name.c_str(), m.name.size());
+			blob.write((u32)m.diffuse_texture.size());
+			blob.write(m.diffuse_texture.c_str(), m.diffuse_texture.size());
+			blob.write((u32)m.normal_texture.size());
+			blob.write(m.normal_texture.c_str(), m.normal_texture.size());
+		}
 		// number of LODS
 		blob.write((u32)scene.lod_groups.size());
 
@@ -731,6 +789,7 @@ namespace primal::tools
 		combined_mesh.elements_type = determine_elements_type(first_mesh);
 		combined_mesh.lod_threshold = first_mesh.lod_threshold;
 		combined_mesh.lod_id = first_mesh.lod_id;
+		combined_mesh.material_idx = first_mesh.material_idx;
 		combined_mesh.uv_sets.resize(first_mesh.uv_sets.size());
 
 		for (u32 mesh_idx{ 0 }; mesh_idx < lod.meshes.size(); ++mesh_idx)
@@ -740,6 +799,7 @@ namespace primal::tools
 			if (combined_mesh.elements_type != determine_elements_type(m) ||
 				combined_mesh.uv_sets.size() != m.uv_sets.size() ||
 				combined_mesh.lod_id != m.lod_id ||
+				combined_mesh.material_idx != m.material_idx ||
 				!math::is_equal(combined_mesh.lod_threshold, m.lod_threshold))
 			{
 				combined_mesh = {};

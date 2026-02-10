@@ -3,6 +3,7 @@
 #include "ToolsCommon.h"
 #include <fbxsdk.h>
 #include <cstring>
+#include <unordered_map>
 
 namespace primal::tools
 {
@@ -50,6 +51,7 @@ namespace primal::tools
 		void get_mesh(FbxNodeAttribute* attribute, utl::vector<mesh>& meshes, u32 lod_id, f32 lod_threshold);
 		void get_lod_group(FbxNodeAttribute* atrtribute);
 		bool get_mesh_data(FbxMesh* fbx_mesh, mesh& m);
+		void process_materials();
 
 		scene*							_scene{ nullptr };
 		scene_data*						_scene_data{ nullptr };
@@ -57,5 +59,6 @@ namespace primal::tools
 		FbxScene*						_fbx_scene{ nullptr };
 		progression*					_progression{ nullptr };
 		f32								_scene_scale{ 1.0f };
+		std::unordered_map<FbxSurfaceMaterial*, u32> _material_map;
 	};
 }

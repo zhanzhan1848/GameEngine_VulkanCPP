@@ -386,6 +386,7 @@ GameEngine_VulkanCPP_Debug/
 EngineTest/assets/
 .trae/
 .venv/
+.sisyphus/
 
 TODO*
 

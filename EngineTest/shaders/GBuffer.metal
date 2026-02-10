@@ -57,16 +57,21 @@ struct VertexElement {
     packed_float2   UV;
 };
 
-struct VertexInput {
-    packed_float3 position;
-    VertexElement element;
-};
+// struct VertexInput {
+//    packed_float3 position;
+//    VertexElement element;
+// };
 
 // Helper Functions
 float3 UnpackNormal(packed_ushort2 p) {
     float2 f = float2(p);
     f = f * InvIntervals - 1.0f;
-    float z = sqrt(max(0.0f, 1.0f - dot(f, f)));
+    float d = dot(f, f);
+    if (d > 1.0f) {
+        // Invalid/Zeroed data fallback
+        return float3(0.0f, 0.0f, 1.0f);
+    }
+    float z = sqrt(max(0.0f, 1.0f - d));
     return float3(f.x, f.y, z); // Assuming Z is reconstructed positive
 }
 
@@ -75,13 +80,19 @@ vertex VertexOut vertexMain(
     constant SceneData& sceneData [[buffer(0)]],
     constant ViewData& viewData [[buffer(1)]],
     constant PushConsts& pushConsts [[buffer(2)]],
-    device const VertexInput* vertices [[buffer(20)]]
+    constant uchar* vertexBuffer [[buffer(20)]] // Manual Fetch
 ) {
     VertexOut out;
     
-    // Fetch Attributes
-    float3 rawPos = vertices[vertexId].position;
-    VertexElement element = vertices[vertexId].element;
+    // Manual Vertex Fetch
+    // Stride = 12 (Position) + 20 (Element) = 32
+    uint offset = vertexId * 32;
+    
+    // Position
+    float3 rawPos = *reinterpret_cast<constant packed_float3*>(vertexBuffer + offset);
+    
+    // Element
+    VertexElement element = *reinterpret_cast<constant VertexElement*>(vertexBuffer + offset + 12);
     
     // Unpack Normal
     packed_ushort2 packedN = element.Normal;
@@ -168,14 +179,14 @@ fragment FragmentOut fragmentMain(
     // out.albedo = float4(1.0, 0.0, 0.0, 1.0);
 
     // Standard PBR Sampling
-    out.albedo = albedoMap.sample(defaultSampler, in.uv);
+    // out.albedo = albedoMap.sample(defaultSampler, in.uv);
     // DEBUG: Force Red to verify GBuffer execution
     // out.albedo = float4(1.0, 0.0, 0.0, 1.0);
     // out.albedo = float4(1.0, 1.0, 1.0, 1.0);
     
     // Normal Mapping
-    float3 normal = normalMap.sample(defaultSampler, in.uv).rgb;
-    normal = normal * 2.0 - 1.0;
+    // float3 normal = normalMap.sample(defaultSampler, in.uv).rgb;
+    // normal = normal * 2.0 - 1.0;
     
     // float3 T = normalize(in.worldTangent);
     float3 N = normalize(in.worldNormal);
@@ -185,11 +196,13 @@ fragment FragmentOut fragmentMain(
     float3 B = cross(N, T); 
     float3x3 TBN = float3x3(T, B, N);
     
-    out.normal = float4(normalize(TBN * normal) * 0.5 + 0.5, 1.0);
+    out.albedo = float4(1.0);
+
+    out.normal = float4(normalize(TBN * N) * 0.5 + 0.5, 1.0);
     // out.normal = float4(N * 0.5 + 0.5, 1.0);
 
-    out.orm = ormMap.sample(defaultSampler, in.uv);
-    // out.orm = float4(1.0, 0.5, 0.0, 1.0); // Occlusion=1.0, Roughness=0.5, Metallic=0.0
+    // out.orm = ormMap.sample(defaultSampler, in.uv);
+    out.orm = float4(1.0, 0.5, 0.0, 1.0); // Occlusion=1.0, Roughness=0.5, Metallic=0.0
     
     // Calculate Velocity
     // Convert to NDC

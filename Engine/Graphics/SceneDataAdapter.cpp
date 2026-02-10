@@ -1,3 +1,7 @@
+// 文件说明: 实现 SceneDataAdapter 类，用于加载场景数据和网格数据。
+// 关键点: 解析 ContentToEngine 生成的二进制格式，包括 LOD、Submesh、Material 等信息。
+// 注意: 二进制格式必须与 MeshCPU.cpp 中的写入格式严格一致（特别是 16 字节对齐）。
+
 #include "SceneDataAdapter.h"
 #include <cassert>
 #include <cstring>
@@ -50,6 +54,10 @@ public:
         return size_ > offset_ ? size_ - offset_ : 0;
     }
 
+    size_t GetOffset() const {
+        return offset_;
+    }
+
 private:
     const uint8_t* buffer_;
     size_t size_;
@@ -57,56 +65,194 @@ private:
 };
 
 // Helper for alignment
-inline uint32_t align_up(uint32_t s, uint32_t a) { return (s + a - 1) & ~(a - 1); }
+// inline uint32_t align_up(uint32_t s, uint32_t a) { return (s + a - 1) & ~(a - 1); }
 
 } // namespace
 
+// 函数说明: 从二进制数据中加载渲染项数据（网格）。
+// 参数:
+//   device: RHI 设备指针
+//   data: 二进制数据指针
+//   size: 数据大小
+// 返回: 加载的网格信息列表
 std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDeviceBase* device, const void* data, uint32_t size) {
     std::vector<SceneDataMeshInfo> result;
     if (!data || !device) return result;
 
+    std::cout << "SceneDataAdapter::LoadRenderItemData: Start. Size=" << size << std::endl;
+
     BlobReader reader(static_cast<const uint8_t*>(data), size);
 
-    // 1. lod_count
+    // DEBUG: Dump first 16 integers
+    const uint32_t* debugPtr = reinterpret_cast<const uint32_t*>(reader.GetCurrentPtr());
+    std::cout << "File Header Dump (First 16 u32):" << std::endl;
+    const uint8_t* u8Data = static_cast<const uint8_t*>(data);
+    for (int i = 0; i < 16; ++i) {
+        if (u8Data + (i + 1) * sizeof(uint32_t) > u8Data + size) break;
+        std::cout << "[" << i << "]: " << debugPtr[i] << " (0x" << std::hex << debugPtr[i] << std::dec << ")" << std::endl;
+    }
+
+    // 1. Materials Header (Added by pack_geometry.py)
+    // We try to detect if this is the new format with materials header or old format
+    // New format: [NumMaterials] [Mat0_NameLen] [Mat0_Name] ... [LODCount]
+    // Old format: [LODCount] ...
+    // Since we rebuilt the model, we assume New Format. 
+    // But to be safe, we can check if the first uint32 is reasonably small and followed by string length?
+    // Actually, let's just implement the New Format reading as we control the pipeline.
+    
+    uint32_t numMaterials = reader.Read<uint32_t>();
+    std::cout << "SceneDataAdapter: Header NumMaterials=" << numMaterials << std::endl;
+    
+    struct TempMaterialData {
+        std::string name;
+        std::string diffuse;
+        std::string normal;
+    };
+    std::vector<TempMaterialData> tempMaterials;
+
+    std::vector<std::shared_ptr<MaterialInstance>> materialInstances;
+    std::vector<std::shared_ptr<Material>> materials;
+    
+    // Basic sanity check: if numMaterials is huge (e.g. > 10000), it might be lodCount from old format (which is usually small, e.g. 1-5).
+    // Wait, lodCount is usually small. numMaterials is e.g. 25.
+    // If we read lodCount (e.g. 1) as numMaterials, we try to read 1 material.
+    // Material reading involves reading string length.
+    // If it was lodCount, next is thresholds (floats).
+    // Float as u32 (length) might be huge.
+    
+    if (numMaterials < 10000) {
+        materialInstances.reserve(numMaterials);
+        materials.reserve(numMaterials);
+        tempMaterials.reserve(numMaterials);
+        
+        for (uint32_t i = 0; i < numMaterials; ++i) {
+             if (reader.Remaining() < 4) break;
+             uint32_t nameLen = reader.Read<uint32_t>();
+             if (nameLen > 1000) {
+                 // Something is wrong, maybe old format?
+                 std::cerr << "SceneDataAdapter: Material Name too long (" << nameLen << "), possible format mismatch." << std::endl;
+                 break;
+             }
+             std::string name = reader.ReadString(nameLen);
+             
+             uint32_t diffLen = reader.Read<uint32_t>();
+             std::string diffuse = reader.ReadString(diffLen);
+             
+             uint32_t normLen = reader.Read<uint32_t>();
+             std::string normal = reader.ReadString(normLen);
+             
+             tempMaterials.push_back({name, diffuse, normal});
+
+             // Create Dummy Material & Instance
+             auto mat = std::make_shared<Material>();
+             // We can store the name/paths in the material for debug/loading later if Material class supports it
+             // For now, just create the instance
+             materials.push_back(mat);
+             auto inst = std::make_shared<MaterialInstance>(mat.get());
+             materialInstances.push_back(inst);
+             
+             std::cout << "  Mat " << i << ": " << name << " (Diff: " << diffuse << ")" << std::endl;
+        }
+    } else {
+         std::cerr << "SceneDataAdapter: numMaterials suspiciously large, assuming Old Format or Error." << std::endl;
+         // Rewind? We can't rewind BlobReader easily without creating new one or hacking offset.
+         // But we made BlobReader private.
+         // Let's just hope we are using the new format.
+    }
+
+    // 2. lod_count
     if (reader.Remaining() < 4) return result;
     uint32_t lodCount = reader.Read<uint32_t>();
+    std::cout << "lodCount: " << lodCount << std::endl;
+    
+    std::vector<float> thresholds(lodCount);
+    if (reader.Remaining() < sizeof(float) * lodCount) return result;
+    reader.Read(thresholds.data(), sizeof(float) * lodCount);
+
+    // Skip lod_offsets
+    if (reader.Remaining() < sizeof(uint32_t) * lodCount) return result;
+    reader.Skip(sizeof(uint32_t) * lodCount);
     
     for (uint32_t lod = 0; lod < lodCount; ++lod) {
         if (reader.Remaining() < 8) break;
-        float threshold = reader.Read<float>();
         uint32_t submeshCount = reader.Read<uint32_t>();
-        reader.Skip(4); // Skip size_of_submeshes
+        uint32_t sizeOfSubmeshes = reader.Read<uint32_t>(); // Read and use variable to avoid skip confusion
         
+        std::cout << "LOD " << lod << ": SubmeshCount=" << submeshCount << ", SizeOfSubmeshes=" << sizeOfSubmeshes << std::endl;
+
         for (uint32_t i = 0; i < submeshCount; ++i) {
              if (reader.Remaining() < 20) break;
              // Read submesh header
-                     uint32_t elementSize = reader.Read<uint32_t>();
-                     uint32_t vertexCount = reader.Read<uint32_t>();
-                     uint32_t indexCount = reader.Read<uint32_t>();
-                     uint32_t elementsType = reader.Read<uint32_t>();
-                     uint32_t primitiveTopology = reader.Read<uint32_t>();
-                     
-                     std::cout << "Submesh " << i << " (LOD " << lod << "): Verts=" << vertexCount 
-                               << ", Indices=" << indexCount << ", ElementSize=" << elementSize << std::endl;
+             int32_t materialIndex = reader.Read<int32_t>();
+             uint32_t elementSize = reader.Read<uint32_t>();
+             
+             uint32_t vertexCount, indexCount, elementsType, primitiveTopology;
 
-                     // Data sizes
+             // Heuristic to detect Old Format (shifted fields due to missing MaterialIndex)
+             if (elementSize > 200) {
+                 // Old Format: [ElementSize] [VertexCount] [IndexCount] [ElementType] [PrimitiveTopology]
+                 // We read [ElementSize] as materialIndex, and [VertexCount] as elementSize.
+                 uint32_t realElementSize = (uint32_t)materialIndex;
+                 uint32_t realVertexCount = elementSize;
+                 
+                 vertexCount = realVertexCount;
+                 elementSize = realElementSize;
+                 materialIndex = -1; // Default
+                 
+                 indexCount = reader.Read<uint32_t>();
+                 elementsType = reader.Read<uint32_t>();
+                 primitiveTopology = reader.Read<uint32_t>();
+                 
+                 std::cout << "DEBUG: Detected Old Format. Adapted values: MatIdx=" << materialIndex 
+                           << ", ElemSize=" << elementSize << ", Verts=" << vertexCount << std::endl;
+             } else {
+                 // New Format: [MatIdx] [ElemSize] [VertCount] [IdxCount] [ElemType] [PrimTopo]
+                 if (reader.Remaining() < 16) break; // Need 4 more ints
+                 
+                 vertexCount = reader.Read<uint32_t>();
+                 indexCount = reader.Read<uint32_t>();
+                 elementsType = reader.Read<uint32_t>();
+                 primitiveTopology = reader.Read<uint32_t>();
+             }
+             
+             (void)elementsType;
+             (void)primitiveTopology;
+
+             
+             std::cout << "Submesh " << i << " (LOD " << lod << "): MatIdx=" << materialIndex << ", Verts=" << vertexCount 
+                       << ", Indices=" << indexCount << ", ElementSize=" << elementSize << std::endl;
+
+             // Data sizes
              uint32_t positionSize = 12 * vertexCount;
              uint32_t elementBufferSize = elementSize * vertexCount;
              uint32_t indexSize = (vertexCount < (1 << 16)) ? 2 : 4;
              uint32_t indexBufferSize = indexSize * indexCount;
              
-             // Alignment
-             uint32_t alignment = 4;
-             uint32_t alignedPosSize = align_up(positionSize, alignment);
-             uint32_t alignedElemSize = align_up(elementBufferSize, alignment);
+             // Alignment (Match MeshCPU.cpp align16 logic which aligns absolute offset)
+             size_t currentOffset = reader.GetOffset();
+             
+             uint32_t posPadding = 0;
+             if (vertexCount > 0) {
+                 size_t endPos = currentOffset + positionSize;
+                 size_t alignedEndPos = (endPos + 15) & ~15;
+                 posPadding = (uint32_t)(alignedEndPos - endPos);
+             }
+             
+             uint32_t elemPadding = 0;
+             if (elementBufferSize > 0) {
+                 size_t currentElemOffset = currentOffset + positionSize + posPadding;
+                 size_t endElem = currentElemOffset + elementBufferSize;
+                 size_t alignedEndElem = (endElem + 15) & ~15;
+                 elemPadding = (uint32_t)(alignedEndElem - endElem);
+             }
              
              // Pointers
              const uint8_t* posPtr = static_cast<const uint8_t*>(reader.GetCurrentPtr());
-             const uint8_t* elemPtr = posPtr + alignedPosSize;
-             const uint8_t* idxPtr = elemPtr + alignedElemSize;
+             const uint8_t* elemPtr = posPtr + positionSize + posPadding;
+             const uint8_t* idxPtr = elemPtr + elementBufferSize + elemPadding;
              
              // Skip data in reader
-             uint32_t totalSize = alignedPosSize + alignedElemSize + indexBufferSize;
+             uint32_t totalSize = positionSize + posPadding + elementBufferSize + elemPadding + indexBufferSize;
              if (reader.Remaining() < totalSize) {
                  std::cerr << "Incomplete submesh data." << std::endl;
                  break;
@@ -114,30 +260,79 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              reader.Skip(totalSize);
              
              // Create Interleaved Data
-             uint32_t vertexStride = 12 + elementSize;
-             std::vector<uint8_t> interleavedVertices(vertexCount * vertexStride);
-             
-             for (uint32_t v = 0; v < vertexCount; ++v) {
-                 // Copy Position
-                 memcpy(interleavedVertices.data() + v * vertexStride, posPtr + v * 12, 12);
-                 // Copy Elements
-                 if (elementSize > 0) {
-                     memcpy(interleavedVertices.data() + v * vertexStride + 12, elemPtr + v * elementSize, elementSize);
-                 }
+        // Force standard stride (32 bytes) to match Metal shader (12 Pos + 20 Element)
+        constexpr uint32_t TARGET_ELEMENT_SIZE = 20;
+        constexpr uint32_t TARGET_VERTEX_STRIDE = 12 + TARGET_ELEMENT_SIZE;
+        
+        // Determine source strides
+        // WARNING: The binary file format for Positions MUST be 12 bytes (packed float3).
+        // MeshCPU.cpp on Mac might write 16 bytes (sizeof(simd::float3)), but pack_geometry.py (Python) writes 12 bytes.
+        // We assume 12 bytes to be safe and platform-independent for the file format.
+        const uint32_t srcPosStride = 12; 
+        const uint32_t srcElemStride = elementSize;
+
+        std::cout << "SceneDataAdapter: Interleaving - SrcPosStride=" << srcPosStride 
+                  << ", SrcElemStride=" << srcElemStride 
+                  << ", TargetStride=" << TARGET_VERTEX_STRIDE << std::endl;
+        
+        std::vector<uint8_t> interleavedVertices(vertexCount * TARGET_VERTEX_STRIDE);
+        // Zero initialize to handle padding/missing elements safely
+        memset(interleavedVertices.data(), 0, interleavedVertices.size());
+        
+        for (uint32_t v = 0; v < vertexCount; ++v) {
+            uint8_t* dstVertex = interleavedVertices.data() + v * TARGET_VERTEX_STRIDE;
+            
+            // 1. Copy Position (Always 12 bytes: x, y, z)
+            // Skip padding if srcPosStride > 12 (though we force 12 now)
+            memcpy(dstVertex, posPtr + v * srcPosStride, 12);
+            
+            // 2. Copy Elements
+            if (srcElemStride > 0) {
+                uint8_t* dstElem = dstVertex + 12;
+                const uint8_t* srcElem = elemPtr + v * srcElemStride;
+                
+                if (srcElemStride >= 24) {
+                    // Special handling for static_normal_texture on platforms with padding (e.g. Mac C++ writer)
+                    // Layout: [Color+Sign+Normal+Tangent (12 bytes)] [Padding (4 bytes)] [UV (8 bytes)] ...
+                    // Target: [Color+Sign+Normal+Tangent (12 bytes)] [UV (8 bytes)]
+                    memcpy(dstElem, srcElem, 12);      // Copy Color, Normal, Tangent
+                    // Check if we have enough space for UV
+                    // UV starts at offset 16 in source
+                    memcpy(dstElem + 12, srcElem + 16, 8); // Copy UV
+                } else {
+                    // Standard copy (clamp to target size)
+                    // e.g. 20 bytes -> 20 bytes
+                    uint32_t copySize = std::min(srcElemStride, TARGET_ELEMENT_SIZE);
+                    memcpy(dstElem, srcElem, copySize);
+                }
+            }
+        }
+
+             if (vertexCount > 0) {
+                 const float* p = reinterpret_cast<const float*>(interleavedVertices.data());
+                 std::cout << "DEBUG: Mesh " << i << " Vertex 0 Pos: " << p[0] << ", " << p[1] << ", " << p[2] << std::endl;
              }
              
              RenderMesh* mesh = new RenderMesh();
              rhi::DataIndexType idxType = (indexSize == 2) ? rhi::DataIndexType::UInt16 : rhi::DataIndexType::UInt32;
              
              if (mesh->Create(device, primal::id::invalid_id, 
-                              interleavedVertices.data(), vertexCount, vertexStride,
+                              interleavedVertices.data(), vertexCount, TARGET_VERTEX_STRIDE,
                               idxPtr, indexCount, idxType)) {
                  SceneDataMeshInfo info;
                  info.mesh = mesh;
                  info.lodId = lod;
-                 info.lodThreshold = threshold;
-                 info.name = "Mesh_" + std::to_string(lod) + "_" + std::to_string(i);
-                 result.push_back(info);
+                 info.lodThreshold = thresholds[lod];
+                 info.materialIndex = materialIndex;
+                if (materialIndex >= 0 && (size_t)materialIndex < materialInstances.size()) {
+                    info.materialInstance = materialInstances[materialIndex];
+                }
+                if (materialIndex >= 0 && (size_t)materialIndex < tempMaterials.size()) {
+                    info.diffuseTexturePath = tempMaterials[materialIndex].diffuse;
+                    info.normalTexturePath = tempMaterials[materialIndex].normal;
+                }
+                info.name = "Mesh_" + std::to_string(lod) + "_" + std::to_string(i);
+                result.push_back(info);
              } else {
                  delete mesh;
              }
@@ -147,6 +342,12 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
     return result;
 }
 
+// 函数说明: 加载完整的场景数据，包括材质、LOD 组、网格等。
+// 参数:
+//   device: RHI 设备指针
+//   data: 二进制数据指针
+//   size: 数据大小
+// 返回: 加载的网格信息列表
 std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device, const void* data, uint32_t size) {
     std::vector<SceneDataMeshInfo> result;
     if (!data || size == 0 || !device) return result;
@@ -273,9 +474,18 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
             std::shared_ptr<MaterialInstance> assignedMatInst = nullptr;
             std::shared_ptr<Material> assignedMaterial = nullptr;
             
+            std::cout << "Mesh: " << meshName << ", MaterialIndex: " << materialIndex << ", TotalMaterials: " << materials.size() << std::endl;
+
             if (materialIndex >= 0 && (size_t)materialIndex < materialInstances.size()) {
                 assignedMatInst = materialInstances[materialIndex];
                 assignedMaterial = materials[materialIndex];
+                if (assignedMaterial) {
+                    std::cout << "  Assigned Material: " << materialIndex << std::endl;
+                } else {
+                     std::cout << "  Assigned Material is NULL at index " << materialIndex << std::endl;
+                }
+            } else {
+                std::cout << "  Invalid Material Index or Out of Bounds!" << std::endl;
             }
             
             // Create RenderMesh
@@ -287,6 +497,12 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
             const uint8_t* currElem = elementData;
 
             for (uint32_t v = 0; v < numVertices; ++v) {
+                // Debug: Print first vertex of each mesh
+                if (v == 0) {
+                     const float* p = reinterpret_cast<const float*>(currPos);
+                     std::cout << "Mesh: " << meshName << " Vertex 0 Position: " << p[0] << ", " << p[1] << ", " << p[2] << std::endl;
+                }
+
                 // Copy Position
                 memcpy(destPtr, currPos, sizeof(float) * 3);
                 destPtr += sizeof(float) * 3;
@@ -311,9 +527,16 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
                              interleavedData.data(), numVertices, vertexSize,
                              indexData, numIndices, indexType)) {
                 
-                // Note: assignedMaterial is still null because of the loop issue.
-                // I will fix this by keeping a separate vector of materials.
-                result.push_back({meshName, lodId, lodThreshold, mesh, assignedMaterial, assignedMatInst});
+                std::string diffusePath;
+                std::string normalPath;
+                /*
+                if (materialIndex >= 0 && (size_t)materialIndex < tempMaterials.size()) {
+                    diffusePath = tempMaterials[materialIndex].diffuse;
+                    normalPath = tempMaterials[materialIndex].normal;
+                }
+                */
+                
+                result.push_back({meshName, lodId, lodThreshold, mesh, materialIndex, diffusePath, normalPath, assignedMaterial, assignedMatInst});
             } else {
                 delete mesh;
                 // Log error?

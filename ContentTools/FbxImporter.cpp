@@ -154,6 +154,42 @@ namespace primal::tools
 		if (lod.meshes.size()) _scene->lod_groups.emplace_back(lod);
 	}
 
+	void fbx_context::process_materials()
+	{
+		const s32 material_count{ _fbx_scene->GetMaterialCount() };
+		for (s32 i{ 0 }; i < material_count; ++i)
+		{
+			FbxSurfaceMaterial* fbx_material{ _fbx_scene->GetMaterial(i) };
+			if (!fbx_material) continue;
+			if (_material_map.find(fbx_material) != _material_map.end()) continue;
+
+			material m;
+			m.name = fbx_material->GetName();
+			_material_map[fbx_material] = (u32)_scene->materials.size();
+
+			auto get_texture = [](FbxProperty& prop) -> std::string {
+				if (prop.IsValid()) {
+					const s32 texture_count{ prop.GetSrcObjectCount<FbxFileTexture>() };
+					if (texture_count > 0) {
+						FbxFileTexture* texture{ prop.GetSrcObject<FbxFileTexture>(0) };
+						if (texture && texture->GetRelativeFileName()) {
+							return texture->GetRelativeFileName();
+						}
+					}
+				}
+				return "";
+			};
+
+			FbxProperty diffuse_prop{ fbx_material->FindProperty(FbxSurfaceMaterial::sDiffuse) };
+			m.diffuse_texture = get_texture(diffuse_prop);
+
+			FbxProperty normal_prop{ fbx_material->FindProperty(FbxSurfaceMaterial::sNormalMap) };
+			m.normal_texture = get_texture(normal_prop);
+
+			_scene->materials.emplace_back(m);
+		}
+	}
+
 	bool fbx_context::get_mesh_data(FbxMesh* fbx_mesh, mesh & m)
 	{
 		assert(fbx_mesh);
@@ -212,10 +248,20 @@ namespace primal::tools
 			{
 				const s32 mtl_index{ mtl_indices->GetAt(i) };
 				assert(mtl_index >= 0);
-				m.material_indices.emplace_back((u32)mtl_index);
-				if (std::find(m.material_used.begin(), m.material_used.end(), (u32)mtl_index) == m.material_used.end())
+
+				FbxSurfaceMaterial* material{ node->GetMaterial(mtl_index) };
+				u32 global_material_index{ u32_invalid_id };
+				if (material) {
+					auto it{ _material_map.find(material) };
+					if (it != _material_map.end()) {
+						global_material_index = it->second;
+					}
+				}
+
+				m.material_indices.emplace_back(global_material_index);
+				if (std::find(m.material_used.begin(), m.material_used.end(), global_material_index) == m.material_used.end())
 				{
-					m.material_used.emplace_back((u32)mtl_index);
+					m.material_used.emplace_back(global_material_index);
 				}
 			}
 		}
@@ -303,6 +349,8 @@ namespace primal::tools
 	void fbx_context::get_scene(FbxNode* root)
 	{
 		assert(is_valid());
+
+		process_materials();
 
 		if (!root)
 		{

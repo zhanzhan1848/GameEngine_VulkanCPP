@@ -167,12 +167,25 @@ void RenderMesh::SetEntityId(primal::id::id_type id) {
 }
 
 void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount, uint32_t startInstance, uint32_t bindingSlot) {
-    if (!cmdBuffer || !IsValid()) return;
+    if (!cmdBuffer || !IsValid()) {
+        if (!IsValid()) {
+            std::cerr << "RenderMesh::Draw Error: Mesh is invalid! VBuffer: " << vertexBuffer_ << ", Count: " << vertexCount_ << std::endl;
+        }
+        return;
+    }
 
     // 绑定顶点缓冲区
     rhi::ResourceHandle buffers[] = { vertexBuffer_ };
     uint64_t offsets[] = { 0 };
     cmdBuffer->BindVertexBuffers(bindingSlot, 1, buffers, offsets);
+
+    // Debug: Print Draw Info once
+    static bool printed = false;
+    if (!printed && vertexCount_ > 0) {
+        std::cout << "RenderMesh::Draw - Binding Vertex Buffer " << vertexBuffer_ << " to slot " << bindingSlot << " Offset 0" << std::endl;
+        std::cout << "RenderMesh::Draw - Drawing " << (indexBuffer_ != rhi::handles::INVALID_RESOURCE ? indexCount_ : vertexCount_) << " primitives." << std::endl;
+        printed = true;
+    }
 
     if (indexBuffer_ != rhi::handles::INVALID_RESOURCE && indexCount_ > 0) {
         // 绑定索引缓冲区
@@ -195,8 +208,8 @@ rhi::ResourceHandle RenderMesh::CreateBuffer(rhi::RHIDeviceBase* device, const v
         .size = size,
         .type = type,
         // 优先使用静态内存以获得最佳性能
-        .usage = rhi::GPUMemoryUsage::Dynamic, // Changed from Static to Dynamic for debugging
-        .memoryUsage = rhi::GPUMemoryUsage::Dynamic,
+        .usage = rhi::GPUMemoryUsage::Static,
+        .memoryUsage = rhi::GPUMemoryUsage::Static,
     };
     
     // 设置绑定标志

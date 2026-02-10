@@ -1081,7 +1081,7 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_RenderLayerComponent_Test
     COMMAND RHI_EntityManager_Test
     COMMAND TestRenderSystemECS
-    COMMAND TestSceneDataAdapter
+    COMMAND StandaloneGraphics_SceneDataAdapter_Test
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
@@ -1148,25 +1148,25 @@ set_target_properties(TestLightProbe PROPERTIES
 target_compile_definitions(TestLightProbe PRIVATE DEBUG _DEBUG)
 
 # 创建SceneDataAdapter测试
-add_executable(TestSceneDataAdapter 
+add_executable(StandaloneGraphics_SceneDataAdapter_Test 
     Graphics/TestSceneDataAdapter.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/SceneDataAdapter.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHICommand.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
 )
-target_include_directories(TestSceneDataAdapter PRIVATE 
+target_include_directories(StandaloneGraphics_SceneDataAdapter_Test PRIVATE 
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
     ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
 )
-target_link_libraries(TestSceneDataAdapter PRIVATE Engine)
-add_test(NAME TestSceneDataAdapter COMMAND TestSceneDataAdapter)
-set_target_properties(TestSceneDataAdapter PROPERTIES
+target_link_libraries(StandaloneGraphics_SceneDataAdapter_Test PRIVATE Engine)
+add_test(NAME StandaloneGraphics_SceneDataAdapter_Test COMMAND StandaloneGraphics_SceneDataAdapter_Test)
+set_target_properties(StandaloneGraphics_SceneDataAdapter_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestSceneDataAdapter PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneGraphics_SceneDataAdapter_Test PRIVATE DEBUG _DEBUG)
 
 # 创建RenderSystem集成测试
 add_executable(TestRenderSystemIntegration Graphics/TestRenderSystemIntegration.cpp)

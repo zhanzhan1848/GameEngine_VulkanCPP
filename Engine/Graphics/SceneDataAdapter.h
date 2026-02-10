@@ -15,6 +15,9 @@ struct SceneDataMeshInfo {
     uint32_t lodId;
     float lodThreshold;
     RenderMesh* mesh;
+    int32_t materialIndex{-1}; // 材质索引
+    std::string diffuseTexturePath; // 漫反射贴图路径 (从文件加载)
+    std::string normalTexturePath;  // 法线贴图路径 (从文件加载)
     std::shared_ptr<Material> material{nullptr}; // 材质资源 (共享所有权)
     std::shared_ptr<MaterialInstance> materialInstance{nullptr}; // 关联的材质实例
 };

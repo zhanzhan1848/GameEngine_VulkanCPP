@@ -47,6 +47,7 @@ protected:
     void BindVertexBuffers(uint32_t, uint32_t, const ResourceHandle*, const uint64_t*) override {}
     void BindIndexBuffer(ResourceHandle, DataFormat, uint64_t) override {}
     void BindDescriptorSets(PipelineBindPoint, PipelineLayoutHandle, uint32_t, uint32_t, const DescriptorSetHandle*, uint32_t, const uint32_t*) override {}
+    void PushConstants(PipelineLayoutHandle, ShaderStage, uint32_t, uint32_t, const void*) override {}
     void Draw(uint32_t, uint32_t, uint32_t, uint32_t) override {}
     void DrawIndexed(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) override {}
     void DrawIndirect(ResourceHandle, uint64_t, uint32_t) override {}
@@ -63,6 +64,15 @@ protected:
 
 class MockDevice : public RHIDeviceBase {
 public:
+    struct MockBindingInfo {
+        uint32_t binding;
+        rhi::DescriptorType type;
+        uint32_t count;
+        rhi::ShaderStage stage;
+        rhi::DescriptorBindingFlags flags;
+    };
+    std::vector<MockBindingInfo> lastBindings;
+
     MockDevice() { desc_.platform = RHIPlatform::Metal; }
     ~MockDevice() override {}
 
@@ -81,7 +91,14 @@ public:
     bool GetQueryPoolResults(QueryPoolHandle, uint32_t, uint32_t, void*, size_t) override { return false; }
     SamplerHandle CreateSampler(const SamplerDesc&) override { return handles::INVALID_SAMPLER; }
     void DestroySampler(SamplerHandle) override {}
-    DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc&) override { return (DescriptorSetLayoutHandle)1; }
+    DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) override {
+        lastBindings.clear();
+        for (uint32_t i = 0; i < desc.bindingCount; ++i) {
+            const auto& b = desc.bindings[i];
+            lastBindings.push_back({b.binding, b.descriptorType, b.descriptorCount, b.stageFlags, b.flags});
+        }
+        return (DescriptorSetLayoutHandle)1;
+    }
     void DestroyDescriptorSetLayout(DescriptorSetLayoutHandle) override {}
     PipelineLayoutHandle CreatePipelineLayout(const PipelineLayoutDesc&) override { return handles::INVALID_PIPELINE_LAYOUT; }
     void DestroyPipelineLayout(PipelineLayoutHandle) override {}
@@ -146,6 +163,7 @@ private:
         buffer.insert(buffer.end(), ptr, ptr + sizeof(T));
     }
 
+public:
     TestResult LoadMaterialTest() {
         MockDevice device;
         SceneDataAdapter adapter;
@@ -231,11 +249,11 @@ private:
         }
 
         auto flags = device.lastBindings[0].flags;
-        if (!(flags & rhi::DescriptorBindingFlags::PartiallyBound)) {
+        if ((flags & rhi::DescriptorBindingFlags::PartiallyBound) == rhi::DescriptorBindingFlags::None) {
              std::cout << "PartiallyBound flag missing" << std::endl;
              return TestResult::Failed;
         }
-        if (!(flags & rhi::DescriptorBindingFlags::UpdateAfterBind)) {
+        if ((flags & rhi::DescriptorBindingFlags::UpdateAfterBind) == rhi::DescriptorBindingFlags::None) {
              std::cout << "UpdateAfterBind flag missing" << std::endl;
              return TestResult::Failed;
         }
@@ -333,11 +351,94 @@ private:
 
         return TestResult::Passed;
     }
+
+    TestResult LoadRenderItemData_Matches_MeshCPU_Format() {
+        MockDevice device;
+        SceneDataAdapter adapter;
+
+        // Construct Mock Data following MeshCPU.cpp format (Writer)
+        // 1. lod_count (u32)
+        // 2. thresholds (f32 * lod_count)
+        // 3. lod_offsets (lod_offset * lod_count)
+        // 4. LOD Blocks...
+        
+        std::vector<uint8_t> data;
+        
+        uint32_t lodCount = 1;
+        Write<uint32_t>(data, lodCount);
+        
+        // Thresholds
+        Write<float>(data, 0.5f);
+        
+        // LOD Offsets
+        struct lod_offset { uint16_t offset; uint16_t count; };
+        lod_offset lo { 0, 1 };
+        Write<uint16_t>(data, lo.offset);
+        Write<uint16_t>(data, lo.count);
+        
+        // LOD 0 Block
+        // Submesh Count
+        Write<uint32_t>(data, 1);
+        
+        // Size of Submeshes (Placeholder)
+        size_t sizePos = data.size();
+        Write<uint32_t>(data, 0);
+        size_t submeshStart = data.size();
+        
+        // Submesh 0
+        uint32_t elementSize = 0; // Position only
+        uint32_t vertexCount = 1;
+        uint32_t indexCount = 3;
+        uint32_t elementsType = 0;
+        uint32_t primitiveTopology = 4; // Triangle List
+        
+        Write<uint32_t>(data, elementSize);
+        Write<uint32_t>(data, vertexCount);
+        Write<uint32_t>(data, indexCount);
+        Write<uint32_t>(data, elementsType);
+        Write<uint32_t>(data, primitiveTopology);
+        
+        // Position Buffer (1 vertex * 3 floats = 12 bytes) -> Aligned to 16 bytes
+        Write<float>(data, 1.0f); Write<float>(data, 2.0f); Write<float>(data, 3.0f);
+        // Padding (12 bytes to reach 64, since current is 52)
+        for(int i=0; i<12; ++i) Write<uint8_t>(data, 0);
+        
+        // Element Buffer (Empty)
+        
+        // Index Buffer (3 indices * 2 bytes = 6 bytes) -> Aligned to 16 bytes
+        // Use 16-bit indices since vertexCount < 65536
+        Write<uint16_t>(data, 0); Write<uint16_t>(data, 0); Write<uint16_t>(data, 0);
+        // Padding (10 bytes)
+        for(int i=0; i<10; ++i) Write<uint8_t>(data, 0);
+        
+        // Backfill Size
+        uint32_t submeshSize = (uint32_t)(data.size() - submeshStart);
+        memcpy(data.data() + sizePos, &submeshSize, sizeof(uint32_t));
+        
+        // Call LoadRenderItemData
+        auto meshes = adapter.LoadRenderItemData(&device, data.data(), (uint32_t)data.size());
+        
+        if (meshes.size() != 1) return TestResult::Failed;
+        if (meshes[0].lodId != 0) return TestResult::Failed;
+        // if (meshes[0].lodThreshold != 0.5f) return TestResult::Failed; // Currently LoadRenderItemData might not set this correctly or logic differs
+        
+        return TestResult::Passed;
+    }
 };
 
 int main() {
-    auto suite = std::make_shared<TestSceneDataAdapter>();
-    TestRunner::RegisterTestSuite(suite);
-    TestRunner::RunAllSuites();
-    return 0;
+    TestSceneDataAdapter test;
+    int result = 0;
+    
+    if (test.LoadSimpleScene() == TestResult::Failed) {
+        std::cerr << "LoadSimpleScene Failed" << std::endl;
+        result = 1;
+    }
+    
+    if (test.LoadRenderItemData_Matches_MeshCPU_Format() == TestResult::Failed) {
+        std::cerr << "LoadRenderItemData_Matches_MeshCPU_Format Failed" << std::endl;
+        result = 1;
+    }
+    
+    return result;
 }

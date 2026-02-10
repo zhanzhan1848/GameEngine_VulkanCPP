@@ -142,6 +142,10 @@ private:
     // Helper Functions
     bool CreateUniformBuffers();
     bool CreateDescriptorSets();
+    
+    // Texture Loading
+    std::unordered_map<std::string, primal::graphics::rhi::ResourceHandle> textureCache;
+    primal::graphics::rhi::ResourceHandle LoadTextureFromFile(const std::string& path, bool isNormalMap = false);
 
 public:
     static void OnF1Pressed();
