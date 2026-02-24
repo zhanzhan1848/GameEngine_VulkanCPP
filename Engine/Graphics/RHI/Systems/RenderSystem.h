@@ -65,6 +65,18 @@ public:
     uint32_t GetCurrentFrameIndex() const { return currentFrameIndex_; }
 
     /**
+     * @brief 获取当前帧的 Command Buffer
+     * @return 当前帧的 Command Buffer 指针
+     */
+    rhi::RHICommandBuffer* GetCurrentCommandBuffer() { return cmdBuffers_[currentFrameIndex_]; }
+
+    /**
+     * @brief 获取当前帧的 Command Buffer 句柄
+     * @return 当前帧的 Command Buffer 句柄
+     */
+    rhi::CommandBufferHandle GetCurrentCommandBufferHandle() { return cmdBufferHandles_[currentFrameIndex_]; }
+
+    /**
      * @brief 注册材质实例
      * @param id 材质ID
      * @param materialInstance 材质实例指针 (共享所有权)

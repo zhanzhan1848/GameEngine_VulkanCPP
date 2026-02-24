@@ -55,11 +55,11 @@ namespace primal::graphics::rhi::metal {
      * @brief Metal平台特定的正交投影矩阵
      */
     inline m4x4 CreateOrthographicMatrix(float left, float right, float top, float bottom, float near, float far) {
-        float ral = right + left;
+        // float ral = right + left;
         float rsl = right - left;
-        float tab = top + bottom;
-        float tsb = top - bottom; // 注意这里 top 和 bottom 的方向取决于Y轴定义
-        float fan = far + near;
+        // float tab = top + bottom;
+        // float tsb = top - bottom; // 注意这里 top 和 bottom 的方向取决于Y轴定义
+        // float fan = far + near;
         float fsn = far - near;
 
         // Metal NDC Z [0, 1]

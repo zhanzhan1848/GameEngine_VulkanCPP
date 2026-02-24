@@ -370,6 +370,7 @@ project_rules.md
 *.plist
 
 build/
+xcode_build/
 lib/
 CMake/
 .DS_Store
@@ -396,3 +397,4 @@ TODO*
 !third_party/FBX_SDK/Mac/lib/release/
 
 !Engine/Graphics/RenderPipeline/RenderPasses/Debug/
+!Engine/Graphics/RHI/Shaders/Debug/

@@ -129,6 +129,37 @@ namespace primal::tools {
 		u32										material_idx{ u32_invalid_id };
 		utl::vector<u32>						raw_indices;
 
+		// Meshlet data
+		struct meshlet
+		{
+			u32 vertex_offset;
+			u32 triangle_offset;
+			u32 vertex_count;
+			u32 triangle_count;
+			
+			f32 cone_apex[3];
+			f32 cone_axis[3];
+			f32 cone_cutoff;
+			f32 center[3];
+			f32 radius;
+		};
+
+		utl::vector<meshlet>					meshlets;
+		utl::vector<u32>						meshlet_vertices;
+		utl::vector<u8>							meshlet_triangles;
+
+		// SDF data
+		struct sdf_data
+		{
+			u32 resolution[3];
+			f32 bounds_min[3];
+			f32 bounds_max[3];
+			utl::vector<u16> data; // half-float distance
+			utl::vector<u8> voxels; // 8-bit occupancy/density
+			utl::vector<u16> vector_field; // 4x half-float vector to nearest surface (RGBA)
+		};
+		sdf_data								sdf;
+
 		// Intermediate data
 		utl::vector<vertex>						vertices;
 		utl::vector<u32>						indices;

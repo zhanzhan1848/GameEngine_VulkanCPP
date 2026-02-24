@@ -65,6 +65,11 @@ public:
     }
 
     void shutdown() override {
+        if (_displayLink) {
+            CFRunLoopRemoveTimer(_runLoop, _displayLink, kCFRunLoopCommonModes);
+            CFRelease(_displayLink);
+            _displayLink = nullptr;
+        }
         if (_testCase) {
             _testCase->Shutdown();
         }

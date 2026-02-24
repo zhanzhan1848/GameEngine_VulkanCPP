@@ -246,7 +246,7 @@ bool MetalPipeline::Initialize(const GraphicsPipelineDesc& desc) {
         return false;
     }
 
-    // std::cout << "[MetalPipeline] Render pipeline state created successfully." << std::endl;
+    std::cout << "[MetalPipeline] Render pipeline state created successfully." << std::endl;
 
     return true;
 }

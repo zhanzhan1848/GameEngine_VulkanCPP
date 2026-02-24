@@ -126,7 +126,7 @@ public:
         uint32_t id = _pool.add(std::forward<Args>(args)...);
         
         if (sizeof(T) == 232) { // Trace MetalCommandBuffer
-             printf("Allocator Alloc: id=%u, T size=%zu\n", id, sizeof(T));
+             // printf("Allocator Alloc: id=%u, T size=%zu\n", id, sizeof(T));
         }
 
         // 如果是 RHIResource 的子类，自动设置 Handle
@@ -205,7 +205,7 @@ private:
         if (id >= _pool.capacity()) return;
         
         if (sizeof(T) == 232) { // Trace MetalCommandBuffer
-             printf("Allocator Free: id=%u, T size=%zu\n", id, sizeof(T));
+             // printf("Allocator Free: id=%u, T size=%zu\n", id, sizeof(T));
         }
 
         _pool.remove(id);

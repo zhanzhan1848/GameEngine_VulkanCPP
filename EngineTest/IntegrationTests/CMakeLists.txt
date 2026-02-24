@@ -179,9 +179,21 @@ if(APPLE)
     setup_test_target(TestSponzaRenderGraph)
     target_compile_definitions(TestSponzaRenderGraph PRIVATE "TEST_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0")
 
+    # 8. TestGeometryDebugSponza
+    add_executable(TestGeometryDebugSponza
+        "Main.cpp"
+        "TestGeometryDebugSponza.cpp"
+        "ShaderCompilation.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Input/InputMac.mm"
+    )
+    setup_test_target(TestGeometryDebugSponza)
+    target_compile_definitions(TestGeometryDebugSponza PRIVATE "TEST_GEOMETRY_DEBUG_SPONZA=1" "TEST_RENDERER=0")
+
 
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

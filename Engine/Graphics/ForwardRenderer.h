@@ -8,6 +8,7 @@
 #include "Graphics/Passes/BlurPass.h"
 #include "Graphics/Passes/SSRPass.h"
 #include "Graphics/Material.h"
+#include "RenderPipeline/RenderPasses/Debug/GeometryDebugPass.h"
 #include <unordered_map>
 
 namespace primal::graphics {
@@ -37,16 +38,20 @@ public:
                 const RenderView& view, 
                 rhi::ResourceHandle renderTarget, 
                 rhi::ResourceHandle depthStencil,
-                const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
+                const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
                 uint32_t frameIndex,
                 uint32_t width,
                 uint32_t height);
 
+    GeometryDebugSettings& GetDebugSettings() { return debugSettings_; }
+
 private:
+    GeometryDebugSettings debugSettings_;
+
     void DepthPrePass(rhi::RHICommandBuffer* cmdBuffer, 
                      const RenderView& view, 
                      rhi::ResourceHandle depthStencil,
-                     const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
+                     const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
                      const utl::vector<const RenderProxy*>& proxies,
                      uint32_t frameIndex,
                      uint32_t width,
@@ -55,13 +60,13 @@ private:
     void RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
                           const RenderScene& scene,
                           const RenderView& mainView,
-                          const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
+                          const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
                           uint32_t frameIndex);
 
     void ShadowPass(rhi::RHICommandBuffer* cmdBuffer, 
                    const RenderView& view, 
                    rhi::ResourceHandle shadowMap,
-                   const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
+                   const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
                    const utl::vector<const RenderProxy*>& proxies,
                    uint32_t frameIndex,
                    uint32_t arrayLayer);
@@ -71,12 +76,12 @@ private:
                     rhi::GlobalShaderData* globalData,
                     const utl::vector<RenderView>& shadowViews,
                     const utl::vector<float>& splits,
-                    const std::unordered_map<uint32_t, int>& lightShadowIndices,
-                    const std::unordered_map<uint32_t, rhi::math::m4x4>& lightViewProjs);
+                    const ::std::unordered_map<uint32_t, int>& lightShadowIndices,
+                    const ::std::unordered_map<uint32_t, rhi::math::m4x4>& lightViewProjs);
 
     void OpaquePass(rhi::RHICommandBuffer* cmdBuffer, 
                    const RenderView& view, 
-                   const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
+                   const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
                    const utl::vector<const RenderProxy*>& proxies,
                    uint32_t frameIndex,
                    bool useDepthEqual,
@@ -85,7 +90,7 @@ private:
 
     void TransparentPass(rhi::RHICommandBuffer* cmdBuffer, 
                         const RenderView& view, 
-                        const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
+                        const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
                         const utl::vector<const RenderProxy*>& proxies,
                         uint32_t frameIndex);
 
@@ -121,7 +126,7 @@ private:
         void* frameBufferMapped{nullptr};
         rhi::DescriptorSetHandle descriptorSet{rhi::handles::INVALID_DESCRIPTOR_SET};
     };
-    std::unordered_map<id::id_type, ReflectionResource> reflectionResources_;
+    ::std::unordered_map<id::id_type, ReflectionResource> reflectionResources_;
     rhi::SamplerHandle reflectionSampler_{rhi::handles::INVALID_RESOURCE};
 
     // Passes

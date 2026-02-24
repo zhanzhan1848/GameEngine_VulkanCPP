@@ -31,7 +31,9 @@ int main(int argc, char* argv[]) {
 
     ImportFbx(input_file, &data, [](s32 val, s32 max) {
         // Simple progress indicator
-        // std::cout << "\rProgress: " << val << "/" << max << std::flush;
+        if (max > 0 && (val % 10 == 0 || val == max)) {
+             std::cout << "\rProgress: " << val << "/" << max << " (" << (val * 100 / max) << "%)" << std::flush;
+        }
     });
     
     std::cout << "Import finished." << std::endl;

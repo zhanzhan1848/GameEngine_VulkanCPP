@@ -4,6 +4,7 @@
 #include "TransformComponent.h"
 #include "ScriptComponent.h"
 #include "MeshComponent.h"
+#include "Engine/Utilities/Hash.h"
 
 namespace primal {
 
@@ -65,7 +66,15 @@ namespace primal {
 		namespace detail {
 			using script_ptr = std::unique_ptr<entity_script>;
 			using script_creator = script_ptr(*)(game_entity::entity entity);
-			using string_hash = std::hash<std::string>;
+			// using string_hash = std::hash<std::string>;
+            struct string_hash {
+                size_t operator()(const std::string& s) const {
+                    uint32_t hashOut;
+                    primal::utl::MurmurHash3_x86_32(s.data(), (int)s.length(), 0x9e3779b9, &hashOut);
+                    return hashOut;
+                }
+            };
+
 			u8 register_script(size_t, script_creator);
 			script_creator get_script_creator(size_t tag);
 #ifdef USE_WITH_EDITOR

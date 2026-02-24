@@ -1,6 +1,7 @@
 // Copyright (c) Contributors of Primal+
 // Distributed under the MIT license. See the LICENSE file in the project root for more information.
-#define TEST_SPONZA_RENDERGRAPH
+//#define TEST_SPONZA_RENDERGRAPH
+#define TEST_GEOMETRY_DEBUG_SPONZA
 #include "Test.h"
 
 #if defined(_MSC_VER)
@@ -23,6 +24,8 @@
 #include "TestMultiView.h"
 #elif defined(TEST_SPONZA_RENDERGRAPH)
 #include "TestSponzaRenderGraph.h"
+#elif defined(TEST_GEOMETRY_DEBUG_SPONZA)
+#include "TestGeometryDebugSponza.h"
 #else
 #error One of the tests need to be enabled
 #endif

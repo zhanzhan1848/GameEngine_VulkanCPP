@@ -13,19 +13,38 @@
 #include "Engine/Platform/Platform.h"
 #include "ShaderCompilation.h"
 #include "Engine/Graphics/RHI/Components/RHICamera.h"
+#include "Engine/Graphics/RenderPipeline/RenderPasses/Debug/GeometryDebugPass.h"
+#include "Engine/Utilities/Hash.h"
 
 #include <unordered_map>
 #include <string>
 #include <memory>
 
-class TestSponzaRenderGraph : public primal::test::RenderTestCase {
+class TestGeometryDebugSponza;
+
+class Engine_Test : public primal::test::RenderTestRunner {
 public:
+    Engine_Test();
+};
+
+struct StringHash {
+    size_t operator()(const std::string& key) const {
+        uint32_t hash;
+        primal::utl::MurmurHash3_x86_32(key.c_str(), (int)key.length(), 0, &hash);
+        return hash;
+    }
+};
+
+class TestGeometryDebugSponza : public primal::test::RenderTestCase {
+public:
+    virtual ~TestGeometryDebugSponza();
     bool Initialize() override;
     void Resize(uint32_t width, uint32_t height) override;
     void Run() override;
     void Shutdown() override;
 
 private:
+    bool isShutdown = false;
     // Core RHI & System
     primal::graphics::rhi::RHIDeviceBase* device = nullptr;
     std::unique_ptr<primal::graphics::rhi::RHIDeviceBase> device_ownership;
@@ -33,13 +52,16 @@ private:
     primal::graphics::RenderSystem renderSystem;
     std::unique_ptr<primal::graphics::rendergraph::RenderGraph> renderGraph;
     
+    // Camera
+    RHICamera m_camera;
+
     // Scene Assets
     primal::graphics::RenderScene scene;
     primal::graphics::RenderView view;
     std::vector<primal::graphics::SceneDataMeshInfo> sceneMeshes;
     
     // Shader Management
-    std::unordered_map<std::string, primal::graphics::rhi::ShaderHandle> shaderVariantMap;
+    std::unordered_map<std::string, primal::graphics::rhi::ShaderHandle, StringHash> shaderVariantMap;
     
     // Pass Resources
     primal::graphics::rhi::ResourceHandle skyboxTexture = primal::graphics::rhi::handles::INVALID_RESOURCE;
@@ -48,7 +70,7 @@ private:
     primal::graphics::rhi::ResourceHandle prefilteredMap = primal::graphics::rhi::handles::INVALID_RESOURCE;
     primal::graphics::rhi::ResourceHandle brdfLUT = primal::graphics::rhi::handles::INVALID_RESOURCE;
     
-    // Persistent Resources for Static Descriptor Sets
+    // Persistent Resources
     primal::graphics::rhi::ResourceHandle depthTexture = primal::graphics::rhi::handles::INVALID_RESOURCE;
     primal::graphics::rhi::ResourceHandle whiteTexture = primal::graphics::rhi::handles::INVALID_RESOURCE;
     primal::graphics::rhi::ResourceHandle normalTexture = primal::graphics::rhi::handles::INVALID_RESOURCE;
@@ -56,15 +78,18 @@ private:
     primal::graphics::rhi::ResourceHandle shadowMap1 = primal::graphics::rhi::handles::INVALID_RESOURCE;
     primal::graphics::rhi::ResourceHandle envCubemap = primal::graphics::rhi::handles::INVALID_RESOURCE;
 
-    // TAA Resources
-    primal::graphics::rhi::ResourceHandle historyTexture = primal::graphics::rhi::handles::INVALID_RESOURCE;
-    primal::graphics::rhi::ResourceHandle motionVectorTexture = primal::graphics::rhi::handles::INVALID_RESOURCE;
-    
+    // Samplers
+    primal::graphics::rhi::SamplerHandle defaultSampler = primal::graphics::rhi::handles::INVALID_SAMPLER;
+    primal::graphics::rhi::SamplerHandle brdfSampler = primal::graphics::rhi::handles::INVALID_SAMPLER;
+    primal::graphics::rhi::SamplerHandle debugSampler = primal::graphics::rhi::handles::INVALID_SAMPLER;
+
     // Test State
     uint32_t frameCount = 0;
-    bool debugPassEnabled = false;
     uint32_t renderWidth = 0;
     uint32_t renderHeight = 0;
+    
+    // Geometry Debug Settings
+    primal::graphics::GeometryDebugSettings debugSettings;
 
     // Helper Functions
     bool CompileAllShaders();
@@ -73,103 +98,50 @@ private:
     bool SetupIBL();
     void BuildRenderGraph(primal::graphics::rendergraph::RenderGraph& graph, primal::graphics::rhi::ResourceHandle backBuffer);
     void UpdateScene();
-    void ValidateFrame();
-    void WriteTexture(primal::graphics::rhi::ResourceHandle texture, const void* data, uint64_t size, uint32_t width, uint32_t height, uint32_t layer = 0);
-    
-    primal::graphics::rhi::ResourceHandle defaultMaterialSet = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    bool CreateUniformBuffers();
+    bool CreateDescriptorSets();
     bool CreatePersistentResources();
     
-    // Pipelines
+    primal::graphics::rhi::ResourceHandle defaultMaterialSet = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    
+    // Pipelines (reused from Sponza test for basic rendering)
     primal::graphics::rhi::PipelineHandle gbufferPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
     primal::graphics::rhi::PipelineHandle lightingPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
     primal::graphics::rhi::PipelineHandle skyboxPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
     primal::graphics::rhi::PipelineHandle shadowPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
+    primal::graphics::rhi::PipelineHandle blitPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
     
     // Pipeline Layouts
     primal::graphics::rhi::PipelineLayoutHandle gbufferLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
     primal::graphics::rhi::PipelineLayoutHandle lightingLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
     primal::graphics::rhi::PipelineLayoutHandle skyboxLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
     primal::graphics::rhi::PipelineLayoutHandle shadowLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
+    primal::graphics::rhi::PipelineLayoutHandle blitLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
 
     // Descriptor Set Layouts
     primal::graphics::rhi::DescriptorSetLayoutHandle globalSetLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     primal::graphics::rhi::DescriptorSetLayoutHandle materialSetLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     primal::graphics::rhi::DescriptorSetLayoutHandle lightingSetLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     primal::graphics::rhi::DescriptorSetLayoutHandle skyboxSetLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    primal::graphics::rhi::DescriptorSetLayoutHandle blitSetLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
 
     // Descriptor Sets
     primal::graphics::rhi::DescriptorSetHandle globalDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
     primal::graphics::rhi::DescriptorSetHandle lightingDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
     primal::graphics::rhi::DescriptorSetHandle skyboxDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
-    std::unordered_map<primal::graphics::MaterialInstance*, primal::graphics::rhi::DescriptorSetHandle> materialDescriptorSets;
+    primal::graphics::rhi::DescriptorSetHandle blitDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
 
-    bool ownsMaterialSetLayout = false;
-
-    // Sampler
-    primal::graphics::rhi::SamplerHandle defaultSampler = primal::graphics::rhi::handles::INVALID_SAMPLER;
-    primal::graphics::rhi::SamplerHandle brdfSampler = primal::graphics::rhi::handles::INVALID_SAMPLER;
-
-    // Uniform Buffers
-    primal::graphics::rhi::ResourceHandle sceneDataBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    // Buffers
     primal::graphics::rhi::ResourceHandle viewDataBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
-    primal::graphics::rhi::ResourceHandle readbackBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ResourceHandle sceneDataBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
 
     // Shadow Matrices
     primal::math::m4x4 lightVP0;
     primal::math::m4x4 lightVP1;
 
-    // TAA State
-    primal::math::v2 previousJitter = {0.0f, 0.0f};
-    primal::math::m4x4 previousViewProjection = primal::graphics::rhi::math::MatrixIdentity();
-
-    // Debug/Blit Resources
-    primal::graphics::rhi::PipelineHandle debugPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
-    primal::graphics::rhi::PipelineLayoutHandle debugLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
-    primal::graphics::rhi::DescriptorSetLayoutHandle debugSetLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
-    primal::graphics::rhi::DescriptorSetHandle debugDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
-    primal::graphics::rhi::SamplerHandle debugSampler = primal::graphics::rhi::handles::INVALID_SAMPLER;
-
-    // PostProcess Pipeline Resources
-    primal::graphics::rhi::PipelineHandle postProcessPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
-    primal::graphics::rhi::PipelineLayoutHandle postProcessLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
-    primal::graphics::rhi::DescriptorSetLayoutHandle postProcessSetLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
-    primal::graphics::rhi::DescriptorSetHandle postProcessDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
-
-    // TAA Pipeline Resources
-    primal::graphics::rhi::PipelineHandle taaPipeline = primal::graphics::rhi::handles::INVALID_PIPELINE;
-    primal::graphics::rhi::PipelineLayoutHandle taaLayout = primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT;
-    primal::graphics::rhi::DescriptorSetLayoutHandle taaSetLayout = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
-    primal::graphics::rhi::DescriptorSetHandle taaDescriptorSet = primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET;
-    primal::graphics::rhi::ResourceHandle taaUniformBuffer = primal::graphics::rhi::handles::INVALID_RESOURCE;
-
-    // Camera
-    primal::graphics::rhi::RHICamera m_camera;
-    std::chrono::steady_clock::time_point lastFrameTime;
-
-    // Helper Functions
-    bool CreateUniformBuffers();
-    bool CreateDescriptorSets();
+    // Static singleton for main entry
+    static TestGeometryDebugSponza* instance;
     
-    // Texture Loading
-    std::unordered_map<std::string, primal::graphics::rhi::ResourceHandle> textureCache;
-    primal::graphics::rhi::ResourceHandle LoadTextureFromFile(const std::string& path, bool isNormalMap, bool allowFallback = true);
-    primal::graphics::rhi::ResourceHandle LoadORMTexture(const std::string& assetBaseDir, const std::string& ormPath, const std::string& roughnessPath, const std::string& metallicPath);
-    primal::graphics::rhi::ResourceHandle CreateTextureFromData(uint32_t width, uint32_t height, const unsigned char* data, bool isSRGB);
-    
-    // Helper to normalize paths
-    std::string NormalizePath(const std::string& path);
-    // Helper to resolve texture path with multiple search directories
-    std::string ResolveTexturePath(const std::string& assetBaseDir, const std::string& filename);
-
-public:
-    static void OnF1Pressed();
-private:
-    static TestSponzaRenderGraph* instance;
+    // Resource Management
+    std::vector<primal::graphics::rhi::ResourceHandle> createdResources;
 };
-
-#ifdef TEST_SPONZA_RENDERGRAPH
-class Engine_Test : public primal::test::RenderTestRunner {
-public:
-    Engine_Test();
-};
-#endif

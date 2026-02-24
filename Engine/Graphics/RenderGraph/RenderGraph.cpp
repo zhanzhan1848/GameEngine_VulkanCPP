@@ -13,6 +13,17 @@ RenderGraph::RenderGraph(rhi::RHIDeviceBase& device) : device_(device) {
 
 RenderGraph::~RenderGraph() {
     Clear();
+    
+    // Destroy all pooled resources
+    for (const auto& res : resourcePool_) {
+        if (res.isTexture) {
+            device_.DestroyTexture(res.handle);
+        } else {
+            device_.DestroyBuffer(res.handle);
+        }
+    }
+    resourcePool_.clear();
+
     // Cleanup Query Pools
     for (int i = 0; i < 2; ++i) {
         if (queryFrames_[i].queryPool != rhi::handles::INVALID_QUERY_POOL) {

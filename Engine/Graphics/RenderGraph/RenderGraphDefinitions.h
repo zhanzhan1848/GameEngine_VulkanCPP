@@ -7,9 +7,9 @@
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RHI/Core/RHIResource.h"
 
-namespace primal::graphics::rendergraph {
-
 using namespace primal::graphics::rhi;
+
+namespace primal::graphics::rendergraph {
 
 // 资源句柄
 struct RGResourceHandle {
@@ -103,11 +103,12 @@ struct RGRenderPassDesc {
 
 namespace std {
     template<>
-    struct hash<primal::graphics::rendergraph::RGResourceHandle> {
+    struct ::std::hash<primal::graphics::rendergraph::RGResourceHandle> {
         size_t operator()(const primal::graphics::rendergraph::RGResourceHandle& handle) const {
-            // Combine index and version
-            // A simple hash combination
-            return std::hash<uint32_t>()(handle.index) ^ (std::hash<uint32_t>()(handle.version) << 1);
+            // Use MurmurHash3 from Engine/Utilities/Hash.h
+            uint32_t hashOut;
+            primal::utl::MurmurHash3_x86_32(&handle, sizeof(handle), 0x9e3779b9, &hashOut);
+            return hashOut;
         }
     };
 }

@@ -27,14 +27,14 @@ struct RGPassResourceDef {
  */
 class RenderGraphPass {
 public:
-    RenderGraphPass(const std::string& name, RGPassType type, RGPassCategory category = RGPassCategory::None)
+    RenderGraphPass(const ::std::string& name, RGPassType type, RGPassCategory category = RGPassCategory::None)
         : name_(name), type_(type), category_(category) {}
     
     virtual ~RenderGraphPass() = default;
 
     virtual void Execute(RenderGraphContext& context) = 0;
 
-    const std::string& GetName() const { return name_; }
+    const ::std::string& GetName() const { return name_; }
     RGPassType GetType() const { return type_; }
     RGPassCategory GetCategory() const { return category_; }
     
@@ -52,32 +52,32 @@ public:
         outputs_.push_back({resource, state, RGAccessType::Write});
     }
 
-    const std::vector<RGPassResourceDef>& GetInputs() const { return inputs_; }
-    const std::vector<RGPassResourceDef>& GetOutputs() const { return outputs_; }
+    const ::std::vector<RGPassResourceDef>& GetInputs() const { return inputs_; }
+    const ::std::vector<RGPassResourceDef>& GetOutputs() const { return outputs_; }
 
     void AddBarrier(const rhi::ResourceBarrier& barrier) {
         barriers_.push_back(barrier);
     }
-    const std::vector<rhi::ResourceBarrier>& GetBarriers() const { return barriers_; }
+    const ::std::vector<rhi::ResourceBarrier>& GetBarriers() const { return barriers_; }
 
     void SetRenderPassDesc(const RGRenderPassDesc& desc) {
         renderPassDesc_ = desc;
     }
-    const std::optional<RGRenderPassDesc>& GetRenderPassDesc() const {
+    const ::std::optional<RGRenderPassDesc>& GetRenderPassDesc() const {
         return renderPassDesc_;
     }
 
 protected:
-    std::string name_;
+    ::std::string name_;
     RGPassType type_;
     RGPassCategory category_;
     bool culled_ = false;
     bool hasSideEffect_ = false;
     
-    std::vector<RGPassResourceDef> inputs_;
-    std::vector<RGPassResourceDef> outputs_;
-    std::vector<rhi::ResourceBarrier> barriers_;
-    std::optional<RGRenderPassDesc> renderPassDesc_;
+    ::std::vector<RGPassResourceDef> inputs_;
+    ::std::vector<RGPassResourceDef> outputs_;
+    ::std::vector<rhi::ResourceBarrier> barriers_;
+    ::std::optional<RGRenderPassDesc> renderPassDesc_;
 };
 
 /**
@@ -87,14 +87,14 @@ protected:
 template<typename Data>
 class RenderGraphPassImpl : public RenderGraphPass {
 public:
-    using SetupFunc = std::function<void(Data&, RenderGraphBuilder&)>;
-    using ExecuteFunc = std::function<void(const Data&, RenderGraphContext&)>;
+    using SetupFunc = ::std::function<void(Data&, RenderGraphBuilder&)>;
+    using ExecuteFunc = ::std::function<void(const Data&, RenderGraphContext&)>;
 
-    RenderGraphPassImpl(const std::string& name, RGPassType type, RGPassCategory category, SetupFunc setup, ExecuteFunc execute)
+    RenderGraphPassImpl(const ::std::string& name, RGPassType type, RGPassCategory category, SetupFunc setup, ExecuteFunc execute)
         : RenderGraphPass(name, type, category), setup_(setup), execute_(execute) {}
     
     // Maintain backward compatibility constructor
-    RenderGraphPassImpl(const std::string& name, RGPassType type, SetupFunc setup, ExecuteFunc execute)
+    RenderGraphPassImpl(const ::std::string& name, RGPassType type, SetupFunc setup, ExecuteFunc execute)
         : RenderGraphPass(name, type, RGPassCategory::None), setup_(setup), execute_(execute) {}
 
     void Setup(RenderGraphBuilder& builder) {

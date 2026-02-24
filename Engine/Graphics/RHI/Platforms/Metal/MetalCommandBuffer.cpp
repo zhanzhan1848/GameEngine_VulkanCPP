@@ -291,6 +291,12 @@ MTL::ComputeCommandEncoder* MetalCommandBuffer::getComputeEncoder() {
 // === Render Commands ===
 
 void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
+    static int passCount = 0;
+    passCount++;
+    if (passCount <= 5) {
+        std::cout << "[Metal] BeginRenderPass #" << passCount << ": colorAttachments=" << desc.colorAttachments.size() << std::endl;
+    }
+    
     if (isSecondary_) return;
 
     endCurrentEncoder();
@@ -580,6 +586,17 @@ void MetalCommandBuffer::EndRenderPass() {
 }
 
 void MetalCommandBuffer::SetViewport(const ViewportDesc& viewport) {
+    // DEBUG: Log viewport settings for debug pass
+    static int viewportCount = 0;
+    viewportCount++;
+    if (viewportCount > 100 && viewportCount <= 105) {
+        std::cout << "[Metal] SetViewport #" << viewportCount 
+                  << " x=" << viewport.topLeft.x 
+                  << " y=" << viewport.topLeft.y
+                  << " w=" << viewport.size.x 
+                  << " h=" << viewport.size.y << std::endl;
+    }
+    
     if (currentEncoderType_ == EncoderType::Render) {
         MTL::Viewport vp;
         vp.originX = viewport.topLeft.x;
@@ -613,6 +630,15 @@ void MetalCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
     
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     MetalPipeline* mtlPipeline = metalDevice.GetPipeline(pipeline);
+    
+    // DEBUG: Log pipeline binding for meshlet debug
+    static int bindCount = 0;
+    bindCount++;
+    if (bindCount > 10000 && bindCount <= 10010) {
+        std::cout << "[Metal] BindGraphicsPipeline #" << bindCount 
+                  << " pipeline=" << (mtlPipeline ? "valid" : "NULL")
+                  << " encoder=" << (currentEncoder_ ? "valid" : "NULL") << std::endl;
+    }
     
     if (mtlPipeline && mtlPipeline->GetRenderPipelineState()) {
         MTL::RenderCommandEncoder* encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
@@ -887,6 +913,18 @@ void MetalCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, uint32_t quer
 
 void MetalCommandBuffer::Draw(uint32_t vertexCount, uint32_t startVertex, uint32_t instanceCount, uint32_t startInstance) {
     if (currentEncoderType_ == EncoderType::Render) {
+        // DEBUG: Verify encoder state
+        static int totalDrawCount = 0;
+        totalDrawCount++;
+        
+        // Log every 10000th draw to catch meshlet debug draws
+        if (totalDrawCount > 10000 && totalDrawCount <= 10100) {
+            std::cout << "[Metal] Draw #" << totalDrawCount << ": vertexCount=" << vertexCount 
+                      << " instanceCount=" << instanceCount 
+                      << " primitiveType=" << (int)currentPrimitiveType_ 
+                      << " encoder=" << (currentEncoder_ ? "valid" : "NULL") << std::endl;
+        }
+        
         static_cast<MTL::RenderCommandEncoder*>(currentEncoder_)->drawPrimitives(
                 currentPrimitiveType_,
                 (NS::UInteger)startVertex,
@@ -1069,8 +1107,27 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
     };
 
     static PixelFormatInfo GetPixelFormatInfo(MTL::PixelFormat format) {
-        switch (format) {
+        // Debug print to ensure we are running the new version
+        uint64_t fmt = (uint64_t)format;
+        std::cout << "DEBUG: GetPixelFormatInfo(" << fmt << ")" << std::endl;
+        switch (fmt) {
             // Uncompressed formats
+            case 10: // MTL::PixelFormatR8Unorm
+            case 13: // MTL::PixelFormatR8Uint
+            case 14: // MTL::PixelFormatR8Sint
+                // std::cout << "DEBUG: Hit case 10/13/14" << std::endl;
+                return {1, 1, 1};
+            case 25: // MTL::PixelFormatR16Float
+            case 26: // MTL::PixelFormatR16Uint
+            case 27: // MTL::PixelFormatR16Sint
+            case 20: // MTL::PixelFormatR16Unorm
+                // std::cout << "DEBUG: Hit case 25/26/27/20" << std::endl;
+                return {2, 1, 1};
+            case 65: // MTL::PixelFormatRG16Float
+            case 66: // MTL::PixelFormatRG16Uint
+            case 67: // MTL::PixelFormatRG16Sint
+            case 60: // MTL::PixelFormatRG16Unorm
+                return {4, 1, 1};
             case MTL::PixelFormatRGBA8Unorm:
             case MTL::PixelFormatRGBA8Unorm_sRGB:
             case MTL::PixelFormatBGRA8Unorm:
@@ -1138,7 +1195,7 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
 
         PixelFormatInfo info = GetPixelFormatInfo(texture->GetNativeTexture()->pixelFormat());
         if (info.bytesPerBlock == 0) {
-            std::cerr << "[MetalCommandBuffer] Unsupported pixel format for copy: " 
+            std::cerr << "[MetalCommandBuffer] SUPER UNIQUE ERROR: Unsupported pixel format for copy: " 
                       << (uint64_t)texture->GetNativeTexture()->pixelFormat() << std::endl;
             return;
         }

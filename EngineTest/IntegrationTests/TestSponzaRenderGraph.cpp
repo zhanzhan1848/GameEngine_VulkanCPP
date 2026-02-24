@@ -14,6 +14,7 @@
 #include <fstream>
 #include <filesystem>
 #include <cmath>
+#include <algorithm>
 #include "Utilities/IOStream.h"
 
 using namespace primal;
@@ -188,6 +189,9 @@ struct TAAPassData {
 struct DebugPassData {
     RGResourceHandle output;
     RGResourceHandle input;
+    RGResourceHandle normal;
+    RGResourceHandle depth;
+    RGResourceHandle shadowMap;
 };
 
 struct BlitPassData {
@@ -216,7 +220,11 @@ bool TestSponzaRenderGraph::Initialize() {
         return false;
     }
     
-    device = metalDevice.get();
+    device = metalDevice.get();    
+    // Register Device to Global Manager so Content System can access it
+    primal::graphics::rhi::g_deviceManager.RegisterDevice(device);
+    std::cout << "Device registered to Global Manager. Count: " << primal::graphics::rhi::g_deviceManager.GetDeviceCount() << std::endl;
+    
     device_ownership = std::move(metalDevice);
 
     // 2. Initialize Window & RenderSystem
@@ -251,6 +259,32 @@ bool TestSponzaRenderGraph::Initialize() {
 
     // 4. Initialize RenderGraph
     renderGraph = std::make_unique<RenderGraph>(*device);
+
+    // Create Fallback Material Layout & Sampler (Before LoadScene)
+    {
+        std::cout << "Creating Material Descriptor Set Layout (Fallback)..." << std::endl;
+        DescriptorSetLayoutBinding bindings[] = {
+            { 0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // Albedo
+            { 1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // Normal
+            { 2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // ORM
+            { 3, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr }        // Sampler
+        };
+        DescriptorSetLayoutDesc desc{ .bindings = bindings, .bindingCount = 4 };
+        materialSetLayout = device->CreateDescriptorSetLayout(desc);
+        ownsMaterialSetLayout = true;
+        std::cout << "Material Descriptor Set Layout created: " << (uint64_t)materialSetLayout << std::endl;
+
+        // Create Sampler
+        SamplerDesc samplerDesc{
+            .minFilter = FilterMode::Linear,
+            .magFilter = FilterMode::Linear,
+            .mipFilter = FilterMode::Linear,
+            .addressU = TextureAddressMode::Wrap,
+            .addressV = TextureAddressMode::Wrap,
+            .addressW = TextureAddressMode::Wrap,
+        };
+        defaultSampler = device->CreateSampler(samplerDesc);
+    }
 
     // 5. Load Scene
     if (!LoadScene()) {
@@ -389,36 +423,9 @@ bool TestSponzaRenderGraph::SetupPipelines() {
     }
 
     // Common Set 1: Material Data
-    // Try to get layout from loaded material
-    std::cout << "Processing Material Set Layout..." << std::endl;
-    if (sceneMeshes[0].materialInstance) {
-        std::cout << "Material instance found." << std::endl;
-        auto material = sceneMeshes[0].materialInstance->GetMaterial();
-        if (material) {
-             std::cout << "Material found. Getting layout..." << std::endl;
-             materialSetLayout = material->GetDescriptorSetLayout();
-             std::cout << "Material layout retrieved: " << (uint64_t)materialSetLayout << std::endl;
-        } else {
-             std::cout << "Material is null." << std::endl;
-        }
-    } else {
-        std::cout << "Material instance is null." << std::endl;
-    }
-    
-    if (materialSetLayout == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-        std::cout << "Using fallback material layout..." << std::endl;
-        // Fallback
-        DescriptorSetLayoutBinding bindings[] = {
-            { 0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // Albedo
-            { 1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // Normal
-            { 2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // ORM
-            { 3, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr }        // Sampler
-        };
-        DescriptorSetLayoutDesc desc{ .bindings = bindings, .bindingCount = 4 };
-        std::cout << "Creating Material Descriptor Set Layout (Fallback)..." << std::endl;
-        materialSetLayout = device->CreateDescriptorSetLayout(desc);
-        std::cout << "Material Descriptor Set Layout created." << std::endl;
-    }
+    // Material Set Layout is already created in Initialize() and assigned to materials in LoadScene()
+    // We just verify it here or skip.
+    std::cout << "Using Material Set Layout: " << (uint64_t)materialSetLayout << std::endl;
 
     // 1. GBuffer Pipeline
     {
@@ -657,10 +664,15 @@ bool TestSponzaRenderGraph::SetupPipelines() {
     {
         std::cout << "Creating Debug Pipeline..." << std::endl;
         DescriptorSetLayoutBinding bindings[] = {
-             { 0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // Texture
+             { 0, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr }, // ViewData
+             { 1, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr }, // SceneData
+             { 2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // Lighting Output
+             { 3, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // Normal
+             { 4, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // Depth
+             { 5, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr }, // ShadowMap
         };
         DescriptorSetLayoutDesc setDesc{
-            .bindingCount = 1,
+            .bindingCount = 6,
             .bindings = bindings
         };
         debugSetLayout = device->CreateDescriptorSetLayout(setDesc);
@@ -778,10 +790,10 @@ bool TestSponzaRenderGraph::CreateDescriptorSets() {
     globalDescriptorSet = device->CreateDescriptorSet(globalDesc);
     if (globalDescriptorSet == handles::INVALID_DESCRIPTOR_SET) return false;
     
-    // Fix: SceneData at 0, ViewData at 1 to match Shader
+    // Fix: ViewData at 0, SceneData at 1 to match Shader
     DescriptorData globalParams[2]{
-        { .binding = 0, .type = DescriptorType::UniformBuffer, .resource = sceneDataBuffer },
-        { .binding = 1, .type = DescriptorType::UniformBuffer, .resource = viewDataBuffer },
+        { .binding = 0, .type = DescriptorType::UniformBuffer, .resource = viewDataBuffer },
+        { .binding = 1, .type = DescriptorType::UniformBuffer, .resource = sceneDataBuffer },
     };
     UpdateDescriptorSet(device, globalDescriptorSet, globalParams, 2);
 
@@ -792,8 +804,8 @@ bool TestSponzaRenderGraph::CreateDescriptorSets() {
     // Bind static resources and safe defaults for dynamic ones
     {
         DescriptorData params[11]{
-            { .binding = 0, .type = DescriptorType::UniformBuffer, .resource = sceneDataBuffer },
-            { .binding = 1, .type = DescriptorType::UniformBuffer, .resource = viewDataBuffer },
+            { .binding = 0, .type = DescriptorType::UniformBuffer, .resource = viewDataBuffer },
+            { .binding = 1, .type = DescriptorType::UniformBuffer, .resource = sceneDataBuffer },
             // Initial binds for dynamic resources (will be overwritten in RenderPass)
             { .binding = 2, .type = DescriptorType::SampledImage, .resource = brdfLUT }, // Albedo (Placeholder)
             { .binding = 3, .type = DescriptorType::SampledImage, .resource = brdfLUT }, // Normal (Placeholder)
@@ -810,19 +822,13 @@ bool TestSponzaRenderGraph::CreateDescriptorSets() {
         UpdateDescriptorSet(device, lightingDescriptorSet, params, 11);
         
         // Samplers (Bindings 11, 12)
-        SamplerDesc samplerDesc{
-            .minFilter = FilterMode::Linear,
-            .magFilter = FilterMode::Linear,
-        };
-        SamplerHandle defaultSampler = device->CreateSampler(samplerDesc);
-        
         SamplerDesc brdfSamplerDesc{
             .minFilter = FilterMode::Linear,
             .magFilter = FilterMode::Linear,
             .addressU = TextureAddressMode::Clamp,
             .addressV = TextureAddressMode::Clamp,
         };
-        SamplerHandle brdfSampler = device->CreateSampler(brdfSamplerDesc);
+        brdfSampler = device->CreateSampler(brdfSamplerDesc);
         
         DescriptorData samplers[2]{
             { .binding = 11, .type = DescriptorType::Sampler, .resource = defaultSampler },
@@ -837,12 +843,6 @@ bool TestSponzaRenderGraph::CreateDescriptorSets() {
     skyboxDesc.layout = skyboxSetLayout;
     skyboxDescriptorSet = device->CreateDescriptorSet(skyboxDesc);
     {
-        SamplerDesc samplerDesc{
-            .minFilter = FilterMode::Linear,
-            .magFilter = FilterMode::Linear,
-        };
-        SamplerHandle defaultSampler = device->CreateSampler(samplerDesc);
-        
         DescriptorData params[4]{
             { .binding = 0, .type = DescriptorType::UniformBuffer, .resource = viewDataBuffer },
             { .binding = 1, .type = DescriptorType::UniformBuffer, .resource = sceneDataBuffer },
@@ -946,15 +946,17 @@ bool TestSponzaRenderGraph::CreatePersistentResources() {
         TextureDesc whiteDesc{
             .size = { 1, 1, 1 },
             .format = DataFormat::RGBA8_UNorm,
-            .usage = TextureUsage::ShaderResource,
+            .usage = TextureUsage::ShaderResource | TextureUsage::CopyDest,
         };
-        ResourceHandle whiteTexture = device->CreateTexture(whiteDesc);
-        uint32_t whiteData = 0xFFFFFFFF;
+        whiteTexture = device->CreateTexture(whiteDesc);
+        // DEBUG: Force RED for Default/Missing Texture
+        // 0xFF0000FF -> R=255, G=0, B=0, A=255 (Little Endian: FF 00 00 FF)
+        uint32_t whiteData = 0xFF0000FF; 
         WriteTexture(whiteTexture, &whiteData, sizeof(uint32_t), 1, 1, 0);
         
         // Create 1x1 Normal Texture (Flat Normal: 0.5, 0.5, 1.0)
         TextureDesc normalDesc = whiteDesc;
-        ResourceHandle normalTexture = device->CreateTexture(normalDesc);
+        normalTexture = device->CreateTexture(normalDesc);
         uint32_t normalData = 0xFFFF8080; // RGBA: R=128, G=128, B=255, A=255
         WriteTexture(normalTexture, &normalData, sizeof(uint32_t), 1, 1, 0);
         
@@ -965,7 +967,7 @@ bool TestSponzaRenderGraph::CreatePersistentResources() {
             .addressU = TextureAddressMode::Wrap,
             .addressV = TextureAddressMode::Wrap,
         };
-        SamplerHandle defaultSampler = device->CreateSampler(samplerDesc_1);
+        defaultSampler = device->CreateSampler(samplerDesc_1);
         
         // Update Descriptor Set (Assuming standard Sponza layout: 0:Albedo, 1:Normal, 2:ORM, 3:Sampler)
         DescriptorData params[4] = {
@@ -1024,52 +1026,107 @@ bool TestSponzaRenderGraph::LoadScene() {
     uint32_t matIdCounter = 2000;
     uint32_t entityIdCounter = 3000;
     std::unordered_map<primal::graphics::MaterialInstance*, primal::id::id_type> materialMap;
-    std::string assetBaseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
+    std::string assetBaseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/models/Sponza/";
 
     for (size_t i = 0; i < sceneMeshes.size(); ++i) {
         auto& meshInfo = sceneMeshes[i];
         
+        // Debug Mesh Info
+        if (i < 5) {
+             std::cout << "DEBUG: Processing Mesh " << i 
+                       << " MatInst: " << (meshInfo.materialInstance ? "YES" : "NO")
+                       << " DiffPath: '" << meshInfo.diffuseTexturePath << "'" << std::endl;
+        }
+
         // Register Mesh ID (Fake)
         primal::id::id_type meshId = meshIdCounter++;
         // meshInfo.mesh->SetEntityId(meshId); // Cannot set on null mesh
 
         // Load Textures and Update Material Instance
-        /*
-        if (meshInfo.materialInstance) {
-            bool texturesUpdated = false;
-            
-            // Diffuse Texture
-            if (!meshInfo.diffuseTexturePath.empty()) {
-                std::string fullPath = assetBaseDir + meshInfo.diffuseTexturePath;
-                // Normalize path separators
-                std::replace(fullPath.begin(), fullPath.end(), '\\', '/');
-                
-                ResourceHandle tex = LoadTextureFromFile(fullPath, false);
-                if (tex != handles::INVALID_RESOURCE) {
-                    // Assuming Binding 0 is Albedo in MaterialInstance
-                    meshInfo.materialInstance->SetTexture(0, tex);
-                    texturesUpdated = true;
+            if (meshInfo.materialInstance) {
+                // Ensure Material has the correct DescriptorSetLayout
+                auto material = meshInfo.materialInstance->GetMaterial();
+                if (material) {
+                    material->SetDescriptorSetLayout(materialSetLayout);
                 }
-            }
-            
-            // Normal Texture
-            if (!meshInfo.normalTexturePath.empty()) {
-                std::string fullPath = assetBaseDir + meshInfo.normalTexturePath;
-                std::replace(fullPath.begin(), fullPath.end(), '\\', '/');
-                
-                ResourceHandle tex = LoadTextureFromFile(fullPath, true);
-                if (tex != handles::INVALID_RESOURCE) {
-                    // Assuming Binding 1 is Normal in MaterialInstance
-                    meshInfo.materialInstance->SetTexture(1, tex);
-                    texturesUpdated = true;
+
+                // Initialize Instance (allocates DescriptorSet)
+                meshInfo.materialInstance->Initialize(device);
+
+                bool texturesUpdated = false;
+
+                // Diffuse Texture
+                ResourceHandle diffuseTex = whiteTexture;
+                /*
+                if (!meshInfo.diffuseTexturePath.empty()) {
+                    // std::cout << "Processing Diffuse Texture: " << meshInfo.diffuseTexturePath << std::endl;
+                    std::string fullPath = assetBaseDir + meshInfo.diffuseTexturePath;
+                    // Normalize path separators
+                    std::replace(fullPath.begin(), fullPath.end(), '\\', '/');
+
+                    ResourceHandle tex = LoadTextureFromFile(fullPath, false);
+                    if (tex != handles::INVALID_RESOURCE) {
+                        diffuseTex = tex;
+                    }
                 }
+                */
+                // Always set a texture (default or loaded)
+                // meshInfo.materialInstance->SetTexture(0, diffuseTex);
+                // texturesUpdated = true;
+
+                if (!meshInfo.diffuseTexturePath.empty()) {
+                    // std::cout << "Processing Diffuse Texture: " << meshInfo.diffuseTexturePath << std::endl;
+                    std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.diffuseTexturePath);
+
+                    ResourceHandle tex = LoadTextureFromFile(fullPath, false);
+                    if (tex != handles::INVALID_RESOURCE) {
+                        diffuseTex = tex;
+                    }
+                }
+
+                // Normal Texture
+                ResourceHandle normalTex = normalTexture;
+                
+                if (!meshInfo.normalTexturePath.empty()) {
+                    std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.normalTexturePath);
+
+                    ResourceHandle tex = LoadTextureFromFile(fullPath, true);
+                    if (tex != handles::INVALID_RESOURCE) {
+                        normalTex = tex;
+                    }
+                }
+
+                // ORM Texture
+                ResourceHandle ormTex = whiteTexture; // Default: AO=1, Rough=0(Smooth), Metal=0
+                
+                // Try to load ORM from individual or packed paths
+                ResourceHandle loadedORM = LoadORMTexture(
+                    assetBaseDir,
+                    meshInfo.ormTexturePath, 
+                    meshInfo.roughnessTexturePath, 
+                    meshInfo.metallicTexturePath
+                );
+                
+                if (loadedORM != handles::INVALID_RESOURCE) {
+                    ormTex = loadedORM;
+                }
+                
+                // FIX: Update ALL descriptor sets for triple buffering (Frames 0, 1, 2)
+                // Since MaterialInstance::Update clears pending updates, we must set and update for each frame.
+                for (uint32_t i = 0; i < 3; ++i) {
+                    meshInfo.materialInstance->SetCurrentFrame(i);
+                    meshInfo.materialInstance->SetTexture(0, diffuseTex);
+                    meshInfo.materialInstance->SetTexture(1, normalTex);
+                    meshInfo.materialInstance->SetTexture(2, ormTex);
+                    if (defaultSampler != handles::INVALID_SAMPLER) {
+                        meshInfo.materialInstance->SetSampler(3, defaultSampler);
+                    }
+                    meshInfo.materialInstance->Update(device);
+                }
+                // texturesUpdated = false; // Already updated manually
+                (void)texturesUpdated;
+
             }
-            
-            if (texturesUpdated) {
-                meshInfo.materialInstance->Update(device);
-            }
-        }
-        */
 
         // Register Material ID
         primal::id::id_type matId = primal::id::invalid_id;
@@ -1098,42 +1155,208 @@ bool TestSponzaRenderGraph::LoadScene() {
     return true;
 }
 
-primal::graphics::rhi::ResourceHandle TestSponzaRenderGraph::LoadTextureFromFile(const std::string& path, bool isNormalMap) {
+primal::graphics::rhi::ResourceHandle TestSponzaRenderGraph::CreateTextureFromData(uint32_t width, uint32_t height, const unsigned char* data, bool isSRGB) {
+    // Header: width, height, array_size, flags, mip_levels, format
+    uint32_t array_size = 1;
+    uint32_t flags = 0;
+    uint32_t mip_levels = 1; 
+    
+    // 28 = R8G8B8A8_UNORM (Linear)
+    // 29 = R8G8B8A8_UNORM_SRGB (sRGB)
+    uint32_t format = isSRGB ? 29 : 28;
+
+    uint32_t row_pitch = width * 4;
+    uint32_t slice_pitch = height * row_pitch;
+
+    size_t blob_size = (6 * sizeof(uint32_t)) + (mip_levels * (2 * sizeof(uint32_t) + slice_pitch));
+    
+    std::vector<uint8_t> blob(blob_size);
+    utl::blob_stream_writer writer(blob.data(), blob.size());
+    
+    writer.write((uint32_t)width);
+    writer.write((uint32_t)height);
+    writer.write(array_size);
+    writer.write(flags);
+    writer.write(mip_levels);
+    writer.write(format);
+
+    // Mip 0
+    writer.write(row_pitch);
+    writer.write(slice_pitch);
+    // Write pixel data
+    writer.write(data, slice_pitch);
+
+    primal::id::id_type id = primal::content::create_resource(blob.data(), primal::content::asset_type::texture);
+    
+    if (primal::id::is_valid(id)) {
+        ResourceHandle handle = primal::content::get_rhi_texture_handle(id);
+        if (handle != handles::INVALID_RESOURCE) {
+            return handle;
+        } else {
+             std::cerr << "Failed to retrieve RHI handle for texture ID: " << id << std::endl;
+        }
+    } else {
+         std::cerr << "Failed to create texture resource via content system." << std::endl;
+    }
+    return handles::INVALID_RESOURCE;
+}
+
+std::string TestSponzaRenderGraph::NormalizePath(const std::string& path) {
+    std::string p = path;
+    std::replace(p.begin(), p.end(), '\\', '/');
+    return p;
+}
+
+std::string TestSponzaRenderGraph::ResolveTexturePath(const std::string& assetBaseDir, const std::string& filename) {
+    if (filename.empty()) return "";
+    
+    std::string cleanName = NormalizePath(filename);
+    
+    // Potential base paths
+    std::vector<std::string> basePaths;
+    basePaths.push_back(assetBaseDir);
+    basePaths.push_back(assetBaseDir + "models/Sponza/");
+    basePaths.push_back(assetBaseDir + "fbx_textures/");
+    
+    for (const auto& base : basePaths) {
+        std::string fullPath = base + cleanName;
+        // Check if file exists
+        std::ifstream f(fullPath.c_str());
+        if (f.good()) {
+            return fullPath;
+        }
+    }
+    
+    // Return default if not found
+    return NormalizePath(assetBaseDir + cleanName);
+}
+
+primal::graphics::rhi::ResourceHandle TestSponzaRenderGraph::LoadORMTexture(const std::string& assetBaseDir, const std::string& ormPath, const std::string& roughnessPath, const std::string& metallicPath) {
+    // Check Cache (key could be combined paths)
+    std::string cacheKey = "ORM|" + ormPath + "|" + roughnessPath + "|" + metallicPath;
+    if (textureCache.find(cacheKey) != textureCache.end()) {
+        return textureCache[cacheKey];
+    }
+
+    // 1. Try Loading ORM directly
+    if (!ormPath.empty()) {
+        std::string fullPath = ResolveTexturePath(assetBaseDir, ormPath);
+        
+        // ORM is data, so it should be Linear (not sRGB). 
+        // LoadTextureFromFile with isNormalMap=true uses format 28 (UNORM), false uses 29 (SRGB).
+        ResourceHandle tex = LoadTextureFromFile(fullPath, true, false); 
+        if (tex != handles::INVALID_RESOURCE) {
+            textureCache[cacheKey] = tex;
+            return tex;
+        }
+    }
+
+    // 2. Combine Roughness/Metallic
+    int width = 0, height = 0;
+    
+    unsigned char* roughData = nullptr;
+    unsigned char* metalData = nullptr;
+    
+    if (!roughnessPath.empty()) {
+        std::string fullPath = ResolveTexturePath(assetBaseDir, roughnessPath);
+        int w, h, c;
+        roughData = stbi_load(fullPath.c_str(), &w, &h, &c, 1); // Load as 1 channel
+        if (roughData) {
+            width = w; height = h;
+        }
+    }
+    
+    if (!metallicPath.empty()) {
+        std::string fullPath = ResolveTexturePath(assetBaseDir, metallicPath);
+        int w, h, c;
+        metalData = stbi_load(fullPath.c_str(), &w, &h, &c, 1);
+        if (metalData) {
+            if (width == 0) { width = w; height = h; }
+            else if (w != width || h != height) {
+                // Size mismatch. Ignore metallic for now.
+                std::cerr << "WARNING: Metallic texture size mismatch. Ignoring." << std::endl;
+                stbi_image_free(metalData);
+                metalData = nullptr;
+            }
+        }
+    }
+    
+    if (width == 0) {
+        // No texture loaded
+        return handles::INVALID_RESOURCE;
+    }
+    
+    std::vector<unsigned char> ormBuffer(width * height * 4);
+    for (int i = 0; i < width * height; ++i) {
+        // ORM packing: R=AO, G=Roughness, B=Metallic
+        unsigned char ao = 255;
+        unsigned char rough = roughData ? roughData[i] : 255; 
+        unsigned char metal = metalData ? metalData[i] : 0;
+        
+        ormBuffer[i*4 + 0] = ao;
+        ormBuffer[i*4 + 1] = rough;
+        ormBuffer[i*4 + 2] = metal;
+        ormBuffer[i*4 + 3] = 255;
+    }
+    
+    if (roughData) stbi_image_free(roughData);
+    if (metalData) stbi_image_free(metalData);
+    
+    ResourceHandle handle = CreateTextureFromData(width, height, ormBuffer.data(), false); // ORM is Linear (false)
+    if (handle != handles::INVALID_RESOURCE) {
+        textureCache[cacheKey] = handle;
+    }
+    return handle;
+}
+
+primal::graphics::rhi::ResourceHandle TestSponzaRenderGraph::LoadTextureFromFile(const std::string& path, bool isNormalMap, bool allowFallback) {
     // Check Cache
     if (textureCache.find(path) != textureCache.end()) {
         return textureCache[path];
     }
 
-    std::cout << "Loading Texture: " << path << std::endl;
+    std::cout << "Loading Texture (via Content System): " << path << std::endl;
 
     int width, height, channels;
-    // Vulkan/Metal usually expect top-left origin, but STB loads top-left by default.
-    // However, some engines/shaders expect bottom-left. 
-    // Let's assume standard behavior for now. If textures are flipped, we can toggle this.
-    // stbi_set_flip_vertically_on_load(true); 
+    unsigned char* data = nullptr;
 
-    unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4); // Force RGBA
-    if (!data) {
+    // Load using stb_image
+    // Force RGBA (4 channels)
+    data = stbi_load(path.c_str(), &width, &height, &channels, 4); 
+    bool loadedWithStb = (data != nullptr);
+
+    if (!loadedWithStb) {
+        if (!allowFallback) {
+             return handles::INVALID_RESOURCE;
+        }
         std::cerr << "Failed to load texture file: " << path << std::endl;
-        return handles::INVALID_RESOURCE;
-    }
-
-    TextureDesc desc{};
-    desc.size = { (uint32_t)width, (uint32_t)height, 1 };
-    desc.format = DataFormat::RGBA8_UNorm; // Use UNorm for now. If SRGB is needed for Albedo, we might need RGBA8_SRGB.
-    desc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
-    desc.type = TextureType::Texture2D;
-
-    ResourceHandle texture = device->CreateTexture(desc);
-    if (texture != handles::INVALID_RESOURCE) {
-        WriteTexture(texture, data, (uint64_t)(width * height * 4), (uint32_t)width, (uint32_t)height, 0);
-        textureCache[path] = texture;
+        // Fallback to 1x1 Magenta to indicate missing texture
+        width = 1; height = 1; channels = 4;
+        data = (unsigned char*)malloc(4);
+        data[0] = 255; data[1] = 0; data[2] = 255; data[3] = 255;
+        std::cout << "DEBUG: Forcing MAGENTA (Missing) for: " << path << std::endl;
     } else {
-        std::cerr << "Failed to create texture resource for: " << path << std::endl;
+        std::cout << "Loaded texture: " << path << " (" << width << "x" << height << ")" << std::endl;
     }
 
-    stbi_image_free(data);
-    return texture;
+    // Determine format
+    // Diffuse is usually sRGB, Normal is Linear.
+    bool isSRGB = !isNormalMap;
+    
+    ResourceHandle handle = CreateTextureFromData(width, height, data, isSRGB);
+
+    if (loadedWithStb) {
+        stbi_image_free(data);
+    } else {
+        free(data); // Use free() since we used malloc()
+    }
+
+    if (handle != handles::INVALID_RESOURCE) {
+        textureCache[path] = handle;
+        return handle;
+    } else {
+         return handles::INVALID_RESOURCE;
+    }
 }
 
 bool TestSponzaRenderGraph::SetupIBL() {
@@ -1147,7 +1370,7 @@ bool TestSponzaRenderGraph::SetupIBL() {
         .arraySize = 1,
         .type = TextureType::TextureCube,
         .format = DataFormat::RGBA8_UNorm,
-        .usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess,
+        .usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopyDest,
     };
     envCubemap = device->CreateTexture(cubeDesc);
 
@@ -1431,7 +1654,15 @@ void TestSponzaRenderGraph::BuildRenderGraph(RenderGraph& graph, ResourceHandle 
                 // Bind Material Set (Set 1)
                 DescriptorSetHandle matSet = defaultMaterialSet;
                 if (meshInfo.materialInstance) {
+                    // Update Current Frame Index
+                    meshInfo.materialInstance->SetCurrentFrame(renderSystem.GetCurrentFrameIndex());
                     matSet = meshInfo.materialInstance->GetDescriptorSet();
+
+                    // DEBUG: Check if matSet is valid
+                    if (matSet == handles::INVALID_RESOURCE) {
+                        // std::cerr << "ERROR: MaterialInstance DescriptorSet is INVALID! Falling back to default." << std::endl;
+                        matSet = defaultMaterialSet;
+                    }
                 }
                 const DescriptorSetHandle matSets[] = { matSet };
                 cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbufferLayout, 1, 1, matSets, 0, nullptr);
@@ -1524,18 +1755,34 @@ void TestSponzaRenderGraph::BuildRenderGraph(RenderGraph& graph, ResourceHandle 
                 builder.DeclareRenderPass(rpDesc);
             }, 
             [&](const LightingPassData& data, RenderGraphContext& context) {
-                std::cout << "Executing LightingPass (Frame " << frameCount << ")..." << std::endl;
+                // std::cout << "Executing LightingPass (Frame " << frameCount << ")..." << std::endl;
                 
+                // Debug handles once
+                if (frameCount == 1) {
+                    std::cout << "LightingPass Resources:" << std::endl;
+                    std::cout << "  IrradianceMap: " << irradianceMap << std::endl;
+                    std::cout << "  PrefilteredMap: " << prefilteredMap << std::endl;
+                    std::cout << "  BRDF LUT: " << brdfLUT << std::endl;
+                    std::cout << "  DefaultSampler: " << defaultSampler << std::endl;
+                    std::cout << "  BRDFSampler: " << brdfSampler << std::endl;
+                }
+
                 // Update Descriptor Set with current Frame's GBuffer Resources
-                DescriptorData params[6] = {
+                // We update ALL dynamic bindings (textures + samplers) to ensure they are correct
+                DescriptorData params[11] = {
                     { .binding = 2, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.albedo)->GetPhysicalHandle() },
                     { .binding = 3, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.normal)->GetPhysicalHandle() },
                     { .binding = 4, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.orm)->GetPhysicalHandle() },
                     { .binding = 5, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.depth)->GetPhysicalHandle() },
                     { .binding = 6, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.shadowMap0)->GetPhysicalHandle() },
-                    { .binding = 7, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.shadowMap1)->GetPhysicalHandle() }
+                    { .binding = 7, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.shadowMap1)->GetPhysicalHandle() },
+                    { .binding = 8, .type = DescriptorType::SampledImage, .resource = irradianceMap },
+                    { .binding = 9, .type = DescriptorType::SampledImage, .resource = prefilteredMap },
+                    { .binding = 10, .type = DescriptorType::SampledImage, .resource = brdfLUT },
+                    { .binding = 11, .type = DescriptorType::Sampler, .resource = defaultSampler },
+                    { .binding = 12, .type = DescriptorType::Sampler, .resource = brdfSampler }
                 };
-                UpdateDescriptorSet(device, lightingDescriptorSet, params, 6);
+                UpdateDescriptorSet(device, lightingDescriptorSet, params, 11);
 
                 auto cmd = context.cmdBuffer;
                 cmd->BindGraphicsPipeline(lightingPipeline);
@@ -1643,7 +1890,10 @@ void TestSponzaRenderGraph::BuildRenderGraph(RenderGraph& graph, ResourceHandle 
                 // data.input = builder.Read(shadowMap0); 
                 // Or TAA Output
                 data.input = builder.Read(taaOutput);
-                // data.input = builder.Read(lightingOutput);
+                // We also need to read other resources for debug visualization
+                data.normal = builder.Read(gbufferNormal);
+                data.depth = builder.Read(depthBuffer);
+                data.shadowMap = builder.Read(shadowMap0);
                 
                 // Output to BackBuffer
                 data.output = builder.Write(backBufferHandle, ResourceState::RenderTarget);
@@ -1664,10 +1914,15 @@ void TestSponzaRenderGraph::BuildRenderGraph(RenderGraph& graph, ResourceHandle 
                 cmd->SetViewport({ {0, 0 }, { (float)renderWidth, (float)renderHeight }, 0, 1});
                 cmd->SetScissor({{ 0, 0 }, { renderWidth, renderHeight }});
                 
-                DescriptorData params[1]{
-                    {.binding = 0, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.input)->GetPhysicalHandle()},
+                DescriptorData params[6]{
+                    {.binding = 0, .type = DescriptorType::UniformBuffer, .resource = viewDataBuffer},
+                    {.binding = 1, .type = DescriptorType::UniformBuffer, .resource = sceneDataBuffer},
+                    {.binding = 2, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.input)->GetPhysicalHandle()},
+                    {.binding = 3, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.normal)->GetPhysicalHandle()},
+                    {.binding = 4, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.depth)->GetPhysicalHandle()},
+                    {.binding = 5, .type = DescriptorType::SampledImage, .resource = graph.GetResource(data.shadowMap)->GetPhysicalHandle()},
                 };
-                UpdateDescriptorSet(device, debugDescriptorSet, params, 1);
+                UpdateDescriptorSet(device, debugDescriptorSet, params, 6);
                 
                 const DescriptorSetHandle debugSets[] = { debugDescriptorSet };
                 cmd->BindDescriptorSets(PipelineBindPoint::Graphics, debugLayout, 0, 1, debugSets, 0, nullptr);
@@ -1723,7 +1978,7 @@ void TestSponzaRenderGraph::Run() {
     
     // Acquire BackBuffer
     ResourceHandle backBuffer;
-    SyncHandle imageAvailableFence; // RenderSystem manages this?
+    
     // The BeginFrame signature: bool BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandle& outSignalFence);
     // outSignalFence is a fence we MUST signal when we are done rendering to this image.
     // Wait, usually it's:
@@ -1788,6 +2043,15 @@ void UpdateBuffer(RHIDeviceBase* device, ResourceHandle buffer, const void* data
 }
 
 void TestSponzaRenderGraph::UpdateScene() {
+    // Check F1 Toggle
+    primal::input::input_value f1_value;
+    primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f1, f1_value);
+    
+    if (f1_value.current.x != 0.0f && f1_value.previous.x == 0.0f) {
+        debugPassEnabled = !debugPassEnabled;
+        std::cout << "Debug Pass Toggled: " << (debugPassEnabled ? "ON" : "OFF") << std::endl;
+    }
+
     // 1. Update Camera (ViewData)
     
     // Calculate Delta Time
@@ -1804,17 +2068,12 @@ void TestSponzaRenderGraph::UpdateScene() {
     float aspect = (float)renderWidth / (float)renderHeight;
     primal::math::m4x4 proj = primal::graphics::rhi::math::CreatePerspectiveMatrix(45.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD, aspect, 0.1f, 10000.0f);
     
-    // Flip Y for Metal/Vulkan coordinate difference
+    // Flip Y for Metal/Vulkan coordinate difference -> REMOVED for Metal Y-Up consistency
     // proj.columns[1][1] *= -1.0f;
 
-    // Fix Z range for Metal [0, 1] (Assuming CreatePerspectiveMatrix produces [-1, 1])
-    // REMOVED: CreatePerspectiveMatrix already returns [0, 1] Z range for Metal.
-    // Double applying this fix causes Z to be mapped to [0.5, 1.0]
-    /*
-    for (int i = 0; i < 4; ++i) {
-        proj.columns[i][2] = 0.5f * proj.columns[i][2] + 0.5f * proj.columns[i][3];
-    }
-    */
+    // Fix Z range for Metal [0, 1]
+    // RHIMath CreatePerspectiveMatrix ALREADY returns [0, 1] Z range.
+    // So we do NOT need to apply the fix.
     
     // TAA Jitter (ENABLED)
     int sampleIndex = frameCount % 16;
@@ -1910,23 +2169,20 @@ void TestSponzaRenderGraph::UpdateScene() {
     // Sponza is approx 20x15x10.
     // Bounds [-25, 25] should cover the scene tightly.
     // Far plane 1000.0f covers the distance.
-    primal::math::m4x4 lightProj0 = primal::graphics::rhi::metal::CreateOrthographicMatrix(-25.0f, 25.0f, -25.0f, 25.0f, 0.1f, 1000.0f);
+    // Use Top=25, Bottom=-25 for Y-Up Coordinate System (Metal)
+    // Left, Right, Top, Bottom, Near, Far
+    primal::math::m4x4 lightProj0 = primal::graphics::rhi::metal::CreateOrthographicMatrix(-30.0f, 30.0f, 30.0f, -30.0f, 0.1f, 1000.0f);
     
-    // DEBUG: Manual Z-fix for Metal [0,1] range
-    // We apply this in the Pass Lambda now, but let's ensure the matrix here is raw GL.
-    /*
-    for (int i = 0; i < 4; ++i) {
-       lightProj0.columns[i][2] = 0.5f * lightProj0.columns[i][2] + 0.5f * lightProj0.columns[i][3];
-    }
-    */
+    // Note: RHIMath CreateOrthographicMatrix produces [0, 1] Z-range for Metal automatically.
+    // No manual Z-fix needed.
     
     lightVP0 = lightProj0 * lightView0;
     
     // Cascade 1 (Far)
-    primal::math::v3 lightEye1 = lightEye0;
     primal::math::m4x4 lightView1 = lightView0;
     // Increase Cascade 1 coverage to ensure all objects are covered
-    primal::math::m4x4 lightProj1 = primal::graphics::rhi::metal::CreateOrthographicMatrix(-5000.0f, 5000.0f, -5000.0f, 5000.0f, 0.1f, 10000.0f);
+    // Use Top=5000, Bottom=-5000 for Y-Up Coordinate System
+    primal::math::m4x4 lightProj1 = primal::graphics::rhi::metal::CreateOrthographicMatrix(-500.0f, 500.0f, 500.0f, -500.0f, 0.1f, 5000.0f);
     
     lightVP1 = lightProj1 * lightView1;
     
@@ -1944,16 +2200,14 @@ void TestSponzaRenderGraph::UpdateScene() {
     sceneData.jitter = {jitterX * 2.0f, jitterY * 2.0f}; // NDC Jitter
     sceneData.previousJitter = oldJitter;
     
-    // Apply Metal Z-fix to shadow matrices for sampling in Shader
-    // REMOVED: CreateOrthographicMatrix already returns [0, 1] Z range for Metal.
-    // Double applying this fix causes Z to be mapped to [0.5, 1.0], making all depths > sampled depth (Shadowed).
     sceneData.shadowMatrix0 = lightVP0;
     sceneData.shadowMatrix1 = lightVP1;
     
     // Fake directional light as far point light
     // Use Directional Light Mode (w=0) for proper lighting without distance attenuation issues
     sceneData.lightPos = lightPos; // Use our angled light position
-    sceneData.lightColor = { 5.0f, 5.0f, 5.0f, 1.0f }; // Increased Intensity
+    // Increase Light Intensity for better contrast
+    sceneData.lightColor = { 20.0f, 20.0f, 20.0f, 1.0f }; 
     sceneData.viewPos = { eye.x, eye.y, eye.z, 1.0f };
     
     if (sceneDataBuffer != handles::INVALID_RESOURCE) {
@@ -2109,7 +2363,13 @@ void TestSponzaRenderGraph::Shutdown() {
     };
     std::cout << "Destroying DescriptorSetLayouts..." << std::endl;
     SafeDestroyDescriptorSetLayout(globalSetLayout);
-    SafeDestroyDescriptorSetLayout(materialSetLayout);
+    if (ownsMaterialSetLayout) {
+        SafeDestroyDescriptorSetLayout(materialSetLayout);
+    }
+    if (defaultSampler != handles::INVALID_SAMPLER) {
+        device->DestroySampler(defaultSampler);
+        defaultSampler = handles::INVALID_SAMPLER;
+    }
     SafeDestroyDescriptorSetLayout(lightingSetLayout);
     SafeDestroyDescriptorSetLayout(skyboxSetLayout);
     std::cout << "DescriptorSetLayouts Destroyed" << std::endl;

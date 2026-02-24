@@ -39,7 +39,33 @@ def main(input_file, output_file):
             mat_name = read_string(f)
             diffuse = read_string(f)
             normal = read_string(f)
-            materials.append({'name': mat_name, 'diffuse': diffuse, 'normal': normal})
+
+            # Deduce other maps from diffuse
+            roughness = ""
+            metallic = ""
+            orm = ""
+            
+            if diffuse:
+                base = diffuse
+                if "_diffuse" in base:
+                    roughness = base.replace("_diffuse", "_roughness")
+                    metallic = base.replace("_diffuse", "_metallic")
+                    orm = base.replace("_diffuse", "_orm")
+                elif "_Diff" in base:
+                    # roughness = base.replace("_Diff", "_Roughness")
+                    # metallic = base.replace("_Diff", "_Metalness")
+                    # Sponza specific: Sponza doesn't have ORM by default usually, but we can try
+                    # Sponza textures: sponza_thorn_diff.png, sponza_thorn_norm.png, sponza_thorn_rough.png, sponza_thorn_metal.png
+                    if not normal:
+                        normal = base.replace("_Diff", "_Normal")
+                elif "_Albedo" in base:
+                    # roughness = base.replace("_Albedo", "_Roughness")
+                    # metallic = base.replace("_Albedo", "_Metallic")
+                    if not normal:
+                        normal = base.replace("_Albedo", "_Normal")
+                
+            materials.append({'name': mat_name, 'diffuse': diffuse, 'normal': normal,
+                              'roughness': roughness, 'metallic': metallic, 'orm': orm})
             
         # LODs
         num_lods_bytes = f.read(4)
@@ -80,6 +106,65 @@ def main(input_file, output_file):
                 
                 idx_buffer_size = mesh['index_size'] * mesh['index_count']
                 mesh['indices'] = f.read(idx_buffer_size)
+
+                # Magic MSHL
+                magic_mshl = struct.unpack('<I', f.read(4))[0]
+                if magic_mshl != 0x4C48534D: # "MSHL"
+                     print(f"Error: Expected Magic MSHL 0x4C48534D, got {hex(magic_mshl)} at {f.tell()-4}")
+                     sys.exit(1)
+
+                # Meshlets
+                meshlet_count = struct.unpack('<I', f.read(4))[0]
+                print(f"DEBUG: Meshlets count: {meshlet_count}")
+                mesh['meshlets'] = b''
+                if meshlet_count > 0:
+                    # meshlet struct size is 60 bytes
+                    mesh['meshlets'] = f.read(meshlet_count * 60)
+                
+                # Meshlet Vertices
+                meshlet_vertex_count = struct.unpack('<I', f.read(4))[0]
+                print(f"DEBUG: Meshlet Vertices count: {meshlet_vertex_count}")
+                mesh['meshlet_vertices'] = b''
+                if meshlet_vertex_count > 0:
+                    mesh['meshlet_vertices'] = f.read(meshlet_vertex_count * 4) # sizeof(u32)
+
+                # Meshlet Triangles
+                data = f.read(4)
+                if len(data) < 4:
+                    print(f"Error: Unexpected EOF reading meshlet_triangle_count at {f.tell()}. Read {len(data)} bytes.")
+                    sys.exit(1)
+                meshlet_triangle_count = struct.unpack('<I', data)[0]
+                print(f"DEBUG: Meshlet Triangles count: {meshlet_triangle_count}")
+                mesh['meshlet_triangles'] = b''
+                if meshlet_triangle_count > 0:
+                    mesh['meshlet_triangles'] = f.read(meshlet_triangle_count * 1) # sizeof(u8)
+                
+                # Magic SDF
+                magic_sdf = struct.unpack('<I', f.read(4))[0]
+                if magic_sdf != 0x20464453: # "SDF "
+                    print(f"Error: Expected Magic SDF 0x20464453, got {hex(magic_sdf)} at {f.tell()-4}")
+                    sys.exit(1)
+
+                # SDF Header
+                mesh['sdf_header'] = f.read(4 * 3 + 4 * 3 + 4 * 3) # resolution(3*u32) + bounds_min(3*f32) + bounds_max(3*f32)
+
+                # SDF Data
+                sdf_data_size = struct.unpack('<I', f.read(4))[0]
+                mesh['sdf_data'] = b''
+                if sdf_data_size > 0:
+                    mesh['sdf_data'] = f.read(sdf_data_size * 2) # sizeof(u16)
+                
+                # Voxels
+                voxels_size = struct.unpack('<I', f.read(4))[0]
+                mesh['voxels'] = b''
+                if voxels_size > 0:
+                    mesh['voxels'] = f.read(voxels_size * 1) # sizeof(u8)
+
+                # Vector Field
+                vector_field_size = struct.unpack('<I', f.read(4))[0]
+                mesh['vector_field'] = b''
+                if vector_field_size > 0:
+                    mesh['vector_field'] = f.read(vector_field_size * 2) # sizeof(u16)
                 
                 meshes.append(mesh)
             
@@ -108,6 +193,18 @@ def write_engine_format(lods, materials, output_file):
             normal_bytes = mat['normal'].encode('utf-8')
             f.write(struct.pack('<I', len(normal_bytes)))
             f.write(normal_bytes)
+            # Roughness
+            roughness_bytes = mat['roughness'].encode('utf-8')
+            f.write(struct.pack('<I', len(roughness_bytes)))
+            f.write(roughness_bytes)
+            # Metallic
+            metallic_bytes = mat['metallic'].encode('utf-8')
+            f.write(struct.pack('<I', len(metallic_bytes)))
+            f.write(metallic_bytes)
+            # ORM
+            # orm_bytes = mat['orm'].encode('utf-8')
+            # f.write(struct.pack('<I', len(orm_bytes)))
+            # f.write(orm_bytes)
 
         # 1. lod_count
         f.write(struct.pack('<I', len(lods)))
@@ -136,12 +233,12 @@ def write_engine_format(lods, materials, output_file):
             start_pos = f.tell()
             
             for mesh in lod['meshes']:
-                # Submesh Header (6 u32s now)
+                # Submesh Header (5 u32s now)
                 # Note: MeshCPU.cpp does NOT write material_idx in the submesh header.
                 # Handle potential unsigned -1 (0xFFFFFFFF) from C++
                 mat_idx = mesh['material_idx']
                 if mat_idx > 2147483647:
-                    mat_idx -= 4294967296
+                   mat_idx -= 4294967296
                 f.write(struct.pack('<i', mat_idx))
                 f.write(struct.pack('<I', mesh['element_size']))
                 f.write(struct.pack('<I', mesh['vertex_count']))
@@ -169,6 +266,32 @@ def write_engine_format(lods, materials, output_file):
                 
                 # Index Buffer
                 f.write(mesh['indices'])
+                
+                # Magic MSHL
+                f.write(struct.pack('<I', 0x4C48534D))
+                # Meshlets
+                f.write(struct.pack('<I', len(mesh['meshlets']) // 60))
+                f.write(mesh['meshlets'])
+                # Meshlet Vertices
+                f.write(struct.pack('<I', len(mesh['meshlet_vertices']) // 4))
+                f.write(mesh['meshlet_vertices'])
+                # Meshlet Triangles
+                f.write(struct.pack('<I', len(mesh['meshlet_triangles'])))
+                f.write(mesh['meshlet_triangles'])
+                
+                # Magic SDF
+                f.write(struct.pack('<I', 0x20464453))
+                # SDF Header
+                f.write(mesh['sdf_header'])
+                # SDF Data
+                f.write(struct.pack('<I', len(mesh['sdf_data']) // 2))
+                f.write(mesh['sdf_data'])
+                # Voxels
+                f.write(struct.pack('<I', len(mesh['voxels'])))
+                f.write(mesh['voxels'])
+                # Vector Field
+                f.write(struct.pack('<I', len(mesh['vector_field']) // 2))
+                f.write(mesh['vector_field'])
                 
             end_pos = f.tell()
             submeshes_size = end_pos - start_pos

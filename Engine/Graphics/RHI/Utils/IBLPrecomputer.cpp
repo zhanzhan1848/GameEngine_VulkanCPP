@@ -50,7 +50,9 @@ namespace {
             "shaders/",
             "Engine/Graphics/RHI/Shaders/",
             "../Engine/Graphics/RHI/Shaders/",
-            "../../Engine/Graphics/RHI/Shaders/" // Just in case deeper in build dir
+            "../../Engine/Graphics/RHI/Shaders/",
+            "../../../Engine/Graphics/RHI/Shaders/",
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/"
         };
 
         std::string path;

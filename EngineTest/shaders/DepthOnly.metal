@@ -7,8 +7,7 @@ struct VertexIn {
 
 struct VertexInput {
     packed_float3 position;
-    packed_float3 normal;
-    packed_float2 uv;
+    uint padding[5]; // 20 bytes padding to match 32-byte stride (12 pos + 20 element)
 };
 
 struct PushConsts {
@@ -22,7 +21,7 @@ struct VertexOut {
 vertex VertexOut shadow_mapping_vs(
     uint vertexId [[vertex_id]],
     constant PushConsts& pushConsts [[buffer(2)]],
-    device const VertexInput* vertices [[buffer(20)]]
+    constant VertexInput* vertices [[buffer(20)]]
 ) {
     VertexOut out;
     

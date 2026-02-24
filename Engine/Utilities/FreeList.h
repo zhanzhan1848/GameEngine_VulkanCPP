@@ -116,6 +116,13 @@ namespace primal::utl
 			return !already_removed(id, false);
 		}
 
+        void clear()
+        {
+            _array.clear();
+            _next_free_index = u32_invalid_id;
+            _size = 0;
+        }
+
 		[[nodiscard]] constexpr T& operator[](u32 id)
 		{
 			assert(id < _array.size() && !already_removed(id, false));

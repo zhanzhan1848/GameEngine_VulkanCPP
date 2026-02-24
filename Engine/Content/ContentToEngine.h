@@ -1,5 +1,11 @@
 #pragma once
 #include "CommonHeaders.h"
+#include "Graphics/RHI/Core/RHITypes.h"
+
+namespace primal::graphics::rhi {
+    struct RHIMeshAsset;
+    class RHIGpuMesh;
+}
 
 namespace primal::content
 {
@@ -53,8 +59,24 @@ namespace primal::content
 		u16 count;
 	};
 
-	id::id_type create_resource(const void *const data, asset_type::type type);
-	void destroy_resource(id::id_type id, asset_type::type type);
+    enum class GraphicsAPI : u32
+    {
+        Legacy = 0,
+        RHI = 1
+    };
+
+[[nodiscard]] id::id_type create_resource(const void *const data, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
+    void destroy_resource(id::id_type id, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
+    void shutdown();
+
+	// RHI Forwarding Helper
+	graphics::rhi::ResourceHandle get_rhi_texture_handle(id::id_type id);
+	bool get_rhi_mesh_asset(id::id_type id, graphics::rhi::RHIMeshAsset& asset);
+	graphics::rhi::RHIGpuMesh* get_rhi_gpu_mesh(id::id_type id);
+    id::id_type register_mesh_asset(graphics::rhi::RHIMeshAsset& asset);
+
+    using GpuMeshCallback = std::function<void(id::id_type, graphics::rhi::RHIGpuMesh*)>;
+    void foreach_gpu_mesh(GpuMeshCallback callback);
 
 	id::id_type add_shader_group(const u8* const* shaders, u32 num_shaders, const u32 *const keys);
 	void remove_shader_group(id::id_type id);

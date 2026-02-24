@@ -18,8 +18,15 @@ struct SceneDataMeshInfo {
     int32_t materialIndex{-1}; // 材质索引
     std::string diffuseTexturePath; // 漫反射贴图路径 (从文件加载)
     std::string normalTexturePath;  // 法线贴图路径 (从文件加载)
+    std::string roughnessTexturePath; // 粗糙度贴图路径
+    std::string metallicTexturePath;  // 金属度贴图路径
+    std::string specularTexturePath;  // 高光贴图路径
+    std::string ormTexturePath;       // ORM 贴图路径 (如果合并了)
     std::shared_ptr<Material> material{nullptr}; // 材质资源 (共享所有权)
     std::shared_ptr<MaterialInstance> materialInstance{nullptr}; // 关联的材质实例
+    
+    // Meshlet/Debug support - content system entity ID
+    primal::id::id_type meshEntityId{primal::id::invalid_id};
 };
 
 class SceneDataAdapter {

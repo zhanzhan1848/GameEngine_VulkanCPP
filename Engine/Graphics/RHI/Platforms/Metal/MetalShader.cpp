@@ -37,21 +37,22 @@ bool MetalShader::Initialize() {
     // If binary creation failed, try as source code
     if (!library_) {
         if (error) {
-            // std::cerr << "[MetalShader] Failed to create library from binary: " 
-            //           << error->localizedDescription()->utf8String() << std::endl;
+            std::cerr << "[MetalShader] Failed to create library from binary: " 
+                      << error->localizedDescription()->utf8String() << std::endl;
             // Error is autoreleased, do not release manually
             error = nullptr;
         }
 
-        // std::cout << "[MetalShader] Compiling from source..." << std::endl;
-        NS::String* source = NS::String::alloc()->init(static_cast<const char*>(data_), NS::UTF8StringEncoding);
+        std::cout << "[MetalShader] Compiling from source... (size: " << size_ << " bytes)" << std::endl;
+        std::string sourceStr(static_cast<const char*>(data_), size_);
+        NS::String* source = NS::String::alloc()->init(sourceStr.c_str(), NS::UTF8StringEncoding);
         if (!source) {
              std::cerr << "[MetalShader] Failed to create NS::String from source data (UTF8). Trying ASCII..." << std::endl;
-             source = NS::String::alloc()->init(static_cast<const char*>(data_), NS::ASCIIStringEncoding);
+             source = NS::String::alloc()->init(sourceStr.c_str(), NS::ASCIIStringEncoding);
         }
         if (!source) {
              std::cerr << "[MetalShader] Failed to create NS::String from source data (ASCII). Trying MacOSRoman..." << std::endl;
-             source = NS::String::alloc()->init(static_cast<const char*>(data_), NS::MacOSRomanStringEncoding);
+             source = NS::String::alloc()->init(sourceStr.c_str(), NS::MacOSRomanStringEncoding);
         }
         if (!source) {
              std::cerr << "[MetalShader] Failed to create NS::String from source data (All encodings failed)." << std::endl;
@@ -68,6 +69,26 @@ bool MetalShader::Initialize() {
         if (error) {
             std::cerr << "[MetalShader] Error: " 
                       << error->localizedDescription()->utf8String() << std::endl;
+            
+            // Print source code for debugging
+            std::cerr << "[MetalShader] Source Code (First 200 lines):" << std::endl;
+            const char* sourceStr = static_cast<const char*>(data_);
+            std::string sourceString(sourceStr, std::min(size_, (size_t)10000)); // Limit output
+            
+            int lineNum = 1;
+            size_t start = 0;
+            size_t end = sourceString.find('\n');
+            while (end != std::string::npos && lineNum <= 200) {
+                std::cerr << lineNum << ": " << sourceString.substr(start, end - start) << std::endl;
+                start = end + 1;
+                end = sourceString.find('\n', start);
+                lineNum++;
+            }
+            if (lineNum <= 200) {
+                std::cerr << lineNum << ": " << sourceString.substr(start) << std::endl;
+            }
+            std::cerr << "[MetalShader] End of Source Code" << std::endl;
+
         } else {
              std::cerr << "[MetalShader] Unknown error (error object is null)" << std::endl;
         }

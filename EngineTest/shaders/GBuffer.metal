@@ -57,10 +57,10 @@ struct VertexElement {
     packed_float2   UV;
 };
 
-// struct VertexInput {
-//    packed_float3 position;
-//    VertexElement element;
-// };
+struct VertexInput {
+    packed_float3 position;
+    VertexElement element;
+};
 
 // Helper Functions
 float3 UnpackNormal(packed_ushort2 p) {
@@ -77,22 +77,18 @@ float3 UnpackNormal(packed_ushort2 p) {
 
 vertex VertexOut vertexMain(
     uint vertexId [[vertex_id]],
-    constant SceneData& sceneData [[buffer(0)]],
-    constant ViewData& viewData [[buffer(1)]],
+    constant ViewData& viewData [[buffer(0)]],
+    constant SceneData& sceneData [[buffer(1)]],
     constant PushConsts& pushConsts [[buffer(2)]],
-    constant uchar* vertexBuffer [[buffer(20)]] // Manual Fetch
+    constant VertexInput* vertices [[buffer(20)]]
 ) {
     VertexOut out;
     
-    // Manual Vertex Fetch
-    // Stride = 12 (Position) + 20 (Element) = 32
-    uint offset = vertexId * 32;
-    
     // Position
-    float3 rawPos = *reinterpret_cast<constant packed_float3*>(vertexBuffer + offset);
+    float3 rawPos = vertices[vertexId].position;
     
     // Element
-    VertexElement element = *reinterpret_cast<constant VertexElement*>(vertexBuffer + offset + 12);
+    VertexElement element = vertices[vertexId].element;
     
     // Unpack Normal
     packed_ushort2 packedN = element.Normal;
@@ -127,7 +123,7 @@ vertex VertexOut vertexMain(
     // For now, simple cross
     out.worldBitangent = cross(out.worldNormal, out.worldTangent);
     
-    out.uv = rawUV;
+    out.uv = float2(rawUV.x, 1.0 - rawUV.y);
     
     out.position = viewData.viewProjection * worldPos;
     
@@ -144,7 +140,7 @@ vertex VertexOut vertexMain(
 
 fragment FragmentOut fragmentMain(
     VertexOut in [[stage_in]],
-    constant SceneData& sceneData [[buffer(0)]],
+    constant SceneData& sceneData [[buffer(1)]],
     texture2d<float> albedoMap [[texture(0)]],
     texture2d<float> normalMap [[texture(1)]],
     texture2d<float> ormMap [[texture(2)]],
@@ -179,31 +175,43 @@ fragment FragmentOut fragmentMain(
     // out.albedo = float4(1.0, 0.0, 0.0, 1.0);
 
     // Standard PBR Sampling
-    // out.albedo = albedoMap.sample(defaultSampler, in.uv);
-    // DEBUG: Force Red to verify GBuffer execution
-    // out.albedo = float4(1.0, 0.0, 0.0, 1.0);
-    // out.albedo = float4(1.0, 1.0, 1.0, 1.0);
+    float4 albedoSample = albedoMap.sample(defaultSampler, in.uv);
+    out.albedo = albedoSample;
+    
+    // ORM Sampling (AO, Roughness, Metallic)
+    // Sponza might not have ORM, or it might be separate.
+    // If texture is missing/black, we need defaults.
+    float4 ormSample = ormMap.sample(defaultSampler, in.uv);
+    
+    // Default Fallback if ORM is black (likely missing)
+    if (length(ormSample.rgb) < 0.01) {
+        // AO = 1.0 (Full Ambient)
+        // Roughness = 0.8 (Rough)
+        // Metallic = 0.0 (Non-metal)
+        out.orm = float4(1.0, 0.8, 0.0, 1.0);
+    } else {
+        out.orm = ormSample;
+        // Ensure AO is never 0
+        out.orm.r = max(out.orm.r, 0.1); 
+    }
     
     // Normal Mapping
-    // float3 normal = normalMap.sample(defaultSampler, in.uv).rgb;
-    // normal = normal * 2.0 - 1.0;
-    
-    // float3 T = normalize(in.worldTangent);
-    float3 N = normalize(in.worldNormal);
-    float3 T = normalize(in.worldTangent);
-    // float3 B = normalize(in.worldBitangent); // Use Bitangent from vertex
-    // If Bitangent is not available, calculate it:
-    float3 B = cross(N, T); 
-    float3x3 TBN = float3x3(T, B, N);
-    
-    out.albedo = float4(1.0);
+    float3 normalSample = normalMap.sample(defaultSampler, in.uv).rgb;
+    // If normal map is present (not black/blue-ish default), use it
+    // Flat normal is (0.5, 0.5, 1.0). Length ~1.22.
+    // Black is (0,0,0). Length 0.
+    if (length(normalSample) > 0.1) {
+        float3 normal = normalSample * 2.0 - 1.0;
+        float3 N = normalize(in.worldNormal);
+        float3 T = normalize(in.worldTangent);
+        float3 B = cross(N, T); 
+        float3x3 TBN = float3x3(T, B, N);
+        out.normal = float4(normalize(TBN * normal) * 0.5 + 0.5, 1.0);
+    } else {
+        // Fallback to vertex normal
+        out.normal = float4(normalize(in.worldNormal) * 0.5 + 0.5, 1.0);
+    }
 
-    out.normal = float4(normalize(TBN * N) * 0.5 + 0.5, 1.0);
-    // out.normal = float4(N * 0.5 + 0.5, 1.0);
-
-    // out.orm = ormMap.sample(defaultSampler, in.uv);
-    out.orm = float4(1.0, 0.5, 0.0, 1.0); // Occlusion=1.0, Roughness=0.5, Metallic=0.0
-    
     // Calculate Velocity
     // Convert to NDC
     float2 currentNDC = in.currentPos.xy / in.currentPos.w;

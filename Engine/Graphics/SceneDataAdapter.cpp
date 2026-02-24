@@ -8,6 +8,8 @@
 #include <iostream>
 #include "Material.h"
 #include "MaterialInstance.h"
+#include "Content/ContentToEngine.h"
+#include "Graphics/RHI/Core/RHIMeshAsset.h"
 
 namespace primal::graphics {
 
@@ -141,6 +143,13 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              uint32_t normLen = reader.Read<uint32_t>();
              std::string normal = reader.ReadString(normLen);
              
+             // Read roughness and metallic (added by pack_geometry.py)
+             uint32_t roughLen = reader.Read<uint32_t>();
+             std::string roughness = reader.ReadString(roughLen);
+             
+             uint32_t metalLen = reader.Read<uint32_t>();
+             std::string metallic = reader.ReadString(metalLen);
+             
              tempMaterials.push_back({name, diffuse, normal});
 
              // Create Dummy Material & Instance
@@ -180,39 +189,126 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         
         std::cout << "LOD " << lod << ": SubmeshCount=" << submeshCount << ", SizeOfSubmeshes=" << sizeOfSubmeshes << std::endl;
 
-        for (uint32_t i = 0; i < submeshCount; ++i) {
-             if (reader.Remaining() < 20) break;
-             // Read submesh header
-             int32_t materialIndex = reader.Read<int32_t>();
-             uint32_t elementSize = reader.Read<uint32_t>();
-             
-             uint32_t vertexCount, indexCount, elementsType, primitiveTopology;
+        // Track submesh loading for diagnostics
+        int loadedCount = 0;
+        int failedCount = 0;
 
-             // Heuristic to detect Old Format (shifted fields due to missing MaterialIndex)
-             if (elementSize > 200) {
-                 // Old Format: [ElementSize] [VertexCount] [IndexCount] [ElementType] [PrimitiveTopology]
-                 // We read [ElementSize] as materialIndex, and [VertexCount] as elementSize.
-                 uint32_t realElementSize = (uint32_t)materialIndex;
-                 uint32_t realVertexCount = elementSize;
+        for (uint32_t i = 0; i < submeshCount; ++i) {
+             if (reader.Remaining() < 4) break;
+             
+             // =====================================================================
+             // COMPACT FORMAT DETECTION (Geometry.cpp output format)
+             // Compact format header: [NameLen] [Name] [LodId] [MatIdx] [ElemSize] [ElemType] [VertCount] [IdxSize] [IdxCount] [LodThreshold]
+             // =====================================================================
+             
+             int32_t materialIndex = -1;
+             uint32_t elementSize = 0;
+             uint32_t vertexCount = 0;
+             uint32_t indexCount = 0;
+             uint32_t indexSize = 2;  // Default
+             uint32_t elementsType = 0;
+             uint32_t primitiveTopology = 4; // TriangleList
+             std::string meshName;
+             bool isCompactFormat = false;
+             
+             // Read first value and try to detect format
+             uint32_t firstVal = reader.Read<uint32_t>();
+             
+             // Check if firstVal could be a name length (Compact format)
+             // Name length should be reasonable (0-200 chars)
+             if (firstVal > 0 && firstVal < 200 && reader.Remaining() >= firstVal + 32) {
+                 // Peek at the potential name
+                 const char* namePtr = static_cast<const char*>(reader.GetCurrentPtr());
+                 bool looksLikeString = true;
+                 for (uint32_t c = 0; c < firstVal && c < 50; ++c) {
+                     char ch = namePtr[c];
+                     if (ch != 0 && (ch < 32 || ch > 126)) {
+                         looksLikeString = false;
+                         break;
+                     }
+                 }
                  
-                 vertexCount = realVertexCount;
-                 elementSize = realElementSize;
-                 materialIndex = -1; // Default
+                 if (looksLikeString) {
+                     // Try to read as Compact format
+                     meshName = std::string(namePtr, firstVal);
+                     reader.Skip(firstVal);
+                     
+                     uint32_t lodId = reader.Read<uint32_t>();
+                     materialIndex = (int32_t)reader.Read<uint32_t>();
+                     elementSize = reader.Read<uint32_t>();
+                     elementsType = reader.Read<uint32_t>();
+                     vertexCount = reader.Read<uint32_t>();
+                     indexSize = reader.Read<uint32_t>();
+                     indexCount = reader.Read<uint32_t>();
+                     float lodThreshold;
+                     reader.Read(&lodThreshold, sizeof(float));
+                     
+                     // Validate Compact format signatures
+                     if (elementSize == 20 && (indexSize == 2 || indexSize == 4) &&
+                         vertexCount > 0 && vertexCount < 10000000 &&
+                         indexCount > 0 && indexCount < 30000000) {
+                         isCompactFormat = true;
+                         std::cout << "DEBUG: Detected COMPACT Format. Name='" << meshName 
+                                   << "', LodId=" << lodId
+                                   << ", MatIdx=" << materialIndex
+                                   << ", ElemSize=" << elementSize
+                                   << ", ElemType=" << elementsType
+                                   << ", Verts=" << vertexCount
+                                   << ", IdxSize=" << indexSize
+                                   << ", Indices=" << indexCount << std::endl;
+                     }
+                 }
+             }
+             
+             if (!isCompactFormat) {
+                 // Fallback: Use original format detection
+                 // firstVal was either materialIndex or elementSize (old format)
+                 elementSize = reader.Read<uint32_t>();
+                 uint32_t vertexCount_tmp, indexCount_tmp, elementsType_tmp, primitiveTopology_tmp;
                  
-                 indexCount = reader.Read<uint32_t>();
-                 elementsType = reader.Read<uint32_t>();
-                 primitiveTopology = reader.Read<uint32_t>();
-                 
-                 std::cout << "DEBUG: Detected Old Format. Adapted values: MatIdx=" << materialIndex 
-                           << ", ElemSize=" << elementSize << ", Verts=" << vertexCount << std::endl;
-             } else {
-                 // New Format: [MatIdx] [ElemSize] [VertCount] [IdxCount] [ElemType] [PrimTopo]
-                 if (reader.Remaining() < 16) break; // Need 4 more ints
-                 
-                 vertexCount = reader.Read<uint32_t>();
-                 indexCount = reader.Read<uint32_t>();
-                 elementsType = reader.Read<uint32_t>();
-                 primitiveTopology = reader.Read<uint32_t>();
+                 // Heuristic to detect Old Format
+                 if (elementSize > 200) {
+                     // Old Format: [ElementSize] [VertexCount] [IndexCount] [ElementType] [PrimitiveTopology]
+                     uint32_t realElementSize = firstVal;
+                     uint32_t realVertexCount = elementSize;
+                     
+                     vertexCount = realVertexCount;
+                     elementSize = realElementSize;
+                     materialIndex = -1;
+                     
+                     indexCount_tmp = reader.Read<uint32_t>();
+                     elementsType_tmp = reader.Read<uint32_t>();
+                     primitiveTopology_tmp = reader.Read<uint32_t>();
+                     
+                     indexCount = indexCount_tmp;
+                     elementsType = elementsType_tmp;
+                     primitiveTopology = primitiveTopology_tmp;
+                     indexSize = (vertexCount < (1 << 16)) ? 2 : 4;
+                     
+                     std::cout << "DEBUG: Detected Old Format. MatIdx=" << materialIndex 
+                               << ", ElemSize=" << elementSize << ", Verts=" << vertexCount << std::endl;
+                 } else {
+                     // Engine Format (pack_geometry): [MatIdx i32] [ElemSize u32] [VertCount u32] [IdxCount u32] [ElemType u32] [PrimTopo u32]
+                     // NOTE: elementSize was already read at line 264
+                     materialIndex = (int32_t)firstVal;
+                     
+                     if (reader.Remaining() < 16) {  // 4 remaining fields * 4 bytes (ElemSize already read)
+                         std::cerr << "ERROR: Incomplete submesh header at LOD " << lod << ", submesh " << i << std::endl;
+                         failedCount++;
+                         continue;
+                     }
+                     
+                     // elementSize already set above at line 264
+                     vertexCount = reader.Read<uint32_t>();
+                     indexCount = reader.Read<uint32_t>();
+                     elementsType = reader.Read<uint32_t>();
+                     primitiveTopology = reader.Read<uint32_t>();
+                     indexSize = (vertexCount < (1 << 16)) ? 2 : 4;
+                     
+                     std::cout << "DEBUG: Detected Engine Format (pack_geometry). MatIdx=" << materialIndex 
+                               << ", ElemSize=" << elementSize << ", Verts=" << vertexCount 
+                               << ", IdxCount=" << indexCount << std::endl;
+                 }
              }
              
              (void)elementsType;
@@ -225,7 +321,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // Data sizes
              uint32_t positionSize = 12 * vertexCount;
              uint32_t elementBufferSize = elementSize * vertexCount;
-             uint32_t indexSize = (vertexCount < (1 << 16)) ? 2 : 4;
+             // indexSize already defined above (line 199)
              uint32_t indexBufferSize = indexSize * indexCount;
              
              // Alignment (Match MeshCPU.cpp align16 logic which aligns absolute offset)
@@ -257,7 +353,147 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  std::cerr << "Incomplete submesh data." << std::endl;
                  break;
              }
+             
+             // =================================================================
+             // Create RHIMeshAsset for meshlet/SDF debug support
+             // =================================================================
+             rhi::RHIMeshAsset meshAsset;
+             meshAsset.lod_id = lod;
+             meshAsset.material_idx = (materialIndex >= 0) ? materialIndex : 0;
+             meshAsset.lod_threshold = thresholds[lod];
+             meshAsset.index_size = indexSize;
+             meshAsset.num_vertices = vertexCount;
+             meshAsset.num_indices = indexCount;
+             meshAsset.elements_type = elementsType;
+             
+             // Copy position buffer (12 bytes per vertex)
+             meshAsset.position_buffer.resize(positionSize);
+             memcpy(meshAsset.position_buffer.data(), posPtr, positionSize);
+             
+             // Copy element buffer
+             meshAsset.element_buffer.resize(elementBufferSize);
+             memcpy(meshAsset.element_buffer.data(), elemPtr, elementBufferSize);
+             
+             // Copy index buffer
+             meshAsset.index_buffer.resize(indexBufferSize);
+             memcpy(meshAsset.index_buffer.data(), idxPtr, indexBufferSize);
+             
              reader.Skip(totalSize);
+             
+             // Parse MSHL (Meshlets) section
+             // NOTE: We need to peek at the magic without advancing if it doesn't match
+             if (reader.Remaining() >= 8) {
+                 const uint8_t* peekPtr = static_cast<const uint8_t*>(reader.GetCurrentPtr());
+                 uint32_t meshletMagic = *reinterpret_cast<const uint32_t*>(peekPtr);
+                 
+                 if (meshletMagic == 0x4C48534D) { // 'MSHL'
+                     reader.Skip(4); // Consume the magic
+                     uint32_t meshletCount = reader.Read<uint32_t>();
+                     
+                     if (meshletCount > 0 && meshletCount < 100000) {
+                         meshAsset.meshlets.resize(meshletCount);
+                         
+                         // Read meshlet data (60 bytes each)
+                         for (uint32_t m = 0; m < meshletCount; ++m) {
+                             rhi::RHIMeshlet& ml = meshAsset.meshlets[m];
+                             ml.vertex_offset = reader.Read<uint32_t>();
+                             ml.triangle_offset = reader.Read<uint32_t>();
+                             ml.vertex_count = reader.Read<uint32_t>();
+                             ml.triangle_count = reader.Read<uint32_t>();
+                             
+                             // cone_apex[3]
+                             reader.Read(&ml.cone_apex[0], sizeof(float) * 3);
+                             // cone_axis[3]
+                             reader.Read(&ml.cone_axis[0], sizeof(float) * 3);
+                             // cone_cutoff
+                             reader.Read(&ml.cone_cutoff, sizeof(float));
+                             // center[3]
+                             reader.Read(&ml.center[0], sizeof(float) * 3);
+                             // radius
+                             reader.Read(&ml.radius, sizeof(float));
+                         }
+                         
+                         // Read meshlet vertices
+                         if (reader.Remaining() >= 4) {
+                             uint32_t meshletVertCount = reader.Read<uint32_t>();
+                             if (meshletVertCount > 0 && meshletVertCount < 10000000) {
+                                 meshAsset.meshlet_vertices.resize(meshletVertCount);
+                                 reader.Read(meshAsset.meshlet_vertices.data(), meshletVertCount * 4);
+                             }
+                         }
+                         
+                         // Read meshlet triangles
+                         if (reader.Remaining() >= 4) {
+                             uint32_t meshletTriCount = reader.Read<uint32_t>();
+                             if (meshletTriCount > 0 && meshletTriCount < 10000000) {
+                                 meshAsset.meshlet_triangles.resize(meshletTriCount);
+                                 reader.Read(meshAsset.meshlet_triangles.data(), meshletTriCount);
+                             }
+                         }
+                         
+                         std::cout << "DEBUG: Loaded " << meshletCount << " meshlets for mesh LOD " << lod << std::endl;
+						 if (meshletCount > 0) {
+							 const auto& firstMl = meshAsset.meshlets[0];
+							 std::cout << "  First meshlet: center=(" << firstMl.center[0] << "," << firstMl.center[1] << "," << firstMl.center[2] << ") radius=" << firstMl.radius << std::endl;
+						 }
+                     }
+                 }
+                 // If not MSHL, don't consume - it might be next submesh data
+             }
+             
+             // Parse SDF section
+             if (reader.Remaining() >= 8) {
+                 const uint8_t* peekPtr = static_cast<const uint8_t*>(reader.GetCurrentPtr());
+                 uint32_t sdfMagic = *reinterpret_cast<const uint32_t*>(peekPtr);
+                 
+                 if (sdfMagic == 0x20464453) { // 'SDF '
+                     reader.Skip(4); // Consume the magic
+                     
+                     // Read SDF header
+                     reader.Read(&meshAsset.sdf.resolution[0], sizeof(uint32_t) * 3);
+                     reader.Read(&meshAsset.sdf.bounds_min[0], sizeof(float) * 3);
+                     reader.Read(&meshAsset.sdf.bounds_max[0], sizeof(float) * 3);
+                     
+                     // Read SDF data
+                     if (reader.Remaining() >= 4) {
+                         uint32_t sdfSize = reader.Read<uint32_t>();
+                         if (sdfSize > 0 && sdfSize < 100000000) {
+                             meshAsset.sdf.data.resize(sdfSize);
+                             reader.Read(meshAsset.sdf.data.data(), sdfSize * 2);
+                         }
+                     }
+                     
+                     // Read voxels
+                     if (reader.Remaining() >= 4) {
+                         uint32_t voxelsSize = reader.Read<uint32_t>();
+                         if (voxelsSize > 0 && voxelsSize < 100000000) {
+                             meshAsset.sdf.voxels.resize(voxelsSize);
+                             reader.Read(meshAsset.sdf.voxels.data(), voxelsSize);
+                         }
+                     }
+                     
+                     // Read vector field
+                     if (reader.Remaining() >= 4) {
+                         uint32_t vecFieldSize = reader.Read<uint32_t>();
+                         if (vecFieldSize > 0 && vecFieldSize < 100000000) {
+                             meshAsset.sdf.vector_field.resize(vecFieldSize);
+                             reader.Read(meshAsset.sdf.vector_field.data(), vecFieldSize * 2);
+                         }
+                     }
+                     
+                     std::cout << "DEBUG: Loaded SDF data, resolution: " 
+                               << meshAsset.sdf.resolution[0] << "x"
+                               << meshAsset.sdf.resolution[1] << "x"
+                               << meshAsset.sdf.resolution[2] << std::endl;
+                 }
+                 // If not SDF, don't consume - it might be next submesh data
+             }
+             
+             // Register mesh asset to content system
+             id::id_type meshEntityId = content::register_mesh_asset(meshAsset);
+             
+             // Don't create GPU mesh here - let it be created lazily when needed by GeometryDebugPass
+             // This avoids potential resource conflicts during scene loading
              
              // Create Interleaved Data
         // Force standard stride (32 bytes) to match Metal shader (12 Pos + 20 Element)
@@ -321,11 +557,15 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                               idxPtr, indexCount, idxType)) {
                  SceneDataMeshInfo info;
                  info.mesh = mesh;
+                 info.meshEntityId = meshEntityId;
                  info.lodId = lod;
                  info.lodThreshold = thresholds[lod];
                  info.materialIndex = materialIndex;
                 if (materialIndex >= 0 && (size_t)materialIndex < materialInstances.size()) {
                     info.materialInstance = materialInstances[materialIndex];
+                }
+                if (materialIndex >= 0 && (size_t)materialIndex < materials.size()) {
+                    info.material = materials[materialIndex];
                 }
                 if (materialIndex >= 0 && (size_t)materialIndex < tempMaterials.size()) {
                     info.diffuseTexturePath = tempMaterials[materialIndex].diffuse;
@@ -536,7 +776,17 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
                 }
                 */
                 
-                result.push_back({meshName, lodId, lodThreshold, mesh, materialIndex, diffusePath, normalPath, assignedMaterial, assignedMatInst});
+                SceneDataMeshInfo info;
+                info.name = meshName;
+                info.lodId = lodId;
+                info.lodThreshold = lodThreshold;
+                info.mesh = mesh;
+                info.materialIndex = materialIndex;
+                info.diffuseTexturePath = diffusePath;
+                info.normalTexturePath = normalPath;
+                info.material = assignedMaterial;
+                info.materialInstance = assignedMatInst;
+                result.push_back(info);
             } else {
                 delete mesh;
                 // Log error?

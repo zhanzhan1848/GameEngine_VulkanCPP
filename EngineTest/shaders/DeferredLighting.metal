@@ -99,8 +99,8 @@ float GetShadow(float3 worldPos, float4x4 shadowMatrix, texture2d<float> shadowM
 
 fragment float4 fragmentLighting_v3(
     VertexOut in [[stage_in]],
-    constant SceneData& sceneData [[buffer(0)]],
-    constant ViewData& viewData [[buffer(1)]],
+    constant ViewData& viewData [[buffer(0)]],
+    constant SceneData& sceneData [[buffer(1)]],
     
     texture2d<float> albedoTex [[texture(2)]],
     texture2d<float> normalTex [[texture(3)]],
@@ -134,12 +134,14 @@ fragment float4 fragmentLighting_v3(
     float ao = orm.r;
 
     // 2. Reconstruct World Position
-    // Metal NDC: Z [0, 1]
-    float4 clipPos;
-    clipPos.x = uv.x * 2.0 - 1.0;
-    clipPos.y = (1.0 - uv.y) * 2.0 - 1.0; // Flip Y for View/Clip space
-    clipPos.z = depth;
-    clipPos.w = 1.0;
+    // Metal NDC: Z [0, 1], Y [-1, 1] (Y Down: -1 Top, 1 Bottom) -> This comment was wrong. Metal is Y-Up (-1 Bottom, 1 Top)
+    float2 ndc;
+    ndc.x = uv.x * 2.0 - 1.0;
+    ndc.y = (1.0 - uv.y) * 2.0 - 1.0; // Flip Y (Top UV=0 -> Top NDC=1)
+
+    float z = depth;
+
+    float4 clipPos = float4(ndc, z, 1.0);
 
     float4 worldPos4 = viewData.invViewProjection * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
@@ -148,23 +150,94 @@ fragment float4 fragmentLighting_v3(
     float shadow = GetShadow(worldPos, sceneData.shadowMatrix0, shadowMap0, defaultSampler);
 
     // Calculate PBR Lighting
-    // Simple Directional Light
     float3 N = normalize(normal);
     float3 V = normalize(sceneData.viewPos.xyz - worldPos);
-    float3 L = normalize(sceneData.lightPos.xyz); // Directional Light assumed for now (or far point)
-    float3 H = normalize(V + L);
-    
-    float NdotL = max(dot(N, L), 0.0);
-    float3 radiance = sceneData.lightColor.rgb * shadow; // Apply Shadow
-    
-    // Simple Diffuse (Lambert) for Debug
-    float3 diffuse = albedo.rgb / 3.14159265;
-    float3 finalColor = diffuse * radiance * NdotL;
-    
-    // Add Ambient
-    finalColor += albedo.rgb * 0.1;
+    float3 R = reflect(-V, N); 
 
-    // Output Final Color
-    return float4(finalColor, 1.0);
-    // return float4(0.0, 1.0, 0.0, 1.0); // Debug: Force Green
+    // F0 for Fresnel
+    float3 F0 = float3(0.04); 
+    F0 = mix(F0, albedo.rgb, metallic);
+
+    float3 Lo = float3(0.0);
+
+    // --- Direct Light (Directional) ---
+    {
+        float3 L;
+        float attenuation = 1.0;
+        
+        if (sceneData.lightPos.w == 0.0) {
+            // Directional Light
+            // lightPos.xyz is the direction TO the light source
+            L = normalize(sceneData.lightPos.xyz);
+        } else {
+            // Point Light
+            float3 lightDir = sceneData.lightPos.xyz - worldPos;
+            float distance = length(lightDir);
+            L = normalize(lightDir);
+            attenuation = 1.0 / (distance * distance); // Inverse square falloff
+        }
+
+        float3 H = normalize(V + L);
+        
+        float3 radiance = sceneData.lightColor.rgb * shadow * attenuation; 
+        
+        // Cook-Torrance BRDF
+        float NDF = DistributionGGX(N, H, roughness);   
+        float G   = GeometrySmith(N, V, L, roughness);      
+        float3 F  = FresnelSchlick(max(dot(H, V), 0.0), F0);
+        
+        float3 numerator    = NDF * G * F; 
+        float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+        float3 specular = numerator / denominator;
+        
+        // kS is equal to Fresnel
+        float3 kS = F;
+        float3 kD = float3(1.0) - kS;
+        kD *= 1.0 - metallic;	  
+
+        float NdotL = max(dot(N, L), 0.0);        
+
+        Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL;  
+    }
+
+    // --- Ambient Light (IBL) ---
+    // IBL Diffuse (Irradiance)
+    float3 kS = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+    float3 kD = 1.0 - kS;
+    kD *= 1.0 - metallic;
+    
+    float3 irradiance = irradianceMap.sample(defaultSampler, N).rgb;
+    float3 diffuse = irradiance * albedo.rgb;
+    
+    // IBL Specular (Prefilter + BRDF)
+    const float MAX_REFLECTION_LOD = 4.0;
+    float3 prefilteredColor = prefilterMap.sample(defaultSampler, R, level(roughness * MAX_REFLECTION_LOD)).rgb;
+    float2 brdf = brdfLUT.sample(brdfSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
+    float3 specular = prefilteredColor * (kS * brdf.x + brdf.y);
+    
+    // Reduce IBL intensity to increase contrast with Direct Light
+    float iblIntensity = 0.3; 
+    float3 ambient = (kD * diffuse + specular) * iblIntensity; // AO is in orm.r
+    ambient *= ao; 
+    
+    float3 color = ambient + Lo;
+    
+    // HDR Tone Mapping (Reinhard) - Simple version if PostProcess is not doing it
+    // color = color / (color + float3(1.0));
+    // Gamma Correct
+    // color = pow(color, float3(1.0/2.2));
+    
+    return float4(color, 1.0);
+}
+
+// ================================================================================================
+// Blit Shader
+// ================================================================================================
+
+fragment float4 fragmentBlit(
+    VertexOut in [[stage_in]],
+    texture2d<float> inputTex [[texture(0)]]
+) {
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    return inputTex.sample(s, in.uv);
 }

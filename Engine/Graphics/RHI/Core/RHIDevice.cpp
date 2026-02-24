@@ -333,6 +333,38 @@ void LogDeviceMessage(DeviceDebugLevel level, uint32_t deviceId, const char* mes
 }
 
 /**
+ * @brief 注册设备
+ * @param device 设备指针
+ * @return 设备ID
+ */
+uint32_t RHIDeviceManager::RegisterDevice(RHIDeviceBase* device) {
+    uint32_t id = nextDeviceId_++;
+    devices_.emplace_back(id, device);
+    return id;
+}
+
+/**
+ * @brief 注销设备
+ * @param deviceId 设备ID
+ */
+void RHIDeviceManager::UnregisterDevice(uint32_t deviceId) {
+    for (size_t i = 0; i < devices_.size(); ++i) {
+        if (devices_[i].first == deviceId) {
+            devices_.erase(devices_.begin() + i);
+            break;
+        }
+    }
+}
+
+/**
+ * @brief 获取设备数量
+ * @return 设备数量
+ */
+size_t RHIDeviceManager::GetDeviceCount() const {
+    return devices_.size();
+}
+
+/**
  * @brief 获取设备
  * @param deviceId 设备ID
  * @return 设备指针

@@ -10,6 +10,7 @@
  * - Post-processing (Composite)
  */
 #include "ForwardRenderer.h"
+#include "Graphics/RenderPipeline/RenderPasses/Debug/GeometryDebugPass.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RenderMesh.h"
 #include "Graphics/MaterialInstance.h"
@@ -776,7 +777,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
                              const RenderView& view, 
                              rhi::ResourceHandle renderTarget, 
                              rhi::ResourceHandle depthStencil,
-                             const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
+                             const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
                              uint32_t frameIndex,
                              uint32_t width,
                              uint32_t height) {
@@ -789,8 +790,8 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     // Shadow Pass (Before Main Pass)
     utl::vector<RenderView> csmViews;
     utl::vector<float> cascadeSplits;
-    std::unordered_map<uint32_t, int> lightShadowIndices;
-    std::unordered_map<uint32_t, rhi::math::m4x4> lightViewProjs;
+    ::std::unordered_map<uint32_t, int> lightShadowIndices;
+    ::std::unordered_map<uint32_t, rhi::math::m4x4> lightViewProjs;
 
     // Process Lights for Shadows
     const auto& allLights = scene.GetLights();
@@ -1058,6 +1059,10 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 
     // std::cout << "ForwardRenderer: Calling TransparentPass" << std::endl;
     TransparentPass(cmdBuffer, view, materials, transparentProxies, frameIndex);
+
+    // 6. Geometry Debug Pass
+    RenderGeometryDebug(*device_, cmdBuffer, view, renderTarget, depthStencil, rhi::DataFormat::BGRA8_UNorm, rhi::DataFormat::D32_Float, debugSettings_);
+
     cmdBuffer->EndRenderPass();
     // std::cout << "ForwardRenderer: Main RenderPass Ended" << std::endl;
 }

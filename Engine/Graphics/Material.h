@@ -99,10 +99,20 @@ private:
 
     struct PipelineKeyHash {
         std::size_t operator()(const PipelineKey& k) const {
-            std::size_t h1 = std::hash<u64>{}(k.renderPass);
-            std::size_t h2 = std::hash<u32>{}(k.permutationId);
-            std::size_t h3 = std::hash<u8>{}(static_cast<u8>(k.flags));
-            return h1 ^ (h2 << 1) ^ (h3 << 2);
+            struct PackedKey {
+                rhi::RenderPassHandle renderPass;
+                u32 permutationId;
+                PipelineFlags flags;
+                u8 padding[3] = {0, 0, 0};
+            } packed{};
+            
+            packed.renderPass = k.renderPass;
+            packed.permutationId = k.permutationId;
+            packed.flags = k.flags;
+            
+            u32 hashOut;
+            primal::utl::MurmurHash3_x86_32(&packed, sizeof(packed), 0x9e3779b9, &hashOut);
+            return hashOut;
         }
     };
 
