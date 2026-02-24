@@ -45,6 +45,11 @@ struct DebugUniforms {
             float padding;
             uint32_t resolution[4];
         } voxel;
+        struct {
+            uint32_t mesh_id;
+            float wireframe_enabled; 
+            float padding[6];
+        } meshlet_debug;
     };
 };
 
@@ -154,7 +159,7 @@ struct GeometryDebugContext {
                 std::cout << "Meshlet Debug Pipeline Created Successfully." << std::endl;
                 
                 DescriptorSetLayoutBinding bindings[] = {
-                    { 0, DescriptorType::UniformBufferDynamic, 1, ShaderStage::Vertex }, // DebugUniforms
+                    { 0, DescriptorType::UniformBufferDynamic, 1, ShaderStage::Vertex | ShaderStage::Pixel }, // DebugUniforms
                     { 1, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex }, // Meshlets
                     { 2, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex }, // MeshletVertices
                     { 3, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex }, // MeshletTriangles
@@ -728,6 +733,8 @@ static void ExecuteGeometryDebug(
                 DebugUniforms* uniforms = (DebugUniforms*)((uint8_t*)mappedData + offset);
                 uniforms->viewProjection = viewProj;
                 uniforms->model = modelMatrix;
+                uniforms->meshlet_debug.mesh_id = (uint32_t)id;
+                uniforms->meshlet_debug.wireframe_enabled = 1.0f; // Enable wireframe by default for better visibility
                 
                 DescriptorSetHandle ds = g_debugContext.GetMeshletDescriptorSet(device, 
                                                                             mesh->GetPositionBuffer(),

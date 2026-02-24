@@ -5,7 +5,9 @@ using namespace metal;
 struct DebugUniforms {
     float4x4 viewProjection;
     float4x4 model;
-    float extraParams[8];  // padding to match 160 bytes
+    uint mesh_id;
+    float wireframe_enabled;
+    float padding[6];
 };
 
 // Meshlet structure matching RHIMeshlet
@@ -26,6 +28,7 @@ struct VertexOut {
     float4 position [[position]];
     float3 color;
     float alpha;
+    float3 barycentric;
 };
 
 // Hash function for random color based on meshlet ID
@@ -44,8 +47,8 @@ float3 hashColor(uint n) {
 
 // Meshlet Debug Vertex Shader
 // Draws meshlets using instanced rendering:
-// - Draw(3, firstVertex, instanceCount, firstInstance)
-// - vertexID: 0, 1, 2 for each triangle
+// - Draw(384, firstVertex, instanceCount, firstInstance)
+// - vertexID: 0..383 (covers 128 triangles * 3 vertices)
 // - instanceID: meshlet index
 vertex VertexOut meshlet_debug_vs(
     uint vertexID [[vertex_id]],
@@ -72,6 +75,7 @@ vertex VertexOut meshlet_debug_vs(
         out.position = float4(0, 0, 0, 0); // W=0 puts it at infinity usually, or just clipped
         out.color = float3(0, 0, 0);
         out.alpha = 0.0;
+        out.barycentric = float3(0,0,0);
         return out;
     }
     
@@ -88,15 +92,37 @@ vertex VertexOut meshlet_debug_vs(
     float4 worldPos = uniforms.model * float4(pos, 1.0);
     out.position = uniforms.viewProjection * worldPos;
     
-    // Color based on meshlet ID (instanceID)
-    out.color = hashColor(instanceID);
+    // Color based on meshlet ID (instanceID) mixed with Mesh ID
+    // This ensures different meshes don't have identical color patterns
+    uint seed = instanceID + uniforms.mesh_id * 1024; 
+    out.color = hashColor(seed);
     out.alpha = 0.6;  // Semi-transparent
+    
+    // Barycentric coordinates for wireframe
+    uint vertexInTriangle = vertexID % 3;
+    if (vertexInTriangle == 0) out.barycentric = float3(1, 0, 0);
+    else if (vertexInTriangle == 1) out.barycentric = float3(0, 1, 0);
+    else out.barycentric = float3(0, 0, 1);
     
     return out;
 }
 
 fragment float4 meshlet_debug_fs(
-    VertexOut in [[stage_in]]
+    VertexOut in [[stage_in]],
+    constant DebugUniforms& uniforms [[buffer(0)]]
 ) {
-    return float4(in.color, in.alpha);
+    float3 color = in.color;
+    
+    // Wireframe visualization
+    if (uniforms.wireframe_enabled > 0.5) {
+        // Calculate distance to nearest edge in screen space
+        float3 d = fwidth(in.barycentric);
+        float3 a3 = smoothstep(float3(0.0), d * 1.5, in.barycentric);
+        float minBary = min(min(a3.x, a3.y), a3.z);
+        
+        // Mix black edge color
+        color = mix(float3(0.0), color, minBary);
+    }
+    
+    return float4(color, in.alpha);
 }
