@@ -398,3 +398,7 @@ TODO*
 
 !Engine/Graphics/RenderPipeline/RenderPasses/Debug/
 !Engine/Graphics/RHI/Shaders/Debug/
+
+# Git Worktrees
+.worktrees/
+worktrees/
