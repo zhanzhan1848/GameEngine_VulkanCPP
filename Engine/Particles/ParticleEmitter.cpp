@@ -56,6 +56,10 @@ void particle_emitter::set_active(bool active) {
     _is_active = active;
 }
 
+void particle_emitter::set_texture(primal::graphics::rhi::ResourceHandle texture) {
+    _texture = texture;
+}
+
 void particle_emitter::set_position(const math::v3& position) {
     _position = position;
 }
