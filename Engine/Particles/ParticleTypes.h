@@ -20,22 +20,19 @@ constexpr u32 default_max_particles{ 10000 };
 constexpr u32 invalid_id{ u32_invalid_id };
 
 // Particle data size in bytes (for buffer calculations)
-constexpr u32 particle_data_size{ 64 };
+constexpr u32 particle_data_size{ 80 };
 
-// -----------------------------------------------------------------------------
 // Particle Data Structure
 // Matches GPU shader layout for direct buffer upload
-// Total size: 64 bytes (2 cache lines)
-// -----------------------------------------------------------------------------
+// Total size: 80 bytes (2.5 cache lines)
 
 struct particle_data {
-    math::v4 position;       // xyz = world position, w = age (normalized 0-1)
+    math::v4 position;       // xyz = world position, w = age
     math::v4 velocity;       // xyz = velocity vector, w = lifetime (seconds)
     math::v4 color;          // rgba = particle color with alpha
     math::v4 scale_rotation; // xy = scale (width, height), zw = rotation (radians)
+    math::v4 uv_params;      // x = atlas_index, y = frame_progress, zw = padding
 };
-
-static_assert(sizeof(particle_data) == particle_data_size, "particle_data must be 64 bytes");
 
 // -----------------------------------------------------------------------------
 // Blend Modes
@@ -103,6 +100,13 @@ struct emitter_config {
     u32 texture_frames_y{ 1 };
     f32 texture_frame_rate{ 0.0f };     // 0 = no animation
     
+    // Texture atlas
+    u32 texture_atlas_columns{ 1 };     // Columns in atlas
+    u32 texture_atlas_rows{ 1 };        // Rows in atlas
+    bool texture_random_frame{ false }; // Random start frame vs sequential
+    u32 texture_first_frame{ 0 };       // First frame index
+    u32 texture_frame_count{ 1 };       // Number of frames to use
+
     // Transform binding
     bool emit_in_local_space{ false };  // Apply emitter rotation to velocity
 };

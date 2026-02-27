@@ -204,12 +204,37 @@ inline void test_emitter_transform() {
     std::cout << "  PASS: Emitter transform binding" << std::endl;
 }
 
+inline void test_emitter_texture() {
+    std::cout << "Testing emitter texture support..." << std::endl;
+    
+    emitter_config config;
+    config.texture_atlas_columns = 4;
+    config.texture_atlas_rows = 4;
+    config.texture_frame_count = 16;
+    config.texture_random_frame = true;
+    
+    particle_emitter emitter(config, emitter_id{ 1 });
+    
+    const emitter_config& c = emitter.get_config();
+    assert(c.texture_atlas_columns == 4);
+    assert(c.texture_atlas_rows == 4);
+    assert(c.texture_frame_count == 16);
+    assert(c.texture_random_frame == true);
+    
+    // Test texture setters/getters
+    // Test texture setters/getters
+    primal::graphics::rhi::ResourceHandle test_handle = 0xDEADBEEF;
+    emitter.set_texture(test_handle);
+    assert(emitter.get_texture() == test_handle);
+    std::cout << "  PASS: Emitter texture support" << std::endl;
+}
 inline void run_emitter_tests() {
     std::cout << "\n=== Particle Emitter Tests ===" << std::endl;
     
     test_emitter_basic();
     test_emitter_config();
     test_emitter_transform();
+    test_emitter_texture();
     
     std::cout << "All particle emitter tests passed!" << std::endl;
 }
