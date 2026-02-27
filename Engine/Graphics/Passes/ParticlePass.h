@@ -65,8 +65,18 @@ private:
     u32 texture_frames_y_{ 1 };
     f32 texture_frame_rate_{ 0.0f };
     
+    // Persistent buffers for each frame in flight
+    static constexpr size_t MAX_PARTICLE_BUFFER_SIZE = 1024 * 1024;  // 1MB for particle data
+    
+    rhi::ResourceHandle uniform_buffers_[rhi::MAX_FRAMES_IN_FLIGHT]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle particle_buffers_[rhi::MAX_FRAMES_IN_FLIGHT]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle count_buffers_[rhi::MAX_FRAMES_IN_FLIGHT]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    void* uniform_buffer_mapped_[rhi::MAX_FRAMES_IN_FLIGHT]{ nullptr, nullptr, nullptr };
+    
     bool create_pipelines();
     bool create_descriptor_sets();
+    bool create_buffers();
+    void create_default_texture();
     void update_descriptor_set(u32 frame_index);
 };
 
