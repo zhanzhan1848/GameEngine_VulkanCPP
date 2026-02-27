@@ -2,6 +2,7 @@
 
 #include "Common/CommonHeaders.h"
 #include "Particles/ParticleCurve.h"
+#include "Particles/ParticleTypes.h"
 
 #ifndef DISABLE_PARTICLE_SYSTEM
 
@@ -10,6 +11,7 @@ namespace primal::particles {
 // -----------------------------------------------------------------------------
 // Curve Editor Widget (ImGui-based)
 // Provides inline editing for float_curve and color_gradient
+// NOTE: Implementation requires ImGui. Stubs provided when ImGui unavailable.
 // -----------------------------------------------------------------------------
 
 namespace curve_editor {
@@ -64,6 +66,26 @@ void draw_float_curve_presets(float_curve& curve);
 
 // Helper: Draw gradient presets popup
 void draw_color_gradient_presets(color_gradient& gradient);
+
+} // namespace curve_editor
+
+} // namespace primal::particles
+
+#else
+
+// Stub implementation when particle system is disabled
+namespace primal::particles {
+
+namespace curve_editor {
+
+inline void initialize() {}
+inline void shutdown() {}
+inline bool draw_float_curve(const char*, float_curve&, float, float, const char*) { return false; }
+inline bool draw_color_gradient(const char*, color_gradient&, const char*) { return false; }
+inline bool draw_vector_curve(const char*, vector_curve&, float, float) { return false; }
+inline bool draw_emitter_curves(emitter_curves&, bool, bool, bool, bool, bool, bool) { return false; }
+inline void draw_float_curve_presets(float_curve&) {}
+inline void draw_color_gradient_presets(color_gradient&) {}
 
 } // namespace curve_editor
 
