@@ -50,8 +50,7 @@ void particle_sorter::sort_parallel(
     particle_data* particles,
     u32* indices,
     u32 count,
-    const math::v3& camera_position,
-    jobsystem::JobSystem& js)
+    const math::v3& camera_position)
 {
     if (count == 0 || !particles || !indices) return;
     
@@ -63,25 +62,15 @@ void particle_sorter::sort_parallel(
     
     // Parallel distance calculation
     std::vector<f32> distances(count);
-    std::atomic<u32> completion_count{0};
     
-    const u32 chunk_size = 256;
-    const u32 num_chunks = (count + chunk_size - 1) / chunk_size;
-    
-    auto calc_job = js.CreateJob([&](void*) {
-        for (u32 chunk = 0; chunk < num_chunks; ++chunk) {
-            u32 start = chunk * chunk_size;
-            u32 end = std::min(start + chunk_size, count);
-            
-            js.CreateJob([&, start, end](void*) {
-                for (u32 i = start; i < end; ++i) {
-                    distances[i] = calculate_distance_sq(particles[i], camera_position);
-                }
-            })->Run();
+    // Use ParallelFor for distance calculation
+    auto handle = primal::jobsystem::JobSystem::ParallelFor(count, 
+        [&](u32 i) {
+            distances[i] = calculate_distance_sq(particles[i], camera_position);
         }
-    });
+    );
     
-    calc_job->RunAndWait();
+    primal::jobsystem::JobSystem::Wait(handle);
     
     // Build pairs and sort (sequential for now - could use parallel sort)
     std::vector<std::pair<f32, u32>> pairs;

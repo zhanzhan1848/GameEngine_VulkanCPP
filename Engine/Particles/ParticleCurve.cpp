@@ -20,6 +20,11 @@ void float_curve::add_keyframe(f32 time, f32 value) {
     add_keyframe(key);
 }
 
+void float_curve::add_keyframe(f32 time, f32 value, f32 in_tangent, f32 out_tangent) {
+    curve_keyframe<f32> key{ time, value, in_tangent, out_tangent };
+    add_keyframe(key);
+}
+
 void float_curve::add_keyframe(const curve_keyframe<f32>& key) {
     // Insert sorted by time
     auto it = std::lower_bound(keyframes_.begin(), keyframes_.end(), key,
@@ -278,64 +283,63 @@ color_gradient color_gradient::solid(const math::v4& color) {
 
 color_gradient color_gradient::fade(const math::v4& color, f32 start_alpha, f32 end_alpha) {
     color_gradient grad;
-    grad.add_color(0.0f, { color.x, color.y, color.z, start_alpha });
-    grad.add_color(1.0f, { color.x, color.y, color.z, end_alpha });
+    grad.add_color(0.0f, math::v4{ color.x, color.y, color.z, start_alpha });
+    grad.add_color(1.0f, math::v4{ color.x, color.y, color.z, end_alpha });
     return grad;
 }
 
 color_gradient color_gradient::fire() {
     color_gradient grad;
-    grad.add_color(0.0f, { 1.0f, 1.0f, 0.8f, 1.0f });    // White-yellow
-    grad.add_color(0.2f, { 1.0f, 0.9f, 0.3f, 0.95f });   // Yellow
-    grad.add_color(0.4f, { 1.0f, 0.6f, 0.1f, 0.9f });     // Orange
-    grad.add_color(0.7f, { 1.0f, 0.2f, 0.05f, 0.6f });    // Red-orange
-    grad.add_color(1.0f, { 0.2f, 0.05f, 0.02f, 0.0f });   // Dark, transparent
+    grad.add_color(0.0f, math::v4{ 1.0f, 1.0f, 0.8f, 1.0f });    // White-yellow
+    grad.add_color(0.2f, math::v4{ 1.0f, 0.9f, 0.3f, 0.95f });   // Yellow
+    grad.add_color(0.4f, math::v4{ 1.0f, 0.6f, 0.1f, 0.9f });     // Orange
+    grad.add_color(0.7f, math::v4{ 1.0f, 0.2f, 0.05f, 0.6f });    // Red-orange
+    grad.add_color(1.0f, math::v4{ 0.2f, 0.05f, 0.02f, 0.0f });   // Dark, transparent
     return grad;
 }
 
 color_gradient color_gradient::smoke() {
     color_gradient grad;
-    grad.add_color(0.0f, { 0.9f, 0.9f, 0.9f, 0.7f });
-    grad.add_color(0.5f, { 0.6f, 0.6f, 0.6f, 0.4f });
-    grad.add_color(1.0f, { 0.3f, 0.3f, 0.3f, 0.0f });
+    grad.add_color(0.0f, math::v4{ 0.9f, 0.9f, 0.9f, 0.7f });
+    grad.add_color(0.5f, math::v4{ 0.6f, 0.6f, 0.6f, 0.4f });
+    grad.add_color(1.0f, math::v4{ 0.3f, 0.3f, 0.3f, 0.0f });
     return grad;
 }
 
 color_gradient color_gradient::magic() {
     color_gradient grad;
-    grad.add_color(0.0f, { 0.5f, 0.2f, 1.0f, 1.0f });     // Purple
-    grad.add_color(0.33f, { 0.2f, 0.5f, 1.0f, 0.9f });    // Blue
-    grad.add_color(0.66f, { 0.8f, 0.2f, 1.0f, 0.7f });    // Pink
-    grad.add_color(1.0f, { 0.2f, 0.8f, 1.0f, 0.0f });     // Cyan, transparent
+    grad.add_color(0.0f, math::v4{ 0.5f, 0.2f, 1.0f, 1.0f });     // Purple
+    grad.add_color(0.33f, math::v4{ 0.2f, 0.5f, 1.0f, 0.9f });    // Blue
+    grad.add_color(0.66f, math::v4{ 0.8f, 0.2f, 1.0f, 0.7f });    // Pink
+    grad.add_color(1.0f, math::v4{ 0.2f, 0.8f, 1.0f, 0.0f });     // Cyan, transparent
     return grad;
 }
 
 color_gradient color_gradient::explosion() {
     color_gradient grad;
-    grad.add_color(0.0f, { 1.0f, 1.0f, 1.0f, 1.0f });      // White core
-    grad.add_color(0.1f, { 1.0f, 0.95f, 0.5f, 1.0f });    // Yellow
-    grad.add_color(0.3f, { 1.0f, 0.5f, 0.1f, 0.9f });     // Orange
-    grad.add_color(0.6f, { 0.8f, 0.2f, 0.1f, 0.5f });     // Red
-    grad.add_color(1.0f, { 0.1f, 0.1f, 0.1f, 0.0f });     // Black smoke
+    grad.add_color(0.0f, math::v4{ 1.0f, 1.0f, 1.0f, 1.0f });      // White core
+    grad.add_color(0.1f, math::v4{ 1.0f, 0.95f, 0.5f, 1.0f });    // Yellow
+    grad.add_color(0.3f, math::v4{ 1.0f, 0.5f, 0.1f, 0.9f });     // Orange
+    grad.add_color(0.6f, math::v4{ 0.8f, 0.2f, 0.1f, 0.5f });     // Red
+    grad.add_color(1.0f, math::v4{ 0.1f, 0.1f, 0.1f, 0.0f });     // Black smoke
     return grad;
 }
 
 color_gradient color_gradient::rainbow() {
     color_gradient grad;
-    grad.add_color(0.0f, { 1.0f, 0.0f, 0.0f, 1.0f });      // Red
-    grad.add_color(0.17f, { 1.0f, 0.5f, 0.0f, 1.0f });    // Orange
-    grad.add_color(0.33f, { 1.0f, 1.0f, 0.0f, 1.0f });     // Yellow
-    grad.add_color(0.5f, { 0.0f, 1.0f, 0.0f, 1.0f });      // Green
-    grad.add_color(0.67f, { 0.0f, 0.5f, 1.0f, 1.0f });     // Blue
-    grad.add_color(0.83f, { 0.3f, 0.0f, 1.0f, 1.0f });     // Indigo
-    grad.add_color(1.0f, { 0.5f, 0.0f, 1.0f, 1.0f });      // Violet
+    grad.add_color(0.0f, math::v4{ 1.0f, 0.0f, 0.0f, 1.0f });      // Red
+    grad.add_color(0.17f, math::v4{ 1.0f, 0.5f, 0.0f, 1.0f });    // Orange
+    grad.add_color(0.33f, math::v4{ 1.0f, 1.0f, 0.0f, 1.0f });     // Yellow
+    grad.add_color(0.5f, math::v4{ 0.0f, 1.0f, 0.0f, 1.0f });      // Green
+    grad.add_color(0.67f, math::v4{ 0.0f, 0.5f, 1.0f, 1.0f });     // Blue
+    grad.add_color(0.83f, math::v4{ 0.3f, 0.0f, 1.0f, 1.0f });     // Indigo
+    grad.add_color(1.0f, math::v4{ 0.5f, 0.0f, 1.0f, 1.0f });      // Violet
     return grad;
 }
 
 // -----------------------------------------------------------------------------
 // Vector Curve Implementation
 // -----------------------------------------------------------------------------
-
 vector_curve::vector_curve(std::initializer_list<vector_key> keys)
     : keys_(keys) {
     sort_keys();
@@ -526,9 +530,9 @@ color_gradient magic_gradient() {
 
 color_gradient water_gradient() {
     color_gradient grad;
-    grad.add_color(0.0f, { 0.7f, 0.9f, 1.0f, 0.8f });
-    grad.add_color(0.5f, { 0.3f, 0.6f, 0.9f, 0.5f });
-    grad.add_color(1.0f, { 0.1f, 0.3f, 0.7f, 0.0f });
+    grad.add_color(0.0f, math::v4{ 0.7f, 0.9f, 1.0f, 0.8f });
+    grad.add_color(0.5f, math::v4{ 0.3f, 0.6f, 0.9f, 0.5f });
+    grad.add_color(1.0f, math::v4{ 0.1f, 0.3f, 0.7f, 0.0f });
     return grad;
 }
 

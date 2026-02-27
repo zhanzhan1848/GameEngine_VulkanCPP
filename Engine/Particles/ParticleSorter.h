@@ -27,6 +27,11 @@ public:
         particle_data* particles,
         u32* indices,
         u32 count,
+        const math::v3& camera_position);
+    static void sort_parallel(
+        particle_data* particles,
+        u32* indices,
+        u32 count,
         const math::v3& camera_position,
         jobsystem::JobSystem& js);
     

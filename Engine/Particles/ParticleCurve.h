@@ -49,6 +49,7 @@ public:
     
     // Add keyframes
     void add_keyframe(f32 time, f32 value);
+    void add_keyframe(f32 time, f32 value, f32 in_tangent, f32 out_tangent);
     void add_keyframe(const curve_keyframe<f32>& key);
     void remove_keyframe(size_t index);
     void clear();
@@ -57,7 +58,6 @@ public:
     f32 evaluate(f32 time) const;
     
     // Accessors
-    size_t keyframe_count() const { return keyframes_.size(); }
     const curve_keyframe<f32>& get_keyframe(size_t index) const { return keyframes_[index]; }
     void set_interpolation(curve_interpolation mode) { interpolation_ = mode; }
     curve_interpolation get_interpolation() const { return interpolation_; }
