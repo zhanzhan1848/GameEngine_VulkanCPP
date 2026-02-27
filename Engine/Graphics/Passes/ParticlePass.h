@@ -4,7 +4,7 @@
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Particles/ParticleTypes.h"
-
+#include "Particles/ParticleSorter.h"
 #ifndef DISABLE_PARTICLE_SYSTEM
 
 #include <vector>
@@ -30,7 +30,8 @@ public:
     
     void set_texture_sheet(u32 frames_x, u32 frames_y, f32 frame_rate);
     void set_particle_texture(rhi::ResourceHandle texture);
-    
+    void set_sorting_enabled(bool enabled) { enable_sorting_ = enabled; }
+    bool is_sorting_enabled() const { return enable_sorting_; }
     rhi::PipelineHandle get_current_pipeline() const;
 private:
     struct ParticlePushConstants {
@@ -71,7 +72,12 @@ private:
     rhi::ResourceHandle uniform_buffers_[rhi::MAX_FRAMES_IN_FLIGHT]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle particle_buffers_[rhi::MAX_FRAMES_IN_FLIGHT]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle count_buffers_[rhi::MAX_FRAMES_IN_FLIGHT]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle index_buffers_[rhi::MAX_FRAMES_IN_FLIGHT]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
     void* uniform_buffer_mapped_[rhi::MAX_FRAMES_IN_FLIGHT]{ nullptr, nullptr, nullptr };
+    
+    // CPU-side sorting data
+    std::vector<u32> sorted_indices_;
+    bool enable_sorting_{ true };
     
     bool create_pipelines();
     bool create_descriptor_sets();

@@ -148,7 +148,17 @@ bool ParticlePass::create_buffers() {
             std::cerr << "ParticlePass: Failed to map uniform buffer for frame " << i << std::endl;
             return false;
         }
+        
+        // Create index buffer for sorted indices
+        index_buffers_[i] = device_->CreateBuffer(count_desc);  // Same size as count buffer
+        if (index_buffers_[i] == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "ParticlePass: Failed to create index buffer for frame " << i << std::endl;
+            return false;
+        }
     }
+    
+    // Initialize sorted indices buffer
+    sorted_indices_.resize(MAX_PARTICLE_BUFFER_SIZE / sizeof(particles::particle_data));
     
     return true;
 }
@@ -286,6 +296,36 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
         device_->UnmapBuffer(count_buffers_[frame_index]);
     }
     
+    // Sort particles by distance if enabled
+    // TODO: Need camera position from caller or implement math::inverse
+    // For now, sorting is disabled until proper camera position extraction
+    /*
+    if (enable_sorting_ && active_count > 1) {
+        // Camera position extraction would go here
+        // math::v3 camera_pos = ...;
+        
+        // Resize sorted indices buffer if needed
+        if (sorted_indices_.size() < active_count) {
+            sorted_indices_.resize(active_count);
+        }
+        
+        // Sort particles back-to-front
+        particles::particle_sorter::sort_by_distance(
+            particle_data,
+            sorted_indices_.data(),
+            active_count,
+            camera_pos
+        );
+        
+        // Upload sorted indices to index buffer (for future shader use)
+        void* index_mapped = device_->MapBuffer(index_buffers_[frame_index]);
+        if (index_mapped) {
+            memcpy(index_mapped, sorted_indices_.data(), active_count * sizeof(u32));
+            device_->UnmapBuffer(index_buffers_[frame_index]);
+        }
+    }
+    */
+    
     // Bind buffers using BindVertexBuffers (works for Metal shader buffers too)
     rhi::ResourceHandle buffers[3] = { 
         uniform_buffers_[frame_index], 
@@ -301,7 +341,6 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     // Draw(vertexCount, startVertex, instanceCount, startInstance)
     cmd_buffer->Draw(6, 0, active_count, 0);
 }
-
 void ParticlePass::set_blend_mode(particles::blend_mode mode) {
     current_blend_mode_ = mode;
 }
