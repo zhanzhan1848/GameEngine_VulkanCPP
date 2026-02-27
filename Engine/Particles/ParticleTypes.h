@@ -22,9 +22,11 @@ constexpr u32 invalid_id{ u32_invalid_id };
 // Particle data size in bytes (for buffer calculations)
 constexpr u32 particle_data_size{ 80 };
 
+// -----------------------------------------------------------------------------
 // Particle Data Structure
 // Matches GPU shader layout for direct buffer upload
 // Total size: 80 bytes (2.5 cache lines)
+// -----------------------------------------------------------------------------
 
 struct particle_data {
     math::v4 position;       // xyz = world position, w = age
@@ -32,6 +34,67 @@ struct particle_data {
     math::v4 color;          // rgba = particle color with alpha
     math::v4 scale_rotation; // xy = scale (width, height), zw = rotation (radians)
     math::v4 uv_params;      // x = atlas_index, y = frame_progress, zw = padding
+};
+
+// -----------------------------------------------------------------------------
+// Forward declarations for curve types
+// -----------------------------------------------------------------------------
+
+class float_curve;
+class color_gradient;
+class vector_curve;
+
+// -----------------------------------------------------------------------------
+// Emitter Curves Configuration
+// Controls how particle properties change over their lifetime
+// -----------------------------------------------------------------------------
+
+struct emitter_curves {
+    // Scale over lifetime (multiplier, 1.0 = no change)
+    float_curve* scale_curve{ nullptr };
+    bool use_scale_curve{ false };
+    
+    // Alpha multiplier over lifetime
+    float_curve* alpha_curve{ nullptr };
+    bool use_alpha_curve{ false };
+    
+    // Color gradient over lifetime (overrides color_start/color_end)
+    color_gradient* color_gradient{ nullptr };
+    bool use_color_gradient{ false };
+    
+    // Velocity multiplier over lifetime (for speed control)
+    float_curve* velocity_curve{ nullptr };
+    bool use_velocity_curve{ false };
+    
+    // Force over lifetime (for dynamic gravity/wind effects)
+    vector_curve* force_curve{ nullptr };
+    bool use_force_curve{ false };
+    
+    // Rotation speed over lifetime (radians per second multiplier)
+    float_curve* rotation_curve{ nullptr };
+    bool use_rotation_curve{ false };
+    
+    // Utility: Check if any curves are active
+    bool has_any_curves() const {
+        return use_scale_curve || use_alpha_curve || use_color_gradient ||
+               use_velocity_curve || use_force_curve || use_rotation_curve;
+    }
+    
+    // Reset all curve references
+    void clear() {
+        scale_curve = nullptr;
+        alpha_curve = nullptr;
+        color_gradient = nullptr;
+        velocity_curve = nullptr;
+        force_curve = nullptr;
+        rotation_curve = nullptr;
+        use_scale_curve = false;
+        use_alpha_curve = false;
+        use_color_gradient = false;
+        use_velocity_curve = false;
+        use_force_curve = false;
+        use_rotation_curve = false;
+    }
 };
 
 // -----------------------------------------------------------------------------
@@ -78,6 +141,7 @@ struct emitter_config {
     math::v3 velocity_max{ 0.0f, 5.0f, 0.0f };
     
     // Initial color range (random lerp between start/end)
+    // Note: If curves.use_color_gradient is true, this is used as initial color only
     math::v4 color_start{ 1.0f, 1.0f, 1.0f, 1.0f };
     math::v4 color_end{ 0.5f, 0.5f, 1.0f, 0.8f };
     
@@ -85,7 +149,10 @@ struct emitter_config {
     math::v2 scale_min{ 0.1f, 0.1f };
     math::v2 scale_max{ 1.0f, 1.0f };
     
-    // Forces
+    // Initial scale multiplier (applied to scale_min/scale_max)
+    f32 scale_multiplier{ 1.0f };
+    
+    // Forces (static, overridden by curves.force_curve if set)
     math::v3 gravity{ 0.0f, -9.8f, 0.0f };
     math::v3 wind{ 0.0f, 0.0f, 0.0f };
     f32 drag{ 0.0f };                   // Velocity damping (0-1)
@@ -109,6 +176,9 @@ struct emitter_config {
 
     // Transform binding
     bool emit_in_local_space{ false };  // Apply emitter rotation to velocity
+    
+    // Curve-based property animation
+    emitter_curves curves;
 };
 
 // -----------------------------------------------------------------------------
@@ -178,7 +248,8 @@ namespace component_flags {
         position = 0x02,
         active = 0x04,
         burst = 0x08,
-        all = spawn_rate | position | active | burst
+        curves = 0x10,      // Curves updated
+        all = spawn_rate | position | active | burst | curves
     };
 }
 

@@ -10,7 +10,7 @@ namespace primal::particle {
 namespace {
 
 struct particle_component {
-    particles::emitter_id emitter_id{ particles::invalid_id };
+    particles::emitter_id emitter{ particles::invalid_id };
     game_entity::entity_id entity_id{ id::invalid_id };
     bool is_active{ true };
 };
@@ -21,9 +21,9 @@ std::mutex component_mutex;
 } // anonymous namespace
 
 component create(init_info info, game_entity::entity entity) {
-    particles::emitter_id emitter = particles::create_emitter(info.config);
+    const particles::emitter_id new_emitter = particles::create_emitter(info.config);
     
-    if (emitter == particles::invalid_id) {
+    if (new_emitter == particles::invalid_id) {
         return component{};
     }
     
@@ -34,14 +34,14 @@ component create(init_info info, game_entity::entity entity) {
         id = particle_id{ next_id++ };
         
         particle_component comp;
-        comp.emitter_id = emitter;
+        comp.emitter = new_emitter;
         comp.entity_id = entity.get_id();
         comp.is_active = info.auto_activate;
         
         component_map[id] = comp;
     }
     
-    particles::particle_emitter* emitter_ptr = particles::get_emitter(emitter);
+    particles::particle_emitter* emitter_ptr = particles::get_emitter(new_emitter);
     if (emitter_ptr && !info.auto_activate) {
         emitter_ptr->set_active(false);
     }
@@ -58,7 +58,7 @@ void remove(component c) {
     
     auto it = component_map.find(c.get_id());
     if (it != component_map.end()) {
-        particles::destroy_emitter(it->second.emitter_id);
+        particles::destroy_emitter(it->second.emitter);
         component_map.erase(it);
     }
 }
@@ -78,7 +78,7 @@ void update(const component_cache* cache, u32 count) {
             continue;
         }
         
-        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter_id);
+        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter);
         if (!emitter) {
             continue;
         }
@@ -109,7 +109,7 @@ particles::emitter_id get_emitter_id(const component& c) {
     
     auto it = component_map.find(c.get_id());
     if (it != component_map.end()) {
-        return it->second.emitter_id;
+        return it->second.emitter;
     }
     
     return particles::invalid_id;
@@ -141,7 +141,7 @@ void set_active(component& c, bool active) {
     if (it != component_map.end()) {
         it->second.is_active = active;
         
-        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter_id);
+        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter);
         if (emitter) {
             emitter->set_active(active);
         }
@@ -157,7 +157,7 @@ void burst(component& c, u32 count) {
     
     auto it = component_map.find(c.get_id());
     if (it != component_map.end()) {
-        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter_id);
+        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter);
         if (emitter) {
             particles::particle_pool& pool = particles::get_frame_pool(particles::get_frame_index());
             emitter->burst(count, pool);
@@ -174,7 +174,7 @@ f32 get_spawn_rate(const component& c) {
     
     auto it = component_map.find(c.get_id());
     if (it != component_map.end()) {
-        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter_id);
+        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter);
         if (emitter) {
             return emitter->get_config().spawn_rate;
         }
@@ -192,7 +192,7 @@ void set_spawn_rate(component& c, f32 rate) {
     
     auto it = component_map.find(c.get_id());
     if (it != component_map.end()) {
-        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter_id);
+        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter);
         if (emitter) {
             auto config = emitter->get_config();
             config.spawn_rate = rate;
@@ -210,7 +210,7 @@ u32 get_active_particle_count(const component& c) {
     
     auto it = component_map.find(c.get_id());
     if (it != component_map.end()) {
-        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter_id);
+        particles::particle_emitter* emitter = particles::get_emitter(it->second.emitter);
         if (emitter) {
             return emitter->get_active_count();
         }
