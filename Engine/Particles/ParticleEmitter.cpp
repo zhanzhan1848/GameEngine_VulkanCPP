@@ -19,6 +19,31 @@ void particle_emitter::update(f32 delta_time, particle_pool& pool) {
         return;
     }
     
+    // Update existing particles with frame animation
+    if (_config.texture_frame_rate > 0.0f) {
+        for (u32 i = 0; i < pool.capacity(); ++i) {
+            const particle_data& p = pool.get(i);
+            
+            // Check if particle is active (has a valid age < lifetime)
+            if (p.position.w < p.velocity.w - 0.001f) {
+                continue;
+            }
+            
+            particle_data& modified_p = pool.get(i);
+            
+            // Animate texture frame
+            f32 frame_progress = modified_p.uv_params.y + delta_time * _config.texture_frame_rate;
+            
+            if (frame_progress >= 1.0f) {
+                u32 current_frame = static_cast<u32>(modified_p.uv_params.x);
+                current_frame = (current_frame + 1) % _config.texture_frame_count;
+                modified_p.uv_params.x = static_cast<f32>(current_frame);
+                frame_progress -= 1.0f;
+            }
+            modified_p.uv_params.y = frame_progress;
+        }
+    }
+    
     switch (_config.mode) {
         case emission_mode::continuous:
         case emission_mode::ring_buffer: {
@@ -123,6 +148,17 @@ void particle_emitter::initialize_particle(particle_data& p) {
     p.scale_rotation.y = sy;
     p.scale_rotation.z = 0.0f;
     p.scale_rotation.w = 0.0f;
+    
+    // Calculate texture frame
+    u32 frame_index = 0;
+    if (_config.texture_random_frame) {
+        frame_index = static_cast<u32>(_rng() % _config.texture_frame_count);
+    } else {
+        frame_index = _config.texture_first_frame;
+    }
+    
+    p.uv_params.x = static_cast<f32>(frame_index);
+    p.uv_params.y = 0.0f; // Frame progress for animation
 }
 
 f32 particle_emitter::random_range(f32 min, f32 max) {
