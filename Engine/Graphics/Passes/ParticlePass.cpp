@@ -22,8 +22,8 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
     
     device_ = device;
     
-    // Load particle shader from external .metal file
-    std::string shader_path = "Engine/Graphics/Metal/shaders/ParticleAtlas.metal";
+    // Load particle shader from shaders directory (relative to executable)
+    std::string shader_path = "shaders/ParticleAtlas.metal";
     std::ifstream shader_file(shader_path);
     
     if (!shader_file.is_open()) {
