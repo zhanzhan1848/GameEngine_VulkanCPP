@@ -4,7 +4,11 @@
 #include "TransformComponent.h"
 #include "ScriptComponent.h"
 #include "MeshComponent.h"
+#include "ParticleComponent.h"
 #include "Engine/Utilities/Hash.h"
+
+// Forward declaration for particle component
+namespace primal::particle { class component; }
 
 namespace primal {
 
@@ -19,9 +23,10 @@ namespace primal {
 			[[nodiscard]]  constexpr entity_id get_id() const { return _id; }
 			[[nodiscard]]  constexpr bool is_valid() const { return id::is_valid(_id); }
 
-			[[nodiscard]]  transform::component transform() const;
+            [[nodiscard]]  transform::component transform() const;
 			[[nodiscard]]  script::component script() const;
 			[[nodiscard]]  mesh::component mesh() const;
+			[[nodiscard]]  particle::component particle() const;
 
 			[[nodiscard]] math::v4 rotation() const { return transform().rotation(); }
 			[[nodiscard]] math::v3 orientation() const { return transform().orientation(); }
