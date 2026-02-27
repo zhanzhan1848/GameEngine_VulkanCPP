@@ -1,0 +1,72 @@
+#pragma once
+
+#include "Common/CommonHeaders.h"
+#include "Particles/ParticleCurve.h"
+
+#ifndef DISABLE_PARTICLE_SYSTEM
+
+namespace primal::particles {
+
+// -----------------------------------------------------------------------------
+// Curve Editor Widget (ImGui-based)
+// Provides inline editing for float_curve and color_gradient
+// -----------------------------------------------------------------------------
+
+namespace curve_editor {
+
+// Initialize curve editor (call once at startup)
+void initialize();
+
+// Shutdown curve editor (call once at shutdown)
+void shutdown();
+
+// Draw float curve editor widget
+// Returns true if curve was modified
+bool draw_float_curve(
+    const char* label,
+    float_curve& curve,
+    float min_value = 0.0f,
+    float max_value = 1.0f,
+    const char* preset_button_label = "Presets"
+);
+
+// Draw color gradient editor widget
+// Returns true if gradient was modified
+bool draw_color_gradient(
+    const char* label,
+    color_gradient& gradient,
+    const char* preset_button_label = "Presets"
+);
+
+// Draw vector curve editor widget
+// Returns true if curve was modified
+bool draw_vector_curve(
+    const char* label,
+    vector_curve& curve,
+    float min_value = -10.0f,
+    float max_value = 10.0f
+);
+
+// Draw emitter curves editor (all curves in one panel)
+// Returns true if any curve was modified
+bool draw_emitter_curves(
+    emitter_curves& curves,
+    bool show_scale = true,
+    bool show_alpha = true,
+    bool show_color = true,
+    bool show_velocity = true,
+    bool show_force = true,
+    bool show_rotation = true
+);
+
+// Helper: Draw curve presets popup
+void draw_float_curve_presets(float_curve& curve);
+
+// Helper: Draw gradient presets popup
+void draw_color_gradient_presets(color_gradient& gradient);
+
+} // namespace curve_editor
+
+} // namespace primal::particles
+
+#endif // !DISABLE_PARTICLE_SYSTEM
