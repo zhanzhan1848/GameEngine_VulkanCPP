@@ -1185,3 +1185,30 @@ target_compile_definitions(TestRenderSystemIntegration PRIVATE DEBUG _DEBUG)
 set_target_properties(TestRenderSystemIntegration PROPERTIES FOLDER "Tests/Graphics")
 
 
+# ==================================
+# Job System Tests
+# ==================================
+
+add_executable(TestJobSystem
+    TestJobSystem.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/JobSystem/WorkStealingQueue.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/JobSystem/JobScheduler.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/JobSystem/JobSystem.cpp
+)
+target_include_directories(TestJobSystem PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME TestJobSystem COMMAND TestJobSystem)
+set_target_properties(TestJobSystem PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestJobSystem PRIVATE DEBUG _DEBUG)
+set_target_properties(TestJobSystem PROPERTIES FOLDER "Tests/JobSystem")
+
+# JobSystem thread support
+find_package(Threads REQUIRED)
+target_link_libraries(TestJobSystem PRIVATE Threads::Threads)
+

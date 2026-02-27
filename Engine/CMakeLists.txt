@@ -193,6 +193,8 @@ file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/Utilities/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.cpp"
 )
 
 # 根据编译器排除特定文件

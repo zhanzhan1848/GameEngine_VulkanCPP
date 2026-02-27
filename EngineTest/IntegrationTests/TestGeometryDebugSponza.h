@@ -15,10 +15,9 @@
 #include "Engine/Graphics/RHI/Components/RHICamera.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/Debug/GeometryDebugPass.h"
 #include "Engine/Utilities/Hash.h"
-
-#include <unordered_map>
-#include <string>
-#include <memory>
+#include "Engine/JobSystem/JobSystem.h"
+#include "Engine/Content/AsyncResourceLoader.h"
+#include <chrono>
 
 class TestGeometryDebugSponza;
 
@@ -144,4 +143,19 @@ private:
     
     // Resource Management
     std::vector<primal::graphics::rhi::ResourceHandle> createdResources;
+    
+    // ============================================
+    // Async Texture Loading Support
+    // ============================================
+    void StartAsyncTextureLoading();
+    void UpdateAsyncTextures();
+    
+    // Async loading state
+    std::unordered_map<std::string, primal::graphics::rhi::ResourceHandle> _asyncTextureMap;
+    std::vector<std::string> _pendingTexturePaths;
+    std::atomic<bool> _asyncTexturesLoaded{false};
+    std::atomic<u32> _asyncTexturesLoadedCount{0};
+    std::atomic<u32> _asyncTexturesTotalCount{0};
+    primal::jobsystem::JobHandle _asyncLoadHandle;
+    bool _asyncLoadStarted{false};
 };

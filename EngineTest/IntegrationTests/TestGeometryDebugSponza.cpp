@@ -1,5 +1,7 @@
 #include "TestGeometryDebugSponza.h"
 #include "Engine/Content/ContentToEngine.h"
+#include "Engine/Content/AsyncResourceLoader.h"
+#include "Engine/JobSystem/JobSystem.h"
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Engine/Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Engine/Graphics/RenderGraph/RenderGraphDefinitions.h"
@@ -7,7 +9,6 @@
 #include "Engine/Input/Input.h"
 #include "ShaderCompilation.h"
 
-#define STB_IMAGE_IMPLEMENTATION
 #include "third_party/astc-encoder/Source/ThirdParty/stb_image.h"
 
 #include <iostream>
@@ -253,6 +254,19 @@ bool TestGeometryDebugSponza::Initialize() {
     std::cout << "DEBUG: TestGeometryDebugSponza STARTING NEW VERSION " << __DATE__ << " " << __TIME__ << std::endl;
     instance = this;
     
+    // 0. Initialize JobSystem and AsyncResourceLoader
+    if (!primal::jobsystem::JobSystem::Initialize(primal::jobsystem::JobSchedulerConfig::Default())) {
+        std::cerr << "Failed to initialize JobSystem" << std::endl;
+        return false;
+    }
+    std::cout << "JobSystem initialized with " << primal::jobsystem::JobSystem::GetWorkerCount() << " workers" << std::endl;
+    
+    if (!primal::content::AsyncResourceLoader::Initialize()) {
+        std::cerr << "Failed to initialize AsyncResourceLoader" << std::endl;
+        return false;
+    }
+    std::cout << "AsyncResourceLoader initialized" << std::endl;
+    
     // 1. Initialize Device (Metal)
     primal::graphics::rhi::DeviceDesc deviceDesc;
     deviceDesc.platform = primal::graphics::rhi::RHIPlatform::Metal;
@@ -413,6 +427,9 @@ void TestGeometryDebugSponza::Run() {
     // primal::input::input::update(); // Handled by engine/platform
     m_camera.Update(0.016f); // Fixed dt for test
     
+    // Process main thread callbacks (for async resource loading)
+    jobsystem::JobSystem::ProcessMainThreadJobs();
+    
     primal::input::input_value val;
 
     // F1: Meshlet Mode
@@ -483,7 +500,32 @@ void TestGeometryDebugSponza::Run() {
         if (debugSettings.slice_depth < 0.0f) debugSettings.slice_depth = 0.0f;
         std::cout << "Slice Depth: " << debugSettings.slice_depth << std::endl;
     }
-
+    
+    // ============================================
+    // Async Texture Loading
+    // ============================================
+    // Start async loading after a few frames (let engine settle)
+    if (frameCount == 5 && !_asyncLoadStarted)
+    {
+        StartAsyncTextureLoading();
+    }
+    
+    // Update async textures (apply when loaded)
+    UpdateAsyncTextures();
+    
+    // Debug output for loading progress
+    static u32 lastReportedCount = 0;
+    if (_asyncLoadStarted && !_asyncTexturesLoaded.load())
+    {
+        u32 currentCount = _asyncTexturesLoadedCount.load();
+        if (currentCount != lastReportedCount && currentCount > 0)
+        {
+            std::cout << "[Frame " << frameCount << "] Loading textures: " 
+                      << currentCount << "/" << _asyncTexturesTotalCount.load() << std::endl;
+            lastReportedCount = currentCount;
+        }
+    }
+    
     UpdateScene();
     
     rhi::ResourceHandle backBuffer;
@@ -613,6 +655,10 @@ void TestGeometryDebugSponza::Shutdown() {
     
     // Cleanup Global Content Resources (GPU Meshes)
     primal::content::shutdown();
+    
+    // Shutdown JobSystem and AsyncResourceLoader
+    primal::content::AsyncResourceLoader::Shutdown();
+    primal::jobsystem::JobSystem::Shutdown();
     
     std::cout << "TestGeometryDebugSponza::Shutdown End" << std::endl;
 }
@@ -1001,6 +1047,8 @@ bool TestGeometryDebugSponza::LoadScene() {
 
     std::string assetBaseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/models/Sponza/";
     
+    // Initialize all materials with default textures first (fast startup)
+    // Then collect paths for async loading
     for (auto& meshInfo : sceneMeshes) {
         if (meshInfo.materialInstance) {
             auto material = meshInfo.materialInstance->GetMaterial();
@@ -1008,54 +1056,42 @@ bool TestGeometryDebugSponza::LoadScene() {
             
             meshInfo.materialInstance->Initialize(device);
             
-            ResourceHandle diffuseTex = whiteTexture;
+            // Set default textures initially
+            for (uint32_t i = 0; i < 3; ++i) {
+                meshInfo.materialInstance->SetCurrentFrame(i);
+                meshInfo.materialInstance->SetTexture(0, whiteTexture);   // Diffuse
+                meshInfo.materialInstance->SetTexture(1, normalTexture);  // Normal
+                meshInfo.materialInstance->SetTexture(2, whiteTexture);   // ORM
+                meshInfo.materialInstance->SetSampler(3, defaultSampler);
+                meshInfo.materialInstance->Update(device);
+            }
+            
+            // Collect texture paths for async loading
             if (!meshInfo.diffuseTexturePath.empty()) {
                 std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.diffuseTexturePath);
                 std::ifstream f(fullPath.c_str());
-                if (f.good()) {
-                    ResourceHandle tex = LoadTextureFromFile(device, fullPath, false, true);
-                    if (tex != handles::INVALID_RESOURCE) {
-                        diffuseTex = tex;
-                        createdResources.push_back(tex);
-                    }
+                if (f.good())
+                {
+                    _pendingTexturePaths.push_back(fullPath);
                 }
             }
             
-            ResourceHandle normalTex = normalTexture;
             if (!meshInfo.normalTexturePath.empty()) {
                 std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.normalTexturePath);
                 std::ifstream f(fullPath.c_str());
-                if (f.good()) {
-                    ResourceHandle tex = LoadTextureFromFile(device, fullPath, true, false);
-                    if (tex != handles::INVALID_RESOURCE) {
-                        normalTex = tex;
-                        createdResources.push_back(tex);
-                    }
+                if (f.good())
+                {
+                    _pendingTexturePaths.push_back(fullPath);
                 }
             }
             
-            // ORM Texture Loading
-            ResourceHandle ormTex = whiteTexture; 
             if (!meshInfo.ormTexturePath.empty()) {
                 std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.ormTexturePath);
                 std::ifstream f(fullPath.c_str());
-                if (f.good()) {
-                    ResourceHandle tex = LoadTextureFromFile(device, fullPath, false, false);
-                    if (tex != handles::INVALID_RESOURCE) {
-                        ormTex = tex;
-                        createdResources.push_back(tex);
-                    }
+                if (f.good())
+                {
+                    _pendingTexturePaths.push_back(fullPath);
                 }
-            }
-
-            for (uint32_t i = 0; i < 3; ++i) {
-                meshInfo.materialInstance->SetCurrentFrame(i);
-                meshInfo.materialInstance->SetTexture(0, diffuseTex);
-                meshInfo.materialInstance->SetTexture(1, normalTex);
-                meshInfo.materialInstance->SetTexture(2, ormTex);
-                // Sampler binding 3
-                meshInfo.materialInstance->SetSampler(3, defaultSampler);
-                meshInfo.materialInstance->Update(device);
             }
         }
         
@@ -1064,6 +1100,15 @@ bool TestGeometryDebugSponza::LoadScene() {
         proxy.transform = primal::graphics::rhi::math::MatrixIdentity();
         scene.AddProxy(proxy);
     }
+    
+    // Remove duplicate texture paths
+    std::sort(_pendingTexturePaths.begin(), _pendingTexturePaths.end());
+    _pendingTexturePaths.erase(
+        std::unique(_pendingTexturePaths.begin(), _pendingTexturePaths.end()),
+        _pendingTexturePaths.end());
+    
+    _asyncTexturesTotalCount = static_cast<u32>(_pendingTexturePaths.size());
+    std::cout << "Collected " << _pendingTexturePaths.size() << " unique textures for async loading" << std::endl;
     
     return true; 
 }
@@ -1544,4 +1589,135 @@ void TestGeometryDebugSponza::BuildRenderGraph(RenderGraph& graph, ResourceHandl
             cmd->Draw(3, 0, 1, 0);
         }
     );
+}
+
+// ============================================================================
+// Async Texture Loading Implementation
+// ============================================================================
+
+void TestGeometryDebugSponza::StartAsyncTextureLoading()
+{
+    if (_asyncLoadStarted || _pendingTexturePaths.empty())
+    {
+        return;
+    }
+    
+    _asyncLoadStarted = true;
+    std::cout << "[Async] Starting async texture loading for " << _pendingTexturePaths.size() << " textures..." << std::endl;
+    
+    // Start async loading using JobSystem
+    _asyncLoadHandle = content::AsyncResourceLoader::Get()->LoadTexturesAsync(
+        _pendingTexturePaths,
+        [this](const std::vector<content::TextureLoadResult>& results)
+        {
+            // This callback runs on main thread
+            std::cout << "[Async] Texture loading complete!" << std::endl;
+            
+            u32 successCount = 0;
+            for (const auto& result : results)
+            {
+                if (result.success)
+                {
+                    auto texHandle = content::get_rhi_texture_handle(result.handle);
+                    _asyncTextureMap[result.path] = texHandle;
+                    createdResources.push_back(texHandle);
+                    ++successCount;
+                }
+                else
+                {
+                    std::cerr << "[Async] Failed to load: " << result.path
+                              << " - " << result.error_message << std::endl;
+                }
+            }
+            
+            _asyncTexturesLoaded.store(true);
+            std::cout << "[Async] Successfully loaded " << successCount << "/" << results.size() << " textures" << std::endl;
+        },
+        [this](u32 completed, u32 total, const std::string& currentFile)
+        {
+            // Progress callback
+            _asyncTexturesLoadedCount.store(completed);
+            if (completed % 10 == 0 || completed == total)
+            {
+                std::cout << "[Async] Progress: " << completed << "/" << total
+                          << " (" << (completed * 100 / total) << "%) - " << currentFile << std::endl;
+            }
+        }
+    );
+    
+    std::cout << "[Async] Async loading started. Textures will load in background." << std::endl;
+}
+
+void TestGeometryDebugSponza::UpdateAsyncTextures()
+{
+    if (!_asyncTexturesLoaded.load())
+    {
+        return; // Still loading
+    }
+    
+    // Apply loaded textures to meshes
+    static bool texturesApplied = false;
+    if (texturesApplied)
+    {
+        return; // Already applied
+    }
+    texturesApplied = true;
+    
+    std::cout << "[Async] Applying loaded textures to materials..." << std::endl;
+    
+    std::string assetBaseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/models/Sponza/";
+    
+    for (auto& meshInfo : sceneMeshes)
+    {
+        if (!meshInfo.materialInstance)
+        {
+            continue;
+        }
+        
+        ResourceHandle diffuseTex = whiteTexture;
+        if (!meshInfo.diffuseTexturePath.empty())
+        {
+            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.diffuseTexturePath);
+            auto it = _asyncTextureMap.find(fullPath);
+            if (it != _asyncTextureMap.end())
+            {
+                diffuseTex = it->second;
+            }
+        }
+        
+        ResourceHandle normalTex = normalTexture;
+        if (!meshInfo.normalTexturePath.empty())
+        {
+            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.normalTexturePath);
+            auto it = _asyncTextureMap.find(fullPath);
+            if (it != _asyncTextureMap.end())
+            {
+                normalTex = it->second;
+            }
+        }
+        
+        ResourceHandle ormTex = whiteTexture;
+        if (!meshInfo.ormTexturePath.empty())
+        {
+            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.ormTexturePath);
+            auto it = _asyncTextureMap.find(fullPath);
+            if (it != _asyncTextureMap.end())
+            {
+                ormTex = it->second;
+            }
+        }
+        
+        // Update material with loaded textures
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            meshInfo.materialInstance->SetCurrentFrame(i);
+            meshInfo.materialInstance->SetTexture(0, diffuseTex);
+            meshInfo.materialInstance->SetTexture(1, normalTex);
+            meshInfo.materialInstance->SetTexture(2, ormTex);
+            meshInfo.materialInstance->SetSampler(3, defaultSampler);
+            meshInfo.materialInstance->Update(device);
+        }
+    }
+    
+    std::cout << "[Async] Textures applied to all materials!" << std::endl;
 }
