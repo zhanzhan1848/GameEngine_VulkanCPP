@@ -735,19 +735,49 @@ void TestParticleSponza::Shutdown() {
         device->WaitIdle();
     }
 
-    // Destroy Pipelines
-    device->DestroyPipeline(gbufferPipeline);
-    device->DestroyPipeline(lightingPipeline);
-    device->DestroyPipeline(skyboxPipeline);
-    device->DestroyPipeline(shadowPipeline);
-    device->DestroyPipeline(blitPipeline);
+    // Destroy Pipelines (with handle invalidation to prevent double-free)
+    if (gbufferPipeline != handles::INVALID_PIPELINE) {
+        device->DestroyPipeline(gbufferPipeline);
+        gbufferPipeline = handles::INVALID_PIPELINE;
+    }
+    if (lightingPipeline != handles::INVALID_PIPELINE) {
+        device->DestroyPipeline(lightingPipeline);
+        lightingPipeline = handles::INVALID_PIPELINE;
+    }
+    if (skyboxPipeline != handles::INVALID_PIPELINE) {
+        device->DestroyPipeline(skyboxPipeline);
+        skyboxPipeline = handles::INVALID_PIPELINE;
+    }
+    if (shadowPipeline != handles::INVALID_PIPELINE) {
+        device->DestroyPipeline(shadowPipeline);
+        shadowPipeline = handles::INVALID_PIPELINE;
+    }
+    if (blitPipeline != handles::INVALID_PIPELINE) {
+        device->DestroyPipeline(blitPipeline);
+        blitPipeline = handles::INVALID_PIPELINE;
+    }
 
     // Destroy Pipeline Layouts
-    device->DestroyPipelineLayout(gbufferLayout);
-    device->DestroyPipelineLayout(lightingLayout);
-    device->DestroyPipelineLayout(skyboxLayout);
-    device->DestroyPipelineLayout(shadowLayout);
-    device->DestroyPipelineLayout(blitLayout);
+    if (gbufferLayout != handles::INVALID_PIPELINE_LAYOUT) {
+        device->DestroyPipelineLayout(gbufferLayout);
+        gbufferLayout = handles::INVALID_PIPELINE_LAYOUT;
+    }
+    if (lightingLayout != handles::INVALID_PIPELINE_LAYOUT) {
+        device->DestroyPipelineLayout(lightingLayout);
+        lightingLayout = handles::INVALID_PIPELINE_LAYOUT;
+    }
+    if (skyboxLayout != handles::INVALID_PIPELINE_LAYOUT) {
+        device->DestroyPipelineLayout(skyboxLayout);
+        skyboxLayout = handles::INVALID_PIPELINE_LAYOUT;
+    }
+    if (shadowLayout != handles::INVALID_PIPELINE_LAYOUT) {
+        device->DestroyPipelineLayout(shadowLayout);
+        shadowLayout = handles::INVALID_PIPELINE_LAYOUT;
+    }
+    if (blitLayout != handles::INVALID_PIPELINE_LAYOUT) {
+        device->DestroyPipelineLayout(blitLayout);
+        blitLayout = handles::INVALID_PIPELINE_LAYOUT;
+    }
 
     // Destroy Descriptor Sets
     // Note: Some RHIs free sets when pool is reset, but explicit destroy is safer if we own them
@@ -758,34 +788,91 @@ void TestParticleSponza::Shutdown() {
     if (blitDescriptorSet != handles::INVALID_DESCRIPTOR_SET) device->DestroyDescriptorSet(blitDescriptorSet);
     
     // Destroy Descriptor Set Layouts
-    device->DestroyDescriptorSetLayout(globalSetLayout);
-    device->DestroyDescriptorSetLayout(materialSetLayout);
-    device->DestroyDescriptorSetLayout(lightingSetLayout);
-    device->DestroyDescriptorSetLayout(skyboxSetLayout);
-    device->DestroyDescriptorSetLayout(blitSetLayout);
+    if (globalSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device->DestroyDescriptorSetLayout(globalSetLayout);
+        globalSetLayout = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
+    if (materialSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device->DestroyDescriptorSetLayout(materialSetLayout);
+        materialSetLayout = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
+    if (lightingSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device->DestroyDescriptorSetLayout(lightingSetLayout);
+        lightingSetLayout = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
+    if (skyboxSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device->DestroyDescriptorSetLayout(skyboxSetLayout);
+        skyboxSetLayout = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
+    if (blitSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device->DestroyDescriptorSetLayout(blitSetLayout);
+        blitSetLayout = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
 
     // Destroy Buffers
-    device->DestroyBuffer(viewDataBuffer);
-    device->DestroyBuffer(sceneDataBuffer);
+    if (viewDataBuffer != handles::INVALID_RESOURCE) {
+        device->DestroyBuffer(viewDataBuffer);
+        viewDataBuffer = handles::INVALID_RESOURCE;
+    }
+    if (sceneDataBuffer != handles::INVALID_RESOURCE) {
+        device->DestroyBuffer(sceneDataBuffer);
+        sceneDataBuffer = handles::INVALID_RESOURCE;
+    }
 
     // Destroy Persistent Resources
-    device->DestroyTexture(depthTexture);
-    device->DestroyTexture(whiteTexture);
-    device->DestroyTexture(normalTexture);
-    device->DestroyTexture(shadowMap0);
-    device->DestroyTexture(shadowMap1);
-    device->DestroyTexture(envCubemap); // Also invalidates skyboxTexture
+    if (depthTexture != handles::INVALID_RESOURCE) {
+        device->DestroyTexture(depthTexture);
+        depthTexture = handles::INVALID_RESOURCE;
+    }
+    if (whiteTexture != handles::INVALID_RESOURCE) {
+        device->DestroyTexture(whiteTexture);
+        whiteTexture = handles::INVALID_RESOURCE;
+    }
+    if (normalTexture != handles::INVALID_RESOURCE) {
+        device->DestroyTexture(normalTexture);
+        normalTexture = handles::INVALID_RESOURCE;
+    }
+    if (shadowMap0 != handles::INVALID_RESOURCE) {
+        device->DestroyTexture(shadowMap0);
+        shadowMap0 = handles::INVALID_RESOURCE;
+    }
+    if (shadowMap1 != handles::INVALID_RESOURCE) {
+        device->DestroyTexture(shadowMap1);
+        shadowMap1 = handles::INVALID_RESOURCE;
+    }
+    if (envCubemap != handles::INVALID_RESOURCE) {
+        device->DestroyTexture(envCubemap);
+        envCubemap = handles::INVALID_RESOURCE;
+    }
     
     // Destroy IBL
     iblPrecomputer.reset();
-    device->DestroyTexture(irradianceMap);
-    device->DestroyTexture(prefilteredMap);
-    device->DestroyTexture(brdfLUT);
+    if (irradianceMap != handles::INVALID_RESOURCE) {
+        device->DestroyTexture(irradianceMap);
+        irradianceMap = handles::INVALID_RESOURCE;
+    }
+    if (prefilteredMap != handles::INVALID_RESOURCE) {
+        device->DestroyTexture(prefilteredMap);
+        prefilteredMap = handles::INVALID_RESOURCE;
+    }
+    if (brdfLUT != handles::INVALID_RESOURCE) {
+        device->DestroyTexture(brdfLUT);
+        brdfLUT = handles::INVALID_RESOURCE;
+    }
 
     // Destroy Samplers
-    device->DestroySampler(defaultSampler);
-    device->DestroySampler(brdfSampler);
-    device->DestroySampler(debugSampler);
+    if (defaultSampler != handles::INVALID_SAMPLER) {
+        device->DestroySampler(defaultSampler);
+        defaultSampler = handles::INVALID_SAMPLER;
+    }
+    if (brdfSampler != handles::INVALID_SAMPLER) {
+        device->DestroySampler(brdfSampler);
+        brdfSampler = handles::INVALID_SAMPLER;
+    }
+    if (debugSampler != handles::INVALID_SAMPLER) {
+        device->DestroySampler(debugSampler);
+        debugSampler = handles::INVALID_SAMPLER;
+    }
     
     // Destroy Loaded Scene Resources
     for (auto& meshInfo : sceneMeshes) {
@@ -799,13 +886,17 @@ void TestParticleSponza::Shutdown() {
     
     // Destroy Created Resources (Textures loaded from file)
     for (auto handle : createdResources) {
-        device->DestroyTexture(handle);
+        if (handle != handles::INVALID_RESOURCE) {
+            device->DestroyTexture(handle);
+        }
     }
     createdResources.clear();
     
     // Destroy Shaders
     for (auto& pair : shaderVariantMap) {
-        device->DestroyShader(pair.second);
+        if (pair.second != handles::INVALID_SHADER) {
+            device->DestroyShader(pair.second);
+        }
     }
     shaderVariantMap.clear();
 
@@ -879,9 +970,37 @@ bool TestParticleSponza::CompileAllShaders() {
         shaderVariantMap[std::string(info.file_name) + ":" + info.function] = handle;
         return true;
     };
-
-    std::string testShaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/";
-    std::string engineShaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/";
+    
+    // Use executable-relative paths for shaders (works from any directory)
+    // Try multiple locations in order of preference
+    auto getShaderPath = []() -> std::string {
+        // First try: relative to current directory (shaders/ copied by CMake)
+        if (std::ifstream("shaders/GBuffer.metal").good()) {
+            return "shaders/";
+        }
+        // Second try: Darwin/Debug/shaders/ (when running from build root)
+        if (std::ifstream("Darwin/Debug/shaders/GBuffer.metal").good()) {
+            return "Darwin/Debug/shaders/";
+        }
+        // Third try: absolute path to worktree (fallback)
+        return "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/particle-system-integration/EngineTest/shaders/";
+    };
+    
+    auto getEngineShaderPath = []() -> std::string {
+        // First try: relative to current directory
+        if (std::ifstream("shaders/EquirectangularToCube.metal").good()) {
+            return "shaders/";
+        }
+        // Fallback: absolute path to worktree
+        return "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/particle-system-integration/Engine/Graphics/RHI/Shaders/";
+    };
+    
+    std::string testShaderPath = getShaderPath();
+    std::string engineShaderPath = getEngineShaderPath();
+    
+    std::cout << "Using shader paths:" << std::endl;
+    std::cout << "  Test shaders: " << testShaderPath << std::endl;
+    std::cout << "  Engine shaders: " << engineShaderPath << std::endl;
 
     if (!Compile(gbuffer_vs_info, testShaderPath)) return false;
     if (!Compile(gbuffer_ps_info, testShaderPath)) return false;
