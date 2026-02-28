@@ -20,8 +20,13 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
         return false;
     }
     
-    device_ = device;
+    // Prevent double initialization - shutdown must be called first
+    if (device_) {
+        // Already initialized, return success
+        return true;
+    }
     
+    device_ = device;
     // Load particle shader from shaders directory (relative to executable)
     std::string shader_path = "shaders/ParticleAtlas.metal";
     std::ifstream shader_file(shader_path);

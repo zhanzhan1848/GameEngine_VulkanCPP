@@ -51,11 +51,19 @@ private:
     rhi::ShaderHandle fragment_shader_{ rhi::handles::INVALID_SHADER };
     
     rhi::PipelineLayoutHandle pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
-    rhi::PipelineHandle pipelines_[4];  // additive, alpha, multiply, premultiplied
+    rhi::PipelineHandle pipelines_[4]{ 
+        rhi::handles::INVALID_PIPELINE, 
+        rhi::handles::INVALID_PIPELINE, 
+        rhi::handles::INVALID_PIPELINE, 
+        rhi::handles::INVALID_PIPELINE 
+    };  // additive, alpha, multiply, premultiplied
     
     rhi::DescriptorSetLayoutHandle descriptor_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    rhi::DescriptorSetHandle descriptor_sets_[rhi::MAX_FRAMES_IN_FLIGHT];
-    
+    rhi::DescriptorSetHandle descriptor_sets_[rhi::MAX_FRAMES_IN_FLIGHT]{ 
+        rhi::handles::INVALID_DESCRIPTOR_SET, 
+        rhi::handles::INVALID_DESCRIPTOR_SET, 
+        rhi::handles::INVALID_DESCRIPTOR_SET 
+    };
     rhi::ResourceHandle particle_texture_{ rhi::handles::INVALID_RESOURCE };
     
     particles::blend_mode current_blend_mode_{ particles::blend_mode::additive };
