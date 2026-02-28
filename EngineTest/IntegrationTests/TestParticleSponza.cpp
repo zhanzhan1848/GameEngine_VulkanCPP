@@ -475,38 +475,7 @@ bool TestParticleSponza::Initialize() {
     particlePass_.set_depth_test_enabled(true);
     std::cout << "Particle pass initialized" << std::endl;
     
-    // ============================================
-    // Initialize GPU Particle System (parallel)
-    // ============================================
-    primal::particles::gpu::gpu_system_config gpu_config;
-    gpu_config.max_particles_per_emitter = 50000;
-    gpu_config.async_compute = true;
-    
-    if (!primal::particles::gpu::system::initialize(device, gpu_config)) {
-        std::cerr << "Failed to initialize GPU particle system" << std::endl;
-    } else {
-        std::cout << "GPU particle system initialized" << std::endl;
-        
-        // Create GPU emitter with same config as CPU
-        gpuParticleEmitter = primal::particles::gpu::system::get()->create_emitter(particleConfig);
-        if (gpuParticleEmitter != primal::particles::gpu::INVALID_GPU_EMITTER_ID) {
-            auto* gpu_emitter = primal::particles::gpu::system::get()->get_emitter(gpuParticleEmitter);
-            if (gpu_emitter) {
-                gpu_emitter->set_position(emitterPosition);
-                std::cout << "GPU particle emitter created" << std::endl;
-            }
-        }
-        
-        // Initialize GPU particle pass
-        if (!gpuParticlePass_.initialize(device)) {
-            std::cerr << "Failed to initialize GPU particle pass" << std::endl;
-        } else {
-            gpuParticlePass_.set_blend_mode(primal::particles::blend_mode::additive);
-            gpuParticlePass_.set_depth_write_enabled(false);
-            gpuParticlePass_.set_depth_test_enabled(true);
-            std::cout << "GPU particle pass initialized" << std::endl;
-        }
-    }
+
 #else
     std::cout << "Particle system disabled at compile time" << std::endl;
 #endif
@@ -698,22 +667,7 @@ void TestParticleSponza::Run() {
                       << "Emitter at: (" << pos.x << ", " << pos.y << ", " << pos.z << ")" << std::endl;
         }
     }
-    // ============================================
-    // Update GPU Particle System
-    // ============================================
-    if (primal::particles::gpu::system::is_initialized() && gpuParticlesEnabled) {
-        auto* gpu_system = primal::particles::gpu::system::get();
-        
-        // Update GPU emitter position to match camera
-        auto* gpu_emitter = gpu_system->get_emitter(gpuParticleEmitter);
-        if (gpu_emitter) {
-            primal::math::v3 camPos = m_camera.GetPosition();
-            gpu_emitter->set_position(camPos);
-        }
-        
-        // Dispatch GPU particle update
-        gpu_system->update(deltaTime, renderSystem.GetCurrentFrameIndex());
-    }
+
     
     #endif
     
@@ -885,23 +839,7 @@ void TestParticleSponza::Shutdown() {
     primal::particles::shutdown();
     std::cout << "Particle system shutdown" << std::endl;
     
-    // ============================================
-    // Cleanup GPU Particle System
-    // ============================================
-    gpuParticlePass_.shutdown();
-    std::cout << "GPU particle pass shutdown" << std::endl;
-    
-    if (gpuParticleEmitter != primal::particles::gpu::INVALID_GPU_EMITTER_ID) {
-        auto* gpu_system = primal::particles::gpu::system::get();
-        if (gpu_system) {
-            gpu_system->destroy_emitter(gpuParticleEmitter);
-            std::cout << "GPU particle emitter destroyed" << std::endl;
-        }
-        gpuParticleEmitter = primal::particles::gpu::INVALID_GPU_EMITTER_ID;
-    }
-    
-    primal::particles::gpu::system::shutdown();
-    std::cout << "GPU particle system shutdown" << std::endl;
+
 #endif
     
     // Cleanup Global Content Resources (GPU Meshes)
@@ -1838,48 +1776,7 @@ void TestParticleSponza::BuildRenderGraph(RenderGraph& graph, ResourceHandle bac
         );
     }
     
-    // 4.6 GPU Particle Pass - Render GPU-computed particles
-    if (primal::particles::gpu::system::is_initialized() && gpuParticlesEnabled)
-    {
-        struct GPUParticlePassData {
-            RGResourceHandle output;
-            RGResourceHandle depth;
-        };
-        
-        graph.AddPass<GPUParticlePassData>("GPUParticlePass", RGPassType::Graphics, RGPassCategory::PostProcess,
-            [this, depth, lightingOutput](GPUParticlePassData& data, RenderGraphBuilder& builder) {
-                data.output = builder.Write(lightingOutput, ResourceState::RenderTarget);
-                data.depth = builder.Read(depth);
-                
-                RGRenderPassDesc rpDesc;
-                rpDesc.colors.push_back(RGAttachmentDesc{ .texture = data.output, .loadOp = LoadAction::Load, .storeOp = StoreAction::Store });
-                rpDesc.depthStencil = { .texture = depth, .depthLoadOp = LoadAction::Load, .depthStoreOp = StoreAction::Store };
-                builder.DeclareRenderPass(rpDesc);
-            },
-            [this](const GPUParticlePassData& /*data*/, RenderGraphContext& context) {
-                auto cmd = context.cmdBuffer;
-                cmd->SetViewport({ { 0, 0 }, { (float)renderWidth, (float)renderHeight }, 0, 1});
-                cmd->SetScissor({ { 0, 0 }, { renderWidth, renderHeight } });
-                
-                // Get view/projection matrices from camera
-                primal::math::m4x4 viewMat = m_camera.GetViewMatrix();
-                float fov = 60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD;
-                float aspect = (float)renderWidth / (float)renderHeight;
-                primal::math::m4x4 projMat = primal::graphics::rhi::math::CreatePerspectiveMatrix(fov, aspect, 0.1f, 1000.0f);
-                
-                // Get GPU particle system data
-                auto* gpu_system = primal::particles::gpu::system::get();
-                if (gpu_system) {
-                    rhi::ResourceHandle particle_buffer = gpu_system->get_particle_buffer(renderSystem.GetCurrentFrameIndex());
-                    rhi::ResourceHandle indirect_buffer = gpu_system->get_indirect_buffer(renderSystem.GetCurrentFrameIndex());
-                    
-                    // Execute GPU particle rendering
-                    gpuParticlePass_.execute(cmd, renderSystem.GetCurrentFrameIndex(), viewMat, projMat,
-                                            particle_buffer, indirect_buffer, gpu_system->get_max_particles());
-                }
-            }
-        );
-    }
+
 #endif
     
     // 5. Final Blit and Debug

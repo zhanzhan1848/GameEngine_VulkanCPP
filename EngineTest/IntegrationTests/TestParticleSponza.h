@@ -25,10 +25,7 @@
 #include "Engine/Particles/ParticleCPU.h"
 #include "Engine/Graphics/Passes/ParticlePass.h"
 
-// GPU Particle System includes
-#include "Engine/Particles/GPUParticleSystem.h"
-#include "Engine/Particles/GPUParticleEmitter.h"
-#include "Engine/Particles/GPUParticlePass.h"
+
 class TestParticleSponza;
 
 class Engine_Test : public primal::test::RenderTestRunner {
@@ -109,11 +106,8 @@ private:
     primal::math::v3 emitterPosition{ 0.0f, 5.0f, 0.0f };
     bool particlesEnabled = true;
     
-    // GPU Particle System (parallel to CPU)
-    primal::particles::gpu::gpu_emitter_id gpuParticleEmitter{ primal::particles::gpu::INVALID_GPU_EMITTER_ID };
-    primal::particles::gpu::gpu_particle_pass gpuParticlePass_;
-    bool gpuParticlesEnabled = true;
     
+
     // Helper Functions
     bool CompileAllShaders();
     bool SetupPipelines();
