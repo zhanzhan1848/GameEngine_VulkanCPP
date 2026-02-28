@@ -4,6 +4,8 @@
 
 #include "Particles/ParticleSystem.h"
 #include "Graphics/RHI/Platforms/Metal/MetalCommandBuffer.h"
+#include "Engine/Content/ContentToEngine.h"
+#include "Utilities/IOStream.h"
 
 #include <cstring>
 #include <fstream>
@@ -108,6 +110,19 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
     
     // Create default white texture
     create_default_texture();
+    
+    // Create default sampler for particle texture
+    rhi::SamplerDesc samplerDesc{};
+    samplerDesc.minFilter = rhi::FilterMode::Linear;
+    samplerDesc.magFilter = rhi::FilterMode::Linear;
+    samplerDesc.addressU = rhi::TextureAddressMode::Clamp;
+    samplerDesc.addressV = rhi::TextureAddressMode::Clamp;
+    defaultSampler_ = device_->CreateSampler(samplerDesc);
+    
+    // Update descriptor sets with texture and sampler
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+        update_descriptor_set(i);
+    }
     
     return true;
 }
@@ -236,6 +251,12 @@ void ParticlePass::shutdown() {
         particle_texture_ = rhi::handles::INVALID_RESOURCE;
     }
     
+    // Destroy default sampler
+    if (defaultSampler_ != rhi::handles::INVALID_SAMPLER) {
+        device_->DestroySampler(defaultSampler_);
+        defaultSampler_ = rhi::handles::INVALID_SAMPLER;
+    }
+    
     device_ = nullptr;
 }
 
@@ -341,6 +362,11 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     cmd_buffer->BindVertexBuffers(0, 3, buffers, offsets);
     
     // TODO: Bind texture through descriptor set when texture support is implemented
+    
+    // Bind descriptor set with texture, sampler, and buffers
+    if (descriptor_sets_[frame_index] != rhi::handles::INVALID_DESCRIPTOR_SET) {
+        cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, pipeline_layout_, 0, 1, &descriptor_sets_[frame_index], 0, nullptr);
+    }
     
     // Draw instanced: 6 vertices per particle quad, N instances
     // Draw(vertexCount, startVertex, instanceCount, startInstance)
@@ -469,24 +495,89 @@ bool ParticlePass::create_descriptor_sets() {
 }
 
 void ParticlePass::update_descriptor_set(u32 frame_index) {
-    // Update descriptor set with current buffers
-    // This would be called when particle buffers change
+    if (frame_index >= rhi::MAX_FRAMES_IN_FLIGHT) return;
+    if (descriptor_sets_[frame_index] == rhi::handles::INVALID_DESCRIPTOR_SET) return;
+    
+    // Update descriptor set with current buffers and texture
+    rhi::WriteDescriptorSet writes[4];
+    rhi::DescriptorBufferInfo bufferInfos[3];
+    rhi::DescriptorImageInfo imageInfo{};
+    
+    // Binding 0: Uniform buffer
+    writes[0].dstSet = descriptor_sets_[frame_index];
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+    bufferInfos[0].buffer = uniform_buffers_[frame_index];
+    bufferInfos[0].offset = 0;
+    bufferInfos[0].range = sizeof(ParticlePushConstants);
+    writes[0].bufferInfo = &bufferInfos[0];
+    
+    // Binding 1: Particle data buffer
+    writes[1].dstSet = descriptor_sets_[frame_index];
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = rhi::DescriptorType::StorageBuffer;
+    bufferInfos[1].buffer = particle_buffers_[frame_index];
+    bufferInfos[1].offset = 0;
+    bufferInfos[1].range = MAX_PARTICLE_BUFFER_SIZE;
+    writes[1].bufferInfo = &bufferInfos[1];
+    
+    // Binding 2: Count buffer
+    writes[2].dstSet = descriptor_sets_[frame_index];
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = rhi::DescriptorType::StorageBuffer;
+    bufferInfos[2].buffer = count_buffers_[frame_index];
+    bufferInfos[2].offset = 0;
+    bufferInfos[2].range = sizeof(u32) * 4;
+    writes[2].bufferInfo = &bufferInfos[2];
+    
+    // Binding 3: Texture + Sampler (CombinedImageSampler)
+    writes[3].dstSet = descriptor_sets_[frame_index];
+    writes[3].dstBinding = 3;
+    writes[3].descriptorCount = 1;
+    writes[3].descriptorType = rhi::DescriptorType::CombinedImageSampler;
+    imageInfo.imageView = particle_texture_;
+    imageInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    imageInfo.sampler = defaultSampler_;
+    writes[3].imageInfo = &imageInfo;
+    
+    device_->UpdateDescriptorSets(4, writes);
 }
 
 void ParticlePass::create_default_texture() {
-    // Create 1x1 white texture as fallback
-    // TODO: Implement when texture creation API is clarified
-    // For now, particles will render without texture (procedural)
+    // Create 1x1 white texture using content system
+    uint32_t width = 1;
+    uint32_t height = 1;
+    rhi::DataFormat format = rhi::DataFormat::RGBA8_UNorm;
+    uint32_t row_pitch = 4;
+    uint32_t slice_pitch = 4;
     
-    /* Example of correct API:
-    rhi::TextureDesc texture_desc{};
-    texture_desc.size = math::u32v3{ 1, 1, 1 };
-    texture_desc.format = rhi::DataFormat::RGBA8_UNorm;
-    texture_desc.type = rhi::TextureType::Texture2D;
-    texture_desc.usage = rhi::TextureUsage::ShaderResource;
+    // White pixel data (RGBA)
+    uint8_t white_pixel[4] = { 255, 255, 255, 255 };
     
-    particle_texture_ = device_->CreateTexture(texture_desc);
-    */
+    size_t blob_size = (6 * sizeof(uint32_t)) + (2 * sizeof(uint32_t) + slice_pitch);
+    std::vector<uint8_t> blob(blob_size);
+    utl::blob_stream_writer writer(blob.data(), blob.size());
+    
+    writer.write(width);
+    writer.write(height);
+    writer.write((uint32_t)1);  // array_size
+    writer.write((uint32_t)0);  // flags
+    writer.write((uint32_t)1);  // mip_levels
+    writer.write((uint32_t)format);
+    writer.write(row_pitch);
+    writer.write(slice_pitch);
+    writer.write(white_pixel, slice_pitch);
+
+    id::id_type id = content::create_resource(blob.data(), content::asset_type::texture);
+    if (id::is_valid(id)) {
+        particle_texture_ = content::get_rhi_texture_handle(id);
+        std::cout << "ParticlePass: Created default white texture" << std::endl;
+    } else {
+        std::cerr << "ParticlePass: Failed to create default texture" << std::endl;
+    }
 }
 
 } // namespace primal::graphics

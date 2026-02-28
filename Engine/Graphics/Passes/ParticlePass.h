@@ -65,6 +65,7 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET 
     };
     rhi::ResourceHandle particle_texture_{ rhi::handles::INVALID_RESOURCE };
+    rhi::SamplerHandle defaultSampler_{ rhi::handles::INVALID_SAMPLER };
     
     particles::blend_mode current_blend_mode_{ particles::blend_mode::additive };
     bool depth_write_enabled_{ false };
