@@ -438,9 +438,9 @@ bool TestParticleSponza::Initialize() {
     particleConfig.color_start = primal::math::v4{ 1.0f, 0.2f, 0.2f, 1.0f };  // Warm start (red/orange)
     particleConfig.color_end = primal::math::v4{ 0.2f, 0.5f, 1.0f, 0.8f };    // Cool end (blue/cyan)
     
-    // Random sizes
-    particleConfig.scale_min = primal::math::v2{ 0.1f, 0.1f };
-    particleConfig.scale_max = primal::math::v2{ 0.5f, 0.5f };
+    // Random sizes (larger for visibility)
+    particleConfig.scale_min = primal::math::v2{ 0.5f, 0.5f };
+    particleConfig.scale_max = primal::math::v2{ 2.0f, 2.0f };
     
     // Light gravity and drag for visible movement
     particleConfig.gravity = primal::math::v3{ 0.0f, -2.0f, 0.0f };
@@ -621,12 +621,13 @@ void TestParticleSponza::Run() {
     // Update emitter position and direction based on camera
     auto* emitter = primal::particles::get_emitter(particleEmitter);
     if (emitter && particlesEnabled) {
-        // Set emitter position to camera position
+        // Get camera position for spawning
         primal::math::v3 camPos = m_camera.GetPosition();
-        emitter->set_position(camPos);
         
-        // Update velocity direction based on camera forward
+        // Set emitter position slightly in front of camera (avoid near clipping plane)
         primal::math::v3 camForward = m_camera.GetForward();
+        primal::math::v3 spawnOffset = camForward * 2.0f; // 2 units in front of camera
+        emitter->set_position(camPos + spawnOffset);
         
         // Get current config and update velocity
         auto config = emitter->get_config();
