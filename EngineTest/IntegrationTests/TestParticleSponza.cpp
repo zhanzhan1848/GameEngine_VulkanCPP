@@ -826,8 +826,9 @@ void TestParticleSponza::Shutdown() {
     // ============================================
     // Cleanup Particle System
     // ============================================
-    particlePass_.shutdown();
-    std::cout << "Particle pass shutdown" << std::endl;
+    // Note: particlePass_.shutdown() is already called by renderSystem.Shutdown() -> ForwardRenderer::Shutdown()
+    // Don't call it again to avoid double-free crash
+    // particlePass_.shutdown();
     
     if (particleEmitter != primal::particles::invalid_id) {
         primal::particles::destroy_emitter(particleEmitter);
