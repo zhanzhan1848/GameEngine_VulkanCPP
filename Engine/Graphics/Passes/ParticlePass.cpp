@@ -352,21 +352,16 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     }
     */
     
-    // Bind buffers using BindVertexBuffers (works for Metal shader buffers too)
-    rhi::ResourceHandle buffers[3] = { 
-        uniform_buffers_[frame_index], 
-        particle_buffers_[frame_index], 
-        count_buffers_[frame_index] 
-    };
-    uint64_t offsets[3] = { 0, 0, 0 };
-    cmd_buffer->BindVertexBuffers(0, 3, buffers, offsets);
-    
-    // TODO: Bind texture through descriptor set when texture support is implemented
-    
     // Bind descriptor set with texture, sampler, and buffers
+    // This binds:
+    // - buffer slot 0: uniforms
+    // - buffer slot 1: particle data
+    // - buffer slot 2: count
+    // - texture slot 0 + sampler slot 0: particle texture
     if (descriptor_sets_[frame_index] != rhi::handles::INVALID_DESCRIPTOR_SET) {
         cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, pipeline_layout_, 0, 1, &descriptor_sets_[frame_index], 0, nullptr);
     }
+    
     
     // Draw instanced: 6 vertices per particle quad, N instances
     // Draw(vertexCount, startVertex, instanceCount, startInstance)
