@@ -281,7 +281,13 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     u32 blend_idx = static_cast<u32>(current_blend_mode_);
     rhi::PipelineHandle pipeline = pipelines_[blend_idx];
     
+    std::cout << "[ParticlePass::execute] frame=" << frame_index 
+              << ", active_count=" << active_count 
+              << ", pipeline=" << (pipeline == rhi::handles::INVALID_PIPELINE ? "INVALID" : "VALID") 
+              << std::endl;
+    
     if (pipeline == rhi::handles::INVALID_PIPELINE) {
+        std::cerr << "[ParticlePass::execute] ERROR: Pipeline is INVALID!" << std::endl;
         return;
     }
     

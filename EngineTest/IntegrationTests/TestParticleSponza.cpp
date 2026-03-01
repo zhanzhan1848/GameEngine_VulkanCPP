@@ -438,9 +438,9 @@ bool TestParticleSponza::Initialize() {
     particleConfig.color_start = primal::math::v4{ 1.0f, 0.2f, 0.2f, 1.0f };  // Warm start (red/orange)
     particleConfig.color_end = primal::math::v4{ 0.2f, 0.5f, 1.0f, 0.8f };    // Cool end (blue/cyan)
     
-    // Random sizes (larger for visibility)
-    particleConfig.scale_min = primal::math::v2{ 0.5f, 0.5f };
-    particleConfig.scale_max = primal::math::v2{ 2.0f, 2.0f };
+    // Random sizes (VERY large for debugging visibility)
+    particleConfig.scale_min = primal::math::v2{ 5.0f, 5.0f };
+    particleConfig.scale_max = primal::math::v2{ 10.0f, 10.0f };
     
     // Light gravity and drag for visible movement
     particleConfig.gravity = primal::math::v3{ 0.0f, -2.0f, 0.0f };
@@ -472,9 +472,8 @@ bool TestParticleSponza::Initialize() {
     }
     particlePass_.set_blend_mode(primal::particles::blend_mode::additive);
     particlePass_.set_depth_write_enabled(false);
-    particlePass_.set_depth_test_enabled(true);
-    std::cout << "Particle pass initialized" << std::endl;
-    
+    particlePass_.set_depth_test_enabled(false);  // Disable depth test for debugging
+    std::cout << "Particle pass initialized (depth test DISABLED for debugging)" << std::endl;
 
 #else
     std::cout << "Particle system disabled at compile time" << std::endl;

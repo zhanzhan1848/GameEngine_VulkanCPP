@@ -1073,7 +1073,8 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 
 #ifndef DISABLE_PARTICLE_SYSTEM
     // 5.5. Particle Pass (after TransparentPass)
-    particlePass_.execute(cmdBuffer, frameIndex, view.GetViewMatrix(), view.GetProjectionMatrix());
+    // DISABLED: ParticlePass is now handled by RenderGraph in TestParticleSponza
+    // particlePass_.execute(cmdBuffer, frameIndex, view.GetViewMatrix(), view.GetProjectionMatrix());
 #endif
 
     // 6. Geometry Debug Pass
