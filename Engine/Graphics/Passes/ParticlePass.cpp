@@ -30,7 +30,7 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
     
     device_ = device;
     // Load particle shader from shaders directory (relative to executable)
-    std::string shader_path = "shaders/ParticleAtlas.metal";
+    std::string shader_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/ParticleAtlas.metal";
     std::ifstream shader_file(shader_path);
     
     if (!shader_file.is_open()) {

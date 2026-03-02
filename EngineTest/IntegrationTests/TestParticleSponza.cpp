@@ -18,14 +18,13 @@
 #include <cmath>
 #include <algorithm>
 #include "Utilities/IOStream.h"
+#include "Engine/Graphics/RHI/Platforms/Metal/MetalCommandBuffer.h"
+#include "Engine/Graphics/RHI/Platforms/Metal/MetalMath.h"
 
 using namespace primal;
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
 using namespace primal::graphics::rendergraph;
-
-#include "Engine/Graphics/RHI/Platforms/Metal/MetalCommandBuffer.h"
-#include "Engine/Graphics/RHI/Platforms/Metal/MetalMath.h"
 
 // Initialize static member
 TestParticleSponza* TestParticleSponza::instance = nullptr;
