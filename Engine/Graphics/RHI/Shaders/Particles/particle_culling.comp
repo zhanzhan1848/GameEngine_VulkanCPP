@@ -1,0 +1,105 @@
+#version 450
+#extension GL_ARB_shader_storage_buffer_object : require
+
+layout(local_size_x = 256) in;
+
+struct ParticleData {
+    vec4 position;      // xyz = position, w = age (0-1)
+    vec4 velocity;      // xyz = velocity, w = lifetime
+    vec4 color;         // rgba
+    vec4 scale_rotation; // xy = scale, zw = rotation
+};
+
+struct DrawIndirectCommand {
+    uint vertex_count;
+    uint instance_count;
+    uint first_vertex;
+    uint first_instance;
+};
+
+layout(std430, binding = 0) readonly buffer ParticleBuffer {
+    ParticleData particles[];
+};
+
+layout(std430, binding = 1) buffer VisibleIndices {
+    uint visible_indices[];
+};
+
+layout(std430, binding = 2) buffer IndirectCommand {
+    DrawIndirectCommand cmd;
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 view_projection;
+    vec4 frustum_planes[6];  // Left, Right, Top, Bottom, Near, Far
+    uint max_particles;
+    uint vertex_count;       // 4 for instanced quad, 1 for point sprite
+} pc;
+
+bool is_inside_frustum(vec3 position, float radius) {
+    for (int i = 0; i < 6; ++i) {
+        vec4 plane = pc.frustum_planes[i];
+        float distance = dot(plane.xyz, position) + plane.w;
+        if (distance < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    
+    if (index >= pc.max_particles) {
+        return;
+    }
+    
+    ParticleData p = particles[index];
+    
+    // Skip dead particles
+    if (p.position.w >= 1.0) {
+        return;
+    }
+    
+    vec3 pos = p.position.xyz;
+    float max_scale = max(p.scale_rotation.x, p.scale_rotation.y);
+    
+    // Simple frustum culling using clip space
+    vec4 clip_pos = pc.view_projection * vec4(pos, 1.0);
+    
+    // Check if behind camera
+    if (clip_pos.w <= 0.0) {
+        return;
+    }
+    
+    // Perspective divide
+    vec3 ndc = clip_pos.xyz / clip_pos.w;
+    
+    // Check NDC bounds with scale-based tolerance
+    float tolerance = max_scale * 0.1;
+    if (abs(ndc.x) > 1.0 + tolerance || abs(ndc.y) > 1.0 + tolerance) {
+        return;
+    }
+    
+    // Also check depth
+    if (ndc.z < 0.0 || ndc.z > 1.0) {
+        return;
+    }
+    
+    // Particle is visible, add to visible list
+    uint visible_index = atomicAdd(cmd.instance_count, 1);
+    
+    if (visible_index < pc.max_particles) {
+        visible_indices[visible_index] = index;
+    }
+}
+
+// Initialize command buffer at the start
+void main_init() {
+    // This would be called from a separate dispatch or compute shader
+    // to reset the instance count to 0
+    cmd.vertex_count = pc.vertex_count;
+    cmd.instance_count = 0;
+    cmd.first_vertex = 0;
+    cmd.first_instance = 0;
+}

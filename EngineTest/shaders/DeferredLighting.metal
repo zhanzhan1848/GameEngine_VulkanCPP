@@ -239,5 +239,6 @@ fragment float4 fragmentBlit(
     texture2d<float> inputTex [[texture(0)]]
 ) {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
-    return inputTex.sample(s, in.uv);
+    float4 sampled = inputTex.sample(s, in.uv);
+    return sampled;
 }

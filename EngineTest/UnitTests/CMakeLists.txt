@@ -1168,6 +1168,36 @@ set_target_properties(StandaloneGraphics_SceneDataAdapter_Test PROPERTIES
 )
 target_compile_definitions(StandaloneGraphics_SceneDataAdapter_Test PRIVATE DEBUG _DEBUG)
 
+# ======================
+# Particle System Tests
+# ======================
+
+# 创建粒子系统单元测试
+add_executable(TestParticles 
+    Particles/TestParticles.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Particles/ParticlePool.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Particles/ParticleSystem.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Particles/ParticleEmitter.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Particles/ParticleCPU.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Particles/ParticleCompute.cpp
+)
+target_include_directories(TestParticles PRIVATE 
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestParticles PRIVATE Engine pthread)
+add_test(NAME TestParticles COMMAND TestParticles)
+set_target_properties(TestParticles PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/Particles"
+)
+target_compile_definitions(TestParticles PRIVATE DEBUG _DEBUG)
+
+message(STATUS "Particle System Tests configured:")
+message(STATUS "  - TestParticles: Particle pool and emitter unit tests")
+
 # 创建RenderSystem集成测试
 add_executable(TestRenderSystemIntegration Graphics/TestRenderSystemIntegration.cpp)
 target_include_directories(TestRenderSystemIntegration PRIVATE 

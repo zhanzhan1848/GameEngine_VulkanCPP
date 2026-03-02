@@ -53,6 +53,8 @@ set(MESHOPT_SOURCES
     ${MESHOPT_DIR}/vertexcodec.cpp
     ${MESHOPT_DIR}/vertexfilter.cpp
     ${MESHOPT_DIR}/vfetchoptimizer.cpp
+    ${MESHOPT_DIR}/meshletutils.cpp
+    ${MESHOPT_DIR}/meshletcodec.cpp
 )
 
 set(CONTENT_TOOLS_SOURCES

@@ -107,6 +107,9 @@ file(GLOB_RECURSE GRAPHICS_UTILS
 # 检查是否启用WebGPU支持
 option(ENABLE_WEBGPU "Enable WebGPU support via Dawn library" OFF)
 
+# 检查是否禁用粒子系统
+option(DISABLE_PARTICLE_SYSTEM "Disable particle system compilation" OFF)
+
 if(WIN32)
     file(GLOB_RECURSE GRAPHICS_SOURCES 
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.cpp"
@@ -191,10 +194,11 @@ file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/EngineAPI/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/EngineAPI/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Utilities/*.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Content/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Particles/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Particles/*.cpp"
 )
 
 # 根据编译器排除特定文件
@@ -221,6 +225,12 @@ endif()
 # 手动排除特定文件（如果需要）
 list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*_test\\.cpp$")  # 排除测试文件
 # list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*/Platform/.*")   # 排除所有平台相关文件
+
+# 粒子系统可选编译
+if(DISABLE_PARTICLE_SYSTEM)
+    message(STATUS "Particle system disabled - excluding from build")
+    list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*/Particles/.*")
+endif()
 
 # 合并所有源文件
 set(ALL_SOURCES
@@ -307,6 +317,11 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     _LIB
     _HAS_EXCEPTIONS=0
 )
+
+# 粒子系统禁用定义
+if(DISABLE_PARTICLE_SYSTEM)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DISABLE_PARTICLE_SYSTEM=1)
+endif()
 
 # 编译选项
 if(MSVC)

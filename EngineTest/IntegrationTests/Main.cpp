@@ -1,7 +1,7 @@
 // Copyright (c) Contributors of Primal+
 // Distributed under the MIT license. See the LICENSE file in the project root for more information.
-//#define TEST_SPONZA_RENDERGRAPH
-#define TEST_GEOMETRY_DEBUG_SPONZA
+// Test selection is controlled via CMake compile definitions
+// Do not add hardcoded #define here - use CMakeLists.txt to configure
 #include "Test.h"
 
 #if defined(_MSC_VER)
@@ -26,8 +26,10 @@
 #include "TestSponzaRenderGraph.h"
 #elif defined(TEST_GEOMETRY_DEBUG_SPONZA)
 #include "TestGeometryDebugSponza.h"
+#elif defined(TEST_PARTICLE_SPONZA)
+#include "TestParticleSponza.h"
 #else
-#error One of the tests need to be enabled
+#error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif
 
 #ifdef _WIN64

@@ -284,6 +284,14 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         return false;
     }
 
+#ifndef DISABLE_PARTICLE_SYSTEM
+    // Initialize Particle Pass
+    if (!particlePass_.initialize(device_)) {
+        std::cerr << "ForwardRenderer: Failed to initialize ParticlePass" << std::endl;
+        return false;
+    }
+#endif
+
     // Initialize Composite Pipeline (SSR Blending)
     {
         // Layout
@@ -356,6 +364,9 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 void ForwardRenderer::Shutdown() {
     blurPass_.Shutdown();
     ssrPass_.Shutdown();
+#ifndef DISABLE_PARTICLE_SYSTEM
+    particlePass_.shutdown();
+#endif
 
     if (device_) {
         if (ssrOutput_ != rhi::handles::INVALID_RESOURCE) {
@@ -1059,6 +1070,12 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 
     // std::cout << "ForwardRenderer: Calling TransparentPass" << std::endl;
     TransparentPass(cmdBuffer, view, materials, transparentProxies, frameIndex);
+
+#ifndef DISABLE_PARTICLE_SYSTEM
+    // 5.5. Particle Pass (after TransparentPass)
+    // DISABLED: ParticlePass is now handled by RenderGraph in TestParticleSponza
+    // particlePass_.execute(cmdBuffer, frameIndex, view.GetViewMatrix(), view.GetProjectionMatrix());
+#endif
 
     // 6. Geometry Debug Pass
     RenderGeometryDebug(*device_, cmdBuffer, view, renderTarget, depthStencil, rhi::DataFormat::BGRA8_UNorm, rhi::DataFormat::D32_Float, debugSettings_);

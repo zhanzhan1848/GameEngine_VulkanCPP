@@ -394,6 +394,7 @@ EngineTest/assets/
 .trae/
 .venv/
 .sisyphus/
+.opencode
 
 TODO*
 
