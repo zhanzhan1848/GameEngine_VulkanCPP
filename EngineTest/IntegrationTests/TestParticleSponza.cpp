@@ -438,9 +438,15 @@ bool TestParticleSponza::Initialize() {
     particleConfig.color_start = primal::math::v4{ 1.0f, 0.2f, 0.2f, 1.0f };  // Warm start (red/orange)
     particleConfig.color_end = primal::math::v4{ 0.2f, 0.5f, 1.0f, 0.8f };    // Cool end (blue/cyan)
     
-    // Random sizes (VERY large for debugging visibility)
-    particleConfig.scale_min = primal::math::v2{ 5.0f, 5.0f };
-    particleConfig.scale_max = primal::math::v2{ 10.0f, 10.0f };
+    // Particle sizes (reduced for better appearance)
+    particleConfig.scale_min = primal::math::v2{ 0.3f, 0.3f };
+    particleConfig.scale_max = primal::math::v2{ 0.8f, 0.8f };
+    
+    // Light gravity and drag for visible movement
+    // particleConfig.scale_min = primal::math::v2{ 0.3f, 0.3f };
+    // particleConfig.scale_max = primal::math::v2{ 0.8f, 0.8f };
+    // particleConfig.scale_min = primal::math::v2{ 5.0f, 5.0f };
+    // particleConfig.scale_max = primal::math::v2{ 10.0f, 10.0f };
     
     // Light gravity and drag for visible movement
     particleConfig.gravity = primal::math::v3{ 0.0f, -2.0f, 0.0f };
@@ -1831,6 +1837,9 @@ void TestParticleSponza::BuildRenderGraph(RenderGraph& graph, ResourceHandle bac
             // Load Skybox Result
             rpDesc.colors.push_back(RGAttachmentDesc{ .texture = data.output, .loadOp = LoadAction::Load, .storeOp = StoreAction::Store });
             builder.DeclareRenderPass(rpDesc);
+            
+            // Prevent this pass from being culled - it's needed even if output is overwritten
+            builder.SideEffect();
         },
         [&](const LightingPassData& data, RenderGraphContext& context) {
             DescriptorData params[13] = {

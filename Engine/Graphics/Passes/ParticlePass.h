@@ -69,7 +69,7 @@ private:
     
     particles::blend_mode current_blend_mode_{ particles::blend_mode::additive };
     bool depth_write_enabled_{ false };
-    bool depth_test_enabled_{ true };
+    bool depth_test_enabled_{ false };  // DEBUG: Disabled for visibility testing
     
     u32 texture_frames_x_{ 1 };
     u32 texture_frames_y_{ 1 };

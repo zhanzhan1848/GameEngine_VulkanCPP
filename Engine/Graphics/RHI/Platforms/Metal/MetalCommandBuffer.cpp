@@ -293,8 +293,15 @@ MTL::ComputeCommandEncoder* MetalCommandBuffer::getComputeEncoder() {
 void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     static int passCount = 0;
     passCount++;
-    if (passCount <= 5) {
-        std::cout << "[Metal] BeginRenderPass #" << passCount << ": colorAttachments=" << desc.colorAttachments.size() << std::endl;
+    
+    // Log first 50 render passes with texture details
+    if (passCount <= 50) {
+        std::cout << "[Metal] BeginRenderPass #" << passCount << ": colorAttachments=" << desc.colorAttachments.size();
+        if (!desc.colorAttachments.empty()) {
+            std::cout << " texture[0]=" << desc.colorAttachments[0].texture
+                      << " loadOp=" << (int)desc.colorAttachments[0].loadOp;
+        }
+        std::cout << std::endl;
     }
     
     if (isSecondary_) return;
@@ -912,19 +919,16 @@ void MetalCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, uint32_t quer
 }
 
 void MetalCommandBuffer::Draw(uint32_t vertexCount, uint32_t startVertex, uint32_t instanceCount, uint32_t startInstance) {
+    // DEBUG: Log ALL draw calls for first 50 calls
+    static int totalDrawCount = 0;
+    totalDrawCount++;
+    if (totalDrawCount <= 50) {
+        std::cout << "[Metal] DRAW #" << totalDrawCount << ": vertexCount=" << vertexCount 
+                  << " instanceCount=" << instanceCount 
+                  << " encoderType=" << (int)currentEncoderType_ << std::endl;
+    }
+    
     if (currentEncoderType_ == EncoderType::Render) {
-        // DEBUG: Verify encoder state
-        static int totalDrawCount = 0;
-        totalDrawCount++;
-        
-        // Log every 10000th draw to catch meshlet debug draws
-        if (totalDrawCount > 10000 && totalDrawCount <= 10100) {
-            std::cout << "[Metal] Draw #" << totalDrawCount << ": vertexCount=" << vertexCount 
-                      << " instanceCount=" << instanceCount 
-                      << " primitiveType=" << (int)currentPrimitiveType_ 
-                      << " encoder=" << (currentEncoder_ ? "valid" : "NULL") << std::endl;
-        }
-        
         static_cast<MTL::RenderCommandEncoder*>(currentEncoder_)->drawPrimitives(
                 currentPrimitiveType_,
                 (NS::UInteger)startVertex,

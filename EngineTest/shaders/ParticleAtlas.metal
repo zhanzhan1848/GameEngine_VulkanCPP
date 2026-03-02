@@ -63,14 +63,14 @@ vertex ParticleVertexOut particle_vertex_instanced(
 {
     ParticleVertexOut out;
     
-    // Cull instances beyond visible count
-    if (instance_id >= visible_count[0]) {
-        out.position = float4(0.0, 0.0, -1000.0, 1.0);
-        out.color = float4(0.0);
-        out.uv = float2(0.0);
-        out.age = 1.0;
-        return out;
-    }
+    // DEBUG: Temporarily DISABLE culling to test if visible_count is the issue
+    // if (instance_id >= visible_count[0]) {
+    //     out.position = float4(0.0, 0.0, -1000.0, 1.0);
+    //     out.color = float4(0.0);
+    //     out.uv = float2(0.0);
+    //     out.age = 1.0;
+    //     return out;
+    // }
     
     // Get particle data - use instance_id directly as index
     device const ParticleData& p = particles[instance_id];
@@ -86,7 +86,7 @@ vertex ParticleVertexOut particle_vertex_instanced(
     // Calculate world position
     float3 world_pos = p.position.xyz;
     float3 offset = camera_right * quad_pos.x * scale.x + camera_up * quad_pos.y * scale.y;
-    
+
     float4 world_position = float4(world_pos + offset, 1.0);
     out.position = uniforms.view_projection * world_position;
     
@@ -122,7 +122,7 @@ fragment float4 particle_fragment(
     texture2d<float> particle_texture [[texture(0)]],
     sampler tex_sampler [[sampler(0)]])
 {
-    // Sample texture
+    // Sample texture for alpha mask
     constexpr sampler s(mip_filter::linear, address::clamp_to_edge);
     float4 tex_color = particle_texture.sample(s, in.uv);
     
@@ -137,6 +137,7 @@ fragment float4 particle_fragment(
     // Soft edge
     float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
     
-    // Combine texture with particle color
-    return float4(in.color.rgb * tex_color.rgb, in.color.a * alpha * tex_color.a);
+    // Additive blending with reduced brightness
+    float3 color = in.color.rgb * alpha * 0.5;  // Reduce brightness
+    return float4(color, in.color.a * alpha * 0.5);
 }

@@ -101,8 +101,8 @@ private:
     // Particle System
     primal::particles::emitter_id particleEmitter{ primal::particles::invalid_id };
     primal::graphics::ParticlePass particlePass_;
-    float particleSpawnRate = 100.0f;
-    float particleLifetime = 3.0f;
+    float particleSpawnRate = 15.0f;
+    float particleLifetime = 1.5f;
     primal::math::v3 emitterPosition{ 0.0f, 5.0f, 0.0f };
     bool particlesEnabled = true;
     

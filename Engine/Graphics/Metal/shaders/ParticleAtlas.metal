@@ -88,7 +88,18 @@ vertex ParticleVertexOut particle_vertex_instanced(
     float3 offset = camera_right * quad_pos.x * scale.x + camera_up * quad_pos.y * scale.y;
     
     float4 world_position = float4(world_pos + offset, 1.0);
-    out.position = uniforms.view_projection * world_position;
+    // DEBUG: Override position to output a FIXED QUAD in the CENTER of the screen
+    // This bypasses all matrix calculations - if you see PINK, the render pass is working!
+    float2 debug_offsets[6] = {
+        float2(-0.5, -0.5),  // Vertex 0
+        float2( 0.5, -0.5),  // Vertex 1
+        float2(-0.5,  0.5),  // Vertex 2
+        float2(-0.5,  0.5),  // Vertex 3
+        float2( 0.5, -0.5),  // Vertex 4
+        float2( 0.5,  0.5)   // Vertex 5
+    };
+    // FULL SCREEN QUAD - if you see PINK everywhere, the render pass is working!
+    out.position = float4(debug_offsets[vertex_id] * 2.0, 1.0, 1.0);  // z=1.0 for NEAREST in Metal's reversed Z
     
     // Calculate texture UV from atlas index
     float atlas_index = p.uv_params.x;
@@ -122,21 +133,7 @@ fragment float4 particle_fragment(
     texture2d<float> particle_texture [[texture(0)]],
     sampler tex_sampler [[sampler(0)]])
 {
-    // Sample texture
-    constexpr sampler s(mip_filter::linear, address::clamp_to_edge);
-    float4 tex_color = particle_texture.sample(s, in.uv);
-    
-    // Create circular shape from UV
-    float2 centered = in.uv - 0.5;
-    float dist = length(centered);
-    
-    if (dist > 0.5) {
-        discard_fragment();
-    }
-    
-    // Soft edge
-    float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
-    
-    // Combine texture with particle color
-    return float4(in.color.rgb * tex_color.rgb, in.color.a * alpha * tex_color.a);
+    // DEBUG: Output SOLID HOT PINK color - impossible to miss!
+    // If you see this color, the particle fragment shader IS running!
+    return float4(1.0, 0.0, 1.0, 1.0);  // HOT PINK - fully opaque
 }
