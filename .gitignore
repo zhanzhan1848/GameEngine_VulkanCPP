@@ -375,6 +375,7 @@ xcode_build/
 .opencode/worktrees/
 .worktrees/
 .opencode/
+.opencode
 openspec/
 tasks/
 lib/
@@ -394,7 +395,6 @@ EngineTest/assets/
 .trae/
 .venv/
 .sisyphus/
-.opencode
 
 TODO*
 
