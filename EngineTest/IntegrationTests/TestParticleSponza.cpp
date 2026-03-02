@@ -508,9 +508,10 @@ void TestParticleSponza::Run() {
     
     primal::input::input_value val;
 
-    // F1: Meshlet Mode
+    // F1: Meshlet Mode (use our own state tracking for reliable edge detection)
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f1, val);
-    if (val.current.x > 0.0f) {
+    bool f1_current = val.current.x > 0.0f;
+    if (f1_current && !keyState.f1_prev) {
         debugSettings.enable = true;
         debugSettings.mode = GeometryDebugMode::Meshlet;
         debugSettings.visualize_meshlets = true;
@@ -519,10 +520,12 @@ void TestParticleSponza::Run() {
         debugSettings.visualize_vector_field = false;
         std::cout << "Debug Mode: Meshlet" << std::endl;
     }
+    keyState.f1_prev = f1_current;
 
     // F2: SDF Mode
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f2, val);
-    if (val.current.x > 0.0f) {
+    bool f2_current = val.current.x > 0.0f;
+    if (f2_current && !keyState.f2_prev) {
         debugSettings.enable = true;
         debugSettings.mode = GeometryDebugMode::SDF;
         debugSettings.visualize_meshlets = false;
@@ -531,10 +534,12 @@ void TestParticleSponza::Run() {
         debugSettings.visualize_vector_field = false;
         std::cout << "Debug Mode: SDF" << std::endl;
     }
+    keyState.f2_prev = f2_current;
 
     // F3: Voxel Mode
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f3, val);
-    if (val.current.x > 0.0f) {
+    bool f3_current = val.current.x > 0.0f;
+    if (f3_current && !keyState.f3_prev) {
         debugSettings.enable = true;
         debugSettings.mode = GeometryDebugMode::Voxel;
         debugSettings.visualize_meshlets = false;
@@ -543,10 +548,12 @@ void TestParticleSponza::Run() {
         debugSettings.visualize_vector_field = false;
         std::cout << "Debug Mode: Voxel" << std::endl;
     }
+    keyState.f3_prev = f3_current;
 
     // F4: Vector Field Mode
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f4, val);
-    if (val.current.x > 0.0f) {
+    bool f4_current = val.current.x > 0.0f;
+    if (f4_current && !keyState.f4_prev) {
         debugSettings.enable = true;
         debugSettings.mode = GeometryDebugMode::VectorField;
         debugSettings.visualize_meshlets = false;
@@ -555,13 +562,16 @@ void TestParticleSponza::Run() {
         debugSettings.visualize_vector_field = true;
         std::cout << "Debug Mode: VectorField" << std::endl;
     }
+    keyState.f4_prev = f4_current;
     
     // F5: Toggle Enable/Disable
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f5, val);
-    if (val.current.x > 0.0f && val.previous.x == 0.0f) { // Trigger on press
+    bool f5_current = val.current.x > 0.0f;
+    if (f5_current && !keyState.f5_prev) {
         debugSettings.enable = !debugSettings.enable;
         std::cout << "Debug Mode: " << (debugSettings.enable ? "Enabled" : "Disabled") << std::endl;
     }
+    keyState.f5_prev = f5_current;
 
     // Up/Down: Change Slice Depth
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_up, val);
@@ -583,7 +593,8 @@ void TestParticleSponza::Run() {
     // ============================================
     // F6: Toggle particle system
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f6, val);
-    if (val.current.x > 0.0f && val.previous.x == 0.0f) {
+    bool f6_current = val.current.x > 0.0f;
+    if (f6_current && !keyState.f6_prev) {
         particlesEnabled = !particlesEnabled;
         auto* emitter = primal::particles::get_emitter(particleEmitter);
         if (emitter) {
@@ -591,10 +602,12 @@ void TestParticleSponza::Run() {
         }
         std::cout << "Particles: " << (particlesEnabled ? "Enabled" : "Disabled") << std::endl;
     }
+    keyState.f6_prev = f6_current;
     
     // F7: Decrease spawn rate
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f7, val);
-    if (val.current.x > 0.0f && val.previous.x == 0.0f) {
+    bool f7_current = val.current.x > 0.0f;
+    if (f7_current && !keyState.f7_prev) {
         particleSpawnRate = std::max(10.0f, particleSpawnRate - 25.0f);
         auto* emitter = primal::particles::get_emitter(particleEmitter);
         if (emitter) {
@@ -604,10 +617,12 @@ void TestParticleSponza::Run() {
         }
         std::cout << "Particle Spawn Rate: " << particleSpawnRate << "/sec" << std::endl;
     }
+    keyState.f7_prev = f7_current;
     
     // F8: Increase spawn rate
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f8, val);
-    if (val.current.x > 0.0f && val.previous.x == 0.0f) {
+    bool f8_current = val.current.x > 0.0f;
+    if (f8_current && !keyState.f8_prev) {
         particleSpawnRate = std::min(500.0f, particleSpawnRate + 25.0f);
         auto* emitter = primal::particles::get_emitter(particleEmitter);
         if (emitter) {
@@ -617,6 +632,7 @@ void TestParticleSponza::Run() {
         }
         std::cout << "Particle Spawn Rate: " << particleSpawnRate << "/sec" << std::endl;
     }
+    keyState.f8_prev = f8_current;
     
     // Update particle system
     const float deltaTime = 0.016f; // Fixed timestep for test
@@ -987,7 +1003,7 @@ bool TestParticleSponza::CompileAllShaders() {
             return "Darwin/Debug/shaders/";
         }
         // Third try: absolute path to worktree (fallback)
-        return "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/particle-system-integration/EngineTest/shaders/";
+        return "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/";
     };
     
     auto getEngineShaderPath = []() -> std::string {
@@ -996,7 +1012,7 @@ bool TestParticleSponza::CompileAllShaders() {
             return "shaders/";
         }
         // Fallback: absolute path to worktree
-        return "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/particle-system-integration/Engine/Graphics/RHI/Shaders/";
+        return "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/";
     };
     
     std::string testShaderPath = getShaderPath();

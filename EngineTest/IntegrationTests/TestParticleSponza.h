@@ -106,6 +106,18 @@ private:
     primal::math::v3 emitterPosition{ 0.0f, 5.0f, 0.0f };
     bool particlesEnabled = true;
     
+    // Key State Tracking (for reliable edge detection)
+    struct KeyStateTracker {
+        bool f1_prev = false;
+        bool f2_prev = false;
+        bool f3_prev = false;
+        bool f4_prev = false;
+        bool f5_prev = false;
+        bool f6_prev = false;
+        bool f7_prev = false;
+        bool f8_prev = false;
+    } keyState;
+    
     
 
     // Helper Functions
