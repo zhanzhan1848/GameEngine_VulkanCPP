@@ -371,6 +371,12 @@ project_rules.md
 
 build/
 xcode_build/
+.claude/
+.opencode/worktrees/
+.worktrees/
+.opencode/
+openspec/
+tasks/
 lib/
 CMake/
 .DS_Store
@@ -402,3 +408,4 @@ TODO*
 # Git Worktrees
 .worktrees/
 worktrees/
+.worktrees
