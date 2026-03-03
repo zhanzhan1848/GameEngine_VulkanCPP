@@ -65,9 +65,9 @@ protected:
     // === RHIResource 接口实现 ===
     
     void destroyImpl() override;
-    void* mapImpl(uint64_t offset, uint64_t size) override;
+    void* mapImpl(u64 offset, u64 size) override;
     void unmapImpl() override;
-    bool updateDataImpl(const void* data, uint64_t size, uint64_t offset) override;
+    bool updateDataImpl(const void* data, u64 size, u64 offset) override;
 
 private:
     MTL::Texture* mtlTexture_{nullptr};   ///< Metal纹理对象

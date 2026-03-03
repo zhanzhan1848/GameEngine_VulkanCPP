@@ -13,7 +13,7 @@
 
 namespace primal::graphics::utils {
 
-utl::vector<rhi::math::v2> SamplingUtils::GeneratePoissonDiskSamples(uint32_t count, uint32_t numRetries) {
+utl::vector<rhi::math::v2> SamplingUtils::GeneratePoissonDiskSamples(u32 count, u32 numRetries) {
     utl::vector<rhi::math::v2> samples;
     if (count == 0) return samples;
     
@@ -37,11 +37,11 @@ utl::vector<rhi::math::v2> SamplingUtils::GeneratePoissonDiskSamples(uint32_t co
      * 对于每个新样本，生成 numRetries 个候选点，选择距离现有样本最远的那个。
      */
 
-    for (uint32_t i = 0; i < count; ++i) {
+    for (u32 i = 0; i < count; ++i) {
         rhi::math::v2 bestCandidate{0.0f, 0.0f};
         float bestDistSq = -1.0f;
         
-        for (uint32_t k = 0; k < numRetries; ++k) {
+        for (u32 k = 0; k < numRetries; ++k) {
             // 在单位圆内生成随机点: r = sqrt(random), theta = random
             float r = std::sqrt(dis(gen));
             float theta = angleDis(gen);
@@ -76,8 +76,8 @@ utl::vector<rhi::math::v2> SamplingUtils::GeneratePoissonDiskSamples(uint32_t co
     return samples;
 }
 
-utl::vector<uint8_t> SamplingUtils::GenerateNoiseTexture(uint32_t size) {
-    utl::vector<uint8_t> data;
+utl::vector<u8> SamplingUtils::GenerateNoiseTexture(u32 size) {
+    utl::vector<u8> data;
     data.resize(size * size * 4); // RG16_SNorm = 4 bytes per pixel
 
     std::random_device rd;
@@ -86,7 +86,7 @@ utl::vector<uint8_t> SamplingUtils::GenerateNoiseTexture(uint32_t size) {
 
     int16_t* ptr = reinterpret_cast<int16_t*>(data.data());
 
-    for (uint32_t i = 0; i < size * size; ++i) {
+    for (u32 i = 0; i < size * size; ++i) {
         float angle = angleDis(gen);
         
         // 旋转向量 (cos, sin)

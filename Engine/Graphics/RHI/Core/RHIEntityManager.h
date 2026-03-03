@@ -6,7 +6,7 @@
 #include "Engine/Graphics/RHI/Components/MaterialComponent.h"
 #include "Engine/Graphics/RHI/Components/RenderLayerComponent.h"
 #include "Engine/Graphics/RHI/Components/RHITransformComponent.h"
-#include <vector>
+#include "Engine/Utilities/Vector.h"
 #include <queue>
 #include <type_traits>
 
@@ -49,7 +49,7 @@ namespace primal::graphics::rhi {
          * @brief 获取当前最大实体索引（用于遍历）
          * @return 最大索引（不包含）
          */
-        uint32_t GetMaxEntityIndex() const { return static_cast<uint32_t>(generations.size()); }
+        u32 GetMaxEntityIndex() const { return static_cast<u32>(generations.size()); }
 
         // === 组件管理 ===
 
@@ -67,29 +67,29 @@ namespace primal::graphics::rhi {
 
     private:
         // 实体管理
-        std::vector<uint32_t> generations;
-        std::vector<bool> alive; // Track active state of each index
-        std::queue<uint32_t> freeIndices;
-        uint32_t activeEntityCount{0};
+		utl::vector<u32> generations;
+		utl::vector<bool> alive; // Track active state of each index
+        std::queue<u32> freeIndices;
+        u32 activeEntityCount{0};
 
         // 组件存储 (SoA)
-        std::vector<GPUBufferComponent> gpuBuffers;
-        std::vector<bool> hasGPUBuffer;
+		utl::vector<GPUBufferComponent> gpuBuffers;
+		utl::vector<bool> hasGPUBuffer;
 
-        std::vector<TextureComponent> textures;
-        std::vector<bool> hasTexture;
+		utl::vector<TextureComponent> textures;
+		utl::vector<bool> hasTexture;
 
-        std::vector<MaterialComponent> materials;
-        std::vector<bool> hasMaterial;
+		utl::vector<MaterialComponent> materials;
+		utl::vector<bool> hasMaterial;
 
-        std::vector<RenderLayerComponent> renderLayers;
-        std::vector<bool> hasRenderLayer;
+		utl::vector<RenderLayerComponent> renderLayers;
+		utl::vector<bool> hasRenderLayer;
 
-        std::vector<RHITransformComponent> transforms;
-        std::vector<bool> hasTransform;
+		utl::vector<RHITransformComponent> transforms;
+		utl::vector<bool> hasTransform;
 
         // 辅助方法：确保容量
-        void EnsureCapacity(uint32_t index);
+        void EnsureCapacity(u32 index);
     };
 
     // === 模板实现 ===
@@ -103,7 +103,7 @@ namespace primal::graphics::rhi {
                       std::is_same_v<T, RHITransformComponent>, 
                       "Unsupported component type");
 
-        uint32_t index = entity; // 假设 ID 就是索引，忽略 generation 检查（或者在 IsAlive 中检查）
+        u32 index = entity; // 假设 ID 就是索引，忽略 generation 检查（或者在 IsAlive 中检查）
         EnsureCapacity(index);
 
         if constexpr (std::is_same_v<T, GPUBufferComponent>) {
@@ -126,7 +126,7 @@ namespace primal::graphics::rhi {
 
     template<typename T>
     void RHIEntityManager::RemoveComponent(RHIEntityID entity) {
-        uint32_t index = entity;
+        u32 index = entity;
         if (index >= generations.size()) return;
 
         if constexpr (std::is_same_v<T, GPUBufferComponent>) {
@@ -147,7 +147,7 @@ namespace primal::graphics::rhi {
 
     template<typename T>
     T* RHIEntityManager::GetComponent(RHIEntityID entity) {
-        uint32_t index = entity;
+        u32 index = entity;
         if (index >= generations.size()) return nullptr;
 
         if constexpr (std::is_same_v<T, GPUBufferComponent>) {
@@ -166,7 +166,7 @@ namespace primal::graphics::rhi {
 
     template<typename T>
     bool RHIEntityManager::HasComponent(RHIEntityID entity) const {
-        uint32_t index = entity;
+        u32 index = entity;
         if (index >= generations.size()) return false;
 
         if constexpr (std::is_same_v<T, GPUBufferComponent>) {

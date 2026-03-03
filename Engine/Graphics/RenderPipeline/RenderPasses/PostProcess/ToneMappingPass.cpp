@@ -101,7 +101,7 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
 
             cmd->BeginRenderPass(passDesc);
             cmd->SetViewport(viewport);
-            cmd->SetScissor({ { 0, 0 }, { (uint32_t)viewport.size.x, (uint32_t)viewport.size.y } });
+            cmd->SetScissor({ { 0, 0 }, { (u32)viewport.size.x, (u32)viewport.size.y } });
             cmd->BindGraphicsPipeline(s_ToneMapPipeline);
 
             // Bind Textures

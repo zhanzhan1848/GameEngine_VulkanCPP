@@ -37,8 +37,8 @@ public:
      * @param device 设备指针
      * @return 设备ID
      */
-    uint32_t RegisterDevice(RHIDeviceBase* device) {
-        uint32_t id = nextDeviceId_++;
+    u32 RegisterDevice(RHIDeviceBase* device) {
+        u32 id = nextDeviceId_++;
         devices_.emplace_back(id, device);
         return id;
     }
@@ -47,7 +47,7 @@ public:
      * @brief 注销设备
      * @param deviceId 设备ID
      */
-    void UnregisterDevice(uint32_t deviceId) {
+    void UnregisterDevice(u32 deviceId) {
         for (u64 i = 0; i < devices_.size(); ++i) {
             if (devices_[i].first == deviceId) {
                 devices_.erase(i);
@@ -70,7 +70,7 @@ public:
      * @param maxIds 数组最大容量
      * @return 实际写入的ID数量
      */
-    size_t GetAllDeviceIds(uint32_t* ids, size_t maxIds) const {
+    size_t GetAllDeviceIds(u32* ids, size_t maxIds) const {
         size_t count = 0;
         for (const auto& [id, device] : devices_) {
             if (count < maxIds) {
@@ -109,8 +109,8 @@ private:
     DeviceManager() = default;
     ~DeviceManager() = default;
     
-    utl::vector<std::pair<uint32_t, RHIDeviceBase*>> devices_;
-    uint32_t nextDeviceId_{1};
+    utl::vector<std::pair<u32, RHIDeviceBase*>> devices_;
+    u32 nextDeviceId_{1};
 };
 
 // === 设备工厂方法 ===
@@ -228,16 +228,16 @@ DeviceDesc GetRecommendedDeviceDesc(RHIPlatform platform) {
  * @details 用于监控设备性能统计信息
  */
 struct DevicePerformanceCounters {
-    uint64_t frameCount;               ///< 总帧数
-    uint64_t drawCallCount;            ///< 绘制调用次数
-    uint64_t computeDispatchCount;     ///< 计算分派次数
-    uint64_t bufferCreations;          ///< 缓冲区创建次数
-    uint64_t textureCreations;         ///< 纹理创建次数
-    uint64_t pipelineCreations;        ///< 管线创建次数
+    u64 frameCount;               ///< 总帧数
+    u64 drawCallCount;            ///< 绘制调用次数
+    u64 computeDispatchCount;     ///< 计算分派次数
+    u64 bufferCreations;          ///< 缓冲区创建次数
+    u64 textureCreations;         ///< 纹理创建次数
+    u64 pipelineCreations;        ///< 管线创建次数
     float averageFrameTime;            ///< 平均帧时间（毫秒）
     float averageGPUTime;              ///< 平均GPU时间（毫秒）
-    uint64_t memoryUsage;              ///< 当前内存使用量（字节）
-    uint64_t peakMemoryUsage;          ///< 峰值内存使用量（字节）
+    u64 memoryUsage;              ///< 当前内存使用量（字节）
+    u64 peakMemoryUsage;          ///< 峰值内存使用量（字节）
     
     DevicePerformanceCounters() 
         : frameCount(0), drawCallCount(0), computeDispatchCount(0),
@@ -265,7 +265,7 @@ public:
      * @param deviceId 设备ID
      * @param counters 性能计数器
      */
-    void UpdateCounters(uint32_t deviceId, const DevicePerformanceCounters& counters) {
+    void UpdateCounters(u32 deviceId, const DevicePerformanceCounters& counters) {
         std::lock_guard<std::mutex> lock(mutex_);
         counters_[deviceId] = counters;
     }
@@ -275,7 +275,7 @@ public:
      * @param deviceId 设备ID
      * @return 性能计数器的常量指针，如果设备不存在返回nullptr
      */
-    const DevicePerformanceCounters* GetCounters(uint32_t deviceId) const {
+    const DevicePerformanceCounters* GetCounters(u32 deviceId) const {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = counters_.find(deviceId);
         return (it != counters_.end()) ? &it->second : nullptr;
@@ -294,7 +294,7 @@ private:
     ~PerformanceMonitor() = default;
     
     mutable std::mutex mutex_;
-    std::unordered_map<uint32_t, DevicePerformanceCounters> counters_;
+    std::unordered_map<u32, DevicePerformanceCounters> counters_;
 };
 
 // === 调试和日志 ===
@@ -302,7 +302,7 @@ private:
 /**
  * @brief 设备调试级别
  */
-enum class DeviceDebugLevel : uint8_t {
+enum class DeviceDebugLevel : u8 {
     None = 0,        ///< 无调试信息
     Error = 1,       ///< 仅错误
     Warning = 2,     ///< 警告和错误
@@ -325,7 +325,7 @@ void SetDeviceDebugLevel(DeviceDebugLevel level) {
  * @param deviceId 设备ID
  * @param message 消息内容
  */
-void LogDeviceMessage(DeviceDebugLevel level, uint32_t deviceId, const char* message) {
+void LogDeviceMessage(DeviceDebugLevel level, u32 deviceId, const char* message) {
     // 实现调试消息输出逻辑
     (void)level;
     (void)deviceId;
@@ -337,8 +337,8 @@ void LogDeviceMessage(DeviceDebugLevel level, uint32_t deviceId, const char* mes
  * @param device 设备指针
  * @return 设备ID
  */
-uint32_t RHIDeviceManager::RegisterDevice(RHIDeviceBase* device) {
-    uint32_t id = nextDeviceId_++;
+u32 RHIDeviceManager::RegisterDevice(RHIDeviceBase* device) {
+    u32 id = nextDeviceId_++;
     devices_.emplace_back(id, device);
     return id;
 }
@@ -347,7 +347,7 @@ uint32_t RHIDeviceManager::RegisterDevice(RHIDeviceBase* device) {
  * @brief 注销设备
  * @param deviceId 设备ID
  */
-void RHIDeviceManager::UnregisterDevice(uint32_t deviceId) {
+void RHIDeviceManager::UnregisterDevice(u32 deviceId) {
     for (size_t i = 0; i < devices_.size(); ++i) {
         if (devices_[i].first == deviceId) {
             devices_.erase(devices_.begin() + i);
@@ -369,7 +369,7 @@ size_t RHIDeviceManager::GetDeviceCount() const {
  * @param deviceId 设备ID
  * @return 设备指针
  */
-RHIDeviceBase* RHIDeviceManager::GetDevice(uint32_t deviceId) const {
+RHIDeviceBase* RHIDeviceManager::GetDevice(u32 deviceId) const {
     for (const auto& [id, device] : devices_) {
         if (id == deviceId) {
             return device;

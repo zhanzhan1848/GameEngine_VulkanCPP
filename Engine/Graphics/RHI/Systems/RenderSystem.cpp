@@ -51,8 +51,8 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
 
     // Update dimensions from initialized SwapChain (handles High DPI)
     const auto& scDesc = swapChain_->GetDesc();
-    uint32_t width = scDesc.width;
-    uint32_t height = scDesc.height;
+    u32 width = scDesc.width;
+    u32 height = scDesc.height;
 
     // Create Depth Stencil Texture
     rhi::TextureDesc depthDesc{};
@@ -75,7 +75,7 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
     cmdBuffers_.resize(rhi::MAX_FRAMES_IN_FLIGHT, nullptr);
     frameFences_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_SYNC);
 
-    for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         cmdBufferHandles_[i] = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
         if (cmdBufferHandles_[i] == rhi::handles::INVALID_COMMAND_BUFFER) {
             std::cerr << "RenderSystem::Initialize failed: Could not create command buffer " << i << std::endl;
@@ -122,7 +122,7 @@ void RenderSystem::Shutdown() {
     }
     
     std::cout << "[RenderSystem] Destroying CommandBuffers" << std::endl;
-    for (uint32_t i = 0; i < cmdBuffers_.size(); ++i) {
+    for (u32 i = 0; i < cmdBuffers_.size(); ++i) {
         if (cmdBuffers_[i]) {
             cmdBuffers_[i]->Destroy();
             cmdBuffers_[i] = nullptr;
@@ -156,10 +156,10 @@ std::shared_ptr<MaterialInstance> RenderSystem::GetMaterialInstance(id::id_type 
     return nullptr;
 }
 
-void RenderSystem::Wait(uint32_t frameIndex) {
+void RenderSystem::Wait(u32 frameIndex) {
     if (!device_ || frameFences_.empty()) return;
     
-    uint32_t idx = frameIndex % rhi::MAX_FRAMES_IN_FLIGHT;
+    u32 idx = frameIndex % rhi::MAX_FRAMES_IN_FLIGHT;
     rhi::SyncHandle fence = frameFences_[idx];
     if (fence != rhi::handles::INVALID_SYNC) {
         auto waitStart = std::chrono::high_resolution_clock::now();
@@ -174,7 +174,7 @@ void RenderSystem::Wait(uint32_t frameIndex) {
     }
 }
 
-void RenderSystem::Resize(uint32_t width, uint32_t height) {
+void RenderSystem::Resize(u32 width, u32 height) {
     if (swapChain_) {
         device_->WaitIdle();
         swapChain_->Resize(width, height);
@@ -244,7 +244,7 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view) {
     // but we can still use it for passed-in state if needed.
     // Ideally, we should deprecate the frameIndex argument or verify it matches.
     
-    static uint64_t frameCount = 0;
+    static u64 frameCount = 0;
     frameCount++;
     auto renderStart = std::chrono::high_resolution_clock::now();
 
@@ -331,12 +331,12 @@ void RenderSystem::Render(rhi::RHICommandBuffer* cmdBuffer) {
     }
 
     // 获取所有活动实体
-    uint32_t maxEntities = entityManager->GetMaxEntityIndex();
+    u32 maxEntities = entityManager->GetMaxEntityIndex();
     
     struct DrawCall {
         rhi::RHIEntityID entity;
-        uint32_t layer;
-        uint32_t priority;
+        u32 layer;
+        u32 priority;
         rhi::MaterialComponent* material;
         rhi::GPUBufferComponent* buffer;
         rhi::RenderLayerComponent* renderLayer;
@@ -345,12 +345,12 @@ void RenderSystem::Render(rhi::RHICommandBuffer* cmdBuffer) {
 
     // 使用 vector 存储 DrawCall，避免频繁分配
     // 可以考虑将其作为成员变量以重用内存
-    static std::vector<DrawCall> drawCalls;
+    static utl::vector<DrawCall> drawCalls;
     drawCalls.clear();
     drawCalls.reserve(maxEntities);
 
     // 1. 遍历实体，收集 DrawCall
-    for (uint32_t i = 0; i < maxEntities; ++i) {
+    for (u32 i = 0; i < maxEntities; ++i) {
         // 检查实体是否存在且具有必要组件
         if (!entityManager->IsAlive(i)) continue;
 
@@ -375,7 +375,7 @@ void RenderSystem::Render(rhi::RHICommandBuffer* cmdBuffer) {
         drawCalls.push_back({
             i, 
             renderLayer->layerMask, 
-            static_cast<uint32_t>(renderLayer->priority), 
+            static_cast<u32>(renderLayer->priority), 
             material, 
             buffer, 
             renderLayer,
@@ -439,7 +439,7 @@ void RenderSystem::Render(rhi::RHICommandBuffer* cmdBuffer) {
 
         // 绑定顶点缓冲
         rhi::ResourceHandle vbs[] = { dc.buffer->vertexBuffer };
-        uint64_t offsets[] = { dc.buffer->offset };
+        u64 offsets[] = { dc.buffer->offset };
         // 假设 Binding 0 是 Vertex Buffer
         cmdBuffer->BindVertexBuffers(0, 1, vbs, offsets);
 

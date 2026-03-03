@@ -22,7 +22,7 @@ class RHIDeviceBase;
  * @brief 内存分配策略枚举
  * @details 定义不同的内存分配和管理策略
  */
-enum class MemoryAllocationStrategy : uint8_t {
+enum class MemoryAllocationStrategy : u8 {
     Linear = 0,         ///< 线性分配，简单快速
     Buddy = 1,          ///< 伙伴系统，适合多种大小分配
     TLSF = 2,           ///< Two-Level Segregated Fit，高性能
@@ -33,7 +33,7 @@ enum class MemoryAllocationStrategy : uint8_t {
 /**
  * @brief 内存块状态枚举
  */
-enum class MemoryBlockState : uint8_t {
+enum class MemoryBlockState : u8 {
     Free = 0,           ///< 空闲
     Allocated = 1,      ///< 已分配
     Fragmented = 2,     ///< 碎片化
@@ -45,18 +45,18 @@ enum class MemoryBlockState : uint8_t {
  * @details 描述内存块的基本信息
  */
 struct MemoryBlock {
-    uint64_t offset;            ///< 块在内存池中的偏移量
-    uint64_t size;              ///< 块大小
-    uint64_t alignment;         ///< 对齐要求
+    u64 offset;            ///< 块在内存池中的偏移量
+    u64 size;              ///< 块大小
+    u64 alignment;         ///< 对齐要求
     MemoryBlockState state;     ///< 块状态
     GPUMemoryUsage usage;       ///< 内存用途类型
-    uint32_t padding;           ///< 填充字节
+    u32 padding;           ///< 填充字节
     void* userData;             ///< 用户数据指针
     
     MemoryBlock() : offset(0), size(0), alignment(0), state(MemoryBlockState::Free),
                    usage(GPUMemoryUsage::Unknown), padding(0), userData(nullptr) {}
     
-    MemoryBlock(uint64_t off, uint64_t sz, uint64_t align = 0)
+    MemoryBlock(u64 off, u64 sz, u64 align = 0)
         : offset(off), size(sz), alignment(align), state(MemoryBlockState::Free),
           usage(GPUMemoryUsage::Unknown), padding(0), userData(nullptr) {}
 };
@@ -66,14 +66,14 @@ struct MemoryBlock {
  * @details 定义内存池的配置参数
  */
 struct MemoryPoolDesc {
-    uint64_t poolSize;                  ///< 内存池总大小
-    uint64_t blockSize;                 ///< 默认块大小
-    uint64_t alignment;                 ///< 默认对齐要求
+    u64 poolSize;                  ///< 内存池总大小
+    u64 blockSize;                 ///< 默认块大小
+    u64 alignment;                 ///< 默认对齐要求
     MemoryAllocationStrategy strategy;  ///< 分配策略
     GPUMemoryUsage usage;                ///< 内存用途
     bool allowGrowth;                   ///< 是否允许动态增长
     bool threadSafe;                     ///< 是否线程安全
-    uint32_t maxBlocks;                  ///< 最大块数量
+    u32 maxBlocks;                  ///< 最大块数量
     const char* name;                    ///< 内存池名称
     
     MemoryPoolDesc() : poolSize(64 * 1024 * 1024), blockSize(1024), alignment(256),
@@ -86,18 +86,18 @@ struct MemoryPoolDesc {
  * @details 用于内存使用情况分析和优化
  */
 struct MemoryStats {
-    uint64_t totalSize;                  ///< 总内存大小
-    uint64_t allocatedSize;               ///< 已分配内存大小
-    uint64_t freeSize;                    ///< 空闲内存大小
-    uint64_t fragmentedSize;              ///< 碎片化内存大小
-    uint32_t totalBlocks;                 ///< 总块数量
-    uint32_t allocatedBlocks;             ///< 已分配块数量
-    uint32_t freeBlocks;                  ///< 空闲块数量
-    uint32_t fragmentedBlocks;            ///< 碎片化块数量
+    u64 totalSize;                  ///< 总内存大小
+    u64 allocatedSize;               ///< 已分配内存大小
+    u64 freeSize;                    ///< 空闲内存大小
+    u64 fragmentedSize;              ///< 碎片化内存大小
+    u32 totalBlocks;                 ///< 总块数量
+    u32 allocatedBlocks;             ///< 已分配块数量
+    u32 freeBlocks;                  ///< 空闲块数量
+    u32 fragmentedBlocks;            ///< 碎片化块数量
     float fragmentationRatio;            ///< 碎片化比例
-    uint32_t allocationCount;             ///< 分配次数
-    uint32_t deallocationCount;           ///< 释放次数
-    uint64_t peakUsage;                   ///< 峰值使用量
+    u32 allocationCount;             ///< 分配次数
+    u32 deallocationCount;           ///< 释放次数
+    u64 peakUsage;                   ///< 峰值使用量
     
     MemoryStats() : totalSize(0), allocatedSize(0), freeSize(0), fragmentedSize(0),
                     totalBlocks(0), allocatedBlocks(0), freeBlocks(0), fragmentedBlocks(0),
@@ -169,14 +169,14 @@ public:
      * @param usage 内存用途
      * @return 内存块句柄，失败返回0
      */
-    virtual uint32_t Allocate(uint64_t size, uint64_t alignment = 0, GPUMemoryUsage usage = GPUMemoryUsage::Unknown) = 0;
+    virtual u32 Allocate(u64 size, u64 alignment = 0, GPUMemoryUsage usage = GPUMemoryUsage::Unknown) = 0;
     
     /**
      * @brief 释放内存块
      * @param blockHandle 内存块句柄
      * @return 释放是否成功
      */
-    virtual bool Deallocate(uint32_t blockHandle) = 0;
+    virtual bool Deallocate(u32 blockHandle) = 0;
     
     /**
      * @brief 重新分配内存块
@@ -185,14 +185,14 @@ public:
      * @param newAlignment 新的对齐要求
      * @return 新的内存块句柄，失败返回0
      */
-    virtual uint32_t Reallocate(uint32_t blockHandle, uint64_t newSize, uint64_t newAlignment = 0) = 0;
+    virtual u32 Reallocate(u32 blockHandle, u64 newSize, u64 newAlignment = 0) = 0;
     
     /**
      * @brief 获取内存块信息
      * @param blockHandle 内存块句柄
      * @return 内存块描述符，失败返回空对象
      */
-    virtual MemoryBlock GetMemoryBlock(uint32_t blockHandle) const = 0;
+    virtual MemoryBlock GetMemoryBlock(u32 blockHandle) const = 0;
     
     /**
      * @brief 内存池整理（碎片回收）
@@ -230,19 +230,19 @@ public:
      * @brief 获取内存池大小
      * @return 内存池大小
      */
-    uint64_t GetSize() const { return desc_.poolSize; }
+    u64 GetSize() const { return desc_.poolSize; }
     
     /**
      * @brief 获取可用内存大小
      * @return 可用内存大小
      */
-    uint64_t GetAvailableSize() const { return stats_.freeSize; }
+    u64 GetAvailableSize() const { return stats_.freeSize; }
     
     /**
      * @brief 获取已使用内存大小
      * @return 已使用内存大小
      */
-    uint64_t GetUsedSize() const { return stats_.allocatedSize; }
+    u64 GetUsedSize() const { return stats_.allocatedSize; }
     
     /**
      * @brief 获取内存使用率
@@ -266,7 +266,7 @@ public:
      * @param alignment 对齐要求
      * @return 是否有足够内存
      */
-    bool HasEnoughMemory(uint64_t size, uint64_t alignment = 0) const {
+    bool HasEnoughMemory(u64 size, u64 alignment = 0) const {
         if (alignment > 0) {
             size = AlignSize(size, alignment);
         }
@@ -278,7 +278,7 @@ public:
      * @param blockHandle 内存块句柄
      * @return 内存块是否有效
      */
-    virtual bool IsValidBlock(uint32_t blockHandle) const = 0;
+    virtual bool IsValidBlock(u32 blockHandle) const = 0;
     
     /**
      * @brief 获取内存块的对齐后大小
@@ -286,7 +286,7 @@ public:
      * @param alignment 对齐要求
      * @return 对齐后的大小
      */
-    static uint64_t AlignSize(uint64_t size, uint64_t alignment) {
+    static u64 AlignSize(u64 size, u64 alignment) {
         if (alignment == 0) return size;
         return (size + alignment - 1) & ~(alignment - 1);
     }
@@ -302,7 +302,7 @@ public:
      * @brief 打印内存块信息
      * @param blockHandle 内存块句柄
      */
-    void PrintMemoryBlock(uint32_t blockHandle) const;
+    void PrintMemoryBlock(u32 blockHandle) const;
     
     /**
      * @brief 打印所有内存块信息
@@ -361,7 +361,7 @@ protected:
      * @param alignment 对齐要求
      * @return 是否有效
      */
-    bool IsValidAlignment(uint64_t alignment) const {
+    bool IsValidAlignment(u64 alignment) const {
         return alignment == 0 || (alignment & (alignment - 1)) == 0;  // 必须是2的幂
     }
     

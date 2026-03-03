@@ -24,7 +24,7 @@ enum class ViewType {
  * @brief 阴影视图特定信息
  */
 struct ShadowViewInfo {
-    uint32_t cascadeIndex{0};       ///< CSM 级联索引
+    u32 cascadeIndex{0};       ///< CSM 级联索引
     float splitDistance{0.0f};      ///< CSM 分割距离
     float bias{0.005f};             ///< 深度偏移
     float slopeBias{0.002f};        ///< 斜率深度偏移

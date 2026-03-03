@@ -101,7 +101,7 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
 
             cmd->BeginRenderPass(passDesc);
             cmd->SetViewport(viewport);
-            cmd->SetScissor({ { 0, 0 }, { (uint32_t)viewport.size.x, (uint32_t)viewport.size.y } });
+            cmd->SetScissor({ { 0, 0 }, { (u32)viewport.size.x, (u32)viewport.size.y } });
             cmd->BindGraphicsPipeline(s_BrightPassPipeline);
             // TODO: Bind inputColor
             cmd->Draw(3, 0, 1, 0);
@@ -140,7 +140,7 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
             if (inputRes && outputRes && tempRes && inputRes->GetType() == RGResourceType::Texture) {
                 // Execute Blur
                 // Using frame index 0 for simplicity, ideally from context
-                uint32_t frameIndex = 0; // TODO: Get from context
+                u32 frameIndex = 0; // TODO: Get from context
                 
                 auto* texRes = static_cast<RenderGraphTexture*>(inputRes);
 

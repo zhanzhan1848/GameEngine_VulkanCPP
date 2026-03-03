@@ -12,7 +12,7 @@
 #include "CommonHeaders.h"
 #include "RHITypes.h"
 #include "RHIMultiThreadedCommandGenerator.h"
-#include <vector>
+// #include <vector>  // Replaced with Utilities/Vector.h via CommonHeaders.h
 #include <string>
 #include <memory>
 
@@ -25,7 +25,7 @@ class RHIDeviceBase;
  * @brief 调试级别枚举
  * @details 定义不同级别的调试信息详细程度
  */
-enum class DebugLevel : uint8_t {
+enum class DebugLevel : u8 {
     Basic = 0,      ///< 基础调试信息
     Detailed = 1,   ///< 详细调试信息
     Verbose = 2,    ///< 冗长调试信息
@@ -35,7 +35,7 @@ enum class DebugLevel : uint8_t {
 /**
  * @brief 优化建议类型枚举
  */
-enum class OptimizationType : uint8_t {
+enum class OptimizationType : u8 {
     None = 0,           ///< 无建议
     ThreadCount = 1,    ///< 线程数量优化
     MemoryUsage = 2,    ///< 内存使用优化
@@ -48,7 +48,7 @@ enum class OptimizationType : uint8_t {
 /**
  * @brief 性能瓶颈类型
  */
-enum class BottleneckType : uint8_t {
+enum class BottleneckType : u8 {
     None = 0,           ///< 无瓶颈
     CPU = 1,            ///< CPU瓶颈
     Memory = 2,         ///< 内存瓶颈
@@ -80,7 +80,7 @@ struct DebugInfo {
     // 错误统计
     u64 totalErrors;                       ///< 总错误数
     u64 recentErrors;                      ///< 最近错误数
-    std::vector<std::string> errorMessages; ///< 错误消息列表
+    utl::vector<std::string> errorMessages; ///< 错误消息列表
     
     /**
      * @brief 构造函数
@@ -123,14 +123,14 @@ struct PerformanceAnalysisReport {
     std::string bottleneckDescription;     ///< 瓶颈描述
     
     // 详细分析
-    std::vector<OptimizationSuggestion> suggestions; ///< 优化建议列表
+    utl::vector<OptimizationSuggestion> suggestions; ///< 优化建议列表
     DebugInfo currentDebugInfo;            ///< 当前调试信息
-    std::vector<std::string> warnings;     ///< 警告列表
-    std::vector<std::string> recommendations; ///< 推荐操作列表
+    utl::vector<std::string> warnings;     ///< 警告列表
+    utl::vector<std::string> recommendations; ///< 推荐操作列表
     
     // 历史对比
     f64 performanceTrend;                  ///< 性能趋势（百分比变化）
-    std::vector<f64> historicalPerformance; ///< 历史性能数据
+    utl::vector<f64> historicalPerformance; ///< 历史性能数据
     
     /**
      * @brief 构造函数
@@ -250,7 +250,7 @@ public:
      * @brief 获取优化建议
      * @return 优化建议列表
      */
-    std::vector<OptimizationSuggestion> GetOptimizationSuggestions() const;
+    utl::vector<OptimizationSuggestion> GetOptimizationSuggestions() const;
     
     /**
      * @brief 获取主要瓶颈类型
@@ -294,7 +294,7 @@ public:
      * @brief 获取历史性能数据
      * @return 历史数据列表
      */
-    std::vector<f64> GetHistoricalPerformanceData() const;
+    utl::vector<f64> GetHistoricalPerformanceData() const;
     
     /**
      * @brief 清除历史数据
@@ -320,7 +320,7 @@ public:
      * @brief 验证系统配置
      * @return 验证结果和问题列表
      */
-    std::pair<bool, std::vector<std::string>> ValidateSystemConfiguration() const;
+    std::pair<bool, utl::vector<std::string>> ValidateSystemConfiguration() const;
     
     /**
      * @brief 推荐最佳配置
@@ -432,8 +432,8 @@ private:
     std::function<void(const DebugInfo&)> monitoringCallback_; ///< 监控回调函数
     
     // 历史数据
-    std::vector<f64> performanceHistory_;           ///< 性能历史数据
-    std::vector<std::chrono::system_clock::time_point> timestamps_; ///< 时间戳
+    utl::vector<f64> performanceHistory_;           ///< 性能历史数据
+    utl::vector<std::chrono::system_clock::time_point> timestamps_; ///< 时间戳
     mutable std::mutex historyMutex_;              ///< 历史数据互斥锁
     
     // 性能快照

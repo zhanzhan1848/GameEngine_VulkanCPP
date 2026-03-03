@@ -35,7 +35,7 @@ struct LODPrefetchInfo {
  * @brief 着色器预取信息
  */
 struct ShaderPrefetchInfo {
-    std::vector<std::string> shaderNames; // 着色器名称列表
+    utl::vector<std::string> shaderNames; // 着色器名称列表
     u32 frameOffset;                 // 预取帧偏移
     u32 priority;                    // 预取优先级
     f32 confidence;                   // 预取置信度
@@ -191,7 +191,7 @@ public:
      * @return 是否成功调度预取
      */
     bool DeterministicPrefetchShaders(
-        const std::vector<std::string>& shaderNames, 
+        const utl::vector<std::string>& shaderNames,
         const FrameData& frameData);
     
     /**
@@ -206,7 +206,7 @@ public:
      * @param sceneType 场景类型
      * @return 预测的着色器列表
      */
-    std::vector<std::string> PredictShadersByScene(SceneType sceneType);
+    utl::vector<std::string> PredictShadersByScene(SceneType sceneType);
     
     /**
      * @brief 计算着色器优先级

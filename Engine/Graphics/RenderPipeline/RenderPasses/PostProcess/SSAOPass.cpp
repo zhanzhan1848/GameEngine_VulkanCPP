@@ -101,8 +101,8 @@ const SSAOPassData& AddSSAOPass(RenderGraph& graph, RGResourceHandle normalDepth
             // uint3 dispatchSize = (width + 7) / 8, (height + 7) / 8, 1
             if (ssaoTex && ssaoTex->GetType() == RGResourceType::Texture) {
                 const auto& desc = static_cast<RenderGraphTexture*>(ssaoTex)->GetDesc();
-                uint32_t groupX = (desc.size.x + 7) / 8;
-                uint32_t groupY = (desc.size.y + 7) / 8;
+                u32 groupX = (desc.size.x + 7) / 8;
+                u32 groupY = (desc.size.y + 7) / 8;
                 cmd->Dispatch(groupX, groupY, 1);
             }
         }

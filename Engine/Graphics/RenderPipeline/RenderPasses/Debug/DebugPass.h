@@ -12,10 +12,10 @@ struct DebugResource {
 
 struct DebugPassData {
     rendergraph::RGResourceHandle target;
-    std::vector<DebugResource> debugResources;
+    utl::vector<DebugResource> debugResources;
 };
 
-const DebugPassData& AddDebugPass(rendergraph::RenderGraph& graph, rendergraph::RGResourceHandle target, const std::vector<DebugResource>& debugResources = {});
+const DebugPassData& AddDebugPass(rendergraph::RenderGraph& graph, rendergraph::RGResourceHandle target, const utl::vector<DebugResource>& debugResources = {});
 
 // Manually shutdown the debug pass renderer (to handle static lifetime issues)
 void ShutdownDebugPass();

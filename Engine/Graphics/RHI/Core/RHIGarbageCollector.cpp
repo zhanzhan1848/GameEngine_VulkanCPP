@@ -60,8 +60,8 @@ void RHIGarbageCollector::DeferredDestroy(std::function<void()>&& callback) {
     garbageQueue_.push_back({currentFrame_, std::move(callback)});
 }
 
-void RHIGarbageCollector::Update(uint64_t completedFrame, double maxDurationMs) {
-    std::vector<std::function<void()>> callbacksToRun;
+void RHIGarbageCollector::Update(u64 completedFrame, double maxDurationMs) {
+    utl::vector<std::function<void()>> callbacksToRun;
     
     // 1. Collect all valid candidates
     {
@@ -122,7 +122,7 @@ void RHIGarbageCollector::Update(uint64_t completedFrame, double maxDurationMs) 
     }
 }
 
-void RHIGarbageCollector::SetCurrentFrame(uint64_t frameIndex) {
+void RHIGarbageCollector::SetCurrentFrame(u64 frameIndex) {
     std::lock_guard<std::mutex> lock(mutex_);
     currentFrame_ = frameIndex;
 }

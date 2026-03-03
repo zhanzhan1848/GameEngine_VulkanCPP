@@ -417,7 +417,7 @@ void gpu_particle_pass::execute(rhi::RHICommandBuffer* cmd_buffer,
         indices_buffer,
         count_buffer
     };
-    uint64_t offsets[4] = { 0, 0, 0, 0 };
+    u64 offsets[4] = { 0, 0, 0, 0 };
     cmd_buffer->BindVertexBuffers(0, 4, buffers, offsets);
     
     // Draw instanced

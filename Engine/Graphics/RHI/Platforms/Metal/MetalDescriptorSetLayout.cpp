@@ -15,7 +15,7 @@ void MetalDescriptorSetLayout::Destroy() {
     // Software layout, no native resources to release
 }
 
-const DescriptorSetLayoutBinding* MetalDescriptorSetLayout::GetBinding(uint32_t binding) const {
+const DescriptorSetLayoutBinding* MetalDescriptorSetLayout::GetBinding(u32 binding) const {
     for (const auto& b : bindings_) {
         if (b.binding == binding) return &b;
     }

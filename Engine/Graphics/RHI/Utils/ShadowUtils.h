@@ -7,11 +7,11 @@
 namespace primal::graphics::utils {
 
 struct CascadeConfig {
-    uint32_t cascadeCount{3};
+    u32 cascadeCount{3};
     float splitLambda{0.5f}; // 0.0 = uniform, 1.0 = logarithmic
     float nearClip{0.1f};
     float farClip{100.0f};
-    uint32_t shadowMapSize{2048};
+    u32 shadowMapSize{2048};
 };
 
 /**
@@ -49,7 +49,7 @@ void CreateSpotShadowView(
     const math::v3& lightDir,
     float outerCone,
     float range,
-    uint32_t shadowMapSize,
+    u32 shadowMapSize,
     RenderView& outView
 );
 
@@ -63,7 +63,7 @@ void CreateSpotShadowView(
 void CreatePointShadowViews(
     const math::v3& lightPos,
     float range,
-    uint32_t shadowMapSize,
+    u32 shadowMapSize,
     utl::vector<RenderView>& outViews
 );
 

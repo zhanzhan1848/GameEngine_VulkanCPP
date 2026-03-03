@@ -192,7 +192,7 @@ bool MetalCommandBuffer::endImpl() {
     return true;
 }
 
-bool MetalCommandBuffer::submitImpl(uint32_t waitFlags) {
+bool MetalCommandBuffer::submitImpl(u32 waitFlags) {
     if (!mtlCommandBuffer_) return false;
 
     // Process wait semaphores
@@ -683,18 +683,18 @@ void MetalCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
     }
 }
 
-void MetalCommandBuffer::BindVertexBuffers(uint32_t firstSlot, uint32_t slotCount, const ResourceHandle* buffers, const uint64_t* offsets) {
+void MetalCommandBuffer::BindVertexBuffers(u32 firstSlot, u32 slotCount, const ResourceHandle* buffers, const u64* offsets) {
     if (currentEncoderType_ != EncoderType::Render) return;
     
     // std::cout << "[MetalCommandBuffer] BindVertexBuffers: first=" << firstSlot << " count=" << slotCount << std::endl;
 
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
 
-    for (uint32_t i = 0; i < slotCount; ++i) {
+    for (u32 i = 0; i < slotCount; ++i) {
         if (buffers[i] != handles::INVALID_RESOURCE) {
             MetalBuffer* buffer = metalDevice.GetBuffer(buffers[i]);
             if (buffer && buffer->GetNativeBuffer()) {
-                uint64_t offset = offsets ? offsets[i] : 0;
+                u64 offset = offsets ? offsets[i] : 0;
                 static_cast<MTL::RenderCommandEncoder*>(currentEncoder_)->setVertexBuffer(
                     buffer->GetNativeBuffer(),
                     offset,
@@ -708,7 +708,7 @@ void MetalCommandBuffer::BindVertexBuffers(uint32_t firstSlot, uint32_t slotCoun
     }
 }
 
-void MetalCommandBuffer::BindIndexBuffer(ResourceHandle buffer, DataFormat format, uint64_t offset) {
+void MetalCommandBuffer::BindIndexBuffer(ResourceHandle buffer, DataFormat format, u64 offset) {
     if (currentEncoderType_ != EncoderType::Render) return;
     
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
@@ -727,11 +727,11 @@ void MetalCommandBuffer::BindIndexBuffer(ResourceHandle buffer, DataFormat forma
 
 void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                                            PipelineLayoutHandle pipelineLayout,
-                                           uint32_t firstSet,
-                                           uint32_t setCount,
+                                           u32 firstSet,
+                                           u32 setCount,
                                            const DescriptorSetHandle* descriptorSets,
-                                           uint32_t dynamicOffsetCount,
-                                           const uint32_t* dynamicOffsets) {
+                                           u32 dynamicOffsetCount,
+                                           const u32* dynamicOffsets) {
     if (setCount == 0 || !descriptorSets) return;
 
     if (std::this_thread::get_id() != recordingThreadId_) {
@@ -753,9 +753,9 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
         computeEncoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
     }
 
-    uint32_t currentDynamicOffsetIndex = 0;
+    u32 currentDynamicOffsetIndex = 0;
 
-    for (uint32_t i = 0; i < setCount; ++i) {
+    for (u32 i = 0; i < setCount; ++i) {
         MetalDescriptorSet* set = metalDevice.GetDescriptorSet(descriptorSets[i]);
         if (!set) continue;
         
@@ -763,10 +763,10 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
         for (const auto& binding : bindings) {
             // Simple mapping: binding index = slot index
             // In a real engine, we might remap this based on PipelineLayout or SPIR-V reflection
-            uint32_t slot = binding.binding; 
+            u32 slot = binding.binding; 
             
             // Apply dynamic offset if needed
-            uint32_t dynamicOffset = 0;
+            u32 dynamicOffset = 0;
              if ((binding.type == DescriptorType::UniformBufferDynamic || 
                   binding.type == DescriptorType::StorageBufferDynamic) && 
                  currentDynamicOffsetIndex < dynamicOffsetCount) {
@@ -784,14 +784,14 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     if (binding.resources.empty()) break;
                     MetalBuffer* buffer = metalDevice.GetBuffer(binding.resources[0]);
                     if (buffer && buffer->GetNativeBuffer()) {
-                                uint64_t offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
+                                u64 offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
                                 if (renderEncoder) {
-                                    if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                                    if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Vertex))
                                         renderEncoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, slot);
-                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                            if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Pixel))
                                 renderEncoder->setFragmentBuffer(buffer->GetNativeBuffer(), offset, slot);
                         } else if (computeEncoder) {
-                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                            if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                                 computeEncoder->setBuffer(buffer->GetNativeBuffer(), offset, slot);
                         }
                     }
@@ -824,12 +824,12 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     NS::Range range(slot, mtlTextures.size());
                     
                     if (renderEncoder) {
-                        if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                        if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Vertex))
                             renderEncoder->setVertexTextures(mtlTextures.data(), range);
-                        if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                        if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Pixel))
                             renderEncoder->setFragmentTextures(mtlTextures.data(), range);
                     } else if (computeEncoder) {
-                        if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                        if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                             computeEncoder->setTextures(mtlTextures.data(), range);
                     }
                     
@@ -837,12 +837,12 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     if (!mtlSamplers.empty()) {
                         NS::Range samplerRange(slot, mtlSamplers.size());
                         if (renderEncoder) {
-                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                             if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Vertex))
                                 renderEncoder->setVertexSamplerStates(mtlSamplers.data(), samplerRange);
-                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                             if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Pixel))
                                 renderEncoder->setFragmentSamplerStates(mtlSamplers.data(), samplerRange);
                         } else if (computeEncoder) {
-                             if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                             if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                                 computeEncoder->setSamplerStates(mtlSamplers.data(), samplerRange);
                         }
                     }
@@ -863,12 +863,12 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                      if (!mtlSamplers.empty()) {
                          NS::Range range(slot, mtlSamplers.size());
                          if (renderEncoder) {
-                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Vertex))
+                            if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Vertex))
                                 renderEncoder->setVertexSamplerStates(mtlSamplers.data(), range);
-                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Pixel))
+                            if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Pixel))
                                 renderEncoder->setFragmentSamplerStates(mtlSamplers.data(), range);
                         } else if (computeEncoder) {
-                            if (static_cast<uint8_t>(binding.stageFlags) & static_cast<uint8_t>(ShaderStage::Compute))
+                            if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                                 computeEncoder->setSamplerStates(mtlSamplers.data(), range);
                         }
                     }
@@ -881,7 +881,7 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
     }
 }
 
-void MetalCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) {
+void MetalCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, u32 queryIndex) {
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     MetalQueryPool* pool = metalDevice.GetQueryPool(queryPool);
     if (!pool || pool->GetType() != MetalQueryType::Timestamp) return;
@@ -918,7 +918,7 @@ void MetalCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, uint32_t quer
     }
 }
 
-void MetalCommandBuffer::Draw(uint32_t vertexCount, uint32_t startVertex, uint32_t instanceCount, uint32_t startInstance) {
+void MetalCommandBuffer::Draw(u32 vertexCount, u32 startVertex, u32 instanceCount, u32 startInstance) {
     // DEBUG: Log ALL draw calls for first 50 calls
     static int totalDrawCount = 0;
     totalDrawCount++;
@@ -941,7 +941,7 @@ void MetalCommandBuffer::Draw(uint32_t vertexCount, uint32_t startVertex, uint32
     }
 }
 
-void MetalCommandBuffer::DrawIndexed(uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex, uint32_t instanceCount, uint32_t startInstance) {
+void MetalCommandBuffer::DrawIndexed(u32 indexCount, u32 startIndex, u32 baseVertex, u32 instanceCount, u32 startInstance) {
     if (currentEncoderType_ == EncoderType::Render && currentIndexBuffer_) {
         NS::UInteger indexStride = (currentIndexType_ == MTL::IndexTypeUInt16) ? 2 : 4;
         NS::UInteger offset = currentIndexBufferOffset_ + startIndex * indexStride;
@@ -965,7 +965,7 @@ void MetalCommandBuffer::DrawIndexed(uint32_t indexCount, uint32_t startIndex, u
     }
 }
 
-void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, uint64_t offset, uint32_t drawCount) {
+void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 drawCount) {
     if (currentEncoderType_ == EncoderType::Render) {
         MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
         MetalBuffer* mtlBuffer = metalDevice.GetBuffer(buffer);
@@ -974,7 +974,7 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, uint64_t offset, ui
             MTL::RenderCommandEncoder* encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
             MTL::Buffer* nativeBuffer = mtlBuffer->GetNativeBuffer();
             
-            for (uint32_t i = 0; i < drawCount; ++i) {
+            for (u32 i = 0; i < drawCount; ++i) {
                 // Metal indirect buffer layout matches RHI
                 // MTLDrawPrimitivesIndirectArguments
                 encoder->drawPrimitives(
@@ -1003,7 +1003,7 @@ void MetalCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
 }
 
 void MetalCommandBuffer::PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
-                                     uint32_t offset, uint32_t size, const void* pValues) {
+                                     u32 offset, u32 size, const void* pValues) {
     // Metal assumes push constants are passed as bytes at a reserved index (e.g. 0 or based on reflection)
     // Since MetalPipelineLayout doesn't currently store this info, we'll try a convention or just warn.
     // For now, let's assume index 0 for push constants if they are small enough (< 4KB).
@@ -1021,11 +1021,11 @@ void MetalCommandBuffer::PushConstants(PipelineLayoutHandle layout, ShaderStage 
     
     if (currentEncoderType_ == EncoderType::Render) {
         auto encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
-        if (static_cast<uint32_t>(stageFlags) & static_cast<uint32_t>(ShaderStage::Vertex)) {
+        if (static_cast<u32>(stageFlags) & static_cast<u32>(ShaderStage::Vertex)) {
             // Assuming index 2 for now to avoid conflict with SceneData(0) and ViewData(1)
              encoder->setVertexBytes(pValues, size, 2); 
         }
-        if (static_cast<uint32_t>(stageFlags) & static_cast<uint32_t>(ShaderStage::Pixel)) {
+        if (static_cast<u32>(stageFlags) & static_cast<u32>(ShaderStage::Pixel)) {
              encoder->setFragmentBytes(pValues, size, 2);
         }
     } else if (currentEncoderType_ == EncoderType::Compute) {
@@ -1034,7 +1034,7 @@ void MetalCommandBuffer::PushConstants(PipelineLayoutHandle layout, ShaderStage 
     }
 }
 
-void MetalCommandBuffer::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
+void MetalCommandBuffer::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
     MTL::ComputeCommandEncoder* encoder = getComputeEncoder();
     if (encoder) {
         encoder->dispatchThreadgroups(
@@ -1044,7 +1044,7 @@ void MetalCommandBuffer::Dispatch(uint32_t groupCountX, uint32_t groupCountY, ui
     }
 }
 
-void MetalCommandBuffer::DispatchIndirect(ResourceHandle buffer, uint64_t offset) {
+void MetalCommandBuffer::DispatchIndirect(ResourceHandle buffer, u64 offset) {
     MTL::ComputeCommandEncoder* encoder = getComputeEncoder();
     if (!encoder) return;
     
@@ -1060,13 +1060,13 @@ void MetalCommandBuffer::DispatchIndirect(ResourceHandle buffer, uint64_t offset
     }
 }
 
-void MetalCommandBuffer::BindComputeBuffers(uint32_t firstSlot, uint32_t slotCount, const ResourceHandle* buffers, const uint64_t* offsets) {
+void MetalCommandBuffer::BindComputeBuffers(u32 firstSlot, u32 slotCount, const ResourceHandle* buffers, const u64* offsets) {
     MTL::ComputeCommandEncoder* encoder = getComputeEncoder();
     if (!encoder) return;
     
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     
-    for (uint32_t i = 0; i < slotCount; ++i) {
+    for (u32 i = 0; i < slotCount; ++i) {
         if (buffers[i] != handles::INVALID_RESOURCE) {
             MetalBuffer* buffer = metalDevice.GetBuffer(buffers[i]);
             if (buffer && buffer->GetNativeBuffer()) {
@@ -1079,7 +1079,7 @@ void MetalCommandBuffer::BindComputeBuffers(uint32_t firstSlot, uint32_t slotCou
 
 // === Resource Commands ===
 
-void MetalCommandBuffer::CopyBuffer(ResourceHandle src, ResourceHandle dst, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) {
+void MetalCommandBuffer::CopyBuffer(ResourceHandle src, ResourceHandle dst, u64 srcOffset, u64 dstOffset, u64 size) {
     MTL::BlitCommandEncoder* encoder = getBlitEncoder();
     if (!encoder) return;
     
@@ -1098,21 +1098,21 @@ void MetalCommandBuffer::CopyBuffer(ResourceHandle src, ResourceHandle dst, uint
     }
 }
 
-void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) {
+void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) {
     // Metal handles many barriers implicitly, but fences/events might be needed for specific synchronization.
     // For now, empty.
 }
 
     // Helper to get pixel format info for block-based calculation
     struct PixelFormatInfo {
-        uint32_t bytesPerBlock;
-        uint32_t blockWidth;
-        uint32_t blockHeight;
+        u32 bytesPerBlock;
+        u32 blockWidth;
+        u32 blockHeight;
     };
 
     static PixelFormatInfo GetPixelFormatInfo(MTL::PixelFormat format) {
         // Debug print to ensure we are running the new version
-        uint64_t fmt = (uint64_t)format;
+        u64 fmt = (u64)format;
         std::cout << "DEBUG: GetPixelFormatInfo(" << fmt << ")" << std::endl;
         switch (fmt) {
             // Uncompressed formats
@@ -1187,7 +1187,7 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
         }
     }
 
-    void MetalCommandBuffer::CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture, const BufferTextureCopyRegion* regions, uint32_t regionCount) {
+    void MetalCommandBuffer::CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture, const BufferTextureCopyRegion* regions, u32 regionCount) {
         MTL::BlitCommandEncoder* encoder = getBlitEncoder();
         if (!encoder) return;
 
@@ -1200,11 +1200,11 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
         PixelFormatInfo info = GetPixelFormatInfo(texture->GetNativeTexture()->pixelFormat());
         if (info.bytesPerBlock == 0) {
             std::cerr << "[MetalCommandBuffer] SUPER UNIQUE ERROR: Unsupported pixel format for copy: " 
-                      << (uint64_t)texture->GetNativeTexture()->pixelFormat() << std::endl;
+                      << (u64)texture->GetNativeTexture()->pixelFormat() << std::endl;
             return;
         }
 
-        for (uint32_t i = 0; i < regionCount; ++i) {
+        for (u32 i = 0; i < regionCount; ++i) {
             const auto& region = regions[i];
             
             MTL::Origin origin(region.imageOffset.x, region.imageOffset.y, region.imageOffset.z);
@@ -1220,7 +1220,7 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
             NS::UInteger imageHeightInBlocks = (imageHeight + info.blockHeight - 1) / info.blockHeight;
             NS::UInteger bytesPerImage = imageHeightInBlocks * bytesPerRow;
 
-            for (uint32_t layer = 0; layer < region.imageSubresource.layerCount; ++layer) {
+            for (u32 layer = 0; layer < region.imageSubresource.layerCount; ++layer) {
                 encoder->copyFromBuffer(
                     buffer->GetNativeBuffer(),
                     region.bufferOffset + layer * bytesPerImage,
@@ -1236,7 +1236,7 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
         }
     }
 
-    void MetalCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer, const BufferTextureCopyRegion* regions, uint32_t regionCount) {
+    void MetalCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer, const BufferTextureCopyRegion* regions, u32 regionCount) {
         MTL::BlitCommandEncoder* encoder = getBlitEncoder();
         if (!encoder) return;
 
@@ -1249,11 +1249,11 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
         PixelFormatInfo info = GetPixelFormatInfo(texture->GetNativeTexture()->pixelFormat());
         if (info.bytesPerBlock == 0) {
             std::cerr << "[MetalCommandBuffer] Unsupported pixel format for copy: " 
-                      << (uint64_t)texture->GetNativeTexture()->pixelFormat() << std::endl;
+                      << (u64)texture->GetNativeTexture()->pixelFormat() << std::endl;
             return;
         }
 
-        for (uint32_t i = 0; i < regionCount; ++i) {
+        for (u32 i = 0; i < regionCount; ++i) {
             const auto& region = regions[i];
             
             MTL::Origin origin(region.imageOffset.x, region.imageOffset.y, region.imageOffset.z);
@@ -1269,7 +1269,7 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
             NS::UInteger imageHeightInBlocks = (imageHeight + info.blockHeight - 1) / info.blockHeight;
             NS::UInteger bytesPerImage = imageHeightInBlocks * bytesPerRow;
 
-            for (uint32_t layer = 0; layer < region.imageSubresource.layerCount; ++layer) {
+            for (u32 layer = 0; layer < region.imageSubresource.layerCount; ++layer) {
                 encoder->copyFromTexture(
                     texture->GetNativeTexture(),
                     region.imageSubresource.baseArrayLayer + layer,
@@ -1286,7 +1286,7 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, uint32_t
     }
 
 void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
-                                     const TextureBlitRegion* regions, uint32_t regionCount,
+                                     const TextureBlitRegion* regions, u32 regionCount,
                                      FilterMode filter) {
     MTL::BlitCommandEncoder* encoder = getBlitEncoder();
     if (!encoder) return;
@@ -1296,7 +1296,7 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
     MetalTexture* dstTex = metalDevice.GetTexture(dst);
 
     if (srcTex && dstTex && srcTex->GetNativeTexture() && dstTex->GetNativeTexture()) {
-        for (uint32_t i = 0; i < regionCount; ++i) {
+        for (u32 i = 0; i < regionCount; ++i) {
             const auto& region = regions[i];
             
             MTL::Origin srcOrigin(region.srcOffsets[0].x, region.srcOffsets[0].y, region.srcOffsets[0].z);

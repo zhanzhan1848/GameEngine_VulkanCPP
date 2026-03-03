@@ -488,7 +488,7 @@ gpu_emitter_id gpu_particle_system::create_emitter(const emitter_config& config)
     
     if (!free_emitter_indices_.empty()) {
         id = free_emitter_indices_.back();
-        free_emitter_indices_.pop_back();
+        free_emitter_indices_.erase(id);
         emitters_[id] = std::make_unique<gpu_emitter>(id, config);
     } else {
         id = static_cast<gpu_emitter_id>(emitters_.size());

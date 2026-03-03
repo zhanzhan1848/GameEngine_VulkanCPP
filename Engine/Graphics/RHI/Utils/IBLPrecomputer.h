@@ -49,7 +49,7 @@ public:
      * @param outputSize 输出贴图尺寸 (默认 32x32)
      * @return 生成的 Irradiance Map 句柄
      */
-    ResourceHandle ComputeIrradianceMap(ResourceHandle envMap, uint32_t outputSize = 32);
+    ResourceHandle ComputeIrradianceMap(ResourceHandle envMap, u32 outputSize = 32);
 
     /**
      * @brief 生成镜面反射预滤波贴图 (Prefiltered Environment Map)
@@ -57,14 +57,14 @@ public:
      * @param outputSize 输出贴图尺寸 (默认 512x512)
      * @return 生成的 Prefiltered Map 句柄
      */
-    ResourceHandle ComputePrefilteredEnvironmentMap(ResourceHandle envMap, uint32_t outputSize = 512);
+    ResourceHandle ComputePrefilteredEnvironmentMap(ResourceHandle envMap, u32 outputSize = 512);
 
     /**
      * @brief 生成 BRDF 积分 LUT
      * @param outputSize 输出贴图尺寸 (默认 512x512)
      * @return 生成的 BRDF LUT 句柄
      */
-    ResourceHandle ComputeBRDFIntegrationMap(uint32_t outputSize = 512);
+    ResourceHandle ComputeBRDFIntegrationMap(u32 outputSize = 512);
 
 private:
     RHIDeviceBase* device_;

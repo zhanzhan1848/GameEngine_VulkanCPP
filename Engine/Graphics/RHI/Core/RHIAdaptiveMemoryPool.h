@@ -28,7 +28,7 @@ struct MemoryAllocationRecord;
  * @brief 内存使用模式枚举
  * @details 描述不同的内存使用模式特征
  */
-enum class MemoryUsagePattern : uint8_t {
+enum class MemoryUsagePattern : u8 {
     Unknown = 0,        ///< 未知模式
     Burst = 1,          ///< 突发模式：短时间内大量分配
     Steady = 2,         ///< 稳定模式：持续的稳定分配
@@ -40,7 +40,7 @@ enum class MemoryUsagePattern : uint8_t {
 /**
  * @brief 内存块热点级别枚举
  */
-enum class MemoryHotspotLevel : uint8_t {
+enum class MemoryHotspotLevel : u8 {
     Cold = 0,           ///< 冷点：很少使用
     Warm = 1,           ///< 温点：偶尔使用
     Hot = 2,            ///< 热点：频繁使用

@@ -30,7 +30,7 @@ class RHIDeviceBase;
  * @brief 工作项类型枚举
  * @details 定义不同类型的工作项
  */
-enum class WorkItemType : uint8_t {
+enum class WorkItemType : u8 {
     Unknown = 0,
     CommandBuffer = 1,     ///< 命令缓冲区工作项
     ResourceUpdate = 2,    ///< 资源更新工作项
@@ -43,7 +43,7 @@ enum class WorkItemType : uint8_t {
  * @brief 工作项优先级枚举
  * @details 定义工作项的执行优先级
  */
-enum class WorkPriority : uint8_t {
+enum class WorkPriority : u8 {
     Low = 0,              ///< 低优先级
     Normal = 1,           ///< 普通优先级
     High = 2,             ///< 高优先级
@@ -53,7 +53,7 @@ enum class WorkPriority : uint8_t {
 /**
  * @brief 工作项状态枚举
  */
-enum class WorkItemState : uint8_t {
+enum class WorkItemState : u8 {
     Pending = 0,          ///< 等待执行
     Processing = 1,       ///< 正在处理
     Completed = 2,        ///< 已完成
@@ -69,27 +69,27 @@ struct WorkItem {
     WorkItemType type;            ///< 工作项类型
     WorkPriority priority;        ///< 优先级
     WorkItemState state;          ///< 状态
-    uint64_t id;                  ///< 工作项ID
-    uint64_t timestamp;           ///< 创建时间戳
-    uint32_t timeoutMs;           ///< 超时时间（毫秒）
+    u64 id;                  ///< 工作项ID
+    u64 timestamp;           ///< 创建时间戳
+    u32 timeoutMs;           ///< 超时时间（毫秒）
     
     union {
         struct {
             CommandBufferHandle commandBuffer;  ///< 命令缓冲区句柄
-            uint32_t waitFlags;                 ///< 等待标志
+            u32 waitFlags;                 ///< 等待标志
         } commandData;
         
         struct {
             ResourceHandle resource;            ///< 资源句柄
             void* data;                          ///< 数据指针
-            uint64_t dataSize;                   ///< 数据大小
-            uint64_t offset;                      ///< 偏移量
+            u64 dataSize;                   ///< 数据大小
+            u64 offset;                      ///< 偏移量
         } resourceData;
         
         struct {
             void* srcPtr;                        ///< 源指针
             void* dstPtr;                        ///< 目标指针
-            uint64_t size;                       ///< 复制大小
+            u64 size;                       ///< 复制大小
         } memoryData;
         
         struct {
@@ -267,16 +267,16 @@ struct WorkItem {
  * @details 用于性能分析和调试
  */
 struct QueueStats {
-    std::atomic<uint64_t> totalEnqueued;      ///< 总入队数量
-    std::atomic<uint64_t> totalDequeued;      ///< 总出队数量
-    std::atomic<uint64_t> totalProcessed;      ///< 总处理数量
-    std::atomic<uint64_t> totalCompleted;      ///< 总完成数量
-    std::atomic<uint64_t> totalFailed;         ///< 总失败数量
-    std::atomic<uint64_t> totalCancelled;      ///< 总取消数量
+    std::atomic<u64> totalEnqueued;      ///< 总入队数量
+    std::atomic<u64> totalDequeued;      ///< 总出队数量
+    std::atomic<u64> totalProcessed;      ///< 总处理数量
+    std::atomic<u64> totalCompleted;      ///< 总完成数量
+    std::atomic<u64> totalFailed;         ///< 总失败数量
+    std::atomic<u64> totalCancelled;      ///< 总取消数量
     
-    std::atomic<uint32_t> currentQueueSize;    ///< 当前队列大小
-    std::atomic<uint32_t> maxQueueSize;        ///< 最大队列大小
-    std::atomic<uint64_t> totalProcessingTime; ///< 总处理时间（微秒）
+    std::atomic<u32> currentQueueSize;    ///< 当前队列大小
+    std::atomic<u32> maxQueueSize;        ///< 最大队列大小
+    std::atomic<u64> totalProcessingTime; ///< 总处理时间（微秒）
     
     QueueStats() {
         totalEnqueued.store(0);
@@ -291,9 +291,9 @@ struct QueueStats {
     }
     
     // 构造函数，用于GetStats()返回值
-    QueueStats(uint64_t enqueued, uint64_t dequeued, uint64_t processed, 
-               uint64_t completed, uint64_t failed, uint64_t cancelled,
-               uint32_t currentSize, uint32_t maxSize, uint64_t processingTime) {
+    QueueStats(u64 enqueued, u64 dequeued, u64 processed, 
+               u64 completed, u64 failed, u64 cancelled,
+               u32 currentSize, u32 maxSize, u64 processingTime) {
         totalEnqueued.store(enqueued);
         totalDequeued.store(dequeued);
         totalProcessed.store(processed);
@@ -325,14 +325,14 @@ struct QueueStats {
  * @brief 队列配置参数
  */
 struct QueueConfig {
-    uint32_t maxQueueSize;          ///< 最大队列大小
-    uint32_t maxWorkItemSize;       ///< 最大工作项大小
-    uint32_t batchSize;             ///< 批处理大小
+    u32 maxQueueSize;          ///< 最大队列大小
+    u32 maxWorkItemSize;       ///< 最大工作项大小
+    u32 batchSize;             ///< 批处理大小
     bool enableBatching;            ///< 是否启用批处理
-    uint32_t workerThreadCount;    ///< 工作线程数量
+    u32 workerThreadCount;    ///< 工作线程数量
     bool enablePriorityQueue;       ///< 是否启用优先级队列
     bool enableTimeout;             ///< 是否启用超时机制
-    uint32_t defaultTimeoutMs;     ///< 默认超时时间
+    u32 defaultTimeoutMs;     ///< 默认超时时间
     bool enableStatistics;          ///< 是否启用统计信息
     const char* name;               ///< 队列名称
     
@@ -427,7 +427,7 @@ public:
      * @param workItem 工作项
      * @return 工作项ID，失败返回0
      */
-    virtual uint64_t Enqueue(const WorkItem& workItem) = 0;
+    virtual u64 Enqueue(const WorkItem& workItem) = 0;
     
     /**
      * @brief 批量提交工作项
@@ -435,7 +435,7 @@ public:
      * @param count 数组大小
      * @return 成功提交的数量
      */
-    virtual uint32_t EnqueueBatch(const WorkItem* workItems, uint32_t count) = 0;
+    virtual u32 EnqueueBatch(const WorkItem* workItems, u32 count) = 0;
     
     /**
      * @brief 获取下一个工作项
@@ -457,7 +457,7 @@ public:
      * @param maxCount 最大数量
      * @return 实际获取的数量
      */
-    virtual uint32_t DequeueBatch(WorkItem* workItems, uint32_t maxCount) = 0;
+    virtual u32 DequeueBatch(WorkItem* workItems, u32 maxCount) = 0;
     
     /**
      * @brief 唤醒所有等待的消费者线程
@@ -469,14 +469,14 @@ public:
      * @param workId 工作项ID
      * @return 取消是否成功
      */
-    virtual bool CancelWork(uint64_t workId) = 0;
+    virtual bool CancelWork(u64 workId) = 0;
     
     /**
      * @brief 获取工作项状态
      * @param workId 工作项ID
      * @return 工作项状态
      */
-    virtual WorkItemState GetWorkState(uint64_t workId) const = 0;
+    virtual WorkItemState GetWorkState(u64 workId) const = 0;
     
     /**
      * @brief 等待工作项完成
@@ -484,7 +484,7 @@ public:
      * @param timeoutMs 超时时间
      * @return 是否完成
      */
-    virtual bool WaitForWork(uint64_t workId, uint32_t timeoutMs = 0) = 0;
+    virtual bool WaitForWork(u64 workId, u32 timeoutMs = 0) = 0;
     
     // === 便利方法 ===
     
@@ -496,9 +496,9 @@ public:
      * @param completionCallback 完成回调
      * @return 工作项ID
      */
-    uint64_t SubmitCommandBuffer(CommandBufferHandle commandBuffer, 
+    u64 SubmitCommandBuffer(CommandBufferHandle commandBuffer, 
                                 WorkPriority priority = WorkPriority::Normal,
-                                uint32_t waitFlags = 0,
+                                u32 waitFlags = 0,
                                 std::function<void()> completionCallback = nullptr);
     
     /**
@@ -511,8 +511,8 @@ public:
      * @param completionCallback 完成回调
      * @return 工作项ID
      */
-    uint64_t SubmitResourceUpdate(ResourceHandle resource, void* data, uint64_t dataSize,
-                                  uint64_t offset = 0, WorkPriority priority = WorkPriority::Normal,
+    u64 SubmitResourceUpdate(ResourceHandle resource, void* data, u64 dataSize,
+                                  u64 offset = 0, WorkPriority priority = WorkPriority::Normal,
                                   std::function<void()> completionCallback = nullptr);
     
     /**
@@ -523,7 +523,7 @@ public:
      * @param completionCallback 完成回调
      * @return 工作项ID
      */
-    uint64_t SubmitCallback(std::function<void()> callback, void* userData = nullptr,
+    u64 SubmitCallback(std::function<void()> callback, void* userData = nullptr,
                             WorkPriority priority = WorkPriority::Normal,
                             std::function<void()> completionCallback = nullptr);
     
@@ -551,7 +551,7 @@ public:
      * @brief 获取当前队列大小
      * @return 当前队列大小
      */
-    uint32_t GetCurrentSize() const { return stats_.currentQueueSize.load(); }
+    u32 GetCurrentSize() const { return stats_.currentQueueSize.load(); }
     
     /**
      * @brief 检查队列是否为空
@@ -613,7 +613,7 @@ protected:
     QueueConfig config_;                ///< 队列配置
     QueueStats stats_;                  ///< 统计信息
     std::atomic<bool> running_;         ///< 运行状态
-    std::atomic<uint64_t> nextWorkId_;  ///< 下一个工作项ID
+    std::atomic<u64> nextWorkId_;  ///< 下一个工作项ID
     
     // === 受保护的辅助方法 ===
     
@@ -621,7 +621,7 @@ protected:
      * @brief 生成下一个工作项ID
      * @return 工作项ID
      */
-    uint64_t GenerateWorkId() {
+    u64 GenerateWorkId() {
         return nextWorkId_.fetch_add(1);
     }
     
@@ -629,8 +629,8 @@ protected:
      * @brief 更新统计信息
      */
     void UpdateMaxQueueSize() {
-        uint32_t currentSize = stats_.currentQueueSize.load();
-        uint32_t maxSize = stats_.maxQueueSize.load();
+        u32 currentSize = stats_.currentQueueSize.load();
+        u32 maxSize = stats_.maxQueueSize.load();
         while (currentSize > maxSize) {
             if (stats_.maxQueueSize.compare_exchange_weak(maxSize, currentSize)) {
                 break;
@@ -642,7 +642,7 @@ protected:
      * @brief 获取当前时间戳（微秒）
      * @return 时间戳
      */
-    static uint64_t GetCurrentTimestamp() {
+    static u64 GetCurrentTimestamp() {
         auto now = std::chrono::high_resolution_clock::now();
         return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
     }
@@ -657,8 +657,8 @@ protected:
             return false;
         }
         
-        uint64_t currentTime = GetCurrentTimestamp();
-        uint64_t elapsed = currentTime - workItem.timestamp;
+        u64 currentTime = GetCurrentTimestamp();
+        u64 elapsed = currentTime - workItem.timestamp;
         return elapsed > (workItem.timeoutMs * 1000);  // 转换为微秒
     }
     
@@ -741,7 +741,7 @@ public:
      * @param workItem 工作项
      * @return 工作项ID，失败返回0
      */
-    uint64_t Enqueue(const WorkItem& workItem) override;
+    u64 Enqueue(const WorkItem& workItem) override;
     
     /**
      * @brief 批量提交工作项
@@ -749,7 +749,7 @@ public:
      * @param count 数组大小
      * @return 成功提交的数量
      */
-    uint32_t EnqueueBatch(const WorkItem* workItems, uint32_t count) override;
+    u32 EnqueueBatch(const WorkItem* workItems, u32 count) override;
     
     /**
      * @brief 获取下一个工作项
@@ -771,7 +771,7 @@ public:
      * @param maxCount 最大数量
      * @return 实际获取的数量
      */
-    uint32_t DequeueBatch(WorkItem* workItems, uint32_t maxCount) override;
+    u32 DequeueBatch(WorkItem* workItems, u32 maxCount) override;
     
     /**
      * @brief 唤醒所有等待的消费者线程
@@ -783,14 +783,14 @@ public:
      * @param workId 工作项ID
      * @return 取消是否成功
      */
-    bool CancelWork(uint64_t workId) override;
+    bool CancelWork(u64 workId) override;
     
     /**
      * @brief 获取工作项状态
      * @param workId 工作项ID
      * @return 工作项状态
      */
-    WorkItemState GetWorkState(uint64_t workId) const override;
+    WorkItemState GetWorkState(u64 workId) const override;
     
     /**
      * @brief 等待工作项完成
@@ -798,7 +798,7 @@ public:
      * @param timeoutMs 超时时间
      * @return 是否完成
      */
-    bool WaitForWork(uint64_t workId, uint32_t timeoutMs = 0) override;
+    bool WaitForWork(u64 workId, u32 timeoutMs = 0) override;
     
     /**
      * @brief 验证队列一致性
@@ -828,7 +828,7 @@ public:
      * @brief 获取当前队列大小
      * @return 队列大小
      */
-    uint32_t GetQueueSize() const;
+    u32 GetQueueSize() const;
     
     /**
      * @brief 获取统计信息
@@ -853,12 +853,12 @@ private:
 #ifdef ENABLE_MOODYCAMEL_CONCURRENT_QUEUE
     moodycamel::ConcurrentQueue<WorkItem> workQueue_;     ///< moodycamel无锁队列
     // 优先级队列 - 使用多个队列实现优先级
-    static constexpr uint32_t PRIORITY_LEVELS = 4;        ///< 优先级层级数
+    static constexpr u32 PRIORITY_LEVELS = 4;        ///< 优先级层级数
     moodycamel::ConcurrentQueue<WorkItem> priorityQueues_[PRIORITY_LEVELS]; ///< 优先级队列数组
 #else
     // 替代实现（使用标准库队列）
     std::queue<WorkItem> workQueue_;                      ///< 标准库队列
-    static constexpr uint32_t PRIORITY_LEVELS = 4;        ///< 优先级层级数
+    static constexpr u32 PRIORITY_LEVELS = 4;        ///< 优先级层级数
     std::queue<WorkItem> priorityQueues_[PRIORITY_LEVELS]; ///< 优先级队列数组
     std::mutex queueMutex_;                               ///< 队列互斥锁
 #endif
@@ -871,9 +871,9 @@ private:
     std::condition_variable conditionVariable_;         ///< 主条件变量，用于唤醒等待的消费者线程
     
     // 工作项状态跟踪（用于状态查询和等待）
-    mutable std::unordered_map<uint64_t, WorkItemState> workItemStates_;    ///< 工作项状态映射
+    mutable std::unordered_map<u64, WorkItemState> workItemStates_;    ///< 工作项状态映射
     mutable std::mutex stateMutex_;                   ///< 状态映射的互斥锁
-    std::unordered_map<uint64_t, std::condition_variable*> workConditions_; ///< 工作项条件变量
+    std::unordered_map<u64, std::condition_variable*> workConditions_; ///< 工作项条件变量
     
     // === 私有辅助方法 ===
     
@@ -887,7 +887,7 @@ private:
      * @param workItem 工作项
      * @return 工作项ID
      */
-    uint64_t enqueueByPriority(const WorkItem& workItem);
+    u64 enqueueByPriority(const WorkItem& workItem);
     
     /**
      * @brief 根据优先级出队

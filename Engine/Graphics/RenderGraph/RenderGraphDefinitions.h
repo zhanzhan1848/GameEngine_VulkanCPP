@@ -13,8 +13,8 @@ namespace primal::graphics::rendergraph {
 
 // 资源句柄
 struct RGResourceHandle {
-    uint32_t index = 0;
-    uint32_t version = 0;
+    u32 index = 0;
+    u32 version = 0;
 
     bool IsValid() const { return index != 0; }
     bool operator==(const RGResourceHandle& other) const { return index == other.index && version == other.version; }
@@ -69,17 +69,17 @@ enum class RGResourceType {
 };
 
 inline RGResourceFlags operator|(RGResourceFlags a, RGResourceFlags b) {
-    return static_cast<RGResourceFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+    return static_cast<RGResourceFlags>(static_cast<u32>(a) | static_cast<u32>(b));
 }
 
 inline bool HasFlag(RGResourceFlags flags, RGResourceFlags flag) {
-    return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(flag)) != 0;
+    return (static_cast<u32>(flags) & static_cast<u32>(flag)) != 0;
 }
 
 struct RGAttachmentDesc {
     RGResourceHandle texture = kInvalidRGResourceHandle;
-    uint32_t level = 0;
-    uint32_t slice = 0;
+    u32 level = 0;
+    u32 slice = 0;
     rhi::LoadAction loadOp = rhi::LoadAction::DontCare;
     rhi::StoreAction storeOp = rhi::StoreAction::DontCare;
     rhi::ClearValue clearColor = {math::v4{0, 0, 0, 0}};
@@ -90,13 +90,13 @@ struct RGAttachmentDesc {
     rhi::LoadAction stencilLoadOp = rhi::LoadAction::DontCare;
     rhi::StoreAction stencilStoreOp = rhi::StoreAction::DontCare;
     float clearDepth = 1.0f;
-    uint8_t clearStencil = 0;
+    u8 clearStencil = 0;
 };
 
 struct RGRenderPassDesc {
-    std::vector<RGAttachmentDesc> colors;
+    utl::vector<RGAttachmentDesc> colors;
     RGAttachmentDesc depthStencil;
-    uint32_t renderTargetArrayLength = 0; // Default to 0 (No Layered Rendering)
+    u32 renderTargetArrayLength = 0; // Default to 0 (No Layered Rendering)
 };
 
 } // namespace primal::graphics::rendergraph
@@ -106,7 +106,7 @@ namespace std {
     struct ::std::hash<primal::graphics::rendergraph::RGResourceHandle> {
         size_t operator()(const primal::graphics::rendergraph::RGResourceHandle& handle) const {
             // Use MurmurHash3 from Engine/Utilities/Hash.h
-            uint32_t hashOut;
+            u32 hashOut;
             primal::utl::MurmurHash3_x86_32(&handle, sizeof(handle), 0x9e3779b9, &hashOut);
             return hashOut;
         }

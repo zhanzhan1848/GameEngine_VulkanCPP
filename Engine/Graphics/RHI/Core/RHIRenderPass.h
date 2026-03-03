@@ -32,7 +32,7 @@ public:
     /**
      * @brief 获取颜色附件数量
      */
-    uint32_t GetColorAttachmentCount() const { return static_cast<uint32_t>(desc_.colorAttachments.size()); }
+    u32 GetColorAttachmentCount() const { return static_cast<u32>(desc_.colorAttachments.size()); }
 
     /**
      * @brief 检查是否有深度附件

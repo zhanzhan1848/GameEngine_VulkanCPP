@@ -16,7 +16,7 @@ struct DebugRendererCleaner {
 };
 static DebugRendererCleaner s_Cleaner;
 
-const DebugPassData& AddDebugPass(rendergraph::RenderGraph& graph, rendergraph::RGResourceHandle target, const std::vector<DebugResource>& debugResources) {
+const DebugPassData& AddDebugPass(rendergraph::RenderGraph& graph, rendergraph::RGResourceHandle target, const utl::vector<DebugResource>& debugResources) {
     if (s_Device != &graph.GetDevice()) {
         s_DebugRenderer.reset(); // Reset if device changes
         s_Device = &graph.GetDevice();
@@ -55,8 +55,8 @@ const DebugPassData& AddDebugPass(rendergraph::RenderGraph& graph, rendergraph::
         [&](const DebugPassData& data, rendergraph::RenderGraphContext& context) {
             s_DebugRenderer->Update(0.016f); // Mock delta time
             
-            uint32_t width = 1920;
-            uint32_t height = 1080;
+            u32 width = 1920;
+            u32 height = 1080;
             
             auto* resource = context.graph->GetResource(data.target);
             if (resource) {
@@ -69,7 +69,7 @@ const DebugPassData& AddDebugPass(rendergraph::RenderGraph& graph, rendergraph::
             }
 
             // Prepare debug resources
-            std::vector<std::pair<std::string, rendergraph::RenderGraphResource*>> resolvedResources;
+            utl::vector<std::pair<std::string, rendergraph::RenderGraphResource*>> resolvedResources;
             for (const auto& res : data.debugResources) {
                 resolvedResources.push_back({res.name, context.graph->GetResource(res.handle)});
             }

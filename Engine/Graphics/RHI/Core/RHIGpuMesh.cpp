@@ -248,7 +248,7 @@ namespace primal::graphics::rhi
 
         BufferDesc desc{};
         desc.size = size;
-        desc.bindFlags = (uint32_t)(usage | BufferUsageFlags::TransferDst); // Allow transfer to this buffer
+        desc.bindFlags = (u32)(usage | BufferUsageFlags::TransferDst); // Allow transfer to this buffer
         desc.memoryUsage = GPUMemoryUsage::Static; // GPU Local
         desc.usage = GPUMemoryUsage::Static;
         desc.name = name;
@@ -263,7 +263,7 @@ namespace primal::graphics::rhi
         // Staging Buffer
         BufferDesc stagingDesc{};
         stagingDesc.size = size;
-        stagingDesc.bindFlags = (uint32_t)BufferUsageFlags::TransferSrc;
+        stagingDesc.bindFlags = (u32)BufferUsageFlags::TransferSrc;
         stagingDesc.memoryUsage = GPUMemoryUsage::Staging; // CPU Write, GPU Read
         stagingDesc.usage = GPUMemoryUsage::Staging;
         stagingDesc.name = "StagingBuffer";
@@ -377,7 +377,7 @@ namespace primal::graphics::rhi
         // Staging Buffer
         BufferDesc stagingDesc{};
         stagingDesc.size = totalSize;
-        stagingDesc.bindFlags = (uint32_t)BufferUsageFlags::TransferSrc;
+        stagingDesc.bindFlags = (u32)BufferUsageFlags::TransferSrc;
         stagingDesc.memoryUsage = GPUMemoryUsage::Staging;
         stagingDesc.usage = GPUMemoryUsage::Staging;
         stagingDesc.name = "TextureStagingBuffer";

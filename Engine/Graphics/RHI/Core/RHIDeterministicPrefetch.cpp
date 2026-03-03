@@ -508,12 +508,23 @@ utl::vector<u64> StaticRuleEngine::GenerateCandidates(
     
     // 基于场景类型添加相关资源
     // 这里应该有场景资源图，简化实现
-    static const std::unordered_map<SceneType, std::vector<u64>> sceneResources = {
-        {SceneType::Indoor, {1001, 1002, 1003}},
-        {SceneType::Outdoor, {2001, 2002, 2003}},
-        {SceneType::Combat, {3001, 3002, 3003}},
-        {SceneType::Menu, {4001, 4002, 4003}}
-    };
+    static std::unordered_map<SceneType, utl::vector<u64>> sceneResources;
+    static bool sceneResourcesInitialized = false;
+    if (!sceneResourcesInitialized) {
+        sceneResources[SceneType::Indoor].push_back(1001);
+        sceneResources[SceneType::Indoor].push_back(1002);
+        sceneResources[SceneType::Indoor].push_back(1003);
+        sceneResources[SceneType::Outdoor].push_back(2001);
+        sceneResources[SceneType::Outdoor].push_back(2002);
+        sceneResources[SceneType::Outdoor].push_back(2003);
+        sceneResources[SceneType::Combat].push_back(3001);
+        sceneResources[SceneType::Combat].push_back(3002);
+        sceneResources[SceneType::Combat].push_back(3003);
+        sceneResources[SceneType::Menu].push_back(4001);
+        sceneResources[SceneType::Menu].push_back(4002);
+        sceneResources[SceneType::Menu].push_back(4003);
+        sceneResourcesInitialized = true;
+    }
     
     auto it = sceneResources.find(frameData.currentSceneType);
     if (it != sceneResources.end()) {

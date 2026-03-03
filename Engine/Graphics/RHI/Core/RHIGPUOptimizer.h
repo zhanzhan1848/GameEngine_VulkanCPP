@@ -28,7 +28,7 @@ class RHIDeterministicPrefetchManager;
 /**
  * @brief GPU优化策略枚举
  */
-enum class GPUOptimizationStrategy : uint8_t {
+enum class GPUOptimizationStrategy : u8 {
     Conservative = 0,    ///< 保守策略：优先稳定性
     Balanced = 1,        ///< 平衡策略：性能与稳定性并重
     Aggressive = 2       ///< 激进策略：优先性能
@@ -37,7 +37,7 @@ enum class GPUOptimizationStrategy : uint8_t {
 /**
  * @brief 命令缓冲区优化级别
  */
-enum class CommandOptimizationLevel : uint8_t {
+enum class CommandOptimizationLevel : u8 {
     None = 0,            ///< 不优化
     Basic = 1,           ///< 基础优化（去除冗余状态切换）
     Advanced = 2,        ///< 高级优化（命令重排序、合并）
@@ -47,7 +47,7 @@ enum class CommandOptimizationLevel : uint8_t {
 /**
  * @brief 同步策略枚举
  */
-enum class SynchronizationStrategy : uint8_t {
+enum class SynchronizationStrategy : u8 {
     Immediate = 0,       ///< 立即同步：每次提交后等待
     Batched = 1,         ///< 批量同步：累积多个提交后同步
     Adaptive = 2,        ///< 自适应同步：根据GPU负载动态调整
@@ -460,9 +460,9 @@ private:
     
     std::unordered_map<CommandBufferHandle, CommandBufferOptimizationInfo> commandBufferCache_;  ///< 命令缓冲区缓存
     std::unordered_map<u64, ResourceBindingCacheItem> resourceBindingCache_;                     ///< 资源绑定缓存
-    std::vector<SyncPointInfo> syncPoints_;        ///< 同步点列表
+    utl::vector<SyncPointInfo> syncPoints_;        ///< 同步点列表
     
-    std::vector<CommandBufferHandle> pendingCommandBuffers_;  ///< 待提交命令缓冲区
+    utl::vector<CommandBufferHandle> pendingCommandBuffers_;  ///< 待提交命令缓冲区
     std::queue<CommandBufferHandle> commandBufferQueue_;      ///< 命令缓冲区队列
     
     u64 currentFrameNumber_;                       ///< 当前帧编号

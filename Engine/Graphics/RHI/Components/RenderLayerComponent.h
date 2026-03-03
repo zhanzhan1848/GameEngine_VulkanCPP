@@ -20,8 +20,8 @@ namespace primal::graphics::rhi {
  */
 struct RenderLayerComponent {
     // === 基础数据 ===
-    uint32_t layerMask;          ///< 层级掩码 (每一位代表一个层，共32层)
-    int32_t priority;            ///< 渲染排序优先级 (越小越先渲染，默认为0)
+    u32 layerMask;          ///< 层级掩码 (每一位代表一个层，共32层)
+    s32 priority;            ///< 渲染排序优先级 (越小越先渲染，默认为0)
     
     // === 视口与裁剪配置 (通常用于相机实体) ===
     ViewportDesc viewport;       ///< 视口配置
@@ -39,33 +39,33 @@ struct RenderLayerComponent {
      * @brief 设置所属层级（会清除其他层级）
      * @param layerIndex 层级索引 (0-31)
      */
-    void SetLayer(uint8_t layerIndex);
+    void SetLayer(u8 layerIndex);
     
     /**
      * @brief 启用特定层级
      * @param layerIndex 层级索引 (0-31)
      */
-    void EnableLayer(uint8_t layerIndex);
+    void EnableLayer(u8 layerIndex);
     
     /**
      * @brief 禁用特定层级
      * @param layerIndex 层级索引 (0-31)
      */
-    void DisableLayer(uint8_t layerIndex);
+    void DisableLayer(u8 layerIndex);
     
     /**
      * @brief 检查是否包含特定层级
      * @param layerIndex 层级索引 (0-31)
      * @return 是否包含
      */
-    bool HasLayer(uint8_t layerIndex) const;
+    bool HasLayer(u8 layerIndex) const;
     
     /**
      * @brief 检查是否与指定掩码有重叠
      * @param mask 待检查的掩码
      * @return 是否重叠
      */
-    bool Match(uint32_t mask) const;
+    bool Match(u32 mask) const;
 };
 
 } // namespace primal::graphics::rhi

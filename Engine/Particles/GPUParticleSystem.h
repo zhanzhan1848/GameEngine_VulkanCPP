@@ -7,7 +7,7 @@
 
 #ifndef DISABLE_PARTICLE_SYSTEM
 
-#include <vector>
+// #include <vector>  // Migrated to utl::vector
 #include <memory>
 
 namespace primal::particles::gpu {
@@ -79,8 +79,8 @@ private:
     gpu_system_config config_;
     
     // Emitters
-    std::vector<std::unique_ptr<gpu_emitter>> emitters_;
-    std::vector<u32> free_emitter_indices_;
+    utl::vector<std::unique_ptr<gpu_emitter>> emitters_;
+    utl::vector<u32> free_emitter_indices_;
     
     // Per-frame GPU buffers (double/triple buffered)
     static constexpr u32 BUFFER_COUNT = rhi::MAX_FRAMES_IN_FLIGHT;

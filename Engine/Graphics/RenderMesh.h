@@ -57,8 +57,8 @@ public:
      */
     bool Create(rhi::RHIDeviceBase* device, 
                 primal::id::id_type entityId,
-                const void* vertices, uint32_t vertexCount, uint32_t vertexStride,
-                const void* indices = nullptr, uint32_t indexCount = 0, 
+                const void* vertices, u32 vertexCount, u32 vertexStride,
+                const void* indices = nullptr, u32 indexCount = 0, 
                 rhi::DataIndexType indexType = rhi::DataIndexType::Unknown);
 
     /**
@@ -74,7 +74,7 @@ public:
      * @param startInstance 起始实例（默认0）
      * @param bindingSlot 顶点缓冲区绑定槽位（默认0）
      */
-    void Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount = 1, uint32_t startInstance = 0, uint32_t bindingSlot = 0);
+    void Draw(rhi::RHICommandBuffer* cmdBuffer, u32 instanceCount = 1, u32 startInstance = 0, u32 bindingSlot = 0);
 
     /**
      * @brief 设置实体ID并更新注册表
@@ -99,19 +99,19 @@ public:
      * @brief 获取顶点数量
      * @return 顶点数量
      */
-    uint32_t GetVertexCount() const { return vertexCount_; }
+    u32 GetVertexCount() const { return vertexCount_; }
 
     /**
      * @brief 获取顶点步长
      * @return 顶点步长（字节）
      */
-    uint32_t GetVertexStride() const { return vertexStride_; }
+    u32 GetVertexStride() const { return vertexStride_; }
 
     /**
      * @brief 获取索引数量
      * @return 索引数量
      */
-    uint32_t GetIndexCount() const { return indexCount_; }
+    u32 GetIndexCount() const { return indexCount_; }
 
     /**
      * @brief 获取局部包围盒
@@ -140,16 +140,16 @@ private:
      * @param type 缓冲区类型
      * @return 资源句柄
      */
-    rhi::ResourceHandle CreateBuffer(rhi::RHIDeviceBase* device, const void* data, uint64_t size, rhi::BufferType type);
+    rhi::ResourceHandle CreateBuffer(rhi::RHIDeviceBase* device, const void* data, u64 size, rhi::BufferType type);
 
     friend class RenderMeshTestHelper;
 
     rhi::ResourceHandle vertexBuffer_;      ///< 顶点缓冲区句柄
     rhi::ResourceHandle indexBuffer_;       ///< 索引缓冲区句柄
     primal::id::id_type entityId_;          ///< 关联的ECS实体ID
-    uint32_t vertexCount_;                  ///< 顶点数量
-    uint32_t indexCount_;                   ///< 索引数量
-    uint32_t vertexStride_;                 ///< 顶点步长
+    u32 vertexCount_;                  ///< 顶点数量
+    u32 indexCount_;                   ///< 索引数量
+    u32 vertexStride_;                 ///< 顶点步长
     rhi::DataIndexType indexType_;          ///< 索引类型
     rhi::AABB localAABB_;                   ///< 局部坐标系下的包围盒
 

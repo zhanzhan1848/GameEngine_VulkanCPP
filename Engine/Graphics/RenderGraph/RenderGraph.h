@@ -4,7 +4,7 @@
 #include "RenderGraphResource.h"
 #include "RenderGraphPass.h"
 #include "RenderGraphBuilder.h"
-#include <vector>
+#include <memory>
 #include <memory>
 #include <unordered_map>
 
@@ -102,7 +102,7 @@ private:
         rhi::ResourceHandle handle;
         rhi::TextureDesc texDesc;
         rhi::BufferDesc bufDesc;
-        uint64_t lastUsedFrame = 0;
+        u64 lastUsedFrame = 0;
         bool isTexture = false;
     };
 
@@ -124,17 +124,17 @@ private:
 
     // 资源池
     utl::vector<PooledResource> resourcePool_;
-    uint64_t currentFrame_ = 0;
+    u64 currentFrame_ = 0;
 
     // GPU时间戳查询
     struct FrameQueryData {
         rhi::QueryPoolHandle queryPool = rhi::handles::INVALID_QUERY_POOL;
-        uint32_t capacity = 0;
-        std::vector<std::string> passNames; // Index i corresponds to queries 2*i and 2*i+1
+        u32 capacity = 0;
+        utl::vector<std::string> passNames; // Index i corresponds to queries 2*i and 2*i+1
         bool ready = false;
     };
     FrameQueryData queryFrames_[2]; // Ping-pong
-    uint32_t currentQueryFrameIndex_ = 0;
+    u32 currentQueryFrameIndex_ = 0;
     
     std::unordered_map<std::string, double> passExecutionTimes_;
 

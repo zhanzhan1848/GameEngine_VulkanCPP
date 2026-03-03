@@ -48,7 +48,7 @@ public:
      * @param pool 来源内存池（用于释放）
      * @param handle 内存池分配句柄
      */
-    void SetHeapAllocation(MTL::Heap* heap, uint64_t offset, class RHIAdaptiveMemoryPool* pool, uint32_t handle);
+    void SetHeapAllocation(MTL::Heap* heap, u64 offset, class RHIAdaptiveMemoryPool* pool, u32 handle);
 
     /**
      * @brief 获取Metal缓冲区对象
@@ -60,18 +60,18 @@ protected:
     // === RHIResource 接口实现 ===
     
     void destroyImpl() override;
-    void* mapImpl(uint64_t offset, uint64_t size) override;
+    void* mapImpl(u64 offset, u64 size) override;
     void unmapImpl() override;
-    bool updateDataImpl(const void* data, uint64_t size, uint64_t offset) override;
+    bool updateDataImpl(const void* data, u64 size, u64 offset) override;
 
 private:
     MTL::Buffer* mtlBuffer_{nullptr};   ///< Metal缓冲区对象
     
     // 堆分配信息
     MTL::Heap* heap_{nullptr};          ///< 来源堆
-    uint64_t heapOffset_{0};            ///< 堆内偏移
+    u64 heapOffset_{0};            ///< 堆内偏移
     class RHIAdaptiveMemoryPool* pool_{nullptr}; ///< 来源内存池
-    uint32_t poolHandle_{0};            ///< 内存池分配句柄
+    u32 poolHandle_{0};            ///< 内存池分配句柄
 
     // 辅助函数
     MTL::ResourceOptions getResourceOptions() const;

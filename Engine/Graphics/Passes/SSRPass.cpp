@@ -8,7 +8,7 @@
 #include "SSRPass.h"
 #include <iostream>
 #include <fstream>
-#include <vector>
+
 
 namespace primal::graphics {
 
@@ -65,7 +65,7 @@ bool SSRPass::Initialize(rhi::RHIDeviceBase* device) {
     }
     
     size_t fileSize = (size_t)file.tellg();
-    std::vector<char> buffer(fileSize + 1);
+    utl::vector<char> buffer(fileSize + 1);
     file.seekg(0);
     file.read(buffer.data(), fileSize);
     buffer[fileSize] = '\0';
@@ -85,7 +85,7 @@ bool SSRPass::Initialize(rhi::RHIDeviceBase* device) {
     pipelineLayout_ = device_->CreatePipelineLayout(plDesc);
 
     // 4. Create Resources per frame
-    for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         // Param Buffer
         rhi::BufferDesc paramDesc{
             sizeof(SSRParams),
@@ -114,7 +114,7 @@ void SSRPass::Shutdown() {
         if (descriptorSetLayout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) device_->DestroyDescriptorSetLayout(descriptorSetLayout_);
         if (computeShader_ != rhi::handles::INVALID_SHADER) device_->DestroyShader(computeShader_);
 
-        for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             if (paramBuffer_[i] != rhi::handles::INVALID_RESOURCE) {
                 device_->UnmapBuffer(paramBuffer_[i]);
                 device_->DestroyBuffer(paramBuffer_[i]);
@@ -129,8 +129,8 @@ void SSRPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
                       rhi::ResourceHandle sceneColor,
                       rhi::ResourceHandle sceneDepth,
                       rhi::ResourceHandle output,
-                      uint32_t width, uint32_t height,
-                      uint32_t frameIndex,
+                      u32 width, u32 height,
+                      u32 frameIndex,
                       const rhi::math::m4x4& viewMatrix,
                       const rhi::math::m4x4& projMatrix) {
     
@@ -215,10 +215,10 @@ void SSRPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
     cmdBuffer->BindComputePipeline(pipeline_);
     cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, pipelineLayout_, 0, 1, &descriptorSets_[frameIndex], 0, nullptr);
     
-    uint32_t groupSizeX = 16;
-    uint32_t groupSizeY = 16;
-    uint32_t groupCountX = (width + groupSizeX - 1) / groupSizeX;
-    uint32_t groupCountY = (height + groupSizeY - 1) / groupSizeY;
+    u32 groupSizeX = 16;
+    u32 groupSizeY = 16;
+    u32 groupCountX = (width + groupSizeX - 1) / groupSizeX;
+    u32 groupCountY = (height + groupSizeY - 1) / groupSizeY;
     
     cmdBuffer->Dispatch(groupCountX, groupCountY, 1);
 }

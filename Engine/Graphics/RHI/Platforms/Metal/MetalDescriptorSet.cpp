@@ -22,7 +22,7 @@ bool MetalDescriptorSet::Initialize() {
     // Or we can just iterate the layout bindings and add them?
     // The layout has a list of bindings.
     const auto& layoutBindings = layout->GetBindings();
-    uint32_t maxBinding = 0;
+    u32 maxBinding = 0;
     for (const auto& b : layoutBindings) {
         if (b.binding > maxBinding) {
             maxBinding = b.binding;
@@ -57,8 +57,8 @@ void MetalDescriptorSet::Destroy() {
     bindings_.clear();
 }
 
-void MetalDescriptorSet::Update(const WriteDescriptorSet* writes, uint32_t writeCount) {
-    for (uint32_t i = 0; i < writeCount; ++i) {
+void MetalDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCount) {
+    for (u32 i = 0; i < writeCount; ++i) {
         const WriteDescriptorSet& write = writes[i];
         
         // Find the binding in our vector
@@ -78,16 +78,16 @@ void MetalDescriptorSet::Update(const WriteDescriptorSet* writes, uint32_t write
         }
         
         // Update resources
-        uint32_t count = write.descriptorCount;
-        uint32_t dstArrayElement = write.dstArrayElement;
+        u32 count = write.descriptorCount;
+        u32 dstArrayElement = write.dstArrayElement;
         
         if (dstArrayElement + count > targetBinding->resources.size()) {
              // Out of bounds
-             count = (uint32_t)targetBinding->resources.size() - dstArrayElement;
+             count = (u32)targetBinding->resources.size() - dstArrayElement;
         }
         
-        for (uint32_t j = 0; j < count; ++j) {
-            uint32_t idx = dstArrayElement + j;
+        for (u32 j = 0; j < count; ++j) {
+            u32 idx = dstArrayElement + j;
             
             if (write.descriptorType == DescriptorType::UniformBuffer ||
                 write.descriptorType == DescriptorType::StorageBuffer ||
@@ -116,12 +116,12 @@ void MetalDescriptorSet::Update(const WriteDescriptorSet* writes, uint32_t write
     }
 }
 
-bool MetalDescriptorSet::updateDataImpl(const void* data, uint64_t size, uint64_t offset) {
+bool MetalDescriptorSet::updateDataImpl(const void* data, u64 size, u64 offset) {
     // Descriptor sets are updated via Update() method, not generic updateDataImpl
     return false;
 }
 
-void* MetalDescriptorSet::mapImpl(uint64_t offset, uint64_t size) {
+void* MetalDescriptorSet::mapImpl(u64 offset, u64 size) {
     return nullptr;
 }
 

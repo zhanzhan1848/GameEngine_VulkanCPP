@@ -7,7 +7,7 @@
 #include "Particles/ParticleSorter.h"
 #ifndef DISABLE_PARTICLE_SYSTEM
 
-#include <vector>
+
 
 namespace primal::graphics {
 
@@ -85,7 +85,7 @@ private:
     void* uniform_buffer_mapped_[rhi::MAX_FRAMES_IN_FLIGHT]{ nullptr, nullptr, nullptr };
     
     // CPU-side sorting data
-    std::vector<u32> sorted_indices_;
+    utl::vector<u32> sorted_indices_;
     bool enable_sorting_{ true };
     
     bool create_pipelines();

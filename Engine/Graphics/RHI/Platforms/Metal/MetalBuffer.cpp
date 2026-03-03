@@ -13,7 +13,7 @@
 namespace primal::graphics::rhi {
 
 // 辅助函数：将 BufferType 转换为 ResourceUsage
-static ResourceUsage GetResourceUsageFromBufferType(BufferType type, uint32_t bindFlags) {
+static ResourceUsage GetResourceUsageFromBufferType(BufferType type, u32 bindFlags) {
     ResourceUsage usage = ResourceUsage::None;
     
     switch (type) {
@@ -158,14 +158,14 @@ void MetalBuffer::destroyImpl() {
     heapOffset_ = 0;
 }
 
-void MetalBuffer::SetHeapAllocation(MTL::Heap* heap, uint64_t offset, RHIAdaptiveMemoryPool* pool, uint32_t handle) {
+void MetalBuffer::SetHeapAllocation(MTL::Heap* heap, u64 offset, RHIAdaptiveMemoryPool* pool, u32 handle) {
     heap_ = heap;
     heapOffset_ = offset;
     pool_ = pool;
     poolHandle_ = handle;
 }
 
-void* MetalBuffer::mapImpl(uint64_t offset, uint64_t size) {
+void* MetalBuffer::mapImpl(u64 offset, u64 size) {
     if (!mtlBuffer_) {
         std::cerr << "[MetalBuffer] mapImpl failed: mtlBuffer_ is null" << std::endl;
         return nullptr;
@@ -177,7 +177,7 @@ void* MetalBuffer::mapImpl(uint64_t offset, uint64_t size) {
         return nullptr;
     }
     
-    uint8_t* bufferContents = static_cast<uint8_t*>(mtlBuffer_->contents());
+    u8* bufferContents = static_cast<u8*>(mtlBuffer_->contents());
     if (!bufferContents) {
          static bool loggedMapFail = false;
          if (!loggedMapFail) {
@@ -205,7 +205,7 @@ void MetalBuffer::unmapImpl() {
 #endif
 }
 
-bool MetalBuffer::updateDataImpl(const void* data, uint64_t size, uint64_t offset) {
+bool MetalBuffer::updateDataImpl(const void* data, u64 size, u64 offset) {
     if (!mtlBuffer_ || !data) {
         return false;
     }

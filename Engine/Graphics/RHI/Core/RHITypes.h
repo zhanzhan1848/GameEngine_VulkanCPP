@@ -19,12 +19,12 @@ namespace primal::graphics::rhi {
 /**
  * @brief 最大同时在飞行的帧数（多缓冲）
  */
-constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
+constexpr u32 MAX_FRAMES_IN_FLIGHT = 3;
 
 /**
  * @brief 所有子资源掩码
  */
-constexpr uint32_t RHI_ALL_SUBRESOURCES = ~0u;
+constexpr u32 RHI_ALL_SUBRESOURCES = ~0u;
 
 // === 前向声明 ===
 
@@ -40,86 +40,86 @@ class RHIPipeline;
  * @brief RHI设备句柄
  * @details 64位句柄，包含设备类型和唯一标识符
  */
-using DeviceHandle = uint64_t;
+using DeviceHandle = u64;
 
 /**
  * @brief RHI交换链句柄
  * @details 64位句柄，用于标识交换链对象
  */
-using SwapChainHandle = uint64_t;
+using SwapChainHandle = u64;
 
 /**
  * @brief RHI资源句柄
  * @details 64位句柄，用于标识缓冲区、纹理等GPU资源
  */
-using ResourceHandle = uint64_t;
+using ResourceHandle = u64;
 
 /**
  * @brief RHI命令缓冲区句柄
  * @details 64位句柄，用于标识命令缓冲区
  */
-using CommandBufferHandle = uint64_t;
+using CommandBufferHandle = u64;
 
 /**
  * @brief RHI着色器句柄
  * @details 64位句柄，用于标识着色器对象
  */
-using ShaderHandle = uint64_t;
+using ShaderHandle = u64;
 
 /**
  * @brief RHI管线句柄
  * @details 64位句柄，用于标识渲染管线或计算管线
  */
-using PipelineHandle = uint64_t;
+using PipelineHandle = u64;
 
 /**
  * @brief RHI采样器句柄
  * @details 64位句柄，用于标识采样器状态
  */
-using SamplerHandle = uint64_t;
+using SamplerHandle = u64;
 
 /**
  * @brief RHI同步对象句柄
  * @details 64位句柄，用于标识围栏、信号量等同步对象
  */
-using SyncHandle = uint64_t;
+using SyncHandle = u64;
 
 /**
  * @brief RHI查询池句柄
  * @details 64位句柄，用于标识查询池对象
  */
-using QueryPoolHandle = uint64_t;
+using QueryPoolHandle = u64;
 
 /**
  * @brief RHI描述符集布局句柄
  * @details 64位句柄，用于标识描述符集布局对象
  */
-using DescriptorSetLayoutHandle = uint64_t;
+using DescriptorSetLayoutHandle = u64;
 
 /**
  * @brief RHI描述符集句柄
  * @details 64位句柄，用于标识描述符集对象
  */
-using DescriptorSetHandle = uint64_t;
+using DescriptorSetHandle = u64;
 
 /**
  * @brief RHI ECS 实体 ID
  * @details 32位整数，用于标识 RHI ECS 中的实体
  */
-using RHIEntityID = uint32_t;
+using RHIEntityID = u32;
 constexpr RHIEntityID INVALID_RHI_ENTITY_ID = 0xFFFFFFFF;
 
 /**
  * @brief RHI渲染通道句柄
  * @details 64位句柄，用于标识渲染通道对象
  */
-using RenderPassHandle = uint64_t;
+using RenderPassHandle = u64;
 
 /**
  * @brief RHI管线布局句柄
  * @details 64位句柄，用于标识管线布局对象
  */
-using PipelineLayoutHandle = uint64_t;
+using PipelineLayoutHandle = u64;
 
 /**
  * @brief 无效句柄常量
@@ -155,7 +155,7 @@ struct QueueSubmitInfo {
 /**
  * @brief RHI支持的图形API平台
  */
-enum class RHIPlatform : uint8_t {
+enum class RHIPlatform : u8 {
     Unknown = 0,    ///< 未知平台
     D3D12   = 1,    ///< DirectX 12
     Vulkan  = 2,    ///< Vulkan
@@ -166,7 +166,7 @@ enum class RHIPlatform : uint8_t {
 /**
  * @brief GPU资源类型
  */
-enum class ResourceType : uint8_t {
+enum class ResourceType : u8 {
     Unknown     = 0,    ///< 未知类型
     Buffer      = 1,    ///< 缓冲区
     Texture     = 2,    ///< 纹理
@@ -186,7 +186,7 @@ enum class ResourceType : uint8_t {
 /**
  * @brief 管线绑定点
  */
-enum class PipelineBindPoint : uint8_t {
+enum class PipelineBindPoint : u8 {
     Graphics = 0,   ///< 图形管线
     Compute = 1     ///< 计算管线
 };
@@ -194,7 +194,7 @@ enum class PipelineBindPoint : uint8_t {
 /**
  * @brief 查询类型
  */
-enum class QueryType : uint8_t {
+enum class QueryType : u8 {
     Timestamp,  ///< 时间戳查询
     Occlusion,  ///< 遮挡查询
     PipelineStatistics ///< 管线统计查询
@@ -203,25 +203,25 @@ enum class QueryType : uint8_t {
 /**
  * @brief 查询结果标志
  */
-enum class QueryResultFlags : uint8_t {
+enum class QueryResultFlags : u8 {
     None = 0,
     Wait = 1 << 0,      ///< 等待结果可用
     v64 = 1 << 1        ///< 结果为64位
 };
 
 inline QueryResultFlags operator|(QueryResultFlags a, QueryResultFlags b) {
-    return static_cast<QueryResultFlags>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+    return static_cast<QueryResultFlags>(static_cast<u8>(a) | static_cast<u8>(b));
 }
 
 inline QueryResultFlags operator&(QueryResultFlags a, QueryResultFlags b) {
-    return static_cast<QueryResultFlags>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
+    return static_cast<QueryResultFlags>(static_cast<u8>(a) & static_cast<u8>(b));
 }
 
 /**
  * @brief 资源状态枚举
  * @details 描述资源的当前状态和生命周期
  */
-enum class ResourceState : uint8_t {
+enum class ResourceState : u8 {
     Unknown = 0,        ///< 未知状态
     Created = 1,        ///< 已创建，但未分配GPU内存
     Allocated = 2,      ///< 已分配GPU内存
@@ -249,7 +249,7 @@ enum class ResourceState : uint8_t {
 /**
  * @brief 缓冲区类型
  */
-enum class BufferType : uint8_t {
+enum class BufferType : u8 {
     Unknown             = 0,    ///< 未知类型
     Vertex              = 1,    ///< 顶点缓冲区
     Index               = 2,    ///< 索引缓冲区
@@ -263,7 +263,7 @@ enum class BufferType : uint8_t {
 /**
  * @brief 缓冲区用途标志
  */
-enum class BufferUsageFlags : uint32_t {
+enum class BufferUsageFlags : u32 {
     None = 0,
     TransferSrc = 1 << 0,
     TransferDst = 1 << 1,
@@ -277,17 +277,17 @@ enum class BufferUsageFlags : uint32_t {
 };
 
 inline BufferUsageFlags operator|(BufferUsageFlags a, BufferUsageFlags b) {
-    return static_cast<BufferUsageFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+    return static_cast<BufferUsageFlags>(static_cast<u32>(a) | static_cast<u32>(b));
 }
 
 inline BufferUsageFlags operator&(BufferUsageFlags a, BufferUsageFlags b) {
-    return static_cast<BufferUsageFlags>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+    return static_cast<BufferUsageFlags>(static_cast<u32>(a) & static_cast<u32>(b));
 }
 
 /**
  * @brief 描述符绑定标志
  */
-enum class DescriptorBindingFlags : uint32_t {
+enum class DescriptorBindingFlags : u32 {
     None = 0,
     UpdateAfterBind = 1 << 0,           ///< 绑定后更新
     UpdateUnusedWhilePending = 1 << 1,  ///< 挂起时更新未使用
@@ -296,17 +296,17 @@ enum class DescriptorBindingFlags : uint32_t {
 };
 
 inline DescriptorBindingFlags operator|(DescriptorBindingFlags a, DescriptorBindingFlags b) {
-    return static_cast<DescriptorBindingFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+    return static_cast<DescriptorBindingFlags>(static_cast<u32>(a) | static_cast<u32>(b));
 }
 
 inline DescriptorBindingFlags operator&(DescriptorBindingFlags a, DescriptorBindingFlags b) {
-    return static_cast<DescriptorBindingFlags>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+    return static_cast<DescriptorBindingFlags>(static_cast<u32>(a) & static_cast<u32>(b));
 }
 
 /**
  * @brief 纹理类型
  */
-enum class TextureType : uint8_t {
+enum class TextureType : u8 {
     Unknown     = 0,    ///< 未知类型
     Texture1D   = 1,    ///< 1D纹理
     Texture2D   = 2,    ///< 2D纹理
@@ -320,7 +320,7 @@ enum class TextureType : uint8_t {
 /**
  * @brief 纹理方面掩码
  */
-enum class TextureAspect : uint8_t {
+enum class TextureAspect : u8 {
     Unknown = 0,
     Color = 1,          ///< 颜色分量
     Depth = 2,          ///< 深度分量
@@ -329,17 +329,17 @@ enum class TextureAspect : uint8_t {
 };
 
 inline TextureAspect operator|(TextureAspect a, TextureAspect b) {
-    return static_cast<TextureAspect>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+    return static_cast<TextureAspect>(static_cast<u8>(a) | static_cast<u8>(b));
 }
 
 inline TextureAspect operator&(TextureAspect a, TextureAspect b) {
-    return static_cast<TextureAspect>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
+    return static_cast<TextureAspect>(static_cast<u8>(a) & static_cast<u8>(b));
 }
 
 /**
  * @brief 纹理用途
  */
-enum class TextureUsage : uint32_t {
+enum class TextureUsage : u32 {
     Unknown = 0x00000000,
     ShaderResource = 0x00000001,    ///< 着色器资源
     RenderTarget = 0x00000002,       ///< 渲染目标
@@ -353,17 +353,17 @@ enum class TextureUsage : uint32_t {
 };
 
 inline TextureUsage operator|(TextureUsage a, TextureUsage b) {
-    return static_cast<TextureUsage>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+    return static_cast<TextureUsage>(static_cast<u32>(a) | static_cast<u32>(b));
 }
 
 inline TextureUsage operator&(TextureUsage a, TextureUsage b) {
-    return static_cast<TextureUsage>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+    return static_cast<TextureUsage>(static_cast<u32>(a) & static_cast<u32>(b));
 }
 
 /**
  * @brief 数据格式枚举
  */
-enum class DataFormat : uint16_t {
+enum class DataFormat : u16 {
     Unknown = 0,
     
     // 8位格式
@@ -470,7 +470,7 @@ enum class DataFormat : uint16_t {
 /**
  * @brief 索引数据类型
  */
-enum class DataIndexType : uint8_t {
+enum class DataIndexType : u8 {
     Unknown = 0,
     UInt16 = 1,    ///< 16位无符号整数索引
     UInt32 = 2     ///< 32位无符号整数索引
@@ -479,7 +479,7 @@ enum class DataIndexType : uint8_t {
 /**
  * @brief GPU内存使用模式
  */
-enum class GPUMemoryUsage : uint8_t {
+enum class GPUMemoryUsage : u8 {
     Unknown = 0,
     Static = 1,    ///< 静态内存，CPU只写一次，GPU多次读取
     Dynamic = 2,   ///< 动态内存，CPU频繁更新，GPU多次读取
@@ -492,7 +492,7 @@ enum class GPUMemoryUsage : uint8_t {
 /**
  * @brief 命令队列类型
  */
-enum class CommandQueueType : uint8_t {
+enum class CommandQueueType : u8 {
     Unknown = 0,
     Graphics = 1,  ///< 图形队列，支持图形和计算操作
     Compute = 2,   ///< 计算队列，仅支持计算操作
@@ -502,7 +502,7 @@ enum class CommandQueueType : uint8_t {
 /**
  * @brief 图元拓扑类型
  */
-enum class PrimitiveTopology : uint8_t {
+enum class PrimitiveTopology : u8 {
     Unknown = 0,
     PointList = 1,      ///< 点列表
     LineList = 2,       ///< 线列表
@@ -518,7 +518,7 @@ enum class PrimitiveTopology : uint8_t {
 /**
  * @brief 着色器阶段
  */
-enum class ShaderStage : uint8_t {
+enum class ShaderStage : u8 {
     Unknown = 0,
     Vertex = 1 << 0,     ///< 顶点着色器
     Pixel = 1 << 1,      ///< 像素着色器
@@ -529,17 +529,17 @@ enum class ShaderStage : uint8_t {
 };
 
 inline ShaderStage operator|(ShaderStage a, ShaderStage b) {
-    return static_cast<ShaderStage>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+    return static_cast<ShaderStage>(static_cast<u8>(a) | static_cast<u8>(b));
 }
 
 inline ShaderStage operator&(ShaderStage a, ShaderStage b) {
-    return static_cast<ShaderStage>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
+    return static_cast<ShaderStage>(static_cast<u8>(a) & static_cast<u8>(b));
 }
 
 /**
  * @brief 描述符类型
  */
-enum class DescriptorType : uint8_t {
+enum class DescriptorType : u8 {
     Unknown = 0,
     Sampler = 1,
     CombinedImageSampler = 2,
@@ -558,9 +558,9 @@ enum class DescriptorType : uint8_t {
  * @brief 描述符集布局绑定
  */
 struct DescriptorSetLayoutBinding {
-    uint32_t binding{ 0 };
+    u32 binding{ 0 };
     DescriptorType descriptorType{ DescriptorType::Unknown };
-    uint32_t descriptorCount{ 0 };
+    u32 descriptorCount{ 0 };
     ShaderStage stageFlags{ ShaderStage::Unknown };
     const SamplerHandle* immutableSamplers{ nullptr };
     DescriptorBindingFlags flags{ DescriptorBindingFlags::None };
@@ -570,7 +570,7 @@ struct DescriptorSetLayoutBinding {
  * @brief 描述符集布局描述符
  */
 struct DescriptorSetLayoutDesc {
-    uint32_t bindingCount{ 0 };
+    u32 bindingCount{ 0 };
     const DescriptorSetLayoutBinding* bindings{ nullptr };
 };
 
@@ -595,8 +595,8 @@ struct DescriptorImageInfo {
  */
 struct DescriptorBufferInfo {
     ResourceHandle buffer{ handles::INVALID_RESOURCE };
-    uint64_t offset{ 0 };
-    uint64_t range{ 0 };
+    u64 offset{ 0 };
+    u64 range{ 0 };
 };
 
 /**
@@ -604,9 +604,9 @@ struct DescriptorBufferInfo {
  */
 struct WriteDescriptorSet {
     DescriptorSetHandle dstSet{ handles::INVALID_RESOURCE };
-    uint32_t dstBinding{ 0 };
-    uint32_t dstArrayElement{ 0 };
-    uint32_t descriptorCount{ 0 };
+    u32 dstBinding{ 0 };
+    u32 dstArrayElement{ 0 };
+    u32 descriptorCount{ 0 };
     DescriptorType descriptorType{ DescriptorType::Unknown };
     const DescriptorImageInfo* imageInfo{ nullptr };
     const DescriptorBufferInfo* bufferInfo{ nullptr };
@@ -615,7 +615,7 @@ struct WriteDescriptorSet {
 /**
  * @brief 混合操作
  */
-enum class BlendOp : uint8_t {
+enum class BlendOp : u8 {
     Unknown = 0,
     Add = 1,        ///< 相加
     Subtract = 2,   ///< 相减
@@ -627,7 +627,7 @@ enum class BlendOp : uint8_t {
 /**
  * @brief 混合因子
  */
-enum class BlendFactor : uint8_t {
+enum class BlendFactor : u8 {
     Unknown = 0,
     Zero = 1,           ///< 零
     One = 2,            ///< 一
@@ -651,7 +651,7 @@ enum class BlendFactor : uint8_t {
 /**
  * @brief 比较函数
  */
-enum class ComparisonFunc : uint8_t {
+enum class ComparisonFunc : u8 {
     Unknown = 0,
     Never = 1,          ///< 永不通过
     Less = 2,           ///< 小于通过
@@ -666,7 +666,7 @@ enum class ComparisonFunc : uint8_t {
 /**
  * @brief 模板操作
  */
-enum class StencilOp : uint8_t {
+enum class StencilOp : u8 {
     Unknown = 0,
     Keep = 1,           ///< 保持
     Zero = 2,           ///< 置零
@@ -681,7 +681,7 @@ enum class StencilOp : uint8_t {
 /**
  * @brief 填充模式
  */
-enum class FillMode : uint8_t {
+enum class FillMode : u8 {
     Unknown = 0,
     Solid = 1,          ///< 实心填充
     Wireframe = 2       ///< 线框填充
@@ -690,7 +690,7 @@ enum class FillMode : uint8_t {
 /**
  * @brief 裁剪模式
  */
-enum class CullMode : uint8_t {
+enum class CullMode : u8 {
     Unknown = 0,
     None = 1,           ///< 不裁剪
     Front = 2,          ///< 裁剪前面
@@ -700,7 +700,7 @@ enum class CullMode : uint8_t {
 /**
  * @brief 纹理过滤模式
  */
-enum class FilterMode : uint8_t {
+enum class FilterMode : u8 {
     Unknown = 0,
     Point = 1,          ///< 点过滤
     Linear = 2,         ///< 线性过滤
@@ -711,7 +711,7 @@ enum class FilterMode : uint8_t {
 /**
  * @brief 纹理寻址模式
  */
-enum class TextureAddressMode : uint8_t {
+enum class TextureAddressMode : u8 {
     Unknown = 0,
     Wrap = 1,           ///< 重复
     Mirror = 2,         ///< 镜像
@@ -723,7 +723,7 @@ enum class TextureAddressMode : uint8_t {
 /**
  * @brief 呈现模式
  */
-enum class PresentMode : uint8_t {
+enum class PresentMode : u8 {
     Immediate = 0,      ///< 立即呈现（可能撕裂）
     Mailbox = 1,        ///< 邮箱模式（三缓冲，低延迟，无撕裂）
     FIFO = 2,           ///< 先进先出（垂直同步，标准）
@@ -736,21 +736,21 @@ enum class PresentMode : uint8_t {
  * @brief RHI系统常量
  */
 namespace constants {
-    constexpr uint32_t MAX_RENDER_TARGETS = 8;           ///< 最大渲染目标数量
-    constexpr uint32_t MAX_VERTEX_BUFFERS = 16;         ///< 最大顶点缓冲区数量
-    constexpr uint32_t MAX_TEXTURE_UNITS = 32;          ///< 最大纹理单元数量
-    constexpr uint32_t MAX_SAMPLERS = 16;               ///< 最大采样器数量
-    constexpr uint32_t MAX_CONSTANT_BUFFERS = 14;        ///< 最大常量缓冲区数量
-    constexpr uint32_t MAX_VIEWPORTS = 16;              ///< 最大视口数量
-    constexpr uint32_t MAX_SCISSOR_RECTS = 16;          ///< 最大裁剪矩形数量
-    constexpr uint32_t MAX_VERTEX_INPUT_ATTRIBUTES = 16; ///< 最大顶点输入属性数量
-    constexpr uint32_t MAX_COLOR_ATTACHMENTS = 8;       ///< 最大颜色附件数量
-    constexpr uint32_t MAX_SHADER_STAGES = 6;            ///< 最大着色器阶段数
-    constexpr uint32_t MAX_PUSH_CONSTANTS_SIZE = 256;    ///< 最大推送常量大小（字节）
-    constexpr uint32_t MAX_UBO_SIZE = 64 * 1024;          ///< 最大统一缓冲区大小（64KB）
-    constexpr uint32_t MAX_SSBO_SIZE = 128 * 1024 * 1024; ///< 最大存储缓冲区大小（128MB）
-    constexpr uint32_t MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT = 256; ///< 最小统一缓冲区对齐
-    constexpr uint32_t FRAME_COUNT = 3;                 ///< 帧缓冲数量（三重缓冲）
+    constexpr u32 MAX_RENDER_TARGETS = 8;           ///< 最大渲染目标数量
+    constexpr u32 MAX_VERTEX_BUFFERS = 16;         ///< 最大顶点缓冲区数量
+    constexpr u32 MAX_TEXTURE_UNITS = 32;          ///< 最大纹理单元数量
+    constexpr u32 MAX_SAMPLERS = 16;               ///< 最大采样器数量
+    constexpr u32 MAX_CONSTANT_BUFFERS = 14;        ///< 最大常量缓冲区数量
+    constexpr u32 MAX_VIEWPORTS = 16;              ///< 最大视口数量
+    constexpr u32 MAX_SCISSOR_RECTS = 16;          ///< 最大裁剪矩形数量
+    constexpr u32 MAX_VERTEX_INPUT_ATTRIBUTES = 16; ///< 最大顶点输入属性数量
+    constexpr u32 MAX_COLOR_ATTACHMENTS = 8;       ///< 最大颜色附件数量
+    constexpr u32 MAX_SHADER_STAGES = 6;            ///< 最大着色器阶段数
+    constexpr u32 MAX_PUSH_CONSTANTS_SIZE = 256;    ///< 最大推送常量大小（字节）
+    constexpr u32 MAX_UBO_SIZE = 64 * 1024;          ///< 最大统一缓冲区大小（64KB）
+    constexpr u32 MAX_SSBO_SIZE = 128 * 1024 * 1024; ///< 最大存储缓冲区大小（128MB）
+    constexpr u32 MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT = 256; ///< 最小统一缓冲区对齐
+    constexpr u32 FRAME_COUNT = 3;                 ///< 帧缓冲数量（三重缓冲）
     constexpr float MAX_ANISOTROPY = 16.0f;              ///< 最大各向异性
 }
 
@@ -791,8 +791,8 @@ struct DepthStencilState {
     ComparisonFunc depthFunc{ ComparisonFunc::Less };           ///< 深度比较函数
     
     bool enableStencilTest{ false };             ///< 是否启用模板测试
-    uint8_t stencilReadMask{ 0xFF };           ///< 模板读取掩码
-    uint8_t stencilWriteMask{ 0xFF };           ///< 模板写入掩码
+    u8 stencilReadMask{ 0xFF };           ///< 模板读取掩码
+    u8 stencilWriteMask{ 0xFF };           ///< 模板写入掩码
     
     StencilOpDesc frontStencil{};         ///< 正面模板操作
     StencilOpDesc backStencil{};          ///< 背面模板操作
@@ -840,7 +840,7 @@ struct ClearValue {
         math::v4 color;      ///< 颜色清除值 (r, g, b, a)
         struct {
             float depth;     ///< 深度清除值
-            uint32_t stencil; ///< 模板清除值
+            u32 stencil; ///< 模板清除值
         };
         math::v4 depthStencil; ///< 深度模板清除值
     };
@@ -850,36 +850,36 @@ struct ClearValue {
  * @brief 纹理子资源层
  */
 struct TextureSubresourceLayers {
-    uint32_t mipLevel{ 0 };       ///< Mip层级
-    uint32_t baseArrayLayer{ 0 }; ///< 起始数组层
-    uint32_t layerCount{ 1 };     ///< 数组层数量
+    u32 mipLevel{ 0 };       ///< Mip层级
+    u32 baseArrayLayer{ 0 }; ///< 起始数组层
+    u32 layerCount{ 1 };     ///< 数组层数量
 };
 
 /**
  * @brief 3D 偏移量
  */
 struct Offset3D {
-    int32_t x{ 0 };
-    int32_t y{ 0 };
-    int32_t z{ 0 };
+    s32 x{ 0 };
+    s32 y{ 0 };
+    s32 z{ 0 };
 };
 
 /**
  * @brief 3D 范围
  */
 struct Extent3D {
-    uint32_t width{ 0 };
-    uint32_t height{ 0 };
-    uint32_t depth{ 0 };
+    u32 width{ 0 };
+    u32 height{ 0 };
+    u32 depth{ 0 };
 };
 
 /**
  * @brief 缓冲区到纹理的复制区域
  */
 struct BufferTextureCopyRegion {
-    uint64_t bufferOffset{ 0 };       ///< 缓冲区偏移量
-    uint32_t bufferRowLength{ 0 };    ///< 缓冲区行长（像素），0表示紧密排列
-    uint32_t bufferImageHeight{ 0 };  ///< 缓冲区图像高度（像素），0表示紧密排列
+    u64 bufferOffset{ 0 };       ///< 缓冲区偏移量
+    u32 bufferRowLength{ 0 };    ///< 缓冲区行长（像素），0表示紧密排列
+    u32 bufferImageHeight{ 0 };  ///< 缓冲区图像高度（像素），0表示紧密排列
     TextureSubresourceLayers imageSubresource{ 0, 0, 1 }; ///< 纹理子资源
     Offset3D imageOffset{ 0, 0, 0 };        ///< 纹理偏移
     Extent3D imageExtent{ 0, 0, 0 };        ///< 纹理范围
@@ -910,18 +910,18 @@ struct TextureBlitRegion {
  * @brief 顶点输入属性描述符
  */
 struct VertexInputAttribute {
-    uint32_t location{ 0 };       ///< 着色器中的位置
-    uint32_t binding{ 0 };        ///< 绑定点
+    u32 location{ 0 };       ///< 着色器中的位置
+    u32 binding{ 0 };        ///< 绑定点
     DataFormat format{ DataFormat::Unknown };       ///< 数据格式
-    uint32_t offset{ 0 };         ///< 在缓冲区中的字节偏移量
+    u32 offset{ 0 };         ///< 在缓冲区中的字节偏移量
 };
 
 /**
  * @brief 顶点输入绑定描述符
  */
 struct VertexInputBinding {
-    uint32_t binding{ 0 };        ///< 绑定点
-    uint32_t stride{ 0 };         ///< 顶点步长（字节）
+    u32 binding{ 0 };        ///< 绑定点
+    u32 stride{ 0 };         ///< 顶点步长（字节）
     bool perVertex{ true };          ///< true=每个顶点，false=每个实例
 };
 
@@ -929,27 +929,27 @@ struct VertexInputBinding {
  * @brief 缓冲区描述符
  */
 struct BufferDesc {
-    uint64_t size{ 0 };           ///< 缓冲区大小（字节）
+    u64 size{ 0 };           ///< 缓冲区大小（字节）
     BufferType type{ BufferType::Unknown };         ///< 缓冲区类型
     GPUMemoryUsage usage{ GPUMemoryUsage::Unknown };    ///< 内存使用模式
     GPUMemoryUsage memoryUsage{ GPUMemoryUsage::Unknown }; ///< 内存使用方式（兼容字段）
-    uint32_t bindFlags{ 0 };      ///< 绑定标志位
+    u32 bindFlags{ 0 };      ///< 绑定标志位
     
     // 扩展字段用于具体缓冲区类型
     union {
         struct {
-            uint32_t vertexCount{ 0 };     ///< 顶点数量
-            uint32_t vertexStride{ 0 };    ///< 顶点步长
+            u32 vertexCount{ 0 };     ///< 顶点数量
+            u32 vertexStride{ 0 };    ///< 顶点步长
         } vertex;
         
         struct {
-            uint32_t indexCount{ 0 };      ///< 索引数量
+            u32 indexCount{ 0 };      ///< 索引数量
             DataFormat format{ DataFormat::Unknown };       ///< 索引格式
         } index;
         
         struct {
-            uint32_t elementCount{ 0 };    ///< 元素数量
-            uint32_t elementStride{ 0 };  ///< 元素步长
+            u32 elementCount{ 0 };    ///< 元素数量
+            u32 elementStride{ 0 };  ///< 元素步长
         } structured;
     };
     
@@ -960,7 +960,7 @@ struct BufferDesc {
  * @brief 采样数量枚举
  * @details 定义多重采样支持的采样数量
  */
-enum class SampleCount : uint8_t {
+enum class SampleCount : u8 {
     Unknown = 0,    ///< 未知采样数量
     Samples1 = 1,   ///< 1个采样点
     Samples2 = 2,   ///< 2个采样点
@@ -974,8 +974,8 @@ enum class SampleCount : uint8_t {
  */
 struct TextureDesc {
     math::u32v3 size{ 0, 0, 0 };        ///< 纹理尺寸 (width, height, depth)
-    uint32_t mipLevels{ 1 };      ///< Mip层级数
-    uint32_t arraySize{ 1 };      ///< 数组大小
+    u32 mipLevels{ 1 };      ///< Mip层级数
+    u32 arraySize{ 1 };      ///< 数组大小
     DataFormat format{ DataFormat::Unknown };       ///< 数据格式
     TextureType type{ TextureType::Unknown };        ///< 纹理类型
     TextureUsage usage{ TextureUsage::Unknown };      ///< 纹理用途
@@ -990,10 +990,10 @@ struct TextureViewDesc {
     ResourceHandle texture{ handles::INVALID_RESOURCE };           ///< 原始纹理句柄
     TextureType viewType{ TextureType::Unknown };             ///< 视图类型
     DataFormat format{ DataFormat::Unknown };                ///< 数据格式
-    uint32_t mostDetailedMip{ 0 };         ///< 起始Mip层级
-    uint32_t mipCount{ 1 };                ///< Mip层级数量
-    uint32_t firstArraySlice{ 0 };         ///< 起始数组层
-    uint32_t arraySize{ 1 };               ///< 数组层数量
+    u32 mostDetailedMip{ 0 };         ///< 起始Mip层级
+    u32 mipCount{ 1 };                ///< Mip层级数量
+    u32 firstArraySlice{ 0 };         ///< 起始数组层
+    u32 arraySize{ 1 };               ///< 数组层数量
 };
 
 /**
@@ -1001,10 +1001,10 @@ struct TextureViewDesc {
  */
 struct SwapChainDesc {
     platform::window_handle window{ nullptr };  ///< 窗口句柄
-    uint32_t width{ 0 };                  ///< 宽度
-    uint32_t height{ 0 };                 ///< 高度
+    u32 width{ 0 };                  ///< 宽度
+    u32 height{ 0 };                 ///< 高度
     DataFormat format{ DataFormat::BGRA8_UNorm };               ///< 颜色格式
-    uint32_t bufferCount{ 3 };            ///< 缓冲区数量
+    u32 bufferCount{ 3 };            ///< 缓冲区数量
     PresentMode presentMode{ PresentMode::FIFO };         ///< 呈现模式
     bool enableVsync{ true };                ///< 是否开启垂直同步（辅助字段，优先使用presentMode）
 };
@@ -1020,7 +1020,7 @@ struct SamplerDesc {
     TextureAddressMode addressV{ TextureAddressMode::Wrap }; ///< V轴寻址模式
     TextureAddressMode addressW{ TextureAddressMode::Wrap }; ///< W轴寻址模式
     float mipLodBias{ 0.0f };            ///< Mipmap LOD偏差
-    uint32_t maxAnisotropy{ 1 };      ///< 最大各向异性
+    u32 maxAnisotropy{ 1 };      ///< 最大各向异性
     ComparisonFunc comparisonFunc{ ComparisonFunc::Always }; ///< 比较函数
     math::v4 borderColor{ 0.0f, 0.0f, 0.0f, 0.0f };        ///< 边框颜色
     float minLod{ 0.0f };                ///< 最小LOD
@@ -1057,14 +1057,14 @@ enum class StoreAction {
 
 struct PushConstantRange {
     ShaderStage stageFlags{ ShaderStage::Unknown };
-    uint32_t offset{ 0 };
-    uint32_t size{ 0 };
+    u32 offset{ 0 };
+    u32 size{ 0 };
 };
 
 struct PipelineLayoutDesc {
-    uint32_t setLayoutCount{ 0 };
+    u32 setLayoutCount{ 0 };
     const DescriptorSetLayoutHandle* setLayouts{ nullptr };
-    uint32_t pushConstantRangeCount{ 0 };
+    u32 pushConstantRangeCount{ 0 };
     const PushConstantRange* pushConstantRanges{ nullptr };
 };
 
@@ -1080,8 +1080,8 @@ struct RenderPassDesc {
         StoreAction storeOp{ StoreAction::Store };              ///< 存储操作
         ClearValue clearValue;            ///< 清除值
         u32 sampleCount{ 1 };                  ///< 采样数量
-        uint8_t mipLevel{ 0 };                 ///< Mip层级
-        uint16_t arrayLayer{ 0 };              ///< 数组层级
+        u8 mipLevel{ 0 };                 ///< Mip层级
+        u16 arrayLayer{ 0 };              ///< 数组层级
     };
     
     utl::vector<Attachment> colorAttachments;   ///< 颜色附件
@@ -1093,12 +1093,12 @@ struct RenderPassDesc {
     
     // Timestamp Queries
     QueryPoolHandle timestampQueryPool{handles::INVALID_QUERY_POOL};
-    uint32_t beginTimestampIndex{0};
-    uint32_t endTimestampIndex{0};
+    u32 beginTimestampIndex{0};
+    u32 endTimestampIndex{0};
     bool enableTimestamp{false};
 
     // Multi-View / Layered Rendering
-    uint32_t renderTargetArrayLength{1};
+    u32 renderTargetArrayLength{1};
 };
 
 } // namespace primal::graphics::rhi

@@ -12,12 +12,12 @@ public:
     ~RenderGraphDebug();
 
     void Update(float deltaTime);
-    void Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph& graph, uint32_t width, uint32_t height);
+    void Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph& graph, u32 width, u32 height);
 
     void ToggleEnabled() { enabled_ = !enabled_; }
     bool IsEnabled() const { return enabled_; }
 
-    void SetDebugResources(const std::vector<std::pair<std::string, RenderGraphResource*>>& resources) {
+    void SetDebugResources(const utl::vector<std::pair<std::string, RenderGraphResource*>>& resources) {
         debugResources_ = resources;
         graphDirty_ = true;
     }
@@ -45,13 +45,13 @@ private:
     
     // Cache for descriptor sets (one per debug resource)
     // We rebuild these every frame or when resources change
-    std::vector<rhi::DescriptorSetHandle> textureSets_;
+    utl::vector<rhi::DescriptorSetHandle> textureSets_;
 
     bool enabled_ = false;
     bool graphDirty_ = true;
     
     // Debug Resources
-    std::vector<std::pair<std::string, RenderGraphResource*>> debugResources_;
+    utl::vector<std::pair<std::string, RenderGraphResource*>> debugResources_;
 
     // View state
     math::v2 offset_ = {50.0f, 50.0f}; // Move down to see vertical stack

@@ -42,11 +42,11 @@ void AsyncResourceLoader::Shutdown()
     }
 }
 
-std::vector<TextureLoadResult> AsyncResourceLoader::LoadTexturesParallel(
-    const std::vector<std::string>& paths,
+utl::vector<TextureLoadResult> AsyncResourceLoader::LoadTexturesParallel(
+    const utl::vector<std::string>& paths,
     TextureProgressCallback progress_callback)
 {
-    std::vector<TextureLoadResult> results(paths.size());
+    utl::vector<TextureLoadResult> results(paths.size());
     std::atomic<u32> completed_count{ 0 };
     
     if (!jobsystem::JobSystem::IsRunning())
@@ -86,7 +86,7 @@ std::vector<TextureLoadResult> AsyncResourceLoader::LoadTexturesParallel(
                 // Create proper texture blob format expected by create_resource
                 // Format: width, height, array_size, flags, mip_levels, format, row_pitch, slice_pitch, pixel_data
                 size_t blob_size = (6 * sizeof(u32)) + (2 * sizeof(u32) + slice_pitch);
-                std::vector<u8> blob(blob_size);
+                utl::vector<u8> blob(blob_size);
                 utl::blob_stream_writer writer(blob.data(), blob.size());
                 
                 writer.write(static_cast<u32>(width));
@@ -126,7 +126,7 @@ std::vector<TextureLoadResult> AsyncResourceLoader::LoadTexturesParallel(
 }
 
 jobsystem::JobHandle AsyncResourceLoader::LoadTexturesAsync(
-    const std::vector<std::string>& paths,
+    const utl::vector<std::string>& paths,
     TextureCompleteCallback complete_callback,
     TextureProgressCallback progress_callback)
 {
@@ -134,16 +134,17 @@ jobsystem::JobHandle AsyncResourceLoader::LoadTexturesAsync(
     {
         if (complete_callback)
         {
-            std::vector<TextureLoadResult> empty_results;
+            utl::vector<TextureLoadResult> empty_results;
             complete_callback(empty_results);
         }
         return jobsystem::JobHandle();
     }
     
-    auto results = std::make_shared<std::vector<TextureLoadResult>>(paths.size());
+    auto results = std::make_shared<utl::vector<TextureLoadResult>>(paths.size());
     auto completed_count = std::make_shared<std::atomic<u32>>(0);
     auto total_count = static_cast<u32>(paths.size());
-    auto paths_ptr = std::make_shared<std::vector<std::string>>(paths);
+    auto paths_ptr = std::make_shared<utl::vector<std::string>>();
+    for (const auto& p : paths) { paths_ptr->push_back(p); }
     
     printf("[AsyncResourceLoader] LoadTexturesAsync: %zu paths, results vector size: %zu\n", 
            paths.size(), results->size());
@@ -177,7 +178,7 @@ jobsystem::JobHandle AsyncResourceLoader::LoadTexturesAsync(
                 
                 // Create proper texture blob format expected by create_resource
                 size_t blob_size = (6 * sizeof(u32)) + (2 * sizeof(u32) + slice_pitch);
-                std::vector<u8> blob(blob_size);
+                utl::vector<u8> blob(blob_size);
                 utl::blob_stream_writer writer(blob.data(), blob.size());
                 
                 writer.write(static_cast<u32>(width));
@@ -261,7 +262,7 @@ jobsystem::JobHandle AsyncResourceLoader::LoadMeshAsync(
         std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);
         
-        std::vector<u8> buffer(size);
+        utl::vector<u8> buffer(size);
         if (!file.read(reinterpret_cast<char*>(buffer.data()), size))
         {
             if (complete_callback)

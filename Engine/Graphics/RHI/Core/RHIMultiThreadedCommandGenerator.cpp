@@ -34,8 +34,8 @@ u64 GetCurrentTimeMs() {
  */
 struct ThreadLocalContext {
     std::unique_ptr<RHIMemoryPool> memoryPool;      ///< 线程本地内存池
-    std::vector<CommandGenerationTask> taskQueue;  ///< 线程本地任务队列
-    std::vector<CommandGenerationResult> results;  ///< 线程本地结果队列
+    utl::vector<CommandGenerationTask> taskQueue;  ///< 线程本地任务队列
+    utl::vector<CommandGenerationResult> results;  ///< 线程本地结果队列
     u32 processedTaskCount;                         ///< 已处理任务数量
     f64 totalProcessingTime;                       ///< 总处理时间
     u64 lastCleanupTime;                           ///< 上次清理时间
@@ -163,9 +163,9 @@ public:
      * @brief 获取并清除结果
      * @return 结果列表
      */
-    std::vector<CommandGenerationResult> GetAndClearResults() {
+    utl::vector<CommandGenerationResult> GetAndClearResults() {
         std::lock_guard<std::mutex> lock(resultMutex_);
-        std::vector<CommandGenerationResult> results = std::move(completedResults_);
+        utl::vector<CommandGenerationResult> results = std::move(completedResults_);
         completedResults_.clear();
         return results;
     }
@@ -330,14 +330,14 @@ private:
     }
     
     u32 threadCount_;                                    ///< 线程数量
-    std::vector<std::thread> workerThreads_;            ///< 工作线程列表
+    utl::vector<std::thread> workerThreads_;            ///< 工作线程列表
     std::unique_ptr<RHIMpscQueue> taskQueue_;           ///< 任务队列
     std::atomic<u32> activeTasks_;                       ///< 活跃任务数量
     std::atomic<bool> shutdownFlag_;                     ///< 关闭标志
     RHIDeviceBase& device_;                              ///< 设备引用
     
     // 结果收集
-    std::vector<CommandGenerationResult> completedResults_; ///< 已完成任务结果
+    utl::vector<CommandGenerationResult> completedResults_; ///< 已完成任务结果列表
     std::mutex resultMutex_;                             ///< 结果互斥锁
     
     // 禁用拷贝和移动
@@ -368,8 +368,8 @@ public:
      * @param threadCount 线程数量
      * @return 生成的任务列表
      */
-    std::vector<CommandGenerationTask> DistributeWorkItems(const RenderScene& scene, u32 threadCount) {
-        std::vector<CommandGenerationTask> tasks;
+    utl::vector<CommandGenerationTask> DistributeWorkItems(const RenderScene& scene, u32 threadCount) {
+        utl::vector<CommandGenerationTask> tasks;
         
         if (scene.totalDrawCalls == 0) {
             return tasks;
@@ -464,13 +464,14 @@ public:
      * @param outputs 合并后的输出命令缓冲区列表
      * @return 是否合并成功
      */
-    bool MergeTaskResults(const std::vector<CommandGenerationResult>& results,
-                          std::vector<CommandBufferHandle>& outputs) {
+    bool MergeTaskResults(const utl::vector<CommandGenerationResult>& results,
+                          utl::vector<CommandBufferHandle>& outputs) {
         outputs.clear();
         outputs.reserve(results.size());
         
         // 按任务ID排序结果，确保执行顺序正确
-        std::vector<CommandGenerationResult> sortedResults = results;
+        // 按任务ID排序结果，确保执行顺序正确
+        utl::vector<CommandGenerationResult> sortedResults = results;
         std::sort(sortedResults.begin(), sortedResults.end(),
                  [](const CommandGenerationResult& a, const CommandGenerationResult& b) {
                      return a.taskId < b.taskId;
@@ -501,7 +502,7 @@ public:
      * @param outputCommands 输出命令数量
      * @param outputBuffers 输出缓冲区数量
      */
-    void GetMergeStats(const std::vector<CommandGenerationResult>& results,
+    void GetMergeStats(const utl::vector<CommandGenerationResult>& results,
                       f64& totalTime, u64& outputCommands, u64& outputBuffers) {
         totalTime = 0.0;
         outputCommands = 0;
@@ -547,7 +548,7 @@ public:
      * @param threadCount 线程数量
      * @param activeTasks 活跃任务数量
      */
-    void UpdateMetrics(const std::vector<CommandGenerationResult>& taskResults,
+    void UpdateMetrics(const utl::vector<CommandGenerationResult>& taskResults,
                       u32 threadCount, u32 activeTasks) {
         auto currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch()).count();
@@ -619,7 +620,7 @@ private:
     /**
      * @brief 计算基础性能指标
      */
-    void CalculateBasicMetrics(const std::vector<CommandGenerationResult>& results,
+    void CalculateBasicMetrics(const utl::vector<CommandGenerationResult>& results,
                               u32 threadCount, u32 activeTasks) {
         if (results.empty()) {
             return;
@@ -669,7 +670,7 @@ private:
     MultiThreadPerformanceMetrics metrics_;  ///< 性能指标
     u64 frameCount_;                         ///< 帧计数
     u64 lastUpdateTime_;                     ///< 上次更新时间
-    std::vector<f64> frameHistory_;          ///< 帧历史数据
+    utl::vector<f64> frameHistory_;          ///< 帧历史数据
     
     // 禁用拷贝和移动
     DISABLE_COPY_AND_MOVE(MultiThreadPerformanceAnalyzer);
@@ -743,7 +744,7 @@ void RHIMultiThreadedCommandGenerator::Shutdown() {
 }
 
 bool RHIMultiThreadedCommandGenerator::GenerateCommandsParallel(const RenderScene& scene, 
-                                                                std::vector<CommandBufferHandle>& outputs) {
+                                                                utl::vector<CommandBufferHandle>& outputs) {
     if (!isInitialized_) {
         std::lock_guard<std::mutex> lock(stateMutex_);
         systemStatus_ = "Not initialized";
@@ -789,7 +790,8 @@ bool RHIMultiThreadedCommandGenerator::GenerateCommandsParallel(const RenderScen
         workerPool_->WaitForAllTasks();
         
         // 收集任务结果
-        std::vector<CommandGenerationResult> results = workerPool_->GetAndClearResults();
+        // 收集任务结果
+        utl::vector<CommandGenerationResult> results = workerPool_->GetAndClearResults();
         
         // 验证结果数量
         if (results.size() != tasks.size()) {
@@ -825,7 +827,7 @@ bool RHIMultiThreadedCommandGenerator::GenerateCommandBuffer(const RenderScene& 
                                                            CommandBufferHandle& commandBuffer) {
     // 简化实现：重用并行逻辑，但只用一个线程
     // 实际生产代码可能会有专门的单线程优化路径
-    std::vector<CommandBufferHandle> outputs;
+    utl::vector<CommandBufferHandle> outputs;
     bool result = GenerateCommandsParallel(scene, outputs);
     
     if (result && !outputs.empty()) {

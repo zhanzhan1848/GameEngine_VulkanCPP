@@ -184,7 +184,7 @@ protected:
      * @brief 获取当前帧索引实现
      * @return 当前帧索引
      */
-    uint32_t getCurrentFrameIndexImpl() const;
+    u32 getCurrentFrameIndexImpl() const;
     
     /**
      * @brief 提交命令缓冲区实现
@@ -216,7 +216,7 @@ protected:
      */
     void destroyQueryPoolImpl(QueryPoolHandle handle);
 
-    bool getQueryPoolResultsImpl(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride);
+    bool getQueryPoolResultsImpl(QueryPoolHandle handle, u32 firstQuery, u32 queryCount, void* data, size_t stride);
 
     /**
      * @brief 获取时间戳周期实现
@@ -258,7 +258,7 @@ protected:
     DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc);
     PipelineLayoutHandle createPipelineLayoutImpl(const PipelineLayoutDesc& desc);
     DescriptorSetHandle createDescriptorSetImpl(const DescriptorSetDesc& desc);
-    void updateDescriptorSetsImpl(uint32_t writeCount, const WriteDescriptorSet* writes);
+    void updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes);
 
     /**
      * @brief 创建渲染通道实现
@@ -308,7 +308,7 @@ private:
     class RHIAdaptiveMemoryPool* memoryPool_{nullptr}; ///< 自适应内存池 (Shared)
     MTL::Heap* heap_{nullptr};                         ///< Metal堆 (Shared)
     
-    std::atomic<uint32_t> currentFrameIndex_{0};             ///< 当前帧索引
+    std::atomic<u32> currentFrameIndex_{0};             ///< 当前帧索引
     
     RHIAllocator<MetalBuffer> bufferAllocator_; ///< 缓冲区分配器
     RHIAllocator<MetalTexture> textureAllocator_; ///< 纹理分配器

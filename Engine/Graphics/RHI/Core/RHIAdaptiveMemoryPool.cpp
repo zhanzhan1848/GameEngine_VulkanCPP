@@ -666,8 +666,8 @@ MemoryUsagePattern RHIAdaptiveMemoryPool::detectUsagePattern(const std::deque<Us
     }
     
     // 分析最近N个窗口的特征
-    std::vector<f32> allocationRates;
-    std::vector<f32> usageVariations;
+    utl::vector<f32> allocationRates;
+    utl::vector<f32> usageVariations;
     
     for (size_t i = 1; i < windows.size(); ++i) {
         const UsageWindow& current = windows[i];
@@ -750,7 +750,7 @@ f32 RHIAdaptiveMemoryPool::calculatePatternConfidence(MemoryUsagePattern pattern
     f32 patternConsistency = 0.8f; // 基础一致性
     if (pattern != MemoryUsagePattern::Unknown) {
         // 计算模式的一致性分数
-        std::vector<MemoryUsagePattern> recentPatterns;
+        utl::vector<MemoryUsagePattern> recentPatterns;
         for (size_t i = windows.size() / 2; i < windows.size(); ++i) {
             // 简化处理：基于窗口特征判断模式
             // 实际应该复用detectUsagePattern的逻辑

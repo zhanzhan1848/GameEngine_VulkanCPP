@@ -11,7 +11,7 @@
 
 namespace primal::graphics::rhi {
 
-MetalQueryPool::MetalQueryPool(MTL::Device* device, MetalQueryType type, uint32_t count)
+MetalQueryPool::MetalQueryPool(MTL::Device* device, MetalQueryType type, u32 count)
     : type_(type), count_(count) {
     if (!device) return;
 
@@ -42,8 +42,8 @@ MetalQueryPool::MetalQueryPool(MTL::Device* device, MetalQueryType type, uint32_
         
         desc->release();
     } else if (type == MetalQueryType::Occlusion) {
-        // Occlusion 查询使用 Buffer 存储结果 (uint64_t per query)
-        visibilityBuffer_ = device->newBuffer(count * sizeof(uint64_t), MTL::ResourceStorageModeShared);
+        // Occlusion 查询使用 Buffer 存储结果 (u64 per query)
+        visibilityBuffer_ = device->newBuffer(count * sizeof(u64), MTL::ResourceStorageModeShared);
         visibilityBuffer_->setLabel(NS::String::string("Occlusion Query Pool", NS::UTF8StringEncoding));
     }
 }
@@ -59,7 +59,7 @@ MetalQueryPool::~MetalQueryPool() {
     }
 }
 
-bool MetalQueryPool::GetResults(uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) {
+bool MetalQueryPool::GetResults(u32 firstQuery, u32 queryCount, void* data, size_t stride) {
     if (firstQuery + queryCount > count_) return false;
     if (!data) return false;
 
@@ -67,18 +67,18 @@ bool MetalQueryPool::GetResults(uint32_t firstQuery, uint32_t queryCount, void* 
         NS::Range range = NS::Range(firstQuery, queryCount);
         NS::Data* resultData = buffer_->resolveCounterRange(range);
         if (resultData) {
-            // Timestamp 结果通常是 uint64_t
+            // Timestamp 结果通常是 u64
             const void* bytes = resultData->mutableBytes();
-            // 这里假设 data 也是 uint64_t 数组，且 stride 是 sizeof(uint64_t)
+            // 这里假设 data 也是 u64 数组，且 stride 是 sizeof(u64)
             // 如果 stride 不同，需要逐个拷贝
-            if (stride == sizeof(uint64_t)) {
-                memcpy(data, bytes, queryCount * sizeof(uint64_t));
+            if (stride == sizeof(u64)) {
+                memcpy(data, bytes, queryCount * sizeof(u64));
             } else {
-                const uint8_t* src = static_cast<const uint8_t*>(bytes);
-                uint8_t* dst = static_cast<uint8_t*>(data);
-                for (uint32_t i = 0; i < queryCount; ++i) {
-                    memcpy(dst, src, sizeof(uint64_t));
-                    src += sizeof(uint64_t);
+                const u8* src = static_cast<const u8*>(bytes);
+                u8* dst = static_cast<u8*>(data);
+                for (u32 i = 0; i < queryCount; ++i) {
+                    memcpy(dst, src, sizeof(u64));
+                    src += sizeof(u64);
                     dst += stride;
                 }
             }
@@ -86,11 +86,11 @@ bool MetalQueryPool::GetResults(uint32_t firstQuery, uint32_t queryCount, void* 
         }
     } else if (type_ == MetalQueryType::Occlusion && visibilityBuffer_) {
         // 直接从 Buffer 读取
-        const uint8_t* src = static_cast<const uint8_t*>(visibilityBuffer_->contents()) + firstQuery * sizeof(uint64_t);
-        uint8_t* dst = static_cast<uint8_t*>(data);
-        for (uint32_t i = 0; i < queryCount; ++i) {
-            memcpy(dst, src, sizeof(uint64_t));
-            src += sizeof(uint64_t);
+        const u8* src = static_cast<const u8*>(visibilityBuffer_->contents()) + firstQuery * sizeof(u64);
+        u8* dst = static_cast<u8*>(data);
+        for (u32 i = 0; i < queryCount; ++i) {
+            memcpy(dst, src, sizeof(u64));
+            src += sizeof(u64);
             dst += stride;
         }
         return true;

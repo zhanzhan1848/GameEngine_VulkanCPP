@@ -19,8 +19,8 @@ struct RenderSystemInitInfo {
     rhi::RHIDeviceBase* device{nullptr};
     rhi::RHIEntityManager* entityManager{nullptr};
     platform::window_handle window{nullptr};
-    uint32_t width{0};
-    uint32_t height{0};
+    u32 width{0};
+    u32 height{0};
 };
 
 /**
@@ -62,7 +62,7 @@ public:
      * @brief 获取当前帧索引 (0 to MAX_FRAMES_IN_FLIGHT-1)
      * @return 当前帧索引
      */
-    uint32_t GetCurrentFrameIndex() const { return currentFrameIndex_; }
+    u32 GetCurrentFrameIndex() const { return currentFrameIndex_; }
 
     /**
      * @brief 获取当前帧的 Command Buffer
@@ -126,7 +126,7 @@ public:
      * @param width 新宽度
      * @param height 新高度
      */
-    void Resize(uint32_t width, uint32_t height);
+    void Resize(u32 width, u32 height);
 
     ForwardRenderer& GetRenderer() { return forwardRenderer_; }
 
@@ -135,7 +135,7 @@ private:
      * @brief 等待上一帧完成 (CPU wait)
      * @param frameIndex 当前帧索引
      */
-    void Wait(uint32_t frameIndex);
+    void Wait(u32 frameIndex);
 
     rhi::RHIDeviceBase* device_{nullptr};
     rhi::RHISwapChain* swapChain_{nullptr};
@@ -144,8 +144,8 @@ private:
     utl::vector<rhi::CommandBufferHandle> cmdBufferHandles_;
     utl::vector<rhi::RHICommandBuffer*> cmdBuffers_;
     utl::vector<rhi::SyncHandle> frameFences_; // CPU-GPU sync fences
-    uint32_t currentFrameIndex_{0};
-    uint32_t currentImageIndex_{0}; // Index of the swapchain image acquired for the current frame
+    u32 currentFrameIndex_{0};
+    u32 currentImageIndex_{0}; // Index of the swapchain image acquired for the current frame
 
     rhi::ResourceHandle depthStencilTexture_{rhi::handles::INVALID_RESOURCE};
     std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>> materialInstances_;

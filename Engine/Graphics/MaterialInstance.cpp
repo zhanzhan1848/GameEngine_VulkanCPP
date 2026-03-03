@@ -184,7 +184,7 @@ void MaterialInstance::SetUniformData(u32 offset, const void* data, u32 size) {
 
     // Use mapped memory if available (faster)
     if (uniformBuffersMapped_[currentFrameIndex_]) {
-        memcpy(static_cast<uint8_t*>(uniformBuffersMapped_[currentFrameIndex_]) + offset, data, size);
+        memcpy(static_cast<u8*>(uniformBuffersMapped_[currentFrameIndex_]) + offset, data, size);
         uniformDirty_ = true;
     } else {
         // Fallback to RHI update
@@ -211,13 +211,13 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
     rhi::DescriptorSetHandle currentSet = GetDescriptorSet();
     if (!needsUpdate || currentSet == rhi::handles::INVALID_RESOURCE) return;
 
-    std::vector<rhi::WriteDescriptorSet> writes;
+    utl::vector<rhi::WriteDescriptorSet> writes;
     writes.reserve(pendingTextures_.size() + pendingSamplers_.size() + pendingBuffers_.size());
     
-    std::vector<rhi::DescriptorImageInfo> imageInfos;
+    utl::vector<rhi::DescriptorImageInfo> imageInfos;
     imageInfos.reserve(pendingTextures_.size() + pendingSamplers_.size());
 
-    std::vector<rhi::DescriptorBufferInfo> bufferInfos;
+    utl::vector<rhi::DescriptorBufferInfo> bufferInfos;
     bufferInfos.reserve(pendingBuffers_.size());
 
     for (const auto& tex : pendingTextures_) {

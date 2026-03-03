@@ -53,7 +53,7 @@ DefaultMpscQueue::DefaultMpscQueue(RHIDeviceBase& device, const QueueConfig& con
     , initialized_(false) {
     
     // 预分配优先级队列
-    for (uint32_t i = 0; i < PRIORITY_LEVELS; ++i) {
+    for (u32 i = 0; i < PRIORITY_LEVELS; ++i) {
         priorityQueues_[i] = moodycamel::ConcurrentQueue<WorkItem>();
     }
 }
@@ -135,7 +135,7 @@ void DefaultMpscQueue::destroyImpl() {
     // 清空所有队列
     workQueue_ = moodycamel::ConcurrentQueue<WorkItem>();
     
-    for (uint32_t i = 0; i < PRIORITY_LEVELS; ++i) {
+    for (u32 i = 0; i < PRIORITY_LEVELS; ++i) {
         priorityQueues_[i] = moodycamel::ConcurrentQueue<WorkItem>();
     }
     
@@ -150,13 +150,13 @@ void DefaultMpscQueue::destroyImpl() {
     
 }
 
-uint64_t DefaultMpscQueue::Enqueue(const WorkItem& workItem) {
+u64 DefaultMpscQueue::Enqueue(const WorkItem& workItem) {
     if (!initialized_ || !running_.load()) {
         return 0;
     }
 
     // 检查队列大小限制
-    uint32_t currentSize = GetCurrentSize();
+    u32 currentSize = GetCurrentSize();
     if (currentSize >= config_.maxQueueSize) {
         stats_.totalFailed.fetch_add(1);
         return 0;
@@ -165,15 +165,15 @@ uint64_t DefaultMpscQueue::Enqueue(const WorkItem& workItem) {
     return enqueueByPriority(workItem);
 }
 
-uint32_t DefaultMpscQueue::EnqueueBatch(const WorkItem* workItems, uint32_t count) {
+u32 DefaultMpscQueue::EnqueueBatch(const WorkItem* workItems, u32 count) {
     if (!initialized_ || !running_.load() || !workItems) {
         return 0;
     }
 
-    uint32_t successCount = 0;
-    uint32_t currentSize = GetCurrentSize();
+    u32 successCount = 0;
+    u32 currentSize = GetCurrentSize();
     
-    for (uint32_t i = 0; i < count && currentSize < config_.maxQueueSize; ++i) {
+    for (u32 i = 0; i < count && currentSize < config_.maxQueueSize; ++i) {
         if (enqueueByPriority(workItems[i]) != 0) {
             successCount++;
             currentSize++;
@@ -191,14 +191,14 @@ bool DefaultMpscQueue::Dequeue(WorkItem& workItem) {
     return dequeueByPriority(workItem);
 }
 
-uint32_t DefaultMpscQueue::DequeueBatch(WorkItem* workItems, uint32_t maxCount) {
+u32 DefaultMpscQueue::DequeueBatch(WorkItem* workItems, u32 maxCount) {
     if (!initialized_ || !workItems || maxCount == 0) {
         return 0;
     }
 
-    uint32_t dequeuedCount = 0;
+    u32 dequeuedCount = 0;
     
-    for (uint32_t i = 0; i < maxCount; ++i) {
+    for (u32 i = 0; i < maxCount; ++i) {
         if (!dequeueByPriority(workItems[i])) {
             break;
         }
@@ -208,7 +208,7 @@ uint32_t DefaultMpscQueue::DequeueBatch(WorkItem* workItems, uint32_t maxCount) 
     return dequeuedCount;
 }
 
-bool DefaultMpscQueue::CancelWork(uint64_t workId) {
+bool DefaultMpscQueue::CancelWork(u64 workId) {
     std::lock_guard<std::mutex> lock(stateMutex_);
     
     auto it = workItemStates_.find(workId);
@@ -222,7 +222,7 @@ bool DefaultMpscQueue::CancelWork(uint64_t workId) {
     return false;
 }
 
-WorkItemState DefaultMpscQueue::GetWorkState(uint64_t workId) const {
+WorkItemState DefaultMpscQueue::GetWorkState(u64 workId) const {
     std::lock_guard<std::mutex> lock(stateMutex_);
     
     auto it = workItemStates_.find(workId);
@@ -233,7 +233,7 @@ WorkItemState DefaultMpscQueue::GetWorkState(uint64_t workId) const {
     return WorkItemState::Pending;
 }
 
-bool DefaultMpscQueue::WaitForWork(uint64_t workId, uint32_t timeoutMs) {
+bool DefaultMpscQueue::WaitForWork(u64 workId, u32 timeoutMs) {
     std::unique_lock<std::mutex> lock(stateMutex_);
     
     auto it = workItemStates_.find(workId);
@@ -288,10 +288,10 @@ bool DefaultMpscQueue::Validate() const {
     }
     
     // 验证统计信息的一致性
-    uint64_t processed = stats_.totalProcessed.load();
-    uint64_t completed = stats_.totalCompleted.load();
-    uint64_t failed = stats_.totalFailed.load();
-    uint64_t cancelled = stats_.totalCancelled.load();
+    u64 processed = stats_.totalProcessed.load();
+    u64 completed = stats_.totalCompleted.load();
+    u64 failed = stats_.totalFailed.load();
+    u64 cancelled = stats_.totalCancelled.load();
     
     // 处理的数量应该等于完成+失败+取消的数量
     if (processed != (completed + failed + cancelled)) {
@@ -316,12 +316,12 @@ void DefaultMpscQueue::Clear() {
     // 清空所有队列
     workQueue_ = moodycamel::ConcurrentQueue<WorkItem>();
     
-    for (uint32_t i = 0; i < PRIORITY_LEVELS; ++i) {
+    for (u32 i = 0; i < PRIORITY_LEVELS; ++i) {
         priorityQueues_[i] = moodycamel::ConcurrentQueue<WorkItem>();
     }
     
     // 更新统计信息
-    uint32_t currentSize = stats_.currentQueueSize.load();
+    u32 currentSize = stats_.currentQueueSize.load();
     stats_.totalDequeued.fetch_add(currentSize);
     stats_.currentQueueSize.store(0);
     
@@ -333,7 +333,7 @@ bool DefaultMpscQueue::IsEmpty() const {
         return false;
     }
     
-    for (uint32_t i = 0; i < PRIORITY_LEVELS; ++i) {
+    for (u32 i = 0; i < PRIORITY_LEVELS; ++i) {
         if (priorityQueues_[i].size_approx() > 0) {
             return false;
         }
@@ -342,7 +342,7 @@ bool DefaultMpscQueue::IsEmpty() const {
     return true;
 }
 
-uint32_t DefaultMpscQueue::GetQueueSize() const {
+u32 DefaultMpscQueue::GetQueueSize() const {
     return GetCurrentSize();
 }
 
@@ -375,14 +375,14 @@ void DefaultMpscQueue::ResetStats() {
 
 // === 私有辅助方法实现 ===
 
-uint64_t DefaultMpscQueue::enqueueByPriority(const WorkItem& workItem) {
+u64 DefaultMpscQueue::enqueueByPriority(const WorkItem& workItem) {
     WorkItem newWorkItem = workItem;
     newWorkItem.id = GenerateWorkId();
     newWorkItem.state = WorkItemState::Pending;
     newWorkItem.timestamp = GetCurrentTimestamp();
     
     // 根据优先级选择队列
-    uint32_t priorityIndex = static_cast<uint32_t>(workItem.priority);
+    u32 priorityIndex = static_cast<u32>(workItem.priority);
     if (priorityIndex >= PRIORITY_LEVELS) {
         priorityIndex = PRIORITY_LEVELS - 1; // 限制在有效范围内
     }
@@ -410,7 +410,7 @@ uint64_t DefaultMpscQueue::enqueueByPriority(const WorkItem& workItem) {
 
 bool DefaultMpscQueue::dequeueByPriority(WorkItem& workItem) {
     // 按优先级顺序尝试出队（Critical -> High -> Normal -> Low）
-    for (int32_t i = PRIORITY_LEVELS - 1; i >= 0; --i) {
+    for (s32 i = PRIORITY_LEVELS - 1; i >= 0; --i) {
         if (priorityQueues_[i].try_dequeue(workItem)) {
             // 更新状态
             {
@@ -468,7 +468,7 @@ void DefaultMpscQueue::workerThreadFunc() {
         
         if (hasWorkItem) {
             auto endTime = GetCurrentTimestamp();
-            uint64_t processingTime = endTime - startTime;
+            u64 processingTime = endTime - startTime;
             stats_.totalProcessingTime.fetch_add(processingTime);
             stats_.totalProcessed.fetch_add(1);
         }

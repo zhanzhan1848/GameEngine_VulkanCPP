@@ -17,7 +17,7 @@ namespace {
 
 class BlobReader {
 public:
-    BlobReader(const uint8_t* buffer, size_t size) : buffer_(buffer), size_(size), offset_(0) {}
+    BlobReader(const u8* buffer, size_t size) : buffer_(buffer), size_(size), offset_(0) {}
 
     template<typename T>
     T Read() {
@@ -40,7 +40,7 @@ public:
          return ptr;
     }
 
-    std::string ReadString(uint32_t length) {
+    std::string ReadString(u32 length) {
         if (length == 0) return "";
         assert(offset_ + length <= size_);
         std::string s(reinterpret_cast<const char*>(buffer_ + offset_), length);
@@ -61,13 +61,13 @@ public:
     }
 
 private:
-    const uint8_t* buffer_;
+    const u8* buffer_;
     size_t size_;
     size_t offset_;
 };
 
 // Helper for alignment
-// inline uint32_t align_up(uint32_t s, uint32_t a) { return (s + a - 1) & ~(a - 1); }
+// inline u32 align_up(u32 s, u32 a) { return (s + a - 1) & ~(a - 1); }
 
 } // namespace
 
@@ -77,20 +77,20 @@ private:
 //   data: 二进制数据指针
 //   size: 数据大小
 // 返回: 加载的网格信息列表
-std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDeviceBase* device, const void* data, uint32_t size) {
-    std::vector<SceneDataMeshInfo> result;
+utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDeviceBase* device, const void* data, u32 size) {
+    utl::vector<SceneDataMeshInfo> result;
     if (!data || !device) return result;
 
     std::cout << "SceneDataAdapter::LoadRenderItemData: Start. Size=" << size << std::endl;
 
-    BlobReader reader(static_cast<const uint8_t*>(data), size);
+    BlobReader reader(static_cast<const u8*>(data), size);
 
     // DEBUG: Dump first 16 integers
-    const uint32_t* debugPtr = reinterpret_cast<const uint32_t*>(reader.GetCurrentPtr());
+    const u32* debugPtr = reinterpret_cast<const u32*>(reader.GetCurrentPtr());
     std::cout << "File Header Dump (First 16 u32):" << std::endl;
-    const uint8_t* u8Data = static_cast<const uint8_t*>(data);
+    const u8* u8Data = static_cast<const u8*>(data);
     for (int i = 0; i < 16; ++i) {
-        if (u8Data + (i + 1) * sizeof(uint32_t) > u8Data + size) break;
+        if (u8Data + (i + 1) * sizeof(u32) > u8Data + size) break;
         std::cout << "[" << i << "]: " << debugPtr[i] << " (0x" << std::hex << debugPtr[i] << std::dec << ")" << std::endl;
     }
 
@@ -102,7 +102,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
     // But to be safe, we can check if the first uint32 is reasonably small and followed by string length?
     // Actually, let's just implement the New Format reading as we control the pipeline.
     
-    uint32_t numMaterials = reader.Read<uint32_t>();
+    u32 numMaterials = reader.Read<u32>();
     std::cout << "SceneDataAdapter: Header NumMaterials=" << numMaterials << std::endl;
     
     struct TempMaterialData {
@@ -110,10 +110,10 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         std::string diffuse;
         std::string normal;
     };
-    std::vector<TempMaterialData> tempMaterials;
+    utl::vector<TempMaterialData> tempMaterials;
 
-    std::vector<std::shared_ptr<MaterialInstance>> materialInstances;
-    std::vector<std::shared_ptr<Material>> materials;
+    utl::vector<std::shared_ptr<MaterialInstance>> materialInstances;
+    utl::vector<std::shared_ptr<Material>> materials;
     
     // Basic sanity check: if numMaterials is huge (e.g. > 10000), it might be lodCount from old format (which is usually small, e.g. 1-5).
     // Wait, lodCount is usually small. numMaterials is e.g. 25.
@@ -127,9 +127,9 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         materials.reserve(numMaterials);
         tempMaterials.reserve(numMaterials);
         
-        for (uint32_t i = 0; i < numMaterials; ++i) {
+        for (u32 i = 0; i < numMaterials; ++i) {
              if (reader.Remaining() < 4) break;
-             uint32_t nameLen = reader.Read<uint32_t>();
+             u32 nameLen = reader.Read<u32>();
              if (nameLen > 1000) {
                  // Something is wrong, maybe old format?
                  std::cerr << "SceneDataAdapter: Material Name too long (" << nameLen << "), possible format mismatch." << std::endl;
@@ -137,17 +137,17 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              }
              std::string name = reader.ReadString(nameLen);
              
-             uint32_t diffLen = reader.Read<uint32_t>();
+             u32 diffLen = reader.Read<u32>();
              std::string diffuse = reader.ReadString(diffLen);
              
-             uint32_t normLen = reader.Read<uint32_t>();
+             u32 normLen = reader.Read<u32>();
              std::string normal = reader.ReadString(normLen);
              
              // Read roughness and metallic (added by pack_geometry.py)
-             uint32_t roughLen = reader.Read<uint32_t>();
+             u32 roughLen = reader.Read<u32>();
              std::string roughness = reader.ReadString(roughLen);
              
-             uint32_t metalLen = reader.Read<uint32_t>();
+             u32 metalLen = reader.Read<u32>();
              std::string metallic = reader.ReadString(metalLen);
              
              tempMaterials.push_back({name, diffuse, normal});
@@ -171,21 +171,21 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
 
     // 2. lod_count
     if (reader.Remaining() < 4) return result;
-    uint32_t lodCount = reader.Read<uint32_t>();
+    u32 lodCount = reader.Read<u32>();
     std::cout << "lodCount: " << lodCount << std::endl;
     
-    std::vector<float> thresholds(lodCount);
+    utl::vector<float> thresholds(lodCount);
     if (reader.Remaining() < sizeof(float) * lodCount) return result;
     reader.Read(thresholds.data(), sizeof(float) * lodCount);
 
     // Skip lod_offsets
-    if (reader.Remaining() < sizeof(uint32_t) * lodCount) return result;
-    reader.Skip(sizeof(uint32_t) * lodCount);
+    if (reader.Remaining() < sizeof(u32) * lodCount) return result;
+    reader.Skip(sizeof(u32) * lodCount);
     
-    for (uint32_t lod = 0; lod < lodCount; ++lod) {
+    for (u32 lod = 0; lod < lodCount; ++lod) {
         if (reader.Remaining() < 8) break;
-        uint32_t submeshCount = reader.Read<uint32_t>();
-        uint32_t sizeOfSubmeshes = reader.Read<uint32_t>(); // Read and use variable to avoid skip confusion
+        u32 submeshCount = reader.Read<u32>();
+        u32 sizeOfSubmeshes = reader.Read<u32>(); // Read and use variable to avoid skip confusion
         
         std::cout << "LOD " << lod << ": SubmeshCount=" << submeshCount << ", SizeOfSubmeshes=" << sizeOfSubmeshes << std::endl;
 
@@ -193,7 +193,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         int loadedCount = 0;
         int failedCount = 0;
 
-        for (uint32_t i = 0; i < submeshCount; ++i) {
+        for (u32 i = 0; i < submeshCount; ++i) {
              if (reader.Remaining() < 4) break;
              
              // =====================================================================
@@ -201,18 +201,18 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // Compact format header: [NameLen] [Name] [LodId] [MatIdx] [ElemSize] [ElemType] [VertCount] [IdxSize] [IdxCount] [LodThreshold]
              // =====================================================================
              
-             int32_t materialIndex = -1;
-             uint32_t elementSize = 0;
-             uint32_t vertexCount = 0;
-             uint32_t indexCount = 0;
-             uint32_t indexSize = 2;  // Default
-             uint32_t elementsType = 0;
-             uint32_t primitiveTopology = 4; // TriangleList
+             s32 materialIndex = -1;
+             u32 elementSize = 0;
+             u32 vertexCount = 0;
+             u32 indexCount = 0;
+             u32 indexSize = 2;  // Default
+             u32 elementsType = 0;
+             u32 primitiveTopology = 4; // TriangleList
              std::string meshName;
              bool isCompactFormat = false;
              
              // Read first value and try to detect format
-             uint32_t firstVal = reader.Read<uint32_t>();
+             u32 firstVal = reader.Read<u32>();
              
              // Check if firstVal could be a name length (Compact format)
              // Name length should be reasonable (0-200 chars)
@@ -220,7 +220,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  // Peek at the potential name
                  const char* namePtr = static_cast<const char*>(reader.GetCurrentPtr());
                  bool looksLikeString = true;
-                 for (uint32_t c = 0; c < firstVal && c < 50; ++c) {
+                 for (u32 c = 0; c < firstVal && c < 50; ++c) {
                      char ch = namePtr[c];
                      if (ch != 0 && (ch < 32 || ch > 126)) {
                          looksLikeString = false;
@@ -233,13 +233,13 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                      meshName = std::string(namePtr, firstVal);
                      reader.Skip(firstVal);
                      
-                     uint32_t lodId = reader.Read<uint32_t>();
-                     materialIndex = (int32_t)reader.Read<uint32_t>();
-                     elementSize = reader.Read<uint32_t>();
-                     elementsType = reader.Read<uint32_t>();
-                     vertexCount = reader.Read<uint32_t>();
-                     indexSize = reader.Read<uint32_t>();
-                     indexCount = reader.Read<uint32_t>();
+                     u32 lodId = reader.Read<u32>();
+                     materialIndex = (s32)reader.Read<u32>();
+                     elementSize = reader.Read<u32>();
+                     elementsType = reader.Read<u32>();
+                     vertexCount = reader.Read<u32>();
+                     indexSize = reader.Read<u32>();
+                     indexCount = reader.Read<u32>();
                      float lodThreshold;
                      reader.Read(&lodThreshold, sizeof(float));
                      
@@ -263,22 +263,22 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              if (!isCompactFormat) {
                  // Fallback: Use original format detection
                  // firstVal was either materialIndex or elementSize (old format)
-                 elementSize = reader.Read<uint32_t>();
-                 uint32_t vertexCount_tmp, indexCount_tmp, elementsType_tmp, primitiveTopology_tmp;
+                 elementSize = reader.Read<u32>();
+                 u32 vertexCount_tmp, indexCount_tmp, elementsType_tmp, primitiveTopology_tmp;
                  
                  // Heuristic to detect Old Format
                  if (elementSize > 200) {
                      // Old Format: [ElementSize] [VertexCount] [IndexCount] [ElementType] [PrimitiveTopology]
-                     uint32_t realElementSize = firstVal;
-                     uint32_t realVertexCount = elementSize;
+                     u32 realElementSize = firstVal;
+                     u32 realVertexCount = elementSize;
                      
                      vertexCount = realVertexCount;
                      elementSize = realElementSize;
                      materialIndex = -1;
                      
-                     indexCount_tmp = reader.Read<uint32_t>();
-                     elementsType_tmp = reader.Read<uint32_t>();
-                     primitiveTopology_tmp = reader.Read<uint32_t>();
+                     indexCount_tmp = reader.Read<u32>();
+                     elementsType_tmp = reader.Read<u32>();
+                     primitiveTopology_tmp = reader.Read<u32>();
                      
                      indexCount = indexCount_tmp;
                      elementsType = elementsType_tmp;
@@ -290,7 +290,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  } else {
                      // Engine Format (pack_geometry): [MatIdx i32] [ElemSize u32] [VertCount u32] [IdxCount u32] [ElemType u32] [PrimTopo u32]
                      // NOTE: elementSize was already read at line 264
-                     materialIndex = (int32_t)firstVal;
+                     materialIndex = (s32)firstVal;
                      
                      if (reader.Remaining() < 16) {  // 4 remaining fields * 4 bytes (ElemSize already read)
                          std::cerr << "ERROR: Incomplete submesh header at LOD " << lod << ", submesh " << i << std::endl;
@@ -299,10 +299,10 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                      }
                      
                      // elementSize already set above at line 264
-                     vertexCount = reader.Read<uint32_t>();
-                     indexCount = reader.Read<uint32_t>();
-                     elementsType = reader.Read<uint32_t>();
-                     primitiveTopology = reader.Read<uint32_t>();
+                     vertexCount = reader.Read<u32>();
+                     indexCount = reader.Read<u32>();
+                     elementsType = reader.Read<u32>();
+                     primitiveTopology = reader.Read<u32>();
                      indexSize = (vertexCount < (1 << 16)) ? 2 : 4;
                      
                      std::cout << "DEBUG: Detected Engine Format (pack_geometry). MatIdx=" << materialIndex 
@@ -319,36 +319,36 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                        << ", Indices=" << indexCount << ", ElementSize=" << elementSize << std::endl;
 
              // Data sizes
-             uint32_t positionSize = 12 * vertexCount;
-             uint32_t elementBufferSize = elementSize * vertexCount;
+             u32 positionSize = 12 * vertexCount;
+             u32 elementBufferSize = elementSize * vertexCount;
              // indexSize already defined above (line 199)
-             uint32_t indexBufferSize = indexSize * indexCount;
+             u32 indexBufferSize = indexSize * indexCount;
              
              // Alignment (Match MeshCPU.cpp align16 logic which aligns absolute offset)
              size_t currentOffset = reader.GetOffset();
              
-             uint32_t posPadding = 0;
+             u32 posPadding = 0;
              if (vertexCount > 0) {
                  size_t endPos = currentOffset + positionSize;
                  size_t alignedEndPos = (endPos + 15) & ~15;
-                 posPadding = (uint32_t)(alignedEndPos - endPos);
+                 posPadding = (u32)(alignedEndPos - endPos);
              }
              
-             uint32_t elemPadding = 0;
+             u32 elemPadding = 0;
              if (elementBufferSize > 0) {
                  size_t currentElemOffset = currentOffset + positionSize + posPadding;
                  size_t endElem = currentElemOffset + elementBufferSize;
                  size_t alignedEndElem = (endElem + 15) & ~15;
-                 elemPadding = (uint32_t)(alignedEndElem - endElem);
+                 elemPadding = (u32)(alignedEndElem - endElem);
              }
              
              // Pointers
-             const uint8_t* posPtr = static_cast<const uint8_t*>(reader.GetCurrentPtr());
-             const uint8_t* elemPtr = posPtr + positionSize + posPadding;
-             const uint8_t* idxPtr = elemPtr + elementBufferSize + elemPadding;
+             const u8* posPtr = static_cast<const u8*>(reader.GetCurrentPtr());
+             const u8* elemPtr = posPtr + positionSize + posPadding;
+             const u8* idxPtr = elemPtr + elementBufferSize + elemPadding;
              
              // Skip data in reader
-             uint32_t totalSize = positionSize + posPadding + elementBufferSize + elemPadding + indexBufferSize;
+             u32 totalSize = positionSize + posPadding + elementBufferSize + elemPadding + indexBufferSize;
              if (reader.Remaining() < totalSize) {
                  std::cerr << "Incomplete submesh data." << std::endl;
                  break;
@@ -383,23 +383,23 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // Parse MSHL (Meshlets) section
              // NOTE: We need to peek at the magic without advancing if it doesn't match
              if (reader.Remaining() >= 8) {
-                 const uint8_t* peekPtr = static_cast<const uint8_t*>(reader.GetCurrentPtr());
-                 uint32_t meshletMagic = *reinterpret_cast<const uint32_t*>(peekPtr);
+                 const u8* peekPtr = static_cast<const u8*>(reader.GetCurrentPtr());
+                 u32 meshletMagic = *reinterpret_cast<const u32*>(peekPtr);
                  
                  if (meshletMagic == 0x4C48534D) { // 'MSHL'
                      reader.Skip(4); // Consume the magic
-                     uint32_t meshletCount = reader.Read<uint32_t>();
+                     u32 meshletCount = reader.Read<u32>();
                      
                      if (meshletCount > 0 && meshletCount < 100000) {
                          meshAsset.meshlets.resize(meshletCount);
                          
                          // Read meshlet data (60 bytes each)
-                         for (uint32_t m = 0; m < meshletCount; ++m) {
+                         for (u32 m = 0; m < meshletCount; ++m) {
                              rhi::RHIMeshlet& ml = meshAsset.meshlets[m];
-                             ml.vertex_offset = reader.Read<uint32_t>();
-                             ml.triangle_offset = reader.Read<uint32_t>();
-                             ml.vertex_count = reader.Read<uint32_t>();
-                             ml.triangle_count = reader.Read<uint32_t>();
+                             ml.vertex_offset = reader.Read<u32>();
+                             ml.triangle_offset = reader.Read<u32>();
+                             ml.vertex_count = reader.Read<u32>();
+                             ml.triangle_count = reader.Read<u32>();
                              
                              // cone_apex[3]
                              reader.Read(&ml.cone_apex[0], sizeof(float) * 3);
@@ -415,7 +415,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                          
                          // Read meshlet vertices
                          if (reader.Remaining() >= 4) {
-                             uint32_t meshletVertCount = reader.Read<uint32_t>();
+                             u32 meshletVertCount = reader.Read<u32>();
                              if (meshletVertCount > 0 && meshletVertCount < 10000000) {
                                  meshAsset.meshlet_vertices.resize(meshletVertCount);
                                  reader.Read(meshAsset.meshlet_vertices.data(), meshletVertCount * 4);
@@ -424,7 +424,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                          
                          // Read meshlet triangles
                          if (reader.Remaining() >= 4) {
-                             uint32_t meshletTriCount = reader.Read<uint32_t>();
+                             u32 meshletTriCount = reader.Read<u32>();
                              if (meshletTriCount > 0 && meshletTriCount < 10000000) {
                                  meshAsset.meshlet_triangles.resize(meshletTriCount);
                                  reader.Read(meshAsset.meshlet_triangles.data(), meshletTriCount);
@@ -443,20 +443,20 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              
              // Parse SDF section
              if (reader.Remaining() >= 8) {
-                 const uint8_t* peekPtr = static_cast<const uint8_t*>(reader.GetCurrentPtr());
-                 uint32_t sdfMagic = *reinterpret_cast<const uint32_t*>(peekPtr);
+                 const u8* peekPtr = static_cast<const u8*>(reader.GetCurrentPtr());
+                 u32 sdfMagic = *reinterpret_cast<const u32*>(peekPtr);
                  
                  if (sdfMagic == 0x20464453) { // 'SDF '
                      reader.Skip(4); // Consume the magic
                      
                      // Read SDF header
-                     reader.Read(&meshAsset.sdf.resolution[0], sizeof(uint32_t) * 3);
+                     reader.Read(&meshAsset.sdf.resolution[0], sizeof(u32) * 3);
                      reader.Read(&meshAsset.sdf.bounds_min[0], sizeof(float) * 3);
                      reader.Read(&meshAsset.sdf.bounds_max[0], sizeof(float) * 3);
                      
                      // Read SDF data
                      if (reader.Remaining() >= 4) {
-                         uint32_t sdfSize = reader.Read<uint32_t>();
+                         u32 sdfSize = reader.Read<u32>();
                          if (sdfSize > 0 && sdfSize < 100000000) {
                              meshAsset.sdf.data.resize(sdfSize);
                              reader.Read(meshAsset.sdf.data.data(), sdfSize * 2);
@@ -465,7 +465,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                      
                      // Read voxels
                      if (reader.Remaining() >= 4) {
-                         uint32_t voxelsSize = reader.Read<uint32_t>();
+                         u32 voxelsSize = reader.Read<u32>();
                          if (voxelsSize > 0 && voxelsSize < 100000000) {
                              meshAsset.sdf.voxels.resize(voxelsSize);
                              reader.Read(meshAsset.sdf.voxels.data(), voxelsSize);
@@ -474,7 +474,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                      
                      // Read vector field
                      if (reader.Remaining() >= 4) {
-                         uint32_t vecFieldSize = reader.Read<uint32_t>();
+                         u32 vecFieldSize = reader.Read<u32>();
                          if (vecFieldSize > 0 && vecFieldSize < 100000000) {
                              meshAsset.sdf.vector_field.resize(vecFieldSize);
                              reader.Read(meshAsset.sdf.vector_field.data(), vecFieldSize * 2);
@@ -497,26 +497,26 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              
              // Create Interleaved Data
         // Force standard stride (32 bytes) to match Metal shader (12 Pos + 20 Element)
-        constexpr uint32_t TARGET_ELEMENT_SIZE = 20;
-        constexpr uint32_t TARGET_VERTEX_STRIDE = 12 + TARGET_ELEMENT_SIZE;
+        constexpr u32 TARGET_ELEMENT_SIZE = 20;
+        constexpr u32 TARGET_VERTEX_STRIDE = 12 + TARGET_ELEMENT_SIZE;
         
         // Determine source strides
         // WARNING: The binary file format for Positions MUST be 12 bytes (packed float3).
         // MeshCPU.cpp on Mac might write 16 bytes (sizeof(simd::float3)), but pack_geometry.py (Python) writes 12 bytes.
         // We assume 12 bytes to be safe and platform-independent for the file format.
-        const uint32_t srcPosStride = 12; 
-        const uint32_t srcElemStride = elementSize;
+        const u32 srcPosStride = 12; 
+        const u32 srcElemStride = elementSize;
 
         std::cout << "SceneDataAdapter: Interleaving - SrcPosStride=" << srcPosStride 
                   << ", SrcElemStride=" << srcElemStride 
                   << ", TargetStride=" << TARGET_VERTEX_STRIDE << std::endl;
         
-        std::vector<uint8_t> interleavedVertices(vertexCount * TARGET_VERTEX_STRIDE);
+        utl::vector<u8> interleavedVertices(vertexCount * TARGET_VERTEX_STRIDE);
         // Zero initialize to handle padding/missing elements safely
         memset(interleavedVertices.data(), 0, interleavedVertices.size());
         
-        for (uint32_t v = 0; v < vertexCount; ++v) {
-            uint8_t* dstVertex = interleavedVertices.data() + v * TARGET_VERTEX_STRIDE;
+        for (u32 v = 0; v < vertexCount; ++v) {
+            u8* dstVertex = interleavedVertices.data() + v * TARGET_VERTEX_STRIDE;
             
             // 1. Copy Position (Always 12 bytes: x, y, z)
             // Skip padding if srcPosStride > 12 (though we force 12 now)
@@ -524,8 +524,8 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
             
             // 2. Copy Elements
             if (srcElemStride > 0) {
-                uint8_t* dstElem = dstVertex + 12;
-                const uint8_t* srcElem = elemPtr + v * srcElemStride;
+                u8* dstElem = dstVertex + 12;
+                const u8* srcElem = elemPtr + v * srcElemStride;
                 
                 if (srcElemStride >= 24) {
                     // Special handling for static_normal_texture on platforms with padding (e.g. Mac C++ writer)
@@ -538,7 +538,7 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                 } else {
                     // Standard copy (clamp to target size)
                     // e.g. 20 bytes -> 20 bytes
-                    uint32_t copySize = std::min(srcElemStride, TARGET_ELEMENT_SIZE);
+                    u32 copySize = std::min(srcElemStride, TARGET_ELEMENT_SIZE);
                     memcpy(dstElem, srcElem, copySize);
                 }
             }
@@ -588,35 +588,35 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
 //   data: 二进制数据指针
 //   size: 数据大小
 // 返回: 加载的网格信息列表
-std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device, const void* data, uint32_t size) {
-    std::vector<SceneDataMeshInfo> result;
+utl::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device, const void* data, u32 size) {
+    utl::vector<SceneDataMeshInfo> result;
     if (!data || size == 0 || !device) return result;
 
-    BlobReader reader(static_cast<const uint8_t*>(data), size);
+    BlobReader reader(static_cast<const u8*>(data), size);
 
     // 1. Scene Name
-    if (reader.Remaining() < sizeof(uint32_t)) return result;
-    uint32_t sceneNameSize = reader.Read<uint32_t>();
+    if (reader.Remaining() < sizeof(u32)) return result;
+    u32 sceneNameSize = reader.Read<u32>();
     if (reader.Remaining() < sceneNameSize) return result;
     std::string sceneName = reader.ReadString(sceneNameSize);
     std::cout << "Scene Name: " << sceneName << std::endl;
 
     // 2. Num Materials
-    if (reader.Remaining() < sizeof(uint32_t)) return result;
-    uint32_t numMaterials = reader.Read<uint32_t>();
+    if (reader.Remaining() < sizeof(u32)) return result;
+    u32 numMaterials = reader.Read<u32>();
     if (numMaterials > 100000) { // Sanity check
         std::cerr << "Invalid NumMaterials: " << numMaterials << std::endl;
         return result;
     }
     std::cout << "Num Materials: " << numMaterials << std::endl;
-    std::vector<std::shared_ptr<MaterialInstance>> materialInstances;
-    std::vector<std::shared_ptr<Material>> materials;
+    utl::vector<std::shared_ptr<MaterialInstance>> materialInstances;
+    utl::vector<std::shared_ptr<Material>> materials;
     materialInstances.reserve(numMaterials);
     materials.reserve(numMaterials);
 
-    for (uint32_t i = 0; i < numMaterials; ++i) {
-        if (reader.Remaining() < sizeof(uint32_t)) return result;
-        uint32_t matSize = reader.Read<uint32_t>();
+    for (u32 i = 0; i < numMaterials; ++i) {
+        if (reader.Remaining() < sizeof(u32)) return result;
+        u32 matSize = reader.Read<u32>();
         std::cout << "Material " << i << " Size: " << matSize << std::endl;
         if (reader.Remaining() < matSize) return result;
         const void* matData = reader.GetCurrentPtr();
@@ -640,51 +640,51 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
     }
 
     // 3. Num LOD Groups
-    if (reader.Remaining() < sizeof(uint32_t)) return result;
-    uint32_t numLodGroups = reader.Read<uint32_t>();
+    if (reader.Remaining() < sizeof(u32)) return result;
+    u32 numLodGroups = reader.Read<u32>();
     if (numLodGroups > 1000) { // Sanity check
         std::cerr << "Invalid NumLodGroups: " << numLodGroups << std::endl;
         return result;
     }
     std::cout << "Num LOD Groups: " << numLodGroups << std::endl;
 
-    for (uint32_t i = 0; i < numLodGroups; ++i) {
+    for (u32 i = 0; i < numLodGroups; ++i) {
         // LOD Name
-        if (reader.Remaining() < sizeof(uint32_t)) return result;
-        uint32_t lodNameSize = reader.Read<uint32_t>();
+        if (reader.Remaining() < sizeof(u32)) return result;
+        u32 lodNameSize = reader.Read<u32>();
         if (reader.Remaining() < lodNameSize) return result;
         std::string lodName = reader.ReadString(lodNameSize);
         std::cout << "LOD Group: " << lodName << std::endl;
 
         // Num Meshes
-        if (reader.Remaining() < sizeof(uint32_t)) return result;
-        uint32_t numMeshes = reader.Read<uint32_t>();
+        if (reader.Remaining() < sizeof(u32)) return result;
+        u32 numMeshes = reader.Read<u32>();
         if (numMeshes > 100000) return result; // Sanity check
         std::cout << "Num Meshes: " << numMeshes << std::endl;
 
-        for (uint32_t j = 0; j < numMeshes; ++j) {
+        for (u32 j = 0; j < numMeshes; ++j) {
             // Mesh Name
-            if (reader.Remaining() < sizeof(uint32_t)) return result;
-            uint32_t meshNameSize = reader.Read<uint32_t>();
+            if (reader.Remaining() < sizeof(u32)) return result;
+            u32 meshNameSize = reader.Read<u32>();
             if (reader.Remaining() < meshNameSize) return result;
             std::string meshName = reader.ReadString(meshNameSize);
             std::cout << "Mesh: " << meshName << std::endl;
 
             // LOD ID
-            if (reader.Remaining() < sizeof(uint32_t) * 8) return result; // Basic check for next few fields
-            uint32_t lodId = reader.Read<uint32_t>();
+            if (reader.Remaining() < sizeof(u32) * 8) return result; // Basic check for next few fields
+            u32 lodId = reader.Read<u32>();
 
             // Vertex Size (Position + Elements)
-            uint32_t vertexSize = reader.Read<uint32_t>();
+            u32 vertexSize = reader.Read<u32>();
 
             // Num Vertices
-            uint32_t numVertices = reader.Read<uint32_t>();
+            u32 numVertices = reader.Read<u32>();
 
             // Index Size
-            uint32_t indexSize = reader.Read<uint32_t>();
+            u32 indexSize = reader.Read<u32>();
 
             // Num Indices
-            uint32_t numIndices = reader.Read<uint32_t>();
+            u32 numIndices = reader.Read<u32>();
 
             std::cout << "  VertexSize: " << vertexSize << ", NumVertices: " << numVertices 
                       << ", IndexSize: " << indexSize << ", NumIndices: " << numIndices << std::endl;
@@ -695,13 +695,13 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
             // Position Buffer Data Ptr
             size_t posSize = numVertices * sizeof(float) * 3;
             if (reader.Remaining() < posSize) return result;
-            const uint8_t* posData = static_cast<const uint8_t*>(reader.Skip(posSize));
+            const u8* posData = static_cast<const u8*>(reader.Skip(posSize));
 
             // Element Buffer Data Ptr
-            uint32_t elementSize = vertexSize - sizeof(float) * 3;
+            u32 elementSize = vertexSize - sizeof(float) * 3;
             size_t elemBufSize = numVertices * elementSize;
             if (reader.Remaining() < elemBufSize) return result;
-            const uint8_t* elementData = static_cast<const uint8_t*>(reader.Skip(elemBufSize));
+            const u8* elementData = static_cast<const u8*>(reader.Skip(elemBufSize));
 
             // Index Buffer Data Ptr
             size_t idxBufSize = numIndices * indexSize;
@@ -709,8 +709,8 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
             const void* indexData = reader.Skip(idxBufSize);
 
             // Material Index
-            if (reader.Remaining() < sizeof(int32_t)) return result;
-            int32_t materialIndex = reader.Read<int32_t>();
+            if (reader.Remaining() < sizeof(s32)) return result;
+            s32 materialIndex = reader.Read<s32>();
             std::shared_ptr<MaterialInstance> assignedMatInst = nullptr;
             std::shared_ptr<Material> assignedMaterial = nullptr;
             
@@ -731,12 +731,12 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
             // Create RenderMesh
             // 由于 RenderMesh 需要 Interleaved 数据，我们需要在这里重组数据
             // 这是一个临时方案，直到 RenderMesh 支持 Bindless/Planar 布局
-            std::vector<uint8_t> interleavedData(numVertices * vertexSize);
-            uint8_t* destPtr = interleavedData.data();
-            const uint8_t* currPos = posData;
-            const uint8_t* currElem = elementData;
+            utl::vector<u8> interleavedData(numVertices * vertexSize);
+            u8* destPtr = interleavedData.data();
+            const u8* currPos = posData;
+            const u8* currElem = elementData;
 
-            for (uint32_t v = 0; v < numVertices; ++v) {
+            for (u32 v = 0; v < numVertices; ++v) {
                 // Debug: Print first vertex of each mesh
                 if (v == 0) {
                      const float* p = reinterpret_cast<const float*>(currPos);
@@ -797,25 +797,25 @@ std::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
     return result;
 }
 
-std::shared_ptr<Material> SceneDataAdapter::LoadMaterial(rhi::RHIDeviceBase* device, const void* data, uint32_t size) {
+std::shared_ptr<Material> SceneDataAdapter::LoadMaterial(rhi::RHIDeviceBase* device, const void* data, u32 size) {
     if (!data || size == 0 || !device) return nullptr;
 
-    BlobReader reader(static_cast<const uint8_t*>(data), size);
+    BlobReader reader(static_cast<const u8*>(data), size);
 
     // Read Header
-    uint32_t magic = reader.Read<uint32_t>();
+    u32 magic = reader.Read<u32>();
     if (magic != 0x4C54414D) return nullptr; // 'MATL'
-    uint32_t version = reader.Read<uint32_t>();
+    u32 version = reader.Read<u32>();
     if (version != 1) return nullptr;
 
-    uint32_t shaderCount = reader.Read<uint32_t>();
+    u32 shaderCount = reader.Read<u32>();
 
     auto material = std::make_shared<Material>();
 
-    for(uint32_t i=0; i<shaderCount; ++i) {
-        rhi::ShaderStage stage = (rhi::ShaderStage)reader.Read<uint32_t>();
-        uint32_t bytecodeSize = reader.Read<uint32_t>();
-        uint32_t entryPointSize = reader.Read<uint32_t>();
+    for(u32 i=0; i<shaderCount; ++i) {
+        rhi::ShaderStage stage = (rhi::ShaderStage)reader.Read<u32>();
+        u32 bytecodeSize = reader.Read<u32>();
+        u32 entryPointSize = reader.Read<u32>();
         
         std::string entryPoint = reader.ReadString(entryPointSize);
         
@@ -840,37 +840,37 @@ std::shared_ptr<Material> SceneDataAdapter::LoadMaterial(rhi::RHIDeviceBase* dev
     // Topology is part of RasterizerState in struct, but Material has separate setter
     // We assume the data format includes it explicitly or we take it from RasterizerState
     // For now let's assume it's explicitly written after RasterizerState to be robust
-    rhi::PrimitiveTopology topology = (rhi::PrimitiveTopology)reader.Read<uint32_t>();
+    rhi::PrimitiveTopology topology = (rhi::PrimitiveTopology)reader.Read<u32>();
     material->SetTopology(topology);
 
     // Vertex Input Attributes
-    uint32_t numVertexAttributes = reader.Read<uint32_t>();
+    u32 numVertexAttributes = reader.Read<u32>();
     if (numVertexAttributes > 0) {
         utl::vector<rhi::VertexInputAttribute> attributes(numVertexAttributes);
-        for (uint32_t i = 0; i < numVertexAttributes; ++i) {
+        for (u32 i = 0; i < numVertexAttributes; ++i) {
             attributes[i] = reader.Read<rhi::VertexInputAttribute>();
         }
         material->SetVertexAttributes(attributes);
     }
 
     // Vertex Input Bindings
-    uint32_t numVertexBindings = reader.Read<uint32_t>();
+    u32 numVertexBindings = reader.Read<u32>();
     if (numVertexBindings > 0) {
         utl::vector<rhi::VertexInputBinding> bindings(numVertexBindings);
-        for (uint32_t i = 0; i < numVertexBindings; ++i) {
+        for (u32 i = 0; i < numVertexBindings; ++i) {
             bindings[i] = reader.Read<rhi::VertexInputBinding>();
         }
         material->SetVertexBindings(bindings);
     }
 
     // Descriptor Binding Count
-    uint32_t numDescriptorBindings = reader.Read<uint32_t>();
+    u32 numDescriptorBindings = reader.Read<u32>();
     if (numDescriptorBindings > 0) {
         utl::vector<rhi::DescriptorSetLayoutBinding> bindings(numDescriptorBindings);
-        for (uint32_t i = 0; i < numDescriptorBindings; ++i) {
-            bindings[i].binding = reader.Read<uint32_t>();
+        for (u32 i = 0; i < numDescriptorBindings; ++i) {
+            bindings[i].binding = reader.Read<u32>();
             bindings[i].descriptorType = reader.Read<rhi::DescriptorType>();
-            bindings[i].descriptorCount = reader.Read<uint32_t>();
+            bindings[i].descriptorCount = reader.Read<u32>();
             bindings[i].stageFlags = reader.Read<rhi::ShaderStage>();
             bindings[i].flags = reader.Read<rhi::DescriptorBindingFlags>();
             bindings[i].immutableSamplers = nullptr;

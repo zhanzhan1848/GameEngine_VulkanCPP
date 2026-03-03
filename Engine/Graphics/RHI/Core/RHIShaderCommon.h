@@ -20,8 +20,8 @@ struct GlobalShaderData
     math::v4 cameraPositionAndViewWidth;   // xyz: position, w: viewWidth
     math::v4 cameraDirectionAndViewHeight; // xyz: direction, w: viewHeight
 
-    uint32_t numDirectionalLights;
-    uint32_t numPunctualLights;
+    u32 numDirectionalLights;
+    u32 numPunctualLights;
     float deltaTime;
     float frameCount;
 };
@@ -68,9 +68,9 @@ struct DirectionalLightParameters
 
 // 用于 Forward Renderer 的统一光照缓冲区
 struct ForwardLightBuffer {
-    uint32_t directionalLightCount;
-    uint32_t punctualLightCount;
-    uint32_t padding[2];
+    u32 directionalLightCount;
+    u32 punctualLightCount;
+    u32 padding[2];
     DirectionalLightParameters directionalLights[4]; // Max 4 directional lights
     LightParameters lights[128]; // Max 128 punctual lights
 };

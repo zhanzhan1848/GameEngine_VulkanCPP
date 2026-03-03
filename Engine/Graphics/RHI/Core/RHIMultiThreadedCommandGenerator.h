@@ -37,13 +37,13 @@ using f64 = double;
  * @details 包含需要渲染的所有对象和资源信息
  */
 struct RenderScene {
-    std::vector<ResourceHandle> meshes;           ///< 网格资源列表
-    std::vector<ResourceHandle> materials;        ///< 材质资源列表
-    std::vector<ResourceHandle> textures;         ///< 纹理资源列表
-    std::vector<math::m4x4> transforms;        ///< 变换矩阵列表
-    std::vector<u32> materialIndices;             ///< 材质索引列表
-    std::vector<u32> meshIndices;                 ///< 网格索引列表
-    std::vector<u32> drawCalls;                   ///< 绘制调用参数
+    utl::vector<ResourceHandle> meshes;           ///< 网格资源列表
+    utl::vector<ResourceHandle> materials;        ///< 材质资源列表
+    utl::vector<ResourceHandle> textures;         ///< 纹理资源列表
+    utl::vector<math::m4x4> transforms;        ///< 变换矩阵列表
+    utl::vector<u32> materialIndices;             ///< 材质索引列表
+    utl::vector<u32> meshIndices;                 ///< 网格索引列表
+    utl::vector<u32> drawCalls;                   ///< 绘制调用参数
     u64 totalDrawCalls;                           ///< 总绘制调用数
     u64 totalVertices;                           ///< 总顶点数
     u64 totalTriangles;                          ///< 总三角形数
@@ -85,9 +85,9 @@ struct MultiThreadRenderBatch {
     u32 endMeshIndex;                            ///< 结束网格索引
     u32 startDrawCallIndex;                      ///< 起始绘制调用索引
     u32 endDrawCallIndex;                        ///< 结束绘制调用索引
-    std::vector<ResourceHandle> batchMeshes;     ///< 批次网格列表
-    std::vector<math::m4x4> batchTransforms; ///< 批次变换列表
-    std::vector<u32> batchMaterialIndices;       ///< 批次材质索引
+    utl::vector<ResourceHandle> batchMeshes;     ///< 批次网格列表
+    utl::vector<math::m4x4> batchTransforms; ///< 批次变换列表
+    utl::vector<u32> batchMaterialIndices;       ///< 批次材质索引
     u64 commandCount;                           ///< 预估命令数量
     ResourceHandle renderTarget{handles::INVALID_RESOURCE}; ///< 渲染目标
     
@@ -268,7 +268,7 @@ public:
      * @return 是否生成成功
      */
     bool GenerateCommandsParallel(const RenderScene& scene, 
-                                 std::vector<CommandBufferHandle>& outputs);
+                                 utl::vector<CommandBufferHandle>& outputs);
     
     /**
      * @brief 生成单个命令缓冲区（同步版本）
@@ -384,14 +384,14 @@ private:
      * @param scene 渲染场景
      * @return 生成的任务列表
      */
-    std::vector<CommandGenerationTask> DistributeWorkItems(const RenderScene& scene);
+    utl::vector<CommandGenerationTask> DistributeWorkItems(const RenderScene& scene);
     
     /**
      * @brief 等待任务完成
      * @param tasks 任务列表
      * @return 是否所有任务都成功完成
      */
-    bool WaitForTaskCompletion(const std::vector<CommandGenerationTask>& tasks);
+    bool WaitForTaskCompletion(const utl::vector<CommandGenerationTask>& tasks);
     
     /**
      * @brief 合并任务结果
@@ -399,8 +399,8 @@ private:
      * @param outputs 合并后的输出命令缓冲区列表
      * @return 是否合并成功
      */
-    bool MergeTaskResults(const std::vector<CommandGenerationResult>& results,
-                          std::vector<CommandBufferHandle>& outputs);
+    bool MergeTaskResults(const utl::vector<CommandGenerationResult>& results,
+                          utl::vector<CommandBufferHandle>& outputs);
     
     /**
      * @brief 更新性能指标
@@ -440,8 +440,8 @@ private:
     
     // 任务管理
     std::atomic<u32> activeTaskCount_;           ///< 活跃任务数量
-    std::vector<CommandGenerationTask> pendingTasks_; ///< 待处理任务列表
-    std::vector<CommandGenerationResult> completedResults_; ///< 已完成任务结果列表
+    utl::vector<CommandGenerationTask> pendingTasks_; ///< 待处理任务列表
+    utl::vector<CommandGenerationResult> completedResults_; ///< 已完成任务结果列表
     
     // 资源管理
     std::unordered_map<u32, CommandBufferHandle> commandBufferCache_; ///< 命令缓冲区缓存

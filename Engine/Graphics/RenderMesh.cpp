@@ -65,8 +65,8 @@ RenderMesh::~RenderMesh() {
 
 bool RenderMesh::Create(rhi::RHIDeviceBase* device, 
             primal::id::id_type entityId,
-            const void* vertices, uint32_t vertexCount, uint32_t vertexStride,
-            const void* indices, uint32_t indexCount, 
+            const void* vertices, u32 vertexCount, u32 vertexStride,
+            const void* indices, u32 indexCount, 
             rhi::DataIndexType indexType) {
 
     if (!device || !vertices || vertexCount == 0 || vertexStride == 0) {
@@ -85,8 +85,8 @@ bool RenderMesh::Create(rhi::RHIDeviceBase* device,
 
     // 计算AABB
     localAABB_ = rhi::AABB(); // 重置为无效
-    const uint8_t* vertexData = static_cast<const uint8_t*>(vertices);
-    for (uint32_t i = 0; i < vertexCount; ++i) {
+    const u8* vertexData = static_cast<const u8*>(vertices);
+    for (u32 i = 0; i < vertexCount; ++i) {
         // 假设前3个float是位置
         const float* pos = reinterpret_cast<const float*>(vertexData + i * vertexStride);
         localAABB_.Expand(rhi::math::v3{pos[0], pos[1], pos[2]});
@@ -94,8 +94,8 @@ bool RenderMesh::Create(rhi::RHIDeviceBase* device,
 
     // 创建顶点缓冲区
     // Metal要求缓冲区大小必须是256字节对齐，否则可能会导致访问越界或性能问题
-    uint64_t vertexBufferSize = static_cast<uint64_t>(vertexCount) * vertexStride;
-    uint64_t alignedVertexSize = (vertexBufferSize + 255) & ~255;
+    u64 vertexBufferSize = static_cast<u64>(vertexCount) * vertexStride;
+    u64 alignedVertexSize = (vertexBufferSize + 255) & ~255;
     vertexBuffer_ = CreateBuffer(device, vertices, alignedVertexSize, rhi::BufferType::Vertex);
     
     if (vertexBuffer_ != rhi::handles::INVALID_RESOURCE) {
@@ -111,18 +111,18 @@ bool RenderMesh::Create(rhi::RHIDeviceBase* device,
 
     // 创建索引缓冲区（可选）
     if (indices && indexCount > 0) {
-        uint64_t indexStride = (indexType == rhi::DataIndexType::UInt32) ? 4 : 2;
-        uint64_t indexBufferSize = static_cast<uint64_t>(indexCount) * indexStride;
+        u64 indexStride = (indexType == rhi::DataIndexType::UInt32) ? 4 : 2;
+        u64 indexBufferSize = static_cast<u64>(indexCount) * indexStride;
         
         // 对齐缓冲区大小到256字节，符合Metal最佳实践并避免越界警告
-        uint64_t alignedSize = (indexBufferSize + 255) & ~255;
+        u64 alignedSize = (indexBufferSize + 255) & ~255;
 
         rhi::BufferDesc desc{
             .size = alignedSize,
             .type = rhi::BufferType::Index,
             .usage = rhi::GPUMemoryUsage::Dynamic, // 使用动态内存以便调试
             .memoryUsage = rhi::GPUMemoryUsage::Dynamic,
-            .bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::IndexBuffer) | static_cast<uint32_t>(rhi::ResourceUsage::CopyDest),
+            .bindFlags = static_cast<u32>(rhi::ResourceUsage::IndexBuffer) | static_cast<u32>(rhi::ResourceUsage::CopyDest),
         };
         
         indexBuffer_ = device->CreateBuffer(desc);
@@ -166,7 +166,7 @@ void RenderMesh::SetEntityId(primal::id::id_type id) {
     Register();
 }
 
-void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount, uint32_t startInstance, uint32_t bindingSlot) {
+void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, u32 instanceCount, u32 startInstance, u32 bindingSlot) {
     if (!cmdBuffer || !IsValid()) {
         if (!IsValid()) {
             std::cerr << "RenderMesh::Draw Error: Mesh is invalid! VBuffer: " << vertexBuffer_ << ", Count: " << vertexCount_ << std::endl;
@@ -176,7 +176,7 @@ void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount, 
 
     // 绑定顶点缓冲区
     rhi::ResourceHandle buffers[] = { vertexBuffer_ };
-    uint64_t offsets[] = { 0 };
+    u64 offsets[] = { 0 };
     cmdBuffer->BindVertexBuffers(bindingSlot, 1, buffers, offsets);
 
     // Debug: Print Draw Info once
@@ -203,7 +203,7 @@ void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, uint32_t instanceCount, 
     }
 }
 
-rhi::ResourceHandle RenderMesh::CreateBuffer(rhi::RHIDeviceBase* device, const void* data, uint64_t size, rhi::BufferType type) {
+rhi::ResourceHandle RenderMesh::CreateBuffer(rhi::RHIDeviceBase* device, const void* data, u64 size, rhi::BufferType type) {
     rhi::BufferDesc desc{
         .size = size,
         .type = type,
@@ -214,11 +214,11 @@ rhi::ResourceHandle RenderMesh::CreateBuffer(rhi::RHIDeviceBase* device, const v
     
     // 设置绑定标志
     desc.bindFlags = (type == rhi::BufferType::Vertex) 
-        ? static_cast<uint32_t>(rhi::ResourceUsage::VertexBuffer) 
-        : static_cast<uint32_t>(rhi::ResourceUsage::IndexBuffer);
+        ? static_cast<u32>(rhi::ResourceUsage::VertexBuffer) 
+        : static_cast<u32>(rhi::ResourceUsage::IndexBuffer);
     
     // 添加复制目标标志，以便上传数据
-    desc.bindFlags |= static_cast<uint32_t>(rhi::ResourceUsage::CopyDest);
+    desc.bindFlags |= static_cast<u32>(rhi::ResourceUsage::CopyDest);
 
     rhi::ResourceHandle handle = device->CreateBuffer(desc);
     

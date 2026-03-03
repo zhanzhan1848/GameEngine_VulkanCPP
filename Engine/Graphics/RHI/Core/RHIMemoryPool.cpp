@@ -42,7 +42,7 @@ public:
      * @param size 预期大小
      * @return 推荐的内存池描述符
      */
-    static MemoryPoolDesc GetRecommendedPoolDesc(GPUMemoryUsage usage, uint64_t size) {
+    static MemoryPoolDesc GetRecommendedPoolDesc(GPUMemoryUsage usage, u64 size) {
         MemoryPoolDesc desc;
         
         switch (usage) {
@@ -80,7 +80,7 @@ public:
         
         // 根据大小调整池大小
         if (size > 0) {
-            desc.poolSize = std::max(size, static_cast<uint64_t>(64 * 1024 * 1024));  // 最小64MB
+            desc.poolSize = std::max(size, static_cast<u64>(64 * 1024 * 1024));  // 最小64MB
         }
         
         return desc;
@@ -142,7 +142,7 @@ void RHIMemoryPool::PrintStats() const {
     printf("================================\n");
 }
 
-void RHIMemoryPool::PrintMemoryBlock(uint32_t blockHandle) const {
+void RHIMemoryPool::PrintMemoryBlock(u32 blockHandle) const {
     if (!IsValidBlock(blockHandle)) {
         printf("Invalid memory block handle: %u\n", blockHandle);
         return;
@@ -247,7 +247,7 @@ bool ValidateMemoryBlockAlignment(const MemoryBlock& block) {
  * @param poolSize 内存池大小
  * @return 大小是否有效
  */
-bool ValidateMemoryBlockSize(const MemoryBlock& block, uint64_t poolSize) {
+bool ValidateMemoryBlockSize(const MemoryBlock& block, u64 poolSize) {
     return block.offset < poolSize && 
            (block.offset + block.size) <= poolSize &&
            block.size > 0;
@@ -265,8 +265,8 @@ bool CheckMemoryBlockOverlap(const MemoryBlock& block1, const MemoryBlock& block
         return false;
     }
     
-    uint64_t end1 = block1.offset + block1.size;
-    uint64_t end2 = block2.offset + block2.size;
+    u64 end1 = block1.offset + block1.size;
+    u64 end2 = block2.offset + block2.size;
     
     return !(block1.offset >= end2 || block2.offset >= end1);
 }

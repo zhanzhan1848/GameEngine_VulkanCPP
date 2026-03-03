@@ -48,7 +48,7 @@ void UnregisterCommandBuffer(CommandBufferHandle handle);
  * @brief 命令缓冲区状态枚举
  * @details 描述命令缓冲区的记录状态
  */
-enum class CommandBufferState : uint8_t {
+enum class CommandBufferState : u8 {
     Reset = 0,          ///< 已重置，可以开始记录
     Recording = 1,       ///< 正在记录命令
     RecordingEnded = 2,  ///< 记录已结束，等待提交
@@ -61,7 +61,7 @@ enum class CommandBufferState : uint8_t {
  * @brief 命令类型枚举
  * @details 标识不同类型的渲染命令
  */
-enum class CommandType : uint16_t {
+enum class CommandType : u16 {
     Unknown = 0,
     
     // === 资源管理命令 ===
@@ -128,9 +128,9 @@ enum class CommandType : uint16_t {
  * @details 描述如何绑定着色器资源
  */
 struct DescriptorSetBinding {
-    uint32_t setIndex;                          ///< 描述符集索引
-    uint32_t dynamicOffsetCount;                ///< 动态偏移数量
-    const uint32_t* dynamicOffsets;             ///< 动态偏移数组
+    u32 setIndex;                          ///< 描述符集索引
+    u32 dynamicOffsetCount;                ///< 动态偏移数量
+    const u32* dynamicOffsets;             ///< 动态偏移数组
     ResourceHandle descriptorSet;               ///< 描述符集句柄
     
     DescriptorSetBinding() : setIndex(0), dynamicOffsetCount(0), dynamicOffsets(nullptr),
@@ -145,8 +145,8 @@ struct ResourceBarrier {
     ResourceHandle resource;                    ///< 资源句柄
     ResourceState beforeState;                   ///< 转换前状态
     ResourceState afterState;                    ///< 转换后状态
-    uint32_t subresource;                       ///< 子资源索引
-    uint32_t queueFamily;                       ///< 队列族索引
+    u32 subresource;                       ///< 子资源索引
+    u32 queueFamily;                       ///< 队列族索引
     
     ResourceBarrier() : resource(handles::INVALID_RESOURCE),
                        beforeState(ResourceState::Unknown),
@@ -160,11 +160,11 @@ struct ResourceBarrier {
  * @details 用于性能分析和调试
  */
 struct CommandStats {
-    uint32_t drawCallCount;                      ///< 绘制调用次数
-    uint32_t computeDispatchCount;               ///< 计算分派次数
-    uint32_t copyCommandCount;                   ///< 复制命令次数
-    uint32_t barrierCount;                       ///< 屏障命令次数
-    uint32_t renderPassCount;                    ///< 渲染通道次数
+    u32 drawCallCount;                      ///< 绘制调用次数
+    u32 computeDispatchCount;               ///< 计算分派次数
+    u32 copyCommandCount;                   ///< 复制命令次数
+    u32 barrierCount;                       ///< 屏障命令次数
+    u32 renderPassCount;                    ///< 渲染通道次数
     float commandRecordingTime;                  ///< 命令记录时间（毫秒）
     float commandExecutionTime;                  ///< 命令执行时间（毫秒）
     
@@ -288,7 +288,7 @@ public:
      * @param waitFlags 等待标志
      * @return 提交是否成功
      */
-    virtual bool Submit(uint32_t waitFlags = 0) {
+    virtual bool Submit(u32 waitFlags = 0) {
         if (state_ != CommandBufferState::RecordingEnded) {
             return false;
         }
@@ -321,7 +321,7 @@ public:
      * @param semaphore 信号量句柄
      * @param value 等待值
      */
-    void AddWaitSemaphore(SyncHandle semaphore, uint64_t value) {
+    void AddWaitSemaphore(SyncHandle semaphore, u64 value) {
         waitSemaphores_.push_back({semaphore, value});
     }
 
@@ -330,7 +330,7 @@ public:
      * @param semaphore 信号量句柄
      * @param value 发送值
      */
-    void AddSignalSemaphore(SyncHandle semaphore, uint64_t value) {
+    void AddSignalSemaphore(SyncHandle semaphore, u64 value) {
         signalSemaphores_.push_back({semaphore, value});
     }
 
@@ -378,8 +378,8 @@ public:
      * @param buffers 缓冲区句柄数组
      * @param offsets 偏移量数组
      */
-    virtual void BindVertexBuffers(uint32_t firstSlot, uint32_t slotCount,
-                                   const ResourceHandle* buffers, const uint64_t* offsets) = 0;
+    virtual void BindVertexBuffers(u32 firstSlot, u32 slotCount,
+                                   const ResourceHandle* buffers, const u64* offsets) = 0;
     
     /**
      * @brief 绑定索引缓冲区
@@ -387,7 +387,7 @@ public:
      * @param format 索引格式
      * @param offset 偏移量
      */
-    virtual void BindIndexBuffer(ResourceHandle buffer, DataFormat format, uint64_t offset = 0) = 0;
+    virtual void BindIndexBuffer(ResourceHandle buffer, DataFormat format, u64 offset = 0) = 0;
 
     /**
      * @brief 绑定描述符集
@@ -401,11 +401,11 @@ public:
      */
     virtual void BindDescriptorSets(PipelineBindPoint bindPoint,
                                    PipelineLayoutHandle pipelineLayout,
-                                   uint32_t firstSet,
-                                   uint32_t setCount,
+                                   u32 firstSet,
+                                   u32 setCount,
                                    const DescriptorSetHandle* descriptorSets,
-                                   uint32_t dynamicOffsetCount,
-                                   const uint32_t* dynamicOffsets) = 0;
+                                   u32 dynamicOffsetCount,
+                                   const u32* dynamicOffsets) = 0;
 
     /**
      * @brief 推送常量
@@ -416,14 +416,14 @@ public:
      * @param pValues 数据指针
      */
     virtual void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
-                              uint32_t offset, uint32_t size, const void* pValues) = 0;
+                              u32 offset, u32 size, const void* pValues) = 0;
 
     /**
      * @brief 写入时间戳
      * @param queryPool 查询池句柄
      * @param queryIndex 查询索引
      */
-    virtual void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) = 0;
+    virtual void WriteTimestamp(QueryPoolHandle queryPool, u32 queryIndex) = 0;
     
     /**
      * @brief 绘制
@@ -432,8 +432,8 @@ public:
      * @param instanceCount 实例数量
      * @param startInstance 起始实例
      */
-    virtual void Draw(uint32_t vertexCount, uint32_t startVertex = 0,
-                     uint32_t instanceCount = 1, uint32_t startInstance = 0) = 0;
+    virtual void Draw(u32 vertexCount, u32 startVertex = 0,
+                     u32 instanceCount = 1, u32 startInstance = 0) = 0;
     
     /**
      * @brief 绘制索引
@@ -443,9 +443,9 @@ public:
      * @param instanceCount 实例数量
      * @param startInstance 起始实例
      */
-    virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndex = 0,
-                            uint32_t baseVertex = 0, uint32_t instanceCount = 1,
-                            uint32_t startInstance = 0) = 0;
+    virtual void DrawIndexed(u32 indexCount, u32 startIndex = 0,
+                            u32 baseVertex = 0, u32 instanceCount = 1,
+                            u32 startInstance = 0) = 0;
     
     /**
      * @brief 绘制间接
@@ -453,7 +453,7 @@ public:
      * @param offset 偏移量
      * @param drawCount 绘制次数
      */
-    virtual void DrawIndirect(ResourceHandle buffer, uint64_t offset = 0, uint32_t drawCount = 1) = 0;
+    virtual void DrawIndirect(ResourceHandle buffer, u64 offset = 0, u32 drawCount = 1) = 0;
     
     // === 计算命令 ===
     
@@ -469,14 +469,14 @@ public:
      * @param groupCountY Y轴工作组数量
      * @param groupCountZ Z轴工作组数量
      */
-    virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) = 0;
+    virtual void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) = 0;
     
     /**
      * @brief 间接计算分派
      * @param buffer 间接参数缓冲区
      * @param offset 偏移量
      */
-    virtual void DispatchIndirect(ResourceHandle buffer, uint64_t offset = 0) = 0;
+    virtual void DispatchIndirect(ResourceHandle buffer, u64 offset = 0) = 0;
     
     // === 资源操作命令 ===
     
@@ -489,7 +489,7 @@ public:
      * @param size 复制大小
      */
     virtual void CopyBuffer(ResourceHandle src, ResourceHandle dst,
-                            uint64_t srcOffset = 0, uint64_t dstOffset = 0, uint64_t size = 0) = 0;
+                            u64 srcOffset = 0, u64 dstOffset = 0, u64 size = 0) = 0;
     
     /**
      * @brief 复制缓冲区到纹理
@@ -499,7 +499,7 @@ public:
      * @param regionCount 区域数量
      */
     virtual void CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture,
-                                     const BufferTextureCopyRegion* regions, uint32_t regionCount) = 0;
+                                     const BufferTextureCopyRegion* regions, u32 regionCount) = 0;
 
     /**
      * @brief 复制纹理到缓冲区
@@ -509,7 +509,7 @@ public:
      * @param regionCount 区域数量
      */
     virtual void CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer,
-                                     const BufferTextureCopyRegion* regions, uint32_t regionCount) = 0;
+                                     const BufferTextureCopyRegion* regions, u32 regionCount) = 0;
 
     /**
      * @brief 纹理Blit
@@ -520,7 +520,7 @@ public:
      * @param filter 过滤模式
      */
     virtual void BlitTexture(ResourceHandle src, ResourceHandle dst,
-                             const TextureBlitRegion* regions, uint32_t regionCount,
+                             const TextureBlitRegion* regions, u32 regionCount,
                              FilterMode filter) = 0;
 
     /**
@@ -534,7 +534,7 @@ public:
      * @param barrier 屏障描述符
      * @param barrierCount 屏障数量
      */
-    virtual void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) = 0;
+    virtual void InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) = 0;
     
     // === 访问器方法 ===
     
@@ -602,17 +602,17 @@ protected:
     virtual bool resetImpl() = 0;
     virtual bool beginImpl() = 0;
     virtual bool endImpl() = 0;
-    virtual bool submitImpl(uint32_t waitFlags) = 0;
+    virtual bool submitImpl(u32 waitFlags) = 0;
     virtual bool waitForCompletionImpl() = 0;
     
     // === 受保护的成员变量 ===
     
     struct SemaphoreInfo {
         SyncHandle semaphore;
-        uint64_t value;
+        u64 value;
     };
-    std::vector<SemaphoreInfo> waitSemaphores_;
-    std::vector<SemaphoreInfo> signalSemaphores_;
+	utl::vector<SemaphoreInfo> waitSemaphores_;
+	utl::vector<SemaphoreInfo> signalSemaphores_;
 
     RHIDeviceBase& device_;              ///< 设备引用
     CommandQueueType type_;               ///< 命令队列类型

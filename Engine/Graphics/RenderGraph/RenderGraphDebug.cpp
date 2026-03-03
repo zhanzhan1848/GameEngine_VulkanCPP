@@ -396,7 +396,7 @@ void RenderGraphDebug::BuildTimelineMesh(const RenderGraph& graph, float width, 
     const auto& passes = graph.GetPasses();
 
     // Filter active passes that have timing info
-    std::vector<std::pair<RenderGraphPass*, double>> activeTimes;
+    utl::vector<std::pair<RenderGraphPass*, double>> activeTimes;
     double totalTime = 0.0;
 
     for (auto* pass : passes) {
@@ -460,7 +460,7 @@ void RenderGraphDebug::BuildTimelineMesh(const RenderGraph& graph, float width, 
     }
 }
 
-void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph& graph, uint32_t width, uint32_t height) {
+void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph& graph, u32 width, u32 height) {
     if (!enabled_) {
         // std::cout << "RenderGraphDebug disabled." << std::endl; // Optional spam
         return;
@@ -570,10 +570,10 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
         }
         
         rhi::ResourceHandle vBuffers[] = {vertexBuffer_, uniformBuffer_};
-        uint64_t offsets[] = {0, 0};
+        u64 offsets[] = {0, 0};
         cmdBuffer->BindVertexBuffers(0, 2, vBuffers, offsets);
         
-        cmdBuffer->Draw(static_cast<uint32_t>(vertices_.size()), 0, 1, 0);
+        cmdBuffer->Draw(static_cast<u32>(vertices_.size()), 0, 1, 0);
     } 
 
     // ---------------------------------------------------------
@@ -632,7 +632,7 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
         float startY = height - previewSize - 20.0f;
         
         // We will collect valid textures to draw
-        std::vector<size_t> validIndices;
+        utl::vector<size_t> validIndices;
 
         for (size_t i = 0; i < debugResources_.size(); ++i) {
             auto* resource = debugResources_[i].second;
@@ -730,7 +730,7 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
 
             // Bind Buffers
             rhi::ResourceHandle bindings[] = {textureVertexBuffer_, textureUniformBuffer_};
-            uint64_t tOffsets[] = {0, 0};
+            u64 tOffsets[] = {0, 0};
             cmdBuffer->BindVertexBuffers(0, 2, bindings, tOffsets);
             
             // Draw Calls

@@ -273,41 +273,41 @@ void MetalDevice::queryDeviceInfo(DeviceInfo& info) {
     info.maxTexture3DSize = 2048;
 }
 
-uint32_t MetalDevice::getCurrentFrameIndexImpl() const {
+u32 MetalDevice::getCurrentFrameIndexImpl() const {
     return currentFrameIndex_;
 }
 
 MetalBuffer* MetalDevice::GetBuffer(ResourceHandle handle) {
-    return bufferAllocator_.Get(static_cast<uint32_t>(handle));
+    return bufferAllocator_.Get(static_cast<u32>(handle));
 }
 
 MetalTexture* MetalDevice::GetTexture(ResourceHandle handle) {
-    return textureAllocator_.Get(static_cast<uint32_t>(handle));
+    return textureAllocator_.Get(static_cast<u32>(handle));
 }
 
 MetalCommandBuffer* MetalDevice::GetCommandBuffer(CommandBufferHandle handle) {
-    return commandBufferAllocator_.Get(static_cast<uint32_t>(handle));
+    return commandBufferAllocator_.Get(static_cast<u32>(handle));
 }
 
 MetalSync* MetalDevice::GetSync(SyncHandle handle) {
     if (handle == handles::INVALID_SYNC) return nullptr;
-    return syncAllocator_.Get(static_cast<uint32_t>(handle));
+    return syncAllocator_.Get(static_cast<u32>(handle));
 }
 
 MetalQueryPool* MetalDevice::GetQueryPool(QueryPoolHandle handle) {
-    return queryPoolAllocator_.Get(static_cast<uint32_t>(handle));
+    return queryPoolAllocator_.Get(static_cast<u32>(handle));
 }
 
 MetalShader* MetalDevice::GetShader(ShaderHandle handle) {
-    return shaderAllocator_.Get(static_cast<uint32_t>(handle));
+    return shaderAllocator_.Get(static_cast<u32>(handle));
 }
 
 MetalPipeline* MetalDevice::GetPipeline(PipelineHandle handle) {
-    return pipelineAllocator_.Get(static_cast<uint32_t>(handle));
+    return pipelineAllocator_.Get(static_cast<u32>(handle));
 }
 
 MetalSampler* MetalDevice::GetSampler(SamplerHandle handle) {
-    return samplerAllocator_.Get(static_cast<uint32_t>(handle));
+    return samplerAllocator_.Get(static_cast<u32>(handle));
 }
 
 MetalRenderPass* MetalDevice::GetRenderPass(RenderPassHandle handle) {
@@ -368,7 +368,7 @@ bool MetalDevice::ReloadShader(ShaderHandle shaderHandle, const void* data, size
 // === CRTP 实现接口 ===
 
 bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
-    MetalCommandBuffer* cmdBuf = commandBufferAllocator_.Get(static_cast<uint32_t>(info.cmdBuffer));
+    MetalCommandBuffer* cmdBuf = commandBufferAllocator_.Get(static_cast<u32>(info.cmdBuffer));
     if (cmdBuf) {
         if (info.waitSemaphore != handles::INVALID_SYNC) {
             // Default value 1 for binary semaphore simulation if not specified
@@ -381,7 +381,7 @@ bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
         if (info.signalFence != handles::INVALID_SYNC) {
             MetalSync* sync = GetSync(info.signalFence);
             if (sync && sync->GetNativeEvent()) {
-                 uint64_t nextVal = sync->GetValue() + 1;
+                 u64 nextVal = sync->GetValue() + 1;
                  // 直接访问 MetalCommandBuffer 的私有成员，因为是 friend
                  if (cmdBuf->mtlCommandBuffer_) {
                      cmdBuf->mtlCommandBuffer_->encodeSignalEvent(sync->GetNativeEvent(), nextVal);
@@ -396,7 +396,7 @@ bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
 }
 
 SyncHandle MetalDevice::createSyncImpl() {
-    uint32_t id = syncAllocator_.Allocate(mtlDevice_);
+    u32 id = syncAllocator_.Allocate(mtlDevice_);
     return SyncHandle(id);
 }
 
@@ -412,7 +412,7 @@ bool MetalDevice::waitForSyncImpl(SyncHandle handle, u32 timeoutMs) {
     if (!event) return false;
 
     // 获取当前期望的目标值 (假设由 Submit 递增)
-    uint64_t value = sync->GetValue();
+    u64 value = sync->GetValue();
     if (value == 0) return true; // 初始状态，视为已完成
 
     // 使用 dispatch_semaphore 实现同步等待
@@ -422,7 +422,7 @@ bool MetalDevice::waitForSyncImpl(SyncHandle handle, u32 timeoutMs) {
     MTL::SharedEventListener* listener = MTL::SharedEventListener::alloc()->init();
     
     // 注册监听器
-    event->notifyListener(listener, value, ^(MTL::SharedEvent* evt, uint64_t val) {
+    event->notifyListener(listener, value, ^(MTL::SharedEvent* evt, u64 val) {
         dispatch_semaphore_signal(sema);
         dispatch_release(sema);
     });
@@ -482,7 +482,7 @@ void MetalDevice::shutdownMemoryPool() {
 }
 
 ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
-    uint32_t id = bufferAllocator_.Allocate(*this, desc);
+    u32 id = bufferAllocator_.Allocate(*this, desc);
     MetalBuffer* buffer = bufferAllocator_.Get(id);
     if (buffer) {
         // 尝试从内存池分配 (仅针对 Shared/Dynamic/Staging 内存)
@@ -528,7 +528,7 @@ ResourceHandle MetalDevice::createTextureImpl(const TextureDesc& desc) {
               << " Size: " << desc.size.x << "x" << desc.size.y << "x" << desc.size.z 
               << " Array: " << desc.arraySize 
               << " Mips: " << desc.mipLevels << std::endl;
-    uint32_t id = textureAllocator_.Allocate(*this, desc);
+    u32 id = textureAllocator_.Allocate(*this, desc);
     MetalTexture* texture = textureAllocator_.Get(id);
     if (texture) {
         if (texture->Initialize()) {
@@ -546,7 +546,7 @@ ResourceHandle MetalDevice::createTextureImpl(const TextureDesc& desc) {
 
 ResourceHandle MetalDevice::createTextureViewImpl(const TextureViewDesc& desc) {
     // 1. 获取源纹理
-    MetalTexture* sourceTexture = textureAllocator_.Get(uint32_t(desc.texture));
+    MetalTexture* sourceTexture = textureAllocator_.Get(u32(desc.texture));
     if (!sourceTexture) {
         std::cerr << "[MetalDevice] Invalid source texture for view creation" << std::endl;
         return handles::INVALID_RESOURCE;
@@ -565,9 +565,9 @@ ResourceHandle MetalDevice::createTextureViewImpl(const TextureViewDesc& desc) {
     textureDesc.format = desc.format;
     
     // 计算视图的尺寸
-    uint32_t width = std::max(1u, (uint32_t)mtlSource->width() >> desc.mostDetailedMip);
-    uint32_t height = std::max(1u, (uint32_t)mtlSource->height() >> desc.mostDetailedMip);
-    uint32_t depth = std::max(1u, (uint32_t)mtlSource->depth());
+    u32 width = std::max(1u, (u32)mtlSource->width() >> desc.mostDetailedMip);
+    u32 height = std::max(1u, (u32)mtlSource->height() >> desc.mostDetailedMip);
+    u32 depth = std::max(1u, (u32)mtlSource->depth());
     if (sourceTexture->textureDesc_.type == TextureType::Texture3D) {
         depth = std::max(1u, depth >> desc.mostDetailedMip);
     }
@@ -579,7 +579,7 @@ ResourceHandle MetalDevice::createTextureViewImpl(const TextureViewDesc& desc) {
     textureDesc.memoryUsage = sourceTexture->textureDesc_.memoryUsage;
     
     // 3. 分配 MetalTexture 对象
-    uint32_t id = textureAllocator_.Allocate(*this, textureDesc);
+    u32 id = textureAllocator_.Allocate(*this, textureDesc);
     MetalTexture* viewTexture = textureAllocator_.Get(id);
     
     if (viewTexture) {
@@ -613,7 +613,7 @@ ResourceHandle MetalDevice::createTextureViewImpl(const TextureViewDesc& desc) {
 }
 
 ShaderHandle MetalDevice::createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint) {
-    uint32_t id = shaderAllocator_.Allocate(*this, data, size, stage, entryPoint);
+    u32 id = shaderAllocator_.Allocate(*this, data, size, stage, entryPoint);
     MetalShader* shader = shaderAllocator_.Get(id);
     if (shader && shader->Initialize()) {
         shader->SetHandle(ShaderHandle(id));
@@ -624,7 +624,7 @@ ShaderHandle MetalDevice::createShaderImpl(const void* data, size_t size, Shader
 }
 
 PipelineHandle MetalDevice::createGraphicsPipelineImpl(const GraphicsPipelineDesc& desc) {
-    uint32_t id = pipelineAllocator_.Allocate(*this);
+    u32 id = pipelineAllocator_.Allocate(*this);
     MetalPipeline* pipeline = pipelineAllocator_.Get(id);
     if (pipeline && pipeline->Initialize(desc)) {
         pipeline->SetHandle(PipelineHandle(id));
@@ -644,7 +644,7 @@ PipelineHandle MetalDevice::createGraphicsPipelineImpl(const GraphicsPipelineDes
 }
 
 PipelineHandle MetalDevice::createComputePipelineImpl(const ComputePipelineDesc& desc) {
-    uint32_t id = pipelineAllocator_.Allocate(*this);
+    u32 id = pipelineAllocator_.Allocate(*this);
     MetalPipeline* pipeline = pipelineAllocator_.Get(id);
     if (pipeline && pipeline->Initialize(desc)) {
         pipeline->SetHandle(PipelineHandle(id));
@@ -661,7 +661,7 @@ PipelineHandle MetalDevice::createComputePipelineImpl(const ComputePipelineDesc&
 }
 
 SamplerHandle MetalDevice::createSamplerImpl(const SamplerDesc& desc) {
-    uint32_t id = samplerAllocator_.Allocate(*this);
+    u32 id = samplerAllocator_.Allocate(*this);
     MetalSampler* sampler = samplerAllocator_.Get(id);
     if (sampler && sampler->Initialize(desc)) {
         sampler->SetHandle(SamplerHandle(id));
@@ -672,7 +672,7 @@ SamplerHandle MetalDevice::createSamplerImpl(const SamplerDesc& desc) {
 }
 
 DescriptorSetLayoutHandle MetalDevice::createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc) {
-    uint32_t id = descriptorSetLayoutAllocator_.Allocate(*this, desc);
+    u32 id = descriptorSetLayoutAllocator_.Allocate(*this, desc);
     MetalDescriptorSetLayout* layout = descriptorSetLayoutAllocator_.Get(id);
     if (layout && layout->Initialize()) {
         return DescriptorSetLayoutHandle(id);
@@ -682,7 +682,7 @@ DescriptorSetLayoutHandle MetalDevice::createDescriptorSetLayoutImpl(const Descr
 }
 
 PipelineLayoutHandle MetalDevice::createPipelineLayoutImpl(const PipelineLayoutDesc& desc) {
-    uint32_t id = pipelineLayoutAllocator_.Allocate(*this, desc);
+    u32 id = pipelineLayoutAllocator_.Allocate(*this, desc);
     MetalPipelineLayout* layout = pipelineLayoutAllocator_.Get(id);
     if (layout && layout->Initialize()) {
         return PipelineLayoutHandle(id);
@@ -692,7 +692,7 @@ PipelineLayoutHandle MetalDevice::createPipelineLayoutImpl(const PipelineLayoutD
 }
 
 DescriptorSetHandle MetalDevice::createDescriptorSetImpl(const DescriptorSetDesc& desc) {
-    uint32_t id = descriptorSetAllocator_.Allocate(*this, desc);
+    u32 id = descriptorSetAllocator_.Allocate(*this, desc);
     MetalDescriptorSet* set = descriptorSetAllocator_.Get(id);
     if (set && set->Initialize()) {
         return DescriptorSetHandle(id);
@@ -701,18 +701,18 @@ DescriptorSetHandle MetalDevice::createDescriptorSetImpl(const DescriptorSetDesc
     return static_cast<DescriptorSetHandle>(handles::INVALID_RESOURCE);
 }
 
-void MetalDevice::updateDescriptorSetsImpl(uint32_t writeCount, const WriteDescriptorSet* writes) {
+void MetalDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes) {
     // Group writes by descriptor set
     // Note: Since WriteDescriptorSet contains the dstSet handle, we can process them one by one
     // or group them. The MetalDescriptorSet::Update takes an array, but it expects them to be for 'this' set?
     // Let's check MetalDescriptorSet::Update signature.
-    // void Update(uint32_t writeCount, const WriteDescriptorSet* writes);
+    // void Update(u32 writeCount, const WriteDescriptorSet* writes);
     // It seems it iterates and checks write.dstSet? No, typically Update is called on the set instance
     // and the writes passed to it are for that set. 
     // BUT, the RHI interface is UpdateDescriptorSets(count, writes), where writes can target DIFFERENT sets.
     // So we need to iterate and dispatch.
     
-    for (uint32_t i = 0; i < writeCount; ++i) {
+    for (u32 i = 0; i < writeCount; ++i) {
         const WriteDescriptorSet& write = writes[i];
         MetalDescriptorSet* set = GetDescriptorSet(write.dstSet);
         if (set) {
@@ -723,7 +723,7 @@ void MetalDevice::updateDescriptorSetsImpl(uint32_t writeCount, const WriteDescr
 }
 
 CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) {
-    uint32_t id = commandBufferAllocator_.Allocate(*this, type);
+    u32 id = commandBufferAllocator_.Allocate(*this, type);
     MetalCommandBuffer* cmdBuf = commandBufferAllocator_.Get(id);
     if (cmdBuf) {
         if (cmdBuf->Initialize()) {
@@ -742,9 +742,9 @@ CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) 
 
 void MetalDevice::destroyBufferImpl(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
-    // std::cout << "[MetalDevice] Destroying Buffer - ID: " << (uint32_t)handle << std::endl;
+    // std::cout << "[MetalDevice] Destroying Buffer - ID: " << (u32)handle << std::endl;
     ResourceManager::Instance().UnregisterResource(handle);
-    bufferAllocator_.Free(static_cast<uint32_t>(handle));
+    bufferAllocator_.Free(static_cast<u32>(handle));
 }
 
 void* MetalDevice::mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) {
@@ -761,7 +761,7 @@ void* MetalDevice::mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) {
     if (!mtlBuffer) return nullptr;
     
     // 获取缓冲区内容指针并偏移
-    uint8_t* ptr = static_cast<uint8_t*>(mtlBuffer->contents());
+    u8* ptr = static_cast<u8*>(mtlBuffer->contents());
     if (!ptr) return nullptr;
     
     return ptr + offset;
@@ -784,17 +784,17 @@ void MetalDevice::unmapBufferImpl(ResourceHandle handle) {
 
 void MetalDevice::destroyTextureImpl(ResourceHandle handle) {
     ResourceManager::Instance().UnregisterResource(handle);
-    textureAllocator_.Free(static_cast<uint32_t>(handle));
+    textureAllocator_.Free(static_cast<u32>(handle));
 }
 void MetalDevice::destroyShaderImpl(ShaderHandle handle) {
-    shaderAllocator_.Free(static_cast<uint32_t>(handle));
+    shaderAllocator_.Free(static_cast<u32>(handle));
 }
 void MetalDevice::destroyPipelineImpl(PipelineHandle handle) {
     UnregisterPipelineDependency(handle);
-    pipelineAllocator_.Free(static_cast<uint32_t>(handle));
+    pipelineAllocator_.Free(static_cast<u32>(handle));
 }
 void MetalDevice::destroySamplerImpl(SamplerHandle handle) {
-    samplerAllocator_.Free(static_cast<uint32_t>(handle));
+    samplerAllocator_.Free(static_cast<u32>(handle));
 }
 void MetalDevice::destroyCommandBufferImpl(CommandBufferHandle handle) {
     if (handle == handles::INVALID_COMMAND_BUFFER) return;
@@ -802,11 +802,11 @@ void MetalDevice::destroyCommandBufferImpl(CommandBufferHandle handle) {
     // Unregister from global manager
     UnregisterCommandBuffer(handle);
     
-    commandBufferAllocator_.Free(static_cast<uint32_t>(handle));
+    commandBufferAllocator_.Free(static_cast<u32>(handle));
 }
 
 void MetalDevice::destroySyncImpl(SyncHandle handle) {
-    MetalSync* sync = syncAllocator_.Get(static_cast<uint32_t>(handle));
+    MetalSync* sync = syncAllocator_.Get(static_cast<u32>(handle));
     if (sync) {
         MTL::SharedEvent* event = sync->DetachNativeEvent();
         if (event) {
@@ -815,7 +815,7 @@ void MetalDevice::destroySyncImpl(SyncHandle handle) {
             });
         }
     }
-    syncAllocator_.Free(static_cast<uint32_t>(handle));
+    syncAllocator_.Free(static_cast<u32>(handle));
 }
 
 QueryPoolHandle MetalDevice::createQueryPoolImpl(const QueryPoolDesc& desc) {
@@ -834,15 +834,15 @@ QueryPoolHandle MetalDevice::createQueryPoolImpl(const QueryPoolDesc& desc) {
             return handles::INVALID_QUERY_POOL;
     }
 
-    uint32_t id = queryPoolAllocator_.Allocate(mtlDevice_, metalType, desc.queryCount);
+    u32 id = queryPoolAllocator_.Allocate(mtlDevice_, metalType, desc.queryCount);
     return QueryPoolHandle(id);
 }
 
 void MetalDevice::destroyQueryPoolImpl(QueryPoolHandle handle) {
-    queryPoolAllocator_.Free(static_cast<uint32_t>(handle));
+    queryPoolAllocator_.Free(static_cast<u32>(handle));
 }
 
-bool MetalDevice::getQueryPoolResultsImpl(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) {
+bool MetalDevice::getQueryPoolResultsImpl(QueryPoolHandle handle, u32 firstQuery, u32 queryCount, void* data, size_t stride) {
     MetalQueryPool* pool = GetQueryPool(handle);
     if (!pool) return false;
     return pool->GetResults(firstQuery, queryCount, data, stride);
@@ -866,23 +866,23 @@ void MetalDevice::destroySwapChainImpl(RHISwapChain* swapChain) {
 }
 
 MetalDescriptorSet* MetalDevice::GetDescriptorSet(DescriptorSetHandle handle) {
-    return descriptorSetAllocator_.Get(static_cast<uint32_t>(handle));
+    return descriptorSetAllocator_.Get(static_cast<u32>(handle));
 }
 
 MetalDescriptorSetLayout* MetalDevice::GetDescriptorSetLayout(DescriptorSetLayoutHandle handle) {
-    return descriptorSetLayoutAllocator_.Get(static_cast<uint32_t>(handle));
+    return descriptorSetLayoutAllocator_.Get(static_cast<u32>(handle));
 }
 
 void MetalDevice::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
-    descriptorSetAllocator_.Free(static_cast<uint32_t>(handle));
+    descriptorSetAllocator_.Free(static_cast<u32>(handle));
 }
 
 void MetalDevice::destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle) {
-    descriptorSetLayoutAllocator_.Free(static_cast<uint32_t>(handle));
+    descriptorSetLayoutAllocator_.Free(static_cast<u32>(handle));
 }
 
 void MetalDevice::destroyPipelineLayoutImpl(PipelineLayoutHandle handle) {
-    pipelineLayoutAllocator_.Free(static_cast<uint32_t>(handle));
+    pipelineLayoutAllocator_.Free(static_cast<u32>(handle));
 }
 
 RenderPassHandle MetalDevice::createRenderPassImpl(const RenderPassDesc& desc) {

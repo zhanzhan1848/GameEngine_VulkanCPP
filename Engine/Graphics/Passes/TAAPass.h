@@ -15,7 +15,7 @@ public:
     TAAPass();
     ~TAAPass();
 
-    bool Initialize(rhi::RHIDeviceBase* device, uint32_t width, uint32_t height, rhi::DataFormat outputFormat = rhi::DataFormat::RGBA8_UNorm);
+    bool Initialize(rhi::RHIDeviceBase* device, u32 width, u32 height, rhi::DataFormat outputFormat = rhi::DataFormat::RGBA8_UNorm);
     void Shutdown();
 
     // Execute TAA
@@ -25,8 +25,8 @@ public:
                  rhi::ResourceHandle historyInput,
                  rhi::ResourceHandle velocityInput,
                  rhi::ResourceHandle output,
-                 uint32_t width, uint32_t height,
-                 uint32_t frameIndex,
+                 u32 width, u32 height,
+                 u32 frameIndex,
                  float jitterX, float jitterY,
                  float prevJitterX, float prevJitterY);
 

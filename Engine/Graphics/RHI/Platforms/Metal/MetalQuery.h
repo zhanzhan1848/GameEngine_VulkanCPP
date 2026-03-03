@@ -35,7 +35,7 @@ public:
      * @param type 查询类型
      * @param count 查询数量
      */
-    MetalQueryPool(MTL::Device* device, MetalQueryType type, uint32_t count);
+    MetalQueryPool(MTL::Device* device, MetalQueryType type, u32 count);
 
     /**
      * @brief 析构函数
@@ -60,7 +60,7 @@ public:
     /**
      * @brief 获取查询数量
      */
-    uint32_t GetCount() const { return count_; }
+    u32 GetCount() const { return count_; }
 
     /**
      * @brief 获取查询结果
@@ -70,13 +70,13 @@ public:
      * @param stride 数据步长
      * @return 是否获取成功
      */
-    bool GetResults(uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride);
+    bool GetResults(u32 firstQuery, u32 queryCount, void* data, size_t stride);
 
 private:
     MTL::CounterSampleBuffer* buffer_{nullptr}; ///< 计数器采样缓冲区 (用于 Timestamp)
     MTL::Buffer* visibilityBuffer_{nullptr};    ///< 可见性结果缓冲区 (用于 Occlusion)
     MetalQueryType type_;                       ///< 查询类型
-    uint32_t count_;                            ///< 查询数量
+    u32 count_;                            ///< 查询数量
 };
 
 } // namespace primal::graphics::rhi

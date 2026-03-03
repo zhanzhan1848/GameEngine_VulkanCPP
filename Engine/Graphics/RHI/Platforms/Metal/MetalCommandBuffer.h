@@ -44,7 +44,7 @@ protected:
     bool resetImpl() override;
     bool beginImpl() override;
     bool endImpl() override;
-    bool submitImpl(uint32_t waitFlags) override;
+    bool submitImpl(u32 waitFlags) override;
     bool waitForCompletionImpl() override;
 
 public:
@@ -69,43 +69,43 @@ public:
     void SetViewport(const ViewportDesc& viewport) override;
     void SetScissor(const Rect& scissor) override;
     void BindGraphicsPipeline(PipelineHandle pipeline) override;
-    void BindVertexBuffers(uint32_t firstSlot, uint32_t slotCount, const ResourceHandle* buffers, const uint64_t* offsets) override;
-    void BindIndexBuffer(ResourceHandle buffer, DataFormat format, uint64_t offset) override;
+    void BindVertexBuffers(u32 firstSlot, u32 slotCount, const ResourceHandle* buffers, const u64* offsets) override;
+    void BindIndexBuffer(ResourceHandle buffer, DataFormat format, u64 offset) override;
     void BindDescriptorSets(PipelineBindPoint bindPoint,
                            PipelineLayoutHandle pipelineLayout,
-                           uint32_t firstSet,
-                           uint32_t setCount,
+                           u32 firstSet,
+                           u32 setCount,
                            const DescriptorSetHandle* descriptorSets,
-                           uint32_t dynamicOffsetCount,
-                           const uint32_t* dynamicOffsets) override;
+                           u32 dynamicOffsetCount,
+                           const u32* dynamicOffsets) override;
     void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
-                      uint32_t offset, uint32_t size, const void* pValues) override;
-    void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override;
-    void Draw(uint32_t vertexCount, uint32_t startVertex, uint32_t instanceCount, uint32_t startInstance) override;
-    void DrawIndexed(uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex, uint32_t instanceCount, uint32_t startInstance) override;
-    void DrawIndirect(ResourceHandle buffer, uint64_t offset, uint32_t drawCount) override;
+                      u32 offset, u32 size, const void* pValues) override;
+    void WriteTimestamp(QueryPoolHandle queryPool, u32 queryIndex) override;
+    void Draw(u32 vertexCount, u32 startVertex, u32 instanceCount, u32 startInstance) override;
+    void DrawIndexed(u32 indexCount, u32 startIndex, u32 baseVertex, u32 instanceCount, u32 startInstance) override;
+    void DrawIndirect(ResourceHandle buffer, u64 offset, u32 drawCount) override;
 
     // === 计算命令 ===
     void BindComputePipeline(PipelineHandle pipeline) override;
-    void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
-    void DispatchIndirect(ResourceHandle buffer, uint64_t offset) override;
+    void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
+    void DispatchIndirect(ResourceHandle buffer, u64 offset) override;
     
     // Metal 特有扩展
-    void BindComputeBuffers(uint32_t firstSlot, uint32_t slotCount, const ResourceHandle* buffers, const uint64_t* offsets);
+    void BindComputeBuffers(u32 firstSlot, u32 slotCount, const ResourceHandle* buffers, const u64* offsets);
 
     MTL::RenderCommandEncoder* GetCurrentRenderEncoder() const { return (MTL::RenderCommandEncoder*)currentEncoder_; }
 
     // === 资源命令 ===
-    void CopyBuffer(ResourceHandle src, ResourceHandle dst, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) override;
-    void CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture, const BufferTextureCopyRegion* regions, uint32_t regionCount) override;
-    void CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer, const BufferTextureCopyRegion* regions, uint32_t regionCount) override;
-    void BlitTexture(ResourceHandle src, ResourceHandle dst, const TextureBlitRegion* regions, uint32_t regionCount, FilterMode filter) override;
+    void CopyBuffer(ResourceHandle src, ResourceHandle dst, u64 srcOffset, u64 dstOffset, u64 size) override;
+    void CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture, const BufferTextureCopyRegion* regions, u32 regionCount) override;
+    void CopyTextureToBuffer(ResourceHandle srcTexture, ResourceHandle dstBuffer, const BufferTextureCopyRegion* regions, u32 regionCount) override;
+    void BlitTexture(ResourceHandle src, ResourceHandle dst, const TextureBlitRegion* regions, u32 regionCount, FilterMode filter) override;
     void GenerateMipmaps(ResourceHandle texture) override;
-    void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override;
+    void InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) override;
 
 private:
     SyncHandle guardEventHandle_ = handles::INVALID_SYNC;
-    uint64_t guardValue_ = 0;
+    u64 guardValue_ = 0;
 
     /**
      * @brief 结束当前编码器

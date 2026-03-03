@@ -19,7 +19,7 @@ namespace primal::graphics::rhi::debug {
  * @brief RHI调试输出级别
  * @details TRACE为最低级别，ERROR为最高级别
  */
-enum class DebugLevel : uint8_t {
+enum class DebugLevel : u8 {
     TRACE = 0,    ///< 跟踪级别：详细的执行流程信息
     DEBUG_LEVEL = 1,    ///< 调试级别：开发和调试信息
     INFO = 2,     ///< 信息级别：重要状态变更
@@ -52,12 +52,12 @@ enum class DebugLevel : uint8_t {
 /**
  * @brief 获取当前调试级别阈值
  */
-#define RHI_GET_DEBUG_LEVEL() static_cast<uint8_t>(RHI_DEBUG_LEVEL)
+#define RHI_GET_DEBUG_LEVEL() static_cast<u8>(RHI_DEBUG_LEVEL)
 
 /**
  * @brief 检查是否应该输出指定级别的调试信息
  */
-#define RHI_SHOULD_LOG(level) (RHI_DEBUG_TARGET != 0 && RHI_GET_DEBUG_LEVEL() <= static_cast<uint8_t>(level))
+#define RHI_SHOULD_LOG(level) (RHI_DEBUG_TARGET != 0 && RHI_GET_DEBUG_LEVEL() <= static_cast<u8>(level))
 
 /**
  * @brief 格式化输出缓冲区大小
@@ -72,7 +72,7 @@ enum class DebugLevel : uint8_t {
  * @param function 函数名
  * @param message 消息内容
  */
-extern void OutputDebugMessage(DebugLevel level, const char* file, uint32_t line, 
+extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line, 
                               const char* function, const char* message);
 
 /**
@@ -195,7 +195,7 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, uint32_t line
     DEBUG_OP( \
         if ((value) < (min) || (value) > (max)) { \
             RHI_ERROR("Range check failed for " #name ": %u (expected %u-%u)", \
-                     static_cast<uint32_t>(value), static_cast<uint32_t>(min), static_cast<uint32_t>(max)); \
+                     static_cast<u32>(value), static_cast<u32>(min), static_cast<u32>(max)); \
             return false; \
         } \
     )
@@ -224,15 +224,15 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, uint32_t line
  * @brief RHI调试计数器
  */
 namespace counters {
-    extern std::atomic<uint64_t> ResourceAllocations;
-    extern std::atomic<uint64_t> ResourceDeallocations;
-    extern std::atomic<uint64_t> BufferCreations;
-    extern std::atomic<uint64_t> TextureCreations;
-    extern std::atomic<uint64_t> CommandBufferSubmissions;
-    extern std::atomic<uint64_t> ShaderCompilations;
-    extern std::atomic<uint64_t> PipelineCreations;
-    extern std::atomic<uint64_t> MemoryAllocations;
-    extern std::atomic<uint64_t> MemoryDeallocations;
+    extern std::atomic<u64> ResourceAllocations;
+    extern std::atomic<u64> ResourceDeallocations;
+    extern std::atomic<u64> BufferCreations;
+    extern std::atomic<u64> TextureCreations;
+    extern std::atomic<u64> CommandBufferSubmissions;
+    extern std::atomic<u64> ShaderCompilations;
+    extern std::atomic<u64> PipelineCreations;
+    extern std::atomic<u64> MemoryAllocations;
+    extern std::atomic<u64> MemoryDeallocations;
 }
 
 /**

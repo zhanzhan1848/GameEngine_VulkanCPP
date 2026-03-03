@@ -13,7 +13,7 @@
 namespace primal::graphics::rhi {
 
 // 辅助函数：获取像素大小（字节）
-static uint32_t GetBytePerPixel(DataFormat format) {
+static u32 GetBytePerPixel(DataFormat format) {
     switch (format) {
         // 8-bit formats
         case DataFormat::R8_UNorm:
@@ -310,7 +310,7 @@ void MetalTexture::destroyImpl() {
     state_ = ResourceState::Destroyed;
 }
 
-void* MetalTexture::mapImpl(uint64_t offset, uint64_t size) {
+void* MetalTexture::mapImpl(u64 offset, u64 size) {
     // Textures are generally not mappable in the same way as buffers
     // Only linear textures or managed/shared textures might be mappable via getBytes/replaceRegion logic or if backed by buffer
     // For now, return nullptr
@@ -321,7 +321,7 @@ void MetalTexture::unmapImpl() {
     // Do nothing
 }
 
-bool MetalTexture::updateDataImpl(const void* data, uint64_t size, uint64_t offset) {
+bool MetalTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     if (!mtlTexture_ || !data) return false;
     
     // Simplified update for 2D texture, single mip, single layer
@@ -341,7 +341,7 @@ bool MetalTexture::updateDataImpl(const void* data, uint64_t size, uint64_t offs
     // We will implement basic support for common formats.
     
     // Estimate bytes per pixel
-    uint32_t bytesPerPixel = GetBytePerPixel(textureDesc_.format);
+    u32 bytesPerPixel = GetBytePerPixel(textureDesc_.format);
     if (bytesPerPixel == 0) {
         // Fallback or compressed format handling needed
         // For now, assume 4 bytes as a safe fallback for unknown formats in basic tests

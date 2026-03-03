@@ -27,7 +27,7 @@ public:
      * @param numRetries 候选点重试次数，越高分布越均匀，但生成越慢
      * @return 采样点列表 (坐标范围 [-1, 1])
      */
-    static utl::vector<rhi::math::v2> GeneratePoissonDiskSamples(uint32_t count, uint32_t numRetries = 30);
+    static utl::vector<rhi::math::v2> GeneratePoissonDiskSamples(u32 count, u32 numRetries = 30);
 
     /**
      * @brief 生成随机旋转 Noise Texture 数据
@@ -39,7 +39,7 @@ public:
      * @param size 纹理尺寸 (例如 4, 16, 64)
      * @return 纹理数据字节数组 (大小 = size * size * 4)
      */
-    static utl::vector<uint8_t> GenerateNoiseTexture(uint32_t size);
+    static utl::vector<u8> GenerateNoiseTexture(u32 size);
 };
 
 } // namespace primal::graphics::utils

@@ -8,14 +8,14 @@ class MetalDevice;
 class MetalDescriptorSetLayout;
 
 struct MetalDescriptorBinding {
-    uint32_t binding;
+    u32 binding;
     DescriptorType type;
-    uint32_t count;
+    u32 count;
     ShaderStage stageFlags;
     
     utl::vector<ResourceHandle> resources;
     utl::vector<SamplerHandle> samplers;
-    utl::vector<uint64_t> bufferOffsets;
+    utl::vector<u64> bufferOffsets;
 };
 
 class MetalDescriptorSet : public RHIDescriptorSet {
@@ -25,12 +25,12 @@ public:
     
     bool Initialize() override;
     void Destroy() override;
-    bool updateDataImpl(const void* data, uint64_t size, uint64_t offset) override;
+    bool updateDataImpl(const void* data, u64 size, u64 offset) override;
     
-    void* mapImpl(uint64_t offset, uint64_t size) override;
+    void* mapImpl(u64 offset, u64 size) override;
     void unmapImpl() override;
     
-    void Update(const WriteDescriptorSet* writes, uint32_t count);
+    void Update(const WriteDescriptorSet* writes, u32 count);
     
     const utl::vector<MetalDescriptorBinding>& GetBindings() const { return bindings_; }
 

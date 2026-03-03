@@ -346,7 +346,7 @@ u32 RHIBatchRenderer::SplitBatch(RenderBatch& batch) {
         return 1;
     }
     
-    std::vector<RenderBatch> splitBatches;
+    utl::vector<RenderBatch> splitBatches;
     RenderBatch currentBatch;
     currentBatch.key = batch.key;
     
@@ -396,8 +396,8 @@ u32 RHIBatchRenderer::SplitBatch(RenderBatch& batch) {
     return static_cast<u32>(splitBatches.size());
 }
 
-std::vector<RenderBatch> RHIBatchRenderer::CreateInstancedBatches(const RenderBatch& batch) {
-    std::vector<RenderBatch> instancedBatches;
+utl::vector<RenderBatch> RHIBatchRenderer::CreateInstancedBatches(const RenderBatch& batch) {
+    utl::vector<RenderBatch> instancedBatches;
     
     if (batch.items.empty()) {
         return instancedBatches;

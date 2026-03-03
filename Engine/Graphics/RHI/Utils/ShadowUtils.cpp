@@ -17,7 +17,7 @@ void CalculateCascadeSplits(const CascadeConfig& config, utl::vector<float>& out
     outSplits[0] = nearClip;
     outSplits[config.cascadeCount] = farClip;
     
-    for (uint32_t i = 1; i < config.cascadeCount; ++i) {
+    for (u32 i = 1; i < config.cascadeCount; ++i) {
         float p = static_cast<float>(i) / static_cast<float>(config.cascadeCount);
         float log = nearClip * std::pow(farClip / nearClip, p);
         float uniform = nearClip + (farClip - nearClip) * p;
@@ -55,7 +55,7 @@ void CreateCascadeViews(
     const auto& mainViewMat = mainView.GetViewMatrix();
     const auto mainInvView = math::Inverse(mainViewMat);
     
-    for (uint32_t i = 0; i < config.cascadeCount; ++i) {
+    for (u32 i = 0; i < config.cascadeCount; ++i) {
         float splitNear = splits[i];
         float splitFar = splits[i+1];
         
@@ -175,7 +175,7 @@ void CreateSpotShadowView(
     const math::v3& lightDir,
     float outerCone,
     float range,
-    uint32_t shadowMapSize,
+    u32 shadowMapSize,
     RenderView& outView
 ) {
     // 1. Calculate FOV
@@ -217,7 +217,7 @@ void CreateSpotShadowView(
 void CreatePointShadowViews(
     const math::v3& lightPos,
     float range,
-    uint32_t shadowMapSize,
+    u32 shadowMapSize,
     utl::vector<RenderView>& outViews
 ) {
     outViews.clear();
@@ -253,7 +253,7 @@ void CreatePointShadowViews(
     };
 
     // 6 Faces
-    for (uint32_t i = 0; i < 6; ++i) {
+    for (u32 i = 0; i < 6; ++i) {
         math::v3 target = lightPos + faces[i].targetOffset;
         math::m4x4 view = math::CreateLookAtMatrix(lightPos, target, faces[i].up);
 

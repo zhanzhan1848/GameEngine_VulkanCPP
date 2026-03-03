@@ -49,7 +49,7 @@ void RenderGraph::Clear() {
 
 void RenderGraph::CleanupPool() {
     // Keep resources for some frames to reduce thrashing
-    const uint64_t kKeepFrames = 30; 
+    const u64 kKeepFrames = 30; 
     
     // Manually iterate and erase since custom vector might not support remove_if+erase(iterator)
     for (size_t i = 0; i < resourcePool_.size(); ) {
@@ -68,7 +68,7 @@ void RenderGraph::CleanupPool() {
 }
 
 RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::ResourceHandle resource) {
-    RGResourceHandle handle = {static_cast<uint32_t>(resources_.size() + 1), 0};
+    RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphResource>(name, handle, RGResourceType::Unknown);
     rgResource->SetImportedResource(resource);
     
@@ -78,7 +78,7 @@ RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::Resou
 }
 
 RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::ResourceHandle resource, const rhi::TextureDesc& desc) {
-    RGResourceHandle handle = {static_cast<uint32_t>(resources_.size() + 1), 0};
+    RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphTexture>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
@@ -89,7 +89,7 @@ RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::Resour
 }
 
 RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::ResourceHandle resource, const rhi::BufferDesc& desc) {
-    RGResourceHandle handle = {static_cast<uint32_t>(resources_.size() + 1), 0};
+    RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphBuffer>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
@@ -100,7 +100,7 @@ RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::Resourc
 }
 
 RGResourceHandle RenderGraph::CreateTexture(const std::string& name, const rhi::TextureDesc& desc) {
-    RGResourceHandle handle = {static_cast<uint32_t>(resources_.size() + 1), 0};
+    RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphTexture>(name, handle, desc);
     rgResource->AddFlag(RGResourceFlags::Transient);
     
@@ -110,7 +110,7 @@ RGResourceHandle RenderGraph::CreateTexture(const std::string& name, const rhi::
 }
 
 RGResourceHandle RenderGraph::CreateBuffer(const std::string& name, const rhi::BufferDesc& desc) {
-    RGResourceHandle handle = {static_cast<uint32_t>(resources_.size() + 1), 0};
+    RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphBuffer>(name, handle, desc);
     rgResource->AddFlag(RGResourceFlags::Transient);
 
@@ -163,7 +163,7 @@ void RenderGraph::Compile() {
 
     // 5. 准备 Timestamp Query Pool
     auto& currentFrameData = queryFrames_[currentQueryFrameIndex_];
-    uint32_t requiredQueries = static_cast<uint32_t>(activePasses_.size() * 2);
+    u32 requiredQueries = static_cast<u32>(activePasses_.size() * 2);
 
     // 记录 Pass Names
     currentFrameData.passNames.clear();
@@ -179,7 +179,7 @@ void RenderGraph::Compile() {
                 device_.DestroyQueryPool(currentFrameData.queryPool);
             }
 
-            uint32_t newCapacity = std::max(requiredQueries, 64u); // 最小 64，避免频繁重建
+            u32 newCapacity = std::max(requiredQueries, 64u); // 最小 64，避免频繁重建
             // 向上取整到 64 的倍数
             newCapacity = (newCapacity + 63) & ~63;
 
@@ -299,8 +299,8 @@ static bool IsCompatible(const rhi::BufferDesc& a, const rhi::BufferDesc& b) {
 
 void RenderGraph::AllocateResources() {
     // 1. Build Pass Index Map for O(1) lookup
-    std::unordered_map<RenderGraphPass*, uint32_t> passIndexMap;
-    for (uint32_t i = 0; i < activePasses_.size(); ++i) {
+    std::unordered_map<RenderGraphPass*, u32> passIndexMap;
+    for (u32 i = 0; i < activePasses_.size(); ++i) {
         passIndexMap[activePasses_[i]] = i;
     }
 
@@ -320,8 +320,8 @@ void RenderGraph::AllocateResources() {
         // If resource is not used, skip
         if (!resource->GetFirstPass()) continue;
 
-        uint32_t startIdx = passIndexMap[resource->GetFirstPass()];
-        uint32_t endIdx = passIndexMap[resource->GetLastPass()];
+        u32 startIdx = passIndexMap[resource->GetFirstPass()];
+        u32 endIdx = passIndexMap[resource->GetLastPass()];
 
         resourcesStartingAt[startIdx].push_back(resource.get());
         resourcesEndingAt[endIdx].push_back(resource.get());
@@ -332,7 +332,7 @@ void RenderGraph::AllocateResources() {
     utl::vector<bool> poolLocked(resourcePool_.size(), false);
 
     // 4. Simulate Execution to Allocate Resources with Aliasing
-    for (uint32_t i = 0; i < activePasses_.size(); ++i) {
+    for (u32 i = 0; i < activePasses_.size(); ++i) {
         // A. Allocate resources starting at this pass
         for (auto* res : resourcesStartingAt[i]) {
             int foundIdx = -1;
@@ -360,7 +360,7 @@ void RenderGraph::AllocateResources() {
                         handle,
                         tex->GetDesc(),
                         {},
-                        static_cast<uint32_t>(currentFrame_),
+                        static_cast<u32>(currentFrame_),
                         true
                     };
                     
@@ -392,7 +392,7 @@ void RenderGraph::AllocateResources() {
                         handle,
                         {},
                         buf->GetDesc(),
-                        static_cast<uint32_t>(currentFrame_),
+                        static_cast<u32>(currentFrame_),
                         false
                     };
                     
@@ -427,7 +427,7 @@ void RenderGraph::InsertBarriers() {
         // 处理输入资源 (Read)
         for (const auto& input : pass->GetInputs()) {
             auto* resource = input.resource;
-            uint32_t index = resource->GetHandle().index;
+            u32 index = resource->GetHandle().index;
             rhi::ResourceState currentState = resourceStates[index];
             rhi::ResourceState requiredState = input.state;
 
@@ -458,7 +458,7 @@ void RenderGraph::InsertBarriers() {
         // 处理输出资源 (Write)
         for (const auto& output : pass->GetOutputs()) {
             auto* resource = output.resource;
-            uint32_t index = resource->GetHandle().index;
+            u32 index = resource->GetHandle().index;
             rhi::ResourceState currentState = resourceStates[index];
             rhi::ResourceState requiredState = output.state;
 
@@ -497,14 +497,14 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         // 1. Write Begin Timestamp
         // Only write manually if NOT using RenderPass (RenderPass handles it via desc to support Apple Silicon)
         if (enableTimestamp && !hasRenderPass) {
-            cmdBuffer->WriteTimestamp(queryPool, static_cast<uint32_t>(i * 2));
+            cmdBuffer->WriteTimestamp(queryPool, static_cast<u32>(i * 2));
         }
 
         // 执行 Pre-Pass Barriers
         const auto& barriers = pass->GetBarriers();
         if (!barriers.empty()) {
             // std::cout << "RenderGraph: Inserting Barriers for " << pass->GetName() << std::endl;
-            cmdBuffer->InsertBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
+            cmdBuffer->InsertBarrier(barriers.data(), static_cast<u32>(barriers.size()));
         }
 
         // 处理自动 RenderPass Begin/End
@@ -557,8 +557,8 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
             if (enableTimestamp) {
                 desc.enableTimestamp = true;
                 desc.timestampQueryPool = queryPool;
-                desc.beginTimestampIndex = static_cast<uint32_t>(i * 2);
-                desc.endTimestampIndex = static_cast<uint32_t>(i * 2 + 1);
+                desc.beginTimestampIndex = static_cast<u32>(i * 2);
+                desc.endTimestampIndex = static_cast<u32>(i * 2 + 1);
             }
 
             // Begin RenderPass
@@ -579,7 +579,7 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         // So we rely on RenderPassDesc to capture timestamps.
         // However, if the pass is NOT a RenderPass (e.g. Compute), we MUST use WriteTimestamp.
         if (enableTimestamp && !hasRenderPass) {
-            cmdBuffer->WriteTimestamp(queryPool, static_cast<uint32_t>(i * 2 + 1));
+            cmdBuffer->WriteTimestamp(queryPool, static_cast<u32>(i * 2 + 1));
         }
     }
 
@@ -649,29 +649,29 @@ std::string RenderGraph::DumpGraphViz() const {
 }
 
 void RenderGraph::ResolveTimestamps() {
-    uint32_t prevFrameIndex = 1 - currentQueryFrameIndex_;
+    u32 prevFrameIndex = 1 - currentQueryFrameIndex_;
     auto& frameData = queryFrames_[prevFrameIndex];
 
     if (!frameData.ready || frameData.queryPool == rhi::handles::INVALID_QUERY_POOL) {
         return;
     }
 
-    uint32_t passCount = static_cast<uint32_t>(frameData.passNames.size());
+    u32 passCount = static_cast<u32>(frameData.passNames.size());
     if (passCount == 0) return;
 
-    std::vector<uint64_t> results(passCount * 2);
+    utl::vector<u64> results(passCount * 2);
     // 使用 0 作为 offset (假设 RHI 实现正确处理)
     // 注意：GetQueryPoolResults 是我们刚添加到 RHIDevice 的接口
-    if (device_.GetQueryPoolResults(frameData.queryPool, 0, passCount * 2, results.data(), sizeof(uint64_t))) {
+    if (device_.GetQueryPoolResults(frameData.queryPool, 0, passCount * 2, results.data(), sizeof(u64))) {
         passExecutionTimes_.clear();
         
         // 假设 1 tick = 1 nanosecond (Apple Silicon Metal)
         // 转换为毫秒: / 1,000,000.0
         double timestampPeriod = device_.GetTimestampPeriod();
         
-        for (uint32_t i = 0; i < passCount; ++i) {
-            uint64_t start = results[2 * i];
-            uint64_t end = results[2 * i + 1];
+        for (u32 i = 0; i < passCount; ++i) {
+            u64 start = results[2 * i];
+            u64 end = results[2 * i + 1];
             
             // 简单的溢出检查和有效性检查
             if (end > start && start != 0) {

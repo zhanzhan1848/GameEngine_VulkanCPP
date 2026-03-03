@@ -23,14 +23,14 @@ MetalSync::~MetalSync() {
     }
 }
 
-uint64_t MetalSync::GetValue() const {
+u64 MetalSync::GetValue() const {
     if (event_) {
         return event_->signaledValue();
     }
     return 0;
 }
 
-void MetalSync::SetValue(uint64_t value) {
+void MetalSync::SetValue(u64 value) {
     if (event_) {
         event_->setSignaledValue(value);
     }

@@ -43,7 +43,7 @@ public:
     void SetProducer(RenderGraphPass* pass) { producer_ = pass; }
     RenderGraphPass* GetProducer() const { return producer_; }
 
-    uint32_t GetRefCount() const { return refCount_; }
+    u32 GetRefCount() const { return refCount_; }
     void AddRef() { refCount_++; }
     void Release() { if (refCount_ > 0) refCount_--; }
 
@@ -59,7 +59,7 @@ protected:
     RenderGraphPass* firstPass_ = nullptr;
     RenderGraphPass* lastPass_ = nullptr;
     RenderGraphPass* producer_ = nullptr;
-    uint32_t refCount_ = 0;
+    u32 refCount_ = 0;
 };
 
 /**

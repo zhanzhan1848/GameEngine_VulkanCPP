@@ -11,8 +11,8 @@ namespace primal::graphics {
 struct PipelineStatistics {
     double cpuFrameTimeMs{0.0};
     double gpuFrameTimeMs{0.0};
-    uint32_t drawCallCount{0};
-    uint32_t triangleCount{0};
+    u32 drawCallCount{0};
+    u32 triangleCount{0};
     
     // Per-pass GPU execution time in milliseconds
     std::unordered_map<std::string, double> passExecutionTimes;

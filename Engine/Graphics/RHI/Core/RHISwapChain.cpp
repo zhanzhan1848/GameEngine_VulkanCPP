@@ -20,7 +20,7 @@ void RHISwapChain::Destroy() {
     RHIResource::Destroy();
 }
 
-void RHISwapChain::Resize(uint32_t width, uint32_t height) {
+void RHISwapChain::Resize(u32 width, u32 height) {
     if (swapChainDesc_.width == width && swapChainDesc_.height == height) {
         return;
     }

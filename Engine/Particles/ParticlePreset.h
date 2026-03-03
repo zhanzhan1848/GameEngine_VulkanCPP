@@ -5,11 +5,9 @@
 #include "ParticleCurve.h"
 
 #ifndef DISABLE_PARTICLE_SYSTEM
-
 #include <string>
-#include <vector>
-#include <unordered_map>
 #include <functional>
+#include <unordered_map>
 
 namespace primal::particles {
 
@@ -25,25 +23,25 @@ struct particle_preset {
     std::string description;
     std::string author;
     u32 version{ 1 };
-    
+
     // Emitter configuration
     emitter_config config;
-    
+
     // Curve data (serialized separately from pointers)
     struct curve_data {
-        std::vector<std::pair<f32, f32>> keyframes; // time, value
+        utl::vector<std::pair<f32, f32>> keyframes; // time, value
         curve_interpolation interpolation{ curve_interpolation::linear };
     };
-    
+
     struct gradient_data {
-        std::vector<std::pair<f32, math::v4>> keys; // time, color
+        utl::vector<std::pair<f32, math::v4>> keys; // time, color
     };
-    
+
     struct vector_curve_data {
-        std::vector<std::pair<f32, math::v3>> keys; // time, value
+        utl::vector<std::pair<f32, math::v3>> keys; // time, value
         curve_interpolation interpolation{ curve_interpolation::linear };
     };
-    
+
     // Serialized curve data
     curve_data scale_curve;
     curve_data alpha_curve;
@@ -51,7 +49,7 @@ struct particle_preset {
     curve_data rotation_curve;
     gradient_data color_gradient;
     vector_curve_data force_curve;
-    
+
     // Curve enable flags
     bool use_scale_curve{ false };
     bool use_alpha_curve{ false };
@@ -59,16 +57,16 @@ struct particle_preset {
     bool use_velocity_curve{ false };
     bool use_force_curve{ false };
     bool use_rotation_curve{ false };
-    
+
     // Default constructor
     particle_preset() = default;
-    
+
     // Construct from emitter config
     explicit particle_preset(const std::string& preset_name, const emitter_config& cfg);
-    
+
     // Apply preset to emitter config (creates curve objects)
     void apply_to(emitter_config& cfg) const;
-    
+
     // Extract curve data from emitter config
     void extract_curves_from(const emitter_config& cfg);
 };
@@ -81,49 +79,49 @@ struct particle_preset {
 class preset_manager {
 public:
     using preset_callback = std::function<void(const std::string& preset_name)>;
-    
+
     preset_manager() = default;
     ~preset_manager() = default;
-    
+
     // Non-copyable
     preset_manager(const preset_manager&) = delete;
     preset_manager& operator=(const preset_manager&) = delete;
-    
+
     // Preset management
     bool load_preset(const std::string& filepath);
     bool save_preset(const std::string& filepath, const particle_preset& preset);
-    
+
     bool add_preset(const particle_preset& preset);
     bool remove_preset(const std::string& name);
     const particle_preset* get_preset(const std::string& name) const;
-    
+
     // Category management
-    std::vector<std::string> get_categories() const;
-    std::vector<std::string> get_presets_in_category(const std::string& category) const;
-    
+    utl::vector<std::string> get_categories() const;
+    utl::vector<std::string> get_presets_in_category(const std::string& category) const;
+
     // Get all preset names
-    std::vector<std::string> get_all_preset_names() const;
-    
+    utl::vector<std::string> get_all_preset_names() const;
+
     // Load all presets from directory
     u32 load_presets_from_directory(const std::string& directory);
-    
+
     // Save all presets to directory
     bool save_all_presets_to_directory(const std::string& directory);
-    
+
     // Callbacks for UI updates
     void set_on_preset_added(preset_callback callback) { on_preset_added_ = std::move(callback); }
     void set_on_preset_removed(preset_callback callback) { on_preset_removed_ = std::move(callback); }
-    
+
     // Preset count
     u32 preset_count() const { return static_cast<u32>(presets_.size()); }
-    
+
     // Check if preset exists
     bool has_preset(const std::string& name) const;
-    
+
 private:
     std::unordered_map<std::string, particle_preset> presets_;
-    std::unordered_map<std::string, std::vector<std::string>> categories_;
-    
+    std::unordered_map<std::string, utl::vector<std::string>> categories_;
+
     preset_callback on_preset_added_;
     preset_callback on_preset_removed_;
 };

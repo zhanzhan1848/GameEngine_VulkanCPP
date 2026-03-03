@@ -31,8 +31,8 @@ struct DeviceDesc {
     RHIPlatform platform;              ///< 目标平台
     bool enableDebug;                   ///< 是否启用调试层
     bool enableValidation;              ///< 是否启用验证层
-    uint32_t adapterIndex;              ///< 适配器索引
-    uint32_t maxFramesInFlight;         ///< 最大帧数
+    u32 adapterIndex;              ///< 适配器索引
+    u32 maxFramesInFlight;         ///< 最大帧数
     
     DeviceDesc() : platform(RHIPlatform::Unknown), enableDebug(false), 
                   enableValidation(false), adapterIndex(0), maxFramesInFlight(3) {}
@@ -46,16 +46,16 @@ struct DeviceInfo {
     RHIPlatform platform;              ///< 设备平台
     char deviceName[256];               ///< 设备名称
     char driverVersion[128];            ///< 驱动版本
-    uint64_t dedicatedVideoMemory;      ///< 专用显存大小（字节）
-    uint64_t sharedSystemMemory;        ///< 共享系统内存大小（字节）
-    uint32_t maxTexture1DSize;          ///< 1D纹理最大尺寸
-    uint32_t maxTexture2DSize;          ///< 2D纹理最大尺寸
-    uint32_t maxTexture3DSize;          ///< 3D纹理最大尺寸
-    uint32_t maxTextureCubeSize;        ///< 立方纹理最大尺寸
-    uint32_t maxRenderTargets;          ///< 最大渲染目标数
-    uint32_t maxVertexAttributes;       ///< 最大顶点属性数
-    uint32_t maxSamplerStates;          ///< 最大采样器状态数
-    uint32_t maxConstantBufferSize;     ///< 最大常量缓冲区大小
+    u64 dedicatedVideoMemory;      ///< 专用显存大小（字节）
+    u64 sharedSystemMemory;        ///< 共享系统内存大小（字节）
+    u32 maxTexture1DSize;          ///< 1D纹理最大尺寸
+    u32 maxTexture2DSize;          ///< 2D纹理最大尺寸
+    u32 maxTexture3DSize;          ///< 3D纹理最大尺寸
+    u32 maxTextureCubeSize;        ///< 立方纹理最大尺寸
+    u32 maxRenderTargets;          ///< 最大渲染目标数
+    u32 maxVertexAttributes;       ///< 最大顶点属性数
+    u32 maxSamplerStates;          ///< 最大采样器状态数
+    u32 maxConstantBufferSize;     ///< 最大常量缓冲区大小
     bool supportsRayTracing;            ///< 是否支持光线追踪
     bool supportsMeshShaders;           ///< 是否支持网格着色器
     bool supportsVariableRateShading;   ///< 是否支持可变速率着色
@@ -96,7 +96,7 @@ struct GraphicsPipelineDesc {
     float slopeScaledDepthBias;         ///< 深度偏差斜率因子
     
     DataFormat renderTargetFormats[constants::MAX_RENDER_TARGETS]; ///< 渲染目标格式
-    uint32_t renderTargetCount;         ///< 渲染目标数量
+    u32 renderTargetCount;         ///< 渲染目标数量
     DataFormat depthStencilFormat;       ///< 深度模板格式
     
     bool enableDepthTest;               ///< 是否启用深度测试
@@ -104,8 +104,8 @@ struct GraphicsPipelineDesc {
     ComparisonFunc depthFunc;           ///< 深度比较函数
     
     bool enableStencilTest;             ///< 是否启用模板测试
-    uint8_t stencilReadMask;           ///< 模板读取掩码
-    uint8_t stencilWriteMask;           ///< 模板写入掩码
+    u8 stencilReadMask;           ///< 模板读取掩码
+    u8 stencilWriteMask;           ///< 模板写入掩码
     
     StencilOpDesc frontStencil;         ///< 正面模板操作
     StencilOpDesc backStencil;          ///< 背面模板操作
@@ -136,7 +136,7 @@ struct GraphicsPipelineDesc {
                             srcColorBlendFactor(BlendFactor::One), dstColorBlendFactor(BlendFactor::Zero), colorBlendOp(BlendOp::Add),
                             srcAlphaBlendFactor(BlendFactor::One), dstAlphaBlendFactor(BlendFactor::Zero), alphaBlendOp(BlendOp::Add),
                             blendConstants{1.0f, 1.0f, 1.0f, 1.0f} {
-        for (uint32_t i = 0; i < constants::MAX_RENDER_TARGETS; ++i) {
+        for (u32 i = 0; i < constants::MAX_RENDER_TARGETS; ++i) {
             renderTargetFormats[i] = DataFormat::Unknown;
         }
     }
@@ -152,7 +152,7 @@ struct GraphicsPipelineDesc {
  */
 struct QueryPoolDesc {
     QueryType type;                     ///< 查询类型
-    uint32_t queryCount;                ///< 查询数量
+    u32 queryCount;                ///< 查询数量
     
     QueryPoolDesc() : type(QueryType::Timestamp), queryCount(0) {}
 };
@@ -184,7 +184,7 @@ public:
     virtual void DestroyPipelineLayout(PipelineLayoutHandle handle) = 0;
     virtual DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc& desc) = 0;
     virtual void DestroyDescriptorSet(DescriptorSetHandle handle) = 0;
-    virtual void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) = 0;
+    virtual void UpdateDescriptorSets(u32 writeCount, const WriteDescriptorSet* writes) = 0;
     virtual RHISwapChain* CreateSwapChain(const SwapChainDesc& desc) = 0;
     virtual void DestroySwapChain(RHISwapChain* swapChain) = 0;
     virtual ResourceHandle CreateBuffer(const BufferDesc& desc) = 0;
@@ -201,7 +201,7 @@ public:
     virtual void DestroyTexture(ResourceHandle handle) = 0;
     virtual void DestroyShader(ShaderHandle handle) = 0;
     virtual void DestroyPipeline(PipelineHandle handle) = 0;
-    virtual bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) = 0;
+    virtual bool GetQueryPoolResults(QueryPoolHandle handle, u32 firstQuery, u32 queryCount, void* data, size_t stride) = 0;
     virtual void* MapBuffer(ResourceHandle handle, u64 offset = 0, u64 size = 0) = 0;
     virtual void UnmapBuffer(ResourceHandle handle) = 0;
     virtual double GetTimestampPeriod() const = 0;
@@ -303,7 +303,7 @@ public:
         derived().endFrameImpl();
         
         // 假设最大飞行帧数为 2 (MaxFramesInFlight - 1)
-        uint64_t completedFrame = frameCount_ > 2 ? frameCount_ - 2 : 0;
+        u64 completedFrame = frameCount_ > 2 ? frameCount_ - 2 : 0;
         gc_.Update(completedFrame);
     }
     
@@ -496,7 +496,7 @@ public:
      * @param writeCount 更新数量
      * @param writes 更新操作数组
      */
-    void UpdateDescriptorSets(uint32_t writeCount, const WriteDescriptorSet* writes) override {
+    void UpdateDescriptorSets(u32 writeCount, const WriteDescriptorSet* writes) override {
         assert(isValid_ && "Device not initialized");
         derived().updateDescriptorSetsImpl(writeCount, writes);
     }
@@ -610,7 +610,7 @@ public:
         }
     }
 
-    bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override {
+    bool GetQueryPoolResults(QueryPoolHandle handle, u32 firstQuery, u32 queryCount, void* data, size_t stride) override {
         assert(isValid_ && "Device not initialized");
         return derived().getQueryPoolResultsImpl(handle, firstQuery, queryCount, data, stride);
     }
@@ -705,7 +705,7 @@ public:
      * @brief 获取当前帧索引
      * @return 当前帧索引（0到maxFramesInFlight-1）
      */
-    uint32_t GetCurrentFrameIndex() const {
+    u32 GetCurrentFrameIndex() const {
         assert(isValid_ && "Device not initialized");
         return derived().getCurrentFrameIndexImpl();
     }
@@ -752,7 +752,7 @@ protected:
     DeviceInfo info_;                    ///< 设备信息
     bool isValid_;                       ///< 设备是否有效
     RHIGarbageCollector gc_;             ///< 垃圾回收器
-    uint64_t frameCount_ = 0;            ///< 帧计数器
+    u64 frameCount_ = 0;            ///< 帧计数器
     
 private:
     // === 友元声明 ===
@@ -770,13 +770,13 @@ public:
      * @param device 设备指针
      * @return 设备ID
      */
-    uint32_t RegisterDevice(RHIDeviceBase* device);
+    u32 RegisterDevice(RHIDeviceBase* device);
     
     /**
      * @brief 注销设备
      * @param deviceId 设备ID
      */
-    void UnregisterDevice(uint32_t deviceId);
+    void UnregisterDevice(u32 deviceId);
     
     /**
      * @brief 获取设备数量
@@ -789,11 +789,11 @@ public:
      * @param deviceId 设备ID
      * @return 设备指针
      */
-    RHIDeviceBase* GetDevice(uint32_t deviceId) const;
+    RHIDeviceBase* GetDevice(u32 deviceId) const;
     
 private:
-    utl::vector<std::pair<uint32_t, RHIDeviceBase*>> devices_;
-    uint32_t nextDeviceId_ = 1;
+    utl::vector<std::pair<u32, RHIDeviceBase*>> devices_;
+    u32 nextDeviceId_ = 1;
 };
 
 // 全局设备管理器实例

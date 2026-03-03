@@ -24,10 +24,10 @@ namespace primal::graphics::rhi {
  * @brief 分配器统计信息
  */
 struct AllocatorStats {
-    std::atomic<uint64_t> totalAllocated{0};        ///< 总分配次数
-    std::atomic<uint64_t> totalFreed{0};            ///< 总释放次数
-    std::atomic<uint64_t> activeAllocations{0};     ///< 当前活跃分配数
-    std::atomic<uint64_t> totalBytesAllocated{0};   ///< 当前分配的字节数（估算）
+    std::atomic<u64> totalAllocated{0};        ///< 总分配次数
+    std::atomic<u64> totalFreed{0};            ///< 总释放次数
+    std::atomic<u64> activeAllocations{0};     ///< 当前活跃分配数
+    std::atomic<u64> totalBytesAllocated{0};   ///< 当前分配的字节数（估算）
     
     // 拷贝构造函数需要显式定义以处理 atomic
     AllocatorStats() = default;
@@ -79,7 +79,7 @@ public:
      * @brief 预分配容量
      * @param count 容量大小
      */
-    void Reserve(uint32_t count) {
+    void Reserve(u32 count) {
         std::unique_lock<std::shared_mutex> lock(_mutex);
         _pool.reserve(count);
     }
@@ -104,9 +104,9 @@ public:
      */
     void Shutdown() {
         std::unique_lock<std::shared_mutex> lock(_mutex);
-        uint32_t cap = _pool.capacity();
+        u32 cap = _pool.capacity();
         // std::cout << "[RHIAllocator] Shutdown: capacity=" << cap << ", size=" << _pool.size() << std::endl;
-        for (uint32_t i = 0; i < cap; ++i) {
+        for (u32 i = 0; i < cap; ++i) {
             if (_pool.is_valid(i)) {
                 FreeInternal(i);
             }
@@ -121,9 +121,9 @@ public:
      * @return 对象的Handle (ID)
      */
     template<typename... Args>
-    uint32_t Allocate(Args&&... args) {
+    u32 Allocate(Args&&... args) {
         std::unique_lock<std::shared_mutex> lock(_mutex);
-        uint32_t id = _pool.add(std::forward<Args>(args)...);
+        u32 id = _pool.add(std::forward<Args>(args)...);
         
         if (sizeof(T) == 232) { // Trace MetalCommandBuffer
              // printf("Allocator Alloc: id=%u, T size=%zu\n", id, sizeof(T));
@@ -146,7 +146,7 @@ public:
      * @brief 释放对象
      * @param id 对象的Handle
      */
-    void Free(uint32_t id) {
+    void Free(u32 id) {
         std::unique_lock<std::shared_mutex> lock(_mutex);
         FreeInternal(id);
     }
@@ -156,7 +156,7 @@ public:
      * @param id 对象的Handle
      * @return 对象指针，如果ID无效可能触发断言（取决于free_list实现）
      */
-    T* Get(uint32_t id) {
+    T* Get(u32 id) {
         std::shared_lock<std::shared_mutex> lock(_mutex);
         if (id >= _pool.capacity()) return nullptr;
         if (!_pool.is_valid(id)) return nullptr;
@@ -180,7 +180,7 @@ public:
      * @brief 获取当前容量
      * @return 容量大小
      */
-    uint32_t Capacity() const {
+    u32 Capacity() const {
         std::shared_lock<std::shared_mutex> lock(_mutex);
         return _pool.capacity();
     }
@@ -200,7 +200,7 @@ private:
     /**
      * @brief 内部释放实现（无锁）
      */
-    void FreeInternal(uint32_t id) {
+    void FreeInternal(u32 id) {
         // 简单的范围检查
         if (id >= _pool.capacity()) return;
         

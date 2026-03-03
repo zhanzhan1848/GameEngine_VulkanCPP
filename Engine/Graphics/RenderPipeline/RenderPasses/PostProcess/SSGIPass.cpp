@@ -78,8 +78,8 @@ const SSGIPassData& AddSSGIPass(RenderGraph& graph, RGResourceHandle normalDepth
             auto* ssgiTex = context.graph->GetResource(data.ssgiOutput);
             if (ssgiTex && ssgiTex->GetType() == RGResourceType::Texture) {
                 const auto& desc = static_cast<RenderGraphTexture*>(ssgiTex)->GetDesc();
-                uint32_t groupX = (desc.size.x + 7) / 8;
-                uint32_t groupY = (desc.size.y + 7) / 8;
+                u32 groupX = (desc.size.x + 7) / 8;
+                u32 groupY = (desc.size.y + 7) / 8;
                 cmd->Dispatch(groupX, groupY, 1);
             }
         }

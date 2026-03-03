@@ -36,17 +36,17 @@ struct DebugUniforms {
             float scale;
             float step; // Added for throttling
             float padding[2];
-            uint32_t resolution[4];
+            u32 resolution[4];
         } vf;
         struct {
             float scale;
             float threshold;
             float step; // Added for throttling
             float padding;
-            uint32_t resolution[4];
+            u32 resolution[4];
         } voxel;
         struct {
-            uint32_t mesh_id;
+            u32 mesh_id;
             float wireframe_enabled; 
             float padding[6];
         } meshlet_debug;
@@ -93,27 +93,27 @@ struct GeometryDebugContext {
     struct FrameData {
         ResourceHandle uniformBuffer = handles::INVALID_RESOURCE;
         void* mappedPtr = nullptr;
-        uint32_t capacity = 0;
-        uint32_t currentOffset = 0;
+        u32 capacity = 0;
+        u32 currentOffset = 0;
     };
     FrameData frames[3];
-    uint32_t frameIndex = 0;
+    u32 frameIndex = 0;
     
     // Descriptor Set Cache
-    std::unordered_map<uint64_t, DescriptorSetHandle> meshlet_ds_cache[3];
-    std::unordered_map<uint64_t, DescriptorSetHandle> sdf_ds_cache[3];
-    std::unordered_map<uint64_t, DescriptorSetHandle> vf_ds_cache[3];
-    std::unordered_map<uint64_t, DescriptorSetHandle> voxel_ds_cache[3];
+    std::unordered_map<u64, DescriptorSetHandle> meshlet_ds_cache[3];
+    std::unordered_map<u64, DescriptorSetHandle> sdf_ds_cache[3];
+    std::unordered_map<u64, DescriptorSetHandle> vf_ds_cache[3];
+    std::unordered_map<u64, DescriptorSetHandle> voxel_ds_cache[3];
 
     // Helper to load shader data
-    std::vector<char> LoadShaderData(const char* path) {
+    utl::vector<char> LoadShaderData(const char* path) {
         std::ifstream file(path, std::ios::ate | std::ios::binary);
         if (!file.is_open()) {
             std::cerr << "Failed to open shader file: " << path << std::endl;
             return {};
         }
         size_t fileSize = (size_t)file.tellg();
-        std::vector<char> buffer(fileSize);
+        utl::vector<char> buffer(fileSize);
         file.seekg(0);
         file.read(buffer.data(), fileSize);
         file.close();
@@ -138,8 +138,8 @@ struct GeometryDebugContext {
         // 1. Meshlet Pipeline
         {
             // Load Shaders
-            std::vector<char> vs_data = LoadShaderData(meshlet_vs_path);
-            std::vector<char> fs_data = LoadShaderData(meshlet_fs_path);
+            utl::vector<char> vs_data = LoadShaderData(meshlet_vs_path);
+            utl::vector<char> fs_data = LoadShaderData(meshlet_fs_path);
             
             ShaderHandle vs = handles::INVALID_SHADER;
             ShaderHandle fs = handles::INVALID_SHADER;
@@ -215,8 +215,8 @@ struct GeometryDebugContext {
         // 2. SDF Pipeline
         {
             // Load Shaders
-            std::vector<char> vs_data = LoadShaderData(sdf_vs_path);
-            std::vector<char> fs_data = LoadShaderData(sdf_fs_path);
+            utl::vector<char> vs_data = LoadShaderData(sdf_vs_path);
+            utl::vector<char> fs_data = LoadShaderData(sdf_fs_path);
             
             ShaderHandle vs = handles::INVALID_SHADER;
             ShaderHandle fs = handles::INVALID_SHADER;
@@ -277,8 +277,8 @@ struct GeometryDebugContext {
         // 3. Vector Field Pipeline
         {
             // Load Shaders
-            std::vector<char> vs_data = LoadShaderData(vf_vs_path);
-            std::vector<char> fs_data = LoadShaderData(vf_fs_path);
+            utl::vector<char> vs_data = LoadShaderData(vf_vs_path);
+            utl::vector<char> fs_data = LoadShaderData(vf_fs_path);
             
             ShaderHandle vs = handles::INVALID_SHADER;
             ShaderHandle fs = handles::INVALID_SHADER;
@@ -335,8 +335,8 @@ struct GeometryDebugContext {
         // 4. Voxel Pipeline
         {
             // Load Shaders
-            std::vector<char> vs_data = LoadShaderData(voxel_vs_path);
-            std::vector<char> fs_data = LoadShaderData(voxel_fs_path);
+            utl::vector<char> vs_data = LoadShaderData(voxel_vs_path);
+            utl::vector<char> fs_data = LoadShaderData(voxel_fs_path);
             
             ShaderHandle vs = handles::INVALID_SHADER;
             ShaderHandle fs = handles::INVALID_SHADER;
@@ -415,10 +415,10 @@ struct GeometryDebugContext {
         frame.currentOffset = 0;
     }
     
-    uint32_t AllocateUniforms(uint32_t size) {
+    u32 AllocateUniforms(u32 size) {
         auto& frame = frames[frameIndex];
         // Align offset
-        uint32_t alignedOffset = (frame.currentOffset + 255) & ~255; // Min Uniform Offset Alignment 256
+        u32 alignedOffset = (frame.currentOffset + 255) & ~255; // Min Uniform Offset Alignment 256
         if (alignedOffset + size > frame.capacity) return 0xFFFFFFFF;
         frame.currentOffset = alignedOffset + size;
         return alignedOffset;
@@ -439,8 +439,8 @@ struct GeometryDebugContext {
                                                     ResourceHandle meshletVerticesBuffer,
                                                     ResourceHandle meshletTrianglesBuffer) {
         // Create a combined key from all buffers
-        uint64_t key = (uint64_t)positionBuffer ^ (uint64_t)meshletBuffer ^ 
-                       (uint64_t)meshletVerticesBuffer ^ (uint64_t)meshletTrianglesBuffer;
+        u64 key = (u64)positionBuffer ^ (u64)meshletBuffer ^ 
+                       (u64)meshletVerticesBuffer ^ (u64)meshletTrianglesBuffer;
         if (meshlet_ds_cache[frameIndex].find(key) != meshlet_ds_cache[frameIndex].end()) {
             return meshlet_ds_cache[frameIndex][key];
         }
@@ -523,7 +523,7 @@ struct GeometryDebugContext {
     }
 
     DescriptorSetHandle GetSDFDescriptorSet(RHIDeviceBase& device, ResourceHandle sdfTexture) {
-        uint64_t key = (uint64_t)sdfTexture;
+        u64 key = (u64)sdfTexture;
         if (sdf_ds_cache[frameIndex].find(key) != sdf_ds_cache[frameIndex].end()) {
             return sdf_ds_cache[frameIndex][key];
         }
@@ -565,7 +565,7 @@ struct GeometryDebugContext {
     }
 
     DescriptorSetHandle GetVectorFieldDescriptorSet(RHIDeviceBase& device, ResourceHandle vfTexture) {
-        uint64_t key = (uint64_t)vfTexture;
+        u64 key = (u64)vfTexture;
         if (vf_ds_cache[frameIndex].find(key) != vf_ds_cache[frameIndex].end()) {
             return vf_ds_cache[frameIndex][key];
         }
@@ -607,7 +607,7 @@ struct GeometryDebugContext {
     }
 
     DescriptorSetHandle GetVoxelDescriptorSet(RHIDeviceBase& device, ResourceHandle voxelTexture) {
-        uint64_t key = (uint64_t)voxelTexture;
+        u64 key = (u64)voxelTexture;
         if (voxel_ds_cache[frameIndex].find(key) != voxel_ds_cache[frameIndex].end()) {
             return voxel_ds_cache[frameIndex][key];
         }
@@ -728,12 +728,12 @@ static void ExecuteGeometryDebug(
         }
         
         if (settings.visualize_meshlets && mesh->GetMeshletCount() > 0 && g_debugContext.meshlet_pipeline != handles::INVALID_PIPELINE) {
-            uint32_t offset = g_debugContext.AllocateUniforms(sizeof(DebugUniforms));
+            u32 offset = g_debugContext.AllocateUniforms(sizeof(DebugUniforms));
             if (offset != 0xFFFFFFFF) {
-                DebugUniforms* uniforms = (DebugUniforms*)((uint8_t*)mappedData + offset);
+                DebugUniforms* uniforms = (DebugUniforms*)((u8*)mappedData + offset);
                 uniforms->viewProjection = viewProj;
                 uniforms->model = modelMatrix;
-                uniforms->meshlet_debug.mesh_id = (uint32_t)id;
+                uniforms->meshlet_debug.mesh_id = (u32)id;
                 uniforms->meshlet_debug.wireframe_enabled = 1.0f; // Enable wireframe by default for better visibility
                 
                 DescriptorSetHandle ds = g_debugContext.GetMeshletDescriptorSet(device, 
@@ -752,7 +752,7 @@ static void ExecuteGeometryDebug(
                 if (ds != handles::INVALID_DESCRIPTOR_SET) {
                     cmdList->BindGraphicsPipeline(g_debugContext.meshlet_pipeline);
                     
-                    uint32_t dynamicOffsets[] = { offset };
+                    u32 dynamicOffsets[] = { offset };
                     cmdList->BindDescriptorSets(PipelineBindPoint::Graphics, g_debugContext.meshlet_layout, 0, 1, &ds, 1, dynamicOffsets);
                     
                     // DEBUG: Log first draw call
@@ -800,9 +800,9 @@ static void ExecuteGeometryDebug(
                 valid_logged_meshes.insert(id);
             }
 
-            uint32_t offset = g_debugContext.AllocateUniforms(sizeof(DebugUniforms));
+            u32 offset = g_debugContext.AllocateUniforms(sizeof(DebugUniforms));
             if (offset != 0xFFFFFFFF) {
-                DebugUniforms* uniforms = (DebugUniforms*)((uint8_t*)mappedData + offset);
+                DebugUniforms* uniforms = (DebugUniforms*)((u8*)mappedData + offset);
                 // Zero initialize the whole struct to avoid garbage
                 memset(uniforms, 0, sizeof(DebugUniforms));
                 
@@ -821,7 +821,7 @@ static void ExecuteGeometryDebug(
                 if (ds != handles::INVALID_DESCRIPTOR_SET) {
                     cmdList->BindGraphicsPipeline(g_debugContext.sdf_pipeline);
                     
-                    uint32_t dynamicOffsets[] = { offset };
+                    u32 dynamicOffsets[] = { offset };
                     cmdList->BindDescriptorSets(PipelineBindPoint::Graphics, g_debugContext.sdf_layout, 0, 1, &ds, 1, dynamicOffsets);
                     
                     cmdList->Draw(6, 0, 1, 0);
@@ -831,14 +831,14 @@ static void ExecuteGeometryDebug(
         
         // 3. Vector Field Debug
         if (settings.visualize_vector_field && mesh->GetVectorFieldTexture() != handles::INVALID_RESOURCE && g_debugContext.vector_field_pipeline != handles::INVALID_PIPELINE) {
-            uint32_t offset = g_debugContext.AllocateUniforms(sizeof(DebugUniforms));
+            u32 offset = g_debugContext.AllocateUniforms(sizeof(DebugUniforms));
             if (offset != 0xFFFFFFFF) {
-                DebugUniforms* uniforms = (DebugUniforms*)((uint8_t*)mappedData + offset);
+                DebugUniforms* uniforms = (DebugUniforms*)((u8*)mappedData + offset);
                 uniforms->viewProjection = viewProj;
                 uniforms->model = volumeModel;
                 uniforms->vf.scale = 0.05f;
                 
-                const uint32_t* res = mesh->GetVectorFieldResolution();
+                const u32* res = mesh->GetVectorFieldResolution();
                 uniforms->vf.resolution[0] = res[0];
                 uniforms->vf.resolution[1] = res[1];
                 uniforms->vf.resolution[2] = res[2];
@@ -847,20 +847,20 @@ static void ExecuteGeometryDebug(
                 if (ds != handles::INVALID_DESCRIPTOR_SET) {
                     cmdList->BindGraphicsPipeline(g_debugContext.vector_field_pipeline);
                     
-                    uint32_t dynamicOffsets[] = { offset };
+                    u32 dynamicOffsets[] = { offset };
                     cmdList->BindDescriptorSets(PipelineBindPoint::Graphics, g_debugContext.vector_field_layout, 0, 1, &ds, 1, dynamicOffsets);
                     
-                    uint32_t total_voxels = res[0] * res[1] * res[2];
+                    u32 total_voxels = res[0] * res[1] * res[2];
                 
                 // Calculate step for throttling to avoid GPU hang
-                uint32_t step = 1;
-                const uint32_t MAX_VF_LINES = 200000;
+                u32 step = 1;
+                const u32 MAX_VF_LINES = 200000;
                 if (total_voxels > MAX_VF_LINES) {
                     step = (total_voxels + MAX_VF_LINES - 1) / MAX_VF_LINES;
                 }
                 uniforms->vf.step = (float)step;
                 
-                uint32_t draw_count = total_voxels / step;
+                u32 draw_count = total_voxels / step;
                 if (draw_count > 0) {
                      static bool logged_vf_size = false;
                      if (!logged_vf_size && step > 1) {
@@ -875,15 +875,15 @@ static void ExecuteGeometryDebug(
 
         // 4. Voxel Debug
         if (settings.visualize_voxels && mesh->GetVoxelTexture() != handles::INVALID_RESOURCE && g_debugContext.voxel_pipeline != handles::INVALID_PIPELINE) {
-            uint32_t offset = g_debugContext.AllocateUniforms(sizeof(DebugUniforms));
+            u32 offset = g_debugContext.AllocateUniforms(sizeof(DebugUniforms));
             if (offset != 0xFFFFFFFF) {
-                DebugUniforms* uniforms = (DebugUniforms*)((uint8_t*)mappedData + offset);
+                DebugUniforms* uniforms = (DebugUniforms*)((u8*)mappedData + offset);
                 uniforms->viewProjection = viewProj;
                 uniforms->model = volumeModel;
                 uniforms->voxel.scale = 1.0f; // Scale handled in shader based on resolution
                 uniforms->voxel.threshold = 0.1f;
                 
-                const uint32_t* res = mesh->GetVoxelResolution();
+                const u32* res = mesh->GetVoxelResolution();
                 
                 static std::set<id::id_type> logged_voxels;
                 if (logged_voxels.find(id) == logged_voxels.end()) {
@@ -900,20 +900,20 @@ static void ExecuteGeometryDebug(
                 if (ds != handles::INVALID_DESCRIPTOR_SET) {
                     cmdList->BindGraphicsPipeline(g_debugContext.voxel_pipeline);
                     
-                    uint32_t dynamicOffsets[] = { offset };
+                    u32 dynamicOffsets[] = { offset };
                     cmdList->BindDescriptorSets(PipelineBindPoint::Graphics, g_debugContext.voxel_layout, 0, 1, &ds, 1, dynamicOffsets);
                     
-                    uint32_t total_voxels = res[0] * res[1] * res[2];
+                    u32 total_voxels = res[0] * res[1] * res[2];
                 
                 // Calculate step for throttling to avoid GPU hang
-                uint32_t step = 1;
-                const uint32_t MAX_VOXELS = 100000;
+                u32 step = 1;
+                const u32 MAX_VOXELS = 100000;
                 if (total_voxels > MAX_VOXELS) {
                     step = (total_voxels + MAX_VOXELS - 1) / MAX_VOXELS;
                 }
                 uniforms->voxel.step = (float)step;
                 
-                uint32_t draw_count = total_voxels / step;
+                u32 draw_count = total_voxels / step;
                 if (draw_count > 0) {
                      static bool logged_voxel_size = false;
                      if (!logged_voxel_size && step > 1) {

@@ -11,13 +11,13 @@ namespace primal::graphics::rhi {
 struct GPUBufferComponent {
     // 顶点缓冲信息
     ResourceHandle vertexBuffer = handles::INVALID_RESOURCE;
-    uint64_t offset = 0;
-    uint32_t vertexCount = 0;
+    u64 offset = 0;
+    u32 vertexCount = 0;
 
     // 索引缓冲信息
     ResourceHandle indexBuffer = handles::INVALID_RESOURCE;
-    uint64_t indexOffset = 0;
-    uint32_t indexCount = 0;
+    u64 indexOffset = 0;
+    u32 indexCount = 0;
     DataFormat indexType = DataFormat::R32_UInt;
 
     // 辅助方法：是否有效

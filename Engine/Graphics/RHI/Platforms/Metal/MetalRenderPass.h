@@ -2,7 +2,7 @@
 
 #include "../../Core/RHIRenderPass.h"
 #include "MetalCommon.h"
-#include <vector>
+#include "Utilities/Vector.h"
 
 namespace primal::graphics::rhi {
 
@@ -28,9 +28,9 @@ public:
 protected:
     void destroyImpl() override;
 
-    void* mapImpl(uint64_t /*offset*/, uint64_t /*size*/) override { return nullptr; }
+    void* mapImpl(u64 /*offset*/, u64 /*size*/) override { return nullptr; }
     void unmapImpl() override {}
-    bool updateDataImpl(const void* /*data*/, uint64_t /*size*/, uint64_t /*offset*/) override { return false; }
+    bool updateDataImpl(const void* /*data*/, u64 /*size*/, u64 /*offset*/) override { return false; }
 
 private:
     /**
@@ -51,7 +51,7 @@ private:
         MTL::Texture* nativeTexture;
     };
     
-    std::vector<CachedAttachment> cachedColorAttachments_;
+    utl::vector<CachedAttachment> cachedColorAttachments_;
     CachedAttachment cachedDepthAttachment_;
     CachedAttachment cachedStencilAttachment_;
 };

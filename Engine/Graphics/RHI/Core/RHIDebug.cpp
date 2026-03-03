@@ -16,15 +16,15 @@ namespace primal::graphics::rhi::debug {
 // === 计数器定义 ===
 
 namespace counters {
-    std::atomic<uint64_t> ResourceAllocations(0);
-    std::atomic<uint64_t> ResourceDeallocations(0);
-    std::atomic<uint64_t> BufferCreations(0);
-    std::atomic<uint64_t> TextureCreations(0);
-    std::atomic<uint64_t> CommandBufferSubmissions(0);
-    std::atomic<uint64_t> ShaderCompilations(0);
-    std::atomic<uint64_t> PipelineCreations(0);
-    std::atomic<uint64_t> MemoryAllocations(0);
-    std::atomic<uint64_t> MemoryDeallocations(0);
+    std::atomic<u64> ResourceAllocations(0);
+    std::atomic<u64> ResourceDeallocations(0);
+    std::atomic<u64> BufferCreations(0);
+    std::atomic<u64> TextureCreations(0);
+    std::atomic<u64> CommandBufferSubmissions(0);
+    std::atomic<u64> ShaderCompilations(0);
+    std::atomic<u64> PipelineCreations(0);
+    std::atomic<u64> MemoryAllocations(0);
+    std::atomic<u64> MemoryDeallocations(0);
 }
 
 // === 内部辅助函数 ===
@@ -73,7 +73,7 @@ static const char* ExtractFileName(const char* filePath) {
 
 // === 调试输出函数实现 ===
 
-void OutputDebugMessage(DebugLevel level, const char* file, uint32_t line, 
+void OutputDebugMessage(DebugLevel level, const char* file, u32 line, 
                        const char* function, const char* message) {
     if (message == nullptr) {
         return;
@@ -181,7 +181,7 @@ struct MemoryAllocationRecord {
     std::chrono::high_resolution_clock::time_point timestamp;
 };
 
-static std::vector<MemoryAllocationRecord> g_memoryRecords;
+static utl::vector<MemoryAllocationRecord> g_memoryRecords;
 static std::mutex g_memoryRecordsMutex;
 
 void TrackMemoryAllocation(const char* type, size_t size, void* ptr) {

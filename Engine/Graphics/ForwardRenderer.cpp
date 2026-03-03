@@ -28,14 +28,14 @@
 #include <algorithm>
 #include <iostream>
 #include <fstream>
-#include <vector>
+// #include <vector>  // Removed - using utl::vector
 
 namespace primal::graphics {
 
-constexpr uint32_t MAX_CSM_CASCADES = 4;
-constexpr uint32_t MAX_SPOT_SHADOWS = 4;
-constexpr uint32_t SHADOW_MAP_ARRAY_SIZE = MAX_CSM_CASCADES + MAX_SPOT_SHADOWS;
-constexpr uint32_t MAX_POINT_SHADOWS = 2;
+constexpr u32 MAX_CSM_CASCADES = 4;
+constexpr u32 MAX_SPOT_SHADOWS = 4;
+constexpr u32 SHADOW_MAP_ARRAY_SIZE = MAX_CSM_CASCADES + MAX_SPOT_SHADOWS;
+constexpr u32 MAX_POINT_SHADOWS = 2;
 
 ForwardRenderer::ForwardRenderer() = default;
 ForwardRenderer::~ForwardRenderer() = default;
@@ -50,7 +50,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     lightBufferDesc.type = rhi::BufferType::Constant;
     lightBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     lightBufferDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-    lightBufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
+    lightBufferDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ConstantBuffer);
 
     // 2. Create Frame Buffers (GlobalShaderData)
     rhi::BufferDesc frameBufferDesc{};
@@ -58,7 +58,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     frameBufferDesc.type = rhi::BufferType::Constant;
     frameBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     frameBufferDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-    frameBufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
+    frameBufferDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ConstantBuffer);
 
     // 3. Create Per-Object Buffers
     rhi::BufferDesc perObjectBufferDesc{};
@@ -66,7 +66,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     perObjectBufferDesc.type = rhi::BufferType::Constant; // Using Dynamic Offset
     perObjectBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     perObjectBufferDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-    perObjectBufferDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
+    perObjectBufferDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ConstantBuffer);
 
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         // Light Buffer
@@ -320,7 +320,8 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         }
         if (file.is_open()) {
             size_t size = file.tellg();
-            std::vector<char> buf(size + 1);
+            utl::vector<char> buf;
+            buf.resize(size + 1);
             file.seekg(0);
             file.read(buf.data(), size);
             buf[size] = 0;
@@ -431,7 +432,7 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
                                         const RenderScene& scene,
                                         const RenderView& mainView,
                                         const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
-                                        uint32_t frameIndex) {
+                                        u32 frameIndex) {
     const auto& planes = scene.GetReflectionPlanes();
     if (planes.empty()) return;
 
@@ -508,7 +509,7 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
             bDesc.size = sizeof(rhi::GlobalShaderData);
             bDesc.type = rhi::BufferType::Constant;
             bDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-            bDesc.bindFlags = static_cast<uint32_t>(rhi::ResourceUsage::ConstantBuffer);
+            bDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ConstantBuffer);
             res.frameBuffer = device_->CreateBuffer(bDesc);
             res.frameBufferMapped = device_->MapBuffer(res.frameBuffer);
             
@@ -637,8 +638,8 @@ void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer,
                                  rhi::ResourceHandle shadowMap,
                                  const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                  const utl::vector<const RenderProxy*>& proxies,
-                                 uint32_t frameIndex,
-                                 uint32_t cascadeIndex) {
+                                 u32 frameIndex,
+                                 u32 cascadeIndex) {
     // Ensure we run the pass to Clear the texture even if no proxies are visible
     // if (proxies.empty()) return;
 
@@ -651,7 +652,7 @@ void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear; 
     passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
     passDesc.colorAttachments[0].clearValue = rhi::ClearValue{ math::v4{ 1.0f, 1.0f, 1.0f, 1.0f } };
-    passDesc.colorAttachments[0].arrayLayer = static_cast<uint16_t>(cascadeIndex);
+    passDesc.colorAttachments[0].arrayLayer = static_cast<u16>(cascadeIndex);
 
     passDesc.depthAttachment.texture = shadowDepthBuffer_;
     passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear; 
@@ -709,12 +710,12 @@ void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer,
 
 
 void ForwardRenderer::SetupLights(const RenderScene& scene, 
-                                  uint32_t frameIndex, 
+                                  u32 frameIndex, 
                                   rhi::GlobalShaderData* globalData,
                                   const utl::vector<RenderView>& shadowViews,
                                   const utl::vector<float>& splits,
-                                  const std::unordered_map<uint32_t, int>& lightShadowIndices,
-                                  const std::unordered_map<uint32_t, rhi::math::m4x4>& lightViewProjs) {
+                                  const std::unordered_map<u32, int>& lightShadowIndices,
+                                  const std::unordered_map<u32, rhi::math::m4x4>& lightViewProjs) {
     if (frameIndex >= rhi::MAX_FRAMES_IN_FLIGHT || !lightBuffersMapped_[frameIndex]) return;
 
     auto* buffer = static_cast<rhi::ForwardLightBuffer*>(lightBuffersMapped_[frameIndex]);
@@ -763,11 +764,11 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
                 else pl.lightType = 0;
 
                 // Check shadow index
-                auto it = lightShadowIndices.find(static_cast<uint32_t>(i));
+                auto it = lightShadowIndices.find(static_cast<u32>(i));
                 pl.shadowIndex = (it != lightShadowIndices.end()) ? it->second : -1;
 
                 // Check view projection (for Spot Lights mainly)
-                auto itVP = lightViewProjs.find(static_cast<uint32_t>(i));
+                auto itVP = lightViewProjs.find(static_cast<u32>(i));
                 if (itVP != lightViewProjs.end()) {
                     pl.viewProjection = itVP->second;
                 } else {
@@ -789,9 +790,9 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
                              rhi::ResourceHandle renderTarget, 
                              rhi::ResourceHandle depthStencil,
                              const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
-                             uint32_t frameIndex,
-                             uint32_t width,
-                             uint32_t height) {
+                             u32 frameIndex,
+                             u32 width,
+                             u32 height) {
     if (!device_ || !cmdBuffer) return;
     (void)scene; 
 
@@ -801,15 +802,15 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     // Shadow Pass (Before Main Pass)
     utl::vector<RenderView> csmViews;
     utl::vector<float> cascadeSplits;
-    ::std::unordered_map<uint32_t, int> lightShadowIndices;
-    ::std::unordered_map<uint32_t, rhi::math::m4x4> lightViewProjs;
+    ::std::unordered_map<u32, int> lightShadowIndices;
+    ::std::unordered_map<u32, rhi::math::m4x4> lightViewProjs;
 
     // Process Lights for Shadows
     const auto& allLights = scene.GetLights();
     rhi::math::v3 lightDir = {0, -1, 0};
     bool hasDirectionalLight = false;
-    uint32_t spotShadowCount = 0;
-    uint32_t pointShadowCount = 0;
+    u32 spotShadowCount = 0;
+    u32 pointShadowCount = 0;
 
     for (size_t i = 0; i < allLights.size(); ++i) {
         const auto& light = allLights[i];
@@ -827,7 +828,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
                 utils::CalculateCascadeSplits(config, cascadeSplits);
                 utils::CreateCascadeViews(view, lightDir, config, csmViews);
 
-                for (uint32_t j = 0; j < csmViews.size(); ++j) {
+                for (u32 j = 0; j < csmViews.size(); ++j) {
                     auto& shadowView = csmViews[j];
                     shadowView.Cull(scene);
                     ShadowPass(cmdBuffer, shadowView, shadowMapArray_, materials, shadowView.GetVisibleProxies(), frameIndex, j);
@@ -836,21 +837,21 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         } 
         else if (light.type == LightType::Spot) {
             if (spotShadowCount < MAX_SPOT_SHADOWS && shadowMapArray_ != rhi::handles::INVALID_RESOURCE) {
-                 uint32_t shadowIndex = MAX_CSM_CASCADES + spotShadowCount;
+                 u32 shadowIndex = MAX_CSM_CASCADES + spotShadowCount;
                  RenderView shadowView;
                  utils::CreateSpotShadowView(light.position, light.direction, light.outerCone, light.range, 2048, shadowView);
                  shadowView.Cull(scene);
                  
                  ShadowPass(cmdBuffer, shadowView, shadowMapArray_, materials, shadowView.GetVisibleProxies(), frameIndex, shadowIndex);
                  
-                 lightShadowIndices[static_cast<uint32_t>(i)] = shadowIndex;
-                 lightViewProjs[static_cast<uint32_t>(i)] = shadowView.GetViewProjectionMatrix();
+                 lightShadowIndices[static_cast<u32>(i)] = shadowIndex;
+                 lightViewProjs[static_cast<u32>(i)] = shadowView.GetViewProjectionMatrix();
                  spotShadowCount++;
             }
         }
         else if (light.type == LightType::Point) {
             if (pointShadowCount < MAX_POINT_SHADOWS && shadowCubeMapArray_ != rhi::handles::INVALID_RESOURCE) {
-                uint32_t baseSlice = pointShadowCount * 6;
+                u32 baseSlice = pointShadowCount * 6;
                 utl::vector<RenderView> pointViews;
                 utils::CreatePointShadowViews(light.position, light.range, 1024, pointViews);
                 
@@ -860,7 +861,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
                     ShadowPass(cmdBuffer, shadowView, shadowCubeMapArray_, materials, shadowView.GetVisibleProxies(), frameIndex, baseSlice + face);
                 }
                 
-                lightShadowIndices[static_cast<uint32_t>(i)] = pointShadowCount;
+                lightShadowIndices[static_cast<u32>(i)] = pointShadowCount;
                 pointShadowCount++;
             }
         }
@@ -984,7 +985,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 
     rhi::Rect scissor;
     scissor.offset = {0, 0};
-    scissor.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    scissor.extent = {static_cast<u32>(width), static_cast<u32>(height)};
     cmdBuffer->SetScissor(scissor);
 
     bool useDepthEqual = (depthStencil != rhi::handles::INVALID_RESOURCE);
@@ -1089,9 +1090,9 @@ void ForwardRenderer::DepthPrePass(rhi::RHICommandBuffer* cmdBuffer,
                                    rhi::ResourceHandle depthStencil,
                                    const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                    const utl::vector<const RenderProxy*>& proxies,
-                                   uint32_t frameIndex,
-                                   uint32_t width,
-                                   uint32_t height) {
+                                   u32 frameIndex,
+                                   u32 width,
+                                   u32 height) {
     if (proxies.empty()) return;
 
     rhi::RenderPassDesc passDesc{};
@@ -1105,7 +1106,7 @@ void ForwardRenderer::DepthPrePass(rhi::RHICommandBuffer* cmdBuffer,
     rhi::ViewportDesc viewport{ {0.0f, 0.0f}, {static_cast<float>(width), static_cast<float>(height)}, 0.0f, 1.0f };
     cmdBuffer->SetViewport(viewport);
 
-    rhi::Rect scissor{{0, 0}, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}};
+    rhi::Rect scissor{{0, 0}, {static_cast<u32>(width), static_cast<u32>(height)}};
     cmdBuffer->SetScissor(scissor);
 
     // Bind Global Set (Set 0)
@@ -1159,7 +1160,7 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
                                  const RenderView& view, 
                                  const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                  const utl::vector<const RenderProxy*>& proxies,
-                                 uint32_t frameIndex,
+                                 u32 frameIndex,
                                  bool useDepthEqual,
                                  rhi::DescriptorSetHandle overrideGlobalSet,
                                  PipelineFlags extraFlags) {
@@ -1224,7 +1225,7 @@ void ForwardRenderer::TransparentPass(rhi::RHICommandBuffer* cmdBuffer,
                                       const RenderView& view, 
                                       const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                       const utl::vector<const RenderProxy*>& proxies,
-                                      uint32_t frameIndex) {
+                                      u32 frameIndex) {
     for (const auto* proxy : proxies) {
         auto it = materials.find(proxy->materialId);
         if (it == materials.end() || !it->second) continue;

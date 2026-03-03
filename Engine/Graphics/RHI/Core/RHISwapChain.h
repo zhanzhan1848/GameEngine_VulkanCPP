@@ -56,7 +56,7 @@ public:
      * @param fence 栅栏
      * @return 是否成功
      */
-    virtual bool AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore = handles::INVALID_SYNC, SyncHandle fence = handles::INVALID_SYNC) = 0;
+    virtual bool AcquireNextImage(u32* imageIndex, SyncHandle semaphore = handles::INVALID_SYNC, SyncHandle fence = handles::INVALID_SYNC) = 0;
 
     /**
      * @brief 呈现当前后台缓冲区
@@ -70,20 +70,20 @@ public:
      * @param width 新宽度
      * @param height 新高度
      */
-    virtual void Resize(uint32_t width, uint32_t height);
+    virtual void Resize(u32 width, u32 height);
 
     /**
      * @brief 获取当前后台缓冲区索引
      * @return 当前正在使用的后台缓冲区索引
      */
-    virtual uint32_t GetCurrentBackBufferIndex() const = 0;
+    virtual u32 GetCurrentBackBufferIndex() const = 0;
 
     /**
      * @brief 获取后台缓冲区纹理句柄
      * @param index 缓冲区索引
      * @return 纹理句柄，如果索引无效返回INVALID_RESOURCE
      */
-    virtual ResourceHandle GetBackBuffer(uint32_t index) const = 0;
+    virtual ResourceHandle GetBackBuffer(u32 index) const = 0;
 
     /**
      * @brief 获取交换链描述符

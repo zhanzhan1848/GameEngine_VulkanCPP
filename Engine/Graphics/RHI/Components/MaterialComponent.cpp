@@ -16,31 +16,31 @@ namespace primal::graphics::rhi {
         return materialInstance->Initialize(device);
     }
 
-    void MaterialComponent::SetTexture(uint32_t binding, ResourceHandle texture) {
+    void MaterialComponent::SetTexture(u32 binding, ResourceHandle texture) {
         if (materialInstance) {
             materialInstance->SetTexture(binding, texture);
         }
     }
 
-    void MaterialComponent::SetBuffer(uint32_t binding, ResourceHandle buffer, uint32_t size, uint32_t offset) {
+    void MaterialComponent::SetBuffer(u32 binding, ResourceHandle buffer, u32 size, u32 offset) {
         if (materialInstance) {
             materialInstance->SetBuffer(binding, buffer, size, offset);
         }
     }
 
-    void MaterialComponent::SetSampler(uint32_t binding, SamplerHandle sampler) {
+    void MaterialComponent::SetSampler(u32 binding, SamplerHandle sampler) {
         if (materialInstance) {
             materialInstance->SetSampler(binding, sampler);
         }
     }
 
-    void MaterialComponent::SetUniformData(uint32_t offset, const void* data, uint32_t size) {
+    void MaterialComponent::SetUniformData(u32 offset, const void* data, u32 size) {
         if (materialInstance) {
             materialInstance->SetUniformData(offset, data, size);
         }
     }
 
-    void MaterialComponent::Update(RHIDeviceBase* device, uint32_t frameIndex) {
+    void MaterialComponent::Update(RHIDeviceBase* device, u32 frameIndex) {
         if (materialInstance) {
             materialInstance->SetCurrentFrame(frameIndex);
             materialInstance->Update(device);

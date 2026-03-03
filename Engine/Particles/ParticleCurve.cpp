@@ -10,8 +10,10 @@ namespace primal::particles {
 // Float Curve Implementation
 // -----------------------------------------------------------------------------
 
-float_curve::float_curve(std::initializer_list<curve_keyframe<f32>> keys)
-    : keyframes_(keys) {
+float_curve::float_curve(std::initializer_list<curve_keyframe<f32>> keys) {
+    for (const auto& key : keys) {
+        keyframes_.push_back(key);
+    }
     sort_keyframes();
 }
 
@@ -209,8 +211,10 @@ float_curve float_curve::elastic() {
 // Color Gradient Implementation
 // -----------------------------------------------------------------------------
 
-color_gradient::color_gradient(std::initializer_list<color_key> keys)
-    : keys_(keys) {
+color_gradient::color_gradient(std::initializer_list<color_key> keys) {
+    for (const auto& key : keys) {
+        keys_.push_back(key);
+    }
     sort_keys();
 }
 
@@ -340,8 +344,10 @@ color_gradient color_gradient::rainbow() {
 // -----------------------------------------------------------------------------
 // Vector Curve Implementation
 // -----------------------------------------------------------------------------
-vector_curve::vector_curve(std::initializer_list<vector_key> keys)
-    : keys_(keys) {
+vector_curve::vector_curve(std::initializer_list<vector_key> keys) {
+    for (const auto& key : keys) {
+        keys_.push_back(key);
+    }
     sort_keys();
 }
 

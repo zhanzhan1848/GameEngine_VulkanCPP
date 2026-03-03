@@ -112,8 +112,8 @@ bool MetalSwapChain::Initialize() {
     
     // Update SwapChainDesc with actual drawable size
     CGSize drawableSize = mtkView_->drawableSize();
-    swapChainDesc_.width = static_cast<uint32_t>(drawableSize.width);
-    swapChainDesc_.height = static_cast<uint32_t>(drawableSize.height);
+    swapChainDesc_.width = static_cast<u32>(drawableSize.width);
+    swapChainDesc_.height = static_cast<u32>(drawableSize.height);
     
     CGRect windowFrame = window->frame();
     std::cout << "[MetalSwapChain] Window Logical Size: " << windowFrame.size.width << "x" << windowFrame.size.height 
@@ -126,7 +126,7 @@ bool MetalSwapChain::Initialize() {
     // 我们预分配 bufferCount 个 ResourceHandle
     backBufferHandles_.resize(swapChainDesc_.bufferCount);
     
-    for (uint32_t i = 0; i < swapChainDesc_.bufferCount; ++i) {
+    for (u32 i = 0; i < swapChainDesc_.bufferCount; ++i) {
         // 创建一个空的 TextureDesc
         TextureDesc texDesc;
         texDesc.size.x = swapChainDesc_.width;
@@ -166,7 +166,7 @@ void MetalSwapChain::Destroy() {
     RHISwapChain::Destroy();
 }
 
-bool MetalSwapChain::AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore, SyncHandle fence) {
+bool MetalSwapChain::AcquireNextImage(u32* imageIndex, SyncHandle semaphore, SyncHandle fence) {
     // 1. 获取 Drawable
     if (!currentDrawable_) {
         GetCurrentDrawable();
@@ -174,7 +174,7 @@ bool MetalSwapChain::AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore
     if (!currentDrawable_) return false;
 
     // 2. 更新当前帧索引
-    uint32_t index = currentFrameIndex_;
+    u32 index = currentFrameIndex_;
     if (imageIndex) {
         *imageIndex = index;
     }
@@ -198,7 +198,7 @@ bool MetalSwapChain::AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore
         MetalSync* sync = metalDevice_.GetSync(semaphore);
         if (sync) {
             // 简单递增信号量值，模拟 Signal 行为
-            uint64_t val = sync->GetValue();
+            u64 val = sync->GetValue();
             sync->SetValue(val + 1);
         }
     }
@@ -248,7 +248,7 @@ void MetalSwapChain::Present(SyncHandle semaphore) {
     currentDrawable_ = nullptr;
 }
 
-void MetalSwapChain::Resize(uint32_t width, uint32_t height) {
+void MetalSwapChain::Resize(u32 width, u32 height) {
     RHISwapChain::Resize(width, height);
     if (mtkView_) {
         // MTKView 自动处理 resize，或者我们需要更新 drawableSize
@@ -259,11 +259,11 @@ void MetalSwapChain::Resize(uint32_t width, uint32_t height) {
     }
 }
 
-uint32_t MetalSwapChain::GetCurrentBackBufferIndex() const {
+u32 MetalSwapChain::GetCurrentBackBufferIndex() const {
     return currentFrameIndex_;
 }
 
-ResourceHandle MetalSwapChain::GetBackBuffer(uint32_t index) const {
+ResourceHandle MetalSwapChain::GetBackBuffer(u32 index) const {
     if (index >= backBufferHandles_.size()) return handles::INVALID_RESOURCE;
     return backBufferHandles_[index];
 }
@@ -287,14 +287,14 @@ MTL::Drawable* MetalSwapChain::GetCurrentDrawable() {
     return currentDrawable_;
 }
 
-void* MetalSwapChain::mapImpl(uint64_t offset, uint64_t size) {
+void* MetalSwapChain::mapImpl(u64 offset, u64 size) {
     return nullptr;
 }
 
 void MetalSwapChain::unmapImpl() {
 }
 
-bool MetalSwapChain::updateDataImpl(const void* data, uint64_t size, uint64_t offset) {
+bool MetalSwapChain::updateDataImpl(const void* data, u64 size, u64 offset) {
     return false;
 }
 

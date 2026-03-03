@@ -667,7 +667,8 @@ bool preset_manager::remove_preset(const std::string& name) {
     const std::string& category = it->second.category;
     if (!category.empty()) {
         auto& cat_list = categories_[category];
-        cat_list.erase(std::remove(cat_list.begin(), cat_list.end(), name), cat_list.end());
+        std::remove(cat_list.begin(), cat_list.end(), name);
+        cat_list.erase(cat_list.end());
     }
     
     presets_.erase(it);
@@ -687,8 +688,8 @@ const particle_preset* preset_manager::get_preset(const std::string& name) const
     return &it->second;
 }
 
-std::vector<std::string> preset_manager::get_categories() const {
-    std::vector<std::string> result;
+utl::vector<std::string> preset_manager::get_categories() const {
+    utl::vector<std::string> result;
     result.reserve(categories_.size());
     for (const auto& pair : categories_) {
         result.push_back(pair.first);
@@ -696,7 +697,7 @@ std::vector<std::string> preset_manager::get_categories() const {
     return result;
 }
 
-std::vector<std::string> preset_manager::get_presets_in_category(const std::string& category) const {
+utl::vector<std::string> preset_manager::get_presets_in_category(const std::string& category) const {
     auto it = categories_.find(category);
     if (it == categories_.end()) {
         return {};
@@ -704,8 +705,8 @@ std::vector<std::string> preset_manager::get_presets_in_category(const std::stri
     return it->second;
 }
 
-std::vector<std::string> preset_manager::get_all_preset_names() const {
-    std::vector<std::string> result;
+utl::vector<std::string> preset_manager::get_all_preset_names() const {
+    utl::vector<std::string> result;
     result.reserve(presets_.size());
     for (const auto& pair : presets_) {
         result.push_back(pair.first);
@@ -765,7 +766,9 @@ particle_preset fire() {
     preset.config.blending = blend_mode::additive;
     
     preset.use_alpha_curve = true;
-    preset.alpha_curve.keyframes = { {0.0f, 1.0f}, {0.7f, 1.0f}, {1.0f, 0.0f} };
+    preset.alpha_curve.keyframes.push_back({0.0f, 1.0f});
+    preset.alpha_curve.keyframes.push_back({0.7f, 1.0f});
+    preset.alpha_curve.keyframes.push_back({1.0f, 0.0f});
     
     return preset;
 }
@@ -795,7 +798,8 @@ particle_preset smoke() {
     preset.config.blending = blend_mode::alpha;
     
     preset.use_scale_curve = true;
-    preset.scale_curve.keyframes = { {0.0f, 0.5f}, {1.0f, 2.0f} };
+    preset.scale_curve.keyframes.push_back({0.0f, 0.5f});
+    preset.scale_curve.keyframes.push_back({1.0f, 2.0f});
     
     return preset;
 }
@@ -949,7 +953,8 @@ particle_preset bubbles() {
     preset.config.blending = blend_mode::alpha;
     
     preset.use_scale_curve = true;
-    preset.scale_curve.keyframes = { {0.0f, 0.5f}, {1.0f, 1.2f} };
+    preset.scale_curve.keyframes.push_back({0.0f, 0.5f});
+    preset.scale_curve.keyframes.push_back({1.0f, 1.2f});
     
     return preset;
 }

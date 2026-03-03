@@ -23,8 +23,8 @@ public:
                  rhi::ResourceHandle sceneColor,
                  rhi::ResourceHandle sceneDepth,
                  rhi::ResourceHandle output,
-                 uint32_t width, uint32_t height,
-                 uint32_t frameIndex,
+                 u32 width, u32 height,
+                 u32 frameIndex,
                  const rhi::math::m4x4& viewMatrix,
                  const rhi::math::m4x4& projMatrix);
 

@@ -9,7 +9,7 @@
 
 #include <cstring>
 #include <fstream>
-#include <vector>
+#include <iostream>
 #include <iostream>
 
 namespace primal::graphics {
@@ -549,25 +549,25 @@ void ParticlePass::update_descriptor_set(u32 frame_index) {
 
 void ParticlePass::create_default_texture() {
     // Create 1x1 white texture using content system
-    uint32_t width = 1;
-    uint32_t height = 1;
+    u32 width = 1;
+    u32 height = 1;
     rhi::DataFormat format = rhi::DataFormat::RGBA8_UNorm;
-    uint32_t row_pitch = 4;
-    uint32_t slice_pitch = 4;
+    u32 row_pitch = 4;
+    u32 slice_pitch = 4;
     
     // White pixel data (RGBA)
-    uint8_t white_pixel[4] = { 255, 255, 255, 255 };
+    u8 white_pixel[4] = { 255, 255, 255, 255 };
     
-    size_t blob_size = (6 * sizeof(uint32_t)) + (2 * sizeof(uint32_t) + slice_pitch);
-    std::vector<uint8_t> blob(blob_size);
+    size_t blob_size = (6 * sizeof(u32)) + (2 * sizeof(u32) + slice_pitch);
+    utl::vector<u8> blob(blob_size);
     utl::blob_stream_writer writer(blob.data(), blob.size());
     
     writer.write(width);
     writer.write(height);
-    writer.write((uint32_t)1);  // array_size
-    writer.write((uint32_t)0);  // flags
-    writer.write((uint32_t)1);  // mip_levels
-    writer.write((uint32_t)format);
+    writer.write((u32)1);  // array_size
+    writer.write((u32)0);  // flags
+    writer.write((u32)1);  // mip_levels
+    writer.write((u32)format);
     writer.write(row_pitch);
     writer.write(slice_pitch);
     writer.write(white_pixel, slice_pitch);

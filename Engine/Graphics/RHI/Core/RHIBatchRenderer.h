@@ -126,7 +126,7 @@ struct RenderItem {
  */
 struct RenderBatch {
     RenderItemKey key;                  ///< 批次分类键
-    std::vector<RenderItem> items;     ///< 渲染项列表
+    utl::vector<RenderItem> items;     ///< 渲染项列表
     u32 totalVertices;                  ///< 总顶点数
     u32 totalIndices;                   ///< 总索引数
     u32 totalInstances;                 ///< 总实例数
@@ -310,7 +310,7 @@ public:
      * @brief 获取批次列表（只读）
      * @return 批次列表
      */
-    const std::vector<RenderBatch>& GetBatches() const { return batches_; }
+    const utl::vector<RenderBatch>& GetBatches() const { return batches_; }
     
     /**
      * @brief 打印统计信息
@@ -374,7 +374,7 @@ private:
      * @param batch 原始批次
      * @return 实例化批次列表
      */
-    std::vector<RenderBatch> CreateInstancedBatches(const RenderBatch& batch);
+    utl::vector<RenderBatch> CreateInstancedBatches(const RenderBatch& batch);
     
     /**
      * @brief 提交单个批次到命令缓冲区
@@ -400,9 +400,9 @@ private:
     BatchConfig config_;                             ///< 批处理配置
     BatchStats stats_;                               ///< 统计信息
     
-    std::vector<RenderItem> renderItems_;            ///< 渲染项列表
+    utl::vector<RenderItem> renderItems_;            ///< 渲染项列表
     std::unordered_map<RenderItemKey, std::unique_ptr<RenderBatch>, RenderItemKeyHash> batchMap_;  ///< 批次映射表
-    std::vector<RenderBatch> batches_;               ///< 处理后的批次列表
+    utl::vector<RenderBatch> batches_;               ///< 处理后的批次列表
     
     math::m4x4 viewMatrix_;                       ///< 当前视图矩阵
     math::m4x4 projectionMatrix_;                 ///< 当前投影矩阵
@@ -412,9 +412,9 @@ private:
     u32 frameCounter_;                               ///< 帧计数器
     
     // 性能优化相关的临时缓冲区
-    std::vector<u32> tempIndices_;                    ///< 临时索引缓冲区
-    std::vector<math::m4x4> tempInstanceData_;    ///< 临时实例数据
-    std::vector<RenderBatch> tempBatches_;           ///< 临时批次缓冲区
+    utl::vector<u32> tempIndices_;                    ///< 临时索引缓冲区
+    utl::vector<math::m4x4> tempInstanceData_;    ///< 临时实例数据
+    utl::vector<RenderBatch> tempBatches_;           ///< 临时批次缓冲区
 };
 
 } // namespace primal::graphics::rhi

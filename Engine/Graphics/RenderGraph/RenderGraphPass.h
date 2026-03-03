@@ -3,7 +3,7 @@
 #include "RenderGraphDefinitions.h"
 #include "RenderGraphResource.h"
 #include "Graphics/RHI/Core/RHICommand.h"
-#include <vector>
+
 #include <optional>
 
 namespace primal::graphics::rendergraph {
@@ -52,13 +52,13 @@ public:
         outputs_.push_back({resource, state, RGAccessType::Write});
     }
 
-    const ::std::vector<RGPassResourceDef>& GetInputs() const { return inputs_; }
-    const ::std::vector<RGPassResourceDef>& GetOutputs() const { return outputs_; }
+    const utl::vector<RGPassResourceDef>& GetInputs() const { return inputs_; }
+    const utl::vector<RGPassResourceDef>& GetOutputs() const { return outputs_; }
 
     void AddBarrier(const rhi::ResourceBarrier& barrier) {
         barriers_.push_back(barrier);
     }
-    const ::std::vector<rhi::ResourceBarrier>& GetBarriers() const { return barriers_; }
+    const utl::vector<rhi::ResourceBarrier>& GetBarriers() const { return barriers_; }
 
     void SetRenderPassDesc(const RGRenderPassDesc& desc) {
         renderPassDesc_ = desc;
@@ -74,9 +74,9 @@ protected:
     bool culled_ = false;
     bool hasSideEffect_ = false;
     
-    ::std::vector<RGPassResourceDef> inputs_;
-    ::std::vector<RGPassResourceDef> outputs_;
-    ::std::vector<rhi::ResourceBarrier> barriers_;
+    utl::vector<RGPassResourceDef> inputs_;
+    utl::vector<RGPassResourceDef> outputs_;
+    utl::vector<rhi::ResourceBarrier> barriers_;
     ::std::optional<RGRenderPassDesc> renderPassDesc_;
 };
 

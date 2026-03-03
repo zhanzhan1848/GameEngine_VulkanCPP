@@ -38,7 +38,7 @@ bool RenderTexture::Create(rhi::RHIDeviceBase* device,
                            primal::id::id_type entityId,
                            const rhi::TextureDesc& desc,
                            const void* initialData, 
-                           uint64_t dataSize) {
+                           u64 dataSize) {
     if (!device) return false;
     
     // Ensure cleanup if already created
@@ -82,7 +82,7 @@ void RenderTexture::Destroy(rhi::RHIDeviceBase* device) {
     entityId_ = primal::id::invalid_id;
 }
 
-bool RenderTexture::UploadDataAsync(rhi::RHIDeviceBase* device, const void* data, uint64_t size) {
+bool RenderTexture::UploadDataAsync(rhi::RHIDeviceBase* device, const void* data, u64 size) {
     if (!device || !IsValid() || !data || size == 0) return false;
 
     // 1. Create Staging Buffer
@@ -167,7 +167,7 @@ bool RenderTexture::UploadDataAsync(rhi::RHIDeviceBase* device, const void* data
     return true;
 }
 
-bool RenderTexture::ReadBack(rhi::RHIDeviceBase* device, void* data, uint64_t size) {
+bool RenderTexture::ReadBack(rhi::RHIDeviceBase* device, void* data, u64 size) {
     if (!device || !IsValid() || !data || size == 0) return false;
     
     // 1. Create Readback Buffer
@@ -233,15 +233,15 @@ bool RenderTexture::GenerateMipmaps(rhi::RHIDeviceBase* device) {
     
     cmd->Begin();
     
-    int32_t width = desc_.size.x;
-    int32_t height = desc_.size.y;
-    int32_t depth = desc_.size.z;
+    s32 width = desc_.size.x;
+    s32 height = desc_.size.y;
+    s32 depth = desc_.size.z;
     
-    for (uint32_t i = 0; i < desc_.mipLevels - 1; ++i) {
+    for (u32 i = 0; i < desc_.mipLevels - 1; ++i) {
         // Next level dims
-        int32_t nextWidth = std::max(1, width / 2);
-        int32_t nextHeight = std::max(1, height / 2);
-        int32_t nextDepth = std::max(1, depth / 2);
+        s32 nextWidth = std::max(1, width / 2);
+        s32 nextHeight = std::max(1, height / 2);
+        s32 nextDepth = std::max(1, depth / 2);
         rhi::TextureBlitRegion region{
             .srcSubresource = {i, 0, 1},
             .dstSubresource = {i + 1, 0, 1},

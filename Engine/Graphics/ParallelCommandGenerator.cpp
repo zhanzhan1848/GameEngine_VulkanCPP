@@ -78,11 +78,10 @@ bool ParallelCommandGenerator::FrustumCullSingle(
 }
 
 jobsystem::JobHandle ParallelCommandGenerator::FrustumCullParallel(
-    const std::vector<RenderProxy>& proxies,
-    std::vector<bool>& visibility,
+    const utl::vector<RenderProxy>& proxies,
+    utl::vector<bool>& visibility,
     const math::m4x4& view_matrix,
     const math::m4x4& projection_matrix)
-{
     visibility.resize(proxies.size());
     
     if (proxies.empty())
@@ -102,12 +101,11 @@ jobsystem::JobHandle ParallelCommandGenerator::FrustumCullParallel(
         });
 }
 
-std::vector<DrawCall> ParallelCommandGenerator::GenerateDrawCallsParallel(
-    const std::vector<RenderProxy>& proxies,
-    const std::vector<bool>& visibility,
+utl::vector<DrawCall> ParallelCommandGenerator::GenerateDrawCallsParallel(
+    const utl::vector<RenderProxy>& proxies,
+    const utl::vector<bool>& visibility,
     const math::v3& camera_position)
-{
-    std::vector<DrawCall> draw_calls;
+    utl::vector<DrawCall> draw_calls;
     
     if (proxies.size() != visibility.size())
     {
@@ -146,9 +144,8 @@ std::vector<DrawCall> ParallelCommandGenerator::GenerateDrawCallsParallel(
 }
 
 void ParallelCommandGenerator::SortDrawCallsParallel(
-    std::vector<DrawCall>& draw_calls,
+    utl::vector<DrawCall>& draw_calls,
     bool back_to_front)
-{
     if (draw_calls.size() < 1000)
     {
         if (back_to_front)
@@ -242,14 +239,13 @@ void ParallelCommandGenerator::SortDrawCallsParallel(
 }
 
 void ParallelCommandGenerator::GenerateCommands(
-    const std::vector<RenderProxy>& proxies,
-    std::vector<DrawCall>& out_draw_calls,
+    const utl::vector<RenderProxy>& proxies,
+    utl::vector<DrawCall>& out_draw_calls,
     const math::m4x4& view_matrix,
     const math::m4x4& projection_matrix,
     const math::v3& camera_position,
     bool sort_transparent)
-{
-    std::vector<bool> visibility;
+    utl::vector<bool> visibility;
     
     auto cull_handle = FrustumCullParallel(proxies, visibility, view_matrix, projection_matrix);
     cull_handle.Wait();

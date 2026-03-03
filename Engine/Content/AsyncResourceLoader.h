@@ -4,7 +4,7 @@
 #include "../JobSystem/JobSystem.h"
 #include <functional>
 #include <future>
-#include <vector>
+#include <string>
 #include <string>
 
 namespace primal::content {
@@ -20,7 +20,7 @@ struct TextureLoadResult
 };
 
 using TextureProgressCallback = std::function<void(u32 completed, u32 total, const std::string& current_file)>;
-using TextureCompleteCallback = std::function<void(const std::vector<TextureLoadResult>& results)>;
+using TextureCompleteCallback = std::function<void(const utl::vector<TextureLoadResult>& results)>;
 using MeshCompleteCallback = std::function<void(id::id_type mesh_id)>;
 
 class AsyncResourceLoader
@@ -33,15 +33,15 @@ public:
     
     // Load multiple textures in parallel
     // Returns a vector of results, blocks until all are complete
-    std::vector<TextureLoadResult> LoadTexturesParallel(
-        const std::vector<std::string>& paths,
+    utl::vector<TextureLoadResult> LoadTexturesParallel(
+        const utl::vector<std::string>& paths,
         TextureProgressCallback progress_callback = nullptr);
     
     // Load multiple textures asynchronously
     // Returns immediately with a JobHandle
     // Completion callback is called when all textures are loaded
     jobsystem::JobHandle LoadTexturesAsync(
-        const std::vector<std::string>& paths,
+        const utl::vector<std::string>& paths,
         TextureCompleteCallback complete_callback,
         TextureProgressCallback progress_callback = nullptr);
     
@@ -68,7 +68,7 @@ private:
     
     struct PendingTextureUpload
     {
-        std::vector<u8> data;
+        utl::vector<u8> data;
         u32 width;
         u32 height;
         std::string path;
@@ -77,7 +77,7 @@ private:
     
     struct PendingMeshUpload
     {
-        std::vector<u8> data;
+        utl::vector<u8> data;
         std::string path;
         std::promise<id::id_type> promise;
     };

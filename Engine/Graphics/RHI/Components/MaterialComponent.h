@@ -36,17 +36,17 @@ namespace primal::graphics {
              */
             bool Create(RHIDeviceBase* device, Material* material);
 
-            void SetTexture(uint32_t binding, ResourceHandle texture);
-            void SetBuffer(uint32_t binding, ResourceHandle buffer, uint32_t size, uint32_t offset = 0);
-            void SetSampler(uint32_t binding, SamplerHandle sampler);
-            void SetUniformData(uint32_t offset, const void* data, uint32_t size);
+            void SetTexture(u32 binding, ResourceHandle texture);
+            void SetBuffer(u32 binding, ResourceHandle buffer, u32 size, u32 offset = 0);
+            void SetSampler(u32 binding, SamplerHandle sampler);
+            void SetUniformData(u32 offset, const void* data, u32 size);
 
             template<typename T>
-            void SetUniform(uint32_t offset, const T& value) {
+            void SetUniform(u32 offset, const T& value) {
                 SetUniformData(offset, &value, sizeof(T));
             }
 
-            void Update(RHIDeviceBase* device, uint32_t frameIndex);
+            void Update(RHIDeviceBase* device, u32 frameIndex);
             
             DescriptorSetHandle GetDescriptorSet() const;
             

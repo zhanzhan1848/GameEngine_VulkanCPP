@@ -4,7 +4,7 @@
 #include "Engine/Common/Id.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 #include <unordered_map>
-#include <vector>
+#include "Engine/Utilities/Vector.h"
 
 namespace primal::graphics {
     class RenderScene;

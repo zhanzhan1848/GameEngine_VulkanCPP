@@ -5,8 +5,7 @@
 #include "JobHandle.h"
 #include "WorkStealingQueue.h"
 #include <deque>
-#include <deque>
-#include <vector>
+#include "Utilities/Vector.h"
 #include <random>
 
 namespace primal::jobsystem {
@@ -75,8 +74,8 @@ private:
     u32 _worker_count{ 0 };
     u32 _core_thread_count{ 0 };
     
-    std::vector<std::unique_ptr<WorkerThread>> _workers;
-    std::vector<JobQueue*> _queues;
+    utl::vector<std::unique_ptr<WorkerThread>> _workers;
+    utl::vector<JobQueue*> _queues;
     
     std::unique_ptr<JobQueue> _main_thread_queue;
     std::thread::id _main_thread_id;

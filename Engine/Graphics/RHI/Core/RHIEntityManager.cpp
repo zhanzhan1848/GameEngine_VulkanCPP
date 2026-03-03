@@ -3,14 +3,14 @@
 namespace primal::graphics::rhi {
 
 RHIEntityID RHIEntityManager::CreateEntity() {
-    uint32_t index;
+    u32 index;
     if (!freeIndices.empty()) {
         index = freeIndices.front();
         freeIndices.pop();
     } else {
         generations.push_back(0);
         alive.push_back(false); // Will be set to true
-        index = static_cast<uint32_t>(generations.size() - 1);
+        index = static_cast<u32>(generations.size() - 1);
         EnsureCapacity(index);
     }
     
@@ -20,7 +20,7 @@ RHIEntityID RHIEntityManager::CreateEntity() {
 }
 
 void RHIEntityManager::DestroyEntity(RHIEntityID entity) {
-    uint32_t index = entity;
+    u32 index = entity;
     if (index >= alive.size() || !alive[index]) return;
     
     // Invalidate components
@@ -40,7 +40,7 @@ void RHIEntityManager::DestroyEntity(RHIEntityID entity) {
 }
 
 bool RHIEntityManager::IsAlive(RHIEntityID entity) const {
-    uint32_t index = entity;
+    u32 index = entity;
     if (index >= alive.size()) return false;
     return alive[index];
 }
@@ -61,11 +61,11 @@ void RHIEntityManager::Clear() {
     hasRenderLayer.clear();
 }
 
-void RHIEntityManager::EnsureCapacity(uint32_t index) {
+void RHIEntityManager::EnsureCapacity(u32 index) {
     if (index >= gpuBuffers.size()) {
         // Grow by 1.5x or similar strategy could be better, but direct resize is fine for now
         // Assuming EnsureCapacity is called when adding new entity at 'index'
-        uint32_t newSize = index + 1;
+        u32 newSize = index + 1;
         if (newSize < gpuBuffers.size() * 2) {
             newSize = gpuBuffers.size() * 2;
         }

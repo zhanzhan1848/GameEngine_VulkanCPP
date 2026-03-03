@@ -47,23 +47,23 @@ public:
      * @param completedFrame GPU已完成的帧索引
      * @param maxDurationMs 最大执行时间(ms)，0表示不限制
      */
-    void Update(uint64_t completedFrame, double maxDurationMs = 0.0);
+    void Update(u64 completedFrame, double maxDurationMs = 0.0);
 
     /**
      * @brief 设置当前CPU正在录制的帧索引
      * @param frameIndex 当前帧索引
      */
-    void SetCurrentFrame(uint64_t frameIndex);
+    void SetCurrentFrame(u64 frameIndex);
 
 private:
     struct GarbageItem {
-        uint64_t frameIndex;
+        u64 frameIndex;
         std::function<void()> callback;
     };
 
     std::mutex mutex_;
     std::deque<GarbageItem> garbageQueue_;
-    uint64_t currentFrame_ = 0;
+    u64 currentFrame_ = 0;
 };
 
 } // namespace primal::graphics::rhi

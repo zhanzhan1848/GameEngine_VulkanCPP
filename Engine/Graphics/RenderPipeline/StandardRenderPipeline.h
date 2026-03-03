@@ -44,7 +44,7 @@ private:
     PipelineStatistics stats_;
     
     // Per-frame data
-    uint64_t frameCount_{0};
+    u64 frameCount_{0};
 };
 
 } // namespace primal::graphics

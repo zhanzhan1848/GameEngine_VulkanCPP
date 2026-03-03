@@ -5,17 +5,17 @@
 #include "RenderMesh.h"
 #include "Material.h"
 #include "MaterialInstance.h"
-#include <vector>
+#include "Utilities/Vector.h"
 #include <string>
 
 namespace primal::graphics {
 
 struct SceneDataMeshInfo {
     std::string name;
-    uint32_t lodId;
+    u32 lodId;
     float lodThreshold;
     RenderMesh* mesh;
-    int32_t materialIndex{-1}; // 材质索引
+    s32 materialIndex{-1}; // 材质索引
     std::string diffuseTexturePath; // 漫反射贴图路径 (从文件加载)
     std::string normalTexturePath;  // 法线贴图路径 (从文件加载)
     std::string roughnessTexturePath; // 粗糙度贴图路径
@@ -41,7 +41,7 @@ public:
      * @param size 数据大小
      * @return 创建的 Mesh 信息列表
      */
-    std::vector<SceneDataMeshInfo> Load(rhi::RHIDeviceBase* device, const void* data, uint32_t size);
+    utl::vector<SceneDataMeshInfo> Load(rhi::RHIDeviceBase* device, const void* data, u32 size);
 
     /**
      * @brief 加载 RenderItem 格式的场景数据 (ContentToEngine 格式)
@@ -50,15 +50,15 @@ public:
      * @param size 数据大小
      * @return 创建的 Mesh 信息列表
      */
-    std::vector<SceneDataMeshInfo> LoadRenderItemData(rhi::RHIDeviceBase* device, const void* data, uint32_t size);
+    utl::vector<SceneDataMeshInfo> LoadRenderItemData(rhi::RHIDeviceBase* device, const void* data, u32 size);
 
     /**
      * @brief 预编译材质数据结构头
      */
     struct CompiledMaterialHeader {
-        uint32_t magic;     // 'MATL'
-        uint32_t version;   // 1
-        uint32_t shaderCount;
+        u32 magic;     // 'MATL'
+        u32 version;   // 1
+        u32 shaderCount;
         // Followed by Shader Data, then State Data
     };
 
@@ -69,7 +69,7 @@ public:
      * @param size 数据大小
      * @return 创建的 Material 对象指针 (共享所有权)
      */
-    std::shared_ptr<Material> LoadMaterial(rhi::RHIDeviceBase* device, const void* data, uint32_t size);
+    std::shared_ptr<Material> LoadMaterial(rhi::RHIDeviceBase* device, const void* data, u32 size);
 
 private:
     // 内部辅助类和函数将在cpp中实现

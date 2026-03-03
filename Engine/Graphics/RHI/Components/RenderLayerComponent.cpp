@@ -18,27 +18,27 @@ RenderLayerComponent::RenderLayerComponent()
 {
 }
 
-void RenderLayerComponent::SetLayer(uint8_t layerIndex) {
+void RenderLayerComponent::SetLayer(u8 layerIndex) {
     if (layerIndex >= 32) return;
     layerMask = (1u << layerIndex);
 }
 
-void RenderLayerComponent::EnableLayer(uint8_t layerIndex) {
+void RenderLayerComponent::EnableLayer(u8 layerIndex) {
     if (layerIndex >= 32) return;
     layerMask |= (1u << layerIndex);
 }
 
-void RenderLayerComponent::DisableLayer(uint8_t layerIndex) {
+void RenderLayerComponent::DisableLayer(u8 layerIndex) {
     if (layerIndex >= 32) return;
     layerMask &= ~(1u << layerIndex);
 }
 
-bool RenderLayerComponent::HasLayer(uint8_t layerIndex) const {
+bool RenderLayerComponent::HasLayer(u8 layerIndex) const {
     if (layerIndex >= 32) return false;
     return (layerMask & (1u << layerIndex)) != 0;
 }
 
-bool RenderLayerComponent::Match(uint32_t mask) const {
+bool RenderLayerComponent::Match(u32 mask) const {
     return (layerMask & mask) != 0;
 }
 

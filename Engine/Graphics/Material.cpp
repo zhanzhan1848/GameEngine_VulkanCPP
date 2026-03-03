@@ -248,7 +248,7 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     desc.blendConstants = blendState_.blendConstants;
     
     if (!isDepthOnly && !isShadow) {
-        desc.renderTargetCount = static_cast<uint32_t>(renderTargetFormats_.size());
+        desc.renderTargetCount = static_cast<u32>(renderTargetFormats_.size());
         for (size_t i = 0; i < renderTargetFormats_.size() && i < rhi::constants::MAX_RENDER_TARGETS; ++i) {
             desc.renderTargetFormats[i] = renderTargetFormats_[i];
         }

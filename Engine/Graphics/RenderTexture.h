@@ -52,7 +52,7 @@ public:
                 primal::id::id_type entityId,
                 const rhi::TextureDesc& desc,
                 const void* initialData = nullptr, 
-                uint64_t dataSize = 0);
+                u64 dataSize = 0);
 
     /**
      * @brief 异步上传数据到纹理
@@ -62,7 +62,7 @@ public:
      * @param size 数据大小
      * @return 是否成功
      */
-    bool UploadDataAsync(rhi::RHIDeviceBase* device, const void* data, uint64_t size);
+    bool UploadDataAsync(rhi::RHIDeviceBase* device, const void* data, u64 size);
 
     /**
      * @brief 生成 Mipmaps
@@ -80,7 +80,7 @@ public:
      * @param size 接收缓冲区大小
      * @return 是否成功
      */
-    bool ReadBack(rhi::RHIDeviceBase* device, void* data, uint64_t size);
+    bool ReadBack(rhi::RHIDeviceBase* device, void* data, u64 size);
 
     /**
      * @brief 销毁纹理资源
@@ -107,13 +107,13 @@ public:
      * @brief 获取纹理宽度
      * @return 宽度（像素）
      */
-    uint32_t GetWidth() const { return desc_.size.x; }
+    u32 GetWidth() const { return desc_.size.x; }
 
     /**
      * @brief 获取纹理高度
      * @return 高度（像素）
      */
-    uint32_t GetHeight() const { return desc_.size.y; }
+    u32 GetHeight() const { return desc_.size.y; }
 
     /**
      * @brief 获取关联的实体ID

@@ -10,7 +10,7 @@
 
 #include "../../Core/RHISwapChain.h"
 #include "MetalCommon.h"
-#include <vector>
+#include "Utilities/Vector.h"
 
 namespace primal::graphics::rhi {
 
@@ -28,7 +28,7 @@ public:
      * @param width 宽度
      * @param height 高度
      */
-    void Resize(uint32_t width, uint32_t height) override;
+    void Resize(u32 width, u32 height) override;
 
     /**
      * @brief 获取下一个图像索引
@@ -37,15 +37,15 @@ public:
      * @param fence 栅栏
      * @return 是否成功
      */
-    bool AcquireNextImage(uint32_t* imageIndex, SyncHandle semaphore = handles::INVALID_SYNC, SyncHandle fence = handles::INVALID_SYNC) override;
+    bool AcquireNextImage(u32* imageIndex, SyncHandle semaphore = handles::INVALID_SYNC, SyncHandle fence = handles::INVALID_SYNC) override;
 
     /**
      * @brief 呈现画面
      * @param semaphore 等待的信号量
      */
     void Present(SyncHandle semaphore) override;
-    uint32_t GetCurrentBackBufferIndex() const override;
-    ResourceHandle GetBackBuffer(uint32_t index) const override;
+    u32 GetCurrentBackBufferIndex() const override;
+    ResourceHandle GetBackBuffer(u32 index) const override;
 
     /**
      * @brief 获取当前帧的Drawable
@@ -55,9 +55,9 @@ public:
 
 protected:
     // === RHIResource 接口实现 ===
-    void* mapImpl(uint64_t offset, uint64_t size) override;
+    void* mapImpl(u64 offset, u64 size) override;
     void unmapImpl() override;
-    bool updateDataImpl(const void* data, uint64_t size, uint64_t offset) override;
+    bool updateDataImpl(const void* data, u64 size, u64 offset) override;
 
 private:
     MetalDevice& metalDevice_;
@@ -67,9 +67,9 @@ private:
     // 后台缓冲区句柄
     // Metal 不像 Vulkan 那样暴露固定的 SwapChain Image 列表
     // 但为了适配接口，我们维护一组 Handle，每一帧更新当前 Handle 对应的底层 Texture
-    std::vector<ResourceHandle> backBufferHandles_;
+    utl::vector<ResourceHandle> backBufferHandles_;
     
-    uint32_t currentFrameIndex_{0};
+    u32 currentFrameIndex_{0};
 };
 
 } // namespace primal::graphics::rhi

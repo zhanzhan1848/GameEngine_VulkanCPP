@@ -22,7 +22,7 @@ template<typename T> class RHIAllocator;
  * @brief 资源使用标志位
  * @details 描述资源的预期用途
  */
-enum class ResourceUsage : uint32_t {
+enum class ResourceUsage : u32 {
     None = 0x00000000,
     ShaderResource = 0x00000001,       ///< 作为着色器资源
     RenderTarget = 0x00000002,          ///< 作为渲染目标
@@ -41,11 +41,11 @@ enum class ResourceUsage : uint32_t {
 
 // 支持位运算操作
 inline ResourceUsage operator|(ResourceUsage a, ResourceUsage b) {
-    return static_cast<ResourceUsage>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+    return static_cast<ResourceUsage>(static_cast<u32>(a) | static_cast<u32>(b));
 }
 
 inline ResourceUsage operator&(ResourceUsage a, ResourceUsage b) {
-    return static_cast<ResourceUsage>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+    return static_cast<ResourceUsage>(static_cast<u32>(a) & static_cast<u32>(b));
 }
 
 inline bool HasUsage(ResourceUsage usage, ResourceUsage flag) {
@@ -60,13 +60,13 @@ struct ResourceDesc {
     ResourceType type;          ///< 资源类型
     ResourceUsage usage;        ///< 资源用途
     GPUMemoryUsage memoryUsage; ///< 内存使用模式
-    uint64_t size;             ///< 资源大小（字节）
+    u64 size;             ///< 资源大小（字节）
     const char* name;           ///< 资源名称（用于调试）
     
     ResourceDesc() : type(ResourceType::Unknown), usage(ResourceUsage::None),
                     memoryUsage(GPUMemoryUsage::Unknown), size(0), name(nullptr) {}
     
-    ResourceDesc(ResourceType t, ResourceUsage u, GPUMemoryUsage mem, uint64_t sz, const char* n = nullptr)
+    ResourceDesc(ResourceType t, ResourceUsage u, GPUMemoryUsage mem, u64 sz, const char* n = nullptr)
         : type(t), usage(u), memoryUsage(mem), size(sz), name(n) {}
 };
 
@@ -75,12 +75,12 @@ struct ResourceDesc {
  * @details 用于描述资源的子资源（如纹理的Mip层级、数组切片等）
  */
 struct SubresourceDesc {
-    uint32_t mipLevel;          ///< Mip层级
-    uint32_t arraySlice;        ///< 数组切片
-    uint32_t plane;             ///< 平面（用于多平面格式）
+    u32 mipLevel;          ///< Mip层级
+    u32 arraySlice;        ///< 数组切片
+    u32 plane;             ///< 平面（用于多平面格式）
     
     SubresourceDesc() : mipLevel(0), arraySlice(0), plane(0) {}
-    SubresourceDesc(uint32_t mip, uint32_t array, uint32_t p = 0)
+    SubresourceDesc(u32 mip, u32 array, u32 p = 0)
         : mipLevel(mip), arraySlice(array), plane(p) {}
 };
 
@@ -90,8 +90,8 @@ struct SubresourceDesc {
  */
 struct ResourceMapDesc {
     void* data;                ///< 映射的数据指针
-    uint64_t offset;            ///< 映射偏移量（字节）
-    uint64_t size;              ///< 映射大小（字节）
+    u64 offset;            ///< 映射偏移量（字节）
+    u64 size;              ///< 映射大小（字节）
     bool isReadback;            ///< 是否为回读映射
     bool isPersistent;          ///< 是否为持久映射
     
@@ -103,12 +103,12 @@ struct ResourceMapDesc {
  * @details 用于监控资源使用情况
  */
 struct ResourceStats {
-    uint32_t bufferCount;       ///< 缓冲区数量
-    uint32_t textureCount;      ///< 纹理数量
-    uint32_t pipelineCount;     ///< 管线数量
-    uint64_t totalMemoryUsage;  ///< 总内存使用量
-    uint64_t bufferMemoryUsage; ///< 缓冲区内存使用量
-    uint64_t textureMemoryUsage; ///< 纹理内存使用量
+    u32 bufferCount;       ///< 缓冲区数量
+    u32 textureCount;      ///< 纹理数量
+    u32 pipelineCount;     ///< 管线数量
+    u64 totalMemoryUsage;  ///< 总内存使用量
+    u64 bufferMemoryUsage; ///< 缓冲区内存使用量
+    u64 textureMemoryUsage; ///< 纹理内存使用量
     
     ResourceStats() : bufferCount(0), textureCount(0), pipelineCount(0),
                      totalMemoryUsage(0), bufferMemoryUsage(0), textureMemoryUsage(0) {}
@@ -185,7 +185,7 @@ public:
      * @param size 映射大小（字节）
      * @return 映射的数据指针，失败返回nullptr
      */
-    virtual void* Map(uint64_t offset = 0, uint64_t size = 0) {
+    virtual void* Map(u64 offset = 0, u64 size = 0) {
         if (!CanMap()) return nullptr;
         if (mappedData_) return mappedData_;
         
@@ -214,7 +214,7 @@ public:
      * @param offset 写入偏移量（字节）
      * @return 更新是否成功
      */
-    virtual bool UpdateData(const void* data, uint64_t size, uint64_t offset = 0) {
+    virtual bool UpdateData(const void* data, u64 size, u64 offset = 0) {
         if (!data || size == 0 || !CanUpdate()) return false;
         return updateDataImpl(data, size, offset);
     }
@@ -229,7 +229,7 @@ public:
      * @brief 获取资源大小
      * @return 资源大小（字节）
      */
-    uint64_t GetSize() const { return desc_.size; }
+    u64 GetSize() const { return desc_.size; }
     
     /**
      * @brief 资源句柄
@@ -315,8 +315,8 @@ public:
      * @brief 释放引用
      * @return 当前引用计数
      */
-    uint32_t Release() {
-        uint32_t count = refCount_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+    u32 Release() {
+        u32 count = refCount_.fetch_sub(1, std::memory_order_acq_rel) - 1;
         if (count == 0) {
             delete this;
         }
@@ -327,7 +327,7 @@ public:
      * @brief 获取引用计数
      * @return 当前引用计数
      */
-    uint32_t GetRefCount() const {
+    u32 GetRefCount() const {
         return refCount_.load(std::memory_order_relaxed);
     }
     
@@ -345,7 +345,7 @@ protected:
      * @param size 映射大小
      * @return 映射的数据指针
      */
-    virtual void* mapImpl(uint64_t offset, uint64_t size) = 0;
+    virtual void* mapImpl(u64 offset, u64 size) = 0;
     
     /**
      * @brief 取消映射的派生类实现
@@ -359,7 +359,7 @@ protected:
      * @param offset 写入偏移量
      * @return 更新是否成功
      */
-    virtual bool updateDataImpl(const void* data, uint64_t size, uint64_t offset) = 0;
+    virtual bool updateDataImpl(const void* data, u64 size, u64 offset) = 0;
     
     // === 受保护的成员变量 ===
     
@@ -367,7 +367,7 @@ protected:
     ResourceDesc desc_;               ///< 资源描述符
     ResourceHandle handle_;           ///< 资源句柄
     ResourceState state_;             ///< 资源状态
-    std::atomic<uint32_t> refCount_;  ///< 引用计数
+    std::atomic<u32> refCount_;  ///< 引用计数
     void* mappedData_;               ///< 映射的数据指针
     
     /**

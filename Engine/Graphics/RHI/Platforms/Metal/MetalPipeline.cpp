@@ -373,7 +373,7 @@ MTL::RenderPipelineDescriptor* MetalPipeline::CreateRenderPipelineDescriptor(con
     }
 
     // Color Attachments
-    for (uint32_t i = 0; i < desc.renderTargetCount; ++i) {
+    for (u32 i = 0; i < desc.renderTargetCount; ++i) {
         MTL::RenderPipelineColorAttachmentDescriptor* colorDesc = pipelineDesc->colorAttachments()->object(i);
         colorDesc->setPixelFormat(ToMTLPixelFormat(desc.renderTargetFormats[i]));
         

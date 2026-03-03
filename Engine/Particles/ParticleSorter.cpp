@@ -1,7 +1,6 @@
 #include "ParticleSorter.h"
 
 #ifndef DISABLE_PARTICLE_SYSTEM
-
 #include <algorithm>
 #include <cmath>
 
@@ -24,22 +23,22 @@ void particle_sorter::sort_by_distance(
     const math::v3& camera_position)
 {
     if (count == 0 || !particles || !indices) return;
-    
+
     // Build distance-index pairs
-    std::vector<std::pair<f32, u32>> distances;
+    utl::vector<std::pair<f32, u32>> distances;
     distances.reserve(count);
-    
+
     for (u32 i = 0; i < count; ++i) {
         f32 dist = calculate_distance_sq(particles[i], camera_position);
         distances.emplace_back(dist, i);
     }
-    
+
     // Sort back-to-front (descending distance - far objects first)
-    std::sort(distances.begin(), distances.end(), 
+    std::sort(distances.begin(), distances.end(),
         [](const auto& a, const auto& b) {
             return a.first > b.first;  // Greater distance = render first
         });
-    
+
     // Write sorted indices
     for (u32 i = 0; i < count; ++i) {
         indices[i] = distances[i].second;
@@ -53,35 +52,35 @@ void particle_sorter::sort_parallel(
     const math::v3& camera_position)
 {
     if (count == 0 || !particles || !indices) return;
-    
+
     // For small counts, use sequential sort
     if (count < 1000) {
         sort_by_distance(particles, indices, count, camera_position);
         return;
     }
-    
+
     // Parallel distance calculation
-    std::vector<f32> distances(count);
-    
+    utl::vector<f32> distances(count);
+
     // Use ParallelFor for distance calculation
-    auto handle = primal::jobsystem::JobSystem::ParallelFor(count, 
+    auto handle = primal::jobsystem::JobSystem::ParallelFor(count,
         [&](u32 i) {
             distances[i] = calculate_distance_sq(particles[i], camera_position);
         }
     );
-    
+
     primal::jobsystem::JobSystem::Wait(handle);
-    
+
     // Build pairs and sort (sequential for now - could use parallel sort)
-    std::vector<std::pair<f32, u32>> pairs;
+    utl::vector<std::pair<f32, u32>> pairs;
     pairs.reserve(count);
     for (u32 i = 0; i < count; ++i) {
         pairs.emplace_back(distances[i], i);
     }
-    
-    std::sort(pairs.begin(), pairs.end(), 
+
+    std::sort(pairs.begin(), pairs.end(),
         [](const auto& a, const auto& b) { return a.first > b.first; });
-    
+
     for (u32 i = 0; i < count; ++i) {
         indices[i] = pairs[i].second;
     }
@@ -93,52 +92,52 @@ void particle_sorter::sort_in_place(
     const math::v3& camera_position)
 {
     if (count == 0 || !particles) return;
-    
+
     // Calculate distances
-    std::vector<std::pair<f32, u32>> distances;
+    utl::vector<std::pair<f32, u32>> distances;
     distances.reserve(count);
-    
+
     for (u32 i = 0; i < count; ++i) {
         f32 dist = calculate_distance_sq(particles[i], camera_position);
         distances.emplace_back(dist, i);
     }
-    
+
     // Sort back-to-front
-    std::sort(distances.begin(), distances.end(), 
+    std::sort(distances.begin(), distances.end(),
         [](const auto& a, const auto& b) { return a.first > b.first; });
-    
+
     // Create temporary copy and reorder
-    std::vector<particle_data> temp(count);
+    utl::vector<particle_data> temp(count);
     for (u32 i = 0; i < count; ++i) {
         temp[i] = particles[distances[i].second];
     }
-    
+
     // Copy back
     std::copy(temp.begin(), temp.end(), particles);
 }
 
 void particle_sorter::radix_sort(
-    std::vector<std::pair<u32, u32>>& distance_index_pairs,
+    utl::vector<std::pair<u32, u32>>& distance_index_pairs,
     u32 count)
 {
     if (count <= 1) return;
-    
+
     // 11-bit radix (2048 buckets) for better distribution
     constexpr u32 RADIX_BITS = 11;
     constexpr u32 RADIX_SIZE = 1 << RADIX_BITS;
     constexpr u32 RADIX_MASK = RADIX_SIZE - 1;
-    
-    std::vector<std::pair<u32, u32>> temp(count);
-    
+
+    utl::vector<std::pair<u32, u32>> temp(count);
+
     for (u32 shift = 0; shift < 32; shift += RADIX_BITS) {
         u32 count_buckets[RADIX_SIZE] = {0};
-        
+
         // Count occurrences
         for (u32 i = 0; i < count; ++i) {
             u32 bucket = (distance_index_pairs[i].first >> shift) & RADIX_MASK;
             count_buckets[bucket]++;
         }
-        
+
         // Compute prefix sums
         u32 total = 0;
         for (u32 i = 0; i < RADIX_SIZE; ++i) {
@@ -146,13 +145,13 @@ void particle_sorter::radix_sort(
             count_buckets[i] = total;
             total += c;
         }
-        
+
         // Scatter
         for (u32 i = 0; i < count; ++i) {
             u32 bucket = (distance_index_pairs[i].first >> shift) & RADIX_MASK;
             temp[count_buckets[bucket]++] = distance_index_pairs[i];
         }
-        
+
         std::swap(distance_index_pairs, temp);
     }
 }
@@ -162,7 +161,7 @@ void sorted_index_buffer::resize(u32 max_particles) {
     indices_.resize(max_particles);
     distances_.resize(max_particles);
     sorted_indices_.resize(max_particles);
-    
+
     // Initialize identity indices
     for (u32 i = 0; i < max_particles; ++i) {
         indices_[i] = i;
@@ -175,7 +174,7 @@ void sorted_index_buffer::update(
     const math::v3& camera_position)
 {
     if (count == 0 || !particles) return;
-    
+
     // Calculate distances
     for (u32 i = 0; i < count; ++i) {
         const f32 dx = particles[i].position.x - camera_position.x;
@@ -184,13 +183,13 @@ void sorted_index_buffer::update(
         distances_[i] = dx * dx + dy * dy + dz * dz;
         sorted_indices_[i] = i;
     }
-    
+
     // Sort indices by distance (back to front)
     std::sort(sorted_indices_.begin(), sorted_indices_.begin() + count,
         [this](u32 a, u32 b) {
             return distances_[a] > distances_[b];  // Far first
         });
-    
+
     // Copy to output
     std::copy(sorted_indices_.begin(), sorted_indices_.begin() + count, indices_.begin());
 }

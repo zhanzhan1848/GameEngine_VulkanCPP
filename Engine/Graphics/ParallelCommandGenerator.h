@@ -4,7 +4,7 @@
 #include "../JobSystem/JobSystem.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "RenderProxy.h"
-#include <vector>
+#include "Utilities/Vector.h"
 
 namespace primal::graphics {
 
@@ -31,33 +31,28 @@ public:
     // view_matrix: camera view matrix
     // projection_matrix: camera projection matrix
     jobsystem::JobHandle FrustumCullParallel(
-        const std::vector<RenderProxy>& proxies,
-        std::vector<bool>& visibility,
-        const math::m4x4& view_matrix,
-        const math::m4x4& projection_matrix);
+    jobsystem::JobHandle FrustumCullParallel(
+        const utl::vector<RenderProxy>& proxies,
+        utl::vector<bool>& visibility,
     
     // Generate draw commands in parallel
     // proxies: input array of visible render proxies
     // camera_position: camera world position for sorting
-    std::vector<DrawCall> GenerateDrawCallsParallel(
-        const std::vector<RenderProxy>& proxies,
-        const std::vector<bool>& visibility,
-        const math::v3& camera_position);
+    utl::vector<DrawCall> GenerateDrawCallsParallel(
+        const utl::vector<RenderProxy>& proxies,
+        const utl::vector<bool>& visibility,
     
     // Sort draw calls in parallel (for transparent objects)
     // back_to_front: true for back-to-front, false for front-to-back
     void SortDrawCallsParallel(
-        std::vector<DrawCall>& draw_calls,
+        utl::vector<DrawCall>& draw_calls,
         bool back_to_front = true);
     
     // Combined pipeline: cull -> generate -> sort
     void GenerateCommands(
-        const std::vector<RenderProxy>& proxies,
-        std::vector<DrawCall>& out_draw_calls,
-        const math::m4x4& view_matrix,
-        const math::m4x4& projection_matrix,
-        const math::v3& camera_position,
-        bool sort_transparent = true);
+    void GenerateCommands(
+        const utl::vector<RenderProxy>& proxies,
+        utl::vector<DrawCall>& out_draw_calls,
     
 private:
     ParallelCommandGenerator() = default;

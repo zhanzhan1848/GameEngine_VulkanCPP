@@ -26,19 +26,19 @@ public:
                  rhi::ResourceHandle input,
                  rhi::ResourceHandle output,
                  rhi::ResourceHandle temp,
-                 uint32_t width, uint32_t height, uint32_t layers,
-                 uint32_t frameIndex,
+                 u32 width, u32 height, u32 layers,
+                 u32 frameIndex,
                  int radius = 5, float sigma = 2.0f);
 
 private:
     struct BlurParams {
-        uint32_t textureWidth;
-        uint32_t textureHeight;
-        int32_t blurRadius;
+        u32 textureWidth;
+        u32 textureHeight;
+        s32 blurRadius;
         float sigma;
-        uint32_t arrayLayer;
-        uint32_t direction; // 0: Horizontal, 1: Vertical
-        uint32_t padding[2];
+        u32 arrayLayer;
+        u32 direction; // 0: Horizontal, 1: Vertical
+        u32 padding[2];
     };
 
     rhi::RHIDeviceBase* device_ = nullptr;
@@ -49,20 +49,20 @@ private:
     
     // Resource Management
     // We use a ring buffer of descriptor sets to handle dynamic texture bindings
-    static constexpr uint32_t MAX_SETS_PER_FRAME = 128; // Enough for many layers
+    static constexpr u32 MAX_SETS_PER_FRAME = 128; // Enough for many layers
     rhi::DescriptorSetHandle setPool_[rhi::MAX_FRAMES_IN_FLIGHT][MAX_SETS_PER_FRAME];
-    uint32_t currentSetIndex_[rhi::MAX_FRAMES_IN_FLIGHT] = {0};
+    u32 currentSetIndex_[rhi::MAX_FRAMES_IN_FLIGHT] = {0};
     
     // Dynamic Parameter Buffer
     rhi::ResourceHandle paramBuffer_[rhi::MAX_FRAMES_IN_FLIGHT];
     void* paramBufferMapped_[rhi::MAX_FRAMES_IN_FLIGHT];
-    uint32_t paramBufferOffset_[rhi::MAX_FRAMES_IN_FLIGHT] = {0};
-    static constexpr uint32_t MAX_PARAM_BUFFER_SIZE = 1024 * 1024; // 1MB
+    u32 paramBufferOffset_[rhi::MAX_FRAMES_IN_FLIGHT] = {0};
+    static constexpr u32 MAX_PARAM_BUFFER_SIZE = 1024 * 1024; // 1MB
     
-    rhi::DescriptorSetHandle GetDescriptorSet(uint32_t frameIndex, 
+    rhi::DescriptorSetHandle GetDescriptorSet(u32 frameIndex, 
                                             rhi::ResourceHandle input, 
                                             rhi::ResourceHandle output, 
-                                            uint32_t paramOffset);
+                                            u32 paramOffset);
 };
 
 } // namespace primal::graphics

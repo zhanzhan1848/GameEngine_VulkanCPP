@@ -99,7 +99,7 @@ namespace primal::graphics::lighting
                         }
                         
                         // Redistribute existing
-                        std::vector<size_t> old_indices = std::move(curr->probe_indices);
+                        utl::vector<size_t> old_indices = std::move(curr->probe_indices);
                         curr->probe_indices.clear();
                         
                         for (size_t existing_idx : old_indices)
@@ -136,7 +136,7 @@ namespace primal::graphics::lighting
         RecursiveInserter{*this}(node, probe_index, 0);
     }
 
-    void LightProbeManager::QueryProbes(const OctreeNode* node, const math::v3& position, f32 radius, std::vector<size_t>& out_indices) const
+    void LightProbeManager::QueryProbes(const OctreeNode* node, const math::v3& position, f32 radius, utl::vector<size_t>& out_indices) const
     {
         if (!node) return;
 
@@ -170,7 +170,7 @@ namespace primal::graphics::lighting
 
         if (m_probes.empty()) return {};
 
-        std::vector<size_t> candidates;
+        utl::vector<size_t> candidates;
         // Search radius strategy: Start with a reasonable radius.
         // If the scene is large, 20.0 might be too small or too big.
         // For now, hardcode 50.0f to be safe.

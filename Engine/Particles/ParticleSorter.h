@@ -1,11 +1,10 @@
 #pragma once
 #include "Particles/ParticleTypes.h"
 #include "Engine/JobSystem/JobSystem.h"
-#include <vector>
+#include "Utilities/Vector.h"
 #include <functional>
 
 #ifndef DISABLE_PARTICLE_SYSTEM
-
 namespace primal::particles {
 
 // -----------------------------------------------------------------------------
@@ -49,7 +48,7 @@ private:
     
     // Radix sort for GPU-friendly sorting (stable, O(n))
     static void radix_sort(
-        std::vector<std::pair<u32, u32>>& distance_index_pairs,
+        utl::vector<std::pair<u32, u32>>& distance_index_pairs,
         u32 count);
 };
 
@@ -66,9 +65,9 @@ public:
     u32 size() const { return static_cast<u32>(indices_.size()); }
     
 private:
-    std::vector<u32> indices_;
-    std::vector<f32> distances_;
-    std::vector<u32> sorted_indices_;
+    utl::vector<u32> indices_;
+    utl::vector<f32> distances_;
+    utl::vector<u32> sorted_indices_;
 };
 
 } // namespace primal::particles

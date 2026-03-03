@@ -22,7 +22,7 @@ namespace primal::graphics::rhi {
  * @param format 数据格式
  * @return 字节大小
  */
-uint32_t GetFormatSize(DataFormat format) {
+u32 GetFormatSize(DataFormat format) {
     switch (format) {
         case DataFormat::Unknown:
             return 0;
@@ -176,7 +176,7 @@ public:
  * @param alignment 对齐要求
  * @return 对齐后的大小
  */
-uint64_t AlignBufferSize(uint64_t size, uint64_t alignment) {
+u64 AlignBufferSize(u64 size, u64 alignment) {
     if (alignment == 0) return size;
     return (size + alignment - 1) & ~(alignment - 1);
 }
@@ -186,18 +186,18 @@ uint64_t AlignBufferSize(uint64_t size, uint64_t alignment) {
  * @param desc 纹理描述符
  * @return 纹理大小（字节）
  */
-uint64_t CalculateTextureSize(const TextureDesc& desc) {
-    uint64_t size = 0;
+u64 CalculateTextureSize(const TextureDesc& desc) {
+    u64 size = 0;
     
     // 计算单个纹理层的大小
-    uint64_t layerSize = 0;
-    for (uint32_t mip = 0; mip < desc.mipLevels; ++mip) {
-        uint32_t width = std::max(1u, desc.size.x >> mip);
-        uint32_t height = std::max(1u, desc.size.y >> mip);
-        uint32_t depth = std::max(1u, desc.size.z >> mip);
+    u64 layerSize = 0;
+    for (u32 mip = 0; mip < desc.mipLevels; ++mip) {
+        u32 width = std::max(1u, desc.size.x >> mip);
+        u32 height = std::max(1u, desc.size.y >> mip);
+        u32 depth = std::max(1u, desc.size.z >> mip);
         
-        uint64_t pixelSize = GetFormatSize(desc.format);
-        uint64_t mipSize = static_cast<uint64_t>(width) * height * depth * pixelSize;
+        u64 pixelSize = GetFormatSize(desc.format);
+        u64 mipSize = static_cast<u64>(width) * height * depth * pixelSize;
         layerSize += mipSize;
     }
     
@@ -212,21 +212,21 @@ uint64_t CalculateTextureSize(const TextureDesc& desc) {
  * @param desc 缓冲区描述符
  * @return 缓冲区大小（字节）
  */
-uint64_t CalculateBufferSize(const BufferDesc& desc) {
-    uint64_t size = 0;
+u64 CalculateBufferSize(const BufferDesc& desc) {
+    u64 size = 0;
     
     switch (desc.type) {
         case BufferType::Vertex:
-            size = static_cast<uint64_t>(desc.vertex.vertexCount) * desc.vertex.vertexStride;
+            size = static_cast<u64>(desc.vertex.vertexCount) * desc.vertex.vertexStride;
             break;
         case BufferType::Index:
-            size = static_cast<uint64_t>(desc.index.indexCount) * GetFormatSize(desc.index.format);
+            size = static_cast<u64>(desc.index.indexCount) * GetFormatSize(desc.index.format);
             break;
         case BufferType::Constant:
             size = desc.size;
             break;
         case BufferType::Structured:
-            size = static_cast<uint64_t>(desc.structured.elementCount) * desc.structured.elementStride;
+            size = static_cast<u64>(desc.structured.elementCount) * desc.structured.elementStride;
             break;
         case BufferType::Raw:
             size = desc.size;
@@ -347,13 +347,13 @@ bool ValidateBufferDesc(const BufferDesc& desc) {
 bool ValidateTextureDesc(const TextureDesc& desc) {
     // 基础验证 - 纹理的ResourceUsage根据TextureUsage推断
     ResourceUsage usage = ResourceUsage::None;
-    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(TextureUsage::ShaderResource)) {
+    if (static_cast<u32>(desc.usage) & static_cast<u32>(TextureUsage::ShaderResource)) {
         usage = usage | ResourceUsage::ShaderResource;
     }
-    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(TextureUsage::RenderTarget)) {
+    if (static_cast<u32>(desc.usage) & static_cast<u32>(TextureUsage::RenderTarget)) {
         usage = usage | ResourceUsage::RenderTarget;
     }
-    if (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(TextureUsage::DepthStencil)) {
+    if (static_cast<u32>(desc.usage) & static_cast<u32>(TextureUsage::DepthStencil)) {
         usage = usage | ResourceUsage::DepthStencil;
     }
     
@@ -479,7 +479,7 @@ void PrintResourceInfo(const RHIResource* resource, bool verbose) {
     printf("  Name: %s\n", resource->GetName());
     
     if (verbose) {
-        printf("  Usage: 0x%08x\n", static_cast<uint32_t>(resource->GetUsage()));
+        printf("  Usage: 0x%08x\n", static_cast<u32>(resource->GetUsage()));
         printf("  IsValid: %s\n", resource->IsValid() ? "true" : "false");
         printf("  CanMap: %s\n", resource->CanMap() ? "true" : "false");
         printf("  CanUpdate: %s\n", resource->CanUpdate() ? "true" : "false");

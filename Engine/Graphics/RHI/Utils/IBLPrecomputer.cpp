@@ -8,18 +8,18 @@
 #include <fstream>
 #include <iostream>
 #include <cmath>
-#include <vector>
+#include "Utilities/Vector.h"
 #include <set>
 
 namespace primal::graphics::rhi {
 
 struct IrradianceParams {
-    uint32_t faceIndex;
+    u32 faceIndex;
     float padding[3];
 };
 
 struct PrefilterParams {
-    uint32_t faceIndex;
+    u32 faceIndex;
     float roughness;
     float padding[2];
 };
@@ -46,14 +46,13 @@ namespace {
         }
         includedFiles.insert(filename);
 
-        std::vector<std::string> searchPaths = {
-            "shaders/",
-            "Engine/Graphics/RHI/Shaders/",
-            "../Engine/Graphics/RHI/Shaders/",
-            "../../Engine/Graphics/RHI/Shaders/",
-            "../../../Engine/Graphics/RHI/Shaders/",
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/"
-        };
+        utl::vector<std::string> searchPaths;
+        searchPaths.push_back("shaders/");
+        searchPaths.push_back("Engine/Graphics/RHI/Shaders/");
+        searchPaths.push_back("../Engine/Graphics/RHI/Shaders/");
+        searchPaths.push_back("../../Engine/Graphics/RHI/Shaders/");
+        searchPaths.push_back("../../../Engine/Graphics/RHI/Shaders/");
+        searchPaths.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/");
 
         std::string path;
         std::ifstream file;
@@ -118,8 +117,8 @@ bool IBLPrecomputer::CreatePipelines() {
     // 1. Create DescriptorSetLayouts
     
     // Irradiance & Prefilter share similar layout
-    std::vector<DescriptorSetLayoutBinding> commonBindings(4);
-    
+    utl::vector<DescriptorSetLayoutBinding> commonBindings;
+    commonBindings.resize(4);
     // Binding 0: Input EnvMap
     commonBindings[0].binding = 0;
     commonBindings[0].descriptorType = DescriptorType::SampledImage;
@@ -145,21 +144,22 @@ bool IBLPrecomputer::CreatePipelines() {
     commonBindings[3].stageFlags = ShaderStage::Compute;
 
     DescriptorSetLayoutDesc commonDesc;
-    commonDesc.bindingCount = static_cast<uint32_t>(commonBindings.size());
+    commonDesc.bindingCount = static_cast<u32>(commonBindings.size());
     commonDesc.bindings = commonBindings.data();
 
     irradianceDescLayout_ = device_->CreateDescriptorSetLayout(commonDesc);
     prefilterDescLayout_ = device_->CreateDescriptorSetLayout(commonDesc);
     
     // BRDF Layout
-    std::vector<DescriptorSetLayoutBinding> brdfBindings(1);
+    utl::vector<DescriptorSetLayoutBinding> brdfBindings;
+    brdfBindings.resize(1);
     brdfBindings[0].binding = 0;
     brdfBindings[0].descriptorType = DescriptorType::StorageImage;
     brdfBindings[0].descriptorCount = 1;
     brdfBindings[0].stageFlags = ShaderStage::Compute;
     
     DescriptorSetLayoutDesc brdfDesc;
-    brdfDesc.bindingCount = static_cast<uint32_t>(brdfBindings.size());
+    brdfDesc.bindingCount = static_cast<u32>(brdfBindings.size());
     brdfDesc.bindings = brdfBindings.data();
     
     brdfDescLayout_ = device_->CreateDescriptorSetLayout(brdfDesc);
@@ -172,21 +172,21 @@ bool IBLPrecomputer::CreatePipelines() {
     }
 
     // 2. Create PipelineLayouts
-    std::vector<DescriptorSetLayoutHandle> irradianceSetLayouts = {irradianceDescLayout_};
+    utl::vector<DescriptorSetLayoutHandle> irradianceSetLayouts; irradianceSetLayouts.push_back(irradianceDescLayout_);
     PipelineLayoutDesc irradiancePipeLayoutDesc;
-    irradiancePipeLayoutDesc.setLayoutCount = static_cast<uint32_t>(irradianceSetLayouts.size());
+    irradiancePipeLayoutDesc.setLayoutCount = static_cast<u32>(irradianceSetLayouts.size());
     irradiancePipeLayoutDesc.setLayouts = irradianceSetLayouts.data();
     irradiancePipelineLayout_ = device_->CreatePipelineLayout(irradiancePipeLayoutDesc);
 
-    std::vector<DescriptorSetLayoutHandle> prefilterSetLayouts = {prefilterDescLayout_};
+    utl::vector<DescriptorSetLayoutHandle> prefilterSetLayouts; prefilterSetLayouts.push_back(prefilterDescLayout_);
     PipelineLayoutDesc prefilterPipeLayoutDesc;
-    prefilterPipeLayoutDesc.setLayoutCount = static_cast<uint32_t>(prefilterSetLayouts.size());
+    prefilterPipeLayoutDesc.setLayoutCount = static_cast<u32>(prefilterSetLayouts.size());
     prefilterPipeLayoutDesc.setLayouts = prefilterSetLayouts.data();
     prefilterPipelineLayout_ = device_->CreatePipelineLayout(prefilterPipeLayoutDesc);
 
-    std::vector<DescriptorSetLayoutHandle> brdfSetLayouts = {brdfDescLayout_};
+    utl::vector<DescriptorSetLayoutHandle> brdfSetLayouts; brdfSetLayouts.push_back(brdfDescLayout_);
     PipelineLayoutDesc brdfPipeLayoutDesc;
-    brdfPipeLayoutDesc.setLayoutCount = static_cast<uint32_t>(brdfSetLayouts.size());
+    brdfPipeLayoutDesc.setLayoutCount = static_cast<u32>(brdfSetLayouts.size());
     brdfPipeLayoutDesc.setLayouts = brdfSetLayouts.data();
     brdfPipelineLayout_ = device_->CreatePipelineLayout(brdfPipeLayoutDesc);
 
@@ -228,7 +228,7 @@ void IBLPrecomputer::DestroyPipelines() {
     // Assuming device shutdown handles it for now as per previous context.
 }
 
-ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, uint32_t outputSize) {
+ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, u32 outputSize) {
     if (irradiancePipeline_ == handles::INVALID_PIPELINE) return handles::INVALID_RESOURCE;
 
     // 1. Create Output Cubemap
@@ -263,12 +263,12 @@ ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, uint3
     cmd->BindComputePipeline(irradiancePipeline_);
 
     // Keep track of temporary resources to destroy later
-    std::vector<ResourceHandle> tempTextures;
-    std::vector<ResourceHandle> tempBuffers;
-    std::vector<DescriptorSetHandle> tempSets;
+    utl::vector<ResourceHandle> tempTextures;
+    utl::vector<ResourceHandle> tempBuffers;
+    utl::vector<DescriptorSetHandle> tempSets;
 
     // 4. Process each face
-    for (uint32_t face = 0; face < 6; ++face) {
+    for (u32 face = 0; face < 6; ++face) {
         // Create Face View
         TextureViewDesc viewDesc;
         viewDesc.texture = outputTexture;
@@ -288,7 +288,7 @@ ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, uint3
             BufferType::Constant,
             GPUMemoryUsage::Dynamic,
             GPUMemoryUsage::Dynamic,
-            static_cast<uint32_t>(BufferUsageFlags::Uniform)
+            static_cast<u32>(BufferUsageFlags::Uniform)
         };
         ResourceHandle paramBuffer = device_->CreateBuffer(bufDesc);
         tempBuffers.push_back(paramBuffer);
@@ -357,12 +357,16 @@ ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, uint3
         write3.descriptorCount = 1;
         write3.bufferInfo = &bufInfo;
         
-        std::vector<WriteDescriptorSet> writes = {write0, write1, write2, write3};
+        utl::vector<WriteDescriptorSet> writes;
+        writes.push_back(write0);
+        writes.push_back(write1);
+        writes.push_back(write2);
+        writes.push_back(write3);
         device_->UpdateDescriptorSets(writes.size(), writes.data());
         
         cmd->BindDescriptorSets(PipelineBindPoint::Compute, irradiancePipelineLayout_, 0, 1, &ds, 0, nullptr);
         
-        uint32_t groups = (outputSize + 7) / 8;
+        u32 groups = (outputSize + 7) / 8;
         cmd->Dispatch(groups, groups, 1);
     }
     
@@ -384,10 +388,10 @@ ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, uint3
     return outputTexture;
 }
 
-ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle envMap, uint32_t outputSize) {
+ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle envMap, u32 outputSize) {
     if (prefilterPipeline_ == handles::INVALID_PIPELINE) return handles::INVALID_RESOURCE;
 
-    uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(outputSize))) + 1;
+    u32 mipLevels = static_cast<u32>(std::floor(std::log2(outputSize))) + 1;
 
     TextureDesc desc;
     desc.type = TextureType::TextureCube;
@@ -418,17 +422,17 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
     cmd->Begin();
     cmd->BindComputePipeline(prefilterPipeline_);
     
-    std::vector<ResourceHandle> tempTextures;
-    std::vector<ResourceHandle> tempBuffers;
-    std::vector<DescriptorSetHandle> tempSets;
+    utl::vector<ResourceHandle> tempTextures;
+    utl::vector<ResourceHandle> tempBuffers;
+    utl::vector<DescriptorSetHandle> tempSets;
 
-    for (uint32_t mip = 0; mip < mipLevels; ++mip) {
-        uint32_t mipSize = outputSize >> mip;
+    for (u32 mip = 0; mip < mipLevels; ++mip) {
+        u32 mipSize = outputSize >> mip;
         if (mipSize == 0) mipSize = 1;
         
         float roughness = (float)mip / (float)(mipLevels - 1);
         
-        for (uint32_t face = 0; face < 6; ++face) {
+        for (u32 face = 0; face < 6; ++face) {
             TextureViewDesc viewDesc;
             viewDesc.texture = outputTexture;
             viewDesc.viewType = TextureType::Texture2D;
@@ -445,7 +449,7 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
                 BufferType::Constant,
                 GPUMemoryUsage::Dynamic,
                 GPUMemoryUsage::Dynamic,
-                static_cast<uint32_t>(BufferUsageFlags::Uniform)
+                static_cast<u32>(BufferUsageFlags::Uniform)
             };
             ResourceHandle paramBuffer = device_->CreateBuffer(bufDesc);
             tempBuffers.push_back(paramBuffer);
@@ -512,12 +516,16 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
             write3.descriptorCount = 1;
             write3.bufferInfo = &bufInfo;
             
-            std::vector<WriteDescriptorSet> writes = {write0, write1, write2, write3};
+            utl::vector<WriteDescriptorSet> writes;
+            writes.push_back(write0);
+            writes.push_back(write1);
+            writes.push_back(write2);
+            writes.push_back(write3);
             device_->UpdateDescriptorSets(writes.size(), writes.data());
             
             cmd->BindDescriptorSets(PipelineBindPoint::Compute, prefilterPipelineLayout_, 0, 1, &ds, 0, nullptr);
             
-            uint32_t groups = (mipSize + 7) / 8;
+            u32 groups = (mipSize + 7) / 8;
             cmd->Dispatch(groups, groups, 1);
         }
     }
@@ -540,7 +548,7 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
     return outputTexture;
 }
 
-ResourceHandle IBLPrecomputer::ComputeBRDFIntegrationMap(uint32_t outputSize) {
+ResourceHandle IBLPrecomputer::ComputeBRDFIntegrationMap(u32 outputSize) {
     if (brdfPipeline_ == handles::INVALID_PIPELINE) return handles::INVALID_RESOURCE;
 
     TextureDesc desc;
@@ -583,7 +591,7 @@ ResourceHandle IBLPrecomputer::ComputeBRDFIntegrationMap(uint32_t outputSize) {
     
     cmd->BindDescriptorSets(PipelineBindPoint::Compute, brdfPipelineLayout_, 0, 1, &ds, 0, nullptr);
     
-    uint32_t groups = (outputSize + 7) / 8;
+    u32 groups = (outputSize + 7) / 8;
     cmd->Dispatch(groups, groups, 1);
     
     cmd->End();

@@ -39,12 +39,12 @@ public:
     /**
      * @brief 获取当前信号值
      */
-    uint64_t GetValue() const;
+    u64 GetValue() const;
 
     /**
      * @brief 设置信号值 (CPU 端)
      */
-    void SetValue(uint64_t value);
+    void SetValue(u64 value);
 
     /**
      * @brief 释放原生事件的所有权

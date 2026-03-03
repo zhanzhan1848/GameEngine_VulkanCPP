@@ -1,12 +1,12 @@
 #include "TAAPass.h"
 #include <fstream>
 #include <iostream>
-#include <vector>
+
 
 namespace primal::graphics {
 
 TAAPass::TAAPass() {
-    for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         descriptorSets_[i] = rhi::handles::INVALID_DESCRIPTOR_SET;
         uniformBuffers_[i] = rhi::handles::INVALID_RESOURCE;
         uniformBuffersMapped_[i] = nullptr;
@@ -17,12 +17,12 @@ TAAPass::~TAAPass() {
     Shutdown();
 }
 
-bool TAAPass::Initialize(rhi::RHIDeviceBase* device, uint32_t width, uint32_t height, rhi::DataFormat outputFormat) {
+bool TAAPass::Initialize(rhi::RHIDeviceBase* device, u32 width, u32 height, rhi::DataFormat outputFormat) {
     device_ = device;
     if (!device_) return false;
 
     // 1. Create Descriptor Set Layout
-    std::vector<rhi::DescriptorSetLayoutBinding> bindings;
+    utl::vector<rhi::DescriptorSetLayoutBinding> bindings;
     // Binding 0: Color Texture
     {
         rhi::DescriptorSetLayoutBinding b;
@@ -62,7 +62,7 @@ bool TAAPass::Initialize(rhi::RHIDeviceBase* device, uint32_t width, uint32_t he
     
     rhi::DescriptorSetLayoutDesc dslDesc;
     dslDesc.bindings = bindings.data();
-    dslDesc.bindingCount = (uint32_t)bindings.size();
+    dslDesc.bindingCount = (u32)bindings.size();
     
     descriptorSetLayout_ = device_->CreateDescriptorSetLayout(dslDesc);
 
@@ -82,7 +82,7 @@ bool TAAPass::Initialize(rhi::RHIDeviceBase* device, uint32_t width, uint32_t he
         if (!file.is_open()) return rhi::handles::INVALID_SHADER;
         
         size_t fileSize = (size_t)file.tellg();
-        std::vector<char> buffer(fileSize + 1);
+        utl::vector<char> buffer(fileSize + 1);
         file.seekg(0);
         file.read(buffer.data(), fileSize);
         buffer[fileSize] = '\0';
@@ -117,7 +117,7 @@ bool TAAPass::Initialize(rhi::RHIDeviceBase* device, uint32_t width, uint32_t he
     pipeline_ = device_->CreateGraphicsPipeline(gpDesc);
 
     // 5. Create Per-Frame Resources
-    for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         rhi::DescriptorSetDesc desc;
         desc.layout = descriptorSetLayout_;
         descriptorSets_[i] = device_->CreateDescriptorSet(desc);
@@ -127,7 +127,7 @@ bool TAAPass::Initialize(rhi::RHIDeviceBase* device, uint32_t width, uint32_t he
             rhi::BufferType::Constant,
             rhi::GPUMemoryUsage::Dynamic,
             rhi::GPUMemoryUsage::Dynamic,
-            (uint32_t)rhi::BufferUsageFlags::Uniform
+            (u32)rhi::BufferUsageFlags::Uniform
         };
         uniformBuffers_[i] = device_->CreateBuffer(bufDesc);
         
@@ -146,8 +146,8 @@ void TAAPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
                       rhi::ResourceHandle historyInput,
                       rhi::ResourceHandle velocityInput,
                       rhi::ResourceHandle output,
-                      uint32_t width, uint32_t height,
-                      uint32_t frameIndex,
+                      u32 width, u32 height,
+                      u32 frameIndex,
                       float jitterX, float jitterY,
                       float prevJitterX, float prevJitterY) {
     
@@ -173,7 +173,7 @@ void TAAPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
     }
     
     // Update Descriptor Set
-    std::vector<rhi::WriteDescriptorSet> writes;
+    utl::vector<rhi::WriteDescriptorSet> writes;
     
     // 0: Color
     rhi::DescriptorImageInfo colorInfo;
@@ -228,7 +228,7 @@ void TAAPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
     bufferWrite.bufferInfo = &bufferInfo;
     writes.push_back(bufferWrite);
     
-    device_->UpdateDescriptorSets((uint32_t)writes.size(), writes.data());
+    device_->UpdateDescriptorSets((u32)writes.size(), writes.data());
     
     
     // Begin Render Pass - REMOVED (RenderGraph handles this)

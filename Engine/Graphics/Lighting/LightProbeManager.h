@@ -11,7 +11,6 @@
 
 #include "Utilities/SphericalHarmonics.h"
 #include "Utilities/MathTypes.h"
-#include <vector>
 #include <memory>
 
 namespace primal::graphics::lighting
@@ -35,7 +34,7 @@ namespace primal::graphics::lighting
     {
         math::v3 center;
         f32 half_size; // 半边长
-        std::vector<size_t> probe_indices;
+        utl::vector<size_t> probe_indices;
         std::unique_ptr<OctreeNode> children[8];
         bool is_leaf{ true };
 
@@ -73,7 +72,7 @@ namespace primal::graphics::lighting
         /**
          * @brief 获取所有 Probes (只读)
          */
-        const std::vector<LightProbe>& GetProbes() const { return m_probes; }
+        const utl::vector<LightProbe>& GetProbes() const { return m_probes; }
 
         /**
          * @brief 构建 Octree 加速结构
@@ -89,11 +88,11 @@ namespace primal::graphics::lighting
         math::sh::SH9Color GetInterpolatedSH(const math::v3& position);
 
     private:
-        std::vector<LightProbe> m_probes;
+        utl::vector<LightProbe> m_probes;
         std::unique_ptr<OctreeNode> m_root;
         bool m_dirty{ false };
 
         void InsertProbe(OctreeNode* node, size_t probe_index);
-        void QueryProbes(const OctreeNode* node, const math::v3& position, f32 radius, std::vector<size_t>& out_indices) const;
+        void QueryProbes(const OctreeNode* node, const math::v3& position, f32 radius, utl::vector<size_t>& out_indices) const;
     };
 }

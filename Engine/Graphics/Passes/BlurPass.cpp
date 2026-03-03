@@ -1,6 +1,6 @@
 #include "Graphics/Passes/BlurPass.h"
 #include <fstream>
-#include <vector>
+#include <iostream>
 #include <iostream>
 
 namespace primal::graphics {
@@ -29,7 +29,7 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     }
     
     size_t fileSize = (size_t)file.tellg();
-    std::vector<char> buffer(fileSize + 1);
+    utl::vector<char> buffer(fileSize + 1);
     file.seekg(0);
     file.read(buffer.data(), fileSize);
     buffer[fileSize] = '\0';
@@ -42,7 +42,7 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     }
     
     // 2. Create DescriptorSetLayout
-    std::vector<rhi::DescriptorSetLayoutBinding> bindings;
+    utl::vector<rhi::DescriptorSetLayoutBinding> bindings;
     // Binding 0: Input Texture (Read)
     {
         rhi::DescriptorSetLayoutBinding b;
@@ -73,7 +73,7 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     
     rhi::DescriptorSetLayoutDesc dslDesc;
     dslDesc.bindings = bindings.data();
-    dslDesc.bindingCount = (uint32_t)bindings.size();
+    dslDesc.bindingCount = (u32)bindings.size();
     
     descriptorSetLayout_ = device_->CreateDescriptorSetLayout(dslDesc);
 
@@ -107,16 +107,16 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
         0
     };
     
-    for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         paramBuffer_[i] = device_->CreateBuffer(bufferDesc);
         paramBufferMapped_[i] = device_->MapBuffer(paramBuffer_[i]);
         
         // Init Descriptor Pool
-        for (uint32_t j = 0; j < MAX_SETS_PER_FRAME; ++j) {
+        for (u32 j = 0; j < MAX_SETS_PER_FRAME; ++j) {
             rhi::DescriptorSetDesc dsDesc;
             dsDesc.layout = descriptorSetLayout_;
             setPool_[i][j] = device_->CreateDescriptorSet(dsDesc);
-            // std::cout << "BlurPass: DescriptorSet created [" << i << "][" << j << "]: " << (uint64_t)setPool_[i][j] << std::endl;
+            // std::cout << "BlurPass: DescriptorSet created [" << i << "][" << j << "]: " << (u64)setPool_[i][j] << std::endl;
         }
     }
     
@@ -126,12 +126,12 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
 void BlurPass::Shutdown() {
     if (!device_) return;
     
-    for (uint32_t i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         if (paramBuffer_[i] != rhi::handles::INVALID_RESOURCE) {
             device_->UnmapBuffer(paramBuffer_[i]);
             device_->DestroyBuffer(paramBuffer_[i]);
         }
-        for (uint32_t j = 0; j < MAX_SETS_PER_FRAME; ++j) {
+        for (u32 j = 0; j < MAX_SETS_PER_FRAME; ++j) {
             if (setPool_[i][j] != rhi::handles::INVALID_RESOURCE) {
                 device_->DestroyDescriptorSet(setPool_[i][j]);
             }
@@ -154,11 +154,11 @@ void BlurPass::Shutdown() {
     device_ = nullptr;
 }
 
-rhi::DescriptorSetHandle BlurPass::GetDescriptorSet(uint32_t frameIndex, 
+rhi::DescriptorSetHandle BlurPass::GetDescriptorSet(u32 frameIndex, 
                                                    rhi::ResourceHandle input, 
                                                    rhi::ResourceHandle output, 
-                                                   uint32_t paramOffset) {
-    uint32_t index = currentSetIndex_[frameIndex]++;
+                                                   u32 paramOffset) {
+    u32 index = currentSetIndex_[frameIndex]++;
     if (index >= MAX_SETS_PER_FRAME) {
         // Simple wrap around strategy
         index = 0;
@@ -168,7 +168,7 @@ rhi::DescriptorSetHandle BlurPass::GetDescriptorSet(uint32_t frameIndex,
     rhi::DescriptorSetHandle set = setPool_[frameIndex][index];
     
     // Update Descriptor Set
-    std::vector<rhi::WriteDescriptorSet> writes;
+    utl::vector<rhi::WriteDescriptorSet> writes;
     
     // Input
     rhi::DescriptorImageInfo inputInfo;
@@ -210,7 +210,7 @@ rhi::DescriptorSetHandle BlurPass::GetDescriptorSet(uint32_t frameIndex,
     paramWrite.bufferInfo = &bufferInfo;
     writes.push_back(paramWrite);
     
-    device_->UpdateDescriptorSets((uint32_t)writes.size(), writes.data());
+    device_->UpdateDescriptorSets((u32)writes.size(), writes.data());
     
     return set;
 }
@@ -219,11 +219,11 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
                        rhi::ResourceHandle input,
                        rhi::ResourceHandle output,
                        rhi::ResourceHandle temp,
-                       uint32_t width, uint32_t height, uint32_t layers,
-                       uint32_t frameIndex,
+                       u32 width, u32 height, u32 layers,
+                       u32 frameIndex,
                        int radius, float sigma) {
     
-    static uint32_t lastFrameIndex = -1;
+    static u32 lastFrameIndex = -1;
     if (lastFrameIndex != frameIndex) {
         paramBufferOffset_[frameIndex] = 0;
         currentSetIndex_[frameIndex] = 0;
@@ -243,7 +243,7 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
     
     // Pass 1: Horizontal (Input -> Temp)
     {
-        uint32_t offset = paramBufferOffset_[frameIndex];
+        u32 offset = paramBufferOffset_[frameIndex];
         offset = (offset + 255) & ~255; // Alignment
         
         if (offset + sizeof(BlurParams) > MAX_PARAM_BUFFER_SIZE) {
@@ -251,7 +251,7 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
             return;
         }
         
-        BlurParams* params = (BlurParams*)((uint8_t*)paramBufferMapped_[frameIndex] + offset);
+        BlurParams* params = (BlurParams*)((u8*)paramBufferMapped_[frameIndex] + offset);
         params->textureWidth = width;
         params->textureHeight = height;
         params->blurRadius = radius;
@@ -264,13 +264,13 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
         rhi::DescriptorSetHandle set = GetDescriptorSet(frameIndex, input, temp, offset);
         cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, pipelineLayout_, 0, 1, &set, 0, nullptr);
         
-        uint32_t groupX = (width + 8 - 1) / 8;
-        uint32_t groupY = (height + 8 - 1) / 8;
+        u32 groupX = (width + 8 - 1) / 8;
+        u32 groupY = (height + 8 - 1) / 8;
         cmdBuffer->Dispatch(groupX, groupY, layers);
     }
     
     // Barrier: Wait for Temp write to finish AND Prepare Output for writing
-    std::vector<rhi::ResourceBarrier> barriers;
+    utl::vector<rhi::ResourceBarrier> barriers;
     
     // Temp: UAV -> SRV
     rhi::ResourceBarrier tempReadBarrier;
@@ -289,18 +289,18 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
     outWriteBarrier.subresource = rhi::RHI_ALL_SUBRESOURCES;
     barriers.push_back(outWriteBarrier);
 
-    cmdBuffer->InsertBarrier(barriers.data(), (uint32_t)barriers.size());
+    cmdBuffer->InsertBarrier(barriers.data(), (u32)barriers.size());
     
     // Pass 2: Vertical (Temp -> Output)
     {
-        uint32_t offset = paramBufferOffset_[frameIndex];
+        u32 offset = paramBufferOffset_[frameIndex];
         offset = (offset + 255) & ~255;
         
         if (offset + sizeof(BlurParams) > MAX_PARAM_BUFFER_SIZE) {
             return;
         }
         
-        BlurParams* params = (BlurParams*)((uint8_t*)paramBufferMapped_[frameIndex] + offset);
+        BlurParams* params = (BlurParams*)((u8*)paramBufferMapped_[frameIndex] + offset);
         params->textureWidth = width;
         params->textureHeight = height;
         params->blurRadius = radius;
@@ -313,8 +313,8 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
         rhi::DescriptorSetHandle set = GetDescriptorSet(frameIndex, temp, output, offset);
         cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, pipelineLayout_, 0, 1, &set, 0, nullptr);
         
-        uint32_t groupX = (width + 8 - 1) / 8;
-        uint32_t groupY = (height + 8 - 1) / 8;
+        u32 groupX = (width + 8 - 1) / 8;
+        u32 groupY = (height + 8 - 1) / 8;
         cmdBuffer->Dispatch(groupX, groupY, layers);
     }
     
