@@ -28,45 +28,56 @@ set(PROJECTION_SOURCES
     NormalMapIdentification.h
 )
 
+set(MESHOPT_DIR "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src")
+
+# 检查meshoptimizer是否存在
+if(NOT EXISTS "${MESHOPT_DIR}/meshoptimizer.h")
+    message(FATAL_ERROR "meshoptimizer submodule not found at ${MESHOPT_DIR}. Please run 'git submodule update --init --recursive'.")
+endif()
+
 set(MESHOPT_SOURCES
-    meshoptimizer/meshoptimizer.h
-    meshoptimizer/allocator.cpp
-    meshoptimizer/clusterizer.cpp
-    meshoptimizer/indexcodec.cpp
-    meshoptimizer/indexgenerator.cpp
-    meshoptimizer/overdrawanalyzer.cpp
-    meshoptimizer/overdrawoptimizer.cpp
-    meshoptimizer/partition.cpp
-    meshoptimizer/simplifier.cpp
-    meshoptimizer/quantization.cpp
-    meshoptimizer/spatialorder.cpp
-    meshoptimizer/stripifier.cpp
-    meshoptimizer/vcacheoptimizer.cpp
-    meshoptimizer/vcacheanalyzer.cpp
-    meshoptimizer/vertexcodec.cpp
-    meshoptimizer/vertexfilter.cpp
-    meshoptimizer/vfetchoptimizer.cpp
-    meshoptimizer/vfetchanalyzer.cpp
+    ${MESHOPT_DIR}/meshoptimizer.h
+    ${MESHOPT_DIR}/allocator.cpp
+    ${MESHOPT_DIR}/clusterizer.cpp
+    ${MESHOPT_DIR}/indexanalyzer.cpp
+    ${MESHOPT_DIR}/indexcodec.cpp
+    ${MESHOPT_DIR}/indexgenerator.cpp
+    ${MESHOPT_DIR}/overdrawoptimizer.cpp
+    ${MESHOPT_DIR}/partition.cpp
+    ${MESHOPT_DIR}/quantization.cpp
+    ${MESHOPT_DIR}/rasterizer.cpp
+    ${MESHOPT_DIR}/simplifier.cpp
+    ${MESHOPT_DIR}/spatialorder.cpp
+    ${MESHOPT_DIR}/stripifier.cpp
+    ${MESHOPT_DIR}/vcacheoptimizer.cpp
+    ${MESHOPT_DIR}/vertexcodec.cpp
+    ${MESHOPT_DIR}/vertexfilter.cpp
+    ${MESHOPT_DIR}/vfetchoptimizer.cpp
+    ${MESHOPT_DIR}/meshletutils.cpp
+    ${MESHOPT_DIR}/meshletcodec.cpp
 )
 
-set(SOURCES
+set(CONTENT_TOOLS_SOURCES
     ${PROJECTION_SOURCES}
     ${MESHOPT_SOURCES}
 )
+
+# 调试信息
+message(STATUS "ContentTools Sources: ${CONTENT_TOOLS_SOURCES}")
 
 # 添加头文件目录
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
-    ${CMAKE_CURRENT_SOURCE_DIR}/meshoptimizer
+    ${MESHOPT_DIR}
     ${CMAKE_SOURCE_DIR}/OSAPI/MAC/
     ${MACOSX_PREFIX}/usr/include
     ${MACOSX_PREFIX}/System/Library/Frameworks
 )
 
 # 创建库
-add_library(${PROJECT_NAME} SHARED ${SOURCES})
+add_library(${PROJECT_NAME} SHARED ${CONTENT_TOOLS_SOURCES})
 
 # 平台特定设置
 if(WIN32)
@@ -98,14 +109,38 @@ elseif(APPLE)
     # 查找必要的框架
     find_library(FOUNDATION_LIBRARY Foundation)
     find_library(COCOA_LIBRARY Cocoa)
+
+    # 动态查找 FBX SDK 库
+    find_library(FBX_LIB_DEBUG
+        NAMES fbxsdk
+        HINTS ${FBX_SDK_ROOT}/lib
+        PATH_SUFFIXES debug debug
+        NO_DEFAULT_PATH
+    )
+    
+    find_library(FBX_LIB_RELEASE
+        NAMES fbxsdk
+        HINTS ${FBX_SDK_ROOT}/lib
+        PATH_SUFFIXES release release
+        NO_DEFAULT_PATH
+    )
+
+    if (NOT FBX_LIB_DEBUG OR NOT FBX_LIB_RELEASE)
+        message(FATAL_ERROR "Could not find FBX SDK libraries in ${FBX_SDK_ROOT}/lib. Checked debug/clang/debug and release/clang/release.")
+    endif()
+
+    # 链接 FBX SDK
+    if(FBX_SDK_FOUND)
+        target_link_libraries(${PROJECT_NAME} PRIVATE fbxsdk)
+    endif()
     find_library(METAL_LIBRARY Metal)
     find_library(METALKIT_LIBRARY MetalKit)
     find_library(QUARTZ_CORE_LIBRARY QuartzCore)
 
     target_link_libraries(${PROJECT_NAME} 
         PRIVATE 
-        debug ${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib
-        optimized ${FBX_SDK_ROOT}/lib/clang/release/libfbxsdk.dylib
+        debug ${FBX_LIB_DEBUG}
+        optimized ${FBX_LIB_RELEASE}
         ${FOUNDATION_LIBRARY}
         ${COCOA_LIBRARY}
         ${METAL_LIBRARY}
@@ -164,7 +199,26 @@ target_link_options(${PROJECT_NAME} PRIVATE
 
 # 安装目标
 install(TARGETS ${PROJECT_NAME}
+    RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
-    RUNTIME DESTINATION bin
 )
+
+# CLI Tool for converting FBX to intermediate binary format
+if(APPLE OR UNIX)
+    add_executable(ContentToolsCLI main.cpp)
+    
+    target_include_directories(ContentToolsCLI PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${MESHOPT_DIR}
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC/
+    )
+
+    target_link_libraries(ContentToolsCLI PRIVATE ${PROJECT_NAME})
+    
+    if(APPLE)
+        target_compile_options(ContentToolsCLI PRIVATE -std=c++17 -stdlib=libc++)
+    endif()
+endif()

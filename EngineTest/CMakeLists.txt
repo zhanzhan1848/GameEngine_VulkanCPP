@@ -11,191 +11,39 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++17")
 set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -std=c++17")
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
 
-# 源文件列表
-if(WIN32)
-    set(SOURCE_FILES
-        "Lights.cpp"
-        "Main.cpp"
-        "RenderItem.cpp"
-        "Scripts.cpp"
-        "ShaderCompilation.cpp"
-        "TestRenderer.cpp"
-    )
+# 包含子目录
+add_subdirectory(UnitTests)
+add_subdirectory(IntegrationTests)
 
-    # 头文件列表
-    set(HEADER_FILES
-        "PythonScript.h"
-        "ShaderCompilation.h"
-        "Test.h"
-        "TestEntityComponents.h"
-        "TestRenderer.h"
-        "TestWindow.h"
-    )
-elseif(LINUX)
-    set(SOURCE_FILES
-        "Lights.cpp"
-        "Main.cpp"
-        "RenderItem.cpp"
-        "Scripts.cpp"
-        "ShaderCompilation.cpp"
-        "TestRenderer.cpp"
-    )
-
-    # 头文件列表
-    set(HEADER_FILES
-        "PythonScript.h"
-        "ShaderCompilation.h"
-        "Test.h"
-        "TestEntityComponents.h"
-        "TestRenderer.h"
-        "TestWindowLinux.h"
-    )
-elseif(APPLE)
-    set(SOURCE_FILES
-        "Lights.cpp"
-        "Main.cpp"
-        "RenderItem.cpp"
-        "Scripts.cpp"
-        "ShaderCompilation.cpp"
-        "TestRendererMac.cpp"
-        "MacKeyboard.mm"
-    )
-
-    # 头文件列表
-    set(HEADER_FILES
-        "PythonScript.h"
-        "ShaderCompilation.h"
-        "Test.h"
-        "TestEntityComponents.h"
-        "TestRenderer.h"
-        "TestWindow.h"
-        "MacKeyboard.h"
-    )
-endif()
-
-# 添加可执行文件目标
-add_executable(${PROJECT_NAME} ${SOURCE_FILES} ${HEADER_FILES})
-
-# 设置C++标准
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED ON
+# 创建自定义目标来运行所有测试
+add_custom_target(run_all_tests
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    DEPENDS RHI_All_Tests IntegrationTests
+    COMMENT "Running all tests (Unit Tests + Integration Tests)"
 )
 
-# 设置输出目录
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/"
+# 创建自定义目标来运行单元测试
+add_custom_target(run_unit_tests
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R RHI_All_Tests
+    DEPENDS RHI_All_Tests
+    COMMENT "Running Unit Tests only"
 )
 
-# 包含目录
-target_include_directories(${PROJECT_NAME} PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Engine"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Engine/Common"
-    ${CMAKE_SOURCE_DIR}/OSAPI/MAC/
+# 创建自定义目标来运行集成测试
+add_custom_target(run_integration_tests
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R Engine_Integration_Tests
+    DEPENDS IntegrationTests
+    COMMENT "Running Integration Tests only"
 )
 
-# 平台特定设置
-if(WIN32)
-    # Windows特定的编译选项和定义
-    target_compile_definitions(${PROJECT_NAME} PRIVATE
-        "PRIMAL_PLUS"
-        "_CONSOLE"
-        "_HAS_EXCEPTIONS=0"
-        "UNICODE"
-        "_UNICODE"
-        "$<$<CONFIG:Debug>:DEBUG>"
-        "$<$<CONFIG:Release>:NDEBUG>"
-    )
-    
-    target_compile_options(${PROJECT_NAME} PRIVATE
-        /W3
-        /MP
-        /GR-             # 禁用RTTI
-        /fp:fast         # 快速浮点运算
-        /EHs-c-         # 禁用异常处理
-        $<$<CONFIG:Debug>:/Od /Zi>
-        $<$<CONFIG:Release>:/O2>
-    )
+# 设置CTEST配置
+enable_testing()
+set(CTEST_OUTPUT_ON_FAILURE TRUE)
 
-    target_link_options(${PROJECT_NAME} PRIVATE
-        /SUBSYSTEM:WINDOWS
-        /IGNORE:4099
-        $<$<CONFIG:Debug>:/DEBUG>
-        $<$<CONFIG:Release>:/INCREMENTAL:NO /OPT:REF /OPT:ICF>
-    )
-elseif(APPLE)
-    # macOS特定的编译选项和定义
-    target_compile_definitions(${PROJECT_NAME} PRIVATE
-        "PRIMAL_PLUS"
-        "$<$<CONFIG:Debug>:DEBUG>"
-        "$<$<CONFIG:Release>:NDEBUG>"
-    )
-    
-    target_compile_options(${PROJECT_NAME} PRIVATE
-        -Wall
-        -fno-rtti              # 禁用RTTI
-        -ffast-math            # 快速浮点运算
-        # -fno-exceptions        # 禁用异常处理
-        -pthread
-        $<$<CONFIG:Debug>:-O0 -g>
-        $<$<CONFIG:Release>:-O3>
-        -Wunused-parameter
-    )
-
-    # macOS特定的框架
-    target_link_libraries(${PROJECT_NAME} PRIVATE
-        "-framework Cocoa"
-        "-framework Metal"
-        "-framework QuartzCore"
-        "-framework AppKit"
-    )
-else()
-    # Linux特定的编译选项和定义
-    target_compile_definitions(${PROJECT_NAME} PRIVATE
-        "PRIMAL_PLUS"
-        "$<$<CONFIG:Debug>:DEBUG>"
-        "$<$<CONFIG:Release>:NDEBUG>"
-    )
-    
-    target_compile_options(${PROJECT_NAME} PRIVATE
-        -Wall
-        -fno-rtti              # 禁用RTTI
-        -ffast-math            # 快速浮点运算
-        -fno-exceptions        # 禁用异常处理
-        $<$<CONFIG:Debug>:-O0 -g>
-        $<$<CONFIG:Release>:-O3>
-    )
-
-    # Linux特定的库
-    target_link_libraries(${PROJECT_NAME} PRIVATE
-        X11
-        vulkan
-    )
-endif()
-
-# 链接依赖项
-target_link_libraries(${PROJECT_NAME} PRIVATE
-    Engine
-    ContentTools
-)
-
-# 配置编译器特性
-if(MSVC)
-    target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
-else()
-    target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
-    target_compile_options(${PROJECT_NAME} PRIVATE -fPIC)
-endif()
-
-# 复制着色器和资源文件
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders
-    $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
-)
-
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets
-    $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets
-)
+# 输出配置信息
+message(STATUS "Engine Test Suite configured successfully")
+message(STATUS "Project: ${PROJECT_NAME}")
+message(STATUS "Available test targets:")
+message(STATUS "  - run_all_tests: Run both unit and integration tests")
+message(STATUS "  - run_unit_tests: Run unit tests only") 
+message(STATUS "  - run_integration_tests: Run integration tests only")

@@ -33,8 +33,12 @@ namespace primal::graphics::metal::shader
 				"ssao_pass",
 				"ssao_blur",
 				"ssgi_pass",
-				"ssgi_blur"
+				"ssgi_blur",
+				"taa_pass",
+				"compose_pass"
 			};
+
+			static_assert(sizeof(shader_names) / sizeof(shader_names[0]) == engine_shader::count, "shader_names array size must match engine_shader::count");
 
 			assert(!engine_shaders_blob);
 
@@ -99,6 +103,27 @@ namespace primal::graphics::metal::shader
 	}
 	void shutdown() 
     {
+		// 释放所有MTL::Function对象
+		for (auto* function : engine_functions)
+		{
+			if (function)
+			{
+				function->release();
+			}
+		}
+		engine_functions.clear();
+		
+		// 释放所有MTL::Library对象
+		for (auto* library : engine_libraries)
+		{
+			if (library)
+			{
+				library->release();
+			}
+		}
+		engine_libraries.clear();
+		
+		// 清理着色器数据
 		for (u32 i{ 0 }; i < engine_shader::count; ++i)
 		{
 			engine_shaders[i] = {};
@@ -112,12 +137,24 @@ namespace primal::graphics::metal::shader
 		assert(!engine_libraries.empty());
 		assert(!engine_functions.empty());
 		
-        // 定义静态删除器函数
+		// 检查函数指针是否有效
+		if (id >= engine_shader::count || engine_functions.empty() || !engine_functions[id]) {
+			return engine_metal_shader_function(nullptr, nullptr);
+		}
+		
+		// 增加引用计数并返回，使用空删除器避免重复释放
+		// 因为engine_functions中的对象由shutdown()统一管理释放
+		MTL::Function* function = engine_functions[id];
+		if (function) {
+			function->retain(); // 增加引用计数
+		}
+		
+		// 定义删除器函数，负责减少引用计数
 		static auto deleter = [](MTL::Function* ptr) {
 			if (ptr) {
-				ptr->release();
+				ptr->release(); // 减少引用计数
 			}
 		};
-		return engine_metal_shader_function(engine_functions[id], deleter);
+		return engine_metal_shader_function(function, deleter);
 	}
 }

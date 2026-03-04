@@ -3,6 +3,12 @@
 #include "Components/ComponentsCommon.h"
 #include "TransformComponent.h"
 #include "ScriptComponent.h"
+#include "MeshComponent.h"
+#include "ParticleComponent.h"
+#include "Engine/Utilities/Hash.h"
+
+// Forward declaration for particle component
+namespace primal::particle { class component; }
 
 namespace primal {
 
@@ -17,8 +23,10 @@ namespace primal {
 			[[nodiscard]]  constexpr entity_id get_id() const { return _id; }
 			[[nodiscard]]  constexpr bool is_valid() const { return id::is_valid(_id); }
 
-			[[nodiscard]]  transform::component transform() const;
+            [[nodiscard]]  transform::component transform() const;
 			[[nodiscard]]  script::component script() const;
+			[[nodiscard]]  mesh::component mesh() const;
+			[[nodiscard]]  particle::component particle() const;
 
 			[[nodiscard]] math::v4 rotation() const { return transform().rotation(); }
 			[[nodiscard]] math::v3 orientation() const { return transform().orientation(); }
@@ -63,7 +71,15 @@ namespace primal {
 		namespace detail {
 			using script_ptr = std::unique_ptr<entity_script>;
 			using script_creator = script_ptr(*)(game_entity::entity entity);
-			using string_hash = std::hash<std::string>;
+			// using string_hash = std::hash<std::string>;
+            struct string_hash {
+                size_t operator()(const std::string& s) const {
+                    uint32_t hashOut;
+                    primal::utl::MurmurHash3_x86_32(s.data(), (int)s.length(), 0x9e3779b9, &hashOut);
+                    return hashOut;
+                }
+            };
+
 			u8 register_script(size_t, script_creator);
 			script_creator get_script_creator(size_t tag);
 #ifdef USE_WITH_EDITOR

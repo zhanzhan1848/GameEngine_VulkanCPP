@@ -26,6 +26,7 @@ struct PerObjectData
 	float4x4 			World;
 	float4x4 			InvWorld;
 	float4x4 			WorldViewProjection;
+	float4				sh_coeffs[9];
 };
 
 struct Plane
@@ -46,6 +47,17 @@ struct Cone
 	float	Height;
 	float3	Direction;
 	float	Radius;
+};
+
+struct Surface
+{
+	float3 BaseColor;
+	float Metallic;
+	float3 Normal;
+	float PerceptualRoughness;
+	float3 EmissiveColor;
+	float EmissiveIntensity;
+	float AmbientOcclusion;
 };
 
 #if USE_BOUNDING_SPHERES

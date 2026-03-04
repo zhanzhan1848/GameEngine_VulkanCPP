@@ -1,6 +1,8 @@
 #include "Entity.h"
 #include "Transform.h"
 #include "Script.h"
+#include "Mesh.h"
+#include "Particle.h"
 
 namespace primal::game_entity {
 
@@ -8,6 +10,8 @@ namespace primal::game_entity {
 
 		utl::vector<transform::component>			transforms;
 		utl::vector<script::component>			scripts;
+		utl::vector<mesh::component>			meshes;
+		utl::vector<particle::component>			particles;
 
 		utl::vector<id::generation_type>			generations;
 		utl::deque<entity_id>						free_ids;
@@ -39,6 +43,8 @@ namespace primal::game_entity {
 			// NOTE: we don't call resize(), so the number of memory allocations stays low
 			transforms.emplace_back();
 			scripts.emplace_back();
+			meshes.emplace_back();
+			particles.emplace_back();
 		}
 
 		const entity new_entity{ id };
@@ -57,6 +63,23 @@ namespace primal::game_entity {
 			assert(scripts[index].is_valid());
 		}
 
+		//Create Mesh component
+		if (info.mesh && info.mesh->material_count)
+		{
+			assert(!meshes[index].is_valid());
+			meshes[index] = mesh::create(*info.mesh, new_entity);
+			assert(meshes[index].is_valid());
+		}
+
+		//Create Particle component
+		if (info.particle)
+		{
+			assert(!particles[index].is_valid());
+			particles[index] = particle::create(*info.particle, new_entity);
+		}
+
+		return new_entity;
+
 		return new_entity;
 	}
 
@@ -70,9 +93,18 @@ namespace primal::game_entity {
 			script::remove(scripts[index]);
 			scripts[index] = {};
 		}
+		if (meshes[index].is_valid())
+		{
+			mesh::remove(meshes[index]);
+			meshes[index] = {};
+		}
+		if (particles[index].is_valid())
+		{
+			particle::remove(particles[index]);
+			particles[index] = {};
+		}
 		transform::remove(transforms[index]);
 		transforms[index] = {};
-		free_ids.push_back(id);
 	}
 
 	bool is_alive(entity_id id)
@@ -95,5 +127,19 @@ namespace primal::game_entity {
 		assert(is_alive(_id));
 		const id::id_type index{ id::index(_id) };
 		return scripts[index];
+	}
+
+	mesh::component entity::mesh() const
+	{
+		assert(is_alive(_id));
+		const id::id_type index{ id::index(_id) };
+		return meshes[index];
+	}
+
+	particle::component entity::particle() const
+	{
+		assert(is_alive(_id));
+		const id::id_type index{ id::index(_id) };
+		return particles[index];
 	}
 }

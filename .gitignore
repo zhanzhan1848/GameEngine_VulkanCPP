@@ -370,8 +370,15 @@ project_rules.md
 *.plist
 
 build/
+xcode_build/
+.claude/
+.opencode/worktrees/
+.worktrees/
+.opencode/
+.opencode
+openspec/
+tasks/
 lib/
-OSAPI/*
 CMake/
 .DS_Store
 *.bak
@@ -382,9 +389,24 @@ GameEngine_VulkanCPP_Debug/
 *.metallib
 *.metalar
 *.ir
-astc-encoder/
 *.model
 *.texture
 EngineTest/assets/
-astc-encoder/
 .trae/
+.venv/
+.sisyphus/
+
+TODO*
+
+# Exceptions for third_party libraries
+!third_party/FBX_SDK/Mac/lib/
+!third_party/FBX_SDK/Mac/lib/debug/
+!third_party/FBX_SDK/Mac/lib/release/
+
+!Engine/Graphics/RenderPipeline/RenderPasses/Debug/
+!Engine/Graphics/RHI/Shaders/Debug/
+
+# Git Worktrees
+.worktrees/
+worktrees/
+.worktrees

@@ -1,4 +1,4 @@
-#include "MetalSSAO.h"
+#include "MetalPostProcess.h"
 
 #include "MetalCore.h"
 #include "MetalResource.h"
@@ -67,11 +67,28 @@ namespace primal::graphics::metal::ssao
         {
             MTL::Device* device{ core::get_device() };
             NS::Error* pError{ nullptr };
-            ssao_pipeline_state = device->newComputePipelineState(shader::get_engine_shader( shader::engine_shader::ssao_calculate ).get(), &pError);
+            
+            // 获取SSAO计算着色器并检查有效性
+            auto ssao_shader = shader::get_engine_shader( shader::engine_shader::ssao_calculate );
+            if (!ssao_shader.get()) {
+                return false;
+            }
+            ssao_pipeline_state = device->newComputePipelineState(ssao_shader.get(), &pError);
             MTL_CHECK_ERROR(pError)
 
-            ssao_blur_pipeline_state = device->newComputePipelineState(shader::get_engine_shader(shader::engine_shader::ssao_blur).get(), &pError);
+            // 为SSAO计算管线状态设置名称
+            NAME_METAL_OBJECT(ssao_pipeline_state, "ssao_pipeline_state");
+
+            // 获取SSAO模糊着色器并检查有效性
+            auto ssao_blur_shader = shader::get_engine_shader(shader::engine_shader::ssao_blur);
+            if (!ssao_blur_shader.get()) {
+                return false;
+            }
+            ssao_blur_pipeline_state = device->newComputePipelineState(ssao_blur_shader.get(), &pError);
             MTL_CHECK_ERROR(pError);
+
+            // 为SSAO模糊管线状态设置名称
+            NAME_METAL_OBJECT(ssao_blur_pipeline_state, "ssao_blur_pipeline_state");
 
             return ssao_pipeline_state != nullptr && ssao_blur_pipeline_state != nullptr;
         }

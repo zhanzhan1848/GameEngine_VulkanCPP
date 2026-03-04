@@ -3,7 +3,7 @@
  * @brief Screen Space Directional Occlusion (SSDO) 着色器实现
  * @details 实现基于屏幕空间的方向性遮挡效果，支持深度自适应采样和方向性光照
  * @author GameEngine Team
- * @date 2024
+ * @date 2025-09-04
  */
 
 #include "Common.h"
@@ -64,6 +64,7 @@ kernel void ssao_pass(
     
     // 计算UV坐标
     float2 uv_pos = float2(thread_id) / float2(global_data.CameraPositionAndViewWidth.w, global_data.CameraDirectionAndViewHeight.w);
+    uv_pos.y = 1.f - uv_pos.y;
 
 	float4 clips = float4(uv_pos * 2.0f - 1.0f, 1.0f, 1.0f);
     // clips.y = 1.f - clips.y;
@@ -95,7 +96,7 @@ kernel void ssao_pass(
 
         float4 rclipPos = global_data.Projection * float4(sampleViewPos, 1.0f);
 		float2 rscreenPos = (rclipPos.xy / rclipPos.w) * 0.5f + 0.5f;
-        // rscreenPos.y = 1.f - rscreenPos.y;
+        rscreenPos.y = 1.f - rscreenPos.y;
 
         // 边界检查
         if (any(rscreenPos < 0.0f) || any(rscreenPos > 1.0f)) {
@@ -103,6 +104,7 @@ kernel void ssao_pass(
         }
 
         rscreenPos = float2(rscreenPos.x * global_data.CameraPositionAndViewWidth.w, rscreenPos.y * global_data.CameraDirectionAndViewHeight.w);
+        rscreenPos.y = 1.f - rscreenPos.y;
         
         // 读取采样点的深度和法线信息
         float4 sampleTexture = normal_depth_texture.read(uint2(rscreenPos));

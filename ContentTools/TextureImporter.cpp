@@ -2068,7 +2068,7 @@ namespace primal::tools
 				colorProfile = " -cl";
 			}
 			
-			std::string cmd = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/astc-encoder/build/Source/astcenc-neon "  + colorProfile + " " 
+			std::string cmd = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCP/third_party/astc-encoder/build/Source/astcenc-neon "  + colorProfile + " " 
 				+ tempInputPath + " " + tempOutputPath + " " + 
 				blockSize + " " + quality;
 			

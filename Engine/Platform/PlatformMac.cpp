@@ -86,7 +86,7 @@ namespace primal::platform
 		{
 			window_info& info{ get_from_id(id) };
 
-			return { (u32)info.client_area.origin.x, (u32)info.client_area.origin.x, (u32)(info.client_area.size.width + info.client_area.origin.x), (u32)(info.client_area.size.height + info.client_area.origin.y) };
+			return { (u32)info.client_area.origin.x, (u32)info.client_area.origin.y, (u32)(info.client_area.size.width + info.client_area.origin.x), (u32)(info.client_area.size.height + info.client_area.origin.y) };
 		}
 
 		bool is_window_closed(window_id id)
@@ -114,8 +114,10 @@ namespace primal::platform
 
 		if (info.hwnd)
 		{
+			NS::Window* nsWindow = static_cast<NS::Window*>(info.hwnd);
 			// if (callback) SetWindowLongPtr(info.hwnd, 0, (LONG_PTR)callback);
-			static_cast<NS::Window*>(info.hwnd)->setTitle(init_info->caption);
+			nsWindow->setTitle(init_info->caption);
+			nsWindow->makeKeyAndOrderFront(nullptr);
 
 			window_id id{ (id::id_type)windows.add(info) };
 

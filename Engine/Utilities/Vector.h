@@ -224,6 +224,123 @@ namespace primal::utl
 			return item;
 		}
 
+		// Inserts an element at the specified position.
+		// Returns pointer to the inserted element.
+		constexpr T* insert(T* const pos, const T& value)
+		{
+			return insert(pos, 1, value);
+		}
+
+		// Inserts an element at the specified position by moving.
+		// Returns pointer to the inserted element.
+		constexpr T* insert(T* const pos, T&& value)
+		{
+			assert(pos >= std::addressof(_data[0]) && pos <= std::addressof(_data[_size]));
+			const u64 index = pos - std::addressof(_data[0]);
+			if (_size == _capacity)
+			{
+				reserve(((_capacity + 1) * 3) >> 1);
+			}
+			assert(_size < _capacity);
+
+			// Move elements to make space
+			T* const insertPos = std::addressof(_data[index]);
+			if (index < _size)
+			{
+				memmove(insertPos + 1, insertPos, (_size - index) * sizeof(T));
+			}
+
+			new (insertPos) T(std::move(value));
+			++_size;
+			return insertPos;
+		}
+
+		// Inserts multiple copies of an element at the specified position.
+		// Returns pointer to the first inserted element.
+		constexpr T* insert(T* const pos, u64 count, const T& value)
+		{
+			assert(pos >= std::addressof(_data[0]) && pos <= std::addressof(_data[_size]));
+			if (count == 0) return pos;
+
+			const u64 index = pos - std::addressof(_data[0]);
+			if (_size + count > _capacity)
+			{
+				reserve(((_size + count) * 3) >> 1);
+			}
+			assert(_size + count <= _capacity);
+
+			// Move elements to make space
+			T* const insertPos = std::addressof(_data[index]);
+			if (index < _size)
+			{
+				memmove(insertPos + count, insertPos, (_size - index) * sizeof(T));
+			}
+
+			// Insert copies of value
+			for (u64 i = 0; i < count; ++i)
+			{
+				new (insertPos + i) T(value);
+			}
+			_size += count;
+			return insertPos;
+		}
+
+		// Inserts elements from range [first, last) at the specified position.
+		// Returns pointer to the first inserted element.
+		template<typename InputIt>
+		constexpr T* insert(T* const pos, InputIt first, InputIt last)
+		{
+			assert(pos >= std::addressof(_data[0]) && pos <= std::addressof(_data[_size]));
+			const u64 count = last - first;
+			if (count == 0) return pos;
+
+			const u64 index = pos - std::addressof(_data[0]);
+			if (_size + count > _capacity)
+			{
+				reserve(((_size + count) * 3) >> 1);
+			}
+			assert(_size + count <= _capacity);
+
+			// Move elements to make space
+			T* const insertPos = std::addressof(_data[index]);
+			if (index < _size)
+			{
+				memmove(insertPos + count, insertPos, (_size - index) * sizeof(T));
+			}
+
+			// Insert elements from range
+			u64 i = 0;
+			for (InputIt it = first; it != last; ++it, ++i)
+			{
+				new (insertPos + i) T(*it);
+			}
+			_size += count;
+			return insertPos;
+		}
+
+		// Assigns new contents to the vector, replacing its current contents.
+		// Assigns count copies of value.
+		constexpr void assign(u64 count, const T& value)
+		{
+			clear();
+			reserve(count);
+			for (u64 i = 0; i < count; ++i)
+			{
+				emplace_back(value);
+			}
+		}
+
+		// Assigns new contents to the vector, replacing its current contents.
+		// Assigns elements from range [first, last).
+		template<typename InputIt>
+		constexpr void assign(InputIt first, InputIt last)
+		{
+			clear();
+			for (; first != last; ++first)
+			{
+				emplace_back(*first);
+			}
+		}
 		// Clears the vector and destruct items as specified in template argument.
 		constexpr void clear()
 		{

@@ -1,0 +1,15 @@
+[submodule "third_party/WebGPU"]
+	path = third_party/WebGPU
+	url = https://github.com/webgpu-native/webgpu-headers.git
+[submodule "third_party/astc-encoder"]
+	path = third_party/astc-encoder
+	url = https://github.com/ARM-software/astc-encoder.git
+[submodule "third_party/dawn"]
+	path = third_party/dawn
+	url = https://github.com/google/dawn.git
+[submodule "third_party/moodycamel-ConcurrentQueue"]
+	path = third_party/moodycamel-ConcurrentQueue
+	url = https://github.com/ikiller1/moodycamel-ConcurrentQueue.git
+[submodule "third_party/meshoptimizer"]
+	path = third_party/meshoptimizer
+	url = https://github.com/zeux/meshoptimizer.git

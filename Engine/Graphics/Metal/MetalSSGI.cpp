@@ -1,4 +1,4 @@
-#include "MetalSSGI.h"
+#include "MetalPostProcess.h"
 
 #include "MetalCore.h"
 #include "MetalResource.h"
@@ -67,11 +67,28 @@ namespace primal::graphics::metal::ssgi
         {
             MTL::Device* device{ core::get_device() };
             NS::Error* pError{ nullptr };
-            ssgi_pipeline_state = device->newComputePipelineState(shader::get_engine_shader( shader::engine_shader::ssgi_pass ).get(), &pError);
+            
+            // 获取SSGI计算着色器并检查有效性
+            auto ssgi_shader = shader::get_engine_shader( shader::engine_shader::ssgi_pass );
+            if (!ssgi_shader.get()) {
+                return false;
+            }
+            ssgi_pipeline_state = device->newComputePipelineState(ssgi_shader.get(), &pError);
             MTL_CHECK_ERROR(pError)
 
-            ssgi_blur_pipeline_state = device->newComputePipelineState(shader::get_engine_shader( shader::engine_shader::ssgi_blur ).get(), &pError);
+            // 为SSGI计算管线状态设置名称
+            NAME_METAL_OBJECT(ssgi_pipeline_state, "ssgi_pipeline_state");
+
+            // 获取SSGI模糊着色器并检查有效性
+            auto ssgi_blur_shader = shader::get_engine_shader( shader::engine_shader::ssgi_blur );
+            if (!ssgi_blur_shader.get()) {
+                return false;
+            }
+            ssgi_blur_pipeline_state = device->newComputePipelineState(ssgi_blur_shader.get(), &pError);
             MTL_CHECK_ERROR(pError);
+
+            // 为SSGI模糊管线状态设置名称
+            NAME_METAL_OBJECT(ssgi_blur_pipeline_state, "ssgi_blur_pipeline_state");
 
             return ssgi_pipeline_state != nullptr && ssgi_blur_pipeline_state != nullptr;
         }
@@ -163,7 +180,7 @@ namespace primal::graphics::metal::ssgi
         encoder->setComputePipelineState(ssgi_pipeline_state);
         encoder->setTexture(gpass::get_normal_depth_buffer().texture(), 0);
         encoder->setTexture(gpass::get_albedo_buffer().texture(), 1);
-        encoder->setTexture(gpass::get_main_buffer().texture(), 2);
+        encoder->setTexture(taa::get_taa_texture().texture(), 2);
         encoder->setTexture(ssgi_texture.texture(), 3);
         encoder->setBuffer(metal_info.global_shader_data, 0, 0);
         encoder->setBuffer(current_non_cullable_light_buffer, 0, 1);

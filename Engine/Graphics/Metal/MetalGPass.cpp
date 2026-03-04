@@ -8,6 +8,7 @@
 #include "Components/Entity.h"
 #include "Components/Transform.h"
 #include "MetalPreProcess.h"
+#include "Graphics/Lighting/LightProbeManager.h"
 
 namespace primal::graphics::metal::gpass
 {
@@ -15,9 +16,10 @@ namespace primal::graphics::metal::gpass
     {
         const math::u32v2					initial_dimensions{ 100, 100 };
 
-        metal_render_texture                gpass_main_buffer{};
+        metal_render_texture                gpass_world_pos_buffer{};
 		metal_render_texture				gpass_normal_depth_buffer{};
 		metal_render_texture				gpass_albedo_buffer{};
+		metal_render_texture				gpass_motion_vector_buffer{};
         metal_texture                       gpass_depth_buffer{};
         math::u32v2							dimensions{ initial_dimensions };
 		utl::vector<MTL::Buffer*>			argument_buffers;
@@ -168,7 +170,7 @@ namespace primal::graphics::metal::gpass
         bool create_buffers(math::u32v2 size)
         {
             assert(size.x != 0 && size.y != 0);
-            gpass_main_buffer.release();
+            gpass_world_pos_buffer.release();
 			gpass_depth_buffer.release();
 			gpass_normal_depth_buffer.release();
 
@@ -188,7 +190,7 @@ namespace primal::graphics::metal::gpass
                 metal_texture_init_info init_info{};
                 init_info.texture_desc = desc;
                 init_info.clear_value = MTL::ClearColor::Make(clear_value[0], clear_value[1], clear_value[2], clear_value[3]);
-                gpass_main_buffer = metal_render_texture{ init_info };
+                gpass_world_pos_buffer = metal_render_texture{ init_info };
             }
 #pragma endregion
 
@@ -210,6 +212,15 @@ namespace primal::graphics::metal::gpass
             }
 #pragma endregion
 
+#pragma region gpass_motion_vector_texture
+            {
+                metal_texture_init_info init_info{};
+                init_info.texture_desc = desc;
+                init_info.clear_value = MTL::ClearColor::Make(clear_value[0], clear_value[1], clear_value[2], clear_value[3]);
+                gpass_motion_vector_buffer = metal_render_texture{ init_info };
+            }
+#pragma endregion
+
 #pragma region gpass_depth_texture
             desc->setPixelFormat(depth_buffer_format);
             {
@@ -226,18 +237,21 @@ namespace primal::graphics::metal::gpass
             }
 #pragma endregion
 
-            NAME_METAL_OBJECT(gpass_main_buffer.texture(), "gpass_main_buffer");
+            NAME_METAL_OBJECT(gpass_world_pos_buffer.texture(), "gpass_world_pos_buffer");
             NAME_METAL_OBJECT(gpass_depth_buffer.texture(), "gpass_depth_buffer");
             NAME_METAL_OBJECT(gpass_normal_depth_buffer.texture(), "gpass_normal_depth_buffer");
             NAME_METAL_OBJECT(gpass_albedo_buffer.texture(), "gpass_albedo_buffer");
+            NAME_METAL_OBJECT(gpass_motion_vector_buffer.texture(), "gpass_motion_vector_buffer");
 
-			gpass_main_buffer.texture()->setLabel(NS::String::string("gpass_main_buffer", NS::UTF8StringEncoding));
+			gpass_world_pos_buffer.texture()->setLabel(NS::String::string("gpass_world_pos_buffer", NS::UTF8StringEncoding));
             gpass_depth_buffer.texture()->setLabel(NS::String::string("gpass_depth_buffer", NS::UTF8StringEncoding));
             gpass_normal_depth_buffer.texture()->setLabel(NS::String::string("gpass_normal_depth_buffer", NS::UTF8StringEncoding));
 			gpass_albedo_buffer.texture()->setLabel(NS::String::string("gpass_albedo_buffer", NS::UTF8StringEncoding));
+			gpass_motion_vector_buffer.texture()->setLabel(NS::String::string("gpass_motion_vector_buffer", NS::UTF8StringEncoding));
 
-            return gpass_main_buffer.texture() != nullptr && gpass_depth_buffer.texture()!= nullptr
-					&& gpass_normal_depth_buffer.texture() != nullptr && gpass_albedo_buffer.texture() != nullptr;
+            return gpass_world_pos_buffer.texture() != nullptr && gpass_depth_buffer.texture()!= nullptr
+					&& gpass_normal_depth_buffer.texture() != nullptr && gpass_albedo_buffer.texture() != nullptr
+					&& gpass_motion_vector_buffer.texture() != nullptr;
         }
 
         void set_root_parameters(u32 cache_index, MTL::Buffer* argument_buffer)
@@ -386,6 +400,16 @@ namespace primal::graphics::metal::gpass
 					transform::get_transform_matrices(game_entity::entity_id{ current_entity_id }, data.World, data.InvWorld);
 					data.WorldViewProjection = metal_info.camera->view_projection() * data.World;
 
+					if (metal_info.light_probe_manager)
+					{
+						math::v3 position{ data.World.columns[3].x, data.World.columns[3].y, data.World.columns[3].z };
+						auto sh_color = metal_info.light_probe_manager->GetInterpolatedSH(position);
+						for (int k = 0; k < 9; ++k)
+						{
+							data.sh_coeffs[k] = math::v4{ sh_color.coeffs[k].x, sh_color.coeffs[k].y, sh_color.coeffs[k].z, 0.0f };
+						}
+					}
+
 					current_data_pointer = cbuffer.allocate<msl::PerObjectData>();
 					memcpy(current_data_pointer, &data, sizeof(msl::PerObjectData));
 				}
@@ -449,10 +473,11 @@ namespace primal::graphics::metal::gpass
 
 	void shutdown()
 	{
-		gpass_main_buffer.release();
+		gpass_world_pos_buffer.release();
 		gpass_normal_depth_buffer.release();
 		gpass_albedo_buffer.release();
 		gpass_depth_buffer.release();
+		gpass_motion_vector_buffer.release();
 		dimensions = initial_dimensions;
 
 		if(point_sampler)
@@ -489,9 +514,9 @@ namespace primal::graphics::metal::gpass
 		argument_buffers.clear();
 	}
 
-    const metal_render_texture& get_main_buffer()
+    const metal_render_texture& get_world_pos_buffer()
     {
-        return gpass_main_buffer;
+        return gpass_world_pos_buffer;
     }
 
     const metal_texture& get_depth_buffer()
@@ -507,6 +532,11 @@ namespace primal::graphics::metal::gpass
 	const metal_render_texture& get_albedo_buffer()
 	{
 		return gpass_albedo_buffer;
+	}
+
+	const metal_render_texture& get_motion_vector_buffer()
+	{
+		return gpass_motion_vector_buffer;
 	}
 
     void set_size(math::u32v2 size)
@@ -623,18 +653,18 @@ namespace primal::graphics::metal::gpass
 		const u32 items_count{ cache.size() };
 		const u32 frame_index{ frame_info.frame_index };
 		MTL::Buffer* current_non_cullable_light_buffer{ light::non_cullable_light_buffer(frame_index) };
-		MTL::Texture* shadow_mapping_texture{ prepass::prepass_texture().texture() };
+		// MTL::Texture* shadow_mapping_texture{ prepass::prepass_texture().texture() };
 
 		// 创建渲染通道描述符
 		MTL::RenderPassDescriptor* gpassRpd = MTL::RenderPassDescriptor::alloc()->init();
 		
-		// 创建颜色附件描述符
-		MTL::RenderPassColorAttachmentDescriptor* colorAttachment = MTL::RenderPassColorAttachmentDescriptor::alloc()->init();
-		colorAttachment->setClearColor(MTL::ClearColor::Make(clear_value[0], clear_value[1], clear_value[2], clear_value[3]));
-		colorAttachment->setStoreAction(MTL::StoreActionStore);
-		colorAttachment->setLoadAction(MTL::LoadActionClear);
-		colorAttachment->setTexture(gpass_main_buffer.texture());
-		gpassRpd->colorAttachments()->setObject(colorAttachment, 0);
+		// 创建世界坐标附件描述符
+		MTL::RenderPassColorAttachmentDescriptor* worldposAttachment = MTL::RenderPassColorAttachmentDescriptor::alloc()->init();
+		worldposAttachment->setClearColor(MTL::ClearColor::Make(clear_value[0], clear_value[1], clear_value[2], clear_value[3]));
+		worldposAttachment->setStoreAction(MTL::StoreActionStore);
+		worldposAttachment->setLoadAction(MTL::LoadActionClear);
+		worldposAttachment->setTexture(gpass_world_pos_buffer.texture());
+		gpassRpd->colorAttachments()->setObject(worldposAttachment, 0);
 
 		// Create Normal Depth Texture for SSAO
 		MTL::RenderPassColorAttachmentDescriptor* normalAttachment = MTL::RenderPassColorAttachmentDescriptor::alloc()->init();
@@ -651,6 +681,14 @@ namespace primal::graphics::metal::gpass
 		albedoAttachment->setLoadAction(MTL::LoadActionClear);
 		albedoAttachment->setTexture(gpass_albedo_buffer.texture());
 		gpassRpd->colorAttachments()->setObject(albedoAttachment, 2);
+
+		// Create Motion Vector Texture
+		MTL::RenderPassColorAttachmentDescriptor* motionAttachment = MTL::RenderPassColorAttachmentDescriptor::alloc()->init();
+		motionAttachment->setClearColor(MTL::ClearColor::Make(clear_value[0], clear_value[1], clear_value[2], clear_value[3]));
+		motionAttachment->setStoreAction(MTL::StoreActionStore);
+		motionAttachment->setLoadAction(MTL::LoadActionClear);
+		motionAttachment->setTexture(gpass_motion_vector_buffer.texture());
+		gpassRpd->colorAttachments()->setObject(motionAttachment, 3);
 
 		// 创建深度附件描述符
 		MTL::RenderPassDepthAttachmentDescriptor* depthAttachment = MTL::RenderPassDepthAttachmentDescriptor::alloc()->init();
@@ -728,7 +766,6 @@ namespace primal::graphics::metal::gpass
 			gpassEnc->setVertexBuffer(argument_buffers[i], 0, 0);
 			gpassEnc->setFragmentBuffer(argument_buffers[i], 0, 0);
 			gpassEnc->setFragmentBuffer(sampler_argument_buffers[i], 0, 1);
-			gpassEnc->setFragmentTexture(shadow_mapping_texture, 0);
 			gpassEnc->useResource(frame_info.global_shader_data, MTL::ResourceUsageRead);
 			gpassEnc->useResource(cache.view_buffer[i], MTL::ResourceUsageRead);
 			gpassEnc->useResource(current_non_cullable_light_buffer, MTL::ResourceUsageRead);
@@ -751,8 +788,8 @@ namespace primal::graphics::metal::gpass
 		if (depthAttachment) {
 			depthAttachment->release();
 		}
-		if (colorAttachment) {
-			colorAttachment->release();
+		if (worldposAttachment) {
+			worldposAttachment->release();
 		}
 		if (gpassRpd) {
 			gpassRpd->release();

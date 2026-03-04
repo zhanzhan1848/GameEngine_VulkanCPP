@@ -17,7 +17,7 @@
 #include <string>
 #include "../Engine/Utilities/IOStream.h"
 #include "TemplateShader/PBR_Template_Shader_v1.h"
-#include "meshoptimizer/meshoptimizer.h"
+#include "meshoptimizer.h"
 #include "../Engine/Utilities/Hash.h"
 
 namespace primal::tools

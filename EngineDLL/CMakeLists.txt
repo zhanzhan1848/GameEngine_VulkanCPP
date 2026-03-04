@@ -90,7 +90,7 @@ elseif(APPLE)
     
     target_compile_options(${PROJECT_NAME} PRIVATE
         -Wall
-        -fno-rtti              # 禁用RTTI
+        # -fno-rtti              # 禁用RTTI
         -ffast-math            # 快速浮点运算
         -fno-exceptions        # 禁用异常处理
         $<$<CONFIG:Debug>:-O0 -g>
@@ -117,7 +117,7 @@ else()
     
     target_compile_options(${PROJECT_NAME} PRIVATE
         -Wall
-        -fno-rtti              # 禁用RTTI
+        # -fno-rtti              # 禁用RTTI
         -ffast-math            # 快速浮点运算
         -fno-exceptions        # 禁用异常处理
         -fPIC                  # 位置无关代码

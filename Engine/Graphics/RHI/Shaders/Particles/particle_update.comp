@@ -1,0 +1,74 @@
+#version 450
+#extension GL_ARB_shader_storage_buffer_object : require
+
+layout(local_size_x = 256) in;
+
+struct ParticleData {
+    vec4 position;      // xyz = position, w = age (0-1)
+    vec4 velocity;      // xyz = velocity, w = lifetime
+    vec4 color;         // rgba
+    vec4 scale_rotation; // xy = scale, zw = rotation
+};
+
+layout(std430, binding = 0) buffer ParticleBufferIn {
+    ParticleData particles_in[];
+};
+
+layout(std430, binding = 1) buffer ParticleBufferOut {
+    ParticleData particles_out[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float delta_time;
+    float time;
+    uint max_particles;
+    uint frame_index;
+    vec3 gravity;
+    float drag;
+    vec3 wind;
+    float _pad;
+} pc;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    
+    if (index >= pc.max_particles) {
+        return;
+    }
+    
+    ParticleData p = particles_in[index];
+    
+    // Check if particle is dead (age >= 1.0)
+    if (p.position.w >= 1.0) {
+        // Copy dead particle as-is (or could mark for reuse)
+        particles_out[index] = p;
+        return;
+    }
+    
+    float lifetime = p.velocity.w;
+    float age_increment = pc.delta_time / max(lifetime, 0.001);
+    
+    // Update age
+    p.position.w += age_increment;
+    
+    // Check if particle died this frame
+    if (p.position.w >= 1.0) {
+        particles_out[index] = p;
+        return;
+    }
+    
+    // Apply forces to velocity
+    vec3 acceleration = pc.gravity + pc.wind;
+    p.velocity.xyz += acceleration * pc.delta_time;
+    
+    // Apply drag
+    p.velocity.xyz *= (1.0 - pc.drag * pc.delta_time);
+    
+    // Integrate position
+    p.position.xyz += p.velocity.xyz * pc.delta_time;
+    
+    // Rotate particle based on velocity (optional)
+    // p.scale_rotation.z += length(p.velocity.xyz) * pc.delta_time;
+    
+    particles_out[index] = p;
+}

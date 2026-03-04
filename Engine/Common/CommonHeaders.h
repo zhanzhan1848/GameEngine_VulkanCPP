@@ -13,6 +13,11 @@
 #include <unordered_map>
 #include <mutex>
 #include <cstring>
+#include <atomic>
+#include <deque>
+#include <condition_variable>
+#include <thread>
+#include <algorithm>
 
 #if defined(_WIN64)
 #include <DirectXMath.h>
@@ -41,7 +46,7 @@
 #define DISABLE_COPY_AND_MOVE(T) DISABLE_COPY(T) DISABLE_MOVE(T)
 #endif
 
-#ifdef _DEBUG
+#if defined(_DEBUG) || !defined(NDEBUG)
 #define DEBUG_OP(x) x
 #else
 #define DEBUG_OP(x)
@@ -52,6 +57,7 @@
 #include "../Utilities/Math.h"
 #include "../Utilities/Utilities.h"
 #include "../Utilities/MathTypes.h"
+#include "../Utilities/Hash.h"
 #include "Id.h"
 
 

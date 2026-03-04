@@ -10,6 +10,7 @@ namespace primal::graphics::metal
     {
         const frame_info*				info{ nullptr };
         camera::metal_camera*			camera{ nullptr};
+        lighting::LightProbeManager*    light_probe_manager{ nullptr };
         MTL::Buffer*					global_shader_data{ nullptr };
 		u32								surface_width{ 0 };
 		u32								surface_height{ 0 };
