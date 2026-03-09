@@ -10,6 +10,7 @@ namespace primal {
 	INIT_INFO(script);
 	INIT_INFO(mesh);
 	INIT_INFO(particle);
+	INIT_INFO(cluster);
 #undef INIT_INFO
 
 	namespace game_entity {
@@ -19,6 +20,7 @@ namespace primal {
 			script::init_info* script{ nullptr };
 			mesh::init_info* mesh{ nullptr };
 			particle::init_info* particle{ nullptr };
+			cluster::init_info* cluster{ nullptr };
 		};
 
 		entity create(entity_info info);

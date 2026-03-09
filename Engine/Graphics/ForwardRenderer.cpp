@@ -24,6 +24,7 @@
 #include "Graphics/RHI/Core/RHIDescriptorSetLayout.h"
 #include "Graphics/RHI/Core/RHIPipelineLayout.h"
 #include "Graphics/RHI/Utils/ShadowUtils.h"
+#include "Graphics/Scene/SceneExtractionSystem.h"
 
 #include <algorithm>
 #include <iostream>
@@ -292,6 +293,12 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     }
 #endif
 
+    // Initialize Scene Extraction System
+    if (!sceneExtractionSystem_.Initialize(device_, 10000, 100000)) {
+        std::cerr << "ForwardRenderer: Failed to initialize SceneExtractionSystem" << std::endl;
+        return false;
+    }
+
     // Initialize Composite Pipeline (SSR Blending)
     {
         // Layout
@@ -368,6 +375,7 @@ void ForwardRenderer::Shutdown() {
 #ifndef DISABLE_PARTICLE_SYSTEM
     particlePass_.shutdown();
 #endif
+    sceneExtractionSystem_.Shutdown();
 
     if (device_) {
         if (ssrOutput_ != rhi::handles::INVALID_RESOURCE) {
@@ -797,9 +805,19 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     (void)scene; 
 
     // Reset Per-Object Buffer Offset
-    perObjectBufferOffset_ = 0;
+    if (sceneExtractionEnabled_) {
+        sceneExtractionSystem_.QueryDirtyTransforms(scene);
+        
+        if (sceneExtractionSystem_.NeedsFullRebuild()) {
+            sceneExtractionSystem_.ExtractScene(scene);
+        } else {
+            if (!sceneExtractionSystem_.ExtractScene(scene)) {
+                std::cerr << "ForwardRenderer: Partial scene update failed" << std::endl;
+            }
+        }
+    }
 
-    // Shadow Pass (Before Main Pass)
+    // === Shadow Pass (Before Main Pass) ===
     utl::vector<RenderView> csmViews;
     utl::vector<float> cascadeSplits;
     ::std::unordered_map<u32, int> lightShadowIndices;

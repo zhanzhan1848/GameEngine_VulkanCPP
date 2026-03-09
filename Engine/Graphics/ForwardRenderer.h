@@ -9,6 +9,7 @@
 #include "Graphics/Passes/SSRPass.h"
 #include "Graphics/Material.h"
 #include "Graphics/Passes/ParticlePass.h"
+#include "Graphics/Scene/SceneExtractionSystem.h"
 #include "RenderPipeline/RenderPasses/Debug/GeometryDebugPass.h"
 #include <unordered_map>
 
@@ -45,6 +46,9 @@ public:
                 u32 height);
 
     GeometryDebugSettings& GetDebugSettings() { return debugSettings_; }
+    
+    const SceneExtractionStats& GetExtractionStats() const { return sceneExtractionSystem_.GetStats(); }
+    SceneExtractionStats& GetExtractionStats() { return sceneExtractionSystem_.GetStats(); }
 
 private:
     GeometryDebugSettings debugSettings_;
@@ -134,6 +138,10 @@ private:
     BlurPass blurPass_;
     SSRPass ssrPass_;
     ParticlePass particlePass_;
+
+    // Scene Extraction System (Nanite v7.1)
+    SceneExtractionSystem sceneExtractionSystem_;
+    bool sceneExtractionEnabled_{true};
 
     // Multi-frame buffers to avoid CPU-GPU sync stalls
     rhi::ResourceHandle lightBuffers_[rhi::MAX_FRAMES_IN_FLIGHT]{};

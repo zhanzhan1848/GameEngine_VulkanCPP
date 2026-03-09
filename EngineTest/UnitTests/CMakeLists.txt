@@ -507,6 +507,120 @@ if(APPLE)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
 
+
+    #### Nanite 单元测试 ####
+
+    # 创建 Nanite Resource 测试
+    add_executable(TestNaniteResourceManager Nanite/TestNaniteResourceManager.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Nanite/NaniteResourceManager.cpp
+    )
+    target_include_directories(TestNaniteResourceManager PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestNaniteResourceManager PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    target_compile_definitions(TestNaniteResourceManager PRIVATE 
+        DEBUG 
+        _DEBUG 
+        PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+    )
+    add_test(NAME TestNaniteResourceManager COMMAND TestNaniteResourceManager)
+    set_target_properties(TestNaniteResourceManager PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建 Nanite Streaming Manager 测试
+    add_executable(TestNaniteStreamingManager Graphics/TestNaniteStreamingManager.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Nanite/NaniteStreamingManager.cpp
+    )
+    target_include_directories(TestNaniteStreamingManager PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestNaniteStreamingManager PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    target_compile_definitions(TestNaniteStreamingManager PRIVATE 
+        DEBUG 
+        _DEBUG 
+        PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+    )
+    add_test(NAME TestNaniteStreamingManager COMMAND TestNaniteStreamingManager)
+    set_target_properties(TestNaniteStreamingManager PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建 Cluster Component 测试
+    add_executable(TestClusterComponent Components/TestClusterComponent.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Components/Cluster.cpp
+    )
+    target_include_directories(TestClusterComponent PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestClusterComponent PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    target_compile_definitions(TestClusterComponent PRIVATE 
+        DEBUG 
+        _DEBUG 
+        PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+    )
+    add_test(NAME TestClusterComponent COMMAND TestClusterComponent)
+    set_target_properties(TestClusterComponent PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建 Scene Snapshot 测试
+    add_executable(TestSceneSnapshot Graphics/TestSceneSnapshot.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Scene/RenderSceneSnapshot.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Scene/SceneExtractionSystem.cpp
+    )
+    target_include_directories(TestSceneSnapshot PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestSceneSnapshot PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    target_compile_definitions(TestSceneSnapshot PRIVATE 
+        DEBUG 
+        _DEBUG 
+        PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+    )
+    add_test(NAME TestSceneSnapshot COMMAND TestSceneSnapshot)
+    set_target_properties(TestSceneSnapshot PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    ####
+
 endif()
 
 # RHI GPU优化测试
