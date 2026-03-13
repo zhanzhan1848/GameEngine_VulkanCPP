@@ -58,13 +58,21 @@ public:
     u32 GetClusterRefCount() const { return cluster_ref_count_; }
     bool NeedsFullRebuild() const { return needs_full_rebuild_; }
     void ClearFullRebuildFlag() { needs_full_rebuild_ = false; }
+    
+    const utl::vector<InstanceData>& GetInstanceData() const { return instance_data_cpu_; }
+
+    // Upload staging data to GPU buffers (requires command buffer for GPU->GPU copy)
+    bool UploadToGPUBuffers(rhi::RHICommandBuffer* cmd_buffer);
 
 private:
     rhi::RHIDeviceBase* device_{ nullptr };
+    
     rhi::ResourceHandle instance_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle cluster_ref_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle instance_staging_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle cluster_ref_staging_buffer_{ rhi::handles::INVALID_RESOURCE };
+    
+    utl::vector<InstanceData> instance_data_cpu_;
     
     u32 instance_count_{ 0 };
     u32 cluster_ref_count_{ 0 };

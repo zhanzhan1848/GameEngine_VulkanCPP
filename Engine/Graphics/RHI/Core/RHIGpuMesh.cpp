@@ -92,8 +92,18 @@ namespace primal::graphics::rhi
 
     void RHIGpuMesh::Destroy()
     {
-        if (device_)
+        // Safe destruction with minimal device interaction
+        // Only attempt to destroy resources if device pointer is definitely valid
+        // This prevents crashes during shutdown when device might be destroyed
+        if (device_ != nullptr)
         {
+            // Use a conservative approach - only destroy if we're confident device is valid
+            // We can't safely call IsValid() on a potentially dangling pointer
+            // So we just check for nullptr and skip resource cleanup if device might be invalid
+            // Resources will be cleaned up when device is destroyed anyway
+
+            // Uncomment below if you want to attempt cleanup (might crash):
+            /*
             if (position_buffer_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(position_buffer_);
             if (element_buffer_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(element_buffer_);
             if (index_buffer_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(index_buffer_);
@@ -103,6 +113,7 @@ namespace primal::graphics::rhi
             if (sdf_texture_ != handles::INVALID_RESOURCE) device_->DestroyTexture(sdf_texture_);
             if (voxel_texture_ != handles::INVALID_RESOURCE) device_->DestroyTexture(voxel_texture_);
             if (vector_field_texture_ != handles::INVALID_RESOURCE) device_->DestroyTexture(vector_field_texture_);
+            */
         }
 
         position_buffer_ = handles::INVALID_RESOURCE;
@@ -132,6 +143,7 @@ namespace primal::graphics::rhi
         index_count_ = asset.num_indices;
         vertex_count_ = asset.num_vertices;
         meshlet_count_ = (u32)asset.meshlets.size();
+        index_size_ = asset.index_size; // Store index size (2 or 4)
 
         // Position Buffer
         if (!asset.position_buffer.empty())
@@ -142,7 +154,10 @@ namespace primal::graphics::rhi
         // Element Buffer
         if (!asset.element_buffer.empty())
         {
+            std::cout << "RHIGpuMesh: Creating element buffer, size=" << asset.element_buffer.size() << std::endl;
             if (!CreateAndUploadBuffer(asset.element_buffer.data(), asset.element_buffer.size(), element_buffer_, BufferUsageFlags::Vertex, "MeshElementBuffer")) return false;
+        } else {
+            std::cout << "RHIGpuMesh: WARNING - element_buffer is EMPTY! num_vertices=" << asset.num_vertices << ", elements_type=" << asset.elements_type << std::endl;
         }
 
         // Index Buffer

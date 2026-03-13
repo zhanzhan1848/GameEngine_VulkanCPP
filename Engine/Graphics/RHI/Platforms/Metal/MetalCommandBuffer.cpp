@@ -969,14 +969,14 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
     if (currentEncoderType_ == EncoderType::Render) {
         MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
         MetalBuffer* mtlBuffer = metalDevice.GetBuffer(buffer);
-        
+
         if (mtlBuffer && mtlBuffer->GetNativeBuffer()) {
             MTL::RenderCommandEncoder* encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
             MTL::Buffer* nativeBuffer = mtlBuffer->GetNativeBuffer();
-            
+
+            // Use Metal's proper indirect drawing API
+            // This allows GPU to make draw decisions autonomously
             for (u32 i = 0; i < drawCount; ++i) {
-                // Metal indirect buffer layout matches RHI
-                // MTLDrawPrimitivesIndirectArguments
                 encoder->drawPrimitives(
                     currentPrimitiveType_,
                     nativeBuffer,
@@ -1288,28 +1288,41 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barr
 void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                                      const TextureBlitRegion* regions, u32 regionCount,
                                      FilterMode filter) {
-    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
-    if (!encoder) return;
+    // Metal's BlitCommandEncoder has limitations - use render pass for proper blitting
+    // For now, use a simple copy approach which should work better
 
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     MetalTexture* srcTex = metalDevice.GetTexture(src);
     MetalTexture* dstTex = metalDevice.GetTexture(dst);
 
-    if (srcTex && dstTex && srcTex->GetNativeTexture() && dstTex->GetNativeTexture()) {
-        for (u32 i = 0; i < regionCount; ++i) {
-            const auto& region = regions[i];
-            
-            MTL::Origin srcOrigin(region.srcOffsets[0].x, region.srcOffsets[0].y, region.srcOffsets[0].z);
-            MTL::Size srcSize(
-                region.srcOffsets[1].x - region.srcOffsets[0].x,
-                region.srcOffsets[1].y - region.srcOffsets[0].y,
-                region.srcOffsets[1].z - region.srcOffsets[0].z
-            );
-            
-            MTL::Origin dstOrigin(region.dstOffsets[0].x, region.dstOffsets[0].y, region.dstOffsets[0].z);
-            
-            // MTLBlitCommandEncoder copyFromTexture does not support scaling.
-            // This implementation assumes 1:1 copy for now.
+    if (!srcTex || !dstTex || !srcTex->GetNativeTexture() || !dstTex->GetNativeTexture()) {
+        std::cerr << "[MetalCommandBuffer] BlitTexture: Invalid textures" << std::endl;
+        return;
+    }
+
+    // For Metal, we need to use a render pass approach for proper blitting
+    // But for now, let's try using the blit encoder with proper format checking
+    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
+    if (!encoder) return;
+
+    std::cout << "[MetalCommandBuffer] BlitTexture: "
+              << srcTex->GetNativeTexture()->pixelFormat() << " -> "
+              << dstTex->GetNativeTexture()->pixelFormat() << std::endl;
+
+    for (u32 i = 0; i < regionCount; ++i) {
+        const auto& region = regions[i];
+
+        MTL::Origin srcOrigin(region.srcOffsets[0].x, region.srcOffsets[0].y, region.srcOffsets[0].z);
+        MTL::Size srcSize(
+            region.srcOffsets[1].x - region.srcOffsets[0].x,
+            region.srcOffsets[1].y - region.srcOffsets[0].y,
+            region.srcOffsets[1].z - region.srcOffsets[0].z
+        );
+
+        MTL::Origin dstOrigin(region.dstOffsets[0].x, region.dstOffsets[0].y, region.dstOffsets[0].z);
+
+        // Check if formats match - Metal's blit encoder requires compatible formats
+        if (srcTex->GetNativeTexture()->pixelFormat() == dstTex->GetNativeTexture()->pixelFormat()) {
             encoder->copyFromTexture(
                 srcTex->GetNativeTexture(),
                 region.srcSubresource.baseArrayLayer,
@@ -1321,8 +1334,12 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                 region.dstSubresource.mipLevel,
                 dstOrigin
             );
+        } else {
+            std::cerr << "[MetalCommandBuffer] BlitTexture: Format mismatch, cannot use blit encoder" << std::endl;
         }
     }
+
+    std::cout << "[MetalCommandBuffer] BlitTexture completed" << std::endl;
 }
 
 void MetalCommandBuffer::GenerateMipmaps(ResourceHandle texture) {

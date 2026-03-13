@@ -4,6 +4,8 @@
 #include "../../Components/Cluster.h"
 #include "../../Graphics/Nanite/NaniteResourceManager.h"
 #include "../../Graphics/RHI/Core/RHIDevice.h"
+#include "../../Graphics/RHI/Core/RHICommand.h"
+#include <iostream>
 
 namespace primal::graphics {
 
@@ -69,7 +71,10 @@ bool RenderSceneSnapshot::AllocateBuffers(u32 instance_capacity, u32 cluster_cap
     instance_desc.structured.elementCount = instance_capacity;
     instance_desc.structured.elementStride = sizeof(InstanceData);
     instance_desc.name = "SceneSnapshot_InstanceBuffer";
-    
+
+    std::cout << "[RenderSceneSnapshot] Creating instance buffer: capacity=" << instance_capacity
+              << " size=" << instance_buffer_size << " bytes" << std::endl;
+
     instance_buffer_ = device_->CreateBuffer(instance_desc);
     if (instance_buffer_ == rhi::handles::INVALID_RESOURCE) {
         return false;
@@ -284,36 +289,54 @@ bool RenderSceneSnapshot::ExtractSceneData(const RenderScene& scene,
                                           utl::vector<InstanceData>& out_instances,
                                           utl::vector<ClusterRef>& out_cluster_refs) {
     const utl::vector<RenderProxy>& proxies = scene.GetProxies();
-    
+
+    std::cout << "[RenderSceneSnapshot] ExtractSceneData: " << proxies.size() << " proxies" << std::endl;
+
     out_instances.clear();
     out_cluster_refs.clear();
-    
+
     out_instances.reserve(proxies.size());
-    
+
     auto& resource_manager = nanite::NaniteResourceManager::Get();
-    
+
+    u32 valid_cluster_count = 0;
+    u32 missing_resource_count = 0;
+    u32 proxyIndex = 0;
+
     for (const RenderProxy& proxy : proxies) {
-        const cluster::component_cache* cluster_cache = 
+        const cluster::component_cache* cluster_cache =
             cluster::get(proxy.meshId);
-        
+
+        std::cout << "[RenderSceneSnapshot]   Proxy[" << proxyIndex << "] meshId=" << proxy.meshId
+                  << ", entity_id=" << proxy.entityId << std::endl;
+
         if (!cluster_cache || !cluster_cache->exists) {
+            std::cout << "[RenderSceneSnapshot]     -> No cluster component or not exists" << std::endl;
             continue;
         }
-        
+
+        std::cout << "[RenderSceneSnapshot]     -> Cluster found, geometry_content_id=" 
+                  << cluster_cache->geometry_content_id 
+                  << " (valid=" << (cluster_cache->geometry_content_id != id::invalid_id) << ")" << std::endl;
+
         InstanceData instance{};
         instance.world_matrix = proxy.transform;
         instance.inverse_world_matrix = rhi::math::Inverse(proxy.transform);
-        
+
         instance.geometry_id = cluster_cache->geometry_content_id;
         instance.material_id = proxy.materialId;
         instance.cluster_start = static_cast<u32>(out_cluster_refs.size());
-        
-        nanite::NaniteRuntimeResource* resource = 
+
+        nanite::NaniteRuntimeResource* resource =
             resource_manager.GetOrCreateResource(cluster_cache->geometry_content_id);
-        
+
         if (resource) {
             instance.cluster_count = resource->cluster_data.cluster_count;
-            
+            valid_cluster_count++;
+
+            std::cout << "[RenderSceneSnapshot]   geometry_id " << instance.geometry_id
+                      << " -> " << instance.cluster_count << " clusters" << std::endl;
+
             for (u32 i = 0; i < instance.cluster_count; ++i) {
                 ClusterRef ref{};
                 ref.geometry_id = instance.geometry_id;
@@ -322,11 +345,24 @@ bool RenderSceneSnapshot::ExtractSceneData(const RenderScene& scene,
             }
         } else {
             instance.cluster_count = 0;
+            missing_resource_count++;
+
+            std::cout << "[RenderSceneSnapshot]   geometry_id " << instance.geometry_id
+                      << " -> NULL resource (missing Nanite data)" << std::endl;
         }
-        
+
         out_instances.push_back(instance);
+        proxyIndex++;
     }
-    
+
+    instance_data_cpu_ = out_instances;
+
+    std::cout << "[RenderSceneSnapshot] ExtractSceneData complete:" << std::endl;
+    std::cout << "  Valid cluster resources: " << valid_cluster_count << std::endl;
+    std::cout << "  Missing resources: " << missing_resource_count << std::endl;
+    std::cout << "  Total instances: " << out_instances.size() << std::endl;
+    std::cout << "  Total cluster refs: " << out_cluster_refs.size() << std::endl;
+
     return true;
 }
 
@@ -387,6 +423,58 @@ bool RenderSceneSnapshot::UpdateInstances(const RenderScene& scene,
         instances.push_back(instance);
     }
     
+    return true;
+}
+
+bool RenderSceneSnapshot::UploadToGPUBuffers(rhi::RHICommandBuffer* cmd_buffer) {
+    if (!cmd_buffer) {
+        std::cerr << "[RenderSceneSnapshot] UploadToGPUBuffers failed: null command buffer" << std::endl;
+        return false;
+    }
+
+    if (!initialized_) {
+        std::cerr << "[RenderSceneSnapshot] UploadToGPUBuffers failed: not initialized" << std::endl;
+        return false;
+    }
+
+    // Copy instance data from staging buffer to GPU buffer
+    if (instance_staging_buffer_ != rhi::handles::INVALID_RESOURCE &&
+        instance_buffer_ != rhi::handles::INVALID_RESOURCE &&
+        instance_count_ > 0) {
+
+        u64 instance_data_size = instance_count_ * sizeof(InstanceData);
+        u64 instance_buffer_capacity = instance_capacity_ * sizeof(InstanceData);
+
+        std::cout << "[RenderSceneSnapshot] Buffer Check: count=" << instance_count_
+                  << " capacity=" << instance_capacity_
+                  << " needed=" << instance_data_size
+                  << " available=" << instance_buffer_capacity << std::endl;
+
+        if (instance_data_size > instance_buffer_capacity) {
+            std::cerr << "[RenderSceneSnapshot] ERROR: Instance buffer too small! "
+                      << "Need " << instance_data_size << " bytes but only have "
+                      << instance_buffer_capacity << " bytes" << std::endl;
+            return false;
+        }
+
+        cmd_buffer->CopyBuffer(instance_staging_buffer_, instance_buffer_, 0, 0, instance_data_size);
+
+        std::cout << "[RenderSceneSnapshot] Uploaded " << instance_count_
+                  << " instances (" << instance_data_size << " bytes) to GPU" << std::endl;
+    }
+
+    // Copy cluster ref data from staging buffer to GPU buffer
+    if (cluster_ref_staging_buffer_ != rhi::handles::INVALID_RESOURCE &&
+        cluster_ref_buffer_ != rhi::handles::INVALID_RESOURCE &&
+        cluster_ref_count_ > 0) {
+
+        u64 cluster_ref_size = cluster_ref_count_ * sizeof(ClusterRef);
+        cmd_buffer->CopyBuffer(cluster_ref_staging_buffer_, cluster_ref_buffer_, 0, 0, cluster_ref_size);
+
+        std::cout << "[RenderSceneSnapshot] Uploaded " << cluster_ref_count_
+                  << " cluster refs (" << cluster_ref_size << " bytes) to GPU" << std::endl;
+    }
+
     return true;
 }
 

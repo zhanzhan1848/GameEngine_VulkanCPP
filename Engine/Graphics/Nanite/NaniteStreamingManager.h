@@ -63,6 +63,7 @@ public:
     rhi::ResourceHandle GetResidencyBuffer() const { return residency_buffer_; }
     rhi::ResourceHandle GetRequestBuffer() const { return request_buffer_; }
     rhi::ResourceHandle GetFeedbackBuffer() const { return feedback_buffer_; }
+    rhi::ResourceHandle GetPagePoolBuffer() const { return page_pool_buffer_; }
     
     const StreamingStats& GetStats() const { return stats_; }
     const NaniteStreamingConfig& GetConfig() const { return config_; }

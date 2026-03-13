@@ -28,6 +28,8 @@
 #include "TestGeometryDebugSponza.h"
 #elif defined(TEST_PARTICLE_SPONZA)
 #include "TestParticleSponza.h"
+#elif defined(TEST_NANITE_STREAMING_PIPELINE)
+#include "TestNaniteStreamingPipeline.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif

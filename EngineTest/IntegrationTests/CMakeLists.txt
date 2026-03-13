@@ -203,9 +203,21 @@ if(APPLE)
     setup_test_target(TestParticleSponza)
     target_compile_definitions(TestParticleSponza PRIVATE "TEST_PARTICLE_SPONZA=1" "TEST_RENDERER=0")
 
+    # 10. TestNaniteStreamingPipeline
+    add_executable(TestNaniteStreamingPipeline
+        "Main.cpp"
+        "TestNaniteStreamingPipeline.cpp"
+        "ShaderCompilation.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Input/InputMac.mm"
+    )
+    setup_test_target(TestNaniteStreamingPipeline)
+    target_compile_definitions(TestNaniteStreamingPipeline PRIVATE "TEST_NANITE_STREAMING_PIPELINE=1" "TEST_RENDERER=0")
+
 
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

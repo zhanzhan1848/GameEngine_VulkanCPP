@@ -637,13 +637,13 @@ inline v3 HSVToRGB(const v3& hsv) {
  */
 inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ) {
 #if defined(__APPLE__)
-    // 手动实现透视矩阵
+    // Metal使用的透视矩阵（NDC Z范围[0,1]，右手坐标系）
     float f = 1.0f / std::tanf(fovY * 0.5f);
     simd::float4x4 result{};
     result.columns[0] = simd::float4{f / aspect, 0.0f, 0.0f, 0.0f};
     result.columns[1] = simd::float4{0.0f, f, 0.0f, 0.0f};
-    result.columns[2] = simd::float4{0.0f, 0.0f, (farZ + nearZ) / (nearZ - farZ), -1.0f};
-    result.columns[3] = simd::float4{0.0f, 0.0f, (2.0f * farZ * nearZ) / (nearZ - farZ), 0.0f};
+    result.columns[2] = simd::float4{0.0f, 0.0f, farZ / (nearZ - farZ), -1.0f};
+    result.columns[3] = simd::float4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 1.0f};
     return result;
 #elif defined(_WIN32)
     return DirectX::XMMatrixPerspectiveFovLH(fovY, aspect, nearZ, farZ);

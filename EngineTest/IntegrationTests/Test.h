@@ -36,7 +36,7 @@
 #endif
 
 #ifndef TEST_SPONZA_RENDERGRAPH
-#define TEST_SPONZA_RENDERGRAPH 1
+#define TEST_SPONZA_RENDERGRAPH 0
 #endif
 
 class Test

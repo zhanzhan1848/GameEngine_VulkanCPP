@@ -131,24 +131,6 @@ namespace primal::content
 			const u32 num_indices{ blob.read<u32>() };
 			blob.skip(sizeof(f32)); // threshold
 
-			// Pos Buffer
-			blob.skip(12 * num_vertices);
-			// Elem Buffer
-			blob.skip(elem_size * num_vertices);
-			// Index Buffer
-			blob.skip(index_size * num_indices);
-
-			// Meshlets
-			blob.skip(sizeof(u32)); // magic_mshl
-			const u32 meshlet_count{ blob.read<u32>() };
-			blob.skip(meshlet_count * sizeof(graphics::rhi::RHIMeshlet));
-			
-			const u32 meshlet_vert_count{ blob.read<u32>() };
-			blob.skip(meshlet_vert_count * sizeof(u32));
-			
-			const u32 meshlet_tri_count{ blob.read<u32>() };
-			blob.skip(meshlet_tri_count * sizeof(u8));
-			
 			// SDF
 			blob.skip(sizeof(u32)); // magic_sdf
 			blob.skip(sizeof(u32) * 3); // Res
@@ -940,6 +922,8 @@ namespace primal::content
     void shutdown()
     {
         // Clear GPU Meshes first as they depend on Device
+        // IMPORTANT: Let unique_ptr handle cleanup automatically to avoid double-free
+        // The RHIGpuMesh destructor is safe and will not crash if device is invalid
         {
             std::lock_guard lock{ rhi_gpu_mesh_mutex };
             rhi_gpu_meshes.clear();

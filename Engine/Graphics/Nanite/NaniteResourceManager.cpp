@@ -1,5 +1,8 @@
 #include "NaniteResourceManager.h"
 #include "../RHI/Core/RHIDevice.h"
+#include "../RHI/Core/RHIGpuMesh.h"
+#include "../../Content/ContentToEngine.h"
+#include <iostream>
 #include <cassert>
 
 namespace primal::graphics::nanite {
@@ -7,10 +10,8 @@ namespace primal::graphics::nanite {
 NaniteRuntimeResource::NaniteRuntimeResource(id::id_type geo_id)
     : geometry_id(geo_id)
     , ref_count(0)
+    , gpu_mesh(nullptr)
 {
-    cluster_data.bounds_buffer = rhi::handles::INVALID_RESOURCE;
-    cluster_data.meshlet_buffer = rhi::handles::INVALID_RESOURCE;
-    cluster_data.sdf_texture = rhi::handles::INVALID_RESOURCE;
     cluster_data.cluster_count = 0;
     cluster_data.meshlet_count = 0;
 
@@ -21,9 +22,10 @@ NaniteRuntimeResource::NaniteRuntimeResource(id::id_type geo_id)
 }
 
 NaniteRuntimeResource::~NaniteRuntimeResource() {
-    assert(cluster_data.bounds_buffer == rhi::handles::INVALID_RESOURCE);
-    assert(cluster_data.meshlet_buffer == rhi::handles::INVALID_RESOURCE);
-    assert(cluster_data.sdf_texture == rhi::handles::INVALID_RESOURCE);
+    // Do not delete gpu_mesh - it's owned by rhi_gpu_meshes in ContentToEngine.cpp
+    // This is just a non-owning pointer to avoid circular dependencies
+    gpu_mesh = nullptr;
+
     assert(streaming_data.residency_buffer == rhi::handles::INVALID_RESOURCE);
     assert(streaming_data.request_buffer == rhi::handles::INVALID_RESOURCE);
 }
@@ -40,23 +42,18 @@ void NaniteResourceManager::Shutdown() {
     std::lock_guard<std::mutex> lock(mutex_);
 
     for (auto& pair : resources_) {
+        // gpu_mesh is owned by ContentToEngine, do NOT delete it here
         if (pair.second) {
-            NaniteRuntimeResource* res = pair.second.get();
-            if (res->cluster_data.bounds_buffer != rhi::handles::INVALID_RESOURCE) {
-                device_->DestroyBuffer(res->cluster_data.bounds_buffer);
-            }
-            if (res->cluster_data.meshlet_buffer != rhi::handles::INVALID_RESOURCE) {
-                device_->DestroyBuffer(res->cluster_data.meshlet_buffer);
-            }
-            if (res->cluster_data.sdf_texture != rhi::handles::INVALID_RESOURCE) {
-                device_->DestroyTexture(res->cluster_data.sdf_texture);
-            }
-            if (res->streaming_data.residency_buffer != rhi::handles::INVALID_RESOURCE) {
-                device_->DestroyBuffer(res->streaming_data.residency_buffer);
-            }
-            if (res->streaming_data.request_buffer != rhi::handles::INVALID_RESOURCE) {
-                device_->DestroyBuffer(res->streaming_data.request_buffer);
-            }
+            pair.second->gpu_mesh = nullptr;
+        }
+
+        if (pair.second && pair.second->streaming_data.residency_buffer != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(pair.second->streaming_data.residency_buffer);
+            pair.second->streaming_data.residency_buffer = rhi::handles::INVALID_RESOURCE;
+        }
+        if (pair.second && pair.second->streaming_data.request_buffer != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(pair.second->streaming_data.request_buffer);
+            pair.second->streaming_data.request_buffer = rhi::handles::INVALID_RESOURCE;
         }
     }
 
@@ -70,25 +67,80 @@ void NaniteResourceManager::Shutdown() {
 NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type geometry_id) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    std::cout << "[NaniteResourceManager] GetOrCreateResource called for geometry_id: " << geometry_id << std::endl;
+
+    if (!device_) {
+        std::cerr << "[NaniteResourceManager] ERROR: ResourceManager not initialized! device_ is null" << std::endl;
+        return nullptr;
+    }
+
     if (destroyed_resources_.count(geometry_id) > 0) {
+        std::cout << "[NaniteResourceManager]   Resource was previously destroyed, returning nullptr" << std::endl;
         return nullptr;
     }
 
     auto it = resources_.find(geometry_id);
-    if (it != resources_.end()) return it->second.get();
+    if (it != resources_.end()) {
+        std::cout << "[NaniteResourceManager]   Resource already exists, returning cached instance" << std::endl;
+        return it->second.get();
+    }
+
+    std::cout << "[NaniteResourceManager]   Creating new resource..." << std::endl;
 
     auto resource = NaniteRuntimeResource::Create(geometry_id);
-    if (!resource) return nullptr;
+    if (!resource) {
+        std::cerr << "[NaniteResourceManager]   Failed to create resource object!" << std::endl;
+        return nullptr;
+    }
 
-    resource->cluster_data.cluster_count = 1;
-    resource->cluster_data.meshlet_count = 1;
+    graphics::rhi::RHIMeshAsset meshAsset;
+    bool hasMeshletData = primal::content::get_rhi_mesh_asset(geometry_id, meshAsset);
+
+    std::cout << "[NaniteResourceManager]   get_rhi_mesh_asset returned: " << hasMeshletData << std::endl;
+
+    if (hasMeshletData) {
+        std::cout << "[NaniteResourceManager]   MeshAsset meshlets count: " << meshAsset.meshlets.size() << std::endl;
+        std::cout << "[NaniteResourceManager]   MeshAsset meshlet_vertices count: " << meshAsset.meshlet_vertices.size() << std::endl;
+        std::cout << "[NaniteResourceManager]   MeshAsset meshlet_triangles count: " << meshAsset.meshlet_triangles.size() << std::endl;
+    } else {
+        std::cout << "[NaniteResourceManager]   get_rhi_mesh_asset returned false!" << std::endl;
+    }
+
+    if (hasMeshletData && !meshAsset.meshlets.empty()) {
+        resource->cluster_data.cluster_count = static_cast<u32>(meshAsset.meshlets.size());
+        resource->cluster_data.meshlet_count = static_cast<u32>(meshAsset.meshlets.size());
+
+        std::cout << "[NaniteResourceManager]   Created resource with " << resource->cluster_data.cluster_count
+                  << " meshlets for geometry_id: " << geometry_id << std::endl;
+    } else {
+        resource->cluster_data.cluster_count = 1;
+        resource->cluster_data.meshlet_count = 1;
+
+        std::cout << "[NaniteResourceManager]   No meshlet data found for geometry_id: " << geometry_id
+                  << ", using single cluster fallback" << std::endl;
+    }
+
+    resource->gpu_mesh = primal::content::get_rhi_gpu_mesh(geometry_id);
     
-    UploadClusterData(resource.get());
+    if (resource->gpu_mesh) {
+        std::cout << "[NaniteResourceManager]   RHIGpuMesh obtained successfully" << std::endl;
+        std::cout << "[NaniteResourceManager]   GPU mesh has "
+                  << resource->gpu_mesh->GetMeshletCount() << " meshlets" << std::endl;
+        std::cout << "[NaniteResourceManager]   GPU mesh has "
+                  << resource->gpu_mesh->GetVertexCount() << " vertices" << std::endl;
+        std::cout << "[NaniteResourceManager]   GPU mesh has "
+                  << resource->gpu_mesh->GetIndexCount() << " indices" << std::endl;
+    } else {
+        std::cout << "[NaniteResourceManager]   WARNING: get_rhi_gpu_mesh returned null!" << std::endl;
+    }
 
     auto* ptr = resource.get();
     resource->ref_count.store(1, std::memory_order_relaxed);
     resources_[geometry_id] = std::move(resource);
     ref_counts_[geometry_id] = 1;
+
+    std::cout << "[NaniteResourceManager]   Resource created successfully with "
+              << ptr->cluster_data.cluster_count << " clusters" << std::endl;
 
     return ptr;
 }
@@ -98,19 +150,9 @@ void NaniteResourceManager::DestroyResource(NaniteRuntimeResource* resource) {
 
     std::lock_guard<std::mutex> lock(mutex_);
     
-    if (resource->cluster_data.bounds_buffer != rhi::handles::INVALID_RESOURCE) {
-        device_->DestroyBuffer(resource->cluster_data.bounds_buffer);
-        resource->cluster_data.bounds_buffer = rhi::handles::INVALID_RESOURCE;
-    }
-    
-    if (resource->cluster_data.meshlet_buffer != rhi::handles::INVALID_RESOURCE) {
-        device_->DestroyBuffer(resource->cluster_data.meshlet_buffer);
-        resource->cluster_data.meshlet_buffer = rhi::handles::INVALID_RESOURCE;
-    }
-    
-    if (resource->cluster_data.sdf_texture != rhi::handles::INVALID_RESOURCE) {
-        device_->DestroyTexture(resource->cluster_data.sdf_texture);
-        resource->cluster_data.sdf_texture = rhi::handles::INVALID_RESOURCE;
+    if (resource->gpu_mesh) {
+        // delete resource->gpu_mesh;
+        resource->gpu_mesh = nullptr;
     }
     
     if (resource->streaming_data.residency_buffer != rhi::handles::INVALID_RESOURCE) {
@@ -156,21 +198,19 @@ void NaniteResourceManager::ReleaseGeometryRef(id::id_type geometry_id) {
         return;
     }
     
-        if (ref_counts_[geometry_id] > 0) {
-            ref_counts_[geometry_id]--;
-            
-            it->second->ref_count.fetch_sub(1, std::memory_order_relaxed);
-            
-            if (ref_counts_[geometry_id] == 0) {
-                DestroyResource(it->second.get());
-                resources_.erase(it);
-                ref_counts_.erase(geometry_id);
-                destroyed_resources_.insert(geometry_id);
-            }
+    if (ref_counts_[geometry_id] > 0) {
+        ref_counts_[geometry_id]--;
+        
+        it->second->ref_count.fetch_sub(1, std::memory_order_relaxed);
+        
+        if (ref_counts_[geometry_id] == 0) {
+            DestroyResource(it->second.get());
+            resources_.erase(it);
+            ref_counts_.erase(geometry_id);
+            destroyed_resources_.insert(geometry_id);
         }
+    }
 }
-
-
 
 void NaniteResourceManager::RequestClusterResidency(id::id_type geometry_id, u32 cluster_index) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -182,80 +222,6 @@ void NaniteResourceManager::UpdateResidency() {
 
 void NaniteResourceManager::OnFrameEnd() {
     std::lock_guard<std::mutex> lock(mutex_);
-}
-
-void NaniteResourceManager::UploadClusterData(NaniteRuntimeResource* resource) {
-    if (!resource || !device_) return;
-    if (resource->cluster_data.cluster_count == 0) return;
-    
-    rhi::BufferDesc bounds_desc{};
-    bounds_desc.type = rhi::BufferType::Structured;
-    bounds_desc.usage = rhi::GPUMemoryUsage::Static;
-    bounds_desc.memoryUsage = rhi::GPUMemoryUsage::Static;
-    bounds_desc.size = sizeof(ClusterBounds) * resource->cluster_data.cluster_count;
-    bounds_desc.name = "NaniteClusterBounds";
-    
-    resource->cluster_data.bounds_buffer = device_->CreateBuffer(bounds_desc);
-    if (resource->cluster_data.bounds_buffer == rhi::handles::INVALID_RESOURCE) {
-        return;
-    }
-    
-    if (resource->cluster_data.meshlet_count > 1) {
-        rhi::BufferDesc meshlet_desc{};
-        meshlet_desc.type = rhi::BufferType::Structured;
-        meshlet_desc.usage = rhi::GPUMemoryUsage::Static;
-        meshlet_desc.memoryUsage = rhi::GPUMemoryUsage::Static;
-        meshlet_desc.size = sizeof(MeshletData) * resource->cluster_data.meshlet_count;
-        meshlet_desc.name = "NaniteMeshlets";
-        
-        resource->cluster_data.meshlet_buffer = device_->CreateBuffer(meshlet_desc);
-        if (resource->cluster_data.meshlet_buffer == rhi::handles::INVALID_RESOURCE) {
-            device_->DestroyBuffer(resource->cluster_data.bounds_buffer);
-            resource->cluster_data.bounds_buffer = rhi::handles::INVALID_RESOURCE;
-            return;
-        }
-    }
-    
-    if (resource->cluster_data.cluster_count > 1) {
-        rhi::TextureDesc sdf_desc{};
-        sdf_desc.size = { 64, 64, 1 };
-        sdf_desc.format = rhi::DataFormat::R8_UNorm;
-        sdf_desc.type = rhi::TextureType::Texture2DArray;
-        sdf_desc.usage = rhi::TextureUsage::ShaderResource;
-        sdf_desc.memoryUsage = rhi::GPUMemoryUsage::Static;
-        sdf_desc.mipLevels = 1;
-        sdf_desc.arraySize = resource->cluster_data.cluster_count;
-        sdf_desc.name = "NaniteClusterSDF";
-        
-        resource->cluster_data.sdf_texture = device_->CreateTexture(sdf_desc);
-        if (resource->cluster_data.sdf_texture == rhi::handles::INVALID_RESOURCE) {
-            device_->DestroyBuffer(resource->cluster_data.meshlet_buffer);
-            device_->DestroyBuffer(resource->cluster_data.bounds_buffer);
-            resource->cluster_data.meshlet_buffer = rhi::handles::INVALID_RESOURCE;
-            resource->cluster_data.bounds_buffer = rhi::handles::INVALID_RESOURCE;
-            return;
-        }
-    }
-    
-    rhi::BufferDesc residency_desc{};
-    residency_desc.type = rhi::BufferType::Structured;
-    residency_desc.usage = rhi::GPUMemoryUsage::Static;
-    residency_desc.memoryUsage = rhi::GPUMemoryUsage::Static;
-    residency_desc.size = resource->cluster_data.cluster_count * sizeof(u32);
-    residency_desc.name = "NaniteResidency";
-    
-    resource->streaming_data.residency_buffer = device_->CreateBuffer(residency_desc);
-    if (resource->streaming_data.residency_buffer == rhi::handles::INVALID_RESOURCE) {
-        device_->DestroyTexture(resource->cluster_data.sdf_texture);
-        device_->DestroyBuffer(resource->cluster_data.meshlet_buffer);
-        device_->DestroyBuffer(resource->cluster_data.bounds_buffer);
-        resource->cluster_data.sdf_texture = rhi::handles::INVALID_RESOURCE;
-        resource->cluster_data.meshlet_buffer = rhi::handles::INVALID_RESOURCE;
-        resource->cluster_data.bounds_buffer = rhi::handles::INVALID_RESOURCE;
-        return;
-    }
-    
-    resource->streaming_data.is_resident = true;
 }
 
 void NaniteResourceManager::EvictPages(u64 target_memory) {

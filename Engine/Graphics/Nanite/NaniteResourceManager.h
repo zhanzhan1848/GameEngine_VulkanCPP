@@ -10,29 +10,14 @@
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
+    class RHIGpuMesh;
 }
 
 namespace primal::graphics::nanite {
 
-struct ClusterBounds {
-    math::v3 min;
-    math::v3 max;
-    f32 screen_space_error;
-};
-
-struct MeshletData {
-    u32 vertex_offset;
-    u32 index_offset;
-    u32 triangle_count;
-    u32 padding;
-};
-
 class NaniteRuntimeResource {
 public:
     struct ClusterData {
-        rhi::ResourceHandle bounds_buffer;
-        rhi::ResourceHandle meshlet_buffer;
-        rhi::ResourceHandle sdf_texture;
         u32 cluster_count;
         u32 meshlet_count;
     };
@@ -47,6 +32,8 @@ public:
     id::id_type geometry_id;
     ClusterData cluster_data;
     StreamingData streaming_data;
+    
+    rhi::RHIGpuMesh* gpu_mesh{ nullptr };
     
     std::atomic<u32> ref_count{ 0 };
 

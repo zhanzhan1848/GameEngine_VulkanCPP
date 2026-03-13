@@ -61,6 +61,8 @@ struct ClusterVisibility {
     uint cluster_index;
     uint instance_index;
     uint lod_level;
+    uint frame_index;
+    uint padding[3]; // Align to 32 bytes
 };
 
 // Frustum Planes for culling
@@ -71,6 +73,13 @@ struct FrustumPlanes {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+// ============================================================================
+// Constants
+// ============================================================================
+constant uint MAX_CLUSTERS_PER_INSTANCE = 256;
+constant uint MAX_INSTANCES = 100000;
+constant uint MAX_CLUSTERS = MAX_INSTANCES * MAX_CLUSTERS_PER_INSTANCE;
 
 // Extract frustum planes from view-projection matrix
 FrustumPlanes extract_frustum_planes(float4x4 vp_matrix) {
@@ -157,6 +166,19 @@ uint select_lod_level(float distance, float screen_space_error, float lod_bias, 
 }
 
 // ============================================================================
+// Stage 0: Reset Counter
+// ============================================================================
+
+kernel void stage0_reset_counter(
+    device atomic_uint* visible_counter [[buffer(6)]],
+    uint3 global_id [[thread_position_in_grid]])
+{
+    if (global_id.x == 0) {
+        atomic_store_explicit(visible_counter, 0, memory_order_relaxed);
+    }
+}
+
+// ============================================================================
 // Stage 1: Instance-Level Frustum Culling
 // ============================================================================
 
@@ -165,19 +187,22 @@ kernel void stage1_instance_frustum_culling(
     device const BoundingSphere* instance_bounds [[buffer(1)]],
     device InstanceVisibility* instance_visibility [[buffer(2)]],
     constant CullingUniforms& uniforms [[buffer(3)]],
-    uint3 global_id [[thread_position_in_grid]],
-    uint3 local_id [[thread_position_in_threadgroup]],
-    uint3 group_id [[threadgroup_position_in_grid]])
+    uint3 global_id [[thread_position_in_grid]])
 {
     uint instance_id = global_id.x;
 
-    // DEBUG: Write debug info for ALL threads to see which ones actually execute
-    if (instance_id < 1000) { // Maximum debug range
-        instance_visibility[instance_id].is_visible = 0xBAD + instance_id;  // Pattern: each thread writes unique value
-        instance_visibility[instance_id].instance_index = instance_id;
-        instance_visibility[instance_id].lod_level = group_id.x;  // Thread group ID
-        instance_visibility[instance_id].distance_rank = local_id.x;  // Local thread ID
+    if (instance_id >= uniforms.instance_count || instance_id >= 10000) { // Safety limit
+        return;
     }
+
+    // DISABLE CULLING: Make everything visible for stable debugging
+    bool visible = true;
+
+    // Write results
+    instance_visibility[instance_id].is_visible = visible ? 1 : 0;
+    instance_visibility[instance_id].instance_index = instance_id;
+    instance_visibility[instance_id].lod_level = 0;
+    instance_visibility[instance_id].distance_rank = 0;
 }
 
 // ============================================================================
@@ -197,8 +222,13 @@ kernel void stage2_distance_small_object_culling(
         return;
     }
 
-    // STEP 1: NO CULLING - Pass through all instances
-    // Just calculate distance rank for LOD selection (no actual culling)
+    // Skip if already culled
+    if (instance_visibility[instance_id].is_visible == 0) {
+        return;
+    }
+
+    // TEMPORARY: Skip all culling for debugging
+    // Just calculate distance rank for LOD selection
     device const InstanceData& instance = instances[instance_id];
     device const BoundingSphere& bounds = instance_bounds[instance_id];
 
@@ -209,8 +239,8 @@ kernel void stage2_distance_small_object_culling(
     // Calculate distance to camera
     float distance = length(world_center - uniforms.camera_position);
 
-    // Calculate distance rank for LOD selection (but don't cull)
-    instance_visibility[instance_id].distance_rank = (uint)(distance * 10.0);
+    // Calculate distance rank for LOD selection
+    instance_visibility[instance_id].distance_rank = (uint)(distance * 10.0); // Quantize for sorting
 }
 
 // ============================================================================
@@ -263,16 +293,16 @@ kernel void stage3_lod_selection(
 // ============================================================================
 
 kernel void stage4_cluster_expansion(
-    device const InstanceVisibility* instance_visibility [[buffer(0)]],
-    device const ClusterRef* cluster_refs [[buffer(1)]],
-    device const InstanceData* instances [[buffer(2)]],
-    device ClusterVisibility* cluster_visibility [[buffer(3)]],
-    constant CullingUniforms& uniforms [[buffer(4)]],
+    device const InstanceVisibility* instance_visibility [[buffer(2)]],
+    device const ClusterRef* cluster_refs [[buffer(4)]],
+    device const InstanceData* instances [[buffer(0)]],
+    device ClusterVisibility* cluster_visibility [[buffer(5)]],
+    constant CullingUniforms& uniforms [[buffer(3)]],
     uint3 global_id [[thread_position_in_grid]])
 {
     uint instance_id = global_id.x;
 
-    if (instance_id >= uniforms.instance_count || instance_id >= 10000) {
+    if (instance_id >= uniforms.instance_count || instance_id >= MAX_INSTANCES) {
         return;
     }
 
@@ -290,14 +320,17 @@ kernel void stage4_cluster_expansion(
 
     for (uint i = 0; i < cluster_count; i++) {
         uint cluster_idx = cluster_start + i;
-        uint visibility_idx = instance_id * 256 + i; // Max 256 clusters per instance
+        uint visibility_idx = instance_id * MAX_CLUSTERS_PER_INSTANCE + i; // Max 256 clusters per instance
 
-        if (visibility_idx >= 100000) break; // Safety limit
+        if (visibility_idx >= MAX_CLUSTERS) break; // Safety limit
 
+        // Mark as visible for now - occlusion culling can disable later if needed
+        // Use stable cluster index for consistent visibility across frames
         cluster_visibility[visibility_idx].is_visible = 1;
         cluster_visibility[visibility_idx].cluster_index = cluster_idx;
         cluster_visibility[visibility_idx].instance_index = instance_id;
         cluster_visibility[visibility_idx].lod_level = lod_level;
+        cluster_visibility[visibility_idx].frame_index = uniforms.frame_index;
     }
 }
 
@@ -306,20 +339,16 @@ kernel void stage4_cluster_expansion(
 // ============================================================================
 
 kernel void stage5_occlusion_culling(
-    device const ClusterVisibility* cluster_visibility [[buffer(0)]],
-    device ClusterVisibility* cluster_visibility_out [[buffer(1)]],
+    device const ClusterVisibility* cluster_visibility [[buffer(5)]],
     texture2d<float> hzb_texture [[texture(0)]],
-    constant CullingUniforms& uniforms [[buffer(2)]],
+    constant CullingUniforms& uniforms [[buffer(3)]],
     uint3 global_id [[thread_position_in_grid]])
 {
     uint cluster_idx = global_id.x;
 
-    if (cluster_idx >= 100000) { // Safety limit
+    if (cluster_idx >= MAX_CLUSTERS) { // Safety limit
         return;
     }
-
-    // Copy input to output
-    cluster_visibility_out[cluster_idx] = cluster_visibility[cluster_idx];
 
     // Skip if already culled or occlusion culling disabled
     if (cluster_visibility[cluster_idx].is_visible == 0 || !uniforms.enable_occlusion_culling) {
@@ -328,6 +357,7 @@ kernel void stage5_occlusion_culling(
 
     // TODO: Implement HZB occlusion culling
     // This requires proper HZB texture generation and sampling
+    // For now, this is a placeholder that doesn't modify the visibility data
 }
 
 // ============================================================================
@@ -335,28 +365,59 @@ kernel void stage5_occlusion_culling(
 // ============================================================================
 
 kernel void stage6_compact_visible_list(
-    device const ClusterVisibility* cluster_visibility [[buffer(0)]],
-    device atomic_uint* visible_counter [[buffer(1)]],
-    device uint* visible_cluster_list [[buffer(2)]],
+    device const InstanceData* instances [[buffer(0)]],
+    device const InstanceVisibility* instance_visibility [[buffer(2)]],
+    device const ClusterVisibility* cluster_visibility [[buffer(5)]],
+    device atomic_uint* visible_counter [[buffer(6)]],
+    device uint* visible_cluster_list [[buffer(7)]],
     constant CullingUniforms& uniforms [[buffer(3)]],
     uint3 global_id [[thread_position_in_grid]])
 {
-    uint cluster_idx = global_id.x;
+    // Process the full visibility array range (instance_count * 256)
+    // This handles the sparse distribution of clusters across instances
+    uint instance_id = global_id.x / MAX_CLUSTERS_PER_INSTANCE;  // Which instance
+    uint cluster_offset = global_id.x % MAX_CLUSTERS_PER_INSTANCE;  // Which cluster within instance
+    uint visibility_idx = global_id.x;
 
-    if (cluster_idx >= 100000) { // Safety limit
+    if (visibility_idx >= MAX_CLUSTERS) { // Safety limit
         return;
     }
 
-    // Skip if not visible
-    if (cluster_visibility[cluster_idx].is_visible == 0) {
+    // Check instance bounds
+    if (instance_id >= uniforms.instance_count) {
+        return;
+    }
+
+    // 1. Check if instance is visible
+    // This is CRITICAL because if the instance is culled, Stage 4 doesn't run,
+    // so cluster_visibility buffer contains STALE data from previous frames.
+    if (instance_visibility[instance_id].is_visible == 0) {
+        return;
+    }
+
+    // 2. Check if this is a valid cluster slot
+    // This is CRITICAL because Stage 4 only writes to slots < cluster_count.
+    // Slots >= cluster_count contain UNINITIALIZED GARBAGE.
+    device const InstanceData& instance = instances[instance_id];
+    if (cluster_offset >= instance.cluster_count) {
+        return;
+    }
+
+    // 3. Check cluster visibility (e.g. from Occlusion Culling)
+    // AND check frame index to prevent reading stale data from previous frames (Crucial for flickering fix)
+    if (cluster_visibility[visibility_idx].is_visible == 0 ||
+        cluster_visibility[visibility_idx].frame_index != uniforms.frame_index) {
         return;
     }
 
     // Atomic increment to get position in visible list
     uint list_idx = atomic_fetch_add_explicit(visible_counter, 1, memory_order_relaxed);
 
-    if (list_idx < 100000) { // Safety limit
-        visible_cluster_list[list_idx] = cluster_idx;
+    if (list_idx < MAX_CLUSTERS) { // Safety limit
+        // Store the actual cluster index for rendering
+        // Use stable cluster_index instead of visibility_idx to prevent flickering
+        uint cluster_index = cluster_visibility[visibility_idx].cluster_index;
+        visible_cluster_list[list_idx] = cluster_index;
     }
 }
 
@@ -372,9 +433,9 @@ struct IndirectDrawCommand {
 };
 
 kernel void stage7_build_indirect_commands(
-    device const atomic_uint* visible_counter [[buffer(0)]],
-    device const uint* visible_cluster_list [[buffer(1)]],
-    device IndirectDrawCommand* indirect_commands [[buffer(2)]],
+    device const atomic_uint* visible_counter [[buffer(6)]],
+    device const uint* visible_cluster_list [[buffer(7)]],
+    device IndirectDrawCommand* indirect_commands [[buffer(8)]],
     constant CullingUniforms& uniforms [[buffer(3)]],
     uint3 global_id [[thread_position_in_grid]])
 {
@@ -384,6 +445,15 @@ kernel void stage7_build_indirect_commands(
     }
 
     uint visible_count = atomic_load_explicit(visible_counter, memory_order_relaxed);
+
+    // Safety clamp to prevent out of bounds indirect draw
+    // This is CRITICAL for preventing GPU hangs
+    if (visible_count > MAX_CLUSTERS) {
+        visible_count = MAX_CLUSTERS;
+    }
+    
+    // Also clamp to 0 if something went wrong
+    if (visible_count < 0) visible_count = 0;
 
     // Build single indirect command for all visible clusters
     IndirectDrawCommand cmd;
