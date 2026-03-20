@@ -15,17 +15,25 @@ namespace primal::graphics {
 
 class RenderScene;
 
-// GPU memory layout: 144 bytes total, 16-byte aligned for optimal GPU access
+// GPU memory layout: 192 bytes total, 16-byte aligned for optimal GPU access
 struct InstanceData {
-    math::m4x4 world_matrix;              // 64 bytes
-    math::m4x4 inverse_world_matrix;      // 64 bytes
-    id::id_type geometry_id;              // 4 bytes - references NaniteResourceManager
-    id::id_type material_id;              // 4 bytes - material instance ID
-    u32 cluster_start;                    // 4 bytes - start index in cluster ref buffer
-    u32 cluster_count;                    // 4 bytes - number of clusters for this instance
+    math::m4x4 world_matrix;              // 64 bytes - offsets 0-63
+    math::m4x4 inverse_world_matrix;      // 64 bytes - offsets 64-127
+    id::id_type geometry_id;              // 4 bytes - offset 128
+    id::id_type material_id;              // 4 bytes - offset 132
+    u32 cluster_start;                    // 4 bytes - offset 136
+    u32 cluster_count;                    // 4 bytes - offset 140
+    u32 cluster_map_base;                 // 4 bytes - offset 144
+    u32 padding;                         // 4 bytes - offset 148
+    u32 padding1;                         // 4 bytes - offset 152 (extra padding for 16-byte alignment)
+    u32 padding2;                         // 4 bytes - offset 156 (extra padding for alignment)
+    math::v3 bounds_center;               // 12 bytes - offsets 160-171 (16-byte aligned!)
+    f32 bounds_radius;                    // 4 bytes - offset 172
+    u32 bounds_padding[2];                // 12 bytes - offsets 176-187
+    u32 bounds_padding2;                  // 4 bytes - offset 188-191 (total 192 bytes)
 };
 
-static_assert(sizeof(InstanceData) == 144, "InstanceData must be 144 bytes for GPU alignment");
+static_assert(sizeof(InstanceData) == 192, "InstanceData must be 192 bytes for GPU alignment");
 
 struct ClusterRef {
     id::id_type geometry_id;              // 4 bytes

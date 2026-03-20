@@ -140,7 +140,7 @@ void MetalBuffer::destroyImpl() {
     auto poolHandle = poolHandle_;
 
     if (mtlBuffer || (pool && poolHandle != 0)) {
-        std::cout << "[MetalBuffer] Destroying buffer at " << mtlBuffer << std::endl;
+        // std::cout << "[MetalBuffer] Destroying buffer at " << mtlBuffer << std::endl;
         device_.GetGarbageCollector().DeferredDestroy([mtlBuffer, pool, poolHandle]() {
             if (mtlBuffer) {
                 mtlBuffer->release();

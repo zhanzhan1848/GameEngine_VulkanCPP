@@ -294,8 +294,8 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     static int passCount = 0;
     passCount++;
     
-    // Log first 50 render passes with texture details
-    if (passCount <= 50) {
+    // Log first 5 render passes with texture details
+    if (passCount <= 5) {
         std::cout << "[Metal] BeginRenderPass #" << passCount << ": colorAttachments=" << desc.colorAttachments.size();
         if (!desc.colorAttachments.empty()) {
             std::cout << " texture[0]=" << desc.colorAttachments[0].texture
@@ -785,6 +785,27 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     MetalBuffer* buffer = metalDevice.GetBuffer(binding.resources[0]);
                     if (buffer && buffer->GetNativeBuffer()) {
                                 u64 offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
+
+                                // DEBUG: Log uniform buffer binding
+                                if (binding.type == DescriptorType::UniformBuffer && slot == 3) {
+                                    // std::cout << "[MetalCommandBuffer] DEBUG - Binding uniform buffer to slot 3:" << std::endl;
+                                    // std::cout << "  Buffer native pointer: " << buffer->GetNativeBuffer() << std::endl;
+                                    // std::cout << "  Offset: " << offset << std::endl;
+                                    // std::cout << "  Buffer contents address: " << buffer->GetNativeBuffer()->contents() << std::endl;
+
+                                    // Debug: Check data at different offsets
+                                    float* testData = static_cast<float*>(buffer->GetNativeBuffer()->contents());
+                                    // std::cout << "  Offset 0 (view_matrix[0]): " << testData[0] << ", " << testData[1] << ", " << testData[2] << ", " << testData[3] << std::endl;
+                                    // std::cout << "  Offset 16 (view_matrix[1]): " << testData[4] << ", " << testData[5] << ", " << testData[6] << ", " << testData[7] << std::endl;
+
+                                    // Check camera_position at offset 192 bytes = 48 floats
+                                    // std::cout << "  Offset 192 (camera_position): " << testData[48] << ", " << testData[49] << ", " << testData[50] << std::endl;
+
+                                    // Check frame_index at offset 216 bytes = 54 floats
+                                    u32* uintData = reinterpret_cast<u32*>(testData);
+                                    // std::cout << "  Offset 216 (frame_index): " << uintData[54] << std::endl;
+                                }
+
                                 if (renderEncoder) {
                                     if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Vertex))
                                         renderEncoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, slot);
@@ -793,6 +814,14 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                         } else if (computeEncoder) {
                             if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                                 computeEncoder->setBuffer(buffer->GetNativeBuffer(), offset, slot);
+                        }
+                    } else {
+                        // std::cerr << "[MetalCommandBuffer] ERROR - Failed to bind buffer at slot " << slot
+                        //           << " (binding type: " << (int)binding.type << ")" << std::endl;
+                        if (!buffer) {
+                            std::cerr << "  Buffer is null" << std::endl;
+                        } else if (!buffer->GetNativeBuffer()) {
+                            std::cerr << "  Native buffer is null" << std::endl;
                         }
                     }
                     break;
@@ -919,10 +948,10 @@ void MetalCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, u32 queryInde
 }
 
 void MetalCommandBuffer::Draw(u32 vertexCount, u32 startVertex, u32 instanceCount, u32 startInstance) {
-    // DEBUG: Log ALL draw calls for first 50 calls
+    // DEBUG: Log ALL draw calls for first 10 calls
     static int totalDrawCount = 0;
     totalDrawCount++;
-    if (totalDrawCount <= 50) {
+    if (totalDrawCount <= 10) {
         std::cout << "[Metal] DRAW #" << totalDrawCount << ": vertexCount=" << vertexCount 
                   << " instanceCount=" << instanceCount 
                   << " encoderType=" << (int)currentEncoderType_ << std::endl;
@@ -974,6 +1003,19 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
             MTL::RenderCommandEncoder* encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
             MTL::Buffer* nativeBuffer = mtlBuffer->GetNativeBuffer();
 
+            // DEBUG: Read indirect arguments to see what we're actually drawing
+            void* mappedData = metalDevice.MapBuffer(buffer);
+            MTL::DrawPrimitivesIndirectArguments* indirectArgs = reinterpret_cast<MTL::DrawPrimitivesIndirectArguments*>(mappedData);
+
+            if (indirectArgs) {
+                // std::cout << "[Metal] DrawIndirect called with buffer: " << buffer << " offset: " << offset << std::endl;
+                // std::cout << "  VertexCount: " << indirectArgs->vertexCount << std::endl;
+                // std::cout << "  InstanceCount: " << indirectArgs->instanceCount << std::endl;
+                // std::cout << "  VertexStart: " << indirectArgs->vertexStart << std::endl;
+                // Note: Metal doesn't have instanceStart field
+                metalDevice.UnmapBuffer(buffer);
+            }
+
             // Use Metal's proper indirect drawing API
             // This allows GPU to make draw decisions autonomously
             for (u32 i = 0; i < drawCount; ++i) {
@@ -983,7 +1025,17 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
                     offset + i * sizeof(MTL::DrawPrimitivesIndirectArguments)
                 );
             }
+            // std::cout << "[Metal] DrawPrimitives indirect called" << std::endl;
+        } else {
+            // std::cerr << "[Metal] DrawIndirect ERROR: Invalid buffer or native buffer is null!" << std::endl;
+            if (!mtlBuffer) {
+                std::cerr << "  MetalBuffer is null" << std::endl;
+            } else {
+                std::cerr << "  NativeBuffer is null" << std::endl;
+            }
         }
+    } else {
+        std::cerr << "[Metal] DrawIndirect ERROR: Not in render encoder! Current encoder type: " << (int)currentEncoderType_ << std::endl;
     }
 }
 
@@ -1103,6 +1155,64 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barr
     // For now, empty.
 }
 
+void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask,
+                                      AccessFlag srcAccessMask, AccessFlag dstAccessMask) {
+    // CONSERVATIVE STRATEGY: Force encoder isolation for all GPU Culling stages
+    // This ensures proper Metal dependency tracking between compute dispatches
+
+    if (currentEncoder_ != nullptr) {
+        switch (currentEncoderType_) {
+            case EncoderType::Compute:
+                if (auto computeEncoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_)) {
+                    // Memory barrier for compute shaders
+                    computeEncoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+                    // Debug output for first few barriers
+                    static int barrierCount = 0;
+                    if (barrierCount < 10) {
+                        // std::cout << "[MetalBarrier] Compute memory barrier #" << barrierCount << " (CONSERVATIVE)" << std::endl;
+                        barrierCount++;
+                    }
+
+                    // CONSERVATIVE APPROACH: Always end encoder for GPU Culling stages
+                    // This prevents any potential out-of-order execution between dispatches
+                    // Critical for multi-stage pipelines like: Stage0 → Stage1 → Stage2 → ... → Stage7
+                    bool isComputeToCompute = (static_cast<u32>(dstStageMask) & static_cast<u32>(PipelineStage::ComputeShader)) != 0;
+                    bool isComputeToDraw = (static_cast<u32>(dstStageMask) & static_cast<u32>(PipelineStage::DrawIndirect)) != 0;
+                    bool hasShaderWrite = (static_cast<u32>(srcAccessMask) & static_cast<u32>(AccessFlag::ShaderWrite)) != 0;
+
+                    // Force encoder isolation for:
+                    // 1. Compute-to-Compute transitions (Stage N → Stage N+1)
+                    // 2. Compute-to-Draw transitions (GPU Culling → Drawing)
+                    // 3. Any shader write operations
+                    if (isComputeToCompute || isComputeToDraw || hasShaderWrite) {
+                        endCurrentEncoder();
+                        if (barrierCount <= 10) {
+                            // std::cout << "[MetalBarrier] FORCE END: Compute encoder for strict synchronization" << std::endl;
+                            // std::cout << "[MetalBarrier]   Reason: ComputeToCompute=" << isComputeToCompute
+                            //          << " ComputeToDraw=" << isComputeToDraw
+                            //          << " ShaderWrite=" << hasShaderWrite << std::endl;
+                        }
+                    }
+                }
+                break;
+            case EncoderType::Render:
+                // For render encoders, we handle barriers differently
+                // End the render pass and start a new one if needed
+                endCurrentEncoder();
+                break;
+            case EncoderType::Blit:
+                // For Blit encoders, ending the encoder ensures completion of copy commands
+                endCurrentEncoder();
+                break;
+            default:
+                // For unknown encoder types, end it to be safe
+                endCurrentEncoder();
+                break;
+        }
+    }
+}
+
     // Helper to get pixel format info for block-based calculation
     struct PixelFormatInfo {
         u32 bytesPerBlock;
@@ -1113,7 +1223,7 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barr
     static PixelFormatInfo GetPixelFormatInfo(MTL::PixelFormat format) {
         // Debug print to ensure we are running the new version
         u64 fmt = (u64)format;
-        std::cout << "DEBUG: GetPixelFormatInfo(" << fmt << ")" << std::endl;
+        // std::cout << "DEBUG: GetPixelFormatInfo(" << fmt << ")" << std::endl;
         switch (fmt) {
             // Uncompressed formats
             case 10: // MTL::PixelFormatR8Unorm

@@ -67,7 +67,8 @@ public:
                  const math::m4x4& view_matrix,
                  const math::m4x4& projection_matrix,
                  const CullingResults& culling_results,
-                 u32 frame_index = 0);
+                 u32 frame_index = 0,
+                 u32 buffer_index = 0);
 
     const GPUDrawResults& GetResults() const { return results_; }
     const BinningConfig& GetBinningConfig() const { return binning_config_; }
@@ -76,6 +77,7 @@ public:
 
     void SetHZBSystem(HZBSystem* hzb_system) { hzb_system_ = hzb_system; }
     void SetVisibilityBufferSystem(VisibilityBufferSystem* vis_system) { visibility_buffer_system_ = vis_system; }
+    void SetCullingPipeline(class GPUCullingPipeline* culling_pipeline) { culling_pipeline_ = culling_pipeline; }
 
     void UpdateGeometryData(const RenderSceneSnapshot& scene_snapshot);
     bool CreateGeometryBuffers(u32 vertex_count, u32 index_count);
@@ -107,7 +109,8 @@ private:
                              const RenderSceneSnapshot& scene_snapshot,
                              const CullingResults& culling_results,
                              const GPUDrawResults& intermediate_results,
-                             u32 frame_index);
+                             u32 frame_index,
+                             u32 buffer_index);
 
     void SetupVisibilityBufferPipeline(rhi::RHICommandBuffer* cmd_buffer);
     void ResolveVisibilityBuffer(rhi::RHICommandBuffer* cmd_buffer);
@@ -120,6 +123,7 @@ private:
 
     HZBSystem* hzb_system_{ nullptr };
     VisibilityBufferSystem* visibility_buffer_system_{ nullptr };
+    class GPUCullingPipeline* culling_pipeline_{ nullptr };
 
     rhi::PipelineLayoutHandle binning_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineHandle binning_pipeline_{ rhi::handles::INVALID_PIPELINE };
@@ -130,11 +134,20 @@ private:
     rhi::PipelineLayoutHandle draw_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineHandle draw_pipeline_{ rhi::handles::INVALID_PIPELINE };
 
+    struct FrameResource {
+        rhi::ResourceHandle camera_constants_buffer{ rhi::handles::INVALID_RESOURCE };
+        rhi::DescriptorSetHandle global_draw_descriptor_set{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    };
+
+    utl::vector<FrameResource> frame_resources_;
+
+    // Single buffers (read-only or static)
     rhi::ResourceHandle bin_data_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle bin_counter_buffer_{ rhi::handles::INVALID_RESOURCE };
-    rhi::ResourceHandle visibility_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle visibility_buffer_{ rhi::handles::INVALID_RESOURCE }; // Texture
     rhi::ResourceHandle indirect_draw_buffer_{ rhi::handles::INVALID_RESOURCE };
-    rhi::ResourceHandle camera_constants_buffer_{ rhi::handles::INVALID_RESOURCE };
+    
+    // Global Geometry Buffers (Static/Append only)
 
     rhi::ResourceHandle vertex_position_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle vertex_normal_buffer_{ rhi::handles::INVALID_RESOURCE };

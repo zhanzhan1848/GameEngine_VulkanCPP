@@ -102,6 +102,7 @@ public:
     void BlitTexture(ResourceHandle src, ResourceHandle dst, const TextureBlitRegion* regions, u32 regionCount, FilterMode filter) override;
     void GenerateMipmaps(ResourceHandle texture) override;
     void InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) override;
+    void MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask, AccessFlag srcAccessMask, AccessFlag dstAccessMask) override;
 
 private:
     SyncHandle guardEventHandle_ = handles::INVALID_SYNC;

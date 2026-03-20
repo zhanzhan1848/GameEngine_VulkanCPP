@@ -320,7 +320,7 @@ namespace primal::content
 		id::id_type create_mesh_hierarchy(const void *const data)
 		{
 			assert(data);
-			std::cout << "create_mesh_hierarchy called." << std::endl;
+			// std::cout << "create_mesh_hierarchy called." << std::endl;
 			const u32 size{ get_geometry_hierarchy_buffer_size(data) };
 			u8 *const hierarchy_buffer{ (u8 *const)malloc(size) };
 
@@ -341,7 +341,7 @@ namespace primal::content
 				for (u32 id_idx{ 0 }; id_idx < id_count; ++id_idx)
 				{
 					const u8* at{ blob.position() };
-					std::cout << "create_mesh_hierarchy: calling graphics::add_submesh for LOD " << lod_idx << ", id " << id_idx << std::endl;
+					// std::cout << "create_mesh_hierarchy: calling graphics::add_submesh for LOD " << lod_idx << ", id " << id_idx << std::endl;
 					gpu_ids[submesh_index++] = graphics::add_submesh(at);
 					skip_mesh_in_blob(blob);
 					assert(submesh_index < (1 << 16));
@@ -369,14 +369,14 @@ namespace primal::content
 		id::id_type create_single_submesh(const void *const data)
 		{
 			assert(data);
-			std::cout << "create_single_submesh called." << std::endl;
+			// std::cout << "create_single_submesh called." << std::endl;
 			utl::blob_stream_reader blob{ (const u8*)data };
 			// skip lod_count, lod_threshold, submesh_count and size_of_submeshes
 			blob.skip(sizeof(u32) + sizeof(f32) + sizeof(u32) + sizeof(u32));
 			const u8* at{ blob.position() };
-			std::cout << "create_single_submesh: calling graphics::add_submesh..." << std::endl;
+			// std::cout << "create_single_submesh: calling graphics::add_submesh..." << std::endl;
 			const id::id_type gpu_id{ graphics::add_submesh(at) };
-			std::cout << "create_single_submesh: graphics::add_submesh returned " << gpu_id << std::endl;
+			// std::cout << "create_single_submesh: graphics::add_submesh returned " << gpu_id << std::endl;
 
 			// create a fake pointer and put it in the geometry hierarchies
 			static_assert(sizeof(uintptr_t) > sizeof(id::id_type));
@@ -535,9 +535,9 @@ namespace primal::content
 		[[nodiscard]] id::id_type create_geometry_resource(const void *const data)
 		{
 			assert(data);
-			std::cout << "create_geometry_resource: Checking is_single_mesh..." << std::endl;
+			// std::cout << "create_geometry_resource: Checking is_single_mesh..." << std::endl;
 			bool single = is_single_mesh(data);
-			std::cout << "create_geometry_resource: is_single_mesh = " << single << std::endl;
+			// std::cout << "create_geometry_resource: is_single_mesh = " << single << std::endl;
 			return single ? create_single_submesh(data) : create_mesh_hierarchy(data);
 		}
 
@@ -699,7 +699,7 @@ namespace primal::content
                         if (!mtlTexture) {
                             std::cerr << "Failed to get native Metal texture." << std::endl;
                         } else {
-                            std::cout << "Got native Metal texture: " << mtlTexture << std::endl;
+                            // std::cout << "Got native Metal texture: " << mtlTexture << std::endl;
                         }
 						
 						for (u32 i{ 0 }; i < array_size; ++i)

@@ -154,7 +154,7 @@ namespace primal::graphics::rhi
         // Element Buffer
         if (!asset.element_buffer.empty())
         {
-            std::cout << "RHIGpuMesh: Creating element buffer, size=" << asset.element_buffer.size() << std::endl;
+            // std::cout << "RHIGpuMesh: Creating element buffer, size=" << asset.element_buffer.size() << std::endl;
             if (!CreateAndUploadBuffer(asset.element_buffer.data(), asset.element_buffer.size(), element_buffer_, BufferUsageFlags::Vertex, "MeshElementBuffer")) return false;
         } else {
             std::cout << "RHIGpuMesh: WARNING - element_buffer is EMPTY! num_vertices=" << asset.num_vertices << ", elements_type=" << asset.elements_type << std::endl;
@@ -201,7 +201,7 @@ namespace primal::graphics::rhi
                 sdf_resolution_[0] = asset.sdf.resolution[0];
                 sdf_resolution_[1] = asset.sdf.resolution[1];
                 sdf_resolution_[2] = asset.sdf.resolution[2];
-                std::cout << "RHIGpuMesh: SDF Texture uploaded successfully. Res: " << sdf_resolution_[0] << "x" << sdf_resolution_[1] << "x" << sdf_resolution_[2] << std::endl;
+                // std::cout << "RHIGpuMesh: SDF Texture uploaded successfully. Res: " << sdf_resolution_[0] << "x" << sdf_resolution_[1] << "x" << sdf_resolution_[2] << std::endl;
             } else {
                  std::cerr << "RHIGpuMesh: Failed to upload SDF Texture." << std::endl;
                  return false;
@@ -220,7 +220,7 @@ namespace primal::graphics::rhi
                 voxel_resolution_[0] = asset.sdf.resolution[0];
                 voxel_resolution_[1] = asset.sdf.resolution[1];
                 voxel_resolution_[2] = asset.sdf.resolution[2];
-                std::cout << "RHIGpuMesh: Voxel Texture uploaded successfully." << std::endl;
+                // std::cout << "RHIGpuMesh: Voxel Texture uploaded successfully." << std::endl;
             } else {
                 return false;
             }

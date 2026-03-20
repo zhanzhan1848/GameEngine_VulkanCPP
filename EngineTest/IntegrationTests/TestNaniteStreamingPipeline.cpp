@@ -3,6 +3,7 @@
 #include "Engine/Content/AsyncResourceLoader.h"
 #include "Engine/JobSystem/JobSystem.h"
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
+#include "Engine/Graphics/RHI/Core/RHIGpuMesh.h"
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Engine/Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Engine/Graphics/RenderGraph/RenderGraphDefinitions.h"
@@ -142,6 +143,9 @@ bool TestNaniteStreamingPipeline::Initialize() {
     std::cout << "  - Max Clusters: " << testConfig_.max_clusters << std::endl;
     std::cout << "  - Max Requests/Frame: " << testConfig_.max_requests_per_frame << std::endl;
 
+    // Print all instance bounds information
+    PrintAllInstanceBounds();
+
     return true;
 }
 
@@ -193,8 +197,10 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     cullingConfig.max_clusters_per_dispatch = testConfig_.max_clusters;
     cullingConfig.max_instances_per_dispatch = testConfig_.max_instances;
     cullingConfig.enable_streaming_feedback = testConfig_.enable_streaming;
-    cullingConfig.enable_occlusion_culling = testConfig_.enable_occlusion_culling;
-    cullingConfig.enable_lod_selection = testConfig_.enable_lod_selection;
+    cullingConfig.enable_occlusion_culling = false; // DISABLED: HZB Occlusion Culling to isolate flickering
+    cullingConfig.enable_lod_selection = false; // DISABLED: LOD Selection to isolate flickering
+    // cullingConfig.enable_occlusion_culling = testConfig_.enable_occlusion_culling;
+    // cullingConfig.enable_lod_selection = testConfig_.enable_lod_selection;
 
     std::cout << "[TestNanite] Initializing GPUCullingPipeline..." << std::endl;
     if (!cullingPipeline_->Initialize(device_, cullingConfig)) {
@@ -202,6 +208,10 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         return false;
     }
     std::cout << "[TestNanite] GPUCullingPipeline initialized, IsInitialized=" << cullingPipeline_->IsInitialized() << std::endl;
+
+    // Enable GPU culling debug output to diagnose culling issues
+    cullingPipeline_->EnableDebugOutput(true);
+    std::cout << "[TestNanite] GPU culling debug output ENABLED" << std::endl;
 
     // Initialize GPU Driven Draw Pipeline
     gpuDrawPipeline_ = &graphics::nanite::GPUDrivenDrawPipeline::Get();
@@ -222,6 +232,9 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         std::cerr << "Failed to initialize GPU driven draw pipeline" << std::endl;
         return false;
     }
+
+    // CRITICAL: Connect culling pipeline to draw pipeline for proper buffer access
+    gpuDrawPipeline_->SetCullingPipeline(cullingPipeline_);
 
     // CONNECT HZB AND VISIBILITY BUFFER SYSTEMS TO GPU DRIVEN PIPELINE - DISABLED
     // gpuDrawPipeline_->SetHZBSystem(hzbSystem_.get());
@@ -309,11 +322,11 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     auto getShaderPath = []() -> std::string {
         // First try: relative to current directory (shaders/ copied by CMake)
         if (std::ifstream("shaders/DeferredLighting.metal").good()) {
-            return "shaders/";
+            return "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/";
         }
         // Second try: Darwin/Debug directory
         if (std::ifstream("Darwin/Debug/shaders/DeferredLighting.metal").good()) {
-            return "Darwin/Debug/shaders/";
+            return "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/";
         }
         // Fallback to absolute path (like TestParticleSponza)
         return "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/";
@@ -430,6 +443,14 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
 
     std::cout << "Successfully loaded Sponza scene with " << sceneMeshes_.size() << " meshes." << std::endl;
 
+    // 🔧 DEBUG: Keep only the first mesh for culling debugging
+    // if (!sceneMeshes_.empty()) {
+    //     auto firstMesh = sceneMeshes_[0];
+    //     sceneMeshes_.clear();
+    //     sceneMeshes_.push_back(firstMesh);
+    //     std::cout << "🔧 DEBUG: Keeping only first mesh '" << firstMesh.name << "' for culling analysis" << std::endl;
+    // }
+
     // Debug: Check mesh entity IDs
     u32 validEntityCount = 0;
     for (const auto& meshInfo : sceneMeshes_) {
@@ -463,13 +484,13 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
             proxy.transform = graphics::rhi::math::MatrixIdentity();
             scene_.AddProxy(proxy);
 
-            std::cout << "Added mesh: " << meshInfo.name 
-                      << " (entityId=" << entityId 
-                      << ", geometryId=" << meshInfo.meshEntityId << ")" << std::endl;
+            // std::cout << "Added mesh: " << meshInfo.name 
+            //           << " (entityId=" << entityId 
+            //           << ", geometryId=" << meshInfo.meshEntityId << ")" << std::endl;
         }
     }
 
-    std::cout << "Added " << scene_.GetProxies().size() << " proxies to render scene" << std::endl;
+    // std::cout << "Added " << scene_.GetProxies().size() << " proxies to render scene" << std::endl;
 
     // Bind scene data to snapshot for Nanite culling
     if (!sceneSnapshot_.Rebind(scene_)) {
@@ -477,7 +498,7 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
         return false;
     }
 
-    std::cout << "Scene snapshot updated with " << sceneSnapshot_.GetInstanceCount() << " instances" << std::endl;
+    // std::cout << "Scene snapshot updated with " << sceneSnapshot_.GetInstanceCount() << " instances" << std::endl;
 
     // Initialize render view
     view_.SetViewMatrix(cameraView_);
@@ -534,7 +555,9 @@ void TestNaniteStreamingPipeline::Run() {
         cmd->Begin();
 
         renderGraph_->Clear();
-        BuildRenderGraph(*renderGraph_, backBuffer);
+        // Capture the index correctly for this specific frame inside the graph setup
+        u32 currentGraphBufferIndex = renderSystem_.GetCurrentFrameIndex();
+        BuildRenderGraph(*renderGraph_, backBuffer, currentGraphBufferIndex);
         renderGraph_->Compile();
         renderGraph_->Execute(cmd);
 
@@ -549,7 +572,7 @@ void TestNaniteStreamingPipeline::Run() {
         frameCount_++;
     }
 
-    if (frameCount_ % 60 == 0) {
+    if (frameCount_ == 0) {
         auto stats = streamingManager_->GetStats();
         std::cout << "[Frame " << frameCount_ << "] "
                   << "Streamed: " << testResults_.clusters_streamed.load()
@@ -557,6 +580,14 @@ void TestNaniteStreamingPipeline::Run() {
                   << ", Requests: " << testResults_.requests_processed.load()
                   << ", Pool Usage: " << (stats.page_pool_usage * 100.0f) << "%"
                   << std::endl;
+    }
+
+    // Collect GPU culling debug data for the final frame only
+    // Replace previous frame's data with current frame's data
+    utl::vector<primal::graphics::nanite::CullingDebugData> debug_data;
+    if (cullingPipeline_->ReadDebugData(debug_data)) {
+        // Store current frame data (replaces previous frame data)
+        finalFrameCullingDebugData_ = std::move(debug_data);
     }
 }
 
@@ -570,8 +601,14 @@ void TestNaniteStreamingPipeline::UpdateTestScene() {
         camera_initialized = true;
     }
 
-    // Update camera (like TestParticleSponza does)
+    // CRITICAL FIX: Update camera FIRST before using its data
+    // This ensures we have valid camera matrices before updating double-buffers
     camera_.Update(0.016f); // Fixed dt for test
+
+    // DISABLED: Jitter for TAA - causing flickering in debug visualization
+    // float jitterX = ((float)(rand() % 100) / 100.0f - 0.5f) * 0.001f;
+    // float jitterY = ((float)(rand() % 100) / 100.0f - 0.5f) * 0.001f;
+    // camera_.ApplyJitter(jitterX, jitterY);
 
     // Get view matrix from RHICamera (like TestParticleSponza)
     cameraView_ = camera_.GetViewMatrix();
@@ -587,22 +624,48 @@ void TestNaniteStreamingPipeline::UpdateTestScene() {
     view_.SetViewport({ {0, 0}, {static_cast<float>(renderWidth_), static_cast<float>(renderHeight_)}, 0, 1 });
     view_.SetScissor({ {0, 0}, {renderWidth_, renderHeight_} });
     view_.UpdateFrustum();
+
+    // CRITICAL FIX: Initialize triple-buffered camera data AFTER camera is set up
+    // This ensures we start with valid camera matrices, not identity matrices
+    static bool buffers_initialized = false;
+    if (!buffers_initialized) {
+        for (int i = 0; i < 3; i++) {
+            cameraBuffers_[i].view_matrix = cameraView_;
+            cameraBuffers_[i].proj_matrix = cameraProj_;
+            cameraBuffers_[i].frame_index = 0;
+        }
+        buffers_initialized = true;
+    }
+
+    // Update ONLY the current frame's camera buffer
+    // Updating other buffers (in-flight frames) causes race conditions and flickering!
+    u32 currentBufferIndex = renderSystem_.GetCurrentFrameIndex();
+    cameraBuffers_[currentBufferIndex].view_matrix = cameraView_;
+    cameraBuffers_[currentBufferIndex].proj_matrix = cameraProj_;
+    cameraBuffers_[currentBufferIndex].frame_index = frameCount_;
 }
 
 void TestNaniteStreamingPipeline::BuildRenderGraph(
     graphics::rendergraph::RenderGraph& graph,
-    graphics::rhi::ResourceHandle backBuffer) {
+    graphics::rhi::ResourceHandle backBuffer,
+    u32 currentBufferIndex) {
+
+    // CRITICAL: Debug output for buffer synchronization
+    // This is essential to prevent flickering caused by reading previous frame data
+    if (frameCount_ < 5) { // Only debug first few frames
+        std::cout << "[BuildRenderGraph] Frame " << frameCount_ << " using synced buffer index=" << currentBufferIndex << std::endl;
+    }
 
     // Import backbuffer
     auto backBufferHandle = graph.ImportResource("BackBuffer", backBuffer);
 
-    // Create depth texture for HZB generation
-    rhi::TextureDesc depthDesc{};
-    depthDesc.size = {renderWidth_, renderHeight_, 1};
-    depthDesc.format = rhi::DataFormat::D32_Float;
-    depthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
-    auto depthTexture = device_->CreateTexture(depthDesc);
-    auto depthHandle = graph.ImportResource("SceneDepth", depthTexture);
+    // Create depth texture for HZB generation - DISABLED to prevent memory leak
+    // rhi::TextureDesc depthDesc{};
+    // depthDesc.size = {renderWidth_, renderHeight_, 1};
+    // depthDesc.format = rhi::DataFormat::D32_Float;
+    // depthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+    // auto depthTexture = device_->CreateTexture(depthDesc);
+    // auto depthHandle = graph.ImportResource("SceneDepth", depthTexture);
 
     struct CullingPassData {
         rendergraph::RGResourceHandle depth_buffer;
@@ -614,73 +677,110 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     const auto& cullingData = graph.AddPass<CullingPassData>("NaniteCulling",
         graphics::rendergraph::RGPassType::Compute,
         graphics::rendergraph::RGPassCategory::Main,
-        [this](CullingPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
-            std::cout << "[BuildRenderGraph] NaniteCulling PASS SETUP called!" << std::endl;
+        [this, currentBufferIndex](CullingPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+            // std::cout << "[BuildRenderGraph] NaniteCulling PASS SETUP called!" << std::endl;
 
-            // Create indirect args buffer - this will be the output of this pass
-            rhi::BufferDesc indirectDesc{};
-            indirectDesc.size = sizeof(u32) * 5;
-            indirectDesc.usage = rhi::GPUMemoryUsage::Dynamic;
-            indirectDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-            data.indirect_args_buffer = builder.CreateBuffer(
-                "indirect_args",
-                indirectDesc,
-                rhi::ResourceState::UnorderedAccess
+            // CRITICAL FIX: Use the shared synchronized buffer index for this frame
+            // This ensures both compute and render passes use the same buffer
+            rhi::ResourceHandle indirectBuffer = cullingPipeline_->GetIndirectBuffer(currentBufferIndex);
+
+            if (indirectBuffer == rhi::handles::INVALID_RESOURCE) {
+                std::cerr << "[NaniteCulling] ERROR: Invalid indirect args buffer from pipeline at index " << currentBufferIndex << std::endl;
+                return;
+            }
+
+            // Import the buffer into RenderGraph using the graph reference
+            rhi::BufferDesc bufferDesc{};
+            bufferDesc.size = sizeof(u32) * 5;
+            data.indirect_args_buffer = builder.GetGraph().ImportBuffer(
+                "indirect_args_" + std::to_string(currentBufferIndex),
+                indirectBuffer,
+                bufferDesc
             );
 
-            // CRITICAL: Tell RenderGraph we're writing to this buffer
+            // CRITICAL: Tell RenderGraph we're writing to this buffer with proper memory barrier
             // This establishes the dependency: SceneRender depends on NaniteCulling
             builder.Write(data.indirect_args_buffer, rhi::ResourceState::UnorderedAccess);
 
-            std::cout << "[NaniteCulling] Created indirect args buffer, establishing write dependency" << std::endl;
+            if (frameCount_ < 5) { // Debug first 5 frames
+                std::cout << "[NaniteCulling] Frame " << frameCount_ << " using synced buffer index=" << currentBufferIndex << " buffer " << indirectBuffer << std::endl;
+            }
         },
-        [this](const CullingPassData& data, graphics::rendergraph::RenderGraphContext& context) {
+        [this, currentBufferIndex](const CullingPassData& data, graphics::rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
 
-            std::cout << "[BuildRenderGraph] NaniteCulling PASS EXECUTE called!" << std::endl;
-            std::cout << "[BuildRenderGraph] cullingPipeline_=" << (void*)cullingPipeline_
-                      << ", initialized=" << (cullingPipeline_ ? cullingPipeline_->IsInitialized() : 0) << std::endl;
+            // CRITICAL FIX: Use triple-buffered camera data matching the system
+            u32 bufferIndex = currentBufferIndex;
+            if (frameCount_ < 10) { // Debug first 10 frames
+                std::cout << "[Draw] Frame " << frameCount_ << " using bufferIndex=" << bufferIndex << std::endl;
+            }
+
+            // std::cout << "[BuildRenderGraph] NaniteCulling PASS EXECUTE called!" << std::endl;
+            // std::cout << "[BuildRenderGraph] cullingPipeline_=" << (void*)cullingPipeline_
+            //           << ", initialized=" << (cullingPipeline_ ? cullingPipeline_->IsInitialized() : 0) << std::endl;
 
             // Build HZB from previous frame's depth (if available) - DISABLED
             if (false && hzbSystem_ && hzbSystem_->IsReady()) {
-                std::cout << "[BuildRenderGraph] Building HZB for occlusion culling..." << std::endl;
+                // std::cout << "[BuildRenderGraph] Building HZB for occlusion culling..." << std::endl;
                 // TODO: Convert RGResourceHandle to ResourceHandle when HZB system is ready
                 // auto hzbResult = hzbSystem_->BuildHZB(depthTexture, cmd, frameCount_);
-                std::cout << "[BuildRenderGraph] HZB building - TODO: Convert RGResourceHandle" << std::endl;
+                // std::cout << "[BuildRenderGraph] HZB building - TODO: Convert RGResourceHandle" << std::endl;
             }
 
             // Render visibility buffer (if enabled) - DISABLED
             if (false && visibilityBufferSystem_ && visibilityBufferSystem_->IsReady()) {
-                std::cout << "[BuildRenderGraph] Rendering visibility buffer..." << std::endl;
+                // std::cout << "[BuildRenderGraph] Rendering visibility buffer..." << std::endl;
                 auto visResult = visibilityBufferSystem_->RenderVisibilityBuffer(
                     cmd,
                     sceneSnapshot_,
-                    cameraView_,
-                    cameraProj_,
+                    cameraBuffers_[bufferIndex].view_matrix,
+                    cameraBuffers_[bufferIndex].proj_matrix,
                     cullingPipeline_->GetResults(),
                     frameCount_
                 );
-                std::cout << "[BuildRenderGraph] Visibility buffer rendered: " << visResult.visible_triangles
-                          << " triangles in " << visResult.render_time_ms << " ms" << std::endl;
+                // std::cout << "[BuildRenderGraph] Visibility buffer rendered: " << visResult.visible_triangles
+                //           << " triangles in " << visResult.render_time_ms << " ms" << std::endl;
             }
 
             if (!cullingPipeline_->Execute(
                 cmd,
                 sceneSnapshot_,
-                cameraView_,
-                cameraProj_,
+                cameraBuffers_[bufferIndex].view_matrix,
+                cameraBuffers_[bufferIndex].proj_matrix,
                 streamingManager_,
-                frameCount_)) {
+                bufferIndex)) {  // Fixed: Use bufferIndex instead of frameCount_ for synchronization
                 std::cerr << "[NaniteCulling] Culling pipeline failed!" << std::endl;
             }
 
+            // Execute defers UpdateResults() until GPU completes - results will be available after render graph execution
             const auto& results = cullingPipeline_->GetResults();
-            std::cout << "[NaniteCulling] Culling complete: visible_clusters=" << results.visible_cluster_count
-                      << ", visible_instances=" << results.visible_instance_count << std::endl;
+            // std::cout << "[NaniteCulling] Culling complete: visible_clusters=" << results.visible_cluster_count
+            //           << ", visible_instances=" << results.visible_instance_count << std::endl;
         }
     );
     
-    std::cout << "[BuildRenderGraph] NaniteCulling pass ADDED to graph" << std::endl;
+    // std::cout << "[BuildRenderGraph] NaniteCulling pass ADDED to graph" << std::endl;
+
+    // INSERTED: ForceSync Pass (Blit Encoder Barrier)
+    // This inserts a BlitCommandEncoder between Compute and Render, forcing a full GPU synchronization.
+    // This is the recommended fix for flickering issues in Metal GPU-driven pipelines.
+    struct ForceSyncPassData {
+        rendergraph::RGResourceHandle dummy;
+    };
+
+    graph.AddPass<ForceSyncPassData>("ForceSync",
+        graphics::rendergraph::RGPassType::Copy,
+        graphics::rendergraph::RGPassCategory::Copy,
+        [&, cullingIndirectArgs = cullingData.indirect_args_buffer](ForceSyncPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+            // Force a read dependency on the indirect args buffer
+            // This ensures a barrier from Compute -> Copy
+            builder.Read(cullingIndirectArgs, rhi::ResourceState::CopySource);
+        },
+        [](const ForceSyncPassData& data, graphics::rendergraph::RenderGraphContext& context) {
+            // Empty body - just the existence of the pass forces a new encoder (BlitEncoder)
+            // and the barrier transitions.
+        }
+    );
 
     // Scene rendering pass - let GPU draw pipeline handle its own render pass management
     struct SceneRenderPassData {
@@ -688,7 +788,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         rendergraph::RGResourceHandle output;         // Final output (backbuffer)
         const RenderSceneSnapshot* scene_snapshot;
         const CullingResults* culling_results;
-        rendergraph::RGResourceHandle culling_dependency;
+        rendergraph::RGResourceHandle indirect_args_buffer;  // Pre-allocated indirect args buffer
     };
 
     // Import the GPU draw pipeline's final output texture
@@ -700,14 +800,14 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     }
 
     auto gpuOutputHandle = graph.ImportResource("GPUFinalOutput", gpuFinalOutput);
-    std::cout << "[BuildRenderGraph] Imported GPU pipeline's final output texture" << std::endl;
+    // std::cout << "[BuildRenderGraph] Imported GPU pipeline's final output texture" << std::endl;
 
     // Scene Render Pass - Execute GPU pipeline which manages its own render pass
     graph.AddPass<SceneRenderPassData>("SceneRender",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::Main,
-        [this, gpuOutputHandle, &cullingData](SceneRenderPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
-            std::cout << "[SceneRender] SETUP: Configuring GPU pipeline execution" << std::endl;
+        [this, gpuOutputHandle, currentBufferIndex, cullingIndirectArgs = cullingData.indirect_args_buffer](SceneRenderPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+            // std::cout << "[SceneRender] SETUP: Configuring GPU pipeline execution" << std::endl;
 
             // Store pointers to scene data for use in execute phase
             data.scene_snapshot = &sceneSnapshot_;
@@ -717,22 +817,35 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             // The GPU pipeline manages its own render pass internally
             // CHANGED: Use Write instead of Read to ensure this pass is not culled (since FinalBlit reads it)
             data.gpu_output = builder.Write(gpuOutputHandle, rhi::ResourceState::RenderTarget);
-            
-            // Establish dependency on culling pass
-            data.culling_dependency = builder.Read(cullingData.indirect_args_buffer, rhi::ResourceState::IndirectArgument);
 
-            std::cout << "[SceneRender] SETUP: GPU pipeline will manage its own render pass" << std::endl;
+            // CRITICAL FIX: Use the SAME RGResourceHandle from culling pass
+            // This ensures we read from the same buffer that compute shader just wrote to
+            data.indirect_args_buffer = cullingIndirectArgs;
+
+            // CRITICAL: Establish dependency on culling pass with proper memory barrier
+            // This ensures compute shader has finished writing before we read
+            builder.Read(data.indirect_args_buffer, rhi::ResourceState::IndirectArgument);
+
+            if (frameCount_ < 5) { // Debug first 5 frames
+                std::cout << "[SceneRender] Frame " << frameCount_ << " using synced buffer index=" << currentBufferIndex << std::endl;
+            }
         },
-        [this](const SceneRenderPassData& data, graphics::rendergraph::RenderGraphContext& context) {
-            std::cout << "[DEBUG] SceneRender PASS - Executing GPU pipeline..." << std::endl;
+        [this, currentBufferIndex](const SceneRenderPassData& data, graphics::rendergraph::RenderGraphContext& context) {
+            // std::cout << "[DEBUG] SceneRender PASS - Executing GPU pipeline..." << std::endl;
             auto cmd = context.cmdBuffer;
+
+            // CRITICAL FIX: Use triple-buffered camera data matching the system
+            u32 bufferIndex = currentBufferIndex;
+            if (frameCount_ < 10) { // Debug first 10 frames
+                std::cout << "[Draw] Frame " << frameCount_ << " using bufferIndex=" << bufferIndex << std::endl;
+            }
 
             // Execute the complete GPU-driven draw pipeline
             // The pipeline handles its own render pass begin/end internally
-            if (!gpuDrawPipeline_->Execute(cmd, *data.scene_snapshot, cameraView_, cameraProj_, *data.culling_results, frameCount_)) {
+            if (!gpuDrawPipeline_->Execute(cmd, *data.scene_snapshot, cameraBuffers_[bufferIndex].view_matrix, cameraBuffers_[bufferIndex].proj_matrix, *data.culling_results, frameCount_, currentBufferIndex)) {
                 std::cerr << "[DEBUG] GPU-driven draw pipeline failed!" << std::endl;
             } else {
-                std::cout << "[DEBUG] GPU-driven draw pipeline completed successfully!" << std::endl;
+                // std::cout << "[DEBUG] GPU-driven draw pipeline completed successfully!" << std::endl;
             }
 
             // Log rendering statistics
@@ -740,13 +853,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 const auto& cullingResults = cullingPipeline_->GetResults();
                 const auto& drawResults = gpuDrawPipeline_->GetResults();
 
-                std::cout << "[GPU Driven Rendering Stats]" << std::endl;
-                std::cout << "  Loaded meshes: " << sceneMeshes_.size() << std::endl;
-                std::cout << "  Scene instances: " << sceneSnapshot_.GetInstanceCount() << std::endl;
-                std::cout << "  Visible clusters: " << cullingResults.visible_cluster_count << std::endl;
-                std::cout << "  GPU Draw calls: " << drawResults.total_draw_calls << std::endl;
-                std::cout << "  Clusters rendered: " << drawResults.total_clusters_rendered << std::endl;
-                std::cout << "  Bin count: " << drawResults.bin_count << std::endl;
+                // std::cout << "[GPU Driven Rendering Stats]" << std::endl;
+                // std::cout << "  Loaded meshes: " << sceneMeshes_.size() << std::endl;
+                // std::cout << "  Scene instances: " << sceneSnapshot_.GetInstanceCount() << std::endl;
+                // std::cout << "  Visible clusters: " << cullingResults.visible_cluster_count << std::endl;
+                // std::cout << "  GPU Draw calls: " << drawResults.total_draw_calls << std::endl;
+                // std::cout << "  Clusters rendered: " << drawResults.total_clusters_rendered << std::endl;
+                // std::cout << "  Bin count: " << drawResults.bin_count << std::endl;
             }
         }
     );
@@ -762,15 +875,15 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
         [this, backBufferHandle, gpuOutputHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
-            std::cout << "[FinalBlit] SETUP: Configuring final blit with GPU pipeline dependency" << std::endl;
+            // std::cout << "[FinalBlit] SETUP: Configuring final blit with GPU pipeline dependency" << std::endl;
 
             // CRITICAL: Read from GPU pipeline's final output
             // This establishes the dependency: FinalBlit depends on SceneRender
             data.input = builder.Read(gpuOutputHandle, rhi::ResourceState::ShaderResource);
-            std::cout << "[FinalBlit] SETUP: Reading from GPUFinalOutput (GPU pipeline's output)" << std::endl;
+            // std::cout << "[FinalBlit] SETUP: Reading from GPUFinalOutput (GPU pipeline's output)" << std::endl;
 
             data.output = builder.Write(backBufferHandle, rhi::ResourceState::RenderTarget);
-            std::cout << "[FinalBlit] SETUP: Writing to backbuffer" << std::endl;
+            // std::cout << "[FinalBlit] SETUP: Writing to backbuffer" << std::endl;
 
             graphics::rendergraph::RGRenderPassDesc rpDesc;
             rpDesc.colors.push_back({
@@ -781,12 +894,12 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             });
             builder.DeclareRenderPass(rpDesc);
 
-            std::cout << "[FinalBlit] SETUP: Pass configured with GPU pipeline dependency" << std::endl;
+            // std::cout << "[FinalBlit] SETUP: Pass configured with GPU pipeline dependency" << std::endl;
         },
         [this](const BlitPassData& data, graphics::rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
 
-            std::cout << "[DEBUG] Final blit pass executing - using shader-based fullscreen quad" << std::endl;
+            // std::cout << "[DEBUG] Final blit pass executing - using shader-based fullscreen quad" << std::endl;
 
             // Set viewport and scissor for fullscreen rendering
             cmd->SetViewport({ {0, 0}, {static_cast<float>(renderWidth_), static_cast<float>(renderHeight_)}, 0, 1 });
@@ -821,7 +934,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             // Draw fullscreen triangle (3 vertices)
             cmd->Draw(3, 0, 1, 0);
 
-            std::cout << "[DEBUG] Shader-based blit completed successfully" << std::endl;
+            // std::cout << "[DEBUG] Shader-based blit completed successfully" << std::endl;
         }
     );
 }
@@ -849,10 +962,7 @@ void TestNaniteStreamingPipeline::ProcessStreamingFeedback() {
 }
 
 void TestNaniteStreamingPipeline::RecordTestMetrics() {
-    static u32 lastFrameCount = 0;
-    if (frameCount_ - lastFrameCount >= 300) {
-        lastFrameCount = frameCount_;
-
+    if (frameCount_ == 0) {
         std::cout << "\n=== Streaming Metrics (Frame " << frameCount_ << ") ===" << std::endl;
         std::cout << "  Avg Processing Time: " << testResults_.avg_processing_time_ms.load() << " ms" << std::endl;
 
@@ -918,6 +1028,9 @@ void TestNaniteStreamingPipeline::Shutdown() {
     std::cout << "  Clusters Evicted: " << testResults_.clusters_evicted.load() << std::endl;
     std::cout << "  Requests Processed: " << testResults_.requests_processed.load() << std::endl;
     std::cout << "  Avg Processing Time: " << testResults_.avg_processing_time_ms.load() << " ms/frame" << std::endl;
+
+    // Print final frame culling debug data at shutdown
+    PrintFinalFrameCullingDebugData();
 
     if (device_) {
         device_->WaitIdle();
@@ -1068,4 +1181,163 @@ void TestNaniteStreamingPipeline::TestEndToEndStreaming() {
     } else {
         std::cout << "✗ No clusters streamed" << std::endl;
     }
+}
+
+void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
+    std::cout << "\n=== All Instance Bounds Information ===" << std::endl;
+
+    const auto& proxies = scene_.GetProxies();
+    std::cout << "Total proxies in scene: " << proxies.size() << std::endl;
+
+    u32 validInstanceCount = 0;
+    u32 totalClusterCount = 0;
+
+    for (size_t i = 0; i < proxies.size(); ++i) {
+        const auto& proxy = proxies[i];
+
+        // Get cluster component to access geometry data
+        const cluster::component_cache* cluster_cache = cluster::get(proxy.meshId);
+        if (!cluster_cache || !cluster_cache->exists) {
+            std::cout << "  [" << i << "] Invalid cluster component" << std::endl;
+            continue;
+        }
+
+        // Get resource from NaniteResourceManager
+        auto& resource_manager = nanite::NaniteResourceManager::Get();
+        nanite::NaniteRuntimeResource* resource =
+            resource_manager.GetOrCreateResource(cluster_cache->geometry_content_id);
+
+        if (!resource || !resource->gpu_mesh) {
+            std::cout << "  [" << i << "] No GPU mesh resource" << std::endl;
+            continue;
+        }
+
+        // Get bounds from GPU mesh (local space)
+        const f32* boundsMin = resource->gpu_mesh->GetBoundsMin();
+        const f32* boundsMax = resource->gpu_mesh->GetBoundsMax();
+
+        // Calculate local space bounds
+        primal::math::v3 localCenter{
+            (boundsMin[0] + boundsMax[0]) * 0.5f,
+            (boundsMin[1] + boundsMax[1]) * 0.5f,
+            (boundsMin[2] + boundsMax[2]) * 0.5f
+        };
+
+        primal::math::v3 localExtent{
+            (boundsMax[0] - boundsMin[0]) * 0.5f,
+            (boundsMax[1] - boundsMin[1]) * 0.5f,
+            (boundsMax[2] - boundsMin[2]) * 0.5f
+        };
+
+        // Calculate world space bounds (same as RenderSceneSnapshot)
+        primal::math::v4 worldCenter4 = proxy.transform * primal::math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
+        primal::math::v3 worldCenter{worldCenter4.x, worldCenter4.y, worldCenter4.z};
+
+        // Calculate radius
+        f32 maxLocalExtent = std::max({localExtent.x, localExtent.y, localExtent.z});
+        const simd::float4x4& transform = proxy.transform;
+        f32 maxScale = std::max({
+            std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
+            std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
+            std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
+        });
+        f32 worldRadius = maxLocalExtent * maxScale;
+
+        std::cout << "  [" << i << "] Geometry ID: " << cluster_cache->geometry_content_id << std::endl;
+        std::cout << "      Local Space:" << std::endl;
+        std::cout << "        Center: (" << localCenter.x << ", " << localCenter.y << ", " << localCenter.z << ")" << std::endl;
+        std::cout << "        Extent: (" << localExtent.x << ", " << localExtent.y << ", " << localExtent.z << ")" << std::endl;
+        std::cout << "        AABB Min: (" << boundsMin[0] << ", " << boundsMin[1] << ", " << boundsMin[2] << ")" << std::endl;
+        std::cout << "        AABB Max: (" << boundsMax[0] << ", " << boundsMax[1] << ", " << boundsMax[2] << ")" << std::endl;
+        std::cout << "      World Space:" << std::endl;
+        std::cout << "        Center: (" << worldCenter.x << ", " << worldCenter.y << ", " << worldCenter.z << ")" << std::endl;
+        std::cout << "        Radius: " << worldRadius << std::endl;
+        std::cout << "        Max Scale: " << maxScale << std::endl;
+        std::cout << "      Cluster Count: " << resource->cluster_data.cluster_count << std::endl;
+
+        validInstanceCount++;
+        totalClusterCount += resource->cluster_data.cluster_count;
+    }
+
+    std::cout << "\nSummary:" << std::endl;
+    std::cout << "  Valid Instances: " << validInstanceCount << " out of " << proxies.size() << std::endl;
+    std::cout << "  Total Clusters: " << totalClusterCount << std::endl;
+    std::cout << "=== End Instance Bounds Information ===\n" << std::endl;
+}
+
+void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
+    if (finalFrameCullingDebugData_.empty()) {
+        std::cout << "\n=== No Final Frame Culling Debug Data ===" << std::endl;
+        return;
+    }
+
+    std::cout << "\n=== Final Frame GPU Culling Debug Data (Frame " << frameCount_ << ", "
+              << finalFrameCullingDebugData_.size() << " entries) ===" << std::endl;
+
+    // Group by culling reason for better analysis
+    u32 frustumCulled = 0;
+    u32 distanceCulled = 0;
+    u32 notCulled = 0;
+    u32 unknownCulled = 0;
+
+    for (const auto& entry : finalFrameCullingDebugData_) {
+        switch (entry.culling_reason) {
+            case 0: frustumCulled++; break;
+            case 1: distanceCulled++; break;
+            case 2: notCulled++; break;
+            default: unknownCulled++; break;
+        }
+    }
+
+    std::cout << "Final Frame Culling Summary:" << std::endl;
+    std::cout << "  Frustum Culled: " << frustumCulled << std::endl;
+    std::cout << "  Distance Culled: " << distanceCulled << std::endl;
+    std::cout << "  Not Culled: " << notCulled << std::endl;
+    std::cout << "  Unknown: " << unknownCulled << std::endl;
+
+    // Show all entries with detailed information
+    std::cout << "\nDetailed culling data for all entries:" << std::endl;
+
+    for (u32 i = 0; i < finalFrameCullingDebugData_.size(); ++i) {
+        if( i > 500) break;
+        const auto& entry = finalFrameCullingDebugData_[i];
+        const char* culling_reason_str =
+            entry.culling_reason == 0 ? "Frustum" :
+            entry.culling_reason == 1 ? "Distance" :
+            entry.culling_reason == 2 ? "None" : "Unknown";
+
+        // Convert culling plane to string
+        const char* plane_str = "None";
+        if (entry.culling_plane != 0xFFFFFFFF) {
+            switch (entry.culling_plane) {
+                case 0: plane_str = "Left"; break;
+                case 1: plane_str = "Right"; break;
+                case 2: plane_str = "Bottom"; break;
+                case 3: plane_str = "Top"; break;
+                case 4: plane_str = "Near"; break;
+                case 5: plane_str = "Far"; break;
+                default: plane_str = "Unknown"; break;
+            }
+        }
+
+        std::cout << "  [" << i << "] Instance=" << entry.instance_id
+                 << ", Cluster=" << entry.cluster_id
+                 << ", Reason=" << culling_reason_str
+                 << ", Plane=" << plane_str
+                 << ", ViewZ=" << entry.view_space_z
+                 << ", Distance=" << entry.distance_to_camera
+                 << ", BoundsRadius=" << entry.bounds_radius
+                 << ", Visible=" << (entry.is_visible ? "Yes" : "No");
+
+        // Show plane distances for debugging
+        std::cout << "\n      PlaneDistances=[L:" << entry.plane_distances[0]
+                 << ",R:" << entry.plane_distances[1]
+                 << ",B:" << entry.plane_distances[2]
+                 << ",T:" << entry.plane_distances[3]
+                 << ",N:" << entry.plane_distances[4]
+                 << ",F:" << entry.plane_distances[5] << "]"
+                 << std::endl;
+    }
+
+    std::cout << "=== End Final Frame Culling Debug Data ===\n" << std::endl;
 }

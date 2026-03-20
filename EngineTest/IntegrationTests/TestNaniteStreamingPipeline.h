@@ -109,6 +109,18 @@ private:
     math::m4x4 cameraView_{ primal::graphics::rhi::math::MatrixIdentity() };
     math::m4x4 cameraProj_{ primal::graphics::rhi::math::MatrixIdentity() };
 
+    // Culling debug data storage for final frame only
+    primal::utl::vector<primal::graphics::nanite::CullingDebugData> finalFrameCullingDebugData_;
+
+    // CRITICAL FIX: Triple-buffered camera data to match MAX_FRAMES_IN_FLIGHT = 3
+    // This prevents array out-of-bounds and frame synchronization issues
+    struct CameraBuffer {
+        math::m4x4 view_matrix;
+        math::m4x4 proj_matrix;
+        u32 frame_index;
+        u32 padding[3];
+    } cameraBuffers_[3];
+
     // Test configuration
     struct TestConfig {
         u32 max_clusters{ 10000 };
@@ -139,11 +151,12 @@ private:
     bool LoadSponzaScene();
     bool SetupBasicRenderingPipeline();
     void UpdateTestScene();
-    void BuildRenderGraph(primal::graphics::rendergraph::RenderGraph& graph,
-                          primal::graphics::rhi::ResourceHandle backBuffer);
+    void BuildRenderGraph(primal::graphics::rendergraph::RenderGraph& graph, primal::graphics::rhi::ResourceHandle backBuffer, u32 currentBufferIndex);
     void ProcessStreamingFeedback();
     void RecordTestMetrics();
     void ValidateResults();
+    void PrintAllInstanceBounds();
+    void PrintFinalFrameCullingDebugData();
 
     // Input handling
     struct KeyStateTracker {

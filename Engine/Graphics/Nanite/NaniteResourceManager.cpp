@@ -67,7 +67,7 @@ void NaniteResourceManager::Shutdown() {
 NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type geometry_id) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    std::cout << "[NaniteResourceManager] GetOrCreateResource called for geometry_id: " << geometry_id << std::endl;
+    // std::cout << "[NaniteResourceManager] GetOrCreateResource called for geometry_id: " << geometry_id << std::endl;
 
     if (!device_) {
         std::cerr << "[NaniteResourceManager] ERROR: ResourceManager not initialized! device_ is null" << std::endl;
@@ -75,17 +75,17 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
     }
 
     if (destroyed_resources_.count(geometry_id) > 0) {
-        std::cout << "[NaniteResourceManager]   Resource was previously destroyed, returning nullptr" << std::endl;
+        // std::cout << "[NaniteResourceManager]   Resource was previously destroyed, returning nullptr" << std::endl;
         return nullptr;
     }
 
     auto it = resources_.find(geometry_id);
     if (it != resources_.end()) {
-        std::cout << "[NaniteResourceManager]   Resource already exists, returning cached instance" << std::endl;
+        // std::cout << "[NaniteResourceManager]   Resource already exists, returning cached instance" << std::endl;
         return it->second.get();
     }
 
-    std::cout << "[NaniteResourceManager]   Creating new resource..." << std::endl;
+    // std::cout << "[NaniteResourceManager]   Creating new resource..." << std::endl;
 
     auto resource = NaniteRuntimeResource::Create(geometry_id);
     if (!resource) {
@@ -96,42 +96,42 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
     graphics::rhi::RHIMeshAsset meshAsset;
     bool hasMeshletData = primal::content::get_rhi_mesh_asset(geometry_id, meshAsset);
 
-    std::cout << "[NaniteResourceManager]   get_rhi_mesh_asset returned: " << hasMeshletData << std::endl;
+    // std::cout << "[NaniteResourceManager]   get_rhi_mesh_asset returned: " << hasMeshletData << std::endl;
 
     if (hasMeshletData) {
-        std::cout << "[NaniteResourceManager]   MeshAsset meshlets count: " << meshAsset.meshlets.size() << std::endl;
-        std::cout << "[NaniteResourceManager]   MeshAsset meshlet_vertices count: " << meshAsset.meshlet_vertices.size() << std::endl;
-        std::cout << "[NaniteResourceManager]   MeshAsset meshlet_triangles count: " << meshAsset.meshlet_triangles.size() << std::endl;
+        // std::cout << "[NaniteResourceManager]   MeshAsset meshlets count: " << meshAsset.meshlets.size() << std::endl;
+        // std::cout << "[NaniteResourceManager]   MeshAsset meshlet_vertices count: " << meshAsset.meshlet_vertices.size() << std::endl;
+        // std::cout << "[NaniteResourceManager]   MeshAsset meshlet_triangles count: " << meshAsset.meshlet_triangles.size() << std::endl;
     } else {
-        std::cout << "[NaniteResourceManager]   get_rhi_mesh_asset returned false!" << std::endl;
+        // std::cout << "[NaniteResourceManager]   get_rhi_mesh_asset returned false!" << std::endl;
     }
 
     if (hasMeshletData && !meshAsset.meshlets.empty()) {
         resource->cluster_data.cluster_count = static_cast<u32>(meshAsset.meshlets.size());
         resource->cluster_data.meshlet_count = static_cast<u32>(meshAsset.meshlets.size());
 
-        std::cout << "[NaniteResourceManager]   Created resource with " << resource->cluster_data.cluster_count
-                  << " meshlets for geometry_id: " << geometry_id << std::endl;
+        // std::cout << "[NaniteResourceManager]   Created resource with " << resource->cluster_data.cluster_count
+        //           << " meshlets for geometry_id: " << geometry_id << std::endl;
     } else {
         resource->cluster_data.cluster_count = 1;
         resource->cluster_data.meshlet_count = 1;
 
-        std::cout << "[NaniteResourceManager]   No meshlet data found for geometry_id: " << geometry_id
-                  << ", using single cluster fallback" << std::endl;
+        // std::cout << "[NaniteResourceManager]   No meshlet data found for geometry_id: " << geometry_id
+        //           << ", using single cluster fallback" << std::endl;
     }
 
     resource->gpu_mesh = primal::content::get_rhi_gpu_mesh(geometry_id);
     
     if (resource->gpu_mesh) {
-        std::cout << "[NaniteResourceManager]   RHIGpuMesh obtained successfully" << std::endl;
-        std::cout << "[NaniteResourceManager]   GPU mesh has "
-                  << resource->gpu_mesh->GetMeshletCount() << " meshlets" << std::endl;
-        std::cout << "[NaniteResourceManager]   GPU mesh has "
-                  << resource->gpu_mesh->GetVertexCount() << " vertices" << std::endl;
-        std::cout << "[NaniteResourceManager]   GPU mesh has "
-                  << resource->gpu_mesh->GetIndexCount() << " indices" << std::endl;
+        // std::cout << "[NaniteResourceManager]   RHIGpuMesh obtained successfully" << std::endl;
+        // std::cout << "[NaniteResourceManager]   GPU mesh has "
+        //           << resource->gpu_mesh->GetMeshletCount() << " meshlets" << std::endl;
+        // std::cout << "[NaniteResourceManager]   GPU mesh has "
+        //           << resource->gpu_mesh->GetVertexCount() << " vertices" << std::endl;
+        // std::cout << "[NaniteResourceManager]   GPU mesh has "
+        //           << resource->gpu_mesh->GetIndexCount() << " indices" << std::endl;
     } else {
-        std::cout << "[NaniteResourceManager]   WARNING: get_rhi_gpu_mesh returned null!" << std::endl;
+        // std::cout << "[NaniteResourceManager]   WARNING: get_rhi_gpu_mesh returned null!" << std::endl;
     }
 
     auto* ptr = resource.get();
@@ -139,8 +139,8 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
     resources_[geometry_id] = std::move(resource);
     ref_counts_[geometry_id] = 1;
 
-    std::cout << "[NaniteResourceManager]   Resource created successfully with "
-              << ptr->cluster_data.cluster_count << " clusters" << std::endl;
+    // std::cout << "[NaniteResourceManager]   Resource created successfully with "
+    //           << ptr->cluster_data.cluster_count << " clusters" << std::endl;
 
     return ptr;
 }
