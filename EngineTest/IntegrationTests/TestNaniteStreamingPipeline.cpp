@@ -190,30 +190,8 @@ bool TestNaniteStreamingPipeline::InitializeWindowAndRenderSystem() {
 }
 
 bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
-    cullingPipeline_ = &graphics::nanite::GPUCullingPipeline::Get();
-    std::cout << "[TestNanite] GPUCullingPipeline singleton obtained: " << (void*)cullingPipeline_ << std::endl;
-
-    graphics::nanite::CullingConfig cullingConfig;
-    cullingConfig.max_clusters_per_dispatch = testConfig_.max_clusters;
-    cullingConfig.max_instances_per_dispatch = testConfig_.max_instances;
-    cullingConfig.enable_streaming_feedback = testConfig_.enable_streaming;
-    cullingConfig.enable_occlusion_culling = false; // DISABLED: HZB Occlusion Culling to isolate flickering
-    cullingConfig.enable_lod_selection = false; // DISABLED: LOD Selection to isolate flickering
-    // cullingConfig.enable_occlusion_culling = testConfig_.enable_occlusion_culling;
-    // cullingConfig.enable_lod_selection = testConfig_.enable_lod_selection;
-
-    std::cout << "[TestNanite] Initializing GPUCullingPipeline..." << std::endl;
-    if (!cullingPipeline_->Initialize(device_, cullingConfig)) {
-        std::cerr << "Failed to initialize GPU culling pipeline" << std::endl;
-        return false;
-    }
-    std::cout << "[TestNanite] GPUCullingPipeline initialized, IsInitialized=" << cullingPipeline_->IsInitialized() << std::endl;
-
-    // Enable GPU culling debug output to diagnose culling issues
-    cullingPipeline_->EnableDebugOutput(true);
-    std::cout << "[TestNanite] GPU culling debug output ENABLED" << std::endl;
-
-    // Initialize GPU Driven Draw Pipeline
+    // 🔥 FIX: Initialize GPU Driven Draw Pipeline FIRST to ensure global meshlet buffer is ready
+    // This fixes the issue where GPUCullingPipeline can't access global meshlet buffer during initialization
     gpuDrawPipeline_ = &graphics::nanite::GPUDrivenDrawPipeline::Get();
 
     graphics::nanite::BinningConfig binningConfig{};
@@ -228,13 +206,41 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     visibilityConfig.format = graphics::rhi::DataFormat::R32_UInt;
     visibilityConfig.enable_depth = true;
 
+    std::cout << "[TestNanite] Initializing GPUDrivenDrawPipeline..." << std::endl;
     if (!gpuDrawPipeline_->Initialize(device_, binningConfig, visibilityConfig)) {
         std::cerr << "Failed to initialize GPU driven draw pipeline" << std::endl;
         return false;
     }
+    std::cout << "[TestNanite] GPUDrivenDrawPipeline initialized successfully" << std::endl;
+
+    // Now initialize culling pipeline (after GPU draw pipeline is ready)
+    cullingPipeline_ = &graphics::nanite::GPUCullingPipeline::Get();
+    std::cout << "[TestNanite] GPUCullingPipeline singleton obtained: " << (void*)cullingPipeline_ << std::endl;
+
+    graphics::nanite::CullingConfig cullingConfig;
+    cullingConfig.max_clusters_per_dispatch = testConfig_.max_clusters;
+    cullingConfig.max_instances_per_dispatch = testConfig_.max_instances;
+    cullingConfig.enable_streaming_feedback = testConfig_.enable_streaming;
+    cullingConfig.enable_occlusion_culling = false; // DISABLED: HZB Occlusion Culling to isolate flickering
+    cullingConfig.enable_lod_selection = false; // DISABLED: LOD Selection to isolate flickering
+    cullingConfig.enable_debug_output = true; // 🔥 ENABLE: Debug output to see backface culling statistics
+    // cullingConfig.enable_occlusion_culling = testConfig_.enable_occlusion_culling;
+    // cullingConfig.enable_lod_selection = testConfig_.enable_lod_selection;
+
+    std::cout << "[TestNanite] Initializing GPUCullingPipeline..." << std::endl;
+    if (!cullingPipeline_->Initialize(device_, cullingConfig)) {
+        std::cerr << "Failed to initialize GPU culling pipeline" << std::endl;
+        return false;
+    }
+    std::cout << "[TestNanite] GPUCullingPipeline initialized, IsInitialized=" << cullingPipeline_->IsInitialized() << std::endl;
+
+    // Enable GPU culling debug output to diagnose culling issues
+    cullingPipeline_->EnableDebugOutput(true);
+    std::cout << "[TestNanite] GPU culling debug output ENABLED" << std::endl;
 
     // CRITICAL: Connect culling pipeline to draw pipeline for proper buffer access
     gpuDrawPipeline_->SetCullingPipeline(cullingPipeline_);
+    cullingPipeline_->SetGPUDrawPipeline(gpuDrawPipeline_);
 
     // CONNECT HZB AND VISIBILITY BUFFER SYSTEMS TO GPU DRIVEN PIPELINE - DISABLED
     // gpuDrawPipeline_->SetHZBSystem(hzbSystem_.get());
@@ -1184,10 +1190,11 @@ void TestNaniteStreamingPipeline::TestEndToEndStreaming() {
 }
 
 void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
-    std::cout << "\n=== All Instance Bounds Information ===" << std::endl;
+    // 🔥 COMMENTED OUT: Reduce log noise, instance data has been validated
+    // std::cout << "\n=== All Instance Bounds Information ===" << std::endl;
 
     const auto& proxies = scene_.GetProxies();
-    std::cout << "Total proxies in scene: " << proxies.size() << std::endl;
+    // std::cout << "Total proxies in scene: " << proxies.size() << std::endl;
 
     u32 validInstanceCount = 0;
     u32 totalClusterCount = 0;
@@ -1198,7 +1205,7 @@ void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
         // Get cluster component to access geometry data
         const cluster::component_cache* cluster_cache = cluster::get(proxy.meshId);
         if (!cluster_cache || !cluster_cache->exists) {
-            std::cout << "  [" << i << "] Invalid cluster component" << std::endl;
+            // std::cout << "  [" << i << "] Invalid cluster component" << std::endl;
             continue;
         }
 
@@ -1208,61 +1215,19 @@ void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
             resource_manager.GetOrCreateResource(cluster_cache->geometry_content_id);
 
         if (!resource || !resource->gpu_mesh) {
-            std::cout << "  [" << i << "] No GPU mesh resource" << std::endl;
+            // std::cout << "  [" << i << "] No GPU mesh resource" << std::endl;
             continue;
         }
-
-        // Get bounds from GPU mesh (local space)
-        const f32* boundsMin = resource->gpu_mesh->GetBoundsMin();
-        const f32* boundsMax = resource->gpu_mesh->GetBoundsMax();
-
-        // Calculate local space bounds
-        primal::math::v3 localCenter{
-            (boundsMin[0] + boundsMax[0]) * 0.5f,
-            (boundsMin[1] + boundsMax[1]) * 0.5f,
-            (boundsMin[2] + boundsMax[2]) * 0.5f
-        };
-
-        primal::math::v3 localExtent{
-            (boundsMax[0] - boundsMin[0]) * 0.5f,
-            (boundsMax[1] - boundsMin[1]) * 0.5f,
-            (boundsMax[2] - boundsMin[2]) * 0.5f
-        };
-
-        // Calculate world space bounds (same as RenderSceneSnapshot)
-        primal::math::v4 worldCenter4 = proxy.transform * primal::math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
-        primal::math::v3 worldCenter{worldCenter4.x, worldCenter4.y, worldCenter4.z};
-
-        // Calculate radius
-        f32 maxLocalExtent = std::max({localExtent.x, localExtent.y, localExtent.z});
-        const simd::float4x4& transform = proxy.transform;
-        f32 maxScale = std::max({
-            std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
-            std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
-            std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
-        });
-        f32 worldRadius = maxLocalExtent * maxScale;
-
-        std::cout << "  [" << i << "] Geometry ID: " << cluster_cache->geometry_content_id << std::endl;
-        std::cout << "      Local Space:" << std::endl;
-        std::cout << "        Center: (" << localCenter.x << ", " << localCenter.y << ", " << localCenter.z << ")" << std::endl;
-        std::cout << "        Extent: (" << localExtent.x << ", " << localExtent.y << ", " << localExtent.z << ")" << std::endl;
-        std::cout << "        AABB Min: (" << boundsMin[0] << ", " << boundsMin[1] << ", " << boundsMin[2] << ")" << std::endl;
-        std::cout << "        AABB Max: (" << boundsMax[0] << ", " << boundsMax[1] << ", " << boundsMax[2] << ")" << std::endl;
-        std::cout << "      World Space:" << std::endl;
-        std::cout << "        Center: (" << worldCenter.x << ", " << worldCenter.y << ", " << worldCenter.z << ")" << std::endl;
-        std::cout << "        Radius: " << worldRadius << std::endl;
-        std::cout << "        Max Scale: " << maxScale << std::endl;
-        std::cout << "      Cluster Count: " << resource->cluster_data.cluster_count << std::endl;
 
         validInstanceCount++;
         totalClusterCount += resource->cluster_data.cluster_count;
     }
 
-    std::cout << "\nSummary:" << std::endl;
+    // Only print summary
+    std::cout << "\n=== Scene Summary ===" << std::endl;
     std::cout << "  Valid Instances: " << validInstanceCount << " out of " << proxies.size() << std::endl;
     std::cout << "  Total Clusters: " << totalClusterCount << std::endl;
-    std::cout << "=== End Instance Bounds Information ===\n" << std::endl;
+    std::cout << "=== End Summary ===\n" << std::endl;
 }
 
 void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
@@ -1277,6 +1242,7 @@ void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
     // Group by culling reason for better analysis
     u32 frustumCulled = 0;
     u32 distanceCulled = 0;
+    u32 backfaceCulled = 0;  // 🔥 NEW: Backface culling counter
     u32 notCulled = 0;
     u32 unknownCulled = 0;
 
@@ -1285,6 +1251,7 @@ void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
             case 0: frustumCulled++; break;
             case 1: distanceCulled++; break;
             case 2: notCulled++; break;
+            case 3: backfaceCulled++; break;  // 🔥 NEW: Backface culled
             default: unknownCulled++; break;
         }
     }
@@ -1292,6 +1259,7 @@ void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
     std::cout << "Final Frame Culling Summary:" << std::endl;
     std::cout << "  Frustum Culled: " << frustumCulled << std::endl;
     std::cout << "  Distance Culled: " << distanceCulled << std::endl;
+    std::cout << "  Backface Culled: " << backfaceCulled << std::endl;  // 🔥 NEW: Backface culling output
     std::cout << "  Not Culled: " << notCulled << std::endl;
     std::cout << "  Unknown: " << unknownCulled << std::endl;
 
@@ -1304,7 +1272,8 @@ void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
         const char* culling_reason_str =
             entry.culling_reason == 0 ? "Frustum" :
             entry.culling_reason == 1 ? "Distance" :
-            entry.culling_reason == 2 ? "None" : "Unknown";
+            entry.culling_reason == 2 ? "None" :
+            entry.culling_reason == 3 ? "Backface" : "Unknown";  // 🔥 NEW: Backface culling
 
         // Convert culling plane to string
         const char* plane_str = "None";
@@ -1328,6 +1297,14 @@ void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
                  << ", Distance=" << entry.distance_to_camera
                  << ", BoundsRadius=" << entry.bounds_radius
                  << ", Visible=" << (entry.is_visible ? "Yes" : "No");
+
+        // 🔥 NEW: Show backface culling specific data
+        if (entry.meshlet_id > 0 || entry.is_backface_culled) {
+            std::cout << "\n      Backface: [MeshletID=" << entry.meshlet_id
+                     << ", CosAngle=" << entry.backface_cos_angle
+                     << ", Cutoff=" << entry.backface_cutoff
+                     << ", Culled=" << (entry.is_backface_culled ? "Yes" : "No") << "]";
+        }
 
         // Show plane distances for debugging
         std::cout << "\n      PlaneDistances=[L:" << entry.plane_distances[0]

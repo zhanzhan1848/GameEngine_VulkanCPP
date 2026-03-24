@@ -15,6 +15,7 @@ namespace primal::graphics::nanite {
 
 class NaniteStreamingManager;
 class NaniteResourceManager;
+class GPUDrivenDrawPipeline;
 
 struct CullingConfig {
     u32 max_clusters_per_dispatch{ 100000 };
@@ -45,9 +46,15 @@ struct CullingDebugData {
     u32 is_visible;              // Visibility result
     u32 instance_id;             // Instance identifier
     u32 cluster_id;              // Cluster identifier
-    u32 culling_reason;          // Why it was culled (0=frustum, 1=distance, 2=none)
+    u32 culling_reason;          // Why it was culled (0=frustum, 1=distance, 2=none, 3=backface)
     u32 culling_plane;           // 🔥 NEW: Which plane caused culling (0=left, 1=right, 2=bottom, 3=top, 4=near, 5=far, 0xFFFFFFFF=none)
     float plane_distances[6];     // 🔥 NEW: Distance to each frustum plane for debugging
+
+    // 🔥 NEW: Backface culling specific data
+    u32 meshlet_id;              // Meshlet ID for backface culling
+    float backface_cos_angle;     // Cosine of angle between view dir and cone axis
+    float backface_cutoff;        // Cone cutoff value for debugging
+    u32 is_backface_culled;      // Whether backface culling was triggered (0=no, 1=yes)
 };
 
 struct VisibilityResult {
@@ -105,6 +112,9 @@ public:
     void SetConfig(const CullingConfig& config) { config_ = config; }
     void SetLODBias(float bias) { config_.lod_bias = bias; }
 
+    // Set GPU Draw Pipeline for accessing global meshlet buffer (for backface culling)
+    void SetGPUDrawPipeline(GPUDrivenDrawPipeline* pipeline) { gpuDrawPipeline_ = pipeline; }
+
     // Debug methods
     void EnableDebugOutput(bool enable) { config_.enable_debug_output = enable; }
     bool ReadDebugData(utl::vector<primal::graphics::nanite::CullingDebugData>& out_debug_data);
@@ -156,6 +166,9 @@ private:
 
     rhi::ResourceHandle hiz_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle occlusion_query_buffer_{ rhi::handles::INVALID_RESOURCE };
+
+    // Pointer to GPU Draw Pipeline for accessing global meshlet buffer
+    GPUDrivenDrawPipeline* gpuDrawPipeline_{ nullptr };
 
     // Triple-buffered debug buffers to avoid data races
     std::array<rhi::ResourceHandle, 3> culling_debug_buffers_{ rhi::handles::INVALID_RESOURCE };

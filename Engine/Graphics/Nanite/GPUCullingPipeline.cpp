@@ -1,4 +1,5 @@
 #include "GPUCullingPipeline.h"
+#include "GPUDrivenDrawPipeline.h"
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHIResource.h"
 #include "../RHI/Core/RHICommand.h"
@@ -90,11 +91,13 @@ bool GPUCullingPipeline::CreatePipelines() {
         { 9, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
         // Binding 10: Debug culling buffer (write-only, for debugging culling issues)
         { 10, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
+        // Binding 11: Global meshlet buffer (read-only, for Normal Cone backface culling)
+        { 11, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
     };
 
     rhi::DescriptorSetLayoutDesc cullingLayoutDesc{
         .bindings = cullingBindings,
-        .bindingCount = 11  // Updated from 10 to 11 (added debug buffer)
+        .bindingCount = 12  // Updated from 11 to 12 (added meshlet buffer)
     };
 
     culling_descriptor_layout_ = device_->CreateDescriptorSetLayout(cullingLayoutDesc);
@@ -626,13 +629,50 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     );
 
     // Create descriptor sets on first frame (now we have snapshot data)
-    static bool descriptor_sets_created = false;
-    if (!descriptor_sets_created && callCount == 1) {
+    // 🔥 FIX: Handle meshlet buffer availability across triple buffering
+    // Frame 1: Create basic descriptor sets (meshlet buffer not ready yet)
+    // Frame 3: Recreate descriptor sets with meshlet buffer binding for backface culling
+    static bool basic_descriptor_sets_created = false;
+    static bool backface_descriptor_sets_created = false;
+
+    if (!basic_descriptor_sets_created && callCount == 1) {
+        std::cout << "[GPUCulling] Frame " << bufferIndex << ": Creating basic descriptor sets (backface culling disabled until frame 3)..." << std::endl;
         if (!CreateDescriptorSets(snapshot)) {
-            std::cerr << "Failed to create descriptor sets during first frame" << std::endl;
+            std::cerr << "Failed to create basic descriptor sets" << std::endl;
             return false;
         }
-        descriptor_sets_created = true;
+        basic_descriptor_sets_created = true;
+    }
+
+    // Frame 3: Recreate descriptor sets with meshlet buffer for backface culling
+    if (!backface_descriptor_sets_created && callCount >= 3) {
+        // Check if meshlet buffer is now available
+        if (gpuDrawPipeline_) {
+            auto meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();
+            if (meshlet_buffer != rhi::handles::INVALID_RESOURCE) {
+                std::cout << "[GPUCulling] Frame " << bufferIndex << ": Global meshlet buffer ready! Recreating descriptor sets with backface culling..." << std::endl;
+
+                // Destroy old descriptor sets first
+                for (u32 i = 0; i < 3; i++) {
+                    if (culling_descriptor_sets_[i] != rhi::handles::INVALID_DESCRIPTOR_SET) {
+                        device_->DestroyDescriptorSet(culling_descriptor_sets_[i]);
+                        culling_descriptor_sets_[i] = rhi::handles::INVALID_DESCRIPTOR_SET;
+                    }
+                }
+
+                // Recreate descriptor sets with meshlet buffer binding
+                if (!CreateDescriptorSets(snapshot)) {
+                    std::cerr << "Failed to recreate descriptor sets with meshlet buffer" << std::endl;
+                    return false;
+                }
+                backface_descriptor_sets_created = true;
+                std::cout << "[GPUCulling] Frame " << bufferIndex << ": Backface culling descriptor sets created successfully!" << std::endl;
+            } else {
+                if (bufferIndex == 0) {
+                    std::cout << "[GPUCulling] Frame " << bufferIndex << ": Meshlet buffer still not ready, will retry next frame..." << std::endl;
+                }
+            }
+        }
     }
 
     // Update culling constants data
@@ -1334,8 +1374,8 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
 
         // Set up all bindings for this frame's descriptor set
         auto& frame_res = frame_resources_[i];
-        rhi::WriteDescriptorSet writes[11];  // Updated from 10 to 11 (added debug buffer)
-        rhi::DescriptorBufferInfo bufferInfos[11];  // Updated from 10 to 11 (added debug buffer)
+        rhi::WriteDescriptorSet writes[12];  // Updated from 11 to 12 (added meshlet buffer)
+        rhi::DescriptorBufferInfo bufferInfos[12];  // Updated from 11 to 12 (added meshlet buffer)
         rhi::DescriptorImageInfo imageInfo;
         u32 writeCount = 0;
 
@@ -1458,6 +1498,22 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         writes[writeCount].descriptorType = rhi::DescriptorType::StorageBuffer;
         writes[writeCount].bufferInfo = &bufferInfos[writeCount];
         writeCount++;
+
+        // Binding 11: Global meshlet buffer (for Normal Cone backface culling) - single buffer
+        auto global_meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();
+        if (global_meshlet_buffer != rhi::handles::INVALID_RESOURCE) {
+            bufferInfos[writeCount].buffer = global_meshlet_buffer;
+            bufferInfos[writeCount].offset = 0;
+            bufferInfos[writeCount].range = ~0ull;
+            writes[writeCount].dstSet = culling_descriptor_sets_[i];
+            writes[writeCount].dstBinding = 11;
+            writes[writeCount].descriptorCount = 1;
+            writes[writeCount].descriptorType = rhi::DescriptorType::StorageBuffer;
+            writes[writeCount].bufferInfo = &bufferInfos[writeCount];
+            writeCount++;
+        } else {
+            std::cerr << "[GPUCulling] Warning: Global meshlet buffer is invalid, skipping binding 11" << std::endl;
+        }
 
         device_->UpdateDescriptorSets(writeCount, writes);
         // std::cout << "[GPUCulling] Created and configured descriptor set for frame " << i << std::endl;
@@ -1925,7 +1981,7 @@ bool GPUCullingPipeline::ReadDebugData(utl::vector<primal::graphics::nanite::Cul
         return false;
     }
 
-    // 🔥 FIX: Only read Stage 1 debug data (instance-level culling) to avoid confusion
+    // 🔥 FIX: Read Stage 4 debug data (cluster-level culling with backface culling)
     // Stage 1 data is at indices [STAGE1_DEBUG_OFFSET, STAGE1_DEBUG_OFFSET + STAGE_DEBUG_COUNT)
     // Stage 4 data is at indices [STAGE4_DEBUG_OFFSET, STAGE4_DEBUG_OFFSET + STAGE_DEBUG_COUNT)
     constexpr u32 STAGE1_DEBUG_OFFSET = 0;
@@ -1933,13 +1989,13 @@ bool GPUCullingPipeline::ReadDebugData(utl::vector<primal::graphics::nanite::Cul
     constexpr u32 STAGE4_DEBUG_OFFSET = 500;
     constexpr u32 MAX_DEBUG_ENTRIES = 1000;
 
-    // Only read Stage 1 data (instance-level culling)
+    // Read Stage 4 data (cluster-level culling with backface culling)
     u32 debug_count = STAGE1_DEBUG_COUNT;
 
-    // Copy only Stage 1 debug data
+    // Copy Stage 4 debug data instead of Stage 1
     const primal::graphics::nanite::CullingDebugData* debug_data = static_cast<const primal::graphics::nanite::CullingDebugData*>(mapped_data);
     out_debug_data.resize(debug_count);
-    memcpy(out_debug_data.data(), debug_data + STAGE1_DEBUG_OFFSET, sizeof(primal::graphics::nanite::CullingDebugData) * debug_count);
+    memcpy(out_debug_data.data(), debug_data + STAGE4_DEBUG_OFFSET, sizeof(primal::graphics::nanite::CullingDebugData) * debug_count);
 
     // Filter out empty entries (where instance_id is 0 and cluster_id is 0)
     utl::vector<primal::graphics::nanite::CullingDebugData> filtered_debug_data;

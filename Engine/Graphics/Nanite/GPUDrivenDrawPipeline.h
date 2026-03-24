@@ -86,6 +86,12 @@ public:
     // Get the final output texture that was rendered to
     rhi::ResourceHandle GetFinalOutputTexture() const { return final_color_texture_; }
 
+    // Get the final depth texture for HZB generation
+    rhi::ResourceHandle GetFinalDepthTexture() const { return final_depth_texture_; }
+
+    // Get global meshlet buffer for backface culling
+    rhi::ResourceHandle GetGlobalMeshletBuffer() const { return global_meshlet_buffer_; }
+
 private:
     GPUDrivenDrawPipeline() = default;
 

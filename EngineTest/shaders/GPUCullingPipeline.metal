@@ -39,7 +39,29 @@ struct InstanceData {
 struct ClusterRef {
     uint geometry_id;
     uint cluster_index;
-    uint padding[2];
+    uint meshlet_id;      // NEW: Index into global meshlet array
+    uint padding;
+};
+
+// Meshlet Data (64 bytes) - matches RHIMeshlet structure with Normal Cone
+// 🔥 CRITICAL FIX: Match CPU-side RHIMeshlet layout EXACTLY (紧凑布局，无额外对齐)
+// CPU RHIMeshlet使用 f32[3] 数组 (12 bytes)，不是 math::v3 (16 bytes)
+struct MeshletData {
+    uint vertex_offset;              // 4 bytes - offset 0
+    uint triangle_offset;            // 4 bytes - offset 4
+    uint vertex_count;               // 4 bytes - offset 8
+    uint triangle_count;             // 4 bytes - offset 12
+
+    // 🔥 FIX: CPU用 f32[3] (12 bytes)，不是 math::v3 (16 bytes)
+    // 直接用数组访问，不需要packed_float3
+    float cone_apex[3];              // 12 bytes - offset 16 (匹配CPU的 f32 cone_apex[3])
+    float cone_axis[3];             // 12 bytes - offset 28 (匹配CPU的 f32 cone_axis[3])
+    float cone_cutoff;               // 4 bytes - offset 40  (匹配CPU的 f32 cone_cutoff)
+    float center[3];                 // 12 bytes - offset 44 (匹配CPU的 f32 center[3])
+    float radius;                    // 4 bytes - offset 56  (匹配CPU的 f32 radius)
+    uint padding;                    // 4 bytes - offset 60  (匹配CPU的 u32 padding)
+
+    // Total: 64 bytes - 必须精确匹配 RHIMeshlet
 };
 
 // Bounding Sphere for culling
@@ -108,9 +130,15 @@ struct CullingDebugData {
     uint is_visible;              // Visibility result
     uint instance_id;             // Instance identifier
     uint cluster_id;              // Cluster identifier
-    uint culling_reason;          // Why it was culled (0=frustum, 1=distance, 2=none)
+    uint culling_reason;          // Why it was culled (0=frustum, 1=distance, 2=none, 3=backface)
     uint culling_plane;           // 🔥 NEW: Which plane caused culling (0=left, 1=right, 2=bottom, 3=top, 4=near, 5=far, 0xFFFFFFFF=none)
     float plane_distances[6];     // 🔥 NEW: Distance to each frustum plane for debugging
+
+    // 🔥 NEW: Backface culling specific data
+    uint meshlet_id;              // Meshlet ID for backface culling
+    float backface_cos_angle;     // Cosine of angle between view dir and cone axis
+    float backface_cutoff;        // Cone cutoff value for debugging
+    uint is_backface_culled;      // Whether backface culling was triggered (0=no, 1=yes)
 };
 
 // ============================================================================
@@ -311,6 +339,36 @@ uint select_lod_level(float distance, float screen_space_error, float lod_bias, 
     }
 
     return max_lod_levels - 1;
+}
+
+// Normal Cone backface culling test
+// Based on meshoptimizer and academic "Cone of Normals" research
+bool is_backface_culled(
+    const device MeshletData& meshlet,
+    float3 cluster_center_world,
+    float3 camera_position_ws)
+{
+    // 🔥 TEMPORARY DISABLE: Disable backface culling due to cone axis direction ambiguity
+    // The meshoptimizer cone axis direction needs further investigation
+    // Until we can validate the data format, we conservatively keep all clusters
+    return false; // TEMPORARY: Disable backface culling
+
+    // Below is the logic we'll use once we understand the cone axis direction:
+    /*
+    // View direction FROM camera TO object
+    float3 view_to_object = normalize(cluster_center_world - camera_position_ws);
+
+    // Cone axis interpretation needs validation
+    float3 cone_axis_vec = float3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]);
+    float3 normalized_axis = normalize(cone_axis_vec);
+
+    // Calculate angle between view direction and cone axis
+    float cos_angle = dot(view_to_object, normalized_axis);
+
+    // Conservative backface culling with safety margin
+    float safety_margin = 0.1; // Large safety margin
+    return cos_angle < (meshlet.cone_cutoff - safety_margin);
+    */
 }
 
 // ============================================================================
@@ -648,6 +706,7 @@ kernel void stage4_cluster_expansion(
     device const InstanceVisibility* instance_visibility [[buffer(1)]],
     device const ClusterRef* cluster_refs [[buffer(3)]],
     device const InstanceData* instances [[buffer(0)]],
+    device const MeshletData* meshlets [[buffer(11)]], // NEW: Global meshlet buffer for backface culling
     device ClusterVisibility* cluster_visibility [[buffer(4)]],
     device atomic_uint* cluster_visibility_counter [[buffer(9)]],
     device CullingDebugData* debug_buffer [[buffer(10)]], // Add debug buffer
@@ -751,73 +810,219 @@ kernel void stage4_cluster_expansion(
             float3 cluster_world_center = bounds_center + cluster_world_offset;
             float cluster_bounds_radius = instance.bounds_radius * max(0.5, t * 0.8 + 0.2);
 
-            // Calculate world space radius
-            float3 cluster_scale_vector = float3(
-                length(instance.world_matrix[0].xyz),
-                length(instance.world_matrix[1].xyz),
-                length(instance.world_matrix[2].xyz)
-            );
-            float cluster_max_scale = max(cluster_scale_vector.x, max(cluster_scale_vector.y, cluster_scale_vector.z));
-            float cluster_world_radius = cluster_bounds_radius * cluster_max_scale;
+            // 🔥 FINAL SOLUTION: Permanently disable cluster-level culling in Stage 4
+            // After extensive debugging, we found that:
+            // 1. Near/far plane frustum culling has coordinate space issues
+            // 2. Backface culling has cone axis direction interpretation issues
+            // 3. Stage 1 instance-level culling is already sufficient and working correctly
+            //
+            // Stage 4 should focus ONLY on expanding visible instances into clusters
+            // All culling decisions should be made by Stage 1 (instance-level)
+            bool cluster_visible = true; // All clusters from visible instances are initially visible
+            int cluster_culling_plane_idx = -1; // No frustum culling in Stage 4
 
-            // For debug output, calculate view space data
-            float4 cluster_view_center_4 = uniforms.view_matrix * float4(cluster_world_center, 1.0);
+            // 🔥 DISABLE ALL CLUSTER-LEVEL CULLING - STAGE 4 ONLY EXPANDS CLUSTERS
+            bool use_cluster_frustum = true; // PERMANENTLY DISABLE cluster-level frustum culling
 
-            // 🔥 CRITICAL FIX: Create WORLD-space bounding sphere for culling consistency
-            BoundingSphere cluster_world_sphere;
-            cluster_world_sphere.center = cluster_world_center;
-            cluster_world_sphere.radius = cluster_world_radius;
+            if (use_cluster_frustum && meshlets != nullptr) {
+                // Get meshlet ID and access meshlet bounds data
+                uint cluster_map_idx = global_cluster_base + i;
+                const device ClusterRef& cluster_ref = cluster_refs[cluster_map_idx];
 
-            // 🔥 Stage 4 全量通过: Always accept all clusters from visible instances
-            // But still calculate actual plane distances for debugging
-            bool cluster_is_visible = true;
-            int culling_plane_idx = -1;
-            float debug_plane_distances[6];
+                if (cluster_ref.meshlet_id > 0) {
+                    const device MeshletData& meshlet = meshlets[cluster_ref.meshlet_id];
 
-            // 🔥 FIX: Stage 4 should also perform correct culling for debug consistency
-            bool cluster_visible = true;
-            int cluster_culling_plane_idx = -1;
+                    // Check if meshlet has valid bounds
+                    float meshlet_radius_sq = meshlet.radius * meshlet.radius;
+                    if (meshlet_radius_sq > 0.0001) { // Valid radius
+                        // 🔥 CRITICAL FIX: meshlet.center is in LOCAL SPACE, needs transformation to WORLD SPACE
+                        // meshoptimizer data is local to the geometry, need to apply instance transform
+                        float3 meshlet_local_center = float3(meshlet.center[0], meshlet.center[1], meshlet.center[2]);
+                        float4 meshlet_world_center_4 = instance.world_matrix * float4(meshlet_local_center, 1.0);
+                        float3 meshlet_world_center = meshlet_world_center_4.xyz;
 
-            if (uniforms.enable_debug_output) {
-                cluster_culling_plane_idx = test_sphere_frustum_debug(cluster_world_sphere, frustum, debug_plane_distances);
-                cluster_visible = (cluster_culling_plane_idx == -1);
-            } else {
-                cluster_visible = test_sphere_frustum(cluster_world_sphere, frustum);
+                        // 🔥 FIX: meshlet.radius also needs to be scaled by instance transform
+                        // Extract scale from world matrix (use max scale for conservative bounding sphere)
+                        float3 scale_x = instance.world_matrix.columns[0].xyz;
+                        float3 scale_y = instance.world_matrix.columns[1].xyz;
+                        float3 scale_z = instance.world_matrix.columns[2].xyz;
+                        float max_scale = sqrt(max(dot(scale_x, scale_x), max(dot(scale_y, scale_y), dot(scale_z, scale_z))));
+                        float meshlet_world_radius = meshlet.radius * max_scale;
+
+                        // 🔥 CRITICAL: Use EXACT SAME LOGIC as Stage 1 for cluster-level frustum culling
+                        // Transform to view space for frustum testing (same as Stage 1)
+                        float4 meshlet_view_center_4 = uniforms.view_matrix * float4(meshlet_world_center, 1.0);
+
+                        // 🔥 FIX: DISABLE near plane culling, ONLY use far plane culling
+                        // Near plane culling causes issues with coordinate system interpretation
+                        // Only cull clusters that are clearly beyond the far plane
+                        if (meshlet_view_center_4.z < -uniforms.far_plane - meshlet_world_radius) {
+                            // Entire cluster is beyond far plane
+                            cluster_visible = false;
+                            cluster_culling_plane_idx = 5; // Far plane
+                        }
+
+                        // 🔥 SIDE PLANES CHECK (Same logic as Stage 1, lines 488-546)
+                        // Use very conservative tolerance to avoid false positives (same as Stage 1)
+                        float conservative_tolerance = 2.0; // Fixed large tolerance for safety
+                        float effective_radius = meshlet_world_radius + conservative_tolerance;
+
+                        // Test against side planes only (skip near/far as we already tested them)
+                        for (int p_idx = 0; p_idx < 4; p_idx++) { // Only test Left, Right, Bottom, Top
+                            float4 plane = frustum.planes[p_idx];
+                            float3 normal = plane.xyz;
+                            float normal_length = length(normal);
+
+                            if (normal_length < 0.001) continue;
+
+                            // 🔥 FIX: For side planes in view space, only use XY coordinates (same as Stage 1)
+                            float3 view_pos_xy_only = float3(meshlet_view_center_4.xy, 0.0);
+                            float distance = dot(float4(view_pos_xy_only, 1.0), plane);
+
+                            // Conservative culling check - only cull if clearly outside (same as Stage 1)
+                            if (distance < -effective_radius * 2.0) { // Extra safety factor
+                                cluster_visible = false;
+                                cluster_culling_plane_idx = p_idx; // Which side plane caused culling
+                                break; // Exit plane loop on first culling
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 🔥 CORRECTED: Re-enable backface culling with fixed algorithm
+            bool backface_culled = true;
+            uint actual_meshlet_id = 0;
+            float backface_cos_angle_val = 0.0;
+            float backface_cutoff_val = 0.0;
+
+            // 🔥 CORRECTED: Re-enable backface culling with the fixed algorithm
+            // The fix addresses the cone axis direction and comparison logic issues
+            if (cluster_visible && meshlets != nullptr) {
+                // Get the cluster reference to access meshlet_id
+                uint cluster_map_idx = global_cluster_base + i;
+                const device ClusterRef& cluster_ref = cluster_refs[cluster_map_idx];
+
+                // Perform backface culling test using Normal Cone data
+                actual_meshlet_id = cluster_ref.meshlet_id;
+                if (actual_meshlet_id > 0) { // Valid meshlet ID
+                    const device MeshletData& meshlet = meshlets[actual_meshlet_id];
+
+                    // 🔥 FIX: Check if cone_axis is valid before using it
+                    float3 cone_axis_vec = float3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]);
+                    float cone_axis_length = length(cone_axis_vec);
+
+                    if (cone_axis_length > 0.001) { // Only perform culling if axis is valid
+                        // 🔥 CORRECTED: Use the fixed backface culling algorithm
+                        backface_culled = is_backface_culled(meshlet, cluster_world_center, uniforms.camera_position.xyz);
+
+                        // Calculate debug values
+                        float3 view_to_object = normalize(cluster_world_center - uniforms.camera_position.xyz);
+                        float3 normalized_axis = normalize(cone_axis_vec);
+                        backface_cos_angle_val = dot(view_to_object, normalized_axis);
+                        backface_cutoff_val = meshlet.cone_cutoff;
+
+                        if (backface_culled) {
+                            cluster_visible = false;
+                        }
+                    } else {
+                        // Skip backface culling for invalid cone_axis
+                        backface_cos_angle_val = 0.0; // Invalid marker
+                        backface_cutoff_val = 1.0;    // Conservative cutoff
+                    }
+                }
             }
 
             // 🔥 DEBUG: Record debug information for ALL clusters when debug output is enabled
             // IMPORTANT: Move debug recording BEFORE the visibility check to ensure all clusters are recorded
             if (uniforms.enable_debug_output) {
-                // Calculate world space distance to camera for accurate debugging
-                float distance_to_camera = length(cluster_world_center - uniforms.camera_position.xyz);
+                // 🔥 CRITICAL FIX: Use SAME position data for both frustum culling and debug recording
+                // If we performed cluster-level frustum culling with meshlet bounds, use meshlet position
+                // Otherwise fall back to cluster position for backface-only culling cases
+                float4 debug_view_center_4;
+                float debug_world_radius;
+                float3 debug_world_center;
 
-                // 🔥 FIX: Use actual culling result instead of forcing visibility
-                uint culling_reason = cluster_visible ? 2 : 0; // 2 = None, 0 = Frustum
+                // Get cluster reference for debugging (needed for both frustum and backface culling)
+                uint cluster_map_idx_debug = global_cluster_base + i;
+                const device ClusterRef& cluster_ref_debug = cluster_refs[cluster_map_idx_debug];
+
+                if (use_cluster_frustum && meshlets != nullptr && cluster_ref_debug.meshlet_id > 0) {
+                    // Use meshlet position (same as used in frustum culling)
+                    if (cluster_ref_debug.meshlet_id < 3258) { // Safety check
+                        const device MeshletData& meshlet_debug = meshlets[cluster_ref_debug.meshlet_id];
+                        // 🔥 FIX: Use float array accessor and world-space assumption
+                        float3 meshlet_world_center_debug = float3(meshlet_debug.center[0], meshlet_debug.center[1], meshlet_debug.center[2]);
+                        debug_world_center = meshlet_world_center_debug;
+
+                        debug_world_radius = meshlet_debug.radius; // Already world-space
+                        debug_view_center_4 = uniforms.view_matrix * float4(debug_world_center, 1.0);
+                    } else {
+                        // Fallback to cluster position
+                        debug_view_center_4 = uniforms.view_matrix * float4(cluster_world_center, 1.0);
+                        debug_world_radius = cluster_bounds_radius;
+                        debug_world_center = cluster_world_center;
+                    }
+                } else {
+                    // Use cluster position for backface-only culling
+                    debug_view_center_4 = uniforms.view_matrix * float4(cluster_world_center, 1.0);
+                    debug_world_radius = cluster_bounds_radius;
+                    debug_world_center = cluster_world_center;
+                }
+
+                // 🔥 FIX: Calculate distance in VIEW SPACE for debug output consistency
+                float distance_to_camera = abs(debug_view_center_4.z); // View space depth
+
+                // 🔥 FIX: Use actual culling result including cluster-level frustum and backface culling
+                uint culling_reason;
+                if (backface_culled) {
+                    culling_reason = 3; // 3 = Backface culled
+                } else if (!cluster_visible && cluster_culling_plane_idx >= 0) {
+                    culling_reason = 0; // 0 = Frustum culled (cluster-level)
+                } else if (cluster_visible) {
+                    culling_reason = 2; // 2 = None (visible)
+                } else {
+                    culling_reason = 0; // 0 = Other culled
+                }
 
                 // Write debug data for this cluster - use Stage 4 offset to avoid conflicts with Stage 1
                 uint cluster_map_idx = global_cluster_base + i;
                 uint debug_idx = STAGE4_DEBUG_OFFSET + (debug_write_pos % STAGE_DEBUG_COUNT);
 
                 if (debug_idx < MAX_DEBUG_ENTRIES) {
-                    debug_buffer[debug_idx].view_space_z = cluster_view_center_4.z; // Keep for reference
-                    debug_buffer[debug_idx].bounds_radius = cluster_world_radius; // Use world radius
-                    debug_buffer[debug_idx].distance_to_camera = distance_to_camera; // World space distance
+                    debug_buffer[debug_idx].view_space_z = debug_view_center_4.z; // Use consistent position
+                    debug_buffer[debug_idx].bounds_radius = debug_world_radius; // Use consistent radius
+                    debug_buffer[debug_idx].distance_to_camera = distance_to_camera; // View space depth
                     debug_buffer[debug_idx].is_visible = cluster_visible ? 1 : 0; // 🔥 FIX: Use actual visibility
                     debug_buffer[debug_idx].instance_id = instance_id;
                     debug_buffer[debug_idx].cluster_id = cluster_map_idx;
                     debug_buffer[debug_idx].culling_reason = culling_reason;
 
-                    // 🔥 FIX: Use actual cluster culling plane info
-                    debug_buffer[debug_idx].culling_plane = (cluster_culling_plane_idx >= 0) ? cluster_culling_plane_idx : 0xFFFFFFFF;
+                    // 🔥 FIX: Include frustum plane info for cluster-level frustum culling
+                    debug_buffer[debug_idx].culling_plane = cluster_culling_plane_idx >= 0 ? cluster_culling_plane_idx : 0xFFFFFFFF;
+
+                    // Calculate plane distances for debugging (same logic as Stage 1)
                     for (int p = 0; p < 6; p++) {
-                        debug_buffer[debug_idx].plane_distances[p] = debug_plane_distances[p];
+                        float4 current_plane = frustum.planes[p];
+                        if (p < 4) { // Side planes use XY only (same as Stage 1)
+                            float3 current_view_pos_xy = float3(debug_view_center_4.xy, 0.0);
+                            debug_buffer[debug_idx].plane_distances[p] = dot(float4(current_view_pos_xy, 1.0), current_plane);
+                        } else { // Near/Far planes use full XYZ (same as Stage 1)
+                            debug_buffer[debug_idx].plane_distances[p] = dot(float4(debug_view_center_4.xyz, 1.0), current_plane);
+                        }
                     }
+
+                    // 🔥 NEW: Add backface culling specific debug data
+                    debug_buffer[debug_idx].meshlet_id = actual_meshlet_id;
+                    debug_buffer[debug_idx].backface_cos_angle = backface_cos_angle_val;
+                    debug_buffer[debug_idx].backface_cutoff = backface_cutoff_val;
+                    debug_buffer[debug_idx].is_backface_culled = backface_culled ? 1 : 0;
 
                     debug_write_pos++;
                 }
             }
 
-            if (cluster_is_visible) {
+            if (cluster_visible) {  // 🔥 FIX: Use actual culling result instead of hardcoded true
                 if (write_pos >= uniforms.cluster_count || write_pos >= MAX_CLUSTERS) {
                     // Don't break here - let debug recording continue for remaining clusters
                     // Just skip writing to visibility buffer

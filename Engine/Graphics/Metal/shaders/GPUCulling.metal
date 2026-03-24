@@ -19,7 +19,8 @@ struct InstanceData {
 struct ClusterRef {
     uint geometry_id;
     uint cluster_index;
-    uint padding[2];
+    uint meshlet_id;      // NEW: Index into global meshlet array
+    uint padding;
 };
 
 // Bounding Sphere for culling

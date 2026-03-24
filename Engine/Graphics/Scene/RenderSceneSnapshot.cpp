@@ -388,6 +388,15 @@ bool RenderSceneSnapshot::ExtractSceneData(const RenderScene& scene,
                 ClusterRef ref{};
                 ref.geometry_id = instance.geometry_id;
                 ref.cluster_index = instance.cluster_start + i;
+
+                // Set meshlet_id: simplified 1:1 mapping with cluster_index
+                // TODO: Implement proper meshlet_id mapping when needed
+                if (resource->gpu_mesh && i < resource->gpu_mesh->GetMeshletCount()) {
+                    ref.meshlet_id = i;  // Direct cluster->meshlet mapping
+                } else {
+                    ref.meshlet_id = 0;  // Fallback to first meshlet
+                }
+
                 out_cluster_refs.push_back(ref);
             }
         } else {
@@ -517,6 +526,17 @@ bool RenderSceneSnapshot::UpdateInstances(const RenderScene& scene,
                 ClusterRef ref{};
                 ref.geometry_id = instance.geometry_id;
                 ref.cluster_index = i;
+
+                // Set meshlet_id: simplified 1:1 mapping with cluster_index
+                // TODO: Implement proper meshlet_id mapping when needed
+                const auto& proxy = scene.GetProxies()[instance.geometry_id];
+                auto* resource = nanite::NaniteResourceManager::Get().GetOrCreateResource(proxy.meshId);
+                if (resource && resource->gpu_mesh && i < resource->gpu_mesh->GetMeshletCount()) {
+                    ref.meshlet_id = i;  // Direct cluster->meshlet mapping
+                } else {
+                    ref.meshlet_id = 0;  // Fallback to first meshlet
+                }
+
                 cluster_refs.push_back(ref);
             }
         } else {

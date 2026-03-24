@@ -38,7 +38,8 @@ static_assert(sizeof(InstanceData) == 192, "InstanceData must be 192 bytes for G
 struct ClusterRef {
     id::id_type geometry_id;              // 4 bytes
     u32 cluster_index;                    // 4 bytes
-    u32 padding[2];                       // 8 bytes - pad to 16-byte alignment
+    u32 meshlet_id;                       // 4 bytes - NEW: index into global meshlet array
+    u32 padding;                          // 4 bytes - maintain 16-byte alignment
 };
 
 static_assert(sizeof(ClusterRef) == 16, "ClusterRef must be 16 bytes for GPU alignment");
