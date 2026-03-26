@@ -106,7 +106,10 @@ struct ClusterVisibility {
     uint instance_index;
     uint lod_level;
     uint frame_index;
-    uint padding[3]; // Align to 32 bytes
+    // 🔥 NEW: Add cluster bounds for HZB occlusion culling
+    float3 cluster_center;  // World-space cluster center
+    float cluster_radius;   // World-space cluster radius
+    uint padding[2]; // Maintain alignment
 };
 
 // Frustum Planes for culling (traditional method)
@@ -1032,6 +1035,18 @@ kernel void stage4_cluster_expansion(
                 // CRITICAL: Use CPU-calculated cluster_map index for correct rendering pipeline access
                 uint cluster_map_idx = global_cluster_base + i;
 
+                // 🔥 NEW: Calculate cluster bounds for HZB occlusion culling
+                float3 hzb_cluster_center = cluster_world_center;
+                float hzb_cluster_radius = cluster_bounds_radius;
+
+                // Try to get more precise bounds from meshlet if available
+                const device ClusterRef& cluster_ref_hzb = cluster_refs[cluster_map_idx];
+                if (meshlets != nullptr && cluster_ref_hzb.meshlet_id > 0 && cluster_ref_hzb.meshlet_id < 3258) {
+                    const device MeshletData& meshlet_hzb = meshlets[cluster_ref_hzb.meshlet_id];
+                    hzb_cluster_center = float3(meshlet_hzb.center[0], meshlet_hzb.center[1], meshlet_hzb.center[2]);
+                    hzb_cluster_radius = meshlet_hzb.radius;
+                }
+
                 // Mark as visible for now - occlusion culling can disable later if needed
                 // Use cluster_map index for rendering pipeline compatibility
                 cluster_visibility[write_pos].is_visible = 1;
@@ -1039,6 +1054,8 @@ kernel void stage4_cluster_expansion(
                 cluster_visibility[write_pos].instance_index = instance_id;
                 cluster_visibility[write_pos].lod_level = lod_level;
                 cluster_visibility[write_pos].frame_index = uniforms.frame_index;
+                cluster_visibility[write_pos].cluster_center = hzb_cluster_center;  // 🔥 NEW: Store cluster center
+                cluster_visibility[write_pos].cluster_radius = hzb_cluster_radius; // 🔥 NEW: Store cluster radius
 
                 write_pos++;
             }
@@ -1050,13 +1067,135 @@ kernel void stage4_cluster_expansion(
 }
 
 // ============================================================================
-// Stage 5: Occlusion Culling (HZB) - Placeholder for now
+// Stage 5: Occlusion Culling (HZB) - Basic Implementation
 // ============================================================================
 
+// HZB occlusion culling helper function
+bool is_occluded_by_hzb_basic(
+    float3 cluster_center,
+    float cluster_radius,
+    float4x4 view_projection_matrix,
+    texture2d<float> hzb_texture,
+    constant CullingUniforms& uniforms)
+{
+    // Transform cluster center to screen space
+    float4 clip_pos = view_projection_matrix * float4(cluster_center, 1.0);
+
+    // Check if cluster is behind camera
+    if (clip_pos.w <= 0.0) {
+        return false; // Behind camera, assume visible (conservative)
+    }
+
+    // Perspective divide to get NDC coordinates
+    float2 ndc = clip_pos.xy / clip_pos.w;
+
+    // Convert NDC to texture coordinates [0, 1]
+    float2 texture_coords = float2(ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5);
+
+    // Check if texture coordinates are valid
+    if (texture_coords.x < 0.0 || texture_coords.x > 1.0 ||
+        texture_coords.y < 0.0 || texture_coords.y > 1.0) {
+        return false; // Outside screen bounds, assume visible
+    }
+
+    // Get texture dimensions
+    uint width = hzb_texture.get_width(0);  // Base mip level
+    uint height = hzb_texture.get_height(0);
+
+    // Convert to pixel coordinates
+    uint2 pixel_pos = uint2(texture_coords.x * width, texture_coords.y * height);
+
+    // Sample HZB texture (mip level 0 for now - can be optimized with higher mips)
+    float hzb_depth = hzb_texture.read(pixel_pos, 0).r;
+
+    // Calculate cluster depth in screen space
+    // In clip space, z is in [-1, 1] for OpenGL, [0, 1] for Vulkan/Metal
+    float cluster_depth = clip_pos.z / clip_pos.w;
+
+    // Conservative occlusion test
+    // If HZB depth is significantly closer than cluster depth, cluster is occluded
+    // Use a small bias to avoid false positives due to numerical precision
+    float depth_bias = 0.001;
+
+    // HZB stores MAX depth, so if HZB depth < cluster depth - bias, cluster is behind something
+    return hzb_depth < (cluster_depth - depth_bias);
+}
+
+// Advanced HZB occlusion culling with mip level selection
+bool is_occluded_by_hzb_advanced(
+    float3 cluster_center,
+    float cluster_radius,
+    float4x4 view_projection_matrix,
+    texture2d<float> hzb_texture,
+    constant CullingUniforms& uniforms)
+{
+    // Transform cluster center to screen space
+    float4 clip_pos = view_projection_matrix * float4(cluster_center, 1.0);
+
+    // Check if cluster is behind camera
+    if (clip_pos.w <= 0.0) {
+        return false; // Behind camera, assume visible (conservative)
+    }
+
+    // Perspective divide to get NDC coordinates
+    float2 ndc = clip_pos.xy / clip_pos.w;
+
+    // Convert NDC to texture coordinates [0, 1]
+    float2 texture_coords = float2(ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5);
+
+    // Check if texture coordinates are valid
+    if (texture_coords.x < 0.0 || texture_coords.x > 1.0 ||
+        texture_coords.y < 0.0 || texture_coords.y > 1.0) {
+        return false; // Outside screen bounds, assume visible
+    }
+
+    // Calculate screen-space radius to determine appropriate mip level
+    // Approximate screen-space diameter
+    float screen_space_radius = cluster_radius / clip_pos.w;
+
+    // Select mip level based on screen-space size
+    // Larger objects use lower mips (higher resolution), smaller objects use higher mips
+    uint max_mips = hzb_texture.get_num_mip_levels();
+    uint selected_mip = 0;
+
+    // Simple mip level selection: log2 of screen size
+    if (screen_space_radius < 0.01) {
+        selected_mip = min(max_mips - 1, uint(4));  // Small objects -> high mip
+    } else if (screen_space_radius < 0.05) {
+        selected_mip = min(max_mips - 1, uint(3));
+    } else if (screen_space_radius < 0.1) {
+        selected_mip = min(max_mips - 1, uint(2));
+    } else if (screen_space_radius < 0.2) {
+        selected_mip = min(max_mips - 1, uint(1));
+    } else {
+        selected_mip = 0;  // Large objects -> base mip
+    }
+
+    // Get texture dimensions for selected mip level
+    uint mip_width = hzb_texture.get_width(selected_mip);
+    uint mip_height = hzb_texture.get_height(selected_mip);
+
+    // Convert to pixel coordinates at selected mip level
+    uint2 pixel_pos = uint2(texture_coords.x * mip_width, texture_coords.y * mip_height);
+
+    // Sample HZB texture at selected mip level
+    float hzb_depth = hzb_texture.read(pixel_pos, selected_mip).r;
+
+    // Calculate cluster depth in screen space
+    float cluster_depth = clip_pos.z / clip_pos.w;
+
+    // Conservative occlusion test with adaptive bias
+    // Use larger bias for higher mips (coarser depth values)
+    float adaptive_bias = 0.001 + (selected_mip * 0.0005);
+
+    return hzb_depth < (cluster_depth - adaptive_bias);
+}
+
 kernel void stage5_occlusion_culling(
-    device const ClusterVisibility* cluster_visibility [[buffer(4)]],
-    texture2d<float> hzb_texture [[texture(0)]],
+    device ClusterVisibility* cluster_visibility [[buffer(4)]],  // Removed const to allow modification
+    texture2d<float> hzb_texture [[texture(8)]],
     constant CullingUniforms& uniforms [[buffer(2)]],
+    device atomic_uint* cluster_visibility_counter [[buffer(9)]], // For debug stats
     uint3 global_id [[thread_position_in_grid]])
 {
     uint cluster_idx = global_id.x;
@@ -1070,9 +1209,133 @@ kernel void stage5_occlusion_culling(
         return;
     }
 
-    // TODO: Implement HZB occlusion culling
-    // This requires proper HZB texture generation and sampling
-    // For now, this is a placeholder that doesn't modify the visibility data
+    // 🔥 CONSERVATIVE HZB OCCLUSION CULLING - Prevents false positives and flickering
+    // This implementation is much more conservative to avoid visual artifacts
+
+    // Transform cluster center to screen space
+    float3 cluster_center = cluster_visibility[cluster_idx].cluster_center;
+    float cluster_radius = cluster_visibility[cluster_idx].cluster_radius;
+
+    float4 clip_pos = uniforms.view_projection_matrix * float4(cluster_center, 1.0);
+
+    // Check if cluster is behind camera
+    if (clip_pos.w <= 0.0) {
+        return; // Behind camera, assume visible (conservative)
+    }
+
+    // Perspective divide to get NDC coordinates
+    float2 ndc = clip_pos.xy / clip_pos.w;
+
+    // Convert NDC to texture coordinates [0, 1]
+    float2 texture_coords = float2(ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5);
+
+    // Check if cluster is outside screen bounds
+    if (texture_coords.x < 0.0 || texture_coords.x > 1.0 ||
+        texture_coords.y < 0.0 || texture_coords.y > 1.0) {
+        return; // Outside screen bounds, assume visible (conservative)
+    }
+
+    // 🔥 CONSERVATIVE FILTER 1: Screen space size threshold
+    // Only perform HZB testing on clusters that occupy sufficient screen space
+    float screen_space_radius = cluster_radius / clip_pos.w;
+    const float min_screen_space_threshold = 0.08;  // 8% of screen width
+
+    if (screen_space_radius < min_screen_space_threshold) {
+        return; // Skip HZB for small clusters - they're too prone to false positives
+    }
+
+    // 🔥 SMART HZB MIPMAP SELECTION - Prevent near-camera false occlusion
+    // When camera is close to geometry, use higher resolution HZB (lower mip levels)
+    // When camera is far, can use lower resolution HZB (higher mip levels)
+
+    float camera_distance = length(cluster_center - uniforms.camera_position.xyz);
+
+    // Dynamic mip level selection based on camera distance
+    // Close objects = low mip level (high res), Far objects = high mip level (low res)
+    uint selected_mip = 0;
+    if (camera_distance < 5.0) {
+        selected_mip = 0;  // Very close - use highest resolution
+    } else if (camera_distance < 15.0) {
+        selected_mip = 1;  // Close range - high resolution
+    } else if (camera_distance < 30.0) {
+        selected_mip = 2;  // Medium range - medium resolution
+    } else {
+        selected_mip = 3;  // Far range - can use lower resolution
+    }
+
+    // Safety check: don't exceed available mip levels
+    uint max_mips = hzb_texture.get_num_mip_levels();
+    selected_mip = min(selected_mip, max_mips - 1);
+
+    // Get texture dimensions for selected mip level
+    uint width = hzb_texture.get_width(selected_mip);
+    uint height = hzb_texture.get_height(selected_mip);
+
+    // Convert to pixel coordinates at selected mip level
+    uint2 pixel_pos = uint2(texture_coords.x * width, texture_coords.y * height);
+
+    // Sample HZB texture at selected mip level
+    float hzb_depth = hzb_texture.read(pixel_pos, selected_mip).r;
+
+    // Calculate cluster depth in screen space
+    float cluster_depth = clip_pos.z / clip_pos.w;
+
+    // 🔥 DYNAMIC CONSERVATIVE BIAS - Adjust based on distance and mip level
+    // Near objects need more conservative bias to prevent false occlusion
+    // Far objects can use less conservative bias for better culling
+    float distance_conservative_factor = 1.0;
+    if (camera_distance < 10.0) {
+        distance_conservative_factor = 2.0;  // Near objects: extra conservative
+    } else if (camera_distance < 25.0) {
+        distance_conservative_factor = 1.5;  // Mid range: moderately conservative
+    } else {
+        distance_conservative_factor = 1.0;  // Far objects: normal conservativeness
+    }
+
+    // Also adjust bias based on mip level (higher mip = more conservative due to lower precision)
+    float mip_conservative_factor = 1.0 + (selected_mip * 0.2);
+
+    // 🔥 CONSERVATIVE FILTER 2: Ultra-conservative depth bias
+    // Use much larger bias to prevent false occlusion
+    float base_conservative_bias = 0.02;  // 20x larger than original
+    float radius_based_bias = cluster_radius * 0.15;  // Scale with cluster size
+
+    // Apply dynamic conservative factors
+    float total_conservative_bias = base_conservative_bias * distance_conservative_factor * mip_conservative_factor;
+    total_conservative_bias += radius_based_bias;
+
+    bool occluded = hzb_depth < (cluster_depth - total_conservative_bias);
+
+    if (occluded) {
+        // 🔥 ADDITIONAL CONSERVATIVE CHECK: Only cull if definitely occluded
+        // This extra check helps prevent flickering in borderline cases
+        float depth_difference = cluster_depth - hzb_depth;
+
+        // 🔥 SPECIAL HANDLING FOR NEAR-CAMERA WALLS
+        // When camera is very close to geometry, be extra conservative
+        float dynamic_min_occlusion = 0.1;  // Default minimum depth difference
+        if (camera_distance < 8.0) {
+            dynamic_min_occlusion = 0.3;  // Near camera: require 3x larger depth difference
+        } else if (camera_distance < 20.0) {
+            dynamic_min_occlusion = 0.2;  // Mid range: require 2x larger depth difference
+        }
+
+        // Require significant depth difference to consider occlusion
+        if (depth_difference > dynamic_min_occlusion) {
+            // 🔥 FINAL SAFETY CHECK: For very close objects, verify HZB reliability
+            if (camera_distance < 5.0 && selected_mip > 0) {
+                // Near camera but using lower mip HZB - skip to be safe
+                // This prevents the wall issue you described
+                return;
+            }
+
+            // Mark cluster as occluded
+            cluster_visibility[cluster_idx].is_visible = 0;
+
+            // Update occlusion culling statistics (if needed)
+            atomic_fetch_add_explicit(cluster_visibility_counter, 1, memory_order_relaxed);
+        }
+    }
 }
 
 // ============================================================================

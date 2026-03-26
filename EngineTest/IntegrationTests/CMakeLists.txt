@@ -215,9 +215,17 @@ if(APPLE)
     setup_test_target(TestNaniteStreamingPipeline)
     target_compile_definitions(TestNaniteStreamingPipeline PRIVATE "TEST_NANITE_STREAMING_PIPELINE=1" "TEST_RENDERER=0")
 
+    # 11. TestHZBStandalone
+    add_executable(TestHZBStandalone
+        "HZBStandaloneTest.cpp"
+        "HZBTestUtils.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestHZBStandalone)
+    target_compile_definitions(TestHZBStandalone PRIVATE "HZB_STANDALONE_TEST=1")
 
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

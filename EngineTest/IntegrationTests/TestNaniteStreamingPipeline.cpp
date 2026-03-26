@@ -8,6 +8,7 @@
 #include "Engine/Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Engine/Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Engine/Graphics/Nanite/HZBSystem.h"
+#include "Engine/Graphics/Nanite/DepthHistoryManager.h"
 #include "Engine/Graphics/Nanite/VisibilityBufferSystem.h"
 #include "Engine/Input/Input.h"
 #include "Engine/Components/Entity.h"
@@ -221,10 +222,9 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     cullingConfig.max_clusters_per_dispatch = testConfig_.max_clusters;
     cullingConfig.max_instances_per_dispatch = testConfig_.max_instances;
     cullingConfig.enable_streaming_feedback = testConfig_.enable_streaming;
-    cullingConfig.enable_occlusion_culling = false; // DISABLED: HZB Occlusion Culling to isolate flickering
+    cullingConfig.enable_occlusion_culling = true; // 🔥 ENABLE: HZB Occlusion Culling for testing
     cullingConfig.enable_lod_selection = false; // DISABLED: LOD Selection to isolate flickering
     cullingConfig.enable_debug_output = true; // 🔥 ENABLE: Debug output to see backface culling statistics
-    // cullingConfig.enable_occlusion_culling = testConfig_.enable_occlusion_culling;
     // cullingConfig.enable_lod_selection = testConfig_.enable_lod_selection;
 
     std::cout << "[TestNanite] Initializing GPUCullingPipeline..." << std::endl;
@@ -242,10 +242,8 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     gpuDrawPipeline_->SetCullingPipeline(cullingPipeline_);
     cullingPipeline_->SetGPUDrawPipeline(gpuDrawPipeline_);
 
-    // CONNECT HZB AND VISIBILITY BUFFER SYSTEMS TO GPU DRIVEN PIPELINE - DISABLED
-    // gpuDrawPipeline_->SetHZBSystem(hzbSystem_.get());
-    // gpuDrawPipeline_->SetVisibilityBufferSystem(visibilityBufferSystem_.get());
-    std::cout << "[TestNanite] HZB and Visibility Buffer systems DISABLED, not connected to GPU pipeline" << std::endl;
+    // CONNECT HZB AND VISIBILITY BUFFER SYSTEMS TO GPU DRIVEN PIPELINE - NOW ENABLED
+    std::cout << "[TestNanite] Connecting HZB and Visibility Buffer systems to GPU pipeline..." << std::endl;
 
     graphics::nanite::NaniteStreamingConfig streamingConfig;
     streamingConfig.page_pool_size_bytes = testConfig_.streaming_pool_size_mb * 1024 * 1024;
@@ -273,20 +271,40 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         return false;
     }
 
-    // Initialize HZB System - DISABLED for now to focus on basic GPU rendering
-    // hzbSystem_ = std::make_unique<HZBSystem>();
-    // HZBSystem::Config hzbConfig;
-    // hzbConfig.max_width = renderWidth_;
-    // hzbConfig.max_height = renderHeight_;
-    // hzbConfig.min_mip_size = 8;
-    // hzbConfig.enable_compression = false; // Disable compression for now
-    // hzbConfig.generate_on_gpu = false; // Use CPU for now (GPU not implemented)
-    //
-    // if (!hzbSystem_->Initialize(device_, hzbConfig)) {
-    //     std::cerr << "Failed to initialize HZB system" << std::endl;
-    //     return false;
-    // }
-    std::cout << "[TestNanite] HZB System DISABLED" << std::endl;
+    // Initialize HZB System - ENABLED for Phase 2 implementation
+    hzbSystem_ = std::make_unique<HZBSystem>();
+    HZBSystem::Config hzbConfig;
+    hzbConfig.max_width = renderWidth_;
+    hzbConfig.max_height = renderHeight_;
+    hzbConfig.min_mip_size = 8;
+    hzbConfig.enable_compression = false; // Disable compression for now
+    hzbConfig.generate_on_gpu = true; // Enable GPU HZB generation
+
+    if (!hzbSystem_->Initialize(device_, hzbConfig)) {
+        std::cerr << "Failed to initialize HZB system" << std::endl;
+        return false;
+    }
+    std::cout << "[TestNanite] HZB System initialized successfully" << std::endl;
+
+    // 🔥 CRITICAL FIX: Connect HZB system AFTER it's initialized
+    // This ensures descriptor sets can access valid HZB texture
+    gpuDrawPipeline_->SetHZBSystem(hzbSystem_.get());
+    cullingPipeline_->SetHZBSystem(hzbSystem_.get());
+    std::cout << "[TestNanite] HZB System connected to GPU pipeline!" << std::endl;
+
+    // Initialize Depth History Manager for triple-buffered depth management
+    depthHistoryManager_ = std::make_unique<DepthHistoryManager>();
+    DepthHistoryManager::Config depthConfig;
+    depthConfig.width = renderWidth_;
+    depthConfig.height = renderHeight_;
+    depthConfig.format = rhi::DataFormat::R32_Float;
+    depthConfig.buffer_count = 3; // Triple buffering
+
+    if (!depthHistoryManager_->Initialize(device_, depthConfig)) {
+        std::cerr << "Failed to initialize depth history manager" << std::endl;
+        return false;
+    }
+    std::cout << "[TestNanite] Depth History Manager initialized successfully" << std::endl;
 
     // Initialize Visibility Buffer System - DISABLED for now due to texture format issues
     // visibilityBufferSystem_ = std::make_unique<VisibilityBufferSystem>();
@@ -665,13 +683,25 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     // Import backbuffer
     auto backBufferHandle = graph.ImportResource("BackBuffer", backBuffer);
 
-    // Create depth texture for HZB generation - DISABLED to prevent memory leak
-    // rhi::TextureDesc depthDesc{};
-    // depthDesc.size = {renderWidth_, renderHeight_, 1};
-    // depthDesc.format = rhi::DataFormat::D32_Float;
-    // depthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
-    // auto depthTexture = device_->CreateTexture(depthDesc);
-    // auto depthHandle = graph.ImportResource("SceneDepth", depthTexture);
+    // CRITICAL FIX: Don't recreate depth texture every frame!
+    // Use R32_Float format for intermediate depth storage
+    if (sceneDepthTexture_ == rhi::handles::INVALID_RESOURCE) {
+        std::cout << "[BuildRenderGraph] Creating persistent depth texture for HZB (R32_Float format)" << std::endl;
+
+        rhi::TextureDesc depthDesc{};
+        depthDesc.size = {renderWidth_, renderHeight_, 1};
+        depthDesc.format = rhi::DataFormat::D32_Float;  // Depth format for source texture
+        depthDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::DepthStencil | rhi::TextureUsage::CopyDest;
+        sceneDepthTexture_ = device_->CreateTexture(depthDesc);
+
+        if (sceneDepthTexture_ == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[BuildRenderGraph] Failed to create persistent depth texture!" << std::endl;
+        }
+    } else {
+        std::cout << "[BuildRenderGraph] Reusing existing depth texture: " << sceneDepthTexture_ << std::endl;
+    }
+
+    auto depthHandle = graph.ImportResource("SceneDepth", sceneDepthTexture_);
 
     struct CullingPassData {
         rendergraph::RGResourceHandle depth_buffer;
@@ -725,12 +755,57 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             // std::cout << "[BuildRenderGraph] cullingPipeline_=" << (void*)cullingPipeline_
             //           << ", initialized=" << (cullingPipeline_ ? cullingPipeline_->IsInitialized() : 0) << std::endl;
 
-            // Build HZB from previous frame's depth (if available) - DISABLED
-            if (false && hzbSystem_ && hzbSystem_->IsReady()) {
-                // std::cout << "[BuildRenderGraph] Building HZB for occlusion culling..." << std::endl;
-                // TODO: Convert RGResourceHandle to ResourceHandle when HZB system is ready
-                // auto hzbResult = hzbSystem_->BuildHZB(depthTexture, cmd, frameCount_);
-                // std::cout << "[BuildRenderGraph] HZB building - TODO: Convert RGResourceHandle" << std::endl;
+            // Build HZB from previous frame's depth (if available) for THIS frame's occlusion culling
+            std::cout << "[BuildRenderGraph] HZB System Check: hzbSystem_=" << (hzbSystem_ ? "valid" : "null")
+                      << ", IsReady()=" << (hzbSystem_ ? hzbSystem_->IsReady() : false)
+                      << ", frameCount_=" << frameCount_ << std::endl;
+
+            if (hzbSystem_ && hzbSystem_->IsReady() && frameCount_ > 0) {
+                std::cout << "[BuildRenderGraph] 🔥 Building HZB for THIS frame's occlusion culling..." << std::endl;
+
+                // CRITICAL: Use the persistent sceneDepthTexture_ which contains previous frame's data
+                // This texture persists across frames, so it still has Frame N-1's data when we're in Frame N
+                if (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE) {
+                    std::cout << "[BuildRenderGraph] Using persistent depth texture for HZB: " << sceneDepthTexture_ << std::endl;
+
+                    // CRITICAL: Insert barrier to ensure the persistent depth texture is ready for shader read
+                    // The texture was written to in the previous frame's SceneRender pass
+                    rhi::ResourceBarrier depthTextureBarrier{};
+                    depthTextureBarrier.resource = sceneDepthTexture_;
+                    depthTextureBarrier.beforeState = rhi::ResourceState::CopyDest;  // Was copy destination in previous frame
+                    depthTextureBarrier.afterState = rhi::ResourceState::ShaderResource;  // Now shader reads from it
+                    depthTextureBarrier.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&depthTextureBarrier, 1);
+
+                    std::cout << "[BuildRenderGraph] ✅ Depth texture barrier inserted for HZB generation" << std::endl;
+
+                    // Build HZB from previous frame depth (still in sceneDepthTexture_)
+                    auto hzbResult = hzbSystem_->BuildHZB(sceneDepthTexture_, cmd);
+
+                    // 🔥 CRITICAL: Insert barrier to ensure HZB texture is ready for culling shader read
+                    // HZB generation writes to the texture, and culling shader needs to read from it
+                    rhi::ResourceBarrier hzbBarrier{};
+                    hzbBarrier.resource = hzbSystem_->GetHZBTexture();
+                    hzbBarrier.beforeState = rhi::ResourceState::UnorderedAccess;  // HZB was written as UAV
+                    hzbBarrier.afterState = rhi::ResourceState::ShaderResource;   // Culling shader reads as SRV
+                    hzbBarrier.subresource = 0xFFFFFFFF;  // All mip levels
+                    cmd->InsertBarrier(&hzbBarrier, 1);
+
+                    std::cout << "[BuildRenderGraph] HZB built successfully! Mips: " << hzbResult.mip_levels
+                              << ", Time: " << hzbResult.build_time_ms << " ms" << std::endl;
+                    std::cout << "[BuildRenderGraph] ✅ HZB barrier inserted - texture ready for culling shader" << std::endl;
+                } else {
+                    std::cout << "[BuildRenderGraph] ❌ No persistent depth texture available yet" << std::endl;
+                }
+            } else {
+                std::cout << "[BuildRenderGraph] ⏸️ HZB generation skipped - conditions not met" << std::endl;
+                if (!hzbSystem_) {
+                    std::cout << "[BuildRenderGraph]   Reason: hzbSystem_ is null" << std::endl;
+                } else if (!hzbSystem_->IsReady()) {
+                    std::cout << "[BuildRenderGraph]   Reason: HZB system not ready" << std::endl;
+                } else if (frameCount_ <= 0) {
+                    std::cout << "[BuildRenderGraph]   Reason: First frame (frameCount_=" << frameCount_ << ")" << std::endl;
+                }
             }
 
             // Render visibility buffer (if enabled) - DISABLED
@@ -837,7 +912,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             }
         },
         [this, currentBufferIndex](const SceneRenderPassData& data, graphics::rendergraph::RenderGraphContext& context) {
-            // std::cout << "[DEBUG] SceneRender PASS - Executing GPU pipeline..." << std::endl;
+            std::cout << "[SceneRender] EXECUTE: SceneRender pass started!" << std::endl;
             auto cmd = context.cmdBuffer;
 
             // CRITICAL FIX: Use triple-buffered camera data matching the system
@@ -848,10 +923,54 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
             // Execute the complete GPU-driven draw pipeline
             // The pipeline handles its own render pass begin/end internally
+            std::cout << "[SceneRender] About to execute GPU pipeline..." << std::endl;
             if (!gpuDrawPipeline_->Execute(cmd, *data.scene_snapshot, cameraBuffers_[bufferIndex].view_matrix, cameraBuffers_[bufferIndex].proj_matrix, *data.culling_results, frameCount_, currentBufferIndex)) {
                 std::cerr << "[DEBUG] GPU-driven draw pipeline failed!" << std::endl;
             } else {
-                // std::cout << "[DEBUG] GPU-driven draw pipeline completed successfully!" << std::endl;
+                std::cout << "[SceneRender] GPU pipeline execution completed successfully!" << std::endl;
+
+                // Debug: Check depth texture status after GPU pipeline execution
+                auto debugDepthTexture = gpuDrawPipeline_->GetFinalDepthTexture();
+                std::cout << "[SceneRender] Final depth texture from GPU pipeline: " << debugDepthTexture << std::endl;
+            }
+
+            // CRITICAL: Copy depth texture from GPU pipeline to our HZB depth texture
+            std::cout << "[SceneRender] Checking depth textures for copy operation..." << std::endl;
+            std::cout << "[SceneRender] sceneDepthTexture_: " << sceneDepthTexture_ << " (" << (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE ? "VALID" : "INVALID") << ")" << std::endl;
+
+            auto gpuDepthTexture = gpuDrawPipeline_->GetFinalDepthTexture();
+            std::cout << "[SceneRender] gpuDepthTexture: " << gpuDepthTexture << " (" << (gpuDepthTexture != rhi::handles::INVALID_RESOURCE ? "VALID" : "INVALID") << ")" << std::endl;
+
+            if (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE) {
+                std::cout << "[SceneRender] ✅ sceneDepthTexture_ is valid, proceeding with copy..." << std::endl;
+
+                if (gpuDepthTexture != rhi::handles::INVALID_RESOURCE) {
+                    std::cout << "[SceneRender] ✅ gpuDepthTexture is valid, performing depth copy..." << std::endl;
+                    std::cout << "[SceneRender] 🚀 Starting depth texture conversion copy..." << std::endl;
+                    std::cout << "[SceneRender] Source: " << gpuDepthTexture << " (D32_Float, " << renderWidth_ << "x" << renderHeight_ << ")" << std::endl;
+                    std::cout << "[SceneRender] Target: " << sceneDepthTexture_ << " (D32_Float, " << renderWidth_ << "x" << renderHeight_ << ")" << std::endl;
+
+                    // Now both textures are D32_Float format, so BlitTexture should work
+                    rhi::TextureBlitRegion blitRegion{};
+                    blitRegion.srcSubresource = {0, 0, 1}; // mip 0, array 0, 1 layer
+                    blitRegion.dstSubresource = {0, 0, 1};
+                    blitRegion.srcOffsets[0] = {0, 0, 0};
+                    blitRegion.srcOffsets[1] = {static_cast<s32>(renderWidth_), static_cast<s32>(renderHeight_), 1};
+                    blitRegion.dstOffsets[0] = {0, 0, 0};
+                    blitRegion.dstOffsets[1] = {static_cast<s32>(renderWidth_), static_cast<s32>(renderHeight_), 1};
+
+                    std::cout << "[SceneRender] 🚀 Starting BlitTexture (D32_Float to D32_Float)..." << std::endl;
+                    cmd->BlitTexture(gpuDepthTexture, sceneDepthTexture_, &blitRegion, 1, rhi::FilterMode::Linear);
+                    std::cout << "[SceneRender] ✅ BlitTexture completed successfully" << std::endl;
+
+                    // Note: sceneDepthTexture_ now contains current frame's depth
+                    // Next frame's HZB generation will automatically use this data
+                    // No need for explicit storage - the texture persists across frames
+                } else {
+                    std::cout << "[SceneRender] ❌ gpuDepthTexture is INVALID, cannot copy depth!" << std::endl;
+                }
+            } else {
+                std::cout << "[SceneRender] ❌ sceneDepthTexture_ is INVALID, cannot copy depth!" << std::endl;
             }
 
             // Log rendering statistics
@@ -866,6 +985,77 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 // std::cout << "  GPU Draw calls: " << drawResults.total_draw_calls << std::endl;
                 // std::cout << "  Clusters rendered: " << drawResults.total_clusters_rendered << std::endl;
                 // std::cout << "  Bin count: " << drawResults.bin_count << std::endl;
+            }
+        }
+    );
+
+    // === DEPTH COPY PASS ===
+    // CRITICAL: Separate pass for depth texture copy using Blit encoder
+    struct DepthCopyPassData {
+        rendergraph::RGResourceHandle dummy;
+    };
+
+    graph.AddPass<DepthCopyPassData>("DepthCopy",
+        graphics::rendergraph::RGPassType::Copy,  // Use Copy type for Blit encoder
+        graphics::rendergraph::RGPassCategory::Copy,
+        [this](DepthCopyPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+            // No resource dependencies needed - we handle this manually
+            std::cout << "[DepthCopy] SETUP: Depth copy pass configured" << std::endl;
+        },
+        [this](const DepthCopyPassData& data, graphics::rendergraph::RenderGraphContext& context) {
+            std::cout << "[DepthCopy] EXECUTE: Starting depth texture copy..." << std::endl;
+            auto cmd = context.cmdBuffer;
+
+            std::cout << "[DepthCopy] Checking depth textures for copy operation..." << std::endl;
+            std::cout << "[DepthCopy] sceneDepthTexture_: " << sceneDepthTexture_ << " (" << (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE ? "VALID" : "INVALID") << ")" << std::endl;
+
+            auto gpuDepthTexture = gpuDrawPipeline_->GetFinalDepthTexture();
+            std::cout << "[DepthCopy] gpuDepthTexture: " << gpuDepthTexture << " (" << (gpuDepthTexture != rhi::handles::INVALID_RESOURCE ? "VALID" : "INVALID") << ")" << std::endl;
+
+            if (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE && gpuDepthTexture != rhi::handles::INVALID_RESOURCE) {
+                std::cout << "[DepthCopy] ✅ Both textures valid, performing depth copy..." << std::endl;
+
+                // Insert barrier for source depth texture
+                rhi::ResourceBarrier srcBarrier{};
+                srcBarrier.resource = gpuDepthTexture;
+                srcBarrier.beforeState = rhi::ResourceState::DepthStencil;
+                srcBarrier.afterState = rhi::ResourceState::CopySource;
+                srcBarrier.subresource = 0xFFFFFFFF;
+                srcBarrier.queueFamily = 0xFFFFFFFF;
+                cmd->InsertBarrier(&srcBarrier, 1);
+
+                // Insert barrier for destination texture
+                rhi::ResourceBarrier dstBarrier{};
+                dstBarrier.resource = sceneDepthTexture_;
+                dstBarrier.beforeState = rhi::ResourceState::Unknown;
+                dstBarrier.afterState = rhi::ResourceState::CopyDest;
+                dstBarrier.subresource = 0xFFFFFFFF;
+                dstBarrier.queueFamily = 0xFFFFFFFF;
+                cmd->InsertBarrier(&dstBarrier, 1);
+
+                std::cout << "[DepthCopy] Barriers inserted, performing BlitTexture..." << std::endl;
+
+                // Blit depth texture
+                rhi::TextureBlitRegion blitRegion{};
+                blitRegion.srcSubresource = {0, 0, 1}; // mipLevel, arrayLayer, arraySize
+                blitRegion.srcOffsets[0] = {0, 0, 0};
+                blitRegion.srcOffsets[1] = {static_cast<int>(renderWidth_), static_cast<int>(renderHeight_), 1};
+                blitRegion.dstSubresource = {0, 0, 1};
+                blitRegion.dstOffsets[0] = {0, 0, 0};
+                blitRegion.dstOffsets[1] = {static_cast<int>(renderWidth_), static_cast<int>(renderHeight_), 1};
+
+                cmd->BlitTexture(gpuDepthTexture, sceneDepthTexture_, &blitRegion, 1, rhi::FilterMode::Nearest);
+                std::cout << "[DepthCopy] ✅ Depth blit completed successfully!" << std::endl;
+
+                // Note: sceneDepthTexture_ now contains current frame's depth
+                // Next frame's HZB generation will automatically use this data
+            } else {
+                if (sceneDepthTexture_ == rhi::handles::INVALID_RESOURCE) {
+                    std::cout << "[DepthCopy] ❌ sceneDepthTexture_ is INVALID!" << std::endl;
+                }
+                if (gpuDepthTexture == rhi::handles::INVALID_RESOURCE) {
+                    std::cout << "[DepthCopy] ❌ gpuDepthTexture is INVALID!" << std::endl;
+                }
             }
         }
     );

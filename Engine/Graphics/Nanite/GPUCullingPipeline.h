@@ -112,6 +112,15 @@ public:
     void SetConfig(const CullingConfig& config) { config_ = config; }
     void SetLODBias(float bias) { config_.lod_bias = bias; }
 
+    // Set HZB System for occlusion culling
+    void SetHZBSystem(class HZBSystem* hzb_system) {
+        hzb_system_ = hzb_system;
+        // Re-create descriptor sets to use the new HZB texture
+        if (initialized_) {
+            UpdateHZBBindings();
+        }
+    }
+
     // Set GPU Draw Pipeline for accessing global meshlet buffer (for backface culling)
     void SetGPUDrawPipeline(GPUDrivenDrawPipeline* pipeline) { gpuDrawPipeline_ = pipeline; }
 
@@ -167,6 +176,9 @@ private:
     rhi::ResourceHandle hiz_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle occlusion_query_buffer_{ rhi::handles::INVALID_RESOURCE };
 
+    // Pointer to HZB System for occlusion culling
+    class HZBSystem* hzb_system_{ nullptr };
+
     // Pointer to GPU Draw Pipeline for accessing global meshlet buffer
     GPUDrivenDrawPipeline* gpuDrawPipeline_{ nullptr };
 
@@ -209,6 +221,7 @@ private:
     bool CreatePipelines();
     bool CreateBuffers();
     bool CreateDescriptorSets(const RenderSceneSnapshot& snapshot);
+    bool UpdateHZBBindings();  // Update HZB texture binding after HZB system is set
     bool UpdateCullingConstants(u32 frame_index, const CullingConstants& constants);
 
     bool Stage0_ResetBuffers(rhi::RHICommandBuffer* cmd_buffer,

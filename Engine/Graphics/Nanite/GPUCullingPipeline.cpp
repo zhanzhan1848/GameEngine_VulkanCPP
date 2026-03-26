@@ -1,5 +1,6 @@
 #include "GPUCullingPipeline.h"
 #include "GPUDrivenDrawPipeline.h"
+#include "HZBSystem.h"
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHIResource.h"
 #include "../RHI/Core/RHICommand.h"
@@ -257,8 +258,11 @@ bool GPUCullingPipeline::CreateBuffers() {
         frame_res.instance_visibility_buffer = device_->CreateBuffer(instanceVisDesc);
 
         // Cluster visibility buffer (expanded from instances)
+        // 🔥 FIX: Updated size to match new shader ClusterVisibility struct (48 bytes instead of 16)
+        // Old: uint4 * max_clusters (16 bytes)
+        // New: ClusterVisibility struct with center/radius (48 bytes)
         rhi::BufferDesc clusterVisDesc{};
-        clusterVisDesc.size = sizeof(u32) * 4 * config_.max_clusters_per_dispatch;
+        clusterVisDesc.size = sizeof(u32) * 12 * config_.max_clusters_per_dispatch;  // 48 bytes = 12 uints
         clusterVisDesc.type = rhi::BufferType::Structured;
         clusterVisDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
         clusterVisDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::UnorderedAccess) | static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
@@ -449,6 +453,19 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // CRITICAL FIX: Use the pre-calculated buffer index directly instead of recalculating
     // This ensures synchronization with BuildRenderGraph and other systems
     current_frame_resource_ = bufferIndex;
+
+    // 🔥 CRITICAL: Check if HZB system became ready and update bindings if needed
+    // This fixes the issue where descriptor sets are created before HZB is ready
+    static bool hzb_bindings_updated = false;
+    if (!hzb_bindings_updated && hzb_system_ && hzb_system_->IsReady()) {
+        std::cout << "[GPUCulling] HZB system became ready at call #" << callCount << ", updating bindings..." << std::endl;
+        if (UpdateHZBBindings()) {
+            hzb_bindings_updated = true;
+            std::cout << "[GPUCulling] HZB bindings updated successfully!" << std::endl;
+        } else {
+            std::cerr << "[GPUCulling] Failed to update HZB bindings" << std::endl;
+        }
+    }
 
     // Reduce spam: only print first 5 calls
     if (callCount <= 5) {
@@ -1468,7 +1485,21 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         writeCount++;
 
         // Binding 8: HZB texture
-        imageInfo.imageView = hiz_buffer_;
+        // Use HZBSystem's texture if available, otherwise fall back to internal hiz_buffer_
+        rhi::ResourceHandle hzbTexture = hiz_buffer_;
+        if (hzb_system_ && hzb_system_->IsReady()) {
+            hzbTexture = hzb_system_->GetHZBTexture();
+            if (hzbTexture == rhi::handles::INVALID_RESOURCE) {
+                std::cout << "[GPUCulling] HZBSystem texture invalid, falling back to internal buffer" << std::endl;
+                hzbTexture = hiz_buffer_;
+            } else {
+                std::cout << "[GPUCulling] Frame " << i << ": Using HZBSystem texture " << hzbTexture << std::endl;
+            }
+        } else {
+            std::cout << "[GPUCulling] Frame " << i << ": HZB system not ready, using fallback buffer" << std::endl;
+        }
+
+        imageInfo.imageView = hzbTexture;
         imageInfo.imageLayout = rhi::ResourceState::ShaderResource;
         writes[writeCount].dstSet = culling_descriptor_sets_[i];
         writes[writeCount].dstBinding = 8;
@@ -1499,21 +1530,33 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         writes[writeCount].bufferInfo = &bufferInfos[writeCount];
         writeCount++;
 
-        // Binding 11: Global meshlet buffer (for Normal Cone backface culling) - single buffer
+        // Binding 11: Global meshlet buffer (for Normal Cone backface culling) - CRITICAL: Always bind
         auto global_meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();
-        if (global_meshlet_buffer != rhi::handles::INVALID_RESOURCE) {
-            bufferInfos[writeCount].buffer = global_meshlet_buffer;
-            bufferInfos[writeCount].offset = 0;
-            bufferInfos[writeCount].range = ~0ull;
-            writes[writeCount].dstSet = culling_descriptor_sets_[i];
-            writes[writeCount].dstBinding = 11;
-            writes[writeCount].descriptorCount = 1;
-            writes[writeCount].descriptorType = rhi::DescriptorType::StorageBuffer;
-            writes[writeCount].bufferInfo = &bufferInfos[writeCount];
-            writeCount++;
-        } else {
-            std::cerr << "[GPUCulling] Warning: Global meshlet buffer is invalid, skipping binding 11" << std::endl;
+        if (global_meshlet_buffer == rhi::handles::INVALID_RESOURCE) {
+            // Create a placeholder buffer if meshlet buffer is not available yet
+            // This prevents Metal validation errors while waiting for meshlet buffer to be ready
+            static rhi::ResourceHandle placeholder_meshlet_buffer = rhi::handles::INVALID_RESOURCE;
+            if (placeholder_meshlet_buffer == rhi::handles::INVALID_RESOURCE) {
+                rhi::BufferDesc placeholderDesc{};
+                placeholderDesc.size = sizeof(float) * 16; // Minimal valid buffer size
+                placeholderDesc.type = rhi::BufferType::Structured;
+                placeholderDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
+                placeholderDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ShaderResource);
+                placeholder_meshlet_buffer = device_->CreateBuffer(placeholderDesc);
+                std::cout << "[GPUCulling] Created placeholder meshlet buffer for binding 11" << std::endl;
+            }
+            global_meshlet_buffer = placeholder_meshlet_buffer;
         }
+
+        bufferInfos[writeCount].buffer = global_meshlet_buffer;
+        bufferInfos[writeCount].offset = 0;
+        bufferInfos[writeCount].range = ~0ull; // Use full range for both real and placeholder buffers
+        writes[writeCount].dstSet = culling_descriptor_sets_[i];
+        writes[writeCount].dstBinding = 11;
+        writes[writeCount].descriptorCount = 1;
+        writes[writeCount].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[writeCount].bufferInfo = &bufferInfos[writeCount];
+        writeCount++;
 
         device_->UpdateDescriptorSets(writeCount, writes);
         // std::cout << "[GPUCulling] Created and configured descriptor set for frame " << i << std::endl;
@@ -2034,6 +2077,49 @@ bool GPUCullingPipeline::ReadDebugData(utl::vector<primal::graphics::nanite::Cul
     }
 
     device_->UnmapBuffer(culling_debug_buffers_[read_frame_index]);
+    return true;
+}
+
+bool GPUCullingPipeline::UpdateHZBBindings() {
+    if (!hzb_system_ || !hzb_system_->IsReady()) {
+        std::cout << "[GPUCulling] HZB system not ready, skipping HZB binding update" << std::endl;
+        return false;
+    }
+
+    rhi::ResourceHandle hzbTexture = hzb_system_->GetHZBTexture();
+    if (hzbTexture == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GPUCulling] HZB texture is invalid" << std::endl;
+        return false;
+    }
+
+    std::cout << "[GPUCulling] ========== Updating HZB Bindings ==========" << std::endl;
+    std::cout << "[GPUCulling] HZB Texture Handle: " << hzbTexture << std::endl;
+
+    // Update HZB binding for all three frame descriptor sets
+    for (u32 i = 0; i < 3; i++) {
+        if (culling_descriptor_sets_[i] == rhi::handles::INVALID_DESCRIPTOR_SET) {
+            continue;
+        }
+
+        rhi::DescriptorImageInfo imageInfo;
+        imageInfo.imageView = hzbTexture;
+        imageInfo.imageLayout = rhi::ResourceState::ShaderResource;
+        imageInfo.sampler = rhi::handles::INVALID_SAMPLER;
+
+        rhi::WriteDescriptorSet write;
+        write.dstSet = culling_descriptor_sets_[i];
+        write.dstBinding = 8;  // HZB texture binding - FIXED: Match shader [[texture(8)]]
+        write.descriptorCount = 1;
+        write.descriptorType = rhi::DescriptorType::SampledImage;
+        write.imageInfo = &imageInfo;
+
+        device_->UpdateDescriptorSets(1, &write);
+
+        std::cout << "[GPUCulling] Frame " << i << ": Descriptor Set " << culling_descriptor_sets_[i]
+                  << " Binding 8 -> Texture " << hzbTexture << std::endl;
+    }
+
+    std::cout << "[GPUCulling] HZB bindings updated successfully" << std::endl;
     return true;
 }
 

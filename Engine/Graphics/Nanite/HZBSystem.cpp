@@ -4,6 +4,7 @@
 #include "../RHI/Core/RHIMath.h"
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 
 namespace primal::graphics::nanite {
@@ -58,14 +59,9 @@ void HZBSystem::Shutdown() {
         // TODO: Properly destroy resources via RHI
         hzb_texture_ = rhi::handles::INVALID_RESOURCE;
         hzb_sampler_ = rhi::handles::INVALID_SAMPLER;
-        hzb_compute_pipeline_ = rhi::handles::INVALID_PIPELINE;
+        hzb_copy_pipeline_ = rhi::handles::INVALID_PIPELINE;
+        hzb_downsample_pipeline_ = rhi::handles::INVALID_PIPELINE;
         hzb_pipeline_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
-    }
-
-    // Cleanup frame resources
-    for (auto& frame_res : frame_resources_) {
-        frame_res.staging_buffer = rhi::handles::INVALID_RESOURCE;
-        frame_res.in_use = false;
     }
 
     initialized_ = false;
@@ -86,22 +82,6 @@ bool HZBSystem::CreateHZBResources() {
         return false;
     }
 
-    // Create staging buffers for each frame resource
-    for (auto& frame_res : frame_resources_) {
-        rhi::BufferDesc stagingDesc{};
-        stagingDesc.size = config_.max_width * config_.max_height * sizeof(f32); // Single channel depth
-        stagingDesc.bindFlags = (u32)rhi::BufferUsageFlags::TransferDst;
-        stagingDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-
-        frame_res.staging_buffer = device_->CreateBuffer(stagingDesc);
-        if (frame_res.staging_buffer == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[HZBSystem] Failed to create staging buffer" << std::endl;
-            return false;
-        }
-
-        frame_res.in_use = false;
-    }
-
     std::cout << "[HZBSystem] HZB resources created successfully" << std::endl;
     return true;
 }
@@ -109,7 +89,7 @@ bool HZBSystem::CreateHZBResources() {
 bool HZBSystem::CreateHZBTexture() {
     rhi::TextureDesc hzbDesc{};
     hzbDesc.size = { config_.max_width, config_.max_height, 1 };
-    hzbDesc.format = rhi::DataFormat::R32_Float;  // Single channel depth
+    hzbDesc.format = rhi::DataFormat::R32_Float;  // Color format for compute shader write access
     hzbDesc.type = rhi::TextureType::Texture2D;
     hzbDesc.mipLevels = mip_levels_;
     hzbDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
@@ -146,15 +126,103 @@ bool HZBSystem::CreateHZBSampler() {
 }
 
 bool HZBSystem::CreateHZBComputePipeline() {
-    // TODO: Implement compute shader for HZB generation
-    // For now, return false to force CPU fallback
-    std::cout << "[HZBSystem] GPU HZB generation not implemented, using CPU fallback" << std::endl;
-    return false;
+    std::cout << "[HZBSystem] ========== Creating HZB Compute Pipeline ==========" << std::endl;
+
+    rhi::DescriptorSetLayoutBinding hzbBindings[] = {
+        { 0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute, nullptr },
+        { 1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute, nullptr }
+    };
+
+    rhi::DescriptorSetLayoutDesc layoutDesc{
+        .bindings = hzbBindings,
+        .bindingCount = 2
+    };
+
+    hzb_descriptor_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    if (hzb_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        std::cerr << "[HZBSystem] ❌ Failed to create HZB descriptor layout" << std::endl;
+        return false;
+    }
+    std::cout << "[HZBSystem] ✅ HZB descriptor layout created" << std::endl;
+
+    // Create pipeline layout
+    rhi::PipelineLayoutDesc pipelineLayoutDesc{
+        .setLayoutCount = 1,
+        .setLayouts = &hzb_descriptor_layout_,
+        .pushConstantRangeCount = 0,
+        .pushConstantRanges = nullptr
+    };
+
+    hzb_pipeline_layout_ = device_->CreatePipelineLayout(pipelineLayoutDesc);
+    if (hzb_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
+        std::cerr << "[HZBSystem] Failed to create HZB pipeline layout" << std::endl;
+        return false;
+    }
+
+    // Load HZB generation Metal shader
+    std::string shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/HZBGeneration.metal";
+    std::cout << "[HZBSystem] Loading shader from: " << shaderPath << std::endl;
+
+    std::ifstream shaderFile(shaderPath);
+    if (!shaderFile.is_open()) {
+        std::cerr << "[HZBSystem] ❌ Failed to open shader file: " << shaderPath << std::endl;
+        return false;
+    }
+    std::cout << "[HZBSystem] ✅ Shader file opened successfully" << std::endl;
+
+    std::string shaderCode((std::istreambuf_iterator<char>(shaderFile)),
+                          std::istreambuf_iterator<char>());
+    shaderFile.close();
+
+    std::cout << "[HZBSystem] Shader code size: " << shaderCode.size() << " bytes" << std::endl;
+
+    rhi::ShaderHandle copyShader = device_->CreateShader(
+        shaderCode.data(),
+        shaderCode.size(),
+        rhi::ShaderStage::Compute,
+        "copy_depth_to_hzb_mip0"
+    );
+    if (copyShader == rhi::handles::INVALID_SHADER) {
+        std::cerr << "[HZBSystem] ❌ Failed to create HZB base copy shader" << std::endl;
+        return false;
+    }
+
+    rhi::ShaderHandle downsampleShader = device_->CreateShader(
+        shaderCode.data(),
+        shaderCode.size(),
+        rhi::ShaderStage::Compute,
+        "generate_hzb_mip_level_basic"
+    );
+    if (downsampleShader == rhi::handles::INVALID_SHADER) {
+        std::cerr << "[HZBSystem] ❌ Failed to create HZB downsample shader" << std::endl;
+        return false;
+    }
+
+    rhi::ComputePipelineDesc pipelineDesc{};
+    pipelineDesc.layout = hzb_pipeline_layout_;
+    pipelineDesc.threadGroupSize = {16, 16, 1}; // Match HZB_THREAD_GROUP_SIZE in shader
+
+    pipelineDesc.computeShader = copyShader;
+    hzb_copy_pipeline_ = device_->CreateComputePipeline(pipelineDesc);
+    if (hzb_copy_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+        std::cerr << "[HZBSystem] ❌ Failed to create HZB copy pipeline" << std::endl;
+        return false;
+    }
+
+    pipelineDesc.computeShader = downsampleShader;
+    hzb_downsample_pipeline_ = device_->CreateComputePipeline(pipelineDesc);
+    if (hzb_downsample_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+        std::cerr << "[HZBSystem] ❌ Failed to create HZB downsample pipeline" << std::endl;
+        return false;
+    }
+
+    std::cout << "[HZBSystem] ✅ HZB compute pipeline created successfully" << std::endl;
+    std::cout << "[HZBSystem] ========== HZB Compute Pipeline Creation Complete ==========" << std::endl;
+    return true;
 }
 
 HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
-                                          rhi::RHICommandBuffer* cmd_buffer,
-                                          u32 frame_index) {
+                                          rhi::RHICommandBuffer* cmd_buffer) {
     if (!initialized_) {
         std::cerr << "[HZBSystem] Not initialized" << std::endl;
         return {};
@@ -166,15 +234,18 @@ HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
     result.hzb_texture = hzb_texture_;
     result.mip_levels = mip_levels_;
 
-    // Get current frame resource
-    current_frame_resource_ = frame_index % frame_resources_.size();
+    std::cout << "[HZBSystem] BuildHZB called: generate_on_gpu=" << config_.generate_on_gpu
+              << ", cmd_buffer=" << (cmd_buffer ? "valid" : "null") << std::endl;
 
     if (config_.generate_on_gpu && cmd_buffer) {
+        std::cout << "[HZBSystem] Attempting GPU HZB generation..." << std::endl;
         if (!GenerateHZBOnGPU(cmd_buffer, depth_texture)) {
-            std::cerr << "[HZBSystem] GPU HZB generation failed, falling back to CPU" << std::endl;
+            std::cerr << "[HZBSystem] ❌ GPU HZB generation failed, falling back to CPU" << std::endl;
             GenerateHZBOnCPU(depth_texture);
         }
     } else {
+        std::cout << "[HZBSystem] Using CPU HZB generation (generate_on_gpu=" << config_.generate_on_gpu
+                  << ", cmd_buffer=" << (cmd_buffer ? "valid" : "null") << ")" << std::endl;
         GenerateHZBOnCPU(depth_texture);
     }
 
@@ -201,15 +272,184 @@ bool HZBSystem::GenerateHZBOnCPU(rhi::ResourceHandle depth_texture) {
 }
 
 bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::ResourceHandle depth_texture) {
-    std::cout << "[HZBSystem] GPU HZB generation - PLACEHOLDER" << std::endl;
+    std::cout << "[HZBSystem] ========== GPU HZB Generation Start ==========" << std::endl;
 
-    // TODO: Implement GPU-based HZB generation using compute shaders
-    // 1. Copy depth texture to HZB base mip level
-    // 2. For each subsequent mip level:
-    //    - Dispatch compute shader to sample previous mip and write max depth
-    //    - Insert appropriate memory barriers
+    if (hzb_copy_pipeline_ == rhi::handles::INVALID_PIPELINE ||
+        hzb_downsample_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+        std::cerr << "[HZBSystem] ❌ HZB compute pipelines not available" << std::endl;
+        return false;
+    }
+    std::cout << "[HZBSystem] ✅ HZB compute pipelines are valid" << std::endl;
 
-    return false; // Not implemented yet
+    if (depth_texture == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[HZBSystem] ❌ Invalid depth texture" << std::endl;
+        return false;
+    }
+    std::cout << "[HZBSystem] ✅ Depth texture is valid: " << depth_texture << std::endl;
+
+    if (hzb_texture_ == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[HZBSystem] ❌ HZB texture is invalid" << std::endl;
+        return false;
+    }
+    std::cout << "[HZBSystem] ✅ HZB texture is valid: " << hzb_texture_ << std::endl;
+
+    std::vector<rhi::ResourceHandle> temporaryViews;
+
+    rhi::DescriptorSetDesc descriptorDesc{};
+    descriptorDesc.layout = hzb_descriptor_layout_;
+
+    rhi::DescriptorSetHandle descriptorSet = device_->CreateDescriptorSet(descriptorDesc);
+    if (descriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
+        std::cerr << "[HZBSystem] Failed to create HZB descriptor set" << std::endl;
+        return false;
+    }
+
+    rhi::TextureViewDesc baseTargetViewDesc{};
+    baseTargetViewDesc.texture = hzb_texture_;
+    baseTargetViewDesc.viewType = rhi::TextureType::Texture2D;
+    baseTargetViewDesc.format = rhi::DataFormat::R32_Float;
+    baseTargetViewDesc.mostDetailedMip = 0;
+    baseTargetViewDesc.mipCount = 1;
+    baseTargetViewDesc.firstArraySlice = 0;
+    baseTargetViewDesc.arraySize = 1;
+    rhi::ResourceHandle hzbMip0View = device_->CreateTextureView(baseTargetViewDesc);
+    if (hzbMip0View == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[HZBSystem] Failed to create HZB mip0 view" << std::endl;
+        device_->DestroyDescriptorSet(descriptorSet);
+        return false;
+    }
+    temporaryViews.push_back(hzbMip0View);
+
+    rhi::DescriptorImageInfo baseSourceInfo{};
+    baseSourceInfo.imageView = depth_texture;
+    baseSourceInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    baseSourceInfo.sampler = rhi::handles::INVALID_SAMPLER;
+    rhi::DescriptorImageInfo baseTargetInfo{};
+    baseTargetInfo.imageView = hzbMip0View;
+    baseTargetInfo.imageLayout = rhi::ResourceState::UnorderedAccess;
+    baseTargetInfo.sampler = rhi::handles::INVALID_SAMPLER;
+    rhi::WriteDescriptorSet baseWrites[2]{};
+    baseWrites[0].dstSet = descriptorSet;
+    baseWrites[0].dstBinding = 0;
+    baseWrites[0].descriptorCount = 1;
+    baseWrites[0].descriptorType = rhi::DescriptorType::SampledImage;
+    baseWrites[0].imageInfo = &baseSourceInfo;
+    baseWrites[1].dstSet = descriptorSet;
+    baseWrites[1].dstBinding = 1;
+    baseWrites[1].descriptorCount = 1;
+    baseWrites[1].descriptorType = rhi::DescriptorType::StorageImage;
+    baseWrites[1].imageInfo = &baseTargetInfo;
+    device_->UpdateDescriptorSets(2, baseWrites);
+
+    const rhi::DescriptorSetHandle descriptorSets[] = { descriptorSet };
+    cmd_buffer->BindComputePipeline(hzb_copy_pipeline_);
+    cmd_buffer->BindDescriptorSets(
+        rhi::PipelineBindPoint::Compute,
+        hzb_pipeline_layout_,
+        0, 1, descriptorSets,
+        0, nullptr
+    );
+    std::cout << "[HZBSystem] 🚀 Copying source depth to HZB mip 0" << std::endl;
+    u32 threadGroupsX = (config_.max_width + 15) / 16;
+    u32 threadGroupsY = (config_.max_height + 15) / 16;
+    cmd_buffer->Dispatch(threadGroupsX, threadGroupsY, 1);
+    cmd_buffer->MemoryBarrier(
+        rhi::PipelineStage::ComputeShader,
+        rhi::PipelineStage::ComputeShader,
+        rhi::AccessFlag::ShaderWrite,
+        rhi::AccessFlag::ShaderRead
+    );
+
+    for (u32 mip_level = 0; mip_level < mip_levels_ - 1; ++mip_level) {
+        rhi::TextureViewDesc sourceViewDesc{};
+        sourceViewDesc.texture = hzb_texture_;
+        sourceViewDesc.viewType = rhi::TextureType::Texture2D;
+        sourceViewDesc.format = rhi::DataFormat::R32_Float;
+        sourceViewDesc.mostDetailedMip = mip_level;
+        sourceViewDesc.mipCount = 1;
+        sourceViewDesc.firstArraySlice = 0;
+        sourceViewDesc.arraySize = 1;
+        rhi::ResourceHandle sourceView = device_->CreateTextureView(sourceViewDesc);
+        if (sourceView == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[HZBSystem] Failed to create source mip view" << std::endl;
+            for (auto view : temporaryViews) device_->DestroyTexture(view);
+            device_->DestroyDescriptorSet(descriptorSet);
+            return false;
+        }
+        temporaryViews.push_back(sourceView);
+
+        rhi::TextureViewDesc targetViewDesc{};
+        targetViewDesc.texture = hzb_texture_;
+        targetViewDesc.viewType = rhi::TextureType::Texture2D;
+        targetViewDesc.format = rhi::DataFormat::R32_Float;
+        targetViewDesc.mostDetailedMip = mip_level + 1;
+        targetViewDesc.mipCount = 1;
+        targetViewDesc.firstArraySlice = 0;
+        targetViewDesc.arraySize = 1;
+        rhi::ResourceHandle targetView = device_->CreateTextureView(targetViewDesc);
+        if (targetView == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[HZBSystem] Failed to create target mip view" << std::endl;
+            for (auto view : temporaryViews) device_->DestroyTexture(view);
+            device_->DestroyDescriptorSet(descriptorSet);
+            return false;
+        }
+        temporaryViews.push_back(targetView);
+
+        rhi::DescriptorImageInfo sourceInfo{};
+        sourceInfo.imageView = sourceView;
+        sourceInfo.imageLayout = rhi::ResourceState::ShaderResource;
+        sourceInfo.sampler = rhi::handles::INVALID_SAMPLER;
+        rhi::DescriptorImageInfo targetInfo{};
+        targetInfo.imageView = targetView;
+        targetInfo.imageLayout = rhi::ResourceState::UnorderedAccess;
+        targetInfo.sampler = rhi::handles::INVALID_SAMPLER;
+        rhi::WriteDescriptorSet mipWrites[2]{};
+        mipWrites[0].dstSet = descriptorSet;
+        mipWrites[0].dstBinding = 0;
+        mipWrites[0].descriptorCount = 1;
+        mipWrites[0].descriptorType = rhi::DescriptorType::SampledImage;
+        mipWrites[0].imageInfo = &sourceInfo;
+        mipWrites[1].dstSet = descriptorSet;
+        mipWrites[1].dstBinding = 1;
+        mipWrites[1].descriptorCount = 1;
+        mipWrites[1].descriptorType = rhi::DescriptorType::StorageImage;
+        mipWrites[1].imageInfo = &targetInfo;
+        device_->UpdateDescriptorSets(2, mipWrites);
+
+        cmd_buffer->BindComputePipeline(hzb_downsample_pipeline_);
+        cmd_buffer->BindDescriptorSets(
+            rhi::PipelineBindPoint::Compute,
+            hzb_pipeline_layout_,
+            0, 1, descriptorSets,
+            0, nullptr
+        );
+
+        u32 target_width = std::max(config_.max_width >> (mip_level + 1), 1u);
+        u32 target_height = std::max(config_.max_height >> (mip_level + 1), 1u);
+        threadGroupsX = (target_width + 15) / 16;
+        threadGroupsY = (target_height + 15) / 16;
+
+        std::cout << "[HZBSystem] 🚀 Generating mip " << (mip_level + 1) << " from mip " << mip_level
+                  << " (" << target_width << "x" << target_height << ")" << std::endl;
+        std::cout << "[HZBSystem] Dispatch: " << threadGroupsX << "x" << threadGroupsY << "x1 thread groups" << std::endl;
+
+        cmd_buffer->Dispatch(threadGroupsX, threadGroupsY, 1);
+        cmd_buffer->MemoryBarrier(
+            rhi::PipelineStage::ComputeShader,
+            rhi::PipelineStage::ComputeShader,
+            rhi::AccessFlag::ShaderWrite,
+            rhi::AccessFlag::ShaderRead
+        );
+
+    }
+
+    for (auto view : temporaryViews) device_->DestroyTexture(view);
+    device_->DestroyDescriptorSet(descriptorSet);
+
+    std::cout << "[HZBSystem] ✅ HZB generation dispatch completed" << std::endl;
+    std::cout << "[HZBSystem] ========== GPU HZB Generation Complete ==========" << std::endl;
+
+    return true;
 }
 
 bool HZBSystem::UpdateConfig(const Config& new_config) {

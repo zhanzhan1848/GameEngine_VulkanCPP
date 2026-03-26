@@ -52,14 +52,12 @@ public:
     void Shutdown();
 
     /**
-     * @brief Build HZB from depth buffer
+     * @brief Build HZB from depth buffer (simplified interface)
      * @param depth_texture Source depth texture (full resolution)
      * @param cmd_buffer Command buffer for GPU operations
-     * @param frame_index Current frame index for resource tracking
      */
     BuildResult BuildHZB(rhi::ResourceHandle depth_texture,
-                        rhi::RHICommandBuffer* cmd_buffer,
-                        u32 frame_index = 0);
+                        rhi::RHICommandBuffer* cmd_buffer);
 
     /**
      * @brief Get HZB texture for reading
@@ -114,22 +112,16 @@ private:
     BuildResult last_result_;
 
     rhi::ResourceHandle hzb_texture_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle last_depth_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::SamplerHandle hzb_sampler_{ rhi::handles::INVALID_SAMPLER };
-    rhi::PipelineHandle hzb_compute_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle hzb_copy_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle hzb_downsample_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineLayoutHandle hzb_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle hzb_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
 
     u32 mip_levels_{ 0 };
     bool initialized_{ false };
     std::mutex mutex_;
-
-    // Resource tracking for frame synchronization
-    struct FrameResources {
-        rhi::ResourceHandle staging_buffer{ rhi::handles::INVALID_RESOURCE };
-        u32 frame_index{ 0 };
-        bool in_use{ false };
-    };
-    std::array<FrameResources, 3> frame_resources_;
-    u32 current_frame_resource_{ 0 };
 };
 
 /**

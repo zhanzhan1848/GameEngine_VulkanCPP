@@ -10,6 +10,7 @@
 #include "Engine/Graphics/Nanite/NaniteStreamingManager.h"
 #include "Engine/Graphics/Nanite/NaniteResourceManager.h"
 #include "Engine/Graphics/Nanite/HZBSystem.h"
+#include "Engine/Graphics/Nanite/DepthHistoryManager.h"
 #include "Engine/Graphics/Nanite/VisibilityBufferSystem.h"
 #include "Engine/Graphics/Scene/RenderSceneSnapshot.h"
 #include "Engine/Components/Cluster.h"
@@ -61,6 +62,7 @@ private:
     primal::graphics::rhi::RHIDeviceBase* device_{ nullptr };
     std::unique_ptr<primal::graphics::rhi::RHIDeviceBase> device_ownership_;
     primal::platform::window window_;
+    primal::graphics::rhi::ResourceHandle sceneDepthTexture_{ primal::graphics::rhi::handles::INVALID_RESOURCE };  // Actual rendered depth for HZB
     primal::graphics::RenderSystem renderSystem_;
     std::unique_ptr<primal::graphics::rendergraph::RenderGraph> renderGraph_;
 
@@ -73,6 +75,7 @@ private:
 
     // HZB and Visibility Buffer components
     std::unique_ptr<primal::graphics::nanite::HZBSystem> hzbSystem_;
+    std::unique_ptr<primal::graphics::nanite::DepthHistoryManager> depthHistoryManager_;
     std::unique_ptr<primal::graphics::nanite::VisibilityBufferSystem> visibilityBufferSystem_;
 
     // Blit pipeline for final presentation

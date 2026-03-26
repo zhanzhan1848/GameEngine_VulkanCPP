@@ -282,7 +282,8 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     rhi::TextureDesc finalDepthDesc{};
     finalDepthDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
     finalDepthDesc.format = rhi::DataFormat::D32_Float;
-    finalDepthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::RenderTarget;
+    // CRITICAL: Add ShaderResource usage to allow depth texture to be sampled by HZB generation shader
+    finalDepthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
 
     final_depth_texture_ = device_->CreateTexture(finalDepthDesc);
     if (final_depth_texture_ == rhi::handles::INVALID_RESOURCE) {
