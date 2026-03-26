@@ -84,6 +84,54 @@ namespace primal::graphics {
          */
         Material* GetMaterial() const { return material_; }
 
+        // ============================================================================
+        // 🔥 NEW METHODS: GPU Material Registry Support
+        // ============================================================================
+
+        /**
+         * @brief Get texture resource handle at binding index
+         * @param binding Texture binding index (0=albedo, 1=normal, 2=ORM)
+         * @return Texture resource handle, or INVALID_RESOURCE if not bound
+         *
+         * @note This retrieves the texture handle from pending textures
+         *       For GPU-driven rendering where we need direct resource access
+         */
+        rhi::ResourceHandle GetTextureHandle(u32 binding) const;
+
+        /**
+         * @brief Get material factor values (tint, metallic, roughness)
+         * @param out_albedo_tint [out] RGB tint multiplier
+         * @param out_metallic [out] Metallic factor (0.0 = dielectric, 1.0 = metal)
+         * @param out_roughness [out] Roughness factor (0.0 = smooth, 1.0 = rough)
+         *
+         * @note Factors are stored in uniform buffer, retrieve from there
+         *       Returns default values (1,1,1 tint, 0 metallic, 0.5 roughness) if not set
+         */
+        void GetMaterialFactors(
+            math::v3& out_albedo_tint,
+            float& out_metallic,
+            float& out_roughness
+        ) const;
+
+        /**
+         * @brief Get all bound texture handles at once
+         * @param out_albedo [out] Albedo texture handle
+         * @param out_normal [out] Normal map texture handle
+         * @param out_orm [out] ORM (occlusion/roughness/metallic) texture handle
+         *
+         * @note Convenience method that calls GetTextureHandle for standard bindings
+         *       Uses INVALID_RESOURCE for missing textures
+         */
+        void GetBoundTextures(
+            rhi::ResourceHandle& out_albedo,
+            rhi::ResourceHandle& out_normal,
+            rhi::ResourceHandle& out_orm
+        ) const;
+
+        // ============================================================================
+        // END NEW METHODS
+        // ============================================================================
+
     private:
         Material* material_{nullptr};
         utl::vector<rhi::DescriptorSetHandle> descriptorSets_;

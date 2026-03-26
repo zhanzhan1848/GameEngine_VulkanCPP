@@ -150,6 +150,48 @@ bool TestNaniteStreamingPipeline::Initialize() {
     return true;
 }
 
+bool TestNaniteStreamingPipeline::VerifyMeshletUVSupport() {
+    std::cout << "[TestNanite] Verifying meshlet UV support..." << std::endl;
+
+    // Check RHIGpuMesh vertex structure
+    for (const auto& meshInfo : sceneMeshes_) {
+        if (!meshInfo.mesh) continue;
+
+        auto* gpuMesh = content::get_rhi_gpu_mesh(meshInfo.meshEntityId);
+        if (!gpuMesh) continue;
+
+        // Calculate vertex stride from element buffer
+        // Note: RHIGpuMesh doesn't store stride directly, but we can infer it
+        // The element_buffer contains normals + UVs + other vertex data
+        // Position is stored separately (12 bytes per vertex)
+        auto elementBuffer = gpuMesh->GetElementBuffer();
+        u32 vertexCount = gpuMesh->GetVertexCount();
+
+        if (elementBuffer == primal::graphics::rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "  ⚠️  Warning: Mesh '" << meshInfo.name
+                      << "' has no element buffer (missing normals/UVs)" << std::endl;
+            return false;
+        }
+
+        // Note: We can't verify UV data directly without GetVertexStride()
+        // This is a heuristic check - element buffer should contain normals + UVs
+        // We verify buffer exists and vertex count is reasonable
+        if (vertexCount == 0) {
+            std::cerr << "  ⚠️  Warning: Mesh '" << meshInfo.name
+                      << "' has zero vertices" << std::endl;
+            return false;
+        }
+
+        std::cout << "  Mesh: " << meshInfo.name
+                  << ", Vertices: " << vertexCount
+                  << ", ElementBuffer: " << (elementBuffer != primal::graphics::rhi::handles::INVALID_RESOURCE ? "OK" : "MISSING")
+                  << std::endl;
+    }
+
+    std::cout << "  ✓ Meshlet vertex structure verification complete" << std::endl;
+    return true;
+}
+
 bool TestNaniteStreamingPipeline::InitializeDevice() {
     graphics::rhi::DeviceDesc deviceDesc;
     deviceDesc.platform = graphics::rhi::RHIPlatform::Metal;
@@ -483,6 +525,41 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
         }
     }
     std::cout << "Valid mesh entity IDs: " << validEntityCount << " out of " << sceneMeshes_.size() << std::endl;
+
+    // Verify UV support
+    if (!VerifyMeshletUVSupport()) {
+        std::cerr << "[TestNanite] UV verification failed, enabling procedural UV fallback" << std::endl;
+        useProceduralUV_ = true;
+    }
+
+    // Initialize GPU Material Registry
+    std::cout << "[TestNanite] Initializing GPU Material Registry..." << std::endl;
+    gpuMaterialRegistry_ = std::make_unique<primal::graphics::nanite::GPUMaterialRegistry>();
+
+    // Register all materials
+    uint32_t registeredCount = 0;
+    for (auto& meshInfo : sceneMeshes_) {
+        if (meshInfo.materialInstance) {
+            primal::graphics::nanite::GPUMaterialRegistry::MaterialID matID = gpuMaterialRegistry_->RegisterMaterial(meshInfo.materialInstance.get());
+            if (matID != primal::graphics::nanite::GPUMaterialRegistry::INVALID_MATERIAL_ID) {
+                registeredCount++;
+            }
+        }
+    }
+
+    std::cout << "[TestNanite] Registered " << registeredCount << " materials" << std::endl;
+
+    if (registeredCount == 0) {
+        std::cerr << "[TestNanite] Warning: No materials were registered!" << std::endl;
+    }
+
+    // Start async material build
+    std::cout << "[TestNanite] Starting async material data build..." << std::endl;
+    materialBuildJob_ = gpuMaterialRegistry_->BuildAsync(device_);
+
+    if (!materialBuildJob_.IsValid()) {
+        std::cerr << "[TestNanite] Warning: Material build job is invalid!" << std::endl;
+    }
 
     // Add loaded meshes to the render scene for Nanite processing
     for (const auto& meshInfo : sceneMeshes_) {
@@ -1261,6 +1338,16 @@ void TestNaniteStreamingPipeline::Shutdown() {
 
     if (resourceManager_) {
         resourceManager_->Shutdown();
+    }
+
+    // Cleanup GPU Material Registry
+    if (gpuMaterialRegistry_) {
+        // Wait for async build job to complete before destroying registry
+        if (materialBuildJob_.IsValid()) {
+            std::cout << "[TestNanite] Waiting for material build job to complete..." << std::endl;
+            materialBuildJob_.Wait();
+        }
+        gpuMaterialRegistry_.reset();
     }
 
     renderGraph_.reset();

@@ -12,6 +12,7 @@
 #include "Engine/Graphics/Nanite/HZBSystem.h"
 #include "Engine/Graphics/Nanite/DepthHistoryManager.h"
 #include "Engine/Graphics/Nanite/VisibilityBufferSystem.h"
+#include "Engine/Graphics/Nanite/GPUMaterialRegistry.h"
 #include "Engine/Graphics/Scene/RenderSceneSnapshot.h"
 #include "Engine/Components/Cluster.h"
 #include "Engine/Graphics/Scene/SceneExtractionSystem.h"
@@ -72,6 +73,11 @@ private:
     primal::graphics::nanite::NaniteStreamingManager* streamingManager_{ nullptr };
     primal::graphics::nanite::NaniteResourceManager* resourceManager_{ nullptr };
     std::unique_ptr<primal::graphics::SceneExtractionSystem> extractionSystem_;
+
+    // GPU Material Registry
+    std::unique_ptr<primal::graphics::nanite::GPUMaterialRegistry> gpuMaterialRegistry_;
+    primal::jobsystem::JobHandle materialBuildJob_;
+    bool useProceduralUV_{ false };
 
     // HZB and Visibility Buffer components
     std::unique_ptr<primal::graphics::nanite::HZBSystem> hzbSystem_;
@@ -152,6 +158,7 @@ private:
     bool InitializeStreamingComponents();
     bool CreateTestScene();
     bool LoadSponzaScene();
+    bool VerifyMeshletUVSupport();
     bool SetupBasicRenderingPipeline();
     void UpdateTestScene();
     void BuildRenderGraph(primal::graphics::rendergraph::RenderGraph& graph, primal::graphics::rhi::ResourceHandle backBuffer, u32 currentBufferIndex);

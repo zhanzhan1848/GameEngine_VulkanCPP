@@ -132,6 +132,7 @@ void GPUDrivenDrawPipeline::Shutdown() {
         if (global_meshlet_vertices_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_meshlet_vertices_buffer_);
         if (global_meshlet_triangles_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_meshlet_triangles_buffer_);
         if (global_vertex_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_vertex_buffer_);
+        if (global_element_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_element_buffer_); // 🔥 NEW
         if (cluster_map_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cluster_map_buffer_);
         if (global_instance_data_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_instance_data_buffer_);
         
@@ -266,17 +267,45 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     // std::cout << "[GPUDrivenDrawPipeline] Visibility render pass created successfully" << std::endl;
 
     // Create Final Render Pass (for Stage 3)
-    // First, create a color texture as render target
-    rhi::TextureDesc finalColorDesc{};
-    finalColorDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
-    finalColorDesc.format = rhi::DataFormat::BGRA8_UNorm; // Match swapchain format for Metal blit compatibility
-    finalColorDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    // 🔥 NEW: Create GBuffer render targets (4 color attachments)
+    rhi::TextureDesc gbufferDesc{};
+    gbufferDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
+    gbufferDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
 
-    final_color_texture_ = device_->CreateTexture(finalColorDesc);
-    if (final_color_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create final color texture" << std::endl;
+    // GBuffer Target 0: Albedo (BGRA8)
+    gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
+    rhi::ResourceHandle gbufferAlbedo = device_->CreateTexture(gbufferDesc);
+    if (gbufferAlbedo == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Albedo texture" << std::endl;
         return false;
     }
+
+    // GBuffer Target 1: Normal (BGRA8)
+    gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
+    rhi::ResourceHandle gbufferNormal = device_->CreateTexture(gbufferDesc);
+    if (gbufferNormal == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Normal texture" << std::endl;
+        return false;
+    }
+
+    // GBuffer Target 2: ORM (BGRA8)
+    gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
+    rhi::ResourceHandle gbufferORM = device_->CreateTexture(gbufferDesc);
+    if (gbufferORM == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer ORM texture" << std::endl;
+        return false;
+    }
+
+    // GBuffer Target 3: Velocity (RG16)
+    gbufferDesc.format = rhi::DataFormat::RG16_UNorm;
+    rhi::ResourceHandle gbufferVelocity = device_->CreateTexture(gbufferDesc);
+    if (gbufferVelocity == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Velocity texture" << std::endl;
+        return false;
+    }
+
+    // Keep final_color_texture_ for compatibility (use albedo as output)
+    final_color_texture_ = gbufferAlbedo;
 
     // Create depth texture for final render pass
     rhi::TextureDesc finalDepthDesc{};
@@ -293,15 +322,42 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 
     rhi::RenderPassDesc finalPassDesc{};
 
-    // Color attachment - use the created texture
-    rhi::RenderPassDesc::Attachment finalColorAttachment{};
-    finalColorAttachment.texture = final_color_texture_;
-    finalColorAttachment.format = rhi::DataFormat::BGRA8_UNorm; // Match texture and swapchain format
-    finalColorAttachment.loadOp = rhi::LoadAction::Clear;
-    finalColorAttachment.storeOp = rhi::StoreAction::Store;
-    finalColorAttachment.clearValue.color = math::v4{0.0f, 0.0f, 0.0f, 1.0f};
+    // 🔥 NEW: GBuffer color attachments
+    // Attachment 0: Albedo
+    rhi::RenderPassDesc::Attachment albedoAttachment{};
+    albedoAttachment.texture = gbufferAlbedo;
+    albedoAttachment.format = rhi::DataFormat::BGRA8_UNorm;
+    albedoAttachment.loadOp = rhi::LoadAction::Clear;
+    albedoAttachment.storeOp = rhi::StoreAction::Store;
+    albedoAttachment.clearValue.color = math::v4{0.0f, 0.0f, 0.0f, 1.0f};
+    finalPassDesc.colorAttachments.push_back(albedoAttachment);
 
-    finalPassDesc.colorAttachments.push_back(finalColorAttachment);
+    // Attachment 1: Normal
+    rhi::RenderPassDesc::Attachment normalAttachment{};
+    normalAttachment.texture = gbufferNormal;
+    normalAttachment.format = rhi::DataFormat::BGRA8_UNorm;
+    normalAttachment.loadOp = rhi::LoadAction::Clear;
+    normalAttachment.storeOp = rhi::StoreAction::Store;
+    normalAttachment.clearValue.color = math::v4{0.5f, 0.5f, 1.0f, 1.0f}; // (0,0,1) in [0,1]
+    finalPassDesc.colorAttachments.push_back(normalAttachment);
+
+    // Attachment 2: ORM
+    rhi::RenderPassDesc::Attachment ormAttachment{};
+    ormAttachment.texture = gbufferORM;
+    ormAttachment.format = rhi::DataFormat::BGRA8_UNorm;
+    ormAttachment.loadOp = rhi::LoadAction::Clear;
+    ormAttachment.storeOp = rhi::StoreAction::Store;
+    ormAttachment.clearValue.color = math::v4{1.0f, 0.8f, 0.0f, 1.0f}; // AO=1, Roughness=0.8, Metallic=0
+    finalPassDesc.colorAttachments.push_back(ormAttachment);
+
+    // Attachment 3: Velocity
+    rhi::RenderPassDesc::Attachment velocityAttachment{};
+    velocityAttachment.texture = gbufferVelocity;
+    velocityAttachment.format = rhi::DataFormat::RG16_UNorm;
+    velocityAttachment.loadOp = rhi::LoadAction::Clear;
+    velocityAttachment.storeOp = rhi::StoreAction::Store;
+    velocityAttachment.clearValue.color = math::v4{0.0f, 0.0f, 0.0f, 0.0f};
+    finalPassDesc.colorAttachments.push_back(velocityAttachment);
 
     // Depth attachment - use the created depth texture
     rhi::RenderPassDesc::Attachment finalDepthAttachment{};
@@ -518,7 +574,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
 
         if (gpuDrawVS != rhi::handles::INVALID_SHADER && gpuDrawFS != rhi::handles::INVALID_SHADER) {
             // Create GPU Draw descriptor layout
-            rhi::DescriptorSetLayoutBinding gpuDrawBindings[8];
+            rhi::DescriptorSetLayoutBinding gpuDrawBindings[9];  // Updated to 9 for element buffer
             gpuDrawBindings[0].binding = 0;
             gpuDrawBindings[0].descriptorType = rhi::DescriptorType::UniformBufferDynamic;
             gpuDrawBindings[0].descriptorCount = 1;
@@ -559,8 +615,14 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             gpuDrawBindings[7].descriptorCount = 1;
             gpuDrawBindings[7].stageFlags = rhi::ShaderStage::Vertex;
 
+            // 🔥 NEW: Element buffer binding
+            gpuDrawBindings[8].binding = 8;
+            gpuDrawBindings[8].descriptorType = rhi::DescriptorType::StorageBuffer;
+            gpuDrawBindings[8].descriptorCount = 1;
+            gpuDrawBindings[8].stageFlags = rhi::ShaderStage::Vertex;
+
             rhi::DescriptorSetLayoutDesc gpuDrawLayoutDesc{};
-            gpuDrawLayoutDesc.bindingCount = 8;
+            gpuDrawLayoutDesc.bindingCount = 9;  // Updated from 8 to 9
             gpuDrawLayoutDesc.bindings = gpuDrawBindings;
 
             draw_descriptor_layout_ = device_->CreateDescriptorSetLayout(gpuDrawLayoutDesc);
@@ -587,9 +649,12 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             gpuDrawPipelineDesc.pixelShader = gpuDrawFS;
             gpuDrawPipelineDesc.layout = draw_pipeline_layout_;
 
-            // Render target format - final color buffer
-            gpuDrawPipelineDesc.renderTargetCount = 1;
-            gpuDrawPipelineDesc.renderTargetFormats[0] = rhi::DataFormat::BGRA8_UNorm; // Match render pass and swapchain format
+            // 🔥 NEW: GBuffer render targets (4 outputs)
+            gpuDrawPipelineDesc.renderTargetCount = 4;
+            gpuDrawPipelineDesc.renderTargetFormats[0] = rhi::DataFormat::BGRA8_UNorm; // Albedo
+            gpuDrawPipelineDesc.renderTargetFormats[1] = rhi::DataFormat::BGRA8_UNorm; // Normal (packed)
+            gpuDrawPipelineDesc.renderTargetFormats[2] = rhi::DataFormat::BGRA8_UNorm; // ORM
+            gpuDrawPipelineDesc.renderTargetFormats[3] = rhi::DataFormat::RG16_UNorm;  // Velocity
 
             // DEPTH SETTINGS - CRITICAL FOR PROPER RENDERING
             // Based on UE5 Nanite depth rendering practices
@@ -787,6 +852,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     u32 totalVertices = 0;
     u32 totalTriangles = 0; // total meshlet triangle indices (bytes or count?) - count
     u32 totalPositions = 0;
+    u32 totalElements = 0; // 🔥 NEW: For element buffer (Normal, Tangent, UV)
 
     // Use packed float3 for positions to match Metal's packed_float3 and typical disk format
 
@@ -802,7 +868,11 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             // RHIMeshAsset stores positions as bytes
             // Assuming the asset data is tightly packed float3 (12 bytes)
             totalPositions += (u32)(meshAsset.position_buffer.size() / sizeof(PackedV3));
-            
+
+            // 🔥 NEW: Element buffer (Normal, Tangent, UV)
+            // Element buffer size should match position buffer size (one element per vertex)
+            totalElements += (u32)(meshAsset.position_buffer.size() / sizeof(PackedV3));
+
             processedGeometries.insert(instance.geometry_id);
         }
     }
@@ -848,6 +918,15 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     positionDesc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed to Dynamic
     global_vertex_buffer_ = device_->CreateBuffer(positionDesc);
 
+    // 🔥 NEW: Global Elements (Normal, Tangent, UV)
+    // Each element is 24 bytes: ColorTSign(4) + Normal(4) + Tangent(4) + Padding(4) + UV(8)
+    // Matches GBuffer.metal VertexElement structure
+    rhi::BufferDesc elementDesc{};
+    elementDesc.size = totalElements * 24; // 24 bytes per vertex element (with padding for math::v2)
+    elementDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
+    elementDesc.usage = rhi::GPUMemoryUsage::Dynamic;
+    global_element_buffer_ = device_->CreateBuffer(elementDesc);
+
     // 3. Fill Data
     // We need staging buffers or map/unmap. Since these are Static, we might need staging.
     // For simplicity in this test, let's assume we can create staging buffers, fill them, and copy.
@@ -865,6 +944,19 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
 
     utl::vector<PackedV3> mergedPositions;
     mergedPositions.reserve(totalPositions);
+
+    // 🔥 NEW: Vertex elements (Normal, Tangent, UV) - 24 bytes per vertex
+    // Matches Metal shader layout with explicit padding for math::v2 alignment
+    struct VertexElement {
+        u32 colorTSign;       // 4 bytes
+        u32 normal;           // 4 bytes (packed_ushort2)
+        u32 tangent;          // 4 bytes (packed_ushort2)
+        u32 padding;          // 4 bytes padding to align uv
+        math::v2 uv;          // 8 bytes (simd_float2, 8-byte aligned)
+        // Total: 4+4+4+4+8 = 24 bytes
+    };
+    utl::vector<VertexElement> mergedElements;
+    mergedElements.reserve(totalElements);
 
     u32 currentMeshletOffset = 0;
     u32 currentVertexOffset = 0;   // Offset in global_meshlet_vertices_buffer
@@ -961,7 +1053,24 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             u32 posCount = (u32)(meshAsset.position_buffer.size() / sizeof(PackedV3));
             const PackedV3* posSrc = reinterpret_cast<const PackedV3*>(meshAsset.position_buffer.data());
             for(u32 i=0; i<posCount; ++i) mergedPositions.push_back(posSrc[i]);
-            
+
+            // 🔥 NEW: Copy Elements (Normal, Tangent, UV)
+            // Element buffer size should match position buffer size
+            u32 elemCount = posCount; // Same as vertex count
+            if (meshAsset.element_buffer.size() >= elemCount * 24) {
+                const VertexElement* elemSrc = reinterpret_cast<const VertexElement*>(meshAsset.element_buffer.data());
+                for(u32 i=0; i<elemCount; ++i) mergedElements.push_back(elemSrc[i]);
+            } else {
+                // Element buffer missing or wrong size - fill with defaults
+                std::cerr << "[GPUDrivenDrawPipeline] Warning: Element buffer missing for geometry " << instance.geometry_id << ", using defaults" << std::endl;
+                VertexElement defaultElem{};
+                defaultElem.colorTSign = 0xFFFFFFFF;
+                defaultElem.normal = 0xFFFF8000; // Packed (0, 0, 1) = default normal
+                defaultElem.tangent = 0xFFFF8000; // Packed (0, 0, 1) = default tangent
+                defaultElem.uv = math::v2{0.0f, 0.0f};
+                for(u32 i=0; i<elemCount; ++i) mergedElements.push_back(defaultElem);
+            }
+
             // Copy MeshletVertices (Global Vertex Indices)
             // Need to offset by currentPositionOffset
             for(u32 idx : meshAsset.meshlet_vertices) {
@@ -1013,6 +1122,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     UploadBuffer(global_meshlet_vertices_buffer_, mergedVertices.data(), mergedVertices.size() * sizeof(u32));
     UploadBuffer(global_meshlet_triangles_buffer_, mergedTriangles.data(), mergedTriangles.size() * sizeof(u8));
     UploadBuffer(global_vertex_buffer_, mergedPositions.data(), mergedPositions.size() * sizeof(PackedV3));
+    UploadBuffer(global_element_buffer_, mergedElements.data(), mergedElements.size() * sizeof(VertexElement));
 
     // 🔥 NEW: Check meshlet data quality for backface culling and cluster-level frustum culling
     std::cout << "[GPUDrivenDrawPipeline] Meshlet Data Quality Check:" << std::endl;
@@ -1649,7 +1759,10 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     rhi::DescriptorBufferInfo clusterMapInfo{ cluster_map_buffer_, 0, ~0ULL };
     rhi::DescriptorBufferInfo instanceInfo{ global_instance_data_buffer_, 0, ~0ULL };
 
-    rhi::WriteDescriptorSet writes[8];
+    // 🔥 NEW: Element buffer (Normal, Tangent, UV)
+    rhi::DescriptorBufferInfo elementBufferInfo{ global_element_buffer_, 0, ~0ULL };
+
+    rhi::WriteDescriptorSet writes[9];
     writes[0].dstSet = globalDrawDS;
     writes[0].dstBinding = 0;
     writes[0].descriptorCount = 1;
@@ -1698,7 +1811,14 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     writes[7].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[7].bufferInfo = &instanceInfo;
 
-    device_->UpdateDescriptorSets(8, writes);
+    // 🔥 NEW: Bind Element Buffer to binding 8
+    writes[8].dstSet = globalDrawDS;
+    writes[8].dstBinding = 8;
+    writes[8].descriptorCount = 1;
+    writes[8].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[8].bufferInfo = &elementBufferInfo;
+
+    device_->UpdateDescriptorSets(9, writes);
 
     // Bind Pipeline and Descriptor Set
     // NOTE: No memory barrier needed here - Metal automatically handles encoder transitions

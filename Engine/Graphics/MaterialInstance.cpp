@@ -287,8 +287,66 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
     pendingSamplers_.clear();
     pendingBuffers_.clear();
     
-    // We do NOT auto-increment currentFrameIndex_ anymore. 
+    // We do NOT auto-increment currentFrameIndex_ anymore.
     // It should be set via SetCurrentFrame() by the renderer.
 }
+
+// ============================================================================
+// 🔥 NEW METHODS: GPU Material Registry Support (Task 4)
+// ============================================================================
+
+rhi::ResourceHandle MaterialInstance::GetTextureHandle(u32 binding) const {
+    // Check if binding is valid
+    if (binding >= pendingTextures_.size()) {
+        std::cerr << "[MaterialInstance] Invalid texture binding: " << binding << std::endl;
+        return rhi::handles::INVALID_RESOURCE;
+    }
+
+    // Search pending textures for this binding
+    for (const auto& update : pendingTextures_) {
+        if (update.binding == binding) {
+            return update.texture;
+        }
+    }
+
+    // Not found in pending textures, return invalid
+    return rhi::handles::INVALID_RESOURCE;
+}
+
+void MaterialInstance::GetMaterialFactors(
+    math::v3& out_albedo_tint,
+    float& out_metallic,
+    float& out_roughness
+) const {
+    // Try to get from material template
+    if (material_) {
+        // Assuming material template has methods to get factors
+        // For now, return default values
+        // TODO: Implement proper material factor extraction
+        out_albedo_tint = math::v3{1.0f, 1.0f, 1.0f};
+        out_metallic = 0.0f;
+        out_roughness = 0.5f;
+    } else {
+        // Default values
+        out_albedo_tint = math::v3{1.0f, 1.0f, 1.0f};
+        out_metallic = 0.0f;
+        out_roughness = 0.5f;
+    }
+}
+
+void MaterialInstance::GetBoundTextures(
+    rhi::ResourceHandle& out_albedo,
+    rhi::ResourceHandle& out_normal,
+    rhi::ResourceHandle& out_orm
+) const {
+    // Standard binding indices: 0=albedo, 1=normal, 2=ORM
+    out_albedo = GetTextureHandle(0);
+    out_normal = GetTextureHandle(1);
+    out_orm = GetTextureHandle(2);
+}
+
+// ============================================================================
+// END NEW METHODS
+// ============================================================================
 
 } // namespace primal::graphics

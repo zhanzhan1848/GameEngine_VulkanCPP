@@ -165,8 +165,10 @@ private:
     rhi::ResourceHandle global_meshlet_vertices_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle global_meshlet_triangles_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle global_vertex_buffer_{ rhi::handles::INVALID_RESOURCE }; // Merged Positions
+    rhi::ResourceHandle global_element_buffer_{ rhi::handles::INVALID_RESOURCE }; // Merged Vertex Elements (Normal, Tangent, UV)
     rhi::ResourceHandle cluster_map_buffer_{ rhi::handles::INVALID_RESOURCE }; // Cluster ID -> (MeshletID, InstanceID)
     rhi::ResourceHandle global_instance_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Instance ID -> World Matrix
+    rhi::ResourceHandle global_material_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Material Data (for material sampling)
     
     // Total counts for global buffers
     u32 total_meshlet_count_{ 0 };
