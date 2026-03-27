@@ -2,6 +2,7 @@
 #include "../MaterialInstance.h"
 #include "MaterialDataBuilder.h"
 #include "../RHI/Core/RHIDevice.h"
+#include "../RHI/Core/RHICommand.h"
 #include "JobSystem/JobSystem.h"
 #include <iostream>
 #include <algorithm>
@@ -38,6 +39,7 @@ GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterMaterial(graphics::
 
     materials_.push_back(data);
     materialToID_[instance] = newID;
+    registeredInstances_.push_back(instance);  // 🔥 NEW: Preserve registration order
 
     std::cout << "[GPUMaterialRegistry] Registered material ID " << newID
               << " (total: " << materials_.size() << ")" << std::endl;
@@ -47,41 +49,149 @@ GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterMaterial(graphics::
 jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device) {
     std::cout << "[GPUMaterialRegistry] Starting async material data build..." << std::endl;
 
-    // Collect all unique MaterialInstance pointers
-    std::vector<MaterialInstance*> instances;
-    instances.reserve(materialToID_.size());
-    for (const auto& [instance, id] : materialToID_) {
-        instances.push_back(instance);
-    }
+    // 🔥 CRITICAL FIX: Use registeredInstances_ to preserve registration order
+    // This ensures texture array indices match MaterialID assignments
+    const std::vector<MaterialInstance*>& instances = registeredInstances_;
 
     // Schedule async build on worker thread
     // Reference: EngineTest/UnitTests/TestJobSystem.cpp:255
     buildJob_ = jobsystem::JobSystem::Schedule([this, device, instances]() {
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Building texture arrays..." << std::endl;
+        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 1: Building texture mapping..." << std::endl;
 
-        // Build texture arrays
-        bool success = MaterialDataBuilder::BuildTextureArrays(
-            device,
-            instances,
-            albedoTextureArray_,
-            normalTextureArray_,
-            ormTextureArray_
-        );
+        // 🎨 Phase 1: Build texture mapping (deduplication)
+        TextureArrayBuildContext texCtx;
+        MaterialDataBuilder::BuildTextureMapping(instances, texCtx, device);
 
-        if (!success) {
-            buildError_ = "Failed to build texture arrays";
+        // 🎨 Phase 2: Create command buffer for texture operations
+        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 2: Creating command buffer..." << std::endl;
+
+        rhi::CommandBufferHandle cmdBufHandle = device->CreateCommandBuffer(rhi::CommandQueueType::Transfer);
+        if (cmdBufHandle == rhi::handles::INVALID_COMMAND_BUFFER) {
+            buildError_ = "Failed to create command buffer for texture operations";
             std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
             return;
         }
 
-        // Build material data buffer
-        // TODO: Create GPU buffer with materials_ data
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Built "
-                  << instances.size() << " materials" << std::endl;
+        rhi::RHICommandBuffer* cmdBuffer = rhi::GetCommandBuffer(cmdBufHandle);
+        if (!cmdBuffer) {
+            buildError_ = "Failed to get command buffer object";
+            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            return;
+        }
+
+        // Begin command buffer recording
+        if (!cmdBuffer->Begin()) {
+            buildError_ = "Failed to begin command buffer recording";
+            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            return;
+        }
+
+        // 🎨 Phase 3: Create texture arrays with BlitTexture
+        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 3: Creating texture arrays..." << std::endl;
+
+        bool success = true;
+
+        if (!texCtx.uniqueAlbedo.empty()) {
+            if (!MaterialDataBuilder::CreateTextureArray(
+                device, cmdBuffer, texCtx.uniqueAlbedo,
+                "AlbedoTextureArray", albedoTextureArray_
+            )) {
+                std::cerr << "[GPUMaterialRegistry] ERROR: Failed to create albedo texture array" << std::endl;
+                success = false;
+            }
+        }
+
+        if (success && !texCtx.uniqueNormal.empty()) {
+            if (!MaterialDataBuilder::CreateTextureArray(
+                device, cmdBuffer, texCtx.uniqueNormal,
+                "NormalTextureArray", normalTextureArray_
+            )) {
+                std::cerr << "[GPUMaterialRegistry] ERROR: Failed to create normal texture array" << std::endl;
+                success = false;
+            }
+        }
+
+        if (success && !texCtx.uniqueORM.empty()) {
+            if (!MaterialDataBuilder::CreateTextureArray(
+                device, cmdBuffer, texCtx.uniqueORM,
+                "ORMTextureArray", ormTextureArray_
+            )) {
+                std::cerr << "[GPUMaterialRegistry] ERROR: Failed to create ORM texture array" << std::endl;
+                success = false;
+            }
+        }
+
+        if (!success) {
+            buildError_ = "Failed to create texture arrays";
+            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            return;
+        }
+
+        // 🎨 Phase 4: End command buffer and submit
+        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 4: Submitting commands..." << std::endl;
+
+        if (!cmdBuffer->End()) {
+            buildError_ = "Failed to end command buffer recording";
+            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            return;
+        }
+
+        // Submit command buffer
+        rhi::QueueSubmitInfo submitInfo{};
+        submitInfo.cmdBuffer = cmdBufHandle;
+
+        // Create fence for synchronization
+        rhi::SyncHandle fence = device->CreateSync();
+        if (fence == rhi::handles::INVALID_SYNC) {
+            buildError_ = "Failed to create synchronization fence";
+            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            return;
+        }
+        submitInfo.signalFence = fence;
+
+        if (!device->Submit(submitInfo)) {
+            buildError_ = "Failed to submit command buffer";
+            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            device->DestroySync(fence);
+            return;
+        }
+
+        // 🎨 Phase 5: Update material data with texture indices
+        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 5: Updating material data..." << std::endl;
+
+        // Rebuild materials_ vector with correct texture indices
+        materials_.clear();
+        materials_.reserve(instances.size());
+
+        for (auto* instance : instances) {
+            if (!instance) continue;
+
+            // Extract material data with texture mapping
+            MaterialData data = MaterialDataBuilder::ExtractMaterialData(instance, texCtx);
+            materials_.push_back(data);
+        }
+
+        // 🎨 Phase 6: Wait for GPU operations to complete
+        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 6: Waiting for GPU completion..." << std::endl;
+
+        constexpr u32 SYNC_TIMEOUT_MS = 5000;  // 5 second timeout
+        if (!device->WaitForSync(fence, SYNC_TIMEOUT_MS)) {
+            buildError_ = "Timeout waiting for texture operations to complete";
+            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            device->DestroySync(fence);
+            return;
+        }
+
+        device->DestroySync(fence);
 
         // Mark build complete
         buildComplete_ = true;
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Build complete successfully" << std::endl;
+        std::cout << "[GPUMaterialRegistry] [Worker Thread] Build complete successfully: "
+                  << materials_.size() << " materials, "
+                  << texCtx.uniqueAlbedo.size() << " albedo textures, "
+                  << texCtx.uniqueNormal.size() << " normal textures, "
+                  << texCtx.uniqueORM.size() << " ORM textures"
+                  << std::endl;
     });
 
     return buildJob_;

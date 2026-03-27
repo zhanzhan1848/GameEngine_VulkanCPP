@@ -158,6 +158,8 @@ private:
     bool InitializeStreamingComponents();
     bool CreateTestScene();
     bool LoadSponzaScene();
+    bool LoadMaterialTextures();  // 🎨 NEW: Load textures for all materials
+    void AdjustMaterialUVScaling();  // 🔧 NEW: Manually adjust UV scaling for testing
     bool VerifyMeshletUVSupport();
     bool SetupBasicRenderingPipeline();
     void UpdateTestScene();

@@ -33,6 +33,7 @@ public:
         float metallic_factor;
         float roughness_factor;
         float normal_scale;
+        float uv_scale[2];            // UV scaling (tiling) for texture repetition
         uint32_t flags;               // Reserved for future use
     };
 
@@ -78,6 +79,11 @@ public:
     // Get GPU resource handles
     ResourceHandle GetMaterialIDBuffer() const { return materialIDBuffer_; }
     ResourceHandle GetMaterialDataBuffer() const { return materialDataBuffer_; }
+
+    // 🔧 NEW: Get mutable material data for UV scaling adjustments
+    MaterialData* GetMaterialDataMutable() { return materials_.data(); }
+    const MaterialData* GetMaterialData() const { return materials_.data(); }
+    size_t GetMaterialCount() const { return materials_.size(); }
     ResourceHandle GetAlbedoTextureArray() const { return albedoTextureArray_; }
     ResourceHandle GetNormalTextureArray() const { return normalTextureArray_; }
     ResourceHandle GetORMTextureArray() const { return ormTextureArray_; }
@@ -92,6 +98,7 @@ private:
     // Material storage
     std::vector<MaterialData> materials_;
     std::unordered_map<graphics::MaterialInstance*, MaterialID> materialToID_;
+    std::vector<MaterialInstance*> registeredInstances_;  // 🔥 NEW: Preserve registration order
 
     // GPU resources
     ResourceHandle materialIDBuffer_;

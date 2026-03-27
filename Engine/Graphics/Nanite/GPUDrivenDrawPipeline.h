@@ -83,6 +83,22 @@ public:
     bool CreateGeometryBuffers(u32 vertex_count, u32 index_count);
     void UploadGeometryData(const RenderSceneSnapshot& scene_snapshot);
 
+    // 🎨 Set material data buffer (for texture sampling)
+    void SetMaterialDataBuffer(rhi::ResourceHandle material_buffer) {
+        global_material_data_buffer_ = material_buffer;
+    }
+
+    // 🎨 Set texture arrays for material sampling
+    void SetTextureArrays(rhi::ResourceHandle albedo_array,
+                          rhi::ResourceHandle normal_array,
+                          rhi::ResourceHandle orm_array,
+                          rhi::SamplerHandle sampler) {
+        albedo_texture_array_ = albedo_array;
+        normal_texture_array_ = normal_array;
+        orm_texture_array_ = orm_array;
+        texture_sampler_ = sampler;
+    }
+
     // Get the final output texture that was rendered to
     rhi::ResourceHandle GetFinalOutputTexture() const { return final_color_texture_; }
 
@@ -169,7 +185,13 @@ private:
     rhi::ResourceHandle cluster_map_buffer_{ rhi::handles::INVALID_RESOURCE }; // Cluster ID -> (MeshletID, InstanceID)
     rhi::ResourceHandle global_instance_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Instance ID -> World Matrix
     rhi::ResourceHandle global_material_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Material Data (for material sampling)
-    
+
+    // 🎨 Texture arrays for material sampling
+    rhi::ResourceHandle albedo_texture_array_{ rhi::handles::INVALID_RESOURCE };    // Albedo texture array
+    rhi::ResourceHandle normal_texture_array_{ rhi::handles::INVALID_RESOURCE };    // Normal texture array
+    rhi::ResourceHandle orm_texture_array_{ rhi::handles::INVALID_RESOURCE };       // ORM texture array
+    rhi::SamplerHandle texture_sampler_{ rhi::handles::INVALID_SAMPLER };           // Texture sampler
+
     // Total counts for global buffers
     u32 total_meshlet_count_{ 0 };
     u32 total_meshlet_vertex_count_{ 0 };

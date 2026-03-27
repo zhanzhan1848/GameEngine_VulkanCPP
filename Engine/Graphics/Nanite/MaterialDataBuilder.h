@@ -5,18 +5,44 @@
 #include "../RHI/Core/RHIResource.h"
 #include "JobSystem/JobSystem.h"
 #include <vector>
+#include <unordered_map>
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
+    class RHICommandBuffer;
 }
 
 namespace primal::graphics::nanite {
 
+// 🎨 Texture array build context
+struct TextureArrayBuildContext {
+    // Deduplication mapping: texture handle → array index
+    std::unordered_map<rhi::ResourceHandle, uint32_t> albedoToIndex;
+    std::unordered_map<rhi::ResourceHandle, uint32_t> normalToIndex;
+    std::unordered_map<rhi::ResourceHandle, uint32_t> ormToIndex;
+
+    // Unique texture collection (in insertion order)
+    std::vector<rhi::ResourceHandle> uniqueAlbedo;
+    std::vector<rhi::ResourceHandle> uniqueNormal;
+    std::vector<rhi::ResourceHandle> uniqueORM;
+
+    // Placeholder textures (1x1 default textures)
+    rhi::ResourceHandle placeholderAlbedo{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle placeholderNormal{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle placeholderORM{rhi::handles::INVALID_RESOURCE};
+};
+
 class MaterialDataBuilder {
 public:
-    // Extract material data from MaterialInstance
+    // Extract material data from MaterialInstance (without texture mapping - uses default indices)
     static GPUMaterialRegistry::MaterialData ExtractMaterialData(
         graphics::MaterialInstance* instance
+    );
+
+    // Extract material data from MaterialInstance (with texture mapping)
+    static GPUMaterialRegistry::MaterialData ExtractMaterialData(
+        graphics::MaterialInstance* instance,
+        const TextureArrayBuildContext& ctx
     );
 
     // Check if two materials are compatible (can share same ID)
@@ -40,6 +66,26 @@ public:
         rhi::RHIDeviceBase* device,
         const std::vector<graphics::MaterialInstance*>& instances,
         GPUMaterialRegistry* registry
+    );
+
+    // 🎨 NEW: Texture mapping and array creation helpers (public for GPUMaterialRegistry)
+    static void BuildTextureMapping(
+        const std::vector<graphics::MaterialInstance*>& instances,
+        TextureArrayBuildContext& ctx,
+        rhi::RHIDeviceBase* device
+    );
+
+    static void CreatePlaceholderTextures(
+        TextureArrayBuildContext& ctx,
+        rhi::RHIDeviceBase* device
+    );
+
+    static bool CreateTextureArray(
+        rhi::RHIDeviceBase* device,
+        rhi::RHICommandBuffer* cmdBuffer,
+        const std::vector<rhi::ResourceHandle>& sources,
+        const char* name,
+        rhi::ResourceHandle& outArray
     );
 
 private:

@@ -13,12 +13,15 @@
 #include "Engine/Input/Input.h"
 #include "Engine/Components/Entity.h"
 #include "ShaderCompilation.h"
+#include "Engine/Content/stb_image.h"
+#include "Engine/Utilities/IOStream.h"
 
 #include <iostream>
 #include <fstream>
 #include <filesystem>
 #include <chrono>
 #include <cmath>
+#include <algorithm>
 
 using namespace primal;
 using namespace primal::graphics;
@@ -66,6 +69,147 @@ namespace {
             }
         }
         device->UpdateDescriptorSets(count, writes.data());
+    }
+
+    // 🎨 Texture loading helpers (from TestParticleSponza)
+    std::string NormalizePath(const std::string& path) {
+        std::string p = path;
+        std::replace(p.begin(), p.end(), '\\', '/');
+        return p;
+    }
+
+    std::string ResolveTexturePath(const std::string& assetBaseDir, const std::string& filename) {
+        if (filename.empty()) return "";
+        std::string cleanName = NormalizePath(filename);
+
+        std::vector<std::string> basePaths;
+        basePaths.push_back(assetBaseDir);
+        basePaths.push_back(assetBaseDir + "models/Sponza/");
+        basePaths.push_back(assetBaseDir + "fbx_textures/");
+
+        for (const auto& base : basePaths) {
+            std::string fullPath = base + cleanName;
+            std::ifstream f(fullPath.c_str());
+            if (f.good()) return fullPath;
+        }
+        return NormalizePath(assetBaseDir + cleanName);
+    }
+
+    primal::graphics::rhi::ResourceHandle CreateTextureFromData(RHIDeviceBase* /*device*/, uint32_t width, uint32_t height, const unsigned char* data, bool isSRGB) {
+        // Use correct DataFormat enums instead of hardcoded values
+        // RGBA8_UNorm = 36, RGBA8_sRGB = 40
+        DataFormat format = isSRGB ? DataFormat::RGBA8_sRGB : DataFormat::RGBA8_UNorm;
+        uint32_t row_pitch = width * 4;
+        uint32_t slice_pitch = height * row_pitch;
+        size_t blob_size = (6 * sizeof(uint32_t)) + (2 * sizeof(uint32_t) + slice_pitch);
+
+        std::vector<uint8_t> blob(blob_size);
+        utl::blob_stream_writer writer(blob.data(), blob.size());
+
+        writer.write((uint32_t)width);
+        writer.write((uint32_t)height);
+        writer.write((uint32_t)1); // array_size
+        writer.write((uint32_t)0); // flags
+        writer.write((uint32_t)1); // mip_levels
+        writer.write((uint32_t)format); // Write enum value as uint32_t
+        writer.write(row_pitch);
+        writer.write(slice_pitch);
+        writer.write(data, slice_pitch);
+
+        primal::id::id_type id = primal::content::create_resource(blob.data(), primal::content::asset_type::texture);
+        if (primal::id::is_valid(id)) {
+            return primal::content::get_rhi_texture_handle(id);
+        }
+        return handles::INVALID_RESOURCE;
+    }
+
+    // 🎨 Bilinear interpolation resize helper
+    unsigned char* ResizeTextureBilinear(
+        const unsigned char* src_data,
+        int src_width, int src_height,
+        int dst_width, int dst_height
+    ) {
+        unsigned char* dst_data = new unsigned char[dst_width * dst_height * 4];
+
+        float x_ratio = static_cast<float>(src_width - 1) / dst_width;
+        float y_ratio = static_cast<float>(src_height - 1) / dst_height;
+
+        for (int y = 0; y < dst_height; ++y) {
+            for (int x = 0; x < dst_width; ++x) {
+                int src_x = static_cast<int>(x * x_ratio);
+                int src_y = static_cast<int>(y * y_ratio);
+
+                int x_diff = (src_width > 1) ? (x * x_ratio - src_x) * 256 : 0;
+                int y_diff = (src_height > 1) ? (y * y_ratio - src_y) * 256 : 0;
+
+                // Clamp source coordinates
+                src_x = (src_x < src_width - 1) ? src_x : src_width - 2;
+                src_y = (src_y < src_height - 1) ? src_y : src_height - 2;
+
+                const unsigned char* src_pixel = &src_data[(src_y * src_width + src_x) * 4];
+                const unsigned char* src_pixel_next_x = &src_pixel[4];
+                const unsigned char* src_pixel_next_y = &src_data[((src_y + 1) * src_width + src_x) * 4];
+                const unsigned char* src_pixel_next_xy = &src_pixel_next_y[4];
+
+                for (int c = 0; c < 4; ++c) {
+                    int a = src_pixel[c];
+                    int b = src_pixel_next_x[c];
+                    int c_val = src_pixel_next_y[c];
+                    int d = src_pixel_next_xy[c];
+
+                    int result = (
+                        a * (256 - x_diff) * (256 - y_diff) +
+                        b * x_diff * (256 - y_diff) +
+                        c_val * (256 - x_diff) * y_diff +
+                        d * x_diff * y_diff
+                    ) >> 16;
+
+                    dst_data[(y * dst_width + x) * 4 + c] = static_cast<unsigned char>(result);
+                }
+            }
+        }
+
+        return dst_data;
+    }
+
+    primal::graphics::rhi::ResourceHandle LoadTextureFromFile(RHIDeviceBase* device, const std::string& path, bool isNormalMap, bool isSRGB = true) {
+        int width, height, channels;
+        unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
+        if (!data) {
+            std::cerr << "Failed to load texture: " << path << std::endl;
+            return handles::INVALID_RESOURCE;
+        }
+
+        // 🎨 DEBUG: Print original texture size
+        std::cout << "[TestNanite] Loaded texture: " << path << " (" << width << "x" << height << ")" << std::endl;
+
+        // 🎨 NEW: 统一缩放到 1024x1024
+        constexpr int TARGET_SIZE = 1024;
+        unsigned char* final_data = data;
+        int final_width = width;
+        int final_height = height;
+
+        if (width != TARGET_SIZE || height != TARGET_SIZE) {
+            std::cout << "[TestNanite] Resizing texture from " << width << "x" << height
+                      << " to " << TARGET_SIZE << "x" << TARGET_SIZE << std::endl;
+
+            final_data = ResizeTextureBilinear(data, width, height, TARGET_SIZE, TARGET_SIZE);
+            final_width = TARGET_SIZE;
+            final_height = TARGET_SIZE;
+
+            // 释放原始数据
+            stbi_image_free(data);
+        }
+
+        ResourceHandle handle = CreateTextureFromData(device, final_width, final_height, final_data, isSRGB);
+
+        if (final_data != data) {
+            delete[] final_data;
+        } else {
+            stbi_image_free(data);
+        }
+
+        return handle;
     }
 }
 
@@ -474,7 +618,7 @@ bool TestNaniteStreamingPipeline::CreateTestScene() {
         return false;
     }
 
-    // Load Sponza scene
+    // Load Sponza scene (includes texture loading internally)
     if (!LoadSponzaScene()) {
         std::cerr << "Failed to load Sponza scene" << std::endl;
         return false;
@@ -532,6 +676,12 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
         useProceduralUV_ = true;
     }
 
+    // 🎨 CRITICAL: Load textures BEFORE registering materials to GPU
+    // This ensures MaterialInstance has valid texture handles when BuildAsync reads them
+    if (!LoadMaterialTextures()) {
+        std::cerr << "[TestNanite] Warning: Some textures failed to load" << std::endl;
+    }
+
     // Initialize GPU Material Registry
     std::cout << "[TestNanite] Initializing GPU Material Registry..." << std::endl;
     gpuMaterialRegistry_ = std::make_unique<primal::graphics::nanite::GPUMaterialRegistry>();
@@ -542,6 +692,8 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
         if (meshInfo.materialInstance) {
             primal::graphics::nanite::GPUMaterialRegistry::MaterialID matID = gpuMaterialRegistry_->RegisterMaterial(meshInfo.materialInstance.get());
             if (matID != primal::graphics::nanite::GPUMaterialRegistry::INVALID_MATERIAL_ID) {
+                // 🔥 CRITICAL: Save MaterialID to meshInfo for later use in RenderProxy
+                meshInfo.gpuMaterialId = matID;
                 registeredCount++;
             }
         }
@@ -553,12 +705,80 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
         std::cerr << "[TestNanite] Warning: No materials were registered!" << std::endl;
     }
 
+    // 🔧 TEMPORARY: Manually adjust UV scaling for problematic materials
+    // This is a test to verify UV scaling works before implementing FBX parameter reading
+    std::cout << "[TestNanite] Applying manual UV scaling adjustments..." << std::endl;
+    AdjustMaterialUVScaling();
+
     // Start async material build
     std::cout << "[TestNanite] Starting async material data build..." << std::endl;
     materialBuildJob_ = gpuMaterialRegistry_->BuildAsync(device_);
 
     if (!materialBuildJob_.IsValid()) {
         std::cerr << "[TestNanite] Warning: Material build job is invalid!" << std::endl;
+    }
+
+    // 🎨 Wait for material build to complete and upload to GPU
+    std::cout << "[TestNanite] Waiting for material build to complete..." << std::endl;
+    materialBuildJob_.Wait();
+
+    // Upload material data to GPU
+    std::cout << "[TestNanite] Uploading material data to GPU..." << std::endl;
+    if (!gpuMaterialRegistry_->UploadToGPU(device_)) {
+        std::cerr << "[TestNanite] ERROR: Failed to upload material data to GPU" << std::endl;
+    } else {
+        std::cout << "[TestNanite] Material data uploaded successfully" << std::endl;
+
+        // Get material data buffer and set it to GPU draw pipeline
+        auto materialBuffer = gpuMaterialRegistry_->GetMaterialDataBuffer();
+        if (materialBuffer != rhi::handles::INVALID_RESOURCE) {
+            gpuDrawPipeline_->SetMaterialDataBuffer(materialBuffer);
+            std::cout << "[TestNanite] Material data buffer set to GPU draw pipeline" << std::endl;
+        } else {
+            std::cerr << "[TestNanite] Warning: Material data buffer is invalid!" << std::endl;
+        }
+
+        // 🎨 CRITICAL: Get texture arrays and set them to GPU draw pipeline
+        auto albedoArray = gpuMaterialRegistry_->GetAlbedoTextureArray();
+        auto normalArray = gpuMaterialRegistry_->GetNormalTextureArray();
+        auto ormArray = gpuMaterialRegistry_->GetORMTextureArray();
+
+        if (albedoArray != rhi::handles::INVALID_RESOURCE &&
+            normalArray != rhi::handles::INVALID_RESOURCE &&
+            ormArray != rhi::handles::INVALID_RESOURCE) {
+
+            // Create texture sampler (if not already created)
+            rhi::SamplerHandle sampler = rhi::handles::INVALID_SAMPLER;
+            {
+                rhi::SamplerDesc samplerDesc{};
+                samplerDesc.minFilter = rhi::FilterMode::Linear;
+                samplerDesc.magFilter = rhi::FilterMode::Linear;
+                samplerDesc.mipFilter = rhi::FilterMode::Linear;
+                samplerDesc.addressU = rhi::TextureAddressMode::Wrap;
+                samplerDesc.addressV = rhi::TextureAddressMode::Wrap;
+                samplerDesc.addressW = rhi::TextureAddressMode::Wrap;
+                samplerDesc.mipLodBias = 0.0f;
+                samplerDesc.maxAnisotropy = 1;
+                samplerDesc.minLod = 0.0f;
+                samplerDesc.maxLod = 100.0f;  // Allow all mipmaps
+
+                sampler = device_->CreateSampler(samplerDesc);
+                if (sampler == rhi::handles::INVALID_SAMPLER) {
+                    std::cerr << "[TestNanite] Warning: Failed to create texture sampler" << std::endl;
+                }
+            }
+
+            if (sampler != rhi::handles::INVALID_SAMPLER) {
+                gpuDrawPipeline_->SetTextureArrays(albedoArray, normalArray, ormArray, sampler);
+                std::cout << "[TestNanite] Texture arrays set to GPU draw pipeline (albedo="
+                          << albedoArray << ", normal=" << normalArray << ", orm=" << ormArray << ")" << std::endl;
+            } else {
+                std::cerr << "[TestNanite] Warning: Cannot set texture arrays - sampler creation failed" << std::endl;
+            }
+        } else {
+            std::cerr << "[TestNanite] Warning: Texture arrays are invalid (albedo="
+                      << albedoArray << ", normal=" << normalArray << ", orm=" << ormArray << ")" << std::endl;
+        }
     }
 
     // Add loaded meshes to the render scene for Nanite processing
@@ -578,7 +798,7 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
             }
 
             graphics::RenderProxy proxy = graphics::RenderProxy::Create(
-                entityId, meshInfo.meshEntityId, primal::id::invalid_id);
+                entityId, meshInfo.meshEntityId, meshInfo.gpuMaterialId);  // 🔥 Use gpuMaterialId instead of invalid_id
 
             // TODO: Extract proper transform from scene data
             // Currently using identity matrix - scene data may not contain individual transforms
@@ -609,6 +829,139 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
     view_.UpdateFrustum();
 
     return true;
+}
+
+bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
+    std::cout << "[TestNanite] Loading material textures..." << std::endl;
+
+    std::string assetBaseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
+
+    // Create default 1024x1024 white texture (for missing textures)
+    // 🎨 CRITICAL: Must match Texture2DArray size (1024x1024)
+    rhi::ResourceHandle whiteTexture = rhi::handles::INVALID_RESOURCE;
+    {
+        constexpr u32 WHITE_SIZE = 1024;
+        constexpr u32 WHITE_PIXEL_COUNT = WHITE_SIZE * WHITE_SIZE;
+
+        // Create 1024x1024 filled with white
+        std::vector<u32> whiteData(WHITE_PIXEL_COUNT, 0xFFFFFFFF);  // RGBA white
+        whiteTexture = CreateTextureFromData(device_, WHITE_SIZE, WHITE_SIZE,
+            reinterpret_cast<unsigned char*>(whiteData.data()), true);
+
+        if (whiteTexture == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[TestNanite] Failed to create white texture" << std::endl;
+            return false;
+        }
+    }
+
+    // Load unique textures (deduplication by path)
+    std::unordered_map<std::string, rhi::ResourceHandle> textureCache;
+    u32 loadedCount = 0;
+    u32 skippedCount = 0;
+
+    for (auto& meshInfo : sceneMeshes_) {
+        if (!meshInfo.materialInstance) continue;
+
+        // Load diffuse texture
+        if (!meshInfo.diffuseTexturePath.empty()) {
+            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.diffuseTexturePath);
+            if (!fullPath.empty()) {
+                auto it = textureCache.find(fullPath);
+                rhi::ResourceHandle texture;
+
+                if (it != textureCache.end()) {
+                    texture = it->second;
+                    skippedCount++;
+                } else {
+                    texture = LoadTextureFromFile(device_, fullPath, true);  // sRGB for albedo
+                    if (texture != rhi::handles::INVALID_RESOURCE) {
+                        textureCache[fullPath] = texture;
+                        loadedCount++;
+                    } else {
+                        texture = whiteTexture;  // Fallback to white
+                    }
+                }
+
+                meshInfo.materialInstance->SetTexture(0, texture);  // Albedo binding = 0
+            }
+        } else {
+            meshInfo.materialInstance->SetTexture(0, whiteTexture);  // No path, use white
+        }
+
+        // Load normal texture
+        if (!meshInfo.normalTexturePath.empty()) {
+            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.normalTexturePath);
+            if (!fullPath.empty()) {
+                auto it = textureCache.find(fullPath);
+                rhi::ResourceHandle texture;
+
+                if (it != textureCache.end()) {
+                    texture = it->second;
+                } else {
+                    texture = LoadTextureFromFile(device_, fullPath, false);  // Linear for normal
+                    if (texture != rhi::handles::INVALID_RESOURCE) {
+                        textureCache[fullPath] = texture;
+                        loadedCount++;
+                    } else {
+                        texture = whiteTexture;  // Fallback
+                    }
+                }
+
+                meshInfo.materialInstance->SetTexture(1, texture);  // Normal binding = 1
+            }
+        } else {
+            meshInfo.materialInstance->SetTexture(1, whiteTexture);  // No path, use white
+        }
+
+        // ORM texture (use white for now - would need separate loading logic)
+        meshInfo.materialInstance->SetTexture(2, whiteTexture);  // ORM binding = 2
+    }
+
+    std::cout << "[TestNanite] Texture loading complete: "
+              << loadedCount << " loaded, " << skippedCount << " reused ("
+              << textureCache.size() << " unique)" << std::endl;
+
+    return true;
+}
+
+// 🔧 NEW: Manually adjust UV scaling for problematic materials
+void TestNaniteStreamingPipeline::AdjustMaterialUVScaling() {
+    if (!gpuMaterialRegistry_) {
+        std::cerr << "[AdjustUVScaling] ERROR: GPU Material Registry is null!" << std::endl;
+        return;
+    }
+
+    auto* materialData = gpuMaterialRegistry_->GetMaterialDataMutable();
+    if (!materialData) {
+        std::cerr << "[AdjustUVScaling] ERROR: Material data is null!" << std::endl;
+        return;
+    }
+
+    size_t materialCount = gpuMaterialRegistry_->GetMaterialCount();
+    std::cout << "[AdjustUVScaling] Adjusting UV scaling for " << materialCount << " materials..." << std::endl;
+
+    // 🔧 TEMPORARY HARDCODED ADJUSTMENTS
+    // These are test values based on UV visualization - materials with small UV ranges need higher scaling
+    // TODO: Read these values from FBX material properties
+
+    // 🔥 FIXED: Structure alignment issue resolved
+    // UV coordinates are now correctly read from buffer (20 bytes, no padding)
+    // Use default scaling (1.0) since UV range is already correct [0, 1]
+
+    for (size_t i = 0; i < materialCount; ++i) {
+        auto& mat = materialData[i];
+
+        // Default UV scaling (no repetition) since UV coords are now correct
+        mat.uv_scale[0] = 1.0f;
+        mat.uv_scale[1] = 1.0f;
+
+        if (i < 10) {  // Log first 10 materials for debugging
+            std::cout << "[AdjustUVScaling] Material " << i << ": UV scale set to (1.0, 1.0) - structure alignment fixed" << std::endl;
+        }
+        // Other materials: default scaling (1.0, 1.0)
+    }
+
+    std::cout << "[AdjustUVScaling] UV scaling adjustments complete" << std::endl;
 }
 
 void TestNaniteStreamingPipeline::Run() {
@@ -751,19 +1104,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     graphics::rhi::ResourceHandle backBuffer,
     u32 currentBufferIndex) {
 
-    // CRITICAL: Debug output for buffer synchronization
-    // This is essential to prevent flickering caused by reading previous frame data
-    if (frameCount_ < 5) { // Only debug first few frames
-        std::cout << "[BuildRenderGraph] Frame " << frameCount_ << " using synced buffer index=" << currentBufferIndex << std::endl;
-    }
-
     // Import backbuffer
     auto backBufferHandle = graph.ImportResource("BackBuffer", backBuffer);
 
     // CRITICAL FIX: Don't recreate depth texture every frame!
     // Use R32_Float format for intermediate depth storage
     if (sceneDepthTexture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cout << "[BuildRenderGraph] Creating persistent depth texture for HZB (R32_Float format)" << std::endl;
+        std::cout << "[HZB] Creating persistent depth texture (" << renderWidth_ << "x" << renderHeight_ << ")" << std::endl;
 
         rhi::TextureDesc depthDesc{};
         depthDesc.size = {renderWidth_, renderHeight_, 1};
@@ -772,10 +1119,8 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         sceneDepthTexture_ = device_->CreateTexture(depthDesc);
 
         if (sceneDepthTexture_ == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[BuildRenderGraph] Failed to create persistent depth texture!" << std::endl;
+            std::cerr << "[HZB] ERROR: Failed to create persistent depth texture!" << std::endl;
         }
-    } else {
-        std::cout << "[BuildRenderGraph] Reusing existing depth texture: " << sceneDepthTexture_ << std::endl;
     }
 
     auto depthHandle = graph.ImportResource("SceneDepth", sceneDepthTexture_);
@@ -814,37 +1159,18 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             // CRITICAL: Tell RenderGraph we're writing to this buffer with proper memory barrier
             // This establishes the dependency: SceneRender depends on NaniteCulling
             builder.Write(data.indirect_args_buffer, rhi::ResourceState::UnorderedAccess);
-
-            if (frameCount_ < 5) { // Debug first 5 frames
-                std::cout << "[NaniteCulling] Frame " << frameCount_ << " using synced buffer index=" << currentBufferIndex << " buffer " << indirectBuffer << std::endl;
-            }
         },
         [this, currentBufferIndex](const CullingPassData& data, graphics::rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
 
-            // CRITICAL FIX: Use triple-buffered camera data matching the system
+            // Use triple-buffered camera data matching the system
             u32 bufferIndex = currentBufferIndex;
-            if (frameCount_ < 10) { // Debug first 10 frames
-                std::cout << "[Draw] Frame " << frameCount_ << " using bufferIndex=" << bufferIndex << std::endl;
-            }
-
-            // std::cout << "[BuildRenderGraph] NaniteCulling PASS EXECUTE called!" << std::endl;
-            // std::cout << "[BuildRenderGraph] cullingPipeline_=" << (void*)cullingPipeline_
-            //           << ", initialized=" << (cullingPipeline_ ? cullingPipeline_->IsInitialized() : 0) << std::endl;
 
             // Build HZB from previous frame's depth (if available) for THIS frame's occlusion culling
-            std::cout << "[BuildRenderGraph] HZB System Check: hzbSystem_=" << (hzbSystem_ ? "valid" : "null")
-                      << ", IsReady()=" << (hzbSystem_ ? hzbSystem_->IsReady() : false)
-                      << ", frameCount_=" << frameCount_ << std::endl;
-
             if (hzbSystem_ && hzbSystem_->IsReady() && frameCount_ > 0) {
-                std::cout << "[BuildRenderGraph] 🔥 Building HZB for THIS frame's occlusion culling..." << std::endl;
-
                 // CRITICAL: Use the persistent sceneDepthTexture_ which contains previous frame's data
                 // This texture persists across frames, so it still has Frame N-1's data when we're in Frame N
                 if (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE) {
-                    std::cout << "[BuildRenderGraph] Using persistent depth texture for HZB: " << sceneDepthTexture_ << std::endl;
-
                     // CRITICAL: Insert barrier to ensure the persistent depth texture is ready for shader read
                     // The texture was written to in the previous frame's SceneRender pass
                     rhi::ResourceBarrier depthTextureBarrier{};
@@ -853,8 +1179,6 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     depthTextureBarrier.afterState = rhi::ResourceState::ShaderResource;  // Now shader reads from it
                     depthTextureBarrier.subresource = 0xFFFFFFFF;
                     cmd->InsertBarrier(&depthTextureBarrier, 1);
-
-                    std::cout << "[BuildRenderGraph] ✅ Depth texture barrier inserted for HZB generation" << std::endl;
 
                     // Build HZB from previous frame depth (still in sceneDepthTexture_)
                     auto hzbResult = hzbSystem_->BuildHZB(sceneDepthTexture_, cmd);
@@ -867,21 +1191,6 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     hzbBarrier.afterState = rhi::ResourceState::ShaderResource;   // Culling shader reads as SRV
                     hzbBarrier.subresource = 0xFFFFFFFF;  // All mip levels
                     cmd->InsertBarrier(&hzbBarrier, 1);
-
-                    std::cout << "[BuildRenderGraph] HZB built successfully! Mips: " << hzbResult.mip_levels
-                              << ", Time: " << hzbResult.build_time_ms << " ms" << std::endl;
-                    std::cout << "[BuildRenderGraph] ✅ HZB barrier inserted - texture ready for culling shader" << std::endl;
-                } else {
-                    std::cout << "[BuildRenderGraph] ❌ No persistent depth texture available yet" << std::endl;
-                }
-            } else {
-                std::cout << "[BuildRenderGraph] ⏸️ HZB generation skipped - conditions not met" << std::endl;
-                if (!hzbSystem_) {
-                    std::cout << "[BuildRenderGraph]   Reason: hzbSystem_ is null" << std::endl;
-                } else if (!hzbSystem_->IsReady()) {
-                    std::cout << "[BuildRenderGraph]   Reason: HZB system not ready" << std::endl;
-                } else if (frameCount_ <= 0) {
-                    std::cout << "[BuildRenderGraph]   Reason: First frame (frameCount_=" << frameCount_ << ")" << std::endl;
                 }
             }
 
@@ -983,71 +1292,37 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             // CRITICAL: Establish dependency on culling pass with proper memory barrier
             // This ensures compute shader has finished writing before we read
             builder.Read(data.indirect_args_buffer, rhi::ResourceState::IndirectArgument);
-
-            if (frameCount_ < 5) { // Debug first 5 frames
-                std::cout << "[SceneRender] Frame " << frameCount_ << " using synced buffer index=" << currentBufferIndex << std::endl;
-            }
         },
         [this, currentBufferIndex](const SceneRenderPassData& data, graphics::rendergraph::RenderGraphContext& context) {
-            std::cout << "[SceneRender] EXECUTE: SceneRender pass started!" << std::endl;
             auto cmd = context.cmdBuffer;
 
             // CRITICAL FIX: Use triple-buffered camera data matching the system
             u32 bufferIndex = currentBufferIndex;
-            if (frameCount_ < 10) { // Debug first 10 frames
-                std::cout << "[Draw] Frame " << frameCount_ << " using bufferIndex=" << bufferIndex << std::endl;
-            }
 
             // Execute the complete GPU-driven draw pipeline
             // The pipeline handles its own render pass begin/end internally
-            std::cout << "[SceneRender] About to execute GPU pipeline..." << std::endl;
             if (!gpuDrawPipeline_->Execute(cmd, *data.scene_snapshot, cameraBuffers_[bufferIndex].view_matrix, cameraBuffers_[bufferIndex].proj_matrix, *data.culling_results, frameCount_, currentBufferIndex)) {
-                std::cerr << "[DEBUG] GPU-driven draw pipeline failed!" << std::endl;
-            } else {
-                std::cout << "[SceneRender] GPU pipeline execution completed successfully!" << std::endl;
-
-                // Debug: Check depth texture status after GPU pipeline execution
-                auto debugDepthTexture = gpuDrawPipeline_->GetFinalDepthTexture();
-                std::cout << "[SceneRender] Final depth texture from GPU pipeline: " << debugDepthTexture << std::endl;
+                std::cerr << "[GPU Draw] ERROR: Pipeline execution failed!" << std::endl;
             }
 
             // CRITICAL: Copy depth texture from GPU pipeline to our HZB depth texture
-            std::cout << "[SceneRender] Checking depth textures for copy operation..." << std::endl;
-            std::cout << "[SceneRender] sceneDepthTexture_: " << sceneDepthTexture_ << " (" << (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE ? "VALID" : "INVALID") << ")" << std::endl;
-
             auto gpuDepthTexture = gpuDrawPipeline_->GetFinalDepthTexture();
-            std::cout << "[SceneRender] gpuDepthTexture: " << gpuDepthTexture << " (" << (gpuDepthTexture != rhi::handles::INVALID_RESOURCE ? "VALID" : "INVALID") << ")" << std::endl;
 
-            if (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE) {
-                std::cout << "[SceneRender] ✅ sceneDepthTexture_ is valid, proceeding with copy..." << std::endl;
+            if (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE && gpuDepthTexture != rhi::handles::INVALID_RESOURCE) {
+                // Now both textures are D32_Float format, so BlitTexture should work
+                rhi::TextureBlitRegion blitRegion{};
+                blitRegion.srcSubresource = {0, 0, 1}; // mip 0, array 0, 1 layer
+                blitRegion.dstSubresource = {0, 0, 1};
+                blitRegion.srcOffsets[0] = {0, 0, 0};
+                blitRegion.srcOffsets[1] = {static_cast<s32>(renderWidth_), static_cast<s32>(renderHeight_), 1};
+                blitRegion.dstOffsets[0] = {0, 0, 0};
+                blitRegion.dstOffsets[1] = {static_cast<s32>(renderWidth_), static_cast<s32>(renderHeight_), 1};
 
-                if (gpuDepthTexture != rhi::handles::INVALID_RESOURCE) {
-                    std::cout << "[SceneRender] ✅ gpuDepthTexture is valid, performing depth copy..." << std::endl;
-                    std::cout << "[SceneRender] 🚀 Starting depth texture conversion copy..." << std::endl;
-                    std::cout << "[SceneRender] Source: " << gpuDepthTexture << " (D32_Float, " << renderWidth_ << "x" << renderHeight_ << ")" << std::endl;
-                    std::cout << "[SceneRender] Target: " << sceneDepthTexture_ << " (D32_Float, " << renderWidth_ << "x" << renderHeight_ << ")" << std::endl;
+                cmd->BlitTexture(gpuDepthTexture, sceneDepthTexture_, &blitRegion, 1, rhi::FilterMode::Linear);
 
-                    // Now both textures are D32_Float format, so BlitTexture should work
-                    rhi::TextureBlitRegion blitRegion{};
-                    blitRegion.srcSubresource = {0, 0, 1}; // mip 0, array 0, 1 layer
-                    blitRegion.dstSubresource = {0, 0, 1};
-                    blitRegion.srcOffsets[0] = {0, 0, 0};
-                    blitRegion.srcOffsets[1] = {static_cast<s32>(renderWidth_), static_cast<s32>(renderHeight_), 1};
-                    blitRegion.dstOffsets[0] = {0, 0, 0};
-                    blitRegion.dstOffsets[1] = {static_cast<s32>(renderWidth_), static_cast<s32>(renderHeight_), 1};
-
-                    std::cout << "[SceneRender] 🚀 Starting BlitTexture (D32_Float to D32_Float)..." << std::endl;
-                    cmd->BlitTexture(gpuDepthTexture, sceneDepthTexture_, &blitRegion, 1, rhi::FilterMode::Linear);
-                    std::cout << "[SceneRender] ✅ BlitTexture completed successfully" << std::endl;
-
-                    // Note: sceneDepthTexture_ now contains current frame's depth
-                    // Next frame's HZB generation will automatically use this data
-                    // No need for explicit storage - the texture persists across frames
-                } else {
-                    std::cout << "[SceneRender] ❌ gpuDepthTexture is INVALID, cannot copy depth!" << std::endl;
-                }
-            } else {
-                std::cout << "[SceneRender] ❌ sceneDepthTexture_ is INVALID, cannot copy depth!" << std::endl;
+                // Note: sceneDepthTexture_ now contains current frame's depth
+                // Next frame's HZB generation will automatically use this data
+                // No need for explicit storage - the texture persists across frames
             }
 
             // Log rendering statistics

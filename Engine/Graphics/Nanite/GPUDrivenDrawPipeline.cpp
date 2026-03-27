@@ -91,6 +91,9 @@ bool GPUDrivenDrawPipeline::Initialize(rhi::RHIDeviceBase* device,
         return false;
     }
 
+    std::cout << "[GPUDrivenDrawPipeline] CreatePipelines() succeeded, draw_pipeline_layout_: "
+              << draw_pipeline_layout_ << std::endl;
+
     if (!CreateDescriptorSets()) {
         std::cerr << "[GPUDrivenDrawPipeline] Failed to create descriptor sets" << std::endl;
         return false;
@@ -147,6 +150,12 @@ void GPUDrivenDrawPipeline::Shutdown() {
         if (final_render_pass_ != rhi::handles::INVALID_RENDER_PASS) device_->DestroyRenderPass(final_render_pass_);
         if (final_color_texture_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(final_color_texture_);
         if (final_depth_texture_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(final_depth_texture_);
+
+        // 🎨 Cleanup texture arrays and sampler
+        if (albedo_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(albedo_texture_array_);
+        if (normal_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(normal_texture_array_);
+        if (orm_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(orm_texture_array_);
+        if (texture_sampler_ != rhi::handles::INVALID_SAMPLER) device_->DestroySampler(texture_sampler_);
     }
 
     initialized_ = false;
@@ -221,6 +230,58 @@ bool GPUDrivenDrawPipeline::CreateResources() {
         // Note: Descriptor Layout must be created before this!
         // We will do this in CreateDescriptorSets() instead
     }
+
+    // 🎨 NEW: Create texture sampler
+    rhi::SamplerDesc samplerDesc{};
+    samplerDesc.minFilter = rhi::FilterMode::Linear;
+    samplerDesc.magFilter = rhi::FilterMode::Linear;
+    samplerDesc.mipFilter = rhi::FilterMode::Linear;
+    samplerDesc.addressU = rhi::TextureAddressMode::Wrap;
+    samplerDesc.addressV = rhi::TextureAddressMode::Wrap;
+    samplerDesc.addressW = rhi::TextureAddressMode::Wrap;
+    samplerDesc.maxLod = 100.0f;
+    texture_sampler_ = device_->CreateSampler(samplerDesc);
+
+    if (texture_sampler_ == rhi::handles::INVALID_SAMPLER) {
+        std::cerr << "[GPUDrivenDrawPipeline] Failed to create texture sampler" << std::endl;
+        return false;
+    }
+
+    // 🎨 NEW: Create placeholder texture arrays (1x1 white textures for now)
+    // TODO: Replace with real texture arrays from material data
+    rhi::TextureDesc textureArrayDesc{};
+    textureArrayDesc.size = { 1, 1, 1 };  // 1x1 texture
+    textureArrayDesc.arraySize = 1;        // Array size = 1 (will be increased when real textures are loaded)
+    textureArrayDesc.mipLevels = 1;
+    textureArrayDesc.format = rhi::DataFormat::RGBA8_UNorm;
+    textureArrayDesc.type = rhi::TextureType::Texture2DArray;
+    textureArrayDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest;
+    textureArrayDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
+
+    // Create albedo texture array
+    albedo_texture_array_ = device_->CreateTexture(textureArrayDesc);
+    if (albedo_texture_array_ == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GPUDrivenDrawPipeline] Failed to create albedo texture array" << std::endl;
+        return false;
+    }
+
+    // Create normal texture array
+    normal_texture_array_ = device_->CreateTexture(textureArrayDesc);
+    if (normal_texture_array_ == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GPUDrivenDrawPipeline] Failed to create normal texture array" << std::endl;
+        return false;
+    }
+
+    // Create ORM texture array
+    orm_texture_array_ = device_->CreateTexture(textureArrayDesc);
+    if (orm_texture_array_ == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GPUDrivenDrawPipeline] Failed to create ORM texture array" << std::endl;
+        return false;
+    }
+
+    // 🎨 NOTE: Texture arrays are currently placeholder (1x1)
+    // TODO: Initialize with white color or upload actual texture data
+    // For now, textures will use default values
 
     // std::cout << "[GPUDrivenDrawPipeline] Resources created successfully" << std::endl;
     return true;
@@ -574,7 +635,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
 
         if (gpuDrawVS != rhi::handles::INVALID_SHADER && gpuDrawFS != rhi::handles::INVALID_SHADER) {
             // Create GPU Draw descriptor layout
-            rhi::DescriptorSetLayoutBinding gpuDrawBindings[9];  // Updated to 9 for element buffer
+            rhi::DescriptorSetLayoutBinding gpuDrawBindings[14];  // Updated to 9 for element buffer
             gpuDrawBindings[0].binding = 0;
             gpuDrawBindings[0].descriptorType = rhi::DescriptorType::UniformBufferDynamic;
             gpuDrawBindings[0].descriptorCount = 1;
@@ -621,8 +682,37 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             gpuDrawBindings[8].descriptorCount = 1;
             gpuDrawBindings[8].stageFlags = rhi::ShaderStage::Vertex;
 
+            // 🎨 NEW: Material data buffer (vertex + fragment shader)
+            // Both stages need access: vertex reads materialID, fragment reads full material data
+            gpuDrawBindings[9].binding = 9;
+            gpuDrawBindings[9].descriptorType = rhi::DescriptorType::StorageBuffer;
+            gpuDrawBindings[9].descriptorCount = 1;
+            gpuDrawBindings[9].stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel;
+
+            // 🎨 NEW: Texture arrays (fragment shader)
+            gpuDrawBindings[10].binding = 10;
+            gpuDrawBindings[10].descriptorType = rhi::DescriptorType::SampledImage;
+            gpuDrawBindings[10].descriptorCount = 1;
+            gpuDrawBindings[10].stageFlags = rhi::ShaderStage::Pixel;
+
+            gpuDrawBindings[11].binding = 11;
+            gpuDrawBindings[11].descriptorType = rhi::DescriptorType::SampledImage;
+            gpuDrawBindings[11].descriptorCount = 1;
+            gpuDrawBindings[11].stageFlags = rhi::ShaderStage::Pixel;
+
+            gpuDrawBindings[12].binding = 12;
+            gpuDrawBindings[12].descriptorType = rhi::DescriptorType::SampledImage;
+            gpuDrawBindings[12].descriptorCount = 1;
+            gpuDrawBindings[12].stageFlags = rhi::ShaderStage::Pixel;
+
+            // 🎨 NEW: Texture sampler (fragment shader)
+            gpuDrawBindings[13].binding = 13;
+            gpuDrawBindings[13].descriptorType = rhi::DescriptorType::Sampler;
+            gpuDrawBindings[13].descriptorCount = 1;
+            gpuDrawBindings[13].stageFlags = rhi::ShaderStage::Pixel;
+
             rhi::DescriptorSetLayoutDesc gpuDrawLayoutDesc{};
-            gpuDrawLayoutDesc.bindingCount = 9;  // Updated from 8 to 9
+            gpuDrawLayoutDesc.bindingCount = 14;  // Updated from 9 to 14
             gpuDrawLayoutDesc.bindings = gpuDrawBindings;
 
             draw_descriptor_layout_ = device_->CreateDescriptorSetLayout(gpuDrawLayoutDesc);
@@ -817,18 +907,23 @@ bool GPUDrivenDrawPipeline::CreateDescriptorSets() {
 
     // Create descriptor set layouts for GPU Draw pipeline
     if (draw_pipeline_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
-        // std::cout << "[GPUDrivenDrawPipeline] GPU Draw descriptor layout already created in CreatePipelines" << std::endl;
-        
+        std::cout << "[GPUDrivenDrawPipeline] Creating GPU Draw descriptor sets..." << std::endl;
+        std::cout << "  draw_descriptor_layout_: " << draw_descriptor_layout_ << std::endl;
+        std::cout << "  frame_resources_.size(): " << frame_resources_.size() << std::endl;
+
         // Allocate 3 descriptor sets for triple buffering
         for (u32 i = 0; i < 3; ++i) {
             if (i < frame_resources_.size()) {
                 frame_resources_[i].global_draw_descriptor_set = device_->CreateDescriptorSet({draw_descriptor_layout_});
+                std::cout << "  Frame " << i << " descriptor set: " << frame_resources_[i].global_draw_descriptor_set << std::endl;
                 if (frame_resources_[i].global_draw_descriptor_set == rhi::handles::INVALID_DESCRIPTOR_SET) {
                     std::cerr << "[GPUDrivenDrawPipeline] Failed to create descriptor set for frame " << i << std::endl;
                     return false;
                 }
+                std::cout << "  Frame " << i << " camera buffer: " << frame_resources_[i].camera_constants_buffer << std::endl;
             }
         }
+        std::cout << "[GPUDrivenDrawPipeline] GPU Draw descriptor sets created successfully" << std::endl;
     }
 
     return true;
@@ -919,10 +1014,10 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     global_vertex_buffer_ = device_->CreateBuffer(positionDesc);
 
     // 🔥 NEW: Global Elements (Normal, Tangent, UV)
-    // Each element is 24 bytes: ColorTSign(4) + Normal(4) + Tangent(4) + Padding(4) + UV(8)
-    // Matches GBuffer.metal VertexElement structure
+    // Each element is 20 bytes: ColorTSign(4) + Normal(4) + Tangent(4) + UV(8)
+    // Matches TestParticleSponza VertexElement format (NO padding)
     rhi::BufferDesc elementDesc{};
-    elementDesc.size = totalElements * 24; // 24 bytes per vertex element (with padding for math::v2)
+    elementDesc.size = totalElements * 24; // 24 bytes per vertex element
     elementDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
     elementDesc.usage = rhi::GPUMemoryUsage::Dynamic;
     global_element_buffer_ = device_->CreateBuffer(elementDesc);
@@ -945,14 +1040,14 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     utl::vector<PackedV3> mergedPositions;
     mergedPositions.reserve(totalPositions);
 
-    // 🔥 NEW: Vertex elements (Normal, Tangent, UV) - 24 bytes per vertex
-    // Matches Metal shader layout with explicit padding for math::v2 alignment
+    // 🔥 Vertex elements (Normal, Tangent, UV) - 24 bytes per vertex
+    // Uses padding to match traditional rendering format
     struct VertexElement {
         u32 colorTSign;       // 4 bytes
-        u32 normal;           // 4 bytes (packed_ushort2)
-        u32 tangent;          // 4 bytes (packed_ushort2)
-        u32 padding;          // 4 bytes padding to align uv
-        math::v2 uv;          // 8 bytes (simd_float2, 8-byte aligned)
+        u32 normal;           // 4 bytes (stored as uint, unpacked to vec2)
+        u32 tangent;          // 4 bytes (stored as uint, unpacked to vec2)
+        u32 padding;          // 4 bytes (padding for alignment)
+        math::v2 uv;          // 8 bytes
         // Total: 4+4+4+4+8 = 24 bytes
     };
     utl::vector<VertexElement> mergedElements;
@@ -1056,6 +1151,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
 
             // 🔥 NEW: Copy Elements (Normal, Tangent, UV)
             // Element buffer size should match position buffer size
+            // Each element is 20 bytes (matches TestParticleSponza format)
             u32 elemCount = posCount; // Same as vertex count
             if (meshAsset.element_buffer.size() >= elemCount * 24) {
                 const VertexElement* elemSrc = reinterpret_cast<const VertexElement*>(meshAsset.element_buffer.data());
@@ -1295,10 +1391,16 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     // Total Clusters = sum(instance.cluster_count)
     u32 totalClusters = 0;
     for(const auto& inst : instanceData) totalClusters += inst.cluster_count;
+
+    // 🔥 NEW DEBUG: Print material mapping info
+    std::cout << "[GPUDrivenDrawPipeline] Building ClusterMap with " << totalClusters
+              << " clusters from " << instanceData.size() << " instances..." << std::endl;
     
     struct ClusterMap {
         u32 globalMeshletIndex;
         u32 instanceIndex;
+        u32 materialID;  // 🔥 NEW: Per-cluster material ID
+        u32 padding;     // Maintain alignment
     };
     
     utl::vector<ClusterMap> clusterMapData;
@@ -1320,10 +1422,30 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             baseMeshletIndex = static_cast<u32>(clusterMapData.size());
         }
 
+        // 🔥 NEW DEBUG: Print material info for each instance
+        std::cout << "[GPUDrivenDrawPipeline]   Instance " << i
+                  << " (geometry_id=" << instance.geometry_id
+                  << ", material_id=" << instance.material_id
+                  << ", clusters=" << instance.cluster_count << ")" << std::endl;
+
+        // 🔥 CRITICAL DEBUG: Print baseMeshletIndex and range
+        std::cout << "    baseMeshletIndex=" << baseMeshletIndex
+                  << ", cluster range=[" << baseMeshletIndex
+                  << "-" << (baseMeshletIndex + instance.cluster_count - 1) << "]" << std::endl;
+
+        // Sample first few clusters to verify meshlet data
+        if (i < 3) {
+            std::cout << "    First cluster uses globalMeshletIndex=" << baseMeshletIndex << std::endl;
+        }
+
         for(u32 c=0; c<instance.cluster_count; ++c) {
             ClusterMap map;
             map.globalMeshletIndex = baseMeshletIndex + c;
             map.instanceIndex = i; // Index into Instance Data Buffer (transforms)
+            // 🔥 NEW: Use instance material_id for now
+            // TODO: This needs to be per-cluster material_id from meshlet/submesh mapping
+            map.materialID = instance.material_id;
+            map.padding = 0;
             clusterMapData.push_back(map);
         }
     }
@@ -1336,21 +1458,24 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     
     cluster_map_buffer_ = device_->CreateBuffer(mapDesc);
     UploadBuffer(cluster_map_buffer_, clusterMapData.data(), clusterMapData.size() * sizeof(ClusterMap));
-    
-    // 5. Build Global Instance Data Buffer (World Matrices)
-    // We map instance index `i` (from instanceData[i]) to `world_matrix`
-    utl::vector<math::m4x4> instanceMatrices;
-    instanceMatrices.reserve(instanceData.size());
+
+    // 5. Build Global Instance Data Buffer (Full InstanceData for material access)
+    // We need material_id from InstanceData, so upload full 192-byte structure
+    utl::vector<graphics::InstanceData> instanceDataFull;
+    instanceDataFull.reserve(instanceData.size());
     for(const auto& inst : instanceData) {
-        instanceMatrices.push_back(inst.world_matrix);
+        instanceDataFull.push_back(inst);  // Copy full InstanceData (includes material_id)
     }
-    
+
     rhi::BufferDesc instDesc{};
-    instDesc.size = instanceMatrices.size() * sizeof(math::m4x4);
+    instDesc.size = instanceDataFull.size() * sizeof(graphics::InstanceData);
     instDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
     instDesc.usage = rhi::GPUMemoryUsage::Dynamic;
     global_instance_data_buffer_ = device_->CreateBuffer(instDesc);
-    UploadBuffer(global_instance_data_buffer_, instanceMatrices.data(), instanceMatrices.size() * sizeof(math::m4x4));
+    UploadBuffer(global_instance_data_buffer_, instanceDataFull.data(), instanceDataFull.size() * sizeof(graphics::InstanceData));
+
+    std::cout << "[GPUDrivenDrawPipeline] Uploaded " << instanceDataFull.size()
+              << " instances (full InstanceData with material_id)" << std::endl;
 
     total_meshlet_count_ = totalMeshlets;
     total_meshlet_vertex_count_ = totalVertices;
@@ -1358,6 +1483,15 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     total_vertex_count_ = totalPositions;
     
     std::cout << "[GPUDrivenDrawPipeline] Global Buffers Built Successfully!" << std::endl;
+
+    // 🔥 NEW DEBUG: Print critical buffer statistics
+    std::cout << "[GPUDrivenDrawPipeline] Buffer Statistics:" << std::endl;
+    std::cout << "  Total meshlets: " << totalMeshlets << std::endl;
+    std::cout << "  Total meshlet_vertices: " << totalVertices << std::endl;
+    std::cout << "  Total meshlet_triangles: " << totalTriangles << std::endl;
+    std::cout << "  Total positions: " << totalPositions << std::endl;
+    std::cout << "  Total instances: " << instanceDataFull.size() << std::endl;
+    std::cout << "  Total clusters: " << clusterMapData.size() << std::endl;
 }
 
 bool GPUDrivenDrawPipeline::CreateGeometryBuffers(u32 vertex_count, u32 index_count) {
@@ -1762,7 +1896,17 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     // 🔥 NEW: Element buffer (Normal, Tangent, UV)
     rhi::DescriptorBufferInfo elementBufferInfo{ global_element_buffer_, 0, ~0ULL };
 
-    rhi::WriteDescriptorSet writes[9];
+    // 🎨 NEW: Material data buffer (for fragment shader)
+    rhi::DescriptorBufferInfo materialDataBufferInfo{ global_material_data_buffer_, 0, ~0ULL };
+
+    // 🎨 NEW: Texture arrays and sampler (for fragment shader)
+    // Note: DescriptorImageInfo order is sampler, imageView, imageLayout
+    rhi::DescriptorImageInfo albedoTextureInfo{ texture_sampler_, albedo_texture_array_, rhi::ResourceState::ShaderResource };
+    rhi::DescriptorImageInfo normalTextureInfo{ texture_sampler_, normal_texture_array_, rhi::ResourceState::ShaderResource };
+    rhi::DescriptorImageInfo ormTextureInfo{ texture_sampler_, orm_texture_array_, rhi::ResourceState::ShaderResource };
+    rhi::DescriptorImageInfo samplerInfo{ texture_sampler_, rhi::handles::INVALID_RESOURCE, rhi::ResourceState::General };
+
+    rhi::WriteDescriptorSet writes[14];
     writes[0].dstSet = globalDrawDS;
     writes[0].dstBinding = 0;
     writes[0].descriptorCount = 1;
@@ -1792,19 +1936,19 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     writes[4].descriptorCount = 1;
     writes[4].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[4].bufferInfo = &positionBufferInfo;
-    
+
     writes[5].dstSet = globalDrawDS;
     writes[5].dstBinding = 5;
     writes[5].descriptorCount = 1;
     writes[5].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[5].bufferInfo = &compactClusterInfo;
-    
+
     writes[6].dstSet = globalDrawDS;
     writes[6].dstBinding = 6;
     writes[6].descriptorCount = 1;
     writes[6].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[6].bufferInfo = &clusterMapInfo;
-    
+
     writes[7].dstSet = globalDrawDS;
     writes[7].dstBinding = 7;
     writes[7].descriptorCount = 1;
@@ -1818,7 +1962,40 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     writes[8].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[8].bufferInfo = &elementBufferInfo;
 
-    device_->UpdateDescriptorSets(9, writes);
+    // 🎨 NEW: Material data buffer to binding 9
+    writes[9].dstSet = globalDrawDS;
+    writes[9].dstBinding = 9;
+    writes[9].descriptorCount = 1;
+    writes[9].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[9].bufferInfo = &materialDataBufferInfo;
+
+    // 🎨 NEW: Texture arrays to bindings 10, 11, 12
+    writes[10].dstSet = globalDrawDS;
+    writes[10].dstBinding = 10;
+    writes[10].descriptorCount = 1;
+    writes[10].descriptorType = rhi::DescriptorType::SampledImage;
+    writes[10].imageInfo = &albedoTextureInfo;
+
+    writes[11].dstSet = globalDrawDS;
+    writes[11].dstBinding = 11;
+    writes[11].descriptorCount = 1;
+    writes[11].descriptorType = rhi::DescriptorType::SampledImage;
+    writes[11].imageInfo = &normalTextureInfo;
+
+    writes[12].dstSet = globalDrawDS;
+    writes[12].dstBinding = 12;
+    writes[12].descriptorCount = 1;
+    writes[12].descriptorType = rhi::DescriptorType::SampledImage;
+    writes[12].imageInfo = &ormTextureInfo;
+
+    // 🎨 NEW: Texture sampler to binding 13
+    writes[13].dstSet = globalDrawDS;
+    writes[13].dstBinding = 13;
+    writes[13].descriptorCount = 1;
+    writes[13].descriptorType = rhi::DescriptorType::Sampler;
+    writes[13].imageInfo = &samplerInfo;
+
+    device_->UpdateDescriptorSets(14, writes);
 
     // Bind Pipeline and Descriptor Set
     // NOTE: No memory barrier needed here - Metal automatically handles encoder transitions
