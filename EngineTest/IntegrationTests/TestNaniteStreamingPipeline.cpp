@@ -13,7 +13,7 @@
 #include "Engine/Input/Input.h"
 #include "Engine/Components/Entity.h"
 #include "ShaderCompilation.h"
-#include "Engine/Content/stb_image.h"
+#include "stb_image.h"  // third_party/stb submodule
 #include "Engine/Utilities/IOStream.h"
 
 #include <iostream>
@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <set>
 
 using namespace primal;
 using namespace primal::graphics;
@@ -701,6 +702,46 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
 
     std::cout << "[TestNanite] Registered " << registeredCount << " materials" << std::endl;
 
+    // 🔥 NEW DEBUG: Print texture handles for problematic materials
+    std::cout << "\n[TextureHandleDebug] Texture handle assignments:" << std::endl;
+    for (const auto& meshInfo : sceneMeshes_) {
+        if (!meshInfo.materialInstance) continue;
+        // Only print first occurrence of each MaterialID
+        static std::set<uint32_t> printedIDs;
+        if (printedIDs.find(meshInfo.gpuMaterialId) == printedIDs.end()) {
+            printedIDs.insert(meshInfo.gpuMaterialId);
+            rhi::ResourceHandle albedo = meshInfo.materialInstance->GetTextureHandle(0);
+            rhi::ResourceHandle normal = meshInfo.materialInstance->GetTextureHandle(1);
+            std::cout << "  MaterialID " << meshInfo.gpuMaterialId << ": "
+                      << "albedo_handle=" << albedo << ", "
+                      << "normal_handle=" << normal << ", "
+                      << "mesh_name=" << meshInfo.name << std::endl;
+        }
+    }
+
+    // 🔍 DEBUG: Material mapping for walls/columns to diagnose texture swapping
+    std::cout << "\n[WallDebug] Checking MaterialID 4 (Bricks) usage:" << std::endl;
+    int brickMeshCount = 0;
+    for (const auto& meshInfo : sceneMeshes_) {
+        if (meshInfo.gpuMaterialId == 4) {  // Bricks material
+            std::cout << "[WallDebug] MaterialID 4 used by: " << meshInfo.name
+                      << " (material_index=" << meshInfo.materialIndex << ")" << std::endl;
+            brickMeshCount++;
+        }
+    }
+    std::cout << "[WallDebug] MaterialID 4 used by " << brickMeshCount << " meshes" << std::endl;
+
+    std::cout << "\n[WallDebug] MaterialID 11 (Column_b) usage:" << std::endl;
+    int columnBMeshCount = 0;
+    for (const auto& meshInfo : sceneMeshes_) {
+        if (meshInfo.gpuMaterialId == 11) {  // Column_b material
+            std::cout << "[WallDebug] MaterialID 11 used by: " << meshInfo.name
+                      << " (material_index=" << meshInfo.materialIndex << ")" << std::endl;
+            columnBMeshCount++;
+        }
+    }
+    std::cout << "[WallDebug] MaterialID 11 used by " << columnBMeshCount << " meshes" << std::endl;
+
     if (registeredCount == 0) {
         std::cerr << "[TestNanite] Warning: No materials were registered!" << std::endl;
     }
@@ -877,6 +918,9 @@ bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
                     if (texture != rhi::handles::INVALID_RESOURCE) {
                         textureCache[fullPath] = texture;
                         loadedCount++;
+                        // 🔥 NEW DEBUG: Print texture handle to filename mapping
+                        std::cout << "[TextureMapping] Loaded albedo: handle=" << texture
+                                  << " → " << fullPath << std::endl;
                     } else {
                         texture = whiteTexture;  // Fallback to white
                     }
@@ -886,6 +930,32 @@ bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
             }
         } else {
             meshInfo.materialInstance->SetTexture(0, whiteTexture);  // No path, use white
+        }
+
+        // Infer normal texture path from diffuse if missing (binary files store empty normal paths)
+        if (meshInfo.normalTexturePath.empty() && !meshInfo.diffuseTexturePath.empty()) {
+            const std::string& diff = meshInfo.diffuseTexturePath;
+            std::string inferredNormal;
+
+            // Try known naming conventions: _diffuse → _normal, _Diff → _Normal, _Albedo → _Normal
+            if (diff.find("_diffuse.") != std::string::npos) {
+                inferredNormal = diff;
+                inferredNormal.replace(diff.find("_diffuse."), 9, "_normal.");
+            } else if (diff.find("_Diff.") != std::string::npos) {
+                inferredNormal = diff;
+                inferredNormal.replace(diff.find("_Diff."), 5, "_Normal.");
+            } else if (diff.find("_Albedo.") != std::string::npos) {
+                inferredNormal = diff;
+                inferredNormal.replace(diff.find("_Albedo."), 8, "_Normal.");
+            }
+
+            if (!inferredNormal.empty()) {
+                std::string fullPath = ResolveTexturePath(assetBaseDir, inferredNormal);
+                std::ifstream testFile(fullPath);
+                if (testFile.good()) {
+                    meshInfo.normalTexturePath = inferredNormal;
+                }
+            }
         }
 
         // Load normal texture
@@ -902,6 +972,9 @@ bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
                     if (texture != rhi::handles::INVALID_RESOURCE) {
                         textureCache[fullPath] = texture;
                         loadedCount++;
+                        // 🔥 NEW DEBUG: Print texture handle to filename mapping
+                        std::cout << "[TextureMapping] Loaded normal: handle=" << texture
+                                  << " → " << fullPath << std::endl;
                     } else {
                         texture = whiteTexture;  // Fallback
                     }

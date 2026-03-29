@@ -25,6 +25,7 @@ function(setup_test_target target_name)
         "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Common"
         ${CMAKE_SOURCE_DIR}/OSAPI/MAC/
+        ${CMAKE_SOURCE_DIR}/third_party/stb
     )
     
     # 定义测试宏

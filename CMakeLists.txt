@@ -107,12 +107,19 @@ elseif(APPLE)
 
     # 检查 submodule 是否已初始化
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src/meshoptimizer.h")
-        message(FATAL_ERROR 
+        message(FATAL_ERROR
             "Git submodules not initialized!\n"
             "Please run the following command to initialize submodules:\n"
             "    git submodule update --init --recursive"
         )
     endif()
+
+    # === PhysX (Engine/Simulation/) ===
+    # TODO: 使用 git submodule 集成 PhysX 源码：
+    #   git submodule add https://github.com/NVIDIAGameWorks/PhysX.git third_party/PhysX
+    # Engine/Simulation/ 中保留了 include 头文件和桥接层，预编译二进制已移除。
+    # 当前状态：未集成到 CMake 构建系统，代码中暂无使用。
+    message(STATUS "PhysX: not yet integrated as submodule (Engine/Simulation/ has headers only)")
     
     # 如果没有找到FBX SDK，提供安装指导
     if(NOT FBX_SDK_FOUND)
@@ -267,6 +274,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
     ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    ${CMAKE_SOURCE_DIR}/third_party/stb
 )
 
 # 添加子项目

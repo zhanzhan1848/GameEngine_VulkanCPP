@@ -184,12 +184,13 @@ vertex VertexOut gpu_driven_vertex_shader(
     float3 normal = UnpackNormal(element.normal);
     float3 tangent = UnpackNormal(element.tangent);
 
+    // Extract tangent sign from colorTSign field (stored in high byte)
+    // colorTSign format: color[0](bits 0-7) | color[1](8-15) | color[2](16-23) | t_sign(24-31)
+    // t_sign is non-zero (0xFF) for negative tangent handedness
+    float tangentSign = (element.colorTSign & 0xFF000000) ? -1.0 : 1.0;
+
     // UV coordinates (flip Y axis for Metal texture coordinate system)
     float2 uv = float2(element.uv.x, 1.0 - element.uv.y);
-
-    // 🔧 DEBUG: Visualize UV coordinates to diagnose texture stretching
-    // Mode 1: UV gradient visualization (red = U, green = V)
-    // out.color = float3(uv.x, uv.y, 0.0);
 
     // Normal rendering
     out.color = float3(1.0, 1.0, 1.0); // Default white
@@ -199,7 +200,7 @@ vertex VertexOut gpu_driven_vertex_shader(
     float4 viewPos = uniforms.view_matrix * worldPos;
     out.position = uniforms.proj_matrix * viewPos;
 
-    // 🔥 NEW: Transform normal/tangent to world space
+    // Transform normal/tangent to world space
     float3x3 normalMatrix = float3x3(
         instance.world_matrix[0].xyz,
         instance.world_matrix[1].xyz,
@@ -210,22 +211,16 @@ vertex VertexOut gpu_driven_vertex_shader(
     float3 worldNormal = normalize(normalMatrix * normal);
     float3 worldTangent = normalize(normalMatrix * tangent);
 
-    // Calculate Bitangent
-    float3 worldBitangent = cross(worldNormal, worldTangent);
+    // Calculate Bitangent with correct sign for normal mapping
+    float3 worldBitangent = cross(worldNormal, worldTangent) * tangentSign;
 
     // Output material data
-    out.uv = uv;
-    out.normal = worldNormal;
-    out.tangent = worldTangent;
-    out.bitangent = worldBitangent;
-
-    // Output material ID and data
     out.materialID = materialID;
     out.uv = uv;
     out.normal = worldNormal;
     out.tangent = worldTangent;
     out.bitangent = worldBitangent;
-    out.color = float3(1.0, 1.0, 1.0); // Default white
+    out.color = float3(1.0, 1.0, 1.0);
 
     return out;
 }
@@ -242,12 +237,10 @@ fragment GBufferOutput gpu_driven_fragment_shader(
 {
     GBufferOutput out;
 
-    // 🔧 DEBUG: Visualize which material ID is being used
-    // This helps identify if stretched textures correlate with specific materials
     ClusterMaterial mat = material_data[in.materialID];
 
     // Sample textures
-    constexpr sampler linear_sampler(mip_filter::linear, mag_filter::linear, min_filter::linear);
+    constexpr sampler linear_sampler(mip_filter::linear, mag_filter::linear, min_filter::linear, address::repeat);
 
     // Get texture array size
     uint albedo_array_size = albedo_textures.get_array_size();
@@ -265,15 +258,37 @@ fragment GBufferOutput gpu_driven_fragment_shader(
     // Apply albedo tint
     float3 baseColor = albedo_sample.rgb * float3(mat.albedo_tint[0], mat.albedo_tint[1], mat.albedo_tint[2]);
 
-    // 🔧 DEBUG: Mix material ID color with texture to identify which material is which
-    // Make material ID 0-15 visible as color overlay
-    float matIDOverlay = (in.materialID < 16) ? (float(in.materialID) / 16.0) : 0.0;
-    baseColor = mix(baseColor, float3(matIDOverlay, 0.0, 0.0), 0.3);  // Red tint for material ID
-
-    // For now, just output albedo with material ID overlay
     out.albedo = float4(baseColor, 1.0);
-    out.normal = float4(in.normal * 0.0 + 0.5, 1.0);
-    out.orm = float4(1.0, 1.0, 1.0, 1.0);
+
+    // Normal mapping: sample normal texture if available, otherwise use vertex normal
+    uint normal_array_size = normal_textures.get_array_size();
+
+    if (mat.normal_texture_idx != 0xFFFFFFFF && mat.normal_texture_idx < normal_array_size) {
+        float3 normalSample = normal_textures.sample(linear_sampler, scaled_uv, mat.normal_texture_idx).rgb;
+
+        // Check if normal map has actual data (not flat/black default)
+        if (length(normalSample) > 0.1) {
+            // Decode tangent-space normal from [0,1] to [-1,1]
+            float3 tangentNormal = normalSample * 2.0 - 1.0;
+
+            // Build TBN matrix from vertex tangent frame
+            float3 N = normalize(in.normal);
+            float3 T = normalize(in.tangent);
+            float3 B = normalize(in.bitangent);
+            float3x3 TBN = float3x3(T, B, N);
+
+            // Transform to world space and encode to [0,1] for GBuffer
+            out.normal = float4(normalize(TBN * tangentNormal) * 0.5 + 0.5, 1.0);
+        } else {
+            // Normal map exists but is flat/default — use vertex normal
+            out.normal = float4(normalize(in.normal) * 0.5 + 0.5, 1.0);
+        }
+    } else {
+        // No normal texture — use vertex normal
+        out.normal = float4(normalize(in.normal) * 0.5 + 0.5, 1.0);
+    }
+
+    out.orm = float4(1.0, 0.5, 0.0, 1.0);
     out.velocity = float2(0.0, 0.0);
 
     return out;

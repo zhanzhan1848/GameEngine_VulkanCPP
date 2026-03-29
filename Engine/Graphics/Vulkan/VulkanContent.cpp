@@ -5,7 +5,7 @@
 #include "VulkanTexture.h"
 #include "Components/Transform.h"
 #define STB_IMAGE_IMPLEMENTATION
-#include "Content/stb_image.h"
+#include "stb_image.h"  // third_party/stb submodule
 #include "Utilities/FreeList.h"
 #include <iostream>
 #include <unordered_map>
@@ -34,7 +34,7 @@ namespace primal::graphics::vulkan
 	{
 		namespace
 		{
-			// ！此freelist存储并生成图片的原始ID
+			// 锟斤拷锟斤拷freelist锟芥储锟斤拷锟斤拷锟斤拷图片锟斤拷原始ID
 			utl::free_list<textures::vulkan_texture_2d>			textures;
 
 			std::mutex											texture_mutex;
@@ -196,7 +196,7 @@ namespace primal::graphics::vulkan
 		}
 
 		/// <summary>
-		// ! 生成图片原始ID
+		// ! 锟斤拷锟斤拷图片原始ID
 		/// </summary>
 		/// <param name="path"></param>
 		/// <returns></returns>
@@ -221,9 +221,9 @@ namespace primal::graphics::vulkan
 		}
 
 		/// <summary>
-		// ！ 删除图片原始ID
-		///	1、 执行关联的所有material里的remove_texture 操作
-		///   2、 执行删除图片原始ID的操作
+		// 锟斤拷 删锟斤拷图片原始ID
+		///	1锟斤拷 执锟叫癸拷锟斤拷锟斤拷锟斤拷锟斤拷material锟斤拷锟絩emove_texture 锟斤拷锟斤拷
+		///   2锟斤拷 执锟斤拷删锟斤拷图片原始ID锟侥诧拷锟斤拷
 		/// </summary>
 		/// <param name="id"></param>
 		void remove(id::id_type id)
@@ -262,8 +262,8 @@ namespace primal::graphics::vulkan
 		}
 
 		/// <summary>
-		///  在一个material内的图片的ID由2部分组成，第一部分是图片的原始ID，第二部分是在material内的copy_id
-		///   material内的ID由原始ID作为头16位，copy_id作为后16位
+		///  锟斤拷一锟斤拷material锟节碉拷图片锟斤拷ID锟斤拷2锟斤拷锟斤拷锟斤拷桑锟斤拷锟揭伙拷锟斤拷锟斤拷锟酵计拷锟皆糏D锟斤拷锟节讹拷锟斤拷锟斤拷锟斤拷锟斤拷material锟节碉拷copy_id
+		///   material锟节碉拷ID锟斤拷原始ID锟斤拷为头16位锟斤拷copy_id锟斤拷为锟斤拷16位
 		/// </summary>
 		/// <param name="path"></param>
 		void vulkan_material::add_texture(std::string path)
@@ -285,7 +285,7 @@ namespace primal::graphics::vulkan
 		/// <summary>
 		/// 
 		/// </summary>
-		/// <param name="id">此ID应为material内的组合后的ID</param>
+		/// <param name="id">锟斤拷ID应为material锟节碉拷锟斤拷虾锟斤拷ID</param>
 		void vulkan_material::remove_texture(id::id_type id)
 		{
 			if (_texture_ids.size() < 2) _texture_ids.clear();
@@ -503,7 +503,7 @@ namespace primal::graphics::vulkan
 			VkPipelineViewportStateCreateInfo viewportState = descriptor::pipelineViewportStateCreate(1, 1);
 			VkPipelineRasterizationStateCreateInfo rasterizationState = descriptor::pipelineRasterizationStateCreate(VK_POLYGON_MODE_FILL, VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_COUNTER_CLOCKWISE);
 			VkPipelineMultisampleStateCreateInfo multisampleState = descriptor::pipelineMultisampleStateCreate(VK_SAMPLE_COUNT_1_BIT);
-			// ↓ two for forward render(single color attachment)
+			// 锟斤拷 two for forward render(single color attachment)
 			// VkPipelineColorBlendAttachmentState blendAttachmentState = descriptor::pipelineColorBlendAttachmentState(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT, VK_FALSE);
 			// VkPipelineColorBlendStateCreateInfo colorBlendState = descriptor::pipelineColorBlendStateCreate(1, blendAttachmentState);
 			std::vector<VkPipelineColorBlendAttachmentState> blendAttachmentState = { descriptor::pipelineColorBlendAttachmentState(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT, VK_FALSE),

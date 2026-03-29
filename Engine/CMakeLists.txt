@@ -293,6 +293,7 @@ elseif(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/Common
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+        ${CMAKE_SOURCE_DIR}/third_party/stb
     )
     
     # 添加编译器选项

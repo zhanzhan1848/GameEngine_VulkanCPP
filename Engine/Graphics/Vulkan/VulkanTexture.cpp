@@ -4,7 +4,7 @@
 #include "VulkanCommandBuffer.h"
 #include "VulkanCore.h"
 //#define STB_IMAGE_IMPLEMENTATION
-//#include "Content/stb_image.h"
+//#include "stb_image.h"  // third_party/stb submodule
 
 namespace primal::graphics::vulkan
 {

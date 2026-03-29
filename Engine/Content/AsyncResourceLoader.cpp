@@ -3,7 +3,7 @@
 
 // STB image implementation - must be defined in exactly one translation unit
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include "stb_image.h"  // third_party/stb submodule
 
 #include "Utilities/IOStream.h"
 #include <future>

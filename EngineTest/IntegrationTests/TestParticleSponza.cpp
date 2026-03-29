@@ -9,7 +9,7 @@
 #include "Engine/Input/Input.h"
 #include "ShaderCompilation.h"
 
-#include "Engine/Content/stb_image.h"
+#include "stb_image.h"  // third_party/stb submodule
 
 #include <iostream>
 #include <fstream>

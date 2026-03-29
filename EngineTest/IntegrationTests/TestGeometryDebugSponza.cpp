@@ -9,7 +9,7 @@
 #include "Engine/Input/Input.h"
 #include "ShaderCompilation.h"
 
-#include "third_party/astc-encoder/Source/ThirdParty/stb_image.h"
+#include "stb_image.h"  // third_party/stb submodule
 
 #include <iostream>
 #include <fstream>

@@ -8,7 +8,7 @@
 #include "ShaderCompilation.h"
 
 #define STB_IMAGE_IMPLEMENTATION
-#include "third_party/astc-encoder/Source/ThirdParty/stb_image.h"
+#include "stb_image.h"  // third_party/stb submodule
 
 #include <iostream>
 #include <fstream>

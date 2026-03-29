@@ -16,6 +16,7 @@
 #include <iostream>
 #include <algorithm>
 #include <set>
+#include <map>
 
 namespace primal::graphics::nanite {
 
@@ -1149,20 +1150,50 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             const PackedV3* posSrc = reinterpret_cast<const PackedV3*>(meshAsset.position_buffer.data());
             for(u32 i=0; i<posCount; ++i) mergedPositions.push_back(posSrc[i]);
 
-            // 🔥 NEW: Copy Elements (Normal, Tangent, UV)
-            // Element buffer size should match position buffer size
-            // Each element is 20 bytes (matches TestParticleSponza format)
-            u32 elemCount = posCount; // Same as vertex count
+            // Copy Elements (Normal, Tangent, UV)
+            // Source format: static_normal_texture (20 bytes) from Geometry.h:
+            //   Offset 0-3:   u8 color[3] + u8 t_sign
+            //   Offset 4-5:   u16 normal[2]
+            //   Offset 6-7:   u16 tangent[2]
+            //   Offset 8-15:  float2 uv
+            // Dest format: VertexElement (24 bytes) for GPU shader:
+            //   u32 colorTSign, u32 normal, u32 tangent, u32 padding, float2 uv
+            u32 elemCount = posCount;
             if (meshAsset.element_buffer.size() >= elemCount * 24) {
+                // Already 24-byte format - direct copy
                 const VertexElement* elemSrc = reinterpret_cast<const VertexElement*>(meshAsset.element_buffer.data());
                 for(u32 i=0; i<elemCount; ++i) mergedElements.push_back(elemSrc[i]);
+            } else if (meshAsset.element_buffer.size() >= elemCount * 20) {
+                // 20-byte source format - convert to 24-byte GPU format
+                const u8* srcData = meshAsset.element_buffer.data();
+                for(u32 i=0; i<elemCount; ++i) {
+                    const u8* src = srcData + i * 20;
+                    VertexElement dest{};
+                    // Pack color[3] + t_sign into colorTSign (little-endian)
+                    dest.colorTSign = (u32)src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16) | ((u32)src[3] << 24);
+                    // Pack u16 normal[2] into u32: high16=normal[0], low16=normal[1]
+                    u16 n0 = *reinterpret_cast<const u16*>(src + 4);
+                    u16 n1 = *reinterpret_cast<const u16*>(src + 6);
+                    dest.normal = ((u32)n0 << 16) | (u32)n1;
+                    // Pack u16 tangent[2] into u32
+                    u16 t0 = *reinterpret_cast<const u16*>(src + 8);
+                    u16 t1 = *reinterpret_cast<const u16*>(src + 10);
+                    dest.tangent = ((u32)t0 << 16) | (u32)t1;
+                    dest.padding = 0;
+                    // Copy UV from offset 12 in static_normal_texture (20-byte format):
+                    // color[3]+t_sign(4) + normal[2](4) + tangent[2](4) + uv(8)
+                    memcpy(&dest.uv, src + 12, sizeof(math::v2));
+                    mergedElements.push_back(dest);
+                }
             } else {
                 // Element buffer missing or wrong size - fill with defaults
-                std::cerr << "[GPUDrivenDrawPipeline] Warning: Element buffer missing for geometry " << instance.geometry_id << ", using defaults" << std::endl;
+                std::cerr << "[GPUDrivenDrawPipeline] Warning: Element buffer too small for geometry "
+                          << instance.geometry_id << " (have " << meshAsset.element_buffer.size()
+                          << ", need " << elemCount * 20 << ")" << std::endl;
                 VertexElement defaultElem{};
                 defaultElem.colorTSign = 0xFFFFFFFF;
-                defaultElem.normal = 0xFFFF8000; // Packed (0, 0, 1) = default normal
-                defaultElem.tangent = 0xFFFF8000; // Packed (0, 0, 1) = default tangent
+                defaultElem.normal = 0xFFFF8000;
+                defaultElem.tangent = 0xFFFF8000;
                 defaultElem.uv = math::v2{0.0f, 0.0f};
                 for(u32 i=0; i<elemCount; ++i) mergedElements.push_back(defaultElem);
             }
@@ -1220,172 +1251,8 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     UploadBuffer(global_vertex_buffer_, mergedPositions.data(), mergedPositions.size() * sizeof(PackedV3));
     UploadBuffer(global_element_buffer_, mergedElements.data(), mergedElements.size() * sizeof(VertexElement));
 
-    // 🔥 NEW: Check meshlet data quality for backface culling and cluster-level frustum culling
-    std::cout << "[GPUDrivenDrawPipeline] Meshlet Data Quality Check:" << std::endl;
-    std::cout << "  Total Meshlets: " << mergedMeshlets.size() << std::endl;
+    // Meshlet data quality checks removed - not needed for debugging material mapping
 
-    u32 valid_cone_cutoff = 0;
-    u32 invalid_cone_cutoff = 0;
-    u32 valid_cone_axis = 0;
-    u32 invalid_cone_axis = 0;
-    u32 negative_cutoff = 0;
-    u32 nan_cutoff = 0;
-    u32 zero_axis_count = 0;
-    u32 non_zero_axis_count = 0;
-
-    // 🔥 NEW: Check meshlet bounds data for cluster-level frustum culling
-    u32 valid_center_count = 0;
-    u32 invalid_center_count = 0;
-    u32 valid_radius_count = 0;
-    u32 invalid_radius_count = 0;
-    u32 zero_center_count = 0;
-    u32 zero_radius_count = 0;
-
-    for (size_t i = 0; i < mergedMeshlets.size(); ++i) {
-        const auto& meshlet = mergedMeshlets[i];
-
-        // Check cone_cutoff validity (should be in range [0, 1])
-        if (std::isfinite(meshlet.cone_cutoff)) {
-            if (meshlet.cone_cutoff >= 0.0f && meshlet.cone_cutoff <= 1.0f) {
-                valid_cone_cutoff++;
-            } else {
-                invalid_cone_cutoff++;
-                if (meshlet.cone_cutoff < 0.0f) {
-                    negative_cutoff++;
-                }
-            }
-        } else {
-            nan_cutoff++;
-        }
-
-        // Check cone_axis validity (should be normalized vector)
-        float axis_length = std::sqrt(meshlet.cone_axis[0] * meshlet.cone_axis[0] +
-                                      meshlet.cone_axis[1] * meshlet.cone_axis[1] +
-                                      meshlet.cone_axis[2] * meshlet.cone_axis[2]);
-
-        if (std::isfinite(axis_length) && axis_length > 0.001f) {
-            valid_cone_axis++;
-            non_zero_axis_count++;
-        } else {
-            invalid_cone_axis++;
-            zero_axis_count++;
-        }
-
-        // 🔥 NEW: Check meshlet bounds for cluster-level frustum culling
-        bool valid_center = (meshlet.center[0] != 0 || meshlet.center[1] != 0 || meshlet.center[2] != 0);
-        bool valid_radius = (meshlet.radius > 0.001f && std::isfinite(meshlet.radius));
-
-        if (valid_center) {
-            valid_center_count++;
-        } else {
-            invalid_center_count++;
-            if (meshlet.center[0] == 0 && meshlet.center[1] == 0 && meshlet.center[2] == 0) {
-                zero_center_count++;
-            }
-        }
-
-        if (valid_radius) {
-            valid_radius_count++;
-        } else {
-            invalid_radius_count++;
-            if (meshlet.radius <= 0.001f) {
-                zero_radius_count++;
-            }
-        }
-
-        // 🔥 NEW: Print EVERY meshlet with bounds info for complete analysis
-        if (i < 100) { // Print first 100 to avoid log spam
-            std::cout << "  Meshlet #" << i << ": "
-                      << "cone_cutoff=" << meshlet.cone_cutoff << ", "
-                      << "cone_axis=[" << meshlet.cone_axis[0] << "," << meshlet.cone_axis[1] << "," << meshlet.cone_axis[2] << "], "
-                      << "center=[" << meshlet.center[0] << "," << meshlet.center[1] << "," << meshlet.center[2] << "], "
-                      << "radius=" << meshlet.radius;
-
-            bool has_issues = (axis_length < 0.001f || !std::isfinite(axis_length) ||
-                              !valid_center || !valid_radius);
-            if (has_issues) {
-                std::cout << " ❌ ISSUES:";
-                if (axis_length < 0.001f) std::cout << " zero_axis";
-                if (!valid_center) std::cout << " invalid_center";
-                if (!valid_radius) std::cout << " invalid_radius";
-            }
-            std::cout << std::endl;
-        }
-    }
-
-    std::cout << "\n  Cone Cutoff Quality: " << valid_cone_cutoff << " valid, " << invalid_cone_cutoff << " invalid" << std::endl;
-    std::cout << "    - Negative cutoffs: " << negative_cutoff << std::endl;
-    std::cout << "    - NaN cutoffs: " << nan_cutoff << std::endl;
-    std::cout << "  Cone Axis Quality: " << valid_cone_axis << " valid, " << invalid_cone_axis << " invalid" << std::endl;
-    std::cout << "    - Zero axis vectors: " << zero_axis_count << " (40% issue)" << std::endl;
-    std::cout << "    - Non-zero axis vectors: " << non_zero_axis_count << std::endl;
-
-    // 🔥 NEW: Meshlet Bounds Quality Summary
-    std::cout << "\n  Meshlet Bounds Quality:" << std::endl;
-    std::cout << "    Valid Centers: " << valid_center_count << " / " << mergedMeshlets.size() << std::endl;
-    std::cout << "    Invalid Centers: " << invalid_center_count << " (including " << zero_center_count << " zero centers)" << std::endl;
-    std::cout << "    Valid Radii: " << valid_radius_count << " / " << mergedMeshlets.size() << std::endl;
-    std::cout << "    Invalid Radii: " << invalid_radius_count << " (including " << zero_radius_count << " zero radii)" << std::endl;
-
-    // 🔥 NEW: Cluster-level frustum culling capability assessment
-    bool cluster_frustum_capable = (valid_center_count > (mergedMeshlets.size() * 0.9)) &&
-                                    (valid_radius_count > (mergedMeshlets.size() * 0.9));
-    std::cout << "\n  Cluster-Level Frustum Culling Capability: " << (cluster_frustum_capable ? "✅ READY" : "❌ NOT READY") << std::endl;
-    if (cluster_frustum_capable) {
-        std::cout << "    → " << valid_center_count << " meshlets have valid bounds for precise cluster frustum culling" << std::endl;
-    } else {
-        std::cout << "    → Only " << valid_center_count << "/" << mergedMeshlets.size() << " meshlets have valid bounds" << std::endl;
-        std::cout << "    → Cluster-level frustum culling would be too aggressive" << std::endl;
-    }
-
-    // 🔥 NEW: Instance-Cluster Bounds Consistency Check
-    std::cout << "\n  Instance-Cluster Bounds Consistency Check:" << std::endl;
-    const auto& instanceDataForCheck = scene_snapshot.GetInstanceData();
-    u32 instances_to_check = std::min((u32)instanceDataForCheck.size(), (u32)10);
-
-    for (u32 i = 0; i < instances_to_check; i++) {
-        const auto& instance = instanceDataForCheck[i];
-        if (instance.cluster_count == 0) continue;
-
-        std::cout << "  Instance #" << i << ":" << std::endl;
-        std::cout << "    Instance Bounds: center=[" << instance.bounds_center.x << ", "
-                  << instance.bounds_center.y << ", " << instance.bounds_center.z << "], "
-                  << "radius=" << instance.bounds_radius << std::endl;
-
-        // Check first few clusters of this instance by using cluster_start directly
-        u32 clusters_to_check = std::min(instance.cluster_count, (u32)5);
-        std::cout << "    Cluster bounds (first " << clusters_to_check << "):" << std::endl;
-
-        for (u32 j = 0; j < clusters_to_check; j++) {
-            // Directly use cluster_start + j as meshlet_id (based on current mapping)
-            u32 meshlet_id = instance.cluster_start + j;
-
-            // Get meshlet bounds from global meshlet array
-            if (meshlet_id < mergedMeshlets.size()) {
-                const auto& meshlet = mergedMeshlets[meshlet_id];
-
-                // Transform local meshlet center to world space
-                math::v3 meshlet_local_center{ meshlet.center[0], meshlet.center[1], meshlet.center[2] };
-
-                // Use SIMD matrix multiplication
-                simd_float4 local_center_4 = {meshlet_local_center.x, meshlet_local_center.y, meshlet_local_center.z, 1.0f};
-                simd_float4 world_center_4 = simd_mul(instance.world_matrix, local_center_4);
-                math::v3 meshlet_world_center = {world_center_4.x, world_center_4.y, world_center_4.z};
-
-                // Calculate world-space radius with scale from matrix columns
-                float max_scale = std::max({std::abs(instance.world_matrix.columns[0].x),
-                                          std::abs(instance.world_matrix.columns[1].y),
-                                          std::abs(instance.world_matrix.columns[2].z)});
-                float meshlet_world_radius = meshlet.radius * max_scale;
-
-                std::cout << "      Cluster #" << j << " (meshlet_id=" << meshlet_id << "): "
-                          << "center=[" << meshlet_world_center.x << ", " << meshlet_world_center.y << ", "
-                          << meshlet_world_center.z << "], radius=" << meshlet_world_radius << std::endl;
-            }
-        }
-        std::cout << std::endl;
-    }
-    
     // 4. Build Cluster Map (Flattened Cluster ID -> Global Meshlet ID)
     // We need to iterate instances again to build this map
     // Total Clusters = sum(instance.cluster_count)
@@ -1422,6 +1289,20 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             baseMeshletIndex = static_cast<u32>(clusterMapData.size());
         }
 
+        // 🔍 NEW DEBUG: 统计material_id分布
+        static bool materialStatsPrinted = false;
+        if (!materialStatsPrinted && i == 0) {
+            std::map<u32, u32> materialIDCount;
+            for(const auto& inst : instanceData) {
+                materialIDCount[inst.material_id]++;
+            }
+            std::cout << "[DEBUG] Material ID Distribution across all instances:" << std::endl;
+            for(const auto& [matID, count] : materialIDCount) {
+                std::cout << "  Material ID " << matID << ": " << count << " instances" << std::endl;
+            }
+            materialStatsPrinted = true;
+        }
+
         // 🔥 NEW DEBUG: Print material info for each instance
         std::cout << "[GPUDrivenDrawPipeline]   Instance " << i
                   << " (geometry_id=" << instance.geometry_id
@@ -1433,11 +1314,8 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
                   << ", cluster range=[" << baseMeshletIndex
                   << "-" << (baseMeshletIndex + instance.cluster_count - 1) << "]" << std::endl;
 
-        // Sample first few clusters to verify meshlet data
-        if (i < 3) {
-            std::cout << "    First cluster uses globalMeshletIndex=" << baseMeshletIndex << std::endl;
-        }
-
+        // 🔍 NEW DEBUG: 显示每个cluster使用的material ID（前3个和最后3个）
+        std::cout << "    Cluster material assignments (showing first 3 and last 3):" << std::endl;
         for(u32 c=0; c<instance.cluster_count; ++c) {
             ClusterMap map;
             map.globalMeshletIndex = baseMeshletIndex + c;
@@ -1447,6 +1325,14 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             map.materialID = instance.material_id;
             map.padding = 0;
             clusterMapData.push_back(map);
+
+            // 只显示前3个和后3个cluster的详细信息
+            if (c < 3 || c >= instance.cluster_count - 3) {
+                std::cout << "      Cluster " << c << " (meshlet " << map.globalMeshletIndex
+                          << ") → material_id=" << map.materialID << std::endl;
+            } else if (c == 3) {
+                std::cout << "      ... (skipping " << (instance.cluster_count - 6) << " clusters)" << std::endl;
+            }
         }
     }
     

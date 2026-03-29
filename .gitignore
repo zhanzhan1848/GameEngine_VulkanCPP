@@ -405,6 +405,7 @@ TODO*
 
 !Engine/Graphics/RenderPipeline/RenderPasses/Debug/
 !Engine/Graphics/RHI/Shaders/Debug/
+!output.log
 
 # Git Worktrees
 .worktrees/

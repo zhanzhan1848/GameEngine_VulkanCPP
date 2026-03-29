@@ -349,7 +349,8 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         0, 1, descriptorSets,
         0, nullptr
     );
-    std::cout << "[HZBSystem] 🚀 Copying source depth to HZB mip 0" << std::endl;
+    // 🔇 DISABLED: Verbose HZB output
+    // std::cout << "[HZBSystem] 🚀 Copying source depth to HZB mip 0" << std::endl;
     u32 threadGroupsX = (config_.max_width + 15) / 16;
     u32 threadGroupsY = (config_.max_height + 15) / 16;
     cmd_buffer->Dispatch(threadGroupsX, threadGroupsY, 1);
@@ -429,9 +430,10 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         threadGroupsX = (target_width + 15) / 16;
         threadGroupsY = (target_height + 15) / 16;
 
-        std::cout << "[HZBSystem] 🚀 Generating mip " << (mip_level + 1) << " from mip " << mip_level
-                  << " (" << target_width << "x" << target_height << ")" << std::endl;
-        std::cout << "[HZBSystem] Dispatch: " << threadGroupsX << "x" << threadGroupsY << "x1 thread groups" << std::endl;
+        // 🔇 DISABLED: Verbose HZB output
+        // std::cout << "[HZBSystem] 🚀 Generating mip " << (mip_level + 1) << " from mip " << mip_level
+        //           << " (" << target_width << "x" << target_height << ")" << std::endl;
+        // std::cout << "[HZBSystem] Dispatch: " << threadGroupsX << "x" << threadGroupsY << "x1 thread groups" << std::endl;
 
         cmd_buffer->Dispatch(threadGroupsX, threadGroupsY, 1);
         cmd_buffer->MemoryBarrier(
@@ -446,8 +448,9 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     for (auto view : temporaryViews) device_->DestroyTexture(view);
     device_->DestroyDescriptorSet(descriptorSet);
 
-    std::cout << "[HZBSystem] ✅ HZB generation dispatch completed" << std::endl;
-    std::cout << "[HZBSystem] ========== GPU HZB Generation Complete ==========" << std::endl;
+    // 🔇 DISABLED: Verbose HZB output
+    // std::cout << "[HZBSystem] ✅ HZB generation dispatch completed" << std::endl;
+    // std::cout << "[HZBSystem] ========== GPU HZB Generation Complete ==========" << std::endl;
 
     return true;
 }
