@@ -611,6 +611,90 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
 
     std::cout << "[TestNanite] Blit Pipeline initialized successfully" << std::endl;
 
+    // === Composite Blit Pipeline (scene + SSGI) ===
+    {
+        // 2 sampled image bindings: texture(0)=scene, texture(1)=ssgi
+        primal::graphics::rhi::DescriptorSetLayoutBinding composite_bindings[] = {
+            { 0, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
+            { 1, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr }
+        };
+        primal::graphics::rhi::DescriptorSetLayoutDesc composite_set_desc{ .bindingCount = 2, .bindings = composite_bindings };
+        blit_composite_set_layout_ = device_->CreateDescriptorSetLayout(composite_set_desc);
+
+        primal::graphics::rhi::PipelineLayoutDesc composite_pl_desc{ .setLayoutCount = 1, .setLayouts = &blit_composite_set_layout_ };
+        blit_composite_layout_ = device_->CreatePipelineLayout(composite_pl_desc);
+
+        primal::graphics::rhi::DescriptorSetDesc composite_ds_desc{ .layout = blit_composite_set_layout_ };
+        blit_composite_descriptor_set_ = device_->CreateDescriptorSet(composite_ds_desc);
+
+        // Compile the fragmentBlitComposite entry point
+        const shader_file_info composite_ps_info{ "DeferredLighting.metal", "fragmentBlitComposite", shader_type::pixel };
+        if (!CompileShader(composite_ps_info)) {
+            std::cerr << "[TestNanite] Warning: Failed to compile composite blit shader" << std::endl;
+        } else {
+            primal::graphics::rhi::GraphicsPipelineDesc composite_pipeline_desc{};
+            composite_pipeline_desc.layout = blit_composite_layout_;
+            composite_pipeline_desc.vertexShader = shaderVariantMap[std::string(blit_vs_info.file_name) + ":" + blit_vs_info.function]; // Reuse same VS
+            composite_pipeline_desc.pixelShader = shaderVariantMap[std::string(composite_ps_info.file_name) + ":" + composite_ps_info.function];
+            composite_pipeline_desc.renderTargetFormats[0] = primal::graphics::rhi::DataFormat::BGRA8_UNorm;
+            composite_pipeline_desc.renderTargetCount = 1;
+            composite_pipeline_desc.depthStencilFormat = primal::graphics::rhi::DataFormat::Unknown;
+            composite_pipeline_desc.enableDepthTest = false;
+            composite_pipeline_desc.enableDepthWrite = false;
+            composite_pipeline_desc.cullMode = primal::graphics::rhi::CullMode::None;
+            composite_pipeline_desc.vertexAttributes.clear();
+            composite_pipeline_desc.vertexBindings.clear();
+
+            blit_composite_pipeline_ = device_->CreateGraphicsPipeline(composite_pipeline_desc);
+            if (blit_composite_pipeline_ == primal::graphics::rhi::handles::INVALID_PIPELINE) {
+                std::cerr << "[TestNanite] Warning: Failed to create composite blit pipeline" << std::endl;
+            } else {
+                std::cout << "[TestNanite] Composite Blit Pipeline initialized successfully" << std::endl;
+            }
+        }
+    }
+
+    // Initialize SSGI pipeline
+    if (!InitializeSSGIPipeline()) {
+        std::cerr << "[TestNanite] Warning: SSGI pipeline initialization failed" << std::endl;
+    }
+
+    return true;
+}
+
+bool TestNaniteStreamingPipeline::InitializeSSGIPipeline() {
+    std::cout << "[LumenSSGI] Initializing SSGI pipeline..." << std::endl;
+
+    // 1. Initialize ColorHistoryManager
+    colorHistoryManager_ = std::make_unique<nanite::ColorHistoryManager>();
+    nanite::ColorHistoryManager::Config colorConfig;
+    colorConfig.width = renderWidth_;
+    colorConfig.height = renderHeight_;
+    colorConfig.format = DataFormat::BGRA8_UNorm;  // Must match GPUDrivenDrawPipeline output format
+    colorConfig.buffer_count = 3;
+    if (!colorHistoryManager_->Initialize(device_, colorConfig)) {
+        std::cerr << "[LumenSSGI] Failed to initialize ColorHistoryManager" << std::endl;
+        return false;
+    }
+
+    // 2. Create black fallback texture for missing color history
+    {
+        u32 blackPixel = 0;
+        ssgi_black_texture_ = CreateTextureFromData(device_, 1, 1,
+            reinterpret_cast<unsigned char*>(&blackPixel), true);
+        if (ssgi_black_texture_ == handles::INVALID_RESOURCE) {
+            std::cerr << "[LumenSSGI] Warning: Failed to create black fallback texture" << std::endl;
+        }
+    }
+
+    // 3. Initialize LumenSSGIPass (owns all GPU resources internally)
+    ssgiPass_ = std::make_unique<primal::graphics::lumen::LumenSSGIPass>();
+    if (!ssgiPass_->Initialize(device_, renderWidth_, renderHeight_)) {
+        std::cerr << "[LumenSSGI] Failed to initialize LumenSSGIPass" << std::endl;
+        return false;
+    }
+
+    std::cout << "[LumenSSGI] SSGI pipeline initialized via LumenSSGIPass" << std::endl;
     return true;
 }
 
@@ -1068,6 +1152,16 @@ void TestNaniteStreamingPipeline::Run() {
     }
     keyState_.f3_prev = f3_current;
 
+    // F4: SSGI visualization mode toggle (0=Composite, 1=SSGI only, 2=Scene only)
+    primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f4, val);
+    bool f4_current = val.current.x > 0.0f;
+    if (f4_current && !keyState_.f4_prev) {
+        ssgiVisMode_ = (ssgiVisMode_ + 1) % 3;
+        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only" };
+        std::cout << "[SSGI Vis] Mode: " << modeNames[ssgiVisMode_] << std::endl;
+    }
+    keyState_.f4_prev = f4_current;
+
     jobsystem::JobSystem::ProcessMainThreadJobs();
 
     UpdateTestScene();
@@ -1425,21 +1519,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         graphics::rendergraph::RGPassCategory::Copy,
         [this](DepthCopyPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
             // No resource dependencies needed - we handle this manually
-            std::cout << "[DepthCopy] SETUP: Depth copy pass configured" << std::endl;
         },
         [this](const DepthCopyPassData& data, graphics::rendergraph::RenderGraphContext& context) {
-            std::cout << "[DepthCopy] EXECUTE: Starting depth texture copy..." << std::endl;
             auto cmd = context.cmdBuffer;
 
-            std::cout << "[DepthCopy] Checking depth textures for copy operation..." << std::endl;
-            std::cout << "[DepthCopy] sceneDepthTexture_: " << sceneDepthTexture_ << " (" << (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE ? "VALID" : "INVALID") << ")" << std::endl;
-
             auto gpuDepthTexture = gpuDrawPipeline_->GetFinalDepthTexture();
-            std::cout << "[DepthCopy] gpuDepthTexture: " << gpuDepthTexture << " (" << (gpuDepthTexture != rhi::handles::INVALID_RESOURCE ? "VALID" : "INVALID") << ")" << std::endl;
 
             if (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE && gpuDepthTexture != rhi::handles::INVALID_RESOURCE) {
-                std::cout << "[DepthCopy] ✅ Both textures valid, performing depth copy..." << std::endl;
-
                 // Insert barrier for source depth texture
                 rhi::ResourceBarrier srcBarrier{};
                 srcBarrier.resource = gpuDepthTexture;
@@ -1458,8 +1544,6 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 dstBarrier.queueFamily = 0xFFFFFFFF;
                 cmd->InsertBarrier(&dstBarrier, 1);
 
-                std::cout << "[DepthCopy] Barriers inserted, performing BlitTexture..." << std::endl;
-
                 // Blit depth texture
                 rhi::TextureBlitRegion blitRegion{};
                 blitRegion.srcSubresource = {0, 0, 1}; // mipLevel, arrayLayer, arraySize
@@ -1470,92 +1554,173 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 blitRegion.dstOffsets[1] = {static_cast<int>(renderWidth_), static_cast<int>(renderHeight_), 1};
 
                 cmd->BlitTexture(gpuDepthTexture, sceneDepthTexture_, &blitRegion, 1, rhi::FilterMode::Nearest);
-                std::cout << "[DepthCopy] ✅ Depth blit completed successfully!" << std::endl;
-
-                // Note: sceneDepthTexture_ now contains current frame's depth
-                // Next frame's HZB generation will automatically use this data
-            } else {
-                if (sceneDepthTexture_ == rhi::handles::INVALID_RESOURCE) {
-                    std::cout << "[DepthCopy] ❌ sceneDepthTexture_ is INVALID!" << std::endl;
-                }
-                if (gpuDepthTexture == rhi::handles::INVALID_RESOURCE) {
-                    std::cout << "[DepthCopy] ❌ gpuDepthTexture is INVALID!" << std::endl;
-                }
             }
         }
     );
+
+    // === LUMEN SSGI PASS ===
+    rendergraph::RGResourceHandle ssgiOutputHandle;
+    if (ssgiPass_ && ssgiPass_->IsInitialized() && frameCount_ > 0) {
+        // Import GBuffer textures into render graph for SSGI
+        auto normalHandle = graph.ImportResource("GBufferNormal", gpuDrawPipeline_->GetGBufferNormal());
+        auto velocityHandle = graph.ImportResource("GBufferVelocity", gpuDrawPipeline_->GetGBufferVelocity());
+        auto hzbHandle = graph.ImportResource("HZBTexture", hzbSystem_->GetHZBTexture());
+
+        // Get previous frame color (or black fallback)
+        auto prevColor = colorHistoryManager_->GetPreviousFrameColor(frameCount_);
+        ResourceHandle prevColorTex = prevColor.is_valid ? prevColor.texture : ssgi_black_texture_;
+        auto prevColorHandle = graph.ImportResource("PrevFrameColor", prevColorTex);
+
+        // Build camera data for LumenSSGIPass
+        lumen::SSGICameraData cameraData;
+        cameraData.view_matrix = cameraBuffers_[currentBufferIndex].view_matrix;
+        cameraData.proj_matrix = cameraBuffers_[currentBufferIndex].proj_matrix;
+        {
+            u32 prevIdx = (currentBufferIndex + 2) % 3;
+            cameraData.prev_view_matrix = cameraBuffers_[prevIdx].view_matrix;
+            cameraData.prev_proj_matrix = cameraBuffers_[prevIdx].proj_matrix;
+        }
+        cameraData.frame_index = frameCount_;
+        cameraData.delta_time = 0.016f;
+
+        auto ssgiOutput = ssgiPass_->AddPass(graph, normalHandle, depthHandle,
+            velocityHandle, hzbHandle, prevColorHandle,
+            cameraData, currentBufferIndex,
+            hzbSystem_->GetMipLevels());
+
+        ssgiOutputHandle = ssgiOutput.ssgi_output;
+
+        // Store current frame color for next frame's SSGI ray hit sampling
+        struct ColorHistoryData {
+            rendergraph::RGResourceHandle gpu_output;
+        };
+
+        graph.AddPass<ColorHistoryData>("ColorHistoryStore",
+            graphics::rendergraph::RGPassType::Copy,
+            graphics::rendergraph::RGPassCategory::Copy,
+            [gpuOutputHandle](ColorHistoryData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+                data.gpu_output = builder.Read(gpuOutputHandle, rhi::ResourceState::ShaderResource);
+                builder.SideEffect(); // CRITICAL: Prevent render graph from culling this pass
+            },
+            [this](const ColorHistoryData& data, graphics::rendergraph::RenderGraphContext& context) {
+                auto gpuOutputTex = gpuDrawPipeline_->GetFinalOutputTexture();
+                if (gpuOutputTex == rhi::handles::INVALID_RESOURCE) return;
+
+                bool ok = colorHistoryManager_->StoreCurrentFrameColor(
+                    gpuOutputTex, context.cmdBuffer, frameCount_);
+
+                if (frameCount_ % 60 == 1) {
+                    std::cout << "[ColorHistoryStore] StoreCurrentFrameColor: frame=" << frameCount_
+                              << " result=" << (ok ? "OK" : "FAILED") << std::endl;
+                }
+            }
+        );
+    }
 
     // === FINAL BLIT PASS (Following TestParticleSponza pattern) ===
     // CRITICAL: This pass MUST depend on SceneRender to ensure Nanite output is ready
     struct BlitPassData {
         rendergraph::RGResourceHandle input;
+        rendergraph::RGResourceHandle ssgi_input;
         rendergraph::RGResourceHandle output;
     };
 
     graph.AddPass<BlitPassData>("FinalBlit",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
-        [this, backBufferHandle, gpuOutputHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
-            // std::cout << "[FinalBlit] SETUP: Configuring final blit with GPU pipeline dependency" << std::endl;
-
-            // CRITICAL: Read from GPU pipeline's final output
-            // This establishes the dependency: FinalBlit depends on SceneRender
+        [this, backBufferHandle, gpuOutputHandle, ssgiOutputHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+            // Always read scene color as primary input
             data.input = builder.Read(gpuOutputHandle, rhi::ResourceState::ShaderResource);
-            // std::cout << "[FinalBlit] SETUP: Reading from GPUFinalOutput (GPU pipeline's output)" << std::endl;
+
+            // Read SSGI output when in composite or SSGI-only mode
+            // ssgiVisMode_: 0=Composite, 1=SSGI only, 2=Scene only
+            bool needSSGI = (ssgiVisMode_ != 2) &&
+                            ssgiOutputHandle.IsValid() &&
+                            blit_composite_pipeline_ != rhi::handles::INVALID_PIPELINE;
+            if (needSSGI) {
+                data.ssgi_input = builder.Read(ssgiOutputHandle, rhi::ResourceState::ShaderResource);
+            } else {
+                data.ssgi_input = rendergraph::RGResourceHandle{};
+            }
 
             data.output = builder.Write(backBufferHandle, rhi::ResourceState::RenderTarget);
-            // std::cout << "[FinalBlit] SETUP: Writing to backbuffer" << std::endl;
 
             graphics::rendergraph::RGRenderPassDesc rpDesc;
             rpDesc.colors.push_back({
                 .texture = data.output,
-                .loadOp = rhi::LoadAction::DontCare,  // Don't clear - we're overwriting everything
+                .loadOp = rhi::LoadAction::DontCare,
                 .storeOp = rhi::StoreAction::Store,
                 .clearColor = { primal::math::v4{0,0,0,1} }
             });
             builder.DeclareRenderPass(rpDesc);
-
-            // std::cout << "[FinalBlit] SETUP: Pass configured with GPU pipeline dependency" << std::endl;
         },
         [this](const BlitPassData& data, graphics::rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
 
-            // std::cout << "[DEBUG] Final blit pass executing - using shader-based fullscreen quad" << std::endl;
-
-            // Set viewport and scissor for fullscreen rendering
             cmd->SetViewport({ {0, 0}, {static_cast<float>(renderWidth_), static_cast<float>(renderHeight_)}, 0, 1 });
             cmd->SetScissor({ {0, 0}, {renderWidth_, renderHeight_} });
 
-            // Get the input texture (Nanite output)
+            // Get scene color texture
             auto inputResource = context.graph->GetResource(data.input);
-            if (!inputResource) {
-                std::cerr << "[DEBUG] Failed to get input resource for shader blit!" << std::endl;
-                return;
-            }
-
+            if (!inputResource) return;
             auto inputHandle = inputResource->GetPhysicalHandle();
-            if (inputHandle == primal::graphics::rhi::handles::INVALID_RESOURCE) {
-                std::cerr << "[DEBUG] Invalid input texture handle!" << std::endl;
+            if (inputHandle == rhi::handles::INVALID_RESOURCE) return;
+
+            // Mode 2: Scene only — simple blit of scene color
+            if (ssgiVisMode_ == 2 || !data.ssgi_input.IsValid()) {
+                DescriptorData blit_params[1] = {
+                    { .binding = 0, .type = DescriptorType::SampledImage, .resource = inputHandle }
+                };
+                UpdateDescriptorSet(device_, blit_descriptor_set_, blit_params, 1);
+                cmd->BindGraphicsPipeline(blit_pipeline_);
+                const rhi::DescriptorSetHandle descriptor_sets[] = { blit_descriptor_set_ };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_layout_, 0, 1, descriptor_sets, 0, nullptr);
+                cmd->Draw(3, 0, 1, 0);
                 return;
             }
 
-            // Update descriptor set with input texture (following TestParticleSponza pattern)
-            DescriptorData blit_params[1] = {
-                { .binding = 0, .type = DescriptorType::SampledImage, .resource = inputHandle }
-            };
-            UpdateDescriptorSet(device_, blit_descriptor_set_, blit_params, 1);
+            // Get SSGI texture
+            auto ssgiResource = context.graph->GetResource(data.ssgi_input);
+            if (!ssgiResource) {
+                // Fallback to scene only
+                DescriptorData blit_params[1] = {
+                    { .binding = 0, .type = DescriptorType::SampledImage, .resource = inputHandle }
+                };
+                UpdateDescriptorSet(device_, blit_descriptor_set_, blit_params, 1);
+                cmd->BindGraphicsPipeline(blit_pipeline_);
+                const rhi::DescriptorSetHandle descriptor_sets[] = { blit_descriptor_set_ };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_layout_, 0, 1, descriptor_sets, 0, nullptr);
+                cmd->Draw(3, 0, 1, 0);
+                return;
+            }
+            auto ssgiHandle = ssgiResource->GetPhysicalHandle();
+            if (ssgiHandle == rhi::handles::INVALID_RESOURCE) return;
 
-            // Bind blit pipeline
-            cmd->BindGraphicsPipeline(blit_pipeline_);
+            // Mode 1: SSGI only — blit SSGI filter output directly
+            if (ssgiVisMode_ == 1) {
+                DescriptorData blit_params[1] = {
+                    { .binding = 0, .type = DescriptorType::SampledImage, .resource = ssgiHandle }
+                };
+                UpdateDescriptorSet(device_, blit_descriptor_set_, blit_params, 1);
+                cmd->BindGraphicsPipeline(blit_pipeline_);
+                const rhi::DescriptorSetHandle descriptor_sets[] = { blit_descriptor_set_ };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_layout_, 0, 1, descriptor_sets, 0, nullptr);
+                cmd->Draw(3, 0, 1, 0);
+                return;
+            }
 
-            // Bind descriptor set
-            const primal::graphics::rhi::DescriptorSetHandle descriptor_sets[] = { blit_descriptor_set_ };
-            cmd->BindDescriptorSets(primal::graphics::rhi::PipelineBindPoint::Graphics, blit_layout_, 0, 1, descriptor_sets, 0, nullptr);
-
-            // Draw fullscreen triangle (3 vertices)
-            cmd->Draw(3, 0, 1, 0);
-
-            // std::cout << "[DEBUG] Shader-based blit completed successfully" << std::endl;
+            // Mode 0: Composite (default) — scene + SSGI via composite pipeline
+            {
+                DescriptorData composite_params[2] = {
+                    { .binding = 0, .type = DescriptorType::SampledImage, .resource = inputHandle },
+                    { .binding = 1, .type = DescriptorType::SampledImage, .resource = ssgiHandle }
+                };
+                UpdateDescriptorSet(device_, blit_composite_descriptor_set_, composite_params, 2);
+                cmd->BindGraphicsPipeline(blit_composite_pipeline_);
+                const rhi::DescriptorSetHandle sets[] = { blit_composite_descriptor_set_ };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_composite_layout_, 0, 1, sets, 0, nullptr);
+                cmd->Draw(3, 0, 1, 0);
+            }
         }
     );
 }
@@ -1696,6 +1861,16 @@ void TestNaniteStreamingPipeline::Shutdown() {
             materialBuildJob_.Wait();
         }
         gpuMaterialRegistry_.reset();
+    }
+
+    // Cleanup SSGI resources
+    if (ssgiPass_) {
+        ssgiPass_->Shutdown();
+        ssgiPass_.reset();
+    }
+    if (colorHistoryManager_) {
+        colorHistoryManager_->Shutdown();
+        colorHistoryManager_.reset();
     }
 
     renderGraph_.reset();

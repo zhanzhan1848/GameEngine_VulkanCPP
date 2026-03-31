@@ -223,32 +223,29 @@ float3 ReconstructViewPos(float2 pixelUv, float linearDepth, device GlobalShader
 {
     // 将屏幕空间UV转换为NDC坐标 [-1,1]
     float2 ndc = pixelUv * 2.0 - 1.0;
-    
-    // Metal使用左手坐标系，Y轴需要翻转
+
+    // Metal NDC Y is up, texture UV Y is down — flip
     ndc.y = -ndc.y;
-    
-    // 构建NDC空间的齐次坐标，使用远平面深度值进行重建
+
+    // 构建NDC空间的齐次坐标，z=1 对应远平面
     float4 ndcPos = float4(ndc.x, ndc.y, 1.0, 1.0);
-    
+
     // 通过逆投影矩阵获得view space方向
     float4 viewRayH = gd.InvProjection * ndcPos;
 
     // 透视除法，得到view space方向向量
     float3 viewRay = viewRayH.xyz / viewRayH.w;
-    
-    // 在Metal左手坐标系中，相机看向+Z方向
-    // view space中正Z值表示距离相机的深度
+
     float rayLength = length(viewRay);
     if (rayLength > 1e-6) {
-        viewRay = normalize(viewRay);
-        // 直接使用线性深度缩放view ray
-        // 在Metal左手坐标系中，保持Z值为正值（表示距离相机的深度）
-        float3 viewPos = viewRay * linearDepth;
-        // 确保Z值为正值，符合Metal左手坐标系约定
-        viewPos.z = abs(viewPos.z);
+        // linearDepth is a positive distance along the camera look direction.
+        // In our view-space convention, camera looks along -Z, so viewPos.z = -linearDepth.
+        // Scale the ray so that its Z component equals -linearDepth.
+        float scale = -linearDepth / viewRay.z;
+        float3 viewPos = viewRay * scale;
         return viewPos;
     } else {
-        // 处理退化情况，Z值为负表示深度
+        // 处理退化情况
         return float3(0.0, 0.0, -linearDepth);
     }
 }

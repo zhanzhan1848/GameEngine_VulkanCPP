@@ -105,6 +105,12 @@ public:
     // Get the final depth texture for HZB generation
     rhi::ResourceHandle GetFinalDepthTexture() const { return final_depth_texture_; }
 
+    // GBuffer texture accessors for downstream passes (SSGI, DDGI, etc.)
+    rhi::ResourceHandle GetGBufferAlbedo() const { return gbuffer_albedo_texture_; }
+    rhi::ResourceHandle GetGBufferNormal() const { return gbuffer_normal_texture_; }
+    rhi::ResourceHandle GetGBufferORM() const { return gbuffer_orm_texture_; }
+    rhi::ResourceHandle GetGBufferVelocity() const { return gbuffer_velocity_texture_; }
+
     // Get global meshlet buffer for backface culling
     rhi::ResourceHandle GetGlobalMeshletBuffer() const { return global_meshlet_buffer_; }
 
@@ -200,6 +206,9 @@ private:
 
     math::m4x4 cached_view_matrix_;
     math::m4x4 cached_proj_matrix_;
+    math::m4x4 prev_view_matrix_;   // Previous frame view matrix for velocity
+    math::m4x4 prev_proj_matrix_;   // Previous frame proj matrix for velocity
+    bool has_prev_frame_{ false };   // Whether previous frame data is available
     u32 vertex_count_{ 0 };
     u32 index_count_{ 0 };
     rhi::DataFormat index_format_{ rhi::DataFormat::R32_UInt };
@@ -214,6 +223,12 @@ private:
     rhi::RenderPassHandle final_render_pass_{ rhi::handles::INVALID_RENDER_PASS };
     rhi::ResourceHandle final_color_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle final_depth_texture_{ rhi::handles::INVALID_RESOURCE };
+
+    // GBuffer render targets (created in CreateRenderPasses)
+    rhi::ResourceHandle gbuffer_albedo_texture_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle gbuffer_normal_texture_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle gbuffer_orm_texture_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle gbuffer_velocity_texture_{ rhi::handles::INVALID_RESOURCE };
 
     rhi::PipelineLayoutHandle resolve_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineHandle resolve_pipeline_{ rhi::handles::INVALID_PIPELINE };

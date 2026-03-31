@@ -242,3 +242,34 @@ fragment float4 fragmentBlit(
     float4 sampled = inputTex.sample(s, in.uv);
     return sampled;
 }
+
+// Composite blit: scene color + SSGI indirect lighting with PBR-correct composition
+// SSGI output is irradiance (incoming indirect light from nearby surfaces).
+// Correct PBR: L_out = L_direct + kD * irradiance * albedo / PI
+// Since we don't have receiver albedo in this pass, we use a conservative
+// intensity scale. Tone mapping prevents overexposure from combined lighting.
+fragment float4 fragmentBlitComposite(
+    VertexOut in [[stage_in]],
+    texture2d<float> sceneColor [[texture(0)]],
+    texture2d<float> ssgiColor  [[texture(1)]]
+) {
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    float4 scene = sceneColor.sample(s, in.uv);
+    float4 ssgi  = ssgiColor.sample(s, in.uv);
+
+    // Indirect irradiance scaled by conservative intensity factor.
+    // This approximates kD * albedo / PI averaging ~0.1-0.3 for typical PBR materials.
+    float ssgiIntensity = 0.3;
+    float3 indirect = ssgi.rgb * ssgiIntensity;
+
+    // Additive: direct + indirect (PBR rendering equation)
+    float3 result = scene.rgb + indirect;
+
+    // Reinhard tone mapping (handles HDR values from direct + indirect)
+    result = result / (result + 1.0);
+
+    // Gamma correction (linear -> sRGB)
+    // result = pow(result, float3(1.0 / 2.2));
+
+    return float4(result, 1.0);
+}

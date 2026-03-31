@@ -62,11 +62,13 @@ void MetalDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCount
         const WriteDescriptorSet& write = writes[i];
         
         // Find the binding in our vector
-        // Since we didn't index by binding number directly (to save space if bindings are sparse),
-        // we search for it.
+        // CRITICAL: Metal uses separate binding namespaces for textures and buffers.
+        // Multiple entries can share the same binding number but with different types
+        // (e.g. binding 0 = SampledImage AND binding 0 = UniformBuffer).
+        // We must match BOTH binding number AND descriptor type.
         MetalDescriptorBinding* targetBinding = nullptr;
         for (auto& b : bindings_) {
-            if (b.binding == write.dstBinding) {
+            if (b.binding == write.dstBinding && b.type == write.descriptorType) {
                 targetBinding = &b;
                 break;
             }

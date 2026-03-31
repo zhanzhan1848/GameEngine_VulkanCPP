@@ -87,6 +87,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Scene/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/*.cpp"
     # Ensure SSRPass is included (GLOB_RECURSE should pick it up, but touching file forces rescan)
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.cpp"

@@ -47,6 +47,7 @@ struct GBufferOutput {
 
 // Constants per draw
 struct DrawConstants {
+    // --- Existing fields (DO NOT REORDER) ---
     float4x4 view_matrix;
     float4x4 proj_matrix;
     float4x4 world_matrix; // Unused in indirect path (fetched from buffer)
@@ -54,6 +55,11 @@ struct DrawConstants {
     uint view_height;
     uint meshlet_count;
     uint padding;
+    // --- New fields appended at end ---
+    float4x4 prev_view_matrix;
+    float4x4 prev_proj_matrix;
+    uint has_prev_frame;
+    uint padding2[3];
 };
 
 struct ClusterMap {
@@ -114,6 +120,10 @@ struct VertexOut {
 
     // 🎨 Material ID (for material sampling)
     uint materialID; // Will be used to index material data
+
+    // Velocity buffer: current and previous clip-space positions
+    float4 currentPos;    // Current frame clip-space position
+    float4 previousPos;   // Previous frame clip-space position
 };
 
 // GPU-Driven Vertex Shader - reads from storage buffers
@@ -199,6 +209,16 @@ vertex VertexOut gpu_driven_vertex_shader(
     float4 worldPos = instance.world_matrix * float4(pos, 1.0);
     float4 viewPos = uniforms.view_matrix * worldPos;
     out.position = uniforms.proj_matrix * viewPos;
+
+    // Compute current and previous clip-space positions for velocity
+    out.currentPos = out.position;  // Already computed as current frame position
+
+    // Previous frame clip position (for velocity)
+    if (uniforms.has_prev_frame) {
+        out.previousPos = uniforms.prev_proj_matrix * (uniforms.prev_view_matrix * worldPos);
+    } else {
+        out.previousPos = out.currentPos;
+    }
 
     // Transform normal/tangent to world space
     float3x3 normalMatrix = float3x3(
@@ -288,8 +308,29 @@ fragment GBufferOutput gpu_driven_fragment_shader(
         out.normal = float4(normalize(in.normal) * 0.5 + 0.5, 1.0);
     }
 
-    out.orm = float4(1.0, 0.5, 0.0, 1.0);
-    out.velocity = float2(0.0, 0.0);
+    // ORM: Sample texture if available, otherwise use material scalar factors
+    float occlusion = 1.0;
+    float roughness = mat.roughness_factor;
+    float metallic = mat.metallic_factor;
+
+    uint orm_array_size = orm_textures.get_array_size();
+    if (mat.orm_texture_idx != 0xFFFFFFFF && mat.orm_texture_idx < orm_array_size) {
+        float4 orm_sample = orm_textures.sample(linear_sampler, scaled_uv, mat.orm_texture_idx);
+        occlusion = orm_sample.r;
+        roughness = orm_sample.g;
+        metallic = orm_sample.b;
+    }
+
+    out.orm = float4(occlusion, roughness, metallic, 1.0);
+
+    // Calculate velocity (screen-space motion vectors)
+    if (uniforms.has_prev_frame) {
+        float2 currentNDC = in.currentPos.xy / in.currentPos.w;
+        float2 previousNDC = in.previousPos.xy / in.previousPos.w;
+        out.velocity = (currentNDC - previousNDC) * 0.5;
+    } else {
+        out.velocity = float2(0.0, 0.0);
+    }
 
     return out;
 }

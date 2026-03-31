@@ -1151,8 +1151,44 @@ void MetalCommandBuffer::CopyBuffer(ResourceHandle src, ResourceHandle dst, u64 
 }
 
 void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) {
-    // Metal handles many barriers implicitly, but fences/events might be needed for specific synchronization.
-    // For now, empty.
+    if (!currentEncoder_ || barrierCount == 0) return;
+
+    switch (currentEncoderType_) {
+        case EncoderType::Compute: {
+            auto* computeEncoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
+
+            // Accumulate barrier scope based on actual resource types
+            MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+            MTL::BarrierScope scope = 0;
+            for (u32 i = 0; i < barrierCount; ++i) {
+                auto handle = barriers[i].resource;
+                if (handle == handles::INVALID_RESOURCE) continue;
+                // Distinguish texture vs buffer by trying both allocators
+                if (metalDevice.GetTexture(handle) != nullptr) {
+                    scope |= MTL::BarrierScopeTextures;
+                } else if (metalDevice.GetBuffer(handle) != nullptr) {
+                    scope |= MTL::BarrierScopeBuffers;
+                }
+            }
+
+            // Fallback: if no specific resources matched, barrier both scopes
+            if (scope == 0) {
+                scope = MTL::BarrierScopeTextures | MTL::BarrierScopeBuffers;
+            }
+
+            computeEncoder->memoryBarrier(scope);
+            break;
+        }
+        case EncoderType::Render: {
+            // Render encoder doesn't have memoryBarrier; handled implicitly by Metal.
+            break;
+        }
+        case EncoderType::Blit:
+            // Blit operations are serialized within the encoder; no explicit barrier needed.
+            break;
+        default:
+            break;
+    }
 }
 
 void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask,
@@ -1415,10 +1451,6 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
     MTL::BlitCommandEncoder* encoder = getBlitEncoder();
     if (!encoder) return;
 
-    std::cout << "[MetalCommandBuffer] BlitTexture: "
-              << srcTex->GetNativeTexture()->pixelFormat() << " -> "
-              << dstTex->GetNativeTexture()->pixelFormat() << std::endl;
-
     for (u32 i = 0; i < regionCount; ++i) {
         const auto& region = regions[i];
 
@@ -1432,7 +1464,9 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
         MTL::Origin dstOrigin(region.dstOffsets[0].x, region.dstOffsets[0].y, region.dstOffsets[0].z);
 
         // Check if formats match - Metal's blit encoder requires compatible formats
-        if (srcTex->GetNativeTexture()->pixelFormat() == dstTex->GetNativeTexture()->pixelFormat()) {
+        auto srcFmt = srcTex->GetNativeTexture()->pixelFormat();
+        auto dstFmt = dstTex->GetNativeTexture()->pixelFormat();
+        if (srcFmt == dstFmt) {
             encoder->copyFromTexture(
                 srcTex->GetNativeTexture(),
                 region.srcSubresource.baseArrayLayer,
@@ -1445,11 +1479,12 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                 dstOrigin
             );
         } else {
-            std::cerr << "[MetalCommandBuffer] BlitTexture: Format mismatch, cannot use blit encoder" << std::endl;
+            std::cerr << "[MetalCommandBuffer] BlitTexture: Format mismatch! src="
+                      << (int)srcFmt << " dst=" << (int)dstFmt
+                      << " — cannot use blit encoder, copy SKIPPED" << std::endl;
         }
     }
 
-    std::cout << "[MetalCommandBuffer] BlitTexture completed" << std::endl;
 }
 
 void MetalCommandBuffer::GenerateMipmaps(ResourceHandle texture) {

@@ -8,11 +8,13 @@
 #include "Engine/Graphics/Nanite/GPUCullingPipeline.h"
 #include "Engine/Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Engine/Graphics/Nanite/NaniteStreamingManager.h"
+#include "Engine/Graphics/Nanite/ColorHistoryManager.h"
 #include "Engine/Graphics/Nanite/NaniteResourceManager.h"
 #include "Engine/Graphics/Nanite/HZBSystem.h"
 #include "Engine/Graphics/Nanite/DepthHistoryManager.h"
 #include "Engine/Graphics/Nanite/VisibilityBufferSystem.h"
 #include "Engine/Graphics/Nanite/GPUMaterialRegistry.h"
+#include "Engine/Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include "Engine/Graphics/Scene/RenderSceneSnapshot.h"
 #include "Engine/Components/Cluster.h"
 #include "Engine/Graphics/Scene/SceneExtractionSystem.h"
@@ -90,7 +92,18 @@ private:
     primal::graphics::rhi::DescriptorSetLayoutHandle blit_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     primal::graphics::rhi::DescriptorSetHandle blit_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
 
-    // Shader management (following TestParticleSponza pattern)
+    // Composite blit pipeline (scene + SSGI)
+    primal::graphics::rhi::PipelineHandle blit_composite_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle blit_composite_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle blit_composite_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle blit_composite_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+
+    // === Lumen SSGI ===
+    std::unique_ptr<primal::graphics::lumen::LumenSSGIPass> ssgiPass_;
+    primal::graphics::rhi::ResourceHandle ssgi_black_texture_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+
+    // Color history for SSGI ray hit sampling
+    std::unique_ptr<primal::graphics::nanite::ColorHistoryManager> colorHistoryManager_;
     struct StringHash {
         size_t operator()(const std::string& key) const {
             uint32_t hash;
@@ -162,6 +175,7 @@ private:
     void AdjustMaterialUVScaling();  // 🔧 NEW: Manually adjust UV scaling for testing
     bool VerifyMeshletUVSupport();
     bool SetupBasicRenderingPipeline();
+    bool InitializeSSGIPipeline();
     void UpdateTestScene();
     void BuildRenderGraph(primal::graphics::rendergraph::RenderGraph& graph, primal::graphics::rhi::ResourceHandle backBuffer, u32 currentBufferIndex);
     void ProcessStreamingFeedback();
@@ -175,6 +189,10 @@ private:
         bool f1_prev{ false };  // Toggle streaming visualization
         bool f2_prev{ false };  // Stress test mode
         bool f3_prev{ false };  // Performance benchmark
+        bool f4_prev{ false };  // SSGI visualization mode toggle
         bool space_prev{ false }; // Pause/resume streaming
     } keyState_;
+
+    // SSGI visualization mode: 0=Composite(scene+SSGI), 1=SSGI only, 2=Scene only
+    u32 ssgiVisMode_{ 0 };
 };

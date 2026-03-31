@@ -152,6 +152,22 @@ void GPUDrivenDrawPipeline::Shutdown() {
         if (final_color_texture_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(final_color_texture_);
         if (final_depth_texture_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(final_depth_texture_);
 
+        // GBuffer texture cleanup (albedo is same as final_color_texture_, already destroyed above)
+        if (gbuffer_normal_texture_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(gbuffer_normal_texture_);
+            gbuffer_normal_texture_ = rhi::handles::INVALID_RESOURCE;
+        }
+        if (gbuffer_orm_texture_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(gbuffer_orm_texture_);
+            gbuffer_orm_texture_ = rhi::handles::INVALID_RESOURCE;
+        }
+        if (gbuffer_velocity_texture_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(gbuffer_velocity_texture_);
+            gbuffer_velocity_texture_ = rhi::handles::INVALID_RESOURCE;
+        }
+        // Reset albedo handle (actual resource already destroyed via final_color_texture_)
+        gbuffer_albedo_texture_ = rhi::handles::INVALID_RESOURCE;
+
         // 🎨 Cleanup texture arrays and sampler
         if (albedo_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(albedo_texture_array_);
         if (normal_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(normal_texture_array_);
@@ -217,7 +233,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
     frame_resources_.resize(3);
     for (int i = 0; i < 3; ++i) {
         rhi::BufferDesc constantsDesc{};
-        constantsDesc.size = 256; // sizeof(DrawConstants)
+        constantsDesc.size = 352; // sizeof(DrawConstants) with prev matrices
         constantsDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Uniform | rhi::BufferUsageFlags::TransferDst);
         constantsDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic; // Updated every frame
 
@@ -336,38 +352,38 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 
     // GBuffer Target 0: Albedo (BGRA8)
     gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
-    rhi::ResourceHandle gbufferAlbedo = device_->CreateTexture(gbufferDesc);
-    if (gbufferAlbedo == rhi::handles::INVALID_RESOURCE) {
+    gbuffer_albedo_texture_ = device_->CreateTexture(gbufferDesc);
+    if (gbuffer_albedo_texture_ == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Albedo texture" << std::endl;
         return false;
     }
 
     // GBuffer Target 1: Normal (BGRA8)
     gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
-    rhi::ResourceHandle gbufferNormal = device_->CreateTexture(gbufferDesc);
-    if (gbufferNormal == rhi::handles::INVALID_RESOURCE) {
+    gbuffer_normal_texture_ = device_->CreateTexture(gbufferDesc);
+    if (gbuffer_normal_texture_ == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Normal texture" << std::endl;
         return false;
     }
 
     // GBuffer Target 2: ORM (BGRA8)
     gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
-    rhi::ResourceHandle gbufferORM = device_->CreateTexture(gbufferDesc);
-    if (gbufferORM == rhi::handles::INVALID_RESOURCE) {
+    gbuffer_orm_texture_ = device_->CreateTexture(gbufferDesc);
+    if (gbuffer_orm_texture_ == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer ORM texture" << std::endl;
         return false;
     }
 
     // GBuffer Target 3: Velocity (RG16)
     gbufferDesc.format = rhi::DataFormat::RG16_UNorm;
-    rhi::ResourceHandle gbufferVelocity = device_->CreateTexture(gbufferDesc);
-    if (gbufferVelocity == rhi::handles::INVALID_RESOURCE) {
+    gbuffer_velocity_texture_ = device_->CreateTexture(gbufferDesc);
+    if (gbuffer_velocity_texture_ == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Velocity texture" << std::endl;
         return false;
     }
 
     // Keep final_color_texture_ for compatibility (use albedo as output)
-    final_color_texture_ = gbufferAlbedo;
+    final_color_texture_ = gbuffer_albedo_texture_;
 
     // Create depth texture for final render pass
     rhi::TextureDesc finalDepthDesc{};
@@ -387,7 +403,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     // 🔥 NEW: GBuffer color attachments
     // Attachment 0: Albedo
     rhi::RenderPassDesc::Attachment albedoAttachment{};
-    albedoAttachment.texture = gbufferAlbedo;
+    albedoAttachment.texture = gbuffer_albedo_texture_;
     albedoAttachment.format = rhi::DataFormat::BGRA8_UNorm;
     albedoAttachment.loadOp = rhi::LoadAction::Clear;
     albedoAttachment.storeOp = rhi::StoreAction::Store;
@@ -396,7 +412,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 
     // Attachment 1: Normal
     rhi::RenderPassDesc::Attachment normalAttachment{};
-    normalAttachment.texture = gbufferNormal;
+    normalAttachment.texture = gbuffer_normal_texture_;
     normalAttachment.format = rhi::DataFormat::BGRA8_UNorm;
     normalAttachment.loadOp = rhi::LoadAction::Clear;
     normalAttachment.storeOp = rhi::StoreAction::Store;
@@ -405,7 +421,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 
     // Attachment 2: ORM
     rhi::RenderPassDesc::Attachment ormAttachment{};
-    ormAttachment.texture = gbufferORM;
+    ormAttachment.texture = gbuffer_orm_texture_;
     ormAttachment.format = rhi::DataFormat::BGRA8_UNorm;
     ormAttachment.loadOp = rhi::LoadAction::Clear;
     ormAttachment.storeOp = rhi::StoreAction::Store;
@@ -414,7 +430,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 
     // Attachment 3: Velocity
     rhi::RenderPassDesc::Attachment velocityAttachment{};
-    velocityAttachment.texture = gbufferVelocity;
+    velocityAttachment.texture = gbuffer_velocity_texture_;
     velocityAttachment.format = rhi::DataFormat::RG16_UNorm;
     velocityAttachment.loadOp = rhi::LoadAction::Clear;
     velocityAttachment.storeOp = rhi::StoreAction::Store;
@@ -640,7 +656,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             gpuDrawBindings[0].binding = 0;
             gpuDrawBindings[0].descriptorType = rhi::DescriptorType::UniformBufferDynamic;
             gpuDrawBindings[0].descriptorCount = 1;
-            gpuDrawBindings[0].stageFlags = rhi::ShaderStage::Vertex;
+            gpuDrawBindings[0].stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel;
 
             gpuDrawBindings[1].binding = 1;
             gpuDrawBindings[1].descriptorType = rhi::DescriptorType::StorageBuffer;
@@ -1599,6 +1615,11 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
         std::cout << "  Total Clusters Rendered: " << results_.total_clusters_rendered << std::endl;
     }
 
+    // Store current frame matrices for next frame's velocity computation
+    prev_view_matrix_ = cached_view_matrix_;
+    prev_proj_matrix_ = cached_proj_matrix_;
+    has_prev_frame_ = true;
+
     return true;
 }
 
@@ -1737,13 +1758,19 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
 
     // Update Global Constants
     struct DrawConstants {
+        // --- Existing fields (DO NOT REORDER) ---
         math::m4x4 view_matrix;
         math::m4x4 proj_matrix;
-        math::m4x4 world_matrix; // Unused
+        math::m4x4 world_matrix;       // Unused
         u32 view_width;
         u32 view_height;
         u32 meshlet_count;
         u32 padding;
+        // --- New fields appended at end ---
+        math::m4x4 prev_view_matrix;   // Previous frame view matrix
+        math::m4x4 prev_proj_matrix;   // Previous frame proj matrix
+        u32 has_prev_frame;            // 1 if previous frame data is available
+        u32 padding2[3];               // Alignment padding to 16 bytes
     } drawConsts;
 
     drawConsts.view_matrix = cached_view_matrix_;
@@ -1753,8 +1780,12 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     drawConsts.view_height = visibility_config_.height;
     // CRITICAL FIX: Pass the TOTAL meshlet count to the shader for safety checks,
     // NOT the visible cluster count (which can be 0 or small and causes out-of-bounds clipping)
-    drawConsts.meshlet_count = total_meshlet_count_; 
+    drawConsts.meshlet_count = total_meshlet_count_;
     drawConsts.padding = 0;
+    drawConsts.prev_view_matrix = prev_view_matrix_;
+    drawConsts.prev_proj_matrix = prev_proj_matrix_;
+    drawConsts.has_prev_frame = has_prev_frame_ ? 1u : 0u;
+    drawConsts.padding2[0] = drawConsts.padding2[1] = drawConsts.padding2[2] = 0;
 
     void* constData = device_->MapBuffer(cameraConstBuffer);
     if (constData) {
