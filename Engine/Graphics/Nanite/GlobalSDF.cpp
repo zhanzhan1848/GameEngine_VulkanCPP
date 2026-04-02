@@ -1,8 +1,13 @@
 #include "GlobalSDF.h"
 #include "../RHI/Core/RHIDevice.h"
+#include "../RHI/Core/RHICommand.h"
 #include "../RHI/Core/RHIMath.h"
 #include <algorithm>
 #include <chrono>
+#include <fstream>
+#include <sstream>
+#include <set>
+#include <iostream>
 
 namespace primal::graphics::nanite {
 
@@ -116,16 +121,19 @@ void GlobalSDF::Update(const RenderSceneSnapshot& snapshot, u64 current_frame,
 bool GlobalSDF::CreateCascades() {
     for (auto& cascade : cascades_) {
         u32 resolution = cascade.resolution;
-        u32 mip_levels = static_cast<u32>(std::log2(resolution)) + 1;
+        // SDF cascade only needs mip 0 — voxelization writes only to mip 0,
+        // and DDGI trace reads only mip 0. Extra mip levels waste memory
+        // and contain uninitialized garbage data.
+        u32 mip_levels = 1;
         cascade.mip_levels = mip_levels;
-        
+
         if (!AllocateTexture(cascade.sdf_texture, resolution, mip_levels)) {
             return false;
         }
-        
+
         cascade.is_valid = true;
     }
-    
+
     return true;
 }
 
@@ -192,7 +200,7 @@ bool GlobalSDF::AllocateTexture(rhi::ResourceHandle& handle, u32 resolution, u32
     desc.arraySize = 1;
     desc.format = rhi::DataFormat::R16_Float;
     desc.type = rhi::TextureType::Texture3D;
-    desc.usage = rhi::TextureUsage::ShaderResource;
+    desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
     desc.memoryUsage = rhi::GPUMemoryUsage::Static;
     
     handle = device_->CreateTexture(desc);
@@ -219,17 +227,21 @@ u32 GlobalSDF::CalculateRequiredResolution(f32 distance, u32 cascade_index) cons
     return resolution;
 }
 
-math::v3 GlobalSDF::CalculateCascadeOrigin(u32 cascade_index, const math::v3& camera_position, 
+math::v3 GlobalSDF::CalculateCascadeOrigin(u32 cascade_index, const math::v3& camera_position,
                                             f32 voxel_size) const {
     f32 cascade_size = config_.base_resolution * voxel_size;
-    f32 half_size = cascade_size / 2.0f;
-    
+
+    // Snap camera to grid, then offset by -half to CENTER the cascade on the camera.
+    // This ensures geometry at the camera position is covered even if it extends
+    // in the negative direction (e.g. Sponza centered at origin).
+    f32 half = cascade_size * 0.5f;
+
     math::v3 snapped_pos{
-        std::floor(camera_position.x / cascade_size) * cascade_size + half_size,
-        std::floor(camera_position.y / cascade_size) * cascade_size + half_size,
-        std::floor(camera_position.z / cascade_size) * cascade_size + half_size
+        std::floor((camera_position.x + half) / cascade_size) * cascade_size - half,
+        std::floor((camera_position.y + half) / cascade_size) * cascade_size - half,
+        std::floor((camera_position.z + half) / cascade_size) * cascade_size - half
     };
-    
+
     return snapped_pos;
 }
 
@@ -243,6 +255,243 @@ const SDFCascade& GlobalSDF::GetCascade(u32 index) const {
         return invalid_cascade;
     }
     return cascades_[index];
+}
+
+// ============================================================================
+// Shader loading (same pattern as LumenDDGIPass)
+// ============================================================================
+
+namespace {
+
+static const std::string SDF_SHADER_DIR =
+    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Nanite/";
+
+static std::string ReadFileToString(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) return {};
+    std::stringstream ss;
+    ss << file.rdbuf();
+    return ss.str();
+}
+
+static std::vector<u8> LoadShaderSource(const char* name) {
+    std::string path = SDF_SHADER_DIR + std::string(name) + ".metal";
+    std::string source = ReadFileToString(path);
+    if (source.empty()) {
+        std::cerr << "[GlobalSDF] Failed to load shader: " << path << std::endl;
+        return {};
+    }
+    return std::vector<u8>(source.begin(), source.end());
+}
+
+struct DescriptorData {
+    u32 binding;
+    rhi::DescriptorType type;
+    rhi::ResourceHandle resource;
+    u32 count{ 1 };
+};
+
+static void UpdateDescriptorSet(rhi::RHIDeviceBase* device, rhi::DescriptorSetHandle set,
+                                 const DescriptorData* params, u32 count) {
+    utl::vector<rhi::WriteDescriptorSet> writes(count);
+    utl::vector<rhi::DescriptorBufferInfo> bufferInfos(count);
+    utl::vector<rhi::DescriptorImageInfo> imageInfos(count);
+
+    for (u32 i = 0; i < count; ++i) {
+        writes[i].dstSet = set;
+        writes[i].dstBinding = params[i].binding;
+        writes[i].descriptorCount = params[i].count;
+        writes[i].descriptorType = params[i].type;
+
+        if (params[i].type == rhi::DescriptorType::UniformBuffer ||
+            params[i].type == rhi::DescriptorType::StorageBuffer) {
+            bufferInfos[i].buffer = params[i].resource;
+            bufferInfos[i].offset = 0;
+            bufferInfos[i].range = ~0ull;
+            writes[i].bufferInfo = &bufferInfos[i];
+        } else if (params[i].type == rhi::DescriptorType::StorageImage ||
+                   params[i].type == rhi::DescriptorType::SampledImage) {
+            imageInfos[i].imageView = params[i].resource;
+            imageInfos[i].imageLayout = rhi::ResourceState::ShaderResource;
+            writes[i].imageInfo = &imageInfos[i];
+        }
+    }
+    device->UpdateDescriptorSets(count, writes.data());
+}
+
+} // anonymous namespace
+
+// ============================================================================
+// InitVoxelization
+// ============================================================================
+
+bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
+    if (!initialized_ || !device_) return false;
+
+    vox_resources_ = resources;
+
+    // Load shader source
+    auto code = LoadShaderSource("GlobalSDFVoxelization");
+    if (code.empty()) {
+        std::cerr << "[GlobalSDF] Failed to load voxelization shader" << std::endl;
+        return false;
+    }
+
+    auto shader = device_->CreateShader(code.data(), code.size(),
+                                         rhi::ShaderStage::Compute, "voxelize_sdf");
+    if (shader == rhi::handles::INVALID_SHADER) {
+        std::cerr << "[GlobalSDF] Failed to compile voxelization shader" << std::endl;
+        return false;
+    }
+
+    // Create descriptor set layout
+    // Metal: texture(0) = SDF output, buffer(0..6) = cascade + geometry data
+    {
+        rhi::DescriptorSetLayoutBinding bindings[] = {
+            // Texture
+            {0, rhi::DescriptorType::StorageImage,  1, rhi::ShaderStage::Compute, nullptr},
+            // Buffers (separate Metal namespace)
+            {0, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // CascadeUniforms
+            {1, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // vertex positions
+            {2, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // meshlets
+            {3, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // meshlet vertex indices
+            {4, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // meshlet triangle indices
+            {5, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // cluster map
+            {6, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // instance data
+        };
+        rhi::DescriptorSetLayoutDesc layoutDesc{8, bindings};
+        vox_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    }
+
+    // Create pipeline layout
+    {
+        rhi::PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &vox_set_layout_;
+        vox_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
+
+    // Create compute pipeline
+    {
+        rhi::ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = shader;
+        pipeDesc.layout = vox_layout_;
+        pipeDesc.threadGroupSize = {4, 4, 4};
+        vox_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
+
+    if (vox_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+        std::cerr << "[GlobalSDF] Failed to create voxelization pipeline" << std::endl;
+        return false;
+    }
+
+    // Create triple-buffered cascade constant buffers
+    for (int i = 0; i < 3; i++) {
+        // Cascade uniforms (matches Metal CascadeUniforms struct)
+        rhi::BufferDesc cbDesc{};
+        cbDesc.size = 64;  // CascadeUniforms: float4 + uint3 + uint + padding = 48 bytes, round to 64
+        cbDesc.type = rhi::BufferType::Constant;
+        cbDesc.usage = rhi::GPUMemoryUsage::Dynamic;
+        cbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        vox_cascade_cb_[i] = device_->CreateBuffer(cbDesc);
+
+        // Descriptor sets
+        rhi::DescriptorSetDesc dsDesc{vox_set_layout_};
+        vox_descriptor_sets_[i] = device_->CreateDescriptorSet(dsDesc);
+    }
+
+    voxelization_ready_ = true;
+    std::cout << "[GlobalSDF] Voxelization pipeline ready (" << resources.num_instances
+              << " instances)" << std::endl;
+    return true;
+}
+
+// ============================================================================
+// DispatchVoxelization
+// ============================================================================
+
+void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_index) {
+    if (!voxelization_ready_ || !cmd) return;
+    if (cascade_index >= cascades_.size()) return;
+
+    const auto& cascade = cascades_[cascade_index];
+    if (!cascade.is_valid || cascade.sdf_texture == rhi::handles::INVALID_RESOURCE) return;
+
+    // Determine frame index for triple-buffered resources
+    u32 frameIdx = cascade_index % 3;
+
+    // Upload cascade uniforms
+    {
+        // Must match Metal CascadeUniforms layout EXACTLY:
+        // offset 0:  float4 origin (xyz=origin, w=voxel_size) — 16 bytes
+        // offset 16: uint res_x, res_y, res_z              — 12 bytes
+        // offset 28: uint num_instances                  — 4 bytes
+        // Total: 32 bytes
+        struct alignas(16) CascadeUniformsCB {
+            f32 origin_x, origin_y, origin_z, voxel_size;  // offset 0-15
+            u32 res_x, res_y, res_z;                      // offset 16-27
+            u32 num_instances;                            // offset 28-31
+            u32 _pad[4];                                     // pad to 48 (align to 16)
+        };
+
+        auto* mapped = static_cast<CascadeUniformsCB*>(device_->MapBuffer(vox_cascade_cb_[frameIdx]));
+        if (mapped) {
+            mapped->origin_x = cascade.origin.x;
+            mapped->origin_y = cascade.origin.y;
+            mapped->origin_z = cascade.origin.z;
+            mapped->voxel_size = cascade.voxel_size;
+            mapped->res_x = cascade.resolution;
+            mapped->res_y = cascade.resolution;
+            mapped->res_z = cascade.resolution;
+            mapped->num_instances = vox_resources_.num_instances;
+            device_->UnmapBuffer(vox_cascade_cb_[frameIdx]);
+        } else {
+            static bool logMapFail = false;
+            if (!logMapFail) {
+                std::cerr << "[GlobalSDF] ERROR: MapBuffer failed for cascade CB!" << std::endl;
+                logMapFail = true;
+            }
+        }
+    }
+
+    // Update descriptor set
+    {
+        DescriptorData params[] = {
+            // Texture (SDF output)
+            {0, rhi::DescriptorType::StorageImage, cascade.sdf_texture},
+            // Buffers
+            {0, rhi::DescriptorType::UniformBuffer, vox_cascade_cb_[frameIdx]},
+            {1, rhi::DescriptorType::StorageBuffer, vox_resources_.vertex_buffer},
+            {2, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_buffer},
+            {3, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_vertices_buffer},
+            {4, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_triangles_buffer},
+            {5, rhi::DescriptorType::StorageBuffer, vox_resources_.cluster_map_buffer},
+            {6, rhi::DescriptorType::StorageBuffer, vox_resources_.instance_data_buffer},
+        };
+        UpdateDescriptorSet(device_, vox_descriptor_sets_[frameIdx], params, 8);
+    }
+
+    // Bind and dispatch
+    cmd->BindComputePipeline(vox_pipeline_);
+    const rhi::DescriptorSetHandle sets[] = { vox_descriptor_sets_[frameIdx] };
+    cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, vox_layout_, 0, 1, sets, 0, nullptr);
+
+    // Dispatch: (resolution/4, resolution/4, resolution/4) groups with threadGroupSize (4,4,4)
+    u32 res = cascade.resolution;
+    u32 gx = (res + 3) / 4;
+    u32 gy = (res + 3) / 4;
+    u32 gz = (res + 3) / 4;
+    cmd->Dispatch(gx, gy, gz);
+
+    // Barrier: SDF texture UAV → SRV (for DDGI trace to read)
+    {
+        rhi::ResourceBarrier barrier{};
+        barrier.resource = cascade.sdf_texture;
+        barrier.beforeState = rhi::ResourceState::UnorderedAccess;
+        barrier.afterState = rhi::ResourceState::ShaderResource;
+        barrier.subresource = 0xFFFFFFFF;
+        cmd->InsertBarrier(&barrier, 1);
+    }
 }
 
 } // namespace primal::graphics::nanite

@@ -33,7 +33,10 @@ struct LumenConfig {
     u32 ddgi_probe_count_y = 16;
     u32 ddgi_probe_count_z = 32;
     u32 ddgi_rays_per_probe = 128;
-    float ddgi_probe_spacing = 1.0f;
+    float ddgi_probe_spacing = 4.0f;             // 16 probes * 4.0 = 60 units coverage
+    float ddgi_irradiance_temporal_weight = 0.02f;
+    float ddgi_depth_temporal_weight = 0.2f;
+    float ddgi_ray_max_distance = 50.0f;         // Must reach geometry across probe grid
 
     // Surface Cache settings
     u32 surface_cache_atlas_size = 4096;

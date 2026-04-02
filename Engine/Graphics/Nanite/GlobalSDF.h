@@ -40,46 +40,87 @@ struct GlobalSDFStats {
     u32 skipped_updates{ 1 };
 };
 
+/// GPU buffer handles needed for SDF voxelization.
+struct SDFVoxelizationResources {
+    rhi::ResourceHandle vertex_buffer{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle meshlet_buffer{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle meshlet_vertices_buffer{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle meshlet_triangles_buffer{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle cluster_map_buffer{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle instance_data_buffer{ rhi::handles::INVALID_RESOURCE };
+    u32 num_instances{ 0 };
+};
+
 class GlobalSDF {
 public:
     static GlobalSDF& Get();
-    
+
     GlobalSDF(const GlobalSDF&) = delete;
     GlobalSDF& operator=(const GlobalSDF&) = delete;
-    
+
     bool Initialize(rhi::RHIDeviceBase* device, const GlobalSDFConfig& config = GlobalSDFConfig{});
     void Shutdown();
-    
+
     void Update(const RenderSceneSnapshot& snapshot, u64 current_frame, const math::v3& camera_position);
-    
+
     const SDFCascade& GetCascade(u32 index) const;
     const rhi::ResourceHandle GetGlobalTexture() const { return global_sdf_texture_; }
     const GlobalSDFConfig& GetConfig() const { return config_; }
     const GlobalSDFStats& GetStats() const { return stats_; }
-    
+
     bool IsInitialized() const { return initialized_; }
-    
+
+    /// Initialize the voxelization compute pipeline. Call once after Initialize().
+    bool InitVoxelization(const SDFVoxelizationResources& resources);
+
+    /// Update buffer handles (geometry may be uploaded after init).
+    void SetVoxelizationResources(const SDFVoxelizationResources& resources) {
+        vox_resources_ = resources;
+    }
+
+    /// Dispatch voxelization for a specific cascade. Call from render graph compute pass.
+    void DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_index);
+
+    bool IsVoxelizationReady() const { return voxelization_ready_; }
+
 private:
     GlobalSDF() = default;
-    
+
     rhi::RHIDeviceBase* device_{ nullptr };
     GlobalSDFConfig config_;
     utl::vector<SDFCascade> cascades_;
     rhi::ResourceHandle global_sdf_texture_{ rhi::handles::INVALID_RESOURCE };
     GlobalSDFStats stats_;
-    
+
     std::mutex mutex_;
     std::atomic<bool> initialized_{ false };
-    
+
+    // Voxelization pipeline resources
+    bool voxelization_ready_{ false };
+    SDFVoxelizationResources vox_resources_;
+    rhi::PipelineHandle vox_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineLayoutHandle vox_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle vox_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetHandle vox_descriptor_sets_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::ResourceHandle vox_cascade_cb_[3]{
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE
+    };
+
     bool CreateCascades();
     bool CreateGlobalTexture();
     void UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& snapshot, const math::v3& camera_position);
     void MergeCascades();
     void UpdateStats(u64 current_frame);
-    
+
     bool AllocateTexture(rhi::ResourceHandle& handle, u32 resolution, u32 mip_levels);
     void FreeTexture(rhi::ResourceHandle& handle);
-    
+
     u32 CalculateRequiredResolution(f32 distance, u32 cascade_index) const;
     math::v3 CalculateCascadeOrigin(u32 cascade_index, const math::v3& camera_position, f32 voxel_size) const;
     f32 CalculateCascadeVoxelSize(u32 cascade_index) const;

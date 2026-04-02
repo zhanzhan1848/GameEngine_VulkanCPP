@@ -15,6 +15,8 @@
 #include "Engine/Graphics/Nanite/VisibilityBufferSystem.h"
 #include "Engine/Graphics/Nanite/GPUMaterialRegistry.h"
 #include "Engine/Graphics/Lumen/SSGI/LumenSSGIPass.h"
+#include "Engine/Graphics/Lumen/DDGI/LumenDDGIPass.h"
+#include "Engine/Graphics/Nanite/GlobalSDF.h"
 #include "Engine/Graphics/Scene/RenderSceneSnapshot.h"
 #include "Engine/Components/Cluster.h"
 #include "Engine/Graphics/Scene/SceneExtractionSystem.h"
@@ -102,6 +104,9 @@ private:
     std::unique_ptr<primal::graphics::lumen::LumenSSGIPass> ssgiPass_;
     primal::graphics::rhi::ResourceHandle ssgi_black_texture_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
 
+    // === Lumen DDGI ===
+    std::unique_ptr<primal::graphics::lumen::LumenDDGIPass> ddgiPass_;
+
     // Color history for SSGI ray hit sampling
     std::unique_ptr<primal::graphics::nanite::ColorHistoryManager> colorHistoryManager_;
     struct StringHash {
@@ -133,6 +138,17 @@ private:
 
     // Culling debug data storage for final frame only
     primal::utl::vector<primal::graphics::nanite::CullingDebugData> finalFrameCullingDebugData_;
+
+    // DDGI blit resources
+    primal::graphics::rhi::DescriptorSetLayoutHandle blit_ddgi_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::PipelineLayoutHandle blit_ddgi_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle blit_ddgi_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    primal::graphics::rhi::PipelineHandle blit_ddgi_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::ResourceHandle ddgi_probe_cb_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
 
     // CRITICAL FIX: Triple-buffered camera data to match MAX_FRAMES_IN_FLIGHT = 3
     // This prevents array out-of-bounds and frame synchronization issues
@@ -176,6 +192,7 @@ private:
     bool VerifyMeshletUVSupport();
     bool SetupBasicRenderingPipeline();
     bool InitializeSSGIPipeline();
+    bool InitializeDDGIBlitPipeline();
     void UpdateTestScene();
     void BuildRenderGraph(primal::graphics::rendergraph::RenderGraph& graph, primal::graphics::rhi::ResourceHandle backBuffer, u32 currentBufferIndex);
     void ProcessStreamingFeedback();
@@ -194,5 +211,5 @@ private:
     } keyState_;
 
     // SSGI visualization mode: 0=Composite(scene+SSGI), 1=SSGI only, 2=Scene only
-    u32 ssgiVisMode_{ 0 };
+    u32 ssgiVisMode_{ 3 };  // Default to DDGI Composite for testing
 };

@@ -114,6 +114,13 @@ public:
     // Get global meshlet buffer for backface culling
     rhi::ResourceHandle GetGlobalMeshletBuffer() const { return global_meshlet_buffer_; }
 
+    // Geometry buffer accessors for GlobalSDF voxelization
+    rhi::ResourceHandle GetGlobalVertexBuffer() const { return global_vertex_buffer_; }
+    rhi::ResourceHandle GetGlobalMeshletVerticesBuffer() const { return global_meshlet_vertices_buffer_; }
+    rhi::ResourceHandle GetGlobalMeshletTrianglesBuffer() const { return global_meshlet_triangles_buffer_; }
+    rhi::ResourceHandle GetClusterMapBuffer() const { return cluster_map_buffer_; }
+    rhi::ResourceHandle GetGlobalInstanceDataBuffer() const { return global_instance_data_buffer_; }
+
 private:
     GPUDrivenDrawPipeline() = default;
 

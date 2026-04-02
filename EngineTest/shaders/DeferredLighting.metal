@@ -243,6 +243,111 @@ fragment float4 fragmentBlit(
     return sampled;
 }
 
+// DDGI irradiance visualization blit
+// Reconstructs world position from depth, samples DDGI probe grid,
+// evaluates SH0 (constant term) for approximate indirect lighting.
+fragment float4 fragmentBlitDDGI(
+    VertexOut in [[stage_in]],
+    texture2d<float, access::sample> sceneColor   [[texture(0)]],
+    texture2d<float, access::sample> depthTex      [[texture(1)]],
+    texture3d<float, access::sample> irradianceTex [[texture(2)]],
+    constant float4x4& invViewProjection [[buffer(0)]],
+    constant float4& probeOrigin_spacing [[buffer(1)]],  // xyz=origin, w=spacing
+    constant float4& probeCounts_shCountF [[buffer(2)]]  // xyz=counts, w=SH coeff count (as floats)
+) {
+    constexpr sampler s2d(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+
+    float2 uv = in.uv;
+    float4 scene = sceneColor.sample(s2d, uv);
+    float depth = depthTex.sample(s2d, uv).r;
+
+    // Sky pixels — return scene unchanged
+    if (depth >= 1.0f) {
+        return scene;
+    }
+
+    // Reconstruct world position from depth + invVP
+    float2 ndc;
+    ndc.x = uv.x * 2.0 - 1.0;
+    ndc.y = (1.0 - uv.y) * 2.0 - 1.0;
+    float4 clipPos = float4(ndc, depth, 1.0);
+    float4 worldPos4 = invViewProjection * clipPos;
+    float3 worldPos = worldPos4.xyz / worldPos4.w;
+
+    float3 probeOrigin = probeOrigin_spacing.xyz;
+    float probeSpacing = probeOrigin_spacing.w;
+    uint3 probeCounts = uint3(uint(probeCounts_shCountF.x), uint(probeCounts_shCountF.y), uint(probeCounts_shCountF.z));
+    uint shCount = uint(probeCounts_shCountF.w);  // 4
+
+    // Probe grid continuous coordinates
+    float3 gridPos = (worldPos - probeOrigin) / probeSpacing;
+
+    // Bounds check — outside probe grid, return scene
+    if (gridPos.x < 0.0f || gridPos.x >= float(probeCounts.x) ||
+        gridPos.y < 0.0f || gridPos.y >= float(probeCounts.y) ||
+        gridPos.z < 0.0f || gridPos.z >= float(probeCounts.z)) {
+        return scene;
+    }
+
+    // Manual trilinear interpolation of SH0.
+    // The irradiance texture has z = probe_z * shCount + sh_index.
+    // Hardware trilinear would incorrectly interpolate across SH boundaries,
+    // so we manually read each probe's SH0 texel and blend.
+    int3 baseProbe = int3(floor(gridPos));
+    float3 fracPart = fract(gridPos);
+
+    float3 totalIrradiance = float3(0.0f);
+    float totalWeight = 0.0f;
+
+    for (uint corner = 0; corner < 8; ++corner) {
+        int3 offset = int3(
+            (corner & 1u) ? 1 : 0,
+            (corner & 2u) ? 1 : 0,
+            (corner & 4u) ? 1 : 0
+        );
+        int3 probeCoord = baseProbe + offset;
+
+        // Skip out-of-bounds probes
+        if (probeCoord.x < 0 || probeCoord.x >= int(probeCounts.x) ||
+            probeCoord.y < 0 || probeCoord.y >= int(probeCounts.y) ||
+            probeCoord.z < 0 || probeCoord.z >= int(probeCounts.z)) {
+            continue;
+        }
+
+        // Trilinear weight
+        float3 blendW;
+        blendW.x = (corner & 1u) ? fracPart.x : (1.0f - fracPart.x);
+        blendW.y = (corner & 2u) ? fracPart.y : (1.0f - fracPart.y);
+        blendW.z = (corner & 4u) ? fracPart.z : (1.0f - fracPart.z);
+        float weight = blendW.x * blendW.y * blendW.z;
+
+        // Read SH0 texel: z = probe_z * shCount + 0
+        uint3 texCoord = uint3(probeCoord.x, probeCoord.y, probeCoord.z * shCount);
+        float3 sh0 = irradianceTex.read(texCoord).rgb;
+
+        totalIrradiance += sh0 * weight;
+        totalWeight += weight;
+    }
+
+    if (totalWeight > 0.0f) {
+        totalIrradiance /= totalWeight;
+    }
+
+    // SH constant for Y0 evaluation
+    const float SH_C0 = 0.282095f;
+    // Evaluate: irradiance ≈ sh0 * C0
+    float3 indirect = totalIrradiance * SH_C0;
+
+    // Add DDGI indirect to scene (conservative intensity)
+    float ddgiIntensity = 2.0;
+    float3 result = scene.rgb + indirect * ddgiIntensity;
+
+    // Reinhard tone mapping
+    result = result / (result + 1.0f);
+
+    return float4(result, 1.0f);
+}
+
 // Composite blit: scene color + SSGI indirect lighting with PBR-correct composition
 // SSGI output is irradiance (incoming indirect light from nearby surfaces).
 // Correct PBR: L_out = L_direct + kD * irradiance * albedo / PI

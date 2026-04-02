@@ -493,6 +493,43 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     }
     std::cout << "[TestNanite] Depth History Manager initialized successfully" << std::endl;
 
+    // Initialize GlobalSDF for DDGI ray tracing
+    {
+        auto& globalSDF = nanite::GlobalSDF::Get();
+        nanite::GlobalSDFConfig sdfConfig;
+        sdfConfig.cascade_count = 1;
+        sdfConfig.base_resolution = 60;
+        sdfConfig.cascade_scale_factor = 2;
+        sdfConfig.voxel_size_base = 1.0f;
+
+        if (globalSDF.Initialize(device_, sdfConfig)) {
+            std::cout << "[TestNanite] GlobalSDF initialized (1 cascade, 60³, voxel=1.0)" << std::endl;
+        } else {
+            std::cerr << "[TestNanite] Warning: GlobalSDF initialization failed — DDGI trace will be skipped" << std::endl;
+        }
+    }
+
+    // Initialize GlobalSDF voxelization pipeline (after GPUDrivenDrawPipeline has geometry buffers)
+    {
+        auto& globalSDF = nanite::GlobalSDF::Get();
+        if (globalSDF.IsInitialized() && gpuDrawPipeline_) {
+            nanite::SDFVoxelizationResources voxResources;
+            voxResources.vertex_buffer = gpuDrawPipeline_->GetGlobalVertexBuffer();
+            voxResources.meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();
+            voxResources.meshlet_vertices_buffer = gpuDrawPipeline_->GetGlobalMeshletVerticesBuffer();
+            voxResources.meshlet_triangles_buffer = gpuDrawPipeline_->GetGlobalMeshletTrianglesBuffer();
+            voxResources.cluster_map_buffer = gpuDrawPipeline_->GetClusterMapBuffer();
+            voxResources.instance_data_buffer = gpuDrawPipeline_->GetGlobalInstanceDataBuffer();
+            voxResources.num_instances = sceneSnapshot_.GetInstanceCount();
+
+            if (globalSDF.InitVoxelization(voxResources)) {
+                std::cout << "[TestNanite] GlobalSDF voxelization pipeline initialized" << std::endl;
+            } else {
+                std::cerr << "[TestNanite] Warning: GlobalSDF voxelization init failed" << std::endl;
+            }
+        }
+    }
+
     // Initialize Visibility Buffer System - DISABLED for now due to texture format issues
     // visibilityBufferSystem_ = std::make_unique<VisibilityBufferSystem>();
     // VisibilityBufferSystem::Config visConfig;
@@ -659,6 +696,11 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         std::cerr << "[TestNanite] Warning: SSGI pipeline initialization failed" << std::endl;
     }
 
+    // Initialize DDGI blit pipeline
+    if (!InitializeDDGIBlitPipeline()) {
+        std::cerr << "[TestNanite] Warning: DDGI blit pipeline initialization failed" << std::endl;
+    }
+
     return true;
 }
 
@@ -695,6 +737,126 @@ bool TestNaniteStreamingPipeline::InitializeSSGIPipeline() {
     }
 
     std::cout << "[LumenSSGI] SSGI pipeline initialized via LumenSSGIPass" << std::endl;
+
+    // 4. Initialize LumenDDGIPass (probe-based GI)
+    ddgiPass_ = std::make_unique<primal::graphics::lumen::LumenDDGIPass>();
+    if (!ddgiPass_->Initialize(device_)) {
+        std::cerr << "[LumenDDGI] Failed to initialize LumenDDGIPass" << std::endl;
+        // Non-fatal: DDGI is additive, SSGI still works without it
+        ddgiPass_.reset();
+    } else {
+        std::cout << "[LumenDDGI] DDGI probe system initialized via LumenDDGIPass" << std::endl;
+    }
+    return true;
+}
+
+bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
+    if (!ddgiPass_ || !ddgiPass_->IsInitialized()) {
+        std::cerr << "[DDGIBlit] Skipping: DDGI pass not initialized" << std::endl;
+        return false;
+    }
+    std::cout << "[DDGIBlit] Initializing DDGI blit pipeline..." << std::endl;
+
+    // --- Compile fragmentBlitDDGI shader ---
+    const shader_file_info ddgi_ps_info{ "DeferredLighting.metal", "fragmentBlitDDGI", shader_type::pixel };
+    const std::string shaderDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/";
+    {
+        using namespace primal::graphics;
+        using namespace primal::graphics::rhi;
+
+        primal::utl::vector<std::wstring> extra_args;
+        auto compiled = compile_shader(ddgi_ps_info, shaderDir.c_str(), extra_args);
+        if (!compiled) {
+            std::cerr << "[DDGIBlit] Failed to compile fragmentBlitDDGI shader" << std::endl;
+            return false;
+        }
+
+        u64 byte_code_size = *reinterpret_cast<u64*>(compiled.get());
+        u8* byte_code_ptr = compiled.get() + sizeof(u64) + 16;
+        if (!byte_code_ptr || byte_code_size == 0) {
+            std::cerr << "[DDGIBlit] Invalid byte code for fragmentBlitDDGI" << std::endl;
+            return false;
+        }
+
+        ShaderHandle psHandle = device_->CreateShader(byte_code_ptr, byte_code_size, ShaderStage::Pixel, ddgi_ps_info.function);
+        if (psHandle == handles::INVALID_SHADER) {
+            std::cerr << "[DDGIBlit] Failed to create pixel shader handle" << std::endl;
+            return false;
+        }
+        shaderVariantMap[std::string(ddgi_ps_info.file_name) + ":" + ddgi_ps_info.function] = psHandle;
+    }
+
+    // Vertex shader should already be compiled from the blit pipeline
+    const std::string vsKey = "DeferredLighting.metal:vertexMain";
+    if (shaderVariantMap.find(vsKey) == shaderVariantMap.end()) {
+        std::cerr << "[DDGIBlit] Vertex shader not found in variant map" << std::endl;
+        return false;
+    }
+
+    // --- Descriptor set layout: 3 textures + 3 constant buffers ---
+    {
+        using namespace primal::graphics::rhi;
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // scene color
+            {1, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // depth
+            {2, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // DDGI irradiance 3D
+            {0, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // invViewProjection
+            {1, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // probe origin + spacing
+            {2, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // probe counts
+        };
+        DescriptorSetLayoutDesc layoutDesc{ .bindingCount = 6, .bindings = bindings };
+        blit_ddgi_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    }
+
+    // --- Pipeline layout ---
+    {
+        primal::graphics::rhi::PipelineLayoutDesc plDesc{};
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &blit_ddgi_set_layout_;
+        blit_ddgi_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
+
+    // --- Descriptor set ---
+    {
+        primal::graphics::rhi::DescriptorSetDesc dsDesc{ .layout = blit_ddgi_set_layout_ };
+        blit_ddgi_descriptor_set_ = device_->CreateDescriptorSet(dsDesc);
+    }
+
+    // --- Graphics pipeline ---
+    {
+        using namespace primal::graphics::rhi;
+        const std::string psKey = std::string(ddgi_ps_info.file_name) + ":" + ddgi_ps_info.function;
+        GraphicsPipelineDesc pipeDesc{};
+        pipeDesc.layout = blit_ddgi_layout_;
+        pipeDesc.vertexShader = shaderVariantMap[vsKey];
+        pipeDesc.pixelShader = shaderVariantMap[psKey];
+        pipeDesc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        pipeDesc.renderTargetCount = 1;
+        pipeDesc.depthStencilFormat = DataFormat::Unknown;
+        pipeDesc.enableDepthTest = false;
+        pipeDesc.enableDepthWrite = false;
+        pipeDesc.cullMode = CullMode::None;
+        pipeDesc.vertexAttributes.clear();
+        pipeDesc.vertexBindings.clear();
+        blit_ddgi_pipeline_ = device_->CreateGraphicsPipeline(pipeDesc);
+    }
+
+    if (blit_ddgi_pipeline_ == primal::graphics::rhi::handles::INVALID_PIPELINE) {
+        std::cerr << "[DDGIBlit] Failed to create DDGI blit pipeline" << std::endl;
+        return false;
+    }
+
+    // --- Triple-buffered constant buffers (one per frame, packs all 3 CBs) ---
+    for (int i = 0; i < 3; ++i) {
+        primal::graphics::rhi::BufferDesc cbDesc{};
+        cbDesc.size = 256;
+        cbDesc.type = primal::graphics::rhi::BufferType::Constant;
+        cbDesc.usage = primal::graphics::rhi::GPUMemoryUsage::Dynamic;
+        cbDesc.memoryUsage = primal::graphics::rhi::GPUMemoryUsage::Dynamic;
+        ddgi_probe_cb_[i] = device_->CreateBuffer(cbDesc);
+    }
+
+    std::cout << "[DDGIBlit] DDGI blit pipeline initialized successfully" << std::endl;
     return true;
 }
 
@@ -1156,8 +1318,8 @@ void TestNaniteStreamingPipeline::Run() {
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f4, val);
     bool f4_current = val.current.x > 0.0f;
     if (f4_current && !keyState_.f4_prev) {
-        ssgiVisMode_ = (ssgiVisMode_ + 1) % 3;
-        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only" };
+        ssgiVisMode_ = (ssgiVisMode_ + 1) % 4;
+        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only", "DDGI Composite" };
         std::cout << "[SSGI Vis] Mode: " << modeNames[ssgiVisMode_] << std::endl;
     }
     keyState_.f4_prev = f4_current;
@@ -1264,6 +1426,14 @@ void TestNaniteStreamingPipeline::UpdateTestScene() {
     cameraBuffers_[currentBufferIndex].view_matrix = cameraView_;
     cameraBuffers_[currentBufferIndex].proj_matrix = cameraProj_;
     cameraBuffers_[currentBufferIndex].frame_index = frameCount_;
+
+    // Update GlobalSDF cascade origins based on camera position (for DDGI ray tracing)
+    {
+        auto& globalSDF = nanite::GlobalSDF::Get();
+        if (globalSDF.IsInitialized()) {
+            globalSDF.Update(sceneSnapshot_, frameCount_, camera_.GetPosition());
+        }
+    }
 }
 
 void TestNaniteStreamingPipeline::BuildRenderGraph(
@@ -1617,30 +1787,177 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         );
     }
 
+    // === GLOBAL SDF VOXELIZATION PASS ===
+    // Must run BEFORE DDGI so that SDF cascade textures contain valid distance data.
+    {
+        auto& globalSDF = nanite::GlobalSDF::Get();
+        if (!globalSDF.IsInitialized()) {
+            static bool logOnce = false;
+            if (!logOnce) { std::cerr << "[GlobalSDF] Not initialized — skipping voxelization pass" << std::endl; logOnce = true; }
+        } else if (!globalSDF.IsVoxelizationReady()) {
+            static bool logOnce = false;
+            if (!logOnce) { std::cerr << "[GlobalSDF] Voxelization pipeline not ready — skipping" << std::endl; logOnce = true; }
+        } else {
+            struct SDFVoxData {};
+            graph.AddPass<SDFVoxData>("GlobalSDF_Voxelization",
+                graphics::rendergraph::RGPassType::Compute,
+                graphics::rendergraph::RGPassCategory::Lighting,
+                [](SDFVoxData&, graphics::rendergraph::RenderGraphBuilder& builder) {
+                    builder.SideEffect();
+                },
+                [this, &globalSDF](const SDFVoxData&, graphics::rendergraph::RenderGraphContext& context) {
+                    auto cmd = context.cmdBuffer;
+                    if (!cmd) {
+                        static bool logOnce = false;
+                        if (!logOnce) { std::cerr << "[GlobalSDF] cmdBuffer is null in voxelization pass!" << std::endl; logOnce = true; }
+                        return;
+                    }
+
+                    // Refresh buffer handles — geometry may be uploaded after init
+                    nanite::SDFVoxelizationResources fresh;
+                    fresh.vertex_buffer = gpuDrawPipeline_->GetGlobalVertexBuffer();
+                    fresh.meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();
+                    fresh.meshlet_vertices_buffer = gpuDrawPipeline_->GetGlobalMeshletVerticesBuffer();
+                    fresh.meshlet_triangles_buffer = gpuDrawPipeline_->GetGlobalMeshletTrianglesBuffer();
+                    fresh.cluster_map_buffer = gpuDrawPipeline_->GetClusterMapBuffer();
+                    fresh.instance_data_buffer = gpuDrawPipeline_->GetGlobalInstanceDataBuffer();
+                    fresh.num_instances = sceneSnapshot_.GetInstanceCount();
+
+                    // Log buffer state on first few frames
+                    static u32 logCount = 0;
+                    if (logCount < 5) {
+                        std::cout << "[GlobalSDF] Pass executing: frame=" << frameCount_
+                                  << " num_instances=" << fresh.num_instances
+                                  << " vertex=" << fresh.vertex_buffer
+                                  << " meshlet=" << fresh.meshlet_buffer
+                                  << " instance=" << fresh.instance_data_buffer
+                                  << " cmd=" << (void*)cmd
+                                  << std::endl;
+                        logCount++;
+                    }
+
+                    // Skip if geometry buffers aren't ready yet
+                    if (fresh.num_instances == 0 ||
+                        fresh.vertex_buffer == rhi::handles::INVALID_RESOURCE ||
+                        fresh.meshlet_buffer == rhi::handles::INVALID_RESOURCE ||
+                        fresh.instance_data_buffer == rhi::handles::INVALID_RESOURCE) {
+                        static bool logSkipOnce = false;
+                        if (!logSkipOnce) {
+                            std::cerr << "[GlobalSDF] Skipping: buffers not ready (instances="
+                                      << fresh.num_instances << " vb=" << fresh.vertex_buffer
+                                      << " mb=" << fresh.meshlet_buffer << " ib=" << fresh.instance_data_buffer << ")" << std::endl;
+                            logSkipOnce = true;
+                        }
+                        return;
+                    }
+
+                    // Static scene: only voxelize once after the first successful dispatch
+                    static bool voxCompleted = false;
+                    if (voxCompleted) return;
+
+                    globalSDF.SetVoxelizationResources(fresh);
+
+                    std::cout << "[GlobalSDF] Voxelization dispatch: frame=" << frameCount_
+                              << " num_instances=" << fresh.num_instances << std::endl;
+
+                    for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
+                        globalSDF.DispatchVoxelization(cmd, c);
+                    }
+
+                    voxCompleted = true;
+                    std::cout << "[GlobalSDF] Voxelization completed (static scene, will not re-run)" << std::endl;
+                }
+            );
+        }
+    }
+
+    // === LUMEN DDGI PASS (probe-based GI) ===
+    if (ddgiPass_ && ddgiPass_->IsInitialized() && frameCount_ > 1) {
+        // Get previous frame color for DDGI ray hit radiance sampling
+        auto prevColor = colorHistoryManager_->GetPreviousFrameColor(frameCount_);
+        ResourceHandle prevColorTex = prevColor.is_valid ? prevColor.texture : ssgi_black_texture_;
+        auto ddgiPrevColorHandle = graph.ImportResource("DDGIPrevColor", prevColorTex);
+
+        // Build camera data for DDGI
+        primal::graphics::lumen::DDGICameraData ddgiCameraData;
+        ddgiCameraData.camera_position = camera_.GetPosition();
+        ddgiCameraData.view_matrix = cameraBuffers_[currentBufferIndex].view_matrix;
+        ddgiCameraData.proj_matrix = cameraBuffers_[currentBufferIndex].proj_matrix;
+        {
+            u32 prevIdx = (currentBufferIndex + 2) % 3;
+            ddgiCameraData.prev_view_matrix = cameraBuffers_[prevIdx].view_matrix;
+            ddgiCameraData.prev_proj_matrix = cameraBuffers_[prevIdx].proj_matrix;
+        }
+        ddgiCameraData.frame_index = frameCount_;
+        ddgiCameraData.delta_time = 0.016f;
+
+        auto ddgiOutput = ddgiPass_->AddPass(graph, ddgiPrevColorHandle,
+            ddgiCameraData, currentBufferIndex);
+
+        // DDGI output (irradiance + depth textures) is available for
+        // sampling in downstream passes. For now, the DDGI pass updates
+        // probe data in-place — visualization will be added separately.
+
+        static bool ddgiLogOnce = false;
+        if (!ddgiLogOnce) {
+            std::cout << "[LumenDDGI] DDGI pass integrated into render graph" << std::endl;
+            ddgiLogOnce = true;
+        }
+    }
+
     // === FINAL BLIT PASS (Following TestParticleSponza pattern) ===
     // CRITICAL: This pass MUST depend on SceneRender to ensure Nanite output is ready
     struct BlitPassData {
         rendergraph::RGResourceHandle input;
         rendergraph::RGResourceHandle ssgi_input;
+        rendergraph::RGResourceHandle depth_input;
+        rendergraph::RGResourceHandle ddgi_irradiance;
         rendergraph::RGResourceHandle output;
     };
+
+    // Import depth texture for DDGI blit
+    rendergraph::RGResourceHandle depthBlitHandle;
+    if (ddgiPass_ && ddgiPass_->IsInitialized() &&
+        blit_ddgi_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE) {
+        depthBlitHandle = graph.ImportResource("BlitDepth", sceneDepthTexture_);
+    }
+
+    // Import DDGI irradiance texture for blit
+    rendergraph::RGResourceHandle ddgiIrradianceHandle;
+    if (ddgiPass_ && ddgiPass_->IsInitialized() &&
+        blit_ddgi_pipeline_ != rhi::handles::INVALID_PIPELINE) {
+        auto ddgiTex = ddgiPass_->GetIrradianceTexture(frameCount_);
+        if (ddgiTex != rhi::handles::INVALID_RESOURCE) {
+            ddgiIrradianceHandle = graph.ImportResource("DDGIIrradianceBlit", ddgiTex);
+        }
+    }
 
     graph.AddPass<BlitPassData>("FinalBlit",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
-        [this, backBufferHandle, gpuOutputHandle, ssgiOutputHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+        [this, backBufferHandle, gpuOutputHandle, ssgiOutputHandle, depthBlitHandle, ddgiIrradianceHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
             // Always read scene color as primary input
             data.input = builder.Read(gpuOutputHandle, rhi::ResourceState::ShaderResource);
 
             // Read SSGI output when in composite or SSGI-only mode
-            // ssgiVisMode_: 0=Composite, 1=SSGI only, 2=Scene only
-            bool needSSGI = (ssgiVisMode_ != 2) &&
+            // ssgiVisMode_: 0=Composite, 1=SSGI only, 2=Scene only, 3=DDGI Composite
+            bool needSSGI = (ssgiVisMode_ == 0 || ssgiVisMode_ == 1) &&
                             ssgiOutputHandle.IsValid() &&
                             blit_composite_pipeline_ != rhi::handles::INVALID_PIPELINE;
             if (needSSGI) {
                 data.ssgi_input = builder.Read(ssgiOutputHandle, rhi::ResourceState::ShaderResource);
             } else {
                 data.ssgi_input = rendergraph::RGResourceHandle{};
+            }
+
+            // Read depth + DDGI irradiance when in DDGI mode
+            if (ssgiVisMode_ == 3 && depthBlitHandle.IsValid() && ddgiIrradianceHandle.IsValid()) {
+                data.depth_input = builder.Read(depthBlitHandle, rhi::ResourceState::ShaderResource);
+                data.ddgi_irradiance = builder.Read(ddgiIrradianceHandle, rhi::ResourceState::ShaderResource);
+            } else {
+                data.depth_input = rendergraph::RGResourceHandle{};
+                data.ddgi_irradiance = rendergraph::RGResourceHandle{};
             }
 
             data.output = builder.Write(backBufferHandle, rhi::ResourceState::RenderTarget);
@@ -1654,7 +1971,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             });
             builder.DeclareRenderPass(rpDesc);
         },
-        [this](const BlitPassData& data, graphics::rendergraph::RenderGraphContext& context) {
+        [this, currentBufferIndex](const BlitPassData& data, graphics::rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
 
             cmd->SetViewport({ {0, 0}, {static_cast<float>(renderWidth_), static_cast<float>(renderHeight_)}, 0, 1 });
@@ -1665,6 +1982,101 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             if (!inputResource) return;
             auto inputHandle = inputResource->GetPhysicalHandle();
             if (inputHandle == rhi::handles::INVALID_RESOURCE) return;
+
+            // Mode 3: DDGI Composite — scene + DDGI indirect via DDGI blit pipeline
+            if (ssgiVisMode_ == 3 && data.depth_input.IsValid() && data.ddgi_irradiance.IsValid() &&
+                blit_ddgi_pipeline_ != rhi::handles::INVALID_PIPELINE) {
+                auto depthResource = context.graph->GetResource(data.depth_input);
+                auto ddgiResource = context.graph->GetResource(data.ddgi_irradiance);
+                if (depthResource && ddgiResource) {
+                    auto depthHandle = depthResource->GetPhysicalHandle();
+                    auto ddgiIrrHandle = ddgiResource->GetPhysicalHandle();
+
+                    if (depthHandle != rhi::handles::INVALID_RESOURCE &&
+                        ddgiIrrHandle != rhi::handles::INVALID_RESOURCE) {
+
+                        // Upload constant buffers
+                        u32 cbIdx = currentBufferIndex % 3;
+                        {
+                            // Compute inverse view-projection matrix
+                            primal::math::m4x4 vp = cameraBuffers_[currentBufferIndex].proj_matrix * cameraBuffers_[currentBufferIndex].view_matrix;
+                            primal::math::m4x4 invVP = rhi::math::Inverse(vp);
+
+                            // Get DDGI probe parameters
+                            const auto& ddgiParams = ddgiPass_->GetParams();
+                            const auto& volData = ddgiPass_->GetVolumeData();
+
+                            // Pack CB data:
+                            // buffer(0): invViewProjection (64 bytes)
+                            // buffer(1): probeOrigin_spacing (16 bytes: xyz=origin, w=spacing)
+                            // buffer(2): probeCounts_shCount (16 bytes: xyz=counts, w=SH_COEFF_COUNT=4)
+                            struct DDGIBlitCB {
+                                primal::math::m4x4 inv_view_projection;  // offset 0, 64 bytes
+                                primal::math::v4   probe_origin_spacing; // offset 64, 16 bytes (xyz=origin, w=spacing)
+                                primal::math::v4   probe_counts_sh;     // offset 80, 16 bytes (xyz=counts, w=4)
+                            };
+
+                            auto* cb = static_cast<DDGIBlitCB*>(device_->MapBuffer(ddgi_probe_cb_[cbIdx]));
+                            if (cb) {
+                                cb->inv_view_projection = invVP;
+                                cb->probe_origin_spacing = primal::math::v4{
+                                    volData.ProbeOrigin.x,
+                                    volData.ProbeOrigin.y,
+                                    volData.ProbeOrigin.z,
+                                    ddgiParams.probe_spacing
+                                };
+                                cb->probe_counts_sh = primal::math::v4{
+                                    static_cast<f32>(ddgiParams.probe_count_x),
+                                    static_cast<f32>(ddgiParams.probe_count_y),
+                                    static_cast<f32>(ddgiParams.probe_count_z),
+                                    4.0f  // DDGI_SH_COEFF_COUNT
+                                };
+                                device_->UnmapBuffer(ddgi_probe_cb_[cbIdx]);
+                            }
+                        }
+
+                        // Update descriptor set: 3 textures + 3 constant buffers
+                        // Textures use Metal texture namespace, buffers use buffer namespace
+                        DescriptorData ddgi_params[] = {
+                            {0, DescriptorType::SampledImage,  inputHandle},          // texture(0): scene color
+                            {1, DescriptorType::SampledImage,  depthHandle},          // texture(1): depth
+                            {2, DescriptorType::SampledImage,  ddgiIrrHandle},        // texture(2): DDGI irradiance
+                        };
+                        UpdateDescriptorSet(device_, blit_ddgi_descriptor_set_, ddgi_params, 3);
+
+                        // Buffer bindings with offsets into single CB:
+                        // buffer(0) offset=0  = invViewProjection (64 bytes)
+                        // buffer(1) offset=64 = probeOrigin_spacing (16 bytes)
+                        // buffer(2) offset=80 = probeCounts_shCount (16 bytes)
+                        {
+                            rhi::WriteDescriptorSet bufWrites[3];
+                            rhi::DescriptorBufferInfo bufInfos[3];
+                            for (int i = 0; i < 3; ++i) {
+                                bufWrites[i].dstSet = blit_ddgi_descriptor_set_;
+                                bufWrites[i].dstBinding = i;
+                                bufWrites[i].descriptorCount = 1;
+                                bufWrites[i].descriptorType = DescriptorType::UniformBuffer;
+                                bufWrites[i].bufferInfo = &bufInfos[i];
+                                bufInfos[i].buffer = ddgi_probe_cb_[cbIdx];
+                            }
+                            bufInfos[0].offset = 0;
+                            bufInfos[0].range = 64;
+                            bufInfos[1].offset = 64;
+                            bufInfos[1].range = 16;
+                            bufInfos[2].offset = 80;
+                            bufInfos[2].range = 16;
+                            device_->UpdateDescriptorSets(3, bufWrites);
+                        }
+
+                        cmd->BindGraphicsPipeline(blit_ddgi_pipeline_);
+                        const rhi::DescriptorSetHandle sets[] = { blit_ddgi_descriptor_set_ };
+                        cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_ddgi_layout_, 0, 1, sets, 0, nullptr);
+                        cmd->Draw(3, 0, 1, 0);
+                        return;
+                    }
+                }
+                // Fallback: if DDGI resources invalid, fall through to scene-only blit
+            }
 
             // Mode 2: Scene only — simple blit of scene color
             if (ssgiVisMode_ == 2 || !data.ssgi_input.IsValid()) {
@@ -1849,6 +2261,14 @@ void TestNaniteStreamingPipeline::Shutdown() {
         cullingPipeline_->Shutdown();
     }
 
+    // Shutdown GlobalSDF
+    {
+        auto& globalSDF = nanite::GlobalSDF::Get();
+        if (globalSDF.IsInitialized()) {
+            globalSDF.Shutdown();
+        }
+    }
+
     if (resourceManager_) {
         resourceManager_->Shutdown();
     }
@@ -1867,6 +2287,12 @@ void TestNaniteStreamingPipeline::Shutdown() {
     if (ssgiPass_) {
         ssgiPass_->Shutdown();
         ssgiPass_.reset();
+    }
+
+    // Cleanup DDGI resources
+    if (ddgiPass_) {
+        ddgiPass_->Shutdown();
+        ddgiPass_.reset();
     }
     if (colorHistoryManager_) {
         colorHistoryManager_->Shutdown();
@@ -2023,10 +2449,61 @@ void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
         totalClusterCount += resource->cluster_data.cluster_count;
     }
 
-    // Only print summary
+    // Compute instance bounds distribution from the snapshot GPU buffer
     std::cout << "\n=== Scene Summary ===" << std::endl;
     std::cout << "  Valid Instances: " << validInstanceCount << " out of " << proxies.size() << std::endl;
     std::cout << "  Total Clusters: " << totalClusterCount << std::endl;
+
+    // Print instance bounds distribution from the actual GPU buffer
+    {
+        auto* mapped = static_cast<graphics::rhi::ResourceHandle*>(
+            // Read the instance data buffer to get bounds distribution
+            nullptr);
+        // Use the scene snapshot's instance data directly
+        const auto& snapshotInstances = sceneSnapshot_.GetInstanceData();
+        if (!snapshotInstances.empty()) {
+            f32 minCX = 1e10f, minCY = 1e10f, minCZ = 1e10f;
+            f32 maxCX = -1e10f, maxCY = -1e10f, maxCZ = -1e10f;
+            f32 minR = 1e10f, maxR = 0.0f, avgR = 0.0f;
+
+            for (const auto& inst : snapshotInstances) {
+                minCX = std::min(minCX, inst.bounds_center.x);
+                minCY = std::min(minCY, inst.bounds_center.y);
+                minCZ = std::min(minCZ, inst.bounds_center.z);
+                maxCX = std::max(maxCX, inst.bounds_center.x);
+                maxCY = std::max(maxCY, inst.bounds_center.y);
+                maxCZ = std::max(maxCZ, inst.bounds_center.z);
+                minR = std::min(minR, inst.bounds_radius);
+                maxR = std::max(maxR, inst.bounds_radius);
+                avgR += inst.bounds_radius;
+            }
+            avgR /= (f32)snapshotInstances.size();
+
+            std::cout << "\n  Instance Bounds Distribution:" << std::endl;
+            std::cout << "    Count: " << snapshotInstances.size() << std::endl;
+            std::cout << "    bounds_center X: [" << minCX << ", " << maxCX << "]" << std::endl;
+            std::cout << "    bounds_center Y: [" << minCY << ", " << maxCY << "]" << std::endl;
+            std::cout << "    bounds_center Z: [" << minCZ << ", " << maxCZ << "]" << std::endl;
+            std::cout << "    bounds_radius: min=" << minR << " max=" << maxR << " avg=" << avgR << std::endl;
+            std::cout << "    Scene extent X: " << (maxCX - minCX) << std::endl;
+            std::cout << "    Scene extent Y: " << (maxCY - minCY) << std::endl;
+            std::cout << "    Scene extent Z: " << (maxCZ - minCZ) << std::endl;
+
+            // Print first 5 instances' bounds for spot check
+            std::cout << "\n    First 5 instances:" << std::endl;
+            for (u32 i = 0; i < std::min((u32)5, (u32)snapshotInstances.size()); ++i) {
+                const auto& inst = snapshotInstances[i];
+                std::cout << "      [" << i << "] center=("
+                          << inst.bounds_center.x << ", "
+                          << inst.bounds_center.y << ", "
+                          << inst.bounds_center.z << ") radius="
+                          << inst.bounds_radius
+                          << " cluster_start=" << inst.cluster_start
+                          << " cluster_count=" << inst.cluster_count
+                          << std::endl;
+            }
+        }
+    }
     std::cout << "=== End Summary ===\n" << std::endl;
 }
 
