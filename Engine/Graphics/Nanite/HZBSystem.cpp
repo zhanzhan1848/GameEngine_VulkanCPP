@@ -22,10 +22,10 @@ bool HZBSystem::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
     device_ = device;
     config_ = config;
 
-    std::cout << "[HZBSystem] Initializing..." << std::endl;
-    std::cout << "  Max Resolution: " << config_.max_width << "x" << config_.max_height << std::endl;
-    std::cout << "  Min Mip Size: " << config_.min_mip_size << "x" << config_.min_mip_size << std::endl;
-    std::cout << "  GPU Generation: " << (config_.generate_on_gpu ? "Enabled" : "Disabled") << std::endl;
+//    std::cout << "[HZBSystem] Initializing..." << std::endl;
+//    std::cout << "  Max Resolution: " << config_.max_width << "x" << config_.max_height << std::endl;
+//    std::cout << "  Min Mip Size: " << config_.min_mip_size << "x" << config_.min_mip_size << std::endl;
+//    std::cout << "  GPU Generation: " << (config_.generate_on_gpu ? "Enabled" : "Disabled") << std::endl;
 
     if (!CreateHZBResources()) {
         std::cerr << "[HZBSystem] Failed to create HZB resources" << std::endl;
@@ -38,13 +38,13 @@ bool HZBSystem::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
     }
 
     if (config_.generate_on_gpu && !CreateHZBComputePipeline()) {
-        std::cout << "[HZBSystem] GPU pipeline creation failed, falling back to CPU" << std::endl;
+//        std::cout << "[HZBSystem] GPU pipeline creation failed, falling back to CPU" << std::endl;
         config_.generate_on_gpu = false;
     }
 
     initialized_ = true;
-    std::cout << "[HZBSystem] Initialized successfully" << std::endl;
-    std::cout << "  Mip Levels: " << mip_levels_ << std::endl;
+//    std::cout << "[HZBSystem] Initialized successfully" << std::endl;
+//    std::cout << "  Mip Levels: " << mip_levels_ << std::endl;
 
     return true;
 }
@@ -52,7 +52,7 @@ bool HZBSystem::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
 void HZBSystem::Shutdown() {
     if (!initialized_) return;
 
-    std::cout << "[HZBSystem] Shutting down..." << std::endl;
+//    std::cout << "[HZBSystem] Shutting down..." << std::endl;
 
     // Cleanup resources
     if (device_) {
@@ -68,7 +68,7 @@ void HZBSystem::Shutdown() {
 }
 
 bool HZBSystem::CreateHZBResources() {
-    std::cout << "[HZBSystem] Creating HZB resources..." << std::endl;
+//    std::cout << "[HZBSystem] Creating HZB resources..." << std::endl;
 
     // Calculate number of mip levels
     u32 max_dim = std::max(config_.max_width, config_.max_height);
@@ -82,7 +82,7 @@ bool HZBSystem::CreateHZBResources() {
         return false;
     }
 
-    std::cout << "[HZBSystem] HZB resources created successfully" << std::endl;
+//    std::cout << "[HZBSystem] HZB resources created successfully" << std::endl;
     return true;
 }
 
@@ -100,8 +100,8 @@ bool HZBSystem::CreateHZBTexture() {
         return false;
     }
 
-    std::cout << "[HZBSystem] HZB texture created: " << config_.max_width << "x" << config_.max_height
-              << " with " << mip_levels_ << " mip levels" << std::endl;
+//    std::cout << "[HZBSystem] HZB texture created: " << config_.max_width << "x" << config_.max_height
+//              << " with " << mip_levels_ << " mip levels" << std::endl;
 
     return true;
 }
@@ -126,7 +126,7 @@ bool HZBSystem::CreateHZBSampler() {
 }
 
 bool HZBSystem::CreateHZBComputePipeline() {
-    std::cout << "[HZBSystem] ========== Creating HZB Compute Pipeline ==========" << std::endl;
+//    std::cout << "[HZBSystem] ========== Creating HZB Compute Pipeline ==========" << std::endl;
 
     rhi::DescriptorSetLayoutBinding hzbBindings[] = {
         { 0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute, nullptr },
@@ -143,7 +143,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
         std::cerr << "[HZBSystem] ❌ Failed to create HZB descriptor layout" << std::endl;
         return false;
     }
-    std::cout << "[HZBSystem] ✅ HZB descriptor layout created" << std::endl;
+//    std::cout << "[HZBSystem] ✅ HZB descriptor layout created" << std::endl;
 
     // Create pipeline layout
     rhi::PipelineLayoutDesc pipelineLayoutDesc{
@@ -161,20 +161,20 @@ bool HZBSystem::CreateHZBComputePipeline() {
 
     // Load HZB generation Metal shader
     std::string shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/HZBGeneration.metal";
-    std::cout << "[HZBSystem] Loading shader from: " << shaderPath << std::endl;
+//    std::cout << "[HZBSystem] Loading shader from: " << shaderPath << std::endl;
 
     std::ifstream shaderFile(shaderPath);
     if (!shaderFile.is_open()) {
         std::cerr << "[HZBSystem] ❌ Failed to open shader file: " << shaderPath << std::endl;
         return false;
     }
-    std::cout << "[HZBSystem] ✅ Shader file opened successfully" << std::endl;
+//    std::cout << "[HZBSystem] ✅ Shader file opened successfully" << std::endl;
 
     std::string shaderCode((std::istreambuf_iterator<char>(shaderFile)),
                           std::istreambuf_iterator<char>());
     shaderFile.close();
 
-    std::cout << "[HZBSystem] Shader code size: " << shaderCode.size() << " bytes" << std::endl;
+//    std::cout << "[HZBSystem] Shader code size: " << shaderCode.size() << " bytes" << std::endl;
 
     rhi::ShaderHandle copyShader = device_->CreateShader(
         shaderCode.data(),
@@ -216,8 +216,8 @@ bool HZBSystem::CreateHZBComputePipeline() {
         return false;
     }
 
-    std::cout << "[HZBSystem] ✅ HZB compute pipeline created successfully" << std::endl;
-    std::cout << "[HZBSystem] ========== HZB Compute Pipeline Creation Complete ==========" << std::endl;
+//    std::cout << "[HZBSystem] ✅ HZB compute pipeline created successfully" << std::endl;
+//    std::cout << "[HZBSystem] ========== HZB Compute Pipeline Creation Complete ==========" << std::endl;
     return true;
 }
 
@@ -234,18 +234,18 @@ HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
     result.hzb_texture = hzb_texture_;
     result.mip_levels = mip_levels_;
 
-    std::cout << "[HZBSystem] BuildHZB called: generate_on_gpu=" << config_.generate_on_gpu
-              << ", cmd_buffer=" << (cmd_buffer ? "valid" : "null") << std::endl;
+//    std::cout << "[HZBSystem] BuildHZB called: generate_on_gpu=" << config_.generate_on_gpu
+//              << ", cmd_buffer=" << (cmd_buffer ? "valid" : "null") << std::endl;
 
     if (config_.generate_on_gpu && cmd_buffer) {
-        std::cout << "[HZBSystem] Attempting GPU HZB generation..." << std::endl;
+//        std::cout << "[HZBSystem] Attempting GPU HZB generation..." << std::endl;
         if (!GenerateHZBOnGPU(cmd_buffer, depth_texture)) {
             std::cerr << "[HZBSystem] ❌ GPU HZB generation failed, falling back to CPU" << std::endl;
             GenerateHZBOnCPU(depth_texture);
         }
     } else {
-        std::cout << "[HZBSystem] Using CPU HZB generation (generate_on_gpu=" << config_.generate_on_gpu
-                  << ", cmd_buffer=" << (cmd_buffer ? "valid" : "null") << ")" << std::endl;
+//        std::cout << "[HZBSystem] Using CPU HZB generation (generate_on_gpu=" << config_.generate_on_gpu
+//                  << ", cmd_buffer=" << (cmd_buffer ? "valid" : "null") << ")" << std::endl;
         GenerateHZBOnCPU(depth_texture);
     }
 
@@ -254,13 +254,13 @@ HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
 
     last_result_ = result;
 
-    std::cout << "[HZBSystem] HZB built in " << result.build_time_ms << " ms" << std::endl;
+//    std::cout << "[HZBSystem] HZB built in " << result.build_time_ms << " ms" << std::endl;
 
     return result;
 }
 
 bool HZBSystem::GenerateHZBOnCPU(rhi::ResourceHandle depth_texture) {
-    std::cout << "[HZBSystem] CPU HZB generation - PLACEHOLDER" << std::endl;
+//    std::cout << "[HZBSystem] CPU HZB generation - PLACEHOLDER" << std::endl;
 
     // TODO: Implement CPU-based HZB generation
     // 1. Read depth texture data
@@ -272,26 +272,26 @@ bool HZBSystem::GenerateHZBOnCPU(rhi::ResourceHandle depth_texture) {
 }
 
 bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::ResourceHandle depth_texture) {
-    std::cout << "[HZBSystem] ========== GPU HZB Generation Start ==========" << std::endl;
+//    std::cout << "[HZBSystem] ========== GPU HZB Generation Start ==========" << std::endl;
 
     if (hzb_copy_pipeline_ == rhi::handles::INVALID_PIPELINE ||
         hzb_downsample_pipeline_ == rhi::handles::INVALID_PIPELINE) {
         std::cerr << "[HZBSystem] ❌ HZB compute pipelines not available" << std::endl;
         return false;
     }
-    std::cout << "[HZBSystem] ✅ HZB compute pipelines are valid" << std::endl;
+//    std::cout << "[HZBSystem] ✅ HZB compute pipelines are valid" << std::endl;
 
     if (depth_texture == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[HZBSystem] ❌ Invalid depth texture" << std::endl;
         return false;
     }
-    std::cout << "[HZBSystem] ✅ Depth texture is valid: " << depth_texture << std::endl;
+//    std::cout << "[HZBSystem] ✅ Depth texture is valid: " << depth_texture << std::endl;
 
     if (hzb_texture_ == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[HZBSystem] ❌ HZB texture is invalid" << std::endl;
         return false;
     }
-    std::cout << "[HZBSystem] ✅ HZB texture is valid: " << hzb_texture_ << std::endl;
+//    std::cout << "[HZBSystem] ✅ HZB texture is valid: " << hzb_texture_ << std::endl;
 
     std::vector<rhi::ResourceHandle> temporaryViews;
 
@@ -456,7 +456,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 }
 
 bool HZBSystem::UpdateConfig(const Config& new_config) {
-    std::cout << "[HZBSystem] Updating configuration..." << std::endl;
+//    std::cout << "[HZBSystem] Updating configuration..." << std::endl;
 
     // Check if dimensions changed
     if (new_config.max_width != config_.max_width ||
@@ -552,10 +552,10 @@ HZBOcclusionResult HZBOcclusionCulling::TestBatch(const std::vector<std::pair<ma
     auto end_time = std::chrono::high_resolution_clock::now();
     result.culling_time_ms = std::chrono::duration<float, std::milli>(end_time - start_time).count();
 
-    std::cout << "[HZBOcclusion] Tested " << result.total_objects_tested
-              << " objects: " << result.objects_visible << " visible, "
-              << result.objects_occluded << " occluded ("
-              << result.culling_time_ms << " ms)" << std::endl;
+//    std::cout << "[HZBOcclusion] Tested " << result.total_objects_tested
+//              << " objects: " << result.objects_visible << " visible, "
+//              << result.objects_occluded << " occluded ("
+//              << result.culling_time_ms << " ms)" << std::endl;
 
     return result;
 }

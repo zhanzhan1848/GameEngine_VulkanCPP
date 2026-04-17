@@ -447,7 +447,27 @@ void MetalCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
         MTL::RenderCommandEncoder* encoder = mtlCommandBuffer_->renderCommandEncoder(passDesc);
         currentEncoder_ = encoder;
         currentEncoderType_ = EncoderType::Render;
-        
+
+        if (!encoder) {
+            static int nullEncoderCount = 0;
+            nullEncoderCount++;
+            if (nullEncoderCount <= 3) {
+                std::cerr << "[MetalCommandBuffer] CRITICAL: renderCommandEncoder returned nilULL!" << std::endl;
+                std::cerr << "  This means the render pass will be completely silent (no draws, no depth writes)." << std::endl;
+            }
+        } else {
+            // DIAGNOSTIC: Check depth attachment in the descriptor
+            auto* depthDesc = passDesc->depthAttachment();
+            if (depthDesc) {
+                static int okCount = 0;
+                okCount++;
+                if (okCount <= 3) {
+                    std::cout << "[MetalCMD] BeginRenderPass OK: depthTex=" << (void*)depthDesc->texture()
+                              << " storeAction=" << (int)depthDesc->storeAction() << std::endl;
+                }
+            }
+        }
+
         // Initial state setup (viewport, scissor)
         const auto& desc = pass->GetDesc();
         SetViewport(desc.viewport);
@@ -1001,23 +1021,20 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
 
         if (mtlBuffer && mtlBuffer->GetNativeBuffer()) {
             MTL::RenderCommandEncoder* encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
-            MTL::Buffer* nativeBuffer = mtlBuffer->GetNativeBuffer();
 
-            // DEBUG: Read indirect arguments to see what we're actually drawing
-            void* mappedData = metalDevice.MapBuffer(buffer);
-            MTL::DrawPrimitivesIndirectArguments* indirectArgs = reinterpret_cast<MTL::DrawPrimitivesIndirectArguments*>(mappedData);
-
-            if (indirectArgs) {
-                // std::cout << "[Metal] DrawIndirect called with buffer: " << buffer << " offset: " << offset << std::endl;
-                // std::cout << "  VertexCount: " << indirectArgs->vertexCount << std::endl;
-                // std::cout << "  InstanceCount: " << indirectArgs->instanceCount << std::endl;
-                // std::cout << "  VertexStart: " << indirectArgs->vertexStart << std::endl;
-                // Note: Metal doesn't have instanceStart field
-                metalDevice.UnmapBuffer(buffer);
+            // DIAGNOSTIC: Check if encoder is valid
+            if (!encoder) {
+                static int nullEncoderDrawCount = 0;
+                nullEncoderDrawCount++;
+                if (nullEncoderDrawCount <= 3) {
+                    std::cerr << "[MetalCMD] DrawIndirect ERROR: encoder is NULL! Draws will be silently dropped." << std::endl;
+                }
+                return;
             }
 
+            MTL::Buffer* nativeBuffer = mtlBuffer->GetNativeBuffer();
+
             // Use Metal's proper indirect drawing API
-            // This allows GPU to make draw decisions autonomously
             for (u32 i = 0; i < drawCount; ++i) {
                 encoder->drawPrimitives(
                     currentPrimitiveType_,
@@ -1025,7 +1042,24 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
                     offset + i * sizeof(MTL::DrawPrimitivesIndirectArguments)
                 );
             }
-            // std::cout << "[Metal] DrawPrimitives indirect called" << std::endl;
+
+            // DIAGNOSTIC: Verify draw call on first few frames
+            {
+                static u32 drawDiagCount = 0;
+                drawDiagCount++;
+                if (drawDiagCount <= 5) {
+                    // Read indirect args from CPU (this is the buffer from 2 frames ago)
+                    void* mapped = nativeBuffer->contents();
+                    if (mapped) {
+                        u32* args = reinterpret_cast<u32*>((u8*)mapped + offset);
+                        std::cout << "[MetalCMD] DrawIndirect #" << drawDiagCount
+                                  << " vertexStart=" << args[0]
+                                  << " vertexCount=" << args[1]
+                                  << " instanceCount=" << args[2]
+                                  << " instanceStart=" << args[3] << std::endl;
+                    }
+                }
+            }
         } else {
             // std::cerr << "[Metal] DrawIndirect ERROR: Invalid buffer or native buffer is null!" << std::endl;
             if (!mtlBuffer) {
@@ -1463,9 +1497,14 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
 
         MTL::Origin dstOrigin(region.dstOffsets[0].x, region.dstOffsets[0].y, region.dstOffsets[0].z);
 
-        // Check if formats match - Metal's blit encoder requires compatible formats
+        // Metal's blit encoder can copy between formats as long as the block size matches.
+        // Depth32Float (32-bit) <-> R32Float (32-bit) is a common cross-format copy needed
+        // for sampling depth in shaders (Metal TBDR cannot sample D32 directly).
         auto srcFmt = srcTex->GetNativeTexture()->pixelFormat();
         auto dstFmt = dstTex->GetNativeTexture()->pixelFormat();
+
+        // Metal docs: "Depth and stencil pixel formats are not compatible with color pixel formats."
+        // D32_Float -> R32_Float requires a compute shader (e.g. ShadowBlit.metal), NOT the blit encoder.
         if (srcFmt == dstFmt) {
             encoder->copyFromTexture(
                 srcTex->GetNativeTexture(),
@@ -1479,9 +1518,13 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                 dstOrigin
             );
         } else {
-            std::cerr << "[MetalCommandBuffer] BlitTexture: Format mismatch! src="
+            // CRITICAL: Metal blit encoder does NOT support depth<->color format copies
+            // even when byte sizes match (D32_Float <-> R32_Float).
+            // Use ExecuteGBufferDepthBlit() compute shader instead.
+            std::cerr << "[MetalCommandBuffer] BlitTexture: Incompatible formats src="
                       << (int)srcFmt << " dst=" << (int)dstFmt
-                      << " — cannot use blit encoder, copy SKIPPED" << std::endl;
+                      << " — Metal does not support depth<->color copies via blit encoder. "
+                      << "Use compute shader (ShadowBlit.metal) instead." << std::endl;
         }
     }
 

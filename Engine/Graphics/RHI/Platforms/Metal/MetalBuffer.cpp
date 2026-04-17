@@ -129,6 +129,21 @@ bool MetalBuffer::Initialize() {
         mtlBuffer_->setLabel(name);
     }
 
+    // CRITICAL FIX: Zero-initialize StorageModeShared buffers.
+    // Metal's newBuffer/newBufferFromHeap do NOT guarantee zero-initialized memory.
+    // For GPU-driven pipelines with triple buffering, the first frame reads from a
+    // buffer slot that hasn't been written to yet by the GPU. Garbage data in that
+    // buffer causes non-deterministic rendering (some geometry disappears) that
+    // varies between program runs due to ASLR affecting heap address layout.
+    // Only zero Shared-mode buffers (CPU/GPU coherent) since Private buffers
+    // are not CPU-accessible and must be written via GPU commands.
+    if (options & MTL::ResourceStorageModeShared) {
+        void* contents = mtlBuffer_->contents();
+        if (contents) {
+            memset(contents, 0, desc_.size);
+        }
+    }
+
     state_ = ResourceState::Ready;
     // std::cout << "[MetalBuffer] Initialized at address: " << this << " Handle: " << handle_ << std::endl;
     return true;

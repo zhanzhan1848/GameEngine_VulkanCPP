@@ -231,7 +231,15 @@ vertex VertexOut gpu_driven_vertex_shader(
     float3 worldNormal = normalize(normalMatrix * normal);
     float3 worldTangent = normalize(normalMatrix * tangent);
 
-    // Calculate Bitangent with correct sign for normal mapping
+    // Degenerate check FIRST: if tangent is parallel to normal, rebuild frame
+    if (abs(dot(worldTangent, worldNormal)) > 0.999) {
+        float3 up = abs(worldNormal.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
+        worldTangent = normalize(cross(up, worldNormal));
+    } else {
+        // Gram-Schmidt: ensure tangent is orthogonal to normal (safe now)
+        worldTangent = normalize(worldTangent - dot(worldTangent, worldNormal) * worldNormal);
+    }
+
     float3 worldBitangent = cross(worldNormal, worldTangent) * tangentSign;
 
     // Output material data

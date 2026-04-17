@@ -182,7 +182,7 @@ namespace {
         }
 
         // 🎨 DEBUG: Print original texture size
-        std::cout << "[TestNanite] Loaded texture: " << path << " (" << width << "x" << height << ")" << std::endl;
+        //std::cout << "[TestNanite] Loaded texture: " << path << " (" << width << "x" << height << ")" << std::endl;
 
         // 🎨 NEW: 统一缩放到 1024x1024
         constexpr int TARGET_SIZE = 1024;
@@ -191,8 +191,8 @@ namespace {
         int final_height = height;
 
         if (width != TARGET_SIZE || height != TARGET_SIZE) {
-            std::cout << "[TestNanite] Resizing texture from " << width << "x" << height
-                      << " to " << TARGET_SIZE << "x" << TARGET_SIZE << std::endl;
+            //std::cout << "[TestNanite] Resizing texture from " << width << "x" << height
+                      //<< " to " << TARGET_SIZE << "x" << TARGET_SIZE << std::endl;
 
             final_data = ResizeTextureBilinear(data, width, height, TARGET_SIZE, TARGET_SIZE);
             final_width = TARGET_SIZE;
@@ -250,7 +250,7 @@ primal::game_entity::entity create_one_game_entity(primal::math::v3 position = p
 }
 
 bool TestNaniteStreamingPipeline::Initialize() {
-    std::cout << "DEBUG: TestNaniteStreamingPipeline INITIALIZING " << __DATE__ << " " << __TIME__ << std::endl;
+    //std::cout << "DEBUG: TestNaniteStreamingPipeline INITIALIZING " << __DATE__ << " " << __TIME__ << std::endl;
 
     if (!primal::jobsystem::JobSystem::Initialize(primal::jobsystem::JobSchedulerConfig::Default())) {
         std::cerr << "Failed to initialize JobSystem" << std::endl;
@@ -284,10 +284,10 @@ bool TestNaniteStreamingPipeline::Initialize() {
         return false;
     }
 
-    std::cout << "TestNaniteStreamingPipeline Initialized Successfully" << std::endl;
-    std::cout << "  - Streaming Pool Size: " << testConfig_.streaming_pool_size_mb << " MB" << std::endl;
-    std::cout << "  - Max Clusters: " << testConfig_.max_clusters << std::endl;
-    std::cout << "  - Max Requests/Frame: " << testConfig_.max_requests_per_frame << std::endl;
+    //std::cout << "TestNaniteStreamingPipeline Initialized Successfully" << std::endl;
+    //std::cout << "  - Streaming Pool Size: " << testConfig_.streaming_pool_size_mb << " MB" << std::endl;
+    //std::cout << "  - Max Clusters: " << testConfig_.max_clusters << std::endl;
+    //std::cout << "  - Max Requests/Frame: " << testConfig_.max_requests_per_frame << std::endl;
 
     // Print all instance bounds information
     PrintAllInstanceBounds();
@@ -296,7 +296,7 @@ bool TestNaniteStreamingPipeline::Initialize() {
 }
 
 bool TestNaniteStreamingPipeline::VerifyMeshletUVSupport() {
-    std::cout << "[TestNanite] Verifying meshlet UV support..." << std::endl;
+    //std::cout << "[TestNanite] Verifying meshlet UV support..." << std::endl;
 
     // Check RHIGpuMesh vertex structure
     for (const auto& meshInfo : sceneMeshes_) {
@@ -327,13 +327,13 @@ bool TestNaniteStreamingPipeline::VerifyMeshletUVSupport() {
             return false;
         }
 
-        std::cout << "  Mesh: " << meshInfo.name
-                  << ", Vertices: " << vertexCount
-                  << ", ElementBuffer: " << (elementBuffer != primal::graphics::rhi::handles::INVALID_RESOURCE ? "OK" : "MISSING")
-                  << std::endl;
+        //std::cout << "  Mesh: " << meshInfo.name
+                  //<< ", Vertices: " << vertexCount
+                  //<< ", ElementBuffer: " << (elementBuffer != primal::graphics::rhi::handles::INVALID_RESOURCE ? "OK" : "MISSING")
+                  //<< std::endl;
     }
 
-    std::cout << "  ✓ Meshlet vertex structure verification complete" << std::endl;
+    //std::cout << "  ✓ Meshlet vertex structure verification complete" << std::endl;
     return true;
 }
 
@@ -394,16 +394,16 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     visibilityConfig.format = graphics::rhi::DataFormat::R32_UInt;
     visibilityConfig.enable_depth = true;
 
-    std::cout << "[TestNanite] Initializing GPUDrivenDrawPipeline..." << std::endl;
+    //std::cout << "[TestNanite] Initializing GPUDrivenDrawPipeline..." << std::endl;
     if (!gpuDrawPipeline_->Initialize(device_, binningConfig, visibilityConfig)) {
         std::cerr << "Failed to initialize GPU driven draw pipeline" << std::endl;
         return false;
     }
-    std::cout << "[TestNanite] GPUDrivenDrawPipeline initialized successfully" << std::endl;
+    //std::cout << "[TestNanite] GPUDrivenDrawPipeline initialized successfully" << std::endl;
 
     // Now initialize culling pipeline (after GPU draw pipeline is ready)
     cullingPipeline_ = &graphics::nanite::GPUCullingPipeline::Get();
-    std::cout << "[TestNanite] GPUCullingPipeline singleton obtained: " << (void*)cullingPipeline_ << std::endl;
+    //std::cout << "[TestNanite] GPUCullingPipeline singleton obtained: " << (void*)cullingPipeline_ << std::endl;
 
     graphics::nanite::CullingConfig cullingConfig;
     cullingConfig.max_clusters_per_dispatch = testConfig_.max_clusters;
@@ -414,23 +414,23 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     cullingConfig.enable_debug_output = true; // 🔥 ENABLE: Debug output to see backface culling statistics
     // cullingConfig.enable_lod_selection = testConfig_.enable_lod_selection;
 
-    std::cout << "[TestNanite] Initializing GPUCullingPipeline..." << std::endl;
+    //std::cout << "[TestNanite] Initializing GPUCullingPipeline..." << std::endl;
     if (!cullingPipeline_->Initialize(device_, cullingConfig)) {
         std::cerr << "Failed to initialize GPU culling pipeline" << std::endl;
         return false;
     }
-    std::cout << "[TestNanite] GPUCullingPipeline initialized, IsInitialized=" << cullingPipeline_->IsInitialized() << std::endl;
+    //std::cout << "[TestNanite] GPUCullingPipeline initialized, IsInitialized=" << cullingPipeline_->IsInitialized() << std::endl;
 
     // Enable GPU culling debug output to diagnose culling issues
     cullingPipeline_->EnableDebugOutput(true);
-    std::cout << "[TestNanite] GPU culling debug output ENABLED" << std::endl;
+    //std::cout << "[TestNanite] GPU culling debug output ENABLED" << std::endl;
 
     // CRITICAL: Connect culling pipeline to draw pipeline for proper buffer access
     gpuDrawPipeline_->SetCullingPipeline(cullingPipeline_);
     cullingPipeline_->SetGPUDrawPipeline(gpuDrawPipeline_);
 
     // CONNECT HZB AND VISIBILITY BUFFER SYSTEMS TO GPU DRIVEN PIPELINE - NOW ENABLED
-    std::cout << "[TestNanite] Connecting HZB and Visibility Buffer systems to GPU pipeline..." << std::endl;
+    //std::cout << "[TestNanite] Connecting HZB and Visibility Buffer systems to GPU pipeline..." << std::endl;
 
     graphics::nanite::NaniteStreamingConfig streamingConfig;
     streamingConfig.page_pool_size_bytes = testConfig_.streaming_pool_size_mb * 1024 * 1024;
@@ -471,13 +471,13 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         std::cerr << "Failed to initialize HZB system" << std::endl;
         return false;
     }
-    std::cout << "[TestNanite] HZB System initialized successfully" << std::endl;
+    //std::cout << "[TestNanite] HZB System initialized successfully" << std::endl;
 
     // 🔥 CRITICAL FIX: Connect HZB system AFTER it's initialized
     // This ensures descriptor sets can access valid HZB texture
     gpuDrawPipeline_->SetHZBSystem(hzbSystem_.get());
     cullingPipeline_->SetHZBSystem(hzbSystem_.get());
-    std::cout << "[TestNanite] HZB System connected to GPU pipeline!" << std::endl;
+    //std::cout << "[TestNanite] HZB System connected to GPU pipeline!" << std::endl;
 
     // Initialize Depth History Manager for triple-buffered depth management
     depthHistoryManager_ = std::make_unique<DepthHistoryManager>();
@@ -491,7 +491,7 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         std::cerr << "Failed to initialize depth history manager" << std::endl;
         return false;
     }
-    std::cout << "[TestNanite] Depth History Manager initialized successfully" << std::endl;
+    //std::cout << "[TestNanite] Depth History Manager initialized successfully" << std::endl;
 
     // Initialize GlobalSDF for DDGI ray tracing
     {
@@ -503,7 +503,7 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         sdfConfig.voxel_size_base = 1.0f;
 
         if (globalSDF.Initialize(device_, sdfConfig)) {
-            std::cout << "[TestNanite] GlobalSDF initialized (1 cascade, 60³, voxel=1.0)" << std::endl;
+            //std::cout << "[TestNanite] GlobalSDF initialized (1 cascade, 60³, voxel=1.0)" << std::endl;
         } else {
             std::cerr << "[TestNanite] Warning: GlobalSDF initialization failed — DDGI trace will be skipped" << std::endl;
         }
@@ -523,7 +523,7 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
             voxResources.num_instances = sceneSnapshot_.GetInstanceCount();
 
             if (globalSDF.InitVoxelization(voxResources)) {
-                std::cout << "[TestNanite] GlobalSDF voxelization pipeline initialized" << std::endl;
+                //std::cout << "[TestNanite] GlobalSDF voxelization pipeline initialized" << std::endl;
             } else {
                 std::cerr << "[TestNanite] Warning: GlobalSDF voxelization init failed" << std::endl;
             }
@@ -542,10 +542,10 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     //     std::cerr << "Failed to initialize visibility buffer system" << std::endl;
     //     return false;
     // }
-    std::cout << "[TestNanite] Visibility Buffer System DISABLED" << std::endl;
+    //std::cout << "[TestNanite] Visibility Buffer System DISABLED" << std::endl;
 
     // Initialize Blit Pipeline for final presentation
-    std::cout << "[TestNanite] Initializing Blit Pipeline..." << std::endl;
+    //std::cout << "[TestNanite] Initializing Blit Pipeline..." << std::endl;
 
     // Create descriptor set layout for blit
     primal::graphics::rhi::DescriptorSetLayoutBinding blit_bindings[] = {
@@ -583,7 +583,7 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     auto testShaderPath = getShaderPath();
 
     // Debug: Print shader path
-    std::cout << "[TestNanite] Using shader path: " << testShaderPath << std::endl;
+    //std::cout << "[TestNanite] Using shader path: " << testShaderPath << std::endl;
 
     // Compile shaders (following TestParticleSponza pattern - pass directory path, not full file path)
     auto CompileShader = [&](shader_file_info info) -> bool {
@@ -646,7 +646,7 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         return false;
     }
 
-    std::cout << "[TestNanite] Blit Pipeline initialized successfully" << std::endl;
+    //std::cout << "[TestNanite] Blit Pipeline initialized successfully" << std::endl;
 
     // === Composite Blit Pipeline (scene + SSGI) ===
     {
@@ -686,7 +686,7 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
             if (blit_composite_pipeline_ == primal::graphics::rhi::handles::INVALID_PIPELINE) {
                 std::cerr << "[TestNanite] Warning: Failed to create composite blit pipeline" << std::endl;
             } else {
-                std::cout << "[TestNanite] Composite Blit Pipeline initialized successfully" << std::endl;
+                //std::cout << "[TestNanite] Composite Blit Pipeline initialized successfully" << std::endl;
             }
         }
     }
@@ -701,11 +701,141 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         std::cerr << "[TestNanite] Warning: DDGI blit pipeline initialization failed" << std::endl;
     }
 
+    // Shadow mapping initialization
+    if (gpuDrawPipeline_) {
+        gpuDrawPipeline_->InitializeShadowResources(
+            sceneSnapshot_.GetInstanceCount(), 100000);
+    }
+
+    // === Deferred PBR Lighting Pipeline ===
+    {
+        using namespace primal::graphics::rhi;
+
+        // Descriptor set layout: MUST match fragmentLighting_gpuDriven shader signature exactly
+        // buffer(0)=ViewData, buffer(1)=SceneData, texture(2-7,9), sampler(8)
+        DescriptorSetLayoutBinding deferred_bindings[] = {
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel | ShaderStage::Vertex, nullptr},  // buffer(0) ViewData
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr},                          // buffer(1) SceneData
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(2) albedo
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(3) normal
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(4) ORM
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(5) depth
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(6) shadowMap0
+            {7, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(7) shadowMap1
+            {8, DescriptorType::Sampler,       1, ShaderStage::Pixel, nullptr},  // sampler(8) defaultSampler
+            {9, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(9) SSAO
+        };
+        DescriptorSetLayoutDesc deferred_set_desc{ .bindingCount = 10, .bindings = deferred_bindings };
+        deferred_set_layout_ = device_->CreateDescriptorSetLayout(deferred_set_desc);
+
+        PipelineLayoutDesc deferred_pl_desc{ .setLayoutCount = 1, .setLayouts = &deferred_set_layout_ };
+        deferred_layout_ = device_->CreatePipelineLayout(deferred_pl_desc);
+
+        // Compile deferred lighting fragment shader
+        const shader_file_info deferred_ps_info{ "DeferredLighting.metal", "fragmentLighting_gpuDriven", shader_type::pixel };
+        if (!CompileShader(deferred_ps_info)) {
+            std::cerr << "[TestNanite] Warning: Failed to compile deferred lighting shader" << std::endl;
+        } else {
+            // Create deferred output texture (RGBA16_Float for HDR)
+            TextureDesc deferredOutputDesc{};
+            deferredOutputDesc.size = {renderWidth_, renderHeight_, 1};
+            deferredOutputDesc.format = DataFormat::RGBA16_Float;
+            deferredOutputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+            deferredOutputDesc.memoryUsage = GPUMemoryUsage::Static;
+            deferred_output_texture_ = device_->CreateTexture(deferredOutputDesc);
+
+            // Match shader SceneData struct layout exactly
+            struct DeferredSceneData {
+                primal::math::m4x4 model;           // offset 0, 64 bytes
+                primal::math::v4 lightPos;          // offset 64
+                primal::math::v4 lightColor;        // offset 80
+                primal::math::v4 reflectionPlane;   // offset 96 (reused for cascadeSplits)
+                primal::math::v4 reflectionPlane2;  // offset 112
+                primal::math::v4 reflectionPlane3;  // offset 128
+                primal::math::m4x4 previousModel;   // offset 144
+                primal::math::v4 viewPos;           // offset 208
+                primal::math::m4x4 shadowMatrix0;   // offset 224
+                primal::math::m4x4 shadowMatrix1;   // offset 288
+                primal::math::v2 jitter;            // offset 352
+                primal::math::v2 previousJitter;    // offset 360
+                primal::math::v2 padding;           // offset 368
+            };
+
+            // Triple-buffered constant buffers and descriptor sets
+            for (int i = 0; i < 3; ++i) {
+                BufferDesc viewCbDesc{};
+                viewCbDesc.size = sizeof(primal::math::m4x4) * 2; // ViewData: viewProjection + invViewProjection
+                viewCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+                deferred_view_cb_[i] = device_->CreateBuffer(viewCbDesc);
+
+                BufferDesc lightCbDesc{};
+                lightCbDesc.size = sizeof(DeferredSceneData);
+                lightCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+                deferred_light_cb_[i] = device_->CreateBuffer(lightCbDesc);
+
+                // DDGI probe params: 2 x float4 = 32 bytes
+                BufferDesc ddgiCbDesc{};
+                ddgiCbDesc.size = 256;
+                ddgiCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+                deferred_ddgi_probe_cb_[i] = device_->CreateBuffer(ddgiCbDesc);
+
+                DescriptorSetDesc dsDesc{ .layout = deferred_set_layout_ };
+                deferred_descriptor_set_[i] = device_->CreateDescriptorSet(dsDesc);
+            }
+
+            // Create sampler for deferred pass
+            SamplerHandle deferredSampler = handles::INVALID_SAMPLER;
+            {
+                SamplerDesc samplerDesc{};
+                samplerDesc.minFilter = FilterMode::Linear;
+                samplerDesc.magFilter = FilterMode::Linear;
+                samplerDesc.mipFilter = FilterMode::Linear;
+                samplerDesc.addressU = TextureAddressMode::Clamp;
+                samplerDesc.addressV = TextureAddressMode::Clamp;
+                samplerDesc.addressW = TextureAddressMode::Clamp;
+                deferredSampler = device_->CreateSampler(samplerDesc);
+            }
+
+            // Store sampler handle for later use in render graph
+            deferred_sampler_handle_ = deferredSampler;
+
+            // Create graphics pipeline
+            const std::string vsKey = "DeferredLighting.metal:vertexMain";
+            const std::string psKey = "DeferredLighting.metal:fragmentLighting_gpuDriven";
+
+            if (shaderVariantMap.find(vsKey) != shaderVariantMap.end() &&
+                shaderVariantMap.find(psKey) != shaderVariantMap.end()) {
+
+                GraphicsPipelineDesc deferred_pipeline_desc{};
+                deferred_pipeline_desc.layout = deferred_layout_;
+                deferred_pipeline_desc.vertexShader = shaderVariantMap[vsKey];
+                deferred_pipeline_desc.pixelShader = shaderVariantMap[psKey];
+                deferred_pipeline_desc.renderTargetFormats[0] = DataFormat::RGBA16_Float;
+                deferred_pipeline_desc.renderTargetCount = 1;
+                deferred_pipeline_desc.depthStencilFormat = DataFormat::Unknown;
+                deferred_pipeline_desc.enableDepthTest = false;
+                deferred_pipeline_desc.enableDepthWrite = false;
+                deferred_pipeline_desc.cullMode = CullMode::None;
+                deferred_pipeline_desc.vertexAttributes.clear();
+                deferred_pipeline_desc.vertexBindings.clear();
+                deferred_pipeline_ = device_->CreateGraphicsPipeline(deferred_pipeline_desc);
+
+                if (deferred_pipeline_ == handles::INVALID_PIPELINE) {
+                    std::cerr << "[TestNanite] Warning: Failed to create deferred lighting pipeline" << std::endl;
+                } else {
+                    //std::cout << "[TestNanite] Deferred PBR Lighting pipeline initialized successfully" << std::endl;
+                }
+            } else {
+                std::cerr << "[TestNanite] Warning: Deferred lighting shaders not found in variant map" << std::endl;
+            }
+        }
+    }
+
     return true;
 }
 
 bool TestNaniteStreamingPipeline::InitializeSSGIPipeline() {
-    std::cout << "[LumenSSGI] Initializing SSGI pipeline..." << std::endl;
+    //std::cout << "[LumenSSGI] Initializing SSGI pipeline..." << std::endl;
 
     // 1. Initialize ColorHistoryManager
     colorHistoryManager_ = std::make_unique<nanite::ColorHistoryManager>();
@@ -736,7 +866,17 @@ bool TestNaniteStreamingPipeline::InitializeSSGIPipeline() {
         return false;
     }
 
-    std::cout << "[LumenSSGI] SSGI pipeline initialized via LumenSSGIPass" << std::endl;
+    //std::cout << "[LumenSSGI] SSGI pipeline initialized via LumenSSGIPass" << std::endl;
+
+    // 3.5 Initialize LumenSSAOPass (runs before deferred lighting)
+    ssaoPass_ = std::make_unique<primal::graphics::lumen::LumenSSAOPass>();
+    if (!ssaoPass_->Initialize(device_, renderWidth_, renderHeight_)) {
+        std::cerr << "[LumenSSAO] Failed to initialize LumenSSAOPass" << std::endl;
+        // Non-fatal: SSAO is a quality enhancement, not critical
+        ssaoPass_.reset();
+    } else {
+        //std::cout << "[LumenSSAO] SSAO pass initialized" << std::endl;
+    }
 
     // 4. Initialize LumenDDGIPass (probe-based GI)
     ddgiPass_ = std::make_unique<primal::graphics::lumen::LumenDDGIPass>();
@@ -745,7 +885,7 @@ bool TestNaniteStreamingPipeline::InitializeSSGIPipeline() {
         // Non-fatal: DDGI is additive, SSGI still works without it
         ddgiPass_.reset();
     } else {
-        std::cout << "[LumenDDGI] DDGI probe system initialized via LumenDDGIPass" << std::endl;
+        //std::cout << "[LumenDDGI] DDGI probe system initialized via LumenDDGIPass" << std::endl;
     }
     return true;
 }
@@ -755,7 +895,7 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
         std::cerr << "[DDGIBlit] Skipping: DDGI pass not initialized" << std::endl;
         return false;
     }
-    std::cout << "[DDGIBlit] Initializing DDGI blit pipeline..." << std::endl;
+    //std::cout << "[DDGIBlit] Initializing DDGI blit pipeline..." << std::endl;
 
     // --- Compile fragmentBlitDDGI shader ---
     const shader_file_info ddgi_ps_info{ "DeferredLighting.metal", "fragmentBlitDDGI", shader_type::pixel };
@@ -793,18 +933,21 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
         return false;
     }
 
-    // --- Descriptor set layout: 3 textures + 3 constant buffers ---
+    // --- Descriptor set layout: 6 textures + 3 constant buffers ---
     {
         using namespace primal::graphics::rhi;
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // scene color
             {1, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // depth
             {2, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // DDGI irradiance 3D
+            {3, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // GBuffer albedo
+            {4, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // GBuffer normal
+            {5, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // DDGI depth 3D
             {0, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // invViewProjection
             {1, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // probe origin + spacing
             {2, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // probe counts
         };
-        DescriptorSetLayoutDesc layoutDesc{ .bindingCount = 6, .bindings = bindings };
+        DescriptorSetLayoutDesc layoutDesc{ .bindingCount = 9, .bindings = bindings };
         blit_ddgi_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -856,7 +999,7 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
         ddgi_probe_cb_[i] = device_->CreateBuffer(cbDesc);
     }
 
-    std::cout << "[DDGIBlit] DDGI blit pipeline initialized successfully" << std::endl;
+    //std::cout << "[DDGIBlit] DDGI blit pipeline initialized successfully" << std::endl;
     return true;
 }
 
@@ -898,14 +1041,14 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
         return false;
     }
 
-    std::cout << "Successfully loaded Sponza scene with " << sceneMeshes_.size() << " meshes." << std::endl;
+    //std::cout << "Successfully loaded Sponza scene with " << sceneMeshes_.size() << " meshes." << std::endl;
 
     // 🔧 DEBUG: Keep only the first mesh for culling debugging
     // if (!sceneMeshes_.empty()) {
     //     auto firstMesh = sceneMeshes_[0];
     //     sceneMeshes_.clear();
     //     sceneMeshes_.push_back(firstMesh);
-    //     std::cout << "🔧 DEBUG: Keeping only first mesh '" << firstMesh.name << "' for culling analysis" << std::endl;
+    ////     std::cout << "🔧 DEBUG: Keeping only first mesh '" << firstMesh.name << "' for culling analysis" << std::endl;
     // }
 
     // Debug: Check mesh entity IDs
@@ -915,7 +1058,7 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
             validEntityCount++;
         }
     }
-    std::cout << "Valid mesh entity IDs: " << validEntityCount << " out of " << sceneMeshes_.size() << std::endl;
+    //std::cout << "Valid mesh entity IDs: " << validEntityCount << " out of " << sceneMeshes_.size() << std::endl;
 
     // Verify UV support
     if (!VerifyMeshletUVSupport()) {
@@ -930,7 +1073,7 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
     }
 
     // Initialize GPU Material Registry
-    std::cout << "[TestNanite] Initializing GPU Material Registry..." << std::endl;
+    //std::cout << "[TestNanite] Initializing GPU Material Registry..." << std::endl;
     gpuMaterialRegistry_ = std::make_unique<primal::graphics::nanite::GPUMaterialRegistry>();
 
     // Register all materials
@@ -946,47 +1089,10 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
         }
     }
 
-    std::cout << "[TestNanite] Registered " << registeredCount << " materials" << std::endl;
+    //std::cout << "[TestNanite] Registered " << registeredCount << " materials" << std::endl;
 
-    // 🔥 NEW DEBUG: Print texture handles for problematic materials
-    std::cout << "\n[TextureHandleDebug] Texture handle assignments:" << std::endl;
-    for (const auto& meshInfo : sceneMeshes_) {
-        if (!meshInfo.materialInstance) continue;
-        // Only print first occurrence of each MaterialID
-        static std::set<uint32_t> printedIDs;
-        if (printedIDs.find(meshInfo.gpuMaterialId) == printedIDs.end()) {
-            printedIDs.insert(meshInfo.gpuMaterialId);
-            rhi::ResourceHandle albedo = meshInfo.materialInstance->GetTextureHandle(0);
-            rhi::ResourceHandle normal = meshInfo.materialInstance->GetTextureHandle(1);
-            std::cout << "  MaterialID " << meshInfo.gpuMaterialId << ": "
-                      << "albedo_handle=" << albedo << ", "
-                      << "normal_handle=" << normal << ", "
-                      << "mesh_name=" << meshInfo.name << std::endl;
-        }
-    }
-
-    // 🔍 DEBUG: Material mapping for walls/columns to diagnose texture swapping
-    std::cout << "\n[WallDebug] Checking MaterialID 4 (Bricks) usage:" << std::endl;
-    int brickMeshCount = 0;
-    for (const auto& meshInfo : sceneMeshes_) {
-        if (meshInfo.gpuMaterialId == 4) {  // Bricks material
-            std::cout << "[WallDebug] MaterialID 4 used by: " << meshInfo.name
-                      << " (material_index=" << meshInfo.materialIndex << ")" << std::endl;
-            brickMeshCount++;
-        }
-    }
-    std::cout << "[WallDebug] MaterialID 4 used by " << brickMeshCount << " meshes" << std::endl;
-
-    std::cout << "\n[WallDebug] MaterialID 11 (Column_b) usage:" << std::endl;
-    int columnBMeshCount = 0;
-    for (const auto& meshInfo : sceneMeshes_) {
-        if (meshInfo.gpuMaterialId == 11) {  // Column_b material
-            std::cout << "[WallDebug] MaterialID 11 used by: " << meshInfo.name
-                      << " (material_index=" << meshInfo.materialIndex << ")" << std::endl;
-            columnBMeshCount++;
-        }
-    }
-    std::cout << "[WallDebug] MaterialID 11 used by " << columnBMeshCount << " meshes" << std::endl;
+    // Debug blocks commented out — too verbose for normal operation
+    // Uncomment individually if needed for debugging material/texture issues
 
     if (registeredCount == 0) {
         std::cerr << "[TestNanite] Warning: No materials were registered!" << std::endl;
@@ -994,11 +1100,11 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
 
     // 🔧 TEMPORARY: Manually adjust UV scaling for problematic materials
     // This is a test to verify UV scaling works before implementing FBX parameter reading
-    std::cout << "[TestNanite] Applying manual UV scaling adjustments..." << std::endl;
+    //std::cout << "[TestNanite] Applying manual UV scaling adjustments..." << std::endl;
     AdjustMaterialUVScaling();
 
     // Start async material build
-    std::cout << "[TestNanite] Starting async material data build..." << std::endl;
+    //std::cout << "[TestNanite] Starting async material data build..." << std::endl;
     materialBuildJob_ = gpuMaterialRegistry_->BuildAsync(device_);
 
     if (!materialBuildJob_.IsValid()) {
@@ -1006,21 +1112,21 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
     }
 
     // 🎨 Wait for material build to complete and upload to GPU
-    std::cout << "[TestNanite] Waiting for material build to complete..." << std::endl;
+    //std::cout << "[TestNanite] Waiting for material build to complete..." << std::endl;
     materialBuildJob_.Wait();
 
     // Upload material data to GPU
-    std::cout << "[TestNanite] Uploading material data to GPU..." << std::endl;
+    //std::cout << "[TestNanite] Uploading material data to GPU..." << std::endl;
     if (!gpuMaterialRegistry_->UploadToGPU(device_)) {
         std::cerr << "[TestNanite] ERROR: Failed to upload material data to GPU" << std::endl;
     } else {
-        std::cout << "[TestNanite] Material data uploaded successfully" << std::endl;
+        //std::cout << "[TestNanite] Material data uploaded successfully" << std::endl;
 
         // Get material data buffer and set it to GPU draw pipeline
         auto materialBuffer = gpuMaterialRegistry_->GetMaterialDataBuffer();
         if (materialBuffer != rhi::handles::INVALID_RESOURCE) {
             gpuDrawPipeline_->SetMaterialDataBuffer(materialBuffer);
-            std::cout << "[TestNanite] Material data buffer set to GPU draw pipeline" << std::endl;
+            //std::cout << "[TestNanite] Material data buffer set to GPU draw pipeline" << std::endl;
         } else {
             std::cerr << "[TestNanite] Warning: Material data buffer is invalid!" << std::endl;
         }
@@ -1057,8 +1163,8 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
 
             if (sampler != rhi::handles::INVALID_SAMPLER) {
                 gpuDrawPipeline_->SetTextureArrays(albedoArray, normalArray, ormArray, sampler);
-                std::cout << "[TestNanite] Texture arrays set to GPU draw pipeline (albedo="
-                          << albedoArray << ", normal=" << normalArray << ", orm=" << ormArray << ")" << std::endl;
+                //std::cout << "[TestNanite] Texture arrays set to GPU draw pipeline (albedo="
+                          //<< albedoArray << ", normal=" << normalArray << ", orm=" << ormArray << ")" << std::endl;
             } else {
                 std::cerr << "[TestNanite] Warning: Cannot set texture arrays - sampler creation failed" << std::endl;
             }
@@ -1081,7 +1187,7 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
             cluster::component clusterComp = cluster::create(clusterInit, entity);
 
             if (clusterComp == primal::id::invalid_id) {
-                std::cout << "Warning: Failed to create cluster component for mesh: " << meshInfo.name << std::endl;
+                //std::cout << "Warning: Failed to create cluster component for mesh: " << meshInfo.name << std::endl;
             }
 
             graphics::RenderProxy proxy = graphics::RenderProxy::Create(
@@ -1092,13 +1198,13 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
             proxy.transform = graphics::rhi::math::MatrixIdentity();
             scene_.AddProxy(proxy);
 
-            // std::cout << "Added mesh: " << meshInfo.name 
+            //// std::cout << "Added mesh: " << meshInfo.name 
             //           << " (entityId=" << entityId 
             //           << ", geometryId=" << meshInfo.meshEntityId << ")" << std::endl;
         }
     }
 
-    // std::cout << "Added " << scene_.GetProxies().size() << " proxies to render scene" << std::endl;
+    //// std::cout << "Added " << scene_.GetProxies().size() << " proxies to render scene" << std::endl;
 
     // Bind scene data to snapshot for Nanite culling
     if (!sceneSnapshot_.Rebind(scene_)) {
@@ -1106,7 +1212,7 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
         return false;
     }
 
-    // std::cout << "Scene snapshot updated with " << sceneSnapshot_.GetInstanceCount() << " instances" << std::endl;
+    //// std::cout << "Scene snapshot updated with " << sceneSnapshot_.GetInstanceCount() << " instances" << std::endl;
 
     // Initialize render view
     view_.SetViewMatrix(cameraView_);
@@ -1119,7 +1225,7 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
 }
 
 bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
-    std::cout << "[TestNanite] Loading material textures..." << std::endl;
+    //std::cout << "[TestNanite] Loading material textures..." << std::endl;
 
     std::string assetBaseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
 
@@ -1164,9 +1270,7 @@ bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
                     if (texture != rhi::handles::INVALID_RESOURCE) {
                         textureCache[fullPath] = texture;
                         loadedCount++;
-                        // 🔥 NEW DEBUG: Print texture handle to filename mapping
-                        std::cout << "[TextureMapping] Loaded albedo: handle=" << texture
-                                  << " → " << fullPath << std::endl;
+                        // [TextureMapping] albedo debug — commented out
                     } else {
                         texture = whiteTexture;  // Fallback to white
                     }
@@ -1218,27 +1322,27 @@ bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
                     if (texture != rhi::handles::INVALID_RESOURCE) {
                         textureCache[fullPath] = texture;
                         loadedCount++;
-                        // 🔥 NEW DEBUG: Print texture handle to filename mapping
-                        std::cout << "[TextureMapping] Loaded normal: handle=" << texture
-                                  << " → " << fullPath << std::endl;
-                    } else {
-                        texture = whiteTexture;  // Fallback
+                        // [TextureMapping] normal debug — commented out
                     }
+                    // Don't set white fallback for normals — white (1,1,1) decodes as
+                    // tangent normal (1,1,1) which produces wrong world normals via TBN.
+                    // Leaving INVALID causes shader to use correct vertex normals instead.
                 }
 
-                meshInfo.materialInstance->SetTexture(1, texture);  // Normal binding = 1
+                if (texture != rhi::handles::INVALID_RESOURCE) {
+                    meshInfo.materialInstance->SetTexture(1, texture);  // Normal binding = 1
+                }
             }
-        } else {
-            meshInfo.materialInstance->SetTexture(1, whiteTexture);  // No path, use white
         }
+        // No normal texture path — leave as INVALID so shader uses vertex normal
 
         // ORM texture (use white for now - would need separate loading logic)
         meshInfo.materialInstance->SetTexture(2, whiteTexture);  // ORM binding = 2
     }
 
-    std::cout << "[TestNanite] Texture loading complete: "
-              << loadedCount << " loaded, " << skippedCount << " reused ("
-              << textureCache.size() << " unique)" << std::endl;
+    //std::cout << "[TestNanite] Texture loading complete: "
+              //<< loadedCount << " loaded, " << skippedCount << " reused ("
+              //<< textureCache.size() << " unique)" << std::endl;
 
     return true;
 }
@@ -1257,30 +1361,11 @@ void TestNaniteStreamingPipeline::AdjustMaterialUVScaling() {
     }
 
     size_t materialCount = gpuMaterialRegistry_->GetMaterialCount();
-    std::cout << "[AdjustUVScaling] Adjusting UV scaling for " << materialCount << " materials..." << std::endl;
-
-    // 🔧 TEMPORARY HARDCODED ADJUSTMENTS
-    // These are test values based on UV visualization - materials with small UV ranges need higher scaling
-    // TODO: Read these values from FBX material properties
-
-    // 🔥 FIXED: Structure alignment issue resolved
-    // UV coordinates are now correctly read from buffer (20 bytes, no padding)
-    // Use default scaling (1.0) since UV range is already correct [0, 1]
-
+    // Set default UV scaling (1.0) for all materials
     for (size_t i = 0; i < materialCount; ++i) {
-        auto& mat = materialData[i];
-
-        // Default UV scaling (no repetition) since UV coords are now correct
-        mat.uv_scale[0] = 1.0f;
-        mat.uv_scale[1] = 1.0f;
-
-        if (i < 10) {  // Log first 10 materials for debugging
-            std::cout << "[AdjustUVScaling] Material " << i << ": UV scale set to (1.0, 1.0) - structure alignment fixed" << std::endl;
-        }
-        // Other materials: default scaling (1.0, 1.0)
+        materialData[i].uv_scale[0] = 1.0f;
+        materialData[i].uv_scale[1] = 1.0f;
     }
-
-    std::cout << "[AdjustUVScaling] UV scaling adjustments complete" << std::endl;
 }
 
 void TestNaniteStreamingPipeline::Run() {
@@ -1290,26 +1375,26 @@ void TestNaniteStreamingPipeline::Run() {
     bool f1_current = val.current.x > 0.0f;
     if (f1_current && !keyState_.f1_prev) {
         testConfig_.enable_streaming = !testConfig_.enable_streaming;
-        std::cout << "Streaming: " << (testConfig_.enable_streaming ? "Enabled" : "Disabled") << std::endl;
+        //std::cout << "Streaming: " << (testConfig_.enable_streaming ? "Enabled" : "Disabled") << std::endl;
     }
     keyState_.f1_prev = f1_current;
 
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f2, val);
     bool f2_current = val.current.x > 0.0f;
     if (f2_current && !keyState_.f2_prev) {
-        std::cout << "\n=== Running Stress Test ===" << std::endl;
+        //std::cout << "\n=== Running Stress Test ===" << std::endl;
         for (u32 i = 0; i < 100; ++i) {
             ProcessStreamingFeedback();
         }
         ValidateResults();
-        std::cout << "Stress Test Complete" << std::endl;
+        //std::cout << "Stress Test Complete" << std::endl;
     }
     keyState_.f2_prev = f2_current;
 
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f3, val);
     bool f3_current = val.current.x > 0.0f;
     if (f3_current && !keyState_.f3_prev) {
-        std::cout << "\n=== Running Performance Benchmark ===" << std::endl;
+        //std::cout << "\n=== Running Performance Benchmark ===" << std::endl;
         TestPerformance();
     }
     keyState_.f3_prev = f3_current;
@@ -1318,9 +1403,9 @@ void TestNaniteStreamingPipeline::Run() {
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f4, val);
     bool f4_current = val.current.x > 0.0f;
     if (f4_current && !keyState_.f4_prev) {
-        ssgiVisMode_ = (ssgiVisMode_ + 1) % 4;
-        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only", "DDGI Composite" };
-        std::cout << "[SSGI Vis] Mode: " << modeNames[ssgiVisMode_] << std::endl;
+        ssgiVisMode_ = (ssgiVisMode_ + 1) % 5;
+        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only", "DDGI Composite", "Albedo Only" };
+        //std::cout << "[SSGI Vis] Mode: " << modeNames[ssgiVisMode_] << std::endl;
     }
     keyState_.f4_prev = f4_current;
 
@@ -1355,14 +1440,17 @@ void TestNaniteStreamingPipeline::Run() {
         frameCount_++;
     }
 
+    // Process garbage collector to release deferred-destroyed GPU resources
+    // device_->GetGarbageCollector().Update(frameCount_);
+
     if (frameCount_ == 0) {
         auto stats = streamingManager_->GetStats();
-        std::cout << "[Frame " << frameCount_ << "] "
-                  << "Streamed: " << testResults_.clusters_streamed.load()
-                  << ", Evicted: " << testResults_.clusters_evicted.load()
-                  << ", Requests: " << testResults_.requests_processed.load()
-                  << ", Pool Usage: " << (stats.page_pool_usage * 100.0f) << "%"
-                  << std::endl;
+        //std::cout << "[Frame " << frameCount_ << "] "
+                  //<< "Streamed: " << testResults_.clusters_streamed.load()
+                  //<< ", Evicted: " << testResults_.clusters_evicted.load()
+                  //<< ", Requests: " << testResults_.requests_processed.load()
+                  //<< ", Pool Usage: " << (stats.page_pool_usage * 100.0f) << "%"
+                  //<< std::endl;
     }
 
     // Collect GPU culling debug data for the final frame only
@@ -1372,6 +1460,7 @@ void TestNaniteStreamingPipeline::Run() {
         // Store current frame data (replaces previous frame data)
         finalFrameCullingDebugData_ = std::move(debug_data);
     }
+
 }
 
 void TestNaniteStreamingPipeline::UpdateTestScene() {
@@ -1447,7 +1536,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     // CRITICAL FIX: Don't recreate depth texture every frame!
     // Use R32_Float format for intermediate depth storage
     if (sceneDepthTexture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cout << "[HZB] Creating persistent depth texture (" << renderWidth_ << "x" << renderHeight_ << ")" << std::endl;
+        //std::cout << "[HZB] Creating persistent depth texture (" << renderWidth_ << "x" << renderHeight_ << ")" << std::endl;
 
         rhi::TextureDesc depthDesc{};
         depthDesc.size = {renderWidth_, renderHeight_, 1};
@@ -1462,6 +1551,215 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
     auto depthHandle = graph.ImportResource("SceneDepth", sceneDepthTexture_);
 
+    // === SHARED LIGHT SETUP (used by both shadow & deferred passes) ===
+    // Fixed world-space directional light (like the sun).
+    // MUST NOT derive from camera orientation — otherwise rotating the camera
+    // changes the light direction, causing walls to go black (NdotL <= 0).
+    // lightForward: the direction light TRAVELS (emission direction, e.g. downward).
+    // Shader expects lightPos.xyz = direction FROM surface TO light (opposite of emission).
+    primal::math::v3 lightForward = Normalize(primal::math::v3{-0.9f, 1.5f, -0.8f});
+    primal::math::v4 sharedLightPos{-lightForward.x, -lightForward.y, -lightForward.z, 0.0f}; // w=0 = directional, negate for "to light"
+    primal::math::v3 sharedLightDir = lightForward; // Emission direction for shadow camera lookAt
+    primal::math::v3 sharedLightUp = {0.0f, 1.0f, 0.0f};
+    if (abs(sharedLightDir.y) > 0.9f) sharedLightUp = {1.0f, 0.0f, 0.0f};
+
+    // Import shadow map textures into RenderGraph so it can track dependencies.
+    // ShadowBlit writes → DeferredLighting reads: this establishes the execution order
+    // and inserts the correct GPU barrier (UAV → ShaderResource).
+    // Defined outside the shadow_enabled_ block so DeferredLighting can reference it.
+    rendergraph::RGResourceHandle shadowMapRG[2];
+
+    // === SHADOW CULLING + DEPTH BLIT PASSES ===
+    if (shadow_enabled_ && gpuDrawPipeline_ && gpuDrawPipeline_->IsInitialized()) {
+        // Use shared light setup (defined at top of BuildRenderGraph)
+        auto& lightPos = sharedLightPos;
+        auto& lightDir = sharedLightDir;
+        auto& lightUp = sharedLightUp;
+
+        struct ShadowPassData {};
+
+        for (u32 c = 0; c < 2; ++c) {
+            auto smHandle = gpuDrawPipeline_->GetShadowMap(c, currentBufferIndex);
+            if (smHandle != rhi::handles::INVALID_RESOURCE) {
+                shadowMapRG[c] = graph.ImportResource(
+                    "ShadowMap_C" + std::to_string(c) + "_" + std::to_string(currentBufferIndex),
+                    smHandle);
+            }
+        }
+
+        // VP matrix comparison for shadow map caching
+        auto vp_equal = [](const primal::math::m4x4& a, const primal::math::m4x4& b) -> bool {
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r)
+                    if (std::abs(a.columns[c][r] - b.columns[c][r]) > 1e-5f)
+                        return false;
+            return true;
+        };
+
+        for (u32 cascade = 0; cascade < 2; ++cascade) {
+            // Shadow cascade parameters tuned for Sponza scene (~30 units):
+            // cascadeDistance = 200: light camera is 200 units behind target, enough to see entire scene
+            // farPlane = 400: gives scene ~7.5% of depth buffer (was 0.3% with 5000/10000)
+            // orthoExtent: cascade 0 covers 30 units (close-up shadows), cascade 1 covers 150 units
+            // nearPlane = 0.1: standard near plane
+            float cascadeDistance = 200.0f;
+            float orthoExtent = (cascade == 0) ? 30.0f : 150.0f;
+
+            // ⚠️ 终极 Shadow Map 稳定方案：标准的 CSM 视椎体固定原点对齐法
+            primal::math::v3 camPos = camera_.GetPosition();
+            
+            // 1. 创建一个固定在世界原点的临时灯光观察矩阵，只用于确定灯光空间的”朝向”
+            //    CRITICAL: tempView 必须与 lightView 朝向一致（都朝向场景，即 +lightDir 方向）
+            //    否则 X 轴翻转导致纹素对齐方向错误，阴影会反向移动并产生左右分割
+            primal::math::v3 origin = {0.0f, 0.0f, 0.0f};
+            primal::math::v3 lightLookAt = {origin.x + lightDir.x, origin.y + lightDir.y, origin.z + lightDir.z};
+            primal::math::m4x4 tempView = CreateLookAtMatrix(origin, lightLookAt, lightUp);
+
+            // 2. 将相机的世界坐标转换到这个绝对静止的灯光空间中
+            primal::math::v4 camPosLS4 = tempView * primal::math::v4{camPos.x, camPos.y, camPos.z, 1.0f};
+            primal::math::v3 camPosLS = {camPosLS4.x, camPosLS4.y, camPosLS4.z};
+
+            // 3. 在灯光空间中计算纹素大小（Texel Size）
+            float shadowMapSize = 2048.0f;
+            float worldUnitsPerTexel = (orthoExtent * 2.0f) / shadowMapSize;
+
+            // 4. 将灯光空间下的 XY 坐标严格对齐到纹素网格上
+            // 必须用 floor 并且补偿微小浮点误差，确保对齐方向绝对一致
+            camPosLS.x = std::floor(camPosLS.x / worldUnitsPerTexel) * worldUnitsPerTexel;
+            camPosLS.y = std::floor(camPosLS.y / worldUnitsPerTexel) * worldUnitsPerTexel;
+            // Z 轴（深度）不能对齐，必须保留连续平滑移动，否则深度精度会跳变
+
+            // 5. 将对齐后的灯光空间坐标转换回世界空间
+            primal::math::m4x4 tempViewInv = primal::graphics::rhi::math::Inverse(tempView);
+            primal::math::v4 snappedCamPosWorld4 = tempViewInv * primal::math::v4{camPosLS.x, camPosLS.y, camPosLS.z, 1.0f};
+            primal::math::v3 snappedCamPosWorld = {snappedCamPosWorld4.x, snappedCamPosWorld4.y, snappedCamPosWorld4.z};
+
+            // 6. 用对齐后的世界坐标来构建最终的阴影相机
+            primal::math::v3 lightEye = {
+                snappedCamPosWorld.x - lightDir.x * cascadeDistance, 
+                snappedCamPosWorld.y - lightDir.y * cascadeDistance, 
+                snappedCamPosWorld.z - lightDir.z * cascadeDistance
+            };
+            
+            primal::math::m4x4 lightView = CreateLookAtMatrix(lightEye, snappedCamPosWorld, lightUp);
+
+            // Compute tight near/far from actual scene geometry for maximum shadow depth precision.
+            // Old: near=0.1, far=400 → scene at ~200 units occupies only ~2% of [0,1] depth range.
+            // New: near/far tightly bracket scene → scene uses ~90% of depth range.
+            float minDist = 1e10f;
+            float maxDist = 0.0f;
+            {
+                const auto& instances = sceneSnapshot_.GetInstanceData();
+                for (const auto& inst : instances) {
+                    // Vector from light eye to instance bounds center
+                    float dx = inst.bounds_center.x - lightEye.x;
+                    float dy = inst.bounds_center.y - lightEye.y;
+                    float dz = inst.bounds_center.z - lightEye.z;
+                    // Project onto light view direction to get depth along view axis
+                    float dist = dx * lightDir.x + dy * lightDir.y + dz * lightDir.z;
+                    minDist = std::min(minDist, dist - inst.bounds_radius);
+                    maxDist = std::max(maxDist, dist + inst.bounds_radius);
+                }
+            }
+            // 10% margin to avoid clipping at boundaries
+            float depthSpan = maxDist - minDist;
+            float margin = depthSpan * 0.1f;
+            float nearPlane = std::max(minDist - margin, 0.5f);
+            float farPlane = maxDist + margin;
+
+            primal::math::m4x4 lightProj = CreateOrthographicMatrix(
+                -orthoExtent, orthoExtent, -orthoExtent, orthoExtent, nearPlane, farPlane);
+                
+            primal::math::m4x4 lightVP = lightProj * lightView;
+
+            bool cache_hit = false;
+
+            if (cache_hit) {
+                continue;
+            }
+
+            primal::graphics::nanite::GPUDrivenDrawPipeline::DirectionalLightData lightData{};
+            lightData.direction = { lightDir.x, lightDir.y, lightDir.z, 0.0f };
+            lightData.color = { 20.0f, 20.0f, 20.0f, 1.0f };
+            lightData.viewPos = { camera_.GetPosition().x, camera_.GetPosition().y, camera_.GetPosition().z, 1.0f };
+            
+            // ⚠️ CRITICAL FIX: The GPU pipeline expects BOTH shadow matrices to be available
+            // when it evaluates the frustum planes (or when it does anything per-light).
+            // However, the shadow culling pass currently takes `lightData` by value, and it ONLY
+            // cares about the matrix for the current `cascade`.
+            // But just in case, we should ensure the matrix is placed in the correct slot.
+            if (cascade == 0) {
+                lightData.shadowMatrix0 = lightVP;
+            } else {
+                lightData.shadowMatrix1 = lightVP;
+            }
+            
+            // Also need to pass the current camera's view matrix for CSM cascade splitting
+            lightData.cascadeSplits = { 600.0f, 2000.0f, 0.0f, 0.0f }; // Adjust cascade splits!
+            
+            // SAVE THE MATRICES per triple-buffer slot so DeferredLighting uses matching matrix+map
+            u32 shadowWriteSlot = currentBufferIndex % 3;
+            if (cascade == 0) {
+                cachedShadowMatrix0_[shadowWriteSlot] = lightVP;
+            } else {
+                cachedShadowMatrix1_[shadowWriteSlot] = lightVP;
+            }
+
+            // Shadow Culling pass (Compute)
+            std::string cullName = "ShadowCulling_C" + std::to_string(cascade);
+            graph.AddPass<ShadowPassData>(cullName,
+                graphics::rendergraph::RGPassType::Compute,
+                graphics::rendergraph::RGPassCategory::Lighting,
+                [](ShadowPassData&, graphics::rendergraph::RenderGraphBuilder& builder) {
+                    builder.SideEffect();
+                },
+                [this, lightData, cascade, currentBufferIndex](const ShadowPassData&, graphics::rendergraph::RenderGraphContext& context) {
+                    gpuDrawPipeline_->ExecuteShadowCulling(
+                        context.cmdBuffer, sceneSnapshot_, lightData, cascade, currentBufferIndex);
+                }
+            );
+
+            // Shadow Raster pass (Graphics) — render visible clusters to D32 depth
+            std::string rasterName = "ShadowRaster_C" + std::to_string(cascade);
+            graph.AddPass<ShadowPassData>(rasterName,
+                graphics::rendergraph::RGPassType::Graphics,
+                graphics::rendergraph::RGPassCategory::Lighting,
+                [](ShadowPassData&, graphics::rendergraph::RenderGraphBuilder& builder) {
+                    builder.SideEffect();
+                },
+                [this, cascade, currentBufferIndex, lightVP](const ShadowPassData&, graphics::rendergraph::RenderGraphContext& context) {
+                    gpuDrawPipeline_->ExecuteShadowRaster(
+                        context.cmdBuffer, lightVP, cascade, currentBufferIndex);
+                }
+            );
+
+            // Shadow Depth Blit (D32 -> R32, Compute)
+            std::string blitName = "ShadowBlit_C" + std::to_string(cascade);
+            graph.AddPass<ShadowPassData>(blitName,
+                graphics::rendergraph::RGPassType::Compute,
+                graphics::rendergraph::RGPassCategory::Lighting,
+                [shadowMapRG, cascade](ShadowPassData&, graphics::rendergraph::RenderGraphBuilder& builder) {
+                    builder.SideEffect();
+                    // Declare shadow map write so RenderGraph inserts barrier to consumers
+                    if (shadowMapRG[cascade].IsValid()) {
+                        builder.Write(shadowMapRG[cascade], rhi::ResourceState::UnorderedAccess);
+                    }
+                },
+                [this, cascade, currentBufferIndex](const ShadowPassData&, graphics::rendergraph::RenderGraphContext& context) {
+                    gpuDrawPipeline_->ExecuteShadowDepthBlit(
+                        context.cmdBuffer, cascade, currentBufferIndex);
+                }
+            );
+
+            // Mark this buffer slot + cascade as valid
+            cached_shadow_vp_[shadowWriteSlot][cascade] = lightVP;
+            shadow_cache_valid_[shadowWriteSlot][cascade] = true;
+        }
+
+        shadow_cache_globally_valid_ = true;
+        shadow_frame_index_ = (shadow_frame_index_ + 1) % 3;
+    }
+
     struct CullingPassData {
         rendergraph::RGResourceHandle depth_buffer;
         rendergraph::RGResourceHandle hzb_buffer;
@@ -1473,7 +1771,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         graphics::rendergraph::RGPassType::Compute,
         graphics::rendergraph::RGPassCategory::Main,
         [this, currentBufferIndex](CullingPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
-            // std::cout << "[BuildRenderGraph] NaniteCulling PASS SETUP called!" << std::endl;
+            //// std::cout << "[BuildRenderGraph] NaniteCulling PASS SETUP called!" << std::endl;
 
             // CRITICAL FIX: Use the shared synchronized buffer index for this frame
             // This ensures both compute and render passes use the same buffer
@@ -1533,7 +1831,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
             // Render visibility buffer (if enabled) - DISABLED
             if (false && visibilityBufferSystem_ && visibilityBufferSystem_->IsReady()) {
-                // std::cout << "[BuildRenderGraph] Rendering visibility buffer..." << std::endl;
+                //// std::cout << "[BuildRenderGraph] Rendering visibility buffer..." << std::endl;
                 auto visResult = visibilityBufferSystem_->RenderVisibilityBuffer(
                     cmd,
                     sceneSnapshot_,
@@ -1542,7 +1840,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     cullingPipeline_->GetResults(),
                     frameCount_
                 );
-                // std::cout << "[BuildRenderGraph] Visibility buffer rendered: " << visResult.visible_triangles
+                //// std::cout << "[BuildRenderGraph] Visibility buffer rendered: " << visResult.visible_triangles
                 //           << " triangles in " << visResult.render_time_ms << " ms" << std::endl;
             }
 
@@ -1558,12 +1856,12 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
             // Execute defers UpdateResults() until GPU completes - results will be available after render graph execution
             const auto& results = cullingPipeline_->GetResults();
-            // std::cout << "[NaniteCulling] Culling complete: visible_clusters=" << results.visible_cluster_count
+            //// std::cout << "[NaniteCulling] Culling complete: visible_clusters=" << results.visible_cluster_count
             //           << ", visible_instances=" << results.visible_instance_count << std::endl;
         }
     );
     
-    // std::cout << "[BuildRenderGraph] NaniteCulling pass ADDED to graph" << std::endl;
+    //// std::cout << "[BuildRenderGraph] NaniteCulling pass ADDED to graph" << std::endl;
 
     // INSERTED: ForceSync Pass (Blit Encoder Barrier)
     // This inserts a BlitCommandEncoder between Compute and Render, forcing a full GPU synchronization.
@@ -1604,14 +1902,14 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     }
 
     auto gpuOutputHandle = graph.ImportResource("GPUFinalOutput", gpuFinalOutput);
-    // std::cout << "[BuildRenderGraph] Imported GPU pipeline's final output texture" << std::endl;
+    //// std::cout << "[BuildRenderGraph] Imported GPU pipeline's final output texture" << std::endl;
 
     // Scene Render Pass - Execute GPU pipeline which manages its own render pass
     graph.AddPass<SceneRenderPassData>("SceneRender",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::Main,
         [this, gpuOutputHandle, currentBufferIndex, cullingIndirectArgs = cullingData.indirect_args_buffer](SceneRenderPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
-            // std::cout << "[SceneRender] SETUP: Configuring GPU pipeline execution" << std::endl;
+            //// std::cout << "[SceneRender] SETUP: Configuring GPU pipeline execution" << std::endl;
 
             // Store pointers to scene data for use in execute phase
             data.scene_snapshot = &sceneSnapshot_;
@@ -1642,38 +1940,22 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 std::cerr << "[GPU Draw] ERROR: Pipeline execution failed!" << std::endl;
             }
 
-            // CRITICAL: Copy depth texture from GPU pipeline to our HZB depth texture
-            auto gpuDepthTexture = gpuDrawPipeline_->GetFinalDepthTexture();
-
-            if (sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE && gpuDepthTexture != rhi::handles::INVALID_RESOURCE) {
-                // Now both textures are D32_Float format, so BlitTexture should work
-                rhi::TextureBlitRegion blitRegion{};
-                blitRegion.srcSubresource = {0, 0, 1}; // mip 0, array 0, 1 layer
-                blitRegion.dstSubresource = {0, 0, 1};
-                blitRegion.srcOffsets[0] = {0, 0, 0};
-                blitRegion.srcOffsets[1] = {static_cast<s32>(renderWidth_), static_cast<s32>(renderHeight_), 1};
-                blitRegion.dstOffsets[0] = {0, 0, 0};
-                blitRegion.dstOffsets[1] = {static_cast<s32>(renderWidth_), static_cast<s32>(renderHeight_), 1};
-
-                cmd->BlitTexture(gpuDepthTexture, sceneDepthTexture_, &blitRegion, 1, rhi::FilterMode::Linear);
-
-                // Note: sceneDepthTexture_ now contains current frame's depth
-                // Next frame's HZB generation will automatically use this data
-                // No need for explicit storage - the texture persists across frames
-            }
+            // NOTE: Depth copy is handled by the separate DepthCopy pass below,
+            // which has proper barrier transitions (DepthStencil → CopySource).
+            // Do NOT blit depth here — the render pass encoder state may conflict.
 
             // Log rendering statistics
             if (frameCount_ % 60 == 0 && !sceneMeshes_.empty()) {
                 const auto& cullingResults = cullingPipeline_->GetResults();
                 const auto& drawResults = gpuDrawPipeline_->GetResults();
 
-                // std::cout << "[GPU Driven Rendering Stats]" << std::endl;
-                // std::cout << "  Loaded meshes: " << sceneMeshes_.size() << std::endl;
-                // std::cout << "  Scene instances: " << sceneSnapshot_.GetInstanceCount() << std::endl;
-                // std::cout << "  Visible clusters: " << cullingResults.visible_cluster_count << std::endl;
-                // std::cout << "  GPU Draw calls: " << drawResults.total_draw_calls << std::endl;
-                // std::cout << "  Clusters rendered: " << drawResults.total_clusters_rendered << std::endl;
-                // std::cout << "  Bin count: " << drawResults.bin_count << std::endl;
+                //// std::cout << "[GPU Driven Rendering Stats]" << std::endl;
+                //// std::cout << "  Loaded meshes: " << sceneMeshes_.size() << std::endl;
+                //// std::cout << "  Scene instances: " << sceneSnapshot_.GetInstanceCount() << std::endl;
+                //// std::cout << "  Visible clusters: " << cullingResults.visible_cluster_count << std::endl;
+                //// std::cout << "  GPU Draw calls: " << drawResults.total_draw_calls << std::endl;
+                //// std::cout << "  Clusters rendered: " << drawResults.total_clusters_rendered << std::endl;
+                //// std::cout << "  Bin count: " << drawResults.bin_count << std::endl;
             }
         }
     );
@@ -1688,7 +1970,8 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         graphics::rendergraph::RGPassType::Copy,  // Use Copy type for Blit encoder
         graphics::rendergraph::RGPassCategory::Copy,
         [this](DepthCopyPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
-            // No resource dependencies needed - we handle this manually
+            // CRITICAL: Must declare SideEffect or render graph will cull this pass!
+            builder.SideEffect();
         },
         [this](const DepthCopyPassData& data, graphics::rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
@@ -1727,6 +2010,173 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             }
         }
     );
+
+    // GBufferDepthBlit pass removed — deferred lighting now reads D32 directly
+    // via depth2d<float> in the shader, eliminating the compute shader depth read
+    // that caused non-deterministic depth issues on Metal TBDR.
+
+    // === LUMEN SSAO PASS (before deferred lighting) ===
+    rendergraph::RGResourceHandle ssaoOutputHandle;
+    if (ssaoPass_ && ssaoPass_->IsInitialized() && frameCount_ > 0) {
+        auto normalHandleSSAO = graph.ImportResource("GBufferNormal_SSAO", gpuDrawPipeline_->GetGBufferNormal());
+        auto depthHandleSSAO = graph.ImportResource("GBufferDepth_SSAO", gpuDrawPipeline_->GetGBufferDepthSampleable());
+
+        lumen::SSAOCameraData ssaoCameraData;
+        ssaoCameraData.view_matrix = cameraBuffers_[currentBufferIndex].view_matrix;
+        ssaoCameraData.proj_matrix = cameraBuffers_[currentBufferIndex].proj_matrix;
+        {
+            u32 prevIdx = (currentBufferIndex + 2) % 3;
+            ssaoCameraData.prev_view_matrix = cameraBuffers_[prevIdx].view_matrix;
+            ssaoCameraData.prev_proj_matrix = cameraBuffers_[prevIdx].proj_matrix;
+        }
+        ssaoCameraData.frame_index = frameCount_;
+        ssaoCameraData.delta_time = 0.016f;
+
+        auto ssaoOutput = ssaoPass_->AddPass(graph, normalHandleSSAO, depthHandleSSAO,
+            ssaoCameraData, currentBufferIndex);
+        ssaoOutputHandle = ssaoOutput.ssao_output;
+    }
+
+    // === DEFERRED PBR LIGHTING PASS ===
+    // Import deferred output texture early so FinalBlit can reference it
+    rendergraph::RGResourceHandle deferredOutputRG;
+    if (deferred_output_texture_ != rhi::handles::INVALID_RESOURCE) {
+        deferredOutputRG = graph.ImportResource("DeferredOutput", deferred_output_texture_);
+    }
+
+    if (deferred_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        deferred_output_texture_ != rhi::handles::INVALID_RESOURCE &&
+        frameCount_ > 0) {
+
+        struct DeferredPassData {
+            rendergraph::RGResourceHandle output;
+        };
+
+        // Use same-frame shadow maps: all passes execute within a single Metal command buffer,
+        // so ShadowBlit's output is guaranteed visible to DeferredLighting without delay.
+        // Previous 2-frame delay caused flickering by reading different triple-buffer slots
+        // whose shadow maps differed slightly due to non-deterministic GPU thread scheduling.
+        graph.AddPass<DeferredPassData>("DeferredLighting",
+            graphics::rendergraph::RGPassType::Graphics,
+            graphics::rendergraph::RGPassCategory::Lighting,
+            [deferredOutputRG, shadowMapRG](DeferredPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+                data.output = builder.Write(deferredOutputRG, rhi::ResourceState::RenderTarget);
+
+                // Declare shadow map reads: this creates dependency on ShadowBlit pass
+                // and ensures proper GPU barrier (UAV → ShaderResource) before sampling.
+                // Using shadowMapRG (same handles as ShadowBlit writes) ensures correct dependency.
+                for (u32 c = 0; c < 2; ++c) {
+                    if (shadowMapRG[c].IsValid()) {
+                        builder.Read(shadowMapRG[c], rhi::ResourceState::ShaderResource);
+                    }
+                }
+
+                graphics::rendergraph::RGRenderPassDesc rpDesc;
+                rpDesc.colors.push_back({
+                    .texture = data.output,
+                    .loadOp = rhi::LoadAction::DontCare,
+                    .storeOp = rhi::StoreAction::Store,
+                    .clearColor = { primal::math::v4{0,0,0,1} }
+                });
+                builder.DeclareRenderPass(rpDesc);
+            },
+            [this, currentBufferIndex, sharedLightPos](const DeferredPassData& data, graphics::rendergraph::RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                u32 cbIdx = currentBufferIndex % 3;
+
+                // Upload ViewData (viewProjection + invViewProjection)
+                {
+                    primal::math::m4x4 vp = cameraBuffers_[currentBufferIndex].proj_matrix * cameraBuffers_[currentBufferIndex].view_matrix;
+                    primal::math::m4x4 invVP = rhi::math::Inverse(vp);
+
+                    struct ViewData {
+                        primal::math::m4x4 viewProjection;
+                        primal::math::m4x4 invViewProjection;
+                    };
+                    auto* vd = static_cast<ViewData*>(device_->MapBuffer(deferred_view_cb_[cbIdx]));
+                    if (vd) {
+                        vd->viewProjection = vp;
+                        vd->invViewProjection = invVP;
+                        device_->UnmapBuffer(deferred_view_cb_[cbIdx]);
+                    }
+                }
+
+                // Upload SceneData (must match shader SceneData struct layout exactly)
+                {
+                    struct DeferredSceneData {
+                        primal::math::m4x4 model;           // offset 0
+                        primal::math::v4 lightPos;          // offset 64
+                        primal::math::v4 lightColor;        // offset 80
+                        primal::math::v4 reflectionPlane;   // offset 96 (cascadeSplits)
+                        primal::math::v4 reflectionPlane2;  // offset 112
+                        primal::math::v4 reflectionPlane3;  // offset 128
+                        primal::math::m4x4 previousModel;   // offset 144
+                        primal::math::v4 viewPos;           // offset 208 — MUST match Metal SceneData layout
+                        primal::math::m4x4 shadowMatrix0;   // offset 224
+                        primal::math::m4x4 shadowMatrix1;   // offset 288
+                        primal::math::v2 jitter;            // offset 352
+                        primal::math::v2 previousJitter;    // offset 360
+                        primal::math::v2 padding;           // offset 368
+                    };
+
+                    auto* sd = static_cast<DeferredSceneData*>(device_->MapBuffer(deferred_light_cb_[cbIdx]));
+                    if (sd) {
+                        memset(sd, 0, sizeof(DeferredSceneData));
+                        // Use shared light setup (defined at top of BuildRenderGraph)
+                        sd->lightPos = sharedLightPos;
+
+                        sd->lightColor = primal::math::v4{20.0f, 20.0f, 20.0f, 1.0f};
+                        sd->reflectionPlane = primal::math::v4{600.0f, 2000.0f, 0.0f, 0.0f};
+                        sd->viewPos = primal::math::v4{camera_.GetPosition().x, camera_.GetPosition().y, camera_.GetPosition().z, 1.0f};
+
+                        // Use same-frame shadow matrices (no delay needed).
+                        // All passes share a single Metal command buffer — ordering is guaranteed.
+                        sd->shadowMatrix0 = cachedShadowMatrix0_[cbIdx];
+                        sd->shadowMatrix1 = cachedShadowMatrix1_[cbIdx];
+
+                        device_->UnmapBuffer(deferred_light_cb_[cbIdx]);
+                    }
+                }
+
+                // Update descriptor set with GBuffer + shadow resources
+                auto depthSampleable = gpuDrawPipeline_->GetGBufferDepthSampleable();
+                // Use same-frame shadow maps (no delay — same command buffer guarantees ordering)
+                auto shadowMap0 = gpuDrawPipeline_->GetShadowMap(0, currentBufferIndex);
+                auto shadowMap1 = gpuDrawPipeline_->GetShadowMap(1, currentBufferIndex);
+
+                // Get SSAO texture (or invalid for fallback — shader handles this)
+                ResourceHandle ssaoTex = (ssaoPass_ && ssaoPass_->IsInitialized())
+                    ? ssaoPass_->GetFilterTexture() : handles::INVALID_RESOURCE;
+
+                // NOTE: DDGI irradiance and probe params are NOT bound here —
+                // fragmentLighting_gpuDriven does not declare texture(10) or buffer(2).
+                // DDGI is applied separately via the DDGI blit pass (mode 3).
+
+                DescriptorData params[] = {
+                    {0, DescriptorType::UniformBuffer, deferred_view_cb_[cbIdx]},
+                    {1, DescriptorType::UniformBuffer, deferred_light_cb_[cbIdx]},
+                    {2, DescriptorType::SampledImage, gpuDrawPipeline_->GetGBufferAlbedo()},
+                    {3, DescriptorType::SampledImage, gpuDrawPipeline_->GetGBufferNormal()},
+                    {4, DescriptorType::SampledImage, gpuDrawPipeline_->GetGBufferORM()},
+                    {5, DescriptorType::SampledImage, depthSampleable},
+                    {6, DescriptorType::SampledImage, shadowMap0},
+                    {7, DescriptorType::SampledImage, shadowMap1},
+                    {8, DescriptorType::Sampler, static_cast<ResourceHandle>(deferred_sampler_handle_)},
+                    {9, DescriptorType::SampledImage, ssaoTex},
+                };
+                UpdateDescriptorSet(device_, deferred_descriptor_set_[cbIdx], params, 10);
+
+                // Draw
+                cmd->SetViewport({{0, 0}, {static_cast<float>(renderWidth_), static_cast<float>(renderHeight_)}, 0, 1});
+                cmd->SetScissor({{0, 0}, {renderWidth_, renderHeight_}});
+
+                cmd->BindGraphicsPipeline(deferred_pipeline_);
+                const rhi::DescriptorSetHandle sets[] = { deferred_descriptor_set_[cbIdx] };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, deferred_layout_, 0, 1, sets, 0, nullptr);
+                cmd->Draw(3, 0, 1, 0);  // Full-screen triangle
+            }
+        );
+    }
 
     // === LUMEN SSGI PASS ===
     rendergraph::RGResourceHandle ssgiOutputHandle;
@@ -1780,9 +2230,26 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     gpuOutputTex, context.cmdBuffer, frameCount_);
 
                 if (frameCount_ % 60 == 1) {
-                    std::cout << "[ColorHistoryStore] StoreCurrentFrameColor: frame=" << frameCount_
-                              << " result=" << (ok ? "OK" : "FAILED") << std::endl;
+                    //std::cout << "[ColorHistoryStore] StoreCurrentFrameColor: frame=" << frameCount_
+                              //<< " result=" << (ok ? "OK" : "FAILED") << std::endl;
                 }
+            }
+        );
+
+        // Store current frame depth for DDGI reprojection occlusion test
+        struct DepthHistoryData {};
+        graph.AddPass<DepthHistoryData>("DepthHistoryStore",
+            graphics::rendergraph::RGPassType::Copy,
+            graphics::rendergraph::RGPassCategory::Copy,
+            [](DepthHistoryData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+                builder.SideEffect();
+            },
+            [this](const DepthHistoryData& data, graphics::rendergraph::RenderGraphContext& context) {
+                auto gpuDepthTexture = gpuDrawPipeline_->GetFinalDepthTexture();
+                if (gpuDepthTexture == rhi::handles::INVALID_RESOURCE) return;
+
+                depthHistoryManager_->StoreCurrentFrameDepth(
+                    gpuDepthTexture, context.cmdBuffer, frameCount_);
             }
         );
     }
@@ -1826,13 +2293,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     // Log buffer state on first few frames
                     static u32 logCount = 0;
                     if (logCount < 5) {
-                        std::cout << "[GlobalSDF] Pass executing: frame=" << frameCount_
-                                  << " num_instances=" << fresh.num_instances
-                                  << " vertex=" << fresh.vertex_buffer
-                                  << " meshlet=" << fresh.meshlet_buffer
-                                  << " instance=" << fresh.instance_data_buffer
-                                  << " cmd=" << (void*)cmd
-                                  << std::endl;
+                        //std::cout << "[GlobalSDF] Pass executing: frame=" << frameCount_
+                                  //<< " num_instances=" << fresh.num_instances
+                                  //<< " vertex=" << fresh.vertex_buffer
+                                  //<< " meshlet=" << fresh.meshlet_buffer
+                                  //<< " instance=" << fresh.instance_data_buffer
+                                  //<< " cmd=" << (void*)cmd
+                                  //<< std::endl;
                         logCount++;
                     }
 
@@ -1844,8 +2311,8 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         static bool logSkipOnce = false;
                         if (!logSkipOnce) {
                             std::cerr << "[GlobalSDF] Skipping: buffers not ready (instances="
-                                      << fresh.num_instances << " vb=" << fresh.vertex_buffer
-                                      << " mb=" << fresh.meshlet_buffer << " ib=" << fresh.instance_data_buffer << ")" << std::endl;
+                                << fresh.num_instances << " vb=" << fresh.vertex_buffer
+                                << " mb=" << fresh.meshlet_buffer << " ib=" << fresh.instance_data_buffer << ")" << std::endl;
                             logSkipOnce = true;
                         }
                         return;
@@ -1857,15 +2324,15 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
                     globalSDF.SetVoxelizationResources(fresh);
 
-                    std::cout << "[GlobalSDF] Voxelization dispatch: frame=" << frameCount_
-                              << " num_instances=" << fresh.num_instances << std::endl;
+                    //std::cout << "[GlobalSDF] Voxelization dispatch: frame=" << frameCount_
+                              //<< " num_instances=" << fresh.num_instances << std::endl;
 
                     for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
                         globalSDF.DispatchVoxelization(cmd, c);
                     }
 
                     voxCompleted = true;
-                    std::cout << "[GlobalSDF] Voxelization completed (static scene, will not re-run)" << std::endl;
+                    //std::cout << "[GlobalSDF] Voxelization completed (static scene, will not re-run)" << std::endl;
                 }
             );
         }
@@ -1877,6 +2344,11 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         auto prevColor = colorHistoryManager_->GetPreviousFrameColor(frameCount_);
         ResourceHandle prevColorTex = prevColor.is_valid ? prevColor.texture : ssgi_black_texture_;
         auto ddgiPrevColorHandle = graph.ImportResource("DDGIPrevColor", prevColorTex);
+
+        // Get previous frame depth for occlusion testing during reprojection
+        auto prevDepth = depthHistoryManager_->GetPreviousFrameDepth(frameCount_);
+        ResourceHandle prevDepthTex = prevDepth.is_valid ? prevDepth.texture : ssgi_black_texture_;
+        auto ddgiPrevDepthHandle = graph.ImportResource("DDGIPrevDepth", prevDepthTex);
 
         // Build camera data for DDGI
         primal::graphics::lumen::DDGICameraData ddgiCameraData;
@@ -1900,7 +2372,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
         static bool ddgiLogOnce = false;
         if (!ddgiLogOnce) {
-            std::cout << "[LumenDDGI] DDGI pass integrated into render graph" << std::endl;
+            //std::cout << "[LumenDDGI] DDGI pass integrated into render graph" << std::endl;
             ddgiLogOnce = true;
         }
     }
@@ -1912,6 +2384,9 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         rendergraph::RGResourceHandle ssgi_input;
         rendergraph::RGResourceHandle depth_input;
         rendergraph::RGResourceHandle ddgi_irradiance;
+        rendergraph::RGResourceHandle albedo_input;
+        rendergraph::RGResourceHandle normal_input;
+        rendergraph::RGResourceHandle ddgi_depth;
         rendergraph::RGResourceHandle output;
     };
 
@@ -1924,21 +2399,51 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     }
 
     // Import DDGI irradiance texture for blit
+    // 2-frame delayed read: guarantees GPU has finished writing this slot.
     rendergraph::RGResourceHandle ddgiIrradianceHandle;
+    rendergraph::RGResourceHandle ddgiDepthHandle;
     if (ddgiPass_ && ddgiPass_->IsInitialized() &&
         blit_ddgi_pipeline_ != rhi::handles::INVALID_PIPELINE) {
-        auto ddgiTex = ddgiPass_->GetIrradianceTexture(frameCount_);
+        u32 ddgiReadIdx = (currentBufferIndex + 2) % 3;
+        auto ddgiTex = ddgiPass_->GetIrradianceTexture(ddgiReadIdx);
         if (ddgiTex != rhi::handles::INVALID_RESOURCE) {
             ddgiIrradianceHandle = graph.ImportResource("DDGIIrradianceBlit", ddgiTex);
         }
+        auto ddgiDepthTex = ddgiPass_->GetDepthTexture(ddgiReadIdx);
+        if (ddgiDepthTex != rhi::handles::INVALID_RESOURCE) {
+            ddgiDepthHandle = graph.ImportResource("DDGIDepthBlit", ddgiDepthTex);
+        }
+    }
+
+    // Import GBuffer albedo and normal for DDGI blit
+    rendergraph::RGResourceHandle gbufferAlbedoHandle;
+    rendergraph::RGResourceHandle gbufferNormalHandle;
+    if (gpuDrawPipeline_) {
+        auto albedoTex = gpuDrawPipeline_->GetGBufferAlbedo();
+        auto normalTex = gpuDrawPipeline_->GetGBufferNormal();
+        if (albedoTex != rhi::handles::INVALID_RESOURCE) {
+            gbufferAlbedoHandle = graph.ImportResource("GBufferAlbedoBlit", albedoTex);
+        }
+        if (normalTex != rhi::handles::INVALID_RESOURCE) {
+            gbufferNormalHandle = graph.ImportResource("GBufferNormalBlit", normalTex);
+        }
+    }
+
+    // Choose primary input for FinalBlit:
+    // When deferred lighting is active, use its output (lit scene color).
+    // Otherwise use raw GBuffer albedo (no lighting).
+    rendergraph::RGResourceHandle primaryInputHandle = gpuOutputHandle;
+    if (deferred_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        deferred_output_texture_ != rhi::handles::INVALID_RESOURCE) {
+        primaryInputHandle = deferredOutputRG;
     }
 
     graph.AddPass<BlitPassData>("FinalBlit",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
-        [this, backBufferHandle, gpuOutputHandle, ssgiOutputHandle, depthBlitHandle, ddgiIrradianceHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
-            // Always read scene color as primary input
-            data.input = builder.Read(gpuOutputHandle, rhi::ResourceState::ShaderResource);
+        [this, backBufferHandle, primaryInputHandle, ssgiOutputHandle, depthBlitHandle, ddgiIrradianceHandle, ddgiDepthHandle, gbufferAlbedoHandle, gbufferNormalHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+            // Read lit scene color (deferred output or raw GBuffer albedo)
+            data.input = builder.Read(primaryInputHandle, rhi::ResourceState::ShaderResource);
 
             // Read SSGI output when in composite or SSGI-only mode
             // ssgiVisMode_: 0=Composite, 1=SSGI only, 2=Scene only, 3=DDGI Composite
@@ -1951,13 +2456,34 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 data.ssgi_input = rendergraph::RGResourceHandle{};
             }
 
-            // Read depth + DDGI irradiance when in DDGI mode
+            // Read depth + DDGI irradiance + GBuffer + DDGI depth when in DDGI mode
             if (ssgiVisMode_ == 3 && depthBlitHandle.IsValid() && ddgiIrradianceHandle.IsValid()) {
                 data.depth_input = builder.Read(depthBlitHandle, rhi::ResourceState::ShaderResource);
                 data.ddgi_irradiance = builder.Read(ddgiIrradianceHandle, rhi::ResourceState::ShaderResource);
+
+                // GBuffer albedo and normal for DDGI blit albedo modulation
+                if (gbufferAlbedoHandle.IsValid()) {
+                    data.albedo_input = builder.Read(gbufferAlbedoHandle, rhi::ResourceState::ShaderResource);
+                } else {
+                    data.albedo_input = rendergraph::RGResourceHandle{};
+                }
+                if (gbufferNormalHandle.IsValid()) {
+                    data.normal_input = builder.Read(gbufferNormalHandle, rhi::ResourceState::ShaderResource);
+                } else {
+                    data.normal_input = rendergraph::RGResourceHandle{};
+                }
+                // DDGI depth for visibility weighting
+                if (ddgiDepthHandle.IsValid()) {
+                    data.ddgi_depth = builder.Read(ddgiDepthHandle, rhi::ResourceState::ShaderResource);
+                } else {
+                    data.ddgi_depth = rendergraph::RGResourceHandle{};
+                }
             } else {
                 data.depth_input = rendergraph::RGResourceHandle{};
                 data.ddgi_irradiance = rendergraph::RGResourceHandle{};
+                data.albedo_input = rendergraph::RGResourceHandle{};
+                data.normal_input = rendergraph::RGResourceHandle{};
+                data.ddgi_depth = rendergraph::RGResourceHandle{};
             }
 
             data.output = builder.Write(backBufferHandle, rhi::ResourceState::RenderTarget);
@@ -1994,6 +2520,23 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
                     if (depthHandle != rhi::handles::INVALID_RESOURCE &&
                         ddgiIrrHandle != rhi::handles::INVALID_RESOURCE) {
+
+                        // Resolve GBuffer albedo, normal, and DDGI depth handles
+                        auto albedoHandle = rhi::handles::INVALID_RESOURCE;
+                        if (data.albedo_input.IsValid()) {
+                            auto res = context.graph->GetResource(data.albedo_input);
+                            if (res) albedoHandle = res->GetPhysicalHandle();
+                        }
+                        auto normalHandle = rhi::handles::INVALID_RESOURCE;
+                        if (data.normal_input.IsValid()) {
+                            auto res = context.graph->GetResource(data.normal_input);
+                            if (res) normalHandle = res->GetPhysicalHandle();
+                        }
+                        auto ddgiDepthHandle = rhi::handles::INVALID_RESOURCE;
+                        if (data.ddgi_depth.IsValid()) {
+                            auto res = context.graph->GetResource(data.ddgi_depth);
+                            if (res) ddgiDepthHandle = res->GetPhysicalHandle();
+                        }
 
                         // Upload constant buffers
                         u32 cbIdx = currentBufferIndex % 3;
@@ -2035,14 +2578,17 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                             }
                         }
 
-                        // Update descriptor set: 3 textures + 3 constant buffers
+                        // Update descriptor set: 6 textures + 3 constant buffers
                         // Textures use Metal texture namespace, buffers use buffer namespace
                         DescriptorData ddgi_params[] = {
                             {0, DescriptorType::SampledImage,  inputHandle},          // texture(0): scene color
                             {1, DescriptorType::SampledImage,  depthHandle},          // texture(1): depth
-                            {2, DescriptorType::SampledImage,  ddgiIrrHandle},        // texture(2): DDGI irradiance
+                            {2, DescriptorType::SampledImage,  ddgiIrrHandle},        // texture(2): DDGI irradiance 3D
+                            {3, DescriptorType::SampledImage,  albedoHandle},         // texture(3): GBuffer albedo
+                            {4, DescriptorType::SampledImage,  normalHandle},         // texture(4): GBuffer normal
+                            {5, DescriptorType::SampledImage,  ddgiDepthHandle},      // texture(5): DDGI depth 3D
                         };
-                        UpdateDescriptorSet(device_, blit_ddgi_descriptor_set_, ddgi_params, 3);
+                        UpdateDescriptorSet(device_, blit_ddgi_descriptor_set_, ddgi_params, 6);
 
                         // Buffer bindings with offsets into single CB:
                         // buffer(0) offset=0  = invViewProjection (64 bytes)
@@ -2079,9 +2625,18 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             }
 
             // Mode 2: Scene only — simple blit of scene color
-            if (ssgiVisMode_ == 2 || !data.ssgi_input.IsValid()) {
+            // Mode 4: Albedo only — blit raw GBuffer albedo (no lighting)
+            if (ssgiVisMode_ == 2 || ssgiVisMode_ == 4 || !data.ssgi_input.IsValid()) {
+                ResourceHandle blitTex = inputHandle;
+                // Mode 4: use raw GBuffer albedo instead of lit scene
+                if (ssgiVisMode_ == 4) {
+                    auto albedoTex = gpuDrawPipeline_->GetGBufferAlbedo();
+                    if (albedoTex != rhi::handles::INVALID_RESOURCE) {
+                        blitTex = albedoTex;
+                    }
+                }
                 DescriptorData blit_params[1] = {
-                    { .binding = 0, .type = DescriptorType::SampledImage, .resource = inputHandle }
+                    { .binding = 0, .type = DescriptorType::SampledImage, .resource = blitTex }
                 };
                 UpdateDescriptorSet(device_, blit_descriptor_set_, blit_params, 1);
                 cmd->BindGraphicsPipeline(blit_pipeline_);
@@ -2161,13 +2716,13 @@ void TestNaniteStreamingPipeline::ProcessStreamingFeedback() {
 
 void TestNaniteStreamingPipeline::RecordTestMetrics() {
     if (frameCount_ == 0) {
-        std::cout << "\n=== Streaming Metrics (Frame " << frameCount_ << ") ===" << std::endl;
-        std::cout << "  Avg Processing Time: " << testResults_.avg_processing_time_ms.load() << " ms" << std::endl;
+        //std::cout << "\n=== Streaming Metrics (Frame " << frameCount_ << ") ===" << std::endl;
+        //std::cout << "  Avg Processing Time: " << testResults_.avg_processing_time_ms.load() << " ms" << std::endl;
 
         auto stats = streamingManager_->GetStats();
-        std::cout << "  Resident Clusters: " << stats.current_resident_clusters << std::endl;
-        std::cout << "  Pool Usage: " << (stats.page_pool_usage * 100.0f) << "%" << std::endl;
-        std::cout << "  Pending Requests: " << stats.pending_requests_count << std::endl;
+        //std::cout << "  Resident Clusters: " << stats.current_resident_clusters << std::endl;
+        //std::cout << "  Pool Usage: " << (stats.page_pool_usage * 100.0f) << "%" << std::endl;
+        //std::cout << "  Pending Requests: " << stats.pending_requests_count << std::endl;
     }
 }
 
@@ -2175,21 +2730,21 @@ void TestNaniteStreamingPipeline::ValidateResults() {
     auto stats = streamingManager_->GetStats();
 
     if (stats.eviction_count > 0) {
-        std::cout << "✓ LRU eviction working correctly" << std::endl;
+        //std::cout << "✓ LRU eviction working correctly" << std::endl;
     }
 
     if (stats.total_clusters_streamed > 0) {
-        std::cout << "✓ Cluster streaming working correctly" << std::endl;
+        //std::cout << "✓ Cluster streaming working correctly" << std::endl;
     }
 
     if (testResults_.requests_processed.load() > 0) {
-        std::cout << "✓ Request processing working correctly" << std::endl;
+        //std::cout << "✓ Request processing working correctly" << std::endl;
     }
 
-    std::cout << "\nValidation Summary:" << std::endl;
-    std::cout << "  Total Streamed: " << testResults_.clusters_streamed.load() << std::endl;
-    std::cout << "  Total Evicted: " << testResults_.clusters_evicted.load() << std::endl;
-    std::cout << "  Total Requests: " << testResults_.requests_processed.load() << std::endl;
+    //std::cout << "\nValidation Summary:" << std::endl;
+    //std::cout << "  Total Streamed: " << testResults_.clusters_streamed.load() << std::endl;
+    //std::cout << "  Total Evicted: " << testResults_.clusters_evicted.load() << std::endl;
+    //std::cout << "  Total Requests: " << testResults_.requests_processed.load() << std::endl;
 }
 
 void TestNaniteStreamingPipeline::TestPerformance() {
@@ -2204,15 +2759,15 @@ void TestNaniteStreamingPipeline::TestPerformance() {
     float totalTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     float avgTime = totalTime / numIterations;
 
-    std::cout << "Performance Results:" << std::endl;
-    std::cout << "  Total Time: " << totalTime << " ms" << std::endl;
-    std::cout << "  Avg Time/Frame: " << avgTime << " ms" << std::endl;
-    std::cout << "  Target: < 1.0 ms/frame" << std::endl;
+    //std::cout << "Performance Results:" << std::endl;
+    //std::cout << "  Total Time: " << totalTime << " ms" << std::endl;
+    //std::cout << "  Avg Time/Frame: " << avgTime << " ms" << std::endl;
+    //std::cout << "  Target: < 1.0 ms/frame" << std::endl;
 
     if (avgTime < 1.0f) {
-        std::cout << "  ✓ PASS - Performance within target" << std::endl;
+        //std::cout << "  ✓ PASS - Performance within target" << std::endl;
     } else {
-        std::cout << "  ✗ FAIL - Performance exceeds target" << std::endl;
+        //std::cout << "  ✗ FAIL - Performance exceeds target" << std::endl;
     }
 }
 
@@ -2220,12 +2775,12 @@ void TestNaniteStreamingPipeline::Shutdown() {
     if (isShutdown_) return;
     isShutdown_ = true;
 
-    std::cout << "\nTestNaniteStreamingPipeline Final Results:" << std::endl;
-    std::cout << "  Total Frames: " << frameCount_ << std::endl;
-    std::cout << "  Clusters Streamed: " << testResults_.clusters_streamed.load() << std::endl;
-    std::cout << "  Clusters Evicted: " << testResults_.clusters_evicted.load() << std::endl;
-    std::cout << "  Requests Processed: " << testResults_.requests_processed.load() << std::endl;
-    std::cout << "  Avg Processing Time: " << testResults_.avg_processing_time_ms.load() << " ms/frame" << std::endl;
+    //std::cout << "\nTestNaniteStreamingPipeline Final Results:" << std::endl;
+    //std::cout << "  Total Frames: " << frameCount_ << std::endl;
+    //std::cout << "  Clusters Streamed: " << testResults_.clusters_streamed.load() << std::endl;
+    //std::cout << "  Clusters Evicted: " << testResults_.clusters_evicted.load() << std::endl;
+    //std::cout << "  Requests Processed: " << testResults_.requests_processed.load() << std::endl;
+    //std::cout << "  Avg Processing Time: " << testResults_.avg_processing_time_ms.load() << " ms/frame" << std::endl;
 
     // Print final frame culling debug data at shutdown
     PrintFinalFrameCullingDebugData();
@@ -2277,7 +2832,7 @@ void TestNaniteStreamingPipeline::Shutdown() {
     if (gpuMaterialRegistry_) {
         // Wait for async build job to complete before destroying registry
         if (materialBuildJob_.IsValid()) {
-            std::cout << "[TestNanite] Waiting for material build job to complete..." << std::endl;
+            //std::cout << "[TestNanite] Waiting for material build job to complete..." << std::endl;
             materialBuildJob_.Wait();
         }
         gpuMaterialRegistry_.reset();
@@ -2289,11 +2844,23 @@ void TestNaniteStreamingPipeline::Shutdown() {
         ssgiPass_.reset();
     }
 
+    // Cleanup SSAO resources
+    if (ssaoPass_) {
+        ssaoPass_->Shutdown();
+        ssaoPass_.reset();
+    }
+
     // Cleanup DDGI resources
     if (ddgiPass_) {
         ddgiPass_->Shutdown();
         ddgiPass_.reset();
     }
+
+    // Cleanup shadow resources
+    if (gpuDrawPipeline_) {
+        gpuDrawPipeline_->ShutdownShadowResources();
+    }
+
     if (colorHistoryManager_) {
         colorHistoryManager_->Shutdown();
         colorHistoryManager_.reset();
@@ -2317,7 +2884,7 @@ void TestNaniteStreamingPipeline::Shutdown() {
 
     primal::jobsystem::JobSystem::Shutdown();
 
-    std::cout << "TestNaniteStreamingPipeline::Shutdown End" << std::endl;
+    //std::cout << "TestNaniteStreamingPipeline::Shutdown End" << std::endl;
 }
 
 void TestNaniteStreamingPipeline::Resize(u32 width, u32 height) {
@@ -2331,33 +2898,33 @@ TestNaniteStreamingPipeline::~TestNaniteStreamingPipeline() {
 }
 
 void TestNaniteStreamingPipeline::TestStreamingInitialization() {
-    std::cout << "\n=== Test: Streaming Initialization ===" << std::endl;
+    //std::cout << "\n=== Test: Streaming Initialization ===" << std::endl;
 
     if (streamingManager_) {
-        std::cout << "✓ Streaming manager initialized" << std::endl;
+        //std::cout << "✓ Streaming manager initialized" << std::endl;
     } else {
-        std::cout << "✗ Streaming manager NOT initialized" << std::endl;
+        //std::cout << "✗ Streaming manager NOT initialized" << std::endl;
     }
 
     if (cullingPipeline_) {
-        std::cout << "✓ Culling pipeline initialized" << std::endl;
+        //std::cout << "✓ Culling pipeline initialized" << std::endl;
     } else {
-        std::cout << "✗ Culling pipeline NOT initialized" << std::endl;
+        //std::cout << "✗ Culling pipeline NOT initialized" << std::endl;
     }
 
     (void)streamingManager_->GetStats(); // Suppress unused variable warning
     auto config = streamingManager_->GetConfig();
-    std::cout << "  Pool Size: " << (config.page_pool_size_bytes / (1024 * 1024)) << " MB" << std::endl;
-    std::cout << "  Max Requests/Frame: " << config.max_requests_per_frame << std::endl;
+    //std::cout << "  Pool Size: " << (config.page_pool_size_bytes / (1024 * 1024)) << " MB" << std::endl;
+    //std::cout << "  Max Requests/Frame: " << config.max_requests_per_frame << std::endl;
 }
 
 void TestNaniteStreamingPipeline::TestGPURequestGeneration() {
-    std::cout << "\n=== Test: GPU Request Generation ===" << std::endl;
-    std::cout << "⚠ Not yet implemented - requires streaming feedback shaders" << std::endl;
+    //std::cout << "\n=== Test: GPU Request Generation ===" << std::endl;
+    //std::cout << "⚠ Not yet implemented - requires streaming feedback shaders" << std::endl;
 }
 
 void TestNaniteStreamingPipeline::TestLRUEviction() {
-    std::cout << "\n=== Test: LRU Eviction ===" << std::endl;
+    //std::cout << "\n=== Test: LRU Eviction ===" << std::endl;
 
     for (u32 i = 0; i < 1000; ++i) {
         ProcessStreamingFeedback();
@@ -2365,40 +2932,40 @@ void TestNaniteStreamingPipeline::TestLRUEviction() {
 
     auto stats = streamingManager_->GetStats();
     if (stats.eviction_count > 0) {
-        std::cout << "✓ LRU eviction triggered" << std::endl;
-        std::cout << "  Evictions: " << stats.eviction_count << std::endl;
+        //std::cout << "✓ LRU eviction triggered" << std::endl;
+        //std::cout << "  Evictions: " << stats.eviction_count << std::endl;
     } else {
-        std::cout << "✗ No evictions occurred" << std::endl;
+        //std::cout << "✗ No evictions occurred" << std::endl;
     }
 }
 
 void TestNaniteStreamingPipeline::TestResidencyBuffer() {
-    std::cout << "\n=== Test: Residency Buffer ===" << std::endl;
+    //std::cout << "\n=== Test: Residency Buffer ===" << std::endl;
 
     auto residencyBuffer = streamingManager_->GetResidencyBuffer();
     if (residencyBuffer != rhi::handles::INVALID_RESOURCE) {
-        std::cout << "✓ Residency buffer allocated" << std::endl;
+        //std::cout << "✓ Residency buffer allocated" << std::endl;
     } else {
-        std::cout << "✗ Residency buffer NOT allocated" << std::endl;
+        //std::cout << "✗ Residency buffer NOT allocated" << std::endl;
     }
 
     auto requestBuffer = streamingManager_->GetRequestBuffer();
     if (requestBuffer != rhi::handles::INVALID_RESOURCE) {
-        std::cout << "✓ Request buffer allocated" << std::endl;
+        //std::cout << "✓ Request buffer allocated" << std::endl;
     } else {
-        std::cout << "✗ Request buffer NOT allocated" << std::endl;
+        //std::cout << "✗ Request buffer NOT allocated" << std::endl;
     }
 
     auto feedbackBuffer = streamingManager_->GetFeedbackBuffer();
     if (feedbackBuffer != rhi::handles::INVALID_RESOURCE) {
-        std::cout << "✓ Feedback buffer allocated" << std::endl;
+        //std::cout << "✓ Feedback buffer allocated" << std::endl;
     } else {
-        std::cout << "✗ Feedback buffer NOT allocated" << std::endl;
+        //std::cout << "✗ Feedback buffer NOT allocated" << std::endl;
     }
 }
 
 void TestNaniteStreamingPipeline::TestEndToEndStreaming() {
-    std::cout << "\n=== Test: End-to-End Streaming ===" << std::endl;
+    //std::cout << "\n=== Test: End-to-End Streaming ===" << std::endl;
 
     u32 initialStreamed = testResults_.clusters_streamed.load();
 
@@ -2409,18 +2976,18 @@ void TestNaniteStreamingPipeline::TestEndToEndStreaming() {
     u32 finalStreamed = testResults_.clusters_streamed.load();
 
     if (finalStreamed > initialStreamed) {
-        std::cout << "✓ Clusters streamed: " << (finalStreamed - initialStreamed) << std::endl;
+        //std::cout << "✓ Clusters streamed: " << (finalStreamed - initialStreamed) << std::endl;
     } else {
-        std::cout << "✗ No clusters streamed" << std::endl;
+        //std::cout << "✗ No clusters streamed" << std::endl;
     }
 }
 
 void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
     // 🔥 COMMENTED OUT: Reduce log noise, instance data has been validated
-    // std::cout << "\n=== All Instance Bounds Information ===" << std::endl;
+    //// std::cout << "\n=== All Instance Bounds Information ===" << std::endl;
 
     const auto& proxies = scene_.GetProxies();
-    // std::cout << "Total proxies in scene: " << proxies.size() << std::endl;
+    //// std::cout << "Total proxies in scene: " << proxies.size() << std::endl;
 
     u32 validInstanceCount = 0;
     u32 totalClusterCount = 0;
@@ -2431,7 +2998,7 @@ void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
         // Get cluster component to access geometry data
         const cluster::component_cache* cluster_cache = cluster::get(proxy.meshId);
         if (!cluster_cache || !cluster_cache->exists) {
-            // std::cout << "  [" << i << "] Invalid cluster component" << std::endl;
+            //// std::cout << "  [" << i << "] Invalid cluster component" << std::endl;
             continue;
         }
 
@@ -2441,7 +3008,7 @@ void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
             resource_manager.GetOrCreateResource(cluster_cache->geometry_content_id);
 
         if (!resource || !resource->gpu_mesh) {
-            // std::cout << "  [" << i << "] No GPU mesh resource" << std::endl;
+            //// std::cout << "  [" << i << "] No GPU mesh resource" << std::endl;
             continue;
         }
 
@@ -2450,9 +3017,9 @@ void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
     }
 
     // Compute instance bounds distribution from the snapshot GPU buffer
-    std::cout << "\n=== Scene Summary ===" << std::endl;
-    std::cout << "  Valid Instances: " << validInstanceCount << " out of " << proxies.size() << std::endl;
-    std::cout << "  Total Clusters: " << totalClusterCount << std::endl;
+    //std::cout << "\n=== Scene Summary ===" << std::endl;
+    //std::cout << "  Valid Instances: " << validInstanceCount << " out of " << proxies.size() << std::endl;
+    //std::cout << "  Total Clusters: " << totalClusterCount << std::endl;
 
     // Print instance bounds distribution from the actual GPU buffer
     {
@@ -2479,42 +3046,42 @@ void TestNaniteStreamingPipeline::PrintAllInstanceBounds() {
             }
             avgR /= (f32)snapshotInstances.size();
 
-            std::cout << "\n  Instance Bounds Distribution:" << std::endl;
-            std::cout << "    Count: " << snapshotInstances.size() << std::endl;
-            std::cout << "    bounds_center X: [" << minCX << ", " << maxCX << "]" << std::endl;
-            std::cout << "    bounds_center Y: [" << minCY << ", " << maxCY << "]" << std::endl;
-            std::cout << "    bounds_center Z: [" << minCZ << ", " << maxCZ << "]" << std::endl;
-            std::cout << "    bounds_radius: min=" << minR << " max=" << maxR << " avg=" << avgR << std::endl;
-            std::cout << "    Scene extent X: " << (maxCX - minCX) << std::endl;
-            std::cout << "    Scene extent Y: " << (maxCY - minCY) << std::endl;
-            std::cout << "    Scene extent Z: " << (maxCZ - minCZ) << std::endl;
+            //std::cout << "\n  Instance Bounds Distribution:" << std::endl;
+            //std::cout << "    Count: " << snapshotInstances.size() << std::endl;
+            //std::cout << "    bounds_center X: [" << minCX << ", " << maxCX << "]" << std::endl;
+            //std::cout << "    bounds_center Y: [" << minCY << ", " << maxCY << "]" << std::endl;
+            //std::cout << "    bounds_center Z: [" << minCZ << ", " << maxCZ << "]" << std::endl;
+            //std::cout << "    bounds_radius: min=" << minR << " max=" << maxR << " avg=" << avgR << std::endl;
+            //std::cout << "    Scene extent X: " << (maxCX - minCX) << std::endl;
+            //std::cout << "    Scene extent Y: " << (maxCY - minCY) << std::endl;
+            //std::cout << "    Scene extent Z: " << (maxCZ - minCZ) << std::endl;
 
             // Print first 5 instances' bounds for spot check
-            std::cout << "\n    First 5 instances:" << std::endl;
+            //std::cout << "\n    First 5 instances:" << std::endl;
             for (u32 i = 0; i < std::min((u32)5, (u32)snapshotInstances.size()); ++i) {
                 const auto& inst = snapshotInstances[i];
-                std::cout << "      [" << i << "] center=("
-                          << inst.bounds_center.x << ", "
-                          << inst.bounds_center.y << ", "
-                          << inst.bounds_center.z << ") radius="
-                          << inst.bounds_radius
-                          << " cluster_start=" << inst.cluster_start
-                          << " cluster_count=" << inst.cluster_count
-                          << std::endl;
+                //std::cout << "      [" << i << "] center=("
+                          //<< inst.bounds_center.x << ", "
+                          //<< inst.bounds_center.y << ", "
+                          //<< inst.bounds_center.z << ") radius="
+                          //<< inst.bounds_radius
+                          //<< " cluster_start=" << inst.cluster_start
+                          //<< " cluster_count=" << inst.cluster_count
+                          //<< std::endl;
             }
         }
     }
-    std::cout << "=== End Summary ===\n" << std::endl;
+    //std::cout << "=== End Summary ===\n" << std::endl;
 }
 
 void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
     if (finalFrameCullingDebugData_.empty()) {
-        std::cout << "\n=== No Final Frame Culling Debug Data ===" << std::endl;
+        //std::cout << "\n=== No Final Frame Culling Debug Data ===" << std::endl;
         return;
     }
 
-    std::cout << "\n=== Final Frame GPU Culling Debug Data (Frame " << frameCount_ << ", "
-              << finalFrameCullingDebugData_.size() << " entries) ===" << std::endl;
+    //std::cout << "\n=== Final Frame GPU Culling Debug Data (Frame " << frameCount_ << ", "
+              //<< finalFrameCullingDebugData_.size() << " entries) ===" << std::endl;
 
     // Group by culling reason for better analysis
     u32 frustumCulled = 0;
@@ -2533,15 +3100,15 @@ void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
         }
     }
 
-    std::cout << "Final Frame Culling Summary:" << std::endl;
-    std::cout << "  Frustum Culled: " << frustumCulled << std::endl;
-    std::cout << "  Distance Culled: " << distanceCulled << std::endl;
-    std::cout << "  Backface Culled: " << backfaceCulled << std::endl;  // 🔥 NEW: Backface culling output
-    std::cout << "  Not Culled: " << notCulled << std::endl;
-    std::cout << "  Unknown: " << unknownCulled << std::endl;
+    //std::cout << "Final Frame Culling Summary:" << std::endl;
+    //std::cout << "  Frustum Culled: " << frustumCulled << std::endl;
+    //std::cout << "  Distance Culled: " << distanceCulled << std::endl;
+    //std::cout << "  Backface Culled: " << backfaceCulled << std::endl;  // 🔥 NEW: Backface culling output
+    //std::cout << "  Not Culled: " << notCulled << std::endl;
+    //std::cout << "  Unknown: " << unknownCulled << std::endl;
 
     // Show all entries with detailed information
-    std::cout << "\nDetailed culling data for all entries:" << std::endl;
+    //std::cout << "\nDetailed culling data for all entries:" << std::endl;
 
     for (u32 i = 0; i < finalFrameCullingDebugData_.size(); ++i) {
         if( i > 500) break;
@@ -2566,32 +3133,32 @@ void TestNaniteStreamingPipeline::PrintFinalFrameCullingDebugData() {
             }
         }
 
-        std::cout << "  [" << i << "] Instance=" << entry.instance_id
-                 << ", Cluster=" << entry.cluster_id
-                 << ", Reason=" << culling_reason_str
-                 << ", Plane=" << plane_str
-                 << ", ViewZ=" << entry.view_space_z
-                 << ", Distance=" << entry.distance_to_camera
-                 << ", BoundsRadius=" << entry.bounds_radius
-                 << ", Visible=" << (entry.is_visible ? "Yes" : "No");
+        //std::cout << "  [" << i << "] Instance=" << entry.instance_id
+                 //<< ", Cluster=" << entry.cluster_id
+                 //<< ", Reason=" << culling_reason_str
+                 //<< ", Plane=" << plane_str
+                 //<< ", ViewZ=" << entry.view_space_z
+                 //<< ", Distance=" << entry.distance_to_camera
+                 //<< ", BoundsRadius=" << entry.bounds_radius
+                 //<< ", Visible=" << (entry.is_visible ? "Yes" : "No");
 
         // 🔥 NEW: Show backface culling specific data
         if (entry.meshlet_id > 0 || entry.is_backface_culled) {
-            std::cout << "\n      Backface: [MeshletID=" << entry.meshlet_id
-                     << ", CosAngle=" << entry.backface_cos_angle
-                     << ", Cutoff=" << entry.backface_cutoff
-                     << ", Culled=" << (entry.is_backface_culled ? "Yes" : "No") << "]";
+            //std::cout << "\n      Backface: [MeshletID=" << entry.meshlet_id
+                     //<< ", CosAngle=" << entry.backface_cos_angle
+                     //<< ", Cutoff=" << entry.backface_cutoff
+                     //<< ", Culled=" << (entry.is_backface_culled ? "Yes" : "No") << "]";
         }
 
         // Show plane distances for debugging
-        std::cout << "\n      PlaneDistances=[L:" << entry.plane_distances[0]
-                 << ",R:" << entry.plane_distances[1]
-                 << ",B:" << entry.plane_distances[2]
-                 << ",T:" << entry.plane_distances[3]
-                 << ",N:" << entry.plane_distances[4]
-                 << ",F:" << entry.plane_distances[5] << "]"
-                 << std::endl;
+        //std::cout << "\n      PlaneDistances=[L:" << entry.plane_distances[0]
+                 //<< ",R:" << entry.plane_distances[1]
+                 //<< ",B:" << entry.plane_distances[2]
+                 //<< ",T:" << entry.plane_distances[3]
+                 //<< ",N:" << entry.plane_distances[4]
+                 //<< ",F:" << entry.plane_distances[5] << "]"
+                 //<< std::endl;
     }
 
-    std::cout << "=== End Final Frame Culling Debug Data ===\n" << std::endl;
+    //std::cout << "=== End Final Frame Culling Debug Data ===\n" << std::endl;
 }

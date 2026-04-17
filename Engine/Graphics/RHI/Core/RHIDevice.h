@@ -128,6 +128,7 @@ struct GraphicsPipelineDesc {
                             layout(handles::INVALID_PIPELINE_LAYOUT),
                             topology(PrimitiveTopology::TriangleList),
                             fillMode(FillMode::Solid), cullMode(CullMode::Back),
+                            depthBias(0.0f), depthBiasClamp(0.0f), slopeScaledDepthBias(0.0f),
                             renderTargetCount(0), depthStencilFormat(DataFormat::Unknown),
                             enableDepthTest(true), enableDepthWrite(true),
                             depthFunc(ComparisonFunc::Less), enableStencilTest(false),

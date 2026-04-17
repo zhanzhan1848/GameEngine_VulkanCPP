@@ -1,4 +1,4 @@
-#include "LumenSSGIPass.h"
+#include "LumenSSAOPass.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RenderGraph/RenderGraphPass.h"
@@ -19,7 +19,7 @@ using namespace rendergraph;
 namespace {
 
 // ============================================================================
-// Descriptor update helper (from TestNaniteStreamingPipeline pattern)
+// Descriptor update helper
 // ============================================================================
 
 struct DescriptorData {
@@ -65,8 +65,6 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
 
 // ============================================================================
 // Shader source loader with #include resolution
-// Metal's newLibrary(source) can't resolve #include without include dirs.
-// We manually inline local includes before passing to CreateShader.
 // ============================================================================
 
 static const std::string SHADER_BASE_DIR = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/";
@@ -80,8 +78,6 @@ static std::string ReadFileToString(const std::string& path) {
     return ss.str();
 }
 
-// Recursively resolve #include "..." directives by inlining file content.
-// Only resolves local includes (quoted), not system includes (angle brackets).
 static std::string ResolveIncludes(const std::string& source, const std::string& baseDir,
                                    std::set<std::string>& included) {
     std::istringstream in(source);
@@ -89,7 +85,6 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
     std::string line;
 
     while (std::getline(in, line)) {
-        // Check for #include "..." (local include, not <...> system include)
         std::string trimmed = line;
         size_t firstNonSpace = trimmed.find_first_not_of(" \t");
         if (firstNonSpace != std::string::npos) trimmed = trimmed.substr(firstNonSpace);
@@ -100,7 +95,6 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
             if (start != std::string::npos && end != std::string::npos) {
                 std::string includeFile = trimmed.substr(start, end - start);
 
-                // Search in baseDir first, then SHADER_BASE_DIR
                 std::string fullPath = baseDir + includeFile;
                 if (std::ifstream(fullPath).good() == false) {
                     fullPath = SHADER_BASE_DIR + includeFile;
@@ -110,16 +104,13 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
                     included.insert(fullPath);
                     std::string includedContent = ReadFileToString(fullPath);
                     if (!includedContent.empty()) {
-                        // Recursively resolve includes in the included file
                         std::string resolved = ResolveIncludes(includedContent,
                             fullPath.substr(0, fullPath.find_last_of('/') + 1), included);
                         out << resolved << "\n";
                     } else {
-                        std::cerr << "[LumenSSGI] Warning: Failed to read include: " << fullPath << std::endl;
                         out << line << "\n";
                     }
                 }
-                // If already included, skip (header guard / #pragma once handles it)
                 continue;
             }
         }
@@ -138,40 +129,34 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
     }
 
     if (source.empty()) {
-        std::cerr << "[LumenSSGI] Failed to load shader: " << shaderName << std::endl;
+        std::cerr << "[LumenSSAO] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
 
-    // Resolve all #include "..." directives by inlining
     std::set<std::string> included;
     std::string resolved = ResolveIncludes(source, LUMEN_SHADER_DIR, included);
 
     return std::vector<u8>(resolved.begin(), resolved.end());
 }
 
-// ============================================================================
-// Per-pass data struct for the RenderGraph pass
-// ============================================================================
-
-struct LumenSSGIData {
-    RGResourceHandle ssgi_trace;
-    RGResourceHandle ssgi_temporal;
-    RGResourceHandle ssgi_temporal_hist;
-    RGResourceHandle ssgi_output;
+// Per-pass data for render graph
+struct LumenSSAOData {
+    RGResourceHandle ssao_trace;
+    RGResourceHandle ssao_output;
 };
 
 } // anonymous namespace
 
 // ============================================================================
-// LumenSSGIPass Implementation
+// LumenSSAOPass Implementation
 // ============================================================================
 
-LumenSSGIPass::~LumenSSGIPass() {
+LumenSSAOPass::~LumenSSAOPass() {
     Shutdown();
 }
 
-bool LumenSSGIPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height,
-                               const SSGIParams& params) {
+bool LumenSSAOPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height,
+                               const SSAOParams& params) {
     if (initialized_) return true;
 
     device_ = device;
@@ -182,81 +167,49 @@ bool LumenSSGIPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
     u32 half_w = render_width / 2;
     u32 half_h = render_height / 2;
 
-    // Create descriptor set layouts
     CreateDescriptorSetLayouts();
-
-    // Create compute pipelines + descriptor sets
     CreatePipelines();
-
-    // Create triple-buffered constant buffers
     CreateConstantBuffers();
-
-    // Create persistent output textures
     CreatePersistentTextures();
 
     initialized_ = true;
 
-    std::cout << "[LumenSSGI] Initialized (" << render_width << "x" << render_height
+    std::cout << "[LumenSSAO] Initialized (" << render_width << "x" << render_height
               << ", half-res: " << half_w << "x" << half_h << ")" << std::endl;
     return true;
 }
 
-void LumenSSGIPass::Shutdown() {
+void LumenSSAOPass::Shutdown() {
     if (!initialized_) return;
     initialized_ = false;
-
     device_ = nullptr;
-
-    // No explicit GPU resource destruction needed — handles are POD types
-    // managed by the RHI device's garbage collector.
 }
 
 // ============================================================================
 // Private helper methods
 // ============================================================================
 
-void LumenSSGIPass::CreateDescriptorSetLayouts() {
-    // --- Trace: 4 sampled + 1 storage + 2 UBO ---
-    // Metal uses SEPARATE binding namespaces for textures and buffers.
-    // [[texture(N)]] and [[buffer(N)]] are independent.
-    // So binding 0 can be used for BOTH texture(0) and buffer(0).
+void LumenSSAOPass::CreateDescriptorSetLayouts() {
+    // --- Trace: 2 sampled + 1 storage + 2 UBO ---
     {
         DescriptorSetLayoutBinding traceBindings[] = {
             // Textures (sampled)
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // normal
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth
-            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // hzb
-            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev_color
             // Texture (storage)
-            {4, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // output
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // output
             // Buffers (separate Metal namespace)
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
-            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // SSGIParams
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // SSAOTraceParams
         };
-        DescriptorSetLayoutDesc layoutDesc{7, traceBindings};
+        DescriptorSetLayoutDesc layoutDesc{5, traceBindings};
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
-    }
-
-    // --- Temporal: 5 sampled + 1 storage + 2 UBO ---
-    {
-        DescriptorSetLayoutBinding temporalBindings[] = {
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // trace (half-res)
-            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // history
-            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // velocity
-            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth
-            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // normal
-            {5, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // output
-            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
-            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // TemporalParams
-        };
-        DescriptorSetLayoutDesc layoutDesc{8, temporalBindings};
-        temporal_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
     // --- Filter: 3 sampled + 1 storage + 2 UBO ---
     {
         DescriptorSetLayoutBinding filterBindings[] = {
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // temporal output
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // ssao half-res
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // normal
             {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth
             {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // output
@@ -268,22 +221,19 @@ void LumenSSGIPass::CreateDescriptorSetLayouts() {
     }
 }
 
-void LumenSSGIPass::CreatePipelines() {
+void LumenSSAOPass::CreatePipelines() {
     auto CompileShader = [&](const char* name, const char* entry) -> ShaderHandle {
         auto code = LoadShaderBytecode(name);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
 
-    // Compile shaders
-    auto traceShader = CompileShader("SSGITrace", "ssgi_trace");
-    auto temporalShader = CompileShader("SSGITemporal", "ssgi_temporal");
-    auto filterShader = CompileShader("SSGIFilter", "ssgi_filter");
+    auto traceShader = CompileShader("SSAOTrace", "ssao_trace");
+    auto filterShader = CompileShader("SSAOFilter", "ssao_filter");
 
     if (traceShader == handles::INVALID_SHADER ||
-        temporalShader == handles::INVALID_SHADER ||
         filterShader == handles::INVALID_SHADER) {
-        std::cerr << "[LumenSSGI] Shader compilation failed" << std::endl;
+        std::cerr << "[LumenSSAO] Shader compilation failed" << std::endl;
         return;
     }
 
@@ -293,12 +243,6 @@ void LumenSSGIPass::CreatePipelines() {
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &trace_set_layout_;
         trace_layout_ = device_->CreatePipelineLayout(plDesc);
-    }
-    {
-        PipelineLayoutDesc plDesc;
-        plDesc.setLayoutCount = 1;
-        plDesc.setLayouts = &temporal_set_layout_;
-        temporal_layout_ = device_->CreatePipelineLayout(plDesc);
     }
     {
         PipelineLayoutDesc plDesc;
@@ -317,13 +261,6 @@ void LumenSSGIPass::CreatePipelines() {
     }
     {
         ComputePipelineDesc pipeDesc{};
-        pipeDesc.computeShader = temporalShader;
-        pipeDesc.layout = temporal_layout_;
-        pipeDesc.threadGroupSize = {8, 8, 1};
-        temporal_pipeline_ = device_->CreateComputePipeline(pipeDesc);
-    }
-    {
-        ComputePipelineDesc pipeDesc{};
         pipeDesc.computeShader = filterShader;
         pipeDesc.layout = filter_layout_;
         pipeDesc.threadGroupSize = {8, 8, 1};
@@ -337,17 +274,13 @@ void LumenSSGIPass::CreatePipelines() {
             trace_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
         {
-            DescriptorSetDesc dsDesc{temporal_set_layout_};
-            temporal_ds_[i] = device_->CreateDescriptorSet(dsDesc);
-        }
-        {
             DescriptorSetDesc dsDesc{filter_set_layout_};
             filter_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
     }
 }
 
-void LumenSSGIPass::CreateConstantBuffers() {
+void LumenSSAOPass::CreateConstantBuffers() {
     auto CreateCBs = [&](ResourceHandle (&cbs)[3], u64 size) {
         for (int i = 0; i < 3; i++) {
             BufferDesc desc{};
@@ -359,39 +292,29 @@ void LumenSSGIPass::CreateConstantBuffers() {
         }
     };
 
-    CreateCBs(global_cb_, 512);          // GlobalShaderData (432 bytes, padded)
-    CreateCBs(params_cb_, 48);           // SSGIParams
-    CreateCBs(temporal_params_cb_, 32);  // TemporalParams
-    CreateCBs(filter_params_cb_, 32);    // FilterParams (20 bytes + padding)
+    CreateCBs(global_cb_, 512);           // GlobalShaderData
+    CreateCBs(trace_params_cb_, 64);      // SSAOTraceParams
+    CreateCBs(filter_params_cb_, 32);     // SSAOFilterParams
 }
 
-void LumenSSGIPass::CreatePersistentTextures() {
+void LumenSSAOPass::CreatePersistentTextures() {
     u32 half_w = render_width_ / 2;
     u32 half_h = render_height_ / 2;
 
-    // Half-res trace output
+    // Half-res trace output (R16_Float)
     {
         TextureDesc desc{};
         desc.size = {half_w, half_h, 1};
-        desc.format = DataFormat::RGBA16_Float;
+        desc.format = DataFormat::R16_Float;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         trace_texture_ = device_->CreateTexture(desc);
     }
 
-    // Full-res temporal textures (triple-buffered)
-    for (int i = 0; i < 3; i++) {
-        TextureDesc desc{};
-        desc.size = {render_width_, render_height_, 1};
-        desc.format = DataFormat::RGBA16_Float;
-        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
-        temporal_textures_[i] = device_->CreateTexture(desc);
-    }
-
-    // Full-res filter output
+    // Full-res filter output (R16_Float)
     {
         TextureDesc desc{};
         desc.size = {render_width_, render_height_, 1};
-        desc.format = DataFormat::RGBA16_Float;
+        desc.format = DataFormat::R16_Float;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         filter_texture_ = device_->CreateTexture(desc);
     }
@@ -401,67 +324,36 @@ void LumenSSGIPass::CreatePersistentTextures() {
 // AddPass — main entry point called per frame
 // ============================================================================
 
-LumenSSGIOutput LumenSSGIPass::AddPass(
+LumenSSAOOutput LumenSSAOPass::AddPass(
     RenderGraph& graph,
     RGResourceHandle gbuffer_normal,
     RGResourceHandle gbuffer_depth,
-    RGResourceHandle gbuffer_velocity,
-    RGResourceHandle hzb_texture,
-    RGResourceHandle prev_frame_color,
-    const SSGICameraData& camera_data,
-    u32 current_frame_index,
-    u32 hzb_mip_levels)
+    const SSAOCameraData& camera_data,
+    u32 current_frame_index)
 {
-    LumenSSGIOutput output{};
+    LumenSSAOOutput output{};
 
-    // Import persistent textures into render graph
-    auto traceHandle = graph.ImportResource("LumenSSGI_Trace", trace_texture_);
-    auto filterHandle = graph.ImportResource("LumenSSGI_Filter", filter_texture_);
+    auto traceHandle = graph.ImportResource("LumenSSAO_Trace", trace_texture_);
+    auto filterHandle = graph.ImportResource("LumenSSAO_Filter", filter_texture_);
 
-    // Triple-buffered temporal indexing
-    u32 outIdx = current_frame_index % 3;
-    u32 histIdx = (current_frame_index + 2) % 3;
+    output.ssao_output = filterHandle;
 
-    // Import temporal textures
-    auto temporalOutHandle = graph.ImportResource(
-        "LumenSSGI_Temporal_" + std::to_string(outIdx), temporal_textures_[outIdx]);
-    auto temporalHistHandle = graph.ImportResource(
-        "LumenSSGI_TemporalHist_" + std::to_string(histIdx), temporal_textures_[histIdx]);
-
-    // Store the filter output handle for external use
-    output.ssgi_output = filterHandle;
-
-    graph.AddPass<LumenSSGIData>("LumenSSGI",
+    graph.AddPass<LumenSSAOData>("LumenSSAO",
         RGPassType::Compute, RGPassCategory::Lighting,
 
-        // ====================================================================
-        // Setup lambda: declare resource dependencies
-        // ====================================================================
-        [gbuffer_normal, gbuffer_depth, gbuffer_velocity, hzb_texture,
-         prev_frame_color, traceHandle, temporalOutHandle,
-         temporalHistHandle, filterHandle](
-            LumenSSGIData& data, RenderGraphBuilder& builder) {
-            // Read all input textures
-            builder.Read(gbuffer_normal,   ResourceState::ShaderResource);
-            builder.Read(gbuffer_depth,    ResourceState::ShaderResource);
-            builder.Read(gbuffer_velocity, ResourceState::ShaderResource);
-            builder.Read(hzb_texture,      ResourceState::ShaderResource);
-            builder.Read(prev_frame_color, ResourceState::ShaderResource);
+        // Setup lambda
+        [gbuffer_normal, gbuffer_depth, traceHandle, filterHandle](
+            LumenSSAOData& data, RenderGraphBuilder& builder) {
+            builder.Read(gbuffer_normal, ResourceState::ShaderResource);
+            builder.Read(gbuffer_depth, ResourceState::ShaderResource);
 
-            // Write to SSGI output textures
-            data.ssgi_trace = builder.Write(traceHandle, ResourceState::UnorderedAccess);
-            data.ssgi_temporal = builder.Write(temporalOutHandle, ResourceState::UnorderedAccess);
-            data.ssgi_temporal_hist = builder.Read(temporalHistHandle, ResourceState::ShaderResource);
-            data.ssgi_output = builder.Write(filterHandle, ResourceState::UnorderedAccess);
+            data.ssao_trace = builder.Write(traceHandle, ResourceState::UnorderedAccess);
+            data.ssao_output = builder.Write(filterHandle, ResourceState::UnorderedAccess);
         },
 
-        // ====================================================================
-        // Execute lambda: dispatch 3 compute sub-passes
-        // ====================================================================
-        [this, camera_data, current_frame_index, hzb_mip_levels,
-         gbuffer_normal, gbuffer_depth, gbuffer_velocity,
-         hzb_texture, prev_frame_color, outIdx, histIdx](
-            const LumenSSGIData& data, RenderGraphContext& context) {
+        // Execute lambda
+        [this, camera_data, current_frame_index, gbuffer_normal, gbuffer_depth](
+            const LumenSSAOData& data, RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
 
@@ -470,42 +362,17 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             u32 half_h = render_height_ / 2;
             constexpr u32 TG = 8;
 
-            // Resolve physical handles from render graph
             auto ResolveTexture = [&](RGResourceHandle handle) -> ResourceHandle {
                 auto* res = context.graph->GetResource(handle);
                 if (res) return res->GetPhysicalHandle();
                 return handles::INVALID_RESOURCE;
             };
 
-            ResourceHandle normalTex     = ResolveTexture(gbuffer_normal);
-            ResourceHandle depthTex      = ResolveTexture(gbuffer_depth);
-            ResourceHandle velocityTex   = ResolveTexture(gbuffer_velocity);
-            ResourceHandle hzbTex        = ResolveTexture(hzb_texture);
-            ResourceHandle prevColorTex  = ResolveTexture(prev_frame_color);
-
-            // DEBUG: Log SSGI dimensions and resource validity (every 120 frames)
-            static u32 dbgFrame = 0;
-            if (dbgFrame < 3) {
-                std::cout << "[LumenSSGI] Frame " << dbgFrame
-                          << " render=" << render_width_ << "x" << render_height_
-                          << " half=" << half_w << "x" << half_h
-                          << " frameIdx=" << frameIdx
-                          << "\n  normalTex=" << normalTex
-                          << " depthTex=" << depthTex
-                          << " velocityTex=" << velocityTex
-                          << " hzbTex=" << hzbTex
-                          << " prevColorTex=" << prevColorTex
-                          << "\n  trace_tex=" << trace_texture_
-                          << " temporal_out=" << temporal_textures_[outIdx]
-                          << " temporal_hist=" << temporal_textures_[histIdx]
-                          << " filter_tex=" << filter_texture_
-                          << std::endl;
-                dbgFrame++;
-            }
+            ResourceHandle normalTex = ResolveTexture(gbuffer_normal);
+            ResourceHandle depthTex  = ResolveTexture(gbuffer_depth);
 
             // ---- Upload GlobalShaderData ----
             {
-                // Must match CommonTypes.metal GlobalShaderData layout
                 struct GlobalShaderData {
                     math::m4x4 View;
                     math::m4x4 Projection;
@@ -550,48 +417,43 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             }
 
             // ================================================================
-            // Sub-pass 1: Trace (half-res)
+            // Sub-pass 1: GTAO Trace (half-res)
             // ================================================================
             if (trace_pipeline_ != handles::INVALID_PIPELINE &&
                 trace_texture_ != handles::INVALID_RESOURCE) {
-                // Upload SSGIParams
-                struct SSGIParamsData {
-                    u32   ray_count;
+                struct SSAOTraceParamsData {
                     float radius;
-                    float thickness;
+                    float power;
+                    u32   direction_count;
+                    u32   sample_count;
                     u32   frame_index;
                     u32   output_width;
                     u32   output_height;
                     float near_plane;
                     float far_plane;
-                    u32   hzb_mip_levels;
                 };
-                auto* ssgiParams = static_cast<SSGIParamsData*>(device_->MapBuffer(params_cb_[frameIdx]));
-                if (ssgiParams) {
-                    ssgiParams->ray_count = params_.ray_count;
-                    ssgiParams->radius = params_.radius;
-                    ssgiParams->thickness = params_.thickness;
-                    ssgiParams->frame_index = camera_data.frame_index;
-                    ssgiParams->output_width = half_w;
-                    ssgiParams->output_height = half_h;
-                    ssgiParams->near_plane = 0.1f;
-                    ssgiParams->far_plane = 1000.0f;
-                    ssgiParams->hzb_mip_levels = hzb_mip_levels;
-                    device_->UnmapBuffer(params_cb_[frameIdx]);
+                auto* traceParams = static_cast<SSAOTraceParamsData*>(device_->MapBuffer(trace_params_cb_[frameIdx]));
+                if (traceParams) {
+                    traceParams->radius = params_.radius;
+                    traceParams->power = params_.power;
+                    traceParams->direction_count = params_.direction_count;
+                    traceParams->sample_count = params_.sample_count;
+                    traceParams->frame_index = camera_data.frame_index;
+                    traceParams->output_width = half_w;
+                    traceParams->output_height = half_h;
+                    traceParams->near_plane = 0.1f;
+                    traceParams->far_plane = 1000.0f;
+                    device_->UnmapBuffer(trace_params_cb_[frameIdx]);
                 }
 
-                // Update descriptor set
-                DescriptorData traceParams[] = {
+                DescriptorData traceDesc[] = {
                     {0, DescriptorType::SampledImage,  normalTex},
                     {1, DescriptorType::SampledImage,  depthTex},
-                    {2, DescriptorType::SampledImage,  hzbTex},
-                    {3, DescriptorType::SampledImage,  prevColorTex},
-                    {4, DescriptorType::StorageImage,  trace_texture_},
-                    // Metal: buffers use separate binding namespace from textures
+                    {2, DescriptorType::StorageImage,  trace_texture_},
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {1, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
+                    {1, DescriptorType::UniformBuffer, trace_params_cb_[frameIdx]},
                 };
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 7);
+                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceDesc, 5);
 
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
@@ -599,17 +461,6 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
 
                 u32 gx = (half_w + TG - 1) / TG;
                 u32 gy = (half_h + TG - 1) / TG;
-
-                // DEBUG: Log first 3 frames
-                static u32 traceFrame = 0;
-                if (traceFrame < 3) {
-                    std::cout << "[LumenSSGI] TRACE dispatch: gx=" << gx << " gy=" << gy
-                              << " half=" << half_w << "x" << half_h
-                              << " total_threads=" << (gx*TG) << "x" << (gy*TG)
-                              << std::endl;
-                    traceFrame++;
-                }
-
                 cmd->Dispatch(gx, gy, 1);
             }
 
@@ -624,95 +475,44 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             }
 
             // ================================================================
-            // Sub-pass 2: Temporal Accumulation (full-res)
-            // ================================================================
-            if (temporal_pipeline_ != handles::INVALID_PIPELINE &&
-                temporal_textures_[outIdx] != handles::INVALID_RESOURCE) {
-                struct TemporalParamsData {
-                    float feedback;
-                    u32   full_width;
-                    u32   full_height;
-                    u32   half_width;
-                    u32   half_height;
-                };
-                auto* temporalParams = static_cast<TemporalParamsData*>(device_->MapBuffer(temporal_params_cb_[frameIdx]));
-                if (temporalParams) {
-                    temporalParams->feedback = params_.temporal_feedback;
-                    temporalParams->full_width = render_width_;
-                    temporalParams->full_height = render_height_;
-                    temporalParams->half_width = half_w;
-                    temporalParams->half_height = half_h;
-                    device_->UnmapBuffer(temporal_params_cb_[frameIdx]);
-                }
-
-                DescriptorData temporalParamsDesc[] = {
-                    {0, DescriptorType::SampledImage,  trace_texture_},               // half-res trace
-                    {1, DescriptorType::SampledImage,  temporal_textures_[histIdx]},  // history
-                    {2, DescriptorType::SampledImage,  velocityTex},                  // velocity
-                    {3, DescriptorType::SampledImage,  depthTex},                     // depth
-                    {4, DescriptorType::SampledImage,  normalTex},                    // normal
-                    {5, DescriptorType::StorageImage,  temporal_textures_[outIdx]},   // output
-                    // Metal: buffers use separate binding namespace
-                    {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {1, DescriptorType::UniformBuffer, temporal_params_cb_[frameIdx]},
-                };
-                UpdateDescriptorSet(device_, temporal_ds_[frameIdx], temporalParamsDesc, 8);
-
-                cmd->BindComputePipeline(temporal_pipeline_);
-                const DescriptorSetHandle sets[] = { temporal_ds_[frameIdx] };
-                cmd->BindDescriptorSets(PipelineBindPoint::Compute, temporal_layout_, 0, 1, sets, 0, nullptr);
-
-                u32 gx = (render_width_ + TG - 1) / TG;
-                u32 gy = (render_height_ + TG - 1) / TG;
-                cmd->Dispatch(gx, gy, 1);
-            }
-
-            // Barrier: temporal UAV -> SRV
-            {
-                ResourceBarrier barrier{};
-                barrier.resource = temporal_textures_[outIdx];
-                barrier.beforeState = ResourceState::UnorderedAccess;
-                barrier.afterState = ResourceState::ShaderResource;
-                barrier.subresource = 0xFFFFFFFF;
-                cmd->InsertBarrier(&barrier, 1);
-            }
-
-            // ================================================================
-            // Sub-pass 3: Spatial Filter (full-res)
+            // Sub-pass 2: Bilateral Filter (full-res)
             // ================================================================
             if (filter_pipeline_ != handles::INVALID_PIPELINE &&
                 filter_texture_ != handles::INVALID_RESOURCE) {
                 struct FilterParamsData {
                     float sigma_depth;
                     float sigma_normal;
-                    float sigma_hit_dist;
-                    float sigma_spatial;
                     u32   kernel_radius;
+                    u32   full_width;
+                    u32   full_height;
+                    u32   half_width;
+                    u32   half_height;
                 };
                 auto* filterParams = static_cast<FilterParamsData*>(device_->MapBuffer(filter_params_cb_[frameIdx]));
                 if (filterParams) {
                     filterParams->sigma_depth = params_.filter_sigma_depth;
                     filterParams->sigma_normal = params_.filter_sigma_normal;
-                    filterParams->sigma_hit_dist = params_.filter_sigma_hit_dist;
-                    filterParams->sigma_spatial = params_.filter_sigma_spatial;
                     filterParams->kernel_radius = params_.filter_kernel_radius;
+                    filterParams->full_width = render_width_;
+                    filterParams->full_height = render_height_;
+                    filterParams->half_width = half_w;
+                    filterParams->half_height = half_h;
                     device_->UnmapBuffer(filter_params_cb_[frameIdx]);
                 }
 
-                DescriptorData filterParamsDesc[] = {
-                    {0, DescriptorType::SampledImage,  temporal_textures_[outIdx]}, // temporal output
+                DescriptorData filterDesc[] = {
+                    {0, DescriptorType::SampledImage,  trace_texture_},
                     {1, DescriptorType::SampledImage,  normalTex},
                     {2, DescriptorType::SampledImage,  depthTex},
-                    {3, DescriptorType::StorageImage,  filter_texture_},             // final output
-                    // Metal: buffers use separate binding namespace
+                    {3, DescriptorType::StorageImage,  filter_texture_},
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {1, DescriptorType::UniformBuffer, filter_params_cb_[frameIdx]},
                 };
-                UpdateDescriptorSet(device_, filter_ds_[frameIdx], filterParamsDesc, 6);
+                UpdateDescriptorSet(device_, filter_ds_[frameIdx], filterDesc, 6);
 
                 cmd->BindComputePipeline(filter_pipeline_);
-                const DescriptorSetHandle sets[] = { filter_ds_[frameIdx] };
-                cmd->BindDescriptorSets(PipelineBindPoint::Compute, filter_layout_, 0, 1, sets, 0, nullptr);
+                const DescriptorSetHandle filterSets[] = { filter_ds_[frameIdx] };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, filter_layout_, 0, 1, filterSets, 0, nullptr);
 
                 u32 gx = (render_width_ + TG - 1) / TG;
                 u32 gy = (render_height_ + TG - 1) / TG;

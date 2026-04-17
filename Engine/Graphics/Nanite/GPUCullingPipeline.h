@@ -197,6 +197,14 @@ private:
     bool initialized_{ false };
     std::mutex mutex_;
 
+    // Execution state tracking (replaces static locals in Execute())
+    // These must be member variables to reset properly across Initialize/Shutdown cycles
+    u32 execute_call_count_{ 0 };
+    bool basic_descriptor_sets_created_{ false };
+    bool backface_descriptor_sets_created_{ false };
+    bool hzb_bindings_updated_{ false };
+    u32 matrix_print_count_{ 0 };
+
     // Culling constants structure matching Metal shader layout
     struct CullingConstants {
         math::m4x4 view_matrix;

@@ -30,9 +30,8 @@ struct InstanceData {
     uint _pad1;
     uint _pad2;
     packed_float3 bounds_center;
-    uint _pad_bc;
-    float bounds_radius;
-    uint _pad_br[3];
+    float bounds_radius;           // offset 172 — matches CPU InstanceData layout
+    uint _pad_br[4];               // 16 bytes padding to reach 192 total
 };
 
 struct MeshletData {

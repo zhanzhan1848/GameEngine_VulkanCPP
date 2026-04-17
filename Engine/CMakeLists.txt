@@ -281,14 +281,6 @@ elseif(APPLE)
     # 设置链接器标志
     # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L/opt/homebrew/Cellar/llvm/20.1.5/lib -Wl,-rpath,/opt/homebrew/Cellar/llvm/20.1.5/lib")
     
-    # 添加系统头文件目录（顺序很重要）
-    include_directories(SYSTEM BEFORE
-        # /opt/homebrew/Cellar/llvm/20.1.5/include/c++/v1
-        # /opt/homebrew/Cellar/llvm/20.1.5/lib/clang/19/include
-        ${MACOSX_PREFIX}/usr/include
-        ${MACOSX_PREFIX}/System/Library/Frameworks
-    )
-    
     # 添加项目头文件
     target_include_directories(${PROJECT_NAME} PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}

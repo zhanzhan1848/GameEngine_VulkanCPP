@@ -124,7 +124,7 @@ bool GPUCullingPipeline::CreatePipelines() {
     auto loadComputePipeline = [&](const char* shaderName, const char* entryPoint) -> rhi::PipelineHandle {
         auto shaderCode = LoadShaderBytecode(shaderName, entryPoint);
         if (shaderCode.empty()) {
-            std::cout << "GPU Culling shader " << shaderName << " not found, skipping" << std::endl;
+//            std::cout << "GPU Culling shader " << shaderName << " not found, skipping" << std::endl;
             return rhi::handles::INVALID_PIPELINE;
         }
 
@@ -184,10 +184,10 @@ bool GPUCullingPipeline::CreatePipelines() {
         if (pipeline == rhi::handles::INVALID_PIPELINE) {
             std::cerr << "Failed to create pipeline: " << shaderName << std::endl;
         } else {
-            std::cout << "Created GPU culling pipeline: " << shaderName
-                      << " (ThreadGroupSize: " << pipelineDesc.threadGroupSize.x
-                      << ", " << pipelineDesc.threadGroupSize.y
-                      << ", " << pipelineDesc.threadGroupSize.z << ")" << std::endl;
+//            std::cout << "Created GPU culling pipeline: " << shaderName
+//                      << " (ThreadGroupSize: " << pipelineDesc.threadGroupSize.x
+//                      << ", " << pipelineDesc.threadGroupSize.y
+//                      << ", " << pipelineDesc.threadGroupSize.z << ")" << std::endl;
         }
 
         return pipeline;
@@ -209,7 +209,7 @@ bool GPUCullingPipeline::CreatePipelines() {
         return false;
     }
 
-    std::cout << "GPU Culling pipelines created successfully (progressive filtering)" << std::endl;
+//    std::cout << "GPU Culling pipelines created successfully (progressive filtering)" << std::endl;
     return true;
 }
 
@@ -303,7 +303,7 @@ bool GPUCullingPipeline::CreateBuffers() {
         constantsDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ConstantBuffer) | static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
         frame_res.culling_constants_buffer = device_->CreateBuffer(constantsDesc);
 
-        std::cout << "[GPUCulling] Created frame_resources_[" << i << "] buffers" << std::endl;
+//        std::cout << "[GPUCulling] Created frame_resources_[" << i << "] buffers" << std::endl;
     }
 
     // HZB texture for occlusion culling (shared)
@@ -332,7 +332,7 @@ bool GPUCullingPipeline::CreateBuffers() {
         }
     }
 
-    std::cout << "GPU Culling buffers created successfully with triple buffering" << std::endl;
+//    std::cout << "GPU Culling buffers created successfully with triple buffering" << std::endl;
 
     // Note: Descriptor sets will be created later when we have scene snapshot
     return true;
@@ -434,7 +434,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                  NaniteStreamingManager* streamingManager,
                  u32 bufferIndex) {
     if (callCount == 0) {
-        std::cout << "[GPUCulling] GPU Progressive Filtering Execute called, initialized_=" << initialized_ << std::endl;
+//        std::cout << "[GPUCulling] GPU Progressive Filtering Execute called, initialized_=" << initialized_ << std::endl;
     }
     callCount++;
 
@@ -445,7 +445,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
 
     if (!config_.enable_gpu_culling) {
         if (callCount == 1) {
-            std::cout << "[GPUCulling] GPU culling disabled, skipping" << std::endl;
+//            std::cout << "[GPUCulling] GPU culling disabled, skipping" << std::endl;
         }
         return true;
     }
@@ -458,10 +458,10 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // This fixes the issue where descriptor sets are created before HZB is ready
     static bool hzb_bindings_updated = false;
     if (!hzb_bindings_updated && hzb_system_ && hzb_system_->IsReady()) {
-        std::cout << "[GPUCulling] HZB system became ready at call #" << callCount << ", updating bindings..." << std::endl;
+//        std::cout << "[GPUCulling] HZB system became ready at call #" << callCount << ", updating bindings..." << std::endl;
         if (UpdateHZBBindings()) {
             hzb_bindings_updated = true;
-            std::cout << "[GPUCulling] HZB bindings updated successfully!" << std::endl;
+//            std::cout << "[GPUCulling] HZB bindings updated successfully!" << std::endl;
         } else {
             std::cerr << "[GPUCulling] Failed to update HZB bindings" << std::endl;
         }
@@ -524,9 +524,9 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                     nanite::NaniteRuntimeResource* resource = resource_manager.GetOrCreateResource(geometryId);
 
                     if (callCount == 1 && i < 3) {
-                        std::cout << "[GPUCulling] Instance " << i << ": geometry_id=" << geometryId
-                                  << ", resource=" << (void*)resource
-                                  << ", gpu_mesh=" << (resource ? (void*)resource->gpu_mesh : nullptr) << std::endl;
+//                        std::cout << "[GPUCulling] Instance " << i << ": geometry_id=" << geometryId
+//                                  << ", resource=" << (void*)resource
+//                                  << ", gpu_mesh=" << (resource ? (void*)resource->gpu_mesh : nullptr) << std::endl;
                     }
 
                     if (resource && resource->gpu_mesh) {
@@ -653,7 +653,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     static bool backface_descriptor_sets_created = false;
 
     if (!basic_descriptor_sets_created && callCount == 1) {
-        std::cout << "[GPUCulling] Frame " << bufferIndex << ": Creating basic descriptor sets (backface culling disabled until frame 3)..." << std::endl;
+//        std::cout << "[GPUCulling] Frame " << bufferIndex << ": Creating basic descriptor sets (backface culling disabled until frame 3)..." << std::endl;
         if (!CreateDescriptorSets(snapshot)) {
             std::cerr << "Failed to create basic descriptor sets" << std::endl;
             return false;
@@ -667,7 +667,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
         if (gpuDrawPipeline_) {
             auto meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();
             if (meshlet_buffer != rhi::handles::INVALID_RESOURCE) {
-                std::cout << "[GPUCulling] Frame " << bufferIndex << ": Global meshlet buffer ready! Recreating descriptor sets with backface culling..." << std::endl;
+//                std::cout << "[GPUCulling] Frame " << bufferIndex << ": Global meshlet buffer ready! Recreating descriptor sets with backface culling..." << std::endl;
 
                 // Destroy old descriptor sets first
                 for (u32 i = 0; i < 3; i++) {
@@ -683,10 +683,10 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                     return false;
                 }
                 backface_descriptor_sets_created = true;
-                std::cout << "[GPUCulling] Frame " << bufferIndex << ": Backface culling descriptor sets created successfully!" << std::endl;
+//                std::cout << "[GPUCulling] Frame " << bufferIndex << ": Backface culling descriptor sets created successfully!" << std::endl;
             } else {
                 if (bufferIndex == 0) {
-                    std::cout << "[GPUCulling] Frame " << bufferIndex << ": Meshlet buffer still not ready, will retry next frame..." << std::endl;
+//                    std::cout << "[GPUCulling] Frame " << bufferIndex << ": Meshlet buffer still not ready, will retry next frame..." << std::endl;
                 }
             }
         }
@@ -1133,7 +1133,7 @@ bool GPUCullingPipeline::CompactResults(rhi::RHICommandBuffer* cmdBuffer, u32 bu
     (void)cmdBuffer;
     
     if (callCount == 1) {
-        std::cout << "[GPUCulling] CompactResults called: visible_clusters=" << results_.visible_cluster_count << std::endl;
+//        std::cout << "[GPUCulling] CompactResults called: visible_clusters=" << results_.visible_cluster_count << std::endl;
     }
 
     auto& current_frame_res = frame_resources_[current_frame_resource_];
@@ -1144,7 +1144,7 @@ bool GPUCullingPipeline::CompactResults(rhi::RHICommandBuffer* cmdBuffer, u32 bu
 
     if (results_.visible_cluster_count == 0) {
         if (callCount == 1) {
-            std::cout << "[GPUCulling] No visible clusters, skipping indirect draw setup" << std::endl;
+//            std::cout << "[GPUCulling] No visible clusters, skipping indirect draw setup" << std::endl;
         }
         return true;
     }
@@ -1190,10 +1190,10 @@ bool GPUCullingPipeline::CompactResults(rhi::RHICommandBuffer* cmdBuffer, u32 bu
             device_->UnmapBuffer(current_frame_res.visible_cluster_list_buffer);
             
             if (callCount == 1) {
-                std::cout << "[GPUCulling] Compacted cluster buffer updated with " << results_.visible_cluster_indices.size() << " indices" << std::endl;
+//                std::cout << "[GPUCulling] Compacted cluster buffer updated with " << results_.visible_cluster_indices.size() << " indices" << std::endl;
             }
         } else {
-             std::cout << "[GPUCulling] Failed to map compact cluster buffer" << std::endl;
+//             std::cout << "[GPUCulling] Failed to map compact cluster buffer" << std::endl;
         }
     }
     
@@ -1255,36 +1255,36 @@ void GPUCullingPipeline::UpdateResults() {
                             u32* clusterList = static_cast<u32*>(list_mapped);
 
                             // Print first 50 consecutive cluster IDs
-                            std::cout << "[GPUCulling] compact_cluster_ids samples (FIRST 50):" << std::endl;
+//                            std::cout << "[GPUCulling] compact_cluster_ids samples (FIRST 50):" << std::endl;
                             u32 max_cluster_samples = std::min(static_cast<u32>(50), visibleCount);
                             for (u32 pos = 0; pos < max_cluster_samples; ++pos) {
                                 uint32_t cluster_id = clusterList[pos];
-                                std::cout << "  [" << pos << "] = " << cluster_id;
+//                                std::cout << "  [" << pos << "] = " << cluster_id;
 
                                 // Check for invalid markers
                                 if (cluster_id == 0xFFFFFFFF) {
-                                    std::cout << " [INVALID!]";
+//                                    std::cout << " [INVALID!]";
                                 } else if (cluster_id == 0) {
-                                    std::cout << " [ZERO_CLUSTER]";
+//                                    std::cout << " [ZERO_CLUSTER]";
                                 } else if (cluster_id > 5000) {
-                                    std::cout << " [LARGE_ID]";
+//                                    std::cout << " [LARGE_ID]";
                                 }
-                                std::cout << std::endl;
+//                                std::cout << std::endl;
                             }
 
                             // Check for data mutations by analyzing patterns
-                            std::cout << "[GPUCulling] Data stability analysis:" << std::endl;
+//                            std::cout << "[GPUCulling] Data stability analysis:" << std::endl;
                             bool has_anomaly = false;
                             for (int i = 0; i < 10 && static_cast<u32>(i) < visibleCount; i++) {
                                 uint32_t cluster_id = clusterList[i];
                                 if (cluster_id == 0xFFFFFFFF || cluster_id == 0 || cluster_id > 5000) {
-                                    std::cout << "  ANOMALY at position " << i << ": " << cluster_id << std::endl;
+//                                    std::cout << "  ANOMALY at position " << i << ": " << cluster_id << std::endl;
                                     has_anomaly = true;
                                 }
                             }
 
                             if (!has_anomaly) {
-                                std::cout << "  First 10 positions look stable" << std::endl;
+//                                std::cout << "  First 10 positions look stable" << std::endl;
                             }
 
                             device_->UnmapBuffer(current_frame_res.visible_cluster_list_buffer);
@@ -1297,7 +1297,7 @@ void GPUCullingPipeline::UpdateResults() {
                         if (visibility_mapped) {
                             u32* visibilityData = static_cast<u32*>(visibility_mapped);
 
-                            std::cout << "[GPUCulling] cluster_visibility samples (FIRST 50):" << std::endl;
+//                            std::cout << "[GPUCulling] cluster_visibility samples (FIRST 50):" << std::endl;
                             u32 max_samples = std::min(static_cast<u32>(50), visibleCount);
                             for (u32 pos = 0; pos < max_samples; ++pos) {
                                 // ClusterVisibility struct has 8 u32 fields, so we need to multiply by 8
@@ -1307,27 +1307,27 @@ void GPUCullingPipeline::UpdateResults() {
                                 uint32_t instance_index = visibilityData[struct_offset + 2]; // instance_index field
                                 uint32_t lod_level = visibilityData[struct_offset + 3];     // lod_level field
 
-                                std::cout << "  [" << pos << "] is_visible=" << is_visible
-                                 << ", cluster_index=" << cluster_index
-                                 << ", instance_index=" << instance_index
-                                 << ", lod_level=" << lod_level;
+//                                std::cout << "  [" << pos << "] is_visible=" << is_visible
+//                                 << ", cluster_index=" << cluster_index
+//                                 << ", instance_index=" << instance_index
+//                                 << ", lod_level=" << lod_level;
 
                                 // Check visibility patterns
                                 if (is_visible == 0) {
-                                    std::cout << " [INVISIBLE]";
+//                                    std::cout << " [INVISIBLE]";
                                 } else if (is_visible == 1) {
-                                    std::cout << " [VISIBLE]";
+//                                    std::cout << " [VISIBLE]";
                                 } else {
-                                    std::cout << " [UNEXPECTED:" << is_visible << "]";
+//                                    std::cout << " [UNEXPECTED:" << is_visible << "]";
                                 }
-                                std::cout << std::endl;
+//                                std::cout << std::endl;
                             }
 
                             device_->UnmapBuffer(current_frame_res.cluster_visibility_buffer);
                         }
                     }
 
-                    std::cout << "[GPUCulling] === END CommandCall " << command_buffer_call_count << " ANALYSIS ===" << std::endl;
+//                    std::cout << "[GPUCulling] === END CommandCall " << command_buffer_call_count << " ANALYSIS ===" << std::endl;
                     */
                 } else {
                     // For frames beyond 90, just show summary
@@ -1339,13 +1339,13 @@ void GPUCullingPipeline::UpdateResults() {
                         if (list_mapped) {
                             u32* clusterList = static_cast<u32*>(list_mapped);
 
-                            std::cout << "list[0]=" << clusterList[0] << " ";
-                            std::cout << "list[100]=" << clusterList[100] << " ";
-                            std::cout << "list[500]=" << clusterList[500] << " ";
-                            std::cout << "list[1000]=" << clusterList[1000] << " ";
-                            std::cout << "list[1500]=" << clusterList[1500] << " ";
-                            std::cout << "list[1829]=" << clusterList[1829] << " ";
-                            std::cout << std::endl;
+//                            std::cout << "list[0]=" << clusterList[0] << " ";
+//                            std::cout << "list[100]=" << clusterList[100] << " ";
+//                            std::cout << "list[500]=" << clusterList[500] << " ";
+//                            std::cout << "list[1000]=" << clusterList[1000] << " ";
+//                            std::cout << "list[1500]=" << clusterList[1500] << " ";
+//                            std::cout << "list[1829]=" << clusterList[1829] << " ";
+//                            std::cout << std::endl;
 
                             device_->UnmapBuffer(current_frame_res.visible_cluster_list_buffer);
                         }
@@ -1490,13 +1490,13 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         if (hzb_system_ && hzb_system_->IsReady()) {
             hzbTexture = hzb_system_->GetHZBTexture();
             if (hzbTexture == rhi::handles::INVALID_RESOURCE) {
-                std::cout << "[GPUCulling] HZBSystem texture invalid, falling back to internal buffer" << std::endl;
+//                std::cout << "[GPUCulling] HZBSystem texture invalid, falling back to internal buffer" << std::endl;
                 hzbTexture = hiz_buffer_;
             } else {
-                std::cout << "[GPUCulling] Frame " << i << ": Using HZBSystem texture " << hzbTexture << std::endl;
+//                std::cout << "[GPUCulling] Frame " << i << ": Using HZBSystem texture " << hzbTexture << std::endl;
             }
         } else {
-            std::cout << "[GPUCulling] Frame " << i << ": HZB system not ready, using fallback buffer" << std::endl;
+//            std::cout << "[GPUCulling] Frame " << i << ": HZB system not ready, using fallback buffer" << std::endl;
         }
 
         imageInfo.imageView = hzbTexture;
@@ -1543,7 +1543,7 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
                 placeholderDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
                 placeholderDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ShaderResource);
                 placeholder_meshlet_buffer = device_->CreateBuffer(placeholderDesc);
-                std::cout << "[GPUCulling] Created placeholder meshlet buffer for binding 11" << std::endl;
+//                std::cout << "[GPUCulling] Created placeholder meshlet buffer for binding 11" << std::endl;
             }
             global_meshlet_buffer = placeholder_meshlet_buffer;
         }
@@ -1610,48 +1610,48 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
     // 🔥 DEBUG: Print matrix data to verify calculations
     static int matrix_print_count = 0;
     if (matrix_print_count < 3) { // Only print first 3 frames to avoid spam
-        std::cout << "[GPUCulling] Frame " << matrix_print_count << " Matrix Data:" << std::endl;
+//        std::cout << "[GPUCulling] Frame " << matrix_print_count << " Matrix Data:" << std::endl;
 
         // Print View Matrix - try different access methods
-        std::cout << "View Matrix (method 1):" << std::endl;
+//        std::cout << "View Matrix (method 1):" << std::endl;
         for (int row = 0; row < 4; row++) {
             for (int col = 0; col < 4; col++) {
-                std::cout << view_matrix.columns[col][row] << " ";
+//                std::cout << view_matrix.columns[col][row] << " ";
             }
-            std::cout << std::endl;
+//            std::cout << std::endl;
         }
 
         // Also try treating as row-major
-        std::cout << "View Matrix (method 2):" << std::endl;
+//        std::cout << "View Matrix (method 2):" << std::endl;
         for (int row = 0; row < 4; row++) {
             for (int col = 0; col < 4; col++) {
-                std::cout << view_matrix.columns[row][col] << " ";
+//                std::cout << view_matrix.columns[row][col] << " ";
             }
-            std::cout << std::endl;
+//            std::cout << std::endl;
         }
 
         // Print Projection Matrix
-        std::cout << "Projection Matrix:" << std::endl;
+//        std::cout << "Projection Matrix:" << std::endl;
         for (int row = 0; row < 4; row++) {
             for (int col = 0; col < 4; col++) {
-                std::cout << projection_matrix.columns[col][row] << " ";
+//                std::cout << projection_matrix.columns[col][row] << " ";
             }
-            std::cout << std::endl;
+//            std::cout << std::endl;
         }
 
         // Print View-Projection Matrix
-        std::cout << "View-Projection Matrix:" << std::endl;
+//        std::cout << "View-Projection Matrix:" << std::endl;
         for (int row = 0; row < 4; row++) {
             for (int col = 0; col < 4; col++) {
-                std::cout << view_projection.columns[col][row] << " ";
+//                std::cout << view_projection.columns[col][row] << " ";
             }
-            std::cout << std::endl;
+//            std::cout << std::endl;
         }
 
         // Print Camera Position
-        std::cout << "Camera Position: (" << camera_position.x << ", " << camera_position.y << ", " << camera_position.z << ")" << std::endl;
+//        std::cout << "Camera Position: (" << camera_position.x << ", " << camera_position.y << ", " << camera_position.z << ")" << std::endl;
 
-        std::cout << "------------------------" << std::endl;
+//        std::cout << "------------------------" << std::endl;
         matrix_print_count++;
     }
 
@@ -1698,7 +1698,7 @@ bool GPUCullingPipeline::Stage2_DistanceCulling(rhi::RHICommandBuffer* cmdBuffer
                                                 const RenderSceneSnapshot& snapshot,
                                                 u32 bufferIndex) {
     if (distance_culling_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cout << "[GPUCulling] Distance culling pipeline not available, skipping" << std::endl;
+//        std::cout << "[GPUCulling] Distance culling pipeline not available, skipping" << std::endl;
         return true;
     }
 
@@ -1737,7 +1737,7 @@ bool GPUCullingPipeline::Stage3_LODSelection(rhi::RHICommandBuffer* cmdBuffer,
                                             const math::v3& camera_position,
                                             u32 bufferIndex) {
     if (lod_selection_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cout << "[GPUCulling] LOD selection pipeline not available, skipping" << std::endl;
+//        std::cout << "[GPUCulling] LOD selection pipeline not available, skipping" << std::endl;
         return true;
     }
 
@@ -1775,7 +1775,7 @@ bool GPUCullingPipeline::Stage4_ClusterExpansion(rhi::RHICommandBuffer* cmdBuffe
                                                  const RenderSceneSnapshot& snapshot,
                                                  u32 bufferIndex) {
     if (cluster_expansion_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cout << "[GPUCulling] Cluster expansion pipeline not available, skipping" << std::endl;
+//        std::cout << "[GPUCulling] Cluster expansion pipeline not available, skipping" << std::endl;
         return true;
     }
 
@@ -1814,7 +1814,7 @@ bool GPUCullingPipeline::Stage5_OcclusionCulling(rhi::RHICommandBuffer* cmdBuffe
                                                  const RenderSceneSnapshot& snapshot,
                                                  u32 bufferIndex) {
     if (occlusion_culling_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cout << "[GPUCulling] Occlusion culling pipeline not available, skipping" << std::endl;
+//        std::cout << "[GPUCulling] Occlusion culling pipeline not available, skipping" << std::endl;
         return true;
     }
 
@@ -1851,7 +1851,7 @@ bool GPUCullingPipeline::Stage6_Compaction(rhi::RHICommandBuffer* cmdBuffer,
                                           const RenderSceneSnapshot& snapshot,
                                           u32 bufferIndex) {
     if (compaction_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cout << "[GPUCulling] Compaction pipeline not available, skipping" << std::endl;
+//        std::cout << "[GPUCulling] Compaction pipeline not available, skipping" << std::endl;
         return true;
     }
 
@@ -1983,14 +1983,14 @@ void GPUCullingPipeline::ReadbackResults(const RenderSceneSnapshot& snapshot, u3
 
             // CRITICAL DEBUG: Check if atomic counter value is reasonable
             if (bufferIndex % 60 == 0) { // Print every 60 frames to reduce spam
-                std::cout << "[GPUCulling] Buffer index " << bufferIndex << ": "
-                         << visibleCount << " clusters visible (atomic counter)" << std::endl;
+//                std::cout << "[GPUCulling] Buffer index " << bufferIndex << ": "
+//                         << visibleCount << " clusters visible (atomic counter)" << std::endl;
             }
 
             // Sanity check for corrupted atomic counter
             if (visibleCount > 1000000) {
-                std::cout << "[GPUCulling] WARNING: Atomic counter corrupted! "
-                         << "value=" << visibleCount << ", clamping to safe value" << std::endl;
+//                std::cout << "[GPUCulling] WARNING: Atomic counter corrupted! "
+//                         << "value=" << visibleCount << ", clamping to safe value" << std::endl;
                 visibleCount = 0; // Reset to safe value
             }
 
@@ -2073,7 +2073,7 @@ bool GPUCullingPipeline::ReadDebugData(utl::vector<primal::graphics::nanite::Cul
             //          << " Reason=" << reason_str << std::endl;
         //     } 
     }else {
-        std::cout << "[GPUCulling] DEBUG - No culling data recorded in frame " << read_frame_index << " (all objects visible)" << std::endl;   
+//        std::cout << "[GPUCulling] DEBUG - No culling data recorded in frame " << read_frame_index << " (all objects visible)" << std::endl;   
     }
 
     device_->UnmapBuffer(culling_debug_buffers_[read_frame_index]);
@@ -2082,7 +2082,7 @@ bool GPUCullingPipeline::ReadDebugData(utl::vector<primal::graphics::nanite::Cul
 
 bool GPUCullingPipeline::UpdateHZBBindings() {
     if (!hzb_system_ || !hzb_system_->IsReady()) {
-        std::cout << "[GPUCulling] HZB system not ready, skipping HZB binding update" << std::endl;
+//        std::cout << "[GPUCulling] HZB system not ready, skipping HZB binding update" << std::endl;
         return false;
     }
 
@@ -2092,8 +2092,8 @@ bool GPUCullingPipeline::UpdateHZBBindings() {
         return false;
     }
 
-    std::cout << "[GPUCulling] ========== Updating HZB Bindings ==========" << std::endl;
-    std::cout << "[GPUCulling] HZB Texture Handle: " << hzbTexture << std::endl;
+//    std::cout << "[GPUCulling] ========== Updating HZB Bindings ==========" << std::endl;
+//    std::cout << "[GPUCulling] HZB Texture Handle: " << hzbTexture << std::endl;
 
     // Update HZB binding for all three frame descriptor sets
     for (u32 i = 0; i < 3; i++) {
@@ -2115,11 +2115,11 @@ bool GPUCullingPipeline::UpdateHZBBindings() {
 
         device_->UpdateDescriptorSets(1, &write);
 
-        std::cout << "[GPUCulling] Frame " << i << ": Descriptor Set " << culling_descriptor_sets_[i]
-                  << " Binding 8 -> Texture " << hzbTexture << std::endl;
+//        std::cout << "[GPUCulling] Frame " << i << ": Descriptor Set " << culling_descriptor_sets_[i]
+//                  << " Binding 8 -> Texture " << hzbTexture << std::endl;
     }
 
-    std::cout << "[GPUCulling] HZB bindings updated successfully" << std::endl;
+//    std::cout << "[GPUCulling] HZB bindings updated successfully" << std::endl;
     return true;
 }
 

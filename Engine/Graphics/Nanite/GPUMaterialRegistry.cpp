@@ -10,11 +10,11 @@
 namespace primal::graphics::nanite {
 
 GPUMaterialRegistry::GPUMaterialRegistry() {
-    std::cout << "[GPUMaterialRegistry] Initialized" << std::endl;
+//    std::cout << "[GPUMaterialRegistry] Initialized" << std::endl;
 }
 
 GPUMaterialRegistry::~GPUMaterialRegistry() {
-    std::cout << "[GPUMaterialRegistry] Destroyed, releasing GPU resources" << std::endl;
+//    std::cout << "[GPUMaterialRegistry] Destroyed, releasing GPU resources" << std::endl;
     // GPU resources will be released by RHI when ResourceHandles go out of scope
 }
 
@@ -27,7 +27,7 @@ GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterMaterial(graphics::
     // Check if already registered (deduplication)
     auto it = materialToID_.find(instance);
     if (it != materialToID_.end()) {
-        std::cout << "[GPUMaterialRegistry] Material already registered, reusing ID " << it->second << std::endl;
+//        std::cout << "[GPUMaterialRegistry] Material already registered, reusing ID " << it->second << std::endl;
         return it->second;
     }
 
@@ -41,13 +41,13 @@ GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterMaterial(graphics::
     materialToID_[instance] = newID;
     registeredInstances_.push_back(instance);  // 🔥 NEW: Preserve registration order
 
-    std::cout << "[GPUMaterialRegistry] Registered material ID " << newID
-              << " (total: " << materials_.size() << ")" << std::endl;
+//    std::cout << "[GPUMaterialRegistry] Registered material ID " << newID
+//              << " (total: " << materials_.size() << ")" << std::endl;
     return newID;
 }
 
 jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device) {
-    std::cout << "[GPUMaterialRegistry] Starting async material data build..." << std::endl;
+//    std::cout << "[GPUMaterialRegistry] Starting async material data build..." << std::endl;
 
     // 🔥 CRITICAL FIX: Use registeredInstances_ to preserve registration order
     // This ensures texture array indices match MaterialID assignments
@@ -56,14 +56,14 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
     // Schedule async build on worker thread
     // Reference: EngineTest/UnitTests/TestJobSystem.cpp:255
     buildJob_ = jobsystem::JobSystem::Schedule([this, device, instances]() {
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 1: Building texture mapping..." << std::endl;
+//        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 1: Building texture mapping..." << std::endl;
 
         // 🎨 Phase 1: Build texture mapping (deduplication)
         TextureArrayBuildContext texCtx;
         MaterialDataBuilder::BuildTextureMapping(instances, texCtx, device);
 
         // 🎨 Phase 2: Create command buffer for texture operations
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 2: Creating command buffer..." << std::endl;
+//        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 2: Creating command buffer..." << std::endl;
 
         rhi::CommandBufferHandle cmdBufHandle = device->CreateCommandBuffer(rhi::CommandQueueType::Transfer);
         if (cmdBufHandle == rhi::handles::INVALID_COMMAND_BUFFER) {
@@ -87,7 +87,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         }
 
         // 🎨 Phase 3: Create texture arrays with BlitTexture
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 3: Creating texture arrays..." << std::endl;
+//        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 3: Creating texture arrays..." << std::endl;
 
         bool success = true;
 
@@ -128,7 +128,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         }
 
         // 🎨 Phase 4: End command buffer and submit
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 4: Submitting commands..." << std::endl;
+//        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 4: Submitting commands..." << std::endl;
 
         if (!cmdBuffer->End()) {
             buildError_ = "Failed to end command buffer recording";
@@ -157,7 +157,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         }
 
         // 🎨 Phase 5: Update material data with texture indices
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 5: Updating material data..." << std::endl;
+//        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 5: Updating material data..." << std::endl;
 
         // Rebuild materials_ vector with correct texture indices
         materials_.clear();
@@ -172,7 +172,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         }
 
         // 🎨 Phase 6: Wait for GPU operations to complete
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 6: Waiting for GPU completion..." << std::endl;
+//        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 6: Waiting for GPU completion..." << std::endl;
 
         constexpr u32 SYNC_TIMEOUT_MS = 5000;  // 5 second timeout
         if (!device->WaitForSync(fence, SYNC_TIMEOUT_MS)) {
@@ -186,12 +186,12 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
 
         // Mark build complete
         buildComplete_ = true;
-        std::cout << "[GPUMaterialRegistry] [Worker Thread] Build complete successfully: "
-                  << materials_.size() << " materials, "
-                  << texCtx.uniqueAlbedo.size() << " albedo textures, "
-                  << texCtx.uniqueNormal.size() << " normal textures, "
-                  << texCtx.uniqueORM.size() << " ORM textures"
-                  << std::endl;
+//        std::cout << "[GPUMaterialRegistry] [Worker Thread] Build complete successfully: "
+//                  << materials_.size() << " materials, "
+//                  << texCtx.uniqueAlbedo.size() << " albedo textures, "
+//                  << texCtx.uniqueNormal.size() << " normal textures, "
+//                  << texCtx.uniqueORM.size() << " ORM textures"
+//                  << std::endl;
     });
 
     return buildJob_;
@@ -209,7 +209,7 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
         return false;
     }
 
-    std::cout << "[GPUMaterialRegistry] Uploading material data to GPU..." << std::endl;
+//    std::cout << "[GPUMaterialRegistry] Uploading material data to GPU..." << std::endl;
 
     // Create material data buffer
     // Reference: TestParticleSponza.cpp texture creation pattern
@@ -243,8 +243,8 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
         return false;
     }
 
-    std::cout << "[GPUMaterialRegistry] Uploaded " << materials_.size()
-              << " materials (" << (materials_.size() * sizeof(MaterialData) / 1024.0f) << " KB)" << std::endl;
+//    std::cout << "[GPUMaterialRegistry] Uploaded " << materials_.size()
+//              << " materials (" << (materials_.size() * sizeof(MaterialData) / 1024.0f) << " KB)" << std::endl;
     return true;
 }
 

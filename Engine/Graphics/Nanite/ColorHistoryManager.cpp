@@ -30,10 +30,10 @@ bool ColorHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& c
         return false;
     }
 
-    std::cout << "[ColorHistoryManager] Initializing..." << std::endl;
-    std::cout << "  Resolution: " << config_.width << "x" << config_.height << std::endl;
-    std::cout << "  Format: " << static_cast<int>(config_.format) << std::endl;
-    std::cout << "  Buffer Count: " << config_.buffer_count << std::endl;
+//    std::cout << "[ColorHistoryManager] Initializing..." << std::endl;
+//    std::cout << "  Resolution: " << config_.width << "x" << config_.height << std::endl;
+//    std::cout << "  Format: " << static_cast<int>(config_.format) << std::endl;
+//    std::cout << "  Buffer Count: " << config_.buffer_count << std::endl;
 
     if (!CreateColorResources()) {
         std::cerr << "[ColorHistoryManager] Failed to create color resources" << std::endl;
@@ -41,7 +41,7 @@ bool ColorHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& c
     }
 
     initialized_ = true;
-    std::cout << "[ColorHistoryManager] Initialized successfully" << std::endl;
+//    std::cout << "[ColorHistoryManager] Initialized successfully" << std::endl;
 
     return true;
 }
@@ -49,7 +49,7 @@ bool ColorHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& c
 void ColorHistoryManager::Shutdown() {
     if (!initialized_) return;
 
-    std::cout << "[ColorHistoryManager] Shutting down..." << std::endl;
+//    std::cout << "[ColorHistoryManager] Shutting down..." << std::endl;
 
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -70,7 +70,7 @@ void ColorHistoryManager::Shutdown() {
 }
 
 bool ColorHistoryManager::CreateColorResources() {
-    std::cout << "[ColorHistoryManager] Creating color resources..." << std::endl;
+//    std::cout << "[ColorHistoryManager] Creating color resources..." << std::endl;
 
     // Create color textures for each buffer
     for (size_t i = 0; i < config_.buffer_count; ++i) {
@@ -90,7 +90,7 @@ bool ColorHistoryManager::CreateColorResources() {
         color_buffers_[i].frame_index = 0xFFFFFFFF;
         color_buffers_[i].is_valid = false;
 
-        std::cout << "  Created color buffer " << i << std::endl;
+//        std::cout << "  Created color buffer " << i << std::endl;
     }
 
     return true;
@@ -218,9 +218,9 @@ bool ColorHistoryManager::CopyColorTexture(rhi::ResourceHandle source,
     region.dstOffsets[0] = {0, 0, 0};
     region.dstOffsets[1] = {static_cast<s32>(config_.width), static_cast<s32>(config_.height), 1};
 
-    std::cout << "[ColorHistoryManager] CopyColorTexture: src=" << source
-              << " dst=" << destination
-              << " size=" << config_.width << "x" << config_.height << std::endl;
+//    std::cout << "[ColorHistoryManager] CopyColorTexture: src=" << source
+//              << " dst=" << destination
+//              << " size=" << config_.width << "x" << config_.height << std::endl;
 
     cmd_buffer->BlitTexture(source, destination, &region, 1, rhi::FilterMode::Nearest);
 

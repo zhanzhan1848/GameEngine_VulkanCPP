@@ -40,6 +40,7 @@ struct SSGIParams {
 
 constant uint   SSGI_MAX_STEPS    = 64;
 constant float  SSGI_MAX_DISTANCE = 20.0f;
+constant float  SSGI_MAX_RADIANCE = 4.0f;  // Clamp to prevent fireflies from HDR highlights
 
 // ============================================================================
 // Helper: View-space position to screen UV
@@ -192,25 +193,27 @@ static bool traceRayHZB(float2 origin_uv,
         // Use view-space Z (consistent with NDCDepthToLinear output)
         float ray_depth_linear = -ray_pos.z;
 
-        // Ray passed behind surface -> potential hit
-        if (ray_depth_linear > scene_depth_linear + params.thickness) {
+        // Ray is behind the closest surface → potential hit
+        if (ray_depth_linear > scene_depth_linear) {
             if (mip == 0) {
-                // Confirmed hit at finest level
-                hit_uv    = sample_uv;
-                hit_depth = scene_depth_linear;
-                return true;
+                // Check thickness: only report hit if ray hasn't passed completely
+                // through the surface (within assumed surface thickness)
+                if (ray_depth_linear <= scene_depth_linear + params.thickness) {
+                    hit_uv    = sample_uv;
+                    hit_depth = scene_depth_linear;
+                    return true;
+                }
+                // Ray passed through thin geometry — treat as miss, continue marching
+            } else {
+                // Refine: step back and re-evaluate at finer mip level
+                t -= baseStep * mipScale;
+                mip--;
             }
-            // Don't advance t — refine mip to re-evaluate at same position
-            // with finer granularity (step back by the mip-scaled increment,
-            // then the next iteration will use a smaller mip-scaled step)
-            t -= baseStep * mipScale;
-            mip--;
         }
         // Ray is in front of surface -> safe to go coarser for faster traversal
-        else if (ray_depth_linear < scene_depth_linear - params.thickness) {
+        else {
             mip = min(mip + 1, params.hzb_mip_levels - 1);
         }
-        // Ray is near surface but not crossing -> stay at current mip
     }
 
     return false;
@@ -354,8 +357,12 @@ kernel void ssgi_trace(
                                  + s01 * (1.0f - fracPart.x) *       fracPart.y
                                  + s11 *        fracPart.x  *       fracPart.y;
 
-                // Lambertian weighting: N dot L (cosine of angle between normal and ray direction)
-                float NoL = max(dot(view_normal, ray_dir), 0.0f);
+                // Cosine-weighted sampling already accounts for the cos(N,L) term in the PDF.
+                // For Lambertian BRDF: integral ≈ (1/N) * Σ radiance * PI
+                // (albedo applied separately in the lighting pass)
+
+                // Clamp radiance to suppress fireflies from HDR highlights / emissive surfaces
+                float3 clamped_radiance = min(hit_color.rgb, float3(SSGI_MAX_RADIANCE));
 
                 // Distance attenuation: fade out hits that are too far
                 float distAttenuation = 1.0f - smoothstep(params.radius * 0.5f,
@@ -364,9 +371,9 @@ kernel void ssgi_trace(
 
                 // Edge fade: reduce contribution near screen borders
                 float2 edgeDist = min(hit_uv, 1.0f - hit_uv);
-                float edgeFade  = smoothstep(0.0f, 0.1f, min(edgeDist.x, edgeDist.y));
+                float edgeFade  = smoothstep(0.0f, 0.15f, min(edgeDist.x, edgeDist.y));
 
-                total_irradiance += hit_color.rgb * NoL * distAttenuation * edgeFade;
+                total_irradiance += clamped_radiance * LUMEN_PI * distAttenuation * edgeFade;
                 total_hit_dist   += hit_depth;
                 hit_count++;
             }

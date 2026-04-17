@@ -39,9 +39,32 @@ struct LumenConfig {
     float ddgi_ray_max_distance = 50.0f;         // Must reach geometry across probe grid
 
     // Surface Cache settings
-    u32 surface_cache_atlas_size = 4096;
-    u32 surface_cache_page_size = 128;
-    u32 surface_cache_capture_budget = 512;
+    u32 surface_cache_atlas_size = 2048;
+    u32 surface_cache_page_size = 32;               // 2048/32 = 64 pages per side = 4096 total pages
+    u32 surface_cache_capture_budget = 256;          // Pages per frame
+    u32 surface_cache_max_cards = 4096;
+    float surface_cache_update_distance = 50.0f;     // Only update cards within this distance
+    float surface_cache_importance_weight = 0.5f;    // Camera proximity vs recency tradeoff
+
+    // GTAO settings
+    float gtao_radius = 1.0f;
+    float gtao_power = 1.5f;
+    u32 gtao_direction_count = 4;
+    u32 gtao_sample_count = 2;
+    float gtao_temporal_weight = 0.85f;
+
+    // SSDO settings
+    float ssdo_radius = 0.5f;
+    u32 ssdo_sample_count = 8;
+    float ssdo_depth_bias = 0.01f;
+    float ssdo_color_bleed_intensity = 0.3f;
+    float ssdo_temporal_weight = 0.85f;
+
+    // Shadow settings
+    u32 shadow_cascade_count = 2;
+    u32 shadow_map_resolution = 2048;
+    float shadow_cascade_split_0 = 60.0f;
+    float shadow_cascade_split_1 = 500.0f;
 
     // Screen Probes settings
     u32 screen_probes_spacing = 8;

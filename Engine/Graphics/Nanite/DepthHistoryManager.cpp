@@ -30,10 +30,10 @@ bool DepthHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& c
         return false;
     }
 
-    std::cout << "[DepthHistoryManager] Initializing..." << std::endl;
-    std::cout << "  Resolution: " << config_.width << "x" << config_.height << std::endl;
-    std::cout << "  Format: " << static_cast<int>(config_.format) << std::endl;
-    std::cout << "  Buffer Count: " << config_.buffer_count << std::endl;
+//    std::cout << "[DepthHistoryManager] Initializing..." << std::endl;
+//    std::cout << "  Resolution: " << config_.width << "x" << config_.height << std::endl;
+//    std::cout << "  Format: " << static_cast<int>(config_.format) << std::endl;
+//    std::cout << "  Buffer Count: " << config_.buffer_count << std::endl;
 
     if (!CreateDepthResources()) {
         std::cerr << "[DepthHistoryManager] Failed to create depth resources" << std::endl;
@@ -41,7 +41,7 @@ bool DepthHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& c
     }
 
     initialized_ = true;
-    std::cout << "[DepthHistoryManager] Initialized successfully" << std::endl;
+//    std::cout << "[DepthHistoryManager] Initialized successfully" << std::endl;
 
     return true;
 }
@@ -49,7 +49,7 @@ bool DepthHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& c
 void DepthHistoryManager::Shutdown() {
     if (!initialized_) return;
 
-    std::cout << "[DepthHistoryManager] Shutting down..." << std::endl;
+//    std::cout << "[DepthHistoryManager] Shutting down..." << std::endl;
 
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -70,7 +70,7 @@ void DepthHistoryManager::Shutdown() {
 }
 
 bool DepthHistoryManager::CreateDepthResources() {
-    std::cout << "[DepthHistoryManager] Creating depth resources..." << std::endl;
+//    std::cout << "[DepthHistoryManager] Creating depth resources..." << std::endl;
 
     // Create depth textures for each buffer
     for (size_t i = 0; i < config_.buffer_count; ++i) {
@@ -90,7 +90,7 @@ bool DepthHistoryManager::CreateDepthResources() {
         depth_buffers_[i].frame_index = 0xFFFFFFFF;
         depth_buffers_[i].is_valid = false;
 
-        std::cout << "  Created depth buffer " << i << std::endl;
+//        std::cout << "  Created depth buffer " << i << std::endl;
     }
 
     return true;
@@ -125,8 +125,8 @@ bool DepthHistoryManager::StoreCurrentFrameDepth(rhi::ResourceHandle depth_textu
     depth_buffers_[write_index].is_valid = true;
     current_write_index_ = write_index;
 
-    std::cout << "[DepthHistoryManager] Stored frame " << frame_index
-              << " depth in buffer " << write_index << std::endl;
+//    std::cout << "[DepthHistoryManager] Stored frame " << frame_index
+//              << " depth in buffer " << write_index << std::endl;
 
     return true;
 }
@@ -148,13 +148,13 @@ DepthHistoryManager::DepthBuffer DepthHistoryManager::GetPreviousFrameDepth(u32 
 
     // Validate that this buffer actually contains the previous frame
     if (buffer.frame_index != prev_frame_index || !buffer.is_valid) {
-        std::cout << "[DepthHistoryManager] Previous frame depth not available (frame "
-                  << prev_frame_index << " in buffer " << prev_buffer_index << ")" << std::endl;
+//        std::cout << "[DepthHistoryManager] Previous frame depth not available (frame "
+//                  << prev_frame_index << " in buffer " << prev_buffer_index << ")" << std::endl;
         return {}; // Return invalid buffer
     }
 
-    std::cout << "[DepthHistoryManager] Retrieved previous frame " << prev_frame_index
-              << " from buffer " << prev_buffer_index << std::endl;
+//    std::cout << "[DepthHistoryManager] Retrieved previous frame " << prev_frame_index
+//              << " from buffer " << prev_buffer_index << std::endl;
 
     return buffer;
 }
@@ -190,7 +190,7 @@ bool DepthHistoryManager::CopyDepthTexture(rhi::ResourceHandle source,
     // 3. Insert barrier for synchronization
 
     // For now, this is a placeholder
-    std::cout << "[DepthHistoryManager] Copying depth texture (placeholder)" << std::endl;
+//    std::cout << "[DepthHistoryManager] Copying depth texture (placeholder)" << std::endl;
 
     return true;
 }

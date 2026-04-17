@@ -32,6 +32,7 @@ struct FilterParams {
     float sigma_depth;     // Depth weight sharpness (default 10.0)
     float sigma_normal;    // Normal weight power (default 64.0)
     float sigma_hit_dist;  // Hit distance weight sharpness (default 8.0)
+    float sigma_spatial;   // Gaussian spatial falloff (default 2.0)
     uint  kernel_radius;   // Filter kernel radius (default 2 = 5x5)
 };
 
@@ -118,8 +119,12 @@ kernel void ssgi_filter(
             float dist_diff = abs(center_hit_dist - sample_ssgi.a);
             float w_dist = exp(-dist_diff * params.sigma_hit_dist);
 
+            // ---- Gaussian spatial weight ----
+            float spatial_dist2 = float(dx * dx + dy * dy);
+            float w_spatial = exp(-spatial_dist2 / (2.0 * params.sigma_spatial * params.sigma_spatial));
+
             // Combined weight
-            float weight = w_depth * w_normal * w_dist;
+            float weight = w_depth * w_normal * w_dist * w_spatial;
 
             filtered_irradiance += sample_ssgi.rgb * weight;
             filtered_hit_dist   += sample_ssgi.a   * weight;

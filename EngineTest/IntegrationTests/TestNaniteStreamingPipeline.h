@@ -15,6 +15,7 @@
 #include "Engine/Graphics/Nanite/VisibilityBufferSystem.h"
 #include "Engine/Graphics/Nanite/GPUMaterialRegistry.h"
 #include "Engine/Graphics/Lumen/SSGI/LumenSSGIPass.h"
+#include "Engine/Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Engine/Graphics/Lumen/DDGI/LumenDDGIPass.h"
 #include "Engine/Graphics/Nanite/GlobalSDF.h"
 #include "Engine/Graphics/Scene/RenderSceneSnapshot.h"
@@ -104,6 +105,9 @@ private:
     std::unique_ptr<primal::graphics::lumen::LumenSSGIPass> ssgiPass_;
     primal::graphics::rhi::ResourceHandle ssgi_black_texture_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
 
+    // === Lumen SSAO ===
+    std::unique_ptr<primal::graphics::lumen::LumenSSAOPass> ssaoPass_;
+
     // === Lumen DDGI ===
     std::unique_ptr<primal::graphics::lumen::LumenDDGIPass> ddgiPass_;
 
@@ -121,6 +125,14 @@ private:
     // Scene data
     primal::graphics::RenderSceneSnapshot sceneSnapshot_;
     std::vector<primal::graphics::nanite::NaniteRuntimeResource*> testResources_;
+
+    // Triple-buffered shadow matrices (must match shadow map buffering)
+    math::m4x4 cachedShadowMatrix0_[3]{ primal::graphics::rhi::math::MatrixIdentity(),
+                                         primal::graphics::rhi::math::MatrixIdentity(),
+                                         primal::graphics::rhi::math::MatrixIdentity() };
+    math::m4x4 cachedShadowMatrix1_[3]{ primal::graphics::rhi::math::MatrixIdentity(),
+                                         primal::graphics::rhi::math::MatrixIdentity(),
+                                         primal::graphics::rhi::math::MatrixIdentity() };
 
     // Sponza scene data
     primal::graphics::RenderScene scene_;
@@ -145,6 +157,43 @@ private:
     primal::graphics::rhi::DescriptorSetHandle blit_ddgi_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
     primal::graphics::rhi::PipelineHandle blit_ddgi_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
     primal::graphics::rhi::ResourceHandle ddgi_probe_cb_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
+
+    // Shadow mapping
+    math::v3 light_direction_{ -0.4f, -0.8f, -0.3f };  // Normalized toward light
+    u32 shadow_frame_index_{ 0 };
+    bool shadow_enabled_{ true };
+
+    // Shadow map caching — skip regeneration when light/scene is static
+    math::m4x4 cached_shadow_vp_[3][2]{};     // [buffer_index][cascade]
+    bool shadow_cache_valid_[3][2]{false};     // [buffer_index][cascade]
+    bool shadow_cache_globally_valid_{false};  // Reset on scene change
+
+    // Deferred PBR Lighting pipeline
+    primal::graphics::rhi::PipelineHandle deferred_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle deferred_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle deferred_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle deferred_descriptor_set_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    primal::graphics::rhi::ResourceHandle deferred_output_texture_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle deferred_view_cb_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
+    primal::graphics::rhi::ResourceHandle deferred_light_cb_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
+    primal::graphics::rhi::SamplerHandle deferred_sampler_handle_{ primal::graphics::rhi::handles::INVALID_SAMPLER };
+    primal::graphics::rhi::ResourceHandle deferred_ddgi_probe_cb_[3]{
         primal::graphics::rhi::handles::INVALID_RESOURCE,
         primal::graphics::rhi::handles::INVALID_RESOURCE,
         primal::graphics::rhi::handles::INVALID_RESOURCE
@@ -211,5 +260,5 @@ private:
     } keyState_;
 
     // SSGI visualization mode: 0=Composite(scene+SSGI), 1=SSGI only, 2=Scene only
-    u32 ssgiVisMode_{ 3 };  // Default to DDGI Composite for testing
+    u32 ssgiVisMode_{ 0 };  // Scene only (no SSGI/DDGI overlay, direct deferred output)
 };

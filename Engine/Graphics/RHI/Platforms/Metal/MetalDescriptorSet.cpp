@@ -1,6 +1,7 @@
 #include "MetalDescriptorSet.h"
 #include "MetalDevice.h"
 #include "MetalDescriptorSetLayout.h"
+#include <iostream>
 
 namespace primal::graphics::rhi {
 
@@ -60,7 +61,7 @@ void MetalDescriptorSet::Destroy() {
 void MetalDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCount) {
     for (u32 i = 0; i < writeCount; ++i) {
         const WriteDescriptorSet& write = writes[i];
-        
+
         // Find the binding in our vector
         // CRITICAL: Metal uses separate binding namespaces for textures and buffers.
         // Multiple entries can share the same binding number but with different types
@@ -73,9 +74,21 @@ void MetalDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCount
                 break;
             }
         }
-        
+
         if (!targetBinding) {
             // Binding not found in layout?
+            // DEBUG: Log the mismatch for shadow pipeline debugging
+            static int logCount = 0;
+            if (logCount < 20) {
+                std::cerr << "[MetalDescSet] UPDATE SKIP: write binding=" << write.dstBinding
+                          << " type=" << (int)write.descriptorType
+                          << " — no match in layout bindings:";
+                for (const auto& b : bindings_) {
+                    std::cerr << " [" << b.binding << "/t=" << (int)b.type << "]";
+                }
+                std::cerr << std::endl;
+                logCount++;
+            }
             continue;
         }
         

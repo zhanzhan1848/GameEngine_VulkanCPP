@@ -194,10 +194,14 @@ kernel void ssgi_temporal(
     // -----------------------------------------------------------------------
     // Step 2: Velocity Reprojection
     // -----------------------------------------------------------------------
-    // Velocity buffer encoding: velocity = (current_ndc - prev_ndc) * 0.5
-    // Decode: prev_uv = current_uv - velocity * 2.0
+    // Velocity encoding: velocity = (currentNDC - previousNDC) * 0.5
+    // NDC -> UV: uv.x = ndc.x * 0.5 + 0.5,  uv.y = 0.5 - 0.5 * ndc.y
+    // So: prev_uv.x = pixel_uv.x - velocity.x
+    //     prev_uv.y = pixel_uv.y + velocity.y  (Metal Y-flip sign reversal)
     float2 velocity = velocity_buffer.read(pixel_pos).rg;
-    float2 prev_uv  = pixel_uv - velocity * 2.0;
+    float2 prev_uv;
+    prev_uv.x = pixel_uv.x - velocity.x;
+    prev_uv.y = pixel_uv.y + velocity.y;
 
     // -----------------------------------------------------------------------
     // Step 3: Sample history at reprojected UV
@@ -248,19 +252,16 @@ kernel void ssgi_temporal(
     }
 
     // -----------------------------------------------------------------------
-    // Step 4: Variance Clipping (AABB clamp) on 3x3 neighborhood
+    // Step 4: Variance Clipping (Mean + Sigma) on 3x3 neighborhood
     // -----------------------------------------------------------------------
-    // Build min/max AABB from current frame's 3x3 neighborhood of upscaled SSGI.
-    // Since the current pixel's bilateral upsample is already computed, we use it
-    // as the center and compute the remaining 8 neighbors via the same upsampler.
-    // To keep cost reasonable, we use a simplified approach: compute min/max from
-    // the already-available current pixel and its directly readable half-res neighbors.
+    // Uses mean + N*sigma clipping instead of min/max AABB.
+    // Min/max AABB is too sensitive to outliers (a single firefly expands it).
+    // Mean+sigma is more robust and is the standard approach in UE5 TAA.
 
-    float3 aabb_min = current_ssgi;
-    float3 aabb_max = current_ssgi;
+    float3 neighborhood_sum   = current_ssgi;
+    float3 neighborhood_sum2  = current_ssgi * current_ssgi;
+    int   neighborhood_count  = 1;
 
-    // Sample a 3x3 neighborhood in full-res space.
-    // For each neighbor, we do a quick upsampling by reading the nearest half-res texel.
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             if (dx == 0 && dy == 0) continue;
@@ -272,7 +273,6 @@ kernel void ssgi_temporal(
                 continue;
             }
 
-            // Map neighbor to nearest half-res texel for a quick read
             float2 neighbor_uv = (float2(neighbor_pos) + 0.5) / float2(params.full_width, params.full_height);
             float2 half_uv     = neighbor_uv * float2(params.half_width, params.half_height);
             int2   half_texel  = clamp(int2(floor(half_uv)), int2(0),
@@ -280,31 +280,51 @@ kernel void ssgi_temporal(
 
             float3 neighbor_ssgi = ssgi_trace.read(uint2(half_texel)).rgb;
 
-            aabb_min = min(aabb_min, neighbor_ssgi);
-            aabb_max = max(aabb_max, neighbor_ssgi);
+            neighborhood_sum  += neighbor_ssgi;
+            neighborhood_sum2 += neighbor_ssgi * neighbor_ssgi;
+            neighborhood_count++;
         }
     }
 
-    // Slightly expand the AABB to avoid excessive clipping in noisy regions
-    float3 aabb_center  = (aabb_min + aabb_max) * 0.5;
-    float3 aabb_extents = (aabb_max - aabb_min) * 0.5;
-    float  aabb_scale   = 1.0 + 0.1; // 10% expansion
-    aabb_min = aabb_center - aabb_extents * aabb_scale;
-    aabb_max = aabb_center + aabb_extents * aabb_scale;
+    // Compute mean and standard deviation
+    float3 mean     = neighborhood_sum / float(neighborhood_count);
+    float3 variance = abs(neighborhood_sum2 / float(neighborhood_count) - mean * mean);
+    float3 sigma    = sqrt(max(variance, float3(0.0)));
+
+    // AABB = mean ± 2*sigma (captures ~95% of distribution)
+    // Add a small floor to sigma to avoid degenerate AABB in flat regions
+    float3 sigma_floor = max(mean * 0.1, float3(0.01));
+    float3 aabb_min = mean - sigma * 2.0 - sigma_floor;
+    float3 aabb_max = mean + sigma * 2.0 + sigma_floor;
 
     // Clamp history to the AABB
     float3 clamped_history = clamp(history_ssgi, aabb_min, aabb_max);
 
     // -----------------------------------------------------------------------
-    // Step 5: Screen-edge fade for history
+    // Step 5: Disocclusion detection + screen-edge fade
     // -----------------------------------------------------------------------
-    // Reduce history weight near screen borders to avoid edge artifacts
+    // Compare current depth with history depth at reprojected position.
+    // Use a generous threshold since NDC depth is non-linear (tight at near,
+    // loose at far). Gradual blend avoids hard pop-in of noise.
+    float disocclusion_fade = 1.0;
+    {
+        if (in_bounds) {
+            int2 hist_pixel = clamp(int2(prev_uv * float2(params.full_width, params.full_height)),
+                                    int2(0), int2(int(params.full_width) - 1, int(params.full_height) - 1));
+            float hist_depth = gbuffer_depth.read(uint2(hist_pixel));
+            float depth_diff = abs(depth_ndc - hist_depth);
+            // Gradual rejection: full history at diff=0.005, no history at diff=0.02
+            disocclusion_fade = saturate((0.02 - depth_diff) / 0.015);
+        }
+    }
+
+    // Screen-edge fade for history
     float edge_fade = smoothstep(0.0, 0.05, min(edge_dist.x, edge_dist.y));
 
     // -----------------------------------------------------------------------
     // Step 6: Exponential blend
     // -----------------------------------------------------------------------
-    float effective_feedback = params.feedback * edge_fade;
+    float effective_feedback = params.feedback * edge_fade * disocclusion_fade;
 
     float3 result_color = mix(current_ssgi, clamped_history, effective_feedback);
     float  result_dist  = mix(current_hit_dist, history_hit_dist, effective_feedback);

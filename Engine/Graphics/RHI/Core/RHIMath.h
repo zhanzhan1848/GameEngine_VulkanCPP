@@ -372,11 +372,13 @@ inline m4x4 CreatePerspectiveMatrix(float fovY, float aspect, float nearPlane, f
  * @return 4x4正交投影矩阵
  */
 inline m4x4 CreateOrthographicMatrix(float left, float right, float bottom, float top, float nearPlane, float farPlane) {
+    // Z formula accounts for view-space Z being negative (CreateLookAtMatrix maps look direction to -Z):
+    //   z_view = -near → z_clip = 0,  z_view = -far → z_clip = 1   (Metal [0,1] depth range)
     return m4x4{
         v4{2.0f / (right - left), 0.0f, 0.0f, 0.0f},
         v4{0.0f, 2.0f / (top - bottom), 0.0f, 0.0f},
         v4{0.0f, 0.0f, 1.0f / (nearPlane - farPlane), 0.0f},
-        v4{(left + right) / (left - right), (top + bottom) / (bottom - top), 
+        v4{(left + right) / (left - right), (top + bottom) / (bottom - top),
            nearPlane / (nearPlane - farPlane), 1.0f}
     };
 }
@@ -431,6 +433,9 @@ inline m4x4 Transpose(const m4x4& mat) {
  * @return 逆矩阵，如果矩阵不可逆则返回单位矩阵
  */
 inline m4x4 Inverse(const m4x4& m) {
+#if defined(__APPLE__)
+    return simd::inverse(m);
+#else
     float m00 = m.columns[0][0], m01 = m.columns[0][1], m02 = m.columns[0][2], m03 = m.columns[0][3];
     float m10 = m.columns[1][0], m11 = m.columns[1][1], m12 = m.columns[1][2], m13 = m.columns[1][3];
     float m20 = m.columns[2][0], m21 = m.columns[2][1], m22 = m.columns[2][2], m23 = m.columns[2][3];
@@ -497,6 +502,7 @@ inline m4x4 Inverse(const m4x4& m) {
     out.columns[2][0] = d20; out.columns[2][1] = d21; out.columns[2][2] = d22; out.columns[2][3] = d23;
     out.columns[3][0] = d30; out.columns[3][1] = d31; out.columns[3][2] = d32; out.columns[3][3] = d33;
     return out;
+#endif
 }
 
 /**

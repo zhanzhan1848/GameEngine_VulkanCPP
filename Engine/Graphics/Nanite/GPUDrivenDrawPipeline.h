@@ -4,6 +4,7 @@
 #include "../RHI/Core/RHITypes.h"
 #include "GPUCullingPipeline.h"
 #include <mutex>
+#include <iostream>
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
@@ -83,12 +84,10 @@ public:
     bool CreateGeometryBuffers(u32 vertex_count, u32 index_count);
     void UploadGeometryData(const RenderSceneSnapshot& scene_snapshot);
 
-    // 🎨 Set material data buffer (for texture sampling)
     void SetMaterialDataBuffer(rhi::ResourceHandle material_buffer) {
         global_material_data_buffer_ = material_buffer;
     }
 
-    // 🎨 Set texture arrays for material sampling
     void SetTextureArrays(rhi::ResourceHandle albedo_array,
                           rhi::ResourceHandle normal_array,
                           rhi::ResourceHandle orm_array,
@@ -105,11 +104,76 @@ public:
     // Get the final depth texture for HZB generation
     rhi::ResourceHandle GetFinalDepthTexture() const { return final_depth_texture_; }
 
+    // ---- Shadow Mapping ----
+
+    struct alignas(16) DirectionalLightData {
+        math::v4 direction;        // xyz = normalized light dir (toward light), w = 0
+        math::v4 color;            // rgb = light intensity, a = unused
+        math::v4 viewPos;          // xyz = camera position (cascade selection), w = unused
+        math::m4x4 shadowMatrix0;  // Light VP matrix for cascade 0
+        math::m4x4 shadowMatrix1;  // Light VP matrix for cascade 1
+        math::v4 cascadeSplits;    // x = cascade 0 max distance, y = cascade 1 max distance
+    };
+
+    struct ShadowFrameResources {
+        rhi::ResourceHandle shadow_depth_rt_0{ rhi::handles::INVALID_RESOURCE };  // D32_Float, 2048x2048
+        rhi::ResourceHandle shadow_depth_rt_1{ rhi::handles::INVALID_RESOURCE };
+        rhi::ResourceHandle shadow_map_0{ rhi::handles::INVALID_RESOURCE };       // R32_Float sampleable
+        rhi::ResourceHandle shadow_map_1{ rhi::handles::INVALID_RESOURCE };
+        
+        // Per-cascade resources to avoid CPU/GPU data races and descriptor set overwrite issues
+        rhi::ResourceHandle visible_clusters_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+        rhi::ResourceHandle visible_counter_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };  // atomic counter per cascade
+        rhi::ResourceHandle indirect_draw_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+        rhi::ResourceHandle light_frustum_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+        rhi::ResourceHandle shadow_depth_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };    // ShadowDepthUniforms for raster pass
+        rhi::ResourceHandle blit_resolution_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE }; // BlitResolution for depth blit
+        
+        rhi::DescriptorSetHandle shadow_cull_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };
+        rhi::DescriptorSetHandle shadow_depth_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };  // 8 bindings for vertex pulling
+        rhi::DescriptorSetHandle shadow_blit_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };   // 3 bindings for D32→R32 blit
+    };
+
+    bool InitializeShadowResources(u32 num_instances, u32 max_clusters);
+    void ShutdownShadowResources();
+
+    bool ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buffer,
+                              const RenderSceneSnapshot& scene_snapshot,
+                              const DirectionalLightData& light_data,
+                              u32 cascade_index,
+                              u32 buffer_index);
+
+    bool ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffer,
+                             const math::m4x4& light_view_projection,
+                             u32 cascade_index,
+                             u32 buffer_index);
+
+    bool ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_buffer,
+                                u32 cascade_index,
+                                u32 buffer_index);
+
+    // GBuffer depth blit: D32_Float -> R32_Float via compute shader (ShadowBlit.metal)
+    // Metal TBDR cannot sample D32_Float; this uses the same compute pipeline as shadow blit.
+    bool ExecuteGBufferDepthBlit(rhi::RHICommandBuffer* cmd_buffer);
+
+    const ShadowFrameResources& GetShadowFrameResources(u32 buffer_index) const {
+        return shadow_frames_[buffer_index % 3];
+    }
+
+    rhi::ResourceHandle GetShadowMap(u32 cascade_index, u32 buffer_index) const {
+        return (cascade_index == 0)
+            ? shadow_frames_[buffer_index % 3].shadow_map_0
+            : shadow_frames_[buffer_index % 3].shadow_map_1;
+    }
+
     // GBuffer texture accessors for downstream passes (SSGI, DDGI, etc.)
     rhi::ResourceHandle GetGBufferAlbedo() const { return gbuffer_albedo_texture_; }
     rhi::ResourceHandle GetGBufferNormal() const { return gbuffer_normal_texture_; }
     rhi::ResourceHandle GetGBufferORM() const { return gbuffer_orm_texture_; }
     rhi::ResourceHandle GetGBufferVelocity() const { return gbuffer_velocity_texture_; }
+    // Sampleable depth for DeferredLighting — returns D32 depth texture directly.
+    // Fragment shaders read it via depth2d<float> (Metal supports sampling depth textures directly).
+    rhi::ResourceHandle GetGBufferDepthSampleable() const { return final_depth_texture_; }
 
     // Get global meshlet buffer for backface culling
     rhi::ResourceHandle GetGlobalMeshletBuffer() const { return global_meshlet_buffer_; }
@@ -237,6 +301,9 @@ private:
     rhi::ResourceHandle gbuffer_orm_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle gbuffer_velocity_texture_{ rhi::handles::INVALID_RESOURCE };
 
+    // Sampleable depth (R32_Float) for GTAO, SSDO, DeferredLighting
+    rhi::ResourceHandle gbuffer_depth_sampleable_{ rhi::handles::INVALID_RESOURCE };
+
     rhi::PipelineLayoutHandle resolve_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineHandle resolve_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::DescriptorSetLayoutHandle resolve_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
@@ -244,6 +311,25 @@ private:
 
     rhi::ResourceHandle resolve_output_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::SamplerHandle resolve_sampler_{ rhi::handles::INVALID_SAMPLER };
+
+    // ---- Shadow Mapping Resources ----
+    ShadowFrameResources shadow_frames_[3];                         // Triple-buffered per-frame
+    rhi::PipelineHandle shadow_cull_pipeline_{ rhi::handles::INVALID_PIPELINE };    // Compute: cluster culling
+    rhi::PipelineHandle shadow_depth_pipeline_{ rhi::handles::INVALID_PIPELINE };   // Graphics: depth-only raster
+    rhi::PipelineHandle shadow_finalize_pipeline_{ rhi::handles::INVALID_PIPELINE }; // Compute: finalize indirect args
+    rhi::PipelineHandle shadow_blit_pipeline_{ rhi::handles::INVALID_PIPELINE };    // Compute: D32→R32 blit
+    rhi::PipelineLayoutHandle shadow_cull_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle shadow_depth_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle shadow_blit_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle shadow_cull_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle shadow_depth_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle shadow_blit_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    u32 shadow_max_clusters_{ 100000 };
+    bool shadow_initialized_{ false };
+
+    // GBuffer depth blit resources (reuses shadow_blit_pipeline_/layout/set_layout)
+    rhi::DescriptorSetHandle gbuffer_depth_blit_descriptor_set_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    rhi::ResourceHandle gbuffer_depth_blit_cb_{ rhi::handles::INVALID_RESOURCE };  // Resolution uniform buffer
 
     bool initialized_{ false };
     std::mutex mutex_;
