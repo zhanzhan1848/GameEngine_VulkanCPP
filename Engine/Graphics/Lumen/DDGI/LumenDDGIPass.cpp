@@ -569,8 +569,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     mapped->View = camera_data.view_matrix;
                     mapped->Projection = camera_data.proj_matrix;
                     mapped->InvProjection = rhi::math::Inverse(camera_data.proj_matrix);
-                    mapped->ViewProjection = camera_data.view_matrix * camera_data.proj_matrix;
-                    mapped->PreviousViewProjection = camera_data.prev_view_matrix * camera_data.prev_proj_matrix;
+                    mapped->ViewProjection = camera_data.proj_matrix * camera_data.view_matrix;
+                    mapped->PreviousViewProjection = camera_data.prev_proj_matrix * camera_data.prev_view_matrix;
                     mapped->InvViewProjection = rhi::math::Inverse(mapped->ViewProjection);
 
                     math::m4x4 invView = rhi::math::Inverse(camera_data.view_matrix);

@@ -364,14 +364,19 @@ fragment float4 fragmentBlitDDGI(
 
     constexpr sampler s2d(coord::normalized, address::clamp_to_edge, filter::linear);
     constexpr sampler depthS(coord::normalized, address::clamp_to_edge, filter::nearest);
-    float depth = depthTex.sample(depthS, uv);
-
-    if (depth >= 1.0f) {
-        return float4(0.0f, 0.0f, 0.0f, 1.0f);
-    }
 
     // Scene color = direct lighting (from deferred pass)
     float3 sceneColor = sceneColorTex.sample(s2d, uv).rgb;
+
+    float depth = depthTex.sample(depthS, uv);
+
+    // Fix 3: background (sky) should pass through sceneColor, not black
+    if (depth >= 1.0f) {
+        // Tone map + gamma for sky/background
+        sceneColor = sceneColor / (sceneColor + float3(1.0f));
+        sceneColor = pow(sceneColor, float3(1.0f / 2.2f));
+        return float4(sceneColor, 1.0f);
+    }
 
     // GI indirect from half-res compute texture
     float3 indirect = giIndirectTex.sample(s2d, uv).rgb;
@@ -382,9 +387,15 @@ fragment float4 fragmentBlitDDGI(
         indirect = float3(0.0f);
     }
 
+    // Fix 2: bright-area suppression — DDGI weight based on scene luminance
+    // Dark areas (shadows): DDGI weight = 0.6 (strong indirect boost)
+    // Bright areas (direct lit): DDGI weight = 0.1 (subtle fill)
+    float sceneLum = dot(sceneColor, float3(0.2126f, 0.7152f, 0.0722f));
+    float ddgiWeight = mix(0.6f, 0.1f, saturate(sceneLum / 3.0f));
+
     // Modulate indirect by albedo for diffuse response
     float4 albedo = albedoTex.sample(s2d, uv);
-    float3 ddgiDiffuse = albedo.rgb * indirect * 0.5f;
+    float3 ddgiDiffuse = albedo.rgb * indirect * ddgiWeight;
 
     // Final: direct + indirect
     float3 lit = sceneColor + ddgiDiffuse;
@@ -526,11 +537,13 @@ fragment float4 fragmentLighting_gpuDriven(
     }
 
     // 5. Ambient + SSAO + Shadow
-    float3 ambient = albedo.rgb * 0.03;
+    // Base ambient provides reasonable fill so DDGI only needs to add
+    // 20-60% indirect boost rather than rescuing near-black areas.
+    float3 ambient = albedo.rgb * 0.08;
 
     // Shadow darkens ambient too: in full shadow, ambient is reduced by ~70%
-    float ambientShadow = mix(1.0, 0.05, 1.0 - shadow);
-    float3 color = Lo + ambient * ao * ambientShadow; // 
+    float ambientShadow = mix(1.0, 0.3, 1.0 - shadow);
+    float3 color = Lo + ambient * ao * ambientShadow;
 
     // NOTE: No tone mapping here — output is HDR linear to intermediate texture.
     // Final blit shader handles tone mapping + gamma before backbuffer write.

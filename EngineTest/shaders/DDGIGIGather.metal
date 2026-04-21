@@ -2,8 +2,8 @@
  * @file DDGIGIGather.metal
  * @brief Half-resolution DDGI indirect irradiance gathering (compute)
  *
- * Tetrahedral 4-probe interpolation, no depth visibility.
- * Reads: 16 storage buffer (4 probes × 4 float3) + 2 texture2D.
+ * Tetrahedral 4-probe + depth visibility with generous threshold.
+ * Reads: 16 storage buffer + 2 texture2D + 1 texture3D.
  */
 
 #include <metal_stdlib>
@@ -39,16 +39,34 @@ static void tetrahedral(float3 gp, uint3 gd,
     for (uint i = 0; i < 4u; ++i) bw[i] = max(bw[i], 0.0f);
 }
 
+// Isolated function: sample ddgiDepth texture3D
+static float sampleDDGIDepth(
+    texture3d<float, access::sample> depthTex,
+    uint3 gridCoord, uint3 gridDim, uint dirIdx)
+{
+    float3 uvw;
+    uvw.x = (float(gridCoord.x) + 0.5f) / float(gridDim.x);
+    uvw.y = (float(gridCoord.y) + 0.5f) / float(gridDim.y);
+    uvw.z = (float(gridCoord.z * 4u + dirIdx) + 0.5f) / float(gridDim.z * 4u);
+    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+    return depthTex.sample(s, uvw).r;
+}
+
+constant float3 DEPTH_DIRS[8] = {
+    float3( 1, 0, 0), float3(-1, 0, 0),
+    float3( 0, 1, 0), float3( 0,-1, 0),
+    float3( 0, 0, 1), float3( 0, 0,-1),
+    float3(0.57735f, 0.57735f, 0.57735f),
+    float3(-0.57735f,-0.57735f,-0.57735f)
+};
+
 kernel void ddgi_gi_gather(
     uint2 tid [[thread_position_in_grid]],
 
-    depth2d<float, access::sample>   depthTex   [[texture(0)]],
-    texture2d<float, access::sample> normalTex  [[texture(1)]],
-
-    // texture(2) unused (depth visibility deferred)
-    texture3d<float, access::sample> ddgiDepthTex [[texture(2)]],
-
-    texture2d<float, access::write>  outputTex  [[texture(3)]],
+    depth2d<float, access::sample>   depthTex      [[texture(0)]],
+    texture2d<float, access::sample> normalTex     [[texture(1)]],
+    texture3d<float, access::sample> ddgiDepthTex  [[texture(2)]],
+    texture2d<float, access::write>  outputTex     [[texture(3)]],
 
     constant float4x4& invViewProj        [[buffer(0)]],
     constant float4&    probeOriginSpacing [[buffer(1)]],
@@ -91,6 +109,40 @@ kernel void ddgi_gi_gather(
     uint pi[4]; float bw[4];
     tetrahedral(gp, counts, pi, bw);
 
+    // Depth visibility: single texture3D read for nearest probe
+    uint3 nearPC = clamp(uint3(round(gp)), uint3(0u), counts - 1u);
+    float3 nearProbePos = origin + float3(float(nearPC.x), float(nearPC.y), float(nearPC.z)) * spacing;
+
+    float3 toSurface = worldPos - nearProbePos;
+    float dist = length(toSurface);
+    float globalVis = 1.0f;
+
+    if (dist > 0.001f) {
+        float3 dir = toSurface / dist;
+        float bestDot = -2.0f;
+        uint bestDir = 0;
+        for (uint i = 0; i < 8u; ++i) {
+            float d = dot(dir, DEPTH_DIRS[i]);
+            if (d > bestDot) { bestDot = d; bestDir = i; }
+        }
+
+        float storedMean = sampleDDGIDepth(ddgiDepthTex, nearPC, counts, bestDir);
+
+        // Generous threshold: stored depth is MIN distance in that octant.
+        // Actual surface can be much further. Only reject if >> stored.
+        // threshold = stored * 4x + 2 * probeSpacing
+        float threshold = storedMean * 4.0f + spacing * 2.0f;
+        if (dist > threshold) {
+            globalVis = 0.0f;
+        } else {
+            // Smooth falloff near threshold
+            float fadeStart = storedMean * 2.0f + spacing;
+            if (dist > fadeStart) {
+                globalVis = 1.0f - (dist - fadeStart) / max(threshold - fadeStart, 0.01f);
+            }
+        }
+    }
+
     float3 result(0.0f);
     float  totalWeight = 0.0f;
 
@@ -110,6 +162,7 @@ kernel void ddgi_gi_gather(
     }
 
     if (totalWeight > 0.0f) result /= totalWeight;
+    result *= globalVis;
     result = max(result, float3(0.0f));
 
     outputTex.write(float4(result, 1.0f), tid);
