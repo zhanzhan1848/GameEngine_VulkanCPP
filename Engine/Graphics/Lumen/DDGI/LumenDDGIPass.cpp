@@ -236,30 +236,27 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
     // So binding 0 can be used for BOTH texture(0) and buffer(0).
     {
         DescriptorSetLayoutBinding traceBindings[] = {
-            // Textures (sampled)
+            // Textures (sampled) — SDF cascades only
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
             {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 2
-            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev_frame_color
             // Buffers (separate Metal namespace)
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data
         };
-        DescriptorSetLayoutDesc layoutDesc{7, traceBindings};
+        DescriptorSetLayoutDesc layoutDesc{6, traceBindings};
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Irradiance: 1 sampled (history) + 1 storage (output) + 2 UBO + 1 SSBO ---
+    // --- Irradiance: 2 UBO + 3 SSBO (ray data + irradiance history + irradiance output) ---
     {
         DescriptorSetLayoutBinding irradianceBindings[] = {
-            // Textures
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // irradiance history
-            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // irradiance output
-            // Buffers (separate Metal namespace)
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance history buffer
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance output buffer
         };
         DescriptorSetLayoutDesc layoutDesc{5, irradianceBindings};
         irradiance_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
@@ -321,12 +318,12 @@ void LumenDDGIPass::CreatePipelines() {
     }
 
     // Create compute pipelines
-    // Trace uses threadGroupSize (128,1,1) for ray-level parallelism
+    // Trace uses threadGroupSize (64,1,1) for ray-level parallelism
     {
         ComputePipelineDesc pipeDesc{};
         pipeDesc.computeShader = traceShader;
         pipeDesc.layout = trace_layout_;
-        pipeDesc.threadGroupSize = {128, 1, 1};
+        pipeDesc.threadGroupSize = {64, 1, 1};
         trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
     // Irradiance update uses (1,1,1) — one thread per probe
@@ -384,15 +381,26 @@ void LumenDDGIPass::CreateProbeTextures() {
     u32 ny = params_.probe_count_y;
     u32 nz = params_.probe_count_z;
 
-    // Irradiance textures: Texture3D (Nx, Ny, Nz*4, RGBA16_Float)
-    // Each probe stores 4 SH coefficients (4 channels x 16-bit float)
+    // Irradiance storage buffers: each probe stores 9 SH3 coefficients (float3 each)
+    u32 totalProbes = nx * ny * nz;
+    u64 irradianceSize = (u64)totalProbes * 9 * sizeof(float) * 3;
+
     for (int i = 0; i < 3; i++) {
-        TextureDesc desc{};
-        desc.size = {nx, ny, nz * 4};
-        desc.format = DataFormat::RGBA16_Float;
-        desc.type = TextureType::Texture3D;
-        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
-        irradiance_textures_[i] = device_->CreateTexture(desc);
+        BufferDesc desc{};
+        desc.size = irradianceSize;
+        desc.type = BufferType::Structured;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.structured.elementCount = totalProbes * 9 * 3;
+        desc.structured.elementStride = sizeof(float);
+        irradiance_buffers_[i] = device_->CreateBuffer(desc);
+
+        // Zero-initialize to prevent garbage data causing flickering
+        void* mapped = device_->MapBuffer(irradiance_buffers_[i]);
+        if (mapped) {
+            memset(mapped, 0, irradianceSize);
+            device_->UnmapBuffer(irradiance_buffers_[i]);
+        }
     }
 
     // Depth textures: Texture3D (Nx, Ny, Nz*4, RG16_Float)
@@ -408,7 +416,6 @@ void LumenDDGIPass::CreateProbeTextures() {
 
     // Ray data storage buffer
     // Each probe fires rays_per_probe rays, each ray produces DDGIRayData (16 bytes)
-    u32 totalProbes = nx * ny * nz;
     u64 rayDataSize = (u64)totalProbes * params_.rays_per_probe * sizeof(DDGIRayData);
 
     {
@@ -440,9 +447,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
     // Import persistent probe textures into render graph
     auto irradianceOutHandle = graph.ImportResource(
-        "LumenDDGI_Irradiance_" + std::to_string(outIdx), irradiance_textures_[outIdx]);
+        "LumenDDGI_Irradiance_" + std::to_string(outIdx), irradiance_buffers_[outIdx]);
     auto irradianceHistHandle = graph.ImportResource(
-        "LumenDDGI_IrradianceHist_" + std::to_string(histIdx), irradiance_textures_[histIdx]);
+        "LumenDDGI_IrradianceHist_" + std::to_string(histIdx), irradiance_buffers_[histIdx]);
     auto depthOutHandle = graph.ImportResource(
         "LumenDDGI_Depth_" + std::to_string(outIdx), depth_textures_[outIdx]);
     auto depthHistHandle = graph.ImportResource(
@@ -520,8 +527,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                           << " sdfCascadeCount=" << (sdfAvailable ? sdfRef.GetConfig().cascade_count : 0)
                           << "\n  prevColorTex=" << prevColorTex
                           << " ray_data_buffer=" << ray_data_buffer_
-                          << "\n  irradiance_out=" << irradiance_textures_[outIdx]
-                          << " irradiance_hist=" << irradiance_textures_[histIdx]
+                          << "\n  irradiance_out=" << irradiance_buffers_[outIdx]
+                          << " irradiance_hist=" << irradiance_buffers_[histIdx]
                           << "\n  depth_out=" << depth_textures_[outIdx]
                           << " depth_hist=" << depth_textures_[histIdx]
                           << "\n  sdf[0]=" << sdfTextures[0]
@@ -605,6 +612,14 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.DeltaTime = camera_data.delta_time;
                     vd.FrameIndex = camera_data.frame_index;
                     vd.RayMaxDistance = params_.ray_max_distance;
+                    vd.ProbeHysteresis = 0.01f;
+                    vd.TemporalAlpha = 0.1f;
+                    vd.LightDirection = {camera_data.light_direction.x,
+                                         camera_data.light_direction.y,
+                                         camera_data.light_direction.z, 0.0f};
+                    vd.LightColor = {camera_data.light_color.x,
+                                     camera_data.light_color.y,
+                                     camera_data.light_color.z, 0.0f};
 
                     // Fill SDF cascade data from GlobalSDF
                     for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
@@ -632,24 +647,23 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 ray_data_buffer_ != handles::INVALID_RESOURCE) {
                 // Update trace descriptor set
                 DescriptorData traceParams[] = {
-                    // Textures (SDF cascades + prev_color)
+                    // Textures (SDF cascades only)
                     {0, DescriptorType::SampledImage,  sdfTextures[0]},
                     {1, DescriptorType::SampledImage,  sdfTextures[1]},
                     {2, DescriptorType::SampledImage,  sdfTextures[2]},
-                    {3, DescriptorType::SampledImage,  prevColorTex},
                     // Metal: buffers use separate binding namespace from textures
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
                     {2, DescriptorType::StorageBuffer, ray_data_buffer_},
                 };
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 7);
+                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 6);
 
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, trace_layout_, 0, 1, sets, 0, nullptr);
 
                 u32 totalRayThreads = probeCountTotal * params_.rays_per_probe;
-                u32 gx = (totalRayThreads + 127) / 128;  // threadGroupSize = (128,1,1)
+                u32 gx = (totalRayThreads + 63) / 64;  // threadGroupSize = (64,1,1)
 
                 // DEBUG: Log first 3 frames
                 static u32 traceFrame = 0;
@@ -679,16 +693,14 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // Sub-pass 2: UpdateIrradiance
             // ================================================================
             if (irradiance_pipeline_ != handles::INVALID_PIPELINE &&
-                irradiance_textures_[outIdx] != handles::INVALID_RESOURCE) {
+                irradiance_buffers_[outIdx] != handles::INVALID_RESOURCE) {
                 // Update irradiance descriptor set
                 DescriptorData irradianceParams[] = {
-                    // Textures
-                    {0, DescriptorType::SampledImage,  irradiance_textures_[histIdx]},   // history
-                    {1, DescriptorType::StorageImage,  irradiance_textures_[outIdx]},     // output
-                    // Metal: buffers use separate binding namespace
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
                     {2, DescriptorType::StorageBuffer, ray_data_buffer_},
+                    {3, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
+                    {4, DescriptorType::StorageBuffer, irradiance_buffers_[outIdx]},
                 };
                 UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 5);
 
@@ -703,7 +715,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // Barrier: irradiance UAV -> SRV
             {
                 ResourceBarrier barrier{};
-                barrier.resource = irradiance_textures_[outIdx];
+                barrier.resource = irradiance_buffers_[outIdx];
                 barrier.beforeState = ResourceState::UnorderedAccess;
                 barrier.afterState = ResourceState::ShaderResource;
                 barrier.subresource = 0xFFFFFFFF;

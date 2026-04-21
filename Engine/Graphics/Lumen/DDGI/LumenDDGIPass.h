@@ -23,7 +23,7 @@ struct DDGIRuntimeParams {
     u32   probe_count_x = 16;
     u32   probe_count_y = 8;
     u32   probe_count_z = 16;
-    u32   rays_per_probe = 128;
+    u32   rays_per_probe = 64;
     float probe_spacing = 4.0f;                 // 16 probes * 4.0 = 60 units coverage (matches Sponza)
     float irradiance_temporal_weight = 0.02f;   // EMA alpha for irradiance
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
@@ -37,13 +37,15 @@ struct DDGICameraData {
     math::m4x4 proj_matrix;
     math::m4x4 prev_view_matrix;
     math::m4x4 prev_proj_matrix;
+    math::v3   light_direction;   // normalized world-space light direction
+    math::v3   light_color;       // linear HDR light color
     u32        frame_index;
     float      delta_time;
 };
 
-/// Output from DDGI AddPass — probe irradiance/depth textures available for sampling.
+/// Output from DDGI AddPass — probe irradiance buffer/depth textures available for sampling.
 struct LumenDDGIOutput {
-    rendergraph::RGResourceHandle ddgi_irradiance;  ///< Texture3D irradiance (current frame)
+    rendergraph::RGResourceHandle ddgi_irradiance;  ///< Storage buffer irradiance (current frame)
     rendergraph::RGResourceHandle ddgi_depth;        ///< Texture3D depth (current frame)
 };
 
@@ -73,8 +75,8 @@ struct DDGIVolumeData {
     u32      FrameIndex;              // offset 68
     float    RayMaxDistance;          // offset 72
 
-    float    _pad0;                   // offset 76
-    float    _pad1;                   // offset 80
+    float    ProbeHysteresis;         // offset 76
+    float    TemporalAlpha;           // offset 80
 
     // GlobalSDF cascade data — v4 matches Metal's float4 alignment
     // C++ inserts implicit padding 84→96 for v4 16-byte alignment
@@ -83,7 +85,8 @@ struct DDGIVolumeData {
     math::v4 SdfExtents[3];           // offset 192
     u32      SdfResolutions[3];       // offset 240
     u32      SdfCascadeCount;         // offset 252
-    float    _pad2[3];                // offset 256
+    math::v4 LightDirection;          // offset 256: xyz = light dir, w unused
+    math::v4 LightColor;              // offset 272: xyz = light color, w unused
 };
 
 // ============================================================================
@@ -109,7 +112,7 @@ struct DDGIRayData {
  * The pass owns all persistent GPU resources:
  *   - 3 compute pipelines (trace, irradiance update, depth update)
  *   - Triple-buffered descriptor sets, constant buffers
- *   - Persistent probe irradiance/depth Texture3D (triple-buffered)
+ *   - Persistent probe irradiance buffer/depth Texture3D (triple-buffered)
  *   - Ray data storage buffer
  */
 class LumenDDGIPass {
@@ -129,8 +132,8 @@ public:
     bool IsInitialized() const { return initialized_; }
 
     // Accessors for probe data (for sampling in other passes)
-    rhi::ResourceHandle GetIrradianceTexture(u32 frame_idx) const {
-        return irradiance_textures_[frame_idx % 3];
+    rhi::ResourceHandle GetIrradianceBuffer(u32 frame_idx) const {
+        return irradiance_buffers_[frame_idx % 3];
     }
     rhi::ResourceHandle GetDepthTexture(u32 frame_idx) const {
         return depth_textures_[frame_idx % 3];
@@ -184,8 +187,8 @@ private:
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
 
-    // Probe textures (persistent, triple-buffered for history)
-    rhi::ResourceHandle irradiance_textures_[3]{
+    // Probe irradiance buffers (persistent, triple-buffered for history)
+    rhi::ResourceHandle irradiance_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
     rhi::ResourceHandle depth_textures_[3]{

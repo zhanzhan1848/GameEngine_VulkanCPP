@@ -3,6 +3,64 @@ using namespace metal;
 
 #define RHI_ENABLE_PBR
 #include "RHIShaderCommon.metal"
+// DDGI v2 sampling — inlined from DDGISample.metal + DDGIVolumeData.metal
+// (EngineTest shaders don't have access to Engine/Graphics include paths)
+constant float _DDGI_SH_C0   = 0.282095f;
+constant float _DDGI_SH_C1   = 0.488603f;
+constant float _DDGI_SH_C2_0 = 1.092548f;
+constant float _DDGI_SH_C2_1 = 0.315392f;
+constant float _DDGI_SH_C2_2 = 0.546274f;
+
+static void _ddgiShEvaluate(float3 d, thread float* out) {
+    float x=d.x, y=d.y, z=d.z;
+    float x2=x*x, y2=y*y, z2=z*z;
+    out[0]= _DDGI_SH_C0;
+    out[1]=-_DDGI_SH_C1*y;  out[2]= _DDGI_SH_C1*z;  out[3]=-_DDGI_SH_C1*x;
+    out[4]= _DDGI_SH_C2_0*y*x; out[5]=-_DDGI_SH_C2_0*y*z;
+    out[6]= _DDGI_SH_C2_1*(3.0f*z2-1.0f);
+    out[7]=-_DDGI_SH_C2_0*x*z; out[8]= _DDGI_SH_C2_2*(x2-y2);
+}
+
+static float3 _ddgiShDot(thread const float3* c, float3 d) {
+    float b[9]; _ddgiShEvaluate(d, b);
+    float3 r(0.0f);
+    for (uint i=0; i<4u; ++i) r += c[i]*b[i]; // Only L0+L1 (4 coeff) for stability
+    return r;
+}
+
+static void _ddgiTetrahedral(float3 gp, uint3 gd, thread uint* pi, thread float* bw) {
+    uint3 b0=clamp(uint3(floor(gp)),uint3(0u),gd-1u), b1=min(b0+1u,gd-1u);
+    uint p[8];
+    p[0]=b0.x+b0.y*gd.x+b0.z*gd.x*gd.y; p[1]=b1.x+b0.y*gd.x+b0.z*gd.x*gd.y;
+    p[2]=b0.x+b1.y*gd.x+b0.z*gd.x*gd.y; p[3]=b1.x+b1.y*gd.x+b0.z*gd.x*gd.y;
+    p[4]=b0.x+b0.y*gd.x+b1.z*gd.x*gd.y; p[5]=b1.x+b0.y*gd.x+b1.z*gd.x*gd.y;
+    p[6]=b0.x+b1.y*gd.x+b1.z*gd.x*gd.y; p[7]=b1.x+b1.y*gd.x+b1.z*gd.x*gd.y;
+    float fx=fract(gp.x), fy=fract(gp.y), fz=fract(gp.z);
+    if      (fx>=fy&&fy>=fz) { pi[0]=p[0];pi[1]=p[1];pi[2]=p[3];pi[3]=p[7]; bw[0]=1-fx;bw[1]=fx-fy;bw[2]=fy-fz;bw[3]=fz; }
+    else if (fx>=fz&&fz>=fy) { pi[0]=p[0];pi[1]=p[1];pi[2]=p[5];pi[3]=p[7]; bw[0]=1-fx;bw[1]=fx-fz;bw[2]=fz-fy;bw[3]=fy; }
+    else if (fy>=fx&&fx>=fz) { pi[0]=p[0];pi[1]=p[2];pi[2]=p[3];pi[3]=p[7]; bw[0]=1-fy;bw[1]=fy-fx;bw[2]=fx-fz;bw[3]=fz; }
+    else if (fy>=fz&&fz>=fx) { pi[0]=p[0];pi[1]=p[2];pi[2]=p[6];pi[3]=p[7]; bw[0]=1-fy;bw[1]=fy-fz;bw[2]=fz-fx;bw[3]=fx; }
+    else if (fz>=fx&&fx>=fy) { pi[0]=p[0];pi[1]=p[4];pi[2]=p[5];pi[3]=p[7]; bw[0]=1-fz;bw[1]=fz-fx;bw[2]=fx-fy;bw[3]=fy; }
+    else                     { pi[0]=p[0];pi[1]=p[4];pi[2]=p[6];pi[3]=p[7]; bw[0]=1-fz;bw[1]=fz-fy;bw[2]=fy-fx;bw[3]=fx; }
+    for(uint i=0;i<4u;++i) bw[i]=max(bw[i],0.0f);
+}
+
+static float3 _ddgiSampleIrradiance(float3 wp, float3 n, float3 origin, float spacing, uint3 counts, device const float3* buf) {
+    float3 gp=(wp-origin)/spacing;
+    float3 gm=float3(float(counts.x-1u),float(counts.y-1u),float(counts.z-1u));
+    if(any(gp<0.0f)||any(gp>gm)) return float3(0.0f);
+
+    // Nearest probe only (1 probe × 4 float3 = 4 reads, well within Apple Silicon fragment limits)
+    uint3 pc = clamp(uint3(round(gp)), uint3(0u), counts - 1u);
+    uint probeIdx = pc.x + pc.y * counts.x + pc.z * counts.x * counts.y;
+    uint base = probeIdx * 9u;
+    float3 sh[4];
+    for (uint i = 0; i < 4u; ++i) sh[i] = buf[base + i];
+
+    float3 nn = normalize(n);
+    float3 r = _ddgiShDot(sh, nn);
+    return max(r, float3(0.0f));
+}
 
 // ================================================================================================
 // Data Structures (Must match C++ Binding)
@@ -285,165 +343,57 @@ fragment float4 fragmentBlit(
     return float4(color, 1.0);
 }
 
-// DDGI indirect lighting blit — final composite to backbuffer:
-//   1. Sample G-Buffer (albedo, normal) for surface properties
-//   2. Full SH0-SH3 directional evaluation with surface normal
-//   3. DDGI depth-based visibility weighting (reduces light leaking)
-//   4. Modulate by albedo (no /PI — DDGI irradiance already integrates hemisphere)
-//   5. Add to HDR scene color
-//   6. Apply Reinhard tone mapping + sRGB gamma (final output stage)
 fragment float4 fragmentBlitDDGI(
-    VertexOut in [[stage_in]],
-    texture2d<float, access::sample> sceneColor    [[texture(0)]],
-    depth2d<float, access::sample> depthTex        [[texture(1)]],
-    texture3d<float, access::sample> irradianceTex  [[texture(2)]],
-    texture2d<float, access::sample> albedoTex      [[texture(3)]],
-    texture2d<float, access::sample> normalTex      [[texture(4)]],
-    texture3d<float, access::sample> ddgiDepthTex   [[texture(5)]],
-    constant float4x4& invViewProjection [[buffer(0)]],
-    constant float4& probeOrigin_spacing [[buffer(1)]],
-    constant float4& probeCounts_shCountF [[buffer(2)]]
-) {
-    constexpr sampler s2d(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    VertexOut IN [[stage_in]],
 
-    float2 uv = in.uv;
-    float4 scene = sceneColor.sample(s2d, uv);
-    float depth = depthTex.sample(s2d, uv);
+    texture2d<float, access::sample> sceneColorTex  [[texture(0)]],
+    depth2d<float, access::sample>   depthTex        [[texture(1)]],
+    // texture(2) = half-res GI indirect (set by compute pass)
+    texture2d<float, access::sample> giIndirectTex   [[texture(2)]],
+    texture2d<float, access::sample> albedoTex       [[texture(3)]],
+    texture2d<float, access::sample> normalTex       [[texture(4)]],
+    // texture(5) unused (ddgiDepth now handled by compute)
 
-    // Sky pixels
-    if (depth >= 1.0f) return scene;
+    constant float4x4& invViewProj         [[buffer(0)]],
+    constant float4&    probeOriginSpacing [[buffer(1)]],
+    constant float4&    probeCountsSh      [[buffer(2)]]
+    // NO buffer(3) — irradiance buffer now read by compute, not fragment
+)
+{
+    float2 uv = IN.uv;
 
-    // Reconstruct world position
-    float2 ndc;
-    ndc.x = uv.x * 2.0 - 1.0;
-    ndc.y = (1.0 - uv.y) * 2.0 - 1.0;
-    float4 worldPos4 = invViewProjection * float4(ndc, depth, 1.0);
-    float3 worldPos = worldPos4.xyz / worldPos4.w;
+    constexpr sampler s2d(coord::normalized, address::clamp_to_edge, filter::linear);
+    constexpr sampler depthS(coord::normalized, address::clamp_to_edge, filter::nearest);
+    float depth = depthTex.sample(depthS, uv);
 
-    // Sample G-Buffer
-    float3 albedo = albedoTex.sample(s2d, uv).rgb;
-    float3 normal = normalize(normalTex.sample(s2d, uv).xyz * 2.0 - 1.0);
-
-    float3 probeOrigin = probeOrigin_spacing.xyz;
-    float  probeSpacing = probeOrigin_spacing.w;
-    uint3  probeCounts = uint3(uint(probeCounts_shCountF.x), uint(probeCounts_shCountF.y), uint(probeCounts_shCountF.z));
-    uint   shCount = uint(probeCounts_shCountF.w);
-
-    // Probe grid continuous coordinates
-    float3 gridPos = (worldPos - probeOrigin) / probeSpacing;
-
-    // Bounds check
-    if (gridPos.x < 0.0f || gridPos.x >= float(probeCounts.x) ||
-        gridPos.y < 0.0f || gridPos.y >= float(probeCounts.y) ||
-        gridPos.z < 0.0f || gridPos.z >= float(probeCounts.z)) {
-        return scene;
+    if (depth >= 1.0f) {
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
-    int3 baseProbe = int3(floor(gridPos));
-    float3 fracPart = fract(gridPos);
+    // Scene color = direct lighting (from deferred pass)
+    float3 sceneColor = sceneColorTex.sample(s2d, uv).rgb;
 
-    // SH constants (must match DDGIVolumeData.metal)
-    const float SH_C0 = 0.282095f;
-    const float SH_C1 = 0.488603f;
+    // GI indirect from half-res compute texture
+    float3 indirect = giIndirectTex.sample(s2d, uv).rgb;
 
-    float3 totalIrradiance = float3(0.0f);
-    float  totalWeight = 0.0f;
-
-    for (uint corner = 0; corner < 8; ++corner) {
-        int3 offset = int3(
-            (corner & 1u) ? 1 : 0,
-            (corner & 2u) ? 1 : 0,
-            (corner & 4u) ? 1 : 0
-        );
-        int3 probeCoord = baseProbe + offset;
-
-        if (probeCoord.x < 0 || probeCoord.x >= int(probeCounts.x) ||
-            probeCoord.y < 0 || probeCoord.y >= int(probeCounts.y) ||
-            probeCoord.z < 0 || probeCoord.z >= int(probeCounts.z)) {
-            continue;
-        }
-
-        // Probe world position
-        float3 probeWorldPos = probeOrigin + float3(float(probeCoord.x), float(probeCoord.y), float(probeCoord.z)) * probeSpacing;
-
-        // --- Visibility weighting ---
-        float3 toProbe = probeWorldPos - worldPos;
-        float  dist = length(toProbe);
-        float3 dir  = toProbe / max(dist, 0.001f);
-
-        // Backface weight: probe behind surface gets reduced weight
-        float NoL = dot(normal, dir);
-        float backfaceWeight = max(NoL + 1.0f, 0.0f) * 0.5f;
-
-        // Distance weight
-        float distWeight = 1.0f / max(dist * dist, 0.01f);
-
-        // Depth validity from DDGI depth texture (8-direction depth check)
-        float3 probeToSurf = -dir;
-        uint octant = 0u;
-        if (probeToSurf.x > 0.0f) octant |= 1u;
-        if (probeToSurf.y > 0.0f) octant |= 2u;
-        if (probeToSurf.z > 0.0f) octant |= 4u;
-        uint depthTexelIdx = octant / 2u;
-        uint3 depthCoord = uint3(probeCoord.x, probeCoord.y, probeCoord.z * 4 + depthTexelIdx);
-        float storedDepth = 100.0f;
-        if (depthCoord.z < probeCounts.z * 4) {
-            float2 octantDepth = ddgiDepthTex.read(depthCoord).rg;
-            storedDepth = (octant == depthTexelIdx * 2) ? octantDepth.x : octantDepth.y;
-        }
-        // Depth validity: storedDepth >= dist means the probe "sees through" to the surface.
-        // Wide threshold (0.5 → 2.0) avoids false self-shadowing from SDF voxel precision.
-        float depthValidity = smoothstep(0.5f, 2.0f, storedDepth / max(dist, 0.001f));
-
-        // --- Trilinear weight ---
-        float3 blendW;
-        blendW.x = (corner & 1u) ? fracPart.x : (1.0f - fracPart.x);
-        blendW.y = (corner & 2u) ? fracPart.y : (1.0f - fracPart.y);
-        blendW.z = (corner & 4u) ? fracPart.z : (1.0f - fracPart.z);
-        float trilinWeight = blendW.x * blendW.y * blendW.z;
-
-        float weight = backfaceWeight * distWeight * depthValidity * trilinWeight;
-
-        // --- Full SH evaluation (SH0-SH3) with surface normal ---
-        float3 sh[4];
-        for (uint i = 0; i < 4; ++i) {
-            uint3 texCoord = uint3(probeCoord.x, probeCoord.y, probeCoord.z * shCount + i);
-            sh[i] = irradianceTex.read(texCoord).rgb;
-        }
-
-        float3 probeIrradiance = float3(0.0f);
-        probeIrradiance += sh[0] * SH_C0;
-        probeIrradiance += sh[1] * (-SH_C1 * normal.y);
-        probeIrradiance += sh[2] * ( SH_C1 * normal.z);
-        probeIrradiance += sh[3] * ( SH_C1 * normal.x);
-        probeIrradiance = max(probeIrradiance, float3(0.0f));
-
-        totalIrradiance += probeIrradiance * weight;
-        totalWeight += weight;
-    }
-
-    if (totalWeight > 0.0f) {
-        totalIrradiance /= totalWeight;
-    }
-
-    // DDGI irradiance already includes hemisphere integral from SH projection+reconstruction.
-    // Do NOT divide by PI here — that would make indirect light ~3x too dark.
-    float3 indirect = totalIrradiance * albedo;
-
-    // NaN protection: uninitialized probe textures can contain NaN.
-    // scene + NaN = NaN wipes out the entire scene (black "missing polygons").
-    if (any(isnan(indirect)) || any(isinf(indirect))) {
+    // NaN guard
+    uint3 bits = as_type<uint3>(indirect);
+    if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u) {
         indirect = float3(0.0f);
     }
 
-    // Add DDGI indirect to scene
-    float3 result = scene.rgb + indirect;
+    // Modulate indirect by albedo for diffuse response
+    float4 albedo = albedoTex.sample(s2d, uv);
+    float3 ddgiDiffuse = albedo.rgb * indirect * 0.5f;
 
-    // Tone mapping + gamma: the backbuffer is BGRA8, values >1.0 are lost without this.
-    result = result / (result + float3(1.0));       // Reinhard
-    result = pow(result, float3(1.0 / 2.2));        // sRGB gamma
+    // Final: direct + indirect
+    float3 lit = sceneColor + ddgiDiffuse;
 
-    return float4(result, 1.0f);
+    // Tone map + gamma
+    lit = lit / (lit + float3(1.0f));
+    lit = pow(lit, float3(1.0f / 2.2f));
+
+    return float4(lit, 1.0f);
 }
 
 // Diagnostic: read raw shadow depth from cascade (MUST be in separate function
@@ -475,118 +425,6 @@ float2 DiagShadowMapRaw(float2 screenUV, texture2d<float> sm0, texture2d<float> 
 // ================================================================================================
 // GPU-Driven Deferred PBR Lighting with DDGI Indirect
 // ================================================================================================
-
-// DDGI probe params (must match C++ DDGIProbeParamsCB layout)
-struct DDGIProbeParams {
-    float4 probeOrigin_spacing;   // xyz = probe origin, w = probe spacing
-    float4 probeCounts_shCount;   // xyz = (Nx, Ny, Nz), w = 4 (SH coeff count)
-};
-
-// Sample DDGI irradiance via trilinear probe interpolation with SH evaluation.
-// Returns indirect irradiance (incoming light, NOT modulated by albedo).
-static float3 sampleDDGIIndirect(
-    float3 worldPos,
-    float3 normal,
-    texture3d<float, access::sample> irradianceTex,
-    constant DDGIProbeParams& params)
-{
-    float3 probeOrigin = params.probeOrigin_spacing.xyz;
-    float  probeSpacing = params.probeOrigin_spacing.w;
-    uint3  probeCounts = uint3(uint(params.probeCounts_shCount.x),
-                               uint(params.probeCounts_shCount.y),
-                               uint(params.probeCounts_shCount.z));
-    uint   shCount = uint(params.probeCounts_shCount.w);
-
-    // Probe grid continuous coordinates
-    float3 gridPos = (worldPos - probeOrigin) / probeSpacing;
-
-    // Bounds check — outside probe grid, no indirect light
-    if (gridPos.x < 0.0f || gridPos.x >= float(probeCounts.x) ||
-        gridPos.y < 0.0f || gridPos.y >= float(probeCounts.y) ||
-        gridPos.z < 0.0f || gridPos.z >= float(probeCounts.z)) {
-        return float3(0.0f);
-    }
-
-    int3 baseProbe = int3(floor(gridPos));
-    float3 fracPart = fract(gridPos);
-
-    // SH constants (must match DDGIVolumeData.metal)
-    const float SH_C0 = 0.282095f;
-    const float SH_C1 = 0.488603f;
-
-    float3 totalIrradiance = float3(0.0f);
-    float  totalWeight = 0.0f;
-
-    for (uint corner = 0; corner < 8; ++corner) {
-        int3 offset = int3(
-            (corner & 1u) ? 1 : 0,
-            (corner & 2u) ? 1 : 0,
-            (corner & 4u) ? 1 : 0
-        );
-        int3 probeCoord = baseProbe + offset;
-
-        if (probeCoord.x < 0 || probeCoord.x >= int(probeCounts.x) ||
-            probeCoord.y < 0 || probeCoord.y >= int(probeCounts.y) ||
-            probeCoord.z < 0 || probeCoord.z >= int(probeCounts.z)) {
-            continue;
-        }
-
-        // Probe world position
-        float3 probeWorldPos = probeOrigin + float3(float(probeCoord.x), float(probeCoord.y), float(probeCoord.z)) * probeSpacing;
-
-        // Distance-based weight
-        float3 toProbe = probeWorldPos - worldPos;
-        float  dist = length(toProbe);
-        float3 dir  = toProbe / max(dist, 0.001f);
-
-        // Backface weight: reduce contribution from probes behind the surface
-        float NoL = dot(normal, dir);
-        float backfaceWeight = max(NoL + 1.0f, 0.0f) * 0.5f;
-
-        // Distance weight
-        float distWeight = 1.0f / max(dist * dist, 0.01f);
-
-        // Trilinear weight
-        float3 blendW;
-        blendW.x = (corner & 1u) ? fracPart.x : (1.0f - fracPart.x);
-        blendW.y = (corner & 2u) ? fracPart.y : (1.0f - fracPart.y);
-        blendW.z = (corner & 4u) ? fracPart.z : (1.0f - fracPart.z);
-        float trilinWeight = blendW.x * blendW.y * blendW.z;
-
-        float weight = backfaceWeight * distWeight * trilinWeight;
-
-        // SH evaluation: read 4 SH coefficients and evaluate with surface normal
-        float3 sh[4];
-        for (uint i = 0; i < 4; ++i) {
-            uint3 texCoord = uint3(probeCoord.x, probeCoord.y, probeCoord.z * shCount + i);
-            sh[i] = irradianceTex.read(texCoord).rgb;
-        }
-
-        float3 probeIrradiance = float3(0.0f);
-        probeIrradiance += sh[0] * SH_C0;
-        probeIrradiance += sh[1] * (-SH_C1 * normal.y);
-        probeIrradiance += sh[2] * ( SH_C1 * normal.z);
-        probeIrradiance += sh[3] * ( SH_C1 * normal.x);
-        probeIrradiance = max(probeIrradiance, float3(0.0f));
-
-        totalIrradiance += probeIrradiance * weight;
-        totalWeight += weight;
-    }
-
-    if (totalWeight > 0.0f) {
-        totalIrradiance /= totalWeight;
-    }
-
-    // Bitwise NaN/Inf guard (survives Metal -ffast-math)
-    uint3 bits = as_type<uint3>(totalIrradiance);
-    if (((bits.x & 0x7F800000u) == 0x7F800000u) ||
-        ((bits.y & 0x7F800000u) == 0x7F800000u) ||
-        ((bits.z & 0x7F800000u) == 0x7F800000u)) {
-        totalIrradiance = float3(0.0f);
-    }
-
-    return totalIrradiance;
-}
 
 fragment float4 fragmentLighting_gpuDriven(
     VertexOut in [[stage_in]],

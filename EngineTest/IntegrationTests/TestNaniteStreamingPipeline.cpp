@@ -933,21 +933,22 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
         return false;
     }
 
-    // --- Descriptor set layout: 6 textures + 3 constant buffers ---
+    // --- Descriptor set layout: 5 textures + 3 uniform buffers ---
+    // Fragment reads texture2D only (no storage buffer) to stay within Apple Silicon limits
     {
         using namespace primal::graphics::rhi;
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // scene color
             {1, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // depth
-            {2, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // DDGI irradiance 3D
+            {2, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // half-res GI indirect
             {3, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // GBuffer albedo
             {4, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // GBuffer normal
-            {5, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // DDGI depth 3D
+            // Buffers
             {0, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // invViewProjection
             {1, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // probe origin + spacing
             {2, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // probe counts
         };
-        DescriptorSetLayoutDesc layoutDesc{ .bindingCount = 9, .bindings = bindings };
+        DescriptorSetLayoutDesc layoutDesc{ .bindingCount = 8, .bindings = bindings };
         blit_ddgi_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -987,6 +988,70 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
     if (blit_ddgi_pipeline_ == primal::graphics::rhi::handles::INVALID_PIPELINE) {
         std::cerr << "[DDGIBlit] Failed to create DDGI blit pipeline" << std::endl;
         return false;
+    }
+
+    // === DDGI GI Gather compute pipeline (half-res) ===
+    // Moves storage buffer reads from fragment to compute to avoid Apple Silicon limits
+    {
+        using namespace primal::graphics::rhi;
+        const shader_file_info gi_gather_info{ "DDGIGIGather.metal", "ddgi_gi_gather", shader_type::compute };
+        primal::utl::vector<std::wstring> extra_args;
+        auto compiled = compile_shader(gi_gather_info, shaderDir.c_str(), extra_args);
+
+        if (!compiled) {
+            std::cerr << "[DDGIGIGather] Failed to compile shader" << std::endl;
+        } else {
+            u64 byte_code_size = *reinterpret_cast<u64*>(compiled.get());
+            u8* byte_code_ptr = compiled.get() + sizeof(u64) + 16;
+            if (!byte_code_ptr || byte_code_size == 0) {
+                std::cerr << "[DDGIGIGather] Invalid byte code" << std::endl;
+            } else {
+                ShaderHandle giGatherShader = device_->CreateShader(byte_code_ptr, byte_code_size, ShaderStage::Compute, gi_gather_info.function);
+                if (giGatherShader == handles::INVALID_SHADER) {
+                    std::cerr << "[DDGIGIGather] Invalid shader handle" << std::endl;
+                } else {
+                    // Descriptor set layout: 4 textures + 4 buffers
+                    DescriptorSetLayoutBinding giGatherBindings[] = {
+                        {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // depth
+                        {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // normal
+                        {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // ddgiDepth
+                        {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr}, // output
+                        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // invViewProj
+                        {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeOriginSpacing
+                        {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeCounts
+                        {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // irradianceBuffer
+                    };
+                    DescriptorSetLayoutDesc layoutDesc{8, giGatherBindings};
+                    gi_gather_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+
+                    PipelineLayoutDesc plDesc;
+                    plDesc.setLayoutCount = 1;
+                    plDesc.setLayouts = &gi_gather_set_layout_;
+                    gi_gather_layout_ = device_->CreatePipelineLayout(plDesc);
+
+                    ComputePipelineDesc pipeDesc{};
+                    pipeDesc.computeShader = giGatherShader;
+                    pipeDesc.layout = gi_gather_layout_;
+                    pipeDesc.threadGroupSize = {8, 8, 1};
+                    gi_gather_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+
+                    DescriptorSetDesc dsDesc{gi_gather_set_layout_};
+                    gi_gather_descriptor_set_ = device_->CreateDescriptorSet(dsDesc);
+
+                    // Create half-res output texture
+                    u32 halfW = renderWidth_ / 2;
+                    u32 halfH = renderHeight_ / 2;
+                    TextureDesc texDesc{};
+                    texDesc.size = {halfW, halfH, 1};
+                    texDesc.format = DataFormat::RGBA16_Float;
+                    texDesc.type = TextureType::Texture2D;
+                    texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+                    gi_halfres_texture_ = device_->CreateTexture(texDesc);
+
+                    std::cout << "[DDGIGIGather] Initialized (half-res " << halfW << "x" << halfH << ")" << std::endl;
+                }
+            }
+        }
     }
 
     // --- Triple-buffered constant buffers (one per frame, packs all 3 CBs) ---
@@ -2362,6 +2427,8 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         }
         ddgiCameraData.frame_index = frameCount_;
         ddgiCameraData.delta_time = 0.016f;
+        ddgiCameraData.light_direction = primal::math::v3{sharedLightPos.x, sharedLightPos.y, sharedLightPos.z};
+        ddgiCameraData.light_color = primal::math::v3{20.0f, 20.0f, 20.0f};
 
         auto ddgiOutput = ddgiPass_->AddPass(graph, ddgiPrevColorHandle,
             ddgiCameraData, currentBufferIndex);
@@ -2383,10 +2450,9 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         rendergraph::RGResourceHandle input;
         rendergraph::RGResourceHandle ssgi_input;
         rendergraph::RGResourceHandle depth_input;
-        rendergraph::RGResourceHandle ddgi_irradiance;
+        rendergraph::RGResourceHandle gi_indirect;     // half-res GI texture from compute
         rendergraph::RGResourceHandle albedo_input;
         rendergraph::RGResourceHandle normal_input;
-        rendergraph::RGResourceHandle ddgi_depth;
         rendergraph::RGResourceHandle output;
     };
 
@@ -2396,23 +2462,6 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         blit_ddgi_pipeline_ != rhi::handles::INVALID_PIPELINE &&
         sceneDepthTexture_ != rhi::handles::INVALID_RESOURCE) {
         depthBlitHandle = graph.ImportResource("BlitDepth", sceneDepthTexture_);
-    }
-
-    // Import DDGI irradiance texture for blit
-    // 2-frame delayed read: guarantees GPU has finished writing this slot.
-    rendergraph::RGResourceHandle ddgiIrradianceHandle;
-    rendergraph::RGResourceHandle ddgiDepthHandle;
-    if (ddgiPass_ && ddgiPass_->IsInitialized() &&
-        blit_ddgi_pipeline_ != rhi::handles::INVALID_PIPELINE) {
-        u32 ddgiReadIdx = (currentBufferIndex + 2) % 3;
-        auto ddgiTex = ddgiPass_->GetIrradianceTexture(ddgiReadIdx);
-        if (ddgiTex != rhi::handles::INVALID_RESOURCE) {
-            ddgiIrradianceHandle = graph.ImportResource("DDGIIrradianceBlit", ddgiTex);
-        }
-        auto ddgiDepthTex = ddgiPass_->GetDepthTexture(ddgiReadIdx);
-        if (ddgiDepthTex != rhi::handles::INVALID_RESOURCE) {
-            ddgiDepthHandle = graph.ImportResource("DDGIDepthBlit", ddgiDepthTex);
-        }
     }
 
     // Import GBuffer albedo and normal for DDGI blit
@@ -2429,6 +2478,144 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         }
     }
 
+    // === DDGI GI GATHER PASS (half-res compute) ===
+    // Moves storage buffer reads from fragment to compute to avoid Apple Silicon limits
+    rendergraph::RGResourceHandle giOutputHandle;
+    rhi::ResourceHandle giGatherIrradianceBuf = rhi::handles::INVALID_RESOURCE;
+    if (ddgiPass_ && ddgiPass_->IsInitialized() &&
+        gi_gather_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        gi_halfres_texture_ != rhi::handles::INVALID_RESOURCE &&
+        ssgiVisMode_ == 3) {
+
+        auto giTexHandle = graph.ImportResource("DDGIHalfResGI", gi_halfres_texture_);
+        giOutputHandle = giTexHandle;
+
+        u32 ddgiReadIdx = (currentBufferIndex + 2) % 3;
+        auto ddgiIrrBuf = ddgiPass_->GetIrradianceBuffer(ddgiReadIdx);
+        auto ddgiDepthTex = ddgiPass_->GetDepthTexture(ddgiReadIdx);
+        giGatherIrradianceBuf = ddgiIrrBuf;
+
+        // Import GBuffer textures for the compute pass
+        auto gbufferDepth = gpuDrawPipeline_ ? gpuDrawPipeline_->GetGBufferDepthSampleable() : rhi::handles::INVALID_RESOURCE;
+        auto gbufferNormal = gpuDrawPipeline_ ? gpuDrawPipeline_->GetGBufferNormal() : rhi::handles::INVALID_RESOURCE;
+
+        if (ddgiIrrBuf != rhi::handles::INVALID_RESOURCE &&
+            ddgiDepthTex != rhi::handles::INVALID_RESOURCE &&
+            gbufferDepth != rhi::handles::INVALID_RESOURCE &&
+            gbufferNormal != rhi::handles::INVALID_RESOURCE) {
+
+            auto gDepthRG = graph.ImportResource("GBufferDepthGI", gbufferDepth);
+            auto gNormalRG = graph.ImportResource("GBufferNormalGI", gbufferNormal);
+            auto ddgiDepthRG = graph.ImportResource("DDGIDepthGI", ddgiDepthTex);
+
+            graph.AddPass<BlitPassData>("DDGIGIGather",
+                graphics::rendergraph::RGPassType::Compute,
+                graphics::rendergraph::RGPassCategory::Lighting,
+                [giTexHandle, gDepthRG, gNormalRG, ddgiDepthRG](
+                    BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+                    builder.Read(gDepthRG, rhi::ResourceState::ShaderResource);
+                    builder.Read(gNormalRG, rhi::ResourceState::ShaderResource);
+                    builder.Read(ddgiDepthRG, rhi::ResourceState::ShaderResource);
+                    builder.Write(giTexHandle, rhi::ResourceState::UnorderedAccess);
+                },
+                [this, currentBufferIndex, ddgiIrrBuf, gDepthRG, gNormalRG, ddgiDepthRG, giTexHandle](
+                    const BlitPassData& data, graphics::rendergraph::RenderGraphContext& context) {
+                    auto cmd = context.cmdBuffer;
+                    if (!cmd) return;
+
+                    // Resolve texture handles
+                    auto resolveTex = [&](rendergraph::RGResourceHandle h) -> rhi::ResourceHandle {
+                        auto* res = context.graph->GetResource(h);
+                        return res ? res->GetPhysicalHandle() : rhi::handles::INVALID_RESOURCE;
+                    };
+
+                    rhi::ResourceHandle depthH = resolveTex(gDepthRG);
+                    rhi::ResourceHandle normalH = resolveTex(gNormalRG);
+                    rhi::ResourceHandle ddgiDepthH = resolveTex(ddgiDepthRG);
+                    rhi::ResourceHandle outputH = resolveTex(giTexHandle);
+
+                    if (depthH == rhi::handles::INVALID_RESOURCE ||
+                        normalH == rhi::handles::INVALID_RESOURCE) return;
+
+                    // Upload constant buffers
+                    u32 cbIdx = currentBufferIndex % 3;
+                    {
+                        primal::math::m4x4 vp = cameraBuffers_[currentBufferIndex].proj_matrix * cameraBuffers_[currentBufferIndex].view_matrix;
+                        primal::math::m4x4 invVP = rhi::math::Inverse(vp);
+                        const auto& ddgiParams = ddgiPass_->GetParams();
+                        const auto& volData = ddgiPass_->GetVolumeData();
+
+                        struct GIGatherCB {
+                            primal::math::m4x4 inv_view_projection;
+                            primal::math::v4   probe_origin_spacing;
+                            primal::math::v4   probe_counts;
+                        };
+
+                        auto* cb = static_cast<GIGatherCB*>(device_->MapBuffer(ddgi_probe_cb_[cbIdx]));
+                        if (cb) {
+                            cb->inv_view_projection = invVP;
+                            cb->probe_origin_spacing = primal::math::v4{
+                                volData.ProbeOrigin.x, volData.ProbeOrigin.y,
+                                volData.ProbeOrigin.z, ddgiParams.probe_spacing};
+                            cb->probe_counts = primal::math::v4{
+                                static_cast<f32>(ddgiParams.probe_count_x),
+                                static_cast<f32>(ddgiParams.probe_count_y),
+                                static_cast<f32>(ddgiParams.probe_count_z), 0.0f};
+                            device_->UnmapBuffer(ddgi_probe_cb_[cbIdx]);
+                        }
+                    }
+
+                    // Update descriptor set: textures
+                    DescriptorData texParams[] = {
+                        {0, DescriptorType::SampledImage, depthH},
+                        {1, DescriptorType::SampledImage, normalH},
+                        {2, DescriptorType::SampledImage, ddgiDepthH},
+                        {3, DescriptorType::StorageImage, outputH},
+                    };
+                    UpdateDescriptorSet(device_, gi_gather_descriptor_set_, texParams, 4);
+
+                    // Update descriptor set: buffers (offsets into single CB)
+                    {
+                        rhi::WriteDescriptorSet bufWrites[4];
+                        rhi::DescriptorBufferInfo bufInfos[4];
+                        for (int i = 0; i < 3; ++i) {
+                            bufWrites[i].dstSet = gi_gather_descriptor_set_;
+                            bufWrites[i].dstBinding = i;
+                            bufWrites[i].descriptorCount = 1;
+                            bufWrites[i].descriptorType = DescriptorType::UniformBuffer;
+                            bufWrites[i].bufferInfo = &bufInfos[i];
+                            bufInfos[i].buffer = ddgi_probe_cb_[cbIdx];
+                        }
+                        bufInfos[0].offset = 0;   bufInfos[0].range = 64;
+                        bufInfos[1].offset = 64;  bufInfos[1].range = 16;
+                        bufInfos[2].offset = 80;  bufInfos[2].range = 16;
+                        // Irradiance storage buffer
+                        bufWrites[3].dstSet = gi_gather_descriptor_set_;
+                        bufWrites[3].dstBinding = 3;
+                        bufWrites[3].descriptorCount = 1;
+                        bufWrites[3].descriptorType = DescriptorType::StorageBuffer;
+                        bufWrites[3].bufferInfo = &bufInfos[3];
+                        bufInfos[3].buffer = ddgiIrrBuf;
+                        bufInfos[3].offset = 0;
+                        bufInfos[3].range = ~0ull;
+                        device_->UpdateDescriptorSets(4, bufWrites);
+                    }
+
+                    // Dispatch
+                    cmd->BindComputePipeline(gi_gather_pipeline_);
+                    const rhi::DescriptorSetHandle sets[] = { gi_gather_descriptor_set_ };
+                    cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, gi_gather_layout_, 0, 1, sets, 0, nullptr);
+
+                    u32 halfW = renderWidth_ / 2;
+                    u32 halfH = renderHeight_ / 2;
+                    u32 gx = (halfW + 7) / 8;
+                    u32 gy = (halfH + 7) / 8;
+                    cmd->Dispatch(gx, gy, 1);
+                }
+            );
+        }
+    }
+
     // Choose primary input for FinalBlit:
     // When deferred lighting is active, use its output (lit scene color).
     // Otherwise use raw GBuffer albedo (no lighting).
@@ -2441,7 +2628,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     graph.AddPass<BlitPassData>("FinalBlit",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
-        [this, backBufferHandle, primaryInputHandle, ssgiOutputHandle, depthBlitHandle, ddgiIrradianceHandle, ddgiDepthHandle, gbufferAlbedoHandle, gbufferNormalHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+        [this, backBufferHandle, primaryInputHandle, ssgiOutputHandle, depthBlitHandle, giOutputHandle, gbufferAlbedoHandle, gbufferNormalHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
             // Read lit scene color (deferred output or raw GBuffer albedo)
             data.input = builder.Read(primaryInputHandle, rhi::ResourceState::ShaderResource);
 
@@ -2456,10 +2643,11 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 data.ssgi_input = rendergraph::RGResourceHandle{};
             }
 
-            // Read depth + DDGI irradiance + GBuffer + DDGI depth when in DDGI mode
-            if (ssgiVisMode_ == 3 && depthBlitHandle.IsValid() && ddgiIrradianceHandle.IsValid()) {
+            // Read depth + half-res GI indirect + GBuffer when in DDGI mode
+            if (ssgiVisMode_ == 3 && depthBlitHandle.IsValid() && giOutputHandle.IsValid()) {
                 data.depth_input = builder.Read(depthBlitHandle, rhi::ResourceState::ShaderResource);
-                data.ddgi_irradiance = builder.Read(ddgiIrradianceHandle, rhi::ResourceState::ShaderResource);
+                // Half-res GI indirect texture from compute pass
+                data.gi_indirect = builder.Read(giOutputHandle, rhi::ResourceState::ShaderResource);
 
                 // GBuffer albedo and normal for DDGI blit albedo modulation
                 if (gbufferAlbedoHandle.IsValid()) {
@@ -2472,18 +2660,11 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 } else {
                     data.normal_input = rendergraph::RGResourceHandle{};
                 }
-                // DDGI depth for visibility weighting
-                if (ddgiDepthHandle.IsValid()) {
-                    data.ddgi_depth = builder.Read(ddgiDepthHandle, rhi::ResourceState::ShaderResource);
-                } else {
-                    data.ddgi_depth = rendergraph::RGResourceHandle{};
-                }
             } else {
                 data.depth_input = rendergraph::RGResourceHandle{};
-                data.ddgi_irradiance = rendergraph::RGResourceHandle{};
+                data.gi_indirect = rendergraph::RGResourceHandle{};
                 data.albedo_input = rendergraph::RGResourceHandle{};
                 data.normal_input = rendergraph::RGResourceHandle{};
-                data.ddgi_depth = rendergraph::RGResourceHandle{};
             }
 
             data.output = builder.Write(backBufferHandle, rhi::ResourceState::RenderTarget);
@@ -2510,18 +2691,23 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             if (inputHandle == rhi::handles::INVALID_RESOURCE) return;
 
             // Mode 3: DDGI Composite — scene + DDGI indirect via DDGI blit pipeline
-            if (ssgiVisMode_ == 3 && data.depth_input.IsValid() && data.ddgi_irradiance.IsValid() &&
+            // Fragment shader reads texture2D only (half-res GI from compute), no storage buffer
+            if (ssgiVisMode_ == 3 && data.depth_input.IsValid() && data.gi_indirect.IsValid() &&
                 blit_ddgi_pipeline_ != rhi::handles::INVALID_PIPELINE) {
                 auto depthResource = context.graph->GetResource(data.depth_input);
-                auto ddgiResource = context.graph->GetResource(data.ddgi_irradiance);
-                if (depthResource && ddgiResource) {
+                if (depthResource) {
                     auto depthHandle = depthResource->GetPhysicalHandle();
-                    auto ddgiIrrHandle = ddgiResource->GetPhysicalHandle();
 
-                    if (depthHandle != rhi::handles::INVALID_RESOURCE &&
-                        ddgiIrrHandle != rhi::handles::INVALID_RESOURCE) {
+                    if (depthHandle != rhi::handles::INVALID_RESOURCE) {
 
-                        // Resolve GBuffer albedo, normal, and DDGI depth handles
+                        // Resolve GI indirect (half-res texture from compute pass)
+                        auto giIndirectHandle = rhi::handles::INVALID_RESOURCE;
+                        if (data.gi_indirect.IsValid()) {
+                            auto res = context.graph->GetResource(data.gi_indirect);
+                            if (res) giIndirectHandle = res->GetPhysicalHandle();
+                        }
+
+                        // Resolve GBuffer albedo, normal handles
                         auto albedoHandle = rhi::handles::INVALID_RESOURCE;
                         if (data.albedo_input.IsValid()) {
                             auto res = context.graph->GetResource(data.albedo_input);
@@ -2532,93 +2718,89 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                             auto res = context.graph->GetResource(data.normal_input);
                             if (res) normalHandle = res->GetPhysicalHandle();
                         }
-                        auto ddgiDepthHandle = rhi::handles::INVALID_RESOURCE;
-                        if (data.ddgi_depth.IsValid()) {
-                            auto res = context.graph->GetResource(data.ddgi_depth);
-                            if (res) ddgiDepthHandle = res->GetPhysicalHandle();
-                        }
 
-                        // Upload constant buffers
-                        u32 cbIdx = currentBufferIndex % 3;
-                        {
-                            // Compute inverse view-projection matrix
-                            primal::math::m4x4 vp = cameraBuffers_[currentBufferIndex].proj_matrix * cameraBuffers_[currentBufferIndex].view_matrix;
-                            primal::math::m4x4 invVP = rhi::math::Inverse(vp);
+                        if (giIndirectHandle == rhi::handles::INVALID_RESOURCE) {
+                            // No GI texture available, fall through to scene-only blit
+                        } else {
 
-                            // Get DDGI probe parameters
-                            const auto& ddgiParams = ddgiPass_->GetParams();
-                            const auto& volData = ddgiPass_->GetVolumeData();
+                            // Upload constant buffers (reuse same CB as GI Gather)
+                            u32 cbIdx = currentBufferIndex % 3;
+                            {
+                                // Compute inverse view-projection matrix
+                                primal::math::m4x4 vp = cameraBuffers_[currentBufferIndex].proj_matrix * cameraBuffers_[currentBufferIndex].view_matrix;
+                                primal::math::m4x4 invVP = rhi::math::Inverse(vp);
 
-                            // Pack CB data:
-                            // buffer(0): invViewProjection (64 bytes)
-                            // buffer(1): probeOrigin_spacing (16 bytes: xyz=origin, w=spacing)
-                            // buffer(2): probeCounts_shCount (16 bytes: xyz=counts, w=SH_COEFF_COUNT=4)
-                            struct DDGIBlitCB {
-                                primal::math::m4x4 inv_view_projection;  // offset 0, 64 bytes
-                                primal::math::v4   probe_origin_spacing; // offset 64, 16 bytes (xyz=origin, w=spacing)
-                                primal::math::v4   probe_counts_sh;     // offset 80, 16 bytes (xyz=counts, w=4)
+                                // Get DDGI probe parameters
+                                const auto& ddgiParams = ddgiPass_->GetParams();
+                                const auto& volData = ddgiPass_->GetVolumeData();
+
+                                struct DDGIBlitCB {
+                                    primal::math::m4x4 inv_view_projection;
+                                    primal::math::v4   probe_origin_spacing;
+                                    primal::math::v4   probe_counts_sh;
+                                };
+
+                                auto* cb = static_cast<DDGIBlitCB*>(device_->MapBuffer(ddgi_probe_cb_[cbIdx]));
+                                if (cb) {
+                                    cb->inv_view_projection = invVP;
+                                    cb->probe_origin_spacing = primal::math::v4{
+                                        volData.ProbeOrigin.x,
+                                        volData.ProbeOrigin.y,
+                                        volData.ProbeOrigin.z,
+                                        ddgiParams.probe_spacing
+                                    };
+                                    cb->probe_counts_sh = primal::math::v4{
+                                        static_cast<f32>(ddgiParams.probe_count_x),
+                                        static_cast<f32>(ddgiParams.probe_count_y),
+                                        static_cast<f32>(ddgiParams.probe_count_z),
+                                        9.0f
+                                    };
+                                    device_->UnmapBuffer(ddgi_probe_cb_[cbIdx]);
+                                }
+                            }
+
+                            // Update descriptor set: 5 textures (no storage buffer)
+                            // texture(0): scene color, texture(1): depth, texture(2): half-res GI
+                            // texture(3): GBuffer albedo, texture(4): GBuffer normal
+                            DescriptorData ddgi_params[] = {
+                                {0, DescriptorType::SampledImage,  inputHandle},          // texture(0): scene color
+                                {1, DescriptorType::SampledImage,  depthHandle},          // texture(1): depth
+                                {2, DescriptorType::SampledImage,  giIndirectHandle},     // texture(2): half-res GI indirect
+                                {3, DescriptorType::SampledImage,  albedoHandle},         // texture(3): GBuffer albedo
+                                {4, DescriptorType::SampledImage,  normalHandle},         // texture(4): GBuffer normal
                             };
+                            UpdateDescriptorSet(device_, blit_ddgi_descriptor_set_, ddgi_params, 5);
 
-                            auto* cb = static_cast<DDGIBlitCB*>(device_->MapBuffer(ddgi_probe_cb_[cbIdx]));
-                            if (cb) {
-                                cb->inv_view_projection = invVP;
-                                cb->probe_origin_spacing = primal::math::v4{
-                                    volData.ProbeOrigin.x,
-                                    volData.ProbeOrigin.y,
-                                    volData.ProbeOrigin.z,
-                                    ddgiParams.probe_spacing
-                                };
-                                cb->probe_counts_sh = primal::math::v4{
-                                    static_cast<f32>(ddgiParams.probe_count_x),
-                                    static_cast<f32>(ddgiParams.probe_count_y),
-                                    static_cast<f32>(ddgiParams.probe_count_z),
-                                    4.0f  // DDGI_SH_COEFF_COUNT
-                                };
-                                device_->UnmapBuffer(ddgi_probe_cb_[cbIdx]);
+                            // Buffer bindings with offsets into single CB:
+                            // buffer(0) offset=0  = invViewProjection (64 bytes)
+                            // buffer(1) offset=64 = probeOrigin_spacing (16 bytes)
+                            // buffer(2) offset=80 = probeCounts_shCount (16 bytes)
+                            {
+                                rhi::WriteDescriptorSet bufWrites[3];
+                                rhi::DescriptorBufferInfo bufInfos[3];
+                                for (int i = 0; i < 3; ++i) {
+                                    bufWrites[i].dstSet = blit_ddgi_descriptor_set_;
+                                    bufWrites[i].dstBinding = i;
+                                    bufWrites[i].descriptorCount = 1;
+                                    bufWrites[i].descriptorType = DescriptorType::UniformBuffer;
+                                    bufWrites[i].bufferInfo = &bufInfos[i];
+                                    bufInfos[i].buffer = ddgi_probe_cb_[cbIdx];
+                                }
+                                bufInfos[0].offset = 0;
+                                bufInfos[0].range = 64;
+                                bufInfos[1].offset = 64;
+                                bufInfos[1].range = 16;
+                                bufInfos[2].offset = 80;
+                                bufInfos[2].range = 16;
+                                device_->UpdateDescriptorSets(3, bufWrites);
                             }
+
+                            cmd->BindGraphicsPipeline(blit_ddgi_pipeline_);
+                            const rhi::DescriptorSetHandle sets[] = { blit_ddgi_descriptor_set_ };
+                            cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_ddgi_layout_, 0, 1, sets, 0, nullptr);
+                            cmd->Draw(3, 0, 1, 0);
+                            return;
                         }
-
-                        // Update descriptor set: 6 textures + 3 constant buffers
-                        // Textures use Metal texture namespace, buffers use buffer namespace
-                        DescriptorData ddgi_params[] = {
-                            {0, DescriptorType::SampledImage,  inputHandle},          // texture(0): scene color
-                            {1, DescriptorType::SampledImage,  depthHandle},          // texture(1): depth
-                            {2, DescriptorType::SampledImage,  ddgiIrrHandle},        // texture(2): DDGI irradiance 3D
-                            {3, DescriptorType::SampledImage,  albedoHandle},         // texture(3): GBuffer albedo
-                            {4, DescriptorType::SampledImage,  normalHandle},         // texture(4): GBuffer normal
-                            {5, DescriptorType::SampledImage,  ddgiDepthHandle},      // texture(5): DDGI depth 3D
-                        };
-                        UpdateDescriptorSet(device_, blit_ddgi_descriptor_set_, ddgi_params, 6);
-
-                        // Buffer bindings with offsets into single CB:
-                        // buffer(0) offset=0  = invViewProjection (64 bytes)
-                        // buffer(1) offset=64 = probeOrigin_spacing (16 bytes)
-                        // buffer(2) offset=80 = probeCounts_shCount (16 bytes)
-                        {
-                            rhi::WriteDescriptorSet bufWrites[3];
-                            rhi::DescriptorBufferInfo bufInfos[3];
-                            for (int i = 0; i < 3; ++i) {
-                                bufWrites[i].dstSet = blit_ddgi_descriptor_set_;
-                                bufWrites[i].dstBinding = i;
-                                bufWrites[i].descriptorCount = 1;
-                                bufWrites[i].descriptorType = DescriptorType::UniformBuffer;
-                                bufWrites[i].bufferInfo = &bufInfos[i];
-                                bufInfos[i].buffer = ddgi_probe_cb_[cbIdx];
-                            }
-                            bufInfos[0].offset = 0;
-                            bufInfos[0].range = 64;
-                            bufInfos[1].offset = 64;
-                            bufInfos[1].range = 16;
-                            bufInfos[2].offset = 80;
-                            bufInfos[2].range = 16;
-                            device_->UpdateDescriptorSets(3, bufWrites);
-                        }
-
-                        cmd->BindGraphicsPipeline(blit_ddgi_pipeline_);
-                        const rhi::DescriptorSetHandle sets[] = { blit_ddgi_descriptor_set_ };
-                        cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_ddgi_layout_, 0, 1, sets, 0, nullptr);
-                        cmd->Draw(3, 0, 1, 0);
-                        return;
                     }
                 }
                 // Fallback: if DDGI resources invalid, fall through to scene-only blit

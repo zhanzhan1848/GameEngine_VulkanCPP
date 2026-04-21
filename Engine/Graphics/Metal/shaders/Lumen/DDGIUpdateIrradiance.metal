@@ -1,10 +1,10 @@
 /**
  * @file DDGIUpdateIrradiance.metal
- * @brief Lumen DDGI Phase 2 - SH irradiance projection + temporal filtering
+ * @brief Lumen DDGI Phase 2 - SH3 irradiance projection + hysteresis
  *
  * Each thread handles one probe: reads all rays from storage buffer,
- * projects radiance onto 2nd-order SH (4 coefficients), applies temporal
- * EMA with history, and writes 4 texels to irradiance Texture3D.
+ * projects radiance onto 3rd-order SH (9 coefficients), applies probe
+ * hysteresis with history, and writes to irradiance storage buffer.
  *
  * Dispatch: (ProbeCountTotal, 1, 1), threadGroupSize = (1, 1, 1)
  */
@@ -15,94 +15,62 @@ using namespace metal;
 #include "../CommonTypes.metal"
 #include "DDGIVolumeData.metal"
 
-// ============================================================================
-// Main Kernel
-// ============================================================================
-
 kernel void ddgi_update_irradiance(
-    uint global_id [[thread_position_in_grid]],
+    uint gid [[thread_position_in_grid]],
 
-    // Previous frame irradiance (history)
-    texture3d<float, access::read> irradiance_history [[texture(0)]],
-
-    // Output irradiance
-    texture3d<float, access::write> irradiance_output [[texture(1)]],
-
-    // Global shader data (matches C++ descriptor layout at buffer(0))
     constant GlobalShaderData& gd [[buffer(0)]],
-
-    // DDGI volume data
-    device DDGIVolumeData& volume [[buffer(1)]],
-
-    // Ray data from trace pass
-    device const DDGIRayData* ray_buffer [[buffer(2)]]
+    constant DDGIVolumeData& vol [[buffer(1)]],
+    device const DDGIRayData* rayData [[buffer(2)]],
+    device const float3* irradianceHistory [[buffer(3)]],
+    device float3* irradianceOutput [[buffer(4)]]
 )
 {
-    uint probeIdx = global_id;
-    if (probeIdx >= volume.ProbeCountTotal) return;
+    if (gid >= vol.ProbeCountTotal) return;
 
-    uint3 gc = ddgiProbeGridCoord(probeIdx, volume.ProbeCounts);
+    uint rayOffset = gid * vol.RaysPerProbe;
 
-    // -------------------------------------------------------------------
-    // Accumulate SH coefficients from all rays
-    // -------------------------------------------------------------------
-    float3 shCoeffs[4] = { float3(0), float3(0), float3(0), float3(0) };
-    float  validCount = 0.0f;
+    // Accumulate SH3 coefficients
+    float3 shAccum[9];
+    for (uint i = 0; i < 9u; ++i) shAccum[i] = float3(0.0f);
 
-    uint baseOffset = probeIdx * volume.RaysPerProbe;
+    for (uint r = 0; r < vol.RaysPerProbe; ++r) {
+        uint rayIdx = rayOffset + r;
+        float3 radiance = rayData[rayIdx].radiance_and_dist.xyz;
+        float hitDist = rayData[rayIdx].radiance_and_dist.w;
 
-    for (uint r = 0; r < volume.RaysPerProbe; ++r) {
-        DDGIRayData ray = ray_buffer[baseOffset + r];
-
-        float3 radiance;
-        float3 rayDir = ddgiFibonacciSphereDir(r, volume.RaysPerProbe, volume.FrameIndex);
-
-        if (ray.radiance_and_dist.w >= 0.0f) {
-            // Hit: use sampled radiance with distance attenuation
-            float distWeight = 1.0f - smoothstep(0.0f, volume.RayMaxDistance, ray.radiance_and_dist.w);
-            radiance = ray.radiance_and_dist.xyz * distWeight;
+        if (hitDist < 0.0f) {
+            radiance = DDGI_SKY_COLOR * 0.5f;
         } else {
-            // Miss: sky contribution with constant weight
-            radiance = DDGI_SKY_COLOR;
+            float distWeight = 1.0f - smoothstep(0.0f, vol.RayMaxDistance, hitDist);
+            radiance *= distWeight;
         }
 
-        // Project onto 2nd-order SH basis
-        // Y0 = C0                        (constant)
-        // Y1 = -C1 * y                   (linear y)
-        // Y2 =  C1 * z                   (linear z)
-        // Y3 =  C1 * x                   (linear x)
-        shCoeffs[0] += radiance * DDGI_SH_C0;
-        shCoeffs[1] += radiance * (-DDGI_SH_C1 * rayDir.y);
-        shCoeffs[2] += radiance * ( DDGI_SH_C1 * rayDir.z);
-        shCoeffs[3] += radiance * ( DDGI_SH_C1 * rayDir.x);
+        float3 rayDir = ddgiRayDirection(r, vol.RaysPerProbe, vol.FrameIndex);
 
-        validCount += 1.0f;
-    }
+        // Project onto SH3
+        float basis[9];
+        shEvaluate(rayDir, basis);
+        float mcWeight = 4.0f * 3.14159265f / float(vol.RaysPerProbe);
 
-    // Normalize: Monte Carlo weight = 4π / N
-    float normFactor = (4.0f * 3.14159265f) / max(validCount, 1.0f);
-    for (uint i = 0; i < 4; ++i) {
-        shCoeffs[i] *= normFactor;
-        shCoeffs[i] = max(shCoeffs[i], float3(0.0f)); // Clamp negatives
-    }
-
-    // -------------------------------------------------------------------
-    // Temporal filter with history
-    // -------------------------------------------------------------------
-    float alpha = volume.IrradianceBlurSigma;
-
-    for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) {
-        uint3 coord = uint3(gc.x, gc.y, gc.z * DDGI_SH_COEFF_COUNT + i);
-
-        // Read previous frame
-        float3 history = float3(0.0f);
-        if (coord.z < irradiance_history.get_depth()) {
-            history = irradiance_history.read(coord).rgb;
+        for (uint i = 0; i < 9u; ++i) {
+            shAccum[i] += radiance * basis[i] * mcWeight;
         }
+    }
 
-        // Exponential moving average
-        float3 filtered = mix(history, shCoeffs[i], alpha);
+    // Read history with NaN guard
+    uint probeBase = gid * 9u;
+    float alpha = (vol.FrameIndex < 6u) ? 1.0f : vol.ProbeHysteresis;
 
-        irradiance_output.write(float4(filtered, 1.0f), coord);
+    for (uint i = 0; i < 9u; ++i) {
+        float3 history = irradianceHistory[probeBase + i];
+        // Bitwise NaN guard (survives -ffast-math)
+        uint3 bits = as_type<uint3>(history);
+        if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u) {
+            history = float3(0.0f);
+        }
+        float3 filtered = mix(history, shAccum[i], alpha);
+        // Clamp to prevent SH ringing / extreme values
+        filtered = clamp(filtered, float3(0.0f), float3(10.0f));
+        irradianceOutput[probeBase + i] = filtered;
     }
 }

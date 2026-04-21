@@ -1,179 +1,95 @@
 /**
  * @file DDGISample.metal
- * @brief DDGI probe sampling utilities (include file, not a kernel)
+ * @brief DDGI probe sampling: 4-probe tetrahedral interpolation with SH3
  *
- * Provides functions to:
- *  1. Trilinear-interpolate between 8 nearest probes
- *  2. Evaluate 2nd-order SH at a surface normal direction
- *  3. Apply depth-aware weighting to reduce light leaking
- *
- * Usage: #include "DDGISample.metal" in shaders that need DDGI GI.
+ * Uses storage buffer (not texture3D) for irradiance data.
+ * Each probe stores 9 float3 SH3 coefficients.
+ * Tetrahedral interpolation reads 4 probes (vs 8 for trilinear).
  */
 
-#ifndef DDGI_SAMPLE_METAL
-#define DDGI_SAMPLE_METAL
-
-#include <metal_stdlib>
-using namespace metal;
 #include "DDGIVolumeData.metal"
 
-// ============================================================================
-// SH Evaluation (2nd order, 4 coefficients)
-// ============================================================================
-
-static float3 ddgiEvalSH2(float3 N, float3 sh0, float3 sh1, float3 sh2, float3 sh3)
+// Tetrahedral interpolation: find 4 probes and barycentric weights
+static void tetrahedralProbes(
+    float3 gridPos,
+    uint3 gridDim,
+    thread uint* probeIndices,
+    thread float* baryWeights)
 {
-    float3 result = float3(0.0f);
-    result += sh0 * DDGI_SH_C0;
-    result += sh1 * (-DDGI_SH_C1 * N.y);
-    result += sh2 * ( DDGI_SH_C1 * N.z);
-    result += sh3 * ( DDGI_SH_C1 * N.x);
-    return max(result, float3(0.0f));
-}
+    uint3 base = clamp(uint3(floor(gridPos)), uint3(0u), gridDim - 1u);
+    uint3 base1 = min(base + 1u, gridDim - 1u);
 
-// ============================================================================
-// Sample a single probe's irradiance (read 4 SH texels)
-// ============================================================================
+    uint probes[8];
+    probes[0] = base.x  + base.y  * gridDim.x + base.z  * gridDim.x * gridDim.y;
+    probes[1] = base1.x + base.y  * gridDim.x + base.z  * gridDim.x * gridDim.y;
+    probes[2] = base.x  + base1.y * gridDim.x + base.z  * gridDim.x * gridDim.y;
+    probes[3] = base1.x + base1.y * gridDim.x + base.z  * gridDim.x * gridDim.y;
+    probes[4] = base.x  + base.y  * gridDim.x + base1.z * gridDim.x * gridDim.y;
+    probes[5] = base1.x + base.y  * gridDim.x + base1.z * gridDim.x * gridDim.y;
+    probes[6] = base.x  + base1.y * gridDim.x + base1.z * gridDim.x * gridDim.y;
+    probes[7] = base1.x + base1.y * gridDim.x + base1.z * gridDim.x * gridDim.y;
 
-static float3 ddgiSampleProbeIrradiance(
-    uint3 probeCoord,
-    float3 worldNormal,
-    texture3d<float, access::sample> irradianceTexture,
-    uint3 probeCounts)
-{
-    float3 sh[4];
-    for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) {
-        uint3 coord = uint3(probeCoord.x, probeCoord.y, probeCoord.z * DDGI_SH_COEFF_COUNT + i);
-        sh[i] = irradianceTexture.read(coord).rgb;
+    float fx = fract(gridPos.x), fy = fract(gridPos.y), fz = fract(gridPos.z);
+
+    // 6 tetrahedra split by main diagonal
+    if (fx >= fy && fy >= fz) {
+        probeIndices[0]=probes[0]; probeIndices[1]=probes[1]; probeIndices[2]=probes[3]; probeIndices[3]=probes[7];
+        baryWeights[0]=1.0f-fx; baryWeights[1]=fx-fy; baryWeights[2]=fy-fz; baryWeights[3]=fz;
+    } else if (fx >= fz && fz >= fy) {
+        probeIndices[0]=probes[0]; probeIndices[1]=probes[1]; probeIndices[2]=probes[5]; probeIndices[3]=probes[7];
+        baryWeights[0]=1.0f-fx; baryWeights[1]=fx-fz; baryWeights[2]=fz-fy; baryWeights[3]=fy;
+    } else if (fy >= fx && fx >= fz) {
+        probeIndices[0]=probes[0]; probeIndices[1]=probes[2]; probeIndices[2]=probes[3]; probeIndices[3]=probes[7];
+        baryWeights[0]=1.0f-fy; baryWeights[1]=fy-fx; baryWeights[2]=fx-fz; baryWeights[3]=fz;
+    } else if (fy >= fz && fz >= fx) {
+        probeIndices[0]=probes[0]; probeIndices[1]=probes[2]; probeIndices[2]=probes[6]; probeIndices[3]=probes[7];
+        baryWeights[0]=1.0f-fy; baryWeights[1]=fy-fz; baryWeights[2]=fz-fx; baryWeights[3]=fx;
+    } else if (fz >= fx && fx >= fy) {
+        probeIndices[0]=probes[0]; probeIndices[1]=probes[4]; probeIndices[2]=probes[5]; probeIndices[3]=probes[7];
+        baryWeights[0]=1.0f-fz; baryWeights[1]=fz-fx; baryWeights[2]=fx-fy; baryWeights[3]=fy;
+    } else { // fz >= fy && fy >= fx
+        probeIndices[0]=probes[0]; probeIndices[1]=probes[4]; probeIndices[2]=probes[6]; probeIndices[3]=probes[7];
+        baryWeights[0]=1.0f-fz; baryWeights[1]=fz-fy; baryWeights[2]=fy-fx; baryWeights[3]=fx;
     }
 
-    return ddgiEvalSH2(worldNormal, sh[0], sh[1], sh[2], sh[3]);
+    for (uint i = 0; i < 4u; ++i) baryWeights[i] = max(baryWeights[i], 0.0f);
 }
 
-// ============================================================================
-// Depth-aware probe weight (reduces light leaking through walls)
-// ============================================================================
-
-static float ddgiProbeWeight(
-    float3 surfaceWorldPos,
-    float3 surfaceNormal,
-    float3 probeWorldPos,
-    texture3d<float, access::sample> depthTexture,
-    float3 probeOrigin,
-    float  probeSpacing,
-    uint3  probeCounts)
-{
-    // Direction from surface to probe
-    float3 toProbe = probeWorldPos - surfaceWorldPos;
-    float dist = length(toProbe);
-    float3 dir = toProbe / max(dist, 0.001f);
-
-    // Backface check: probe behind surface gets less weight
-    float NoL = dot(surfaceNormal, dir);
-    float backfaceWeight = max(NoL + 1.0f, 0.0f) * 0.5f;
-
-    // Distance weight: closer probes contribute more
-    float distWeight = 1.0f / max(dist * dist, 0.01f);
-
-    // Depth validity check: read octant depth
-    float3 probeToSurf = -dir;
-    uint octant = 0u;
-    if (probeToSurf.x > 0.0f) octant |= 1u;
-    if (probeToSurf.y > 0.0f) octant |= 2u;
-    if (probeToSurf.z > 0.0f) octant |= 4u;
-
-    // Read depth from the probe's depth texture
-    uint depthTexelIdx = octant / 2u;
-    uint3 probeCoord = uint3(
-        uint((probeWorldPos.x - probeOrigin.x) / probeSpacing),
-        uint((probeWorldPos.y - probeOrigin.y) / probeSpacing),
-        uint((probeWorldPos.z - probeOrigin.z) / probeSpacing)
-    );
-
-    // Clamp to valid range
-    probeCoord = clamp(probeCoord, uint3(0), probeCounts - 1u);
-
-    float storedDepth = 100.0f;
-    uint3 depthCoord = uint3(probeCoord.x, probeCoord.y, probeCoord.z * 4 + depthTexelIdx);
-    if (depthCoord.z < probeCounts.z * 4) {
-        float2 octantDepth = depthTexture.read(depthCoord).rg;
-        storedDepth = (octant == depthTexelIdx * 2) ? octantDepth.x : octantDepth.y;
-    }
-
-    // Depth validity: does the probe "see through" to the surface?
-    float depthValidity = smoothstep(0.0f, 0.5f, storedDepth / max(dist, 0.001f));
-
-    return backfaceWeight * distWeight * depthValidity;
-}
-
-// ============================================================================
-// Main Sampling Function: Trilinear interpolate DDGI irradiance
-// ============================================================================
-
+// Sample DDGI irradiance at world position for given normal
 static float3 ddgiSampleIrradiance(
     float3 worldPos,
-    float3 worldNormal,
-    texture3d<float, access::sample> irradianceTexture,
-    texture3d<float, access::sample> depthTexture,
-    constant DDGIVolumeData& volume)
+    float3 normal,
+    constant DDGIVolumeData& vol,
+    device const float3* irradianceBuffer)
 {
-    // World position to probe grid continuous coordinates
-    float3 gridPos = (worldPos - volume.ProbeOrigin) / volume.ProbeSpacing;
+    float3 gridPos = (worldPos - vol.ProbeOrigin) / vol.ProbeSpacing;
+    float3 gridMax = float3(float(vol.ProbeCounts.x - 1u),
+                            float(vol.ProbeCounts.y - 1u),
+                            float(vol.ProbeCounts.z - 1u));
 
-    // Base probe (floor) for trilinear interpolation
-    int3 baseProbe = int3(floor(gridPos));
-    float3 fracPart = fract(gridPos);
+    if (any(gridPos < 0.0f) || any(gridPos > gridMax)) return float3(0.0f);
 
-    float3 totalIrradiance = float3(0.0f);
-    float  totalWeight = 0.0f;
+    uint probeIdx[4];
+    float baryW[4];
+    tetrahedralProbes(gridPos, vol.ProbeCounts, probeIdx, baryW);
 
-    // Iterate over 8 corner probes
-    for (uint corner = 0; corner < 8; ++corner) {
-        int3 offset = int3(
-            (corner & 1u) ? 1 : 0,
-            (corner & 2u) ? 1 : 0,
-            (corner & 4u) ? 1 : 0
-        );
+    float3 n = normalize(normal);
+    float3 result = float3(0.0f);
 
-        int3 probeCoord = baseProbe + offset;
+    for (uint p = 0; p < 4u; ++p) {
+        if (baryW[p] < 0.001f) continue;
 
-        // Skip out-of-bounds probes
-        if (probeCoord.x < 0 || probeCoord.x >= int(volume.ProbeCounts.x) ||
-            probeCoord.y < 0 || probeCoord.y >= int(volume.ProbeCounts.y) ||
-            probeCoord.z < 0 || probeCoord.z >= int(volume.ProbeCounts.z)) {
-            continue;
+        uint base = probeIdx[p] * 9u;
+        // Only read L0+L1 (4 float3 per probe) to stay within
+        // Apple Silicon buffer read limits. 4 probes × 4 coeff = 16 float3 reads.
+        float3 sh[4];
+        for (uint i = 0; i < 4u; ++i) {
+            sh[i] = irradianceBuffer[base + i];
         }
 
-        float3 probeWorldPos = ddgiProbeWorldPos(uint3(probeCoord), volume.ProbeOrigin, volume.ProbeSpacing);
-
-        // Compute weight
-        float weight = ddgiProbeWeight(
-            worldPos, worldNormal, probeWorldPos,
-            depthTexture,
-            volume.ProbeOrigin, volume.ProbeSpacing, volume.ProbeCounts);
-
-        // Trilinear blending weight
-        float3 blendW;
-        blendW.x = (corner & 1u) ? fracPart.x : (1.0f - fracPart.x);
-        blendW.y = (corner & 2u) ? fracPart.y : (1.0f - fracPart.y);
-        blendW.z = (corner & 4u) ? fracPart.z : (1.0f - fracPart.z);
-        float trilinWeight = blendW.x * blendW.y * blendW.z;
-
-        weight *= trilinWeight;
-
-        // Sample irradiance
-        float3 probeIrradiance = ddgiSampleProbeIrradiance(
-            uint3(probeCoord), worldNormal, irradianceTexture, volume.ProbeCounts);
-
-        totalIrradiance += probeIrradiance * weight;
-        totalWeight += weight;
+        float3 irradiance = shDot(sh, n);
+        result += irradiance * baryW[p];
     }
 
-    if (totalWeight > 0.0f) {
-        return totalIrradiance / totalWeight;
-    }
-
-    return float3(0.0f);
+    return max(result, float3(0.0f));
 }
-
-#endif // DDGI_SAMPLE_METAL

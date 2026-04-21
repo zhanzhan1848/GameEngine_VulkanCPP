@@ -60,7 +60,7 @@ kernel void ddgi_update_depth(
         if (ray.radiance_and_dist.w < 0.0f) continue;
 
         // Compute ray direction for octant classification
-        float3 rayDir = ddgiFibonacciSphereDir(r, volume.RaysPerProbe, volume.FrameIndex);
+        float3 rayDir = ddgiRayDirection(r, volume.RaysPerProbe, volume.FrameIndex);
 
         // Octant classification: 3 bits from sign of x, y, z
         uint octant = 0u;
