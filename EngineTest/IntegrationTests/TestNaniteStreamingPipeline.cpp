@@ -1010,16 +1010,16 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
                 if (giGatherShader == handles::INVALID_SHADER) {
                     std::cerr << "[DDGIGIGather] Invalid shader handle" << std::endl;
                 } else {
-                    // Descriptor set layout: 4 textures + 4 buffers
+                    // Descriptor set layout: 3 textures + 5 buffers (depth buffer replaces texture3D)
                     DescriptorSetLayoutBinding giGatherBindings[] = {
                         {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // depth
                         {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // normal
-                        {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // ddgiDepth
-                        {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr}, // output
+                        {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr}, // output
                         {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // invViewProj
                         {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeOriginSpacing
                         {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeCounts
                         {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // irradianceBuffer
+                        {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // depthBuffer
                     };
                     DescriptorSetLayoutDesc layoutDesc{8, giGatherBindings};
                     gi_gather_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
@@ -1049,6 +1049,69 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
                     gi_halfres_texture_ = device_->CreateTexture(texDesc);
 
                     std::cout << "[DDGIGIGather] Initialized (half-res " << halfW << "x" << halfH << ")" << std::endl;
+                }
+            }
+        }
+    }
+
+    // === DDGI Visibility compute pipeline (Pass 1: texture3D only) ===
+    // Separates texture3D reads from storage buffer reads to avoid Apple Silicon limits
+    {
+        using namespace primal::graphics::rhi;
+        const shader_file_info vis_info{ "DDGIVisibility.metal", "ddgi_visibility", shader_type::compute };
+        primal::utl::vector<std::wstring> extra_args;
+        auto compiled = compile_shader(vis_info, shaderDir.c_str(), extra_args);
+
+        if (!compiled) {
+            std::cerr << "[DDGIVisibility] Failed to compile shader" << std::endl;
+        } else {
+            u64 byte_code_size = *reinterpret_cast<u64*>(compiled.get());
+            u8* byte_code_ptr = compiled.get() + sizeof(u64) + 16;
+            if (!byte_code_ptr || byte_code_size == 0) {
+                std::cerr << "[DDGIVisibility] Invalid byte code" << std::endl;
+            } else {
+                ShaderHandle visShader = device_->CreateShader(byte_code_ptr, byte_code_size, ShaderStage::Compute, vis_info.function);
+                if (visShader == handles::INVALID_SHADER) {
+                    std::cerr << "[DDGIVisibility] Invalid shader handle" << std::endl;
+                } else {
+                    // Descriptor set layout: 4 textures + 3 buffers (no irradianceBuffer)
+                    DescriptorSetLayoutBinding visBindings[] = {
+                        {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // depth
+                        {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // normal
+                        {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // ddgiDepth
+                        {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr}, // visibility output
+                        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // invViewProj
+                        {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeOriginSpacing
+                        {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeCounts
+                    };
+                    DescriptorSetLayoutDesc layoutDesc{7, visBindings};
+                    vis_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+
+                    PipelineLayoutDesc plDesc;
+                    plDesc.setLayoutCount = 1;
+                    plDesc.setLayouts = &vis_set_layout_;
+                    vis_layout_ = device_->CreatePipelineLayout(plDesc);
+
+                    ComputePipelineDesc pipeDesc{};
+                    pipeDesc.computeShader = visShader;
+                    pipeDesc.layout = vis_layout_;
+                    pipeDesc.threadGroupSize = {8, 8, 1};
+                    vis_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+
+                    DescriptorSetDesc dsDesc{vis_set_layout_};
+                    vis_descriptor_set_ = device_->CreateDescriptorSet(dsDesc);
+
+                    // Create half-res visibility texture (same size as GI output)
+                    u32 halfW = renderWidth_ / 2;
+                    u32 halfH = renderHeight_ / 2;
+                    TextureDesc texDesc{};
+                    texDesc.size = {halfW, halfH, 1};
+                    texDesc.format = DataFormat::RGBA16_Float;
+                    texDesc.type = TextureType::Texture2D;
+                    texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+                    vis_texture_ = device_->CreateTexture(texDesc);
+
+                    std::cout << "[DDGIVisibility] Initialized (half-res " << halfW << "x" << halfH << ")" << std::endl;
                 }
             }
         }
@@ -1582,9 +1645,11 @@ void TestNaniteStreamingPipeline::UpdateTestScene() {
     cameraBuffers_[currentBufferIndex].frame_index = frameCount_;
 
     // Update GlobalSDF cascade origins based on camera position (for DDGI ray tracing)
+    // CRITICAL: Only update BEFORE voxelization completes. After that, lock origins
+    // so SDF texture data matches the cascade origin/extent metadata.
     {
         auto& globalSDF = nanite::GlobalSDF::Get();
-        if (globalSDF.IsInitialized()) {
+        if (globalSDF.IsInitialized() && !sdf_voxelization_done_) {
             globalSDF.Update(sceneSnapshot_, frameCount_, camera_.GetPosition());
         }
     }
@@ -2384,19 +2449,15 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     }
 
                     // Static scene: only voxelize once after the first successful dispatch
-                    static bool voxCompleted = false;
-                    if (voxCompleted) return;
+                    if (sdf_voxelization_done_) return;
 
                     globalSDF.SetVoxelizationResources(fresh);
-
-                    //std::cout << "[GlobalSDF] Voxelization dispatch: frame=" << frameCount_
-                              //<< " num_instances=" << fresh.num_instances << std::endl;
 
                     for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
                         globalSDF.DispatchVoxelization(cmd, c);
                     }
 
-                    voxCompleted = true;
+                    sdf_voxelization_done_ = true;
                     //std::cout << "[GlobalSDF] Voxelization completed (static scene, will not re-run)" << std::endl;
                 }
             );
@@ -2479,7 +2540,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     }
 
     // === DDGI GI GATHER PASS (half-res compute) ===
-    // Moves storage buffer reads from fragment to compute to avoid Apple Silicon limits
+    // Buffer-based: no texture3D, 16 irradiance buffer + 4 depth buffer reads = stable on Apple Silicon
     rendergraph::RGResourceHandle giOutputHandle;
     rhi::ResourceHandle giGatherIrradianceBuf = rhi::handles::INVALID_RESOURCE;
     if (ddgiPass_ && ddgiPass_->IsInitialized() &&
@@ -2492,38 +2553,34 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
         u32 ddgiReadIdx = (currentBufferIndex + 2) % 3;
         auto ddgiIrrBuf = ddgiPass_->GetIrradianceBuffer(ddgiReadIdx);
-        auto ddgiDepthTex = ddgiPass_->GetDepthTexture(ddgiReadIdx);
+        auto ddgiDepthBuf = ddgiPass_->GetDepthBuffer(ddgiReadIdx);
         giGatherIrradianceBuf = ddgiIrrBuf;
 
-        // Import GBuffer textures for the compute pass
         auto gbufferDepth = gpuDrawPipeline_ ? gpuDrawPipeline_->GetGBufferDepthSampleable() : rhi::handles::INVALID_RESOURCE;
         auto gbufferNormal = gpuDrawPipeline_ ? gpuDrawPipeline_->GetGBufferNormal() : rhi::handles::INVALID_RESOURCE;
 
         if (ddgiIrrBuf != rhi::handles::INVALID_RESOURCE &&
-            ddgiDepthTex != rhi::handles::INVALID_RESOURCE &&
+            ddgiDepthBuf != rhi::handles::INVALID_RESOURCE &&
             gbufferDepth != rhi::handles::INVALID_RESOURCE &&
             gbufferNormal != rhi::handles::INVALID_RESOURCE) {
 
             auto gDepthRG = graph.ImportResource("GBufferDepthGI", gbufferDepth);
             auto gNormalRG = graph.ImportResource("GBufferNormalGI", gbufferNormal);
-            auto ddgiDepthRG = graph.ImportResource("DDGIDepthGI", ddgiDepthTex);
 
             graph.AddPass<BlitPassData>("DDGIGIGather",
                 graphics::rendergraph::RGPassType::Compute,
                 graphics::rendergraph::RGPassCategory::Lighting,
-                [giTexHandle, gDepthRG, gNormalRG, ddgiDepthRG](
+                [giTexHandle, gDepthRG, gNormalRG](
                     BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
                     builder.Read(gDepthRG, rhi::ResourceState::ShaderResource);
                     builder.Read(gNormalRG, rhi::ResourceState::ShaderResource);
-                    builder.Read(ddgiDepthRG, rhi::ResourceState::ShaderResource);
                     builder.Write(giTexHandle, rhi::ResourceState::UnorderedAccess);
                 },
-                [this, currentBufferIndex, ddgiIrrBuf, gDepthRG, gNormalRG, ddgiDepthRG, giTexHandle](
+                [this, currentBufferIndex, ddgiIrrBuf, ddgiDepthBuf, gDepthRG, gNormalRG, giTexHandle](
                     const BlitPassData& data, graphics::rendergraph::RenderGraphContext& context) {
                     auto cmd = context.cmdBuffer;
                     if (!cmd) return;
 
-                    // Resolve texture handles
                     auto resolveTex = [&](rendergraph::RGResourceHandle h) -> rhi::ResourceHandle {
                         auto* res = context.graph->GetResource(h);
                         return res ? res->GetPhysicalHandle() : rhi::handles::INVALID_RESOURCE;
@@ -2531,13 +2588,11 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
                     rhi::ResourceHandle depthH = resolveTex(gDepthRG);
                     rhi::ResourceHandle normalH = resolveTex(gNormalRG);
-                    rhi::ResourceHandle ddgiDepthH = resolveTex(ddgiDepthRG);
                     rhi::ResourceHandle outputH = resolveTex(giTexHandle);
 
                     if (depthH == rhi::handles::INVALID_RESOURCE ||
                         normalH == rhi::handles::INVALID_RESOURCE) return;
 
-                    // Upload constant buffers
                     u32 cbIdx = currentBufferIndex % 3;
                     {
                         primal::math::m4x4 vp = cameraBuffers_[currentBufferIndex].proj_matrix * cameraBuffers_[currentBufferIndex].view_matrix;
@@ -2565,19 +2620,18 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         }
                     }
 
-                    // Update descriptor set: textures
+                    // Textures: depth, normal, output (3 total, no texture3D)
                     DescriptorData texParams[] = {
                         {0, DescriptorType::SampledImage, depthH},
                         {1, DescriptorType::SampledImage, normalH},
-                        {2, DescriptorType::SampledImage, ddgiDepthH},
-                        {3, DescriptorType::StorageImage, outputH},
+                        {2, DescriptorType::StorageImage, outputH},
                     };
-                    UpdateDescriptorSet(device_, gi_gather_descriptor_set_, texParams, 4);
+                    UpdateDescriptorSet(device_, gi_gather_descriptor_set_, texParams, 3);
 
-                    // Update descriptor set: buffers (offsets into single CB)
+                    // Buffers: invViewProj, probeOriginSpacing, probeCounts, irradiance, depth
                     {
-                        rhi::WriteDescriptorSet bufWrites[4];
-                        rhi::DescriptorBufferInfo bufInfos[4];
+                        rhi::WriteDescriptorSet bufWrites[5];
+                        rhi::DescriptorBufferInfo bufInfos[5];
                         for (int i = 0; i < 3; ++i) {
                             bufWrites[i].dstSet = gi_gather_descriptor_set_;
                             bufWrites[i].dstBinding = i;
@@ -2589,7 +2643,6 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         bufInfos[0].offset = 0;   bufInfos[0].range = 64;
                         bufInfos[1].offset = 64;  bufInfos[1].range = 16;
                         bufInfos[2].offset = 80;  bufInfos[2].range = 16;
-                        // Irradiance storage buffer
                         bufWrites[3].dstSet = gi_gather_descriptor_set_;
                         bufWrites[3].dstBinding = 3;
                         bufWrites[3].descriptorCount = 1;
@@ -2598,10 +2651,17 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         bufInfos[3].buffer = ddgiIrrBuf;
                         bufInfos[3].offset = 0;
                         bufInfos[3].range = ~0ull;
-                        device_->UpdateDescriptorSets(4, bufWrites);
+                        bufWrites[4].dstSet = gi_gather_descriptor_set_;
+                        bufWrites[4].dstBinding = 4;
+                        bufWrites[4].descriptorCount = 1;
+                        bufWrites[4].descriptorType = DescriptorType::StorageBuffer;
+                        bufWrites[4].bufferInfo = &bufInfos[4];
+                        bufInfos[4].buffer = ddgiDepthBuf;
+                        bufInfos[4].offset = 0;
+                        bufInfos[4].range = ~0ull;
+                        device_->UpdateDescriptorSets(5, bufWrites);
                     }
 
-                    // Dispatch
                     cmd->BindComputePipeline(gi_gather_pipeline_);
                     const rhi::DescriptorSetHandle sets[] = { gi_gather_descriptor_set_ };
                     cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, gi_gather_layout_, 0, 1, sets, 0, nullptr);

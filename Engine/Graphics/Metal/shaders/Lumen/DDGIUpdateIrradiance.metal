@@ -1,10 +1,11 @@
 /**
  * @file DDGIUpdateIrradiance.metal
- * @brief Lumen DDGI Phase 2 - SH3 irradiance projection + hysteresis
+ * @brief Lumen DDGI Phase 2 - SH irradiance projection + hysteresis
  *
- * Each thread handles one probe: reads all rays from storage buffer,
- * projects radiance onto 3rd-order SH (9 coefficients), applies probe
- * hysteresis with history, and writes to irradiance storage buffer.
+ * Changes vs original:
+ * - Only stores L0+L1 (4 coefficients) per probe instead of SH3 (9)
+ * - Energy clamping instead of per-coefficient clamp (preserves directionality)
+ * - Stability from temporal filtering, not coefficient truncation
  *
  * Dispatch: (ProbeCountTotal, 1, 1), threadGroupSize = (1, 1, 1)
  */
@@ -29,9 +30,9 @@ kernel void ddgi_update_irradiance(
 
     uint rayOffset = gid * vol.RaysPerProbe;
 
-    // Accumulate SH3 coefficients
-    float3 shAccum[9];
-    for (uint i = 0; i < 9u; ++i) shAccum[i] = float3(0.0f);
+    // Accumulate L0+L1 only (4 coefficients)
+    float3 shAccum[4];
+    for (uint i = 0; i < 4u; ++i) shAccum[i] = float3(0.0f);
 
     for (uint r = 0; r < vol.RaysPerProbe; ++r) {
         uint rayIdx = rayOffset + r;
@@ -47,30 +48,50 @@ kernel void ddgi_update_irradiance(
 
         float3 rayDir = ddgiRayDirection(r, vol.RaysPerProbe, vol.FrameIndex);
 
-        // Project onto SH3
-        float basis[9];
-        shEvaluate(rayDir, basis);
+        // L0+L1 SH basis
+        float basis[4];
+        basis[0] =  DDGI_SH_C0;
+        basis[1] = -DDGI_SH_C1 * rayDir.y;
+        basis[2] =  DDGI_SH_C1 * rayDir.z;
+        basis[3] = -DDGI_SH_C1 * rayDir.x;
+
         float mcWeight = 4.0f * 3.14159265f / float(vol.RaysPerProbe);
 
-        for (uint i = 0; i < 9u; ++i) {
+        for (uint i = 0; i < 4u; ++i) {
             shAccum[i] += radiance * basis[i] * mcWeight;
         }
     }
 
-    // Read history with NaN guard
-    uint probeBase = gid * 9u;
+    // Temporal blend with history
+    uint probeBase = gid * 9u; // Keep stride 9 for buffer compatibility
     float alpha = (vol.FrameIndex < 6u) ? 1.0f : vol.ProbeHysteresis;
 
-    for (uint i = 0; i < 9u; ++i) {
+    // Energy clamping: limit the total irradiance energy, not individual coefficients
+    // This preserves directional shape (L1 ratios) while preventing blowout
+    float3 sh0 = shAccum[0]; // L0 = average irradiance (always positive for C0)
+    float energyLimit = max(length(sh0) * 3.0f, 0.1f); // L1 energy capped relative to L0
+
+    for (uint i = 0; i < 4u; ++i) {
+        // Read history with NaN guard
         float3 history = irradianceHistory[probeBase + i];
-        // Bitwise NaN guard (survives -ffast-math)
         uint3 bits = as_type<uint3>(history);
         if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u) {
             history = float3(0.0f);
         }
+
         float3 filtered = mix(history, shAccum[i], alpha);
-        // Clamp to prevent SH ringing / extreme values
-        filtered = clamp(filtered, float3(0.0f), float3(10.0f));
+
+        // Energy-aware clamp: L0 clamped by absolute limit, L1 by relative energy
+        if (i == 0u) {
+            // L0: soft clamp on irradiance magnitude
+            float mag = length(filtered);
+            if (mag > 10.0f) filtered *= 10.0f / mag;
+        } else {
+            // L1: energy proportional to L0, preserves directionality
+            float mag = length(filtered);
+            if (mag > energyLimit) filtered *= energyLimit / mag;
+        }
+
         irradianceOutput[probeBase + i] = filtered;
     }
 }

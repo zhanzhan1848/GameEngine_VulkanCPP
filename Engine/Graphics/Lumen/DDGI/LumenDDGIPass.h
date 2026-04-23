@@ -138,6 +138,9 @@ public:
     rhi::ResourceHandle GetDepthTexture(u32 frame_idx) const {
         return depth_textures_[frame_idx % 3];
     }
+    rhi::ResourceHandle GetDepthBuffer(u32 frame_idx) const {
+        return depth_buffers_[frame_idx % 3];
+    }
     const DDGIRuntimeParams& GetParams() const { return params_; }
     const DDGIVolumeData& GetVolumeData() const { return volume_data_; }
 
@@ -192,6 +195,10 @@ private:
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
     rhi::ResourceHandle depth_textures_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    // Probe depth buffers (buffer-based, replaces texture3D for Apple Silicon)
+    rhi::ResourceHandle depth_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
 

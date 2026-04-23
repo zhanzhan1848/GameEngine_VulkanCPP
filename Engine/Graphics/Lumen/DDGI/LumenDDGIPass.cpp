@@ -262,16 +262,15 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         irradiance_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Depth: 1 sampled (history) + 1 storage (output) + 2 UBO + 1 SSBO ---
+    // --- Depth: 2 UBO + 3 SSBO (ray data + depth history + depth output) ---
+    // Buffer-based: no texture3D, uses storage buffer for Apple Silicon performance
     {
         DescriptorSetLayoutBinding depthBindings[] = {
-            // Textures
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth history
-            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // depth output
-            // Buffers (separate Metal namespace)
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // depth history buffer
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // depth output buffer
         };
         DescriptorSetLayoutDesc layoutDesc{5, depthBindings};
         depth_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
@@ -403,7 +402,7 @@ void LumenDDGIPass::CreateProbeTextures() {
         }
     }
 
-    // Depth textures: Texture3D (Nx, Ny, Nz*4, RG16_Float)
+    // Depth textures: Texture3D (Nx, Ny, Nz*4, RG16_Float) — legacy, kept for compatibility
     // Each probe stores 4 directional depth values (2 channels x 2 depths = 4 texels)
     for (int i = 0; i < 3; i++) {
         TextureDesc desc{};
@@ -412,6 +411,26 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = TextureType::Texture3D;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         depth_textures_[i] = device_->CreateTexture(desc);
+    }
+
+    // Depth buffers: float[probeCount * 8], one float per octant per probe
+    // Apple Silicon: buffer load/store is much faster than texture3D sampling
+    for (int i = 0; i < 3; i++) {
+        BufferDesc desc{};
+        desc.size = totalProbes * 8 * sizeof(float);
+        desc.type = BufferType::Structured;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.structured.elementCount = totalProbes * 8;
+        desc.structured.elementStride = sizeof(float);
+        depth_buffers_[i] = device_->CreateBuffer(desc);
+
+        // Zero-initialize
+        void* mapped = device_->MapBuffer(depth_buffers_[i]);
+        if (mapped) {
+            memset(mapped, 0, totalProbes * 8 * sizeof(float));
+            device_->UnmapBuffer(depth_buffers_[i]);
+        }
     }
 
     // Ray data storage buffer
@@ -445,15 +464,15 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
     u32 outIdx = current_frame_index % 3;
     u32 histIdx = (current_frame_index + 2) % 3;
 
-    // Import persistent probe textures into render graph
+    // Import persistent probe buffers/textures into render graph
     auto irradianceOutHandle = graph.ImportResource(
         "LumenDDGI_Irradiance_" + std::to_string(outIdx), irradiance_buffers_[outIdx]);
     auto irradianceHistHandle = graph.ImportResource(
         "LumenDDGI_IrradianceHist_" + std::to_string(histIdx), irradiance_buffers_[histIdx]);
     auto depthOutHandle = graph.ImportResource(
-        "LumenDDGI_Depth_" + std::to_string(outIdx), depth_textures_[outIdx]);
+        "LumenDDGI_Depth_" + std::to_string(outIdx), depth_buffers_[outIdx]);
     auto depthHistHandle = graph.ImportResource(
-        "LumenDDGI_DepthHist_" + std::to_string(histIdx), depth_textures_[histIdx]);
+        "LumenDDGI_DepthHist_" + std::to_string(histIdx), depth_buffers_[histIdx]);
 
     output.ddgi_irradiance = irradianceOutHandle;
     output.ddgi_depth = depthOutHandle;
@@ -529,8 +548,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                           << " ray_data_buffer=" << ray_data_buffer_
                           << "\n  irradiance_out=" << irradiance_buffers_[outIdx]
                           << " irradiance_hist=" << irradiance_buffers_[histIdx]
-                          << "\n  depth_out=" << depth_textures_[outIdx]
-                          << " depth_hist=" << depth_textures_[histIdx]
+                          << "\n  depth_out=" << depth_buffers_[outIdx]
+                          << " depth_hist=" << depth_buffers_[histIdx]
                           << "\n  sdf[0]=" << sdfTextures[0]
                           << " sdf[1]=" << sdfTextures[1]
                           << " sdf[2]=" << sdfTextures[2];
@@ -723,19 +742,17 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             }
 
             // ================================================================
-            // Sub-pass 3: UpdateDepth
+            // Sub-pass 3: UpdateDepth (buffer-based, no texture3D)
             // ================================================================
             if (depth_pipeline_ != handles::INVALID_PIPELINE &&
-                depth_textures_[outIdx] != handles::INVALID_RESOURCE) {
-                // Update depth descriptor set
+                depth_buffers_[outIdx] != handles::INVALID_RESOURCE) {
+                // Update depth descriptor set (buffers only, no textures)
                 DescriptorData depthParams[] = {
-                    // Textures
-                    {0, DescriptorType::SampledImage,  depth_textures_[histIdx]},        // history
-                    {1, DescriptorType::StorageImage,  depth_textures_[outIdx]},          // output
-                    // Metal: buffers use separate binding namespace
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
                     {2, DescriptorType::StorageBuffer, ray_data_buffer_},
+                    {3, DescriptorType::StorageBuffer, depth_buffers_[histIdx]},  // history
+                    {4, DescriptorType::StorageBuffer, depth_buffers_[outIdx]},   // output
                 };
                 UpdateDescriptorSet(device_, depth_ds_[frameIdx], depthParams, 5);
 
@@ -747,10 +764,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 cmd->Dispatch(probeCountTotal, 1, 1);
             }
 
-            // Barrier: depth UAV -> SRV
+            // Barrier: depth buffer UAV -> SRV
             {
                 ResourceBarrier barrier{};
-                barrier.resource = depth_textures_[outIdx];
+                barrier.resource = depth_buffers_[outIdx];
                 barrier.beforeState = ResourceState::UnorderedAccess;
                 barrier.afterState = ResourceState::ShaderResource;
                 barrier.subresource = 0xFFFFFFFF;

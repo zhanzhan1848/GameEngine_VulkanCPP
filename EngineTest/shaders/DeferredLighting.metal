@@ -378,7 +378,7 @@ fragment float4 fragmentBlitDDGI(
         return float4(sceneColor, 1.0f);
     }
 
-    // GI indirect from half-res compute texture
+    // GI indirect from half-res compute texture (bilateral upsampled by compute pass)
     float3 indirect = giIndirectTex.sample(s2d, uv).rgb;
 
     // NaN guard

@@ -162,12 +162,21 @@ private:
         primal::graphics::rhi::handles::INVALID_RESOURCE
     };
 
-    // DDGI GI Gather compute pass (half-res)
+    // DDGI Visibility compute pass (Pass 1: texture3D only, no storage buffer)
+    primal::graphics::rhi::PipelineHandle       vis_pipeline_       {primal::graphics::rhi::handles::INVALID_PIPELINE};
+    primal::graphics::rhi::PipelineLayoutHandle vis_layout_         {primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT};
+    primal::graphics::rhi::DescriptorSetLayoutHandle vis_set_layout_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    primal::graphics::rhi::DescriptorSetHandle  vis_descriptor_set_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET};
+    primal::graphics::rhi::ResourceHandle       vis_texture_        {primal::graphics::rhi::handles::INVALID_RESOURCE};
+
+    // DDGI GI Gather compute pass (Pass 2: storage buffer only, no texture3D)
     primal::graphics::rhi::PipelineHandle       gi_gather_pipeline_    {primal::graphics::rhi::handles::INVALID_PIPELINE};
     primal::graphics::rhi::PipelineLayoutHandle gi_gather_layout_      {primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT};
     primal::graphics::rhi::DescriptorSetLayoutHandle gi_gather_set_layout_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     primal::graphics::rhi::DescriptorSetHandle  gi_gather_descriptor_set_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET};
     primal::graphics::rhi::ResourceHandle        gi_halfres_texture_   {primal::graphics::rhi::handles::INVALID_RESOURCE};
+
+    bool sdf_voxelization_done_ = false;  // Lock SDF origins after first voxelization
 
     // Shadow mapping
     math::v3 light_direction_{ -0.4f, -0.8f, -0.3f };  // Normalized toward light
