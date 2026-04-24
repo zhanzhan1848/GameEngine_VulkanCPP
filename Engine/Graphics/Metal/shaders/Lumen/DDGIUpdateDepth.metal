@@ -76,7 +76,10 @@ kernel void ddgi_update_depth(
     // Temporal filter with history and write output
     // -----------------------------------------------------------------------
 
-    float alpha = volume.DepthBlurSigma;
+    // Smooth alpha ramp for depth (same pattern as irradiance)
+    float rampFrames = 60.0f;
+    float t = saturate(float(max(volume.FrameIndex, 1u) - 1u) / rampFrames);
+    float alpha = mix(1.0f, volume.DepthBlurSigma, t);
 
     for (uint o = 0; o < 8; ++o) {
         uint idx = probeIdx * 8 + o;

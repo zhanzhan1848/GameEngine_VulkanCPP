@@ -133,34 +133,14 @@ kernel void ddgi_gi_gather(
         uint3 gc = probeGridCoord(pi[p], counts);
         float3 probePos = origin + float3(float(gc.x), float(gc.y), float(gc.z)) * spacing;
 
-        // --- Normal hemisphere weight ---
+        // --- Smooth weight: barycentric × normal hemisphere × soft distance ---
         float3 toProbe = normalize(probePos - worldPos);
         float ndotd = dot(normal, toProbe);
         float normalWeight = saturate((ndotd + 0.2f) / 0.5f);
 
-        // --- Depth visibility for ALL probes (buffer-based) ---
-        float occWeight;
-        {
-            float3 toSurface = worldPos - probePos;
-            float dist = length(toSurface);
-            if (dist > 0.001f) {
-                float3 dir = toSurface / dist;
-                float storedMean = sampleDDGIDepthBuffer(depthBuffer, pi[p], dir);
-                float threshold = storedMean * 3.0f + spacing * 1.5f;
-                if (dist > threshold) {
-                    occWeight = 0.0f;
-                } else {
-                    float fadeStart = storedMean * 1.5f + spacing * 0.8f;
-                    if (dist > fadeStart) {
-                        occWeight = 1.0f - (dist - fadeStart) / max(threshold - fadeStart, 0.01f);
-                    } else {
-                        occWeight = 1.0f;
-                    }
-                }
-            } else {
-                occWeight = 1.0f;
-            }
-        }
+        // Soft distance falloff (smooth, no hard cutoffs that cause blocky artifacts)
+        float distToProbe = length(probePos - worldPos);
+        float distWeight = saturate(1.0f - distToProbe / (spacing * 2.5f));
 
         // Read irradiance L0+L1+L2 (9 coefficients)
         uint base = pi[p] * 9u;
@@ -177,7 +157,7 @@ kernel void ddgi_gi_gather(
 
         float3 irradiance = shDot9(sh, normal);
 
-        float w = bw[p] * normalWeight * occWeight;
+        float w = bw[p] * normalWeight * distWeight;
         result += irradiance * w;
         totalWeight += w;
     }

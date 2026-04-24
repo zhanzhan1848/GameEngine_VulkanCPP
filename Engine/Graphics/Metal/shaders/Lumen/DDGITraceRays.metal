@@ -3,8 +3,9 @@
  * @brief Lumen DDGI - Probe ray tracing through GlobalSDF
  *
  * Each thread traces one ray from one probe through the GlobalSDF volume.
- * On hit, computes surface normal from SDF gradient and evaluates
- * analytical direct lighting (NdotL * LightColor).
+ * On hit, projects the hit point to screen space and samples the previous
+ * frame's lit scene color (direct + shadow + albedo) as radiance.
+ * Falls back to analytical NdotL if prev_frame_color is unavailable.
  * On miss, uses sky color.
  *
  * Dispatch: (ProbeCountTotal * RaysPerProbe, 1, 1)
@@ -159,10 +160,12 @@ static SDFHitResult traceSDF(
 kernel void ddgi_trace_rays(
     uint global_id [[thread_position_in_grid]],
 
-    // SDF cascade textures (no prev_frame_color needed)
+    // SDF cascade textures
     texture3d<float, access::sample> sdf_cascade_0 [[texture(0)]],
     texture3d<float, access::sample> sdf_cascade_1 [[texture(1)]],
     texture3d<float, access::sample> sdf_cascade_2 [[texture(2)]],
+    // Previous frame lit scene color (direct + shadow + albedo)
+    texture2d<float, access::sample> prev_frame_color [[texture(3)]],
 
     // Global shader data (matrices)
     device GlobalShaderData& gd [[buffer(0)]],
@@ -194,14 +197,32 @@ kernel void ddgi_trace_rays(
     if (hit.hit) {
         result.radiance_and_dist.w = hit.distance;
 
-        // Analytical direct lighting: Lambertian NdotL
-        float3 N = hit.normal;
-        float3 L = normalize(volume.LightDirection);
-        float NdotL = max(dot(N, L), 0.0f);
+        // Project hit point to screen space to sample prev frame lit color
+        float4 clipPos = gd.ViewProjection * float4(hit.position, 1.0f);
+        float3 ndc = clipPos.xyz / clipPos.w;
 
-        // Radiance = light color * NdotL (simple Lambertian bounce)
-        // Scale down to simulate single-bounce indirect (energy conservation)
-        result.radiance_and_dist.xyz = volume.LightColor * NdotL * 0.5f;
+        // Check if hit point is on screen
+        bool onScreen = ndc.x >= -1.0f && ndc.x <= 1.0f &&
+                        ndc.y >= -1.0f && ndc.y <= 1.0f &&
+                        ndc.z >= 0.0f  && ndc.z <= 1.0f;
+
+        if (onScreen && prev_frame_color.get_width() > 0) {
+            // NDC → UV (Metal: Y flipped)
+            float2 screenUV = float2(ndc.x * 0.5f + 0.5f, ndc.y * -0.5f + 0.5f);
+            constexpr sampler screenS(coord::normalized, filter::linear, address::clamp_to_edge);
+            float3 sceneColor = prev_frame_color.sample(screenS, screenUV).rgb;
+
+            // sceneColor is direct lighting only (no DDGI indirect),
+            // so includes correct shadows + albedo with no feedback loop.
+            // Scale for energy conservation (single-bounce approximation).
+            result.radiance_and_dist.xyz = sceneColor * 0.5f;
+        } else {
+            // Fallback: analytical direct lighting for off-screen hits
+            float3 N = hit.normal;
+            float3 L = normalize(volume.LightDirection);
+            float NdotL = max(dot(N, L), 0.0f);
+            result.radiance_and_dist.xyz = volume.LightColor * NdotL * 0.5f;
+        }
     } else {
         // Miss: negative distance signals miss
         result.radiance_and_dist.w = -1.0f;

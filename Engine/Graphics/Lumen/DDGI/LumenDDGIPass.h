@@ -24,7 +24,7 @@ struct DDGIRuntimeParams {
     u32   probe_count_y = 8;
     u32   probe_count_z = 16;
     u32   rays_per_probe = 64;
-    float probe_spacing = 4.0f;                 // 16 probes * 4.0 = 60 units coverage (matches Sponza)
+    float probe_spacing = 2.0f;                 // 16 probes * 2.0 = 30 units coverage (denser probes for quality)
     float irradiance_temporal_weight = 0.02f;   // EMA alpha for irradiance
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
     float ray_max_distance = 50.0f;             // Must reach geometry across probe grid

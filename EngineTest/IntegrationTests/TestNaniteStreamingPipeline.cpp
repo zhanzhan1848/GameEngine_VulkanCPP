@@ -497,7 +497,7 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     {
         auto& globalSDF = nanite::GlobalSDF::Get();
         nanite::GlobalSDFConfig sdfConfig;
-        sdfConfig.cascade_count = 1;
+        sdfConfig.cascade_count = 3;
         sdfConfig.base_resolution = 60;
         sdfConfig.cascade_scale_factor = 2;
         sdfConfig.voxel_size_base = 1.0f;
@@ -934,7 +934,6 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
     }
 
     // --- Descriptor set layout: 5 textures + 3 uniform buffers ---
-    // Fragment reads texture2D only (no storage buffer) to stay within Apple Silicon limits
     {
         using namespace primal::graphics::rhi;
         DescriptorSetLayoutBinding bindings[] = {
@@ -2466,10 +2465,12 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
     // === LUMEN DDGI PASS (probe-based GI) ===
     if (ddgiPass_ && ddgiPass_->IsInitialized() && frameCount_ > 1) {
-        // Get previous frame color for DDGI ray hit radiance sampling
-        auto prevColor = colorHistoryManager_->GetPreviousFrameColor(frameCount_);
-        ResourceHandle prevColorTex = prevColor.is_valid ? prevColor.texture : ssgi_black_texture_;
-        auto ddgiPrevColorHandle = graph.ImportResource("DDGIPrevColor", prevColorTex);
+        // Use current frame's deferred output (direct light only, no DDGI indirect)
+        // as the radiance source for probe ray hits. This avoids the positive
+        // feedback loop that occurs when prev_frame_color includes DDGI indirect.
+        auto ddgiRadianceHandle = deferredOutputRG.IsValid()
+            ? deferredOutputRG
+            : graph.ImportResource("DDGIBlackFallback", ssgi_black_texture_);
 
         // Get previous frame depth for occlusion testing during reprojection
         auto prevDepth = depthHistoryManager_->GetPreviousFrameDepth(frameCount_);
@@ -2491,7 +2492,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         ddgiCameraData.light_direction = primal::math::v3{sharedLightPos.x, sharedLightPos.y, sharedLightPos.z};
         ddgiCameraData.light_color = primal::math::v3{20.0f, 20.0f, 20.0f};
 
-        auto ddgiOutput = ddgiPass_->AddPass(graph, ddgiPrevColorHandle,
+        auto ddgiOutput = ddgiPass_->AddPass(graph, ddgiRadianceHandle,
             ddgiCameraData, currentBufferIndex);
 
         // DDGI output (irradiance + depth textures) is available for
@@ -2706,7 +2707,6 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             // Read depth + half-res GI indirect + GBuffer when in DDGI mode
             if (ssgiVisMode_ == 3 && depthBlitHandle.IsValid() && giOutputHandle.IsValid()) {
                 data.depth_input = builder.Read(depthBlitHandle, rhi::ResourceState::ShaderResource);
-                // Half-res GI indirect texture from compute pass
                 data.gi_indirect = builder.Read(giOutputHandle, rhi::ResourceState::ShaderResource);
 
                 // GBuffer albedo and normal for DDGI blit albedo modulation
@@ -2751,7 +2751,6 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             if (inputHandle == rhi::handles::INVALID_RESOURCE) return;
 
             // Mode 3: DDGI Composite — scene + DDGI indirect via DDGI blit pipeline
-            // Fragment shader reads texture2D only (half-res GI from compute), no storage buffer
             if (ssgiVisMode_ == 3 && data.depth_input.IsValid() && data.gi_indirect.IsValid() &&
                 blit_ddgi_pipeline_ != rhi::handles::INVALID_PIPELINE) {
                 auto depthResource = context.graph->GetResource(data.depth_input);
@@ -2819,7 +2818,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                                 }
                             }
 
-                            // Update descriptor set: 5 textures (no storage buffer)
+                            // Update descriptor set: 5 textures
                             // texture(0): scene color, texture(1): depth, texture(2): half-res GI
                             // texture(3): GBuffer albedo, texture(4): GBuffer normal
                             DescriptorData ddgi_params[] = {

@@ -236,16 +236,17 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
     // So binding 0 can be used for BOTH texture(0) and buffer(0).
     {
         DescriptorSetLayoutBinding traceBindings[] = {
-            // Textures (sampled) — SDF cascades only
+            // Textures (sampled) — SDF cascades + prev frame color
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
             {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 2
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev frame color (lit scene)
             // Buffers (separate Metal namespace)
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data
         };
-        DescriptorSetLayoutDesc layoutDesc{6, traceBindings};
+        DescriptorSetLayoutDesc layoutDesc{7, traceBindings};
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -631,7 +632,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.DeltaTime = camera_data.delta_time;
                     vd.FrameIndex = camera_data.frame_index;
                     vd.RayMaxDistance = params_.ray_max_distance;
-                    vd.ProbeHysteresis = 0.01f;
+                    vd.ProbeHysteresis = 0.08f;
                     vd.TemporalAlpha = 0.1f;
                     vd.LightDirection = {camera_data.light_direction.x,
                                          camera_data.light_direction.y,
@@ -666,16 +667,17 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 ray_data_buffer_ != handles::INVALID_RESOURCE) {
                 // Update trace descriptor set
                 DescriptorData traceParams[] = {
-                    // Textures (SDF cascades only)
+                    // Textures: SDF cascades + prev frame lit scene color
                     {0, DescriptorType::SampledImage,  sdfTextures[0]},
                     {1, DescriptorType::SampledImage,  sdfTextures[1]},
                     {2, DescriptorType::SampledImage,  sdfTextures[2]},
+                    {3, DescriptorType::SampledImage,  prevColorTex},
                     // Metal: buffers use separate binding namespace from textures
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
                     {2, DescriptorType::StorageBuffer, ray_data_buffer_},
                 };
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 6);
+                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 7);
 
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };

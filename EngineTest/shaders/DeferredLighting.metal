@@ -348,16 +348,13 @@ fragment float4 fragmentBlitDDGI(
 
     texture2d<float, access::sample> sceneColorTex  [[texture(0)]],
     depth2d<float, access::sample>   depthTex        [[texture(1)]],
-    // texture(2) = half-res GI indirect (set by compute pass)
     texture2d<float, access::sample> giIndirectTex   [[texture(2)]],
     texture2d<float, access::sample> albedoTex       [[texture(3)]],
     texture2d<float, access::sample> normalTex       [[texture(4)]],
-    // texture(5) unused (ddgiDepth now handled by compute)
 
     constant float4x4& invViewProj         [[buffer(0)]],
     constant float4&    probeOriginSpacing [[buffer(1)]],
     constant float4&    probeCountsSh      [[buffer(2)]]
-    // NO buffer(3) — irradiance buffer now read by compute, not fragment
 )
 {
     float2 uv = IN.uv;
@@ -370,15 +367,14 @@ fragment float4 fragmentBlitDDGI(
 
     float depth = depthTex.sample(depthS, uv);
 
-    // Fix 3: background (sky) should pass through sceneColor, not black
+    // Background (sky) pass through
     if (depth >= 1.0f) {
-        // Tone map + gamma for sky/background
         sceneColor = sceneColor / (sceneColor + float3(1.0f));
         sceneColor = pow(sceneColor, float3(1.0f / 2.2f));
         return float4(sceneColor, 1.0f);
     }
 
-    // GI indirect from half-res compute texture (bilateral upsampled by compute pass)
+    // GI indirect from half-res compute texture
     float3 indirect = giIndirectTex.sample(s2d, uv).rgb;
 
     // NaN guard
@@ -387,11 +383,8 @@ fragment float4 fragmentBlitDDGI(
         indirect = float3(0.0f);
     }
 
-    // Fix 2: bright-area suppression — DDGI weight based on scene luminance
-    // Dark areas (shadows): DDGI weight = 0.6 (strong indirect boost)
-    // Bright areas (direct lit): DDGI weight = 0.1 (subtle fill)
-    float sceneLum = dot(sceneColor, float3(0.2126f, 0.7152f, 0.0722f));
-    float ddgiWeight = mix(0.6f, 0.1f, saturate(sceneLum / 3.0f));
+    // Fixed DDGI weight
+    float ddgiWeight = 0.4f;
 
     // Modulate indirect by albedo for diffuse response
     float4 albedo = albedoTex.sample(s2d, uv);
