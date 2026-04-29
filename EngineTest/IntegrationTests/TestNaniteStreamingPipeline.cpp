@@ -691,6 +691,50 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         }
     }
 
+    // === Fusion Blit Pipeline (DDGI + SPGI + SSGI + direct) ===
+    {
+        // 6 sampled image bindings: scene, ssgi, ddgi, spgi, albedo, depth
+        primal::graphics::rhi::DescriptorSetLayoutBinding fusion_bindings[] = {
+            { 0, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
+            { 1, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
+            { 2, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
+            { 3, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
+            { 4, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
+            { 5, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr }
+        };
+        primal::graphics::rhi::DescriptorSetLayoutDesc fusion_set_desc{ .bindingCount = 6, .bindings = fusion_bindings };
+        fusion_set_layout_ = device_->CreateDescriptorSetLayout(fusion_set_desc);
+
+        primal::graphics::rhi::PipelineLayoutDesc fusion_pl_desc{ .setLayoutCount = 1, .setLayouts = &fusion_set_layout_ };
+        fusion_layout_ = device_->CreatePipelineLayout(fusion_pl_desc);
+
+        primal::graphics::rhi::DescriptorSetDesc fusion_ds_desc{ .layout = fusion_set_layout_ };
+        fusion_descriptor_set_ = device_->CreateDescriptorSet(fusion_ds_desc);
+
+        const shader_file_info fusion_ps_info{ "DeferredLighting.metal", "fragmentBlitFusion", shader_type::pixel };
+        if (!CompileShader(fusion_ps_info)) {
+            std::cerr << "[TestNanite] Warning: Failed to compile fusion blit shader" << std::endl;
+        } else {
+            primal::graphics::rhi::GraphicsPipelineDesc fusion_pipeline_desc{};
+            fusion_pipeline_desc.layout = fusion_layout_;
+            fusion_pipeline_desc.vertexShader = shaderVariantMap[std::string(blit_vs_info.file_name) + ":" + blit_vs_info.function];
+            fusion_pipeline_desc.pixelShader = shaderVariantMap[std::string(fusion_ps_info.file_name) + ":" + fusion_ps_info.function];
+            fusion_pipeline_desc.renderTargetFormats[0] = primal::graphics::rhi::DataFormat::BGRA8_UNorm;
+            fusion_pipeline_desc.renderTargetCount = 1;
+            fusion_pipeline_desc.depthStencilFormat = primal::graphics::rhi::DataFormat::Unknown;
+            fusion_pipeline_desc.enableDepthTest = false;
+            fusion_pipeline_desc.enableDepthWrite = false;
+            fusion_pipeline_desc.cullMode = primal::graphics::rhi::CullMode::None;
+            fusion_pipeline_desc.vertexAttributes.clear();
+            fusion_pipeline_desc.vertexBindings.clear();
+
+            fusion_pipeline_ = device_->CreateGraphicsPipeline(fusion_pipeline_desc);
+            if (fusion_pipeline_ == primal::graphics::rhi::handles::INVALID_PIPELINE) {
+                std::cerr << "[TestNanite] Warning: Failed to create fusion blit pipeline" << std::endl;
+            }
+        }
+    }
+
     // Initialize SSGI pipeline
     if (!InitializeSSGIPipeline()) {
         std::cerr << "[TestNanite] Warning: SSGI pipeline initialization failed" << std::endl;
@@ -887,6 +931,15 @@ bool TestNaniteStreamingPipeline::InitializeSSGIPipeline() {
     } else {
         //std::cout << "[LumenDDGI] DDGI probe system initialized via LumenDDGIPass" << std::endl;
     }
+
+    // 5. Initialize ScreenProbeGIPass (screen-space probe GI)
+    screenProbeGIPass_ = std::make_unique<primal::graphics::lumen::ScreenProbeGIPass>();
+    if (!screenProbeGIPass_->Initialize(device_, renderWidth_, renderHeight_)) {
+        std::cerr << "[ScreenProbeGI] Failed to initialize ScreenProbeGIPass" << std::endl;
+        screenProbeGIPass_.reset();
+    } else {
+        std::cout << "[ScreenProbeGI] Screen Probe GI pass initialized" << std::endl;
+    }
     return true;
 }
 
@@ -1009,7 +1062,7 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
                 if (giGatherShader == handles::INVALID_SHADER) {
                     std::cerr << "[DDGIGIGather] Invalid shader handle" << std::endl;
                 } else {
-                    // Descriptor set layout: 3 textures + 5 buffers (depth buffer replaces texture3D)
+                    // Descriptor set layout: 3 textures + 4 buffers
                     DescriptorSetLayoutBinding giGatherBindings[] = {
                         {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // depth
                         {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // normal
@@ -1018,9 +1071,8 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
                         {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeOriginSpacing
                         {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeCounts
                         {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // irradianceBuffer
-                        {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // depthBuffer
                     };
-                    DescriptorSetLayoutDesc layoutDesc{8, giGatherBindings};
+                    DescriptorSetLayoutDesc layoutDesc{7, giGatherBindings};
                     gi_gather_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
 
                     PipelineLayoutDesc plDesc;
@@ -1053,68 +1105,7 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
         }
     }
 
-    // === DDGI Visibility compute pipeline (Pass 1: texture3D only) ===
-    // Separates texture3D reads from storage buffer reads to avoid Apple Silicon limits
-    {
-        using namespace primal::graphics::rhi;
-        const shader_file_info vis_info{ "DDGIVisibility.metal", "ddgi_visibility", shader_type::compute };
-        primal::utl::vector<std::wstring> extra_args;
-        auto compiled = compile_shader(vis_info, shaderDir.c_str(), extra_args);
-
-        if (!compiled) {
-            std::cerr << "[DDGIVisibility] Failed to compile shader" << std::endl;
-        } else {
-            u64 byte_code_size = *reinterpret_cast<u64*>(compiled.get());
-            u8* byte_code_ptr = compiled.get() + sizeof(u64) + 16;
-            if (!byte_code_ptr || byte_code_size == 0) {
-                std::cerr << "[DDGIVisibility] Invalid byte code" << std::endl;
-            } else {
-                ShaderHandle visShader = device_->CreateShader(byte_code_ptr, byte_code_size, ShaderStage::Compute, vis_info.function);
-                if (visShader == handles::INVALID_SHADER) {
-                    std::cerr << "[DDGIVisibility] Invalid shader handle" << std::endl;
-                } else {
-                    // Descriptor set layout: 4 textures + 3 buffers (no irradianceBuffer)
-                    DescriptorSetLayoutBinding visBindings[] = {
-                        {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // depth
-                        {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // normal
-                        {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // ddgiDepth
-                        {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr}, // visibility output
-                        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // invViewProj
-                        {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeOriginSpacing
-                        {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeCounts
-                    };
-                    DescriptorSetLayoutDesc layoutDesc{7, visBindings};
-                    vis_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
-
-                    PipelineLayoutDesc plDesc;
-                    plDesc.setLayoutCount = 1;
-                    plDesc.setLayouts = &vis_set_layout_;
-                    vis_layout_ = device_->CreatePipelineLayout(plDesc);
-
-                    ComputePipelineDesc pipeDesc{};
-                    pipeDesc.computeShader = visShader;
-                    pipeDesc.layout = vis_layout_;
-                    pipeDesc.threadGroupSize = {8, 8, 1};
-                    vis_pipeline_ = device_->CreateComputePipeline(pipeDesc);
-
-                    DescriptorSetDesc dsDesc{vis_set_layout_};
-                    vis_descriptor_set_ = device_->CreateDescriptorSet(dsDesc);
-
-                    // Create half-res visibility texture (same size as GI output)
-                    u32 halfW = renderWidth_ / 2;
-                    u32 halfH = renderHeight_ / 2;
-                    TextureDesc texDesc{};
-                    texDesc.size = {halfW, halfH, 1};
-                    texDesc.format = DataFormat::RGBA16_Float;
-                    texDesc.type = TextureType::Texture2D;
-                    texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
-                    vis_texture_ = device_->CreateTexture(texDesc);
-
-                    std::cout << "[DDGIVisibility] Initialized (half-res " << halfW << "x" << halfH << ")" << std::endl;
-                }
-            }
-        }
-    }
+    // === DDGI Visibility compute pipeline — REMOVED (depth now buffer-based, no texture3D needed) ===
 
     // --- Triple-buffered constant buffers (one per frame, packs all 3 CBs) ---
     for (int i = 0; i < 3; ++i) {
@@ -1530,8 +1521,8 @@ void TestNaniteStreamingPipeline::Run() {
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f4, val);
     bool f4_current = val.current.x > 0.0f;
     if (f4_current && !keyState_.f4_prev) {
-        ssgiVisMode_ = (ssgiVisMode_ + 1) % 5;
-        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only", "DDGI Composite", "Albedo Only" };
+        ssgiVisMode_ = (ssgiVisMode_ + 1) % 7;
+        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only", "DDGI Composite", "Albedo Only", "Screen Probe GI", "Full GI Fusion" };
         //std::cout << "[SSGI Vis] Mode: " << modeNames[ssgiVisMode_] << std::endl;
     }
     keyState_.f4_prev = f4_current;
@@ -2464,6 +2455,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     }
 
     // === LUMEN DDGI PASS (probe-based GI) ===
+    primal::graphics::lumen::LumenDDGIOutput ddgiOutput{};
     if (ddgiPass_ && ddgiPass_->IsInitialized() && frameCount_ > 1) {
         // Use current frame's deferred output (direct light only, no DDGI indirect)
         // as the radiance source for probe ray hits. This avoids the positive
@@ -2492,7 +2484,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         ddgiCameraData.light_direction = primal::math::v3{sharedLightPos.x, sharedLightPos.y, sharedLightPos.z};
         ddgiCameraData.light_color = primal::math::v3{20.0f, 20.0f, 20.0f};
 
-        auto ddgiOutput = ddgiPass_->AddPass(graph, ddgiRadianceHandle,
+        ddgiOutput = ddgiPass_->AddPass(graph, ddgiRadianceHandle,
             ddgiCameraData, currentBufferIndex);
 
         // DDGI output (irradiance + depth textures) is available for
@@ -2506,6 +2498,34 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         }
     }
 
+    // === LUMEN SCREEN PROBE GI PASS ===
+    // Only run when mode 5 (Screen Probe GI visualization) is active
+    // to avoid interfering with other rendering modes
+    rendergraph::RGResourceHandle screenProbeGIOutputHandle;
+    if (screenProbeGIPass_ && screenProbeGIPass_->IsInitialized() && frameCount_ > 1 && (ssgiVisMode_ == 5 || ssgiVisMode_ == 6)) {
+        // Get GBuffer depth and normal as RG handles
+        auto spDepthHandle = graph.ImportResource("GBufferDepth_SP", gpuDrawPipeline_->GetGBufferDepthSampleable());
+        auto spNormalHandle = graph.ImportResource("GBufferNormal_SP", gpuDrawPipeline_->GetGBufferNormal());
+
+        // Use deferred lighting output as radiance source.
+        // fragmentLighting_gpuDriven is direct-lighting-only (PBR + shadow + ambient),
+        // no DDGI indirect — so no feedback loop.
+        auto spRadianceHandle = (deferred_output_texture_ != rhi::handles::INVALID_RESOURCE)
+            ? graph.ImportResource("DeferredOutput_SP", deferred_output_texture_)
+            : graph.ImportResource("SPBlackFallback", ssgi_black_texture_);
+
+        // Build camera data
+        primal::graphics::lumen::ScreenProbeCameraData spCameraData;
+        spCameraData.view_matrix = cameraBuffers_[currentBufferIndex].view_matrix;
+        spCameraData.proj_matrix = cameraBuffers_[currentBufferIndex].proj_matrix;
+        spCameraData.camera_position = camera_.GetPosition();
+        spCameraData.frame_index = frameCount_;
+
+        auto spOutput = screenProbeGIPass_->AddPass(graph, spDepthHandle, spNormalHandle,
+            spRadianceHandle, spCameraData, currentBufferIndex);
+        screenProbeGIOutputHandle = spOutput.gi_output;
+    }
+
     // === FINAL BLIT PASS (Following TestParticleSponza pattern) ===
     // CRITICAL: This pass MUST depend on SceneRender to ensure Nanite output is ready
     struct BlitPassData {
@@ -2515,6 +2535,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         rendergraph::RGResourceHandle gi_indirect;     // half-res GI texture from compute
         rendergraph::RGResourceHandle albedo_input;
         rendergraph::RGResourceHandle normal_input;
+        rendergraph::RGResourceHandle spgi_input;      // Screen Probe GI output
         rendergraph::RGResourceHandle output;
     };
 
@@ -2541,27 +2562,25 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     }
 
     // === DDGI GI GATHER PASS (half-res compute) ===
-    // Buffer-based: no texture3D, 16 irradiance buffer + 4 depth buffer reads = stable on Apple Silicon
+    // Buffer-based: no texture3D, irradiance buffer reads only
     rendergraph::RGResourceHandle giOutputHandle;
     rhi::ResourceHandle giGatherIrradianceBuf = rhi::handles::INVALID_RESOURCE;
     if (ddgiPass_ && ddgiPass_->IsInitialized() &&
         gi_gather_pipeline_ != rhi::handles::INVALID_PIPELINE &&
         gi_halfres_texture_ != rhi::handles::INVALID_RESOURCE &&
-        ssgiVisMode_ == 3) {
+        (ssgiVisMode_ == 3 || ssgiVisMode_ == 6)) {
 
         auto giTexHandle = graph.ImportResource("DDGIHalfResGI", gi_halfres_texture_);
         giOutputHandle = giTexHandle;
 
         u32 ddgiReadIdx = (currentBufferIndex + 2) % 3;
         auto ddgiIrrBuf = ddgiPass_->GetIrradianceBuffer(ddgiReadIdx);
-        auto ddgiDepthBuf = ddgiPass_->GetDepthBuffer(ddgiReadIdx);
         giGatherIrradianceBuf = ddgiIrrBuf;
 
         auto gbufferDepth = gpuDrawPipeline_ ? gpuDrawPipeline_->GetGBufferDepthSampleable() : rhi::handles::INVALID_RESOURCE;
         auto gbufferNormal = gpuDrawPipeline_ ? gpuDrawPipeline_->GetGBufferNormal() : rhi::handles::INVALID_RESOURCE;
 
         if (ddgiIrrBuf != rhi::handles::INVALID_RESOURCE &&
-            ddgiDepthBuf != rhi::handles::INVALID_RESOURCE &&
             gbufferDepth != rhi::handles::INVALID_RESOURCE &&
             gbufferNormal != rhi::handles::INVALID_RESOURCE) {
 
@@ -2571,13 +2590,18 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             graph.AddPass<BlitPassData>("DDGIGIGather",
                 graphics::rendergraph::RGPassType::Compute,
                 graphics::rendergraph::RGPassCategory::Lighting,
-                [giTexHandle, gDepthRG, gNormalRG](
+                [giTexHandle, gDepthRG, gNormalRG, ddgiIrrHistHandle = ddgiOutput.ddgi_irradiance_hist](
                     BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
                     builder.Read(gDepthRG, rhi::ResourceState::ShaderResource);
                     builder.Read(gNormalRG, rhi::ResourceState::ShaderResource);
                     builder.Write(giTexHandle, rhi::ResourceState::UnorderedAccess);
+                    // Declare irradiance history buffer dependency so RenderGraph
+                    // inserts proper barriers between DDGI write and this read
+                    if (ddgiIrrHistHandle.IsValid()) {
+                        builder.Read(ddgiIrrHistHandle, rhi::ResourceState::ShaderResource);
+                    }
                 },
-                [this, currentBufferIndex, ddgiIrrBuf, ddgiDepthBuf, gDepthRG, gNormalRG, giTexHandle](
+                [this, currentBufferIndex, ddgiIrrBuf, gDepthRG, gNormalRG, giTexHandle](
                     const BlitPassData& data, graphics::rendergraph::RenderGraphContext& context) {
                     auto cmd = context.cmdBuffer;
                     if (!cmd) return;
@@ -2629,10 +2653,10 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     };
                     UpdateDescriptorSet(device_, gi_gather_descriptor_set_, texParams, 3);
 
-                    // Buffers: invViewProj, probeOriginSpacing, probeCounts, irradiance, depth
+                    // Buffers: invViewProj, probeOriginSpacing, probeCounts, irradiance
                     {
-                        rhi::WriteDescriptorSet bufWrites[5];
-                        rhi::DescriptorBufferInfo bufInfos[5];
+                        rhi::WriteDescriptorSet bufWrites[4];
+                        rhi::DescriptorBufferInfo bufInfos[4];
                         for (int i = 0; i < 3; ++i) {
                             bufWrites[i].dstSet = gi_gather_descriptor_set_;
                             bufWrites[i].dstBinding = i;
@@ -2652,15 +2676,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         bufInfos[3].buffer = ddgiIrrBuf;
                         bufInfos[3].offset = 0;
                         bufInfos[3].range = ~0ull;
-                        bufWrites[4].dstSet = gi_gather_descriptor_set_;
-                        bufWrites[4].dstBinding = 4;
-                        bufWrites[4].descriptorCount = 1;
-                        bufWrites[4].descriptorType = DescriptorType::StorageBuffer;
-                        bufWrites[4].bufferInfo = &bufInfos[4];
-                        bufInfos[4].buffer = ddgiDepthBuf;
-                        bufInfos[4].offset = 0;
-                        bufInfos[4].range = ~0ull;
-                        device_->UpdateDescriptorSets(5, bufWrites);
+                        device_->UpdateDescriptorSets(4, bufWrites);
                     }
 
                     cmd->BindComputePipeline(gi_gather_pipeline_);
@@ -2689,13 +2705,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     graph.AddPass<BlitPassData>("FinalBlit",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
-        [this, backBufferHandle, primaryInputHandle, ssgiOutputHandle, depthBlitHandle, giOutputHandle, gbufferAlbedoHandle, gbufferNormalHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+        [this, backBufferHandle, primaryInputHandle, ssgiOutputHandle, depthBlitHandle, giOutputHandle, gbufferAlbedoHandle, gbufferNormalHandle, screenProbeGIOutputHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
             // Read lit scene color (deferred output or raw GBuffer albedo)
             data.input = builder.Read(primaryInputHandle, rhi::ResourceState::ShaderResource);
 
             // Read SSGI output when in composite or SSGI-only mode
             // ssgiVisMode_: 0=Composite, 1=SSGI only, 2=Scene only, 3=DDGI Composite
-            bool needSSGI = (ssgiVisMode_ == 0 || ssgiVisMode_ == 1) &&
+            bool needSSGI = (ssgiVisMode_ == 0 || ssgiVisMode_ == 1 || ssgiVisMode_ == 6) &&
                             ssgiOutputHandle.IsValid() &&
                             blit_composite_pipeline_ != rhi::handles::INVALID_PIPELINE;
             if (needSSGI) {
@@ -2704,12 +2720,11 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 data.ssgi_input = rendergraph::RGResourceHandle{};
             }
 
-            // Read depth + half-res GI indirect + GBuffer when in DDGI mode
-            if (ssgiVisMode_ == 3 && depthBlitHandle.IsValid() && giOutputHandle.IsValid()) {
+            // Read depth + half-res GI indirect + GBuffer when in DDGI or fusion mode
+            if ((ssgiVisMode_ == 3 || ssgiVisMode_ == 6) && depthBlitHandle.IsValid() && giOutputHandle.IsValid()) {
                 data.depth_input = builder.Read(depthBlitHandle, rhi::ResourceState::ShaderResource);
                 data.gi_indirect = builder.Read(giOutputHandle, rhi::ResourceState::ShaderResource);
 
-                // GBuffer albedo and normal for DDGI blit albedo modulation
                 if (gbufferAlbedoHandle.IsValid()) {
                     data.albedo_input = builder.Read(gbufferAlbedoHandle, rhi::ResourceState::ShaderResource);
                 } else {
@@ -2725,6 +2740,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 data.gi_indirect = rendergraph::RGResourceHandle{};
                 data.albedo_input = rendergraph::RGResourceHandle{};
                 data.normal_input = rendergraph::RGResourceHandle{};
+            }
+
+            // Read Screen Probe GI output when in mode 5 or fusion mode 6
+            if ((ssgiVisMode_ == 5 || ssgiVisMode_ == 6) && screenProbeGIOutputHandle.IsValid()) {
+                data.spgi_input = builder.Read(screenProbeGIOutputHandle, rhi::ResourceState::ShaderResource);
+            } else {
+                data.spgi_input = rendergraph::RGResourceHandle{};
             }
 
             data.output = builder.Write(backBufferHandle, rhi::ResourceState::RenderTarget);
@@ -2865,15 +2887,52 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 // Fallback: if DDGI resources invalid, fall through to scene-only blit
             }
 
+            // Mode 6: Full GI Fusion — DDGI + SPGI + SSGI + direct lighting
+            if (ssgiVisMode_ == 6 && fusion_pipeline_ != rhi::handles::INVALID_PIPELINE) {
+                // Resolve all texture handles
+                auto resolveHandle = [&](rendergraph::RGResourceHandle h) -> ResourceHandle {
+                    auto* res = context.graph->GetResource(h);
+                    return res ? res->GetPhysicalHandle() : ssgi_black_texture_;
+                };
+                ResourceHandle ssgiHandle = data.ssgi_input.IsValid() ? resolveHandle(data.ssgi_input) : ssgi_black_texture_;
+                ResourceHandle ddgiHandle = data.gi_indirect.IsValid() ? resolveHandle(data.gi_indirect) : ssgi_black_texture_;
+                ResourceHandle spgiHandle = data.spgi_input.IsValid() ? resolveHandle(data.spgi_input) : ssgi_black_texture_;
+                ResourceHandle albedoHandle = data.albedo_input.IsValid() ? resolveHandle(data.albedo_input) : ssgi_black_texture_;
+                ResourceHandle depthHandle = data.depth_input.IsValid() ? resolveHandle(data.depth_input) : ssgi_black_texture_;
+
+                DescriptorData fusion_params[6] = {
+                    { 0, DescriptorType::SampledImage, inputHandle },    // scene (direct lighting)
+                    { 1, DescriptorType::SampledImage, ssgiHandle },     // SSGI
+                    { 2, DescriptorType::SampledImage, ddgiHandle },     // DDGI
+                    { 3, DescriptorType::SampledImage, spgiHandle },     // SPGI
+                    { 4, DescriptorType::SampledImage, albedoHandle },   // albedo
+                    { 5, DescriptorType::SampledImage, depthHandle },    // depth
+                };
+                UpdateDescriptorSet(device_, fusion_descriptor_set_, fusion_params, 6);
+                cmd->BindGraphicsPipeline(fusion_pipeline_);
+                const rhi::DescriptorSetHandle sets[] = { fusion_descriptor_set_ };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, fusion_layout_, 0, 1, sets, 0, nullptr);
+                cmd->Draw(3, 0, 1, 0);
+                return;
+            }
+
             // Mode 2: Scene only — simple blit of scene color
             // Mode 4: Albedo only — blit raw GBuffer albedo (no lighting)
-            if (ssgiVisMode_ == 2 || ssgiVisMode_ == 4 || !data.ssgi_input.IsValid()) {
+            // Mode 5: Screen Probe GI — blit screen probe output directly
+            if (ssgiVisMode_ == 2 || ssgiVisMode_ == 4 || ssgiVisMode_ == 5 || !data.ssgi_input.IsValid()) {
                 ResourceHandle blitTex = inputHandle;
                 // Mode 4: use raw GBuffer albedo instead of lit scene
                 if (ssgiVisMode_ == 4) {
                     auto albedoTex = gpuDrawPipeline_->GetGBufferAlbedo();
                     if (albedoTex != rhi::handles::INVALID_RESOURCE) {
                         blitTex = albedoTex;
+                    }
+                }
+                // Mode 5: use screen probe GI output
+                if (ssgiVisMode_ == 5 && screenProbeGIPass_ && screenProbeGIPass_->IsInitialized()) {
+                    auto spTex = screenProbeGIPass_->GetOutputTexture();
+                    if (spTex != rhi::handles::INVALID_RESOURCE) {
+                        blitTex = spTex;
                     }
                 }
                 DescriptorData blit_params[1] = {

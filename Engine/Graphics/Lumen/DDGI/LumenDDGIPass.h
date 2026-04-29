@@ -24,7 +24,7 @@ struct DDGIRuntimeParams {
     u32   probe_count_y = 8;
     u32   probe_count_z = 16;
     u32   rays_per_probe = 64;
-    float probe_spacing = 2.0f;                 // 16 probes * 2.0 = 30 units coverage (denser probes for quality)
+    float probe_spacing = 4.0f;                 // 16 probes * 4.0 = 64 units coverage
     float irradiance_temporal_weight = 0.02f;   // EMA alpha for irradiance
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
     float ray_max_distance = 50.0f;             // Must reach geometry across probe grid
@@ -43,10 +43,10 @@ struct DDGICameraData {
     float      delta_time;
 };
 
-/// Output from DDGI AddPass — probe irradiance buffer/depth textures available for sampling.
+/// Output from DDGI AddPass — probe irradiance buffer available for sampling.
 struct LumenDDGIOutput {
-    rendergraph::RGResourceHandle ddgi_irradiance;  ///< Storage buffer irradiance (current frame)
-    rendergraph::RGResourceHandle ddgi_depth;        ///< Texture3D depth (current frame)
+    rendergraph::RGResourceHandle ddgi_irradiance;       ///< Storage buffer irradiance (current frame)
+    rendergraph::RGResourceHandle ddgi_irradiance_hist;   ///< History irradiance buffer (for downstream reads)
 };
 
 // ============================================================================
@@ -77,6 +77,9 @@ struct DDGIVolumeData {
 
     float    ProbeHysteresis;         // offset 76
     float    TemporalAlpha;           // offset 80
+
+    // Probe grid relocation (camera-following grid shift, in probe cells)
+    int      ProbeRelocationShift[3]; // offset 84, 12 bytes — fills padding before SdfOrigins
 
     // GlobalSDF cascade data — v4 matches Metal's float4 alignment
     // C++ inserts implicit padding 84→96 for v4 16-byte alignment
@@ -135,14 +138,15 @@ public:
     rhi::ResourceHandle GetIrradianceBuffer(u32 frame_idx) const {
         return irradiance_buffers_[frame_idx % 3];
     }
-    rhi::ResourceHandle GetDepthTexture(u32 frame_idx) const {
-        return depth_textures_[frame_idx % 3];
-    }
     rhi::ResourceHandle GetDepthBuffer(u32 frame_idx) const {
         return depth_buffers_[frame_idx % 3];
     }
     const DDGIRuntimeParams& GetParams() const { return params_; }
     const DDGIVolumeData& GetVolumeData() const { return volume_data_; }
+
+    // Update probe origin to follow camera (grid-snapped).
+    // Returns true if the grid actually shifted this frame.
+    bool UpdateProbeOrigin(const math::v3& camera_position);
 
 private:
     void CreateDescriptorSetLayouts();
@@ -155,6 +159,8 @@ private:
     DDGIRuntimeParams params_{};
     DDGIVolumeData    volume_data_{};
     math::v3          probe_origin_{ 0.0f };
+    math::v3          last_snapped_cam_{ 0.0f };  // last camera position snapped to grid
+    int               relocation_shift_[3]{ 0, 0, 0 };  // current frame grid shift (probe cells)
 
     // Compute pipelines (3 sub-passes)
     rhi::PipelineHandle trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
@@ -194,10 +200,7 @@ private:
     rhi::ResourceHandle irradiance_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
-    rhi::ResourceHandle depth_textures_[3]{
-        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
-    };
-    // Probe depth buffers (buffer-based, replaces texture3D for Apple Silicon)
+    // Probe depth buffers (buffer-based, 8 octant depths per probe)
     rhi::ResourceHandle depth_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };

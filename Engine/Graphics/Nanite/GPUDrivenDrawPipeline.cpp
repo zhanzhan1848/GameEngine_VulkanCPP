@@ -2092,7 +2092,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         rhi::ComputePipelineDesc desc{};
         desc.layout = shadow_cull_layout_;
         desc.computeShader = finalizeShader;
-        desc.threadGroupSize = {1, 1, 1};
+        desc.threadGroupSize = {64, 1, 1};
         shadow_finalize_pipeline_ = device_->CreateComputePipeline(desc);
         if (shadow_finalize_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
     }

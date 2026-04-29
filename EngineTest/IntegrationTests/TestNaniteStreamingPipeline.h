@@ -17,6 +17,7 @@
 #include "Engine/Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include "Engine/Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Engine/Graphics/Lumen/DDGI/LumenDDGIPass.h"
+#include "Engine/Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
 #include "Engine/Graphics/Nanite/GlobalSDF.h"
 #include "Engine/Graphics/Scene/RenderSceneSnapshot.h"
 #include "Engine/Components/Cluster.h"
@@ -101,6 +102,12 @@ private:
     primal::graphics::rhi::DescriptorSetLayoutHandle blit_composite_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     primal::graphics::rhi::DescriptorSetHandle blit_composite_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
 
+    // Fusion blit pipeline (DDGI + SPGI + SSGI + direct)
+    primal::graphics::rhi::PipelineHandle fusion_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle fusion_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle fusion_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle fusion_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+
     // === Lumen SSGI ===
     std::unique_ptr<primal::graphics::lumen::LumenSSGIPass> ssgiPass_;
     primal::graphics::rhi::ResourceHandle ssgi_black_texture_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
@@ -110,6 +117,9 @@ private:
 
     // === Lumen DDGI ===
     std::unique_ptr<primal::graphics::lumen::LumenDDGIPass> ddgiPass_;
+
+    // === Lumen Screen Probe GI ===
+    std::unique_ptr<primal::graphics::lumen::ScreenProbeGIPass> screenProbeGIPass_;
 
     // Color history for SSGI ray hit sampling
     std::unique_ptr<primal::graphics::nanite::ColorHistoryManager> colorHistoryManager_;
@@ -162,14 +172,7 @@ private:
         primal::graphics::rhi::handles::INVALID_RESOURCE
     };
 
-    // DDGI Visibility compute pass (Pass 1: texture3D only, no storage buffer)
-    primal::graphics::rhi::PipelineHandle       vis_pipeline_       {primal::graphics::rhi::handles::INVALID_PIPELINE};
-    primal::graphics::rhi::PipelineLayoutHandle vis_layout_         {primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT};
-    primal::graphics::rhi::DescriptorSetLayoutHandle vis_set_layout_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
-    primal::graphics::rhi::DescriptorSetHandle  vis_descriptor_set_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET};
-    primal::graphics::rhi::ResourceHandle       vis_texture_        {primal::graphics::rhi::handles::INVALID_RESOURCE};
-
-    // DDGI GI Gather compute pass (Pass 2: storage buffer only, no texture3D)
+    // DDGI GI Gather compute pass (storage buffer only, no texture3D)
     primal::graphics::rhi::PipelineHandle       gi_gather_pipeline_    {primal::graphics::rhi::handles::INVALID_PIPELINE};
     primal::graphics::rhi::PipelineLayoutHandle gi_gather_layout_      {primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT};
     primal::graphics::rhi::DescriptorSetLayoutHandle gi_gather_set_layout_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};

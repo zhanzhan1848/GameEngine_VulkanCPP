@@ -2,13 +2,12 @@
  * @file DDGIGIGather.metal
  * @brief Half-resolution DDGI indirect irradiance gathering (compute)
  *
- * Strategy: L0+L1+L2 SH (9 coeff) + per-probe depth visibility (buffer-based)
- *   - ALL 4 probes: real depth visibility from buffer
- *   - ALL 4 probes: full L0+L1+L2 SH reconstruction
- *   - All probes: normal hemisphere weight
+ * Strategy: L0+L1+L2 SH (9 coeff) tetrahedral 4-probe interpolation
+ *   - Soft distance falloff (no hard depth visibility cutoffs)
+ *   - Normal hemisphere weight
+ *   - Full L0+L1+L2 SH reconstruction
  *
- * Total reads: 36 storage buffer (irradiance) + 4 storage buffer (depth)
- *            + 2 texture2D (depth+normal) = 40 buffer + 0 texture3D
+ * Total reads: 36 storage buffer (irradiance) + 2 texture2D (depth+normal)
  */
 
 #include <metal_stdlib>
@@ -55,17 +54,6 @@ static void tetrahedral(float3 gp, uint3 gd,
     for (uint i = 0; i < 4u; ++i) bw[i] = max(bw[i], 0.0f);
 }
 
-static float sampleDDGIDepthBuffer(
-    device const float* depthBuffer,
-    uint probeIdx, float3 direction)
-{
-    uint octant = 0u;
-    if (direction.x > 0.0f) octant |= 1u;
-    if (direction.y > 0.0f) octant |= 2u;
-    if (direction.z > 0.0f) octant |= 4u;
-    return depthBuffer[probeIdx * 8u + octant];
-}
-
 static uint3 probeGridCoord(uint probeIdx, uint3 counts) {
     uint pz = probeIdx / (counts.x * counts.y);
     uint rem = probeIdx % (counts.x * counts.y);
@@ -84,8 +72,7 @@ kernel void ddgi_gi_gather(
     constant float4x4& invViewProj        [[buffer(0)]],
     constant float4&    probeOriginSpacing [[buffer(1)]],
     constant float4&    probeCounts        [[buffer(2)]],
-    device const float3* irradianceBuffer  [[buffer(3)]],
-    device const float*  depthBuffer       [[buffer(4)]]
+    device const float3* irradianceBuffer  [[buffer(3)]]
 )
 {
     uint2 outSize = uint2(outputTex.get_width(), outputTex.get_height());

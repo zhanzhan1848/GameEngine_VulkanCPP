@@ -197,8 +197,10 @@ kernel void ddgi_trace_rays(
     if (hit.hit) {
         result.radiance_and_dist.w = hit.distance;
 
-        // Project hit point to screen space to sample prev frame lit color
-        float4 clipPos = gd.ViewProjection * float4(hit.position, 1.0f);
+        // Project hit point to screen space to sample prev frame lit color.
+        // MUST use previous frame's VP: prev_frame_color was rendered with prev camera,
+        // so the hit point must be projected through prev VP to find the correct texel.
+        float4 clipPos = gd.PreviousViewProjection * float4(hit.position, 1.0f);
         float3 ndc = clipPos.xyz / clipPos.w;
 
         // Check if hit point is on screen

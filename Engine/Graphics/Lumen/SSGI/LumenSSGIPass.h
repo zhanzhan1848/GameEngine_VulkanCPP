@@ -19,12 +19,12 @@ struct SSGIParams {
     u32   ray_count = 4;
     float radius = 2.0f;
     float thickness = 0.25f;
-    float temporal_feedback = 0.95f;
+    float temporal_feedback = 0.9f;
     float filter_sigma_depth = 10.0f;
-    float filter_sigma_normal = 64.0f;
+    float filter_sigma_normal = 16.0f;
     float filter_sigma_hit_dist = 8.0f;
     float filter_sigma_spatial = 2.5f;
-    u32   filter_kernel_radius = 3;
+    u32   filter_kernel_radius = 2;
 };
 
 /// Per-frame camera data that the caller must provide.

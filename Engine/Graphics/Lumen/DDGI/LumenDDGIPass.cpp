@@ -326,20 +326,20 @@ void LumenDDGIPass::CreatePipelines() {
         pipeDesc.threadGroupSize = {64, 1, 1};
         trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
-    // Irradiance update uses (1,1,1) — one thread per probe
+    // Irradiance update uses (64,1,1) — one thread per probe
     {
         ComputePipelineDesc pipeDesc{};
         pipeDesc.computeShader = irradianceShader;
         pipeDesc.layout = irradiance_layout_;
-        pipeDesc.threadGroupSize = {1, 1, 1};
+        pipeDesc.threadGroupSize = {64, 1, 1};
         irradiance_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
-    // Depth update uses (1,1,1) — one thread per probe
+    // Depth update uses (64,1,1) — one thread per probe
     {
         ComputePipelineDesc pipeDesc{};
         pipeDesc.computeShader = depthShader;
         pipeDesc.layout = depth_layout_;
-        pipeDesc.threadGroupSize = {1, 1, 1};
+        pipeDesc.threadGroupSize = {64, 1, 1};
         depth_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
 
@@ -403,17 +403,6 @@ void LumenDDGIPass::CreateProbeTextures() {
         }
     }
 
-    // Depth textures: Texture3D (Nx, Ny, Nz*4, RG16_Float) — legacy, kept for compatibility
-    // Each probe stores 4 directional depth values (2 channels x 2 depths = 4 texels)
-    for (int i = 0; i < 3; i++) {
-        TextureDesc desc{};
-        desc.size = {nx, ny, nz * 4};
-        desc.format = DataFormat::RG16_Float;
-        desc.type = TextureType::Texture3D;
-        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
-        depth_textures_[i] = device_->CreateTexture(desc);
-    }
-
     // Depth buffers: float[probeCount * 8], one float per octant per probe
     // Apple Silicon: buffer load/store is much faster than texture3D sampling
     for (int i = 0; i < 3; i++) {
@@ -454,6 +443,53 @@ void LumenDDGIPass::CreateProbeTextures() {
 // AddPass -- main entry point called per frame
 // ============================================================================
 
+bool LumenDDGIPass::UpdateProbeOrigin(const math::v3& camera_position)
+{
+    if (!initialized_) return false;
+
+    float spacing = params_.probe_spacing;
+    // Snap camera to grid: only shifts when camera crosses a spacing boundary
+    math::v3 snappedCam{
+        std::floor(camera_position.x / spacing) * spacing,
+        std::floor(camera_position.y / spacing) * spacing,
+        std::floor(camera_position.z / spacing) * spacing
+    };
+
+    // Center the grid around the snapped camera position
+    math::v3 halfGrid{
+        float(params_.probe_count_x) * 0.5f * spacing,
+        float(params_.probe_count_y) * 0.5f * spacing,
+        float(params_.probe_count_z) * 0.5f * spacing
+    };
+    math::v3 newOrigin = snappedCam - halfGrid;
+
+    bool shifted = false;
+    if (std::abs(newOrigin.x - probe_origin_.x) > 0.01f ||
+        std::abs(newOrigin.y - probe_origin_.y) > 0.01f ||
+        std::abs(newOrigin.z - probe_origin_.z) > 0.01f)
+    {
+        // Compute shift in probe cells
+        float invSpacing = 1.0f / spacing;
+        relocation_shift_[0] = (int)std::round((newOrigin.x - probe_origin_.x) * invSpacing);
+        relocation_shift_[1] = (int)std::round((newOrigin.y - probe_origin_.y) * invSpacing);
+        relocation_shift_[2] = (int)std::round((newOrigin.z - probe_origin_.z) * invSpacing);
+
+        probe_origin_ = newOrigin;
+        volume_data_.ProbeOrigin = {newOrigin.x, newOrigin.y, newOrigin.z, 0.0f};
+        last_snapped_cam_ = snappedCam;
+        shifted = true;
+    } else {
+        // No shift this frame — reset relocation
+        relocation_shift_[0] = 0;
+        relocation_shift_[1] = 0;
+        relocation_shift_[2] = 0;
+    }
+
+    return shifted;
+}
+
+// ============================================================================
+
 LumenDDGIOutput LumenDDGIPass::AddPass(
     RenderGraph& graph,
     RGResourceHandle prev_frame_color,
@@ -476,7 +512,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
         "LumenDDGI_DepthHist_" + std::to_string(histIdx), depth_buffers_[histIdx]);
 
     output.ddgi_irradiance = irradianceOutHandle;
-    output.ddgi_depth = depthOutHandle;
+    output.ddgi_irradiance_hist = irradianceHistHandle;
 
     graph.AddPass<LumenDDGIData>("LumenDDGI",
         RGPassType::Compute, RGPassCategory::Lighting,
@@ -729,8 +765,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 const DescriptorSetHandle sets[] = { irradiance_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, irradiance_layout_, 0, 1, sets, 0, nullptr);
 
-                // threadGroupSize = (1,1,1), one thread per probe
-                cmd->Dispatch(probeCountTotal, 1, 1);
+                cmd->Dispatch((probeCountTotal + 63) / 64, 1, 1);
             }
 
             // Barrier: irradiance UAV -> SRV
@@ -762,8 +797,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 const DescriptorSetHandle sets[] = { depth_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, depth_layout_, 0, 1, sets, 0, nullptr);
 
-                // threadGroupSize = (1,1,1), one thread per probe
-                cmd->Dispatch(probeCountTotal, 1, 1);
+                cmd->Dispatch((probeCountTotal + 63) / 64, 1, 1);
             }
 
             // Barrier: depth buffer UAV -> SRV

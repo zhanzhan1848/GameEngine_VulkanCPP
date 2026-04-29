@@ -240,7 +240,7 @@ void LumenSSGIPass::CreateDescriptorSetLayouts() {
     // --- Temporal: 5 sampled + 1 storage + 2 UBO ---
     {
         DescriptorSetLayoutBinding temporalBindings[] = {
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // trace (half-res)
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // spatial filter output (full-res)
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // history
             {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // velocity
             {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth
@@ -256,7 +256,7 @@ void LumenSSGIPass::CreateDescriptorSetLayouts() {
     // --- Filter: 3 sampled + 1 storage + 2 UBO ---
     {
         DescriptorSetLayoutBinding filterBindings[] = {
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // temporal output
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // trace output (half-res)
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // normal
             {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth
             {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // output
@@ -428,8 +428,8 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
     auto temporalHistHandle = graph.ImportResource(
         "LumenSSGI_TemporalHist_" + std::to_string(histIdx), temporal_textures_[histIdx]);
 
-    // Store the filter output handle for external use
-    output.ssgi_output = filterHandle;
+    // Store the temporal output handle for external use (final output after temporal accumulation)
+    output.ssgi_output = temporalOutHandle;
 
     graph.AddPass<LumenSSGIData>("LumenSSGI",
         RGPassType::Compute, RGPassCategory::Lighting,
@@ -624,61 +624,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             }
 
             // ================================================================
-            // Sub-pass 2: Temporal Accumulation (full-res)
-            // ================================================================
-            if (temporal_pipeline_ != handles::INVALID_PIPELINE &&
-                temporal_textures_[outIdx] != handles::INVALID_RESOURCE) {
-                struct TemporalParamsData {
-                    float feedback;
-                    u32   full_width;
-                    u32   full_height;
-                    u32   half_width;
-                    u32   half_height;
-                };
-                auto* temporalParams = static_cast<TemporalParamsData*>(device_->MapBuffer(temporal_params_cb_[frameIdx]));
-                if (temporalParams) {
-                    temporalParams->feedback = params_.temporal_feedback;
-                    temporalParams->full_width = render_width_;
-                    temporalParams->full_height = render_height_;
-                    temporalParams->half_width = half_w;
-                    temporalParams->half_height = half_h;
-                    device_->UnmapBuffer(temporal_params_cb_[frameIdx]);
-                }
-
-                DescriptorData temporalParamsDesc[] = {
-                    {0, DescriptorType::SampledImage,  trace_texture_},               // half-res trace
-                    {1, DescriptorType::SampledImage,  temporal_textures_[histIdx]},  // history
-                    {2, DescriptorType::SampledImage,  velocityTex},                  // velocity
-                    {3, DescriptorType::SampledImage,  depthTex},                     // depth
-                    {4, DescriptorType::SampledImage,  normalTex},                    // normal
-                    {5, DescriptorType::StorageImage,  temporal_textures_[outIdx]},   // output
-                    // Metal: buffers use separate binding namespace
-                    {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {1, DescriptorType::UniformBuffer, temporal_params_cb_[frameIdx]},
-                };
-                UpdateDescriptorSet(device_, temporal_ds_[frameIdx], temporalParamsDesc, 8);
-
-                cmd->BindComputePipeline(temporal_pipeline_);
-                const DescriptorSetHandle sets[] = { temporal_ds_[frameIdx] };
-                cmd->BindDescriptorSets(PipelineBindPoint::Compute, temporal_layout_, 0, 1, sets, 0, nullptr);
-
-                u32 gx = (render_width_ + TG - 1) / TG;
-                u32 gy = (render_height_ + TG - 1) / TG;
-                cmd->Dispatch(gx, gy, 1);
-            }
-
-            // Barrier: temporal UAV -> SRV
-            {
-                ResourceBarrier barrier{};
-                barrier.resource = temporal_textures_[outIdx];
-                barrier.beforeState = ResourceState::UnorderedAccess;
-                barrier.afterState = ResourceState::ShaderResource;
-                barrier.subresource = 0xFFFFFFFF;
-                cmd->InsertBarrier(&barrier, 1);
-            }
-
-            // ================================================================
-            // Sub-pass 3: Spatial Filter (full-res)
+            // Sub-pass 2: Spatial Filter (full-res, reads half-res trace)
             // ================================================================
             if (filter_pipeline_ != handles::INVALID_PIPELINE &&
                 filter_texture_ != handles::INVALID_RESOURCE) {
@@ -700,10 +646,10 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                 }
 
                 DescriptorData filterParamsDesc[] = {
-                    {0, DescriptorType::SampledImage,  temporal_textures_[outIdx]}, // temporal output
+                    {0, DescriptorType::SampledImage,  trace_texture_},           // half-res trace (bilinear)
                     {1, DescriptorType::SampledImage,  normalTex},
                     {2, DescriptorType::SampledImage,  depthTex},
-                    {3, DescriptorType::StorageImage,  filter_texture_},             // final output
+                    {3, DescriptorType::StorageImage,  filter_texture_},          // full-res output
                     // Metal: buffers use separate binding namespace
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {1, DescriptorType::UniformBuffer, filter_params_cb_[frameIdx]},
@@ -723,6 +669,56 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             {
                 ResourceBarrier barrier{};
                 barrier.resource = filter_texture_;
+                barrier.beforeState = ResourceState::UnorderedAccess;
+                barrier.afterState = ResourceState::ShaderResource;
+                barrier.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&barrier, 1);
+            }
+
+            // ================================================================
+            // Sub-pass 3: Temporal Accumulation (full-res)
+            // ================================================================
+            if (temporal_pipeline_ != handles::INVALID_PIPELINE &&
+                temporal_textures_[outIdx] != handles::INVALID_RESOURCE) {
+                struct TemporalParamsData {
+                    float feedback;
+                    u32   full_width;
+                    u32   full_height;
+                };
+                auto* temporalParams = static_cast<TemporalParamsData*>(device_->MapBuffer(temporal_params_cb_[frameIdx]));
+                if (temporalParams) {
+                    temporalParams->feedback = params_.temporal_feedback;
+                    temporalParams->full_width = render_width_;
+                    temporalParams->full_height = render_height_;
+                    device_->UnmapBuffer(temporal_params_cb_[frameIdx]);
+                }
+
+                DescriptorData temporalParamsDesc[] = {
+                    {0, DescriptorType::SampledImage,  filter_texture_},              // full-res spatial output
+                    {1, DescriptorType::SampledImage,  temporal_textures_[histIdx]},  // history
+                    {2, DescriptorType::SampledImage,  velocityTex},                  // velocity
+                    {3, DescriptorType::SampledImage,  depthTex},                     // depth
+                    {4, DescriptorType::SampledImage,  normalTex},                    // normal
+                    {5, DescriptorType::StorageImage,  temporal_textures_[outIdx]},   // output
+                    // Metal: buffers use separate binding namespace
+                    {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                    {1, DescriptorType::UniformBuffer, temporal_params_cb_[frameIdx]},
+                };
+                UpdateDescriptorSet(device_, temporal_ds_[frameIdx], temporalParamsDesc, 8);
+
+                cmd->BindComputePipeline(temporal_pipeline_);
+                const DescriptorSetHandle sets[] = { temporal_ds_[frameIdx] };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, temporal_layout_, 0, 1, sets, 0, nullptr);
+
+                u32 gx = (render_width_ + TG - 1) / TG;
+                u32 gy = (render_height_ + TG - 1) / TG;
+                cmd->Dispatch(gx, gy, 1);
+            }
+
+            // Barrier: temporal UAV -> SRV (final output)
+            {
+                ResourceBarrier barrier{};
+                barrier.resource = temporal_textures_[outIdx];
                 barrier.beforeState = ResourceState::UnorderedAccess;
                 barrier.afterState = ResourceState::ShaderResource;
                 barrier.subresource = 0xFFFFFFFF;

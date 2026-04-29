@@ -390,12 +390,22 @@ fragment float4 fragmentBlitDDGI(
     float4 albedo = albedoTex.sample(s2d, uv);
     float3 ddgiDiffuse = albedo.rgb * indirect * ddgiWeight;
 
+    // DIAGNOSTIC: output DDGI indirect only (no direct lighting)
+    // Uncomment the line below to enable; comment out to restore normal composite.
+    // #define DDGI_DIAGNOSTIC_INDIRECT_ONLY
+#ifdef DDGI_DIAGNOSTIC_INDIRECT_ONLY
+    // Show DDGI irradiance directly (tone-mapped for visibility)
+    float3 lit = ddgiDiffuse * 5.0f; // boost for visibility
+    lit = lit / (lit + float3(1.0f));
+    lit = pow(lit, float3(1.0f / 2.2f));
+#else
     // Final: direct + indirect
     float3 lit = sceneColor + ddgiDiffuse;
 
     // Tone map + gamma
     lit = lit / (lit + float3(1.0f));
     lit = pow(lit, float3(1.0f / 2.2f));
+#endif
 
     return float4(lit, 1.0f);
 }
@@ -572,4 +582,61 @@ fragment float4 fragmentBlitComposite(
     result = pow(result, float3(1.0 / 2.2));
 
     return float4(result, 1.0);
+}
+
+// ================================================================================================
+// Full GI Fusion Blit: DDGI (low-freq) + SPGI (mid-freq) + SSGI (high-freq) + Direct
+// ================================================================================================
+
+fragment float4 fragmentBlitFusion(
+    VertexOut in [[stage_in]],
+    texture2d<float> sceneColor  [[texture(0)]],   // direct lighting (deferred output)
+    texture2d<float> ssgiColor   [[texture(1)]],   // SSGI irradiance
+    texture2d<float> ddgiColor   [[texture(2)]],   // DDGI irradiance (half-res)
+    texture2d<float> spgiColor   [[texture(3)]],   // Screen Probe GI irradiance
+    texture2d<float> albedoTex   [[texture(4)]],   // GBuffer albedo
+    texture2d<float> depthTex    [[texture(5)]])    // GBuffer depth
+{
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    constexpr sampler ds(coord::normalized, filter::nearest, mip_filter::none, address::clamp_to_edge);
+
+    float2 uv = in.uv;
+    float depth = depthTex.sample(ds, uv).r;
+
+    // Background: pass through scene color (skybox)
+    if (depth >= 1.0f) {
+        float3 sky = sceneColor.sample(s, uv).rgb;
+        sky = sky / (sky + float3(1.0f));
+        sky = pow(sky, float3(1.0f / 2.2f));
+        return float4(sky, 1.0f);
+    }
+
+    float3 direct  = sceneColor.sample(s, uv).rgb;
+    float3 albedo  = albedoTex.sample(s, uv).rgb;
+
+    // DDGI irradiance (low-frequency global indirect)
+    float3 ddgi_irr = ddgiColor.sample(s, uv).rgb;
+    // NaN guard
+    uint3 bits = as_type<uint3>(ddgi_irr);
+    if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u)
+        ddgi_irr = float3(0.0f);
+
+    // Screen Probe GI irradiance (medium-frequency screen-space indirect)
+    float3 spgi_irr = spgiColor.sample(s, uv).rgb;
+
+    // SSGI irradiance (high-frequency contact indirect)
+    float3 ssgi_irr = ssgiColor.sample(s, uv).rgb;
+
+    // Fusion: PBR diffuse indirect = albedo * (DDGI + SPGI) + SSGI
+    // Diagnostic: SPGI disabled to test stability without it
+    float3 indirect = albedo * (ddgi_irr * 0.4f + spgi_irr * 0.0f)
+                    + ssgi_irr * 0.3f;
+
+    float3 result = direct + indirect;
+
+    // Tone map + gamma
+    result = result / (result + float3(1.0f));
+    result = pow(result, float3(1.0f / 2.2f));
+
+    return float4(result, 1.0f);
 }
