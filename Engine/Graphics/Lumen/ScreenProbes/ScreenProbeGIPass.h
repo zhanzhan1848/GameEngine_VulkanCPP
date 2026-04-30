@@ -97,7 +97,7 @@ public:
     bool IsInitialized() const { return initialized_; }
 
     /// Get the output GI texture for direct sampling in other passes.
-    rhi::ResourceHandle GetOutputTexture() const { return output_texture_; }
+    rhi::ResourceHandle GetOutputTexture() const { return output_texture_filtered_; }
 
     const ScreenProbeParams& GetParams() const { return params_; }
 
@@ -115,26 +115,32 @@ private:
     u32               grid_width_{ 0 };
     u32               grid_height_{ 0 };
 
-    // Compute pipelines (5 sub-passes)
+    // Compute pipelines (7 sub-passes)
     rhi::PipelineHandle place_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle avg_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle temporal_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle spatial_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle gather_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle denoise_pipeline_{ rhi::handles::INVALID_PIPELINE };
 
     // Pipeline layouts
     rhi::PipelineLayoutHandle place_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle avg_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle temporal_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle spatial_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle gather_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle denoise_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
 
     // Descriptor set layouts
     rhi::DescriptorSetLayoutHandle place_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle avg_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle temporal_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle spatial_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle gather_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle denoise_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
 
     // Descriptor sets (triple-buffered)
     rhi::DescriptorSetHandle place_ds_[3]{
@@ -147,6 +153,12 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
     rhi::DescriptorSetHandle temporal_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle spatial_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle denoise_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
     rhi::DescriptorSetHandle gather_ds_[3]{
@@ -170,16 +182,23 @@ private:
     };  // gridW * gridH * raysPerProbe * float4
     rhi::ResourceHandle probe_avg_radiance_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
-    };  // gridW * gridH * float4 (pre-averaged per probe)
+    };  // gridW * gridH * 4 * float4 (SH2: L0+L1 coefficients per probe)
     rhi::ResourceHandle avg_constants_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };  // 2 * uint32 = totalProbes + raysPerProbe
     rhi::ResourceHandle temporal_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };  // TemporalConstants: totalProbes, alpha, threshold, pad
+    rhi::ResourceHandle spatial_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };  // SpatialConstants: totalProbes, gridW, sigma, pad
+    rhi::ResourceHandle denoise_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };  // DenoiseParams: sigma_depth, sigma_normal, sigma_spatial, kernel_radius, width, height
 
-    // Output texture (full-resolution RGBA16_Float)
-    rhi::ResourceHandle output_texture_{ rhi::handles::INVALID_RESOURCE };
+    // Output textures (full-resolution RGBA16_Float)
+    rhi::ResourceHandle output_texture_{ rhi::handles::INVALID_RESOURCE };           // Gather output (raw)
+    rhi::ResourceHandle output_texture_filtered_{ rhi::handles::INVALID_RESOURCE };  // Denoise output (filtered)
 };
 
 } // namespace primal::graphics::lumen

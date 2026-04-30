@@ -622,14 +622,19 @@ fragment float4 fragmentBlitFusion(
         ddgi_irr = float3(0.0f);
 
     // Screen Probe GI irradiance (medium-frequency screen-space indirect)
-    float3 spgi_irr = spgiColor.sample(s, uv).rgb;
+    float4 spgi_sample = spgiColor.sample(s, uv);
+    float3 spgi_irr = spgi_sample.rgb;
+    float  spgi_conf = spgi_sample.a;  // confidence from Gather
 
     // SSGI irradiance (high-frequency contact indirect)
     float3 ssgi_irr = ssgiColor.sample(s, uv).rgb;
 
-    // Fusion: PBR diffuse indirect = albedo * (DDGI + SPGI) + SSGI
-    // Diagnostic: SPGI disabled to test stability without it
-    float3 indirect = albedo * (ddgi_irr * 0.4f + spgi_irr * 0.0f)
+    // Fusion: confidence-based blending
+    // Where SPGI is confident → use SPGI (better screen-space detail)
+    // Where SPGI is not confident → fall back to DDGI (global coverage)
+    // SSGI adds high-frequency contact indirect on top
+    float3 base_gi = mix(ddgi_irr, spgi_irr, spgi_conf);
+    float3 indirect = albedo * base_gi * 0.5f
                     + ssgi_irr * 0.3f;
 
     float3 result = direct + indirect;

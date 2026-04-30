@@ -226,7 +226,7 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Gather: 2 textures (depth, normal) + 1 storage image (output) + 3 SSBO + 1 UBO ---
+    // --- Gather: 2 textures (depth, normal) + 1 storage image (output) + 2 SSBO + 1 UBO ---
     {
         DescriptorSetLayoutBinding bindings[] = {
             // Textures
@@ -235,26 +235,27 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // output texture
             // Buffers
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe positions (read)
-            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals (read)
-            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe radiance (read)
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe SH (read, filtered)
             {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global data
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals (read)
         };
         DescriptorSetLayoutDesc layoutDesc{7, bindings};
         gather_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Average: 2 SSBO (rayRadiance in, probeAvg out) + 2 uniform (totalProbes, raysPerProbe) ---
+    // --- Average: 3 SSBO (rayRadiance in, probeSH out, probeNormals in) + 1 UBO ---
     {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray radiance (read)
-            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // avg radiance (write)
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe SH output (write)
             {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // totalProbes + raysPerProbe
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals (read, for ray direction)
         };
-        DescriptorSetLayoutDesc layoutDesc{3, bindings};
+        DescriptorSetLayoutDesc layoutDesc{4, bindings};
         avg_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Temporal: 5 SSBO + 1 UBO ---
+    // --- Temporal: 7 SSBO + 1 UBO ---
     {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // current avg radiance (read)
@@ -263,9 +264,36 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // history positions (read)
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // output radiance (write)
             {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // temporal constants
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // current normals (read)
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // history normals (read)
         };
-        DescriptorSetLayoutDesc layoutDesc{6, bindings};
+        DescriptorSetLayoutDesc layoutDesc{8, bindings};
         temporal_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    }
+
+    // --- Spatial Filter: 3 SSBO (inputSH, outputSH, positions) + 1 UBO ---
+    {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // input SH (read)
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // output SH (write)
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe positions (read)
+            {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // spatial constants
+        };
+        DescriptorSetLayoutDesc layoutDesc{4, bindings};
+        spatial_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    }
+
+    // --- Denoise: 3 sampled textures + 1 storage image + 1 UBO ---
+    {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // GI input (from Gather)
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // GI output (filtered)
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // denoise params
+        };
+        DescriptorSetLayoutDesc layoutDesc{5, bindings};
+        denoise_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 }
 
@@ -285,11 +313,15 @@ void ScreenProbeGIPass::CreatePipelines() {
     }
     auto gatherShader = CompileShader("ScreenProbeGather", "screen_probe_gather");
     auto temporalShader = CompileShader("ScreenProbeTemporal", "screen_probe_temporal");
+    auto spatialShader = CompileShader("ScreenProbeSpatialFilter", "screen_probe_spatial_filter");
+    auto denoiseShader = CompileShader("ScreenProbeDenoise", "screen_probe_denoise");
 
     if (placeShader == handles::INVALID_SHADER ||
         traceShader == handles::INVALID_SHADER ||
         gatherShader == handles::INVALID_SHADER ||
-        temporalShader == handles::INVALID_SHADER) {
+        temporalShader == handles::INVALID_SHADER ||
+        spatialShader == handles::INVALID_SHADER ||
+        denoiseShader == handles::INVALID_SHADER) {
         std::cerr << "[ScreenProbeGI] Shader compilation failed" << std::endl;
         return;
     }
@@ -324,6 +356,18 @@ void ScreenProbeGIPass::CreatePipelines() {
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &temporal_set_layout_;
         temporal_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
+    {
+        PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &spatial_set_layout_;
+        spatial_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
+    {
+        PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &denoise_set_layout_;
+        denoise_layout_ = device_->CreatePipelineLayout(plDesc);
     }
 
     // Create compute pipelines
@@ -363,6 +407,20 @@ void ScreenProbeGIPass::CreatePipelines() {
         pipeDesc.threadGroupSize = {64, 1, 1};
         temporal_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
+    {
+        ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = spatialShader;
+        pipeDesc.layout = spatial_layout_;
+        pipeDesc.threadGroupSize = {64, 1, 1};
+        spatial_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
+    {
+        ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = denoiseShader;
+        pipeDesc.layout = denoise_layout_;
+        pipeDesc.threadGroupSize = {8, 8, 1};  // 2D dispatch for screen-space filter
+        denoise_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
 
     // Create triple-buffered descriptor sets
     for (int i = 0; i < 3; i++) {
@@ -385,6 +443,14 @@ void ScreenProbeGIPass::CreatePipelines() {
         {
             DescriptorSetDesc dsDesc{temporal_set_layout_};
             temporal_ds_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        {
+            DescriptorSetDesc dsDesc{spatial_set_layout_};
+            spatial_ds_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        {
+            DescriptorSetDesc dsDesc{denoise_set_layout_};
+            denoise_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
     }
 }
@@ -458,14 +524,14 @@ void ScreenProbeGIPass::CreateBuffers() {
         }
     }
 
-    // Per-probe average radiance buffers (triple-buffered)
+    // Per-probe SH coefficient buffers (triple-buffered, 4 float4 per probe for L0+L1)
     for (int i = 0; i < 3; ++i) {
         BufferDesc desc{};
-        desc.size = (u64)totalProbes * sizeof(float) * 4;
+        desc.size = (u64)totalProbes * 4 * sizeof(float) * 4;
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.structured.elementCount = totalProbes;
+        desc.structured.elementCount = totalProbes * 4;
         desc.structured.elementStride = sizeof(float) * 4;
         probe_avg_radiance_[i] = device_->CreateBuffer(desc);
 
@@ -497,14 +563,34 @@ void ScreenProbeGIPass::CreateBuffers() {
     // Temporal accumulation constant buffers (triple-buffered)
     for (int i = 0; i < 3; ++i) {
         BufferDesc desc{};
-        desc.size = 16;  // totalProbes(u32) + alpha(f32) + threshold(f32) + pad(u32)
+        desc.size = 32;  // totalProbes + alpha + posThreshold + normalThreshold + clampScale + pad[3]
         desc.type = BufferType::Constant;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
         temporal_cb_[i] = device_->CreateBuffer(desc);
     }
 
-    // Output texture: full-resolution RGBA16_Float
+    // Spatial filter constant buffers (triple-buffered)
+    for (int i = 0; i < 3; ++i) {
+        BufferDesc desc{};
+        desc.size = 16;  // totalProbes(u32) + gridW(u32) + sigma(f32) + pad(f32)
+        desc.type = BufferType::Constant;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        spatial_cb_[i] = device_->CreateBuffer(desc);
+    }
+
+    // Denoise constant buffers (triple-buffered)
+    for (int i = 0; i < 3; ++i) {
+        BufferDesc desc{};
+        desc.size = 32;  // sigma_depth(f32) + sigma_normal(f32) + sigma_spatial(f32) + kernel_radius(u32) + width(u32) + height(u32) + pad(u32) + pad(u32)
+        desc.type = BufferType::Constant;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        denoise_cb_[i] = device_->CreateBuffer(desc);
+    }
+
+    // Output texture: full-resolution RGBA16_Float (raw Gather output)
     {
         TextureDesc desc{};
         desc.size = {render_width_, render_height_, 1};
@@ -512,6 +598,16 @@ void ScreenProbeGIPass::CreateBuffers() {
         desc.type = TextureType::Texture2D;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         output_texture_ = device_->CreateTexture(desc);
+    }
+
+    // Filtered output texture: full-resolution RGBA16_Float (Denoise output)
+    {
+        TextureDesc desc{};
+        desc.size = {render_width_, render_height_, 1};
+        desc.format = DataFormat::RGBA16_Float;
+        desc.type = TextureType::Texture2D;
+        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+        output_texture_filtered_ = device_->CreateTexture(desc);
     }
 }
 
@@ -532,9 +628,10 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     u32 frameIdx = current_frame_index % 3;
     u32 histIdx = (current_frame_index + 2) % 3;
 
-    // Import persistent output texture into render graph
+    // Import persistent output textures into render graph
     auto giOutputHandle = graph.ImportResource("ScreenProbeGI_Output", output_texture_);
-    output.gi_output = giOutputHandle;
+    auto giFilteredHandle = graph.ImportResource("ScreenProbeGI_Filtered", output_texture_filtered_);
+    output.gi_output = giFilteredHandle;  // Return denoised (filtered) output
 
     graph.AddPass<ScreenProbePassData>("ScreenProbeGI",
         RGPassType::Compute, RGPassCategory::Lighting,
@@ -542,7 +639,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
         // ====================================================================
         // Setup lambda: declare resource dependencies
         // ====================================================================
-        [gbuffer_depth, gbuffer_normal, prev_frame_color, giOutputHandle](
+        [gbuffer_depth, gbuffer_normal, prev_frame_color, giOutputHandle, giFilteredHandle](
             ScreenProbePassData& data, RenderGraphBuilder& builder) {
             // Read GBuffer inputs
             builder.Read(gbuffer_depth, ResourceState::ShaderResource);
@@ -553,8 +650,10 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 builder.Read(prev_frame_color, ResourceState::ShaderResource);
             }
 
-            // Write to output texture
+            // Write to raw output texture (Gather output)
             builder.Write(giOutputHandle, ResourceState::UnorderedAccess);
+            // Write to filtered output texture (Denoise output)
+            builder.Write(giFilteredHandle, ResourceState::UnorderedAccess);
 
             data.gbuffer_depth = gbuffer_depth;
             data.gbuffer_normal = gbuffer_normal;
@@ -565,7 +664,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
         // ====================================================================
         // Execute lambda: dispatch 3 compute sub-passes
         // ====================================================================
-        [this, camera_data, current_frame_index, frameIdx, histIdx](
+        [this, camera_data, current_frame_index, frameIdx, histIdx, giFilteredHandle](
             const ScreenProbePassData& data, RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
@@ -581,6 +680,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             ResourceHandle normalTex = ResolveTexture(data.gbuffer_normal);
             ResourceHandle prevColorTex = ResolveTexture(data.prev_frame_color);
             ResourceHandle outputTex = ResolveTexture(data.gi_output);
+            ResourceHandle filteredTex = ResolveTexture(giFilteredHandle);
 
             if (depthTex == handles::INVALID_RESOURCE ||
                 normalTex == handles::INVALID_RESOURCE ||
@@ -726,15 +826,16 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             }
 
             // ==================================================================
-            // Sub-pass 2.5: ScreenProbeAverage (pre-aggregate per-ray to per-probe)
+            // Sub-pass 2.5: ScreenProbeAverage (SH2 accumulation per-ray → per-probe)
             // ==================================================================
             {
                 DescriptorData params[] = {
                     {0, DescriptorType::StorageBuffer, probe_radiance_buffer_[frameIdx]},
                     {1, DescriptorType::StorageBuffer, probe_avg_radiance_[frameIdx]},
                     {2, DescriptorType::UniformBuffer, avg_constants_[frameIdx]},
+                    {3, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                 };
-                UpdateDescriptorSet(device_, avg_ds_[frameIdx], params, 3);
+                UpdateDescriptorSet(device_, avg_ds_[frameIdx], params, 4);
 
                 cmd->BindComputePipeline(avg_pipeline_);
                 const DescriptorSetHandle sets[] = { avg_ds_[frameIdx] };
@@ -760,13 +861,16 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             if (temporal_pipeline_ != handles::INVALID_PIPELINE) {
                 // Upload temporal constants
-                struct TemporalCB { u32 totalProbes; float alpha; float threshold; u32 pad; };
+                struct TemporalCB { u32 totalProbes; float alpha; float posThreshold; float normalThreshold; float clampScale; float maxGradient; u32 pad[2]; };
                 auto* tcb = static_cast<TemporalCB*>(device_->MapBuffer(temporal_cb_[frameIdx]));
                 if (tcb) {
                     tcb->totalProbes = grid_width_ * grid_height_;
                     tcb->alpha = 0.1f;
-                    tcb->threshold = 0.5f;
-                    tcb->pad = 0;
+                    tcb->posThreshold = 0.5f;
+                    tcb->normalThreshold = 0.5f;
+                    tcb->clampScale = 2.0f;
+                    tcb->maxGradient = 2.0f;
+                    tcb->pad[0] = tcb->pad[1] = 0;
                     device_->UnmapBuffer(temporal_cb_[frameIdx]);
                 }
 
@@ -777,8 +881,10 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     {3, DescriptorType::StorageBuffer, probe_positions_buffer_[histIdx]},
                     {4, DescriptorType::StorageBuffer, probe_avg_radiance_[frameIdx]},   // output (write, same as current)
                     {5, DescriptorType::UniformBuffer, temporal_cb_[frameIdx]},
+                    {6, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
+                    {7, DescriptorType::StorageBuffer, probe_normals_buffer_[histIdx]},
                 };
-                UpdateDescriptorSet(device_, temporal_ds_[frameIdx], params, 6);
+                UpdateDescriptorSet(device_, temporal_ds_[frameIdx], params, 8);
 
                 cmd->BindComputePipeline(temporal_pipeline_);
                 const DescriptorSetHandle sets[] = { temporal_ds_[frameIdx] };
@@ -788,10 +894,51 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
             }
 
-            // Barrier: temporal output written, need to be readable by gather
+            // Barrier: temporal output written, need to be readable by spatial filter
             {
                 ResourceBarrier barrier{};
                 barrier.resource = probe_avg_radiance_[frameIdx];
+                barrier.beforeState = ResourceState::UnorderedAccess;
+                barrier.afterState = ResourceState::ShaderResource;
+                barrier.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&barrier, 1);
+            }
+
+            // ==================================================================
+            // Sub-pass 2.9: Probe Spatial Filter (bilateral blur on SH coefficients)
+            // ==================================================================
+            if (spatial_pipeline_ != handles::INVALID_PIPELINE) {
+                // Upload spatial constants
+                struct SpatialCB { u32 totalProbes; u32 gridW; float sigma; float pad; };
+                auto* scb = static_cast<SpatialCB*>(device_->MapBuffer(spatial_cb_[frameIdx]));
+                if (scb) {
+                    scb->totalProbes = grid_width_ * grid_height_;
+                    scb->gridW = grid_width_;
+                    scb->sigma = 2.0f;  // bilateral sigma (world-space, stronger blur)
+                    scb->pad = 0.0f;
+                    device_->UnmapBuffer(spatial_cb_[frameIdx]);
+                }
+
+                DescriptorData params[] = {
+                    {0, DescriptorType::StorageBuffer, probe_avg_radiance_[frameIdx]},    // input SH (read)
+                    {1, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},     // output SH (write)
+                    {2, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
+                    {3, DescriptorType::UniformBuffer, spatial_cb_[frameIdx]},
+                };
+                UpdateDescriptorSet(device_, spatial_ds_[frameIdx], params, 4);
+
+                cmd->BindComputePipeline(spatial_pipeline_);
+                const DescriptorSetHandle sets[] = { spatial_ds_[frameIdx] };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, spatial_layout_, 0, 1, sets, 0, nullptr);
+
+                u32 totalProbes = grid_width_ * grid_height_;
+                cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
+            }
+
+            // Barrier: spatial filter output written (histIdx), need to be readable by gather
+            {
+                ResourceBarrier barrier{};
+                barrier.resource = probe_avg_radiance_[histIdx];
                 barrier.beforeState = ResourceState::UnorderedAccess;
                 barrier.afterState = ResourceState::ShaderResource;
                 barrier.subresource = 0xFFFFFFFF;
@@ -807,9 +954,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     {1, DescriptorType::SampledImage,  normalTex},
                     {2, DescriptorType::StorageImage,  outputTex},
                     {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
-                    {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
-                    {2, DescriptorType::StorageBuffer, probe_avg_radiance_[frameIdx]},
+                    {2, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},     // spatially filtered SH
                     {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                    {4, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                 };
                 UpdateDescriptorSet(device_, gather_ds_[frameIdx], params, 7);
 
@@ -819,6 +966,58 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 u32 totalPixels = render_width_ * render_height_;
                 cmd->Dispatch((totalPixels + 63) / 64, 1, 1);
+            }
+
+            // Barrier: Gather output written to output_texture_, need to be readable by denoise
+            {
+                ResourceBarrier barrier{};
+                barrier.resource = outputTex;
+                barrier.beforeState = ResourceState::UnorderedAccess;
+                barrier.afterState = ResourceState::ShaderResource;
+                barrier.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&barrier, 1);
+            }
+
+            // ==================================================================
+            // Sub-pass 4: ScreenProbeDenoise (screen-space bilateral filter)
+            // ==================================================================
+            if (denoise_pipeline_ != handles::INVALID_PIPELINE &&
+                filteredTex != handles::INVALID_RESOURCE) {
+                // Upload denoise params (gentle filter — geometry constraints are in Gather)
+                struct DenoiseCB {
+                    float sigma_depth; float sigma_normal; float sigma_spatial; float pad1;
+                    u32 kernel_radius; u32 render_width; u32 render_height; u32 pad2;
+                };
+                auto* dcb = static_cast<DenoiseCB*>(device_->MapBuffer(denoise_cb_[frameIdx]));
+                if (dcb) {
+                    dcb->sigma_depth = 8.0f;      // moderate depth sensitivity
+                    dcb->sigma_normal = 8.0f;     // moderate normal sensitivity (was 16, too aggressive)
+                    dcb->sigma_spatial = 1.2f;    // tight spatial falloff
+                    dcb->pad1 = 0.0f;
+                    dcb->kernel_radius = 1;       // 3x3
+                    dcb->render_width = render_width_;
+                    dcb->render_height = render_height_;
+                    dcb->pad2 = 0;
+                    device_->UnmapBuffer(denoise_cb_[frameIdx]);
+                }
+
+                DescriptorData params[] = {
+                    {0, DescriptorType::SampledImage,  outputTex},       // GI input (raw Gather output)
+                    {1, DescriptorType::SampledImage,  normalTex},
+                    {2, DescriptorType::SampledImage,  depthTex},
+                    {3, DescriptorType::StorageImage,  filteredTex},     // GI output (filtered)
+                    {0, DescriptorType::UniformBuffer, denoise_cb_[frameIdx]},
+                };
+                UpdateDescriptorSet(device_, denoise_ds_[frameIdx], params, 5);
+
+                cmd->BindComputePipeline(denoise_pipeline_);
+                const DescriptorSetHandle sets[] = { denoise_ds_[frameIdx] };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, denoise_layout_, 0, 1, sets, 0, nullptr);
+
+                // 2D dispatch: 8x8 threadgroups
+                u32 dispatchX = (render_width_ + 7) / 8;
+                u32 dispatchY = (render_height_ + 7) / 8;
+                cmd->Dispatch(dispatchX, dispatchY, 1);
             }
         }
     );
