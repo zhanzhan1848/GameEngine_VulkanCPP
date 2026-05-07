@@ -38,9 +38,10 @@ Runtime generation: 6 axis-aligned cards per mesh, skip directions with projecti
 
 ### Atlas Layout
 
-- Size: **2048x2048** (configurable, can drop to 1024/512)
-- Page size: **64x64** (1024 pages total)
-- All atlas dimensions are `static constexpr` configurable values
+- Size: **2048x2048** (configurable, can drop to 1024/512; matches `LumenConfig::surface_cache_atlas_size`)
+- Page size: **32x32** (4096 pages total; matches `LumenConfig::surface_cache_page_size`)
+- Max cards: **4096** (matches `LumenConfig::surface_cache_max_cards`)
+- All atlas dimensions are `static constexpr` configurable values, sourced from `LumenConfig`
 
 ### Per-Texel Channels
 
@@ -124,12 +125,18 @@ Reads: depth_atlas(1) + normal_atlas(1) + card_data_buffer(1) = **3 reads**
 
 **Pass 2: LightEvaluate** (compute)
 - Per-texel threads
+- Read card_data to reconstruct world position from atlas UV + depth
 - Read tile's light assignment, compute per-light contribution
 - Lambertian diffuse with albedo
 - Add emissive
 - Shadow: reuse existing cascade shadow maps (Phase A), add per-texel SDF shadow later (Phase B)
 
-Reads: light_assignment_buffer(1) + albedo_atlas(1) + normal_atlas(1) + emissive_atlas(1) + shadow_map(1) = **5 reads**
+Reads: card_data_buffer(1) + light_assignment_buffer(1) + albedo_atlas(1) + normal_atlas(1) + emissive_atlas(1) + shadow_map(1) = **6 reads**
+
+> **Note**: 6 reads is within the 16-read stable limit but higher than the 4-5 target.
+> If this causes issues, split further: pre-compute world positions in a separate pass
+> into a `world_position_buffer`, then LightEvaluate reads that buffer instead of
+> card_data + depth_atlas (reduces to 5 reads).
 
 ### Update Frequency
 
@@ -149,14 +156,18 @@ Reads: light_assignment_buffer(1) + albedo_atlas(1) + normal_atlas(1) + emissive
 Reads: depth_atlas(1) + card_data_buffer(1) + normal_atlas(1) + GlobalSDF(1) = **4 reads**
 
 **Pass 2: IndirectResolve** (compute)
-- Sample prev_lighting_atlas at near-hit positions (world pos → atlas UV lookup)
+- Read card_lookup + card_data to convert near-hit world positions to atlas UV
+- Sample prev_lighting_atlas at near-hit positions
 - Far hits: sample DDGI (Phase A) or Voxel Radiance (Phase B)
 - Sky hits: sample sky cubemap
 - Cosine-weighted average of 8 rays → indirect lighting
 - Multiply by albedo
 - Temporal filter: exponential blend with previous frame (weight 0.1-0.2)
 
-Reads: hit_position_buffer(1) + prev_lighting_atlas(1) + albedo_atlas(1) + DDGI_sample(1) + sky_cubemap(1) = **5 reads**
+Reads: hit_position_buffer(1) + card_lookup(1) + card_data_buffer(1) + prev_lighting_atlas(1) + albedo_atlas(1) + DDGI_or_sky(1) = **6 reads**
+
+> **Note**: Same mitigation as LightEvaluate — if 6 reads causes issues, pre-compute
+> atlas UVs in a separate pass into `atlas_uv_buffer`, reducing IndirectResolve to 5 reads.
 
 ### Multi-Bounce Convergence
 
@@ -288,11 +299,11 @@ Existing Lumen ~3ms + new ~2.1ms = **~5.1ms total GI cost**.
 
 ## Apple Silicon Hardware Constraints
 
-Key mitigation strategy: **split large passes into multiple small passes**, each with <= 4-5 texture/buffer reads.
+Key mitigation strategy: **split large passes into multiple small passes**, each with <= 5-6 texture/buffer reads. Passes at 6 reads can be further split if needed (pre-compute intermediate buffers).
 
 | Concern | Mitigation |
 |---------|-----------|
-| Buffer read limit (~16 stable, >32 flickers) | Every compute pass capped at 4-5 reads |
+| Buffer read limit (~16 stable, >32 flickers) | Every compute pass capped at 6 reads; 4-5 target, 6 max with pre-compute split option |
 | texture3D ~4 read limit | Using 2D atlas textures, not texture3D |
 | Inline texture sampling bug (fragment) | Card capture material sampling in separate function |
 | Memory budget | Atlas size configurable (2048/1024/512), can downsize |
