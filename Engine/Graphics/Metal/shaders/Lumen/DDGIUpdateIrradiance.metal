@@ -21,12 +21,17 @@ kernel void ddgi_update_irradiance(
     constant DDGIVolumeData& vol [[buffer(1)]],
     device const DDGIRayData* rayData [[buffer(2)]],
     device const float3* irradianceHistory [[buffer(3)]],
-    device float3* irradianceOutput [[buffer(4)]]
+    device float3* irradianceOutput [[buffer(4)]],
+
+    // Probe update list (sparse indices of probes to update this frame)
+    device const uint* probeUpdateList [[buffer(5)]]
 )
 {
-    if (gid >= vol.ProbeCountTotal) return;
+    if (gid >= vol.ProbeUpdateCount) return;
 
-    uint rayOffset = gid * vol.RaysPerProbe;
+    // Map sparse update index to real probe index
+    uint probeIdx = probeUpdateList[gid];
+    uint rayOffset = probeIdx * vol.RaysPerProbe;
 
     // Accumulate L0+L1+L2 (9 coefficients)
     float3 shAccum[9];
@@ -68,7 +73,7 @@ kernel void ddgi_update_irradiance(
     }
 
     // Temporal blend with history
-    uint probeBase = gid * 9u;
+    uint probeBase = probeIdx * 9u;
 
     // Smooth alpha ramp: 1.0 → ProbeHysteresis over ~60 frames
     float rampFrames = 60.0f;

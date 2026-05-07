@@ -205,9 +205,23 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     // Create persistent probe textures
     CreateProbeTextures();
 
+    // Initialize probe state tracking for importance-based partial update
+    u32 totalProbes = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+    probe_states_.resize(totalProbes);
+    max_probes_per_frame_ = params_.max_probes_per_frame;
+
+    // Create probe update list buffer (CPU-writable for priority scheduling)
+    // Size for worst case: all probes updated in one frame
+    {
+        u32 totalProbes = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+        BufferDesc updateListDesc{};
+        updateListDesc.size = totalProbes * sizeof(u32);
+        updateListDesc.usage = GPUMemoryUsage::Dynamic;
+        probe_update_list_buffer_ = device_->CreateBuffer(updateListDesc);
+    }
+
     initialized_ = true;
 
-    u32 totalProbes = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
     std::cout << "[LumenDDGI] Initialized (grid: "
               << params_.probe_count_x << "x" << params_.probe_count_y << "x" << params_.probe_count_z
               << " = " << totalProbes << " probes, "
@@ -245,12 +259,13 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list
         };
-        DescriptorSetLayoutDesc layoutDesc{7, traceBindings};
+        DescriptorSetLayoutDesc layoutDesc{8, traceBindings};
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Irradiance: 2 UBO + 3 SSBO (ray data + irradiance history + irradiance output) ---
+    // --- Irradiance: 2 UBO + 3 SSBO (ray data + irradiance history + irradiance output) + 1 SSBO (update list) ---
     {
         DescriptorSetLayoutBinding irradianceBindings[] = {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
@@ -258,12 +273,13 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance history buffer
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance output buffer
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list
         };
-        DescriptorSetLayoutDesc layoutDesc{5, irradianceBindings};
+        DescriptorSetLayoutDesc layoutDesc{6, irradianceBindings};
         irradiance_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Depth: 2 UBO + 3 SSBO (ray data + depth history + depth output) ---
+    // --- Depth: 2 UBO + 3 SSBO (ray data + depth history + depth output) + 1 SSBO (update list) ---
     // Buffer-based: no texture3D, uses storage buffer for Apple Silicon performance
     {
         DescriptorSetLayoutBinding depthBindings[] = {
@@ -272,8 +288,9 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // depth history buffer
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // depth output buffer
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list
         };
-        DescriptorSetLayoutDesc layoutDesc{5, depthBindings};
+        DescriptorSetLayoutDesc layoutDesc{6, depthBindings};
         depth_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 }
@@ -403,22 +420,36 @@ void LumenDDGIPass::CreateProbeTextures() {
         }
     }
 
-    // Depth buffers: float[probeCount * 8], one float per octant per probe
+    // Depth buffers: octahedral 8x8 depth map per probe
+    // Layout per probe: [mean0..mean63, variance0..variance63] = 128 floats
     // Apple Silicon: buffer load/store is much faster than texture3D sampling
+    static constexpr u32 DDGI_DEPTH_RES = 8;
+    static constexpr u32 DDGI_DEPTH_TEXELS = DDGI_DEPTH_RES * DDGI_DEPTH_RES; // 64
+    static constexpr u32 DDGI_FLOATS_PER_PROBE = DDGI_DEPTH_TEXELS * 2; // 128
+    u64 depthSize = (u64)totalProbes * DDGI_FLOATS_PER_PROBE * sizeof(float);
+    float depthMeanInit = params_.ray_max_distance;  // start "open" — no occlusion assumed
+    float depthVarInit  = params_.probe_spacing * params_.probe_spacing * 0.25f; // non-zero avoids Chebyshev singularity
+
     for (int i = 0; i < 3; i++) {
         BufferDesc desc{};
-        desc.size = totalProbes * 8 * sizeof(float);
+        desc.size = depthSize;
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.structured.elementCount = totalProbes * 8;
+        desc.structured.elementCount = totalProbes * DDGI_FLOATS_PER_PROBE;
         desc.structured.elementStride = sizeof(float);
         depth_buffers_[i] = device_->CreateBuffer(desc);
 
-        // Zero-initialize
-        void* mapped = device_->MapBuffer(depth_buffers_[i]);
+        // Initialize with sensible defaults
+        float* mapped = static_cast<float*>(device_->MapBuffer(depth_buffers_[i]));
         if (mapped) {
-            memset(mapped, 0, totalProbes * 8 * sizeof(float));
+            for (u32 p = 0; p < totalProbes; ++p) {
+                float* probe = mapped + p * DDGI_FLOATS_PER_PROBE;
+                // First 64 floats: depth mean — fill with ray_max_distance (open)
+                for (u32 j = 0; j < DDGI_DEPTH_TEXELS; ++j) probe[j] = depthMeanInit;
+                // Next 64 floats: depth variance — non-zero to avoid Chebyshev singularity
+                for (u32 j = DDGI_DEPTH_TEXELS; j < DDGI_FLOATS_PER_PROBE; ++j) probe[j] = depthVarInit;
+            }
             device_->UnmapBuffer(depth_buffers_[i]);
         }
     }
@@ -570,38 +601,6 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 }
             }
 
-            // DEBUG: Log DDGI state (first 10 frames)
-            static u32 dbgFrame = 0;
-            if (dbgFrame < 10) {
-                // Log SDF cascade data being passed to DDGI
-                auto& sdfRef = nanite::GlobalSDF::Get();
-                std::cout << "[LumenDDGI] Frame " << dbgFrame
-                          << " frameIdx=" << frameIdx
-                          << " probeCount=" << probeCountTotal
-                          << " rays/probe=" << params_.rays_per_probe
-                          << "\n  sdfAvailable=" << (sdfAvailable ? "YES" : "NO (skipping trace)")
-                          << " sdfCascadeCount=" << (sdfAvailable ? sdfRef.GetConfig().cascade_count : 0)
-                          << "\n  prevColorTex=" << prevColorTex
-                          << " ray_data_buffer=" << ray_data_buffer_
-                          << "\n  irradiance_out=" << irradiance_buffers_[outIdx]
-                          << " irradiance_hist=" << irradiance_buffers_[histIdx]
-                          << "\n  depth_out=" << depth_buffers_[outIdx]
-                          << " depth_hist=" << depth_buffers_[histIdx]
-                          << "\n  sdf[0]=" << sdfTextures[0]
-                          << " sdf[1]=" << sdfTextures[1]
-                          << " sdf[2]=" << sdfTextures[2];
-                if (sdfAvailable && sdfRef.GetConfig().cascade_count > 0) {
-                    const auto& c0 = sdfRef.GetCascade(0);
-                    std::cout << "\n  cascade0_origin=(" << c0.origin.x << "," << c0.origin.y << "," << c0.origin.z << ")"
-                              << " extent=(" << c0.extent.x << "," << c0.extent.y << "," << c0.extent.z << ")"
-                              << " voxelSize=" << c0.voxel_size
-                              << " res=" << c0.resolution
-                              << " mipLevels=" << c0.mip_levels;
-                }
-                std::cout << std::endl;
-                dbgFrame++;
-            }
-
             // ---- Upload GlobalShaderData ----
             {
                 // Must match CommonTypes.metal GlobalShaderData layout
@@ -687,11 +686,116 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     }
                     vd.SdfCascadeCount = sdf.GetConfig().cascade_count;
 
+                    vd.ProbeUpdateCount = probeCountTotal;  // default: update all; refined below
+                    vd._pad_before_relocation = 0.0f;
+
                     *mapped = vd;
                     device_->UnmapBuffer(volume_cb_[frameIdx]);
 
                     // Store for C++ access via GetVolumeData()
                     volume_data_ = vd;
+                }
+            }
+
+            // ================================================================
+            // Priority scheduling: select top-N probes to update this frame
+            // ================================================================
+            u32 updateCount = probeCountTotal;  // default: update all probes
+
+            // First frame: full update of all probes to initialize irradiance/depth.
+            // Subsequent frames: priority scheduling updates only top-N probes.
+            bool isFirstFrame = (camera_data.frame_index <= 1);
+
+            // Read back variance from previous frame's depth buffer for priority scheduling.
+            // histIdx is 2 frames behind — GPU has long since finished writing to it.
+            if (!isFirstFrame &&
+                probe_states_.size() == probeCountTotal &&
+                probe_update_list_buffer_ != handles::INVALID_RESOURCE) {
+                float* depthData = static_cast<float*>(device_->MapBuffer(depth_buffers_[histIdx]));
+                if (depthData) {
+                    static constexpr u32 DDGI_DEPTH_TEXELS = 64;
+                    static constexpr u32 DDGI_FLOATS_PER_PROBE = DDGI_DEPTH_TEXELS * 2;
+                    for (u32 i = 0; i < probeCountTotal; ++i) {
+                        float maxVar = 0.0f;
+                        for (u32 o = 0; o < DDGI_DEPTH_TEXELS; ++o) {
+                            maxVar = std::max(maxVar, depthData[i * DDGI_FLOATS_PER_PROBE + DDGI_DEPTH_TEXELS + o]);
+                        }
+                        probe_states_[i].max_depth_variance = maxVar;
+                    }
+                    device_->UnmapBuffer(depth_buffers_[histIdx]);
+                }
+
+                // Compute priority scores and select top-N probes
+                float maxExpectedVariance = params_.probe_spacing * params_.probe_spacing;
+
+                struct ProbePriority { u32 index; float score; };
+                std::vector<ProbePriority> priorities(probeCountTotal);
+
+                // Extract camera position from inverse view (already computed above)
+                math::v3 cameraPos = {
+                    0.0f, 0.0f, 0.0f  // placeholder, computed below
+                };
+                {
+                    math::m4x4 invView = rhi::math::Inverse(camera_data.view_matrix);
+                    cameraPos = { invView.columns[3][0], invView.columns[3][1], invView.columns[3][2] };
+                }
+
+                for (u32 i = 0; i < probeCountTotal; ++i) {
+                    // Compute probe world position
+                    u32 ix = i % params_.probe_count_x;
+                    u32 iy = (i / params_.probe_count_x) % params_.probe_count_y;
+                    u32 iz = i / (params_.probe_count_x * params_.probe_count_y);
+                    math::v3 probePos = {
+                        probe_origin_.x + (float)ix * params_.probe_spacing,
+                        probe_origin_.y + (float)iy * params_.probe_spacing,
+                        probe_origin_.z + (float)iz * params_.probe_spacing
+                    };
+
+                    math::v3 diff = probePos - cameraPos;
+                    float dist2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+                    float distScore = 1.0f / (1.0f + dist2);
+                    float varianceScore = std::min(probe_states_[i].max_depth_variance / maxExpectedVariance, 1.0f);
+                    float ageScore = std::min(float(current_frame_index - probe_states_[i].last_update_frame), 30.0f) / 30.0f;
+
+                    priorities[i] = { i, distScore + varianceScore * 0.5f + ageScore * 0.3f };
+                }
+
+                // Partial sort: top-N only
+                updateCount = std::min(max_probes_per_frame_, probeCountTotal);
+                std::partial_sort(priorities.begin(), priorities.begin() + updateCount,
+                                  priorities.end(), [](const ProbePriority& a, const ProbePriority& b) {
+                                      return a.score > b.score;
+                                  });
+
+                // Write update list buffer
+                u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffer_));
+                if (updateList) {
+                    for (u32 i = 0; i < updateCount; ++i) {
+                        updateList[i] = priorities[i].index;
+                        probe_states_[priorities[i].index].last_update_frame = current_frame_index;
+                    }
+                    device_->UnmapBuffer(probe_update_list_buffer_);
+                }
+
+                // Patch ProbeUpdateCount in the volume constant buffer
+                {
+                    auto* mapped = static_cast<DDGIVolumeData*>(device_->MapBuffer(volume_cb_[frameIdx]));
+                    if (mapped) {
+                        mapped->ProbeUpdateCount = updateCount;
+                        device_->UnmapBuffer(volume_cb_[frameIdx]);
+                        volume_data_.ProbeUpdateCount = updateCount;
+                    }
+                }
+            }
+
+            // First frame: fill update list with all probe indices (0..N-1)
+            if (isFirstFrame && probe_update_list_buffer_ != handles::INVALID_RESOURCE) {
+                u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffer_));
+                if (updateList) {
+                    for (u32 i = 0; i < updateCount; ++i) {
+                        updateList[i] = i;
+                    }
+                    device_->UnmapBuffer(probe_update_list_buffer_);
                 }
             }
 
@@ -712,26 +816,16 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
                     {2, DescriptorType::StorageBuffer, ray_data_buffer_},
+                    {3, DescriptorType::StorageBuffer, probe_update_list_buffer_},
                 };
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 7);
+                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 8);
 
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, trace_layout_, 0, 1, sets, 0, nullptr);
 
-                u32 totalRayThreads = probeCountTotal * params_.rays_per_probe;
-                u32 gx = (totalRayThreads + 63) / 64;  // threadGroupSize = (64,1,1)
-
-                // DEBUG: Log first 3 frames
-                static u32 traceFrame = 0;
-                if (traceFrame < 3) {
-                    std::cout << "[LumenDDGI] TRACE dispatch: gx=" << gx
-                              << " totalRayThreads=" << totalRayThreads
-                              << " probeCountTotal=" << probeCountTotal
-                              << " raysPerProbe=" << params_.rays_per_probe
-                              << std::endl;
-                    traceFrame++;
-                }
+                u32 totalRayThreads = updateCount * params_.rays_per_probe;
+                u32 gx = (totalRayThreads + 63) / 64;
 
                 cmd->Dispatch(gx, 1, 1);
             }
@@ -758,14 +852,15 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {2, DescriptorType::StorageBuffer, ray_data_buffer_},
                     {3, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
                     {4, DescriptorType::StorageBuffer, irradiance_buffers_[outIdx]},
+                    {5, DescriptorType::StorageBuffer, probe_update_list_buffer_},
                 };
-                UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 5);
+                UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 6);
 
                 cmd->BindComputePipeline(irradiance_pipeline_);
                 const DescriptorSetHandle sets[] = { irradiance_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, irradiance_layout_, 0, 1, sets, 0, nullptr);
 
-                cmd->Dispatch((probeCountTotal + 63) / 64, 1, 1);
+                cmd->Dispatch((updateCount + 63) / 64, 1, 1);
             }
 
             // Barrier: irradiance UAV -> SRV
@@ -778,7 +873,6 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 cmd->InsertBarrier(&barrier, 1);
             }
 
-            // ================================================================
             // Sub-pass 3: UpdateDepth (buffer-based, no texture3D)
             // ================================================================
             if (depth_pipeline_ != handles::INVALID_PIPELINE &&
@@ -790,14 +884,15 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {2, DescriptorType::StorageBuffer, ray_data_buffer_},
                     {3, DescriptorType::StorageBuffer, depth_buffers_[histIdx]},  // history
                     {4, DescriptorType::StorageBuffer, depth_buffers_[outIdx]},   // output
+                    {5, DescriptorType::StorageBuffer, probe_update_list_buffer_},
                 };
-                UpdateDescriptorSet(device_, depth_ds_[frameIdx], depthParams, 5);
+                UpdateDescriptorSet(device_, depth_ds_[frameIdx], depthParams, 6);
 
                 cmd->BindComputePipeline(depth_pipeline_);
                 const DescriptorSetHandle sets[] = { depth_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, depth_layout_, 0, 1, sets, 0, nullptr);
 
-                cmd->Dispatch((probeCountTotal + 63) / 64, 1, 1);
+                cmd->Dispatch((updateCount + 63) / 64, 1, 1);
             }
 
             // Barrier: depth buffer UAV -> SRV

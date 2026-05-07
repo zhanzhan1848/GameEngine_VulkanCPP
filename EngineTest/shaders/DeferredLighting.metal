@@ -62,6 +62,21 @@ static float3 _ddgiSampleIrradiance(float3 wp, float3 n, float3 origin, float sp
     return max(r, float3(0.0f));
 }
 
+// ACES Filmic tone mapping
+static float3 ACESFilm(float3 x) {
+    float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0f, 1.0f);
+}
+
+// Apply exposure + tone map + gamma
+static float3 toneMap(float3 color) {
+    float exposure = 1.2f;
+    color *= exposure;
+    color = ACESFilm(color);
+    color = pow(color, float3(1.0f / 2.2f));
+    return color;
+}
+
 // ================================================================================================
 // Data Structures (Must match C++ Binding)
 // ================================================================================================
@@ -337,8 +352,7 @@ fragment float4 fragmentBlit(
     float3 color = inputTex.sample(s, in.uv).rgb;
 
     // Final output: tone map + gamma (fragmentLighting outputs HDR linear)
-    color = color / (color + float3(1.0));       // Reinhard
-    color = pow(color, float3(1.0 / 2.2));        // sRGB gamma
+    color = toneMap(color);
 
     return float4(color, 1.0);
 }
@@ -351,6 +365,7 @@ fragment float4 fragmentBlitDDGI(
     texture2d<float, access::sample> giIndirectTex   [[texture(2)]],
     texture2d<float, access::sample> albedoTex       [[texture(3)]],
     texture2d<float, access::sample> normalTex       [[texture(4)]],
+    texture2d<float, access::sample> ssaoTex         [[texture(5)]],
 
     constant float4x4& invViewProj         [[buffer(0)]],
     constant float4&    probeOriginSpacing [[buffer(1)]],
@@ -362,15 +377,16 @@ fragment float4 fragmentBlitDDGI(
     constexpr sampler s2d(coord::normalized, address::clamp_to_edge, filter::linear);
     constexpr sampler depthS(coord::normalized, address::clamp_to_edge, filter::nearest);
 
-    // Scene color = direct lighting (from deferred pass)
-    float3 sceneColor = sceneColorTex.sample(s2d, uv).rgb;
+    // Scene color: RGB = direct lighting (HDR linear), A = shadow factor
+    float4 sceneSample = sceneColorTex.sample(s2d, uv);
+    float3 sceneColor = sceneSample.rgb;
+    float directShadow = sceneSample.a;
 
     float depth = depthTex.sample(depthS, uv);
 
     // Background (sky) pass through
     if (depth >= 1.0f) {
-        sceneColor = sceneColor / (sceneColor + float3(1.0f));
-        sceneColor = pow(sceneColor, float3(1.0f / 2.2f));
+        sceneColor = toneMap(sceneColor);
         return float4(sceneColor, 1.0f);
     }
 
@@ -384,11 +400,21 @@ fragment float4 fragmentBlitDDGI(
     }
 
     // Fixed DDGI weight
-    float ddgiWeight = 0.4f;
+    float ddgiWeight = 1.0f;
 
-    // Modulate indirect by albedo for diffuse response
+    // SSAO: modulate DDGI indirect with contact occlusion.
+    // Use direct SSAO value (trace already applies power curve).
+    float ssao = ssaoTex.sample(s2d, uv).r;
+    if (ssao <= 0.0f) ssao = 1.0f;
+    float ao = ssao;
+
+    // Shadow on indirect: direct shadow map as low-frequency multiplier
+    // to prevent DDGI light leaking into shadowed areas.
+    float indirectShadow = mix(1.0f, 0.8f, 1.0f - directShadow);
+
+    // Modulate indirect by albedo for diffuse response, with AO + shadow darkening
     float4 albedo = albedoTex.sample(s2d, uv);
-    float3 ddgiDiffuse = albedo.rgb * indirect * ddgiWeight;
+    float3 ddgiDiffuse = albedo.rgb * indirect * ddgiWeight * ao * indirectShadow;
 
     // DIAGNOSTIC: output DDGI indirect only (no direct lighting)
     // Uncomment the line below to enable; comment out to restore normal composite.
@@ -396,15 +422,13 @@ fragment float4 fragmentBlitDDGI(
 #ifdef DDGI_DIAGNOSTIC_INDIRECT_ONLY
     // Show DDGI irradiance directly (tone-mapped for visibility)
     float3 lit = ddgiDiffuse * 5.0f; // boost for visibility
-    lit = lit / (lit + float3(1.0f));
-    lit = pow(lit, float3(1.0f / 2.2f));
+    lit = toneMap(lit);
 #else
     // Final: direct + indirect
     float3 lit = sceneColor + ddgiDiffuse;
 
     // Tone map + gamma
-    lit = lit / (lit + float3(1.0f));
-    lit = pow(lit, float3(1.0f / 2.2f));
+    lit = toneMap(lit);
 #endif
 
     return float4(lit, 1.0f);
@@ -451,13 +475,10 @@ fragment float4 fragmentLighting_gpuDriven(
     depth2d<float> depthTex [[texture(5)]],
     texture2d<float> shadowMap0 [[texture(6)]],
     texture2d<float> shadowMap1 [[texture(7)]],
-    texture2d<float> ssaoTex [[texture(9)]],
 
     sampler defaultSampler [[sampler(8)]]
 ) {
     constexpr sampler linearSampler(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
-    // depth2d 必须用 nearest：linear 插值会在几何边界混合前景/背景深度，
-    // 产生不存在的深度值 → worldPos 重建偏移 → shadow 比较翻转 → 闪烁
     constexpr sampler depthSampler(coord::normalized, filter::nearest, mip_filter::none, address::clamp_to_edge);
 
     float2 uv = in.uv;
@@ -465,7 +486,7 @@ fragment float4 fragmentLighting_gpuDriven(
     // 1. Sample GBuffer
     float4 albedo = albedoTex.sample(linearSampler, uv);
     float3 normal = normalTex.sample(linearSampler, uv).xyz;
-    normal = normal * 2.0 - 1.0; // Unpack [0,1] -> [-1,1]
+    normal = normal * 2.0 - 1.0;
     float depth = depthTex.sample(depthSampler, uv);
 
     // Discard background pixels
@@ -476,14 +497,6 @@ fragment float4 fragmentLighting_gpuDriven(
     float4 orm = ormTex.sample(linearSampler, uv);
     float roughness = orm.g;
     float metallic = orm.b;
-
-    // Sample SSAO texture (R16_Float, 0=fully occluded, 1=unoccluded)
-    // Fallback to 1.0 (no occlusion) if SSAO is not available
-    float ssao = ssaoTex.sample(linearSampler, uv).r;
-    if (ssao <= 0.0) ssao = 1.0;
-    // Moderate AO: power curve adds depth to occluded areas
-    // pow(1.5) preserves some ambient base so DDGI indirect can build on it
-    float ao = pow(ssao, 1.5);
 
     // 2. Reconstruct World Position
     float2 ndc;
@@ -540,17 +553,15 @@ fragment float4 fragmentLighting_gpuDriven(
     }
 
     // 5. Ambient + SSAO + Shadow
-    // Base ambient provides reasonable fill so DDGI only needs to add
-    // 20-60% indirect boost rather than rescuing near-black areas.
-    float3 ambient = albedo.rgb * 0.08;
+    // DDGI replaces traditional ambient — set to zero.
+    float3 ambient = float3(0.0f);
 
     // Shadow darkens ambient too: in full shadow, ambient is reduced by ~70%
     float ambientShadow = mix(1.0, 0.3, 1.0 - shadow);
-    float3 color = Lo + ambient * ao * ambientShadow;
+    float3 color = Lo + ambient * ambientShadow;
 
-    // NOTE: No tone mapping here — output is HDR linear to intermediate texture.
-    // Final blit shader handles tone mapping + gamma before backbuffer write.
-    return float4(color, 1.0);
+    // Output: RGB = direct lighting (HDR linear), A = shadow factor for indirect modulation
+    return float4(color, shadow);
 }
 
 // Composite blit: scene color + SSGI indirect lighting with PBR-correct composition
@@ -575,11 +586,8 @@ fragment float4 fragmentBlitComposite(
     // Additive: direct + indirect (PBR rendering equation)
     float3 result = scene.rgb + indirect;
 
-    // Reinhard tone mapping (handles HDR values from direct + indirect)
-    result = result / (result + 1.0);
-
-    // Gamma correction (linear -> sRGB)
-    result = pow(result, float3(1.0 / 2.2));
+    // Tone map + gamma
+    result = toneMap(result);
 
     return float4(result, 1.0);
 }
@@ -590,12 +598,13 @@ fragment float4 fragmentBlitComposite(
 
 fragment float4 fragmentBlitFusion(
     VertexOut in [[stage_in]],
-    texture2d<float> sceneColor  [[texture(0)]],   // direct lighting (deferred output)
+    texture2d<float> sceneColor  [[texture(0)]],   // direct lighting (deferred output), A = shadow
     texture2d<float> ssgiColor   [[texture(1)]],   // SSGI irradiance
     texture2d<float> ddgiColor   [[texture(2)]],   // DDGI irradiance (half-res)
     texture2d<float> spgiColor   [[texture(3)]],   // Screen Probe GI irradiance
     texture2d<float> albedoTex   [[texture(4)]],   // GBuffer albedo
-    texture2d<float> depthTex    [[texture(5)]])    // GBuffer depth
+    texture2d<float> depthTex    [[texture(5)]],   // GBuffer depth
+    texture2d<float> ssaoTex     [[texture(6)]])   // SSAO
 {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
     constexpr sampler ds(coord::normalized, filter::nearest, mip_filter::none, address::clamp_to_edge);
@@ -611,8 +620,20 @@ fragment float4 fragmentBlitFusion(
         return float4(sky, 1.0f);
     }
 
-    float3 direct  = sceneColor.sample(s, uv).rgb;
+    // Direct lighting + shadow factor (from deferred output alpha)
+    float4 sceneSample = sceneColor.sample(s, uv);
+    float3 direct = sceneSample.rgb;
+    float directShadow = sceneSample.a;
+
     float3 albedo  = albedoTex.sample(s, uv).rgb;
+
+    // SSAO: contact occlusion modulates all indirect
+    float ssao = ssaoTex.sample(s, uv).r;
+    if (ssao <= 0.0f) ssao = 1.0f;
+    float ao = ssao;
+
+    // Shadow on indirect: prevent GI light leaking into shadowed areas
+    float indirectShadow = mix(1.0f, 0.8f, 1.0f - directShadow);
 
     // DDGI irradiance (low-frequency global indirect)
     float3 ddgi_irr = ddgiColor.sample(s, uv).rgb;
@@ -624,24 +645,28 @@ fragment float4 fragmentBlitFusion(
     // Screen Probe GI irradiance (medium-frequency screen-space indirect)
     float4 spgi_sample = spgiColor.sample(s, uv);
     float3 spgi_irr = spgi_sample.rgb;
-    float  spgi_conf = spgi_sample.a;  // confidence from Gather
+    float  spgi_conf = spgi_sample.a;
 
     // SSGI irradiance (high-frequency contact indirect)
-    float3 ssgi_irr = ssgiColor.sample(s, uv).rgb;
+    float4 ssgi_sample = ssgiColor.sample(s, uv);
+    float3 ssgi_irr = ssgi_sample.rgb;
+    float  ssgi_hit_dist = ssgi_sample.a;
 
-    // Fusion: confidence-based blending
-    // Where SPGI is confident → use SPGI (better screen-space detail)
-    // Where SPGI is not confident → fall back to DDGI (global coverage)
-    // SSGI adds high-frequency contact indirect on top
-    float3 base_gi = mix(ddgi_irr, spgi_irr, spgi_conf);
-    float3 indirect = albedo * base_gi * 0.5f
-                    + ssgi_irr * 0.3f;
+    // ================================================================
+    // GI Fusion: frequency-separated + confidence-driven
+    // ================================================================
+    float3 base_irr = ddgi_irr
+                    + spgi_irr * spgi_conf;
+
+    float ssgi_hit_conf = saturate(1.0f - ssgi_hit_dist / 2.0f);
+    float ssgi_conf = ssgi_hit_conf * (1.0f - spgi_conf);
+
+    float3 indirect = albedo * (base_irr + ssgi_irr * ssgi_conf * 0.3f) * ao * indirectShadow;
 
     float3 result = direct + indirect;
 
     // Tone map + gamma
-    result = result / (result + float3(1.0f));
-    result = pow(result, float3(1.0f / 2.2f));
+    result = toneMap(result);
 
     return float4(result, 1.0f);
 }

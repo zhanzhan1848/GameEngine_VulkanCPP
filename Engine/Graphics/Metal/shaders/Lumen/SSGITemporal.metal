@@ -195,9 +195,14 @@ kernel void ssgi_temporal(
     float edge_fade = smoothstep(0.0, 0.05, min(edge_dist.x, edge_dist.y));
 
     // -----------------------------------------------------------------------
-    // Step 6: Exponential blend
+    // Step 6: Confidence-modulated exponential blend
     // -----------------------------------------------------------------------
-    float effective_feedback = params.feedback * edge_fade * disocclusion_fade;
+    // Hit distance confidence: close hits → high confidence → more history
+    // Far hits / misses (hit_dist ~ radius=2.0) → low confidence → less history
+    float hit_confidence = saturate(1.0 - current_hit_dist / 2.0);
+    float confidence_scale = mix(0.6, 1.0, hit_confidence);
+
+    float effective_feedback = params.feedback * edge_fade * disocclusion_fade * confidence_scale;
 
     float3 result_color = mix(current_ssgi, clamped_history, effective_feedback);
     float  result_dist  = mix(current_hit_dist, history_hit_dist, effective_feedback);

@@ -5,8 +5,10 @@
  * This is the single source of truth for DDGI shader data structures.
  * All DDGI shaders include this file.
  *
- * The C++ struct layout must match exactly — see LumenDDGIPass.cpp for the
- * matching C++ definitions used when uploading constant buffers.
+ * IMPORTANT: The struct layout must match the C++ DDGIVolumeData exactly.
+ * C++ uses math::v4 (16 bytes, 16-byte aligned) for all vector types.
+ * Metal uses float4 (same layout). float3/uint3 have different size/alignment
+ * than C++ v4/v3u — so we use float4/uint[4] with explicit padding to match.
  */
 
 #ifndef DDGI_VOLUME_DATA_METAL
@@ -17,7 +19,8 @@
 // ============================================================================
 
 #define DDGI_SH_COEFF_COUNT  9
-#define DDGI_DEPTH_DIRS      8
+#define DDGI_DEPTH_RES       8
+#define DDGI_DEPTH_TEXELS    64  // DDGI_DEPTH_RES * DDGI_DEPTH_RES
 #define DDGI_MAX_SDF_STEPS   128
 #define DDGI_SH_C0           0.282095f
 #define DDGI_SH_C1           0.488603f
@@ -27,38 +30,50 @@ constant float DDGI_SH_C2_1  = 0.315392f;
 constant float DDGI_SH_C2_2  = 0.546274f;
 
 // ============================================================================
-// DDGIVolumeData (constant buffer, ~256 bytes)
-// Must match C++ DDGIVolumeData struct in LumenDDGIPass.cpp
+// DDGIVolumeData (constant buffer, ~304 bytes)
+// Must match C++ DDGIVolumeData struct in LumenDDGIPass.cpp EXACTLY.
+//
+// C++ uses math::v4 (float[4], align 16) for ProbeOrigin, SdfOrigins, etc.
+// Metal float3 has size 12 but C++ v4 has size 16 — so we use float4 here
+// to match. Similarly uint3 (Metal: size 12) vs u32[4] (C++: size 16).
 // ============================================================================
 
 struct DDGIVolumeData {
     // Probe grid definition
-    float3   ProbeOrigin;          //  0: World-space origin of the grid
-    float    ProbeSpacing;         // 12: Distance between probes
-    uint3    ProbeCounts;          // 16: (Nx, Ny, Nz)
-    uint     RaysPerProbe;         // 28: 128
-    uint     ProbeCountTotal;      // 32: Nx*Ny*Nz
+    float4   ProbeOrigin;             //   0: xyz = origin, w unused (C++: math::v4)
+    float    ProbeSpacing;            //  16
+
+    float    _pad_before_counts[3];   //  20: matches C++ explicit padding
+    uint     ProbeCounts[4];          //  32: [0]=Nx [1]=Ny [2]=Nz [3] unused
+    uint     RaysPerProbe;            //  48
+    uint     ProbeCountTotal;         //  52
 
     // Temporal filtering
-    float    IrradianceBlurSigma;  // 36: EMA alpha for irradiance (0.02)
-    float    DepthBlurSigma;       // 40: EMA alpha for depth (0.2)
+    float    IrradianceBlurSigma;     //  56
+    float    DepthBlurSigma;          //  60
 
     // Frame
-    float    DeltaTime;            // 44
-    uint     FrameIndex;           // 48
-    float    RayMaxDistance;       // 52: 20.0
+    float    DeltaTime;               //  64
+    uint     FrameIndex;              //  68
+    float    RayMaxDistance;          //  72
 
-    float    ProbeHysteresis;      // 56
-    float    TemporalAlpha;        // 60
+    float    ProbeHysteresis;         //  76
+    float    TemporalAlpha;           //  80
+    uint     ProbeUpdateCount;        //  84
+
+    float    _pad_before_relocation;  //  88
+    int      ProbeRelocationShift[3]; //  92: grid shift in probe cells
+    float    _pad_to_sdf[2];          // 104: padding to reach 112 (float4 align)
 
     // GlobalSDF cascade data (3 cascades)
-    float4   SdfOrigins[3];       //  64  (float3 + 4 bytes padding)
-    float4   SdfVoxelSizes[3];    // 80 (float + 12 bytes padding)
-    float4   SdfExtents[3];       // 112 (float3 + 4 bytes padding)
-    uint     SdfResolutions[3];   // 148
-    uint     SdfCascadeCount;     // 160
-    float3   LightDirection;      // 256: normalized light direction (world space)
-    float3   LightColor;          // 272: light color (linear HDR)
+    float4   SdfOrigins[3];           // 112
+    float4   SdfVoxelSizes[3];        // 160
+    float4   SdfExtents[3];           // 208
+    uint     SdfResolutions[3];       // 256
+    uint     SdfCascadeCount;         // 268
+
+    float4   LightDirection;          // 272: xyz = light dir, w unused (C++: math::v4)
+    float4   LightColor;              // 288: xyz = light color, w unused (C++: math::v4)
 };
 
 // ============================================================================
@@ -104,13 +119,15 @@ static float3 shDot(thread const float3* shCoeffs, float3 d)
 // Helpers
 // ============================================================================
 
+// Extract uint3 probe counts from the uint[4] array
+static uint3 ddgiGetProbeCounts(constant DDGIVolumeData& vol) {
+    return uint3(vol.ProbeCounts[0], vol.ProbeCounts[1], vol.ProbeCounts[2]);
+}
+
 static float3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex)
 {
     const float INV_PHI = 0.6180339887498948482f;
     const float PI = 3.14159265358979323846f;
-    // Fixed R2 directions (no per-frame rotation) — eliminates L1 temporal noise
-    // with 64 rays. Rotation causes frame-to-frame L1 variance that tetrahedral
-    // interpolation amplifies into visible flickering, even with hysteresis 0.01.
     float u = fract((float(rayIndex) + 0.5f) * INV_PHI);
     float v = fract((float(rayIndex) + 0.5f) * INV_PHI * INV_PHI);
     float theta = 2.0f * PI * u;
@@ -131,6 +148,49 @@ static uint3 ddgiProbeGridCoord(uint probeIdx, uint3 counts)
 static float3 ddgiProbeWorldPos(uint3 gc, float3 origin, float spacing)
 {
     return origin + float3(float(gc.x), float(gc.y), float(gc.z)) * spacing;
+}
+
+// ============================================================================
+// Octahedral depth mapping
+// ============================================================================
+
+// Sphere direction → octahedral UV in [0,1]²
+static float2 octahedralEncode(float3 d)
+{
+    float l1norm = abs(d.x) + abs(d.y) + abs(d.z);
+    float2 uv = d.xy / l1norm;
+    if (d.z < 0.0f) {
+        uv = (1.0f - abs(uv.yx)) * select(float2(-1.0f), float2(1.0f), uv.xy >= 0.0f);
+    }
+    return uv * 0.5f + 0.5f;
+}
+
+// Octahedral UV in [0,1]² → sphere direction
+static float3 octahedralDecode(float2 uv)
+{
+    float2 p = uv * 2.0f - 1.0f;
+    float3 d = float3(p, 1.0f - abs(p.x) - abs(p.y));
+    if (d.z < 0.0f) {
+        d.xy = (1.0f - abs(d.yx)) * select(float2(-1.0f), float2(1.0f), d.xy >= 0.0f);
+    }
+    return normalize(d);
+}
+
+// Nearest-neighbor depth sampling from octahedral storage buffer.
+// Conservative: avoids bilinear blending across depth discontinuities
+// which creates false mid-depths and causes Chebyshev visibility failures.
+// Returns float2(mean, variance)
+static float2 sampleDepthOctahedral(device const float* buf, uint probeIdx, float3 dir)
+{
+    constexpr uint res = DDGI_DEPTH_RES;
+    constexpr uint texels = res * res;
+
+    float2 uv = octahedralEncode(dir);
+    uint2 texel = uint2(clamp(uint(uv.x * float(res)), 0u, res - 1u),
+                        clamp(uint(uv.y * float(res)), 0u, res - 1u));
+    uint idx = texel.y * res + texel.x;
+    uint probeBase = probeIdx * texels * 2u;
+    return float2(buf[probeBase + idx], buf[probeBase + texels + idx]);
 }
 
 #endif // DDGI_VOLUME_DATA_METAL

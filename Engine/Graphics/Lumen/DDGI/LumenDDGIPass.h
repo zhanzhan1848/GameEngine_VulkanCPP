@@ -3,6 +3,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
+#include <vector>
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
@@ -13,6 +14,15 @@ namespace primal::graphics::rendergraph {
 }
 
 namespace primal::graphics::lumen {
+
+// ============================================================================
+// DDGI Probe State (for importance-based partial update scheduling)
+// ============================================================================
+
+struct DDGIProbeState {
+    float max_depth_variance = 0.0f;
+    u32 last_update_frame = 0;
+};
 
 // ============================================================================
 // DDGI Parameters
@@ -28,6 +38,7 @@ struct DDGIRuntimeParams {
     float irradiance_temporal_weight = 0.02f;   // EMA alpha for irradiance
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
     float ray_max_distance = 50.0f;             // Must reach geometry across probe grid
+    u32   max_probes_per_frame = 256;            // Max probes updated per frame (importance-based)
 };
 
 /// Per-frame camera data that the caller must provide.
@@ -78,18 +89,22 @@ struct DDGIVolumeData {
     float    ProbeHysteresis;         // offset 76
     float    TemporalAlpha;           // offset 80
 
+    // Partial update scheduling
+    u32      ProbeUpdateCount;        // offset 84 — number of probes to update this frame
+    float    _pad_before_relocation;  // offset 88
+
     // Probe grid relocation (camera-following grid shift, in probe cells)
-    int      ProbeRelocationShift[3]; // offset 84, 12 bytes — fills padding before SdfOrigins
+    int      ProbeRelocationShift[3]; // offset 92, 12 bytes — fills padding before SdfOrigins
 
     // GlobalSDF cascade data — v4 matches Metal's float4 alignment
-    // C++ inserts implicit padding 84→96 for v4 16-byte alignment
-    math::v4 SdfOrigins[3];           // offset 96
-    math::v4 SdfVoxelSizes[3];        // offset 144
-    math::v4 SdfExtents[3];           // offset 192
-    u32      SdfResolutions[3];       // offset 240
-    u32      SdfCascadeCount;         // offset 252
-    math::v4 LightDirection;          // offset 256: xyz = light dir, w unused
-    math::v4 LightColor;              // offset 272: xyz = light color, w unused
+    // C++ inserts implicit padding 104→112 for v4 16-byte alignment
+    math::v4 SdfOrigins[3];           // offset 112
+    math::v4 SdfVoxelSizes[3];        // offset 160
+    math::v4 SdfExtents[3];           // offset 208
+    u32      SdfResolutions[3];       // offset 256
+    u32      SdfCascadeCount;         // offset 268
+    math::v4 LightDirection;          // offset 272: xyz = light dir, w unused
+    math::v4 LightColor;              // offset 288: xyz = light color, w unused
 };
 
 // ============================================================================
@@ -200,13 +215,18 @@ private:
     rhi::ResourceHandle irradiance_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
-    // Probe depth buffers (buffer-based, 8 octant depths per probe)
+    // Probe depth buffers (buffer-based, 16 floats per probe: 8 mean + 8 variance)
     rhi::ResourceHandle depth_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
 
     // Ray data storage buffer (single, reused each frame)
     rhi::ResourceHandle ray_data_buffer_{ rhi::handles::INVALID_RESOURCE };
+
+    // Probe state tracking (importance-based partial update)
+    std::vector<DDGIProbeState> probe_states_;
+    rhi::ResourceHandle probe_update_list_buffer_{ rhi::handles::INVALID_RESOURCE };
+    u32 max_probes_per_frame_ = 256;
 };
 
 } // namespace primal::graphics::lumen

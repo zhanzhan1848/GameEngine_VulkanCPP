@@ -16,13 +16,13 @@ namespace primal::graphics::lumen {
 
 /// SSAO (GTAO) quality / performance tuning parameters.
 struct SSAOParams {
-    float radius = 1.0f;
-    float power = 1.5f;
-    u32   direction_count = 4;
-    u32   sample_count = 2;
-    float filter_sigma_depth = 10.0f;
-    float filter_sigma_normal = 64.0f;
-    u32   filter_kernel_radius = 2;
+    float radius = 2.0f;                // Medium-scale geometric occlusion only
+    float power = 1.0f;                 // Linear AO — let tone mapping handle contrast
+    u32   direction_count = 6;
+    u32   sample_count = 3;
+    float filter_sigma_depth = 2.0f;    // Relaxed depth tolerance for smoother filtering
+    float filter_sigma_normal = 32.0f;  // Relaxed normal tolerance to blur out grain
+    u32   filter_kernel_radius = 2;     // 5x5 — stays within Apple Silicon texture read limits
 };
 
 /// Per-frame camera data that the caller must provide.

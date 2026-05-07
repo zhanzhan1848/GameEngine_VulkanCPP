@@ -5,10 +5,10 @@
  * Each thread traces one ray from one probe through the GlobalSDF volume.
  * On hit, projects the hit point to screen space and samples the previous
  * frame's lit scene color (direct + shadow + albedo) as radiance.
- * Falls back to analytical NdotL if prev_frame_color is unavailable.
+ * Falls back to analytical NdotL for off-screen hits.
  * On miss, uses sky color.
  *
- * Dispatch: (ProbeCountTotal * RaysPerProbe, 1, 1)
+ * Dispatch: (ProbeUpdateCount * RaysPerProbe, 1, 1)
  * ThreadGroupSize: (64, 1, 1)
  */
 
@@ -174,20 +174,27 @@ kernel void ddgi_trace_rays(
     constant DDGIVolumeData& volume [[buffer(1)]],
 
     // Output: ray data storage buffer
-    device DDGIRayData* ray_buffer [[buffer(2)]]
+    device DDGIRayData* ray_buffer [[buffer(2)]],
+
+    // Probe update list (sparse indices of probes to update this frame)
+    device const uint* probeUpdateList [[buffer(3)]]
 )
 {
-    uint totalRays = volume.ProbeCountTotal * volume.RaysPerProbe;
+    uint totalRays = volume.ProbeUpdateCount * volume.RaysPerProbe;
     if (global_id >= totalRays) return;
 
-    uint probeIdx = global_id / volume.RaysPerProbe;
-    uint rayIdx   = global_id % volume.RaysPerProbe;
+    uint localProbeIdx = global_id / volume.RaysPerProbe;
+    uint localRayIdx   = global_id % volume.RaysPerProbe;
 
-    uint3 gc = ddgiProbeGridCoord(probeIdx, volume.ProbeCounts);
-    float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin, volume.ProbeSpacing);
+    // Map sparse update index to real probe index
+    uint probeIdx = probeUpdateList[localProbeIdx];
 
-    float3 rayDir = ddgiRayDirection(rayIdx, volume.RaysPerProbe, volume.FrameIndex);
+    uint3 gc = ddgiProbeGridCoord(probeIdx, ddgiGetProbeCounts(volume));
+    float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
 
+    float3 rayDir = ddgiRayDirection(localRayIdx, volume.RaysPerProbe, volume.FrameIndex);
+
+    // Trace ray through SDF
     SDFHitResult hit = traceSDF(
         probePos, rayDir, volume.RayMaxDistance,
         sdf_cascade_0, sdf_cascade_1, sdf_cascade_2, volume);
@@ -197,33 +204,31 @@ kernel void ddgi_trace_rays(
     if (hit.hit) {
         result.radiance_and_dist.w = hit.distance;
 
-        // Project hit point to screen space to sample prev frame lit color.
-        // MUST use previous frame's VP: prev_frame_color was rendered with prev camera,
-        // so the hit point must be projected through prev VP to find the correct texel.
-        float4 clipPos = gd.PreviousViewProjection * float4(hit.position, 1.0f);
-        float3 ndc = clipPos.xyz / clipPos.w;
+        float3 N = hit.normal;
+        // Off-screen fallback: conservative sky color only.
+        // Surface Cache will replace this with proper off-screen radiance.
+        float3 analyticalRadiance = DDGI_SKY_COLOR;
 
-        // Check if hit point is on screen
-        bool onScreen = ndc.x >= -1.0f && ndc.x <= 1.0f &&
-                        ndc.y >= -1.0f && ndc.y <= 1.0f &&
-                        ndc.z >= 0.0f  && ndc.z <= 1.0f;
+        // Project hit position to previous frame screen space
+        float4 prevClip = gd.PreviousViewProjection * float4(hit.position, 1.0f);
+        if (prevClip.w > 0.0f) {
+            float2 prevUV = (prevClip.xy / prevClip.w) * 0.5f + 0.5f;
+            prevUV.y = 1.0f - prevUV.y;
 
-        if (onScreen && prev_frame_color.get_width() > 0) {
-            // NDC → UV (Metal: Y flipped)
-            float2 screenUV = float2(ndc.x * 0.5f + 0.5f, ndc.y * -0.5f + 0.5f);
-            constexpr sampler screenS(coord::normalized, filter::linear, address::clamp_to_edge);
-            float3 sceneColor = prev_frame_color.sample(screenS, screenUV).rgb;
+            // Smooth fade: full screen-space at center, blend to analytical at edges
+            float2 edgeDist = abs(prevUV - 0.5f) * 2.0f;
+            float edgeFade = saturate(1.0f - (max(edgeDist.x, edgeDist.y) - 0.4f) / 0.4f);
 
-            // sceneColor is direct lighting only (no DDGI indirect),
-            // so includes correct shadows + albedo with no feedback loop.
-            // Scale for energy conservation (single-bounce approximation).
-            result.radiance_and_dist.xyz = sceneColor * 0.5f;
+            if (edgeFade > 0.0f) {
+                float2 clampedUV = clamp(prevUV, float2(0.0f), float2(1.0f));
+                sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
+                float3 screenRadiance = prev_frame_color.sample(samp, clampedUV).xyz;
+                result.radiance_and_dist.xyz = mix(analyticalRadiance, screenRadiance, edgeFade);
+            } else {
+                result.radiance_and_dist.xyz = analyticalRadiance;
+            }
         } else {
-            // Fallback: analytical direct lighting for off-screen hits
-            float3 N = hit.normal;
-            float3 L = normalize(volume.LightDirection);
-            float NdotL = max(dot(N, L), 0.0f);
-            result.radiance_and_dist.xyz = volume.LightColor * NdotL * 0.5f;
+            result.radiance_and_dist.xyz = analyticalRadiance;
         }
     } else {
         // Miss: negative distance signals miss
@@ -231,5 +236,5 @@ kernel void ddgi_trace_rays(
         result.radiance_and_dist.xyz = DDGI_SKY_COLOR;
     }
 
-    ray_buffer[global_id] = result;
+    ray_buffer[probeIdx * volume.RaysPerProbe + localRayIdx] = result;
 }

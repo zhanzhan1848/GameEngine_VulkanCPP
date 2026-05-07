@@ -19,7 +19,7 @@ struct SSGIParams {
     u32   ray_count = 4;
     float radius = 2.0f;
     float thickness = 0.25f;
-    float temporal_feedback = 0.9f;
+    float temporal_feedback = 0.93f;
     float filter_sigma_depth = 10.0f;
     float filter_sigma_normal = 16.0f;
     float filter_sigma_hit_dist = 8.0f;
@@ -91,16 +91,19 @@ private:
     rhi::PipelineHandle    trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle    temporal_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle    filter_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle    halfres_denoise_pipeline_{ rhi::handles::INVALID_PIPELINE };
 
     // Pipeline layouts
     rhi::PipelineLayoutHandle trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle temporal_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle filter_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle halfres_denoise_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
 
     // Descriptor set layouts
     rhi::DescriptorSetLayoutHandle trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle temporal_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle filter_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle halfres_denoise_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
 
     // Descriptor sets (triple-buffered)
     rhi::DescriptorSetHandle trace_ds_[3]{
@@ -110,6 +113,9 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
     rhi::DescriptorSetHandle filter_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle halfres_denoise_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
 
@@ -126,9 +132,13 @@ private:
     rhi::ResourceHandle filter_params_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
+    rhi::ResourceHandle halfres_denoise_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
 
     // Persistent output textures
     rhi::ResourceHandle trace_texture_{ rhi::handles::INVALID_RESOURCE };       // Half-res RGBA16F
+    rhi::ResourceHandle trace_denoised_texture_{ rhi::handles::INVALID_RESOURCE }; // Half-res denoised RGBA16F
     rhi::ResourceHandle temporal_textures_[3]{                                   // Triple-buffered full-res
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };

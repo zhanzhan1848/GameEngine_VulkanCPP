@@ -87,9 +87,9 @@ static GatherResult gatherProbes(
     result.totalWeight = 0.0f;
     result.bilinearSum = 0.0f;
 
-    constexpr float DEPTH_SIGMA = 0.5f;       // world-space plane distance
-    constexpr float NDC_DEPTH_THRESHOLD = 0.01f; // screen-space depth layer threshold
-    constexpr float WORLD_DIST_SIGMA = 3.0f;  // world-space distance falloff
+    constexpr float DEPTH_SIGMA = 0.8f;       // world-space plane distance
+    constexpr float NDC_DEPTH_THRESHOLD = 0.02f; // screen-space depth layer threshold
+    constexpr float WORLD_DIST_SIGMA = 8.0f;  // world-space distance falloff
     constexpr float MAX_RADIANCE = 8.0f;
     constexpr float BRIGHT_THRESHOLD = 2.0f;
 
@@ -276,7 +276,7 @@ kernel void screen_probe_gather(
         irradiance = exp(avgLog) - 1.0f;
     }
 
-    constexpr float GI_INTENSITY = 3.0f;
+    constexpr float GI_INTENSITY = 5.0f;
     irradiance *= GI_INTENSITY;
 
     outputTexture.write(float4(irradiance, confidence), gid);

@@ -38,17 +38,17 @@ struct SSGIParams {
 // Constants
 // ============================================================================
 
-constant uint   SSGI_MAX_STEPS    = 64;
+constant uint   SSGI_MAX_STEPS    = 16;
 constant float  SSGI_MAX_DISTANCE = 20.0f;
-constant float  SSGI_MAX_RADIANCE = 4.0f;  // Clamp to prevent fireflies from HDR highlights
+constant float  SSGI_MAX_RADIANCE = 2.0f;  // Clamp to suppress direct light fireflies
 
 // ============================================================================
 // Helper: View-space position to screen UV
 // ============================================================================
 
-static float3 viewToScreen(float3 viewPos, device GlobalShaderData& gd)
+static float3 viewToScreen(float3 viewPos, float4x4 projection)
 {
-    float4 clipPos = gd.Projection * float4(viewPos, 1.0);
+    float4 clipPos = projection * float4(viewPos, 1.0);
     float3 ndc = clipPos.xyz / clipPos.w;
 
     // Metal NDC: Y is up, texture UV: Y is down
@@ -83,10 +83,14 @@ static float3 cosineHemisphereSample(float3 N, float2 seed, int sampleIndex,
                                       uint frameIndex, uint rayCount)
 {
     // Golden-ratio based low-discrepancy sequence
+    // xi1 (phi): rotates per frame via golden ratio
+    // xi2 (elevation): rotates per frame via sqrt(2)/2 to break correlation with xi1
+    //   — Cranley-Patterson style: deterministic spatial hash + per-frame offset
     float xi1 = fract((float(sampleIndex) + 0.5) / float(rayCount)
                       + float(frameIndex) * 0.618033988749f);
-    float xi2 = hash(seed + float2(float(sampleIndex) * 0.13f,
-                                    float(sampleIndex) * 0.91f));
+    float xi2 = fract(hash(seed + float2(float(sampleIndex) * 0.13f,
+                                          float(sampleIndex) * 0.91f))
+                      + float(frameIndex) * 0.7071067811865476f);
 
     // Cosine-weighted hemisphere: cosTheta = sqrt(xi2)
     float phi      = 2.0f * LUMEN_PI * xi1;
@@ -136,7 +140,7 @@ static bool traceRayHZB(float2 origin_uv,
                          float3 ray_origin_view,
                          float3 ray_dir_view,
                          texture2d<float, access::read> hzb_texture,
-                         device GlobalShaderData& gd,
+                         float4x4 projection,
                          constant SSGIParams& params,
                          thread float2& hit_uv,
                          thread float& hit_depth)
@@ -161,7 +165,7 @@ static bool traceRayHZB(float2 origin_uv,
         float3 ray_pos = ray_origin_view + ray_dir_view * t;
 
         // Project to screen UV
-        float3 screen = viewToScreen(ray_pos, gd);
+        float3 screen = viewToScreen(ray_pos, projection);
         float2 sample_uv = screen.xy;
 
         // Out of screen check
@@ -229,7 +233,7 @@ kernel void ssgi_trace(
     texture2d<float, access::read>  gbuffer_normal   [[texture(0)]],
     depth2d<float, access::read>    gbuffer_depth    [[texture(1)]],
     texture2d<float, access::read>  hzb_texture      [[texture(2)]],
-    texture2d<float, access::read>  prev_frame_color [[texture(3)]],
+    texture2d<float, access::sample> prev_frame_color [[texture(3)]],
     texture2d<float, access::write> ssgi_output      [[texture(4)]],
 
     device GlobalShaderData&   gd     [[buffer(0)]],
@@ -292,6 +296,11 @@ kernel void ssgi_trace(
     float3 view_normal = surface_normal;
 
     // -----------------------------------------------------------------------
+    // Cache projection matrix to avoid repeated device buffer reads
+    // -----------------------------------------------------------------------
+    float4x4 cachedProjection = gd.Projection;
+
+    // -----------------------------------------------------------------------
     // Ray casting and accumulation
     // -----------------------------------------------------------------------
     float3 total_irradiance = float3(0.0f);
@@ -319,7 +328,7 @@ kernel void ssgi_trace(
         float  hit_depth = 0.0f;
 
         bool foundHit = traceRayHZB(pixel_uv, ray_origin, ray_dir,
-                                     hzb_texture, gd, params,
+                                     hzb_texture, cachedProjection, params,
                                      hit_uv, hit_depth);
 
         if (foundHit) {
@@ -334,28 +343,9 @@ kernel void ssgi_trace(
             if (prev_uv.x >= 0.0f && prev_uv.x <= 1.0f &&
                 prev_uv.y >= 0.0f && prev_uv.y <= 1.0f) {
 
-                // Sample previous frame scene color at hit location
-                // Use 2x2 bilinear interpolation manually since we have access::read
-                float2 texCoord = prev_uv * float2(prev_width, prev_height) - 0.5f;
-                int2   baseCoord = int2(floor(texCoord));
-                float2 fracPart  = fract(texCoord);
-
-                // Clamp to valid range
-                int2 c00 = clamp(baseCoord,                     int2(0), int2(prev_width - 1, prev_height - 1));
-                int2 c10 = clamp(baseCoord + int2(1, 0),        int2(0), int2(prev_width - 1, prev_height - 1));
-                int2 c01 = clamp(baseCoord + int2(0, 1),        int2(0), int2(prev_width - 1, prev_height - 1));
-                int2 c11 = clamp(baseCoord + int2(1, 1),        int2(0), int2(prev_width - 1, prev_height - 1));
-
-                float4 s00 = prev_frame_color.read(uint2(c00));
-                float4 s10 = prev_frame_color.read(uint2(c10));
-                float4 s01 = prev_frame_color.read(uint2(c01));
-                float4 s11 = prev_frame_color.read(uint2(c11));
-
-                // Bilinear blend
-                float4 hit_color = s00 * (1.0f - fracPart.x) * (1.0f - fracPart.y)
-                                 + s10 *        fracPart.x  * (1.0f - fracPart.y)
-                                 + s01 * (1.0f - fracPart.x) *       fracPart.y
-                                 + s11 *        fracPart.x  *       fracPart.y;
+                // Hardware bilinear sampling
+                constexpr sampler colorS(coord::normalized, filter::linear, address::clamp_to_edge);
+                float4 hit_color = prev_frame_color.sample(colorS, prev_uv);
 
                 // Cosine-weighted sampling already accounts for the cos(N,L) term in the PDF.
                 // For Lambertian BRDF: integral ≈ (1/N) * Σ radiance * PI
@@ -363,6 +353,12 @@ kernel void ssgi_trace(
 
                 // Clamp radiance to suppress fireflies from HDR highlights / emissive surfaces
                 float3 clamped_radiance = min(hit_color.rgb, float3(SSGI_MAX_RADIANCE));
+
+                // Bright pixel dimming: reduce contribution from likely direct light hits
+                // Bright surfaces (>1.0 luminance) are progressively dimmed
+                float hitLum = dot(clamped_radiance, float3(0.2126f, 0.7152f, 0.0722f));
+                float brightPenalty = 1.0f / (1.0f + max(hitLum - 1.0f, 0.0f) * 2.0f);
+                clamped_radiance *= brightPenalty;
 
                 // Distance attenuation: fade out hits that are too far
                 float distAttenuation = 1.0f - smoothstep(params.radius * 0.5f,

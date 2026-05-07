@@ -251,7 +251,7 @@ kernel void screen_probe_trace_rays(
         // Sample previous frame lit color at hit position
         radiance = samplePrevFrameColor(hit.position, prevFrameColor, global);
 
-        // NaN/Inf guard — prev frame may contain invalid values
+        // NaN/Inf guard
         if (any(isnan(radiance)) || any(isinf(radiance))) {
             radiance = float3(0.0f);
         }

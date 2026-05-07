@@ -266,6 +266,17 @@ void LumenSSGIPass::CreateDescriptorSetLayouts() {
         DescriptorSetLayoutDesc layoutDesc{6, filterBindings};
         filter_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
+
+    // --- Half-res Denoise: 1 sampled + 1 storage + 1 UBO ---
+    {
+        DescriptorSetLayoutBinding denoiseBindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // trace input (half-res)
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // denoised output (half-res)
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // HalfResDenoiseParams
+        };
+        DescriptorSetLayoutDesc layoutDesc{3, denoiseBindings};
+        halfres_denoise_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    }
 }
 
 void LumenSSGIPass::CreatePipelines() {
@@ -279,10 +290,12 @@ void LumenSSGIPass::CreatePipelines() {
     auto traceShader = CompileShader("SSGITrace", "ssgi_trace");
     auto temporalShader = CompileShader("SSGITemporal", "ssgi_temporal");
     auto filterShader = CompileShader("SSGIFilter", "ssgi_filter");
+    auto halfresDenoiseShader = CompileShader("SSGIHalfResDenoise", "ssgi_halfres_denoise");
 
     if (traceShader == handles::INVALID_SHADER ||
         temporalShader == handles::INVALID_SHADER ||
-        filterShader == handles::INVALID_SHADER) {
+        filterShader == handles::INVALID_SHADER ||
+        halfresDenoiseShader == handles::INVALID_SHADER) {
         std::cerr << "[LumenSSGI] Shader compilation failed" << std::endl;
         return;
     }
@@ -305,6 +318,12 @@ void LumenSSGIPass::CreatePipelines() {
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &filter_set_layout_;
         filter_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
+    {
+        PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &halfres_denoise_set_layout_;
+        halfres_denoise_layout_ = device_->CreatePipelineLayout(plDesc);
     }
 
     // Create compute pipelines
@@ -329,6 +348,13 @@ void LumenSSGIPass::CreatePipelines() {
         pipeDesc.threadGroupSize = {8, 8, 1};
         filter_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
+    {
+        ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = halfresDenoiseShader;
+        pipeDesc.layout = halfres_denoise_layout_;
+        pipeDesc.threadGroupSize = {8, 8, 1};
+        halfres_denoise_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
 
     // Create triple-buffered descriptor sets
     for (int i = 0; i < 3; i++) {
@@ -343,6 +369,10 @@ void LumenSSGIPass::CreatePipelines() {
         {
             DescriptorSetDesc dsDesc{filter_set_layout_};
             filter_ds_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        {
+            DescriptorSetDesc dsDesc{halfres_denoise_set_layout_};
+            halfres_denoise_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
     }
 }
@@ -363,6 +393,7 @@ void LumenSSGIPass::CreateConstantBuffers() {
     CreateCBs(params_cb_, 48);           // SSGIParams
     CreateCBs(temporal_params_cb_, 32);  // TemporalParams
     CreateCBs(filter_params_cb_, 32);    // FilterParams (20 bytes + padding)
+    CreateCBs(halfres_denoise_cb_, 32);  // HalfResDenoiseParams (16 bytes + padding)
 }
 
 void LumenSSGIPass::CreatePersistentTextures() {
@@ -376,6 +407,15 @@ void LumenSSGIPass::CreatePersistentTextures() {
         desc.format = DataFormat::RGBA16_Float;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         trace_texture_ = device_->CreateTexture(desc);
+    }
+
+    // Half-res denoised trace output
+    {
+        TextureDesc desc{};
+        desc.size = {half_w, half_h, 1};
+        desc.format = DataFormat::RGBA16_Float;
+        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+        trace_denoised_texture_ = device_->CreateTexture(desc);
     }
 
     // Full-res temporal textures (triple-buffered)
@@ -624,6 +664,61 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             }
 
             // ================================================================
+            // Sub-pass 1.5: Half-res Denoise (5x5 bilateral on trace output)
+            // ================================================================
+            bool denoiseRan = false;
+            if (halfres_denoise_pipeline_ != handles::INVALID_PIPELINE &&
+                trace_denoised_texture_ != handles::INVALID_RESOURCE) {
+                struct HalfResDenoiseParamsData {
+                    u32   width;
+                    u32   height;
+                    float sigma;
+                    float pad[5];
+                };
+                auto* denoiseParams = static_cast<HalfResDenoiseParamsData*>(device_->MapBuffer(halfres_denoise_cb_[frameIdx]));
+                if (denoiseParams) {
+                    denoiseParams->width = half_w;
+                    denoiseParams->height = half_h;
+                    denoiseParams->sigma = 1.5f;
+                    denoiseParams->pad[0] = 0.0f;
+                    denoiseParams->pad[1] = 0.0f;
+                    denoiseParams->pad[2] = 0.0f;
+                    denoiseParams->pad[3] = 0.0f;
+                    denoiseParams->pad[4] = 0.0f;
+                    device_->UnmapBuffer(halfres_denoise_cb_[frameIdx]);
+                }
+
+                DescriptorData denoiseParamsDesc[] = {
+                    {0, DescriptorType::SampledImage,  trace_texture_},
+                    {1, DescriptorType::StorageImage,  trace_denoised_texture_},
+                    {0, DescriptorType::UniformBuffer, halfres_denoise_cb_[frameIdx]},
+                };
+                UpdateDescriptorSet(device_, halfres_denoise_ds_[frameIdx], denoiseParamsDesc, 3);
+
+                cmd->BindComputePipeline(halfres_denoise_pipeline_);
+                const DescriptorSetHandle denoiseSets[] = { halfres_denoise_ds_[frameIdx] };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, halfres_denoise_layout_, 0, 1, denoiseSets, 0, nullptr);
+
+                u32 gx = (half_w + TG - 1) / TG;
+                u32 gy = (half_h + TG - 1) / TG;
+                cmd->Dispatch(gx, gy, 1);
+                denoiseRan = true;
+            }
+
+            ResourceHandle filterInputTexture;
+            if (denoiseRan) {
+                ResourceBarrier barrier{};
+                barrier.resource = trace_denoised_texture_;
+                barrier.beforeState = ResourceState::UnorderedAccess;
+                barrier.afterState = ResourceState::ShaderResource;
+                barrier.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&barrier, 1);
+                filterInputTexture = trace_denoised_texture_;
+            } else {
+                filterInputTexture = trace_texture_;
+            }
+
+            // ================================================================
             // Sub-pass 2: Spatial Filter (full-res, reads half-res trace)
             // ================================================================
             if (filter_pipeline_ != handles::INVALID_PIPELINE &&
@@ -646,7 +741,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                 }
 
                 DescriptorData filterParamsDesc[] = {
-                    {0, DescriptorType::SampledImage,  trace_texture_},           // half-res trace (bilinear)
+                    {0, DescriptorType::SampledImage,  filterInputTexture},         // half-res trace (bilinear)
                     {1, DescriptorType::SampledImage,  normalTex},
                     {2, DescriptorType::SampledImage,  depthTex},
                     {3, DescriptorType::StorageImage,  filter_texture_},          // full-res output

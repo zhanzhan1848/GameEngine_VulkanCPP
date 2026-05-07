@@ -519,15 +519,6 @@ LumenSSAOOutput LumenSSAOPass::AddPass(
                 cmd->Dispatch(gx, gy, 1);
             }
 
-            // Barrier: filter UAV -> SRV
-            {
-                ResourceBarrier barrier{};
-                barrier.resource = filter_texture_;
-                barrier.beforeState = ResourceState::UnorderedAccess;
-                barrier.afterState = ResourceState::ShaderResource;
-                barrier.subresource = 0xFFFFFFFF;
-                cmd->InsertBarrier(&barrier, 1);
-            }
         }
     );
 

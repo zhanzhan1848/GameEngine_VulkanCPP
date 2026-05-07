@@ -3,11 +3,11 @@
  * @brief Half-resolution DDGI indirect irradiance gathering (compute)
  *
  * Strategy: L0+L1+L2 SH (9 coeff) tetrahedral 4-probe interpolation
- *   - Soft distance falloff (no hard depth visibility cutoffs)
+ *   - Soft distance falloff with visibility weight from DDGI depth
  *   - Normal hemisphere weight
  *   - Full L0+L1+L2 SH reconstruction
  *
- * Total reads: 36 storage buffer (irradiance) + 2 texture2D (depth+normal)
+ * Total reads: 36 storage buffer (irradiance) + 4 storage buffer (depth) + 2 texture2D (depth+normal)
  */
 
 #include <metal_stdlib>
@@ -19,6 +19,15 @@ constant float _C1   = 0.488603f;   // L1
 constant float _C2_0 = 1.092548f;   // L2
 constant float _C2_1 = 0.315392f;
 constant float _C2_2 = 0.546274f;
+
+// L0+L1 SH dot product (4 coefficients) — stable with 64 rays
+static float3 shDot4(thread const float3* c, float3 d) {
+    float x = d.x, y = d.y, z = d.z;
+    return c[0] * _C0
+         + c[1] * (-_C1 * y)
+         + c[2] * ( _C1 * z)
+         + c[3] * (-_C1 * x);
+}
 
 // L0+L1+L2 SH dot product (9 coefficients)
 static float3 shDot9(thread const float3* c, float3 d) {
@@ -54,6 +63,36 @@ static void tetrahedral(float3 gp, uint3 gd,
     for (uint i = 0; i < 4u; ++i) bw[i] = max(bw[i], 0.0f);
 }
 
+static float visibilityWeight(float dist, float mean, float variance, float spacing) {
+    if (dist <= mean) return 1.0f;
+    float d_minus_mean = dist - mean;
+    float chebyshev = variance / (variance + d_minus_mean * d_minus_mean);
+    float bias = spacing * 0.3f;
+    float threshold = mean + bias + chebyshev * spacing;
+    float falloff = spacing * 0.5f;
+    return saturate((threshold - dist + falloff) / falloff);
+}
+
+static float2 octahedralEncode(float3 d) {
+    float l1norm = abs(d.x) + abs(d.y) + abs(d.z);
+    float2 uv = d.xy / l1norm;
+    if (d.z < 0.0f) {
+        uv = (1.0f - abs(uv.yx)) * select(float2(-1.0f), float2(1.0f), uv.xy >= 0.0f);
+    }
+    return uv * 0.5f + 0.5f;
+}
+
+static float2 sampleDepthOctahedral(device const float* buf, uint probeIdx, float3 dir) {
+    constexpr uint res = 8u;
+    constexpr uint texels = res * res;
+    float2 uv = octahedralEncode(dir);
+    uint2 texel = uint2(clamp(uint(uv.x * float(res)), 0u, res - 1u),
+                        clamp(uint(uv.y * float(res)), 0u, res - 1u));
+    uint idx = texel.y * res + texel.x;
+    uint probeBase = probeIdx * texels * 2u;
+    return float2(buf[probeBase + idx], buf[probeBase + texels + idx]);
+}
+
 static uint3 probeGridCoord(uint probeIdx, uint3 counts) {
     uint pz = probeIdx / (counts.x * counts.y);
     uint rem = probeIdx % (counts.x * counts.y);
@@ -72,7 +111,8 @@ kernel void ddgi_gi_gather(
     constant float4x4& invViewProj        [[buffer(0)]],
     constant float4&    probeOriginSpacing [[buffer(1)]],
     constant float4&    probeCounts        [[buffer(2)]],
-    device const float3* irradianceBuffer  [[buffer(3)]]
+    device const float3* irradianceBuffer  [[buffer(3)]],
+    device const float*  ddgiDepthBuffer   [[buffer(4)]]
 )
 {
     uint2 outSize = uint2(outputTex.get_width(), outputTex.get_height());
@@ -114,42 +154,59 @@ kernel void ddgi_gi_gather(
     float3 result(0.0f);
     float  totalWeight = 0.0f;
 
+    // Normal bias to prevent self-shadowing acne (small to avoid thin wall penetration)
+    float3 biasedPos = worldPos + normal * spacing * 0.05f;
+
     for (uint p = 0; p < 4u; ++p) {
         if (bw[p] < 0.001f) continue;
 
         uint3 gc = probeGridCoord(pi[p], counts);
         float3 probePos = origin + float3(float(gc.x), float(gc.y), float(gc.z)) * spacing;
 
-        // --- Smooth weight: barycentric × normal hemisphere × soft distance ---
-        float3 toProbe = normalize(probePos - worldPos);
+        float3 toProbe = normalize(probePos - biasedPos);
         float ndotd = dot(normal, toProbe);
         float normalWeight = saturate((ndotd + 0.2f) / 0.5f);
 
-        // Soft distance falloff (smooth, no hard cutoffs that cause blocky artifacts)
-        float distToProbe = length(probePos - worldPos);
-        float distWeight = saturate(1.0f - distToProbe / (spacing * 2.5f));
+        float3 fromProbeDir = normalize(biasedPos - probePos);
+        float distToProbe = length(biasedPos - probePos);
 
-        // Read irradiance L0+L1+L2 (9 coefficients)
+        // Octahedral depth sampling with bilinear interpolation (64 directions)
+        float2 depthMV = sampleDepthOctahedral(ddgiDepthBuffer, pi[p], fromProbeDir);
+        float visWeight = visibilityWeight(distToProbe, depthMV.x, depthMV.y, spacing);
+
+        // Read irradiance L0+L1 (4 coefficients, stable with 64 rays)
+        // Keeps buffer reads within Apple Silicon limits (4×4+4×2=24 vs old 4×9+4×2=44)
         uint base = pi[p] * 9u;
-        float3 sh[9];
-        sh[0] = irradianceBuffer[base + 0u];
-        sh[1] = irradianceBuffer[base + 1u];
-        sh[2] = irradianceBuffer[base + 2u];
-        sh[3] = irradianceBuffer[base + 3u];
-        sh[4] = irradianceBuffer[base + 4u];
-        sh[5] = irradianceBuffer[base + 5u];
-        sh[6] = irradianceBuffer[base + 6u];
-        sh[7] = irradianceBuffer[base + 7u];
-        sh[8] = irradianceBuffer[base + 8u];
+        float3 sh[4];
+        for (uint i = 0u; i < 4u; ++i) {
+            sh[i] = irradianceBuffer[base + i];
+        }
+        float3 irradiance = shDot4(sh, normal);
 
-        float3 irradiance = shDot9(sh, normal);
-
-        float w = bw[p] * normalWeight * distWeight;
+        float w = bw[p] * normalWeight * visWeight;
         result += irradiance * w;
         totalWeight += w;
     }
 
-    if (totalWeight > 0.0f) result /= totalWeight;
+    if (totalWeight > 0.0f) {
+        result /= totalWeight;
+    } else {
+        // Fallback: all probes occluded — ignore Chebyshev, use rough local
+        // average at reduced strength. Walls in complex geometry still receive
+        // faint bounce light, not near-black.
+        float dampen = 0.3f;
+        for (uint p = 0; p < 4u; ++p) {
+            if (bw[p] < 0.001f) continue;
+            uint3 gc = probeGridCoord(pi[p], counts);
+            float3 probePos = origin + float3(float(gc.x), float(gc.y), float(gc.z)) * spacing;
+            float3 toProbe = normalize(probePos - biasedPos);
+            float nw = saturate((dot(normal, toProbe) + 0.2f) / 0.5f);
+            uint base = pi[p] * 9u;
+            float3 sh[4];
+            for (uint i = 0u; i < 4u; ++i) sh[i] = irradianceBuffer[base + i];
+            result += shDot4(sh, normal) * bw[p] * nw * dampen;
+        }
+    }
     result = max(result, float3(0.0f));
 
     outputTex.write(float4(result, 1.0f), tid);

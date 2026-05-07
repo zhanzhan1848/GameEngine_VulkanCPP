@@ -512,6 +512,11 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
     // Initialize GlobalSDF voxelization pipeline (after GPUDrivenDrawPipeline has geometry buffers)
     {
         auto& globalSDF = nanite::GlobalSDF::Get();
+        std::cout << "[GlobalSDF] InitVoxelization check: initialized="
+                  << globalSDF.IsInitialized()
+                  << " gpuDrawPipeline=" << (gpuDrawPipeline_ ? "exists" : "NULL")
+                  << " voxReady=" << globalSDF.IsVoxelizationReady()
+                  << std::endl;
         if (globalSDF.IsInitialized() && gpuDrawPipeline_) {
             nanite::SDFVoxelizationResources voxResources;
             voxResources.vertex_buffer = gpuDrawPipeline_->GetGlobalVertexBuffer();
@@ -522,11 +527,22 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
             voxResources.instance_data_buffer = gpuDrawPipeline_->GetGlobalInstanceDataBuffer();
             voxResources.num_instances = sceneSnapshot_.GetInstanceCount();
 
+            std::cout << "[GlobalSDF] Resources: vb=" << voxResources.vertex_buffer
+                      << " mb=" << voxResources.meshlet_buffer
+                      << " inst=" << voxResources.instance_data_buffer
+                      << " numInst=" << voxResources.num_instances
+                      << " clusterMap=" << voxResources.cluster_map_buffer
+                      << std::endl;
+
             if (globalSDF.InitVoxelization(voxResources)) {
-                //std::cout << "[TestNanite] GlobalSDF voxelization pipeline initialized" << std::endl;
+                std::cout << "[TestNanite] GlobalSDF voxelization pipeline initialized" << std::endl;
             } else {
-                std::cerr << "[TestNanite] Warning: GlobalSDF voxelization init failed" << std::endl;
+                std::cout << "[TestNanite] WARNING: GlobalSDF voxelization init FAILED" << std::endl;
             }
+        } else {
+            std::cout << "[GlobalSDF] SKIPPED: initialized="
+                      << globalSDF.IsInitialized()
+                      << " gpuDrawPipeline=" << (gpuDrawPipeline_ ? "yes" : "no") << std::endl;
         }
     }
 
@@ -693,16 +709,17 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
 
     // === Fusion Blit Pipeline (DDGI + SPGI + SSGI + direct) ===
     {
-        // 6 sampled image bindings: scene, ssgi, ddgi, spgi, albedo, depth
+        // 7 sampled image bindings: scene, ssgi, ddgi, spgi, albedo, depth, ssao
         primal::graphics::rhi::DescriptorSetLayoutBinding fusion_bindings[] = {
             { 0, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
             { 1, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
             { 2, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
             { 3, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
             { 4, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
-            { 5, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr }
+            { 5, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr },
+            { 6, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr }
         };
-        primal::graphics::rhi::DescriptorSetLayoutDesc fusion_set_desc{ .bindingCount = 6, .bindings = fusion_bindings };
+        primal::graphics::rhi::DescriptorSetLayoutDesc fusion_set_desc{ .bindingCount = 7, .bindings = fusion_bindings };
         fusion_set_layout_ = device_->CreateDescriptorSetLayout(fusion_set_desc);
 
         primal::graphics::rhi::PipelineLayoutDesc fusion_pl_desc{ .setLayoutCount = 1, .setLayouts = &fusion_set_layout_ };
@@ -986,7 +1003,7 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
         return false;
     }
 
-    // --- Descriptor set layout: 5 textures + 3 uniform buffers ---
+    // --- Descriptor set layout: 6 textures + 3 uniform buffers ---
     {
         using namespace primal::graphics::rhi;
         DescriptorSetLayoutBinding bindings[] = {
@@ -995,12 +1012,13 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
             {2, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // half-res GI indirect
             {3, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // GBuffer albedo
             {4, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // GBuffer normal
+            {5, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},  // SSAO
             // Buffers
             {0, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // invViewProjection
             {1, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // probe origin + spacing
             {2, DescriptorType::UniformBuffer,  1, ShaderStage::Pixel, nullptr},  // probe counts
         };
-        DescriptorSetLayoutDesc layoutDesc{ .bindingCount = 8, .bindings = bindings };
+        DescriptorSetLayoutDesc layoutDesc{ .bindingCount = 9, .bindings = bindings };
         blit_ddgi_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -1062,7 +1080,7 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
                 if (giGatherShader == handles::INVALID_SHADER) {
                     std::cerr << "[DDGIGIGather] Invalid shader handle" << std::endl;
                 } else {
-                    // Descriptor set layout: 3 textures + 4 buffers
+                    // Descriptor set layout: 3 textures + 5 buffers
                     DescriptorSetLayoutBinding giGatherBindings[] = {
                         {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // depth
                         {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // normal
@@ -1071,8 +1089,9 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
                         {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeOriginSpacing
                         {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeCounts
                         {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // irradianceBuffer
+                        {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgiDepthBuffer
                     };
-                    DescriptorSetLayoutDesc layoutDesc{7, giGatherBindings};
+                    DescriptorSetLayoutDesc layoutDesc{8, giGatherBindings};
                     gi_gather_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
 
                     PipelineLayoutDesc plDesc;
@@ -2413,13 +2432,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     // Log buffer state on first few frames
                     static u32 logCount = 0;
                     if (logCount < 5) {
-                        //std::cout << "[GlobalSDF] Pass executing: frame=" << frameCount_
-                                  //<< " num_instances=" << fresh.num_instances
-                                  //<< " vertex=" << fresh.vertex_buffer
-                                  //<< " meshlet=" << fresh.meshlet_buffer
-                                  //<< " instance=" << fresh.instance_data_buffer
-                                  //<< " cmd=" << (void*)cmd
-                                  //<< std::endl;
+                        std::cout << "[GlobalSDF] Pass executing: frame=" << frameCount_
+                                  << " num_instances=" << fresh.num_instances
+                                  << " vertex=" << fresh.vertex_buffer
+                                  << " meshlet=" << fresh.meshlet_buffer
+                                  << " instance=" << fresh.instance_data_buffer
+                                  << " cmd=" << (void*)cmd
+                                  << std::endl;
                         logCount++;
                     }
 
@@ -2439,7 +2458,11 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     }
 
                     // Static scene: only voxelize once after the first successful dispatch
-                    if (sdf_voxelization_done_) return;
+                    if (sdf_voxelization_done_) {
+                        static bool logDoneOnce = false;
+                        if (!logDoneOnce) { std::cout << "[GlobalSDF] Voxelization already done, skipping" << std::endl; logDoneOnce = true; }
+                        return;
+                    }
 
                     globalSDF.SetVoxelizationResources(fresh);
 
@@ -2448,7 +2471,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     }
 
                     sdf_voxelization_done_ = true;
-                    //std::cout << "[GlobalSDF] Voxelization completed (static scene, will not re-run)" << std::endl;
+                    std::cout << "[GlobalSDF] Voxelization completed (static scene, will not re-run)" << std::endl;
                 }
             );
         }
@@ -2575,6 +2598,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
         u32 ddgiReadIdx = (currentBufferIndex + 2) % 3;
         auto ddgiIrrBuf = ddgiPass_->GetIrradianceBuffer(ddgiReadIdx);
+        auto ddgiDepthBuf = ddgiPass_->GetDepthBuffer(ddgiReadIdx);
         giGatherIrradianceBuf = ddgiIrrBuf;
 
         auto gbufferDepth = gpuDrawPipeline_ ? gpuDrawPipeline_->GetGBufferDepthSampleable() : rhi::handles::INVALID_RESOURCE;
@@ -2601,7 +2625,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         builder.Read(ddgiIrrHistHandle, rhi::ResourceState::ShaderResource);
                     }
                 },
-                [this, currentBufferIndex, ddgiIrrBuf, gDepthRG, gNormalRG, giTexHandle](
+                [this, currentBufferIndex, ddgiIrrBuf, ddgiDepthBuf, gDepthRG, gNormalRG, giTexHandle](
                     const BlitPassData& data, graphics::rendergraph::RenderGraphContext& context) {
                     auto cmd = context.cmdBuffer;
                     if (!cmd) return;
@@ -2653,10 +2677,10 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     };
                     UpdateDescriptorSet(device_, gi_gather_descriptor_set_, texParams, 3);
 
-                    // Buffers: invViewProj, probeOriginSpacing, probeCounts, irradiance
+                    // Buffers: invViewProj, probeOriginSpacing, probeCounts, irradiance, ddgiDepth
                     {
-                        rhi::WriteDescriptorSet bufWrites[4];
-                        rhi::DescriptorBufferInfo bufInfos[4];
+                        rhi::WriteDescriptorSet bufWrites[5];
+                        rhi::DescriptorBufferInfo bufInfos[5];
                         for (int i = 0; i < 3; ++i) {
                             bufWrites[i].dstSet = gi_gather_descriptor_set_;
                             bufWrites[i].dstBinding = i;
@@ -2676,7 +2700,29 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         bufInfos[3].buffer = ddgiIrrBuf;
                         bufInfos[3].offset = 0;
                         bufInfos[3].range = ~0ull;
-                        device_->UpdateDescriptorSets(4, bufWrites);
+                        bufWrites[4].dstSet = gi_gather_descriptor_set_;
+                        bufWrites[4].dstBinding = 4;
+                        bufWrites[4].descriptorCount = 1;
+                        bufWrites[4].descriptorType = DescriptorType::StorageBuffer;
+                        bufWrites[4].bufferInfo = &bufInfos[4];
+                        bufInfos[4].buffer = ddgiDepthBuf;
+                        bufInfos[4].offset = 0;
+                        bufInfos[4].range = ~0ull;
+                        device_->UpdateDescriptorSets(5, bufWrites);
+                    }
+
+                    // Barrier: ensure DDGI irradiance + depth buffer writes complete before Gather reads
+                    {
+                        rhi::ResourceBarrier barriers[2]{};
+                        barriers[0].resource = ddgiIrrBuf;
+                        barriers[0].beforeState = rhi::ResourceState::UnorderedAccess;
+                        barriers[0].afterState = rhi::ResourceState::ShaderResource;
+                        barriers[0].subresource = 0xFFFFFFFF;
+                        barriers[1].resource = ddgiDepthBuf;
+                        barriers[1].beforeState = rhi::ResourceState::UnorderedAccess;
+                        barriers[1].afterState = rhi::ResourceState::ShaderResource;
+                        barriers[1].subresource = 0xFFFFFFFF;
+                        cmd->InsertBarrier(barriers, 2);
                     }
 
                     cmd->BindComputePipeline(gi_gather_pipeline_);
@@ -2705,7 +2751,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     graph.AddPass<BlitPassData>("FinalBlit",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
-        [this, backBufferHandle, primaryInputHandle, ssgiOutputHandle, depthBlitHandle, giOutputHandle, gbufferAlbedoHandle, gbufferNormalHandle, screenProbeGIOutputHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+        [this, backBufferHandle, primaryInputHandle, ssgiOutputHandle, depthBlitHandle, giOutputHandle, gbufferAlbedoHandle, gbufferNormalHandle, screenProbeGIOutputHandle, ssaoOutputHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
             // Read lit scene color (deferred output or raw GBuffer albedo)
             data.input = builder.Read(primaryInputHandle, rhi::ResourceState::ShaderResource);
 
@@ -2747,6 +2793,12 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 data.spgi_input = builder.Read(screenProbeGIOutputHandle, rhi::ResourceState::ShaderResource);
             } else {
                 data.spgi_input = rendergraph::RGResourceHandle{};
+            }
+
+            // SSAO dependency: ensure SSAO compute finishes before FinalBlit reads it.
+            // Previously accessed via physical handle bypassing render graph → no barrier → flickering.
+            if (ssaoOutputHandle.IsValid()) {
+                builder.Read(ssaoOutputHandle, rhi::ResourceState::ShaderResource);
             }
 
             data.output = builder.Write(backBufferHandle, rhi::ResourceState::RenderTarget);
@@ -2840,17 +2892,20 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                                 }
                             }
 
-                            // Update descriptor set: 5 textures
+                            // Update descriptor set: 6 textures
                             // texture(0): scene color, texture(1): depth, texture(2): half-res GI
-                            // texture(3): GBuffer albedo, texture(4): GBuffer normal
+                            // texture(3): GBuffer albedo, texture(4): GBuffer normal, texture(5): SSAO
                             DescriptorData ddgi_params[] = {
                                 {0, DescriptorType::SampledImage,  inputHandle},          // texture(0): scene color
                                 {1, DescriptorType::SampledImage,  depthHandle},          // texture(1): depth
                                 {2, DescriptorType::SampledImage,  giIndirectHandle},     // texture(2): half-res GI indirect
                                 {3, DescriptorType::SampledImage,  albedoHandle},         // texture(3): GBuffer albedo
                                 {4, DescriptorType::SampledImage,  normalHandle},         // texture(4): GBuffer normal
+                                {5, DescriptorType::SampledImage,
+                                    (ssaoPass_ && ssaoPass_->IsInitialized())
+                                        ? ssaoPass_->GetFilterTexture() : handles::INVALID_RESOURCE},
                             };
-                            UpdateDescriptorSet(device_, blit_ddgi_descriptor_set_, ddgi_params, 5);
+                            UpdateDescriptorSet(device_, blit_ddgi_descriptor_set_, ddgi_params, 6);
 
                             // Buffer bindings with offsets into single CB:
                             // buffer(0) offset=0  = invViewProjection (64 bytes)
@@ -2899,16 +2954,30 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 ResourceHandle spgiHandle = data.spgi_input.IsValid() ? resolveHandle(data.spgi_input) : ssgi_black_texture_;
                 ResourceHandle albedoHandle = data.albedo_input.IsValid() ? resolveHandle(data.albedo_input) : ssgi_black_texture_;
                 ResourceHandle depthHandle = data.depth_input.IsValid() ? resolveHandle(data.depth_input) : ssgi_black_texture_;
+                ResourceHandle ssaoFusionTex = (ssaoPass_ && ssaoPass_->IsInitialized())
+                    ? ssaoPass_->GetFilterTexture() : handles::INVALID_RESOURCE;
 
-                DescriptorData fusion_params[6] = {
+                DescriptorData fusion_params[7] = {
                     { 0, DescriptorType::SampledImage, inputHandle },    // scene (direct lighting)
                     { 1, DescriptorType::SampledImage, ssgiHandle },     // SSGI
                     { 2, DescriptorType::SampledImage, ddgiHandle },     // DDGI
                     { 3, DescriptorType::SampledImage, spgiHandle },     // SPGI
                     { 4, DescriptorType::SampledImage, albedoHandle },   // albedo
                     { 5, DescriptorType::SampledImage, depthHandle },    // depth
+                    { 6, DescriptorType::SampledImage, ssaoFusionTex },  // SSAO
                 };
-                UpdateDescriptorSet(device_, fusion_descriptor_set_, fusion_params, 6);
+                UpdateDescriptorSet(device_, fusion_descriptor_set_, fusion_params, 7);
+
+                // SSAO UAV→SRV barrier for fusion pass
+                if (ssaoPass_ && ssaoPass_->IsInitialized()) {
+                    rhi::ResourceBarrier ssaoBarrier{};
+                    ssaoBarrier.resource = ssaoPass_->GetFilterTexture();
+                    ssaoBarrier.beforeState = rhi::ResourceState::UnorderedAccess;
+                    ssaoBarrier.afterState = rhi::ResourceState::ShaderResource;
+                    ssaoBarrier.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&ssaoBarrier, 1);
+                }
+
                 cmd->BindGraphicsPipeline(fusion_pipeline_);
                 const rhi::DescriptorSetHandle sets[] = { fusion_descriptor_set_ };
                 cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, fusion_layout_, 0, 1, sets, 0, nullptr);
@@ -2933,6 +3002,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     auto spTex = screenProbeGIPass_->GetOutputTexture();
                     if (spTex != rhi::handles::INVALID_RESOURCE) {
                         blitTex = spTex;
+                        // Barrier: SPGI output written by compute, needs UAV→SRV for graphics read
+                        rhi::ResourceBarrier spgiBarrier{};
+                        spgiBarrier.resource = spTex;
+                        spgiBarrier.beforeState = rhi::ResourceState::UnorderedAccess;
+                        spgiBarrier.afterState = rhi::ResourceState::ShaderResource;
+                        spgiBarrier.subresource = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&spgiBarrier, 1);
                     }
                 }
                 DescriptorData blit_params[1] = {

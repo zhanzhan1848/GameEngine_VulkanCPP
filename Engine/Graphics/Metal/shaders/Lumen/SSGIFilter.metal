@@ -122,9 +122,13 @@ kernel void ssgi_filter(
             float dist_diff = abs(center_hit_dist - sample_ssgi.a);
             float w_dist = exp(-dist_diff * params.sigma_hit_dist);
 
-            // ---- Gaussian spatial weight ----
+            // ---- Hit-distance adaptive spatial weight ----
+            // Close surfaces: small kernel (preserve detail)
+            // Far surfaces: large kernel (smooth more)
+            float adaptive_sigma = max(params.sigma_spatial * center_hit_dist * 0.5f,
+                                       params.sigma_spatial * 0.5f);
             float spatial_dist2 = float(dx * dx + dy * dy);
-            float w_spatial = exp(-spatial_dist2 / (2.0 * params.sigma_spatial * params.sigma_spatial));
+            float w_spatial = exp(-spatial_dist2 / (2.0 * adaptive_sigma * adaptive_sigma));
 
             // Combined weight
             float weight = w_depth * w_normal * w_dist * w_spatial;
