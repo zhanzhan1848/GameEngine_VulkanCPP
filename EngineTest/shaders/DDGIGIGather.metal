@@ -67,9 +67,9 @@ static float visibilityWeight(float dist, float mean, float variance, float spac
     if (dist <= mean) return 1.0f;
     float d_minus_mean = dist - mean;
     float chebyshev = variance / (variance + d_minus_mean * d_minus_mean);
-    float bias = spacing * 0.3f;
+    float bias = spacing * 0.1f;
     float threshold = mean + bias + chebyshev * spacing;
-    float falloff = spacing * 0.5f;
+    float falloff = spacing * 1.0f;
     return saturate((threshold - dist + falloff) / falloff);
 }
 
@@ -157,6 +157,10 @@ kernel void ddgi_gi_gather(
     // Normal bias to prevent self-shadowing acne (small to avoid thin wall penetration)
     float3 biasedPos = worldPos + normal * spacing * 0.05f;
 
+    // Track best fallback probe (highest barycentric weight) for guaranteed output
+    float3 bestIrradiance(0.0f);
+    float  bestWeight = 0.0f;
+
     for (uint p = 0; p < 4u; ++p) {
         if (bw[p] < 0.001f) continue;
 
@@ -165,17 +169,12 @@ kernel void ddgi_gi_gather(
 
         float3 toProbe = normalize(probePos - biasedPos);
         float ndotd = dot(normal, toProbe);
-        float normalWeight = saturate((ndotd + 0.2f) / 0.5f);
+        float normalWeight = saturate((ndotd + 0.5f) / 0.7f);
 
         float3 fromProbeDir = normalize(biasedPos - probePos);
         float distToProbe = length(biasedPos - probePos);
 
-        // Octahedral depth sampling with bilinear interpolation (64 directions)
-        float2 depthMV = sampleDepthOctahedral(ddgiDepthBuffer, pi[p], fromProbeDir);
-        float visWeight = visibilityWeight(distToProbe, depthMV.x, depthMV.y, spacing);
-
-        // Read irradiance L0+L1 (4 coefficients, stable with 64 rays)
-        // Keeps buffer reads within Apple Silicon limits (4×4+4×2=24 vs old 4×9+4×2=44)
+        // Read irradiance L0+L1
         uint base = pi[p] * 9u;
         float3 sh[4];
         for (uint i = 0u; i < 4u; ++i) {
@@ -183,7 +182,25 @@ kernel void ddgi_gi_gather(
         }
         float3 irradiance = shDot4(sh, normal);
 
-        float w = bw[p] * normalWeight * visWeight;
+        // Track best probe for guaranteed fallback
+        if (bw[p] > bestWeight) {
+            bestWeight = bw[p];
+            bestIrradiance = irradiance;
+        }
+
+        // Octahedral depth sampling
+        float2 depthMV = sampleDepthOctahedral(ddgiDepthBuffer, pi[p], fromProbeDir);
+
+        // Soft inside-geometry penalty instead of hard skip:
+        // probes with very short mean depth get reduced weight, not zero
+        float insidePenalty = 1.0f;
+        if (depthMV.x < spacing * 0.2f) {
+            insidePenalty = smoothstep(0.0f, 0.2f, depthMV.x / spacing);
+        }
+
+        float visWeight = visibilityWeight(distToProbe, depthMV.x, depthMV.y, spacing);
+
+        float w = bw[p] * normalWeight * visWeight * insidePenalty;
         result += irradiance * w;
         totalWeight += w;
     }
@@ -191,23 +208,14 @@ kernel void ddgi_gi_gather(
     if (totalWeight > 0.0f) {
         result /= totalWeight;
     } else {
-        // Fallback: all probes occluded — ignore Chebyshev, use rough local
-        // average at reduced strength. Walls in complex geometry still receive
-        // faint bounce light, not near-black.
-        float dampen = 0.3f;
-        for (uint p = 0; p < 4u; ++p) {
-            if (bw[p] < 0.001f) continue;
-            uint3 gc = probeGridCoord(pi[p], counts);
-            float3 probePos = origin + float3(float(gc.x), float(gc.y), float(gc.z)) * spacing;
-            float3 toProbe = normalize(probePos - biasedPos);
-            float nw = saturate((dot(normal, toProbe) + 0.2f) / 0.5f);
-            uint base = pi[p] * 9u;
-            float3 sh[4];
-            for (uint i = 0u; i < 4u; ++i) sh[i] = irradianceBuffer[base + i];
-            result += shDot4(sh, normal) * bw[p] * nw * dampen;
-        }
+        // Fallback: use best probe at reduced strength — always produce SOME indirect light
+        result = bestIrradiance * 0.3f;
     }
     result = max(result, float3(0.0f));
+
+    // Minimum ambient floor: prevents completely black shadow areas when
+    // probe irradiance data is near-zero (radiance source lacks indirect bounce)
+    result = max(result, float3(0.03f, 0.03f, 0.035f));
 
     outputTex.write(float4(result, 1.0f), tid);
 }

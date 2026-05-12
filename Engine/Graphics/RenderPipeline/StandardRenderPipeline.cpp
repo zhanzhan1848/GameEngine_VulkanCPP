@@ -1,5 +1,7 @@
 #include "StandardRenderPipeline.h"
 #include "Graphics/RenderPipeline/RenderPasses/ForwardPass.h"
+#include "Graphics/RenderScene.h"
+#include "Graphics/RenderView.h"
 #include <iostream>
 
 #include <chrono>
@@ -14,18 +16,23 @@ bool StandardRenderPipeline::Initialize(rhi::RHIDeviceBase* device) {
     if (!device) return false;
     device_ = device;
     renderGraph_ = std::make_unique<rendergraph::RenderGraph>(*device);
-    
+
     // 初始化 GPU 优化器
     gpuOptimizer_ = std::make_unique<rhi::RHIGPUOptimizer>(*device);
     if (!gpuOptimizer_->Initialize()) {
         std::cerr << "Failed to initialize GPU Optimizer" << std::endl;
         // 允许失败，非关键组件
     }
-    
+
+    // Initialize Lumen GI passes based on quality preset
+    InitializeLumenPasses();
+
     return true;
 }
 
 void StandardRenderPipeline::Shutdown() {
+    ShutdownLumenPasses();
+
     if (gpuOptimizer_) {
         gpuOptimizer_->Shutdown();
         gpuOptimizer_.reset();
@@ -52,9 +59,37 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
 
     // Setup Passes
     // 1. Depth PrePass (Optional, skipping for now)
-    
+
+    // 1.5 Lumen Surface Cache (High quality and above)
+    if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+        lumen::SurfaceCacheFrameData frame_data{};
+        // TODO: Wire actual camera position and light count from RenderView/RenderScene
+        frame_data.camera_position = { 0.0f, 0.0f, 0.0f };
+        frame_data.frame_index = static_cast<u32>(frameCount_);
+        frame_data.light_count = 0;
+
+        rhi::ResourceHandle null_light_buffer{ rhi::handles::INVALID_RESOURCE };
+
+        surface_cache_pass_->AddPass(
+            *renderGraph_,
+            backBuffer,
+            null_light_buffer,
+            frame_data,
+            static_cast<u32>(frameCount_));
+
+        // Feed surface cache data to screen probe pass
+        if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+            screen_probe_pass_->SetSurfaceCacheData(
+                surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
+                surface_cache_pass_->GetCardDataBuffer(),
+                surface_cache_pass_->GetCardLookupBuffer(),
+                lumen_config_.surface_cache_atlas_size,
+                lumen_config_.surface_cache_max_cards);
+        }
+    }
+
     // 2. Forward Pass
-    RGResourceHandle output = ForwardPass::AddPass(*renderGraph_, scene, view, backBuffer);
+    ForwardPass::AddPass(*renderGraph_, scene, view, backBuffer);
 
     // 3. UI Pass (ToDo)
 
@@ -126,6 +161,45 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
     auto endTime = std::chrono::high_resolution_clock::now();
     stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
     // TODO: Get GPU time from queries
+}
+
+void StandardRenderPipeline::InitializeLumenPasses() {
+    if (!device_) return;
+
+    const auto& config = lumen_config_;
+
+    // Surface Cache: High quality and above
+    if (config.quality >= lumen::LumenQualityPreset::High) {
+        surface_cache_pass_ = std::make_unique<lumen::SurfaceCachePass>();
+        if (!surface_cache_pass_->Initialize(device_, config)) {
+            std::cerr << "[Lumen] Failed to initialize SurfaceCachePass" << std::endl;
+            surface_cache_pass_.reset();
+        }
+    }
+
+    // Screen Probes: Ultra quality and above
+    if (config.quality >= lumen::LumenQualityPreset::Ultra) {
+        screen_probe_pass_ = std::make_unique<lumen::ScreenProbeGIPass>();
+        // TODO: Wire actual render dimensions from the viewport
+        lumen::ScreenProbeParams probe_params{};
+        probe_params.downsample_factor = config.screen_probes_spacing;
+        probe_params.rays_per_probe = config.screen_probes_rays;
+        if (!screen_probe_pass_->Initialize(device_, 1920, 1080, probe_params)) {
+            std::cerr << "[Lumen] Failed to initialize ScreenProbeGIPass" << std::endl;
+            screen_probe_pass_.reset();
+        }
+    }
+}
+
+void StandardRenderPipeline::ShutdownLumenPasses() {
+    if (screen_probe_pass_) {
+        screen_probe_pass_->Shutdown();
+        screen_probe_pass_.reset();
+    }
+    if (surface_cache_pass_) {
+        surface_cache_pass_->Shutdown();
+        surface_cache_pass_.reset();
+    }
 }
 
 } // namespace primal::graphics

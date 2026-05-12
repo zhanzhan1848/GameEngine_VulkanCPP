@@ -17,6 +17,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#include "SurfaceCacheData.metal"
+
 // ============================================================================
 // Constant buffer layout (must match C++ ScreenProbeGlobalData)
 // ============================================================================
@@ -33,6 +35,8 @@ struct ScreenProbeGlobalData {
     float4   sdf_voxel_sizes[3];
     float4   sdf_extents[3];
     float4   sdf_resolutions; // x=res0, y=res1, z=res2, w=cascadeCount
+
+    float4   surface_cache_params; // x=atlasSize, y=cardCount, z=surfaceCacheAvailable(0/1), w=unused
 };
 
 // ============================================================================
@@ -196,6 +200,8 @@ kernel void screen_probe_trace_rays(
     texture3d<float, access::sample>  sdf2          [[texture(2)]],
     // Previous frame lit scene color
     texture2d<float, access::sample>  prevFrameColor [[texture(3)]],
+    // Surface cache lighting atlas (for near-hit sampling)
+    texture2d<float, access::sample>  surface_cache_lighting [[texture(4)]],
 
     // Input probe data buffers
     device const float4* probePositions  [[buffer(0)]],  // gridW * gridH * float4
@@ -206,6 +212,10 @@ kernel void screen_probe_trace_rays(
 
     // Constant buffer
     constant ScreenProbeGlobalData& global [[buffer(3)]],
+
+    // Surface cache card data and lookup buffers
+    constant SurfaceCacheCard*        cards       [[buffer(4)]],
+    constant SurfaceCacheCardLookup*  cardLookup  [[buffer(5)]],
 
     // Thread positioning (1D to be compatible with shared Metal compute encoder)
     uint global_id [[thread_position_in_grid]])
@@ -248,8 +258,31 @@ kernel void screen_probe_trace_rays(
     float cosTheta = 0.0f;  // cosine weight for irradiance integration
 
     if (hit.hit) {
-        // Sample previous frame lit color at hit position
-        radiance = samplePrevFrameColor(hit.position, prevFrameColor, global);
+        // Try surface cache sampling for near hits (< 2 world units)
+        bool usedSurfaceCache = false;
+        float nearDistance = 2.0f;
+
+        if (hit.distance < nearDistance && global.surface_cache_params.z > 0.5f) {
+            // Iterate cards to find matching atlas UV
+            uint cardCount = uint(global.surface_cache_params.y);
+            float atlasSize = global.surface_cache_params.x;
+
+            for (uint ci = 0; ci < cardCount && !usedSurfaceCache; ++ci) {
+                float2 atlas_uv;
+                if (worldToCardUV(hit.position, cards[ci], atlas_uv)) {
+                    // Convert atlas pixel coords to normalized UV for sampling
+                    float2 uv_norm = atlas_uv / float2(atlasSize);
+                    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+                    radiance = surface_cache_lighting.sample(s, uv_norm).rgb;
+                    usedSurfaceCache = true;
+                }
+            }
+        }
+
+        // Fall back to prev frame color if surface cache not used or not available
+        if (!usedSurfaceCache) {
+            radiance = samplePrevFrameColor(hit.position, prevFrameColor, global);
+        }
 
         // NaN/Inf guard
         if (any(isnan(radiance)) || any(isinf(radiance))) {

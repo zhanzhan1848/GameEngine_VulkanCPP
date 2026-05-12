@@ -159,6 +159,11 @@ public:
     const DDGIRuntimeParams& GetParams() const { return params_; }
     const DDGIVolumeData& GetVolumeData() const { return volume_data_; }
 
+    // Accessors for Surface Cache → DDGI integration
+    rhi::ResourceHandle GetProbeUpdateListBuffer() const {
+        return probe_update_list_buffer_;
+    }
+
     // Update probe origin to follow camera (grid-snapped).
     // Returns true if the grid actually shifted this frame.
     bool UpdateProbeOrigin(const math::v3& camera_position);

@@ -43,10 +43,11 @@ kernel void ddgi_update_irradiance(
         float hitDist = rayData[rayIdx].radiance_and_dist.w;
 
         if (hitDist < 0.0f) {
-            radiance = DDGI_SKY_COLOR * 0.5f;
+            radiance = DDGI_SKY_COLOR;
         } else {
-            float distWeight = 1.0f - smoothstep(0.0f, vol.RayMaxDistance, hitDist);
-            radiance *= distWeight;
+            // Gentler distance falloff — only attenuate near max distance
+            float distWeight = 1.0f - smoothstep(vol.RayMaxDistance * 0.8f, vol.RayMaxDistance, hitDist);
+            radiance *= max(distWeight, 0.2f);
         }
 
         float3 d = ddgiRayDirection(r, vol.RaysPerProbe, vol.FrameIndex);

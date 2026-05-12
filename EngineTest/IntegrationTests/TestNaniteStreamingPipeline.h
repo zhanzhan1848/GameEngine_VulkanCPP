@@ -18,6 +18,7 @@
 #include "Engine/Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Engine/Graphics/Lumen/DDGI/LumenDDGIPass.h"
 #include "Engine/Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
+#include "Engine/Graphics/Lumen/SurfaceCache/SurfaceCachePass.h"
 #include "Engine/Graphics/Nanite/GlobalSDF.h"
 #include "Engine/Graphics/Scene/RenderSceneSnapshot.h"
 #include "Engine/Components/Cluster.h"
@@ -120,6 +121,91 @@ private:
 
     // === Lumen Screen Probe GI ===
     std::unique_ptr<primal::graphics::lumen::ScreenProbeGIPass> screenProbeGIPass_;
+
+    // === Lumen Surface Cache ===
+    std::unique_ptr<primal::graphics::lumen::SurfaceCachePass> surfaceCachePass_;
+
+    // Surface Cache test pipelines (compute-only for Phase A verification)
+    primal::graphics::rhi::PipelineHandle sc_fill_test_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle sc_fill_test_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle sc_fill_test_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle sc_fill_test_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+
+    primal::graphics::rhi::PipelineHandle sc_light_cull_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle sc_light_cull_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle sc_light_cull_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle sc_light_cull_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+
+    primal::graphics::rhi::PipelineHandle sc_light_eval_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle sc_light_eval_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle sc_light_eval_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle sc_light_eval_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+
+    primal::graphics::rhi::ResourceHandle sc_light_info_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_cull_params_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_eval_params_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_global_data_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_tile_light_assign_buf_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    bool sc_fill_done_{ false };
+    bool sc_lighting_done_{ false };
+    uint32_t sc_lighting_atlas_idx_{ 0 };
+
+    // Surface Cache CardCapture (graphics pipeline for rendering meshes into atlas)
+    primal::graphics::rhi::PipelineHandle sc_capture_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle sc_capture_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle sc_capture_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle sc_capture_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    primal::graphics::rhi::ResourceHandle sc_capture_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_capture_depth_tex_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::SamplerHandle sc_capture_sampler_{ primal::graphics::rhi::handles::INVALID_SAMPLER };
+
+    // Surface Cache → DDGI integration (Strategy C: pre-computed card→probe projection)
+    static constexpr u32 SC_MAX_CONTRIBS_PER_PROBE = 6;
+
+    struct SCProbeCardContrib {
+        uint32_t card_index;
+        float    sh_weights[4];  // pre-computed L0+L1 SH projection weights
+    };
+
+    struct SCProbeContribRange {
+        uint32_t start;
+        uint32_t count;
+    };
+
+    // Card→Probe contribution data (built once on CPU after card generation)
+    primal::graphics::rhi::ResourceHandle sc_probe_contrib_range_buf_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_flat_contrib_buf_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_card_radiance_buf_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+
+    // CardRadianceAvg pipeline (per frame: sample lighting atlas → card_radiance buffer)
+    primal::graphics::rhi::PipelineHandle sc_card_rad_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle sc_card_rad_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle sc_card_rad_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle sc_card_rad_ds_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+
+    // ProbeIrradianceFromCards pipeline (per frame: weights × card_radiance → SH coefficients)
+    primal::graphics::rhi::PipelineHandle sc_probe_irr_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle sc_probe_irr_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle sc_probe_irr_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle sc_probe_irr_ds_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+
+    // Surface Cache params CB for CardRadianceAvg shader
+    primal::graphics::rhi::ResourceHandle sc_sc_params_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+
+    // DDGI volume CB for ProbeIrradianceFromCards shader
+    primal::graphics::rhi::ResourceHandle sc_ddgi_vol_cb_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
 
     // Color history for SSGI ray hit sampling
     std::unique_ptr<primal::graphics::nanite::ColorHistoryManager> colorHistoryManager_;
@@ -261,6 +347,8 @@ private:
     bool SetupBasicRenderingPipeline();
     bool InitializeSSGIPipeline();
     bool InitializeDDGIBlitPipeline();
+    bool InitializeSurfaceCachePipelines();
+    bool BuildCardProbeAssignment();
     void UpdateTestScene();
     void BuildRenderGraph(primal::graphics::rendergraph::RenderGraph& graph, primal::graphics::rhi::ResourceHandle backBuffer, u32 currentBufferIndex);
     void ProcessStreamingFeedback();

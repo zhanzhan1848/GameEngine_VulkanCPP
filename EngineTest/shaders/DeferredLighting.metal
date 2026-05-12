@@ -408,28 +408,16 @@ fragment float4 fragmentBlitDDGI(
     if (ssao <= 0.0f) ssao = 1.0f;
     float ao = ssao;
 
-    // Shadow on indirect: direct shadow map as low-frequency multiplier
-    // to prevent DDGI light leaking into shadowed areas.
-    float indirectShadow = mix(1.0f, 0.8f, 1.0f - directShadow);
+    // Shadow on indirect: REMOVED — DDGI probes already contain visibility info.
+    // Applying direct shadow to indirect light causes double-darkening artifacts.
 
-    // Modulate indirect by albedo for diffuse response, with AO + shadow darkening
+    // Modulate indirect by albedo for diffuse response, with AO
     float4 albedo = albedoTex.sample(s2d, uv);
-    float3 ddgiDiffuse = albedo.rgb * indirect * ddgiWeight * ao * indirectShadow;
+    float3 ddgiDiffuse = albedo.rgb * indirect * ddgiWeight * ao;
 
-    // DIAGNOSTIC: output DDGI indirect only (no direct lighting)
-    // Uncomment the line below to enable; comment out to restore normal composite.
-    // #define DDGI_DIAGNOSTIC_INDIRECT_ONLY
-#ifdef DDGI_DIAGNOSTIC_INDIRECT_ONLY
-    // Show DDGI irradiance directly (tone-mapped for visibility)
-    float3 lit = ddgiDiffuse * 5.0f; // boost for visibility
-    lit = toneMap(lit);
-#else
     // Final: direct + indirect
     float3 lit = sceneColor + ddgiDiffuse;
-
-    // Tone map + gamma
     lit = toneMap(lit);
-#endif
 
     return float4(lit, 1.0f);
 }
@@ -632,8 +620,8 @@ fragment float4 fragmentBlitFusion(
     if (ssao <= 0.0f) ssao = 1.0f;
     float ao = ssao;
 
-    // Shadow on indirect: prevent GI light leaking into shadowed areas
-    float indirectShadow = mix(1.0f, 0.8f, 1.0f - directShadow);
+    // Shadow on indirect: REMOVED — DDGI probes already contain visibility info.
+    // Applying direct shadow to indirect light causes double-darkening artifacts.
 
     // DDGI irradiance (low-frequency global indirect)
     float3 ddgi_irr = ddgiColor.sample(s, uv).rgb;
@@ -661,7 +649,7 @@ fragment float4 fragmentBlitFusion(
     float ssgi_hit_conf = saturate(1.0f - ssgi_hit_dist / 2.0f);
     float ssgi_conf = ssgi_hit_conf * (1.0f - spgi_conf);
 
-    float3 indirect = albedo * (base_irr + ssgi_irr * ssgi_conf * 0.3f) * ao * indirectShadow;
+    float3 indirect = albedo * (base_irr + ssgi_irr * ssgi_conf * 0.3f) * ao;
 
     float3 result = direct + indirect;
 

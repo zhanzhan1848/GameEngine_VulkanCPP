@@ -208,21 +208,24 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         place_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Trace: 4 textures (3 SDF + prev_color) + 3 SSBO (positions, normals, radiance) + 1 UBO ---
+    // --- Trace: 5 textures (3 SDF + prev_color + surface_cache_lighting) + 3 SSBO (positions, normals, radiance) + 2 SSBO (card_data, card_lookup) + 1 UBO ---
     {
         DescriptorSetLayoutBinding bindings[] = {
-            // Textures (SDF cascades + prev frame color)
+            // Textures (SDF cascades + prev frame color + surface cache lighting atlas)
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SDF 0
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SDF 1
             {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SDF 2
             {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev frame color
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // surface cache lighting atlas
             // Buffers
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe positions (read)
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals (read)
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe radiance (write)
             {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global data
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // surface cache card data
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // surface cache card lookup
         };
-        DescriptorSetLayoutDesc layoutDesc{8, bindings};
+        DescriptorSetLayoutDesc layoutDesc{11, bindings};
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -458,7 +461,7 @@ void ScreenProbeGIPass::CreatePipelines() {
 void ScreenProbeGIPass::CreateConstantBuffers() {
     for (int i = 0; i < 3; i++) {
         BufferDesc desc{};
-        desc.size = 512;  // ScreenProbeGlobalData padded
+        desc.size = 640;  // ScreenProbeGlobalData padded (expanded for surface_cache_params)
         desc.type = BufferType::Constant;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -633,13 +636,24 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     auto giFilteredHandle = graph.ImportResource("ScreenProbeGI_Filtered", output_texture_filtered_);
     output.gi_output = giFilteredHandle;  // Return denoised (filtered) output
 
+    // Import surface cache resources into render graph (needed for RGResourceHandle conversion)
+    RGResourceHandle scLightingHandle;
+    RGResourceHandle scCardDataHandle;
+    RGResourceHandle scCardLookupHandle;
+    if (surface_cache_available_) {
+        scLightingHandle = graph.ImportResource("SurfaceCache_Lighting_ForProbes", surface_cache_lighting_atlas_);
+        scCardDataHandle = graph.ImportResource("SurfaceCache_CardData_ForProbes", surface_cache_card_data_buffer_);
+        scCardLookupHandle = graph.ImportResource("SurfaceCache_CardLookup_ForProbes", surface_cache_card_lookup_buffer_);
+    }
+
     graph.AddPass<ScreenProbePassData>("ScreenProbeGI",
         RGPassType::Compute, RGPassCategory::Lighting,
 
         // ====================================================================
         // Setup lambda: declare resource dependencies
         // ====================================================================
-        [gbuffer_depth, gbuffer_normal, prev_frame_color, giOutputHandle, giFilteredHandle](
+        [this, gbuffer_depth, gbuffer_normal, prev_frame_color, giOutputHandle, giFilteredHandle,
+         scLightingHandle, scCardDataHandle, scCardLookupHandle](
             ScreenProbePassData& data, RenderGraphBuilder& builder) {
             // Read GBuffer inputs
             builder.Read(gbuffer_depth, ResourceState::ShaderResource);
@@ -648,6 +662,13 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Read previous frame color for radiance sampling
             if (prev_frame_color.IsValid()) {
                 builder.Read(prev_frame_color, ResourceState::ShaderResource);
+            }
+
+            // Read surface cache resources for near-hit sampling
+            if (surface_cache_available_) {
+                builder.Read(scLightingHandle, ResourceState::ShaderResource);
+                builder.Read(scCardDataHandle, ResourceState::ShaderResource);
+                builder.Read(scCardLookupHandle, ResourceState::ShaderResource);
             }
 
             // Write to raw output texture (Gather output)
@@ -664,7 +685,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
         // ====================================================================
         // Execute lambda: dispatch 3 compute sub-passes
         // ====================================================================
-        [this, camera_data, current_frame_index, frameIdx, histIdx, giFilteredHandle](
+        [this, camera_data, frameIdx, histIdx, giFilteredHandle](
             const ScreenProbePassData& data, RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
@@ -750,6 +771,14 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         };
                     }
 
+                    // Surface Cache integration params
+                    gd.surface_cache_params = {
+                        surface_cache_available_ ? static_cast<float>(surface_cache_atlas_size_) : 0.0f,
+                        static_cast<float>(surface_cache_card_count_),
+                        surface_cache_available_ ? 1.0f : 0.0f,
+                        0.0f
+                    };
+
                     *mapped = gd;
                     device_->UnmapBuffer(global_cb_[frameIdx]);
                 }
@@ -794,17 +823,25 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Sub-pass 2: ScreenProbeTraceRays
             // ==================================================================
             if (sdfAvailable && prevColorTex != handles::INVALID_RESOURCE) {
+                // Surface cache handles (use INVALID when not available)
+                ResourceHandle scLightingAtlas = surface_cache_available_ ? surface_cache_lighting_atlas_ : handles::INVALID_RESOURCE;
+                ResourceHandle scCardData = surface_cache_available_ ? surface_cache_card_data_buffer_ : handles::INVALID_RESOURCE;
+                ResourceHandle scCardLookup = surface_cache_available_ ? surface_cache_card_lookup_buffer_ : handles::INVALID_RESOURCE;
+
                 DescriptorData params[] = {
                     {0, DescriptorType::SampledImage,  sdfTextures[0]},
                     {1, DescriptorType::SampledImage,  sdfTextures[1]},
                     {2, DescriptorType::SampledImage,  sdfTextures[2]},
                     {3, DescriptorType::SampledImage,  prevColorTex},
+                    {4, DescriptorType::SampledImage,  scLightingAtlas},
                     {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
                     {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                     {2, DescriptorType::StorageBuffer, probe_radiance_buffer_[frameIdx]},
                     {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                    {4, DescriptorType::StorageBuffer, scCardData},
+                    {5, DescriptorType::StorageBuffer, scCardLookup},
                 };
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 8);
+                UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 11);
 
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };

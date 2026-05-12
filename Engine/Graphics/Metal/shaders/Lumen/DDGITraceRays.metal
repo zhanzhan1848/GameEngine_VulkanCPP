@@ -217,7 +217,7 @@ kernel void ddgi_trace_rays(
 
             // Smooth fade: full screen-space at center, blend to analytical at edges
             float2 edgeDist = abs(prevUV - 0.5f) * 2.0f;
-            float edgeFade = saturate(1.0f - (max(edgeDist.x, edgeDist.y) - 0.4f) / 0.4f);
+            float edgeFade = saturate(1.0f - (max(edgeDist.x, edgeDist.y) - 0.85f) / 0.15f);
 
             if (edgeFade > 0.0f) {
                 float2 clampedUV = clamp(prevUV, float2(0.0f), float2(1.0f));

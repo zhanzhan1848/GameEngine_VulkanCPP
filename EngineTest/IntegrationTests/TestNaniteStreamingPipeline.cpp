@@ -292,6 +292,64 @@ bool TestNaniteStreamingPipeline::Initialize() {
     // Print all instance bounds information
     PrintAllInstanceBounds();
 
+    // Register scene meshes with Surface Cache CardGenerator
+    if (surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
+        auto& cardGen = surfaceCachePass_->GetCardGenerator();
+        const auto& instances = sceneSnapshot_.GetInstanceData();
+        u32 registeredCount = 0;
+        for (u32 i = 0; i < sceneSnapshot_.GetInstanceCount() && i < sceneMeshes_.size(); ++i) {
+            const auto& inst = instances[i];
+            const auto& meshInfo = sceneMeshes_[i];
+            if (!meshInfo.mesh) continue;
+
+            const auto& localAABB = meshInfo.mesh->GetLocalAABB();
+            m4x4 worldMat = inst.world_matrix;
+
+            primal::math::v3 corners[8] = {
+                {localAABB.min.x, localAABB.min.y, localAABB.min.z},
+                {localAABB.max.x, localAABB.min.y, localAABB.min.z},
+                {localAABB.min.x, localAABB.max.y, localAABB.min.z},
+                {localAABB.max.x, localAABB.max.y, localAABB.min.z},
+                {localAABB.min.x, localAABB.min.y, localAABB.max.z},
+                {localAABB.max.x, localAABB.min.y, localAABB.max.z},
+                {localAABB.min.x, localAABB.max.y, localAABB.max.z},
+                {localAABB.max.x, localAABB.max.y, localAABB.max.z},
+            };
+            primal::math::v3 worldMin{FLT_MAX, FLT_MAX, FLT_MAX};
+            primal::math::v3 worldMax{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+            for (int c = 0; c < 8; ++c) {
+                v4 worldPt = worldMat * v4{corners[c].x, corners[c].y, corners[c].z, 1.0f};
+                worldMin.x = std::min(worldMin.x, worldPt.x);
+                worldMin.y = std::min(worldMin.y, worldPt.y);
+                worldMin.z = std::min(worldMin.z, worldPt.z);
+                worldMax.x = std::max(worldMax.x, worldPt.x);
+                worldMax.y = std::max(worldMax.y, worldPt.y);
+                worldMax.z = std::max(worldMax.z, worldPt.z);
+            }
+            cardGen.RegisterMesh(worldMin, worldMax, i);
+            registeredCount++;
+        }
+        cardGen.RebuildCardAllocation();
+        std::cout << "[SurfaceCache] Registered " << registeredCount
+                  << " meshes (instanceCount=" << sceneSnapshot_.GetInstanceCount()
+                  << ", sceneMeshes=" << sceneMeshes_.size()
+                  << "), generated " << cardGen.GetCardCount() << " cards" << std::endl;
+
+        // Build Card→Probe assignment now that cards are available
+        if (ddgiPass_ && ddgiPass_->IsInitialized() && cardGen.GetCardCount() > 0) {
+            std::cout << "[SC→DDGI] Calling BuildCardProbeAssignment: cardCount="
+                      << cardGen.GetCardCount() << std::endl;
+            BuildCardProbeAssignment();
+        } else {
+            std::cerr << "[SC→DDGI] Skipping assignment: ddgi=" << (bool)ddgiPass_
+                      << " ddgiInit=" << (ddgiPass_ ? ddgiPass_->IsInitialized() : false)
+                      << " cards=" << cardGen.GetCardCount() << std::endl;
+        }
+    } else {
+        std::cerr << "[SC CardReg] surfaceCachePass_ not available: sc="
+                  << (bool)surfaceCachePass_ << std::endl;
+    }
+
     return true;
 }
 
@@ -762,6 +820,12 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         std::cerr << "[TestNanite] Warning: DDGI blit pipeline initialization failed" << std::endl;
     }
 
+    // Initialize Surface Cache pipelines
+    // Initialize Surface Cache pipelines
+    if (!InitializeSurfaceCachePipelines()) {
+        std::cerr << "[TestNanite] Warning: Surface Cache pipeline initialization failed" << std::endl;
+    }
+
     // Shadow mapping initialization
     if (gpuDrawPipeline_) {
         gpuDrawPipeline_->InitializeShadowResources(
@@ -957,6 +1021,19 @@ bool TestNaniteStreamingPipeline::InitializeSSGIPipeline() {
     } else {
         std::cout << "[ScreenProbeGI] Screen Probe GI pass initialized" << std::endl;
     }
+
+    // 6. Initialize SurfaceCachePass
+    surfaceCachePass_ = std::make_unique<primal::graphics::lumen::SurfaceCachePass>();
+    {
+        primal::graphics::lumen::LumenConfig sc_config;
+        sc_config.quality = primal::graphics::lumen::LumenQualityPreset::High;
+        if (!surfaceCachePass_->Initialize(device_, sc_config)) {
+            std::cerr << "[SurfaceCache] Failed to initialize SurfaceCachePass" << std::endl;
+            surfaceCachePass_.reset();
+        } else {
+            std::cout << "[SurfaceCache] Surface Cache pass initialized" << std::endl;
+        }
+    }
     return true;
 }
 
@@ -1137,6 +1214,586 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
     }
 
     //std::cout << "[DDGIBlit] DDGI blit pipeline initialized successfully" << std::endl;
+    return true;
+}
+
+bool TestNaniteStreamingPipeline::InitializeSurfaceCachePipelines() {
+    if (!surfaceCachePass_ || !surfaceCachePass_->IsInitialized()) {
+        std::cerr << "[SurfaceCache] Skipping pipeline init: pass not initialized" << std::endl;
+        return false;
+    }
+
+    // DEBUG: skip all pipeline creation to test if SurfaceCachePass::Initialize alone breaks rendering
+    // std::cout << "[SurfaceCache] Skipping pipeline creation (debug)" << std::endl;
+    // return true;
+
+    using namespace primal::graphics;
+    using namespace primal::graphics::rhi;
+    const std::string shaderDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/";
+    primal::utl::vector<std::wstring> extra_args;
+
+    std::cout << "[SurfaceCache] Starting pipeline initialization..." << std::endl;
+
+    // === 1. FillTest pipeline ===
+    {
+        const shader_file_info info{ "Lumen/SurfaceCacheTestData.metal", "surfaceCacheFillTest", shader_type::compute };
+        auto compiled = compile_shader(info, shaderDir.c_str(), extra_args);
+        if (!compiled) { std::cout << "[SurfaceCache] FAIL: compile FillTest shader returned null" << std::endl; return false; }
+        std::cout << "[SurfaceCache] FillTest shader compiled OK" << std::endl;
+
+        u64 sz = *reinterpret_cast<u64*>(compiled.get());
+        u8* ptr = compiled.get() + sizeof(u64) + 16;
+        auto sh = device_->CreateShader(ptr, sz, ShaderStage::Compute, info.function);
+        if (sh == handles::INVALID_SHADER) { std::cout << "[SurfaceCache] FAIL: CreateShader for FillTest" << std::endl; return false; }
+
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // albedo out
+            {1, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // normal out
+            {2, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // depth out
+        };
+        sc_fill_test_set_layout_ = device_->CreateDescriptorSetLayout({3, bindings});
+        sc_fill_test_layout_ = device_->CreatePipelineLayout({1, &sc_fill_test_set_layout_});
+        sc_fill_test_descriptor_set_ = device_->CreateDescriptorSet({sc_fill_test_set_layout_});
+
+        ComputePipelineDesc pd{};
+        pd.computeShader = sh;
+        pd.layout = sc_fill_test_layout_;
+        pd.threadGroupSize = {8, 8, 1};
+        sc_fill_test_pipeline_ = device_->CreateComputePipeline(pd);
+        if (sc_fill_test_pipeline_ == handles::INVALID_PIPELINE) {
+            std::cout << "[SurfaceCache] FAIL: CreateComputePipeline for FillTest" << std::endl;
+            return false;
+        }
+        std::cout << "[SurfaceCache] FillTest pipeline created OK" << std::endl;
+    }
+
+    // === 2. LightCull pipeline ===
+    {
+        const shader_file_info info{ "Lumen/SurfaceCacheLightCull.metal", "surfaceCacheLightCull", shader_type::compute };
+        auto compiled = compile_shader(info, shaderDir.c_str(), extra_args);
+        if (!compiled) { std::cerr << "[SurfaceCache] Failed to compile LightCull shader" << std::endl; return false; }
+
+        u64 sz = *reinterpret_cast<u64*>(compiled.get());
+        u8* ptr = compiled.get() + sizeof(u64) + 16;
+        auto sh = device_->CreateShader(ptr, sz, ShaderStage::Compute, info.function);
+        if (sh == handles::INVALID_SHADER) { std::cerr << "[SurfaceCache] Failed to create LightCull shader" << std::endl; return false; }
+
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth atlas
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal atlas
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // LightCullParams
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // LightInfo array
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // tile_light_assignment
+        };
+        sc_light_cull_set_layout_ = device_->CreateDescriptorSetLayout({5, bindings});
+        sc_light_cull_layout_ = device_->CreatePipelineLayout({1, &sc_light_cull_set_layout_});
+        sc_light_cull_descriptor_set_ = device_->CreateDescriptorSet({sc_light_cull_set_layout_});
+
+        ComputePipelineDesc pd{};
+        pd.computeShader = sh;
+        pd.layout = sc_light_cull_layout_;
+        pd.threadGroupSize = {8, 8, 1};
+        sc_light_cull_pipeline_ = device_->CreateComputePipeline(pd);
+        if (sc_light_cull_pipeline_ == handles::INVALID_PIPELINE) {
+            std::cerr << "[SurfaceCache] Failed to create LightCull pipeline" << std::endl;
+            return false;
+        }
+    }
+
+    // === 3. LightEval pipeline ===
+    {
+        const shader_file_info info{ "Lumen/SurfaceCacheLightEval.metal", "surfaceCacheLightEval", shader_type::compute };
+        auto compiled = compile_shader(info, shaderDir.c_str(), extra_args);
+        if (!compiled) { std::cerr << "[SurfaceCache] Failed to compile LightEval shader" << std::endl; return false; }
+
+        u64 sz = *reinterpret_cast<u64*>(compiled.get());
+        u8* ptr = compiled.get() + sizeof(u64) + 16;
+        auto sh = device_->CreateShader(ptr, sz, ShaderStage::Compute, info.function);
+        if (sh == handles::INVALID_SHADER) { std::cerr << "[SurfaceCache] Failed to create LightEval shader" << std::endl; return false; }
+
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // albedo atlas
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal atlas
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // emissive atlas
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadow map
+            {4, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // lighting out
+            {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // GlobalShaderData
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // LightEvalParams
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lights
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // tile_lights
+        };
+        sc_light_eval_set_layout_ = device_->CreateDescriptorSetLayout({10, bindings});
+        sc_light_eval_layout_ = device_->CreatePipelineLayout({1, &sc_light_eval_set_layout_});
+        sc_light_eval_descriptor_set_ = device_->CreateDescriptorSet({sc_light_eval_set_layout_});
+
+        ComputePipelineDesc pd{};
+        pd.computeShader = sh;
+        pd.layout = sc_light_eval_layout_;
+        pd.threadGroupSize = {8, 8, 1};
+        sc_light_eval_pipeline_ = device_->CreateComputePipeline(pd);
+        if (sc_light_eval_pipeline_ == handles::INVALID_PIPELINE) {
+            std::cerr << "[SurfaceCache] Failed to create LightEval pipeline" << std::endl;
+            return false;
+        }
+    }
+
+    // === 4. Constant buffers ===
+    {
+        BufferDesc cbDesc{};
+        cbDesc.size = 256;
+        cbDesc.type = BufferType::Constant;
+        cbDesc.usage = GPUMemoryUsage::Dynamic;
+        cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        sc_cull_params_cb_ = device_->CreateBuffer(cbDesc);
+        sc_eval_params_cb_ = device_->CreateBuffer(cbDesc);
+        // GlobalShaderData needs 432+ bytes
+        BufferDesc globalCbDesc{};
+        globalCbDesc.size = 512;
+        globalCbDesc.type = BufferType::Constant;
+        globalCbDesc.usage = GPUMemoryUsage::Dynamic;
+        globalCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        sc_global_data_cb_ = device_->CreateBuffer(globalCbDesc);
+    }
+
+    // Light info buffer (1 directional light)
+    {
+        BufferDesc lbDesc{};
+        lbDesc.size = 256;
+        lbDesc.type = BufferType::Structured;
+        lbDesc.usage = GPUMemoryUsage::Dynamic;
+        lbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        sc_light_info_cb_ = device_->CreateBuffer(lbDesc);
+    }
+
+    // Tile light assignment buffer — sized for TILES not pages
+    // Atlas=2048, tileSize=8 → 256×256 = 65,536 tiles × uint4 = 1MB
+    {
+        u32 atlasSize = surfaceCachePass_->GetAtlasSize();
+        u32 tileSize = 8;
+        u32 tilesPerSide = atlasSize / tileSize;
+        u32 totalTiles = tilesPerSide * tilesPerSide;
+        BufferDesc tlaDesc{};
+        tlaDesc.size = (u64)totalTiles * sizeof(u32) * 4; // uint4 per tile
+        tlaDesc.type = BufferType::Structured;
+        tlaDesc.usage = GPUMemoryUsage::Dynamic;
+        tlaDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        sc_tile_light_assign_buf_ = device_->CreateBuffer(tlaDesc);
+        std::cout << "[SurfaceCache] Tile light assignment buffer: "
+                  << totalTiles << " tiles (" << tlaDesc.size << " bytes)" << std::endl;
+    }
+
+    // === 5. CardCapture graphics pipeline ===
+    {
+        const shader_file_info vs_info{ "Lumen/SurfaceCacheCardCapture.metal", "cardCaptureVS", shader_type::vertex };
+        const shader_file_info fs_info{ "Lumen/SurfaceCacheCardCapture.metal", "cardCaptureFS", shader_type::pixel };
+        auto compiledVS = compile_shader(vs_info, shaderDir.c_str(), extra_args);
+        auto compiledFS = compile_shader(fs_info, shaderDir.c_str(), extra_args);
+        if (!compiledVS || !compiledFS) {
+            std::cerr << "[SurfaceCache] Failed to compile CardCapture shaders" << std::endl;
+            return false;
+        }
+
+        u64 szVS = *reinterpret_cast<u64*>(compiledVS.get());
+        u8* ptrVS = compiledVS.get() + sizeof(u64) + 16;
+        auto shVS = device_->CreateShader(ptrVS, szVS, ShaderStage::Vertex, vs_info.function);
+
+        u64 szFS = *reinterpret_cast<u64*>(compiledFS.get());
+        u8* ptrFS = compiledFS.get() + sizeof(u64) + 16;
+        auto shFS = device_->CreateShader(ptrFS, szFS, ShaderStage::Pixel, fs_info.function);
+
+        if (shVS == handles::INVALID_SHADER || shFS == handles::INVALID_SHADER) {
+            std::cerr << "[SurfaceCache] Failed to create CardCapture shaders" << std::endl;
+            return false;
+        }
+
+        // Descriptor set layout: materials, textures, sampler only.
+        // CB (buffer 0) and vertex buffer (buffer 1) bound via cmd->BindVertexBuffers per draw
+        DescriptorSetLayoutBinding bindings[] = {
+            {3, DescriptorType::StorageBuffer,  1, ShaderStage::Pixel, nullptr},   // material data
+            {0, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},   // albedo array
+            {1, DescriptorType::SampledImage,   1, ShaderStage::Pixel, nullptr},   // normal array
+            {0, DescriptorType::Sampler,        1, ShaderStage::Pixel, nullptr},
+        };
+        sc_capture_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+        sc_capture_layout_ = device_->CreatePipelineLayout({1, &sc_capture_set_layout_});
+        sc_capture_descriptor_set_ = device_->CreateDescriptorSet({sc_capture_set_layout_});
+
+        GraphicsPipelineDesc gpd{};
+        gpd.vertexShader = shVS;
+        gpd.pixelShader = shFS;
+        gpd.layout = sc_capture_layout_;
+        gpd.topology = PrimitiveTopology::TriangleList;
+        gpd.renderTargetFormats[0] = DataFormat::RGBA8_UNorm;   // albedo
+        gpd.renderTargetFormats[1] = DataFormat::RG16_Float;    // normal
+        gpd.renderTargetFormats[2] = DataFormat::R32_Float;     // depth
+        gpd.renderTargetFormats[3] = DataFormat::RGBA16_Float;  // emissive
+        gpd.renderTargetCount = 4;
+        gpd.depthStencilFormat = DataFormat::D32_Float;
+        gpd.enableDepthTest = true;
+        gpd.enableDepthWrite = true;
+        gpd.cullMode = CullMode::None;  // Double-sided capture for thin/single-sided geometry
+        sc_capture_pipeline_ = device_->CreateGraphicsPipeline(gpd);
+        if (sc_capture_pipeline_ == handles::INVALID_PIPELINE) {
+            std::cerr << "[SurfaceCache] Failed to create CardCapture pipeline" << std::endl;
+            return false;
+        }
+
+        // Capture pass constant buffer — large enough for all cards (dynamic offset per draw)
+        // Each CapturePassGPU is 256 bytes (padded to 256 for alignment)
+        constexpr u32 MAX_CAPTURE_CARDS = 2048;
+        constexpr u32 PER_CARD_CB_SIZE = 256;
+        BufferDesc capCBDesc{};
+        capCBDesc.size = MAX_CAPTURE_CARDS * PER_CARD_CB_SIZE;
+        capCBDesc.type = BufferType::Constant;
+        capCBDesc.usage = GPUMemoryUsage::Dynamic;
+        capCBDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        sc_capture_cb_ = device_->CreateBuffer(capCBDesc);
+
+        // Temporary depth texture for hardware depth testing during capture
+        u32 atlasSize = surfaceCachePass_->GetAtlasSize();
+        TextureDesc depthDesc{};
+        depthDesc.size = {atlasSize, atlasSize, 1};
+        depthDesc.mipLevels = 1;
+        depthDesc.arraySize = 1;
+        depthDesc.format = DataFormat::D32_Float;
+        depthDesc.type = TextureType::Texture2D;
+        depthDesc.usage = TextureUsage::DepthStencil;
+        depthDesc.name = "SC_CaptureDepth";
+        sc_capture_depth_tex_ = device_->CreateTexture(depthDesc);
+
+        // Linear sampler for material texture sampling
+        SamplerDesc sampDesc{};
+        sampDesc.minFilter = FilterMode::Linear;
+        sampDesc.magFilter = FilterMode::Linear;
+        sampDesc.mipFilter = FilterMode::Linear;
+        sampDesc.addressU = TextureAddressMode::Wrap;
+        sampDesc.addressV = TextureAddressMode::Wrap;
+        sc_capture_sampler_ = device_->CreateSampler(sampDesc);
+
+        std::cout << "[SurfaceCache] CardCapture pipeline created" << std::endl;
+    }
+
+    // === 6. CardRadianceAvg compute pipeline (Surface Cache → DDGI) ===
+    {
+        const shader_file_info info{ "Lumen/DDGICardRadianceAvg.metal", "ddgi_card_radiance_avg", shader_type::compute };
+        auto compiled = compile_shader(info, shaderDir.c_str(), extra_args);
+        if (!compiled) { std::cerr << "[SC→DDGI] Failed to compile CardRadianceAvg shader" << std::endl; }
+        else {
+            u64 sz = *reinterpret_cast<u64*>(compiled.get());
+            u8* ptr = compiled.get() + sizeof(u64) + 16;
+            auto sh = device_->CreateShader(ptr, sz, ShaderStage::Compute, info.function);
+
+            if (sh == handles::INVALID_SHADER) {
+                std::cerr << "[SC→DDGI] Failed to create CardRadianceAvg shader" << std::endl;
+            } else {
+                DescriptorSetLayoutBinding bindings[] = {
+                    {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // SurfaceCacheParams
+                    {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards
+                    {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_radiance output
+                    {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // lighting atlas
+                };
+                sc_card_rad_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+                sc_card_rad_layout_ = device_->CreatePipelineLayout({1, &sc_card_rad_set_layout_});
+
+                ComputePipelineDesc pd{};
+                pd.computeShader = sh;
+                pd.layout = sc_card_rad_layout_;
+                pd.threadGroupSize = {64, 1, 1};
+                sc_card_rad_pipeline_ = device_->CreateComputePipeline(pd);
+
+                for (int i = 0; i < 3; ++i) {
+                    sc_card_rad_ds_[i] = device_->CreateDescriptorSet({sc_card_rad_set_layout_});
+                }
+
+                if (sc_card_rad_pipeline_ != handles::INVALID_PIPELINE) {
+                    std::cout << "[SC→DDGI] CardRadianceAvg pipeline created" << std::endl;
+                }
+            }
+        }
+    }
+
+    // === 7. ProbeIrradianceFromCards compute pipeline ===
+    {
+        const shader_file_info info{ "Lumen/DDGIProbeIrradianceFromCards.metal", "ddgi_probe_irradiance_from_cards", shader_type::compute };
+        auto compiled = compile_shader(info, shaderDir.c_str(), extra_args);
+        if (!compiled) { std::cerr << "[SC→DDGI] Failed to compile ProbeIrradianceFromCards shader" << std::endl; }
+        else {
+            u64 sz = *reinterpret_cast<u64*>(compiled.get());
+            u8* ptr = compiled.get() + sizeof(u64) + 16;
+            auto sh = device_->CreateShader(ptr, sz, ShaderStage::Compute, info.function);
+
+            if (sh == handles::INVALID_SHADER) {
+                std::cerr << "[SC→DDGI] Failed to create ProbeIrradianceFromCards shader" << std::endl;
+            } else {
+                DescriptorSetLayoutBinding bindings[] = {
+                    {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // DDGIVolumeData
+                    {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ProbeContribRange
+                    {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ProbeCardContrib
+                    {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_radiance
+                    {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_history
+                    {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_output
+                    {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe_update_list
+                };
+                sc_probe_irr_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
+                sc_probe_irr_layout_ = device_->CreatePipelineLayout({1, &sc_probe_irr_set_layout_});
+
+                // DEBUG: test pipeline creation but skip descriptor sets
+                ComputePipelineDesc pd{};
+                pd.computeShader = sh;
+                pd.layout = sc_probe_irr_layout_;
+                pd.threadGroupSize = {64, 1, 1};
+                sc_probe_irr_pipeline_ = device_->CreateComputePipeline(pd);
+
+                for (int i = 0; i < 3; ++i) {
+                    sc_probe_irr_ds_[i] = device_->CreateDescriptorSet({sc_probe_irr_set_layout_});
+                }
+
+                if (sc_probe_irr_pipeline_ != handles::INVALID_PIPELINE) {
+                    std::cout << "[SC→DDGI] ProbeIrradianceFromCards pipeline created" << std::endl;
+                }
+            }
+        }
+    }
+
+    std::cout << "[SurfaceCache] Pipelines initialized (FillTest + LightCull + LightEval + SC→DDGI)" << std::endl;
+
+    // === Section 8: Pre-allocate SC→DDGI buffers (at init time, not after scene load) ===
+    // These must be created here alongside other GPU resources to avoid heap timing issues.
+    // Data is uploaded later in BuildCardProbeAssignment() after cards are generated.
+    {
+        u32 totalProbes = 2048;  // matches DDGI 16x8x16 grid
+        u32 maxCards = 4096;     // matches SurfaceCacheParams max_cards
+
+        // Range buffer: one ProbeContribRange per probe
+        {
+            BufferDesc rangeDesc{};
+            rangeDesc.size = totalProbes * sizeof(SCProbeContribRange);
+            rangeDesc.type = BufferType::Structured;
+            rangeDesc.usage = GPUMemoryUsage::Dynamic;
+            rangeDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            sc_probe_contrib_range_buf_ = device_->CreateBuffer(rangeDesc);
+        }
+
+        // Flat contrib buffer: worst case = probes * MAX_CONTRIBS_PER_PROBE
+        {
+            BufferDesc contribDesc{};
+            contribDesc.size = (u64)totalProbes * SC_MAX_CONTRIBS_PER_PROBE * sizeof(SCProbeCardContrib);
+            contribDesc.type = BufferType::Structured;
+            contribDesc.usage = GPUMemoryUsage::Dynamic;
+            contribDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            sc_flat_contrib_buf_ = device_->CreateBuffer(contribDesc);
+        }
+
+        // Card radiance buffer: float3 per card
+        {
+            BufferDesc radDesc{};
+            radDesc.size = (u64)maxCards * sizeof(float) * 3;
+            radDesc.type = BufferType::Structured;
+            radDesc.usage = GPUMemoryUsage::Dynamic;
+            radDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            sc_card_radiance_buf_ = device_->CreateBuffer(radDesc);
+        }
+
+        // SurfaceCacheParams CB
+        {
+            BufferDesc cbDesc{};
+            cbDesc.size = 256;
+            cbDesc.type = BufferType::Constant;
+            cbDesc.usage = GPUMemoryUsage::Dynamic;
+            cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            sc_sc_params_cb_ = device_->CreateBuffer(cbDesc);
+        }
+
+        // DDGI volume CB (triple-buffered)
+        for (int i = 0; i < 3; ++i) {
+            BufferDesc cbDesc{};
+            cbDesc.size = 512;
+            cbDesc.type = BufferType::Constant;
+            cbDesc.usage = GPUMemoryUsage::Dynamic;
+            cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            sc_ddgi_vol_cb_[i] = device_->CreateBuffer(cbDesc);
+        }
+
+        std::cout << "[SC→DDGI] Pre-allocated GPU buffers (range+contrib+radiance+CBs)" << std::endl;
+    }
+
+    return true;
+}
+
+bool TestNaniteStreamingPipeline::BuildCardProbeAssignment() {
+    if (!surfaceCachePass_ || !surfaceCachePass_->IsInitialized() || !ddgiPass_ || !ddgiPass_->IsInitialized()) {
+        std::cerr << "[SC→DDGI] Cannot build assignment: missing passes" << std::endl;
+        return false;
+    }
+
+    const auto& cards = surfaceCachePass_->GetCardGenerator().GetCards();
+    u32 cardCount = surfaceCachePass_->GetCardGenerator().GetCardCount();
+    if (cardCount == 0) {
+        std::cerr << "[SC→DDGI] No cards to assign" << std::endl;
+        return false;
+    }
+
+    const auto& ddgiParams = ddgiPass_->GetParams();
+    const auto& ddgiVol = ddgiPass_->GetVolumeData();
+    u32 totalProbes = ddgiParams.probe_count_x * ddgiParams.probe_count_y * ddgiParams.probe_count_z;
+    primal::math::v3 probeOrigin = {ddgiVol.ProbeOrigin.x, ddgiVol.ProbeOrigin.y, ddgiVol.ProbeOrigin.z};
+    float probeSpacing = ddgiParams.probe_spacing;
+    float maxDist = probeSpacing * 3.0f;
+
+    // Per-probe builder (fixed-size, lock-free)
+    struct ProbeBuilder {
+        SCProbeCardContrib entries[SC_MAX_CONTRIBS_PER_PROBE];
+        u32 count = 0;
+        float weights[SC_MAX_CONTRIBS_PER_PROBE] = {};  // for sorting
+    };
+    std::vector<ProbeBuilder> builders(totalProbes);
+
+    // Parallel computation using JobSystem
+    auto jobHandle = primal::jobsystem::JobSystem::ParallelFor(totalProbes,
+        [&](u32 probeIdx) {
+            auto& b = builders[probeIdx];
+
+            // Compute probe world position
+            u32 ix = probeIdx % ddgiParams.probe_count_x;
+            u32 iy = (probeIdx / ddgiParams.probe_count_x) % ddgiParams.probe_count_y;
+            u32 iz = probeIdx / (ddgiParams.probe_count_x * ddgiParams.probe_count_y);
+            primal::math::v3 probePos = {
+                probeOrigin.x + (float)ix * probeSpacing,
+                probeOrigin.y + (float)iy * probeSpacing,
+                probeOrigin.z + (float)iz * probeSpacing
+            };
+
+            constexpr float PI = 3.14159265358979f;
+            constexpr float FOUR_PI = 4.0f * PI;
+            constexpr float SH_C0 = 0.282095f;
+            constexpr float SH_C1 = 0.488603f;
+
+            for (u32 c = 0; c < cardCount; ++c) {
+                const auto& card = cards[c];
+                if (card.resolution == 0) continue;
+
+                // Direction from probe to card center
+                float dx = card.center.x - probePos.x;
+                float dy = card.center.y - probePos.y;
+                float dz = card.center.z - probePos.z;
+                float dist2 = dx*dx + dy*dy + dz*dz;
+                if (dist2 > maxDist * maxDist) continue;
+
+                float dist = std::sqrt(dist2);
+                if (dist < 0.01f) continue;
+
+                float invDist = 1.0f / dist;
+                float dirX = dx * invDist;
+                float dirY = dy * invDist;
+                float dirZ = dz * invDist;
+
+                // Card normal from axis_direction
+                uint8_t axis = card.axis_direction & 0xFF;
+                uint8_t dir  = (card.axis_direction >> 8) & 0xFF;
+                primal::math::v3 cardNormal{0,0,0};
+                if (axis == 0) cardNormal.x = dir ? 1.0f : -1.0f;
+                else if (axis == 1) cardNormal.y = dir ? 1.0f : -1.0f;
+                else cardNormal.z = dir ? 1.0f : -1.0f;
+
+                // NdotL: card normal dotted with direction toward probe (back-face check)
+                float NdotL = -(cardNormal.x * dirX + cardNormal.y * dirY + cardNormal.z * dirZ);
+                if (NdotL < 0.01f) continue;
+
+                // Card area (two non-axis extent components)
+                float cardArea;
+                if (axis == 0) cardArea = card.extent.y * card.extent.z * 4.0f;
+                else if (axis == 1) cardArea = card.extent.x * card.extent.z * 4.0f;
+                else cardArea = card.extent.x * card.extent.y * 4.0f;
+                if (cardArea < 0.001f) continue;
+
+                // Approximate solid angle: area / (dist² + ε)
+                float solidAngle = cardArea / (dist2 + 1.0f);
+                // Weight includes 4π normalization for sparse card sampling
+                // (equivalent to DDGI's 4π/RaysPerProbe per ray)
+                float totalWeight = solidAngle * NdotL * FOUR_PI;
+
+                // Evaluate SH basis L0+L1 in direction (probe→card)
+                float basis[4];
+                basis[0] = SH_C0;
+                basis[1] = -SH_C1 * dirY;
+                basis[2] =  SH_C1 * dirZ;
+                basis[3] = -SH_C1 * dirX;
+
+                // Compute contribution
+                SCProbeCardContrib contrib;
+                contrib.card_index = c;
+                for (int i = 0; i < 4; ++i) {
+                    contrib.sh_weights[i] = totalWeight * basis[i];
+                }
+
+                // Insert-sorted into top-N by weight
+                if (b.count < SC_MAX_CONTRIBS_PER_PROBE) {
+                    b.entries[b.count] = contrib;
+                    b.weights[b.count] = totalWeight;
+                    b.count++;
+                } else {
+                    // Find minimum weight entry
+                    u32 minIdx = 0;
+                    for (u32 j = 1; j < SC_MAX_CONTRIBS_PER_PROBE; ++j) {
+                        if (b.weights[j] < b.weights[minIdx]) minIdx = j;
+                    }
+                    if (totalWeight > b.weights[minIdx]) {
+                        b.entries[minIdx] = contrib;
+                        b.weights[minIdx] = totalWeight;
+                    }
+                }
+            }
+        });
+    primal::jobsystem::JobSystem::Wait(jobHandle);
+
+    // Flatten into GPU-ready buffers
+    std::vector<SCProbeContribRange> ranges(totalProbes);
+    std::vector<SCProbeCardContrib> flatContribs;
+    flatContribs.reserve(totalProbes * SC_MAX_CONTRIBS_PER_PROBE);
+
+    for (u32 p = 0; p < totalProbes; ++p) {
+        ranges[p].start = (u32)flatContribs.size();
+        ranges[p].count = builders[p].count;
+        for (u32 i = 0; i < builders[p].count; ++i) {
+            flatContribs.push_back(builders[p].entries[i]);
+        }
+    }
+
+    // Upload to GPU — buffers were pre-allocated in InitializeSurfaceCachePipelines()
+    // Upload range data
+    {
+        auto* mapped = static_cast<SCProbeContribRange*>(device_->MapBuffer(sc_probe_contrib_range_buf_));
+        if (mapped) {
+            memcpy(mapped, ranges.data(), ranges.size() * sizeof(SCProbeContribRange));
+            device_->UnmapBuffer(sc_probe_contrib_range_buf_);
+        }
+    }
+    // Upload contrib data
+    {
+        auto* mapped = static_cast<SCProbeCardContrib*>(device_->MapBuffer(sc_flat_contrib_buf_));
+        if (mapped) {
+            memcpy(mapped, flatContribs.data(), flatContribs.size() * sizeof(SCProbeCardContrib));
+            device_->UnmapBuffer(sc_flat_contrib_buf_);
+        }
+    }
+    // Upload SurfaceCacheParams
+    {
+        auto* mapped = static_cast<lumen::SurfaceCacheParams*>(device_->MapBuffer(sc_sc_params_cb_));
+        if (mapped) {
+            lumen::SurfaceCacheParams params{};
+            params.atlas_size = surfaceCachePass_->GetAtlasSize();
+            params.page_size = surfaceCachePass_->GetPageSize();
+            params.max_cards = cardCount;
+            *mapped = params;
+            device_->UnmapBuffer(sc_sc_params_cb_);
+        }
+    }
+
+    std::cout << "[SC→DDGI] Card→Probe assignment built: "
+              << cardCount << " cards, " << totalProbes << " probes, "
+              << flatContribs.size() << " contributions (avg "
+              << (flatContribs.size() / (float)totalProbes) << " per probe)" << std::endl;
     return true;
 }
 
@@ -1540,8 +2197,8 @@ void TestNaniteStreamingPipeline::Run() {
     primal::input::get(primal::input::input_source::keyboard, primal::input::input_code::key_f4, val);
     bool f4_current = val.current.x > 0.0f;
     if (f4_current && !keyState_.f4_prev) {
-        ssgiVisMode_ = (ssgiVisMode_ + 1) % 7;
-        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only", "DDGI Composite", "Albedo Only", "Screen Probe GI", "Full GI Fusion" };
+        ssgiVisMode_ = (ssgiVisMode_ + 1) % 10;
+        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only", "DDGI Composite", "Albedo Only", "Screen Probe GI", "Full GI Fusion", "Surface Cache", "SC Albedo Atlas", "SC Depth Atlas" };
         //std::cout << "[SSGI Vis] Mode: " << modeNames[ssgiVisMode_] << std::endl;
     }
     keyState_.f4_prev = f4_current;
@@ -2549,6 +3206,431 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         screenProbeGIOutputHandle = spOutput.gi_output;
     }
 
+    // === SURFACE CACHE SHARED RESOURCES (imported once for all SC passes) ===
+    // CRITICAL: Import atlas resources with consistent names so the render graph
+    // can track dependencies between FillTest → Lighting → FinalBlit passes.
+    rendergraph::RGResourceHandle scAlbedoH, scNormalH, scDepthH, scEmissiveH, scLightingH;
+    u32 scOutIdx = currentBufferIndex % 3;
+    if ((ssgiVisMode_ == 7 || ssgiVisMode_ == 8 || ssgiVisMode_ == 9) &&
+        surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
+        scAlbedoH = graph.ImportResource("SC_Albedo", surfaceCachePass_->GetAlbedoAtlas());
+        scNormalH = graph.ImportResource("SC_Normal", surfaceCachePass_->GetNormalAtlas());
+        scDepthH = graph.ImportResource("SC_Depth", surfaceCachePass_->GetDepthAtlas());
+        scEmissiveH = graph.ImportResource("SC_Emissive", surfaceCachePass_->GetEmissiveAtlas());
+        scLightingH = graph.ImportResource("SC_Lighting_" + std::to_string(scOutIdx),
+            surfaceCachePass_->GetLightingAtlas(scOutIdx));
+    }
+
+    // === SURFACE CACHE CARD CAPTURE (graphics pass, renders meshes into atlas) ===
+    if ((ssgiVisMode_ == 7 || ssgiVisMode_ == 8 || ssgiVisMode_ == 9) &&
+        surfaceCachePass_ && surfaceCachePass_->IsInitialized() &&
+        sc_capture_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        !sc_fill_done_) {
+        sc_fill_done_ = true;
+
+        auto scCaptureDepthH = graph.ImportResource("SC_CaptureDepth", sc_capture_depth_tex_);
+
+        struct SCCaptureData {};
+        graph.AddPass<SCCaptureData>("SC_CardCapture",
+            rendergraph::RGPassType::Graphics, rendergraph::RGPassCategory::Lighting,
+            [scAlbedoH, scNormalH, scDepthH, scEmissiveH, scCaptureDepthH](SCCaptureData& data, rendergraph::RenderGraphBuilder& builder) {
+                // Declare 4 color attachments + depth for MRT capture
+                rendergraph::RGRenderPassDesc rpDesc;
+                rpDesc.colors.resize(4);
+                rpDesc.colors[0].texture = scAlbedoH;
+                rpDesc.colors[0].loadOp = rhi::LoadAction::DontCare;
+                rpDesc.colors[0].storeOp = rhi::StoreAction::Store;
+                rpDesc.colors[1].texture = scNormalH;
+                rpDesc.colors[1].loadOp = rhi::LoadAction::DontCare;
+                rpDesc.colors[1].storeOp = rhi::StoreAction::Store;
+                rpDesc.colors[2].texture = scDepthH;
+                rpDesc.colors[2].loadOp = rhi::LoadAction::DontCare;
+                rpDesc.colors[2].storeOp = rhi::StoreAction::Store;
+                rpDesc.colors[3].texture = scEmissiveH;
+                rpDesc.colors[3].loadOp = rhi::LoadAction::DontCare;
+                rpDesc.colors[3].storeOp = rhi::StoreAction::Store;
+                rpDesc.depthStencil.texture = scCaptureDepthH;
+                rpDesc.depthStencil.depthLoadOp = rhi::LoadAction::Clear;
+                rpDesc.depthStencil.clearDepth = 1.0f;
+                rpDesc.depthStencil.depthStoreOp = rhi::StoreAction::DontCare;
+                builder.DeclareRenderPass(rpDesc);
+            },
+            [this](const SCCaptureData& data, rendergraph::RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                if (!cmd) return;
+
+                auto& cardGen = surfaceCachePass_->GetCardGenerator();
+                u32 cardCount = cardGen.GetCardCount();
+                if (cardCount == 0) {
+                    std::cout << "[SC CardCapture] No cards to capture" << std::endl;
+                    return;
+                }
+
+                const auto& cards = cardGen.GetCards();
+                const auto& instances = sceneSnapshot_.GetInstanceData();
+                u32 atlasSize = surfaceCachePass_->GetAtlasSize();
+                u32 meshCount = std::min(sceneSnapshot_.GetInstanceCount(), (u32)sceneMeshes_.size());
+
+                // --- Phase 1: Upload ALL card pass data into the large CB at once ---
+                struct CapturePassGPU {
+                    m4x4 view_proj;
+                    m4x4 world_matrix;
+                    v4   card_center;
+                    v4   card_extent;
+                    u32  axis_direction;
+                    u32  material_id;
+                    u32  _pad[2];
+                };
+                static_assert(sizeof(CapturePassGPU) == 176, "CapturePassGPU layout");
+                constexpr u32 CB_STRIDE = 256; // aligned stride per card
+
+                auto* cbBase = static_cast<u8*>(device_->MapBuffer(sc_capture_cb_));
+                if (!cbBase) return;
+
+                // Build per-card GPU data and track which cards are drawable
+                struct DrawableCard { u32 cardIdx; u32 cbOffset; };
+                utl::vector<DrawableCard> drawables;
+                drawables.reserve(cardCount);
+
+                for (u32 ci = 0; ci < cardCount && ci < cards.size(); ++ci) {
+                    const auto& card = cards[ci];
+                    u32 instanceIdx = card.mesh_instance_id;
+                    if (instanceIdx >= meshCount || instanceIdx >= instances.size()) continue;
+                    const auto& meshInfo = sceneMeshes_[instanceIdx];
+                    if (!meshInfo.mesh) continue;
+                    u32 res = card.resolution;
+                    if (res == 0) continue;
+                    if (card.atlas_offset_x + res > atlasSize || card.atlas_offset_y + res > atlasSize) continue;
+
+                    const auto& inst = instances[instanceIdx];
+
+                    // Build orthographic VP matrix
+                    uint axis = card.axis_direction & 0xFF;
+                    uint dir = (card.axis_direction >> 8) & 0xFF;
+                    float sign = dir ? 1.0f : -1.0f;
+
+                    v3 cardUp;
+                    if (axis == 0)      cardUp = {0, 0, 1};
+                    else if (axis == 1) cardUp = {0, 0, 1};
+                    else                cardUp = {0, 1, 0};
+
+                    float extentMax = std::max({card.extent.x, card.extent.y, card.extent.z});
+                    v3 viewDir;
+                    if (axis == 0)      viewDir = {sign, 0, 0};
+                    else if (axis == 1) viewDir = {0, sign, 0};
+                    else                viewDir = {0, 0, sign};
+                    float eyeDist = extentMax * 2.0f + 1.0f;
+                    v3 eye = card.center.xyz + viewDir * eyeDist;
+
+                    m4x4 viewMat = CreateLookAtMatrix(eye, card.center.xyz, cardUp);
+
+                    // Use max extent for both axes to match square viewport (no distortion)
+                    float ex = (axis == 0) ? card.extent.y : card.extent.x;
+                    float ey = (axis == 2) ? card.extent.y : card.extent.z;
+                    float maxExtent = std::max(ex, ey);
+                    float nearP = 0.01f;
+                    float farP = eyeDist + extentMax + 1.0f;
+                    m4x4 projMat = CreateOrthographicMatrix(-maxExtent, maxExtent, -maxExtent, maxExtent, nearP, farP);
+
+                    m4x4 vpMatrix = projMat * viewMat;
+
+                    u32 cbOffset = (u32)drawables.size() * CB_STRIDE;
+                    auto* passData = reinterpret_cast<CapturePassGPU*>(cbBase + cbOffset);
+                    passData->view_proj = vpMatrix;
+                    passData->world_matrix = inst.world_matrix;
+                    passData->card_center = card.center;
+                    passData->card_extent = card.extent;
+                    passData->axis_direction = card.axis_direction;
+                    passData->material_id = meshInfo.gpuMaterialId;
+                    passData->_pad[0] = passData->_pad[1] = 0;
+
+                    drawables.push_back({ci, cbOffset});
+                }
+                device_->UnmapBuffer(sc_capture_cb_);
+
+                // --- Phase 2: Bind pipeline + shared descriptor set (materials, textures) ---
+                // Shared descriptor set: CB bound via dynamic offset, no vertex buffer in desc set
+                DescriptorData capture_params[] = {
+                    {3, rhi::DescriptorType::StorageBuffer,  gpuMaterialRegistry_->GetMaterialDataBuffer()},
+                    {0, rhi::DescriptorType::SampledImage,   gpuMaterialRegistry_->GetAlbedoTextureArray()},
+                    {1, rhi::DescriptorType::SampledImage,   gpuMaterialRegistry_->GetNormalTextureArray()},
+                    {0, rhi::DescriptorType::Sampler,        sc_capture_sampler_},
+                };
+                UpdateDescriptorSet(device_, sc_capture_descriptor_set_, capture_params, 4);
+
+                cmd->BindGraphicsPipeline(sc_capture_pipeline_);
+                const rhi::DescriptorSetHandle captureSets[] = { sc_capture_descriptor_set_ };
+                // Bind once — materials/textures don't change per draw
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, sc_capture_layout_,
+                                        0, 1, captureSets, 0, nullptr);
+
+                // --- Phase 3: Draw each card with proper per-draw state ---
+                for (u32 di = 0; di < drawables.size(); ++di) {
+                    const auto& dc = drawables[di];
+                    const auto& card = cards[dc.cardIdx];
+                    u32 instanceIdx = card.mesh_instance_id;
+                    const auto& meshInfo = sceneMeshes_[instanceIdx];
+                    u32 res = card.resolution;
+
+                    // Viewport / scissor for this card's atlas region
+                    u32 vpX = card.atlas_offset_x;
+                    u32 vpY = card.atlas_offset_y;
+                    u32 vpW = std::min(res, atlasSize - vpX);
+                    u32 vpH = std::min(res, atlasSize - vpY);
+
+                    rhi::ViewportDesc vp{};
+                    vp.topLeft = {(float)vpX, (float)vpY};
+                    vp.size = {(float)vpW, (float)vpH};
+                    vp.minDepth = 0.0f;
+                    vp.maxDepth = 1.0f;
+                    cmd->SetViewport(vp);
+
+                    rhi::Rect scissor{};
+                    scissor.offset = {(s32)vpX, (s32)vpY};
+                    scissor.extent = {vpW, vpH};
+                    cmd->SetScissor(scissor);
+
+                    // Bind CB at buffer(0) with per-card offset, and vertex buffer at buffer(1)
+                    // Both via command buffer state (properly recorded per draw in Metal)
+                    ResourceHandle buffers[] = { sc_capture_cb_, meshInfo.mesh->GetVertexBuffer() };
+                    u64 offsets[] = { (u64)dc.cbOffset, 0 };
+                    cmd->BindVertexBuffers(0, 2, buffers, offsets);
+
+                    // Bind index buffer and draw
+                    rhi::DataFormat idxFmt = (meshInfo.mesh->GetVertexCount() < 65536)
+                        ? rhi::DataFormat::R16_UInt : rhi::DataFormat::R32_UInt;
+                    cmd->BindIndexBuffer(meshInfo.mesh->GetIndexBuffer(), idxFmt, 0);
+                    cmd->DrawIndexed(meshInfo.mesh->GetIndexCount(), 0, 0, 1, 0);
+                }
+                std::cout << "[SC CardCapture] Total=" << cardCount
+                          << " drawn=" << drawables.size() << std::endl;
+            });
+    }
+
+    // === SURFACE CACHE LIGHTING (runs ONCE, then blits cached result every frame) ===
+    // CRITICAL: Check ALL required resources, not just the pipeline.
+    // If InitializeSurfaceCachePipelines() failed partway, pipelines may be valid
+    // but constant buffers could be INVALID_RESOURCE → binding them causes GPU fault.
+    if (ssgiVisMode_ == 7 && surfaceCachePass_ && surfaceCachePass_->IsInitialized() &&
+        sc_fill_done_ && !sc_lighting_done_ &&
+        sc_light_cull_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        sc_light_eval_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        sc_cull_params_cb_ != rhi::handles::INVALID_RESOURCE &&
+        sc_eval_params_cb_ != rhi::handles::INVALID_RESOURCE &&
+        sc_light_info_cb_ != rhi::handles::INVALID_RESOURCE &&
+        sc_tile_light_assign_buf_ != rhi::handles::INVALID_RESOURCE) {
+
+        struct SCLightData {};
+        graph.AddPass<SCLightData>("SC_Lighting",
+            rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
+            // CRITICAL: Declare reads on ALL atlases the shaders access, using
+            // the SAME handles as FillTest so the render graph sees the dependency.
+            [scAlbedoH, scNormalH, scDepthH, scEmissiveH, scLightingH](SCLightData& data, rendergraph::RenderGraphBuilder& builder) {
+                builder.Read(scAlbedoH, rhi::ResourceState::ShaderResource);
+                builder.Read(scNormalH, rhi::ResourceState::ShaderResource);
+                builder.Read(scDepthH, rhi::ResourceState::ShaderResource);
+                builder.Read(scEmissiveH, rhi::ResourceState::ShaderResource);
+                builder.Write(scLightingH, rhi::ResourceState::UnorderedAccess);
+            },
+            [this, scOutIdx](const SCLightData& data, rendergraph::RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                if (!cmd) return;
+
+                sc_lighting_done_ = true;
+                sc_lighting_atlas_idx_ = scOutIdx;
+                std::cout << "[SC Lighting] Dispatching LightCull+LightEval (one-time)" << std::endl;
+                u32 atlasSize = surfaceCachePass_->GetAtlasSize();
+                u32 pageSize = surfaceCachePass_->GetPageSize();
+
+                // === LightCull ===
+                {
+                    // Upload light info — uses float4 (not float3) to match Metal LightInfo layout
+                    // Metal float3 alignment causes field offset mismatch with C++ float[3]
+                    // Same fix as DDGIVolumeData (see memory: ddgi-struct-layout-fix.md)
+                    struct SC_GPULightInfo {
+                        float position[4];    // xyz = position, w = radius
+                        float color[4];       // xyz = color, w = unused
+                        float direction[4];   // xyz = direction, w = type (as float)
+                    };
+                    SC_GPULightInfo lights[1];
+                    memset(lights, 0, sizeof(lights));
+                    lights[0].position[0] = 0; lights[0].position[1] = 0; lights[0].position[2] = 0;
+                    lights[0].position[3] = 0; // radius
+                    lights[0].color[0] = 1.0f; lights[0].color[1] = 0.95f; lights[0].color[2] = 0.9f;
+                    lights[0].direction[0] = light_direction_.x;
+                    lights[0].direction[1] = light_direction_.y;
+                    lights[0].direction[2] = light_direction_.z;
+                    lights[0].direction[3] = 1.0f; // type = directional (uint(direction.w) in shader)
+                    auto* dst = static_cast<SC_GPULightInfo*>(device_->MapBuffer(sc_light_info_cb_));
+                    if (dst) { memcpy(dst, lights, sizeof(lights)); device_->UnmapBuffer(sc_light_info_cb_); }
+
+                    // Cull params — SurfaceCacheParams is 12 uints, then LightCullParams fields
+                    auto* cp = static_cast<u32*>(device_->MapBuffer(sc_cull_params_cb_));
+                    if (cp) {
+                        memset(cp, 0, 256);
+                        u32 tileSize = 8;
+                        // SurfaceCacheParams (12 uints = 48 bytes)
+                        cp[0] = atlasSize;    // atlas_size
+                        cp[1] = pageSize;     // page_size
+                        // LightCullParams fields after sc_params
+                        cp[12] = 1;                          // light_count
+                        cp[13] = tileSize;                   // tile_size
+                        cp[14] = atlasSize / tileSize;       // tiles_x
+                        cp[15] = atlasSize / tileSize;       // tiles_y
+                        device_->UnmapBuffer(sc_cull_params_cb_);
+                    }
+
+                    DescriptorData cull_params[5] = {
+                        {0, rhi::DescriptorType::SampledImage,  surfaceCachePass_->GetDepthAtlas()},
+                        {1, rhi::DescriptorType::SampledImage,  surfaceCachePass_->GetNormalAtlas()},
+                        {1, rhi::DescriptorType::UniformBuffer, sc_cull_params_cb_},
+                        {2, rhi::DescriptorType::StorageBuffer, sc_light_info_cb_},
+                        {3, rhi::DescriptorType::StorageBuffer, sc_tile_light_assign_buf_},
+                    };
+                    UpdateDescriptorSet(device_, sc_light_cull_descriptor_set_, cull_params, 5);
+
+                    cmd->BindComputePipeline(sc_light_cull_pipeline_);
+                    const rhi::DescriptorSetHandle cullSets[] = { sc_light_cull_descriptor_set_ };
+                    cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, sc_light_cull_layout_, 0, 1, cullSets, 0, nullptr);
+
+                    u32 tileSize = 8;
+                    u32 tilesX = (atlasSize + tileSize - 1) / tileSize;
+                    u32 tilesY = (atlasSize + tileSize - 1) / tileSize;
+                    // Thread group size {8,8,1}: dispatch = ceil(tiles / 8) per axis
+                    cmd->Dispatch((tilesX + 7) / 8, (tilesY + 7) / 8, 1);
+                }
+
+                // === LightEval ===
+                {
+                    // Eval params — SurfaceCacheParams (12 uints), then LightEvalParams fields
+                    auto* ep = static_cast<u32*>(device_->MapBuffer(sc_eval_params_cb_));
+                    if (ep) {
+                        memset(ep, 0, 256);
+                        ep[0] = atlasSize;    // atlas_size
+                        ep[1] = pageSize;     // page_size
+                        // LightEvalParams fields after sc_params
+                        ep[12] = atlasSize / 8; // tiles_x
+                        ep[13] = 8;              // tile_size
+                        ep[14] = 1;              // light_count
+                        device_->UnmapBuffer(sc_eval_params_cb_);
+                    }
+
+                    DescriptorData eval_params[10] = {
+                        {0, rhi::DescriptorType::SampledImage,  surfaceCachePass_->GetAlbedoAtlas()},
+                        {1, rhi::DescriptorType::SampledImage,  surfaceCachePass_->GetNormalAtlas()},
+                        {2, rhi::DescriptorType::SampledImage,  surfaceCachePass_->GetEmissiveAtlas()},
+                        {3, rhi::DescriptorType::SampledImage,  ssgi_black_texture_},
+                        {4, rhi::DescriptorType::StorageImage,  surfaceCachePass_->GetLightingAtlas(scOutIdx)},
+                        {0, rhi::DescriptorType::StorageBuffer, sc_global_data_cb_},
+                        {1, rhi::DescriptorType::UniformBuffer, sc_eval_params_cb_},
+                        {2, rhi::DescriptorType::StorageBuffer, surfaceCachePass_->GetCardDataBuffer()},
+                        {3, rhi::DescriptorType::StorageBuffer, sc_light_info_cb_},
+                        {4, rhi::DescriptorType::StorageBuffer, sc_tile_light_assign_buf_},
+                    };
+                    UpdateDescriptorSet(device_, sc_light_eval_descriptor_set_, eval_params, 10);
+
+                    cmd->BindComputePipeline(sc_light_eval_pipeline_);
+                    const rhi::DescriptorSetHandle evalSets[] = { sc_light_eval_descriptor_set_ };
+                    cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, sc_light_eval_layout_, 0, 1, evalSets, 0, nullptr);
+
+                    u32 gx = (atlasSize + 7) / 8;
+                    u32 gy = (atlasSize + 7) / 8;
+                    cmd->Dispatch(gx, gy, 1);
+                }
+            });
+    }
+
+    // === SURFACE CACHE → DDGI INTEGRATION (Strategy C) ===
+    if (sc_lighting_done_ &&
+        sc_card_rad_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        sc_probe_irr_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        sc_card_radiance_buf_ != rhi::handles::INVALID_RESOURCE &&
+        sc_probe_contrib_range_buf_ != rhi::handles::INVALID_RESOURCE &&
+        sc_flat_contrib_buf_ != rhi::handles::INVALID_RESOURCE &&
+        ddgiPass_ && ddgiPass_->IsInitialized()) {
+
+        struct SCDDGIIntData {};
+        graph.AddPass<SCDDGIIntData>("SC_DDGI_Integration",
+            rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
+            [scLightingH](SCDDGIIntData& data, rendergraph::RenderGraphBuilder& builder) {
+                builder.Read(scLightingH, rhi::ResourceState::ShaderResource);
+                builder.SideEffect();  // writes to DDGI irradiance buffers
+            },
+            [this, scOutIdx, currentBufferIndex](const SCDDGIIntData& data, rendergraph::RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                if (!cmd) return;
+
+                u32 cardCount = surfaceCachePass_->GetCardGenerator().GetCardCount();
+                if (cardCount == 0) return;
+
+                u32 frameIdx = currentBufferIndex % 3;
+                u32 histIdx = (currentBufferIndex + 2) % 3;
+
+                // --- Pass 1: CardRadianceAvg ---
+                {
+                    DescriptorData params[4] = {
+                        {0, rhi::DescriptorType::UniformBuffer, sc_sc_params_cb_},
+                        {1, rhi::DescriptorType::StorageBuffer, surfaceCachePass_->GetCardDataBuffer()},
+                        {2, rhi::DescriptorType::StorageBuffer, sc_card_radiance_buf_},
+                        {0, rhi::DescriptorType::SampledImage,  surfaceCachePass_->GetLightingAtlas(sc_lighting_atlas_idx_)},
+                    };
+                    UpdateDescriptorSet(device_, sc_card_rad_ds_[frameIdx], params, 4);
+
+                    cmd->BindComputePipeline(sc_card_rad_pipeline_);
+                    const rhi::DescriptorSetHandle sets[] = { sc_card_rad_ds_[frameIdx] };
+                    cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, sc_card_rad_layout_, 0, 1, sets, 0, nullptr);
+
+                    cmd->Dispatch((cardCount + 63) / 64, 1, 1);
+                }
+
+                // Barrier: card_radiance write → read
+                {
+                    rhi::ResourceBarrier barrier{};
+                    barrier.resource = sc_card_radiance_buf_;
+                    barrier.beforeState = rhi::ResourceState::UnorderedAccess;
+                    barrier.afterState = rhi::ResourceState::ShaderResource;
+                    barrier.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&barrier, 1);
+                }
+
+                // --- Pass 2: ProbeIrradianceFromCards ---
+                {
+                    // Upload DDGI volume data for this frame
+                    const auto& ddgiVol = ddgiPass_->GetVolumeData();
+                    auto* mapped = static_cast<primal::graphics::lumen::DDGIVolumeData*>(
+                        device_->MapBuffer(sc_ddgi_vol_cb_[frameIdx]));
+                    if (mapped) {
+                        *mapped = ddgiVol;
+                        device_->UnmapBuffer(sc_ddgi_vol_cb_[frameIdx]);
+                    }
+
+                    DescriptorData params[7] = {
+                        {0, rhi::DescriptorType::UniformBuffer, sc_ddgi_vol_cb_[frameIdx]},
+                        {1, rhi::DescriptorType::StorageBuffer, sc_probe_contrib_range_buf_},
+                        {2, rhi::DescriptorType::StorageBuffer, sc_flat_contrib_buf_},
+                        {3, rhi::DescriptorType::StorageBuffer, sc_card_radiance_buf_},
+                        {4, rhi::DescriptorType::StorageBuffer, ddgiPass_->GetIrradianceBuffer(histIdx)},
+                        {5, rhi::DescriptorType::StorageBuffer, ddgiPass_->GetIrradianceBuffer(frameIdx)},
+                        {6, rhi::DescriptorType::StorageBuffer, ddgiPass_->GetProbeUpdateListBuffer()},
+                    };
+                    UpdateDescriptorSet(device_, sc_probe_irr_ds_[frameIdx], params, 7);
+
+                    cmd->BindComputePipeline(sc_probe_irr_pipeline_);
+                    const rhi::DescriptorSetHandle sets[] = { sc_probe_irr_ds_[frameIdx] };
+                    cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, sc_probe_irr_layout_, 0, 1, sets, 0, nullptr);
+
+                    u32 updateCount = ddgiVol.ProbeUpdateCount;
+                    cmd->Dispatch((updateCount + 63) / 64, 1, 1);
+                }
+
+                static bool logOnce = false;
+                if (!logOnce) {
+                    std::cout << "[SC→DDGI] Card→Probe integration dispatched (frame " << frameCount_ << ")" << std::endl;
+                    logOnce = true;
+                }
+            });
+    }
+
     // === FINAL BLIT PASS (Following TestParticleSponza pattern) ===
     // CRITICAL: This pass MUST depend on SceneRender to ensure Nanite output is ready
     struct BlitPassData {
@@ -2751,7 +3833,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     graph.AddPass<BlitPassData>("FinalBlit",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
-        [this, backBufferHandle, primaryInputHandle, ssgiOutputHandle, depthBlitHandle, giOutputHandle, gbufferAlbedoHandle, gbufferNormalHandle, screenProbeGIOutputHandle, ssaoOutputHandle](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+        [this, backBufferHandle, primaryInputHandle, ssgiOutputHandle, depthBlitHandle, giOutputHandle, gbufferAlbedoHandle, gbufferNormalHandle, screenProbeGIOutputHandle, ssaoOutputHandle, scLightingH](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
             // Read lit scene color (deferred output or raw GBuffer albedo)
             data.input = builder.Read(primaryInputHandle, rhi::ResourceState::ShaderResource);
 
@@ -2799,6 +3881,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             // Previously accessed via physical handle bypassing render graph → no barrier → flickering.
             if (ssaoOutputHandle.IsValid()) {
                 builder.Read(ssaoOutputHandle, rhi::ResourceState::ShaderResource);
+            }
+
+            // Surface Cache: ensure SC_Lighting compute finishes before FinalBlit reads the atlas.
+            // Without this, the render graph doesn't know FinalBlit depends on SC_Lighting
+            // and may schedule them in the wrong order → GPU resource conflict → hang.
+            if ((ssgiVisMode_ == 7 || ssgiVisMode_ == 8 || ssgiVisMode_ == 9) && scLightingH.IsValid()) {
+                builder.Read(scLightingH, rhi::ResourceState::ShaderResource);
             }
 
             data.output = builder.Write(backBufferHandle, rhi::ResourceState::RenderTarget);
@@ -2981,6 +4070,75 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 cmd->BindGraphicsPipeline(fusion_pipeline_);
                 const rhi::DescriptorSetHandle sets[] = { fusion_descriptor_set_ };
                 cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, fusion_layout_, 0, 1, sets, 0, nullptr);
+                cmd->Draw(3, 0, 1, 0);
+                return;
+            }
+
+            // Mode 7: Surface Cache — blit lighting atlas (compute passes run before FinalBlit)
+            if (ssgiVisMode_ == 7 && surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
+                // SC lighting runs once (sc_lighting_done_ flag), writing to only ONE atlas.
+                // Use sc_lighting_atlas_idx_ (set during Lighting pass) instead of currentBufferIndex
+                // to avoid reading an uninitialized triple-buffer slot.
+                auto scAtlas = surfaceCachePass_->GetLightingAtlas(sc_lighting_atlas_idx_);
+                if (scAtlas != rhi::handles::INVALID_RESOURCE) {
+                    rhi::ResourceBarrier scBarrier{};
+                    scBarrier.resource = scAtlas;
+                    scBarrier.beforeState = rhi::ResourceState::UnorderedAccess;
+                    scBarrier.afterState = rhi::ResourceState::ShaderResource;
+                    scBarrier.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&scBarrier, 1);
+                }
+                ResourceHandle blitTex = (scAtlas != rhi::handles::INVALID_RESOURCE) ? scAtlas : ssgi_black_texture_;
+                DescriptorData blit_params[1] = {{0, DescriptorType::SampledImage, blitTex}};
+                UpdateDescriptorSet(device_, blit_descriptor_set_, blit_params, 1);
+                cmd->BindGraphicsPipeline(blit_pipeline_);
+                const rhi::DescriptorSetHandle sc_sets[] = { blit_descriptor_set_ };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_layout_, 0, 1, sc_sets, 0, nullptr);
+                cmd->Draw(3, 0, 1, 0);
+                return;
+            }
+
+            // Mode 8: SC Albedo Atlas — blit raw albedo atlas
+            if (ssgiVisMode_ == 8 && surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
+                auto tex = surfaceCachePass_->GetAlbedoAtlas();
+                static bool printed8 = false;
+                if (!printed8) {
+                    printed8 = true;
+                    std::cout << "[SC Debug] Mode 8: albedo_atlas=" << tex
+                              << " valid=" << (tex != rhi::handles::INVALID_RESOURCE)
+                              << " fill_done=" << sc_fill_done_ << std::endl;
+                }
+                if (tex != rhi::handles::INVALID_RESOURCE) {
+                    rhi::ResourceBarrier b{}; b.resource = tex;
+                    b.beforeState = rhi::ResourceState::UnorderedAccess;
+                    b.afterState = rhi::ResourceState::ShaderResource; b.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&b, 1);
+                }
+                ResourceHandle blitTex = (tex != rhi::handles::INVALID_RESOURCE) ? tex : ssgi_black_texture_;
+                DescriptorData p[1] = {{0, DescriptorType::SampledImage, blitTex}};
+                UpdateDescriptorSet(device_, blit_descriptor_set_, p, 1);
+                cmd->BindGraphicsPipeline(blit_pipeline_);
+                const rhi::DescriptorSetHandle s[] = { blit_descriptor_set_ };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_layout_, 0, 1, s, 0, nullptr);
+                cmd->Draw(3, 0, 1, 0);
+                return;
+            }
+
+            // Mode 9: SC Depth Atlas — raw depth atlas blit
+            if (ssgiVisMode_ == 9 && surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
+                auto tex = surfaceCachePass_->GetDepthAtlas();
+                if (tex != rhi::handles::INVALID_RESOURCE) {
+                    rhi::ResourceBarrier b{}; b.resource = tex;
+                    b.beforeState = rhi::ResourceState::UnorderedAccess;
+                    b.afterState = rhi::ResourceState::ShaderResource; b.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&b, 1);
+                }
+                ResourceHandle blitTex = (tex != rhi::handles::INVALID_RESOURCE) ? tex : ssgi_black_texture_;
+                DescriptorData p[1] = {{0, DescriptorType::SampledImage, blitTex}};
+                UpdateDescriptorSet(device_, blit_descriptor_set_, p, 1);
+                cmd->BindGraphicsPipeline(blit_pipeline_);
+                const rhi::DescriptorSetHandle s[] = { blit_descriptor_set_ };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_layout_, 0, 1, s, 0, nullptr);
                 cmd->Draw(3, 0, 1, 0);
                 return;
             }
@@ -3230,6 +4388,12 @@ void TestNaniteStreamingPipeline::Shutdown() {
     if (ddgiPass_) {
         ddgiPass_->Shutdown();
         ddgiPass_.reset();
+    }
+
+    // Cleanup Surface Cache resources
+    if (surfaceCachePass_) {
+        surfaceCachePass_->Shutdown();
+        surfaceCachePass_.reset();
     }
 
     // Cleanup shadow resources

@@ -58,6 +58,9 @@ struct ScreenProbeGlobalData {
     math::v4   sdf_voxel_sizes[3];     // offset 224
     math::v4   sdf_extents[3];         // offset 272
     math::v4   sdf_resolutions;        // offset 320: x=res0, y=res1, z=res2, w=cascadeCount
+
+    // Surface Cache integration data
+    math::v4   surface_cache_params;   // offset 336: x=atlasSize, y=cardCount, z=surfaceCacheAvailable(0/1), w=unused
 };
 
 // ============================================================================
@@ -100,6 +103,21 @@ public:
     rhi::ResourceHandle GetOutputTexture() const { return output_texture_filtered_; }
 
     const ScreenProbeParams& GetParams() const { return params_; }
+
+    // Surface Cache integration
+    void SetSurfaceCacheData(
+        rhi::ResourceHandle lighting_atlas,
+        rhi::ResourceHandle card_data,
+        rhi::ResourceHandle card_lookup,
+        u32 atlas_size = 2048,
+        u32 card_count = 0) {
+        surface_cache_lighting_atlas_ = lighting_atlas;
+        surface_cache_card_data_buffer_ = card_data;
+        surface_cache_card_lookup_buffer_ = card_lookup;
+        surface_cache_atlas_size_ = atlas_size;
+        surface_cache_card_count_ = card_count;
+        surface_cache_available_ = true;
+    }
 
 private:
     void CreateDescriptorSetLayouts();
@@ -199,6 +217,14 @@ private:
     // Output textures (full-resolution RGBA16_Float)
     rhi::ResourceHandle output_texture_{ rhi::handles::INVALID_RESOURCE };           // Gather output (raw)
     rhi::ResourceHandle output_texture_filtered_{ rhi::handles::INVALID_RESOURCE };  // Denoise output (filtered)
+
+    // Surface Cache integration
+    rhi::ResourceHandle surface_cache_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle surface_cache_card_data_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle surface_cache_card_lookup_buffer_{ rhi::handles::INVALID_RESOURCE };
+    u32  surface_cache_atlas_size_ = 0;
+    u32  surface_cache_card_count_ = 0;
+    bool surface_cache_available_ = false;
 };
 
 } // namespace primal::graphics::lumen
