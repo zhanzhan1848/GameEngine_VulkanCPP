@@ -128,6 +128,50 @@ void CardGenerator::RebuildCardAllocation() {
     }
 
     card_count_ = static_cast<uint32_t>(cards_.size());
+
+    // Sort lookups by AABB volume descending — largest meshes first.
+    // The trace shader checks only the first N lookups (kMaxLookups),
+    // so putting the largest meshes first maximizes coverage.
+    // Must also remap card_start indices after sort.
+    if (lookups_.size() > 1) {
+        // Compute original card_start offsets
+        std::vector<u32> original_card_starts;
+        original_card_starts.reserve(lookups_.size());
+        for (auto& lk : lookups_) original_card_starts.push_back(lk.card_start);
+
+        // Sort by AABB volume descending
+        std::vector<size_t> indices(lookups_.size());
+        for (size_t i = 0; i < indices.size(); ++i) indices[i] = i;
+        std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+            auto& la = lookups_[a], lb = lookups_[b];
+            float va = (la.aabb_max.x - la.aabb_min.x) *
+                       (la.aabb_max.y - la.aabb_min.y) *
+                       (la.aabb_max.z - la.aabb_min.z);
+            float vb = (lb.aabb_max.x - lb.aabb_min.x) *
+                       (lb.aabb_max.y - lb.aabb_min.y) *
+                       (lb.aabb_max.z - lb.aabb_min.z);
+            return va > vb;
+        });
+
+        // Reorder cards to match new lookup order
+        std::vector<SurfaceCacheCard> sorted_cards;
+        sorted_cards.reserve(cards_.size());
+        std::vector<SurfaceCacheCardLookup> sorted_lookups;
+        sorted_lookups.reserve(lookups_.size());
+
+        for (size_t idx : indices) {
+            auto& lk = lookups_[idx];
+            u32 new_start = static_cast<u32>(sorted_cards.size());
+            for (u32 c = 0; c < lk.card_count; ++c) {
+                sorted_cards.push_back(cards_[lk.card_start + c]);
+            }
+            lk.card_start = new_start;
+            sorted_lookups.push_back(lk);
+        }
+        cards_ = std::move(sorted_cards);
+        lookups_ = std::move(sorted_lookups);
+    }
+
     UploadToGPU();
     allocation_dirty_ = false;
 }

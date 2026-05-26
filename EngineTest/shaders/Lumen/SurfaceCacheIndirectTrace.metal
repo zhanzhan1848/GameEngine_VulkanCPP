@@ -1,8 +1,8 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "../CommonTypes.metal"
-#include "../CommonFunction.metal"
-#include "SurfaceCacheData.metal"
+#include "CommonTypes.metal"
+#include "CommonFunction.metal"
+#include "Lumen/SurfaceCacheData.metal"
 
 struct IndirectTraceParams {
     SurfaceCacheParams sc_params;

@@ -166,21 +166,15 @@ float GetShadow(float3 worldPos, float3 normal, float3 lightDir, float4x4 shadow
         return -1.0; // Return -1 to indicate “Out of Bounds”
     }
 
-    // PCF 3x3
-    float shadow = 0.0;
+    // Single-tap shadow comparison (was PCF 3x3 = 9 samples, reduced to 1 for performance)
     float currentDepth = shadowCoord.z;
     float NdotL = max(dot(normalize(normal), normalize(lightDir)), 0.0);
     float bias = 0.002 + (1.0 - NdotL) * 0.02;
-    float2 texelSize = float2(1.0 / 2048.0, 1.0 / 2048.0);
 
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
-            float pcfDepth = shadowMap.sample(shadowSampler, shadowCoord.xy + float2(x, y) * texelSize).r;
-            shadow += (currentDepth - bias > pcfDepth) ? 0.0 : 1.0;
-        }
-    }
+    float pcfDepth = shadowMap.sample(shadowSampler, shadowCoord.xy).r;
+    float shadow = (currentDepth - bias > pcfDepth) ? 0.0 : 1.0;
 
-    return shadow / 9.0;
+    return shadow;
 }
 
 // ================================================================================================
@@ -579,82 +573,117 @@ fragment float4 fragmentBlitComposite(
 
     return float4(result, 1.0);
 }
+// ================================================================================================
+// Compute-based fusion: split into two passes to stay within Apple Silicon texture read limits.
+// Each pass reads max 4 textures + 1 write (stable on Apple Silicon).
+// ================================================================================================
 
 // ================================================================================================
-// Full GI Fusion Blit: DDGI (low-freq) + SPGI (mid-freq) + SSGI (high-freq) + Direct
+// Fragment-based Fusion: Apple Silicon TBDR optimized
+// Reads multiple textures in fragment shader where tile cache handles bandwidth efficiently.
 // ================================================================================================
 
-fragment float4 fragmentBlitFusion(
+// Fusion Pass 1 (half-res): pre-combine GI sources + albedo + ssao → indirect contribution
+fragment float4 fragmentFusionIndirect(
     VertexOut in [[stage_in]],
-    texture2d<float> sceneColor  [[texture(0)]],   // direct lighting (deferred output), A = shadow
-    texture2d<float> ssgiColor   [[texture(1)]],   // SSGI irradiance
-    texture2d<float> ddgiColor   [[texture(2)]],   // DDGI irradiance (half-res)
-    texture2d<float> spgiColor   [[texture(3)]],   // Screen Probe GI irradiance
-    texture2d<float> albedoTex   [[texture(4)]],   // GBuffer albedo
-    texture2d<float> depthTex    [[texture(5)]],   // GBuffer depth
-    texture2d<float> ssaoTex     [[texture(6)]])   // SSAO
+    texture2d<float> ssgiColor   [[texture(0)]],
+    texture2d<float> ddgiColor   [[texture(1)]],
+    texture2d<float> spgiColor   [[texture(2)]],
+    texture2d<float> albedoTex   [[texture(3)]],
+    texture2d<float> ssaoTex     [[texture(4)]])
 {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
-    constexpr sampler ds(coord::normalized, filter::nearest, mip_filter::none, address::clamp_to_edge);
+    float4 ssgi4   = ssgiColor.sample(s, in.uv);
+    float3 ddgi    = ddgiColor.sample(s, in.uv).rgb;
+    float3 spgi    = spgiColor.sample(s, in.uv).rgb;
+    float3 albedo  = albedoTex.sample(s, in.uv).rgb;
+    float  ssao    = ssaoTex.sample(s, in.uv).r;
 
-    float2 uv = in.uv;
-    float depth = depthTex.sample(ds, uv).r;
+    float3 ssgi_irr  = ssgi4.rgb;
+    float  ssgi_hit  = ssgi4.a;
+    float  ssgi_conf = saturate(1.0f - ssgi_hit / 2.0f);
+    albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
-    // Background: pass through scene color (skybox)
-    if (depth >= 1.0f) {
-        float3 sky = sceneColor.sample(s, uv).rgb;
-        sky = sky / (sky + float3(1.0f));
-        sky = pow(sky, float3(1.0f / 2.2f));
-        return float4(sky, 1.0f);
-    }
+    float3 indirect = albedo * (ddgi * 0.3f + spgi * 0.5f + ssgi_irr * ssgi_conf * 0.3f);
+    indirect *= ssao;
 
-    // Direct lighting + shadow factor (from deferred output alpha)
-    float4 sceneSample = sceneColor.sample(s, uv);
-    float3 direct = sceneSample.rgb;
-    float directShadow = sceneSample.a;
+    return float4(indirect, 1.0f);
+}
 
-    float3 albedo  = albedoTex.sample(s, uv).rgb;
+// Fusion Pass 2 (full-res): scene + pre-combined indirect → tonemapped output
+fragment float4 fragmentFusion(
+    VertexOut in [[stage_in]],
+    texture2d<float> sceneColor    [[texture(0)]],
+    texture2d<float> indirectColor [[texture(1)]])
+{
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    float3 scene   = sceneColor.sample(s, in.uv).rgb;
+    float3 indirect = indirectColor.sample(s, in.uv).rgb;
 
-    // SSAO: contact occlusion modulates all indirect
-    float ssao = ssaoTex.sample(s, uv).r;
-    if (ssao <= 0.0f) ssao = 1.0f;
-    float ao = ssao;
-
-    // Shadow on indirect: REMOVED — DDGI probes already contain visibility info.
-    // Applying direct shadow to indirect light causes double-darkening artifacts.
-
-    // DDGI irradiance (low-frequency global indirect)
-    float3 ddgi_irr = ddgiColor.sample(s, uv).rgb;
-    // NaN guard
-    uint3 bits = as_type<uint3>(ddgi_irr);
-    if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u)
-        ddgi_irr = float3(0.0f);
-
-    // Screen Probe GI irradiance (medium-frequency screen-space indirect)
-    float4 spgi_sample = spgiColor.sample(s, uv);
-    float3 spgi_irr = spgi_sample.rgb;
-    float  spgi_conf = spgi_sample.a;
-
-    // SSGI irradiance (high-frequency contact indirect)
-    float4 ssgi_sample = ssgiColor.sample(s, uv);
-    float3 ssgi_irr = ssgi_sample.rgb;
-    float  ssgi_hit_dist = ssgi_sample.a;
-
-    // ================================================================
-    // GI Fusion: frequency-separated + confidence-driven
-    // ================================================================
-    float3 base_irr = ddgi_irr
-                    + spgi_irr * spgi_conf;
-
-    float ssgi_hit_conf = saturate(1.0f - ssgi_hit_dist / 2.0f);
-    float ssgi_conf = ssgi_hit_conf * (1.0f - spgi_conf);
-
-    float3 indirect = albedo * (base_irr + ssgi_irr * ssgi_conf * 0.3f) * ao;
-
-    float3 result = direct + indirect;
-
-    // Tone map + gamma
+    float3 result = scene + indirect;
+    result = clamp(result, float3(0.0f), float3(64.0f));
     result = toneMap(result);
 
     return float4(result, 1.0f);
+}
+
+// Pass 1: compute indirect lighting from GI sources (DDGI + SPGI + SSGI)
+// Uses access::read + read() matching SSGI's stable pattern (not access::sample)
+kernel void computeFusionIndirect(
+    texture2d<float, access::read> ssgiColor   [[texture(0)]],
+    texture2d<float, access::read> ddgiColor   [[texture(1)]],
+    texture2d<float, access::read> spgiColor   [[texture(2)]],
+    texture2d<float, access::read> albedoTex   [[texture(3)]],
+    texture2d<float, access::write> indirectOut [[texture(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint w = indirectOut.get_width();
+    uint h = indirectOut.get_height();
+    if (gid.x >= w || gid.y >= h) return;
+
+    float4 ssgi4  = ssgiColor.read(gid);
+    float3 albedo = albedoTex.read(gid).rgb;
+    float3 spgi   = spgiColor.read(gid).rgb;
+
+    // DDGI is half-resolution: read at half pixel coords
+    uint2 ddgiCoord = gid / 2u;
+    uint ddgiW = ddgiColor.get_width();
+    uint ddgiH = ddgiColor.get_height();
+    float3 ddgi = (ddgiCoord.x < ddgiW && ddgiCoord.y < ddgiH)
+        ? ddgiColor.read(ddgiCoord).rgb : float3(0.0f);
+
+    float3 ssgi_irr = ssgi4.rgb;
+    float  ssgi_hit = ssgi4.a;
+
+    albedo = clamp(albedo, float3(0.0f), float3(1.0f));
+
+    float ssgi_conf = saturate(1.0f - ssgi_hit / 2.0f);
+    float3 indirect_ddgi = albedo * ddgi * 0.3f;
+    float3 indirect_spgi = albedo * spgi * 0.5f;
+    float3 indirect_ssgi = albedo * ssgi_irr * ssgi_conf * 0.3f;
+    float3 indirect = indirect_ddgi + indirect_spgi + indirect_ssgi;
+
+    indirectOut.write(float4(indirect, 1.0f), gid);
+}
+
+// Pass 2: composite direct + indirect, tone map to output
+kernel void computeFusionComposite(
+    texture2d<float, access::read> sceneColor  [[texture(0)]],
+    texture2d<float, access::read> indirectTex [[texture(1)]],
+    texture2d<float, access::read> ssaoTex     [[texture(2)]],
+    texture2d<float, access::write>  outputTex   [[texture(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint w = outputTex.get_width();
+    uint h = outputTex.get_height();
+    if (gid.x >= w || gid.y >= h) return;
+
+    float3 scene   = sceneColor.read(gid).rgb;
+    float3 indirect = indirectTex.read(gid).rgb;
+
+    float3 result = scene + indirect;
+    result = clamp(result, float3(0.0f), float3(64.0f));
+    result = toneMap(result);
+
+    outputTex.write(float4(result, 1.0f), gid);
 }

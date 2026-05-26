@@ -80,6 +80,7 @@ public:
                            const u32* dynamicOffsets) override;
     void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
                       u32 offset, u32 size, const void* pValues) override;
+    void SetComputeBytes(u32 index, const void* data, u32 size) override;
     void WriteTimestamp(QueryPoolHandle queryPool, u32 queryIndex) override;
     void Draw(u32 vertexCount, u32 startVertex, u32 instanceCount, u32 startInstance) override;
     void DrawIndexed(u32 indexCount, u32 startIndex, u32 baseVertex, u32 instanceCount, u32 startInstance) override;

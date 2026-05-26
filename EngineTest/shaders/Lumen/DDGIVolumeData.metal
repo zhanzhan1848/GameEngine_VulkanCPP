@@ -21,7 +21,7 @@
 #define DDGI_SH_COEFF_COUNT  9
 #define DDGI_DEPTH_RES       8
 #define DDGI_DEPTH_TEXELS    64  // DDGI_DEPTH_RES * DDGI_DEPTH_RES
-#define DDGI_MAX_SDF_STEPS   128
+#define DDGI_MAX_SDF_STEPS   4
 #define DDGI_SH_C0           0.282095f
 #define DDGI_SH_C1           0.488603f
 #define DDGI_SKY_COLOR       float3(0.3f, 0.3f, 0.35f)
@@ -61,9 +61,10 @@ struct DDGIVolumeData {
     float    TemporalAlpha;           //  80
     uint     ProbeUpdateCount;        //  84
 
-    float    _pad_before_relocation;  //  88
-    int      ProbeRelocationShift[3]; //  92: grid shift in probe cells
-    float    _pad_to_sdf[2];          // 104: padding to reach 112 (float4 align)
+    uint     SCLookupCount;           //  88 - Surface Cache card lookup count
+    uint     SCAtlasSize;             //  92 - Surface Cache lighting atlas size
+    int      ProbeRelocationShift[3]; //  96: grid shift in probe cells
+    float    _pad_to_sdf[1];          // 108: padding to reach 112 (float4 align)
 
     // GlobalSDF cascade data (3 cascades)
     float4   SdfOrigins[3];           // 112

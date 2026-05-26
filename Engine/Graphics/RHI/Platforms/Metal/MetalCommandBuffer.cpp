@@ -195,6 +195,9 @@ bool MetalCommandBuffer::endImpl() {
 bool MetalCommandBuffer::submitImpl(u32 waitFlags) {
     if (!mtlCommandBuffer_) return false;
 
+    // Defensive: ensure no encoder is active before commit
+    endCurrentEncoder();
+
     // Process wait semaphores
     for (const auto& semInfo : waitSemaphores_) {
         MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
@@ -1117,6 +1120,13 @@ void MetalCommandBuffer::PushConstants(PipelineLayoutHandle layout, ShaderStage 
     } else if (currentEncoderType_ == EncoderType::Compute) {
         auto encoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
         encoder->setBytes(pValues, size, 2);
+    }
+}
+
+void MetalCommandBuffer::SetComputeBytes(u32 index, const void* data, u32 size) {
+    auto encoder = getComputeEncoder();
+    if (encoder) {
+        encoder->setBytes(data, size, index);
     }
 }
 

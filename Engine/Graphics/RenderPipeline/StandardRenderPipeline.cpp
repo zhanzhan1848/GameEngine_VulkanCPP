@@ -152,11 +152,14 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
         }
     }
     
-    // Cleanup command buffer (should rely on frame/allocator but here we destroy it for now to avoid leak if pool not used)
-    // Actually device_->DestroyCommandBuffer(handle) if available, or just leave it for GC/Pool.
-    // Assuming simple lifetime for now.
-    
+    device_->DestroyCommandBuffer(cmdBufferHandle);
+
+    // Drive GC to release deferred-destroy GPU objects (Metal command buffers, etc.)
     frameCount_++;
+    auto& gc = device_->GetGarbageCollector();
+    gc.SetCurrentFrame(frameCount_);
+    u64 completedFrame = frameCount_ > 2 ? frameCount_ - 2 : 0;
+    gc.Update(completedFrame);
 
     auto endTime = std::chrono::high_resolution_clock::now();
     stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
@@ -189,9 +192,28 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             screen_probe_pass_.reset();
         }
     }
+
+    // Static Probe Volume — load baked probe data from scene.probe_cache
+    static_probe_volume_ = std::make_unique<lumen::StaticProbeVolume>();
+    lumen::StaticProbeParams spParams{};
+    spParams.grid_dim_x = config.ddgi_probe_count_x;
+    spParams.grid_dim_y = config.ddgi_probe_count_y;
+    spParams.grid_dim_z = config.ddgi_probe_count_z;
+    spParams.spacing = config.ddgi_probe_spacing;
+    if (static_probe_volume_->Initialize(device_, spParams)) {
+        const char* probeCachePath = "scene.probe_cache";
+        if (static_probe_volume_->LoadFromFile(probeCachePath)) {
+            static_probe_volume_->UploadToGPU();
+            std::cout << "[Lumen] Loaded static probe cache: " << probeCachePath << std::endl;
+        }
+    }
 }
 
 void StandardRenderPipeline::ShutdownLumenPasses() {
+    if (static_probe_volume_) {
+        static_probe_volume_->Shutdown();
+        static_probe_volume_.reset();
+    }
     if (screen_probe_pass_) {
         screen_probe_pass_->Shutdown();
         screen_probe_pass_.reset();

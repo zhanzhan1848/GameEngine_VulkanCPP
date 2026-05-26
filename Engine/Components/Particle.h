@@ -9,6 +9,9 @@ namespace primal::particle {
     DEFINE_TYPED_ID(particle_id);
 }
 
+#if _DEBUG
+// In debug mode, particle_id is a struct (id_base subclass) and needs std::hash.
+// In release mode, particle_id = unsigned int and std::hash already exists.
 namespace std {
     template<>
     struct hash<primal::particle::particle_id> {
@@ -17,6 +20,7 @@ namespace std {
         }
     };
 }
+#endif
 
 #ifndef DISABLE_PARTICLE_SYSTEM
 

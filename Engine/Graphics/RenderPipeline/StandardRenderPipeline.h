@@ -5,6 +5,7 @@
 #include "Graphics/RHI/Core/RHIGPUOptimizer.h"
 #include "Graphics/Lumen/SurfaceCache/SurfaceCachePass.h"
 #include "Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
+#include "Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
 #include "Graphics/Lumen/LumenTypes.h"
 #include <memory>
 
@@ -41,6 +42,11 @@ public:
      */
     const PipelineStatistics& GetStats() const { return stats_; }
 
+    /**
+     * @brief Access the static probe volume (baked GI data)
+     */
+    lumen::StaticProbeVolume* GetStaticProbeVolume() const { return static_probe_volume_.get(); }
+
 private:
     void SetupGraph(RenderScene& scene, RenderView& view);
     void InitializeLumenPasses();
@@ -59,6 +65,7 @@ private:
     lumen::LumenConfig lumen_config_{};
     std::unique_ptr<lumen::SurfaceCachePass> surface_cache_pass_;
     std::unique_ptr<lumen::ScreenProbeGIPass> screen_probe_pass_;
+    std::unique_ptr<lumen::StaticProbeVolume> static_probe_volume_;
 
     // Per-frame data
     u64 frameCount_{0};

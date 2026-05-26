@@ -1,17 +1,15 @@
 /**
  * @file DDGIUpdateDepth.metal
- * @brief Lumen DDGI Phase 2 - Octahedral depth update + temporal filtering
+ * @brief Lumen DDGI Phase 3 - Cooperative octahedral depth update + temporal filtering
  *
- * Each thread handles one probe: reads all rays, classifies hit distances
- * into 8x8 octahedral texels (64 bins), computes mean + variance per texel,
- * applies temporal EMA, and writes to depth storage buffer.
+ * Restructured for Apple Silicon: 8x8 threadgroup cooperative mode.
+ * Each group handles one probe. Thread (x,y) reads ray y*8+x.
+ * Thread (x,y) then processes texel y*8+x.
  *
- * Buffer layout per probe: 128 floats
- *   Indices [0..63]:   mean distance per octahedral texel
- *   Indices [64..127]: variance per octahedral texel
- * Index: probeIdx * 128 + texelIdx (mean) / probeIdx * 128 + 64 + texelIdx (variance)
+ * Per-thread device reads: ≤4 (well within Apple Silicon ~32 limit).
+ * Previous single-thread approach had ~193 reads (causing flickering).
  *
- * Dispatch: (ProbeUpdateCount, 1, 1), threadGroupSize = (1, 1, 1)
+ * Dispatch: (ProbeUpdateCount, 1, 1), threadGroupSize = (8, 8, 1)
  */
 
 #include <metal_stdlib>
@@ -20,105 +18,102 @@ using namespace metal;
 #include "../CommonTypes.metal"
 #include "DDGIVolumeData.metal"
 
-// ============================================================================
-// Main Kernel
-// ============================================================================
+struct RayInfo {
+    float distance;
+    uint  texelIdx;
+    uint  hit;
+};
 
 kernel void ddgi_update_depth(
-    uint global_id [[thread_position_in_grid]],
+    uint2 tid2d [[thread_position_in_threadgroup]],
+    uint2 gid2d [[threadgroup_position_in_grid]],
 
-    // Global shader data
     constant GlobalShaderData& gd [[buffer(0)]],
-
-    // DDGI volume data
     constant DDGIVolumeData& volume [[buffer(1)]],
-
-    // Ray data from trace pass
     device const DDGIRayData* ray_buffer [[buffer(2)]],
-
-    // Previous frame depth history buffer
     device const float* depth_history [[buffer(3)]],
-
-    // Output depth buffer
     device float* depth_output [[buffer(4)]],
-
-    // Probe update list (sparse indices of probes to update this frame)
     device const uint* probeUpdateList [[buffer(5)]]
 )
 {
-    if (global_id >= volume.ProbeUpdateCount) return;
+    uint tid = tid2d.y * 8u + tid2d.x;
+    uint group_id = gid2d.x;
 
-    uint probeIdx = probeUpdateList[global_id];
+    if (group_id >= volume.ProbeUpdateCount) return;
 
-    // -----------------------------------------------------------------------
-    // Accumulate per-texel mean + variance from all rays (octahedral binning)
-    // -----------------------------------------------------------------------
+    uint probeIdx = probeUpdateList[group_id];
+    if (probeIdx >= volume.ProbeCountTotal) return;
+    uint rayOffset = probeIdx * volume.RaysPerProbe;
 
-    constexpr uint texels = DDGI_DEPTH_TEXELS;
-    float sumDist[texels];
-    float sumDistSq[texels];
-    uint rayCount[texels];
-    for (uint t = 0; t < texels; ++t) {
-        sumDist[t] = 0.0f;
-        sumDistSq[t] = 0.0f;
-        rayCount[t] = 0u;
+    // =====================================================================
+    // Phase 1: Each thread reads one ray and stores in threadgroup
+    // =====================================================================
+    threadgroup RayInfo tg_rays[64];
+
+    tg_rays[tid].distance = 0.0f;
+    tg_rays[tid].texelIdx = 0u;
+    tg_rays[tid].hit = 0u;
+
+    if (tid < volume.RaysPerProbe) {
+        DDGIRayData ray = ray_buffer[rayOffset + tid];
+
+        if (ray.radiance_and_dist.w >= 0.0f) {
+            float3 rayDir = ddgiRayDirection(tid, volume.RaysPerProbe, volume.FrameIndex);
+            float2 uv = octahedralEncode(rayDir);
+            uint2 texel = uint2(clamp(uint(uv.x * float(DDGI_DEPTH_RES)), 0u, DDGI_DEPTH_RES - 1u),
+                                clamp(uint(uv.y * float(DDGI_DEPTH_RES)), 0u, DDGI_DEPTH_RES - 1u));
+
+            tg_rays[tid].distance = ray.radiance_and_dist.w;
+            tg_rays[tid].texelIdx = texel.y * DDGI_DEPTH_RES + texel.x;
+            tg_rays[tid].hit = 1u;
+        }
     }
 
-    constexpr uint res = DDGI_DEPTH_RES;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // =====================================================================
+    // Phase 2: Each thread processes one octahedral texel
+    // Thread tid handles texel tid: aggregates from threadgroup + history blend
+    // =====================================================================
+    if (tid >= DDGI_DEPTH_TEXELS) return;
+
+    uint texelIdx = tid;
+    uint probeBase = probeIdx * DDGI_DEPTH_TEXELS * 2u;
+
+    float sumDist = 0.0f;
+    float sumDistSq = 0.0f;
+    uint rayCount = 0u;
 
     for (uint r = 0; r < volume.RaysPerProbe; ++r) {
-        DDGIRayData ray = ray_buffer[probeIdx * volume.RaysPerProbe + r];
-
-        // Skip miss rays (negative distance)
-        if (ray.radiance_and_dist.w < 0.0f) continue;
-
-        // Compute ray direction and map to octahedral texel
-        float3 rayDir = ddgiRayDirection(r, volume.RaysPerProbe, volume.FrameIndex);
-        float2 uv = octahedralEncode(rayDir);
-        uint2 texel = uint2(clamp(uint(uv.x * float(res)), 0u, res - 1u),
-                            clamp(uint(uv.y * float(res)), 0u, res - 1u));
-        uint texelIdx = texel.y * res + texel.x;
-
-        float dist = ray.radiance_and_dist.w;
-        sumDist[texelIdx] += dist;
-        sumDistSq[texelIdx] += dist * dist;
-        rayCount[texelIdx]++;
+        if (tg_rays[r].hit && tg_rays[r].texelIdx == texelIdx) {
+            float d = tg_rays[r].distance;
+            sumDist += d;
+            sumDistSq += d * d;
+            rayCount++;
+        }
     }
 
-    // -----------------------------------------------------------------------
-    // Temporal filter with history and write output
-    // -----------------------------------------------------------------------
+    uint meanIdx = probeBase + texelIdx;
+    uint varIdx  = probeBase + DDGI_DEPTH_TEXELS + texelIdx;
 
-    constexpr uint floatsPerProbe = texels * 2u; // 128
-    uint probeBase = probeIdx * floatsPerProbe;
+    if (rayCount == 0u) {
+        depth_output[meanIdx] = depth_history[meanIdx];
+        depth_output[varIdx]  = depth_history[varIdx];
+        return;
+    }
 
-    // Smooth alpha ramp for depth
+    float mean     = sumDist / float(rayCount);
+    float variance = abs(sumDistSq / float(rayCount) - mean * mean);
+
+    if (rayCount < 4u) {
+        variance = max(variance, volume.ProbeSpacing * volume.ProbeSpacing * 0.02f);
+    }
+    variance = max(variance, 0.001f);
+
     float rampFrames = 60.0f;
-    float t = saturate(float(max(volume.FrameIndex, 1u) - 1u) / rampFrames);
-    float alpha = mix(1.0f, volume.DepthBlurSigma, t);
+    float rampT = saturate(float(max(volume.FrameIndex, 1u) - 1u) / rampFrames);
+    float alpha = mix(1.0f, volume.DepthBlurSigma, rampT);
 
-    for (uint texelIdx = 0; texelIdx < texels; ++texelIdx) {
-        uint meanIdx = probeBase + texelIdx;
-        uint varIdx  = probeBase + texels + texelIdx;
-
-        // No rays hit in this texel: keep history unchanged
-        if (rayCount[texelIdx] == 0u) {
-            depth_output[meanIdx] = depth_history[meanIdx];
-            depth_output[varIdx]  = depth_history[varIdx];
-            continue;
-        }
-
-        float mean     = sumDist[texelIdx] / float(rayCount[texelIdx]);
-        float variance = abs(sumDistSq[texelIdx] / float(rayCount[texelIdx]) - mean * mean);
-
-        // Few samples: inflate variance to avoid overconfidence
-        if (rayCount[texelIdx] < 4u) {
-            variance = max(variance, volume.ProbeSpacing * volume.ProbeSpacing * 0.1f);
-        }
-        variance = max(variance, 0.001f);
-
-        // Exponential moving average
-        depth_output[meanIdx] = mix(depth_history[meanIdx], mean, alpha);
-        depth_output[varIdx]  = mix(depth_history[varIdx],  variance, alpha);
-    }
+    depth_output[meanIdx] = mix(depth_history[meanIdx], mean, alpha);
+    depth_output[varIdx]  = mix(depth_history[varIdx],  variance, alpha);
 }

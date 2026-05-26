@@ -17,6 +17,7 @@
 #include "Engine/Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include "Engine/Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Engine/Graphics/Lumen/DDGI/LumenDDGIPass.h"
+#include "Engine/Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
 #include "Engine/Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
 #include "Engine/Graphics/Lumen/SurfaceCache/SurfaceCachePass.h"
 #include "Engine/Graphics/Nanite/GlobalSDF.h"
@@ -63,6 +64,8 @@ public:
     void TestResidencyBuffer();
     void TestEndToEndStreaming();
     void TestPerformance();
+    void TestStaticProbeSerialization();
+    void TestDDGIInitFromStatic();
 
 private:
     static TestNaniteStreamingPipeline* instance;
@@ -95,19 +98,51 @@ private:
     primal::graphics::rhi::PipelineHandle blit_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
     primal::graphics::rhi::PipelineLayoutHandle blit_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
     primal::graphics::rhi::DescriptorSetLayoutHandle blit_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    primal::graphics::rhi::DescriptorSetHandle blit_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    primal::graphics::rhi::DescriptorSetHandle blit_descriptor_set_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
 
     // Composite blit pipeline (scene + SSGI)
     primal::graphics::rhi::PipelineHandle blit_composite_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
     primal::graphics::rhi::PipelineLayoutHandle blit_composite_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
     primal::graphics::rhi::DescriptorSetLayoutHandle blit_composite_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    primal::graphics::rhi::DescriptorSetHandle blit_composite_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    primal::graphics::rhi::DescriptorSetHandle blit_composite_descriptor_set_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
 
-    // Fusion blit pipeline (DDGI + SPGI + SSGI + direct)
-    primal::graphics::rhi::PipelineHandle fusion_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
-    primal::graphics::rhi::PipelineLayoutHandle fusion_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
-    primal::graphics::rhi::DescriptorSetLayoutHandle fusion_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    primal::graphics::rhi::DescriptorSetHandle fusion_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    // Fusion pipeline: 2-pass fragment for Apple Silicon TBDR compatibility
+    // Pass 1 (half-res): 5 reads — SSGI+DDGI+SPGI+albedo×ssao → indirect contribution
+    // Pass 2 (full-res): 2 reads — scene + indirect → tonemapped output
+    primal::graphics::rhi::PipelineHandle fusion_indirect_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle fusion_indirect_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle fusion_indirect_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle fusion_indirect_descriptor_set_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    primal::graphics::rhi::ResourceHandle fusion_indirect_output_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
+    primal::graphics::rhi::PipelineHandle fusion_fragment_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle fusion_fragment_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle fusion_fragment_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle fusion_fragment_descriptor_set_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    primal::graphics::rhi::ResourceHandle fusion_output_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
 
     // === Lumen SSGI ===
     std::unique_ptr<primal::graphics::lumen::LumenSSGIPass> ssgiPass_;
@@ -134,12 +169,20 @@ private:
     primal::graphics::rhi::PipelineHandle sc_light_cull_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
     primal::graphics::rhi::PipelineLayoutHandle sc_light_cull_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
     primal::graphics::rhi::DescriptorSetLayoutHandle sc_light_cull_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    primal::graphics::rhi::DescriptorSetHandle sc_light_cull_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    primal::graphics::rhi::DescriptorSetHandle sc_light_cull_descriptor_sets_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
 
     primal::graphics::rhi::PipelineHandle sc_light_eval_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
     primal::graphics::rhi::PipelineLayoutHandle sc_light_eval_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
     primal::graphics::rhi::DescriptorSetLayoutHandle sc_light_eval_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    primal::graphics::rhi::DescriptorSetHandle sc_light_eval_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    primal::graphics::rhi::DescriptorSetHandle sc_light_eval_descriptor_sets_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
 
     primal::graphics::rhi::ResourceHandle sc_light_info_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
     primal::graphics::rhi::ResourceHandle sc_cull_params_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
@@ -158,6 +201,34 @@ private:
     primal::graphics::rhi::ResourceHandle sc_capture_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
     primal::graphics::rhi::ResourceHandle sc_capture_depth_tex_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
     primal::graphics::rhi::SamplerHandle sc_capture_sampler_{ primal::graphics::rhi::handles::INVALID_SAMPLER };
+
+    // Surface Cache DepthDilate (compute, 3x3 depth hole fill)
+    primal::graphics::rhi::PipelineHandle sc_dilate_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle sc_dilate_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle sc_dilate_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle sc_dilate_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    primal::graphics::rhi::ResourceHandle sc_dilate_params_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_depth_temp_tex_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    bool sc_dilate_done_{ false };
+
+    // Card dispatch buffer for flattened 1D LightEval dispatch
+    primal::graphics::rhi::ResourceHandle sc_card_dispatch_buf_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+
+    // Surface Cache IndirectTrace (compute, ray march through GlobalSDF)
+    primal::graphics::rhi::PipelineHandle sc_ind_trace_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle sc_ind_trace_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle sc_ind_trace_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle sc_ind_trace_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    primal::graphics::rhi::ResourceHandle sc_ind_trace_params_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_ray_hits_buf_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+
+    // Surface Cache IndirectResolve (compute)
+    primal::graphics::rhi::PipelineHandle sc_ind_resolve_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    primal::graphics::rhi::PipelineLayoutHandle sc_ind_resolve_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
+    primal::graphics::rhi::DescriptorSetLayoutHandle sc_ind_resolve_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    primal::graphics::rhi::DescriptorSetHandle sc_ind_resolve_descriptor_set_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET };
+    primal::graphics::rhi::ResourceHandle sc_ind_resolve_params_cb_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    primal::graphics::rhi::ResourceHandle sc_indirect_out_tex_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
 
     // Surface Cache → DDGI integration (Strategy C: pre-computed card→probe projection)
     static constexpr u32 SC_MAX_CONTRIBS_PER_PROBE = 6;
@@ -258,12 +329,30 @@ private:
         primal::graphics::rhi::handles::INVALID_RESOURCE
     };
 
-    // DDGI GI Gather compute pass (storage buffer only, no texture3D)
+    // DDGI GI Gather compute pass (texture atlas for Apple GPU cache efficiency)
     primal::graphics::rhi::PipelineHandle       gi_gather_pipeline_    {primal::graphics::rhi::handles::INVALID_PIPELINE};
     primal::graphics::rhi::PipelineLayoutHandle gi_gather_layout_      {primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT};
     primal::graphics::rhi::DescriptorSetLayoutHandle gi_gather_set_layout_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     primal::graphics::rhi::DescriptorSetHandle  gi_gather_descriptor_set_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET};
     primal::graphics::rhi::ResourceHandle        gi_halfres_texture_   {primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle        gi_halfres_history_   {primal::graphics::rhi::handles::INVALID_RESOURCE};
+
+    // Probe data atlas textures (buffer → texture for Apple GPU)
+    primal::graphics::rhi::ResourceHandle dyn_sh_atlas_       {primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle dyn_depth_atlas_    {primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle stat_sh_atlas_      {primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle stat_depth_atlas_   {primal::graphics::rhi::handles::INVALID_RESOURCE};
+
+    // Atlas pre-filter pass (buffer → texture copy)
+    primal::graphics::rhi::PipelineHandle       atlas_prefilter_pipeline_    {primal::graphics::rhi::handles::INVALID_PIPELINE};
+    primal::graphics::rhi::PipelineLayoutHandle atlas_prefilter_layout_      {primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT};
+    primal::graphics::rhi::DescriptorSetLayoutHandle atlas_prefilter_set_layout_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    primal::graphics::rhi::DescriptorSetHandle  atlas_prefilter_descriptor_set_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET};
+    primal::graphics::rhi::ResourceHandle       atlas_params_cb_             {primal::graphics::rhi::handles::INVALID_RESOURCE};
+
+    // Static probe volume for GI Gather static probe data bindings
+    std::unique_ptr<primal::graphics::lumen::StaticProbeVolume> static_probe_volume_;
+    primal::graphics::rhi::ResourceHandle static_probe_cb_{primal::graphics::rhi::handles::INVALID_RESOURCE};
 
     bool sdf_voxelization_done_ = false;  // Lock SDF origins after first voxelization
 
@@ -286,7 +375,12 @@ private:
         primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
         primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
     };
-    primal::graphics::rhi::ResourceHandle deferred_output_texture_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    // Triple-buffered deferred output — fusion reads 2-frame-old data to avoid data race
+    primal::graphics::rhi::ResourceHandle deferred_output_textures_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
     primal::graphics::rhi::ResourceHandle deferred_view_cb_[3]{
         primal::graphics::rhi::handles::INVALID_RESOURCE,
         primal::graphics::rhi::handles::INVALID_RESOURCE,
@@ -364,8 +458,10 @@ private:
         bool f3_prev{ false };  // Performance benchmark
         bool f4_prev{ false };  // SSGI visualization mode toggle
         bool space_prev{ false }; // Pause/resume streaming
+        bool f5_prev{ false };  // Mode 6 diagnostic toggle
     } keyState_;
 
     // SSGI visualization mode: 0=Composite(scene+SSGI), 1=SSGI only, 2=Scene only
     u32 ssgiVisMode_{ 0 };  // Scene only (no SSGI/DDGI overlay, direct deferred output)
+    u32 mode_diag_{ 0 };    // Mode 6 diagnostic: 0=simple blit, 1=fusion same-tex, 2=fusion real, 3=7-bind simple shader
 };

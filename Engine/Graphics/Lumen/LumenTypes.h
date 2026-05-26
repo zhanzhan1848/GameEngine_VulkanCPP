@@ -74,4 +74,20 @@ struct LumenConfig {
     float max_gi_time_ms = 6.0f;
 };
 
+// --- Static Probe Volume ---
+struct StaticProbeParams {
+    u32 grid_dim_x{16};
+    u32 grid_dim_y{8};
+    u32 grid_dim_z{16};
+    float spacing{4.0f};
+    math::v3 origin{0.0f};
+};
+
+struct ProbeConfidenceData {
+    float ray_hit_ratio{0.0f};
+    float temporal_stability{0.0f};
+    float visibility_conf{0.0f};
+    float convergence_age{0.0f};
+};
+
 } // namespace primal::graphics::lumen

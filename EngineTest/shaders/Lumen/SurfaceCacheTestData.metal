@@ -19,8 +19,9 @@ kernel void surfaceCacheFillTest(
 
     albedo_out.write(float4(gray, gray, gray, 1.0), gid);
 
-    // Normal: Y-up oct-encoded = (0.5, 0.5)
-    normal_out.write(float4(0.5, 0.5, 0.0, 1.0), gid);
+    // Normal: Y-up oct-encoded — faces typical downward light direction
+    // octEncode(0,1,0): l1norm=1, result=(0,1)/1=(0,1), *0.5+0.5=(0.5,1.0)
+    normal_out.write(float4(0.5, 1.0, 0.0, 1.0), gid);
 
     // Depth: positive value
     depth_out.write(float4(0.5, 0.0, 0.0, 1.0), gid);

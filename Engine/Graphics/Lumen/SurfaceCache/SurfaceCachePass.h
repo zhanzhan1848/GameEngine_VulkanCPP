@@ -105,7 +105,15 @@ private:
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
 
-    // Pipelines (stubs, created in later tasks)
+    // Descriptor set layouts
+    rhi::DescriptorSetLayoutHandle dilate_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle light_cull_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle light_eval_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle capture_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle indirect_trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle indirect_resolve_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+
+    // Pipelines
     rhi::PipelineHandle capture_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle dilate_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle light_cull_pipeline_{ rhi::handles::INVALID_PIPELINE };
@@ -145,6 +153,7 @@ private:
     rhi::ResourceHandle light_assignment_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle light_info_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle ray_hits_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle card_dispatch_buffer_{ rhi::handles::INVALID_RESOURCE };
 
     u32 atlas_size_ = 0;
     u32 page_size_ = 0;

@@ -94,6 +94,11 @@ public:
      */
     rhi::ResourceHandle GetIndexBuffer() const { return indexBuffer_; }
 
+    /**
+     * @brief 获取索引类型
+     */
+    rhi::DataIndexType GetIndexType() const { return indexType_; }
+
 
     /**
      * @brief 获取顶点数量
