@@ -3615,7 +3615,8 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     {
         u32 scOutIdx = currentBufferIndex % 3;
         bool scDirectView = (ssgiVisMode_ == 7 || ssgiVisMode_ == 8 || ssgiVisMode_ == 9);
-        if (scDirectView && surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
+        bool ddgiSCActive = (ssgiVisMode_ == 3 || ssgiVisMode_ == 6 || scDirectView);
+        if (ddgiSCActive && surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
             scLightingH = graph.ImportResource("SC_Lighting_" + std::to_string(scOutIdx),
                 surfaceCachePass_->GetLightingAtlas(scOutIdx));
         }
@@ -3736,22 +3737,21 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     rendergraph::RGResourceHandle scAlbedoH, scNormalH, scDepthH, scEmissiveH;
     // scLightingH already declared and imported above
     u32 scOutIdx = currentBufferIndex % 3;
-    // SC full pipeline only for direct SC view modes (7/8/9)
     bool scDirectView = (ssgiVisMode_ == 7 || ssgiVisMode_ == 8 || ssgiVisMode_ == 9);
-    if (scDirectView &&
+    bool scLightingNeeded = scDirectView || (ssgiVisMode_ == 3 || ssgiVisMode_ == 6);
+    if (scLightingNeeded &&
         surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
         scAlbedoH = graph.ImportResource("SC_Albedo", surfaceCachePass_->GetAlbedoAtlas());
         scNormalH = graph.ImportResource("SC_Normal", surfaceCachePass_->GetNormalAtlas());
         scDepthH = graph.ImportResource("SC_Depth", surfaceCachePass_->GetDepthAtlas());
         scEmissiveH = graph.ImportResource("SC_Emissive", surfaceCachePass_->GetEmissiveAtlas());
-        // scLightingH was already imported above before DDGI AddPass — no re-import needed
     }
 
     // === SURFACE CACHE FILL TEST (prefill atlases with test pattern) ===
     // Runs before CardCapture to fill entire atlas so modes 8/9 show a visible
     // pattern outside card regions. CardCapture then overwrites card regions
     // with actual mesh material data for LightEval.
-    if (scDirectView &&
+    if (scLightingNeeded &&
         surfaceCachePass_ && surfaceCachePass_->IsInitialized() &&
         sc_fill_test_pipeline_ != rhi::handles::INVALID_PIPELINE &&
         !sc_fill_done_) {
@@ -3795,7 +3795,8 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
     // === SURFACE CACHE CARD CAPTURE (graphics pass, renders meshes into atlas) ===
     // Overwrites card regions with actual material data for LightEval.
-    if (scDirectView &&
+    // Runs in SC modes (7/8/9) AND DDGI modes (3/6) so DDGI has SC data for radiance.
+    if (scLightingNeeded &&
         surfaceCachePass_ && surfaceCachePass_->IsInitialized() &&
         sc_capture_pipeline_ != rhi::handles::INVALID_PIPELINE &&
         !sc_fill_done_) {
@@ -3979,7 +3980,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                           << " drawn=" << drawables.size() - skippedOOB
                           << " skipped=" << skippedOOB << std::endl;
             });
-    } else if (scDirectView && !sc_fill_done_ && surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
+    } else if (scLightingNeeded && !sc_fill_done_ && surfaceCachePass_ && surfaceCachePass_->IsInitialized()) {
         static bool logOnce = false;
         if (!logOnce) {
             std::cout << "[SC_CardCapture] GATE FAILED: capture_pipeline="
@@ -3990,7 +3991,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
     // === SURFACE CACHE DEPTH DILATE (ping-pong: depth_atlas → depth_temp) ===
     rendergraph::RGResourceHandle scDepthTempH;
-    if (scDirectView && surfaceCachePass_ && surfaceCachePass_->IsInitialized() &&
+    if (scLightingNeeded && surfaceCachePass_ && surfaceCachePass_->IsInitialized() &&
         sc_dilate_pipeline_ != rhi::handles::INVALID_PIPELINE &&
         sc_fill_done_ && !sc_dilate_done_ &&
         sc_depth_temp_tex_ != rhi::handles::INVALID_RESOURCE) {
@@ -4028,12 +4029,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             });
     }
 
-    // === SURFACE CACHE LIGHTING (runs ONCE, then blits cached result every frame) ===
+    // === SURFACE CACHE LIGHTING (per-frame: updates lighting atlas with current light direction) ===
+    // Runs in SC view modes (7/8/9) AND DDGI modes (3/6) since DDGI finalize
+    // samples the lighting atlas for ray hit radiance.
     // CRITICAL: Check ALL required resources, not just the pipeline.
     // If InitializeSurfaceCachePipelines() failed partway, pipelines may be valid
     // but constant buffers could be INVALID_RESOURCE → binding them causes GPU fault.
-    if (scDirectView && surfaceCachePass_ && surfaceCachePass_->IsInitialized() &&
-        sc_fill_done_ &&
+    if (scLightingNeeded && sc_fill_done_ && surfaceCachePass_ && surfaceCachePass_->IsInitialized() &&
         sc_light_cull_pipeline_ != rhi::handles::INVALID_PIPELINE &&
         sc_light_eval_pipeline_ != rhi::handles::INVALID_PIPELINE &&
         sc_cull_params_cb_ != rhi::handles::INVALID_RESOURCE &&
@@ -4171,7 +4173,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     }
                 }
             });
-    } else if (scDirectView && sc_fill_done_) {
+    } else if (scLightingNeeded && sc_fill_done_) {
         // Gate failed — print which resource is invalid
         static bool logOnce = false;
         if (!logOnce) {
