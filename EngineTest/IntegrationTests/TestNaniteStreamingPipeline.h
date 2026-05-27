@@ -366,6 +366,22 @@ private:
     bool shadow_cache_valid_[3][2]{false};     // [buffer_index][cascade]
     bool shadow_cache_globally_valid_{false};  // Reset on scene change
 
+    // Shadow filter (half-res compute pass — avoids Apple Silicon texture bandwidth limits)
+    primal::graphics::rhi::PipelineHandle shadow_filter_pipeline_{primal::graphics::rhi::handles::INVALID_PIPELINE};
+    primal::graphics::rhi::PipelineLayoutHandle shadow_filter_layout_{primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT};
+    primal::graphics::rhi::DescriptorSetLayoutHandle shadow_filter_set_layout_{primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    primal::graphics::rhi::DescriptorSetHandle shadow_filter_ds_[3]{
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
+        primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    primal::graphics::rhi::ResourceHandle shadow_visibility_tex_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle shadow_filter_cb_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
+
     // Deferred PBR Lighting pipeline
     primal::graphics::rhi::PipelineHandle deferred_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
     primal::graphics::rhi::PipelineLayoutHandle deferred_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
@@ -441,6 +457,7 @@ private:
     bool SetupBasicRenderingPipeline();
     bool InitializeSSGIPipeline();
     bool InitializeDDGIBlitPipeline();
+    bool InitializeShadowFilterPipeline();
     bool InitializeSurfaceCachePipelines();
     bool BuildCardProbeAssignment();
     void UpdateTestScene();

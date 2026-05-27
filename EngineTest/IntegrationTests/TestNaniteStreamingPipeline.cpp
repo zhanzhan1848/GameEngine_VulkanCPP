@@ -888,12 +888,17 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
             sceneSnapshot_.GetInstanceCount(), 100000);
     }
 
+    // Shadow filter pipeline (half-res compute, avoids Apple Silicon bandwidth limits)
+    if (!InitializeShadowFilterPipeline()) {
+        std::cerr << "[TestNanite] Warning: Shadow filter pipeline initialization failed" << std::endl;
+    }
+
     // === Deferred PBR Lighting Pipeline ===
     {
         using namespace primal::graphics::rhi;
 
         // Descriptor set layout: MUST match fragmentLighting_gpuDriven shader signature exactly
-        // buffer(0)=ViewData, buffer(1)=SceneData, texture(2-7,9), sampler(8)
+        // buffer(0)=ViewData, buffer(1)=SceneData, texture(2-6,8), sampler(7)
         DescriptorSetLayoutBinding deferred_bindings[] = {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel | ShaderStage::Vertex, nullptr},  // buffer(0) ViewData
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr},                          // buffer(1) SceneData
@@ -901,12 +906,11 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
             {3, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(3) normal
             {4, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(4) ORM
             {5, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(5) depth
-            {6, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(6) shadowMap0
-            {7, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(7) shadowMap1
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(6) shadowVisibility
             {8, DescriptorType::Sampler,       1, ShaderStage::Pixel, nullptr},  // sampler(8) defaultSampler
             {9, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // texture(9) SSAO
         };
-        DescriptorSetLayoutDesc deferred_set_desc{ .bindingCount = 10, .bindings = deferred_bindings };
+        DescriptorSetLayoutDesc deferred_set_desc{ .bindingCount = 9, .bindings = deferred_bindings };
         deferred_set_layout_ = device_->CreateDescriptorSetLayout(deferred_set_desc);
 
         PipelineLayoutDesc deferred_pl_desc{ .setLayoutCount = 1, .setLayouts = &deferred_set_layout_ };
@@ -1013,6 +1017,76 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         }
     }
 
+    return true;
+}
+
+bool TestNaniteStreamingPipeline::InitializeShadowFilterPipeline() {
+    using namespace primal::graphics;
+    using namespace primal::graphics::rhi;
+    const std::string shaderDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/";
+    primal::utl::vector<std::wstring> extra_args;
+
+    // Compile shadow filter compute shader
+    const shader_file_info info{ "ShadowFilter.metal", "shadow_filter_compute", shader_type::compute };
+    auto compiled = compile_shader(info, shaderDir.c_str(), extra_args);
+    if (!compiled) {
+        std::cerr << "[ShadowFilter] Failed to compile shader" << std::endl;
+        return false;
+    }
+
+    u64 sz = *reinterpret_cast<u64*>(compiled.get());
+    u8* ptr = compiled.get() + sizeof(u64) + 16;
+    auto sh = device_->CreateShader(ptr, sz, ShaderStage::Compute, info.function);
+    if (sh == handles::INVALID_SHADER) {
+        std::cerr << "[ShadowFilter] Failed to create shader" << std::endl;
+        return false;
+    }
+
+    // Bindings: buffer(0)=params CB, texture(0)=depth, texture(1)=shadowMap0, texture(2)=shadowMap1, texture(3)=visibility_out
+    DescriptorSetLayoutBinding bindings[] = {
+        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+        {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+        {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+        {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+        {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+    };
+    shadow_filter_set_layout_ = device_->CreateDescriptorSetLayout({5, bindings});
+    shadow_filter_layout_ = device_->CreatePipelineLayout({1, &shadow_filter_set_layout_});
+
+    for (int i = 0; i < 3; ++i) {
+        shadow_filter_ds_[i] = device_->CreateDescriptorSet({shadow_filter_set_layout_});
+    }
+
+    ComputePipelineDesc pd{};
+    pd.computeShader = sh;
+    pd.layout = shadow_filter_layout_;
+    pd.threadGroupSize = {8, 8, 1};
+    shadow_filter_pipeline_ = device_->CreateComputePipeline(pd);
+    if (shadow_filter_pipeline_ == handles::INVALID_PIPELINE) {
+        std::cerr << "[ShadowFilter] Failed to create pipeline" << std::endl;
+        return false;
+    }
+
+    // Create half-res visibility texture (R8_UNorm)
+    TextureDesc visDesc{};
+    visDesc.size = {(renderWidth_ / 2), (renderHeight_ / 2), 1};
+    visDesc.format = DataFormat::R8_UNorm;
+    visDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+    shadow_visibility_tex_ = device_->CreateTexture(visDesc);
+    if (shadow_visibility_tex_ == handles::INVALID_RESOURCE) {
+        std::cerr << "[ShadowFilter] Failed to create visibility texture" << std::endl;
+        return false;
+    }
+
+    // Triple-buffered constant buffers
+    for (int i = 0; i < 3; ++i) {
+        BufferDesc cbDesc{};
+        cbDesc.size = 512;
+        cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        shadow_filter_cb_[i] = device_->CreateBuffer(cbDesc);
+    }
+
+    std::cout << "[ShadowFilter] Initialized: " << (renderWidth_/2) << "x" << (renderHeight_/2) << std::endl;
     return true;
 }
 
@@ -3280,9 +3354,101 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         ssaoOutputHandle = ssaoOutput.ssao_output;
     }
 
-    // === DEFERRED PBR LIGHTING PASS ===
-    // Import deferred output texture early so FinalBlit can reference it
+    // === SHADOW FILTER PASS (half-res compute — avoids Apple Silicon texture bandwidth limits) ===
     u32 cbIdx = currentBufferIndex % 3;
+    rendergraph::RGResourceHandle shadowVisibilityRG;
+    if (shadow_filter_pipeline_ != rhi::handles::INVALID_PIPELINE &&
+        shadow_visibility_tex_ != rhi::handles::INVALID_RESOURCE &&
+        frameCount_ > 0) {
+
+        shadowVisibilityRG = graph.ImportResource("ShadowVisibility", shadow_visibility_tex_);
+
+        struct ShadowFilterData {
+            rendergraph::RGResourceHandle output;
+        };
+
+        graph.AddPass<ShadowFilterData>("ShadowFilter",
+            graphics::rendergraph::RGPassType::Compute,
+            graphics::rendergraph::RGPassCategory::Copy,
+            [shadowVisibilityRG, shadowMapRG](ShadowFilterData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+                data.output = builder.Write(shadowVisibilityRG, rhi::ResourceState::UnorderedAccess);
+
+                // Read shadow maps from ShadowBlit pass
+                for (u32 c = 0; c < 2; ++c) {
+                    if (shadowMapRG[c].IsValid()) {
+                        builder.Read(shadowMapRG[c], rhi::ResourceState::ShaderResource);
+                    }
+                }
+            },
+            [this, currentBufferIndex, cbIdx, sharedLightPos](const ShadowFilterData& data, graphics::rendergraph::RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+
+                // Upload ShadowFilterParams
+                {
+                    primal::math::m4x4 vp = cameraBuffers_[currentBufferIndex].proj_matrix * cameraBuffers_[currentBufferIndex].view_matrix;
+                    primal::math::m4x4 invVP = rhi::math::Inverse(vp);
+
+                    struct ShadowFilterParams {
+                        primal::math::m4x4 inv_view_proj;
+                        primal::math::m4x4 shadow_vp[2];
+                        primal::math::v4   light_dir;
+                        primal::math::v2   texel_size;
+                        primal::math::v2   depth_texel_size;
+                        u32 shadow_quality;
+                        u32 render_width;
+                        u32 render_height;
+                        float _pad0;
+                    };
+
+                    auto* p = static_cast<ShadowFilterParams*>(device_->MapBuffer(shadow_filter_cb_[cbIdx]));
+                    if (p) {
+                        p->inv_view_proj = invVP;
+                        p->shadow_vp[0] = cachedShadowMatrix0_[cbIdx];
+                        p->shadow_vp[1] = cachedShadowMatrix1_[cbIdx];
+
+                        primal::math::v3 L = Normalize(
+                            primal::math::v3{sharedLightPos.x, sharedLightPos.y, sharedLightPos.z});
+                        p->light_dir = primal::math::v4{L.x, L.y, L.z, 0.0f};
+                        p->texel_size = primal::math::v2{1.0f / 2048.0f, 1.0f / 2048.0f};
+                        p->depth_texel_size = primal::math::v2{1.0f / (float)renderWidth_, 1.0f / (float)renderHeight_};
+                        // Modes 1/6 (SSGI + fusion) are bandwidth-heavy: hard shadow to stay within budget.
+                        // Mode 3 (DDGI only) has headroom: use PCSS (24 taps) for softer shadows.
+                        bool heavyMode = (ssgiVisMode_ == 1 || ssgiVisMode_ == 6);
+                        p->shadow_quality = heavyMode ? 0u : 2u;
+                        p->render_width = renderWidth_;
+                        p->render_height = renderHeight_;
+                        p->_pad0 = 0.0f;
+
+                        device_->UnmapBuffer(shadow_filter_cb_[cbIdx]);
+                    }
+                }
+
+                // Update descriptor set
+                ResourceHandle shadowMap0 = gpuDrawPipeline_->GetShadowMap(0, currentBufferIndex);
+                ResourceHandle shadowMap1 = gpuDrawPipeline_->GetShadowMap(1, currentBufferIndex);
+                DescriptorData params[] = {
+                    {0, DescriptorType::UniformBuffer, shadow_filter_cb_[cbIdx]},
+                    {0, DescriptorType::SampledImage, gpuDrawPipeline_->GetGBufferDepthSampleable()},
+                    {1, DescriptorType::SampledImage, shadowMap0},
+                    {2, DescriptorType::SampledImage, shadowMap1},
+                    {3, DescriptorType::StorageImage, shadow_visibility_tex_},
+                };
+                UpdateDescriptorSet(device_, shadow_filter_ds_[cbIdx], params, 5);
+
+                // Dispatch half-res
+                cmd->BindComputePipeline(shadow_filter_pipeline_);
+                const rhi::DescriptorSetHandle sets[] = { shadow_filter_ds_[cbIdx] };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, shadow_filter_layout_, 0, 1, sets, 0, nullptr);
+
+                u32 halfW = (renderWidth_ / 2 + 7) / 8;
+                u32 halfH = (renderHeight_ / 2 + 7) / 8;
+                cmd->Dispatch(halfW, halfH, 1);
+            }
+        );
+    }
+
+    // === DEFERRED PBR LIGHTING PASS ===
+    // cbIdx already declared above (shared with ShadowFilter)
     ResourceHandle currentDeferredTex = deferred_output_textures_[cbIdx];
     // 2-frame-old deferred output for fusion pass (avoids data race with in-flight frames)
     // (currentBufferIndex + 1) % 3 = texture written 2 frames ago
@@ -3308,23 +3474,16 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             rendergraph::RGResourceHandle output;
         };
 
-        // Use same-frame shadow maps: all passes execute within a single Metal command buffer,
-        // so ShadowBlit's output is guaranteed visible to DeferredLighting without delay.
-        // Previous 2-frame delay caused flickering by reading different triple-buffer slots
-        // whose shadow maps differed slightly due to non-deterministic GPU thread scheduling.
+        // ShadowFilter pass produces shadowVisibilityRG — DeferredLighting reads it.
         graph.AddPass<DeferredPassData>("DeferredLighting",
             graphics::rendergraph::RGPassType::Graphics,
             graphics::rendergraph::RGPassCategory::Lighting,
-            [deferredOutputRG, shadowMapRG](DeferredPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+            [deferredOutputRG, shadowVisibilityRG](DeferredPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
                 data.output = builder.Write(deferredOutputRG, rhi::ResourceState::RenderTarget);
 
-                // Declare shadow map reads: this creates dependency on ShadowBlit pass
-                // and ensures proper GPU barrier (UAV → ShaderResource) before sampling.
-                // Using shadowMapRG (same handles as ShadowBlit writes) ensures correct dependency.
-                for (u32 c = 0; c < 2; ++c) {
-                    if (shadowMapRG[c].IsValid()) {
-                        builder.Read(shadowMapRG[c], rhi::ResourceState::ShaderResource);
-                    }
+                // Read pre-filtered shadow visibility from ShadowFilter pass
+                if (shadowVisibilityRG.IsValid()) {
+                    builder.Read(shadowVisibilityRG, rhi::ResourceState::ShaderResource);
                 }
 
                 graphics::rendergraph::RGRenderPassDesc rpDesc;
@@ -3394,11 +3553,8 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     }
                 }
 
-                // Update descriptor set with GBuffer + shadow resources
+                // Update descriptor set with GBuffer + shadow visibility resources
                 auto depthSampleable = gpuDrawPipeline_->GetGBufferDepthSampleable();
-                // Use same-frame shadow maps (no delay — same command buffer guarantees ordering)
-                auto shadowMap0 = gpuDrawPipeline_->GetShadowMap(0, currentBufferIndex);
-                auto shadowMap1 = gpuDrawPipeline_->GetShadowMap(1, currentBufferIndex);
 
                 // Get SSAO texture (or invalid for fallback — shader handles this)
                 ResourceHandle ssaoTex = (ssaoPass_ && ssaoPass_->IsInitialized())
@@ -3415,12 +3571,11 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     {3, DescriptorType::SampledImage, gpuDrawPipeline_->GetGBufferNormal()},
                     {4, DescriptorType::SampledImage, gpuDrawPipeline_->GetGBufferORM()},
                     {5, DescriptorType::SampledImage, depthSampleable},
-                    {6, DescriptorType::SampledImage, shadowMap0},
-                    {7, DescriptorType::SampledImage, shadowMap1},
+                    {6, DescriptorType::SampledImage, shadow_visibility_tex_},
                     {8, DescriptorType::Sampler, static_cast<ResourceHandle>(deferred_sampler_handle_)},
                     {9, DescriptorType::SampledImage, ssaoTex},
                 };
-                UpdateDescriptorSet(device_, deferred_descriptor_set_[cbIdx], params, 10);
+                UpdateDescriptorSet(device_, deferred_descriptor_set_[cbIdx], params, 9);
 
                 // Draw
                 cmd->SetViewport({{0, 0}, {static_cast<float>(renderWidth_), static_cast<float>(renderHeight_)}, 0, 1});

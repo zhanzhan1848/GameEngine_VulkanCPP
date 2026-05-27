@@ -131,7 +131,7 @@ vertex VertexOut vertexMain(uint vertexID [[vertex_id]]) {
 }
 
 // ================================================================================================
-// Shadow Helper
+// Shadow Helper — reads pre-filtered visibility texture from ShadowFilter pass
 // ================================================================================================
 
 // Diagnostic: read raw shadow map depth (no PCF, no comparison)
@@ -149,32 +149,10 @@ float ReadRawShadowDepth(float3 worldPos, float4x4 shadowMatrix, texture2d<float
     return shadowMap.sample(shadowSampler, shadowCoord.xy).r;
 }
 
-float GetShadow(float3 worldPos, float3 normal, float3 lightDir, float4x4 shadowMatrix, texture2d<float> shadowMap, sampler passedSampler) {
-    constexpr sampler shadowSampler(coord::normalized, filter::nearest, mip_filter::none, address::clamp_to_edge);
-
-    float4 clipPos = shadowMatrix * float4(worldPos, 1.0);
-    float3 shadowCoord = clipPos.xyz / clipPos.w;
-
-    // NDC to UV (Metal Y is inverted: clipY=+1 → texture row 0 → UV.y=0)
-    shadowCoord.x = shadowCoord.x * 0.5 + 0.5;
-    shadowCoord.y = shadowCoord.y * -0.5 + 0.5;
-
-    // Check bounds
-    if (shadowCoord.x < 0.0 || shadowCoord.x > 1.0 ||
-        shadowCoord.y < 0.0 || shadowCoord.y > 1.0 ||
-        shadowCoord.z < 0.0 || shadowCoord.z > 1.0) {
-        return -1.0; // Return -1 to indicate “Out of Bounds”
-    }
-
-    // Single-tap shadow comparison (was PCF 3x3 = 9 samples, reduced to 1 for performance)
-    float currentDepth = shadowCoord.z;
-    float NdotL = max(dot(normalize(normal), normalize(lightDir)), 0.0);
-    float bias = 0.002 + (1.0 - NdotL) * 0.02;
-
-    float pcfDepth = shadowMap.sample(shadowSampler, shadowCoord.xy).r;
-    float shadow = (currentDepth - bias > pcfDepth) ? 0.0 : 1.0;
-
-    return shadow;
+// Sample pre-filtered shadow visibility (half-res, bilinear upsample)
+float GetShadowVisibility(float2 uv, texture2d<float> shadowVisibility, sampler sm) {
+    float v = shadowVisibility.sample(sm, uv).r;
+    return saturate(v);
 }
 
 // ================================================================================================
@@ -190,8 +168,7 @@ fragment float4 fragmentLighting_v3(
     texture2d<float> normalTex [[texture(3)]],
     texture2d<float> ormTex [[texture(4)]],
     depth2d<float> depthTex [[texture(5)]],
-    texture2d<float> shadowMap0 [[texture(6)]],
-    texture2d<float> shadowMap1 [[texture(7)]],
+    texture2d<float> shadowVisibility [[texture(6)]],
     texturecube<float> irradianceMap [[texture(8)]],
     texturecube<float> prefilterMap [[texture(9)]],
     texture2d<float> brdfLUT [[texture(10)]],
@@ -249,18 +226,11 @@ fragment float4 fragmentLighting_v3(
     float3 V = normalize(sceneData.viewPos.xyz - worldPos);
     float3 R = reflect(-V, N);
 
-    // 3. Calculate Shadow (Cascade 0 first, then Cascade 1 if out of bounds)
-    float3 L_shadow = normalize(sceneData.lightPos.xyz);
-    float shadow = GetShadow(worldPos, N, L_shadow, sceneData.shadowMatrix0, shadowMap0, defaultSampler);
-    if (shadow < 0.0) {
-        shadow = GetShadow(worldPos, N, L_shadow, sceneData.shadowMatrix1, shadowMap1, defaultSampler);
-        if (shadow < 0.0) {
-            shadow = 1.0; // Outside all cascades, default to fully lit
-        }
-    }
+    // 3. Shadow — read pre-filtered visibility texture (half-res, bilinear upsample)
+    float shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
 
     // F0 for Fresnel
-    float3 F0 = float3(0.04); 
+    float3 F0 = float3(0.04);
     F0 = mix(F0, albedo.rgb, metallic);
 
     float3 Lo = float3(0.0);
@@ -455,8 +425,7 @@ fragment float4 fragmentLighting_gpuDriven(
     texture2d<float> normalTex [[texture(3)]],
     texture2d<float> ormTex [[texture(4)]],
     depth2d<float> depthTex [[texture(5)]],
-    texture2d<float> shadowMap0 [[texture(6)]],
-    texture2d<float> shadowMap1 [[texture(7)]],
+    texture2d<float> shadowVisibility [[texture(6)]],
 
     sampler defaultSampler [[sampler(8)]]
 ) {
@@ -489,21 +458,12 @@ fragment float4 fragmentLighting_gpuDriven(
     float4 worldPos4 = viewData.invViewProjection * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
 
-    // 3. Calculate Shadow (Cascade 0 first, then Cascade 1 if out of bounds)
-    float3 N = normalize(normal);
-    float3 L = normalize(sceneData.lightPos.xyz);
-
-    // Cascade selection: try cascade 0 first, fall back to cascade 1
-    float shadow = GetShadow(worldPos, N, L, sceneData.shadowMatrix0, shadowMap0, defaultSampler);
-    if (shadow < 0.0) {
-        // Outside cascade 0 — try cascade 1
-        shadow = GetShadow(worldPos, N, L, sceneData.shadowMatrix1, shadowMap1, defaultSampler);
-        if (shadow < 0.0) {
-            shadow = 1.0; // Outside both cascades, fully lit
-        }
-    }
+    // 3. Shadow — read pre-filtered visibility texture (half-res, bilinear upsample)
+    float shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
 
     // 4. Direct Lighting (Cook-Torrance PBR + shadow)
+    float3 N = normalize(normal);
+    float3 L = normalize(sceneData.lightPos.xyz);
     float3 V = normalize(sceneData.viewPos.xyz - worldPos);
 
     // F0 for Fresnel
