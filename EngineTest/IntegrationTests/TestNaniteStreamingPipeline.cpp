@@ -13,6 +13,7 @@
 #include "Engine/Input/Input.h"
 #include "Engine/Components/Entity.h"
 #include "ShaderCompilation.h"
+#include "Engine/Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Engine/Graphics/Lumen/StaticProbe/StaticProbeBaker.h"
 #include "stb_image.h"  // third_party/stb submodule
 #include "Engine/Utilities/IOStream.h"
@@ -3411,10 +3412,12 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         p->light_dir = primal::math::v4{L.x, L.y, L.z, 0.0f};
                         p->texel_size = primal::math::v2{1.0f / 2048.0f, 1.0f / 2048.0f};
                         p->depth_texel_size = primal::math::v2{1.0f / (float)renderWidth_, 1.0f / (float)renderHeight_};
-                        // Modes 1/6 (SSGI + fusion) are bandwidth-heavy: hard shadow to stay within budget.
-                        // Mode 3 (DDGI only) has headroom: use PCSS (24 taps) for softer shadows.
+                        // Heavy modes (SSGI + fusion) must use hard shadow to stay within bandwidth.
+                        // Lighter modes can use PCSS for softer shadows.
                         bool heavyMode = (ssgiVisMode_ == 1 || ssgiVisMode_ == 6);
-                        p->shadow_quality = heavyMode ? 0u : 2u;
+                        auto qualityCfg = PipelineQualityConfig::FromPreset(
+                            heavyMode ? lumen::LumenQualityPreset::Low : lumen::LumenQualityPreset::High);
+                        p->shadow_quality = static_cast<u32>(qualityCfg.shadow_quality);
                         p->render_width = renderWidth_;
                         p->render_height = renderHeight_;
                         p->_pad0 = 0.0f;
