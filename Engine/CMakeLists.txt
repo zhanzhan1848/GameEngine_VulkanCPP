@@ -94,6 +94,7 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/Modules/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Debug/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Debug/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/PostProcess/*.h"
@@ -239,6 +240,9 @@ if(DISABLE_PARTICLE_SYSTEM)
 endif()
 
 # 合并所有源文件
+# Module .cpp files require test include paths — exclude from Engine library
+list(FILTER GRAPHICS_UTILS EXCLUDE REGEX "Modules/.*\\.cpp$")
+
 set(ALL_SOURCES
     ${COMMON_SOURCES}
     ${PLATFORM_SOURCES}

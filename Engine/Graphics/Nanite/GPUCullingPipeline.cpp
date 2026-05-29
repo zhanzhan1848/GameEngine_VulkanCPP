@@ -1668,7 +1668,7 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
     constants.max_lod_levels = config_.max_lod_levels;
     constants.instance_count = snapshot.GetInstanceCount();
     constants.cluster_count = snapshot.GetClusterRefCount();
-    constants.force_pass_all = 0; // 🔥 RE-ENABLE: Test with inverted culling logic
+    constants.force_pass_all = 0;
     constants.enable_debug_output = 1; // 🔥 Enable debug output to see culling details
 
     // Additional validation to prevent corrupted data
@@ -1897,7 +1897,11 @@ bool GPUCullingPipeline::Stage7_BuildIndirectCommands(rhi::RHICommandBuffer* cmd
                                                      const RenderSceneSnapshot& snapshot,
                                                      u32 bufferIndex) {
     if (indirect_command_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        // std::cout << "[GPUCulling] Indirect command pipeline not available, skipping" << std::endl;
+        static bool warned = false;
+        if (!warned) {
+            std::cerr << "[GPUCulling] Stage7: indirect_command_pipeline_ is INVALID! Skipping." << std::endl;
+            warned = true;
+        }
         return true;
     }
 
@@ -1935,17 +1939,22 @@ bool GPUCullingPipeline::Stage7_BuildIndirectCommands(rhi::RHICommandBuffer* cmd
             void* mapped = device_->MapBuffer(current_frame_res.indirect_args_buffer);
             if (mapped) {
                 struct IndirectCommand {
-                    u32 vertex_count;
-                    u32 instance_count;
-                    u32 first_vertex;
-                    u32 first_instance;
+                    u32 vertexStart;
+                    u32 vertexCount;
+                    u32 instanceCount;
+                    u32 baseInstance;
                 };
                 IndirectCommand* cmd = static_cast<IndirectCommand*>(mapped);
-                // std::cout << "[GPUCulling] Stage7: Indirect command for buffer index " << bufferIndex << ":" << std::endl;
-                // std::cout << "  vertex_count: " << cmd->vertex_count << std::endl;
-                // std::cout << "  instance_count: " << cmd->instance_count << std::endl;
-                // std::cout << "  first_vertex: " << cmd->first_vertex << std::endl;
-                // std::cout << "  first_instance: " << cmd->first_instance << std::endl;
+                static int printCount = 0;
+                if (printCount < 10) {
+                    std::cout << "[Stage7] bufIdx=" << bufferIndex
+                              << " frameRes=" << current_frame_resource_
+                              << " vertexStart=" << cmd->vertexStart
+                              << " vertexCount=" << cmd->vertexCount
+                              << " instanceCount=" << cmd->instanceCount
+                              << " baseInstance=" << cmd->baseInstance << std::endl;
+                    printCount++;
+                }
                 device_->UnmapBuffer(current_frame_res.indirect_args_buffer);
             }
         }

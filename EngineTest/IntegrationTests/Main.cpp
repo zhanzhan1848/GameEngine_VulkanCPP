@@ -14,6 +14,8 @@
 #include "TestWindow.h"
 #elif TEST_STANDARD_PIPELINE
 #include "TestStandardPipeline.h"
+#elif defined(TEST_MODULAR_PIPELINE)
+#include "TestModularPipeline.h"
 #elif TEST_RENDERER
 #include "TestRenderer.h"
 #elif TEST_CSM_INTEGRATION

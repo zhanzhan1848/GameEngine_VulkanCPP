@@ -404,43 +404,51 @@ namespace primal::graphics
 
 	id::id_type add_submesh(const u8 *& data)
 	{
+		assert(gfx.resources.add_submesh);
+		if (!gfx.resources.add_submesh) return id::invalid_id;
 		return gfx.resources.add_submesh(data);
 	}
 
 	void remove_submesh(id::id_type id)
 	{
-		gfx.resources.remove_submesh(id);
+		if (gfx.resources.remove_submesh) gfx.resources.remove_submesh(id);
 	}
 
 	id::id_type add_texture(const u8 *const data)
 	{
+		assert(gfx.resources.add_texture);
+		if (!gfx.resources.add_texture) return id::invalid_id;
 		return gfx.resources.add_texture(data);
 	}
 
 	void remove_texture(id::id_type id)
 	{
-		gfx.resources.remove_texture(id);
+		if (gfx.resources.remove_texture) gfx.resources.remove_texture(id);
 	}
 
 	id::id_type add_material(material_init_info info)
 	{
+		assert(gfx.resources.add_material);
+		if (!gfx.resources.add_material) return id::invalid_id;
 		return gfx.resources.add_material(info);
 	}
 
 	void remove_material(id::id_type id)
 	{
-		gfx.resources.remove_material(id);
+		if (gfx.resources.remove_material) gfx.resources.remove_material(id);
 	}
 
 	id::id_type add_render_item(id::id_type entity_id, id::id_type geometry_content_id,
 		u32 material_count, const id::id_type *const material_ids)
 	{
+		assert(gfx.resources.add_render_item);
+		if (!gfx.resources.add_render_item) return id::invalid_id;
 		return gfx.resources.add_render_item(entity_id, geometry_content_id, material_count, material_ids);
 	}
 
 	void remove_render_item(id::id_type id)
 	{
-		gfx.resources.remove_render_item(id);
+		if (gfx.resources.remove_render_item) gfx.resources.remove_render_item(id);
 	}
 
 }

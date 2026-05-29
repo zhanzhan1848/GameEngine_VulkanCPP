@@ -97,7 +97,8 @@ kernel void shadow_filter_compute(
     texture2d<float> depthTex [[texture(0)]],
     texture2d<float> shadowMap0 [[texture(1)]],
     texture2d<float> shadowMap1 [[texture(2)]],
-    texture2d<float, access::write> visibilityOut [[texture(3)]]
+    texture2d<float, access::write> visibilityOut [[texture(3)]],
+    texture2d<float> normalTex [[texture(4)]]
 ) {
     uint2 outSize = uint2(visibilityOut.get_width(), visibilityOut.get_height());
     if (any(gid >= outSize)) return;
@@ -120,12 +121,24 @@ kernel void shadow_filter_compute(
     float4 worldPos4 = params.inv_view_proj * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
 
-    // Bias
-    float NdotL = max(dot(float3(0.0, 1.0, 0.0), params.light_dir.xyz), 0.0);
-    float bias = 0.002 + (1.0 - NdotL) * 0.02;
+    // Sample surface normal from GBuffer for slope-based bias
+    constexpr sampler linearSmp(coord::normalized, filter::linear, address::clamp_to_edge);
+    float3 normalSample = normalTex.sample(linearSmp, fullUV).xyz;
+    float3 N = normalize(normalSample * 2.0 - 1.0);
+    float NdotL = dot(N, params.light_dir.xyz);
+
+    // Backface shadow: if surface faces away from light source, it's always in shadow
+    if (NdotL > 0.01) {
+        visibilityOut.write(float4(0.0), gid);
+        return;
+    }
+
+    // Slope-based bias (bounded formula)
+    float bias = 0.002 + (1.0 - saturate(-NdotL)) * 0.02;
 
     float2 screenPos = float2(gid);
-    float visibility = 1.0;
+
+    float visibility = 1.0; // default: no cascade covers = lit
 
     // Try cascade 0
     float4 clip0 = params.shadow_vp[0] * float4(worldPos, 1.0);

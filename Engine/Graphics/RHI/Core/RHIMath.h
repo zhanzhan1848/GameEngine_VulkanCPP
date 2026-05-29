@@ -403,11 +403,19 @@ inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
     // [ 0         0         0          1                  ]
 
     // In column-major format, each column is stored as a v4
+    // Row-major view matrix (rows are basis vectors):
+    // Row 0: [ right.x    right.y    right.z    -dot(right, eye)   ]
+    // Row 1: [ newUp.x    newUp.y    newUp.z    -dot(newUp, eye)   ]
+    // Row 2: [-forward.x -forward.y -forward.z   dot(forward, eye) ]
+    // Row 3: [ 0          0          0           1                  ]
+    //
+    // simd::float4x4 stores columns: m4x4{col0, col1, col2, col3}
+    // where col_i = {row0[i], row1[i], row2[i], row3[i]}
     return m4x4{
-        v4{right.x, right.y, right.z, 0.0f},           // Column 0: right vector
-        v4{newUp.x, newUp.y, newUp.z, 0.0f},           // Column 1: up vector
-        v4{-forward.x, -forward.y, -forward.z, 0.0f},   // Column 2: negated forward vector
-        v4{-Dot(right, eye), -Dot(newUp, eye), Dot(forward, eye), 1.0f}  // Column 3: translation
+        v4{right.x, newUp.x, -forward.x, 0.0f},
+        v4{right.y, newUp.y, -forward.y, 0.0f},
+        v4{right.z, newUp.z, -forward.z, 0.0f},
+        v4{-Dot(right, eye), -Dot(newUp, eye), Dot(forward, eye), 1.0f}
     };
 }
 

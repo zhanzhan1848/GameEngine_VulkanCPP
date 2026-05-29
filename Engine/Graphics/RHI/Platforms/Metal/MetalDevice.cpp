@@ -522,14 +522,6 @@ ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
 }
 
 ResourceHandle MetalDevice::createTextureImpl(const TextureDesc& desc) {
-    /*
-    std::cout << "[MetalDevice] Creating Texture: " << desc.name 
-              << " Type: " << (int)desc.type 
-              << " Format: " << (int)desc.format 
-              << " Size: " << desc.size.x << "x" << desc.size.y << "x" << desc.size.z 
-              << " Array: " << desc.arraySize 
-              << " Mips: " << desc.mipLevels << std::endl;
-    */
     u32 id = textureAllocator_.Allocate(*this, desc);
     MetalTexture* texture = textureAllocator_.Get(id);
     if (texture) {

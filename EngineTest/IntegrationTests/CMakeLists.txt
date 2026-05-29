@@ -146,7 +146,24 @@ if(APPLE)
     setup_test_target(TestStandardPipeline)
     target_compile_definitions(TestStandardPipeline PRIVATE "TEST_STANDARD_PIPELINE=1" "TEST_RENDERER=0")
 
-    # 5. TestCSMIntegrationRenderGraph
+    # 5. TestModularPipeline
+    add_executable(TestModularPipeline
+        "Main.cpp"
+        "TestModularPipeline.cpp"
+        "ShaderCompilation.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/ShadowMapModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/DeferredLightingModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/FinalBlitModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/GIGatherModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/FusionCompositeModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/SCDDGIIntegrationModule.cpp"
+    )
+    setup_test_target(TestModularPipeline)
+    target_compile_definitions(TestModularPipeline PRIVATE "TEST_MODULAR_PIPELINE=1" "TEST_RENDERER=0")
+
+    # 6. TestCSMIntegrationRenderGraph
     add_executable(TestCSMIntegrationRenderGraph
         "Main.cpp"
         "TestCSMIntegrationRenderGraph.cpp"
@@ -226,7 +243,7 @@ if(APPLE)
     target_compile_definitions(TestHZBStandalone PRIVATE "HZB_STANDALONE_TEST=1")
 
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

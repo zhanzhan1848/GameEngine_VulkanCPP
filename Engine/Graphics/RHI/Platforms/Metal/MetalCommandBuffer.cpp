@@ -459,14 +459,28 @@ void MetalCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
                 std::cerr << "  This means the render pass will be completely silent (no draws, no depth writes)." << std::endl;
             }
         } else {
-            // DIAGNOSTIC: Check depth attachment in the descriptor
-            auto* depthDesc = passDesc->depthAttachment();
-            if (depthDesc) {
-                static int okCount = 0;
-                okCount++;
-                if (okCount <= 3) {
-                    std::cout << "[MetalCMD] BeginRenderPass OK: depthTex=" << (void*)depthDesc->texture()
-                              << " storeAction=" << (int)depthDesc->storeAction() << std::endl;
+            // DIAGNOSTIC: Check ALL attachments in the descriptor
+            static int okCount = 0;
+            okCount++;
+            if (okCount <= 3) {
+                auto* colorAttachments = passDesc->colorAttachments();
+                int colorCount = 0;
+                for (int i = 0; i < 8; ++i) {
+                    auto* ca = colorAttachments->object(i);
+                    if (ca && ca->texture()) colorCount++;
+                }
+                auto* depthDesc = passDesc->depthAttachment();
+                std::cout << "[MetalCMD] BeginRenderPass OK: colorAttachments=" << colorCount
+                          << " depthTex=" << (void*)(depthDesc ? depthDesc->texture() : nullptr)
+                          << " depthLoad=" << (depthDesc ? (int)depthDesc->loadAction() : -1)
+                          << " descColors=" << pass->GetDesc().colorAttachments.size()
+                          << std::endl;
+                // Print each color attachment texture pointer
+                for (size_t i = 0; i < pass->GetDesc().colorAttachments.size() && i < 4; ++i) {
+                    auto* ca = colorAttachments->object(i);
+                    std::cout << "  color[" << i << "] tex=" << (void*)(ca ? ca->texture() : nullptr)
+                              << " loadAction=" << (ca ? (int)ca->loadAction() : -1)
+                              << " storeAction=" << (ca ? (int)ca->storeAction() : -1) << std::endl;
                 }
             }
         }
