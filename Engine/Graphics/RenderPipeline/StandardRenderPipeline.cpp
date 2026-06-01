@@ -111,9 +111,27 @@ void StandardRenderPipeline::SetLumenConfig(const lumen::LumenConfig& config) {
     lumen_config_ = config;
     quality_config_ = PipelineQualityConfig::FromPreset(config.quality);
 
+    // Apply render scale: GPU resolution = logical window size × scale
+    render_width_  = static_cast<u32>(logical_width_  * quality_config_.render_scale);
+    render_height_ = static_cast<u32>(logical_height_ * quality_config_.render_scale);
+
+    std::cout << "[Pipeline] Render scale=" << quality_config_.render_scale
+              << " logical=" << logical_width_ << "x" << logical_height_
+              << " render=" << render_width_ << "x" << render_height_ << std::endl;
+
     if (device_ && !subsystems_initialized_) {
         InitializeSubsystems();
         subsystems_initialized_ = true;
+    }
+}
+
+void StandardRenderPipeline::SetQualityOverride(bool enable_screen_probes, bool enable_surface_cache) {
+    quality_config_.enable_screen_probes = enable_screen_probes;
+    quality_config_.enable_surface_cache = enable_surface_cache;
+    // Re-initialize Lumen passes with updated flags
+    if (subsystems_initialized_) {
+        ShutdownLumenPasses();
+        InitializeLumenPasses();
     }
 }
 
@@ -239,6 +257,11 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (hzb_system_) { hzb_system_->Shutdown(); hzb_system_.reset(); }
     if (streaming_manager_) { streaming_manager_->Shutdown(); delete streaming_manager_; streaming_manager_ = nullptr; }
 
+    // Shutdown singletons (must happen before device shutdown)
+    if (culling_pipeline_) { culling_pipeline_->Shutdown(); culling_pipeline_ = nullptr; }
+    auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
+    if (gpuDraw.IsInitialized()) { gpuDraw.Shutdown(); }
+
     subsystems_initialized_ = false;
 }
 
@@ -279,6 +302,16 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         if (!ssao_pass_->Initialize(device_, render_width_, render_height_, ssaoParams)) {
             std::cerr << "[Lumen] SSAO init failed" << std::endl;
             ssao_pass_.reset();
+        }
+    }
+
+    // SSGI
+    if (quality_config_.enable_ssgi) {
+        ssgi_pass_ = std::make_unique<lumen::LumenSSGIPass>();
+        lumen::SSGIParams ssgiParams{};
+        if (!ssgi_pass_->Initialize(device_, render_width_, render_height_, ssgiParams)) {
+            std::cerr << "[Lumen] SSGI init failed" << std::endl;
+            ssgi_pass_.reset();
         }
     }
 
@@ -364,10 +397,13 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
         globalSDF.Update(*scene_snapshot_, frameCount_, camera_position_);
     }
 
-    // DDGI probe origin follows camera
-    if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
-        ddgi_pass_->UpdateProbeOrigin(camera_position_);
-    }
+    // DDGI probe origin stays fixed at world origin (matches TestNaniteStreamingPipeline).
+    // UpdateProbeOrigin causes relocation shifts that reset irradiance data, producing
+    // "light turning off" artifacts in shadowed areas. The static grid (32x16x32 = 124
+    // units coverage) is large enough for Sponza (~30 units).
+    // if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+    //     ddgi_pass_->UpdateProbeOrigin(camera_position_);
+    // }
 
     // Streaming LRU update
     if (streaming_manager_) {
@@ -631,11 +667,60 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
-    // Step 8: Screen Probe GI
+    // Step 8: SSGI (Screen Space GI)
     // ========================================================================
 
-    RGResourceHandle spgiRG;
-    ResourceHandle spgiTex{handles::INVALID_RESOURCE};
+    lumen::LumenSSGIOutput ssgiOut;
+    if (ssgi_pass_ && ssgi_pass_->IsInitialized() && frameCount_ > 0) {
+        auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
+        auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
+        auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
+        auto hzbHandle = graph.ImportResource("HZBTexture_SSGI", hzb_system_->GetHZBTexture());
+
+        RGResourceHandle prevColorSSGI;
+        if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
+            prevColorSSGI = graph.ImportResource("PrevFrameColor_SSGI", deferredOut.deferred_output_tex);
+        }
+
+        lumen::SSGICameraData ssgiCam{};
+        ssgiCam.view_matrix = view_matrix_;
+        ssgiCam.proj_matrix = proj_matrix_;
+        ssgiCam.prev_view_matrix = view_matrix_;
+        ssgiCam.prev_proj_matrix = proj_matrix_;
+        ssgiCam.frame_index = static_cast<u32>(frameCount_);
+        ssgiCam.delta_time = 0.016f;
+
+        ssgiOut = ssgi_pass_->AddPass(graph, gbufferNormalSSGI, gbufferDepthSSGI,
+            gbufferVelocitySSGI, hzbHandle, prevColorSSGI,
+            ssgiCam, static_cast<u32>(frameCount_),
+            hzb_system_->GetMipLevels());
+    }
+
+    // ========================================================================
+    // Step 9: Screen Probe GI
+    // ========================================================================
+
+    lumen::ScreenProbeGIOutput spgiOut;
+    if (screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
+        auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
+        auto spNormal = graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());
+
+        RGResourceHandle spRadiance;
+        if (deferredOut.deferred_output_rg.IsValid()) {
+            spRadiance = deferredOut.deferred_output_rg;
+        } else {
+            spRadiance = graph.ImportResource("SPBlackFallback", black_texture_);
+        }
+
+        lumen::ScreenProbeCameraData spCam{};
+        spCam.view_matrix = view_matrix_;
+        spCam.proj_matrix = proj_matrix_;
+        spCam.camera_position = camera_position_;
+        spCam.frame_index = static_cast<u32>(frameCount_);
+
+        spgiOut = screen_probe_pass_->AddPass(graph, spDepth, spNormal,
+            spRadiance, spCam, static_cast<u32>(frameCount_));
+    }
 
     // ========================================================================
     // Step 9: GI Gather (DDGI → half-res screen texture)
@@ -669,12 +754,12 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         FusionInputs fusionIn;
         fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
         fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
-        fusionIn.ssgi_rg = giOut.gi_output_rg;
-        fusionIn.ssgi_tex = giOut.gi_output_tex;
+        fusionIn.ssgi_rg = ssgiOut.ssgi_output;
+        fusionIn.ssgi_tex = handles::INVALID_RESOURCE; // RG-resolved inside module
         fusionIn.ddgi_rg = giOut.gi_output_rg;
         fusionIn.ddgi_tex = giOut.gi_output_tex;
-        fusionIn.spgi_rg = spgiRG;
-        fusionIn.spgi_tex = spgiTex;
+        fusionIn.spgi_rg = spgiOut.gi_output;
+        fusionIn.spgi_tex = handles::INVALID_RESOURCE; // RG-resolved inside module
         fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
         fusionIn.ssao_rg = ssaoOut.ssao_output;
         fusionIn.ssao_tex = ssao_pass_ ? ssao_pass_->GetFilterTexture() : black_texture_;
@@ -796,10 +881,173 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         deferredIn.gbuffer_depth_rg = gbufferDepthDL;
         auto deferredOut = deferred_module_->AddPasses(graph, deferredIn);
 
-        // Final Blit → backbuffer
+        // --- SSAO ---
+        lumen::LumenSSAOOutput ssaoOut{};
+        if (ssao_pass_ && ssao_pass_->IsInitialized()) {
+            auto gbufferNormalSSAO = graph.ImportResource("GBufferNormal_SSAO", gpuDraw.GetGBufferNormal());
+            auto gbufferDepthSSAO = graph.ImportResource("GBufferDepth_SSAO", gpuDraw.GetGBufferDepthSampleable());
+            lumen::SSAOCameraData camData{};
+            camData.view_matrix = view_matrix_;
+            camData.proj_matrix = proj_matrix_;
+            camData.prev_view_matrix = view_matrix_;
+            camData.prev_proj_matrix = proj_matrix_;
+            camData.frame_index = static_cast<u32>(frameCount_);
+            camData.delta_time = 0.016f;
+            ssaoOut = ssao_pass_->AddPass(graph, gbufferNormalSSAO, gbufferDepthSSAO, camData, static_cast<u32>(frameCount_));
+        }
+
+        // --- Surface Cache ---
+        RGResourceHandle scLightingRG;
+        if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+            lumen::SurfaceCacheFrameData frameData{};
+            frameData.camera_position = {camera_position_.x, camera_position_.y, camera_position_.z};
+            frameData.frame_index = static_cast<u32>(frameCount_);
+            frameData.light_count = 1;
+            ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
+            surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameData, static_cast<u32>(frameCount_));
+            scLightingRG = graph.ImportResource("SCLightingAtlas", surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)));
+            if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+                ddgi_pass_->SetSurfaceCacheResources(
+                    surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
+                    surface_cache_pass_->GetCardLookupBuffer(),
+                    surface_cache_pass_->GetCardDataBuffer(),
+                    lumen_config_.surface_cache_atlas_size,
+                    lumen_config_.surface_cache_max_cards);
+            }
+            if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+                screen_probe_pass_->SetSurfaceCacheData(
+                    surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
+                    surface_cache_pass_->GetCardDataBuffer(),
+                    surface_cache_pass_->GetCardLookupBuffer(),
+                    lumen_config_.surface_cache_atlas_size,
+                    lumen_config_.surface_cache_max_cards);
+            }
+        }
+
+        // --- DDGI ---
+        lumen::LumenDDGIOutput ddgiOut;
+        if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            lumen::DDGICameraData camData{};
+            camData.camera_position = camera_position_;
+            camData.view_matrix = view_matrix_;
+            camData.proj_matrix = proj_matrix_;
+            camData.prev_view_matrix = view_matrix_;
+            camData.prev_proj_matrix = proj_matrix_;
+            camData.light_direction = Normalize(math::v3{0.707f, -1.0f, 0.408f});
+            camData.light_color = {20.0f, 20.0f, 20.0f};
+            camData.frame_index = static_cast<u32>(frameCount_);
+            camData.delta_time = 0.016f;
+            RGResourceHandle prevColor;
+            if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE)
+                prevColor = graph.ImportResource("PrevFrameColor", deferredOut.deferred_output_tex);
+            ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData, static_cast<u32>(frameCount_), scLightingRG);
+        }
+
+        // --- SC-DDGI Integration ---
+        if (sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_) {
+            SCDDGIInputs scDDGIIn;
+            scDDGIIn.ddgi_pass = ddgi_pass_.get();
+            scDDGIIn.surface_cache_pass = surface_cache_pass_.get();
+            scDDGIIn.current_buffer_index = cbIdx;
+            scDDGIIn.sc_lighting_rg = scLightingRG;
+            sc_ddgi_module_->AddPass(graph, scDDGIIn);
+        }
+
+        // --- GIGather ---
+        GIGatherOutputs giOut;
+        if (gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            auto gbufferDepthGI = graph.ImportResource("GBufferDepthGI", gpuDraw.GetGBufferDepthSampleable());
+            auto gbufferNormalGI = graph.ImportResource("GBufferNormalGI", gpuDraw.GetGBufferNormal());
+            GIGatherInputs giIn;
+            giIn.ddgi_pass = ddgi_pass_.get();
+            giIn.static_probe_volume = static_probe_volume_.get();
+            giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
+            giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
+            giIn.gbuffer_depth_rg = gbufferDepthGI;
+            giIn.gbuffer_normal_rg = gbufferNormalGI;
+            giIn.view_matrix = view_matrix_;
+            giIn.proj_matrix = proj_matrix_;
+            giIn.current_buffer_index = cbIdx;
+            giOut = gi_gather_module_->AddPasses(graph, giIn);
+        }
+
+        // --- SSGI (Screen Space GI) ---
+        lumen::LumenSSGIOutput ssgiOut;
+        if (ssgi_pass_ && ssgi_pass_->IsInitialized() && frameCount_ > 0) {
+            auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
+            auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
+            auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
+            auto hzbHandle = graph.ImportResource("HZBTexture_SSGI", hzb_system_->GetHZBTexture());
+
+            RGResourceHandle prevColorSSGI;
+            if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE)
+                prevColorSSGI = graph.ImportResource("PrevFrameColor_SSGI", deferredOut.deferred_output_tex);
+
+            lumen::SSGICameraData ssgiCam{};
+            ssgiCam.view_matrix = view_matrix_;
+            ssgiCam.proj_matrix = proj_matrix_;
+            ssgiCam.prev_view_matrix = view_matrix_;
+            ssgiCam.prev_proj_matrix = proj_matrix_;
+            ssgiCam.frame_index = static_cast<u32>(frameCount_);
+            ssgiCam.delta_time = 0.016f;
+
+            ssgiOut = ssgi_pass_->AddPass(graph, gbufferNormalSSGI, gbufferDepthSSGI,
+                gbufferVelocitySSGI, hzbHandle, prevColorSSGI,
+                ssgiCam, static_cast<u32>(frameCount_),
+                hzb_system_->GetMipLevels());
+        }
+
+        // --- SPGI (Screen Probe GI) ---
+        lumen::ScreenProbeGIOutput spgiOut;
+        if (screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
+            auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
+            auto spNormal = graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());
+
+            RGResourceHandle spRadiance = deferredOut.deferred_output_rg.IsValid()
+                ? deferredOut.deferred_output_rg
+                : graph.ImportResource("SPBlackFallback", black_texture_);
+
+            lumen::ScreenProbeCameraData spCam{};
+            spCam.view_matrix = view_matrix_;
+            spCam.proj_matrix = proj_matrix_;
+            spCam.camera_position = camera_position_;
+            spCam.frame_index = static_cast<u32>(frameCount_);
+
+            spgiOut = screen_probe_pass_->AddPass(graph, spDepth, spNormal,
+                spRadiance, spCam, static_cast<u32>(frameCount_));
+        }
+
+        // --- FusionComposite ---
+        FusionOutputs fusionOut;
+        if (fusion_module_ && quality_config_.enable_ssgi) {
+            FusionInputs fusionIn;
+            fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
+            fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
+            fusionIn.ssgi_rg = ssgiOut.ssgi_output;
+            fusionIn.ssgi_tex = handles::INVALID_RESOURCE;
+            fusionIn.ddgi_rg = giOut.gi_output_rg;
+            fusionIn.ddgi_tex = giOut.gi_output_tex;
+            fusionIn.spgi_rg = spgiOut.gi_output;
+            fusionIn.spgi_tex = handles::INVALID_RESOURCE;
+            fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
+            fusionIn.ssao_rg = ssaoOut.ssao_output;
+            fusionIn.ssao_tex = ssao_pass_ ? ssao_pass_->GetFilterTexture() : black_texture_;
+            fusionIn.current_buffer_index = cbIdx;
+            fusionIn.render_width = render_width_;
+            fusionIn.render_height = render_height_;
+            fusionIn.black_texture = black_texture_;
+            fusionOut = fusion_module_->AddPasses(graph, fusionIn);
+        }
+
+        // --- Final Blit → backbuffer ---
         FinalBlitInputs blitIn;
-        blitIn.input_rg = deferredOut.deferred_output_rg;
-        blitIn.input_tex = deferredOut.deferred_output_tex;
+        if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+            blitIn.input_rg = fusionOut.output_rg;
+            blitIn.input_tex = fusionOut.output_tex;
+        } else {
+            blitIn.input_rg = deferredOut.deferred_output_rg;
+            blitIn.input_tex = deferredOut.deferred_output_tex;
+        }
         blitIn.backbuffer_rg = graph.ImportResource("BackBuffer", target);
         blitIn.current_buffer_index = cbIdx;
         blitIn.render_width = target_width_ > 0 ? target_width_ : render_width_;

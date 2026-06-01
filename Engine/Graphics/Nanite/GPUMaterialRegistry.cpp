@@ -15,7 +15,30 @@ GPUMaterialRegistry::GPUMaterialRegistry() {
 
 GPUMaterialRegistry::~GPUMaterialRegistry() {
 //    std::cout << "[GPUMaterialRegistry] Destroyed, releasing GPU resources" << std::endl;
-    // GPU resources will be released by RHI when ResourceHandles go out of scope
+}
+
+void GPUMaterialRegistry::Shutdown(RHIDeviceBase* device) {
+    if (!device) return;
+    if (materialIDBuffer_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyBuffer(materialIDBuffer_);
+        materialIDBuffer_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (materialDataBuffer_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyBuffer(materialDataBuffer_);
+        materialDataBuffer_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (albedoTextureArray_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyTexture(albedoTextureArray_);
+        albedoTextureArray_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (normalTextureArray_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyTexture(normalTextureArray_);
+        normalTextureArray_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (ormTextureArray_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyTexture(ormTextureArray_);
+        ormTextureArray_ = rhi::handles::INVALID_RESOURCE;
+    }
 }
 
 GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterMaterial(graphics::MaterialInstance* instance) {

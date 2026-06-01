@@ -8,6 +8,7 @@
 #include "Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
 #include "Graphics/Lumen/DDGI/LumenDDGIPass.h"
 #include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
+#include "Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/RenderPipeline/Modules/ShadowMapModule.h"
@@ -54,12 +55,18 @@ public:
 
     const PipelineStatistics& GetStats() const { return stats_; }
 
+    /// Override specific quality flags. Call AFTER SetLumenConfig — triggers re-init of Lumen passes.
+    void SetQualityOverride(bool enable_screen_probes, bool enable_surface_cache = false);
+
     lumen::StaticProbeVolume* GetStaticProbeVolume() const { return static_probe_volume_.get(); }
 
-    /// Set viewport dimensions (must call before SetLumenConfig)
+    /// Set logical viewport dimensions.
+    /// Actual render resolution = logical × quality_config_.render_scale.
     void SetViewportSize(u32 width, u32 height) {
-        render_width_ = width;
-        render_height_ = height;
+        logical_width_ = width;
+        logical_height_ = height;
+        render_width_  = static_cast<u32>(width  * quality_config_.render_scale);
+        render_height_ = static_cast<u32>(height * quality_config_.render_scale);
     }
 
     /// Inject pre-compiled shader handles. Call before SetLumenConfig.
@@ -112,9 +119,11 @@ private:
     PipelineStatistics stats_;
 
     // Viewport
-    u32 render_width_ = 1920;
-    u32 render_height_ = 1080;
-    u32 target_width_ = 0;   // actual backbuffer size (may differ on Retina/HiDPI)
+    u32 logical_width_ = 1280;   // window logical size (set via SetViewportSize)
+    u32 logical_height_ = 720;
+    u32 render_width_ = 1280;    // actual GPU render resolution (= logical × render_scale)
+    u32 render_height_ = 720;
+    u32 target_width_ = 0;       // backbuffer size (may differ on Retina/HiDPI)
     u32 target_height_ = 0;
 
     // Quality config (derived from LumenConfig + PipelineQualityConfig)
@@ -134,6 +143,7 @@ private:
     // --- Lumen GI ---
     std::unique_ptr<lumen::LumenDDGIPass> ddgi_pass_;
     std::unique_ptr<lumen::LumenSSAOPass> ssao_pass_;
+    std::unique_ptr<lumen::LumenSSGIPass> ssgi_pass_;
     std::unique_ptr<lumen::SurfaceCachePass> surface_cache_pass_;
     std::unique_ptr<lumen::ScreenProbeGIPass> screen_probe_pass_;
     std::unique_ptr<lumen::StaticProbeVolume> static_probe_volume_;

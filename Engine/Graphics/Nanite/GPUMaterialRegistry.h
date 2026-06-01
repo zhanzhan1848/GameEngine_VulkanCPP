@@ -94,6 +94,9 @@ public:
     // Validate registry state
     bool IsValid() const;
 
+    /// Release all GPU resources. Must call before device shutdown.
+    void Shutdown(RHIDeviceBase* device);
+
 private:
     // Material storage
     std::vector<MaterialData> materials_;

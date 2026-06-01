@@ -558,14 +558,16 @@ fragment float4 fragmentFusionIndirect(
     float3 spgi    = spgiColor.sample(s, in.uv).rgb;
     float3 albedo  = albedoTex.sample(s, in.uv).rgb;
     float  ssao    = ssaoTex.sample(s, in.uv).r;
+    if (ssao <= 0.0f) ssao = 1.0f;
+    float ao = pow(ssao, 1.5f);
 
     float3 ssgi_irr  = ssgi4.rgb;
     float  ssgi_hit  = ssgi4.a;
     float  ssgi_conf = saturate(1.0f - ssgi_hit / 2.0f);
     albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
-    float3 indirect = albedo * (ddgi * 0.3f + spgi * 0.5f + ssgi_irr * ssgi_conf * 0.3f);
-    indirect *= ssao;
+    float3 indirect = albedo * (ddgi * 0.08f + spgi * 0.5f + ssgi_irr * ssgi_conf * 0.3f);
+    indirect *= ao;
 
     return float4(indirect, 1.0f);
 }
@@ -618,7 +620,7 @@ kernel void computeFusionIndirect(
     albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
     float ssgi_conf = saturate(1.0f - ssgi_hit / 2.0f);
-    float3 indirect_ddgi = albedo * ddgi * 0.3f;
+    float3 indirect_ddgi = albedo * ddgi * 0.08f;
     float3 indirect_spgi = albedo * spgi * 0.5f;
     float3 indirect_ssgi = albedo * ssgi_irr * ssgi_conf * 0.3f;
     float3 indirect = indirect_ddgi + indirect_spgi + indirect_ssgi;

@@ -284,13 +284,13 @@ bool TestModularPipeline::InitializePipeline() {
     pipeline_->SetShaderHandles(shaderHandles_);
 
     // Configure Lumen — Medium preset: SSGI + SSAO + DDGI + PCF shadows
+    // Probe grid matches TestNaniteStreamingPipeline defaults: 16x8x16 = 2048 probes, 4.0 spacing
+    // Coverage: 60x28x60 units — large enough for Sponza (~30 units)
     lumen::LumenConfig lumenConfig;
     lumenConfig.quality = lumen::LumenQualityPreset::Medium;
-    lumenConfig.ddgi_probe_count_x = 6;
-    lumenConfig.ddgi_probe_count_y = 4;
-    lumenConfig.ddgi_probe_count_z = 6;
-    lumenConfig.ddgi_probe_spacing = 4.0f;
     pipeline_->SetLumenConfig(lumenConfig);
+    // Enable SPGI + Surface Cache (matching TestNaniteStreamingPipeline which initializes all passes)
+    pipeline_->SetQualityOverride(true /*enable_screen_probes*/, true /*enable_surface_cache*/);
 
     // Load Sponza scene (populates scene_ and wires materials to GPUDrivenDrawPipeline)
     if (!LoadSponzaScene()) {
@@ -641,6 +641,9 @@ void TestModularPipeline::Shutdown() {
 
     std::cout << "[TestModularPipeline] Shutting down after " << frameCount_ << " frames..." << std::endl;
 
+    if (gpuMaterialRegistry_ && device_) {
+        gpuMaterialRegistry_->Shutdown(device_.get());
+    }
     gpuMaterialRegistry_.reset();
     pipeline_.reset();
     renderSystem_.Shutdown();
@@ -650,6 +653,7 @@ void TestModularPipeline::Shutdown() {
     }
 
     device_.reset();
+    primal::content::shutdown();
     primal::content::AsyncResourceLoader::Shutdown();
     primal::jobsystem::JobSystem::Shutdown();
 }

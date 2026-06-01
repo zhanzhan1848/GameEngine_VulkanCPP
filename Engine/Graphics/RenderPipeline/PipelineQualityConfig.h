@@ -14,6 +14,10 @@ struct PipelineQualityConfig {
     bool enable_screen_probes = false;
     lumen::ShadowQuality shadow_quality = lumen::ShadowQuality::PCF_16;
 
+    /// Render resolution multiplier relative to logical window size.
+    /// 1.0 = logical size, 2.0 = Retina/native pixel size.
+    float render_scale = 1.0f;
+
     static PipelineQualityConfig FromPreset(lumen::LumenQualityPreset p) {
         PipelineQualityConfig cfg;
         cfg.preset = p;
@@ -26,6 +30,7 @@ struct PipelineQualityConfig {
             cfg.enable_surface_cache = false;
             cfg.enable_screen_probes = false;
             cfg.shadow_quality = lumen::ShadowQuality::Hard;
+            cfg.render_scale = 1.0f;
             break;
 
         case lumen::LumenQualityPreset::Low:
@@ -35,6 +40,7 @@ struct PipelineQualityConfig {
             cfg.enable_surface_cache = false;
             cfg.enable_screen_probes = false;
             cfg.shadow_quality = lumen::ShadowQuality::Hard;
+            cfg.render_scale = 1.0f;
             break;
 
         case lumen::LumenQualityPreset::Medium:
@@ -44,6 +50,7 @@ struct PipelineQualityConfig {
             cfg.enable_surface_cache = false;
             cfg.enable_screen_probes = false;
             cfg.shadow_quality = lumen::ShadowQuality::PCF_16;
+            cfg.render_scale = 1.0f;
             break;
 
         case lumen::LumenQualityPreset::High:
@@ -53,6 +60,7 @@ struct PipelineQualityConfig {
             cfg.enable_surface_cache = true;
             cfg.enable_screen_probes = false;
             cfg.shadow_quality = lumen::ShadowQuality::PCSS;
+            cfg.render_scale = 2.0f;
             break;
 
         case lumen::LumenQualityPreset::Ultra:
@@ -62,6 +70,7 @@ struct PipelineQualityConfig {
             cfg.enable_surface_cache = true;
             cfg.enable_screen_probes = true;
             cfg.shadow_quality = lumen::ShadowQuality::PCSS;
+            cfg.render_scale = 2.0f;
             break;
 
         case lumen::LumenQualityPreset::UltraRT:
@@ -71,6 +80,7 @@ struct PipelineQualityConfig {
             cfg.enable_surface_cache = true;
             cfg.enable_screen_probes = true;
             cfg.shadow_quality = lumen::ShadowQuality::PCSS;
+            cfg.render_scale = 2.0f;
             break;
         }
 

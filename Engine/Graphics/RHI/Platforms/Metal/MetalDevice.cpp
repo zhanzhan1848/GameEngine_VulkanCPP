@@ -76,45 +76,24 @@ bool MetalDevice::initializeImpl() {
 }
 
 void MetalDevice::shutdownImpl() {
-    // std::cout << "[MetalDevice] Shutdown started." << std::endl;
-    // 1. 清理所有延迟销毁的资源 (必须在 Allocator Shutdown 之前，否则会导致 Double Free)
-    // std::cout << "[MetalDevice] Shutting down GC..." << std::endl;
     gc_.Shutdown();
 
-    // 2. 释放所有分配的资源
-    // std::cout << "[MetalDevice] Shutting down allocators..." << std::endl;
-    // std::cout << "  CommandBuffer..." << std::endl; 
     commandBufferAllocator_.Shutdown();
-    // std::cout << "  Buffer..." << std::endl; 
     bufferAllocator_.Shutdown();
-    // std::cout << "  Texture..." << std::endl; 
     textureAllocator_.Shutdown();
-    // std::cout << "  Sync..." << std::endl; 
     syncAllocator_.Shutdown();
-    // std::cout << "  QueryPool..." << std::endl; 
     queryPoolAllocator_.Shutdown();
-    // std::cout << "  Shader..." << std::endl; 
     shaderAllocator_.Shutdown();
-    // std::cout << "  Pipeline..." << std::endl; 
     pipelineAllocator_.Shutdown();
-    // std::cout << "  PipelineLayout..." << std::endl; 
     pipelineLayoutAllocator_.Shutdown();
-    // std::cout << "  Sampler..." << std::endl; 
     samplerAllocator_.Shutdown();
-    // std::cout << "  DescriptorSetLayout..." << std::endl; 
     descriptorSetLayoutAllocator_.Shutdown();
-    // std::cout << "  DescriptorSet..." << std::endl; 
     descriptorSetAllocator_.Shutdown();
 
-    // 3. 再次清理 GC，处理 Allocator Shutdown 产生的新垃圾 (关键修复：防止 MemoryPool 销毁后 GC 回调访问悬空指针)
-    // std::cout << "[MetalDevice] Shutting down GC (Pass 2)..." << std::endl;
+    // 再次清理 GC，处理 Allocator Shutdown 产生的新垃圾
     gc_.Shutdown();
 
-    // 4. 销毁内存池
-    // std::cout << "[MetalDevice] Shutting down memory pool..." << std::endl;
     shutdownMemoryPool();
-    // std::cout << "[MetalDevice] Shutdown finished." << std::endl;
-
 
     if (transferQueue_) {
         transferQueue_->release();
@@ -736,7 +715,10 @@ CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) 
 
 void MetalDevice::destroyBufferImpl(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
-    // std::cout << "[MetalDevice] Destroying Buffer - ID: " << (u32)handle << std::endl;
+    if (!bufferAllocator_.Get(static_cast<u32>(handle))) {
+        std::cerr << "[MetalDevice] Double-free buffer handle=" << (u32)handle << " — skipping" << std::endl;
+        return;
+    }
     ResourceManager::Instance().UnregisterResource(handle);
     bufferAllocator_.Free(static_cast<u32>(handle));
 }
@@ -777,6 +759,11 @@ void MetalDevice::unmapBufferImpl(ResourceHandle handle) {
 }
 
 void MetalDevice::destroyTextureImpl(ResourceHandle handle) {
+    if (handle == handles::INVALID_RESOURCE) return;
+    if (!textureAllocator_.Get(static_cast<u32>(handle))) {
+        std::cerr << "[MetalDevice] Double-free texture handle=" << (u32)handle << " — skipping" << std::endl;
+        return;
+    }
     ResourceManager::Instance().UnregisterResource(handle);
     textureAllocator_.Free(static_cast<u32>(handle));
 }
