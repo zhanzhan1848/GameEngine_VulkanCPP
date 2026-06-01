@@ -112,6 +112,15 @@ private:
     u32 current_write_index_{ 0 };
     bool initialized_{ false };
     mutable std::mutex mutex_;  // Thread safety for multi-threaded access
+
+    // Compute pipeline for D32→R32 depth blit
+    rhi::PipelineHandle depth_copy_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineLayoutHandle depth_copy_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle depth_copy_ds_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetHandle depth_copy_ds_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    rhi::ResourceHandle depth_copy_cb_{ rhi::handles::INVALID_RESOURCE };
+
+    bool CreateCopyPipeline();
 };
 
 } // namespace primal::graphics::nanite

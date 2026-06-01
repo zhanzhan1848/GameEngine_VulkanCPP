@@ -21,7 +21,7 @@ struct CullingConfig {
     u32 max_clusters_per_dispatch{ 100000 };
     u32 max_instances_per_dispatch{ 10000 };
     float lod_bias{ 1.0f };
-    bool enable_occlusion_culling{ false }; // Keep disabled for stability
+    bool enable_occlusion_culling{ true };
     bool enable_lod_selection{ true };
     bool enable_small_object_culling{ false }; // Keep disabled for now
     bool enable_streaming_feedback{ true };

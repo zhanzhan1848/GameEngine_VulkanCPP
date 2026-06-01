@@ -67,17 +67,17 @@ kernel void generate_hzb_mip_level_basic(
     uint source_width = source_depth.get_width();
     uint source_height = source_depth.get_height();
 
-    float min_depth = 1.0;
+    float max_depth = 0.0;
     for (uint dy = 0; dy < 2; ++dy) {
         for (uint dx = 0; dx < 2; ++dx) {
             uint2 sample_pos = source_pos + uint2(dx, dy);
             if (sample_pos.x < source_width && sample_pos.y < source_height) {
                 float depth = source_depth.read(sample_pos).r;
-                min_depth = min(min_depth, depth);
+                max_depth = max(max_depth, depth);
             }
         }
     }
-    target_depth.write(min_depth, target_pos);
+    target_depth.write(max_depth, target_pos);
 }
 
 // ============================================================================
