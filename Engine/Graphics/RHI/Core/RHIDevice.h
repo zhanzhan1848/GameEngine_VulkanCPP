@@ -212,6 +212,12 @@ public:
      * @return 垃圾回收器引用
      */
     virtual RHIGarbageCollector& GetGarbageCollector() = 0;
+
+    /// Hot-reload a shader's bytecode. Returns true on success.
+    virtual bool ReloadShader(ShaderHandle shader, const void* data, size_t size) {
+        (void)shader; (void)data; (void)size;
+        return false;
+    }
 };
 
 /**

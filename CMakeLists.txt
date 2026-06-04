@@ -77,6 +77,9 @@ elseif(APPLE)
     # macOS特定设置
     set(CMAKE_MACOSX_RPATH ON)
 
+    # Metal shader validation (xcrun compile check)
+    include(CMake/MetalShaderValidation.cmake)
+
     # FBX SDK 自动检测和安装
     set(FBX_SDK_VERSION "2020.3.7")
     set(FBX_SDK_ROOT "/Applications/Autodesk/FBX SDK/${FBX_SDK_VERSION}")

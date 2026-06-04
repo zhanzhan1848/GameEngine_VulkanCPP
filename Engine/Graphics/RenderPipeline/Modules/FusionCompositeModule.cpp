@@ -1,6 +1,7 @@
 #include "FusionCompositeModule.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Graphics/RHI/Core/RHICommand.h"
 
 namespace primal::graphics {
 
@@ -78,13 +79,14 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         }
     }
 
-    // --- Pass 2: FusionComposite (full-res, 2 texture reads) ---
+    // --- Pass 2: FusionComposite (full-res, 3 texture reads) ---
     {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // scene
             {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // indirect
+            {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // volume_scatter
         };
-        composite_set_layout_ = device->CreateDescriptorSetLayout({2, bindings});
+        composite_set_layout_ = device->CreateDescriptorSetLayout({3, bindings});
         composite_layout_ = device->CreatePipelineLayout({1, &composite_set_layout_});
 
         for (int i = 0; i < 3; ++i)
@@ -97,6 +99,53 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         outDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
         for (int i = 0; i < 3; ++i)
             fusion_output_[i] = device->CreateTexture(outDesc);
+
+        // Volume identity texture: 1x1 RGBA16_Float = (0,0,0,1)
+        // transmittance=1 means scene passes through unchanged when no volume effect
+        {
+            TextureDesc desc{};
+            desc.size = {1, 1, 1};
+            desc.format = DataFormat::RGBA16_Float;
+            desc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+            volume_identity_tex_ = device->CreateTexture(desc);
+
+            if (volume_identity_tex_ != handles::INVALID_RESOURCE) {
+                // Upload (0,0,0,1) via staging buffer + CopyBufferToTexture
+                BufferDesc sbDesc{};
+                sbDesc.size = 256; // Metal requires 256-byte row alignment
+                sbDesc.usage = GPUMemoryUsage::Staging;
+                sbDesc.memoryUsage = GPUMemoryUsage::Staging;
+                auto staging = device->CreateBuffer(sbDesc);
+
+                if (staging != handles::INVALID_RESOURCE) {
+                    auto* mapped = static_cast<float*>(device->MapBuffer(staging));
+                    if (mapped) {
+                        memset(mapped, 0, 256);
+                        // RGBA16_Float: each channel is 2 bytes (half float)
+                        auto* halfData = reinterpret_cast<u16*>(mapped);
+                        halfData[3] = 0x3C00; // A = 1.0 (half-float encoding)
+                        device->UnmapBuffer(staging);
+
+                        auto cmdHandle = device->CreateCommandBuffer(CommandQueueType::Graphics);
+                        if (cmdHandle != handles::INVALID_COMMAND_BUFFER) {
+                            auto* cmd = GetCommandBuffer(cmdHandle);
+                            cmd->Begin();
+                            BufferTextureCopyRegion region{};
+                            region.bufferOffset = 0;
+                            region.bufferRowLength = 256 / 4; // aligned row in pixels (RGBA16 = 4 bytes/pixel for 2 channels... actually 8 bytes for RGBA16)
+                            region.imageSubresource = {0, 0, 1};
+                            region.imageExtent = {1, 1, 1};
+                            cmd->CopyBufferToTexture(staging, volume_identity_tex_, &region, 1);
+                            cmd->End();
+                            cmd->Submit();
+                            cmd->WaitForCompletion();
+                            device->DestroyCommandBuffer(cmdHandle);
+                        }
+                    }
+                    device->DestroyBuffer(staging);
+                }
+            }
+        }
 
         if (composite_vs != handles::INVALID_SHADER && composite_ps != handles::INVALID_SHADER) {
             GraphicsPipelineDesc pd{};
@@ -118,7 +167,12 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
     return indirect_pipeline_ != handles::INVALID_PIPELINE && composite_pipeline_ != handles::INVALID_PIPELINE;
 }
 
-void FusionCompositeModule::Shutdown() {}
+void FusionCompositeModule::Shutdown() {
+    if (device_ && volume_identity_tex_ != handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(volume_identity_tex_);
+        volume_identity_tex_ = handles::INVALID_RESOURCE;
+    }
+}
 
 FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs) {
     FusionOutputs outputs{};
@@ -191,25 +245,32 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
     graph.AddPass<ComposeData>("FusionComposite",
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
-        [primaryRG = inputs.primary_input_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
+        [primaryRG = inputs.primary_input_rg, volumeRG = inputs.volume_scatter_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
             if (primaryRG.IsValid()) builder.Read(primaryRG, ResourceState::ShaderResource);
             builder.Read(indirectRG, ResourceState::ShaderResource);
+            if (volumeRG.IsValid()) builder.Read(volumeRG, ResourceState::ShaderResource);
             data.output = builder.Write(fusionOutRG, ResourceState::RenderTarget);
 
             rendergraph::RGRenderPassDesc rpDesc;
             rpDesc.colors.push_back({.texture = data.output, .loadOp = LoadAction::DontCare, .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 1}}});
             builder.DeclareRenderPass(rpDesc);
         },
-        [this, inputs, cbIdx, indirectTex = indirect_output_[cbIdx]](const ComposeData&, rendergraph::RenderGraphContext& context) {
+        [this, inputs, cbIdx, indirectTex = indirect_output_[cbIdx], resolve](const ComposeData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
-            DescData params[2] = {
+            // Resolve volume scatter from RG, or fall back to identity texture (transmittance=1)
+            ResourceHandle volTex = resolve(inputs.volume_scatter_rg);
+            if (volTex == inputs.black_texture || volTex == handles::INVALID_RESOURCE)
+                volTex = volume_identity_tex_;
+
+            DescData params[3] = {
                 {0, DescriptorType::SampledImage, inputs.primary_input_tex},
                 {1, DescriptorType::SampledImage, indirectTex},
+                {2, DescriptorType::SampledImage, volTex},
             };
-            UpdateDesc(device_, composite_ds_[cbIdx], params, 2);
+            UpdateDesc(device_, composite_ds_[cbIdx], params, 3);
             cmd->BindGraphicsPipeline(composite_pipeline_);
             const DescriptorSetHandle sets[] = { composite_ds_[cbIdx] };
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, composite_layout_, 0, 1, sets, 0, nullptr);

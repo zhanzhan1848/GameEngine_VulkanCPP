@@ -103,44 +103,25 @@ kernel void shadow_filter_compute(
     uint2 outSize = uint2(visibilityOut.get_width(), visibilityOut.get_height());
     if (any(gid >= outSize)) return;
 
-    // Map half-res pixel to full-res UV (center of 2x2 block)
     float2 fullUV = (float2(gid) * 2.0 + 1.0) / float2(params.render_width, params.render_height);
 
     constexpr sampler depthSmp(coord::normalized, filter::nearest, address::clamp_to_edge);
     float depth = depthTex.sample(depthSmp, fullUV).r;
 
-    // Sky pixels: fully lit
     if (depth >= 1.0) {
         visibilityOut.write(float4(1.0), gid);
         return;
     }
 
-    // Reconstruct world position
     float2 ndc = float2(fullUV.x * 2.0 - 1.0, 1.0 - fullUV.y * 2.0);
     float4 clipPos = float4(ndc, depth, 1.0);
     float4 worldPos4 = params.inv_view_proj * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
 
-    // Sample surface normal from GBuffer for slope-based bias
-    constexpr sampler linearSmp(coord::normalized, filter::linear, address::clamp_to_edge);
-    float3 normalSample = normalTex.sample(linearSmp, fullUV).xyz;
-    float3 N = normalize(normalSample * 2.0 - 1.0);
-    float NdotL = dot(N, params.light_dir.xyz);
-
-    // Backface shadow: if surface faces away from light source, it's always in shadow
-    if (NdotL > 0.01) {
-        visibilityOut.write(float4(0.0), gid);
-        return;
-    }
-
-    // Slope-based bias (bounded formula)
-    float bias = 0.002 + (1.0 - saturate(-NdotL)) * 0.02;
-
+    float bias = 0.003;
     float2 screenPos = float2(gid);
+    float visibility = 1.0;
 
-    float visibility = 1.0; // default: no cascade covers = lit
-
-    // Try cascade 0
     float4 clip0 = params.shadow_vp[0] * float4(worldPos, 1.0);
     float3 sc0 = clip0.xyz / clip0.w;
     sc0.x = sc0.x * 0.5 + 0.5;
@@ -151,7 +132,6 @@ kernel void shadow_filter_compute(
         visibility = sampleShadowMap(shadowMap0, shadowSmp, sc0, screenPos,
                                      params.texel_size, bias, params.shadow_quality);
     } else {
-        // Try cascade 1
         float4 clip1 = params.shadow_vp[1] * float4(worldPos, 1.0);
         float3 sc1 = clip1.xyz / clip1.w;
         sc1.x = sc1.x * 0.5 + 0.5;

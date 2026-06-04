@@ -88,7 +88,7 @@ bool DepthHistoryManager::CreateDepthResources() {
         depthDesc.format = config_.format;
         depthDesc.type = rhi::TextureType::Texture2D;
         depthDesc.mipLevels = 1; // Single mip level for depth history
-        depthDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest;
+        depthDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest | rhi::TextureUsage::UnorderedAccess;
 
         depth_buffers_[i].texture = device_->CreateTexture(depthDesc);
         if (depth_buffers_[i].texture == rhi::handles::INVALID_RESOURCE) {

@@ -22,6 +22,10 @@ struct FusionInputs {
     rhi::ResourceHandle ssao_tex;
     rhi::ResourceHandle gbuffer_albedo;
 
+    // Volume scatter (RGBA16_Float: RGB=scatter, A=transmittance)
+    rendergraph::RGResourceHandle volume_scatter_rg;
+    rhi::ResourceHandle volume_scatter_tex;
+
     u32 current_buffer_index = 0;
     u32 render_width = 0;
     u32 render_height = 0;
@@ -72,6 +76,9 @@ private:
 
     // Shared vertex shader (full-screen triangle)
     rhi::ShaderHandle vertex_shader_{rhi::handles::INVALID_SHADER};
+
+    // 1x1 identity texture for volume scatter fallback: RGBA = (0,0,0,1)
+    rhi::ResourceHandle volume_identity_tex_{rhi::handles::INVALID_RESOURCE};
 };
 
 } // namespace primal::graphics

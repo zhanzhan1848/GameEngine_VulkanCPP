@@ -572,17 +572,20 @@ fragment float4 fragmentFusionIndirect(
     return float4(indirect, 1.0f);
 }
 
-// Fusion Pass 2 (full-res): scene + pre-combined indirect → tonemapped output
+// Fusion Pass 2 (full-res): scene + pre-combined indirect + volume scatter → tonemapped output
 fragment float4 fragmentFusion(
     VertexOut in [[stage_in]],
     texture2d<float> sceneColor    [[texture(0)]],
-    texture2d<float> indirectColor [[texture(1)]])
+    texture2d<float> indirectColor [[texture(1)]],
+    texture2d<float> volumeScatter [[texture(2)]])
 {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
     float3 scene   = sceneColor.sample(s, in.uv).rgb;
     float3 indirect = indirectColor.sample(s, in.uv).rgb;
+    float4 vol     = volumeScatter.sample(s, in.uv);
 
-    float3 result = scene + indirect;
+    // Beer-Lambert: attenuate scene by transmittance, add scattered light
+    float3 result = (scene + indirect) * vol.a + vol.rgb;
     result = clamp(result, float3(0.0f), float3(64.0f));
     result = toneMap(result);
 
@@ -628,12 +631,13 @@ kernel void computeFusionIndirect(
     indirectOut.write(float4(indirect, 1.0f), gid);
 }
 
-// Pass 2: composite direct + indirect, tone map to output
+// Pass 2: composite direct + indirect + volume scatter, tone map to output
 kernel void computeFusionComposite(
     texture2d<float, access::read> sceneColor  [[texture(0)]],
     texture2d<float, access::read> indirectTex [[texture(1)]],
     texture2d<float, access::read> ssaoTex     [[texture(2)]],
     texture2d<float, access::write>  outputTex   [[texture(3)]],
+    texture2d<float, access::sample> volumeScatter [[texture(4)]],
     uint2 gid [[thread_position_in_grid]])
 {
     uint w = outputTex.get_width();
@@ -643,7 +647,12 @@ kernel void computeFusionComposite(
     float3 scene   = sceneColor.read(gid).rgb;
     float3 indirect = indirectTex.read(gid).rgb;
 
-    float3 result = scene + indirect;
+    // Volume scatter (half-res, bilinear sample at full-res UV)
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5f) / float2(w, h);
+    float4 vol = volumeScatter.sample(s, uv);
+
+    float3 result = (scene + indirect) * vol.a + vol.rgb;
     result = clamp(result, float3(0.0f), float3(64.0f));
     result = toneMap(result);
 

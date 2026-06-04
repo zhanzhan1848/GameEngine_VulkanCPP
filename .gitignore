@@ -406,6 +406,7 @@ TODO*
 
 !Engine/Graphics/RenderPipeline/RenderPasses/Debug/
 !Engine/Graphics/RHI/Shaders/Debug/
+!CMake/MetalShaderValidation.cmake
 
 # Git Worktrees
 .worktrees/

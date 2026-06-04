@@ -20,6 +20,8 @@ using namespace rhi;
 using namespace rhi::math;
 using namespace rendergraph;
 
+RenderPipeline* RenderPipeline::s_instance = nullptr;
+
 // Descriptor update helper (same pattern as module .cpp files)
 struct DescData {
     u32 binding;
@@ -67,6 +69,7 @@ StandardRenderPipeline::~StandardRenderPipeline() {
 bool StandardRenderPipeline::Initialize(RHIDeviceBase* device) {
     if (!device) return false;
     device_ = device;
+    s_instance = this;
     renderGraph_ = std::make_unique<RenderGraph>(*device);
 
     gpuOptimizer_ = std::make_unique<rhi::RHIGPUOptimizer>(*device);
@@ -88,6 +91,7 @@ bool StandardRenderPipeline::Initialize(RHIDeviceBase* device) {
 }
 
 void StandardRenderPipeline::Shutdown() {
+    if (s_instance == this) s_instance = nullptr;
     ShutdownSubsystems();
     ShutdownLumenPasses();
 
@@ -107,15 +111,20 @@ void StandardRenderPipeline::Shutdown() {
 // Config
 // ============================================================================
 
+bool StandardRenderPipeline::ReloadShader(ShaderHandle shader, const void* data, u32 size) {
+    if (!device_ || !data || size == 0) return false;
+    return device_->ReloadShader(shader, data, size);
+}
+
 void StandardRenderPipeline::SetLumenConfig(const lumen::LumenConfig& config) {
-    lumen_config_ = config;
-    quality_config_ = PipelineQualityConfig::FromPreset(config.quality);
+    settings_.lumen = config;
+    settings_.quality = PipelineQualityConfig::FromPreset(config.quality);
 
     // Apply render scale: GPU resolution = logical window size × scale
-    render_width_  = static_cast<u32>(logical_width_  * quality_config_.render_scale);
-    render_height_ = static_cast<u32>(logical_height_ * quality_config_.render_scale);
+    render_width_  = static_cast<u32>(logical_width_  * settings_.quality.render_scale);
+    render_height_ = static_cast<u32>(logical_height_ * settings_.quality.render_scale);
 
-    std::cout << "[Pipeline] Render scale=" << quality_config_.render_scale
+    std::cout << "[Pipeline] Render scale=" << settings_.quality.render_scale
               << " logical=" << logical_width_ << "x" << logical_height_
               << " render=" << render_width_ << "x" << render_height_ << std::endl;
 
@@ -126,13 +135,67 @@ void StandardRenderPipeline::SetLumenConfig(const lumen::LumenConfig& config) {
 }
 
 void StandardRenderPipeline::SetQualityOverride(bool enable_screen_probes, bool enable_surface_cache) {
-    quality_config_.enable_screen_probes = enable_screen_probes;
-    quality_config_.enable_surface_cache = enable_surface_cache;
-    // Re-initialize Lumen passes with updated flags
+    settings_.quality.enable_screen_probes = enable_screen_probes;
+    settings_.quality.enable_surface_cache = enable_surface_cache;
+    settings_dirty_ = true;
+}
+
+// ============================================================================
+// Runtime Pass Configuration
+// ============================================================================
+
+void StandardRenderPipeline::SetPassEnabled(RenderPassID pass, bool enabled) {
+    bool was_enabled = settings_.quality.IsPassEnabled(pass);
+    settings_.quality.SetPassEnabled(pass, enabled);
+    if (was_enabled != settings_.quality.IsPassEnabled(pass)) {
+        settings_dirty_ = true;
+        std::cout << "[Pipeline] Pass '" << GetRenderPassInfo(pass).name
+                  << "' " << (enabled ? "enabled" : "disabled") << std::endl;
+    }
+}
+
+bool StandardRenderPipeline::IsPassEnabled(RenderPassID pass) const {
+    return settings_.quality.IsPassEnabled(pass);
+}
+
+bool StandardRenderPipeline::IsPassActive(RenderPassID pass) const {
+    if (!settings_.quality.IsPassEnabled(pass)) return false;
+    switch (pass) {
+        case RenderPassID::Shadow:           return shadow_module_ != nullptr;
+        case RenderPassID::DeferredLighting: return deferred_module_ != nullptr;
+        case RenderPassID::SSAO:             return ssao_pass_ && ssao_pass_->IsInitialized();
+        case RenderPassID::DDGI:             return ddgi_pass_ && ddgi_pass_->IsInitialized();
+        case RenderPassID::SurfaceCache:     return surface_cache_pass_ && surface_cache_pass_->IsInitialized();
+        case RenderPassID::SCDDGIIntegration:return sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_;
+        case RenderPassID::SSGI:             return ssgi_pass_ && ssgi_pass_->IsInitialized();
+        case RenderPassID::ScreenProbes:     return screen_probe_pass_ && screen_probe_pass_->IsInitialized();
+        case RenderPassID::GIGather:         return gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized();
+        case RenderPassID::VolumePass:       return volume_pass_ && volume_pass_->IsInitialized();
+        case RenderPassID::VolumeRenderer:   return volume_renderer_ && volume_renderer_->IsInitialized();
+        case RenderPassID::FusionComposite:  return fusion_module_ != nullptr;
+        case RenderPassID::FinalBlit:        return final_blit_module_ != nullptr;
+        default: return false;
+    }
+}
+
+void StandardRenderPipeline::UpdateSettings(const RenderPipelineSettings& settings) {
+    settings_ = settings;
+    settings_dirty_ = true;
+
+    // Re-derive render dimensions if scale changed
+    render_width_  = static_cast<u32>(logical_width_  * settings_.quality.render_scale);
+    render_height_ = static_cast<u32>(logical_height_ * settings_.quality.render_scale);
+}
+
+bool StandardRenderPipeline::ApplyConfigChanges() {
+    if (!settings_dirty_) return false;
+    settings_dirty_ = false;
+
     if (subsystems_initialized_) {
         ShutdownLumenPasses();
         InitializeLumenPasses();
     }
+    return true;
 }
 
 // ============================================================================
@@ -222,18 +285,18 @@ void StandardRenderPipeline::InitializeSubsystems() {
     final_blit_module_ = std::make_unique<FinalBlitModule>();
     final_blit_module_->Initialize(device_, blit_vs_, blit_ps_);
 
-    if (quality_config_.enable_ddgi && gi_gather_shader_ != handles::INVALID_SHADER) {
+    if (settings_.quality.enable_ddgi && gi_gather_shader_ != handles::INVALID_SHADER) {
         gi_gather_module_ = std::make_unique<GIGatherModule>();
         gi_gather_module_->Initialize(device_, gi_gather_shader_, render_width_, render_height_);
     }
 
-    if (quality_config_.enable_ssgi || quality_config_.enable_ddgi) {
+    if (settings_.quality.enable_ssgi || settings_.quality.enable_ddgi) {
         fusion_module_ = std::make_unique<FusionCompositeModule>();
         fusion_module_->Initialize(device_, fusion_indirect_ps_, blit_vs_,
                                    fusion_composite_ps_, render_width_, render_height_);
     }
 
-    if (quality_config_.enable_surface_cache && quality_config_.enable_ddgi) {
+    if (settings_.quality.enable_surface_cache && settings_.quality.enable_ddgi) {
         sc_ddgi_module_ = std::make_unique<SCDDGIIntegrationModule>();
         sc_ddgi_module_->Initialize(device_, sc_card_radiance_shader_,
                                     sc_probe_irradiance_shader_, render_width_, render_height_);
@@ -271,10 +334,10 @@ void StandardRenderPipeline::ShutdownSubsystems() {
 
 void StandardRenderPipeline::InitializeLumenPasses() {
     if (!device_) return;
-    const auto& config = lumen_config_;
+    const auto& config = settings_.lumen;
 
     // DDGI
-    if (quality_config_.enable_ddgi) {
+    if (settings_.quality.enable_ddgi) {
         ddgi_pass_ = std::make_unique<lumen::LumenDDGIPass>();
         lumen::DDGIRuntimeParams ddgiParams{};
         ddgiParams.probe_count_x = config.ddgi_probe_count_x;
@@ -292,7 +355,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     }
 
     // SSAO
-    if (quality_config_.enable_ssao) {
+    if (settings_.quality.enable_ssao) {
         ssao_pass_ = std::make_unique<lumen::LumenSSAOPass>();
         lumen::SSAOParams ssaoParams{};
         ssaoParams.radius = config.gtao_radius;
@@ -306,7 +369,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     }
 
     // SSGI
-    if (quality_config_.enable_ssgi) {
+    if (settings_.quality.enable_ssgi) {
         ssgi_pass_ = std::make_unique<lumen::LumenSSGIPass>();
         lumen::SSGIParams ssgiParams{};
         if (!ssgi_pass_->Initialize(device_, render_width_, render_height_, ssgiParams)) {
@@ -316,7 +379,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     }
 
     // Surface Cache
-    if (quality_config_.enable_surface_cache) {
+    if (settings_.quality.enable_surface_cache) {
         surface_cache_pass_ = std::make_unique<lumen::SurfaceCachePass>();
         if (!surface_cache_pass_->Initialize(device_, config)) {
             std::cerr << "[Lumen] Surface Cache init failed" << std::endl;
@@ -325,7 +388,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     }
 
     // Screen Probes
-    if (quality_config_.enable_screen_probes) {
+    if (settings_.quality.enable_screen_probes) {
         screen_probe_pass_ = std::make_unique<lumen::ScreenProbeGIPass>();
         lumen::ScreenProbeParams probeParams{};
         probeParams.downsample_factor = config.screen_probes_spacing;
@@ -350,9 +413,30 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             std::cout << "[Lumen] Loaded static probe cache: " << probeCachePath << std::endl;
         }
     }
+
+    // Volume Pass (post-process fog)
+    if (settings_.quality.enable_volume_pass) {
+        volume_pass_ = std::make_unique<volume::VolumePass>();
+        volume::VolumeRuntimeParams volumeParams{};
+        if (!volume_pass_->Initialize(device_, render_width_, render_height_, volumeParams)) {
+            std::cerr << "[Volume] VolumePass init failed" << std::endl;
+            volume_pass_.reset();
+        }
+    }
+
+    // Volume Renderer (forward proxy cube + fragment ray march)
+    if (settings_.quality.enable_volume_renderer) {
+        volume_renderer_ = std::make_unique<volume::VolumeRenderer>();
+        if (!volume_renderer_->Initialize(device_, render_width_, render_height_)) {
+            std::cerr << "[Volume] VolumeRenderer init failed" << std::endl;
+            volume_renderer_.reset();
+        }
+    }
 }
 
 void StandardRenderPipeline::ShutdownLumenPasses() {
+    if (volume_renderer_) { volume_renderer_->Shutdown(); volume_renderer_.reset(); }
+    if (volume_pass_) { volume_pass_->Shutdown(); volume_pass_.reset(); }
     if (static_probe_volume_) { static_probe_volume_->Shutdown(); static_probe_volume_.reset(); }
     if (screen_probe_pass_) { screen_probe_pass_->Shutdown(); screen_probe_pass_.reset(); }
     if (surface_cache_pass_) { surface_cache_pass_->Shutdown(); surface_cache_pass_.reset(); }
@@ -520,7 +604,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     ShadowMapOutputs shadowOut;
-    math::v3 lightDir = Normalize(math::v3{0.707f, -1.0f, 0.408f});
+    math::v3 lightDir = Normalize(settings_.lighting.light_direction);
     if (shadow_module_) {
         ShadowMapInputs shadowIn;
         shadowIn.gpu_draw_pipeline = &gpuDraw;
@@ -530,7 +614,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         shadowIn.proj_matrix = proj_matrix_;
         shadowIn.light_direction = lightDir;
         shadowIn.current_buffer_index = cbIdx;
-        shadowIn.shadow_quality = quality_config_.shadow_quality;
+        shadowIn.shadow_quality = settings_.quality.shadow_quality;
         shadowOut = shadow_module_->AddPasses(graph, shadowIn);
     }
 
@@ -551,7 +635,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         camData.prev_view_matrix = view_matrix_;
         camData.prev_proj_matrix = proj_matrix_;
         camData.frame_index = static_cast<u32>(frameCount_);
-        camData.delta_time = 0.016f;
+        camData.delta_time = settings_.advanced.delta_time_override;
         ssaoOut = ssao_pass_->AddPass(graph, gbufferNormalSSAO, gbufferDepthSSAO, camData, static_cast<u32>(frameCount_));
     }
 
@@ -575,8 +659,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         deferredIn.proj_matrix = proj_matrix_;
         deferredIn.camera_position = camera_position_;
         deferredIn.light_pos = math::v4{-lightDir.x, -lightDir.y, -lightDir.z, 0.0f};
-        deferredIn.light_color = light_color_;
-        deferredIn.cascade_splits = {600.0f, 2000.0f, 0.0f, 0.0f};
+        deferredIn.light_color = settings_.lighting.light_color;
+        deferredIn.cascade_splits = settings_.lighting.cascade_splits;
         deferredIn.shadow_matrix0 = shadowOut.shadow_matrix0;
         deferredIn.shadow_matrix1 = shadowOut.shadow_matrix1;
         deferredIn.current_buffer_index = cbIdx;
@@ -587,6 +671,45 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         deferredIn.gbuffer_orm_rg = gbufferORMDL;
         deferredIn.gbuffer_depth_rg = gbufferDepthDL;
         deferredOut = deferred_module_->AddPasses(graph, deferredIn);
+    }
+
+    // ========================================================================
+    // Step 4.5: Volume Ray March
+    // ========================================================================
+
+    volume::VolumeOutput volumeOut;
+    if (volume_pass_ && volume_pass_->IsInitialized()) {
+        volume::VolumeInputs volIn;
+        volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+        volIn.scene_color = deferredOut.deferred_output_rg;
+        volIn.shadow_map = shadowOut.shadow_visibility_rg;
+
+        // SDF cascades from GlobalSDF
+        auto& globalSDF = nanite::GlobalSDF::Get();
+        if (globalSDF.IsInitialized()) {
+            for (u32 c = 0; c < std::min(3u, globalSDF.GetConfig().cascade_count); ++c) {
+                const auto& cascade = globalSDF.GetCascade(c);
+                if (cascade.sdf_texture != handles::INVALID_RESOURCE) {
+                    std::string name = "SDFCascade" + std::to_string(c) + "_Volume";
+                    auto sdfRG = graph.ImportResource(name, cascade.sdf_texture);
+                    if (c == 0) volIn.sdf_cascade_0 = sdfRG;
+                    else if (c == 1) volIn.sdf_cascade_1 = sdfRG;
+                    else if (c == 2) volIn.sdf_cascade_2 = sdfRG;
+                }
+            }
+        }
+
+        volume::VolumeCameraData volCam{};
+        volCam.camera_position = camera_position_;
+        volCam.view_matrix = view_matrix_;
+        volCam.proj_matrix = proj_matrix_;
+        volCam.light_direction = Normalize(settings_.lighting.light_direction);
+        volCam.light_color = {settings_.lighting.light_color.x, settings_.lighting.light_color.y, settings_.lighting.light_color.z};
+        volCam.frame_index = static_cast<u32>(frameCount_);
+        volIn.camera_data = volCam;
+        volIn.width = render_width_;
+        volIn.height = render_height_;
+        volumeOut = volume_pass_->AddPass(graph, volIn);
     }
 
     // ========================================================================
@@ -612,8 +735,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
                 surface_cache_pass_->GetCardDataBuffer(),
                 surface_cache_pass_->GetCardLookupBuffer(),
-                lumen_config_.surface_cache_atlas_size,
-                lumen_config_.surface_cache_max_cards);
+                settings_.lumen.surface_cache_atlas_size,
+                settings_.lumen.surface_cache_max_cards);
         }
 
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
@@ -621,8 +744,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
                 surface_cache_pass_->GetCardLookupBuffer(),
                 surface_cache_pass_->GetCardDataBuffer(),
-                lumen_config_.surface_cache_atlas_size,
-                lumen_config_.surface_cache_max_cards);
+                settings_.lumen.surface_cache_atlas_size,
+                settings_.lumen.surface_cache_max_cards);
         }
     }
 
@@ -638,11 +761,11 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         camData.proj_matrix = proj_matrix_;
         camData.prev_view_matrix = view_matrix_;
         camData.prev_proj_matrix = proj_matrix_;
-        math::v3 lightFwd = Normalize(math::v3{0.707f, -1.0f, 0.408f});
+        math::v3 lightFwd = Normalize(settings_.lighting.light_direction);
         camData.light_direction = lightFwd;
-        camData.light_color = {20.0f, 20.0f, 20.0f};
+        camData.light_color = {settings_.lighting.ddgi_light_color.x, settings_.lighting.ddgi_light_color.y, settings_.lighting.ddgi_light_color.z};
         camData.frame_index = static_cast<u32>(frameCount_);
-        camData.delta_time = 0.016f;
+        camData.delta_time = settings_.advanced.delta_time_override;
 
         RGResourceHandle prevColor;
         if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
@@ -750,7 +873,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     FusionOutputs fusionOut;
-    if (fusion_module_ && quality_config_.enable_ssgi) {
+    if (fusion_module_ && settings_.quality.enable_ssgi) {
         FusionInputs fusionIn;
         fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
         fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
@@ -763,6 +886,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
         fusionIn.ssao_rg = ssaoOut.ssao_output;
         fusionIn.ssao_tex = ssao_pass_ ? ssao_pass_->GetFilterTexture() : black_texture_;
+        fusionIn.volume_scatter_rg = volumeOut.volume_scatter;
+        fusionIn.volume_scatter_tex = handles::INVALID_RESOURCE; // RG-resolved inside module
         fusionIn.current_buffer_index = cbIdx;
         fusionIn.render_width = render_width_;
         fusionIn.render_height = render_height_;
@@ -805,6 +930,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     auto startTime = std::chrono::high_resolution_clock::now();
     if (!device_ || !cmd || !renderGraph_) return;
 
+    ApplyConfigChanges();
+
     u32 cbIdx = bufferIndex;
 
     if (targetDesc.size.x > 0 && targetDesc.size.y > 0) {
@@ -843,7 +970,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         auto gbufferDepthDL = graph.ImportResource("GBufferDepth_DL", gpuDraw.GetGBufferDepthSampleable());
 
         // Unified light direction (shines in this direction)
-        math::v3 lightDir = Normalize(math::v3{0.707f, -1.0f, 0.408f});
+        math::v3 lightDir = Normalize(settings_.lighting.light_direction);
 
         // Shadow Map
         ShadowMapOutputs shadowOut;
@@ -856,7 +983,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             shadowIn.proj_matrix = proj_matrix_;
             shadowIn.light_direction = lightDir;
             shadowIn.current_buffer_index = cbIdx;
-            shadowIn.shadow_quality = quality_config_.shadow_quality;
+            shadowIn.shadow_quality = settings_.quality.shadow_quality;
             shadowOut = shadow_module_->AddPasses(graph, shadowIn);
         }
 
@@ -868,8 +995,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         deferredIn.proj_matrix = proj_matrix_;
         deferredIn.camera_position = camera_position_;
         deferredIn.light_pos = math::v4{-lightDir.x, -lightDir.y, -lightDir.z, 0.0f};
-        deferredIn.light_color = light_color_;
-        deferredIn.cascade_splits = {600.0f, 2000.0f, 0.0f, 0.0f};
+        deferredIn.light_color = settings_.lighting.light_color;
+        deferredIn.cascade_splits = settings_.lighting.cascade_splits;
         deferredIn.shadow_matrix0 = shadowOut.shadow_matrix0;
         deferredIn.shadow_matrix1 = shadowOut.shadow_matrix1;
         deferredIn.current_buffer_index = cbIdx;
@@ -892,7 +1019,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             camData.prev_view_matrix = view_matrix_;
             camData.prev_proj_matrix = proj_matrix_;
             camData.frame_index = static_cast<u32>(frameCount_);
-            camData.delta_time = 0.016f;
+            camData.delta_time = settings_.advanced.delta_time_override;
             ssaoOut = ssao_pass_->AddPass(graph, gbufferNormalSSAO, gbufferDepthSSAO, camData, static_cast<u32>(frameCount_));
         }
 
@@ -911,16 +1038,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
                     surface_cache_pass_->GetCardLookupBuffer(),
                     surface_cache_pass_->GetCardDataBuffer(),
-                    lumen_config_.surface_cache_atlas_size,
-                    lumen_config_.surface_cache_max_cards);
+                    settings_.lumen.surface_cache_atlas_size,
+                    settings_.lumen.surface_cache_max_cards);
             }
             if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
                 screen_probe_pass_->SetSurfaceCacheData(
                     surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
                     surface_cache_pass_->GetCardDataBuffer(),
                     surface_cache_pass_->GetCardLookupBuffer(),
-                    lumen_config_.surface_cache_atlas_size,
-                    lumen_config_.surface_cache_max_cards);
+                    settings_.lumen.surface_cache_atlas_size,
+                    settings_.lumen.surface_cache_max_cards);
             }
         }
 
@@ -933,10 +1060,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             camData.proj_matrix = proj_matrix_;
             camData.prev_view_matrix = view_matrix_;
             camData.prev_proj_matrix = proj_matrix_;
-            camData.light_direction = Normalize(math::v3{0.707f, -1.0f, 0.408f});
-            camData.light_color = {20.0f, 20.0f, 20.0f};
+            camData.light_direction = Normalize(settings_.lighting.light_direction);
+            camData.light_color = {settings_.lighting.ddgi_light_color.x, settings_.lighting.ddgi_light_color.y, settings_.lighting.ddgi_light_color.z};
             camData.frame_index = static_cast<u32>(frameCount_);
-            camData.delta_time = 0.016f;
+            camData.delta_time = settings_.advanced.delta_time_override;
             RGResourceHandle prevColor;
             if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE)
                 prevColor = graph.ImportResource("PrevFrameColor", deferredOut.deferred_output_tex);
@@ -989,7 +1116,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             ssgiCam.prev_view_matrix = view_matrix_;
             ssgiCam.prev_proj_matrix = proj_matrix_;
             ssgiCam.frame_index = static_cast<u32>(frameCount_);
-            ssgiCam.delta_time = 0.016f;
+            ssgiCam.delta_time = settings_.advanced.delta_time_override;
 
             ssgiOut = ssgi_pass_->AddPass(graph, gbufferNormalSSGI, gbufferDepthSSGI,
                 gbufferVelocitySSGI, hzbHandle, prevColorSSGI,
@@ -1017,9 +1144,68 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 spRadiance, spCam, static_cast<u32>(frameCount_));
         }
 
+        // --- Volume Ray March ---
+        volume::VolumeOutput volumeOut;
+        if (volume_pass_ && volume_pass_->IsInitialized()) {
+            volume::VolumeInputs volIn;
+            volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+            volIn.scene_color = deferredOut.deferred_output_rg;
+            volIn.shadow_map = shadowOut.shadow_visibility_rg;
+
+            auto& globalSDF = nanite::GlobalSDF::Get();
+            if (globalSDF.IsInitialized()) {
+                for (u32 c = 0; c < std::min(3u, globalSDF.GetConfig().cascade_count); ++c) {
+                    const auto& cascade = globalSDF.GetCascade(c);
+                    if (cascade.sdf_texture != handles::INVALID_RESOURCE) {
+                        std::string name = "SDFCascade" + std::to_string(c) + "_Volume";
+                        auto sdfRG = graph.ImportResource(name, cascade.sdf_texture);
+                        if (c == 0) volIn.sdf_cascade_0 = sdfRG;
+                        else if (c == 1) volIn.sdf_cascade_1 = sdfRG;
+                        else if (c == 2) volIn.sdf_cascade_2 = sdfRG;
+                    }
+                }
+            }
+
+            volume::VolumeCameraData volCam{};
+            volCam.camera_position = camera_position_;
+            volCam.view_matrix = view_matrix_;
+            volCam.proj_matrix = proj_matrix_;
+            math::v3 lightDir = Normalize(settings_.lighting.light_direction);
+            volCam.light_direction = lightDir;
+            volCam.light_color = {settings_.lighting.light_color.x, settings_.lighting.light_color.y, settings_.lighting.light_color.z};
+            volCam.frame_index = static_cast<u32>(frameCount_);
+            volIn.camera_data = volCam;
+            volIn.width = render_width_;
+            volIn.height = render_height_;
+            volumeOut = volume_pass_->AddPass(graph, volIn);
+        }
+
+        // --- Volume Object Rendering (forward, into scatter texture) ---
+        // Must run BEFORE graph.Execute() so scatter texture can be imported into FusionComposite.
+        rendergraph::RGResourceHandle volume_scatter_rg;
+        if (volume_renderer_ && volume_renderer_->IsInitialized()) {
+            volume::VolumeCameraData volCam{};
+            volCam.camera_position = camera_position_;
+            volCam.view_matrix = view_matrix_;
+            volCam.proj_matrix = proj_matrix_;
+            math::v3 lightDir = Normalize(settings_.lighting.light_direction);
+            volCam.light_direction = lightDir;
+            volCam.light_color = {settings_.lighting.light_color.x, settings_.lighting.light_color.y, settings_.lighting.light_color.z};
+            volCam.frame_index = static_cast<u32>(frameCount_);
+
+            volume_renderer_->Render(cmd,
+                volCam,
+                static_cast<u32>(frameCount_),
+                render_width_,
+                render_height_);
+
+            volume_scatter_rg = graph.ImportResource("VolumeScatter",
+                volume_renderer_->GetScatterTexture(static_cast<u32>(frameCount_)));
+        }
+
         // --- FusionComposite ---
         FusionOutputs fusionOut;
-        if (fusion_module_ && quality_config_.enable_ssgi) {
+        if (fusion_module_ && settings_.quality.enable_ssgi) {
             FusionInputs fusionIn;
             fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
             fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
@@ -1036,6 +1222,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionIn.render_width = render_width_;
             fusionIn.render_height = render_height_;
             fusionIn.black_texture = black_texture_;
+            fusionIn.volume_scatter_rg = volume_scatter_rg.IsValid()
+                ? volume_scatter_rg : volumeOut.volume_scatter;
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
         }
 

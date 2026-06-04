@@ -296,12 +296,6 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
 // ============================================================================
 
 rhi::ResourceHandle MaterialInstance::GetTextureHandle(u32 binding) const {
-    // Check if binding is valid
-    if (binding >= pendingTextures_.size()) {
-        std::cerr << "[MaterialInstance] Invalid texture binding: " << binding << std::endl;
-        return rhi::handles::INVALID_RESOURCE;
-    }
-
     // Search pending textures for this binding
     for (const auto& update : pendingTextures_) {
         if (update.binding == binding) {

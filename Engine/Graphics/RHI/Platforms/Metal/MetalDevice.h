@@ -118,7 +118,7 @@ public:
      * @brief 热重载 Shader
      * @details 更新 Shader 内容并重建所有依赖的 Pipeline
      */
-    bool ReloadShader(ShaderHandle shader, const void* data, size_t size);
+    bool ReloadShader(ShaderHandle shader, const void* data, size_t size) override;
 
     /**
      * @brief 获取采样器对象 (内部使用)

@@ -9,6 +9,8 @@ set(SOURCE_FILES
     "DllMain.cpp"
     "EngineAPI.cpp"
     "EntityAPI.cpp"
+    "AssetAPI.cpp"
+    "RenderPipelineAPI.cpp"
 )
 
 set(HEADER_FILES
@@ -37,6 +39,8 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     # "${CMAKE_CURRENT_SOURCE_DIR}/../Engine/Common"
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/Engine/Content
+    ${CMAKE_SOURCE_DIR}/Content
 )
 
 # 平台特定设置

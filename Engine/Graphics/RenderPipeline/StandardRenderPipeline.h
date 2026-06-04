@@ -10,6 +10,8 @@
 #include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include "Graphics/Lumen/LumenTypes.h"
+#include "Graphics/Volume/VolumePass.h"
+#include "Graphics/Volume/VolumeRenderer.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/RenderPipeline/Modules/ShadowMapModule.h"
 #include "Graphics/RenderPipeline/Modules/DeferredLightingModule.h"
@@ -58,6 +60,16 @@ public:
     /// Override specific quality flags. Call AFTER SetLumenConfig — triggers re-init of Lumen passes.
     void SetQualityOverride(bool enable_screen_probes, bool enable_surface_cache = false);
 
+    // --- Runtime pass configuration ---
+    void SetPassEnabled(RenderPassID pass, bool enabled);
+    bool IsPassEnabled(RenderPassID pass) const;
+    bool IsPassActive(RenderPassID pass) const;
+    static constexpr u32 GetPassCount() { return static_cast<u32>(RenderPassID::Count); }
+
+    // --- Runtime settings ---
+    const RenderPipelineSettings& GetSettings() const { return settings_; }
+    void UpdateSettings(const RenderPipelineSettings& settings);
+
     lumen::StaticProbeVolume* GetStaticProbeVolume() const { return static_probe_volume_.get(); }
 
     /// Set logical viewport dimensions.
@@ -65,8 +77,8 @@ public:
     void SetViewportSize(u32 width, u32 height) {
         logical_width_ = width;
         logical_height_ = height;
-        render_width_  = static_cast<u32>(width  * quality_config_.render_scale);
-        render_height_ = static_cast<u32>(height * quality_config_.render_scale);
+        render_width_  = static_cast<u32>(width  * settings_.quality.render_scale);
+        render_height_ = static_cast<u32>(height * settings_.quality.render_scale);
     }
 
     /// Inject pre-compiled shader handles. Call before SetLumenConfig.
@@ -100,6 +112,11 @@ public:
         return surface_cache_pass_ ? surface_cache_pass_.get() : nullptr;
     }
 
+    rhi::RHIDeviceBase* GetDevice() const { return device_; }
+
+    /// Hot-reload a shader. Returns true on success.
+    bool ReloadShader(rhi::ShaderHandle shader, const void* data, u32 size) override;
+
 private:
     void InitializeSubsystems();
     void InitializeLumenPasses();
@@ -108,6 +125,7 @@ private:
 
     void UpdatePerFrame(RenderScene& scene, RenderView& view);
     void BuildRenderGraph(rhi::ResourceHandle backBuffer, u32 currentBufferIndex);
+    bool ApplyConfigChanges();
 
     rhi::RHIDeviceBase* device_{nullptr};
     std::unique_ptr<rendergraph::RenderGraph> renderGraph_;
@@ -126,9 +144,9 @@ private:
     u32 target_width_ = 0;       // backbuffer size (may differ on Retina/HiDPI)
     u32 target_height_ = 0;
 
-    // Quality config (derived from LumenConfig + PipelineQualityConfig)
-    lumen::LumenConfig lumen_config_{};
-    PipelineQualityConfig quality_config_{};
+    // Unified settings (replaces lumen_config_ + quality_config_ + hardcoded values)
+    RenderPipelineSettings settings_{};
+    bool settings_dirty_ = false;
 
     // --- Nanite subsystems ---
     nanite::GPUCullingPipeline* culling_pipeline_ = nullptr;
@@ -147,6 +165,10 @@ private:
     std::unique_ptr<lumen::SurfaceCachePass> surface_cache_pass_;
     std::unique_ptr<lumen::ScreenProbeGIPass> screen_probe_pass_;
     std::unique_ptr<lumen::StaticProbeVolume> static_probe_volume_;
+
+    // --- Volume Rendering ---
+    std::unique_ptr<volume::VolumePass> volume_pass_;
+    std::unique_ptr<volume::VolumeRenderer> volume_renderer_;
 
     // --- Pipeline modules ---
     std::unique_ptr<ShadowMapModule> shadow_module_;
@@ -176,12 +198,14 @@ private:
     math::m4x4 view_matrix_{};
     math::m4x4 proj_matrix_{};
     math::v3 camera_position_{};
-    math::v4 light_pos_{-0.537f, -0.894f, 0.476f, 0.0f}; // Normalized "to light" direction
-    math::v4 light_color_{5.0f, 5.0f, 5.0f, 1.0f};
 
     // Per-frame data
     u64 frameCount_{0};
     bool subsystems_initialized_{false};
+
+    // Convenience accessors for frequently used settings fields
+    const PipelineQualityConfig& qc() const { return settings_.quality; }
+    const lumen::LumenConfig& lc() const { return settings_.lumen; }
 };
 
 } // namespace primal::graphics

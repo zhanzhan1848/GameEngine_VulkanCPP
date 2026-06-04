@@ -322,6 +322,28 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
 
                 ResourceHandle sm0 = gpu_draw_pipeline_->GetShadowMap(0, inputs.current_buffer_index);
                 ResourceHandle sm1 = gpu_draw_pipeline_->GetShadowMap(1, inputs.current_buffer_index);
+
+                // Manual barriers: shadow maps may be in UnorderedAccess state from a
+                // previous frame's ShadowBlit (cache hit skips the blit this frame).
+                // GBuffer depth/normal were written as RenderTarget by an earlier pass
+                // that has no explicit RG dependency with this compute dispatch.
+                {
+                    ResourceBarrier barriers[4];
+                    barriers[0].resource = sm0;
+                    barriers[0].beforeState = ResourceState::Unknown;
+                    barriers[0].afterState = ResourceState::ShaderResource;
+                    barriers[1].resource = sm1;
+                    barriers[1].beforeState = ResourceState::Unknown;
+                    barriers[1].afterState = ResourceState::ShaderResource;
+                    barriers[2].resource = gpu_draw_pipeline_->GetGBufferDepthSampleable();
+                    barriers[2].beforeState = ResourceState::Unknown;
+                    barriers[2].afterState = ResourceState::ShaderResource;
+                    barriers[3].resource = gpu_draw_pipeline_->GetGBufferNormal();
+                    barriers[3].beforeState = ResourceState::RenderTarget;
+                    barriers[3].afterState = ResourceState::ShaderResource;
+                    cmd->InsertBarrier(barriers, 4);
+                }
+
                 DescData params[] = {
                     {0, DescriptorType::UniformBuffer, shadow_filter_cb_[cbIdx]},
                     {0, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()},

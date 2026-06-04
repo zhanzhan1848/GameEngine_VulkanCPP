@@ -20,6 +20,8 @@ struct PipelineStatistics {
 
 class RenderPipeline {
 public:
+    static RenderPipeline* Get() { return s_instance; }
+
     virtual ~RenderPipeline() = default;
 
     /**
@@ -45,6 +47,16 @@ public:
     virtual void Render(RenderScene& scene, RenderView& view, rhi::ResourceHandle target, const rhi::TextureDesc& targetDesc, rhi::SyncHandle signalFence = rhi::handles::INVALID_SYNC) = 0;
 
     virtual PipelineStatistics GetStatistics() const { return {}; }
+
+    virtual bool ReloadShader(rhi::ShaderHandle shader, const void* data, u32 size) {
+        (void)shader; (void)data; (void)size;
+        return false;
+    }
+
+protected:
+    static RenderPipeline* s_instance;
 };
 
 } // namespace primal::graphics
+
+#define g_RenderPipeline primal::graphics::RenderPipeline::Get()
