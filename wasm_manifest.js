@@ -2,7 +2,6 @@
 window.WASM_MANIFEST = {
   shaders: [],
   assets: [
-    { url: 'assets/Sponza.model', fsPath: '/assets/Sponza.model' },
     { url: 'assets/models/Sponza/Background_Albedo.png', fsPath: '/assets/models/Sponza/Background_Albedo.png' },
     { url: 'assets/models/Sponza/Background_Normal.png', fsPath: '/assets/models/Sponza/Background_Normal.png' },
     { url: 'assets/models/Sponza/Background_Roughness.png', fsPath: '/assets/models/Sponza/Background_Roughness.png' },

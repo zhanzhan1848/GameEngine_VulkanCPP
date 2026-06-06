@@ -326,9 +326,8 @@
         if (window.WASM_MANIFEST) {
           return (window.WASM_MANIFEST.shaders || []).concat(window.WASM_MANIFEST.assets || []);
         }
-        return [
-          { url: 'assets/Sponza.model', fsPath: '/assets/Sponza.model' }
-        ];
+        // Sponza.model is embedded, fallback list only needs textures
+        return [];
       }
 
       function fetchAndStage(item) {
@@ -355,12 +354,11 @@
         });
       }
 
-      // Stage only the critical startup file (Sponza.model) synchronously in preRun.
-      // Textures are fetched in the background after the engine starts rendering.
+      // Sponza.model is embedded directly in the WASM binary (--embed-file in
+      // CMakeLists.txt), so it's already in MEMFS before main() runs.  Textures
+      // are fetched in the background after the engine starts rendering.
       async function stageCriticalAssets() {
-        // Sponza.model is needed before main() runs
-        await fetchAndStage({ url: 'assets/Sponza.model', fsPath: '/assets/Sponza.model' });
-        console.log('[Assets] Sponza.model staged');
+        console.log('[Assets] Model already embedded in WASM, nothing to stage');
       }
 
       function stageBackgroundAssets() {
