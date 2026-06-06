@@ -1066,7 +1066,12 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     cmdBuffer->SetScissor(scissor);
 
     bool useDepthEqual = (depthStencil != rhi::handles::INVALID_RESOURCE) && !skipShadows;
-    // std::cout << "ForwardRenderer: Calling OpaquePass" << std::endl;
+#ifdef __EMSCRIPTEN__
+    if (frameNumber_ == 0) {
+        std::cout << "[FwdRenderer] OpaquePass: proxies=" << opaqueProxies.size()
+                  << " transparent=" << transparentProxies.size() << std::endl;
+    }
+#endif
     OpaquePass(cmdBuffer, view, materials, opaqueProxies, frameIndex, useDepthEqual);
 
     cmdBuffer->EndRenderPass();
@@ -1253,9 +1258,17 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
                                  bool useDepthEqual,
                                  rhi::DescriptorSetHandle overrideGlobalSet,
                                  PipelineFlags extraFlags) {
+#ifdef __EMSCRIPTEN__
+    u32 drawCount = 0, matMiss = 0, meshMiss = 0, pipeMiss = 0;
+#endif
     for (const auto* proxy : proxies) {
         auto it = materials.find(proxy->materialId);
-        if (it == materials.end() || !it->second) continue;
+        if (it == materials.end() || !it->second) {
+#ifdef __EMSCRIPTEN__
+            matMiss++;
+#endif
+            continue;
+        }
         MaterialInstance* mi = it->second.get();
         Material* mat = mi->GetMaterial();
 
@@ -1273,6 +1286,10 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
             flags = flags | extraFlags;
             pipeline = mat->GetPipeline(device_, rhi::handles::INVALID_RESOURCE, 0, flags);
         }
+
+#ifdef __EMSCRIPTEN__
+        if (pipeline == rhi::handles::INVALID_PIPELINE) pipeMiss++;
+#endif
 
         cmdBuffer->BindGraphicsPipeline(pipeline);
 
@@ -1306,10 +1323,24 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
         RenderMesh* mesh = RenderMesh::GetByEntityId(proxy->entityId);
         if (mesh && mesh->IsValid()) {
             mesh->Draw(cmdBuffer);
+#ifdef __EMSCRIPTEN__
+            drawCount++;
+#endif
+        } else {
+#ifdef __EMSCRIPTEN__
+            meshMiss++;
+#endif
         }
 
         perObjectBufferOffset_ += alignedSize;
     }
+#ifdef __EMSCRIPTEN__
+    if (frameNumber_ == 0) {
+        std::cout << "[FwdRenderer] OpaquePass done: draws=" << drawCount
+                  << " matMiss=" << matMiss << " meshMiss=" << meshMiss
+                  << " pipeMiss=" << pipeMiss << " total=" << proxies.size() << std::endl;
+    }
+#endif
 }
 
 void ForwardRenderer::TransparentPass(rhi::RHICommandBuffer* cmdBuffer,
