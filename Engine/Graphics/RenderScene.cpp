@@ -92,6 +92,17 @@ utl::vector<const RenderProxy*> RenderScene::Cull(const rhi::Frustum& frustum) c
 
 void RenderScene::Cull(const rhi::Frustum& frustum, utl::vector<const RenderProxy*>& outProxies) const {
     std::lock_guard<std::mutex> lock(mutex_);
+#ifdef __EMSCRIPTEN__
+    // TODO: frustum culling returns 0 visible on WASM, bypassing for now
+    (void)frustum;
+    if (outProxies.capacity() < outProxies.size() + proxies_.size()) {
+        outProxies.reserve(outProxies.size() + proxies_.size());
+    }
+    for (const auto& proxy : proxies_) {
+        outProxies.push_back(&proxy);
+    }
+    return;
+#endif
     // 预估容量，避免频繁分配
     if (outProxies.capacity() < outProxies.size() + proxies_.size()) {
         outProxies.reserve(outProxies.size() + proxies_.size());

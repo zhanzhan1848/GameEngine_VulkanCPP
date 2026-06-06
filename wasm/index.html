@@ -363,23 +363,31 @@
 
       function stageBackgroundAssets() {
         var list = getAssetList();
-        // Filter out Sponza.model (already staged) — keep only textures
         var textures = list.filter(function(item) {
           return item.fsPath !== '/assets/Sponza.model';
         });
-        console.log('[Assets] Background-fetching ' + textures.length + ' textures');
+        console.log('[Assets] Background-fetching ' + textures.length + ' textures (parallel, 8 concurrent)');
+        // Fetch in parallel with up to 8 concurrent requests for speed
+        var concurrency = 8;
         var idx = 0;
+        var completed = 0;
         function next() {
-          if (idx >= textures.length) {
-            console.log('[Assets] All ' + textures.length + ' textures staged');
-            return;
-          }
-          fetchAndStage(textures[idx]).then(function() {
-            idx++;
+          if (idx >= textures.length) return;
+          var current = idx++;
+          fetchAndStage(textures[current]).then(function() {
+            completed++;
+            if (completed % 20 === 0) {
+              console.log('[Assets] Progress: ' + completed + '/' + textures.length);
+            }
+            if (completed === textures.length) {
+              console.log('[Assets] All ' + textures.length + ' textures staged');
+            }
             next();
           });
         }
-        next();
+        for (var i = 0; i < Math.min(concurrency, textures.length); i++) {
+          next();
+        }
       }
 
       var Module = {

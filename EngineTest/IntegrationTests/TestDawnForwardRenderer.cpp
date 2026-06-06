@@ -255,6 +255,28 @@ bool Engine_Test::initialize() {
     // Cull to populate visible proxies
     view_.Cull(scene_);
 
+#ifdef __EMSCRIPTEN__
+    // Diagnostic: check AABB validity and frustum planes
+    {
+        u32 validAABB = 0, invalidAABB = 0;
+        for (const auto& info : sceneMeshInfos_) {
+            if (info.mesh && info.mesh->IsValid()) validAABB++;
+            else invalidAABB++;
+        }
+        std::cout << "[TestDawnFR] AABB stats: " << validAABB << " valid, " << invalidAABB << " invalid" << std::endl;
+    }
+    if (view_.GetVisibleProxies().empty()) {
+        std::cout << "[TestDawnFR] WARNING: 0 visible proxies, bypassing frustum culling" << std::endl;
+        // Force all proxies visible to diagnose rendering
+        auto& proxies = scene_.GetProxies();
+        auto& visible = const_cast<utl::vector<const RenderProxy*>&>(view_.GetVisibleProxies());
+        visible.clear();
+        for (const auto& p : proxies) {
+            visible.push_back(&p);
+        }
+    }
+#endif
+
     std::cout << "[TestDawnForwardRenderer] Scene loaded: " << sceneMeshInfos_.size()
               << " meshes, " << scene_.GetProxies().size() << " proxies, "
               << view_.GetVisibleProxies().size() << " visible" << std::endl;
@@ -513,7 +535,7 @@ void Engine_Test::ReloadTextures() {
     if (texturesReloaded_) return;
 
     std::string textureBase = "assets/";
-    u32 reloaded = 0;
+    u32 reloaded = 0, failed = 0;
 
     for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
         auto& meshInfo = sceneMeshInfos_[i];
@@ -525,7 +547,10 @@ void Engine_Test::ReloadTextures() {
         if (!diffusePath.empty()) {
             diffuseTex = LoadTextureFromFile(device_, diffusePath);
         }
-        if (diffuseTex == INVALID_RESOURCE) continue; // skip if still not available
+        if (diffuseTex == INVALID_RESOURCE) {
+            failed++;
+            continue; // skip if still not available
+        }
 
         // Load normal
         ResourceHandle normalTex = INVALID_RESOURCE;
@@ -581,8 +606,8 @@ void Engine_Test::RenderFrame() {
     UpdateCamera(dt);
 
 #ifdef __EMSCRIPTEN__
-    // Poll for texture reload after ~2 seconds (frame 120)
-    if (!texturesReloaded_ && totalFrames_ >= 120 && totalFrames_ % 60 == 0) {
+    // Poll for texture reload after ~2 seconds (frame 120), retry every 120 frames
+    if (!texturesReloaded_ && totalFrames_ >= 120 && totalFrames_ % 120 == 0) {
         ReloadTextures();
     }
 #endif
