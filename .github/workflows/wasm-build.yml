@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - dawn-webgpu-backend
+      - features/dawn-webgpu-backend
   workflow_dispatch:
 
 permissions:
