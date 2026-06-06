@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Game Engine - WebGPU Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    #canvas {
+      display: block;
+      background: #000;
+      border: 1px solid #333;
+      image-rendering: pixelated;
+    }
+
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #1a1a2e;
+      z-index: 100;
+      transition: opacity 0.5s;
+    }
+
+    #loading.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #loading .spinner {
+      width: 48px;
+      height: 48px;
+      border: 4px solid #333;
+      border-top-color: #00d4ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    #loading .label {
+      margin-top: 16px;
+      font-size: 16px;
+      color: #aaa;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    #status {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 8px 16px;
+      background: rgba(0,0,0,0.7);
+      font-size: 13px;
+      color: #888;
+      text-align: center;
+      display: none;
+    }
+
+    #error {
+      position: fixed;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #1a1a2e;
+      z-index: 200;
+      padding: 40px;
+    }
+
+    #error h2 {
+      color: #ff4444;
+      margin-bottom: 12px;
+    }
+
+    #error p {
+      color: #aaa;
+      max-width: 500px;
+      text-align: center;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Loading overlay -->
+  <div id="loading">
+    <div class="spinner"></div>
+    <div class="label">Loading WASM Module / 加载中...</div>
+  </div>
+
+  <!-- WebGPU canvas -->
+  <canvas id="canvas" width="1280" height="720"></canvas>
+
+  <!-- Status bar -->
+  <div id="status"></div>
+
+  <!-- Error overlay -->
+  <div id="error">
+    <h2>WebGPU Not Available</h2>
+    <p>
+      Your browser does not support WebGPU. Please use Chrome 113+, Edge 113+, or Firefox Nightly with WebGPU enabled.<br>
+      <br>
+      浏览器不支持 WebGPU，请使用 Chrome 113+、Edge 113+ 或开启 WebGPU 的 Firefox Nightly。
+    </p>
+  </div>
+
+  <script>
+    (function() {
+      var loadingEl = document.getElementById('loading');
+      var errorEl   = document.getElementById('error');
+      var statusEl  = document.getElementById('status');
+
+      // WebGPU capability check
+      if (!navigator.gpu) {
+        errorEl.style.display = 'flex';
+        loadingEl.style.display = 'none';
+        return;
+      }
+
+      // Status helper - WASM module can call setStatus from JS
+      window.setStatus = function(text) {
+        statusEl.style.display = 'block';
+        statusEl.textContent = text;
+      };
+
+      // Called by Emscripten when runtime is ready
+      window.hideLoading = function() {
+        loadingEl.classList.add('hidden');
+      };
+
+      // Emscripten module configuration
+      var Module = {
+        preRun: [],
+        postRun: [function() {
+          window.hideLoading();
+        }],
+        print: function(text) {
+          console.log('[WASM]', text);
+        },
+        printErr: function(text) {
+          console.error('[WASM]', text);
+          window.setStatus(text);
+        },
+        canvas: (function() {
+          return document.getElementById('canvas');
+        })(),
+        setStatus: function(text) {
+          if (text) {
+            document.querySelector('#loading .label').textContent = text;
+          }
+        },
+        totalDependencies: 0,
+        monitorRunDependencies: function(left) {
+          this.totalDependencies = Math.max(this.totalDependencies, left);
+          if (left) {
+            Module.setStatus('Downloading... (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')');
+          } else {
+            Module.setStatus('All downloads complete. / 下载完成');
+          }
+        }
+      };
+
+      window.Module = Module;
+    })();
+  </script>
+
+  {{{ SCRIPT }}}
+
+</body>
+</html>
