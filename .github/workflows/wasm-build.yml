@@ -51,6 +51,12 @@ jobs:
           if [ -f wasm/index.html ]; then
             cp wasm/index.html deploy/index.html
           fi
+          # Copy runtime assets (Sponza model + textures, ~114MB)
+          mkdir -p deploy/assets/models/Sponza
+          cp EngineTest/assets/Sponza.model deploy/assets/
+          cp EngineTest/assets/models/Sponza/*.png deploy/assets/models/Sponza/ 2>/dev/null || true
+          echo "=== Deploy contents ==="
+          du -sh deploy/
           ls -la deploy/
 
       - name: Deploy to GitHub Pages
