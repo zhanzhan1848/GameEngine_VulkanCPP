@@ -3,6 +3,7 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/SceneDataAdapter.h"
 #include "Graphics/Passes/ParticlePass.h"
+#include "Graphics/PCG/PCGInstanceBuilder.h"
 #include "Utilities/Math.h"
 
 namespace primal::graphics {
@@ -37,6 +38,10 @@ public:
     void SetLightDirection(math::v3 dir);
     void SetLightColor(math::v4 color);
     ParticlePass* GetParticlePass();
+
+    // PCG instance rendering (loop-draw, zero shader changes)
+    void SetPCGInstances(const std::vector<pcg::PCGInstanceData>& instances);
+    void ClearPCGInstances();
 
 private:
     // Initialization sub-methods
@@ -171,6 +176,9 @@ private:
     rhi::ResourceHandle white_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle flat_normal_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle black_cube_texture_{rhi::handles::INVALID_RESOURCE};
+
+    // PCG instances (CPU-side, loop-draw per frame)
+    std::vector<pcg::PCGInstanceData> pcg_instances_;
 };
 
 } // namespace primal::graphics

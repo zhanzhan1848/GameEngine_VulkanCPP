@@ -780,6 +780,13 @@ void ForwardSceneRenderer::SetLightDirection(math::v3 dir) { light_dir_ = dir; }
 void ForwardSceneRenderer::SetLightColor(math::v4 color) { light_color_ = color; }
 ParticlePass* ForwardSceneRenderer::GetParticlePass() { return &particle_pass_; }
 
+void ForwardSceneRenderer::SetPCGInstances(const std::vector<pcg::PCGInstanceData>& instances) {
+    pcg_instances_ = instances;
+}
+void ForwardSceneRenderer::ClearPCGInstances() {
+    pcg_instances_.clear();
+}
+
 // ============================================================================
 // Shadow VP Computation
 // ============================================================================
@@ -914,6 +921,19 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
             cmd->PushConstants(shadow_layout_, ShaderStage::Vertex, 2, sizeof(mvp), &mvp);
             mesh_infos_[i].mesh->Draw(cmd, 1, 0, 20);
         }
+
+        // PCG instances in shadow pass
+        if (!pcg_instances_.empty() && !mesh_infos_.empty() && mesh_infos_[0].mesh) {
+            auto matSet = (material_ds_.size() > 0) ? material_ds_[0] : material_ds_[0];
+            const DescriptorSetHandle matSets[] = {matSet};
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 1, 1, matSets, 0, nullptr);
+            for (const auto& inst : pcg_instances_) {
+                math::m4x4 mvp = cached_shadow_vp_[1] * inst.model_matrix;
+                cmd->PushConstants(shadow_layout_, ShaderStage::Vertex, 2, sizeof(mvp), &mvp);
+                mesh_infos_[0].mesh->Draw(cmd, 1, 0, 20);
+            }
+        }
+
         cmd->EndRenderPass();
     }
 
@@ -956,6 +976,18 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
             mesh_infos_[i].mesh->Draw(cmd, 1, 0, 20);
             gbuf_draws++;
         }
+
+        // PCG instances (loop-draw, reuses first mesh's material)
+        if (!pcg_instances_.empty() && !mesh_infos_.empty() && mesh_infos_[0].mesh) {
+            auto matSet = (material_ds_.size() > 0) ? material_ds_[0] : material_ds_[0];
+            const DescriptorSetHandle matSets[] = {matSet};
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbuffer_layout_, 1, 1, matSets, 0, nullptr);
+            for (const auto& inst : pcg_instances_) {
+                cmd->PushConstants(gbuffer_layout_, ShaderStage::Vertex, 2, sizeof(inst.model_matrix), &inst.model_matrix);
+                mesh_infos_[0].mesh->Draw(cmd, 1, 0, 20);
+            }
+        }
+
         cmd->EndRenderPass();
     }
 

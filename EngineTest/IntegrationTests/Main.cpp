@@ -34,6 +34,8 @@
 #include "TestNaniteStreamingPipeline.h"
 #elif defined(TEST_FORWARD_RENDERER)
 #include "TestForwardRenderer.h"
+#elif defined(TEST_PCG_SCATTER)
+#include "TestPCGScatter.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif

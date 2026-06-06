@@ -252,8 +252,18 @@ if(APPLE)
     setup_test_target(TestForwardRenderer)
     target_compile_definitions(TestForwardRenderer PRIVATE "TEST_FORWARD_RENDERER=1" "TEST_RENDERER=0")
 
+    # 13. TestPCGScatter
+    add_executable(TestPCGScatter
+        "Main.cpp"
+        "TestPCGScatter.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestPCGScatter)
+    target_compile_definitions(TestPCGScatter PRIVATE "TEST_PCG_SCATTER=1" "TEST_RENDERER=0")
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

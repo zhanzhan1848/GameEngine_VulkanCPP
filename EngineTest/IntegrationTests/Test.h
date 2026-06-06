@@ -47,6 +47,10 @@
 #define TEST_FORWARD_RENDERER 0
 #endif
 
+#ifndef TEST_PCG_SCATTER
+#define TEST_PCG_SCATTER 0
+#endif
+
 class Test
 {
 public:
