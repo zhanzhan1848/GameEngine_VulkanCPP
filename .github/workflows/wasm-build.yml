@@ -30,6 +30,17 @@ jobs:
       - name: Verify Emscripten
         run: emcc --version
 
+      - name: Cache Emscripten ports
+        uses: actions/cache@v4
+        with:
+          path: ~/.emscripten_cache
+          key: emscripten-ports-${{ runner.os }}-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            emscripten-ports-${{ runner.os }}-
+
+      - name: Pre-fetch emdawnwebgpu port
+        run: embuilder build emdawnwebgpu --force 2>&1 || true
+
       - name: Configure (Emscripten + WebGPU)
         run: |
           emcmake cmake -B build_wasm \
