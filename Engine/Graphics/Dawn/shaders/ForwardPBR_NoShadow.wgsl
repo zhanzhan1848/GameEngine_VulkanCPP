@@ -130,6 +130,8 @@ const PI: f32 = 3.141592653589793;
 
 @fragment
 fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @location(0) vec4<f32> {
+    // DIAGNOSTIC: output solid red to verify draw calls are working
+    return vec4<f32>(1.0, 0.2, 0.1, 1.0);
     let albedo = textureSample(albedoMap, matSampler, input.uv).rgb;
     let normalTex = textureSample(normalMap, matSampler, input.uv).rgb;
     let orm = textureSample(ormMap, matSampler, input.uv);
