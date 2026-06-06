@@ -42,9 +42,11 @@ jobs:
       - name: Prepare deploy directory
         run: |
           mkdir -p deploy
-          # Copy WASM runtime files
+          # CMakeLists.txt sets CMAKE_RUNTIME_OUTPUT_DIRECTORY to WASM/
+          cp WASM/TestDawnWASM.js WASM/TestDawnWASM.wasm deploy/ 2>/dev/null || true
+          # Also check build_wasm just in case
           find build_wasm -maxdepth 3 \( -name '*.js' -o -name '*.wasm' -o -name '*.data' \) \
-            -exec cp {} deploy/ \;
+            -exec cp {} deploy/ \; 2>/dev/null || true
           # Copy landing page
           if [ -f wasm/index.html ]; then
             cp wasm/index.html deploy/index.html
