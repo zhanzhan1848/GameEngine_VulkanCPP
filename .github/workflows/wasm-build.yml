@@ -1,9 +1,5 @@
 name: WASM Build & Deploy
 
-# Build Dawn WebGPU engine to WebAssembly and deploy to GitHub Pages.
-# This is an iterative work-in-progress; expect build failures until
-# Emscripten / WebGPU CMake support is fully wired up.
-
 on:
   push:
     branches:
@@ -31,27 +27,17 @@ jobs:
           version: latest
           actions-cache-folder: emsdk-cache
 
-      - name: Activate emsdk
-        run: |
-          source ./emsdk/emsdk_env.sh
-          emcc --version
-
-      - name: Install Python3
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3 python3-pip
+      - name: Verify Emscripten
+        run: emcc --version
 
       - name: Configure (Emscripten + WebGPU)
         run: |
-          source ./emsdk/emsdk_env.sh
           emcmake cmake -B build_wasm \
             -DENABLE_WEBGPU=ON \
             -DCMAKE_BUILD_TYPE=MinSizeRel
 
       - name: Build
-        run: |
-          source ./emsdk/emsdk_env.sh
-          cmake --build build_wasm --parallel $(nproc)
+        run: cmake --build build_wasm --parallel $(nproc)
 
       - name: Prepare deploy directory
         run: |
@@ -59,24 +45,9 @@ jobs:
           # Copy WASM runtime files
           find build_wasm -maxdepth 3 \( -name '*.js' -o -name '*.wasm' -o -name '*.data' \) \
             -exec cp {} deploy/ \;
-          # Copy landing page if it exists
+          # Copy landing page
           if [ -f wasm/index.html ]; then
             cp wasm/index.html deploy/index.html
-          fi
-          # Fallback: generate a minimal index.html if none provided
-          if [ ! -f deploy/index.html ]; then
-            cat > deploy/index.html <<'HTMLEOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>GameEngine WebGPU</title></head>
-            <body>
-              <canvas id="canvas"></canvas>
-              <script>
-                var Module = { canvas: document.getElementById('canvas') };
-              </script>
-            </body>
-            </html>
-            HTMLEOF
           fi
           ls -la deploy/
 
