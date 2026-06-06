@@ -3,6 +3,7 @@
 #include "CommonHeaders.h"
 #include "../RHI/Core/RHITypes.h"
 #include "../Scene/RenderSceneSnapshot.h"
+#include "Graphics/Field/FieldDescriptor.h"
 #include <mutex>
 #include <atomic>
 
@@ -69,6 +70,12 @@ public:
     const GlobalSDFStats& GetStats() const { return stats_; }
 
     bool IsInitialized() const { return initialized_; }
+
+    // Field System integration
+    using CascadeDescriptors = std::array<field::FieldDescriptor, 4>;
+    CascadeDescriptors GetCascadeDescriptors() const;
+    void RegisterToFieldRegistry();
+    void UnregisterFromFieldRegistry();
 
     /// Initialize the voxelization compute pipeline. Call once after Initialize().
     bool InitVoxelization(const SDFVoxelizationResources& resources);

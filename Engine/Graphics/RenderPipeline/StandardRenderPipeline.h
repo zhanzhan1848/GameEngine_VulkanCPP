@@ -12,7 +12,10 @@
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Volume/VolumePass.h"
 #include "Graphics/Volume/VolumeRenderer.h"
+#include "Graphics/Volume/FroxelFogPass.h"
+#include "Graphics/Fluid/FluidRenderPass.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
+#include "Graphics/RenderPipeline/Modules/ForwardSceneRenderer.h"
 #include "Graphics/RenderPipeline/Modules/ShadowMapModule.h"
 #include "Graphics/RenderPipeline/Modules/DeferredLightingModule.h"
 #include "Graphics/RenderPipeline/Modules/FinalBlitModule.h"
@@ -114,6 +117,15 @@ public:
 
     rhi::RHIDeviceBase* GetDevice() const { return device_; }
 
+    // --- Editor mode (lightweight forward rendering) ---
+    void SetEditorMode(bool enabled) { editor_mode_ = enabled; }
+    bool IsEditorMode() const { return editor_mode_; }
+    bool LoadEditorScene(const std::string& model_path) {
+        if (!forward_renderer_) return false;
+        return forward_renderer_->LoadScene(model_path);
+    }
+    ForwardSceneRenderer* GetForwardRenderer() const { return forward_renderer_.get(); }
+
     /// Hot-reload a shader. Returns true on success.
     bool ReloadShader(rhi::ShaderHandle shader, const void* data, u32 size) override;
 
@@ -169,6 +181,14 @@ private:
     // --- Volume Rendering ---
     std::unique_ptr<volume::VolumePass> volume_pass_;
     std::unique_ptr<volume::VolumeRenderer> volume_renderer_;
+    std::unique_ptr<volume::FroxelFogPass> froxel_fog_pass_;
+
+    // --- Fluid Rendering ---
+    std::unique_ptr<fluid::FluidRenderPass> fluid_render_pass_;
+
+    // --- Forward Renderer (Editor mode) ---
+    std::unique_ptr<ForwardSceneRenderer> forward_renderer_;
+    bool editor_mode_{false};
 
     // --- Pipeline modules ---
     std::unique_ptr<ShadowMapModule> shadow_module_;

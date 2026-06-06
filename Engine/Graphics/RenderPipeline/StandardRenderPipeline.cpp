@@ -170,8 +170,11 @@ bool StandardRenderPipeline::IsPassActive(RenderPassID pass) const {
         case RenderPassID::SSGI:             return ssgi_pass_ && ssgi_pass_->IsInitialized();
         case RenderPassID::ScreenProbes:     return screen_probe_pass_ && screen_probe_pass_->IsInitialized();
         case RenderPassID::GIGather:         return gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized();
-        case RenderPassID::VolumePass:       return volume_pass_ && volume_pass_->IsInitialized();
+        case RenderPassID::VolumePass:       return (volume_pass_ && volume_pass_->IsInitialized()) ||
+                                                     (froxel_fog_pass_ && froxel_fog_pass_->IsInitialized());
         case RenderPassID::VolumeRenderer:   return volume_renderer_ && volume_renderer_->IsInitialized();
+        case RenderPassID::FroxelFog:       return froxel_fog_pass_ && froxel_fog_pass_->IsInitialized();
+        case RenderPassID::FluidRender:     return fluid_render_pass_ && fluid_render_pass_->IsInitialized();
         case RenderPassID::FusionComposite:  return fusion_module_ != nullptr;
         case RenderPassID::FinalBlit:        return final_blit_module_ != nullptr;
         default: return false;
@@ -304,6 +307,10 @@ void StandardRenderPipeline::InitializeSubsystems() {
 
     // --- Lumen passes ---
     InitializeLumenPasses();
+
+    // --- Forward renderer (editor mode) ---
+    forward_renderer_ = std::make_unique<ForwardSceneRenderer>();
+    forward_renderer_->Initialize(device_, render_width_, render_height_);
 }
 
 void StandardRenderPipeline::ShutdownSubsystems() {
@@ -313,6 +320,9 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (final_blit_module_) { final_blit_module_->Shutdown(); final_blit_module_.reset(); }
     if (deferred_module_) { deferred_module_->Shutdown(); deferred_module_.reset(); }
     if (shadow_module_) { shadow_module_->Shutdown(); shadow_module_.reset(); }
+
+    // Forward renderer (editor mode)
+    if (forward_renderer_) { forward_renderer_->Shutdown(); forward_renderer_.reset(); }
 
     if (scene_snapshot_) { scene_snapshot_->Shutdown(); scene_snapshot_.reset(); }
     if (color_history_) { color_history_->Shutdown(); color_history_.reset(); }
@@ -432,9 +442,29 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             volume_renderer_.reset();
         }
     }
+
+    // Froxel Fog (frustum-aligned volumetric fog)
+    if (settings_.quality.enable_froxel_fog) {
+        froxel_fog_pass_ = std::make_unique<volume::FroxelFogPass>();
+        if (!froxel_fog_pass_->Initialize(device_, render_width_, render_height_, settings_.froxel)) {
+            std::cerr << "[FroxelFog] Init failed" << std::endl;
+            froxel_fog_pass_.reset();
+        }
+    }
+
+    // Fluid Render (splat-based fluid surface)
+    if (settings_.quality.enable_fluid_render) {
+        fluid_render_pass_ = std::make_unique<fluid::FluidRenderPass>();
+        if (!fluid_render_pass_->Initialize(device_, render_width_, render_height_, settings_.fluid)) {
+            std::cerr << "[FluidRender] Init failed" << std::endl;
+            fluid_render_pass_.reset();
+        }
+    }
 }
 
 void StandardRenderPipeline::ShutdownLumenPasses() {
+    if (fluid_render_pass_) { fluid_render_pass_->Shutdown(); fluid_render_pass_.reset(); }
+    if (froxel_fog_pass_) { froxel_fog_pass_->Shutdown(); froxel_fog_pass_.reset(); }
     if (volume_renderer_) { volume_renderer_->Shutdown(); volume_renderer_.reset(); }
     if (volume_pass_) { volume_pass_->Shutdown(); volume_pass_.reset(); }
     if (static_probe_volume_) { static_probe_volume_->Shutdown(); static_probe_volume_.reset(); }
@@ -674,17 +704,11 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
-    // Step 4.5: Volume Ray March
+    // Step 4.5: Volume (Froxel Fog or Ray March)
     // ========================================================================
 
-    volume::VolumeOutput volumeOut;
-    if (volume_pass_ && volume_pass_->IsInitialized()) {
-        volume::VolumeInputs volIn;
-        volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
-        volIn.scene_color = deferredOut.deferred_output_rg;
-        volIn.shadow_map = shadowOut.shadow_visibility_rg;
-
-        // SDF cascades from GlobalSDF
+    // Helper: collect SDF cascade RG handles (shared by both VolumePass and FroxelFogPass)
+    auto collectSDFCascades = [&](auto& volIn) {
         auto& globalSDF = nanite::GlobalSDF::Get();
         if (globalSDF.IsInitialized()) {
             for (u32 c = 0; c < std::min(3u, globalSDF.GetConfig().cascade_count); ++c) {
@@ -698,6 +722,38 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 }
             }
         }
+    };
+
+    volume::VolumeOutput volumeOut;
+    if (froxel_fog_pass_ && froxel_fog_pass_->IsInitialized()) {
+        volume::FroxelInputs froxelIn;
+        froxelIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+        froxelIn.scene_color = deferredOut.deferred_output_rg;
+        froxelIn.shadow_map = shadowOut.shadow_visibility_rg;
+        froxelIn.shadow_matrix0 = shadowOut.shadow_matrix0;
+        froxelIn.shadow_matrix1 = shadowOut.shadow_matrix1;
+        collectSDFCascades(froxelIn);
+
+        volume::VolumeCameraData volCam{};
+        volCam.camera_position = camera_position_;
+        volCam.view_matrix = view_matrix_;
+        volCam.proj_matrix = proj_matrix_;
+        volCam.light_direction = Normalize(settings_.lighting.light_direction);
+        volCam.light_color = {settings_.lighting.light_color.x, settings_.lighting.light_color.y, settings_.lighting.light_color.z};
+        volCam.frame_index = static_cast<u32>(frameCount_);
+        froxelIn.camera_data = volCam;
+        froxelIn.width = render_width_;
+        froxelIn.height = render_height_;
+
+        auto froxelOut = froxel_fog_pass_->AddPass(graph, froxelIn);
+        volumeOut.volume_scatter = froxelOut.volume_scatter;
+        volumeOut.valid = froxelOut.valid;
+    } else if (volume_pass_ && volume_pass_->IsInitialized()) {
+        volume::VolumeInputs volIn;
+        volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+        volIn.scene_color = deferredOut.deferred_output_rg;
+        volIn.shadow_map = shadowOut.shadow_visibility_rg;
+        collectSDFCascades(volIn);
 
         volume::VolumeCameraData volCam{};
         volCam.camera_position = camera_position_;
@@ -710,6 +766,23 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         volIn.width = render_width_;
         volIn.height = render_height_;
         volumeOut = volume_pass_->AddPass(graph, volIn);
+    }
+
+    // ========================================================================
+    // Step 4.6: Fluid Render
+    // ========================================================================
+
+    fluid::FluidOutput fluidOut;
+    if (fluid_render_pass_ && fluid_render_pass_->IsInitialized()) {
+        fluid::FluidInputs fluidIn;
+        fluidIn.view_matrix = view_matrix_;
+        fluidIn.proj_matrix = proj_matrix_;
+        fluidIn.camera_position = camera_position_;
+        fluidIn.scene_color = deferredOut.deferred_output_rg;
+        fluidIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Fluid", gpuDraw.GetGBufferDepthSampleable());
+        fluidIn.width = render_width_;
+        fluidIn.height = render_height_;
+        fluidOut = fluid_render_pass_->AddPass(graph, fluidIn);
     }
 
     // ========================================================================
@@ -941,6 +1014,19 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
     UpdatePerFrame(scene, view);
 
+    // --- Editor mode: lightweight forward rendering ---
+    if (editor_mode_ && forward_renderer_) {
+        std::cout << "[DIAG] EDITOR_MODE_PATH: frame=" << frameCount_
+                  << " target=" << (u32)target
+                  << " cmd=" << (void*)cmd << std::endl;
+        forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
+                                   target, cbIdx % 3);
+        frameCount_++;
+        return;
+    }
+    std::cout << "[DIAG] NON_EDITOR_PATH: editor=" << editor_mode_
+              << " fwd=" << (void*)forward_renderer_.get() << std::endl;
+
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
 
     // Culling
@@ -1144,9 +1230,46 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 spRadiance, spCam, static_cast<u32>(frameCount_));
         }
 
-        // --- Volume Ray March ---
+        // --- Volume (Froxel Fog or Ray March) ---
         volume::VolumeOutput volumeOut;
-        if (volume_pass_ && volume_pass_->IsInitialized()) {
+        if (froxel_fog_pass_ && froxel_fog_pass_->IsInitialized()) {
+            volume::FroxelInputs froxelIn;
+            froxelIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+            froxelIn.scene_color = deferredOut.deferred_output_rg;
+            froxelIn.shadow_map = shadowOut.shadow_visibility_rg;
+            froxelIn.shadow_matrix0 = shadowOut.shadow_matrix0;
+            froxelIn.shadow_matrix1 = shadowOut.shadow_matrix1;
+
+            auto& globalSDF = nanite::GlobalSDF::Get();
+            if (globalSDF.IsInitialized()) {
+                for (u32 c = 0; c < std::min(3u, globalSDF.GetConfig().cascade_count); ++c) {
+                    const auto& cascade = globalSDF.GetCascade(c);
+                    if (cascade.sdf_texture != handles::INVALID_RESOURCE) {
+                        std::string name = "SDFCascade" + std::to_string(c) + "_Volume";
+                        auto sdfRG = graph.ImportResource(name, cascade.sdf_texture);
+                        if (c == 0) froxelIn.sdf_cascade_0 = sdfRG;
+                        else if (c == 1) froxelIn.sdf_cascade_1 = sdfRG;
+                        else if (c == 2) froxelIn.sdf_cascade_2 = sdfRG;
+                    }
+                }
+            }
+
+            volume::VolumeCameraData volCam{};
+            volCam.camera_position = camera_position_;
+            volCam.view_matrix = view_matrix_;
+            volCam.proj_matrix = proj_matrix_;
+            math::v3 lightDir = Normalize(settings_.lighting.light_direction);
+            volCam.light_direction = lightDir;
+            volCam.light_color = {settings_.lighting.light_color.x, settings_.lighting.light_color.y, settings_.lighting.light_color.z};
+            volCam.frame_index = static_cast<u32>(frameCount_);
+            froxelIn.camera_data = volCam;
+            froxelIn.width = render_width_;
+            froxelIn.height = render_height_;
+
+            auto froxelOut = froxel_fog_pass_->AddPass(graph, froxelIn);
+            volumeOut.volume_scatter = froxelOut.volume_scatter;
+            volumeOut.valid = froxelOut.valid;
+        } else if (volume_pass_ && volume_pass_->IsInitialized()) {
             volume::VolumeInputs volIn;
             volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
             volIn.scene_color = deferredOut.deferred_output_rg;
@@ -1178,6 +1301,20 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             volIn.width = render_width_;
             volIn.height = render_height_;
             volumeOut = volume_pass_->AddPass(graph, volIn);
+        }
+
+        // --- Fluid Render ---
+        fluid::FluidOutput fluidOut;
+        if (fluid_render_pass_ && fluid_render_pass_->IsInitialized()) {
+            fluid::FluidInputs fluidIn;
+            fluidIn.view_matrix = view_matrix_;
+            fluidIn.proj_matrix = proj_matrix_;
+            fluidIn.camera_position = camera_position_;
+            fluidIn.scene_color = deferredOut.deferred_output_rg;
+            fluidIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Fluid", gpuDraw.GetGBufferDepthSampleable());
+            fluidIn.width = render_width_;
+            fluidIn.height = render_height_;
+            fluidOut = fluid_render_pass_->AddPass(graph, fluidIn);
         }
 
         // --- Volume Object Rendering (forward, into scatter texture) ---
@@ -1311,7 +1448,36 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
         target_height_ = targetDesc.size.y;
     }
 
+    ApplyConfigChanges();
     UpdatePerFrame(scene, view);
+
+    // --- Editor mode: lightweight forward rendering ---
+    if (editor_mode_ && forward_renderer_) {
+        CommandBufferHandle cmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        if (cmdHandle == handles::INVALID_COMMAND_BUFFER) return;
+
+        RHICommandBuffer* cmd = GetCommandBuffer(cmdHandle);
+        if (!cmd || !cmd->Initialize() || !cmd->Begin()) {
+            if (cmd) device_->DestroyCommandBuffer(cmdHandle);
+            return;
+        }
+
+        forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
+                                   target, cbIdx % 3);
+
+        cmd->End();
+        QueueSubmitInfo submitInfo{};
+        submitInfo.cmdBuffer = cmdHandle;
+        submitInfo.signalFence = signalFence;
+        device_->Submit(submitInfo);
+        device_->DestroyCommandBuffer(cmdHandle);
+
+        frameCount_++;
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+        return;
+    }
 
     renderGraph_->Clear();
     BuildRenderGraph(target, cbIdx);

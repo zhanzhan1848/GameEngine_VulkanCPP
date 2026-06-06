@@ -2,6 +2,7 @@
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
 #include "../RHI/Core/RHIMath.h"
+#include "Graphics/Field/FieldRegistry.h"
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -46,6 +47,7 @@ bool GlobalSDF::Initialize(rhi::RHIDeviceBase* device, const GlobalSDFConfig& co
     }
     
     initialized_ = true;
+    RegisterToFieldRegistry();
     return true;
 }
 
@@ -53,7 +55,9 @@ void GlobalSDF::Shutdown() {
     if (!initialized_) {
         return;
     }
-    
+
+    UnregisterFromFieldRegistry();
+
     for (auto& cascade : cascades_) {
         if (cascade.sdf_texture != rhi::handles::INVALID_RESOURCE) {
             FreeTexture(cascade.sdf_texture);
@@ -116,6 +120,13 @@ void GlobalSDF::Update(const RenderSceneSnapshot& snapshot, u64 current_frame,
     stats_.updates_this_frame = updates_this_frame;
     
     UpdateStats(current_frame);
+
+    // Update field registry with latest cascade data (origins may have shifted)
+    auto descs = GetCascadeDescriptors();
+    auto& registry = field::FieldRegistry::Get();
+    for (u32 i = 0; i < config_.cascade_count && i < 4; ++i) {
+        registry.Update(field::FieldSemantic::GlobalSDF, descs[i]);
+    }
 }
 
 bool GlobalSDF::CreateCascades() {
@@ -247,6 +258,46 @@ math::v3 GlobalSDF::CalculateCascadeOrigin(u32 cascade_index, const math::v3& ca
 
 f32 GlobalSDF::CalculateCascadeVoxelSize(u32 cascade_index) const {
     return config_.voxel_size_base * std::pow(config_.cascade_scale_factor, cascade_index);
+}
+
+// ============================================================================
+// Field System integration
+// ============================================================================
+
+GlobalSDF::CascadeDescriptors GlobalSDF::GetCascadeDescriptors() const {
+    CascadeDescriptors descs{};
+    for (u32 i = 0; i < config_.cascade_count && i < 4; ++i) {
+        const auto& c = cascades_[i];
+        auto& d = descs[i];
+
+        d.type = field::FieldType::SDF;
+        d.semantic = field::FieldSemantic::GlobalSDF;
+        d.origin = c.origin;
+        d.extent = c.extent;
+        d.is_valid = c.is_valid;
+
+        d.Set(field::FieldAttr::VoxelSize, c.voxel_size);
+        d.Set(field::FieldAttr::Resolution, c.resolution);
+        d.Set(field::FieldAttr::MipLevels, c.mip_levels);
+        d.Set(field::FieldAttr::CascadeIndex, i);
+        d.Set(field::FieldAttr::CascadeCount, config_.cascade_count);
+        d.Set(field::FieldAttr::CascadeScale, static_cast<f32>(config_.cascade_scale_factor));
+
+        d.SetResource(field::FieldResourceSlot::Primary, c.sdf_texture);
+    }
+    return descs;
+}
+
+void GlobalSDF::RegisterToFieldRegistry() {
+    auto& registry = field::FieldRegistry::Get();
+    auto descs = GetCascadeDescriptors();
+    for (u32 i = 0; i < config_.cascade_count && i < 4; ++i) {
+        registry.Register(descs[i]);
+    }
+}
+
+void GlobalSDF::UnregisterFromFieldRegistry() {
+    field::FieldRegistry::Get().Unregister(field::FieldSemantic::GlobalSDF);
 }
 
 const SDFCascade& GlobalSDF::GetCascade(u32 index) const {

@@ -242,8 +242,18 @@ if(APPLE)
     setup_test_target(TestHZBStandalone)
     target_compile_definitions(TestHZBStandalone PRIVATE "HZB_STANDALONE_TEST=1")
 
+    # 12. TestForwardRenderer
+    add_executable(TestForwardRenderer
+        "Main.cpp"
+        "TestForwardRenderer.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestForwardRenderer)
+    target_compile_definitions(TestForwardRenderer PRIVATE "TEST_FORWARD_RENDERER=1" "TEST_RENDERER=0")
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

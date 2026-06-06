@@ -32,6 +32,8 @@
 #include "TestParticleSponza.h"
 #elif defined(TEST_NANITE_STREAMING_PIPELINE)
 #include "TestNaniteStreamingPipeline.h"
+#elif defined(TEST_FORWARD_RENDERER)
+#include "TestForwardRenderer.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif

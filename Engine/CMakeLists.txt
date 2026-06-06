@@ -91,6 +91,10 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Volume/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Volume/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Field/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Field/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Fluid/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Fluid/*.cpp"
     # Ensure SSRPass is included (GLOB_RECURSE should pick it up, but touching file forces rescan)
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.cpp"
