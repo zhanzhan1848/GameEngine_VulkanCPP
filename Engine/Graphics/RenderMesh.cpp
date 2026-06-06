@@ -179,14 +179,6 @@ void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, u32 instanceCount, u32 s
     u64 offsets[] = { 0 };
     cmdBuffer->BindVertexBuffers(bindingSlot, 1, buffers, offsets);
 
-    // Debug: Print Draw Info once
-    static bool printed = false;
-    if (!printed && vertexCount_ > 0) {
-        std::cout << "RenderMesh::Draw - Binding Vertex Buffer " << vertexBuffer_ << " to slot " << bindingSlot << " Offset 0" << std::endl;
-        std::cout << "RenderMesh::Draw - Drawing " << (indexBuffer_ != rhi::handles::INVALID_RESOURCE ? indexCount_ : vertexCount_) << " primitives." << std::endl;
-        printed = true;
-    }
-
     if (indexBuffer_ != rhi::handles::INVALID_RESOURCE && indexCount_ > 0) {
         // 绑定索引缓冲区
         rhi::DataFormat indexFormat = (indexType_ == rhi::DataIndexType::UInt32) 

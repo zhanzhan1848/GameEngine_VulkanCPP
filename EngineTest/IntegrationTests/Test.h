@@ -35,13 +35,10 @@
 #define TEST_MULTIVIEW 0
 #endif
 
-#ifndef TEST_SPONZA_RENDERGRAPH
-#define TEST_SPONZA_RENDERGRAPH 0
-#endif
-
 class Test
 {
 public:
+    virtual ~Test() = default;
 #ifdef _WIN64
     virtual bool initialize() = 0;
     virtual void run() = 0;

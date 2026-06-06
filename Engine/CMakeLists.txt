@@ -9,13 +9,15 @@ project(${PROJECT_NAME})
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-execute_process(
-        COMMAND xcrun --sdk macosx --show-sdk-path
-        OUTPUT_VARIABLE MACOSX_PREFIX
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-set(CMAKE_OSX_SYSROOT "${MACOSX_PREFIX}")
-set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
+if(APPLE AND NOT EMSCRIPTEN)
+    execute_process(
+            COMMAND xcrun --sdk macosx --show-sdk-path
+            OUTPUT_VARIABLE MACOSX_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    set(CMAKE_OSX_SYSROOT "${MACOSX_PREFIX}")
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
+endif()
 
 # 根据平台分别收集源文件
 file(GLOB_RECURSE PLATFORM_UTILS
@@ -43,8 +45,13 @@ elseif(APPLE)
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.mm"
     )
 elseif(LINUX)
-    file(GLOB_RECURSE PLATFORM_SOURCES 
+    file(GLOB_RECURSE PLATFORM_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformLinux.cpp"
+    )
+elseif(EMSCRIPTEN)
+    file(GLOB_RECURSE PLATFORM_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformEmscripten.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Platform/StubsEmscripten.cpp"
     )
 endif()
 
@@ -139,11 +146,23 @@ endif()
 
 # 添加WebGPU平台支持（如果启用）
 if(ENABLE_WEBGPU)
-    # 设置Dawn库路径
-    set(DAWN_ROOT_DIR ${CMAKE_SOURCE_DIR}/third_party/dawn)
-    
-    # 检查Dawn库是否存在
-    if(EXISTS ${DAWN_ROOT_DIR})
+    if(EMSCRIPTEN)
+        # Emscripten: use browser's native WebGPU, don't compile Dawn
+        file(GLOB_RECURSE WEBGPU_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Dawn/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Dawn/*.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Dawn/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Dawn/*.cpp"
+        )
+        list(APPEND GRAPHICS_SOURCES ${WEBGPU_SOURCES})
+        add_definitions(-DENABLE_WEBGPU=1)
+        message(STATUS "WebGPU platform configured for Emscripten (browser WebGPU)")
+    else()
+        # Native: compile Dawn from source
+        set(DAWN_ROOT_DIR ${CMAKE_SOURCE_DIR}/third_party/dawn)
+
+        # 检查Dawn库是否存在
+        if(EXISTS ${DAWN_ROOT_DIR})
         message(STATUS "Found Dawn library at: ${DAWN_ROOT_DIR}")
         
         # 添加Dawn库作为子项目
@@ -151,12 +170,12 @@ if(ENABLE_WEBGPU)
         
         # 设置Dawn库目标
         set(DAWN_LIBRARIES
+            webgpu_dawn
             dawn_native
             dawn_proc
             dawn_wire
             dawn_platform
             dawn_common
-            dawn_utils
         )
         
         # 设置Dawn包含目录
@@ -168,9 +187,11 @@ if(ENABLE_WEBGPU)
         )
         
         # 收集WebGPU平台源文件
-        file(GLOB_RECURSE WEBGPU_SOURCES 
-            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/WebGPU/*.h"
-            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/WebGPU/*.cpp"
+        file(GLOB_RECURSE WEBGPU_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Dawn/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Dawn/*.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Dawn/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Dawn/*.cpp"
         )
         
         # 将WebGPU源文件添加到图形源文件列表
@@ -185,6 +206,7 @@ if(ENABLE_WEBGPU)
         message(WARNING "WebGPU support will be disabled")
         set(ENABLE_WEBGPU OFF)
     endif()
+    endif() # closes if(EMSCRIPTEN) else()
 else()
     message(STATUS "WebGPU support disabled")
 endif()
@@ -236,6 +258,17 @@ list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*_test\\.cpp$")  # 排除测试文件
 if(DISABLE_PARTICLE_SYSTEM)
     message(STATUS "Particle system disabled - excluding from build")
     list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*/Particles/.*")
+    list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*/ParticlePass.*")
+    list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*Particle\\.")
+    list(FILTER GRAPHICS_SOURCES EXCLUDE REGEX ".*/ParticlePass.*")
+    list(FILTER GRAPHICS_UTILS EXCLUDE REGEX ".*/ParticlePass.*")
+endif()
+
+# Emscripten: exclude Nanite/Lumen systems (Metal-specific, not needed for WASM)
+if(EMSCRIPTEN)
+    list(FILTER GRAPHICS_UTILS EXCLUDE REGEX ".*/Nanite/.*")
+    list(FILTER GRAPHICS_UTILS EXCLUDE REGEX ".*/Lumen/.*")
+    list(FILTER COMMON_SOURCES EXCLUDE REGEX "Content/ContentToEngine\\.cpp")
 endif()
 
 # 合并所有源文件
@@ -267,20 +300,20 @@ if(WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/Common
         $ENV{VULKAN_SDK}/include
     )
-elseif(APPLE)
-    
+elseif(APPLE AND NOT EMSCRIPTEN)
+
     # 设置LLVM编译器
     # set(CMAKE_CXX_COMPILER /opt/homebrew/Cellar/llvm/20.1.5/bin/clang++)
-    
+
     # 设置编译器标志
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++17")
-    
+
     # 设置Objective-C++标志
     set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -std=c++17")
-    
+
     # 设置链接器标志
     # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L/opt/homebrew/Cellar/llvm/20.1.5/lib -Wl,-rpath,/opt/homebrew/Cellar/llvm/20.1.5/lib")
-    
+
     # 添加项目头文件
     target_include_directories(${PROJECT_NAME} PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -289,7 +322,7 @@ elseif(APPLE)
         ${CMAKE_SOURCE_DIR}/OSAPI/MAC
         ${CMAKE_SOURCE_DIR}/third_party/stb
     )
-    
+
     # 添加编译器选项
     target_compile_options(${PROJECT_NAME} PRIVATE
         -Wall
@@ -298,6 +331,15 @@ elseif(APPLE)
         -Wno-unused-parameter
         -Wno-c++17-extensions
         -Wignored-qualifiers
+    )
+
+elseif(EMSCRIPTEN)
+
+    target_include_directories(${PROJECT_NAME} PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Common
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/stb
     )
 endif()
 
@@ -411,7 +453,7 @@ if(UNIX AND NOT APPLE)
         dl
         pthread
     )
-elseif(APPLE)
+elseif(APPLE AND NOT EMSCRIPTEN)
     find_library(FOUNDATION_LIBRARY Foundation)
     find_library(COCOA_LIBRARY Cocoa)
     find_library(METAL_LIBRARY Metal)
@@ -463,13 +505,19 @@ endif()
 
 # 添加WebGPU/Dawn库支持（如果启用）
 if(ENABLE_WEBGPU)
-    # 添加Dawn包含目录
-    target_include_directories(${PROJECT_NAME} PRIVATE ${DAWN_INCLUDE_DIRS})
-    
-    # 链接Dawn库
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${DAWN_LIBRARIES})
+    if(EMSCRIPTEN)
+        # Emscripten: link browser WebGPU via emdawnwebgpu port
+        target_compile_options(${PROJECT_NAME} PUBLIC "--use-port=emdawnwebgpu")
+        target_link_options(${PROJECT_NAME} PUBLIC "--use-port=emdawnwebgpu" -sALLOW_MEMORY_GROWTH=1)
+    else()
+        # 添加Dawn包含目录
+        target_include_directories(${PROJECT_NAME} PRIVATE ${DAWN_INCLUDE_DIRS})
+
+        # 链接Dawn库
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${DAWN_LIBRARIES})
     
     # 根据平台添加特定的Dawn依赖
+    if(NOT EMSCRIPTEN)
     if(WIN32)
         # Windows特定依赖
         target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -494,11 +542,13 @@ if(ENABLE_WEBGPU)
             dl
         )
     endif()
-    
+    endif() # closes if(NOT EMSCRIPTEN)
+
     # 添加WebGPU平台定义
-    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
         PLATFORM_WEBGPU=1
     )
+    endif() # closes if(EMSCRIPTEN) else() for linking
 endif()
 
 # 输出目录

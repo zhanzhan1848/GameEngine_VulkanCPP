@@ -205,7 +205,14 @@ public:
     virtual bool GetQueryPoolResults(QueryPoolHandle handle, u32 firstQuery, u32 queryCount, void* data, size_t stride) = 0;
     virtual void* MapBuffer(ResourceHandle handle, u64 offset = 0, u64 size = 0) = 0;
     virtual void UnmapBuffer(ResourceHandle handle) = 0;
+    virtual void SetBufferDirtySize(ResourceHandle handle, u64 size) = 0;
     virtual double GetTimestampPeriod() const = 0;
+
+    /**
+     * @brief 获取设备平台类型
+     * @return 设备运行的平台
+     */
+    virtual RHIPlatform GetPlatform() const = 0;
 
     /**
      * @brief 获取垃圾回收器
@@ -630,6 +637,11 @@ public:
    void UnmapBuffer(ResourceHandle handle) override {
         assert(isValid_ && "Device not initialized");
         derived().unmapBufferImpl(handle);
+    }
+
+    void SetBufferDirtySize(ResourceHandle handle, u64 size) override {
+        assert(isValid_ && "Device not initialized");
+        derived().setBufferDirtySizeImpl(handle, size);
     }
 
     double GetTimestampPeriod() const override {

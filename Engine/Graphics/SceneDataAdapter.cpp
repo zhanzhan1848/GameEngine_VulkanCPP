@@ -111,6 +111,8 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         std::string name;
         std::string diffuse;
         std::string normal;
+        std::string roughness;
+        std::string metallic;
     };
     utl::vector<TempMaterialData> tempMaterials;
 
@@ -129,30 +131,60 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         materials.reserve(numMaterials);
         tempMaterials.reserve(numMaterials);
         
+        // Detect fields-per-material by probing the data at two candidate offsets:
+        //   3-field format (name, diffuse, normal): after numMaterials*3 strings,
+        //     the next u32 should be lodCount (typically 1-10).
+        //   5-field format (name, diffuse, normal, roughness, metallic): after
+        //     numMaterials*5 strings, the next u32 should be lodCount.
+        // We scan forward from the start of material data to count how many
+        // consecutive length-prefixed strings exist before hitting a non-string u32,
+        // then divide by numMaterials to get the field count.
+        int fieldsPerMaterial = 3; // default: older format
+        {
+            size_t probeOffset = reader.GetOffset();
+            int stringCount = 0;
+            for (int s = 0; s < (int)(numMaterials * 6); ++s) {
+                if (probeOffset + 4 > size) break;
+                u32 sLen = *reinterpret_cast<const u32*>(static_cast<const u8*>(data) + probeOffset);
+                if (sLen > 500) break; // not a string length
+                probeOffset += 4 + sLen;
+                if (probeOffset > size) break;
+                stringCount++;
+            }
+            if (stringCount == (int)(numMaterials * 5)) {
+                fieldsPerMaterial = 5;
+            } else if (stringCount == (int)(numMaterials * 3)) {
+                fieldsPerMaterial = 3;
+            }
+            // else: keep default 3
+        }
+
         for (u32 i = 0; i < numMaterials; ++i) {
              if (reader.Remaining() < 4) break;
              u32 nameLen = reader.Read<u32>();
              if (nameLen > 1000) {
-                 // Something is wrong, maybe old format?
                  std::cerr << "SceneDataAdapter: Material Name too long (" << nameLen << "), possible format mismatch." << std::endl;
                  break;
              }
              std::string name = reader.ReadString(nameLen);
-             
+
              u32 diffLen = reader.Read<u32>();
              std::string diffuse = reader.ReadString(diffLen);
-             
+
              u32 normLen = reader.Read<u32>();
              std::string normal = reader.ReadString(normLen);
-             
-             // Read roughness and metallic (added by pack_geometry.py)
-             u32 roughLen = reader.Read<u32>();
-             std::string roughness = reader.ReadString(roughLen);
-             
-             u32 metalLen = reader.Read<u32>();
-             std::string metallic = reader.ReadString(metalLen);
-             
-             tempMaterials.push_back({name, diffuse, normal});
+
+             std::string roughness;
+             std::string metallic;
+             if (fieldsPerMaterial >= 5) {
+                 u32 roughLen = reader.Read<u32>();
+                 roughness = reader.ReadString(roughLen);
+
+                 u32 metalLen = reader.Read<u32>();
+                 metallic = reader.ReadString(metalLen);
+             }
+
+             tempMaterials.push_back({name, diffuse, normal, roughness, metallic});
 
              // Create Dummy Material & Instance
              auto mat = std::make_shared<Material>();
@@ -246,20 +278,10 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                      reader.Read(&lodThreshold, sizeof(float));
                      
                      // Validate Compact format signatures
-                     if (elementSize == 20 && (indexSize == 2 || indexSize == 4) &&
+                     if ((indexSize == 2 || indexSize == 4) &&
                          vertexCount > 0 && vertexCount < 10000000 &&
                          indexCount > 0 && indexCount < 30000000) {
                          isCompactFormat = true;
-                         /*
-                         std::cout << "DEBUG: Detected COMPACT Format. Name='" << meshName 
-                                   << "', LodId=" << lodId
-                                   << ", MatIdx=" << materialIndex
-                                   << ", ElemSize=" << elementSize
-                                   << ", ElemType=" << elementsType
-                                   << ", Verts=" << vertexCount
-                                   << ", IdxSize=" << indexSize
-                                   << ", Indices=" << indexCount << std::endl;
-                         */
                      }
                  }
              }
@@ -309,8 +331,8 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                      primitiveTopology = reader.Read<u32>();
                      indexSize = (vertexCount < (1 << 16)) ? 2 : 4;
                      
-                     // std::cout << "DEBUG: Detected Engine Format (pack_geometry). MatIdx=" << materialIndex 
-                     //           << ", ElemSize=" << elementSize << ", Verts=" << vertexCount 
+                     // std::cout << "DEBUG: Detected Engine Format (pack_geometry). MatIdx=" << materialIndex
+                     //           << ", ElemSize=" << elementSize << ", Verts=" << vertexCount
                      //           << ", IdxCount=" << indexCount << std::endl;
                  }
              }
@@ -511,9 +533,19 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         const u32 srcPosStride = 12; 
         const u32 srcElemStride = elementSize;
 
-        // std::cout << "SceneDataAdapter: Interleaving - SrcPosStride=" << srcPosStride 
-        //           << ", SrcElemStride=" << srcElemStride 
-        //           << ", TargetStride=" << TARGET_VERTEX_STRIDE << std::endl;
+        // Diagnostic: print element size for arch meshes (matIdx=5) and first few meshes
+        {
+            static int diagCount2 = 0;
+            bool isArch = (materialIndex == 5);
+            bool isCeiling = (materialIndex == 6);
+            bool isColumn = (materialIndex == 7);
+            bool isFloor = (materialIndex == 8);
+            if (diagCount2 < 5 || isArch || isCeiling || isColumn || isFloor) {
+                std::cerr << "[ELEM DIAG] matIdx=" << materialIndex << " elemStride=" << srcElemStride
+                          << " verts=" << vertexCount << std::endl;
+                diagCount2++;
+            }
+        }
         
         utl::vector<u8> interleavedVertices(vertexCount * TARGET_VERTEX_STRIDE);
         // Zero initialize to handle padding/missing elements safely
@@ -548,15 +580,42 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
             }
         }
 
-             if (vertexCount > 0) {
-                 const float* p = reinterpret_cast<const float*>(interleavedVertices.data());
-                 // std::cout << "DEBUG: Mesh " << i << " Vertex 0 Pos: " << p[0] << ", " << p[1] << ", " << p[2] << std::endl;
+             // Diagnostic: print UV range for cloth meshes (matIdx 14-19) and a reference mesh
+             if (vertexCount > 0 && srcElemStride >= 20 && materialIndex >= 0) {
+                 static int clothDiagCount = 0;
+                 static bool printedRef = false;
+                 bool isCloth = (materialIndex >= 14 && materialIndex <= 19);
+                 bool isCurtain = (materialIndex >= 17 && materialIndex <= 19);
+                 bool printThis = false;
+                 if (isCloth && clothDiagCount < 6) { printThis = true; clothDiagCount++; }
+                 else if (!printedRef && materialIndex == 0) { printThis = true; printedRef = true; }
+                 if (printThis) {
+                     float minU = 1e30f, maxU = -1e30f, minV = 1e30f, maxV = -1e30f;
+                     float minY = 1e30f, maxY = -1e30f;
+                     for (u32 v = 0; v < vertexCount && v < 10000; ++v) {
+                         const u8* dst = interleavedVertices.data() + v * TARGET_VERTEX_STRIDE;
+                         float u, vv;
+                         memcpy(&u, dst + 12 + 12, 4);
+                         memcpy(&vv, dst + 12 + 12 + 4, 4);
+                         if (u < minU) minU = u; if (u > maxU) maxU = u;
+                         if (vv < minV) minV = vv; if (vv > maxV) maxV = vv;
+                         float py;
+                         memcpy(&py, dst + 4, 4);
+                         if (py < minY) minY = py; if (py > maxY) maxY = py;
+                     }
+                     std::cerr << "[UV DIAG] matIdx=" << materialIndex
+                               << " verts=" << vertexCount << " elemStride=" << srcElemStride
+                               << " U=[" << minU << "," << maxU << "]"
+                               << " V=[" << minV << "," << maxV << "]"
+                               << " posY=[" << minY << "," << maxY << "]"
+                               << (isCloth ? (isCurtain ? " CURTAIN" : " CLOTH") : "") << std::endl;
+                 }
              }
              
              RenderMesh* mesh = new RenderMesh();
              rhi::DataIndexType idxType = (indexSize == 2) ? rhi::DataIndexType::UInt16 : rhi::DataIndexType::UInt32;
              
-             if (mesh->Create(device, primal::id::invalid_id, 
+             if (mesh->Create(device, meshEntityId,
                               interleavedVertices.data(), vertexCount, TARGET_VERTEX_STRIDE,
                               idxPtr, indexCount, idxType)) {
                  SceneDataMeshInfo info;
@@ -574,6 +633,8 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                 if (materialIndex >= 0 && (size_t)materialIndex < tempMaterials.size()) {
                     info.diffuseTexturePath = tempMaterials[materialIndex].diffuse;
                     info.normalTexturePath = tempMaterials[materialIndex].normal;
+                    info.roughnessTexturePath = tempMaterials[materialIndex].roughness;
+                    info.metallicTexturePath = tempMaterials[materialIndex].metallic;
                 }
                 info.name = "Mesh_" + std::to_string(lod) + "_" + std::to_string(i);
                 result.push_back(info);

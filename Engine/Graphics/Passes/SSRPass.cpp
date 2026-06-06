@@ -6,6 +6,7 @@
  * including resource management (buffers, descriptors) and synchronization.
  */
 #include "SSRPass.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include <iostream>
 #include <fstream>
 
@@ -52,7 +53,8 @@ bool SSRPass::Initialize(rhi::RHIDeviceBase* device) {
     if (descriptorSetLayout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) return false;
 
     // 2. Load Shader
-    std::string shaderPath = "Engine/Graphics/Metal/shaders/SSRPass.metal";
+    auto platform = device_->GetPlatform();
+    std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "SSRPass");
     std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
         shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;

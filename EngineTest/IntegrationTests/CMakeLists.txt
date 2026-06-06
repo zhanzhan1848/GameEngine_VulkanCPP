@@ -228,6 +228,100 @@ if(APPLE)
     # Create IntegrationTests pseudo-target
     add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone)
 
+    # 12. TestDawnRenderer (WebGPU)
+    if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)
+        set(DAWN_ROOT_DIR ${CMAKE_SOURCE_DIR}/third_party/dawn)
+        add_executable(TestDawnRenderer
+            "TestDawnMain.cpp"
+            "TestDawnRenderer.cpp"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnRenderer)
+        target_compile_definitions(TestDawnRenderer PRIVATE "TEST_DAWN_RENDERER=1" "ENABLE_WEBGPU=1")
+        target_include_directories(TestDawnRenderer PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnRenderer PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnRenderer)
+
+        # 13. TestDawnRenderingWindow (WebGPU windowed rendering)
+        add_executable(TestDawnRenderingWindow
+            "Main.cpp"
+            "TestDawnRendering.cpp"
+            "MacKeyboard.mm"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnRenderingWindow)
+        target_compile_definitions(TestDawnRenderingWindow PRIVATE "TEST_DAWN_RENDERING=1" "ENABLE_WEBGPU=1")
+        target_include_directories(TestDawnRenderingWindow PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnRenderingWindow PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnRenderingWindow)
+
+        # 14. TestDawnSponza (WebGPU Sponza rendering)
+        add_executable(TestDawnSponza
+            "Main.cpp"
+            "TestDawnSponza.cpp"
+            "MacKeyboard.mm"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnSponza)
+        target_compile_definitions(TestDawnSponza PRIVATE "TEST_DAWN_SPONZA=1" "ENABLE_WEBGPU=1")
+        target_include_directories(TestDawnSponza PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnSponza PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnSponza)
+
+        # 15. TestDawnRenderGraph (WebGPU RenderGraph integration)
+        add_executable(TestDawnRenderGraph
+            "Main.cpp"
+            "TestDawnRenderGraph.cpp"
+            "MacKeyboard.mm"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnRenderGraph)
+        target_compile_definitions(TestDawnRenderGraph PRIVATE "TEST_DAWN_RENDERGRAPH=1" "ENABLE_WEBGPU=1")
+        target_include_directories(TestDawnRenderGraph PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderGraph"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnRenderGraph PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnRenderGraph)
+
+        # 16. TestDawnForwardRenderer (ForwardRenderer on Dawn)
+        add_executable(TestDawnForwardRenderer
+            "Main.cpp"
+            "TestDawnForwardRenderer.cpp"
+            "MacKeyboard.mm"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnForwardRenderer)
+        target_compile_definitions(TestDawnForwardRenderer PRIVATE "TEST_DAWN_FORWARD_RENDERER=1" "ENABLE_WEBGPU=1")
+        target_include_directories(TestDawnForwardRenderer PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderGraph"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnForwardRenderer PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnForwardRenderer)
+    endif()
+
 elseif(WIN32)
     # Windows下使用 TestRenderer
     add_executable(TestRenderer

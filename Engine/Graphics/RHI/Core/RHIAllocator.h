@@ -186,6 +186,21 @@ public:
     }
 
     /**
+     * @brief Iterate over all active (valid) objects
+     * @param callback Called for each active object
+     */
+    template<typename F>
+    void ForEach(F&& callback) {
+        std::shared_lock<std::shared_mutex> lock(_mutex);
+        u32 cap = _pool.capacity();
+        for (u32 i = 0; i < cap; ++i) {
+            if (_pool.is_valid(i)) {
+                callback(_pool[i]);
+            }
+        }
+    }
+
+    /**
      * @brief 执行内存碎片整理
      * @details 尝试缩减未使用的内存。注意：由于依赖底层实现，可能不会物理移动对象。
      */

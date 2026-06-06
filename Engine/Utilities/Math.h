@@ -10,6 +10,8 @@
 #elif defined(__APPLE__)
 	#include <arm_neon.h>
 	#include "CRC64Table.h"
+#elif defined(__EMSCRIPTEN__)
+	#include "CRC64Table.h"
 #endif
 
 namespace primal::math
@@ -125,10 +127,15 @@ namespace primal::math
 			at += sizeof(u64);
 		}
 	#else
-		// Linux和其他平台使用SSE4.2指令
+		// Fallback for Linux, Emscripten, etc.
 		while (at < end)
 		{
-			crc = _mm_crc32_u64(crc, *((const u64*)at));
+			const u64 val = *((const u64*)at);
+			for(int i = 0; i < 8; ++i)
+			{
+				const u8 byte = (val >> (i * 8)) & 0xFF;
+				crc = (crc >> 8) ^ primal::math::crc64_tab[(crc ^ byte) & 0xFF];
+			}
 			at += sizeof(u64);
 		}
 	#endif

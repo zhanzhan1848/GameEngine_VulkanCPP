@@ -49,21 +49,29 @@ void RenderGraph::Clear() {
 
 void RenderGraph::CleanupPool() {
     // Keep resources for some frames to reduce thrashing
-    const u64 kKeepFrames = 30; 
-    
-    // Manually iterate and erase since custom vector might not support remove_if+erase(iterator)
-    for (size_t i = 0; i < resourcePool_.size(); ) {
-        const auto& res = resourcePool_[i];
-        if (currentFrame_ > res.lastUsedFrame + kKeepFrames) {
-            if (res.isTexture) {
-                device_.DestroyTexture(res.handle);
+    const u64 kKeepFrames = 3;
+
+    // Destroy expired resources and compact the pool using move-assignment.
+    // utl::vector::erase() uses memcpy internally, which is UB for
+    // PooledResource (contains TextureDesc with std::string).
+    size_t writeIdx = 0;
+    for (size_t readIdx = 0; readIdx < resourcePool_.size(); ++readIdx) {
+        if (currentFrame_ > resourcePool_[readIdx].lastUsedFrame + kKeepFrames) {
+            if (resourcePool_[readIdx].isTexture) {
+                device_.DestroyTexture(resourcePool_[readIdx].handle);
             } else {
-                device_.DestroyBuffer(res.handle);
+                device_.DestroyBuffer(resourcePool_[readIdx].handle);
             }
-            resourcePool_.erase(i);
         } else {
-            ++i;
+            if (writeIdx != readIdx) {
+                resourcePool_[writeIdx] = std::move(resourcePool_[readIdx]);
+            }
+            ++writeIdx;
         }
+    }
+    // Shrink to actual size by erasing trailing elements from the end
+    while (resourcePool_.size() > writeIdx) {
+        resourcePool_.erase_unordered(resourcePool_.size() - 1);
     }
 }
 
@@ -567,8 +575,9 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         }
 
         // std::cout << "RenderGraph: Executing Pass " << pass->GetName() << std::endl;
+        std::cerr << "[RG] Executing: " << pass->GetName() << std::endl;
         pass->Execute(context);
-        // std::cout << "RenderGraph: Finished Pass " << pass->GetName() << std::endl;
+        std::cerr << "[RG] Done: " << pass->GetName() << std::endl;
 
         if (hasRenderPass) {
             cmdBuffer->EndRenderPass();

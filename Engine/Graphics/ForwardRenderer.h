@@ -8,7 +8,9 @@
 #include "Graphics/Passes/BlurPass.h"
 #include "Graphics/Passes/SSRPass.h"
 #include "Graphics/Material.h"
+#ifndef DISABLE_PARTICLE_SYSTEM
 #include "Graphics/Passes/ParticlePass.h"
+#endif
 #include "Graphics/Scene/SceneExtractionSystem.h"
 #include "RenderPipeline/RenderPasses/Debug/GeometryDebugPass.h"
 #include <unordered_map>
@@ -137,7 +139,9 @@ private:
     // Passes
     BlurPass blurPass_;
     SSRPass ssrPass_;
+#ifndef DISABLE_PARTICLE_SYSTEM
     ParticlePass particlePass_;
+#endif
 
     // Scene Extraction System (Nanite v7.1)
     SceneExtractionSystem sceneExtractionSystem_;
@@ -164,12 +168,20 @@ private:
     float totalTime_{0.0f};
     u32 frameNumber_{0};
 
+    // Dawn shadow resources — shadow bindings go in Group 0 (bindings 13, 14)
+    rhi::ResourceHandle dawnShadowDepthTex_{rhi::handles::INVALID_RESOURCE};
+    rhi::SamplerHandle dawnShadowSampler_{rhi::handles::INVALID_SAMPLER};
+    primal::math::m4x4 dawnShadowLightVP_{};
+
 public:
     void SetTime(float deltaTime, float totalTime, u32 frameNumber) {
         deltaTime_ = deltaTime;
         totalTime_ = totalTime;
         frameNumber_ = frameNumber;
     }
+
+    void SetDawnShadowResources(rhi::ResourceHandle depthTex, rhi::SamplerHandle sampler);
+    void SetDawnShadowLightVP(const primal::math::m4x4& vp) { dawnShadowLightVP_ = vp; }
 
     rhi::DescriptorSetLayoutHandle GetGlobalDescriptorSetLayout() const { return globalDescriptorSetLayout_; }
     rhi::DescriptorSetLayoutHandle GetPerObjectDescriptorSetLayout() const { return perObjectDescriptorSetLayout_; }

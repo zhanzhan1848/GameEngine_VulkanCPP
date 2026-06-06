@@ -6,6 +6,8 @@
 #include "Graphics/Lumen/SurfaceCache/SurfaceCachePass.h"
 #include "Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
 #include "Graphics/Lumen/LumenTypes.h"
+#include "Graphics/ForwardRenderer.h"
+#include "Graphics/MaterialInstance.h"
 #include <memory>
 
 namespace primal::graphics {
@@ -19,26 +21,21 @@ public:
     void Shutdown() override;
     void Render(RenderScene& scene, RenderView& view, rhi::ResourceHandle target, const rhi::TextureDesc& targetDesc, rhi::SyncHandle signalFence = rhi::handles::INVALID_SYNC) override;
 
-    /**
-     * @brief Set an override output resource (e.g. for offscreen testing)
-     * @param handle Resource Handle
-     * @param desc Texture Description
-     */
     void SetOutputResource(rhi::ResourceHandle handle, const rhi::TextureDesc& desc) {
         outputResource_ = handle;
         outputDesc_ = desc;
     }
 
-    /**
-     * @brief Configure Lumen GI quality and settings
-     */
     void SetLumenConfig(const lumen::LumenConfig& config) {
         lumen_config_ = config;
     }
 
-    /**
-     * @brief Get pipeline statistics
-     */
+    void SetMaterials(const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials) {
+        materials_ = &materials;
+    }
+
+    ForwardRenderer* GetForwardRenderer() { return forwardRenderer_ ? forwardRenderer_.get() : nullptr; }
+
     const PipelineStatistics& GetStats() const { return stats_; }
 
 private:
@@ -49,11 +46,14 @@ private:
     rhi::RHIDeviceBase* device_{nullptr};
     std::unique_ptr<rendergraph::RenderGraph> renderGraph_;
     std::unique_ptr<rhi::RHIGPUOptimizer> gpuOptimizer_;
+    std::unique_ptr<ForwardRenderer> forwardRenderer_;
 
     rhi::ResourceHandle outputResource_{rhi::handles::INVALID_RESOURCE};
     rhi::TextureDesc outputDesc_;
 
     PipelineStatistics stats_;
+
+    const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>* materials_{nullptr};
 
     // Lumen GI
     lumen::LumenConfig lumen_config_{};

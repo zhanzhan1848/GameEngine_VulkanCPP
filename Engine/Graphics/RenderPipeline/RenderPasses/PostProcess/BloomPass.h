@@ -18,6 +18,8 @@ struct BloomPassData {
  * @brief Adds a Bloom Pass
  * @details Extracts bright areas, blurs them, and prepares for composition
  */
-const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColor);
+const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColor, u32 frameIndex);
+
+void ShutdownBloomPass();
 
 } // namespace primal::graphics::PostProcess

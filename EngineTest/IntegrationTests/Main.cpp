@@ -30,6 +30,14 @@
 #include "TestParticleSponza.h"
 #elif defined(TEST_NANITE_STREAMING_PIPELINE)
 #include "TestNaniteStreamingPipeline.h"
+#elif defined(TEST_DAWN_RENDERING)
+#include "TestDawnRendering.h"
+#elif defined(TEST_DAWN_RENDERGRAPH)
+#include "TestDawnRenderGraph.h"
+#elif defined(TEST_DAWN_SPONZA)
+#include "TestDawnSponza.h"
+#elif defined(TEST_DAWN_FORWARD_RENDERER)
+#include "TestDawnForwardRenderer.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif
@@ -149,17 +157,24 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[])
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
     try
     {
+#if defined(TEST_DAWN_SPONZA)
+        Engine_Test test{};
+        NS::Application* app = NS::Application::sharedApplication();
+        app->setDelegate(&test);
+        app->run();
+#else
         Engine_Test test{};
         NS::Application* app = NS::Application::sharedApplication();
         monitorKeyboardInput();
         app->setDelegate(&test);
         app->run();
+#endif
     }
     catch(const std::exception& e)
     {
         std::cerr << "Error: " << e.what() << std::endl;
     }
-    
+
     pool->release();
     return 0;
 }

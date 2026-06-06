@@ -272,6 +272,7 @@ protected:
     // 内存管理辅助
     void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size);
     void unmapBufferImpl(ResourceHandle handle);
+    void setBufferDirtySizeImpl(ResourceHandle handle, u64 size) { (void)handle; (void)size; }
     void destroyTextureImpl(ResourceHandle handle);
 
     /**

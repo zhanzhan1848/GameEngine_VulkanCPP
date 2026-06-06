@@ -3,72 +3,81 @@
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
+#include "Graphics/ForwardRenderer.h"
+#include "Graphics/MaterialInstance.h"
 #include "Graphics/RHI/Core/RHICommand.h"
-#include <iostream>
 
 namespace primal::graphics::ForwardPass {
 
 struct ForwardPassData {
-    RGResourceHandle renderTarget;
+    ForwardPassOutput output;
+    ForwardRenderer* renderer;
+    RenderScene* scene;
+    RenderView* view;
+    const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>* materials;
+    u32 frameIndex;
+    u32 width;
+    u32 height;
 };
 
-RGResourceHandle AddPass(RenderGraph& graph, RenderScene& scene, RenderView& view, RGResourceHandle renderTarget) {
-    return graph.AddPass<ForwardPassData>("ForwardPass", RGPassType::Graphics,
+const ForwardPassOutput& AddPass(
+    RenderGraph& graph,
+    RenderScene& scene,
+    RenderView& view,
+    ForwardRenderer& renderer,
+    const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
+    u32 frameIndex,
+    u32 width,
+    u32 height) {
+
+    return graph.AddPass<ForwardPassData>("ForwardPass", RGPassType::Graphics, RGPassCategory::Main,
         [&](ForwardPassData& data, RenderGraphBuilder& builder) {
-            data.renderTarget = renderTarget;
-            
-            // Write to RenderTarget
-            builder.Write(data.renderTarget, rhi::ResourceState::RenderTarget);
-            
-            // Since we are writing to an imported backbuffer (usually), 
-            // we need to make sure this pass is not culled if it's the final output.
-            // If the resource is marked as Output, the pass writing to it is kept.
-            // If not, we might need SideEffect.
-            // For safety in this simple implementation, we mark SideEffect.
-            builder.SideEffect(); 
+            data.renderer = &renderer;
+            data.scene = &scene;
+            data.view = &view;
+            data.materials = &materials;
+            data.frameIndex = frameIndex;
+            data.width = width;
+            data.height = height;
+
+            // Create HDR render target (RGBA16_Float for HDR pipeline)
+            rhi::TextureDesc hdrDesc;
+            hdrDesc.size = {width, height, 1};
+            hdrDesc.format = rhi::DataFormat::RGBA16_Float;
+            hdrDesc.type = rhi::TextureType::Texture2D;
+            hdrDesc.mipLevels = 1;
+            hdrDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+            data.output.hdrTexture = builder.CreateTexture("HDR_Scene", hdrDesc, rhi::ResourceState::RenderTarget);
+
+            // Create depth buffer
+            rhi::TextureDesc depthDesc;
+            depthDesc.size = {width, height, 1};
+            depthDesc.format = rhi::DataFormat::D32_Float;
+            depthDesc.type = rhi::TextureType::Texture2D;
+            depthDesc.mipLevels = 1;
+            depthDesc.usage = rhi::TextureUsage::DepthStencil;
+            data.output.depthTexture = builder.CreateTexture("ForwardDepth", depthDesc, rhi::ResourceState::DepthStencil);
         },
-        [&](const ForwardPassData& data, RenderGraphContext& context) {
-            auto* cmd = context.cmdBuffer;
-            auto* rtResource = context.graph->GetResource(data.renderTarget);
-            
-            if (!rtResource) return;
-            
-            // Setup RenderPass Descriptor
-            rhi::RenderPassDesc passDesc;
-            passDesc.colorAttachments.resize(1);
-            passDesc.colorAttachments[0].texture = rtResource->GetPhysicalHandle();
-            passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
-            passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
-            passDesc.colorAttachments[0].clearValue = rhi::ClearValue{ math::v4{ 0.1f, 0.1f, 0.1f, 1.0f } }; // Dark gray background
-            
-            passDesc.viewport = view.GetViewport();
-            passDesc.scissor = view.GetScissor();
-            
-            // Begin Pass
-            // std::cout << "BeginRenderPass..." << std::endl;
-            cmd->BeginRenderPass(passDesc);
-            
-            // Render Scene
-            // For this iteration, we just clear the screen (which BeginRenderPass does).
-            // Actual object drawing requires Material/Pipeline binding which is complex 
-            // and depends on the Material System integration which is separate.
-            // We will iterate proxies just to show where it happens.
-            
-            const auto& visibleProxies = view.GetVisibleProxies();
-            if (!visibleProxies.empty()) {
-                // Issue a dummy draw call to verify stats
-                // std::cout << "Drawing dummy..." << std::endl;
-                // cmd->Draw(3, 0, 1, 0); // Crashes without pipeline state
-            }
-            for (const auto* proxy : visibleProxies) {
-                // Draw Proxy
-                (void)proxy;
-            }
-            
-            // std::cout << "EndRenderPass..." << std::endl;
-            cmd->EndRenderPass();
+        [](const ForwardPassData& data, RenderGraphContext& context) {
+            if (!data.renderer || !data.scene || !data.view) return;
+
+            auto* hdrRes = context.graph->GetResource(data.output.hdrTexture);
+            auto* depthRes = context.graph->GetResource(data.output.depthTexture);
+            if (!hdrRes || !depthRes) return;
+
+            data.renderer->Render(
+                context.cmdBuffer,
+                *data.scene,
+                *data.view,
+                hdrRes->GetPhysicalHandle(),
+                depthRes->GetPhysicalHandle(),
+                *data.materials,
+                data.frameIndex,
+                data.width,
+                data.height
+            );
         }
-    ).renderTarget;
+    ).output;
 }
 
 } // namespace primal::graphics::ForwardPass

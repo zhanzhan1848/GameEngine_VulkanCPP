@@ -124,12 +124,14 @@ void SceneExtractionSystem::QueryDirtyTransforms(const RenderScene& scene) {
     
     transform_flags_cache_.clear();
     transform_flags_cache_.resize(count);
-    
-    transform::get_updated_components_flags(
-        entity_ids_cache_.data(),
-        count,
-        transform_flags_cache_.data()
-    );
+
+    if (count > 0) {
+        transform::get_updated_components_flags(
+            entity_ids_cache_.data(),
+            count,
+            transform_flags_cache_.data()
+        );
+    }
     
     dirty_entities_.clear();
     dirty_entities_.reserve(count);

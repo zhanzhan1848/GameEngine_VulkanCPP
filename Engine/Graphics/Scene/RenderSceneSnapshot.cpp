@@ -6,7 +6,9 @@
 #include "../../Graphics/RHI/Core/RHIDevice.h"
 #include "../../Graphics/RHI/Core/RHICommand.h"
 #include "../../Graphics/RHI/Core/RHIGpuMesh.h"
+#ifdef __APPLE__
 #include <simd/simd.h>
+#endif
 #include <iostream>
 
 namespace primal::graphics {
@@ -365,12 +367,11 @@ bool RenderSceneSnapshot::ExtractSceneData(const RenderScene& scene,
                 // Calculate radius as max extent scaled by transform
                 f32 maxLocalExtent = std::max({localExtent.x, localExtent.y, localExtent.z});
 
-                // For simd::float4x4, access elements using columns array
-                const simd::float4x4& transform = proxy.transform;
+                const math::m4x4& transform = proxy.transform;
                 f32 maxScale = std::max({
-                    std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
-                    std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
-                    std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
+                    std::abs(transform[0].x), std::abs(transform[0].y), std::abs(transform[0].z),
+                    std::abs(transform[1].x), std::abs(transform[1].y), std::abs(transform[1].z),
+                    std::abs(transform[2].x), std::abs(transform[2].y), std::abs(transform[2].z)
                 });
                 instance.bounds_radius = maxLocalExtent * maxScale;
             } else {
@@ -500,12 +501,11 @@ bool RenderSceneSnapshot::UpdateInstances(const RenderScene& scene,
                 // Calculate radius as max extent scaled by transform
                 f32 maxLocalExtent = std::max({localExtent.x, localExtent.y, localExtent.z});
 
-                // For simd::float4x4, access elements using columns array
-                const simd::float4x4& transform = proxy.transform;
+                const math::m4x4& transform = proxy.transform;
                 f32 maxScale = std::max({
-                    std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
-                    std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
-                    std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
+                    std::abs(transform[0].x), std::abs(transform[0].y), std::abs(transform[0].z),
+                    std::abs(transform[1].x), std::abs(transform[1].y), std::abs(transform[1].z),
+                    std::abs(transform[2].x), std::abs(transform[2].y), std::abs(transform[2].z)
                 });
                 instance.bounds_radius = maxLocalExtent * maxScale;
             } else {

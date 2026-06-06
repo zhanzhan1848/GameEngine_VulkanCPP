@@ -61,6 +61,7 @@ namespace constants {
 template<typename T>
 float dot(const T& a, const T& b) {
     float result = 0.0f;
+#if defined(__APPLE__)
     if constexpr (std::is_same_v<T, simd::float3>) {
         result = a.x * b.x + a.y * b.y + a.z * b.z;
     } else if constexpr (std::is_same_v<T, simd::float4>) {
@@ -68,12 +69,17 @@ float dot(const T& a, const T& b) {
     } else if constexpr (std::is_same_v<T, simd::float2>) {
         result = a.x * b.x + a.y * b.y;
     } else {
-        // 通用实现，假设支持[]
         constexpr int size = sizeof(T) / sizeof(float);
         for (int i = 0; i < size; ++i) {
             result += a[i] * b[i];
         }
     }
+#else
+    constexpr int size = sizeof(T) / sizeof(float);
+    for (int i = 0; i < size; ++i) {
+        result += a[i] * b[i];
+    }
+#endif
     return result;
 }
 
@@ -218,11 +224,12 @@ inline m4x4 MatrixIdentity() {
 #elif defined(_WIN32)
     return DirectX::XMMatrixIdentity();
 #else
-    // 默认实现：手动构造单位矩阵
-    m4x4 result{};
-    // 根据具体的m4x4类型进行初始化
-    // 这里假设m4x4有合适的构造函数或成员访问方式
-    return result;
+    return m4x4{
+        v4{1.0f, 0.0f, 0.0f, 0.0f},
+        v4{0.0f, 1.0f, 0.0f, 0.0f},
+        v4{0.0f, 0.0f, 1.0f, 0.0f},
+        v4{0.0f, 0.0f, 0.0f, 1.0f}
+    };
 #endif
 }
 
@@ -662,10 +669,13 @@ inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ)
 #elif defined(_WIN32)
     return DirectX::XMMatrixPerspectiveFovLH(fovY, aspect, nearZ, farZ);
 #else
-    // 默认实现：手动构造透视矩阵
-    m4x4 result{};
-    // 这里需要根据具体的m4x4类型手动构造
-    return result;
+    float f = 1.0f / std::tanf(fovY * 0.5f);
+    return m4x4{
+        v4{f / aspect, 0.0f, 0.0f, 0.0f},
+        v4{0.0f, f, 0.0f, 0.0f},
+        v4{0.0f, 0.0f, farZ / (nearZ - farZ), -1.0f},
+        v4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 1.0f}
+    };
 #endif
 }
 
@@ -683,10 +693,12 @@ inline m4x4 MatrixTranslation(const v3& translation) {
 #elif defined(_WIN32)
     return DirectX::XMMatrixTranslation(translation.x, translation.y, translation.z);
 #else
-    // 默认实现：手动构造平移矩阵
-    m4x4 result{};
-    // 这里需要根据具体的m4x4类型手动构造
-    return result;
+    return m4x4{
+        v4{1.0f, 0.0f, 0.0f, 0.0f},
+        v4{0.0f, 1.0f, 0.0f, 0.0f},
+        v4{0.0f, 0.0f, 1.0f, 0.0f},
+        v4{translation.x, translation.y, translation.z, 1.0f}
+    };
 #endif
 }
 

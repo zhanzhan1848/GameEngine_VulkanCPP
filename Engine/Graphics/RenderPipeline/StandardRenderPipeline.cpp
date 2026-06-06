@@ -1,7 +1,15 @@
 #include "StandardRenderPipeline.h"
 #include "Graphics/RenderPipeline/RenderPasses/ForwardPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/SSAOPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/BloomPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/ToneMappingPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/HZBPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/VelocityPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.h"
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
+#include "Graphics/RHI/Core/RHICommand.h"
+#include "Graphics/RHI/Core/RHIMath.h"
 #include <iostream>
 
 #include <chrono>
@@ -17,20 +25,28 @@ bool StandardRenderPipeline::Initialize(rhi::RHIDeviceBase* device) {
     device_ = device;
     renderGraph_ = std::make_unique<rendergraph::RenderGraph>(*device);
 
-    // 初始化 GPU 优化器
     gpuOptimizer_ = std::make_unique<rhi::RHIGPUOptimizer>(*device);
     if (!gpuOptimizer_->Initialize()) {
         std::cerr << "Failed to initialize GPU Optimizer" << std::endl;
-        // 允许失败，非关键组件
     }
 
-    // Initialize Lumen GI passes based on quality preset
+    forwardRenderer_ = std::make_unique<ForwardRenderer>();
+    if (!forwardRenderer_->Initialize(device)) {
+        std::cerr << "Failed to initialize ForwardRenderer" << std::endl;
+        forwardRenderer_.reset();
+    }
+
     InitializeLumenPasses();
 
     return true;
 }
 
 void StandardRenderPipeline::Shutdown() {
+    if (forwardRenderer_) {
+        forwardRenderer_->Shutdown();
+        forwardRenderer_.reset();
+    }
+
     ShutdownLumenPasses();
 
     if (gpuOptimizer_) {
@@ -53,17 +69,16 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
     // Import BackBuffer
     rhi::ResourceHandle backBufferHandle = target;
     rhi::TextureDesc backBufferDesc = targetDesc;
-    
-    // Import BackBuffer into RenderGraph
+
     RGResourceHandle backBuffer = renderGraph_->ImportTexture("BackBuffer", backBufferHandle, backBufferDesc);
 
-    // Setup Passes
-    // 1. Depth PrePass (Optional, skipping for now)
+    u32 width = targetDesc.size.x;
+    u32 height = targetDesc.size.y;
+    u32 frameIndex = static_cast<u32>(frameCount_ % rhi::MAX_FRAMES_IN_FLIGHT);
 
-    // 1.5 Lumen Surface Cache (High quality and above)
+    // Lumen Surface Cache (High quality and above)
     if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
         lumen::SurfaceCacheFrameData frame_data{};
-        // TODO: Wire actual camera position and light count from RenderView/RenderScene
         frame_data.camera_position = { 0.0f, 0.0f, 0.0f };
         frame_data.frame_index = static_cast<u32>(frameCount_);
         frame_data.light_count = 0;
@@ -77,7 +92,6 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
             frame_data,
             static_cast<u32>(frameCount_));
 
-        // Feed surface cache data to screen probe pass
         if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
             screen_probe_pass_->SetSurfaceCacheData(
                 surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
@@ -88,22 +102,134 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
         }
     }
 
-    // 2. Forward Pass
-    ForwardPass::AddPass(*renderGraph_, scene, view, backBuffer);
+    // 1. Forward Pass → HDR + Depth
+    RGResourceHandle hdrTexture = kInvalidRGResourceHandle;
+    if (forwardRenderer_ && materials_) {
+        const auto& fwdOutput = ForwardPass::AddPass(*renderGraph_, scene, view, *forwardRenderer_,
+            *materials_, frameIndex, width, height);
+        hdrTexture = fwdOutput.hdrTexture;
 
-    // 3. UI Pass (ToDo)
+        // 2. HZB Generation from depth buffer
+        RGResourceHandle hzbTexture = kInvalidRGResourceHandle;
+        RGResourceHandle velTexture = kInvalidRGResourceHandle;
+        RGResourceHandle ssgiTexture = kInvalidRGResourceHandle;
+        if (hdrTexture != kInvalidRGResourceHandle && fwdOutput.depthTexture != kInvalidRGResourceHandle) {
+            auto invProj = rhi::math::Inverse(view.GetProjectionMatrix());
 
-    // 4. Present (Handled by RHI usually, but we can have a Present Pass or just ensure BackBuffer is written)
-    // For RenderGraph, we just ensure the last pass writes to BackBuffer or transitions it to Present.
-    
+            const auto& hzbOut = PostProcess::AddHZBPass(*renderGraph_, fwdOutput.depthTexture, width, height);
+            hzbTexture = hzbOut.hzbTexture;
+
+            auto viewProj = view.GetViewMatrix() * view.GetProjectionMatrix();
+            const auto& velOut = PostProcess::AddVelocityPass(*renderGraph_, fwdOutput.depthTexture,
+                width, height, frameIndex, viewProj, viewProj, invProj);
+            velTexture = velOut.velocityTexture;
+
+            const auto& ssgiOut = PostProcess::AddLumenSSGIPass(*renderGraph_, fwdOutput.depthTexture,
+                hzbTexture, velTexture, hdrTexture, width, height, frameIndex,
+                view.GetProjectionMatrix(), invProj);
+            ssgiTexture = ssgiOut.ssgiOutput;
+        }
+
+        // 3. SSAO: Screen Space Ambient Occlusion
+        RGResourceHandle aoTexture = kInvalidRGResourceHandle;
+        if (hdrTexture != kInvalidRGResourceHandle && fwdOutput.depthTexture != kInvalidRGResourceHandle) {
+            auto invProj = rhi::math::Inverse(view.GetProjectionMatrix());
+            const auto& ssaoOutput = PostProcess::AddSSAOPass(*renderGraph_, fwdOutput.depthTexture,
+                width, height, frameIndex, view.GetProjectionMatrix(), invProj);
+            aoTexture = ssaoOutput.ssaoOutput;
+        }
+
+        // 3. Bloom: Extract bright areas + blur
+        RGResourceHandle bloomTexture = kInvalidRGResourceHandle;
+        if (hdrTexture != kInvalidRGResourceHandle) {
+            const auto& bloomOutput = PostProcess::AddBloomPass(*renderGraph_, hdrTexture, frameIndex);
+            bloomTexture = bloomOutput.bloomOutput;
+
+            // 4. ToneMapping: HDR → LDR (with bloom + AO)
+            const auto& tonemapOutput = PostProcess::AddToneMappingPass(*renderGraph_, hdrTexture, bloomTexture, aoTexture, ssgiTexture, frameIndex);
+
+            // 3. Present: Blit LDR → BackBuffer
+            struct PresentData {
+                RGResourceHandle input;
+                RGResourceHandle output;
+            };
+            renderGraph_->AddPass<PresentData>("PresentPass", RGPassType::Graphics, RGPassCategory::Present,
+                [&](PresentData& data, RenderGraphBuilder& builder) {
+                    data.input = tonemapOutput.output;
+                    data.output = backBuffer;
+                    builder.Read(data.input, rhi::ResourceState::ShaderResource);
+                    builder.Write(data.output, rhi::ResourceState::RenderTarget);
+                },
+                [](const PresentData& data, RenderGraphContext& context) {
+                    auto* inputRes = context.graph->GetResource(data.input);
+                    auto* outputRes = context.graph->GetResource(data.output);
+                    if (!inputRes || !outputRes) return;
+
+                    auto& device = context.graph->GetDevice();
+                    auto* cmd = context.cmdBuffer;
+
+                    // Get input texture view for sampling
+                    ResourceHandle inputHandle = inputRes->GetPhysicalHandle();
+                    rhi::DataFormat inputFormat = rhi::DataFormat::RGBA8_UNorm;
+                    if (inputRes->GetType() == RGResourceType::Texture) {
+                        inputFormat = static_cast<RenderGraphTexture*>(inputRes)->GetDesc().format;
+                    }
+
+                    ResourceHandle inputView = rhi::handles::INVALID_RESOURCE;
+                    if (inputHandle != rhi::handles::INVALID_RESOURCE) {
+                        rhi::TextureViewDesc viewDesc;
+                        viewDesc.texture = inputHandle;
+                        viewDesc.viewType = rhi::TextureType::Texture2D;
+                        viewDesc.format = inputFormat;
+                        inputView = device.CreateTextureView(viewDesc);
+                    }
+
+                    // Use device's blit pipeline for the copy
+                    // For now, just clear the backbuffer as a minimal present step
+                    rhi::RenderPassDesc passDesc;
+                    passDesc.colorAttachments.resize(1);
+                    passDesc.colorAttachments[0].texture = outputRes->GetPhysicalHandle();
+                    passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
+                    passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
+
+                    cmd->BeginRenderPass(passDesc);
+                    cmd->EndRenderPass();
+
+                    if (inputView != rhi::handles::INVALID_RESOURCE) {
+                        device.DestroyTexture(inputView);
+                    }
+                }
+            );
+        }
+    } else {
+        // Fallback: simple clear pass when ForwardRenderer or materials aren't available
+        struct ClearData { RGResourceHandle target; };
+        renderGraph_->AddPass<ClearData>("ClearPass", RGPassType::Graphics, RGPassCategory::None,
+            [&](ClearData& data, RenderGraphBuilder& builder) {
+                data.target = backBuffer;
+                builder.Write(data.target, rhi::ResourceState::RenderTarget);
+                builder.SideEffect();
+            },
+            [](const ClearData& data, RenderGraphContext& context) {
+                auto* rtRes = context.graph->GetResource(data.target);
+                if (!rtRes) return;
+                rhi::RenderPassDesc passDesc;
+                passDesc.colorAttachments.resize(1);
+                passDesc.colorAttachments[0].texture = rtRes->GetPhysicalHandle();
+                passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
+                passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
+                context.cmdBuffer->BeginRenderPass(passDesc);
+                context.cmdBuffer->EndRenderPass();
+            }
+        );
+    }
+
     // Compile and Execute
     renderGraph_->Compile();
-    
-    // We need a command buffer to execute
-    // In a real engine, we'd get this from a CommandQueue
+
     rhi::CommandBufferHandle cmdBufferHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
     if (cmdBufferHandle == rhi::handles::INVALID_COMMAND_BUFFER) return;
-    
+
     rhi::RHICommandBuffer* cmdBuffer = rhi::GetCommandBuffer(cmdBufferHandle);
     if (cmdBuffer) {
         if (cmdBuffer->Initialize()) {
@@ -111,38 +237,27 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
                 std::cerr << "Failed to begin command buffer!" << std::endl;
                 return;
             }
-            // std::cout << "Executing RenderGraph..." << std::endl;
             renderGraph_->Execute(cmdBuffer);
-            // std::cout << "RenderGraph Executed." << std::endl;
-            cmdBuffer->End(); // Ensure command buffer is closed
-            
+            cmdBuffer->End();
+
             rhi::QueueSubmitInfo submitInfo;
             submitInfo.cmdBuffer = cmdBufferHandle;
             submitInfo.signalFence = signalFence;
-            
-            device_->Submit(submitInfo); // Need fences in real usage
-            
-            // Collect statistics
+
+            device_->Submit(submitInfo);
+
             const auto& cmdStats = cmdBuffer->GetStats();
             stats_.drawCallCount = cmdStats.drawCallCount;
             stats_.gpuFrameTimeMs = cmdStats.commandExecutionTime;
-            
-            // Get GPU time from queries
             stats_.passExecutionTimes = renderGraph_->GetPassExecutionTimes();
 
-            // Feed metrics to GPU Optimizer
             if (gpuOptimizer_) {
                 for (const auto& [passName, timeMs] : stats_.passExecutionTimes) {
                     gpuOptimizer_->RecordPassExecutionTime(passName, timeMs);
                 }
-                
-                // Update optimizer per frame
-                // Assuming ~16.6ms per frame for now or calculate actual delta time
-                // Here we use CPU time as an approximation or fixed step
                 gpuOptimizer_->Update(frameCount_, 16.6f / 1000.0f);
             }
 
-            // Calculate CPU time
             auto endTime = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double, std::milli> cpuTime = endTime - startTime;
             stats_.cpuFrameTimeMs = cpuTime.count();
@@ -151,16 +266,11 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
              std::cerr << "Failed to begin command buffer!" << std::endl;
         }
     }
-    
-    // Cleanup command buffer (should rely on frame/allocator but here we destroy it for now to avoid leak if pool not used)
-    // Actually device_->DestroyCommandBuffer(handle) if available, or just leave it for GC/Pool.
-    // Assuming simple lifetime for now.
-    
+
     frameCount_++;
 
     auto endTime = std::chrono::high_resolution_clock::now();
     stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
-    // TODO: Get GPU time from queries
 }
 
 void StandardRenderPipeline::InitializeLumenPasses() {
@@ -168,7 +278,6 @@ void StandardRenderPipeline::InitializeLumenPasses() {
 
     const auto& config = lumen_config_;
 
-    // Surface Cache: High quality and above
     if (config.quality >= lumen::LumenQualityPreset::High) {
         surface_cache_pass_ = std::make_unique<lumen::SurfaceCachePass>();
         if (!surface_cache_pass_->Initialize(device_, config)) {
@@ -177,10 +286,8 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         }
     }
 
-    // Screen Probes: Ultra quality and above
     if (config.quality >= lumen::LumenQualityPreset::Ultra) {
         screen_probe_pass_ = std::make_unique<lumen::ScreenProbeGIPass>();
-        // TODO: Wire actual render dimensions from the viewport
         lumen::ScreenProbeParams probe_params{};
         probe_params.downsample_factor = config.screen_probes_spacing;
         probe_params.rays_per_probe = config.screen_probes_rays;

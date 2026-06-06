@@ -8,8 +8,13 @@
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RHI/Core/RHIMeshAsset.h"
 #include "Graphics/RHI/Core/RHIGpuMesh.h"
+#ifdef __APPLE__
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
+#endif
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+#include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"
+#endif
 
 // Metal Headers for parsing and upload
 #ifdef __APPLE__
@@ -783,7 +788,66 @@ namespace primal::content
                     return new_id;
 #endif
 				}
+				else if (device && device->GetDesc().platform == graphics::rhi::RHIPlatform::Dawn) {
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+					utl::blob_stream_reader blob((const u8*)data);
+					const u32 width{ blob.read<u32>() };
+					const u32 height{ blob.read<u32>() };
+					const u32 array_size{ blob.read<u32>() };
+					[[maybe_unused]] const u32 flags{ blob.read<u32>() };
+					const u32 mip_levels{ blob.read<u32>() };
+					const u32 format_u32{ blob.read<u32>() };
+
+					graphics::rhi::TextureDesc desc{};
+					desc.size = { width, height, 1 };
+					desc.arraySize = array_size;
+					desc.mipLevels = mip_levels;
+					desc.type = (array_size > 1) ? graphics::rhi::TextureType::Texture2DArray : graphics::rhi::TextureType::Texture2D;
+
+					if (format_u32 == 28) desc.format = graphics::rhi::DataFormat::RGBA8_UNorm;
+					else if (format_u32 == 29) desc.format = graphics::rhi::DataFormat::RGBA8_sRGB;
+					else if (format_u32 == 71) desc.format = graphics::rhi::DataFormat::BC1_UNorm;
+					else if (format_u32 == 72) desc.format = graphics::rhi::DataFormat::BC1_sRGB;
+					else if (format_u32 == 98) desc.format = graphics::rhi::DataFormat::BC7_UNorm;
+					else if (format_u32 == 99) desc.format = graphics::rhi::DataFormat::BC7_sRGB;
+					else desc.format = graphics::rhi::DataFormat::RGBA8_UNorm;
+
+					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest;
+
+					auto handle = device->CreateTexture(desc);
+					if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
+						std::cerr << "[ContentToEngine] Failed to create Dawn texture." << std::endl;
+						return id::invalid_id;
+					}
+
+					auto* dawnDevice = static_cast<graphics::rhi::DawnDevice*>(device);
+
+					for (u32 i{ 0 }; i < array_size; ++i) {
+						for (u32 j{ 0 }; j < mip_levels; ++j) {
+							const u32 row_pitch{ blob.read<u32>() };
+							const u32 slice_pitch{ blob.read<u32>() };
+							u32 mipWidth = std::max(1u, width >> j);
+							u32 mipHeight = std::max(1u, height >> j);
+
+							dawnDevice->UpdateTextureData(handle, blob.position(),
+								0, 0, i, mipWidth, mipHeight, 1, row_pitch, j);
+
+							blob.skip(slice_pitch);
+						}
+					}
+
+					id::id_type new_id = rhi_texture_id_counter++;
+					{
+						std::lock_guard lock(rhi_texture_mutex());
+						rhi_texture_map()[new_id] = handle;
+					}
+					return new_id;
+#else
+					return id::invalid_id;
+#endif
+				}
 			}
+
 
 			return graphics::add_texture((const u8 *const)data);
 		}

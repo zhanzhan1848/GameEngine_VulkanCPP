@@ -2,8 +2,10 @@
 #include "../MaterialInstance.h"
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
+#ifdef __APPLE__
 #include "../RHI/Platforms/Metal/MetalDevice.h"
 #include "../RHI/Platforms/Metal/MetalTexture.h"
+#endif
 #include "../../Content/ContentToEngine.h"
 #include "../../Utilities/IOStream.h"
 #include <iostream>
