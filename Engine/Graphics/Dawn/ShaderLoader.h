@@ -477,11 +477,10 @@ fn deferred_lighting_fs(input: VertexOutput) -> @location(0) vec4<f32> {
 )wgsl";
 
 static const char* kShader_ForwardPBR_NoShadow = R"wgsl(
-// ForwardPBR_NoShadow.wgsl — Dawn Forward PBR with shadow map (3-group layout)
+// ForwardPBR_NoShadow.wgsl — Dawn Forward PBR without shadow map (3-group layout)
 //
 // Descriptor set layout:
-//   Group 0 (Global):   binding 11 = GlobalShaderData(UB), binding 12 = ForwardLightBuffer(UB),
-//                        binding 13 = shadowDepthTex, binding 14 = shadowSampler
+//   Group 0 (Global):   binding 11 = GlobalShaderData(UB), binding 12 = ForwardLightBuffer(UB)
 //   Group 1 (PerObject): binding 10 = PerObjectData (dynamic uniform)
 //   Group 2 (Material):  binding 0 = albedo, 1 = normal, 2 = ORM, 3 = sampler
 
@@ -523,8 +522,6 @@ struct PerObjectData {
 
 @group(0) @binding(11) var<uniform> globalData: GlobalShaderData;
 @group(0) @binding(12) var<uniform> lightBuffer: ForwardLightBuffer;
-@group(0) @binding(13) var shadowDepthTex: texture_depth_2d;
-@group(0) @binding(14) var shadowSampler: sampler;
 
 @group(1) @binding(10) var<uniform> perObject: PerObjectData;
 
@@ -610,32 +607,6 @@ fn geometrySmith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, a: f32) -> f32 {
 
 const PI: f32 = 3.141592653589793;
 
-const SHADOW_MAP_SIZE: f32 = 2048.0;
-
-fn sampleShadow(worldPos: vec3f) -> f32 {
-    if (lightBuffer.directionalLightCount == 0u) { return 1.0; }
-    let lightVP = lightBuffer.directionalLights[0].viewProjections[0];
-    let clipPos = lightVP * vec4f(worldPos, 1.0);
-    let ndc = clipPos.xyz / clipPos.w;
-    let shadowUV = vec2f(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y);
-    let currentDepth = ndc.z;
-
-    let texelCoord = vec2i(clamp(shadowUV, vec2f(0.0), vec2f(1.0)) * vec2f(SHADOW_MAP_SIZE));
-    let maxCoord = vec2i(i32(SHADOW_MAP_SIZE) - 1);
-    var shadow: f32 = 0.0;
-    for (var y: i32 = -1; y <= 1; y++) {
-        for (var x: i32 = -1; x <= 1; x++) {
-            let coord = clamp(texelCoord + vec2i(x, y), vec2i(0), maxCoord);
-            let sampleDepth = textureLoad(shadowDepthTex, coord, 0);
-            shadow += select(0.0, 1.0, currentDepth <= sampleDepth + 0.003);
-        }
-    }
-    if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
-        shadowUV.y < 0.0 || shadowUV.y > 1.0 ||
-        currentDepth > 1.0 || currentDepth < 0.0) { return 1.0; }
-    return shadow / 9.0;
-}
-
 @fragment
 fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @location(0) vec4<f32> {
     let albedo = textureSample(albedoMap, matSampler, input.uv).rgb;
@@ -678,10 +649,12 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
         let kS = fresnel;
         let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
 
-        let shadowFactor = sampleShadow(input.worldPos);
-        let Lo = (kD * albedo / PI + specular) * radiance * NdotL * shadowFactor;
+        let Lo = (kD * albedo / PI + specular) * radiance * NdotL;
         color = color + Lo;
     }
+
+    // Gamma correction: PBR output is in linear space, convert to sRGB for display
+    color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
 
     return vec4<f32>(color, 1.0);
 }

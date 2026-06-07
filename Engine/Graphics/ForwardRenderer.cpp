@@ -984,6 +984,26 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
 
         SetupLights(scene, frameIndex, frameData, csmViews, cascadeSplits, lightShadowIndices, lightViewProjs);
+
+#ifdef __EMSCRIPTEN__
+        if (frameIndex == 0 && frameNumber_ == 0) {
+            auto* lb = static_cast<rhi::ForwardLightBuffer*>(lightBuffersMapped_[frameIndex]);
+            std::cout << "[FwdRenderer] Light buffer: dirCount=" << lb->directionalLightCount
+                      << " punctCount=" << lb->punctualLightCount << std::endl;
+            if (lb->directionalLightCount > 0) {
+                auto& dl = lb->directionalLights[0];
+                std::cout << "[FwdRenderer] DirLight0: dir=("
+                          << dl.directionAndIntensity.x << "," << dl.directionAndIntensity.y << "," << dl.directionAndIntensity.z
+                          << ") intensity=" << dl.directionAndIntensity.w
+                          << " color=(" << dl.colorAndShadow.x << "," << dl.colorAndShadow.y << "," << dl.colorAndShadow.z << ")" << std::endl;
+            }
+            std::cout << "[FwdRenderer] GlobalData: numDirLights=" << frameData->numDirectionalLights
+                      << " numPunctLights=" << frameData->numPunctualLights << std::endl;
+            // Verify staging: print first 16 bytes of frame buffer as floats
+            auto* fb = static_cast<float*>(frameBuffersMapped_[frameIndex]);
+            std::cout << "[FwdRenderer] FrameBuf first 4 floats: " << fb[0] << "," << fb[1] << "," << fb[2] << "," << fb[3] << std::endl;
+        }
+#endif
     }
 
     // 1. Filter and Sort Proxies
