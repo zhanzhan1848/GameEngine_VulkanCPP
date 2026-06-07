@@ -1075,6 +1075,24 @@ void Engine_Test::UpdateCameraView() {
         // Also test: construct target manually and diff
         auto manualTarget = primal::math::v3{0.0f, 5.0f, -10.0f} + primal::math::v3{0.0f, -0.287f, 0.958f};
         std::cout << "[CAM] manualTarget=(" << manualTarget.x << "," << manualTarget.y << "," << manualTarget.z << ")" << std::endl;
+
+        // Test Length and Normalize with the named diff variable
+        float diffLen = rhimath::Length(diff);
+        std::cout << "[CAM] Length(diff)=" << diffLen << std::endl;
+        auto diffDot = rhimath::dot(diff, diff);
+        std::cout << "[CAM] dot(diff,diff)=" << diffDot << std::endl;
+        auto fwd_from_diff = rhimath::Normalize(diff);
+        std::cout << "[CAM] Normalize(diff)=(" << fwd_from_diff.x << "," << fwd_from_diff.y << "," << fwd_from_diff.z << ")" << std::endl;
+
+        // Test Normalize with the expression directly
+        auto fwd_from_expr = rhimath::Normalize(target - cameraPos_);
+        std::cout << "[CAM] Normalize(expr)=(" << fwd_from_expr.x << "," << fwd_from_expr.y << "," << fwd_from_expr.z << ")" << std::endl;
+
+        // Store expression result and check values
+        auto tempResult = target - cameraPos_;
+        float tempLen = rhimath::Length(tempResult);
+        std::cout << "[CAM] tempResult=(" << tempResult.x << "," << tempResult.y << "," << tempResult.z << ") Length=" << tempLen << std::endl;
+
         auto fwd = rhimath::Normalize(target - cameraPos_);
         std::cout << "[CAM] fwd=(" << fwd.x << "," << fwd.y << "," << fwd.z << ")" << std::endl;
         auto rt = rhimath::Normalize(rhimath::Cross(fwd, primal::math::v3{0,1,0}));
