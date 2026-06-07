@@ -60,8 +60,8 @@ constexpr f32 epsilon{ 1e-5f };
 		constexpr v2() : x(0), y(0) {}
 		constexpr v2(float x, float y) : x(x), y(y) {}
 		constexpr explicit v2(float s) : x(s), y(s) {}
-		float& operator[](int i) { return (&x)[i]; }
-		constexpr float operator[](int i) const { return (&x)[i]; }
+		float& operator[](int i) { return i == 0 ? x : y; }
+		constexpr float operator[](int i) const { return i == 0 ? x : y; }
 		v2 operator+(const v2& o) const { return {x + o.x, y + o.y}; }
 		v2 operator-(const v2& o) const { return {x - o.x, y - o.y}; }
 		v2 operator*(float s) const { return {x * s, y * s}; }
@@ -78,8 +78,8 @@ constexpr f32 epsilon{ 1e-5f };
 		constexpr v3() : x(0), y(0), z(0), _pad(0) {}
 		constexpr v3(float x, float y, float z) : x(x), y(y), z(z), _pad(0) {}
 		constexpr explicit v3(float s) : x(s), y(s), z(s), _pad(0) {}
-		float& operator[](int i) { return (&x)[i]; }
-		constexpr float operator[](int i) const { return (&x)[i]; }
+		float& operator[](int i) { switch(i) { case 0: return x; case 1: return y; case 2: return z; default: return _pad; } }
+		constexpr float operator[](int i) const { switch(i) { case 0: return x; case 1: return y; case 2: return z; default: return _pad; } }
 		v3 operator+(const v3& o) const { return {x + o.x, y + o.y, z + o.z}; }
 		v3 operator-(const v3& o) const { return {x - o.x, y - o.y, z - o.z}; }
 		v3 operator*(float s) const { return {x * s, y * s, z * s}; }
@@ -98,8 +98,8 @@ constexpr f32 epsilon{ 1e-5f };
 		constexpr v4(float x, float y, float z, float w) : x(x), y(y), z(z), w(w) {}
 		constexpr explicit v4(float s) : x(s), y(s), z(s), w(s) {}
 		constexpr v4(const v3& v, float w_) : x(v.x), y(v.y), z(v.z), w(w_) {}
-		float& operator[](int i) { return (&x)[i]; }
-		constexpr float operator[](int i) const { return (&x)[i]; }
+		float& operator[](int i) { switch(i) { case 0: return x; case 1: return y; case 2: return z; default: return w; } }
+		constexpr float operator[](int i) const { switch(i) { case 0: return x; case 1: return y; case 2: return z; default: return w; } }
 		v4 operator+(const v4& o) const { return {x + o.x, y + o.y, z + o.z, w + o.w}; }
 		v4 operator-(const v4& o) const { return {x - o.x, y - o.y, z - o.z, w - o.w}; }
 		v4 operator*(float s) const { return {x * s, y * s, z * s, w * s}; }
