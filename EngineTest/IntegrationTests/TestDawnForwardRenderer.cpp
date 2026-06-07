@@ -1067,6 +1067,14 @@ void Engine_Test::UpdateCameraView() {
         std::cout << "[CAM] Normalize test: (" << testNorm.x << "," << testNorm.y << "," << testNorm.z << ")" << std::endl;
 
         // Isolate: manually trace CreateLookAtMatrix
+        std::cout << "[CAM] target=(" << target.x << "," << target.y << "," << target.z << ")" << std::endl;
+        std::cout << "[CAM] cameraPos=(" << cameraPos_.x << "," << cameraPos_.y << "," << cameraPos_.z << ")" << std::endl;
+        auto diff = target - cameraPos_;
+        std::cout << "[CAM] diff=target-cam=(" << diff.x << "," << diff.y << "," << diff.z << ")" << std::endl;
+        std::cout << "[CAM] forward=(" << forward.x << "," << forward.y << "," << forward.z << ")" << std::endl;
+        // Also test: construct target manually and diff
+        auto manualTarget = primal::math::v3{0.0f, 5.0f, -10.0f} + primal::math::v3{0.0f, -0.287f, 0.958f};
+        std::cout << "[CAM] manualTarget=(" << manualTarget.x << "," << manualTarget.y << "," << manualTarget.z << ")" << std::endl;
         auto fwd = rhimath::Normalize(target - cameraPos_);
         std::cout << "[CAM] fwd=(" << fwd.x << "," << fwd.y << "," << fwd.z << ")" << std::endl;
         auto rt = rhimath::Normalize(rhimath::Cross(fwd, primal::math::v3{0,1,0}));
