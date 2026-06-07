@@ -631,7 +631,61 @@ void Engine_Test::RenderFrame() {
     // No render graph, no post-processing (HZB/SSGI/SSAO/Bloom/TM)
     // ============================================================
 
-    if (totalFrames_ == 0) std::cout << "[TestDawnFR] First frame begin" << std::endl;
+    if (totalFrames_ == 0) {
+        std::cout << "[TestDawnFR] First frame begin" << std::endl;
+
+        // === Diagnostic: Print camera and matrix state ===
+        std::cout << "[DIAG] Camera pos=(" << cameraPos_.x << "," << cameraPos_.y << "," << cameraPos_.z
+                  << ") yaw=" << cameraYaw_ << " pitch=" << cameraPitch_ << std::endl;
+        float cp = cosf(cameraPitch_), sp = sinf(cameraPitch_);
+        float cy = cosf(cameraYaw_), sy = sinf(cameraYaw_);
+        primal::math::v3 fwd{-sy*cp, sp, -cy*cp};
+        std::cout << "[DIAG] Forward=(" << fwd.x << "," << fwd.y << "," << fwd.z << ")" << std::endl;
+
+        auto vm = view_.GetViewMatrix();
+        std::cout << "[DIAG] View col0=(" << vm.columns[0][0] << "," << vm.columns[0][1] << "," << vm.columns[0][2] << "," << vm.columns[0][3] << ")" << std::endl;
+        std::cout << "[DIAG] View col1=(" << vm.columns[1][0] << "," << vm.columns[1][1] << "," << vm.columns[1][2] << "," << vm.columns[1][3] << ")" << std::endl;
+        std::cout << "[DIAG] View col2=(" << vm.columns[2][0] << "," << vm.columns[2][1] << "," << vm.columns[2][2] << "," << vm.columns[2][3] << ")" << std::endl;
+        std::cout << "[DIAG] View col3=(" << vm.columns[3][0] << "," << vm.columns[3][1] << "," << vm.columns[3][2] << "," << vm.columns[3][3] << ")" << std::endl;
+
+        auto pm = view_.GetProjectionMatrix();
+        std::cout << "[DIAG] Proj col0=(" << pm.columns[0][0] << "," << pm.columns[0][1] << "," << pm.columns[0][2] << "," << pm.columns[0][3] << ")" << std::endl;
+        std::cout << "[DIAG] Proj col1=(" << pm.columns[1][0] << "," << pm.columns[1][1] << "," << pm.columns[1][2] << "," << pm.columns[1][3] << ")" << std::endl;
+        std::cout << "[DIAG] Proj col2=(" << pm.columns[2][0] << "," << pm.columns[2][1] << "," << pm.columns[2][2] << "," << pm.columns[2][3] << ")" << std::endl;
+        std::cout << "[DIAG] Proj col3=(" << pm.columns[3][0] << "," << pm.columns[3][1] << "," << pm.columns[3][2] << "," << pm.columns[3][3] << ")" << std::endl;
+
+        auto vp = view_.GetViewProjectionMatrix();
+        std::cout << "[DIAG] VP col0=(" << vp.columns[0][0] << "," << vp.columns[0][1] << "," << vp.columns[0][2] << "," << vp.columns[0][3] << ")" << std::endl;
+        std::cout << "[DIAG] VP col1=(" << vp.columns[1][0] << "," << vp.columns[1][1] << "," << vp.columns[1][2] << "," << vp.columns[1][3] << ")" << std::endl;
+        std::cout << "[DIAG] VP col2=(" << vp.columns[2][0] << "," << vp.columns[2][1] << "," << vp.columns[2][2] << "," << vp.columns[2][3] << ")" << std::endl;
+        std::cout << "[DIAG] VP col3=(" << vp.columns[3][0] << "," << vp.columns[3][1] << "," << vp.columns[3][2] << "," << vp.columns[3][3] << ")" << std::endl;
+
+        // Test VP * known vertices
+        auto testOrigin = vp * primal::math::v4{0,0,0,1};
+        std::cout << "[DIAG] VP*(0,0,0,1) = (" << testOrigin.x << "," << testOrigin.y << "," << testOrigin.z << "," << testOrigin.w << ")"
+                  << " ndc=(" << (testOrigin.w!=0?testOrigin.x/testOrigin.w:9999) << "," << (testOrigin.w!=0?testOrigin.y/testOrigin.w:9999) << "," << (testOrigin.w!=0?testOrigin.z/testOrigin.w:9999) << ")" << std::endl;
+
+        auto testV = vp * primal::math::v4{5,5,5,1};
+        std::cout << "[DIAG] VP*(5,5,5,1) = (" << testV.x << "," << testV.y << "," << testV.z << "," << testV.w << ")"
+                  << " ndc=(" << (testV.w!=0?testV.x/testV.w:9999) << "," << (testV.w!=0?testV.y/testV.w:9999) << "," << (testV.w!=0?testV.z/testV.w:9999) << ")" << std::endl;
+
+        auto testV2 = vp * primal::math::v4{-5,0,-5,1};
+        std::cout << "[DIAG] VP*(-5,0,-5,1) = (" << testV2.x << "," << testV2.y << "," << testV2.z << "," << testV2.w << ")"
+                  << " ndc=(" << (testV2.w!=0?testV2.x/testV2.w:9999) << "," << (testV2.w!=0?testV2.y/testV2.w:9999) << "," << (testV2.w!=0?testV2.z/testV2.w:9999) << ")" << std::endl;
+
+        // Print struct sizes for buffer verification
+        std::cout << "[DIAG] sizeof(GlobalShaderData)=" << sizeof(GlobalShaderData) << " sizeof(PerObjectData)=" << sizeof(PerObjectData) << std::endl;
+        std::cout << "[DIAG] sizeof(m4x4)=" << sizeof(primal::math::m4x4) << " sizeof(v4)=" << sizeof(primal::math::v4) << std::endl;
+
+        // Print first proxy transform and AABB
+        if (!view_.GetVisibleProxies().empty()) {
+            const auto* p = view_.GetVisibleProxies()[0];
+            auto wvp = vp * p->transform;
+            auto testP = wvp * primal::math::v4{0,0,0,1};
+            std::cout << "[DIAG] Proxy0 WVP*(0,0,0,1) = (" << testP.x << "," << testP.y << "," << testP.z << "," << testP.w << ")"
+                      << " ndc=(" << (testP.w!=0?testP.x/testP.w:9999) << "," << (testP.w!=0?testP.y/testP.w:9999) << "," << (testP.w!=0?testP.z/testP.w:9999) << ")" << std::endl;
+        }
+    }
 
     if (cmdBuffer_ == rhi::handles::INVALID_COMMAND_BUFFER) {
         cmdBuffer_ = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
