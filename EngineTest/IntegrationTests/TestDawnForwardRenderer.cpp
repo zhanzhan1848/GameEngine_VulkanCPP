@@ -1049,7 +1049,43 @@ void Engine_Test::UpdateCameraView() {
         std::cout << "[CAM] CreateLookAt: col0=(" << viewMat.columns[0][0] << "," << viewMat.columns[0][1] << "," << viewMat.columns[0][2] << "," << viewMat.columns[0][3] << ")" << std::endl;
         std::cout << "[CAM] CreateLookAt: col1=(" << viewMat.columns[1][0] << "," << viewMat.columns[1][1] << "," << viewMat.columns[1][2] << "," << viewMat.columns[1][3] << ")" << std::endl;
         std::cout << "[CAM] CreateLookAt: col3=(" << viewMat.columns[3][0] << "," << viewMat.columns[3][1] << "," << viewMat.columns[3][2] << "," << viewMat.columns[3][3] << ")" << std::endl;
-        std::cout << "[CAM] sizeof(viewMat)=" << sizeof(viewMat) << " sizeof(m4x4)=" << sizeof(primal::math::m4x4) << std::endl;
+
+        // Isolate: test m4x4 construction
+        auto testM = primal::math::m4x4{primal::math::v4{-1,0,0,0}, primal::math::v4{0,1,0,0}, primal::math::v4{0,0,1,0}, primal::math::v4{0,0,0,1}};
+        std::cout << "[CAM] testM col0=(" << testM.columns[0][0] << "," << testM.columns[0][1] << "," << testM.columns[0][2] << "," << testM.columns[0][3] << ")" << std::endl;
+
+        // Isolate: test Identity
+        auto ident = rhimath::MatrixIdentity();
+        std::cout << "[CAM] Identity col0=(" << ident.columns[0][0] << "," << ident.columns[0][1] << "," << ident.columns[0][2] << "," << ident.columns[0][3] << ")" << std::endl;
+
+        // Isolate: test Cross
+        auto testCross = rhimath::Cross(primal::math::v3{0.0f,-0.287f,0.958f}, primal::math::v3{0.0f,1.0f,0.0f});
+        std::cout << "[CAM] Cross test: (" << testCross.x << "," << testCross.y << "," << testCross.z << ")" << std::endl;
+
+        // Isolate: test Normalize
+        auto testNorm = rhimath::Normalize(primal::math::v3{-0.958f, 0.0f, 0.0f});
+        std::cout << "[CAM] Normalize test: (" << testNorm.x << "," << testNorm.y << "," << testNorm.z << ")" << std::endl;
+
+        // Isolate: manually trace CreateLookAtMatrix
+        auto fwd = rhimath::Normalize(target - cameraPos_);
+        std::cout << "[CAM] fwd=(" << fwd.x << "," << fwd.y << "," << fwd.z << ")" << std::endl;
+        auto rt = rhimath::Normalize(rhimath::Cross(fwd, primal::math::v3{0,1,0}));
+        std::cout << "[CAM] rt=(" << rt.x << "," << rt.y << "," << rt.z << ")" << std::endl;
+        auto nu = rhimath::Cross(rt, fwd);
+        std::cout << "[CAM] nu=(" << nu.x << "," << nu.y << "," << nu.z << ")" << std::endl;
+        auto dotRE = rhimath::Dot(rt, cameraPos_);
+        auto dotUE = rhimath::Dot(nu, cameraPos_);
+        auto dotFE = rhimath::Dot(fwd, cameraPos_);
+        std::cout << "[CAM] dots: r*e=" << dotRE << " u*e=" << dotUE << " f*e=" << dotFE << std::endl;
+        // Manually construct result
+        auto manualMat = primal::math::m4x4{
+            primal::math::v4{rt.x, nu.x, -fwd.x, 0.0f},
+            primal::math::v4{rt.y, nu.y, -fwd.y, 0.0f},
+            primal::math::v4{rt.z, nu.z, -fwd.z, 0.0f},
+            primal::math::v4{-dotRE, -dotUE, dotFE, 1.0f}
+        };
+        std::cout << "[CAM] manual col0=(" << manualMat.columns[0][0] << "," << manualMat.columns[0][1] << "," << manualMat.columns[0][2] << "," << manualMat.columns[0][3] << ")" << std::endl;
+        std::cout << "[CAM] manual col3=(" << manualMat.columns[3][0] << "," << manualMat.columns[3][1] << "," << manualMat.columns[3][2] << "," << manualMat.columns[3][3] << ")" << std::endl;
     }
 #endif
     view_.SetViewMatrix(viewMat);
