@@ -68,6 +68,7 @@ bool EmscriptenGetMouseButton(int button) {
 void EmscriptenGetMouseDelta(float* dx, float* dy) {
     *dx = mouseDX;
     *dy = mouseDY;
+    // Always clear deltas to prevent accumulation when mouse button is not held
     mouseDX = 0;
     mouseDY = 0;
 }

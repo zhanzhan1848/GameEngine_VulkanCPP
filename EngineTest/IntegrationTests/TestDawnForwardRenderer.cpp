@@ -967,8 +967,8 @@ void Engine_Test::UpdateCamera(float dt) {
     float mdx, mdy;
     EmscriptenGetMouseDelta(&mdx, &mdy);
     if (EmscriptenGetMouseButton(0)) { // left button drag
-        cameraYaw_ -= mdx * 0.003f;
-        cameraPitch_ -= mdy * 0.003f;
+        cameraYaw_ -= mdx * 0.002f;
+        cameraPitch_ -= mdy * 0.002f;
     }
 #endif
 

@@ -364,8 +364,8 @@ inline m4x4 CreatePerspectiveMatrix(float fovY, float aspect, float nearPlane, f
         v4{1.0f / (aspect * tanHalfFov), 0.0f, 0.0f, 0.0f},
         v4{0.0f, 1.0f / tanHalfFov, 0.0f, 0.0f},
         v4{0.0f, 0.0f, farPlane / (nearPlane - farPlane), -1.0f},
-        v4{0.0f, 0.0f, (nearPlane * farPlane) / (nearPlane - farPlane), 1.0f}
-    }; // Note: This is Metal-compatible [0,1] depth range
+        v4{0.0f, 0.0f, (nearPlane * farPlane) / (nearPlane - farPlane), 0.0f}
+    }; // Metal/Dawn [0,1] depth range. column 3 w=0: clip.w = -z_view
 }
 
 /**
@@ -674,7 +674,7 @@ inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ)
         v4{f / aspect, 0.0f, 0.0f, 0.0f},
         v4{0.0f, f, 0.0f, 0.0f},
         v4{0.0f, 0.0f, farZ / (nearZ - farZ), -1.0f},
-        v4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 1.0f}
+        v4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 0.0f}
     };
 #endif
 }

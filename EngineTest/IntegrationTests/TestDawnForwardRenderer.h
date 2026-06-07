@@ -71,11 +71,11 @@ private:
     primal::graphics::RenderScene scene_;
     primal::graphics::RenderView view_;
 
-    // Camera — yaw=π, pitch≈-0.291 matches initial view (0,5,-10)→(0,2,0)
-    primal::math::v3 cameraPos_{0.0f, 5.0f, -10.0f};
-    float cameraYaw_{3.14159265f};
-    float cameraPitch_{-0.291f};
-    float cameraSpeed_{10.0f};
+    // Camera — inside Sponza atrium looking along -Z
+    primal::math::v3 cameraPos_{0.0f, 5.0f, 0.0f};
+    float cameraYaw_{0.0f};
+    float cameraPitch_{-0.1f};
+    float cameraSpeed_{5.0f};
 
     // Sponza scene data
     primal::utl::vector<primal::graphics::SceneDataMeshInfo> sceneMeshInfos_;
