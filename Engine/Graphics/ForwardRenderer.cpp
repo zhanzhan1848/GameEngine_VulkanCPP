@@ -971,6 +971,15 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     // 0. Update Frame Data
     if (frameIndex < rhi::MAX_FRAMES_IN_FLIGHT && frameBuffersMapped_[frameIndex]) {
         rhi::GlobalShaderData* frameData = static_cast<rhi::GlobalShaderData*>(frameBuffersMapped_[frameIndex]);
+#ifdef __EMSCRIPTEN__
+        if (frameIndex == 0 && frameNumber_ == 0) {
+            auto srcView = view.GetViewMatrix();
+            std::cout << "[FwdRenderer] BEFORE write: src view col0=(" << srcView.columns[0][0] << "," << srcView.columns[0][1] << "," << srcView.columns[0][2] << "," << srcView.columns[0][3] << ")" << std::endl;
+            std::cout << "[FwdRenderer] BEFORE write: src view col3=(" << srcView.columns[3][0] << "," << srcView.columns[3][1] << "," << srcView.columns[3][2] << "," << srcView.columns[3][3] << ")" << std::endl;
+            std::cout << "[FwdRenderer] frameData ptr=" << frameData << " mappedPtr=" << frameBuffersMapped_[frameIndex] << std::endl;
+            std::cout << "[FwdRenderer] sizeof(GlobalShaderData)=" << sizeof(rhi::GlobalShaderData) << " offset of view=" << offsetof(rhi::GlobalShaderData, view) << std::endl;
+        }
+#endif
         frameData->view = view.GetViewMatrix();
         frameData->projection = view.GetProjectionMatrix();
         frameData->viewProjection = view.GetViewProjectionMatrix();
@@ -1002,6 +1011,10 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
             // Verify staging: print first 16 bytes of frame buffer as floats
             auto* fb = static_cast<float*>(frameBuffersMapped_[frameIndex]);
             std::cout << "[FwdRenderer] FrameBuf first 4 floats: " << fb[0] << "," << fb[1] << "," << fb[2] << "," << fb[3] << std::endl;
+            std::cout << "[FwdRenderer] AFTER write: frameData->view col0=(" << frameData->view.columns[0][0] << "," << frameData->view.columns[0][1] << "," << frameData->view.columns[0][2] << "," << frameData->view.columns[0][3] << ")" << std::endl;
+            std::cout << "[FwdRenderer] AFTER write: frameData->view col3=(" << frameData->view.columns[3][0] << "," << frameData->view.columns[3][1] << "," << frameData->view.columns[3][2] << "," << frameData->view.columns[3][3] << ")" << std::endl;
+            std::cout << "[FwdRenderer] frameData->proj col0=(" << frameData->projection.columns[0][0] << "," << frameData->projection.columns[0][1] << "," << frameData->projection.columns[0][2] << "," << frameData->projection.columns[0][3] << ")" << std::endl;
+            std::cout << "[FwdRenderer] frameData->vp col0=(" << frameData->viewProjection.columns[0][0] << "," << frameData->viewProjection.columns[0][1] << "," << frameData->viewProjection.columns[0][2] << "," << frameData->viewProjection.columns[0][3] << ")" << std::endl;
         }
 #endif
     }

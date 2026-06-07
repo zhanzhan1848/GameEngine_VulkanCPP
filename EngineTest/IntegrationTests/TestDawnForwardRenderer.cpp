@@ -1044,7 +1044,21 @@ void Engine_Test::UpdateCameraView() {
     primal::math::v3 up{0.0f, 1.0f, 0.0f};
 
     rhimath::m4x4 viewMat = rhimath::CreateLookAtMatrix(cameraPos_, target, up);
+#ifdef __EMSCRIPTEN__
+    if (totalFrames_ <= 1) {
+        std::cout << "[CAM] CreateLookAt: col0=(" << viewMat.columns[0][0] << "," << viewMat.columns[0][1] << "," << viewMat.columns[0][2] << "," << viewMat.columns[0][3] << ")" << std::endl;
+        std::cout << "[CAM] CreateLookAt: col1=(" << viewMat.columns[1][0] << "," << viewMat.columns[1][1] << "," << viewMat.columns[1][2] << "," << viewMat.columns[1][3] << ")" << std::endl;
+        std::cout << "[CAM] CreateLookAt: col3=(" << viewMat.columns[3][0] << "," << viewMat.columns[3][1] << "," << viewMat.columns[3][2] << "," << viewMat.columns[3][3] << ")" << std::endl;
+        std::cout << "[CAM] sizeof(viewMat)=" << sizeof(viewMat) << " sizeof(m4x4)=" << sizeof(primal::math::m4x4) << std::endl;
+    }
+#endif
     view_.SetViewMatrix(viewMat);
+#ifdef __EMSCRIPTEN__
+    if (totalFrames_ <= 1) {
+        auto vm2 = view_.GetViewMatrix();
+        std::cout << "[CAM] After SetView: col0=(" << vm2.columns[0][0] << "," << vm2.columns[0][1] << "," << vm2.columns[0][2] << "," << vm2.columns[0][3] << ")" << std::endl;
+    }
+#endif
     view_.Cull(scene_);
 }
 
