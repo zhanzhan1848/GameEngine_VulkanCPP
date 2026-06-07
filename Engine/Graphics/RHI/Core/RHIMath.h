@@ -402,19 +402,14 @@ inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
     v3 right = Normalize(Cross(forward, up));
     v3 newUp = Cross(right, forward);
 
-    // Metal uses column-major storage, so we need to construct the matrix accordingly
-    // The view matrix should be:
-    // [ right.x   right.y   right.z   -dot(right, eye)    ]
-    // [ newUp.x   newUp.y   newUp.z   -dot(newUp, eye)   ]
-    // [ -forward.x -forward.y -forward.z  dot(forward, eye) ]
-    // [ 0         0         0          1                  ]
-
-    // In column-major format, each column is stored as a v4
+    // Column-major storage: each v4 is a COLUMN of the view matrix.
+    // The standard view matrix rows are: [right | newUp | -forward | translation]
+    // Transposing to column-major: column j = (row0[j], row1[j], row2[j], row3[j])
     return m4x4{
-        v4{right.x, right.y, right.z, 0.0f},           // Column 0: right vector
-        v4{newUp.x, newUp.y, newUp.z, 0.0f},           // Column 1: up vector
-        v4{-forward.x, -forward.y, -forward.z, 0.0f},   // Column 2: negated forward vector
-        v4{-Dot(right, eye), -Dot(newUp, eye), Dot(forward, eye), 1.0f}  // Column 3: translation
+        v4{right.x, newUp.x, -forward.x, 0.0f},
+        v4{right.y, newUp.y, -forward.y, 0.0f},
+        v4{right.z, newUp.z, -forward.z, 0.0f},
+        v4{-Dot(right, eye), -Dot(newUp, eye), Dot(forward, eye), 1.0f}
     };
 }
 

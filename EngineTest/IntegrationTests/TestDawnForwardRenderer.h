@@ -71,10 +71,10 @@ private:
     primal::graphics::RenderScene scene_;
     primal::graphics::RenderView view_;
 
-    // Camera — inside Sponza atrium looking along -Z
-    primal::math::v3 cameraPos_{0.0f, 5.0f, 0.0f};
-    float cameraYaw_{0.0f};
-    float cameraPitch_{-0.1f};
+    // Camera — outside Sponza, looking toward origin (same as macOS verified view)
+    primal::math::v3 cameraPos_{0.0f, 5.0f, -10.0f};
+    float cameraYaw_{3.14159265f};
+    float cameraPitch_{-0.291f};
     float cameraSpeed_{5.0f};
 
     // Sponza scene data
