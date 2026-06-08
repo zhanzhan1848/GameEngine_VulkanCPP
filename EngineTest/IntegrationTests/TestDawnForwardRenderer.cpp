@@ -150,7 +150,7 @@ Engine_Test::~Engine_Test() {
 }
 
 bool Engine_Test::initialize() {
-    std::cout << "[TestDawnForwardRenderer] Initializing..." << std::endl;
+    std::cout << "[TestDawnFR] Init..." << std::endl;
 
     // Create window
     platform::window_init_info windowInfo{
@@ -172,10 +172,9 @@ bool Engine_Test::initialize() {
     deviceDesc.maxFramesInFlight = kFrameCount;
     device_ = new rhi::DawnDevice(deviceDesc);
     if (!device_ || !device_->Initialize()) {
-        std::cerr << "Failed to create Dawn device" << std::endl;
+        std::cerr << "[TestDawnFR] Dawn device failed" << std::endl;
         return false;
     }
-    std::cout << "[TestDawnForwardRenderer] Dawn device created" << std::endl;
 
     // Create persistent depth texture (reused across frames)
     CreateDepthTexture();
@@ -200,22 +199,17 @@ bool Engine_Test::initialize() {
     scDesc.bufferCount = kFrameCount;
     swapchain_ = device_->CreateSwapChain(scDesc);
     if (!swapchain_) {
-        std::cerr << "Failed to create swapchain" << std::endl;
+        std::cerr << "[TestDawnFR] Swapchain failed" << std::endl;
         return false;
     }
-    std::cout << "[TestDawnForwardRenderer] Swapchain created" << std::endl;
 
     // Initialize ForwardRenderer
     if (!forwardRenderer_.Initialize(device_)) {
-        std::cerr << "Failed to initialize ForwardRenderer" << std::endl;
+        std::cerr << "[TestDawnFR] ForwardRenderer failed" << std::endl;
         return false;
     }
-    std::cout << "[TestDawnForwardRenderer] ForwardRenderer initialized" << std::endl;
 
-    // Create shadow resources before LoadSponzaScene (shadow depth texture + sampler)
-    std::cout << "[TestDawnForwardRenderer] Creating shadow resources..." << std::endl;
     CreateShadowResources();
-    std::cout << "[TestDawnForwardRenderer] Shadow resources created" << std::endl;
 
     // Load Sponza scene
     if (!LoadSponzaScene()) {
@@ -254,9 +248,8 @@ bool Engine_Test::initialize() {
     // Cull to populate visible proxies
     view_.Cull(scene_);
 
-    std::cout << "[TestDawnForwardRenderer] Scene loaded: " << sceneMeshInfos_.size()
-              << " meshes, " << scene_.GetProxies().size() << " proxies, "
-              << view_.GetVisibleProxies().size() << " visible" << std::endl;
+    std::cout << "[TestDawnFR] Ready: " << sceneMeshInfos_.size()
+              << " meshes, " << view_.GetVisibleProxies().size() << " visible" << std::endl;
 
 #ifdef __EMSCRIPTEN__
     g_engineTest = this;
@@ -299,22 +292,15 @@ bool Engine_Test::LoadSponzaScene() {
     std::cout << "[TestDawnFR] Loaded " << sceneMeshInfos_.size() << " meshes" << std::endl;
 
     // Load Dawn-compatible PBR shader with shadow sampling
-    std::cout << "[TestDawnFR] Loading shader..." << std::endl;
 #ifdef __EMSCRIPTEN__
     std::string shaderSource = dawn::LoadWGSL("ForwardPBR");
 #else
     std::string shaderSource = LoadShaderSource("Engine/Graphics/Dawn/shaders/ForwardPBR.wgsl");
 #endif
-    std::cout << "[TestDawnFR] Shader source: " << (shaderSource.empty() ? "EMPTY" : "OK") << " size=" << shaderSource.size() << std::endl;
     if (shaderSource.empty()) {
         std::cerr << "[TestDawnFR] Failed to load ForwardPBR.wgsl" << std::endl;
         return false;
     }
-
-    // Test: verify shader compiles on Dawn
-    auto testVS = device_->CreateShader(shaderSource.data(), shaderSource.size() + 1, ShaderStage::Vertex, "vertexMain");
-    auto testFS = device_->CreateShader(shaderSource.data(), shaderSource.size() + 1, ShaderStage::Pixel, "fragmentMain");
-    std::cout << "[TestDawnFR] Shader compilation: VS=" << testVS << " FS=" << testFS << std::endl;
 
     // Create shared Material for all meshes
     auto material = std::make_shared<Material>();
@@ -422,8 +408,6 @@ bool Engine_Test::LoadSponzaScene() {
     std::string textureBase = baseDir;
     u32 texLoaded = 0, texFailed = 0;
 
-    std::cout << "[TestDawnFR] Creating material instances for " << sceneMeshInfos_.size() << " meshes..." << std::endl;
-
     for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
         auto& meshInfo = sceneMeshInfos_[i];
         meshInfo.material = material; // Shared material
@@ -498,13 +482,8 @@ bool Engine_Test::LoadSponzaScene() {
 
         // Add to materials map (keyed by materialId = entityId)
         materials_[proxy.materialId] = matInst;
-
-        if ((i + 1) % 50 == 0) {
-            std::cout << "[TestDawnFR] Processed " << (i + 1) << "/" << sceneMeshInfos_.size() << " meshes" << std::endl;
-        }
     }
 
-    std::cout << "[TestDawnFR] Textures: " << texLoaded << " loaded, " << texFailed << " fallback" << std::endl;
     return true;
 }
 
@@ -564,7 +543,6 @@ void Engine_Test::ReloadTextures() {
         reloaded++;
     }
 
-    std::cout << "[TestDawnFR] Texture reload: " << reloaded << "/" << sceneMeshInfos_.size() << std::endl;
     texturesReloaded_ = (reloaded > 0);
 }
 #endif
@@ -832,10 +810,6 @@ void Engine_Test::RenderFrame() {
     device_->EndFrame();
     frameIndex_++;
     totalFrames_++;
-
-    if (totalFrames_ % 60 == 0) {
-        std::cout << "[TestDawnForwardRenderer] Frame " << totalFrames_ << std::endl;
-    }
 }
 
 void Engine_Test::UpdateCamera(float dt) {
@@ -1073,10 +1047,6 @@ void Engine_Test::CreateShadowResources() {
 
     // Pass shadow resources to ForwardRenderer (bindings 13, 14 in Group 0)
     forwardRenderer_.SetDawnShadowResources(shadowDepthTexture_, shadowSampler_);
-
-    std::cout << "[TestDawnFR] Shadow resources: pipeline=" << shadowPipeline_
-              << " depthTex=" << shadowDepthTexture_
-              << " sampler=" << shadowSampler_ << std::endl;
 }
 
 primal::math::m4x4 Engine_Test::ComputeLightViewProjection() const {
@@ -1170,7 +1140,6 @@ void Engine_Test::DisplayLinkCallback(CFRunLoopTimerRef, void* info) {
 #endif
 
 void Engine_Test::run() {
-    std::cout << "[TestDawnForwardRenderer] Running interactive mode (WASD to move, Q/E up/down, ESC to quit)..." << std::endl;
     timer_.begin();
     lastFrameTime_ = std::chrono::steady_clock::now();
 }
@@ -1270,12 +1239,11 @@ void Engine_Test::shutdown() {
 
 #ifdef __APPLE__
 void Engine_Test::applicationDidFinishLaunching(NS::Notification* notification) {
-    std::cerr << "[TestDawnForwardRenderer] applicationDidFinishLaunching called" << std::endl;
     NS::Application* pApp = reinterpret_cast<NS::Application*>(notification->object());
     pApp->activateIgnoringOtherApps(true);
 
     if (!initialize()) {
-        std::cerr << "[TestDawnForwardRenderer] Initialization FAILED" << std::endl;
+        std::cerr << "[TestDawnFR] Init FAILED" << std::endl;
         NS::Application::sharedApplication()->terminate(nullptr);
         return;
     }
@@ -1310,13 +1278,6 @@ bool Engine_Test::applicationShouldTerminateAfterLastWindowClosed(NS::Applicatio
     shutdown();
 
     timer_.end();
-    std::cout << "[TestDawnForwardRenderer] " << totalFrames_ << " frames done (avg "
-              << timer_.dt_avg() * 1000.0f << " ms/frame)" << std::endl;
-
-    // Use _exit(0) to terminate immediately after cleanup.
-    // exit()/terminate: runs static destructors (free_list assertion crash).
-    // Returning to app->run() triggers CA::Transaction commit on destroyed
-    // Metal textures (image_finalize crash). _exit skips both.
     _exit(0);
 }
 #endif
