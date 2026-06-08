@@ -74,29 +74,33 @@ DawnPendingBinding* DawnDescriptorSet::GetOrCreatePending(u32 engineBinding, Des
         }
     }
     // If looking for a buffer type and no exact match, try any buffer type
-    if (type == DescriptorType::UniformBuffer || type == DescriptorType::StorageBuffer) {
+    if (type == DescriptorType::UniformBuffer || type == DescriptorType::UniformBufferDynamic ||
+        type == DescriptorType::StorageBuffer || type == DescriptorType::StorageBufferDynamic) {
         for (auto& pb : pendingBindings_) {
             if (pb.engineBinding == engineBinding &&
-                (pb.type == DescriptorType::UniformBuffer || pb.type == DescriptorType::StorageBuffer)) {
+                (pb.type == DescriptorType::UniformBuffer || pb.type == DescriptorType::UniformBufferDynamic ||
+                 pb.type == DescriptorType::StorageBuffer || pb.type == DescriptorType::StorageBufferDynamic)) {
                 return &pb;
             }
         }
     }
-    // For texture types, try any texture type
-    if (type == DescriptorType::SampledImage || type == DescriptorType::StorageImage || type == DescriptorType::InputAttachment || type == DescriptorType::SampledDepthImage) {
+    // For texture/sampler types, try compatible types at same binding
+    if (type == DescriptorType::SampledImage || type == DescriptorType::StorageImage ||
+        type == DescriptorType::InputAttachment || type == DescriptorType::SampledDepthImage ||
+        type == DescriptorType::CombinedImageSampler) {
         for (auto& pb : pendingBindings_) {
-            if (pb.engineBinding == engineBinding && pb.type == type) {
+            if (pb.engineBinding == engineBinding &&
+                (pb.type == DescriptorType::SampledImage || pb.type == DescriptorType::StorageImage ||
+                 pb.type == DescriptorType::InputAttachment || pb.type == DescriptorType::SampledDepthImage ||
+                 pb.type == DescriptorType::CombinedImageSampler)) {
                 return &pb;
             }
         }
     }
-    // Not found — allocate a new one
-    DawnPendingBinding pb{};
-    pb.type = type;
-    pb.engineBinding = engineBinding;
-    pb.populated = false;
-    pendingBindings_.emplace_back(pb);
-    return &pendingBindings_.back();
+    // Not found — do NOT grow. The layout's bindings were pre-populated during
+    // Initialize(), so a miss means the write type is incompatible with the layout.
+    // Returning nullptr is safe: the caller checks for nullptr and skips the write.
+    return nullptr;
 }
 
 WGPUBindGroup DawnDescriptorSet::GetBindGroup() {
@@ -181,6 +185,17 @@ bool DawnDescriptorSet::BuildBindGroup() {
         }
         case DescriptorType::Sampler: {
             if (!pb.sampler) continue;
+            // Skip samplers that belong to a CombinedImageSampler — handled in second pass
+            bool belongsToCombined = false;
+            for (const auto& other : pendingBindings_) {
+                if (other.engineBinding == pb.engineBinding &&
+                    other.type == DescriptorType::CombinedImageSampler &&
+                    other.populated) {
+                    belongsToCombined = true;
+                    break;
+                }
+            }
+            if (belongsToCombined) continue;
             auto& entry = entries.emplace_back();
             std::memset(&entry, 0, sizeof(entry));
             entry.nextInChain = nullptr;

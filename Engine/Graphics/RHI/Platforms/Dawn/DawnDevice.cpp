@@ -695,9 +695,6 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 DawnPendingBinding* pb = ds->GetOrCreatePending(binding, write.descriptorType);
                 if (!pb) continue;
 
-                pb->type = write.descriptorType;
-                pb->engineBinding = binding;
-
                 if (bufInfo.buffer != handles::INVALID_RESOURCE) {
                     DawnBuffer* buf = GetBuffer(bufInfo.buffer);
                     if (buf) {
@@ -719,9 +716,6 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 DawnPendingBinding* pb = ds->GetOrCreatePending(binding, write.descriptorType);
                 if (!pb) continue;
 
-                pb->type = write.descriptorType;
-                pb->engineBinding = binding;
-
                 if (imgInfo.imageView != handles::INVALID_RESOURCE) {
                     DawnTexture* tex = GetTexture(imgInfo.imageView);
                     if (tex && tex->GetDefaultView()) {
@@ -738,9 +732,6 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 DawnPendingBinding* pb = ds->GetOrCreatePending(binding, DescriptorType::Sampler);
                 if (!pb) continue;
 
-                pb->type = DescriptorType::Sampler;
-                pb->engineBinding = binding;
-
                 if (imgInfo.sampler != handles::INVALID_SAMPLER) {
                     DawnSampler* samp = GetSampler(imgInfo.sampler);
                     if (samp) {
@@ -754,11 +745,9 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 if (!write.imageInfo) continue;
                 const auto& imgInfo = write.imageInfo[d];
 
-                // Texture part
+                // Texture part — look up CombinedImageSampler entry from layout
                 DawnPendingBinding* texPB = ds->GetOrCreatePending(binding, DescriptorType::SampledImage);
                 if (texPB) {
-                    texPB->type = DescriptorType::SampledImage;
-                    texPB->engineBinding = binding;
                     if (imgInfo.imageView != handles::INVALID_RESOURCE) {
                         DawnTexture* tex = GetTexture(imgInfo.imageView);
                         if (tex && tex->GetDefaultView()) {
@@ -771,8 +760,6 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 // Sampler part
                 DawnPendingBinding* sampPB = ds->GetOrCreatePending(binding, DescriptorType::Sampler);
                 if (sampPB) {
-                    sampPB->type = DescriptorType::Sampler;
-                    sampPB->engineBinding = binding;
                     if (imgInfo.sampler != handles::INVALID_SAMPLER) {
                         DawnSampler* samp = GetSampler(imgInfo.sampler);
                         if (samp) {
