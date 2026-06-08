@@ -340,6 +340,7 @@ else()
             -sTOTAL_STACK=16777216
             -sENVIRONMENT=web
             -sEXIT_RUNTIME=0
+            -sASYNCIFY=1
             --shell-file ${CMAKE_SOURCE_DIR}/wasm/shell.html
             -O3
         )
