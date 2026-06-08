@@ -693,7 +693,12 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 const auto& bufInfo = write.bufferInfo[d];
 
                 DawnPendingBinding* pb = ds->GetOrCreatePending(binding, write.descriptorType);
-                if (!pb) continue;
+                if (!pb) {
+                    std::cerr << "[DawnDSWrite] SKIP buf binding=" << binding
+                              << " type=" << static_cast<u32>(write.descriptorType)
+                              << " (no pending match)" << std::endl;
+                    continue;
+                }
 
                 if (bufInfo.buffer != handles::INVALID_RESOURCE) {
                     DawnBuffer* buf = GetBuffer(bufInfo.buffer);
@@ -702,7 +707,13 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                         pb->offset = bufInfo.offset;
                         pb->size = bufInfo.range > 0 ? bufInfo.range : WGPU_WHOLE_SIZE;
                         pb->populated = true;
+                    } else {
+                        std::cerr << "[DawnDSWrite] SKIP buf binding=" << binding
+                                  << " GetBuffer returned null" << std::endl;
                     }
+                } else {
+                    std::cerr << "[DawnDSWrite] SKIP buf binding=" << binding
+                              << " handle INVALID" << std::endl;
                 }
                 break;
             }
@@ -714,14 +725,28 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 const auto& imgInfo = write.imageInfo[d];
 
                 DawnPendingBinding* pb = ds->GetOrCreatePending(binding, write.descriptorType);
-                if (!pb) continue;
+                if (!pb) {
+                    std::cerr << "[DawnDSWrite] SKIP tex binding=" << binding
+                              << " type=" << static_cast<u32>(write.descriptorType)
+                              << " (no pending match)" << std::endl;
+                    continue;
+                }
 
                 if (imgInfo.imageView != handles::INVALID_RESOURCE) {
                     DawnTexture* tex = GetTexture(imgInfo.imageView);
                     if (tex && tex->GetDefaultView()) {
                         pb->textureView = tex->GetDefaultView();
                         pb->populated = true;
+                    } else {
+                        std::cerr << "[DawnDSWrite] SKIP tex binding=" << binding
+                                  << " type=" << static_cast<u32>(write.descriptorType)
+                                  << " tex=" << (tex ? "Y" : "N")
+                                  << " view=" << (tex && tex->GetDefaultView() ? "Y" : "N") << std::endl;
                     }
+                } else {
+                    std::cerr << "[DawnDSWrite] SKIP tex binding=" << binding
+                              << " type=" << static_cast<u32>(write.descriptorType)
+                              << " imageView=INVALID" << std::endl;
                 }
                 break;
             }

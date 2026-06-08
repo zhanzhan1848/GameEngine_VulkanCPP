@@ -97,21 +97,8 @@ DawnPendingBinding* DawnDescriptorSet::GetOrCreatePending(u32 engineBinding, Des
             }
         }
     }
-    // Not found — do NOT grow. The layout's bindings were pre-populated during
-    // Initialize(), so a miss means the write type is incompatible with the layout.
-    // Returning nullptr is safe: the caller checks for nullptr and skips the write.
-    static bool loggedOnce = false;
-    if (!loggedOnce) {
-        loggedOnce = true;
-        std::cerr << "[DawnDS] GetOrCreatePending: no match for binding="
-                  << engineBinding << " type=" << static_cast<u32>(type)
-                  << " (pending count=" << pendingBindings_.size() << ")" << std::endl;
-        for (const auto& pb : pendingBindings_) {
-            std::cerr << "  existing: binding=" << pb.engineBinding
-                      << " type=" << static_cast<u32>(pb.type)
-                      << " populated=" << pb.populated << std::endl;
-        }
-    }
+    // Not found — layout bindings were pre-populated during Initialize(),
+    // so a miss means the write type is incompatible with the layout.
     return nullptr;
 }
 
@@ -131,7 +118,7 @@ bool DawnDescriptorSet::BuildBindGroup() {
         return false;
     }
 
-    // Count populated entries
+    // Count populated entries and compute expected WGPU entry count
     u32 populatedCount = 0;
     for (const auto& pb : pendingBindings_) {
         if (pb.populated) ++populatedCount;
@@ -141,20 +128,20 @@ bool DawnDescriptorSet::BuildBindGroup() {
         return false;
     }
 
+    // Compute expected WGPU entry count from layout bindings
+    u32 expectedEntries = 0;
+    for (const auto& lb : layout->GetBindings()) {
+        expectedEntries += (lb.descriptorType == DescriptorType::CombinedImageSampler) ? 2 : 1;
+    }
+
     // Build WGPUBindGroupEntry array
     utl::vector<WGPUBindGroupEntry> entries;
     entries.reserve(populatedCount);
 
-    // Debug: log when bind group might be incomplete
-    static int buildCount = 0;
-    bool logThisOne = (buildCount < 4);
-    buildCount++;
-
     for (auto& pb : pendingBindings_) {
         if (!pb.populated) continue;
 
-        DawnDescriptorSetLayout* layout2 = device_.GetDescriptorSetLayout(layoutHandle_);
-        u32 wgpuBinding = layout2->GetWGPUBinding(pb.engineBinding, pb.type);
+        u32 wgpuBinding = layout->GetWGPUBinding(pb.engineBinding, pb.type);
 
         switch (pb.type) {
         case DescriptorType::UniformBufferDynamic:
@@ -163,7 +150,12 @@ bool DawnDescriptorSet::BuildBindGroup() {
         case DescriptorType::StorageBufferDynamic:
         case DescriptorType::UniformTexelBuffer:
         case DescriptorType::StorageTexelBuffer: {
-            if (!pb.buffer) continue;
+            if (!pb.buffer) {
+                std::cerr << "[DawnDS] WARN: binding=" << pb.engineBinding
+                          << " type=" << static_cast<u32>(pb.type)
+                          << " populated but buffer is null" << std::endl;
+                continue;
+            }
             auto& entry = entries.emplace_back();
             std::memset(&entry, 0, sizeof(entry));
             entry.nextInChain = nullptr;
@@ -264,16 +256,21 @@ bool DawnDescriptorSet::BuildBindGroup() {
         wgpuGroup_ = nullptr;
     }
 
-    if (logThisOne) {
-        std::cerr << "[DawnDS] BuildBindGroup: pending=" << pendingBindings_.size()
-                  << " populated=" << populatedCount << " entries=" << entries.size() << std::endl;
+    // Safety check: entry count must match layout's expected count
+    if (entries.size() != expectedEntries) {
+        std::cerr << "[DawnDS] MISMATCH: entries=" << entries.size()
+                  << " expected=" << expectedEntries
+                  << " pending=" << pendingBindings_.size()
+                  << " populated=" << populatedCount << std::endl;
         for (const auto& pb : pendingBindings_) {
-            std::cerr << "  b=" << pb.engineBinding << " type=" << static_cast<u32>(pb.type)
-                      << " pop=" << pb.populated << std::endl;
+            std::cerr << "  pb: binding=" << pb.engineBinding
+                      << " type=" << static_cast<u32>(pb.type)
+                      << " pop=" << pb.populated
+                      << " buf=" << (pb.buffer ? "Y" : "N")
+                      << " view=" << (pb.textureView ? "Y" : "N")
+                      << " samp=" << (pb.sampler ? "Y" : "N") << std::endl;
         }
-    }
-
-    if (entries.empty()) {
+        // Do NOT create an invalid bind group — return false
         return false;
     }
 
