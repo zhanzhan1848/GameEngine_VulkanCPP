@@ -590,6 +590,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                          memcpy(&py, dst + 4, 4);
                          if (py < minY) minY = py; if (py > maxY) maxY = py;
                      }
+                 }
              }
              
              RenderMesh* mesh = new RenderMesh();
