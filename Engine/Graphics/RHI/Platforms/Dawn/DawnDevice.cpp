@@ -111,10 +111,8 @@ bool DawnDevice::initializeImpl() {
     // to let pending microtasks (and the actual adapter request) make progress.
     while (!adapterData.done) {
         wgpuInstanceProcessEvents(wgpuInstance_);
-#ifndef __EMSCRIPTEN__
-        // On native, poll in a tight loop is fine. On Emscripten,
-        // wgpuInstanceProcessEvents dispatches pending callbacks synchronously
-        // via the JS event loop, so the callback fires within this call.
+#ifdef __EMSCRIPTEN__
+        emscripten_sleep(0);
 #endif
     }
 
@@ -219,6 +217,9 @@ bool DawnDevice::initializeImpl() {
     // Pump callbacks until device request completes.
     while (!deviceData.done) {
         wgpuInstanceProcessEvents(wgpuInstance_);
+#ifdef __EMSCRIPTEN__
+        emscripten_sleep(0);
+#endif
     }
 
     if (!deviceData.success || !deviceData.device) {
