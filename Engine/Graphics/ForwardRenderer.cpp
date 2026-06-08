@@ -125,9 +125,25 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             b.stageFlags = rhi::ShaderStage::Pixel;
             globalBindings.push_back(b);
         }
+    } else {
+        // Dawn/WebGPU: separate texture + sampler bindings for shadow
+        {
+            rhi::DescriptorSetLayoutBinding b;
+            b.binding = SHADOW_MAP_BINDING; // 13
+            b.descriptorType = rhi::DescriptorType::SampledDepthImage;
+            b.descriptorCount = 1;
+            b.stageFlags = rhi::ShaderStage::Pixel;
+            globalBindings.push_back(b);
+        }
+        {
+            rhi::DescriptorSetLayoutBinding b;
+            b.binding = SHADOW_CUBE_MAP_BINDING; // 14
+            b.descriptorType = rhi::DescriptorType::Sampler;
+            b.descriptorCount = 1;
+            b.stageFlags = rhi::ShaderStage::Pixel;
+            globalBindings.push_back(b);
+        }
     }
-    // Dawn: shadow not yet implemented, skip shadow bindings in layout
-    // to match the descriptor set writes which also skip them
 
     rhi::DescriptorSetLayoutDesc globalLayoutDesc;
     globalLayoutDesc.bindingCount = (u32)globalBindings.size();

@@ -211,12 +211,10 @@ bool Engine_Test::initialize() {
     }
     std::cout << "[TestDawnForwardRenderer] ForwardRenderer initialized" << std::endl;
 
-#ifndef __EMSCRIPTEN__
     // Create shadow resources before LoadSponzaScene (shadow depth texture + sampler)
     std::cout << "[TestDawnForwardRenderer] Creating shadow resources..." << std::endl;
     CreateShadowResources();
     std::cout << "[TestDawnForwardRenderer] Shadow resources created" << std::endl;
-#endif
 
     // Load Sponza scene
     if (!LoadSponzaScene()) {
@@ -299,12 +297,16 @@ bool Engine_Test::LoadSponzaScene() {
     }
     std::cout << "[TestDawnFR] Loaded " << sceneMeshInfos_.size() << " meshes" << std::endl;
 
-    // Load Dawn-compatible PBR shader (no shadow CombinedImageSampler bindings)
+    // Load Dawn-compatible PBR shader with shadow sampling
     std::cout << "[TestDawnFR] Loading shader..." << std::endl;
-    std::string shaderSource = LoadShaderSource("Engine/Graphics/Dawn/shaders/ForwardPBR_NoShadow.wgsl");
+#ifdef __EMSCRIPTEN__
+    std::string shaderSource = dawn::LoadWGSL("ForwardPBR");
+#else
+    std::string shaderSource = LoadShaderSource("Engine/Graphics/Dawn/shaders/ForwardPBR.wgsl");
+#endif
     std::cout << "[TestDawnFR] Shader source: " << (shaderSource.empty() ? "EMPTY" : "OK") << " size=" << shaderSource.size() << std::endl;
     if (shaderSource.empty()) {
-        std::cerr << "[TestDawnFR] Failed to load ForwardPBR_NoShadow.wgsl" << std::endl;
+        std::cerr << "[TestDawnFR] Failed to load ForwardPBR.wgsl" << std::endl;
         return false;
     }
 
@@ -345,21 +347,18 @@ bool Engine_Test::LoadSponzaScene() {
     rasterState.fillMode = FillMode::Solid;
     material->SetRasterizerState(rasterState);
 
-    // Render target format — match actual render target
+    // Render target format — HDR for tone mapping pipeline
     utl::vector<DataFormat> rtFormats(1);
-#ifdef __EMSCRIPTEN__
-    rtFormats[0] = DataFormat::BGRA8_UNorm;  // Render directly to backbuffer
-#else
     rtFormats[0] = DataFormat::RGBA16_Float; // Render to HDR texture
-#endif
     material->SetRenderTargetFormats(rtFormats, DataFormat::D32_Float);
 
-    // Pipeline layout: 3 descriptor set layouts matching ForwardPBR_NoShadow.wgsl
+    // Pipeline layout: 3 descriptor set layouts matching ForwardPBR.wgsl
     // Group 0 (Global Dawn): binding 11 = GlobalShaderData(UB), binding 12 = ForwardLightBuffer(UB)
+    //                         binding 13 = shadowDepthTex, binding 14 = shadowSampler
     // Group 1 (PerObject): binding 10 = PerObjectData(DynamicUB)
     // Group 2 (Material): binding 0 = albedo, 1 = normal, 2 = ORM, 3 = sampler
 
-    // Use ForwardRenderer's Dawn-compatible global layout (2 bindings: 11+12 only)
+    // Use ForwardRenderer's Dawn-compatible global layout (4 bindings: 11,12,13,14)
     auto globalLayout = forwardRenderer_.GetGlobalDescriptorSetLayout();
 
     // Material descriptor set layout (Group 2)
@@ -603,37 +602,10 @@ void Engine_Test::RenderFrame() {
     u32 fi = frameIndex_ % kFrameCount;
     forwardRenderer_.SetTime(dt, totalFrames_ / 60.0f, frameIndex_);
 
-#ifdef __EMSCRIPTEN__
     // ============================================================
-    // Simplified render path for WASM: forward pass → present
-    // No render graph, no post-processing (HZB/SSGI/SSAO/Bloom/TM)
+    // Full render path: Shadow → Forward(HDR) → Post-processing → Present
     // ============================================================
 
-    if (cmdBuffer_ == rhi::handles::INVALID_COMMAND_BUFFER) {
-        cmdBuffer_ = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
-    }
-    rhi::RHICommandBuffer* cmd = device_->GetCommandBuffer(cmdBuffer_);
-    if (cmd) {
-        cmd->Reset();
-        if (cmd->Begin()) {
-            // Forward pass directly to backbuffer + depth
-            forwardRenderer_.Render(cmd, scene_, view_, backBuffer, depthTexture_, materials_, fi, width_, height_);
-            cmd->End();
-        }
-        rhi::QueueSubmitInfo submitInfo{};
-        submitInfo.cmdBuffer = cmdBuffer_;
-        device_->Submit(submitInfo);
-    }
-
-    swapchain_->Present(rhi::handles::INVALID_SYNC);
-    device_->EndFrame();
-    frameIndex_++;
-    totalFrames_++;
-
-    if (totalFrames_ % 60 == 0) {
-        std::cout << "[TestDawnFR] Frame " << totalFrames_ << std::endl;
-    }
-#else
     // 1. Setup render graph FIRST so SSAO/Bloom/ToneMapping resources are created
     //    before any command buffers. Dawn can corrupt heap if resources are created
     //    between two command buffer recordings.
@@ -701,12 +673,16 @@ void Engine_Test::RenderFrame() {
             // Create Blit pipeline during setup (not during execute)
             if (s_presentPipeline == rhi::handles::INVALID_PIPELINE) {
                 auto& dev = builder.GetGraph().GetDevice();
+#ifdef __EMSCRIPTEN__
+                std::string src = dawn::LoadWGSL("Blit");
+#else
                 auto platform = dev.GetPlatform();
                 std::string path = utils::ShaderRegistry::GetShaderPath(platform, "Blit");
                 std::ifstream f(path);
                 std::stringstream buf;
                 if (f.is_open()) buf << f.rdbuf();
                 std::string src = buf.str();
+#endif
                 if (src.empty()) return;
 
                 auto vs = dev.CreateShader(src.data(), src.size(), rhi::ShaderStage::Vertex, "blit_vs");
@@ -859,7 +835,6 @@ void Engine_Test::RenderFrame() {
     if (totalFrames_ % 60 == 0) {
         std::cout << "[TestDawnForwardRenderer] Frame " << totalFrames_ << std::endl;
     }
-#endif // __EMSCRIPTEN__
 }
 
 void Engine_Test::UpdateCamera(float dt) {
@@ -1012,9 +987,13 @@ void Engine_Test::CreateShadowResources() {
 
     // Shadow depth pipeline (vertex-only, no pixel shader)
     {
+#ifdef __EMSCRIPTEN__
+        std::string src = dawn::LoadWGSL("ShadowDepth");
+#else
         auto platform = device_->GetPlatform();
         std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "ShadowDepth");
         std::string src = LoadShaderSource(shaderPath);
+#endif
         if (src.empty()) {
             std::cerr << "[Shadow] Failed to load ShadowDepth.wgsl" << std::endl;
             return;
@@ -1122,7 +1101,6 @@ primal::math::m4x4 Engine_Test::ComputeLightViewProjection() const {
 
 void Engine_Test::RenderShadowPass(rhi::RHICommandBuffer* cmd) {
     if (shadowPipeline_ == rhi::handles::INVALID_PIPELINE) return;
-    if (shadowDepthTexture_ == rhi::handles::INVALID_RESOURCE) return;
     if (shadowDepthTexture_ == rhi::handles::INVALID_RESOURCE) return;
 
     lightVP_ = ComputeLightViewProjection();

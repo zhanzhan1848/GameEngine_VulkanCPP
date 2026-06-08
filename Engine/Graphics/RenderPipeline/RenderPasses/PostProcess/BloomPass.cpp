@@ -5,6 +5,7 @@
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/Passes/BlurPass.h"
 #include "Graphics/Utils/ShaderRegistry.h"
+#include "Graphics/Dawn/ShaderLoader.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -32,11 +33,21 @@ static void FlushDeferredDestroys(RHIDeviceBase& device, u32 fi) {
 }
 
 static std::string LoadShaderSource(const std::string& path) {
+#ifdef __EMSCRIPTEN__
+    auto lastSlash = path.find_last_of('/');
+    auto lastDot = path.find_last_of('.');
+    if (lastSlash != std::string::npos && lastDot != std::string::npos && lastDot > lastSlash) {
+        std::string name = path.substr(lastSlash + 1, lastDot - lastSlash - 1);
+        return dawn::LoadWGSL(name);
+    }
+    return "";
+#else
     std::ifstream file(path);
     if (!file.is_open()) return "";
     std::stringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
+#endif
 }
 
 struct BloomSetupData {

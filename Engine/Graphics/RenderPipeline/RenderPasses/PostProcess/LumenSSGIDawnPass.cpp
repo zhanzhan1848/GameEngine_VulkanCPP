@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/Utils/ShaderRegistry.h"
+#include "Graphics/Dawn/ShaderLoader.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -65,11 +66,21 @@ static ResourceHandle s_TemporalHistory[MAX_FRAMES] = {
 };                                                                          // triple-buffered full-res RGBA16F
 
 static std::string LoadShaderSource(const std::string& path) {
+#ifdef __EMSCRIPTEN__
+    auto lastSlash = path.find_last_of('/');
+    auto lastDot = path.find_last_of('.');
+    if (lastSlash != std::string::npos && lastDot != std::string::npos && lastDot > lastSlash) {
+        std::string name = path.substr(lastSlash + 1, lastDot - lastSlash - 1);
+        return dawn::LoadWGSL(name);
+    }
+    return "";
+#else
     std::ifstream file(path);
     if (!file.is_open()) return "";
     std::stringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
+#endif
 }
 
 static bool EnsurePipelines(RHIDeviceBase& device) {

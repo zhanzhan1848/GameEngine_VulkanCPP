@@ -2,10 +2,11 @@
 //
 // Descriptor set layout (matches ForwardRenderer + Material system):
 //   Set 0 (Global):   binding 11 = GlobalShaderData, binding 12 = ForwardLightBuffer
+//                     binding 13 = shadowDepthTex, binding 14 = shadowSampler
 //   Set 1 (PerObject): binding 10 = PerObjectData (dynamic uniform)
 //   Set 2 (Material):  binding 0 = albedo, 1 = normal, 2 = ORM, 3 = sampler
 //
-// Stage 1: directional light only (no shadows, no punctual lights)
+// Stage 1: directional light with shadow map sampling
 // Output: linear HDR (tone mapping handled by ToneMappingPass)
 
 // === Structs matching C++ RHIShaderCommon.h (16-byte aligned) ===
@@ -52,6 +53,9 @@ struct PerObjectData {
 @group(0) @binding(12) var<uniform> lightBuffer: ForwardLightBuffer;
 
 @group(1) @binding(10) var<uniform> perObject: PerObjectData;
+
+@group(0) @binding(13) var shadowDepthTex: texture_depth_2d;
+@group(0) @binding(14) var shadowSampler: sampler;
 
 @group(2) @binding(0) var albedoMap: texture_2d<f32>;
 @group(2) @binding(1) var normalMap: texture_2d<f32>;
@@ -143,6 +147,37 @@ fn geometrySmith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, a: f32) -> f32 {
 
 const PI: f32 = 3.141592653589793;
 
+// === Shadow sampling ===
+
+fn sampleShadowPCF(worldPos: vec3<f32>, N: vec3<f32>, lightDir: vec3<f32>) -> f32 {
+    if (lightBuffer.directionalLightCount == 0u) { return 1.0; }
+    let lightVP = lightBuffer.directionalLights[0].viewProjections[0];
+    let lightClip = lightVP * vec4<f32>(worldPos, 1.0);
+    let lightNDC = lightClip.xyz / lightClip.w;
+
+    // WebGPU clip space: Y-up, Z [0,1]
+    let shadowUV = vec2<f32>(lightNDC.x * 0.5 + 0.5, 1.0 - (lightNDC.y * 0.5 + 0.5));
+    let shadowZ = lightNDC.z * 0.5 + 0.5;
+
+    if (shadowUV.x < 0.0 || shadowUV.x > 1.0 || shadowUV.y < 0.0 || shadowUV.y > 1.0) { return 1.0; }
+    if (shadowZ < 0.0 || shadowZ > 1.0) { return 1.0; }
+
+    let texSize = vec2<f32>(textureDimensions(shadowDepthTex));
+    let texelSize = 1.0 / texSize;
+
+    // PCF 3x3
+    var shadow = 0.0;
+    let bias = max(0.005 * (1.0 - dot(N, lightDir)), 0.001);
+    for (var x = -1; x <= 1; x++) {
+        for (var y = -1; y <= 1; y++) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texelSize;
+            let depth = textureSample(shadowDepthTex, shadowSampler, shadowUV + offset);
+            shadow += select(0.0, 1.0, depth > shadowZ - bias);
+        }
+    }
+    return shadow / 9.0;
+}
+
 // === Fragment shader ===
 
 @fragment
@@ -169,12 +204,15 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
     // Ambient
     var color = vec3<f32>(0.03, 0.03, 0.03) * albedo * ao;
 
-    // Directional light (first only, Stage 1)
+    // Directional light (first only, Stage 1) with shadow
     if (lightBuffer.directionalLightCount > 0u) {
         let light = lightBuffer.directionalLights[0];
         let L = normalize(-light.directionAndIntensity.xyz);
         let H = normalize(V + L);
-        let radiance = light.colorAndShadow.rgb * light.directionAndIntensity.w;
+
+        // Shadow
+        let shadowFactor = sampleShadowPCF(input.worldPos, N, L);
+        let radiance = light.colorAndShadow.rgb * light.directionAndIntensity.w * shadowFactor;
 
         let NdotV = max(dot(N, V), 0.001);
         let NdotL = max(dot(N, L), 0.0);
