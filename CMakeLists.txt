@@ -335,9 +335,11 @@ else()
         target_link_options(TestDawnWASM PRIVATE
             "--use-port=emdawnwebgpu"
             -sALLOW_MEMORY_GROWTH=1
+            -sMAXIMUM_MEMORY=2147418112
+            -sINITIAL_MEMORY=268435456
+            -sTOTAL_STACK=16777216
             -sENVIRONMENT=web
             -sEXIT_RUNTIME=0
-            -sASYNCIFY=2
             --shell-file ${CMAKE_SOURCE_DIR}/wasm/shell.html
             -O3
         )

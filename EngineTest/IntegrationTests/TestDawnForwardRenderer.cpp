@@ -812,9 +812,18 @@ void Engine_Test::RenderFrame() {
 
     // Periodic diagnostic: log pool size every 300 frames to detect leaks
     if (totalFrames_ % 300 == 0) {
+#ifdef __EMSCRIPTEN__
+        // Use emscripten_get_heap_max() / emscripten_get_used_heap_size() via proxy
+        // or just log what we can
+        std::cout << "[Diag] Frame " << totalFrames_
+                  << " dt=" << dt * 1000.0f << "ms"
+                  << " RG pool=" << renderGraph_->GetPoolSize()
+                  << std::endl;
+#else
         std::cout << "[Diag] Frame " << totalFrames_
                   << " dt=" << dt * 1000.0f << "ms"
                   << " RG pool=" << renderGraph_->GetPoolSize() << std::endl;
+#endif
     }
 }
 

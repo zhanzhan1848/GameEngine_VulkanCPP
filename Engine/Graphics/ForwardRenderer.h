@@ -158,7 +158,7 @@ private:
     rhi::ResourceHandle perObjectBuffers_[rhi::MAX_FRAMES_IN_FLIGHT]{};
     void* perObjectBuffersMapped_[rhi::MAX_FRAMES_IN_FLIGHT]{};
     u32 perObjectBufferOffset_{0};
-    static constexpr u32 MAX_PER_OBJECT_SIZE = 10 * 1024 * 1024; // 10MB per frame
+    static constexpr u32 MAX_PER_OBJECT_SIZE = 1 * 1024 * 1024; // 1MB (enough for ~2000 objects at 512 bytes each)
     
     // Per-Object Descriptor Set (Set 1)
     rhi::DescriptorSetLayoutHandle perObjectDescriptorSetLayout_{rhi::handles::INVALID_RESOURCE};
