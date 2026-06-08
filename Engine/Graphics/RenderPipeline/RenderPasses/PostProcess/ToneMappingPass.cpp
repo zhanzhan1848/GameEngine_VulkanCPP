@@ -27,16 +27,11 @@ static ResourceHandle s_DummyAOTextureView = handles::INVALID_RESOURCE;
 static ResourceHandle s_DummySSGITexture = handles::INVALID_RESOURCE;
 static ResourceHandle s_DummySSGITextureView = handles::INVALID_RESOURCE;
 
-// Triple-buffered deferred destruction for descriptor sets.
+// Pre-allocated descriptor set pool (no per-frame allocation)
 static constexpr u32 MAX_FRAMES = 3;
-static utl::vector<DescriptorSetHandle> s_DeferredDescriptorSetDestroys[MAX_FRAMES];
-
-static void FlushDeferredDestroys(RHIDeviceBase& device, u32 fi) {
-    for (auto& h : s_DeferredDescriptorSetDestroys[fi]) {
-        device.DestroyDescriptorSet(h);
-    }
-    s_DeferredDescriptorSetDestroys[fi].clear();
-}
+static constexpr u32 MAX_SETS = 2;
+static DescriptorSetHandle s_ToneMapSets[MAX_FRAMES][MAX_SETS] = {};
+static u32 s_ToneMapSetIdx[MAX_FRAMES] = {};
 
 static std::string LoadShaderSource(const std::string& path) {
 #ifdef __EMSCRIPTEN__
@@ -183,12 +178,19 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     pipelineDesc.cullMode = CullMode::None;
 
     s_ToneMapPipeline = device.CreateGraphicsPipeline(pipelineDesc);
+
+    // Pre-allocate descriptor set pool
+    for (u32 f = 0; f < MAX_FRAMES; ++f)
+        for (u32 s = 0; s < MAX_SETS; ++s) {
+            DescriptorSetDesc dsDesc;
+            dsDesc.layout = s_ToneMapDSL;
+            s_ToneMapSets[f][s] = device.CreateDescriptorSet(dsDesc);
+        }
 }
 
 const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHandle inputHDR, RGResourceHandle bloomTexture, RGResourceHandle aoTexture, RGResourceHandle ssgiTexture, u32 frameIndex) {
     u32 fi = frameIndex % MAX_FRAMES;
-    // Flush deferred destroys from 3 frames ago (safe: GPU has finished using them)
-    FlushDeferredDestroys(graph.GetDevice(), fi);
+    s_ToneMapSetIdx[fi] = 0;
 
     return graph.AddPass<ToneMappingPassData>("ToneMappingPass", RGPassType::Graphics, RGPassCategory::PostProcess,
         [&](ToneMappingPassData& data, RenderGraphBuilder& builder) {
@@ -268,10 +270,10 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             }
             if (ssgiViewHandle == handles::INVALID_RESOURCE) ssgiViewHandle = s_DummySSGITextureView;
 
-            // Create descriptor set
-            DescriptorSetDesc dsDesc;
-            dsDesc.layout = s_ToneMapDSL;
-            DescriptorSetHandle ds = device.CreateDescriptorSet(dsDesc);
+            // Use pre-allocated descriptor set from pool
+            u32 idx = s_ToneMapSetIdx[fi]++;
+            if (idx >= MAX_SETS) { idx = 0; s_ToneMapSetIdx[fi] = 1; }
+            DescriptorSetHandle ds = s_ToneMapSets[fi][idx];
 
             if (ds != handles::INVALID_RESOURCE && inputView != handles::INVALID_RESOURCE) {
                 DescriptorImageInfo imageInfos[5];
@@ -330,9 +332,6 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
 
             cmd->Draw(3, 0, 1, 0);
             cmd->EndRenderPass();
-
-            // No per-frame texture views created — default views are reused via GetDefaultView().
-            if (ds != handles::INVALID_RESOURCE) s_DeferredDescriptorSetDestroys[fi].push_back(ds);
         }
     );
 }

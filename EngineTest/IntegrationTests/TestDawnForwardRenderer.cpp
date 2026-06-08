@@ -599,10 +599,9 @@ void Engine_Test::RenderFrame() {
     depthDescForRG.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
     auto depthRG = renderGraph_->ImportTexture("Depth", depthTexture_, depthDescForRG);
 
-#ifndef __EMSCRIPTEN__
     auto invProj = rhimath::Inverse(view_.GetProjectionMatrix());
 
-    // HZB generation from depth buffer (only needed by SSGI)
+    // HZB generation from depth buffer
     const auto& hzbOut = PostProcess::AddHZBPass(*renderGraph_, depthRG, width_, height_);
     auto hzbHandle = hzbOut.hzbTexture;
 
@@ -619,19 +618,12 @@ void Engine_Test::RenderFrame() {
 
     const auto& ssaoOut = graphics::PostProcess::AddSSAOPass(*renderGraph_, depthRG, width_, height_, fi, view_.GetProjectionMatrix(), invProj);
     auto ssaoAOHandle = ssaoOut.ssaoOutput;
-#endif
 
     const auto& bloomOut = PostProcess::AddBloomPass(*renderGraph_, hdrRG, fi);
     auto bloomHandle = bloomOut.bloomOutput;
 
-#ifdef __EMSCRIPTEN__
-    // WASM: shadow + bloom + tone mapping only (SSAO/SSGI disabled to avoid resource leak)
-    const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, hdrRG, bloomHandle,
-        handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, fi);
-#else
     const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, hdrRG, bloomHandle,
         ssaoAOHandle, ssgiHandle, fi);
-#endif
     auto tonemapOutput = tonemapOut.output;
 
     // Present: blit tonemapped output → backbuffer
@@ -649,6 +641,11 @@ void Engine_Test::RenderFrame() {
     static rhi::PipelineLayoutHandle s_presentLayout = rhi::handles::INVALID_PIPELINE_LAYOUT;
     static rhi::DescriptorSetLayoutHandle s_presentDSL = rhi::handles::INVALID_RESOURCE;
     static rhi::SamplerHandle s_presentSampler = rhi::handles::INVALID_SAMPLER;
+    // Pre-allocated descriptor set pool for present pass
+    static constexpr u32 PRESENT_MAX_FRAMES = 3;
+    static constexpr u32 PRESENT_MAX_SETS = 2;
+    static rhi::DescriptorSetHandle s_presentSets[PRESENT_MAX_FRAMES][PRESENT_MAX_SETS] = {};
+    static u32 s_presentSetIdx[PRESENT_MAX_FRAMES] = {};
 
     renderGraph_->AddPass<PresentData>("PresentPass", rendergraph::RGPassType::Graphics, rendergraph::RGPassCategory::Present,
         [&](PresentData& data, rendergraph::RenderGraphBuilder& builder) {
@@ -708,6 +705,14 @@ void Engine_Test::RenderFrame() {
                 gpDesc.enableDepthWrite = false;
                 gpDesc.cullMode = rhi::CullMode::None;
                 s_presentPipeline = dev.CreateGraphicsPipeline(gpDesc);
+
+                // Pre-allocate descriptor set pool for present pass
+                for (u32 f = 0; f < PRESENT_MAX_FRAMES; ++f)
+                    for (u32 s = 0; s < PRESENT_MAX_SETS; ++s) {
+                        rhi::DescriptorSetDesc dsDesc;
+                        dsDesc.layout = s_presentDSL;
+                        s_presentSets[f][s] = dev.CreateDescriptorSet(dsDesc);
+                    }
             }
         },
         [this](const PresentData& data, rendergraph::RenderGraphContext& context) {
@@ -720,23 +725,22 @@ void Engine_Test::RenderFrame() {
 
             rhi::ResourceHandle inputHandle = inputRes->GetPhysicalHandle();
 
-            // Use physical handle directly — updateDescriptorSetsImpl resolves via GetDefaultView()
-            rhi::DescriptorSetHandle ds = rhi::handles::INVALID_RESOURCE;
-            if (inputHandle != rhi::handles::INVALID_RESOURCE) {
-                rhi::DescriptorSetDesc dsDesc;
-                dsDesc.layout = s_presentDSL;
-                ds = dev.CreateDescriptorSet(dsDesc);
-                if (ds != rhi::handles::INVALID_RESOURCE) {
-                    rhi::DescriptorImageInfo img[2];
-                    img[0].imageView = inputHandle;
-                    img[0].sampler = s_presentSampler;
-                    img[1].imageView = inputHandle;
-                    img[1].sampler = s_presentSampler;
-                    rhi::WriteDescriptorSet w[2];
-                    w[0] = {ds, 0, 0, 1, rhi::DescriptorType::SampledImage, &img[0]};
-                    w[1] = {ds, 1, 0, 1, rhi::DescriptorType::Sampler, &img[1]};
-                    dev.UpdateDescriptorSets(2, w);
-                }
+            // Use pre-allocated descriptor set from pool
+            u32 presentFi = frameIndex_ % PRESENT_MAX_FRAMES;
+            u32 pidx = s_presentSetIdx[presentFi]++;
+            if (pidx >= PRESENT_MAX_SETS) { pidx = 0; s_presentSetIdx[presentFi] = 1; }
+            rhi::DescriptorSetHandle ds = s_presentSets[presentFi][pidx];
+
+            if (inputHandle != rhi::handles::INVALID_RESOURCE && ds != rhi::handles::INVALID_RESOURCE) {
+                rhi::DescriptorImageInfo img[2];
+                img[0].imageView = inputHandle;
+                img[0].sampler = s_presentSampler;
+                img[1].imageView = inputHandle;
+                img[1].sampler = s_presentSampler;
+                rhi::WriteDescriptorSet w[2];
+                w[0] = {ds, 0, 0, 1, rhi::DescriptorType::SampledImage, &img[0]};
+                w[1] = {ds, 1, 0, 1, rhi::DescriptorType::Sampler, &img[1]};
+                dev.UpdateDescriptorSets(2, w);
             }
 
             rhi::RenderPassDesc passDesc;
@@ -757,20 +761,6 @@ void Engine_Test::RenderFrame() {
                 context.cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, s_presentLayout, 0, 1, &ds, 0, nullptr);
             context.cmdBuffer->Draw(3, 0, 1, 0);
             context.cmdBuffer->EndRenderPass();
-
-            // Deferred destroy descriptor set (no per-frame texture views created)
-            static constexpr u32 MAX_FRAMES = 3;
-            static utl::vector<rhi::DescriptorSetHandle> s_DeferredDS[MAX_FRAMES];
-            static u32 s_FrameIdx = 0;
-            if (ds != rhi::handles::INVALID_RESOURCE) {
-                s_DeferredDS[s_FrameIdx % MAX_FRAMES].push_back(ds);
-            }
-            s_FrameIdx++;
-            if (s_FrameIdx >= MAX_FRAMES) {
-                u32 fi = s_FrameIdx % MAX_FRAMES;
-                for (auto& h : s_DeferredDS[fi]) dev.DestroyDescriptorSet(h);
-                s_DeferredDS[fi].clear();
-            }
         }
     );
 
@@ -1232,10 +1222,8 @@ void Engine_Test::shutdown() {
     }
 
     graphics::PostProcess::ShutdownBloomPass();
-#ifndef __EMSCRIPTEN__
     graphics::PostProcess::ShutdownSSAOPass();
     graphics::PostProcess::ShutdownLumenSSGIPass();
-#endif
 
     if (device_) {
         device_->Shutdown();

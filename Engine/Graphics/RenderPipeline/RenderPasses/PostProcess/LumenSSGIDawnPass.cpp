@@ -17,10 +17,6 @@ using namespace rhi;
 static constexpr u32 MAX_FRAMES = 3;
 static constexpr u32 MAX_SETS = 4;
 
-// Triple-buffered deferred destruction: per-frame views are destroyed 3 frames
-// later, ensuring the GPU has finished using them.
-static utl::vector<ResourceHandle> s_DeferredViewDestroys[MAX_FRAMES];
-
 // === Trace pass statics ===
 static PipelineHandle s_TracePipeline = handles::INVALID_PIPELINE;
 static PipelineLayoutHandle s_TraceLayout = handles::INVALID_PIPELINE_LAYOUT;
@@ -266,14 +262,6 @@ const LumenSSGIData& AddLumenSSGIPass(RenderGraph& graph,
     auto& device = graph.GetDevice();
     EnsurePipelines(device);
     CreatePersistentTextures(device, width, height);
-
-    // NOTE: We intentionally do NOT destroy per-frame WGPU texture views.
-    // Calling wgpuTextureViewRelease (via DestroyTexture) corrupts Dawn's
-    // internal heap — even with multi-frame deferred destruction. The views
-    // are small objects (~few hundred bytes each, 2 per frame = ~1KB/frame).
-    // Acceptable leak for test usage. Production code should use GPU fences
-    // for safe destruction timing.
-    s_DeferredViewDestroys[fi].clear();
 
     // Compute mip levels for HZB
     u32 hzbMipLevels = u32(std::ceil(std::log2(std::max(width, height))));

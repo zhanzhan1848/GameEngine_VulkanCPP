@@ -22,15 +22,10 @@ static SamplerHandle s_BrightPassSampler = handles::INVALID_SAMPLER;
 static std::unique_ptr<BlurPass> s_BlurPass = nullptr;
 static constexpr u32 MAX_FRAMES = 3;
 
-// Triple-buffered deferred destruction for descriptor sets.
-static utl::vector<DescriptorSetHandle> s_DeferredDescriptorSetDestroys[MAX_FRAMES];
-
-static void FlushDeferredDestroys(RHIDeviceBase& device, u32 fi) {
-    for (auto& h : s_DeferredDescriptorSetDestroys[fi]) {
-        device.DestroyDescriptorSet(h);
-    }
-    s_DeferredDescriptorSetDestroys[fi].clear();
-}
+// Pre-allocated descriptor set pool (matching SSAO/SSGI pattern — no per-frame allocation)
+static constexpr u32 MAX_SETS = 2;
+static DescriptorSetHandle s_BrightPassSets[MAX_FRAMES][MAX_SETS] = {};
+static u32 s_BrightPassSetIdx[MAX_FRAMES] = {};
 
 static std::string LoadShaderSource(const std::string& path) {
 #ifdef __EMSCRIPTEN__
@@ -59,8 +54,7 @@ struct BloomBlurData : public BloomPassData {
 
 const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColor, u32 frameIndex) {
     u32 fi = frameIndex % MAX_FRAMES;
-    // Flush deferred destroys from 3 frames ago (safe: GPU has finished using them)
-    FlushDeferredDestroys(graph.GetDevice(), fi);
+    s_BrightPassSetIdx[fi] = 0;
 
     // 1. Bright Pass
     auto& setupData = graph.AddPass<BloomSetupData>("BloomBrightPass", RGPassType::Graphics, RGPassCategory::PostProcess,
@@ -135,6 +129,14 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
                         pipelineDesc.enableDepthWrite = false;
                         pipelineDesc.cullMode = CullMode::None;
                         s_BrightPassPipeline = device.CreateGraphicsPipeline(pipelineDesc);
+
+                        // Pre-allocate descriptor set pool
+                        for (u32 f = 0; f < MAX_FRAMES; ++f)
+                            for (u32 s = 0; s < MAX_SETS; ++s) {
+                                DescriptorSetDesc dsDesc;
+                                dsDesc.layout = s_BrightPassDSL;
+                                s_BrightPassSets[f][s] = device.CreateDescriptorSet(dsDesc);
+                            }
                     }
                 }
             }
@@ -159,30 +161,27 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
             // Use physical handle directly — updateDescriptorSetsImpl resolves via GetDefaultView()
             ResourceHandle inputView = inputHandle;
 
-            // Create descriptor set
-            DescriptorSetHandle ds = handles::INVALID_RESOURCE;
-            if (inputView != handles::INVALID_RESOURCE) {
-                DescriptorSetDesc dsDesc;
-                dsDesc.layout = s_BrightPassDSL;
-                ds = device.CreateDescriptorSet(dsDesc);
+            // Use pre-allocated descriptor set from pool
+            u32 idx = s_BrightPassSetIdx[fi]++;
+            if (idx >= MAX_SETS) { idx = 0; s_BrightPassSetIdx[fi] = 1; }
+            DescriptorSetHandle ds = s_BrightPassSets[fi][idx];
 
-                if (ds != handles::INVALID_RESOURCE) {
-                    DescriptorImageInfo imageInfos[2];
-                    imageInfos[0].imageView = inputView;
-                    imageInfos[0].sampler = s_BrightPassSampler;
-                    imageInfos[1].imageView = inputView;
-                    imageInfos[1].sampler = s_BrightPassSampler;
+            if (inputView != handles::INVALID_RESOURCE && ds != handles::INVALID_RESOURCE) {
+                DescriptorImageInfo imageInfos[2];
+                imageInfos[0].imageView = inputView;
+                imageInfos[0].sampler = s_BrightPassSampler;
+                imageInfos[1].imageView = inputView;
+                imageInfos[1].sampler = s_BrightPassSampler;
 
-                    WriteDescriptorSet writes[2];
-                    writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].dstArrayElement = 0;
-                    writes[0].descriptorCount = 1; writes[0].descriptorType = DescriptorType::SampledImage;
-                    writes[0].imageInfo = &imageInfos[0];
-                    writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].dstArrayElement = 0;
-                    writes[1].descriptorCount = 1; writes[1].descriptorType = DescriptorType::Sampler;
-                    writes[1].imageInfo = &imageInfos[1];
+                WriteDescriptorSet writes[2];
+                writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].dstArrayElement = 0;
+                writes[0].descriptorCount = 1; writes[0].descriptorType = DescriptorType::SampledImage;
+                writes[0].imageInfo = &imageInfos[0];
+                writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].dstArrayElement = 0;
+                writes[1].descriptorCount = 1; writes[1].descriptorType = DescriptorType::Sampler;
+                writes[1].imageInfo = &imageInfos[1];
 
-                    device.UpdateDescriptorSets(2, writes);
-                }
+                device.UpdateDescriptorSets(2, writes);
             }
 
             // Render
@@ -209,9 +208,6 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
 
             cmd->Draw(3, 0, 1, 0);
             cmd->EndRenderPass();
-
-            // No per-frame texture views created — default views are reused via GetDefaultView()
-            if (ds != handles::INVALID_RESOURCE) s_DeferredDescriptorSetDestroys[fi].push_back(ds);
         }
     );
 
