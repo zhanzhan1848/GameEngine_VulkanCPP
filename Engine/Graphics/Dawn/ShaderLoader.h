@@ -813,30 +813,31 @@ const PI: f32 = 3.141592653589793;
 // === Shadow sampling ===
 
 fn sampleShadowPCF(worldPos: vec3<f32>, N: vec3<f32>, lightDir: vec3<f32>) -> f32 {
-    if (lightBuffer.directionalLightCount == 0u) { return 1.0; }
     let lightVP = lightBuffer.directionalLights[0].viewProjections[0];
     let lightClip = lightVP * vec4<f32>(worldPos, 1.0);
     let lightNDC = lightClip.xyz / lightClip.w;
 
-    // WebGPU clip space: Y-up, Z [0,1] — clamp UV to avoid non-uniform control flow
     let shadowUV = clamp(vec2<f32>(lightNDC.x * 0.5 + 0.5, 1.0 - (lightNDC.y * 0.5 + 0.5)),
                          vec2<f32>(0.001, 0.001), vec2<f32>(0.999, 0.999));
     let shadowZ = lightNDC.z * 0.5 + 0.5;
 
     let texSize = vec2<f32>(textureDimensions(shadowDepthTex));
     let texelSize = 1.0 / texSize;
-
-    // PCF 3x3
-    var shadow = 0.0;
     let bias = max(0.005 * (1.0 - dot(N, lightDir)), 0.001);
+
+    // Use textureLoad (no uniform control flow requirement) for PCF 3x3
+    let baseCoord = vec2<i32>(shadowUV * texSize);
+    var shadow = 0.0;
+    var count = 0;
     for (var x = -1; x <= 1; x++) {
         for (var y = -1; y <= 1; y++) {
-            let offset = vec2<f32>(f32(x), f32(y)) * texelSize;
-            let depth = textureSample(shadowDepthTex, shadowSampler, shadowUV + offset);
+            let coord = clamp(baseCoord + vec2<i32>(x, y), vec2<i32>(0, 0), vec2<i32>(i32(texSize.x) - 1, i32(texSize.y) - 1));
+            let depth = textureLoad(shadowDepthTex, coord, 0);
             shadow += select(0.0, 1.0, depth > shadowZ - bias);
+            count++;
         }
     }
-    return shadow / 9.0;
+    return shadow / f32(count);
 }
 
 // === Fragment shader ===
