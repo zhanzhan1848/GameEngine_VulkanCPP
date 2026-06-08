@@ -43,8 +43,7 @@ static std::string LoadShaderSource(const std::string& path) {
     auto lastSlash = path.find_last_of('/');
     auto lastDot = path.find_last_of('.');
     if (lastSlash != std::string::npos && lastDot != std::string::npos && lastDot > lastSlash) {
-        std::string name = path.substr(lastSlash + 1, lastDot - lastSlash - 1);
-        return dawn::LoadWGSL(name);
+        return dawn::LoadWGSL(path.substr(lastSlash + 1, lastDot - lastSlash - 1).c_str());
     }
     return "";
 #else
