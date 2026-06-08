@@ -100,6 +100,18 @@ DawnPendingBinding* DawnDescriptorSet::GetOrCreatePending(u32 engineBinding, Des
     // Not found — do NOT grow. The layout's bindings were pre-populated during
     // Initialize(), so a miss means the write type is incompatible with the layout.
     // Returning nullptr is safe: the caller checks for nullptr and skips the write.
+    static bool loggedOnce = false;
+    if (!loggedOnce) {
+        loggedOnce = true;
+        std::cerr << "[DawnDS] GetOrCreatePending: no match for binding="
+                  << engineBinding << " type=" << static_cast<u32>(type)
+                  << " (pending count=" << pendingBindings_.size() << ")" << std::endl;
+        for (const auto& pb : pendingBindings_) {
+            std::cerr << "  existing: binding=" << pb.engineBinding
+                      << " type=" << static_cast<u32>(pb.type)
+                      << " populated=" << pb.populated << std::endl;
+        }
+    }
     return nullptr;
 }
 
