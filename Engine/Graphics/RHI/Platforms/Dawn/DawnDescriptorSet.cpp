@@ -138,13 +138,17 @@ bool DawnDescriptorSet::BuildBindGroup() {
     }
 
     if (populatedCount == 0) {
-        std::cerr << "[DawnDS] No populated bindings — nothing to build (pending count=" << pendingBindings_.size() << ")" << std::endl;
         return false;
     }
 
     // Build WGPUBindGroupEntry array
     utl::vector<WGPUBindGroupEntry> entries;
     entries.reserve(populatedCount);
+
+    // Debug: log when bind group might be incomplete
+    static int buildCount = 0;
+    bool logThisOne = (buildCount < 4);
+    buildCount++;
 
     for (auto& pb : pendingBindings_) {
         if (!pb.populated) continue;
@@ -258,6 +262,15 @@ bool DawnDescriptorSet::BuildBindGroup() {
     if (wgpuGroup_) {
         wgpuBindGroupRelease(wgpuGroup_);
         wgpuGroup_ = nullptr;
+    }
+
+    if (logThisOne) {
+        std::cerr << "[DawnDS] BuildBindGroup: pending=" << pendingBindings_.size()
+                  << " populated=" << populatedCount << " entries=" << entries.size() << std::endl;
+        for (const auto& pb : pendingBindings_) {
+            std::cerr << "  b=" << pb.engineBinding << " type=" << static_cast<u32>(pb.type)
+                      << " pop=" << pb.populated << std::endl;
+        }
     }
 
     if (entries.empty()) {
