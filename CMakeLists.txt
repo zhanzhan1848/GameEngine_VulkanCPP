@@ -341,8 +341,10 @@ else()
             -sENVIRONMENT=web
             -sEXIT_RUNTIME=0
             -sASYNCIFY
+            -sASSERTIONS=1
             --shell-file ${CMAKE_SOURCE_DIR}/wasm/shell.html
-            -O3
+            -g
+            -O1
         )
         # Shaders are tiny (~50 KB total) so we embed them directly in the WASM
         # binary. This avoids the CMake @-escaping problem with --preload-file
