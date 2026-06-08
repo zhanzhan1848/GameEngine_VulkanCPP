@@ -12,6 +12,7 @@ void EmscriptenInitInput();
 #include "TestDawnForwardRenderer.h"
 #include "Engine/Graphics/RHI/Platforms/Dawn/DawnDevice.h"
 #include "Engine/Graphics/RHI/Platforms/Dawn/DawnCommandBuffer.h"
+#include "Engine/Graphics/Dawn/ShaderLoader.h"
 #include "Engine/Graphics/RHI/Core/RHICommand.h"
 #include "Engine/Graphics/RHI/Core/RHITypes.h"
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
