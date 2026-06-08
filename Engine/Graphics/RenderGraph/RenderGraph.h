@@ -91,6 +91,7 @@ public:
 
     // 获取上一帧各Pass的GPU耗时 (ms)
     const std::unordered_map<std::string, double>& GetPassExecutionTimes() const { return passExecutionTimes_; }
+    size_t GetPoolSize() const { return resourcePool_.size(); }
 
 private:
     void CleanupPool();

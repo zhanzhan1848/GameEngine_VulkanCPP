@@ -163,7 +163,7 @@ bool DawnDevice::initializeImpl() {
                 case WGPUDeviceLostReason_FailedCreation:     reasonStr = "FailedCreation"; break;
                 default: break;
             }
-            std::cerr << "[DawnDevice] Device lost (" << reasonStr << "): "
+            std::cout << "[DawnDevice] Device lost (" << reasonStr << "): "
                       << (message.data ? std::string(message.data, message.length == WGPU_STRLEN ? std::strlen(message.data) : message.length) : "no message") << std::endl;
         },
         .userdata1 = nullptr,
@@ -184,7 +184,7 @@ bool DawnDevice::initializeImpl() {
                 case WGPUErrorType_Unknown:     typeStr = "Unknown"; break;
                 default: break;
             }
-            std::cerr << "[DawnDevice] Device error (" << typeStr << "): "
+            std::cout << "[DawnDevice] Device error (" << typeStr << "): "
                       << (message.data ? std::string(message.data, message.length == WGPU_STRLEN ? std::strlen(message.data) : message.length) : "no message") << std::endl;
         },
         .userdata1 = nullptr,

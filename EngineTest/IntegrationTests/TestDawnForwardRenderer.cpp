@@ -809,7 +809,13 @@ void Engine_Test::RenderFrame() {
     device_->EndFrame();
     frameIndex_++;
     totalFrames_++;
-}
+
+    // Periodic diagnostic: log pool size every 300 frames to detect leaks
+    if (totalFrames_ % 300 == 0) {
+        std::cout << "[Diag] Frame " << totalFrames_
+                  << " dt=" << dt * 1000.0f << "ms"
+                  << " RG pool=" << renderGraph_->GetPoolSize() << std::endl;
+    }
 
 void Engine_Test::UpdateCamera(float dt) {
 #ifdef __APPLE__
