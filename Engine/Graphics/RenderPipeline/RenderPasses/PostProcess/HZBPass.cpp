@@ -160,18 +160,8 @@ static u32 ComputeMipLevels(u32 width, u32 height) {
 static void CreateHZBTexture(RHIDeviceBase& device, u32 width, u32 height) {
     u32 mipLevels = ComputeMipLevels(width, height);
 
-    if (s_HZBTexture != handles::INVALID_RESOURCE) {
-        // Check if dimensions match
-        // For now, always recreate
-    }
-
-    // Destroy old views
-    for (auto h : s_MipWriteViews) device.DestroyTexture(h);
-    for (auto h : s_MipReadViews) device.DestroyTexture(h);
-    if (s_HZBTexture != handles::INVALID_RESOURCE) device.DestroyTexture(s_HZBTexture);
-
-    s_MipWriteViews.clear();
-    s_MipReadViews.clear();
+    // Only create once — reuse across frames (dimensions don't change at runtime)
+    if (s_HZBTexture != handles::INVALID_RESOURCE) return;
 
     // Create HZB texture
     TextureDesc hzbDesc;

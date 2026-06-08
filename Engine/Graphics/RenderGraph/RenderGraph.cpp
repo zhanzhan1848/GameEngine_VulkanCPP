@@ -582,9 +582,7 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         }
 
         // std::cout << "RenderGraph: Executing Pass " << pass->GetName() << std::endl;
-        std::cerr << "[RG] Executing: " << pass->GetName() << std::endl;
         pass->Execute(context);
-        std::cerr << "[RG] Done: " << pass->GetName() << std::endl;
 
         if (hasRenderPass) {
             cmdBuffer->EndRenderPass();
