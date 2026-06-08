@@ -51,6 +51,13 @@ void RenderGraph::CleanupPool() {
     // Keep resources for some frames to reduce thrashing
     const u64 kKeepFrames = 3;
 
+    // Dawn/WebGPU: DestroyTexture is immediate (no GPU fence defer).
+    // Destroying pooled textures while GPU still references them corrupts
+    // the DawnTexture free list. Since all passes run every frame with
+    // fixed parameters, the pool stabilizes quickly — just keep everything.
+    bool isDawn = (device_.GetPlatform() == rhi::RHIPlatform::Dawn);
+    if (isDawn) return;
+
     // Destroy expired resources and compact the pool using move-assignment.
     // utl::vector::erase() uses memcpy internally, which is UB for
     // PooledResource (contains TextureDesc with std::string).
