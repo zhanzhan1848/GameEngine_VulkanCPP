@@ -816,6 +816,7 @@ void Engine_Test::RenderFrame() {
                   << " dt=" << dt * 1000.0f << "ms"
                   << " RG pool=" << renderGraph_->GetPoolSize() << std::endl;
     }
+}
 
 void Engine_Test::UpdateCamera(float dt) {
 #ifdef __APPLE__
