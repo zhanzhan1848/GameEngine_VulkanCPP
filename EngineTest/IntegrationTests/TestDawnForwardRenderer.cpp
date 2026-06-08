@@ -255,28 +255,6 @@ bool Engine_Test::initialize() {
     // Cull to populate visible proxies
     view_.Cull(scene_);
 
-#ifdef __EMSCRIPTEN__
-    // Diagnostic: check AABB validity and frustum planes
-    {
-        u32 validAABB = 0, invalidAABB = 0;
-        for (const auto& info : sceneMeshInfos_) {
-            if (info.mesh && info.mesh->IsValid()) validAABB++;
-            else invalidAABB++;
-        }
-        std::cout << "[TestDawnFR] AABB stats: " << validAABB << " valid, " << invalidAABB << " invalid" << std::endl;
-    }
-    if (view_.GetVisibleProxies().empty()) {
-        std::cout << "[TestDawnFR] WARNING: 0 visible proxies, bypassing frustum culling" << std::endl;
-        // Force all proxies visible to diagnose rendering
-        auto& proxies = scene_.GetProxies();
-        auto& visible = const_cast<utl::vector<const RenderProxy*>&>(view_.GetVisibleProxies());
-        visible.clear();
-        for (const auto& p : proxies) {
-            visible.push_back(&p);
-        }
-    }
-#endif
-
     std::cout << "[TestDawnForwardRenderer] Scene loaded: " << sceneMeshInfos_.size()
               << " meshes, " << scene_.GetProxies().size() << " proxies, "
               << view_.GetVisibleProxies().size() << " visible" << std::endl;
@@ -631,62 +609,6 @@ void Engine_Test::RenderFrame() {
     // No render graph, no post-processing (HZB/SSGI/SSAO/Bloom/TM)
     // ============================================================
 
-    if (totalFrames_ == 0) {
-        std::cout << "[TestDawnFR] First frame begin" << std::endl;
-
-        // === Diagnostic: Print camera and matrix state ===
-        std::cout << "[DIAG] Camera pos=(" << cameraPos_.x << "," << cameraPos_.y << "," << cameraPos_.z
-                  << ") yaw=" << cameraYaw_ << " pitch=" << cameraPitch_ << std::endl;
-        float cp = cosf(cameraPitch_), sp = sinf(cameraPitch_);
-        float cy = cosf(cameraYaw_), sy = sinf(cameraYaw_);
-        primal::math::v3 fwd{-sy*cp, sp, -cy*cp};
-        std::cout << "[DIAG] Forward=(" << fwd.x << "," << fwd.y << "," << fwd.z << ")" << std::endl;
-
-        auto vm = view_.GetViewMatrix();
-        std::cout << "[DIAG] View col0=(" << vm.columns[0][0] << "," << vm.columns[0][1] << "," << vm.columns[0][2] << "," << vm.columns[0][3] << ")" << std::endl;
-        std::cout << "[DIAG] View col1=(" << vm.columns[1][0] << "," << vm.columns[1][1] << "," << vm.columns[1][2] << "," << vm.columns[1][3] << ")" << std::endl;
-        std::cout << "[DIAG] View col2=(" << vm.columns[2][0] << "," << vm.columns[2][1] << "," << vm.columns[2][2] << "," << vm.columns[2][3] << ")" << std::endl;
-        std::cout << "[DIAG] View col3=(" << vm.columns[3][0] << "," << vm.columns[3][1] << "," << vm.columns[3][2] << "," << vm.columns[3][3] << ")" << std::endl;
-
-        auto pm = view_.GetProjectionMatrix();
-        std::cout << "[DIAG] Proj col0=(" << pm.columns[0][0] << "," << pm.columns[0][1] << "," << pm.columns[0][2] << "," << pm.columns[0][3] << ")" << std::endl;
-        std::cout << "[DIAG] Proj col1=(" << pm.columns[1][0] << "," << pm.columns[1][1] << "," << pm.columns[1][2] << "," << pm.columns[1][3] << ")" << std::endl;
-        std::cout << "[DIAG] Proj col2=(" << pm.columns[2][0] << "," << pm.columns[2][1] << "," << pm.columns[2][2] << "," << pm.columns[2][3] << ")" << std::endl;
-        std::cout << "[DIAG] Proj col3=(" << pm.columns[3][0] << "," << pm.columns[3][1] << "," << pm.columns[3][2] << "," << pm.columns[3][3] << ")" << std::endl;
-
-        auto vp = view_.GetViewProjectionMatrix();
-        std::cout << "[DIAG] VP col0=(" << vp.columns[0][0] << "," << vp.columns[0][1] << "," << vp.columns[0][2] << "," << vp.columns[0][3] << ")" << std::endl;
-        std::cout << "[DIAG] VP col1=(" << vp.columns[1][0] << "," << vp.columns[1][1] << "," << vp.columns[1][2] << "," << vp.columns[1][3] << ")" << std::endl;
-        std::cout << "[DIAG] VP col2=(" << vp.columns[2][0] << "," << vp.columns[2][1] << "," << vp.columns[2][2] << "," << vp.columns[2][3] << ")" << std::endl;
-        std::cout << "[DIAG] VP col3=(" << vp.columns[3][0] << "," << vp.columns[3][1] << "," << vp.columns[3][2] << "," << vp.columns[3][3] << ")" << std::endl;
-
-        // Test VP * known vertices
-        auto testOrigin = vp * primal::math::v4{0,0,0,1};
-        std::cout << "[DIAG] VP*(0,0,0,1) = (" << testOrigin.x << "," << testOrigin.y << "," << testOrigin.z << "," << testOrigin.w << ")"
-                  << " ndc=(" << (testOrigin.w!=0?testOrigin.x/testOrigin.w:9999) << "," << (testOrigin.w!=0?testOrigin.y/testOrigin.w:9999) << "," << (testOrigin.w!=0?testOrigin.z/testOrigin.w:9999) << ")" << std::endl;
-
-        auto testV = vp * primal::math::v4{5,5,5,1};
-        std::cout << "[DIAG] VP*(5,5,5,1) = (" << testV.x << "," << testV.y << "," << testV.z << "," << testV.w << ")"
-                  << " ndc=(" << (testV.w!=0?testV.x/testV.w:9999) << "," << (testV.w!=0?testV.y/testV.w:9999) << "," << (testV.w!=0?testV.z/testV.w:9999) << ")" << std::endl;
-
-        auto testV2 = vp * primal::math::v4{-5,0,-5,1};
-        std::cout << "[DIAG] VP*(-5,0,-5,1) = (" << testV2.x << "," << testV2.y << "," << testV2.z << "," << testV2.w << ")"
-                  << " ndc=(" << (testV2.w!=0?testV2.x/testV2.w:9999) << "," << (testV2.w!=0?testV2.y/testV2.w:9999) << "," << (testV2.w!=0?testV2.z/testV2.w:9999) << ")" << std::endl;
-
-        // Print struct sizes for buffer verification
-        std::cout << "[DIAG] sizeof(GlobalShaderData)=" << sizeof(GlobalShaderData) << " sizeof(PerObjectData)=" << sizeof(PerObjectData) << std::endl;
-        std::cout << "[DIAG] sizeof(m4x4)=" << sizeof(primal::math::m4x4) << " sizeof(v4)=" << sizeof(primal::math::v4) << std::endl;
-
-        // Print first proxy transform and AABB
-        if (!view_.GetVisibleProxies().empty()) {
-            const auto* p = view_.GetVisibleProxies()[0];
-            auto wvp = vp * p->transform;
-            auto testP = wvp * primal::math::v4{0,0,0,1};
-            std::cout << "[DIAG] Proxy0 WVP*(0,0,0,1) = (" << testP.x << "," << testP.y << "," << testP.z << "," << testP.w << ")"
-                      << " ndc=(" << (testP.w!=0?testP.x/testP.w:9999) << "," << (testP.w!=0?testP.y/testP.w:9999) << "," << (testP.w!=0?testP.z/testP.w:9999) << ")" << std::endl;
-        }
-    }
-
     if (cmdBuffer_ == rhi::handles::INVALID_COMMAND_BUFFER) {
         cmdBuffer_ = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
     }
@@ -694,22 +616,16 @@ void Engine_Test::RenderFrame() {
     if (cmd) {
         cmd->Reset();
         if (cmd->Begin()) {
-            if (totalFrames_ == 0) std::cout << "[TestDawnFR] Calling ForwardRenderer::Render" << std::endl;
             // Forward pass directly to backbuffer + depth
             forwardRenderer_.Render(cmd, scene_, view_, backBuffer, depthTexture_, materials_, fi, width_, height_);
-            if (totalFrames_ == 0) std::cout << "[TestDawnFR] ForwardRenderer::Render done" << std::endl;
             cmd->End();
         }
         rhi::QueueSubmitInfo submitInfo{};
         submitInfo.cmdBuffer = cmdBuffer_;
-        if (totalFrames_ == 0) std::cout << "[TestDawnFR] Submitting" << std::endl;
         device_->Submit(submitInfo);
-        if (totalFrames_ == 0) std::cout << "[TestDawnFR] Submit done" << std::endl;
     }
 
-    if (totalFrames_ == 0) std::cout << "[TestDawnFR] Presenting" << std::endl;
     swapchain_->Present(rhi::handles::INVALID_SYNC);
-    if (totalFrames_ == 0) std::cout << "[TestDawnFR] Present done" << std::endl;
     device_->EndFrame();
     frameIndex_++;
     totalFrames_++;
@@ -1044,83 +960,7 @@ void Engine_Test::UpdateCameraView() {
     primal::math::v3 up{0.0f, 1.0f, 0.0f};
 
     rhimath::m4x4 viewMat = rhimath::CreateLookAtMatrix(cameraPos_, target, up);
-#ifdef __EMSCRIPTEN__
-    if (totalFrames_ <= 1) {
-        std::cout << "[CAM] CreateLookAt: col0=(" << viewMat.columns[0][0] << "," << viewMat.columns[0][1] << "," << viewMat.columns[0][2] << "," << viewMat.columns[0][3] << ")" << std::endl;
-        std::cout << "[CAM] CreateLookAt: col1=(" << viewMat.columns[1][0] << "," << viewMat.columns[1][1] << "," << viewMat.columns[1][2] << "," << viewMat.columns[1][3] << ")" << std::endl;
-        std::cout << "[CAM] CreateLookAt: col3=(" << viewMat.columns[3][0] << "," << viewMat.columns[3][1] << "," << viewMat.columns[3][2] << "," << viewMat.columns[3][3] << ")" << std::endl;
-
-        // Isolate: test m4x4 construction
-        auto testM = primal::math::m4x4{primal::math::v4{-1,0,0,0}, primal::math::v4{0,1,0,0}, primal::math::v4{0,0,1,0}, primal::math::v4{0,0,0,1}};
-        std::cout << "[CAM] testM col0=(" << testM.columns[0][0] << "," << testM.columns[0][1] << "," << testM.columns[0][2] << "," << testM.columns[0][3] << ")" << std::endl;
-
-        // Isolate: test Identity
-        auto ident = rhimath::MatrixIdentity();
-        std::cout << "[CAM] Identity col0=(" << ident.columns[0][0] << "," << ident.columns[0][1] << "," << ident.columns[0][2] << "," << ident.columns[0][3] << ")" << std::endl;
-
-        // Isolate: test Cross
-        auto testCross = rhimath::Cross(primal::math::v3{0.0f,-0.287f,0.958f}, primal::math::v3{0.0f,1.0f,0.0f});
-        std::cout << "[CAM] Cross test: (" << testCross.x << "," << testCross.y << "," << testCross.z << ")" << std::endl;
-
-        // Isolate: test Normalize
-        auto testNorm = rhimath::Normalize(primal::math::v3{-0.958f, 0.0f, 0.0f});
-        std::cout << "[CAM] Normalize test: (" << testNorm.x << "," << testNorm.y << "," << testNorm.z << ")" << std::endl;
-
-        // Isolate: manually trace CreateLookAtMatrix
-        std::cout << "[CAM] target=(" << target.x << "," << target.y << "," << target.z << ")" << std::endl;
-        std::cout << "[CAM] cameraPos=(" << cameraPos_.x << "," << cameraPos_.y << "," << cameraPos_.z << ")" << std::endl;
-        auto diff = target - cameraPos_;
-        std::cout << "[CAM] diff=target-cam=(" << diff.x << "," << diff.y << "," << diff.z << ")" << std::endl;
-        std::cout << "[CAM] forward=(" << forward.x << "," << forward.y << "," << forward.z << ")" << std::endl;
-        // Also test: construct target manually and diff
-        auto manualTarget = primal::math::v3{0.0f, 5.0f, -10.0f} + primal::math::v3{0.0f, -0.287f, 0.958f};
-        std::cout << "[CAM] manualTarget=(" << manualTarget.x << "," << manualTarget.y << "," << manualTarget.z << ")" << std::endl;
-
-        // Test Length and Normalize with the named diff variable
-        float diffLen = rhimath::Length(diff);
-        std::cout << "[CAM] Length(diff)=" << diffLen << std::endl;
-        auto diffDot = rhimath::dot(diff, diff);
-        std::cout << "[CAM] dot(diff,diff)=" << diffDot << std::endl;
-        auto fwd_from_diff = rhimath::Normalize(diff);
-        std::cout << "[CAM] Normalize(diff)=(" << fwd_from_diff.x << "," << fwd_from_diff.y << "," << fwd_from_diff.z << ")" << std::endl;
-
-        // Test Normalize with the expression directly
-        auto fwd_from_expr = rhimath::Normalize(target - cameraPos_);
-        std::cout << "[CAM] Normalize(expr)=(" << fwd_from_expr.x << "," << fwd_from_expr.y << "," << fwd_from_expr.z << ")" << std::endl;
-
-        // Store expression result and check values
-        auto tempResult = target - cameraPos_;
-        float tempLen = rhimath::Length(tempResult);
-        std::cout << "[CAM] tempResult=(" << tempResult.x << "," << tempResult.y << "," << tempResult.z << ") Length=" << tempLen << std::endl;
-
-        auto fwd = rhimath::Normalize(target - cameraPos_);
-        std::cout << "[CAM] fwd=(" << fwd.x << "," << fwd.y << "," << fwd.z << ")" << std::endl;
-        auto rt = rhimath::Normalize(rhimath::Cross(fwd, primal::math::v3{0,1,0}));
-        std::cout << "[CAM] rt=(" << rt.x << "," << rt.y << "," << rt.z << ")" << std::endl;
-        auto nu = rhimath::Cross(rt, fwd);
-        std::cout << "[CAM] nu=(" << nu.x << "," << nu.y << "," << nu.z << ")" << std::endl;
-        auto dotRE = rhimath::Dot(rt, cameraPos_);
-        auto dotUE = rhimath::Dot(nu, cameraPos_);
-        auto dotFE = rhimath::Dot(fwd, cameraPos_);
-        std::cout << "[CAM] dots: r*e=" << dotRE << " u*e=" << dotUE << " f*e=" << dotFE << std::endl;
-        // Manually construct result
-        auto manualMat = primal::math::m4x4{
-            primal::math::v4{rt.x, nu.x, -fwd.x, 0.0f},
-            primal::math::v4{rt.y, nu.y, -fwd.y, 0.0f},
-            primal::math::v4{rt.z, nu.z, -fwd.z, 0.0f},
-            primal::math::v4{-dotRE, -dotUE, dotFE, 1.0f}
-        };
-        std::cout << "[CAM] manual col0=(" << manualMat.columns[0][0] << "," << manualMat.columns[0][1] << "," << manualMat.columns[0][2] << "," << manualMat.columns[0][3] << ")" << std::endl;
-        std::cout << "[CAM] manual col3=(" << manualMat.columns[3][0] << "," << manualMat.columns[3][1] << "," << manualMat.columns[3][2] << "," << manualMat.columns[3][3] << ")" << std::endl;
-    }
-#endif
     view_.SetViewMatrix(viewMat);
-#ifdef __EMSCRIPTEN__
-    if (totalFrames_ <= 1) {
-        auto vm2 = view_.GetViewMatrix();
-        std::cout << "[CAM] After SetView: col0=(" << vm2.columns[0][0] << "," << vm2.columns[0][1] << "," << vm2.columns[0][2] << "," << vm2.columns[0][3] << ")" << std::endl;
-    }
-#endif
     view_.Cull(scene_);
 }
 

@@ -533,20 +533,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         const u32 srcPosStride = 12; 
         const u32 srcElemStride = elementSize;
 
-        // Diagnostic: print element size for arch meshes (matIdx=5) and first few meshes
-        {
-            static int diagCount2 = 0;
-            bool isArch = (materialIndex == 5);
-            bool isCeiling = (materialIndex == 6);
-            bool isColumn = (materialIndex == 7);
-            bool isFloor = (materialIndex == 8);
-            if (diagCount2 < 5 || isArch || isCeiling || isColumn || isFloor) {
-                std::cerr << "[ELEM DIAG] matIdx=" << materialIndex << " elemStride=" << srcElemStride
-                          << " verts=" << vertexCount << std::endl;
-                diagCount2++;
-            }
-        }
-        
+
         utl::vector<u8> interleavedVertices(vertexCount * TARGET_VERTEX_STRIDE);
         // Zero initialize to handle padding/missing elements safely
         memset(interleavedVertices.data(), 0, interleavedVertices.size());
@@ -603,13 +590,6 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                          memcpy(&py, dst + 4, 4);
                          if (py < minY) minY = py; if (py > maxY) maxY = py;
                      }
-                     std::cerr << "[UV DIAG] matIdx=" << materialIndex
-                               << " verts=" << vertexCount << " elemStride=" << srcElemStride
-                               << " U=[" << minU << "," << maxU << "]"
-                               << " V=[" << minV << "," << maxV << "]"
-                               << " posY=[" << minY << "," << maxY << "]"
-                               << (isCloth ? (isCurtain ? " CURTAIN" : " CLOTH") : "") << std::endl;
-                 }
              }
              
              RenderMesh* mesh = new RenderMesh();

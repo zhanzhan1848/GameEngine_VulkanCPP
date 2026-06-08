@@ -971,15 +971,6 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     // 0. Update Frame Data
     if (frameIndex < rhi::MAX_FRAMES_IN_FLIGHT && frameBuffersMapped_[frameIndex]) {
         rhi::GlobalShaderData* frameData = static_cast<rhi::GlobalShaderData*>(frameBuffersMapped_[frameIndex]);
-#ifdef __EMSCRIPTEN__
-        if (frameIndex == 0 && frameNumber_ == 0) {
-            auto srcView = view.GetViewMatrix();
-            std::cout << "[FwdRenderer] BEFORE write: src view col0=(" << srcView.columns[0][0] << "," << srcView.columns[0][1] << "," << srcView.columns[0][2] << "," << srcView.columns[0][3] << ")" << std::endl;
-            std::cout << "[FwdRenderer] BEFORE write: src view col3=(" << srcView.columns[3][0] << "," << srcView.columns[3][1] << "," << srcView.columns[3][2] << "," << srcView.columns[3][3] << ")" << std::endl;
-            std::cout << "[FwdRenderer] frameData ptr=" << frameData << " mappedPtr=" << frameBuffersMapped_[frameIndex] << std::endl;
-            std::cout << "[FwdRenderer] sizeof(GlobalShaderData)=" << sizeof(rhi::GlobalShaderData) << " offset of view=" << offsetof(rhi::GlobalShaderData, view) << std::endl;
-        }
-#endif
         frameData->view = view.GetViewMatrix();
         frameData->projection = view.GetProjectionMatrix();
         frameData->viewProjection = view.GetViewProjectionMatrix();
@@ -994,29 +985,6 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 
         SetupLights(scene, frameIndex, frameData, csmViews, cascadeSplits, lightShadowIndices, lightViewProjs);
 
-#ifdef __EMSCRIPTEN__
-        if (frameIndex == 0 && frameNumber_ == 0) {
-            auto* lb = static_cast<rhi::ForwardLightBuffer*>(lightBuffersMapped_[frameIndex]);
-            std::cout << "[FwdRenderer] Light buffer: dirCount=" << lb->directionalLightCount
-                      << " punctCount=" << lb->punctualLightCount << std::endl;
-            if (lb->directionalLightCount > 0) {
-                auto& dl = lb->directionalLights[0];
-                std::cout << "[FwdRenderer] DirLight0: dir=("
-                          << dl.directionAndIntensity.x << "," << dl.directionAndIntensity.y << "," << dl.directionAndIntensity.z
-                          << ") intensity=" << dl.directionAndIntensity.w
-                          << " color=(" << dl.colorAndShadow.x << "," << dl.colorAndShadow.y << "," << dl.colorAndShadow.z << ")" << std::endl;
-            }
-            std::cout << "[FwdRenderer] GlobalData: numDirLights=" << frameData->numDirectionalLights
-                      << " numPunctLights=" << frameData->numPunctualLights << std::endl;
-            // Verify staging: print first 16 bytes of frame buffer as floats
-            auto* fb = static_cast<float*>(frameBuffersMapped_[frameIndex]);
-            std::cout << "[FwdRenderer] FrameBuf first 4 floats: " << fb[0] << "," << fb[1] << "," << fb[2] << "," << fb[3] << std::endl;
-            std::cout << "[FwdRenderer] AFTER write: frameData->view col0=(" << frameData->view.columns[0][0] << "," << frameData->view.columns[0][1] << "," << frameData->view.columns[0][2] << "," << frameData->view.columns[0][3] << ")" << std::endl;
-            std::cout << "[FwdRenderer] AFTER write: frameData->view col3=(" << frameData->view.columns[3][0] << "," << frameData->view.columns[3][1] << "," << frameData->view.columns[3][2] << "," << frameData->view.columns[3][3] << ")" << std::endl;
-            std::cout << "[FwdRenderer] frameData->proj col0=(" << frameData->projection.columns[0][0] << "," << frameData->projection.columns[0][1] << "," << frameData->projection.columns[0][2] << "," << frameData->projection.columns[0][3] << ")" << std::endl;
-            std::cout << "[FwdRenderer] frameData->vp col0=(" << frameData->viewProjection.columns[0][0] << "," << frameData->viewProjection.columns[0][1] << "," << frameData->viewProjection.columns[0][2] << "," << frameData->viewProjection.columns[0][3] << ")" << std::endl;
-        }
-#endif
     }
 
     // 1. Filter and Sort Proxies
@@ -1099,12 +1067,6 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     cmdBuffer->SetScissor(scissor);
 
     bool useDepthEqual = (depthStencil != rhi::handles::INVALID_RESOURCE) && !skipShadows;
-#ifdef __EMSCRIPTEN__
-    if (frameNumber_ == 0) {
-        std::cout << "[FwdRenderer] OpaquePass: proxies=" << opaqueProxies.size()
-                  << " transparent=" << transparentProxies.size() << std::endl;
-    }
-#endif
     OpaquePass(cmdBuffer, view, materials, opaqueProxies, frameIndex, useDepthEqual);
 
     cmdBuffer->EndRenderPass();
@@ -1291,15 +1253,9 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
                                  bool useDepthEqual,
                                  rhi::DescriptorSetHandle overrideGlobalSet,
                                  PipelineFlags extraFlags) {
-#ifdef __EMSCRIPTEN__
-    u32 drawCount = 0, matMiss = 0, meshMiss = 0, pipeMiss = 0;
-#endif
     for (const auto* proxy : proxies) {
         auto it = materials.find(proxy->materialId);
         if (it == materials.end() || !it->second) {
-#ifdef __EMSCRIPTEN__
-            matMiss++;
-#endif
             continue;
         }
         MaterialInstance* mi = it->second.get();
@@ -1319,10 +1275,6 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
             flags = flags | extraFlags;
             pipeline = mat->GetPipeline(device_, rhi::handles::INVALID_RESOURCE, 0, flags);
         }
-
-#ifdef __EMSCRIPTEN__
-        if (pipeline == rhi::handles::INVALID_PIPELINE) pipeMiss++;
-#endif
 
         cmdBuffer->BindGraphicsPipeline(pipeline);
 
@@ -1356,24 +1308,10 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
         RenderMesh* mesh = RenderMesh::GetByEntityId(proxy->entityId);
         if (mesh && mesh->IsValid()) {
             mesh->Draw(cmdBuffer);
-#ifdef __EMSCRIPTEN__
-            drawCount++;
-#endif
-        } else {
-#ifdef __EMSCRIPTEN__
-            meshMiss++;
-#endif
         }
 
         perObjectBufferOffset_ += alignedSize;
     }
-#ifdef __EMSCRIPTEN__
-    if (frameNumber_ == 0) {
-        std::cout << "[FwdRenderer] OpaquePass done: draws=" << drawCount
-                  << " matMiss=" << matMiss << " meshMiss=" << meshMiss
-                  << " pipeMiss=" << pipeMiss << " total=" << proxies.size() << std::endl;
-    }
-#endif
 }
 
 void ForwardRenderer::TransparentPass(rhi::RHICommandBuffer* cmdBuffer,
