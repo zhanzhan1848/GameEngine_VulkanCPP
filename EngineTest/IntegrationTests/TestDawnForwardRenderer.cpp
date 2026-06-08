@@ -599,9 +599,10 @@ void Engine_Test::RenderFrame() {
     depthDescForRG.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
     auto depthRG = renderGraph_->ImportTexture("Depth", depthTexture_, depthDescForRG);
 
+#ifndef __EMSCRIPTEN__
     auto invProj = rhimath::Inverse(view_.GetProjectionMatrix());
 
-    // HZB generation from depth buffer
+    // HZB generation from depth buffer (only needed by SSGI)
     const auto& hzbOut = PostProcess::AddHZBPass(*renderGraph_, depthRG, width_, height_);
     auto hzbHandle = hzbOut.hzbTexture;
 
@@ -618,11 +619,19 @@ void Engine_Test::RenderFrame() {
 
     const auto& ssaoOut = graphics::PostProcess::AddSSAOPass(*renderGraph_, depthRG, width_, height_, fi, view_.GetProjectionMatrix(), invProj);
     auto ssaoAOHandle = ssaoOut.ssaoOutput;
+#endif
 
     const auto& bloomOut = PostProcess::AddBloomPass(*renderGraph_, hdrRG, fi);
     auto bloomHandle = bloomOut.bloomOutput;
 
-    const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, hdrRG, bloomHandle, ssaoAOHandle, ssgiHandle, fi);
+#ifdef __EMSCRIPTEN__
+    // WASM: shadow + bloom + tone mapping only (SSAO/SSGI disabled to avoid resource leak)
+    const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, hdrRG, bloomHandle,
+        handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, fi);
+#else
+    const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, hdrRG, bloomHandle,
+        ssaoAOHandle, ssgiHandle, fi);
+#endif
     auto tonemapOutput = tonemapOut.output;
 
     // Present: blit tonemapped output → backbuffer
@@ -1223,8 +1232,10 @@ void Engine_Test::shutdown() {
     }
 
     graphics::PostProcess::ShutdownBloomPass();
+#ifndef __EMSCRIPTEN__
     graphics::PostProcess::ShutdownSSAOPass();
     graphics::PostProcess::ShutdownLumenSSGIPass();
+#endif
 
     if (device_) {
         device_->Shutdown();
