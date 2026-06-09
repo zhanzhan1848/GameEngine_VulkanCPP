@@ -817,9 +817,9 @@ fn sampleShadowPCF(worldPos: vec3<f32>, N: vec3<f32>, lightDir: vec3<f32>) -> f3
     let lightClip = lightVP * vec4<f32>(worldPos, 1.0);
     let lightNDC = lightClip.xyz / lightClip.w;
 
-    let shadowUV = clamp(vec2<f32>(lightNDC.x * 0.5 + 0.5, 1.0 - (lightNDC.y * 0.5 + 0.5)),
+    let shadowUV = clamp(vec2<f32>(lightNDC.x * 0.5 + 0.5, lightNDC.y * 0.5 + 0.5),
                          vec2<f32>(0.001, 0.001), vec2<f32>(0.999, 0.999));
-    let shadowZ = lightNDC.z * 0.5 + 0.5;
+    let shadowZ = lightNDC.z;
 
     let texSize = vec2<f32>(textureDimensions(shadowDepthTex));
     let texelSize = 1.0 / texSize;
