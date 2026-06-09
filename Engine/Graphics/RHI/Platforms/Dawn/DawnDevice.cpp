@@ -696,7 +696,11 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 if (!pb) {
                     std::cerr << "[DawnDSWrite] SKIP buf binding=" << binding
                               << " type=" << static_cast<u32>(write.descriptorType)
-                              << " (no pending match)" << std::endl;
+                              << " set=" << static_cast<u32>(write.dstSet)
+                              << " pending_types=";
+                    for (u32 k = 0; k < ds->PendingCount() && k < 6; ++k)
+                        std::cerr << static_cast<u32>(ds->PendingType(k)) << ",";
+                    std::cerr << std::endl;
                     continue;
                 }
 
@@ -728,7 +732,11 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 if (!pb) {
                     std::cerr << "[DawnDSWrite] SKIP tex binding=" << binding
                               << " type=" << static_cast<u32>(write.descriptorType)
-                              << " (no pending match)" << std::endl;
+                              << " set=" << static_cast<u32>(write.dstSet)
+                              << " pending_types=";
+                    for (u32 k = 0; k < ds->PendingCount() && k < 6; ++k)
+                        std::cerr << static_cast<u32>(ds->PendingType(k)) << ",";
+                    std::cerr << std::endl;
                     continue;
                 }
 

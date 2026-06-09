@@ -59,6 +59,12 @@ private:
     /// Get mutable pending binding for a given engine binding slot.
     DawnPendingBinding* GetOrCreatePending(u32 engineBinding, DescriptorType type);
 
+    // Diagnostic accessors
+    u32 PendingCount() const { return static_cast<u32>(pendingBindings_.size()); }
+    DescriptorType PendingType(u32 idx) const {
+        return idx < pendingBindings_.size() ? pendingBindings_[idx].type : DescriptorType::Unknown;
+    }
+
     DawnDevice& device_;
     DescriptorSetLayoutHandle layoutHandle_{ handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     WGPUBindGroup wgpuGroup_ = nullptr;
