@@ -173,6 +173,19 @@ private:
     rhi::SamplerHandle dawnShadowSampler_{rhi::handles::INVALID_SAMPLER};
     primal::math::m4x4 dawnShadowLightVP_{};
 
+    // Dawn shadow pipeline (owned by ForwardRenderer)
+    rhi::DescriptorSetLayoutHandle dawnShadowDSL_{rhi::handles::INVALID_RESOURCE};
+    rhi::PipelineLayoutHandle dawnShadowPipelineLayout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineHandle dawnShadowPipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::ResourceHandle dawnShadowPerObjectBuf_{rhi::handles::INVALID_RESOURCE};
+    void* dawnShadowPerObjectMapped_{nullptr};
+    rhi::DescriptorSetHandle dawnShadowPerObjectSet_{rhi::handles::INVALID_DESCRIPTOR_SET};
+
+    void RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
+                              const RenderScene& scene,
+                              const RenderView& view,
+                              const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials);
+
 public:
     void SetTime(float deltaTime, float totalTime, u32 frameNumber) {
         deltaTime_ = deltaTime;

@@ -222,18 +222,18 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         shadowMapSampler_ = device->CreateSampler(shadowSamplerDesc);
         shadowCubeMapSampler_ = device->CreateSampler(shadowSamplerDesc);
     } else {
-        // Dawn: create dummy shadow depth texture + sampler so bind group has all 4 bindings
-        rhi::TextureDesc dummyShadowDesc{
-            { 1, 1, 1 },
+        // Dawn: real shadow depth texture + sampler + pipeline
+        rhi::TextureDesc shadowDepthDesc{
+            { 2048, 2048, 1 },
             1,
             1,
             rhi::DataFormat::D32_Float,
             rhi::TextureType::Texture2D,
             rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource,
             rhi::GPUMemoryUsage::Static,
-            "DummyShadowDepth"
+            "ShadowDepthBuffer"
         };
-        shadowDepthBuffer_ = device->CreateTexture(dummyShadowDesc);
+        shadowDepthBuffer_ = device->CreateTexture(shadowDepthDesc);
 
         rhi::SamplerDesc shadowSamplerDesc{};
         shadowSamplerDesc.minFilter = rhi::FilterMode::Linear;
@@ -244,6 +244,96 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         shadowSamplerDesc.borderColor = {1.0f, 1.0f, 1.0f, 1.0f};
         shadowSamplerDesc.comparisonFunc = rhi::ComparisonFunc::Never;
         shadowMapSampler_ = device->CreateSampler(shadowSamplerDesc);
+
+        // Shadow DSL: 1 binding — ShadowPerObject uniform buffer
+        {
+            rhi::DescriptorSetLayoutBinding bind{};
+            bind.binding = 0;
+            bind.descriptorType = rhi::DescriptorType::UniformBuffer;
+            bind.descriptorCount = 1;
+            bind.stageFlags = rhi::ShaderStage::Vertex;
+            rhi::DescriptorSetLayoutDesc dslDesc;
+            dslDesc.bindingCount = 1;
+            dslDesc.bindings = &bind;
+            dawnShadowDSL_ = device->CreateDescriptorSetLayout(dslDesc);
+
+            rhi::PipelineLayoutDesc plDesc;
+            plDesc.setLayoutCount = 1;
+            plDesc.setLayouts = &dawnShadowDSL_;
+            dawnShadowPipelineLayout_ = device->CreatePipelineLayout(plDesc);
+        }
+
+        // Shadow depth pipeline (vertex-only, front-face cull)
+        {
+            auto platform = device->GetPlatform();
+            std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "ShadowDepth");
+            std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
+            if (!file.is_open()) {
+                shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
+                file.open(shaderPath, std::ios::ate | std::ios::binary);
+            }
+            if (file.is_open()) {
+                size_t size = file.tellg();
+                utl::vector<char> buf;
+                buf.resize(size + 1);
+                file.seekg(0);
+                file.read(buf.data(), size);
+                buf[size] = 0;
+
+                rhi::ShaderHandle vs = device->CreateShader(buf.data(), size, rhi::ShaderStage::Vertex, "shadow_vs");
+                if (vs != rhi::handles::INVALID_SHADER) {
+                    rhi::GraphicsPipelineDesc pipeDesc;
+                    pipeDesc.vertexShader = vs;
+                    pipeDesc.layout = dawnShadowPipelineLayout_;
+                    pipeDesc.topology = rhi::PrimitiveTopology::TriangleList;
+                    pipeDesc.renderTargetCount = 0;
+                    pipeDesc.depthStencilFormat = rhi::DataFormat::D32_Float;
+                    pipeDesc.enableDepthTest = true;
+                    pipeDesc.enableDepthWrite = true;
+                    pipeDesc.depthFunc = rhi::ComparisonFunc::Less;
+                    pipeDesc.cullMode = rhi::CullMode::Front;
+
+                    utl::vector<rhi::VertexInputAttribute> attrs(5);
+                    attrs[0] = {0, 0, rhi::DataFormat::RGB32_Float, 0};
+                    attrs[1] = {1, 0, rhi::DataFormat::R32_UInt, 12};
+                    attrs[2] = {2, 0, rhi::DataFormat::R32_UInt, 16};
+                    attrs[3] = {3, 0, rhi::DataFormat::R32_UInt, 20};
+                    attrs[4] = {4, 0, rhi::DataFormat::RG32_Float, 24};
+                    pipeDesc.vertexAttributes = attrs;
+                    utl::vector<rhi::VertexInputBinding> binds(1);
+                    binds[0] = {0, 32, true};
+                    pipeDesc.vertexBindings = binds;
+
+                    dawnShadowPipeline_ = device->CreateGraphicsPipeline(pipeDesc);
+                }
+            }
+        }
+
+        // Shadow per-object buffer (128 bytes) + descriptor set
+        {
+            rhi::BufferDesc bufDesc{};
+            bufDesc.size = 128;
+            bufDesc.type = rhi::BufferType::Constant;
+            bufDesc.usage = rhi::GPUMemoryUsage::Dynamic;
+            bufDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+            dawnShadowPerObjectBuf_ = device->CreateBuffer(bufDesc);
+            dawnShadowPerObjectMapped_ = device->MapBuffer(dawnShadowPerObjectBuf_, 0, 128);
+
+            rhi::DescriptorSetDesc dsDesc;
+            dsDesc.layout = dawnShadowDSL_;
+            dawnShadowPerObjectSet_ = device->CreateDescriptorSet(dsDesc);
+            rhi::DescriptorBufferInfo bufInfo;
+            bufInfo.buffer = dawnShadowPerObjectBuf_;
+            bufInfo.offset = 0;
+            bufInfo.range = 128;
+            rhi::WriteDescriptorSet write;
+            write.dstSet = dawnShadowPerObjectSet_;
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = rhi::DescriptorType::UniformBuffer;
+            write.bufferInfo = &bufInfo;
+            device->UpdateDescriptorSets(1, &write);
+        }
     }
 
     // 7. Allocate and Update Descriptor Sets
@@ -480,6 +570,21 @@ void ForwardRenderer::Shutdown() {
         }
         if (compositeDescriptorSetLayout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
             device_->DestroyDescriptorSetLayout(compositeDescriptorSetLayout_);
+        }
+
+        // Dawn shadow cleanup
+        if (dawnShadowPipeline_ != rhi::handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(dawnShadowPipeline_);
+        }
+        if (dawnShadowPipelineLayout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+            device_->DestroyPipelineLayout(dawnShadowPipelineLayout_);
+        }
+        if (dawnShadowDSL_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyDescriptorSetLayout(dawnShadowDSL_);
+        }
+        if (dawnShadowPerObjectBuf_ != rhi::handles::INVALID_RESOURCE) {
+            if (dawnShadowPerObjectMapped_) device_->UnmapBuffer(dawnShadowPerObjectBuf_);
+            device_->DestroyBuffer(dawnShadowPerObjectBuf_);
         }
 
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -732,8 +837,90 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
     }
 }
 
-void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer, 
-                                 const RenderView& view, 
+void ForwardRenderer::RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
+                                           const RenderScene& scene,
+                                           const RenderView& view,
+                                           const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& /*materials*/) {
+    if (dawnShadowPipeline_ == rhi::handles::INVALID_PIPELINE) return;
+    if (shadowDepthBuffer_ == rhi::handles::INVALID_RESOURCE) return;
+
+    // Compute light VP from first directional light
+    rhi::math::v3 lightDir = {0.0f, -1.0f, 0.0f};
+    const auto& allLights = scene.GetLights();
+    for (size_t i = 0; i < allLights.size(); ++i) {
+        if (allLights[i].type == LightType::Directional) {
+            lightDir = allLights[i].direction;
+            break;
+        }
+    }
+    float len = sqrtf(lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z);
+    if (len > 0.0001f) lightDir = lightDir / len;
+
+    auto invView = rhi::math::Inverse(view.GetViewMatrix());
+    rhi::math::v3 cameraPos = {invView.columns[3][0], invView.columns[3][1], invView.columns[3][2]};
+    rhi::math::v3 lightEye = cameraPos - lightDir * 30.0f;
+    rhi::math::v3 up{0.0f, 1.0f, 0.0f};
+    rhi::math::m4x4 lightView = rhi::math::CreateLookAtMatrix(lightEye, cameraPos, up);
+    rhi::math::m4x4 lightProj = rhi::math::CreateOrthographicMatrix(-25.0f, 25.0f, -25.0f, 25.0f, 0.1f, 80.0f);
+    dawnShadowLightVP_ = lightProj * lightView;
+
+    // Begin depth-only render pass
+    rhi::RenderPassDesc passDesc{};
+    passDesc.depthAttachment.texture = shadowDepthBuffer_;
+    passDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
+    passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
+    passDesc.depthAttachment.clearValue.depth = 1.0f;
+    passDesc.depthAttachment.storeOp = rhi::StoreAction::Store;
+
+    rhi::ViewportDesc vp;
+    vp.size = {2048.0f, 2048.0f};
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+
+    cmdBuffer->BeginRenderPass(passDesc);
+    cmdBuffer->SetViewport(vp);
+    cmdBuffer->SetScissor({{0, 0}, {2048, 2048}});
+    cmdBuffer->BindGraphicsPipeline(dawnShadowPipeline_);
+
+    if (dawnShadowPerObjectSet_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
+        cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, dawnShadowPipelineLayout_,
+                                      0, 1, &dawnShadowPerObjectSet_, 0, nullptr);
+    }
+
+    // Draw all visible proxies
+    const auto& proxies = view.GetVisibleProxies();
+    for (const auto* proxy : proxies) {
+        if (!proxy) continue;
+
+        if (dawnShadowPerObjectMapped_) {
+            auto* p = static_cast<float*>(dawnShadowPerObjectMapped_);
+            // world matrix (64 bytes)
+            memcpy(p, &proxy->transform, 64);
+            // worldLightVP (64 bytes)
+            rhi::math::m4x4 worldLightVP = dawnShadowLightVP_ * proxy->transform;
+            memcpy(p + 16, &worldLightVP, 64);
+            device_->SetBufferDirtySize(dawnShadowPerObjectBuf_, 128);
+        }
+
+        RenderMesh* mesh = RenderMesh::GetByEntityId(proxy->meshId);
+        if (mesh && mesh->IsValid()) {
+            mesh->Draw(cmdBuffer);
+        }
+    }
+
+    cmdBuffer->EndRenderPass();
+
+    // Barrier: depth texture → ShaderResource for forward pass sampling
+    rhi::ResourceBarrier b{};
+    b.resource = shadowDepthBuffer_;
+    b.beforeState = rhi::ResourceState::DepthStencil;
+    b.afterState = rhi::ResourceState::ShaderResource;
+    b.subresource = 0xFFFFFFFF;
+    cmdBuffer->InsertBarrier(&b, 1);
+}
+
+void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer,
+                                 const RenderView& view,
                                  rhi::ResourceHandle shadowMap,
                                  const std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>>& materials,
                                  const utl::vector<const RenderProxy*>& proxies,
@@ -836,7 +1023,7 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
 
                 // Dawn: fill viewProjections[0] with externally-provided shadow light VP
                 bool isDawnLight = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
-                if (isDawnLight && dawnShadowDepthTex_ != rhi::handles::INVALID_RESOURCE) {
+                if (isDawnLight && shadowDepthBuffer_ != rhi::handles::INVALID_RESOURCE) {
                     dl.viewProjections[0] = dawnShadowLightVP_;
                 }
                 
@@ -933,12 +1120,14 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     u32 spotShadowCount = 0;
     u32 pointShadowCount = 0;
 
-    // Stage 1: Skip shadow pass on Dawn (texture array layer issues)
+    // Stage 1: Dawn uses its own depth-only shadow pass; Metal/Vulkan uses VSM shadow loop
     bool skipShadows = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
 
-    for (size_t i = 0; i < allLights.size(); ++i) {
-        const auto& light = allLights[i];
-        if (skipShadows) break;
+    if (skipShadows) {
+        RenderDawnShadowPass(cmdBuffer, scene, view, materials);
+    } else {
+        for (size_t i = 0; i < allLights.size(); ++i) {
+            const auto& light = allLights[i];
 
         if (light.type == LightType::Directional) {
             if (!hasDirectionalLight && shadowMapArray_ != rhi::handles::INVALID_RESOURCE) {
@@ -990,7 +1179,8 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
                 pointShadowCount++;
             }
         }
-    }
+    } // end for loop (non-Dawn shadows)
+    } // end else (non-Dawn shadow path)
 
     // Execute Blur Pass for VSM (ShadowMapArray -> Temp -> ShadowMapArray)
     if (!skipShadows && shadowMapArray_ != rhi::handles::INVALID_RESOURCE && shadowMapTempArray_ != rhi::handles::INVALID_RESOURCE) {
