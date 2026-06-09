@@ -626,7 +626,7 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
 
     let V = normalize(globalData.cameraPositionAndViewWidth.xyz - input.worldPos);
 
-    var color = vec3<f32>(0.03, 0.03, 0.03) * albedo * ao;
+    var color = vec3<f32>(0.01, 0.01, 0.01) * albedo * ao;
 
     if (lightBuffer.directionalLightCount > 0u) {
         let light = lightBuffer.directionalLights[0];
@@ -653,8 +653,9 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
         color = color + Lo;
     }
 
-    // Gamma correction: PBR output is in linear space, convert to sRGB for display
-    color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+    // Tone contrast + gamma correction
+    color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.3, 1.3, 1.3));
+    color = pow(color, vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
 
     return vec4<f32>(color, 1.0);
 }
@@ -863,8 +864,8 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
 
     let V = normalize(globalData.cameraPositionAndViewWidth.xyz - input.worldPos);
 
-    // Ambient
-    var color = vec3<f32>(0.03, 0.03, 0.03) * albedo * ao;
+    // Ambient (low for deep shadows)
+    var color = vec3<f32>(0.01, 0.01, 0.01) * albedo * ao;
 
     // Directional light (first only, Stage 1) with shadow
     if (lightBuffer.directionalLightCount > 0u) {
@@ -896,8 +897,9 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
         color = color + Lo;
     }
 
-    // Gamma correction: PBR output is in linear space, convert to sRGB for display
-    color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+    // Tone contrast + gamma correction
+    color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.3, 1.3, 1.3));
+    color = pow(color, vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
 
     return vec4<f32>(color, 1.0);
 }

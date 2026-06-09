@@ -853,7 +853,7 @@ void ForwardRenderer::RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     if (dawnShadowPipeline_ == rhi::handles::INVALID_PIPELINE) return;
     if (shadowDepthBuffer_ == rhi::handles::INVALID_RESOURCE) return;
 
-    // Compute light VP from first directional light
+    // Compute light direction from first directional light
     rhi::math::v3 lightDir = {0.0f, -1.0f, 0.0f};
     const auto& allLights = scene.GetLights();
     for (size_t i = 0; i < allLights.size(); ++i) {
@@ -865,23 +865,60 @@ void ForwardRenderer::RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     float len = sqrtf(lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z);
     if (len > 0.0001f) lightDir = lightDir / len;
 
-    auto invView = rhi::math::Inverse(view.GetViewMatrix());
-    rhi::math::v3 cameraPos = {invView.columns[3][0], invView.columns[3][1], invView.columns[3][2]};
-    rhi::math::v3 lightEye = cameraPos - lightDir * 30.0f;
     rhi::math::v3 up{0.0f, 1.0f, 0.0f};
-    rhi::math::m4x4 lightView = rhi::math::CreateLookAtMatrix(lightEye, cameraPos, up);
+    if (fabsf(lightDir.y) > 0.99f) up = {1.0f, 0.0f, 0.0f};
 
-    constexpr float orthoHalf = 25.0f;
-    rhi::math::m4x4 lightProj = rhi::math::CreateOrthographicMatrix(-orthoHalf, orthoHalf, -orthoHalf, orthoHalf, 0.1f, 80.0f);
+    // Compute camera frustum corners in world space
+    rhi::math::m4x4 invVP = rhi::math::Inverse(view.GetViewProjectionMatrix());
+    rhi::math::v3 corners[8];
+    for (int i = 0; i < 8; i++) {
+        float x = (i & 1) ? 1.0f : -1.0f;
+        float y = (i & 2) ? 1.0f : -1.0f;
+        float z = (i >= 4) ? 1.0f : 0.0f;
+        rhi::math::v4 c = invVP * rhi::math::v4{x, y, z, 1.0f};
+        corners[i] = {c.x / c.w, c.y / c.w, c.z / c.w};
+    }
 
-    // Snap shadow projection to texel boundaries to prevent shadow swimming
+    // Frustum center
+    rhi::math::v3 center{0, 0, 0};
+    for (int i = 0; i < 8; i++) {
+        center.x += corners[i].x; center.y += corners[i].y; center.z += corners[i].z;
+    }
+    center.x /= 8.0f; center.y /= 8.0f; center.z /= 8.0f;
+
+    // Light view from frustum center
+    rhi::math::v3 lightEye = center - lightDir * 50.0f;
+    rhi::math::m4x4 lightView = rhi::math::CreateLookAtMatrix(lightEye, center, up);
+
+    // Find frustum bounds in light space
+    float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+    float minZ = 1e9f, maxZ = -1e9f;
+    for (int i = 0; i < 8; i++) {
+        rhi::math::v4 ls = lightView * rhi::math::v4{corners[i].x, corners[i].y, corners[i].z, 1.0f};
+        minX = fminf(minX, ls.x); maxX = fmaxf(maxX, ls.x);
+        minY = fminf(minY, ls.y); maxY = fmaxf(maxY, ls.y);
+        minZ = fminf(minZ, ls.z); maxZ = fmaxf(maxZ, ls.z);
+    }
+
+    // Use square bounds (max of X/Y extent)
+    float halfExt = fmaxf((maxX - minX) * 0.5f, (maxY - minY) * 0.5f);
+    halfExt = fmaxf(halfExt, 5.0f); // minimum 10-unit coverage
+    float cx = (minX + maxX) * 0.5f;
+    float cy = (minY + maxY) * 0.5f;
+
+    // Snap center to texel boundaries
     constexpr float shadowMapSize = 2048.0f;
-    constexpr float texelWorldSize = (2.0f * orthoHalf) / shadowMapSize;
-    rhi::math::v4 originLS = lightView * rhi::math::v4{0.0f, 0.0f, 0.0f, 1.0f};
-    float snappedX = floorf(originLS.x / texelWorldSize) * texelWorldSize;
-    float snappedY = floorf(originLS.y / texelWorldSize) * texelWorldSize;
-    lightView.columns[3][0] += (snappedX - originLS.x);
-    lightView.columns[3][1] += (snappedY - originLS.y);
+    float texelSize = (halfExt * 2.0f) / shadowMapSize;
+    cx = roundf(cx / texelSize) * texelSize;
+    cy = roundf(cy / texelSize) * texelSize;
+
+    // Adjust lightView translation for snapped center
+    rhi::math::v4 centerLS = lightView * rhi::math::v4{center.x, center.y, center.z, 1.0f};
+    lightView.columns[3][0] += (cx - centerLS.x);
+    lightView.columns[3][1] += (cy - centerLS.y);
+
+    rhi::math::m4x4 lightProj = rhi::math::CreateOrthographicMatrix(
+        cx - halfExt, cx + halfExt, cy - halfExt, cy + halfExt, minZ, maxZ);
 
     dawnShadowLightVP_ = lightProj * lightView;
 
