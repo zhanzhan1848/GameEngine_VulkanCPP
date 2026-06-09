@@ -870,7 +870,19 @@ void ForwardRenderer::RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     rhi::math::v3 lightEye = cameraPos - lightDir * 30.0f;
     rhi::math::v3 up{0.0f, 1.0f, 0.0f};
     rhi::math::m4x4 lightView = rhi::math::CreateLookAtMatrix(lightEye, cameraPos, up);
-    rhi::math::m4x4 lightProj = rhi::math::CreateOrthographicMatrix(-25.0f, 25.0f, -25.0f, 25.0f, 0.1f, 80.0f);
+
+    constexpr float orthoHalf = 25.0f;
+    rhi::math::m4x4 lightProj = rhi::math::CreateOrthographicMatrix(-orthoHalf, orthoHalf, -orthoHalf, orthoHalf, 0.1f, 80.0f);
+
+    // Snap shadow projection to texel boundaries to prevent shadow swimming
+    constexpr float shadowMapSize = 2048.0f;
+    constexpr float texelWorldSize = (2.0f * orthoHalf) / shadowMapSize;
+    rhi::math::v4 originLS = lightView * rhi::math::v4{0.0f, 0.0f, 0.0f, 1.0f};
+    float snappedX = floorf(originLS.x / texelWorldSize) * texelWorldSize;
+    float snappedY = floorf(originLS.y / texelWorldSize) * texelWorldSize;
+    lightView.columns[3][0] += (snappedX - originLS.x);
+    lightView.columns[3][1] += (snappedY - originLS.y);
+
     dawnShadowLightVP_ = lightProj * lightView;
 
     // Begin depth-only render pass
