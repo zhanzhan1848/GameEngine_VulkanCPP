@@ -220,7 +220,7 @@ void DawnBuffer::unmapImpl() {
 }
 
 void DawnBuffer::FlushStaging() {
-    if (!stagingData_ || !wgpuBuffer_ || dirtySize_ == 0) return;
+    if (!stagingData_ || !wgpuBuffer_) return;
     WGPUQueue queue = device_.GetQueue();
     if (!queue) return;
     u64 uploadSize = dirtySize_ > mappedSize_ ? mappedSize_ : dirtySize_;
