@@ -868,7 +868,12 @@ void ForwardRenderer::RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     rhi::math::v3 up{0.0f, 1.0f, 0.0f};
     if (fabsf(lightDir.y) > 0.99f) up = {1.0f, 0.0f, 0.0f};
 
-    // Compute camera frustum corners in world space
+    // Fixed ortho size — constant snap grid ensures shadow stability
+    constexpr float orthoHalf = 40.0f;
+    constexpr float shadowMapSize = 2048.0f;
+    constexpr float texelSize = (2.0f * orthoHalf) / shadowMapSize;
+
+    // Compute camera frustum center for light view positioning
     rhi::math::m4x4 invVP = rhi::math::Inverse(view.GetViewProjectionMatrix());
     rhi::math::v3 corners[8];
     for (int i = 0; i < 8; i++) {
@@ -878,47 +883,33 @@ void ForwardRenderer::RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
         rhi::math::v4 c = invVP * rhi::math::v4{x, y, z, 1.0f};
         corners[i] = {c.x / c.w, c.y / c.w, c.z / c.w};
     }
-
-    // Frustum center
     rhi::math::v3 center{0, 0, 0};
     for (int i = 0; i < 8; i++) {
         center.x += corners[i].x; center.y += corners[i].y; center.z += corners[i].z;
     }
     center.x /= 8.0f; center.y /= 8.0f; center.z /= 8.0f;
 
-    // Light view from frustum center
+    // Light view from frustum center (rotation is constant — depends only on lightDir)
     rhi::math::v3 lightEye = center - lightDir * 50.0f;
     rhi::math::m4x4 lightView = rhi::math::CreateLookAtMatrix(lightEye, center, up);
 
-    // Find frustum bounds in light space
-    float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+    // Snap center in light space to texel boundaries (constant grid)
+    rhi::math::v4 centerLS = lightView * rhi::math::v4{center.x, center.y, center.z, 1.0f};
+    float snappedX = roundf(centerLS.x / texelSize) * texelSize;
+    float snappedY = roundf(centerLS.y / texelSize) * texelSize;
+    lightView.columns[3][0] += (snappedX - centerLS.x);
+    lightView.columns[3][1] += (snappedY - centerLS.y);
+
+    // Z bounds from frustum (only depth range varies)
     float minZ = 1e9f, maxZ = -1e9f;
     for (int i = 0; i < 8; i++) {
         rhi::math::v4 ls = lightView * rhi::math::v4{corners[i].x, corners[i].y, corners[i].z, 1.0f};
-        minX = fminf(minX, ls.x); maxX = fmaxf(maxX, ls.x);
-        minY = fminf(minY, ls.y); maxY = fmaxf(maxY, ls.y);
-        minZ = fminf(minZ, ls.z); maxZ = fmaxf(maxZ, ls.z);
+        minZ = fminf(minZ, ls.z);
+        maxZ = fmaxf(maxZ, ls.z);
     }
 
-    // Use square bounds (max of X/Y extent)
-    float halfExt = fmaxf((maxX - minX) * 0.5f, (maxY - minY) * 0.5f);
-    halfExt = fmaxf(halfExt, 5.0f); // minimum 10-unit coverage
-    float cx = (minX + maxX) * 0.5f;
-    float cy = (minY + maxY) * 0.5f;
-
-    // Snap center to texel boundaries
-    constexpr float shadowMapSize = 2048.0f;
-    float texelSize = (halfExt * 2.0f) / shadowMapSize;
-    cx = roundf(cx / texelSize) * texelSize;
-    cy = roundf(cy / texelSize) * texelSize;
-
-    // Adjust lightView translation for snapped center
-    rhi::math::v4 centerLS = lightView * rhi::math::v4{center.x, center.y, center.z, 1.0f};
-    lightView.columns[3][0] += (cx - centerLS.x);
-    lightView.columns[3][1] += (cy - centerLS.y);
-
     rhi::math::m4x4 lightProj = rhi::math::CreateOrthographicMatrix(
-        cx - halfExt, cx + halfExt, cy - halfExt, cy + halfExt, minZ, maxZ);
+        -orthoHalf, orthoHalf, -orthoHalf, orthoHalf, minZ, maxZ);
 
     dawnShadowLightVP_ = lightProj * lightView;
 
