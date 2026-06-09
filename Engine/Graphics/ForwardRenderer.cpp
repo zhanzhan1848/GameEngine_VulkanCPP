@@ -123,8 +123,25 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             b.stageFlags = rhi::ShaderStage::Pixel;
             globalBindings.push_back(b);
         }
+    } else {
+        // Dawn/WebGPU: separate texture + sampler bindings for shadow
+        {
+            rhi::DescriptorSetLayoutBinding b;
+            b.binding = SHADOW_MAP_BINDING; // 13
+            b.descriptorType = rhi::DescriptorType::SampledDepthImage;
+            b.descriptorCount = 1;
+            b.stageFlags = rhi::ShaderStage::Pixel;
+            globalBindings.push_back(b);
+        }
+        {
+            rhi::DescriptorSetLayoutBinding b;
+            b.binding = SHADOW_CUBE_MAP_BINDING; // 14
+            b.descriptorType = rhi::DescriptorType::Sampler;
+            b.descriptorCount = 1;
+            b.stageFlags = rhi::ShaderStage::Pixel;
+            globalBindings.push_back(b);
+        }
     }
-    // Dawn: no shadow bindings — shadows are entirely skipped
 
     rhi::DescriptorSetLayoutDesc globalLayoutDesc;
     globalLayoutDesc.bindingCount = (u32)globalBindings.size();
@@ -144,7 +161,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     perObjectLayoutDesc.bindings = perObjectBindings.data();
     perObjectDescriptorSetLayout_ = device->CreateDescriptorSetLayout(perObjectLayoutDesc);
 
-    // 6. Create Shadow Map Resources (Dawn skips — no shadow pass)
+    // 6. Create Shadow Map Resources
     if (!isDawn) {
         // Shared Depth Buffer (Transient for Shadow Passes)
         rhi::TextureDesc shadowDepthDesc{
@@ -204,6 +221,29 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 
         shadowMapSampler_ = device->CreateSampler(shadowSamplerDesc);
         shadowCubeMapSampler_ = device->CreateSampler(shadowSamplerDesc);
+    } else {
+        // Dawn: create dummy shadow depth texture + sampler so bind group has all 4 bindings
+        rhi::TextureDesc dummyShadowDesc{
+            { 1, 1, 1 },
+            1,
+            1,
+            rhi::DataFormat::D32_Float,
+            rhi::TextureType::Texture2D,
+            rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource,
+            rhi::GPUMemoryUsage::Static,
+            "DummyShadowDepth"
+        };
+        shadowDepthBuffer_ = device->CreateTexture(dummyShadowDesc);
+
+        rhi::SamplerDesc shadowSamplerDesc{};
+        shadowSamplerDesc.minFilter = rhi::FilterMode::Linear;
+        shadowSamplerDesc.magFilter = rhi::FilterMode::Linear;
+        shadowSamplerDesc.addressU = rhi::TextureAddressMode::Clamp;
+        shadowSamplerDesc.addressV = rhi::TextureAddressMode::Clamp;
+        shadowSamplerDesc.addressW = rhi::TextureAddressMode::Clamp;
+        shadowSamplerDesc.borderColor = {1.0f, 1.0f, 1.0f, 1.0f};
+        shadowSamplerDesc.comparisonFunc = rhi::ComparisonFunc::Never;
+        shadowMapSampler_ = device->CreateSampler(shadowSamplerDesc);
     }
 
     // 7. Allocate and Update Descriptor Sets
@@ -267,6 +307,30 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             writeShadowCube.descriptorCount = 1;
             writeShadowCube.imageInfo = &shadowCubeInfo;
             writes.push_back(writeShadowCube);
+        } else {
+            // Dawn: write separate shadow depth texture + sampler bindings
+            rhi::DescriptorImageInfo shadowTexInfo;
+            shadowTexInfo.imageView = shadowDepthBuffer_;
+            shadowTexInfo.imageLayout = rhi::ResourceState::ShaderResource;
+
+            rhi::WriteDescriptorSet writeShadowTex;
+            writeShadowTex.dstSet = globalDescriptorSets_[i];
+            writeShadowTex.dstBinding = SHADOW_MAP_BINDING;
+            writeShadowTex.descriptorType = rhi::DescriptorType::SampledDepthImage;
+            writeShadowTex.descriptorCount = 1;
+            writeShadowTex.imageInfo = &shadowTexInfo;
+            writes.push_back(writeShadowTex);
+
+            rhi::DescriptorImageInfo shadowSampInfo;
+            shadowSampInfo.sampler = shadowMapSampler_;
+
+            rhi::WriteDescriptorSet writeShadowSamp;
+            writeShadowSamp.dstSet = globalDescriptorSets_[i];
+            writeShadowSamp.dstBinding = SHADOW_CUBE_MAP_BINDING;
+            writeShadowSamp.descriptorType = rhi::DescriptorType::Sampler;
+            writeShadowSamp.descriptorCount = 1;
+            writeShadowSamp.imageInfo = &shadowSampInfo;
+            writes.push_back(writeShadowSamp);
         }
 
         device->UpdateDescriptorSets((u32)writes.size(), writes.data());
