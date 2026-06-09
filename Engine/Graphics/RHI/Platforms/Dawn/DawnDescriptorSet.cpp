@@ -151,12 +151,7 @@ bool DawnDescriptorSet::BuildBindGroup() {
         case DescriptorType::StorageBufferDynamic:
         case DescriptorType::UniformTexelBuffer:
         case DescriptorType::StorageTexelBuffer: {
-            if (!pb.buffer) {
-                std::cerr << "[DawnDS] WARN: binding=" << pb.engineBinding
-                          << " type=" << static_cast<u32>(pb.type)
-                          << " populated but buffer is null" << std::endl;
-                continue;
-            }
+            if (!pb.buffer) continue;
             auto& entry = entries.emplace_back();
             std::memset(&entry, 0, sizeof(entry));
             entry.nextInChain = nullptr;
@@ -259,19 +254,6 @@ bool DawnDescriptorSet::BuildBindGroup() {
 
     // Safety check: entry count must match layout's expected count
     if (entries.size() != expectedEntries) {
-        std::cerr << "[DawnDS] MISMATCH: entries=" << entries.size()
-                  << " expected=" << expectedEntries
-                  << " pending=" << pendingBindings_.size()
-                  << " populated=" << populatedCount << std::endl;
-        for (const auto& pb : pendingBindings_) {
-            std::cerr << "  pb: binding=" << pb.engineBinding
-                      << " type=" << static_cast<u32>(pb.type)
-                      << " pop=" << pb.populated
-                      << " buf=" << (pb.buffer ? "Y" : "N")
-                      << " view=" << (pb.textureView ? "Y" : "N")
-                      << " samp=" << (pb.sampler ? "Y" : "N") << std::endl;
-        }
-        // Do NOT create an invalid bind group — return false
         return false;
     }
 

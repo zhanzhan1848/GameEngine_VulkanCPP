@@ -152,10 +152,6 @@ void* DawnBuffer::mapImpl(u64 offset, u64 size) {
             auto* data = static_cast<MapCallbackData*>(userdata1);
             data->success = (status == WGPUMapAsyncStatus_Success);
             data->done = true;
-            if (!data->success) {
-                std::cerr << "[DawnBuffer] mapAsync failed with status: "
-                          << static_cast<int>(status) << std::endl;
-            }
         };
         callbackInfo.userdata1 = &cbData;
         callbackInfo.userdata2 = nullptr;
@@ -171,8 +167,6 @@ void* DawnBuffer::mapImpl(u64 offset, u64 size) {
         }
 
         if (!cbData.done || !cbData.success) {
-            std::cerr << "[DawnBuffer] Map operation "
-                      << (cbData.done ? "failed" : "timed out") << std::endl;
             return nullptr;
         }
 

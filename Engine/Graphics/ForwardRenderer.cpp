@@ -45,7 +45,6 @@ ForwardRenderer::~ForwardRenderer() = default;
 bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     if (!device) return false;
     device_ = device;
-    std::cout << "[ForwardRenderer] Initialize: creating buffers..." << std::endl;
 
     // 1. Create Light Buffers
     rhi::BufferDesc lightBufferDesc{};
@@ -90,7 +89,6 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 
     // 4. Create Global Descriptor Set Layout (Set 0)
     bool isDawn = (device->GetPlatform() == rhi::RHIPlatform::Dawn);
-    std::cout << "[ForwardRenderer] Initialize: creating descriptor layouts..." << std::endl;
     utl::vector<rhi::DescriptorSetLayoutBinding> globalBindings;
     {
         rhi::DescriptorSetLayoutBinding b;
@@ -125,25 +123,8 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             b.stageFlags = rhi::ShaderStage::Pixel;
             globalBindings.push_back(b);
         }
-    } else {
-        // Dawn/WebGPU: separate texture + sampler bindings for shadow
-        {
-            rhi::DescriptorSetLayoutBinding b;
-            b.binding = SHADOW_MAP_BINDING; // 13
-            b.descriptorType = rhi::DescriptorType::SampledDepthImage;
-            b.descriptorCount = 1;
-            b.stageFlags = rhi::ShaderStage::Pixel;
-            globalBindings.push_back(b);
-        }
-        {
-            rhi::DescriptorSetLayoutBinding b;
-            b.binding = SHADOW_CUBE_MAP_BINDING; // 14
-            b.descriptorType = rhi::DescriptorType::Sampler;
-            b.descriptorCount = 1;
-            b.stageFlags = rhi::ShaderStage::Pixel;
-            globalBindings.push_back(b);
-        }
     }
+    // Dawn: no shadow bindings — shadows are entirely skipped
 
     rhi::DescriptorSetLayoutDesc globalLayoutDesc;
     globalLayoutDesc.bindingCount = (u32)globalBindings.size();
@@ -312,7 +293,6 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 
     // 8. Initialize Passes
     if (!isDawn) {
-    std::cout << "[ForwardRenderer] Initialize: BlurPass..." << std::endl;
 
     if (!blurPass_.Initialize(device_)) {
         if (!isDawn) {
@@ -321,7 +301,6 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         }
         std::cerr << "ForwardRenderer: BlurPass skipped (Dawn)" << std::endl;
     }
-    std::cout << "[ForwardRenderer] Initialize: SSRPass..." << std::endl;
 
     // Initialize SSR Pass
     if (!ssrPass_.Initialize(device_)) {
@@ -329,7 +308,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             return false;
     }
     } // !isDawn
-    std::cout << "[ForwardRenderer] Initialize: SceneExtraction..." << std::endl;
+
 #ifndef DISABLE_PARTICLE_SYSTEM
     // Initialize Particle Pass (Dawn skips — no WGSL particle shaders)
     if (!particlePass_.initialize(device_)) {
@@ -342,14 +321,12 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 #endif
 
     // Initialize Scene Extraction System
-    std::cout << "[ForwardRenderer] Initialize: scene extraction..." << std::endl;
     if (!sceneExtractionSystem_.Initialize(device_, 10000, 100000)) {
         std::cerr << "ForwardRenderer: Failed to initialize SceneExtractionSystem" << std::endl;
         return false;
     }
 
     // Initialize Composite Pipeline (SSR Blending) — Dawn skips (no SSR)
-    std::cout << "[ForwardRenderer] Initialize: done." << std::endl;
     if (!isDawn) {
         rhi::DescriptorSetLayoutBinding binding;
         binding.binding = 0;

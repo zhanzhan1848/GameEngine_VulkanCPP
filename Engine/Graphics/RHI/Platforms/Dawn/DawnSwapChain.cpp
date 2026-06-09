@@ -171,8 +171,6 @@ bool DawnSwapChain::Initialize() {
     config.alphaMode = WGPUCompositeAlphaMode_Opaque;
 
     wgpuSurfaceConfigure(wgpuSurface_, &config);
-    std::cout << "[DawnSwapChain] Configured surface "
-              << width_ << "x" << height_ << std::endl;
     return true;
 }
 

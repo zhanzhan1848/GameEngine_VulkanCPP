@@ -46,7 +46,6 @@ struct DeviceUserData {
 
 DawnDevice::DawnDevice(const DeviceDesc& desc)
     : RHIDevice<DawnDevice>(desc) {
-    std::cout << "[DawnDevice] Creating Dawn WebGPU device" << std::endl;
 }
 
 DawnDevice::~DawnDevice() {
@@ -58,8 +57,6 @@ DawnDevice::~DawnDevice() {
 // === Core lifecycle ===
 
 bool DawnDevice::initializeImpl() {
-    std::cout << "[DawnDevice] Initializing..." << std::endl;
-
     // 1. Create WGPU Instance
     WGPUInstanceDescriptor instanceDesc{};
     instanceDesc.nextInChain = nullptr;
@@ -71,7 +68,6 @@ bool DawnDevice::initializeImpl() {
         std::cerr << "[DawnDevice] Failed to create WGPU instance" << std::endl;
         return false;
     }
-    std::cout << "[DawnDevice] WGPU instance created" << std::endl;
 
     // 2. Request Adapter (async with polling)
     WGPURequestAdapterOptions adapterOptions{};
@@ -121,7 +117,6 @@ bool DawnDevice::initializeImpl() {
         return false;
     }
     wgpuAdapter_ = adapterData.adapter;
-    std::cout << "[DawnDevice] Adapter acquired" << std::endl;
 
     // 3. Request Device (async with polling)
     WGPULimits requiredLimits{};
@@ -227,7 +222,6 @@ bool DawnDevice::initializeImpl() {
         return false;
     }
     wgpuDevice_ = deviceData.device;
-    std::cout << "[DawnDevice] Device acquired (uncaptured error callback active)" << std::endl;
 
     // 4. Get Queue
     wgpuQueue_ = wgpuDeviceGetQueue(wgpuDevice_);
@@ -235,7 +229,6 @@ bool DawnDevice::initializeImpl() {
         std::cerr << "[DawnDevice] Failed to get queue" << std::endl;
         return false;
     }
-    std::cout << "[DawnDevice] Queue acquired" << std::endl;
 
     // 5. Create push constant emulation ring buffer (256 KB)
     WGPUBufferDescriptor pushConstantDesc{};
@@ -250,8 +243,6 @@ bool DawnDevice::initializeImpl() {
         std::cerr << "[DawnDevice] Failed to create push constant ring buffer" << std::endl;
         return false;
     }
-    std::cout << "[DawnDevice] Push constant ring buffer created ("
-              << PUSH_CONSTANT_RING_SIZE << " bytes)" << std::endl;
 
     // 6. Reserve allocators
     bufferAllocator_.Reserve(1024);
@@ -267,7 +258,6 @@ bool DawnDevice::initializeImpl() {
     descriptorSetAllocator_.Reserve(256);
     renderPassAllocator_.Reserve(128);
 
-    std::cout << "[DawnDevice] Initialization complete" << std::endl;
     return true;
 }
 
@@ -308,8 +298,6 @@ WGPUTextureView DawnDevice::GetDummyTextureView() {
 }
 
 void DawnDevice::shutdownImpl() {
-    std::cout << "[DawnDevice] Shutting down..." << std::endl;
-
     // Release dummy texture
     if (dummyTextureView_) { wgpuTextureViewRelease(dummyTextureView_); dummyTextureView_ = nullptr; }
     if (dummyTexture_) { wgpuTextureRelease(dummyTexture_); dummyTexture_ = nullptr; }
@@ -360,8 +348,6 @@ void DawnDevice::shutdownImpl() {
         wgpuInstanceRelease(wgpuInstance_);
         wgpuInstance_ = nullptr;
     }
-
-    std::cout << "[DawnDevice] Shutdown complete" << std::endl;
 }
 
 void DawnDevice::waitIdleImpl() const {
@@ -697,16 +683,7 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 const auto& bufInfo = write.bufferInfo[d];
 
                 DawnPendingBinding* pb = ds->GetOrCreatePending(binding, write.descriptorType);
-                if (!pb) {
-                    std::cerr << "[DawnDSWrite] SKIP buf binding=" << binding
-                              << " type=" << static_cast<u32>(write.descriptorType)
-                              << " set=" << static_cast<u32>(write.dstSet)
-                              << " pending_types=";
-                    for (u32 k = 0; k < ds->PendingCount() && k < 6; ++k)
-                        std::cerr << static_cast<u32>(ds->PendingType(k)) << ",";
-                    std::cerr << std::endl;
-                    continue;
-                }
+                if (!pb) continue;
 
                 if (bufInfo.buffer != handles::INVALID_RESOURCE) {
                     DawnBuffer* buf = GetBuffer(bufInfo.buffer);
@@ -715,13 +692,7 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                         pb->offset = bufInfo.offset;
                         pb->size = bufInfo.range > 0 ? bufInfo.range : WGPU_WHOLE_SIZE;
                         pb->populated = true;
-                    } else {
-                        std::cerr << "[DawnDSWrite] SKIP buf binding=" << binding
-                                  << " GetBuffer returned null" << std::endl;
                     }
-                } else {
-                    std::cerr << "[DawnDSWrite] SKIP buf binding=" << binding
-                              << " handle INVALID" << std::endl;
                 }
                 break;
             }
@@ -733,32 +704,14 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
                 const auto& imgInfo = write.imageInfo[d];
 
                 DawnPendingBinding* pb = ds->GetOrCreatePending(binding, write.descriptorType);
-                if (!pb) {
-                    std::cerr << "[DawnDSWrite] SKIP tex binding=" << binding
-                              << " type=" << static_cast<u32>(write.descriptorType)
-                              << " set=" << static_cast<u32>(write.dstSet)
-                              << " pending_types=";
-                    for (u32 k = 0; k < ds->PendingCount() && k < 6; ++k)
-                        std::cerr << static_cast<u32>(ds->PendingType(k)) << ",";
-                    std::cerr << std::endl;
-                    continue;
-                }
+                if (!pb) continue;
 
                 if (imgInfo.imageView != handles::INVALID_RESOURCE) {
                     DawnTexture* tex = GetTexture(imgInfo.imageView);
                     if (tex && tex->GetDefaultView()) {
                         pb->textureView = tex->GetDefaultView();
                         pb->populated = true;
-                    } else {
-                        std::cerr << "[DawnDSWrite] SKIP tex binding=" << binding
-                                  << " type=" << static_cast<u32>(write.descriptorType)
-                                  << " tex=" << (tex ? "Y" : "N")
-                                  << " view=" << (tex && tex->GetDefaultView() ? "Y" : "N") << std::endl;
                     }
-                } else {
-                    std::cerr << "[DawnDSWrite] SKIP tex binding=" << binding
-                              << " type=" << static_cast<u32>(write.descriptorType)
-                              << " imageView=INVALID" << std::endl;
                 }
                 break;
             }
