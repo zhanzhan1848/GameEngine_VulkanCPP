@@ -25,6 +25,7 @@ bool DawnDescriptorSet::Initialize(const DescriptorSetDesc& desc) {
         return false;
     }
 
+    pendingBindings_.clear();
     layoutHandle_ = desc.layout;
 
     // Pre-allocate pending bindings from the layout's bindings
@@ -73,32 +74,32 @@ DawnPendingBinding* DawnDescriptorSet::GetOrCreatePending(u32 engineBinding, Des
             return &pb;
         }
     }
-    // If looking for a buffer type and no exact match, try any buffer type
-    if (type == DescriptorType::UniformBuffer || type == DescriptorType::UniformBufferDynamic ||
-        type == DescriptorType::StorageBuffer || type == DescriptorType::StorageBufferDynamic) {
-        for (auto& pb : pendingBindings_) {
-            if (pb.engineBinding == engineBinding &&
-                (pb.type == DescriptorType::UniformBuffer || pb.type == DescriptorType::UniformBufferDynamic ||
-                 pb.type == DescriptorType::StorageBuffer || pb.type == DescriptorType::StorageBufferDynamic)) {
+    // Fallback: match by binding number only — heal the type if it was corrupted.
+    // This handles cases where pending binding types get zeroed or overwritten.
+    for (auto& pb : pendingBindings_) {
+        if (pb.engineBinding == engineBinding && pb.type != type) {
+            // Verify the write type is compatible with the binding's category
+            bool writeIsBuffer = (type == DescriptorType::UniformBuffer || type == DescriptorType::UniformBufferDynamic ||
+                                  type == DescriptorType::StorageBuffer || type == DescriptorType::StorageBufferDynamic ||
+                                  type == DescriptorType::UniformTexelBuffer || type == DescriptorType::StorageTexelBuffer);
+            bool pbIsBuffer = (pb.type == DescriptorType::UniformBuffer || pb.type == DescriptorType::UniformBufferDynamic ||
+                               pb.type == DescriptorType::StorageBuffer || pb.type == DescriptorType::StorageBufferDynamic ||
+                               pb.type == DescriptorType::UniformTexelBuffer || pb.type == DescriptorType::StorageTexelBuffer ||
+                               pb.type == DescriptorType::Unknown);
+            bool writeIsTexture = (type == DescriptorType::SampledImage || type == DescriptorType::StorageImage ||
+                                   type == DescriptorType::InputAttachment || type == DescriptorType::SampledDepthImage ||
+                                   type == DescriptorType::CombinedImageSampler);
+            bool pbIsTexture = (pb.type == DescriptorType::SampledImage || pb.type == DescriptorType::StorageImage ||
+                                pb.type == DescriptorType::InputAttachment || pb.type == DescriptorType::SampledDepthImage ||
+                                pb.type == DescriptorType::CombinedImageSampler || pb.type == DescriptorType::Unknown);
+            bool typeOk = (writeIsBuffer && pbIsBuffer) || (writeIsTexture && pbIsTexture) ||
+                          (type == DescriptorType::Sampler) || (pb.type == DescriptorType::Unknown);
+            if (typeOk) {
+                pb.type = type;
                 return &pb;
             }
         }
     }
-    // For texture/sampler types, try compatible types at same binding
-    if (type == DescriptorType::SampledImage || type == DescriptorType::StorageImage ||
-        type == DescriptorType::InputAttachment || type == DescriptorType::SampledDepthImage ||
-        type == DescriptorType::CombinedImageSampler) {
-        for (auto& pb : pendingBindings_) {
-            if (pb.engineBinding == engineBinding &&
-                (pb.type == DescriptorType::SampledImage || pb.type == DescriptorType::StorageImage ||
-                 pb.type == DescriptorType::InputAttachment || pb.type == DescriptorType::SampledDepthImage ||
-                 pb.type == DescriptorType::CombinedImageSampler)) {
-                return &pb;
-            }
-        }
-    }
-    // Not found — layout bindings were pre-populated during Initialize(),
-    // so a miss means the write type is incompatible with the layout.
     return nullptr;
 }
 

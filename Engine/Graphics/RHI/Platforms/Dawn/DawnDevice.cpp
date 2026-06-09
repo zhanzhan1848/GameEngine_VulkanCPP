@@ -679,6 +679,10 @@ void DawnDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorS
         auto* ds = GetDescriptorSet(write.dstSet);
         if (!ds) continue;
 
+        // Mark dirty so GetBindGroup() will rebuild with updated bindings.
+        // WebGPU bind groups are immutable — any binding change requires recreation.
+        ds->MarkDirty();
+
         for (u32 d = 0; d < write.descriptorCount; ++d) {
             u32 binding = write.dstBinding + d;
 
