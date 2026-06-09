@@ -30,7 +30,9 @@
 #include <algorithm>
 #include <iostream>
 #include <fstream>
-// #include <vector>  // Removed - using utl::vector
+#ifdef __EMSCRIPTEN__
+#include "Graphics/Dawn/ShaderLoader.h"
+#endif
 
 namespace primal::graphics {
 
@@ -265,6 +267,10 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 
         // Shadow depth pipeline (vertex-only, front-face cull)
         {
+            std::string shaderSrc;
+#ifdef __EMSCRIPTEN__
+            shaderSrc = dawn::LoadWGSL("ShadowDepth");
+#else
             auto platform = device->GetPlatform();
             std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "ShadowDepth");
             std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
@@ -279,8 +285,11 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
                 file.seekg(0);
                 file.read(buf.data(), size);
                 buf[size] = 0;
-
-                rhi::ShaderHandle vs = device->CreateShader(buf.data(), size, rhi::ShaderStage::Vertex, "shadow_vs");
+                shaderSrc = std::string(buf.data(), size);
+            }
+#endif
+            if (!shaderSrc.empty()) {
+                rhi::ShaderHandle vs = device->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Vertex, "shadow_vs");
                 if (vs != rhi::handles::INVALID_SHADER) {
                     rhi::GraphicsPipelineDesc pipeDesc;
                     pipeDesc.vertexShader = vs;

@@ -896,6 +896,9 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
         color = color + Lo;
     }
 
+    // Gamma correction: PBR output is in linear space, convert to sRGB for display
+    color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+
     return vec4<f32>(color, 1.0);
 }
 )wgsl";
