@@ -5648,26 +5648,6 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   
   
   
-  var _emwgpuQueueOnSubmittedWorkDone = function(queuePtr, futureId) {
-    futureId = bigintToI53Checked(futureId);
-  
-  
-      var queue = WebGPU.getJsObject(queuePtr);
-  
-       // onSubmittedWorkDone
-      WebGPU.Internals.futureInsert(futureId, queue.onSubmittedWorkDone().then(() => {
-         // onSubmittedWorkDone fulfilled (assumed not to reject)
-        callUserCallback(() => {
-          _emwgpuOnWorkDoneCompleted(futureId, 1);
-        });
-      }));
-    ;
-  };
-
-  
-  
-  
-  
   
   var emwgpuStringToInt_CompilationMessageType = {
               'error': 1,
@@ -7857,8 +7837,6 @@ var wasmImports = {
   emwgpuDeviceDestroy: _emwgpuDeviceDestroy,
   /** @export */
   emwgpuInstanceRequestAdapter: _emwgpuInstanceRequestAdapter,
-  /** @export */
-  emwgpuQueueOnSubmittedWorkDone: _emwgpuQueueOnSubmittedWorkDone,
   /** @export */
   emwgpuShaderModuleGetCompilationInfo: _emwgpuShaderModuleGetCompilationInfo,
   /** @export */
