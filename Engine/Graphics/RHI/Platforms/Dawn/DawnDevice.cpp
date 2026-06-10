@@ -1048,10 +1048,13 @@ bool DawnDevice::submitImpl(const QueueSubmitInfo& info) {
     // Submit to the device queue
     wgpuQueueSubmit(wgpuQueue_, 1, &wgpuCmdBuf);
 
-    // Wait for GPU work to complete before proceeding.
-    // wgpuInstanceProcessEvents only processes completed callbacks;
-    // wgpuQueueOnSubmittedWorkDone + polling ensures the GPU actually
-    // finishes rendering before we present the surface texture.
+#ifdef __EMSCRIPTEN__
+    // WASM: process events to flush submitted work but do NOT busy-wait.
+    // The browser's rAF loop handles synchronization.
+    wgpuInstanceProcessEvents(wgpuInstance_);
+#else
+    // Native: brief wait for GPU completion so resources are valid before reuse.
+    // Cap at a small poll count to avoid blocking the main thread.
     {
         struct WorkDoneData { bool done{false}; };
         WorkDoneData wd;
@@ -1066,11 +1069,12 @@ bool DawnDevice::submitImpl(const QueueSubmitInfo& info) {
         cbInfo.userdata2 = nullptr;
         wgpuQueueOnSubmittedWorkDone(wgpuQueue_, cbInfo);
         int poll = 0;
-        while (!wd.done && poll < 10000) {
+        while (!wd.done && poll < 100) {
             wgpuInstanceProcessEvents(wgpuInstance_);
             ++poll;
         }
     }
+#endif
 
     // Note: do NOT release wgpuCmdBuf here. The DawnCommandBuffer owns it
     // and will release it in destroyImpl/resetImpl.
