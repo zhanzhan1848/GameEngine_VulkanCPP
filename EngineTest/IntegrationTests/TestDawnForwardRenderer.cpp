@@ -487,74 +487,6 @@ bool Engine_Test::LoadSponzaScene() {
     return true;
 }
 
-#ifdef __EMSCRIPTEN__
-void Engine_Test::ReloadTextures() {
-    if (texturesReloaded_) return;
-
-    std::string textureBase = "assets/";
-
-    // Load one mesh's textures per call to avoid frame hitches
-    for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
-        auto& meshInfo = sceneMeshInfos_[i];
-        if (!meshInfo.materialInstance) continue;
-        if (meshInfo.texturesLoaded) continue;
-
-        // Try diffuse — if file not ready, skip this mesh entirely
-        ResourceHandle diffuseTex = INVALID_RESOURCE;
-        std::string diffusePath = ResolveTexturePath(textureBase, meshInfo.diffuseTexturePath);
-        if (!diffusePath.empty()) {
-            diffuseTex = LoadTextureFromFile(device_, diffusePath);
-        }
-        if (diffuseTex == INVALID_RESOURCE) {
-            // File still not available — stop here, retry next call
-            break;
-        }
-
-        // Load normal
-        ResourceHandle normalTex = INVALID_RESOURCE;
-        std::string normalPath = ResolveTexturePath(textureBase, meshInfo.normalTexturePath);
-        if (!normalPath.empty()) {
-            normalTex = LoadTextureFromFile(device_, normalPath);
-        }
-        if (normalTex == INVALID_RESOURCE) {
-            unsigned char flatNormal[4] = {128, 128, 255, 255};
-            normalTex = CreateTextureFromData(device_, 1, 1, flatNormal);
-        }
-
-        // Load ORM
-        ResourceHandle ormTex = INVALID_RESOURCE;
-        std::string ormPath = ResolveTexturePath(textureBase, meshInfo.ormTexturePath);
-        if (!ormPath.empty()) {
-            ormTex = LoadTextureFromFile(device_, ormPath);
-        }
-        if (ormTex == INVALID_RESOURCE) {
-            unsigned char defaultORM[4] = {255, 128, 0, 255};
-            ormTex = CreateTextureFromData(device_, 1, 1, defaultORM);
-        }
-
-        // Update all frame indices' descriptor sets
-        for (u32 fi = 0; fi < kFrameCount; ++fi) {
-            meshInfo.materialInstance->SetCurrentFrame(fi);
-            meshInfo.materialInstance->SetTexture(0, diffuseTex);
-            meshInfo.materialInstance->SetTexture(1, normalTex);
-            meshInfo.materialInstance->SetTexture(2, ormTex);
-            meshInfo.materialInstance->SetSampler(3, materialSampler_);
-            meshInfo.materialInstance->Update(device_);
-        }
-        meshInfo.texturesLoaded = true;
-        // Only load one mesh's textures per frame to avoid hitching
-        return;
-    }
-
-    // Check if all meshes loaded
-    bool allLoaded = true;
-    for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
-        if (!sceneMeshInfos_[i].texturesLoaded) { allLoaded = false; break; }
-    }
-    texturesReloaded_ = allLoaded;
-}
-#endif
-
 void Engine_Test::RenderFrame() {
     if (!device_ || !swapchain_ || shuttingDown_) return;
 
@@ -568,13 +500,6 @@ void Engine_Test::RenderFrame() {
     if (dt > 0.1f) dt = 1.0f / 60.0f;
 
     UpdateCamera(dt);
-
-#ifdef __EMSCRIPTEN__
-    // Throttled texture reload: load one texture per call to avoid frame hitches
-    if (!texturesReloaded_ && totalFrames_ >= 30 && totalFrames_ % 30 == 0) {
-        ReloadTextures();
-    }
-#endif
 
     u32 imageIndex = 0;
     if (!swapchain_->AcquireNextImage(&imageIndex)) {

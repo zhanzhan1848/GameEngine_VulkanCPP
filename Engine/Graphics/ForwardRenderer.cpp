@@ -1173,7 +1173,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     bool skipShadows = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
 
     if (skipShadows) {
-        RenderDawnShadowPass(cmdBuffer, scene, view, materials);
+        // Shadow pass handled by test's RenderShadowPass() — do not overwrite dawnShadowLightVP_
     } else {
         for (size_t i = 0; i < allLights.size(); ++i) {
             const auto& light = allLights[i];

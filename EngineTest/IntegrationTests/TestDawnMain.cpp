@@ -28,6 +28,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         return 1;
     }
     EmscriptenInitInput();
+    emscripten_run_script("if(window.hideLoading) window.hideLoading();");
     emscripten_set_main_loop(main_loop, 0, 1);
     test.shutdown();
     return 0;

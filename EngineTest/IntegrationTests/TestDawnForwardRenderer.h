@@ -45,9 +45,6 @@ public:
 #endif
 
     void RenderFrame();
-#ifdef __EMSCRIPTEN__
-    void ReloadTextures();
-#endif
 
 private:
 #ifdef __APPLE__
@@ -107,7 +104,6 @@ private:
     u32 width_{1280};
     u32 height_{720};
     u32 totalFrames_{0};
-    bool texturesReloaded_{false};
     static constexpr u32 kFrameCount = 3;
 
 #ifdef __APPLE__
