@@ -1001,17 +1001,17 @@ primal::math::m4x4 Engine_Test::ComputeLightViewProjection() const {
     float len = sqrtf(lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z);
     lightDir = lightDir / len;
 
-    // Light looks from above toward scene center
-    primal::math::v3 lightTarget = cameraPos_;
-    primal::math::v3 lightEye = lightTarget - lightDir * 30.0f;
+    // Fixed scene center — light does NOT follow camera
+    primal::math::v3 lightTarget = {0.0f, 5.0f, 0.0f};
+    primal::math::v3 lightEye = lightTarget - lightDir * 50.0f;
     primal::math::v3 up{0.0f, 1.0f, 0.0f};
 
     rhimath::m4x4 lightView = rhimath::CreateLookAtMatrix(lightEye, lightTarget, up);
 
-    // Orthographic projection covering the visible scene area
+    // Fixed orthographic projection covering the Sponza scene
     float orthoSize = 25.0f;
     rhimath::m4x4 lightProj = rhimath::CreateOrthographicMatrix(
-        -orthoSize, orthoSize, -orthoSize, orthoSize, 0.1f, 80.0f);
+        -orthoSize, orthoSize, -orthoSize, orthoSize, 1.0f, 120.0f);
 
     return lightProj * lightView;
 }
