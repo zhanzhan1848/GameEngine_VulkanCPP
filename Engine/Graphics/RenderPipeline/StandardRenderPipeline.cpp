@@ -124,8 +124,11 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
                 width, height, frameIndex, viewProj, viewProj, invProj);
             velTexture = velOut.velocityTexture;
 
-            // SSGI disabled for Dawn — causes rendering issues, ToneMapping uses dummy fallback
-            ssgiTexture = kInvalidRGResourceHandle;
+            // SSGI: screen-space global illumination
+            const auto& ssgiOut = PostProcess::AddLumenSSGIPass(*renderGraph_, fwdOutput.depthTexture,
+                hzbTexture, velTexture, hdrTexture, width, height, frameIndex,
+                view.GetProjectionMatrix(), invProj);
+            ssgiTexture = ssgiOut.ssgiOutput;
         }
 
         // 3. SSAO: Screen Space Ambient Occlusion

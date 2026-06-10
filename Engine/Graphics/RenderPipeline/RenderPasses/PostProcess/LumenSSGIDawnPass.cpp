@@ -539,7 +539,7 @@ const LumenSSGIData& AddLumenSSGIPass(RenderGraph& graph,
 
                 if (s_TemporalParamsMapped[fi]) {
                     auto* p = static_cast<TemporalParamsCPU*>(s_TemporalParamsMapped[fi]);
-                    p->feedback = 0.0f;
+                    p->feedback = 0.9f;
                     p->fullWidth = width;
                     p->fullHeight = height;
                     p->_pad = 0;
