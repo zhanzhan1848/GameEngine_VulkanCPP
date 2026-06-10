@@ -25,6 +25,8 @@ struct SceneDataMeshInfo {
     std::shared_ptr<Material> material{nullptr}; // 材质资源 (共享所有权)
     std::shared_ptr<MaterialInstance> materialInstance{nullptr}; // 关联的材质实例
 
+    bool texturesLoaded{false};
+
     // Meshlet/Debug support - content system entity ID
     primal::id::id_type meshEntityId{primal::id::invalid_id};
 

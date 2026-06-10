@@ -492,21 +492,22 @@ void Engine_Test::ReloadTextures() {
     if (texturesReloaded_) return;
 
     std::string textureBase = "assets/";
-    u32 reloaded = 0, failed = 0;
 
+    // Load one mesh's textures per call to avoid frame hitches
     for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
         auto& meshInfo = sceneMeshInfos_[i];
         if (!meshInfo.materialInstance) continue;
+        if (meshInfo.texturesLoaded) continue;
 
-        // Load diffuse
+        // Try diffuse — if file not ready, skip this mesh entirely
         ResourceHandle diffuseTex = INVALID_RESOURCE;
         std::string diffusePath = ResolveTexturePath(textureBase, meshInfo.diffuseTexturePath);
         if (!diffusePath.empty()) {
             diffuseTex = LoadTextureFromFile(device_, diffusePath);
         }
         if (diffuseTex == INVALID_RESOURCE) {
-            failed++;
-            continue; // skip if still not available
+            // File still not available — stop here, retry next call
+            break;
         }
 
         // Load normal
@@ -540,11 +541,17 @@ void Engine_Test::ReloadTextures() {
             meshInfo.materialInstance->SetSampler(3, materialSampler_);
             meshInfo.materialInstance->Update(device_);
         }
-        // Only mark complete when ALL meshes got their diffuse texture
-        reloaded++;
+        meshInfo.texturesLoaded = true;
+        // Only load one mesh's textures per frame to avoid hitching
+        return;
     }
 
-    texturesReloaded_ = (reloaded == sceneMeshInfos_.size());
+    // Check if all meshes loaded
+    bool allLoaded = true;
+    for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
+        if (!sceneMeshInfos_[i].texturesLoaded) { allLoaded = false; break; }
+    }
+    texturesReloaded_ = allLoaded;
 }
 #endif
 
@@ -563,8 +570,8 @@ void Engine_Test::RenderFrame() {
     UpdateCamera(dt);
 
 #ifdef __EMSCRIPTEN__
-    // Poll for texture reload after ~0.5s (frame 30), retry every 60 frames
-    if (!texturesReloaded_ && totalFrames_ >= 30 && totalFrames_ % 60 == 0) {
+    // Throttled texture reload: load one texture per call to avoid frame hitches
+    if (!texturesReloaded_ && totalFrames_ >= 30 && totalFrames_ % 30 == 0) {
         ReloadTextures();
     }
 #endif
