@@ -154,7 +154,15 @@ fn sampleShadowPCF(worldPos: vec3<f32>, N: vec3<f32>, lightDir: vec3<f32>) -> f3
     let lightClip = lightVP * vec4<f32>(worldPos, 1.0);
     let lightNDC = lightClip.xyz / lightClip.w;
 
-    let shadowUV = clamp(vec2<f32>(lightNDC.x * 0.5 + 0.5, lightNDC.y * 0.5 + 0.5),
+    // Bounds check — fragment outside shadow map is fully lit
+    if (lightNDC.x < -1.0 || lightNDC.x > 1.0 || lightNDC.y < -1.0 || lightNDC.y > 1.0
+        || lightNDC.z < 0.0 || lightNDC.z > 1.0) {
+        return 1.0;
+    }
+
+    // WebGPU viewport flips Y: NDC y=+1 maps to framebuffer pixel row 0 (top).
+    // textureLoad uses top-left origin, so we flip Y to match.
+    let shadowUV = clamp(vec2<f32>(lightNDC.x * 0.5 + 0.5, 1.0 - (lightNDC.y * 0.5 + 0.5)),
                          vec2<f32>(0.001, 0.001), vec2<f32>(0.999, 0.999));
     let shadowZ = lightNDC.z;
 
