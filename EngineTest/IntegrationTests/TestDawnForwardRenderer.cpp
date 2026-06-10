@@ -540,10 +540,11 @@ void Engine_Test::ReloadTextures() {
             meshInfo.materialInstance->SetSampler(3, materialSampler_);
             meshInfo.materialInstance->Update(device_);
         }
+        // Only mark complete when ALL meshes got their diffuse texture
         reloaded++;
     }
 
-    texturesReloaded_ = (reloaded > 0);
+    texturesReloaded_ = (reloaded == sceneMeshInfos_.size());
 }
 #endif
 
@@ -562,8 +563,8 @@ void Engine_Test::RenderFrame() {
     UpdateCamera(dt);
 
 #ifdef __EMSCRIPTEN__
-    // Poll for texture reload after ~2 seconds (frame 120), retry every 120 frames
-    if (!texturesReloaded_ && totalFrames_ >= 120 && totalFrames_ % 120 == 0) {
+    // Poll for texture reload after ~0.5s (frame 30), retry every 60 frames
+    if (!texturesReloaded_ && totalFrames_ >= 30 && totalFrames_ % 60 == 0) {
         ReloadTextures();
     }
 #endif
