@@ -382,7 +382,12 @@ void DawnDevice::beginFrameImpl() {
 }
 
 void DawnDevice::endFrameImpl() {
-    // No-op: frame boundary is handled by the base class GC
+    // Flush events to ensure GPU work from this frame completes before
+    // the next AcquireNextImage. Without this, surface texture may still
+    // be in use by the previous frame's GPU work, causing hangs.
+    if (wgpuInstance_) {
+        wgpuInstanceProcessEvents(wgpuInstance_);
+    }
 }
 
 void DawnDevice::presentImpl() {
@@ -1045,36 +1050,8 @@ bool DawnDevice::submitImpl(const QueueSubmitInfo& info) {
         }
     });
 
-    // Submit to the device queue
+    // Submit to the device queue — no wait here; sync happens at Present/EndFrame
     wgpuQueueSubmit(wgpuQueue_, 1, &wgpuCmdBuf);
-
-#ifdef __EMSCRIPTEN__
-    // WASM: process events to flush submitted work but do NOT busy-wait.
-    // The browser's rAF loop handles synchronization.
-    wgpuInstanceProcessEvents(wgpuInstance_);
-#else
-    // Native: brief wait for GPU completion so resources are valid before reuse.
-    // Cap at a small poll count to avoid blocking the main thread.
-    {
-        struct WorkDoneData { bool done{false}; };
-        WorkDoneData wd;
-        WGPUQueueWorkDoneCallbackInfo cbInfo{};
-        cbInfo.nextInChain = nullptr;
-        cbInfo.mode = WGPUCallbackMode_AllowProcessEvents;
-        cbInfo.callback = [](WGPUQueueWorkDoneStatus status, WGPUStringView message, void* userdata1, void* userdata2) {
-            (void)status; (void)message; (void)userdata2;
-            static_cast<WorkDoneData*>(userdata1)->done = true;
-        };
-        cbInfo.userdata1 = &wd;
-        cbInfo.userdata2 = nullptr;
-        wgpuQueueOnSubmittedWorkDone(wgpuQueue_, cbInfo);
-        int poll = 0;
-        while (!wd.done && poll < 100) {
-            wgpuInstanceProcessEvents(wgpuInstance_);
-            ++poll;
-        }
-    }
-#endif
 
     // Note: do NOT release wgpuCmdBuf here. The DawnCommandBuffer owns it
     // and will release it in destroyImpl/resetImpl.
