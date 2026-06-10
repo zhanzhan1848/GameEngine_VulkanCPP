@@ -611,10 +611,8 @@ void Engine_Test::RenderFrame() {
         viewProj, viewProj, invProj);
     auto velHandle = velOut.velocityTexture;
 
-    // Lumen SSGI (4 sub-passes: trace → denoise → filter → temporal)
-    const auto& ssgiOut = PostProcess::AddLumenSSGIPass(*renderGraph_, depthRG, hzbHandle,
-        velHandle, hdrRG, width_, height_, fi, view_.GetProjectionMatrix(), invProj);
-    auto ssgiHandle = ssgiOut.ssgiOutput;
+    // SSGI disabled — causes rendering issues on Dawn, ToneMapping falls back to dummy
+    auto ssgiHandle = rendergraph::kInvalidRGResourceHandle;
 
     const auto& ssaoOut = graphics::PostProcess::AddSSAOPass(*renderGraph_, depthRG, width_, height_, fi, view_.GetProjectionMatrix(), invProj);
     auto ssaoAOHandle = ssaoOut.ssaoOutput;
