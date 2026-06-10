@@ -1,14 +1,12 @@
 #pragma once
 
 #include "Components/ComponentsCommon.h"
+#include "Components/ComponentTraits.h"
 #include "TransformComponent.h"
 #include "ScriptComponent.h"
 #include "MeshComponent.h"
 #include "ParticleComponent.h"
 #include "Engine/Utilities/Hash.h"
-
-// Forward declaration for particle component
-namespace primal::particle { class component; }
 
 namespace primal {
 
@@ -16,26 +14,67 @@ namespace primal {
 
 		DEFINE_TYPED_ID(entity_id);
 
+		// Forward declarations from Entity.cpp
+		component_mask get_component_mask(entity_id id);
+		void set_component_bit(entity_id id, u8 bit);
+		void clear_component_bit(entity_id id, u8 bit);
+
+	} // namespace game_entity
+
+	// Forward declarations for component accessors used by entity::Get<T> / Remove<T>
+	namespace script {
+		class component;
+		component get_component_for_entity(game_entity::entity_id eid);
+		void remove_for_entity(game_entity::entity_id eid);
+	}
+
+	namespace particle {
+		class component;
+		component get_component_for_entity(game_entity::entity_id eid);
+		void remove_for_entity(game_entity::entity_id eid);
+	}
+
+	namespace game_entity {
+
 		class entity {
 		public:
 			constexpr explicit entity(entity_id id) : _id{ id } {}
 			constexpr entity() : _id{ id::invalid_id } {}
-			[[nodiscard]]  constexpr entity_id get_id() const { return _id; }
-			[[nodiscard]]  constexpr bool is_valid() const { return id::is_valid(_id); }
+			[[nodiscard]] constexpr entity_id get_id() const { return _id; }
+			[[nodiscard]] constexpr bool is_valid() const { return id::is_valid(_id); }
 
-            [[nodiscard]]  transform::component transform() const;
-			[[nodiscard]]  script::component script() const;
-			[[nodiscard]]  mesh::component mesh() const;
-			[[nodiscard]]  particle::component particle() const;
+			// Legacy accessors (backward compatible)
+			[[nodiscard]] transform::component transform() const;
+			[[nodiscard]] script::component script() const;
+			[[nodiscard]] mesh::component mesh() const;
+			[[nodiscard]] particle::component particle() const;
 
 			[[nodiscard]] math::v4 rotation() const { return transform().rotation(); }
 			[[nodiscard]] math::v3 orientation() const { return transform().orientation(); }
 			[[nodiscard]] math::v3 position() const { return transform().position(); }
 			[[nodiscard]] math::v3 scale() const { return transform().scale(); }
+
+			// Template component API
+			template<typename T>
+			[[nodiscard]] bool Has() const {
+				return (get_component_mask(_id) & bit_mask(component_bit_of<T>())) != 0;
+			}
+
+			template<typename T>
+			[[nodiscard]] auto Get() const; // defined in GameEntity_impl.h
+
+			// Add/Remove — definitions in GameEntity_impl.h
+			template<typename T>
+			void Add(const typename component_init_info<T>::type& info);
+
+			template<typename T>
+			void Remove();
+
 		private:
 			entity_id _id;
 		};
-	} // namespace game entity
+
+	} // namespace game_entity
 
 	namespace script {
 		class entity_script : public game_entity::entity
@@ -111,4 +150,4 @@ namespace primal {
 			}
 		} // namespace detail
 	} // namespace script
-}
+} // namespace primal

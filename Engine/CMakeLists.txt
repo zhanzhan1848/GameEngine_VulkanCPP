@@ -101,6 +101,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Nodes/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Noise/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Noise/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/GPU/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/GPU/*.cpp"
     # Ensure SSRPass is included (GLOB_RECURSE should pick it up, but touching file forces rescan)
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.cpp"
@@ -204,7 +206,7 @@ else()
 endif()
 
 # 收集通用源文件（排除平台特定文件）
-file(GLOB_RECURSE COMMON_SOURCES 
+file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/Common/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Common/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Components/*.h"
@@ -215,6 +217,9 @@ file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/EngineAPI/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Utilities/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/Algorithms/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Particles/*.h"
@@ -434,12 +439,14 @@ elseif(APPLE)
     find_library(METAL_LIBRARY Metal)
     find_library(METALKIT_LIBRARY MetalKit)
     find_library(QUARTZCORE_LIBRARY QuartzCore)
+    find_package(ZLIB REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         ${FOUNDATION_LIBRARY}
         ${COCOA_LIBRARY}
         ${METAL_LIBRARY}
         ${METALKIT_LIBRARY}
         ${QUARTZCORE_LIBRARY}
+        ZLIB::ZLIB
     )
 
     # find_library(ACCELERATE Accelerate)

@@ -60,6 +60,7 @@ struct ScatterContext {
             points.SetAttr(i, PCGAttr::ScaleY, 1.0f);
             points.SetAttr(i, PCGAttr::ScaleZ, 1.0f);
             points.SetAttr(i, PCGAttr::Seed, static_cast<f32>(std::rand()));
+            points.SetAttr(i, PCGAttr::RotationY, 0.0f);
             points.SetAttr(i, PCGAttr::MeshIndex, 0.0f);
         }
     }

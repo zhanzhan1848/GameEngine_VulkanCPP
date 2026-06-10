@@ -14,7 +14,7 @@
 #include "TestWindow.h"
 #elif TEST_STANDARD_PIPELINE
 #include "TestStandardPipeline.h"
-#elif defined(TEST_MODULAR_PIPELINE)
+#elif TEST_MODULAR_PIPELINE
 #include "TestModularPipeline.h"
 #elif TEST_RENDERER
 #include "TestRenderer.h"
@@ -24,18 +24,22 @@
 #include "TestCSMIntegrationRenderGraph.h"
 #elif TEST_MULTIVIEW
 #include "TestMultiView.h"
-#elif defined(TEST_SPONZA_RENDERGRAPH)
+#elif TEST_SPONZA_RENDERGRAPH
 #include "TestSponzaRenderGraph.h"
-#elif defined(TEST_GEOMETRY_DEBUG_SPONZA)
+#elif TEST_GEOMETRY_DEBUG_SPONZA
 #include "TestGeometryDebugSponza.h"
-#elif defined(TEST_PARTICLE_SPONZA)
+#elif TEST_PARTICLE_SPONZA
 #include "TestParticleSponza.h"
-#elif defined(TEST_NANITE_STREAMING_PIPELINE)
+#elif TEST_NANITE_STREAMING_PIPELINE
 #include "TestNaniteStreamingPipeline.h"
-#elif defined(TEST_FORWARD_RENDERER)
+#elif TEST_FORWARD_RENDERER
 #include "TestForwardRenderer.h"
-#elif defined(TEST_PCG_SCATTER)
+#elif TEST_PCG_SCATTER
 #include "TestPCGScatter.h"
+#elif TEST_GEOMETRY_API
+#include "TestGeometryAPI.h"
+#elif TEST_FIELD_DRIVEN_SCATTER
+#include "TestFieldDrivenScatter.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif

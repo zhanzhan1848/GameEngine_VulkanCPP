@@ -1,5 +1,9 @@
 #include "ForwardSceneRenderer.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
+#include "Graphics/RHI/Platforms/Metal/MetalPipeline.h"
+#include "Graphics/RenderScene.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RenderGraph/RenderGraphPass.h"
@@ -7,6 +11,10 @@
 #include "Graphics/RenderMesh.h"
 #include "Graphics/MaterialInstance.h"
 #include "Graphics/RHI/Core/RHICommand.h"
+#include "Content/ContentToEngine.h"
+#include "Components/Entity.h"
+#include "Components/Transform.h"
+#include "Components/Geometry.h"
 
 #include <fstream>
 #include <sstream>
@@ -296,6 +304,17 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
         scene_cb_[i] = device_->CreateBuffer(desc);
     }
 
+    // Shadow VP constant buffers (one per cascade)
+    {
+        BufferDesc desc{};
+        desc.type = BufferType::Constant;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.size = sizeof(ViewData);
+        shadow_view_cb_[0] = device_->CreateBuffer(desc);
+        shadow_view_cb_[1] = device_->CreateBuffer(desc);
+    }
+
     // Create triple-buffered descriptor sets
     for (int i = 0; i < 3; i++) {
         DescriptorSetDesc desc{};
@@ -316,6 +335,9 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     particle_pass_.initialize(device);
 #endif
 
+    // Geometry line renderer
+    line_renderer_.Initialize(device_);
+
     initialized_ = true;
     std::cout << "[ForwardSceneRenderer] Initialized (" << render_width << "x" << render_height << ")" << std::endl;
     return true;
@@ -324,6 +346,9 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
 void ForwardSceneRenderer::Shutdown() {
     if (!initialized_) return;
     initialized_ = false;
+
+    // Geometry line renderer
+    line_renderer_.Shutdown();
 
 #ifndef DISABLE_PARTICLE_SYSTEM
     particle_pass_.shutdown();
@@ -355,6 +380,9 @@ void ForwardSceneRenderer::Shutdown() {
         }
         if (view_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(view_cb_[i]); view_cb_[i] = handles::INVALID_RESOURCE; }
         if (scene_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(scene_cb_[i]); scene_cb_[i] = handles::INVALID_RESOURCE; }
+    }
+    for (int i = 0; i < 2; i++) {
+        if (shadow_view_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(shadow_view_cb_[i]); shadow_view_cb_[i] = handles::INVALID_RESOURCE; }
     }
     // Destroy fallback textures
     if (white_texture_ != handles::INVALID_RESOURCE) { device_->DestroyTexture(white_texture_); white_texture_ = handles::INVALID_RESOURCE; }
@@ -747,6 +775,14 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
               << " (" << mesh_infos_.size() << " meshes, " << textureCache.size()
               << " textures)" << std::endl;
 
+    // Build mesh_id_to_index_ map for ECS bridge
+    mesh_id_to_index_.clear();
+    for (u32 i = 0; i < mesh_infos_.size(); i++) {
+        if (mesh_infos_[i].mesh && mesh_infos_[i].mesh->GetEntityId() != id::invalid_id) {
+            mesh_id_to_index_[mesh_infos_[i].mesh->GetEntityId()] = i;
+        }
+    }
+
     scene_loaded_ = true;
     return true;
 }
@@ -780,11 +816,244 @@ void ForwardSceneRenderer::SetLightDirection(math::v3 dir) { light_dir_ = dir; }
 void ForwardSceneRenderer::SetLightColor(math::v4 color) { light_color_ = color; }
 ParticlePass* ForwardSceneRenderer::GetParticlePass() { return &particle_pass_; }
 
-void ForwardSceneRenderer::SetPCGInstances(const std::vector<pcg::PCGInstanceData>& instances) {
-    pcg_instances_ = instances;
+const SceneDataMeshInfo* ForwardSceneRenderer::GetMeshInfo(u32 index) const {
+    if (index >= mesh_infos_.size()) return nullptr;
+    return &mesh_infos_[index];
 }
-void ForwardSceneRenderer::ClearPCGInstances() {
-    pcg_instances_.clear();
+
+u32 ForwardSceneRenderer::GetMeshInfoCount() const {
+    return static_cast<u32>(mesh_infos_.size());
+}
+
+void ForwardSceneRenderer::SetRenderScene(const RenderScene* scene) {
+    render_scene_ = scene;
+}
+
+void ForwardSceneRenderer::SetGeometryEntities(const std::vector<id::id_type>& entity_ids) {
+    geometry_entity_ids_ = entity_ids;
+}
+
+void ForwardSceneRenderer::ClearGeometryEntities() {
+    geometry_entity_ids_.clear();
+}
+
+ForwardSceneRenderer::StaticEntityResult
+ForwardSceneRenderer::CreateStaticEntities() {
+    StaticEntityResult result;
+    result.entity_ids.reserve(mesh_infos_.size());
+    result.mesh_slot_indices.reserve(mesh_infos_.size());
+
+    for (u32 i = 0; i < mesh_infos_.size(); i++) {
+        if (!mesh_infos_[i].mesh) continue;
+
+        transform::init_info tf{};
+        tf.position[0] = 0.f; tf.position[1] = 0.f; tf.position[2] = 0.f;
+        tf.rotation[0] = 0.f; tf.rotation[1] = 0.f;
+        tf.rotation[2] = 0.f; tf.rotation[3] = 1.f;
+        tf.scale[0] = 1.f; tf.scale[1] = 1.f; tf.scale[2] = 1.f;
+
+        game_entity::entity_info entity_info{};
+        entity_info.transform = &tf;
+
+        game_entity::entity entity = game_entity::create(entity_info);
+        result.entity_ids.push_back(entity.get_id());
+        result.mesh_slot_indices.push_back(i);
+    }
+
+    std::cout << "[ForwardSceneRenderer] Created " << result.entity_ids.size()
+              << " static ECS entities" << std::endl;
+    return result;
+}
+
+void ForwardSceneRenderer::DestroyStaticEntities() {
+    // Entity cleanup handled by caller via StandardRenderPipeline
+}
+
+u32 ForwardSceneRenderer::RegisterMeshResource(id::id_type geometry_content_id,
+                                                id::id_type albedo_texture_id,
+                                                id::id_type normal_texture_id,
+                                                id::id_type orm_texture_id) {
+    // Create RenderMesh from content system asset
+    RenderMesh* mesh = RenderMesh::CreateFromAsset(device_, geometry_content_id);
+    if (!mesh) {
+        std::cerr << "[ForwardSceneRenderer] RegisterMeshResource: CreateFromAsset failed for id "
+                  << geometry_content_id << std::endl;
+        return (u32)-1;
+    }
+
+    // Create SceneDataMeshInfo
+    SceneDataMeshInfo info{};
+    info.mesh = mesh;
+    info.meshEntityId = geometry_content_id;
+    info.name = "Imported_" + std::to_string(geometry_content_id);
+
+    // Get texture handles from content system
+    ResourceHandle albedo = white_texture_;
+    ResourceHandle normal = flat_normal_texture_;
+    ResourceHandle orm = white_texture_;
+
+    if (albedo_texture_id != id::invalid_id) {
+        auto h = content::get_rhi_texture_handle(albedo_texture_id);
+        if (h != handles::INVALID_RESOURCE) albedo = h;
+    }
+    if (normal_texture_id != id::invalid_id) {
+        auto h = content::get_rhi_texture_handle(normal_texture_id);
+        if (h != handles::INVALID_RESOURCE) normal = h;
+    }
+    if (orm_texture_id != id::invalid_id) {
+        auto h = content::get_rhi_texture_handle(orm_texture_id);
+        if (h != handles::INVALID_RESOURCE) orm = h;
+    }
+
+    // Create material descriptor set
+    DescriptorSetDesc desc{};
+    desc.layout = material_set_layout_;
+    auto matSet = device_->CreateDescriptorSet(desc);
+
+    DescData params[] = {
+        {0, DescriptorType::SampledImage, albedo},
+        {1, DescriptorType::SampledImage, normal},
+        {2, DescriptorType::SampledImage, orm},
+        {3, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
+    };
+    UpdateDesc(device_, matSet, params, 4);
+
+    // Store
+    material_textures_.push_back(albedo);
+    material_textures_.push_back(normal);
+    material_textures_.push_back(orm);
+    material_ds_.push_back(matSet);
+
+    u32 slot = (u32)mesh_infos_.size();
+    mesh_infos_.push_back(info);
+    mesh_id_to_index_[geometry_content_id] = slot;
+
+    scene_loaded_ = true;
+    return slot;
+}
+
+void ForwardSceneRenderer::UnregisterMeshResource(u32 slot_index) {
+    if (slot_index >= mesh_infos_.size()) return;
+
+    auto* mesh = mesh_infos_[slot_index].mesh;
+    if (mesh) {
+        mesh_id_to_index_.erase(mesh->GetEntityId());
+        mesh->Destroy(device_);
+        delete mesh;
+        mesh_infos_[slot_index].mesh = nullptr;
+    }
+
+    if (slot_index < material_ds_.size() && material_ds_[slot_index] != handles::INVALID_DESCRIPTOR_SET) {
+        device_->DestroyDescriptorSet(material_ds_[slot_index]);
+        material_ds_[slot_index] = handles::INVALID_DESCRIPTOR_SET;
+    }
+}
+
+void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
+                                                    const math::m4x4& vp_matrix,
+                                                    u32 frame_index,
+                                                    bool shadow_pass) {
+    if (!render_scene_ || mesh_id_to_index_.empty()) return;
+
+    // Frustum cull only for shadow passes — GBuffer uses all proxies (GPU clips invisible triangles)
+    utl::vector<const RenderProxy*> visible;
+    if (shadow_pass) {
+        rhi::Frustum frustum;
+        frustum.FromMatrix(vp_matrix);
+        visible = render_scene_->Cull(frustum);
+        if (visible.empty() && !render_scene_->GetProxies().empty()) {
+            static bool warned = false;
+            if (!warned) {
+                std::cerr << "[ForwardSceneRenderer] Shadow cull: 0/" << render_scene_->GetProxies().size()
+                          << " proxies visible. AABB issue?" << std::endl;
+                auto& proxies = render_scene_->GetProxies();
+                if (!proxies.empty()) {
+                    auto& p = proxies[0];
+                    std::cerr << "  Proxy 0 AABB: min=(" << p.worldAABB.min.x << "," << p.worldAABB.min.y << "," << p.worldAABB.min.z
+                              << ") max=(" << p.worldAABB.max.x << "," << p.worldAABB.max.y << "," << p.worldAABB.max.z
+                              << ") valid=" << p.worldAABB.IsValid() << std::endl;
+                }
+                warned = true;
+            }
+        }
+    } else {
+        for (auto& p : render_scene_->GetProxies()) {
+            visible.push_back(&p);
+        }
+    }
+    if (visible.empty()) return;
+
+    // Debug: first frame shadow pass stats
+    static bool shadowDebug = true;
+    if (shadowDebug && shadow_pass) {
+        std::cout << "[ShadowPass] visible=" << visible.size()
+                  << " total_proxies=" << (render_scene_ ? render_scene_->GetProxies().size() : 0)
+                  << " mesh_map=" << mesh_id_to_index_.size() << std::endl;
+        shadowDebug = false;
+    }
+
+    // Group visible proxies by mesh_infos_ index
+    u32 mesh_count = static_cast<u32>(mesh_infos_.size());
+    std::unordered_map<u32, std::vector<math::m4x4>> groups;
+    for (auto* proxy : visible) {
+        auto it = mesh_id_to_index_.find(proxy->meshId);
+        if (it == mesh_id_to_index_.end()) continue;
+        u32 meshIdx = it->second;
+        if (meshIdx >= mesh_count || !mesh_infos_[meshIdx].mesh) continue;
+        math::m4x4 xform = proxy->transform;
+        groups[meshIdx].push_back(xform);
+    }
+    if (groups.empty()) return;
+
+    // Compute total instance count and ensure buffer capacity
+    u32 total = 0;
+    for (auto& [_, transforms] : groups) total += (u32)transforms.size();
+    u32 required_size = total * sizeof(math::m4x4);
+    if (pcg_instance_buffer_capacity_ < required_size) {
+        if (pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(pcg_instance_buffer_);
+        }
+        BufferDesc desc{};
+        desc.size = required_size;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        pcg_instance_buffer_ = device_->CreateBuffer(desc);
+        pcg_instance_buffer_capacity_ = required_size;
+    }
+
+    // Upload all grouped transforms
+    void* buf = device_->MapBuffer(pcg_instance_buffer_, 0, required_size);
+    if (!buf) return;
+
+    // Compute group offsets
+    struct GroupRange { u32 offset; u32 count; };
+    std::unordered_map<u32, GroupRange> group_ranges;
+    u32 off = 0;
+    for (auto& [meshIdx, transforms] : groups) {
+        group_ranges[meshIdx] = {off, (u32)transforms.size()};
+        for (u32 j = 0; j < transforms.size(); j++) {
+            ((math::m4x4*)buf)[off + j] = transforms[j];
+        }
+        off += (u32)transforms.size();
+    }
+    device_->UnmapBuffer(pcg_instance_buffer_);
+
+    // Select layout based on pass type
+    auto layout = shadow_pass ? shadow_layout_ : gbuffer_layout_;
+
+    // Draw each group
+    for (auto& [meshIdx, range] : group_ranges) {
+        u64 inst_offset = range.offset * sizeof(math::m4x4);
+        cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+        auto matSet = (meshIdx < material_ds_.size()) ? material_ds_[meshIdx] : material_ds_[0];
+        const DescriptorSetHandle matSets[] = {matSet};
+        cmd->BindDescriptorSets(PipelineBindPoint::Graphics, layout, 1, 1, matSets, 0, nullptr);
+        PCGPushConsts pc{};
+        pc.transform = MatrixIdentity();
+        pc.use_instances = 1;
+        cmd->PushConstants(layout, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+        mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
+    }
 }
 
 // ============================================================================
@@ -827,6 +1096,16 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
 
     u32 idx = frame_index % 3;
 
+    // Debug: first frame only
+    static bool first_frame = true;
+    if (first_frame) {
+        size_t proxyCount = render_scene_ ? render_scene_->GetProxies().size() : 0;
+        std::cout << "[ForwardSceneRenderer::Render] scene_loaded_=" << scene_loaded_
+                  << " proxies=" << proxyCount << " mesh_infos=" << mesh_infos_.size()
+                  << " mesh_id_map=" << mesh_id_to_index_.size() << std::endl;
+        first_frame = false;
+    }
+
     // Update shadow VPs — match TestParticleSponza light setup
     // lightPos = {100, 150, 50, 0} → lightDir = Normalize(-lightPos)
     math::v3 lightPos{100.0f, 150.0f, 50.0f};
@@ -868,6 +1147,16 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
 
     // --- Direct rendering (bypass render graph for reliability) ---
 
+    // Pre-fill shadow VP constant buffers (before any render passes)
+    for (int c = 0; c < 2; c++) {
+        ViewData svd{};
+        svd.viewProjection = cached_shadow_vp_[c];
+        svd.invViewProjection = Inverse(svd.viewProjection);
+        svd.previousViewProjection = svd.viewProjection;
+        auto* mapped = static_cast<ViewData*>(device_->MapBuffer(shadow_view_cb_[c]));
+        if (mapped) { *mapped = svd; device_->UnmapBuffer(shadow_view_cb_[c]); }
+    }
+
     // Pass 1: Shadow cascade 0
     {
         RenderPassDesc rpDesc{};
@@ -883,16 +1172,12 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         const DescriptorSetHandle globalSets[] = {global_ds_[idx]};
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 0, 1, globalSets, 0, nullptr);
 
-        for (size_t i = 0; i < mesh_infos_.size(); i++) {
-            if (!mesh_infos_[i].mesh) continue;
-            auto matSet = (i < material_ds_.size()) ? material_ds_[i] : material_ds_[0];
-            const DescriptorSetHandle matSets[] = {matSet};
-            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 1, 1, matSets, 0, nullptr);
-            math::m4x4 model = MatrixIdentity();
-            math::m4x4 mvp = cached_shadow_vp_[0] * model;
-            cmd->PushConstants(shadow_layout_, ShaderStage::Vertex, 2, sizeof(mvp), &mvp);
-            mesh_infos_[i].mesh->Draw(cmd, 1, 0, 20);
-        }
+        // Override buffer slot 0 with dedicated shadow VP CB for this cascade
+        u64 zeroOffset = 0;
+        cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[0], &zeroOffset);
+
+        RenderDynamicInstances(cmd, cached_shadow_vp_[0], idx, true);
+
         cmd->EndRenderPass();
     }
 
@@ -911,28 +1196,11 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         const DescriptorSetHandle globalSets[] = {global_ds_[idx]};
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 0, 1, globalSets, 0, nullptr);
 
-        for (size_t i = 0; i < mesh_infos_.size(); i++) {
-            if (!mesh_infos_[i].mesh) continue;
-            auto matSet = (i < material_ds_.size()) ? material_ds_[i] : material_ds_[0];
-            const DescriptorSetHandle matSets[] = {matSet};
-            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 1, 1, matSets, 0, nullptr);
-            math::m4x4 model = MatrixIdentity();
-            math::m4x4 mvp = cached_shadow_vp_[1] * model;
-            cmd->PushConstants(shadow_layout_, ShaderStage::Vertex, 2, sizeof(mvp), &mvp);
-            mesh_infos_[i].mesh->Draw(cmd, 1, 0, 20);
-        }
+        // Override buffer slot 0 with dedicated shadow VP CB for this cascade
+        u64 zeroOffset = 0;
+        cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[1], &zeroOffset);
 
-        // PCG instances in shadow pass
-        if (!pcg_instances_.empty() && !mesh_infos_.empty() && mesh_infos_[0].mesh) {
-            auto matSet = (material_ds_.size() > 0) ? material_ds_[0] : material_ds_[0];
-            const DescriptorSetHandle matSets[] = {matSet};
-            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 1, 1, matSets, 0, nullptr);
-            for (const auto& inst : pcg_instances_) {
-                math::m4x4 mvp = cached_shadow_vp_[1] * inst.model_matrix;
-                cmd->PushConstants(shadow_layout_, ShaderStage::Vertex, 2, sizeof(mvp), &mvp);
-                mesh_infos_[0].mesh->Draw(cmd, 1, 0, 20);
-            }
-        }
+        RenderDynamicInstances(cmd, cached_shadow_vp_[1], idx, true);
 
         cmd->EndRenderPass();
     }
@@ -965,28 +1233,8 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         const DescriptorSetHandle globalSets[] = {global_ds_[idx]};
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbuffer_layout_, 0, 1, globalSets, 0, nullptr);
 
-        u32 gbuf_draws = 0;
-        for (size_t i = 0; i < mesh_infos_.size(); i++) {
-            if (!mesh_infos_[i].mesh) continue;
-            auto matSet = (i < material_ds_.size()) ? material_ds_[i] : material_ds_[0];
-            const DescriptorSetHandle matSets[] = {matSet};
-            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbuffer_layout_, 1, 1, matSets, 0, nullptr);
-            math::m4x4 model = MatrixIdentity();
-            cmd->PushConstants(gbuffer_layout_, ShaderStage::Vertex, 2, sizeof(model), &model);
-            mesh_infos_[i].mesh->Draw(cmd, 1, 0, 20);
-            gbuf_draws++;
-        }
-
-        // PCG instances (loop-draw, reuses first mesh's material)
-        if (!pcg_instances_.empty() && !mesh_infos_.empty() && mesh_infos_[0].mesh) {
-            auto matSet = (material_ds_.size() > 0) ? material_ds_[0] : material_ds_[0];
-            const DescriptorSetHandle matSets[] = {matSet};
-            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbuffer_layout_, 1, 1, matSets, 0, nullptr);
-            for (const auto& inst : pcg_instances_) {
-                cmd->PushConstants(gbuffer_layout_, ShaderStage::Vertex, 2, sizeof(inst.model_matrix), &inst.model_matrix);
-                mesh_infos_[0].mesh->Draw(cmd, 1, 0, 20);
-            }
-        }
+        // Unified rendering: all meshes (static + PCG) through RenderDynamicInstances
+        RenderDynamicInstances(cmd, MatrixIdentity(), idx, false);
 
         cmd->EndRenderPass();
     }
@@ -1048,6 +1296,36 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         const DescriptorSetHandle sets[] = {blit_ds_[idx]};
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, blit_layout_, 0, 1, sets, 0, nullptr);
         cmd->Draw(3, 0, 1, 0);
+        cmd->EndRenderPass();
+    }
+
+    // Pass 6: Geometry line overlay
+    if (!geometry_entity_ids_.empty()) {
+        line_renderer_.BeginFrame();
+        for (auto eid : geometry_entity_ids_) {
+            auto geom = geometry::component::get(game_entity::entity_id{eid});
+            if (!geom.is_valid()) continue;
+            const auto& pts = geom.tessellate();
+            if (pts.size() < 2) continue;
+            line_renderer_.AddLines(pts.data(), static_cast<u32>(pts.size()));
+        }
+
+        RenderPassDesc rpDesc{};
+        rpDesc.colorAttachments.resize(1);
+        rpDesc.colorAttachments[0].texture = backbuffer;
+        rpDesc.colorAttachments[0].loadOp = LoadAction::Load;
+        rpDesc.colorAttachments[0].storeOp = StoreAction::Store;
+        rpDesc.depthAttachment.texture = gbuffer_depth_[idx];
+        rpDesc.depthAttachment.loadOp = LoadAction::Load;
+        rpDesc.depthAttachment.storeOp = StoreAction::DontCare;
+        cmd->BeginRenderPass(rpDesc);
+
+        cmd->SetViewport({{0, 0}, {(float)render_width_, (float)render_height_}, 0, 1});
+        cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
+
+        math::m4x4 viewProj = proj_matrix * view_matrix;
+        line_renderer_.Render(cmd, viewProj);
+
         cmd->EndRenderPass();
     }
 }

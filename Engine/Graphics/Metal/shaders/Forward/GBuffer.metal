@@ -42,6 +42,8 @@ struct SceneData {
 
 struct PushConsts {
     float4x4 model;
+    uint use_instances;
+    uint _pad[3];
 };
 
 struct ViewData {
@@ -77,23 +79,30 @@ float3 UnpackNormal(packed_ushort2 p) {
 
 vertex VertexOut vertexMain(
     uint vertexId [[vertex_id]],
+    uint instanceId [[instance_id]],
     constant ViewData& viewData [[buffer(0)]],
     constant SceneData& sceneData [[buffer(1)]],
     constant PushConsts& pushConsts [[buffer(2)]],
+    constant float4x4* instanceModels [[buffer(3)]],
     constant VertexInput* vertices [[buffer(20)]]
 ) {
     VertexOut out;
-    
+
+    // Select model matrix: instance buffer or push constant
+    float4x4 model = (pushConsts.use_instances != 0)
+                     ? instanceModels[instanceId]
+                     : pushConsts.model;
+
     // Position
     float3 rawPos = vertices[vertexId].position;
-    
+
     // Element
     VertexElement element = vertices[vertexId].element;
-    
+
     // Unpack Normal
     packed_ushort2 packedN = element.Normal;
     float3 rawNormal = UnpackNormal(packedN);
-    
+
     // Unpack Tangent
     packed_ushort2 packedT = element.Tangent;
     float3 rawTangent = UnpackNormal(packedT); // Tangent uses same encoding
@@ -105,13 +114,13 @@ vertex VertexOut vertexMain(
     // uint colorTSign = element.ColorTSign;
     // float sign = (colorTSign & 0x1) ? -1.0 : 1.0; // Assume sign bit
     
-    // Use PushConstant Model Matrix
-    float4 worldPos = pushConsts.model * float4(rawPos, 1.0);
-    
+    // Use Model Matrix
+    float4 worldPos = model * float4(rawPos, 1.0);
+
     out.worldPos = worldPos.xyz;
-    
+
     // Transform Normal to World Space
-    float3x3 normalMatrix = float3x3(pushConsts.model[0].xyz, pushConsts.model[1].xyz, pushConsts.model[2].xyz);
+    float3x3 normalMatrix = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
     out.worldNormal = normalize(normalMatrix * rawNormal);
     
     // Transform Tangent to World Space

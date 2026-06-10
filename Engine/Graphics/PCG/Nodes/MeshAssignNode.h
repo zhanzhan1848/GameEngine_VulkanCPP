@@ -3,23 +3,10 @@
 #include "Graphics/PCG/PCGNode.h"
 #include <cstdlib>
 #include <numeric>
+#include <cstring>
 
 namespace primal::graphics::pcg {
 
-// Assigns a mesh_index to each point via weighted random selection.
-// The mesh_index maps to a mesh slot in the renderer's mesh list.
-//
-// Pin layout:
-//   Inputs:  [0] PointSet — input points
-//   Outputs: [0] PointSet — same points with MeshIndex attribute set
-//
-// Parameters:
-//   weights — per-mesh-slot selection weights. Normalized internally.
-//             e.g., {0.7f, 0.3f} means ~70% get mesh_index=0, ~30% get mesh_index=1.
-//             Single weight {1.0f} assigns all points to mesh_index=0.
-//
-// The mesh_index stored in PCGAttr::MeshIndex maps to the renderer's mesh array.
-// At render time, each PCGInstanceData::mesh_index selects which mesh to draw.
 class MeshAssignNode : public PCGNode {
 public:
     std::vector<f32> weights{1.0f};
@@ -44,7 +31,6 @@ public:
 
         if (weights.empty()) return;
 
-        // Build cumulative weights
         std::vector<f32> cumulative(weights.size());
         std::partial_sum(weights.begin(), weights.end(), cumulative.begin());
         f32 total = cumulative.back();
@@ -60,6 +46,34 @@ public:
             out->SetAttr(i, PCGAttr::MeshIndex, static_cast<f32>(slot));
         }
     }
+
+    const PCGParamDescriptor* GetParamDescriptors(u32& out_count) const override {
+        out_count = kParamCount; return kParams;
+    }
+    const PCGPinDescriptor* GetPinDescriptors(u32& out_count) const override {
+        out_count = kPinCount; return kPins;
+    }
+    bool SetParamArrayByName(const char* n, const f32* values, u32 count) override {
+        if (std::strcmp(n, "weights") == 0) {
+            weights = std::vector<f32>(values, values + count);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    static constexpr u32 kParamCount = 1;
+    static constexpr u32 kPinCount = 2;
+    static const PCGParamDescriptor kParams[];
+    static const PCGPinDescriptor kPins[];
+};
+
+inline const PCGParamDescriptor MeshAssignNode::kParams[] = {
+    {"weights", "Mesh", PCGParamType::FloatArray, {0.0f,1.0f,0.01f}, 0, 0, nullptr},
+};
+inline const PCGPinDescriptor MeshAssignNode::kPins[] = {
+    {"points", 0, PCGDataType::PointSet, true},
+    {"points", 0, PCGDataType::PointSet, false},
 };
 
 } // namespace primal::graphics::pcg

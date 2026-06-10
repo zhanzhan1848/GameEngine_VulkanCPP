@@ -4,6 +4,7 @@
 #include "Graphics/PCG/Nodes/ScatterContext.h"
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
 
 namespace primal::graphics::pcg {
 
@@ -96,6 +97,45 @@ public:
         ScatterContext::WriteDefaultAttributes(*out, seed);
         ScatterContext::ApplyJitter(*out, cell_x * 0.1f, seed + 1);
     }
+
+    // --- Reflection ---
+    const PCGParamDescriptor* GetParamDescriptors(u32& out_count) const override {
+        out_count = kParamCount;
+        return kParams;
+    }
+    const PCGPinDescriptor* GetPinDescriptors(u32& out_count) const override {
+        out_count = kPinCount;
+        return kPins;
+    }
+    bool SetParamByName(const char* name, f32 value) override {
+        if (std::strcmp(name, "target_count") == 0)         { target_count = static_cast<u32>(value); return true; }
+        if (std::strcmp(name, "seed") == 0)                 { seed = static_cast<u32>(value); return true; }
+        if (std::strcmp(name, "points_per_unit_area") == 0) { points_per_unit_area = value; return true; }
+        return false;
+    }
+    bool SetParamByName(const char* name, math::v3 value) override {
+        if (std::strcmp(name, "bounds_min") == 0) { bounds_min = value; return true; }
+        if (std::strcmp(name, "bounds_max") == 0) { bounds_max = value; return true; }
+        return false;
+    }
+
+private:
+    static constexpr u32 kParamCount = 5;
+    static constexpr u32 kPinCount = 2;
+    static const PCGParamDescriptor kParams[];
+    static const PCGPinDescriptor kPins[];
+};
+
+inline const PCGParamDescriptor FieldScatterNode::kParams[] = {
+    {"target_count",        "Scatter", PCGParamType::UInt,  {1,100000,1},              PCG_OFFSETOF(FieldScatterNode, target_count),        sizeof(target_count),        nullptr},
+    {"seed",                "Scatter", PCGParamType::UInt,  {0,9999,1},                PCG_OFFSETOF(FieldScatterNode, seed),                 sizeof(seed),                nullptr},
+    {"points_per_unit_area","Scatter", PCGParamType::Float, {0.01f,100.0f,0.01f},      PCG_OFFSETOF(FieldScatterNode, points_per_unit_area), sizeof(points_per_unit_area), nullptr},
+    {"bounds_min",          "Scatter", PCGParamType::Vec3,  {-1000,1000,0.1f},         PCG_OFFSETOF(FieldScatterNode, bounds_min),           sizeof(bounds_min),          nullptr},
+    {"bounds_max",          "Scatter", PCGParamType::Vec3,  {-1000,1000,0.1f},         PCG_OFFSETOF(FieldScatterNode, bounds_max),           sizeof(bounds_max),          nullptr},
+};
+inline const PCGPinDescriptor FieldScatterNode::kPins[] = {
+    {"density_field", 0, PCGDataType::Field,    true},
+    {"points",        0, PCGDataType::PointSet, false},
 };
 
 } // namespace primal::graphics::pcg

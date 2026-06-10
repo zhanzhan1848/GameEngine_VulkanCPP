@@ -362,7 +362,8 @@ bool TestNaniteStreamingPipeline::VerifyMeshletUVSupport() {
     for (const auto& meshInfo : sceneMeshes_) {
         if (!meshInfo.mesh) continue;
 
-        auto* gpuMesh = content::get_rhi_gpu_mesh(meshInfo.meshEntityId);
+        auto* gpuMesh = content::get_rhi_gpu_mesh(
+            content::get_rhi_mesh_id(meshInfo.meshEntityId));
         if (!gpuMesh) continue;
 
         // Calculate vertex stride from element buffer

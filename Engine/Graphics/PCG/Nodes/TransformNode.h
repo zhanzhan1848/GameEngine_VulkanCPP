@@ -3,29 +3,15 @@
 #include "Graphics/PCG/PCGNode.h"
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
 
 namespace primal::graphics::pcg {
 
-// Applies random per-point scale, rotation, and position jitter to a point set.
-// Reads existing point positions and writes ScaleX/Y/Z attributes.
-//
-// Pin layout:
-//   Inputs:  [0] PointSet — input points
-//   Outputs: [0] PointSet — same points with updated Scale attributes and jittered positions
-//
-// Parameters:
-//   scale_min/max     — random scale range per axis. Each axis gets an independent
-//                        uniform random value in [min, max].
-//   rotation_range    — maximum rotation angle in radians (default 2*PI = full range).
-//                        Phase 1: stored but not applied to output matrices.
-//   position_jitter   — maximum horizontal displacement added to each point's x/z.
-//                        Set to 0 (default) for no jitter.
-//   seed              — random seed for reproducible transforms
 class TransformNode : public PCGNode {
 public:
     math::v3 scale_min{0.8f, 0.8f, 0.8f};
     math::v3 scale_max{1.2f, 1.2f, 1.2f};
-    f32 rotation_range{6.2832f}; // 2*PI
+    f32 rotation_range{6.2832f};
     f32 position_jitter{0.0f};
     u32 seed{0};
 
@@ -57,6 +43,11 @@ public:
             out->SetAttr(i, PCGAttr::ScaleY, scale_min.y + ry * (scale_max.y - scale_min.y));
             out->SetAttr(i, PCGAttr::ScaleZ, scale_min.z + rz * (scale_max.z - scale_min.z));
 
+            if (rotation_range > 0.0f) {
+                f32 rot_angle = (std::rand() / f32(RAND_MAX)) * rotation_range;
+                out->SetAttr(i, PCGAttr::RotationY, rot_angle);
+            }
+
             if (position_jitter > 0.0f) {
                 f32 jx = (std::rand() / f32(RAND_MAX) - 0.5f) * position_jitter;
                 f32 jz = (std::rand() / f32(RAND_MAX) - 0.5f) * position_jitter;
@@ -65,6 +56,42 @@ public:
             }
         }
     }
+
+    const PCGParamDescriptor* GetParamDescriptors(u32& out_count) const override {
+        out_count = kParamCount; return kParams;
+    }
+    const PCGPinDescriptor* GetPinDescriptors(u32& out_count) const override {
+        out_count = kPinCount; return kPins;
+    }
+    bool SetParamByName(const char* n, f32 v) override {
+        if (std::strcmp(n, "rotation_range") == 0)  { rotation_range = v; return true; }
+        if (std::strcmp(n, "position_jitter") == 0) { position_jitter = v; return true; }
+        if (std::strcmp(n, "seed") == 0) { seed = static_cast<u32>(v); return true; }
+        return false;
+    }
+    bool SetParamByName(const char* n, math::v3 v) override {
+        if (std::strcmp(n, "scale_min") == 0) { scale_min = v; return true; }
+        if (std::strcmp(n, "scale_max") == 0) { scale_max = v; return true; }
+        return false;
+    }
+
+private:
+    static constexpr u32 kParamCount = 5;
+    static constexpr u32 kPinCount = 2;
+    static const PCGParamDescriptor kParams[];
+    static const PCGPinDescriptor kPins[];
+};
+
+inline const PCGParamDescriptor TransformNode::kParams[] = {
+    {"scale_min",       "Transform", PCGParamType::Vec3,  {0.0f,10.0f,0.01f},  PCG_OFFSETOF(TransformNode, scale_min),       sizeof(scale_min), nullptr},
+    {"scale_max",       "Transform", PCGParamType::Vec3,  {0.0f,10.0f,0.01f},  PCG_OFFSETOF(TransformNode, scale_max),       sizeof(scale_max), nullptr},
+    {"rotation_range",  "Transform", PCGParamType::Float, {0.0f,6.2832f,0.01f}, PCG_OFFSETOF(TransformNode, rotation_range), sizeof(rotation_range), nullptr},
+    {"position_jitter", "Transform", PCGParamType::Float, {0.0f,10.0f,0.01f},  PCG_OFFSETOF(TransformNode, position_jitter),sizeof(position_jitter), nullptr},
+    {"seed",            "Transform", PCGParamType::UInt,  {0,9999,1},           PCG_OFFSETOF(TransformNode, seed),            sizeof(seed), nullptr},
+};
+inline const PCGPinDescriptor TransformNode::kPins[] = {
+    {"points", 0, PCGDataType::PointSet, true},
+    {"points", 0, PCGDataType::PointSet, false},
 };
 
 } // namespace primal::graphics::pcg

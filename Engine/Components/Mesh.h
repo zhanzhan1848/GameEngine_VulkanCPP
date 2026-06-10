@@ -48,4 +48,6 @@ namespace primal::mesh {
     void set_lod_policy(mesh::component c, f32 lod_bias, s32 forced_lod);
     // 函数说明: 批量更新 Mesh 组件缓存（便于系统层统一刷新）
     void update(const component_cache* caches, u32 count);
+    // 函数说明: 获取 Mesh 组件的几何资源 id
+    id::id_type get_geometry_id(component c);
 }

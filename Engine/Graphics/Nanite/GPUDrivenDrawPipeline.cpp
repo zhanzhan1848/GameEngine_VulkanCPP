@@ -984,7 +984,8 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
         if (processedGeometries.count(instance.geometry_id)) continue;
         
         graphics::rhi::RHIMeshAsset meshAsset;
-        if (primal::content::get_rhi_mesh_asset(instance.geometry_id, meshAsset)) {
+        if (primal::content::get_rhi_mesh_asset(
+                primal::content::get_rhi_mesh_id(instance.geometry_id), meshAsset)) {
             totalMeshlets += (u32)meshAsset.meshlets.size();
             totalVertices += (u32)meshAsset.meshlet_vertices.size();
             totalTriangles += (u32)meshAsset.meshlet_triangles.size();
@@ -1169,7 +1170,8 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
         if (processedGeometries.count(instance.geometry_id)) continue;
         
         graphics::rhi::RHIMeshAsset meshAsset;
-        if (primal::content::get_rhi_mesh_asset(instance.geometry_id, meshAsset)) {
+        if (primal::content::get_rhi_mesh_asset(
+                primal::content::get_rhi_mesh_id(instance.geometry_id), meshAsset)) {
             
             geometryToGlobalMeshletBase[instance.geometry_id] = currentMeshletOffset;
             

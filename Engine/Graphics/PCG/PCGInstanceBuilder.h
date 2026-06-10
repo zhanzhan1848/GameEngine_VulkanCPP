@@ -2,6 +2,7 @@
 
 #include "Graphics/PCG/PCGTypes.h"
 #include "Utilities/Math.h"
+#include <cmath>
 #include <vector>
 
 namespace primal::graphics::pcg {
@@ -15,17 +16,16 @@ struct PCGInstanceData {
 };
 
 // Converts a PCGPointSet into a vector of PCGInstanceData for rendering.
-// Reads ScaleX/Y/Z attributes and positions to build model matrices.
+// Reads ScaleX/Y/Z, RotationY attributes and positions to build model matrices.
 // Reads MeshIndex attribute to assign mesh per instance.
+//
+// Model matrix layout: Translation * RotationY(angle) * Scale
 //
 // Usage:
 //   PCGInstanceBuilder builder;
 //   std::vector<PCGInstanceData> instances;
 //   builder.Build(pointSet, instances);
 //   forwardRenderer->SetPCGInstances(instances);
-//
-// Phase 1 limitation: rotation is not applied to model matrices.
-// Only scale and translation are encoded.
 class PCGInstanceBuilder {
 public:
     void Build(const PCGPointSet& points, std::vector<PCGInstanceData>& out_instances) {
@@ -43,11 +43,15 @@ public:
             if (sy == 0.0f) sy = 1.0f;
             if (sz == 0.0f) sz = 1.0f;
 
-            // Build model matrix: Scale * Translation (no rotation for Phase 1)
+            f32 angle = points.GetAttr(i, PCGAttr::RotationY);
+            f32 cos_a = std::cos(angle);
+            f32 sin_a = std::sin(angle);
+
+            // Build model matrix: Translation * RotationY * Scale
             const auto& pos = points.positions[i];
-            simd::float4 col0 = {sx, 0, 0, 0};
-            simd::float4 col1 = {0, sy, 0, 0};
-            simd::float4 col2 = {0, 0, sz, 0};
+            simd::float4 col0 = {sx * cos_a,  0, sz * sin_a,  0};
+            simd::float4 col1 = {0,           sy, 0,          0};
+            simd::float4 col2 = {-sx * sin_a, 0, sz * cos_a,  0};
             simd::float4 col3 = {pos.x, pos.y, pos.z, 1};
             inst.model_matrix = simd_matrix(col0, col1, col2, col3);
 

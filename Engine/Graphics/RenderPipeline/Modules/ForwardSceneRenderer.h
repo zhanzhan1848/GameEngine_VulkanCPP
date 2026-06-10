@@ -3,10 +3,13 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/SceneDataAdapter.h"
 #include "Graphics/Passes/ParticlePass.h"
-#include "Graphics/PCG/PCGInstanceBuilder.h"
+#include "Graphics/RenderPipeline/Modules/LineBatchRenderer.h"
 #include "Utilities/Math.h"
+#include <unordered_map>
 
 namespace primal::graphics {
+
+class RenderScene;
 
 class ForwardSceneRenderer {
 public:
@@ -39,9 +42,46 @@ public:
     void SetLightColor(math::v4 color);
     ParticlePass* GetParticlePass();
 
-    // PCG instance rendering (loop-draw, zero shader changes)
-    void SetPCGInstances(const std::vector<pcg::PCGInstanceData>& instances);
-    void ClearPCGInstances();
+    // ECS bridge: sync entities via SyncEntitiesToRenderScene + RenderDynamicInstances
+
+    // Accessors for ECS bridge (Phase 3c)
+    const SceneDataMeshInfo* GetMeshInfo(u32 index) const;
+    u32 GetMeshInfoCount() const;
+
+    // RenderScene-based rendering (Phase 3d)
+    void SetRenderScene(const RenderScene* scene);
+    void RenderDynamicInstances(rhi::RHICommandBuffer* cmd,
+                                const math::m4x4& vp_matrix,
+                                u32 frame_index,
+                                bool shadow_pass);
+
+    // Static mesh ECS entity creation (Phase 3e)
+    struct StaticEntityResult {
+        std::vector<id::id_type> entity_ids;
+        std::vector<u32> mesh_slot_indices;
+    };
+    StaticEntityResult CreateStaticEntities();
+    void DestroyStaticEntities();
+
+    // Content system mesh registration (Phase 4)
+    // Register a mesh that was imported via content system. Creates RenderMesh + material DS.
+    // Returns mesh slot index for mesh_id_to_index_ lookup.
+    u32 RegisterMeshResource(id::id_type geometry_content_id,
+                             id::id_type albedo_texture_id,
+                             id::id_type normal_texture_id,
+                             id::id_type orm_texture_id);
+    void UnregisterMeshResource(u32 slot_index);
+
+    // Push constant with instance buffer flag
+    struct PCGPushConsts {
+        math::m4x4 transform;
+        u32 use_instances{0};
+        u32 _pad[3]{0, 0, 0};
+    };
+
+    // Geometry entity line rendering
+    void SetGeometryEntities(const std::vector<id::id_type>& entity_ids);
+    void ClearGeometryEntities();
 
 private:
     // Initialization sub-methods
@@ -158,6 +198,10 @@ private:
     rhi::ResourceHandle scene_cb_[3]{rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
                                       rhi::handles::INVALID_RESOURCE};
 
+    // Shadow VP constant buffers (one per cascade, avoids shared-memory timing issue)
+    rhi::ResourceHandle shadow_view_cb_[2]{rhi::handles::INVALID_RESOURCE,
+                                            rhi::handles::INVALID_RESOURCE};
+
     // Samplers
     rhi::SamplerHandle default_sampler_{rhi::handles::INVALID_SAMPLER};
     rhi::SamplerHandle brdf_sampler_{rhi::handles::INVALID_SAMPLER};
@@ -177,8 +221,21 @@ private:
     rhi::ResourceHandle flat_normal_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle black_cube_texture_{rhi::handles::INVALID_RESOURCE};
 
-    // PCG instances (CPU-side, loop-draw per frame)
-    std::vector<pcg::PCGInstanceData> pcg_instances_;
+    // PCG instances (CPU-side) — removed, now uses Entity→RenderScene path
+
+    // Instance buffer for instanced rendering (used by RenderDynamicInstances)
+    rhi::ResourceHandle pcg_instance_buffer_{rhi::handles::INVALID_RESOURCE};
+    u32 pcg_instance_buffer_capacity_{0};
+
+    // mesh_id_to_index_: maps RenderMesh::GetEntityId() → mesh_infos_ array index
+    std::unordered_map<id::id_type, u32> mesh_id_to_index_;
+
+    // External RenderScene (for dynamic instances via ECS bridge)
+    const RenderScene* render_scene_{nullptr};
+
+    // Geometry entity line rendering
+    LineBatchRenderer line_renderer_;
+    std::vector<id::id_type> geometry_entity_ids_;
 };
 
 } // namespace primal::graphics

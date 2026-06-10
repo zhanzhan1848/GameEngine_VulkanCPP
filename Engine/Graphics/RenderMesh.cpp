@@ -9,8 +9,11 @@
 #include "RenderMesh.h"
 #include "RHI/Core/RHIResource.h"
 #include "RHI/Core/RHICommand.h"
+#include "RHI/Core/RHIMeshAsset.h"
+#include "Content/ContentToEngine.h"
 
 #include <iostream>
+#include <cstring>
 
 namespace primal::graphics {
 
@@ -26,6 +29,87 @@ RenderMesh* RenderMesh::GetByEntityId(primal::id::id_type entityId) {
         return it->second;
     }
     return nullptr;
+}
+
+RenderMesh* RenderMesh::CreateFromAsset(rhi::RHIDeviceBase* device,
+                                         primal::id::id_type geometry_content_id) {
+    if (!device || geometry_content_id == primal::id::invalid_id) return nullptr;
+
+    // Already created?
+    if (auto* existing = GetByEntityId(geometry_content_id)) {
+        return existing;
+    }
+
+    // geometry_content_id is a geometry_hierarchies ID (from create_resource).
+    // Extract the internal rhi_mesh_assets ID to fetch the actual asset data.
+    const primal::id::id_type rhi_id = content::get_rhi_mesh_id(geometry_content_id);
+
+    // Fetch RHIMeshAsset from content system
+    rhi::RHIMeshAsset asset;
+    if (!content::get_rhi_mesh_asset(rhi_id, asset)) {
+        std::cerr << "RenderMesh::CreateFromAsset: Failed to get RHIMeshAsset for geometry_id "
+                  << geometry_content_id << " (rhi_id=" << rhi_id << ")" << std::endl;
+        return nullptr;
+    }
+
+    if (asset.num_vertices == 0 || asset.position_buffer.empty()) {
+        std::cerr << "RenderMesh::CreateFromAsset: Empty asset for geometry_id "
+                  << geometry_content_id << std::endl;
+        return nullptr;
+    }
+
+    // Interleave position (12B) + element (20B) → 32B stride
+    constexpr u32 TARGET_ELEMENT_SIZE = 20;
+    constexpr u32 TARGET_VERTEX_STRIDE = 12 + TARGET_ELEMENT_SIZE;
+    const u32 vertexCount = asset.num_vertices;
+
+    const u8* posPtr = asset.position_buffer.data();
+    const u32 srcPosStride = 12; // RHIMeshAsset stores packed float3
+
+    const u8* elemPtr = asset.element_buffer.empty() ? nullptr : asset.element_buffer.data();
+    const u32 srcElemStride = elemPtr ? (u32)(asset.element_buffer.size() / vertexCount) : 0;
+
+    utl::vector<u8> interleaved(vertexCount * TARGET_VERTEX_STRIDE);
+    memset(interleaved.data(), 0, interleaved.size());
+
+    for (u32 v = 0; v < vertexCount; ++v) {
+        u8* dst = interleaved.data() + v * TARGET_VERTEX_STRIDE;
+
+        // Position: always 12 bytes
+        memcpy(dst, posPtr + v * srcPosStride, 12);
+
+        // Elements
+        if (elemPtr && srcElemStride > 0) {
+            u8* dstElem = dst + 12;
+            const u8* srcElem = elemPtr + v * srcElemStride;
+
+            if (srcElemStride >= 24) {
+                // Padded format: [Normal+Tangent 12B] [Pad 4B] [UV 8B]
+                memcpy(dstElem, srcElem, 12);
+                memcpy(dstElem + 12, srcElem + 16, 8);
+            } else {
+                u32 copySize = std::min(srcElemStride, TARGET_ELEMENT_SIZE);
+                memcpy(dstElem, srcElem, copySize);
+            }
+        }
+    }
+
+    // Index data
+    const void* idxPtr = asset.index_buffer.empty() ? nullptr : asset.index_buffer.data();
+    const u32 indexCount = asset.num_indices;
+    rhi::DataIndexType idxType = (asset.index_size == 2)
+        ? rhi::DataIndexType::UInt16
+        : rhi::DataIndexType::UInt32;
+
+    RenderMesh* mesh = new RenderMesh();
+    if (!mesh->Create(device, geometry_content_id,
+                      interleaved.data(), vertexCount, TARGET_VERTEX_STRIDE,
+                      idxPtr, indexCount, idxType)) {
+        delete mesh;
+        return nullptr;
+    }
+
+    return mesh;
 }
 
 // 注册当前 Mesh 到全局表，以便通过 EntityID 查找

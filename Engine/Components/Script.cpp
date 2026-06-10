@@ -7,7 +7,9 @@
 namespace primal::script {
 	namespace {
 		utl::vector<detail::script_ptr>				entity_scripts;
-		utl::vector<id::id_type>					id_mapping;
+		utl::vector<script_id>							dense_script_ids;
+		utl::vector<id::id_type>						id_mapping;
+		utl::vector<script_id>							entity_to_script;
 
 		utl::vector<id::generation_type>			generations;
 		utl::deque<script_id>						free_ids;
@@ -145,8 +147,17 @@ namespace primal::script {
 		assert(id::is_valid(id));
 		const id::id_type index{ (id::id_type)entity_scripts.size() };
 		entity_scripts.emplace_back(info.script_creator(entity));
+		dense_script_ids.emplace_back(id);
 		assert(entity_scripts.back()->get_id() == entity.get_id());
 		id_mapping[id::index(id)] = index;
+
+		const id::id_type entity_index{ id::index(entity.get_id()) };
+		if (entity_to_script.size() <= entity_index)
+		{
+			entity_to_script.resize(entity_index + 1);
+		}
+		entity_to_script[entity_index] = id;
+
 		return component{ id };
 	}
 
@@ -155,10 +166,38 @@ namespace primal::script {
 		assert(c.is_valid() && exists(c.get_id()));
 		const script_id id{ c.get_id() };
 		const id::id_type index{ id_mapping[id::index(id)] };
-		const script_id last_id{ entity_scripts.back()->script().get_id() };
+
+		const game_entity::entity_id removed_entity{ entity_scripts[index]->get_id() };
+		const script_id last_id{ dense_script_ids.back() };
 		utl::erase_unordered(entity_scripts, index);
+		utl::erase_unordered(dense_script_ids, index);
 		id_mapping[id::index(last_id)] = index;
 		id_mapping[id::index(id)] = id::invalid_id;
+
+		const id::id_type entity_index{ id::index(removed_entity) };
+		if (entity_index < entity_to_script.size())
+		{
+			entity_to_script[entity_index] = {};
+		}
+	}
+
+	component get_component_for_entity(game_entity::entity_id eid)
+	{
+		const id::id_type entity_index{ id::index(eid) };
+		if (entity_index < entity_to_script.size())
+		{
+			return component{ entity_to_script[entity_index] };
+		}
+		return component{};
+	}
+
+	void remove_for_entity(game_entity::entity_id eid)
+	{
+		const id::id_type entity_index{ id::index(eid) };
+		if (entity_index < entity_to_script.size() && id::is_valid(entity_to_script[entity_index]))
+		{
+			remove(component{ entity_to_script[entity_index] });
+		}
 	}
 
 	void update(f32 dt)

@@ -29,6 +29,7 @@ enum class FieldSemantic : u32 {
     FroxelDensity,
     FroxelLighting,
     ParticleVelocity,
+    CADGeometry,
 };
 
 // 动态属性键 — 新场类型只需扩展此枚举，不改 FieldDescriptor

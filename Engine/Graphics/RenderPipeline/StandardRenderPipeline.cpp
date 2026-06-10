@@ -11,6 +11,9 @@
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Components/Entity.h"
+#include "Components/Transform.h"
+#include "EngineAPI/GameEntity.h"
 #include <iostream>
 #include <chrono>
 
@@ -271,6 +274,11 @@ void StandardRenderPipeline::InitializeSubsystems() {
         globalSDF.Initialize(device_);
     }
 
+    // PCG SDF readback — matches cascade 0 resolution
+    if (globalSDF.IsInitialized()) {
+        pcg_sdf_readback_initialized_ = pcg_sdf_readback_.Initialize(device_, globalSDF.GetCascade(0).resolution);
+    }
+
     // --- Shaders are NOT compiled here ---
     // The caller must set shader handles via SetShaderHandles() before Render().
     // Modules that receive INVALID_SHADER handles will skip their passes gracefully.
@@ -314,6 +322,8 @@ void StandardRenderPipeline::InitializeSubsystems() {
 }
 
 void StandardRenderPipeline::ShutdownSubsystems() {
+    if (pcg_sdf_readback_initialized_) { pcg_sdf_readback_.Shutdown(); pcg_sdf_readback_initialized_ = false; }
+
     if (sc_ddgi_module_) { sc_ddgi_module_->Shutdown(); sc_ddgi_module_.reset(); }
     if (fusion_module_) { fusion_module_->Shutdown(); fusion_module_.reset(); }
     if (gi_gather_module_) { gi_gather_module_->Shutdown(); gi_gather_module_.reset(); }
@@ -511,6 +521,11 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
         globalSDF.Update(*scene_snapshot_, frameCount_, camera_position_);
     }
 
+    // PCG SDF readback: consume previous frame's GPU data
+    if (pcg_sdf_readback_initialized_) {
+        pcg_sdf_readback_.ReadbackData();
+    }
+
     // DDGI probe origin stays fixed at world origin (matches TestNaniteStreamingPipeline).
     // UpdateProbeOrigin causes relocation shifts that reset irradiance data, producing
     // "light turning off" artifacts in shadowed areas. The static grid (32x16x32 = 124
@@ -522,6 +537,108 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     // Streaming LRU update
     if (streaming_manager_) {
         streaming_manager_->UpdateLRU(frameCount_, camera_position_);
+    }
+}
+
+// ============================================================================
+// PCG Entity → RenderScene Sync (Phase 3c)
+// ============================================================================
+
+void StandardRenderPipeline::SyncEntitiesToRenderScene(RenderScene& scene) {
+    if (!forward_renderer_) return;
+    if (static_entity_ids_.empty() && pcg_entity_ids_.empty()) return;
+
+    // Lambda to sync a group of entity IDs
+    auto syncGroup = [&](const std::vector<id::id_type>& ids,
+                         const std::vector<u32>& slots) {
+        for (size_t i = 0; i < ids.size(); i++) {
+            id::id_type eid = ids[i];
+
+            if (!game_entity::is_alive(game_entity::entity_id{eid})) {
+                scene.RemoveProxy(eid);
+                continue;
+            }
+
+            math::m4x4 world, inv_world;
+            transform::get_transform_matrices(game_entity::entity_id{eid}, world, inv_world);
+
+            u32 slot = slots[i];
+            auto* meshInfo = forward_renderer_->GetMeshInfo(slot);
+            if (!meshInfo || !meshInfo->mesh) continue;
+
+            id::id_type meshId = meshInfo->mesh->GetEntityId();
+            id::id_type materialId = meshInfo->gpuMaterialId;
+
+            RenderProxy proxy = RenderProxy::Create(eid, meshId, materialId);
+            proxy.UpdateTransform(world);
+            scene.UpdateProxy(eid, proxy);
+        }
+    };
+
+    syncGroup(static_entity_ids_, static_mesh_slot_indices_);
+    syncGroup(pcg_entity_ids_, pcg_mesh_slot_indices_);
+}
+
+id::id_type StandardRenderPipeline::RegisterMeshEntity(id::id_type geometry_content_id,
+                                                         const id::id_type* texture_content_ids,
+                                                         u32 texture_count) {
+    if (!forward_renderer_ || geometry_content_id == id::invalid_id) return id::invalid_id;
+
+    // Extract texture IDs (with fallback to invalid_id)
+    id::id_type albedo_id = (texture_count > 0) ? texture_content_ids[0] : id::invalid_id;
+    id::id_type normal_id = (texture_count > 1) ? texture_content_ids[1] : id::invalid_id;
+    id::id_type orm_id    = (texture_count > 2) ? texture_content_ids[2] : id::invalid_id;
+
+    // Register mesh resource with ForwardSceneRenderer
+    u32 slot = forward_renderer_->RegisterMeshResource(
+        geometry_content_id, albedo_id, normal_id, orm_id);
+
+    if (slot == (u32)-1) {
+        std::cerr << "[StandardRenderPipeline] RegisterMeshEntity: failed for geometry "
+                  << geometry_content_id << std::endl;
+        return id::invalid_id;
+    }
+
+    // Create ECS entity with identity transform
+    transform::init_info tf{};
+    tf.position[0] = 0.f; tf.position[1] = 0.f; tf.position[2] = 0.f;
+    tf.rotation[0] = 0.f; tf.rotation[1] = 0.f;
+    tf.rotation[2] = 0.f; tf.rotation[3] = 1.f;
+    tf.scale[0] = 1.f; tf.scale[1] = 1.f; tf.scale[2] = 1.f;
+
+    game_entity::entity_info info{};
+    info.transform = &tf;
+
+    game_entity::entity entity = game_entity::create(info);
+    if (!entity.is_valid()) {
+        forward_renderer_->UnregisterMeshResource(slot);
+        return id::invalid_id;
+    }
+
+    id::id_type eid = entity.get_id();
+    static_entity_ids_.push_back(eid);
+    static_mesh_slot_indices_.push_back(slot);
+
+    return eid;
+}
+
+void StandardRenderPipeline::UnregisterMeshEntity(id::id_type entity_id) {
+    // Find and remove from static entity lists
+    for (size_t i = 0; i < static_entity_ids_.size(); i++) {
+        if (static_entity_ids_[i] == entity_id) {
+            forward_renderer_->UnregisterMeshResource(static_mesh_slot_indices_[i]);
+
+            // Swap with last and pop
+            static_entity_ids_[i] = static_entity_ids_.back();
+            static_entity_ids_.pop_back();
+            static_mesh_slot_indices_[i] = static_mesh_slot_indices_.back();
+            static_mesh_slot_indices_.pop_back();
+
+            // Destroy ECS entity
+            game_entity::entity e{game_entity::entity_id{entity_id}};
+            if (e.is_valid()) game_entity::remove(game_entity::entity_id{entity_id});
+            return;
+        }
     }
 }
 
@@ -1016,16 +1133,20 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
     // --- Editor mode: lightweight forward rendering ---
     if (editor_mode_ && forward_renderer_) {
-        std::cout << "[DIAG] EDITOR_MODE_PATH: frame=" << frameCount_
-                  << " target=" << (u32)target
-                  << " cmd=" << (void*)cmd << std::endl;
+        // Sync entities to RenderScene
+        if (!static_entity_ids_.empty() || !pcg_entity_ids_.empty()) {
+            SyncEntitiesToRenderScene(scene);
+            forward_renderer_->SetRenderScene(&scene);
+        }
+        // Sync geometry entities for line overlay
+        if (!geometry_entity_ids_.empty()) {
+            forward_renderer_->SetGeometryEntities(geometry_entity_ids_);
+        }
         forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
                                    target, cbIdx % 3);
         frameCount_++;
         return;
     }
-    std::cout << "[DIAG] NON_EDITOR_PATH: editor=" << editor_mode_
-              << " fwd=" << (void*)forward_renderer_.get() << std::endl;
 
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
 
@@ -1462,8 +1583,25 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
             return;
         }
 
+        // Sync entities to RenderScene
+        if (!static_entity_ids_.empty() || !pcg_entity_ids_.empty()) {
+            SyncEntitiesToRenderScene(scene);
+            forward_renderer_->SetRenderScene(&scene);
+        }
+        // Sync geometry entities for line overlay
+        if (!geometry_entity_ids_.empty()) {
+            forward_renderer_->SetGeometryEntities(geometry_entity_ids_);
+        }
+
         forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
                                    target, cbIdx % 3);
+
+        // PCG SDF: dispatch voxelization + issue readback after scene render
+        auto& gsdf = nanite::GlobalSDF::Get();
+        if (pcg_sdf_readback_initialized_ && gsdf.IsInitialized() && gsdf.IsVoxelizationReady()) {
+            gsdf.DispatchVoxelization(cmd, 0);
+            pcg_sdf_readback_.IssueReadback(cmd, gsdf.GetCascade(0).sdf_texture);
+        }
 
         cmd->End();
         QueueSubmitInfo submitInfo{};

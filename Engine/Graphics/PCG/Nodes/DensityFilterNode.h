@@ -2,22 +2,10 @@
 
 #include "Graphics/PCG/PCGNode.h"
 #include "Graphics/PCG/Nodes/ScatterContext.h"
+#include <cstring>
 
 namespace primal::graphics::pcg {
 
-// Filters points by their Density attribute value. Keeps points where
-// min_density <= Density <= max_density.
-//
-// Pin layout:
-//   Inputs:  [0] PointSet — input points with Density attribute populated
-//   Outputs: [0] PointSet — filtered points
-//
-// Parameters:
-//   min_density — minimum density value (inclusive, default 0.0)
-//   max_density — maximum density value (inclusive, default 1.0)
-//
-// Typically placed after FieldScatterNode to remove low-density outliers,
-// producing more natural-looking clusters.
 class DensityFilterNode : public PCGNode {
 public:
     f32 min_density{0.0f};
@@ -43,6 +31,33 @@ public:
 
         ScatterContext::ApplyDensityFilter(*out, min_density, max_density);
     }
+
+    const PCGParamDescriptor* GetParamDescriptors(u32& out_count) const override {
+        out_count = kParamCount; return kParams;
+    }
+    const PCGPinDescriptor* GetPinDescriptors(u32& out_count) const override {
+        out_count = kPinCount; return kPins;
+    }
+    bool SetParamByName(const char* n, f32 v) override {
+        if (std::strcmp(n, "min_density") == 0) { min_density = v; return true; }
+        if (std::strcmp(n, "max_density") == 0) { max_density = v; return true; }
+        return false;
+    }
+
+private:
+    static constexpr u32 kParamCount = 2;
+    static constexpr u32 kPinCount = 2;
+    static const PCGParamDescriptor kParams[];
+    static const PCGPinDescriptor kPins[];
+};
+
+inline const PCGParamDescriptor DensityFilterNode::kParams[] = {
+    {"min_density", "Filter", PCGParamType::Float, {0.0f,1.0f,0.01f}, PCG_OFFSETOF(DensityFilterNode, min_density), sizeof(min_density), nullptr},
+    {"max_density", "Filter", PCGParamType::Float, {0.0f,1.0f,0.01f}, PCG_OFFSETOF(DensityFilterNode, max_density), sizeof(max_density), nullptr},
+};
+inline const PCGPinDescriptor DensityFilterNode::kPins[] = {
+    {"points", 0, PCGDataType::PointSet, true},
+    {"points", 0, PCGDataType::PointSet, false},
 };
 
 } // namespace primal::graphics::pcg

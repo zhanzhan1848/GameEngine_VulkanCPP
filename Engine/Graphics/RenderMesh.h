@@ -34,6 +34,16 @@ public:
     static RenderMesh* GetByEntityId(primal::id::id_type entityId);
 
     /**
+     * @brief 从 content 系统创建 RenderMesh
+     * @details 通过 geometry_hierarchies ID 提取 RHIMeshAsset → 交错 position+element 到 32B stride → 创建 GPU 缓冲区
+     * @param device RHI设备指针
+     * @param geometry_content_id content 系统中的 geometry ID (create_resource 返回值)
+     * @return 新创建的 RenderMesh 指针 (调用者拥有所有权)，失败返回 nullptr
+     */
+    static RenderMesh* CreateFromAsset(rhi::RHIDeviceBase* device,
+                                       primal::id::id_type geometry_content_id);
+
+    /**
      * @brief 构造函数
      */
     RenderMesh();

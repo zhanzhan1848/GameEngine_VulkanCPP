@@ -86,7 +86,7 @@ inline void tessellate(const std::vector<math::v3>& points,
     for (u32 i = 0; i <= num_steps; ++i) {
         f32 t = static_cast<f32>(i) / static_cast<f32>(num_steps);
         f32 angle = start_angle + sweep * t;
-        out_segments.push_back({
+        out_segments.push_back(math::v3{
             center.x + radius * std::cos(angle),
             center.y + radius * std::sin(angle),
             center.z
