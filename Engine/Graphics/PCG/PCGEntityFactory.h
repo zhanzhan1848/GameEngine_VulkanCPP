@@ -3,6 +3,8 @@
 #include "Graphics/PCG/PCGTypes.h"
 #include "Components/Entity.h"
 #include "Components/Transform.h"
+#include "Components/Material.h"
+#include "Graphics/Material/ShaderTechnique.h"
 #include "EngineAPI/GameEntity.h"
 #include <vector>
 
@@ -64,6 +66,12 @@ public:
 
             game_entity::entity_info entity_info{};
             entity_info.transform = &transform_info;
+
+            material::init_info mat_info{}; // default Opaque
+            u32 tech_val = static_cast<u32>(points.GetAttr(i, PCGAttr::TechniqueIndex));
+            mat_info.technique = static_cast<graphics::ShaderTechnique>(
+                std::min(tech_val, static_cast<u32>(graphics::ShaderTechnique::Count) - 1));
+            entity_info.material = &mat_info;
 
             game_entity::entity entity = game_entity::create(entity_info);
             result.entity_ids.push_back(entity.get_id());

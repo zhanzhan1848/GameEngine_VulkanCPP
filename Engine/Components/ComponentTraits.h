@@ -14,6 +14,7 @@ namespace component {
     struct Pipeline {};
     struct CommandBuffer {};
     struct Geometry {};
+    struct Material {};
 }
 
 enum class component_bit : u8 {
@@ -25,6 +26,7 @@ enum class component_bit : u8 {
     Pipeline = 5,
     CommandBuffer = 6,
     Geometry = 7,
+    Material = 8,
     Count
 };
 
@@ -44,6 +46,7 @@ constexpr component_bit component_bit_of() {
     else if constexpr (std::is_same_v<T, component::Pipeline>)     return component_bit::Pipeline;
     else if constexpr (std::is_same_v<T, component::CommandBuffer>) return component_bit::CommandBuffer;
     else if constexpr (std::is_same_v<T, component::Geometry>)      return component_bit::Geometry;
+    else if constexpr (std::is_same_v<T, component::Material>)      return component_bit::Material;
     else static_assert(!std::is_same_v<T, T>, "Unknown component type");
 }
 

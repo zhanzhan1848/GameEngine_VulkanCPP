@@ -23,6 +23,8 @@
 #include "Engine/Graphics/PCG/Nodes/ScatterOnGeometryNode.h"
 #include "Engine/Graphics/PCG/Nodes/CurveAlignNode.h"
 #include "Engine/Graphics/PCG/Nodes/SurfaceScatterNode.h"
+#include "Engine/EngineAPI/GameEntity_impl.h"
+#include "Engine/Components/Material.h"
 #include "Engine/Geometry/Geometry.h"
 #include "Engine/Geometry/GeometryFieldRasterizer.h"
 #include "Engine/Geometry/GeometryTypes.h"
@@ -45,6 +47,7 @@ private:
     void RunPhase25UnitTests();
     void HandleInput(float dt);
     void UpdateCamera();
+    void UpdatePCGMaterialParams();
 
     std::unique_ptr<primal::graphics::rhi::RHIDeviceBase> device;
     primal::platform::window window;
@@ -88,6 +91,21 @@ private:
     bool key_t_pressed_{false};
     bool key_g_pressed_{false};
     bool key_n_pressed_{false};
+
+    // Material parameter controls
+    f32 mat_roughness_{0.5f};
+    f32 mat_metallic_{0.0f};
+    f32 mat_base_color_[4]{1.f, 1.f, 1.f, 1.f};
+    u32 mat_color_index_{0};
+    u32 mat_technique_index_{0}; // 0=Opaque, 1=AlphaClip, 2=Unlit
+    bool key_1_pressed_{false};
+    bool key_2_pressed_{false};
+    bool key_3_pressed_{false};
+    bool key_4_pressed_{false};
+    bool key_5_pressed_{false};
+    bool key_6_pressed_{false};
+    bool key_7_pressed_{false};
+    bool key_8_pressed_{false};
 };
 
 class Engine_Test : public primal::test::RenderTestRunner {

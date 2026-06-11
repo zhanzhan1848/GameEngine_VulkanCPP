@@ -314,7 +314,7 @@ bool PCGScatterTestCase::Initialize() {
     view->SetViewport(viewport);
     UpdateCamera();
 
-    std::cout << "[TestPCGScatter] Ready. WASD=Move, QE=Up/Down, Arrows=Rotate, R=ReScatter, T=+Count, G=-Count, N=NewSeed, ESC=Quit" << std::endl;
+    std::cout << "[TestPCGScatter] Ready. WASD=Move, QE=Up/Down, Arrows=Rotate, R=ReScatter, T=+Count, G=-Count, N=NewSeed, 1/2=Roughness, 3/4=Metallic, 5=Color, 6=Reset, 7=Technique, 8=Info, ESC=Quit" << std::endl;
     return true;
 }
 
@@ -1064,6 +1064,8 @@ void PCGScatterTestCase::ExecutePCGGraph() {
     // Node 6: MeshAssign (weighted: cylinder, cone, box, hemisphere, pyramid)
     auto meshAssignNode = std::make_unique<MeshAssignNode>();
     meshAssignNode->weights = {0.30f, 0.20f, 0.10f, 0.25f, 0.15f};
+    // Techniques: cylinder=Opaque(0), cone=Opaque(0), box=Opaque(0), hemisphere=Unlit(5), pyramid=Unlit(5)
+    meshAssignNode->techniques = {0, 0, 0, 5, 5};
     pcg_mesh_node_id_ = pcg_graph_->AddNode(std::move(meshAssignNode)); // node 6
 
     // Connect: Noise → Scatter (density input)
@@ -1355,8 +1357,12 @@ void PCGScatterTestCase::ExecuteFieldDrivenScatter() {
     }
 
     // Pass all scatter entities to pipeline for rendering
-    pipeline->SetPCGEntities(std::move(all_geometry_entities),
-                              std::move(all_mesh_slots));
+    // Merge with existing PCG entities from ExecutePCGGraph
+    pcg_entity_ids_.insert(pcg_entity_ids_.end(),
+                           all_geometry_entities.begin(), all_geometry_entities.end());
+    pcg_mesh_slots_.insert(pcg_mesh_slots_.end(),
+                           all_mesh_slots.begin(), all_mesh_slots.end());
+    pipeline->SetPCGEntities(pcg_entity_ids_, pcg_mesh_slots_);
 }
 
 // ============================================================================
@@ -1634,6 +1640,117 @@ void PCGScatterTestCase::HandleInput(float dt) {
             }
         }
     } else { key_n_pressed_ = false; }
+
+    // Material parameter controls
+    get(input_source::keyboard, input_code::key_1, val);
+    if (val.current.x > 0.0f) {
+        if (!key_1_pressed_) { key_1_pressed_ = true; mat_roughness_ = std::min(mat_roughness_ + 0.1f, 1.0f); UpdatePCGMaterialParams(); }
+    } else { key_1_pressed_ = false; }
+
+    get(input_source::keyboard, input_code::key_2, val);
+    if (val.current.x > 0.0f) {
+        if (!key_2_pressed_) { key_2_pressed_ = true; mat_roughness_ = std::max(mat_roughness_ - 0.1f, 0.0f); UpdatePCGMaterialParams(); }
+    } else { key_2_pressed_ = false; }
+
+    get(input_source::keyboard, input_code::key_3, val);
+    if (val.current.x > 0.0f) {
+        if (!key_3_pressed_) { key_3_pressed_ = true; mat_metallic_ = std::min(mat_metallic_ + 0.1f, 1.0f); UpdatePCGMaterialParams(); }
+    } else { key_3_pressed_ = false; }
+
+    get(input_source::keyboard, input_code::key_4, val);
+    if (val.current.x > 0.0f) {
+        if (!key_4_pressed_) { key_4_pressed_ = true; mat_metallic_ = std::max(mat_metallic_ - 0.1f, 0.0f); UpdatePCGMaterialParams(); }
+    } else { key_4_pressed_ = false; }
+
+    get(input_source::keyboard, input_code::key_5, val);
+    if (val.current.x > 0.0f) {
+        if (!key_5_pressed_) {
+            key_5_pressed_ = true;
+            mat_color_index_ = (mat_color_index_ + 1) % 5;
+            const f32 colors[][4] = {
+                {1.f, 1.f, 1.f, 1.f},  // white
+                {1.f, 0.2f, 0.2f, 1.f}, // red
+                {0.2f, 1.f, 0.2f, 1.f}, // green
+                {0.2f, 0.4f, 1.f, 1.f}, // blue
+                {1.f, 1.f, 0.2f, 1.f},  // yellow
+            };
+            memcpy(mat_base_color_, colors[mat_color_index_], sizeof(f32) * 4);
+            UpdatePCGMaterialParams();
+        }
+    } else { key_5_pressed_ = false; }
+
+    get(input_source::keyboard, input_code::key_6, val);
+    if (val.current.x > 0.0f) {
+        if (!key_6_pressed_) {
+            key_6_pressed_ = true;
+            mat_roughness_ = 0.5f;
+            mat_metallic_ = 0.0f;
+            mat_color_index_ = 0;
+            f32 white[4] = {1.f, 1.f, 1.f, 1.f};
+            memcpy(mat_base_color_, white, sizeof(f32) * 4);
+            UpdatePCGMaterialParams();
+            std::cout << "[Material] Reset to defaults" << std::endl;
+        }
+    } else { key_6_pressed_ = false; }
+
+    // Key 7: Cycle technique (Opaque → AlphaClip → Unlit → Opaque)
+    get(input_source::keyboard, input_code::key_7, val);
+    if (val.current.x > 0.0f) {
+        if (!key_7_pressed_) {
+            key_7_pressed_ = true;
+            static const primal::graphics::ShaderTechnique techniques[] = {
+                primal::graphics::ShaderTechnique::Opaque,
+                primal::graphics::ShaderTechnique::AlphaClip,
+                primal::graphics::ShaderTechnique::Unlit,
+            };
+            mat_technique_index_ = (mat_technique_index_ + 1) % 3;
+            const char* names[] = {"Opaque", "AlphaClip", "Unlit"};
+            std::cout << "[Technique] Switched to: " << names[mat_technique_index_] << std::endl;
+            UpdatePCGMaterialParams();
+        }
+    } else { key_7_pressed_ = false; }
+
+    // Key 8: Display current material state
+    get(input_source::keyboard, input_code::key_8, val);
+    if (val.current.x > 0.0f) {
+        if (!key_8_pressed_) {
+            key_8_pressed_ = true;
+            const char* techNames[] = {"Opaque", "AlphaClip", "Unlit"};
+            std::cout << "[Material] technique=" << techNames[mat_technique_index_]
+                      << " roughness=" << mat_roughness_
+                      << " metallic=" << mat_metallic_
+                      << " color=(" << mat_base_color_[0] << "," << mat_base_color_[1]
+                      << "," << mat_base_color_[2] << "," << mat_base_color_[3] << ")" << std::endl;
+        }
+    } else { key_8_pressed_ = false; }
+}
+
+// ============================================================================
+// PCGScatterTestCase::UpdatePCGMaterialParams
+// ============================================================================
+
+void PCGScatterTestCase::UpdatePCGMaterialParams() {
+    static const primal::graphics::ShaderTechnique techniques[] = {
+        primal::graphics::ShaderTechnique::Opaque,
+        primal::graphics::ShaderTechnique::AlphaClip,
+        primal::graphics::ShaderTechnique::Unlit,
+    };
+    auto tech = techniques[mat_technique_index_];
+    for (auto eid : pcg_entity_ids_) {
+        if (!primal::game_entity::is_alive(primal::game_entity::entity_id{eid})) continue;
+        primal::game_entity::entity entity{primal::game_entity::entity_id{eid}};
+        if (entity.Has<primal::component::Material>()) {
+            auto mc = entity.Get<primal::component::Material>();
+            primal::material::set_roughness(mc, mat_roughness_);
+            primal::material::set_metallic(mc, mat_metallic_);
+            primal::material::set_base_color(mc, mat_base_color_);
+            primal::material::set_technique(mc, tech);
+        }
+    }
+    std::cout << "[Material] roughness=" << mat_roughness_
+              << " metallic=" << mat_metallic_
+              << " color=(" << mat_base_color_[0] << "," << mat_base_color_[1]
+              << "," << mat_base_color_[2] << ")" << std::endl;
 }
 
 // ============================================================================

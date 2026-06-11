@@ -10,6 +10,7 @@ namespace primal::graphics::pcg {
 class MeshAssignNode : public PCGNode {
 public:
     std::vector<f32> weights{1.0f};
+    std::vector<u32> techniques; // per-slot ShaderTechnique value (default: all Opaque=0)
 
     MeshAssignNode() {
         inputs.resize(1);
@@ -44,6 +45,8 @@ public:
                 if (r < cumulative[slot]) break;
             }
             out->SetAttr(i, PCGAttr::MeshIndex, static_cast<f32>(slot));
+            u32 tech = (slot < techniques.size()) ? techniques[slot] : 0;
+            out->SetAttr(i, PCGAttr::TechniqueIndex, static_cast<f32>(tech));
         }
     }
 
@@ -58,11 +61,18 @@ public:
             weights = std::vector<f32>(values, values + count);
             return true;
         }
+        if (std::strcmp(n, "techniques") == 0) {
+            techniques.clear();
+            techniques.reserve(count);
+            for (u32 i = 0; i < count; ++i)
+                techniques.push_back(static_cast<u32>(values[i]));
+            return true;
+        }
         return false;
     }
 
 private:
-    static constexpr u32 kParamCount = 1;
+    static constexpr u32 kParamCount = 2;
     static constexpr u32 kPinCount = 2;
     static const PCGParamDescriptor kParams[];
     static const PCGPinDescriptor kPins[];
@@ -70,6 +80,7 @@ private:
 
 inline const PCGParamDescriptor MeshAssignNode::kParams[] = {
     {"weights", "Mesh", PCGParamType::FloatArray, {0.0f,1.0f,0.01f}, 0, 0, nullptr},
+    {"techniques", "Mesh", PCGParamType::FloatArray, {0.0f,6.0f,1.0f}, 0, 0, nullptr},
 };
 inline const PCGPinDescriptor MeshAssignNode::kPins[] = {
     {"points", 0, PCGDataType::PointSet, true},

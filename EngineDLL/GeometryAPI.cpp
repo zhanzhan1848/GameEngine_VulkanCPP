@@ -1,11 +1,15 @@
 #include "Common.h"
+#include "CommonHeaders.h"
+#include "Id.h"
 #include "Geometry/Geometry.h"
 #include "Geometry/GeometryFieldRasterizer.h"
 #include "Components/Entity.h"
+#include "Components/Transform.h"
 #include "Components/Geometry.h"
 #include "EngineAPI/GameEntity.h"
 
 using namespace primal;
+using namespace primal::geometry;
 
 namespace {
     bool g_geometry_initialized = false;
@@ -17,8 +21,6 @@ namespace {
         }
     }
 }
-
-extern "C" {
 
 // ── Lifecycle ──
 
@@ -162,7 +164,7 @@ EDITOR_INTERFACE u32 GeometryTessellate(GeometryHandle h, float tolerance, float
 // ── Distance ──
 
 EDITOR_INTERFACE float GeometryDistanceTo(GeometryHandle h, const float* world_pos) {
-    if (!world_pos) return FLT_MAX;
+    if (!world_pos) return 3.4e38f; // FLT_MAX equivalent
     return geometry::distance_to(h, { world_pos[0], world_pos[1], world_pos[2] });
 }
 
@@ -200,16 +202,16 @@ EDITOR_INTERFACE void GeometryRasterizeField(const GeometryHandle* handles, u32 
 
 // ── Entity Mount ──
 
-EDITOR_INTERFACE entity_id GeometryCreateEntity(GeometryHandle h, const float* position,
-                                                 const float* rotation, const float* scale) {
-    if (!h.is_valid()) return invalid_id;
+EDITOR_INTERFACE id::id_type GeometryCreateEntity(GeometryHandle h, const float* position,
+                                                   const float* rotation, const float* scale) {
+    if (!h.is_valid()) return id::invalid_id;
     ensure_init();
     using namespace primal::game_entity;
     entity_info info{};
     transform::init_info tf{};
-    if (position) tf.position = { position[0], position[1], position[2] };
-    if (rotation) tf.rotation = { rotation[0], rotation[1], rotation[2], rotation[3] };
-    if (scale)    tf.scale    = { scale[0], scale[1], scale[2] };
+    if (position) { tf.position[0] = position[0]; tf.position[1] = position[1]; tf.position[2] = position[2]; }
+    if (rotation) { tf.rotation[0] = rotation[0]; tf.rotation[1] = rotation[1]; tf.rotation[2] = rotation[2]; tf.rotation[3] = rotation[3]; }
+    if (scale)    { tf.scale[0] = scale[0]; tf.scale[1] = scale[1]; tf.scale[2] = scale[2]; }
     info.transform = &tf;
 
     geometry::component::init_info gi{};
@@ -220,13 +222,11 @@ EDITOR_INTERFACE entity_id GeometryCreateEntity(GeometryHandle h, const float* p
     return e.get_id();
 }
 
-EDITOR_INTERFACE GeometryHandle GeometryGetEntityHandle(entity_id entity) {
-    auto geom = geometry::component::get(entity);
+EDITOR_INTERFACE GeometryHandle GeometryGetEntityHandle(id::id_type eid) {
+    auto geom = geometry::component::get(game_entity::entity_id{eid});
     return geom.handle();
 }
 
-EDITOR_INTERFACE void GeometryDestroyEntity(entity_id entity) {
-    game_entity::remove(entity_id{ entity });
+EDITOR_INTERFACE void GeometryDestroyEntity(id::id_type eid) {
+    game_entity::remove(game_entity::entity_id{eid});
 }
-
-} // extern "C"

@@ -6,6 +6,7 @@
 #include "Cluster.h"
 #include "Geometry.h"
 #include "CommandBuffer.h"
+#include "Material.h"
 
 namespace primal::game_entity {
 
@@ -85,6 +86,13 @@ namespace primal::game_entity {
 			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Geometry));
 		}
 
+		if (info.material)
+		{
+			material::component mc = material::create(*info.material, ent);
+			assert(mc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Material));
+		}
+
 		return ent;
 	}
 
@@ -115,6 +123,11 @@ namespace primal::game_entity {
 		if (mask & bit_mask(component_bit::Geometry))
 		{
 			geometry::component::remove(id);
+		}
+		if (mask & bit_mask(component_bit::Material))
+		{
+			material::component mc{ material::material_component_id{id} };
+			material::remove(mc);
 		}
 		// Transform is always removed last since other components may reference it
 		if (mask & bit_mask(component_bit::Transform))

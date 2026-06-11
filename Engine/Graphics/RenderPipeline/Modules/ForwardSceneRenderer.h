@@ -4,6 +4,7 @@
 #include "Graphics/SceneDataAdapter.h"
 #include "Graphics/Passes/ParticlePass.h"
 #include "Graphics/RenderPipeline/Modules/LineBatchRenderer.h"
+#include "Graphics/Material/ShaderTechnique.h"
 #include "Utilities/Math.h"
 #include <unordered_map>
 
@@ -111,6 +112,9 @@ private:
     // Shader loading helper
     rhi::ShaderHandle LoadShader(const char* filename, const char* entry_point, rhi::ShaderStage stage);
 
+    // Technique → Pipeline mapping
+    rhi::PipelineHandle GetTechniquePipeline(ShaderTechnique technique) const;
+
     rhi::RHIDeviceBase* device_ = nullptr;
     u32 render_width_ = 0;
     u32 render_height_ = 0;
@@ -139,12 +143,24 @@ private:
     rhi::ShaderHandle blit_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle blit_ps_{rhi::handles::INVALID_SHADER};
 
+    // AlphaClip technique shaders
+    rhi::ShaderHandle alphaclip_vs_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle alphaclip_ps_{rhi::handles::INVALID_SHADER};
+
+    // Unlit technique shaders
+    rhi::ShaderHandle unlit_vs_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle unlit_ps_{rhi::handles::INVALID_SHADER};
+
     // Pipelines
     rhi::PipelineHandle gbuffer_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle shadow_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle lighting_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle skybox_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle blit_pipeline_{rhi::handles::INVALID_PIPELINE};
+
+    // Technique-specific pipelines
+    rhi::PipelineHandle alphaclip_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle unlit_pipeline_{rhi::handles::INVALID_PIPELINE};
 
     // Pipeline layouts
     rhi::PipelineLayoutHandle gbuffer_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};

@@ -6,6 +6,7 @@
 #include "ScriptComponent.h"
 #include "MeshComponent.h"
 #include "ParticleComponent.h"
+#include "MaterialComponent.h"
 #include "Engine/Utilities/Hash.h"
 
 namespace primal {

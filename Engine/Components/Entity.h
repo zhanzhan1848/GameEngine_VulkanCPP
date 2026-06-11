@@ -32,10 +32,13 @@ namespace primal {
 	INIT_INFO(mesh);
 	INIT_INFO(particle);
 	INIT_INFO(cluster);
+	INIT_INFO(material);
 #undef INIT_INFO
 
 	// Forward declaration for Geometry component (nested namespace)
 	namespace geometry { namespace component { struct init_info; } }
+
+	namespace material { struct init_info; }
 
 	namespace game_entity {
 		struct entity_info
@@ -46,6 +49,7 @@ namespace primal {
 			particle::init_info* particle{ nullptr };
 			cluster::init_info* cluster{ nullptr };
 			geometry::component::init_info* geometry{ nullptr };
+			material::init_info* material{ nullptr };
 		};
 	}
 }

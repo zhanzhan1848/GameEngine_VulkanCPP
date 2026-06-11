@@ -15,6 +15,9 @@ struct VertexOut {
     float2 uv;
     float4 currentPos;
     float4 previousPos;
+    float4 instanceBaseColor;
+    float  instanceRoughness;
+    float  instanceMetallic;
 };
 
 struct FragmentOut {
@@ -45,6 +48,8 @@ struct PushConsts {
     uint use_instances;
     uint _pad[3];
 };
+
+#include "InstanceData.metal"
 
 struct ViewData {
     float4x4 viewProjection;
@@ -83,15 +88,25 @@ vertex VertexOut vertexMain(
     constant ViewData& viewData [[buffer(0)]],
     constant SceneData& sceneData [[buffer(1)]],
     constant PushConsts& pushConsts [[buffer(2)]],
-    constant float4x4* instanceModels [[buffer(3)]],
+    constant InstanceData* instanceData [[buffer(3)]],
     constant VertexInput* vertices [[buffer(20)]]
 ) {
     VertexOut out;
 
-    // Select model matrix: instance buffer or push constant
-    float4x4 model = (pushConsts.use_instances != 0)
-                     ? instanceModels[instanceId]
-                     : pushConsts.model;
+    // Select instance data or push constant fallback
+    float4x4 model;
+    if (pushConsts.use_instances != 0) {
+        InstanceData inst = instanceData[instanceId];
+        model = inst.transform;
+        out.instanceBaseColor  = inst.baseColor;
+        out.instanceRoughness  = inst.roughness;
+        out.instanceMetallic   = inst.metallic;
+    } else {
+        model = pushConsts.model;
+        out.instanceBaseColor  = float4(1.0, 1.0, 1.0, 1.0);
+        out.instanceRoughness  = 0.5;
+        out.instanceMetallic   = 0.0;
+    }
 
     // Position
     float3 rawPos = vertices[vertexId].position;
@@ -185,7 +200,7 @@ fragment FragmentOut fragmentMain(
 
     // Standard PBR Sampling
     float4 albedoSample = albedoMap.sample(defaultSampler, in.uv);
-    out.albedo = albedoSample;
+    out.albedo = albedoSample * in.instanceBaseColor;
     
     // ORM Sampling (AO, Roughness, Metallic)
     // Sponza might not have ORM, or it might be separate.
@@ -194,14 +209,13 @@ fragment FragmentOut fragmentMain(
     
     // Default Fallback if ORM is black (likely missing)
     if (length(ormSample.rgb) < 0.01) {
-        // AO = 1.0 (Full Ambient)
-        // Roughness = 0.8 (Rough)
-        // Metallic = 0.0 (Non-metal)
-        out.orm = float4(1.0, 0.8, 0.0, 1.0);
+        out.orm = float4(1.0, in.instanceRoughness, in.instanceMetallic, 1.0);
     } else {
-        out.orm = ormSample;
-        // Ensure AO is never 0
-        out.orm.r = max(out.orm.r, 0.1); 
+        out.orm = float4(ormSample.r,
+                         ormSample.g * in.instanceRoughness,
+                         ormSample.b * in.instanceMetallic,
+                         1.0);
+        out.orm.r = max(out.orm.r, 0.1);
     }
     
     // Normal Mapping

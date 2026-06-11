@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 
 namespace primal::graphics::pcg {
 

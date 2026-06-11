@@ -13,6 +13,7 @@ set(SOURCE_FILES
     "RenderPipelineAPI.cpp"
     "PCGAPI.cpp"
     "GeometryAPI.cpp"
+    "MaterialAPI.cpp"
 )
 
 set(HEADER_FILES

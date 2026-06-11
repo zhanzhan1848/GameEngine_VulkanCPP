@@ -41,6 +41,7 @@ enum class PCGAttr : u8 {
     Seed,       // Per-point random seed
     RotationY,  // Y-axis rotation in radians
     MeshIndex,  // Assigned mesh slot index (0-based)
+    TechniqueIndex, // ShaderTechnique enum value (as f32)
     Count       // Total number of attributes (used as default stride)
 };
 

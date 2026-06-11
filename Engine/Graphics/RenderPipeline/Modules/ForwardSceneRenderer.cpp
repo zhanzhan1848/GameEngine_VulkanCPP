@@ -15,6 +15,8 @@
 #include "Components/Entity.h"
 #include "Components/Transform.h"
 #include "Components/Geometry.h"
+#include "Graphics/Material/ShaderTechnique.h"
+#include "Graphics/Material/InstanceData.h"
 
 #include <fstream>
 #include <sstream>
@@ -23,6 +25,7 @@
 #include <algorithm>
 #include <set>
 #include <unordered_map>
+#include <array>
 #include <filesystem>
 
 // For texture loading
@@ -356,7 +359,7 @@ void ForwardSceneRenderer::Shutdown() {
 
     // Destroy pipelines
     for (auto* p : {&gbuffer_pipeline_, &shadow_pipeline_, &lighting_pipeline_,
-                    &skybox_pipeline_, &blit_pipeline_}) {
+                    &skybox_pipeline_, &blit_pipeline_, &alphaclip_pipeline_, &unlit_pipeline_}) {
         if (*p != handles::INVALID_PIPELINE) { device_->DestroyPipeline(*p); *p = handles::INVALID_PIPELINE; }
     }
     // Destroy layouts
@@ -495,10 +498,16 @@ void ForwardSceneRenderer::CreateShaders() {
 
     skybox_vs_ = load("Skybox", "vertexSkybox", ShaderStage::Vertex);
     skybox_ps_ = load("Skybox", "fragmentSkybox", ShaderStage::Pixel);
+
+    // Technique-specific shaders
+    alphaclip_vs_ = load("GBufferAlphaClip", "vertexMain", ShaderStage::Vertex);
+    alphaclip_ps_ = load("GBufferAlphaClip", "fragmentMain", ShaderStage::Pixel);
+    unlit_vs_ = load("GBufferUnlit", "vertexMain", ShaderStage::Vertex);
+    unlit_ps_ = load("GBufferUnlit", "fragmentMain", ShaderStage::Pixel);
 }
 
 void ForwardSceneRenderer::CreatePipelines() {
-    PushConstantRange modelPush{ShaderStage::Vertex, 2, sizeof(math::m4x4)};
+    PushConstantRange modelPush{ShaderStage::Vertex, 2, sizeof(PCGPushConsts)};
 
     // GBuffer
     {
@@ -589,6 +598,42 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.vertexAttributes.clear();
         desc.vertexBindings.clear();
         blit_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
+    // AlphaClip technique — shares gbuffer layout, different shader
+    {
+        GraphicsPipelineDesc desc{};
+        desc.layout = gbuffer_layout_;
+        desc.vertexShader = alphaclip_vs_;
+        desc.pixelShader = alphaclip_ps_;
+        desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[1] = DataFormat::RGBA16_Float;
+        desc.renderTargetFormats[2] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[3] = DataFormat::RG16_Float;
+        desc.renderTargetCount = 4;
+        desc.depthStencilFormat = DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = ComparisonFunc::Less;
+        desc.cullMode = CullMode::None;
+        alphaclip_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
+    // Unlit technique — shares gbuffer layout, different shader
+    {
+        GraphicsPipelineDesc desc{};
+        desc.layout = gbuffer_layout_;
+        desc.vertexShader = unlit_vs_;
+        desc.pixelShader = unlit_ps_;
+        desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[1] = DataFormat::RGBA16_Float;
+        desc.renderTargetFormats[2] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[3] = DataFormat::RG16_Float;
+        desc.renderTargetCount = 4;
+        desc.depthStencilFormat = DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = ComparisonFunc::Less;
+        desc.cullMode = CullMode::None;
+        unlit_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
 }
 
@@ -837,6 +882,14 @@ void ForwardSceneRenderer::ClearGeometryEntities() {
     geometry_entity_ids_.clear();
 }
 
+rhi::PipelineHandle ForwardSceneRenderer::GetTechniquePipeline(ShaderTechnique technique) const {
+    switch (technique) {
+        case ShaderTechnique::AlphaClip: return alphaclip_pipeline_;
+        case ShaderTechnique::Unlit:     return unlit_pipeline_;
+        default:                         return gbuffer_pipeline_;
+    }
+}
+
 ForwardSceneRenderer::StaticEntityResult
 ForwardSceneRenderer::CreateStaticEntities() {
     StaticEntityResult result;
@@ -992,23 +1045,38 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
         shadowDebug = false;
     }
 
-    // Group visible proxies by mesh_infos_ index
+    // Group visible proxies by technique then by mesh_infos_ index
     u32 mesh_count = static_cast<u32>(mesh_infos_.size());
-    std::unordered_map<u32, std::vector<math::m4x4>> groups;
+    std::array<std::unordered_map<u32, std::vector<graphics::InstanceData>>, TechniqueCount> technique_groups;
     for (auto* proxy : visible) {
         auto it = mesh_id_to_index_.find(proxy->meshId);
         if (it == mesh_id_to_index_.end()) continue;
         u32 meshIdx = it->second;
         if (meshIdx >= mesh_count || !mesh_infos_[meshIdx].mesh) continue;
-        math::m4x4 xform = proxy->transform;
-        groups[meshIdx].push_back(xform);
+        u32 t = static_cast<u32>(proxy->technique);
+        if (t >= TechniqueCount) t = 0;
+        graphics::InstanceData inst{};
+        inst.transform = proxy->transform;
+        memcpy(inst.base_color, proxy->base_color, sizeof(f32) * 4);
+        inst.roughness    = proxy->roughness;
+        inst.metallic     = proxy->metallic;
+        inst.alpha_cutoff = proxy->alpha_cutoff;
+        technique_groups[t][meshIdx].push_back(inst);
     }
-    if (groups.empty()) return;
+
+    // Check if any groups exist
+    bool has_any = false;
+    for (u32 t = 0; t < TechniqueCount; ++t) {
+        if (!technique_groups[t].empty()) { has_any = true; break; }
+    }
+    if (!has_any) return;
 
     // Compute total instance count and ensure buffer capacity
     u32 total = 0;
-    for (auto& [_, transforms] : groups) total += (u32)transforms.size();
-    u32 required_size = total * sizeof(math::m4x4);
+    for (u32 t = 0; t < TechniqueCount; ++t)
+        for (auto& [_, transforms] : technique_groups[t])
+            total += (u32)transforms.size();
+    u32 required_size = total * sizeof(graphics::InstanceData);
     if (pcg_instance_buffer_capacity_ < required_size) {
         if (pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
             device_->DestroyBuffer(pcg_instance_buffer_);
@@ -1025,34 +1093,45 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     void* buf = device_->MapBuffer(pcg_instance_buffer_, 0, required_size);
     if (!buf) return;
 
-    // Compute group offsets
+    // Compute group offsets per technique
     struct GroupRange { u32 offset; u32 count; };
-    std::unordered_map<u32, GroupRange> group_ranges;
+    std::array<std::unordered_map<u32, GroupRange>, TechniqueCount> all_ranges;
     u32 off = 0;
-    for (auto& [meshIdx, transforms] : groups) {
-        group_ranges[meshIdx] = {off, (u32)transforms.size()};
-        for (u32 j = 0; j < transforms.size(); j++) {
-            ((math::m4x4*)buf)[off + j] = transforms[j];
+    for (u32 t = 0; t < TechniqueCount; ++t) {
+        for (auto& [meshIdx, instances] : technique_groups[t]) {
+            all_ranges[t][meshIdx] = {off, (u32)instances.size()};
+            for (u32 j = 0; j < instances.size(); j++) {
+                ((graphics::InstanceData*)buf)[off + j] = instances[j];
+            }
+            off += (u32)instances.size();
         }
-        off += (u32)transforms.size();
     }
     device_->UnmapBuffer(pcg_instance_buffer_);
 
     // Select layout based on pass type
     auto layout = shadow_pass ? shadow_layout_ : gbuffer_layout_;
 
-    // Draw each group
-    for (auto& [meshIdx, range] : group_ranges) {
-        u64 inst_offset = range.offset * sizeof(math::m4x4);
-        cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
-        auto matSet = (meshIdx < material_ds_.size()) ? material_ds_[meshIdx] : material_ds_[0];
-        const DescriptorSetHandle matSets[] = {matSet};
-        cmd->BindDescriptorSets(PipelineBindPoint::Graphics, layout, 1, 1, matSets, 0, nullptr);
-        PCGPushConsts pc{};
-        pc.transform = MatrixIdentity();
-        pc.use_instances = 1;
-        cmd->PushConstants(layout, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
-        mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
+    // Draw each technique bucket in render order
+    for (u32 t = 0; t < TechniqueCount; ++t) {
+        if (all_ranges[t].empty()) continue;
+
+        // Bind technique-specific pipeline for GBuffer pass
+        if (!shadow_pass) {
+            cmd->BindGraphicsPipeline(GetTechniquePipeline(static_cast<ShaderTechnique>(t)));
+        }
+
+        for (auto& [meshIdx, range] : all_ranges[t]) {
+            u64 inst_offset = range.offset * sizeof(graphics::InstanceData);
+            cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+            auto matSet = (meshIdx < material_ds_.size()) ? material_ds_[meshIdx] : material_ds_[0];
+            const DescriptorSetHandle matSets[] = {matSet};
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, layout, 1, 1, matSets, 0, nullptr);
+            PCGPushConsts pc{};
+            pc.transform = MatrixIdentity();
+            pc.use_instances = 1;
+            cmd->PushConstants(layout, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+            mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
+        }
     }
 }
 
@@ -1227,7 +1306,7 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         rpDesc.depthAttachment.clearValue = ClearValue{math::v4{1.0f, 0.f, 0.f, 1.f}};
         cmd->BeginRenderPass(rpDesc);
 
-        cmd->BindGraphicsPipeline(gbuffer_pipeline_);
+        // Pipeline is now bound per-technique inside RenderDynamicInstances
         cmd->SetViewport({{0, 0}, {(float)render_width_, (float)render_height_}, 0, 1});
         cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
         const DescriptorSetHandle globalSets[] = {global_ds_[idx]};

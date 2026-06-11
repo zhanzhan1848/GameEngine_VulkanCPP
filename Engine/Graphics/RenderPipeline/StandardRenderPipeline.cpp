@@ -14,6 +14,8 @@
 #include "Components/Entity.h"
 #include "Components/Transform.h"
 #include "EngineAPI/GameEntity.h"
+#include "EngineAPI/GameEntity_impl.h"
+#include "Components/Material.h"
 #include <iostream>
 #include <chrono>
 
@@ -571,6 +573,16 @@ void StandardRenderPipeline::SyncEntitiesToRenderScene(RenderScene& scene) {
 
             RenderProxy proxy = RenderProxy::Create(eid, meshId, materialId);
             proxy.UpdateTransform(world);
+
+            game_entity::entity entity{game_entity::entity_id{eid}};
+            if (entity.Has<component::Material>()) {
+                auto mc = entity.Get<component::Material>();
+                proxy.technique = material::get_technique(mc);
+                proxy.roughness = material::get_roughness(mc);
+                proxy.metallic  = material::get_metallic(mc);
+                material::get_base_color(mc, proxy.base_color);
+            }
+
             scene.UpdateProxy(eid, proxy);
         }
     };

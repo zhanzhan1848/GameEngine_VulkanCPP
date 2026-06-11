@@ -9,6 +9,7 @@
 #include "Components/Particle.h"
 #include "Components/Cluster.h"
 #include "Components/Geometry.h"
+#include "Components/Material.h"
 
 namespace primal {
 
@@ -19,6 +20,7 @@ template<> struct component_init_info<component::Mesh>          { using type = m
 template<> struct component_init_info<component::Particle>      { using type = particle::init_info; };
 template<> struct component_init_info<component::Cluster>       { using type = cluster::init_info; };
 template<> struct component_init_info<component::Geometry>      { using type = geometry::component::init_info; };
+template<> struct component_init_info<component::Material>      { using type = material::init_info; };
 
 namespace game_entity {
 
@@ -34,6 +36,8 @@ template<typename T>
         return primal::particle::get_component_for_entity(_id);
     } else if constexpr (std::is_same_v<T, component::Geometry>) {
         return primal::geometry::component::get(_id);
+    } else if constexpr (std::is_same_v<T, component::Material>) {
+        return primal::material::component{ primal::material::material_component_id{_id} };
     }
 }
 
@@ -62,6 +66,10 @@ void entity::Add(const typename component_init_info<T>::type& info) {
         auto c = geometry::component::create(info, *this);
         assert(c.is_valid());
         set_component_bit(_id, static_cast<u8>(component_bit::Geometry));
+    } else if constexpr (std::is_same_v<T, component::Material>) {
+        auto c = material::create(info, *this);
+        assert(c.is_valid());
+        set_component_bit(_id, static_cast<u8>(component_bit::Material));
     }
 }
 
@@ -88,6 +96,10 @@ void entity::Remove() {
     } else if constexpr (std::is_same_v<T, component::Geometry>) {
         geometry::component::remove(_id);
         clear_component_bit(_id, static_cast<u8>(component_bit::Geometry));
+    } else if constexpr (std::is_same_v<T, component::Material>) {
+        material::component mc{ material::material_component_id{_id} };
+        material::remove(mc);
+        clear_component_bit(_id, static_cast<u8>(component_bit::Material));
     }
 }
 
