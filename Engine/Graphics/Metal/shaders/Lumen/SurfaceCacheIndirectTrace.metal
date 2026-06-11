@@ -3,6 +3,7 @@ using namespace metal;
 #include "../CommonTypes.metal"
 #include "../CommonFunction.metal"
 #include "SurfaceCacheData.metal"
+#include "SDFTraceCommon.metal"
 
 struct IndirectTraceParams {
     SurfaceCacheParams sc_params;
@@ -120,12 +121,25 @@ kernel void surfaceCacheIndirectTrace(
         bool hit = false;
         float3 hit_pos = float3(0.0);
 
+        // Adaptive threshold based on finest cascade voxel size
+        float hitThreshold = params.sdf_extents[0].x * 0.5f;
+        float minStep = params.sdf_extents[0].x * 0.25f;
+
         for (uint step = 0; step < kMaxSDFSteps; ++step) {
             float3 p = probe_pos + ray_dir * t;
             float d = sampleSDF(p, sdf0, sdf1, sdf2, params);
-            if (d < 0.01) { hit = true; hit_pos = p; break; }
+
+            if (d < hitThreshold) { hit = true; hit_pos = p; break; }
             if (t > params.max_ray_distance) break;
-            t += max(d, 0.01);
+
+            // Relaxed advancement: overstep when far, conservative when close
+            float advance;
+            if (d > hitThreshold * 4.0f) {
+                advance = d * 1.2f;
+            } else {
+                advance = max(d, minStep);
+            }
+            t += advance;
         }
 
         uint hit_idx = probe_idx * rays + r;

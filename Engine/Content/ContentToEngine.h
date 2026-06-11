@@ -1,9 +1,9 @@
 #pragma once
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHITypes.h"
+#include "Graphics/RHI/Core/RHIMeshAsset.h"
 
 namespace primal::graphics::rhi {
-    struct RHIMeshAsset;
     class RHIGpuMesh;
 }
 
@@ -65,15 +65,22 @@ namespace primal::content
         RHI = 1
     };
 
+    // --- Unified resource import: one call per resource ---
 [[nodiscard]] id::id_type create_resource(const void *const data, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
     void destroy_resource(id::id_type id, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
     void shutdown();
 
-	// RHI Forwarding Helper
-	graphics::rhi::ResourceHandle get_rhi_texture_handle(id::id_type id);
-	bool get_rhi_mesh_asset(id::id_type id, graphics::rhi::RHIMeshAsset& asset);
-	graphics::rhi::RHIGpuMesh* get_rhi_gpu_mesh(id::id_type id);
+    // RHI Forwarding Helpers
+    graphics::rhi::ResourceHandle get_rhi_texture_handle(id::id_type id);
+    bool get_rhi_mesh_asset(id::id_type id, graphics::rhi::RHIMeshAsset& asset);
+    graphics::rhi::RHIGpuMesh* get_rhi_gpu_mesh(id::id_type id);
+
+    // Register a pre-built RHIMeshAsset (from custom binary parsing or procedural generation).
+    // Returns geometry_hierarchies ID — same ID space as create_resource(mesh).
     id::id_type register_mesh_asset(graphics::rhi::RHIMeshAsset& asset);
+
+    // Extract the internal rhi_mesh_assets ID from a geometry_hierarchies ID
+    id::id_type get_rhi_mesh_id(id::id_type geometry_id);
 
     using GpuMeshCallback = std::function<void(id::id_type, graphics::rhi::RHIGpuMesh*)>;
     void foreach_gpu_mesh(GpuMeshCallback callback);

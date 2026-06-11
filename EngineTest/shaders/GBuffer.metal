@@ -15,6 +15,9 @@ struct VertexOut {
     float2 uv;
     float4 currentPos;
     float4 previousPos;
+    float4 instanceBaseColor;
+    float  instanceRoughness;
+    float  instanceMetallic;
 };
 
 struct FragmentOut {
@@ -42,7 +45,11 @@ struct SceneData {
 
 struct PushConsts {
     float4x4 model;
+    uint use_instances;
+    uint _pad[3];
 };
+
+#include "InstanceData.metal"
 
 struct ViewData {
     float4x4 viewProjection;
@@ -77,23 +84,40 @@ float3 UnpackNormal(packed_ushort2 p) {
 
 vertex VertexOut vertexMain(
     uint vertexId [[vertex_id]],
+    uint instanceId [[instance_id]],
     constant ViewData& viewData [[buffer(0)]],
     constant SceneData& sceneData [[buffer(1)]],
     constant PushConsts& pushConsts [[buffer(2)]],
+    constant InstanceData* instanceData [[buffer(3)]],
     constant VertexInput* vertices [[buffer(20)]]
 ) {
     VertexOut out;
-    
+
+    // Select instance data or push constant fallback
+    float4x4 model;
+    if (pushConsts.use_instances != 0) {
+        InstanceData inst = instanceData[instanceId];
+        model = inst.transform;
+        out.instanceBaseColor  = inst.baseColor;
+        out.instanceRoughness  = inst.roughness;
+        out.instanceMetallic   = inst.metallic;
+    } else {
+        model = pushConsts.model;
+        out.instanceBaseColor  = float4(1.0, 1.0, 1.0, 1.0);
+        out.instanceRoughness  = 0.5;
+        out.instanceMetallic   = 0.0;
+    }
+
     // Position
     float3 rawPos = vertices[vertexId].position;
-    
+
     // Element
     VertexElement element = vertices[vertexId].element;
-    
+
     // Unpack Normal
     packed_ushort2 packedN = element.Normal;
     float3 rawNormal = UnpackNormal(packedN);
-    
+
     // Unpack Tangent
     packed_ushort2 packedT = element.Tangent;
     float3 rawTangent = UnpackNormal(packedT); // Tangent uses same encoding
@@ -105,13 +129,13 @@ vertex VertexOut vertexMain(
     // uint colorTSign = element.ColorTSign;
     // float sign = (colorTSign & 0x1) ? -1.0 : 1.0; // Assume sign bit
     
-    // Use PushConstant Model Matrix
-    float4 worldPos = pushConsts.model * float4(rawPos, 1.0);
-    
+    // Use Model Matrix
+    float4 worldPos = model * float4(rawPos, 1.0);
+
     out.worldPos = worldPos.xyz;
-    
+
     // Transform Normal to World Space
-    float3x3 normalMatrix = float3x3(pushConsts.model[0].xyz, pushConsts.model[1].xyz, pushConsts.model[2].xyz);
+    float3x3 normalMatrix = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
     out.worldNormal = normalize(normalMatrix * rawNormal);
     
     // Transform Tangent to World Space
@@ -176,7 +200,7 @@ fragment FragmentOut fragmentMain(
 
     // Standard PBR Sampling
     float4 albedoSample = albedoMap.sample(defaultSampler, in.uv);
-    out.albedo = albedoSample;
+    out.albedo = albedoSample * in.instanceBaseColor;
     
     // ORM Sampling (AO, Roughness, Metallic)
     // Sponza might not have ORM, or it might be separate.
@@ -185,14 +209,13 @@ fragment FragmentOut fragmentMain(
     
     // Default Fallback if ORM is black (likely missing)
     if (length(ormSample.rgb) < 0.01) {
-        // AO = 1.0 (Full Ambient)
-        // Roughness = 0.8 (Rough)
-        // Metallic = 0.0 (Non-metal)
-        out.orm = float4(1.0, 0.8, 0.0, 1.0);
+        out.orm = float4(1.0, in.instanceRoughness, in.instanceMetallic, 1.0);
     } else {
-        out.orm = ormSample;
-        // Ensure AO is never 0
-        out.orm.r = max(out.orm.r, 0.1); 
+        out.orm = float4(ormSample.r,
+                         ormSample.g * in.instanceRoughness,
+                         ormSample.b * in.instanceMetallic,
+                         1.0);
+        out.orm.r = max(out.orm.r, 0.1);
     }
     
     // Normal Mapping

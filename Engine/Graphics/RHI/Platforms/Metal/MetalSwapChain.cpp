@@ -79,38 +79,27 @@ bool MetalSwapChain::Initialize() {
     mtkView_->setPaused(true);
     mtkView_->setEnableSetNeedsDisplay(true);
     
-    // Handle Retina Display / High DPI
-    // Get Screen Scale
+    // Force 1x scale — render pipeline manages its own resolution via render_scale.
+    // Retina 2x would create a drawable larger than the render targets, causing partial blit.
     CGFloat scale = 1.0;
-    
-    ::id windowId = reinterpret_cast<::id>(window);
-    ::SEL screenSel = sel_registerName("screen");
-    
-    // Cast objc_msgSend
+
+    ::id viewId = reinterpret_cast<::id>(mtkView_);
     using ObjectMsgSend = ::id (*)(::id, ::SEL);
     auto objMsg = reinterpret_cast<ObjectMsgSend>(objc_msgSend);
-    ::id screen = objMsg(windowId, screenSel);
-    
-    if (screen) {
-        ::SEL scaleSel = sel_registerName("backingScaleFactor");
-        using ScaleMsgSend = CGFloat (*)(::id, ::SEL);
-        auto scaleMsg = reinterpret_cast<ScaleMsgSend>(objc_msgSend);
-        scale = scaleMsg(screen, scaleSel);
-    }
-    
-    // Set Layer Contents Scale
-    ::id viewId = reinterpret_cast<::id>(mtkView_);
     ::SEL layerSel = sel_registerName("layer");
     ::id layer = objMsg(viewId, layerSel);
-    
+
     if (layer) {
         ::SEL setScaleSel = sel_registerName("setContentsScale:");
         using SetScaleMsgSend = void (*)(::id, ::SEL, CGFloat);
         auto setScaleMsg = reinterpret_cast<SetScaleMsgSend>(objc_msgSend);
         setScaleMsg(layer, setScaleSel, scale);
     }
-    
-    // Update SwapChainDesc with actual drawable size
+
+    // Explicitly set drawable size to match window logical size (not Retina pixels)
+    CGSize logicalSize = CGSizeMake(swapChainDesc_.width, swapChainDesc_.height);
+    mtkView_->setDrawableSize(logicalSize);
+
     CGSize drawableSize = mtkView_->drawableSize();
     swapChainDesc_.width = static_cast<u32>(drawableSize.width);
     swapChainDesc_.height = static_cast<u32>(drawableSize.height);

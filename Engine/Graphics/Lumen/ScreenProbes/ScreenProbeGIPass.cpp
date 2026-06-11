@@ -7,6 +7,8 @@
 #include "Graphics/RHI/Core/RHIMath.h"
 // MetalDevice.h intentionally excluded — causes Rect naming conflict with MacTypes.h
 #include "Graphics/Nanite/GlobalSDF.h"
+#include "Graphics/Field/FieldRegistry.h"
+#include "Graphics/Field/FieldView.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -872,19 +874,12 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                                    (float)render_width_, (float)render_height_};
 
                 if (sdfAvailable) {
-                    u32 cascadeCount = std::min(3u, sdf.GetConfig().cascade_count);
-                    for (u32 c = 0; c < cascadeCount; ++c) {
-                        const auto& cascade = sdf.GetCascade(c);
-                        gd.sdf_origins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
-                        gd.sdf_voxel_sizes[c] = {cascade.voxel_size, cascade.voxel_size, cascade.voxel_size, 0.0f};
-                        gd.sdf_extents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
+                    field::FieldDescriptor sdf_cascades[4];
+                    u32 cascadeCount = field::FieldRegistry::Get().FindCascaded(
+                        field::FieldSemantic::GlobalSDF, sdf_cascades, 4);
+                    if (cascadeCount > 0) {
+                        field::FieldView::WriteSDFToScreenProbe(sdf_cascades, cascadeCount, gd);
                     }
-                    gd.sdf_resolutions = {
-                        cascadeCount > 0 ? (float)sdf.GetCascade(0).resolution : 0.0f,
-                        cascadeCount > 1 ? (float)sdf.GetCascade(1).resolution : 0.0f,
-                        cascadeCount > 2 ? (float)sdf.GetCascade(2).resolution : 0.0f,
-                        (float)cascadeCount
-                    };
                 }
 
                 gd.surface_cache_params = {

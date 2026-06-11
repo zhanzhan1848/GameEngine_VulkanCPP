@@ -9,6 +9,8 @@
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/Nanite/GlobalSDF.h"
+#include "Graphics/Field/FieldRegistry.h"
+#include "Graphics/Field/FieldView.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -956,15 +958,17 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                                      camera_data.light_color.y,
                                      camera_data.light_color.z, 0.0f};
 
-                    // Fill SDF cascade data from GlobalSDF
-                    for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
-                        const auto& cascade = sdf.GetCascade(c);
-                        vd.SdfOrigins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
-                        vd.SdfVoxelSizes[c] = {cascade.voxel_size, 0.0f, 0.0f, 0.0f};
-                        vd.SdfExtents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
-                        vd.SdfResolutions[c] = cascade.resolution;
+                    // Fill SDF cascade data from FieldRegistry via FieldView
+                    {
+                        field::FieldDescriptor sdf_cascades[4];
+                        u32 count = field::FieldRegistry::Get().FindCascaded(
+                            field::FieldSemantic::GlobalSDF, sdf_cascades, 4);
+                        if (count > 0) {
+                            field::FieldView::WriteSDFToDDGI(sdf_cascades, count, vd);
+                        } else {
+                            vd.SdfCascadeCount = 0;
+                        }
                     }
-                    vd.SdfCascadeCount = sdf.GetConfig().cascade_count;
 
                     vd.ProbeUpdateCount = updateCount;  // matches actual dispatch count
                     vd.ProbeRelocationShift[0] = relocation_shift_[0];

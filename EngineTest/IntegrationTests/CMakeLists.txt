@@ -242,8 +242,46 @@ if(APPLE)
     setup_test_target(TestHZBStandalone)
     target_compile_definitions(TestHZBStandalone PRIVATE "HZB_STANDALONE_TEST=1")
 
+    # 12. TestForwardRenderer
+    add_executable(TestForwardRenderer
+        "Main.cpp"
+        "TestForwardRenderer.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestForwardRenderer)
+    target_compile_definitions(TestForwardRenderer PRIVATE "TEST_FORWARD_RENDERER=1" "TEST_RENDERER=0")
+
+    # 13. TestPCGScatter
+    add_executable(TestPCGScatter
+        "Main.cpp"
+        "TestPCGScatter.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestPCGScatter)
+    target_compile_definitions(TestPCGScatter PRIVATE "TEST_PCG_SCATTER=1" "TEST_RENDERER=0")
+
+    # 14. TestGeometryAPI (headless, no GPU)
+    add_executable(TestGeometryAPI
+        "Main.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestGeometryAPI)
+    target_compile_definitions(TestGeometryAPI PRIVATE "TEST_GEOMETRY_API=1" "TEST_RENDERER=0")
+
+    # 15. TestFieldDrivenScatter (headless, no GPU)
+    add_executable(TestFieldDrivenScatter
+        "Main.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestFieldDrivenScatter)
+    target_compile_definitions(TestFieldDrivenScatter PRIVATE "TEST_FIELD_DRIVEN_SCATTER=1" "TEST_RENDERER=0")
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

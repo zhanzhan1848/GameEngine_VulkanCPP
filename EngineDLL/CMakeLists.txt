@@ -12,6 +12,9 @@ set(SOURCE_FILES
     "EntityAPI.cpp"
     "AssetAPI.cpp"
     "RenderPipelineAPI.cpp"
+    "PCGAPI.cpp"
+    "GeometryAPI.cpp"
+    "MaterialAPI.cpp"
 )
 
 if(APPLE)

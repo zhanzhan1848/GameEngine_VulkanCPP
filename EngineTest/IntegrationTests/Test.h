@@ -43,6 +43,22 @@
 #define TEST_SPONZA_RENDERGRAPH 0
 #endif
 
+#ifndef TEST_FORWARD_RENDERER
+#define TEST_FORWARD_RENDERER 0
+#endif
+
+#ifndef TEST_PCG_SCATTER
+#define TEST_PCG_SCATTER 0
+#endif
+
+#ifndef TEST_GEOMETRY_API
+#define TEST_GEOMETRY_API 0
+#endif
+
+#ifndef TEST_FIELD_DRIVEN_SCATTER
+#define TEST_FIELD_DRIVEN_SCATTER 0
+#endif
+
 class Test
 {
 public:

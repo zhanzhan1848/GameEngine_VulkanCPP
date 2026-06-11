@@ -2,6 +2,8 @@
 
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Volume/VolumeTypes.h"
+#include "Graphics/Volume/FroxelTypes.h"
+#include "Graphics/Fluid/FluidTypes.h"
 #include "Utilities/MathTypes.h"
 
 namespace primal::graphics {
@@ -21,6 +23,8 @@ enum class RenderPassID : u32 {
     GIGather,
     VolumePass,
     VolumeRenderer,
+    FroxelFog,
+    FluidRender,
     FusionComposite,
     FinalBlit,
     Count
@@ -71,6 +75,8 @@ struct PipelineQualityConfig {
     bool enable_final_blit        = true;
     bool enable_volume_pass       = false;
     bool enable_volume_renderer   = false;
+    bool enable_froxel_fog        = false;
+    bool enable_fluid_render      = false;
 
     // Quality settings
     lumen::ShadowQuality shadow_quality = lumen::ShadowQuality::PCF_16;
@@ -92,6 +98,8 @@ struct RenderPipelineSettings {
     SceneLightingParams    lighting;
     PipelineAdvancedParams advanced;
     volume::VolumeRuntimeParams volume;
+    volume::FroxelGridConfig froxel;
+    fluid::FluidConfig fluid;
 };
 
 // ============================================================================

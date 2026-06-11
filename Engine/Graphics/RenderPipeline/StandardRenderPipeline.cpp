@@ -11,6 +11,11 @@
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Components/Entity.h"
+#include "Components/Transform.h"
+#include "EngineAPI/GameEntity.h"
+#include "EngineAPI/GameEntity_impl.h"
+#include "Components/Material.h"
 #include <iostream>
 #include <chrono>
 
@@ -170,8 +175,11 @@ bool StandardRenderPipeline::IsPassActive(RenderPassID pass) const {
         case RenderPassID::SSGI:             return ssgi_pass_ && ssgi_pass_->IsInitialized();
         case RenderPassID::ScreenProbes:     return screen_probe_pass_ && screen_probe_pass_->IsInitialized();
         case RenderPassID::GIGather:         return gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized();
-        case RenderPassID::VolumePass:       return volume_pass_ && volume_pass_->IsInitialized();
+        case RenderPassID::VolumePass:       return (volume_pass_ && volume_pass_->IsInitialized()) ||
+                                                     (froxel_fog_pass_ && froxel_fog_pass_->IsInitialized());
         case RenderPassID::VolumeRenderer:   return volume_renderer_ && volume_renderer_->IsInitialized();
+        case RenderPassID::FroxelFog:       return froxel_fog_pass_ && froxel_fog_pass_->IsInitialized();
+        case RenderPassID::FluidRender:     return fluid_render_pass_ && fluid_render_pass_->IsInitialized();
         case RenderPassID::FusionComposite:  return fusion_module_ != nullptr;
         case RenderPassID::FinalBlit:        return final_blit_module_ != nullptr;
         default: return false;
@@ -268,6 +276,11 @@ void StandardRenderPipeline::InitializeSubsystems() {
         globalSDF.Initialize(device_);
     }
 
+    // PCG SDF readback — matches cascade 0 resolution
+    if (globalSDF.IsInitialized()) {
+        pcg_sdf_readback_initialized_ = pcg_sdf_readback_.Initialize(device_, globalSDF.GetCascade(0).resolution);
+    }
+
     // --- Shaders are NOT compiled here ---
     // The caller must set shader handles via SetShaderHandles() before Render().
     // Modules that receive INVALID_SHADER handles will skip their passes gracefully.
@@ -304,15 +317,24 @@ void StandardRenderPipeline::InitializeSubsystems() {
 
     // --- Lumen passes ---
     InitializeLumenPasses();
+
+    // --- Forward renderer (editor mode) ---
+    forward_renderer_ = std::make_unique<ForwardSceneRenderer>();
+    forward_renderer_->Initialize(device_, render_width_, render_height_);
 }
 
 void StandardRenderPipeline::ShutdownSubsystems() {
+    if (pcg_sdf_readback_initialized_) { pcg_sdf_readback_.Shutdown(); pcg_sdf_readback_initialized_ = false; }
+
     if (sc_ddgi_module_) { sc_ddgi_module_->Shutdown(); sc_ddgi_module_.reset(); }
     if (fusion_module_) { fusion_module_->Shutdown(); fusion_module_.reset(); }
     if (gi_gather_module_) { gi_gather_module_->Shutdown(); gi_gather_module_.reset(); }
     if (final_blit_module_) { final_blit_module_->Shutdown(); final_blit_module_.reset(); }
     if (deferred_module_) { deferred_module_->Shutdown(); deferred_module_.reset(); }
     if (shadow_module_) { shadow_module_->Shutdown(); shadow_module_.reset(); }
+
+    // Forward renderer (editor mode)
+    if (forward_renderer_) { forward_renderer_->Shutdown(); forward_renderer_.reset(); }
 
     if (scene_snapshot_) { scene_snapshot_->Shutdown(); scene_snapshot_.reset(); }
     if (color_history_) { color_history_->Shutdown(); color_history_.reset(); }
@@ -432,9 +454,29 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             volume_renderer_.reset();
         }
     }
+
+    // Froxel Fog (frustum-aligned volumetric fog)
+    if (settings_.quality.enable_froxel_fog) {
+        froxel_fog_pass_ = std::make_unique<volume::FroxelFogPass>();
+        if (!froxel_fog_pass_->Initialize(device_, render_width_, render_height_, settings_.froxel)) {
+            std::cerr << "[FroxelFog] Init failed" << std::endl;
+            froxel_fog_pass_.reset();
+        }
+    }
+
+    // Fluid Render (splat-based fluid surface)
+    if (settings_.quality.enable_fluid_render) {
+        fluid_render_pass_ = std::make_unique<fluid::FluidRenderPass>();
+        if (!fluid_render_pass_->Initialize(device_, render_width_, render_height_, settings_.fluid)) {
+            std::cerr << "[FluidRender] Init failed" << std::endl;
+            fluid_render_pass_.reset();
+        }
+    }
 }
 
 void StandardRenderPipeline::ShutdownLumenPasses() {
+    if (fluid_render_pass_) { fluid_render_pass_->Shutdown(); fluid_render_pass_.reset(); }
+    if (froxel_fog_pass_) { froxel_fog_pass_->Shutdown(); froxel_fog_pass_.reset(); }
     if (volume_renderer_) { volume_renderer_->Shutdown(); volume_renderer_.reset(); }
     if (volume_pass_) { volume_pass_->Shutdown(); volume_pass_.reset(); }
     if (static_probe_volume_) { static_probe_volume_->Shutdown(); static_probe_volume_.reset(); }
@@ -481,6 +523,11 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
         globalSDF.Update(*scene_snapshot_, frameCount_, camera_position_);
     }
 
+    // PCG SDF readback: consume previous frame's GPU data
+    if (pcg_sdf_readback_initialized_) {
+        pcg_sdf_readback_.ReadbackData();
+    }
+
     // DDGI probe origin stays fixed at world origin (matches TestNaniteStreamingPipeline).
     // UpdateProbeOrigin causes relocation shifts that reset irradiance data, producing
     // "light turning off" artifacts in shadowed areas. The static grid (32x16x32 = 124
@@ -492,6 +539,118 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     // Streaming LRU update
     if (streaming_manager_) {
         streaming_manager_->UpdateLRU(frameCount_, camera_position_);
+    }
+}
+
+// ============================================================================
+// PCG Entity → RenderScene Sync (Phase 3c)
+// ============================================================================
+
+void StandardRenderPipeline::SyncEntitiesToRenderScene(RenderScene& scene) {
+    if (!forward_renderer_) return;
+    if (static_entity_ids_.empty() && pcg_entity_ids_.empty()) return;
+
+    // Lambda to sync a group of entity IDs
+    auto syncGroup = [&](const std::vector<id::id_type>& ids,
+                         const std::vector<u32>& slots) {
+        for (size_t i = 0; i < ids.size(); i++) {
+            id::id_type eid = ids[i];
+
+            if (!game_entity::is_alive(game_entity::entity_id{eid})) {
+                scene.RemoveProxy(eid);
+                continue;
+            }
+
+            math::m4x4 world, inv_world;
+            transform::get_transform_matrices(game_entity::entity_id{eid}, world, inv_world);
+
+            u32 slot = slots[i];
+            auto* meshInfo = forward_renderer_->GetMeshInfo(slot);
+            if (!meshInfo || !meshInfo->mesh) continue;
+
+            id::id_type meshId = meshInfo->mesh->GetEntityId();
+            id::id_type materialId = meshInfo->gpuMaterialId;
+
+            RenderProxy proxy = RenderProxy::Create(eid, meshId, materialId);
+            proxy.UpdateTransform(world);
+
+            game_entity::entity entity{game_entity::entity_id{eid}};
+            if (entity.Has<component::Material>()) {
+                auto mc = entity.Get<component::Material>();
+                proxy.technique = material::get_technique(mc);
+                proxy.roughness = material::get_roughness(mc);
+                proxy.metallic  = material::get_metallic(mc);
+                material::get_base_color(mc, proxy.base_color);
+            }
+
+            scene.UpdateProxy(eid, proxy);
+        }
+    };
+
+    syncGroup(static_entity_ids_, static_mesh_slot_indices_);
+    syncGroup(pcg_entity_ids_, pcg_mesh_slot_indices_);
+}
+
+id::id_type StandardRenderPipeline::RegisterMeshEntity(id::id_type geometry_content_id,
+                                                         const id::id_type* texture_content_ids,
+                                                         u32 texture_count) {
+    if (!forward_renderer_ || geometry_content_id == id::invalid_id) return id::invalid_id;
+
+    // Extract texture IDs (with fallback to invalid_id)
+    id::id_type albedo_id = (texture_count > 0) ? texture_content_ids[0] : id::invalid_id;
+    id::id_type normal_id = (texture_count > 1) ? texture_content_ids[1] : id::invalid_id;
+    id::id_type orm_id    = (texture_count > 2) ? texture_content_ids[2] : id::invalid_id;
+
+    // Register mesh resource with ForwardSceneRenderer
+    u32 slot = forward_renderer_->RegisterMeshResource(
+        geometry_content_id, albedo_id, normal_id, orm_id);
+
+    if (slot == (u32)-1) {
+        std::cerr << "[StandardRenderPipeline] RegisterMeshEntity: failed for geometry "
+                  << geometry_content_id << std::endl;
+        return id::invalid_id;
+    }
+
+    // Create ECS entity with identity transform
+    transform::init_info tf{};
+    tf.position[0] = 0.f; tf.position[1] = 0.f; tf.position[2] = 0.f;
+    tf.rotation[0] = 0.f; tf.rotation[1] = 0.f;
+    tf.rotation[2] = 0.f; tf.rotation[3] = 1.f;
+    tf.scale[0] = 1.f; tf.scale[1] = 1.f; tf.scale[2] = 1.f;
+
+    game_entity::entity_info info{};
+    info.transform = &tf;
+
+    game_entity::entity entity = game_entity::create(info);
+    if (!entity.is_valid()) {
+        forward_renderer_->UnregisterMeshResource(slot);
+        return id::invalid_id;
+    }
+
+    id::id_type eid = entity.get_id();
+    static_entity_ids_.push_back(eid);
+    static_mesh_slot_indices_.push_back(slot);
+
+    return eid;
+}
+
+void StandardRenderPipeline::UnregisterMeshEntity(id::id_type entity_id) {
+    // Find and remove from static entity lists
+    for (size_t i = 0; i < static_entity_ids_.size(); i++) {
+        if (static_entity_ids_[i] == entity_id) {
+            forward_renderer_->UnregisterMeshResource(static_mesh_slot_indices_[i]);
+
+            // Swap with last and pop
+            static_entity_ids_[i] = static_entity_ids_.back();
+            static_entity_ids_.pop_back();
+            static_mesh_slot_indices_[i] = static_mesh_slot_indices_.back();
+            static_mesh_slot_indices_.pop_back();
+
+            // Destroy ECS entity
+            game_entity::entity e{game_entity::entity_id{entity_id}};
+            if (e.is_valid()) game_entity::remove(game_entity::entity_id{entity_id});
+            return;
+        }
     }
 }
 
@@ -674,17 +833,11 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
-    // Step 4.5: Volume Ray March
+    // Step 4.5: Volume (Froxel Fog or Ray March)
     // ========================================================================
 
-    volume::VolumeOutput volumeOut;
-    if (volume_pass_ && volume_pass_->IsInitialized()) {
-        volume::VolumeInputs volIn;
-        volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
-        volIn.scene_color = deferredOut.deferred_output_rg;
-        volIn.shadow_map = shadowOut.shadow_visibility_rg;
-
-        // SDF cascades from GlobalSDF
+    // Helper: collect SDF cascade RG handles (shared by both VolumePass and FroxelFogPass)
+    auto collectSDFCascades = [&](auto& volIn) {
         auto& globalSDF = nanite::GlobalSDF::Get();
         if (globalSDF.IsInitialized()) {
             for (u32 c = 0; c < std::min(3u, globalSDF.GetConfig().cascade_count); ++c) {
@@ -698,6 +851,38 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 }
             }
         }
+    };
+
+    volume::VolumeOutput volumeOut;
+    if (froxel_fog_pass_ && froxel_fog_pass_->IsInitialized()) {
+        volume::FroxelInputs froxelIn;
+        froxelIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+        froxelIn.scene_color = deferredOut.deferred_output_rg;
+        froxelIn.shadow_map = shadowOut.shadow_visibility_rg;
+        froxelIn.shadow_matrix0 = shadowOut.shadow_matrix0;
+        froxelIn.shadow_matrix1 = shadowOut.shadow_matrix1;
+        collectSDFCascades(froxelIn);
+
+        volume::VolumeCameraData volCam{};
+        volCam.camera_position = camera_position_;
+        volCam.view_matrix = view_matrix_;
+        volCam.proj_matrix = proj_matrix_;
+        volCam.light_direction = Normalize(settings_.lighting.light_direction);
+        volCam.light_color = {settings_.lighting.light_color.x, settings_.lighting.light_color.y, settings_.lighting.light_color.z};
+        volCam.frame_index = static_cast<u32>(frameCount_);
+        froxelIn.camera_data = volCam;
+        froxelIn.width = render_width_;
+        froxelIn.height = render_height_;
+
+        auto froxelOut = froxel_fog_pass_->AddPass(graph, froxelIn);
+        volumeOut.volume_scatter = froxelOut.volume_scatter;
+        volumeOut.valid = froxelOut.valid;
+    } else if (volume_pass_ && volume_pass_->IsInitialized()) {
+        volume::VolumeInputs volIn;
+        volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+        volIn.scene_color = deferredOut.deferred_output_rg;
+        volIn.shadow_map = shadowOut.shadow_visibility_rg;
+        collectSDFCascades(volIn);
 
         volume::VolumeCameraData volCam{};
         volCam.camera_position = camera_position_;
@@ -710,6 +895,23 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         volIn.width = render_width_;
         volIn.height = render_height_;
         volumeOut = volume_pass_->AddPass(graph, volIn);
+    }
+
+    // ========================================================================
+    // Step 4.6: Fluid Render
+    // ========================================================================
+
+    fluid::FluidOutput fluidOut;
+    if (fluid_render_pass_ && fluid_render_pass_->IsInitialized()) {
+        fluid::FluidInputs fluidIn;
+        fluidIn.view_matrix = view_matrix_;
+        fluidIn.proj_matrix = proj_matrix_;
+        fluidIn.camera_position = camera_position_;
+        fluidIn.scene_color = deferredOut.deferred_output_rg;
+        fluidIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Fluid", gpuDraw.GetGBufferDepthSampleable());
+        fluidIn.width = render_width_;
+        fluidIn.height = render_height_;
+        fluidOut = fluid_render_pass_->AddPass(graph, fluidIn);
     }
 
     // ========================================================================
@@ -941,6 +1143,23 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
     UpdatePerFrame(scene, view);
 
+    // --- Editor mode: lightweight forward rendering ---
+    if (editor_mode_ && forward_renderer_) {
+        // Sync entities to RenderScene
+        if (!static_entity_ids_.empty() || !pcg_entity_ids_.empty()) {
+            SyncEntitiesToRenderScene(scene);
+            forward_renderer_->SetRenderScene(&scene);
+        }
+        // Sync geometry entities for line overlay
+        if (!geometry_entity_ids_.empty()) {
+            forward_renderer_->SetGeometryEntities(geometry_entity_ids_);
+        }
+        forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
+                                   target, cbIdx % 3);
+        frameCount_++;
+        return;
+    }
+
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
 
     // Culling
@@ -1144,9 +1363,46 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 spRadiance, spCam, static_cast<u32>(frameCount_));
         }
 
-        // --- Volume Ray March ---
+        // --- Volume (Froxel Fog or Ray March) ---
         volume::VolumeOutput volumeOut;
-        if (volume_pass_ && volume_pass_->IsInitialized()) {
+        if (froxel_fog_pass_ && froxel_fog_pass_->IsInitialized()) {
+            volume::FroxelInputs froxelIn;
+            froxelIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+            froxelIn.scene_color = deferredOut.deferred_output_rg;
+            froxelIn.shadow_map = shadowOut.shadow_visibility_rg;
+            froxelIn.shadow_matrix0 = shadowOut.shadow_matrix0;
+            froxelIn.shadow_matrix1 = shadowOut.shadow_matrix1;
+
+            auto& globalSDF = nanite::GlobalSDF::Get();
+            if (globalSDF.IsInitialized()) {
+                for (u32 c = 0; c < std::min(3u, globalSDF.GetConfig().cascade_count); ++c) {
+                    const auto& cascade = globalSDF.GetCascade(c);
+                    if (cascade.sdf_texture != handles::INVALID_RESOURCE) {
+                        std::string name = "SDFCascade" + std::to_string(c) + "_Volume";
+                        auto sdfRG = graph.ImportResource(name, cascade.sdf_texture);
+                        if (c == 0) froxelIn.sdf_cascade_0 = sdfRG;
+                        else if (c == 1) froxelIn.sdf_cascade_1 = sdfRG;
+                        else if (c == 2) froxelIn.sdf_cascade_2 = sdfRG;
+                    }
+                }
+            }
+
+            volume::VolumeCameraData volCam{};
+            volCam.camera_position = camera_position_;
+            volCam.view_matrix = view_matrix_;
+            volCam.proj_matrix = proj_matrix_;
+            math::v3 lightDir = Normalize(settings_.lighting.light_direction);
+            volCam.light_direction = lightDir;
+            volCam.light_color = {settings_.lighting.light_color.x, settings_.lighting.light_color.y, settings_.lighting.light_color.z};
+            volCam.frame_index = static_cast<u32>(frameCount_);
+            froxelIn.camera_data = volCam;
+            froxelIn.width = render_width_;
+            froxelIn.height = render_height_;
+
+            auto froxelOut = froxel_fog_pass_->AddPass(graph, froxelIn);
+            volumeOut.volume_scatter = froxelOut.volume_scatter;
+            volumeOut.valid = froxelOut.valid;
+        } else if (volume_pass_ && volume_pass_->IsInitialized()) {
             volume::VolumeInputs volIn;
             volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
             volIn.scene_color = deferredOut.deferred_output_rg;
@@ -1178,6 +1434,20 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             volIn.width = render_width_;
             volIn.height = render_height_;
             volumeOut = volume_pass_->AddPass(graph, volIn);
+        }
+
+        // --- Fluid Render ---
+        fluid::FluidOutput fluidOut;
+        if (fluid_render_pass_ && fluid_render_pass_->IsInitialized()) {
+            fluid::FluidInputs fluidIn;
+            fluidIn.view_matrix = view_matrix_;
+            fluidIn.proj_matrix = proj_matrix_;
+            fluidIn.camera_position = camera_position_;
+            fluidIn.scene_color = deferredOut.deferred_output_rg;
+            fluidIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Fluid", gpuDraw.GetGBufferDepthSampleable());
+            fluidIn.width = render_width_;
+            fluidIn.height = render_height_;
+            fluidOut = fluid_render_pass_->AddPass(graph, fluidIn);
         }
 
         // --- Volume Object Rendering (forward, into scatter texture) ---
@@ -1311,7 +1581,53 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
         target_height_ = targetDesc.size.y;
     }
 
+    ApplyConfigChanges();
     UpdatePerFrame(scene, view);
+
+    // --- Editor mode: lightweight forward rendering ---
+    if (editor_mode_ && forward_renderer_) {
+        CommandBufferHandle cmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        if (cmdHandle == handles::INVALID_COMMAND_BUFFER) return;
+
+        RHICommandBuffer* cmd = GetCommandBuffer(cmdHandle);
+        if (!cmd || !cmd->Initialize() || !cmd->Begin()) {
+            if (cmd) device_->DestroyCommandBuffer(cmdHandle);
+            return;
+        }
+
+        // Sync entities to RenderScene
+        if (!static_entity_ids_.empty() || !pcg_entity_ids_.empty()) {
+            SyncEntitiesToRenderScene(scene);
+            forward_renderer_->SetRenderScene(&scene);
+        }
+        // Sync geometry entities for line overlay
+        if (!geometry_entity_ids_.empty()) {
+            forward_renderer_->SetGeometryEntities(geometry_entity_ids_);
+        }
+
+        forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
+                                   target, cbIdx % 3);
+
+        // PCG SDF: dispatch voxelization + issue readback after scene render
+        auto& gsdf = nanite::GlobalSDF::Get();
+        if (pcg_sdf_readback_initialized_ && gsdf.IsInitialized() && gsdf.IsVoxelizationReady()) {
+            gsdf.DispatchVoxelization(cmd, 0);
+            pcg_sdf_readback_.IssueReadback(cmd, gsdf.GetCascade(0).sdf_texture);
+        }
+
+        cmd->End();
+        QueueSubmitInfo submitInfo{};
+        submitInfo.cmdBuffer = cmdHandle;
+        submitInfo.signalFence = signalFence;
+        device_->Submit(submitInfo);
+        device_->DestroyCommandBuffer(cmdHandle);
+
+        frameCount_++;
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+        return;
+    }
 
     renderGraph_->Clear();
     BuildRenderGraph(target, cbIdx);

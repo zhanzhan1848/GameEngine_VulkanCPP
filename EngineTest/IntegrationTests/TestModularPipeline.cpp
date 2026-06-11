@@ -292,6 +292,13 @@ bool TestModularPipeline::InitializePipeline() {
     // Enable SPGI + Surface Cache (matching TestNaniteStreamingPipeline which initializes all passes)
     pipeline_->SetQualityOverride(true /*enable_screen_probes*/, true /*enable_surface_cache*/);
 
+    // Enable Froxel Fog
+    {
+        auto settings = pipeline_->GetSettings();
+        settings.quality.enable_froxel_fog = true;
+        pipeline_->UpdateSettings(settings);
+    }
+
     // Load Sponza scene (populates scene_ and wires materials to GPUDrivenDrawPipeline)
     if (!LoadSponzaScene()) {
         std::cerr << "[TestModularPipeline] Failed to load Sponza scene!" << std::endl;

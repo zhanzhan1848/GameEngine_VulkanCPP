@@ -19,6 +19,8 @@ static const RenderPassInfo kPassInfos[] = {
     {"GIGather",           "DDGI → half-res screen texture",             true},
     {"VolumePass",         "Post-process volumetric fog",                false},
     {"VolumeRenderer",     "Forward proxy cube volume rendering",        false},
+    {"FroxelFog",          "Frustum-aligned volumetric fog",             false},
+    {"FluidRender",        "Splat-based fluid rendering",                false},
     {"FusionComposite",    "Scene + GI + volume composite",              true},
     {"FinalBlit",          "Final blit to backbuffer",                   true},
 };
@@ -47,6 +49,8 @@ bool PipelineQualityConfig::IsPassEnabled(RenderPassID id) const {
         case RenderPassID::GIGather:           return enable_ddgi;
         case RenderPassID::VolumePass:         return enable_volume_pass;
         case RenderPassID::VolumeRenderer:     return enable_volume_renderer;
+        case RenderPassID::FroxelFog:         return enable_froxel_fog;
+        case RenderPassID::FluidRender:       return enable_fluid_render;
         case RenderPassID::FusionComposite:    return enable_ssgi || enable_ddgi;
         case RenderPassID::FinalBlit:          return enable_final_blit;
         default: return false;
@@ -66,6 +70,8 @@ void PipelineQualityConfig::SetPassEnabled(RenderPassID id, bool enabled) {
         case RenderPassID::GIGather:           break; // derived: enable DDGI instead
         case RenderPassID::VolumePass:         enable_volume_pass = enabled; break;
         case RenderPassID::VolumeRenderer:     enable_volume_renderer = enabled; break;
+        case RenderPassID::FroxelFog:         enable_froxel_fog = enabled; break;
+        case RenderPassID::FluidRender:       enable_fluid_render = enabled; break;
         case RenderPassID::FusionComposite:    break; // derived: enable SSGI or DDGI instead
         case RenderPassID::FinalBlit:          enable_final_blit = enabled; break;
         default: break;
@@ -154,6 +160,8 @@ static const ParamDescriptor kParams[] = {
     {"Enable ScreenProbes",     "Passes",  ParamType::Bool, {0,1,1},     OFF(quality.enable_screen_probes),     SZ(quality.enable_screen_probes),     nullptr},
     {"Enable VolumePass",       "Passes",  ParamType::Bool, {0,1,1},     OFF(quality.enable_volume_pass),       SZ(quality.enable_volume_pass),       nullptr},
     {"Enable VolumeRenderer",   "Passes",  ParamType::Bool, {0,1,1},     OFF(quality.enable_volume_renderer),   SZ(quality.enable_volume_renderer),   nullptr},
+    {"Enable FroxelFog",        "Passes",  ParamType::Bool, {0,1,1},     OFF(quality.enable_froxel_fog),        SZ(quality.enable_froxel_fog),        nullptr},
+    {"Enable FluidRender",      "Passes",  ParamType::Bool, {0,1,1},     OFF(quality.enable_fluid_render),      SZ(quality.enable_fluid_render),      nullptr},
     {"Enable FinalBlit",        "Passes",  ParamType::Bool, {0,1,1},     OFF(quality.enable_final_blit),        SZ(quality.enable_final_blit),        nullptr},
 
     // --- Quality ---

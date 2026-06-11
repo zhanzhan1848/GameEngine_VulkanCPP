@@ -19,128 +19,31 @@ using namespace metal;
 #include "../CommonFunction.metal"
 #include "DDGIVolumeData.metal"
 #include "SurfaceCacheData.metal"
+#include "SDFTraceCommon.metal"
 
 // ============================================================================
-// SDF Sampling Helper
+// DDGI-specific SDF trace wrapper (adapts DDGIVolumeData → shared trace params)
 // ============================================================================
 
-static float sampleSDFCascade(texture3d<float, access::sample> sdfTexture,
-                               float3 worldPos,
-                               float3 cascadeOrigin,
-                               float3 cascadeExtent)
-{
-    float3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
-
-    if (uvw.x < 0.0f || uvw.x > 1.0f ||
-        uvw.y < 0.0f || uvw.y > 1.0f ||
-        uvw.z < 0.0f || uvw.z > 1.0f) {
-        return 1e10f;
-    }
-
-    sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
-    return sdfTexture.sample(samp, uvw).r;
-}
-
-static bool isInsideCascade(float3 pos, float3 origin, float3 extent)
-{
-    float3 local = pos - origin;
-    return local.x >= 0.0f && local.x < extent.x &&
-           local.y >= 0.0f && local.y < extent.y &&
-           local.z >= 0.0f && local.z < extent.z;
-}
-
-// Sample the best available SDF cascade at a position
-static float sampleBestSDF(float3 pos,
+static SDFHitResult ddgiTraceSDF(
+    float3 rayOrigin, float3 rayDir, float maxDist,
     texture3d<float, access::sample> sdf0,
     texture3d<float, access::sample> sdf1,
     texture3d<float, access::sample> sdf2,
     constant DDGIVolumeData& vol)
 {
-    float d = 1e10f;
-    if (vol.SdfCascadeCount > 0 &&
-        isInsideCascade(pos, vol.SdfOrigins[0].xyz, vol.SdfExtents[0].xyz))
-        d = min(d, sampleSDFCascade(sdf0, pos, vol.SdfOrigins[0].xyz, vol.SdfExtents[0].xyz));
-    if (vol.SdfCascadeCount > 1 &&
-        isInsideCascade(pos, vol.SdfOrigins[1].xyz, vol.SdfExtents[1].xyz))
-        d = min(d, sampleSDFCascade(sdf1, pos, vol.SdfOrigins[1].xyz, vol.SdfExtents[1].xyz));
-    if (vol.SdfCascadeCount > 2 &&
-        isInsideCascade(pos, vol.SdfOrigins[2].xyz, vol.SdfExtents[2].xyz))
-        d = min(d, sampleSDFCascade(sdf2, pos, vol.SdfOrigins[2].xyz, vol.SdfExtents[2].xyz));
-    return d;
-}
+    float4 origins[3]  = { vol.SdfOrigins[0],  vol.SdfOrigins[1],  vol.SdfOrigins[2] };
+    float4 extents[3]  = { vol.SdfExtents[0],  vol.SdfExtents[1],  vol.SdfExtents[2] };
+    uint coarsest = min(2u, vol.SdfCascadeCount - 1u);
+    float fallbackStride = vol.SdfExtents[coarsest].x * 0.1f;
 
-// ============================================================================
-// Sphere Tracing
-// ============================================================================
+    SDFHitResult result = traceSDF_relaxed(
+        rayOrigin, rayDir, maxDist,
+        vol.SdfVoxelSizes[0].x, fallbackStride,
+        sdf0, sdf1, sdf2,
+        origins, extents, vol.SdfCascadeCount);
 
-struct SDFHitResult {
-    bool   hit;
-    float3 position;
-    float  distance;
-    float3 normal;
-};
-
-static SDFHitResult traceSDF(
-    float3 rayOrigin,
-    float3 rayDir,
-    float  maxDist,
-    texture3d<float, access::sample> sdf0,
-    texture3d<float, access::sample> sdf1,
-    texture3d<float, access::sample> sdf2,
-    constant DDGIVolumeData& vol)
-{
-    SDFHitResult result;
-    result.hit = false;
-    result.position = rayOrigin;
-    result.distance = maxDist;
-    result.normal = float3(0.0f);
-
-    float t = 0.0f;
-    float minStep = 0.01f;
-
-    for (uint step = 0; step < DDGI_MAX_SDF_STEPS; ++step) {
-        float3 pos = rayOrigin + rayDir * t;
-
-        float minDist = 1e10f;
-        bool insideAny = false;
-
-        // Single cascade per step (else-if) — reduces texture3D reads from
-        // 3/step to 1/step. Finest cascade first for best accuracy.
-        if (vol.SdfCascadeCount > 0 &&
-            isInsideCascade(pos, vol.SdfOrigins[0].xyz, vol.SdfExtents[0].xyz)) {
-            minDist = sampleSDFCascade(sdf0, pos, vol.SdfOrigins[0].xyz, vol.SdfExtents[0].xyz);
-            insideAny = true;
-        } else if (vol.SdfCascadeCount > 1 &&
-            isInsideCascade(pos, vol.SdfOrigins[1].xyz, vol.SdfExtents[1].xyz)) {
-            minDist = sampleSDFCascade(sdf1, pos, vol.SdfOrigins[1].xyz, vol.SdfExtents[1].xyz);
-            insideAny = true;
-        } else if (vol.SdfCascadeCount > 2 &&
-            isInsideCascade(pos, vol.SdfOrigins[2].xyz, vol.SdfExtents[2].xyz)) {
-            minDist = sampleSDFCascade(sdf2, pos, vol.SdfOrigins[2].xyz, vol.SdfExtents[2].xyz);
-            insideAny = true;
-        }
-
-        if (!insideAny) {
-            uint coarsest = min(2u, vol.SdfCascadeCount - 1);
-            t += vol.SdfExtents[coarsest].x * 0.1f;
-            if (t > maxDist) break;
-            continue;
-        }
-
-        float hitThreshold = vol.SdfVoxelSizes[0].x * 0.5f;
-        if (minDist < hitThreshold) {
-            result.hit = true;
-            result.position = pos;
-            result.distance = t;
-            // No gradient normal — saves 6×sampleBestSDF = 18 texture3D reads.
-            // DDGI indirect lighting doesn't need precise normals.
-            return result;
-        }
-
-        t += max(minDist, minStep);
-        if (t > maxDist) break;
-    }
-
+    // No gradient normal — saves 6×sampleBestSDF = 18 texture3D reads.
     return result;
 }
 
@@ -219,7 +122,7 @@ kernel void ddgi_trace_rays(
     float3 rayDir = ddgiRayDirection(localRayIdx, volume.RaysPerProbe, volume.FrameIndex);
 
     // Trace ray through SDF
-    SDFHitResult hit = traceSDF(
+    SDFHitResult hit = ddgiTraceSDF(
         probePos, rayDir, volume.RayMaxDistance,
         sdf_cascade_0, sdf_cascade_1, sdf_cascade_2, volume);
 
@@ -310,44 +213,44 @@ kernel void ddgi_trace_sdf(
     float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
     float3 rayDir = ddgiRayDirection(tid, volume.RaysPerProbe, volume.FrameIndex);
 
-    // 4-step sphere tracing (texture3D reads only)
+    // Relaxed sphere tracing (texture3D reads only)
     float t = 0.0f;
     float hitDistance = -1.0f;
+
+    float4 origins[3] = { volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2] };
+    float4 extents[3] = { volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2] };
+    float hitThreshold = volume.SdfVoxelSizes[0].x * 0.5f;
+    float minStep = volume.SdfVoxelSizes[0].x * 0.25f;
+    uint coarsest = min(2u, volume.SdfCascadeCount - 1u);
+    float fallbackStride = volume.SdfExtents[coarsest].x * 0.1f;
 
     for (uint step = 0; step < DDGI_MAX_SDF_STEPS; ++step) {
         float3 pos = probePos + rayDir * t;
 
-        float d = 1e10f;
-        bool insideAny = false;
+        // else-if cascade selection — 1 texture3D read
+        float d = sampleBestSDF_elseIf(pos, sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
+                                        origins, extents, volume.SdfCascadeCount);
 
-        if (volume.SdfCascadeCount > 0 &&
-            isInsideCascade(pos, volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz)) {
-            d = sampleSDFCascade(sdf_cascade_0, pos, volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz);
-            insideAny = true;
-        } else if (volume.SdfCascadeCount > 1 &&
-            isInsideCascade(pos, volume.SdfOrigins[1].xyz, volume.SdfExtents[1].xyz)) {
-            d = sampleSDFCascade(sdf_cascade_1, pos, volume.SdfOrigins[1].xyz, volume.SdfExtents[1].xyz);
-            insideAny = true;
-        } else if (volume.SdfCascadeCount > 2 &&
-            isInsideCascade(pos, volume.SdfOrigins[2].xyz, volume.SdfExtents[2].xyz)) {
-            d = sampleSDFCascade(sdf_cascade_2, pos, volume.SdfOrigins[2].xyz, volume.SdfExtents[2].xyz);
-            insideAny = true;
-        }
-
-        if (!insideAny) {
-            uint coarsest = min(2u, volume.SdfCascadeCount - 1u);
-            t += volume.SdfExtents[coarsest].x * 0.1f;
+        // Outside all cascades — fallback stride
+        if (d >= 1e9f) {
+            t += fallbackStride;
             if (t > volume.RayMaxDistance) break;
             continue;
         }
 
-        float hitThreshold = volume.SdfVoxelSizes[0].x * 0.5f;
         if (d < hitThreshold) {
             hitDistance = t;
             break;
         }
 
-        t += max(d, 0.01f);
+        // Relaxed advancement: overstep when far, conservative when close
+        float advance;
+        if (d > hitThreshold * 4.0f) {
+            advance = d * 1.2f;
+        } else {
+            advance = max(d, minStep);
+        }
+        t += advance;
         if (t > volume.RayMaxDistance) break;
     }
 

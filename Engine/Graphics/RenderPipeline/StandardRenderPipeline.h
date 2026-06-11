@@ -12,7 +12,10 @@
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Volume/VolumePass.h"
 #include "Graphics/Volume/VolumeRenderer.h"
+#include "Graphics/Volume/FroxelFogPass.h"
+#include "Graphics/Fluid/FluidRenderPass.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
+#include "Graphics/RenderPipeline/Modules/ForwardSceneRenderer.h"
 #include "Graphics/RenderPipeline/Modules/ShadowMapModule.h"
 #include "Graphics/RenderPipeline/Modules/DeferredLightingModule.h"
 #include "Graphics/RenderPipeline/Modules/FinalBlitModule.h"
@@ -22,6 +25,7 @@
 #include "Graphics/Nanite/DepthHistoryManager.h"
 #include "Graphics/Nanite/ColorHistoryManager.h"
 #include "Graphics/Nanite/HZBSystem.h"
+#include "Graphics/PCG/PCGSDFReadbackManager.h"
 #include <memory>
 
 namespace primal::graphics {
@@ -72,6 +76,10 @@ public:
 
     lumen::StaticProbeVolume* GetStaticProbeVolume() const { return static_probe_volume_.get(); }
 
+    // PCG SDF readback — provides real GlobalSDF data for PCG scatter
+    pcg::PCGSDFReadbackManager* GetPCGSDFReadback() { return &pcg_sdf_readback_; }
+    const pcg::PCGSDFReadbackManager* GetPCGSDFReadback() const { return &pcg_sdf_readback_; }
+
     /// Set logical viewport dimensions.
     /// Actual render resolution = logical × quality_config_.render_scale.
     void SetViewportSize(u32 width, u32 height) {
@@ -113,6 +121,55 @@ public:
     }
 
     rhi::RHIDeviceBase* GetDevice() const { return device_; }
+
+    // --- Editor mode (lightweight forward rendering) ---
+    void SetEditorMode(bool enabled) { editor_mode_ = enabled; }
+    bool IsEditorMode() const { return editor_mode_; }
+    bool LoadEditorScene(const std::string& model_path) {
+        if (!forward_renderer_) return false;
+        return forward_renderer_->LoadScene(model_path);
+    }
+    ForwardSceneRenderer* GetForwardRenderer() const { return forward_renderer_.get(); }
+
+    // --- PCG Entity integration (Phase 3c/3d) ---
+    void SetPCGEntities(std::vector<id::id_type> entity_ids,
+                        std::vector<u32> mesh_slot_indices) {
+        pcg_entity_ids_ = std::move(entity_ids);
+        pcg_mesh_slot_indices_ = std::move(mesh_slot_indices);
+    }
+    void ClearPCGEntities() {
+        pcg_entity_ids_.clear();
+        pcg_mesh_slot_indices_.clear();
+    }
+
+    // --- Static scene Entity integration (Phase 3e) ---
+    void SetStaticEntities(std::vector<id::id_type> entity_ids,
+                           std::vector<u32> mesh_slot_indices) {
+        static_entity_ids_ = std::move(entity_ids);
+        static_mesh_slot_indices_ = std::move(mesh_slot_indices);
+    }
+    void ClearStaticEntities() {
+        static_entity_ids_.clear();
+        static_mesh_slot_indices_.clear();
+    }
+
+    // --- Geometry entity integration (Phase 3.5) ---
+    void SetGeometryEntities(std::vector<id::id_type> entity_ids) {
+        geometry_entity_ids_ = std::move(entity_ids);
+    }
+    void ClearGeometryEntities() {
+        geometry_entity_ids_.clear();
+    }
+
+    // --- Content system entity registration (Phase 4) ---
+    // Register a mesh resource + create ECS entity → enters render pipeline
+    // geometry_content_id: content system mesh ID (from create_resource)
+    // texture_content_ids: [albedo, normal, ORM] content IDs (invalid_id for fallback)
+    // Returns entity ID, or invalid_id on failure
+    id::id_type RegisterMeshEntity(id::id_type geometry_content_id,
+                                   const id::id_type* texture_content_ids,
+                                   u32 texture_count);
+    void UnregisterMeshEntity(id::id_type entity_id);
 
     /// Hot-reload a shader. Returns true on success.
     bool ReloadShader(rhi::ShaderHandle shader, const void* data, u32 size) override;
@@ -169,6 +226,14 @@ private:
     // --- Volume Rendering ---
     std::unique_ptr<volume::VolumePass> volume_pass_;
     std::unique_ptr<volume::VolumeRenderer> volume_renderer_;
+    std::unique_ptr<volume::FroxelFogPass> froxel_fog_pass_;
+
+    // --- Fluid Rendering ---
+    std::unique_ptr<fluid::FluidRenderPass> fluid_render_pass_;
+
+    // --- Forward Renderer (Editor mode) ---
+    std::unique_ptr<ForwardSceneRenderer> forward_renderer_;
+    bool editor_mode_{false};
 
     // --- Pipeline modules ---
     std::unique_ptr<ShadowMapModule> shadow_module_;
@@ -193,6 +258,23 @@ private:
     // --- Utility textures ---
     rhi::ResourceHandle black_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle white_texture_{rhi::handles::INVALID_RESOURCE};
+
+    // --- PCG SDF readback ---
+    pcg::PCGSDFReadbackManager pcg_sdf_readback_;
+    bool pcg_sdf_readback_initialized_{false};
+
+    // --- PCG Entity → RenderScene bridge (Phase 3c) ---
+    std::vector<id::id_type> pcg_entity_ids_;
+    std::vector<u32> pcg_mesh_slot_indices_;
+
+    // --- Static Entity → RenderScene bridge (Phase 3e) ---
+    std::vector<id::id_type> static_entity_ids_;
+    std::vector<u32> static_mesh_slot_indices_;
+
+    // --- Geometry Entity bridge (Phase 3.5) ---
+    std::vector<id::id_type> geometry_entity_ids_;
+
+    void SyncEntitiesToRenderScene(RenderScene& scene);
 
     // --- Persistent render state ---
     math::m4x4 view_matrix_{};

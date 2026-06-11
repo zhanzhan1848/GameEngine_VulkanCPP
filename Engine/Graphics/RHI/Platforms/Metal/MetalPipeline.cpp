@@ -364,6 +364,18 @@ MTL::RenderPipelineDescriptor* MetalPipeline::CreateRenderPipelineDescriptor(con
     MetalShader* vs = device_.GetShader(desc.vertexShader);
     MetalShader* ps = device_.GetShader(desc.pixelShader);
 
+    // Diagnostic: detect silent shader creation failure
+    if (!vs) {
+        std::cerr << "[PIPELINE_DIAG] VERTEX shader is NULL! handle=" << (u32)desc.vertexShader << std::endl;
+    } else if (!vs->GetFunction()) {
+        std::cerr << "[PIPELINE_DIAG] VERTEX shader function is NULL!" << std::endl;
+    }
+    if (!ps) {
+        std::cerr << "[PIPELINE_DIAG] FRAGMENT shader is NULL! handle=" << (u32)desc.pixelShader << std::endl;
+    } else if (!ps->GetFunction()) {
+        std::cerr << "[PIPELINE_DIAG] FRAGMENT shader function is NULL!" << std::endl;
+    }
+
     if (vs) pipelineDesc->setVertexFunction(vs->GetFunction());
     if (ps) pipelineDesc->setFragmentFunction(ps->GetFunction());
 

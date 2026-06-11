@@ -2,6 +2,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/RHI/Core/RHIGeometry.h"
+#include "Graphics/Material/ShaderTechnique.h"
 
 namespace primal::graphics {
 
@@ -15,6 +16,11 @@ struct RenderProxy {
     id::id_type meshId;         ///< 引用 RenderMesh 的 ID
     id::id_type materialId;     ///< 引用 MaterialInstance 的 ID
     id::id_type entityId;       ///< 对应的 GamePlay Entity ID
+    ShaderTechnique technique{ShaderTechnique::Opaque}; ///< 材质渲染技术类型
+    f32 base_color[4]{1.f, 1.f, 1.f, 1.f};  ///< albedo tint
+    f32 roughness{0.5f};                     ///< PBR roughness
+    f32 metallic{0.0f};                      ///< PBR metallic
+    f32 alpha_cutoff{0.5f};                  ///< alpha clip threshold
 
     RenderProxy();
     RenderProxy(id::id_type entity, id::id_type mesh, id::id_type material);

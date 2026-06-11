@@ -6,6 +6,8 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/Field/FieldRegistry.h"
+#include "Graphics/Field/FieldView.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -589,15 +591,24 @@ VolumeOutput VolumePass::AddPass(RenderGraph& graph, const VolumeInputs& inputs)
                     vp._pad0[0] = 0.0f;
                     vp._pad0[1] = 0.0f;
 
-                    // SDF cascade data (zeros — populated by caller if available)
-                    for (int i = 0; i < 3; i++) {
-                        vp.SdfOrigins[i]    = {0, 0, 0, 0};
-                        vp.SdfVoxelSizes[i] = {0, 0, 0, 0};
-                        vp.SdfExtents[i]    = {0, 0, 0, 0};
-                        vp.SdfResolutions[i] = 0;
+                    // SDF cascade data — populated from FieldRegistry via FieldView
+                    {
+                        field::FieldDescriptor sdf_cascades[4];
+                        u32 count = field::FieldRegistry::Get().FindCascaded(
+                            field::FieldSemantic::GlobalSDF, sdf_cascades, 4);
+                        if (count > 0) {
+                            field::FieldView::WriteSDFToVolumeParams(sdf_cascades, count, vp);
+                        } else {
+                            for (int i = 0; i < 3; i++) {
+                                vp.SdfOrigins[i]    = {0, 0, 0, 0};
+                                vp.SdfVoxelSizes[i] = {0, 0, 0, 0};
+                                vp.SdfExtents[i]    = {0, 0, 0, 0};
+                                vp.SdfResolutions[i] = 0;
+                            }
+                            vp.SdfCascadeCount = 0;
+                        }
+                        vp._pad1[0] = 0.0f;
                     }
-                    vp.SdfCascadeCount = 0;
-                    vp._pad1[0] = 0.0f;
 
                     // Light
                     vp.LightDirection = {inputs.camera_data.light_direction.x,
