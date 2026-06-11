@@ -22,7 +22,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Folder Include="Models\" />
     <AvaloniaResource Include="Assets\**" />
   </ItemGroup>
 
@@ -32,11 +31,24 @@
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.0" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.0" />
     <PackageReference Include="Avalonia.ReactiveUI" Version="11.3.0" />
-    <!--Condition below is needed to remove Avalonia.Diagnostics package from build output in Release configuration.-->
     <PackageReference Include="Avalonia.Diagnostics" Version="11.3.0">
       <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
       <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
     </PackageReference>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.1" />
   </ItemGroup>
+
+  <PropertyGroup>
+    <PostBuildEvent Condition="Exists('$(MSBuildThisFileDirectory)../../Darwin/DebugEditor/libEngineDLL.dylib')">copy /Y "$(MSBuildThisFileDirectory)..\..\Darwin\DebugEditor\libEngineDLL.dylib" "$(BaseOutputPath)\$(Configuration)" &amp; if exist "$(MSBuildThisFileDirectory)..\..\Darwin\DebugEditor\libContentTools.dylib" copy /Y "$(MSBuildThisFileDirectory)..\..\Darwin\DebugEditor\libContentTools.dylib" "$(BaseOutputPath)\$(Configuration)"</PostBuildEvent>
+  </PropertyGroup>
+
+  <Target Name="CopyNativeEngineLibsUnix" AfterTargets="Build" Condition="'$(OS)' != 'Windows_NT' AND Exists('$(MSBuildThisFileDirectory)../../Darwin/DebugEditor/libEngineDLL.dylib')">
+    <ItemGroup>
+      <_NativeLibs Include="../../Darwin/DebugEditor/libEngineDLL.dylib"/>
+      <_NativeLibs Include="../../Darwin/DebugEditor/libContentTools.dylib" Condition="Exists('../../Darwin/DebugEditor/libContentTools.dylib')"/>
+    </ItemGroup>
+    <Copy SourceFiles="@(_NativeLibs)" DestinationFolder="$(BaseOutputPath)/$(Configuration)" SkipUnchangedFiles="true"/>
+    <Exec Command="ln -sf libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib" Condition="!Exists('$(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib')"/>
+    <Exec Command="ln -sf libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/PrimalEngine.dylib" Condition="!Exists('$(BaseOutputPath)/$(Configuration)/PrimalEngine.dylib')"/>
+  </Target>
 </Project>

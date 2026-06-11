@@ -1,5 +1,6 @@
 #include "AsyncResourceLoader.h"
 #include "ContentToEngine.h"
+#include "../JobSystem/JobSystem.h"
 
 // STB image implementation - must be defined in exactly one translation unit
 #define STB_IMAGE_IMPLEMENTATION
@@ -24,11 +25,19 @@ AsyncResourceLoader* AsyncResourceLoader::Get()
 
 bool AsyncResourceLoader::Initialize()
 {
+    if (!jobsystem::JobSystem::IsRunning())
+    {
+        if (!jobsystem::JobSystem::Initialize())
+        {
+            return false;
+        }
+    }
+
     if (s_instance)
     {
         return true;
     }
-    
+
     s_instance = new AsyncResourceLoader();
     return true;
 }

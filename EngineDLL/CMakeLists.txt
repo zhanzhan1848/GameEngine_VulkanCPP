@@ -8,10 +8,15 @@ cmake_minimum_required(VERSION 3.20)
 set(SOURCE_FILES
     "DllMain.cpp"
     "EngineAPI.cpp"
+    "EngineAPI_win32.cpp"
     "EntityAPI.cpp"
     "AssetAPI.cpp"
     "RenderPipelineAPI.cpp"
 )
+
+if(APPLE)
+    list(APPEND SOURCE_FILES "EngineAPI_mac.mm")
+endif()
 
 set(HEADER_FILES
     "Common.h"
@@ -141,7 +146,7 @@ endif()
 # 链接依赖项
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Engine
-    # ContentTools
+    ContentTools
 )
 
 # 配置编译器特性

@@ -1,0 +1,35 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+             x:Class="PrimalEditor_Avalonia.Views.LoggerView"
+             x:DataType="vm:LoggerViewModel">
+
+    <Grid RowDefinitions="Auto,*">
+
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto" Margin="5">
+            <TextBlock Grid.Column="0" Text="Logger" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+            <CheckBox Grid.Column="1" Content="Auto-scroll" IsChecked="{Binding AutoScroll}" Margin="5,0"/>
+            <ComboBox Grid.Column="2" SelectedIndex="{Binding MinLevelIndex}" Margin="5,0" Width="100">
+                <ComboBoxItem Content="Debug"/>
+                <ComboBoxItem Content="Info"/>
+                <ComboBoxItem Content="Warning"/>
+                <ComboBoxItem Content="Error"/>
+            </ComboBox>
+            <Button Grid.Column="3" Content="Clear" Click="OnClearClick" Margin="5,0,0,0" Width="60"/>
+        </Grid>
+
+        <ListBox Grid.Row="1"
+                 x:Name="LogList"
+                 ItemsSource="{Binding FilteredEntries}"
+                 FontFamily="Menlo, Consolas, monospace"
+                 FontSize="11"
+                 Background="#1E1E1E">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding FormattedMessage}"
+                               Foreground="{Binding Level, Converter={x:Static vm:LogLevelToColorConverter.Instance}}"/>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+    </Grid>
+</UserControl>

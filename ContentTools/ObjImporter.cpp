@@ -702,7 +702,6 @@ namespace primal::tools
 		}
 		else
 		{
-
 			lod_group lod{};
 			get_meshes(lod.meshes, 0, -1.f);
 			if (lod.meshes.size())
@@ -785,7 +784,7 @@ namespace primal::tools
 	{
 		assert(lod_id != u32_invalid_id);
 		u32 num_shapes{ (u32)_shapes.size() };
-		
+
 		for (u32 i{ 0 }; i < num_shapes; ++i)
 		{
 			mesh m;
@@ -824,16 +823,24 @@ namespace primal::tools
 
 			math::v3 color = math::v3{ 1.0f, 1.0f, 1.0f };
 
-			math::v2 texCoord = math::v2{
-				_attribute.texcoords[2 * index.texcoord_index + 0],
-				1.0f - _attribute.texcoords[2 * index.texcoord_index + 1] // 1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
-			};
+			math::v2 texCoord = math::v2{ 0.0f, 0.0f };
+			if (index.texcoord_index >= 0 && (u64)index.texcoord_index * 2 + 1 < _attribute.texcoords.size())
+			{
+				texCoord = math::v2{
+					_attribute.texcoords[2 * index.texcoord_index + 0],
+					1.0f - _attribute.texcoords[2 * index.texcoord_index + 1]
+				};
+			}
 
-			math::v3 normal = math::v3{
-				_attribute.normals[3 * index.normal_index + 0],
-				_attribute.normals[3 * index.normal_index + 1],
-				_attribute.normals[3 * index.normal_index + 2]
-			};
+			math::v3 normal = math::v3{ 0.0f, 0.0f, 1.0f };
+			if (index.normal_index >= 0 && (u64)index.normal_index * 3 + 2 < _attribute.normals.size())
+			{
+				normal = math::v3{
+					_attribute.normals[3 * index.normal_index + 0],
+					_attribute.normals[3 * index.normal_index + 1],
+					_attribute.normals[3 * index.normal_index + 2]
+				};
+			}
 
 			if (uniqueVertices.count(index) == 0)
 			{
@@ -852,14 +859,16 @@ namespace primal::tools
 		// Get material index per polygon
 		// Use materials' name to generate hash to connect shader file
 		assert(num_polys > 0);
-		const s32 mtl_index{ shape->mesh.material_ids[0] };
-		u32 mtl_name_hash;
-		utl::MurmurHash3_x86_32(static_cast<void*>(&_materials[mtl_index].name), (u32)_materials[mtl_index].name.length(), (u32)123, &mtl_name_hash);
-		assert(mtl_index >= 0);
-		m.material_indices.emplace_back((u32)mtl_name_hash);
-		if (std::find(m.material_used.begin(), m.material_used.end(), (u32)mtl_name_hash) == m.material_used.end())
+		const s32 mtl_index{ shape->mesh.material_ids.empty() ? -1 : shape->mesh.material_ids[0] };
+		u32 mtl_name_hash{ 0 };
+		if (mtl_index >= 0 && (u64)mtl_index < _materials.size())
 		{
-			m.material_used.emplace_back((u32)mtl_name_hash);
+			utl::MurmurHash3_x86_32(static_cast<void*>(&_materials[mtl_index].name), (u32)_materials[mtl_index].name.length(), (u32)123, &mtl_name_hash);
+		}
+		m.material_indices.emplace_back(mtl_name_hash);
+		if (std::find(m.material_used.begin(), m.material_used.end(), mtl_name_hash) == m.material_used.end())
+		{
+			m.material_used.emplace_back(mtl_name_hash);
 		}
 
 		// Importing normals is ON by default

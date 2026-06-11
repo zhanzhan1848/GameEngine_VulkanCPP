@@ -1,0 +1,13 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="PrimalEditor_Avalonia.Views.EngineViewport3D">
+
+    <Panel>
+        <NativeControlHost x:Name="NativeHost"/>
+        <TextBlock x:Name="Placeholder"
+                   Text="3D Preview (Phase 2/3)&#x0a;Engine not loaded"
+                   FontSize="20" Foreground="Gray"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   TextAlignment="Center"/>
+    </Panel>
+</UserControl>

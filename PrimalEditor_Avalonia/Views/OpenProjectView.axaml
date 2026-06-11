@@ -1,0 +1,46 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+        x:Class="PrimalEditor_Avalonia.Views.OpenProjectView"
+        x:DataType="vm:OpenProjectViewModel"
+        Title="Open Project"
+        Width="700" Height="500"
+        WindowStartupLocation="CenterOwner">
+
+    <Grid Margin="20" RowDefinitions="Auto,*,Auto" ColumnDefinitions="*,Auto">
+
+        <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="Open Project"
+                   FontSize="20" FontWeight="Bold" Margin="0,0,0,20"/>
+
+        <ListBox Grid.Row="1" Grid.Column="0"
+                 ItemsSource="{Binding RecentProjects}"
+                 SelectedItem="{Binding SelectedProject}"
+                 DoubleTapped="OnProjectDoubleClick">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel>
+                        <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold"/>
+                        <TextBlock Text="{Binding Path}" FontSize="11" Foreground="Gray"/>
+                    </StackPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <StackPanel Grid.Row="1" Grid.Column="1" Margin="10,0,0,0">
+            <Button Content="Browse..." Click="OnBrowseClick" Width="100" Margin="0,0,0,5"/>
+            <Button Content="Remove" Click="OnRemoveClick" Width="100" Margin="0,0,0,5"
+                    IsEnabled="{Binding HasSelection}"/>
+        </StackPanel>
+
+        <TextBlock Grid.Row="2" Grid.ColumnSpan="2"
+                   Text="{Binding ErrorMessage}" Foreground="Red"
+                   IsVisible="{Binding HasError}" Margin="0,10,0,0"/>
+
+        <StackPanel Grid.Row="2" Grid.ColumnSpan="2"
+                    Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,40,0,0">
+            <Button Content="Cancel" Click="OnCancelClick" Margin="0,0,10,0" Width="80"/>
+            <Button Content="Open" Click="OnOpenClick" Width="80"
+                    IsDefault="True" IsEnabled="{Binding HasSelection}"/>
+        </StackPanel>
+    </Grid>
+</Window>

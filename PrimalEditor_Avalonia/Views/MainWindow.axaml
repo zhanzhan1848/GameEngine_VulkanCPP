@@ -1,20 +1,101 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+        xmlns:views="using:PrimalEditor_Avalonia.Views"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        mc:Ignorable="d" d:DesignWidth="1200" d:DesignHeight="800"
         x:Class="PrimalEditor_Avalonia.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Icon="/Assets/avalonia-logo.ico"
-        Title="PrimalEditor_Avalonia">
+        Title="{Binding WindowTitle}"
+        MinWidth="800" MinHeight="600"
+        Width="1200" Height="800">
 
     <Design.DataContext>
-        <!-- This only sets the DataContext for the previewer in an IDE,
-             to set the actual DataContext for runtime, set the DataContext property in code (look at App.axaml.cs) -->
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-    <TextBlock Text="{Binding Greeting}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    <DockPanel>
 
+        <Menu DockPanel.Dock="Top">
+            <MenuItem Header="_File">
+                <MenuItem Header="_New Project" Command="{Binding NewProjectCommand}"
+                          InputGesture="Ctrl+N"/>
+                <MenuItem Header="_Open Project" Command="{Binding OpenProjectCommand}"
+                          InputGesture="Ctrl+O"/>
+                <MenuItem Header="_Save" Command="{Binding SaveProjectCommand}"
+                          InputGesture="Ctrl+S"/>
+                <Separator/>
+                <MenuItem Header="_Import _Asset..." Click="OnImportAssetClick"
+                          InputGesture="Ctrl+I"/>
+                <Separator/>
+                <MenuItem Header="E_xit" Command="{Binding ExitCommand}"/>
+            </MenuItem>
+            <MenuItem Header="_Edit">
+                <MenuItem Header="_Undo" Command="{Binding UndoCommand}"
+                          InputGesture="Ctrl+Z"/>
+                <MenuItem Header="_Redo" Command="{Binding RedoCommand}"
+                          InputGesture="Ctrl+Y"/>
+                <Separator/>
+                <MenuItem Header="Cu_t" Command="{Binding CutCommand}"
+                          InputGesture="Ctrl+X"/>
+                <MenuItem Header="_Copy" Command="{Binding CopyCommand}"
+                          InputGesture="Ctrl+C"/>
+                <MenuItem Header="_Paste" Command="{Binding PasteCommand}"
+                          InputGesture="Ctrl+V"/>
+                <Separator/>
+                <MenuItem Header="_Delete Entity" Command="{Binding DeleteEntityCommand}"
+                          InputGesture="Delete"/>
+                <MenuItem Header="_Duplicate Entity" Command="{Binding DuplicateEntityCommand}"
+                          InputGesture="Ctrl+D"/>
+                <MenuItem Header="_Rename Entity..." Command="{Binding RenameEntityCommand}"
+                          InputGesture="F2"/>
+            </MenuItem>
+            <MenuItem Header="_View">
+                <MenuItem Header="Toggle _World Editor" InputGesture="F4"/>
+                <MenuItem Header="Toggle _Content Browser" InputGesture="F5"/>
+                <MenuItem Header="Toggle _Logger" Click="OnToggleLogger" InputGesture="F6"/>
+            </MenuItem>
+            <MenuItem Header="_Help">
+                <MenuItem Header="_About..." Command="{Binding AboutCommand}"/>
+            </MenuItem>
+        </Menu>
+
+        <Grid DockPanel.Dock="Bottom" Background="LightGray"
+              ColumnDefinitions="*,Auto,Auto,Auto" Margin="2">
+            <TextBlock Grid.Column="0" Text="{Binding ProjectPathDisplay}" Padding="5,2"/>
+            <TextBlock Grid.Column="1" Text="{Binding SceneCountDisplay}" Padding="5,2"/>
+            <TextBlock Grid.Column="2" Text="{Binding EntityCountDisplay}" Padding="5,2"/>
+            <TextBlock Grid.Column="3" Text="Ready" Padding="5,2"/>
+        </Grid>
+
+        <Grid RowDefinitions="*,4,180">
+
+            <TabControl Grid.Row="0">
+                <TabItem Header="World Editor">
+                    <views:WorldEditorView DataContext="{Binding WorldEditor}"/>
+                </TabItem>
+            <TabItem Header="Content Browser">
+                <views:ContentBrowserView DataContext="{Binding ContentBrowser}"/>
+            </TabItem>
+            </TabControl>
+
+            <GridSplitter Grid.Row="1"
+                          Height="4"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Center"
+                          Background="#444"
+                          IsVisible="{Binding IsLoggerVisible}"
+                          ResizeDirection="Rows"/>
+
+            <Border Grid.Row="2"
+                    IsVisible="{Binding IsLoggerVisible}"
+                    BorderBrush="#333"
+                    BorderThickness="0,1,0,0">
+                <views:LoggerView DataContext="{Binding Logger}"/>
+            </Border>
+        </Grid>
+
+    </DockPanel>
 </Window>

@@ -1,0 +1,78 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+             xmlns:views="using:PrimalEditor_Avalonia.Views"
+             x:Class="PrimalEditor_Avalonia.Views.WorldEditorView"
+             x:DataType="vm:WorldEditorViewModel">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Row="0" ColumnDefinitions="250,*,300">
+            <DockPanel Grid.Column="0">
+                <Border DockPanel.Dock="Top" BorderBrush="LightGray" BorderThickness="0,0,0,1">
+                    <StackPanel Margin="5,5,5,3">
+                        <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,0,0,3">
+                            <TextBlock Grid.Column="0" Text="Scenes" FontWeight="Bold" VerticalAlignment="Center"/>
+                            <Button Grid.Column="1" Content="+" Click="OnAddSceneClick"
+                                    Width="24" Height="20" Padding="0" Margin="2,0"
+                                    ToolTip.Tip="Add Scene"/>
+                            <Button Grid.Column="2" Content="🗑" Click="OnDeleteSceneClick"
+                                    Width="24" Height="20" Padding="0" Margin="2,0,0,0"
+                                    ToolTip.Tip="Remove Scene"/>
+                        </Grid>
+                        <ComboBox ItemsSource="{Binding Scenes}"
+                                  SelectedItem="{Binding ActiveScene}"
+                                  HorizontalAlignment="Stretch">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Name}"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </StackPanel>
+                </Border>
+                <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto" Margin="5,5,5,0">
+                    <TextBlock Grid.Column="0" Text="Hierarchy" FontWeight="Bold" VerticalAlignment="Center"/>
+                    <Button Grid.Column="1" Content="+" Click="OnAddEntityClick"
+                            Width="28" Height="24" Padding="0" Margin="2,0"
+                            ToolTip.Tip="Add Child Entity"/>
+                    <Button Grid.Column="2" Content="🗑" Click="OnDeleteEntityClick"
+                            Width="28" Height="24" Padding="0" Margin="2,0,0,0"
+                            ToolTip.Tip="Delete Selected"/>
+                </Grid>
+                <TextBox DockPanel.Dock="Top" x:Name="HierarchyFilter"
+                         Watermark="Filter entities..."
+                         Margin="5,2,5,2"
+                         TextChanged="OnHierarchyFilterChanged"/>
+                <TreeView x:Name="HierarchyTree"
+                          ItemsSource="{Binding Entities}"
+                          SelectionMode="Multiple"
+                          SelectionChanged="OnTreeSelectionChanged"
+                          DoubleTapped="OnEntityDoubleClick">
+                    <TreeView.ItemTemplate>
+                        <TreeDataTemplate ItemsSource="{Binding Children}">
+                            <TextBlock Text="{Binding Name}"/>
+                        </TreeDataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </DockPanel>
+
+            <Border Grid.Column="1" BorderBrush="Gray" BorderThickness="1,0">
+                <views:EngineViewport3D/>
+            </Border>
+
+            <DockPanel Grid.Column="2">
+                <TextBlock DockPanel.Dock="Top" Text="Inspector" FontWeight="Bold" Padding="5"/>
+                <views:PropertiesView DataContext="{Binding Properties}"/>
+            </DockPanel>
+        </Grid>
+
+        <TextBlock Grid.Row="1"
+                   Text="{Binding DebugMessage}"
+                   Background="LightGray" Padding="5"/>
+    </Grid>
+</UserControl>

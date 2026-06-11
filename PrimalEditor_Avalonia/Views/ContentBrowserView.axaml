@@ -1,0 +1,142 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+             xmlns:conv="using:PrimalEditor_Avalonia.Converters"
+             x:Class="PrimalEditor_Avalonia.Views.ContentBrowserView"
+             x:DataType="vm:ContentBrowserViewModel">
+
+    <UserControl.Resources>
+        <SolidColorBrush x:Key="DropHighlightBrush" Color="#5500A0FF"/>
+
+        <StreamGeometry x:Key="MeshIconGeometry">M0,0 L40,0 L40,40 L0,40 Z M10,10 L30,10 L20,30 Z</StreamGeometry>
+        <StreamGeometry x:Key="TextureIconGeometry">M0,0 L40,0 L40,40 L0,40 Z M5,5 L35,5 L35,35 L5,35 Z M5,5 L20,20 L35,5 M5,35 L20,20 L35,35</StreamGeometry>
+        <StreamGeometry x:Key="AudioIconGeometry">M0,0 L40,0 L40,40 L0,40 Z M10,5 L10,35 M20,10 L20,30 M30,15 L30,25</StreamGeometry>
+        <StreamGeometry x:Key="ScriptIconGeometry">M0,0 L40,0 L40,40 L0,40 Z M10,5 L30,5 M10,15 L30,15 M10,25 L25,25 M10,35 L20,35</StreamGeometry>
+        <StreamGeometry x:Key="FileIconGeometry">M0,0 L25,0 L40,15 L40,40 L0,40 Z M25,0 L25,15 L40,15</StreamGeometry>
+    </UserControl.Resources>
+
+    <Grid ColumnDefinitions="200,*">
+
+        <Border Grid.Column="0" BorderBrush="Gray" BorderThickness="0,0,1,0">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Top" Text="Folders" FontWeight="Bold" Padding="5"/>
+                <TreeView ItemsSource="{Binding Folders}"
+                          SelectedItem="{Binding SelectedFolder}"
+                          DoubleTapped="OnFolderDoubleClick"
+                          DragDrop.AllowDrop="True">
+                    <TreeView.ItemTemplate>
+                        <TreeDataTemplate ItemsSource="{Binding Subfolders}">
+                            <TextBlock Text="{Binding Name}"/>
+                        </TreeDataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </DockPanel>
+        </Border>
+
+        <Panel Grid.Column="1"
+               DragDrop.AllowDrop="True"
+               DragDrop.DragEnter="OnDragEnter"
+               DragDrop.DragLeave="OnDragLeave"
+               DragDrop.DragOver="OnDragOver"
+               DragDrop.Drop="OnFileDrop">
+            <DockPanel>
+                <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto" Margin="5">
+                    <TextBlock Grid.Column="0" Text="Files" FontWeight="Bold" VerticalAlignment="Center"/>
+                    <ToggleButton Grid.Column="1"
+                                  IsChecked="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.ToThumbnails}, Mode=TwoWay}"
+                                  ToolTip.Tip="Toggle thumbnails view"
+                                  Margin="0,0,5,0"
+                                  Padding="6,2">
+                        <Panel>
+                            <TextBlock Text="☰" FontSize="14"/>
+                            <TextBlock Text="⊞" FontSize="14" IsVisible="{Binding $parent[ToggleButton].IsChecked}"/>
+                        </Panel>
+                    </ToggleButton>
+                    <Button Grid.Column="2" Content="Import..." Click="OnImportClick" Width="80"/>
+                </Grid>
+                <StackPanel DockPanel.Dock="Bottom" Margin="5"
+                            IsVisible="{Binding IsImporting}">
+                    <TextBlock Text="{Binding ImportingStatus}" Margin="0,0,0,4" Foreground="#FFA500"/>
+                    <ProgressBar IsIndeterminate="True" Height="4"/>
+                </StackPanel>
+                <TextBlock DockPanel.Dock="Bottom"
+                           Text="{Binding StatusMessage}" Foreground="Gray"
+                           IsVisible="{Binding HasStatus}" Padding="5"/>
+
+                <ListBox ItemsSource="{Binding Files}"
+                         SelectedItem="{Binding SelectedFile}"
+                         DoubleTapped="OnFileDoubleClick"
+                         IsVisible="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.IsList}}">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid ColumnDefinitions="40,*,100" Margin="2">
+                                <Path Grid.Column="0" Width="24" Height="24" Stretch="Uniform"
+                                      Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
+                                      Fill="#A0A0A0"/>
+                                <TextBlock Grid.Column="1" Text="{Binding Name}" VerticalAlignment="Center" Margin="5,0"/>
+                                <TextBlock Grid.Column="2" Text="{Binding SizeDisplay}" VerticalAlignment="Center" Foreground="Gray"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <ListBox ItemsSource="{Binding Files}"
+                         SelectedItem="{Binding SelectedFile}"
+                         DoubleTapped="OnFileDoubleClick"
+                         IsVisible="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.IsThumbnails}}">
+                    <ListBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel Orientation="Horizontal" Margin="5"/>
+                        </ItemsPanelTemplate>
+                    </ListBox.ItemsPanel>
+                    <ListBox.Styles>
+                        <Style Selector="ListBoxItem">
+                            <Setter Property="Width" Value="110"/>
+                            <Setter Property="Height" Value="120"/>
+                            <Setter Property="Padding" Value="4"/>
+                            <Setter Property="Margin" Value="2"/>
+                        </Style>
+                    </ListBox.Styles>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel HorizontalAlignment="Center">
+                                <Border Width="64" Height="64"
+                                        BorderBrush="#606060" BorderThickness="1"
+                                        Background="#2A2A2A"
+                                        ClipToBounds="True">
+                                    <Panel>
+                                        <Image Source="{Binding FullPath}" Stretch="Uniform"
+                                               IsVisible="{Binding IsImage}"/>
+                                        <Path Width="48" Height="48" Stretch="Uniform"
+                                              Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
+                                              Fill="#A0A0A0"
+                                              IsVisible="{Binding !IsImage}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                                    </Panel>
+                                </Border>
+                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                                           MaxWidth="100" TextAlignment="Center"
+                                           HorizontalAlignment="Center" Margin="0,4,0,0"
+                                           ToolTip.Tip="{Binding Name}"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+
+            <Border x:Name="DropOverlay"
+                    IsVisible="False"
+                    Background="{StaticResource DropHighlightBrush}"
+                    BorderBrush="DodgerBlue"
+                    BorderThickness="3"
+                    IsHitTestVisible="False">
+                <TextBlock Text="Drop files to import"
+                           FontSize="20"
+                           Foreground="White"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"/>
+            </Border>
+        </Panel>
+    </Grid>
+</UserControl>
