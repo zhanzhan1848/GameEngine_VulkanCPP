@@ -866,10 +866,10 @@ void Engine_Test::UpdateCamera(float dt) {
         }
         prevTabState_ = tabPressed;
     }
+#endif
 
     // Add punctual lights once (ForwardRenderer controls whether they're active via renderMode)
     UpdatePunctualLights();
-#endif
 
 #ifdef __EMSCRIPTEN__
     float speed = cameraSpeed_ * dt;
@@ -1614,24 +1614,24 @@ void Engine_Test::UpdatePunctualLights() {
     greenLight.type = LightType::Point;
     greenLight.position = primal::math::v3{-6.0f, 2.5f, 0.0f};
     greenLight.color = primal::math::v3{0.1f, 1.0f, 0.3f};
-    greenLight.intensity = 6.0f;
-    greenLight.range = 6.0f;
+    greenLight.intensity = 30.0f;
+    greenLight.range = 20.0f;
     scene_.AddLight(greenLight);
 
     // Orange — right archway corridor
     orangeLight.type = LightType::Point;
     orangeLight.position = primal::math::v3{6.0f, 2.5f, 0.0f};
     orangeLight.color = primal::math::v3{1.0f, 0.5f, 0.1f};
-    orangeLight.intensity = 6.0f;
-    orangeLight.range = 6.0f;
+    orangeLight.intensity = 30.0f;
+    orangeLight.range = 20.0f;
     scene_.AddLight(orangeLight);
 
     // Purple — under central upper gallery
     purpleLight.type = LightType::Point;
     purpleLight.position = primal::math::v3{0.0f, 2.5f, 3.0f};
     purpleLight.color = primal::math::v3{0.6f, 0.1f, 1.0f};
-    purpleLight.intensity = 5.0f;
-    purpleLight.range = 5.0f;
+    purpleLight.intensity = 25.0f;
+    purpleLight.range = 18.0f;
     scene_.AddLight(purpleLight);
 
     // Warm spot — inside arch pointing at back wall
@@ -1639,8 +1639,8 @@ void Engine_Test::UpdatePunctualLights() {
     spotLight.position = primal::math::v3{0.0f, 6.0f, -3.0f};
     spotLight.direction = primal::math::v3{0.0f, -1.0f, 1.0f};
     spotLight.color = primal::math::v3{1.0f, 0.9f, 0.5f};
-    spotLight.intensity = 8.0f;
-    spotLight.range = 8.0f;
+    spotLight.intensity = 40.0f;
+    spotLight.range = 20.0f;
     spotLight.outerCone = 0.7f;
     spotLight.innerCone = 0.9f;
     scene_.AddLight(spotLight);
