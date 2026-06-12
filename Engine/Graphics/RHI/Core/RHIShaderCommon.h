@@ -78,8 +78,14 @@ struct ForwardLightBuffer {
     LightParameters lights[128]; // Max 128 punctual lights
 };
 
-static_assert((sizeof(PerObjectData) % 16) == 0, "PerObjectData must be 16-byte aligned");
-static_assert((sizeof(LightParameters) % 16) == 0, "LightParameters must be 16-byte aligned");
-static_assert((sizeof(DirectionalLightParameters) % 16) == 0, "DirectionalLightParameters must be 16-byte aligned");
+static_assert(sizeof(PerObjectData) == 336, "PerObjectData size mismatch with WGSL");
+static_assert(sizeof(LightParameters) == 192, "LightParameters must be 192 bytes (matches WGSL PunctualLightParameters)");
+static_assert(sizeof(DirectionalLightParameters) == 304, "DirectionalLightParameters must be 304 bytes");
+static_assert(sizeof(ForwardLightBuffer) == 25808, "ForwardLightBuffer size mismatch");
+static_assert(offsetof(LightParameters, position) == 0, "LightParameters.position offset mismatch");
+static_assert(offsetof(LightParameters, direction) == 32, "LightParameters.direction offset mismatch");
+static_assert(offsetof(LightParameters, color) == 64, "LightParameters.color offset mismatch");
+static_assert(offsetof(LightParameters, attenuation) == 96, "LightParameters.attenuation offset mismatch");
+static_assert(offsetof(LightParameters, viewProjection) == 128, "LightParameters.viewProjection offset mismatch");
 
 } // namespace primal::graphics::rhi

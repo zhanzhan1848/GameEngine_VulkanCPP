@@ -1089,6 +1089,16 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
                                   const std::unordered_map<u32, rhi::math::m4x4>& lightViewProjs) {
     if (frameIndex >= rhi::MAX_FRAMES_IN_FLIGHT || !lightBuffersMapped_[frameIndex]) return;
 
+#ifdef __EMSCRIPTEN__
+    static bool s_firstLightFill = true;
+    if (s_firstLightFill) {
+        s_firstLightFill = false;
+        std::cerr << "[IBL Debug] sizeof(LightParameters)=" << sizeof(rhi::LightParameters)
+                  << " sizeof(ForwardLightBuffer)=" << sizeof(rhi::ForwardLightBuffer)
+                  << " offsetof(lights)=" << offsetof(rhi::ForwardLightBuffer, lights) << std::endl;
+    }
+#endif
+
     auto* buffer = static_cast<rhi::ForwardLightBuffer*>(lightBuffersMapped_[frameIndex]);
     buffer->directionalLightCount = 0;
     buffer->punctualLightCount = 0;
@@ -1132,7 +1142,15 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
             // Punctual lights only in Full mode (renderMode >= 3)
             if (dawnRenderMode_ < 3) continue;
             if (buffer->punctualLightCount < 128) {
-                auto& pl = buffer->lights[buffer->punctualLightCount++];
+                auto& pl = buffer->lights[buffer->punctualLightCount];
+#ifdef __EMSCRIPTEN__
+                std::cerr << "[Light " << buffer->punctualLightCount
+                          << "] pos=(" << light.position.x << "," << light.position.y << "," << light.position.z
+                          << ") range=" << light.range << " type=" << (int)light.type
+                          << " sizeof(LP)=" << sizeof(rhi::LightParameters)
+                          << " offset=" << (1232 + (int)buffer->punctualLightCount * (int)sizeof(rhi::LightParameters))
+                          << std::endl;
+#endif
                 pl.position = light.position;
                 pl.intensity = light.intensity;
                 pl.direction = light.direction;
@@ -1141,7 +1159,7 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
                 pl.cosUmbra = light.outerCone;
                 pl.cosPenumbra = light.innerCone;
                 pl.attenuation = {1.0f, 0.0f, 0.0f}; // Default attenuation
-                
+
                 if (light.type == LightType::Point) pl.lightType = 1;
                 else if (light.type == LightType::Spot) pl.lightType = 2;
                 else pl.lightType = 0;
@@ -1157,6 +1175,7 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
                 } else {
                     pl.viewProjection = rhi::math::MatrixIdentity();
                 }
+                buffer->punctualLightCount++;
             }
         }
     }
