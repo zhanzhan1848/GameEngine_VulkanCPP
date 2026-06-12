@@ -27,11 +27,27 @@ struct DirectionalLightParameters {
     colorAndShadow: vec4<f32>,
 };
 
+struct PunctualLightParameters {
+    position: vec3<f32>,
+    intensity: f32,
+    direction: vec3<f32>,
+    range: f32,
+    color: vec3<f32>,
+    cosUmbra: f32,
+    attenuation: vec3<f32>,
+    cosPenumbra: f32,
+    lightType: i32,
+    shadowIndex: i32,
+    _pad0: f32,
+    viewProjection: mat4x4<f32>,
+};
+
 struct ForwardLightBuffer {
     directionalLightCount: u32,
     punctualLightCount: u32,
     _pad: vec2<u32>,
     directionalLights: array<DirectionalLightParameters, 4>,
+    lights: array<PunctualLightParameters, 128>,
 };
 
 struct PerObjectData {
@@ -44,12 +60,17 @@ struct PerObjectData {
 @group(0) @binding(11) var<uniform> globalData: GlobalShaderData;
 @group(0) @binding(12) var<uniform> lightBuffer: ForwardLightBuffer;
 
-@group(1) @binding(10) var<uniform> perObject: PerObjectData;
+@group(1) @binding(0) var<uniform> perObject: PerObjectData;
 
 @group(2) @binding(0) var albedoMap: texture_2d<f32>;
 @group(2) @binding(1) var normalMap: texture_2d<f32>;
 @group(2) @binding(2) var ormMap: texture_2d<f32>;
 @group(2) @binding(3) var matSampler: sampler;
+
+@group(0) @binding(15) var irradianceMap: texture_cube<f32>;
+@group(0) @binding(16) var prefilterMap: texture_cube<f32>;
+@group(0) @binding(17) var brdfLUT: texture_2d<f32>;
+@group(0) @binding(18) var iblSampler: sampler;
 
 struct VSInput {
     @location(0) position: vec3<f32>,
@@ -109,6 +130,10 @@ fn fresnelSchlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+fn fresnelSchlickRoughness(cosTheta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    return F0 + (max(vec3<f32>(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
 fn distributionGGX(N: vec3<f32>, H: vec3<f32>, a: f32) -> f32 {
     let a2 = a * a;
     let NdotH = max(dot(N, H), 0.0);
@@ -147,7 +172,10 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
 
     let V = normalize(globalData.cameraPositionAndViewWidth.xyz - input.worldPos);
 
-    var color = vec3<f32>(0.03, 0.03, 0.03) * albedo * ao;
+    var color = vec3<f32>(0.0);
+
+    let F0 = mix(vec3<f32>(0.04, 0.04, 0.04), albedo, metallic);
+    let NdotV = max(dot(N, V), 0.001);
 
     if (lightBuffer.directionalLightCount > 0u) {
         let light = lightBuffer.directionalLights[0];
@@ -155,10 +183,8 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
         let H = normalize(V + L);
         let radiance = light.colorAndShadow.rgb * light.directionAndIntensity.w;
 
-        let NdotV = max(dot(N, V), 0.001);
         let NdotL = max(dot(N, L), 0.0);
 
-        let F0 = mix(vec3<f32>(0.04, 0.04, 0.04), albedo, metallic);
         let fresnel = fresnelSchlick(max(dot(H, V), 0.0), F0);
         let ndf = distributionGGX(N, H, roughness);
         let geometry = geometrySmith(N, V, L, roughness);
@@ -173,6 +199,55 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
         let Lo = (kD * albedo / PI + specular) * radiance * NdotL;
         color = color + Lo;
     }
+
+    // Punctual lights (point + spot)
+    for (var i: u32 = 0u; i < lightBuffer.punctualLightCount; i++) {
+        let plight = lightBuffer.lights[i];
+        let toLight = plight.position - input.worldPos;
+        let distance = length(toLight);
+        if (distance > plight.range) { continue; }
+
+        let L = toLight / distance;
+        let H = normalize(V + L);
+
+        let att = plight.attenuation;
+        let attenuation = 1.0 / (att.x + att.y * distance + att.z * distance * distance);
+
+        var spotAtt = 1.0;
+        if (plight.lightType == 2) {
+            let theta = dot(L, normalize(-plight.direction));
+            let epsilon = plight.cosUmbra - plight.cosPenumbra;
+            spotAtt = clamp((theta - plight.cosPenumbra) / max(epsilon, 0.001), 0.0, 1.0);
+        }
+
+        let radiance = plight.color * plight.intensity * attenuation * spotAtt;
+        let NdotL = max(dot(N, L), 0.0);
+
+        let fresnel = fresnelSchlick(max(dot(H, V), 0.0), F0);
+        let ndf = distributionGGX(N, H, roughness);
+        let geometry = geometrySmith(N, V, L, roughness);
+
+        let numerator = ndf * geometry * fresnel;
+        let denominator = 4.0 * NdotV * NdotL + 0.0001;
+        let specular = numerator / denominator;
+
+        let kS = fresnel;
+        let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
+
+        let Lo = (kD * albedo / PI + specular) * radiance * NdotL;
+        color = color + Lo;
+    }
+
+    // IBL ambient
+    let kS_ibl = fresnelSchlickRoughness(NdotV, F0, roughness);
+    let kD_ibl = (vec3<f32>(1.0) - kS_ibl) * (1.0 - metallic);
+    let irradiance = textureSample(irradianceMap, iblSampler, N).rgb;
+    let diffuseIBL = irradiance * albedo;
+    let R = reflect(-V, N);
+    let prefilteredColor = textureSampleLevel(prefilterMap, iblSampler, R, roughness * 4.0).rgb;
+    let brdf = textureSample(brdfLUT, iblSampler, vec2<f32>(NdotV, roughness));
+    let specularIBL = prefilteredColor * (kS_ibl * brdf.r + brdf.g);
+    color = color + (kD_ibl * diffuseIBL + specularIBL) * ao;
 
     // Gamma correction: PBR output is in linear space, convert to sRGB for display
     color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));

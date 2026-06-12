@@ -25,6 +25,7 @@ void EmscriptenInitInput();
 #include "Engine/Graphics/Material.h"
 #include "Engine/Graphics/MaterialInstance.h"
 #include "Engine/Graphics/RenderMesh.h"
+#include "Engine/Graphics/RHI/Utils/ShadowUtils.h"
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
 #include <iostream>
@@ -105,6 +106,18 @@ static ResourceHandle LoadTextureFromFile(DawnDevice* device, const std::string&
     ResourceHandle tex = CreateTextureFromData(device, width, height, data, format);
     stbi_image_free(data);
     return tex;
+}
+
+// Float32 → Float16 conversion for HDR data
+static uint16_t f32_to_f16(float f) {
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    uint16_t sign = (bits >> 16) & 0x8000u;
+    int32_t exp = ((bits >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = (bits >> 13) & 0x3FFu;
+    if (exp <= 0) return sign;
+    if (exp >= 31) return sign | 0x7C00u;
+    return sign | (uint16_t(exp) << 10) | uint16_t(mantissa);
 }
 
 static std::string ResolveTexturePath(const std::string& base, const std::string& filename) {
@@ -211,6 +224,9 @@ bool Engine_Test::initialize() {
 
     CreateShadowResources();
 
+    // Create IBL resources (loads HDR env map + runs compute precomputation)
+    CreateIBLResources();
+
     // Load Sponza scene
     if (!LoadSponzaScene()) {
         std::cerr << "Failed to load Sponza scene" << std::endl;
@@ -264,10 +280,10 @@ bool Engine_Test::LoadSponzaScene() {
 #else
     std::string baseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
 #endif
-    std::string modelPath = baseDir + "Sponza_process_rebuild.model";
+    std::string modelPath = baseDir + "Sponza.model";
     std::ifstream file(modelPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        modelPath = baseDir + "Sponza.model";
+        modelPath = baseDir + "Sponza_process_rebuild.model";
         file.open(modelPath, std::ios::binary | std::ios::ate);
     }
     if (!file.is_open()) {
@@ -301,12 +317,14 @@ bool Engine_Test::LoadSponzaScene() {
         std::cerr << "[TestDawnFR] Failed to load ForwardPBR.wgsl" << std::endl;
         return false;
     }
+    std::cerr << "[TestDawnFR] Shader loaded, size=" << shaderSource.size() << std::endl;
 
     // Create shared Material for all meshes
     auto material = std::make_shared<Material>();
     // Include null terminator for WGSL source text
     material->SetShader(ShaderStage::Vertex, shaderSource.data(), shaderSource.size() + 1, "vertexMain");
     material->SetShader(ShaderStage::Pixel, shaderSource.data(), shaderSource.size() + 1, "fragmentMain");
+    std::cerr << "[TestDawnFR] Material shaders set" << std::endl;
 
     // Vertex attributes (32-byte interleaved: pos + colorTSign + packedNormal + packedTangent + uv)
     utl::vector<VertexInputAttribute> attrs(5);
@@ -381,7 +399,14 @@ bool Engine_Test::LoadSponzaScene() {
     material->SetDescriptorSetLayout(materialSetLayout_);
 
     // Pipeline layout: 3 groups (Global with shadow bindings, PerObject, Material)
-    auto perObjectLayout = forwardRenderer_.GetPerObjectDescriptorSetLayout();
+    // Create per-object layout fresh (avoid handle corruption from IBL heap operations)
+    DescriptorSetLayoutBinding perObjectBinding{};
+    perObjectBinding.binding = 0;
+    perObjectBinding.descriptorType = DescriptorType::UniformBufferDynamic;
+    perObjectBinding.descriptorCount = 1;
+    perObjectBinding.stageFlags = ShaderStage::Vertex;
+    DescriptorSetLayoutDesc perObjLayoutDesc{1, &perObjectBinding};
+    auto perObjectLayout = device_->CreateDescriptorSetLayout(perObjLayoutDesc);
     DescriptorSetLayoutHandle setLayouts[3] = { globalLayout, perObjectLayout, materialSetLayout_ };
 
     PipelineLayoutDesc plDesc{};
@@ -393,6 +418,7 @@ bool Engine_Test::LoadSponzaScene() {
         return false;
     }
     material->SetPipelineLayout(pipelineLayout_);
+    std::cerr << "[TestDawnFR] Pipeline layout created" << std::endl;
 
     // Create sampler for material textures
     SamplerDesc samplerDesc{};
@@ -407,10 +433,15 @@ bool Engine_Test::LoadSponzaScene() {
     // Create MaterialInstance for each mesh with textures
     std::string textureBase = baseDir;
     u32 texLoaded = 0, texFailed = 0;
+    std::cerr << "[TestDawnFR] Creating material instances..." << std::endl;
 
     for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
         auto& meshInfo = sceneMeshInfos_[i];
         meshInfo.material = material; // Shared material
+
+        if (i < 3 || i == sceneMeshInfos_.size() - 1) {
+            std::cerr << "[TestDawnFR] Mesh " << i << "/" << sceneMeshInfos_.size() << std::endl;
+        }
 
         auto matInst = std::make_shared<MaterialInstance>(material.get());
         if (!matInst->Initialize(device_)) {
@@ -484,6 +515,8 @@ bool Engine_Test::LoadSponzaScene() {
         materials_[proxy.materialId] = matInst;
     }
 
+    std::cerr << "[TestDawnFR] Material instances created: " << texLoaded << " loaded, " << texFailed << " failed" << std::endl;
+
     return true;
 }
 
@@ -550,8 +583,8 @@ void Engine_Test::RenderFrame() {
     const auto& ssaoOut = graphics::PostProcess::AddSSAOPass(*renderGraph_, depthRG, width_, height_, fi, view_.GetProjectionMatrix(), invProj);
     auto ssaoAOHandle = ssaoOut.ssaoOutput;
 
-    const auto& bloomOut = PostProcess::AddBloomPass(*renderGraph_, hdrRG, fi);
-    auto bloomHandle = bloomOut.bloomOutput;
+    // Bloom disabled — BlurPass WGSL/C++ struct mismatch + heap corruption causes validation errors
+    auto bloomHandle = rendergraph::kInvalidRGResourceHandle;
 
     const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, hdrRG, bloomHandle,
         ssaoAOHandle, ssgiHandle, fi);
@@ -697,7 +730,9 @@ void Engine_Test::RenderFrame() {
 
     renderGraph_->Compile();
 
-    // 2. Submit 1: Shadow + Forward (heavy draw calls)
+    // Single submit: Shadow + Forward + Post-processing
+    // Dawn's Metal backend crashes when tracking texture sync across separate
+    // command buffer submits. Use one command buffer for the entire frame.
     if (cmdBuffer_ == rhi::handles::INVALID_COMMAND_BUFFER) {
         cmdBuffer_ = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
     }
@@ -705,35 +740,23 @@ void Engine_Test::RenderFrame() {
     if (cmd) {
         cmd->Reset();
         if (cmd->Begin()) {
-            // 1. Shadow pass (depth-only from light POV)
-            RenderShadowPass(cmd);
+            // 1. Shadow pass — skip in NoEffects mode
+            if (renderMode_ != DawnRenderMode::NoEffects) {
+                RenderShadowPass(cmd);
+                forwardRenderer_.SetDawnShadowLightVP(lightVP_);
+            }
 
-            // 2. Pass light VP to ForwardRenderer (writes viewProjections[0] in light buffer)
-            forwardRenderer_.SetDawnShadowLightVP(lightVP_);
-
-            // 3. Forward pass — shadow bindings are in Group 0 (global set)
+            // 2. Forward pass
             forwardRenderer_.Render(cmd, scene_, view_, hdrTexture_, depthTexture_, materials_, fi, width_, height_);
+
+            // 4. Post-processing (render graph: HZB, SSAO, Bloom, ToneMap, Present)
+            renderGraph_->Execute(cmd);
+
             cmd->End();
         }
         rhi::QueueSubmitInfo submitInfo{};
         submitInfo.cmdBuffer = cmdBuffer_;
         device_->Submit(submitInfo);
-    }
-
-    // 3. Submit 2: Post-processing (render graph)
-    if (postCmdBuffer_ == rhi::handles::INVALID_COMMAND_BUFFER) {
-        postCmdBuffer_ = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
-    }
-    rhi::RHICommandBuffer* postCmd = device_->GetCommandBuffer(postCmdBuffer_);
-    if (postCmd) {
-        postCmd->Reset();
-        if (postCmd->Begin()) {
-            renderGraph_->Execute(postCmd);
-            postCmd->End();
-        }
-        rhi::QueueSubmitInfo postSubmitInfo{};
-        postSubmitInfo.cmdBuffer = postCmdBuffer_;
-        device_->Submit(postSubmitInfo);
     }
 
     swapchain_->Present(rhi::handles::INVALID_SYNC);
@@ -798,6 +821,21 @@ void Engine_Test::UpdateCamera(float dt) {
         if (runLoop_) CFRunLoopStop(runLoop_);
         return;
     }
+
+    // Tab (keyCode 48) to cycle render mode — edge detected
+    {
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "Full"};
+        bool tabPressed = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 48);
+        if (tabPressed && !prevTabState_) {
+            renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
+            forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
+            std::cerr << "[Mode] " << kModeNames[static_cast<u8>(renderMode_)] << std::endl;
+        }
+        prevTabState_ = tabPressed;
+    }
+
+    // Add punctual lights once (ForwardRenderer controls whether they're active via renderMode)
+    UpdatePunctualLights();
 #endif
 
 #ifdef __EMSCRIPTEN__
@@ -879,11 +917,12 @@ void Engine_Test::DestroyDepthTexture() {
 }
 
 void Engine_Test::CreateShadowResources() {
-    // Shadow depth texture (2048x2048 D32_Float)
+    // Shadow depth texture (2048x2048 D32_Float, 4 cascade layers)
     rhi::TextureDesc shadowDesc;
     shadowDesc.size = {2048, 2048, 1};
     shadowDesc.format = rhi::DataFormat::D32_Float;
-    shadowDesc.type = rhi::TextureType::Texture2D;
+    shadowDesc.type = rhi::TextureType::Texture2DArray;
+    shadowDesc.arraySize = kCascadeCount;
     shadowDesc.mipLevels = 1;
     shadowDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
     shadowDepthTexture_ = device_->CreateTexture(shadowDesc);
@@ -996,19 +1035,15 @@ void Engine_Test::CreateShadowResources() {
 }
 
 primal::math::m4x4 Engine_Test::ComputeLightViewProjection() const {
-    // Directional light direction (same as scene setup)
     primal::math::v3 lightDir = primal::math::v3{0.5f, -0.7f, 0.3f};
     float len = sqrtf(lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z);
     lightDir = lightDir / len;
 
-    // Fixed scene center — light does NOT follow camera
     primal::math::v3 lightTarget = {0.0f, 5.0f, 0.0f};
     primal::math::v3 lightEye = lightTarget - lightDir * 50.0f;
     primal::math::v3 up{0.0f, 1.0f, 0.0f};
 
     rhimath::m4x4 lightView = rhimath::CreateLookAtMatrix(lightEye, lightTarget, up);
-
-    // Fixed orthographic projection covering the Sponza scene
     float orthoSize = 25.0f;
     rhimath::m4x4 lightProj = rhimath::CreateOrthographicMatrix(
         -orthoSize, orthoSize, -orthoSize, orthoSize, 1.0f, 120.0f);
@@ -1016,56 +1051,70 @@ primal::math::m4x4 Engine_Test::ComputeLightViewProjection() const {
     return lightProj * lightView;
 }
 
+void Engine_Test::ComputeCSMViewProjections() {
+    // Use simple single light VP for all cascades (debugging cascade computation issue)
+    lightVP_ = ComputeLightViewProjection();
+    for (u32 i = 0; i < kCascadeCount; ++i) {
+        cascadeVPs_[i] = lightVP_;
+    }
+    // Simple cascade splits based on depth range
+    float shaderSplits[4] = {10.0f, 25.0f, 50.0f, 100.0f};
+    forwardRenderer_.SetDawnCascadeVPs(cascadeVPs_, shaderSplits);
+
+    // Legacy single VP for fallback
+    lightVP_ = cascadeVPs_[0];
+}
+
 void Engine_Test::RenderShadowPass(rhi::RHICommandBuffer* cmd) {
     if (shadowPipeline_ == rhi::handles::INVALID_PIPELINE) return;
     if (shadowDepthTexture_ == rhi::handles::INVALID_RESOURCE) return;
 
-    lightVP_ = ComputeLightViewProjection();
-
-    // Begin depth-only render pass
-    rhi::RenderPassDesc passDesc;
-    passDesc.depthAttachment.texture = shadowDepthTexture_;
-    passDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
-    passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
-    passDesc.depthAttachment.clearValue.depth = 1.0f;
-    passDesc.depthAttachment.storeOp = rhi::StoreAction::Store;
+    ComputeCSMViewProjections();
 
     rhi::ViewportDesc vp;
     vp.size = {2048.0f, 2048.0f};
     vp.minDepth = 0.0f;
     vp.maxDepth = 1.0f;
 
-    cmd->BeginRenderPass(passDesc);
-    cmd->SetViewport(vp);
-    cmd->SetScissor({{0, 0}, {2048, 2048}});
-    cmd->BindGraphicsPipeline(shadowPipeline_);
+    // Render each cascade layer
+    for (u32 cascade = 0; cascade < kCascadeCount; ++cascade) {
+        rhi::RenderPassDesc passDesc;
+        passDesc.depthAttachment.texture = shadowDepthTexture_;
+        passDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
+        passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
+        passDesc.depthAttachment.clearValue.depth = 1.0f;
+        passDesc.depthAttachment.storeOp = rhi::StoreAction::Store;
+        passDesc.depthAttachment.arrayLayer = cascade;
 
-    // Bind persistent shadow per-object descriptor set
-    if (shadowPerObjectSet_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
-        cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, shadowPipelineLayout_, 0, 1, &shadowPerObjectSet_, 0, nullptr);
-    }
+        cmd->BeginRenderPass(passDesc);
+        cmd->SetViewport(vp);
+        cmd->SetScissor({{0, 0}, {2048, 2048}});
+        cmd->BindGraphicsPipeline(shadowPipeline_);
 
-    // Render each mesh
-    u32 meshCount = 0;
-    for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
-        auto& meshInfo = sceneMeshInfos_[i];
-        if (!meshInfo.mesh || !meshInfo.mesh->IsValid()) continue;
-
-        // Upload per-object data: world (identity) + worldLightVP (lightVP * world)
-        if (shadowPerObjectMapped_) {
-            meshCount++;
-            auto* p = static_cast<float*>(shadowPerObjectMapped_);
-            primal::math::m4x4 identity = rhimath::MatrixIdentity();
-            memcpy(p, &identity, 64);
-            primal::math::m4x4 worldLightVP = lightVP_;
-            memcpy(p + 16, &worldLightVP, 64);
-            device_->SetBufferDirtySize(shadowPerObjectBuf_, 128);
+        if (shadowPerObjectSet_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
+            cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, shadowPipelineLayout_, 0, 1, &shadowPerObjectSet_, 0, nullptr);
         }
 
-        meshInfo.mesh->Draw(cmd);
-    }
+        u32 meshCount = 0;
+        for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
+            auto& meshInfo = sceneMeshInfos_[i];
+            if (!meshInfo.mesh || !meshInfo.mesh->IsValid()) continue;
 
-    cmd->EndRenderPass();
+            if (shadowPerObjectMapped_) {
+                auto* p = static_cast<float*>(shadowPerObjectMapped_);
+                primal::math::m4x4 identity = rhimath::MatrixIdentity();
+                memcpy(p, &identity, 64);
+                primal::math::m4x4 worldLightVP = cascadeVPs_[cascade];
+                memcpy(p + 16, &worldLightVP, 64);
+                device_->SetBufferDirtySize(shadowPerObjectBuf_, 128);
+            }
+
+            meshInfo.mesh->Draw(cmd);
+            meshCount++;
+        }
+
+        cmd->EndRenderPass();
+    }
 
     // Barrier: depth texture → ShaderResource for forward pass sampling
     {
@@ -1076,6 +1125,463 @@ void Engine_Test::RenderShadowPass(rhi::RHICommandBuffer* cmd) {
         b.subresource = 0xFFFFFFFF;
         cmd->InsertBarrier(&b, 1);
     }
+}
+
+// ============================================================
+// IBL Precomputation Pipeline
+// ============================================================
+
+void Engine_Test::CreateIBLResources() {
+    std::cout << "[IBL] Creating IBL resources..." << std::endl;
+
+    // IBL sampler
+    rhi::SamplerDesc sDesc;
+    sDesc.minFilter = rhi::FilterMode::Linear;
+    sDesc.magFilter = rhi::FilterMode::Linear;
+    sDesc.addressU = rhi::TextureAddressMode::Clamp;
+    sDesc.addressV = rhi::TextureAddressMode::Clamp;
+    sDesc.addressW = rhi::TextureAddressMode::Clamp;
+    sDesc.comparisonFunc = rhi::ComparisonFunc::Never;
+    iblSampler_ = device_->CreateSampler(sDesc);
+
+    // Try to load HDR environment map
+#ifdef __EMSCRIPTEN__
+    std::string hdrPath = "assets/textures/hdr/sunset.hdr";
+#else
+    std::string hdrPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/textures/hdr/sunset.hdr";
+#endif
+
+    stbi_set_flip_vertically_on_load(true);
+    int hdrW, hdrH, hdrComp;
+    float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrComp, 4);
+    stbi_set_flip_vertically_on_load(false);
+
+    if (!hdrData) {
+        std::vector<std::string> altPaths = {
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/textures/hdr/",
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/textures/hdr/",
+        };
+        for (auto& dir : altPaths) {
+            for (auto& name : {"environment.hdr", "env.hdr", "sky.hdr"}) {
+                hdrData = stbi_loadf((dir + name).c_str(), &hdrW, &hdrH, &hdrComp, 4);
+                if (hdrData) break;
+            }
+            if (hdrData) break;
+        }
+    }
+
+    if (!hdrData) {
+        std::cerr << "[IBL] No HDR environment map found, creating dummy IBL textures" << std::endl;
+        rhi::TextureDesc cubeDesc;
+        cubeDesc.size = {1, 1, 1};
+        cubeDesc.format = rhi::DataFormat::RGBA16_Float;
+        cubeDesc.type = rhi::TextureType::TextureCube;
+        cubeDesc.mipLevels = 1;
+        cubeDesc.usage = rhi::TextureUsage::ShaderResource;
+        iblIrradianceTex_ = device_->CreateTexture(cubeDesc);
+        iblPrefilterTex_ = device_->CreateTexture(cubeDesc);
+        rhi::TextureDesc lutDesc;
+        lutDesc.size = {1, 1, 1};
+        lutDesc.format = rhi::DataFormat::RGBA16_Float;
+        lutDesc.type = rhi::TextureType::Texture2D;
+        lutDesc.mipLevels = 1;
+        lutDesc.usage = rhi::TextureUsage::ShaderResource;
+        iblBRDFLUTTex_ = device_->CreateTexture(lutDesc);
+        forwardRenderer_.SetDawnIBLResources(iblIrradianceTex_, iblPrefilterTex_, iblBRDFLUTTex_, iblSampler_);
+        return;
+    }
+
+    std::cout << "[IBL] Loaded HDR: " << hdrW << "x" << hdrH << std::endl;
+
+    // Load Hammersley shared code for #include resolution
+    std::string hammerSrc = LoadShaderSource("Engine/Graphics/Dawn/shaders/IBL_Hammersley.wgsl");
+
+    // Helper: resolve #include directives
+    auto resolveIncludes = [&hammerSrc](std::string& src) {
+        size_t pos = src.find("#include \"IBL_Hammersley.wgsl\"");
+        if (pos != std::string::npos) src.replace(pos, 32, hammerSrc);
+    };
+
+    // Create equirectangular texture from HDR data (RGBA16_Float for filterable sampling)
+    rhi::TextureDesc eqDesc;
+    eqDesc.size = {(u32)hdrW, (u32)hdrH, 1};
+    eqDesc.format = rhi::DataFormat::RGBA16_Float;
+    eqDesc.type = rhi::TextureType::Texture2D;
+    eqDesc.mipLevels = 1;
+    eqDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest;
+    ResourceHandle equirectTex = device_->CreateTexture(eqDesc);
+    // Convert float32 HDR → float16 for RGBA16_Float texture
+    {
+        size_t pixelCount = (size_t)hdrW * hdrH * 4;
+        std::vector<uint16_t> halfData(pixelCount);
+        for (size_t i = 0; i < pixelCount; ++i) halfData[i] = f32_to_f16(hdrData[i]);
+        device_->UpdateTextureData(equirectTex, (const unsigned char*)halfData.data(), 0, 0, 0,
+                                   (u32)hdrW, (u32)hdrH, 1, 4 * sizeof(uint16_t) * hdrW, 0);
+    }
+    stbi_image_free(hdrData);
+
+    // Create env cubemap (128x128)
+    constexpr u32 kCubeSize = 128;
+    rhi::TextureDesc cubeDesc;
+    cubeDesc.size = {kCubeSize, kCubeSize, 1};
+    cubeDesc.format = rhi::DataFormat::RGBA16_Float;
+    cubeDesc.type = rhi::TextureType::TextureCube;
+    cubeDesc.mipLevels = 1;
+    cubeDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+    ResourceHandle envCubeTex = device_->CreateTexture(cubeDesc);
+
+    // ---- Step 1: Equirectangular → Cubemap ----
+    {
+        // Create 2DArray storage view of cubemap for write
+        rhi::TextureViewDesc storageViewDesc{};
+        storageViewDesc.texture = envCubeTex;
+        storageViewDesc.viewType = rhi::TextureType::Texture2DArray;
+        storageViewDesc.firstArraySlice = 0;
+        storageViewDesc.arraySize = 6;
+        storageViewDesc.format = rhi::DataFormat::RGBA16_Float;
+        ResourceHandle envCubeView = device_->CreateTextureView(storageViewDesc);
+
+        std::string shaderSrc = LoadShaderSource("Engine/Graphics/Dawn/shaders/IBL_EquirectangularToCube.wgsl");
+        if (shaderSrc.empty()) { std::cerr << "[IBL] Failed to load EquirectToCube shader" << std::endl; return; }
+
+        auto cs = device_->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Compute, "cs_main");
+
+        rhi::DescriptorSetLayoutBinding bindings[2]{};
+        bindings[0] = {0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute};
+        bindings[1] = {1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute}; bindings[1].isArray = true;
+        rhi::DescriptorSetLayoutDesc dslDesc{2, bindings};
+        auto dsl = device_->CreateDescriptorSetLayout(dslDesc);
+
+        rhi::PipelineLayoutDesc plDesc; plDesc.setLayoutCount = 1; plDesc.setLayouts = &dsl;
+        auto pipelineLayout = device_->CreatePipelineLayout(plDesc);
+
+        rhi::ComputePipelineDesc pipeDesc; pipeDesc.computeShader = cs; pipeDesc.layout = pipelineLayout; pipeDesc.threadGroupSize = {16, 16, 1};
+        auto pipeline = device_->CreateComputePipeline(pipeDesc);
+
+        rhi::DescriptorSetDesc dsDesc; dsDesc.layout = dsl;
+        auto ds = device_->CreateDescriptorSet(dsDesc);
+
+        rhi::DescriptorImageInfo imgs[2];
+        imgs[0].imageView = equirectTex; imgs[0].sampler = iblSampler_;
+        imgs[1].imageView = envCubeView; imgs[1].sampler = iblSampler_;
+        rhi::WriteDescriptorSet writes[2];
+        for (int i = 0; i < 2; ++i) {
+            writes[i] = {ds, (u32)i, 0, 1, bindings[i].descriptorType, &imgs[i]};
+        }
+        device_->UpdateDescriptorSets(2, writes);
+
+        auto cmdBuf = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+        auto* cmd = device_->GetCommandBuffer(cmdBuf);
+        if (cmd && cmd->Begin()) {
+            cmd->BindComputePipeline(pipeline);
+            cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, pipelineLayout, 0, 1, &ds, 0, nullptr);
+            u32 groups = (kCubeSize + 15) / 16;
+            cmd->Dispatch(groups, groups, 6);
+            cmd->End();
+        }
+        rhi::QueueSubmitInfo submit{}; submit.cmdBuffer = cmdBuf;
+        device_->Submit(submit);
+        device_->WaitIdle();
+
+        device_->DestroyCommandBuffer(cmdBuf);
+        device_->DestroyDescriptorSet(ds);
+        device_->DestroyDescriptorSetLayout(dsl);
+        device_->DestroyPipelineLayout(pipelineLayout);
+        device_->DestroyPipeline(pipeline);
+        device_->DestroyTexture(envCubeView);
+    }
+    std::cout << "[IBL] Equirect→Cube done" << std::endl;
+    device_->DestroyTexture(equirectTex);
+
+    // ---- Step 2: Irradiance Convolution ----
+    constexpr u32 kIrradSize = 32;
+    {
+        rhi::TextureDesc irradDesc;
+        irradDesc.size = {kIrradSize, kIrradSize, 1};
+        irradDesc.format = rhi::DataFormat::RGBA16_Float;
+        irradDesc.type = rhi::TextureType::TextureCube;
+        irradDesc.mipLevels = 1;
+        irradDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+        iblIrradianceTex_ = device_->CreateTexture(irradDesc);
+
+        // Create 2DArray storage view
+        rhi::TextureViewDesc storageViewDesc{};
+        storageViewDesc.texture = iblIrradianceTex_;
+        storageViewDesc.viewType = rhi::TextureType::Texture2DArray;
+        storageViewDesc.firstArraySlice = 0;
+        storageViewDesc.arraySize = 6;
+        storageViewDesc.format = rhi::DataFormat::RGBA16_Float;
+        ResourceHandle irradView = device_->CreateTextureView(storageViewDesc);
+
+        std::string shaderSrc = LoadShaderSource("Engine/Graphics/Dawn/shaders/IBL_IrradianceConvolution.wgsl");
+        if (shaderSrc.empty()) { std::cerr << "[IBL] Failed to load IrradianceConvolution shader" << std::endl; return; }
+        resolveIncludes(shaderSrc);
+
+        auto cs = device_->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Compute, "cs_main");
+
+        rhi::DescriptorSetLayoutBinding bindings[4]{};
+        bindings[0] = {0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute}; bindings[0].isCube = true;
+        bindings[1] = {1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute}; bindings[1].isArray = true;
+        bindings[2] = {2, rhi::DescriptorType::Sampler, 1, rhi::ShaderStage::Compute};
+        bindings[3] = {3, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute};
+        rhi::DescriptorSetLayoutDesc dslDesc{4, bindings};
+        auto dsl = device_->CreateDescriptorSetLayout(dslDesc);
+
+        rhi::PipelineLayoutDesc plDesc; plDesc.setLayoutCount = 1; plDesc.setLayouts = &dsl;
+        auto pipelineLayout = device_->CreatePipelineLayout(plDesc);
+
+        rhi::ComputePipelineDesc pipeDesc; pipeDesc.computeShader = cs; pipeDesc.layout = pipelineLayout; pipeDesc.threadGroupSize = {16, 16, 1};
+        auto pipeline = device_->CreateComputePipeline(pipeDesc);
+
+        // Uniform: faceSize(u32) + pad(12 bytes) = 16 bytes
+        rhi::BufferDesc ubDesc{}; ubDesc.size = 16; ubDesc.type = rhi::BufferType::Constant;
+        ubDesc.usage = rhi::GPUMemoryUsage::Dynamic; ubDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        ResourceHandle ub = device_->CreateBuffer(ubDesc);
+        void* ubMapped = device_->MapBuffer(ub, 0, 16);
+        if (ubMapped) { auto* p = static_cast<u32*>(ubMapped); p[0] = kIrradSize; p[1] = 0; p[2] = 0; p[3] = 0; device_->SetBufferDirtySize(ub, 16); }
+
+        rhi::DescriptorSetDesc dsDesc; dsDesc.layout = dsl;
+        auto ds = device_->CreateDescriptorSet(dsDesc);
+
+        rhi::DescriptorImageInfo imgs[3];
+        imgs[0].imageView = envCubeTex; imgs[0].sampler = iblSampler_;
+        imgs[1].imageView = irradView;  imgs[1].sampler = iblSampler_;
+        imgs[2].imageView = envCubeTex; imgs[2].sampler = iblSampler_;
+        rhi::DescriptorBufferInfo bufInfo; bufInfo.buffer = ub; bufInfo.offset = 0; bufInfo.range = 16;
+        rhi::WriteDescriptorSet writes[4];
+        writes[0] = {ds, 0, 0, 1, rhi::DescriptorType::SampledImage, &imgs[0]};
+        writes[1] = {ds, 1, 0, 1, rhi::DescriptorType::StorageImage, &imgs[1]};
+        writes[2] = {ds, 2, 0, 1, rhi::DescriptorType::Sampler, &imgs[2]};
+        writes[3] = {ds, 3, 0, 1, rhi::DescriptorType::UniformBuffer, nullptr, &bufInfo};
+        device_->UpdateDescriptorSets(4, writes);
+
+        auto cmdBuf = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+        auto* cmd = device_->GetCommandBuffer(cmdBuf);
+        if (cmd && cmd->Begin()) {
+            cmd->BindComputePipeline(pipeline);
+            cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, pipelineLayout, 0, 1, &ds, 0, nullptr);
+            u32 groups = (kIrradSize + 15) / 16;
+            cmd->Dispatch(groups, groups, 6);
+            cmd->End();
+        }
+        rhi::QueueSubmitInfo submit{}; submit.cmdBuffer = cmdBuf;
+        device_->Submit(submit);
+        device_->WaitIdle();
+
+        device_->DestroyCommandBuffer(cmdBuf);
+        device_->UnmapBuffer(ub); device_->DestroyBuffer(ub);
+        device_->DestroyDescriptorSet(ds); device_->DestroyDescriptorSetLayout(dsl);
+        device_->DestroyPipelineLayout(pipelineLayout); device_->DestroyPipeline(pipeline);
+        device_->DestroyTexture(irradView);
+    }
+    std::cout << "[IBL] Irradiance convolution done" << std::endl;
+
+    // ---- Step 3: Specular Prefilter (5 mip levels) ----
+    {
+        rhi::TextureDesc pfDesc;
+        pfDesc.size = {kCubeSize, kCubeSize, 1};
+        pfDesc.format = rhi::DataFormat::RGBA16_Float;
+        pfDesc.type = rhi::TextureType::TextureCube;
+        pfDesc.mipLevels = 5;
+        pfDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+        iblPrefilterTex_ = device_->CreateTexture(pfDesc);
+
+        std::string shaderSrc = LoadShaderSource("Engine/Graphics/Dawn/shaders/IBL_SpecularPrefilter.wgsl");
+        if (shaderSrc.empty()) { std::cerr << "[IBL] Failed to load SpecularPrefilter shader" << std::endl; return; }
+        resolveIncludes(shaderSrc);
+
+        auto cs = device_->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Compute, "cs_main");
+
+        rhi::DescriptorSetLayoutBinding bindings[4]{};
+        bindings[0] = {0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute}; bindings[0].isCube = true;
+        bindings[1] = {1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute}; bindings[1].isArray = true;
+        bindings[2] = {2, rhi::DescriptorType::Sampler, 1, rhi::ShaderStage::Compute};
+        bindings[3] = {3, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute};
+        rhi::DescriptorSetLayoutDesc dslDesc{4, bindings};
+        auto dsl = device_->CreateDescriptorSetLayout(dslDesc);
+
+        rhi::PipelineLayoutDesc plDesc; plDesc.setLayoutCount = 1; plDesc.setLayouts = &dsl;
+        auto pipelineLayout = device_->CreatePipelineLayout(plDesc);
+
+        rhi::ComputePipelineDesc pipeDesc; pipeDesc.computeShader = cs; pipeDesc.layout = pipelineLayout; pipeDesc.threadGroupSize = {16, 16, 1};
+        auto pipeline = device_->CreateComputePipeline(pipeDesc);
+
+        rhi::BufferDesc ubDesc{}; ubDesc.size = 32; ubDesc.type = rhi::BufferType::Constant;
+        ubDesc.usage = rhi::GPUMemoryUsage::Dynamic; ubDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        ResourceHandle ub = device_->CreateBuffer(ubDesc);
+        void* ubMapped = device_->MapBuffer(ub, 0, 32);
+
+        rhi::DescriptorSetDesc dsDesc; dsDesc.layout = dsl;
+        auto ds = device_->CreateDescriptorSet(dsDesc);
+
+        for (u32 mip = 0; mip < 5; ++mip) {
+            u32 mipSize = kCubeSize >> mip;
+            float roughness = (float)mip / 4.0f;
+
+            // Create 2DArray storage view for this mip level
+            rhi::TextureViewDesc storageViewDesc{};
+            storageViewDesc.texture = iblPrefilterTex_;
+            storageViewDesc.viewType = rhi::TextureType::Texture2DArray;
+            storageViewDesc.firstArraySlice = 0;
+            storageViewDesc.arraySize = 6;
+            storageViewDesc.format = rhi::DataFormat::RGBA16_Float;
+            storageViewDesc.mostDetailedMip = mip;
+            storageViewDesc.mipCount = 1;
+            ResourceHandle mipView = device_->CreateTextureView(storageViewDesc);
+
+            // Update uniform: faceSize(u32), pad(u32), roughness(f32), srcResolution(f32)
+            if (ubMapped) {
+                auto* p = static_cast<u32*>(ubMapped);
+                p[0] = mipSize;
+                p[1] = 0;
+                float* fp = reinterpret_cast<float*>(p + 2);
+                fp[0] = roughness;
+                fp[1] = (float)kCubeSize;
+                device_->SetBufferDirtySize(ub, 32);
+            }
+
+            rhi::DescriptorImageInfo imgs[3];
+            imgs[0].imageView = envCubeTex; imgs[0].sampler = iblSampler_;
+            imgs[1].imageView = mipView;    imgs[1].sampler = iblSampler_;
+            imgs[2].imageView = envCubeTex; imgs[2].sampler = iblSampler_;
+            rhi::DescriptorBufferInfo bufInfo; bufInfo.buffer = ub; bufInfo.offset = 0; bufInfo.range = 32;
+            rhi::WriteDescriptorSet writes[4];
+            writes[0] = {ds, 0, 0, 1, rhi::DescriptorType::SampledImage, &imgs[0]};
+            writes[1] = {ds, 1, 0, 1, rhi::DescriptorType::StorageImage, &imgs[1]};
+            writes[2] = {ds, 2, 0, 1, rhi::DescriptorType::Sampler, &imgs[2]};
+            writes[3] = {ds, 3, 0, 1, rhi::DescriptorType::UniformBuffer, nullptr, &bufInfo};
+            device_->UpdateDescriptorSets(4, writes);
+
+            auto cmdBuf = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+            auto* cmd = device_->GetCommandBuffer(cmdBuf);
+            if (cmd && cmd->Begin()) {
+                cmd->BindComputePipeline(pipeline);
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, pipelineLayout, 0, 1, &ds, 0, nullptr);
+                u32 groups = (mipSize + 15) / 16;
+                cmd->Dispatch(groups, groups, 6);
+                cmd->End();
+            }
+            rhi::QueueSubmitInfo submit{}; submit.cmdBuffer = cmdBuf;
+            device_->Submit(submit);
+            device_->WaitIdle();
+            device_->DestroyCommandBuffer(cmdBuf);
+            device_->DestroyTexture(mipView);
+        }
+
+        device_->UnmapBuffer(ub); device_->DestroyBuffer(ub);
+        device_->DestroyDescriptorSet(ds); device_->DestroyDescriptorSetLayout(dsl);
+        device_->DestroyPipelineLayout(pipelineLayout); device_->DestroyPipeline(pipeline);
+    }
+    std::cout << "[IBL] Specular prefilter done" << std::endl;
+
+    // ---- Step 4: BRDF Integration LUT (512x512) ----
+    {
+        constexpr u32 kLUTSize = 512;
+        rhi::TextureDesc lutDesc;
+        lutDesc.size = {kLUTSize, kLUTSize, 1};
+        lutDesc.format = rhi::DataFormat::RGBA16_Float;
+        lutDesc.type = rhi::TextureType::Texture2D;
+        lutDesc.mipLevels = 1;
+        lutDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+        iblBRDFLUTTex_ = device_->CreateTexture(lutDesc);
+
+        std::string shaderSrc = LoadShaderSource("Engine/Graphics/Dawn/shaders/IBL_BRDFIntegration.wgsl");
+        if (shaderSrc.empty()) { std::cerr << "[IBL] Failed to load BRDFIntegration shader" << std::endl; return; }
+        resolveIncludes(shaderSrc);
+
+        auto cs = device_->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Compute, "cs_main");
+
+        rhi::DescriptorSetLayoutBinding binding{};
+        binding.binding = 0; binding.descriptorType = rhi::DescriptorType::StorageImage;
+        binding.descriptorCount = 1; binding.stageFlags = rhi::ShaderStage::Compute;
+        rhi::DescriptorSetLayoutDesc dslDesc{1, &binding};
+        auto dsl = device_->CreateDescriptorSetLayout(dslDesc);
+
+        rhi::PipelineLayoutDesc plDesc; plDesc.setLayoutCount = 1; plDesc.setLayouts = &dsl;
+        auto pipelineLayout = device_->CreatePipelineLayout(plDesc);
+
+        rhi::ComputePipelineDesc pipeDesc; pipeDesc.computeShader = cs; pipeDesc.layout = pipelineLayout; pipeDesc.threadGroupSize = {16, 16, 1};
+        auto pipeline = device_->CreateComputePipeline(pipeDesc);
+
+        rhi::DescriptorSetDesc dsDesc; dsDesc.layout = dsl;
+        auto ds = device_->CreateDescriptorSet(dsDesc);
+
+        rhi::DescriptorImageInfo imgInfo; imgInfo.imageView = iblBRDFLUTTex_; imgInfo.sampler = iblSampler_;
+        rhi::WriteDescriptorSet write;
+        write.dstSet = ds; write.dstBinding = 0; write.descriptorCount = 1;
+        write.descriptorType = rhi::DescriptorType::StorageImage; write.imageInfo = &imgInfo;
+        device_->UpdateDescriptorSets(1, &write);
+
+        auto cmdBuf = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+        auto* cmd = device_->GetCommandBuffer(cmdBuf);
+        if (cmd && cmd->Begin()) {
+            cmd->BindComputePipeline(pipeline);
+            cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, pipelineLayout, 0, 1, &ds, 0, nullptr);
+            u32 groups = (kLUTSize + 15) / 16;
+            cmd->Dispatch(groups, groups, 1);
+            cmd->End();
+        }
+        rhi::QueueSubmitInfo submit{}; submit.cmdBuffer = cmdBuf;
+        device_->Submit(submit);
+        device_->WaitIdle();
+
+        device_->DestroyCommandBuffer(cmdBuf);
+        device_->DestroyDescriptorSet(ds); device_->DestroyDescriptorSetLayout(dsl);
+        device_->DestroyPipelineLayout(pipelineLayout); device_->DestroyPipeline(pipeline);
+    }
+    std::cout << "[IBL] BRDF LUT done" << std::endl;
+
+    device_->DestroyTexture(envCubeTex);
+
+    forwardRenderer_.SetDawnIBLResources(iblIrradianceTex_, iblPrefilterTex_, iblBRDFLUTTex_, iblSampler_);
+    std::cout << "[IBL] All IBL resources created and bound" << std::endl;
+}
+
+void Engine_Test::RunIBLCompute(ResourceHandle, u32) {
+    // IBL compute is done during initialization, not per-frame
+}
+
+void Engine_Test::UpdatePunctualLights() {
+    if (punctualLightsAdded_) return;
+    // Colored lights placed inside Sponza's shadowed areas (arches, corridors)
+    RenderLight greenLight, orangeLight, purpleLight, spotLight;
+
+    // Green — left archway corridor
+    greenLight.type = LightType::Point;
+    greenLight.position = primal::math::v3{-6.0f, 2.5f, 0.0f};
+    greenLight.color = primal::math::v3{0.1f, 1.0f, 0.3f};
+    greenLight.intensity = 6.0f;
+    greenLight.range = 6.0f;
+    scene_.AddLight(greenLight);
+
+    // Orange — right archway corridor
+    orangeLight.type = LightType::Point;
+    orangeLight.position = primal::math::v3{6.0f, 2.5f, 0.0f};
+    orangeLight.color = primal::math::v3{1.0f, 0.5f, 0.1f};
+    orangeLight.intensity = 6.0f;
+    orangeLight.range = 6.0f;
+    scene_.AddLight(orangeLight);
+
+    // Purple — under central upper gallery
+    purpleLight.type = LightType::Point;
+    purpleLight.position = primal::math::v3{0.0f, 2.5f, 3.0f};
+    purpleLight.color = primal::math::v3{0.6f, 0.1f, 1.0f};
+    purpleLight.intensity = 5.0f;
+    purpleLight.range = 5.0f;
+    scene_.AddLight(purpleLight);
+
+    // Warm spot — inside arch pointing at back wall
+    spotLight.type = LightType::Spot;
+    spotLight.position = primal::math::v3{0.0f, 6.0f, -3.0f};
+    spotLight.direction = primal::math::v3{0.0f, -1.0f, 1.0f};
+    spotLight.color = primal::math::v3{1.0f, 0.9f, 0.5f};
+    spotLight.intensity = 8.0f;
+    spotLight.range = 8.0f;
+    spotLight.outerCone = 0.7f;
+    spotLight.innerCone = 0.9f;
+    scene_.AddLight(spotLight);
+
+    punctualLightsAdded_ = true;
 }
 
 #ifdef __APPLE__
@@ -1098,6 +1604,24 @@ void Engine_Test::shutdown() {
     if (shadowDepthTexture_ != rhi::handles::INVALID_RESOURCE) {
         device_->DestroyTexture(shadowDepthTexture_);
         shadowDepthTexture_ = rhi::handles::INVALID_RESOURCE;
+    }
+
+    // IBL resources
+    if (iblIrradianceTex_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(iblIrradianceTex_);
+        iblIrradianceTex_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (iblPrefilterTex_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(iblPrefilterTex_);
+        iblPrefilterTex_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (iblBRDFLUTTex_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(iblBRDFLUTTex_);
+        iblBRDFLUTTex_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (iblSampler_ != rhi::handles::INVALID_SAMPLER) {
+        device_->DestroySampler(iblSampler_);
+        iblSampler_ = rhi::handles::INVALID_SAMPLER;
     }
     if (shadowPipeline_ != rhi::handles::INVALID_PIPELINE) {
         device_->DestroyPipeline(shadowPipeline_);
@@ -1162,10 +1686,6 @@ void Engine_Test::shutdown() {
     if (cmdBuffer_ != rhi::handles::INVALID_COMMAND_BUFFER) {
         device_->DestroyCommandBuffer(cmdBuffer_);
         cmdBuffer_ = rhi::handles::INVALID_COMMAND_BUFFER;
-    }
-    if (postCmdBuffer_ != rhi::handles::INVALID_COMMAND_BUFFER) {
-        device_->DestroyCommandBuffer(postCmdBuffer_);
-        postCmdBuffer_ = rhi::handles::INVALID_COMMAND_BUFFER;
     }
 
     graphics::PostProcess::ShutdownBloomPass();

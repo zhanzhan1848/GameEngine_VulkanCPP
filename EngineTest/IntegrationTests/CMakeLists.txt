@@ -310,7 +310,7 @@ if(APPLE)
             ${COMMON_HEADERS}
         )
         setup_test_target(TestDawnForwardRenderer)
-        target_compile_definitions(TestDawnForwardRenderer PRIVATE "TEST_DAWN_FORWARD_RENDERER=1" "ENABLE_WEBGPU=1")
+        target_compile_definitions(TestDawnForwardRenderer PRIVATE "TEST_DAWN_FORWARD_RENDERER=1" "ENABLE_WEBGPU=1" "$<$<BOOL:${DISABLE_PARTICLE_SYSTEM}>:DISABLE_PARTICLE_SYSTEM=1>")
         target_include_directories(TestDawnForwardRenderer PUBLIC
             "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
             "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderGraph"

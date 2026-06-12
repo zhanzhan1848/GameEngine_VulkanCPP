@@ -369,9 +369,9 @@ bool RenderSceneSnapshot::ExtractSceneData(const RenderScene& scene,
 
                 const math::m4x4& transform = proxy.transform;
                 f32 maxScale = std::max({
-                    std::abs(transform[0].x), std::abs(transform[0].y), std::abs(transform[0].z),
-                    std::abs(transform[1].x), std::abs(transform[1].y), std::abs(transform[1].z),
-                    std::abs(transform[2].x), std::abs(transform[2].y), std::abs(transform[2].z)
+                    std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
+                    std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
+                    std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
                 });
                 instance.bounds_radius = maxLocalExtent * maxScale;
             } else {
@@ -503,9 +503,9 @@ bool RenderSceneSnapshot::UpdateInstances(const RenderScene& scene,
 
                 const math::m4x4& transform = proxy.transform;
                 f32 maxScale = std::max({
-                    std::abs(transform[0].x), std::abs(transform[0].y), std::abs(transform[0].z),
-                    std::abs(transform[1].x), std::abs(transform[1].y), std::abs(transform[1].z),
-                    std::abs(transform[2].x), std::abs(transform[2].y), std::abs(transform[2].z)
+                    std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
+                    std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
+                    std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
                 });
                 instance.bounds_radius = maxLocalExtent * maxScale;
             } else {

@@ -133,11 +133,47 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             b.descriptorType = rhi::DescriptorType::SampledDepthImage;
             b.descriptorCount = 1;
             b.stageFlags = rhi::ShaderStage::Pixel;
+            b.isArray = true; // texture_depth_2d_array for CSM
             globalBindings.push_back(b);
         }
         {
             rhi::DescriptorSetLayoutBinding b;
             b.binding = SHADOW_CUBE_MAP_BINDING; // 14
+            b.descriptorType = rhi::DescriptorType::Sampler;
+            b.descriptorCount = 1;
+            b.stageFlags = rhi::ShaderStage::Pixel;
+            globalBindings.push_back(b);
+        }
+        // IBL textures + sampler (bindings 15-18)
+        {
+            rhi::DescriptorSetLayoutBinding b;
+            b.binding = IBL_IRRADIANCE_BINDING; // 15
+            b.descriptorType = rhi::DescriptorType::SampledImage;
+            b.descriptorCount = 1;
+            b.stageFlags = rhi::ShaderStage::Pixel;
+            b.isCube = true;
+            globalBindings.push_back(b);
+        }
+        {
+            rhi::DescriptorSetLayoutBinding b;
+            b.binding = IBL_PREFILTER_BINDING; // 16
+            b.descriptorType = rhi::DescriptorType::SampledImage;
+            b.descriptorCount = 1;
+            b.stageFlags = rhi::ShaderStage::Pixel;
+            b.isCube = true;
+            globalBindings.push_back(b);
+        }
+        {
+            rhi::DescriptorSetLayoutBinding b;
+            b.binding = IBL_BRDF_LUT_BINDING; // 17
+            b.descriptorType = rhi::DescriptorType::SampledImage;
+            b.descriptorCount = 1;
+            b.stageFlags = rhi::ShaderStage::Pixel;
+            globalBindings.push_back(b);
+        }
+        {
+            rhi::DescriptorSetLayoutBinding b;
+            b.binding = IBL_SAMPLER_BINDING; // 18
             b.descriptorType = rhi::DescriptorType::Sampler;
             b.descriptorCount = 1;
             b.stageFlags = rhi::ShaderStage::Pixel;
@@ -153,7 +189,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     // 5. Create Per-Object Descriptor Set Layout (Set 1)
     // Binding 0: PerObjectData (Dynamic Uniform Buffer)
     utl::vector<rhi::DescriptorSetLayoutBinding> perObjectBindings(1);
-    perObjectBindings[0].binding = PER_OBJECT_BINDING; // Relative to Set 1
+    perObjectBindings[0].binding = 0; // Binding 0 within Set 1 for Dawn/WebGPU
     perObjectBindings[0].descriptorType = rhi::DescriptorType::UniformBufferDynamic;
     perObjectBindings[0].descriptorCount = 1;
     perObjectBindings[0].stageFlags = rhi::ShaderStage::Vertex;
@@ -446,7 +482,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 
         rhi::WriteDescriptorSet writePerObject;
         writePerObject.dstSet = perObjectDescriptorSets_[i];
-        writePerObject.dstBinding = PER_OBJECT_BINDING;
+        writePerObject.dstBinding = isDawn ? 0 : PER_OBJECT_BINDING;
         writePerObject.descriptorType = rhi::DescriptorType::UniformBufferDynamic;
         writePerObject.descriptorCount = 1;
         writePerObject.bufferInfo = &perObjectInfo;
@@ -1044,8 +1080,8 @@ void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer,
 }
 
 
-void ForwardRenderer::SetupLights(const RenderScene& scene, 
-                                  u32 frameIndex, 
+void ForwardRenderer::SetupLights(const RenderScene& scene,
+                                  u32 frameIndex,
                                   rhi::GlobalShaderData* globalData,
                                   const utl::vector<RenderView>& shadowViews,
                                   const utl::vector<float>& splits,
@@ -1070,12 +1106,16 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
                     }
                 }
 
-                // Dawn: fill viewProjections[0] with externally-provided shadow light VP
+                // Dawn: fill viewProjections with externally-provided cascade VPs
                 bool isDawnLight = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
-                if (isDawnLight && shadowDepthBuffer_ != rhi::handles::INVALID_RESOURCE) {
-                    dl.viewProjections[0] = dawnShadowLightVP_;
+                if (isDawnLight && dawnShadowDepthTex_ != rhi::handles::INVALID_RESOURCE) {
+                    for (int j = 0; j < 4; ++j) {
+                        dl.viewProjections[j] = dawnCascadeVPs_[j];
+                    }
+                    dl.splits = {dawnCascadeSplits_[0], dawnCascadeSplits_[1],
+                                 dawnCascadeSplits_[2], dawnCascadeSplits_[3]};
                 }
-                
+
                 if (!splits.empty()) {
                     dl.splits = {
                         splits.size() > 0 ? splits[0] : 0.0f,
@@ -1089,6 +1129,8 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
                 dl.colorAndShadow = {light.color.x, light.color.y, light.color.z, 1.0f}; // Shadow Enabled
             }
         } else {
+            // Punctual lights only in Full mode (renderMode >= 3)
+            if (dawnRenderMode_ < 3) continue;
             if (buffer->punctualLightCount < 128) {
                 auto& pl = buffer->lights[buffer->punctualLightCount++];
                 pl.position = light.position;
@@ -1276,6 +1318,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         rhi::math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
         frameData->deltaTime = deltaTime_;
         frameData->frameCount = static_cast<float>(frameNumber_);
+        frameData->renderMode = dawnRenderMode_;
         frameData->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, static_cast<float>(width)};
         frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
 
@@ -1697,6 +1740,58 @@ void ForwardRenderer::SetDawnShadowResources(rhi::ResourceHandle depthTex, rhi::
         writes[1].imageInfo = &imgInfo;
 
         device_->UpdateDescriptorSets(2, writes);
+    }
+}
+
+void ForwardRenderer::SetDawnIBLResources(rhi::ResourceHandle irradiance, rhi::ResourceHandle prefilter,
+                                          rhi::ResourceHandle brdfLUT, rhi::SamplerHandle sampler) {
+    dawnIBLIrradiance_ = irradiance;
+    dawnIBLPrefilter_ = prefilter;
+    dawnIBLBRDFLUT_ = brdfLUT;
+    dawnIBLSampler_ = sampler;
+
+    if (irradiance == rhi::handles::INVALID_RESOURCE) return;
+
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+        if (globalDescriptorSets_[i] == rhi::handles::INVALID_DESCRIPTOR_SET) continue;
+
+        rhi::DescriptorImageInfo imgInfo[3];
+        imgInfo[0].imageView = irradiance;
+        imgInfo[0].sampler = sampler;
+        imgInfo[1].imageView = prefilter;
+        imgInfo[1].sampler = sampler;
+        imgInfo[2].imageView = brdfLUT;
+        imgInfo[2].sampler = sampler;
+
+        rhi::DescriptorImageInfo sampInfo;
+        sampInfo.sampler = sampler;
+
+        rhi::WriteDescriptorSet writes[4];
+        writes[0].dstSet = globalDescriptorSets_[i];
+        writes[0].dstBinding = IBL_IRRADIANCE_BINDING;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = rhi::DescriptorType::SampledImage;
+        writes[0].imageInfo = &imgInfo[0];
+
+        writes[1].dstSet = globalDescriptorSets_[i];
+        writes[1].dstBinding = IBL_PREFILTER_BINDING;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = rhi::DescriptorType::SampledImage;
+        writes[1].imageInfo = &imgInfo[1];
+
+        writes[2].dstSet = globalDescriptorSets_[i];
+        writes[2].dstBinding = IBL_BRDF_LUT_BINDING;
+        writes[2].descriptorCount = 1;
+        writes[2].descriptorType = rhi::DescriptorType::SampledImage;
+        writes[2].imageInfo = &imgInfo[2];
+
+        writes[3].dstSet = globalDescriptorSets_[i];
+        writes[3].dstBinding = IBL_SAMPLER_BINDING;
+        writes[3].descriptorCount = 1;
+        writes[3].descriptorType = rhi::DescriptorType::Sampler;
+        writes[3].imageInfo = &sampInfo;
+
+        device_->UpdateDescriptorSets(4, writes);
     }
 }
 

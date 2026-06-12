@@ -235,7 +235,8 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
             entry.binding = wgpuBinding;
             entry.visibility = visibility;
             entry.texture.sampleType = WGPUTextureSampleType_Float;
-            entry.texture.viewDimension = WGPUTextureViewDimension_2D;
+            entry.texture.viewDimension = binding.isCube
+                ? WGPUTextureViewDimension_Cube : WGPUTextureViewDimension_2D;
             entry.texture.multisampled = false;
             break;
         }
@@ -249,7 +250,8 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
                 ? WGPUStorageTextureAccess_ReadOnly
                 : WGPUStorageTextureAccess_WriteOnly;
             entry.storageTexture.format = ToWGPUTextureFormat(binding.format);
-            entry.storageTexture.viewDimension = WGPUTextureViewDimension_2D;
+            entry.storageTexture.viewDimension = binding.isArray
+                ? WGPUTextureViewDimension_2DArray : WGPUTextureViewDimension_2D;
             break;
         }
         case DescriptorType::Sampler: {
@@ -331,7 +333,8 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
             entry.binding = wgpuBinding;
             entry.visibility = visibility;
             entry.texture.sampleType = WGPUTextureSampleType_Depth;
-            entry.texture.viewDimension = WGPUTextureViewDimension_2D;
+            entry.texture.viewDimension = binding.isArray
+                ? WGPUTextureViewDimension_2DArray : WGPUTextureViewDimension_2D;
             entry.texture.multisampled = false;
             break;
         }

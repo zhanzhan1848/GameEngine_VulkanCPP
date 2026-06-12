@@ -24,6 +24,9 @@ struct GlobalShaderData
     u32 numPunctualLights;
     float deltaTime;
     float frameCount;
+
+    u32 renderMode; // 0=NoEffects, 1=ShadowOnly, 2=ShadowAndIBL, 3=Full
+    u32 _pad0[3];
 };
 
 struct PerObjectData

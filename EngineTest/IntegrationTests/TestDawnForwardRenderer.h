@@ -58,6 +58,10 @@ private:
     void CreateShadowResources();
     void RenderShadowPass(primal::graphics::rhi::RHICommandBuffer* cmd);
     primal::math::m4x4 ComputeLightViewProjection() const;
+    void ComputeCSMViewProjections();
+    void CreateIBLResources();
+    void RunIBLCompute(ResourceHandle envCubeTex, u32 cubeSize);
+    void UpdatePunctualLights();
 
     primal::graphics::rhi::DawnDevice* device_{nullptr};
     primal::graphics::rhi::RHISwapChain* swapchain_{nullptr};
@@ -96,9 +100,23 @@ private:
     void* shadowPerObjectMapped_{nullptr};
     primal::graphics::rhi::DescriptorSetHandle shadowPerObjectSet_{primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET};
     primal::math::m4x4 lightVP_{};
+    primal::math::m4x4 cascadeVPs_[4]{};
+    float cascadeSplits_[5]{}; // 5 split distances for 4 cascades
+    static constexpr u32 kCascadeCount = 4;
+
+    // IBL resources
+    primal::graphics::rhi::ResourceHandle iblIrradianceTex_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle iblPrefilterTex_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle iblBRDFLUTTex_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::SamplerHandle iblSampler_{primal::graphics::rhi::handles::INVALID_SAMPLER};
     std::unique_ptr<primal::graphics::rendergraph::RenderGraph> renderGraph_;
     primal::graphics::rhi::CommandBufferHandle cmdBuffer_{primal::graphics::rhi::handles::INVALID_COMMAND_BUFFER};
-    primal::graphics::rhi::CommandBufferHandle postCmdBuffer_{primal::graphics::rhi::handles::INVALID_COMMAND_BUFFER};
+
+    // Render mode switching (Tab key)
+    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, Count };
+    DawnRenderMode renderMode_{DawnRenderMode::ShadowAndIBL};
+    bool prevTabState_{false};
+    bool punctualLightsAdded_{false};
 
     u32 frameIndex_{0};
     u32 width_{1280};

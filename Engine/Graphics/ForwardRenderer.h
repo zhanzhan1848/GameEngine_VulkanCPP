@@ -28,6 +28,10 @@ constexpr u32 FRAME_DATA_BINDING = 11;
 constexpr u32 LIGHT_DATA_BINDING = 12;
 constexpr u32 SHADOW_MAP_BINDING = 13;
 constexpr u32 SHADOW_CUBE_MAP_BINDING = 14;
+constexpr u32 IBL_IRRADIANCE_BINDING = 15;
+constexpr u32 IBL_PREFILTER_BINDING = 16;
+constexpr u32 IBL_BRDF_LUT_BINDING = 17;
+constexpr u32 IBL_SAMPLER_BINDING = 18;
 
 class ForwardRenderer {
 public:
@@ -172,6 +176,16 @@ private:
     rhi::ResourceHandle dawnShadowDepthTex_{rhi::handles::INVALID_RESOURCE};
     rhi::SamplerHandle dawnShadowSampler_{rhi::handles::INVALID_SAMPLER};
     primal::math::m4x4 dawnShadowLightVP_{};
+    primal::math::m4x4 dawnCascadeVPs_[4]{};
+    float dawnCascadeSplits_[4]{};
+
+    // Dawn IBL resources — bindings 15-18 in Group 0
+    rhi::ResourceHandle dawnIBLIrradiance_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle dawnIBLPrefilter_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle dawnIBLBRDFLUT_{rhi::handles::INVALID_RESOURCE};
+    rhi::SamplerHandle dawnIBLSampler_{rhi::handles::INVALID_SAMPLER};
+
+    u32 dawnRenderMode_{2}; // default ShadowAndIBL
 
     // Dawn shadow pipeline (owned by ForwardRenderer)
     rhi::DescriptorSetLayoutHandle dawnShadowDSL_{rhi::handles::INVALID_RESOURCE};
@@ -195,6 +209,13 @@ public:
 
     void SetDawnShadowResources(rhi::ResourceHandle depthTex, rhi::SamplerHandle sampler);
     void SetDawnShadowLightVP(const primal::math::m4x4& vp) { dawnShadowLightVP_ = vp; }
+    void SetDawnCascadeVPs(const primal::math::m4x4 vps[4], const float splits[4]) {
+        memcpy(dawnCascadeVPs_, vps, sizeof(dawnCascadeVPs_));
+        memcpy(dawnCascadeSplits_, splits, sizeof(dawnCascadeSplits_));
+    }
+    void SetDawnIBLResources(rhi::ResourceHandle irradiance, rhi::ResourceHandle prefilter,
+                             rhi::ResourceHandle brdfLUT, rhi::SamplerHandle sampler);
+    void SetDawnRenderMode(u32 mode) { dawnRenderMode_ = mode; }
 
     rhi::DescriptorSetLayoutHandle GetGlobalDescriptorSetLayout() const { return globalDescriptorSetLayout_; }
     rhi::DescriptorSetLayoutHandle GetPerObjectDescriptorSetLayout() const { return perObjectDescriptorSetLayout_; }

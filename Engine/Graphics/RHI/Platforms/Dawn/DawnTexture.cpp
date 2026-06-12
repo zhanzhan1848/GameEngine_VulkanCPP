@@ -126,9 +126,23 @@ bool DawnTexture::Initialize() {
 
     // --- Create the default texture view ---
 
-    // Passing nullptr creates a view covering all mips and all array layers
-    // with the same format as the texture.
-    wgpuTextureView_ = wgpuTextureCreateView(wgpuTexture_, nullptr);
+    // Passing nullptr gives 2DArray for multi-layer 2D textures, but
+    // TextureCube needs an explicit Cube view for sampling with texture_cube.
+    if (textureDesc_.type == TextureType::TextureCube) {
+        WGPUTextureViewDescriptor cubeViewDesc{};
+        cubeViewDesc.nextInChain = nullptr;
+        cubeViewDesc.label = ToWGPUStringView("CubeDefaultView");
+        cubeViewDesc.format = ToWGPUTextureFormat(textureDesc_.format);
+        cubeViewDesc.dimension = WGPUTextureViewDimension_Cube;
+        cubeViewDesc.baseMipLevel = 0;
+        cubeViewDesc.mipLevelCount = textureDesc_.mipLevels;
+        cubeViewDesc.baseArrayLayer = 0;
+        cubeViewDesc.arrayLayerCount = 6;
+        cubeViewDesc.aspect = WGPUTextureAspect_All;
+        wgpuTextureView_ = wgpuTextureCreateView(wgpuTexture_, &cubeViewDesc);
+    } else {
+        wgpuTextureView_ = wgpuTextureCreateView(wgpuTexture_, nullptr);
+    }
     if (!wgpuTextureView_) {
         std::cerr << "[DawnTexture] Failed to create default view for texture"
                   << (textureDesc_.name.empty() ? "" : (" '" + textureDesc_.name + "'").c_str())

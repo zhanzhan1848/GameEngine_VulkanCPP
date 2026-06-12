@@ -279,9 +279,31 @@ void DawnCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
 
     if (desc.depthAttachment.texture != handles::INVALID_RESOURCE) {
         DawnTexture* depthTex = device_.GetTexture(desc.depthAttachment.texture);
-        if (depthTex && depthTex->GetDefaultView()) {
+        if (depthTex) {
+            WGPUTextureView depthView = depthTex->GetDefaultView();
+            auto& texDesc = depthTex->GetTextureDesc();
+            // For array textures, always create a single-layer 2D view
+            // (default view covers all layers, which WebGPU rejects as depth attachment)
+            if (texDesc.type == rhi::TextureType::Texture2DArray && texDesc.arraySize > 1) {
+                rhi::TextureViewDesc viewDesc{};
+                viewDesc.texture = desc.depthAttachment.texture;
+                viewDesc.viewType = rhi::TextureType::Texture2D;
+                viewDesc.firstArraySlice = desc.depthAttachment.arrayLayer;
+                viewDesc.arraySize = 1;
+                viewDesc.format = texDesc.format;
+                depthView = depthTex->CreateView(viewDesc);
+            } else if (desc.depthAttachment.arrayLayer > 0) {
+                rhi::TextureViewDesc viewDesc{};
+                viewDesc.texture = desc.depthAttachment.texture;
+                viewDesc.viewType = rhi::TextureType::Texture2D;
+                viewDesc.firstArraySlice = desc.depthAttachment.arrayLayer;
+                viewDesc.arraySize = 1;
+                viewDesc.format = texDesc.format;
+                depthView = depthTex->CreateView(viewDesc);
+            }
+
             depthStencilAttachment.nextInChain = nullptr;
-            depthStencilAttachment.view = depthTex->GetDefaultView();
+            depthStencilAttachment.view = depthView;
             depthStencilAttachment.depthLoadOp = ToWGPULoadOp(desc.depthAttachment.loadOp);
             depthStencilAttachment.depthStoreOp = ToWGPUStoreOp(desc.depthAttachment.storeOp);
             depthStencilAttachment.depthClearValue = desc.depthAttachment.clearValue.depth;

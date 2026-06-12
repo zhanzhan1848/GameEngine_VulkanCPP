@@ -88,7 +88,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
     // DEBUG: Dump first 16 integers
     const u32* debugPtr = reinterpret_cast<const u32*>(reader.GetCurrentPtr());
     /*
-    std::cout << "File Header Dump (First 16 u32):" << std::endl;
+    std::cout << "File Header Dump (First 16 u32, size=" << size << "):" << std::endl;
     const u8* u8Data = static_cast<const u8*>(data);
     for (int i = 0; i < 16; ++i) {
         if (u8Data + (i + 1) * sizeof(u32) > u8Data + size) break;
@@ -341,7 +341,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              (void)primitiveTopology;
 
              
-             // std::cout << "Submesh " << i << " (LOD " << lod << "): MatIdx=" << materialIndex << ", Verts=" << vertexCount 
+             // std::cout << "Submesh " << i << " (LOD " << lod << "): MatIdx=" << materialIndex << ", Verts=" << vertexCount
              //           << ", Indices=" << indexCount << ", ElementSize=" << elementSize << std::endl;
 
              // Data sizes
@@ -376,7 +376,11 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // Skip data in reader
              u32 totalSize = positionSize + posPadding + elementBufferSize + elemPadding + indexBufferSize;
              if (reader.Remaining() < totalSize) {
-                 std::cerr << "Incomplete submesh data." << std::endl;
+                 std::cerr << "Incomplete submesh data. Skipping remaining LOD." << std::endl;
+                 // Skip whatever remains in this LOD to avoid corrupting reader position
+                 if (reader.Remaining() > 0) {
+                     reader.Skip(reader.Remaining());
+                 }
                  break;
              }
              
