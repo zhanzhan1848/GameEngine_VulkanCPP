@@ -282,6 +282,13 @@ bool Engine_Test::initialize() {
                 + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>';
             document.body.appendChild(hud);
         }
+        // Define HUD update function (independent of shell.html)
+        window.setRenderMode = function(idx, name, desc) {
+            var c = document.getElementById('modeHudCurrent');
+            var d = document.getElementById('modeHudDesc');
+            if (c) c.textContent = 'Mode ' + idx + ': ' + name;
+            if (d) d.textContent = desc;
+        };
     });
 #endif
 
