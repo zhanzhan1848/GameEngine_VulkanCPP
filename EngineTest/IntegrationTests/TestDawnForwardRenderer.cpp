@@ -1,6 +1,7 @@
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
 #ifdef __EMSCRIPTEN__
+#include <emscripten.h>
 extern "C" {
 bool EmscriptenGetKeyState(int keyCode);
 void EmscriptenGetMouseDelta(float* dx, float* dy);
