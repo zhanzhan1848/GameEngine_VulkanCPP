@@ -1191,6 +1191,7 @@ void Engine_Test::CreateIBLResources() {
     int hdrW, hdrH, hdrComp;
     float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrComp, 4);
     stbi_set_flip_vertically_on_load(false);
+    bool hdrFromSTB = (hdrData != nullptr);
 
     if (!hdrData) {
         std::vector<std::string> altPaths = {
@@ -1207,24 +1208,33 @@ void Engine_Test::CreateIBLResources() {
     }
 
     if (!hdrData) {
-        std::cerr << "[IBL] No HDR environment map found, creating dummy IBL textures" << std::endl;
-        rhi::TextureDesc cubeDesc;
-        cubeDesc.size = {1, 1, 1};
-        cubeDesc.format = rhi::DataFormat::RGBA16_Float;
-        cubeDesc.type = rhi::TextureType::TextureCube;
-        cubeDesc.mipLevels = 1;
-        cubeDesc.usage = rhi::TextureUsage::ShaderResource;
-        iblIrradianceTex_ = device_->CreateTexture(cubeDesc);
-        iblPrefilterTex_ = device_->CreateTexture(cubeDesc);
-        rhi::TextureDesc lutDesc;
-        lutDesc.size = {1, 1, 1};
-        lutDesc.format = rhi::DataFormat::RGBA16_Float;
-        lutDesc.type = rhi::TextureType::Texture2D;
-        lutDesc.mipLevels = 1;
-        lutDesc.usage = rhi::TextureUsage::ShaderResource;
-        iblBRDFLUTTex_ = device_->CreateTexture(lutDesc);
-        forwardRenderer_.SetDawnIBLResources(iblIrradianceTex_, iblPrefilterTex_, iblBRDFLUTTex_, iblSampler_);
-        return;
+        // Generate procedural sky gradient as fallback (provides reasonable IBL ambient)
+        constexpr int kProceduralW = 256, kProceduralH = 128;
+        hdrW = kProceduralW; hdrH = kProceduralH;
+        hdrData = new float[kProceduralW * kProceduralH * 4];
+        for (int y = 0; y < kProceduralH; ++y) {
+            float v = float(y) / float(kProceduralH - 1); // 0=top(zenith), 1=bottom(nadir)
+            for (int x = 0; x < kProceduralW; ++x) {
+                float* px = &hdrData[(y * kProceduralW + x) * 4];
+                float t = v * v; // non-linear for more sky concentration at top
+                // Zenith: dark blue → Horizon: warm orange → Nadir: dark
+                px[0] = (1.0f - t) * 0.15f + t * 0.9f;  // R
+                px[1] = (1.0f - t) * 0.2f  + t * 0.6f;   // G
+                px[2] = (1.0f - t) * 0.6f  + t * 0.25f;   // B
+                px[3] = 1.0f;
+                // Warm glow band near horizon (v ~ 0.4-0.6)
+                float horizon = expf(-((v - 0.5f) * (v - 0.5f)) * 50.0f);
+                px[0] += horizon * 1.2f;
+                px[1] += horizon * 0.6f;
+                px[2] += horizon * 0.15f;
+                // Darken below horizon
+                if (v > 0.55f) {
+                    float fade = 1.0f - simd::smoothstep(0.55f, 0.85f, v);
+                    px[0] *= fade; px[1] *= fade; px[2] *= fade;
+                }
+            }
+        }
+        std::cerr << "[IBL] Using procedural sky gradient (" << kProceduralW << "x" << kProceduralH << ")" << std::endl;
     }
 
     std::cout << "[IBL] Loaded HDR: " << hdrW << "x" << hdrH << std::endl;
@@ -1254,7 +1264,7 @@ void Engine_Test::CreateIBLResources() {
         device_->UpdateTextureData(equirectTex, (const unsigned char*)halfData.data(), 0, 0, 0,
                                    (u32)hdrW, (u32)hdrH, 1, 4 * sizeof(uint16_t) * hdrW, 0);
     }
-    stbi_image_free(hdrData);
+    if (hdrFromSTB) { stbi_image_free(hdrData); } else { delete[] hdrData; }
 
     // Create env cubemap (128x128)
     constexpr u32 kCubeSize = 128;
