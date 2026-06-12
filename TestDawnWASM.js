@@ -7548,7 +7548,7 @@ function checkIncomingModuleAPI() {
   ignoredModuleProp('onSbrkGrow');
 }
 var ASM_CONSTS = {
-  7615152: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } }
+  7615296: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } }
 };
 
 // Imports from the Wasm binary.
