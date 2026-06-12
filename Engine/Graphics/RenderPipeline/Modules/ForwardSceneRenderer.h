@@ -54,7 +54,8 @@ public:
     void RenderDynamicInstances(rhi::RHICommandBuffer* cmd,
                                 const math::m4x4& vp_matrix,
                                 u32 frame_index,
-                                bool shadow_pass);
+                                bool shadow_pass,
+                                bool forward_pass = false);
 
     // Static mesh ECS entity creation (Phase 3e)
     struct StaticEntityResult {
@@ -114,6 +115,7 @@ private:
 
     // Technique → Pipeline mapping
     rhi::PipelineHandle GetTechniquePipeline(ShaderTechnique technique) const;
+    rhi::PipelineHandle GetForwardTechniquePipeline(ShaderTechnique technique) const;
 
     rhi::RHIDeviceBase* device_ = nullptr;
     u32 render_width_ = 0;
@@ -151,6 +153,24 @@ private:
     rhi::ShaderHandle unlit_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle unlit_ps_{rhi::handles::INVALID_SHADER};
 
+    // Foliage technique shaders
+    rhi::ShaderHandle foliage_vs_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle foliage_ps_{rhi::handles::INVALID_SHADER};
+
+    // Water technique shaders
+    rhi::ShaderHandle water_vs_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle water_ps_{rhi::handles::INVALID_SHADER};
+
+    // Transparent technique shaders (GBuffer pass — unused for rendering, kept for shadow)
+    rhi::ShaderHandle transparent_vs_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle transparent_ps_{rhi::handles::INVALID_SHADER};
+
+    // Forward pass shaders (Water/Transparent rendered after deferred lighting)
+    rhi::ShaderHandle forward_water_vs_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle forward_water_ps_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle forward_transparent_vs_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle forward_transparent_ps_{rhi::handles::INVALID_SHADER};
+
     // Pipelines
     rhi::PipelineHandle gbuffer_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle shadow_pipeline_{rhi::handles::INVALID_PIPELINE};
@@ -161,6 +181,11 @@ private:
     // Technique-specific pipelines
     rhi::PipelineHandle alphaclip_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle unlit_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle foliage_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle water_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle transparent_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle forward_water_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle forward_transparent_pipeline_{rhi::handles::INVALID_PIPELINE};
 
     // Pipeline layouts
     rhi::PipelineLayoutHandle gbuffer_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};

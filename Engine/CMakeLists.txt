@@ -103,6 +103,9 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Noise/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/GPU/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/GPU/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/Nodes/*.h"
     # Ensure SSRPass is included (GLOB_RECURSE should pick it up, but touching file forces rescan)
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.cpp"

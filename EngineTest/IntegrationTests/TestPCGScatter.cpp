@@ -1693,18 +1693,13 @@ void PCGScatterTestCase::HandleInput(float dt) {
         }
     } else { key_6_pressed_ = false; }
 
-    // Key 7: Cycle technique (Opaque → AlphaClip → Unlit → Opaque)
+    // Key 7: Cycle technique (Opaque → AlphaClip → Foliage → Water → Transparent → Unlit → Opaque)
     get(input_source::keyboard, input_code::key_7, val);
     if (val.current.x > 0.0f) {
         if (!key_7_pressed_) {
             key_7_pressed_ = true;
-            static const primal::graphics::ShaderTechnique techniques[] = {
-                primal::graphics::ShaderTechnique::Opaque,
-                primal::graphics::ShaderTechnique::AlphaClip,
-                primal::graphics::ShaderTechnique::Unlit,
-            };
-            mat_technique_index_ = (mat_technique_index_ + 1) % 3;
-            const char* names[] = {"Opaque", "AlphaClip", "Unlit"};
+            mat_technique_index_ = (mat_technique_index_ + 1) % 6;
+            const char* names[] = {"Opaque", "AlphaClip", "Foliage", "Water", "Transparent", "Unlit"};
             std::cout << "[Technique] Switched to: " << names[mat_technique_index_] << std::endl;
             UpdatePCGMaterialParams();
         }
@@ -1715,7 +1710,7 @@ void PCGScatterTestCase::HandleInput(float dt) {
     if (val.current.x > 0.0f) {
         if (!key_8_pressed_) {
             key_8_pressed_ = true;
-            const char* techNames[] = {"Opaque", "AlphaClip", "Unlit"};
+            const char* techNames[] = {"Opaque", "AlphaClip", "Foliage", "Water", "Transparent", "Unlit"};
             std::cout << "[Material] technique=" << techNames[mat_technique_index_]
                       << " roughness=" << mat_roughness_
                       << " metallic=" << mat_metallic_
@@ -1733,6 +1728,9 @@ void PCGScatterTestCase::UpdatePCGMaterialParams() {
     static const primal::graphics::ShaderTechnique techniques[] = {
         primal::graphics::ShaderTechnique::Opaque,
         primal::graphics::ShaderTechnique::AlphaClip,
+        primal::graphics::ShaderTechnique::Foliage,
+        primal::graphics::ShaderTechnique::Water,
+        primal::graphics::ShaderTechnique::Transparent,
         primal::graphics::ShaderTechnique::Unlit,
     };
     auto tech = techniques[mat_technique_index_];

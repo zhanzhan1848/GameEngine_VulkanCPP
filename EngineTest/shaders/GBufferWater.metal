@@ -140,42 +140,37 @@ fragment FragmentOut fragmentMain(
 ) {
     FragmentOut out;
 
-    // Standard PBR Sampling
-    float4 albedoSample = albedoMap.sample(defaultSampler, in.uv);
-    out.albedo = albedoSample * in.instanceBaseColor;
+    // Wave normal perturbation
+    float t = sceneData.time;
+    float3 waveNormal;
+    waveNormal.x = sin(in.worldPos.x * 2.0 + t * 1.5) * cos(in.worldPos.z * 1.8 + t * 1.2) * 0.15;
+    waveNormal.y = 1.0;
+    waveNormal.z = cos(in.worldPos.x * 1.6 + t * 1.8) * sin(in.worldPos.z * 2.2 + t * 1.0) * 0.15;
+    waveNormal = normalize(waveNormal);
 
-    // AlphaClip: discard fragments below threshold
-    if (out.albedo.a < in.instanceBaseColor.a * 0.5) {
-        discard_fragment();
-    }
+    // Perturb the geometric normal with wave
+    float3 N = normalize(in.worldNormal + waveNormal);
 
-    // ORM Sampling
-    float4 ormSample = ormMap.sample(defaultSampler, in.uv);
+    // Fresnel (view-dependent opacity)
+    float3 viewDir = normalize(sceneData.viewPos.xyz - in.worldPos);
+    float fresnel = pow(1.0 - max(dot(viewDir, N), 0.0), 3.0);
 
-    if (length(ormSample.rgb) < 0.01) {
-        out.orm = float4(1.0, in.instanceRoughness, in.instanceMetallic, 1.0);
-    } else {
-        out.orm = float4(ormSample.r,
-                         ormSample.g * in.instanceRoughness,
-                         ormSample.b * in.instanceMetallic,
-                         1.0);
-        out.orm.r = max(out.orm.r, 0.1);
-    }
+    // Shallow/deep water colors
+    float3 shallowColor = float3(0.1, 0.6, 0.7);
+    float3 deepColor = float3(0.02, 0.1, 0.3);
+    float3 waterColor = mix(shallowColor, deepColor, fresnel);
+    waterColor *= in.instanceBaseColor.rgb;
 
-    // Normal Mapping
-    float3 normalSample = normalMap.sample(defaultSampler, in.uv).rgb;
-    if (length(normalSample) > 0.1) {
-        float3 normal = normalSample * 2.0 - 1.0;
-        float3 N = normalize(in.worldNormal);
-        float3 T = normalize(in.worldTangent);
-        float3 B = cross(N, T);
-        float3x3 TBN = float3x3(T, B, N);
-        out.normal = float4(normalize(TBN * normal) * 0.5 + 0.5, 1.0);
-    } else {
-        out.normal = float4(normalize(in.worldNormal) * 0.5 + 0.5, 1.0);
-    }
+    float opacity = mix(0.4, 0.95, fresnel);
+    out.albedo = float4(waterColor, opacity);
 
-    // Calculate Velocity
+    // Normal output
+    out.normal = float4(N * 0.5 + 0.5, 1.0);
+
+    // ORM: low roughness, no metallic
+    out.orm = float4(1.0, 0.05, 0.0, 1.0);
+
+    // Velocity
     float2 currentNDC = in.currentPos.xy / in.currentPos.w;
     float2 previousNDC = in.previousPos.xy / in.previousPos.w;
     float2 currentNDC_NoJitter = currentNDC - sceneData.jitter;
