@@ -1228,7 +1228,7 @@ void Engine_Test::CreateIBLResources() {
     }
 
     if (!hdrData) {
-        // Generate procedural sky gradient as fallback (provides reasonable IBL ambient)
+        // Generate procedural sky gradient as fallback
         constexpr int kProceduralW = 256, kProceduralH = 128;
         hdrW = kProceduralW; hdrH = kProceduralH;
         hdrData = new float[kProceduralW * kProceduralH * 4];
@@ -1236,23 +1236,19 @@ void Engine_Test::CreateIBLResources() {
             float v = float(y) / float(kProceduralH - 1); // 0=top(zenith), 1=bottom(nadir)
             for (int x = 0; x < kProceduralW; ++x) {
                 float* px = &hdrData[(y * kProceduralW + x) * 4];
-                float t = v * v; // non-linear for more sky concentration at top
-                // Zenith: dark blue → Horizon: warm orange → Nadir: dark
-                px[0] = (1.0f - t) * 0.15f + t * 0.9f;  // R
-                px[1] = (1.0f - t) * 0.2f  + t * 0.6f;   // G
-                px[2] = (1.0f - t) * 0.6f  + t * 0.25f;   // B
-                px[3] = 1.0f;
-                // Warm glow band near horizon (v ~ 0.4-0.6)
-                float horizon = expf(-((v - 0.5f) * (v - 0.5f)) * 50.0f);
-                px[0] += horizon * 1.2f;
-                px[1] += horizon * 0.6f;
-                px[2] += horizon * 0.15f;
+                // Soft neutral sky: blue zenith, light horizon, dark below
+                // Keep values LOW to avoid dominant IBL specular on surfaces
+                px[0] = 0.2f; px[1] = 0.25f; px[2] = 0.45f; px[3] = 1.0f; // base: soft blue
+                // Lighter band near horizon (v ~ 0.45-0.55)
+                float horizon = expf(-((v - 0.5f) * (v - 0.5f)) * 80.0f);
+                px[0] += horizon * 0.25f;
+                px[1] += horizon * 0.2f;
+                px[2] += horizon * 0.1f;
                 // Darken below horizon
                 if (v > 0.55f) {
                     float t = (v - 0.55f) / (0.85f - 0.55f);
-                    t = t * t * (3.0f - 2.0f * t); // smoothstep
-                    float fade = 1.0f - t;
-                    px[0] *= fade; px[1] *= fade; px[2] *= fade;
+                    t = t * t * (3.0f - 2.0f * t);
+                    px[0] *= 1.0f - t; px[1] *= 1.0f - t; px[2] *= 1.0f - t;
                 }
             }
         }

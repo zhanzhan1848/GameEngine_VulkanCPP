@@ -1099,6 +1099,15 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
     }
 #endif
 
+#ifdef __EMSCRIPTEN__
+    static int s_prevMode = -1;
+    bool modeChanged = (int)dawnRenderMode_ != s_prevMode;
+    if (modeChanged) {
+        s_prevMode = (int)dawnRenderMode_;
+        std::cerr << "[FillLight] mode=" << s_prevMode << " sizeof(LP)=" << sizeof(rhi::LightParameters) << std::endl;
+    }
+#endif
+
     auto* buffer = static_cast<rhi::ForwardLightBuffer*>(lightBuffersMapped_[frameIndex]);
     // Zero the header and light counts (keep old data for lights, they'll be overwritten)
     buffer->directionalLightCount = 0;
@@ -1197,7 +1206,7 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
 
 #ifdef __EMSCRIPTEN__
     static bool s_dumpedLights = false;
-    if (!s_dumpedLights && buffer->punctualLightCount > 0) {
+    if ((!s_dumpedLights || modeChanged) && buffer->punctualLightCount > 0) {
         s_dumpedLights = true;
         for (u32 li = 0; li < buffer->punctualLightCount; ++li) {
             auto* p = reinterpret_cast<const float*>(&buffer->lights[li]);
