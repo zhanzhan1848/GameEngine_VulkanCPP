@@ -1100,8 +1100,18 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
 #endif
 
     auto* buffer = static_cast<rhi::ForwardLightBuffer*>(lightBuffersMapped_[frameIndex]);
+    // Zero the header and light counts (keep old data for lights, they'll be overwritten)
     buffer->directionalLightCount = 0;
     buffer->punctualLightCount = 0;
+
+#ifdef __EMSCRIPTEN__
+    // Zero the entire light array on first fill to detect stale data
+    static bool s_firstZero = true;
+    if (s_firstZero) {
+        memset(buffer->lights, 0, sizeof(buffer->lights));
+        s_firstZero = false;
+    }
+#endif
 
     const auto& allLights = scene.GetLights();
     for (size_t i = 0; i < allLights.size(); ++i) {
@@ -1184,6 +1194,27 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
         globalData->numDirectionalLights = buffer->directionalLightCount;
         globalData->numPunctualLights = buffer->punctualLightCount;
     }
+
+#ifdef __EMSCRIPTEN__
+    static bool s_dumpedLights = false;
+    if (!s_dumpedLights && buffer->punctualLightCount > 0) {
+        s_dumpedLights = true;
+        for (u32 li = 0; li < buffer->punctualLightCount; ++li) {
+            auto* p = reinterpret_cast<const float*>(&buffer->lights[li]);
+            std::cerr << "[LightBuf " << li << "] pos=(" << p[0] << "," << p[1] << "," << p[2] << ") w=" << p[3]
+                      << " intensity=" << p[4]
+                      << " dir=(" << p[8] << "," << p[9] << "," << p[10] << ") w=" << p[11]
+                      << " range=" << p[12]
+                      << " color=(" << p[16] << "," << p[17] << "," << p[18] << ")"
+                      << " lightType=" << *(int*)&p[29] << std::endl;
+        }
+        if (globalData) {
+            std::cerr << "[Camera] pos=(" << globalData->cameraPositionAndViewWidth.x
+                      << "," << globalData->cameraPositionAndViewWidth.y
+                      << "," << globalData->cameraPositionAndViewWidth.z << ")" << std::endl;
+        }
+    }
+#endif
 }
 
 void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer, 

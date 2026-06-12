@@ -270,6 +270,19 @@ bool Engine_Test::initialize() {
 
 #ifdef __EMSCRIPTEN__
     g_engineTest = this;
+    // Create HUD dynamically (independent of shell.html)
+    EM_ASM({
+        if (!document.getElementById('modeHud')) {
+            var hud = document.createElement('div');
+            hud.id = 'modeHud';
+            hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;';
+            hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>'
+                + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>'
+                + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>'
+                + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>';
+            document.body.appendChild(hud);
+        }
+    });
 #endif
 
     return true;
