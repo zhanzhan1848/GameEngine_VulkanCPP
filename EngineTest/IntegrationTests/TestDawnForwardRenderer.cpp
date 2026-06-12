@@ -1229,7 +1229,9 @@ void Engine_Test::CreateIBLResources() {
                 px[2] += horizon * 0.15f;
                 // Darken below horizon
                 if (v > 0.55f) {
-                    float fade = 1.0f - simd::smoothstep(0.55f, 0.85f, v);
+                    float t = (v - 0.55f) / (0.85f - 0.55f);
+                    t = t * t * (3.0f - 2.0f * t); // smoothstep
+                    float fade = 1.0f - t;
                     px[0] *= fade; px[1] *= fade; px[2] *= fade;
                 }
             }
