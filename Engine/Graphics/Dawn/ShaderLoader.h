@@ -688,6 +688,10 @@ struct GlobalShaderData {
     numPunctualLights: u32,
     deltaTime: f32,
     frameCount: f32,
+    renderMode: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 };
 
 struct DirectionalLightParameters {
@@ -697,11 +701,30 @@ struct DirectionalLightParameters {
     colorAndShadow: vec4<f32>,
 };
 
+struct PunctualLightParameters {
+    position: vec4<f32>,       // simd::float3 = 16 bytes (xyz=pos, w=unused)
+    intensity: f32,
+    _p0: f32, _p1: f32, _p2: f32,  // pad to 32
+    direction: vec4<f32>,      // xyz=dir, w=unused
+    range: f32,
+    _p3: f32, _p4: f32, _p5: f32,  // pad to 64
+    color: vec4<f32>,          // xyz=color, w=unused
+    cosUmbra: f32,
+    _p6: f32, _p7: f32, _p8: f32,  // pad to 96
+    attenuation: vec4<f32>,    // xyz=att, w=unused
+    cosPenumbra: f32,
+    lightType: i32,
+    shadowIndex: i32,
+    _pad0: f32,
+    viewProjection: mat4x4<f32>,
+};
+
 struct ForwardLightBuffer {
     directionalLightCount: u32,
     punctualLightCount: u32,
     _pad: vec2<u32>,
     directionalLights: array<DirectionalLightParameters, 4>,
+    lights: array<PunctualLightParameters, 128>,
 };
 
 struct PerObjectData {
@@ -716,10 +739,15 @@ struct PerObjectData {
 @group(0) @binding(11) var<uniform> globalData: GlobalShaderData;
 @group(0) @binding(12) var<uniform> lightBuffer: ForwardLightBuffer;
 
-@group(1) @binding(10) var<uniform> perObject: PerObjectData;
+@group(1) @binding(0) var<uniform> perObject: PerObjectData;
 
-@group(0) @binding(13) var shadowDepthTex: texture_depth_2d;
+@group(0) @binding(13) var shadowDepthTex: texture_depth_2d_array;
 @group(0) @binding(14) var shadowSampler: sampler;
+
+@group(0) @binding(15) var irradianceMap: texture_cube<f32>;
+@group(0) @binding(16) var prefilterMap: texture_cube<f32>;
+@group(0) @binding(17) var brdfLUT: texture_2d<f32>;
+@group(0) @binding(18) var iblSampler: sampler;
 
 @group(2) @binding(0) var albedoMap: texture_2d<f32>;
 @group(2) @binding(1) var normalMap: texture_2d<f32>;
@@ -792,6 +820,10 @@ fn fresnelSchlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+fn fresnelSchlickRoughness(cosTheta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    return F0 + (max(vec3<f32>(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
 fn distributionGGX(N: vec3<f32>, H: vec3<f32>, a: f32) -> f32 {
     let a2 = a * a;
     let NdotH = max(dot(N, H), 0.0);
@@ -811,37 +843,41 @@ fn geometrySmith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, a: f32) -> f32 {
 
 const PI: f32 = 3.141592653589793;
 
-// === Shadow sampling ===
+// === Shadow sampling (CSM) ===
 
-fn sampleShadowPCF(worldPos: vec3<f32>, N: vec3<f32>, lightDir: vec3<f32>) -> f32 {
-    let lightVP = lightBuffer.directionalLights[0].viewProjections[0];
+fn selectCascade(viewZ: f32) -> i32 {
+    let splits = lightBuffer.directionalLights[0].splits;
+    for (var i: i32 = 0; i < 4; i++) {
+        if (viewZ < splits[i]) { return i; }
+    }
+    return 3;
+}
+
+fn sampleShadowPCF(worldPos: vec3<f32>, viewZ: f32, N: vec3<f32>, lightDir: vec3<f32>) -> f32 {
+    let cascadeIdx = selectCascade(viewZ);
+    let lightVP = lightBuffer.directionalLights[0].viewProjections[cascadeIdx];
     let lightClip = lightVP * vec4<f32>(worldPos, 1.0);
     let lightNDC = lightClip.xyz / lightClip.w;
 
-    // Bounds check — fragment outside shadow map is fully lit
     if (lightNDC.x < -1.0 || lightNDC.x > 1.0 || lightNDC.y < -1.0 || lightNDC.y > 1.0
         || lightNDC.z < 0.0 || lightNDC.z > 1.0) {
         return 1.0;
     }
 
-    // WebGPU viewport flips Y: NDC y=+1 maps to framebuffer pixel row 0 (top).
-    // textureLoad uses top-left origin, so we flip Y to match.
     let shadowUV = clamp(vec2<f32>(lightNDC.x * 0.5 + 0.5, 1.0 - (lightNDC.y * 0.5 + 0.5)),
                          vec2<f32>(0.001, 0.001), vec2<f32>(0.999, 0.999));
     let shadowZ = lightNDC.z;
 
     let texSize = vec2<f32>(textureDimensions(shadowDepthTex));
-    let texelSize = 1.0 / texSize;
     let bias = max(0.005 * (1.0 - dot(N, lightDir)), 0.001);
 
-    // Use textureLoad (no uniform control flow requirement) for PCF 3x3
     let baseCoord = vec2<i32>(shadowUV * texSize);
     var shadow = 0.0;
     var count = 0;
     for (var x = -1; x <= 1; x++) {
         for (var y = -1; y <= 1; y++) {
             let coord = clamp(baseCoord + vec2<i32>(x, y), vec2<i32>(0, 0), vec2<i32>(i32(texSize.x) - 1, i32(texSize.y) - 1));
-            let depth = textureLoad(shadowDepthTex, coord, 0);
+            let depth = textureLoad(shadowDepthTex, coord, cascadeIdx, 0);
             shadow += select(0.0, 1.0, depth > shadowZ - bias);
             count++;
         }
@@ -872,24 +908,32 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
 
     let V = normalize(globalData.cameraPositionAndViewWidth.xyz - input.worldPos);
 
-    // Ambient (low for deep shadows)
-    var color = vec3<f32>(0.01, 0.01, 0.01) * albedo * ao;
+    // View-space Z for cascade selection
+    let viewPos = globalData.view * vec4<f32>(input.worldPos, 1.0);
+    let viewZ = -viewPos.z;
 
-    // Directional light (first only, Stage 1) with shadow
+    var color = vec3<f32>(0.0);
+    var iblShadow: f32 = 1.0;
+
+    let mode = globalData.renderMode;
+    let shadowActive = mode >= 1u;
+    let iblActive = mode >= 2u;
+    let punctualActive = mode >= 3u;
+
+    let F0 = mix(vec3<f32>(0.04, 0.04, 0.04), albedo, metallic);
+    let NdotV = max(dot(N, V), 0.001);
+
+    // Directional light (first only) with shadow
     if (lightBuffer.directionalLightCount > 0u) {
         let light = lightBuffer.directionalLights[0];
         let L = normalize(-light.directionAndIntensity.xyz);
         let H = normalize(V + L);
 
-        // Shadow
-        let shadowFactor = sampleShadowPCF(input.worldPos, N, L);
+        let shadowFactor = select(1.0, sampleShadowPCF(input.worldPos, viewZ, N, L), shadowActive);
         let radiance = light.colorAndShadow.rgb * light.directionAndIntensity.w * shadowFactor;
 
-        let NdotV = max(dot(N, V), 0.001);
         let NdotL = max(dot(N, L), 0.0);
 
-        // Cook-Torrance BRDF
-        let F0 = mix(vec3<f32>(0.04, 0.04, 0.04), albedo, metallic);
         let fresnel = fresnelSchlick(max(dot(H, V), 0.0), F0);
         let ndf = distributionGGX(N, H, roughness);
         let geometry = geometrySmith(N, V, L, roughness);
@@ -903,12 +947,69 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
 
         let Lo = (kD * albedo / PI + specular) * radiance * NdotL;
         color = color + Lo;
+        iblShadow = select(1.0, mix(0.35, 1.0, shadowFactor), shadowActive);
     }
 
+    // Punctual lights (point + spot) — only in Full mode
+    if (punctualActive) {
+        for (var i: u32 = 0u; i < lightBuffer.punctualLightCount; i++) {
+            let plight = lightBuffer.lights[i];
+            let toLight = plight.position.xyz - input.worldPos;
+            let distance = length(toLight);
+            if (distance > plight.range) { continue; }
+
+            // Smooth falloff near range edge
+            let rangeFade = 1.0 - smoothstep(plight.range * 0.6, plight.range, distance);
+
+            let L = toLight / distance;
+            let H = normalize(V + L);
+
+            let att = plight.attenuation.xyz;
+            let attenuation = 1.0 / (att.x + att.y * distance + att.z * distance * distance) * rangeFade;
+
+            var spotAtt = 1.0;
+            if (plight.lightType == 2) {
+                let theta = dot(L, normalize(-plight.direction.xyz));
+                let epsilon = plight.cosUmbra - plight.cosPenumbra;
+                spotAtt = clamp((theta - plight.cosPenumbra) / max(epsilon, 0.001), 0.0, 1.0);
+            }
+
+            let radiance = plight.color.xyz * plight.intensity * attenuation * spotAtt;
+            let NdotL = max(dot(N, L), 0.0);
+
+            let fresnel = fresnelSchlick(max(dot(H, V), 0.0), F0);
+            let ndf = distributionGGX(N, H, roughness);
+            let geometry = geometrySmith(N, V, L, roughness);
+
+            let numerator = ndf * geometry * fresnel;
+            let denominator = 4.0 * NdotV * NdotL + 0.0001;
+            let specular = numerator / denominator;
+
+            let kS = fresnel;
+            let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
+
+            let Lo = (kD * albedo / PI + specular) * radiance * NdotL;
+            color = color + Lo;
+        }
+    }
+
+    // IBL ambient — only in ShadowAndIBL and Full modes
+    if (iblActive) {
+        let kS_ibl = fresnelSchlickRoughness(NdotV, F0, roughness);
+        let kD_ibl = (vec3<f32>(1.0) - kS_ibl) * (1.0 - metallic);
+        let irradiance = textureSample(irradianceMap, iblSampler, N).rgb;
+        let diffuseIBL = irradiance * albedo;
+        let R = reflect(-V, N);
+        let prefilteredColor = textureSampleLevel(prefilterMap, iblSampler, R, roughness * 4.0).rgb;
+        let brdf = textureSample(brdfLUT, iblSampler, vec2<f32>(NdotV, roughness));
+        let specularIBL = prefilteredColor * (kS_ibl * brdf.r + brdf.g);
+        color = color + (kD_ibl * diffuseIBL + specularIBL) * ao * iblShadow * 0.6;
+    } else {
+        color = color + vec3<f32>(0.03) * albedo * ao;
+    }
     // Tone contrast + gamma correction
     color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.3, 1.3, 1.3));
     color = pow(color, vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-
     return vec4<f32>(color, 1.0);
 }
 )wgsl";

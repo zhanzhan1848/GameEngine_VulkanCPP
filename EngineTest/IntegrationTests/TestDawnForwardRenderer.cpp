@@ -168,7 +168,7 @@ bool Engine_Test::initialize() {
     // Create window
     platform::window_init_info windowInfo{
         nullptr, nullptr,
-        "TestDawnForwardRenderer",
+        "Dawn Forward Renderer | [Tab] Switch Mode | Mode 2: ShadowAndIBL",
         100, 100, (s32)width_, (s32)height_
     };
     window_ = platform::create_window(&windowInfo);
@@ -825,11 +825,23 @@ void Engine_Test::UpdateCamera(float dt) {
     // Tab (keyCode 48) to cycle render mode — edge detected
     {
         static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "Full"};
+        static const char* kModeDesc[] = {
+            "Directional light only",
+            "Directional + Shadow",
+            "Directional + Shadow + IBL",
+            "Directional + Shadow + IBL + Punctual"
+        };
         bool tabPressed = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 48);
         if (tabPressed && !prevTabState_) {
             renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
             forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
             std::cerr << "[Mode] " << kModeNames[static_cast<u8>(renderMode_)] << std::endl;
+            // Update window title with mode info
+            char title[256];
+            snprintf(title, sizeof(title), "Dawn Forward Renderer | [Tab] Switch Mode | Mode %d: %s — %s",
+                     static_cast<u8>(renderMode_), kModeNames[static_cast<u8>(renderMode_)],
+                     kModeDesc[static_cast<u8>(renderMode_)]);
+            window_.set_caption(title);
         }
         prevTabState_ = tabPressed;
     }
@@ -873,6 +885,29 @@ void Engine_Test::UpdateCamera(float dt) {
     if (EmscriptenGetMouseButton(0)) { // left button drag
         cameraYaw_ -= mdx * 0.002f;
         cameraPitch_ -= mdy * 0.002f;
+    }
+
+    // Tab (keyCode 9) to cycle render mode — WASM
+    {
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "Full"};
+        static const char* kModeDesc[] = {
+            "Directional light only",
+            "Directional + Shadow",
+            "Directional + Shadow + IBL",
+            "Directional + Shadow + IBL + Punctual"
+        };
+        bool tabPressed = EmscriptenGetKeyState(9);
+        if (tabPressed && !prevTabState_) {
+            renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
+            forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
+            std::cerr << "[Mode] " << kModeNames[static_cast<u8>(renderMode_)] << std::endl;
+            EM_ASM({
+                if (window.setRenderMode) {
+                    window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2));
+                }
+            }, static_cast<u8>(renderMode_), kModeNames[static_cast<u8>(renderMode_)], kModeDesc[static_cast<u8>(renderMode_)]);
+        }
+        prevTabState_ = tabPressed;
     }
 #endif
 
