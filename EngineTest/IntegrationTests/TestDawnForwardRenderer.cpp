@@ -901,7 +901,7 @@ void Engine_Test::UpdateCamera(float dt) {
             renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
             forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
             std::cerr << "[Mode] " << kModeNames[static_cast<u8>(renderMode_)] << std::endl;
-            EM_ASM({
+            EM_ASM_({
                 if (window.setRenderMode) {
                     window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2));
                 }
