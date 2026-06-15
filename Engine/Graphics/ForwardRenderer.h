@@ -41,10 +41,11 @@ public:
     bool Initialize(rhi::RHIDeviceBase* device);
     void Shutdown();
 
-    void Render(rhi::RHICommandBuffer* cmdBuffer, 
-                const RenderScene& scene, 
-                const RenderView& view, 
-                rhi::ResourceHandle renderTarget, 
+    void Render(rhi::RHICommandBuffer* cmdBuffer,
+                const RenderScene& scene,
+                const RenderView& view,
+                rhi::ResourceHandle renderTarget,
+                rhi::ResourceHandle velocityTarget,
                 rhi::ResourceHandle depthStencil,
                 const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
                 u32 frameIndex,
@@ -186,6 +187,10 @@ private:
     rhi::SamplerHandle dawnIBLSampler_{rhi::handles::INVALID_SAMPLER};
 
     u32 dawnRenderMode_{2}; // default ShadowAndIBL
+
+    // Phase 2: previous-frame state for velocity MRT
+    primal::math::m4x4 prevViewProjection_{};
+    std::unordered_map<id::id_type, primal::math::m4x4> prevWorldMap_;
 
     // Dawn shadow pipeline (owned by ForwardRenderer)
     rhi::DescriptorSetLayoutHandle dawnShadowDSL_{rhi::handles::INVALID_RESOURCE};

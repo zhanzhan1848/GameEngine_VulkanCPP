@@ -49,6 +49,15 @@ const ForwardPassOutput& AddPass(
             hdrDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
             data.output.hdrTexture = builder.CreateTexture("HDR_Scene", hdrDesc, rhi::ResourceState::RenderTarget);
 
+            // Create velocity render target (RG16F — 2 channels for motion vector)
+            rhi::TextureDesc velDesc;
+            velDesc.size = {width, height, 1};
+            velDesc.format = rhi::DataFormat::RG16_Float;
+            velDesc.type = rhi::TextureType::Texture2D;
+            velDesc.mipLevels = 1;
+            velDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+            data.output.velocityTexture = builder.CreateTexture("Velocity_MRT", velDesc, rhi::ResourceState::RenderTarget);
+
             // Create depth buffer
             rhi::TextureDesc depthDesc;
             depthDesc.size = {width, height, 1};
@@ -62,6 +71,7 @@ const ForwardPassOutput& AddPass(
             if (!data.renderer || !data.scene || !data.view) return;
 
             auto* hdrRes = context.graph->GetResource(data.output.hdrTexture);
+            auto* velRes = context.graph->GetResource(data.output.velocityTexture);
             auto* depthRes = context.graph->GetResource(data.output.depthTexture);
             if (!hdrRes || !depthRes) return;
 
@@ -70,6 +80,7 @@ const ForwardPassOutput& AddPass(
                 *data.scene,
                 *data.view,
                 hdrRes->GetPhysicalHandle(),
+                (velRes ? velRes->GetPhysicalHandle() : rhi::handles::INVALID_RESOURCE),
                 depthRes->GetPhysicalHandle(),
                 *data.materials,
                 data.frameIndex,

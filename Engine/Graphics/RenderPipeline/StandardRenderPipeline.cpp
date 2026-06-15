@@ -147,7 +147,7 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view, rhi::R
             bloomTexture = bloomOutput.bloomOutput;
 
             // 4. ToneMapping: HDR → LDR (with bloom + AO)
-            const auto& tonemapOutput = PostProcess::AddToneMappingPass(*renderGraph_, hdrTexture, bloomTexture, aoTexture, ssgiTexture, frameIndex);
+            const auto& tonemapOutput = PostProcess::AddToneMappingPass(*renderGraph_, hdrTexture, bloomTexture, aoTexture, ssgiTexture, velTexture, frameIndex);
 
             // 3. Present: Blit LDR → BackBuffer
             struct PresentData {

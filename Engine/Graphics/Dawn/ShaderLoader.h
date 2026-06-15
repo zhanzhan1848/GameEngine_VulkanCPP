@@ -517,6 +517,7 @@ struct PerObjectData {
     world: mat4x4<f32>,
     invWorld: mat4x4<f32>,
     worldViewProjection: mat4x4<f32>,
+    prevWorldViewProjection: mat4x4<f32>,
     sh_coeffs: array<vec4<f32>, 9>,
 };
 
@@ -545,6 +546,7 @@ struct VSOutput {
     @location(2) normal: vec3<f32>,
     @location(3) tangent: vec3<f32>,
     @location(4) @interpolate(flat) tSign: u32,
+    @location(5) prevClip: vec4<f32>,
 };
 
 fn unpackNormal(packed: u32, colorTSign: u32) -> vec3<f32> {
@@ -581,6 +583,8 @@ fn vertexMain(input: VSInput) -> VSOutput {
     output.normal = unpackNormal(input.packed_normal, input.color_t_sign);
     output.tangent = unpackTangent(input.packed_tangent);
     output.tSign = input.color_t_sign;
+    let prevClip = perObject.prevWorldViewProjection * vec4<f32>(input.position, 1.0);
+    output.prevClip = prevClip;
     return output;
 }
 
@@ -607,8 +611,13 @@ fn geometrySmith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, a: f32) -> f32 {
 
 const PI: f32 = 3.141592653589793;
 
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) velocity: vec2<f32>,
+};
+
 @fragment
-fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @location(0) vec4<f32> {
+fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> FragmentOutput {
     let albedo = textureSample(albedoMap, matSampler, input.uv).rgb;
     let normalTex = textureSample(normalMap, matSampler, input.uv).rgb;
     let orm = textureSample(ormMap, matSampler, input.uv);
@@ -657,7 +666,19 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
     color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.3, 1.3, 1.3));
     color = pow(color, vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
 
-    return vec4<f32>(color, 1.0);
+    let screenSize = vec2<f32>(globalData.cameraPositionAndViewWidth.w,
+                               globalData.cameraDirectionAndViewHeight.w);
+    let currNDC = vec2<f32>(
+        input.clipPos.x / max(screenSize.x, 1.0) * 2.0 - 1.0,
+        1.0 - input.clipPos.y / max(screenSize.y, 1.0) * 2.0
+    );
+    let prevNDC = input.prevClip.xy / max(input.prevClip.w, 0.0001);
+    let velocity = (currNDC - prevNDC) * 0.5;
+
+    var out: FragmentOutput;
+    out.color = vec4<f32>(color, 1.0);
+    out.velocity = velocity;
+    return out;
 }
 )wgsl";
 
@@ -731,6 +752,7 @@ struct PerObjectData {
     world: mat4x4<f32>,
     invWorld: mat4x4<f32>,
     worldViewProjection: mat4x4<f32>,
+    prevWorldViewProjection: mat4x4<f32>,
     sh_coeffs: array<vec4<f32>, 9>,
 };
 
@@ -771,6 +793,7 @@ struct VSOutput {
     @location(2) normal: vec3<f32>,
     @location(3) tangent: vec3<f32>,
     @location(4) @interpolate(flat) tSign: u32,
+    @location(5) prevClip: vec4<f32>,
 };
 
 // === Unpack helpers (little-endian: low 16-bit = x, high 16-bit = y) ===
@@ -811,6 +834,8 @@ fn vertexMain(input: VSInput) -> VSOutput {
     output.normal = unpackNormal(input.packed_normal, input.color_t_sign);
     output.tangent = unpackTangent(input.packed_tangent);
     output.tSign = input.color_t_sign;
+    let prevClip = perObject.prevWorldViewProjection * vec4<f32>(input.position, 1.0);
+    output.prevClip = prevClip;
     return output;
 }
 
@@ -887,8 +912,13 @@ fn sampleShadowPCF(worldPos: vec3<f32>, viewZ: f32, N: vec3<f32>, lightDir: vec3
 
 // === Fragment shader ===
 
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) velocity: vec2<f32>,
+};
+
 @fragment
-fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @location(0) vec4<f32> {
+fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> FragmentOutput {
     let albedo = textureSample(albedoMap, matSampler, input.uv).rgb;
     let normalTex = textureSample(normalMap, matSampler, input.uv).rgb;
     let orm = textureSample(ormMap, matSampler, input.uv);
@@ -1010,7 +1040,20 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
     // Tone contrast + gamma correction
     color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.3, 1.3, 1.3));
     color = pow(color, vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-    return vec4<f32>(color, 1.0);
+
+    let screenSize = vec2<f32>(globalData.cameraPositionAndViewWidth.w,
+                               globalData.cameraDirectionAndViewHeight.w);
+    let currNDC = vec2<f32>(
+        input.clipPos.x / max(screenSize.x, 1.0) * 2.0 - 1.0,
+        1.0 - input.clipPos.y / max(screenSize.y, 1.0) * 2.0
+    );
+    let prevNDC = input.prevClip.xy / max(input.prevClip.w, 0.0001);
+    let velocity = (currNDC - prevNDC) * 0.5;
+
+    var out: FragmentOutput;
+    out.color = vec4<f32>(color, 1.0);
+    out.velocity = velocity;
+    return out;
 }
 )wgsl";
 
@@ -1969,6 +2012,9 @@ fn test_fs(input: VertexOutput) -> @location(0) vec4<f32> {
 static const char* kShader_ToneMapping = R"wgsl(
 // ToneMapping.wgsl — ACES tone mapping with optional bloom, AO, and SSGI
 
+// Set to 1 to visualize velocity buffer (debug only). Set to 0 for normal rendering.
+const DEBUG_VELOCITY: u32 = 0u;
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -1979,6 +2025,7 @@ struct VertexOutput {
 @group(0) @binding(2) var texSampler: sampler;
 @group(0) @binding(3) var aoTexture: texture_2d<f32>;
 @group(0) @binding(4) var ssgiTexture: texture_2d<f32>;
+@group(0) @binding(5) var velocityTexture: texture_2d<f32>;
 
 // Full-screen triangle vertex shader
 @vertex
@@ -2013,6 +2060,14 @@ fn ACESFilm(x: vec3<f32>) -> vec3<f32> {
 // Fragment shader
 @fragment
 fn tonemap_fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    // DEBUG: visualize velocity buffer
+    if (DEBUG_VELOCITY == 1u) {
+        let vel = textureSample(velocityTexture, texSampler, uv).xy;
+        // Velocity is in NDC units (range ~[-1, 1]); amplify by 20x for visibility.
+        // X→R channel (red = rightward motion), Y→G channel (green = upward motion).
+        return vec4<f32>(abs(vel) * 20.0, 0.0, 1.0);
+    }
+
     var color = textureSample(sceneTexture, texSampler, uv).rgb;
 
     // SSAO: darken occluded areas

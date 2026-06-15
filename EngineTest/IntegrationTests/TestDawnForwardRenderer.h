@@ -88,6 +88,7 @@ private:
     primal::graphics::rhi::SamplerHandle materialSampler_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::ResourceHandle depthTexture_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::ResourceHandle hdrTexture_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle velocityTexture_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::TextureDesc hdrDesc_{};
 
     // Shadow map resources (depth-only pass)

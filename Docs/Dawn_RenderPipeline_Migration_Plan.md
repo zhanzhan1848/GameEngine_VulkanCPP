@@ -1,8 +1,8 @@
 ---
 title: Dawn WebGPU 渲染管线迁移规划
 created: 2026-06-11
-updated: 2026-06-12
-status: Phase 1 complete
+updated: 2026-06-13
+status: Phase 1 complete (macOS + WASM)
 ---
 
 # Dawn WebGPU 渲染管线迁移规划
@@ -65,7 +65,7 @@ void StandardRenderPipeline::Render(...) {
 
 **目标**: 补全 Forward 渲染的基础光照能力
 
-**状态**: ✅ **已完成** (2026-06-12)
+**状态**: ✅ **已完成** (2026-06-13, macOS + WASM 均通过)
 
 **当前基线**:
 - [x] Forward PBR Cook-Torrance
@@ -91,12 +91,19 @@ void StandardRenderPipeline::Render(...) {
 - 默认启动模式: **ShadowAndIBL** (Mode 2)
 
 **Full 模式测试灯光** (Sponza 场景):
-- 绿色点光源: (-6, 2.5, 0), range=6, intensity=6
-- 橙色点光源: (6, 2.5, 0), range=6, intensity=6
-- 紫色点光源: (0, 2.5, 3), range=5, intensity=5
-- 暖黄聚光灯: (0, 6, -3) 方向向下, range=8, intensity=8
+- 绿色点光源: (-6, 2.5, 0), range=6, intensity=4
+- 橙色点光源: (6, 2.5, 0), range=6, intensity=4
+- 紫色点光源: (0, 2.5, 3), range=5, intensity=3
+- 暖黄聚光灯: (0, 6, -3) 方向向下, range=8, intensity=5
 
 ### 实现细节
+
+#### WASM 部署
+- **构建**: Emscripten (emcc) + Dawn WebGPU 后端
+- **前端**: `wasm/shell.html` 提供 WebGPU canvas + HUD overlay
+- **HUD**: 动态创建 (EM_ASM)，Tab 切换时通过 `window.setRenderMode()` 更新
+- **IBL**: WASM 无 HDR 文件时使用程序化天空渐变生成 irradiance/prefilter/LUT
+- **注意**: `UpdatePunctualLights()` 必须在平台条件编译块外调用，否则 WASM 不执行
 
 #### 1.1 点光源 + 聚光灯 PBR
 - **文件**: `ForwardPBR.wgsl`, `ForwardRenderer.cpp`

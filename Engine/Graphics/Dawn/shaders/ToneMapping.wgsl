@@ -1,5 +1,8 @@
 // ToneMapping.wgsl — ACES tone mapping with optional bloom, AO, and SSGI
 
+// Set to 1 to visualize velocity buffer (debug only). Set to 0 for normal rendering.
+const DEBUG_VELOCITY: u32 = 0u;
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -10,6 +13,7 @@ struct VertexOutput {
 @group(0) @binding(2) var texSampler: sampler;
 @group(0) @binding(3) var aoTexture: texture_2d<f32>;
 @group(0) @binding(4) var ssgiTexture: texture_2d<f32>;
+@group(0) @binding(5) var velocityTexture: texture_2d<f32>;
 
 // Full-screen triangle vertex shader
 @vertex
@@ -44,6 +48,14 @@ fn ACESFilm(x: vec3<f32>) -> vec3<f32> {
 // Fragment shader
 @fragment
 fn tonemap_fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    // DEBUG: visualize velocity buffer
+    if (DEBUG_VELOCITY == 1u) {
+        let vel = textureSample(velocityTexture, texSampler, uv).xy;
+        // Velocity is in NDC units (range ~[-1, 1]); amplify by 20x for visibility.
+        // X→R channel (red = rightward motion), Y→G channel (green = upward motion).
+        return vec4<f32>(abs(vel) * 20.0, 0.0, 1.0);
+    }
+
     var color = textureSample(sceneTexture, texSampler, uv).rgb;
 
     // SSAO: darken occluded areas

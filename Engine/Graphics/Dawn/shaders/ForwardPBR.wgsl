@@ -67,6 +67,7 @@ struct PerObjectData {
     world: mat4x4<f32>,
     invWorld: mat4x4<f32>,
     worldViewProjection: mat4x4<f32>,
+    prevWorldViewProjection: mat4x4<f32>,
     sh_coeffs: array<vec4<f32>, 9>,
 };
 
@@ -107,6 +108,7 @@ struct VSOutput {
     @location(2) normal: vec3<f32>,
     @location(3) tangent: vec3<f32>,
     @location(4) @interpolate(flat) tSign: u32,
+    @location(5) prevClip: vec4<f32>,  // Pass UN-divided clip pos for correct perspective interpolation
 };
 
 // === Unpack helpers (little-endian: low 16-bit = x, high 16-bit = y) ===
@@ -147,6 +149,8 @@ fn vertexMain(input: VSInput) -> VSOutput {
     output.normal = unpackNormal(input.packed_normal, input.color_t_sign);
     output.tangent = unpackTangent(input.packed_tangent);
     output.tSign = input.color_t_sign;
+    let prevClip = perObject.prevWorldViewProjection * vec4<f32>(input.position, 1.0);
+    output.prevClip = prevClip;
     return output;
 }
 
@@ -223,8 +227,13 @@ fn sampleShadowPCF(worldPos: vec3<f32>, viewZ: f32, N: vec3<f32>, lightDir: vec3
 
 // === Fragment shader ===
 
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) velocity: vec2<f32>,
+};
+
 @fragment
-fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @location(0) vec4<f32> {
+fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> FragmentOutput {
     let albedo = textureSample(albedoMap, matSampler, input.uv).rgb;
     let normalTex = textureSample(normalMap, matSampler, input.uv).rgb;
     let orm = textureSample(ormMap, matSampler, input.uv);
@@ -346,5 +355,21 @@ fn fragmentMain(input: VSOutput, @builtin(front_facing) isFrontFace: bool) -> @l
     // Tone contrast + gamma correction
     color = pow(max(color, vec3<f32>(0.0, 0.0, 0.0)), vec3<f32>(1.3, 1.3, 1.3));
     color = pow(color, vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-    return vec4<f32>(color, 1.0);
+
+    // Velocity MRT: reconstruct current NDC from @builtin(position), compute delta from prevNDC
+    // NOTE: WebGPU @builtin(position).xy is in framebuffer space (Y DOWN, origin top-left).
+    // prevClip.w interpolation is perspective-correct, so dividing in fragment gives accurate prevNDC.
+    let screenSize = vec2<f32>(globalData.cameraPositionAndViewWidth.w,
+                               globalData.cameraDirectionAndViewHeight.w);
+    let currNDC = vec2<f32>(
+        input.clipPos.x / max(screenSize.x, 1.0) * 2.0 - 1.0,
+        1.0 - input.clipPos.y / max(screenSize.y, 1.0) * 2.0
+    );
+    let prevNDC = input.prevClip.xy / max(input.prevClip.w, 0.0001);
+    let velocity = (currNDC - prevNDC) * 0.5;
+
+    var out: FragmentOutput;
+    out.color = vec4<f32>(color, 1.0);
+    out.velocity = velocity;
+    return out;
 }

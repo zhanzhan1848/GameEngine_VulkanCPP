@@ -19,6 +19,7 @@ using namespace rendergraph;
 
 struct ForwardPassOutput {
     RGResourceHandle hdrTexture;
+    RGResourceHandle velocityTexture;
     RGResourceHandle depthTexture;
 };
 

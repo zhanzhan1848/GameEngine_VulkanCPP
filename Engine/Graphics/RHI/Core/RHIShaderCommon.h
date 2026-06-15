@@ -34,6 +34,7 @@ struct PerObjectData
     math::m4x4 world;
     math::m4x4 invWorld;
     math::m4x4 worldViewProjection;
+    math::m4x4 prevWorldViewProjection; // Previous frame WVP for velocity computation
     math::v4 sh_coeffs[9]; // SH9 Color coefficients (RGB + padding/alpha)
 };
 
@@ -78,7 +79,7 @@ struct ForwardLightBuffer {
     LightParameters lights[128]; // Max 128 punctual lights
 };
 
-static_assert(sizeof(PerObjectData) == 336, "PerObjectData size mismatch with WGSL");
+static_assert(sizeof(PerObjectData) == 400, "PerObjectData size mismatch with WGSL");
 static_assert(sizeof(LightParameters) == 192, "LightParameters must be 192 bytes (matches WGSL PunctualLightParameters)");
 static_assert(sizeof(DirectionalLightParameters) == 304, "DirectionalLightParameters must be 304 bytes");
 static_assert(sizeof(ForwardLightBuffer) == 25808, "ForwardLightBuffer size mismatch");

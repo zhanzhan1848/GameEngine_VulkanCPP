@@ -26,6 +26,8 @@ static ResourceHandle s_DummyAOTexture = handles::INVALID_RESOURCE;
 static ResourceHandle s_DummyAOTextureView = handles::INVALID_RESOURCE;
 static ResourceHandle s_DummySSGITexture = handles::INVALID_RESOURCE;
 static ResourceHandle s_DummySSGITextureView = handles::INVALID_RESOURCE;
+static ResourceHandle s_DummyVelocityTexture = handles::INVALID_RESOURCE;
+static ResourceHandle s_DummyVelocityTextureView = handles::INVALID_RESOURCE;
 
 // Pre-allocated descriptor set pool (no per-frame allocation)
 static constexpr u32 MAX_FRAMES = 3;
@@ -62,8 +64,9 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     ShaderHandle fs = device.CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Pixel, "tonemap_fs");
     if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) return;
 
-    // DSL: binding 0 = scene texture, binding 1 = bloom texture, binding 2 = sampler, binding 3 = AO texture, binding 4 = SSGI texture
-    DescriptorSetLayoutBinding bindings[5]{};
+    // DSL: binding 0 = scene texture, binding 1 = bloom texture, binding 2 = sampler,
+    //      binding 3 = AO texture, binding 4 = SSGI texture, binding 5 = velocity texture
+    DescriptorSetLayoutBinding bindings[6]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = DescriptorType::SampledImage;
     bindings[0].descriptorCount = 1;
@@ -89,8 +92,13 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     bindings[4].descriptorCount = 1;
     bindings[4].stageFlags = ShaderStage::Pixel;
 
+    bindings[5].binding = 5;
+    bindings[5].descriptorType = DescriptorType::SampledImage;
+    bindings[5].descriptorCount = 1;
+    bindings[5].stageFlags = ShaderStage::Pixel;
+
     DescriptorSetLayoutDesc dslDesc;
-    dslDesc.bindingCount = 5;
+    dslDesc.bindingCount = 6;
     dslDesc.bindings = bindings;
     s_ToneMapDSL = device.CreateDescriptorSetLayout(dslDesc);
 
@@ -165,6 +173,22 @@ static void EnsurePipeline(RHIDeviceBase& device) {
         s_DummySSGITextureView = device.CreateTextureView(ssgiViewDesc);
     }
 
+    // Dummy 1x1 black texture for velocity (RG16F, zero motion)
+    TextureDesc dummyVelDesc;
+    dummyVelDesc.size = {1, 1, 1};
+    dummyVelDesc.format = DataFormat::RG16_Float;
+    dummyVelDesc.type = TextureType::Texture2D;
+    dummyVelDesc.mipLevels = 1;
+    dummyVelDesc.usage = TextureUsage::ShaderResource;
+    s_DummyVelocityTexture = device.CreateTexture(dummyVelDesc);
+    if (s_DummyVelocityTexture != handles::INVALID_RESOURCE) {
+        TextureViewDesc velViewDesc;
+        velViewDesc.texture = s_DummyVelocityTexture;
+        velViewDesc.viewType = TextureType::Texture2D;
+        velViewDesc.format = DataFormat::RG16_Float;
+        s_DummyVelocityTextureView = device.CreateTextureView(velViewDesc);
+    }
+
     // Pipeline
     GraphicsPipelineDesc pipelineDesc;
     pipelineDesc.vertexShader = vs;
@@ -188,7 +212,7 @@ static void EnsurePipeline(RHIDeviceBase& device) {
         }
 }
 
-const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHandle inputHDR, RGResourceHandle bloomTexture, RGResourceHandle aoTexture, RGResourceHandle ssgiTexture, u32 frameIndex) {
+const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHandle inputHDR, RGResourceHandle bloomTexture, RGResourceHandle aoTexture, RGResourceHandle ssgiTexture, RGResourceHandle velocityTexture, u32 frameIndex) {
     u32 fi = frameIndex % MAX_FRAMES;
     s_ToneMapSetIdx[fi] = 0;
 
@@ -203,6 +227,9 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             }
             if (ssgiTexture != kInvalidRGResourceHandle) {
                 builder.Read(ssgiTexture, ResourceState::ShaderResource);
+            }
+            if (velocityTexture != kInvalidRGResourceHandle) {
+                builder.Read(velocityTexture, ResourceState::ShaderResource);
             }
 
             // Create output texture
@@ -222,7 +249,7 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
 
             EnsurePipeline(builder.GetGraph().GetDevice());
         },
-        [inputHDR, bloomTexture, aoTexture, ssgiTexture, fi](const ToneMappingPassData& data, RenderGraphContext& context) {
+        [inputHDR, bloomTexture, aoTexture, ssgiTexture, velocityTexture, fi](const ToneMappingPassData& data, RenderGraphContext& context) {
             if (s_ToneMapPipeline == handles::INVALID_PIPELINE) return;
 
             auto& device = context.graph->GetDevice();
@@ -270,13 +297,22 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             }
             if (ssgiViewHandle == handles::INVALID_RESOURCE) ssgiViewHandle = s_DummySSGITextureView;
 
+            ResourceHandle velocityViewHandle = s_DummyVelocityTextureView;
+            if (velocityTexture != kInvalidRGResourceHandle) {
+                auto* velRes = context.graph->GetResource(velocityTexture);
+                if (velRes && velRes->GetType() == RGResourceType::Texture) {
+                    velocityViewHandle = velRes->GetPhysicalHandle();
+                }
+            }
+            if (velocityViewHandle == handles::INVALID_RESOURCE) velocityViewHandle = s_DummyVelocityTextureView;
+
             // Use pre-allocated descriptor set from pool
             u32 idx = s_ToneMapSetIdx[fi]++;
             if (idx >= MAX_SETS) { idx = 0; s_ToneMapSetIdx[fi] = 1; }
             DescriptorSetHandle ds = s_ToneMapSets[fi][idx];
 
             if (ds != handles::INVALID_RESOURCE && inputView != handles::INVALID_RESOURCE) {
-                DescriptorImageInfo imageInfos[5];
+                DescriptorImageInfo imageInfos[6];
                 imageInfos[0].imageView = inputView;
                 imageInfos[0].sampler = s_ToneMapSampler;
                 imageInfos[1].imageView = bloomViewHandle;
@@ -287,8 +323,10 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
                 imageInfos[3].sampler = s_ToneMapSampler;
                 imageInfos[4].imageView = ssgiViewHandle;
                 imageInfos[4].sampler = s_ToneMapSampler;
+                imageInfos[5].imageView = velocityViewHandle;
+                imageInfos[5].sampler = s_ToneMapSampler;
 
-                WriteDescriptorSet writes[5];
+                WriteDescriptorSet writes[6];
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].dstArrayElement = 0;
                 writes[0].descriptorCount = 1; writes[0].descriptorType = DescriptorType::SampledImage;
                 writes[0].imageInfo = &imageInfos[0];
@@ -304,8 +342,11 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
                 writes[4].dstSet = ds; writes[4].dstBinding = 4; writes[4].dstArrayElement = 0;
                 writes[4].descriptorCount = 1; writes[4].descriptorType = DescriptorType::SampledImage;
                 writes[4].imageInfo = &imageInfos[4];
+                writes[5].dstSet = ds; writes[5].dstBinding = 5; writes[5].dstArrayElement = 0;
+                writes[5].descriptorCount = 1; writes[5].descriptorType = DescriptorType::SampledImage;
+                writes[5].imageInfo = &imageInfos[5];
 
-                device.UpdateDescriptorSets(5, writes);
+                device.UpdateDescriptorSets(6, writes);
             }
 
             // Begin render pass

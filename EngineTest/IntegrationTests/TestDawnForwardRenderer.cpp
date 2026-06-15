@@ -201,6 +201,15 @@ bool Engine_Test::initialize() {
     hdrDesc_.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     hdrTexture_ = device_->CreateTexture(hdrDesc_);
 
+    // Create persistent Velocity MRT texture (RG16F, written by ForwardPBR fragment)
+    rhi::TextureDesc velDesc{};
+    velDesc.size = {width_, height_, 1};
+    velDesc.format = rhi::DataFormat::RG16_Float;
+    velDesc.type = rhi::TextureType::Texture2D;
+    velDesc.mipLevels = 1;
+    velDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    velocityTexture_ = device_->CreateTexture(velDesc);
+
     // Create render graph for post-processing
     renderGraph_ = std::make_unique<rendergraph::RenderGraph>(*device_);
 
@@ -373,9 +382,10 @@ bool Engine_Test::LoadSponzaScene() {
     rasterState.fillMode = FillMode::Solid;
     material->SetRasterizerState(rasterState);
 
-    // Render target format — HDR for tone mapping pipeline
-    utl::vector<DataFormat> rtFormats(1);
+    // Render target format — HDR + velocity MRT for Phase 2 TAA/SSR
+    utl::vector<DataFormat> rtFormats(2);
     rtFormats[0] = DataFormat::RGBA16_Float; // Render to HDR texture
+    rtFormats[1] = DataFormat::RG16_Float;   // Velocity motion vectors
     material->SetRenderTargetFormats(rtFormats, DataFormat::D32_Float);
 
     // Pipeline layout: 3 descriptor set layouts matching ForwardPBR.wgsl
@@ -586,6 +596,14 @@ void Engine_Test::RenderFrame() {
     depthDescForRG.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
     auto depthRG = renderGraph_->ImportTexture("Depth", depthTexture_, depthDescForRG);
 
+    // Import velocity MRT texture (RG16F) for ToneMapping debug visualization
+    rhi::TextureDesc velDescForRG;
+    velDescForRG.size = {width_, height_, 1};
+    velDescForRG.format = rhi::DataFormat::RG16_Float;
+    velDescForRG.type = rhi::TextureType::Texture2D;
+    velDescForRG.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    auto velMrtRG = renderGraph_->ImportTexture("VelocityMRT", velocityTexture_, velDescForRG);
+
     auto invProj = rhimath::Inverse(view_.GetProjectionMatrix());
 
     // HZB generation from depth buffer
@@ -608,7 +626,7 @@ void Engine_Test::RenderFrame() {
     auto bloomHandle = rendergraph::kInvalidRGResourceHandle;
 
     const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, hdrRG, bloomHandle,
-        ssaoAOHandle, ssgiHandle, fi);
+        ssaoAOHandle, ssgiHandle, velMrtRG, fi);
     auto tonemapOutput = tonemapOut.output;
 
     // Present: blit tonemapped output → backbuffer
@@ -768,7 +786,7 @@ void Engine_Test::RenderFrame() {
             }
 
             // 2. Forward pass
-            forwardRenderer_.Render(cmd, scene_, view_, hdrTexture_, depthTexture_, materials_, fi, width_, height_);
+            forwardRenderer_.Render(cmd, scene_, view_, hdrTexture_, velocityTexture_, depthTexture_, materials_, fi, width_, height_);
 
             // 4. Post-processing (render graph: HZB, SSAO, Bloom, ToneMap, Present)
             renderGraph_->Execute(cmd);
@@ -1717,6 +1735,10 @@ void Engine_Test::shutdown() {
     if (hdrTexture_ != rhi::handles::INVALID_RESOURCE) {
         device_->DestroyTexture(hdrTexture_);
         hdrTexture_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (velocityTexture_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(velocityTexture_);
+        velocityTexture_ = rhi::handles::INVALID_RESOURCE;
     }
     renderGraph_.reset();
 

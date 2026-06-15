@@ -1062,6 +1062,11 @@ void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer,
         perObjectData->world = proxy->transform;
         perObjectData->invWorld = rhi::math::Inverse(proxy->transform);
         perObjectData->worldViewProjection = view.GetViewProjectionMatrix() * proxy->transform;
+        {
+            auto prevIt = prevWorldMap_.find(proxy->entityId);
+            const auto& prevWorld = (prevIt != prevWorldMap_.end()) ? prevIt->second : proxy->transform;
+            perObjectData->prevWorldViewProjection = prevViewProjection_ * prevWorld;
+        }
 
         // Bind Per-Object Set (Set 1) with Dynamic Offset
         u32 dynamicOffset = perObjectBufferOffset_;
@@ -1226,10 +1231,11 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
 #endif
 }
 
-void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer, 
-                             const RenderScene& scene, 
-                             const RenderView& view, 
-                             rhi::ResourceHandle renderTarget, 
+void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
+                             const RenderScene& scene,
+                             const RenderView& view,
+                             rhi::ResourceHandle renderTarget,
+                             rhi::ResourceHandle velocityTarget,
                              rhi::ResourceHandle depthStencil,
                              const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
                              u32 frameIndex,
@@ -1371,6 +1377,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         frameData->view = view.GetViewMatrix();
         frameData->projection = view.GetProjectionMatrix();
         frameData->viewProjection = view.GetViewProjectionMatrix();
+        frameData->previousViewProjection = prevViewProjection_;
 
         rhi::math::m4x4 viewInv = rhi::math::Inverse(view.GetViewMatrix());
         rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
@@ -1431,11 +1438,18 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 
     // 3. Main Pass Part 1 (Opaque)
     rhi::RenderPassDesc passDesc{};
-    passDesc.colorAttachments.resize(1);
+    bool hasVelocityMRT = (velocityTarget != rhi::handles::INVALID_RESOURCE);
+    passDesc.colorAttachments.resize(hasVelocityMRT ? 2 : 1);
     passDesc.colorAttachments[0].texture = renderTarget;
     passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
     passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
     passDesc.colorAttachments[0].clearValue = rhi::ClearValue{ math::v4{ 0.1f, 0.1f, 0.15f, 1.0f } };
+    if (hasVelocityMRT) {
+        passDesc.colorAttachments[1].texture = velocityTarget;
+        passDesc.colorAttachments[1].loadOp = rhi::LoadAction::Clear;
+        passDesc.colorAttachments[1].storeOp = rhi::StoreAction::Store;
+        passDesc.colorAttachments[1].clearValue = rhi::ClearValue{ math::v4{ 0.0f, 0.0f, 0.0f, 0.0f } };
+    }
 
     if (depthStencil != rhi::handles::INVALID_RESOURCE) {
         passDesc.depthAttachment.texture = depthStencil;
@@ -1536,6 +1550,9 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 
     // 5. Main Pass Part 2 (Composite + Transparent)
     passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Load;
+    if (hasVelocityMRT && passDesc.colorAttachments.size() > 1) {
+        passDesc.colorAttachments[1].loadOp = rhi::LoadAction::Load;
+    }
     passDesc.depthAttachment.loadOp = rhi::LoadAction::Load;
     
     // std::cout << "ForwardRenderer: Beginning Main RenderPass (Composite + Transparent)" << std::endl;
@@ -1570,6 +1587,13 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     device_->SetBufferDirtySize(perObjectBuffers_[fi], perObjectBufferOffset_);
     device_->SetBufferDirtySize(frameBuffers_[fi], sizeof(rhi::GlobalShaderData));
     device_->SetBufferDirtySize(lightBuffers_[fi], sizeof(rhi::ForwardLightBuffer));
+
+    // Phase 2: snapshot current view-projection + per-object transforms for next frame's velocity
+    prevViewProjection_ = view.GetViewProjectionMatrix();
+    prevWorldMap_.clear();
+    for (const auto* proxy : view.GetVisibleProxies()) {
+        if (proxy) prevWorldMap_[proxy->entityId] = proxy->transform;
+    }
 }
 
 void ForwardRenderer::DepthPrePass(rhi::RHICommandBuffer* cmdBuffer, 
@@ -1626,6 +1650,11 @@ void ForwardRenderer::DepthPrePass(rhi::RHICommandBuffer* cmdBuffer,
         perObjectData->world = proxy->transform;
         perObjectData->invWorld = rhi::math::Inverse(proxy->transform);
         perObjectData->worldViewProjection = view.GetViewProjectionMatrix() * proxy->transform;
+        {
+            auto prevIt = prevWorldMap_.find(proxy->entityId);
+            const auto& prevWorld = (prevIt != prevWorldMap_.end()) ? prevIt->second : proxy->transform;
+            perObjectData->prevWorldViewProjection = prevViewProjection_ * prevWorld;
+        }
 
         // Bind Per-Object Set (Set 1) with Dynamic Offset
         u32 dynamicOffset = perObjectBufferOffset_;
@@ -1689,6 +1718,11 @@ void ForwardRenderer::OpaquePass(rhi::RHICommandBuffer* cmdBuffer,
         perObjectData->world = proxy->transform;
         perObjectData->invWorld = rhi::math::Inverse(proxy->transform);
         perObjectData->worldViewProjection = view.GetViewProjectionMatrix() * proxy->transform;
+        {
+            auto prevIt = prevWorldMap_.find(proxy->entityId);
+            const auto& prevWorld = (prevIt != prevWorldMap_.end()) ? prevIt->second : proxy->transform;
+            perObjectData->prevWorldViewProjection = prevViewProjection_ * prevWorld;
+        }
 
         u32 dynamicOffset = perObjectBufferOffset_;
         cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, mat->GetPipelineLayout(), 1, 1, &perObjectDescriptorSets_[frameIndex], 1, &dynamicOffset);
@@ -1750,6 +1784,11 @@ void ForwardRenderer::TransparentPass(rhi::RHICommandBuffer* cmdBuffer,
         perObjectData->world = proxy->transform;
         perObjectData->invWorld = rhi::math::Inverse(proxy->transform);
         perObjectData->worldViewProjection = view.GetViewProjectionMatrix() * proxy->transform;
+        {
+            auto prevIt = prevWorldMap_.find(proxy->entityId);
+            const auto& prevWorld = (prevIt != prevWorldMap_.end()) ? prevIt->second : proxy->transform;
+            perObjectData->prevWorldViewProjection = prevViewProjection_ * prevWorld;
+        }
 
         u32 dynamicOffset = perObjectBufferOffset_;
         cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, mat->GetPipelineLayout(), 1, 1, &perObjectDescriptorSets_[frameIndex], 1, &dynamicOffset);
