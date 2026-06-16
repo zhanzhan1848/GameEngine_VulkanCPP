@@ -76,8 +76,14 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     auto loadShader = [&](const char* name, const char* entry) -> ShaderHandle {
         std::string path = utils::ShaderRegistry::GetShaderPath(platform, name);
         std::string src = LoadShaderSource(path);
-        if (src.empty()) { std::cerr << "[SSR] Shader empty: " << name << std::endl; return handles::INVALID_SHADER; }
-        return device.CreateShader(src.data(), src.size(), ShaderStage::Compute, entry);
+        if (src.empty()) {
+            std::cerr << "[SSR] Shader empty: " << name << " (path=" << path << ")" << std::endl;
+            return handles::INVALID_SHADER;
+        }
+        ShaderHandle h = device.CreateShader(src.data(), src.size(), ShaderStage::Compute, entry);
+        std::cerr << "[SSR] LoadShader " << name << " -> handle=" << static_cast<u64>(h)
+                  << " (src=" << src.size() << " bytes)" << std::endl;
+        return h;
     };
 
     ShaderHandle traceCS = loadShader("SSRTrace", "ssr_trace");
@@ -86,7 +92,7 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
 
     if (traceCS == handles::INVALID_SHADER || temporalCS == handles::INVALID_SHADER ||
         compositeCS == handles::INVALID_SHADER) {
-        std::cerr << "[SSR] Shader compilation failed" << std::endl;
+        std::cerr << "[SSR] Shader compilation failed — aborting pipeline creation" << std::endl;
         return false;
     }
 
@@ -187,6 +193,10 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     createSets(s_TemporalSets, s_TemporalDSL);
     createSets(s_CompositeSets, s_CompositeDSL);
 
+    std::cerr << "[SSR] Pipelines created — trace=" << static_cast<u64>(s_TracePipeline)
+              << " temporal=" << static_cast<u64>(s_TemporalPipeline)
+              << " composite=" << static_cast<u64>(s_CompositePipeline) << std::endl;
+
     return true;
 }
 
@@ -224,6 +234,17 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
     s_TemporalSetIdx[fi] = 0;
     s_CompositeSetIdx[fi] = 0;
 
+    static bool s_firstAddCall = true;
+    if (s_firstAddCall) {
+        s_firstAddCall = false;
+        std::cerr << "[SSR] AddSSRPass first call — frame=" << frameIndex
+                  << " w=" << width << " h=" << height
+                  << " hdrValid=" << (hdrTexture != kInvalidRGResourceHandle)
+                  << " depthValid=" << (depthTexture != kInvalidRGResourceHandle)
+                  << " hzbValid=" << (hzbTexture != kInvalidRGResourceHandle)
+                  << " velValid=" << (velocityTexture != kInvalidRGResourceHandle) << std::endl;
+    }
+
     auto& device = graph.GetDevice();
     EnsurePipelines(device);
     CreatePersistentTextures(device, width, height);
@@ -254,7 +275,21 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
          width, height, halfW, halfH, fi, histIdx,
          hzbMipLevels, proj, invProj, frameIndex]
          (const SSRPassData& data, RenderGraphContext& context) {
-            if (s_TracePipeline == handles::INVALID_PIPELINE) return;
+            static u32 s_execCount = 0;
+            bool logThisFrame = (s_execCount < 3u);
+            ++s_execCount;
+
+            if (logThisFrame) {
+                std::cerr << "[SSR] Execute frame=" << frameIndex
+                          << " tracePipe=" << static_cast<u64>(s_TracePipeline)
+                          << " temporalPipe=" << static_cast<u64>(s_TemporalPipeline)
+                          << " compositePipe=" << static_cast<u64>(s_CompositePipeline) << std::endl;
+            }
+
+            if (s_TracePipeline == handles::INVALID_PIPELINE) {
+                if (logThisFrame) std::cerr << "[SSR] Execute abort: trace pipeline INVALID" << std::endl;
+                return;
+            }
 
             auto& device = context.graph->GetDevice();
             auto* cmd = context.cmdBuffer;
@@ -272,8 +307,22 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
             auto* outRes = context.graph->GetResource(data.outputColor);
             ResourceHandle outPhys = outRes ? outRes->GetPhysicalHandle() : handles::INVALID_RESOURCE;
 
+            if (logThisFrame) {
+                std::cerr << "[SSR] Resolved — hdr=" << static_cast<u64>(hdrHandle)
+                          << " depth=" << static_cast<u64>(depthHandle)
+                          << " hzb=" << static_cast<u64>(hzbHandle)
+                          << " vel=" << static_cast<u64>(velocityHandle)
+                          << " out=" << static_cast<u64>(outPhys)
+                          << " traceTex=" << static_cast<u64>(s_TraceTexture)
+                          << " temporalTex=" << static_cast<u64>(s_TemporalTexture)
+                          << " histSlot=" << static_cast<u64>(s_TemporalHistory[histIdx]) << std::endl;
+            }
+
             if (hdrHandle == handles::INVALID_RESOURCE || depthHandle == handles::INVALID_RESOURCE ||
-                outPhys == handles::INVALID_RESOURCE) return;
+                outPhys == handles::INVALID_RESOURCE) {
+                if (logThisFrame) std::cerr << "[SSR] Execute abort: invalid resource handle" << std::endl;
+                return;
+            }
 
             // ============================================================
             // Sub-pass 1: Trace (half-res)
@@ -497,6 +546,11 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                 b.afterState = ResourceState::ShaderResource;
                 b.subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(&b, 1);
+            }
+
+            if (logThisFrame) {
+                std::cerr << "[SSR] Execute complete frame=" << frameIndex
+                          << " dispatched trace+temporal+composite+blit" << std::endl;
             }
         }
     );

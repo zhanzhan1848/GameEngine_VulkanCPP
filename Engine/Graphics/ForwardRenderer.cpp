@@ -1282,25 +1282,6 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
                                   const std::unordered_map<u32, rhi::math::m4x4>& lightViewProjs) {
     if (frameIndex >= rhi::MAX_FRAMES_IN_FLIGHT || !lightBuffersMapped_[frameIndex]) return;
 
-#ifdef __EMSCRIPTEN__
-    static bool s_firstLightFill = true;
-    if (s_firstLightFill) {
-        s_firstLightFill = false;
-        std::cerr << "[IBL Debug] sizeof(LightParameters)=" << sizeof(rhi::LightParameters)
-                  << " sizeof(ForwardLightBuffer)=" << sizeof(rhi::ForwardLightBuffer)
-                  << " offsetof(lights)=" << offsetof(rhi::ForwardLightBuffer, lights) << std::endl;
-    }
-#endif
-
-#ifdef __EMSCRIPTEN__
-    static int s_prevMode = -1;
-    bool modeChanged = (int)dawnRenderMode_ != s_prevMode;
-    if (modeChanged) {
-        s_prevMode = (int)dawnRenderMode_;
-        std::cerr << "[FillLight] mode=" << s_prevMode << " sizeof(LP)=" << sizeof(rhi::LightParameters) << std::endl;
-    }
-#endif
-
     auto* buffer = static_cast<rhi::ForwardLightBuffer*>(lightBuffersMapped_[frameIndex]);
     // Zero the header and light counts (keep old data for lights, they'll be overwritten)
     buffer->directionalLightCount = 0;
@@ -1355,14 +1336,6 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
             if (dawnRenderMode_ < 3) continue;
             if (buffer->punctualLightCount < 128) {
                 auto& pl = buffer->lights[buffer->punctualLightCount];
-#ifdef __EMSCRIPTEN__
-                std::cerr << "[Light " << buffer->punctualLightCount
-                          << "] pos=(" << light.position.x << "," << light.position.y << "," << light.position.z
-                          << ") range=" << light.range << " type=" << (int)light.type
-                          << " sizeof(LP)=" << sizeof(rhi::LightParameters)
-                          << " offset=" << (1232 + (int)buffer->punctualLightCount * (int)sizeof(rhi::LightParameters))
-                          << std::endl;
-#endif
                 pl.position = light.position;
                 pl.intensity = light.intensity;
                 pl.direction = light.direction;
@@ -1396,27 +1369,6 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
         globalData->numDirectionalLights = buffer->directionalLightCount;
         globalData->numPunctualLights = buffer->punctualLightCount;
     }
-
-#ifdef __EMSCRIPTEN__
-    static bool s_dumpedLights = false;
-    if ((!s_dumpedLights || modeChanged) && buffer->punctualLightCount > 0) {
-        s_dumpedLights = true;
-        for (u32 li = 0; li < buffer->punctualLightCount; ++li) {
-            auto* p = reinterpret_cast<const float*>(&buffer->lights[li]);
-            std::cerr << "[LightBuf " << li << "] pos=(" << p[0] << "," << p[1] << "," << p[2] << ") w=" << p[3]
-                      << " intensity=" << p[4]
-                      << " dir=(" << p[8] << "," << p[9] << "," << p[10] << ") w=" << p[11]
-                      << " range=" << p[12]
-                      << " color=(" << p[16] << "," << p[17] << "," << p[18] << ")"
-                      << " lightType=" << *(int*)&p[29] << std::endl;
-        }
-        if (globalData) {
-            std::cerr << "[Camera] pos=(" << globalData->cameraPositionAndViewWidth.x
-                      << "," << globalData->cameraPositionAndViewWidth.y
-                      << "," << globalData->cameraPositionAndViewWidth.z << ")" << std::endl;
-        }
-    }
-#endif
 }
 
 void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
