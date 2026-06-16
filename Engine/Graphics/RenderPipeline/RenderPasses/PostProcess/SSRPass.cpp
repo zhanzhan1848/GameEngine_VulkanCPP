@@ -339,7 +339,11 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                     f32         farPlane;
                     u32         hzbMipLevels;
                     u32         frameIndex;
+                    u32         _pad0;
+                    u32         _pad1;
                 };
+                static_assert(sizeof(TraceParamsCPU) == 192,
+                              "TraceParamsCPU must be 192 bytes (16-byte aligned for WGSL uniform)");
 
                 if (s_TraceParamsMapped[fi]) {
                     auto* p = static_cast<TraceParamsCPU*>(s_TraceParamsMapped[fi]);
@@ -353,6 +357,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                     p->farPlane = 1000.0f;
                     p->hzbMipLevels = hzbMipLevels;
                     p->frameIndex = frameIndex;
+                    p->_pad0 = 0; p->_pad1 = 0;
                     device.SetBufferDirtySize(s_TraceParamsBuf[fi], sizeof(TraceParamsCPU));
                 }
 
