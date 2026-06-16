@@ -152,11 +152,13 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     bool firstEverFrame = (s_LastFrameIndex == ~0u);
     s_LastFrameIndex = frameIndex;
 
-    // The current frame READS history slot [fi-1] (last frame's write) and WRITES to slot [fi].
-    // But for triple buffering, we use: read from [fi], write to [fi] (overwrites prev frame's data).
-    // This is safe because we're 3 frames behind in flight, so by the time fi is read again, GPU
-    // has consumed it.
-    u32 histReadIdx = fi;
+    // Triple-buffered ping-pong matching SSR's pattern: read previous frame's
+    // output, write current frame's output. Distinct read/write slots are
+    // mandatory — reusing the same slot made the compute pass read the texture
+    // as SampledImage while the subsequent BlitTexture wrote it as CopyDest on
+    // the same command buffer. That write-after-read within one encoder trips
+    // Dawn's WASM asyncify stack and crashes in EventManager::ProcessEvents.
+    u32 histReadIdx = (fi + MAX_FRAMES - 1) % MAX_FRAMES;
     bool histValid = s_HistoryInit[histReadIdx] && !firstEverFrame;
 
     // Update params uniform for this frame slot
@@ -210,6 +212,10 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             ResourceHandle outHandle = outRes ? outRes->GetPhysicalHandle() : handles::INVALID_RESOURCE;
 
             ResourceHandle histHandle = s_HistoryTex[histReadIdx];
+            // Write target is the current frame's slot — distinct from histHandle
+            // (read slot) to avoid write-after-read on the same texture within
+            // one command buffer.
+            ResourceHandle histWriteHandle = s_HistoryTex[fi];
 
             if (logThisFrame) {
                 std::cerr << "[TAA] Resolved — in=" << static_cast<u64>(inHandle)
@@ -228,6 +234,10 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
 
             if (histHandle == handles::INVALID_RESOURCE) {
                 if (logThisFrame) std::cerr << "[TAA] Execute abort: invalid history texture" << std::endl;
+                return;
+            }
+            if (histWriteHandle == handles::INVALID_RESOURCE) {
+                if (logThisFrame) std::cerr << "[TAA] Execute abort: invalid history write texture" << std::endl;
                 return;
             }
 
@@ -265,8 +275,9 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
                           << " tg=(" << ((width + 7) / 8) << "," << ((height + 7) / 8) << ",1)" << std::endl;
             }
 
-            // Copy output → history slot so next frame reads resolved color.
-            // BlitTexture is a full-screen copy with no scaling.
+            // Copy output → current frame's history slot so next frame reads resolved color.
+            // BlitTexture is a full-screen copy with no scaling. Destination is
+            // the current frame's slot (fi), source is the RG-managed output.
             TextureBlitRegion blitRegion{};
             blitRegion.srcSubresource = {0, 0, 1};
             blitRegion.srcOffsets[0] = {0, 0, 0};
@@ -274,15 +285,16 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             blitRegion.dstSubresource = {0, 0, 1};
             blitRegion.dstOffsets[0] = {0, 0, 0};
             blitRegion.dstOffsets[1] = {(s32)width, (s32)height, 1};
-            cmd->BlitTexture(outHandle, histHandle, &blitRegion, 1, FilterMode::Nearest);
+            cmd->BlitTexture(outHandle, histWriteHandle, &blitRegion, 1, FilterMode::Nearest);
 
             if (logThisFrame) {
                 std::cerr << "[TAA] BlitTexture queued — out=" << static_cast<u64>(outHandle)
-                          << " hist=" << static_cast<u64>(histHandle)
+                          << " histWrite=" << static_cast<u64>(histWriteHandle)
+                          << " histRead=" << static_cast<u64>(histHandle)
                           << " size=" << width << "x" << height << std::endl;
             }
 
-            s_HistoryInit[histReadIdx] = true;
+            s_HistoryInit[fi] = true;
             (void)histValid; // suppress unused warning
         }
     );
