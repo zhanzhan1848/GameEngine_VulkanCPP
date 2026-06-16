@@ -101,16 +101,20 @@ preRun: [function() {
 
 **错误做法**: 在 `postRun` 中拉取贴图 — 此时 `main()` 已经开始，`LoadSponzaScene()` 只能拿到 1x1 占位贴图。
 
-### 4.4 Shader 双重嵌入机制
+### 4.4 Shader 嵌入机制
 
-修改 WGSL shader 时**必须同时更新两处**:
+WGSL shaders 通过两条路径到达 WASM bundle:
 
-| 位置 | 作用 |
+| 路径 | 作用 |
 |------|------|
-| `Engine/Graphics/Dawn/ShaderLoader.h` | `#ifdef __EMSCRIPTEN__` 中所有 WGSL 作为 `static const char*` 嵌入 |
-| `Engine/Graphics/Dawn/shaders/*.wgsl` | CMake 通过 `--embed-file` 嵌入 MEMFS |
+| `Engine/Graphics/Dawn/shaders/*.wgsl` | 真实源文件, CMake 通过 `--embed-file` 嵌入 MEMFS `/Engine/Graphics/Dawn/shaders/` |
+| `Engine/Graphics/Dawn/ShaderLoader.h` 的 `kShaderMap` | **legacy**: 老shader的 embedded string, `LoadWGSL()` 先查 map, hit 就直接返回嵌入字符串 |
 
-**漏更新任何一处都会导致 WASM 和 Native 行为不一致。**
+**新增 shader**: 不要加到 `kShaderMap`. MEMFS via `--embed-file` 会自动 pick up.
+
+**改老 shader**: 先 grep `kShaderMap` 看是否在 map 里. 在的话要么同步更新嵌入字符串, 要么 (推荐) 从 map 里删掉, 让 MEMFS fallback 接管. **否则 WASM 行为不会跟着源文件变.**
+
+**踩坑记录**: TAA 之前一直崩, 因为 `kShader_TAA` 是 stale embed (predates sampler removal + textureLoad bilinear + binding renumber), 但源文件改了. 改源文件没用, WASM 一直用旧 embed. 解法是把 TAA 从 `kShaderMap` 里删掉. 长期目标是把整个 `kShaderMap` 删了 (cleanup TODO), 但当前还有其他 entry 在用.
 
 ### 4.5 Sampler comparisonFunc
 
@@ -177,6 +181,45 @@ WebGPU depth 纹理采样需要:
 - Texture 创建时带 `TextureBinding` usage flag
 - Descriptor type 用 `SampledDepthImage` (不是 `SampledImage`)
 
+### 4.11 Callback userdata 生命周期
+
+`wgpu*CallbackInfo` 注册的 callback (compile-info, buffer map, adapter/device request 等) 在 WASM 上由 Dawn 的 EventManager 异步分发. 如果 callback 没在 pump loop 里及时触发, Dawn 会保留 userdata 指针, 在**后面任何一次** `wgpuInstanceProcessEvents` (典型场景: `endFrameImpl`) 触发.
+
+**栈上 userdata = 定时炸弹**:
+
+```cpp
+// ❌ OOB 候选
+CompilationUserData compData{};  // stack-local
+callbackInfo.userdata1 = &compData;
+wgpuShaderModuleGetCompilationInfo(module, callbackInfo);
+for (u32 i = 0; i < 1000 && !compData.done; ++i) {
+    wgpuInstanceProcessEvents(instance);  // pump
+}
+// 函数返回, compData 死亡. 但 Dawn 可能仍持有指针,
+// 下次 ProcessEvents (endFrame) 会 deref → OOB
+```
+
+```cpp
+// ✅ heap-allocate, 必要时泄漏
+CompilationUserData* compData = new CompilationUserData{};
+callbackInfo.userdata1 = compData;
+wgpuShaderModuleGetCompilationInfo(module, callbackInfo);
+for (u32 i = 0; i < 1000 && !compData->done; ++i) {
+    wgpuInstanceProcessEvents(instance);
+}
+if (compData->done) {
+    delete compData;  // callback fired, safe
+}
+// 否则 LEAK: Dawn 可能后面还要 deref
+```
+
+**症状特征**: WASM-only `EventManager::ProcessEvents(unsigned long long)` OOB at end-of-frame, native 正常, console 没有validation error, 崩在 Dawn 自己的 wasm code 里 → 几乎一定是某个 init callback 的 userdata 被释放了.
+
+**已知模式**:
+- `DawnShader::Initialize` compile-info (1000-iter cap, 已修复, heap-allocate)
+- `DawnBuffer::mapImpl` map async (100000-iter cap, 大概率没事, 但同模式)
+- `DawnDevice::initializeImpl` adapter/device request (无 cap, 总能 drain)
+
 ## 5. 关键文件索引
 
 | 用途 | 路径 |
@@ -194,6 +237,8 @@ WebGPU depth 纹理采样需要:
 | Forward Renderer | `Engine/Graphics/ForwardRenderer.cpp` |
 | SSGI Pass | `Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.cpp` |
 | SSAO Pass | `Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSAOPass.cpp` |
+| TAA Pass | `Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.cpp` |
+| SSR Pass | `Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSRPass.cpp` |
 | Dawn RHI 平台层 | `Engine/Graphics/RHI/Platforms/Dawn/*.cpp` |
 | 矩阵/数学工具 | `Engine/Graphics/RHI/Core/RHIMath.h` |
 | Emscripten 平台实现 | `Engine/Platform/PlatformEmscripten.cpp` |
@@ -208,10 +253,13 @@ WebGPU depth 纹理采样需要:
 ## 7. 发布检查清单
 
 - [ ] `emmake make` 本地编译通过
-- [ ] ShaderLoader.h 和 .wgsl 文件同步更新
+- [ ] 改老 shader 时检查 `kShaderMap` (见 4.4)
+- [ ] 新增 `wgpu*CallbackInfo` 时 userdata 必须 heap-allocate (见 4.11)
 - [ ] Push 到 `features/dawn-webgpu-backend`
 - [ ] CI 构建通过 (wasm-build.yml)
 - [ ] gh-pages 页面正常加载，loading overlay 正确显示/隐藏
 - [ ] 贴图全部加载 (console 无 `[Assets]` 错误)
 - [ ] 无 WebGPU validation error
+- [ ] 无 `EventManager::ProcessEvents` OOB (见 4.11)
 - [ ] Shadow/Lighting/SSAO/SSGI 效果正常
+- [ ] TAA 无抖动、边缘稳定 (残留锯齿是 alpha=0.1 收敛慢, 见 Optimization Backlog)

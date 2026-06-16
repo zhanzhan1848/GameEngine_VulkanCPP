@@ -118,7 +118,53 @@ many pixels, and show up only when reflections are enabled (mode 4:
 
 ---
 
-## Performance
+### TAA residual aliasing (锯齿残留)
+
+**Status**: Open. Workaround in place (alpha=0.1); jaggies visibly reduced
+but not eliminated, especially on high-frequency geometry edges.
+
+**Symptom**: After enabling TAA on WASM (the EventManager::ProcessEvents
+OOB is fixed — see `Dawn_WASM_Build_Deploy_Guide.md` 4.11), jitter is
+gone and edges are stable, but fine geometry edges still show visible
+stair-stepping. TAA is working but its convergence is too slow to
+fully smooth the aliased edges.
+
+**File**: `Engine/Graphics/Dawn/shaders/TAA.wgsl` (alpha hardcoded at
+line ~144).
+
+**Root cause**: `alpha = 0.1` in the blend
+`mix(historyClipped, currColor, alpha)` overweights history (90%) and
+underweights current frame (10%). This is great for stability (no
+ghosting) but means TAA only removes ~10% of new aliasing per frame,
+so several-pixel-wide stair-steps take many frames to smooth out and
+never fully disappear under motion.
+
+**Tradeoff**: raising alpha → faster convergence → less residual
+aliasing but more ghosting on fast-moving objects. Lowering alpha →
+more stability but more aliasing.
+
+**Future directions to investigate**:
+
+- **Adaptive alpha**: scale alpha by velocity — low velocity (still
+  pixels) → lower alpha for stability; high velocity (moving pixels)
+  → higher alpha so new samples dominate. Standard TAAU/UE pattern.
+- **History clamp strength**: currently uses neighborhood AABB clip in
+  YCoCg. A tighter clip (e.g., variance-based rather than min/max)
+  would allow higher alpha without ghosting.
+- **Catmull-Rom history sample instead of bilinear**: sharper
+  reprojection reduces the softness that comes from bilinear history
+  sampling, allowing lower alpha for the same effective sharpness.
+- **Post-TAA sharpening pass**: a mild unsharp mask after TAA can
+  recover edge crispness without re-introducing aliasing. Cheap and
+  very effective for the "soft" look TAA can produce.
+- **Try alpha=0.15~0.2 as a quick test**: a one-line change; if the
+  ghosting is acceptable for current content, this alone might clean
+  up most of the residual jaggies.
+
+**Not the cause** (verified): the WASM crash was the compile-info
+userdata bug, not anything in the TAA algorithm itself.
+
+---
 
 (no entries yet)
 
