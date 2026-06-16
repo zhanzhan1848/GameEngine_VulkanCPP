@@ -2327,6 +2327,21 @@ inline std::string LoadWGSL(const char* shaderName) {
     if (it != kShaderMap.end()) {
         return std::string(it->second);
     }
+
+    // MEMFS fallback: CMake --embed-file places every .wgsl file at
+    // /Engine/Graphics/Dawn/shaders/ in the WASM filesystem. Shaders not yet
+    // added to kShaderMap (e.g. CameraDepth, SSRTrace/Composite/Temporal) load
+    // from here. Removes the shoot-yourself-in-the-foot requirement of syncing
+    // every new shader into both places.
+    std::string path = std::string("/Engine/Graphics/Dawn/shaders/") +
+                       shaderName + ".wgsl";
+    std::ifstream file(path);
+    if (file.is_open()) {
+        std::ostringstream ss;
+        ss << file.rdbuf();
+        return ss.str();
+    }
+
     return {};
 }
 
