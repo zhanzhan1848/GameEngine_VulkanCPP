@@ -55,6 +55,8 @@ private:
     void UpdateCameraView();
     void CreateDepthTexture();
     void DestroyDepthTexture();
+    void CreatePrepassDepthTexture();
+    void DestroyPrepassDepthTexture();
     void CreateShadowResources();
     void RenderShadowPass(primal::graphics::rhi::RHICommandBuffer* cmd);
     primal::math::m4x4 ComputeLightViewProjection() const;
@@ -87,6 +89,9 @@ private:
     primal::graphics::rhi::DescriptorSetLayoutHandle materialSetLayout_{primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     primal::graphics::rhi::SamplerHandle materialSampler_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::ResourceHandle depthTexture_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    // Non-jittered depth from ForwardRenderer::RenderDawnDepthPrepass — feeds HZB/SSR/SSAO
+    // so downstream passes don't see the per-frame TAA jitter that the forward pass writes.
+    primal::graphics::rhi::ResourceHandle prepassDepthTexture_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::ResourceHandle hdrTexture_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::ResourceHandle velocityTexture_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::TextureDesc hdrDesc_{};
@@ -114,7 +119,7 @@ private:
     primal::graphics::rhi::CommandBufferHandle cmdBuffer_{primal::graphics::rhi::handles::INVALID_COMMAND_BUFFER};
 
     // Render mode switching (Tab key)
-    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, Count };
+    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, FullPlusSSR = 4, Count };
     DawnRenderMode renderMode_{DawnRenderMode::ShadowAndIBL};
     bool prevTabState_{false};
     bool punctualLightsAdded_{false};

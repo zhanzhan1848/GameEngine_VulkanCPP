@@ -850,17 +850,67 @@ void DawnCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture,
 void DawnCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                                      const TextureBlitRegion* regions,
                                      u32 regionCount, FilterMode filter) {
-    // WebGPU has no direct blit operation. For 1:1 copies we can use
-    // CopyTextureToTexture, but scaled blits require a full-screen quad pass.
-    // Log a warning and skip for now.
-    (void)src;
-    (void)dst;
-    (void)regions;
-    (void)regionCount;
-    (void)filter;
+    // CopyTextureToTexture is a command-encoder-level operation — must close any
+    // open compute/render pass before issuing the copy.
+    EndCurrentEncoder();
+    EnsureCommandEncoder();
+    if (!wgpuEncoder_) return;
 
-    std::cerr << "[DawnCommandBuffer] BlitTexture: WebGPU has no native blit. "
-              << "Skipping " << regionCount << " region(s)." << std::endl;
+    DawnTexture* srcTex = device_.GetTexture(src);
+    DawnTexture* dstTex = device_.GetTexture(dst);
+    if (!srcTex || !dstTex) return;
+
+    WGPUTexture wgpuSrc = srcTex->GetNativeTexture();
+    WGPUTexture wgpuDst = dstTex->GetNativeTexture();
+    if (!wgpuSrc || !wgpuDst) return;
+
+    for (u32 i = 0; i < regionCount; ++i) {
+        const auto& r = regions[i];
+
+        // Compute src/dst region sizes
+        s32 srcW = r.srcOffsets[1].x - r.srcOffsets[0].x;
+        s32 srcH = r.srcOffsets[1].y - r.srcOffsets[0].y;
+        s32 dstW = r.dstOffsets[1].x - r.dstOffsets[0].x;
+        s32 dstH = r.dstOffsets[1].y - r.dstOffsets[0].y;
+
+        // Scaled blits need a shader pass — only handle 1:1 copies here.
+        if (srcW != dstW || srcH != dstH) {
+            std::cerr << "[DawnCommandBuffer] BlitTexture: scaled blits unsupported ("
+                      << srcW << "x" << srcH << " → " << dstW << "x" << dstH
+                      << "). Skipping." << std::endl;
+            continue;
+        }
+
+        WGPUTexelCopyTextureInfo srcCopy{};
+        srcCopy.texture = wgpuSrc;
+        srcCopy.mipLevel = r.srcSubresource.mipLevel;
+        srcCopy.origin = WGPUOrigin3D{
+            static_cast<u32>(r.srcOffsets[0].x),
+            static_cast<u32>(r.srcOffsets[0].y),
+            static_cast<u32>(r.srcOffsets[0].z)
+        };
+        srcCopy.aspect = WGPUTextureAspect_All;
+
+        WGPUTexelCopyTextureInfo dstCopy{};
+        dstCopy.texture = wgpuDst;
+        dstCopy.mipLevel = r.dstSubresource.mipLevel;
+        dstCopy.origin = WGPUOrigin3D{
+            static_cast<u32>(r.dstOffsets[0].x),
+            static_cast<u32>(r.dstOffsets[0].y),
+            static_cast<u32>(r.dstOffsets[0].z)
+        };
+        dstCopy.aspect = WGPUTextureAspect_All;
+
+        WGPUExtent3D copySize{};
+        copySize.width = static_cast<u32>(srcW > 0 ? srcW : 0);
+        copySize.height = static_cast<u32>(srcH > 0 ? srcH : 0);
+        copySize.depthOrArrayLayers = 1;
+
+        wgpuCommandEncoderCopyTextureToTexture(wgpuEncoder_, &srcCopy, &dstCopy, &copySize);
+    }
+
+    (void)filter; // Nearest/Linear distinction irrelevant for 1:1 copies
+    UpdateStats(CommandType::BlitTexture);
 }
 
 // GenerateMipmaps is implemented in DawnDevice.cpp to access blit pipeline internals

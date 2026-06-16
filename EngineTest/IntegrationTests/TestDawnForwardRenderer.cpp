@@ -20,6 +20,8 @@ void EmscriptenInitInput();
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSAOPass.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/HZBPass.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/VelocityPass.h"
+#include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.h"
+#include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSRPass.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.h"
 #include "Engine/Graphics/SceneDataAdapter.h"
 #include "Engine/Graphics/RenderProxy.h"
@@ -192,6 +194,7 @@ bool Engine_Test::initialize() {
 
     // Create persistent depth texture (reused across frames)
     CreateDepthTexture();
+    CreatePrepassDepthTexture();
 
     // Create persistent HDR render target for post-processing
     hdrDesc_.size = {width_, height_, 1};
@@ -594,7 +597,9 @@ void Engine_Test::RenderFrame() {
     depthDescForRG.format = rhi::DataFormat::D32_Float;
     depthDescForRG.type = rhi::TextureType::Texture2D;
     depthDescForRG.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
-    auto depthRG = renderGraph_->ImportTexture("Depth", depthTexture_, depthDescForRG);
+    // Downstream passes (HZB/SSR/SSAO) consume the NON-jITTERED prepass depth, not the
+    // jittered forward depth — that's what keeps reflections stable while TAA jitters color.
+    auto depthRG = renderGraph_->ImportTexture("PrepassDepth", prepassDepthTexture_, depthDescForRG);
 
     // Import velocity MRT texture (RG16F) for ToneMapping debug visualization
     rhi::TextureDesc velDescForRG;
@@ -610,11 +615,18 @@ void Engine_Test::RenderFrame() {
     const auto& hzbOut = PostProcess::AddHZBPass(*renderGraph_, depthRG, width_, height_);
     auto hzbHandle = hzbOut.hzbTexture;
 
-    // Velocity buffer (static camera → zero velocity, but needed for temporal pass)
-    auto viewProj = view_.GetViewMatrix() * view_.GetProjectionMatrix();
-    const auto& velOut = PostProcess::AddVelocityPass(*renderGraph_, depthRG, width_, height_, fi,
-        viewProj, viewProj, invProj);
-    auto velHandle = velOut.velocityTexture;
+    // TAA: resolve jittered HDR into clean HDR using velocity from MRT
+    const auto& taaOut = PostProcess::AddTAAPass(*renderGraph_, hdrRG, velMrtRG, width_, height_, fi);
+    auto taaHDR = taaOut.output;
+
+    // SSR: trace reflection rays (half-res), temporal accumulate, composite into HDR.
+    // Only runs in FullPlusSSR mode (toggled via Tab).
+    if (renderMode_ == DawnRenderMode::FullPlusSSR) {
+        const auto& ssrOut = PostProcess::AddSSRPass(*renderGraph_, taaHDR, depthRG, hzbHandle,
+                                                      velMrtRG, width_, height_, fi,
+                                                      view_.GetProjectionMatrix(), invProj);
+        taaHDR = ssrOut.outputColor;
+    }
 
     // SSGI disabled — causes rendering issues on Dawn, ToneMapping falls back to dummy
     auto ssgiHandle = rendergraph::kInvalidRGResourceHandle;
@@ -625,7 +637,7 @@ void Engine_Test::RenderFrame() {
     // Bloom disabled — BlurPass WGSL/C++ struct mismatch + heap corruption causes validation errors
     auto bloomHandle = rendergraph::kInvalidRGResourceHandle;
 
-    const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, hdrRG, bloomHandle,
+    const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, taaHDR, bloomHandle,
         ssaoAOHandle, ssgiHandle, velMrtRG, fi);
     auto tonemapOutput = tonemapOut.output;
 
@@ -785,6 +797,13 @@ void Engine_Test::RenderFrame() {
                 forwardRenderer_.SetDawnShadowLightVP(lightVP_);
             }
 
+            // 1b. Non-jittered depth prepass — must run BEFORE Forward so its depth
+            //     is already in prepassDepthTexture_ when RG passes (HZB/SSR/SSAO)
+            //     execute. Skipped in NoEffects — no consumer downstream.
+            if (renderMode_ != DawnRenderMode::NoEffects) {
+                forwardRenderer_.RenderDawnDepthPrepass(cmd, view_, prepassDepthTexture_, fi, width_, height_);
+            }
+
             // 2. Forward pass
             forwardRenderer_.Render(cmd, scene_, view_, hdrTexture_, velocityTexture_, depthTexture_, materials_, fi, width_, height_);
 
@@ -863,12 +882,13 @@ void Engine_Test::UpdateCamera(float dt) {
 
     // Tab (keyCode 48) to cycle render mode — edge detected
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "Full"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
             "Directional + Shadow + IBL",
-            "Directional + Shadow + IBL + Punctual"
+            "Directional + Shadow + IBL + Punctual",
+            "Full + Screen-Space Reflections"
         };
         bool tabPressed = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 48);
         if (tabPressed && !prevTabState_) {
@@ -928,12 +948,13 @@ void Engine_Test::UpdateCamera(float dt) {
 
     // Tab (keyCode 9) to cycle render mode — WASM
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "Full"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
             "Directional + Shadow + IBL",
-            "Directional + Shadow + IBL + Punctual"
+            "Directional + Shadow + IBL + Punctual",
+            "Full + Screen-Space Reflections"
         };
         bool tabPressed = EmscriptenGetKeyState(9);
         if (tabPressed && !prevTabState_) {
@@ -987,6 +1008,24 @@ void Engine_Test::DestroyDepthTexture() {
     if (depthTexture_ != rhi::handles::INVALID_RESOURCE) {
         device_->DestroyTexture(depthTexture_);
         depthTexture_ = rhi::handles::INVALID_RESOURCE;
+    }
+}
+
+void Engine_Test::CreatePrepassDepthTexture() {
+    if (prepassDepthTexture_ != rhi::handles::INVALID_RESOURCE) return;
+    rhi::TextureDesc depthDesc;
+    depthDesc.size = {width_, height_, 1};
+    depthDesc.format = rhi::DataFormat::D32_Float;
+    depthDesc.type = rhi::TextureType::Texture2D;
+    depthDesc.mipLevels = 1;
+    depthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+    prepassDepthTexture_ = device_->CreateTexture(depthDesc);
+}
+
+void Engine_Test::DestroyPrepassDepthTexture() {
+    if (prepassDepthTexture_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(prepassDepthTexture_);
+        prepassDepthTexture_ = rhi::handles::INVALID_RESOURCE;
     }
 }
 
@@ -1681,6 +1720,7 @@ void Engine_Test::run() {
 void Engine_Test::shutdown() {
     forwardRenderer_.Shutdown();
     DestroyDepthTexture();
+    DestroyPrepassDepthTexture();
 
     // Shadow resources
     if (shadowDepthTexture_ != rhi::handles::INVALID_RESOURCE) {

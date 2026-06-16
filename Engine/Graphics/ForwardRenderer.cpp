@@ -14,6 +14,7 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RenderMesh.h"
 #include "Graphics/Utils/ShaderRegistry.h"
+#include "Graphics/Utils/HaltonSequence.h"
 #include "Graphics/MaterialInstance.h"
 #include "Graphics/RenderProxy.h"
 #include "Graphics/RenderScene.h"
@@ -381,7 +382,104 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         }
     }
 
-    // 7. Allocate and Update Descriptor Sets
+    // Dawn camera depth prepass pipeline (non-jittered, for HZB/SSR/SSAO input)
+    {
+        rhi::DescriptorSetLayoutBinding bind{};
+        bind.binding = 0;
+        bind.descriptorType = rhi::DescriptorType::UniformBuffer;
+        bind.descriptorCount = 1;
+        bind.stageFlags = rhi::ShaderStage::Vertex;
+        rhi::DescriptorSetLayoutDesc dslDesc;
+        dslDesc.bindingCount = 1;
+        dslDesc.bindings = &bind;
+        dawnPrepassDSL_ = device->CreateDescriptorSetLayout(dslDesc);
+
+        rhi::PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &dawnPrepassDSL_;
+        dawnPrepassPipelineLayout_ = device->CreatePipelineLayout(plDesc);
+
+        // CameraDepth.wgsl — never reads GlobalShaderData, so jitter cannot propagate.
+        std::string shaderSrc;
+#ifdef __EMSCRIPTEN__
+        shaderSrc = dawn::LoadWGSL("CameraDepth");
+#else
+        auto platform = device->GetPlatform();
+        std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "CameraDepth");
+        std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+            shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
+            file.open(shaderPath, std::ios::ate | std::ios::binary);
+        }
+        if (file.is_open()) {
+            size_t size = file.tellg();
+            utl::vector<char> buf;
+            buf.resize(size + 1);
+            file.seekg(0);
+            file.read(buf.data(), size);
+            buf[size] = 0;
+            shaderSrc = std::string(buf.data(), size);
+        }
+#endif
+        if (!shaderSrc.empty()) {
+            rhi::ShaderHandle vs = device->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Vertex, "camera_depth_vs");
+            if (vs != rhi::handles::INVALID_SHADER) {
+                rhi::GraphicsPipelineDesc pipeDesc;
+                pipeDesc.vertexShader = vs;
+                pipeDesc.layout = dawnPrepassPipelineLayout_;
+                pipeDesc.topology = rhi::PrimitiveTopology::TriangleList;
+                pipeDesc.renderTargetCount = 0;
+                pipeDesc.depthStencilFormat = rhi::DataFormat::D32_Float;
+                pipeDesc.enableDepthTest = true;
+                pipeDesc.enableDepthWrite = true;
+                pipeDesc.depthFunc = rhi::ComparisonFunc::Less;
+                pipeDesc.cullMode = rhi::CullMode::Back;
+
+                utl::vector<rhi::VertexInputAttribute> attrs(5);
+                attrs[0] = {0, 0, rhi::DataFormat::RGB32_Float, 0};
+                attrs[1] = {1, 0, rhi::DataFormat::R32_UInt, 12};
+                attrs[2] = {2, 0, rhi::DataFormat::R32_UInt, 16};
+                attrs[3] = {3, 0, rhi::DataFormat::R32_UInt, 20};
+                attrs[4] = {4, 0, rhi::DataFormat::RG32_Float, 24};
+                pipeDesc.vertexAttributes = attrs;
+                utl::vector<rhi::VertexInputBinding> binds(1);
+                binds[0] = {0, 32, true};
+                pipeDesc.vertexBindings = binds;
+
+                dawnPrepassPipeline_ = device->CreateGraphicsPipeline(pipeDesc);
+            }
+        }
+
+        // Triple-buffered per-object uniform: 256B aligned slots in a 1MB pool.
+        // Same scheme as ForwardRenderer::perObjectBuffers_, scoped to prepass only.
+        constexpr u32 PREPASS_BUF_SIZE = DAWN_PREPASS_PER_OBJECT_ALIGN * DAWN_PREPASS_MAX_OBJECTS;
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+            rhi::BufferDesc bufDesc{};
+            bufDesc.size = PREPASS_BUF_SIZE;
+            bufDesc.type = rhi::BufferType::Constant;
+            bufDesc.usage = rhi::GPUMemoryUsage::Dynamic;
+            bufDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+            dawnPrepassPerObjectBuf_[i] = device->CreateBuffer(bufDesc);
+            dawnPrepassPerObjectMapped_[i] = device->MapBuffer(dawnPrepassPerObjectBuf_[i], 0, PREPASS_BUF_SIZE);
+
+            rhi::DescriptorSetDesc dsDesc;
+            dsDesc.layout = dawnPrepassDSL_;
+            dawnPrepassPerObjectSet_[i] = device->CreateDescriptorSet(dsDesc);
+
+            rhi::DescriptorBufferInfo bufInfo;
+            bufInfo.buffer = dawnPrepassPerObjectBuf_[i];
+            bufInfo.offset = 0;
+            bufInfo.range = DAWN_PREPASS_PER_OBJECT_ALIGN; // dynamic offset refines per draw
+
+            rhi::WriteDescriptorSet write;
+            write.dstSet = dawnPrepassPerObjectSet_[i];
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = rhi::DescriptorType::UniformBuffer;
+            write.bufferInfo = &bufInfo;
+            device->UpdateDescriptorSets(1, &write);
+        }
+    }
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         // Global Set
         rhi::DescriptorSetDesc globalSetDesc;
@@ -630,6 +728,23 @@ void ForwardRenderer::Shutdown() {
         if (dawnShadowPerObjectBuf_ != rhi::handles::INVALID_RESOURCE) {
             if (dawnShadowPerObjectMapped_) device_->UnmapBuffer(dawnShadowPerObjectBuf_);
             device_->DestroyBuffer(dawnShadowPerObjectBuf_);
+        }
+
+        // Dawn prepass cleanup
+        if (dawnPrepassPipeline_ != rhi::handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(dawnPrepassPipeline_);
+        }
+        if (dawnPrepassPipelineLayout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+            device_->DestroyPipelineLayout(dawnPrepassPipelineLayout_);
+        }
+        if (dawnPrepassDSL_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyDescriptorSetLayout(dawnPrepassDSL_);
+        }
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (dawnPrepassPerObjectBuf_[i] != rhi::handles::INVALID_RESOURCE) {
+                if (dawnPrepassPerObjectMapped_[i]) device_->UnmapBuffer(dawnPrepassPerObjectBuf_[i]);
+                device_->DestroyBuffer(dawnPrepassPerObjectBuf_[i]);
+            }
         }
 
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -998,6 +1113,79 @@ void ForwardRenderer::RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     // Barrier: depth texture → ShaderResource for forward pass sampling
     rhi::ResourceBarrier b{};
     b.resource = shadowDepthBuffer_;
+    b.beforeState = rhi::ResourceState::DepthStencil;
+    b.afterState = rhi::ResourceState::ShaderResource;
+    b.subresource = 0xFFFFFFFF;
+    cmdBuffer->InsertBarrier(&b, 1);
+}
+
+void ForwardRenderer::RenderDawnDepthPrepass(rhi::RHICommandBuffer* cmdBuffer,
+                                             const RenderView& view,
+                                             rhi::ResourceHandle depthTexture,
+                                             u32 frameIndex,
+                                             u32 width,
+                                             u32 height) {
+    if (dawnPrepassPipeline_ == rhi::handles::INVALID_PIPELINE) return;
+    if (depthTexture == rhi::handles::INVALID_RESOURCE) return;
+
+    const u32 fi = frameIndex % rhi::MAX_FRAMES_IN_FLIGHT;
+
+    // Depth-only render pass. Clear to far (1.0); store for HZB/SSR/SSAO consumption.
+    rhi::RenderPassDesc passDesc{};
+    passDesc.depthAttachment.texture = depthTexture;
+    passDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
+    passDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
+    passDesc.depthAttachment.clearValue.depth = 1.0f;
+    passDesc.depthAttachment.storeOp = rhi::StoreAction::Store;
+
+    cmdBuffer->BeginRenderPass(passDesc);
+
+    rhi::ViewportDesc vp;
+    vp.topLeft = {0.0f, 0.0f};
+    vp.size = {static_cast<float>(width), static_cast<float>(height)};
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    cmdBuffer->SetViewport(vp);
+    cmdBuffer->SetScissor({{0, 0}, {width, height}});
+
+    cmdBuffer->BindGraphicsPipeline(dawnPrepassPipeline_);
+
+    // Camera view-projection (no jitter — this is the whole point of the pass).
+    const primal::math::m4x4 viewProj = view.GetViewProjectionMatrix();
+
+    // Per-frame bump allocator: 256B aligned slots carved from the mapped pool.
+    u32 offset = 0;
+    u8* base = static_cast<u8*>(dawnPrepassPerObjectMapped_[fi]);
+    if (!base) {
+        cmdBuffer->EndRenderPass();
+        return;
+    }
+
+    for (const auto* proxy : view.GetVisibleProxies()) {
+        if (!proxy) continue;
+        if (offset + DAWN_PREPASS_PER_OBJECT_ALIGN > DAWN_PREPASS_PER_OBJECT_ALIGN * DAWN_PREPASS_MAX_OBJECTS) break;
+
+        auto* perObject = reinterpret_cast<primal::math::m4x4*>(base + offset);
+        *perObject = viewProj * proxy->transform;
+
+        u32 dynamicOffset = offset;
+        cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, dawnPrepassPipelineLayout_,
+                                      0, 1, &dawnPrepassPerObjectSet_[fi], 1, &dynamicOffset);
+
+        RenderMesh* mesh = RenderMesh::GetByEntityId(proxy->meshId);
+        if (mesh && mesh->IsValid()) {
+            mesh->Draw(cmdBuffer);
+        }
+
+        offset += DAWN_PREPASS_PER_OBJECT_ALIGN;
+        device_->SetBufferDirtySize(dawnPrepassPerObjectBuf_[fi], offset);
+    }
+
+    cmdBuffer->EndRenderPass();
+
+    // Transition to shader resource so downstream RG passes (HZB/SSR/SSAO) can sample.
+    rhi::ResourceBarrier b{};
+    b.resource = depthTexture;
     b.beforeState = rhi::ResourceState::DepthStencil;
     b.afterState = rhi::ResourceState::ShaderResource;
     b.subresource = 0xFFFFFFFF;
@@ -1387,6 +1575,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         frameData->renderMode = dawnRenderMode_;
         frameData->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, static_cast<float>(width)};
         frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
+        frameData->jitterOffset = utils::GetJitterOffset(frameNumber_, width, height);
 
         SetupLights(scene, frameIndex, frameData, csmViews, cascadeSplits, lightShadowIndices, lightViewProjs);
 

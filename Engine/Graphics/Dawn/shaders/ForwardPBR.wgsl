@@ -26,8 +26,7 @@ struct GlobalShaderData {
     frameCount: f32,
     renderMode: u32,
     _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    jitterOffset: vec2<f32>,
 };
 
 struct DirectionalLightParameters {
@@ -144,6 +143,10 @@ fn vertexMain(input: VSInput) -> VSOutput {
     var output: VSOutput;
     let worldPos = perObject.world * vec4<f32>(input.position, 1.0);
     output.clipPos = globalData.viewProjection * worldPos;
+    // TAA subpixel jitter — applied AFTER clipPos computed so projection stays intact.
+    // Multiply by clipPos.w to convert NDC-space jitter back to clip space.
+    output.clipPos = vec4<f32>(output.clipPos.xy + globalData.jitterOffset * output.clipPos.w,
+                               output.clipPos.zw);
     output.uv = vec2<f32>(input.uv.x, 1.0 - input.uv.y);
     output.worldPos = worldPos.xyz;
     output.normal = unpackNormal(input.packed_normal, input.color_t_sign);

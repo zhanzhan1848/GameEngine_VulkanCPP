@@ -52,6 +52,16 @@ public:
                 u32 width,
                 u32 height);
 
+    // Non-jittered depth prepass — writes camera-view depth to the supplied texture
+    // without applying TAA jitter. Call BEFORE Render so downstream RG passes
+    // (HZB/SSR/SSAO) that sample this depth see stable, non-jittered geometry.
+    void RenderDawnDepthPrepass(rhi::RHICommandBuffer* cmdBuffer,
+                                const RenderView& view,
+                                rhi::ResourceHandle depthTexture,
+                                u32 frameIndex,
+                                u32 width,
+                                u32 height);
+
     GeometryDebugSettings& GetDebugSettings() { return debugSettings_; }
     
     const SceneExtractionStats& GetExtractionStats() const { return sceneExtractionSystem_.GetStats(); }
@@ -204,6 +214,18 @@ private:
                               const RenderScene& scene,
                               const RenderView& view,
                               const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials);
+
+    // Dawn camera depth prepass — non-jittered depth for HZB/SSR/SSAO.
+    // Uses its own pipeline so it never touches GlobalShaderData.jitterOffset,
+    // producing a stable depth buffer that downstream passes consume.
+    static constexpr u32 DAWN_PREPASS_PER_OBJECT_ALIGN = 256;
+    static constexpr u32 DAWN_PREPASS_MAX_OBJECTS = 4096; // 1MB / 256B
+    rhi::DescriptorSetLayoutHandle dawnPrepassDSL_{rhi::handles::INVALID_RESOURCE};
+    rhi::PipelineLayoutHandle dawnPrepassPipelineLayout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineHandle dawnPrepassPipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::ResourceHandle dawnPrepassPerObjectBuf_[rhi::MAX_FRAMES_IN_FLIGHT]{};
+    void* dawnPrepassPerObjectMapped_[rhi::MAX_FRAMES_IN_FLIGHT]{};
+    rhi::DescriptorSetHandle dawnPrepassPerObjectSet_[rhi::MAX_FRAMES_IN_FLIGHT]{};
 
 public:
     void SetTime(float deltaTime, float totalTime, u32 frameNumber) {
