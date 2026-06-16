@@ -2312,7 +2312,10 @@ inline std::string LoadWGSL(const char* shaderName) {
         {"ShadowDepth",           kShader_ShadowDepth},
         {"SSAO",                  kShader_SSAO},
         {"SSAOBlur",              kShader_SSAOBlur},
-        {"TAA",                   kShader_TAA},
+        // TAA intentionally omitted — keep the WGSL file authoritative.
+        // The kShader_TAA embed above is stale (predates the sampler-removal
+        // and textureSampleLevel→textureLoad fixes). CMake's --embed-file
+        // places TAA.wgsl in MEMFS, so the fallback below picks it up.
         {"SSGIFilter",            kShader_SSGIFilter},
         {"SSGIHalfResDenoise",    kShader_SSGIHalfResDenoise},
         {"SSGITemporal",          kShader_SSGITemporal},
