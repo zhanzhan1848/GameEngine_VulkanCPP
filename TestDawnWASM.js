@@ -6097,6 +6097,14 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
     };
 
   
+  var _wgpuCommandEncoderCopyTextureToTexture = (encoderPtr, srcPtr, dstPtr, copySizePtr) => {
+      var commandEncoder = WebGPU.getJsObject(encoderPtr);
+      var copySize = WebGPU.makeExtent3D(copySizePtr);
+      commandEncoder.copyTextureToTexture(
+        WebGPU.makeTexelCopyTextureInfo(srcPtr), WebGPU.makeTexelCopyTextureInfo(dstPtr), copySize);
+    };
+
+  
   
   var _wgpuCommandEncoderFinish = (encoderPtr, descriptor) => {
       // TODO: Use the descriptor.
@@ -7548,8 +7556,8 @@ function checkIncomingModuleAPI() {
   ignoredModuleProp('onSbrkGrow');
 }
 var ASM_CONSTS = {
-  7615384: () => { if (!document.getElementById('modeHud')) { var hud = document.createElement('div'); hud.id = 'modeHud'; hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;'; hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>' + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>' + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>'; document.body.appendChild(hud); } window.setRenderMode = function(idx, name, desc) { var c = document.getElementById('modeHudCurrent'); var d = document.getElementById('modeHudDesc'); if (c) c.textContent = 'Mode ' + idx + ': ' + name; if (d) d.textContent = desc; }; },  
- 7616378: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } }
+  7653624: () => { if (!document.getElementById('modeHud')) { var hud = document.createElement('div'); hud.id = 'modeHud'; hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;'; hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>' + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>' + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>'; document.body.appendChild(hud); } window.setRenderMode = function(idx, name, desc) { var c = document.getElementById('modeHudCurrent'); var d = document.getElementById('modeHudDesc'); if (c) c.textContent = 'Mode ' + idx + ': ' + name; if (d) d.textContent = desc; }; },  
+ 7654618: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } }
 };
 
 // Imports from the Wasm binary.
@@ -7921,6 +7929,8 @@ var wasmImports = {
   wgpuCommandEncoderCopyBufferToTexture: _wgpuCommandEncoderCopyBufferToTexture,
   /** @export */
   wgpuCommandEncoderCopyTextureToBuffer: _wgpuCommandEncoderCopyTextureToBuffer,
+  /** @export */
+  wgpuCommandEncoderCopyTextureToTexture: _wgpuCommandEncoderCopyTextureToTexture,
   /** @export */
   wgpuCommandEncoderFinish: _wgpuCommandEncoderFinish,
   /** @export */
