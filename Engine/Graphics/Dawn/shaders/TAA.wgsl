@@ -29,6 +29,37 @@ struct TAAGlobals {
 @group(0) @binding(4) var linearSampler: sampler;
 @group(0) @binding(5) var<uniform> globals: TAAGlobals;
 
+// Manual bilinear via 4 textureLoads — bypasses textureSampleLevel, which
+// silently fails WASM Dawn's uniformity analysis for compute shaders with
+// non-uniform coords in non-uniform control flow. The failure manifests as
+// EventManager::ProcessEvents OOB crash at end-of-frame because the pipeline
+// ends up invalid and DawnShader::Initialize skips compile error polling on
+// WASM, masking the WGSL compile error.
+fn sampleBilinear(tex: texture_2d<f32>, uv: vec2f, dims: vec2u) -> vec3f {
+    let coord = uv * vec2f(dims) - 0.5;
+    let base = vec2i(i32(floor(coord.x)), i32(floor(coord.y)));
+    let frac_ = fract(coord);
+    let maxCoord = vec2i(i32(dims.x) - 1, i32(dims.y) - 1);
+
+    let c00 = clamp(base, vec2i(0), maxCoord);
+    let c10 = clamp(base + vec2i(1, 0), vec2i(0), maxCoord);
+    let c01 = clamp(base + vec2i(0, 1), vec2i(0), maxCoord);
+    let c11 = clamp(base + vec2i(1, 1), vec2i(0), maxCoord);
+
+    let h00 = textureLoad(tex, vec2u(c00), 0).rgb;
+    let h10 = textureLoad(tex, vec2u(c10), 0).rgb;
+    let h01 = textureLoad(tex, vec2u(c01), 0).rgb;
+    let h11 = textureLoad(tex, vec2u(c11), 0).rgb;
+
+    let fx = clamp(frac_.x, 0.0, 1.0);
+    let fy = clamp(frac_.y, 0.0, 1.0);
+
+    return h00 * (1.0 - fx) * (1.0 - fy)
+         + h10 * fx * (1.0 - fy)
+         + h01 * (1.0 - fx) * fy
+         + h11 * fx * fy;
+}
+
 // RGB <-> YCoCg (in-place color space for variance clipping — better chroma separation than YCbCr for natural scenes).
 fn rgb_to_ycocg(c: vec3f) -> vec3f {
     let y  = 0.25 * c.r + 0.5 * c.g + 0.25 * c.b;
@@ -79,7 +110,8 @@ fn taa_main(@builtin(global_invocation_id) gid: vec3u) {
     if (globals.invHistoryValid < 0.5 &&
         historyUV.x >= 0.0 && historyUV.x <= 1.0 &&
         historyUV.y >= 0.0 && historyUV.y <= 1.0) {
-        historyColor = textureSampleLevel(historyColorTex, linearSampler, historyUV, 0.0).rgb;
+        let histDims = vec2u(textureDimensions(historyColorTex, 0));
+        historyColor = sampleBilinear(historyColorTex, historyUV, histDims);
     }
 
     // 3x3 neighborhood of current color (for variance clipping)
