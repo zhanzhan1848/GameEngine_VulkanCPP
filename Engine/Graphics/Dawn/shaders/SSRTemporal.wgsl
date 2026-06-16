@@ -115,6 +115,18 @@ fn ssr_temporal(@builtin(global_invocation_id) gid: vec3u) {
 
     let histDims = vec2u(textureDimensions(ssrHistory, 0));
     let history = sampleBilinear(ssrHistory, prevHalfUV, histDims);
+
+    // WebGPU textures start with undefined contents. On WASM the history slot
+    // can contain NaN bit patterns until a valid frame is blitted into it
+    // (native Metal happens to zero-init textures, masking this). Once NaN
+    // enters the temporal blend it propagates forever — mix(current, NaN, t)
+    // is NaN — turning the entire SSR output black. Skip the blend and use
+    // the current frame's trace result when history is contaminated.
+    if (any(isnan(history))) {
+        textureStore(ssrOutput, halfPixel, vec4f(currentColor, currentMask));
+        return;
+    }
+
     let historyColor = history.rgb;
     let historyMask = history.a;
 
