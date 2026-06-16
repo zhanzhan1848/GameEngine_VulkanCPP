@@ -95,11 +95,6 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     pipeDesc.threadGroupSize = {8, 8, 1};
     s_Pipeline = device.CreateComputePipeline(pipeDesc);
 
-    std::cerr << "[TAA] EnsurePipeline — shader=" << static_cast<u64>(cs)
-              << " dsl=" << static_cast<u64>(s_DSL)
-              << " layout=" << static_cast<u64>(s_Layout)
-              << " pipeline=" << static_cast<u64>(s_Pipeline) << std::endl;
-
     // Linear sampler no longer needed — sampleBilinear uses textureLoad only.
     // Keeping the field for ABI but not creating/binding the sampler.
     s_LinearSampler = handles::INVALID_SAMPLER;
@@ -123,12 +118,6 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
         bufDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         s_ParamsBuf[i] = device.CreateBuffer(bufDesc);
         s_ParamsMapped[i] = device.MapBuffer(s_ParamsBuf[i], 0, sizeof(TAAGlobalsCPU));
-
-        std::cerr << "[TAA] EnsurePipeline frame-slot " << i
-                  << " — histTex=" << static_cast<u64>(s_HistoryTex[i])
-                  << " paramsBuf=" << static_cast<u64>(s_ParamsBuf[i])
-                  << " paramsMapped=" << s_ParamsMapped[i]
-                  << " (TAAGlobalsCPU=" << sizeof(TAAGlobalsCPU) << " bytes)" << std::endl;
 
         for (u32 j = 0; j < MAX_SETS_PER_FRAME; ++j) {
             DescriptorSetDesc dsDesc;
@@ -183,21 +172,10 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             outDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource | TextureUsage::CopySource;
             data.output = builder.CreateTexture("TAA_Output", outDesc, ResourceState::UnorderedAccess);
         },
-        [inputHDR, velocityTexture, width, height, fi, histReadIdx, histValid]
+        [inputHDR, velocityTexture, width, height, fi, histReadIdx]
          (const TAAPassData& data, RenderGraphContext& context) {
-            static u32 s_execCount = 0;
-            bool logThisFrame = (s_execCount < 3u);
-            ++s_execCount;
-
-            if (logThisFrame) {
-                std::cerr << "[TAA] Execute fi=" << fi
-                          << " pipeline=" << static_cast<u64>(s_Pipeline)
-                          << " histValid=" << histValid
-                          << " histReadIdx=" << histReadIdx << std::endl;
-            }
-
             if (s_Pipeline == handles::INVALID_PIPELINE) {
-                if (logThisFrame) std::cerr << "[TAA] Execute abort: pipeline INVALID" << std::endl;
+                std::cerr << "[TAA] Execute abort: pipeline INVALID" << std::endl;
                 return;
             }
 
@@ -217,27 +195,19 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             // one command buffer.
             ResourceHandle histWriteHandle = s_HistoryTex[fi];
 
-            if (logThisFrame) {
-                std::cerr << "[TAA] Resolved — in=" << static_cast<u64>(inHandle)
-                          << " vel=" << static_cast<u64>(velHandle)
-                          << " out=" << static_cast<u64>(outHandle)
-                          << " hist=" << static_cast<u64>(histHandle)
-                          << " paramsBuf=" << static_cast<u64>(s_ParamsBuf[fi]) << std::endl;
-            }
-
             if (inHandle == handles::INVALID_RESOURCE ||
                 velHandle == handles::INVALID_RESOURCE ||
                 outHandle == handles::INVALID_RESOURCE) {
-                if (logThisFrame) std::cerr << "[TAA] Execute abort: invalid input resource" << std::endl;
+                std::cerr << "[TAA] Execute abort: invalid input resource" << std::endl;
                 return;
             }
 
             if (histHandle == handles::INVALID_RESOURCE) {
-                if (logThisFrame) std::cerr << "[TAA] Execute abort: invalid history texture" << std::endl;
+                std::cerr << "[TAA] Execute abort: invalid history texture" << std::endl;
                 return;
             }
             if (histWriteHandle == handles::INVALID_RESOURCE) {
-                if (logThisFrame) std::cerr << "[TAA] Execute abort: invalid history write texture" << std::endl;
+                std::cerr << "[TAA] Execute abort: invalid history write texture" << std::endl;
                 return;
             }
 
@@ -270,11 +240,6 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             cmd->BindDescriptorSets(PipelineBindPoint::Compute, s_Layout, 0, 1, &ds, 0, nullptr);
             cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
 
-            if (logThisFrame) {
-                std::cerr << "[TAA] Dispatched compute — ds=" << static_cast<u64>(ds)
-                          << " tg=(" << ((width + 7) / 8) << "," << ((height + 7) / 8) << ",1)" << std::endl;
-            }
-
             // Copy output → current frame's history slot so next frame reads resolved color.
             // BlitTexture is a full-screen copy with no scaling. Destination is
             // the current frame's slot (fi), source is the RG-managed output.
@@ -287,15 +252,7 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             blitRegion.dstOffsets[1] = {(s32)width, (s32)height, 1};
             cmd->BlitTexture(outHandle, histWriteHandle, &blitRegion, 1, FilterMode::Nearest);
 
-            if (logThisFrame) {
-                std::cerr << "[TAA] BlitTexture queued — out=" << static_cast<u64>(outHandle)
-                          << " histWrite=" << static_cast<u64>(histWriteHandle)
-                          << " histRead=" << static_cast<u64>(histHandle)
-                          << " size=" << width << "x" << height << std::endl;
-            }
-
             s_HistoryInit[fi] = true;
-            (void)histValid; // suppress unused warning
         }
     );
 }
