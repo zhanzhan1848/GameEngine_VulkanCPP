@@ -26,8 +26,7 @@ struct TAAGlobals {
 @group(0) @binding(1) var historyColorTex: texture_2d<f32>;
 @group(0) @binding(2) var velocityTex: texture_2d<f32>;
 @group(0) @binding(3) var outputTex: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(4) var linearSampler: sampler;
-@group(0) @binding(5) var<uniform> globals: TAAGlobals;
+@group(0) @binding(4) var<uniform> globals: TAAGlobals;
 
 // Manual bilinear via 4 textureLoads — bypasses textureSampleLevel, which
 // silently fails WASM Dawn's uniformity analysis for compute shaders with

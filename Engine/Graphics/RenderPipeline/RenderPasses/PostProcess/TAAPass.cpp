@@ -67,18 +67,20 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     ShaderHandle cs = device.CreateShader(source.data(), source.size(), ShaderStage::Compute, "taa_main");
     if (cs == handles::INVALID_SHADER) { std::cerr << "[TAA] Shader creation failed" << std::endl; return false; }
 
-    // 6 bindings: 0..2 = sampled images (curr, hist, vel), 3 = storage image (output),
-    //             4 = sampler, 5 = uniform buffer (globals)
-    DescriptorSetLayoutBinding bindings[6]{};
+    // 5 bindings: 0..2 = sampled images (curr, hist, vel), 3 = storage image (output),
+    //             4 = uniform buffer (globals).
+    // No sampler — sampleBilinear in WGSL uses textureLoad only. Dawn WASM backend
+    // has issues with sampler bindings in compute shaders (manifests as OOB crash
+    // in EventManager::ProcessEvents at end-of-frame).
+    DescriptorSetLayoutBinding bindings[5]{};
     bindings[0] = {0, DescriptorType::SampledImage,    1, ShaderStage::Compute};
     bindings[1] = {1, DescriptorType::SampledImage,    1, ShaderStage::Compute};
     bindings[2] = {2, DescriptorType::SampledImage,    1, ShaderStage::Compute};
     bindings[3] = {3, DescriptorType::StorageImage,    1, ShaderStage::Compute};
-    bindings[4] = {4, DescriptorType::Sampler,         1, ShaderStage::Compute};
-    bindings[5] = {5, DescriptorType::UniformBuffer,   1, ShaderStage::Compute};
+    bindings[4] = {4, DescriptorType::UniformBuffer,   1, ShaderStage::Compute};
 
     DescriptorSetLayoutDesc dslDesc;
-    dslDesc.bindingCount = 6;
+    dslDesc.bindingCount = 5;
     dslDesc.bindings = bindings;
     s_DSL = device.CreateDescriptorSetLayout(dslDesc);
 
@@ -98,17 +100,9 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
               << " layout=" << static_cast<u64>(s_Layout)
               << " pipeline=" << static_cast<u64>(s_Pipeline) << std::endl;
 
-    // Linear sampler for history sampling
-    SamplerDesc samplerDesc;
-    samplerDesc.minFilter = FilterMode::Linear;
-    samplerDesc.magFilter = FilterMode::Linear;
-    samplerDesc.addressU = TextureAddressMode::Clamp;
-    samplerDesc.addressV = TextureAddressMode::Clamp;
-    samplerDesc.addressW = TextureAddressMode::Clamp;
-    samplerDesc.comparisonFunc = ComparisonFunc::Never;
-    s_LinearSampler = device.CreateSampler(samplerDesc);
-
-    std::cerr << "[TAA] EnsurePipeline — sampler=" << static_cast<u64>(s_LinearSampler) << std::endl;
+    // Linear sampler no longer needed — sampleBilinear uses textureLoad only.
+    // Keeping the field for ABI but not creating/binding the sampler.
+    s_LinearSampler = handles::INVALID_SAMPLER;
 
     // Allocate persistent history textures + params buffers per frame slot
     TextureDesc histDesc;
@@ -222,7 +216,6 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
                           << " vel=" << static_cast<u64>(velHandle)
                           << " out=" << static_cast<u64>(outHandle)
                           << " hist=" << static_cast<u64>(histHandle)
-                          << " sampler=" << static_cast<u64>(s_LinearSampler)
                           << " paramsBuf=" << static_cast<u64>(s_ParamsBuf[fi]) << std::endl;
             }
 
@@ -246,11 +239,10 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             DescriptorImageInfo histInfo; histInfo.imageView = histHandle;
             DescriptorImageInfo velInfo;  velInfo.imageView = velHandle;
             DescriptorImageInfo outInfo;  outInfo.imageView = outHandle;
-            DescriptorImageInfo smpInfo;  smpInfo.sampler = s_LinearSampler;
             DescriptorBufferInfo bufInfo; bufInfo.buffer = s_ParamsBuf[fi]; bufInfo.offset = 0;
             bufInfo.range = sizeof(TAAGlobalsCPU);
 
-            WriteDescriptorSet writes[6];
+            WriteDescriptorSet writes[5];
             writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
             writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &currInfo;
             writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
@@ -260,11 +252,9 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             writes[3].dstSet = ds; writes[3].dstBinding = 3; writes[3].descriptorCount = 1;
             writes[3].descriptorType = DescriptorType::StorageImage; writes[3].imageInfo = &outInfo;
             writes[4].dstSet = ds; writes[4].dstBinding = 4; writes[4].descriptorCount = 1;
-            writes[4].descriptorType = DescriptorType::Sampler; writes[4].imageInfo = &smpInfo;
-            writes[5].dstSet = ds; writes[5].dstBinding = 5; writes[5].descriptorCount = 1;
-            writes[5].descriptorType = DescriptorType::UniformBuffer; writes[5].bufferInfo = &bufInfo;
+            writes[4].descriptorType = DescriptorType::UniformBuffer; writes[4].bufferInfo = &bufInfo;
 
-            device.UpdateDescriptorSets(6, writes);
+            device.UpdateDescriptorSets(5, writes);
 
             cmd->BindComputePipeline(s_Pipeline);
             cmd->BindDescriptorSets(PipelineBindPoint::Compute, s_Layout, 0, 1, &ds, 0, nullptr);
