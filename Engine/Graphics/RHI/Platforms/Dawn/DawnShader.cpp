@@ -49,7 +49,13 @@ bool DawnShader::Initialize(const void* data, size_t size, ShaderStage stage, co
         bool done{false};
     };
 
-    CompilationUserData compData{};
+    // Heap-allocate the userdata: Dawn's WASM EventManager holds the pointer
+    // after wgpuShaderModuleGetCompilationInfo and may fire the callback
+    // during a future wgpuInstanceProcessEvents call (e.g. endFrame's),
+    // long after Initialize() has returned. Stack-local userdata would be
+    // dead by then and cause the OOB we saw in EventManager::ProcessEvents.
+    CompilationUserData* compData = new CompilationUserData{};
+
     WGPUCompilationInfoCallbackInfo callbackInfo{};
     callbackInfo.nextInChain = nullptr;
     callbackInfo.mode = WGPUCallbackMode_AllowProcessEvents;
@@ -79,7 +85,7 @@ bool DawnShader::Initialize(const void* data, size_t size, ShaderStage stage, co
         }
         data->done = true;
     };
-    callbackInfo.userdata1 = &compData;
+    callbackInfo.userdata1 = compData;
     callbackInfo.userdata2 = nullptr;
 
     wgpuShaderModuleGetCompilationInfo(wgpuModule_, callbackInfo);
@@ -91,16 +97,30 @@ bool DawnShader::Initialize(const void* data, size_t size, ShaderStage stage, co
     // at dispatch time and OOB crashes in EventManager::ProcessEvents.
     // Cap iterations on WASM as a safety net if the callback somehow stalls.
 #ifdef __EMSCRIPTEN__
-    for (u32 iter = 0; iter < 1000 && !compData.done; ++iter) {
+    for (u32 iter = 0; iter < 1000 && !compData->done; ++iter) {
         wgpuInstanceProcessEvents(device_.GetInstance());
     }
 #else
-    while (!compData.done) {
+    while (!compData->done) {
         wgpuInstanceProcessEvents(device_.GetInstance());
     }
 #endif
 
-    if (compData.hasErrors) {
+    bool hasErrors = compData->hasErrors;
+
+#ifdef __EMSCRIPTEN__
+    // If the callback fired during the pump loop, free normally. If it
+    // didn't (timed out at 1000 iterations), intentionally leak: Dawn
+    // may still fire it later and dereference the pointer.
+    if (compData->done) {
+        delete compData;
+    }
+#else
+    // Native: pump loop guarantees delivery, safe to always free.
+    delete compData;
+#endif
+
+    if (hasErrors) {
         std::cerr << "[DawnShader] Shader has compilation errors" << std::endl;
         wgpuShaderModuleRelease(wgpuModule_);
         wgpuModule_ = nullptr;
