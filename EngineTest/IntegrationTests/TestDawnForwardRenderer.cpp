@@ -615,9 +615,15 @@ void Engine_Test::RenderFrame() {
     const auto& hzbOut = PostProcess::AddHZBPass(*renderGraph_, depthRG, width_, height_);
     auto hzbHandle = hzbOut.hzbTexture;
 
-    // TAA: resolve jittered HDR into clean HDR using velocity from MRT
+    // TAA: resolve jittered HDR into clean HDR using velocity from MRT.
+    // DISABLED on WASM — TAA pass causes memory corruption that crashes Dawn's
+    // EventManager::ProcessEvents at end-of-frame. Pass HDR through directly
+    // until the root cause is fixed. Native (Metal) keeps TAA enabled.
+    auto taaHDR = hdrRG;
+#ifndef __EMSCRIPTEN__
     const auto& taaOut = PostProcess::AddTAAPass(*renderGraph_, hdrRG, velMrtRG, width_, height_, fi);
-    auto taaHDR = taaOut.output;
+    taaHDR = taaOut.output;
+#endif
 
     // SSR: trace reflection rays (half-res), temporal accumulate, composite into HDR.
     // Only runs in FullPlusSSR mode (toggled via Tab).
