@@ -84,14 +84,17 @@ bool DawnShader::Initialize(const void* data, size_t size, ShaderStage stage, co
 
     wgpuShaderModuleGetCompilationInfo(wgpuModule_, callbackInfo);
 
+    // Pump instance events until the compilation-info callback fires.
+    // Previously this was skipped on WASM ("may never deliver"), but that
+    // caused WGSL compile errors to be silently swallowed — invalid shader
+    // modules slipped through, leading to "Invalid ComputePipeline" errors
+    // at dispatch time and OOB crashes in EventManager::ProcessEvents.
+    // Cap iterations on WASM as a safety net if the callback somehow stalls.
 #ifdef __EMSCRIPTEN__
-    // On Emscripten + JSPI, wgpuInstanceProcessEvents may never deliver the
-    // compilation-info callback. Skip the polling loop — errors will surface
-    // later as pipeline-creation failures or device errors via the uncaptured
-    // error callback.
-    compData.done = true;
+    for (u32 iter = 0; iter < 1000 && !compData.done; ++iter) {
+        wgpuInstanceProcessEvents(device_.GetInstance());
+    }
 #else
-    // Pump instance events to ensure compilation info callback is processed
     while (!compData.done) {
         wgpuInstanceProcessEvents(device_.GetInstance());
     }
