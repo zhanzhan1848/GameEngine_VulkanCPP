@@ -65,9 +65,9 @@ fn unpackNormal(packed: u32, colorTSign: u32) -> vec3<f32> {
     return normalize(vec3<f32>(nxy.x, nxy.y, z * nSign));
 }
 
-// Same tangent unpack as ForwardPBR.wgsl:128-141 — needed for normal mapping
-// (TBN basis) so deferred can apply tangent-space normal maps.
-fn unpackTangent(packed: u32, colorTSign: u32) -> vec3<f32> {
+// Mirrors ForwardPBR.wgsl:128-137 exactly — no sign flip, object-space.
+// ForwardPBR is the canonical pattern; deviating breaks TBN.
+fn unpackTangent(packed: u32) -> vec3<f32> {
     let tx = f32(packed & 0xFFFFu);
     let ty = f32((packed >> 16u) & 0xFFFFu);
     let inv = 2.0 / 65535.0;
@@ -75,9 +75,7 @@ fn unpackTangent(packed: u32, colorTSign: u32) -> vec3<f32> {
     let d = dot(txy, txy);
     if (d > 1.0) { return vec3<f32>(1.0, 0.0, 0.0); }
     let z = sqrt(1.0 - d);
-    let signs = (colorTSign >> 24u) & 0xFFu;
-    let tSign = f32(signs & 0x01u) - 1.0;
-    return normalize(vec3<f32>(txy.x, txy.y, z * tSign));
+    return normalize(vec3<f32>(txy.x, txy.y, z));
 }
 
 @vertex
@@ -93,10 +91,10 @@ fn gbuffer_vs(input: VSInput) -> VSOutput {
     output.curClip = clip;
     output.prevClip = perObject.prevWorldViewProjection * vec4<f32>(input.position, 1.0);
 
-    // Tangent space for normal mapping (TBN). world transforms the tangent
-    // and bitangent; normal will be transformed implicitly (deferred uses
-    // world-space normal which the geometry normal already is).
-    let T = normalize(perObject.world * vec4<f32>(unpackTangent(input.packed_tangent, input.color_t_sign), 0.0)).xyz;
+    // TBN stays in object space (matches ForwardPBR:248-255). Sponza static
+    // meshes have identity world transform, so object == world for the
+    // downstream deferred lighting pass that reads this normal.
+    let T = normalize(unpackTangent(input.packed_tangent));
     let N = output.normal;
     output.tangent = T;
     output.bitangent = normalize(cross(N, T));
