@@ -3,8 +3,14 @@
 #include "CommonHeaders.h"
 #include "Platform/Window.h"
 #include "EngineAPI/Camera.h"
-#include "EngineAPI/Light.h" 
+#include "EngineAPI/Light.h"
 
+
+// Forward declarations for RHI path (sub-step 1.2.1+)
+namespace primal::graphics::rhi {
+    struct DeviceDesc;
+    class RHIDeviceBase;
+}
 
 namespace primal::graphics
 {
@@ -262,7 +268,15 @@ namespace primal::graphics
 #include "Graphics/GraphicsPlatform.h"
 #endif // !PRIMAL_PLUS
 
+	// === Legacy 平台初始化（Phase 1 Sub-step 1.2.6' 标记 deprecated）===
+	// 这两个函数自身在新流程里仍被使用（作为三步序列的第三步），但**不应被新代码直接调用**。
+	// 新代码请走：
+	//   - Editor (C#) 走 EngineDLL::InitializeEngine / ShutdownEngine
+	//   - 引擎内部测试走 graphics::initialize_with_device + bind_rhi_device_to_legacy + initialize(graphics_platform::metal)
+	// 合法 suppress 点：EngineDLL/EngineAPI.cpp 和已迁移的测试（TestRendererMac.cpp）。
+	[[deprecated("Use EngineDLL::InitializeEngine, or initialize_with_device + bind_rhi_device_to_legacy + initialize(metal)")]]
 	bool initialize(graphics_platform platform);
+	[[deprecated("Use EngineDLL::ShutdownEngine, or graphics::shutdown() paired with shutdown_rhi() after explicit three-step init")]]
 	void shutdown();
 
 	// Get the location of compiled engine shaders relative to the executable's path.
@@ -301,4 +315,19 @@ namespace primal::graphics
 	id::id_type add_render_item(id::id_type entity_id, id::id_type geometry_content_id,
 		u32 material_count, const id::id_type *const material_ids);
 	void remove_render_item(id::id_type id);
+
+    // === RHI 路径入口（新）===
+    // 与上面的 platform_interface 路径并存。UI 层通过 DeviceDesc.platform 显式决策，
+    // 引擎通过 RHIDeviceFactory 被动映射。详见 RHIDeviceFactory.h。
+    bool initialize_with_device(const rhi::DeviceDesc& desc);
+    void shutdown_rhi();
+    bool is_rhi_initialized();
+    rhi::RHIDeviceBase* get_rhi_device();
+
+    // === RHI → 旧 Metal 后端桥接（Phase 1 Sub-step 1.2.3'）===
+    // 把 g_rhiDevice 持有的 MTL::Device 注入到 metal::core，让旧路径的所有
+    // submesh/light/camera/render_item 创建都使用同一个 device。
+    // 调用时机：initialize_with_device() 之后、graphics::initialize() 之前。
+    // 必须在 g_rhiDevice 非空时调用，返回 false 表示 RHI 未初始化或当前平台无 Metal。
+    bool bind_rhi_device_to_legacy();
 }

@@ -37,7 +37,8 @@ struct SceneData {
     float4x4 previousModel;
     float2 jitter;
     float2 previousJitter;
-    float2 padding;
+    float  time;
+    float  _timePad;
     float4 viewPos;
     float4x4 shadowMatrix0;
     float4x4 shadowMatrix1;

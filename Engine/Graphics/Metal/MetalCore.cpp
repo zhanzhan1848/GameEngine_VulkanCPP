@@ -99,9 +99,16 @@ namespace primal::graphics::metal::core
         };
 
         MTL::Device* _device{ nullptr };
+        // === RHI 桥接（Phase 1 Sub-step 1.2.3'）===
+        // 由 set_external_device() 注入；非空时 get_device() 优先返回它。
+        // 与 _device 互斥使用：create_device() 检测到 _external_device 非空时跳过创建。
+        MTL::Device* _external_device{ nullptr };
 
         bool create_device()
         {
+            // 外部已注入 device，跳过自动创建
+            if (_external_device) return true;
+
             _device = MTL::CreateSystemDefaultDevice();
 
             if(_device) return true;
@@ -202,7 +209,7 @@ namespace primal::graphics::metal::core
 			NAME_METAL_OBJECT_INDEXED(constants_buffer[i].buffer(), i, "Global Constant Buffer");
 		}
 
-        new (&gfx_command) metal_command(_device);
+        new (&gfx_command) metal_command(get_device());
 
         if(!(shader::initialize() 
             && gpass::initialize()
@@ -251,11 +258,39 @@ namespace primal::graphics::metal::core
 		process_deferred_release(0);
 
         if(_device)  release(_device);
+
+        // === RHI 桥接（Phase 1 Sub-step 1.2.3'）===
+        // 释放我们对 _external_device 的 retain()，但 rhi::MetalDevice 自身的所有权不受影响。
+        if(_external_device)
+        {
+            _external_device->release();
+            _external_device = nullptr;
+        }
     }
 
     MTL::Device* get_device()
     {
-        return _device;
+        // 外部注入优先；否则返回自动创建的 device
+        return _external_device ? _external_device : _device;
+    }
+
+    void set_external_device(MTL::Device* device)
+    {
+        // 同一指针重复设置无操作
+        if (_external_device == device) return;
+
+        // 释放旧的 retain
+        if (_external_device)
+        {
+            _external_device->release();
+            _external_device = nullptr;
+        }
+
+        // 设置新的并 retain（rhi::MetalDevice 也持有，双引用计数安全）
+        if (device)
+        {
+            _external_device = device->retain();
+        }
     }
 
     u32 current_frame_index()

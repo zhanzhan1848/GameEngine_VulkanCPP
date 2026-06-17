@@ -27,11 +27,17 @@ f32 get_roughness(component c);
 f32 get_metallic(component c);
 f32 get_alpha_cutoff(component c);
 void get_base_color(component c, f32 out[4]);
+id::id_type get_albedo_texture(component c);
+id::id_type get_normal_texture(component c);
+id::id_type get_orm_texture(component c);
 
 void set_roughness(component c, f32 value);
 void set_metallic(component c, f32 value);
 void set_base_color(component c, const f32 value[4]);
 void set_alpha_cutoff(component c, f32 value);
 void set_technique(component c, graphics::ShaderTechnique technique);
+void set_albedo_texture(component c, id::id_type texture_id);
+void set_normal_texture(component c, id::id_type texture_id);
+void set_orm_texture(component c, id::id_type texture_id);
 
 } // namespace primal::material

@@ -81,6 +81,13 @@ public:
      */
     void UpdateLight(id::id_type entityId, const RenderLight& light);
 
+    /**
+     * @brief 清空所有光源（保留 proxies）
+     * @details 用于每帧 ECS Light 同步前清空旧状态。
+     *          与 Clear() 不同，只清 lights_，不动 proxies_ 和 reflectionPlanes_。
+     */
+    void ClearLights();
+
     // --- Reflection Plane Management ---
 
     struct RenderReflectionPlane {

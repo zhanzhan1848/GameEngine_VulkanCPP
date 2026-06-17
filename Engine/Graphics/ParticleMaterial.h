@@ -72,7 +72,6 @@ material_id create(const particles::emitter_config& config);
 void destroy(material_id id);
 
 ParticleMaterial* get(material_id id);
-const ParticleMaterial* get(material_id id) const;
 
 void set_blend_mode(material_id id, particles::blend_mode mode);
 void set_texture(material_id id, rhi::ResourceHandle texture);

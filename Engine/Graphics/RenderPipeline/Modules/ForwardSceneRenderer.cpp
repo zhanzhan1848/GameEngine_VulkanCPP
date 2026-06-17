@@ -3,6 +3,7 @@
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
 #include "Graphics/RHI/Platforms/Metal/MetalPipeline.h"
+#include <chrono>
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
@@ -11,6 +12,8 @@
 #include "Graphics/RenderMesh.h"
 #include "Graphics/MaterialInstance.h"
 #include "Graphics/RHI/Core/RHICommand.h"
+#include "Graphics/Scene/LightSyncSystem.h"
+#include "Graphics/DebugDraw/DebugDrawQueue.h"
 #include "Content/ContentToEngine.h"
 #include "Components/Entity.h"
 #include "Components/Transform.h"
@@ -56,7 +59,8 @@ struct SceneData {
     math::m4x4 previousModel;
     math::v2 jitter;
     math::v2 previousJitter;
-    math::v2 padding;
+    float  time;
+    float  _timePad;
     math::v4 viewPos;
     math::m4x4 shadowMatrix0;
     math::m4x4 shadowMatrix1;
@@ -359,7 +363,9 @@ void ForwardSceneRenderer::Shutdown() {
 
     // Destroy pipelines
     for (auto* p : {&gbuffer_pipeline_, &shadow_pipeline_, &lighting_pipeline_,
-                    &skybox_pipeline_, &blit_pipeline_, &alphaclip_pipeline_, &unlit_pipeline_}) {
+                    &skybox_pipeline_, &blit_pipeline_, &alphaclip_pipeline_, &unlit_pipeline_,
+                    &foliage_pipeline_, &water_pipeline_, &transparent_pipeline_,
+                    &forward_water_pipeline_, &forward_transparent_pipeline_}) {
         if (*p != handles::INVALID_PIPELINE) { device_->DestroyPipeline(*p); *p = handles::INVALID_PIPELINE; }
     }
     // Destroy layouts
@@ -504,6 +510,18 @@ void ForwardSceneRenderer::CreateShaders() {
     alphaclip_ps_ = load("GBufferAlphaClip", "fragmentMain", ShaderStage::Pixel);
     unlit_vs_ = load("GBufferUnlit", "vertexMain", ShaderStage::Vertex);
     unlit_ps_ = load("GBufferUnlit", "fragmentMain", ShaderStage::Pixel);
+    foliage_vs_ = load("GBufferFoliage", "vertexMain", ShaderStage::Vertex);
+    foliage_ps_ = load("GBufferFoliage", "fragmentMain", ShaderStage::Pixel);
+    water_vs_ = load("GBufferWater", "vertexMain", ShaderStage::Vertex);
+    water_ps_ = load("GBufferWater", "fragmentMain", ShaderStage::Pixel);
+    transparent_vs_ = load("GBufferTransparent", "vertexMain", ShaderStage::Vertex);
+    transparent_ps_ = load("GBufferTransparent", "fragmentMain", ShaderStage::Pixel);
+
+    // Forward pass shaders for Water/Transparent (inline PBR, rendered after deferred lighting)
+    forward_water_vs_ = load("ForwardTransparency", "forwardWaterVS", ShaderStage::Vertex);
+    forward_water_ps_ = load("ForwardTransparency", "forwardWaterFS", ShaderStage::Pixel);
+    forward_transparent_vs_ = load("ForwardTransparency", "forwardTransparentVS", ShaderStage::Vertex);
+    forward_transparent_ps_ = load("ForwardTransparency", "forwardTransparentFS", ShaderStage::Pixel);
 }
 
 void ForwardSceneRenderer::CreatePipelines() {
@@ -634,6 +652,118 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
         unlit_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
+    // Foliage technique — two-sided, wind animation, alpha discard
+    {
+        GraphicsPipelineDesc desc{};
+        desc.layout = gbuffer_layout_;
+        desc.vertexShader = foliage_vs_;
+        desc.pixelShader = foliage_ps_;
+        desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[1] = DataFormat::RGBA16_Float;
+        desc.renderTargetFormats[2] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[3] = DataFormat::RG16_Float;
+        desc.renderTargetCount = 4;
+        desc.depthStencilFormat = DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = ComparisonFunc::Less;
+        desc.cullMode = CullMode::None;
+        foliage_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
+    // Water technique — alpha blend, no depth write
+    {
+        GraphicsPipelineDesc desc{};
+        desc.layout = gbuffer_layout_;
+        desc.vertexShader = water_vs_;
+        desc.pixelShader = water_ps_;
+        desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[1] = DataFormat::RGBA16_Float;
+        desc.renderTargetFormats[2] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[3] = DataFormat::RG16_Float;
+        desc.renderTargetCount = 4;
+        desc.depthStencilFormat = DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = false;
+        desc.depthFunc = ComparisonFunc::Less;
+        desc.cullMode = CullMode::None;
+        desc.enableBlend = true;
+        desc.srcColorBlendFactor = BlendFactor::SrcAlpha;
+        desc.dstColorBlendFactor = BlendFactor::InvSrcAlpha;
+        desc.colorBlendOp = BlendOp::Add;
+        desc.srcAlphaBlendFactor = BlendFactor::One;
+        desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
+        desc.alphaBlendOp = BlendOp::Add;
+        water_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
+    // Transparent technique — alpha blend, no depth write
+    {
+        GraphicsPipelineDesc desc{};
+        desc.layout = gbuffer_layout_;
+        desc.vertexShader = transparent_vs_;
+        desc.pixelShader = transparent_ps_;
+        desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[1] = DataFormat::RGBA16_Float;
+        desc.renderTargetFormats[2] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[3] = DataFormat::RG16_Float;
+        desc.renderTargetCount = 4;
+        desc.depthStencilFormat = DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = false;
+        desc.depthFunc = ComparisonFunc::Less;
+        desc.cullMode = CullMode::None;
+        desc.enableBlend = true;
+        desc.srcColorBlendFactor = BlendFactor::SrcAlpha;
+        desc.dstColorBlendFactor = BlendFactor::InvSrcAlpha;
+        desc.colorBlendOp = BlendOp::Add;
+        desc.srcAlphaBlendFactor = BlendFactor::One;
+        desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
+        desc.alphaBlendOp = BlendOp::Add;
+        transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
+    // Forward Water — single RT (lighting_output_), blend over deferred result, depth test against GBuffer
+    {
+        GraphicsPipelineDesc desc{};
+        desc.layout = gbuffer_layout_;
+        desc.vertexShader = forward_water_vs_;
+        desc.pixelShader = forward_water_ps_;
+        desc.renderTargetFormats[0] = DataFormat::RGBA16_Float;
+        desc.renderTargetCount = 1;
+        desc.depthStencilFormat = DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = false;
+        desc.depthFunc = ComparisonFunc::Less;
+        desc.cullMode = CullMode::None;
+        desc.enableBlend = true;
+        desc.srcColorBlendFactor = BlendFactor::SrcAlpha;
+        desc.dstColorBlendFactor = BlendFactor::InvSrcAlpha;
+        desc.colorBlendOp = BlendOp::Add;
+        desc.srcAlphaBlendFactor = BlendFactor::One;
+        desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
+        desc.alphaBlendOp = BlendOp::Add;
+        forward_water_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
+    // Forward Transparent — same configuration
+    {
+        GraphicsPipelineDesc desc{};
+        desc.layout = gbuffer_layout_;
+        desc.vertexShader = forward_transparent_vs_;
+        desc.pixelShader = forward_transparent_ps_;
+        desc.renderTargetFormats[0] = DataFormat::RGBA16_Float;
+        desc.renderTargetCount = 1;
+        desc.depthStencilFormat = DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = false;
+        desc.depthFunc = ComparisonFunc::Less;
+        desc.cullMode = CullMode::None;
+        desc.enableBlend = true;
+        desc.srcColorBlendFactor = BlendFactor::SrcAlpha;
+        desc.dstColorBlendFactor = BlendFactor::InvSrcAlpha;
+        desc.colorBlendOp = BlendOp::Add;
+        desc.srcAlphaBlendFactor = BlendFactor::One;
+        desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
+        desc.alphaBlendOp = BlendOp::Add;
+        forward_transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
 }
 
@@ -884,9 +1014,20 @@ void ForwardSceneRenderer::ClearGeometryEntities() {
 
 rhi::PipelineHandle ForwardSceneRenderer::GetTechniquePipeline(ShaderTechnique technique) const {
     switch (technique) {
-        case ShaderTechnique::AlphaClip: return alphaclip_pipeline_;
-        case ShaderTechnique::Unlit:     return unlit_pipeline_;
-        default:                         return gbuffer_pipeline_;
+        case ShaderTechnique::AlphaClip:   return alphaclip_pipeline_;
+        case ShaderTechnique::Foliage:     return foliage_pipeline_;
+        case ShaderTechnique::Water:       return water_pipeline_;
+        case ShaderTechnique::Transparent: return transparent_pipeline_;
+        case ShaderTechnique::Unlit:       return unlit_pipeline_;
+        default:                           return gbuffer_pipeline_;
+    }
+}
+
+rhi::PipelineHandle ForwardSceneRenderer::GetForwardTechniquePipeline(ShaderTechnique technique) const {
+    switch (technique) {
+        case ShaderTechnique::Water:       return forward_water_pipeline_;
+        case ShaderTechnique::Transparent: return forward_transparent_pipeline_;
+        default:                           return forward_water_pipeline_;
     }
 }
 
@@ -1005,7 +1146,8 @@ void ForwardSceneRenderer::UnregisterMeshResource(u32 slot_index) {
 void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
                                                     const math::m4x4& vp_matrix,
                                                     u32 frame_index,
-                                                    bool shadow_pass) {
+                                                    bool shadow_pass,
+                                                    bool forward_pass) {
     if (!render_scene_ || mesh_id_to_index_.empty()) return;
 
     // Frustum cull only for shadow passes — GBuffer uses all proxies (GPU clips invisible triangles)
@@ -1115,9 +1257,18 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     for (u32 t = 0; t < TechniqueCount; ++t) {
         if (all_ranges[t].empty()) continue;
 
-        // Bind technique-specific pipeline for GBuffer pass
+        // Forward pass: only render Water(3) and Transparent(4)
+        if (forward_pass && t != 3 && t != 4) continue;
+        // GBuffer pass: skip Water(3) and Transparent(4) — they render in forward pass
+        if (!shadow_pass && !forward_pass && (t == 3 || t == 4)) continue;
+
+        // Bind technique-specific pipeline for GBuffer or forward pass
         if (!shadow_pass) {
-            cmd->BindGraphicsPipeline(GetTechniquePipeline(static_cast<ShaderTechnique>(t)));
+            if (forward_pass) {
+                cmd->BindGraphicsPipeline(GetForwardTechniquePipeline(static_cast<ShaderTechnique>(t)));
+            } else {
+                cmd->BindGraphicsPipeline(GetTechniquePipeline(static_cast<ShaderTechnique>(t)));
+            }
         }
 
         for (auto& [meshIdx, range] : all_ranges[t]) {
@@ -1185,9 +1336,43 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         first_frame = false;
     }
 
-    // Update shadow VPs — match TestParticleSponza light setup
-    // lightPos = {100, 150, 50, 0} → lightDir = Normalize(-lightPos)
+    // Update shadow VPs — consume lights from RenderScene if available
+    // Default light position (fallback when no RenderScene or no directional lights)
     math::v3 lightPos{100.0f, 150.0f, 50.0f};
+    math::v4 effectiveLightColor = light_color_;
+
+    // === Phase 4.5: Pull ECS Light components into RenderScene ===
+    // 在读 GetLights() 之前先同步，让 ECS Light 组件真正驱动渲染。
+    // SyncLightsFromECS 内部会 ClearLights() + 重新填充，所以幂等可重入。
+    //
+    // const_cast 说明：render_scene_ 设计上是 const（renderer 其他路径只读），
+    // 但 LightSyncSystem 是 per-frame 的状态准备阶段，需要写入 lights_。
+    // RenderScene 的 mutator 用 mutable mutex_ 保护，逻辑上 const-correct，
+    // 但 API 上没标 const。这里 const_cast 是最小侵入的接口适配方式，
+    // 避免改 SetRenderScene 签名扩散到 StandardRenderPipeline。
+    if (render_scene_) {
+        scene_sync::SyncLightsFromECS(const_cast<RenderScene&>(*render_scene_));
+    }
+
+    // Override with RenderScene directional light if available
+    if (render_scene_) {
+        const auto& allLights = render_scene_->GetLights();
+        for (const auto& rl : allLights) {
+            if (rl.type == LightType::Directional) {
+                // lightPos is opposite of direction (direction points from light to scene)
+                math::v3 dir = rl.direction;
+                float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+                if (len > 0.001f) {
+                    // Use a fixed distance for the shadow eye position
+                    float dist = 200.0f;
+                    lightPos = { -dir.x * dist, -dir.y * dist, -dir.z * dist };
+                }
+                effectiveLightColor = { rl.color.x, rl.color.y, rl.color.z, rl.intensity };
+                break; // Use first directional light only
+            }
+        }
+    }
+
     math::v3 lightDir = Normalize(math::v3{-lightPos.x, -lightPos.y, -lightPos.z});
     ComputeCascadeVP(lightDir, camera_position, 30.0f, 2048, 0, 0.1f, 1000.0f);
     ComputeCascadeVP(lightDir, camera_position, 500.0f, 2048, 1, 0.1f, 5000.0f);
@@ -1207,7 +1392,9 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         sd.model = MatrixIdentity();
         sd.previousModel = MatrixIdentity();
         sd.lightPos = {lightPos.x, lightPos.y, lightPos.z, 0.0f};
-        sd.lightColor = light_color_;
+        sd.lightColor = effectiveLightColor;
+        static auto start_time = std::chrono::steady_clock::now();
+        sd.time = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
         sd.viewPos = {camera_position.x, camera_position.y, camera_position.z, 1.0f};
         sd.shadowMatrix0 = cached_shadow_vp_[0];
         sd.shadowMatrix1 = cached_shadow_vp_[1];
@@ -1354,6 +1541,38 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->EndRenderPass();
     }
 
+    // Pass 4b: Forward Transparency (Water/Transparent over deferred lighting)
+    {
+        // Check if any Water/Transparent instances exist
+        bool has_forward = false;
+        if (render_scene_) {
+            for (auto& proxy : render_scene_->GetProxies()) {
+                u32 t = static_cast<u32>(proxy.technique);
+                if (t == 3 || t == 4) { has_forward = true; break; }
+            }
+        }
+        if (has_forward) {
+            RenderPassDesc rpDesc{};
+            rpDesc.colorAttachments.resize(1);
+            rpDesc.colorAttachments[0].texture = lighting_output_[idx];
+            rpDesc.colorAttachments[0].loadOp = LoadAction::Load;
+            rpDesc.colorAttachments[0].storeOp = StoreAction::Store;
+            rpDesc.depthAttachment.texture = gbuffer_depth_[idx];
+            rpDesc.depthAttachment.loadOp = LoadAction::Load;
+            rpDesc.depthAttachment.storeOp = StoreAction::DontCare;
+            cmd->BeginRenderPass(rpDesc);
+
+            cmd->SetViewport({{0, 0}, {(float)render_width_, (float)render_height_}, 0, 1});
+            cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
+            const DescriptorSetHandle globalSets[] = {global_ds_[idx]};
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbuffer_layout_, 0, 1, globalSets, 0, nullptr);
+
+            RenderDynamicInstances(cmd, MatrixIdentity(), idx, false, true);
+
+            cmd->EndRenderPass();
+        }
+    }
+
     // Pass 5: Blit to backbuffer
     {
         DescData params[] = {
@@ -1378,8 +1597,15 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->EndRenderPass();
     }
 
-    // Pass 6: Geometry line overlay
-    if (!geometry_entity_ids_.empty()) {
+    // Pass 6: Geometry line overlay + EngineDLL debug draw lines
+    // EngineDLL 的 DebugDrawAPI 把 line 写入 debug_draw::queue()，
+    // 这里每帧 drain 到 frame_local_debug_lines_，转成 position-only
+    // 数组喂给 LineBatchRenderer。color 当前丢弃（shader 单色）。
+    frame_local_debug_lines_.clear();
+    debug_draw::drain_into(frame_local_debug_lines_);
+
+    const bool has_debug_lines = !frame_local_debug_lines_.empty();
+    if (!geometry_entity_ids_.empty() || has_debug_lines) {
         line_renderer_.BeginFrame();
         for (auto eid : geometry_entity_ids_) {
             auto geom = geometry::component::get(game_entity::entity_id{eid});
@@ -1387,6 +1613,17 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
             const auto& pts = geom.tessellate();
             if (pts.size() < 2) continue;
             line_renderer_.AddLines(pts.data(), static_cast<u32>(pts.size()));
+        }
+        if (has_debug_lines) {
+            // 转成紧凑 position 数组 —— color (rgb) 暂时不传。
+            frame_debug_positions_.clear();
+            frame_debug_positions_.reserve(frame_local_debug_lines_.size() * 2);
+            for (const auto& l : frame_local_debug_lines_) {
+                frame_debug_positions_.push_back(l.a);
+                frame_debug_positions_.push_back(l.b);
+            }
+            line_renderer_.AddLines(frame_debug_positions_.data(),
+                                    static_cast<u32>(frame_debug_positions_.size()));
         }
 
         RenderPassDesc rpDesc{};

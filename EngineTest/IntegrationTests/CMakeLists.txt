@@ -117,6 +117,7 @@ if(APPLE)
         ${COMMON_HEADERS}
     )
     setup_test_target(TestRendererMac)
+    target_compile_definitions(TestRendererMac PRIVATE "TEST_RENDERER=1")
 
     # 2. TestMetalRenderer
     add_executable(TestMetalRenderer
@@ -280,8 +281,102 @@ if(APPLE)
     setup_test_target(TestFieldDrivenScatter)
     target_compile_definitions(TestFieldDrivenScatter PRIVATE "TEST_FIELD_DRIVEN_SCATTER=1" "TEST_RENDERER=0")
 
+    # 16. TestMaterialPreview (live material preview window)
+    add_executable(TestMaterialPreview
+        "Main.cpp"
+        "TestMaterialPreview.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestMaterialPreview)
+    target_compile_definitions(TestMaterialPreview PRIVATE "TEST_MATERIAL_PREVIEW=1" "TEST_RENDERER=0")
+
+    # 17. TestMaterialPreviewEditor (MaterialPreview C API validation)
+    add_executable(TestMaterialPreviewEditor
+        "Main.cpp"
+        "TestMaterialPreviewEditor.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestMaterialPreviewEditor)
+    target_compile_definitions(TestMaterialPreviewEditor PRIVATE "TEST_MATERIAL_PREVIEW_EDITOR=1" "TEST_RENDERER=0")
+    target_link_libraries(TestMaterialPreviewEditor PRIVATE EngineDLL)
+
+    # 18. TestRendererRHIDevice (Phase 1 Sub-step 1.2.2)
+    # 验证 graphics::initialize_with_device / shutdown_rhi / is_rhi_initialized / get_rhi_device
+    # 通过 Renderer 公开 API 拿到 device，再 CreateBuffer 验证 device 真正可用。
+    add_executable(TestRendererRHIDevice
+        "TestRendererRHIDevice.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestRendererRHIDevice)
+    target_link_libraries(TestRendererRHIDevice PRIVATE Engine)
+
+    # 19. TestEngineDLLLifecycle (Phase 1 Sub-step 1.2.5')
+    # 通过 dlopen + dlsym 验证 EngineDLL 暴露的 C ABI：InitializeEngine / ShutdownEngine /
+    # IsEngineInitialized / GetEngineDeviceHandle。模拟 Editor (C#) P/Invoke 的调用路径。
+    add_executable(TestEngineDLLLifecycle
+        "TestEngineDLLLifecycle.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestEngineDLLLifecycle)
+    target_link_libraries(TestEngineDLLLifecycle PRIVATE EngineDLL ${CMAKE_DL_LIBS})
+
+    # 20. TestRenderFrameAPI (Phase 5 Track A)
+    # Validates the full Editor-facing render API: CreateEntity, CreateCamera, CreateLightSet,
+    # CreateRenderSurface, RenderFrame, CaptureBackbuffer, and cleanup via dlopen + dlsym.
+    # Includes ShaderCompilation.cpp so we can compile Metal shaders before InitializeEngine,
+    # otherwise the engine bails out before any surface/capture path runs.
+    add_executable(TestRenderFrameAPI
+        "TestRenderFrameAPI.cpp"
+        "ShaderCompilation.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestRenderFrameAPI)
+    target_link_libraries(TestRenderFrameAPI PRIVATE EngineDLL ${CMAKE_DL_LIBS})
+
+    # 21. TestLightCameraAPI (Phase 5 ECS Light/Camera C ABI)
+    # Validates AddEntityLight/RemoveEntityLight/Set/Get round-trip via ECS components,
+    # plus AddEntityCamera/RemoveEntityCamera/Set/Get round-trip. No device required.
+    add_executable(TestLightCameraAPI
+        "TestLightCameraAPI.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestLightCameraAPI)
+    target_link_libraries(TestLightCameraAPI PRIVATE EngineDLL)
+
+    # 22. TestRenderPipelineAPI (Phase 5 RenderPipeline C ABI + schema-only Bloom/TAA)
+    # Validates pass toggles, pass info, settings round-trip, ParamDescriptor table.
+    # No engine init needed — uses static pipeline table and pre-init getters.
+    add_executable(TestRenderPipelineAPI
+        "TestRenderPipelineAPI.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestRenderPipelineAPI)
+    target_link_libraries(TestRenderPipelineAPI PRIVATE EngineDLL)
+
+    # 23. TestMiscRenderingAPIs (Phase 5 C ABI round-trip for DebugDraw/RenderTarget/PCG)
+    # Headless: line queue CRUD, defensive RT cases (no device in test env), PCG lifecycle.
+    add_executable(TestMiscRenderingAPIs
+        "TestMiscRenderingAPIs.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestMiscRenderingAPIs)
+    target_link_libraries(TestMiscRenderingAPIs PRIVATE EngineDLL)
+
+    # 24. TestMediatedDataFlow (Phase 5.1 UI-Mediated data flow C ABI)
+    # Validates the 14 new APIs: ProceduralMesh, PCG output reads, Asset import,
+    # RenderPipeline extensions (RegisterMeshEntity/EditorMode/LumenConfig),
+    # and Camera matrix readback. Headless, no GPU/surface.
+    add_executable(TestMediatedDataFlow
+        "TestMediatedDataFlow.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestMediatedDataFlow)
+    target_link_libraries(TestMediatedDataFlow PRIVATE EngineDLL)
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

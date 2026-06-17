@@ -10,6 +10,7 @@
 #include "Graphics/Nanite/HZBSystem.h"
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
+#include "Graphics/Scene/CameraSyncSystem.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Components/Entity.h"
 #include "Components/Transform.h"
@@ -491,6 +492,12 @@ void StandardRenderPipeline::ShutdownLumenPasses() {
 // ============================================================================
 
 void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view) {
+    // === Phase 3: ECS Camera → RenderView 同步 ===
+    // 在读 view.GetViewMatrix() 之前先让 ECS Camera 组件覆盖 RenderView 的矩阵。
+    // 如果场景里没有 Camera entity，SyncCamerasFromECS no-op，view 保留上游 caller
+    // 设置的矩阵（保持旧行为兼容）。
+    scene_sync::SyncCamerasFromECS(view);
+
     view_matrix_ = view.GetViewMatrix();
     proj_matrix_ = view.GetProjectionMatrix();
 

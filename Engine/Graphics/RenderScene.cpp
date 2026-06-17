@@ -58,6 +58,11 @@ void RenderScene::UpdateLight(id::id_type entityId, const RenderLight& newLight)
     lights_.push_back(newLight);
 }
 
+void RenderScene::ClearLights() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    lights_.clear();
+}
+
 void RenderScene::AddReflectionPlane(const RenderReflectionPlane& plane) {
     std::lock_guard<std::mutex> lock(mutex_);
     reflectionPlanes_.push_back(plane);

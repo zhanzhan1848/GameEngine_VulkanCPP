@@ -29,6 +29,26 @@ set_target_properties(StandaloneRHI_Device_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_Device_Test PRIVATE DEBUG _DEBUG)
 
+# 创建RHI设备工厂测试（端到端验证 CreateRHIDevice/DestroyRHIDevice）
+add_executable(TestRHIDeviceFactory RHI/Core/TestRHIDeviceFactory.cpp)
+target_include_directories(TestRHIDeviceFactory PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+target_link_libraries(TestRHIDeviceFactory PRIVATE
+    Engine
+    "-framework Foundation"
+    "-framework Metal"
+    "-framework MetalKit"
+    "-framework QuartzCore"
+)
+add_test(NAME TestRHIDeviceFactory COMMAND TestRHIDeviceFactory)
+set_target_properties(TestRHIDeviceFactory PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 # 创建RHI资源管理测试
 add_executable(StandaloneRHI_Resource_Test RHI/Core/TestRHIResource.cpp)
 # 不依赖任何Engine头文件或库，完全独立
@@ -409,9 +429,9 @@ if(APPLE)
     )
     target_compile_definitions(TestMetalCommandEncoding PRIVATE DEBUG _DEBUG)
 
-    # 创建Metal Shader 熱重载测试
+    # 创建 Metal Shader 熱重载测试
     add_executable(TestMetalHotReload Graphics/Metal/TestMetalHotReload.cpp)
-    target_include_directories(TestMetalHotReload PRIVATE 
+    target_include_directories(TestMetalHotReload PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/Engine
         ${CMAKE_SOURCE_DIR}/Engine/Common
@@ -423,6 +443,20 @@ if(APPLE)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
     target_compile_definitions(TestMetalHotReload PRIVATE DEBUG _DEBUG)
+
+    # 创建 ShaderIR + MaterialGraphToIR 测试
+    add_executable(TestShaderIR Graphics/TestShaderIR.cpp)
+    target_include_directories(TestShaderIR PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestShaderIR PRIVATE Engine "-framework Foundation" "-framework Metal" "-framework QuartzCore")
+    add_test(NAME TestShaderIR COMMAND TestShaderIR)
+    set_target_properties(TestShaderIR PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    target_compile_definitions(TestShaderIR PRIVATE DEBUG _DEBUG)
 
     # 创建 IBL Shader 测试
     add_executable(StandaloneGraphics_IBL_Test Graphics/TestIBLShaders.cpp)
@@ -1355,4 +1389,172 @@ set_target_properties(TestJobSystem PROPERTIES FOLDER "Tests/JobSystem")
 # JobSystem thread support
 find_package(Threads REQUIRED)
 target_link_libraries(TestJobSystem PRIVATE Threads::Threads)
+
+# ==================================
+# MaterialGraphAPI Tests
+# ==================================
+
+add_executable(TestMaterialGraphAPI TestMaterialGraphAPI.cpp)
+target_include_directories(TestMaterialGraphAPI PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestMaterialGraphAPI PRIVATE EngineDLL)
+add_test(NAME TestMaterialGraphAPI COMMAND TestMaterialGraphAPI)
+set_target_properties(TestMaterialGraphAPI PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestMaterialGraphAPI PRIVATE DEBUG _DEBUG)
+set_target_properties(TestMaterialGraphAPI PROPERTIES FOLDER "Tests/MaterialGraph")
+
+# ==================================
+# MaterialGraph Reflection Tests (P0.2+P0.3+P0.4)
+# ==================================
+
+add_executable(TestMaterialReflection Graphics/TestMaterialReflection.cpp)
+target_include_directories(TestMaterialReflection PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestMaterialReflection PRIVATE Engine)
+add_test(NAME TestMaterialReflection COMMAND TestMaterialReflection)
+set_target_properties(TestMaterialReflection PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestMaterialReflection PRIVATE DEBUG _DEBUG)
+set_target_properties(TestMaterialReflection PROPERTIES FOLDER "Tests/MaterialGraph")
+
+# ==================================
+# ParticleMaterialAPI Tests (P2.8)
+# ==================================
+
+add_executable(TestParticleMaterialAPI Graphics/TestParticleMaterialAPI.cpp)
+target_include_directories(TestParticleMaterialAPI PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestParticleMaterialAPI PRIVATE EngineDLL)
+add_test(NAME TestParticleMaterialAPI COMMAND TestParticleMaterialAPI)
+set_target_properties(TestParticleMaterialAPI PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestParticleMaterialAPI PRIVATE DEBUG _DEBUG)
+set_target_properties(TestParticleMaterialAPI PROPERTIES FOLDER "Tests/MaterialGraph")
+
+# ==================================
+# Material API Extended Tests (P1 Textures + P2.9 Batch)
+# ==================================
+
+add_executable(TestMaterialAPIExtended Graphics/TestMaterialAPIExtended.cpp)
+target_include_directories(TestMaterialAPIExtended PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestMaterialAPIExtended PRIVATE EngineDLL)
+add_test(NAME TestMaterialAPIExtended COMMAND TestMaterialAPIExtended)
+set_target_properties(TestMaterialAPIExtended PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestMaterialAPIExtended PRIVATE DEBUG _DEBUG)
+set_target_properties(TestMaterialAPIExtended PROPERTIES FOLDER "Tests/Material")
+
+# ==================================
+# ECS Light/Camera Component Tests
+# ==================================
+
+add_executable(TestLightComponent Components/TestLightComponent.cpp)
+target_include_directories(TestLightComponent PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(TestLightComponent PRIVATE Engine)
+add_test(NAME TestLightComponent COMMAND TestLightComponent)
+set_target_properties(TestLightComponent PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestLightComponent PRIVATE DEBUG _DEBUG)
+set_target_properties(TestLightComponent PROPERTIES FOLDER "Tests/Components")
+
+add_executable(TestCameraComponent Components/TestCameraComponent.cpp)
+target_include_directories(TestCameraComponent PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(TestCameraComponent PRIVATE Engine)
+add_test(NAME TestCameraComponent COMMAND TestCameraComponent)
+set_target_properties(TestCameraComponent PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestCameraComponent PRIVATE DEBUG _DEBUG)
+set_target_properties(TestCameraComponent PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Phase 4.5: LightSyncSystem Integration Tests
+# 验证 ECS Light + Transform → RenderScene::lights_ 闭环
+# ==================================
+
+add_executable(TestLightSyncSystem Components/TestLightSyncSystem.cpp)
+target_include_directories(TestLightSyncSystem PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestLightSyncSystem PRIVATE Engine)
+add_test(NAME TestLightSyncSystem COMMAND TestLightSyncSystem)
+set_target_properties(TestLightSyncSystem PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestLightSyncSystem PRIVATE DEBUG _DEBUG)
+set_target_properties(TestLightSyncSystem PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Phase 3: CameraSyncSystem Integration Tests
+# 验证 ECS Camera + Transform → RenderView 矩阵闭环
+# ==================================
+
+add_executable(TestCameraSyncSystem Components/TestCameraSyncSystem.cpp)
+target_include_directories(TestCameraSyncSystem PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestCameraSyncSystem PRIVATE Engine)
+add_test(NAME TestCameraSyncSystem COMMAND TestCameraSyncSystem)
+set_target_properties(TestCameraSyncSystem PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestCameraSyncSystem PRIVATE DEBUG _DEBUG)
+set_target_properties(TestCameraSyncSystem PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Phase 5: DebugDrawQueue Tests
+# EngineDLL → Engine queue → ForwardSceneRenderer drain 的数据通道
+# ==================================
+
+add_executable(TestDebugDrawQueue Graphics/TestDebugDrawQueue.cpp)
+target_include_directories(TestDebugDrawQueue PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestDebugDrawQueue PRIVATE Engine pthread)
+add_test(NAME TestDebugDrawQueue COMMAND TestDebugDrawQueue)
+set_target_properties(TestDebugDrawQueue PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestDebugDrawQueue PRIVATE DEBUG _DEBUG)
+set_target_properties(TestDebugDrawQueue PROPERTIES FOLDER "Tests/Graphics")
 

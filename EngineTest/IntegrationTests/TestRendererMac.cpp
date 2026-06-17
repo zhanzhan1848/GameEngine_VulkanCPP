@@ -1,6 +1,7 @@
 #include "Platform/PlatformTypes.h"
 #include "Platform/Platform.h"
 #include "Graphics/Renderer.h"
+#include "Graphics/RHI/Core/RHIDevice.h"
 #include "Content/ContentToEngine.h"
 #include "Components/Entity.h"
 #include "Components/Transform.h"
@@ -156,7 +157,20 @@ bool test_initialize()
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 	}
 
+	// === Phase 1 Sub-step 1.2.4': 三步初始化 ===
+	// 1) initialize_with_device 创建 g_rhiDevice (rhi::MetalDevice)
+	// 2) bind_rhi_device_to_legacy 把 native MTL::Device 注入 metal::core
+	// 3) graphics::initialize(metal) 内部 create_device() 检测到 _external_device 跳过自动创建
+	// 最终结果：旧 Metal 后端所有资源创建走 RHI 持有的 device
+	graphics::rhi::DeviceDesc deviceDesc{};
+	deviceDesc.platform = graphics::rhi::RHIPlatform::Metal;
+	deviceDesc.enableDebug = false;
+	if (!graphics::initialize_with_device(deviceDesc)) return false;
+	if (!graphics::bind_rhi_device_to_legacy()) return false;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 	if (!graphics::initialize(graphics::graphics_platform::metal)) return false;
+#pragma GCC diagnostic pop
 
     platform::window_init_info info[]
 	{
@@ -233,7 +247,14 @@ void test_shutdown()
 	for (u32 i{ 0 }; i < _countof(_surfaces); ++i)
 		destroy_camera_surface(_surfaces[i]);
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 	graphics::shutdown();
+#pragma GCC diagnostic pop
+	// === Phase 1 Sub-step 1.2.4': 关闭顺序 ===
+	// 先 graphics::shutdown() (释放 metal::core 对 _external_device 的 retain + 所有 Metal 资源)
+	// 再 shutdown_rhi() (释放 rhi::MetalDevice 对 mtlDevice_ 的所有权)
+	graphics::shutdown_rhi();
 }
 
 bool Engine_Test::initialize()

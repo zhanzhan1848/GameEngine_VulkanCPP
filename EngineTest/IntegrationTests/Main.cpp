@@ -40,6 +40,10 @@
 #include "TestGeometryAPI.h"
 #elif TEST_FIELD_DRIVEN_SCATTER
 #include "TestFieldDrivenScatter.h"
+#elif TEST_MATERIAL_PREVIEW
+#include "TestMaterialPreview.h"
+#elif TEST_MATERIAL_PREVIEW_EDITOR
+#include "TestMaterialPreviewEditor.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif
