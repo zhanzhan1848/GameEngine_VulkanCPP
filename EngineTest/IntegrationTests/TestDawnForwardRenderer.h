@@ -96,6 +96,18 @@ private:
     primal::graphics::rhi::ResourceHandle velocityTexture_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::TextureDesc hdrDesc_{};
 
+    // G-Buffer textures for Deferred mode (Phase 3b)
+    // RT0: WorldPos  RGBA16F, RT1: Normal+linearDepth RGBA16F,
+    // RT2: Albedo+Metallic RGBA8_sRGB, RT3: ORM RGBA8, RT4: Velocity RG16F
+    static constexpr u32 kGBufferRTCount = 5;
+    primal::graphics::rhi::ResourceHandle gbufferTextures_[kGBufferRTCount] = {
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
+
     // Shadow map resources (depth-only pass)
     primal::graphics::rhi::ResourceHandle shadowDepthTexture_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::PipelineHandle shadowPipeline_{primal::graphics::rhi::handles::INVALID_PIPELINE};
@@ -119,7 +131,7 @@ private:
     primal::graphics::rhi::CommandBufferHandle cmdBuffer_{primal::graphics::rhi::handles::INVALID_COMMAND_BUFFER};
 
     // Render mode switching (Tab key)
-    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, FullPlusSSR = 4, Count };
+    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, FullPlusSSR = 4, Deferred = 5, Count };
     DawnRenderMode renderMode_{DawnRenderMode::ShadowAndIBL};
     bool prevTabState_{false};
     bool punctualLightsAdded_{false};

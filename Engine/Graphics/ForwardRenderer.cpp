@@ -480,6 +480,141 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             device->UpdateDescriptorSets(1, &write);
         }
     }
+
+    // Dawn G-Buffer pass (Phase 3b/3c-2) — per-object DSL + buffer pool are
+    // created here; the actual pipeline is lazy-created on first
+    // RenderDawnGBuffer call so it can include the test-supplied material DSL
+    // (group 1) which doesn't exist yet at Initialize() time.
+    {
+        rhi::DescriptorSetLayoutBinding bind{};
+        bind.binding = 0;
+        bind.descriptorType = rhi::DescriptorType::UniformBuffer;
+        bind.descriptorCount = 1;
+        bind.stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel;
+        rhi::DescriptorSetLayoutDesc dslDesc;
+        dslDesc.bindingCount = 1;
+        dslDesc.bindings = &bind;
+        dawnGBufferDSL_ = device->CreateDescriptorSetLayout(dslDesc);
+
+        // Triple-buffered per-object uniform. 256B aligned slots, 1MB pool.
+        constexpr u32 GBUFFER_BUF_SIZE = DAWN_GBUFFER_PER_OBJECT_ALIGN * DAWN_GBUFFER_MAX_OBJECTS;
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+            rhi::BufferDesc bufDesc{};
+            bufDesc.size = GBUFFER_BUF_SIZE;
+            bufDesc.type = rhi::BufferType::Constant;
+            bufDesc.usage = rhi::GPUMemoryUsage::Dynamic;
+            bufDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+            dawnGBufferPerObjectBuf_[i] = device->CreateBuffer(bufDesc);
+            dawnGBufferPerObjectMapped_[i] = device->MapBuffer(dawnGBufferPerObjectBuf_[i], 0, GBUFFER_BUF_SIZE);
+
+            rhi::DescriptorSetDesc dsDesc;
+            dsDesc.layout = dawnGBufferDSL_;
+            dawnGBufferPerObjectSet_[i] = device->CreateDescriptorSet(dsDesc);
+
+            rhi::DescriptorBufferInfo bufInfo;
+            bufInfo.buffer = dawnGBufferPerObjectBuf_[i];
+            bufInfo.offset = 0;
+            bufInfo.range = DAWN_GBUFFER_PER_OBJECT_ALIGN;
+
+            rhi::WriteDescriptorSet write;
+            write.dstSet = dawnGBufferPerObjectSet_[i];
+            write.dstBinding = 0;
+            write.dstArrayElement = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = rhi::DescriptorType::UniformBuffer;
+            write.bufferInfo = &bufInfo;
+            device->UpdateDescriptorSets(1, &write);
+        }
+    }
+
+    // Dawn Deferred lighting pipeline (Phase 3c) — compute pass that evaluates
+    // PBR from the G-Buffer + shadow + IBL and writes HDR color. 12 bindings:
+    //   0..3 gbuffer (texture_2d), 4 shadow (depth_2d_array), 5..7 IBL
+    //   (cube, cube, 2d), 8 iblSampler, 9 globalData UB, 10 lightBuffer UB,
+    //   11 outputTex (storage_2d).
+    // G-Buffer textures are caller-supplied each frame, so the per-frame
+    // descriptor set is updated at dispatch time, not Initialize() time.
+    if (isDawn) {
+        // 12 bindings matching DeferredLighting.wgsl. The CSM shadow binding
+        // is texture_depth_2d_array (isArray=true) and the IBL cube maps
+        // are texture_cube<f32> (isCube=true). Without these flags Dawn sees
+        // the layout as 2D-only and rejects the shader module.
+        rhi::DescriptorSetLayoutBinding deferredBinds[12];
+        deferredBinds[0]  = {0,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        deferredBinds[1]  = {1,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        deferredBinds[2]  = {2,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        deferredBinds[3]  = {3,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        deferredBinds[4]  = {4,  rhi::DescriptorType::SampledDepthImage, 1, rhi::ShaderStage::Compute};
+        deferredBinds[4].isArray = true; // CSM depth array — texture_depth_2d_array
+        deferredBinds[5]  = {5,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        deferredBinds[5].isCube = true;  // irradianceMap — texture_cube<f32>
+        deferredBinds[6]  = {6,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        deferredBinds[6].isCube = true;  // prefilterMap — texture_cube<f32>
+        deferredBinds[7]  = {7,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        deferredBinds[8]  = {8,  rhi::DescriptorType::Sampler,           1, rhi::ShaderStage::Compute};
+        deferredBinds[9]  = {9,  rhi::DescriptorType::UniformBuffer,     1, rhi::ShaderStage::Compute};
+        deferredBinds[10] = {10, rhi::DescriptorType::UniformBuffer,     1, rhi::ShaderStage::Compute};
+        deferredBinds[11] = {11, rhi::DescriptorType::StorageImage,      1, rhi::ShaderStage::Compute};
+        deferredBinds[11].format = rhi::DataFormat::RGBA16_Float; // outputTex storage format
+        rhi::DescriptorSetLayoutDesc dslDesc;
+        dslDesc.bindingCount = 12;
+        dslDesc.bindings = deferredBinds;
+        dawnDeferredDSL_ = device->CreateDescriptorSetLayout(dslDesc);
+
+        rhi::PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &dawnDeferredDSL_;
+        dawnDeferredPipelineLayout_ = device->CreatePipelineLayout(plDesc);
+
+        // Load DeferredLighting.wgsl — same dual-path (WASM MEMFS via embed-file
+        // fallback, native file) as GBuffer. ShaderLoader.h no longer carries
+        // a stale embed for this shader (Phase 3c cleanup).
+        std::string shaderSrc;
+#ifdef __EMSCRIPTEN__
+        shaderSrc = dawn::LoadWGSL("DeferredLighting");
+#else
+        auto platform = device->GetPlatform();
+        std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "DeferredLighting");
+        std::ifstream dlFile(shaderPath, std::ios::ate | std::ios::binary);
+        if (!dlFile.is_open()) {
+            shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
+            dlFile.open(shaderPath, std::ios::ate | std::ios::binary);
+        }
+        if (dlFile.is_open()) {
+            size_t size = dlFile.tellg();
+            utl::vector<char> buf;
+            buf.resize(size + 1);
+            dlFile.seekg(0);
+            dlFile.read(buf.data(), size);
+            buf[size] = 0;
+            shaderSrc = std::string(buf.data(), size);
+        }
+#endif
+        if (!shaderSrc.empty()) {
+            rhi::ShaderHandle cs = device->CreateShader(shaderSrc.data(), shaderSrc.size(),
+                                                       rhi::ShaderStage::Compute, "deferred_lighting_cs");
+            if (cs != rhi::handles::INVALID_SHADER) {
+                rhi::ComputePipelineDesc pipeDesc;
+                pipeDesc.computeShader = cs;
+                pipeDesc.layout = dawnDeferredPipelineLayout_;
+                pipeDesc.threadGroupSize = {8, 8, 1};
+                dawnDeferredPipeline_ = device->CreateComputePipeline(pipeDesc);
+            } else {
+                std::cerr << "[Deferred] Compute shader creation failed" << std::endl;
+            }
+        } else {
+            std::cerr << "[Deferred] Shader source empty" << std::endl;
+        }
+
+        // Per-frame descriptor sets. Textures are written at dispatch time
+        // (they change with the caller-supplied G-Buffer); the static bindings
+        // (frame/light UBs, IBL textures+sampler) are written here once.
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+            rhi::DescriptorSetDesc dsDesc;
+            dsDesc.layout = dawnDeferredDSL_;
+            dawnDeferredSet_[i] = device->CreateDescriptorSet(dsDesc);
+        }
+    }
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         // Global Set
         rhi::DescriptorSetDesc globalSetDesc;
@@ -746,6 +881,36 @@ void ForwardRenderer::Shutdown() {
                 device_->DestroyBuffer(dawnPrepassPerObjectBuf_[i]);
             }
         }
+
+        // Dawn G-Buffer cleanup (Phase 3b)
+        if (dawnGBufferPipeline_ != rhi::handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(dawnGBufferPipeline_);
+        }
+        if (dawnGBufferPipelineLayout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+            device_->DestroyPipelineLayout(dawnGBufferPipelineLayout_);
+        }
+        if (dawnGBufferDSL_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyDescriptorSetLayout(dawnGBufferDSL_);
+        }
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (dawnGBufferPerObjectBuf_[i] != rhi::handles::INVALID_RESOURCE) {
+                if (dawnGBufferPerObjectMapped_[i]) device_->UnmapBuffer(dawnGBufferPerObjectBuf_[i]);
+                device_->DestroyBuffer(dawnGBufferPerObjectBuf_[i]);
+            }
+        }
+
+        // Deferred lighting pipeline (Phase 3c)
+        if (dawnDeferredPipeline_ != rhi::handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(dawnDeferredPipeline_);
+        }
+        if (dawnDeferredPipelineLayout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+            device_->DestroyPipelineLayout(dawnDeferredPipelineLayout_);
+        }
+        if (dawnDeferredDSL_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyDescriptorSetLayout(dawnDeferredDSL_);
+        }
+        // Descriptor sets freed implicitly; no buffers owned by this pass
+        // (frame/light UBs are owned by the renderer's shared pool above).
 
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             // Buffers
@@ -1190,6 +1355,381 @@ void ForwardRenderer::RenderDawnDepthPrepass(rhi::RHICommandBuffer* cmdBuffer,
     b.afterState = rhi::ResourceState::ShaderResource;
     b.subresource = 0xFFFFFFFF;
     cmdBuffer->InsertBarrier(&b, 1);
+}
+
+bool ForwardRenderer::EnsureDawnGBufferPipeline() {
+    if (dawnGBufferPipeline_ != rhi::handles::INVALID_PIPELINE) return true;
+    if (!device_) return false;
+    if (dawnGBufferMaterialDSL_ == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GBuffer] Cannot create pipeline — material DSL not set" << std::endl;
+        return false;
+    }
+
+    // Pipeline layout = [perObject (group 0), material (group 1)].
+    // The shader declares material textures in @group(1).
+    rhi::DescriptorSetLayoutHandle setLayouts[2] = { dawnGBufferDSL_, dawnGBufferMaterialDSL_ };
+    rhi::PipelineLayoutDesc plDesc;
+    plDesc.setLayoutCount = 2;
+    plDesc.setLayouts = setLayouts;
+    dawnGBufferPipelineLayout_ = device_->CreatePipelineLayout(plDesc);
+
+    // Load GBuffer.wgsl — same dual-path (WASM embedded via MEMFS, native file)
+    // as CameraDepth.
+    std::string shaderSrc;
+#ifdef __EMSCRIPTEN__
+    shaderSrc = dawn::LoadWGSL("GBuffer");
+#else
+    auto platform = device_->GetPlatform();
+    std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "GBuffer");
+    std::ifstream gbFile(shaderPath, std::ios::ate | std::ios::binary);
+    if (!gbFile.is_open()) {
+        shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
+        gbFile.open(shaderPath, std::ios::ate | std::ios::binary);
+    }
+    if (gbFile.is_open()) {
+        size_t size = gbFile.tellg();
+        utl::vector<char> buf;
+        buf.resize(size + 1);
+        gbFile.seekg(0);
+        gbFile.read(buf.data(), size);
+        buf[size] = 0;
+        shaderSrc = std::string(buf.data(), size);
+    }
+#endif
+    if (shaderSrc.empty()) {
+        std::cerr << "[GBuffer] Shader source empty" << std::endl;
+        return false;
+    }
+
+    rhi::ShaderHandle vs = device_->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Vertex, "gbuffer_vs");
+    rhi::ShaderHandle fs = device_->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Pixel, "gbuffer_fs");
+    if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) {
+        std::cerr << "[GBuffer] Shader creation failed (vs=" << vs << " fs=" << fs << ")" << std::endl;
+        return false;
+    }
+
+    rhi::GraphicsPipelineDesc pipeDesc;
+    pipeDesc.vertexShader = vs;
+    pipeDesc.pixelShader = fs;
+    pipeDesc.layout = dawnGBufferPipelineLayout_;
+    pipeDesc.topology = rhi::PrimitiveTopology::TriangleList;
+    pipeDesc.renderTargetCount = 5;
+    pipeDesc.renderTargetFormats[0] = rhi::DataFormat::RGBA16_Float;
+    pipeDesc.renderTargetFormats[1] = rhi::DataFormat::RGBA16_Float;
+    pipeDesc.renderTargetFormats[2] = rhi::DataFormat::RGBA8_sRGB;
+    pipeDesc.renderTargetFormats[3] = rhi::DataFormat::RGBA8_UNorm;
+    pipeDesc.renderTargetFormats[4] = rhi::DataFormat::RG16_Float;
+    pipeDesc.depthStencilFormat = rhi::DataFormat::D32_Float;
+    pipeDesc.enableDepthTest = true;
+    pipeDesc.enableDepthWrite = false;
+    pipeDesc.depthFunc = rhi::ComparisonFunc::LessEqual;
+    pipeDesc.cullMode = rhi::CullMode::Back;
+
+    utl::vector<rhi::VertexInputAttribute> attrs(5);
+    attrs[0] = {0, 0, rhi::DataFormat::RGB32_Float, 0};
+    attrs[1] = {1, 0, rhi::DataFormat::R32_UInt, 12};
+    attrs[2] = {2, 0, rhi::DataFormat::R32_UInt, 16};
+    attrs[3] = {3, 0, rhi::DataFormat::R32_UInt, 20};
+    attrs[4] = {4, 0, rhi::DataFormat::RG32_Float, 24};
+    pipeDesc.vertexAttributes = attrs;
+    utl::vector<rhi::VertexInputBinding> binds(1);
+    binds[0] = {0, 32, true};
+    pipeDesc.vertexBindings = binds;
+
+    dawnGBufferPipeline_ = device_->CreateGraphicsPipeline(pipeDesc);
+    return dawnGBufferPipeline_ != rhi::handles::INVALID_PIPELINE;
+}
+
+void ForwardRenderer::RenderDawnGBuffer(rhi::RHICommandBuffer* cmdBuffer,
+                                        const RenderView& view,
+                                        const rhi::ResourceHandle gbufferTextures[DAWN_GBUFFER_RT_COUNT],
+                                        rhi::ResourceHandle depthTexture,
+                                        const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
+                                        u32 frameIndex,
+                                        u32 width,
+                                        u32 height) {
+    // Validate all 5 G-Buffer RTs are present.
+    for (u32 i = 0; i < DAWN_GBUFFER_RT_COUNT; ++i) {
+        if (gbufferTextures[i] == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[GBuffer] Execute abort: RT" << i << " invalid" << std::endl;
+            return;
+        }
+    }
+    if (depthTexture == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GBuffer] Execute abort: depth invalid" << std::endl;
+        return;
+    }
+
+    const u32 fi = frameIndex % rhi::MAX_FRAMES_IN_FLIGHT;
+
+    rhi::RenderPassDesc passDesc{};
+    passDesc.colorAttachments.resize(DAWN_GBUFFER_RT_COUNT);
+    for (u32 i = 0; i < DAWN_GBUFFER_RT_COUNT; ++i) {
+        passDesc.colorAttachments[i].texture = gbufferTextures[i];
+        passDesc.colorAttachments[i].loadOp = rhi::LoadAction::Clear;
+        passDesc.colorAttachments[i].storeOp = rhi::StoreAction::Store;
+        // Distinct clear colors so an unbound pixel is visually identifiable.
+        // After 3b-2, real geometry overwrites these everywhere it's drawn.
+        const rhi::math::v4 clearColors[DAWN_GBUFFER_RT_COUNT] = {
+            {0.0f, 0.0f, 0.0f, 1.0f},   // RT0 worldPos — black
+            {0.5f, 0.5f, 1.0f, 1.0f},   // RT1 normal+depth — "+Z" (encoded 0,0,1)
+            {0.5f, 0.5f, 0.5f, 1.0f},   // RT2 albedo+metallic — gray
+            {1.0f, 0.5f, 0.0f, 1.0f},   // RT3 ORM — full AO, mid rough
+            {0.0f, 0.0f, 0.0f, 1.0f}    // RT4 velocity — zero
+        };
+        passDesc.colorAttachments[i].clearValue = rhi::ClearValue{clearColors[i]};
+    }
+
+    // Depth: Load from prepass depth (already populated this frame) and Store
+    // it back so downstream passes (HZB/SSAO/SSR) read valid depth. Phase 3b
+    // originally used DontCare here — that discarded the depth after the
+    // render pass, so SSAO/HZB sampled garbage and silently produced no AO.
+    passDesc.depthAttachment.texture = depthTexture;
+    passDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
+    passDesc.depthAttachment.loadOp = rhi::LoadAction::Load;
+    passDesc.depthAttachment.storeOp = rhi::StoreAction::Store;
+
+    // The depth attachment is the same texture RenderDawnDepthPrepass wrote and
+    // then transitioned to ShaderResource for HZB/SSR/SSAO. Flip it back to
+    // DepthStencil before the render pass — otherwise Dawn sees the texture in
+    // the wrong layout and either rejects the load or reads garbage depth.
+    rhi::ResourceBarrier depthToDS{};
+    depthToDS.resource = depthTexture;
+    depthToDS.beforeState = rhi::ResourceState::ShaderResource;
+    depthToDS.afterState = rhi::ResourceState::DepthStencil;
+    depthToDS.subresource = 0xFFFFFFFF;
+    cmdBuffer->InsertBarrier(&depthToDS, 1);
+
+    cmdBuffer->BeginRenderPass(passDesc);
+
+    rhi::ViewportDesc vp;
+    vp.topLeft = {0.0f, 0.0f};
+    vp.size = {static_cast<float>(width), static_cast<float>(height)};
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    cmdBuffer->SetViewport(vp);
+    cmdBuffer->SetScissor({{0, 0}, {width, height}});
+
+    // Lazy-create pipeline now that material DSL is available.
+    if (dawnGBufferPipeline_ == rhi::handles::INVALID_PIPELINE) {
+        EnsureDawnGBufferPipeline();
+    }
+
+    if (dawnGBufferPipeline_ == rhi::handles::INVALID_PIPELINE) {
+        std::cerr << "[GBuffer] Pipeline not initialized — clearing only" << std::endl;
+        cmdBuffer->EndRenderPass();
+    } else {
+        cmdBuffer->BindGraphicsPipeline(dawnGBufferPipeline_);
+
+        // Per-frame bump allocator: 256B aligned slots carved from the mapped pool.
+        // Matches RenderDawnDepthPrepass's allocator pattern.
+        const primal::math::m4x4 viewProj = view.GetViewProjectionMatrix();
+        u32 offset = 0;
+        u8* base = static_cast<u8*>(dawnGBufferPerObjectMapped_[fi]);
+        if (base) {
+            struct GBufferPerObjectGPU {
+                primal::math::m4x4 world;
+                primal::math::m4x4 worldViewProjection;
+                primal::math::m4x4 prevWorldViewProjection;
+            };
+            static_assert(sizeof(GBufferPerObjectGPU) <= DAWN_GBUFFER_PER_OBJECT_ALIGN,
+                          "GBufferPerObjectGPU must fit in one slot");
+
+            for (const auto* proxy : view.GetVisibleProxies()) {
+                if (!proxy) continue;
+                if (offset + DAWN_GBUFFER_PER_OBJECT_ALIGN > DAWN_GBUFFER_PER_OBJECT_ALIGN * DAWN_GBUFFER_MAX_OBJECTS) break;
+
+                auto* perObject = reinterpret_cast<GBufferPerObjectGPU*>(base + offset);
+                perObject->world = proxy->transform;
+                perObject->worldViewProjection = viewProj * proxy->transform;
+                {
+                    auto prevIt = prevWorldMap_.find(proxy->entityId);
+                    const auto& prevWorld = (prevIt != prevWorldMap_.end()) ? prevIt->second : proxy->transform;
+                    perObject->prevWorldViewProjection = prevViewProjection_ * prevWorld;
+                }
+
+                u32 dynamicOffset = offset;
+                cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, dawnGBufferPipelineLayout_,
+                                              0, 1, &dawnGBufferPerObjectSet_[fi], 1, &dynamicOffset);
+
+                // Phase 3c-2: bind the proxy's MaterialInstance descriptor set
+                // at group 1 so the fragment shader can sample albedo/normal/ORM.
+                rhi::DescriptorSetHandle matSet = rhi::handles::INVALID_DESCRIPTOR_SET;
+                auto matIt = materials.find(proxy->materialId);
+                if (matIt != materials.end() && matIt->second) {
+                    matSet = matIt->second->GetDescriptorSet();
+                }
+                if (matSet != rhi::handles::INVALID_DESCRIPTOR_SET) {
+                    cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, dawnGBufferPipelineLayout_,
+                                                  1, 1, &matSet, 0, nullptr);
+                }
+
+                RenderMesh* mesh = RenderMesh::GetByEntityId(proxy->meshId);
+                if (mesh && mesh->IsValid()) {
+                    mesh->Draw(cmdBuffer);
+                }
+
+                offset += DAWN_GBUFFER_PER_OBJECT_ALIGN;
+            }
+            device_->SetBufferDirtySize(dawnGBufferPerObjectBuf_[fi], offset);
+        }
+
+        cmdBuffer->EndRenderPass();
+    }
+
+    // Transition RTs to ShaderResource so the visualization blit (and 3c
+    // deferred lighting pass) can read them.
+    rhi::ResourceBarrier barriers[DAWN_GBUFFER_RT_COUNT];
+    for (u32 i = 0; i < DAWN_GBUFFER_RT_COUNT; ++i) {
+        barriers[i].resource = gbufferTextures[i];
+        barriers[i].beforeState = rhi::ResourceState::RenderTarget;
+        barriers[i].afterState = rhi::ResourceState::ShaderResource;
+        barriers[i].subresource = 0xFFFFFFFF;
+    }
+    cmdBuffer->InsertBarrier(barriers, DAWN_GBUFFER_RT_COUNT);
+
+    // Snapshot current view-projection + per-object transforms so next frame's
+    // velocity is correct. Render() normally does this at the end — since we
+    // bypass Render() in Deferred mode, do it here. (ForwardRenderer.cpp:1812
+    // is the canonical snapshot.)
+    prevViewProjection_ = view.GetViewProjectionMatrix();
+    prevWorldMap_.clear();
+    for (const auto* proxy : view.GetVisibleProxies()) {
+        if (proxy) prevWorldMap_[proxy->entityId] = proxy->transform;
+    }
+}
+
+void ForwardRenderer::RenderDawnDeferredLighting(rhi::RHICommandBuffer* cmdBuffer,
+                                                  const RenderView& view,
+                                                  const rhi::ResourceHandle gbufferTextures[DAWN_GBUFFER_RT_COUNT],
+                                                  rhi::ResourceHandle hdrTexture,
+                                                  const RenderScene& scene,
+                                                  u32 frameIndex,
+                                                  u32 width,
+                                                  u32 height) {
+    if (!device_ || !cmdBuffer) return;
+    if (dawnDeferredPipeline_ == rhi::handles::INVALID_PIPELINE) {
+        std::cerr << "[Deferred] Pipeline not initialized" << std::endl;
+        return;
+    }
+    for (u32 i = 0; i < DAWN_GBUFFER_RT_COUNT; ++i) {
+        if (gbufferTextures[i] == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[Deferred] RT" << i << " invalid" << std::endl;
+            return;
+        }
+    }
+    if (hdrTexture == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[Deferred] HDR output invalid" << std::endl;
+        return;
+    }
+
+    const u32 fi = frameIndex % rhi::MAX_FRAMES_IN_FLIGHT;
+
+    // Populate the global frame uniform — same fields Render() fills at line ~1782.
+    if (frameBuffersMapped_[fi]) {
+        auto* frameData = static_cast<rhi::GlobalShaderData*>(frameBuffersMapped_[fi]);
+        frameData->view = view.GetViewMatrix();
+        frameData->projection = view.GetProjectionMatrix();
+        frameData->viewProjection = view.GetViewProjectionMatrix();
+        frameData->previousViewProjection = prevViewProjection_;
+
+        rhi::math::m4x4 viewInv = rhi::math::Inverse(view.GetViewMatrix());
+        rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
+        rhi::math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+        frameData->deltaTime = deltaTime_;
+        frameData->frameCount = static_cast<float>(frameNumber_);
+        frameData->renderMode = dawnRenderMode_;
+        frameData->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, static_cast<float>(width)};
+        frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
+        frameData->jitterOffset = utils::GetJitterOffset(frameNumber_, width, height);
+
+        // Reuse Render()'s SetupLights path — passes empty csm/splits maps since
+        // Dawn fills cascade VPs/splits from dawnCascadeVPs_/_splits inside
+        // SetupLights (line ~1581).
+        utl::vector<RenderView> emptyCSM;
+        utl::vector<float> emptySplits;
+        std::unordered_map<u32, int> emptyShadowIdx;
+        std::unordered_map<u32, rhi::math::m4x4> emptyLightVPs;
+        SetupLights(scene, fi, frameData, emptyCSM, emptySplits, emptyShadowIdx, emptyLightVPs);
+
+        device_->SetBufferDirtySize(frameBuffers_[fi], sizeof(rhi::GlobalShaderData));
+        device_->SetBufferDirtySize(lightBuffers_[fi], sizeof(rhi::ForwardLightBuffer));
+    }
+
+    // Update per-frame descriptor set. All 12 bindings are written each frame —
+    // cheap (12 WriteDescriptorSet) and avoids tracking partial-update state.
+    rhi::DescriptorImageInfo gbInfo[DAWN_GBUFFER_RT_COUNT];
+    rhi::DescriptorImageInfo shadowInfo;
+    rhi::DescriptorImageInfo irradInfo;
+    rhi::DescriptorImageInfo prefilterInfo;
+    rhi::DescriptorImageInfo brdfInfo;
+    rhi::DescriptorImageInfo iblSampInfo;
+    rhi::DescriptorBufferInfo frameUB;
+    rhi::DescriptorBufferInfo lightUB;
+    rhi::DescriptorImageInfo outInfo;
+
+    for (u32 i = 0; i < DAWN_GBUFFER_RT_COUNT; ++i) {
+        gbInfo[i].imageView = gbufferTextures[i];
+        gbInfo[i].imageLayout = rhi::ResourceState::ShaderResource;
+    }
+    shadowInfo.imageView = dawnShadowDepthTex_;
+    shadowInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    irradInfo.imageView = dawnIBLIrradiance_;
+    irradInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    prefilterInfo.imageView = dawnIBLPrefilter_;
+    prefilterInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    brdfInfo.imageView = dawnIBLBRDFLUT_;
+    brdfInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    iblSampInfo.sampler = dawnIBLSampler_;
+    frameUB.buffer = frameBuffers_[fi];
+    frameUB.offset = 0;
+    frameUB.range = sizeof(rhi::GlobalShaderData);
+    lightUB.buffer = lightBuffers_[fi];
+    lightUB.offset = 0;
+    lightUB.range = sizeof(rhi::ForwardLightBuffer);
+    outInfo.imageView = hdrTexture;
+    outInfo.imageLayout = rhi::ResourceState::UnorderedAccess;
+
+    rhi::WriteDescriptorSet writes[12];
+    writes[0]  = {dawnDeferredSet_[fi], 0,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[0]};
+    writes[1]  = {dawnDeferredSet_[fi], 1,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[1]};
+    writes[2]  = {dawnDeferredSet_[fi], 2,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[2]};
+    writes[3]  = {dawnDeferredSet_[fi], 3,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[3]};
+    writes[4]  = {dawnDeferredSet_[fi], 4,  0, 1, rhi::DescriptorType::SampledDepthImage, &shadowInfo};
+    writes[5]  = {dawnDeferredSet_[fi], 5,  0, 1, rhi::DescriptorType::SampledImage,      &irradInfo};
+    writes[6]  = {dawnDeferredSet_[fi], 6,  0, 1, rhi::DescriptorType::SampledImage,      &prefilterInfo};
+    writes[7]  = {dawnDeferredSet_[fi], 7,  0, 1, rhi::DescriptorType::SampledImage,      &brdfInfo};
+    writes[8]  = {dawnDeferredSet_[fi], 8,  0, 1, rhi::DescriptorType::Sampler,           &iblSampInfo};
+    writes[9]  = {dawnDeferredSet_[fi], 9,  0, 1, rhi::DescriptorType::UniformBuffer,     nullptr, &frameUB};
+    writes[10] = {dawnDeferredSet_[fi], 10, 0, 1, rhi::DescriptorType::UniformBuffer,     nullptr, &lightUB};
+    writes[11] = {dawnDeferredSet_[fi], 11, 0, 1, rhi::DescriptorType::StorageImage,      &outInfo};
+    device_->UpdateDescriptorSets(12, writes);
+
+    // HDR output is normally in RenderTarget state (forward writes via color
+    // attachment). The compute shader writes via storage image, so flip to
+    // UnorderedAccess for the duration of this dispatch. Dawn barriers are
+    // no-ops, but the state value is recorded for downstream consumers.
+    rhi::ResourceBarrier hdrBarrier{};
+    hdrBarrier.resource = hdrTexture;
+    hdrBarrier.beforeState = rhi::ResourceState::RenderTarget;
+    hdrBarrier.afterState = rhi::ResourceState::UnorderedAccess;
+    hdrBarrier.subresource = 0xFFFFFFFF;
+    cmdBuffer->InsertBarrier(&hdrBarrier, 1);
+
+    cmdBuffer->BindComputePipeline(dawnDeferredPipeline_);
+    cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, dawnDeferredPipelineLayout_,
+                                  0, 1, &dawnDeferredSet_[fi], 0, nullptr);
+    cmdBuffer->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+
+    // Transition HDR back to RenderTarget so downstream post-process passes
+    // (TAA, ToneMap) that read it as a ShaderResource / blit it can find it in
+    // the expected state.
+    rhi::ResourceBarrier hdrBack{};
+    hdrBack.resource = hdrTexture;
+    hdrBack.beforeState = rhi::ResourceState::UnorderedAccess;
+    hdrBack.afterState = rhi::ResourceState::RenderTarget;
+    hdrBack.subresource = 0xFFFFFFFF;
+    cmdBuffer->InsertBarrier(&hdrBack, 1);
 }
 
 void ForwardRenderer::ShadowPass(rhi::RHICommandBuffer* cmdBuffer,

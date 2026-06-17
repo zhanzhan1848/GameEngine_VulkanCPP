@@ -62,6 +62,36 @@ public:
                                 u32 width,
                                 u32 height);
 
+    // Phase 3b — G-Buffer pass for Deferred mode. Writes 5 MRT G-Buffer textures
+    // (RT0=WorldPos RGBA16F, RT1=Normal+linearDepth RGBA16F, RT2=Albedo+Metallic RGBA8_sRGB,
+    // RT3=ORM RGBA8, RT4=Velocity RG16F). Depth is loaded from the supplied depth texture
+    // (assumed populated by RenderDawnDepthPrepass).
+    // Current implementation (3b-1): clear-only stub that verifies the 5-attachment MRT
+    // pipeline works in Dawn. Geometry rendering comes in 3b-2.
+    static constexpr u32 DAWN_GBUFFER_RT_COUNT = 5;
+    void RenderDawnGBuffer(rhi::RHICommandBuffer* cmdBuffer,
+                           const RenderView& view,
+                           const rhi::ResourceHandle gbufferTextures[DAWN_GBUFFER_RT_COUNT],
+                           rhi::ResourceHandle depthTexture,
+                           const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials,
+                           u32 frameIndex,
+                           u32 width,
+                           u32 height);
+
+    // Phase 3c — Deferred lighting compute pass. Reads the 5 MRT G-Buffer targets +
+    // shadow depth + IBL, evaluates PBR (mirrors ForwardPBR.wgsl), and writes HDR
+    // linear color to hdrTexture. Reuses the renderer's frameBuffers_/lightBuffers_
+    // (populated internally) so the deferred shader samples the same uniforms as
+    // the forward path.
+    void RenderDawnDeferredLighting(rhi::RHICommandBuffer* cmdBuffer,
+                                    const RenderView& view,
+                                    const rhi::ResourceHandle gbufferTextures[DAWN_GBUFFER_RT_COUNT],
+                                    rhi::ResourceHandle hdrTexture,
+                                    const RenderScene& scene,
+                                    u32 frameIndex,
+                                    u32 width,
+                                    u32 height);
+
     GeometryDebugSettings& GetDebugSettings() { return debugSettings_; }
     
     const SceneExtractionStats& GetExtractionStats() const { return sceneExtractionSystem_.GetStats(); }
@@ -215,6 +245,12 @@ private:
                               const RenderView& view,
                               const ::std::unordered_map<id::id_type, ::std::shared_ptr<MaterialInstance>>& materials);
 
+    // Phase 3c-2 — lazily creates the G-Buffer graphics pipeline on first use.
+    // Deferred because the pipeline layout needs the test-supplied material
+    // DSL (group 1), which isn't available at ForwardRenderer::Initialize() time.
+    // Returns true if the pipeline is ready (or already was).
+    bool EnsureDawnGBufferPipeline();
+
     // Dawn camera depth prepass — non-jittered depth for HZB/SSR/SSAO.
     // Uses its own pipeline so it never touches GlobalShaderData.jitterOffset,
     // producing a stable depth buffer that downstream passes consume.
@@ -226,6 +262,33 @@ private:
     rhi::ResourceHandle dawnPrepassPerObjectBuf_[rhi::MAX_FRAMES_IN_FLIGHT]{};
     void* dawnPrepassPerObjectMapped_[rhi::MAX_FRAMES_IN_FLIGHT]{};
     rhi::DescriptorSetHandle dawnPrepassPerObjectSet_[rhi::MAX_FRAMES_IN_FLIGHT]{};
+
+    // Dawn G-Buffer pass (Phase 3b) — writes 5 MRT G-Buffer targets for Deferred mode.
+    // Same per-object dynamic-offset pattern as the prepass, but with a 3-matrix
+    // uniform (world + WVP + prevWVP) and an actual fragment shader.
+    // Phase 3c-2: pipeline layout = [perObject, material] — material DSL is
+    // supplied by the test (matches its MaterialInstance descriptor sets).
+    static constexpr u32 DAWN_GBUFFER_PER_OBJECT_ALIGN = 256;
+    static constexpr u32 DAWN_GBUFFER_MAX_OBJECTS = 4096; // 1MB / 256B
+    rhi::DescriptorSetLayoutHandle dawnGBufferDSL_{rhi::handles::INVALID_RESOURCE};
+    rhi::DescriptorSetLayoutHandle dawnGBufferMaterialDSL_{rhi::handles::INVALID_RESOURCE};
+    rhi::PipelineLayoutHandle dawnGBufferPipelineLayout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineHandle dawnGBufferPipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::ResourceHandle dawnGBufferPerObjectBuf_[rhi::MAX_FRAMES_IN_FLIGHT]{};
+    void* dawnGBufferPerObjectMapped_[rhi::MAX_FRAMES_IN_FLIGHT]{};
+    rhi::DescriptorSetHandle dawnGBufferPerObjectSet_[rhi::MAX_FRAMES_IN_FLIGHT]{};
+
+    // Dawn Deferred lighting pass (Phase 3c) — compute shader reading G-Buffer +
+    // shadow depth + IBL, writing HDR color. 12 bindings in set 0:
+    //   0..3 gbuffer, 4 shadowDepthTex, 5..7 IBL, 8 iblSampler,
+    //   9 globalData UB, 10 lightBuffer UB, 11 outputTex storage.
+    // Frame/light UBs reuse the renderer's existing frameBuffers_/lightBuffers_.
+    // Per-frame descriptor sets bind the G-Buffer + IBL textures (caller-supplied)
+    // and the global/light UB handles (renderer-owned).
+    rhi::DescriptorSetLayoutHandle dawnDeferredDSL_{rhi::handles::INVALID_RESOURCE};
+    rhi::PipelineLayoutHandle dawnDeferredPipelineLayout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineHandle dawnDeferredPipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::DescriptorSetHandle dawnDeferredSet_[rhi::MAX_FRAMES_IN_FLIGHT]{};
 
 public:
     void SetTime(float deltaTime, float totalTime, u32 frameNumber) {
@@ -243,6 +306,15 @@ public:
     void SetDawnIBLResources(rhi::ResourceHandle irradiance, rhi::ResourceHandle prefilter,
                              rhi::ResourceHandle brdfLUT, rhi::SamplerHandle sampler);
     void SetDawnRenderMode(u32 mode) { dawnRenderMode_ = mode; }
+
+    // Phase 3c-2: caller supplies the material DSL (created by the test, shared
+    // with MaterialInstance descriptor sets). The G-Buffer pipeline binds this
+    // as group 1 so per-draw material textures can be sampled in the geometry
+    // pass. Must be called BEFORE Initialize() so the pipeline layout includes
+    // the material group at creation time.
+    void SetDawnGBufferMaterialDSL(rhi::DescriptorSetLayoutHandle layout) {
+        dawnGBufferMaterialDSL_ = layout;
+    }
 
     rhi::DescriptorSetLayoutHandle GetGlobalDescriptorSetLayout() const { return globalDescriptorSetLayout_; }
     rhi::DescriptorSetLayoutHandle GetPerObjectDescriptorSetLayout() const { return perObjectDescriptorSetLayout_; }

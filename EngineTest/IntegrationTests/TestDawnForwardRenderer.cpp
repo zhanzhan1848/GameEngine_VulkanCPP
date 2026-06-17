@@ -201,7 +201,8 @@ bool Engine_Test::initialize() {
     hdrDesc_.format = rhi::DataFormat::RGBA16_Float;
     hdrDesc_.type = rhi::TextureType::Texture2D;
     hdrDesc_.mipLevels = 1;
-    hdrDesc_.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    hdrDesc_.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource |
+                     rhi::TextureUsage::CopyDest | rhi::TextureUsage::UnorderedAccess;
     hdrTexture_ = device_->CreateTexture(hdrDesc_);
 
     // Create persistent Velocity MRT texture (RG16F, written by ForwardPBR fragment)
@@ -212,6 +213,30 @@ bool Engine_Test::initialize() {
     velDesc.mipLevels = 1;
     velDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     velocityTexture_ = device_->CreateTexture(velDesc);
+
+    // Create G-Buffer textures for Deferred mode (Phase 3b)
+    // RT0: WorldPos RGBA16F, RT1: Normal RGBA16F, RT2: Albedo RGBA8_sRGB,
+    // RT3: ORM RGBA8, RT4: Velocity RG16F (mirrors velocityTexture_ format)
+    {
+        rhi::DataFormat gbufferFormats[kGBufferRTCount] = {
+            rhi::DataFormat::RGBA16_Float,
+            rhi::DataFormat::RGBA16_Float,
+            rhi::DataFormat::RGBA8_sRGB,
+            rhi::DataFormat::RGBA8_UNorm,
+            rhi::DataFormat::RG16_Float
+        };
+        for (u32 i = 0; i < kGBufferRTCount; ++i) {
+            rhi::TextureDesc gbDesc{};
+            gbDesc.size = {width_, height_, 1};
+            gbDesc.format = gbufferFormats[i];
+            gbDesc.type = rhi::TextureType::Texture2D;
+            gbDesc.mipLevels = 1;
+            // CopySource: needed for the 3b-1 visualization blit (RT0 → hdrTexture_).
+            // 3c deferred lighting will sample via ShaderResource instead.
+            gbDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopySource;
+            gbufferTextures_[i] = device_->CreateTexture(gbDesc);
+        }
+    }
 
     // Create render graph for post-processing
     renderGraph_ = std::make_unique<rendergraph::RenderGraph>(*device_);
@@ -432,6 +457,10 @@ bool Engine_Test::LoadSponzaScene() {
     }
     material->SetDescriptorSetLayout(materialSetLayout_);
 
+    // Phase 3c-2: hand the material DSL to ForwardRenderer so its lazily-created
+    // G-Buffer pipeline can include group 1 (material textures) in the layout.
+    forwardRenderer_.SetDawnGBufferMaterialDSL(materialSetLayout_);
+
     // Pipeline layout: 3 groups (Global with shadow bindings, PerObject, Material)
     // Create per-object layout fresh (avoid handle corruption from IBL heap operations)
     DescriptorSetLayoutBinding perObjectBinding{};
@@ -611,36 +640,49 @@ void Engine_Test::RenderFrame() {
 
     auto invProj = rhimath::Inverse(view_.GetProjectionMatrix());
 
-    // HZB generation from depth buffer
-    const auto& hzbOut = PostProcess::AddHZBPass(*renderGraph_, depthRG, width_, height_);
-    auto hzbHandle = hzbOut.hzbTexture;
-
-    // TAA: resolve jittered HDR into clean HDR using velocity from MRT.
-    auto taaHDR = hdrRG;
-    const auto& taaOut = PostProcess::AddTAAPass(*renderGraph_, hdrRG, velMrtRG, width_, height_, fi);
-    taaHDR = taaOut.output;
-
-    // SSR: trace reflection rays (half-res), temporal accumulate, composite into HDR.
-    // Only runs in FullPlusSSR mode (toggled via Tab).
-    if (renderMode_ == DawnRenderMode::FullPlusSSR) {
-        const auto& ssrOut = PostProcess::AddSSRPass(*renderGraph_, taaHDR, depthRG, hzbHandle,
-                                                      velMrtRG, width_, height_, fi,
-                                                      view_.GetProjectionMatrix(), invProj);
-        taaHDR = ssrOut.outputColor;
+    // HZB generation from depth buffer — needed for SSAO/SSR consumers.
+    // (NoEffects/ShadowOnly skip — they're visualization modes.)
+    auto hzbHandle = rendergraph::kInvalidRGResourceHandle;
+    if (renderMode_ != DawnRenderMode::NoEffects && renderMode_ != DawnRenderMode::ShadowOnly) {
+        const auto& hzbOut = PostProcess::AddHZBPass(*renderGraph_, depthRG, width_, height_);
+        hzbHandle = hzbOut.hzbTexture;
     }
 
-    // SSGI disabled — causes rendering issues on Dawn, ToneMapping falls back to dummy
-    auto ssgiHandle = rendergraph::kInvalidRGResourceHandle;
+    // 3c: Deferred path now goes through the full post-process chain (TAA →
+    // SSAO → ToneMap) just like Full/FullPlusSSR. The HDR written by the
+    // deferred lighting compute is in the same linear-HDR space the forward
+    // path produces, so TAA mixing and SSAO AO multiplication work the same.
+    auto taaHDR = hdrRG;
+    auto tonemapOutput = hdrRG;
 
-    const auto& ssaoOut = graphics::PostProcess::AddSSAOPass(*renderGraph_, depthRG, width_, height_, fi, view_.GetProjectionMatrix(), invProj);
-    auto ssaoAOHandle = ssaoOut.ssaoOutput;
+    if (renderMode_ != DawnRenderMode::NoEffects && renderMode_ != DawnRenderMode::ShadowOnly) {
+        // TAA: resolve jittered HDR into clean HDR using velocity from MRT.
+        const auto& taaOut = PostProcess::AddTAAPass(*renderGraph_, hdrRG, velMrtRG, width_, height_, fi);
+        taaHDR = taaOut.output;
 
-    // Bloom disabled — BlurPass WGSL/C++ struct mismatch + heap corruption causes validation errors
-    auto bloomHandle = rendergraph::kInvalidRGResourceHandle;
+        // SSR: trace reflection rays (half-res), temporal accumulate, composite into HDR.
+        // Runs in FullPlusSSR (forward + reflections) and Deferred (Phase 3d —
+        // deferred lighting + reflections, mirrors FullPlusSSR's look).
+        if (renderMode_ == DawnRenderMode::FullPlusSSR || renderMode_ == DawnRenderMode::Deferred) {
+            const auto& ssrOut = PostProcess::AddSSRPass(*renderGraph_, taaHDR, depthRG, hzbHandle,
+                                                          velMrtRG, width_, height_, fi,
+                                                          view_.GetProjectionMatrix(), invProj);
+            taaHDR = ssrOut.outputColor;
+        }
 
-    const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, taaHDR, bloomHandle,
-        ssaoAOHandle, ssgiHandle, velMrtRG, fi);
-    auto tonemapOutput = tonemapOut.output;
+        // SSGI disabled — causes rendering issues on Dawn, ToneMapping falls back to dummy
+        auto ssgiHandle = rendergraph::kInvalidRGResourceHandle;
+
+        const auto& ssaoOut = graphics::PostProcess::AddSSAOPass(*renderGraph_, depthRG, width_, height_, fi, view_.GetProjectionMatrix(), invProj);
+        auto ssaoAOHandle = ssaoOut.ssaoOutput;
+
+        // Bloom disabled — BlurPass WGSL/C++ struct mismatch + heap corruption causes validation errors
+        auto bloomHandle = rendergraph::kInvalidRGResourceHandle;
+
+        const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, taaHDR, bloomHandle,
+            ssaoAOHandle, ssgiHandle, velMrtRG, fi);
+        tonemapOutput = tonemapOut.output;
+    }
 
     // Present: blit tonemapped output → backbuffer
     rhi::TextureDesc bbDesc;
@@ -805,8 +847,32 @@ void Engine_Test::RenderFrame() {
                 forwardRenderer_.RenderDawnDepthPrepass(cmd, view_, prepassDepthTexture_, fi, width_, height_);
             }
 
-            // 2. Forward pass
-            forwardRenderer_.Render(cmd, scene_, view_, hdrTexture_, velocityTexture_, depthTexture_, materials_, fi, width_, height_);
+            // 2. Forward pass — or G-Buffer + Deferred lighting for Deferred mode (Phase 3c).
+            // Deferred path: G-Buffer pass writes 5 MRTs, deferred lighting
+            // compute reads them + shadow + IBL and writes HDR color to
+            // hdrTexture_. Velocity (RT4) is blit'd to velocityTexture_ so
+            // downstream post-process passes (TAA) see it from the standard slot.
+            if (renderMode_ == DawnRenderMode::Deferred) {
+                // G-Buffer shares the non-jittered prepass depth (LessEqual +
+                // no-write). depthTexture_ is only populated by Render(), which
+                // is bypassed in Deferred mode — using it would leave the
+                // GBuffer reading undefined depth and discarding all geometry.
+                forwardRenderer_.RenderDawnGBuffer(cmd, view_, gbufferTextures_, prepassDepthTexture_, materials_, fi, width_, height_);
+                forwardRenderer_.RenderDawnDeferredLighting(cmd, view_, gbufferTextures_, hdrTexture_, scene_, fi, width_, height_);
+
+                // Blit RT4 (velocity RG16F) → velocityTexture_ so TAA sees
+                // per-pixel motion vectors from the G-Buffer pass.
+                rhi::TextureBlitRegion velRegion{};
+                velRegion.srcSubresource = {0, 0, 1};
+                velRegion.srcOffsets[0] = {0, 0, 0};
+                velRegion.srcOffsets[1] = {(s32)width_, (s32)height_, 1};
+                velRegion.dstSubresource = {0, 0, 1};
+                velRegion.dstOffsets[0] = {0, 0, 0};
+                velRegion.dstOffsets[1] = {(s32)width_, (s32)height_, 1};
+                cmd->BlitTexture(gbufferTextures_[4], velocityTexture_, &velRegion, 1, rhi::FilterMode::Nearest);
+            } else {
+                forwardRenderer_.Render(cmd, scene_, view_, hdrTexture_, velocityTexture_, depthTexture_, materials_, fi, width_, height_);
+            }
 
             // 4. Post-processing (render graph: HZB, SSAO, Bloom, ToneMap, Present)
             renderGraph_->Execute(cmd);
@@ -883,13 +949,14 @@ void Engine_Test::UpdateCamera(float dt) {
 
     // Tab (keyCode 48) to cycle render mode — edge detected
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
             "Directional + Shadow + IBL",
             "Directional + Shadow + IBL + Punctual",
-            "Full + Screen-Space Reflections"
+            "Full + Screen-Space Reflections",
+            "G-Buffer + Deferred Lighting"
         };
         bool tabPressed = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 48);
         if (tabPressed && !prevTabState_) {
@@ -949,13 +1016,14 @@ void Engine_Test::UpdateCamera(float dt) {
 
     // Tab (keyCode 9) to cycle render mode — WASM
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
             "Directional + Shadow + IBL",
             "Directional + Shadow + IBL + Punctual",
-            "Full + Screen-Space Reflections"
+            "Full + Screen-Space Reflections",
+            "G-Buffer + Deferred Lighting"
         };
         bool tabPressed = EmscriptenGetKeyState(9);
         if (tabPressed && !prevTabState_) {
@@ -1780,6 +1848,12 @@ void Engine_Test::shutdown() {
     if (velocityTexture_ != rhi::handles::INVALID_RESOURCE) {
         device_->DestroyTexture(velocityTexture_);
         velocityTexture_ = rhi::handles::INVALID_RESOURCE;
+    }
+    for (u32 i = 0; i < kGBufferRTCount; ++i) {
+        if (gbufferTextures_[i] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(gbufferTextures_[i]);
+            gbufferTextures_[i] = rhi::handles::INVALID_RESOURCE;
+        }
     }
     renderGraph_.reset();
 
