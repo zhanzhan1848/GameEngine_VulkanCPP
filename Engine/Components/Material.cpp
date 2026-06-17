@@ -106,6 +106,30 @@ void get_base_color(component c, f32 out[4])
     out[3] = base_color_a[eindex];
 }
 
+id::id_type get_albedo_texture(component c)
+{
+    assert(c.is_valid());
+    const id::id_type eindex{ id::index(c.get_id()) };
+    assert(eindex < exists_flags.size() && exists_flags[eindex]);
+    return albedo_textures[eindex];
+}
+
+id::id_type get_normal_texture(component c)
+{
+    assert(c.is_valid());
+    const id::id_type eindex{ id::index(c.get_id()) };
+    assert(eindex < exists_flags.size() && exists_flags[eindex]);
+    return normal_textures[eindex];
+}
+
+id::id_type get_orm_texture(component c)
+{
+    assert(c.is_valid());
+    const id::id_type eindex{ id::index(c.get_id()) };
+    assert(eindex < exists_flags.size() && exists_flags[eindex]);
+    return orm_textures[eindex];
+}
+
 void set_roughness(component c, f32 value)
 {
     assert(c.is_valid());
@@ -147,6 +171,30 @@ void set_alpha_cutoff(component c, f32 value)
     const id::id_type eindex{ id::index(c.get_id()) };
     assert(eindex < exists_flags.size() && exists_flags[eindex]);
     alpha_cutoffs[eindex] = value;
+}
+
+void set_albedo_texture(component c, id::id_type texture_id)
+{
+    assert(c.is_valid());
+    const id::id_type eindex{ id::index(c.get_id()) };
+    assert(eindex < exists_flags.size() && exists_flags[eindex]);
+    albedo_textures[eindex] = texture_id;
+}
+
+void set_normal_texture(component c, id::id_type texture_id)
+{
+    assert(c.is_valid());
+    const id::id_type eindex{ id::index(c.get_id()) };
+    assert(eindex < exists_flags.size() && exists_flags[eindex]);
+    normal_textures[eindex] = texture_id;
+}
+
+void set_orm_texture(component c, id::id_type texture_id)
+{
+    assert(c.is_valid());
+    const id::id_type eindex{ id::index(c.get_id()) };
+    assert(eindex < exists_flags.size() && exists_flags[eindex]);
+    orm_textures[eindex] = texture_id;
 }
 
 // ============================================================================
@@ -191,6 +239,30 @@ void component::set_base_color(const f32 value[4]) {
 
 void component::set_alpha_cutoff(f32 value) {
     material::set_alpha_cutoff(*this, value);
+}
+
+id::id_type component::albedo_texture() const {
+    return get_albedo_texture(*this);
+}
+
+id::id_type component::normal_texture() const {
+    return get_normal_texture(*this);
+}
+
+id::id_type component::orm_texture() const {
+    return get_orm_texture(*this);
+}
+
+void component::set_albedo_texture(id::id_type texture_id) {
+    material::set_albedo_texture(*this, texture_id);
+}
+
+void component::set_normal_texture(id::id_type texture_id) {
+    material::set_normal_texture(*this, texture_id);
+}
+
+void component::set_orm_texture(id::id_type texture_id) {
+    material::set_orm_texture(*this, texture_id);
 }
 
 } // namespace primal::material

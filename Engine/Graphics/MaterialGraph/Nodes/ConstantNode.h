@@ -15,6 +15,9 @@ public:
         outputs[0].index = 0;
     }
     const char* TypeName() const override { return "ConstantFloat"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"ConstantFloat", "Constant Float", "Constants", false};
+    }
     void Execute() override {
         auto* out = CreateOutput<MaterialFloatData>(0);
         out->value = value;
@@ -50,6 +53,9 @@ public:
         outputs[0].index = 0;
     }
     const char* TypeName() const override { return "ConstantFloat3"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"ConstantFloat3", "Constant Float3", "Constants", false};
+    }
     void Execute() override {
         auto* out = CreateOutput<MaterialFloat3Data>(0);
         out->value = value;
@@ -75,6 +81,40 @@ inline const MaterialPinDescriptor ConstantFloat3Node::kPins[] = {
     {"value", 0, MaterialDataType::Float3, false},
 };
 
+class ConstantFloat2Node : public MaterialNode {
+public:
+    math::v2 value{0.0f, 0.0f};
+
+    ConstantFloat2Node() {
+        outputs.resize(1);
+        outputs[0].expected_type = MaterialDataType::Float2;
+        outputs[0].index = 0;
+    }
+    const char* TypeName() const override { return "ConstantFloat2"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"ConstantFloat2", "Constant Float2", "Constants", false};
+    }
+    void Execute() override {
+        auto* out = CreateOutput<MaterialFloat2Data>(0);
+        out->value = value;
+    }
+
+    const MaterialParamDescriptor* GetParamDescriptors(u32& c) const override { c = 1; return kParams; }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 1; return kPins; }
+
+private:
+    static const MaterialParamDescriptor kParams[];
+    static const MaterialPinDescriptor kPins[];
+};
+
+inline const MaterialParamDescriptor ConstantFloat2Node::kParams[] = {
+    {"value", "Constant", MaterialParamType::Float2, {-1e6f, 1e6f, 0.01f},
+     MAT_OFFSETOF(ConstantFloat2Node, value), sizeof(value), nullptr},
+};
+inline const MaterialPinDescriptor ConstantFloat2Node::kPins[] = {
+    {"value", 0, MaterialDataType::Float2, false},
+};
+
 class ConstantFloat4Node : public MaterialNode {
 public:
     math::v4 value{0.0f, 0.0f, 0.0f, 1.0f};
@@ -85,6 +125,9 @@ public:
         outputs[0].index = 0;
     }
     const char* TypeName() const override { return "ConstantFloat4"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"ConstantFloat4", "Constant Float4", "Constants", false};
+    }
     void Execute() override {
         auto* out = CreateOutput<MaterialFloat4Data>(0);
         out->value = value;
@@ -120,6 +163,9 @@ public:
         outputs[0].index = 0;
     }
     const char* TypeName() const override { return "ConstantTexture"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"ConstantTexture", "Constant Texture", "Constants", false};
+    }
     void Execute() override {
         auto* out = CreateOutput<MaterialTextureData>(0);
         out->asset_path = asset_path;

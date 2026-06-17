@@ -357,7 +357,7 @@ inline m4x4 CreatePerspectiveMatrix(float fovY, float aspect, float nearPlane, f
         v4{1.0f / (aspect * tanHalfFov), 0.0f, 0.0f, 0.0f},
         v4{0.0f, 1.0f / tanHalfFov, 0.0f, 0.0f},
         v4{0.0f, 0.0f, farPlane / (nearPlane - farPlane), -1.0f},
-        v4{0.0f, 0.0f, (nearPlane * farPlane) / (nearPlane - farPlane), 1.0f}
+        v4{0.0f, 0.0f, (nearPlane * farPlane) / (nearPlane - farPlane), 0.0f}
     }; // Note: This is Metal-compatible [0,1] depth range
 }
 

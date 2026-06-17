@@ -201,6 +201,15 @@ static const ParamDescriptor kParams[] = {
     {"Volume Max Distance",    "Volume", ParamType::Float, {10, 500, 10},         OFF(volume.max_distance),     SZ(volume.max_distance),     nullptr},
     {"Volume Extinction",      "Volume", ParamType::Float, {0.001f, 5.0f, 0.01f}, OFF(volume.extinction_scale), SZ(volume.extinction_scale), nullptr},
     {"Volume Max Steps",       "Volume", ParamType::UInt,  {8, 256, 8},           OFF(volume.max_steps),        SZ(volume.max_steps),        nullptr},
+
+    // --- Bloom (schema-only; pass-side wiring pending) ---
+    {"Bloom Intensity",        "Bloom",  ParamType::Float, {0.0f, 8.0f, 0.05f},   OFF(bloom.intensity),         SZ(bloom.intensity),         nullptr},
+    {"Bloom Threshold",        "Bloom",  ParamType::Float, {0.0f, 4.0f, 0.05f},   OFF(bloom.threshold),         SZ(bloom.threshold),         nullptr},
+    {"Bloom Radius",           "Bloom",  ParamType::Float, {0.05f, 1.0f, 0.01f},  OFF(bloom.radius),            SZ(bloom.radius),            nullptr},
+
+    // --- TAA (schema-only; pass-side wiring pending) ---
+    {"TAA Sharpness",          "TAA",    ParamType::Float, {0.0f, 1.0f, 0.01f},   OFF(taa.sharpness),           SZ(taa.sharpness),           nullptr},
+    {"TAA Feedback",           "TAA",    ParamType::Float, {0.0f, 1.0f, 0.01f},   OFF(taa.feedback),            SZ(taa.feedback),            nullptr},
 };
 
 #undef OFF

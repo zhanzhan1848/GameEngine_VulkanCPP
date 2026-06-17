@@ -260,6 +260,12 @@ MetalBuffer* MetalDevice::GetBuffer(ResourceHandle handle) {
     return bufferAllocator_.Get(static_cast<u32>(handle));
 }
 
+bool MetalDevice::UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset) {
+    MetalBuffer* buffer = GetBuffer(handle);
+    if (!buffer || !data || size == 0) return false;
+    return buffer->updateDataImpl(data, size, offset);
+}
+
 MetalTexture* MetalDevice::GetTexture(ResourceHandle handle) {
     return textureAllocator_.Get(static_cast<u32>(handle));
 }
@@ -488,7 +494,13 @@ ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
         if (buffer->Initialize()) {
             buffer->SetHandle(ResourceHandle(id));
             ResourceManager::Instance().RegisterResource(buffer);
-            // std::cerr << "[MetalDevice] Created Buffer - ID: " << id << " Address: " << buffer << std::endl;
+            static bool loggedRM = false;
+            if (!loggedRM) {
+                std::cerr << "[MetalDevice] RM addr=" << &ResourceManager::Instance()
+                          << " registered buffer id=" << id
+                          << " handle=" << ResourceHandle(id) << std::endl;
+                loggedRM = true;
+            }
             return ResourceHandle(id);
         } else {
              std::cerr << "[MetalDevice] Buffer Initialize failed for id: " << id << std::endl;

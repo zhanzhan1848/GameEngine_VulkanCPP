@@ -17,6 +17,11 @@ namespace primal {
 		bool is_alive(entity_id id);
 		u32 entity_count();
 
+		// Build a valid entity_id (with current generation bits) from a raw slot index.
+		// Use with entity_count() to iterate alive entities. Returns invalid_id if the
+		// slot has never been used or the index is out of range.
+		entity_id entity_id_from_index(u32 index);
+
 		// Component mask accessors
 		component_mask get_component_mask(entity_id id);
 		void set_component_bit(entity_id id, u8 bit);
@@ -33,12 +38,16 @@ namespace primal {
 	INIT_INFO(particle);
 	INIT_INFO(cluster);
 	INIT_INFO(material);
+	INIT_INFO(light);
+	INIT_INFO(camera);
 #undef INIT_INFO
 
 	// Forward declaration for Geometry component (nested namespace)
 	namespace geometry { namespace component { struct init_info; } }
 
 	namespace material { struct init_info; }
+	namespace light { struct init_info; }
+	namespace camera { struct init_info; }
 
 	namespace game_entity {
 		struct entity_info
@@ -50,6 +59,8 @@ namespace primal {
 			cluster::init_info* cluster{ nullptr };
 			geometry::component::init_info* geometry{ nullptr };
 			material::init_info* material{ nullptr };
+			light::init_info* light{ nullptr };
+			camera::init_info* camera{ nullptr };
 		};
 	}
 }

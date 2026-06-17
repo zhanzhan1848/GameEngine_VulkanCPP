@@ -29,6 +29,9 @@ public:
         // No outputs — this is a terminal node
     }
     const char* TypeName() const override { return "MaterialOutput"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"MaterialOutput", "Material Output", "Output", true};
+    }
     void Execute() override {
         // No-op: data is propagated to input pins by the graph before Execute().
         // The bridge reads input pins directly after graph execution.

@@ -5,6 +5,9 @@
 #include "Graphics/MaterialGraph/Nodes/TimeNode.h"
 #include "Graphics/MaterialGraph/Nodes/UVNode.h"
 #include "Graphics/MaterialGraph/Nodes/MathNodes.h"
+#include "Graphics/MaterialGraph/Nodes/FlowNodes.h"
+#include "Graphics/MaterialGraph/Nodes/TextureNodes.h"
+#include "Graphics/MaterialGraph/Nodes/CurveNode.h"
 #include "Graphics/MaterialGraph/Nodes/UtilityNodes.h"
 #include "Graphics/MaterialGraph/Nodes/MaterialOutputNode.h"
 #include <sstream>
@@ -48,6 +51,7 @@ public:
     static std::unique_ptr<MaterialNode> CreateNode(const char* type_name) {
         std::string t(type_name);
         if (t == "ConstantFloat")     return std::make_unique<ConstantFloatNode>();
+        if (t == "ConstantFloat2")    return std::make_unique<ConstantFloat2Node>();
         if (t == "ConstantFloat3")    return std::make_unique<ConstantFloat3Node>();
         if (t == "ConstantFloat4")    return std::make_unique<ConstantFloat4Node>();
         if (t == "ConstantTexture")   return std::make_unique<ConstantTextureNode>();
@@ -61,21 +65,37 @@ public:
         if (t == "Saturate")          return std::make_unique<SaturateNode>();
         if (t == "Fresnel")           return std::make_unique<FresnelNode>();
         if (t == "NormalBlend")       return std::make_unique<NormalBlendNode>();
+        if (t == "Select")            return std::make_unique<SelectNode>();
+        if (t == "Remap")             return std::make_unique<RemapNode>();
+        if (t == "SampleTexture")     return std::make_unique<SampleTextureNode>();
+        if (t == "Curve")             return std::make_unique<CurveNode>();
         if (t == "MaterialOutput")    return std::make_unique<MaterialOutputNode>();
         return nullptr;
     }
 
-    static u32 GetRegisteredNodeTypeCount() { return 15; }
+    static u32 GetRegisteredNodeTypeCount() { return 20; }
 
     static const char* GetRegisteredNodeTypeName(u32 index) {
         static const char* kNames[] = {
-            "ConstantFloat", "ConstantFloat3", "ConstantFloat4", "ConstantTexture",
+            "ConstantFloat", "ConstantFloat2", "ConstantFloat3", "ConstantFloat4", "ConstantTexture",
             "Time", "UV",
             "Add", "Multiply", "Lerp", "Clamp", "Pow", "Saturate",
             "Fresnel", "NormalBlend",
+            "Select", "Remap", "SampleTexture", "Curve",
             "MaterialOutput"
         };
-        return index < 15 ? kNames[index] : nullptr;
+        return index < 20 ? kNames[index] : nullptr;
+    }
+
+    static NodeTypeInfo GetRegisteredNodeTypeInfo(u32 index) {
+        if (index >= 20) {
+            return {"", "", "", false};
+        }
+        auto node = CreateNode(GetRegisteredNodeTypeName(index));
+        if (!node) {
+            return {"", "", "", false};
+        }
+        return node->GetTypeInfo();
     }
 
     static bool DeserializeIntoGraph(const std::string& json, MaterialGraph& graph) {
@@ -154,6 +174,18 @@ private:
                     val = static_cast<const ConstantTextureNode&>(node).asset_path;
                 }
                 ss << "\"" << d.name << "\": \"" << val << "\"";
+                break;
+            }
+            case MaterialParamType::Curve: {
+                if (std::strcmp(node.TypeName(), "Curve") == 0) {
+                    auto& cn = static_cast<const CurveNode&>(node);
+                    ss << "\"" << d.name << "\": [[";
+                    for (u32 i = 0; i < cn.curve.point_count; i++) {
+                        if (i > 0) ss << "],[";
+                        ss << cn.curve.points[i].time << "," << cn.curve.points[i].value;
+                    }
+                    ss << "]]";
+                }
                 break;
             }
             default: break;
@@ -283,14 +315,35 @@ private:
                 auto arr_end = FindMatchingBracket(params, val_start);
                 if (arr_end == std::string::npos) break;
                 std::string arr_str = params.substr(val_start + 1, arr_end - val_start - 1);
-                auto arr_vals = ParseFloatArray(arr_str);
 
-                if (arr_vals.size() == 4) {
-                    node->SetParamByName(key.c_str(), math::v4{arr_vals[0], arr_vals[1], arr_vals[2], arr_vals[3]});
-                } else if (arr_vals.size() == 3) {
-                    node->SetParamByName(key.c_str(), math::v3{arr_vals[0], arr_vals[1], arr_vals[2]});
-                } else if (arr_vals.size() == 1) {
-                    node->SetParamByName(key.c_str(), arr_vals[0]);
+                // Check for nested array (curve points): [[t0,v0],[t1,v1],...]
+                if (key == "curve_points" && std::strcmp(node->TypeName(), "Curve") == 0) {
+                    auto* cn = static_cast<CurveNode*>(node);
+                    cn->curve.point_count = 0;
+                    size_t cp = 0;
+                    while (cp < arr_str.size() && cn->curve.point_count < CurveData::MAX_POINTS) {
+                        auto inner_start = arr_str.find('[', cp);
+                        if (inner_start == std::string::npos) break;
+                        auto inner_end = FindMatchingBracket(arr_str, inner_start);
+                        if (inner_end == std::string::npos) break;
+                        std::string inner = arr_str.substr(inner_start + 1, inner_end - inner_start - 1);
+                        auto vals = ParseFloatArray(inner);
+                        if (vals.size() >= 2) {
+                            cn->curve.points[cn->curve.point_count].time = vals[0];
+                            cn->curve.points[cn->curve.point_count].value = vals[1];
+                            cn->curve.point_count++;
+                        }
+                        cp = inner_end + 1;
+                    }
+                } else {
+                    auto arr_vals = ParseFloatArray(arr_str);
+                    if (arr_vals.size() == 4) {
+                        node->SetParamByName(key.c_str(), math::v4{arr_vals[0], arr_vals[1], arr_vals[2], arr_vals[3]});
+                    } else if (arr_vals.size() == 3) {
+                        node->SetParamByName(key.c_str(), math::v3{arr_vals[0], arr_vals[1], arr_vals[2]});
+                    } else if (arr_vals.size() == 1) {
+                        node->SetParamByName(key.c_str(), arr_vals[0]);
+                    }
                 }
 
                 pos = arr_end + 1;

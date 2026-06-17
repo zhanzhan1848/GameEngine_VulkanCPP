@@ -7,6 +7,12 @@
 #include "MetalContent.h"
 #include "MetalLight.h"
 
+// === Phase 1 Sub-step 1.2.6': 本文件实现旧 platform_interface 的 Metal 填充器 ===
+// 函数签名 + pi.X = ... 赋值都依赖已废弃的 platform_interface。
+// RHI 路径已用 MetalDevice + RHIDeviceFactory 替代此填充逻辑，Phase 2 删除整个文件。
+#ifdef __clang__
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 
 namespace primal::graphics::metal
 {

@@ -12,6 +12,8 @@
 #include "Graphics/RenderMesh.h"
 #include "Graphics/MaterialInstance.h"
 #include "Graphics/RHI/Core/RHICommand.h"
+#include "Graphics/Scene/LightSyncSystem.h"
+#include "Graphics/DebugDraw/DebugDrawQueue.h"
 #include "Content/ContentToEngine.h"
 #include "Components/Entity.h"
 #include "Components/Transform.h"
@@ -1334,9 +1336,43 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         first_frame = false;
     }
 
-    // Update shadow VPs — match TestParticleSponza light setup
-    // lightPos = {100, 150, 50, 0} → lightDir = Normalize(-lightPos)
+    // Update shadow VPs — consume lights from RenderScene if available
+    // Default light position (fallback when no RenderScene or no directional lights)
     math::v3 lightPos{100.0f, 150.0f, 50.0f};
+    math::v4 effectiveLightColor = light_color_;
+
+    // === Phase 4.5: Pull ECS Light components into RenderScene ===
+    // 在读 GetLights() 之前先同步，让 ECS Light 组件真正驱动渲染。
+    // SyncLightsFromECS 内部会 ClearLights() + 重新填充，所以幂等可重入。
+    //
+    // const_cast 说明：render_scene_ 设计上是 const（renderer 其他路径只读），
+    // 但 LightSyncSystem 是 per-frame 的状态准备阶段，需要写入 lights_。
+    // RenderScene 的 mutator 用 mutable mutex_ 保护，逻辑上 const-correct，
+    // 但 API 上没标 const。这里 const_cast 是最小侵入的接口适配方式，
+    // 避免改 SetRenderScene 签名扩散到 StandardRenderPipeline。
+    if (render_scene_) {
+        scene_sync::SyncLightsFromECS(const_cast<RenderScene&>(*render_scene_));
+    }
+
+    // Override with RenderScene directional light if available
+    if (render_scene_) {
+        const auto& allLights = render_scene_->GetLights();
+        for (const auto& rl : allLights) {
+            if (rl.type == LightType::Directional) {
+                // lightPos is opposite of direction (direction points from light to scene)
+                math::v3 dir = rl.direction;
+                float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+                if (len > 0.001f) {
+                    // Use a fixed distance for the shadow eye position
+                    float dist = 200.0f;
+                    lightPos = { -dir.x * dist, -dir.y * dist, -dir.z * dist };
+                }
+                effectiveLightColor = { rl.color.x, rl.color.y, rl.color.z, rl.intensity };
+                break; // Use first directional light only
+            }
+        }
+    }
+
     math::v3 lightDir = Normalize(math::v3{-lightPos.x, -lightPos.y, -lightPos.z});
     ComputeCascadeVP(lightDir, camera_position, 30.0f, 2048, 0, 0.1f, 1000.0f);
     ComputeCascadeVP(lightDir, camera_position, 500.0f, 2048, 1, 0.1f, 5000.0f);
@@ -1356,7 +1392,7 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         sd.model = MatrixIdentity();
         sd.previousModel = MatrixIdentity();
         sd.lightPos = {lightPos.x, lightPos.y, lightPos.z, 0.0f};
-        sd.lightColor = light_color_;
+        sd.lightColor = effectiveLightColor;
         static auto start_time = std::chrono::steady_clock::now();
         sd.time = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
         sd.viewPos = {camera_position.x, camera_position.y, camera_position.z, 1.0f};
@@ -1561,8 +1597,15 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->EndRenderPass();
     }
 
-    // Pass 6: Geometry line overlay
-    if (!geometry_entity_ids_.empty()) {
+    // Pass 6: Geometry line overlay + EngineDLL debug draw lines
+    // EngineDLL 的 DebugDrawAPI 把 line 写入 debug_draw::queue()，
+    // 这里每帧 drain 到 frame_local_debug_lines_，转成 position-only
+    // 数组喂给 LineBatchRenderer。color 当前丢弃（shader 单色）。
+    frame_local_debug_lines_.clear();
+    debug_draw::drain_into(frame_local_debug_lines_);
+
+    const bool has_debug_lines = !frame_local_debug_lines_.empty();
+    if (!geometry_entity_ids_.empty() || has_debug_lines) {
         line_renderer_.BeginFrame();
         for (auto eid : geometry_entity_ids_) {
             auto geom = geometry::component::get(game_entity::entity_id{eid});
@@ -1570,6 +1613,17 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
             const auto& pts = geom.tessellate();
             if (pts.size() < 2) continue;
             line_renderer_.AddLines(pts.data(), static_cast<u32>(pts.size()));
+        }
+        if (has_debug_lines) {
+            // 转成紧凑 position 数组 —— color (rgb) 暂时不传。
+            frame_debug_positions_.clear();
+            frame_debug_positions_.reserve(frame_local_debug_lines_.size() * 2);
+            for (const auto& l : frame_local_debug_lines_) {
+                frame_debug_positions_.push_back(l.a);
+                frame_debug_positions_.push_back(l.b);
+            }
+            line_renderer_.AddLines(frame_debug_positions_.data(),
+                                    static_cast<u32>(frame_debug_positions_.size()));
         }
 
         RenderPassDesc rpDesc{};

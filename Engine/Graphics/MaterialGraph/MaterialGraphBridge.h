@@ -78,7 +78,7 @@ public:
         auto* technique = output->inputs[7].AsFloat();
         if (technique) {
             u32 tech_val = static_cast<u32>(technique->value);
-            u32 max_val = static_cast<u32>(ShaderTechnique::TechniqueCount) - 1;
+            u32 max_val = TechniqueCount - 1;
             result.info.technique = static_cast<ShaderTechnique>(std::min(tech_val, max_val));
         }
 

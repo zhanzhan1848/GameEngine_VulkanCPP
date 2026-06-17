@@ -14,10 +14,25 @@ set(SOURCE_FILES
     "PCGAPI.cpp"
     "GeometryAPI.cpp"
     "MaterialAPI.cpp"
+    "MaterialPreviewAPI.cpp"
+    "MaterialGraphAPI.cpp"
+    "MaterialGraphReflectionAPI.cpp"
+    "ParticleMaterialAPI.cpp"
+    "ShaderCompilerAPI.cpp"
+    "FrameAPI.cpp"
+    "ResourceAPI.cpp"
+    "DebugDrawAPI.cpp"
+    "CaptureAPI.cpp"
+    "RenderTargetAPI.cpp"
+    "LightAPI.cpp"
+    "CameraAPI.cpp"
+    "ProceduralMeshAPI.cpp"
 )
 
 set(HEADER_FILES
     "Common.h"
+    "EngineAPIInternal.h"
+    "FrameAPI.h"
 )
 
 # 添加共享库目标

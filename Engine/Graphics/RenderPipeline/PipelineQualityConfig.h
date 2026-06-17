@@ -59,6 +59,26 @@ struct PipelineAdvancedParams {
 };
 
 // ============================================================================
+// Bloom 参数 — schema-only (settings + descriptors); not yet consumed by
+// BloomPass.cpp. Adding the schema lets Editor UI generate controls; pass-side
+// wiring is a separate task (TODO: thread BloomConfig through AddBloomPass).
+// ============================================================================
+struct BloomConfig {
+    float intensity = 1.0f;   // multiplier on the blurred bloom contribution
+    float threshold = 1.0f;   // luminance above which pixels feed the bright pass
+    float radius    = 0.6f;   // gaussian blur radius (texture-space fraction)
+};
+
+// ============================================================================
+// TAA 参数 — schema-only (settings + descriptors); not yet consumed by
+// TAAPass.cpp (feedback currently hardcoded in TAAUniforms).
+// ============================================================================
+struct TAAConfig {
+    float sharpness = 0.8f;   // neighborhood-clamping sharpness (0..1)
+    float feedback  = 0.9f;   // history blend factor (0..1, higher = smoother)
+};
+
+// ============================================================================
 // PipelineQualityConfig — Pass 开关 + 质量设置
 // ============================================================================
 struct PipelineQualityConfig {
@@ -97,6 +117,8 @@ struct RenderPipelineSettings {
     lumen::LumenConfig     lumen;
     SceneLightingParams    lighting;
     PipelineAdvancedParams advanced;
+    BloomConfig            bloom;
+    TAAConfig              taa;
     volume::VolumeRuntimeParams volume;
     volume::FroxelGridConfig froxel;
     fluid::FluidConfig fluid;

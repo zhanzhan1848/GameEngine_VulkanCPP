@@ -7,6 +7,8 @@
 #include "Geometry.h"
 #include "CommandBuffer.h"
 #include "Material.h"
+#include "Light.h"
+#include "Camera.h"
 
 namespace primal::game_entity {
 
@@ -93,6 +95,20 @@ namespace primal::game_entity {
 			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Material));
 		}
 
+		if (info.light)
+		{
+			light::component lc = light::create(*info.light, ent);
+			assert(lc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Light));
+		}
+
+		if (info.camera)
+		{
+			camera::component cc = camera::create(*info.camera, ent);
+			assert(cc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Camera));
+		}
+
 		return ent;
 	}
 
@@ -128,6 +144,16 @@ namespace primal::game_entity {
 		{
 			material::component mc{ material::material_component_id{id} };
 			material::remove(mc);
+		}
+		if (mask & bit_mask(component_bit::Light))
+		{
+			light::component lc{ light::light_component_id{id} };
+			light::remove(lc);
+		}
+		if (mask & bit_mask(component_bit::Camera))
+		{
+			camera::component cc{ camera::camera_component_id{id} };
+			camera::remove(cc);
 		}
 		// Transform is always removed last since other components may reference it
 		if (mask & bit_mask(component_bit::Transform))
@@ -194,5 +220,12 @@ namespace primal::game_entity {
 	u32 entity_count()
 	{
 		return static_cast<u32>(generations.size());
+	}
+
+	entity_id entity_id_from_index(u32 index)
+	{
+		if (index >= generations.size()) return entity_id{ id::invalid_id };
+		const id::id_type gen{ generations[index] };
+		return entity_id{ static_cast<id::id_type>(index) | (gen << id::detail::index_bits) };
 	}
 }

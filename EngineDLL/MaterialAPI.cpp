@@ -23,6 +23,14 @@ struct material_descriptor
     id::id_type orm_texture;
 };
 
+struct material_param_update_c
+{
+    u64 entity_id;
+    u32 param_id;    // 0=technique, 1=roughness, 2=metallic, 3=alpha_cutoff, 4-7=base_color[0-3]
+    u32 _pad;
+    f32 value;
+};
+
 material::component component_from_entity(id::id_type entity_id)
 {
     game_entity::entity entity{ game_entity::entity_id{entity_id} };
@@ -159,4 +167,144 @@ EDITOR_INTERFACE void SetMaterialBaseColor(id::id_type entity_id, const f32* rgb
     material::component mc = component_from_entity(entity_id);
     if (!mc.is_valid()) return;
     mc.set_base_color(rgba);
+}
+
+// ============================================================================
+// Material Texture Getters
+// ============================================================================
+
+EDITOR_INTERFACE u64 GetMaterialAlbedoTexture(id::id_type entity_id)
+{
+    material::component mc = component_from_entity(entity_id);
+    if (!mc.is_valid()) return 0;
+    return static_cast<u64>(mc.albedo_texture());
+}
+
+EDITOR_INTERFACE u64 GetMaterialNormalTexture(id::id_type entity_id)
+{
+    material::component mc = component_from_entity(entity_id);
+    if (!mc.is_valid()) return 0;
+    return static_cast<u64>(mc.normal_texture());
+}
+
+EDITOR_INTERFACE u64 GetMaterialOrmTexture(id::id_type entity_id)
+{
+    material::component mc = component_from_entity(entity_id);
+    if (!mc.is_valid()) return 0;
+    return static_cast<u64>(mc.orm_texture());
+}
+
+// ============================================================================
+// Material Texture Setters
+// ============================================================================
+
+EDITOR_INTERFACE void SetMaterialAlbedoTexture(id::id_type entity_id, u64 texture_id)
+{
+    material::component mc = component_from_entity(entity_id);
+    if (!mc.is_valid()) return;
+    mc.set_albedo_texture(static_cast<id::id_type>(texture_id));
+}
+
+EDITOR_INTERFACE void SetMaterialNormalTexture(id::id_type entity_id, u64 texture_id)
+{
+    material::component mc = component_from_entity(entity_id);
+    if (!mc.is_valid()) return;
+    mc.set_normal_texture(static_cast<id::id_type>(texture_id));
+}
+
+EDITOR_INTERFACE void SetMaterialOrmTexture(id::id_type entity_id, u64 texture_id)
+{
+    material::component mc = component_from_entity(entity_id);
+    if (!mc.is_valid()) return;
+    mc.set_orm_texture(static_cast<id::id_type>(texture_id));
+}
+
+// ============================================================================
+// Entity Enumeration
+// ============================================================================
+
+EDITOR_INTERFACE u32 GetEntityCountWithMaterial()
+{
+    const u32 count = game_entity::entity_count();
+    u32 result = 0;
+    for (u32 i = 0; i < count; ++i)
+    {
+        game_entity::entity_id eid{ static_cast<id::id_type>(i) };
+        if (!game_entity::is_alive(eid)) continue;
+        component_mask mask{ game_entity::get_component_mask(eid) };
+        if (mask & bit_mask(component_bit::Material)) ++result;
+    }
+    return result;
+}
+
+EDITOR_INTERFACE u32 GetEntityIdWithMaterial(u32 index)
+{
+    const u32 count = game_entity::entity_count();
+    u32 match = 0;
+    for (u32 i = 0; i < count; ++i)
+    {
+        game_entity::entity_id eid{ static_cast<id::id_type>(i) };
+        if (!game_entity::is_alive(eid)) continue;
+        component_mask mask{ game_entity::get_component_mask(eid) };
+        if (mask & bit_mask(component_bit::Material))
+        {
+            if (match == index)
+                return static_cast<u32>(eid);
+            ++match;
+        }
+    }
+    return 0;
+}
+
+// ============================================================================
+// Batch Update
+// ============================================================================
+
+EDITOR_INTERFACE void ApplyMaterialParamBatch(const material_param_update_c* updates, u32 count)
+{
+    if (!updates || count == 0) return;
+    for (u32 i = 0; i < count; ++i)
+    {
+        const material_param_update_c& u = updates[i];
+        material::component mc = component_from_entity(u.entity_id);
+        if (!mc.is_valid()) continue;
+        switch (u.param_id)
+        {
+        case 0: // technique
+            mc.set_technique(static_cast<graphics::ShaderTechnique>(
+                std::min(static_cast<u32>(u.value), static_cast<u32>(graphics::ShaderTechnique::Count) - 1)));
+            break;
+        case 1: // roughness
+            mc.set_roughness(u.value);
+            break;
+        case 2: // metallic
+            mc.set_metallic(u.value);
+            break;
+        case 3: // alpha_cutoff
+            mc.set_alpha_cutoff(u.value);
+            break;
+        case 4: // base_color[0]
+        {
+            f32 c[4]; mc.base_color(c); c[0] = u.value; mc.set_base_color(c);
+            break;
+        }
+        case 5: // base_color[1]
+        {
+            f32 c[4]; mc.base_color(c); c[1] = u.value; mc.set_base_color(c);
+            break;
+        }
+        case 6: // base_color[2]
+        {
+            f32 c[4]; mc.base_color(c); c[2] = u.value; mc.set_base_color(c);
+            break;
+        }
+        case 7: // base_color[3]
+        {
+            f32 c[4]; mc.base_color(c); c[3] = u.value; mc.set_base_color(c);
+            break;
+        }
+        default:
+            break;
+        }
+    }
 }

@@ -14,6 +14,9 @@ public:
         outputs[0].index = 0;
     }
     const char* TypeName() const override { return "UV"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"UV", "UV", "Input", false};
+    }
     void Execute() override {
         auto* out = CreateOutput<MaterialFloat2Data>(0);
         out->value = default_uv;

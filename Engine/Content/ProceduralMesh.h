@@ -644,4 +644,246 @@ inline id::id_type create_plane_mesh(f32 width, f32 depth, u32 wSegs, u32 dSegs)
     return RegisterProceduralMesh(asset);
 }
 
+// --- Quad (XY plane, for 2D material preview) ---
+// Single quad in the XY plane facing +Z, spanning [-hw,hw]×[-hh,hh].
+// Used by MaterialPreviewRenderer's SetMode2D path with orthographic projection.
+inline id::id_type create_quad_xy_mesh(f32 width = 2.0f, f32 height = 2.0f) {
+    graphics::rhi::RHIMeshAsset asset;
+    asset.num_vertices = 4;
+    asset.num_indices  = 6;
+    asset.position_buffer.resize(4 * 12);
+    asset.element_buffer.resize(4 * PROC_ELEM_STRIDE);
+    asset.index_buffer.resize(6 * 4);
+
+    const f32 hw = width * 0.5f, hh = height * 0.5f;
+    u8* pos  = asset.position_buffer.data();
+    u8* elem = asset.element_buffer.data();
+    // Counter-clockwise when viewed from +Z. UV origin bottom-left.
+    WriteVertex(pos +  0, elem +  0, -hw, -hh, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+    WriteVertex(pos + 12, elem + 20,  hw, -hh, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f);
+    WriteVertex(pos + 24, elem + 40,  hw,  hh, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f);
+    WriteVertex(pos + 36, elem + 60, -hw,  hh, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+
+    u32* idx = reinterpret_cast<u32*>(asset.index_buffer.data());
+    idx[0] = 0; idx[1] = 1; idx[2] = 2;
+    idx[3] = 0; idx[4] = 2; idx[5] = 3;
+    return RegisterProceduralMesh(asset);
+}
+
+// --- Teapot (procedural lathe + path-swept parts) ---
+// Generates a recognizable teapot silhouette using simple primitives:
+//   body (lathe of profile curve) + lid (cone) + spout (curved tapered cylinder)
+//   + handle (half torus). All parts share one vertex/index buffer.
+// 'size' is the approximate body diameter. Produces watertight, well-formed geometry.
+inline id::id_type create_teapot_mesh(f32 size = 1.0f, u32 tessellation = 16) {
+    // Total vertex/index budget (computed below). Pre-allocate to avoid realloc.
+    const u32 bodySegs   = tessellation;            // longitude slices
+    const u32 bodyRings  = std::max<u32>(8u, tessellation / 2);  // latitude rings
+    const u32 lidSegs    = tessellation;
+    const u32 lidRings   = 4;
+    const u32 spoutSegs  = std::max<u32>(8u, tessellation / 2);
+    const u32 spoutRings = 6;
+    const u32 handleSegs = std::max<u32>(8u, tessellation / 2);
+    const u32 handleRings= 8;
+
+    const u32 bodyVerts    = (bodyRings + 1) * (bodySegs + 1);
+    const u32 bodyIdx      = bodyRings * bodySegs * 6;
+    const u32 lidVerts     = (lidRings + 1) * (lidSegs + 1) + 1;  // +apex
+    const u32 lidIdx       = lidRings * lidSegs * 6 + lidSegs * 3;  // +cap fan
+    const u32 spoutVerts   = (spoutRings + 1) * (spoutSegs + 1);
+    const u32 spoutIdx     = spoutRings * spoutSegs * 6;
+    const u32 handleVerts  = (handleRings + 1) * (handleSegs + 1);
+    const u32 handleIdx    = handleRings * handleSegs * 6;
+
+    const u32 totalVerts = bodyVerts + lidVerts + spoutVerts + handleVerts;
+    const u32 totalIdx   = bodyIdx + lidIdx + spoutIdx + handleIdx;
+
+    graphics::rhi::RHIMeshAsset asset;
+    asset.num_vertices = totalVerts;
+    asset.num_indices  = totalIdx;
+    asset.position_buffer.resize(totalVerts * 12);
+    asset.element_buffer.resize(totalVerts * PROC_ELEM_STRIDE);
+    asset.index_buffer.resize(totalIdx * 4);
+
+    u8* pos  = asset.position_buffer.data();
+    u8* elem = asset.element_buffer.data();
+    u32* idx = reinterpret_cast<u32*>(asset.index_buffer.data());
+    u32 vi = 0, ii = 0;
+
+    const f32 s = size * 0.5f;   // body radius scale
+    const f32 PI = 3.14159265358979323846f;
+
+    // ---------- BODY (lathe) ----------
+    // Profile: y in [-1.0, 1.0] (height ~2 units), radius varies smoothly.
+    // Bottom: 0.55*s, mid: 0.95*s, top: 0.75*s. Forms a rounded pot.
+    const f32 ba = 0.55f, bb = 0.95f, bc = 0.75f;  // base/mid/top radii coefficients
+    auto bodyRadius = [&](f32 t) -> f32 {
+        // t in [0,1], 0=bottom 1=top
+        return s * (ba + (bb - ba) * std::sin(t * PI) * 0.85f + (bc - ba) * (t * t) * 0.3f);
+    };
+    // dR/dt (height direction). Used to slant the normal outward at the equator.
+    auto bodyDRadius = [&](f32 t) -> f32 {
+        return s * ((bb - ba) * std::cos(t * PI) * PI * 0.85f + (bc - ba) * 2.0f * t * 0.3f);
+    };
+    const u32 bodyBase = vi;
+    for (u32 r = 0; r <= bodyRings; ++r) {
+        const f32 t = f32(r) / f32(bodyRings);
+        const f32 y = (t * 2.0f - 1.0f) * s;          // height
+        const f32 rad = bodyRadius(t);
+        const f32 dRdt = bodyDRadius(t);
+        // dy/dt = 2*s; surface tangent in Y direction is (dR/dt, dy/dt, 0),
+        // outward normal = (dy/dt, -dR/dt, 0) normalized after combining with longitude.
+        for (u32 s2 = 0; s2 <= bodySegs; ++s2) {
+            const f32 ang = 2.0f * PI * f32(s2) / f32(bodySegs);
+            const f32 px = std::cos(ang) * rad;
+            const f32 pz = std::sin(ang) * rad;
+            // Normal: longitude direction (cos,0,sin) scaled by dy/dt, plus Y by -dR/dt.
+            const f32 dyDt = 2.0f * s;
+            const f32 nx = std::cos(ang) * dyDt;
+            const f32 ny = -dRdt;
+            const f32 nz = std::sin(ang) * dyDt;
+            WriteVertex(pos + vi * 12, elem + vi * PROC_ELEM_STRIDE,
+                        px, y, pz, nx, ny, nz, f32(s2) / f32(bodySegs), t);
+            ++vi;
+        }
+    }
+    for (u32 r = 0; r < bodyRings; ++r) {
+        for (u32 s2 = 0; s2 < bodySegs; ++s2) {
+            const u32 a = bodyBase + r * (bodySegs + 1) + s2;
+            const u32 b = a + (bodySegs + 1);
+            idx[ii++] = a;     idx[ii++] = b;     idx[ii++] = a + 1;
+            idx[ii++] = a + 1; idx[ii++] = b;     idx[ii++] = b + 1;
+        }
+    }
+
+    // ---------- LID (cone + small cap) ----------
+    // Sits on top of body (y = +s), small cone narrowing upward to a knob.
+    const f32 lidY0 = s;
+    const f32 lidY1 = s * 1.4f;   // tip of cone
+    const u32 lidBase = vi;
+    for (u32 r = 0; r <= lidRings; ++r) {
+        const f32 t = f32(r) / f32(lidRings);
+        const f32 y = lidY0 + (lidY1 - lidY0) * t;
+        const f32 rad = (1.0f - t) * s * 0.55f;
+        for (u32 s2 = 0; s2 <= lidSegs; ++s2) {
+            const f32 ang = 2.0f * PI * f32(s2) / f32(lidSegs);
+            const f32 px = std::cos(ang) * rad;
+            const f32 pz = std::sin(ang) * rad;
+            // Slanted normal: roughly perpendicular to cone surface
+            const f32 ny = 0.3f;
+            WriteVertex(pos + vi * 12, elem + vi * PROC_ELEM_STRIDE,
+                        px, y, pz, std::cos(ang), ny, std::sin(ang),
+                        f32(s2) / f32(lidSegs), t);
+            ++vi;
+        }
+    }
+    for (u32 r = 0; r < lidRings; ++r) {
+        for (u32 s2 = 0; s2 < lidSegs; ++s2) {
+            const u32 a = lidBase + r * (lidSegs + 1) + s2;
+            const u32 b = a + (lidSegs + 1);
+            idx[ii++] = a;     idx[ii++] = b;     idx[ii++] = a + 1;
+            idx[ii++] = a + 1; idx[ii++] = b;     idx[ii++] = b + 1;
+        }
+    }
+    // Apex cap fan
+    const u32 lidApex = vi;
+    WriteVertex(pos + vi * 12, elem + vi * PROC_ELEM_STRIDE,
+                0.0f, lidY1, 0.0f, 0.0f, 1.0f, 0.0f, 0.5f, 1.0f);
+    ++vi;
+    {
+        const u32 lastRingBase = lidBase + lidRings * (lidSegs + 1);
+        for (u32 s2 = 0; s2 < lidSegs; ++s2) {
+            idx[ii++] = lidApex;
+            idx[ii++] = lastRingBase + s2;
+            idx[ii++] = lastRingBase + s2 + 1;
+        }
+    }
+
+    // ---------- SPOUT (curved tapered cylinder) ----------
+    // Path from body side (y ≈ +0.4s) curving outward and upward.
+    const u32 spoutBase = vi;
+    const f32 spoutAttachY = -0.3f * s;
+    for (u32 r = 0; r <= spoutRings; ++r) {
+        const f32 t = f32(r) / f32(spoutRings);        // 0=attach, 1=tip
+        // Quadratic Bezier path: P0=(s*0.9, spoutAttachY, 0), P1=(s*1.8, s*0.6, 0), P2=(s*2.2, s*1.3, 0)
+        const f32 u = 1.0f - t;
+        const f32 cx = u*u*(s*0.9f) + 2*u*t*(s*1.8f) + t*t*(s*2.2f);
+        const f32 cy = u*u*spoutAttachY + 2*u*t*(s*0.6f) + t*t*(s*1.3f);
+        const f32 cz = 0.0f;
+        // Tangent for framing
+        const f32 tx = 2*u*((s*1.8f)-(s*0.9f)) + 2*t*((s*2.2f)-(s*1.8f));
+        const f32 ty = 2*u*((s*0.6f)-spoutAttachY) + 2*t*((s*1.3f)-(s*0.6f));
+        const f32 tz = 0.0f;
+        const f32 tlen = std::sqrt(tx*tx + ty*ty + tz*tz) + 1e-8f;
+        const f32 tnx = tx / tlen, tny = ty / tlen;
+        // Build frame: tangent in XY plane, normal "up" = perpendicular
+        const f32 ux = -tny, uy = tnx;  // perp in XY
+        // For ring, use Z as one axis and (ux,uy,0) as other
+        const f32 radius = (0.25f - 0.15f * t) * s;
+        for (u32 s2 = 0; s2 <= spoutSegs; ++s2) {
+            const f32 ang = 2.0f * PI * f32(s2) / f32(spoutSegs);
+            // Ring axes: axis_a = (ux, uy, 0), axis_b = (0, 0, 1)
+            const f32 ca = std::cos(ang), sa = std::sin(ang);
+            const f32 px = cx + ca * ux * radius;
+            const f32 py = cy + ca * uy * radius;
+            const f32 pz = cz + sa * radius;
+            // Normal points outward from path
+            const f32 nx = ca * ux;
+            const f32 ny = ca * uy;
+            const f32 nz = sa;
+            WriteVertex(pos + vi * 12, elem + vi * PROC_ELEM_STRIDE,
+                        px, py, pz, nx, ny, nz, f32(s2) / f32(spoutSegs), t);
+            ++vi;
+        }
+    }
+    for (u32 r = 0; r < spoutRings; ++r) {
+        for (u32 s2 = 0; s2 < spoutSegs; ++s2) {
+            const u32 a = spoutBase + r * (spoutSegs + 1) + s2;
+            const u32 b = a + (spoutSegs + 1);
+            idx[ii++] = a;     idx[ii++] = b;     idx[ii++] = a + 1;
+            idx[ii++] = a + 1; idx[ii++] = b;     idx[ii++] = b + 1;
+        }
+    }
+
+    // ---------- HANDLE (half torus on opposite side from spout) ----------
+    // Sweeps from (−s, topY) around to (−s, botY) on the X-negative side.
+    const u32 handleBase = vi;
+    const f32 handleCx = -s * 0.9f;
+    const f32 handleMajorR = s * 0.55f;
+    const f32 handleMinorR = s * 0.12f;
+    for (u32 r = 0; r <= handleRings; ++r) {
+        const f32 t = f32(r) / f32(handleRings);
+        // Half circle in XY plane from angle PI (top) to angle 2PI (bottom), going through -X
+        const f32 sweepAng = PI + t * PI;
+        const f32 cx = handleCx + std::cos(sweepAng) * handleMajorR;
+        const f32 cy = 0.0f + std::sin(sweepAng) * handleMajorR;
+        const f32 cz = 0.0f;
+        // Normal in XY plane (outward from torus center curve)
+        const f32 nrmX = std::cos(sweepAng);
+        const f32 nrmY = std::sin(sweepAng);
+        for (u32 s2 = 0; s2 <= handleSegs; ++s2) {
+            const f32 ringAng = 2.0f * PI * f32(s2) / f32(handleSegs);
+            // Ring axes: in the torus tube, axis_a = (nrmX, nrmY, 0), axis_b = (0, 0, 1)
+            const f32 ca = std::cos(ringAng), sa = std::sin(ringAng);
+            const f32 px = cx + ca * nrmX * handleMinorR;
+            const f32 py = cy + ca * nrmY * handleMinorR;
+            const f32 pz = cz + sa * handleMinorR;
+            WriteVertex(pos + vi * 12, elem + vi * PROC_ELEM_STRIDE,
+                        px, py, pz, ca * nrmX, ca * nrmY, sa,
+                        f32(s2) / f32(handleSegs), t);
+            ++vi;
+        }
+    }
+    for (u32 r = 0; r < handleRings; ++r) {
+        for (u32 s2 = 0; s2 < handleSegs; ++s2) {
+            const u32 a = handleBase + r * (handleSegs + 1) + s2;
+            const u32 b = a + (handleSegs + 1);
+            idx[ii++] = a;     idx[ii++] = b;     idx[ii++] = a + 1;
+            idx[ii++] = a + 1; idx[ii++] = b;     idx[ii++] = b + 1;
+        }
+    }
+
+    return RegisterProceduralMesh(asset);
+}
+
 } // namespace primal::content

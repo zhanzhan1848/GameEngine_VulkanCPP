@@ -4,6 +4,7 @@
 #include "../Engine/Components/Entity.h"
 #include "../Engine/Components/Transform.h"
 #include "../Engine/Components/Mesh.h"
+#include "../Engine/Components/Script.h"
 
 using namespace primal;
 
@@ -240,4 +241,42 @@ EDITOR_INTERFACE void SetEntityMesh(id::id_type id, id::id_type geometry_content
 	mesh::component mc{ entity.mesh() };
 	if (!mc.is_valid()) return;
 	mesh::set_geometry(mc, geometry_content_id, material_ids, material_count);
+}
+
+// ============================================================================
+// Simplified entity creation for Editor (Phase 5 Track A)
+// ============================================================================
+
+EDITOR_INTERFACE u32 CreateEntity(f32 pos_x, f32 pos_y, f32 pos_z)
+{
+	transform::init_info transform_info{};
+	transform_info.position[0] = pos_x;
+	transform_info.position[1] = pos_y;
+	transform_info.position[2] = pos_z;
+	// Identity quaternion: w=1, x=y=z=0
+	transform_info.rotation[0] = 0.f;
+	transform_info.rotation[1] = 0.f;
+	transform_info.rotation[2] = 0.f;
+	transform_info.rotation[3] = 1.f;
+	transform_info.scale[0] = 1.f;
+	transform_info.scale[1] = 1.f;
+	transform_info.scale[2] = 1.f;
+
+	script::init_info script_info{}; // no script
+
+	game_entity::entity_info entity_info{};
+	entity_info.transform = &transform_info;
+	entity_info.script = &script_info;
+
+	game_entity::entity ntt{ game_entity::create(entity_info) };
+	if (!ntt.is_valid()) {
+		return id::invalid_id;
+	}
+	return ntt.get_id();
+}
+
+EDITOR_INTERFACE void DestroyEntity(u32 entity_id)
+{
+	if (entity_id == id::invalid_id) return;
+	game_entity::remove(game_entity::entity_id{ entity_id });
 }

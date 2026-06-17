@@ -8,11 +8,19 @@
 
 namespace primal::graphics::material_graph {
 
+struct NodeTypeInfo {
+    const char* type_name;       // e.g. "ConstantFloat4"
+    const char* display_name;    // e.g. "Constant Float4"
+    const char* category;        // e.g. "Constants"
+    bool        is_terminal;     // true only for MaterialOutput
+};
+
 class MaterialNode {
 public:
     virtual ~MaterialNode() = default;
     virtual const char* TypeName() const = 0;
     virtual void Execute() = 0;
+    virtual NodeTypeInfo GetTypeInfo() const = 0;
 
     std::vector<MaterialPin> inputs;
     std::vector<MaterialPin> outputs;

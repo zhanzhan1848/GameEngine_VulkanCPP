@@ -10,6 +10,8 @@
 #include "Components/Cluster.h"
 #include "Components/Geometry.h"
 #include "Components/Material.h"
+#include "Components/Light.h"
+#include "Components/Camera.h"
 
 namespace primal {
 
@@ -21,6 +23,8 @@ template<> struct component_init_info<component::Particle>      { using type = p
 template<> struct component_init_info<component::Cluster>       { using type = cluster::init_info; };
 template<> struct component_init_info<component::Geometry>      { using type = geometry::component::init_info; };
 template<> struct component_init_info<component::Material>      { using type = material::init_info; };
+template<> struct component_init_info<component::Light>         { using type = light::init_info; };
+template<> struct component_init_info<component::Camera>        { using type = camera::init_info; };
 
 namespace game_entity {
 
@@ -38,6 +42,10 @@ template<typename T>
         return primal::geometry::component::get(_id);
     } else if constexpr (std::is_same_v<T, component::Material>) {
         return primal::material::component{ primal::material::material_component_id{_id} };
+    } else if constexpr (std::is_same_v<T, component::Light>) {
+        return primal::light::component{ primal::light::light_component_id{_id} };
+    } else if constexpr (std::is_same_v<T, component::Camera>) {
+        return primal::camera::component{ primal::camera::camera_component_id{_id} };
     }
 }
 
@@ -70,6 +78,14 @@ void entity::Add(const typename component_init_info<T>::type& info) {
         auto c = material::create(info, *this);
         assert(c.is_valid());
         set_component_bit(_id, static_cast<u8>(component_bit::Material));
+    } else if constexpr (std::is_same_v<T, component::Light>) {
+        auto c = light::create(info, *this);
+        assert(c.is_valid());
+        set_component_bit(_id, static_cast<u8>(component_bit::Light));
+    } else if constexpr (std::is_same_v<T, component::Camera>) {
+        auto c = camera::create(info, *this);
+        assert(c.is_valid());
+        set_component_bit(_id, static_cast<u8>(component_bit::Camera));
     }
 }
 
@@ -100,6 +116,14 @@ void entity::Remove() {
         material::component mc{ material::material_component_id{_id} };
         material::remove(mc);
         clear_component_bit(_id, static_cast<u8>(component_bit::Material));
+    } else if constexpr (std::is_same_v<T, component::Light>) {
+        light::component lc{ light::light_component_id{_id} };
+        light::remove(lc);
+        clear_component_bit(_id, static_cast<u8>(component_bit::Light));
+    } else if constexpr (std::is_same_v<T, component::Camera>) {
+        camera::component cc{ camera::camera_component_id{_id} };
+        camera::remove(cc);
+        clear_component_bit(_id, static_cast<u8>(component_bit::Camera));
     }
 }
 

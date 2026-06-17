@@ -4,6 +4,7 @@
 #include "Graphics/RenderPipeline/RenderPipeline.h"
 #include "Graphics/RenderPipeline/StandardRenderPipeline.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
+#include "Graphics/Lumen/LumenTypes.h"
 #include <cstring>
 
 #pragma comment(lib, "Engine.lib")
@@ -14,6 +15,7 @@
 #include "Graphics/RenderPipeline/RenderPipeline.h"
 #include "Graphics/RenderPipeline/StandardRenderPipeline.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
+#include "Graphics/Lumen/LumenTypes.h"
 #include <cstring>
 
 #endif
@@ -116,6 +118,77 @@ EDITOR_INTERFACE u32 ReloadPipelineShader(u64 shader_handle, const void* data, u
     if (!p) return 0;
     return p->ReloadShader(
         static_cast<rhi::ShaderHandle>(shader_handle), data, data_size) ? 1u : 0u;
+}
+
+// ============================================================================
+// Mesh Entity Registration (content_id → ECS entity → render pipeline)
+// ============================================================================
+
+// Register a mesh resource with the pipeline and create an ECS entity that
+// participates in rendering. geometry_content_id from ProceduralMeshCreate or
+// ImportSceneBinary; texture_content_ids is typically [albedo, normal, orm]
+// (use 0 / invalid_id for fallback). Returns entity_id, 0 on failure.
+EDITOR_INTERFACE u64 PipelineRegisterMeshEntity(u64 geometry_content_id,
+                                                const u64* texture_content_ids,
+                                                u32 texture_count) {
+    auto* p = GetStdPipeline();
+    if (!p || geometry_content_id == 0) return 0;
+
+    // Convert u64 array → id::id_type array for the engine API.
+    // Caller may pass nullptr + texture_count=0 for untextured meshes.
+    static thread_local id::id_type tex_buf[8];
+    const id::id_type* tex_ptr = nullptr;
+    if (texture_content_ids && texture_count > 0) {
+        const u32 n = (texture_count < 8) ? texture_count : 8;
+        for (u32 i = 0; i < n; ++i) {
+            tex_buf[i] = static_cast<id::id_type>(texture_content_ids[i]);
+        }
+        tex_ptr = tex_buf;
+        texture_count = n;
+    }
+
+    const id::id_type eid = p->RegisterMeshEntity(
+        static_cast<id::id_type>(geometry_content_id), tex_ptr, texture_count);
+    return static_cast<u64>(eid);
+}
+
+// Unregister a mesh entity and destroy the underlying ECS entity.
+// Safe to call with 0 / invalid_id (no-op).
+EDITOR_INTERFACE void PipelineUnregisterMeshEntity(u64 entity_id) {
+    auto* p = GetStdPipeline();
+    if (!p || entity_id == 0) return;
+    p->UnregisterMeshEntity(static_cast<id::id_type>(entity_id));
+}
+
+// ============================================================================
+// Editor Mode Toggle
+// ============================================================================
+
+// Enable/disable editor mode (lightweight forward rendering path).
+EDITOR_INTERFACE void PipelineSetEditorMode(u32 enable) {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    p->SetEditorMode(enable != 0);
+}
+
+EDITOR_INTERFACE u32 PipelineIsEditorMode() {
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    return p->IsEditorMode() ? 1u : 0u;
+}
+
+// ============================================================================
+// Lumen GI Quality Preset
+// ============================================================================
+
+// Set Lumen GI quality preset. Triggers Lumen subsystem re-init (expensive —
+// do not call per-frame). preset: 0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra, 5=UltraRT.
+EDITOR_INTERFACE void PipelineSetLumenConfig(u32 quality_preset) {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    lumen::LumenConfig config{};
+    config.quality = static_cast<lumen::LumenQualityPreset>(quality_preset);
+    p->SetLumenConfig(config);
 }
 
 } // extern "C"

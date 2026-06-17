@@ -120,6 +120,13 @@ public:
      */
     bool ReloadShader(ShaderHandle shader, const void* data, size_t size) override;
 
+    /// Upload data into an existing buffer using this device's own handle→buffer
+    /// allocator. Bypasses the global ResourceManager singleton, which isn't shared
+    /// across dylib boundaries (each translation unit gets its own Meyers singleton
+    /// instance, so the executable's "create" side and the dylib's "update" side
+    /// disagree on the handle→resource map).
+    bool UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset = 0) override;
+
     /**
      * @brief 获取采样器对象 (内部使用)
      */

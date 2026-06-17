@@ -19,6 +19,9 @@ public:
         outputs[0].expected_type = MaterialDataType::Float; outputs[0].index = 0;
     }
     const char* TypeName() const override { return "Fresnel"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"Fresnel", "Fresnel", "Math", false};
+    }
     void Execute() override {
         auto* n = inputs[0].AsFloat3();
         auto* v = inputs[1].AsFloat3();
@@ -56,6 +59,9 @@ public:
         outputs[0].expected_type = MaterialDataType::Float3; outputs[0].index = 0;
     }
     const char* TypeName() const override { return "NormalBlend"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"NormalBlend", "Normal Blend", "Math", false};
+    }
     void Execute() override {
         auto* base = inputs[0].AsFloat3();
         auto* detail = inputs[1].AsFloat3();

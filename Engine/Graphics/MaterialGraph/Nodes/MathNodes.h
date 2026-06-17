@@ -20,6 +20,9 @@ public:
         outputs[0].index = 0;
     }
     const char* TypeName() const override { return "Add"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"Add", "Add", "Math", false};
+    }
     void Execute() override {
         if (!inputs[0].data || !inputs[1].data) return;
         auto ta = inputs[0].data->type;
@@ -62,6 +65,9 @@ public:
         outputs[0].index = 0;
     }
     const char* TypeName() const override { return "Multiply"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"Multiply", "Multiply", "Math", false};
+    }
     void Execute() override {
         if (!inputs[0].data || !inputs[1].data) return;
         // Float * Float3/Float4: scalar * vector
@@ -116,6 +122,9 @@ public:
         outputs[0].expected_type = MaterialDataType::Float; outputs[0].index = 0;
     }
     const char* TypeName() const override { return "Lerp"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"Lerp", "Lerp", "Math", false};
+    }
     void Execute() override {
         if (!inputs[0].data || !inputs[1].data || !inputs[2].data) return;
         auto* alpha = inputs[2].AsFloat();
@@ -169,6 +178,9 @@ public:
         outputs[0].expected_type = MaterialDataType::Float; outputs[0].index = 0;
     }
     const char* TypeName() const override { return "Clamp"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"Clamp", "Clamp", "Math", false};
+    }
     void Execute() override {
         if (!inputs[0].data) return;
         auto* v = inputs[0].AsFloat();
@@ -205,6 +217,9 @@ public:
         outputs[0].expected_type = MaterialDataType::Float; outputs[0].index = 0;
     }
     const char* TypeName() const override { return "Pow"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"Pow", "Pow", "Math", false};
+    }
     void Execute() override {
         auto* base = inputs[0].AsFloat();
         auto* exp = inputs[1].AsFloat();
@@ -225,6 +240,9 @@ public:
         outputs[0].expected_type = MaterialDataType::Float; outputs[0].index = 0;
     }
     const char* TypeName() const override { return "Saturate"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"Saturate", "Saturate", "Math", false};
+    }
     void Execute() override {
         auto* v = inputs[0].AsFloat();
         if (v) {
@@ -232,6 +250,64 @@ public:
             out->value = std::clamp(v->value, 0.0f, 1.0f);
         }
     }
+};
+
+// Remap: maps Value from [in_min, in_max] to [out_min, out_max]
+class RemapNode : public MaterialNode {
+public:
+    f32 in_min{0.0f};
+    f32 in_max{1.0f};
+    f32 out_min{0.0f};
+    f32 out_max{1.0f};
+
+    RemapNode() {
+        inputs.resize(1);
+        inputs[0].expected_type = MaterialDataType::Float;
+        inputs[0].index = 0;
+        outputs.resize(1);
+        outputs[0].expected_type = MaterialDataType::Float;
+        outputs[0].index = 0;
+    }
+    const char* TypeName() const override { return "Remap"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"Remap", "Remap", "Math", false};
+    }
+    void Execute() override {
+        auto* v = inputs[0].AsFloat();
+        if (v) {
+            auto* out = CreateOutput<MaterialFloatData>(0);
+            f32 range_in = in_max - in_min;
+            if (std::abs(range_in) < 1e-7f) {
+                out->value = out_min;
+            } else {
+                f32 t = (v->value - in_min) / range_in;
+                out->value = out_min + t * (out_max - out_min);
+            }
+        }
+    }
+    const MaterialParamDescriptor* GetParamDescriptors(u32& c) const override { c = 4; return kParams; }
+    bool SetParamByName(const char* n, f32 v) override {
+        if (std::strcmp(n, "in_min") == 0) { in_min = v; return true; }
+        if (std::strcmp(n, "in_max") == 0) { in_max = v; return true; }
+        if (std::strcmp(n, "out_min") == 0) { out_min = v; return true; }
+        if (std::strcmp(n, "out_max") == 0) { out_max = v; return true; }
+        return false;
+    }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 1; return kPins; }
+
+private:
+    static const MaterialParamDescriptor kParams[];
+    static const MaterialPinDescriptor kPins[];
+};
+
+inline const MaterialParamDescriptor RemapNode::kParams[] = {
+    {"in_min",  "Remap", MaterialParamType::Float, {-1e6f, 1e6f, 0.01f}, MAT_OFFSETOF(RemapNode, in_min),  sizeof(in_min),  nullptr},
+    {"in_max",  "Remap", MaterialParamType::Float, {-1e6f, 1e6f, 0.01f}, MAT_OFFSETOF(RemapNode, in_max),  sizeof(in_max),  nullptr},
+    {"out_min", "Remap", MaterialParamType::Float, {-1e6f, 1e6f, 0.01f}, MAT_OFFSETOF(RemapNode, out_min), sizeof(out_min), nullptr},
+    {"out_max", "Remap", MaterialParamType::Float, {-1e6f, 1e6f, 0.01f}, MAT_OFFSETOF(RemapNode, out_max), sizeof(out_max), nullptr},
+};
+inline const MaterialPinDescriptor RemapNode::kPins[] = {
+    {"value", 0, MaterialDataType::Float, true},
 };
 
 } // namespace primal::graphics::material_graph

@@ -249,6 +249,53 @@ EDITOR_INTERFACE u32 PCGGetOutputPointCount(u32 node_id) {
     return pts ? pts->count : 0;
 }
 
+// Read output point positions (3 floats per point: x, y, z) into caller buffer.
+// Returns the number of points actually written (min(pts->count, max_count)).
+// Writes max_count*3 floats to out_positions_xyz (interleaved xyz).
+EDITOR_INTERFACE u32 PCGGetOutputPositions(u32 node_id, f32* out_positions_xyz, u32 max_count) {
+    if (!g_pcg_graph || !out_positions_xyz || max_count == 0) return 0;
+    auto* pts = g_pcg_graph->GetOutputPoints(node_id);
+    if (!pts) return 0;
+    const u32 n = (pts->count < max_count) ? pts->count : max_count;
+    for (u32 i = 0; i < n; ++i) {
+        out_positions_xyz[i * 3 + 0] = pts->positions[i].x;
+        out_positions_xyz[i * 3 + 1] = pts->positions[i].y;
+        out_positions_xyz[i * 3 + 2] = pts->positions[i].z;
+    }
+    return n;
+}
+
+// Read per-point mesh slot indices (1 u32 per point) from PCGAttr::MeshIndex.
+// Returns the number of indices written. Output reflects MeshAssignNode assignment;
+// points without assignment read back 0 (first slot).
+EDITOR_INTERFACE u32 PCGGetOutputMeshSlots(u32 node_id, u32* out_mesh_slots, u32 max_count) {
+    if (!g_pcg_graph || !out_mesh_slots || max_count == 0) return 0;
+    auto* pts = g_pcg_graph->GetOutputPoints(node_id);
+    if (!pts) return 0;
+    const u32 n = (pts->count < max_count) ? pts->count : max_count;
+    for (u32 i = 0; i < n; ++i) {
+        out_mesh_slots[i] = static_cast<u32>(pts->GetAttr(i, PCGAttr::MeshIndex));
+    }
+    return n;
+}
+
+// Read per-point transforms (4 floats: scaleX, scaleY, scaleZ, rotationY) from
+// PCGAttr::ScaleX/Y/Z + PCGAttr::RotationY. Returns count written.
+// Caller can reconstruct a per-instance matrix from these (Y-axis rotation + NDC scale).
+EDITOR_INTERFACE u32 PCGGetOutputTransforms(u32 node_id, f32* out_scale_xyz_rot_y, u32 max_count) {
+    if (!g_pcg_graph || !out_scale_xyz_rot_y || max_count == 0) return 0;
+    auto* pts = g_pcg_graph->GetOutputPoints(node_id);
+    if (!pts) return 0;
+    const u32 n = (pts->count < max_count) ? pts->count : max_count;
+    for (u32 i = 0; i < n; ++i) {
+        out_scale_xyz_rot_y[i * 4 + 0] = pts->GetAttr(i, PCGAttr::ScaleX);
+        out_scale_xyz_rot_y[i * 4 + 1] = pts->GetAttr(i, PCGAttr::ScaleY);
+        out_scale_xyz_rot_y[i * 4 + 2] = pts->GetAttr(i, PCGAttr::ScaleZ);
+        out_scale_xyz_rot_y[i * 4 + 3] = pts->GetAttr(i, PCGAttr::RotationY);
+    }
+    return n;
+}
+
 // ============================================================================
 // Error Reporting
 // ============================================================================

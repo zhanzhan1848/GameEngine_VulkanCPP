@@ -51,6 +51,15 @@ namespace primal::graphics::metal::core
     }
 
     MTL::Device* get_device();
+
+    // === RHI 桥接（Phase 1 Sub-step 1.2.3'）===
+    // 注入外部 MTL::Device（由 rhi::MetalDevice 持有）。设置后 get_device() 优先返回它，
+    // create_device() 跳过 MTL::CreateSystemDefaultDevice() 调用。
+    // 传 nullptr 清除注入，恢复默认行为。
+    // 所有权：set_external_device 会 retain()，shutdown 会 release()。
+    // rhi::MetalDevice 自身持有的 mtlDevice_ 不受影响（双引用计数安全）。
+    void set_external_device(MTL::Device* device);
+
     void render(MTK::View* pView);
 
     [[nodiscard]] u32 current_frame_index();

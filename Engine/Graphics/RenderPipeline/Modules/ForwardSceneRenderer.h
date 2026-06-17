@@ -4,6 +4,7 @@
 #include "Graphics/SceneDataAdapter.h"
 #include "Graphics/Passes/ParticlePass.h"
 #include "Graphics/RenderPipeline/Modules/LineBatchRenderer.h"
+#include "Graphics/DebugDraw/DebugDrawQueue.h"
 #include "Graphics/Material/ShaderTechnique.h"
 #include "Utilities/Math.h"
 #include <unordered_map>
@@ -277,6 +278,11 @@ private:
     // Geometry entity line rendering
     LineBatchRenderer line_renderer_;
     std::vector<id::id_type> geometry_entity_ids_;
+
+    // Frame-local staging for debug draw lines drained from debug_draw::queue().
+    // Reused across frames to avoid reallocations.
+    std::vector<debug_draw::DebugLine> frame_local_debug_lines_;
+    std::vector<math::v3>              frame_debug_positions_;
 };
 
 } // namespace primal::graphics

@@ -3,6 +3,21 @@
 #include "Direct3D12//D3D12Interface.h"
 #include "Vulkan/VulkanInterface.h"
 #include "Metal/MetalInterface.h"
+#include "Graphics/RHI/Core/RHIDeviceFactory.h"
+#if defined(__APPLE__)
+#include "Metal/MetalCore.h"
+#include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#endif
+
+// === Phase 1 Sub-step 1.2.6': Renderer.cpp = 旧 platform_interface 转发层 ===
+// 整个 Renderer.cpp 的 forwarding 逻辑（gfx.surface.create / gfx.light.set_parameter / ...）
+// 都通过静态 platform_interface gfx{} 变量做后端分发。这条路径已被 RHI device path
+// （initialize_with_device + bind_rhi_device_to_legacy + initialize(metal)）替代，
+// 但 forwarding API 本身还是 public surface（Editor 和集成测试在用）。
+// 所以保留实现，只抑制整个 TU 的 deprecation 警告。Phase 2 会真正删除 gfx 分发路径。
+#ifdef __clang__
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 
 namespace primal::graphics
 {
@@ -20,6 +35,10 @@ namespace primal::graphics
 		};
 
 		platform_interface gfx{};
+
+		// === RHI 路径状态（新）===
+		// 与 platform_interface gfx{} 并存。initialize_with_device 后此非空。
+		rhi::RHIDeviceBase* g_rhiDevice{ nullptr };
 
 #ifndef PRIMAL_PLUS
 
@@ -449,6 +468,53 @@ namespace primal::graphics
 	void remove_render_item(id::id_type id)
 	{
 		if (gfx.resources.remove_render_item) gfx.resources.remove_render_item(id);
+	}
+
+	// === RHI 路径入口实现（新）===
+	// 与 platform_interface 路径并存：UI 层通过 DeviceDesc.platform 决策，
+	// 引擎通过 RHIDeviceFactory 被动映射。详见 RHIDeviceFactory.h。
+	bool initialize_with_device(const rhi::DeviceDesc& desc)
+	{
+		if (g_rhiDevice) return false;
+		g_rhiDevice = rhi::CreateRHIDevice(desc);
+		return g_rhiDevice != nullptr;
+	}
+
+	void shutdown_rhi()
+	{
+		if (!g_rhiDevice) return;
+		rhi::DestroyRHIDevice(g_rhiDevice);
+		g_rhiDevice = nullptr;
+	}
+
+	bool is_rhi_initialized()
+	{
+		return g_rhiDevice != nullptr;
+	}
+
+	rhi::RHIDeviceBase* get_rhi_device()
+	{
+		return g_rhiDevice;
+	}
+
+	bool bind_rhi_device_to_legacy()
+	{
+		if (!g_rhiDevice) return false;
+
+#if defined(__APPLE__)
+		// 通过 dynamic_cast 拿到 MetalDevice 的原生 MTL::Device 注入到 metal::core
+		auto* metalDevice = dynamic_cast<rhi::MetalDevice*>(g_rhiDevice);
+		if (!metalDevice) return false;
+
+		MTL::Device* native = metalDevice->GetNativeDevice();
+		if (!native) return false;
+
+		metal::core::set_external_device(native);
+		return true;
+#else
+		// 非 Apple 平台目前没有 RHI Metal 后端，旧 backend 仍走自己的 create_device
+		return false;
+#endif
 	}
 
 }

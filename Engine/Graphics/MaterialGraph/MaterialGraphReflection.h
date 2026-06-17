@@ -15,7 +15,8 @@ enum class MaterialParamType : u8 {
     Int,
     UInt,
     Enum,
-    Texture
+    Texture,
+    Curve
 };
 
 struct MaterialParamRange {

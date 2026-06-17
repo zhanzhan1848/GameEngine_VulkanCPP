@@ -13,6 +13,9 @@ public:
         outputs[0].index = 0;
     }
     const char* TypeName() const override { return "Time"; }
+    NodeTypeInfo GetTypeInfo() const override {
+        return {"Time", "Time", "Input", false};
+    }
     void Execute() override {
         static auto start = std::chrono::steady_clock::now();
         f32 t = std::chrono::duration<f32>(std::chrono::steady_clock::now() - start).count();
