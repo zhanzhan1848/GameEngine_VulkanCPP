@@ -75,45 +75,7 @@ public:
             return;
         }
 
-        // Build RHIMeshAsset with ProceduralMesh buffer layout:
-        //   position_buffer: f32x3 per vertex (12B)
-        //   element_buffer:  static_normal_texture packed (20B) via WriteVertex
-        //   index_buffer:    u32 indices
-        const u32 vert_count = static_cast<u32>(mesh.positions.size() / 3);
-        const u32 idx_count  = static_cast<u32>(mesh.indices.size());
-
-        graphics::rhi::RHIMeshAsset asset;
-        asset.num_vertices = vert_count;
-        asset.num_indices  = idx_count;
-        asset.position_buffer.resize(vert_count * 12);
-        asset.element_buffer.resize(vert_count * content::PROC_ELEM_STRIDE);
-        asset.index_buffer.resize(idx_count * 4);
-
-        // Positions: source is already interleaved xyz
-        std::memcpy(asset.position_buffer.data(), mesh.positions.data(), vert_count * 12);
-        // Elements: pack via WriteVertex (color + t_sign + u16 normal + u16 tangent + f32 uv)
-        {
-            u8* pos = asset.position_buffer.data();
-            u8* elem = asset.element_buffer.data();
-            for (u32 v = 0; v < vert_count; ++v) {
-                content::WriteVertex(
-                    pos + v * 12,
-                    elem + v * content::PROC_ELEM_STRIDE,
-                    mesh.positions[v * 3 + 0],
-                    mesh.positions[v * 3 + 1],
-                    mesh.positions[v * 3 + 2],
-                    mesh.normals [v * 3 + 0],
-                    mesh.normals [v * 3 + 1],
-                    mesh.normals [v * 3 + 2],
-                    mesh.uvs     [v * 2 + 0],
-                    mesh.uvs     [v * 2 + 1]);
-            }
-        }
-        // Indices
-        std::memcpy(asset.index_buffer.data(), mesh.indices.data(), idx_count * 4);
-
-        // Register asset — captures content_id for output + tracking
-        last_created_id_ = content::register_mesh_asset(asset);
+        BuildAndRegisterAsset(mesh);
 
         auto* out = CreateOutput<PCGGeometryData>(0);
         out->content_id = last_created_id_;
@@ -145,6 +107,41 @@ public:
     }
 
 private:
+    // Build RHIMeshAsset from MarchingCubesResult, register it, and update
+    // last_created_id_. Shared by CPU and GPU paths. Position buffer is f32x3
+    // interleaved; element buffer uses content::WriteVertex (20B static_normal_texture);
+    // index buffer is u32. Destroys any previously-created asset first via the
+    // caller (Execute() must call DestroyTrackedAsset() before this).
+    void BuildAndRegisterAsset(const MarchingCubesResult& mesh) {
+        const u32 vert_count = static_cast<u32>(mesh.positions.size() / 3);
+        const u32 idx_count  = static_cast<u32>(mesh.indices.size());
+
+        graphics::rhi::RHIMeshAsset asset;
+        asset.num_vertices = vert_count;
+        asset.num_indices  = idx_count;
+        asset.position_buffer.resize(vert_count * 12);
+        asset.element_buffer.resize(vert_count * content::PROC_ELEM_STRIDE);
+        asset.index_buffer.resize(idx_count * 4);
+
+        std::memcpy(asset.position_buffer.data(), mesh.positions.data(), vert_count * 12);
+        for (u32 v = 0; v < vert_count; ++v) {
+            content::WriteVertex(
+                asset.position_buffer.data() + v * 12,
+                asset.element_buffer.data() + v * content::PROC_ELEM_STRIDE,
+                mesh.positions[v * 3 + 0],
+                mesh.positions[v * 3 + 1],
+                mesh.positions[v * 3 + 2],
+                mesh.normals [v * 3 + 0],
+                mesh.normals [v * 3 + 1],
+                mesh.normals [v * 3 + 2],
+                mesh.uvs     [v * 2 + 0],
+                mesh.uvs     [v * 2 + 1]);
+        }
+        std::memcpy(asset.index_buffer.data(), mesh.indices.data(), idx_count * 4);
+
+        last_created_id_ = content::register_mesh_asset(asset);
+    }
+
     void DestroyTrackedAsset() {
         if (last_created_id_ != id::invalid_id) {
             content::destroy_resource(last_created_id_, content::asset_type::mesh);
