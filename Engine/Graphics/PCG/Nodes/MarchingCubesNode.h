@@ -65,7 +65,7 @@ public:
         if (res < 2) res = 2;
         if (res > 128) res = 128;
 
-        MarchingCubesResult mesh = GenerateSurfaceNets(
+        MarchingCubesResult mesh = GenerateSurfaceNetsCPU(
             *field, bounds_min, bounds_max, res, iso_value);
 
         if (mesh.positions.empty() || mesh.indices.empty()) {

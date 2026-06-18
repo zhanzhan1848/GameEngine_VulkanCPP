@@ -59,7 +59,7 @@ inline math::v3 GridIndexToWorld(u32 i, u32 j, u32 k,
 
 } // namespace
 
-MarchingCubesResult GenerateSurfaceNets(
+MarchingCubesResult GenerateSurfaceNetsCPU(
     const PCGField& field,
     const math::v3& bounds_min,
     const math::v3& bounds_max,

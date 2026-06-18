@@ -37,7 +37,7 @@ struct MarchingCubesResult {
 //   6. UV: Y-planar projection (u on X axis, v on Z axis, mapped to [0,1] over bounds)
 //
 // Returns empty result on degenerate input (zero/very small resolution, etc.).
-MarchingCubesResult GenerateSurfaceNets(
+MarchingCubesResult GenerateSurfaceNetsCPU(
     const PCGField& field,
     const math::v3& bounds_min,
     const math::v3& bounds_max,
