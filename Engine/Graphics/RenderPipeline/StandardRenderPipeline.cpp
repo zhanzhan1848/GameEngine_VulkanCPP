@@ -9,6 +9,7 @@
 #include "Graphics/Nanite/ColorHistoryManager.h"
 #include "Graphics/Nanite/HZBSystem.h"
 #include "Graphics/Nanite/GlobalSDF.h"
+#include "Graphics/PCG/GPU/GPUMesher.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
 #include "Graphics/Scene/CameraSyncSystem.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
@@ -282,6 +283,10 @@ void StandardRenderPipeline::InitializeSubsystems() {
         pcg_sdf_readback_initialized_ = pcg_sdf_readback_.Initialize(device_, globalSDF.GetCascade(0).resolution);
     }
 
+    // GPU Mesher (Phase 9.3a) — singleton bound to device; PCG MarchingCubesNode
+    // queries IsReady() and falls back to CPU if false.
+    pcg::GPUMesher::Get().Initialize(device_);
+
     // --- Shaders are NOT compiled here ---
     // The caller must set shader handles via SetShaderHandles() before Render().
     // Modules that receive INVALID_SHADER handles will skip their passes gracefully.
@@ -325,6 +330,9 @@ void StandardRenderPipeline::InitializeSubsystems() {
 }
 
 void StandardRenderPipeline::ShutdownSubsystems() {
+    // GPUMesher shutdown before device goes away.
+    pcg::GPUMesher::Get().Shutdown();
+
     if (pcg_sdf_readback_initialized_) { pcg_sdf_readback_.Shutdown(); pcg_sdf_readback_initialized_ = false; }
 
     if (sc_ddgi_module_) { sc_ddgi_module_->Shutdown(); sc_ddgi_module_.reset(); }
