@@ -432,6 +432,31 @@ TestResult TestMarchingCubesReexecuteNoLeak() {
     return TestResult::Passed;
 }
 
+TestResult TestGPUMesherFallback() {
+    // Phase 9.3a contract: algorithm=1 (GPU) with no device must transparently
+    // fall back to CPU. Headless test env has no device, so this exercises the
+    // fallback path. In a device-initialized env the same code would run on GPU.
+    PCGCreateGraph();
+
+    const u32 noise = PCGAddNode("NoiseField");
+    const u32 mc    = PCGAddNode("MarchingCubes");
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_min", -4.f, -4.f, -4.f) != 0, "Set bounds_min");
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_max",  4.f,  4.f,  4.f) != 0, "Set bounds_max");
+    TEST_ASSERT(PCGSetNodeParamFloat(mc, "iso_value", 0.0f) != 0, "Set iso_value");
+    TEST_ASSERT(PCGSetNodeParamFloat(mc, "resolution", 32) != 0, "Set resolution");
+    TEST_ASSERT(PCGSetNodeParamFloat(mc, "algorithm", 1.0f) != 0, "Set algorithm=GPU");
+
+    PCGConnect(noise, 0, mc, 0);
+    PCGExecute();
+
+    const u64 cid = PCGGetOutputGeometry(mc);
+    TEST_ASSERT(cid != INVALID_CONTENT_ID,
+                "algorithm=1 falls back to CPU when no device; produces valid content_id");
+
+    PCGDestroyGraph();
+    return TestResult::Passed;
+}
+
 // ============================================================================
 // CameraAPI matrix readback tests
 // ============================================================================
@@ -539,6 +564,9 @@ void RunMarchingCubesTests() {
     suite.AddTestCase(TestCase("Re-execute no leak",
         TestMarchingCubesReexecuteNoLeak,
         "Two Execute() calls on same MC node: destroy-before-create, no FreeList assertion"));
+    suite.AddTestCase(TestCase("GPU fallback",
+        TestGPUMesherFallback,
+        "algorithm=1 + no device falls back to CPU; output is non-empty"));
     suite.RunAllTests();
 }
 
