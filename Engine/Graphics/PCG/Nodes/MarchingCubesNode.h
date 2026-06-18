@@ -27,7 +27,7 @@ namespace primal::graphics::pcg {
 //                    Default 64; 96 is the comfort ceiling for interactive use.
 //   iso_value      — threshold where the surface lives. For SDF use 0.0;
 //                    for noise/density fields tune to taste (e.g. 0.5).
-//   algorithm      — reserved for future (0=SurfaceNets, 1=ClassicMC)
+//   algorithm      — 0=SurfaceNets_CPU, 1=SurfaceNets_GPU, 2=ClassicMC(future)
 //
 // Lifecycle:
 //   The node owns the generated mesh asset across re-executions. Execute()
@@ -182,8 +182,8 @@ inline const PCGParamDescriptor MarchingCubesNode::kParams[] = {
      PCG_OFFSETOF(MarchingCubesNode, resolution), sizeof(resolution), nullptr},
     {"iso_value",  "Volume", PCGParamType::Float, {-1.0f, 1.0f, 0.01f},
      PCG_OFFSETOF(MarchingCubesNode, iso_value),  sizeof(iso_value),  nullptr},
-    {"algorithm",  "Volume", PCGParamType::UInt,  {0.0f, 1.0f, 1.0f},
-     PCG_OFFSETOF(MarchingCubesNode, algorithm),  sizeof(algorithm),  "SurfaceNets,ClassicMC"},
+    {"algorithm",  "Volume", PCGParamType::UInt,  {0.0f, 2.0f, 1.0f},
+     PCG_OFFSETOF(MarchingCubesNode, algorithm),  sizeof(algorithm),  "SurfaceNets_CPU,SurfaceNets_GPU,ClassicMC"},
 };
 
 inline const PCGPinDescriptor MarchingCubesNode::kPins[] = {
