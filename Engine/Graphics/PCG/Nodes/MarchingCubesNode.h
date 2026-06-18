@@ -4,6 +4,7 @@
 #include "Graphics/PCG/PCGTypes.h"
 #include "Graphics/PCG/PCGReflection.h"
 #include "Graphics/PCG/MarchingCubes.h"
+#include "Graphics/PCG/GPU/GPUMesher.h"
 #include "Content/ContentToEngine.h"
 #include "Content/ProceduralMesh.h"
 #include <cstring>
@@ -65,8 +66,23 @@ public:
         if (res < 2) res = 2;
         if (res > 128) res = 128;
 
-        MarchingCubesResult mesh = GenerateSurfaceNetsCPU(
-            *field, bounds_min, bounds_max, res, iso_value);
+        // algorithm: 0=SurfaceNets_CPU, 1=SurfaceNets_GPU, 2=ClassicMC(future)
+        // GPU path requires GPUMesher to be initialized (device available).
+        // If GPUMesher isn't ready (headless test env, no RHI device), fall
+        // back to CPU transparently so graph behavior is consistent.
+        MarchingCubesResult mesh;
+        if (algorithm == 1 && GPUMesher::Get().IsReady()) {
+            mesh = GPUMesher::Get().GenerateSurfaceNets(
+                *field, bounds_min, bounds_max, res, iso_value);
+            // GPU may return empty on internal failure — fall back to CPU.
+            if (mesh.positions.empty()) {
+                mesh = GenerateSurfaceNetsCPU(
+                    *field, bounds_min, bounds_max, res, iso_value);
+            }
+        } else {
+            mesh = GenerateSurfaceNetsCPU(
+                *field, bounds_min, bounds_max, res, iso_value);
+        }
 
         if (mesh.positions.empty() || mesh.indices.empty()) {
             // No surface extracted — emit empty geometry with invalid_id.
