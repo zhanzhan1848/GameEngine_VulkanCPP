@@ -72,6 +72,7 @@ Phase 9.3a is **infrastructure-first**, not raw-perf-first. The dominant cost in
 - **PCGField GPU-side representation** (`PCGGridField` / `PCGGPUField`) — would expand scope; deferred
 - **GPU-resident mesh output** (skip CPU round-trip) — requires changes to Nanite mesh pipeline; deferred to 9.3b
 - **Frame-delayed readback** — Phase 9.3a accepts synchronous `waitUntilCompleted`; 9.3b can optimize
+- **RHI GPU timer query API** (`MTLCounterSampleBuffer` / Vulkan `vkCmdWriteTimestamp` abstraction) — Phase 9.3a measures via wall-clock around the blocking call (within ~5% of true GPU time); 9.3b adds proper per-pass timer for finer profiling
 
 ---
 
@@ -324,16 +325,9 @@ Engine/Graphics/PCG/
 
 ### Test environment caveat
 
-`TestMediatedDataFlow` is headless and does **not** initialize the RHI device. This means headless tests can only validate the **fallback path** (algorithm=1 + no device → CPU execution). True GPU path validation happens in `TestPCGScatter` (live window test, has device).
+`TestMediatedDataFlow` is headless and does **not** initialize the RHI device. This means headless tests can only validate the **fallback path** (algorithm=1 + no device → CPU execution). True GPU path validation requires a device-initializing test — see Section 8.3.
 
-This is acceptable for Phase 9.3a because:
-- The CPU fallback uses the same `BuildAndRegisterAsset` code as the GPU path's post-readback stage
-- Visual verification in `TestPCGScatter` is the source of truth for GPU correctness
-- Adding a device-initializing headless test would require new test fixture infrastructure (out of scope)
-
-If we later need CI to catch GPU regressions, a follow-up task can add device init to `TestMediatedDataFlow` or create a new headless GPU test binary.
-
-### Headless tests (`EngineTest/IntegrationTests/TestMediatedDataFlow.cpp`)
+### 8.1 Headless fallback tests (`EngineTest/IntegrationTests/TestMediatedDataFlow.cpp`)
 
 Add three sub-tests to the existing `MarchingCubes API Tests` suite:
 
@@ -354,12 +348,79 @@ Add three sub-tests to the existing `MarchingCubes API Tests` suite:
    - In headless env both produce identical CPU output (no device → fallback); assert vertex counts match exactly
    - In device env (when run as part of live test infra): assert within ±5% (cell-center gradient vs dual-position gradient causes minor differences)
 
-### Live visual test (`EngineTest/IntegrationTests/TestPCGScatter.cpp`)
+### 8.2 Live manual visual test (`EngineTest/IntegrationTests/TestPCGScatter.cpp`)
 
 - Add key `4` (currently declared as `key_4_pressed_` but check current usage in .cpp; if in use, pick a free key) to toggle `algorithm` 0↔1 on the MarchingCubes node
 - Update title bar to show `[CPU SurfaceNets]` or `[GPU SurfaceNets]`
 - Existing `ReExecuteMarchingCubes` re-runs the MC node with the new algorithm
 - Visual check: same iso/bounds/resolution, CPU and GPU surfaces should look approximately identical (slight normal smoothing differences acceptable)
+- This is human-in-the-loop verification — not a substitute for the automated test in 8.3
+
+### 8.3 GPU rendering integration test (`EngineTest/IntegrationTests/TestGPUMesherIntegration.cpp` — NEW FILE)
+
+**This is the only test that actually exercises the GPU code path automatically.** Pattern after `TestRenderFrameAPI.cpp` which already has the full device + RenderFrame + CaptureBackbuffer lifecycle.
+
+**CMake additions** (`EngineTest/IntegrationTests/CMakeLists.txt`):
+- New executable `TestGPUMesherIntegration` with sources `TestGPUMesherIntegration.cpp`, `Main.cpp`, `MacKeyboard.mm`, `ShaderCompilation.cpp`, COMMON_HEADERS
+- `setup_test_target(TestGPUMesherIntegration)` + `target_link_libraries(TestGPUMesherIntegration PRIVATE EngineDLL ${CMAKE_DL_LIBS})`
+- Compile define: `TEST_GPU_MESHER_INTEGRATION=1`
+- Add to `IntegrationTests` pseudo-target DEPENDS list
+
+**Sub-tests (single binary, multiple cases):**
+
+1. **`TestGPUSurfaceNetsRenderBasic`** — proves GPU path produces renderable geometry
+   ```
+   InitializeEngine() → 拿 device,GPUMesher::Get().IsReady() == true
+   Build PCG graph: NoiseField → MarchingCubes(algorithm=1, res=64)
+   PCGExecute → content_id
+   PipelineRegisterMeshEntity(content_id) → entity_id (≠ 0)
+   AddEntityCamera + AddEntityLight (basic forward setup)
+   RenderFrame × 3 (warm up pipeline)
+   CaptureBackbuffer → RGBA buffer
+   Assert: mean_brightness > 0.05 (非全黑)
+   Assert: pixel_variance > threshold (非平铺色,证明几何真的渲染了)
+   PipelineUnregisterMeshEntity + PCGDestroyGraph + ShutdownEngine
+   ```
+
+2. **`TestGPUSurfaceNetsRenderVsCPU`** — proves GPU output ≈ CPU output
+   ```
+   InitializeEngine
+   Run TestGPUSurfaceNetsRenderBasic flow with algorithm=0 → capture buffer A
+   Run TestGPUSurfaceNetsRenderBasic flow with algorithm=1 → capture buffer B
+   Compute per-channel histogram for A and B
+   Assert: histogram correlation > 0.85(法向略不同 + 法线打包量化会导致像素级差异,
+                                          但分布应该相似)
+   ```
+   Note: pixel-exact match is NOT expected (cell-center gradient vs dual-pos gradient).
+   Histogram correlation catches gross divergence (winding errors, missing geometry,
+   totally wrong normals).
+
+3. **`TestGPUSurfaceNetsPerf`** — guards against perf regression
+   ```
+   InitializeEngine
+   For res in {64, 128}:
+     Build NoiseField → MarchingCubes(algorithm=1, res)
+     // Wall-clock around blocking GenerateSurfaceNets call.
+     // Since waitUntilCompleted blocks, wall clock ≈ GPU time (within ~5%).
+     auto t0 = std::chrono::high_resolution_clock::now();
+     PCGExecute();
+     auto t1 = std::chrono::high_resolution_clock::now();
+     auto ms = duration_cast<milliseconds>(t1 - t0).count();
+     Assert: ms < budget[res]
+       budget[64]  = 10 ms  (expected ~4.3ms, 2.3x headroom for CI variance)
+       budget[128] = 80 ms  (expected ~32ms, 2.5x headroom)
+   ```
+   Budget rationale: 2-3x expected value gives slack for CI machine variance while
+   catching 5-10x regressions (which would indicate a real bug — e.g., accidental
+   CPU fallback, atomic contention, debug build only).
+
+   If test runs on debug build, budgets must be x5 looser (debug is ~5x slower).
+   Detect via `#ifdef NDEBUG` and multiply budgets accordingly.
+
+**Test execution contract:**
+- All three sub-tests must pass in Release build with device
+- Sub-tests 1 and 2 should pass in any build (fallback path is exercised if no device)
+- Sub-test 3 (perf) is Release-only — debug builds skip via `#ifndef NDEBUG` guard
 
 ---
 
@@ -369,14 +430,18 @@ Add three sub-tests to the existing `MarchingCubes API Tests` suite:
 |---|---|---|
 | `waitUntilCompleted` stalls main thread | High (accepted) | Phase 9.3a is synchronous by design. Phase 9.3b introduces frame-delayed readback. |
 | Pass 0 CPU sampling dominates at 64³ (~3ms / 5ms total) | High (accepted) | Document clearly. Pass 0 elimination is the central goal of Phase 9.3b (GlobalSDF direct bind). |
-| Winding order mismatch → back-face culling | Medium | Port CPU `make_cell` offset sequence verbatim. Test visually + via baseline comparison. |
+| Winding order mismatch → back-face culling | Medium | Port CPU `make_cell` offset sequence verbatim. `TestGPUSurfaceNetsRenderBasic` (8.3) catches via variance assertion; `TestGPUSurfaceNetsRenderVsCPU` catches via histogram correlation. |
 | `atomic_uint` flaky on Apple Silicon | Low | Pattern already proven in DDGI probe update; same RHI buffer usage. |
 | 16-read budget overrun | Low | Audited: Pass 1=8, Pass 2=8, Pass 3=6 — all within 16. |
 | Test env has no device → GPU path crashes | Medium | `IsReady() == false` check forces fallback. Sub-test 2 explicitly covers this. |
 | Nanite mesh pipeline requires CPU-side `RHIMeshAsset` | Certain (accepted) | Phase 9.3a always reads back to CPU. Nanite compatibility preserved. |
-| `static_normal_texture` packing logic drifts between `WriteVertex` and shader | Medium | Extract shared helper; document bit layout in both C++ and Metal; covered by existing visual test (CPU vs GPU comparison reveals drift). |
+| `static_normal_texture` packing logic drifts between `WriteVertex` and shader | Medium | Extract shared helper; document bit layout in both C++ and Metal; covered by `TestGPUSurfaceNetsRenderVsCPU` (8.3) — drift shows up as histogram mismatch. |
 | Readback race (reading counter before GPU writes) | Medium | Use `[command_buffer waitUntilCompleted]` before any host read. Verified pattern. |
 | Buffer allocation per Execute is wasteful | Medium | First version: allocate per Execute. Optimization: pool buffers in `GPUMesher` for re-use across calls (sized to last call). Defer to follow-up if profiling reveals cost. |
+| Perf test flakes on slow CI machines | High (accepted) | Budget is 2-3x expected time (10ms/80ms vs 4.3ms/32ms). If still flaky, mark test as `LONG_RUNNING` or skip on CI via env var. |
+| Perf test reports wrong number due to wall-clock including unrelated work | Low | `GenerateSurfaceNets` blocks on `waitUntilCompleted`, so wall clock ≈ GPU time. Any unrelated work between t0/t1 is the caller's bug. |
+| `TestGPUMesherIntegration` fails to initialize engine in CI env (no window) | Medium | Follow `TestRenderFrameAPI`'s headless surface creation pattern (`CreateRenderSurface` with offscreen-only surface). Test must not require a visible window. |
+| Histogram correlation threshold (0.85) too tight / too loose | Medium | Start with 0.85 based on expected cell-center vs dual-pos gradient differences; tune after first runs. If consistently flaky, loosen to 0.75 or replace with mean/sigma comparison. |
 
 ---
 
@@ -418,3 +483,5 @@ For 128³ and larger, GPU becomes the clear win (~2x at 128³, scaling to ~5-10x
 - Whether to share `RHIMeshAsset` build logic between CPU and GPU paths via a common `BuildAndRegisterAsset` method (decided: yes, cleaner).
 - Whether `algorithm` enum should add a 4th value for "auto" (pick GPU if available). Decided: no, explicit is better. Caller can check `IsReady` if needed.
 - Whether to allocate GPU buffers per Execute or pool them. Decided: per Execute for v1, revisit if profiling shows cost.
+- Perf test budget thresholds (10ms / 80ms). Decided: start with 2-3x expected; tune based on first CI runs. If persistently flaky, switch to relative threshold (regression vs rolling baseline).
+- Histogram correlation threshold (0.85). Decided: start with 0.85; loosen if cell-center gradient causes more visual drift than expected.
