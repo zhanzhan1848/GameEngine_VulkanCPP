@@ -7,20 +7,60 @@
 
 namespace primal::content {
 
-// Elements: Normal(12B) + UV(8B) = 20B per vertex, matching CreateFromAsset "else" branch.
+// Elements: ColorTSign(4) + Normal u16[2](4) + Tangent u16[2](4) + UV f32[2](8) = 20B,
+// matching engine `static_normal_texture` format consumed directly by Metal vertex
+// shaders (see buildin_shader.metal `VertexElement`) and by GPUDrivenDrawPipeline
+// 20-byte source branch.
 static constexpr u32 PROC_ELEM_STRIDE = 20;
 static constexpr u32 PROC_ELEMENTS_TYPE = 0x03; // static_normal_texture
 
 // --- Helpers ---
 
+// Quantize a normal/tangent XY component from [-1, 1] to u16.
+// Shader decode: float(u16) * (2/65535) - 1.
+inline u16 PackSignedNormalComponent(f32 c) {
+    f32 q = (c + 1.f) * 32767.5f;
+    if (q < 0.f) q = 0.f;
+    if (q > 65535.f) q = 65535.f;
+    return static_cast<u16>(q);
+}
+
+// Writes one vertex in the engine's packed static_normal_texture layout.
+//   elem[0..3]   : u32 ColorTSign = color_rgb (low 3 bytes) | t_sign (byte 3)
+//                  t_sign bit 1: normal   Z sign (1=+, 0=-)
+//                  t_sign bit 0: tangent  Z sign (1=+, 0=-)
+//   elem[4..7]   : u16 Normal[2]  (XY only; Z reconstructed by shader)
+//   elem[8..11]  : u16 Tangent[2] (placeholder (1,0); ForwardPBR derives TBN from N)
+//   elem[12..19] : f32 UV[2]
 inline void WriteVertex(u8* pos, u8* elem, f32 px, f32 py, f32 pz,
                         f32 nx, f32 ny, f32 nz, f32 u, f32 v) {
     f32 p[3] = {px, py, pz};
     memcpy(pos, p, 12);
 
-    f32 n[3] = {nx, ny, nz};
-    memcpy(elem, n, 12);
-    f32 uv[2] = {u, v};
+    // Normalize defensively (callers normally pass unit normals already).
+    f32 nlen = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (nlen > 1e-8f) { nx /= nlen; ny /= nlen; nz /= nlen; }
+    else { nx = 0.f; ny = 1.f; nz = 0.f; }
+
+    const u16 n0 = PackSignedNormalComponent(nx);
+    const u16 n1 = PackSignedNormalComponent(ny);
+    // Procedural primitives have no real tangent data; encode (1, 0) which the
+    // shader will reconstruct to (1, 0, 0) — ForwardPBR ignores vertex tangent.
+    const u16 t0 = PackSignedNormalComponent(1.f);
+    const u16 t1 = PackSignedNormalComponent(0.f);
+
+    u8 sign_byte = 0;
+    if (nz >= 0.f) sign_byte |= 0x02;  // bit 1: normal Z sign
+
+    // Color white (0xFFFFFF) in low 3 bytes; t_sign byte in high byte.
+    const u32 color_tsign = 0x00FFFFFFu | (static_cast<u32>(sign_byte) << 24);
+
+    memcpy(elem + 0,  &color_tsign, 4);
+    memcpy(elem + 4,  &n0, 2);
+    memcpy(elem + 6,  &n1, 2);
+    memcpy(elem + 8,  &t0, 2);
+    memcpy(elem + 10, &t1, 2);
+    const f32 uv[2] = {u, v};
     memcpy(elem + 12, uv, 8);
 }
 

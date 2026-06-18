@@ -57,6 +57,7 @@ u32  PCGGetOutputPointCount(u32 node_id);
 u32  PCGGetOutputPositions(u32 node_id, f32* out_positions_xyz, u32 max_count);
 u32  PCGGetOutputMeshSlots(u32 node_id, u32* out_mesh_slots, u32 max_count);
 u32  PCGGetOutputTransforms(u32 node_id, f32* out_scale_xyz_rot_y, u32 max_count);
+u64  PCGGetOutputGeometry(u32 node_id);
 u32  PCGAddMeshSlot(const char* path, const char* name);
 u32  PCGSetNodeParamFloat(u32 node_id, const char* name, f32 value);
 u32  PCGSetNodeParamVec3(u32 node_id, const char* name, f32 x, f32 y, f32 z);
@@ -338,6 +339,100 @@ TestResult TestPipelineRegisterMeshEntityNoPipeline() {
 }
 
 // ============================================================================
+// MarchingCubes API tests (Phase 9.1)
+// ============================================================================
+
+TestResult TestMarchingCubesNoiseField() {
+    // Build: NoiseField → MarchingCubes, execute, verify PCGGetOutputGeometry
+    // returns a valid (non-INVALID) content_id. The mesh may be empty if noise
+    // happens to never exceed iso_value, but PCGGetOutputGeometry should still
+    // return a non-INVALID sentinel distinguishable from "node not MC".
+    PCGCreateGraph();
+
+    const u32 noise = PCGAddNode("NoiseField");
+    const u32 mc    = PCGAddNode("MarchingCubes");
+    TEST_ASSERT(noise != INVALID_NODE_ID, "NoiseField added");
+    TEST_ASSERT(mc != INVALID_NODE_ID,    "MarchingCubes added");
+
+    // Tighten bounds and raise iso so noise (FBM2D range ~[-1,1]) reliably straddles.
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_min", -4.f, -4.f, -4.f) != 0, "Set bounds_min");
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_max",  4.f,  4.f,  4.f) != 0, "Set bounds_max");
+    TEST_ASSERT(PCGSetNodeParamFloat(mc, "iso_value", 0.0f) != 0, "Set iso_value");
+    TEST_ASSERT(PCGSetNodeParamFloat(mc, "resolution", 32) != 0, "Set resolution");
+
+    PCGConnect(noise, 0, mc, 0);
+    PCGExecute();
+
+    const u64 cid = PCGGetOutputGeometry(mc);
+    TEST_ASSERT(cid != INVALID_CONTENT_ID, "MC produced a content_id (or documented empty-surface sentinel)");
+
+    // Querying geometry on the NoiseField (input node) must return INVALID — type mismatch.
+    const u64 bad = PCGGetOutputGeometry(noise);
+    TEST_ASSERT_EQ(INVALID_CONTENT_ID, bad, "Non-MC node returns INVALID_CONTENT_ID");
+
+    // Querying geometry on an out-of-range node_id must return INVALID, not crash.
+    const u64 oob = PCGGetOutputGeometry(9999);
+    TEST_ASSERT_EQ(INVALID_CONTENT_ID, oob, "Out-of-range node returns INVALID");
+
+    PCGDestroyGraph();
+    return TestResult::Passed;
+}
+
+TestResult TestMarchingCubesRegisterEntity() {
+    // Generate a mesh via MC, then attempt PipelineRegisterMeshEntity on the result.
+    // Headless: pipeline is null → must return 0 cleanly without crashing, and
+    // importantly without corrupting the MC-tracked content_id (no FreeList assertion).
+    PCGCreateGraph();
+
+    const u32 noise = PCGAddNode("NoiseField");
+    const u32 mc    = PCGAddNode("MarchingCubes");
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_min", -4.f, -4.f, -4.f) != 0, "Set bounds_min");
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_max",  4.f,  4.f,  4.f) != 0, "Set bounds_max");
+    PCGConnect(noise, 0, mc, 0);
+    PCGExecute();
+
+    const u64 cid = PCGGetOutputGeometry(mc);
+    TEST_ASSERT(cid != INVALID_CONTENT_ID, "MC produced a content_id");
+
+    // Register (graceful no-op when pipeline absent).
+    const u64 entity = PipelineRegisterMeshEntity(cid, nullptr, 0);
+    (void)entity;  // 0 without pipeline — the point is no crash + no assertion
+
+    // Unregister (also graceful on bogus id).
+    PipelineUnregisterMeshEntity(entity);
+
+    PCGDestroyGraph();
+    return TestResult::Passed;
+}
+
+TestResult TestMarchingCubesReexecuteNoLeak() {
+    // Execute the same MC node twice. The node must destroy the previous asset
+    // before allocating a new one (destroy-before-create contract). If it forgets,
+    // FreeList::operator[] would assert on a double-destroy or overflow.
+    PCGCreateGraph();
+
+    const u32 noise = PCGAddNode("NoiseField");
+    const u32 mc    = PCGAddNode("MarchingCubes");
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_min", -4.f, -4.f, -4.f) != 0, "Set bounds_min");
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_max",  4.f,  4.f,  4.f) != 0, "Set bounds_max");
+    PCGConnect(noise, 0, mc, 0);
+
+    PCGExecute();
+    const u64 cid1 = PCGGetOutputGeometry(mc);
+    TEST_ASSERT(cid1 != INVALID_CONTENT_ID, "First execute produced a content_id");
+
+    // Tweak a parameter (resolution) and re-execute.
+    TEST_ASSERT(PCGSetNodeParamFloat(mc, "resolution", 24) != 0, "Bump resolution");
+    PCGExecute();
+    const u64 cid2 = PCGGetOutputGeometry(mc);
+    TEST_ASSERT(cid2 != INVALID_CONTENT_ID, "Second execute produced a content_id");
+
+    // Graph teardown implicitly destroys the latest asset via ~MarchingCubesNode.
+    PCGDestroyGraph();
+    return TestResult::Passed;
+}
+
+// ============================================================================
 // CameraAPI matrix readback tests
 // ============================================================================
 
@@ -433,11 +528,26 @@ void RunCameraMatrixTests() {
     suite.RunAllTests();
 }
 
+void RunMarchingCubesTests() {
+    TestSuite suite("MarchingCubes API Tests (Phase 9.1)");
+    suite.AddTestCase(TestCase("NoiseField → mesh",
+        TestMarchingCubesNoiseField,
+        "NoiseField → MarchingCubes → valid content_id; non-MC/OOB nodes return INVALID"));
+    suite.AddTestCase(TestCase("Register entity",
+        TestMarchingCubesRegisterEntity,
+        "PipelineRegisterMeshEntity on MC output is a graceful no-op headless"));
+    suite.AddTestCase(TestCase("Re-execute no leak",
+        TestMarchingCubesReexecuteNoLeak,
+        "Two Execute() calls on same MC node: destroy-before-create, no FreeList assertion"));
+    suite.RunAllTests();
+}
+
 int main() {
     RunProceduralMeshTests();
     RunPCGOutputTests();
     RunAssetImportTests();
     RunPipelineExtTests();
     RunCameraMatrixTests();
+    RunMarchingCubesTests();
     return 0;
 }
