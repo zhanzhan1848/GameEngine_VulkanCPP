@@ -191,3 +191,129 @@ kernel void emit_vertices(
     device uint8_t* elem = elements + vid * 20;
     pack_vertex_element(elem, normal.x, normal.y, normal.z, u_uv, v_uv);
 }
+
+// Pass 3: emit_faces
+// ----------------------------------------------------------------------------
+// For each grid edge axis a, the two perpendicular axes. Matches CPU kPerpAxes.
+constant constexpr uint kPerpAxes[3][2] = {
+    {1, 2},  // axis X → perp Y, Z
+    {2, 0},  // axis Y → perp Z, X
+    {0, 1},  // axis Z → perp X, Y
+};
+
+// Helper: load dual_id for cell (i,j,k). Returns SN_INVALID_ID if OOB.
+// `dp1` and `dp2` are offsets along the two perp axes (edge axis stays at gp[a]).
+template<uint Axis>
+inline uint cell_dual_at(device const uint* dual_id, uint res, uint3 gp, int dp1, int dp2) {
+    constexpr uint P1 = kPerpAxes[Axis][0];
+    constexpr uint P2 = kPerpAxes[Axis][1];
+    int ci[3] = { int(gp.x), int(gp.y), int(gp.z) };
+    ci[P1] += dp1;
+    ci[P2] += dp2;
+    if (ci[0] < 0 || ci[1] < 0 || ci[2] < 0) return SN_INVALID_ID;
+    if (ci[0] >= int(res) || ci[1] >= int(res) || ci[2] >= int(res)) return SN_INVALID_ID;
+    uint idx = uint(ci[0]) + res * uint(ci[1]) + res * res * uint(ci[2]);
+    return dual_id[idx];
+}
+
+// Emit fan-triangulated polygon. `ids` has up to 4 entries; invalid ones are SN_INVALID_ID.
+inline void emit_face_polygon(
+    device uint*                index_buffer,
+    device atomic_uint*         index_counter,
+    uint32_t                    ids[4])
+{
+    // Compact valid ids preserving CCW order.
+    uint v[4];
+    uint n_valid = 0u;
+    for (uint i = 0; i < 4u; ++i) {
+        if (ids[i] != SN_INVALID_ID) v[n_valid++] = ids[i];
+    }
+    if (n_valid < 3u) return;
+
+    // Fan triangulation. Matches CPU emit_face.
+    for (uint t = 1u; t < n_valid - 1u; ++t) {
+        uint base = atomic_fetch_add_explicit(index_counter, 3u, memory_order_relaxed);
+        index_buffer[base + 0] = v[0];
+        index_buffer[base + 1] = v[t];
+        index_buffer[base + 2] = v[t + 1];
+    }
+}
+
+// Pass 3: emit_faces (3 axis-specific kernels).
+// One thread per grid vertex per axis. Reads 2 scalar endpoints + 4 dual_ids.
+// Emits 1-2 triangles via atomic_append on index_counter.
+//
+// Bindings:
+//   0: uniforms
+//   1: scalar_volume (read)
+//   2: dual_id (read)
+//   3: index_buffer (write)
+//   4: index_counter (atomic)
+//
+// Dispatch: n³ threads (one per grid vertex); early-out if edge exits grid.
+template<uint Axis>
+inline void emit_faces_impl(
+    constant SurfaceNetsUniforms& u        [[buffer(0)]],
+    device const float*           scalar   [[buffer(1)]],
+    device const uint*            dual_id  [[buffer(2)]],
+    device uint*                  indices  [[buffer(3)]],
+    device atomic_uint*           icounter [[buffer(4)]],
+    uint3                         tid      [[thread_position_in_grid]])
+{
+    const uint n = u.n;
+    const uint res = u.resolution;
+    if (any(tid >= uint3(n))) return;
+    if (tid[Axis] + 1u >= n) return;  // edge would exit grid
+
+    // Endpoints along axis.
+    uint3 gp1 = tid;
+    uint3 gp2 = tid;
+    ++gp2[Axis];
+    float s1 = scalar[gp1.x + n * gp1.y + n * n * gp1.z];
+    float s2 = scalar[gp2.x + n * gp2.y + n * n * gp2.z];
+    bool sign_diff = (s1 > u.iso_value) != (s2 > u.iso_value);
+    if (!sign_diff) return;
+
+    // 4 surrounding cells, CCW around the edge. Matches CPU make_cell sequence:
+    //   (0,0), (-1,0), (-1,-1), (0,-1)
+    uint32_t ids[4] = {
+        cell_dual_at<Axis>(dual_id, res, tid,  0,  0),
+        cell_dual_at<Axis>(dual_id, res, tid, -1,  0),
+        cell_dual_at<Axis>(dual_id, res, tid, -1, -1),
+        cell_dual_at<Axis>(dual_id, res, tid,  0, -1),
+    };
+    emit_face_polygon(indices, icounter, ids);
+}
+
+kernel void emit_faces_x(
+    constant SurfaceNetsUniforms& u        [[buffer(0)]],
+    device const float*           scalar   [[buffer(1)]],
+    device const uint*            dual_id  [[buffer(2)]],
+    device uint*                  indices  [[buffer(3)]],
+    device atomic_uint*           icounter [[buffer(4)]],
+    uint3                         tid      [[thread_position_in_grid]])
+{
+    emit_faces_impl<0>(u, scalar, dual_id, indices, icounter, tid);
+}
+
+kernel void emit_faces_y(
+    constant SurfaceNetsUniforms& u        [[buffer(0)]],
+    device const float*           scalar   [[buffer(1)]],
+    device const uint*            dual_id  [[buffer(2)]],
+    device uint*                  indices  [[buffer(3)]],
+    device atomic_uint*           icounter [[buffer(4)]],
+    uint3                         tid      [[thread_position_in_grid]])
+{
+    emit_faces_impl<1>(u, scalar, dual_id, indices, icounter, tid);
+}
+
+kernel void emit_faces_z(
+    constant SurfaceNetsUniforms& u        [[buffer(0)]],
+    device const float*           scalar   [[buffer(1)]],
+    device const uint*            dual_id  [[buffer(2)]],
+    device uint*                  indices  [[buffer(3)]],
+    device atomic_uint*           icounter [[buffer(4)]],
+    uint3                         tid      [[thread_position_in_grid]])
+{
+    emit_faces_impl<2>(u, scalar, dual_id, indices, icounter, tid);
+}
