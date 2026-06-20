@@ -1,5 +1,9 @@
 #include "Graphics/PCG/GPU/GPUMesher.h"
 
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
 #include <vector>
 
 #include "Graphics/RHI/Core/RHIDevice.h"
@@ -44,6 +48,44 @@ void DestroyScratch(rhi::RHIDeviceBase* dev, ScratchBuffers& s) {
     s = ScratchBuffers{};
 }
 
+// Read self-contained .metal source as raw bytes. Pattern: LumenSSAOPass::LoadShaderBytecode
+// minus the #include resolver (our shader has no engine includes).
+std::vector<u8> LoadShaderSource(const char* shader_name) {
+    const std::string rel_path = std::string("Engine/Graphics/Metal/shaders/PCG/") + shader_name + ".metal";
+
+    // Try 1: relative to CWD (works when test/bin runs from project root).
+    {
+        std::ifstream f(rel_path, std::ios::binary);
+        if (f) {
+            std::stringstream ss;
+            ss << f.rdbuf();
+            const std::string s = ss.str();
+            return std::vector<u8>(s.begin(), s.end());
+        }
+    }
+
+    // Try 2: walk up CWD ancestors looking for an "Engine/" directory.
+    namespace fs = std::filesystem;
+    fs::path p = fs::current_path();
+    for (int i = 0; i < 8 && p.has_parent_path(); ++i) {
+        fs::path candidate = p / rel_path;
+        if (fs::exists(candidate)) {
+            std::ifstream f(candidate, std::ios::binary);
+            if (f) {
+                std::stringstream ss;
+                ss << f.rdbuf();
+                const std::string s = ss.str();
+                return std::vector<u8>(s.begin(), s.end());
+            }
+        }
+        p = p.parent_path();
+    }
+
+    std::cerr << "[GPUMesher] Failed to load shader '" << shader_name
+              << "' (searched: " << rel_path << " and CWD ancestors)" << std::endl;
+    return {};
+}
+
 } // namespace
 
 GPUMesher& GPUMesher::Get() {
@@ -59,14 +101,159 @@ void GPUMesher::Initialize(rhi::RHIDeviceBase* device) {
 }
 
 void GPUMesher::Shutdown() {
-    // TODO(Task 14): release pipeline handles, descriptor set layouts.
-    pipelines_created_ = false;
+    DestroyPipelines();
     device_ = nullptr;
 }
 
 void GPUMesher::CreatePipelines() {
-    // TODO(Task 14): real implementation.
-    pipelines_created_ = true;
+    if (pipelines_created_ || !device_) return;
+
+    using namespace rhi;
+
+    // ---- Descriptor set layouts (one per kernel binding signature) ----
+    auto make_set_layout = [&](const DescriptorSetLayoutBinding* bindings, u32 count) -> DescriptorSetLayoutHandle {
+        DescriptorSetLayoutDesc desc{};
+        desc.bindingCount = count;
+        desc.bindings = bindings;
+        return device_->CreateDescriptorSetLayout(desc);
+    };
+
+    // classify_cells: uniforms(0), scalar(1), dual_id(2), counters(3)
+    {
+        DescriptorSetLayoutBinding b[] = {
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+        };
+        classify_set_layout_ = make_set_layout(b, 4);
+    }
+    // emit_vertices: uniforms(0), scalar(1), dual_id(2), positions(3), elements(4)
+    {
+        DescriptorSetLayoutBinding b[] = {
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+        };
+        emit_vertices_set_layout_ = make_set_layout(b, 5);
+    }
+    // emit_faces_x/y/z: uniforms(0), scalar(1), dual_id(2), indices(3), counters(4)
+    {
+        DescriptorSetLayoutBinding b[] = {
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+        };
+        emit_faces_set_layout_ = make_set_layout(b, 5);
+    }
+    // write_indirect_args: uniforms(0), counters(1), indirect_args(2)
+    {
+        DescriptorSetLayoutBinding b[] = {
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+        };
+        write_indirect_set_layout_ = make_set_layout(b, 3);
+    }
+
+    // ---- Pipeline layouts ----
+    auto make_pipe_layout = [&](DescriptorSetLayoutHandle setLayout) -> PipelineLayoutHandle {
+        PipelineLayoutDesc desc{};
+        desc.setLayoutCount = 1;
+        desc.setLayouts = &setLayout;
+        return device_->CreatePipelineLayout(desc);
+    };
+    classify_layout_      = make_pipe_layout(classify_set_layout_);
+    emit_vertices_layout_ = make_pipe_layout(emit_vertices_set_layout_);
+    emit_faces_layout_    = make_pipe_layout(emit_faces_set_layout_);
+    write_indirect_layout_ = make_pipe_layout(write_indirect_set_layout_);
+
+    // ---- Shader source + pipelines ----
+    auto src = LoadShaderSource("SurfaceNetsGPU");
+    if (src.empty()) {
+        std::cerr << "[GPUMesher] SurfaceNetsGPU.metal not found\n";
+        return;
+    }
+
+    auto make_compute = [&](const char* entry, PipelineLayoutHandle layout) -> PipelineHandle {
+        ShaderHandle shader = device_->CreateShader(src.data(), src.size(),
+                                                    ShaderStage::Compute, entry);
+        if (shader == handles::INVALID_SHADER) return handles::INVALID_PIPELINE;
+        ComputePipelineDesc desc{};
+        desc.computeShader = shader;
+        desc.layout = layout;
+        desc.threadGroupSize = math::u32v3{4, 4, 4};
+        return device_->CreateComputePipeline(desc);
+    };
+
+    classify_pipeline_        = make_compute("classify_cells",        classify_layout_);
+    emit_vertices_pipeline_   = make_compute("emit_vertices",         emit_vertices_layout_);
+    emit_faces_x_pipeline_    = make_compute("emit_faces_x",          emit_faces_layout_);
+    emit_faces_y_pipeline_    = make_compute("emit_faces_y",          emit_faces_layout_);
+    emit_faces_z_pipeline_    = make_compute("emit_faces_z",          emit_faces_layout_);
+    write_indirect_pipeline_  = make_compute("write_indirect_args",   write_indirect_layout_);
+
+    pipelines_created_ =
+        classify_set_layout_        != handles::INVALID_DESCRIPTOR_SET_LAYOUT &&
+        emit_vertices_set_layout_   != handles::INVALID_DESCRIPTOR_SET_LAYOUT &&
+        emit_faces_set_layout_      != handles::INVALID_DESCRIPTOR_SET_LAYOUT &&
+        write_indirect_set_layout_  != handles::INVALID_DESCRIPTOR_SET_LAYOUT &&
+        classify_layout_            != handles::INVALID_PIPELINE_LAYOUT &&
+        emit_vertices_layout_       != handles::INVALID_PIPELINE_LAYOUT &&
+        emit_faces_layout_          != handles::INVALID_PIPELINE_LAYOUT &&
+        write_indirect_layout_      != handles::INVALID_PIPELINE_LAYOUT &&
+        classify_pipeline_          != handles::INVALID_PIPELINE &&
+        emit_vertices_pipeline_     != handles::INVALID_PIPELINE &&
+        emit_faces_x_pipeline_      != handles::INVALID_PIPELINE &&
+        emit_faces_y_pipeline_      != handles::INVALID_PIPELINE &&
+        emit_faces_z_pipeline_      != handles::INVALID_PIPELINE &&
+        write_indirect_pipeline_    != handles::INVALID_PIPELINE;
+
+    if (!pipelines_created_) {
+        std::cerr << "[GPUMesher] Pipeline creation partially failed; destroying\n";
+        DestroyPipelines();
+    }
+}
+
+void GPUMesher::DestroyPipelines() {
+    if (!device_) return;
+
+    if (classify_pipeline_ != rhi::handles::INVALID_PIPELINE)        device_->DestroyPipeline(classify_pipeline_);
+    if (emit_vertices_pipeline_ != rhi::handles::INVALID_PIPELINE)   device_->DestroyPipeline(emit_vertices_pipeline_);
+    if (emit_faces_x_pipeline_ != rhi::handles::INVALID_PIPELINE)    device_->DestroyPipeline(emit_faces_x_pipeline_);
+    if (emit_faces_y_pipeline_ != rhi::handles::INVALID_PIPELINE)    device_->DestroyPipeline(emit_faces_y_pipeline_);
+    if (emit_faces_z_pipeline_ != rhi::handles::INVALID_PIPELINE)    device_->DestroyPipeline(emit_faces_z_pipeline_);
+    if (write_indirect_pipeline_ != rhi::handles::INVALID_PIPELINE)  device_->DestroyPipeline(write_indirect_pipeline_);
+
+    if (classify_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT)      device_->DestroyPipelineLayout(classify_layout_);
+    if (emit_vertices_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) device_->DestroyPipelineLayout(emit_vertices_layout_);
+    if (emit_faces_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT)    device_->DestroyPipelineLayout(emit_faces_layout_);
+    if (write_indirect_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) device_->DestroyPipelineLayout(write_indirect_layout_);
+
+    if (classify_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)        device_->DestroyDescriptorSetLayout(classify_set_layout_);
+    if (emit_vertices_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)   device_->DestroyDescriptorSetLayout(emit_vertices_set_layout_);
+    if (emit_faces_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)      device_->DestroyDescriptorSetLayout(emit_faces_set_layout_);
+    if (write_indirect_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)  device_->DestroyDescriptorSetLayout(write_indirect_set_layout_);
+
+    classify_pipeline_        = rhi::handles::INVALID_PIPELINE;
+    emit_vertices_pipeline_   = rhi::handles::INVALID_PIPELINE;
+    emit_faces_x_pipeline_    = rhi::handles::INVALID_PIPELINE;
+    emit_faces_y_pipeline_    = rhi::handles::INVALID_PIPELINE;
+    emit_faces_z_pipeline_    = rhi::handles::INVALID_PIPELINE;
+    write_indirect_pipeline_  = rhi::handles::INVALID_PIPELINE;
+    classify_layout_      = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    emit_vertices_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    emit_faces_layout_    = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    write_indirect_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    classify_set_layout_        = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    emit_vertices_set_layout_   = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    emit_faces_set_layout_      = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    write_indirect_set_layout_  = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    pipelines_created_ = false;
 }
 
 MarchingCubesResult GPUMesher::GenerateSurfaceNets(
@@ -78,6 +265,8 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
 {
     MarchingCubesResult empty;
     if (!IsReady()) return empty;
+    if (!pipelines_created_) CreatePipelines();
+    if (!pipelines_created_) return empty;  // shader compile / pipeline creation failed
     if (resolution < 2 || resolution > 256) return empty;
 
     const math::v3 extent{

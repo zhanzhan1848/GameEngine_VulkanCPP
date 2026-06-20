@@ -47,9 +47,33 @@ private:
 
     rhi::RHIDeviceBase* device_{nullptr};
 
-    // Pipeline state — populated lazily on first GenerateSurfaceNets call.
+    // Pipeline state — populated lazily by CreatePipelines() on first
+    // GenerateSurfaceNets call. Destroyed by DestroyPipelines() in Shutdown.
     bool pipelines_created_{false};
-    void CreatePipelines();  // defined in GPUMesher.cpp; full impl lands in Task 14
+    void CreatePipelines();
+    void DestroyPipelines();
+
+    // 4 descriptor set layouts — one per kernel binding signature.
+    // Slots 3/4 conflict across kernels (positions vs indices vs counters),
+    // so we cannot share one layout.
+    rhi::DescriptorSetLayoutHandle classify_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::DescriptorSetLayoutHandle emit_vertices_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::DescriptorSetLayoutHandle emit_faces_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::DescriptorSetLayoutHandle write_indirect_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+
+    // 4 pipeline layouts (one per descriptor set layout).
+    rhi::PipelineLayoutHandle classify_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineLayoutHandle emit_vertices_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineLayoutHandle emit_faces_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineLayoutHandle write_indirect_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+
+    // 6 compute pipelines (emit_faces has 3 entry points sharing one layout).
+    rhi::PipelineHandle classify_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle emit_vertices_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle emit_faces_x_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle emit_faces_y_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle emit_faces_z_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle write_indirect_pipeline_{rhi::handles::INVALID_PIPELINE};
 };
 
 } // namespace primal::graphics::pcg
