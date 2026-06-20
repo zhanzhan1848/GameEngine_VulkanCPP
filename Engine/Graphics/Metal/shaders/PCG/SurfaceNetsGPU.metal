@@ -317,3 +317,36 @@ kernel void emit_faces_z(
 {
     emit_faces_impl<2>(u, scalar, dual_id, indices, icounter, tid);
 }
+
+// Pass 4: write_indirect_args
+// Single-thread dispatch. Reads vertex_counter and index_counter, writes a
+// MTLDrawPrimitivesIndirectCommand to indirect_args buffer.
+//
+// Bindings:
+//   0: uniforms
+//   1: counters (device buffer, u32[2]; [0]=vertex_counter, [1]=index_counter)
+//   2: indirect_args (device buffer, MTLDrawPrimitivesIndirectCommand)
+//
+// Phase 9.3a does NOT consume indirect_args (we read back and use
+// register_mesh_asset), but writing the data structure here costs nothing and
+// Phase 9.3b will need it for GPU-resident mesh rendering.
+
+struct MTLDrawPrimitivesIndirectCommand {
+    uint32_t vertexCount;
+    uint32_t instanceCount;
+    uint32_t vertexStart;
+    uint32_t baseInstance;
+};
+
+kernel void write_indirect_args(
+    constant SurfaceNetsUniforms& u           [[buffer(0)]],
+    device const uint*           counters    [[buffer(1)]],
+    device MTLDrawPrimitivesIndirectCommand* out [[buffer(2)]],
+    uint3                         tid        [[thread_position_in_grid]])
+{
+    if (tid.x != 0u || tid.y != 0u || tid.z != 0u) return;
+    out->vertexCount   = counters[1];  // index count
+    out->instanceCount = 1u;
+    out->vertexStart   = 0u;
+    out->baseInstance  = 0u;
+}
