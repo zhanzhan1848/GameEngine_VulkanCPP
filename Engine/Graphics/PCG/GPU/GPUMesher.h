@@ -74,6 +74,15 @@ private:
     rhi::PipelineHandle emit_faces_y_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle emit_faces_z_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle write_indirect_pipeline_{rhi::handles::INVALID_PIPELINE};
+
+    // 6 compiled shader handles (CreateShader returns one per entry point;
+    // pipelines reference these but do not own them — must be destroyed here).
+    rhi::ShaderHandle classify_shader_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle emit_vertices_shader_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle emit_faces_x_shader_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle emit_faces_y_shader_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle emit_faces_z_shader_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle write_indirect_shader_{rhi::handles::INVALID_SHADER};
 };
 
 } // namespace primal::graphics::pcg

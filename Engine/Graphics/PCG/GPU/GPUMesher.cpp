@@ -183,7 +183,11 @@ void GPUMesher::CreatePipelines() {
         return;
     }
 
-    auto make_compute = [&](const char* entry, PipelineLayoutHandle layout) -> PipelineHandle {
+    // Compile-once-per-entry-point. Each ShaderHandle is a separate RHI allocation
+    // (Metal compiles each entry point into a distinct MTLFunction) and must be
+    // destroyed in DestroyPipelines — pipelines reference shaders but don't own them.
+    auto make_compute = [&](const char* entry, PipelineLayoutHandle layout,
+                            ShaderHandle& out_shader) -> PipelineHandle {
         ShaderHandle shader = device_->CreateShader(src.data(), src.size(),
                                                     ShaderStage::Compute, entry);
         if (shader == handles::INVALID_SHADER) return handles::INVALID_PIPELINE;
@@ -191,15 +195,16 @@ void GPUMesher::CreatePipelines() {
         desc.computeShader = shader;
         desc.layout = layout;
         desc.threadGroupSize = math::u32v3{4, 4, 4};
+        out_shader = shader;
         return device_->CreateComputePipeline(desc);
     };
 
-    classify_pipeline_        = make_compute("classify_cells",        classify_layout_);
-    emit_vertices_pipeline_   = make_compute("emit_vertices",         emit_vertices_layout_);
-    emit_faces_x_pipeline_    = make_compute("emit_faces_x",          emit_faces_layout_);
-    emit_faces_y_pipeline_    = make_compute("emit_faces_y",          emit_faces_layout_);
-    emit_faces_z_pipeline_    = make_compute("emit_faces_z",          emit_faces_layout_);
-    write_indirect_pipeline_  = make_compute("write_indirect_args",   write_indirect_layout_);
+    classify_pipeline_        = make_compute("classify_cells",        classify_layout_,        classify_shader_);
+    emit_vertices_pipeline_   = make_compute("emit_vertices",         emit_vertices_layout_,   emit_vertices_shader_);
+    emit_faces_x_pipeline_    = make_compute("emit_faces_x",          emit_faces_layout_,      emit_faces_x_shader_);
+    emit_faces_y_pipeline_    = make_compute("emit_faces_y",          emit_faces_layout_,      emit_faces_y_shader_);
+    emit_faces_z_pipeline_    = make_compute("emit_faces_z",          emit_faces_layout_,      emit_faces_z_shader_);
+    write_indirect_pipeline_  = make_compute("write_indirect_args",   write_indirect_layout_,  write_indirect_shader_);
 
     pipelines_created_ =
         classify_set_layout_        != handles::INVALID_DESCRIPTOR_SET_LAYOUT &&
@@ -243,12 +248,26 @@ void GPUMesher::DestroyPipelines() {
     if (emit_faces_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)      device_->DestroyDescriptorSetLayout(emit_faces_set_layout_);
     if (write_indirect_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)  device_->DestroyDescriptorSetLayout(write_indirect_set_layout_);
 
+    // Pipelines don't own shaders — destroy after pipelines.
+    if (classify_shader_ != rhi::handles::INVALID_SHADER)        device_->DestroyShader(classify_shader_);
+    if (emit_vertices_shader_ != rhi::handles::INVALID_SHADER)   device_->DestroyShader(emit_vertices_shader_);
+    if (emit_faces_x_shader_ != rhi::handles::INVALID_SHADER)    device_->DestroyShader(emit_faces_x_shader_);
+    if (emit_faces_y_shader_ != rhi::handles::INVALID_SHADER)    device_->DestroyShader(emit_faces_y_shader_);
+    if (emit_faces_z_shader_ != rhi::handles::INVALID_SHADER)    device_->DestroyShader(emit_faces_z_shader_);
+    if (write_indirect_shader_ != rhi::handles::INVALID_SHADER)  device_->DestroyShader(write_indirect_shader_);
+
     classify_pipeline_        = rhi::handles::INVALID_PIPELINE;
     emit_vertices_pipeline_   = rhi::handles::INVALID_PIPELINE;
     emit_faces_x_pipeline_    = rhi::handles::INVALID_PIPELINE;
     emit_faces_y_pipeline_    = rhi::handles::INVALID_PIPELINE;
     emit_faces_z_pipeline_    = rhi::handles::INVALID_PIPELINE;
     write_indirect_pipeline_  = rhi::handles::INVALID_PIPELINE;
+    classify_shader_        = rhi::handles::INVALID_SHADER;
+    emit_vertices_shader_   = rhi::handles::INVALID_SHADER;
+    emit_faces_x_shader_    = rhi::handles::INVALID_SHADER;
+    emit_faces_y_shader_    = rhi::handles::INVALID_SHADER;
+    emit_faces_z_shader_    = rhi::handles::INVALID_SHADER;
+    write_indirect_shader_  = rhi::handles::INVALID_SHADER;
     classify_layout_      = rhi::handles::INVALID_PIPELINE_LAYOUT;
     emit_vertices_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
     emit_faces_layout_    = rhi::handles::INVALID_PIPELINE_LAYOUT;
@@ -334,7 +353,10 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
     scratch.dual_id   = make_storage_buf(sizeof(u32) * res3);
     scratch.positions = make_storage_buf(sizeof(f32) * 3 * res3);
     scratch.elements  = make_storage_buf(20u * res3);
-    scratch.indices   = make_storage_buf(sizeof(u32) * 18 * res3);  // worst case: 3 axes × 2 tris × 3 idx per straddling cell
+    // emit_faces iterates grid vertices (n³ ≈ res³); each can emit up to 6
+    // triangles (2 per axis × 3 axes) when all adjacent cells straddle. Worst
+    // case = 6 tris × 3 idx = 18 idx per grid vertex. res³ bound is tight.
+    scratch.indices   = make_storage_buf(sizeof(u32) * 18 * res3);
     // counters: Dynamic so we can UpdateBufferData (zero init)
     {
         rhi::BufferDesc desc{};
