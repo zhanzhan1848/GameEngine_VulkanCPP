@@ -102,6 +102,52 @@ static PCGGetOutputGeometryFn PCGGetOutputGeometry;
 static PipelineRegisterMeshEntityFn   PipelineRegisterMeshEntity;
 static PipelineUnregisterMeshEntityFn PipelineUnregisterMeshEntity;
 
+// ---- Histogram helpers (Task 21) ----
+struct Histogram {
+    u32 buckets[64] = {0};
+    u64 total_pixels = 0;
+};
+
+static Histogram CaptureAndHistogram(u32 surface_id) {
+    Histogram h;
+    void* cap_data = nullptr;
+    u64 cap_size = 0;
+    if (CaptureBackbuffer(surface_id, &cap_data, &cap_size) != 1 || !cap_data) return h;
+    const u8* p = static_cast<const u8*>(cap_data);
+    const u64 pixel_count = cap_size / 4;
+    for (u64 i = 0; i < pixel_count; ++i) {
+        // Luminance approx
+        u32 lum = (u32(p[i*4+0]) + u32(p[i*4+1]) + u32(p[i*4+2])) / 3;
+        u32 bucket = (lum * 64) / 256;
+        if (bucket >= 64) bucket = 63;
+        h.buckets[bucket]++;
+        h.total_pixels++;
+    }
+    FreeCaptureBuffer(cap_data);
+    return h;
+}
+
+static double HistogramCorrelation(const Histogram& a, const Histogram& b) {
+    if (a.total_pixels == 0 || b.total_pixels == 0) return 0.0;
+    // Pearson correlation on the 64-bucket arrays.
+    double mx = 0, my = 0;
+    for (u32 i = 0; i < 64; ++i) {
+        mx += double(a.buckets[i]);
+        my += double(b.buckets[i]);
+    }
+    mx /= 64.0; my /= 64.0;
+    double num = 0, dx = 0, dy = 0;
+    for (u32 i = 0; i < 64; ++i) {
+        double x = double(a.buckets[i]) - mx;
+        double y = double(b.buckets[i]) - my;
+        num += x * y;
+        dx += x * x;
+        dy += y * y;
+    }
+    if (dx == 0 || dy == 0) return 0.0;
+    return num / std::sqrt(dx * dy);
+}
+
 // ---- Sub-test 1: RenderBasic ----
 static int TestRenderBasic() {
     std::cout << "\n--- TestGPUSurfaceNetsRenderBasic ---\n";
@@ -177,6 +223,63 @@ static int TestRenderBasic() {
     return 0;
 }
 
+// ---- Sub-test 2: RenderVsCPU ----
+static int TestRenderVsCPU() {
+    std::cout << "\n--- TestGPUSurfaceNetsRenderVsCPU ---\n";
+
+    // Common render setup reused for both captures.
+    const u32 camera_entity = CreateEntity(0.f, 5.f, 15.f);
+    const u32 camera_id     = CreateCamera(camera_entity, 0.25f, 16.f/9.f, 0.1f, 100.f);
+    const u64 light_set     = CreateLightSet();
+    u32 surface_id = CreateRenderSurface(nullptr, 800, 600);
+    if (!surface_id) { std::cerr << "[WARN] No surface — skipping\n"; return 0; }
+
+    auto render_capture = [&](u32 algorithm) -> Histogram {
+        PCGCreateGraph();
+        const u32 noise = PCGAddNode("NoiseField");
+        const u32 mc    = PCGAddNode("MarchingCubes");
+        PCGSetNodeParamVec3(mc, "bounds_min", -4.f, -4.f, -4.f);
+        PCGSetNodeParamVec3(mc, "bounds_max",  4.f,  4.f,  4.f);
+        PCGSetNodeParamFloat(mc, "iso_value", 0.0f);
+        PCGSetNodeParamFloat(mc, "resolution", 64);
+        PCGSetNodeParamFloat(mc, "algorithm", float(algorithm));
+        PCGConnect(noise, 0, mc, 0);
+        PCGExecute();
+        const u64 cid = PCGGetOutputGeometry(mc);
+        const u64 eid = (cid != INVALID_CONTENT_ID) ? PipelineRegisterMeshEntity(cid, nullptr, 0) : 0;
+
+        RenderFrameParams params{};
+        params.surface_id = surface_id;
+        params.camera_id  = camera_id;
+        params.light_set_key = light_set;
+        params.average_frame_time = 16.7f;
+        params.last_frame_time = 16.7f;
+        for (int i = 0; i < 3; ++i) RenderFrame(&params);
+
+        Histogram h = CaptureAndHistogram(surface_id);
+
+        if (eid) PipelineUnregisterMeshEntity(eid);
+        PCGDestroyGraph();
+        return h;
+    };
+
+    const Histogram h_cpu = render_capture(0);
+    const Histogram h_gpu = render_capture(1);
+
+    if (h_cpu.total_pixels == 0 || h_gpu.total_pixels == 0) {
+        std::cerr << "[WARN] Empty capture — skipping correlation check\n";
+        RemoveRenderSurface(surface_id);
+        return 0;
+    }
+
+    const double corr = HistogramCorrelation(h_cpu, h_gpu);
+    std::cout << "  histogram correlation CPU vs GPU = " << corr << std::endl;
+    CHECK(corr > 0.85, "Histogram correlation > 0.85 (winding/normals similar)");
+
+    RemoveRenderSurface(surface_id);
+    return 0;
+}
+
 int main() {
     std::cout << "=================================\nTestGPUMesherIntegration\nPhase 9.3a GPU SurfaceNets\n=================================\n";
 
@@ -243,7 +346,7 @@ int main() {
     CHECK(IsEngineInitialized() == 1, "Engine initialized");
 
     TestRenderBasic();
-    // TestRenderVsCPU();  // Task 21
+    TestRenderVsCPU();
     // TestPerf();         // Task 22
 
     ShutdownEngine();
