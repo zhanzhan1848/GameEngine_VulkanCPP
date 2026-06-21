@@ -280,6 +280,52 @@ static int TestRenderVsCPU() {
     return 0;
 }
 
+// ---- Sub-test 3: Perf ----
+static int TestPerf() {
+    std::cout << "\n--- TestGPUSurfaceNetsPerf ---\n";
+#ifndef NDEBUG
+    std::cout << "[INFO] Debug build — skipping perf test (5x slower than Release)\n";
+    return 0;
+#else
+    struct Case { u32 res; u32 budget_ms; };
+    const Case cases[] = {{64, 10}, {128, 80}};
+
+    for (const auto& c : cases) {
+        PCGCreateGraph();
+        const u32 noise = PCGAddNode("NoiseField");
+        const u32 mc    = PCGAddNode("MarchingCubes");
+        PCGSetNodeParamVec3(mc, "bounds_min", -4.f, -4.f, -4.f);
+        PCGSetNodeParamVec3(mc, "bounds_max",  4.f,  4.f,  4.f);
+        PCGSetNodeParamFloat(mc, "iso_value", 0.0f);
+        PCGSetNodeParamFloat(mc, "resolution", float(c.res));
+        PCGSetNodeParamFloat(mc, "algorithm", 1.0f);
+        PCGConnect(noise, 0, mc, 0);
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+        PCGExecute();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+        const u64 cid = PCGGetOutputGeometry(mc);
+        PCGDestroyGraph();
+
+        std::cout << "  res=" << c.res << " took " << ms << "ms (budget " << c.budget_ms << "ms)";
+        if (cid == INVALID_CONTENT_ID) {
+            std::cout << " [WARN] no content_id\n";
+            continue;
+        }
+        if (ms <= c.budget_ms) {
+            std::cout << " PASS\n";
+            CHECK(true, "res=" + std::to_string(c.res) + " within budget");
+        } else {
+            std::cout << " FAIL\n";
+            CHECK(false, "res=" + std::to_string(c.res) + " within budget (took " + std::to_string(ms) + "ms)");
+        }
+    }
+    return 0;
+#endif
+}
+
 int main() {
     std::cout << "=================================\nTestGPUMesherIntegration\nPhase 9.3a GPU SurfaceNets\n=================================\n";
 
@@ -347,7 +393,7 @@ int main() {
 
     TestRenderBasic();
     TestRenderVsCPU();
-    // TestPerf();         // Task 22
+    TestPerf();
 
     ShutdownEngine();
     dlclose(handle);
