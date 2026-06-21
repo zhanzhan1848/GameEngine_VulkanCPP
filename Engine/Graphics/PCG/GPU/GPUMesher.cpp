@@ -1,12 +1,16 @@
 #include "Graphics/PCG/GPU/GPUMesher.h"
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <vector>
+#include <cstring>
 
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 
 namespace primal::graphics::pcg {
@@ -383,9 +387,261 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
     u32 zero_counters[2] = {0u, 0u};
     device_->UpdateBufferData(scratch.counters, zero_counters, sizeof(zero_counters));
 
-    // Tasks 14 & 15 will fill in: pipeline creation, dispatch, readback.
+    using namespace rhi;
+
+    // ---- Create 4 descriptor sets (one per kernel signature) ----
+    auto make_ds = [&](DescriptorSetLayoutHandle set_layout,
+                       const DescriptorBufferInfo* infos,
+                       const DescriptorType* types,
+                       u32 count) -> DescriptorSetHandle {
+        DescriptorSetHandle ds = device_->CreateDescriptorSet({set_layout});
+        if (ds == handles::INVALID_DESCRIPTOR_SET) return ds;
+        // Build writes with per-binding info. We use stack arrays sized to the max binding count.
+        WriteDescriptorSet writes[8];
+        for (u32 i = 0; i < count; ++i) {
+            writes[i] = {ds, i, 0, 1, types[i], nullptr, &infos[i]};
+        }
+        device_->UpdateDescriptorSets(count, writes);
+        return ds;
+    };
+
+    DescriptorSetHandle classify_ds      = handles::INVALID_DESCRIPTOR_SET;
+    DescriptorSetHandle emit_vertices_ds = handles::INVALID_DESCRIPTOR_SET;
+    DescriptorSetHandle emit_faces_ds    = handles::INVALID_DESCRIPTOR_SET;
+    DescriptorSetHandle write_indirect_ds = handles::INVALID_DESCRIPTOR_SET;
+    {
+        DescriptorBufferInfo infos[4] = {
+            {scratch.uniforms,      0, 0},
+            {scratch.scalar_volume, 0, 0},
+            {scratch.dual_id,       0, 0},
+            {scratch.counters,      0, 0},
+        };
+        DescriptorType types[4] = {
+            DescriptorType::UniformBuffer,
+            DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer,
+        };
+        classify_ds = make_ds(classify_set_layout_, infos, types, 4);
+    }
+    {
+        DescriptorBufferInfo infos[5] = {
+            {scratch.uniforms,      0, 0},
+            {scratch.scalar_volume, 0, 0},
+            {scratch.dual_id,       0, 0},
+            {scratch.positions,     0, 0},
+            {scratch.elements,      0, 0},
+        };
+        DescriptorType types[5] = {
+            DescriptorType::UniformBuffer,
+            DescriptorType::StorageBuffer, DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer, DescriptorType::StorageBuffer,
+        };
+        emit_vertices_ds = make_ds(emit_vertices_set_layout_, infos, types, 5);
+    }
+    {
+        DescriptorBufferInfo infos[5] = {
+            {scratch.uniforms,      0, 0},
+            {scratch.scalar_volume, 0, 0},
+            {scratch.dual_id,       0, 0},
+            {scratch.indices,       0, 0},
+            {scratch.counters,      0, 0},
+        };
+        DescriptorType types[5] = {
+            DescriptorType::UniformBuffer,
+            DescriptorType::StorageBuffer, DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer, DescriptorType::StorageBuffer,
+        };
+        emit_faces_ds = make_ds(emit_faces_set_layout_, infos, types, 5);
+    }
+    {
+        DescriptorBufferInfo infos[3] = {
+            {scratch.uniforms,      0, 0},
+            {scratch.counters,      0, 0},
+            {scratch.indirect_args, 0, 0},
+        };
+        DescriptorType types[3] = {
+            DescriptorType::UniformBuffer,
+            DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer,
+        };
+        write_indirect_ds = make_ds(write_indirect_set_layout_, infos, types, 3);
+    }
+
+    if (classify_ds       == handles::INVALID_DESCRIPTOR_SET ||
+        emit_vertices_ds  == handles::INVALID_DESCRIPTOR_SET ||
+        emit_faces_ds     == handles::INVALID_DESCRIPTOR_SET ||
+        write_indirect_ds == handles::INVALID_DESCRIPTOR_SET) {
+        if (classify_ds       != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(classify_ds);
+        if (emit_vertices_ds  != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(emit_vertices_ds);
+        if (emit_faces_ds     != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(emit_faces_ds);
+        if (write_indirect_ds != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(write_indirect_ds);
+        DestroyScratch(device_, scratch);
+        return empty;
+    }
+
+    // ---- Command buffer + dispatch ----
+    CommandBufferHandle cmd_handle = device_->CreateCommandBuffer(CommandQueueType::Compute);
+    if (cmd_handle == handles::INVALID_COMMAND_BUFFER) {
+        device_->DestroyDescriptorSet(classify_ds);
+        device_->DestroyDescriptorSet(emit_vertices_ds);
+        device_->DestroyDescriptorSet(emit_faces_ds);
+        device_->DestroyDescriptorSet(write_indirect_ds);
+        DestroyScratch(device_, scratch);
+        return empty;
+    }
+    RHICommandBuffer* cmd = GetCommandBuffer(cmd_handle);
+
+    cmd->Begin();
+
+    const u32 res_groups = (resolution + 3) / 4;
+    const u32 n_groups    = (n + 3) / 4;
+
+    // Pass 1: classify_cells
+    {
+        cmd->BindComputePipeline(classify_pipeline_);
+        DescriptorSetHandle ds = classify_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, classify_layout_, 0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(res_groups, res_groups, res_groups);
+    }
+    // Pass 2: emit_vertices
+    {
+        cmd->BindComputePipeline(emit_vertices_pipeline_);
+        DescriptorSetHandle ds = emit_vertices_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, emit_vertices_layout_, 0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(res_groups, res_groups, res_groups);
+    }
+    // Pass 3: emit_faces_x / y / z (share emit_faces_ds)
+    {
+        cmd->BindComputePipeline(emit_faces_x_pipeline_);
+        DescriptorSetHandle ds = emit_faces_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, emit_faces_layout_, 0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(n_groups, n_groups, n_groups);
+    }
+    {
+        cmd->BindComputePipeline(emit_faces_y_pipeline_);
+        DescriptorSetHandle ds = emit_faces_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, emit_faces_layout_, 0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(n_groups, n_groups, n_groups);
+    }
+    {
+        cmd->BindComputePipeline(emit_faces_z_pipeline_);
+        DescriptorSetHandle ds = emit_faces_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, emit_faces_layout_, 0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(n_groups, n_groups, n_groups);
+    }
+    // Pass 4: write_indirect_args
+    {
+        cmd->BindComputePipeline(write_indirect_pipeline_);
+        DescriptorSetHandle ds = write_indirect_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, write_indirect_layout_, 0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(1, 1, 1);
+    }
+
+    cmd->End();
+
+    QueueSubmitInfo submit{};
+    submit.cmdBuffer = cmd_handle;
+    device_->Submit(submit);
+    cmd->WaitForCompletion();  // synchronous readback (spec §5) — scopes stall to this cmd buffer
+
+    // ---- Readback ----
+    MarchingCubesResult result;
+
+    // Read counters (u32[2]) to size the position/index readback.
+    u32 counters[2] = {0u, 0u};
+    if (void* mapped = device_->MapBuffer(scratch.counters, 0, sizeof(counters))) {
+        std::memcpy(counters, mapped, sizeof(counters));
+        device_->UnmapBuffer(scratch.counters);
+    }
+    const u32 vert_count = counters[0];
+    const u32 idx_count  = counters[1];
+
+    if (vert_count == 0u || idx_count == 0u || vert_count > res3 || idx_count > 18u * res3) {
+        // Empty surface (e.g. iso_value out of range) or corrupted counters.
+        device_->DestroyDescriptorSet(classify_ds);
+        device_->DestroyDescriptorSet(emit_vertices_ds);
+        device_->DestroyDescriptorSet(emit_faces_ds);
+        device_->DestroyDescriptorSet(write_indirect_ds);
+        device_->DestroyCommandBuffer(cmd_handle);
+        DestroyScratch(device_, scratch);
+        return empty;
+    }
+
+    result.positions.resize(vert_count * 3);
+    result.normals.resize  (vert_count * 3);
+    result.uvs.resize      (vert_count * 2);
+    result.indices.resize  (idx_count);
+
+    bool readback_ok = true;
+    // Read positions.
+    if (void* mapped = device_->MapBuffer(scratch.positions, 0, sizeof(f32) * 3 * vert_count)) {
+        std::memcpy(result.positions.data(), mapped, sizeof(f32) * 3 * vert_count);
+        device_->UnmapBuffer(scratch.positions);
+    } else {
+        std::cerr << "[GPUMesher] MapBuffer failed for positions\n";
+        readback_ok = false;
+    }
+
+    // Read elements (20B each), unpack into normals + uvs.
+    constexpr f32 INV_INTERVALS = 2.0f / 65535.0f;
+    {
+        std::vector<u8> elems(20u * vert_count);
+        if (void* mapped = device_->MapBuffer(scratch.elements, 0, 20u * vert_count)) {
+            std::memcpy(elems.data(), mapped, 20u * vert_count);
+            device_->UnmapBuffer(scratch.elements);
+        } else {
+            std::cerr << "[GPUMesher] MapBuffer failed for elements\n";
+            readback_ok = false;
+        }
+        for (u32 v = 0; v < vert_count; ++v) {
+            const u8* p = elems.data() + v * 20u;
+            u16 n0, n1;
+            std::memcpy(&n0, p + 4, 2);
+            std::memcpy(&n1, p + 6, 2);
+            const u8 sign_byte = p[3];  // top byte of ColorTSign
+            const f32 nx = static_cast<f32>(n0) * INV_INTERVALS - 1.f;
+            const f32 ny = static_cast<f32>(n1) * INV_INTERVALS - 1.f;
+            const f32 nz_sign = (sign_byte & 0x02) ? 1.f : -1.f;
+            const f32 nz_sq = std::max(0.f, 1.f - nx * nx - ny * ny);
+            const f32 nz = std::copysign(std::sqrt(nz_sq), nz_sign);
+            result.normals[v * 3 + 0] = nx;
+            result.normals[v * 3 + 1] = ny;
+            result.normals[v * 3 + 2] = nz;
+            std::memcpy(&result.uvs[v * 2 + 0], p + 12, 4);
+            std::memcpy(&result.uvs[v * 2 + 1], p + 16, 4);
+        }
+    }
+
+    // Read indices.
+    if (void* mapped = device_->MapBuffer(scratch.indices, 0, sizeof(u32) * idx_count)) {
+        std::memcpy(result.indices.data(), mapped, sizeof(u32) * idx_count);
+        device_->UnmapBuffer(scratch.indices);
+    } else {
+        std::cerr << "[GPUMesher] MapBuffer failed for indices\n";
+        readback_ok = false;
+    }
+
+    if (!readback_ok) {
+        std::cerr << "[GPUMesher] GPU readback partially failed; returning empty result\n";
+        device_->DestroyDescriptorSet(classify_ds);
+        device_->DestroyDescriptorSet(emit_vertices_ds);
+        device_->DestroyDescriptorSet(emit_faces_ds);
+        device_->DestroyDescriptorSet(write_indirect_ds);
+        device_->DestroyCommandBuffer(cmd_handle);
+        DestroyScratch(device_, scratch);
+        return empty;
+    }
+
+    // ---- Cleanup ----
+    device_->DestroyDescriptorSet(classify_ds);
+    device_->DestroyDescriptorSet(emit_vertices_ds);
+    device_->DestroyDescriptorSet(emit_faces_ds);
+    device_->DestroyDescriptorSet(write_indirect_ds);
+    device_->DestroyCommandBuffer(cmd_handle);
     DestroyScratch(device_, scratch);
-    return empty;
+
+    return result;
 }
 
 } // namespace primal::graphics::pcg
