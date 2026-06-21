@@ -457,6 +457,32 @@ TestResult TestGPUMesherFallback() {
     return TestResult::Passed;
 }
 
+TestResult TestGPUSurfaceNetsNoiseField() {
+    // Round-trip: NoiseField → MC(algorithm=1) → content_id. In headless env
+    // (no device) this exercises the fallback path; in a device-initialized
+    // env (TestGPUMesherIntegration) this exercises the GPU path. Either way
+    // the contract is the same: valid content_id when surface is non-empty.
+    PCGCreateGraph();
+
+    const u32 noise = PCGAddNode("NoiseField");
+    const u32 mc    = PCGAddNode("MarchingCubes");
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_min", -4.f, -4.f, -4.f) != 0, "Set bounds_min");
+    TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_max",  4.f,  4.f,  4.f) != 0, "Set bounds_max");
+    TEST_ASSERT(PCGSetNodeParamFloat(mc, "iso_value", 0.0f) != 0, "Set iso_value");
+    TEST_ASSERT(PCGSetNodeParamFloat(mc, "resolution", 32) != 0, "Set resolution");
+    TEST_ASSERT(PCGSetNodeParamFloat(mc, "algorithm", 1.0f) != 0, "Set algorithm=GPU");
+
+    PCGConnect(noise, 0, mc, 0);
+    PCGExecute();
+
+    const u64 cid = PCGGetOutputGeometry(mc);
+    TEST_ASSERT(cid != INVALID_CONTENT_ID,
+                "GPU path (or fallback) produced valid content_id");
+
+    PCGDestroyGraph();
+    return TestResult::Passed;
+}
+
 // ============================================================================
 // CameraAPI matrix readback tests
 // ============================================================================
@@ -567,6 +593,9 @@ void RunMarchingCubesTests() {
     suite.AddTestCase(TestCase("GPU fallback",
         TestGPUMesherFallback,
         "algorithm=1 + no device falls back to CPU; output is non-empty"));
+    suite.AddTestCase(TestCase("GPU SurfaceNets NoiseField",
+        TestGPUSurfaceNetsNoiseField,
+        "NoiseField → MC(algorithm=1) → valid content_id (GPU or fallback)"));
     suite.RunAllTests();
 }
 
