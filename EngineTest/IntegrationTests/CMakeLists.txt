@@ -375,8 +375,21 @@ if(APPLE)
     setup_test_target(TestMediatedDataFlow)
     target_link_libraries(TestMediatedDataFlow PRIVATE EngineDLL)
 
+    # 25. TestGPUMesherIntegration (Phase 9.3a GPU SurfaceNets device validation)
+    # Only test that exercises the GPU code path automatically. Requires full device
+    # init — pattern after TestRenderFrameAPI (dlopen + dlsym, in-source main()).
+    # Sub-tests: RenderBasic, RenderVsCPU, Perf.
+    add_executable(TestGPUMesherIntegration
+        "TestGPUMesherIntegration.cpp"
+        "ShaderCompilation.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestGPUMesherIntegration)
+    target_link_libraries(TestGPUMesherIntegration PRIVATE EngineDLL ${CMAKE_DL_LIBS})
+    target_compile_definitions(TestGPUMesherIntegration PRIVATE "TEST_GPU_MESHER_INTEGRATION=1")
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer
