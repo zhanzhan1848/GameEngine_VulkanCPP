@@ -483,6 +483,30 @@ TestResult TestGPUSurfaceNetsNoiseField() {
     return TestResult::Passed;
 }
 
+TestResult TestGPUMesherAlgorithmSwitch() {
+    // Same graph run with algorithm=0 (CPU) and algorithm=1 (GPU/fallback).
+    // Both must produce valid content_id. Phase 9.3a has no vertex-count query
+    // in the C ABI, so we can only assert validity here — Phase 9.3b will add
+    // mesh-stats query and tighten this to vertex-count comparison.
+    for (u32 algo = 0; algo <= 1; ++algo) {
+        PCGCreateGraph();
+        const u32 noise = PCGAddNode("NoiseField");
+        const u32 mc    = PCGAddNode("MarchingCubes");
+        TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_min", -4.f, -4.f, -4.f) != 0, "Set bounds_min");
+        TEST_ASSERT(PCGSetNodeParamVec3(mc, "bounds_max",  4.f,  4.f,  4.f) != 0, "Set bounds_max");
+        TEST_ASSERT(PCGSetNodeParamFloat(mc, "iso_value", 0.0f) != 0, "Set iso_value");
+        TEST_ASSERT(PCGSetNodeParamFloat(mc, "resolution", 32) != 0, "Set resolution");
+        TEST_ASSERT(PCGSetNodeParamFloat(mc, "algorithm", static_cast<f32>(algo)) != 0, "Set algorithm");
+        PCGConnect(noise, 0, mc, 0);
+        PCGExecute();
+
+        const u64 cid = PCGGetOutputGeometry(mc);
+        TEST_ASSERT(cid != INVALID_CONTENT_ID, "content_id valid for both algorithms");
+        PCGDestroyGraph();
+    }
+    return TestResult::Passed;
+}
+
 // ============================================================================
 // CameraAPI matrix readback tests
 // ============================================================================
@@ -596,6 +620,9 @@ void RunMarchingCubesTests() {
     suite.AddTestCase(TestCase("GPU SurfaceNets NoiseField",
         TestGPUSurfaceNetsNoiseField,
         "NoiseField → MC(algorithm=1) → valid content_id (GPU or fallback)"));
+    suite.AddTestCase(TestCase("Algorithm switch",
+        TestGPUMesherAlgorithmSwitch,
+        "algorithm=0 and algorithm=1 both produce valid content_id"));
     suite.RunAllTests();
 }
 
