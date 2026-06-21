@@ -1594,6 +1594,7 @@ void PCGScatterTestCase::ExecuteMarchingCubesDemo() {
     mcNode->bounds_max = primal::math::v3{ 5.f, 20.f,  5.f};
     mcNode->resolution = 64;
     mcNode->iso_value = mc_iso_value_;
+    mcNode->algorithm = mc_algorithm_;
     mc_node_id_ = mc_graph_->AddNode(std::move(mcNode));
 
     mc_graph_->Connect(nid, 0, mc_node_id_, 0);
@@ -1632,6 +1633,7 @@ void PCGScatterTestCase::ExecuteMarchingCubesDemo() {
     }
 
     std::cout << "[MarchingCubesDemo] NoiseField→MC res=64 iso=" << mc_iso_value_
+              << " algo=" << (mc_algorithm_ == 0 ? "CPU" : "GPU")
               << " content_id=" << cid << " entity=" << mc_entity_id_
               << " bounds=(-5,10,-5)-(5,20,5)" << std::endl;
 }
@@ -1661,6 +1663,7 @@ void PCGScatterTestCase::ReExecuteMarchingCubes(f32 new_iso) {
     mc_iso_value_ = new_iso;
     auto* node = static_cast<MarchingCubesNode*>(mc_graph_->GetNodes()[mc_node_id_].get());
     node->iso_value = new_iso;
+    node->algorithm = mc_algorithm_;
 
     mc_graph_->Execute();
 
@@ -1771,6 +1774,21 @@ void PCGScatterTestCase::HandleInput(float dt) {
             }
         }
     } else { key_n_pressed_ = false; }
+
+    // Phase 9.3a: key M toggles MC algorithm (CPU↔GPU). Re-executes the MC
+    // graph with the same iso so the surface can be visually compared.
+    // GPUMesher is initialized in live env (device present), so algorithm=1
+    // hits the GPU path for real.
+    get(input_source::keyboard, input_code::key_m, val);
+    if (val.current.x > 0.0f) {
+        if (!key_m_pressed_) {
+            key_m_pressed_ = true;
+            mc_algorithm_ = (mc_algorithm_ == 0) ? 1 : 0;
+            std::cout << "[MarchingCubesDemo] algorithm=" << mc_algorithm_
+                      << (mc_algorithm_ == 0 ? " (CPU)" : " (GPU)") << std::endl;
+            ReExecuteMarchingCubes(mc_iso_value_);
+        }
+    } else { key_m_pressed_ = false; }
 
     // Material parameter controls
     get(input_source::keyboard, input_code::key_1, val);

@@ -95,6 +95,7 @@ private:
     u32 mc_node_id_{0};
     primal::id::id_type mc_entity_id_{primal::id::invalid_id};
     f32 mc_iso_value_{0.0f};
+    u32  mc_algorithm_{0};  // 0=SurfaceNets_CPU, 1=SurfaceNets_GPU (Phase 9.3a)
 
     // True after ForwardSceneRenderer::SetLightColor has dimmed the default
     // HDR (20,20,20) light down to (3,3,3) so N·L variation survives tone map.
@@ -105,6 +106,7 @@ private:
     bool key_t_pressed_{false};
     bool key_g_pressed_{false};
     bool key_n_pressed_{false};
+    bool key_m_pressed_{false};
 
     // Material parameter controls
     f32 mat_roughness_{0.5f};
