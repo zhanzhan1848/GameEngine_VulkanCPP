@@ -959,9 +959,8 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
         // Texture half (bindings 0..2 in texture namespace).
         // DescriptorImageInfo.imageView holds the texture handle (despite the name).
         DescriptorImageInfo img_infos[3];
-        const auto& cfg2 = sdf.GetConfig();
         for (u32 i = 0; i < 3; ++i) {
-            if (i < cfg2.cascade_count) {
+            if (i < cfg.cascade_count) {
                 img_infos[i].imageView   = sdf.GetCascade(i).sdf_texture;
             } else {
                 img_infos[i].imageView   = handles::INVALID_RESOURCE;
