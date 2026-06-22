@@ -1577,10 +1577,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
     frameCount_++;
 
-    // Frame boundary: drain deferred-destroy queue from GPUMesher.
-    // Handles queued by StreamingMesh owners that died during this frame are
-    // now safe to free — the command buffer for this frame has been submitted
-    // and the next frame hasn't started recording yet.
+    // Drain queued streaming-mesh destroys. Safe on Metal due to in-flight
+    // resource retention (the command buffer for this frame has not yet been
+    // submitted — submission happens in the caller, e.g. TestPCGScatter).
     pcg::GPUMesher::Get().DrainDeferredDestroys();
 
     auto endTime = std::chrono::high_resolution_clock::now();

@@ -31,8 +31,10 @@ public:
     // Used by StreamingMesh owners that may die mid-frame (see spec §7.2).
     void EnqueueDeferredDestroy(rhi::ResourceHandle handle);
 
-    // Free all queued handles. Called by StandardRenderPipeline after the
-    // frame's command buffer has completed (WaitForCompletion).
+    // Free all queued handles. Called by StandardRenderPipeline at frame end.
+    // On Metal this is safe even while command buffers are in-flight because
+    // Metal retains resources referenced by encoders. A Vulkan/D3D12 backend
+    // would need a GPU fence wait before calling this.
     void DrainDeferredDestroys();
 
     // Run SurfaceNets on the GPU. Reads `field` on CPU (Pass 0), uploads scalar
@@ -93,8 +95,10 @@ private:
     rhi::ShaderHandle write_indirect_shader_{rhi::handles::INVALID_SHADER};
 
     // Handles queued by StreamingMesh owners that may die mid-frame.
-    // Freed by DrainDeferredDestroys() at the next frame boundary after the
-    // GPU has finished reading from them (spec §7.2).
+    // Freed by DrainDeferredDestroys() at the next frame boundary. On Metal,
+    // in-flight command buffers retain their referenced resources, so the
+    // queued handles are safe to release without an explicit GPU fence wait
+    // (spec §7.2). A Vulkan/D3D12 backend would need to wait on a fence first.
     utl::vector<rhi::ResourceHandle> deferred_destroy_queue_;
 };
 
