@@ -94,6 +94,19 @@ private:
     rhi::ShaderHandle emit_faces_z_shader_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle write_indirect_shader_{rhi::handles::INVALID_SHADER};
 
+    // --- SDF-variant pipeline state (Phase 9.3b) ---
+    // classify_cells_sdf has 3 extra texture bindings vs classify_cells, so it
+    // needs its own descriptor set layout. Passes 2-4 reuse the 9.3a pipelines
+    // since the shaders are byte-identical.
+    rhi::DescriptorSetLayoutHandle classify_sdf_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::PipelineLayoutHandle      classify_sdf_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::ShaderHandle              classify_sdf_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle            classify_sdf_pipeline_{rhi::handles::INVALID_PIPELINE};
+    bool sdf_pipelines_created_{false};
+
+    void CreateSDFPipelines();
+    void DestroySDFPipelines();
+
     // Handles queued by StreamingMesh owners that may die mid-frame.
     // Freed by DrainDeferredDestroys() at the next frame boundary. On Metal,
     // in-flight command buffers retain their referenced resources, so the

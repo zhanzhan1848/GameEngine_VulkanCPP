@@ -107,6 +107,7 @@ void GPUMesher::Initialize(rhi::RHIDeviceBase* device) {
 void GPUMesher::Shutdown() {
     DrainDeferredDestroys();  // free queued handles while device_ is still valid
     DestroyPipelines();
+    DestroySDFPipelines();
     device_ = nullptr;
 }
 
@@ -294,6 +295,87 @@ void GPUMesher::DestroyPipelines() {
     emit_faces_set_layout_      = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     write_indirect_set_layout_  = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     pipelines_created_ = false;
+}
+
+void GPUMesher::CreateSDFPipelines() {
+    if (sdf_pipelines_created_ || !device_) return;
+
+    using namespace rhi;
+
+    // Descriptor set layout for classify_cells_sdf:
+    //   buffer(0): SurfaceNetsSDFUniforms
+    //   buffer(1): scalar_volume (write)
+    //   buffer(2): dual_id      (write)
+    //   buffer(3): counters     (atomic)
+    //   texture(0..2): GlobalSDF cascades (access::sample)
+    //
+    // 7 bindings, positional init matching the 9.3a CreatePipelines() style:
+    //   {binding, descriptorType, descriptorCount, stageFlags, immutableSamplers}
+    DescriptorSetLayoutBinding b[7] = {
+        {0, DescriptorType::UniformBuffer,  1, ShaderStage::Compute, nullptr},
+        {1, DescriptorType::StorageBuffer,  1, ShaderStage::Compute, nullptr},
+        {2, DescriptorType::StorageBuffer,  1, ShaderStage::Compute, nullptr},
+        {3, DescriptorType::StorageBuffer,  1, ShaderStage::Compute, nullptr},
+        {0, DescriptorType::SampledImage,   1, ShaderStage::Compute, nullptr},
+        {1, DescriptorType::SampledImage,   1, ShaderStage::Compute, nullptr},
+        {2, DescriptorType::SampledImage,   1, ShaderStage::Compute, nullptr},
+    };
+    {
+        DescriptorSetLayoutDesc desc{};
+        desc.bindingCount = 7;
+        desc.bindings = b;
+        classify_sdf_set_layout_ = device_->CreateDescriptorSetLayout(desc);
+    }
+
+    {
+        PipelineLayoutDesc desc{};
+        desc.setLayoutCount = 1;
+        desc.setLayouts = &classify_sdf_set_layout_;
+        classify_sdf_layout_ = device_->CreatePipelineLayout(desc);
+    }
+
+    auto src = LoadShaderSource("SurfaceNetsGPUSDF");
+    if (src.empty()) {
+        std::cerr << "[GPUMesher] SurfaceNetsGPUSDF.metal not found\n";
+        return;
+    }
+
+    classify_sdf_shader_ = device_->CreateShader(
+        src.data(), src.size(), ShaderStage::Compute, "classify_cells_sdf");
+    if (classify_sdf_shader_ == handles::INVALID_SHADER) {
+        std::cerr << "[GPUMesher] classify_cells_sdf compile failed\n";
+        return;
+    }
+
+    ComputePipelineDesc cp_desc{};
+    cp_desc.computeShader  = classify_sdf_shader_;
+    cp_desc.layout         = classify_sdf_layout_;
+    cp_desc.threadGroupSize = math::u32v3{4, 4, 4};
+    classify_sdf_pipeline_ = device_->CreateComputePipeline(cp_desc);
+
+    if (classify_sdf_pipeline_ == handles::INVALID_PIPELINE) {
+        std::cerr << "[GPUMesher] classify_cells_sdf pipeline creation failed\n";
+        DestroySDFPipelines();
+        return;
+    }
+
+    sdf_pipelines_created_ = true;
+}
+
+void GPUMesher::DestroySDFPipelines() {
+    if (!device_) { sdf_pipelines_created_ = false; return; }
+
+    if (classify_sdf_pipeline_   != rhi::handles::INVALID_PIPELINE)         device_->DestroyPipeline(classify_sdf_pipeline_);
+    if (classify_sdf_shader_     != rhi::handles::INVALID_SHADER)           device_->DestroyShader(classify_sdf_shader_);
+    if (classify_sdf_layout_     != rhi::handles::INVALID_PIPELINE_LAYOUT)  device_->DestroyPipelineLayout(classify_sdf_layout_);
+    if (classify_sdf_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)
+        device_->DestroyDescriptorSetLayout(classify_sdf_set_layout_);
+
+    classify_sdf_pipeline_   = rhi::handles::INVALID_PIPELINE;
+    classify_sdf_shader_     = rhi::handles::INVALID_SHADER;
+    classify_sdf_layout_     = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    classify_sdf_set_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    sdf_pipelines_created_   = false;
 }
 
 MarchingCubesResult GPUMesher::GenerateSurfaceNets(
