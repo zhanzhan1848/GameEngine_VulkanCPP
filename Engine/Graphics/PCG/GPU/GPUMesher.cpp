@@ -337,6 +337,7 @@ void GPUMesher::CreateSDFPipelines() {
     auto src = LoadShaderSource("SurfaceNetsGPUSDF");
     if (src.empty()) {
         std::cerr << "[GPUMesher] SurfaceNetsGPUSDF.metal not found\n";
+        DestroySDFPipelines();
         return;
     }
 
@@ -344,6 +345,7 @@ void GPUMesher::CreateSDFPipelines() {
         src.data(), src.size(), ShaderStage::Compute, "classify_cells_sdf");
     if (classify_sdf_shader_ == handles::INVALID_SHADER) {
         std::cerr << "[GPUMesher] classify_cells_sdf compile failed\n";
+        DestroySDFPipelines();
         return;
     }
 
