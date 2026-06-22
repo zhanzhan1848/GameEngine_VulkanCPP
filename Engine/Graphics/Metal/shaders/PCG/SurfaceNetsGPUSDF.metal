@@ -5,10 +5,13 @@
 // so passes 2-4 run byte-identical to 9.3a (they load the original
 // SurfaceNetsGPU.metal kernels and read from that buffer).
 //
-// Self-contained — does NOT #include SurfaceNetsGPU.metal. MTLCompileOptions in
-// MetalShader.cpp:61 does not set includeSearchPaths, so runtime source
-// compilation cannot resolve includes. Shared constants (SN_INVALID_ID,
-// kCornerOffset) are redefined here and MUST match 9.3a exactly.
+// Self-contained (no #include) because GPUMesher.cpp's shader loader (LoadShaderSource,
+// Engine/Graphics/PCG/GPU/GPUMesher.cpp:55-91) reads source as raw bytes and hands them
+// to MetalShader::Initialize, which constructs MTL::CompileOptions with default values
+// (Engine/Graphics/RHI/Platforms/Metal/MetalShader.cpp:61) and never calls
+// setIncludeSearchPaths — includes cannot be resolved at runtime. Shared constants
+// (SN_INVALID_ID, kCornerOffset) are redefined locally and MUST match
+// SurfaceNetsGPU.metal exactly.
 
 #include <metal_stdlib>
 
@@ -49,6 +52,10 @@ inline bool in_cascade(float3 p, float3 origin, float extent) {
     return all(p >= origin) && all(p < origin + float3(extent));
 }
 
+// Assumes 3 cascades are always active (GlobalSDFConfig::cascade_count
+// defaults to 3 and no code path reduces it). If this ever changes, add
+// a cascade_count uniform and guard the cascade accesses.
+//
 // Samples SDF at world_pos using the finest available cascade. Returns a large
 // positive value (treated as solid) if outside all cascades. Mirrors the
 // sampleBestSDF_elseIf pattern in Lumen/SDFTraceCommon.metal:60-78.
@@ -89,6 +96,14 @@ inline float sample_global_sdf(
 //   buffer(3):  counters (atomic_uint, increment counters[0] = vertex_count)
 //
 // Dispatch: resolution³ threads (threadgroup size 4×4×4 = 64, same as 9.3a).
+//
+// NOTE: Each cell-thread writes 8 entries to scalar[]. Adjacent cells share
+// grid vertices, so the same scalar[idx] is written by multiple threads.
+// This is a benign write-after-write race: all racers write the same value
+// (world_pos → texture sample is a pure function). Metal technically calls
+// this UB, but Apple Silicon's tiled rasterizer handles same-value WAW
+// deterministically. v2 may split into a dedicated grid-vertex fill pass
+// if driver changes expose this.
 kernel void classify_cells_sdf(
     constant SurfaceNetsSDFUniforms& u  [[buffer(0)]],
     texture3d<float, access::sample> t0 [[texture(0)]],
