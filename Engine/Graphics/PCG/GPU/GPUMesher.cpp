@@ -289,7 +289,7 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
     MarchingCubesResult empty;
     if (!IsReady()) return empty;
     if (!pipelines_created_) CreatePipelines();
-    if (!pipelines_created_) return empty;  // shader compile / pipeline creation failed
+    if (!pipelines_created_) return empty;
     if (resolution < 2 || resolution > 256) return empty;
 
     const math::v3 extent{
@@ -323,12 +323,14 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
     ScratchBuffers scratch;
 
     // Allocate buffers (worst-case sizes per spec §4.2)
+    // Dynamic (Shared storage on Metal) so we can MapBuffer for synchronous readback.
+    // Static would give us StorageModePrivate → contents() == nullptr → MapBuffer fails.
     auto make_storage_buf = [&](u64 bytes) -> rhi::ResourceHandle {
         rhi::BufferDesc desc{};
         desc.size = bytes;
         desc.bindFlags = (u32)rhi::BufferUsageFlags::Storage;
-        desc.memoryUsage = rhi::GPUMemoryUsage::Static;
-        desc.usage = rhi::GPUMemoryUsage::Static;
+        desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        desc.usage = rhi::GPUMemoryUsage::Dynamic;
         return device_->CreateBuffer(desc);
     };
 

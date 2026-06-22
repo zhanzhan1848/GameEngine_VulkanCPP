@@ -248,7 +248,7 @@ inline void emit_face_polygon(
 //   1: scalar_volume (read)
 //   2: dual_id (read)
 //   3: index_buffer (write)
-//   4: index_counter (atomic)
+//   4: counters (atomic, u32[2]; we increment counters[1] = index_count)
 //
 // Dispatch: n³ threads (one per grid vertex); early-out if edge exits grid.
 template<uint Axis>
@@ -257,7 +257,7 @@ inline void emit_faces_impl(
     device const float*           scalar   [[buffer(1)]],
     device const uint*            dual_id  [[buffer(2)]],
     device uint*                  indices  [[buffer(3)]],
-    device atomic_uint*           icounter [[buffer(4)]],
+    device atomic_uint*           counters [[buffer(4)]],
     uint3                         tid      [[thread_position_in_grid]])
 {
     const uint n = u.n;
@@ -282,7 +282,8 @@ inline void emit_faces_impl(
         cell_dual_at<Axis>(dual_id, res, tid, -1, -1),
         cell_dual_at<Axis>(dual_id, res, tid,  0, -1),
     };
-    emit_face_polygon(indices, icounter, ids);
+    // counters[1] = index_count (counters[0] is vertex_count, owned by classify_cells).
+    emit_face_polygon(indices, counters + 1u, ids);
 }
 
 kernel void emit_faces_x(
@@ -290,10 +291,10 @@ kernel void emit_faces_x(
     device const float*           scalar   [[buffer(1)]],
     device const uint*            dual_id  [[buffer(2)]],
     device uint*                  indices  [[buffer(3)]],
-    device atomic_uint*           icounter [[buffer(4)]],
+    device atomic_uint*           counters [[buffer(4)]],
     uint3                         tid      [[thread_position_in_grid]])
 {
-    emit_faces_impl<0>(u, scalar, dual_id, indices, icounter, tid);
+    emit_faces_impl<0>(u, scalar, dual_id, indices, counters, tid);
 }
 
 kernel void emit_faces_y(
@@ -301,10 +302,10 @@ kernel void emit_faces_y(
     device const float*           scalar   [[buffer(1)]],
     device const uint*            dual_id  [[buffer(2)]],
     device uint*                  indices  [[buffer(3)]],
-    device atomic_uint*           icounter [[buffer(4)]],
+    device atomic_uint*           counters [[buffer(4)]],
     uint3                         tid      [[thread_position_in_grid]])
 {
-    emit_faces_impl<1>(u, scalar, dual_id, indices, icounter, tid);
+    emit_faces_impl<1>(u, scalar, dual_id, indices, counters, tid);
 }
 
 kernel void emit_faces_z(
@@ -312,10 +313,10 @@ kernel void emit_faces_z(
     device const float*           scalar   [[buffer(1)]],
     device const uint*            dual_id  [[buffer(2)]],
     device uint*                  indices  [[buffer(3)]],
-    device atomic_uint*           icounter [[buffer(4)]],
+    device atomic_uint*           counters [[buffer(4)]],
     uint3                         tid      [[thread_position_in_grid]])
 {
-    emit_faces_impl<2>(u, scalar, dual_id, indices, icounter, tid);
+    emit_faces_impl<2>(u, scalar, dual_id, indices, counters, tid);
 }
 
 // Pass 4: write_indirect_args
