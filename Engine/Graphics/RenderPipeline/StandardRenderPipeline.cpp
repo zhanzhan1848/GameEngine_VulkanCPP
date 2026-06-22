@@ -1172,6 +1172,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
                                    target, cbIdx % 3);
         frameCount_++;
+        // Frame boundary: drain deferred-destroy queue from GPUMesher.
+        pcg::GPUMesher::Get().DrainDeferredDestroys();
         return;
     }
 
@@ -1575,6 +1577,12 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
     frameCount_++;
 
+    // Frame boundary: drain deferred-destroy queue from GPUMesher.
+    // Handles queued by StreamingMesh owners that died during this frame are
+    // now safe to free — the command buffer for this frame has been submitted
+    // and the next frame hasn't started recording yet.
+    pcg::GPUMesher::Get().DrainDeferredDestroys();
+
     auto endTime = std::chrono::high_resolution_clock::now();
     stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
 }
@@ -1639,6 +1647,9 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
 
         frameCount_++;
 
+        // Frame boundary: drain deferred-destroy queue from GPUMesher.
+        pcg::GPUMesher::Get().DrainDeferredDestroys();
+
         auto endTime = std::chrono::high_resolution_clock::now();
         stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
         return;
@@ -1690,6 +1701,9 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
     device_->DestroyCommandBuffer(cmdHandle);
 
     frameCount_++;
+
+    // Frame boundary: drain deferred-destroy queue from GPUMesher.
+    pcg::GPUMesher::Get().DrainDeferredDestroys();
 
     auto endTime = std::chrono::high_resolution_clock::now();
     stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();

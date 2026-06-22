@@ -105,8 +105,25 @@ void GPUMesher::Initialize(rhi::RHIDeviceBase* device) {
 }
 
 void GPUMesher::Shutdown() {
+    DrainDeferredDestroys();  // free queued handles while device_ is still valid
     DestroyPipelines();
     device_ = nullptr;
+}
+
+void GPUMesher::EnqueueDeferredDestroy(rhi::ResourceHandle handle) {
+    if (handle == rhi::handles::INVALID_RESOURCE) return;
+    deferred_destroy_queue_.push_back(handle);
+}
+
+void GPUMesher::DrainDeferredDestroys() {
+    if (device_ == nullptr) {
+        deferred_destroy_queue_.clear();
+        return;
+    }
+    for (auto h : deferred_destroy_queue_) {
+        device_->DestroyBuffer(h);
+    }
+    deferred_destroy_queue_.clear();
 }
 
 void GPUMesher::CreatePipelines() {

@@ -27,6 +27,14 @@ public:
 
     bool IsReady() const { return device_ != nullptr; }
 
+    // Queue a buffer handle for destruction at the next frame boundary.
+    // Used by StreamingMesh owners that may die mid-frame (see spec §7.2).
+    void EnqueueDeferredDestroy(rhi::ResourceHandle handle);
+
+    // Free all queued handles. Called by StandardRenderPipeline after the
+    // frame's command buffer has completed (WaitForCompletion).
+    void DrainDeferredDestroys();
+
     // Run SurfaceNets on the GPU. Reads `field` on CPU (Pass 0), uploads scalar
     // volume, dispatches 4 compute passes, blocking-reads back vertex/index
     // buffers, returns MarchingCubesResult identical in shape to the CPU kernel.
@@ -83,6 +91,11 @@ private:
     rhi::ShaderHandle emit_faces_y_shader_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle emit_faces_z_shader_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle write_indirect_shader_{rhi::handles::INVALID_SHADER};
+
+    // Handles queued by StreamingMesh owners that may die mid-frame.
+    // Freed by DrainDeferredDestroys() at the next frame boundary after the
+    // GPU has finished reading from them (spec §7.2).
+    utl::vector<rhi::ResourceHandle> deferred_destroy_queue_;
 };
 
 } // namespace primal::graphics::pcg
