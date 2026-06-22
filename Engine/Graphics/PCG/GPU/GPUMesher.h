@@ -4,6 +4,9 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/PCG/MarchingCubes.h"
 
+namespace primal::graphics::nanite { class GlobalSDF; }
+namespace primal::graphics { struct StreamingMesh; }
+
 namespace primal::graphics::pcg {
 
 // Singleton owning the RHI device pointer and cached compute pipelines for GPU
@@ -48,6 +51,21 @@ public:
         const math::v3& bounds_max,
         u32 resolution,
         f32 iso_value);
+
+    // Run SurfaceNets directly on GlobalSDF cascade textures. Skips Pass 0
+    // (no CPU sample loop, no scalar upload). Writes into the caller-owned
+    // `target` StreamingMesh buffers. Returns true on successful dispatch.
+    //
+    // Caller responsibility: after return, read back target.counters
+    // (8 bytes) for vertex/index counts and call
+    // PipelineUpdateStreamingMeshEntity. Counters are zeroed internally.
+    bool GenerateSurfaceNetsFromGlobalSDF(
+        const primal::graphics::nanite::GlobalSDF& sdf,
+        const math::v3& bounds_min,
+        const math::v3& bounds_max,
+        u32 resolution,
+        f32 iso_value,
+        primal::graphics::StreamingMesh& target);
 
 private:
     GPUMesher() = default;

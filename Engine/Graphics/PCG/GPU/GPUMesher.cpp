@@ -12,6 +12,8 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHITypes.h"
+#include "Graphics/Nanite/GlobalSDF.h"
+#include "Graphics/RenderPipeline/StreamingMesh.h"
 
 namespace primal::graphics::pcg {
 
@@ -27,6 +29,28 @@ struct SurfaceNetsUniforms {
     f32  extent_x, extent_y, extent_z;
     f32  iso_value;
     u32  pad0, pad1, pad2;
+};
+
+// Extended uniforms for the SDF variant. Must match SurfaceNetsSDFUniforms in
+// SurfaceNetsGPUSDF.metal:32-47 exactly. The 9.3a base fields occupy the first
+// 64 bytes (including the 3 u32 pads that align the struct to 16 bytes); the
+// cascade data follows. Each Metal float3 in a constant struct is 16-byte
+// aligned, so SdfOrigins uses v4 (xyz + unused w) per element.
+struct SurfaceNetsSDFUniforms {
+    // --- 9.3a base (offsets 0..63, 64 bytes) ---
+    u32  resolution;
+    u32  n;
+    u32  n2;
+    f32  voxel_x, voxel_y, voxel_z;
+    f32  origin_x, origin_y, origin_z;
+    f32  extent_x, extent_y, extent_z;
+    f32  iso_value;
+    u32  pad0, pad1, pad2;
+    // --- GlobalSDF cascades (offsets 64..) ---
+    math::v4 SdfOrigins[3];      // 3 × 16 bytes (Metal float3 array = 16-byte stride)
+    f32      SdfVoxelSizes[3];   // 12 bytes
+    f32      SdfExtents[3];      // 12 bytes
+    u32      SdfResolutions[3];  // 12 bytes
 };
 
 struct ScratchBuffers {
@@ -767,6 +791,338 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
     DestroyScratch(device_, scratch);
 
     return result;
+}
+
+bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
+    const primal::graphics::nanite::GlobalSDF& sdf,
+    const math::v3& bounds_min,
+    const math::v3& bounds_max,
+    u32 resolution,
+    f32 iso_value,
+    primal::graphics::StreamingMesh& target)
+{
+    if (!IsReady()) return false;
+    if (!pipelines_created_) CreatePipelines();
+    if (!pipelines_created_) return false;
+    if (!sdf_pipelines_created_) CreateSDFPipelines();
+    if (!sdf_pipelines_created_) return false;
+    if (!target.IsValid()) return false;
+    if (resolution < 2 || resolution > 256) return false;
+
+    const math::v3 extent{
+        bounds_max.x - bounds_min.x,
+        bounds_max.y - bounds_min.y,
+        bounds_max.z - bounds_min.z,
+    };
+    if (extent.x <= 0.0f || extent.y <= 0.0f || extent.z <= 0.0f) return false;
+
+    const math::v3 voxel{
+        extent.x / static_cast<f32>(resolution),
+        extent.y / static_cast<f32>(resolution),
+        extent.z / static_cast<f32>(resolution),
+    };
+    const u32 n  = resolution + 1;
+    const u32 n2 = n * n;
+    const u32 n3 = n * n * n;
+    const u32 res3 = resolution * resolution * resolution;
+
+    // Pack SDF uniforms. Must match SurfaceNetsSDFUniforms in
+    // SurfaceNetsGPUSDF.metal:32-47 (base 9.3a fields + cascade data).
+    SurfaceNetsSDFUniforms uni{};
+    uni.resolution = resolution; uni.n = n; uni.n2 = n2;
+    uni.voxel_x = voxel.x; uni.voxel_y = voxel.y; uni.voxel_z = voxel.z;
+    uni.origin_x = bounds_min.x; uni.origin_y = bounds_min.y; uni.origin_z = bounds_min.z;
+    uni.extent_x = extent.x; uni.extent_y = extent.y; uni.extent_z = extent.z;
+    uni.iso_value = iso_value;
+    uni.pad0 = uni.pad1 = uni.pad2 = 0u;
+
+    // Populate cascade data. Cascades are cubic — extent.x is representative.
+    // If config has fewer than 3 cascades, the remaining slots stay zero-initialized
+    // and the shader's in_cascade check returns false for them (safe).
+    const auto& cfg = sdf.GetConfig();
+    for (u32 i = 0; i < cfg.cascade_count && i < 3; ++i) {
+        const auto& c = sdf.GetCascade(i);
+        uni.SdfOrigins[i]      = math::v4{c.origin.x, c.origin.y, c.origin.z, 0.0f};
+        uni.SdfVoxelSizes[i]   = c.voxel_size;
+        uni.SdfExtents[i]      = c.extent.x;
+        uni.SdfResolutions[i]  = c.resolution;
+    }
+
+    // Zero counters (atomic counter must start at 0). Target owns this buffer.
+    u32 zero_counters[2] = {0u, 0u};
+    device_->UpdateBufferData(target.counters, zero_counters, sizeof(zero_counters));
+
+    // Allocate transient buffers: uniforms, dual_id, scalar_volume.
+    // Positions/elements/indices/counters/indirect_args come from the target
+    // StreamingMesh (caller-owned, persistent across re-executes).
+    auto make_storage_buf = [&](u64 bytes) -> rhi::ResourceHandle {
+        rhi::BufferDesc desc{};
+        desc.size = bytes;
+        desc.bindFlags = (u32)rhi::BufferUsageFlags::Storage;
+        desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        desc.usage = rhi::GPUMemoryUsage::Dynamic;
+        return device_->CreateBuffer(desc);
+    };
+
+    rhi::ResourceHandle uni_buf    = rhi::handles::INVALID_RESOURCE;
+    rhi::ResourceHandle dual_id_buf = rhi::handles::INVALID_RESOURCE;
+    rhi::ResourceHandle scalar_buf  = rhi::handles::INVALID_RESOURCE;
+
+    // Uniform buffer (Dynamic so we can UpdateBufferData)
+    {
+        rhi::BufferDesc desc{};
+        desc.size = sizeof(SurfaceNetsSDFUniforms);
+        desc.bindFlags = (u32)rhi::BufferUsageFlags::Uniform;
+        desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        desc.usage = rhi::GPUMemoryUsage::Dynamic;
+        uni_buf = device_->CreateBuffer(desc);
+    }
+    dual_id_buf = make_storage_buf(sizeof(u32) * res3);
+    scalar_buf  = make_storage_buf(sizeof(f32) * n3);
+
+    if (uni_buf     == rhi::handles::INVALID_RESOURCE ||
+        dual_id_buf == rhi::handles::INVALID_RESOURCE ||
+        scalar_buf  == rhi::handles::INVALID_RESOURCE) {
+        if (uni_buf     != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(uni_buf);
+        if (dual_id_buf != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(dual_id_buf);
+        if (scalar_buf  != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(scalar_buf);
+        return false;
+    }
+
+    device_->UpdateBufferData(uni_buf, &uni, sizeof(uni));
+
+    using namespace rhi;
+
+    // ---- Create 4 descriptor sets ----
+    //
+    // classify_sdf_ds: 4 buffers + 3 textures (uses classify_sdf_set_layout_)
+    //   binding 0: UniformBuffer  uni_buf
+    //   binding 1: StorageBuffer  scalar_buf
+    //   binding 2: StorageBuffer  dual_id_buf
+    //   binding 3: StorageBuffer  target.counters
+    //   binding 0: SampledImage   cascade[0].sdf_texture
+    //   binding 1: SampledImage   cascade[1].sdf_texture
+    //   binding 2: SampledImage   cascade[2].sdf_texture
+    //   (Metal uses separate binding namespaces for buffer vs texture — same
+    //   binding number with different DescriptorType is unambiguous, see
+    //   MetalDescriptorSet.cpp:66-72.)
+    //
+    // emit_vertices_ds: 5 buffers (uses emit_vertices_set_layout_)
+    //   0: uni_buf, 1: scalar_buf, 2: dual_id_buf, 3: target.positions, 4: target.elements
+    //
+    // emit_faces_ds: 5 buffers (uses emit_faces_set_layout_)
+    //   0: uni_buf, 1: scalar_buf, 2: dual_id_buf, 3: target.indices, 4: target.counters
+    //
+    // write_indirect_ds: 3 buffers (uses write_indirect_set_layout_)
+    //   0: uni_buf, 1: target.counters, 2: target.indirect_args
+
+    auto make_buffer_ds = [&](DescriptorSetLayoutHandle set_layout,
+                              const DescriptorBufferInfo* infos,
+                              const DescriptorType* types,
+                              u32 count) -> DescriptorSetHandle {
+        DescriptorSetHandle ds = device_->CreateDescriptorSet({set_layout});
+        if (ds == handles::INVALID_DESCRIPTOR_SET) return ds;
+        WriteDescriptorSet writes[8];
+        for (u32 i = 0; i < count; ++i) {
+            writes[i] = {ds, i, 0, 1, types[i], nullptr, &infos[i]};
+        }
+        device_->UpdateDescriptorSets(count, writes);
+        return ds;
+    };
+
+    DescriptorSetHandle classify_ds      = handles::INVALID_DESCRIPTOR_SET;
+    DescriptorSetHandle emit_vertices_ds = handles::INVALID_DESCRIPTOR_SET;
+    DescriptorSetHandle emit_faces_ds    = handles::INVALID_DESCRIPTOR_SET;
+    DescriptorSetHandle write_indirect_ds = handles::INVALID_DESCRIPTOR_SET;
+
+    // classify_sdf_ds — buffer half (bindings 0..3)
+    classify_ds = device_->CreateDescriptorSet({classify_sdf_set_layout_});
+    if (classify_ds != handles::INVALID_DESCRIPTOR_SET) {
+        DescriptorBufferInfo buf_infos[4] = {
+            {uni_buf,        0, 0},
+            {scalar_buf,     0, 0},
+            {dual_id_buf,    0, 0},
+            {target.counters, 0, 0},
+        };
+        DescriptorType buf_types[4] = {
+            DescriptorType::UniformBuffer,
+            DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer,
+        };
+        WriteDescriptorSet writes[4];
+        for (u32 i = 0; i < 4; ++i) {
+            writes[i] = {classify_ds, i, 0, 1, buf_types[i], nullptr, &buf_infos[i]};
+        }
+        device_->UpdateDescriptorSets(4, writes);
+
+        // Texture half (bindings 0..2 in texture namespace).
+        // DescriptorImageInfo.imageView holds the texture handle (despite the name).
+        DescriptorImageInfo img_infos[3];
+        const auto& cfg2 = sdf.GetConfig();
+        for (u32 i = 0; i < 3; ++i) {
+            if (i < cfg2.cascade_count) {
+                img_infos[i].imageView   = sdf.GetCascade(i).sdf_texture;
+            } else {
+                img_infos[i].imageView   = handles::INVALID_RESOURCE;
+            }
+            img_infos[i].sampler    = handles::INVALID_SAMPLER;
+            img_infos[i].imageLayout = ResourceState::ShaderResource;
+        }
+        WriteDescriptorSet tex_writes[3];
+        for (u32 i = 0; i < 3; ++i) {
+            tex_writes[i] = {classify_ds, i, 0, 1, DescriptorType::SampledImage, &img_infos[i], nullptr};
+        }
+        device_->UpdateDescriptorSets(3, tex_writes);
+    }
+
+    // emit_vertices_ds
+    {
+        DescriptorBufferInfo infos[5] = {
+            {uni_buf,          0, 0},
+            {scalar_buf,       0, 0},
+            {dual_id_buf,      0, 0},
+            {target.positions, 0, 0},
+            {target.elements,  0, 0},
+        };
+        DescriptorType types[5] = {
+            DescriptorType::UniformBuffer,
+            DescriptorType::StorageBuffer, DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer, DescriptorType::StorageBuffer,
+        };
+        emit_vertices_ds = make_buffer_ds(emit_vertices_set_layout_, infos, types, 5);
+    }
+    // emit_faces_ds
+    {
+        DescriptorBufferInfo infos[5] = {
+            {uni_buf,         0, 0},
+            {scalar_buf,      0, 0},
+            {dual_id_buf,     0, 0},
+            {target.indices,  0, 0},
+            {target.counters, 0, 0},
+        };
+        DescriptorType types[5] = {
+            DescriptorType::UniformBuffer,
+            DescriptorType::StorageBuffer, DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer, DescriptorType::StorageBuffer,
+        };
+        emit_faces_ds = make_buffer_ds(emit_faces_set_layout_, infos, types, 5);
+    }
+    // write_indirect_ds
+    {
+        DescriptorBufferInfo infos[3] = {
+            {uni_buf,             0, 0},
+            {target.counters,     0, 0},
+            {target.indirect_args, 0, 0},
+        };
+        DescriptorType types[3] = {
+            DescriptorType::UniformBuffer,
+            DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer,
+        };
+        write_indirect_ds = make_buffer_ds(write_indirect_set_layout_, infos, types, 3);
+    }
+
+    if (classify_ds       == handles::INVALID_DESCRIPTOR_SET ||
+        emit_vertices_ds  == handles::INVALID_DESCRIPTOR_SET ||
+        emit_faces_ds     == handles::INVALID_DESCRIPTOR_SET ||
+        write_indirect_ds == handles::INVALID_DESCRIPTOR_SET) {
+        if (classify_ds       != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(classify_ds);
+        if (emit_vertices_ds  != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(emit_vertices_ds);
+        if (emit_faces_ds     != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(emit_faces_ds);
+        if (write_indirect_ds != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(write_indirect_ds);
+        device_->DestroyBuffer(uni_buf);
+        device_->DestroyBuffer(dual_id_buf);
+        device_->DestroyBuffer(scalar_buf);
+        return false;
+    }
+
+    // ---- Command buffer + dispatch ----
+    CommandBufferHandle cmd_handle = device_->CreateCommandBuffer(CommandQueueType::Compute);
+    if (cmd_handle == handles::INVALID_COMMAND_BUFFER) {
+        device_->DestroyDescriptorSet(classify_ds);
+        device_->DestroyDescriptorSet(emit_vertices_ds);
+        device_->DestroyDescriptorSet(emit_faces_ds);
+        device_->DestroyDescriptorSet(write_indirect_ds);
+        device_->DestroyBuffer(uni_buf);
+        device_->DestroyBuffer(dual_id_buf);
+        device_->DestroyBuffer(scalar_buf);
+        return false;
+    }
+    RHICommandBuffer* cmd = GetCommandBuffer(cmd_handle);
+
+    cmd->Begin();
+
+    const u32 res_groups = (resolution + 3) / 4;
+    const u32 n_groups   = (n + 3) / 4;
+
+    // Pass 1: classify_cells_sdf — samples cascade textures, writes scalar buf
+    {
+        cmd->BindComputePipeline(classify_sdf_pipeline_);
+        DescriptorSetHandle ds = classify_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, classify_sdf_layout_,
+                                0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(res_groups, res_groups, res_groups);
+    }
+    // Pass 2: emit_vertices (9.3a pipeline, reads scalar buf written by Pass 1)
+    {
+        cmd->BindComputePipeline(emit_vertices_pipeline_);
+        DescriptorSetHandle ds = emit_vertices_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, emit_vertices_layout_,
+                                0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(res_groups, res_groups, res_groups);
+    }
+    // Pass 3: emit_faces_{x,y,z} (3 dispatches sharing emit_faces_ds)
+    {
+        cmd->BindComputePipeline(emit_faces_x_pipeline_);
+        DescriptorSetHandle ds = emit_faces_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, emit_faces_layout_,
+                                0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(n_groups, n_groups, n_groups);
+    }
+    {
+        cmd->BindComputePipeline(emit_faces_y_pipeline_);
+        DescriptorSetHandle ds = emit_faces_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, emit_faces_layout_,
+                                0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(n_groups, n_groups, n_groups);
+    }
+    {
+        cmd->BindComputePipeline(emit_faces_z_pipeline_);
+        DescriptorSetHandle ds = emit_faces_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, emit_faces_layout_,
+                                0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(n_groups, n_groups, n_groups);
+    }
+    // Pass 4: write_indirect_args
+    {
+        cmd->BindComputePipeline(write_indirect_pipeline_);
+        DescriptorSetHandle ds = write_indirect_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, write_indirect_layout_,
+                                0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(1, 1, 1);
+    }
+
+    cmd->End();
+
+    QueueSubmitInfo submit{};
+    submit.cmdBuffer = cmd_handle;
+    device_->Submit(submit);
+    cmd->WaitForCompletion();  // ensure counters are valid for caller readback
+
+    // ---- Cleanup transient resources ----
+    // Note: target's buffers (positions, elements, indices, counters,
+    // indirect_args) are caller-owned — NOT destroyed here.
+    device_->DestroyDescriptorSet(classify_ds);
+    device_->DestroyDescriptorSet(emit_vertices_ds);
+    device_->DestroyDescriptorSet(emit_faces_ds);
+    device_->DestroyDescriptorSet(write_indirect_ds);
+    device_->DestroyCommandBuffer(cmd_handle);
+    device_->DestroyBuffer(uni_buf);
+    device_->DestroyBuffer(dual_id_buf);
+    device_->DestroyBuffer(scalar_buf);
+
+    return true;
 }
 
 } // namespace primal::graphics::pcg
