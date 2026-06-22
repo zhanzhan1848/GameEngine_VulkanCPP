@@ -1,7 +1,7 @@
 # Phase 9.3a — GPU SurfaceNets on PCGField
 
-**Status:** Design (awaiting implementation plan)
-**Date:** 2026-06-18
+**Status:** ✅ Complete (2026-06-22). Implementation: `Engine/Graphics/PCG/GPU/GPUMesher.{h,cpp}` + `Engine/Graphics/Metal/shaders/PCG/SurfaceNetsGPU.metal`. Tests: `EngineTest/IntegrationTests/TestGPUMesherIntegration.cpp` (3 sub-tests). Verified end-to-end via TestPCGScatter M-key toggle.
+**Date:** 2026-06-18 (design) → 2026-06-22 (ship)
 **Branch:** `features/nanite_lumen`
 **Prerequisite:** Phase 9.1 (CPU SurfaceNets MVP) — completed and visually verified
 
@@ -485,3 +485,36 @@ For 128³ and larger, GPU becomes the clear win (~2x at 128³, scaling to ~5-10x
 - Whether to allocate GPU buffers per Execute or pool them. Decided: per Execute for v1, revisit if profiling shows cost.
 - Perf test budget thresholds (10ms / 80ms). Decided: start with 2-3x expected; tune based on first CI runs. If persistently flaky, switch to relative threshold (regression vs rolling baseline).
 - Histogram correlation threshold (0.85). Decided: start with 0.85; loosen if cell-center gradient causes more visual drift than expected.
+
+---
+
+## 13. Postmortem (2026-06-22)
+
+### Shipped
+
+- `GPUMesher` singleton + 4-pass compute pipeline (`classify_cells` → `emit_vertices` → `emit_faces_{x,y,z}` → `write_indirect_args`)
+- `MarchingCubesNode.algorithm` enum (0=CPU, 1=GPU, 2=ClassicMC reserved)
+- CPU fallback when no RHI device (test env)
+- `TestGPUMesherIntegration` binary with 3 sub-tests (RenderBasic, RenderVsCPU, Perf)
+- TestPCGScatter M-key toggle for live A/B verification
+
+### Bugs found post-test (fixed in `45351a9`)
+
+**Bug 1: Counter aliasing.** `emit_faces` bound `scratch.counters` at buffer(4) starting at offset 0, then used it as `device atomic_uint* icounter`. `classify_cells` bound the same buffer at offset 0 and used it as `vcounter`. Both atomic adds landed on `counters[0]`. Readback read `vert_count + 3*idx_count` in [0] and 0 in [1]. The host sanity check `vert_count > res3` rejected the result, falling back to CPU silently.
+
+Symptom: `[MC] path=GPU→CPU(fallback) verts=18176 indices=35280` regardless of input.
+
+Root cause: shader-level ambiguity about whether `icounter` points to the head of the counters buffer or to the index-counter slot. Fix: pass the full `counters` buffer and explicitly increment at `counters + 1u` in the shader.
+
+**Bug 2: Storage-mode-private scratch buffers.** `positions`/`elements`/`indices` scratch buffers were created with `GPUMemoryUsage::Static`, which maps to `MTL::StorageModePrivate` on Metal. Private buffers have `contents() == nullptr`, so `MapBuffer` returned null and readback failed.
+
+Symptom: `[GPUMesher] MapBuffer failed for positions/elements/indices` after Bug 1 was fixed.
+
+Fix: change `make_storage_buf` lambda to `GPUMemoryUsage::Dynamic` (maps to `StorageModeShared`, host-visible). Performance impact is negligible — Apple Silicon has unified memory; the cost is the one-shot readback, not the storage mode.
+
+### Lessons for 9.3b
+
+- **Silent CPU fallback masked both bugs.** The `[MC] path=...` stderr print (now stripped) was the only signal that something was wrong. 9.3b should log fallbacks to a structured sink, not just stderr.
+- **Counter aliasing is a sharp-edge pattern.** Anywhere multiple compute passes share a counters buffer, offset binding or explicit `+N` addressing is required. The atomic-append pattern in 9.3b (mesh stats, indirect args) inherits this.
+- **Readback path will go away in 9.3b.** The Dynamic-memory workaround is a tactical fix, not strategic. Once the mesh stays GPU-resident, Static becomes correct again.
+- **Diagnostic stderr prints at early-return points were essential.** Future GPU compute work should include them by default during bring-up; strip after visual verification.

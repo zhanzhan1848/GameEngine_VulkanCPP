@@ -1,5 +1,7 @@
 # Phase 9.3a — GPU SurfaceNets on PCGField Implementation Plan
 
+> **Status (2026-06-22):** ✅ Complete. All 22 tasks implemented via subagent-driven-development; integration tests pass; two late-breaking bugs found and fixed in `45351a9` (counter aliasing + scratch readback). Visual parity with CPU path verified via TestPCGScatter M-key toggle (verts=18176 / indices=35280 identical). Phase 9.3b starts next.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Spec:** `Docs/superpowers/specs/2026-06-18-gpu-surfacenets-phase-9.3a-design.md`
