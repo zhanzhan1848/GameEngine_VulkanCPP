@@ -1,5 +1,7 @@
 # Phase 9.3b — GPU-Resident Streaming Terrain Implementation Plan
 
+> **Status (2026-06-23):** ✅ Complete. All 14 tasks implemented across 9 commits (`5e10688` → `053a2d8`). `TestGPUMesherIntegration` passes 7/7 Phase 9.3b sub-tests (sub-tests 1+2 skip dispatch — GlobalSDF has no debug-fill path; deferred to Task 13 interactive). `TestPCGScatter` has B-key toggle for visual verification. Known v1 limitation: vertex buffer binding has no effect under `draw_pipeline_` (storage-buffer vertex pulling); streaming terrain may not render visibly — tracked as follow-up. See spec postmortem (`Docs/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md` §11) for bugs, deviations, and lessons.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Spec:** `Docs/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md`

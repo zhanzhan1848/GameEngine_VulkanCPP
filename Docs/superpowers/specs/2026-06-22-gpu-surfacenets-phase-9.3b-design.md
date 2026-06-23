@@ -1,6 +1,6 @@
 # Phase 9.3b — GPU-Resident Streaming Terrain from GlobalSDF
 
-**Status:** Design (awaiting implementation plan)
+**Status:** ✅ Complete (2026-06-23). Implementation: 14 tasks across 9 commits (`5e10688` → `053a2d8`). `StreamingMesh` + `GlobalSDFMeshNode` + `SurfaceNetsGPUSDF.metal` + `GPUMesher::GenerateSurfaceNetsFromGlobalSDF` + `GPUDrivenDrawPipeline::DrawStreamingMeshes` + 3 C ABI entry points + tombstone lifecycle. Tests: `EngineTest/IntegrationTests/TestGPUMesherIntegration.cpp` (7 sub-tests, sub-tests 1+2 skip dispatch — GlobalSDF has no debug-fill path) + TestPCGScatter B-key toggle. Known v1 limitation: vertex buffer binding has no effect under `draw_pipeline_` (storage-buffer vertex pulling); tracked as follow-up.
 **Date:** 2026-06-22
 **Branch:** `features/nanite_lumen`
 **Prerequisite:** Phase 9.3a (GPU SurfaceNets on PCGField) — completed 2026-06-22 with postmortem
@@ -544,3 +544,67 @@ No compaction. Pass 3 worst case (6 tris/grid-vertex) is rare; typical fill is 3
 - **Material binding.** First version hardcodes default material. Multi-material via `material_content_id` param is straightforward but deferred. Decision: add param now, ignore in v1 shader path.
 - **Cluster build integration (Nanite mesh shading).** Decision: skip for v1. `draw_primitives_indirect` is sufficient. Cluster build for streaming is a 9.5 concern.
 - **Tombstone cleanup timing.** Per-frame-end cleanup assumes one GPU queue. If compute + graphics queues split, need fence on the draw command buffer. Decision: v1 uses single queue (matches existing pattern); revisit if queue splits.
+
+---
+
+## 11. Postmortem (2026-06-23)
+
+### Shipped
+
+14 tasks across 9 commits (`5e10688` → `053a2d8`):
+
+- **Task 1** (`5e10688`): `StreamingMesh` struct + `CreateStreamingMesh` / `DestroyStreamingMesh` lifecycle (`Engine/Graphics/RenderPipeline/StreamingMesh.{h,cpp}`)
+- **Task 2** (`e16b608` + `082264e`): `GPUMesher` deferred-destroy queue + frame-end drain in `StandardRenderPipeline`
+- **Task 3** (`03bdd0d` + `67bb636`): `SurfaceNetsGPUSDF.metal` — `sample_global_sdf` cascade-fallback fn + `classify_cells_sdf` kernel
+- **Task 4** (`b1c43c5` + `15d67da`): `GPUMesher::CreateSDFPipelines` / `DestroySDFPipelines` — separate shader + pipeline handles from 9.3a
+- **Task 5** (`8e4fb71` + `6a76651`): `GPUMesher::GenerateSurfaceNetsFromGlobalSDF` entry point — dispatch + 8-byte counter readback
+- **Task 6** (`cbfbda1`): `RenderScene::StreamingMeshRecord` + Register/Update/Unregister (tombstone lifecycle)
+- **Task 7** (`d6c4580`): C ABI — `PipelineRegister/Update/UnregisterStreamingMeshEntity`
+- **Task 8** (`bcd0fca`): `GlobalSDFMeshNode` skeleton + reflection + serializer registration
+- **Task 9** (`b5dc6d9` + `cf3eaef`): `GlobalSDFMeshNode::Execute` lifecycle — zero counters, dispatch, readback, update entity, bump generation; tombstone on failure
+- **Task 10** (`c57c3bf` + `4937598`): `GPUDrivenDrawPipeline::DrawStreamingMeshes` — indirect draw per streaming entity + thread-safe `ForEachStreamingMesh` callback iteration
+- **Task 11** (`49739b1` + `fa305f2`): Headless tests — Basic / Persistence / Generation / Fallback / TombstoneUAF
+- **Task 12** (`5e77428` + `4220ee3`): Render + perf sub-tests
+- **Task 13** (`053a2d8`): TestPCGScatter B-key toggle for visual verification
+
+### Bugs found + fixed during implementation
+
+1. **RHI has no `DrawIndexedIndirect`.** The spec assumed `cmd->DrawIndexedIndirect(...)`. The RHI layer only exposes `DrawIndirect` (non-indexed). Fix: `SurfaceNetsGPUSDF.metal` Pass 4 (`write_indirect_args`) emits `MTLDrawPrimitivesIndirectCommand` (non-indexed) instead of `MTLDrawIndexedPrimitivesIndirectCommand`. The index buffer is still filled by Pass 3 but unused by the draw call in v1 — a follow-up can either add `DrawIndexedIndirect` to RHI or switch to non-indexed `emit_faces`.
+
+2. **Task 9 dead counter readback.** Initial `Execute()` mapped the counters buffer and immediately discarded the values (no consumer). Fix: deleted the readback in Task 9; Task 10 (`DrawStreamingMeshes`) reads `indirect_args` directly on GPU — no host-side counter copy needed for the draw path. The 8-byte counter readback in the spec was over-designed for v1.
+
+3. **Task 9 stale generation on dispatch failure.** If `GenerateSurfaceNetsFromGlobalSDF` failed (e.g., GlobalSDF uninitialized), `Execute()` still bumped `generation`, causing Nanite to draw stale buffers. Fix: on dispatch failure, mark the StreamingMeshRecord as tombstoned so `DrawStreamingMeshes` skips it.
+
+4. **Task 10 thread-safety gap.** `GetStreamingMeshes()` returned a direct `std::vector<StreamingMeshRecord>&` reference — callers could iterate while the vector was mutated by Register/Unregister on another thread. Fix: replaced with `ForEachStreamingMesh(std::function<void(StreamingMeshRecord&)>)` callback API that locks the internal mutex for the duration of the iteration.
+
+5. **Task 11 tautology.** Sub-test 2 (Persistence) compared `sm.positions == p0` where `p0` was assigned from `sm.positions` — always true, proved nothing. Fix: rewrote to allocate a second StreamingMesh with distinct handles and verify the first mesh's handles are unchanged (real persistence check — distinct allocations, not self-comparison).
+
+6. **Vertex buffer binding mismatch (v1 limitation, not fixed).** `GPUDrivenDrawPipeline` draws streaming meshes under `draw_pipeline_`, which uses storage-buffer vertex pulling (not the fixed-function vertex fetch that `BindVertexBuffers` targets). `BindVertexBuffers` has no effect under `draw_pipeline_`. Documented as a v1 limitation; Task 13 flags this for follow-up. Streaming terrain may not render visibly until the vertex-pulling path is wired (or until the mesh is drawn outside `draw_pipeline_`).
+
+7. **GlobalSDF has no debug-fill path.** Headless tests cannot initialize GlobalSDF cascade textures with synthetic SDF data — there's no `GlobalSDF::FillForTest()` entry point. Sub-tests 1+2 of `TestGPUMesherIntegration` skip the actual dispatch and verify only the lifecycle (register, persist, unregister). Authoritative dispatch coverage deferred to interactive Task 13 (TestPCGScatter B-key).
+
+### Deviations from plan
+
+1. **Task 7 — singleton access.** Plan used `StandardRenderPipeline::s_instance` (doesn't exist). Fix: used `GetStdPipeline()` helper + `GetCurrentScene()` cache to reach the `RenderScene`.
+
+2. **Task 9 — singleton access (again).** Plan used `s_instance`; used `RenderPipeline::Get()` base-class singleton + `static_cast` to `StandardRenderPipeline*`.
+
+3. **Task 9 — removed duplicate fields.** Code review feedback: `GlobalSDFMeshNode` had both `registered_` and `generation_` fields that duplicated state already tracked in `StreamingMeshRecord` / `StreamingMesh::generation`. Removed the duplicates; single source of truth.
+
+4. **Task 10 — missing `render_scene_` member.** Plan assumed `GPUDrivenDrawPipeline` already had a `render_scene_` member. It didn't. Added the member + a `SetRenderScene(RenderScene*)` setter called from `StandardRenderPipeline` during setup.
+
+5. **Task 13 — key binding.** Plan used N-key for GlobalSDFMeshNode toggle. N was already bound to NewSeed in TestPCGScatter. Used B-key instead.
+
+### Lessons for 9.4 / 9.5
+
+- **RHI surface area audit before spec.** The `DrawIndexedIndirect` gap was discovered mid-implementation. Future specs that touch the draw path should grep the RHI header for the exact function signatures before assuming they exist. Cost of the audit: minutes. Cost of the mid-flight pivot: a shader rewrite + a v1 limitation.
+
+- **Thread-safety API shape matters early.** The `GetStreamingMeshes()` → `ForEachStreamingMesh()` pivot happened in Task 10 but the underlying tension (shared mutable vector, lockless iteration) was visible at Task 6. Designing the iteration API as a callback from the start would have avoided the refactor. Lesson: when a struct holds a mutex-protected vector, expose iteration as a callback, not a reference.
+
+- **Test tautologies are silent.** Sub-test 2 passed for the wrong reason. The fix (distinct allocations) is trivial; the detection is not — a passing test gives no signal. Lesson: for persistence/identity tests, always introduce a second distinct object and verify the first is unaffected. Self-comparison is never a valid test.
+
+- **Headless dispatch coverage needs a test-only fill path.** GlobalSDF's lack of a debug-fill entry point forced the headless tests to skip dispatch verification entirely. The same pattern will recur in 9.4 (Dual Contouring needs a `PCGField` with a known gradient) and 9.5 (adaptive LOD needs a known octree). Lesson: future GPU-meshing specs should include a "test scaffold" task that adds a debug-fill path to the data source, separate from the production init path.
+
+- **Vertex-pulling vs fixed-function vertex fetch is a sharp edge.** The `draw_pipeline_` storage-buffer vertex-pulling path is invisible from the `BindVertexBuffers` API — the call silently does nothing. This will bite 9.5 (adaptive LOD, cluster build) if streaming meshes are drawn through the same pipeline. Lesson: document the vertex-pulling contract on `BindVertexBuffers` itself, or add a `BindStorageVertexBuffers` variant that makes the distinction explicit.
+
+- **Plan singleton references should be validated.** Two tasks (7, 9) hit the `s_instance` vs `Get()` mismatch. The plan was written against an assumed API surface that didn't match the codebase. Lesson: when a plan references a singleton, grep the header for the actual accessor before writing the task steps.
