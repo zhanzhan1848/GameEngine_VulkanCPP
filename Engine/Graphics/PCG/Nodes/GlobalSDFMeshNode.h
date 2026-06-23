@@ -170,37 +170,34 @@ inline void GlobalSDFMeshNode::Execute() {
         nanite::GlobalSDF::Get(), bounds_min, bounds_max, res, iso_value,
         streaming_mesh_);
     if (!ok) {
+        // Dispatch failed. The meshing pass zeroes counters internally before
+        // running, so on failure the GPU buffers hold zeros, not the previous
+        // frame's geometry. Rather than rely on a zero-vertex indirect draw
+        // being a silent no-op, tombstone the record so DrawStreamingMeshes
+        // skips it entirely via the `tombstoned` check. Next Execute will
+        // re-register (entity_id is reset to invalid_id below).
+        scene->UnregisterStreamingMesh(streaming_mesh_.entity_id);
+        streaming_mesh_.entity_id = id::invalid_id;
         auto* out = CreateOutput<PCGGeometryData>(0);
         out->content_id = id::invalid_id;
         return;
     }
 
-    // Step 6: Read back counters (8 bytes: u32 vert_count + u32 idx_count).
-    //   This is a blocking read but the buffers are tiny (8B) and already
-    //   synchronized by the compute passes. The counts are not currently
-    //   consumed by downstream nodes (they will be by Task 10's draw path),
-    //   but we read them here to confirm the dispatch produced output and
-    //   to catch silent GPU failures early.
-    if (streaming_mesh_.counters != rhi::handles::INVALID_RESOURCE) {
-        void* mapped = device->MapBuffer(streaming_mesh_.counters, 0, 0);
-        if (mapped) {
-            // u32[2]: {vertex_count, index_count}
-            // Reading is sufficient to verify the mapping succeeded.
-            volatile const u32* counts = reinterpret_cast<volatile const u32*>(mapped);
-            (void)counts[0]; (void)counts[1];
-            device->UnmapBuffer(streaming_mesh_.counters);
-        }
-    }
-
-    // Step 7: Bump generation and notify the draw side.
+    // Step 6: Bump generation and notify the draw side.
     //   generation is monotonic; RenderScene::last_drawn_generation is
     //   compared against it to skip stale records.
     ++streaming_mesh_.generation;
+    // Sync the struct's cached bounds with the current param values so that
+    // DrawStreamingMeshes (and any culling pass that reads sm.mesh->bounds_*)
+    // sees the user's latest bounds_min/bounds_max, not the values captured
+    // at first-execute CreateStreamingMesh time.
+    streaming_mesh_.bounds_min = bounds_min;
+    streaming_mesh_.bounds_max = bounds_max;
     scene->UpdateStreamingMesh(
         streaming_mesh_.entity_id, streaming_mesh_.generation,
         bounds_min, bounds_max);
 
-    // Step 8: Emit sentinel. This node produces a GPU-resident mesh, not a
+    // Step 7: Emit sentinel. This node produces a GPU-resident mesh, not a
     //   content_id. Downstream TransformGeometryNode cannot consume it.
     auto* out = CreateOutput<PCGGeometryData>(0);
     out->content_id = id::invalid_id;
