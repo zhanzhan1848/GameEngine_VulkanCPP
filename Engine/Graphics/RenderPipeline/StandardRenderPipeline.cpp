@@ -532,6 +532,11 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
         }
     }
 
+    // Phase 9.3b: Give GPUDrivenDrawPipeline access to the RenderScene so
+    // DrawStreamingMeshes can iterate GetStreamingMeshes() during Execute.
+    auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
+    gpuDraw.SetRenderScene(&scene);
+
     // Update GlobalSDF cascade origins
     auto& globalSDF = nanite::GlobalSDF::Get();
     if (globalSDF.IsInitialized() && scene_snapshot_) {

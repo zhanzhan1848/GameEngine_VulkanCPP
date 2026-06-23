@@ -11,6 +11,10 @@ namespace primal::graphics::rhi {
     class RHICommandBuffer;
 }
 
+namespace primal::graphics {
+    class RenderScene;
+}
+
 namespace primal::graphics::nanite {
 
 class HZBSystem;
@@ -71,6 +75,12 @@ public:
                  u32 frame_index = 0,
                  u32 buffer_index = 0);
 
+    // Phase 9.3b: Issue one DrawIndirect per visible, non-tombstoned streaming
+    // mesh. Must be called inside a render pass with a graphics pipeline bound.
+    // v1 relies on whatever material/pipeline is currently bound (Task 12 will
+    // validate visually and wire a default material if needed).
+    void DrawStreamingMeshes(rhi::RHICommandBuffer* cmd_buffer);
+
     const GPUDrawResults& GetResults() const { return results_; }
     const BinningConfig& GetBinningConfig() const { return binning_config_; }
     const VisibilityBufferConfig& GetVisibilityConfig() const { return visibility_config_; }
@@ -79,6 +89,10 @@ public:
     void SetHZBSystem(HZBSystem* hzb_system) { hzb_system_ = hzb_system; }
     void SetVisibilityBufferSystem(VisibilityBufferSystem* vis_system) { visibility_buffer_system_ = vis_system; }
     void SetCullingPipeline(class GPUCullingPipeline* culling_pipeline) { culling_pipeline_ = culling_pipeline; }
+
+    // Phase 9.3b: Streaming terrain — RenderScene accessor for iterating
+    // GetStreamingMeshes() and issuing one DrawIndirect per visible mesh.
+    void SetRenderScene(RenderScene* scene) { render_scene_ = scene; }
 
     void UpdateGeometryData(const RenderSceneSnapshot& scene_snapshot);
     bool CreateGeometryBuffers(u32 vertex_count, u32 index_count);
@@ -223,6 +237,10 @@ private:
     HZBSystem* hzb_system_{ nullptr };
     VisibilityBufferSystem* visibility_buffer_system_{ nullptr };
     class GPUCullingPipeline* culling_pipeline_{ nullptr };
+
+    // Phase 9.3b: Non-owning pointer to the RenderScene, set by the render
+    // pipeline each frame. Used by DrawStreamingMeshes to iterate streaming meshes.
+    RenderScene* render_scene_{ nullptr };
 
     rhi::PipelineLayoutHandle binning_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineHandle binning_pipeline_{ rhi::handles::INVALID_PIPELINE };
