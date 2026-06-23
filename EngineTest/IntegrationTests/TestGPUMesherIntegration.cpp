@@ -574,6 +574,14 @@ static int TestGlobalSDFMeshPerf(primal::graphics::rhi::RHIDeviceBase* device) {
     const math::v3 bmax{ 32.0f,  32.0f,  32.0f};
     const u32 res = 64;
 
+    // Spec §2 perf target: <3ms @ 64³, <10ms @ 128³. Dispatch currently skipped
+    // (zero-init GlobalSDF segfaults); constant declared here so the budget isn't
+    // silently lost when dispatch is re-enabled.
+    constexpr double kPerfBudget64Ms  = 3.0;
+    constexpr double kPerfBudget128Ms = 10.0;
+    (void)kPerfBudget64Ms;
+    (void)kPerfBudget128Ms;
+
     StreamingMesh sm = CreateStreamingMesh(device, res, bmin, bmax);
     CHECK(sm.IsValid(), "CreateStreamingMesh(64) valid for perf");
     if (!sm.IsValid()) return 0;
@@ -586,10 +594,21 @@ static int TestGlobalSDFMeshPerf(primal::graphics::rhi::RHIDeviceBase* device) {
     DestroyStreamingMesh(device, sm);
     CHECK(true, "DestroyStreamingMesh completed without crash");
 
+    // Tear down GlobalSDF singleton so its textures are freed and
+    // initialized_ is reset. Without this the singleton persists across
+    // sub-tests and would cause "already initialized" surprises if test
+    // ordering changes. Shutdown() is idempotent (guards on initialized_).
+    sdf.Shutdown();
+    CHECK(!sdf.IsInitialized(), "GlobalSDF::Shutdown reset singleton state");
+
     return 0;
 }
 
 int main() {
+    // NOTE: This binary exits with code 134 (SIGABRT) from the pre-existing
+    // TestGPUSurfaceNetsRenderBasic assertion in CreateRenderSurface (line 174).
+    // All Phase 9.3b sub-tests (4-10) run and pass BEFORE the abort fires.
+    // Tracked as pre-existing — unrelated to Phase 9.3b work.
     std::cout << "=================================\nTestGPUMesherIntegration\nPhase 9.3a + 9.3b GPU SurfaceNets\n=================================\n";
 
     void* handle = dlopen("libEngineDLL.dylib", RTLD_NOW);
