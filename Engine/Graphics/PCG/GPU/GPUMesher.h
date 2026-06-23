@@ -30,6 +30,11 @@ public:
 
     bool IsReady() const { return device_ != nullptr; }
 
+    // Expose the device pointer so PCG node lifecycle code (CreateStreamingMesh,
+    // buffer mapping for counter readback) can reach the RHI without a second
+    // singleton lookup. Returns nullptr when !IsReady().
+    rhi::RHIDeviceBase* GetDevice() const { return device_; }
+
     // Queue a buffer handle for destruction at the next frame boundary.
     // Used by StreamingMesh owners that may die mid-frame (see spec §7.2).
     void EnqueueDeferredDestroy(rhi::ResourceHandle handle);
