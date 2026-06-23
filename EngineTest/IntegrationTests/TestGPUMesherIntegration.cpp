@@ -415,10 +415,21 @@ static int TestStreamingMeshBufferPersistence(primal::graphics::rhi::RHIDeviceBa
     const auto p0 = sm.positions, e0 = sm.elements, i0 = sm.indices;
 
     // Without GlobalSDF debug-fill, we can't dispatch GenerateSurfaceNetsFromGlobalSDF
-    // safely. Verify handle stability by re-calling CreateStreamingMesh semantics
-    // (the handles should not change between operations on the same struct).
-    const bool handles_stable = (sm.positions == p0 && sm.elements == e0 && sm.indices == i0);
-    CHECK(handles_stable, "StreamingMesh buffer handles stable after allocation");
+    // safely. Instead verify the allocator returns distinct handles across calls and
+    // that a second allocation does not corrupt the first StreamingMesh.
+    primal::graphics::StreamingMesh sm2 = primal::graphics::CreateStreamingMesh(
+        device, 32, primal::math::v3{-16.f, -16.f, -16.f}, primal::math::v3{16.f, 16.f, 16.f});
+    CHECK(sm2.IsValid(), "Second CreateStreamingMesh valid");
+    const bool distinct = (sm2.positions != sm.positions)
+                       && (sm2.elements  != sm.elements)
+                       && (sm2.indices   != sm.indices);
+    CHECK(distinct, "StreamingMesh allocator returns distinct handles");
+    primal::graphics::DestroyStreamingMesh(device, sm2);
+    CHECK(true, "DestroyStreamingMesh(sm2) completed without crash");
+
+    // sm must be unaffected by sm2's lifecycle.
+    const bool stable = (sm.positions == p0) && (sm.elements == e0) && (sm.indices == i0);
+    CHECK(stable, "StreamingMesh handles stable after sibling alloc/free");
 
     std::cerr << "[SKIP] GlobalSDF dispatch requires debug-fill; "
               << "persistence test deferred to Task 12\n";
@@ -573,10 +584,11 @@ int main() {
     TestStreamingMeshUnregisterTombstone(rhi_device);
 
     // ---- Phase 9.3a render sub-tests ----
-    // NOTE: TestRenderBasic has a pre-existing failure
-    // (PipelineRegisterMeshEntity returns 0 in this env) followed by an
-    // assertion in CreateRenderSurface(host=nullptr). This is unrelated to
-    // Phase 9.3b — see Task 11 notes in the plan.
+    // NOTE: 9.3b sub-tests run first because TestRenderBasic's CreateRenderSurface
+    // assertion aborts the process, preventing 9.3b sub-tests from running if
+    // ordered after. Tracked separately as pre-existing — unrelated to Phase 9.3b.
+    // TestRenderBasic's PipelineRegisterMeshEntity returns 0 in this env, followed
+    // by an assertion in CreateRenderSurface(host=nullptr); see Task 11 notes.
     TestRenderBasic();
     TestRenderVsCPU();
     TestPerf();
