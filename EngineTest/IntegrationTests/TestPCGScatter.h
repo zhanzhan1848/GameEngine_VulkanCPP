@@ -24,6 +24,7 @@
 #include "Engine/Graphics/PCG/Nodes/CurveAlignNode.h"
 #include "Engine/Graphics/PCG/Nodes/SurfaceScatterNode.h"
 #include "Engine/Graphics/PCG/Nodes/MarchingCubesNode.h"
+#include "Engine/Graphics/PCG/Nodes/GlobalSDFMeshNode.h"
 #include "Engine/EngineAPI/GameEntity_impl.h"
 #include "Engine/Components/Material.h"
 #include "Engine/Geometry/Geometry.h"
@@ -97,6 +98,12 @@ private:
     f32 mc_iso_value_{0.0f};
     u32  mc_algorithm_{0};  // 0=SurfaceNets_CPU, 1=SurfaceNets_GPU (Phase 9.3a)
 
+    // GlobalSDFMeshNode demo (Phase 9.3b): GPU-resident streaming terrain.
+    // Held outside any PCGGraph because Execute() uses RenderPipeline::Get()
+    // singleton + GPUMesher — no upstream nodes required. B toggles visibility.
+    std::unique_ptr<primal::graphics::pcg::GlobalSDFMeshNode> global_sdf_mesh_node_;
+    bool global_sdf_mesh_visible_{false};
+
     // True after ForwardSceneRenderer::SetLightColor has dimmed the default
     // HDR (20,20,20) light down to (3,3,3) so N·L variation survives tone map.
     bool light_dimmed_{false};
@@ -107,6 +114,7 @@ private:
     bool key_g_pressed_{false};
     bool key_n_pressed_{false};
     bool key_m_pressed_{false};
+    bool key_b_pressed_{false};
 
     // Material parameter controls
     f32 mat_roughness_{0.5f};

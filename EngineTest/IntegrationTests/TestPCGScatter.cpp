@@ -298,6 +298,16 @@ bool PCGScatterTestCase::Initialize() {
     // 5d. MarchingCubes demo (Phase 9.1): NoiseField → MC → renderable mesh at Y=10..20
     ExecuteMarchingCubesDemo();
 
+    // 5e. GlobalSDFMeshNode demo (Phase 9.3b): GPU-resident streaming terrain.
+    // Constructed but not executed until B is pressed. Execute() dispatches
+    // SurfaceNets on the GlobalSDF cascade textures and registers a streaming
+    // mesh entity. Held outside any PCGGraph since it has no upstream inputs.
+    global_sdf_mesh_node_ = std::make_unique<primal::graphics::pcg::GlobalSDFMeshNode>();
+    global_sdf_mesh_node_->bounds_min = primal::math::v3{-32.f, -32.f, -32.f};
+    global_sdf_mesh_node_->bounds_max = primal::math::v3{ 32.f,  32.f,  32.f};
+    global_sdf_mesh_node_->resolution = 64;
+    global_sdf_mesh_node_->iso_value  = 0.0f;
+
     // 5. Camera
     scene = new RenderScene();
     RenderProxy proxy;
@@ -317,7 +327,7 @@ bool PCGScatterTestCase::Initialize() {
     view->SetViewport(viewport);
     UpdateCamera();
 
-    std::cout << "[TestPCGScatter] Ready. WASD=Move, QE=Up/Down, Arrows=Rotate, R=ReScatter, T=+Count, G=-Count, N=NewSeed, 1/2=Roughness, 3/4=Metallic, 5=Color, 6=Reset, 7=Technique, 8=Info, 9=MC iso+, 0=MC iso-, ESC=Quit" << std::endl;
+    std::cout << "[TestPCGScatter] Ready. WASD=Move, QE=Up/Down, Arrows=Rotate, R=ReScatter, T=+Count, G=-Count, N=NewSeed, B=GlobalSDFMesh, 1/2=Roughness, 3/4=Metallic, 5=Color, 6=Reset, 7=Technique, 8=Info, 9=MC iso+, 0=MC iso-, ESC=Quit" << std::endl;
     return true;
 }
 
@@ -329,6 +339,16 @@ void PCGScatterTestCase::Run() {
     timer_.begin();
     HandleInput(1.0f / 60.0f);
     UpdateCamera();
+
+    // Phase 9.3b: GlobalSDFMeshNode per-frame Execute. Dispatches SurfaceNets
+    // on GlobalSDF cascade textures and registers a streaming mesh entity.
+    // Skipped unless B has been pressed. See engine-reality caveat in the
+    // plan: vertex buffer binding in DrawStreamingMeshes uses BindVertexBuffers
+    // but draw_pipeline_ uses storage-buffer vertex pulling, so the mesh may
+    // not render visibly until that mismatch is resolved.
+    if (global_sdf_mesh_visible_ && global_sdf_mesh_node_) {
+        global_sdf_mesh_node_->Execute();
+    }
 
     if (pipeline && scene && view) {
         view->UpdateFrustum();
@@ -1789,6 +1809,21 @@ void PCGScatterTestCase::HandleInput(float dt) {
             ReExecuteMarchingCubes(mc_iso_value_);
         }
     } else { key_m_pressed_ = false; }
+
+    // Phase 9.3b: key B toggles GlobalSDFMeshNode visibility. When toggled
+    // on, Execute() runs each frame to regenerate the streaming terrain from
+    // GlobalSDF cascade textures. When toggled off, the node's destructor
+    // runs at Shutdown() and tombstones the record — no per-frame unregister
+    // needed mid-session.
+    get(input_source::keyboard, input_code::key_b, val);
+    if (val.current.x > 0.0f) {
+        if (!key_b_pressed_) {
+            key_b_pressed_ = true;
+            global_sdf_mesh_visible_ = !global_sdf_mesh_visible_;
+            std::cout << "[GlobalSDFMeshDemo] visible=" << global_sdf_mesh_visible_
+                      << " bounds=(-32,-32,-32)-(32,32,32) res=64" << std::endl;
+        }
+    } else { key_b_pressed_ = false; }
 
     // Material parameter controls
     get(input_source::keyboard, input_code::key_1, val);
