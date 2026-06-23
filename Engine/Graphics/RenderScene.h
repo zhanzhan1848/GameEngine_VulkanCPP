@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHIGeometry.h"
 #include <vector>
 #include <mutex>
+#include <functional>
 
 namespace primal::graphics {
 
@@ -160,6 +161,18 @@ public:
                              const math::v3& bounds_min, const math::v3& bounds_max);
     void UnregisterStreamingMesh(id::id_type entity_id);
     void ClearTombstonedStreamingMeshes();   // call at frame boundary after GPU work
+
+    // --- Thread-safe streaming mesh iteration ---
+    // GetStreamingMeshes() returns a const ref WITHOUT holding mutex_. Callers
+    // that iterate while PCG node threads may mutate the list must use
+    // ForEachStreamingMesh instead — it holds mutex_ for the full iteration so
+    // a concurrent push_back / erase_unordered cannot invalidate the reference.
+    void ForEachStreamingMesh(const std::function<void(const StreamingMeshRecord&)>& fn) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& sm : streaming_meshes_) {
+            fn(sm);
+        }
+    }
     const utl::vector<StreamingMeshRecord>& GetStreamingMeshes() const { return streaming_meshes_; }
 
 private:
