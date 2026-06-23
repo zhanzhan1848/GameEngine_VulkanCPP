@@ -496,6 +496,99 @@ static int TestStreamingMeshUnregisterTombstone(primal::graphics::rhi::RHIDevice
     return 0;
 }
 
+// Sub-test 9: TestGlobalSDFMeshNodeVisual
+//   Plan's render sub-test. Requires the full StandardRenderPipeline setup to
+//   drive GlobalSDFMeshNode through voxelization → meshing → draw.
+//
+//   BLOCKED: The pre-existing TestGPUSurfaceNetsRenderBasic (sub-test 1 above)
+//   already fails in this binary with:
+//     [FAIL] PipelineRegisterMeshEntity returned non-zero (line 194)
+//     CreateRenderSurface(nullptr) assertion
+//   Attempting a full StandardRenderPipeline render here hits the same
+//   assertion (host=nullptr is unsupported in the test harness).
+//
+//   Option B (minimal smoke test driving GlobalSDFMeshNode::Execute in
+//   isolation) is also uninformative: Execute checks RenderPipeline::Get()
+//   first, which is nullptr in this binary (no StandardRenderPipeline
+//   constructed). It emits the invalid_id sentinel — the exact path already
+//   covered by sub-test 7 (TestGlobalSDFMeshNodeFallback).
+//
+//   Decision: Option A (skip with note). Authoritative render coverage is
+//   deferred to Task 13's interactive TestPCGScatter N-key toggle, which
+//   runs in a real windowed environment where StandardRenderPipeline and
+//   GlobalSDF voxelization are live.
+static int TestGlobalSDFMeshNodeVisual() {
+    std::cout << "\n--- TestGlobalSDFMeshNodeVisual ---\n";
+    std::cerr << "[SKIP] Render sub-test blocked by pre-existing "
+              << "CreateRenderSurface assertion in this binary; "
+              << "deferred to Task 13 (TestPCGScatter N-key toggle)\n";
+    CHECK(true, "Sub-test 9 skipped (render harness blocked)");
+    return 0;
+}
+
+// Sub-test 10: TestGlobalSDFMeshPerf
+//   Wall-clock budget for GPU SurfaceNets-from-GlobalSDF dispatch.
+//
+//   INITIALIZATION SMOKE TEST: Exercises GPUMesher::Initialize +
+//   GlobalSDF::Get().Initialize + CreateStreamingMesh lifecycle. This catches
+//   allocation / initialization regressions without dispatching.
+//
+//   DISPATCH SKIPPED: Calling GenerateSurfaceNetsFromGlobalSDF with
+//   zero-initialized cascade textures (no voxelization pipeline wired in this
+//   binary) segfaults during GPU command buffer execution (SIGSEGV, exit 139).
+//   Root cause: GlobalSDF has no debug-fill path, and the compute shader
+//   reads descriptor slots that may contain uninitialized texture data.
+//
+//   Per task instructions: "If the dispatch segfaults, don't try to fix
+//   GlobalSDF — skip gracefully and document." Perf timing measurement is
+//   deferred to Task 13's interactive TestPCGScatter, which runs the full
+//   StandardRenderPipeline with live GlobalSDF voxelization.
+static int TestGlobalSDFMeshPerf(primal::graphics::rhi::RHIDeviceBase* device) {
+    using namespace primal::graphics;
+
+    std::cout << "\n--- TestGlobalSDFMeshPerf ---\n";
+
+    if (!device) {
+        std::cerr << "[SKIP] No RHI device — sub-test 10 skipped\n";
+        CHECK(true, "Sub-test 10 skipped (no device)");
+        return 0;
+    }
+
+    // GPUMesher singleton init (idempotent).
+    pcg::GPUMesher::Get().Initialize(device);
+    CHECK(pcg::GPUMesher::Get().IsReady(), "GPUMesher::Initialize succeeded");
+    if (!pcg::GPUMesher::Get().IsReady()) return 0;
+
+    // GlobalSDF singleton init — allocates cascade textures.
+    auto& sdf = nanite::GlobalSDF::Get();
+    if (!sdf.IsInitialized()) {
+        const bool ok = sdf.Initialize(device);
+        CHECK(ok, "GlobalSDF::Initialize succeeded");
+        if (!ok) return 0;
+    }
+    CHECK(sdf.GetCascade(0).sdf_texture != rhi::handles::INVALID_RESOURCE,
+          "GlobalSDF cascade 0 texture allocated");
+
+    // Allocate a StreamingMesh at the target resolution.
+    const math::v3 bmin{-32.0f, -32.0f, -32.0f};
+    const math::v3 bmax{ 32.0f,  32.0f,  32.0f};
+    const u32 res = 64;
+
+    StreamingMesh sm = CreateStreamingMesh(device, res, bmin, bmax);
+    CHECK(sm.IsValid(), "CreateStreamingMesh(64) valid for perf");
+    if (!sm.IsValid()) return 0;
+
+    std::cerr << "[SKIP] Dispatch with zero-initialized GlobalSDF causes SIGSEGV; "
+              << "perf measurement deferred to Task 13 (TestPCGScatter with live "
+              << "voxelization)\n";
+    CHECK(true, "Sub-test 10 dispatch skipped (zero-init GlobalSDF segfaults)");
+
+    DestroyStreamingMesh(device, sm);
+    CHECK(true, "DestroyStreamingMesh completed without crash");
+
+    return 0;
+}
+
 int main() {
     std::cout << "=================================\nTestGPUMesherIntegration\nPhase 9.3a + 9.3b GPU SurfaceNets\n=================================\n";
 
@@ -582,6 +675,9 @@ int main() {
     TestStreamingMeshGenerationBump();
     TestGlobalSDFMeshNodeFallback();
     TestStreamingMeshUnregisterTombstone(rhi_device);
+    // Task 12: render + perf sub-tests
+    TestGlobalSDFMeshNodeVisual();
+    TestGlobalSDFMeshPerf(rhi_device);
 
     // ---- Phase 9.3a render sub-tests ----
     // NOTE: 9.3b sub-tests run first because TestRenderBasic's CreateRenderSurface
