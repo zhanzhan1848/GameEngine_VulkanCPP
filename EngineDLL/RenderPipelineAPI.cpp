@@ -3,6 +3,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/RenderPipeline/RenderPipeline.h"
 #include "Graphics/RenderPipeline/StandardRenderPipeline.h"
+#include "Graphics/RenderPipeline/StreamingMesh.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/Lumen/LumenTypes.h"
 #include <cstring>
@@ -14,6 +15,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/RenderPipeline/RenderPipeline.h"
 #include "Graphics/RenderPipeline/StandardRenderPipeline.h"
+#include "Graphics/RenderPipeline/StreamingMesh.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/Lumen/LumenTypes.h"
 #include <cstring>
@@ -158,6 +160,55 @@ EDITOR_INTERFACE void PipelineUnregisterMeshEntity(u64 entity_id) {
     auto* p = GetStdPipeline();
     if (!p || entity_id == 0) return;
     p->UnregisterMeshEntity(static_cast<id::id_type>(entity_id));
+}
+
+// ============================================================================
+// Streaming Mesh Entity Registration (Phase 9.3b)
+// ============================================================================
+// GPU-resident streaming meshes (e.g., from GlobalSDFMeshNode) bypass
+// content_id and register here directly. Caller owns the StreamingMesh's
+// GPU buffers; the pipeline holds only a non-owning pointer.
+
+EDITOR_INTERFACE u64 PipelineRegisterStreamingMeshEntity(
+    primal::graphics::StreamingMesh* streaming_mesh,
+    const f32* bounds_min,
+    const f32* bounds_max)
+{
+    auto* p = GetStdPipeline();
+    if (!p || streaming_mesh == nullptr || !streaming_mesh->IsValid()) return 0;
+    if (bounds_min == nullptr || bounds_max == nullptr) return 0;
+    auto* scene = p->GetCurrentScene();
+    if (scene == nullptr) return 0;
+
+    primal::math::v3 bmin{bounds_min[0], bounds_min[1], bounds_min[2]};
+    primal::math::v3 bmax{bounds_max[0], bounds_max[1], bounds_max[2]};
+    const id::id_type eid = scene->RegisterStreamingMesh(streaming_mesh, bmin, bmax);
+    return eid == id::invalid_id ? 0u : static_cast<u64>(eid);
+}
+
+EDITOR_INTERFACE void PipelineUpdateStreamingMeshEntity(
+    u64 entity_id,
+    u64 generation,
+    const f32* bounds_min,
+    const f32* bounds_max)
+{
+    auto* p = GetStdPipeline();
+    if (!p || entity_id == 0) return;
+    if (bounds_min == nullptr || bounds_max == nullptr) return;
+    auto* scene = p->GetCurrentScene();
+    if (scene == nullptr) return;
+
+    primal::math::v3 bmin{bounds_min[0], bounds_min[1], bounds_min[2]};
+    primal::math::v3 bmax{bounds_max[0], bounds_max[1], bounds_max[2]};
+    scene->UpdateStreamingMesh(static_cast<id::id_type>(entity_id), generation, bmin, bmax);
+}
+
+EDITOR_INTERFACE void PipelineUnregisterStreamingMeshEntity(u64 entity_id) {
+    auto* p = GetStdPipeline();
+    if (!p || entity_id == 0) return;
+    auto* scene = p->GetCurrentScene();
+    if (scene == nullptr) return;
+    scene->UnregisterStreamingMesh(static_cast<id::id_type>(entity_id));
 }
 
 // ============================================================================

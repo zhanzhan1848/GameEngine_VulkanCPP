@@ -1144,6 +1144,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     CommandBufferHandle cmdHandle,
     SyncHandle signalFence)
 {
+    current_scene_ = &scene;
     auto startTime = std::chrono::high_resolution_clock::now();
     if (!device_ || !cmd || !renderGraph_) return;
 
@@ -1595,6 +1596,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
                                      ResourceHandle target, const TextureDesc& targetDesc,
                                      SyncHandle signalFence) {
+    current_scene_ = &scene;
     auto startTime = std::chrono::high_resolution_clock::now();
     if (!device_ || !renderGraph_) return;
 
