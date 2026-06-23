@@ -13,6 +13,7 @@
 #include "Graphics/PCG/Nodes/CurveAlignNode.h"
 #include "Graphics/PCG/Nodes/SurfaceScatterNode.h"
 #include "Graphics/PCG/Nodes/MarchingCubesNode.h"
+#include "Graphics/PCG/Nodes/GlobalSDFMeshNode.h"
 #include <sstream>
 #include <string>
 
@@ -110,6 +111,7 @@ public:
         if (t == "CurveAlign")       return std::make_unique<CurveAlignNode>();
         if (t == "SurfaceScatter")  return std::make_unique<SurfaceScatterNode>();
         if (t == "MarchingCubes")   return std::make_unique<MarchingCubesNode>();
+        if (t == "GlobalSDFMesh")   return std::make_unique<GlobalSDFMeshNode>();
         return nullptr;
     }
 
@@ -225,21 +227,21 @@ public:
     // Use to populate an editor node palette: iterate 0..count-1, display names,
     // create nodes via CreateNode().
 
-    static u32 GetRegisteredNodeTypeCount() { return 12; }
+    static u32 GetRegisteredNodeTypeCount() { return 13; }
 
     // Returns the type name at index (fixed order), or nullptr if out of range.
     // Order: 0=ReferenceField, 1=NoiseField, 2=FieldScatter,
     //        3=SDFConstraint, 4=DensityFilter, 5=Transform, 6=MeshAssign,
     //        7=RasterizedField, 8=ScatterOnGeometry, 9=CurveAlign,
-    //        10=SurfaceScatter, 11=MarchingCubes
+    //        10=SurfaceScatter, 11=MarchingCubes, 12=GlobalSDFMesh
     static const char* GetRegisteredNodeTypeName(u32 index) {
         static const char* kNames[] = {
             "ReferenceField", "NoiseField", "FieldScatter",
             "SDFConstraint", "DensityFilter", "Transform", "MeshAssign",
             "RasterizedField", "ScatterOnGeometry", "CurveAlign", "SurfaceScatter",
-            "MarchingCubes"
+            "MarchingCubes", "GlobalSDFMesh"
         };
-        return index < 12 ? kNames[index] : nullptr;
+        return index < 13 ? kNames[index] : nullptr;
     }
 
 private:
