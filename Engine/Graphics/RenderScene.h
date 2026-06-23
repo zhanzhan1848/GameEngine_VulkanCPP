@@ -7,6 +7,8 @@
 
 namespace primal::graphics {
 
+struct StreamingMesh;  // defined in Graphics/RenderPipeline/StreamingMesh.h
+
 enum class LightType {
     Directional,
     Point,
@@ -30,6 +32,22 @@ struct RenderLight {
     
     bool castShadow{false};
     f32 shadowBias{0.005f};
+};
+
+// --- Streaming Mesh Record (Phase 9.3b) ---
+// Bridges GlobalSDFMeshNode (PCG side) and GPUDrivenDrawPipeline (draw side).
+// Tombstone lifecycle: when a node dies mid-frame we cannot remove the record
+// immediately (the GPU may still be iterating the list). We mark tombstoned=true
+// and let ClearTombstonedStreamingMeshes() erase it at frame boundary after GPU
+// work is finished. `mesh` is node-owned; RenderScene does not free it.
+struct StreamingMeshRecord {
+    id::id_type entity_id{id::invalid_id};
+    StreamingMesh* mesh{nullptr};
+    math::v3 bounds_min{};
+    math::v3 bounds_max{};
+    bool visible{true};
+    bool tombstoned{false};                        // pending removal at frame end
+    u64  last_drawn_generation{0};
 };
 
 /**
@@ -134,10 +152,22 @@ public:
      */
     void Clear();
 
+    // --- Streaming Mesh Management (Phase 9.3b) ---
+    id::id_type RegisterStreamingMesh(StreamingMesh* mesh,
+                                      const math::v3& bounds_min,
+                                      const math::v3& bounds_max);
+    void UpdateStreamingMesh(id::id_type entity_id, u64 generation,
+                             const math::v3& bounds_min, const math::v3& bounds_max);
+    void UnregisterStreamingMesh(id::id_type entity_id);
+    void ClearTombstonedStreamingMeshes();   // call at frame boundary after GPU work
+    const utl::vector<StreamingMeshRecord>& GetStreamingMeshes() const { return streaming_meshes_; }
+
 private:
     utl::vector<RenderProxy> proxies_;      ///< Store all RenderProxies linearly
     utl::vector<RenderLight> lights_;       ///< Store all RenderLights linearly
     utl::vector<RenderReflectionPlane> reflectionPlanes_;
+    utl::vector<StreamingMeshRecord> streaming_meshes_;
+    id::id_type next_streaming_entity_id_{1}; ///< Monotonic entity id for streaming meshes
     mutable std::mutex mutex_;              ///< Thread safety mutex
 };
 

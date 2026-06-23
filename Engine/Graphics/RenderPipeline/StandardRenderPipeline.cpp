@@ -1174,6 +1174,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         frameCount_++;
         // Frame boundary: drain deferred-destroy queue from GPUMesher.
         pcg::GPUMesher::Get().DrainDeferredDestroys();
+        scene.ClearTombstonedStreamingMeshes();
         return;
     }
 
@@ -1581,6 +1582,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     // resource retention (the command buffer for this frame has not yet been
     // submitted — submission happens in the caller, e.g. TestPCGScatter).
     pcg::GPUMesher::Get().DrainDeferredDestroys();
+    scene.ClearTombstonedStreamingMeshes();
 
     auto endTime = std::chrono::high_resolution_clock::now();
     stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
@@ -1648,6 +1650,7 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
 
         // Frame boundary: drain deferred-destroy queue from GPUMesher.
         pcg::GPUMesher::Get().DrainDeferredDestroys();
+        scene.ClearTombstonedStreamingMeshes();
 
         auto endTime = std::chrono::high_resolution_clock::now();
         stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
@@ -1703,6 +1706,7 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
 
     // Frame boundary: drain deferred-destroy queue from GPUMesher.
     pcg::GPUMesher::Get().DrainDeferredDestroys();
+    scene.ClearTombstonedStreamingMeshes();
 
     auto endTime = std::chrono::high_resolution_clock::now();
     stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
