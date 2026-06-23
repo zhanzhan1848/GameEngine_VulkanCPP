@@ -373,6 +373,7 @@ static int TestPerf() {
 //   the authoritative coverage path — it runs GlobalSDF through the full
 //   StandardRenderPipeline which does voxelization before meshing.
 static int TestGPUSurfaceNetsFromGlobalSDF(primal::graphics::rhi::RHIDeviceBase* device) {
+    using namespace primal::graphics;
     std::cout << "\n--- TestGPUSurfaceNetsFromGlobalSDF ---\n";
 
     if (!device) {
@@ -381,12 +382,51 @@ static int TestGPUSurfaceNetsFromGlobalSDF(primal::graphics::rhi::RHIDeviceBase*
         return 0;
     }
 
-    // GlobalSDF has no debug-fill / AddMeshSource API. Without populated
-    // cascade textures, the SDF dispatch path is untested and may crash.
-    // Skip gracefully per the plan's guidance.
-    std::cerr << "[SKIP] GlobalSDF has no debug-fill path; "
-              << "sub-test 4 deferred to Task 12 (render sub-test)\n";
-    CHECK(true, "Sub-test 4 skipped (no GlobalSDF debug-fill path)");
+    pcg::GPUMesher::Get().Initialize(device);
+    CHECK(pcg::GPUMesher::Get().IsReady(), "GPUMesher::Initialize succeeded");
+    if (!pcg::GPUMesher::Get().IsReady()) return 0;
+
+    auto& sdf = nanite::GlobalSDF::Get();
+    if (!sdf.IsInitialized()) {
+        const bool ok = sdf.Initialize(device);
+        CHECK(ok, "GlobalSDF::Initialize succeeded");
+        if (!ok) return 0;
+    }
+
+    // Populate cascade 0 with a sphere SDF (radius 8 at origin).
+    // DebugFill samples the callback on CPU and uploads via staging buffer.
+    const bool filled = sdf.DebugFill([](const primal::math::v3& p) {
+        return std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z) - 8.0f;
+    });
+    CHECK(filled, "GlobalSDF::DebugFill populated cascades");
+    if (!filled) { sdf.Shutdown(); return 0; }
+
+    StreamingMesh sm = CreateStreamingMesh(
+        device, 32, primal::math::v3{-16.f, -16.f, -16.f}, primal::math::v3{16.f, 16.f, 16.f});
+    CHECK(sm.IsValid(), "CreateStreamingMesh valid");
+    if (!sm.IsValid()) { sdf.Shutdown(); return 0; }
+
+    const bool ok = pcg::GPUMesher::Get().GenerateSurfaceNetsFromGlobalSDF(
+        sdf, primal::math::v3{-16.f, -16.f, -16.f}, primal::math::v3{16.f, 16.f, 16.f},
+        32, 0.0f, sm);
+    CHECK(ok, "GenerateSurfaceNetsFromGlobalSDF dispatch succeeded");
+    if (!ok) { DestroyStreamingMesh(device, sm); sdf.Shutdown(); return 0; }
+
+    // Read back counters and verify a non-empty triangle mesh was produced.
+    u32 counters[2] = {0u, 0u};
+    void* mapped = device->MapBuffer(sm.counters, 0, sizeof(counters));
+    CHECK(mapped != nullptr, "MapBuffer(counters) succeeded");
+    if (!mapped) { DestroyStreamingMesh(device, sm); sdf.Shutdown(); return 0; }
+    std::memcpy(counters, mapped, sizeof(counters));
+    device->UnmapBuffer(sm.counters);
+
+    std::cerr << "[Info] vert_count=" << counters[0] << " idx_count=" << counters[1] << "\n";
+    const bool pass = counters[0] > 0 && (counters[1] % 3) == 0;
+    CHECK(pass, "counters vert_count>0 && idx_count%3==0");
+
+    DestroyStreamingMesh(device, sm);
+    sdf.Shutdown();
+    CHECK(!sdf.IsInitialized(), "GlobalSDF::Shutdown reset singleton state");
     return 0;
 }
 
@@ -397,6 +437,7 @@ static int TestGPUSurfaceNetsFromGlobalSDF(primal::graphics::rhi::RHIDeviceBase*
 //   Same constraint as sub-test 4: requires populated GlobalSDF cascade
 //   textures. Skip gracefully and defer to Task 12.
 static int TestStreamingMeshBufferPersistence(primal::graphics::rhi::RHIDeviceBase* device) {
+    using namespace primal::graphics;
     std::cout << "\n--- TestStreamingMeshBufferPersistence ---\n";
 
     if (!device) {
@@ -405,38 +446,50 @@ static int TestStreamingMeshBufferPersistence(primal::graphics::rhi::RHIDeviceBa
         return 0;
     }
 
-    // Verify StreamingMesh allocation + destruction works (no dispatch).
-    // This covers the buffer lifecycle without needing GlobalSDF data.
-    primal::graphics::StreamingMesh sm = primal::graphics::CreateStreamingMesh(
+    pcg::GPUMesher::Get().Initialize(device);
+    CHECK(pcg::GPUMesher::Get().IsReady(), "GPUMesher::Initialize succeeded");
+    if (!pcg::GPUMesher::Get().IsReady()) return 0;
+
+    auto& sdf = nanite::GlobalSDF::Get();
+    if (!sdf.IsInitialized()) {
+        const bool ok = sdf.Initialize(device);
+        CHECK(ok, "GlobalSDF::Initialize succeeded");
+        if (!ok) return 0;
+    }
+
+    const bool filled = sdf.DebugFill([](const primal::math::v3& p) {
+        return std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z) - 8.0f;
+    });
+    CHECK(filled, "GlobalSDF::DebugFill populated cascades");
+    if (!filled) { sdf.Shutdown(); return 0; }
+
+    StreamingMesh sm = CreateStreamingMesh(
         device, 32, primal::math::v3{-16.f, -16.f, -16.f}, primal::math::v3{16.f, 16.f, 16.f});
     CHECK(sm.IsValid(), "CreateStreamingMesh valid");
-    if (!sm.IsValid()) return 0;
+    if (!sm.IsValid()) { sdf.Shutdown(); return 0; }
 
+    // Capture handles after first allocation.
     const auto p0 = sm.positions, e0 = sm.elements, i0 = sm.indices;
 
-    // Without GlobalSDF debug-fill, we can't dispatch GenerateSurfaceNetsFromGlobalSDF
-    // safely. Instead verify the allocator returns distinct handles across calls and
-    // that a second allocation does not corrupt the first StreamingMesh.
-    primal::graphics::StreamingMesh sm2 = primal::graphics::CreateStreamingMesh(
-        device, 32, primal::math::v3{-16.f, -16.f, -16.f}, primal::math::v3{16.f, 16.f, 16.f});
-    CHECK(sm2.IsValid(), "Second CreateStreamingMesh valid");
-    const bool distinct = (sm2.positions != sm.positions)
-                       && (sm2.elements  != sm.elements)
-                       && (sm2.indices   != sm.indices);
-    CHECK(distinct, "StreamingMesh allocator returns distinct handles");
-    primal::graphics::DestroyStreamingMesh(device, sm2);
-    CHECK(true, "DestroyStreamingMesh(sm2) completed without crash");
+    // Dispatch twice on the same StreamingMesh. Second call should reuse buffers.
+    const math::v3 bmin{-16.f, -16.f, -16.f};
+    const math::v3 bmax{ 16.f,  16.f,  16.f};
+    bool ok = pcg::GPUMesher::Get().GenerateSurfaceNetsFromGlobalSDF(
+        sdf, bmin, bmax, 32, 0.0f, sm);
+    CHECK(ok, "First GenerateSurfaceNetsFromGlobalSDF dispatch succeeded");
+    if (!ok) { DestroyStreamingMesh(device, sm); sdf.Shutdown(); return 0; }
 
-    // sm must be unaffected by sm2's lifecycle.
-    const bool stable = (sm.positions == p0) && (sm.elements == e0) && (sm.indices == i0);
-    CHECK(stable, "StreamingMesh handles stable after sibling alloc/free");
+    ok = pcg::GPUMesher::Get().GenerateSurfaceNetsFromGlobalSDF(
+        sdf, bmin, bmax, 32, 0.0f, sm);
+    CHECK(ok, "Second GenerateSurfaceNetsFromGlobalSDF dispatch succeeded");
+    if (!ok) { DestroyStreamingMesh(device, sm); sdf.Shutdown(); return 0; }
 
-    std::cerr << "[SKIP] GlobalSDF dispatch requires debug-fill; "
-              << "persistence test deferred to Task 12\n";
-    CHECK(true, "Sub-test 5 dispatch skipped (no GlobalSDF debug-fill path)");
+    const bool same_handles = (sm.positions == p0) && (sm.elements == e0) && (sm.indices == i0);
+    CHECK(same_handles, "StreamingMesh buffer handles unchanged across dispatches");
 
-    primal::graphics::DestroyStreamingMesh(device, sm);
-    CHECK(true, "DestroyStreamingMesh completed without crash");
+    DestroyStreamingMesh(device, sm);
+    sdf.Shutdown();
+    CHECK(!sdf.IsInitialized(), "GlobalSDF::Shutdown reset singleton state");
     return 0;
 }
 
@@ -528,24 +581,10 @@ static int TestGlobalSDFMeshNodeVisual() {
 
 // Sub-test 10: TestGlobalSDFMeshPerf
 //   Wall-clock budget for GPU SurfaceNets-from-GlobalSDF dispatch.
-//
-//   INITIALIZATION SMOKE TEST: Exercises GPUMesher::Initialize +
-//   GlobalSDF::Get().Initialize + CreateStreamingMesh lifecycle. This catches
-//   allocation / initialization regressions without dispatching.
-//
-//   DISPATCH SKIPPED: Calling GenerateSurfaceNetsFromGlobalSDF with
-//   zero-initialized cascade textures (no voxelization pipeline wired in this
-//   binary) segfaults during GPU command buffer execution (SIGSEGV, exit 139).
-//   Root cause: GlobalSDF has no debug-fill path, and the compute shader
-//   reads descriptor slots that may contain uninitialized texture data.
-//
-//   Per task instructions: "If the dispatch segfaults, don't try to fix
-//   GlobalSDF — skip gracefully and document." Perf timing measurement is
-//   deferred to Task 13's interactive TestPCGScatter, which runs the full
-//   StandardRenderPipeline with live GlobalSDF voxelization.
+//   Budget: <3ms @ 64³ (spec §2). Uses DebugFill to populate cascade 0 with
+//   a sphere SDF, then dispatches once and measures wall-clock time.
 static int TestGlobalSDFMeshPerf(primal::graphics::rhi::RHIDeviceBase* device) {
     using namespace primal::graphics;
-
     std::cout << "\n--- TestGlobalSDFMeshPerf ---\n";
 
     if (!device) {
@@ -554,12 +593,10 @@ static int TestGlobalSDFMeshPerf(primal::graphics::rhi::RHIDeviceBase* device) {
         return 0;
     }
 
-    // GPUMesher singleton init (idempotent).
     pcg::GPUMesher::Get().Initialize(device);
     CHECK(pcg::GPUMesher::Get().IsReady(), "GPUMesher::Initialize succeeded");
     if (!pcg::GPUMesher::Get().IsReady()) return 0;
 
-    // GlobalSDF singleton init — allocates cascade textures.
     auto& sdf = nanite::GlobalSDF::Get();
     if (!sdf.IsInitialized()) {
         const bool ok = sdf.Initialize(device);
@@ -569,38 +606,46 @@ static int TestGlobalSDFMeshPerf(primal::graphics::rhi::RHIDeviceBase* device) {
     CHECK(sdf.GetCascade(0).sdf_texture != rhi::handles::INVALID_RESOURCE,
           "GlobalSDF cascade 0 texture allocated");
 
-    // Allocate a StreamingMesh at the target resolution.
+    // Populate cascades with a sphere SDF so dispatch reads real data.
+    const bool filled = sdf.DebugFill([](const primal::math::v3& p) {
+        return std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z) - 8.0f;
+    });
+    CHECK(filled, "GlobalSDF::DebugFill populated cascades");
+    if (!filled) { sdf.Shutdown(); return 0; }
+
+    // Spec §2 perf target: <3ms @ 64³, <10ms @ 128³.
+    constexpr double kPerfBudget64Ms  = 3.0;
+    constexpr double kPerfBudget128Ms = 10.0;
+
     const math::v3 bmin{-32.0f, -32.0f, -32.0f};
     const math::v3 bmax{ 32.0f,  32.0f,  32.0f};
     const u32 res = 64;
 
-    // Spec §2 perf target: <3ms @ 64³, <10ms @ 128³. Dispatch currently skipped
-    // (zero-init GlobalSDF segfaults); constant declared here so the budget isn't
-    // silently lost when dispatch is re-enabled.
-    constexpr double kPerfBudget64Ms  = 3.0;
-    constexpr double kPerfBudget128Ms = 10.0;
-    (void)kPerfBudget64Ms;
-    (void)kPerfBudget128Ms;
-
     StreamingMesh sm = CreateStreamingMesh(device, res, bmin, bmax);
     CHECK(sm.IsValid(), "CreateStreamingMesh(64) valid for perf");
-    if (!sm.IsValid()) return 0;
+    if (!sm.IsValid()) { sdf.Shutdown(); return 0; }
 
-    std::cerr << "[SKIP] Dispatch with zero-initialized GlobalSDF causes SIGSEGV; "
-              << "perf measurement deferred to Task 13 (TestPCGScatter with live "
-              << "voxelization)\n";
-    CHECK(true, "Sub-test 10 dispatch skipped (zero-init GlobalSDF segfaults)");
+    // Warm-up dispatch (first call may include pipeline state setup).
+    pcg::GPUMesher::Get().GenerateSurfaceNetsFromGlobalSDF(sdf, bmin, bmax, res, 0.0f, sm);
+
+    // Timed dispatch.
+    auto t0 = std::chrono::high_resolution_clock::now();
+    const bool ok = pcg::GPUMesher::Get().GenerateSurfaceNetsFromGlobalSDF(
+        sdf, bmin, bmax, res, 0.0f, sm);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    CHECK(ok, "GenerateSurfaceNetsFromGlobalSDF dispatch succeeded");
+
+    const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cerr << "[Perf] 64³ GPU SDF meshing: " << ms << "ms (budget: "
+              << kPerfBudget64Ms << "ms)\n";
+    (void)kPerfBudget128Ms;  // declared for documentation; 128³ path not tested
+
+    const bool within_budget = ok && (ms < kPerfBudget64Ms);
+    CHECK(within_budget, "64³ dispatch within 3ms budget");
 
     DestroyStreamingMesh(device, sm);
-    CHECK(true, "DestroyStreamingMesh completed without crash");
-
-    // Tear down GlobalSDF singleton so its textures are freed and
-    // initialized_ is reset. Without this the singleton persists across
-    // sub-tests and would cause "already initialized" surprises if test
-    // ordering changes. Shutdown() is idempotent (guards on initialized_).
     sdf.Shutdown();
     CHECK(!sdf.IsInitialized(), "GlobalSDF::Shutdown reset singleton state");
-
     return 0;
 }
 

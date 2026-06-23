@@ -12,6 +12,7 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHITypes.h"
+#include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/RenderPipeline/StreamingMesh.h"
 
@@ -639,7 +640,17 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
         DestroyScratch(device_, scratch);
         return empty;
     }
-    RHICommandBuffer* cmd = GetCommandBuffer(cmd_handle);
+    // ODR workaround (see GlobalSDF.cpp DebugFill): bypass the global singleton.
+    auto* metal_dev = dynamic_cast<MetalDevice*>(device_);
+    RHICommandBuffer* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmd_handle) : nullptr;
+    if (!cmd) {
+        device_->DestroyDescriptorSet(classify_ds);
+        device_->DestroyDescriptorSet(emit_vertices_ds);
+        device_->DestroyDescriptorSet(emit_faces_ds);
+        device_->DestroyDescriptorSet(write_indirect_ds);
+        DestroyScratch(device_, scratch);
+        return empty;
+    }
 
     cmd->Begin();
 
@@ -1048,7 +1059,23 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
         device_->DestroyBuffer(scalar_buf);
         return false;
     }
-    RHICommandBuffer* cmd = GetCommandBuffer(cmd_handle);
+    // ODR workaround: see GlobalSDF.cpp DebugFill for details. Test binaries
+    // link both libEngine.a (static) and libEngineDLL.dylib, so the global
+    // CommandBufferManager singleton has two instances — dylib registers,
+    // static reads, lookup returns nullptr, Begin() segfaults. MetalDevice's
+    // own allocator is singleton-free.
+    auto* metal_dev = dynamic_cast<MetalDevice*>(device_);
+    RHICommandBuffer* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmd_handle) : nullptr;
+    if (!cmd) {
+        device_->DestroyDescriptorSet(classify_ds);
+        device_->DestroyDescriptorSet(emit_vertices_ds);
+        device_->DestroyDescriptorSet(emit_faces_ds);
+        device_->DestroyDescriptorSet(write_indirect_ds);
+        device_->DestroyBuffer(uni_buf);
+        device_->DestroyBuffer(dual_id_buf);
+        device_->DestroyBuffer(scalar_buf);
+        return false;
+    }
 
     cmd->Begin();
 

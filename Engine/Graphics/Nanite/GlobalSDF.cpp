@@ -2,6 +2,7 @@
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
 #include "../RHI/Core/RHIMath.h"
+#include "../RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/Field/FieldRegistry.h"
 #include <algorithm>
 #include <chrono>
@@ -543,6 +544,117 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
         barrier.subresource = 0xFFFFFFFF;
         cmd->InsertBarrier(&barrier, 1);
     }
+}
+
+// --- f32 → f16 bit conversion (IEEE 754 half) ---
+// Used by DebugFill to write R16_Float cascade textures from CPU.
+static inline u16 f32_to_f16(f32 f) {
+    u32 x;
+    std::memcpy(&x, &f, sizeof(x));
+    const u32 sign = (x >> 16) & 0x8000;
+    const int e = static_cast<int>((x >> 23) & 0xFF) - 127 + 15;
+    const u32 m = x & 0x7FFFFF;
+
+    if (e <= 0) {
+        // Denormal / underflow → zero (good enough for debug SDF)
+        return static_cast<u16>(sign);
+    }
+    if (e >= 31) {
+        // Inf / NaN / overflow → Inf
+        return static_cast<u16>(sign | 0x7C00);
+    }
+    return static_cast<u16>(sign | (e << 10) | (m >> 13));
+}
+
+bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
+    if (!initialized_ || !device_) return false;
+    if (!sdf_fn) return false;
+
+    // Find max cascade resolution to size the staging buffer once.
+    u32 max_res = 0;
+    for (const auto& c : cascades_) {
+        if (c.resolution > max_res) max_res = c.resolution;
+    }
+    if (max_res == 0) return false;
+
+    const u64 staging_bytes = static_cast<u64>(max_res) * max_res * max_res * sizeof(u16);
+    rhi::BufferDesc bufDesc{
+        staging_bytes,
+        rhi::BufferType::Unknown,
+        rhi::GPUMemoryUsage::Staging,
+        rhi::GPUMemoryUsage::Staging,
+        0,
+    };
+    rhi::ResourceHandle staging = device_->CreateBuffer(bufDesc);
+    if (staging == rhi::handles::INVALID_RESOURCE) return false;
+
+    // Scratch CPU buffer for the largest cascade; reused for smaller ones.
+    utl::vector<u16> cpu_data;
+    cpu_data.resize(max_res * max_res * max_res);
+
+    bool all_ok = true;
+
+    for (const auto& c : cascades_) {
+        if (c.sdf_texture == rhi::handles::INVALID_RESOURCE) continue;
+        if (!c.is_valid) continue;
+
+        const u32 res = c.resolution;
+        const f32 inv_res = 1.0f / static_cast<f32>(res);
+        // Voxel center world position = origin + (voxel + 0.5) * extent / res
+        const math::v3 voxel_step{c.extent.x * inv_res,
+                                   c.extent.y * inv_res,
+                                   c.extent.z * inv_res};
+
+        for (u32 z = 0; z < res; ++z) {
+            for (u32 y = 0; y < res; ++y) {
+                for (u32 x = 0; x < res; ++x) {
+                    const math::v3 p{
+                        c.origin.x + (static_cast<f32>(x) + 0.5f) * voxel_step.x,
+                        c.origin.y + (static_cast<f32>(y) + 0.5f) * voxel_step.y,
+                        c.origin.z + (static_cast<f32>(z) + 0.5f) * voxel_step.z};
+                    const f32 d = sdf_fn(p);
+                    cpu_data[(z * res + y) * res + x] = f32_to_f16(d);
+                }
+            }
+        }
+
+        const u64 cascade_bytes = static_cast<u64>(res) * res * res * sizeof(u16);
+        if (!device_->UpdateBufferData(staging, cpu_data.data(), cascade_bytes, 0)) {
+            all_ok = false;
+            continue;
+        }
+
+        auto cmdHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+        // Bypass rhi::GetCommandBuffer (global singleton): test binaries that use
+        // C++ engine APIs link both libEngine.a (static) and libEngineDLL.dylib,
+        // producing two singleton instances. The dylib registers, the static
+        // reads — lookup fails. MetalDevice::GetCommandBuffer routes through
+        // the device's own allocator and is singleton-free.
+        auto* metal_dev = dynamic_cast<rhi::MetalDevice*>(device_);
+        auto* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmdHandle) : nullptr;
+        if (!cmd) { all_ok = false; continue; }
+
+        cmd->Begin();
+        rhi::BufferTextureCopyRegion region;
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;  // tightly packed
+        region.bufferImageHeight = 0;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {res, res, res};
+        cmd->CopyBufferToTexture(staging, c.sdf_texture, &region, 1);
+        cmd->End();
+
+        rhi::QueueSubmitInfo submit{};
+        submit.cmdBuffer = cmdHandle;
+        device_->Submit(submit);
+        cmd->WaitForCompletion();
+    }
+
+    device_->DestroyBuffer(staging);
+    return all_ok;
 }
 
 } // namespace primal::graphics::nanite
