@@ -331,10 +331,7 @@ bool Engine_Test::initialize() {
 
     // Phase N2: lazy-init meshlet pipeline (mode 7/8). Init is cheap if mode 7
     // is never selected — just creates singleton handles + GPU buffers.
-    // Skipped on WASM: Nanite sources are excluded from the Engine WASM build.
-#ifndef __EMSCRIPTEN__
     InitializeMeshletPipeline();
-#endif
 
     // DEBUG: env var override for non-interactive mode testing.
     if (const char* modeEnv = std::getenv("DAWN_FORCE_MODE")) {
@@ -359,8 +356,10 @@ bool Engine_Test::initialize() {
             hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;';
             hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>'
                 + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>'
+                + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>'
                 + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>'
-                + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>';
+                + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>'
+                + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>';
             document.body.appendChild(hud);
         }
         // Define HUD update function (independent of shell.html)
@@ -369,6 +368,21 @@ bool Engine_Test::initialize() {
             var d = document.getElementById('modeHudDesc');
             if (c) c.textContent = 'Mode ' + idx + ': ' + name;
             if (d) d.textContent = desc;
+            // Show the meshlet-debug status line only in modes 7/8.
+            var dbg = document.getElementById('meshletDbgHud');
+            if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none';
+        };
+        // Update meshlet debug label (called from C++ on each V press).
+        // Avoid array-literal commas in EM_ASM — the C preprocessor treats top-
+        // level commas as macro-argument separators.
+        window.setMeshletDebug = function(mode) {
+            var dbg = document.getElementById('meshletDbgHud');
+            if (!dbg) return;
+            var label = 'Off';
+            if (mode == 1) label = 'MeshletID';
+            else if (mode == 2) label = 'TriangleID';
+            else if (mode == 3) label = 'MeshID';
+            dbg.textContent = 'Meshlet Debug: ' + label;
         };
     });
 #endif
@@ -738,7 +752,6 @@ void Engine_Test::RenderFrame() {
     // Forward/Deferred paths still use prepassDepthTexture_.
     const bool meshletMode = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
                               renderMode_ == DawnRenderMode::Meshlet);
-#ifndef __EMSCRIPTEN__
     if (meshletMode) {
         auto& gpuDrawPipeline = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
         rhi::ResourceHandle meshletDepth = gpuDrawPipeline.GetFinalDepthTexture();
@@ -746,7 +759,6 @@ void Engine_Test::RenderFrame() {
             depthRG = renderGraph_->ImportTexture("MeshletDepth", meshletDepth, depthDescForRG);
         }
     }
-#endif
 
     // Import velocity MRT texture (RG16F) for ToneMapping debug visualization
     rhi::TextureDesc velDescForRG;
@@ -976,15 +988,10 @@ void Engine_Test::RenderFrame() {
             // cull + draw + meshlet deferred lighting. Produces hdrTexture_ from
             // the 4-RT meshlet GBuffer. Falls through to the renderGraph
             // post-processing pipeline below.
-            // Skipped on WASM (Nanite sources excluded from Engine WASM build).
-#ifndef __EMSCRIPTEN__
             if (renderMode_ == DawnRenderMode::MeshletNoIBL ||
                 renderMode_ == DawnRenderMode::Meshlet) {
                 RenderMeshletFrame(cmd);
             } else if (renderMode_ == DawnRenderMode::Deferred) {
-#else
-            if (renderMode_ == DawnRenderMode::Deferred) {
-#endif
                 // G-Buffer shares the non-jittered prepass depth (LessEqual +
                 // no-write). depthTexture_ is only populated by Render(), which
                 // is bypassed in Deferred mode — using it would leave the
@@ -1183,13 +1190,7 @@ void Engine_Test::UpdateCamera(float dt) {
     }
 
     // Tab (keyCode 9) to cycle render mode — edge detected.
-    // WASM: Nanite sources are excluded from the Engine build (CMakeLists
-    // list(FILTER ... EXCLUDE REGEX ".*/Nanite/.*")), so Mode 7/8 would
-    // render nothing — empty HDR + HZB reading never-written prepass depth
-    // shows up as a static "ghost" over a black screen, and V has no effect
-    // because SetDebugMode lives inside RenderMeshletFrame which is
-    // #ifndef __EMSCRIPTEN__-guarded out. Wrap Tab at LumenDDGI (Mode 6)
-    // until the meshlet pipeline is ported to WASM.
+    // V (keyCode 86) cycles meshlet debug visualization (mode 7/8 only).
     {
         static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet"};
         static const char* kModeDesc[] = {
@@ -1203,10 +1204,9 @@ void Engine_Test::UpdateCamera(float dt) {
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
             "GPU-Driven Meshlet + Indirect Draw + IBL"
         };
-        constexpr u8 kWasmModeCount = static_cast<u8>(DawnRenderMode::LumenDDGI) + 1u;
         bool tabPressed = EmscriptenGetKeyState(9);
         if (tabPressed && !prevTabState_) {
-            renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % kWasmModeCount);
+            renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
             forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
             // Drop TAA history so the prior mode's HDR image doesn't bleed in.
             PostProcess::ResetTAAHistory();
@@ -1218,6 +1218,25 @@ void Engine_Test::UpdateCamera(float dt) {
             }, static_cast<u8>(renderMode_), kModeNames[static_cast<u8>(renderMode_)], kModeDesc[static_cast<u8>(renderMode_)]);
         }
         prevTabState_ = tabPressed;
+
+        bool vPressed = EmscriptenGetKeyState(86);
+        if (vPressed && !prevVState_) {
+            // V only in Mode 7 (MeshletNoIBL) — see native handler for rationale.
+            if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
+                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 4u;
+                std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_ << std::endl;
+                EM_ASM_({
+                    if (window.setMeshletDebug) {
+                        window.setMeshletDebug($0);
+                    }
+                }, meshletDebugMode_);
+            }
+        }
+        prevVState_ = vPressed;
+
+        if (renderMode_ != DawnRenderMode::MeshletNoIBL && meshletDebugMode_ != 0u) {
+            meshletDebugMode_ = 0u;
+        }
     }
 #endif
 
@@ -1958,11 +1977,9 @@ void Engine_Test::UpdatePunctualLights() {
 // ============================================================
 // Meshlet pipeline (mode 7/8)
 // ============================================================
-// Nanite sources are excluded from the WASM build (see Engine/CMakeLists.txt:
-// "Emscripten: exclude Nanite/Lumen systems (Metal-specific)"). The whole
-// meshlet path is therefore compiled out for __EMSCRIPTEN__; Tab still cycles
-// through modes 7/8 in the enum but those modes render nothing on WASM.
-#ifndef __EMSCRIPTEN__
+// Nanite sources compile for WASM (Metal-only includes are guarded by
+// #ifdef __APPLE__). Mesh asset / GPU mesh data comes through stubs that
+// return empty until ContentToEngine.cpp is ported to wasm32.
 
 bool Engine_Test::InitializeMeshletPipeline() {
     if (meshletInitialized_) return true;
@@ -2264,8 +2281,6 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
     // prevViewProjection uniform.
     forwardRenderer_.SetDawnShadowLightVP(cascadeVPs_[0]);
 }
-
-#endif // __EMSCRIPTEN__
 
 #ifdef __APPLE__
 void Engine_Test::DisplayLinkCallback(CFRunLoopTimerRef, void* info) {
