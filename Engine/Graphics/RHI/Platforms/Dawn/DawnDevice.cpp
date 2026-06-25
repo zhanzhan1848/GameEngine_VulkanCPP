@@ -19,6 +19,7 @@
 #include "DawnRenderPass.h"
 #include "DawnSampler.h"
 #include "DawnSwapChain.h"
+#include "../../Core/RHICommand.h"
 
 #include <iostream>
 #include <fstream>
@@ -133,6 +134,18 @@ bool DawnDevice::initializeImpl() {
         requiredLimits.maxBufferSize = (std::max)(requiredLimits.maxBufferSize, 256ull * 1024ull * 1024ull);
         requiredLimits.maxStorageBufferBindingSize = (std::max)(requiredLimits.maxStorageBufferBindingSize, 128ull * 1024ull * 1024ull);
         requiredLimits.maxUniformBufferBindingSize = (std::max)(requiredLimits.maxUniformBufferBindingSize, 64ull * 1024ull);
+        // Phase 4 — DDGI trace needs 7+ bindings in one stage. WebGPU spec floor is 8;
+        // raise to adapter-supported value so the engine doesn't silently fail on
+        // implementations that report only the floor.
+        requiredLimits.maxStorageBuffersPerShaderStage =
+            (std::max)(requiredLimits.maxStorageBuffersPerShaderStage,
+                       static_cast<decltype(requiredLimits.maxStorageBuffersPerShaderStage)>(8));
+        requiredLimits.maxStorageTexturesPerShaderStage =
+            (std::max)(requiredLimits.maxStorageTexturesPerShaderStage,
+                       static_cast<decltype(requiredLimits.maxStorageTexturesPerShaderStage)>(8));
+        // GlobalSDF cascades are 128³; leave headroom for future larger volumes.
+        requiredLimits.maxTextureDimension3D =
+            (std::max)(requiredLimits.maxTextureDimension3D, 256u);
     }
 
     WGPUDeviceDescriptor deviceDesc{};
@@ -223,6 +236,32 @@ bool DawnDevice::initializeImpl() {
     }
     wgpuDevice_ = deviceData.device;
 
+    // Set up logging callback to surface Dawn validation errors / warnings.
+    // Without this, WebGPU validation errors are silently swallowed, making
+    // texture-blit / pipeline-creation failures invisible.
+    // Emscripten's webgpu.h does not expose WGPULogging*/wgpuDeviceSetLoggingCallback
+    // — the browser already surfaces these via its own console.
+#ifndef __EMSCRIPTEN__
+    WGPULoggingCallbackInfo logCbInfo{};
+    logCbInfo.nextInChain = nullptr;
+    logCbInfo.callback = [](WGPULoggingType type, WGPUStringView message,
+                            void* userdata1, void* userdata2) {
+        (void)userdata1;
+        (void)userdata2;
+        const char* tag = "Info";
+        switch (type) {
+            case WGPULoggingType_Verbose: tag = "Verbose"; break;
+            case WGPULoggingType_Info: tag = "Info"; break;
+            case WGPULoggingType_Warning: tag = "WARNING"; break;
+            case WGPULoggingType_Error: tag = "ERROR"; break;
+            default: break;
+        }
+        std::string msg(message.data, message.length);
+        std::cerr << "[Dawn][" << tag << "] " << msg << std::endl;
+    };
+    wgpuDeviceSetLoggingCallback(wgpuDevice_, logCbInfo);
+#endif
+
     // 4. Get Queue
     wgpuQueue_ = wgpuDeviceGetQueue(wgpuDevice_);
     if (!wgpuQueue_) {
@@ -245,18 +284,23 @@ bool DawnDevice::initializeImpl() {
     }
 
     // 6. Reserve allocators
-    bufferAllocator_.Reserve(1024);
-    textureAllocator_.Reserve(512);
-    commandBufferAllocator_.Reserve(64);
-    syncAllocator_.Reserve(64);
-    queryPoolAllocator_.Reserve(16);
-    shaderAllocator_.Reserve(256);
-    pipelineAllocator_.Reserve(256);
-    samplerAllocator_.Reserve(64);
-    descriptorSetLayoutAllocator_.Reserve(64);
-    pipelineLayoutAllocator_.Reserve(64);
-    descriptorSetAllocator_.Reserve(256);
-    renderPassAllocator_.Reserve(128);
+    // free_list uses std::vector which reallocates on growth — invalidating all
+    // RHIResource* pointers stored in ResourceManager. Reserve enough capacity
+    // upfront to avoid growth during runtime. Sponza + Nanite pipeline needs
+    // ~3000 buffers (per-mesh vertex/index/material) and ~1500 textures.
+    // Each material also creates descriptor sets/layouts (~5 per material).
+    bufferAllocator_.Reserve(16384);
+    textureAllocator_.Reserve(8192);
+    commandBufferAllocator_.Reserve(256);
+    syncAllocator_.Reserve(1024);
+    queryPoolAllocator_.Reserve(64);
+    shaderAllocator_.Reserve(2048);
+    pipelineAllocator_.Reserve(2048);
+    samplerAllocator_.Reserve(4096);
+    descriptorSetLayoutAllocator_.Reserve(8192);
+    pipelineLayoutAllocator_.Reserve(4096);
+    descriptorSetAllocator_.Reserve(8192);
+    renderPassAllocator_.Reserve(1024);
 
     return true;
 }
@@ -595,6 +639,10 @@ CommandBufferHandle DawnDevice::createCommandBufferImpl(CommandQueueType type) {
         commandBufferAllocator_.Free(id);
         return handles::INVALID_COMMAND_BUFFER;
     }
+    // Engine-level callers (e.g. GPUMaterialRegistry) look up command buffers
+    // via rhi::GetCommandBuffer(handle), which queries the global
+    // CommandBufferManager. Metal registers on create — Dawn must too.
+    rhi::RegisterCommandBuffer(cmdBuf);
     return static_cast<CommandBufferHandle>(id);
 }
 

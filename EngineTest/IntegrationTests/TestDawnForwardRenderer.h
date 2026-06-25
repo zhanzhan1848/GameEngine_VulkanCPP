@@ -22,6 +22,11 @@
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/BloomPass.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSAOPass.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/ToneMappingPass.h"
+#include "Engine/Graphics/Nanite/GPUDrivenDrawPipeline.h"
+#include "Engine/Graphics/Nanite/GPUCullingPipeline.h"
+#include "Engine/Graphics/Nanite/HZBSystem.h"
+#include "Engine/Graphics/Nanite/GPUMaterialRegistry.h"
+#include "Engine/Graphics/Scene/RenderSceneSnapshot.h"
 #include "Engine/Graphics/Utils/ShaderRegistry.h"
 #include "Engine/Platform/Platform.h"
 #include <unordered_map>
@@ -64,6 +69,11 @@ private:
     void CreateIBLResources();
     void RunIBLCompute(ResourceHandle envCubeTex, u32 cubeSize);
     void UpdatePunctualLights();
+
+    // Meshlet pipeline (mode 7) — init, per-frame dispatch, shutdown.
+    bool InitializeMeshletPipeline();
+    void ShutdownMeshletPipeline();
+    void RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cmd);
 
     primal::graphics::rhi::DawnDevice* device_{nullptr};
     primal::graphics::rhi::RHISwapChain* swapchain_{nullptr};
@@ -131,10 +141,22 @@ private:
     primal::graphics::rhi::CommandBufferHandle cmdBuffer_{primal::graphics::rhi::handles::INVALID_COMMAND_BUFFER};
 
     // Render mode switching (Tab key)
-    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, FullPlusSSR = 4, Deferred = 5, Count };
+    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, FullPlusSSR = 4, Deferred = 5, LumenDDGI = 6, MeshletNoIBL = 7, Meshlet = 8, Count };
     DawnRenderMode renderMode_{DawnRenderMode::ShadowAndIBL};
     bool prevTabState_{false};
+    bool prevVState_{false};
+    u32 meshletDebugMode_{0};   // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id
     bool punctualLightsAdded_{false};
+
+    // ---- Meshlet pipeline (mode 7) ----
+    // Owned pointers; released in ShutdownMeshletPipeline(). Singletons
+    // (GPUDrivenDrawPipeline::Get() / GPUCullingPipeline::Get()) are accessed
+    // via ::Get() and have their lifetime managed by the singleton itself —
+    // we only call Initialize/Shutdown on them.
+    primal::graphics::nanite::GPUMaterialRegistry* meshletMaterialRegistry_{nullptr};
+    primal::graphics::nanite::HZBSystem* meshletHZBSystem_{nullptr};
+    primal::graphics::RenderSceneSnapshot meshletSceneSnapshot_;
+    bool meshletInitialized_{false};
 
     u32 frameIndex_{0};
     u32 width_{1280};

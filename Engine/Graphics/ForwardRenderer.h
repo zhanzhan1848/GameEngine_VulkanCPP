@@ -92,6 +92,22 @@ public:
                                     u32 width,
                                     u32 height);
 
+    // Phase N2 — Meshlet deferred lighting. Same PBR as RenderDawnDeferredLighting
+    // but consumes the 4-RT meshlet GBuffer (albedo/normal/orm/velocity) written
+    // by Nanite/GPUDrivenDrawPipeline + the meshlet depth texture for worldPos
+    // reconstruction. gbufferTextures[0..3] map to the meshlet RTs; depthTexture
+    // is the sampleable D32 produced by GPUDrivenDrawPipeline::Execute.
+    static constexpr u32 DAWN_MESHLET_GBUFFER_RT_COUNT = 4;
+    void RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* cmdBuffer,
+                                           const RenderView& view,
+                                           const rhi::ResourceHandle gbufferTextures[DAWN_MESHLET_GBUFFER_RT_COUNT],
+                                           rhi::ResourceHandle depthTexture,
+                                           rhi::ResourceHandle hdrTexture,
+                                           const RenderScene& scene,
+                                           u32 frameIndex,
+                                           u32 width,
+                                           u32 height);
+
     GeometryDebugSettings& GetDebugSettings() { return debugSettings_; }
     
     const SceneExtractionStats& GetExtractionStats() const { return sceneExtractionSystem_.GetStats(); }
@@ -228,6 +244,12 @@ private:
 
     u32 dawnRenderMode_{2}; // default ShadowAndIBL
 
+    // Debug visualization + IBL toggle for meshlet modes (7/8).
+    // debugMode is forwarded to GPUDrivenDrawPipeline::SetDebugMode by the test;
+    // enableIBL is written into GlobalShaderData to gate the deferred IBL block.
+    u32 dawnMeshletDebugMode_{0};   // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id
+    u32 dawnEnableIBL_{1};
+
     // Phase 2: previous-frame state for velocity MRT
     primal::math::m4x4 prevViewProjection_{};
     std::unordered_map<id::id_type, primal::math::m4x4> prevWorldMap_;
@@ -290,6 +312,18 @@ private:
     rhi::PipelineHandle dawnDeferredPipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::DescriptorSetHandle dawnDeferredSet_[rhi::MAX_FRAMES_IN_FLIGHT]{};
 
+    // Dawn Meshlet Deferred lighting pass (Phase N2) — compute shader reading the
+    // 4-RT meshlet GBuffer + sampleable depth + shadow depth + IBL, writing HDR
+    // color. 13 bindings in set 0:
+    //   0..3 meshlet gbuffer (albedo/normal/orm/velocity),
+    //   4 depthTex (SampledDepthImage), 5 shadowDepthTex (depth_2d_array),
+    //   6..8 IBL (cube, cube, 2d), 9 iblSampler,
+    //   10 globalData UB, 11 lightBuffer UB, 12 outputTex storage.
+    rhi::DescriptorSetLayoutHandle dawnMeshletDeferredDSL_{rhi::handles::INVALID_RESOURCE};
+    rhi::PipelineLayoutHandle dawnMeshletDeferredPipelineLayout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineHandle dawnMeshletDeferredPipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::DescriptorSetHandle dawnMeshletDeferredSet_[rhi::MAX_FRAMES_IN_FLIGHT]{};
+
 public:
     void SetTime(float deltaTime, float totalTime, u32 frameNumber) {
         deltaTime_ = deltaTime;
@@ -306,6 +340,8 @@ public:
     void SetDawnIBLResources(rhi::ResourceHandle irradiance, rhi::ResourceHandle prefilter,
                              rhi::ResourceHandle brdfLUT, rhi::SamplerHandle sampler);
     void SetDawnRenderMode(u32 mode) { dawnRenderMode_ = mode; }
+    void SetDawnMeshletDebugMode(u32 mode) { dawnMeshletDebugMode_ = mode; }
+    void SetDawnEnableIBL(u32 enable) { dawnEnableIBL_ = enable; }
 
     // Phase 3c-2: caller supplies the material DSL (created by the test, shared
     // with MaterialInstance descriptor sets). The G-Buffer pipeline binds this

@@ -151,6 +151,7 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     bool histValid = s_HistoryInit[histReadIdx] && !firstEverFrame;
 
     // Update params uniform for this frame slot
+    // Update params uniform for this frame slot
     if (s_ParamsMapped[fi]) {
         auto* params = static_cast<TAAGlobalsCPU*>(s_ParamsMapped[fi]);
         params->screenSize = {(f32)width, (f32)height, 1.0f / width, 1.0f / height};
@@ -255,6 +256,15 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             s_HistoryInit[fi] = true;
         }
     );
+}
+
+void ResetTAAHistory() {
+    // Forcing re-init causes next TAA pass to skip blending with the stale
+    // history texture and overwrite it with the current frame's HDR.
+    for (u32 i = 0u; i < MAX_FRAMES; ++i) {
+        s_HistoryInit[i] = false;
+    }
+    s_LastFrameIndex = ~0u;
 }
 
 } // namespace primal::graphics::PostProcess

@@ -140,6 +140,23 @@ bool DawnTexture::Initialize() {
         cubeViewDesc.arrayLayerCount = 6;
         cubeViewDesc.aspect = WGPUTextureAspect_All;
         wgpuTextureView_ = wgpuTextureCreateView(wgpuTexture_, &cubeViewDesc);
+    } else if (textureDesc_.type == TextureType::Texture2DArray) {
+        // Force 2DArray dimension even when arraySize == 1. Passing nullptr as
+        // the view descriptor makes Dawn infer the dimension from layer count,
+        // so a 1-layer array is exposed as 2D — but shader bindings declared as
+        // texture_2d_array require 2DArray views, otherwise bind-group creation
+        // fails validation.
+        WGPUTextureViewDescriptor arrayViewDesc{};
+        arrayViewDesc.nextInChain = nullptr;
+        arrayViewDesc.label = ToWGPUStringView("ArrayDefaultView");
+        arrayViewDesc.format = ToWGPUTextureFormat(textureDesc_.format);
+        arrayViewDesc.dimension = WGPUTextureViewDimension_2DArray;
+        arrayViewDesc.baseMipLevel = 0;
+        arrayViewDesc.mipLevelCount = textureDesc_.mipLevels;
+        arrayViewDesc.baseArrayLayer = 0;
+        arrayViewDesc.arrayLayerCount = textureDesc_.arraySize;
+        arrayViewDesc.aspect = WGPUTextureAspect_All;
+        wgpuTextureView_ = wgpuTextureCreateView(wgpuTexture_, &arrayViewDesc);
     } else {
         wgpuTextureView_ = wgpuTextureCreateView(wgpuTexture_, nullptr);
     }

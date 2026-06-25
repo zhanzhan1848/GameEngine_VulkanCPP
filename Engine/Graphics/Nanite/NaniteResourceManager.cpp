@@ -1,4 +1,5 @@
 #include "NaniteResourceManager.h"
+#include "MeshletSynthesis.h"
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHIGpuMesh.h"
 #include "../../Content/ContentToEngine.h"
@@ -109,15 +110,19 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
     if (hasMeshletData && !meshAsset.meshlets.empty()) {
         resource->cluster_data.cluster_count = static_cast<u32>(meshAsset.meshlets.size());
         resource->cluster_data.meshlet_count = static_cast<u32>(meshAsset.meshlets.size());
-
-        // std::cout << "[NaniteResourceManager]   Created resource with " << resource->cluster_data.cluster_count
-        //           << " meshlets for geometry_id: " << geometry_id << std::endl;
+    } else if (hasMeshletData && meshAsset.num_indices > 0) {
+        // No pre-baked MSHL section — synthesize meshlets from the index buffer
+        // so cluster_count matches what GPUDrivenDrawPipeline will actually create.
+        // Without this, RenderSceneSnapshot would only emit 1 cluster_ref per
+        // instance, while the draw pipeline synthesizes N meshlets → only 1/N
+        // of the geometry gets a cluster_map entry and the rest is never drawn.
+        SynthesizedMeshlets synth;
+        SynthesizeMeshlets(meshAsset, synth);
+        resource->cluster_data.cluster_count = static_cast<u32>(synth.meshlets.size());
+        resource->cluster_data.meshlet_count = static_cast<u32>(synth.meshlets.size());
     } else {
         resource->cluster_data.cluster_count = 1;
         resource->cluster_data.meshlet_count = 1;
-
-        // std::cout << "[NaniteResourceManager]   No meshlet data found for geometry_id: " << geometry_id
-        //           << ", using single cluster fallback" << std::endl;
     }
 
     resource->gpu_mesh = primal::content::get_rhi_gpu_mesh(geometry_id);

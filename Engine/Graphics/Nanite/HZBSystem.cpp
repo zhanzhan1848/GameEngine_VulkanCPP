@@ -2,10 +2,13 @@
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
 #include "../RHI/Core/RHIMath.h"
+#include "../Dawn/ShaderLoader.h"
+#include "../Utils/ShaderRegistry.h"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 
 namespace primal::graphics::nanite {
 
@@ -62,6 +65,9 @@ void HZBSystem::Shutdown() {
         hzb_copy_pipeline_ = rhi::handles::INVALID_PIPELINE;
         hzb_downsample_pipeline_ = rhi::handles::INVALID_PIPELINE;
         hzb_pipeline_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+        hzb_copy_pipeline_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+        hzb_descriptor_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+        hzb_copy_descriptor_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     }
 
     initialized_ = false;
@@ -115,6 +121,9 @@ bool HZBSystem::CreateHZBSampler() {
     samplerDesc.addressV = rhi::TextureAddressMode::Clamp;
     samplerDesc.addressW = rhi::TextureAddressMode::Clamp;
     samplerDesc.maxLod = static_cast<float>(mip_levels_);
+    // WebGPU: comparisonFunc defaults to Always which produces a comparison
+    // sampler. Filtering bindings (SampledImage) require Never.
+    samplerDesc.comparisonFunc = rhi::ComparisonFunc::Never;
 
     hzb_sampler_ = device_->CreateSampler(samplerDesc);
     if (hzb_sampler_ == rhi::handles::INVALID_SAMPLER) {
@@ -127,6 +136,146 @@ bool HZBSystem::CreateHZBSampler() {
 
 bool HZBSystem::CreateHZBComputePipeline() {
 //    std::cout << "[HZBSystem] ========== Creating HZB Compute Pipeline ==========" << std::endl;
+
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+
+    if (isDawn) {
+        // ---- Dawn path: split copy + mip into separate layouts ----
+        // Copy stage binds texture_depth_2d (SampledDepthImage); mip stage binds
+        // texture_2d<f32> (SampledImage). WGSL forbids both binding types at
+        // slot 0 in a single module, so we use two files + two DSLs.
+
+        // Mip-stage layout (also used by existing hzb_descriptor_layout_).
+        rhi::DescriptorSetLayoutBinding mipBindings[] = {
+            { 0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute, nullptr },
+            { 1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute, nullptr }
+        };
+        mipBindings[0].unfilterableFloat = true; // source is R32Float (UnfilterableFloat in WebGPU)
+        mipBindings[1].format = rhi::DataFormat::R32_Float;  // HZBMip.wgsl: texture_storage_2d<r32float, write>
+        rhi::DescriptorSetLayoutDesc mipLayoutDesc{ 2, mipBindings };
+        hzb_descriptor_layout_ = device_->CreateDescriptorSetLayout(mipLayoutDesc);
+        if (hzb_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            std::cerr << "[HZBSystem] Failed to create HZB mip descriptor layout" << std::endl;
+            return false;
+        }
+
+        rhi::PipelineLayoutDesc mipPLDesc{ 1, &hzb_descriptor_layout_, 0, nullptr };
+        hzb_pipeline_layout_ = device_->CreatePipelineLayout(mipPLDesc);
+        if (hzb_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
+            std::cerr << "[HZBSystem] Failed to create HZB mip pipeline layout" << std::endl;
+            return false;
+        }
+
+        // Copy-stage layout — SampledDepthImage at binding 0, R32Float StorageImage at 1.
+        rhi::DescriptorSetLayoutBinding copyBindings[] = {
+            { 0, rhi::DescriptorType::SampledDepthImage, 1, rhi::ShaderStage::Compute, nullptr },
+            { 1, rhi::DescriptorType::StorageImage,      1, rhi::ShaderStage::Compute, nullptr }
+        };
+        copyBindings[1].format = rhi::DataFormat::R32_Float;  // HZBCopy.wgsl: texture_storage_2d<r32float, write>
+        rhi::DescriptorSetLayoutDesc copyLayoutDesc{ 2, copyBindings };
+        hzb_copy_descriptor_layout_ = device_->CreateDescriptorSetLayout(copyLayoutDesc);
+        if (hzb_copy_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            std::cerr << "[HZBSystem] Failed to create HZB copy descriptor layout" << std::endl;
+            return false;
+        }
+
+        rhi::PipelineLayoutDesc copyPLDesc{ 1, &hzb_copy_descriptor_layout_, 0, nullptr };
+        hzb_copy_pipeline_layout_ = device_->CreatePipelineLayout(copyPLDesc);
+        if (hzb_copy_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
+            std::cerr << "[HZBSystem] Failed to create HZB copy pipeline layout" << std::endl;
+            return false;
+        }
+
+        // Load WGSL shaders — use vector<u8> with explicit null terminator
+        // (matches GPUDrivenDrawPipeline's loader). ToWGPUStringView uses
+        // WGPU_STRLEN which calls strlen on the buffer.
+        auto loadWgsl = [](const char* name) -> std::vector<u8> {
+#ifdef __EMSCRIPTEN__
+            std::string fullName = std::string("Nanite/") + name;
+            std::string src = dawn::LoadWGSL(fullName.c_str());
+            if (src.empty()) return {};
+            std::vector<u8> bytecode(src.begin(), src.end());
+            bytecode.push_back(0);
+            return bytecode;
+#else
+            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(
+                rhi::RHIPlatform::Dawn, name);
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.claude/worktrees/dawn-webgpu-backend/" + path;
+                file.open(path, std::ios::binary | std::ios::ate);
+            }
+            if (!file.is_open()) {
+                std::cerr << "[HZBSystem] Failed to open WGSL: " << path << std::endl;
+                return {};
+            }
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytecode(static_cast<size_t>(size) + 1, 0);
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[HZBSystem] Failed to read WGSL: " << path << std::endl;
+                return {};
+            }
+            return bytecode;
+#endif
+        };
+
+        std::vector<u8> copySrc = loadWgsl("HZBCopy");
+        if (copySrc.empty()) {
+            std::cerr << "[HZBSystem] Failed to load HZBCopy.wgsl" << std::endl;
+            return false;
+        }
+        std::vector<u8> mipSrc = loadWgsl("HZBMip");
+        if (mipSrc.empty()) {
+            std::cerr << "[HZBSystem] Failed to load HZBMip.wgsl" << std::endl;
+            return false;
+        }
+        std::cerr << "[HZB] Loaded shaders: HZBCopy=" << copySrc.size()
+                  << " HZBMip=" << mipSrc.size() << std::endl;
+
+        rhi::ShaderHandle copyShader = device_->CreateShader(
+            copySrc.data(), copySrc.size(), rhi::ShaderStage::Compute, "copy_depth_to_hzb_mip0");
+        std::cerr << "[HZB] copyShader handle: " << copyShader << std::endl;
+        if (copyShader == rhi::handles::INVALID_SHADER) {
+            std::cerr << "[HZBSystem] Failed to compile HZB copy shader" << std::endl;
+            return false;
+        }
+
+        rhi::ShaderHandle mipShader = device_->CreateShader(
+            mipSrc.data(), mipSrc.size(), rhi::ShaderStage::Compute, "generate_hzb_mip_level");
+        std::cerr << "[HZB] mipShader handle: " << mipShader << std::endl;
+        if (mipShader == rhi::handles::INVALID_SHADER) {
+            std::cerr << "[HZBSystem] Failed to compile HZB mip shader" << std::endl;
+            return false;
+        }
+
+        rhi::ComputePipelineDesc copyPipeDesc{};
+        copyPipeDesc.layout = hzb_copy_pipeline_layout_;
+        copyPipeDesc.threadGroupSize = {16, 16, 1};
+        copyPipeDesc.computeShader = copyShader;
+        std::cerr << "[HZB] Creating copy pipeline (shader=" << copyShader
+                  << ", layout=" << hzb_copy_pipeline_layout_ << ")" << std::endl;
+        hzb_copy_pipeline_ = device_->CreateComputePipeline(copyPipeDesc);
+        std::cerr << "[HZB] Copy pipeline result: " << hzb_copy_pipeline_ << std::endl;
+        if (hzb_copy_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+            std::cerr << "[HZBSystem] Failed to create HZB copy pipeline" << std::endl;
+            return false;
+        }
+
+        rhi::ComputePipelineDesc mipPipeDesc{};
+        mipPipeDesc.layout = hzb_pipeline_layout_;
+        mipPipeDesc.threadGroupSize = {16, 16, 1};
+        mipPipeDesc.computeShader = mipShader;
+        hzb_downsample_pipeline_ = device_->CreateComputePipeline(mipPipeDesc);
+        if (hzb_downsample_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+            std::cerr << "[HZBSystem] Failed to create HZB mip pipeline" << std::endl;
+            return false;
+        }
+
+        return true;
+    }
+
+    // ---- Metal path (unchanged) ----
 
     rhi::DescriptorSetLayoutBinding hzbBindings[] = {
         { 0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute, nullptr },
@@ -295,6 +444,10 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 
     std::vector<rhi::ResourceHandle> temporaryViews;
 
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+
+    // On Dawn the copy stage needs a separate descriptor set (reads texture_depth_2d
+    // via SampledDepthImage); mip stages share the regular SampledImage layout.
     rhi::DescriptorSetDesc descriptorDesc{};
     descriptorDesc.layout = hzb_descriptor_layout_;
 
@@ -302,6 +455,21 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     if (descriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
         std::cerr << "[HZBSystem] Failed to create HZB descriptor set" << std::endl;
         return false;
+    }
+
+    rhi::DescriptorSetHandle copyDescriptorSet = rhi::handles::INVALID_DESCRIPTOR_SET;
+    if (isDawn) {
+        rhi::DescriptorSetDesc copyDesc{};
+        copyDesc.layout = hzb_copy_descriptor_layout_;
+        copyDescriptorSet = device_->CreateDescriptorSet(copyDesc);
+        if (copyDescriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
+            std::cerr << "[HZBSystem] Failed to create HZB copy descriptor set" << std::endl;
+            device_->DestroyDescriptorSet(descriptorSet);
+            return false;
+        }
+    } else {
+        // Metal path reuses the single descriptorSet for both stages.
+        copyDescriptorSet = descriptorSet;
     }
 
     rhi::TextureViewDesc baseTargetViewDesc{};
@@ -316,6 +484,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     if (hzbMip0View == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[HZBSystem] Failed to create HZB mip0 view" << std::endl;
         device_->DestroyDescriptorSet(descriptorSet);
+        if (isDawn) device_->DestroyDescriptorSet(copyDescriptorSet);
         return false;
     }
     temporaryViews.push_back(hzbMip0View);
@@ -329,24 +498,27 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     baseTargetInfo.imageLayout = rhi::ResourceState::UnorderedAccess;
     baseTargetInfo.sampler = rhi::handles::INVALID_SAMPLER;
     rhi::WriteDescriptorSet baseWrites[2]{};
-    baseWrites[0].dstSet = descriptorSet;
+    baseWrites[0].dstSet = copyDescriptorSet;
     baseWrites[0].dstBinding = 0;
     baseWrites[0].descriptorCount = 1;
-    baseWrites[0].descriptorType = rhi::DescriptorType::SampledImage;
+    // Dawn copy stage binds texture_depth_2d (SampledDepthImage). Metal treats
+    // both depth and color textures uniformly via SampledImage.
+    baseWrites[0].descriptorType = isDawn ? rhi::DescriptorType::SampledDepthImage
+                                          : rhi::DescriptorType::SampledImage;
     baseWrites[0].imageInfo = &baseSourceInfo;
-    baseWrites[1].dstSet = descriptorSet;
+    baseWrites[1].dstSet = copyDescriptorSet;
     baseWrites[1].dstBinding = 1;
     baseWrites[1].descriptorCount = 1;
     baseWrites[1].descriptorType = rhi::DescriptorType::StorageImage;
     baseWrites[1].imageInfo = &baseTargetInfo;
     device_->UpdateDescriptorSets(2, baseWrites);
 
-    const rhi::DescriptorSetHandle descriptorSets[] = { descriptorSet };
+    const rhi::DescriptorSetHandle copyDescriptorSets[] = { copyDescriptorSet };
     cmd_buffer->BindComputePipeline(hzb_copy_pipeline_);
     cmd_buffer->BindDescriptorSets(
         rhi::PipelineBindPoint::Compute,
-        hzb_pipeline_layout_,
-        0, 1, descriptorSets,
+        isDawn ? hzb_copy_pipeline_layout_ : hzb_pipeline_layout_,
+        0, 1, copyDescriptorSets,
         0, nullptr
     );
     // 🔇 DISABLED: Verbose HZB output
@@ -418,10 +590,11 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         device_->UpdateDescriptorSets(2, mipWrites);
 
         cmd_buffer->BindComputePipeline(hzb_downsample_pipeline_);
+        const rhi::DescriptorSetHandle mipDescriptorSets[] = { descriptorSet };
         cmd_buffer->BindDescriptorSets(
             rhi::PipelineBindPoint::Compute,
             hzb_pipeline_layout_,
-            0, 1, descriptorSets,
+            0, 1, mipDescriptorSets,
             0, nullptr
         );
 
@@ -447,6 +620,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 
     for (auto view : temporaryViews) device_->DestroyTexture(view);
     device_->DestroyDescriptorSet(descriptorSet);
+    if (isDawn) device_->DestroyDescriptorSet(copyDescriptorSet);
 
     // 🔇 DISABLED: Verbose HZB output
     // std::cout << "[HZBSystem] ✅ HZB generation dispatch completed" << std::endl;

@@ -162,7 +162,13 @@ namespace primal::graphics {
         utl::vector<TextureUpdate> pendingTextures_;
         utl::vector<SamplerUpdate> pendingSamplers_;
         utl::vector<BufferUpdate> pendingBuffers_;
-        
+
+        // Committed texture state — persists across Update() calls so
+        // GPU-driven paths (GPUMaterialRegistry / MaterialDataBuilder) can query
+        // bound texture handles at any time, not just before the first Update.
+        // Indexed by binding slot; resized on demand in SetTexture.
+        utl::vector<rhi::ResourceHandle> boundTextures_;
+
         rhi::RHIDeviceBase* device_{nullptr}; // Cached for destruction
     };
 

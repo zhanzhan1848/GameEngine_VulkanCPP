@@ -689,7 +689,7 @@ namespace primal::content
 			else if (format_u32 == 99) desc.format = graphics::rhi::DataFormat::BC7_sRGB;
 			else desc.format = graphics::rhi::DataFormat::RGBA8_UNorm; // Fallback
 					
-					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest;
+					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest | graphics::rhi::TextureUsage::CopySource;
 
 					auto handle = device->CreateTexture(desc);
 					if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
@@ -798,6 +798,10 @@ namespace primal::content
 					const u32 mip_levels{ blob.read<u32>() };
 					const u32 format_u32{ blob.read<u32>() };
 
+					std::cerr << "[CTE/Dawn] create_texture_resource w=" << width << " h=" << height
+					          << " arr=" << array_size << " mips=" << mip_levels
+					          << " fmt_u32=" << format_u32 << std::endl;
+
 					graphics::rhi::TextureDesc desc{};
 					desc.size = { width, height, 1 };
 					desc.arraySize = array_size;
@@ -812,9 +816,11 @@ namespace primal::content
 					else if (format_u32 == 99) desc.format = graphics::rhi::DataFormat::BC7_sRGB;
 					else desc.format = graphics::rhi::DataFormat::RGBA8_UNorm;
 
-					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest;
+					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest | graphics::rhi::TextureUsage::CopySource;
 
+					std::cerr << "[CTE/Dawn] Calling CreateTexture..." << std::endl;
 					auto handle = device->CreateTexture(desc);
+					std::cerr << "[CTE/Dawn] CreateTexture result: " << handle << std::endl;
 					if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
 						std::cerr << "[ContentToEngine] Failed to create Dawn texture." << std::endl;
 						return id::invalid_id;
@@ -829,8 +835,12 @@ namespace primal::content
 							u32 mipWidth = std::max(1u, width >> j);
 							u32 mipHeight = std::max(1u, height >> j);
 
+							std::cerr << "[CTE/Dawn] UpdateTextureData mip=" << j << " slice=" << i
+							          << " " << mipWidth << "x" << mipHeight
+							          << " row_pitch=" << row_pitch << std::endl;
 							dawnDevice->UpdateTextureData(handle, blob.position(),
 								0, 0, i, mipWidth, mipHeight, 1, row_pitch, j);
+							std::cerr << "[CTE/Dawn] UpdateTextureData done" << std::endl;
 
 							blob.skip(slice_pitch);
 						}
@@ -841,6 +851,7 @@ namespace primal::content
 						std::lock_guard lock(rhi_texture_mutex());
 						rhi_texture_map()[new_id] = handle;
 					}
+					std::cerr << "[CTE/Dawn] create_texture_resource done id=" << new_id << std::endl;
 					return new_id;
 #else
 					return id::invalid_id;

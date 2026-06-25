@@ -30,5 +30,10 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
                               RGResourceHandle velocityTexture,
                               u32 width, u32 height, u32 frameIndex);
 
+// Marks all internal history slots as uninitialized so the next TAA pass treats
+// the input as a fresh frame (no blend with stale HDR). Call on render-mode or
+// scene transitions to prevent ghosting from the previous mode's image.
+void ResetTAAHistory();
+
 } // namespace PostProcess
 } // namespace primal::graphics

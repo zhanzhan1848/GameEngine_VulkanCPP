@@ -46,6 +46,24 @@ bool DawnBuffer::Initialize() {
         return true;
     }
 
+    // Infer BufferType from bindFlags when caller didn't set it. Many engine
+    // callers (e.g. GPUDrivenDrawPipeline) set bindFlags directly without
+    // touching type; leaving type=Unknown forces MapWrite+CopySrc+CopyDst
+    // which WebGPU rejects as incompatible.
+    if (bufferDesc_.type == BufferType::Unknown) {
+        if ((bufferDesc_.bindFlags & (u32)BufferUsageFlags::Indirect) != 0) {
+            bufferDesc_.type = BufferType::Indirect;
+        } else if ((bufferDesc_.bindFlags & (u32)BufferUsageFlags::Storage) != 0) {
+            bufferDesc_.type = BufferType::Structured;
+        } else if ((bufferDesc_.bindFlags & (u32)BufferUsageFlags::Uniform) != 0) {
+            bufferDesc_.type = BufferType::Constant;
+        } else if ((bufferDesc_.bindFlags & (u32)BufferUsageFlags::Index) != 0) {
+            bufferDesc_.type = BufferType::Index;
+        } else if ((bufferDesc_.bindFlags & (u32)BufferUsageFlags::Vertex) != 0) {
+            bufferDesc_.type = BufferType::Vertex;
+        }
+    }
+
     // --- Build WGPUBufferUsage flags ---
 
     WGPUBufferUsage usage = WGPUBufferUsage_None;
@@ -75,15 +93,19 @@ bool DawnBuffer::Initialize() {
             break;
     }
 
-    // Always allow copy operations
-    usage |= WGPUBufferUsage_CopyDst;
-    usage |= WGPUBufferUsage_CopySrc;
+    // Honor explicit indirect-arg flag regardless of type — some callers
+    // (GPUCullingPipeline indirect_args_buffer) declare type=Structured but
+    // also pass ResourceUsage::IndirectArg in bindFlags so the buffer can
+    // serve as both SSBO (compute writes) and indirect draw source.
+    if ((bufferDesc_.bindFlags & (u32)ResourceUsage::IndirectArg) != 0) {
+        usage |= WGPUBufferUsage_Indirect;
+    }
 
-    // WebGPU restriction: MapWrite can only be combined with CopyDst,
-    // MapRead can only be combined with CopySrc.
-    // GPU buffer types (Vertex, Index, Uniform, Storage, Indirect) are NOT
-    // compatible with MapWrite/MapRead. For those, we use a CPU-side staging
-    // buffer approach instead.
+    // Always allow copy operations EXCEPT when buffer is mappable.
+    // WebGPU restriction: MapWrite can only combine with CopySrc, MapRead can
+    // only combine with CopyDst. Adding CopyDst to MapWrite (or CopySrc to
+    // MapRead) triggers a validation error at buffer creation, which cascades
+    // to every frame because the staging buffer becomes Invalid.
     bool gpuUsage = (bufferDesc_.type == BufferType::Vertex ||
                      bufferDesc_.type == BufferType::Index ||
                      bufferDesc_.type == BufferType::Constant ||
@@ -95,22 +117,30 @@ bool DawnBuffer::Initialize() {
     canDirectMap_ = false;
 
     if (needsMapWrite_ && !gpuUsage) {
-        usage |= WGPUBufferUsage_MapWrite;
+        // Mappable CPU-writable staging: MapWrite + CopySrc (so we can copy
+        // from this buffer to GPU).
+        usage |= WGPUBufferUsage_MapWrite | WGPUBufferUsage_CopySrc;
         canDirectMap_ = true;
-    }
-
-    if (needsMapRead_ && !gpuUsage) {
-        usage |= WGPUBufferUsage_MapRead;
+    } else if (needsMapRead_ && !gpuUsage) {
+        // Mappable CPU-readable readback: MapRead + CopyDst (so we can copy
+        // from GPU to this buffer).
+        usage |= WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
         canDirectMap_ = true;
+    } else {
+        // Plain GPU buffer — both copy directions are valid.
+        usage |= WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
     }
 
     // --- Create the buffer descriptor ---
+
+    // WGPU requires 4-byte alignment for buffer sizes.
+    u64 alignedSize = (bufferDesc_.size + 3ull) & ~3ull;
 
     WGPUBufferDescriptor wgpuDesc{};
     wgpuDesc.nextInChain = nullptr;
     wgpuDesc.label = ToWGPUStringView(bufferDesc_.name.empty() ? "" : bufferDesc_.name.c_str());
     wgpuDesc.usage = usage;
-    wgpuDesc.size = (bufferDesc_.size + 3) & ~3ull;  // WGPU requires 4-byte alignment
+    wgpuDesc.size = alignedSize;
     wgpuDesc.mappedAtCreation = false;
 
     wgpuBuffer_ = wgpuDeviceCreateBuffer(device_.GetNativeDevice(), &wgpuDesc);
@@ -131,6 +161,20 @@ bool DawnBuffer::Initialize() {
 
 void* DawnBuffer::mapImpl(u64 offset, u64 size) {
     if (!wgpuBuffer_) return nullptr;
+
+    // MapBuffer(handle) without explicit size defaults to size=0. Use the
+    // full buffer size in that case — otherwise malloc(0) returns an
+    // impl-defined pointer and the caller writes past the allocation.
+    if (size == 0) {
+        size = bufferDesc_.size;
+    }
+
+    // WebGPU requires MapAsync offset AND size to be multiples of 4. The
+    // underlying WGPUBuffer was created with an already-aligned size, so
+    // padding the map request up is always safe and never exceeds the
+    // allocation.
+    u64 alignedSize = (size + 3ull) & ~3ull;
+    u64 alignedOffset = (offset + 3ull) & ~3ull;
 
     if (canDirectMap_) {
         // Buffer has MapWrite/MapRead usage — use async WebGPU mapping
@@ -156,7 +200,7 @@ void* DawnBuffer::mapImpl(u64 offset, u64 size) {
         callbackInfo.userdata1 = &cbData;
         callbackInfo.userdata2 = nullptr;
 
-        wgpuBufferMapAsync(wgpuBuffer_, mapMode, offset, size, callbackInfo);
+        wgpuBufferMapAsync(wgpuBuffer_, mapMode, alignedOffset, alignedSize, callbackInfo);
 
         WGPUInstance instance = device_.GetInstance();
         constexpr int maxPollIterations = 100000;
@@ -170,26 +214,30 @@ void* DawnBuffer::mapImpl(u64 offset, u64 size) {
             return nullptr;
         }
 
-        return wgpuBufferGetMappedRange(wgpuBuffer_, offset, size);
+        return wgpuBufferGetMappedRange(wgpuBuffer_, alignedOffset, alignedSize);
     }
 
     // GPU buffer (Vertex/Index/Uniform/Storage) — use CPU staging.
     // Caller writes to the staging memory, then unmapImpl uploads via
     // wgpuQueueWriteBuffer.
+    //
+    // wgpuQueueWriteBuffer requires offset AND size to be multiples of 4.
+    // Allocate aligned size and memset the full aligned region to zero so
+    // the trailing padding bytes (which we still upload) are deterministic.
     if (stagingData_) {
         free(stagingData_);
         stagingData_ = nullptr;
     }
 
-    stagingData_ = malloc(size);
+    stagingData_ = malloc(alignedSize);
     if (!stagingData_) {
         std::cerr << "[DawnBuffer] Failed to allocate staging memory" << std::endl;
         return nullptr;
     }
-    memset(stagingData_, 0, size);
+    memset(stagingData_, 0, alignedSize);
 
     mappedOffset_ = offset;
-    mappedSize_ = size;
+    mappedSize_ = alignedSize;
     dirtySize_ = 0;
     return stagingData_;
 }
@@ -200,7 +248,9 @@ void* DawnBuffer::mapImpl(u64 offset, u64 size) {
 
 void DawnBuffer::unmapImpl() {
     if (stagingData_) {
-        // Upload CPU staging data to GPU buffer
+        // Upload CPU staging data to GPU buffer.
+        // mappedSize_ was already aligned up to a multiple of 4 in mapImpl,
+        // so wgpuQueueWriteBuffer won't reject it on alignment grounds.
         WGPUQueue queue = device_.GetQueue();
         if (queue && wgpuBuffer_) {
             wgpuQueueWriteBuffer(queue, wgpuBuffer_, mappedOffset_,
@@ -217,7 +267,10 @@ void DawnBuffer::FlushStaging() {
     if (!stagingData_ || !wgpuBuffer_) return;
     WGPUQueue queue = device_.GetQueue();
     if (!queue) return;
-    u64 uploadSize = dirtySize_ > mappedSize_ ? mappedSize_ : dirtySize_;
+    // Align upload size to 4 bytes — wgpuQueueWriteBuffer rejects non-multiple-of-4.
+    u64 rawSize = dirtySize_ > mappedSize_ ? mappedSize_ : dirtySize_;
+    u64 uploadSize = (rawSize + 3ull) & ~3ull;
+    if (uploadSize > mappedSize_) uploadSize = mappedSize_;  // never exceed staging
     wgpuQueueWriteBuffer(queue, wgpuBuffer_, mappedOffset_,
                          stagingData_, uploadSize);
     dirtySize_ = 0;

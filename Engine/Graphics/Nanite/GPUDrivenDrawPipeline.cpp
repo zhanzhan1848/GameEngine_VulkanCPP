@@ -2,6 +2,7 @@
 #include "GPUCullingPipeline.h"
 #include "NaniteResourceManager.h"
 #include "HZBSystem.h"
+#include "MeshletSynthesis.h"
 #include "VisibilityBufferSystem.h"
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
@@ -9,6 +10,8 @@
 #include "../RHI/Core/RHIGpuMesh.h"
 #include "../Scene/RenderSceneSnapshot.h"
 #include "../../Content/ContentToEngine.h" // Needed for get_rhi_mesh_asset
+#include "../Dawn/ShaderLoader.h"
+#include "../Utils/ShaderRegistry.h"
 #include "CommonHeaders.h"
 #include <cassert>
 #include <fstream>
@@ -21,7 +24,55 @@
 namespace primal::graphics::nanite {
 
 namespace {
-    std::vector<u8> LoadShaderBytecode(const char* shaderName, const char* entryPoint) {
+    // N0c: Forks shader loading on backend.
+    //   Metal: loads from EngineTest/shaders/<name>.metal (existing path).
+    //   Dawn:  loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
+    //          (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    std::vector<u8> LoadShaderBytecode(const char* shaderName, const char* entryPoint,
+                                       rhi::RHIDeviceBase* device) {
+        auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+        if (platform == rhi::RHIPlatform::Dawn) {
+#ifdef __EMSCRIPTEN__
+            std::string fullName = std::string("Nanite/") + shaderName;
+            std::string src = dawn::LoadWGSL(fullName.c_str());
+            if (src.empty()) {
+                std::cerr << "[GPUDrivenDrawPipeline] Failed to load WGSL shader: "
+                          << shaderName << " (entry: " << entryPoint << ")" << std::endl;
+                return {};
+            }
+            // +1 for null terminator: Dawn's ToWGPUStringView uses WGPU_STRLEN.
+            std::vector<u8> bytecode(src.begin(), src.end());
+            bytecode.push_back(0);
+            return bytecode;
+#else
+            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(
+                rhi::RHIPlatform::Dawn, shaderName);
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
+                file.open(path, std::ios::binary | std::ios::ate);
+            }
+            if (!file.is_open()) {
+                std::cerr << "[GPUDrivenDrawPipeline] Failed to load WGSL shader: "
+                          << shaderName << " (entry: " << entryPoint << ")" << std::endl;
+                return {};
+            }
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            // +1 for null terminator: Dawn's ToWGPUStringView uses WGPU_STRLEN,
+            // which calls strlen on the buffer. Without a null terminator the
+            // parser reads into adjacent memory and reports phantom errors.
+            std::vector<u8> bytecode(static_cast<size_t>(size) + 1, 0);
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[GPUDrivenDrawPipeline] Failed to read WGSL shader: "
+                          << shaderName << std::endl;
+                return {};
+            }
+            return bytecode;
+#endif
+        }
+
+        // Metal path (unchanged)
         std::string shaderPath = std::string("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/") + shaderName + ".metal";
 
         std::ifstream file(shaderPath, std::ios::binary | std::ios::ate);
@@ -216,8 +267,12 @@ bool GPUDrivenDrawPipeline::CreateResources() {
 
     visibility_buffer_ = device_->CreateTexture(visibilityDesc);
     if (visibility_buffer_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create visibility buffer" << std::endl;
-        return false;
+        // Visibility buffer is only consumed by Stage2_VisibilityBuffer, which is
+        // bypassed in the meshlet-draw path (mirrors Metal test, which also
+        // disables it). On Dawn the R32_UInt storage texture format isn't always
+        // available, so log + continue rather than failing the whole pipeline.
+        std::cerr << "[GPUDrivenDrawPipeline] Visibility buffer unavailable (skipped — "
+                     "Stage2 is bypassed in this path)" << std::endl;
     }
 
     // Create indirect draw buffer
@@ -310,48 +365,56 @@ bool GPUDrivenDrawPipeline::CreateResources() {
 bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     // std::cout << "[GPUDrivenDrawPipeline] Creating render passes..." << std::endl;
 
-    // Create Visibility Buffer Render Pass
-    rhi::RenderPassDesc visibilityPassDesc{};
+    // Create Visibility Buffer Render Pass — only when the visibility buffer
+    // texture was actually created. On Dawn the R32_UInt storage format isn't
+    // always supported (see CreateResources), and Stage2 is bypassed in the
+    // meshlet-draw path so the render pass isn't needed.
+    if (visibility_buffer_ != rhi::handles::INVALID_RESOURCE) {
+        rhi::RenderPassDesc visibilityPassDesc{};
 
-    // Color attachment - visibility buffer (R32_UINT format)
-    rhi::RenderPassDesc::Attachment visibilityColorAttachment{};
-    visibilityColorAttachment.texture = visibility_buffer_;
-    visibilityColorAttachment.format = rhi::DataFormat::R32_UInt;
-    visibilityColorAttachment.loadOp = rhi::LoadAction::Clear;
-    visibilityColorAttachment.storeOp = rhi::StoreAction::Store;
-    visibilityColorAttachment.clearValue.color = math::v4{0.0f, 0.0f, 0.0f, 0.0f}; // Clear to 0 (no visible geometry)
+        // Color attachment - visibility buffer (R32_UINT format)
+        rhi::RenderPassDesc::Attachment visibilityColorAttachment{};
+        visibilityColorAttachment.texture = visibility_buffer_;
+        visibilityColorAttachment.format = rhi::DataFormat::R32_UInt;
+        visibilityColorAttachment.loadOp = rhi::LoadAction::Clear;
+        visibilityColorAttachment.storeOp = rhi::StoreAction::Store;
+        visibilityColorAttachment.clearValue.color = math::v4{0.0f, 0.0f, 0.0f, 0.0f}; // Clear to 0 (no visible geometry)
 
-    visibilityPassDesc.colorAttachments.push_back(visibilityColorAttachment);
+        visibilityPassDesc.colorAttachments.push_back(visibilityColorAttachment);
 
-    // Depth attachment
-    rhi::RenderPassDesc::Attachment depthAttachment{};
-    depthAttachment.format = rhi::DataFormat::D32_Float;
-    depthAttachment.loadOp = rhi::LoadAction::Clear;
-    depthAttachment.storeOp = rhi::StoreAction::Store;
-    depthAttachment.clearValue.depth = 1.0f;
-    depthAttachment.clearValue.stencil = 0;
+        // Depth attachment
+        rhi::RenderPassDesc::Attachment depthAttachment{};
+        depthAttachment.format = rhi::DataFormat::D32_Float;
+        depthAttachment.loadOp = rhi::LoadAction::Clear;
+        depthAttachment.storeOp = rhi::StoreAction::Store;
+        depthAttachment.clearValue.depth = 1.0f;
+        depthAttachment.clearValue.stencil = 0;
 
-    visibilityPassDesc.depthAttachment = depthAttachment;
+        visibilityPassDesc.depthAttachment = depthAttachment;
 
-    // Set viewport to match visibility buffer size
-    visibilityPassDesc.viewport.size.x = static_cast<float>(visibility_config_.width);
-    visibilityPassDesc.viewport.size.y = static_cast<float>(visibility_config_.height);
-    visibilityPassDesc.scissor.extent.x = visibility_config_.width;
-    visibilityPassDesc.scissor.extent.y = visibility_config_.height;
+        // Set viewport to match visibility buffer size
+        visibilityPassDesc.viewport.size.x = static_cast<float>(visibility_config_.width);
+        visibilityPassDesc.viewport.size.y = static_cast<float>(visibility_config_.height);
+        visibilityPassDesc.scissor.extent.x = visibility_config_.width;
+        visibilityPassDesc.scissor.extent.y = visibility_config_.height;
 
-    visibility_render_pass_ = device_->CreateRenderPass(visibilityPassDesc);
-    if (visibility_render_pass_ == rhi::handles::INVALID_RENDER_PASS) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create visibility render pass" << std::endl;
-        return false;
+        visibility_render_pass_ = device_->CreateRenderPass(visibilityPassDesc);
+        if (visibility_render_pass_ == rhi::handles::INVALID_RENDER_PASS) {
+            std::cerr << "[GPUDrivenDrawPipeline] Failed to create visibility render pass" << std::endl;
+            return false;
+        }
     }
 
     // std::cout << "[GPUDrivenDrawPipeline] Visibility render pass created successfully" << std::endl;
 
     // Create Final Render Pass (for Stage 3)
-    // 🔥 NEW: Create GBuffer render targets (4 color attachments)
+    // NEW: Create GBuffer render targets (4 color attachments)
+    // CopySource|CopyDest are required so the test can blit meshlet GBuffer
+    // outputs into its own GBuffer textures for the deferred lighting pass.
     rhi::TextureDesc gbufferDesc{};
     gbufferDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
-    gbufferDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    gbufferDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource |
+                        rhi::TextureUsage::CopySource | rhi::TextureUsage::CopyDest;
 
     // GBuffer Target 0: Albedo (BGRA8)
     gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
@@ -377,8 +440,10 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
         return false;
     }
 
-    // GBuffer Target 3: Velocity (RG16)
-    gbufferDesc.format = rhi::DataFormat::RG16_UNorm;
+    // GBuffer Target 3: Velocity — RG16_Float (signed, range [-0.5, 0.5]).
+    // RG16_UNorm isn't in WebGPU's core format list; the velocity vector can be
+    // negative so a float format is the right call anyway.
+    gbufferDesc.format = rhi::DataFormat::RG16_Float;
     gbuffer_velocity_texture_ = device_->CreateTexture(gbufferDesc);
     if (gbuffer_velocity_texture_ == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Velocity texture" << std::endl;
@@ -434,7 +499,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     // Attachment 3: Velocity
     rhi::RenderPassDesc::Attachment velocityAttachment{};
     velocityAttachment.texture = gbuffer_velocity_texture_;
-    velocityAttachment.format = rhi::DataFormat::RG16_UNorm;
+    velocityAttachment.format = rhi::DataFormat::RG16_Float;
     velocityAttachment.loadOp = rhi::LoadAction::Clear;
     velocityAttachment.storeOp = rhi::StoreAction::Store;
     velocityAttachment.clearValue.color = math::v4{0.0f, 0.0f, 0.0f, 0.0f};
@@ -475,8 +540,8 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     /*
     // FIRST: Create a minimal test pipeline with absolutely no dependencies
 //    std::cout << "[GPUDrivenDrawPipeline] Creating minimal test pipeline..." << std::endl;
-    auto minimalVertexShaderCode = LoadShaderBytecode("MinimalTest", "minimal_test_vertex");
-    auto minimalFragmentShaderCode = LoadShaderBytecode("MinimalTest", "minimal_test_fragment");
+    auto minimalVertexShaderCode = LoadShaderBytecode("MinimalTest", "minimal_test_vertex", device_);
+    auto minimalFragmentShaderCode = LoadShaderBytecode("MinimalTest", "minimal_test_fragment", device_);
 
     if (!minimalVertexShaderCode.empty() && !minimalFragmentShaderCode.empty()) {
 //        std::cout << "[GPUDrivenDrawPipeline] Minimal test shaders loaded successfully" << std::endl;
@@ -546,7 +611,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     */
 
     // Load Cluster Binning shader
-    auto binningShaderCode = LoadShaderBytecode("ClusterBinning", "cluster_binning_kernel");
+    auto binningShaderCode = LoadShaderBytecode("ClusterBinning", "cluster_binning_kernel", device_);
     if (!binningShaderCode.empty()) {
         rhi::ShaderHandle binningShader = device_->CreateShader(
             binningShaderCode.data(),
@@ -572,8 +637,8 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     }
 
     // Load Visibility Buffer shaders and create graphics pipeline
-    auto visibilityVertexShaderCode = LoadShaderBytecode("VisibilityBuffer", "visibility_vertex_shader");
-    auto visibilityFragmentShaderCode = LoadShaderBytecode("VisibilityBuffer", "visibility_fragment_shader");
+    auto visibilityVertexShaderCode = LoadShaderBytecode("VisibilityBuffer", "visibility_vertex_shader", device_);
+    auto visibilityFragmentShaderCode = LoadShaderBytecode("VisibilityBuffer", "visibility_fragment_shader", device_);
 
     if (!visibilityVertexShaderCode.empty() && !visibilityFragmentShaderCode.empty()) {
         rhi::ShaderHandle visibilityVS = device_->CreateShader(
@@ -631,8 +696,8 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     }
     
     // Load GPU Driven Draw shaders for the main rendering pipeline
-    auto gpuDrawVertexShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_vertex_shader");
-    auto gpuDrawFragmentShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_fragment_shader");
+    auto gpuDrawVertexShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_vertex_shader", device_);
+    auto gpuDrawFragmentShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_fragment_shader", device_);
 
     if (!gpuDrawVertexShaderCode.empty() && !gpuDrawFragmentShaderCode.empty()) {
         // std::cout << "[GPUDrivenDrawPipeline] Loaded GPU Draw shaders (" << gpuDrawVertexShaderCode.size()
@@ -709,21 +774,25 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             gpuDrawBindings[9].descriptorCount = 1;
             gpuDrawBindings[9].stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel;
 
-            // 🎨 NEW: Texture arrays (fragment shader)
+            // 🎨 NEW: Texture arrays (fragment shader) — shader declares texture_2d_array<f32>,
+            // so isArray must be true so DawnDescriptorSetLayout emits WGPUTextureViewDimension_2DArray.
             gpuDrawBindings[10].binding = 10;
             gpuDrawBindings[10].descriptorType = rhi::DescriptorType::SampledImage;
             gpuDrawBindings[10].descriptorCount = 1;
             gpuDrawBindings[10].stageFlags = rhi::ShaderStage::Pixel;
+            gpuDrawBindings[10].isArray = true;
 
             gpuDrawBindings[11].binding = 11;
             gpuDrawBindings[11].descriptorType = rhi::DescriptorType::SampledImage;
             gpuDrawBindings[11].descriptorCount = 1;
             gpuDrawBindings[11].stageFlags = rhi::ShaderStage::Pixel;
+            gpuDrawBindings[11].isArray = true;
 
             gpuDrawBindings[12].binding = 12;
             gpuDrawBindings[12].descriptorType = rhi::DescriptorType::SampledImage;
             gpuDrawBindings[12].descriptorCount = 1;
             gpuDrawBindings[12].stageFlags = rhi::ShaderStage::Pixel;
+            gpuDrawBindings[12].isArray = true;
 
             // 🎨 NEW: Texture sampler (fragment shader)
             gpuDrawBindings[13].binding = 13;
@@ -764,7 +833,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             gpuDrawPipelineDesc.renderTargetFormats[0] = rhi::DataFormat::BGRA8_UNorm; // Albedo
             gpuDrawPipelineDesc.renderTargetFormats[1] = rhi::DataFormat::BGRA8_UNorm; // Normal (packed)
             gpuDrawPipelineDesc.renderTargetFormats[2] = rhi::DataFormat::BGRA8_UNorm; // ORM
-            gpuDrawPipelineDesc.renderTargetFormats[3] = rhi::DataFormat::RG16_UNorm;  // Velocity
+            gpuDrawPipelineDesc.renderTargetFormats[3] = rhi::DataFormat::RG16_Float;  // Velocity
 
             // DEPTH SETTINGS - CRITICAL FOR PROPER RENDERING
             // Based on UE5 Nanite depth rendering practices
@@ -773,6 +842,11 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             gpuDrawPipelineDesc.enableDepthTest = true;
             gpuDrawPipelineDesc.enableDepthWrite = true;
             gpuDrawPipelineDesc.depthFunc = rhi::ComparisonFunc::Less;  // Use Less (strict) to prevent Z-fighting
+
+            // Match Metal TestNaniteStreamingPipeline:1435 — double-sided so walls/
+            // banners/floor visible from any angle. Default CullMode::Back culls
+            // back-facing triangles, hiding walls viewed from inside the atrium.
+            gpuDrawPipelineDesc.cullMode = rhi::CullMode::None;
 
             // No blending for opaque geometry
             gpuDrawPipelineDesc.enableBlend = false;
@@ -791,10 +865,12 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         std::cerr << "[GPUDrivenDrawPipeline] Failed to load GPU Draw shaders" << std::endl;
     }
 
-    auto resolveShaderCode = LoadShaderBytecode("VisibilityBufferResolve", "ComputeMain");
+    auto resolveShaderCode = LoadShaderBytecode("VisibilityBufferResolve", "ComputeMain", device_);
 
-    if (!resolveShaderCode.empty()) {
-        // std::cout << "[GPUDrivenDrawPipeline] VisibilityBufferResolve shader not found, using fallback direct rendering" << std::endl;
+    if (resolveShaderCode.empty()) {
+        // VisibilityBufferResolve is part of the visibility-buffer path, which is bypassed
+        // in this port (mirrors the Metal test where it's disabled). Skip resolve pipeline
+        // creation and return — the main gpu_driven_draw_pipeline_ already handles rendering.
         return true;
     }
     
@@ -955,10 +1031,10 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
         return;
     }
 
-    // std::cout << "[GPUDrivenDrawPipeline] Building Global Geometry Buffers..." << std::endl;
-
     const auto& instanceData = scene_snapshot.GetInstanceData();
     std::set<id::id_type> processedGeometries;
+
+    // std::cout << "[GPUDrivenDrawPipeline] Building Global Geometry Buffers..." << std::endl;
 
     // 1. Calculate total sizes
     struct PackedV3 { float x, y, z; };
@@ -971,15 +1047,29 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
 
     // Use packed float3 for positions to match Metal's packed_float3 and typical disk format
 
+    // Cache synthesized meshlet data per-geometry so the fill loop below can
+    // re-use it without recomputing. Sponza.model has no MSHL sections — we
+    // generate meshlets on the fly from the index buffer.
+    std::unordered_map<id::id_type, SynthesizedMeshlets> synthesized;
+
     for (const auto& instance : instanceData) {
         if (processedGeometries.count(instance.geometry_id)) continue;
-        
+
         graphics::rhi::RHIMeshAsset meshAsset;
         if (primal::content::get_rhi_mesh_asset(instance.geometry_id, meshAsset)) {
-            totalMeshlets += (u32)meshAsset.meshlets.size();
-            totalVertices += (u32)meshAsset.meshlet_vertices.size();
-            totalTriangles += (u32)meshAsset.meshlet_triangles.size();
-            
+            const bool needsSynthesis = meshAsset.meshlets.empty();
+            if (needsSynthesis) {
+                SynthesizedMeshlets& synth = synthesized[instance.geometry_id];
+                SynthesizeMeshlets(meshAsset, synth);
+                totalMeshlets += (u32)synth.meshlets.size();
+                totalVertices += (u32)synth.meshlet_vertices.size();
+                totalTriangles += (u32)synth.meshlet_triangles.size();
+            } else {
+                totalMeshlets += (u32)meshAsset.meshlets.size();
+                totalVertices += (u32)meshAsset.meshlet_vertices.size();
+                totalTriangles += (u32)meshAsset.meshlet_triangles.size();
+            }
+
             // RHIMeshAsset stores positions as bytes
             // Assuming the asset data is tightly packed float3 (12 bytes)
             totalPositions += (u32)(meshAsset.position_buffer.size() / sizeof(PackedV3));
@@ -989,11 +1079,13 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             totalElements += (u32)(meshAsset.position_buffer.size() / sizeof(PackedV3));
 
             processedGeometries.insert(instance.geometry_id);
+        } else {
+            // Asset resolution failed for this instance — skip silently,
+            // the geometry simply won't appear in the merged buffers.
         }
     }
 
     if (totalMeshlets == 0) {
-        // std::cout << "[GPUDrivenDrawPipeline] No meshlets found!" << std::endl;
         return;
     }
 
@@ -1019,8 +1111,10 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     global_meshlet_vertices_buffer_ = device_->CreateBuffer(meshletVerticesDesc);
 
     // Meshlet Triangles (Local Indices)
+    // WebGPU requires storage buffer sizes to be multiples of 4. Pad up.
     rhi::BufferDesc meshletTrianglesDesc{};
-    meshletTrianglesDesc.size = totalTriangles * sizeof(u8); // u8 per index
+    const u32 triangleBytesPadded = (totalTriangles + 3u) & ~3u;
+    meshletTrianglesDesc.size = triangleBytesPadded;
     meshletTrianglesDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
     meshletTrianglesDesc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed to Dynamic
     global_meshlet_triangles_buffer_ = device_->CreateBuffer(meshletTrianglesDesc);
@@ -1219,27 +1313,41 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
 
             // Copy MeshletVertices (Global Vertex Indices)
             // Need to offset by currentPositionOffset
-            for(u32 idx : meshAsset.meshlet_vertices) {
-                mergedVertices.push_back(idx + currentPositionOffset);
+            const bool hasSynth = synthesized.find(instance.geometry_id) != synthesized.end();
+            if (hasSynth) {
+                const auto& synth = synthesized[instance.geometry_id];
+                for (u32 idx : synth.meshlet_vertices) {
+                    mergedVertices.push_back(idx + currentPositionOffset);
+                }
+                for (u8 idx : synth.meshlet_triangles) {
+                    mergedTriangles.push_back(idx);
+                }
+                for (const auto& m : synth.meshlets) {
+                    rhi::RHIMeshlet newM = m;
+                    newM.vertex_offset += currentVertexOffset;
+                    newM.triangle_offset += currentTriangleOffset;
+                    mergedMeshlets.push_back(newM);
+                }
+                currentMeshletOffset += (u32)synth.meshlets.size();
+                currentVertexOffset += (u32)synth.meshlet_vertices.size();
+                currentTriangleOffset += (u32)synth.meshlet_triangles.size();
+            } else {
+                for(u32 idx : meshAsset.meshlet_vertices) {
+                    mergedVertices.push_back(idx + currentPositionOffset);
+                }
+                for(u8 idx : meshAsset.meshlet_triangles) {
+                    mergedTriangles.push_back(idx);
+                }
+                for(const auto& m : meshAsset.meshlets) {
+                    rhi::RHIMeshlet newM = m;
+                    newM.vertex_offset += currentVertexOffset;
+                    newM.triangle_offset += currentTriangleOffset;
+                    mergedMeshlets.push_back(newM);
+                }
+                currentMeshletOffset += (u32)meshAsset.meshlets.size();
+                currentVertexOffset += (u32)meshAsset.meshlet_vertices.size();
+                currentTriangleOffset += (u32)meshAsset.meshlet_triangles.size();
             }
-            
-            // Copy MeshletTriangles (Local Indices)
-            for(u8 idx : meshAsset.meshlet_triangles) {
-                mergedTriangles.push_back(idx);
-            }
-            
-            // Copy Meshlets
-            for(const auto& m : meshAsset.meshlets) {
-                rhi::RHIMeshlet newM = m;
-                // Fix offsets
-                newM.vertex_offset += currentVertexOffset;
-                newM.triangle_offset += currentTriangleOffset;
-                mergedMeshlets.push_back(newM);
-            }
-            
-            currentMeshletOffset += (u32)meshAsset.meshlets.size();
-            currentVertexOffset += (u32)meshAsset.meshlet_vertices.size();
-            currentTriangleOffset += (u32)meshAsset.meshlet_triangles.size();
             currentPositionOffset += posCount;
             
             processedGeometries.insert(instance.geometry_id);
@@ -1269,6 +1377,12 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     UploadBuffer(global_meshlet_triangles_buffer_, mergedTriangles.data(), mergedTriangles.size() * sizeof(u8));
     UploadBuffer(global_vertex_buffer_, mergedPositions.data(), mergedPositions.size() * sizeof(PackedV3));
     UploadBuffer(global_element_buffer_, mergedElements.data(), mergedElements.size() * sizeof(VertexElement));
+
+    // Dawn Storage buffers are GPU-only; MapBuffer returns zeroed staging and
+    // Unmap uploads those zeros back, clobbering the data. Cache the CPU-side
+    // meshlets so ExecuteShadowCulling can do CPU frustum culling without
+    // touching the GPU buffer.
+    cpu_meshlet_cache_ = std::move(mergedMeshlets);
 
     // Meshlet data quality checks removed - not needed for debugging material mapping
 
@@ -1306,20 +1420,6 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             // Fallback: use sequential indexing to prevent crashes
             // This may render incorrectly but won't cause flickering from OOB access
             baseMeshletIndex = static_cast<u32>(clusterMapData.size());
-        }
-
-        // 🔍 NEW DEBUG: 统计material_id分布
-        static bool materialStatsPrinted = false;
-        if (!materialStatsPrinted && i == 0) {
-            std::map<u32, u32> materialIDCount;
-            for(const auto& inst : instanceData) {
-                materialIDCount[inst.material_id]++;
-            }
-//            std::cout << "[DEBUG] Material ID Distribution across all instances:" << std::endl;
-            for(const auto& [matID, count] : materialIDCount) {
-//                std::cout << "  Material ID " << matID << ": " << count << " instances" << std::endl;
-            }
-            materialStatsPrinted = true;
         }
 
         // 🔥 NEW DEBUG: Print material info for each instance
@@ -1773,7 +1873,8 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
         math::m4x4 prev_view_matrix;   // Previous frame view matrix
         math::m4x4 prev_proj_matrix;   // Previous frame proj matrix
         u32 has_prev_frame;            // 1 if previous frame data is available
-        u32 padding2[3];               // Alignment padding to 16 bytes
+        u32 debug_mode;                // 0=off, 1=meshlet, 2=triangle, 3=mesh
+        u32 padding2[2];               // Alignment padding to 16 bytes
     } drawConsts;
 
     drawConsts.view_matrix = cached_view_matrix_;
@@ -1788,7 +1889,8 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     drawConsts.prev_view_matrix = prev_view_matrix_;
     drawConsts.prev_proj_matrix = prev_proj_matrix_;
     drawConsts.has_prev_frame = has_prev_frame_ ? 1u : 0u;
-    drawConsts.padding2[0] = drawConsts.padding2[1] = drawConsts.padding2[2] = 0;
+    drawConsts.debug_mode = meshlet_debug_mode_;
+    drawConsts.padding2[0] = drawConsts.padding2[1] = 0;
 
     void* constData = device_->MapBuffer(cameraConstBuffer);
     if (constData) {
@@ -1802,7 +1904,7 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     rhi::DescriptorBufferInfo meshletVerticesInfo{ global_meshlet_vertices_buffer_, 0, ~0ULL };
     rhi::DescriptorBufferInfo meshletTrianglesInfo{ global_meshlet_triangles_buffer_, 0, ~0ULL };
     rhi::DescriptorBufferInfo positionBufferInfo{ global_vertex_buffer_, 0, ~0ULL };
-    
+
     rhi::ResourceHandle correctVisibleClusterBuffer = culling_results.visible_cluster_list_buffer;
     if (culling_pipeline_) {
         // CRITICAL FIX: Use the same delayed reading for visible cluster list
@@ -1932,20 +2034,19 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     //           << ", read_buffer_index=" << read_buffer_index << std::endl;
     // std::cout << "[GPUDraw] DEBUG: culling_results.indirect_args_buffer=" << culling_results.indirect_args_buffer << std::endl;
 
+    // DrawIndirect — use the culling pipeline's indirect args from the SAME
+    // frame slot as the visible cluster list (read_buffer_index). Mixing
+    // current-frame indirect args with previous-frame cluster list causes
+    // instanceCount/visible_count mismatch → meshlets read OOB/stale entries.
+    rhi::ResourceHandle indirectBuffer = rhi::handles::INVALID_RESOURCE;
     if (culling_pipeline_) {
-        rhi::ResourceHandle indirectBuffer = culling_pipeline_->GetIndirectBuffer(read_buffer_index);
-        // std::cout << "[GPUDraw] DEBUG: culling_pipeline_->GetIndirectBuffer(" << read_buffer_index << ")=" << indirectBuffer << std::endl;
-
-        if (indirectBuffer != rhi::handles::INVALID_RESOURCE) {
-            // std::cout << "[GPUDraw] Calling DrawIndirect with buffer=" << indirectBuffer << std::endl;
-            cmd_buffer->DrawIndirect(indirectBuffer, 0, 1);
-            results_.total_draw_calls = 1;
-        } else {
-            std::cerr << "[GPUDraw] ERROR: Invalid indirect buffer from culling_pipeline_!" << std::endl;
-        }
+        indirectBuffer = culling_pipeline_->GetIndirectBuffer(read_buffer_index);
     } else if (culling_results.indirect_args_buffer != rhi::handles::INVALID_RESOURCE) {
-//        std::cout << "[GPUDraw] Calling DrawIndirect with culling_results buffer=" << culling_results.indirect_args_buffer << std::endl;
-        cmd_buffer->DrawIndirect(culling_results.indirect_args_buffer, 0, 1);
+        indirectBuffer = culling_results.indirect_args_buffer;
+    }
+
+    if (indirectBuffer != rhi::handles::INVALID_RESOURCE) {
+        cmd_buffer->DrawIndirect(indirectBuffer, 0, 1);
         results_.total_draw_calls = 1;
     } else {
         std::cerr << "[GPUDraw] ERROR: No valid indirect buffer available!" << std::endl;
@@ -2031,10 +2132,10 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
     // --- Load & create shadow shaders ---
 
     // Shadow culling compute shader
-    auto cullCode = LoadShaderBytecode("ShadowCulling", "shadow_cluster_culling");
-    auto finalizeCode = LoadShaderBytecode("ShadowCulling", "shadow_finalize_indirect");
-    auto depthVSCode = LoadShaderBytecode("ShadowDepth", "shadow_depth_vs");
-    auto blitCode = LoadShaderBytecode("ShadowBlit", "shadow_depth_blit");
+    auto cullCode = LoadShaderBytecode("ShadowCulling", "shadow_cluster_culling", device_);
+    auto finalizeCode = LoadShaderBytecode("ShadowCulling", "shadow_finalize_indirect", device_);
+    auto depthVSCode = LoadShaderBytecode("ShadowDepth", "shadow_depth_vs", device_);
+    auto blitCode = LoadShaderBytecode("ShadowBlit", "shadow_depth_blit", device_);
 
     if (cullCode.empty() || finalizeCode.empty() || depthVSCode.empty() || blitCode.empty()) {
         std::cerr << "[Shadow] Failed to load shadow shaders" << std::endl;
@@ -2061,8 +2162,11 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
             cullBindings[i].stageFlags = rhi::ShaderStage::Compute;
         }
         cullBindings[0].descriptorType = rhi::DescriptorType::StorageBuffer; // instances
+        cullBindings[0].readonly = true;  // shader: var<storage, read>
         cullBindings[1].descriptorType = rhi::DescriptorType::StorageBuffer; // meshlets
+        cullBindings[1].readonly = true;  // shader: var<storage, read>
         cullBindings[2].descriptorType = rhi::DescriptorType::StorageBuffer; // cluster_map
+        cullBindings[2].readonly = true;  // shader: var<storage, read>
         cullBindings[3].descriptorType = rhi::DescriptorType::UniformBuffer; // uniforms
         cullBindings[4].descriptorType = rhi::DescriptorType::StorageBuffer; // visible_counter
         cullBindings[5].descriptorType = rhi::DescriptorType::StorageBuffer; // visible_clusters
@@ -2146,26 +2250,32 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
     }
 
     // --- Shadow blit descriptor layout (3 bindings) ---
+    // N1a: On Dawn the source is texture_depth_2d (D32_Float depth target) and
+    // must be bound as SampledDepthImage. Metal treats depth and color textures
+    // uniformly via SampledImage.
     {
+        bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
         rhi::DescriptorSetLayoutBinding blitBindings[3];
         blitBindings[0].binding = 0;
-        blitBindings[0].descriptorType = rhi::DescriptorType::SampledImage;
+        blitBindings[0].descriptorType = isDawn ? rhi::DescriptorType::SampledDepthImage
+                                                 : rhi::DescriptorType::SampledImage;
         blitBindings[0].descriptorCount = 1;
         blitBindings[0].stageFlags = rhi::ShaderStage::Compute;
         blitBindings[1].binding = 1;
         blitBindings[1].descriptorType = rhi::DescriptorType::StorageImage;
         blitBindings[1].descriptorCount = 1;
         blitBindings[1].stageFlags = rhi::ShaderStage::Compute;
+        blitBindings[1].format = rhi::DataFormat::R32_Float;  // matches dst_depth: texture_storage_2d<r32float, write>
         blitBindings[2].binding = 2;
         blitBindings[2].descriptorType = rhi::DescriptorType::UniformBuffer;
         blitBindings[2].descriptorCount = 1;
         blitBindings[2].stageFlags = rhi::ShaderStage::Compute;
 
-        rhi::DescriptorSetLayoutDesc blitLayoutDesc{ .bindingCount = 3, .bindings = blitBindings };
+        rhi::DescriptorSetLayoutDesc blitLayoutDesc{ 3, blitBindings };
         shadow_blit_set_layout_ = device_->CreateDescriptorSetLayout(blitLayoutDesc);
         if (shadow_blit_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) return false;
 
-        rhi::PipelineLayoutDesc blitPLDesc{ .setLayoutCount = 1, .setLayouts = &shadow_blit_set_layout_ };
+        rhi::PipelineLayoutDesc blitPLDesc{ 1, &shadow_blit_set_layout_, 0, nullptr };
         shadow_blit_layout_ = device_->CreatePipelineLayout(blitPLDesc);
         if (shadow_blit_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
     }
@@ -2449,15 +2559,13 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
         return true;
     };
 
-    // Read meshlet data from GPU buffer (Dynamic/Shared storage, CPU-readable)
+    // CPU-side meshlet culling using cached meshlet data.
+    // Dawn Storage buffers are GPU-only; MapBuffer returns zeroed staging,
+    // and Unmap uploads those zeros back — clobbering the meshlet data.
     u32 totalMeshlets = 0;
     {
-        void* mapped = device_->MapBuffer(global_meshlet_buffer_);
-        if (mapped) {
-            // Get buffer size to determine meshlet count
-            // (already known from geometry data)
-            // Read meshlet center/radius for per-cluster culling
-            auto* meshlets = static_cast<const rhi::RHIMeshlet*>(mapped);
+        if (!cpu_meshlet_cache_.empty()) {
+            const auto* meshlets = cpu_meshlet_cache_.data();
 
             utl::vector<u32> visibleClusters;
             visibleClusters.reserve(shadow_max_clusters_);
@@ -2472,6 +2580,7 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
                 // Per-cluster cull
                 for (u32 c = 0; c < inst.cluster_count; ++c) {
                     u32 globalIdx = inst.cluster_start + c;
+                    if (globalIdx >= cpu_meshlet_cache_.size()) continue;
                     const auto& meshlet = meshlets[globalIdx];
 
                     // Transform meshlet center to world space
@@ -2497,8 +2606,6 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
                 memcpy(clusterMapped, visibleClusters.data(), totalMeshlets * sizeof(u32));
                 device_->UnmapBuffer(frame.visible_clusters_buffer[cascade_index]);
             }
-
-            device_->UnmapBuffer(global_meshlet_buffer_);
         }
     }
 
@@ -2636,8 +2743,12 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
     rhi::DescriptorImageInfo dstInfo{ rhi::handles::INVALID_SAMPLER, shadowMap, rhi::ResourceState::UnorderedAccess };
     rhi::DescriptorBufferInfo resInfo{ frame.blit_resolution_cb[cascade_index], 0, 8 };
 
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
+                                         : rhi::DescriptorType::SampledImage;
+
     rhi::WriteDescriptorSet writes[3];
-    writes[0] = { ds, 0, 0, 1, rhi::DescriptorType::SampledImage, &srcInfo, nullptr };
+    writes[0] = { ds, 0, 0, 1, srcType, &srcInfo, nullptr };
     writes[1] = { ds, 1, 0, 1, rhi::DescriptorType::StorageImage, &dstInfo, nullptr };
     writes[2] = { ds, 2, 0, 1, rhi::DescriptorType::UniformBuffer, nullptr, &resInfo };
 
@@ -2671,8 +2782,12 @@ bool GPUDrivenDrawPipeline::ExecuteGBufferDepthBlit(rhi::RHICommandBuffer* cmd_b
     rhi::DescriptorImageInfo dstInfo{ rhi::handles::INVALID_SAMPLER, gbuffer_depth_sampleable_, rhi::ResourceState::UnorderedAccess };
     rhi::DescriptorBufferInfo resInfo{ gbuffer_depth_blit_cb_, 0, 8 };
 
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
+                                         : rhi::DescriptorType::SampledImage;
+
     rhi::WriteDescriptorSet writes[3];
-    writes[0] = { gbuffer_depth_blit_descriptor_set_, 0, 0, 1, rhi::DescriptorType::SampledImage, &srcInfo, nullptr };
+    writes[0] = { gbuffer_depth_blit_descriptor_set_, 0, 0, 1, srcType, &srcInfo, nullptr };
     writes[1] = { gbuffer_depth_blit_descriptor_set_, 1, 0, 1, rhi::DescriptorType::StorageImage, &dstInfo, nullptr };
     writes[2] = { gbuffer_depth_blit_descriptor_set_, 2, 0, 1, rhi::DescriptorType::UniformBuffer, nullptr, &resInfo };
 

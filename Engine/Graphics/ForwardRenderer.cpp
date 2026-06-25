@@ -614,6 +614,83 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             dsDesc.layout = dawnDeferredDSL_;
             dawnDeferredSet_[i] = device->CreateDescriptorSet(dsDesc);
         }
+
+        // ---- Meshlet deferred pipeline (Phase N2) ----
+        // 13 bindings matching DeferredLighting_Meshlet.wgsl. Same shape as the
+        // standard deferred block but with an extra depthTex binding for
+        // worldPos reconstruction (meshlet GBuffer has no WorldPos RT).
+        rhi::DescriptorSetLayoutBinding meshletBinds[13];
+        meshletBinds[0]  = {0,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[1]  = {1,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[2]  = {2,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[3]  = {3,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[4]  = {4,  rhi::DescriptorType::SampledDepthImage, 1, rhi::ShaderStage::Compute};
+        meshletBinds[5]  = {5,  rhi::DescriptorType::SampledDepthImage, 1, rhi::ShaderStage::Compute};
+        meshletBinds[5].isArray = true; // CSM depth array — texture_depth_2d_array
+        meshletBinds[6]  = {6,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[6].isCube = true;  // irradianceMap
+        meshletBinds[7]  = {7,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[7].isCube = true;  // prefilterMap
+        meshletBinds[8]  = {8,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[9]  = {9,  rhi::DescriptorType::Sampler,           1, rhi::ShaderStage::Compute};
+        meshletBinds[10] = {10, rhi::DescriptorType::UniformBuffer,     1, rhi::ShaderStage::Compute};
+        meshletBinds[11] = {11, rhi::DescriptorType::UniformBuffer,     1, rhi::ShaderStage::Compute};
+        meshletBinds[12] = {12, rhi::DescriptorType::StorageImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[12].format = rhi::DataFormat::RGBA16_Float;
+        rhi::DescriptorSetLayoutDesc meshletDslDesc;
+        meshletDslDesc.bindingCount = 13;
+        meshletDslDesc.bindings = meshletBinds;
+        dawnMeshletDeferredDSL_ = device->CreateDescriptorSetLayout(meshletDslDesc);
+
+        rhi::PipelineLayoutDesc meshletPlDesc;
+        meshletPlDesc.setLayoutCount = 1;
+        meshletPlDesc.setLayouts = &dawnMeshletDeferredDSL_;
+        dawnMeshletDeferredPipelineLayout_ = device->CreatePipelineLayout(meshletPlDesc);
+
+        std::string meshletShaderSrc;
+#ifdef __EMSCRIPTEN__
+        meshletShaderSrc = dawn::LoadWGSL("DeferredLighting_Meshlet");
+#else
+        {
+            auto platform = device->GetPlatform();
+            std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "DeferredLighting_Meshlet");
+            std::ifstream dlFile(shaderPath, std::ios::ate | std::ios::binary);
+            if (!dlFile.is_open()) {
+                shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
+                dlFile.open(shaderPath, std::ios::ate | std::ios::binary);
+            }
+            if (dlFile.is_open()) {
+                size_t size = dlFile.tellg();
+                utl::vector<char> buf;
+                buf.resize(size + 1);
+                dlFile.seekg(0);
+                dlFile.read(buf.data(), size);
+                buf[size] = 0;
+                meshletShaderSrc = std::string(buf.data(), size);
+            }
+        }
+#endif
+        if (!meshletShaderSrc.empty()) {
+            rhi::ShaderHandle cs = device->CreateShader(meshletShaderSrc.data(), meshletShaderSrc.size(),
+                                                       rhi::ShaderStage::Compute, "deferred_lighting_meshlet_cs");
+            if (cs != rhi::handles::INVALID_SHADER) {
+                rhi::ComputePipelineDesc pipeDesc;
+                pipeDesc.computeShader = cs;
+                pipeDesc.layout = dawnMeshletDeferredPipelineLayout_;
+                pipeDesc.threadGroupSize = {8, 8, 1};
+                dawnMeshletDeferredPipeline_ = device->CreateComputePipeline(pipeDesc);
+            } else {
+                std::cerr << "[MeshletDeferred] Compute shader creation failed" << std::endl;
+            }
+        } else {
+            std::cerr << "[MeshletDeferred] Shader source empty" << std::endl;
+        }
+
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+            rhi::DescriptorSetDesc dsDesc;
+            dsDesc.layout = dawnMeshletDeferredDSL_;
+            dawnMeshletDeferredSet_[i] = device->CreateDescriptorSet(dsDesc);
+        }
     }
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         // Global Set
@@ -911,6 +988,17 @@ void ForwardRenderer::Shutdown() {
         }
         // Descriptor sets freed implicitly; no buffers owned by this pass
         // (frame/light UBs are owned by the renderer's shared pool above).
+
+        // Meshlet deferred lighting pipeline (Phase N2)
+        if (dawnMeshletDeferredPipeline_ != rhi::handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(dawnMeshletDeferredPipeline_);
+        }
+        if (dawnMeshletDeferredPipelineLayout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+            device_->DestroyPipelineLayout(dawnMeshletDeferredPipelineLayout_);
+        }
+        if (dawnMeshletDeferredDSL_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyDescriptorSetLayout(dawnMeshletDeferredDSL_);
+        }
 
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             // Buffers
@@ -1724,6 +1812,142 @@ void ForwardRenderer::RenderDawnDeferredLighting(rhi::RHICommandBuffer* cmdBuffe
     // Transition HDR back to RenderTarget so downstream post-process passes
     // (TAA, ToneMap) that read it as a ShaderResource / blit it can find it in
     // the expected state.
+    rhi::ResourceBarrier hdrBack{};
+    hdrBack.resource = hdrTexture;
+    hdrBack.beforeState = rhi::ResourceState::UnorderedAccess;
+    hdrBack.afterState = rhi::ResourceState::RenderTarget;
+    hdrBack.subresource = 0xFFFFFFFF;
+    cmdBuffer->InsertBarrier(&hdrBack, 1);
+}
+
+void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* cmdBuffer,
+                                                       const RenderView& view,
+                                                       const rhi::ResourceHandle gbufferTextures[DAWN_MESHLET_GBUFFER_RT_COUNT],
+                                                       rhi::ResourceHandle depthTexture,
+                                                       rhi::ResourceHandle hdrTexture,
+                                                       const RenderScene& scene,
+                                                       u32 frameIndex,
+                                                       u32 width,
+                                                       u32 height) {
+    if (!device_ || !cmdBuffer) return;
+    if (dawnMeshletDeferredPipeline_ == rhi::handles::INVALID_PIPELINE) {
+        std::cerr << "[MeshletDeferred] Pipeline not initialized" << std::endl;
+        return;
+    }
+    for (u32 i = 0; i < DAWN_MESHLET_GBUFFER_RT_COUNT; ++i) {
+        if (gbufferTextures[i] == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[MeshletDeferred] RT" << i << " invalid" << std::endl;
+            return;
+        }
+    }
+    if (depthTexture == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[MeshletDeferred] depth texture invalid" << std::endl;
+        return;
+    }
+    if (hdrTexture == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[MeshletDeferred] HDR output invalid" << std::endl;
+        return;
+    }
+
+    const u32 fi = frameIndex % rhi::MAX_FRAMES_IN_FLIGHT;
+
+    // Populate the global frame uniform — same fields as RenderDawnDeferredLighting.
+    // invViewProjection is required because the meshlet GBuffer lacks a WorldPos
+    // RT; the shader reconstructs it from the depth texture + this inverse.
+    if (frameBuffersMapped_[fi]) {
+        auto* frameData = static_cast<rhi::GlobalShaderData*>(frameBuffersMapped_[fi]);
+        frameData->view = view.GetViewMatrix();
+        frameData->projection = view.GetProjectionMatrix();
+        frameData->viewProjection = view.GetViewProjectionMatrix();
+        frameData->previousViewProjection = prevViewProjection_;
+        frameData->invProjection = rhi::math::Inverse(view.GetProjectionMatrix());
+        frameData->invViewProjection = rhi::math::Inverse(view.GetViewProjectionMatrix());
+
+        rhi::math::m4x4 viewInv = rhi::math::Inverse(view.GetViewMatrix());
+        rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
+        rhi::math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+        frameData->deltaTime = deltaTime_;
+        frameData->frameCount = static_cast<float>(frameNumber_);
+        frameData->renderMode = dawnRenderMode_;
+        frameData->enableIBL = dawnEnableIBL_;
+        frameData->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, static_cast<float>(width)};
+        frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
+        frameData->jitterOffset = utils::GetJitterOffset(frameNumber_, width, height);
+
+        utl::vector<RenderView> emptyCSM;
+        utl::vector<float> emptySplits;
+        std::unordered_map<u32, int> emptyShadowIdx;
+        std::unordered_map<u32, rhi::math::m4x4> emptyLightVPs;
+        SetupLights(scene, fi, frameData, emptyCSM, emptySplits, emptyShadowIdx, emptyLightVPs);
+
+        device_->SetBufferDirtySize(frameBuffers_[fi], sizeof(rhi::GlobalShaderData));
+        device_->SetBufferDirtySize(lightBuffers_[fi], sizeof(rhi::ForwardLightBuffer));
+    }
+
+    // Update per-frame descriptor set. All 13 bindings are written each frame.
+    rhi::DescriptorImageInfo gbInfo[DAWN_MESHLET_GBUFFER_RT_COUNT];
+    rhi::DescriptorImageInfo depthInfo;
+    rhi::DescriptorImageInfo shadowInfo;
+    rhi::DescriptorImageInfo irradInfo;
+    rhi::DescriptorImageInfo prefilterInfo;
+    rhi::DescriptorImageInfo brdfInfo;
+    rhi::DescriptorImageInfo iblSampInfo;
+    rhi::DescriptorBufferInfo frameUB;
+    rhi::DescriptorBufferInfo lightUB;
+    rhi::DescriptorImageInfo outInfo;
+
+    for (u32 i = 0; i < DAWN_MESHLET_GBUFFER_RT_COUNT; ++i) {
+        gbInfo[i].imageView = gbufferTextures[i];
+        gbInfo[i].imageLayout = rhi::ResourceState::ShaderResource;
+    }
+    depthInfo.imageView = depthTexture;
+    depthInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    shadowInfo.imageView = dawnShadowDepthTex_;
+    shadowInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    irradInfo.imageView = dawnIBLIrradiance_;
+    irradInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    prefilterInfo.imageView = dawnIBLPrefilter_;
+    prefilterInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    brdfInfo.imageView = dawnIBLBRDFLUT_;
+    brdfInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    iblSampInfo.sampler = dawnIBLSampler_;
+    frameUB.buffer = frameBuffers_[fi];
+    frameUB.offset = 0;
+    frameUB.range = sizeof(rhi::GlobalShaderData);
+    lightUB.buffer = lightBuffers_[fi];
+    lightUB.offset = 0;
+    lightUB.range = sizeof(rhi::ForwardLightBuffer);
+    outInfo.imageView = hdrTexture;
+    outInfo.imageLayout = rhi::ResourceState::UnorderedAccess;
+
+    rhi::WriteDescriptorSet writes[13];
+    writes[0]  = {dawnMeshletDeferredSet_[fi], 0,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[0]};
+    writes[1]  = {dawnMeshletDeferredSet_[fi], 1,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[1]};
+    writes[2]  = {dawnMeshletDeferredSet_[fi], 2,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[2]};
+    writes[3]  = {dawnMeshletDeferredSet_[fi], 3,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[3]};
+    writes[4]  = {dawnMeshletDeferredSet_[fi], 4,  0, 1, rhi::DescriptorType::SampledDepthImage, &depthInfo};
+    writes[5]  = {dawnMeshletDeferredSet_[fi], 5,  0, 1, rhi::DescriptorType::SampledDepthImage, &shadowInfo};
+    writes[6]  = {dawnMeshletDeferredSet_[fi], 6,  0, 1, rhi::DescriptorType::SampledImage,      &irradInfo};
+    writes[7]  = {dawnMeshletDeferredSet_[fi], 7,  0, 1, rhi::DescriptorType::SampledImage,      &prefilterInfo};
+    writes[8]  = {dawnMeshletDeferredSet_[fi], 8,  0, 1, rhi::DescriptorType::SampledImage,      &brdfInfo};
+    writes[9]  = {dawnMeshletDeferredSet_[fi], 9,  0, 1, rhi::DescriptorType::Sampler,           &iblSampInfo};
+    writes[10] = {dawnMeshletDeferredSet_[fi], 10, 0, 1, rhi::DescriptorType::UniformBuffer,     nullptr, &frameUB};
+    writes[11] = {dawnMeshletDeferredSet_[fi], 11, 0, 1, rhi::DescriptorType::UniformBuffer,     nullptr, &lightUB};
+    writes[12] = {dawnMeshletDeferredSet_[fi], 12, 0, 1, rhi::DescriptorType::StorageImage,      &outInfo};
+    device_->UpdateDescriptorSets(13, writes);
+
+    rhi::ResourceBarrier hdrBarrier{};
+    hdrBarrier.resource = hdrTexture;
+    hdrBarrier.beforeState = rhi::ResourceState::RenderTarget;
+    hdrBarrier.afterState = rhi::ResourceState::UnorderedAccess;
+    hdrBarrier.subresource = 0xFFFFFFFF;
+    cmdBuffer->InsertBarrier(&hdrBarrier, 1);
+
+    cmdBuffer->BindComputePipeline(dawnMeshletDeferredPipeline_);
+    cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, dawnMeshletDeferredPipelineLayout_,
+                                  0, 1, &dawnMeshletDeferredSet_[fi], 0, nullptr);
+    cmdBuffer->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+
     rhi::ResourceBarrier hdrBack{};
     hdrBack.resource = hdrTexture;
     hdrBack.beforeState = rhi::ResourceState::UnorderedAccess;

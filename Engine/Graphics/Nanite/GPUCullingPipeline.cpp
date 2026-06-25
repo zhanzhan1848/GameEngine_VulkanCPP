@@ -9,6 +9,8 @@
 #include "../Nanite/NaniteResourceManager.h"
 #include "../RHI/Core/RHIGpuMesh.h"
 #include "../RHI/Core/RHIMath.h"
+#include "../Dawn/ShaderLoader.h"
+#include "../Utils/ShaderRegistry.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -22,26 +24,70 @@ GPUCullingPipeline& GPUCullingPipeline::Get() {
 }
 
 namespace {
-    std::vector<u8> LoadShaderBytecode(const char* shaderName, const char* entryPoint) {
+    // N0c: Forks shader loading on backend.
+    //   Metal: loads from EngineTest/shaders/<name>.metal (existing path).
+    //   Dawn:  loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
+    //          (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    std::vector<u8> LoadShaderBytecode(const char* shaderName, const char* entryPoint,
+                                       rhi::RHIDeviceBase* device) {
+        auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+        if (platform == rhi::RHIPlatform::Dawn) {
+#ifdef __EMSCRIPTEN__
+            std::string fullName = std::string("Nanite/") + shaderName;
+            std::string src = dawn::LoadWGSL(fullName.c_str());
+            if (src.empty()) {
+                std::cerr << "[GPUCullingPipeline] Failed to load WGSL shader: "
+                          << shaderName << " (entry: " << entryPoint << ")" << std::endl;
+                return {};
+            }
+            // +1 for null terminator: Dawn's ToWGPUStringView uses WGPU_STRLEN.
+            std::vector<u8> buffer(src.begin(), src.end());
+            buffer.push_back(0);
+            return buffer;
+#else
+            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(
+                rhi::RHIPlatform::Dawn, shaderName);
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
+                file.open(path, std::ios::binary | std::ios::ate);
+            }
+            if (!file.is_open()) {
+                std::cerr << "[GPUCullingPipeline] Failed to load WGSL shader: "
+                          << shaderName << " (entry: " << entryPoint << ")" << std::endl;
+                return {};
+            }
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            // +1 for null terminator: Dawn's ToWGPUStringView uses WGPU_STRLEN,
+            // which calls strlen on the buffer. Without a null terminator the
+            // parser reads into adjacent memory and reports phantom errors.
+            std::vector<u8> buffer(static_cast<size_t>(size) + 1, 0);
+            file.read(reinterpret_cast<char*>(buffer.data()), size);
+            return buffer;
+#endif
+        }
+
+        // Metal path (unchanged)
         std::string shaderPath = std::string("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/") + shaderName + ".metal";
-        
+
         std::ifstream file(shaderPath, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
             shaderPath = std::string("EngineTest/shaders/") + shaderName + ".metal";
             file.open(shaderPath, std::ios::binary | std::ios::ate);
         }
-        
+
         if (!file.is_open()) {
             std::cerr << "Failed to load shader: " << shaderName << std::endl;
             return {};
         }
-        
+
         std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);
-        
+
         std::vector<u8> buffer(size);
         file.read(reinterpret_cast<char*>(buffer.data()), size);
-        
+
         return buffer;
     }
 }
@@ -86,7 +132,9 @@ bool GPUCullingPipeline::CreatePipelines() {
         { 6, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
         // Binding 7: Indirect commands buffer (write-only)
         { 7, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
-        // Binding 8: HZB texture (read-only, for occlusion culling)
+        // Binding 8: HZB texture (read-only, for occlusion culling).
+        // HZB is R32Float which is UnfilterableFloat in WebGPU — the layout
+        // must declare the matching sample type or pipeline creation fails.
         { 8, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute, nullptr },
         // Binding 9: Cluster visibility counter (atomic) - NEW
         { 9, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
@@ -95,6 +143,15 @@ bool GPUCullingPipeline::CreatePipelines() {
         // Binding 11: Global meshlet buffer (read-only, for Normal Cone backface culling)
         { 11, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
     };
+
+    // WebGPU requires the layout's buffer access mode to match the shader's
+    // `var<storage, ...>` declaration exactly. Bindings 0, 3, 11 are declared
+    // `var<storage, read>` in WGSL → mark them read-only so DawnDescriptorSetLayout
+    // emits WGPUBufferBindingType_ReadOnlyStorage.
+    cullingBindings[0].readonly = true;  // instances
+    cullingBindings[3].readonly = true;  // cluster_refs
+    cullingBindings[8].unfilterableFloat = true; // HZB R32Float
+    cullingBindings[11].readonly = true; // meshlets
 
     rhi::DescriptorSetLayoutDesc cullingLayoutDesc{
         .bindings = cullingBindings,
@@ -122,7 +179,7 @@ bool GPUCullingPipeline::CreatePipelines() {
 
     // Load and create GPU culling compute pipelines
     auto loadComputePipeline = [&](const char* shaderName, const char* entryPoint) -> rhi::PipelineHandle {
-        auto shaderCode = LoadShaderBytecode(shaderName, entryPoint);
+        auto shaderCode = LoadShaderBytecode(shaderName, entryPoint, device_);
         if (shaderCode.empty()) {
 //            std::cout << "GPU Culling shader " << shaderName << " not found, skipping" << std::endl;
             return rhi::handles::INVALID_PIPELINE;
@@ -214,33 +271,22 @@ bool GPUCullingPipeline::CreatePipelines() {
 }
 
 bool GPUCullingPipeline::CreateBuffers() {
-    // Instance bounds buffer (bounding spheres) - triple buffered
+    // Instance bounds buffer (bounding spheres) - triple buffered.
+    // Skip pre-initialization: the staging→wgpuQueueWriteBuffer pattern in
+    // a tight loop triggers an intermittent crash in Dawn's Metal backend
+    // (the freed staging ptr from iter 0 gets reused by iter 1's malloc,
+    // and Dawn's internal queue work races the free). RenderSceneSnapshot's
+    // per-frame upload populates this buffer with real data before any cull
+    // stage reads it; the first frame's transient garbage is acceptable.
     for (u32 i = 0; i < 3; i++) {
         auto& frame_res = frame_resources_[i];
-        
+
         rhi::BufferDesc instanceBoundsDesc{};
         instanceBoundsDesc.size = sizeof(float) * 4 * config_.max_instances_per_dispatch; // center(3) + radius(1)
         instanceBoundsDesc.type = rhi::BufferType::Structured;
         instanceBoundsDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
         instanceBoundsDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ShaderResource) | static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
         frame_res.instance_bounds_buffer = device_->CreateBuffer(instanceBoundsDesc);
-
-        // CRITICAL FIX: Initialize bounds buffer with valid data to prevent culling glitches on first frame
-        if (frame_res.instance_bounds_buffer != rhi::handles::INVALID_RESOURCE) {
-            void* mapped = device_->MapBuffer(frame_res.instance_bounds_buffer);
-            if (mapped) {
-                struct BoundingSphere {
-                    math::v3 center;
-                    float radius;
-                };
-                BoundingSphere* bounds = static_cast<BoundingSphere*>(mapped);
-                for (u32 j = 0; j < config_.max_instances_per_dispatch; j++) {
-                    bounds[j].center = math::v3{0, 0, 0};
-                    bounds[j].radius = 10000.0f; // Large default radius
-                }
-                device_->UnmapBuffer(frame_res.instance_bounds_buffer);
-            }
-        }
     }
 
     // Create triple-buffered frame resources for Culling-Draw synchronization
@@ -1210,160 +1256,14 @@ void GPUCullingPipeline::UpdateResults() {
         return; // No GPU work to read back
     }
 
-    if (current_frame_res.visible_counter_buffer != rhi::handles::INVALID_RESOURCE) {
-        // For a readback buffer, MapBuffer should implicitly wait for GPU completion
-        void* mapped = device_->MapBuffer(current_frame_res.visible_counter_buffer);
-        if (mapped) {
-            u32 visibleCount = *static_cast<u32*>(mapped);
-
-            // Sanity check: if count looks unreasonable, skip reading cluster list
-            bool isValidCount = (visibleCount < 100000); // Arbitrary large number
-
-            if (isValidCount) {
-                // CRITICAL: Update results with actual GPU-computed value
-                results_.visible_cluster_count = visibleCount;
-
-                // CRITICAL FIX: Only update results if we got a valid non-zero count
-                // This prevents flickering by not updating with zero values from incomplete GPU work
-                if (visibleCount > 0) {
-                    // Keep the previous visible_instance_count if we have valid clusters
-                    // This prevents flickering caused by instance count fluctuations
-                }
-            }
-
-            device_->UnmapBuffer(current_frame_res.visible_counter_buffer);
-
-            // Print cluster list data occasionally (every 30 frames to catch the pattern)
-            // BUT: For first 90 frames, print every frame for detailed analysis
-            static u32 command_buffer_call_count = 0;
-            bool should_print = (command_buffer_call_count < 90) || (command_buffer_call_count % 30 == 0);
-            if (should_print && isValidCount) {
-                // std::cout << "[GPUCulling] CommandCall#" << command_buffer_call_count
-                //          << " Frame=" << current_frame_resource_ << " resource=" << current_frame_resource_
-                //          << ", count=" << visibleCount << std::endl;
-
-                // ENHANCED DEBUG: For first 90 frames, do detailed data analysis
-                if (command_buffer_call_count < 90) {
-                    // std::cout << "[GPUCulling] === DETAILED CommandCall " << command_buffer_call_count << " ANALYSIS (Frame: " << current_frame_resource_ << ", Buffer Index: " << current_frame_resource_ << ") ===" << std::endl;
-
-                    // Sample cluster list data with detailed analysis
-                    // Commented out to reduce log spam
-                    /*
-                    if (current_frame_res.visible_cluster_list_buffer != rhi::handles::INVALID_RESOURCE) {
-                        void* list_mapped = device_->MapBuffer(current_frame_res.visible_cluster_list_buffer);
-                        if (list_mapped) {
-                            u32* clusterList = static_cast<u32*>(list_mapped);
-
-                            // Print first 50 consecutive cluster IDs
-//                            std::cout << "[GPUCulling] compact_cluster_ids samples (FIRST 50):" << std::endl;
-                            u32 max_cluster_samples = std::min(static_cast<u32>(50), visibleCount);
-                            for (u32 pos = 0; pos < max_cluster_samples; ++pos) {
-                                uint32_t cluster_id = clusterList[pos];
-//                                std::cout << "  [" << pos << "] = " << cluster_id;
-
-                                // Check for invalid markers
-                                if (cluster_id == 0xFFFFFFFF) {
-//                                    std::cout << " [INVALID!]";
-                                } else if (cluster_id == 0) {
-//                                    std::cout << " [ZERO_CLUSTER]";
-                                } else if (cluster_id > 5000) {
-//                                    std::cout << " [LARGE_ID]";
-                                }
-//                                std::cout << std::endl;
-                            }
-
-                            // Check for data mutations by analyzing patterns
-//                            std::cout << "[GPUCulling] Data stability analysis:" << std::endl;
-                            bool has_anomaly = false;
-                            for (int i = 0; i < 10 && static_cast<u32>(i) < visibleCount; i++) {
-                                uint32_t cluster_id = clusterList[i];
-                                if (cluster_id == 0xFFFFFFFF || cluster_id == 0 || cluster_id > 5000) {
-//                                    std::cout << "  ANOMALY at position " << i << ": " << cluster_id << std::endl;
-                                    has_anomaly = true;
-                                }
-                            }
-
-                            if (!has_anomaly) {
-//                                std::cout << "  First 10 positions look stable" << std::endl;
-                            }
-
-                            device_->UnmapBuffer(current_frame_res.visible_cluster_list_buffer);
-                        }
-                    }
-
-                    // Sample cluster_visibility data
-                    if (current_frame_res.cluster_visibility_buffer != rhi::handles::INVALID_RESOURCE) {
-                        void* visibility_mapped = device_->MapBuffer(current_frame_res.cluster_visibility_buffer);
-                        if (visibility_mapped) {
-                            u32* visibilityData = static_cast<u32*>(visibility_mapped);
-
-//                            std::cout << "[GPUCulling] cluster_visibility samples (FIRST 50):" << std::endl;
-                            u32 max_samples = std::min(static_cast<u32>(50), visibleCount);
-                            for (u32 pos = 0; pos < max_samples; ++pos) {
-                                // ClusterVisibility struct has 8 u32 fields, so we need to multiply by 8
-                                uint32_t struct_offset = pos * 8;
-                                uint32_t is_visible = visibilityData[struct_offset + 0];     // is_visible field
-                                uint32_t cluster_index = visibilityData[struct_offset + 1];  // cluster_index field
-                                uint32_t instance_index = visibilityData[struct_offset + 2]; // instance_index field
-                                uint32_t lod_level = visibilityData[struct_offset + 3];     // lod_level field
-
-//                                std::cout << "  [" << pos << "] is_visible=" << is_visible
-//                                 << ", cluster_index=" << cluster_index
-//                                 << ", instance_index=" << instance_index
-//                                 << ", lod_level=" << lod_level;
-
-                                // Check visibility patterns
-                                if (is_visible == 0) {
-//                                    std::cout << " [INVISIBLE]";
-                                } else if (is_visible == 1) {
-//                                    std::cout << " [VISIBLE]";
-                                } else {
-//                                    std::cout << " [UNEXPECTED:" << is_visible << "]";
-                                }
-//                                std::cout << std::endl;
-                            }
-
-                            device_->UnmapBuffer(current_frame_res.cluster_visibility_buffer);
-                        }
-                    }
-
-//                    std::cout << "[GPUCulling] === END CommandCall " << command_buffer_call_count << " ANALYSIS ===" << std::endl;
-                    */
-                } else {
-                    // For frames beyond 90, just show summary
-                    // Sample different ranges to understand the distribution
-                    // std::cout << "[GPUCulling] Sample ranges: ";
-                    /*
-                    if (current_frame_res.visible_cluster_list_buffer != rhi::handles::INVALID_RESOURCE) {
-                        void* list_mapped = device_->MapBuffer(current_frame_res.visible_cluster_list_buffer);
-                        if (list_mapped) {
-                            u32* clusterList = static_cast<u32*>(list_mapped);
-
-//                            std::cout << "list[0]=" << clusterList[0] << " ";
-//                            std::cout << "list[100]=" << clusterList[100] << " ";
-//                            std::cout << "list[500]=" << clusterList[500] << " ";
-//                            std::cout << "list[1000]=" << clusterList[1000] << " ";
-//                            std::cout << "list[1500]=" << clusterList[1500] << " ";
-//                            std::cout << "list[1829]=" << clusterList[1829] << " ";
-//                            std::cout << std::endl;
-
-                            device_->UnmapBuffer(current_frame_res.visible_cluster_list_buffer);
-                        }
-                    }
-                    */
-                }
-            }
-            command_buffer_call_count++;
-        }
-    }
+    // Dawn note: MapBuffer on a GPU-only Storage buffer returns a zeroed
+    // staging pointer AND Unmap uploads those zeros back, clobbering the
+    // GPU-side visible_counter. Skip the readback; stage7 already wrote
+    // the count into indirect_commands[1] for the GPU-side DrawIndirect.
 
     // Ensure results point to the correct resource buffers
     results_.visible_cluster_list_buffer = current_frame_res.visible_cluster_list_buffer;
     results_.indirect_args_buffer = current_frame_res.indirect_args_buffer;
-
-    // NOTE: Keep needs_readback true for continuous debugging,
-    // normally we would set it to false here
-    // results_.needs_readback = false;
 }
 
 // Helper function to extract camera position from view matrix
@@ -1668,8 +1568,8 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
     constants.max_lod_levels = config_.max_lod_levels;
     constants.instance_count = snapshot.GetInstanceCount();
     constants.cluster_count = snapshot.GetClusterRefCount();
-    constants.force_pass_all = 0; // 🔥 RE-ENABLE: Test with inverted culling logic
-    constants.enable_debug_output = 1; // 🔥 Enable debug output to see culling details
+    constants.force_pass_all = 0;
+    constants.enable_debug_output = 1;
 
     // Additional validation to prevent corrupted data
     if (constants.instance_count > 100000) {
@@ -1928,28 +1828,11 @@ bool GPUCullingPipeline::Stage7_BuildIndirectCommands(rhi::RHICommandBuffer* cmd
         rhi::AccessFlag::IndirectCommandRead | rhi::AccessFlag::ShaderRead
     );
 
-    // DEBUG: Read back indirect command to verify values (for debugging flickering)
-    if (bufferIndex == 0 || bufferIndex % 60 == 0) {
-        auto& current_frame_res = frame_resources_[current_frame_resource_];
-        if (current_frame_res.indirect_args_buffer != rhi::handles::INVALID_RESOURCE) {
-            void* mapped = device_->MapBuffer(current_frame_res.indirect_args_buffer);
-            if (mapped) {
-                struct IndirectCommand {
-                    u32 vertex_count;
-                    u32 instance_count;
-                    u32 first_vertex;
-                    u32 first_instance;
-                };
-                IndirectCommand* cmd = static_cast<IndirectCommand*>(mapped);
-                // std::cout << "[GPUCulling] Stage7: Indirect command for buffer index " << bufferIndex << ":" << std::endl;
-                // std::cout << "  vertex_count: " << cmd->vertex_count << std::endl;
-                // std::cout << "  instance_count: " << cmd->instance_count << std::endl;
-                // std::cout << "  first_vertex: " << cmd->first_vertex << std::endl;
-                // std::cout << "  first_instance: " << cmd->first_instance << std::endl;
-                device_->UnmapBuffer(current_frame_res.indirect_args_buffer);
-            }
-        }
-    }
+    // NOTE: A previous debug readback here mapped indirect_args_buffer (a GPU-only
+    // Storage buffer) every 3rd frame. On Dawn, MapBuffer on a GPU-only buffer
+    // returns zeroed staging and Unmap uploads those zeros back, clobbering the
+    // GPU-written indirect args. This caused every-Nth-frame flicker where the
+    // draw call saw instanceCount=0 and skipped rendering entirely. Removed.
 
     return true;
 }
@@ -1977,26 +1860,12 @@ void GPUCullingPipeline::ReadbackResults(const RenderSceneSnapshot& snapshot, u3
     // Read visible counter (atomic counter should also work)
     auto& current_frame_res = frame_resources_[current_frame_resource_];
     if (current_frame_res.visible_counter_buffer != rhi::handles::INVALID_RESOURCE) {
-        void* mapped = device_->MapBuffer(current_frame_res.visible_counter_buffer);
-        if (mapped) {
-            u32 visibleCount = *static_cast<u32*>(mapped);
-
-            // CRITICAL DEBUG: Check if atomic counter value is reasonable
-            if (bufferIndex % 60 == 0) { // Print every 60 frames to reduce spam
-//                std::cout << "[GPUCulling] Buffer index " << bufferIndex << ": "
-//                         << visibleCount << " clusters visible (atomic counter)" << std::endl;
-            }
-
-            // Sanity check for corrupted atomic counter
-            if (visibleCount > 1000000) {
-//                std::cout << "[GPUCulling] WARNING: Atomic counter corrupted! "
-//                         << "value=" << visibleCount << ", clamping to safe value" << std::endl;
-                visibleCount = 0; // Reset to safe value
-            }
-
-            results_.visible_cluster_count = visibleCount;
-            device_->UnmapBuffer(current_frame_res.visible_counter_buffer);
-        }
+        // Dawn note: MapBuffer on a GPU-only Storage buffer returns a zeroed
+        // staging pointer AND Unmap uploads those zeros back, clobbering the
+        // GPU-side visible_counter. We don't need this read for correctness —
+        // stage7 already wrote visible_count into indirect_commands[1] on the
+        // GPU side. Skip the CPU readback entirely to avoid the clobber.
+        results_.visible_cluster_count = results_.visible_cluster_count;
     }
 
     // Update results buffers for next stage

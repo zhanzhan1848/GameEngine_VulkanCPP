@@ -118,6 +118,11 @@ private:
     rhi::PipelineHandle hzb_downsample_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineLayoutHandle hzb_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle hzb_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    // Dawn-only: copy stage reads texture_depth_2d (needs SampledDepthImage binding),
+    // mip stage reads texture_2d<f32> (needs SampledImage). WGSL can't host both
+    // binding types at slot 0 in one module, so we split copy into its own DSL+PL.
+    rhi::PipelineLayoutHandle hzb_copy_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle hzb_copy_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
 
     u32 mip_levels_{ 0 };
     bool initialized_{ false };

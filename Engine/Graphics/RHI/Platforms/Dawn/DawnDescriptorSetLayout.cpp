@@ -211,7 +211,14 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
             entry.nextInChain = nullptr;
             entry.binding = wgpuBinding;
             entry.visibility = visibility;
-            entry.buffer.type = WGPUBufferBindingType_Storage;
+            // WebGPU forbids read-write storage buffers in vertex shaders. Vertex
+            // pulling / meshlet vertex fetches are read-only by design, so coerce
+            // to ReadOnlyStorage when the binding is visible to the vertex stage.
+            // Also honor an explicit `readonly` request from non-vertex stages.
+            bool vertexVisible = (visibility & WGPUShaderStage_Vertex) != 0;
+            entry.buffer.type = (vertexVisible || binding.readonly)
+                ? WGPUBufferBindingType_ReadOnlyStorage
+                : WGPUBufferBindingType_Storage;
             entry.buffer.hasDynamicOffset = false;
             entry.buffer.minBindingSize = binding.minBindingSize;
             break;
@@ -234,9 +241,17 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
             entry.nextInChain = nullptr;
             entry.binding = wgpuBinding;
             entry.visibility = visibility;
-            entry.texture.sampleType = WGPUTextureSampleType_Float;
-            entry.texture.viewDimension = binding.isCube
-                ? WGPUTextureViewDimension_Cube : WGPUTextureViewDimension_2D;
+            // R32Float and a few other formats are UnfilterableFloat in WebGPU —
+            // declaring Float here triggers validation when such a texture is bound.
+            // Callers set binding.unfilterableFloat = true to opt in.
+            entry.texture.sampleType = binding.unfilterableFloat
+                ? WGPUTextureSampleType_UnfilterableFloat
+                : WGPUTextureSampleType_Float;
+            // N0a: honor isArray for texture_2d_array bindings (meshlet material arrays).
+            // isCube takes precedence over 2D since cube arrays aren't requested here.
+            entry.texture.viewDimension = binding.isArray
+                ? WGPUTextureViewDimension_2DArray
+                : (binding.isCube ? WGPUTextureViewDimension_Cube : WGPUTextureViewDimension_2D);
             entry.texture.multisampled = false;
             break;
         }

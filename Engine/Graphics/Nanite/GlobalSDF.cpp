@@ -2,6 +2,7 @@
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
 #include "../RHI/Core/RHIMath.h"
+#include "../Dawn/ShaderLoader.h"
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -274,7 +275,18 @@ static std::string ReadFileToString(const std::string& path) {
     return ss.str();
 }
 
-static std::vector<u8> LoadShaderSource(const char* name) {
+static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* device) {
+    auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+    if (platform == rhi::RHIPlatform::Dawn) {
+        // Phase 4 — WebGPU/WGSL path. ShaderLoader.h handles MEMFS embed (WASM)
+        // and filesystem read (native) uniformly via LoadWGSL(name).
+        std::string src = dawn::LoadWGSL(name);
+        if (src.empty()) {
+            std::cerr << "[GlobalSDF] Failed to load WGSL shader: " << name << std::endl;
+            return {};
+        }
+        return std::vector<u8>(src.begin(), src.end());
+    }
     std::string path = SDF_SHADER_DIR + std::string(name) + ".metal";
     std::string source = ReadFileToString(path);
     if (source.empty()) {
@@ -331,7 +343,7 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     vox_resources_ = resources;
 
     // Load shader source
-    auto code = LoadShaderSource("GlobalSDFVoxelization");
+    auto code = LoadShaderSource("GlobalSDFVoxelization", device_);
     if (code.empty()) {
         std::cerr << "[GlobalSDF] Failed to load voxelization shader" << std::endl;
         return false;
@@ -346,7 +358,24 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
 
     // Create descriptor set layout
     // Metal: texture(0) = SDF output, buffer(0..6) = cascade + geometry data
-    {
+    //        (Metal has separate texture/buffer namespaces — indices can overlap)
+    // WebGPU: single namespace — texture + UBO + 6 SSBOs use bindings 0..7
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    if (isDawn) {
+        // WebGPU/WGSL bindings — see GlobalSDFVoxelization.wgsl header comment.
+        rhi::DescriptorSetLayoutBinding bindings[] = {
+            {0, rhi::DescriptorType::StorageImage,  1, rhi::ShaderStage::Compute, nullptr},  // sdf_output
+            {1, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // CascadeUniforms
+            {2, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // vertex_positions
+            {3, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // meshlets
+            {4, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // meshlet_vertex_indices
+            {5, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // meshlet_triangle_indices
+            {6, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // cluster_map
+            {7, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // instance_data
+        };
+        rhi::DescriptorSetLayoutDesc layoutDesc{8, bindings};
+        vox_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    } else {
         rhi::DescriptorSetLayoutBinding bindings[] = {
             // Texture
             {0, rhi::DescriptorType::StorageImage,  1, rhi::ShaderStage::Compute, nullptr},
@@ -455,20 +484,36 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
     }
 
     // Update descriptor set
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
     {
-        DescriptorData params[] = {
-            // Texture (SDF output)
-            {0, rhi::DescriptorType::StorageImage, cascade.sdf_texture},
-            // Buffers
-            {0, rhi::DescriptorType::UniformBuffer, vox_cascade_cb_[frameIdx]},
-            {1, rhi::DescriptorType::StorageBuffer, vox_resources_.vertex_buffer},
-            {2, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_buffer},
-            {3, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_vertices_buffer},
-            {4, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_triangles_buffer},
-            {5, rhi::DescriptorType::StorageBuffer, vox_resources_.cluster_map_buffer},
-            {6, rhi::DescriptorType::StorageBuffer, vox_resources_.instance_data_buffer},
-        };
-        UpdateDescriptorSet(device_, vox_descriptor_sets_[frameIdx], params, 8);
+        if (isDawn) {
+            // WebGPU/WGSL bindings: 0=texture, 1=UBO, 2-7=SSBOs (matches WGSL header).
+            DescriptorData params[] = {
+                {0, rhi::DescriptorType::StorageImage,   cascade.sdf_texture},
+                {1, rhi::DescriptorType::UniformBuffer,  vox_cascade_cb_[frameIdx]},
+                {2, rhi::DescriptorType::StorageBuffer,  vox_resources_.vertex_buffer},
+                {3, rhi::DescriptorType::StorageBuffer,  vox_resources_.meshlet_buffer},
+                {4, rhi::DescriptorType::StorageBuffer,  vox_resources_.meshlet_vertices_buffer},
+                {5, rhi::DescriptorType::StorageBuffer,  vox_resources_.meshlet_triangles_buffer},
+                {6, rhi::DescriptorType::StorageBuffer,  vox_resources_.cluster_map_buffer},
+                {7, rhi::DescriptorType::StorageBuffer,  vox_resources_.instance_data_buffer},
+            };
+            UpdateDescriptorSet(device_, vox_descriptor_sets_[frameIdx], params, 8);
+        } else {
+            DescriptorData params[] = {
+                // Texture (SDF output)
+                {0, rhi::DescriptorType::StorageImage, cascade.sdf_texture},
+                // Buffers
+                {0, rhi::DescriptorType::UniformBuffer, vox_cascade_cb_[frameIdx]},
+                {1, rhi::DescriptorType::StorageBuffer, vox_resources_.vertex_buffer},
+                {2, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_buffer},
+                {3, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_vertices_buffer},
+                {4, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_triangles_buffer},
+                {5, rhi::DescriptorType::StorageBuffer, vox_resources_.cluster_map_buffer},
+                {6, rhi::DescriptorType::StorageBuffer, vox_resources_.instance_data_buffer},
+            };
+            UpdateDescriptorSet(device_, vox_descriptor_sets_[frameIdx], params, 8);
+        }
     }
 
     // Bind and dispatch

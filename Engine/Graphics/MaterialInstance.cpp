@@ -23,8 +23,10 @@ MaterialInstance::MaterialInstance(MaterialInstance&& other) noexcept
       uniformDirty_(other.uniformDirty_),
       pendingTextures_(std::move(other.pendingTextures_)),
       pendingSamplers_(std::move(other.pendingSamplers_)),
+      pendingBuffers_(std::move(other.pendingBuffers_)),
+      boundTextures_(std::move(other.boundTextures_)),
       device_(other.device_) {
-    
+
     other.descriptorSets_.clear();
     other.uniformBuffers_.clear();
     other.uniformBuffersMapped_.clear();
@@ -59,6 +61,8 @@ MaterialInstance& MaterialInstance::operator=(MaterialInstance&& other) noexcept
         uniformDirty_ = other.uniformDirty_;
         pendingTextures_ = std::move(other.pendingTextures_);
         pendingSamplers_ = std::move(other.pendingSamplers_);
+        pendingBuffers_ = std::move(other.pendingBuffers_);
+        boundTextures_ = std::move(other.boundTextures_);
         device_ = other.device_;
         
         // Invalidate other
@@ -155,6 +159,15 @@ void MaterialInstance::SetTexture(u32 binding, rhi::ResourceHandle texture, u32 
     update.arrayElement = arrayElement;
     update.texture = texture;
     pendingTextures_.push_back(update);
+
+    // Mirror into boundTextures_ so GetTextureHandle returns the most recent
+    // value even after Update() clears pendingTextures_. GPU-driven paths
+    // (GPUMaterialRegistry / MaterialDataBuilder) query handles long after
+    // SetTexture + Update have run.
+    if (binding >= boundTextures_.size()) {
+        boundTextures_.resize(binding + 1, rhi::handles::INVALID_RESOURCE);
+    }
+    boundTextures_[binding] = texture;
 }
 
 void MaterialInstance::SetSampler(u32 binding, rhi::SamplerHandle sampler, u32 arrayElement) {
@@ -296,20 +309,18 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
 // ============================================================================
 
 rhi::ResourceHandle MaterialInstance::GetTextureHandle(u32 binding) const {
-    // Check if binding is valid
-    if (binding >= pendingTextures_.size()) {
-        std::cerr << "[MaterialInstance] Invalid texture binding: " << binding << std::endl;
-        return rhi::handles::INVALID_RESOURCE;
+    // Read committed state (kept current in SetTexture, persists across
+    // Update() calls). Fall back to pendingTextures_ for any caller that
+    // queries between SetTexture and the next Update — same handle value,
+    // just defensive.
+    if (binding < boundTextures_.size() && boundTextures_[binding] != rhi::handles::INVALID_RESOURCE) {
+        return boundTextures_[binding];
     }
-
-    // Search pending textures for this binding
     for (const auto& update : pendingTextures_) {
         if (update.binding == binding) {
             return update.texture;
         }
     }
-
-    // Not found in pending textures, return invalid
     return rhi::handles::INVALID_RESOURCE;
 }
 

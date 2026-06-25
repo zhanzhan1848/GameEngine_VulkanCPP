@@ -355,11 +355,15 @@ void DawnCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
 }
 
 void DawnCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
-    // This overload is for pre-built render pass objects.
-    // For now, WebGPU render passes are built inline from RenderPassDesc,
-    // so this path requires looking up the cached DawnRenderPass.
-    (void)renderPass;
-    std::cerr << "[DawnCommandBuffer] BeginRenderPass(handle) not yet implemented" << std::endl;
+    // Look up the cached DawnRenderPass and delegate to the RenderPassDesc
+    // overload — WebGPU has no pre-built render pass object, the descriptor
+    // is encoded inline.
+    auto* pass = device_.GetRenderPass(renderPass);
+    if (!pass) {
+        std::cerr << "[DawnCommandBuffer] BeginRenderPass(handle): invalid handle " << renderPass << std::endl;
+        return;
+    }
+    BeginRenderPass(pass->GetDesc());
 }
 
 void DawnCommandBuffer::EndRenderPass() {
@@ -736,6 +740,11 @@ void DawnCommandBuffer::CopyBuffer(ResourceHandle src, ResourceHandle dst,
     EnsureCommandEncoder();
     if (!wgpuEncoder_) return;
 
+    // Dawn rejects encoder-level copies while a compute/render pass is open
+    // ("Recording in CommandEncoder which is locked while ComputePassEncoder
+    // is open"). Auto-end any open pass before issuing the copy.
+    EndCurrentEncoder();
+
     DawnBuffer* srcBuf = device_.GetBuffer(src);
     DawnBuffer* dstBuf = device_.GetBuffer(dst);
     if (!srcBuf || !dstBuf) {
@@ -747,7 +756,16 @@ void DawnCommandBuffer::CopyBuffer(ResourceHandle src, ResourceHandle dst,
     WGPUBuffer wgpuDst = dstBuf->GetNativeBuffer();
     if (!wgpuSrc || !wgpuDst) return;
 
-    wgpuCommandEncoderCopyBufferToBuffer(wgpuEncoder_, wgpuSrc, srcOffset, wgpuDst, dstOffset, size);
+    // wgpuCommandEncoderCopyBufferToBuffer requires offset AND size to be
+    // multiples of 4. Both source and destination WGPUBuffers were created
+    // with size rounded up to a multiple of 4 (see DawnBuffer::Initialize),
+    // so padding the copy size up never overruns either allocation.
+    u64 alignedSrcOffset = (srcOffset + 3ull) & ~3ull;
+    u64 alignedDstOffset = (dstOffset + 3ull) & ~3ull;
+    u64 alignedSize = (size + 3ull) & ~3ull;
+
+    wgpuCommandEncoderCopyBufferToBuffer(wgpuEncoder_, wgpuSrc, alignedSrcOffset,
+                                         wgpuDst, alignedDstOffset, alignedSize);
     UpdateStats(CommandType::CopyBuffer);
 }
 
@@ -757,6 +775,9 @@ void DawnCommandBuffer::CopyBufferToTexture(ResourceHandle srcBuffer,
                                              u32 regionCount) {
     EnsureCommandEncoder();
     if (!wgpuEncoder_) return;
+
+    // Dawn rejects encoder-level copies while a compute/render pass is open.
+    EndCurrentEncoder();
 
     DawnBuffer* srcBuf = device_.GetBuffer(srcBuffer);
     DawnTexture* dstTex = device_.GetTexture(dstTexture);
@@ -805,6 +826,9 @@ void DawnCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture,
                                              u32 regionCount) {
     EnsureCommandEncoder();
     if (!wgpuEncoder_) return;
+
+    // Dawn rejects encoder-level copies while a compute/render pass is open.
+    EndCurrentEncoder();
 
     DawnTexture* srcTex = device_.GetTexture(srcTexture);
     DawnBuffer* dstBuf = device_.GetBuffer(dstBuffer);
@@ -884,20 +908,23 @@ void DawnCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
         WGPUTexelCopyTextureInfo srcCopy{};
         srcCopy.texture = wgpuSrc;
         srcCopy.mipLevel = r.srcSubresource.mipLevel;
+        // WebGPU encodes 2D-texture array layer as origin.z for copy ops.
+        // Without this, every layer-0 source overwrites dst layer 0.
         srcCopy.origin = WGPUOrigin3D{
             static_cast<u32>(r.srcOffsets[0].x),
             static_cast<u32>(r.srcOffsets[0].y),
-            static_cast<u32>(r.srcOffsets[0].z)
+            r.srcSubresource.baseArrayLayer
         };
         srcCopy.aspect = WGPUTextureAspect_All;
 
         WGPUTexelCopyTextureInfo dstCopy{};
         dstCopy.texture = wgpuDst;
         dstCopy.mipLevel = r.dstSubresource.mipLevel;
+        // Same fix on the dst side — baseArrayLayer goes into origin.z.
         dstCopy.origin = WGPUOrigin3D{
             static_cast<u32>(r.dstOffsets[0].x),
             static_cast<u32>(r.dstOffsets[0].y),
-            static_cast<u32>(r.dstOffsets[0].z)
+            r.dstSubresource.baseArrayLayer
         };
         dstCopy.aspect = WGPUTextureAspect_All;
 

@@ -2,6 +2,7 @@
 
 #include "CommonHeaders.h"
 #include "../RHI/Core/RHITypes.h"
+#include "../RHI/Core/RHIMeshAsset.h"
 #include "GPUCullingPipeline.h"
 #include <mutex>
 #include <iostream>
@@ -79,6 +80,11 @@ public:
     void SetHZBSystem(HZBSystem* hzb_system) { hzb_system_ = hzb_system; }
     void SetVisibilityBufferSystem(VisibilityBufferSystem* vis_system) { visibility_buffer_system_ = vis_system; }
     void SetCullingPipeline(class GPUCullingPipeline* culling_pipeline) { culling_pipeline_ = culling_pipeline; }
+
+    // Debug visualization mode for the meshlet GBuffer pass.
+    // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id (instance).
+    // Written into DrawConstants.debug_mode each frame.
+    void SetDebugMode(u32 mode) { meshlet_debug_mode_ = mode; }
 
     void UpdateGeometryData(const RenderSceneSnapshot& scene_snapshot);
     bool CreateGeometryBuffers(u32 vertex_count, u32 index_count);
@@ -275,11 +281,16 @@ private:
     u32 total_meshlet_triangle_count_{ 0 };
     u32 total_vertex_count_{ 0 };
 
+    // CPU-side mirror of global_meshlet_buffer_. Dawn Storage buffers are
+    // GPU-only: MapBuffer returns zeroed staging, so reads must come from CPU.
+    utl::vector<rhi::RHIMeshlet> cpu_meshlet_cache_;
+
     math::m4x4 cached_view_matrix_;
     math::m4x4 cached_proj_matrix_;
     math::m4x4 prev_view_matrix_;   // Previous frame view matrix for velocity
     math::m4x4 prev_proj_matrix_;   // Previous frame proj matrix for velocity
     bool has_prev_frame_{ false };   // Whether previous frame data is available
+    u32 meshlet_debug_mode_{ 0 };   // 0=off, 1=meshlet, 2=triangle, 3=mesh (mirrors DrawConstants.debug_mode)
     u32 vertex_count_{ 0 };
     u32 index_count_{ 0 };
     rhi::DataFormat index_format_{ rhi::DataFormat::R32_UInt };

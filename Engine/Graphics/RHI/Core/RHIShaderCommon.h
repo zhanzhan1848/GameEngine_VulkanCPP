@@ -26,7 +26,7 @@ struct GlobalShaderData
     float frameCount;
 
     u32 renderMode; // 0=NoEffects, 1=ShadowOnly, 2=ShadowAndIBL, 3=Full
-    u32 _pad0;      // explicit pad so jitterOffset (vec2) aligns to 8 bytes
+    u32 enableIBL;  // 0 = skip IBL ambient (MeshletNoIBL), 1 = apply (Meshlet). Mirrors the WGSL GlobalShaderData slot formerly named _pad0.
     math::v2 jitterOffset; // TAA subpixel jitter (clip-space units, applied in PBR vertex)
 };
 

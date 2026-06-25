@@ -53,9 +53,10 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
     // This ensures texture array indices match MaterialID assignments
     const std::vector<MaterialInstance*>& instances = registeredInstances_;
 
-    // Schedule async build on worker thread
-    // Reference: EngineTest/UnitTests/TestJobSystem.cpp:255
-    buildJob_ = jobsystem::JobSystem::Schedule([this, device, instances]() {
+    // Dawn device operations must run on the main thread that owns the device.
+    // Build the lambda in a shared_ptr so we can pass it both to the scheduler
+    // and to inline execution.
+    auto work = std::make_shared<std::function<void()>>([this, device, instances]() {
 //        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 1: Building texture mapping..." << std::endl;
 
         // 🎨 Phase 1: Build texture mapping (deduplication)
@@ -194,6 +195,21 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
 //                  << std::endl;
     });
 
+    // Dawn device operations must execute on the main thread that owns the
+    // device — running them on a JobSystem worker thread deadlocks inside
+    // Dawn's ContentLessObjectCache. Run inline on main thread; return a
+    // completed JobHandle so the caller's .Wait() is a no-op.
+    const bool isDawn = (device->GetPlatform() == rhi::RHIPlatform::Dawn);
+    if (isDawn) {
+        (*work)();
+        // Construct a completed handle so Wait() returns immediately.
+        auto tracker = std::make_shared<jobsystem::JobStateTracker>(0);
+        tracker->NotifyJobCompleted();
+        buildJob_ = jobsystem::JobHandle(tracker);
+        return buildJob_;
+    }
+
+    buildJob_ = jobsystem::JobSystem::Schedule([work]() { (*work)(); });
     return buildJob_;
 }
 
@@ -241,6 +257,22 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
         buildError_ = "Failed to map material data buffer";
         std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
         return false;
+    }
+
+    // DIAGNOSTIC: dump first 5 materials to verify texture indices.
+    std::cerr << "[MaterialDataDBG] Uploaded " << materials_.size()
+              << " materials (sizeof=" << sizeof(MaterialData) << ")" << std::endl;
+    for (size_t i = 0; i < std::min<size_t>(5, materials_.size()); ++i) {
+        const auto& m = materials_[i];
+        std::cerr << "[MaterialDataDBG]   [" << i
+                  << "] albedo_idx=" << m.albedo_texture_idx
+                  << " normal_idx=" << m.normal_texture_idx
+                  << " orm_idx=" << m.orm_texture_idx
+                  << " tint=(" << m.albedo_tint[0] << "," << m.albedo_tint[1] << "," << m.albedo_tint[2] << ")"
+                  << " metal=" << m.metallic_factor
+                  << " rough=" << m.roughness_factor
+                  << " uv_scale=(" << m.uv_scale[0] << "," << m.uv_scale[1] << ")"
+                  << std::endl;
     }
 
 //    std::cout << "[GPUMaterialRegistry] Uploaded " << materials_.size()

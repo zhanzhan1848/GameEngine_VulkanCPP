@@ -23,7 +23,17 @@ void EmscriptenInitInput();
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSRPass.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.h"
+#include "Engine/Graphics/Nanite/GPUDrivenDrawPipeline.h"
+#include "Engine/Graphics/Nanite/GPUCullingPipeline.h"
+#include "Engine/Graphics/Nanite/HZBSystem.h"
+#include "Engine/Graphics/Nanite/GPUMaterialRegistry.h"
+#include "Engine/Graphics/Nanite/NaniteResourceManager.h"
+#include "Engine/Content/ContentToEngine.h"
+#include "Engine/Graphics/RHI/Core/RHIMeshAsset.h"
 #include "Engine/Graphics/SceneDataAdapter.h"
+#include "Engine/Components/Entity.h"
+#include "Engine/Components/Cluster.h"
+#include "Engine/JobSystem/JobSystem.h"
 #include "Engine/Graphics/RenderProxy.h"
 #include "Engine/Graphics/Material.h"
 #include "Engine/Graphics/MaterialInstance.h"
@@ -36,6 +46,7 @@ void EmscriptenInitInput();
 #include <sstream>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 
 #ifdef __APPLE__
 #include <CoreGraphics/CoreGraphics.h>
@@ -66,7 +77,9 @@ static ResourceHandle CreateTextureFromData(DawnDevice* device, int w, int h,
     desc.format = format;
     desc.type = TextureType::Texture2D;
     desc.mipLevels = mipLevels;
-    desc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    // Include CopySource so meshlet path can blit textures into the material
+    // texture arrays (AlbedoTextureArray / NormalTextureArray / ORMTextureArray).
+    desc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest | TextureUsage::CopySource;
 
     ResourceHandle tex = device->CreateTexture(desc);
     if (tex == INVALID_RESOURCE) return INVALID_RESOURCE;
@@ -168,6 +181,12 @@ Engine_Test::~Engine_Test() {
 bool Engine_Test::initialize() {
     std::cout << "[TestDawnFR] Init..." << std::endl;
 
+    // Initialize JobSystem early — GPUMaterialRegistry::BuildAsync schedules on it.
+    if (!primal::jobsystem::JobSystem::Initialize(primal::jobsystem::JobSchedulerConfig::Default())) {
+        std::cerr << "[TestDawnFR] JobSystem init failed" << std::endl;
+        return false;
+    }
+
     // Create window
     platform::window_init_info windowInfo{
         nullptr, nullptr,
@@ -192,6 +211,12 @@ bool Engine_Test::initialize() {
         return false;
     }
 
+    // Register with global device manager so content::create_resource can
+    // reach the Dawn device when GPUMaterialRegistry creates placeholder
+    // textures. Without this, create_texture_resource falls through to the
+    // legacy add_texture path which doesn't support WebGPU.
+    rhi::g_deviceManager.RegisterDevice(device_);
+
     // Create persistent depth texture (reused across frames)
     CreateDepthTexture();
     CreatePrepassDepthTexture();
@@ -211,7 +236,9 @@ bool Engine_Test::initialize() {
     velDesc.format = rhi::DataFormat::RG16_Float;
     velDesc.type = rhi::TextureType::Texture2D;
     velDesc.mipLevels = 1;
-    velDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    // Meshlet path blits GBuffer velocity → velocityTexture_; the source needs CopySrc.
+    velDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource |
+                    rhi::TextureUsage::CopySource | rhi::TextureUsage::CopyDest;
     velocityTexture_ = device_->CreateTexture(velDesc);
 
     // Create G-Buffer textures for Deferred mode (Phase 3b)
@@ -302,6 +329,23 @@ bool Engine_Test::initialize() {
     // Cull to populate visible proxies
     view_.Cull(scene_);
 
+    // Phase N2: lazy-init meshlet pipeline (mode 7/8). Init is cheap if mode 7
+    // is never selected — just creates singleton handles + GPU buffers.
+    // Skipped on WASM: Nanite sources are excluded from the Engine WASM build.
+#ifndef __EMSCRIPTEN__
+    InitializeMeshletPipeline();
+#endif
+
+    // DEBUG: env var override for non-interactive mode testing.
+    if (const char* modeEnv = std::getenv("DAWN_FORCE_MODE")) {
+        int m = std::atoi(modeEnv);
+        if (m >= 0 && m < static_cast<int>(DawnRenderMode::Count)) {
+            renderMode_ = static_cast<DawnRenderMode>(m);
+            std::cerr << "[TestDawnFR] DAWN_FORCE_MODE=" << m
+                      << " forcing mode on startup" << std::endl;
+        }
+    }
+
     std::cout << "[TestDawnFR] Ready: " << sceneMeshInfos_.size()
               << " meshes, " << view_.GetVisibleProxies().size() << " visible" << std::endl;
 
@@ -315,8 +359,10 @@ bool Engine_Test::initialize() {
             hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;';
             hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>'
                 + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>'
+                + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>'
                 + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>'
-                + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>';
+                + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>'
+                + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>';
             document.body.appendChild(hud);
         }
         // Define HUD update function (independent of shell.html)
@@ -325,6 +371,21 @@ bool Engine_Test::initialize() {
             var d = document.getElementById('modeHudDesc');
             if (c) c.textContent = 'Mode ' + idx + ': ' + name;
             if (d) d.textContent = desc;
+            // Show the meshlet-debug status line only in modes 7/8.
+            var dbg = document.getElementById('meshletDbgHud');
+            if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none';
+        };
+        // Update meshlet debug label (called from C++ on each V press).
+        // Avoid array-literal commas in EM_ASM — the C preprocessor treats top-
+        // level commas as macro-argument separators.
+        window.setMeshletDebug = function(mode) {
+            var dbg = document.getElementById('meshletDbgHud');
+            if (!dbg) return;
+            var label = 'Off';
+            if (mode == 1) label = 'MeshletID';
+            else if (mode == 2) label = 'TriangleID';
+            else if (mode == 3) label = 'MeshID';
+            dbg.textContent = 'Meshlet Debug: ' + label;
         };
     });
 #endif
@@ -498,6 +559,33 @@ bool Engine_Test::LoadSponzaScene() {
     u32 texLoaded = 0, texFailed = 0;
     std::cerr << "[TestDawnFR] Creating material instances..." << std::endl;
 
+    // Shared 1024x1024 fallback textures for meshes with missing texture paths.
+    // The meshlet path blits sources into texture arrays — 1x1 fallbacks would
+    // force the array's reference size to 1x1 and skip every real 1024x1024
+    // source. Using 1024x1024 fallbacks keeps array dimensions sane.
+    constexpr u32 FALLBACK_SIZE = 1024;
+    std::vector<unsigned char> whiteBuf(FALLBACK_SIZE * FALLBACK_SIZE * 4, 255);
+    std::vector<unsigned char> flatNormalBuf(FALLBACK_SIZE * FALLBACK_SIZE * 4, 0);
+    for (u32 i = 0; i < FALLBACK_SIZE * FALLBACK_SIZE; ++i) {
+        flatNormalBuf[i * 4 + 0] = 128;
+        flatNormalBuf[i * 4 + 1] = 128;
+        flatNormalBuf[i * 4 + 2] = 255;
+        flatNormalBuf[i * 4 + 3] = 255;
+    }
+    std::vector<unsigned char> defaultORMBuf(FALLBACK_SIZE * FALLBACK_SIZE * 4, 0);
+    for (u32 i = 0; i < FALLBACK_SIZE * FALLBACK_SIZE; ++i) {
+        defaultORMBuf[i * 4 + 0] = 255;  // AO=1
+        defaultORMBuf[i * 4 + 1] = 128;  // roughness=0.5
+        defaultORMBuf[i * 4 + 2] = 0;    // metallic=0
+        defaultORMBuf[i * 4 + 3] = 255;
+    }
+    ResourceHandle fallbackDiffuse = CreateTextureFromData(
+        device_, FALLBACK_SIZE, FALLBACK_SIZE, whiteBuf.data(), DataFormat::RGBA8_sRGB);
+    ResourceHandle fallbackNormal = CreateTextureFromData(
+        device_, FALLBACK_SIZE, FALLBACK_SIZE, flatNormalBuf.data());
+    ResourceHandle fallbackORM = CreateTextureFromData(
+        device_, FALLBACK_SIZE, FALLBACK_SIZE, defaultORMBuf.data());
+
     for (u32 i = 0; i < sceneMeshInfos_.size(); ++i) {
         auto& meshInfo = sceneMeshInfos_[i];
         meshInfo.material = material; // Shared material
@@ -519,8 +607,7 @@ bool Engine_Test::LoadSponzaScene() {
             diffuseTex = LoadTextureFromFile(device_, diffusePath);
         }
         if (diffuseTex == INVALID_RESOURCE) {
-            unsigned char white[4] = {255, 255, 255, 255};
-            diffuseTex = CreateTextureFromData(device_, 1, 1, white);
+            diffuseTex = fallbackDiffuse;
             texFailed++;
         } else {
             texLoaded++;
@@ -533,8 +620,7 @@ bool Engine_Test::LoadSponzaScene() {
             normalTex = LoadTextureFromFile(device_, normalPath);
         }
         if (normalTex == INVALID_RESOURCE) {
-            unsigned char flatNormal[4] = {128, 128, 255, 255};
-            normalTex = CreateTextureFromData(device_, 1, 1, flatNormal);
+            normalTex = fallbackNormal;
         }
 
         // Load ORM texture
@@ -544,8 +630,7 @@ bool Engine_Test::LoadSponzaScene() {
             ormTex = LoadTextureFromFile(device_, ormPath);
         }
         if (ormTex == INVALID_RESOURCE) {
-            unsigned char defaultORM[4] = {255, 128, 0, 255}; // AO=1, roughness=0.5, metallic=0
-            ormTex = CreateTextureFromData(device_, 1, 1, defaultORM);
+            ormTex = fallbackORM;
         }
 
         // Set textures on MaterialInstance
@@ -559,7 +644,12 @@ bool Engine_Test::LoadSponzaScene() {
 
         // Create RenderProxy
         RenderProxy proxy;
-        proxy.meshId = meshInfo.meshEntityId;
+        // NOTE: proxy.meshId doubles as the cluster::component lookup key.
+        // cluster::create stores the cluster keyed by entity_id (see
+        // Cluster.cpp:70-71 — `component c{ entity.get_id() }`). So we set
+        // proxy.meshId = entity_id of the entity that owns the cluster.
+        // The forward path uses meshInfo.mesh directly (not proxy.meshId), so
+        // this is safe.
         proxy.materialId = meshInfo.meshEntityId; // Use entity ID as material key
         proxy.entityId = meshInfo.meshEntityId;
 
@@ -570,6 +660,32 @@ bool Engine_Test::LoadSponzaScene() {
         // Compute AABB from mesh if available
         if (meshInfo.mesh && meshInfo.mesh->IsValid()) {
             proxy.worldAABB = meshInfo.mesh->GetLocalAABB();
+        }
+
+        // Create Cluster component so RenderSceneSnapshot::ExtractSceneData can
+        // resolve geometry_content_id for the meshlet pipeline. Without this,
+        // cluster::get(proxy.meshId) returns nullptr and every proxy is skipped.
+        if (meshInfo.meshEntityId != primal::id::invalid_id) {
+            primal::game_entity::entity_info entInfo{};
+            primal::transform::init_info tfInfo{};
+            tfInfo.position[0] = 0.0f;
+            tfInfo.position[1] = 0.0f;
+            tfInfo.position[2] = 0.0f;
+            entInfo.transform = &tfInfo;
+            primal::game_entity::entity entity = primal::game_entity::create(entInfo);
+            if (entity.is_valid()) {
+                primal::cluster::init_info clusterInit{};
+                clusterInit.geometry_content_id = meshInfo.meshEntityId;
+                primal::cluster::component clusterComp =
+                    primal::cluster::create(clusterInit, entity);
+                // cluster::component == entity_id — set proxy.meshId so
+                // RenderSceneSnapshot can resolve the cluster.
+                proxy.meshId = clusterComp;
+            } else {
+                proxy.meshId = meshInfo.meshEntityId;
+            }
+        } else {
+            proxy.meshId = meshInfo.meshEntityId;
         }
 
         scene_.AddProxy(proxy);
@@ -630,6 +746,25 @@ void Engine_Test::RenderFrame() {
     // jittered forward depth — that's what keeps reflections stable while TAA jitters color.
     auto depthRG = renderGraph_->ImportTexture("PrepassDepth", prepassDepthTexture_, depthDescForRG);
 
+    // In meshlet modes (7/8), prepassDepthTexture_ is NEVER written — we skip
+    // RenderDawnDepthPrepass because the meshlet pipeline owns depth. Feeding
+    // the stale prepass texture to HZB/SSAO produced a static AO overlay that
+    // read as a persistent "ghost" over the moving meshlet result. Mirror the
+    // Metal test (TestNaniteStreamingPipeline.cpp:3340-3341) and import the
+    // meshlet pipeline's own final_depth_texture_ for post-process depth reads.
+    // Forward/Deferred paths still use prepassDepthTexture_.
+    const bool meshletMode = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
+                              renderMode_ == DawnRenderMode::Meshlet);
+#ifndef __EMSCRIPTEN__
+    if (meshletMode) {
+        auto& gpuDrawPipeline = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+        rhi::ResourceHandle meshletDepth = gpuDrawPipeline.GetFinalDepthTexture();
+        if (meshletDepth != rhi::handles::INVALID_RESOURCE) {
+            depthRG = renderGraph_->ImportTexture("MeshletDepth", meshletDepth, depthDescForRG);
+        }
+    }
+#endif
+
     // Import velocity MRT texture (RG16F) for ToneMapping debug visualization
     rhi::TextureDesc velDescForRG;
     velDescForRG.size = {width_, height_, 1};
@@ -656,13 +791,14 @@ void Engine_Test::RenderFrame() {
     auto tonemapOutput = hdrRG;
 
     if (renderMode_ != DawnRenderMode::NoEffects && renderMode_ != DawnRenderMode::ShadowOnly) {
-        // TAA: resolve jittered HDR into clean HDR using velocity from MRT.
-        const auto& taaOut = PostProcess::AddTAAPass(*renderGraph_, hdrRG, velMrtRG, width_, height_, fi);
-        taaHDR = taaOut.output;
+        // DIAGNOSTIC: bypass TAA for meshlet modes to confirm ghost source.
+        // TODO: re-enable once meshlet velocity (RG16F) is verified to feed TAA correctly.
+        if (!meshletMode) {
+            const auto& taaOut = PostProcess::AddTAAPass(*renderGraph_, hdrRG, velMrtRG, width_, height_, fi);
+            taaHDR = taaOut.output;
+        }
 
         // SSR: trace reflection rays (half-res), temporal accumulate, composite into HDR.
-        // Runs in FullPlusSSR (forward + reflections) and Deferred (Phase 3d —
-        // deferred lighting + reflections, mirrors FullPlusSSR's look).
         if (renderMode_ == DawnRenderMode::FullPlusSSR || renderMode_ == DawnRenderMode::Deferred) {
             const auto& ssrOut = PostProcess::AddSSRPass(*renderGraph_, taaHDR, depthRG, hzbHandle,
                                                           velMrtRG, width_, height_, fi,
@@ -834,25 +970,38 @@ void Engine_Test::RenderFrame() {
     if (cmd) {
         cmd->Reset();
         if (cmd->Begin()) {
-            // 1. Shadow pass — skip in NoEffects mode
-            if (renderMode_ != DawnRenderMode::NoEffects) {
+            // 1. Shadow pass — skip in NoEffects / Meshlet modes (Meshlet runs
+            //    its own shadow pipeline in RenderMeshletFrame).
+            if (renderMode_ != DawnRenderMode::NoEffects &&
+                renderMode_ != DawnRenderMode::MeshletNoIBL &&
+                renderMode_ != DawnRenderMode::Meshlet) {
                 RenderShadowPass(cmd);
                 forwardRenderer_.SetDawnShadowLightVP(lightVP_);
             }
 
             // 1b. Non-jittered depth prepass — must run BEFORE Forward so its depth
             //     is already in prepassDepthTexture_ when RG passes (HZB/SSR/SSAO)
-            //     execute. Skipped in NoEffects — no consumer downstream.
-            if (renderMode_ != DawnRenderMode::NoEffects) {
+            //     execute. Skipped in NoEffects / Meshlet — Meshlet produces its
+            //     own depth texture via GPUDrivenDrawPipeline::Execute.
+            if (renderMode_ != DawnRenderMode::NoEffects &&
+                renderMode_ != DawnRenderMode::MeshletNoIBL &&
+                renderMode_ != DawnRenderMode::Meshlet) {
                 forwardRenderer_.RenderDawnDepthPrepass(cmd, view_, prepassDepthTexture_, fi, width_, height_);
             }
 
-            // 2. Forward pass — or G-Buffer + Deferred lighting for Deferred mode (Phase 3c).
-            // Deferred path: G-Buffer pass writes 5 MRTs, deferred lighting
-            // compute reads them + shadow + IBL and writes HDR color to
-            // hdrTexture_. Velocity (RT4) is blit'd to velocityTexture_ so
-            // downstream post-process passes (TAA) see it from the standard slot.
+            // Mode 7/8 (MeshletNoIBL / Meshlet) — runs its own shadow + HZB +
+            // cull + draw + meshlet deferred lighting. Produces hdrTexture_ from
+            // the 4-RT meshlet GBuffer. Falls through to the renderGraph
+            // post-processing pipeline below.
+            // Skipped on WASM (Nanite sources excluded from Engine WASM build).
+#ifndef __EMSCRIPTEN__
+            if (renderMode_ == DawnRenderMode::MeshletNoIBL ||
+                renderMode_ == DawnRenderMode::Meshlet) {
+                RenderMeshletFrame(cmd);
+            } else if (renderMode_ == DawnRenderMode::Deferred) {
+#else
             if (renderMode_ == DawnRenderMode::Deferred) {
+#endif
                 // G-Buffer shares the non-jittered prepass depth (LessEqual +
                 // no-write). depthTexture_ is only populated by Render(), which
                 // is bypassed in Deferred mode — using it would leave the
@@ -862,6 +1011,23 @@ void Engine_Test::RenderFrame() {
 
                 // Blit RT4 (velocity RG16F) → velocityTexture_ so TAA sees
                 // per-pixel motion vectors from the G-Buffer pass.
+                rhi::TextureBlitRegion velRegion{};
+                velRegion.srcSubresource = {0, 0, 1};
+                velRegion.srcOffsets[0] = {0, 0, 0};
+                velRegion.srcOffsets[1] = {(s32)width_, (s32)height_, 1};
+                velRegion.dstSubresource = {0, 0, 1};
+                velRegion.dstOffsets[0] = {0, 0, 0};
+                velRegion.dstOffsets[1] = {(s32)width_, (s32)height_, 1};
+                cmd->BlitTexture(gbufferTextures_[4], velocityTexture_, &velRegion, 1, rhi::FilterMode::Nearest);
+            } else if (renderMode_ == DawnRenderMode::LumenDDGI) {
+                // Phase 4 (Lumen DDGI). Plumbing-only stage: behavior currently
+                // mirrors Deferred (G-Buffer + Deferred Lighting) so the mode
+                // is selectable via Tab. Subsequent 4a/4b/4c/4d steps will
+                // insert GlobalSDF dispatch, DDGI trace/update, and the DDGI
+                // ambient term in DeferredLighting.
+                forwardRenderer_.RenderDawnGBuffer(cmd, view_, gbufferTextures_, prepassDepthTexture_, materials_, fi, width_, height_);
+                forwardRenderer_.RenderDawnDeferredLighting(cmd, view_, gbufferTextures_, hdrTexture_, scene_, fi, width_, height_);
+
                 rhi::TextureBlitRegion velRegion{};
                 velRegion.srcSubresource = {0, 0, 1};
                 velRegion.srcOffsets[0] = {0, 0, 0};
@@ -888,22 +1054,6 @@ void Engine_Test::RenderFrame() {
     device_->EndFrame();
     frameIndex_++;
     totalFrames_++;
-
-    // Periodic diagnostic: log pool size every 300 frames to detect leaks
-    if (totalFrames_ % 300 == 0) {
-#ifdef __EMSCRIPTEN__
-        // Use emscripten_get_heap_max() / emscripten_get_used_heap_size() via proxy
-        // or just log what we can
-        std::cout << "[Diag] Frame " << totalFrames_
-                  << " dt=" << dt * 1000.0f << "ms"
-                  << " RG pool=" << renderGraph_->GetPoolSize()
-                  << std::endl;
-#else
-        std::cout << "[Diag] Frame " << totalFrames_
-                  << " dt=" << dt * 1000.0f << "ms"
-                  << " RG pool=" << renderGraph_->GetPoolSize() << std::endl;
-#endif
-    }
 }
 
 void Engine_Test::UpdateCamera(float dt) {
@@ -947,30 +1097,65 @@ void Engine_Test::UpdateCamera(float dt) {
         return;
     }
 
-    // Tab (keyCode 48) to cycle render mode — edge detected
+    // Tab (keyCode 48) to cycle render mode — edge detected.
+    // V (keyCode 9) cycles meshlet debug visualization (mode 7/8 only).
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
             "Directional + Shadow + IBL",
             "Directional + Shadow + IBL + Punctual",
             "Full + Screen-Space Reflections",
-            "G-Buffer + Deferred Lighting"
+            "G-Buffer + Deferred Lighting",
+            "G-Buffer + DDGI Global Illumination",
+            "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
+            "GPU-Driven Meshlet + Indirect Draw + IBL"
         };
+        static const char* kDebugLabel[] = {"Off", "MeshletID", "TriangleID", "MeshID"};
         bool tabPressed = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 48);
         if (tabPressed && !prevTabState_) {
             renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
             forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
+            // TAA history holds the previous mode's HDR image; without a reset
+            // it bleeds into the new mode for several frames (visible as a
+            // ghost of the prior scene). Mark history slots as invalid so the
+            // next AddTAAPass treats the input as a fresh frame.
+            PostProcess::ResetTAAHistory();
             std::cerr << "[Mode] " << kModeNames[static_cast<u8>(renderMode_)] << std::endl;
-            // Update window title with mode info
-            char title[256];
-            snprintf(title, sizeof(title), "Dawn Forward Renderer | [Tab] Switch Mode | Mode %d: %s — %s",
-                     static_cast<u8>(renderMode_), kModeNames[static_cast<u8>(renderMode_)],
-                     kModeDesc[static_cast<u8>(renderMode_)]);
-            window_.set_caption(title);
         }
         prevTabState_ = tabPressed;
+
+        const bool vPressed = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 9);
+        if (vPressed && !prevVState_) {
+            // V key is intentionally a mode-7 affordance: it cycles the meshlet
+            // debug visualization. Mode 8 (full-lit meshlet) ignores V so the
+            // textured result stays unmodified.
+            if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
+                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 4u;
+                std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_
+                          << " (" << kDebugLabel[meshletDebugMode_] << ")" << std::endl;
+            } else {
+                std::cerr << "[Meshlet] V ignored — debug visualization only available in Mode 7 (MeshletNoIBL)" << std::endl;
+            }
+        }
+        prevVState_ = vPressed;
+
+        // Auto-reset debug mode when leaving Mode 7 so Mode 8 doesn't inherit
+        // hashed-color state via GPUDrivenDrawPipeline::SetDebugMode.
+        if (renderMode_ != DawnRenderMode::MeshletNoIBL && meshletDebugMode_ != 0u) {
+            meshletDebugMode_ = 0u;
+        }
+
+        // Refresh title every frame so the current debug mode is visible
+        // alongside the current render mode. Cheap (one snprintf + set_caption).
+        char title[256];
+        snprintf(title, sizeof(title),
+                 "Dawn Forward Renderer | [Tab] Mode | [V] Meshlet Debug: %s | Mode %d: %s — %s",
+                 kDebugLabel[meshletDebugMode_],
+                 static_cast<u8>(renderMode_), kModeNames[static_cast<u8>(renderMode_)],
+                 kModeDesc[static_cast<u8>(renderMode_)]);
+        window_.set_caption(title);
     }
 #endif
 
@@ -1014,21 +1199,27 @@ void Engine_Test::UpdateCamera(float dt) {
         cameraPitch_ -= mdy * 0.002f;
     }
 
-    // Tab (keyCode 9) to cycle render mode — WASM
+    // Tab (keyCode 9) to cycle render mode, V (keyCode 86) to cycle meshlet
+    // debug visualization — WASM. Both edge-detected.
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
             "Directional + Shadow + IBL",
             "Directional + Shadow + IBL + Punctual",
             "Full + Screen-Space Reflections",
-            "G-Buffer + Deferred Lighting"
+            "G-Buffer + Deferred Lighting",
+            "G-Buffer + DDGI Global Illumination",
+            "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
+            "GPU-Driven Meshlet + Indirect Draw + IBL"
         };
         bool tabPressed = EmscriptenGetKeyState(9);
         if (tabPressed && !prevTabState_) {
             renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
             forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
+            // Drop TAA history so the prior mode's HDR image doesn't bleed in.
+            PostProcess::ResetTAAHistory();
             std::cerr << "[Mode] " << kModeNames[static_cast<u8>(renderMode_)] << std::endl;
             EM_ASM_({
                 if (window.setRenderMode) {
@@ -1037,6 +1228,25 @@ void Engine_Test::UpdateCamera(float dt) {
             }, static_cast<u8>(renderMode_), kModeNames[static_cast<u8>(renderMode_)], kModeDesc[static_cast<u8>(renderMode_)]);
         }
         prevTabState_ = tabPressed;
+
+        bool vPressed = EmscriptenGetKeyState(86);
+        if (vPressed && !prevVState_) {
+            // V only in Mode 7 (MeshletNoIBL) — see native handler for rationale.
+            if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
+                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 4u;
+                std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_ << std::endl;
+                EM_ASM_({
+                    if (window.setMeshletDebug) {
+                        window.setMeshletDebug($0);
+                    }
+                }, meshletDebugMode_);
+            }
+        }
+        prevVState_ = vPressed;
+
+        if (renderMode_ != DawnRenderMode::MeshletNoIBL && meshletDebugMode_ != 0u) {
+            meshletDebugMode_ = 0u;
+        }
     }
 #endif
 
@@ -1774,6 +1984,318 @@ void Engine_Test::UpdatePunctualLights() {
     punctualLightsAdded_ = true;
 }
 
+// ============================================================
+// Meshlet pipeline (mode 7/8)
+// ============================================================
+// Nanite sources are excluded from the WASM build (see Engine/CMakeLists.txt:
+// "Emscripten: exclude Nanite/Lumen systems (Metal-specific)"). The whole
+// meshlet path is therefore compiled out for __EMSCRIPTEN__; Tab still cycles
+// through modes 7/8 in the enum but those modes render nothing on WASM.
+#ifndef __EMSCRIPTEN__
+
+bool Engine_Test::InitializeMeshletPipeline() {
+    if (meshletInitialized_) return true;
+    if (!device_) return false;
+
+    // 0. NaniteResourceManager — must be initialized BEFORE RenderSceneSnapshot
+    //    tries to GetOrCreateResource(geometry_content_id). Without this, the
+    //    manager's device_ is null, every lookup returns nullptr, and every
+    //    instance ends up with cluster_count=0 — which makes UpdateGeometryData
+    //    bail early (totalMeshlets == 0), so cluster_map_buffer_ and
+    //    global_instance_data_buffer_ never get created.
+    auto& resourceManager = primal::graphics::nanite::NaniteResourceManager::Get();
+    if (!resourceManager.Initialize(device_)) {
+        std::cerr << "[Meshlet] NaniteResourceManager init failed" << std::endl;
+        return false;
+    }
+
+    // 0b. Pre-check: scan mesh assets. We need either pre-baked MSHL sections
+    // OR (failing that) at least one asset with index data — the runtime
+    // synthesizer chunks the index buffer into meshlets on demand. If every
+    // asset is empty (no indices at all), the pipeline can't draw anything.
+    {
+        u32 assetsUsable = 0;
+        for (const auto& meshInfo : sceneMeshInfos_) {
+            graphics::rhi::RHIMeshAsset asset;
+            if (!primal::content::get_rhi_mesh_asset(meshInfo.meshEntityId, asset)) continue;
+            if (!asset.meshlets.empty() || asset.num_indices > 0) {
+                assetsUsable++;
+            }
+        }
+        if (assetsUsable == 0) {
+            std::cerr << "[Meshlet] No usable mesh assets among the "
+                      << sceneMeshInfos_.size() << " loaded. "
+                      << "Mode 7 needs either pre-baked MSHL data or index buffers "
+                      << "we can synthesize from. Falling back to NoEffects." << std::endl;
+            return false;
+        }
+        std::cerr << "[Meshlet] " << assetsUsable << " / " << sceneMeshInfos_.size()
+                  << " meshes usable (MSHL or index-buffer synthesizable)" << std::endl;
+    }
+
+    // 1. GPUDrivenDrawPipeline (singleton)
+    auto& gpuDrawPipeline = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+    primal::graphics::nanite::BinningConfig binningConfig{};
+    binningConfig.bin_size = 64;
+    binningConfig.max_bins_per_frame = 4096;
+    binningConfig.max_clusters_per_bin = 256;
+    binningConfig.enable_spatial_sorting = true;
+
+    primal::graphics::nanite::VisibilityBufferConfig visibilityConfig{};
+    visibilityConfig.width = width_;
+    visibilityConfig.height = height_;
+    visibilityConfig.format = rhi::DataFormat::R32_UInt;
+    visibilityConfig.enable_depth = true;
+
+    if (!gpuDrawPipeline.Initialize(device_, binningConfig, visibilityConfig)) {
+        std::cerr << "[Meshlet] GPUDrivenDrawPipeline init failed" << std::endl;
+        return false;
+    }
+
+    // 2. GPUCullingPipeline (singleton)
+    auto& cullingPipeline = primal::graphics::nanite::GPUCullingPipeline::Get();
+    primal::graphics::nanite::CullingConfig cullingConfig;
+    cullingConfig.max_clusters_per_dispatch = 100000;
+    cullingConfig.max_instances_per_dispatch = 10000;
+    cullingConfig.enable_streaming_feedback = false;
+    cullingConfig.enable_occlusion_culling = false;
+    cullingConfig.enable_lod_selection = false;
+    cullingConfig.enable_debug_output = false;
+
+    std::cerr << "[Meshlet] Initializing GPUCullingPipeline..." << std::endl;
+    if (!cullingPipeline.Initialize(device_, cullingConfig)) {
+        std::cerr << "[Meshlet] GPUCullingPipeline init failed" << std::endl;
+        return false;
+    }
+    std::cerr << "[Meshlet] GPUCullingPipeline initialized" << std::endl;
+
+    // Cross-wire draw ↔ cull (meshlet buffer access both ways).
+    gpuDrawPipeline.SetCullingPipeline(&cullingPipeline);
+    cullingPipeline.SetGPUDrawPipeline(&gpuDrawPipeline);
+
+    // 3. HZBSystem (owned by test)
+    meshletHZBSystem_ = new primal::graphics::nanite::HZBSystem();
+    primal::graphics::nanite::HZBSystem::Config hzbConfig;
+    hzbConfig.max_width = width_;
+    hzbConfig.max_height = height_;
+    hzbConfig.min_mip_size = 8;
+    hzbConfig.enable_compression = false;
+    hzbConfig.generate_on_gpu = true;
+    std::cerr << "[Meshlet] Initializing HZBSystem..." << std::endl;
+    if (!meshletHZBSystem_->Initialize(device_, hzbConfig)) {
+        std::cerr << "[Meshlet] HZBSystem init failed" << std::endl;
+        delete meshletHZBSystem_;
+        meshletHZBSystem_ = nullptr;
+        return false;
+    }
+    std::cerr << "[Meshlet] HZBSystem initialized" << std::endl;
+
+    gpuDrawPipeline.SetHZBSystem(meshletHZBSystem_);
+    cullingPipeline.SetHZBSystem(meshletHZBSystem_);
+
+    // 4. Material registry — register all Sponza materials, build + upload.
+    meshletMaterialRegistry_ = new primal::graphics::nanite::GPUMaterialRegistry();
+    u32 registeredCount = 0;
+    for (auto& meshInfo : sceneMeshInfos_) {
+        if (meshInfo.materialInstance) {
+            auto matID = meshletMaterialRegistry_->RegisterMaterial(meshInfo.materialInstance.get());
+            if (matID != primal::graphics::nanite::GPUMaterialRegistry::INVALID_MATERIAL_ID) {
+                meshInfo.gpuMaterialId = matID;
+                registeredCount++;
+            }
+        }
+    }
+    std::cerr << "[Meshlet] Registered " << registeredCount << " materials" << std::endl;
+
+    // Patch RenderProxy.materialId on every proxy — at LoadScene time we stored
+    // entity_id there as a placeholder, but the GPU material buffer is indexed
+    // by the registry's slot ID (0,1,2,...). Without this patch the fragment
+    // shader reads material_data[entity_id * 48] — OOB, returns zeros, and the
+    // GBuffer albedo defaults to white (vec4(1.0)).
+    for (auto& meshInfo : sceneMeshInfos_) {
+        if (meshInfo.materialInstance && meshInfo.gpuMaterialId != primal::id::invalid_id) {
+            for (const auto& proxy : scene_.GetProxies()) {
+                if (proxy.entityId == meshInfo.meshEntityId) {
+                    RenderProxy patched = proxy;
+                    patched.materialId = meshInfo.gpuMaterialId;
+                    scene_.UpdateProxy(meshInfo.meshEntityId, patched);
+                    break;
+                }
+            }
+        }
+    }
+
+    auto buildJob = meshletMaterialRegistry_->BuildAsync(device_);
+    buildJob.Wait();
+    if (!meshletMaterialRegistry_->UploadToGPU(device_)) {
+        std::cerr << "[Meshlet] Material upload failed" << std::endl;
+    } else {
+        gpuDrawPipeline.SetMaterialDataBuffer(meshletMaterialRegistry_->GetMaterialDataBuffer());
+
+        // Texture sampler — Wrap addressing to match the Metal test (Sponza uses repeat).
+        rhi::SamplerDesc samplerDesc{};
+        samplerDesc.minFilter = rhi::FilterMode::Linear;
+        samplerDesc.magFilter = rhi::FilterMode::Linear;
+        samplerDesc.mipFilter = rhi::FilterMode::Linear;
+        samplerDesc.addressU = rhi::TextureAddressMode::Wrap;
+        samplerDesc.addressV = rhi::TextureAddressMode::Wrap;
+        samplerDesc.addressW = rhi::TextureAddressMode::Wrap;
+        samplerDesc.maxAnisotropy = 1;
+        samplerDesc.minLod = 0.0f;
+        samplerDesc.maxLod = 100.0f;
+        samplerDesc.comparisonFunc = rhi::ComparisonFunc::Never;
+        rhi::SamplerHandle texSampler = device_->CreateSampler(samplerDesc);
+
+        gpuDrawPipeline.SetTextureArrays(
+            meshletMaterialRegistry_->GetAlbedoTextureArray(),
+            meshletMaterialRegistry_->GetNormalTextureArray(),
+            meshletMaterialRegistry_->GetORMTextureArray(),
+            texSampler);
+    }
+
+    // 5. Scene snapshot — converts RenderScene to GPU instance/cluster buffers.
+    if (!meshletSceneSnapshot_.Initialize(device_, /*max_instances=*/1000, /*max_clusters=*/100000)) {
+        std::cerr << "[Meshlet] RenderSceneSnapshot init failed" << std::endl;
+        return false;
+    }
+    if (!meshletSceneSnapshot_.Rebind(scene_)) {
+        std::cerr << "[Meshlet] RenderSceneSnapshot rebind failed" << std::endl;
+        return false;
+    }
+
+    // 6. Shadow resources (uses 2 cascades internally — ShadowFrameResources has [2]).
+    if (!gpuDrawPipeline.InitializeShadowResources(
+            (u32)sceneMeshInfos_.size(), /*max_clusters=*/100000)) {
+        std::cerr << "[Meshlet] Shadow resources init failed" << std::endl;
+    }
+
+    meshletInitialized_ = true;
+    std::cerr << "[Meshlet] Pipeline initialized" << std::endl;
+    return true;
+}
+
+void Engine_Test::ShutdownMeshletPipeline() {
+    if (!meshletInitialized_) return;
+
+    auto& gpuDrawPipeline = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+    auto& cullingPipeline = primal::graphics::nanite::GPUCullingPipeline::Get();
+
+    gpuDrawPipeline.ShutdownShadowResources();
+    meshletSceneSnapshot_.Shutdown();
+
+    if (meshletMaterialRegistry_) {
+        delete meshletMaterialRegistry_;
+        meshletMaterialRegistry_ = nullptr;
+    }
+    if (meshletHZBSystem_) {
+        meshletHZBSystem_->Shutdown();
+        delete meshletHZBSystem_;
+        meshletHZBSystem_ = nullptr;
+    }
+
+    cullingPipeline.Shutdown();
+    gpuDrawPipeline.Shutdown();
+
+    meshletInitialized_ = false;
+}
+
+void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cmd) {
+    if (!meshletInitialized_) {
+        if (!InitializeMeshletPipeline()) {
+            std::cerr << "[Meshlet] Init failed, falling back to NoEffects" << std::endl;
+            renderMode_ = DawnRenderMode::NoEffects;
+            return;
+        }
+    }
+
+    auto& gpuDrawPipeline = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+    auto& cullingPipeline = primal::graphics::nanite::GPUCullingPipeline::Get();
+    const u32 fi = frameIndex_ % kFrameCount;
+
+    // Sync CPU→GPU scene buffers (instance/cluster refs). No-op after first frame
+    // unless scene changes.
+    meshletSceneSnapshot_.UploadToGPUBuffers(cmd);
+
+    // --- 1. Shadow cascade pass (2 cascades, matches ShadowFrameResources[2]) ---
+    ComputeCSMViewProjections();
+    for (u32 cascade = 0; cascade < 2; ++cascade) {
+        primal::graphics::nanite::GPUDrivenDrawPipeline::DirectionalLightData lightData{};
+        // light dir from scene
+        const auto& lights = scene_.GetLights();
+        if (!lights.empty()) {
+            lightData.direction = primal::math::v4{lights[0].direction.x, lights[0].direction.y, lights[0].direction.z, 0.0f};
+            lightData.color = primal::math::v4{lights[0].color.x, lights[0].color.y, lights[0].color.z, lights[0].intensity};
+        }
+        lightData.viewPos = primal::math::v4{cameraPos_.x, cameraPos_.y, cameraPos_.z, 1.0f};
+        lightData.shadowMatrix0 = cascadeVPs_[0];
+        lightData.shadowMatrix1 = cascadeVPs_[1];
+        lightData.cascadeSplits = primal::math::v4{10.0f, 25.0f, 0.0f, 0.0f};
+
+        gpuDrawPipeline.ExecuteShadowCulling(cmd, meshletSceneSnapshot_, lightData, cascade, fi);
+        gpuDrawPipeline.ExecuteShadowRaster(cmd, cascadeVPs_[cascade], cascade, fi);
+        gpuDrawPipeline.ExecuteShadowDepthBlit(cmd, cascade, fi);
+    }
+
+    // --- 2. Cull (HZB disabled for now — uses prev-frame depth which we don't have
+    //     in this path; the culling kernel guards hzb_system_ null-ness).
+    cullingPipeline.Execute(cmd, meshletSceneSnapshot_,
+                            view_.GetViewMatrix(), view_.GetProjectionMatrix(),
+                            nullptr, fi);
+    const auto& cullingResults = cullingPipeline.GetResults();
+
+    // --- 3. Meshlet draw — produces 4-RT GBuffer + final_depth_texture_.
+    // Push the debug mode (V key state) before Execute so the GBuffer pass
+    // can hash-color by meshlet_id / triangle_id / mesh_id when active.
+    gpuDrawPipeline.SetDebugMode(meshletDebugMode_);
+    if (!gpuDrawPipeline.Execute(cmd, meshletSceneSnapshot_,
+                                 view_.GetViewMatrix(), view_.GetProjectionMatrix(),
+                                 cullingResults, frameIndex_, fi)) {
+        std::cerr << "[Meshlet] GPUDrivenDrawPipeline::Execute failed" << std::endl;
+    }
+
+    // --- 4. Wire the meshlet GBuffer + sampleable depth into deferred lighting.
+    //     final_depth_texture_ is D32_Float with ShaderResource usage (set at
+    //     creation in GPUDrivenDrawPipeline.cpp:440). No barrier needed — Dawn
+    //     barriers are no-ops; state tracked for downstream consumers only.
+    rhi::ResourceHandle meshletGBuffer[4] = {
+        gpuDrawPipeline.GetGBufferAlbedo(),
+        gpuDrawPipeline.GetGBufferNormal(),
+        gpuDrawPipeline.GetGBufferORM(),
+        gpuDrawPipeline.GetGBufferVelocity(),
+    };
+    rhi::ResourceHandle meshletDepth = gpuDrawPipeline.GetFinalDepthTexture();
+
+    // Point shadow + IBL at the existing renderer-owned bindings so the meshlet
+    // deferred shader sees the same shadow map / cube maps as the other modes.
+    // SetDawnShadowResources was already called during init.
+    // enableIBL: Mode 7 (MeshletNoIBL) skips the IBL ambient term; Mode 8 applies it.
+    forwardRenderer_.SetDawnEnableIBL(renderMode_ == DawnRenderMode::Meshlet ? 1u : 0u);
+    forwardRenderer_.RenderDawnMeshletDeferredLighting(
+        cmd, view_, meshletGBuffer, meshletDepth, hdrTexture_, scene_,
+        frameIndex_, width_, height_);
+
+    // Blit meshlet velocity (RG16_UNorm) → velocityTexture_ so downstream TAA
+    // sees per-pixel motion vectors. Note: format mismatch (UNorm vs Float) —
+    // values get quantized but the sign survives for small motion.
+    rhi::TextureBlitRegion velRegion{};
+    velRegion.srcSubresource = {0, 0, 1};
+    velRegion.srcOffsets[0] = {0, 0, 0};
+    velRegion.srcOffsets[1] = {(s32)width_, (s32)height_, 1};
+    velRegion.dstSubresource = {0, 0, 1};
+    velRegion.dstOffsets[0] = {0, 0, 0};
+    velRegion.dstOffsets[1] = {(s32)width_, (s32)height_, 1};
+    cmd->BlitTexture(gpuDrawPipeline.GetGBufferVelocity(), velocityTexture_,
+                     &velRegion, 1, rhi::FilterMode::Nearest);
+
+    // Update previous view-projection for next frame's velocity calc. The
+    // meshlet pipeline caches its own prev matrices internally; this update
+    // only feeds the renderer-side TAA predictor and the meshlet deferred's
+    // prevViewProjection uniform.
+    forwardRenderer_.SetDawnShadowLightVP(cascadeVPs_[0]);
+}
+
+#endif // __EMSCRIPTEN__
+
 #ifdef __APPLE__
 void Engine_Test::DisplayLinkCallback(CFRunLoopTimerRef, void* info) {
     auto* test = static_cast<Engine_Test*>(info);
@@ -1787,6 +2309,9 @@ void Engine_Test::run() {
 }
 
 void Engine_Test::shutdown() {
+#ifndef __EMSCRIPTEN__
+    ShutdownMeshletPipeline();
+#endif
     forwardRenderer_.Shutdown();
     DestroyDepthTexture();
     DestroyPrepassDepthTexture();
@@ -1902,6 +2427,8 @@ void Engine_Test::shutdown() {
     if (window_.is_valid()) {
         platform::remove_window(window_.get_id());
     }
+
+    primal::jobsystem::JobSystem::Shutdown();
 }
 
 #ifdef __APPLE__

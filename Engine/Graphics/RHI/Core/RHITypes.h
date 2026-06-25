@@ -569,6 +569,7 @@ struct DescriptorSetLayoutBinding {
     bool readonly{ false }; // true = StorageImage read-only access (Dawn: ReadOnly vs WriteOnly)
     bool isArray{ false }; // true = StorageImage/2DArray view dimension
     bool isCube{ false }; // true = SampledImage uses Cube view dimension
+    bool unfilterableFloat{ false }; // true = SampledImage uses UnfilterableFloat sample type (required for R32Float in WebGPU)
     u64 minBindingSize{ 0 }; // For buffer types: minimum buffer size (0 = infer from shader)
 };
 
