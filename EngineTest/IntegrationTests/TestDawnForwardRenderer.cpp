@@ -359,10 +359,8 @@ bool Engine_Test::initialize() {
             hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;';
             hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>'
                 + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>'
-                + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>'
                 + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>'
-                + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>'
-                + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>';
+                + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>';
             document.body.appendChild(hud);
         }
         // Define HUD update function (independent of shell.html)
@@ -371,21 +369,6 @@ bool Engine_Test::initialize() {
             var d = document.getElementById('modeHudDesc');
             if (c) c.textContent = 'Mode ' + idx + ': ' + name;
             if (d) d.textContent = desc;
-            // Show the meshlet-debug status line only in modes 7/8.
-            var dbg = document.getElementById('meshletDbgHud');
-            if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none';
-        };
-        // Update meshlet debug label (called from C++ on each V press).
-        // Avoid array-literal commas in EM_ASM — the C preprocessor treats top-
-        // level commas as macro-argument separators.
-        window.setMeshletDebug = function(mode) {
-            var dbg = document.getElementById('meshletDbgHud');
-            if (!dbg) return;
-            var label = 'Off';
-            if (mode == 1) label = 'MeshletID';
-            else if (mode == 2) label = 'TriangleID';
-            else if (mode == 3) label = 'MeshID';
-            dbg.textContent = 'Meshlet Debug: ' + label;
         };
     });
 #endif
@@ -1199,8 +1182,14 @@ void Engine_Test::UpdateCamera(float dt) {
         cameraPitch_ -= mdy * 0.002f;
     }
 
-    // Tab (keyCode 9) to cycle render mode, V (keyCode 86) to cycle meshlet
-    // debug visualization — WASM. Both edge-detected.
+    // Tab (keyCode 9) to cycle render mode — edge detected.
+    // WASM: Nanite sources are excluded from the Engine build (CMakeLists
+    // list(FILTER ... EXCLUDE REGEX ".*/Nanite/.*")), so Mode 7/8 would
+    // render nothing — empty HDR + HZB reading never-written prepass depth
+    // shows up as a static "ghost" over a black screen, and V has no effect
+    // because SetDebugMode lives inside RenderMeshletFrame which is
+    // #ifndef __EMSCRIPTEN__-guarded out. Wrap Tab at LumenDDGI (Mode 6)
+    // until the meshlet pipeline is ported to WASM.
     {
         static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet"};
         static const char* kModeDesc[] = {
@@ -1214,9 +1203,10 @@ void Engine_Test::UpdateCamera(float dt) {
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
             "GPU-Driven Meshlet + Indirect Draw + IBL"
         };
+        constexpr u8 kWasmModeCount = static_cast<u8>(DawnRenderMode::LumenDDGI) + 1u;
         bool tabPressed = EmscriptenGetKeyState(9);
         if (tabPressed && !prevTabState_) {
-            renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
+            renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % kWasmModeCount);
             forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
             // Drop TAA history so the prior mode's HDR image doesn't bleed in.
             PostProcess::ResetTAAHistory();
@@ -1228,25 +1218,6 @@ void Engine_Test::UpdateCamera(float dt) {
             }, static_cast<u8>(renderMode_), kModeNames[static_cast<u8>(renderMode_)], kModeDesc[static_cast<u8>(renderMode_)]);
         }
         prevTabState_ = tabPressed;
-
-        bool vPressed = EmscriptenGetKeyState(86);
-        if (vPressed && !prevVState_) {
-            // V only in Mode 7 (MeshletNoIBL) — see native handler for rationale.
-            if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
-                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 4u;
-                std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_ << std::endl;
-                EM_ASM_({
-                    if (window.setMeshletDebug) {
-                        window.setMeshletDebug($0);
-                    }
-                }, meshletDebugMode_);
-            }
-        }
-        prevVState_ = vPressed;
-
-        if (renderMode_ != DawnRenderMode::MeshletNoIBL && meshletDebugMode_ != 0u) {
-            meshletDebugMode_ = 0u;
-        }
     }
 #endif
 
