@@ -46,6 +46,8 @@ namespace primal::graphics::metal::shader
 			bool result { content::load_engine_shaders(engine_shaders_blob, size) };
 			// 缺 shader blob 是运行时条件（环境没构建），不应 abort。
 			// 上层 shader::initialize() 会返回 false，由 metal::core::initialize() 决定如何处理。
+			// Avalonia 嵌入式 Editor 场景下，cwd 可能不包含预编译 blob，RHI 路径有自己的
+			// per-shader source-compile fallback，失败时上层走非 shader 渲染路径即可。
 			if (!result || !engine_shaders_blob || size == 0) return false;
 
 			u64 offset { 0 };
@@ -99,11 +101,11 @@ namespace primal::graphics::metal::shader
         }
     } // anonymous namespace
 
-	bool initialize() 
+	bool initialize()
     {
 		return load_engine_shaders();
 	}
-	void shutdown() 
+	void shutdown()
     {
 		// 释放所有MTL::Function对象
 		for (auto* function : engine_functions)
@@ -135,12 +137,14 @@ namespace primal::graphics::metal::shader
 
 	engine_metal_shader_function get_engine_shader(engine_shader::id id)
 	{
-		assert(id < engine_shader::count);
-		assert(!engine_libraries.empty());
-		assert(!engine_functions.empty());
-		
+		// If load_engine_shaders never produced any library (e.g. Avalonia editor
+		// without a precompiled shaders blob), return an empty function. Callers
+		// null-check via .get() and skip their dependent pass.
+		if (id >= engine_shader::count || engine_libraries.empty() || engine_functions.empty()) {
+			return engine_metal_shader_function(nullptr, nullptr);
+		}
 		// 检查函数指针是否有效
-		if (id >= engine_shader::count || engine_functions.empty() || !engine_functions[id]) {
+		if (!engine_functions[id]) {
 			return engine_metal_shader_function(nullptr, nullptr);
 		}
 		

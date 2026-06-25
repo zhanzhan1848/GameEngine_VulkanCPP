@@ -25,13 +25,15 @@ namespace primal::graphics
 	{
 
 		// Defines where the compiled engine shaders file is located for each one of the supported APIs.
+		// Paths are resolved relative to the executable's directory at runtime by ContentLoader
+		// (see ContentLoaderMac.cpp read_file). Keep the bare filenames stable so the same
+		// compilation pipeline (TestPCGScatter / EngineTest) can produce the blob and have
+		// both standalone test executables and the Avalonia editor find it.
 		constexpr const char* engine_shader_paths[]
 		{
 			"./shaders/d3d12/shaders.bin",
-			"./shaders/vulkan/shaders.bin", 
-			"/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Debug/shaders/metal/shaders.metallib", // "./shaders/metal/shaders.metallib"
-			// "./shaders/vulkan/shaders.bin", 
-			//etc
+			"./shaders/vulkan/shaders.bin",
+			"./shaders/metal/shaders.metallib",
 		};
 
 		platform_interface gfx{};
@@ -94,6 +96,16 @@ namespace primal::graphics
 	surface create_surface(platform::window window)
 	{
 		return gfx.surface.create(window);
+	}
+
+	surface create_external_surface(void* host_view, u32 width, u32 height)
+	{
+		return gfx.surface.create_external ? gfx.surface.create_external(host_view, width, height) : surface{};
+	}
+
+	void* get_surface_native_view(surface_id id)
+	{
+		return gfx.surface.get_native_view ? gfx.surface.get_native_view(id) : nullptr;
 	}
 
 	void remove_surface(surface_id id)

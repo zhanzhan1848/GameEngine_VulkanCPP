@@ -17,8 +17,15 @@ namespace primal::graphics::metal::fx
     [[nodiscard]] const metal_render_texture& get_compose_texture();
 
     void set_size(math::u32v2 size);
-    void post_process(MTL::CommandBuffer* buffer, metal_surface* surface, const constant_buffer& cbuffer);
+    void post_process(MTL::CommandBuffer* buffer, metal_surface* surface, const constant_buffer& cbuffer, f32 delta_time = 0.f);
     void compose_pass(MTL::CommandBuffer* buffer, const metal_frame_info& metal_info);
+
+    // Editor hook: invoked from the post-process fallback when no
+    // real shaders are available. The hook records editor-side
+    // preview draws into the same command buffer / drawable that
+    // surface::render is presenting.
+    using editor_draw_hook = void(*)(MTL::CommandBuffer* buffer, CA::MetalDrawable* drawable, f32 time);
+    void set_editor_draw_hook(editor_draw_hook hook);
 }
 
 namespace primal::graphics::metal::ssao

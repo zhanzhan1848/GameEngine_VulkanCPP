@@ -79,6 +79,9 @@ elseif(APPLE)
 
     # Metal shader validation (xcrun compile check)
     include(CMake/MetalShaderValidation.cmake)
+    # Build engine shaders metallib and legacy packed blob for
+    # Engine/Graphics/Metal/MetalShader.cpp::load_engine_shaders.
+    include(CMake/EngineShaderBlob.cmake)
 
     # FBX SDK 自动检测和安装
     set(FBX_SDK_VERSION "2020.3.7")

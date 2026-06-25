@@ -27,6 +27,8 @@ namespace primal::graphics {
 		struct
 		{
 			surface(*create)(platform::window);
+			surface(*create_external)(void*, u32, u32);
+			void*(*get_native_view)(surface_id);
 			void(*remove)(surface_id);
 			void(*resize)(surface_id, u32, u32);
 			u32(*width)(surface_id);

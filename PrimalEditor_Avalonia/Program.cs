@@ -3,6 +3,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Threading.Tasks;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.GameProject;
@@ -20,7 +23,80 @@ sealed class Program
             return;
         }
 
+        // Pin cwd to the executable directory. The native engine resolves
+        // shader blob paths like "./shaders/metal/shaders.metallib" relative
+        // to cwd; without this anchor, "dotnet ./.../dll" from a worktree
+        // root causes shader::initialize to fail silently and disables
+        // every render pass.
+        AnchorWorkingDirectoryToExecutable();
+
+        // Workaround for AvaloniaUI/Avalonia#18895: CVDisplayLink creation
+        // can fail immediately when the active display is in a low-power or
+        // Power Nap state, causing "Native error code is: -6661" on startup.
+        // Retry until a display link is available, then release it so Avalonia
+        // can create its own during AppBuilder.Setup().
+        if (OperatingSystem.IsMacOS())
+        {
+            AwaitDisplayLink().GetAwaiter().GetResult();
+        }
+
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    }
+
+    private static void AnchorWorkingDirectoryToExecutable()
+    {
+        try
+        {
+            string? baseDir = AppContext.BaseDirectory;
+            if (string.IsNullOrEmpty(baseDir)) return;
+
+            // Always pin cwd to the executable's directory. The native engine
+            // resolves bare-relative paths like "./shaders/metal/shaders.metallib"
+            // against cwd, and the only guaranteed source of that blob is the
+            // directory that hosts libPrimalEngine.dylib (== BaseDirectory on
+            // a packaged dotnet layout).
+            //
+            // Skip only when cwd already points at BaseDirectory (no-op
+            // SetCurrentDirectory) to avoid noisy log lines in the common case.
+            string currentDir = Directory.GetCurrentDirectory();
+            if (string.Equals(
+                    Path.GetFullPath(currentDir).TrimEnd(Path.DirectorySeparatorChar),
+                    Path.GetFullPath(baseDir).TrimEnd(Path.DirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            Directory.SetCurrentDirectory(baseDir);
+            Console.Error.WriteLine($"[Avalonia] cwd pinned to BaseDirectory: {baseDir}");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[Avalonia] Could not pin cwd to BaseDirectory: {ex.Message}");
+        }
+    }
+
+    [SupportedOSPlatform("macos")]
+    private static async Task AwaitDisplayLink()
+    {
+        const string CoreVideoLibrary = "/System/Library/Frameworks/CoreVideo.framework/CoreVideo";
+        [DllImport(CoreVideoLibrary)]
+        static extern int CVDisplayLinkCreateWithActiveCGDisplays(out IntPtr displayLinkOut);
+        [DllImport(CoreVideoLibrary)]
+        static extern void CVDisplayLinkRelease(IntPtr displayLink);
+
+        IntPtr displayLink;
+        int attempts = 0;
+        while (CVDisplayLinkCreateWithActiveCGDisplays(out displayLink) != 0)
+        {
+            attempts++;
+            if (attempts == 1)
+                Console.Error.WriteLine("[Avalonia] CVDisplayLink unavailable, retrying every 500ms (Avalonia issue #18895 workaround)");
+            await Task.Delay(500);
+        }
+        if (attempts > 0)
+            Console.Error.WriteLine($"[Avalonia] CVDisplayLink available after {attempts} retries");
+        CVDisplayLinkRelease(displayLink);
     }
 
     public static AppBuilder BuildAvaloniaApp()

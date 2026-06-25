@@ -11,7 +11,7 @@ set(SOURCE_FILES
     "EngineAPI_win32.cpp"
     "EntityAPI.cpp"
     "AssetAPI.cpp"
-    "RenderPipelineAPI.cpp"
+    # "RenderPipelineAPI.cpp"  # depends on StandardRenderPipeline/Lumen; not used by Avalonia UI yet
     "PCGAPI.cpp"
     "GeometryAPI.cpp"
     "MaterialAPI.cpp"
@@ -28,6 +28,7 @@ set(SOURCE_FILES
     "LightAPI.cpp"
     "CameraAPI.cpp"
     "ProceduralMeshAPI.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Graphics/EditorShaderManager.cpp"
 )
 
 if(APPLE)

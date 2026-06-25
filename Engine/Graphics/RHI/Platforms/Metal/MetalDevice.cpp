@@ -23,8 +23,11 @@
 
 namespace primal::graphics::rhi {
 
-MetalDevice::MetalDevice(const DeviceDesc& desc)
-    : RHIDevice(desc) {
+MetalDevice::MetalDevice(const DeviceDesc& desc, MTL::Device* external_device)
+    : RHIDevice(desc), mtlDevice_(nullptr) {
+    if (external_device) {
+        mtlDevice_ = external_device->retain();
+    }
 }
 
 MetalDevice::~MetalDevice() {
@@ -32,18 +35,22 @@ MetalDevice::~MetalDevice() {
 }
 
 bool MetalDevice::initializeImpl() {
-    // 1. 创建 Metal 设备
-    mtlDevice_ = MTL::CreateSystemDefaultDevice();
     if (!mtlDevice_) {
-        std::cerr << "[Metal] Failed to create system default device." << std::endl;
-        return false;
+        mtlDevice_ = MTL::CreateSystemDefaultDevice();
+        if (!mtlDevice_) {
+            std::cerr << "[Metal] Failed to create system default device." << std::endl;
+            return false;
+        }
+        ownsNativeDevice_ = true;
     }
 
-    // 2. 创建命令队列
     graphicsQueue_ = mtlDevice_->newCommandQueue();
     if (!graphicsQueue_) {
         std::cerr << "[Metal] Failed to create graphics command queue." << std::endl;
-        mtlDevice_->release();
+        if (ownsNativeDevice_) {
+            mtlDevice_->release();
+            ownsNativeDevice_ = false;
+        }
         mtlDevice_ = nullptr;
         return false;
     }
@@ -108,9 +115,12 @@ void MetalDevice::shutdownImpl() {
         graphicsQueue_ = nullptr;
     }
     if (mtlDevice_) {
-        mtlDevice_->release();
+        if (ownsNativeDevice_) {
+            mtlDevice_->release();
+        }
         mtlDevice_ = nullptr;
     }
+    ownsNativeDevice_ = false;
 }
 
 // 辅助函数：将 DataFormat 转换为 MTLPixelFormat

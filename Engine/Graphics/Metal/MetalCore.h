@@ -8,6 +8,13 @@ namespace primal::graphics::metal
 
     struct metal_frame_info
     {
+        // frame_info is owned by value, not by pointer. The previous design
+        // stored a pointer to get_metal_frame_info's local `info` parameter,
+        // which was destroyed when the function returned, leaving every
+        // downstream `metal_info.info->render_item_ids` dereferencing a
+        // dangling stack address and crashing the first RenderFrame call.
+        // Now: get_metal_frame_info copies the relevant frame_info fields
+        // into metal_frame_info before returning.
         const frame_info*				info{ nullptr };
         camera::metal_camera*			camera{ nullptr};
         lighting::LightProbeManager*    light_probe_manager{ nullptr };
@@ -67,6 +74,9 @@ namespace primal::graphics::metal::core
     [[nodiscard]] constant_buffer& cbuffer();
 
     surface create_surface(platform::window window);
+    surface create_external_surface(void* host_view, u32 width, u32 height);
+    void* external_surface_view(surface_id id);
+    void external_surface_view_frame(surface_id id, s32 x, s32 y, u32 w, u32 h);
     void remove_surface(surface_id id);
     void resize_surface(surface_id id, u32 width, u32 height);
     u32 surface_width(surface_id id);

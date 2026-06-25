@@ -265,4 +265,22 @@ namespace primal::transform {
 		assert(is_valid());
 		return scales[id::index(_id)];
 	}
+
+	void set_position(component c, const math::v3& position)
+	{
+		assert(c.is_valid());
+		const u32 index{ id::index(c.get_id()) };
+		positions[index] = position;
+		has_transform[index] = 0;
+		changes_from_previous_frame[index] |= component_flags::position;
+	}
+
+	void set_orientation(component c, const math::v3& orientation)
+	{
+		assert(c.is_valid());
+		const u32 index{ id::index(c.get_id()) };
+		orientations[index] = orientation;
+		has_transform[index] = 0;
+		changes_from_previous_frame[index] |= component_flags::orientation;
+	}
 }

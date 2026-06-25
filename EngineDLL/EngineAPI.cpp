@@ -73,10 +73,15 @@ EDITOR_INTERFACE void ResizeRenderSurface(u32 id)
 #include "EngineAPIInternal.h"
 #include "../Graphics/Renderer.h"
 #include "../Graphics/RHI/Core/RHIDevice.h"
+#include "../Graphics/Metal/MetalCore.h"
 #include "../Platform/PlatformTypes.h"
 #include "../Platform/Platform.h"
 #include <dlfcn.h>
 #include <cstdio>
+#if defined(__APPLE__)
+#include <objc/runtime.h>
+#include <objc/message.h>
+#endif
 
 using namespace primal;
 
@@ -141,6 +146,75 @@ EDITOR_INTERFACE void* GetWindowHandle(u32 id)
 {
 	assert(id < surfaces.size());
 	return surfaces[id].window.handle();
+}
+
+// === Phase 1 Sub-step 1.2.7': Embedded render surface ===
+// Embeds the engine's forward pipeline into a host NSView owned by the
+// editor (Avalonia). Unlike CreateRenderSurface which creates a new
+// standalone NSWindow, this path attaches an MTKView as a subview of
+// host_view so the render target lives inside the host's contentView.
+//
+// Returns a surface id suitable for RenderFrame(surface_id, ...).
+EDITOR_INTERFACE u32 CreateEmbeddedRenderSurface(void* host_view, s32 width, s32 height)
+{
+	assert(host_view);
+	graphics::render_surface rs{};
+	rs.window = platform::register_external_window(host_view, (u32)width, (u32)height);
+	rs.surface = graphics::create_external_surface(host_view, (u32)width, (u32)height);
+	if (!rs.surface.is_valid()) return (u32)-1;
+	surfaces.emplace_back(rs);
+	return (u32)surfaces.size() - 1;
+}
+
+// Returns the engine-side NSWindow* that hosts the MTKView for this
+// surface. For embedded surfaces (CreateEmbeddedRenderSurface) this is
+// typically a separate child NSWindow the platform layer created. For
+// standard surfaces (CreateRenderSurface) it is the NSWindow that owns
+// the MTKView directly. May return NULL on platforms that do not use
+// NSWindow for surface presentation.
+EDITOR_INTERFACE void* GetSurfaceView(u32 id)
+{
+	assert(id < surfaces.size());
+	return graphics::metal::core::external_surface_view(surfaces[id].surface.get_id());
+}
+
+// Reposition an embedded surface's MTKView within its host. Used by the
+// editor to keep the MTKView aligned with the host UI control's bounds.
+// Coordinates are in the host's coordinate space (top-left origin on
+// macOS NSView).
+EDITOR_INTERFACE void SetEmbeddedSurfaceFrame(u32 id, s32 x, s32 y, u32 w, u32 h)
+{
+	assert(id < surfaces.size());
+	graphics::metal::core::external_surface_view_frame(
+		surfaces[id].surface.get_id(), x, y, w, h);
+}
+
+// Returns the contentView (NSView*) of the first visible NSWindow, suitable
+// for use as the host argument to CreateEmbeddedRenderSurface. Returns NULL
+// if no visible window is found. macOS only.
+EDITOR_INTERFACE void* GetAvaloniaContentView()
+{
+#if defined(__APPLE__)
+    NS::Application* app = NS::Application::sharedApplication();
+    if (!app) return nullptr;
+
+    NS::Array* windows = app->windows();
+    if (!windows) return nullptr;
+
+    const NS::UInteger count = windows->count();
+    if (count == 0) return nullptr;
+
+    for (NS::UInteger i = 0; i < count; ++i) {
+        NS::Object* win = windows->object<NS::Object>(i);
+        if (!win) continue;
+        // Some hosts (Avalonia) create NSWindows without the standard style
+        // mask — skip the visible check to be permissive.
+        NS::Window* w = (NS::Window*)win;
+        NS::View* contentView = w->contentView();
+        if (contentView) return (void*)contentView;
+    }
+#endif
+    return nullptr;
 }
 
 EDITOR_INTERFACE void ResizeRenderSurface(u32 id, u32 width, u32 height)

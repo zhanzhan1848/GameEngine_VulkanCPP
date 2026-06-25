@@ -19,6 +19,7 @@ namespace primal::platform
 			CGPoint		    top_left{ 0, 0 };
 			bool			is_fullscreen{ false };
 			bool			is_closed{ false };
+			bool			is_external{ false };
 		};
 
 		utl::free_list<window_info> windows;
@@ -34,9 +35,22 @@ namespace primal::platform
         void resize_window(window_id id, u32 width, u32 height)
         {
             window_info& info{ get_from_id(id) };
+
+            // External windows are hosted by an external UI process (e.g. an
+            // Avalonia contentView). The host owns the frame; the engine just
+            // needs the size tracked. Calling setFrame on the host view
+            // triggers AppKit to dispatch setFrame:display:, which crashes
+            // the host view because it does not respond to that selector.
+            if (info.is_external)
+            {
+                info.client_area.size.width = static_cast<CGFloat>(width);
+                info.client_area.size.height = static_cast<CGFloat>(height);
+                return;
+            }
+
             NS::Window* window = static_cast<NS::Window*>(info.hwnd);
 
-            CGRect frame{ { info.client_area.origin.x, info.client_area.origin.y }, 
+            CGRect frame{ { info.client_area.origin.x, info.client_area.origin.y },
             { static_cast<CGFloat>(width), static_cast<CGFloat>(height) } };
 
             window->setFrame(frame, true);
@@ -116,7 +130,10 @@ namespace primal::platform
 		{
 			NS::Window* nsWindow = static_cast<NS::Window*>(info.hwnd);
 			// if (callback) SetWindowLongPtr(info.hwnd, 0, (LONG_PTR)callback);
-			nsWindow->setTitle(init_info->caption);
+			if (init_info->caption)
+			{
+				nsWindow->setTitle(init_info->caption);
+			}
 			nsWindow->makeKeyAndOrderFront(nullptr);
 
 			window_id id{ (id::id_type)windows.add(info) };
@@ -132,6 +149,21 @@ namespace primal::platform
 		window_info& info{ get_from_id(id) };
 		info.hwnd = nullptr;
 		windows.remove(id);
+	}
+
+	window register_external_window(window_handle handle, u32 width, u32 height)
+	{
+		window_info info{};
+		// Editor bridge path: the host NSWindow/NSView is owned by the Avalonia UI
+		// process, not by the engine. We now store the host handle so the core's
+		// create_surface -> metal_surface::create_external() path can attach the
+		// MTKView as a subview itself, instead of pushing that responsibility to
+		// the bridge layer.
+		info.hwnd = handle;
+		info.client_area = { { 0.f, 0.f }, { static_cast<CGFloat>(width), static_cast<CGFloat>(height) } };
+		info.is_external = true;
+		window_id id{ (id::id_type)windows.add(info) };
+		return window{ id };
 	}
 }
 

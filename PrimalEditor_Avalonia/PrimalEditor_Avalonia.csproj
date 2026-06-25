@@ -26,8 +26,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.0" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.3.0" />
+    <PackageReference Include="Avalonia" Version="11.3.17" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.17" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.0" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.0" />
     <PackageReference Include="Avalonia.ReactiveUI" Version="11.3.0" />
@@ -42,13 +42,26 @@
     <PostBuildEvent Condition="Exists('$(MSBuildThisFileDirectory)../../Darwin/DebugEditor/libEngineDLL.dylib')">copy /Y "$(MSBuildThisFileDirectory)..\..\Darwin\DebugEditor\libEngineDLL.dylib" "$(BaseOutputPath)\$(Configuration)" &amp; if exist "$(MSBuildThisFileDirectory)..\..\Darwin\DebugEditor\libContentTools.dylib" copy /Y "$(MSBuildThisFileDirectory)..\..\Darwin\DebugEditor\libContentTools.dylib" "$(BaseOutputPath)\$(Configuration)"</PostBuildEvent>
   </PropertyGroup>
 
-  <Target Name="CopyNativeEngineLibsUnix" AfterTargets="Build" Condition="'$(OS)' != 'Windows_NT' AND Exists('$(MSBuildThisFileDirectory)../../Darwin/DebugEditor/libEngineDLL.dylib')">
+  <Target Name="CopyNativeEngineLibsUnix" AfterTargets="Build" Condition="'$(OS)' != 'Windows_NT' AND Exists('$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libEngineDLL.dylib')">
     <ItemGroup>
-      <_NativeLibs Include="../../Darwin/DebugEditor/libEngineDLL.dylib"/>
-      <_NativeLibs Include="../../Darwin/DebugEditor/libContentTools.dylib" Condition="Exists('../../Darwin/DebugEditor/libContentTools.dylib')"/>
+      <_NativeLibs Include="$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libEngineDLL.dylib" />
+      <_NativeLibs Include="$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libContentTools.dylib" Condition="Exists('$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libContentTools.dylib')" />
+      <_NativeLibs Include="$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libfbxsdk.dylib" Condition="Exists('$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libfbxsdk.dylib')" />
     </ItemGroup>
-    <Copy SourceFiles="@(_NativeLibs)" DestinationFolder="$(BaseOutputPath)/$(Configuration)" SkipUnchangedFiles="true"/>
-    <Exec Command="ln -sf libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib" Condition="!Exists('$(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib')"/>
-    <Exec Command="ln -sf libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/PrimalEngine.dylib" Condition="!Exists('$(BaseOutputPath)/$(Configuration)/PrimalEngine.dylib')"/>
+    <Copy SourceFiles="@(_NativeLibs)" DestinationFolder="$(BaseOutputPath)/$(Configuration)" SkipUnchangedFiles="false" />
+    <Exec Command="ln -sf libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib" Condition="!Exists('$(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib')" />
+    <Exec Command="ln -sf libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/PrimalEngine.dylib" Condition="!Exists('$(BaseOutputPath)/$(Configuration)/PrimalEngine.dylib')" />
+    <!-- Rewrite transitive dylib install names so they resolve at @loader_path
+         (the editor output dir) instead of @executable_path (the dotnet
+         libexec dir, which we can't write to). Without this, dlopen fails
+         with "Library not loaded: @executable_path/libfbxsdk.dylib". -->
+    <Exec Command="chmod +w $(BaseOutputPath)/$(Configuration)/libContentTools.dylib; install_name_tool -change @rpath/libfbxsdk.dylib @loader_path/libfbxsdk.dylib $(BaseOutputPath)/$(Configuration)/libContentTools.dylib 2&gt;/dev/null; install_name_tool -change @executable_path/libfbxsdk.dylib @loader_path/libfbxsdk.dylib $(BaseOutputPath)/$(Configuration)/libContentTools.dylib 2&gt;/dev/null; true" Condition="Exists('$(BaseOutputPath)/$(Configuration)/libContentTools.dylib')" />
+    <!-- Rewrite libEngineDLL.dylib's reference to libContentTools.dylib so it
+         uses @loader_path (the editor dir) instead of @rpath, which would
+         otherwise resolve to the cmake-build dir (Darwin/DebugEditor)
+         and load the un-rewritten libContentTools there. -->
+    <Exec Command="chmod +w $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib; install_name_tool -change @rpath/libContentTools.dylib @loader_path/libContentTools.dylib $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib 2&gt;/dev/null; true" Condition="Exists('$(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib')" />
+    <!-- Same for libEngineDLL.dylib's self-reference (it had @rpath/libEngineDLL.dylib). -->
+    <Exec Command="chmod +w $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib; install_name_tool -id @loader_path/libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib 2&gt;/dev/null; true" Condition="Exists('$(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib')" />
   </Target>
 </Project>

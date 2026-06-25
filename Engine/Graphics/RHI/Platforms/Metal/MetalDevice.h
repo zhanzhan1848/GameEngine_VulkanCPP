@@ -41,8 +41,9 @@ public:
     /**
      * @brief 构造函数
      * @param desc 设备描述符
+     * @param external_device 可选的外部 MTL::Device*;若提供则 retain 复用,否则自动创建系统默认设备
      */
-    explicit MetalDevice(const DeviceDesc& desc);
+    explicit MetalDevice(const DeviceDesc& desc, MTL::Device* external_device = nullptr);
 
     /**
      * @brief 析构函数
@@ -303,6 +304,7 @@ protected:
 
 private:
     MTL::Device* mtlDevice_{nullptr};           ///< Metal 设备对象
+    bool ownsNativeDevice_{false};
     MTL::CommandQueue* graphicsQueue_{nullptr}; ///< 图形命令队列
     MTL::CommandQueue* computeQueue_{nullptr};  ///< 计算命令队列
     MTL::CommandQueue* transferQueue_{nullptr}; ///< 传输命令队列

@@ -10,6 +10,9 @@
 #include "MetalContent.h"
 #include "MetalLight.h"
 #include "MetalPreProcess.h"
+#include "Platform/Platform.h"
+#include "Platform/PlatformTypes.h"
+#include <iostream>
 
 namespace primal::graphics::metal::core
 {
@@ -41,7 +44,7 @@ namespace primal::graphics::metal::core
 
             bool end_frame(metal_surface* surface)
             {
-                MTK::View* pView{ surface->view() };
+                MTK::View* pView{ static_cast<MTK::View*>(surface->view()) };
                 MTL::Drawable* drawable{ pView->currentDrawable() };
 
                 // Schedule a present once the framebuffer is complete using the current drawable
@@ -120,11 +123,16 @@ namespace primal::graphics::metal::core
 
         surface_collection                      _surfaces;
         metal_command                           gfx_command;
-        constant_buffer                         constants_buffer[frame_buffer_count];
 
+        // deferred_release_mutex is declared before constants_buffer so that,
+        // per [basic.start.term]/3, it is destroyed AFTER the buffer array at
+        // program exit. Reversing this order would let ~constant_buffer call
+        // deferred_release on a destroyed mutex (EINVAL from pthread_mutex_lock).
         utl::vector<MTL::Resource*>				deferred_releases[frame_buffer_count]{};
         u32										deferred_release_flag[frame_buffer_count]{};
 		std::mutex								deferred_release_mutex{};
+
+        constant_buffer                         constants_buffer[frame_buffer_count];
 
         void __attribute__((noinline)) process_deferred_release(u32 frame_idx)
 		{
@@ -143,7 +151,7 @@ namespace primal::graphics::metal::core
 			}
 		}
 
-        metal_frame_info get_metal_frame_info(frame_info info, constant_buffer& cbuffer, const metal_surface& surface, u32 frame_idx, u32 frame_count, f32 delta_time)
+        metal_frame_info get_metal_frame_info(const frame_info& info, constant_buffer& cbuffer, const metal_surface& surface, u32 frame_idx, u32 frame_count, f32 delta_time)
         {
             camera::metal_camera& camera{ camera::get(info.camera_id) };
 			msl::GlobalShaderData data{};
@@ -211,16 +219,35 @@ namespace primal::graphics::metal::core
 
         new (&gfx_command) metal_command(get_device());
 
-        if(!(shader::initialize() 
-            && gpass::initialize()
-            && fx::initialize()
-            && prepass::initialize()
-            && taa::initialize()
-            && ssao::initialize()
-            && ssgi::initialize()
-            && content::initialize()
-            && light::initialize()
-        )) return false;
+        // shader::initialize is the EngineShaders blob path (legacy forward
+        // renderer). If the blob is missing we still want graphics::initialize
+        // to succeed so the RHI path (which has its own per-shader source-compile
+        // fallback) can still run. Log a warning and continue.
+        const bool shaders_ok = shader::initialize();
+        if (!shaders_ok) {
+            std::cerr << "[MetalCore] shader::initialize failed; continuing without legacy engine shaders." << std::endl;
+        }
+
+        // Each pass init may fail when its shader is unavailable (Avalonia editor
+        // without a precompiled engine shaders blob). We treat each as a soft
+        // failure so the rest of graphics::initialize still completes — the
+        // individual pass simply won't run, and the editor preview can render
+        // a clear-color frame.
+        auto soft_init = [](const char* name, bool (*fn)()) {
+            if (!fn()) {
+                std::cerr << "[MetalCore] " << name << "::initialize failed; pass disabled."
+                          << " (shader blob missing function or PSO descriptor invalid)"
+                          << std::endl;
+            }
+        };
+        soft_init("gpass",    gpass::initialize);
+        soft_init("fx",       fx::initialize);
+        soft_init("prepass",  prepass::initialize);
+        soft_init("taa",      taa::initialize);
+        soft_init("ssao",     ssao::initialize);
+        soft_init("ssgi",     ssgi::initialize);
+        soft_init("content",  content::initialize);
+        soft_init("light",    light::initialize);
 
         return true;
     }
@@ -312,6 +339,29 @@ namespace primal::graphics::metal::core
         return surface{ id };
     }
 
+    surface create_external_surface(void* host_view, u32 width, u32 height)
+    {
+        // Forward the host view (e.g. Avalonia's NSView) to the platform layer
+        // so metal_surface::create_external() can attach the MTKView as a
+        // subview. Previously this handle was discarded and the bridge layer
+        // did the attachment itself.
+        platform::window win = platform::register_external_window(host_view, width, height);
+        surface_id id{ _surfaces.add(win) };
+        _surfaces[id].create_external();
+        return surface{ id };
+    }
+
+    void* external_surface_view(surface_id id)
+    {
+        return _surfaces[id].view();
+    }
+
+    void external_surface_view_frame(surface_id id, s32 x, s32 y, u32 w, u32 h)
+    {
+        if (id >= _surfaces.size()) return;
+        _surfaces[id].set_external_frame(x, y, w, h);
+    }
+
     void remove_surface(surface_id id)
     {
         _surfaces.remove(id);
@@ -342,7 +392,7 @@ namespace primal::graphics::metal::core
 
         const metal_frame_info metal_info
         { 
-            get_metal_frame_info(info, cbuffer, *surface, frame_idx, gfx_command.frame_count(), 16.7f) 
+            get_metal_frame_info(info, cbuffer, *surface, frame_idx, gfx_command.frame_count(), info.last_frame_time)
         };
 
         gpass::set_size({ metal_info.surface_width, metal_info.surface_height });
@@ -391,7 +441,7 @@ namespace primal::graphics::metal::core
             ssgi::ssgi_blur(cmd_buffer, metal_info);
 
             // Post process
-            fx::post_process(cmd_buffer, surface, cbuffer);
+            fx::post_process(cmd_buffer, surface, cbuffer, info.last_frame_time);
 
             gfx_command.end_frame(surface);
         }

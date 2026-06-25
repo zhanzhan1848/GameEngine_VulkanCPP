@@ -4,6 +4,8 @@
 #include "MetalShader.h"
 #include "MetalGPass.h"
 
+#include <iostream>
+
 namespace primal::graphics::metal::taa
 {
     namespace
@@ -59,8 +61,12 @@ namespace primal::graphics::metal::taa
             // 获取着色器函数并检查有效性
             auto vertex_shader = shader::get_engine_shader( shader::engine_shader::fullscreen_triangle_vs );
             auto fragment_shader = shader::get_engine_shader( shader::engine_shader::taa_pass );
-            
+
             if (!vertex_shader.get() || !fragment_shader.get()) {
+                std::cerr << "[MetalTAA] create_pipeline: missing shader (vs="
+                          << (vertex_shader.get() ? "ok" : "NULL")
+                          << " fs=" << (fragment_shader.get() ? "ok" : "NULL") << ")"
+                          << std::endl;
                 info->release();
                 return false;
             }
@@ -70,6 +76,13 @@ namespace primal::graphics::metal::taa
             info->colorAttachments()->object(0)->setPixelFormat( taa_format );
             taa_pipeline = device->newRenderPipelineState( info, &pError );
             info->release();
+            if (pError) {
+                std::cerr << "[MetalTAA] create_pipeline PSO error: "
+                          << pError->localizedDescription()->utf8String() << std::endl;
+                pError->release();
+            } else if (!taa_pipeline) {
+                std::cerr << "[MetalTAA] create_pipeline: newRenderPipelineState returned null without error" << std::endl;
+            }
             MTL_CHECK_ERROR(pError)
 
             NAME_METAL_OBJECT(taa_pipeline, "taa_pipeline");
@@ -141,8 +154,8 @@ namespace primal::graphics::metal::taa
 
     void taa_pass(MTL::CommandBuffer* buffer, const metal_frame_info& metal_info)
     {
-        assert(taa_pipeline);
-        
+        if (!taa_pipeline) return;
+
         // 交换当前帧和历史帧纹理
         std::swap(curr_taa_texture, prev_taa_texture);
         

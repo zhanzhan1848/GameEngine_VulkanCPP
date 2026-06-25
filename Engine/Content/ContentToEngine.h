@@ -82,6 +82,12 @@ namespace primal::content
     // Extract the internal rhi_mesh_assets ID from a geometry_hierarchies ID
     id::id_type get_rhi_mesh_id(id::id_type geometry_id);
 
+    // Insert a pre-encoded fake_pointer (single_mesh_marker | submesh_view_id
+    // in the high bits) into geometry_hierarchies and return the new
+    // geometry_content_id. Bridges RHI-registered meshes into the legacy
+    // add_render_item path.
+    id::id_type add_legacy_geometry_hierarchy(uint8_t* fake_pointer);
+
     using GpuMeshCallback = std::function<void(id::id_type, graphics::rhi::RHIGpuMesh*)>;
     void foreach_gpu_mesh(GpuMeshCallback callback);
 

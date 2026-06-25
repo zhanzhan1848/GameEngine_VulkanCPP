@@ -23,6 +23,8 @@ namespace primal::graphics::metal
 
         // Basic
         pi.surface.create = core::create_surface;
+        pi.surface.create_external = core::create_external_surface;
+        pi.surface.get_native_view = core::external_surface_view;
         pi.surface.remove = core::remove_surface;
         pi.surface.resize = core::resize_surface;
         pi.surface.width = core::surface_width;

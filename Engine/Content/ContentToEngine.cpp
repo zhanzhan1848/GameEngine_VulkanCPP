@@ -1210,5 +1210,17 @@ namespace primal::content
 			}
 		}
 	}
-	
+
+	// Insert a pre-encoded fake_pointer (single_mesh_marker | submesh_view_id
+	// in the high bits) into geometry_hierarchies and return the new
+	// geometry_content_id. Used by the editor's RegisterProceduralMeshSubmesh
+	// C ABI to bridge RHI-registered meshes into the legacy add_render_item
+	// path, which looks up submesh GPU ids by dereferencing
+	// geometry_hierarchies[geometry_content_id].
+	id::id_type add_legacy_geometry_hierarchy(uint8_t* fake_pointer)
+	{
+		std::lock_guard lock{ geometry_mutex };
+		return geometry_hierarchies.add(fake_pointer);
+	}
+
 }

@@ -62,6 +62,7 @@ protected:
 private:
     MetalDevice& metalDevice_;
     MTK::View* mtkView_{nullptr};
+    bool ownsNativeView_{false};
     MTL::Drawable* currentDrawable_{nullptr};
     
     // 后台缓冲区句柄

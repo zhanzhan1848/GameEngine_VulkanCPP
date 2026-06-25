@@ -28,6 +28,7 @@
 #include "AppKitPrivate.hpp"
 #include <Foundation/NSObject.hpp>
 #include <CoreGraphics/CGGeometry.h>
+#include <cstdint>
 
 namespace NS
 {
@@ -35,6 +36,16 @@ namespace NS
 	{
 		public:
 			View*		init( CGRect frame );
+
+			// View hierarchy
+			void		addSubview( const View* pSubview );
+			CGRect		bounds() const;
+			void		setFrame( CGRect frame );
+			void		setAutoresizingMask( uint32_t mask );
+			void		setNeedsDisplay( bool needsDisplay );
+
+			// Returns true if the receiver is an instance of (or subclass of) pClass.
+			bool		isKindOfClass( const Class* pClass ) const;
 	};
 }
 
@@ -42,4 +53,34 @@ namespace NS
 _NS_INLINE NS::View* NS::View::init( CGRect frame )
 {
 	return Object::sendMessage< View* >( _APPKIT_PRIVATE_CLS( NSView ), _APPKIT_PRIVATE_SEL( initWithFrame_ ), frame );
+}
+
+_NS_INLINE void NS::View::addSubview( const NS::View* pSubview )
+{
+	Object::sendMessage< void >( this, _APPKIT_PRIVATE_SEL( addSubview_ ), pSubview );
+}
+
+_NS_INLINE CGRect NS::View::bounds() const
+{
+	return Object::sendMessage< CGRect >( this, _APPKIT_PRIVATE_SEL( bounds ) );
+}
+
+_NS_INLINE void NS::View::setFrame( CGRect frame )
+{
+	Object::sendMessage< void >( this, _APPKIT_PRIVATE_SEL( setFrame_ ), frame );
+}
+
+_NS_INLINE void NS::View::setAutoresizingMask( uint32_t mask )
+{
+	Object::sendMessage< void >( this, _APPKIT_PRIVATE_SEL( setAutoresizingMask_ ), mask );
+}
+
+_NS_INLINE void NS::View::setNeedsDisplay( bool needsDisplay )
+{
+	Object::sendMessage< void >( this, _APPKIT_PRIVATE_SEL( setNeedsDisplay_ ), needsDisplay );
+}
+
+_NS_INLINE bool NS::View::isKindOfClass( const Class* pClass ) const
+{
+	return Object::sendMessage< bool >( this, _APPKIT_PRIVATE_SEL( isKindOfClass_ ), pClass );
 }
