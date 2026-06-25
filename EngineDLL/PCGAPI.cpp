@@ -38,6 +38,7 @@
 #include "Graphics/PCG/Nodes/DensityFilterNode.h"
 #include "Graphics/PCG/Nodes/TransformNode.h"
 #include "Graphics/PCG/Nodes/MeshAssignNode.h"
+#include "Graphics/PCG/Nodes/MarchingCubesNode.h"
 #include <cstring>
 
 #pragma comment(lib, "Engine.lib")
@@ -54,6 +55,7 @@
 #include "Graphics/PCG/Nodes/DensityFilterNode.h"
 #include "Graphics/PCG/Nodes/TransformNode.h"
 #include "Graphics/PCG/Nodes/MeshAssignNode.h"
+#include "Graphics/PCG/Nodes/MarchingCubesNode.h"
 #include <cstring>
 
 #endif
@@ -294,6 +296,26 @@ EDITOR_INTERFACE u32 PCGGetOutputTransforms(u32 node_id, f32* out_scale_xyz_rot_
         out_scale_xyz_rot_y[i * 4 + 3] = pts->GetAttr(i, PCGAttr::RotationY);
     }
     return n;
+}
+
+// Read the mesh content_id produced by a MarchingCubes node after PCGExecute().
+// Returns the geometry_content_id (cast from primal::id::id_type) on success, or
+// static_cast<u64>(primal::id::invalid_id) = 4294967295 on any failure:
+//   - graph not initialized
+//   - node_id out of range
+//   - node is not a MarchingCubes node
+//   - Execute() has not run or produced no surface
+//
+// Caller uses the returned content_id with PipelineRegisterMeshEntity to register
+// an ECS entity for rendering, and must call PipelineUnregisterMeshEntity before
+// triggering re-execution (the node destroys and recreates the asset on Execute).
+EDITOR_INTERFACE u64 PCGGetOutputGeometry(u32 node_id) {
+    constexpr u64 INVALID_CID = static_cast<u64>(primal::id::invalid_id);
+    if (!g_pcg_graph || node_id >= g_pcg_graph->GetNodes().size()) return INVALID_CID;
+    auto* node = g_pcg_graph->GetNodes()[node_id].get();
+    if (!node || std::strcmp(node->TypeName(), "MarchingCubes") != 0) return INVALID_CID;
+    auto* mc = static_cast<MarchingCubesNode*>(node);
+    return static_cast<u64>(mc->GetLastCreatedId());
 }
 
 // ============================================================================

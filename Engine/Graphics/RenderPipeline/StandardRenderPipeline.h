@@ -174,6 +174,11 @@ public:
     /// Hot-reload a shader. Returns true on success.
     bool ReloadShader(rhi::ShaderHandle shader, const void* data, u32 size) override;
 
+    // Access the RenderScene currently being rendered. Returns nullptr if
+    // called outside Render(). Used by C ABI (EngineDLL/RenderPipelineAPI.cpp)
+    // entry points that need to mutate the scene outside the render call.
+    RenderScene* GetCurrentScene() { return current_scene_; }
+
 private:
     void InitializeSubsystems();
     void InitializeLumenPasses();
@@ -214,6 +219,12 @@ private:
 
     // --- Scene snapshot ---
     std::unique_ptr<RenderSceneSnapshot> scene_snapshot_;
+
+    // Cached RenderScene pointer — valid between Render() entry and the next
+    // Render() call. Set at the top of Render() / RenderWithCommandBuffer().
+    // Used by C ABI entry points (PipelineRegisterStreamingMeshEntity etc.)
+    // that need to mutate the scene outside the render call.
+    RenderScene* current_scene_{nullptr};
 
     // --- Lumen GI ---
     std::unique_ptr<lumen::LumenDDGIPass> ddgi_pass_;

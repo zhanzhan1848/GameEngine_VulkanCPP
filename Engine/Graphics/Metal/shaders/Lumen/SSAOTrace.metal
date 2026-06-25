@@ -2,7 +2,7 @@
 using namespace metal;
 
 #include "CommonTypes.metal"
-#include "CommonFunction.metal"
+#include "Common.h"
 
 // ================================================================================================
 // GTAO (Ground Truth Ambient Occlusion) Trace Shader

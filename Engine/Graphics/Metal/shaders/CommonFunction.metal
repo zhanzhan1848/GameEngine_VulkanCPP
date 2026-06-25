@@ -2,10 +2,6 @@
 #ifndef COMMON_FUNCTION_METAL
 #define COMMON_FUNCTION_METAL
 
-#ifndef PI
-constant float PI = 3.14159265358979323846f;
-#endif
-
 // Basic
 float length2(float3 v) {
     return dot(v, v);  // 返回向量的长度平方

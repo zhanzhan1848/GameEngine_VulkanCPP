@@ -6,6 +6,7 @@
 #include "Graphics/Field/FieldDescriptor.h"
 #include <mutex>
 #include <atomic>
+#include <functional>
 
 namespace primal::graphics::nanite {
 
@@ -89,6 +90,13 @@ public:
     void DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_index);
 
     bool IsVoxelizationReady() const { return voxelization_ready_; }
+
+    /// Test/debug-only: fill all cascade textures by sampling sdf_fn on the CPU,
+    /// uploading via staging buffer + CopyBufferToTexture. Production path uses
+    /// DispatchVoxelization; this exists so headless tests can populate cascades
+    /// without a Nanite mesh source. Blocking (creates+submits its own CB).
+    /// Returns true if all cascades filled successfully.
+    bool DebugFill(std::function<f32(const math::v3&)> sdf_fn);
 
 private:
     GlobalSDF() = default;

@@ -295,6 +295,19 @@ bool PCGScatterTestCase::Initialize() {
     // 5c. Create geometry demo entities (Line/Arc/Spline/Polyline at Y=5)
     CreateGeometryDemo();
 
+    // 5d. MarchingCubes demo (Phase 9.1): NoiseField → MC → renderable mesh at Y=10..20
+    ExecuteMarchingCubesDemo();
+
+    // 5e. GlobalSDFMeshNode demo (Phase 9.3b): GPU-resident streaming terrain.
+    // Constructed but not executed until B is pressed. Execute() dispatches
+    // SurfaceNets on the GlobalSDF cascade textures and registers a streaming
+    // mesh entity. Held outside any PCGGraph since it has no upstream inputs.
+    global_sdf_mesh_node_ = std::make_unique<primal::graphics::pcg::GlobalSDFMeshNode>();
+    global_sdf_mesh_node_->bounds_min = primal::math::v3{-32.f, -32.f, -32.f};
+    global_sdf_mesh_node_->bounds_max = primal::math::v3{ 32.f,  32.f,  32.f};
+    global_sdf_mesh_node_->resolution = 64;
+    global_sdf_mesh_node_->iso_value  = 0.0f;
+
     // 5. Camera
     scene = new RenderScene();
     RenderProxy proxy;
@@ -314,7 +327,7 @@ bool PCGScatterTestCase::Initialize() {
     view->SetViewport(viewport);
     UpdateCamera();
 
-    std::cout << "[TestPCGScatter] Ready. WASD=Move, QE=Up/Down, Arrows=Rotate, R=ReScatter, T=+Count, G=-Count, N=NewSeed, 1/2=Roughness, 3/4=Metallic, 5=Color, 6=Reset, 7=Technique, 8=Info, ESC=Quit" << std::endl;
+    std::cout << "[TestPCGScatter] Ready. WASD=Move, QE=Up/Down, Arrows=Rotate, R=ReScatter, T=+Count, G=-Count, N=NewSeed, B=GlobalSDFMesh, 1/2=Roughness, 3/4=Metallic, 5=Color, 6=Reset, 7=Technique, 8=Info, 9=MC iso+, 0=MC iso-, ESC=Quit" << std::endl;
     return true;
 }
 
@@ -326,6 +339,16 @@ void PCGScatterTestCase::Run() {
     timer_.begin();
     HandleInput(1.0f / 60.0f);
     UpdateCamera();
+
+    // Phase 9.3b: GlobalSDFMeshNode per-frame Execute. Dispatches SurfaceNets
+    // on GlobalSDF cascade textures and registers a streaming mesh entity.
+    // Skipped unless B has been pressed. See engine-reality caveat in the
+    // plan: vertex buffer binding in DrawStreamingMeshes uses BindVertexBuffers
+    // but draw_pipeline_ uses storage-buffer vertex pulling, so the mesh may
+    // not render visibly until that mismatch is resolved.
+    if (global_sdf_mesh_visible_ && global_sdf_mesh_node_) {
+        global_sdf_mesh_node_->Execute();
+    }
 
     if (pipeline && scene && view) {
         view->UpdateFrustum();
@@ -1562,6 +1585,137 @@ void PCGScatterTestCase::CreateGeometryDemo() {
 }
 
 // ============================================================================
+// PCGScatterTestCase::ExecuteMarchingCubesDemo (Phase 9.1)
+// ============================================================================
+//
+// Builds a persistent PCG graph: NoiseField → MarchingCubes. The MC node
+// samples the noise field in a 10×10×10 AABB centered at (0,15,0), runs
+// SurfaceNets at resolution 64, and registers the generated mesh asset for
+// rendering. The graph persists for the test lifetime so the MarchingCubesNode
+// destructor runs only at Shutdown() — keeping the asset alive while rendered.
+//
+// Visual verification target: a blobby organic surface floating above Sponza,
+// roughly between Y=10 and Y=20. If winding is wrong, you'll see backfaces
+// only (or the surface will appear inside-out / culled).
+
+void PCGScatterTestCase::ExecuteMarchingCubesDemo() {
+    using namespace primal::graphics::pcg;
+
+    mc_graph_ = std::make_unique<PCGGraph>();
+
+    auto noiseNode = std::make_unique<NoiseFieldNode>();
+    noiseNode->frequency = 0.1f;
+    noiseNode->octaves = 4;
+    noiseNode->seed = 7;
+    const u32 nid = mc_graph_->AddNode(std::move(noiseNode));
+
+    auto mcNode = std::make_unique<MarchingCubesNode>();
+    mcNode->bounds_min = primal::math::v3{-5.f, 10.f, -5.f};
+    mcNode->bounds_max = primal::math::v3{ 5.f, 20.f,  5.f};
+    mcNode->resolution = 64;
+    mcNode->iso_value = mc_iso_value_;
+    mcNode->algorithm = mc_algorithm_;
+    mc_node_id_ = mc_graph_->AddNode(std::move(mcNode));
+
+    mc_graph_->Connect(nid, 0, mc_node_id_, 0);
+    mc_graph_->Execute();
+
+    auto* node = static_cast<MarchingCubesNode*>(mc_graph_->GetNodes()[mc_node_id_].get());
+    const auto cid = node->GetLastCreatedId();
+    if (cid == primal::id::invalid_id) {
+        std::cerr << "[MarchingCubesDemo] Surface extraction produced empty mesh "
+                  << "(check noise range vs iso_value=" << mc_iso_value_ << ")" << std::endl;
+        return;
+    }
+
+    primal::id::id_type noTex[3] = {
+        primal::id::invalid_id, primal::id::invalid_id, primal::id::invalid_id
+    };
+    mc_entity_id_ = pipeline->RegisterMeshEntity(cid, noTex, 3);
+
+    // RegisterMeshEntity creates the entity with Transform only — the forward
+    // renderer skips technique/base_color/roughness setup for entities without
+    // a Material component, falling back to an unlit constant-white proxy.
+    // Add a Material with a deliberately dim base_color (0.3) so the surface
+    // doesn't get crushed to pure-white by the engine's HDR default light
+    // (ForwardSceneRenderer light_color_ = 20,20,20). At albedo 0.3, N·L in
+    // [0.2, 1.0] tone-maps to ~[0.55, 0.86] → visible shading gradient
+    // without dimming the rest of the scene.
+    if (mc_entity_id_ != primal::id::invalid_id) {
+        primal::game_entity::entity e{primal::game_entity::entity_id{mc_entity_id_}};
+        primal::material::init_info mat_info{};
+        mat_info.base_color[0] = 0.3f;
+        mat_info.base_color[1] = 0.3f;
+        mat_info.base_color[2] = 0.3f;
+        mat_info.base_color[3] = 1.0f;
+        mat_info.roughness = 0.6f;
+        e.Add<primal::component::Material>(mat_info);
+    }
+
+    std::cout << "[MarchingCubesDemo] NoiseField→MC res=64 iso=" << mc_iso_value_
+              << " algo=" << (mc_algorithm_ == 0 ? "CPU" : "GPU")
+              << " content_id=" << cid << " entity=" << mc_entity_id_
+              << " bounds=(-5,10,-5)-(5,20,5)" << std::endl;
+}
+
+// ============================================================================
+// PCGScatterTestCase::ReExecuteMarchingCubes
+// ============================================================================
+//
+// Hot-reload path for the MC demo. Sequence is critical:
+//   1. Unregister old entity (removes render proxy referencing old asset)
+//   2. Update node's iso_value
+//   3. mc_graph_->Execute() — MarchingCubesNode::Execute() destroys old asset
+//      BEFORE creating new (destroy-before-create contract)
+//   4. Read new content_id and register fresh entity
+// Skipping step 1 would leave a dangling reference in the renderer when the
+// asset is destroyed in step 3.
+
+void PCGScatterTestCase::ReExecuteMarchingCubes(f32 new_iso) {
+    using namespace primal::graphics::pcg;
+
+    if (!mc_graph_) return;
+    if (mc_entity_id_ != primal::id::invalid_id) {
+        pipeline->UnregisterMeshEntity(mc_entity_id_);
+        mc_entity_id_ = primal::id::invalid_id;
+    }
+
+    mc_iso_value_ = new_iso;
+    auto* node = static_cast<MarchingCubesNode*>(mc_graph_->GetNodes()[mc_node_id_].get());
+    node->iso_value = new_iso;
+    node->algorithm = mc_algorithm_;
+
+    mc_graph_->Execute();
+
+    const auto cid = node->GetLastCreatedId();
+    if (cid == primal::id::invalid_id) {
+        std::cerr << "[MarchingCubesDemo] Re-execute at iso=" << new_iso
+                  << " produced empty surface" << std::endl;
+        return;
+    }
+
+    primal::id::id_type noTex[3] = {
+        primal::id::invalid_id, primal::id::invalid_id, primal::id::invalid_id
+    };
+    mc_entity_id_ = pipeline->RegisterMeshEntity(cid, noTex, 3);
+
+    // Re-attach Material with dim base_color (matches ExecuteMarchingCubesDemo).
+    if (mc_entity_id_ != primal::id::invalid_id) {
+        primal::game_entity::entity e{primal::game_entity::entity_id{mc_entity_id_}};
+        primal::material::init_info mat_info{};
+        mat_info.base_color[0] = 0.3f;
+        mat_info.base_color[1] = 0.3f;
+        mat_info.base_color[2] = 0.3f;
+        mat_info.base_color[3] = 1.0f;
+        mat_info.roughness = 0.6f;
+        e.Add<primal::component::Material>(mat_info);
+    }
+
+    std::cout << "[MarchingCubesDemo] Re-execute iso=" << new_iso
+              << " new content_id=" << cid << " entity=" << mc_entity_id_ << std::endl;
+}
+
+// ============================================================================
 // PCGScatterTestCase::HandleInput
 // ============================================================================
 
@@ -1641,6 +1795,36 @@ void PCGScatterTestCase::HandleInput(float dt) {
         }
     } else { key_n_pressed_ = false; }
 
+    // Phase 9.3a: key M toggles MC algorithm (CPU↔GPU). Re-executes the MC
+    // graph with the same iso so the surface can be visually compared.
+    // GPUMesher is initialized in live env (device present), so algorithm=1
+    // hits the GPU path for real.
+    get(input_source::keyboard, input_code::key_m, val);
+    if (val.current.x > 0.0f) {
+        if (!key_m_pressed_) {
+            key_m_pressed_ = true;
+            mc_algorithm_ = (mc_algorithm_ == 0) ? 1 : 0;
+            std::cout << "[MarchingCubesDemo] algorithm=" << mc_algorithm_
+                      << (mc_algorithm_ == 0 ? " (CPU)" : " (GPU)") << std::endl;
+            ReExecuteMarchingCubes(mc_iso_value_);
+        }
+    } else { key_m_pressed_ = false; }
+
+    // Phase 9.3b: key B toggles GlobalSDFMeshNode visibility. When toggled
+    // on, Execute() runs each frame to regenerate the streaming terrain from
+    // GlobalSDF cascade textures. When toggled off, the node's destructor
+    // runs at Shutdown() and tombstones the record — no per-frame unregister
+    // needed mid-session.
+    get(input_source::keyboard, input_code::key_b, val);
+    if (val.current.x > 0.0f) {
+        if (!key_b_pressed_) {
+            key_b_pressed_ = true;
+            global_sdf_mesh_visible_ = !global_sdf_mesh_visible_;
+            std::cout << "[GlobalSDFMeshDemo] visible=" << global_sdf_mesh_visible_
+                      << " bounds=(-32,-32,-32)-(32,32,32) res=64" << std::endl;
+        }
+    } else { key_b_pressed_ = false; }
+
     // Material parameter controls
     get(input_source::keyboard, input_code::key_1, val);
     if (val.current.x > 0.0f) {
@@ -1718,6 +1902,24 @@ void PCGScatterTestCase::HandleInput(float dt) {
                       << "," << mat_base_color_[2] << "," << mat_base_color_[3] << ")" << std::endl;
         }
     } else { key_8_pressed_ = false; }
+
+    // Key 9: MC iso_value +  (smaller / higher-elevation surface)
+    get(input_source::keyboard, input_code::key_9, val);
+    if (val.current.x > 0.0f) {
+        if (!key_9_pressed_) {
+            key_9_pressed_ = true;
+            ReExecuteMarchingCubes(std::min(mc_iso_value_ + 0.1f, 0.5f));
+        }
+    } else { key_9_pressed_ = false; }
+
+    // Key 0: MC iso_value -  (larger / denser surface)
+    get(input_source::keyboard, input_code::key_0, val);
+    if (val.current.x > 0.0f) {
+        if (!key_0_pressed_) {
+            key_0_pressed_ = true;
+            ReExecuteMarchingCubes(std::max(mc_iso_value_ - 0.1f, -0.5f));
+        }
+    } else { key_0_pressed_ = false; }
 }
 
 // ============================================================================

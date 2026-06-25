@@ -9,6 +9,7 @@
 #include "Graphics/Nanite/ColorHistoryManager.h"
 #include "Graphics/Nanite/HZBSystem.h"
 #include "Graphics/Nanite/GlobalSDF.h"
+#include "Graphics/PCG/GPU/GPUMesher.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
 #include "Graphics/Scene/CameraSyncSystem.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
@@ -282,6 +283,10 @@ void StandardRenderPipeline::InitializeSubsystems() {
         pcg_sdf_readback_initialized_ = pcg_sdf_readback_.Initialize(device_, globalSDF.GetCascade(0).resolution);
     }
 
+    // GPU Mesher (Phase 9.3a) — singleton bound to device; PCG MarchingCubesNode
+    // queries IsReady() and falls back to CPU if false.
+    pcg::GPUMesher::Get().Initialize(device_);
+
     // --- Shaders are NOT compiled here ---
     // The caller must set shader handles via SetShaderHandles() before Render().
     // Modules that receive INVALID_SHADER handles will skip their passes gracefully.
@@ -325,6 +330,9 @@ void StandardRenderPipeline::InitializeSubsystems() {
 }
 
 void StandardRenderPipeline::ShutdownSubsystems() {
+    // GPUMesher shutdown before device goes away.
+    pcg::GPUMesher::Get().Shutdown();
+
     if (pcg_sdf_readback_initialized_) { pcg_sdf_readback_.Shutdown(); pcg_sdf_readback_initialized_ = false; }
 
     if (sc_ddgi_module_) { sc_ddgi_module_->Shutdown(); sc_ddgi_module_.reset(); }
@@ -523,6 +531,11 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
             scene_snapshot_->ClearFullRebuildFlag();
         }
     }
+
+    // Phase 9.3b: Give GPUDrivenDrawPipeline access to the RenderScene so
+    // DrawStreamingMeshes can iterate GetStreamingMeshes() during Execute.
+    auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
+    gpuDraw.SetRenderScene(&scene);
 
     // Update GlobalSDF cascade origins
     auto& globalSDF = nanite::GlobalSDF::Get();
@@ -1136,6 +1149,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     CommandBufferHandle cmdHandle,
     SyncHandle signalFence)
 {
+    current_scene_ = &scene;
     auto startTime = std::chrono::high_resolution_clock::now();
     if (!device_ || !cmd || !renderGraph_) return;
 
@@ -1164,6 +1178,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
                                    target, cbIdx % 3);
         frameCount_++;
+        // Frame boundary: drain deferred-destroy queue from GPUMesher.
+        pcg::GPUMesher::Get().DrainDeferredDestroys();
+        scene.ClearTombstonedStreamingMeshes();
         return;
     }
 
@@ -1567,6 +1584,12 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
     frameCount_++;
 
+    // Drain queued streaming-mesh destroys. Safe on Metal due to in-flight
+    // resource retention (the command buffer for this frame has not yet been
+    // submitted — submission happens in the caller, e.g. TestPCGScatter).
+    pcg::GPUMesher::Get().DrainDeferredDestroys();
+    scene.ClearTombstonedStreamingMeshes();
+
     auto endTime = std::chrono::high_resolution_clock::now();
     stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
 }
@@ -1578,6 +1601,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
                                      ResourceHandle target, const TextureDesc& targetDesc,
                                      SyncHandle signalFence) {
+    current_scene_ = &scene;
     auto startTime = std::chrono::high_resolution_clock::now();
     if (!device_ || !renderGraph_) return;
 
@@ -1631,6 +1655,10 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
 
         frameCount_++;
 
+        // Frame boundary: drain deferred-destroy queue from GPUMesher.
+        pcg::GPUMesher::Get().DrainDeferredDestroys();
+        scene.ClearTombstonedStreamingMeshes();
+
         auto endTime = std::chrono::high_resolution_clock::now();
         stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
         return;
@@ -1682,6 +1710,10 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
     device_->DestroyCommandBuffer(cmdHandle);
 
     frameCount_++;
+
+    // Frame boundary: drain deferred-destroy queue from GPUMesher.
+    pcg::GPUMesher::Get().DrainDeferredDestroys();
+    scene.ClearTombstonedStreamingMeshes();
 
     auto endTime = std::chrono::high_resolution_clock::now();
     stats_.cpuFrameTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();

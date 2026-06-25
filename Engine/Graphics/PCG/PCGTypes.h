@@ -16,7 +16,7 @@ namespace primal::graphics::pcg {
 enum class PCGDataType : u8 {
     Field,       // PCGField — scalar field sampled at world positions
     PointSet,    // PCGPointSet — collection of points with attributes
-    Geometry,    // Reserved for future use
+    Geometry,    // PCGGeometryData — mesh asset content_id (produced by MarchingCubes etc.)
     AttributeSet // Reserved for future use
 };
 
@@ -206,6 +206,21 @@ struct PCGPointSet : PCGData {
     }
 };
 
+// Geometry data — a mesh asset content_id produced by generation nodes (MarchingCubes etc.).
+// The content_id is owned by the producing node (e.g. MarchingCubesNode tracks and
+// destroys the asset across re-executions and on node destruction). Downstream consumers
+// read the content_id to register render entities via PipelineRegisterMeshEntity.
+//
+// Why PCGGeometryData does NOT destroy content_id in its destructor:
+//   - Multiple downstream pins may reference the same PCGGeometryData instance.
+//   - The producing node is the unique owner of the asset lifecycle.
+//   - See MarchingCubesNode::~MarchingCubesNode for the canonical cleanup pattern.
+struct PCGGeometryData : PCGData {
+    id::id_type content_id{ id::invalid_id };
+
+    PCGGeometryData() { type = PCGDataType::Geometry; }
+};
+
 // Type-safe pin for node connections. Each pin has an expected data type.
 // During graph execution, upstream output pins are wired to downstream input pins.
 // Use AsField() / AsPointSet() to retrieve typed data (asserts on type mismatch).
@@ -225,6 +240,13 @@ struct PCGPin {
         if (data) {
             assert(data->type == PCGDataType::PointSet && "Pin type mismatch: expected PointSet");
             return static_cast<PCGPointSet*>(data);
+        }
+        return nullptr;
+    }
+    PCGGeometryData* AsGeometry() const {
+        if (data) {
+            assert(data->type == PCGDataType::Geometry && "Pin type mismatch: expected Geometry");
+            return static_cast<PCGGeometryData*>(data);
         }
         return nullptr;
     }

@@ -8,6 +8,8 @@
 #include "../RHI/Core/RHIMath.h"
 #include "../RHI/Core/RHIGpuMesh.h"
 #include "../Scene/RenderSceneSnapshot.h"
+#include "../RenderScene.h"
+#include "../RenderPipeline/StreamingMesh.h"
 #include "../../Content/ContentToEngine.h" // Needed for get_rhi_mesh_asset
 #include "CommonHeaders.h"
 #include <cassert>
@@ -1613,6 +1615,38 @@ void GPUDrivenDrawPipeline::UploadGeometryData(const RenderSceneSnapshot& scene_
     }
 }
 
+// Phase 9.3b: Draw streaming meshes via non-indexed DrawIndirect.
+// Each StreamingMesh's indirect_args is a MTLDrawPrimitivesIndirectCommand
+// {vertexStart, vertexCount, instanceCount, instanceStart} written by Pass 4 of
+// the SurfaceNets GPU meshing kernel. v1 binds positions to slot 0 and elements
+// (packed normal+uv) to slot 1, then issues one DrawIndirect per visible mesh.
+// No index buffer is bound — the draw is non-indexed (vertexCount in the indirect
+// args equals the index count from generation; the vertices are read sequentially).
+// v1: relies on whatever material/pipeline is currently bound (Task 12 validates).
+void GPUDrivenDrawPipeline::DrawStreamingMeshes(rhi::RHICommandBuffer* cmd_buffer) {
+    if (render_scene_ == nullptr) return;
+
+    // Iterate under RenderScene::mutex_ — a PCG node thread may concurrently
+    // RegisterStreamingMesh / UpdateStreamingMesh / UnregisterStreamingMesh and
+    // invalidate the vector reference returned by GetStreamingMeshes().
+    render_scene_->ForEachStreamingMesh([&](const StreamingMeshRecord& sm) {
+        if (!sm.visible || sm.tombstoned) return;
+        if (sm.mesh == nullptr || !sm.mesh->IsValid()) return;
+
+        // NOTE: v1 — draw_pipeline_ uses storage-buffer vertex pulling (no vertex
+        // input attributes in the pipeline desc). This BindVertexBuffers call has
+        // no effect until Task 12 introduces a dedicated vertex-input pipeline for
+        // streaming meshes. Kept here so the binding site is already correct.
+        rhi::ResourceHandle vb_handles[2] = { sm.mesh->positions, sm.mesh->elements };
+        u64 vb_offsets[2] = { 0, 0 };
+        cmd_buffer->BindVertexBuffers(0, 2, vb_handles, vb_offsets);
+
+        // Non-indexed indirect draw. The indirect_args buffer contains a
+        // MTLDrawPrimitivesIndirectCommand (4 x u32) written by the GPU meshing pass.
+        cmd_buffer->DrawIndirect(sm.mesh->indirect_args, 0, 1);
+    });
+}
+
 bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
                                    const RenderSceneSnapshot& scene_snapshot,
                                    const math::m4x4& view_matrix,
@@ -1980,6 +2014,11 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     u32 dynOffsets[1] = { 0 };
     cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, draw_pipeline_layout_, 0, 1, dsHandles, 1, dynOffsets);
 
+    // Phase 9.3b: Draw streaming meshes (GPU SurfaceNets terrain) before the
+    // Nanite cluster draw. Uses the same render pass and currently-bound pipeline
+    // (v1 limitation — Task 12 will validate visually and wire a proper default
+    // material pipeline if needed).
+    DrawStreamingMeshes(cmd_buffer);
 
     // Indirect Draw
     static u32 drawDiag = 0;
