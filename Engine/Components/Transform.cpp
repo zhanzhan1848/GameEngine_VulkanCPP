@@ -67,6 +67,60 @@ namespace primal::transform {
 			world_for_inverse.columns[3] = simd_make_float4(0.0f, 0.0f, 0.0f, 1.0f);
 			simd::float4x4 inverse_world = simd_inverse(world_for_inverse);
 			inv_world[index] = inverse_world;
+#else
+			// Portable fallback — also used by Emscripten/WASM (neither _WIN32
+			// nor __APPLE__ matches). Builds world = T*R*S and computes the
+			// affine inverse analytically as S^-1 * R^T * T^-1. Without this
+			// branch the function body is empty on WASM — UB for a non-void
+			// function, manifests as `unreachable` trap at runtime.
+			{
+				const math::v4 q = rotations[index];
+				const math::v3 t = positions[index];
+				const math::v3 s = scales[index];
+
+				// Quaternion-to-rotation (column-major). Standard formula
+				// for unit quaternion (x,y,z,w):
+				//   R_col0 = (1-2(y²+z²),  2(xy+wz),    2(xz-wy))
+				//   R_col1 = (2(xy-wz),    1-2(x²+z²),  2(yz+wx))
+				//   R_col2 = (2(xz+wy),    2(yz-wx),    1-2(x²+y²))
+				f32 xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
+				f32 xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
+				f32 wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
+
+				f32 r0x = 1.0f - 2.0f * (yy + zz);
+				f32 r0y = 2.0f * (xy + wz);
+				f32 r0z = 2.0f * (xz - wy);
+				f32 r1x = 2.0f * (xy - wz);
+				f32 r1y = 1.0f - 2.0f * (xx + zz);
+				f32 r1z = 2.0f * (yz + wx);
+				f32 r2x = 2.0f * (xz + wy);
+				f32 r2y = 2.0f * (yz - wx);
+				f32 r2z = 1.0f - 2.0f * (xx + yy);
+
+				// World = T * R * S — scale each rotation column.
+				math::m4x4 world;
+				world.columns[0] = math::v4{ r0x * s.x, r0y * s.x, r0z * s.x, 0.0f };
+				world.columns[1] = math::v4{ r1x * s.y, r1y * s.y, r1z * s.y, 0.0f };
+				world.columns[2] = math::v4{ r2x * s.z, r2y * s.z, r2z * s.z, 0.0f };
+				world.columns[3] = math::v4{ t.x, t.y, t.z, 1.0f };
+				to_world[index] = world;
+
+				// Inverse = S^-1 * R^T * T^-1.
+				// S^-1*R^T rows: R_col_i / s_i. Translation: -(R_col_i · t) / s_i.
+				f32 isx = (s.x != 0.0f) ? 1.0f / s.x : 0.0f;
+				f32 isy = (s.y != 0.0f) ? 1.0f / s.y : 0.0f;
+				f32 isz = (s.z != 0.0f) ? 1.0f / s.z : 0.0f;
+				f32 inv_tx = -(r0x * t.x + r0y * t.y + r0z * t.z) * isx;
+				f32 inv_ty = -(r1x * t.x + r1y * t.y + r1z * t.z) * isy;
+				f32 inv_tz = -(r2x * t.x + r2y * t.y + r2z * t.z) * isz;
+
+				math::m4x4 inverse_world;
+				inverse_world.columns[0] = math::v4{ r0x * isx, r1x * isy, r2x * isz, 0.0f };
+				inverse_world.columns[1] = math::v4{ r0y * isx, r1y * isy, r2y * isz, 0.0f };
+				inverse_world.columns[2] = math::v4{ r0z * isx, r1z * isy, r2z * isz, 0.0f };
+				inverse_world.columns[3] = math::v4{ inv_tx, inv_ty, inv_tz, 1.0f };
+				inv_world[index] = inverse_world;
+			}
 #endif
 
 			has_transform[index] = 1;
@@ -81,7 +135,7 @@ namespace primal::transform {
 			math::v3 orientation;
 			XMStoreFloat3(&orientation, XMVector3Rotate(front, rotation_quat));
 			return orientation;
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !defined(__EMSCRIPTEN__)
 			using namespace simd;
 			// 构建四元数 (w, x, y, z)
 			simd::quatf r = simd_quaternion(rotations.x, rotations.y, rotations.z, rotations.w);
@@ -92,6 +146,26 @@ namespace primal::transform {
 			// 转换为math::v3类型
 			math::v3 orientation = simd_make_float3(rotated_front.x, rotated_front.y, rotated_front.z);
 			return orientation;
+#else
+			// Portable fallback — also used by Emscripten/WASM build. Rotating
+			// front=(0,0,1) by quaternion (x,y,z,w). Without this branch the
+			// function body is empty on WASM — UB for non-void, traps as
+			// `unreachable` at runtime.
+			// Formula: v' = v + 2*w*cross(q.xyz, v) + 2*cross(q.xyz, cross(q.xyz, v))
+			// cross(q.xyz, (0,0,1)) = (q.y, -q.x, 0); second cross simplifies:
+			// cross(q.xyz, (q.y, -q.x, 0)) = (-q.x*q.z, -q.y*q.z, q.x² + q.y²)
+			f32 qx = rotations.x, qy = rotations.y, qz = rotations.z, qw = rotations.w;
+			f32 cx = qy;
+			f32 cy = -qx;
+			f32 cz = 0.0f;
+			f32 tx = qy * cz - qz * cy;  // = qz*qx
+			f32 ty = qz * cx - qx * cz;  // = qz*qy
+			f32 tz = qx * cy - qy * cx;  // = -(qx² + qy²)
+			return math::v3{
+				2.0f * qw * cx + 2.0f * tx,
+				2.0f * qw * cy + 2.0f * ty,
+				1.0f + 2.0f * qw * cz + 2.0f * tz
+			};
 #endif
 		}
 
