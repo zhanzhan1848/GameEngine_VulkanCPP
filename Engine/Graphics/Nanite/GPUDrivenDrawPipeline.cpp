@@ -1264,38 +1264,48 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             for(u32 i=0; i<posCount; ++i) mergedPositions.push_back(posSrc[i]);
 
             // Copy Elements (Normal, Tangent, UV)
-            // Source format: static_normal_texture (20 bytes) from Geometry.h:
+            // Source format is static_normal_texture (Geometry.h):
             //   Offset 0-3:   u8 color[3] + u8 t_sign
-            //   Offset 4-5:   u16 normal[2]
-            //   Offset 6-7:   u16 tangent[2]
-            //   Offset 8-15:  float2 uv
-            // Dest format: VertexElement (24 bytes) for GPU shader:
-            //   u32 colorTSign, u32 normal, u32 tangent, u32 padding, float2 uv
+            //   Offset 4-5:   u16 normal[2]       (normal[0]=X, normal[1]=Y in LE)
+            //   Offset 6-7:   u16 tangent[2]      (tangent[0]=X, tangent[1]=Y in LE)
+            //   Offset 8-11:  4 bytes padding (Mac) OR start of uv (other platforms)
+            //   Offset 12-19: uv if 20-byte source, OR
+            //   Offset 16-23: uv if 24-byte source (Mac simd::float2 8-byte align)
+            //
+            // On Mac, sizeof(simd::float2)=8 with alignof=8 forces
+            //   sizeof(static_normal_texture)=24, offsetof(uv)=16.
+            // On other platforms, sizeof(static_normal_texture)=20, uv at offset 12.
+            //
+            // Dest VertexElement (24 bytes) packs normal as
+            //   u32: high16 = normal[0] (X), low16 = normal[1] (Y)
+            // matching GPUDrivenDraw.wgsl::unpack_normal which reads
+            //   hi = (packed >> 16) & 0xFFFF  → f.x = X
+            //   lo = packed & 0xFFFF          → f.y = Y
+            //
+            // The previous DIRECT COPY branch (treating source as VertexElement)
+            // broke this: it copied the raw LE u32 at bytes 4-7, which on LE is
+            // (normal[1] << 16) | normal[0] — X and Y SWAPPED in the shader.
+            // Field-by-field extraction here is the only layout-correct path.
             u32 elemCount = posCount;
-            if (meshAsset.element_buffer.size() >= elemCount * 24) {
-                // Already 24-byte format - direct copy
-                const VertexElement* elemSrc = reinterpret_cast<const VertexElement*>(meshAsset.element_buffer.data());
-                for(u32 i=0; i<elemCount; ++i) mergedElements.push_back(elemSrc[i]);
-            } else if (meshAsset.element_buffer.size() >= elemCount * 20) {
-                // 20-byte source format - convert to 24-byte GPU format
-                const u8* srcData = meshAsset.element_buffer.data();
+            const u64 srcTotal = meshAsset.element_buffer.size();
+            const u8* srcData = meshAsset.element_buffer.data();
+            const u64 srcStride = (elemCount > 0) ? (srcTotal / elemCount) : 0;
+
+            if (srcStride == 24 || srcStride == 20) {
+                const u64 uvOffset = (srcStride == 24) ? 16 : 12;
                 for(u32 i=0; i<elemCount; ++i) {
-                    const u8* src = srcData + i * 20;
+                    const u8* src = srcData + i * srcStride;
                     VertexElement dest{};
-                    // Pack color[3] + t_sign into colorTSign (little-endian)
-                    dest.colorTSign = (u32)src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16) | ((u32)src[3] << 24);
-                    // Pack u16 normal[2] into u32: high16=normal[0], low16=normal[1]
+                    dest.colorTSign = (u32)src[0] | ((u32)src[1] << 8) |
+                                      ((u32)src[2] << 16) | ((u32)src[3] << 24);
                     u16 n0 = *reinterpret_cast<const u16*>(src + 4);
                     u16 n1 = *reinterpret_cast<const u16*>(src + 6);
                     dest.normal = ((u32)n0 << 16) | (u32)n1;
-                    // Pack u16 tangent[2] into u32
                     u16 t0 = *reinterpret_cast<const u16*>(src + 8);
                     u16 t1 = *reinterpret_cast<const u16*>(src + 10);
                     dest.tangent = ((u32)t0 << 16) | (u32)t1;
                     dest.padding = 0;
-                    // Copy UV from offset 12 in static_normal_texture (20-byte format):
-                    // color[3]+t_sign(4) + normal[2](4) + tangent[2](4) + uv(8)
-                    memcpy(&dest.uv, src + 12, sizeof(math::v2));
+                    memcpy(&dest.uv, src + uvOffset, sizeof(math::v2));
                     mergedElements.push_back(dest);
                 }
             } else {
