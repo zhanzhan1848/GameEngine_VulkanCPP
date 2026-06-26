@@ -20,6 +20,14 @@
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
+#include "PipelineLightDesc.h"
+#include "Components/Transform.h"
+#include "EngineAPI/Light.h"
+#include "Components/Light.h"
+#include "Components/Entity.h"
+#include "EngineAPI/GameEntity.h"
+#include "EngineAPI/GameEntity_impl.h"
+#include <cmath>
 #include <cstring>
 #include <iostream>
 
@@ -41,6 +49,52 @@ StandardRenderPipeline* GetStdPipeline() {
     if (g_owned_pipeline) return g_owned_pipeline;
     auto* p = RenderPipeline::Get();
     return p ? static_cast<StandardRenderPipeline*>(p) : nullptr;
+}
+
+// Build quaternion that rotates +Z to `fwd`. Handles degenerate input.
+// Used to translate a PipelineLightDesc direction vector into the Transform
+// component rotation that the engine's forward-render / deferred lighting
+// expects (lights face down +Z by convention in this engine).
+primal::math::v4 quat_from_forward(primal::math::v3 fwd) {
+    // Clamp tiny vectors to a default to avoid NaN.
+    float len_sq = fwd.x * fwd.x + fwd.y * fwd.y + fwd.z * fwd.z;
+    if (len_sq < 1e-10f) {
+        return primal::math::v4{0.f, 0.f, 0.f, 1.f};  // identity
+    }
+    float inv = 1.f / std::sqrt(len_sq);
+    fwd.x *= inv; fwd.y *= inv; fwd.z *= inv;
+
+    primal::math::v3 axis{0.f, 0.f, 1.f};
+    float d = axis.x * fwd.x + axis.y * fwd.y + axis.z * fwd.z;
+    if (d > 0.99999f) return primal::math::v4{0.f, 0.f, 0.f, 1.f};       // identity
+    if (d < -0.99999f) return primal::math::v4{0.f, 1.f, 0.f, 0.f};      // 180° around Y
+
+    primal::math::v3 xyz{
+        axis.y * fwd.z - axis.z * fwd.y,
+        axis.z * fwd.x - axis.x * fwd.z,
+        axis.x * fwd.y - axis.y * fwd.x
+    };
+    float w = 1.f + d;
+    // Normalize
+    float n = std::sqrt(xyz.x * xyz.x + xyz.y * xyz.y + xyz.z * xyz.z + w * w);
+    return primal::math::v4{xyz.x / n, xyz.y / n, xyz.z / n, w / n};
+}
+
+// Apply position + optional rotation (from forward direction) to the light
+// entity's Transform component via the public component_cache + update() API.
+// The transform_id is derived from entity_id (same underlying value).
+void apply_light_transform(id::id_type entity_id,
+                           const primal::math::v3& position,
+                           const primal::math::v3* fwd_optional) {
+    transform::component_cache cache{};
+    cache.id = transform::transform_id{ entity_id };
+    cache.flags = transform::component_flags::position;
+    cache.position = position;
+    if (fwd_optional) {
+        cache.flags |= transform::component_flags::rotation;
+        cache.rotation = quat_from_forward(*fwd_optional);
+    }
+    transform::update(&cache, 1);
 }
 }
 
@@ -308,6 +362,100 @@ EDITOR_INTERFACE void DestroyStandardRenderPipeline() {
         delete g_owned_pipeline;
         g_owned_pipeline = nullptr;
     }
+}
+
+// ============================================================================
+// Light Entity Registration (Path B)
+// ============================================================================
+//
+// C ABI wrappers for StandardRenderPipeline's light entity methods (Task 2).
+// PipelineLightDesc translates to engine light_init_info + Transform
+// position/rotation. The pipeline creates an ECS entity internally
+// (info.entity_id is ignored by RegisterLightEntity); the returned u64 is the
+// new entity ID. Use PipelineUpdateLightEntity to mutate it,
+// PipelineUnregisterLightEntity to destroy it. Note: 0 is a VALID entity id
+// (first slot allocated by ECS); only ~0ull (id::invalid_id) is null.
+
+EDITOR_INTERFACE u64 PipelineRegisterLightEntity(const PipelineLightDesc* desc) {
+    constexpr u64 kInvalid = static_cast<u64>(~0ull);
+    if (!desc) return kInvalid;
+    if (desc->type > 2) return kInvalid;
+
+    auto* p = GetStdPipeline();
+    if (!p) return kInvalid;
+
+    // Translate PipelineLightDesc → light_init_info
+    light_init_info li{};
+    li.entity_id = id::invalid_id;  // pipeline creates entity internally
+    li.type = static_cast<graphics::light::type>(desc->type);
+    li.color = primal::math::v3{desc->color[0], desc->color[1], desc->color[2]};
+    li.intensity = desc->intensity;
+    li.is_enabled = desc->is_enabled != 0;
+    if (desc->type == 1) {  // point
+        li.point_param.range = desc->range;
+    } else if (desc->type == 2) {  // spot
+        li.spot_param.range = desc->range;
+        li.spot_param.umbra = desc->umbra;
+        li.spot_param.penumbra = desc->penumbra;
+    }
+
+    id::id_type eid = p->RegisterLightEntity(li);
+    if (eid == id::invalid_id) return kInvalid;
+
+    // Apply transform: position + rotation (from forward direction)
+    primal::math::v3 pos{desc->position[0], desc->position[1], desc->position[2]};
+    if (desc->type == 0 || desc->type == 2) {
+        primal::math::v3 fwd{desc->direction[0], desc->direction[1], desc->direction[2]};
+        apply_light_transform(eid, pos, &fwd);
+    } else {
+        apply_light_transform(eid, pos, nullptr);
+    }
+
+    return static_cast<u64>(eid);
+}
+
+EDITOR_INTERFACE u32 PipelineUpdateLightEntity(u64 entity_id, const PipelineLightDesc* desc) {
+    constexpr u64 kInvalid = static_cast<u64>(~0ull);
+    if (!desc || entity_id == kInvalid) return 0;
+    if (desc->type > 2) return 0;
+
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+
+    light_init_info li{};
+    li.entity_id = id::invalid_id;
+    li.type = static_cast<graphics::light::type>(desc->type);
+    li.color = primal::math::v3{desc->color[0], desc->color[1], desc->color[2]};
+    li.intensity = desc->intensity;
+    li.is_enabled = desc->is_enabled != 0;
+    if (desc->type == 1) {
+        li.point_param.range = desc->range;
+    } else if (desc->type == 2) {
+        li.spot_param.range = desc->range;
+        li.spot_param.umbra = desc->umbra;
+        li.spot_param.penumbra = desc->penumbra;
+    }
+
+    const id::id_type eid = static_cast<id::id_type>(entity_id);
+    if (!p->UpdateLightEntity(eid, li)) return 0;
+
+    // Update transform
+    primal::math::v3 pos{desc->position[0], desc->position[1], desc->position[2]};
+    if (desc->type == 0 || desc->type == 2) {
+        primal::math::v3 fwd{desc->direction[0], desc->direction[1], desc->direction[2]};
+        apply_light_transform(eid, pos, &fwd);
+    } else {
+        apply_light_transform(eid, pos, nullptr);
+    }
+    return 1;
+}
+
+EDITOR_INTERFACE void PipelineUnregisterLightEntity(u64 entity_id) {
+    constexpr u64 kInvalid = static_cast<u64>(~0ull);
+    if (entity_id == kInvalid) return;
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    p->UnregisterLightEntity(static_cast<id::id_type>(entity_id));
 }
 
 } // extern "C"
