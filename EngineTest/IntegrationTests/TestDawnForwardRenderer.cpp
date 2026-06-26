@@ -669,6 +669,13 @@ bool Engine_Test::LoadSponzaScene() {
             tfInfo.position[0] = 0.0f;
             tfInfo.position[1] = 0.0f;
             tfInfo.position[2] = 0.0f;
+            // rotation defaults to {0,0,0,0} which is NOT a valid quaternion —
+            // simd_quaternion(0,0,0,0) produces NaN-rotated world_matrix columns.
+            // Must be identity {0,0,0,1}. See tasks/lessons.md 2026-06-17.
+            tfInfo.rotation[0] = 0.0f;
+            tfInfo.rotation[1] = 0.0f;
+            tfInfo.rotation[2] = 0.0f;
+            tfInfo.rotation[3] = 1.0f;
             entInfo.transform = &tfInfo;
             primal::game_entity::entity entity = primal::game_entity::create(entInfo);
             if (entity.is_valid()) {
