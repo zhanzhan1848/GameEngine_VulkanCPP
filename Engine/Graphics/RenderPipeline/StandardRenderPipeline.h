@@ -186,7 +186,12 @@ public:
     // Access the RenderScene currently being rendered. Returns nullptr if
     // called outside Render(). Used by C ABI (EngineDLL/RenderPipelineAPI.cpp)
     // entry points that need to mutate the scene outside the render call.
-    RenderScene* GetCurrentScene() { return current_scene_; }
+    // Spec §4.1 step 3: returns non-null after Initialize (default_scene_
+    // backs it when no Render() has set current_scene_ yet, so callers don't
+    // need to own a fallback RenderScene).
+    RenderScene* GetCurrentScene() {
+        return current_scene_ ? current_scene_ : &default_scene_;
+    }
 
     // Frame counter (incremented at the end of each Render call). At Execute
     // time for frame N, returns N — matches the cbIdx % 3 the upcoming Render
@@ -240,6 +245,13 @@ private:
     // Used by C ABI entry points (PipelineRegisterStreamingMeshEntity etc.)
     // that need to mutate the scene outside the render call.
     RenderScene* current_scene_{nullptr};
+
+    // Default RenderScene owned by the pipeline. Backs GetCurrentScene() when
+    // no Render() has run yet (e.g., headless integration tests, Editor's
+    // first PipelineRenderFrame). Eliminates the spec §4.1 step 3 violation
+    // where callers had to supply their own fallback scene. Lazily filled by
+    // ECS sync from PipelineRenderFrame / RegisterMeshEntity.
+    RenderScene default_scene_{};
 
     // --- Lumen GI ---
     std::unique_ptr<lumen::LumenDDGIPass> ddgi_pass_;
