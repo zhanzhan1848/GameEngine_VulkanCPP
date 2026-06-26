@@ -6,6 +6,7 @@
 #include <fstream>
 #include <vector>
 #include <filesystem>
+#include <cstdlib>
 
 #include <dispatch/dispatch.h>
 
@@ -18,23 +19,30 @@ namespace primal::graphics::metal
         // (see engine_shader_paths[] in Renderer.cpp). We sit our metallib next
         // to that blob so the editor/test binary's cwd doesn't matter.
         //
-        // We first try the cwd-relative path (matches how the engine finds its
-        // own blob via get_engine_shaders_path), then fall back to a couple of
-        // common absolute locations. Returns empty string if nothing found.
+        // We try cwd-relative paths first (matches how the engine finds its
+        // own blob via get_engine_shaders_path), then the EngineTest-relative
+        // path for tests that chdir into EngineTest/. If ENGINE_SHADER_ROOT is
+        // set, it overrides as a last-resort override (useful for CI / custom
+        // install layouts). Returns empty string if nothing found.
         std::string resolve_metallib_path()
         {
             namespace fs = std::filesystem;
-            const char* candidates[] = {
+            std::vector<const char*> candidates = {
                 // 1. Same dir as the engine shaders blob (preferred).
                 "./Darwin/Debug/shaders/metal/BlitToDrawable.metallib",
                 "./Darwin/Release/shaders/metal/BlitToDrawable.metallib",
                 // 2. Engine-relative for tests that chdir into EngineTest/.
                 "../Darwin/Debug/shaders/metal/BlitToDrawable.metallib",
-                // 3. Repo-root absolute fallback (matches engine_shader_paths[2]).
-                "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Debug/shaders/metal/BlitToDrawable.metallib",
+                "../Darwin/Release/shaders/metal/BlitToDrawable.metallib",
             };
             for (const char* p : candidates) {
                 if (fs::exists(p)) return std::string(p);
+            }
+            // 3. Env var override (CI / custom install layouts).
+            //    ENGINE_SHADER_ROOT should point at "<repo>/Darwin/<Config>".
+            if (const char* root = std::getenv("ENGINE_SHADER_ROOT")) {
+                std::string p = std::string(root) + "/shaders/metal/BlitToDrawable.metallib";
+                if (fs::exists(p)) return p;
             }
             return std::string{};
         }
