@@ -147,7 +147,11 @@ fn load_material(idx: u32) -> MaterialInfo {
 
 // Unpacks a 2-component normal/tangent stored as 2x i16 packed into a u32.
 // High 16 bits = x, low 16 bits = y. Maps [-32767, 32767] to [-1, 1].
-fn unpack_normal(packed: u32) -> vec3<f32> {
+// Z sign comes from color_t_sign's high byte (bit 1, mask 0x02u) — mirrors
+// ForwardPBR's unpackNormal. Without this, every normal ends up with +Z,
+// flipping under-side / back-face normals and breaking the lighting
+// direction in deferred.
+fn unpack_normal(packed: u32, color_t_sign: u32) -> vec3<f32> {
     let hi = f32((packed >> 16u) & 0xFFFFu);
     let lo = f32(packed & 0xFFFFu);
     var f = vec2<f32>(hi, lo) / 32767.0 - 1.0;
@@ -156,7 +160,9 @@ fn unpack_normal(packed: u32) -> vec3<f32> {
         return vec3<f32>(0.0, 0.0, 1.0);
     }
     let z = sqrt(max(0.0, 1.0 - d));
-    return vec3<f32>(f.x, f.y, z);
+    let signs = (color_t_sign >> 24u) & 0xFFu;
+    let nSign = f32(signs & 0x02u) - 1.0;
+    return vec3<f32>(f.x, f.y, z * nSign);
 }
 
 // Vertex shader output. Interpolated across the triangle.
@@ -249,8 +255,8 @@ fn gpu_driven_vertex_shader(
     );
     let element = load_vertex_element(vert_idx);
 
-    let normal = unpack_normal(element.normal);
-    let tangent = unpack_normal(element.tangent);
+    let normal = unpack_normal(element.normal, element.color_t_sign);
+    let tangent = unpack_normal(element.tangent, element.color_t_sign);
 
     // Tangent sign stored in high byte of color_t_sign (0xFF = negative).
     let tangent_sign = select(1.0, -1.0,
