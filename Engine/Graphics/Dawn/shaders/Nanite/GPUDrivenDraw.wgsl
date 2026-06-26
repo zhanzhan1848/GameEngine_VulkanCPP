@@ -413,13 +413,25 @@ fn gpu_driven_fragment_shader(in: VSOutput, @builtin(front_facing) is_front: boo
     // Normal/ORM are forced neutral so deferred lighting applies a flat shade
     // without washing out the per-id colors.
     if (uniforms.debug_mode != 0u) {
-        // mode 1 → meshlet_id, mode 2 → triangle_id, mode 3 → mesh_id
-        let id = select(in.meshlet_id,
-                        select(in.triangle_id, in.mesh_id, uniforms.debug_mode == 3u),
-                        uniforms.debug_mode != 1u);
-        out.albedo = vec4<f32>(hash_id_to_color(id), 1.0);
-        out.normal = vec4<f32>(0.5, 0.5, 1.0, 1.0);  // neutral, lit flat
-        out.orm = vec4<f32>(1.0, 0.9, 0.0, 1.0);     // full AO, high roughness, non-metal
+        if (uniforms.debug_mode == 4u) {
+            // Visualize world-space normal (post back-face flip + normal map)
+            // as RGB. Floor with correct +Y normal → green; flipped -Y →
+            // purple; +X → red; -X → cyan-blue; +Z → blue; -Z → orange.
+            // Use Mode 7 (MeshletNoIBL) for cleanest read: deferred there
+            // outputs `albedo * occlusion`, so the color reaches screen
+            // largely unmultipled by lighting.
+            out.albedo = vec4<f32>(world_normal * 0.5 + 0.5, 1.0);
+            out.normal = vec4<f32>(0.5, 0.5, 1.0, 1.0);  // neutral, deferred-light flat
+            out.orm = vec4<f32>(1.0, 1.0, 0.0, 1.0);     // full AO, smooth, non-metal
+        } else {
+            // mode 1 → meshlet_id, mode 2 → triangle_id, mode 3 → mesh_id
+            let id = select(in.meshlet_id,
+                            select(in.triangle_id, in.mesh_id, uniforms.debug_mode == 3u),
+                            uniforms.debug_mode != 1u);
+            out.albedo = vec4<f32>(hash_id_to_color(id), 1.0);
+            out.normal = vec4<f32>(0.5, 0.5, 1.0, 1.0);  // neutral, lit flat
+            out.orm = vec4<f32>(1.0, 0.9, 0.0, 1.0);     // full AO, high roughness, non-metal
+        }
     }
 
     return out;

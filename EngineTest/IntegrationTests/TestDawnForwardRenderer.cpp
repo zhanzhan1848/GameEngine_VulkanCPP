@@ -382,6 +382,7 @@ bool Engine_Test::initialize() {
             if (mode == 1) label = 'MeshletID';
             else if (mode == 2) label = 'TriangleID';
             else if (mode == 3) label = 'MeshID';
+            else if (mode == 4) label = 'Normal';
             dbg.textContent = 'Meshlet Debug: ' + label;
         };
     });
@@ -1102,7 +1103,7 @@ void Engine_Test::UpdateCamera(float dt) {
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
             "GPU-Driven Meshlet + Indirect Draw + IBL"
         };
-        static const char* kDebugLabel[] = {"Off", "MeshletID", "TriangleID", "MeshID"};
+        static const char* kDebugLabel[] = {"Off", "MeshletID", "TriangleID", "MeshID", "Normal"};
         bool tabPressed = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 48);
         if (tabPressed && !prevTabState_) {
             renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
@@ -1122,7 +1123,7 @@ void Engine_Test::UpdateCamera(float dt) {
             // debug visualization. Mode 8 (full-lit meshlet) ignores V so the
             // textured result stays unmodified.
             if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
-                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 4u;
+                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 5u;
                 std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_
                           << " (" << kDebugLabel[meshletDebugMode_] << ")" << std::endl;
             } else {
@@ -1223,7 +1224,7 @@ void Engine_Test::UpdateCamera(float dt) {
         if (vPressed && !prevVState_) {
             // V only in Mode 7 (MeshletNoIBL) — see native handler for rationale.
             if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
-                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 4u;
+                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 5u;
                 std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_ << std::endl;
                 EM_ASM_({
                     if (window.setMeshletDebug) {
