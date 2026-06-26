@@ -383,6 +383,7 @@ bool Engine_Test::initialize() {
             else if (mode == 2) label = 'TriangleID';
             else if (mode == 3) label = 'MeshID';
             else if (mode == 4) label = 'Normal';
+            else if (mode == 5) label = 'ObjNormal';
             dbg.textContent = 'Meshlet Debug: ' + label;
         };
     });
@@ -1110,7 +1111,12 @@ void Engine_Test::UpdateCamera(float dt) {
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
             "GPU-Driven Meshlet + Indirect Draw + IBL"
         };
-        static const char* kDebugLabel[] = {"Off", "MeshletID", "TriangleID", "MeshID", "Normal"};
+        // Mode 5 (ObjNormal) visualizes the raw unpacked object-space normal
+        // BEFORE the world_matrix 3x3 multiplication. Comparing mode 4 (world)
+        // vs mode 5 (object) isolates whether a tilted normal originates from
+        // source vertex data (object → fix content pipeline / vertex pull) or
+        // from the world transform (world → fix InstanceData world_matrix).
+        static const char* kDebugLabel[] = {"Off", "MeshletID", "TriangleID", "MeshID", "Normal", "ObjNormal"};
         bool tabPressed = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 48);
         if (tabPressed && !prevTabState_) {
             renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
@@ -1130,7 +1136,7 @@ void Engine_Test::UpdateCamera(float dt) {
             // debug visualization. Mode 8 (full-lit meshlet) ignores V so the
             // textured result stays unmodified.
             if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
-                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 5u;
+                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 6u;
                 std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_
                           << " (" << kDebugLabel[meshletDebugMode_] << ")" << std::endl;
             } else {
@@ -1231,7 +1237,7 @@ void Engine_Test::UpdateCamera(float dt) {
         if (vPressed && !prevVState_) {
             // V only in Mode 7 (MeshletNoIBL) — see native handler for rationale.
             if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
-                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 5u;
+                meshletDebugMode_ = (meshletDebugMode_ + 1u) % 6u;
                 std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_ << std::endl;
                 EM_ASM_({
                     if (window.setMeshletDebug) {

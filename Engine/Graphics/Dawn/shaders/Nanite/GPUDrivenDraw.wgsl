@@ -178,6 +178,12 @@ struct VSOutput {
     @location(7) @interpolate(flat) mesh_id: u32,
     @location(8) current_clip: vec4<f32>,
     @location(9) previous_clip: vec4<f32>,
+    // Object-space normal captured BEFORE `normal_matrix * normal` (debug mode 5).
+    // Lets us A/B world vs object normal to localize tilted-normal bugs:
+    //   mode 4 world normal tilted + mode 5 object normal green (0,1,0)
+    //     → source data fine, InstanceData.world_matrix isn't identity.
+    //   mode 5 also tilted → source vertex data or vertex pull is wrong.
+    @location(10) object_normal: vec3<f32>,
 };
 
 // Hash u32 → vec3 color for debug visualization. Uses the PCG-style hash
@@ -234,6 +240,7 @@ fn gpu_driven_vertex_shader(
         out.mesh_id = instance_index;
         out.current_clip = out.position;
         out.previous_clip = out.position;
+        out.object_normal = vec3<f32>(0.0, 1.0, 0.0);
         return out;
     }
 
@@ -284,6 +291,11 @@ fn gpu_driven_vertex_shader(
     normal_matrix[0] = inst.world_matrix[0].xyz;
     normal_matrix[1] = inst.world_matrix[1].xyz;
     normal_matrix[2] = inst.world_matrix[2].xyz;
+
+    // Capture object-space normal BEFORE the world_matrix multiply. Debug
+    // mode 5 visualizes this; comparing against mode 4 (world) tells us
+    // whether a tilted normal comes from source data or from world_matrix.
+    out.object_normal = normal;
 
     var world_normal = normalize(normal_matrix * normal);
     var world_tangent = normalize(normal_matrix * tangent);
@@ -424,6 +436,24 @@ fn gpu_driven_fragment_shader(in: VSOutput, @builtin(front_facing) is_front: boo
             // outputs `albedo * occlusion`, so the color reaches screen
             // largely unmultipled by lighting.
             out.albedo = vec4<f32>(N * 0.5 + 0.5, 1.0);
+            out.normal = vec4<f32>(0.5, 0.5, 1.0, 1.0);  // neutral, deferred-light flat
+            out.orm = vec4<f32>(1.0, 1.0, 0.0, 1.0);     // full AO, smooth, non-metal
+        } else if (uniforms.debug_mode == 5u) {
+            // Visualize the OBJECT-SPACE normal — raw unpacked source normal
+            // BEFORE `normal_matrix * normal`. Mode 4 vs mode 5 isolates
+            // tilted-normal bugs:
+            //   - mode 4 tilted, mode 5 green (0,1,0) → world_matrix isn't
+            //     identity. Check InstanceData.world_matrix and the upstream
+            //     transform::init_info.rotation (must be {0,0,0,1} identity
+            //     quaternion, NOT {0,0,0,0} which silently NaN-rotates).
+            //   - mode 5 also tilted → source vertex data or vertex-pull is
+            //     reading the wrong element index. Check meshlet_vertices +
+            //     meshlet_triangles indirection and the 24-byte VertexElement
+            //     repacking in GPUDrivenDrawPipeline.cpp.
+            // For static Sponza meshes (identity world), object == world, so
+            // modes 4 and 5 should look IDENTICAL. Any divergence is a bug.
+            let obj_n = normalize(in.object_normal);
+            out.albedo = vec4<f32>(obj_n * 0.5 + 0.5, 1.0);
             out.normal = vec4<f32>(0.5, 0.5, 1.0, 1.0);  // neutral, deferred-light flat
             out.orm = vec4<f32>(1.0, 1.0, 0.0, 1.0);     // full AO, smooth, non-metal
         } else {
