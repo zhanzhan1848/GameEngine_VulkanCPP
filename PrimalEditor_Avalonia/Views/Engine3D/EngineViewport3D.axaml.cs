@@ -107,6 +107,18 @@ public partial class EngineViewport3D : UserControl
                 }
                 _engineInitialized = true;
                 Logger.Info("Engine initialized via RHI (Metal)");
+
+                UInt64 deviceHandle = NativeEngineBridge.GetEngineDeviceHandle();
+                if (deviceHandle != 0 && NativeEngineBridge.CreateStandardRenderPipeline(deviceHandle))
+                {
+                    Logger.Info("StandardRenderPipeline created (Lumen=Low)");
+                    NativeEngineBridge.PipelineSetEditorMode(true);
+                    NativeEngineBridge.SetPipelineViewportSize(width, height);
+                }
+                else
+                {
+                    Logger.Warning("StandardRenderPipeline creation failed — falling back to legacy gpass path");
+                }
             }
 
             // Step 2: Embed MTKView into Avalonia's contentView via the engine's
@@ -160,6 +172,15 @@ public partial class EngineViewport3D : UserControl
             _viewportInitialized = true;
             ShowPlaceholder(false);
             StartRenderLoop();
+
+            // Configure the StandardRenderPipeline for editor preview.
+            // Editor mode uses the lightweight forward path; viewport
+            // size must mirror the surface size so internal buffers
+            // scale correctly. Both calls are no-ops if the pipeline
+            // singleton is not yet created (graceful early start).
+            NativeEngineBridge.PipelineSetEditorMode(true);
+            NativeEngineBridge.SetPipelineViewportSize(width, height);
+
             Logger.Info("3D viewport initialized via RHI forward pipeline");
             return true;
         }
@@ -184,7 +205,11 @@ public partial class EngineViewport3D : UserControl
         // +Z. Camera position at (0, 1, -12) with FOV 60° so 4 spheres at
         // x = -6,-2,+2,+6 (radius 0.5) all fit comfortably.
         _cameraEntityId = NativeEngineBridge.CreateEntity(0f, 1f, -12f);
-        const float fov = 1.0472f;  // 60 degrees
+        // ResourceAPI::CreateCamera stores fov in Camera::field_of_view, but
+        // MetalCamera::update() multiplies it by π before passing to
+        // createPerspectiveFovLH — i.e. the engine treats the value as a
+        // fraction of π, not radians. 60° → fov = 60° / 180° = 1/3.
+        const float fov = 1f / 3f;
         float aspect = (float)width / (float)height;
         const float nearZ = 0.1f;
         const float farZ = 1000.0f;
@@ -341,47 +366,55 @@ public partial class EngineViewport3D : UserControl
 
     private DispatcherTimer? _renderTimer;
     private DateTime _lastTick;
+    private uint _nativeRenderLoopId;
 
     private void StartRenderLoop()
     {
-        if (_renderTimer != null) return;
+        if (_nativeRenderLoopId != 0) return;
         _lastTick = DateTime.UtcNow;
+        _nativeRenderLoopId = NativeEngineBridge.EditorRenderLoop.Start(60, OnNativeFrame);
+        if (_nativeRenderLoopId != 0)
+        {
+            Logger.Info("Editor render loop started (60Hz native, RHI forward pipeline)");
+            return;
+        }
         _renderTimer = new DispatcherTimer(DispatcherPriority.Render)
         {
             Interval = TimeSpan.FromMilliseconds(33)
         };
         _renderTimer.Tick += OnRenderTick;
         _renderTimer.Start();
-        Logger.Info("Editor render loop started (30Hz, RHI forward pipeline)");
+        Logger.Warning("Native render loop unavailable — fell back to DispatcherTimer 30Hz");
     }
 
     private void StopRenderLoop()
     {
+        if (_nativeRenderLoopId != 0)
+        {
+            NativeEngineBridge.EditorRenderLoop.Stop(_nativeRenderLoopId);
+            _nativeRenderLoopId = 0;
+        }
         _renderTimer?.Stop();
         _renderTimer = null;
     }
 
+    private void OnNativeFrame(float dt) => OnRenderFrameCore(dt);
+
     private void OnRenderTick(object? sender, EventArgs e)
     {
-        if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return;
         var now = DateTime.UtcNow;
         var dt = (float)(now - _lastTick).TotalSeconds;
         if (dt <= 0f) dt = 0.016f;
         if (dt > 0.1f) dt = 0.1f;
         _lastTick = now;
+        OnRenderFrameCore(dt);
+    }
+
+    private void OnRenderFrameCore(float dt)
+    {
+        if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return;
         _animTime += dt;
 
-        // Build the frame info and call RenderFrame. The engine drives the
-        // full forward pipeline: depth prepass, gpass, shadow, compose,
-        // TAA, SSAO, SSGI, post-process, then presents to the MTKView via
-        // the surface's end_frame() which calls mtkView->draw() to commit
-        // the presentable drawable to the layer.
-        //
-        // Skip the call entirely when there are no render items: with the
-        // current test scene we have no materials to bind, so render_items
-        // stays empty and there is nothing for RenderFrame to do. The
-        // surface still displays its clear color and the tick continues
-        // running so the editor stays responsive.
         if (_testSceneRenderItems.Count == 0) return;
         EnsureRenderItemArrayPinned();
         var p = new NativeEngineBridge.RenderFrameParams
@@ -481,6 +514,10 @@ public partial class EngineViewport3D : UserControl
             _lastWidth = width;
             _lastHeight = height;
             NativeEngineBridge.ResizeRenderSurface(_surfaceId, (uint)width, (uint)height);
+            // StandardRenderPipeline maintains its own render targets
+            // keyed off the viewport size; update it in lockstep with
+            // the surface resize so internal buffers don't go stale.
+            NativeEngineBridge.SetPipelineViewportSize(width, height);
         }
         if (sizeChanged || positionChanged)
         {

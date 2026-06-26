@@ -283,6 +283,288 @@ public static class NativeEngineBridge
     [DllImport("PrimalEngine", EntryPoint = "RenderFrame", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _RenderFrame(IntPtr paramsPtr);
 
+    // ====== Render Pipeline (RenderPipelineAPI.cpp) ======
+    //
+    // Mirrors EngineDLL/RenderPipelineAPI.cpp. Exposes the
+    // StandardRenderPipeline abstraction: pass toggles, editor mode,
+    // Lumen GI quality preset, mesh / streaming-mesh entity registration,
+    // shader hot-reload, viewport size, and the parameter descriptors
+    // used by the editor UI to auto-generate controls.
+    //
+    // Settings struct (RenderPipelineSettings = 380 bytes on macOS) is
+    // intentionally NOT mirrored as a managed struct — we marshal it as
+    // a raw byte buffer via IntPtr. The full struct layout in
+    // Engine/Graphics/RenderPipeline/PipelineQualityConfig.h and friends
+    // drifts over time; keeping it opaque avoids binary-compat breakage.
+
+    public enum RenderPassId : uint
+    {
+        Shadow = 0,
+        DeferredLighting = 1,
+        SSAO = 2,
+        DDGI = 3,
+        SurfaceCache = 4,
+        SCDDGIIntegration = 5,
+        SSGI = 6,
+        ScreenProbes = 7,
+        GIGather = 8,
+        VolumePass = 9,
+        VolumeRenderer = 10,
+        FroxelFog = 11,
+        FluidRender = 12,
+        FusionComposite = 13,
+        FinalBlit = 14,
+        Count = 15,
+    }
+
+    public enum LumenQualityPresetId : uint
+    {
+        Off = 0,
+        Low = 1,
+        Medium = 2,
+        High = 3,
+        Ultra = 4,
+        UltraRT = 5,
+    }
+
+    // Pass toggles
+    [DllImport("PrimalEngine", EntryPoint = "SetRenderPassEnabled", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetRenderPassEnabled(uint passId, uint enabled);
+    public static void SetRenderPassEnabled(RenderPassId passId, bool enabled)
+    {
+        if (!_isLoaded) return;
+        try { _SetRenderPassEnabled((uint)passId, enabled ? 1u : 0u); }
+        catch (Exception ex) { Logger.Error("SetRenderPassEnabled failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "IsRenderPassEnabled", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _IsRenderPassEnabled(uint passId);
+    public static bool IsRenderPassEnabled(RenderPassId passId)
+    {
+        if (!_isLoaded) return false;
+        try { return _IsRenderPassEnabled((uint)passId) != 0; }
+        catch (Exception ex) { Logger.Error("IsRenderPassEnabled failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "IsRenderPassActive", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _IsRenderPassActive(uint passId);
+    public static bool IsRenderPassActive(RenderPassId passId)
+    {
+        if (!_isLoaded) return false;
+        try { return _IsRenderPassActive((uint)passId) != 0; }
+        catch (Exception ex) { Logger.Error("IsRenderPassActive failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "GetRenderPassCount", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GetRenderPassCount();
+    public static uint GetRenderPassCount()
+    {
+        if (!_isLoaded) return 0;
+        try { return _GetRenderPassCount(); }
+        catch (Exception ex) { Logger.Error("GetRenderPassCount failed", ex); return 0; }
+    }
+
+    // Pass info — three out-pointers (name, description, default_enabled).
+    [DllImport("PrimalEngine", EntryPoint = "GetPipelinePassInfo", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _GetPipelinePassInfo(uint passId, out IntPtr name, out IntPtr description, out uint defaultEnabled);
+    public static (string name, string description, bool defaultEnabled) GetPipelinePassInfo(RenderPassId passId)
+    {
+        if (!_isLoaded) return (string.Empty, string.Empty, false);
+        try
+        {
+            _GetPipelinePassInfo((uint)passId, out var namePtr, out var descPtr, out var defEnabled);
+            return (
+                Marshal.PtrToStringAnsi(namePtr) ?? string.Empty,
+                Marshal.PtrToStringAnsi(descPtr) ?? string.Empty,
+                defEnabled != 0);
+        }
+        catch (Exception ex) { Logger.Error("GetPipelinePassInfo failed", ex); return (string.Empty, string.Empty, false); }
+    }
+
+    // Render pipeline settings — opaque byte buffer; size known at runtime
+    // via sizeof(RenderPipelineSettings) on the C++ side. The editor does
+    // not currently need to round-trip the full struct, so the bytes
+    // marshaling path is provided but not used.
+    public static uint GetRenderPipelineSettingsSize()
+    {
+        // sizeof(RenderPipelineSettings) on macOS is 380 bytes; if that
+        // changes upstream, recompile this constant. The native side
+        // trusts the caller to pass a buffer of the right size.
+        return 380;
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "GetRenderPipelineSettings", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _GetRenderPipelineSettings(IntPtr outBuffer);
+    public static byte[] GetRenderPipelineSettings()
+    {
+        if (!_isLoaded) return null;
+        try
+        {
+            var buf = new byte[GetRenderPipelineSettingsSize()];
+            var handle = GCHandle.Alloc(buf, GCHandleType.Pinned);
+            try
+            {
+                _GetRenderPipelineSettings(handle.AddrOfPinnedObject());
+            }
+            finally { handle.Free(); }
+            return buf;
+        }
+        catch (Exception ex) { Logger.Error("GetRenderPipelineSettings failed", ex); return null; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "UpdateRenderPipelineSettings", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _UpdateRenderPipelineSettings(IntPtr settings);
+    public static void UpdateRenderPipelineSettings(byte[] settings)
+    {
+        if (!_isLoaded || settings == null) return;
+        try
+        {
+            var handle = GCHandle.Alloc(settings, GCHandleType.Pinned);
+            try { _UpdateRenderPipelineSettings(handle.AddrOfPinnedObject()); }
+            finally { handle.Free(); }
+        }
+        catch (Exception ex) { Logger.Error("UpdateRenderPipelineSettings failed", ex); }
+    }
+
+    // Param descriptors for UI auto-generation.
+    [DllImport("PrimalEngine", EntryPoint = "GetPipelineParamDescriptors", CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr _GetPipelineParamDescriptors(out uint outCount);
+    public static uint GetPipelineParamDescriptorsCount()
+    {
+        if (!_isLoaded) return 0;
+        try { _GetPipelineParamDescriptors(out var count); return count; }
+        catch (Exception ex) { Logger.Error("GetPipelineParamDescriptors (count) failed", ex); return 0; }
+    }
+
+    // Pipeline viewport size — must match the surface size for the
+    // StandardRenderPipeline to scale its internal buffers correctly.
+    [DllImport("PrimalEngine", EntryPoint = "SetPipelineViewportSize", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetPipelineViewportSize(uint width, uint height);
+    public static void SetPipelineViewportSize(int width, int height)
+    {
+        if (!_isLoaded) return;
+        try { _SetPipelineViewportSize((uint)width, (uint)height); }
+        catch (Exception ex) { Logger.Error("SetPipelineViewportSize failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "ReloadPipelineShader", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _ReloadPipelineShader(UInt64 shaderHandle, IntPtr data, uint dataSize);
+    public static bool ReloadPipelineShader(UInt64 shaderHandle, byte[] data)
+    {
+        if (!_isLoaded || data == null || data.Length == 0) return false;
+        try
+        {
+            var handle = GCHandle.Alloc(data, GCHandleType.Pinned);
+            try { return _ReloadPipelineShader(shaderHandle, handle.AddrOfPinnedObject(), (uint)data.Length) != 0; }
+            finally { handle.Free(); }
+        }
+        catch (Exception ex) { Logger.Error("ReloadPipelineShader failed", ex); return false; }
+    }
+
+    // Mesh entity registration. texture_content_ids is u64 array of
+    // content::add_texture handles; pass null/0 for untextured mesh.
+    [DllImport("PrimalEngine", EntryPoint = "PipelineRegisterMeshEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern UInt64 _PipelineRegisterMeshEntity(UInt64 geometryContentId, IntPtr textureContentIds, uint textureCount);
+    public static UInt64 PipelineRegisterMeshEntity(UInt64 geometryContentId, UInt64[] textureContentIds)
+    {
+        if (!_isLoaded) return 0;
+        try
+        {
+            if (textureContentIds == null || textureContentIds.Length == 0)
+                return _PipelineRegisterMeshEntity(geometryContentId, IntPtr.Zero, 0);
+            var handle = GCHandle.Alloc(textureContentIds, GCHandleType.Pinned);
+            try { return _PipelineRegisterMeshEntity(geometryContentId, handle.AddrOfPinnedObject(), (uint)textureContentIds.Length); }
+            finally { handle.Free(); }
+        }
+        catch (Exception ex) { Logger.Error("PipelineRegisterMeshEntity failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineUnregisterMeshEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineUnregisterMeshEntity(UInt64 entityId);
+    public static void PipelineUnregisterMeshEntity(UInt64 entityId)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineUnregisterMeshEntity(entityId); }
+        catch (Exception ex) { Logger.Error("PipelineUnregisterMeshEntity failed", ex); }
+    }
+
+    // Streaming-mesh entity registration (Phase 9.3b). streamingMesh is
+    // an opaque pointer owned by the C# caller (the pipeline holds a
+    // non-owning reference).
+    [DllImport("PrimalEngine", EntryPoint = "PipelineRegisterStreamingMeshEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern UInt64 _PipelineRegisterStreamingMeshEntity(IntPtr streamingMesh, IntPtr boundsMin, IntPtr boundsMax);
+    public static UInt64 PipelineRegisterStreamingMeshEntity(IntPtr streamingMesh, float[] boundsMin, float[] boundsMax)
+    {
+        if (!_isLoaded || streamingMesh == IntPtr.Zero) return 0;
+        if (boundsMin == null || boundsMin.Length != 3) return 0;
+        if (boundsMax == null || boundsMax.Length != 3) return 0;
+        try
+        {
+            var minHandle = GCHandle.Alloc(boundsMin, GCHandleType.Pinned);
+            var maxHandle = GCHandle.Alloc(boundsMax, GCHandleType.Pinned);
+            try { return _PipelineRegisterStreamingMeshEntity(streamingMesh, minHandle.AddrOfPinnedObject(), maxHandle.AddrOfPinnedObject()); }
+            finally { minHandle.Free(); maxHandle.Free(); }
+        }
+        catch (Exception ex) { Logger.Error("PipelineRegisterStreamingMeshEntity failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineUpdateStreamingMeshEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineUpdateStreamingMeshEntity(UInt64 entityId, UInt64 generation, IntPtr boundsMin, IntPtr boundsMax);
+    public static void PipelineUpdateStreamingMeshEntity(UInt64 entityId, UInt64 generation, float[] boundsMin, float[] boundsMax)
+    {
+        if (!_isLoaded) return;
+        if (boundsMin == null || boundsMin.Length != 3) return;
+        if (boundsMax == null || boundsMax.Length != 3) return;
+        try
+        {
+            var minHandle = GCHandle.Alloc(boundsMin, GCHandleType.Pinned);
+            var maxHandle = GCHandle.Alloc(boundsMax, GCHandleType.Pinned);
+            try { _PipelineUpdateStreamingMeshEntity(entityId, generation, minHandle.AddrOfPinnedObject(), maxHandle.AddrOfPinnedObject()); }
+            finally { minHandle.Free(); maxHandle.Free(); }
+        }
+        catch (Exception ex) { Logger.Error("PipelineUpdateStreamingMeshEntity failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineUnregisterStreamingMeshEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineUnregisterStreamingMeshEntity(UInt64 entityId);
+    public static void PipelineUnregisterStreamingMeshEntity(UInt64 entityId)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineUnregisterStreamingMeshEntity(entityId); }
+        catch (Exception ex) { Logger.Error("PipelineUnregisterStreamingMeshEntity failed", ex); }
+    }
+
+    // Editor mode toggle (lightweight forward rendering path used by the
+    // editor preview; the engine's gameplay path bypasses this).
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetEditorMode", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineSetEditorMode(uint enable);
+    public static void PipelineSetEditorMode(bool enable)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineSetEditorMode(enable ? 1u : 0u); }
+        catch (Exception ex) { Logger.Error("PipelineSetEditorMode failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineIsEditorMode", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineIsEditorMode();
+    public static bool PipelineIsEditorMode()
+    {
+        if (!_isLoaded) return false;
+        try { return _PipelineIsEditorMode() != 0; }
+        catch (Exception ex) { Logger.Error("PipelineIsEditorMode failed", ex); return false; }
+    }
+
+    // Lumen GI quality preset (0=Off .. 5=UltraRT). Triggers Lumen
+    // subsystem re-init — do not call per-frame.
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetLumenConfig", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineSetLumenConfig(uint qualityPreset);
+    public static void PipelineSetLumenConfig(LumenQualityPresetId preset)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineSetLumenConfig((uint)preset); }
+        catch (Exception ex) { Logger.Error("PipelineSetLumenConfig failed", ex); }
+    }
+
     // ====== Scene Setup (ResourceAPI: CreateCamera/Entity/RenderItem) ======
 
 [DllImport("PrimalEngine", EntryPoint = "CreateEntity", CallingConvention = CallingConvention.Cdecl)]
@@ -686,6 +968,25 @@ public static class NativeEngineBridge
         catch { return 0; }
     }
 
+    [DllImport("PrimalEngine", EntryPoint = "CreateStandardRenderPipelineFromDevice", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _CreateStandardRenderPipelineFromDevice(UInt64 deviceHandle);
+
+    [DllImport("PrimalEngine", EntryPoint = "DestroyStandardRenderPipeline", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _DestroyStandardRenderPipeline();
+
+    public static bool CreateStandardRenderPipeline(UInt64 deviceHandle)
+    {
+        if (!_isLoaded || deviceHandle == 0) return false;
+        try { return _CreateStandardRenderPipelineFromDevice(deviceHandle) != 0; }
+        catch { return false; }
+    }
+
+    public static void DestroyStandardRenderPipeline()
+    {
+        if (!_isLoaded) return;
+        try { _DestroyStandardRenderPipeline(); } catch { }
+    }
+
     public static bool RenderFrame(RenderFrameParams p)
     {
         if (!_isLoaded) return false;
@@ -914,5 +1215,82 @@ public static class NativeEngineBridge
         var ptr = Marshal.AllocHGlobal(bytes.Length);
         Marshal.Copy(bytes, 0, ptr, bytes.Length);
         return ptr;
+    }
+
+    // =========================================================================
+    // Editor render loop — native CFRunLoopTimer-driven frame callback.
+    // macOS only. The native side calls back into C# via a function pointer
+    // registered once at startup, so Avalonia's DispatcherTimer is not
+    // involved in frame submission.
+    // =========================================================================
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void NativeFrameCb(uint loopId, float dt);
+
+    [DllImport("PrimalEngine", EntryPoint = "EditorSetFrameCallback", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _EditorSetFrameCallback(NativeFrameCb cb);
+
+    [DllImport("PrimalEngine", EntryPoint = "EditorCreateRenderLoop", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EditorCreateRenderLoop(int fps);
+
+    [DllImport("PrimalEngine", EntryPoint = "EditorStartRenderLoop", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _EditorStartRenderLoop(uint loopId);
+
+    [DllImport("PrimalEngine", EntryPoint = "EditorStopRenderLoop", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _EditorStopRenderLoop(uint loopId);
+
+    [DllImport("PrimalEngine", EntryPoint = "EditorDestroyRenderLoop", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _EditorDestroyRenderLoop(uint loopId);
+
+    public static class EditorRenderLoop
+    {
+        private static readonly System.Collections.Generic.Dictionary<uint, Action<float>> _callbacks = new();
+        private static GCHandle _thunkHandle;
+        private static NativeFrameCb? _thunk;
+        private static bool _thunkRegistered;
+
+        private static void EnsureThunkRegistered()
+        {
+            if (_thunkRegistered) return;
+            _thunk = (loopId, dt) =>
+            {
+                if (_callbacks.TryGetValue(loopId, out var cb))
+                {
+                    try { cb(dt); }
+                    catch (Exception ex) { Logger.Error("EditorRenderLoop callback threw", ex); }
+                }
+            };
+            _thunkHandle = GCHandle.Alloc(_thunk);
+            _EditorSetFrameCallback(_thunk);
+            _thunkRegistered = true;
+        }
+
+        public static uint Start(int fps, Action<float> onFrame)
+        {
+            if (!_isLoaded) return 0;
+            if (onFrame == null) return 0;
+
+            EnsureThunkRegistered();
+            uint loopId = _EditorCreateRenderLoop(fps);
+            if (loopId == 0) return 0;
+
+            _callbacks[loopId] = onFrame;
+            _EditorStartRenderLoop(loopId);
+            return loopId;
+        }
+
+        public static void Stop(uint loopId)
+        {
+            if (loopId == 0 || !_isLoaded) return;
+            try { _EditorStopRenderLoop(loopId); } catch { }
+            _callbacks.Remove(loopId);
+        }
+
+        public static void Destroy(uint loopId)
+        {
+            if (loopId == 0 || !_isLoaded) return;
+            Stop(loopId);
+            try { _EditorDestroyRenderLoop(loopId); } catch { }
+        }
     }
 }

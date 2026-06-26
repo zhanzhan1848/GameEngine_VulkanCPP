@@ -11,7 +11,7 @@ set(SOURCE_FILES
     "EngineAPI_win32.cpp"
     "EntityAPI.cpp"
     "AssetAPI.cpp"
-    # "RenderPipelineAPI.cpp"  # depends on StandardRenderPipeline/Lumen; not used by Avalonia UI yet
+    "RenderPipelineAPI.cpp"
     "PCGAPI.cpp"
     "GeometryAPI.cpp"
     "MaterialAPI.cpp"

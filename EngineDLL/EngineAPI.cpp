@@ -76,6 +76,10 @@ EDITOR_INTERFACE void ResizeRenderSurface(u32 id)
 #include "../Graphics/Metal/MetalCore.h"
 #include "../Platform/PlatformTypes.h"
 #include "../Platform/Platform.h"
+#include "Graphics/RenderPipeline/RenderPipeline.h"
+#include "Graphics/RenderPipeline/StandardRenderPipeline.h"
+#include "Graphics/Lumen/LumenTypes.h"
+#include "Graphics/Scene/RenderSceneSnapshot.h"
 #include <dlfcn.h>
 #include <cstdio>
 #if defined(__APPLE__)
@@ -285,5 +289,35 @@ EDITOR_INTERFACE u64 GetEngineDeviceHandle()
 {
 	// 返回 RHIDeviceBase* 的整数值。Editor 传给 MaterialPreviewAPI 等需要 device 的子模块。
 	return reinterpret_cast<u64>(graphics::get_rhi_device());
+}
+
+EDITOR_INTERFACE u32 CreateStandardRenderPipelineFromDevice(u64 device_handle)
+{
+	if (device_handle == 0) return 0;
+	auto* device = reinterpret_cast<graphics::rhi::RHIDeviceBase*>(device_handle);
+	if (!device) return 0;
+
+	auto* existing = graphics::RenderPipeline::Get();
+	if (existing) return 1;
+
+	auto* pipeline = new graphics::StandardRenderPipeline();
+	if (!pipeline->Initialize(device)) {
+		std::fprintf(stderr, "[CreateStandardRenderPipeline] Initialize failed\n");
+		delete pipeline;
+		return 0;
+	}
+	graphics::lumen::LumenConfig config{};
+	config.quality = graphics::lumen::LumenQualityPreset::Low;
+	pipeline->SetLumenConfig(config);
+	return 1;
+}
+
+EDITOR_INTERFACE void DestroyStandardRenderPipeline()
+{
+	auto* p = graphics::RenderPipeline::Get();
+	if (p) {
+		p->Shutdown();
+		delete p;
+	}
 }
 #endif
