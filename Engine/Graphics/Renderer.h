@@ -10,6 +10,7 @@
 namespace primal::graphics::rhi {
     struct DeviceDesc;
     class RHIDeviceBase;
+    using ResourceHandle = u64;  // mirror of rhi::ResourceHandle for fwd-decl convenience
 }
 
 namespace primal::graphics
@@ -42,6 +43,12 @@ namespace primal::graphics
 		u32 width() const;
 		u32 height() const;
 		void render(frame_info info) const;
+
+		// Blit a source RHI texture (offscreen render target) into the surface's
+		// current drawable and present. Used by Path B (PipelineRenderFrame +
+		// BlitRenderTargetToSurface). `src` must be a valid ResourceHandle with
+		// ShaderResource usage. Returns 1 on success, 0 on failure.
+		u32 blit_and_present(rhi::ResourceHandle src) const;
 	private:
 		surface_id _id{ id::invalid_id };
 	};

@@ -105,4 +105,14 @@ EDITOR_INTERFACE void ProceduralMeshDestroy(u64 content_id) {
                                        primal::content::asset_type::mesh);
 }
 
+// Release all engine-side content-system resources (meshes, shaders, textures).
+// Call BEFORE ShutdownEngine in test programs that registered procedural meshes
+// or pipeline mesh entities. Without this, the engine's static destructors trip
+// a !_size assertion in ~free_list because resources created via the dylib's
+// PipelineRegisterMeshEntity path are not released by ShutdownEngine alone.
+// Idempotent.
+EDITOR_INTERFACE void ShutdownContentSystem() {
+    primal::content::shutdown();
+}
+
 } // extern "C"

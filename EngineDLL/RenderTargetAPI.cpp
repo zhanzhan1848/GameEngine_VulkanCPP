@@ -9,6 +9,7 @@
 // Returns 1-based handle (0 = invalid). Uses RenderTexture::Create internally.
 #include "Common.h"
 #include "CommonHeaders.h"
+#include "EngineAPIInternal.h"
 #include "../Graphics/RHI/Core/RHIDevice.h"
 #include "../Graphics/Renderer.h"
 #include "../Graphics/RenderTexture.h"
@@ -24,14 +25,27 @@ namespace {
 // monotonic counter since these are engine-internal offscreen targets.
 u32 g_rt_entity_counter{ 0x80000000 }; // high bit set to avoid collision
 
-struct RenderTargetEntry {
-    graphics::RenderTexture* texture;
-    u32 entity_id;
-};
-
-std::vector<RenderTargetEntry> g_render_targets;
-
 } // anonymous namespace
+
+namespace primal::engine_dll {
+
+// Backing storage for the render target registry. Exposed to other EngineDLL
+// translation units via GetRenderTarget() declared in EngineAPIInternal.h.
+std::vector<RenderTargetEntry>& RenderTargets() {
+    static std::vector<RenderTargetEntry> v;
+    return v;
+}
+
+// 1-based handle → entry. nullptr if out-of-range or destroyed.
+RenderTargetEntry* GetRenderTarget(u64 handle) {
+    if (handle == 0) return nullptr;
+    auto& v = RenderTargets();
+    if (handle > v.size()) return nullptr;
+    auto& e = v[handle - 1];
+    return e.texture ? &e : nullptr;
+}
+
+} // namespace primal::engine_dll
 
 EDITOR_INTERFACE u64 CreateRenderTarget(u32 width, u32 height, u32 format)
 {
@@ -74,14 +88,16 @@ EDITOR_INTERFACE u64 CreateRenderTarget(u32 width, u32 height, u32 format)
         return 0;
     }
 
-    g_render_targets.push_back({ rt, entity_id });
-    return static_cast<u64>(g_render_targets.size()); // 1-based handle
+    auto& registry = engine_dll::RenderTargets();
+    registry.push_back({ rt, entity_id });
+    return static_cast<u64>(registry.size()); // 1-based handle
 }
 
 EDITOR_INTERFACE void DestroyRenderTarget(u64 handle)
 {
-    if (handle == 0 || handle > g_render_targets.size()) return;
-    auto& entry = g_render_targets[handle - 1];
+    auto& registry = engine_dll::RenderTargets();
+    if (handle == 0 || handle > registry.size()) return;
+    auto& entry = registry[handle - 1];
     if (!entry.texture) return;
 
     auto* device = graphics::get_rhi_device();
@@ -91,4 +107,32 @@ EDITOR_INTERFACE void DestroyRenderTarget(u64 handle)
     delete entry.texture;
     entry.texture = nullptr;
     entry.entity_id = id::invalid_id;
+}
+
+// Synchronous readback for debug / integration tests. Copies the render
+// target's pixel data into the caller-provided buffer. Caller must size
+// `out_buffer` to at least width * height * 8 bytes (RGBA16F = 8 bytes/pixel).
+// Returns 1 on success, 0 on failure (invalid handle / null buffer / etc.).
+// NOTE: synchronous — uses cmd->WaitForCompletion internally. Not for
+// production per-frame use; intended for tests and Editor screenshot paths.
+EDITOR_INTERFACE u32 DebugReadRenderTarget(u64 target_handle, void* out_buffer, u64 buffer_size)
+{
+    if (!out_buffer || buffer_size == 0) {
+        std::fprintf(stderr, "[DebugReadRenderTarget] null/empty out_buffer\n");
+        return 0;
+    }
+    auto* entry = engine_dll::GetRenderTarget(target_handle);
+    if (!entry || !entry->texture) {
+        std::fprintf(stderr, "[DebugReadRenderTarget] invalid target_handle %llu\n",
+                     static_cast<unsigned long long>(target_handle));
+        return 0;
+    }
+
+    auto* device = graphics::get_rhi_device();
+    if (!device) {
+        std::fprintf(stderr, "[DebugReadRenderTarget] no RHI device\n");
+        return 0;
+    }
+
+    return entry->texture->ReadBack(device, out_buffer, buffer_size) ? 1u : 0u;
 }

@@ -133,6 +133,16 @@ void GPUMesher::Shutdown() {
     DrainDeferredDestroys();  // free queued handles while device_ is still valid
     DestroyPipelines();
     DestroySDFPipelines();
+    // Free persistent cached transient buffers
+    if (device_) {
+        if (cached_uni_buf_     != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cached_uni_buf_);
+        if (cached_scalar_buf_  != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cached_scalar_buf_);
+        if (cached_dual_id_buf_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cached_dual_id_buf_);
+    }
+    cached_uni_buf_     = rhi::handles::INVALID_RESOURCE;
+    cached_scalar_buf_  = rhi::handles::INVALID_RESOURCE;
+    cached_dual_id_buf_ = rhi::handles::INVALID_RESOURCE;
+    cached_resolution_  = 0;
     device_ = nullptr;
 }
 
@@ -327,36 +337,32 @@ void GPUMesher::CreateSDFPipelines() {
 
     using namespace rhi;
 
-    // Descriptor set layout for classify_cells_sdf:
-    //   buffer(0): SurfaceNetsSDFUniforms
-    //   buffer(1): scalar_volume (write)
-    //   buffer(2): dual_id      (write)
-    //   buffer(3): counters     (atomic)
+    // Descriptor set layout for fill_scalar_from_sdf:
+    //   buffer(0):  SurfaceNetsSDFUniforms
+    //   buffer(1):  scalar_volume (f32[n³], write)
     //   texture(0..2): GlobalSDF cascades (access::sample)
     //
-    // 7 bindings, positional init matching the 9.3a CreatePipelines() style:
-    //   {binding, descriptorType, descriptorCount, stageFlags, immutableSamplers}
-    DescriptorSetLayoutBinding b[7] = {
+    // 5 bindings — no dual_id or counters (those go through the 9.3a
+    // classify_cells kernel which has its own descriptor set layout).
+    DescriptorSetLayoutBinding b[5] = {
         {0, DescriptorType::UniformBuffer,  1, ShaderStage::Compute, nullptr},
         {1, DescriptorType::StorageBuffer,  1, ShaderStage::Compute, nullptr},
-        {2, DescriptorType::StorageBuffer,  1, ShaderStage::Compute, nullptr},
-        {3, DescriptorType::StorageBuffer,  1, ShaderStage::Compute, nullptr},
         {0, DescriptorType::SampledImage,   1, ShaderStage::Compute, nullptr},
         {1, DescriptorType::SampledImage,   1, ShaderStage::Compute, nullptr},
         {2, DescriptorType::SampledImage,   1, ShaderStage::Compute, nullptr},
     };
     {
         DescriptorSetLayoutDesc desc{};
-        desc.bindingCount = 7;
+        desc.bindingCount = 5;
         desc.bindings = b;
-        classify_sdf_set_layout_ = device_->CreateDescriptorSetLayout(desc);
+        fill_scalar_set_layout_ = device_->CreateDescriptorSetLayout(desc);
     }
 
     {
         PipelineLayoutDesc desc{};
         desc.setLayoutCount = 1;
-        desc.setLayouts = &classify_sdf_set_layout_;
-        classify_sdf_layout_ = device_->CreatePipelineLayout(desc);
+        desc.setLayouts = &fill_scalar_set_layout_;
+        fill_scalar_layout_ = device_->CreatePipelineLayout(desc);
     }
 
     auto src = LoadShaderSource("SurfaceNetsGPUSDF");
@@ -366,22 +372,22 @@ void GPUMesher::CreateSDFPipelines() {
         return;
     }
 
-    classify_sdf_shader_ = device_->CreateShader(
-        src.data(), src.size(), ShaderStage::Compute, "classify_cells_sdf");
-    if (classify_sdf_shader_ == handles::INVALID_SHADER) {
-        std::cerr << "[GPUMesher] classify_cells_sdf compile failed\n";
+    fill_scalar_shader_ = device_->CreateShader(
+        src.data(), src.size(), ShaderStage::Compute, "fill_scalar_from_sdf");
+    if (fill_scalar_shader_ == handles::INVALID_SHADER) {
+        std::cerr << "[GPUMesher] fill_scalar_from_sdf compile failed\n";
         DestroySDFPipelines();
         return;
     }
 
     ComputePipelineDesc cp_desc{};
-    cp_desc.computeShader  = classify_sdf_shader_;
-    cp_desc.layout         = classify_sdf_layout_;
+    cp_desc.computeShader  = fill_scalar_shader_;
+    cp_desc.layout         = fill_scalar_layout_;
     cp_desc.threadGroupSize = math::u32v3{4, 4, 4};
-    classify_sdf_pipeline_ = device_->CreateComputePipeline(cp_desc);
+    fill_scalar_pipeline_ = device_->CreateComputePipeline(cp_desc);
 
-    if (classify_sdf_pipeline_ == handles::INVALID_PIPELINE) {
-        std::cerr << "[GPUMesher] classify_cells_sdf pipeline creation failed\n";
+    if (fill_scalar_pipeline_ == handles::INVALID_PIPELINE) {
+        std::cerr << "[GPUMesher] fill_scalar_from_sdf pipeline creation failed\n";
         DestroySDFPipelines();
         return;
     }
@@ -392,16 +398,16 @@ void GPUMesher::CreateSDFPipelines() {
 void GPUMesher::DestroySDFPipelines() {
     if (!device_) { sdf_pipelines_created_ = false; return; }
 
-    if (classify_sdf_pipeline_   != rhi::handles::INVALID_PIPELINE)         device_->DestroyPipeline(classify_sdf_pipeline_);
-    if (classify_sdf_shader_     != rhi::handles::INVALID_SHADER)           device_->DestroyShader(classify_sdf_shader_);
-    if (classify_sdf_layout_     != rhi::handles::INVALID_PIPELINE_LAYOUT)  device_->DestroyPipelineLayout(classify_sdf_layout_);
-    if (classify_sdf_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)
-        device_->DestroyDescriptorSetLayout(classify_sdf_set_layout_);
+    if (fill_scalar_pipeline_   != rhi::handles::INVALID_PIPELINE)         device_->DestroyPipeline(fill_scalar_pipeline_);
+    if (fill_scalar_shader_     != rhi::handles::INVALID_SHADER)           device_->DestroyShader(fill_scalar_shader_);
+    if (fill_scalar_layout_     != rhi::handles::INVALID_PIPELINE_LAYOUT)  device_->DestroyPipelineLayout(fill_scalar_layout_);
+    if (fill_scalar_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)
+        device_->DestroyDescriptorSetLayout(fill_scalar_set_layout_);
 
-    classify_sdf_pipeline_   = rhi::handles::INVALID_PIPELINE;
-    classify_sdf_shader_     = rhi::handles::INVALID_SHADER;
-    classify_sdf_layout_     = rhi::handles::INVALID_PIPELINE_LAYOUT;
-    classify_sdf_set_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    fill_scalar_pipeline_   = rhi::handles::INVALID_PIPELINE;
+    fill_scalar_shader_     = rhi::handles::INVALID_SHADER;
+    fill_scalar_layout_     = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    fill_scalar_set_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     sdf_pipelines_created_   = false;
 }
 
@@ -863,60 +869,73 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
     u32 zero_counters[2] = {0u, 0u};
     device_->UpdateBufferData(target.counters, zero_counters, sizeof(zero_counters));
 
-    // Allocate transient buffers: uniforms, dual_id, scalar_volume.
-    // Positions/elements/indices/counters/indirect_args come from the target
-    // StreamingMesh (caller-owned, persistent across re-executes).
-    auto make_storage_buf = [&](u64 bytes) -> rhi::ResourceHandle {
-        rhi::BufferDesc desc{};
-        desc.size = bytes;
-        desc.bindFlags = (u32)rhi::BufferUsageFlags::Storage;
-        desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-        desc.usage = rhi::GPUMemoryUsage::Dynamic;
-        return device_->CreateBuffer(desc);
-    };
+    // Persistent transient buffers (uni / scalar / dual_id). Previously these
+    // were allocated fresh every call, which caused pool churn that destabilized
+    // hazard tracking after ~55 frames and corrupted scalar_buf with NaN. Now
+    // we cache them across frames (same resolution) — caller waits for GPU
+    // completion before returning, so no cross-frame read/write race.
+    if (cached_resolution_ != resolution ||
+        cached_uni_buf_     == rhi::handles::INVALID_RESOURCE ||
+        cached_scalar_buf_  == rhi::handles::INVALID_RESOURCE ||
+        cached_dual_id_buf_ == rhi::handles::INVALID_RESOURCE) {
+        // Resolution changed (or first call) — reallocate.
+        if (cached_uni_buf_     != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cached_uni_buf_);
+        if (cached_scalar_buf_  != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cached_scalar_buf_);
+        if (cached_dual_id_buf_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cached_dual_id_buf_);
+        cached_uni_buf_     = rhi::handles::INVALID_RESOURCE;
+        cached_scalar_buf_  = rhi::handles::INVALID_RESOURCE;
+        cached_dual_id_buf_ = rhi::handles::INVALID_RESOURCE;
 
-    rhi::ResourceHandle uni_buf    = rhi::handles::INVALID_RESOURCE;
-    rhi::ResourceHandle dual_id_buf = rhi::handles::INVALID_RESOURCE;
-    rhi::ResourceHandle scalar_buf  = rhi::handles::INVALID_RESOURCE;
+        auto make_storage_buf = [&](u64 bytes) -> rhi::ResourceHandle {
+            rhi::BufferDesc desc{};
+            desc.size = bytes;
+            desc.bindFlags = (u32)rhi::BufferUsageFlags::Storage;
+            desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+            desc.usage = rhi::GPUMemoryUsage::Dynamic;
+            return device_->CreateBuffer(desc);
+        };
+        // Uniform buffer (Dynamic so we can UpdateBufferData)
+        {
+            rhi::BufferDesc desc{};
+            desc.size = sizeof(SurfaceNetsSDFUniforms);
+            desc.bindFlags = (u32)rhi::BufferUsageFlags::Uniform;
+            desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+            desc.usage = rhi::GPUMemoryUsage::Dynamic;
+            cached_uni_buf_ = device_->CreateBuffer(desc);
+        }
+        cached_dual_id_buf_ = make_storage_buf(sizeof(u32) * res3);
+        cached_scalar_buf_  = make_storage_buf(sizeof(f32) * n3);
 
-    // Uniform buffer (Dynamic so we can UpdateBufferData)
-    {
-        rhi::BufferDesc desc{};
-        desc.size = sizeof(SurfaceNetsSDFUniforms);
-        desc.bindFlags = (u32)rhi::BufferUsageFlags::Uniform;
-        desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-        desc.usage = rhi::GPUMemoryUsage::Dynamic;
-        uni_buf = device_->CreateBuffer(desc);
+        if (cached_uni_buf_     == rhi::handles::INVALID_RESOURCE ||
+            cached_dual_id_buf_ == rhi::handles::INVALID_RESOURCE ||
+            cached_scalar_buf_  == rhi::handles::INVALID_RESOURCE) {
+            return false;
+        }
+        cached_resolution_ = resolution;
     }
-    dual_id_buf = make_storage_buf(sizeof(u32) * res3);
-    scalar_buf  = make_storage_buf(sizeof(f32) * n3);
 
-    if (uni_buf     == rhi::handles::INVALID_RESOURCE ||
-        dual_id_buf == rhi::handles::INVALID_RESOURCE ||
-        scalar_buf  == rhi::handles::INVALID_RESOURCE) {
-        if (uni_buf     != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(uni_buf);
-        if (dual_id_buf != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(dual_id_buf);
-        if (scalar_buf  != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(scalar_buf);
-        return false;
-    }
+    const rhi::ResourceHandle uni_buf     = cached_uni_buf_;
+    const rhi::ResourceHandle dual_id_buf = cached_dual_id_buf_;
+    const rhi::ResourceHandle scalar_buf  = cached_scalar_buf_;
 
     device_->UpdateBufferData(uni_buf, &uni, sizeof(uni));
 
     using namespace rhi;
 
-    // ---- Create 4 descriptor sets ----
+    // ---- Create 5 descriptor sets ----
     //
-    // classify_sdf_ds: 4 buffers + 3 textures (uses classify_sdf_set_layout_)
+    // fill_scalar_ds: 2 buffers + 3 textures (uses fill_scalar_set_layout_)
     //   binding 0: UniformBuffer  uni_buf
-    //   binding 1: StorageBuffer  scalar_buf
-    //   binding 2: StorageBuffer  dual_id_buf
-    //   binding 3: StorageBuffer  target.counters
+    //   binding 1: StorageBuffer  scalar_buf (write)
     //   binding 0: SampledImage   cascade[0].sdf_texture
     //   binding 1: SampledImage   cascade[1].sdf_texture
     //   binding 2: SampledImage   cascade[2].sdf_texture
     //   (Metal uses separate binding namespaces for buffer vs texture — same
     //   binding number with different DescriptorType is unambiguous, see
     //   MetalDescriptorSet.cpp:66-72.)
+    //
+    // classify_ds: 4 buffers (uses 9.3a classify_set_layout_)
+    //   0: uni_buf, 1: scalar_buf (read), 2: dual_id_buf, 3: target.counters
     //
     // emit_vertices_ds: 5 buffers (uses emit_vertices_set_layout_)
     //   0: uni_buf, 1: scalar_buf, 2: dual_id_buf, 3: target.positions, 4: target.elements
@@ -941,34 +960,31 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
         return ds;
     };
 
+    DescriptorSetHandle fill_scalar_ds   = handles::INVALID_DESCRIPTOR_SET;
     DescriptorSetHandle classify_ds      = handles::INVALID_DESCRIPTOR_SET;
     DescriptorSetHandle emit_vertices_ds = handles::INVALID_DESCRIPTOR_SET;
     DescriptorSetHandle emit_faces_ds    = handles::INVALID_DESCRIPTOR_SET;
     DescriptorSetHandle write_indirect_ds = handles::INVALID_DESCRIPTOR_SET;
 
-    // classify_sdf_ds — buffer half (bindings 0..3)
-    classify_ds = device_->CreateDescriptorSet({classify_sdf_set_layout_});
-    if (classify_ds != handles::INVALID_DESCRIPTOR_SET) {
-        DescriptorBufferInfo buf_infos[4] = {
+    // fill_scalar_ds — Pass 0: writes scalar[] from texture3D samples.
+    // Bindings: uniforms(0), scalar(1) + cascade textures(0..2).
+    fill_scalar_ds = device_->CreateDescriptorSet({fill_scalar_set_layout_});
+    if (fill_scalar_ds != handles::INVALID_DESCRIPTOR_SET) {
+        DescriptorBufferInfo buf_infos[2] = {
             {uni_buf,        0, 0},
             {scalar_buf,     0, 0},
-            {dual_id_buf,    0, 0},
-            {target.counters, 0, 0},
         };
-        DescriptorType buf_types[4] = {
+        DescriptorType buf_types[2] = {
             DescriptorType::UniformBuffer,
             DescriptorType::StorageBuffer,
-            DescriptorType::StorageBuffer,
-            DescriptorType::StorageBuffer,
         };
-        WriteDescriptorSet writes[4];
-        for (u32 i = 0; i < 4; ++i) {
-            writes[i] = {classify_ds, i, 0, 1, buf_types[i], nullptr, &buf_infos[i]};
+        WriteDescriptorSet writes[2];
+        for (u32 i = 0; i < 2; ++i) {
+            writes[i] = {fill_scalar_ds, i, 0, 1, buf_types[i], nullptr, &buf_infos[i]};
         }
-        device_->UpdateDescriptorSets(4, writes);
+        device_->UpdateDescriptorSets(2, writes);
 
         // Texture half (bindings 0..2 in texture namespace).
-        // DescriptorImageInfo.imageView holds the texture handle (despite the name).
         DescriptorImageInfo img_infos[3];
         for (u32 i = 0; i < 3; ++i) {
             if (i < cfg.cascade_count) {
@@ -981,9 +997,27 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
         }
         WriteDescriptorSet tex_writes[3];
         for (u32 i = 0; i < 3; ++i) {
-            tex_writes[i] = {classify_ds, i, 0, 1, DescriptorType::SampledImage, &img_infos[i], nullptr};
+            tex_writes[i] = {fill_scalar_ds, i, 0, 1, DescriptorType::SampledImage, &img_infos[i], nullptr};
         }
         device_->UpdateDescriptorSets(3, tex_writes);
+    }
+
+    // classify_ds — Pass 1: 9.3a classify_cells kernel reads scalar[] and
+    // writes dual_id + atomic counter. Uses 9.3a classify_set_layout_.
+    {
+        DescriptorBufferInfo infos[4] = {
+            {uni_buf,        0, 0},
+            {scalar_buf,     0, 0},
+            {dual_id_buf,    0, 0},
+            {target.counters, 0, 0},
+        };
+        DescriptorType types[4] = {
+            DescriptorType::UniformBuffer,
+            DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer,
+            DescriptorType::StorageBuffer,
+        };
+        classify_ds = make_buffer_ds(classify_set_layout_, infos, types, 4);
     }
 
     // emit_vertices_ds
@@ -1033,30 +1067,35 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
         write_indirect_ds = make_buffer_ds(write_indirect_set_layout_, infos, types, 3);
     }
 
-    if (classify_ds       == handles::INVALID_DESCRIPTOR_SET ||
+    if (fill_scalar_ds   == handles::INVALID_DESCRIPTOR_SET ||
+        classify_ds      == handles::INVALID_DESCRIPTOR_SET ||
         emit_vertices_ds  == handles::INVALID_DESCRIPTOR_SET ||
         emit_faces_ds     == handles::INVALID_DESCRIPTOR_SET ||
         write_indirect_ds == handles::INVALID_DESCRIPTOR_SET) {
+        if (fill_scalar_ds   != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(fill_scalar_ds);
         if (classify_ds       != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(classify_ds);
         if (emit_vertices_ds  != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(emit_vertices_ds);
         if (emit_faces_ds     != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(emit_faces_ds);
         if (write_indirect_ds != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(write_indirect_ds);
-        device_->DestroyBuffer(uni_buf);
-        device_->DestroyBuffer(dual_id_buf);
-        device_->DestroyBuffer(scalar_buf);
+        // Cached buffers (uni/dual_id/scalar) are NOT destroyed here — they're
+        // persistent across frames. Caller can retry with same buffers.
         return false;
     }
 
     // ---- Command buffer + dispatch ----
-    CommandBufferHandle cmd_handle = device_->CreateCommandBuffer(CommandQueueType::Compute);
+    // Graphics queue (not Compute) so SurfaceNets shares the same Metal queue
+    // as the subsequent DrawIndirect render cmd buffer. Metal guarantees
+    // same-queue submission ordering, which protects the streaming mesh
+    // buffers from cross-queue read/write races without needing explicit
+    // fences or triple-buffering (cross-queue runs in parallel → no implicit
+    // sync). See memory: streaming-mesh-cross-frame-hazard.md.
+    CommandBufferHandle cmd_handle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
     if (cmd_handle == handles::INVALID_COMMAND_BUFFER) {
+        device_->DestroyDescriptorSet(fill_scalar_ds);
         device_->DestroyDescriptorSet(classify_ds);
         device_->DestroyDescriptorSet(emit_vertices_ds);
         device_->DestroyDescriptorSet(emit_faces_ds);
         device_->DestroyDescriptorSet(write_indirect_ds);
-        device_->DestroyBuffer(uni_buf);
-        device_->DestroyBuffer(dual_id_buf);
-        device_->DestroyBuffer(scalar_buf);
         return false;
     }
     // ODR workaround: see GlobalSDF.cpp DebugFill for details. Test binaries
@@ -1067,13 +1106,12 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
     auto* metal_dev = dynamic_cast<MetalDevice*>(device_);
     RHICommandBuffer* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmd_handle) : nullptr;
     if (!cmd) {
+        device_->DestroyDescriptorSet(fill_scalar_ds);
         device_->DestroyDescriptorSet(classify_ds);
         device_->DestroyDescriptorSet(emit_vertices_ds);
         device_->DestroyDescriptorSet(emit_faces_ds);
         device_->DestroyDescriptorSet(write_indirect_ds);
-        device_->DestroyBuffer(uni_buf);
-        device_->DestroyBuffer(dual_id_buf);
-        device_->DestroyBuffer(scalar_buf);
+        device_->DestroyCommandBuffer(cmd_handle);
         return false;
     }
 
@@ -1082,14 +1120,36 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
     const u32 res_groups = (resolution + 3) / 4;
     const u32 n_groups   = (n + 3) / 4;
 
-    // Pass 1: classify_cells_sdf — samples cascade textures, writes scalar buf
+    // Pass 0: fill_scalar_from_sdf — 1 texture3D sample per grid vertex
+    // (n³ threads). Writes scalar[] which all subsequent passes read.
     {
-        cmd->BindComputePipeline(classify_sdf_pipeline_);
+        cmd->BindComputePipeline(fill_scalar_pipeline_);
+        DescriptorSetHandle ds = fill_scalar_ds;
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, fill_scalar_layout_,
+                                0, 1, &ds, 0, nullptr);
+        cmd->Dispatch(n_groups, n_groups, n_groups);
+    }
+    // Barrier: fill_scalar writes scalar[]; classify_cells reads it.
+    cmd->MemoryBarrier(
+        PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+    // Pass 1: classify_cells (9.3a kernel) — reads scalar[], writes dual_id + atomic counter.
+    {
+        cmd->BindComputePipeline(classify_pipeline_);
         DescriptorSetHandle ds = classify_ds;
-        cmd->BindDescriptorSets(PipelineBindPoint::Compute, classify_sdf_layout_,
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, classify_layout_,
                                 0, 1, &ds, 0, nullptr);
         cmd->Dispatch(res_groups, res_groups, res_groups);
     }
+    // Barrier: classify writes scalar_buf + dual_id_buf; emit_vertices reads them.
+    // Metal does NOT insert implicit barriers between compute dispatches within
+    // the same encoder. Without this, Pass 2 can read stale scalar_buf values
+    // (random garbage on first frame, previous frame's data on subsequent
+    // frames), producing non-deterministic vertex emission that flickers even
+    // when the input SDF is bit-stable. See memory: streaming-mesh stability.
+    cmd->MemoryBarrier(
+        PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
     // Pass 2: emit_vertices (9.3a pipeline, reads scalar buf written by Pass 1)
     {
         cmd->BindComputePipeline(emit_vertices_pipeline_);
@@ -1098,6 +1158,11 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
                                 0, 1, &ds, 0, nullptr);
         cmd->Dispatch(res_groups, res_groups, res_groups);
     }
+    // Barrier: emit_vertices writes positions, elements, dual_id_buf, counters[0];
+    // emit_faces reads dual_id_buf (to map cell → vertex slot for index emission).
+    cmd->MemoryBarrier(
+        PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
     // Pass 3: emit_faces_{x,y,z} (3 dispatches sharing emit_faces_ds)
     {
         cmd->BindComputePipeline(emit_faces_x_pipeline_);
@@ -1120,6 +1185,13 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
                                 0, 1, &ds, 0, nullptr);
         cmd->Dispatch(n_groups, n_groups, n_groups);
     }
+    // Barrier: emit_faces atomic-writes counters[1]; write_indirect_args reads
+    // counters[1] non-atomically. Without this, vertexCount in indirect_args
+    // can be a partial/stale value, causing DrawIndirect to issue wrong number
+    // of invocations and the shader's indices[vid] lookup to read garbage.
+    cmd->MemoryBarrier(
+        PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
     // Pass 4: write_indirect_args
     {
         cmd->BindComputePipeline(write_indirect_pipeline_);
@@ -1139,14 +1211,15 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
     // ---- Cleanup transient resources ----
     // Note: target's buffers (positions, elements, indices, counters,
     // indirect_args) are caller-owned — NOT destroyed here.
+    // uni_buf / dual_id_buf / scalar_buf are persistent (cached_*_) — kept for
+    // reuse next frame. Eliminating per-frame pool churn fixes the frame-55+
+    // NaN corruption that stemmed from pool aliasing / hazard tracking issues.
+    device_->DestroyDescriptorSet(fill_scalar_ds);
     device_->DestroyDescriptorSet(classify_ds);
     device_->DestroyDescriptorSet(emit_vertices_ds);
     device_->DestroyDescriptorSet(emit_faces_ds);
     device_->DestroyDescriptorSet(write_indirect_ds);
     device_->DestroyCommandBuffer(cmd_handle);
-    device_->DestroyBuffer(uni_buf);
-    device_->DestroyBuffer(dual_id_buf);
-    device_->DestroyBuffer(scalar_buf);
 
     return true;
 }

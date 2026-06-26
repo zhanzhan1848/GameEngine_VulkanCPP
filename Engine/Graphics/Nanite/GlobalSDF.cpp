@@ -54,10 +54,21 @@ bool GlobalSDF::Initialize(rhi::RHIDeviceBase* device, const GlobalSDFConfig& co
 
 void GlobalSDF::Shutdown() {
     if (!initialized_) {
+        // Even when Initialize() never ran, a prior SetDataProvider() may have
+        // plugged in a provider. Reset it here while device_ is still non-null
+        // (set by Initialize on first init) — the provider's destructor calls
+        // device_->Destroy* and needs a live device. Singleton destruction at
+        // program-exit runs after the test has freed its RHI device, so leaving
+        // the provider alive guarantees use-after-free on shutdown.
+        data_provider_.reset();
         return;
     }
 
     UnregisterFromFieldRegistry();
+
+    // Tear down data_provider_ BEFORE freeing cascades/device — its destructor
+    // issues device_->Destroy* calls that require a live device.
+    data_provider_.reset();
 
     for (auto& cascade : cascades_) {
         if (cascade.sdf_texture != rhi::handles::INVALID_RESOURCE) {
@@ -65,12 +76,12 @@ void GlobalSDF::Shutdown() {
             cascade.sdf_texture = rhi::handles::INVALID_RESOURCE;
         }
     }
-    
+
     if (global_sdf_texture_ != rhi::handles::INVALID_RESOURCE) {
         FreeTexture(global_sdf_texture_);
         global_sdf_texture_ = rhi::handles::INVALID_RESOURCE;
     }
-    
+
     cascades_.clear();
     device_ = nullptr;
     initialized_ = false;
@@ -167,14 +178,33 @@ void GlobalSDF::UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& sn
     if (!cascade.is_valid) {
         return;
     }
-    
-    cascade.origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
-    
+
     cascade.extent = math::v3{
         cascade.resolution * cascade.voxel_size,
         cascade.resolution * cascade.voxel_size,
         cascade.resolution * cascade.voxel_size
     };
+
+    // When a data_provider_ is set (Strategy path), freeze cascade origin
+    // centered on world origin so the provider's SDF data stays stable under
+    // camera movement. Without this lock, CalculateCascadeOrigin snaps the
+    // cascade to a grid based on camera position; when the camera crosses a
+    // cascade_size boundary the origin jumps, shifting SDF data out from
+    // under the fixed-bounds SurfaceNets mesh. Result: mesh topology changes
+    // every snap, geometry flickers / goes solid at mesh bounds.
+    // Freezing here means AnalyticSDFProvider (sphere at origin) writes the
+    // same texel values each frame, SurfaceNets samples the same world
+    // positions, mesh stays stable regardless of camera movement.
+    if (data_provider_) {
+        cascade.origin = math::v3{
+            -cascade.extent.x * 0.5f,
+            -cascade.extent.y * 0.5f,
+            -cascade.extent.z * 0.5f
+        };
+        return;
+    }
+
+    cascade.origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
 }
 
 void GlobalSDF::MergeCascades() {
@@ -462,12 +492,54 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
 // DispatchVoxelization
 // ============================================================================
 
+bool GlobalSDF::IsVoxelizationReady() const {
+    const bool provider_ready = (data_provider_ && data_provider_->IsReady());
+    static int s_checks = 0;
+    if (s_checks < 3) {
+        std::cout << "[GlobalSDF] IsVoxelizationReady check #" << s_checks
+                  << " vox_pipe=" << voxelization_ready_
+                  << " provider=" << (data_provider_ ? "set" : "null")
+                  << " provider_ready=" << (provider_ready ? "yes" : "no")
+                  << " -> " << (voxelization_ready_ || provider_ready ? "TRUE" : "FALSE")
+                  << std::endl;
+        ++s_checks;
+    }
+    return voxelization_ready_ || provider_ready;
+}
+
 void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_index) {
-    if (!voxelization_ready_ || !cmd) return;
+    if (!cmd) return;
     if (cascade_index >= cascades_.size()) return;
+
+    static int s_dv_calls = 0;
+    if (s_dv_calls < 3) {
+        std::cout << "[GlobalSDF] DispatchVoxelization #" << s_dv_calls
+                  << " cascade=" << cascade_index
+                  << " provider_set=" << (data_provider_ ? "yes" : "no")
+                  << " provider_ready=" << (data_provider_ && data_provider_->IsReady() ? "yes" : "no")
+                  << " vox_ready=" << voxelization_ready_
+                  << std::endl;
+        ++s_dv_calls;
+    }
 
     const auto& cascade = cascades_[cascade_index];
     if (!cascade.is_valid || cascade.sdf_texture == rhi::handles::INVALID_RESOURCE) return;
+
+    // Strategy path — preferred when a provider is plugged in (e.g., editor_mode
+    // uses AnalyticSDFProvider; runtime Nanite path leaves this null and uses
+    // the legacy vox_pipeline_ below).
+    if (data_provider_ && data_provider_->IsReady()) {
+        // Use per-frame counter for triple-buffer slot, NOT cascade_index%3.
+        // With only cascade 0 dispatched, cascade_index%3 is always 0, which
+        // causes params_cb_[0] to be rewritten every frame while the previous
+        // frame's GPU dispatch is still reading it — CPU-GPU race that
+        // corrupts SDF data and destabilizes the SurfaceNets mesh.
+        const u32 frame_slot = provider_frame_counter_++ % 3;
+        data_provider_->DispatchCascade(cmd, frame_slot, cascade);
+        return;
+    }
+
+    if (!voxelization_ready_) return;
 
     // Determine frame index for triple-buffered resources
     u32 frameIdx = cascade_index % 3;

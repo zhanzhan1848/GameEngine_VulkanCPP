@@ -388,8 +388,43 @@ if(APPLE)
     target_link_libraries(TestGPUMesherIntegration PRIVATE EngineDLL ${CMAKE_DL_LIBS})
     target_compile_definitions(TestGPUMesherIntegration PRIVATE "TEST_GPU_MESHER_INTEGRATION=1")
 
+    # 26. TestRenderViewBuilder (Task 1: BuildRenderViewFromCameraId engine helper)
+    # Validates invalid-id early-out (no engine required) and the live camera path
+    # (requires Metal device + shaders). Gracefully skips the live path if engine
+    # init fails, so it can run in CI environments without a GPU.
+    add_executable(TestRenderViewBuilder
+        "TestRenderViewBuilder.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestRenderViewBuilder)
+    target_link_libraries(TestRenderViewBuilder PRIVATE Engine)
+
+    # 27. TestPipelineLightEntity (Task 2: StandardRenderPipeline light entity methods)
+    # Validates RegisterLightEntity/UpdateLightEntity/UnregisterLightEntity round-trip
+    # through ECS and scene_sync::SyncLightsFromECS. Requires Metal device + shaders.
+    # Gracefully skips if engine init fails (CI without GPU).
+    add_executable(TestPipelineLightEntity
+        "TestPipelineLightEntity.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestPipelineLightEntity)
+    target_link_libraries(TestPipelineLightEntity PRIVATE Engine)
+
+    # 28. TestPipelineRenderFrame (Task 7: Path B PipelineRenderFrame E2E)
+    # Validates the full headless / offscreen render path via dlopen + dlsym:
+    # CreateStandardRenderPipeline -> CreateRenderTarget -> PipelineRenderFrame ->
+    # DebugReadRenderTarget -> brightness comparisons + light register/update/unregister.
+    # Requires Metal device + shaders; gracefully skips if engine init fails.
+    add_executable(TestPipelineRenderFrame
+        "TestPipelineRenderFrame.cpp"
+        "ShaderCompilation.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestPipelineRenderFrame)
+    target_link_libraries(TestPipelineRenderFrame PRIVATE EngineDLL ${CMAKE_DL_LIBS})
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

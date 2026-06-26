@@ -1,5 +1,7 @@
 #include "MetalCore.h"
 
+#include <mutex>  // std::call_once, std::once_flag
+
 #include "MetalSurface.h"
 #include "MetalShader.h"
 #include "MetalPostProcess.h"
@@ -13,6 +15,11 @@
 #include "Platform/Platform.h"
 #include "Platform/PlatformTypes.h"
 #include <iostream>
+#include "MetalBlitToDrawable.h"
+#include "Graphics/Renderer.h"
+#include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
 
 namespace primal::graphics::metal::core
 {
@@ -445,5 +452,100 @@ namespace primal::graphics::metal::core
 
             gfx_command.end_frame(surface);
         }
+    }
+
+    MTK::View* get_surface_view(surface_id id)
+    {
+        // _surfaces is in the anonymous namespace above. Out-of-range access
+        // to utl::free_list asserts in debug; we treat invalid_id as null.
+        if (!id::is_valid(id)) return nullptr;
+        return _surfaces[id].view();
+    }
+
+    u32 blit_surface_and_present(surface_id id, u64 src_handle)
+    {
+        if (!id::is_valid(id)) return 0;
+
+        MTK::View* view = _surfaces[id].view();
+        if (!view) return 0;
+
+        // === Resolve src texture from the RHI device ===
+        // rhi::ResourceHandle is a u64 alias; the C ABI passes it opaquely.
+        // Resolve via graphics::get_rhi_device() → MetalDevice → MetalTexture.
+        auto* rhiDevice = graphics::get_rhi_device();
+        if (!rhiDevice) return 0;
+        auto* metalDevice = dynamic_cast<rhi::MetalDevice*>(rhiDevice);
+        if (!metalDevice) return 0;
+        auto* metalTex = metalDevice->GetTexture(static_cast<rhi::ResourceHandle>(src_handle));
+        if (!metalTex || !metalTex->GetNativeTexture()) return 0;
+        MTL::Texture* srcTexture = metalTex->GetNativeTexture();
+
+        // === Lazy-init the blit PSO ===
+        // Code review flagged a check-then-act race: if Editor calls
+        // BlitRenderTargetToSurface from multiple threads, two could both
+        // observe !IsInitialized() and double-create the PSO / sampler /
+        // metallib, leaking Metal objects. Guard with std::call_once so
+        // Initialize runs at most once process-wide. A failed init still
+        // leaves IsInitialized()==false, so the next caller can retry
+        // (call_once only suppresses *entry*, not the result).
+        auto& blit = MetalBlitToDrawable::Instance();
+        if (!blit.IsInitialized()) {
+            static std::once_flag init_flag;
+            std::call_once(init_flag, [&blit]() {
+                blit.Initialize(get_device());
+            });
+            if (!blit.IsInitialized()) return 0;
+        }
+
+        // === Acquire drawable + command buffer ===
+        // NOTE: we deliberately use a per-blit command queue rather than
+        // gfx_command's queue. gfx_command is paired with render_surface's
+        // frame semaphore + end_frame present cadence; reusing it from
+        // Path B (which runs *after* PipelineRenderFrame, not via
+        // surface::render) would desync the semaphore. A dedicated queue
+        // keeps Path B self-contained and avoids interference with the
+        // main render loop. The queue is heap-allocated once and cached
+        // for the process lifetime. Guarded with std::call_once to avoid
+        // the same race as the PSO init above.
+        static MTL::CommandQueue* s_blit_queue{ nullptr };
+        if (!s_blit_queue) {
+            static std::once_flag queue_flag;
+            std::call_once(queue_flag, []() {
+                s_blit_queue = get_device()->newCommandQueue();
+                // Retain for process lifetime; intentionally never released
+                // (process exit reclaims it). Matches the pattern in
+                // metal_command's constructor.
+            });
+            if (!s_blit_queue) return 0;
+        }
+
+        CA::MetalDrawable* drawable = view->currentDrawable();
+        if (!drawable) return 0;
+
+        // Current render pass descriptor would reconfigure the drawable's
+        // load/store; we want our own descriptor targeting the drawable
+        // texture with DontCare/Store. MetalBlitToDrawable::Blit builds it.
+        MTL::Texture* drawableTex = drawable->texture();
+        if (!drawableTex) return 0;
+
+        MTL::CommandBuffer* cmd = s_blit_queue->commandBuffer();
+        if (!cmd) return 0;
+
+        blit.Blit(cmd, srcTexture, drawableTex);
+
+        // Present + commit. presentDrawable retains the drawable across the
+        // GPU schedule, so we don't need an explicit retain here (unlike
+        // metal_command::end_frame which adds a scheduledHandler).
+        cmd->presentDrawable(drawable);
+        cmd->commit();
+
+        // MTKView in manual mode (paused=true, enableSetNeedsDisplay=true,
+        // see MetalSurface::create) needs draw() to advance currentDrawable
+        // to the next frame's drawable after we present. Without this, a
+        // subsequent BlitRenderTargetToSurface would re-blit into the same
+        // (already-presented) drawable.
+        view->draw();
+
+        return 1;
     }
 }

@@ -39,6 +39,7 @@ set(HEADER_FILES
     "Common.h"
     "EngineAPIInternal.h"
     "FrameAPI.h"
+    "PipelineLightDesc.h"
 )
 
 # 添加共享库目标

@@ -4,9 +4,11 @@
 #include "../RHI/Core/RHITypes.h"
 #include "../Scene/RenderSceneSnapshot.h"
 #include "Graphics/Field/FieldDescriptor.h"
+#include "ISDFDataProvider.h"
 #include <mutex>
 #include <atomic>
 #include <functional>
+#include <memory>
 
 namespace primal::graphics::nanite {
 
@@ -87,9 +89,19 @@ public:
     }
 
     /// Dispatch voxelization for a specific cascade. Call from render graph compute pass.
+    /// If a data_provider_ is set (Strategy pattern), uses it instead of the legacy
+    /// Nanite-meshlet vox_pipeline_. This is the path editor_mode uses.
     void DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_index);
 
-    bool IsVoxelizationReady() const { return voxelization_ready_; }
+    bool IsVoxelizationReady() const;
+
+    /// Strategy pattern: plug in an alternative SDF data source (e.g. analytic,
+    /// render-mesh rasterizer). When non-null, DispatchVoxelization routes through
+    /// the provider instead of the legacy vox_pipeline_.
+    void SetDataProvider(std::unique_ptr<ISDFDataProvider> provider) {
+        data_provider_ = std::move(provider);
+    }
+    ISDFDataProvider* GetDataProvider() const { return data_provider_.get(); }
 
     /// Test/debug-only: fill all cascade textures by sampling sdf_fn on the CPU,
     /// uploading via staging buffer + CopyBufferToTexture. Production path uses
@@ -126,6 +138,18 @@ private:
         rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE
     };
+
+    // Strategy-pattern provider. When non-null, DispatchVoxelization routes here
+    // instead of the legacy vox_pipeline_ path. Allows editor_mode / tests to
+    // populate the cascade without Nanite meshlet buffers.
+    std::unique_ptr<ISDFDataProvider> data_provider_{nullptr};
+
+    // Per-frame counter for provider triple-buffer slot indexing. Older code
+    // passed cascade_index%3 to DispatchCascade, which is always 0 when only
+    // cascade 0 is dispatched — this caused params_cb_[0] to be rewritten every
+    // frame while the previous frame's GPU read was still in flight (CPU-GPU
+    // race → corrupted SDF → unstable SurfaceNets mesh after a few frames).
+    u32 provider_frame_counter_{0};
 
     bool CreateCascades();
     bool CreateGlobalTexture();

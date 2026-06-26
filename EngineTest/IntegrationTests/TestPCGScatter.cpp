@@ -7,6 +7,8 @@
 #include "Engine/Graphics/Lumen/LumenTypes.h"
 #include "Engine/Graphics/PCG/GPU/PCGScatterCompute.h"
 #include "Engine/Graphics/PCG/PCGEntityFactory.h"
+#include "Engine/Graphics/Nanite/GlobalSDF.h"
+#include "Engine/Graphics/Nanite/Providers/AnalyticSDFProvider.h"
 #include "Engine/EngineAPI/GameEntity_impl.h"
 #include "Engine/Components/Geometry.h"
 #include "Engine/Graphics/SceneDataAdapter.h"
@@ -16,6 +18,7 @@
 #include <iostream>
 #include <fstream>
 #include <cmath>
+#include <functional>
 #include <unordered_map>
 
 using namespace primal::graphics;
@@ -308,6 +311,30 @@ bool PCGScatterTestCase::Initialize() {
     global_sdf_mesh_node_->resolution = 64;
     global_sdf_mesh_node_->iso_value  = 0.0f;
 
+    // 5e.1 Strategy-pattern SDF data source. editor_mode has no Nanite
+    // meshlet pipeline, so StandardRenderPipeline never calls
+    // GlobalSDF::InitVoxelization — cascade textures stay empty and
+    // SurfaceNets finds no sign changes. We plug in AnalyticSDFProvider
+    // (sphere centered at world origin, radius 20) so each frame's
+    // DispatchVoxelization refills the cascade matching the current
+    // cascade origin (which follows the camera). Stable sphere regardless
+    // of camera movement, unlike the one-shot DebugFill hack.
+    std::cerr << "[TestPCGScatter] REACHED GlobalSDF install block" << std::endl;
+    {
+        auto& gsdf = primal::graphics::nanite::GlobalSDF::Get();
+        std::cerr << "[TestPCGScatter] GlobalSDF init check: initialized=" << gsdf.IsInitialized() << std::endl;
+        if (gsdf.IsInitialized()) {
+            auto provider = std::make_unique<primal::graphics::nanite::AnalyticSDFProvider>();
+            provider->SetSphere({primal::math::v3{0.0f, 0.0f, 0.0f}, 20.0f});
+            if (provider->Initialize(device.get())) {
+                gsdf.SetDataProvider(std::move(provider));
+                std::cout << "[TestPCGScatter] AnalyticSDFProvider installed (sphere r=20)" << std::endl;
+            } else {
+                std::cerr << "[TestPCGScatter] AnalyticSDFProvider init FAILED" << std::endl;
+            }
+        }
+    }
+
     // 5. Camera
     scene = new RenderScene();
     RenderProxy proxy;
@@ -340,16 +367,6 @@ void PCGScatterTestCase::Run() {
     HandleInput(1.0f / 60.0f);
     UpdateCamera();
 
-    // Phase 9.3b: GlobalSDFMeshNode per-frame Execute. Dispatches SurfaceNets
-    // on GlobalSDF cascade textures and registers a streaming mesh entity.
-    // Skipped unless B has been pressed. See engine-reality caveat in the
-    // plan: vertex buffer binding in DrawStreamingMeshes uses BindVertexBuffers
-    // but draw_pipeline_ uses storage-buffer vertex pulling, so the mesh may
-    // not render visibly until that mismatch is resolved.
-    if (global_sdf_mesh_visible_ && global_sdf_mesh_node_) {
-        global_sdf_mesh_node_->Execute();
-    }
-
     if (pipeline && scene && view) {
         view->UpdateFrustum();
         view->Cull(*scene);
@@ -364,6 +381,16 @@ void PCGScatterTestCase::Run() {
         auto* cmd = renderSystem.GetCurrentCommandBuffer();
         auto cmdHandle = renderSystem.GetCurrentCommandBufferHandle();
         u32 bufferIndex = renderSystem.GetCurrentFrameIndex();
+
+        // Phase 9.3b: GlobalSDFMeshNode per-frame Execute. Runs AFTER
+        // BeginFrame so fence for slot (frame%3) has been waited on —
+        // guarantees the previous cycle's DrawIndirect is no longer reading
+        // the slot we're about to overwrite. Slot is selected via
+        // pipeline->GetFrameCount() % 3 which matches cbIdx % 3 the render
+        // side uses.
+        if (global_sdf_mesh_visible_ && global_sdf_mesh_node_) {
+            global_sdf_mesh_node_->Execute();
+        }
 
         cmd->Reset();
         cmd->Begin();
@@ -1815,6 +1842,10 @@ void PCGScatterTestCase::HandleInput(float dt) {
     // GlobalSDF cascade textures. When toggled off, the node's destructor
     // runs at Shutdown() and tombstones the record — no per-frame unregister
     // needed mid-session.
+    //
+    // SDF data source: AnalyticSDFProvider is installed at init time (see
+    // Initialize() around line 314), populating cascade 0 each frame with
+    // a sphere SDF (radius 20, world origin). Stable across camera movement.
     get(input_source::keyboard, input_code::key_b, val);
     if (val.current.x > 0.0f) {
         if (!key_b_pressed_) {

@@ -1263,8 +1263,8 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
 
                     // Debug output for first few barriers
                     static int barrierCount = 0;
-                    if (barrierCount < 10) {
-                        // std::cout << "[MetalBarrier] Compute memory barrier #" << barrierCount << " (CONSERVATIVE)" << std::endl;
+                    if (barrierCount < 30) {
+                        std::cerr << "[MetalBarrier] Compute memory barrier #" << barrierCount << " (CONSERVATIVE)" << std::endl;
                         barrierCount++;
                     }
 
@@ -1281,11 +1281,11 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
                     // 3. Any shader write operations
                     if (isComputeToCompute || isComputeToDraw || hasShaderWrite) {
                         endCurrentEncoder();
-                        if (barrierCount <= 10) {
-                            // std::cout << "[MetalBarrier] FORCE END: Compute encoder for strict synchronization" << std::endl;
-                            // std::cout << "[MetalBarrier]   Reason: ComputeToCompute=" << isComputeToCompute
-                            //          << " ComputeToDraw=" << isComputeToDraw
-                            //          << " ShaderWrite=" << hasShaderWrite << std::endl;
+                        if (barrierCount <= 30) {
+                            std::cerr << "[MetalBarrier] FORCE END: Compute encoder for strict synchronization" << std::endl;
+                            std::cerr << "[MetalBarrier]   Reason: ComputeToCompute=" << isComputeToCompute
+                                      << " ComputeToDraw=" << isComputeToDraw
+                                      << " ShaderWrite=" << hasShaderWrite << std::endl;
                         }
                     }
                 }
