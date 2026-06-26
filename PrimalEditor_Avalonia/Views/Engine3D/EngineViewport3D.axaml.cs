@@ -169,6 +169,18 @@ public partial class EngineViewport3D : UserControl
             // our target=origin default, so we apply once to reconcile.
             ApplyCameraTransform();
 
+            _renderTarget = NativeEngineBridge.CreateRenderTarget(
+                width, height, NativeEngineBridge.RenderTargetFormat.RGBA16F);
+            if (_renderTarget == 0)
+            {
+                Logger.Warning("CreateRenderTarget failed — viewport will show clear color only");
+            }
+            else
+            {
+                _renderTargetWidth = width;
+                _renderTargetHeight = height;
+            }
+
             _viewportInitialized = true;
             ShowPlaceholder(false);
             StartRenderLoop();
@@ -197,18 +209,11 @@ public partial class EngineViewport3D : UserControl
     // flat scalars — no struct marshaling needed.
     private uint CreateEditorCamera(int width, int height)
     {
-        // Create a real entity first — ResourceAPI::CreateCamera reads the
-        // entity's Transform position via metal_camera::update(), and
-        // entity_id 0 (id::invalid_id) would deref null.
-        // Camera back along -Z. Camera direction = entity orientation =
-        // (0,0,1) (default identity quat) so the view matrix looks toward
-        // +Z. Camera position at (0, 1, -12) with FOV 60° so 4 spheres at
-        // x = -6,-2,+2,+6 (radius 0.5) all fit comfortably.
-        _cameraEntityId = NativeEngineBridge.CreateEntity(0f, 1f, -12f);
         // ResourceAPI::CreateCamera stores fov in Camera::field_of_view, but
         // MetalCamera::update() multiplies it by π before passing to
         // createPerspectiveFovLH — i.e. the engine treats the value as a
         // fraction of π, not radians. 60° → fov = 60° / 180° = 1/3.
+        _cameraEntityId = NativeEngineBridge.CreateEntity(0f, 1f, -12f);
         const float fov = 1f / 3f;
         float aspect = (float)width / (float)height;
         const float nearZ = 0.1f;
@@ -219,30 +224,14 @@ public partial class EngineViewport3D : UserControl
     // Populate the world with a simple test scene. NOTE: We intentionally do
     // NOT call AddRenderItem here. The native AddRenderItem asserts
     // material_count > 0 && material_ids != null, and the C ABI has no
-    // Create the default opauqe material that the sphere render items share.
-    // Lazily compiled on first call inside the engine (xcrun metal + metallib).
-    // If the compile step fails (e.g. missing xcrun) the test scene falls back
-    // to no render items so the editor still runs without drawing geometry.
-    private UInt64 _testSceneMaterial = NativeEngineBridge.InvalidContentId;
-    private bool _testSceneMaterialAttempted;
-
-    private bool EnsureTestSceneMaterial()
-    {
-        if (_testSceneMaterialAttempted) return NativeEngineBridge.IsValidHandle(_testSceneMaterial);
-        _testSceneMaterialAttempted = true;
-        _testSceneMaterial = NativeEngineBridge.CreateDefaultMaterial();
-        if (!NativeEngineBridge.IsValidHandle(_testSceneMaterial))
-        {
-            Logger.Warning("CreateDefaultMaterial failed — test scene will not render geometry");
-            return false;
-        }
-        Logger.Info($"Test scene material: 0x{_testSceneMaterial:X}");
-        return true;
-    }
-
+    // way to associate a legacy material with a StandardRenderPipeline mesh
+    // entity — ForwardSceneRenderer uses its internal default materials
+    // when RegisterMeshResource is called with no texture ids. See the
+    // comment at the top of CreateTestScene for why we use a single shared
+    // RHI geometry with per-sphere entity transforms instead.
     private void CreateTestScene()
     {
-        const uint kSphereType = 0;  // ProceduralMeshAPI enum: 0=Sphere(r, segs, rings)
+        const uint kSphereType = 0;
         float[] sphereParams = { 0.5f, 24, 16 };
         UInt64 sphereGeom = NativeEngineBridge.ProceduralMeshCreate(kSphereType, sphereParams);
         if (!NativeEngineBridge.IsValidHandle(sphereGeom))
@@ -252,100 +241,99 @@ public partial class EngineViewport3D : UserControl
         }
         _testSceneGeometry = sphereGeom;
 
-        if (!EnsureTestSceneMaterial()) return;
-
-        // CreateTestScene does NOT call AddRenderItem even though the C ABI
-        // is in place (CreateDefaultMaterial + RegisterProceduralMeshSubmesh
-        // wired below). Reason: the engine's PSO creation in
-        // Engine/Graphics/Metal/MetalContent.cpp::create_pso assumes a
-        // vertex shader that uses the [[id(N)]] argument-buffer layout from
-        // Engine/Graphics/Metal/shaders/buildin_shader.metal; one-off MSL
-        // compiled by `xcrun metal` outside that metallib build lacks the
-        // shared argument-buffer infrastructure and the resulting PSO is
-        // rejected by the Apple GPU driver in prepass::prepass. To enable
-        // drawing, add kEditorSphereVertexShader / kEditorSpherePixelShader
-        // to the engine's main metallib build (alongside CommonTypes.metal)
-        // and re-enable the AddRenderItem loop below.
-        // RegisterProceduralMeshSubmesh now returns a NEW legacy
-        // geometry_content_id that bridges the RHI-registered mesh into
-        // the legacy add_render_item path. Use that for AddRenderItem.
-        UInt64 legacyGeom = NativeEngineBridge.RegisterProceduralMeshSubmesh(sphereGeom);
-        if (!NativeEngineBridge.IsValidHandle(legacyGeom))
-        {
-            Logger.Warning("RegisterProceduralMeshSubmesh failed — spheres will not render");
-            return;
-        }
-
-        // The engine's cbuffer::offset() is returning corrupt byte offsets for
-        // per-object data on this system, so per-entity World matrix propagation
-        // is broken. Workaround: bake each sphere's world position into a
-        // dedicated mesh by translating the mesh vertices in C++. The shader's
-        // World matrix becomes identity for the test scene.
-        // (World matrix transform path is left in the shader for future
-        // re-enablement once the cbuffer issue is fixed upstream.)
-        if (!NativeEngineBridge.IsValidHandle(legacyGeom))
-        {
-            Logger.Warning("RegisterProceduralMeshSubmesh failed — spheres will not render");
-            return;
-        }
-
-        // 4 spheres with world positions baked into mesh vertices.
-        // Note: engine bug causes 3 of 4 entity_ids to collapse onto slot 0x1,
-        // so we use a single entity and 4 different meshes.
+        // StandardRenderPipeline::RegisterMeshEntity creates an ECS entity with
+        // an identity transform — distinct spheres need distinct entity
+        // transforms, not distinct geometry blobs. The previous
+        // CreateTranslatedProceduralMesh workaround baked offsets into the
+        // vertex buffer; that path is legacy-only and produces RHI ids that
+        // ForwardSceneRenderer::RegisterMeshResource can't resolve.
         float[] xs = { -6.0f, -2.0f, 2.0f, 6.0f };
-        uint singleEntity = NativeEngineBridge.CreateEntity(0f, 0f, 0f);
-        if (!NativeEngineBridge.IsValidEntity(singleEntity))
-        {
-            Logger.Warning("Failed to create single sphere entity");
-            return;
-        }
-        _testSceneEntities.Add(singleEntity);
         for (int i = 0; i < 4; ++i)
         {
-            float x = xs[i];
-            UInt64 translatedGeom = NativeEngineBridge.CreateTranslatedProceduralMesh(legacyGeom, x, 0f, 0f);
-            if (!NativeEngineBridge.IsValidHandle(translatedGeom))
+            UInt64 meshEntity = NativeEngineBridge.PipelineRegisterMeshEntity(sphereGeom, (UInt64[]?)null);
+            if (meshEntity == 0 || meshEntity == UInt64.MaxValue)
             {
-                Logger.Warning($"CreateTranslatedProceduralMesh failed for sphere {i}");
+                Logger.Warning($"PipelineRegisterMeshEntity returned 0x{meshEntity:X} (invalid) — sphere {i} skipped");
                 continue;
             }
+            // Push world position via ECS transform component. SetEntityTransform
+            // treats rotation as Euler angles (EngineAPI calls euler_to_quat),
+            // not a quaternion — pass all-zero for identity orientation.
+            float[] pos = { xs[i], 0f, 0f };
+            float[] rot = { 0f, 0f, 0f };
+            float[] scl = { 1f, 1f, 1f };
+            NativeEngineBridge.SetEntityTransform((uint)meshEntity, pos, rot, scl);
 
-            Logger.Info($"[DBG_SPHERE] sphere {i}: translatedGeom=0x{translatedGeom:X} entity=0x{singleEntity:X}");
-
-            UInt64[] materialIds = { _testSceneMaterial };
-            uint renderItem = (uint)NativeEngineBridge.AddRenderItem(
-                singleEntity, translatedGeom, 1, materialIds);
-            if (!NativeEngineBridge.IsValidHandle(renderItem))
-            {
-                Logger.Warning($"AddRenderItem returned 0x{renderItem:X} (invalid) — skipping sphere {i}");
-                continue;
-            }
-            _testSceneRenderItems.Add(renderItem);
+            _testSceneRenderItems.Add(meshEntity);
+            Logger.Info($"[DBG_SPHERE] sphere {i}: geom=0x{sphereGeom:X} meshEntity=0x{meshEntity:X} pos=({xs[i]},0,0)");
         }
-        Logger.Info($"Test scene: {_testSceneEntities.Count} entities, {_testSceneRenderItems.Count} render items, rhi_geom=0x{sphereGeom:X}, legacy_geom=0x{legacyGeom:X}, material=0x{_testSceneMaterial:X}");
 
-        uint lightEntity = NativeEngineBridge.CreateEntity(0f, 3f, 0f);
-        if (NativeEngineBridge.IsValidEntity(lightEntity))
+        byte[] sunDesc = new byte[NativeEngineBridge.PipelineLightDescSize];
+        WritePipelineLightDesc(sunDesc,
+            type: 0,
+            r: 1.0f, g: 1.0f, b: 1.0f,
+            intensity: 5.0f,
+            posX: 0f, posY: 3f, posZ: 0f,
+            dirX: 0.3f, dirY: -1.0f, dirZ: 0.2f,
+            range: 0f, umbra: 0f, penumbra: 0f,
+            enabled: 1);
+        UInt64 lightId = NativeEngineBridge.PipelineRegisterLightEntity(sunDesc);
+        if (lightId != 0 && lightId != UInt64.MaxValue)
         {
-            _testSceneEntities.Add(lightEntity);
-            float[] white = { 1.0f, 1.0f, 1.0f };
-            uint added = NativeEngineBridge.AddEntityLight(
-                lightEntity, 0 /* point */, 5.0f, white, 50f, 0f, 0f, true);
-            if (added != 0) Logger.Info("Test scene point light added (intensity=5)");
+            _testSceneLights.Add(lightId);
+            Logger.Info("Test scene directional light added (intensity=5)");
         }
+    }
+
+    // Mirrors EngineDLL/PipelineLightDesc.h layout (64 bytes):
+    //   u32 type; f32 color[3]; f32 intensity;
+    //   f32 position[3]; f32 direction[3];
+    //   f32 range; f32 umbra; f32 penumbra;
+    //   u32 is_enabled; u32 _pad[3];
+    private static void WritePipelineLightDesc(
+        byte[] buf,
+        uint type, float r, float g, float b, float intensity,
+        float posX, float posY, float posZ,
+        float dirX, float dirY, float dirZ,
+        float range, float umbra, float penumbra,
+        uint enabled)
+    {
+        int o = 0;
+        BitConverter.GetBytes(type).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(r).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(g).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(b).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(intensity).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(posX).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(posY).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(posZ).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(dirX).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(dirY).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(dirZ).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(range).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(umbra).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(penumbra).CopyTo(buf, o); o += 4;
+        BitConverter.GetBytes(enabled).CopyTo(buf, o); o += 4;
     }
 
     private void DestroyTestScene()
     {
-        foreach (var ri in _testSceneRenderItems)
+        foreach (var meshEntity in _testSceneRenderItems)
         {
-            NativeEngineBridge.RemoveRenderItem(ri);
+            NativeEngineBridge.PipelineUnregisterMeshEntity(meshEntity);
         }
         _testSceneRenderItems.Clear();
 
-        foreach (var e in _testSceneEntities)
+        foreach (var lightId in _testSceneLights)
         {
-            NativeEngineBridge.RemoveEntityLight(e);
+            NativeEngineBridge.PipelineUnregisterLightEntity(lightId);
+        }
+        _testSceneLights.Clear();
+
+        if (_renderTarget != 0)
+        {
+            NativeEngineBridge.DestroyRenderTarget(_renderTarget);
+            _renderTarget = 0;
         }
 
         if (_testSceneGeometry != 0 && _testSceneGeometry != NativeEngineBridge.InvalidContentId)
@@ -354,15 +342,16 @@ public partial class EngineViewport3D : UserControl
             _testSceneGeometry = 0;
         }
 
-        // Test scene entities were created via the simplified CreateEntity
-        // helper which has no matching DestroyEntity in the C ABI for the
-        // scene-only flow — they're cleaned up on engine shutdown.
         _testSceneEntities.Clear();
     }
 
     private UInt64 _testSceneGeometry;
     private readonly System.Collections.Generic.List<uint> _testSceneEntities = new();
-    private readonly System.Collections.Generic.List<uint> _testSceneRenderItems = new();
+    private readonly System.Collections.Generic.List<UInt64> _testSceneRenderItems = new();
+    private readonly System.Collections.Generic.List<UInt64> _testSceneLights = new();
+    private UInt64 _renderTarget;
+    private int _renderTargetWidth;
+    private int _renderTargetHeight;
 
     private DispatcherTimer? _renderTimer;
     private DateTime _lastTick;
@@ -413,44 +402,12 @@ public partial class EngineViewport3D : UserControl
     private void OnRenderFrameCore(float dt)
     {
         if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return;
+        if (_renderTarget == 0) return;
+        if (_testSceneRenderItems.Count == 0) return;
         _animTime += dt;
 
-        if (_testSceneRenderItems.Count == 0) return;
-        EnsureRenderItemArrayPinned();
-        var p = new NativeEngineBridge.RenderFrameParams
-        {
-            SurfaceId = _surfaceId,
-            CameraId = _cameraId,
-            LightSetKey = 0,
-            RenderItemCount = (uint)_testSceneRenderItems.Count,
-            RenderItemIds = _renderItemIdsPtr,
-            Thresholds = IntPtr.Zero,
-            AverageFrameTime = dt * 1000f,
-            LastFrameTime = dt * 1000f,
-        };
-        NativeEngineBridge.RenderFrame(p);
-    }
-
-    // Keep a pinned copy of the render-item-id array so the unmanaged
-    // RenderFrame can read it without GC moving it. Refreshed whenever
-    // the list mutates (which only happens in CreateTestScene/DestroyTestScene).
-    private GCHandle _renderItemIdsHandle;
-    private IntPtr _renderItemIdsPtr = IntPtr.Zero;
-    private int _pinnedRenderItemCount = 0;
-    private void EnsureRenderItemArrayPinned()
-    {
-        // Re-pin the array whenever the render-item list changes; the engine
-        // reads the array contents each frame, so a stale pinned copy of an
-        // earlier shorter list would cause only the first N render items to
-        // be drawn even after new ones were added via AddRenderItem.
-        if (_renderItemIdsPtr != IntPtr.Zero && _pinnedRenderItemCount == _testSceneRenderItems.Count)
-            return;
-        if (_renderItemIdsHandle.IsAllocated)
-            _renderItemIdsHandle.Free();
-        var arr = _testSceneRenderItems.ToArray();
-        _renderItemIdsHandle = GCHandle.Alloc(arr, GCHandleType.Pinned);
-        _renderItemIdsPtr = _renderItemIdsHandle.AddrOfPinnedObject();
-        _pinnedRenderItemCount = arr.Length;
+        NativeEngineBridge.PipelineRenderFrame(_renderTarget, _cameraId, _surfaceId);
+        NativeEngineBridge.BlitRenderTargetToSurface(_renderTarget, _surfaceId);
     }
 
     private void OnDetached(object? sender, VisualTreeAttachmentEventArgs e)
@@ -458,11 +415,6 @@ public partial class EngineViewport3D : UserControl
         StopRenderLoop();
         LayoutUpdated -= OnLayoutUpdated;
         DestroyTestScene();
-        if (_renderItemIdsHandle.IsAllocated)
-        {
-            _renderItemIdsHandle.Free();
-            _renderItemIdsPtr = IntPtr.Zero;
-        }
         if (_surfaceId != uint.MaxValue)
         {
             NativeEngineBridge.RemoveRenderSurface(_surfaceId);

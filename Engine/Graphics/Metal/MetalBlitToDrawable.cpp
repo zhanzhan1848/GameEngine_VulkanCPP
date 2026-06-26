@@ -28,21 +28,39 @@ namespace primal::graphics::metal
         {
             namespace fs = std::filesystem;
             std::vector<const char*> candidates = {
-                // 1. Same dir as the engine shaders blob (preferred).
+                // 1. Standalone BlitToDrawable.metallib (preferred — set up by
+                //    CMake/EngineShaderBlob.cmake when the dedicated name is
+                //    emitted). The file currently just contains the same
+                //    metallib blob as shaders.metallib because the source
+                //    shader is bundled alongside the editor shaders.
                 "./Darwin/Debug/shaders/metal/BlitToDrawable.metallib",
                 "./Darwin/Release/shaders/metal/BlitToDrawable.metallib",
                 // 2. Engine-relative for tests that chdir into EngineTest/.
                 "../Darwin/Debug/shaders/metal/BlitToDrawable.metallib",
                 "../Darwin/Release/shaders/metal/BlitToDrawable.metallib",
+                // 3. Fall back to the main shaders.metallib (which now also
+                //    contains blit_to_drawable_vs/fs since the shader is
+                //    compiled by build_engine_shader_blob.py alongside
+                //    EditorShaders.metal). Loaded by symbol lookup — same
+                //    library, so the function lookup works identically.
+                "./Darwin/Debug/shaders/metal/shaders.metallib",
+                "./Darwin/Release/shaders/metal/shaders.metallib",
+                "../Darwin/Debug/shaders/metal/shaders.metallib",
+                "../Darwin/Release/shaders/metal/shaders.metallib",
             };
             for (const char* p : candidates) {
                 if (fs::exists(p)) return std::string(p);
             }
-            // 3. Env var override (CI / custom install layouts).
+            // 4. Env var override (CI / custom install layouts).
             //    ENGINE_SHADER_ROOT should point at "<repo>/Darwin/<Config>".
             if (const char* root = std::getenv("ENGINE_SHADER_ROOT")) {
-                std::string p = std::string(root) + "/shaders/metal/BlitToDrawable.metallib";
-                if (fs::exists(p)) return p;
+                for (const char* suffix : {
+                         "/shaders/metal/BlitToDrawable.metallib",
+                         "/shaders/metal/shaders.metallib",
+                     }) {
+                    std::string p = std::string(root) + suffix;
+                    if (fs::exists(p)) return p;
+                }
             }
             return std::string{};
         }

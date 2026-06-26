@@ -18,6 +18,7 @@ set(_ENGINE_SHADERS_DIR "${CMAKE_SOURCE_DIR}/Engine/Graphics/Metal/shaders")
 set(_ENGINE_BLOB_OUT_DIR "${CMAKE_BINARY_DIR}/shaders/metal")
 set(_ENGINE_BLOB_TEMP     "${CMAKE_BINARY_DIR}/_shader_blob_temp")
 set(_ENGINE_METALLIB      "${_ENGINE_BLOB_OUT_DIR}/shaders.metallib")
+set(_ENGINE_BLIT_METALLIB "${_ENGINE_BLOB_OUT_DIR}/BlitToDrawable.metallib")
 set(_ENGINE_PACKED_BLOB   "${_ENGINE_BLOB_OUT_DIR}/shaders.metallib.packed")
 
 file(MAKE_DIRECTORY ${_ENGINE_BLOB_OUT_DIR})
@@ -25,16 +26,19 @@ file(MAKE_DIRECTORY ${_ENGINE_BLOB_OUT_DIR})
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 add_custom_command(
-    OUTPUT ${_ENGINE_METALLIB} ${_ENGINE_PACKED_BLOB}
+    OUTPUT ${_ENGINE_METALLIB} ${_ENGINE_PACKED_BLOB} ${_ENGINE_BLIT_METALLIB}
     COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_SOURCE_DIR}/CMake/build_engine_shader_blob.py"
         --source-dir "${_ENGINE_SHADERS_DIR}"
         --metallib-out "${_ENGINE_METALLIB}"
         --packed-out "${_ENGINE_PACKED_BLOB}"
         --air-temp-dir "${_ENGINE_BLOB_TEMP}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_ENGINE_METALLIB}" "${_ENGINE_BLIT_METALLIB}"
     DEPENDS
         "${CMAKE_SOURCE_DIR}/CMake/build_engine_shader_blob.py"
         "${_ENGINE_SHADERS_DIR}/EditorShaders.metal"
+        "${_ENGINE_SHADERS_DIR}/BlitToDrawable.metal"
     COMMENT "Building engine shaders metallib and packed legacy blob"
     VERBATIM
 )
@@ -53,5 +57,19 @@ add_custom_command(
         "${CMAKE_SOURCE_DIR}/Darwin/PrimalEditor_Avalonia/DebugEditor/shaders/metal/shaders.metallib"
     DEPENDS ${_ENGINE_PACKED_BLOB}
     COMMENT "Copying engine shaders blob to editor output"
+    VERBATIM
+)
+
+# Mirror the dedicated BlitToDrawable.metallib name so the editor's
+# MetalBlitToDrawable helper can find it by the expected filename.
+# Same content as shaders.metallib — the script auto-discovers
+# BlitToDrawable.metal alongside EditorShaders.metal during the build.
+add_custom_command(
+    OUTPUT "${CMAKE_SOURCE_DIR}/Darwin/PrimalEditor_Avalonia/DebugEditor/shaders/metal/BlitToDrawable.metallib"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_ENGINE_BLIT_METALLIB}"
+        "${CMAKE_SOURCE_DIR}/Darwin/PrimalEditor_Avalonia/DebugEditor/shaders/metal/BlitToDrawable.metallib"
+    DEPENDS ${_ENGINE_BLIT_METALLIB}
+    COMMENT "Copying BlitToDrawable metallib to editor output"
     VERBATIM
 )

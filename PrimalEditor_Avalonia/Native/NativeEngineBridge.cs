@@ -968,8 +968,8 @@ public static class NativeEngineBridge
         catch { return 0; }
     }
 
-    [DllImport("PrimalEngine", EntryPoint = "CreateStandardRenderPipelineFromDevice", CallingConvention = CallingConvention.Cdecl)]
-    private static extern uint _CreateStandardRenderPipelineFromDevice(UInt64 deviceHandle);
+    [DllImport("PrimalEngine", EntryPoint = "CreateStandardRenderPipeline", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _CreateStandardRenderPipeline(UInt64 deviceHandle);
 
     [DllImport("PrimalEngine", EntryPoint = "DestroyStandardRenderPipeline", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _DestroyStandardRenderPipeline();
@@ -977,7 +977,7 @@ public static class NativeEngineBridge
     public static bool CreateStandardRenderPipeline(UInt64 deviceHandle)
     {
         if (!_isLoaded || deviceHandle == 0) return false;
-        try { return _CreateStandardRenderPipelineFromDevice(deviceHandle) != 0; }
+        try { return _CreateStandardRenderPipeline(deviceHandle) != 0; }
         catch { return false; }
     }
 
@@ -985,6 +985,99 @@ public static class NativeEngineBridge
     {
         if (!_isLoaded) return;
         try { _DestroyStandardRenderPipeline(); } catch { }
+    }
+
+    public enum RenderTargetFormat : uint { RGBA8 = 0, RGBA16F = 1, R8 = 2, Depth24 = 3 }
+
+    [DllImport("PrimalEngine", EntryPoint = "CreateRenderTarget", CallingConvention = CallingConvention.Cdecl)]
+    private static extern UInt64 _CreateRenderTarget(uint width, uint height, uint format);
+
+    [DllImport("PrimalEngine", EntryPoint = "DestroyRenderTarget", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _DestroyRenderTarget(UInt64 handle);
+
+    [DllImport("PrimalEngine", EntryPoint = "DebugReadRenderTarget", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _DebugReadRenderTarget(UInt64 targetHandle, IntPtr outBuffer, UInt64 bufferSize);
+
+    public static UInt64 CreateRenderTarget(int width, int height, RenderTargetFormat format)
+    {
+        if (!_isLoaded || width <= 0 || height <= 0) return 0;
+        try { return _CreateRenderTarget((uint)width, (uint)height, (uint)format); }
+        catch (Exception ex) { Logger.Error("CreateRenderTarget failed", ex); return 0; }
+    }
+
+    public static void DestroyRenderTarget(UInt64 handle)
+    {
+        if (!_isLoaded || handle == 0) return;
+        try { _DestroyRenderTarget(handle); } catch (Exception ex) { Logger.Error("DestroyRenderTarget failed", ex); }
+    }
+
+    public static bool DebugReadRenderTarget(UInt64 handle, byte[] buffer)
+    {
+        if (!_isLoaded || handle == 0 || buffer == null) return false;
+        var pin = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+        try { return _DebugReadRenderTarget(handle, pin.AddrOfPinnedObject(), (UInt64)buffer.Length) != 0; }
+        catch (Exception ex) { Logger.Error("DebugReadRenderTarget failed", ex); return false; }
+        finally { pin.Free(); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineRenderFrame", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineRenderFrame(UInt64 targetHandle, uint cameraId, uint surfaceId);
+
+    [DllImport("PrimalEngine", EntryPoint = "BlitRenderTargetToSurface", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _BlitRenderTargetToSurface(UInt64 targetHandle, uint surfaceId);
+
+    // surface_id ~0u means headless (no blit, no drawable).
+    public const uint PipelineRenderFrameHeadlessSurface = 0xFFFFFFFFu;
+
+    public static bool PipelineRenderFrame(UInt64 targetHandle, uint cameraId, uint surfaceId)
+    {
+        if (!_isLoaded || targetHandle == 0 || cameraId == 0xFFFFFFFFu) return false;
+        try { return _PipelineRenderFrame(targetHandle, cameraId, surfaceId) != 0; }
+        catch (Exception ex) { Logger.Error("PipelineRenderFrame failed", ex); return false; }
+    }
+
+    public static bool BlitRenderTargetToSurface(UInt64 targetHandle, uint surfaceId)
+    {
+        if (!_isLoaded || targetHandle == 0) return false;
+        try { return _BlitRenderTargetToSurface(targetHandle, surfaceId) != 0; }
+        catch (Exception ex) { Logger.Error("BlitRenderTargetToSurface failed", ex); return false; }
+    }
+
+    // PipelineLightDesc is fed through unmanaged memory as opaque bytes so
+    // we don't have to recreate the layout in C#. Size is verified at call.
+    public const int PipelineLightDescSize = 64;
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineRegisterLightEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern UInt64 _PipelineRegisterLightEntity(IntPtr desc);
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineUpdateLightEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineUpdateLightEntity(UInt64 entityId, IntPtr desc);
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineUnregisterLightEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineUnregisterLightEntity(UInt64 entityId);
+
+    public static UInt64 PipelineRegisterLightEntity(byte[] desc)
+    {
+        if (!_isLoaded || desc == null || desc.Length < PipelineLightDescSize) return 0;
+        var pin = GCHandle.Alloc(desc, GCHandleType.Pinned);
+        try { return _PipelineRegisterLightEntity(pin.AddrOfPinnedObject()); }
+        catch (Exception ex) { Logger.Error("PipelineRegisterLightEntity failed", ex); return 0; }
+        finally { pin.Free(); }
+    }
+
+    public static bool PipelineUpdateLightEntity(UInt64 entityId, byte[] desc)
+    {
+        if (!_isLoaded || entityId == 0 || desc == null || desc.Length < PipelineLightDescSize) return false;
+        var pin = GCHandle.Alloc(desc, GCHandleType.Pinned);
+        try { return _PipelineUpdateLightEntity(entityId, pin.AddrOfPinnedObject()) != 0; }
+        catch (Exception ex) { Logger.Error("PipelineUpdateLightEntity failed", ex); return false; }
+        finally { pin.Free(); }
+    }
+
+    public static void PipelineUnregisterLightEntity(UInt64 entityId)
+    {
+        if (!_isLoaded || entityId == 0) return;
+        try { _PipelineUnregisterLightEntity(entityId); } catch { }
     }
 
     public static bool RenderFrame(RenderFrameParams p)

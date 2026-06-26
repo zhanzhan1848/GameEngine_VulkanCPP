@@ -459,14 +459,14 @@ namespace primal::graphics::metal::core
         // _surfaces is in the anonymous namespace above. Out-of-range access
         // to utl::free_list asserts in debug; we treat invalid_id as null.
         if (!id::is_valid(id)) return nullptr;
-        return _surfaces[id].view();
+        return static_cast<MTK::View*>(_surfaces[id].view());
     }
 
     u32 blit_surface_and_present(surface_id id, u64 src_handle)
     {
         if (!id::is_valid(id)) return 0;
 
-        MTK::View* view = _surfaces[id].view();
+        MTK::View* view = static_cast<MTK::View*>(_surfaces[id].view());
         if (!view) return 0;
 
         // === Resolve src texture from the RHI device ===
