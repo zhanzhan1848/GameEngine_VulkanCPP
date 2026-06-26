@@ -31,6 +31,7 @@
 #include "Engine/Graphics/Scene/LightSyncSystem.h"
 
 #include <cassert>
+#include <cmath>
 #include <iostream>
 
 using namespace primal;
@@ -162,8 +163,101 @@ int main() {
     CHECK(!pipeline.UpdateLightEntity(eid, updateInfo),
           "Update on dead entity returns false");
 
-    // Cleanup
+    // Cleanup Test 1-8 leftovers so new tests start from a clean slate.
     pipeline.UnregisterLightEntity(eid2);
+
+    // === Test 9: Register point light, verify range/attenuation survive sync ===
+    std::cout << "\n--- Test 9: RegisterLightEntity (point) ---" << std::endl;
+    {
+        light_init_info plinfo{};
+        plinfo.entity_id = id::invalid_id;
+        plinfo.type = graphics::light::point;
+        plinfo.color = {0.2f, 0.5f, 0.9f};
+        plinfo.intensity = 12.f;
+        plinfo.is_enabled = true;
+        plinfo.point_param.attenuation = {0.5f, 0.1f, 0.02f};
+        plinfo.point_param.range = 25.f;
+        id::id_type peid = pipeline.RegisterLightEntity(plinfo);
+        CHECK(peid != id::invalid_id, "Register point light succeeds");
+
+        RenderScene pscene;
+        scene_sync::SyncLightsFromECS(pscene);
+        CHECK(pscene.GetLights().size() == 1, "Point light visible after sync");
+        if (!pscene.GetLights().empty()) {
+            const auto& rl = pscene.GetLights()[0];
+            CHECK(rl.type == LightType::Point, "Point light type preserved");
+            CHECK(rl.range == 25.f, "Point light range preserved");
+        }
+        pipeline.UnregisterLightEntity(peid);
+    }
+
+    // === Test 10: Register spot light, verify cone angles survive sync ===
+    std::cout << "\n--- Test 10: RegisterLightEntity (spot) ---" << std::endl;
+    {
+        light_init_info slinfo{};
+        slinfo.entity_id = id::invalid_id;
+        slinfo.type = graphics::light::spot;
+        slinfo.color = {1.f, 0.8f, 0.4f};
+        slinfo.intensity = 8.f;
+        slinfo.is_enabled = true;
+        slinfo.spot_param.attenuation = {0.3f, 0.05f, 0.01f};
+        slinfo.spot_param.range = 15.f;
+        slinfo.spot_param.umbra = 0.4f;       // radians
+        slinfo.spot_param.penumbra = 0.7f;    // radians
+        id::id_type seid = pipeline.RegisterLightEntity(slinfo);
+        CHECK(seid != id::invalid_id, "Register spot light succeeds");
+
+        RenderScene sscene;
+        scene_sync::SyncLightsFromECS(sscene);
+        CHECK(sscene.GetLights().size() == 1, "Spot light visible after sync");
+        if (!sscene.GetLights().empty()) {
+            const auto& rl = sscene.GetLights()[0];
+            CHECK(rl.type == LightType::Spot, "Spot light type preserved");
+            CHECK(rl.range == 15.f, "Spot light range preserved");
+            // innerCone = cos(umbra), outerCone = cos(penumbra) — see LightSyncSystem.cpp:101-102
+            CHECK(rl.innerCone == std::cos(0.4f), "Spot innerCone = cos(umbra)");
+            CHECK(rl.outerCone == std::cos(0.7f), "Spot outerCone = cos(penumbra)");
+        }
+        pipeline.UnregisterLightEntity(seid);
+    }
+
+    // === Test 11: Update directional → spot, verify cone fields now set, no stale state ===
+    std::cout << "\n--- Test 11: UpdateLightEntity directional → spot ---" << std::endl;
+    {
+        light_init_info dinfo{};
+        dinfo.entity_id = id::invalid_id;
+        dinfo.type = graphics::light::directional;
+        dinfo.color = {1.f, 1.f, 1.f};
+        dinfo.intensity = 5.f;
+        dinfo.is_enabled = true;
+        id::id_type teid = pipeline.RegisterLightEntity(dinfo);
+        CHECK(teid != id::invalid_id, "Register directional light for type-change test");
+
+        light_init_info sinfo{};
+        sinfo.entity_id = id::invalid_id;
+        sinfo.type = graphics::light::spot;
+        sinfo.color = {1.f, 0.f, 0.f};
+        sinfo.intensity = 3.f;
+        sinfo.is_enabled = true;
+        sinfo.spot_param.attenuation = {1.f, 0.f, 0.f};
+        sinfo.spot_param.range = 10.f;
+        sinfo.spot_param.umbra = 0.5f;
+        sinfo.spot_param.penumbra = 0.9f;
+
+        CHECK(pipeline.UpdateLightEntity(teid, sinfo), "Update directional → spot succeeds");
+
+        RenderScene tscene;
+        scene_sync::SyncLightsFromECS(tscene);
+        CHECK(tscene.GetLights().size() == 1, "1 light after type change");
+        if (!tscene.GetLights().empty()) {
+            const auto& rl = tscene.GetLights()[0];
+            CHECK(rl.type == LightType::Spot, "Type now Spot");
+            CHECK(rl.range == 10.f, "Range updated to spot param");
+            CHECK(rl.innerCone == std::cos(0.5f), "Cone angles set from spot param");
+        }
+        pipeline.UnregisterLightEntity(teid);
+    }
+
     pipeline.Shutdown();
 
 #pragma GCC diagnostic push

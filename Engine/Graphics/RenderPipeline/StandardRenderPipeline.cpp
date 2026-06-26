@@ -749,10 +749,22 @@ bool StandardRenderPipeline::UpdateLightEntity(id::id_type entity_id, const ligh
     lc.set_intensity(info.intensity);
     lc.set_enabled(info.is_enabled);
     lc.set_light_type(info.type);
-    // Type-specific params.
-    if (info.type == graphics::light::point) {
+
+    // Type-specific params — ALWAYS set every field based on info.type so that
+    // type changes (e.g. spot → directional) clear stale state from the
+    // type-erased SoA backing store. LightSyncSystem reads range/umbra/penumbra/
+    // attenuation unconditionally, so leftover spot cone angles on a directional
+    // light would otherwise feed garbage into RenderLight.
+    // Defaults mirror light::create() initial SoA values (Light.cpp:30-33):
+    //   attenuation = {1,0,0}, range = 10, umbra/penumbra = 0.
+    if (info.type == graphics::light::directional) {
+        lc.set_attenuation(math::v3{1.0f, 0.0f, 0.0f});
+        lc.set_range(10.0f);
+        lc.set_cone_angles(0.0f, 0.0f);
+    } else if (info.type == graphics::light::point) {
         lc.set_attenuation(info.point_param.attenuation);
         lc.set_range(info.point_param.range);
+        lc.set_cone_angles(0.0f, 0.0f);  // point lights have no cone
     } else if (info.type == graphics::light::spot) {
         lc.set_attenuation(info.spot_param.attenuation);
         lc.set_range(info.spot_param.range);
