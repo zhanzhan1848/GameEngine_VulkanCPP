@@ -27,7 +27,14 @@
 #include "Components/Entity.h"
 #include "EngineAPI/GameEntity.h"
 #include "EngineAPI/GameEntity_impl.h"
+#include "Graphics/Camera/RenderViewBuilder.h"
+#include "Graphics/Scene/LightSyncSystem.h"
+#include "Graphics/RHI/Core/RHITypes.h"  // for rhi::handles::INVALID_SYNC
+#include "Graphics/RenderTexture.h"      // for RenderTexture::GetDesc/GetHandle
+#include "Graphics/Renderer.h"           // for graphics::render_surface definition
+#include "EngineAPIInternal.h"           // for engine_dll::GetRenderTarget/GetSurface
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 
@@ -479,6 +486,73 @@ EDITOR_INTERFACE void PipelineUnregisterLightEntity(u64 entity_id) {
     auto* p = GetStdPipeline();
     if (!p) return;
     p->UnregisterLightEntity(static_cast<id::id_type>(entity_id));
+}
+
+// ============================================================================
+// Pipeline Render Frame (Path B trigger)
+// ============================================================================
+//
+// Central render entry for offscreen / headless rendering. Validates target /
+// pipeline / scene, builds a RenderView from camera_id + viewport derived from
+// the target texture, syncs ECS lights into the RenderScene, and invokes
+// pipeline->Render. surface_id is optional — pass u32(-1) to skip the
+// surface-size sanity check (headless tests with no drawable).
+
+EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u32 surface_id) {
+    auto* entry = engine_dll::GetRenderTarget(target_handle);
+    if (!entry || !entry->texture) {
+        std::fprintf(stderr, "[PipelineRenderFrame] invalid target_handle %llu\n",
+                     static_cast<unsigned long long>(target_handle));
+        return 0;
+    }
+
+    auto* p = GetStdPipeline();
+    if (!p) {
+        std::fprintf(stderr, "[PipelineRenderFrame] no pipeline\n");
+        return 0;
+    }
+    auto* scene = p->GetCurrentScene();
+    if (!scene) {
+        std::fprintf(stderr, "[PipelineRenderFrame] no scene\n");
+        return 0;
+    }
+
+    const auto& desc = entry->texture->GetDesc();
+    if (desc.size.x == 0 || desc.size.y == 0) {
+        std::fprintf(stderr, "[PipelineRenderFrame] zero-sized target\n");
+        return 0;
+    }
+
+    // Optional surface size sanity check. surface_id == ~0u means headless / skip.
+    if (surface_id != static_cast<u32>(~0u)) {
+        auto* rs = engine_dll::GetSurface(surface_id);
+        if (rs && rs->surface.is_valid()) {
+            if (rs->surface.width() != desc.size.x ||
+                rs->surface.height() != desc.size.y) {
+                std::fprintf(stderr,
+                    "[PipelineRenderFrame] target %ux%u vs surface %ux%u (warn, continue)\n",
+                    desc.size.x, desc.size.y,
+                    rs->surface.width(), rs->surface.height());
+            }
+        }
+    }
+
+    rhi::ViewportDesc viewport{};
+    viewport.topLeft.x = 0.f;
+    viewport.topLeft.y = 0.f;
+    viewport.size.x = static_cast<f32>(desc.size.x);
+    viewport.size.y = static_cast<f32>(desc.size.y);
+    viewport.minDepth = 0.f;
+    viewport.maxDepth = 1.f;
+
+    RenderView view = BuildRenderViewFromCameraId(camera_id{camera_id_in}, viewport);
+
+    // Sync ECS lights to RenderScene (Path B lights source). Idempotent per-frame.
+    scene_sync::SyncLightsFromECS(*scene);
+
+    p->Render(*scene, view, entry->texture->GetHandle(), desc,
+              rhi::handles::INVALID_SYNC);
+    return 1;
 }
 
 } // extern "C"
