@@ -555,4 +555,41 @@ EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u3
     return 1;
 }
 
+// ============================================================================
+// BlitRenderTargetToSurface (Path B present step)
+// ============================================================================
+//
+// After PipelineRenderFrame has rendered offscreen into `target_handle`,
+// the Editor calls BlitRenderTargetToSurface to copy the render target's
+// texture into the MTKView drawable and present it. Because drawables are
+// framebufferOnly (per memory: Material Preview Fragment Blit), this is
+// implemented as a fullscreen-triangle fragment shader that samples `src`,
+// not an MTLBlitCommandEncoder copy.
+//
+// Returns 1 on success, 0 on failure (invalid target / invalid surface /
+// pipeline not initialized / etc.).
+
+EDITOR_INTERFACE u32 BlitRenderTargetToSurface(u64 target_handle, u32 surface_id) {
+    auto* entry = engine_dll::GetRenderTarget(target_handle);
+    if (!entry || !entry->texture) {
+        std::fprintf(stderr, "[BlitRenderTargetToSurface] invalid target_handle %llu\n",
+                     static_cast<unsigned long long>(target_handle));
+        return 0;
+    }
+
+    auto* rs = engine_dll::GetSurface(surface_id);
+    if (!rs || !rs->surface.is_valid()) {
+        std::fprintf(stderr, "[BlitRenderTargetToSurface] invalid surface_id %u\n",
+                     surface_id);
+        return 0;
+    }
+
+    // Delegate to surface::blit_and_present, which dispatches through
+    // platform_interface → metal::core::blit_surface_and_present. That
+    // resolves the RHI ResourceHandle → MTL::Texture*, lazy-inits the
+    // blit PSO, acquires the currentDrawable, renders the fullscreen
+    // triangle, and presents.
+    return rs->surface.blit_and_present(entry->texture->GetHandle());
+}
+
 } // extern "C"

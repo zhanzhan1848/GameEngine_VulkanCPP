@@ -126,6 +126,16 @@ namespace primal::graphics
 		gfx.surface.render(_id, info);
 	}
 
+	u32 surface::blit_and_present(rhi::ResourceHandle src) const
+	{
+		assert(is_valid());
+		// gfx.surface.blit_and_present may be null on backends that don't
+		// implement Path B (e.g. D3D12/Vulkan stubs). Guard the deref so a
+		// missing impl degrades to a no-op return 0 instead of crashing.
+		if (!gfx.surface.blit_and_present) return 0;
+		return gfx.surface.blit_and_present(_id, src);
+	}
+
 	void create_light_set(u64 light_set_key)
 	{
 		gfx.light.create_light_set(light_set_key);

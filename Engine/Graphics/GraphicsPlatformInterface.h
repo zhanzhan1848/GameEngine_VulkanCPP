@@ -32,6 +32,13 @@ namespace primal::graphics {
 			u32(*width)(surface_id);
 			u32(*height)(surface_id);
 			void(*render)(surface_id, frame_info);
+			// Blit `src` (RHI ResourceHandle, which is a u64 alias) into the
+			// surface's current drawable and present. Used by Path B
+			// (BlitRenderTargetToSurface C ABI). Returns 1 on success, 0 on
+			// failure (invalid id / null src / etc.). Declared as u64 (not
+			// rhi::ResourceHandle) to keep this deprecated header decoupled
+			// from the RHI layer.
+			u32(*blit_and_present)(surface_id, u64);
 		} surface;
 
 		struct

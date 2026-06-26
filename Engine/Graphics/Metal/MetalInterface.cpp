@@ -28,6 +28,8 @@ namespace primal::graphics::metal
         pi.surface.width = core::surface_width;
         pi.surface.height = core::surface_height;
         pi.surface.render = core::render_surface;
+        // Path B: offscreen render → blit to drawable → present.
+        pi.surface.blit_and_present = core::blit_surface_and_present;
 
         // Light
         pi.light.create_light_set = light::create_light_set;

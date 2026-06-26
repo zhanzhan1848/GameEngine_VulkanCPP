@@ -72,4 +72,16 @@ namespace primal::graphics::metal::core
     u32 surface_width(surface_id id);
     u32 surface_height(surface_id id);
     void render_surface(surface_id id, frame_info info);
+
+    // === Path B (PipelineRenderFrame + BlitRenderTargetToSurface) ===
+    // Blit `src_handle` (an rhi::ResourceHandle that resolves to an
+    // MTL::Texture* via MetalDevice) into the surface's current drawable
+    // and present the drawable. Used by Editor surface rendering:
+    // PipelineRenderFrame renders offscreen, BlitRenderTargetToSurface
+    // copies into the MTKView drawable. Returns 1 on success, 0 on failure.
+    u32 blit_surface_and_present(surface_id id, u64 src_handle);
+
+    // Borrow the MTK::View for a surface (used by MetalBlitToDrawable to
+    // grab currentDrawable()). Returns nullptr if id is invalid.
+    [[nodiscard]] MTK::View* get_surface_view(surface_id id);
 }
