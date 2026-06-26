@@ -474,8 +474,11 @@ int main() {
           "PipelineRegisterLightEntity(null) returns invalid id");
     CHECK(PipelineRenderFrame(0, camera_id, ~0u) == 0,
           "PipelineRenderFrame(null target) returns 0");
-    CHECK(PipelineRenderFrame(target, kInvalidId, ~0u) == 0 || true,
-          "PipelineRenderFrame(invalid camera) error path (warn-only)");
+    {
+        const u32 r = PipelineRenderFrame(target, kInvalidId, ~0u);
+        std::cout << "  [info] PipelineRenderFrame(invalid camera) returned " << r
+                  << " (warn-only — informational, not asserted)\n";
+    }
     CHECK(PipelineUpdateLightEntity(static_cast<u64>(~0ull), &green) == 0,
           "UpdateLightEntity(invalid_id) returns 0");
     {
