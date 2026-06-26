@@ -584,6 +584,19 @@ EDITOR_INTERFACE u32 BlitRenderTargetToSurface(u64 target_handle, u32 surface_id
         return 0;
     }
 
+    // Spec §4.2 step 3: hard-fail on size mismatch (blit cannot scale).
+    const auto& target_desc = entry->texture->GetDesc();
+    const u32 target_w = static_cast<u32>(target_desc.size.x);
+    const u32 target_h = static_cast<u32>(target_desc.size.y);
+    const u32 surf_w   = rs->surface.width();
+    const u32 surf_h   = rs->surface.height();
+    if (target_w != surf_w || target_h != surf_h) {
+        std::fprintf(stderr,
+            "[BlitRenderTargetToSurface] size mismatch: target %ux%u vs surface %ux%u\n",
+            target_w, target_h, surf_w, surf_h);
+        return 0;
+    }
+
     // Delegate to surface::blit_and_present, which dispatches through
     // platform_interface → metal::core::blit_surface_and_present. That
     // resolves the RHI ResourceHandle → MTL::Texture*, lazy-inits the
