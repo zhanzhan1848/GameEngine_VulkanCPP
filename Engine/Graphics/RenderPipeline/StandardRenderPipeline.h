@@ -179,6 +179,12 @@ public:
     // entry points that need to mutate the scene outside the render call.
     RenderScene* GetCurrentScene() { return current_scene_; }
 
+    // Frame counter (incremented at the end of each Render call). At Execute
+    // time for frame N, returns N — matches the cbIdx % 3 the upcoming Render
+    // will pass to ForwardSceneRenderer. Used by GlobalSDFMeshNode to pick
+    // the matching triple-buffer slot for SurfaceNets writes.
+    u64 GetFrameCount() const { return frameCount_; }
+
 private:
     void InitializeSubsystems();
     void InitializeLumenPasses();

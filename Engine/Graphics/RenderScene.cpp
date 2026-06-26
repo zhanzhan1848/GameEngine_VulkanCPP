@@ -129,13 +129,14 @@ void RenderScene::Clear() {
 
 // --- Streaming Mesh Management (Phase 9.3b) ---
 
-id::id_type RenderScene::RegisterStreamingMesh(StreamingMesh* mesh,
+id::id_type RenderScene::RegisterStreamingMesh(StreamingMesh* mesh, u32 slot,
                                                 const math::v3& bounds_min,
                                                 const math::v3& bounds_max) {
     std::lock_guard<std::mutex> lock(mutex_);
     StreamingMeshRecord rec{};
     rec.entity_id  = next_streaming_entity_id_++;
     rec.mesh       = mesh;
+    rec.slot       = slot;
     rec.bounds_min = bounds_min;
     rec.bounds_max = bounds_max;
     rec.visible    = true;

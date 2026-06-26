@@ -336,7 +336,26 @@ MTL::ResourceOptions MetalBuffer::getResourceOptions() const {
             options |= MTL::ResourceStorageModeShared;
             break;
     }
-    
+
+    // Cross-cmdbuf hazard tracking. Metal only auto-syncs accesses to
+    // TRACKED resources across different command buffers on the same queue.
+    // Untracked buffers (the default) allow concurrent cmd buffers to
+    // overlap, racing producer/consumer patterns like SurfaceNets (compute
+    // write in one cmdbuf) → DrawIndirect (read in next cmdbuf). Forcing
+    // Tracked on all GPU-accessible buffers closes that hole.
+    //
+    // Within a single cmdbuf, Metal inserts implicit barriers at pass
+    // boundaries regardless of tracking mode, so this flag only adds
+    // cross-cmdbuf sync — no perf hit for the common single-cmdbuf case.
+    options |= MTL::ResourceHazardTrackingModeTracked;
+
+    static int s_tracked_buf_count = 0;
+    if (s_tracked_buf_count < 30) {
+        std::cerr << "[MetalBuffer] Tracked buf opts=0x" << std::hex << options
+                  << " size=" << std::dec << desc_.size
+                  << " mem=" << static_cast<int>(desc_.memoryUsage) << std::endl;
+        ++s_tracked_buf_count;
+    }
     return options;
 }
 

@@ -5,6 +5,7 @@
 #include "Graphics/RHI/Platforms/Metal/MetalPipeline.h"
 #include <chrono>
 #include "Graphics/RenderScene.h"
+#include "Graphics/RenderPipeline/StreamingMesh.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RenderGraph/RenderGraphPass.h"
@@ -338,6 +339,24 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
         blit_ds_[i] = device_->CreateDescriptorSet(desc);
     }
 
+    // Streaming mesh default material DS — created after white_texture_ and
+    // flat_normal_texture_ exist (CreatePersistentResources runs below).
+    // All streaming meshes share this default (white albedo, flat normal);
+    // per-mesh Material on StreamingMeshRecord is deferred (v1).
+    {
+        DescriptorSetDesc desc{};
+        desc.layout = material_set_layout_;
+        streaming_material_ds_ = device_->CreateDescriptorSet(desc);
+
+        DescData params[] = {
+            {0, DescriptorType::SampledImage, white_texture_},
+            {1, DescriptorType::SampledImage, flat_normal_texture_},
+            {2, DescriptorType::SampledImage, white_texture_},
+            {3, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
+        };
+        UpdateDesc(device_, streaming_material_ds_, params, 4);
+    }
+
 #ifndef DISABLE_PARTICLE_SYSTEM
     particle_pass_.initialize(device);
 #endif
@@ -365,7 +384,8 @@ void ForwardSceneRenderer::Shutdown() {
     for (auto* p : {&gbuffer_pipeline_, &shadow_pipeline_, &lighting_pipeline_,
                     &skybox_pipeline_, &blit_pipeline_, &alphaclip_pipeline_, &unlit_pipeline_,
                     &foliage_pipeline_, &water_pipeline_, &transparent_pipeline_,
-                    &forward_water_pipeline_, &forward_transparent_pipeline_}) {
+                    &forward_water_pipeline_, &forward_transparent_pipeline_,
+                    &streaming_pipeline_}) {
         if (*p != handles::INVALID_PIPELINE) { device_->DestroyPipeline(*p); *p = handles::INVALID_PIPELINE; }
     }
     // Destroy layouts
@@ -522,6 +542,10 @@ void ForwardSceneRenderer::CreateShaders() {
     forward_water_ps_ = load("ForwardTransparency", "forwardWaterFS", ShaderStage::Pixel);
     forward_transparent_vs_ = load("ForwardTransparency", "forwardTransparentVS", ShaderStage::Vertex);
     forward_transparent_ps_ = load("ForwardTransparency", "forwardTransparentFS", ShaderStage::Pixel);
+
+    // Streaming mesh shaders (Phase 9.3b Task 12) — SoA vertex pulling
+    streaming_vs_ = load("StreamingGBuffer", "streamingVertexMain", ShaderStage::Vertex);
+    streaming_ps_ = load("StreamingGBuffer", "streamingFragmentMain", ShaderStage::Pixel);
 }
 
 void ForwardSceneRenderer::CreatePipelines() {
@@ -764,6 +788,25 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
         forward_transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
+    // Streaming mesh pipeline — same layout/RTs/depth as GBuffer, different VS/PS
+    // (Phase 9.3b Task 12). Reads SoA buffers at slots 20/21 instead of AoS.
+    {
+        GraphicsPipelineDesc desc{};
+        desc.layout = gbuffer_layout_;
+        desc.vertexShader = streaming_vs_;
+        desc.pixelShader = streaming_ps_;
+        desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[1] = DataFormat::RGBA16_Float;
+        desc.renderTargetFormats[2] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[3] = DataFormat::RG16_Float;
+        desc.renderTargetCount = 4;
+        desc.depthStencilFormat = DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = ComparisonFunc::Less;
+        desc.cullMode = CullMode::None;
+        streaming_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
 }
 
@@ -1313,6 +1356,106 @@ math::m4x4 ForwardSceneRenderer::ComputeCascadeVP(math::v3 lightDir, math::v3 ca
 }
 
 // ============================================================================
+// Streaming Mesh Pass (Phase 9.3b Task 12)
+// ============================================================================
+
+void ForwardSceneRenderer::RenderStreamingMeshes(RHICommandBuffer* cmd, u32 frame_index) {
+    if (!render_scene_) return;
+    if (streaming_pipeline_ == handles::INVALID_PIPELINE) return;
+    if (streaming_material_ds_ == handles::INVALID_DESCRIPTOR_SET) return;
+
+    // Triple-buffer slot: producer (GlobalSDFMeshNode::Execute) wrote slot
+    // frame_index%MAX_FRAMES_IN_FLIGHT this frame; we read the matching slot.
+    // Other slots' records are skipped — their GPU buffers are either being
+    // read by an in-flight render cmd buffer or hold stale data.
+    const u32 target_slot = frame_index % 3;
+
+    // Early-out: any visible, non-tombstoned, valid streaming mesh for this slot?
+    bool any_visible = false;
+    render_scene_->ForEachStreamingMesh([&](const StreamingMeshRecord& sm) {
+        if (sm.slot != target_slot) return;
+        if (sm.visible && !sm.tombstoned && sm.mesh && sm.mesh->IsValid()) any_visible = true;
+    });
+    if (!any_visible) return;
+
+    // Re-enter GBuffer render pass with Load op (preserve Pass 3's color+depth).
+    RenderPassDesc rpDesc{};
+    rpDesc.colorAttachments.resize(4);
+    rpDesc.colorAttachments[0].texture = gbuffer_albedo_[frame_index];
+    rpDesc.colorAttachments[0].loadOp = LoadAction::Load;
+    rpDesc.colorAttachments[0].storeOp = StoreAction::Store;
+    rpDesc.colorAttachments[1].texture = gbuffer_normal_[frame_index];
+    rpDesc.colorAttachments[1].loadOp = LoadAction::Load;
+    rpDesc.colorAttachments[1].storeOp = StoreAction::Store;
+    rpDesc.colorAttachments[2].texture = gbuffer_orm_[frame_index];
+    rpDesc.colorAttachments[2].loadOp = LoadAction::Load;
+    rpDesc.colorAttachments[2].storeOp = StoreAction::Store;
+    rpDesc.colorAttachments[3].texture = gbuffer_velocity_[frame_index];
+    rpDesc.colorAttachments[3].loadOp = LoadAction::Load;
+    rpDesc.colorAttachments[3].storeOp = StoreAction::Store;
+    rpDesc.depthAttachment.texture = gbuffer_depth_[frame_index];
+    rpDesc.depthAttachment.loadOp = LoadAction::Load;
+    rpDesc.depthAttachment.storeOp = StoreAction::Store;
+    cmd->BeginRenderPass(rpDesc);
+
+    cmd->BindGraphicsPipeline(streaming_pipeline_);
+    cmd->SetViewport({{0, 0}, {(float)render_width_, (float)render_height_}, 0, 1});
+    cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
+
+    const DescriptorSetHandle globalSets[] = {global_ds_[frame_index]};
+    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbuffer_layout_, 0, 1, globalSets, 0, nullptr);
+    const DescriptorSetHandle matSets[] = {streaming_material_ds_};
+    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbuffer_layout_, 1, 1, matSets, 0, nullptr);
+
+    // StreamingMesh positions are already in world space; identity transform.
+    PCGPushConsts pc{};
+    pc.transform = MatrixIdentity();
+    pc.use_instances = 0;
+    cmd->PushConstants(gbuffer_layout_, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+
+    render_scene_->ForEachStreamingMesh([&](const StreamingMeshRecord& sm) {
+        if (sm.slot != target_slot) return;  // skip non-matching triple-buffer slots
+        if (!sm.visible || sm.tombstoned) return;
+        if (sm.mesh == nullptr || !sm.mesh->IsValid()) return;
+
+        // Diagnostic: dump indirect_args + counters to find where vertexCount
+        // corruption originates. counters[0]=vert_count, counters[1]=idx_count;
+        // indirect_args.vertexCount should equal counters[1] (set by
+        // write_indirect_args). If they diverge, write_indirect_args is racing
+        // or never ran. If both equal 504978, emit_faces is over-producing.
+        static u32 s_render_diag = 0;
+        if (s_render_diag < 200) {
+            auto* args = static_cast<u32*>(device_->MapBuffer(sm.mesh->indirect_args));
+            auto* cnt  = static_cast<u32*>(device_->MapBuffer(sm.mesh->counters));
+            if (args && cnt) {
+                std::cout << "[RenderStream] frame_idx=" << frame_index
+                          << " slot=" << sm.slot
+                          << " args=(vc=" << args[0]
+                          << " ic=" << args[1]
+                          << " vs=" << args[2]
+                          << " bi=" << args[3] << ")"
+                          << " cnt=(v=" << cnt[0]
+                          << " i=" << cnt[1] << ")"
+                          << std::endl;
+            }
+            if (args) device_->UnmapBuffer(sm.mesh->indirect_args);
+            if (cnt)  device_->UnmapBuffer(sm.mesh->counters);
+            ++s_render_diag;
+        }
+
+        // Bind positions (20), elements (21), indices (22). The shader does
+        // manual indexed drawing — DrawIndirect issues idx_count invocations,
+        // and indices[vid] maps each invocation to the actual vertex.
+        ResourceHandle vb[3] = { sm.mesh->positions, sm.mesh->elements, sm.mesh->indices };
+        u64 offsets[3] = { 0, 0, 0 };
+        cmd->BindVertexBuffers(20, 3, vb, offsets);
+        cmd->DrawIndirect(sm.mesh->indirect_args, 0, 1);
+    });
+
+    cmd->EndRenderPass();
+}
+
+// ============================================================================
 // Main Render Method
 // ============================================================================
 
@@ -1504,6 +1647,13 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
 
         cmd->EndRenderPass();
     }
+
+    // Pass 3b: Streaming meshes (Phase 9.3b Task 12)
+    // Draw GPU-resident StreamingMesh records (GlobalSDFMeshNode output) into
+    // the GBuffer attachments. Must run AFTER Pass 3 (so attachments have a
+    // valid depth buffer) and BEFORE Pass 4 (so deferred lighting illuminates
+    // the streaming surface). Loads existing color+depth, no clear.
+    RenderStreamingMeshes(cmd, idx);
 
     // Pass 4: Deferred Lighting
     {

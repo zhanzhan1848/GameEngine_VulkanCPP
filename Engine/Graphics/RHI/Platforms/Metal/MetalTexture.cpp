@@ -276,6 +276,24 @@ bool MetalTexture::Initialize() {
         storageMode = MTL::StorageModePrivate;
     }
     descriptor->setStorageMode(storageMode);
+
+    // Hazard tracking — Metal only auto-tracks render-target textures.
+    // Compute-written textures (StorageImage/UAV) default to Untracked,
+    // meaning Metal does NOT serialize cross-cmdbuf read/write hazards.
+    // That breaks producer/consumer patterns like SurfaceNets (compute write
+    // in one cmdbuf) → DrawIndirect (read in next cmdbuf): the read can
+    // overlap with the write, returning stale or torn data. Force Tracked
+    // for any UAV texture so Metal inserts the necessary fences.
+    if (HasUsage(desc_.usage, ResourceUsage::UnorderedAccess)) {
+        descriptor->setHazardTrackingMode(MTL::HazardTrackingModeTracked);
+        static int s_tracked_count = 0;
+        if (s_tracked_count < 30) {
+            std::cerr << "[MetalTexture] UAV texture tracked: " << desc_.name
+                      << " size=" << textureDesc_.size.x << "x" << textureDesc_.size.y << "x" << textureDesc_.size.z
+                      << " fmt=" << static_cast<int>(textureDesc_.format) << std::endl;
+            ++s_tracked_count;
+        }
+    }
     
     // Create Texture
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);

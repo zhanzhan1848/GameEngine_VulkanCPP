@@ -6,6 +6,7 @@
 #include "Graphics/RenderPipeline/StreamingMesh.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/Lumen/LumenTypes.h"
+#include "Graphics/Scene/RenderSceneSnapshot.h"
 #include <cstring>
 
 #pragma comment(lib, "Engine.lib")
@@ -18,7 +19,9 @@
 #include "Graphics/RenderPipeline/StreamingMesh.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/Lumen/LumenTypes.h"
+#include "Graphics/Scene/RenderSceneSnapshot.h"
 #include <cstring>
+#include <iostream>
 
 #endif
 
@@ -26,7 +29,16 @@ using namespace primal;
 using namespace primal::graphics;
 
 namespace {
+
+// Forward declaration via extern — definition is later in this TU's
+// anonymous namespace. GetStdPipeline prefers g_owned_pipeline (set by
+// CreateStandardRenderPipeline) over RenderPipeline::Get() to avoid an
+// ODR split between the dylib's `s_instance = this` write and its
+// inline-Get() read when the test binary also statically links libEngine.a.
+extern StandardRenderPipeline* g_owned_pipeline;
+
 StandardRenderPipeline* GetStdPipeline() {
+    if (g_owned_pipeline) return g_owned_pipeline;
     auto* p = RenderPipeline::Get();
     return p ? static_cast<StandardRenderPipeline*>(p) : nullptr;
 }
@@ -134,7 +146,12 @@ EDITOR_INTERFACE u64 PipelineRegisterMeshEntity(u64 geometry_content_id,
                                                 const u64* texture_content_ids,
                                                 u32 texture_count) {
     auto* p = GetStdPipeline();
-    if (!p || geometry_content_id == 0) return 0;
+    if (!p) return 0;
+    // id::invalid_id = 0xffffffff (u32) cast to u64. Slot 0 is a VALID id
+    // (first slot allocated by the FreeList). Treat only invalid_id as
+    // failure, NOT 0.
+    constexpr u64 kInvalidContentId = static_cast<u64>(0xffffffffu);
+    if (geometry_content_id == kInvalidContentId) return 0;
 
     // Convert u64 array → id::id_type array for the engine API.
     // Caller may pass nullptr + texture_count=0 for untextured meshes.
@@ -155,10 +172,12 @@ EDITOR_INTERFACE u64 PipelineRegisterMeshEntity(u64 geometry_content_id,
 }
 
 // Unregister a mesh entity and destroy the underlying ECS entity.
-// Safe to call with 0 / invalid_id (no-op).
+// Safe to call with invalid_id (no-op). Note: 0 is a VALID entity id
+// (first slot allocated by ECS); only id::invalid_id (0xffffffff) is null.
 EDITOR_INTERFACE void PipelineUnregisterMeshEntity(u64 entity_id) {
     auto* p = GetStdPipeline();
-    if (!p || entity_id == 0) return;
+    constexpr u64 kInvalidId = static_cast<u64>(0xffffffffu);
+    if (!p || entity_id == kInvalidId) return;
     p->UnregisterMeshEntity(static_cast<id::id_type>(entity_id));
 }
 
@@ -182,7 +201,8 @@ EDITOR_INTERFACE u64 PipelineRegisterStreamingMeshEntity(
 
     primal::math::v3 bmin{bounds_min[0], bounds_min[1], bounds_min[2]};
     primal::math::v3 bmax{bounds_max[0], bounds_max[1], bounds_max[2]};
-    const id::id_type eid = scene->RegisterStreamingMesh(streaming_mesh, bmin, bmax);
+    // C ABI clients are single-buffered (no triple-buffering) — slot=0.
+    const id::id_type eid = scene->RegisterStreamingMesh(streaming_mesh, 0, bmin, bmax);
     return eid == id::invalid_id ? 0u : static_cast<u64>(eid);
 }
 
@@ -240,6 +260,54 @@ EDITOR_INTERFACE void PipelineSetLumenConfig(u32 quality_preset) {
     lumen::LumenConfig config{};
     config.quality = static_cast<lumen::LumenQualityPreset>(quality_preset);
     p->SetLumenConfig(config);
+}
+
+// ============================================================================
+// Pipeline Lifecycle (Phase 9.3b unblock)
+// ============================================================================
+// Headless integration tests need a StandardRenderPipeline owned by the dylib
+// (not the test binary) so that Pipeline* C ABIs resolve through the dylib's
+// RenderPipeline::s_instance. Mixing a test-binary pipeline with dylib C ABI
+// calls hits the same ODR issue as CommandBufferManager (see
+// GlobalSDF.cpp DebugFill comment).
+
+namespace {
+StandardRenderPipeline* g_owned_pipeline = nullptr;
+}
+
+// Create + Initialize a StandardRenderPipeline owned by the dylib. Idempotent
+// (safe to call when already created). device_handle must come from
+// GetEngineDeviceHandle. Triggers InitializeSubsystems via SetLumenConfig(Low)
+// so forward_renderer_ exists for PipelineRegisterMeshEntity. Returns 1 on
+// success (including the "already created" case), 0 on failure.
+EDITOR_INTERFACE u32 CreateStandardRenderPipeline(u64 device_handle) {
+    if (g_owned_pipeline) return 1;
+    if (device_handle == 0) return 0;
+    auto* device = reinterpret_cast<rhi::RHIDeviceBase*>(device_handle);
+    if (!device) return 0;
+
+    auto* pipeline = new StandardRenderPipeline();
+    if (!pipeline->Initialize(device)) {
+        std::cerr << "[CreateStandardRenderPipeline] Initialize failed" << std::endl;
+        delete pipeline;
+        return 0;
+    }
+    // InitializeSubsystems is lazy-triggered from SetLumenConfig. Low preset
+    // keeps memory + startup cost down for tests.
+    lumen::LumenConfig config{};
+    config.quality = lumen::LumenQualityPreset::Low;
+    pipeline->SetLumenConfig(config);
+
+    g_owned_pipeline = pipeline;
+    return 1;
+}
+
+EDITOR_INTERFACE void DestroyStandardRenderPipeline() {
+    if (g_owned_pipeline) {
+        g_owned_pipeline->Shutdown();
+        delete g_owned_pipeline;
+        g_owned_pipeline = nullptr;
+    }
 }
 
 } // extern "C"

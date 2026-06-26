@@ -111,6 +111,14 @@ private:
                             const math::m4x4& view_matrix, const math::m4x4& proj_matrix);
     void RenderBlit(rhi::RHICommandBuffer* cmd, rhi::ResourceHandle backbuffer, u32 frame_index);
 
+    // Streaming mesh pass (Phase 9.3b Task 12) — draws GPU-resident StreamingMesh
+    // records (e.g. GlobalSDFMeshNode output) into the GBuffer attachments.
+    // Inserts between Pass 3 (GBuffer) and Pass 4 (Deferred Lighting) so that
+    // the deferred lighting pass illuminates the streaming surface. No CPU
+    // readback; positions/elements live in separate SoA buffers bound to slots
+    // 20/21 (see StreamingGBuffer.metal).
+    void RenderStreamingMeshes(rhi::RHICommandBuffer* cmd, u32 frame_index);
+
     // Shader loading helper
     rhi::ShaderHandle LoadShader(const char* filename, const char* entry_point, rhi::ShaderStage stage);
 
@@ -172,6 +180,10 @@ private:
     rhi::ShaderHandle forward_transparent_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle forward_transparent_ps_{rhi::handles::INVALID_SHADER};
 
+    // Streaming mesh shaders (Phase 9.3b Task 12) — SoA vertex pulling
+    rhi::ShaderHandle streaming_vs_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle streaming_ps_{rhi::handles::INVALID_SHADER};
+
     // Pipelines
     rhi::PipelineHandle gbuffer_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle shadow_pipeline_{rhi::handles::INVALID_PIPELINE};
@@ -187,6 +199,11 @@ private:
     rhi::PipelineHandle transparent_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle forward_water_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle forward_transparent_pipeline_{rhi::handles::INVALID_PIPELINE};
+
+    // Streaming mesh pipeline — shares gbuffer_layout_, draws into GBuffer RTs
+    rhi::PipelineHandle streaming_pipeline_{rhi::handles::INVALID_PIPELINE};
+    // Default material DS for streaming meshes (white albedo, flat normal)
+    rhi::DescriptorSetHandle streaming_material_ds_{rhi::handles::INVALID_DESCRIPTOR_SET};
 
     // Pipeline layouts
     rhi::PipelineLayoutHandle gbuffer_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};

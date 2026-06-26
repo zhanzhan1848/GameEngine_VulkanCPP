@@ -81,13 +81,26 @@ public:
 private:
     static constexpr u32 kParamCount = 4;
     static constexpr u32 kPinCount   = 1;
+    // Matches MAX_FRAMES_IN_FLIGHT (RHI/Core/RHITypes.h:22). Hardcoded to keep
+    // the header free of RHI includes; static_assert in the cpp would catch
+    // drift but GlobalSDFMeshNode is header-only — if MAX_FRAMES_IN_FLIGHT ever
+    // changes, update this constant.
+    static constexpr u32 kSlotCount  = 3;
+
     static const PCGParamDescriptor kParams[];
     static const PCGPinDescriptor   kPins[];
 
-    // entity_id lives inside streaming_mesh_ (invalid_id until registered).
-    // generation lives inside streaming_mesh_ (0 until first Execute).
-    // No duplicated state — avoids drift between two sources of truth.
-    StreamingMesh streaming_mesh_{};
+    // Triple-buffered StreamingMesh — one set of GPU buffers per in-flight
+    // frame slot. Producer (Execute) writes slot `execute_count_ % kSlotCount`;
+    // consumer (RenderStreamingMeshes) reads the matching slot via frame_index.
+    // Without triple-buffering, the previous frame's DrawIndirect can still be
+    // reading GPU buffers when this frame's SurfaceNets writes them — causing
+    // a cross-frame read-write race that destabilizes the mesh after a few
+    // frames (see memory: streaming-mesh-cross-frame-hazard.md).
+    StreamingMesh streaming_meshes_[kSlotCount];
+    id::id_type   entity_ids_[kSlotCount]{
+        id::invalid_id, id::invalid_id, id::invalid_id
+    };
 };
 
 inline const PCGParamDescriptor GlobalSDFMeshNode::kParams[] = {
@@ -138,13 +151,18 @@ inline void GlobalSDFMeshNode::Execute() {
         return;
     }
 
-    // Step 3: First-execute allocation.
-    //   Allocate 5 buffers (positions, elements, indices, counters,
-    //   indirect_args) sized for worst-case (res+1)^3 verts / 18*res^3 indices.
-    //   Buffers persist across subsequent Executes.
-    if (!streaming_mesh_.IsValid()) {
-        streaming_mesh_ = CreateStreamingMesh(device, res, bounds_min, bounds_max);
-        if (!streaming_mesh_.IsValid()) {
+    // Step 3: Slot selection — use pipeline's frame counter so producer slot
+    //   aligns with consumer (RenderStreamingMeshes uses frame_index % 3, where
+    //   frame_index = cbIdx = bufferIndex from renderSystem). At Execute time
+    //   for frame N, GetFrameCount() returns N — same value Render will use.
+    //   Do NOT use a local execute_count_: when visible toggles off/on, local
+    //   counter skips frames and goes out of sync with the render side.
+    const u32 slot = static_cast<u32>(pipeline->GetFrameCount() % kSlotCount);
+    StreamingMesh& current_mesh = streaming_meshes_[slot];
+
+    if (!current_mesh.IsValid()) {
+        current_mesh = CreateStreamingMesh(device, res, bounds_min, bounds_max);
+        if (!current_mesh.IsValid()) {
             // Allocation failed (e.g. OOM). Emit sentinel, leave struct empty
             // so the next Execute retries.
             auto* out = CreateOutput<PCGGeometryData>(0);
@@ -153,22 +171,21 @@ inline void GlobalSDFMeshNode::Execute() {
         }
     }
 
-    // Step 4: First-execute entity registration.
-    //   RegisterStreamingMesh returns a monotonic entity id > 0. We store it
-    //   in the StreamingMesh struct so GPUDrivenDrawPipeline can correlate
-    //   the record back to this mesh.
-    if (streaming_mesh_.entity_id == id::invalid_id) {
-        streaming_mesh_.entity_id = scene->RegisterStreamingMesh(
-            &streaming_mesh_, bounds_min, bounds_max);
+    // Step 4: First-execute entity registration (per slot).
+    //   Each slot registers as its own StreamingMeshRecord so the render side
+    //   can filter by slot via `frame_index % kSlotCount`.
+    if (entity_ids_[slot] == id::invalid_id) {
+        entity_ids_[slot] = scene->RegisterStreamingMesh(
+            &current_mesh, slot, bounds_min, bounds_max);
+        current_mesh.entity_id = entity_ids_[slot];
     }
 
-    // Step 5: Dispatch SurfaceNets on GlobalSDF cascade textures.
-    //   This zeroes counters internally, runs 4 compute passes, and leaves
-    //   results in streaming_mesh_.positions/elements/indices. Indirect args
-    //   are written by the last pass.
+    // Step 5: Dispatch SurfaceNets for current slot only.
+    //   Only this slot's buffers are rewritten this frame; other slots' data
+    //   stays intact for their in-flight GPU readers.
     bool ok = GPUMesher::Get().GenerateSurfaceNetsFromGlobalSDF(
         nanite::GlobalSDF::Get(), bounds_min, bounds_max, res, iso_value,
-        streaming_mesh_);
+        current_mesh);
     if (!ok) {
         // Dispatch failed. The meshing pass zeroes counters internally before
         // running, so on failure the GPU buffers hold zeros, not the previous
@@ -176,25 +193,28 @@ inline void GlobalSDFMeshNode::Execute() {
         // being a silent no-op, tombstone the record so DrawStreamingMeshes
         // skips it entirely via the `tombstoned` check. Next Execute will
         // re-register (entity_id is reset to invalid_id below).
-        scene->UnregisterStreamingMesh(streaming_mesh_.entity_id);
-        streaming_mesh_.entity_id = id::invalid_id;
+        scene->UnregisterStreamingMesh(entity_ids_[slot]);
+        entity_ids_[slot] = id::invalid_id;
         auto* out = CreateOutput<PCGGeometryData>(0);
         out->content_id = id::invalid_id;
         return;
     }
 
-    // Step 6: Bump generation and notify the draw side.
-    //   generation is monotonic; RenderScene::last_drawn_generation is
-    //   compared against it to skip stale records.
-    ++streaming_mesh_.generation;
+    // Step 6: Bump generation for this slot and notify the draw side.
+    ++current_mesh.generation;
     // Sync the struct's cached bounds with the current param values so that
     // DrawStreamingMeshes (and any culling pass that reads sm.mesh->bounds_*)
     // sees the user's latest bounds_min/bounds_max, not the values captured
     // at first-execute CreateStreamingMesh time.
-    streaming_mesh_.bounds_min = bounds_min;
-    streaming_mesh_.bounds_max = bounds_max;
+    current_mesh.bounds_min = bounds_min;
+    current_mesh.bounds_max = bounds_max;
+
+    // DIAGNOSTIC disabled — per-frame MapBuffer/UnmapBuffer on positions/
+    // indices/args/counters was destabilizing the deferred-release pool
+    // after ~55 frames, contributing to cascade texture corruption.
+
     scene->UpdateStreamingMesh(
-        streaming_mesh_.entity_id, streaming_mesh_.generation,
+        entity_ids_[slot], current_mesh.generation,
         bounds_min, bounds_max);
 
     // Step 7: Emit sentinel. This node produces a GPU-resident mesh, not a
@@ -204,35 +224,39 @@ inline void GlobalSDFMeshNode::Execute() {
 }
 
 // ---------------------------------------------------------------------------
-// Destructor — unregister + queue deferred destroy
+// Destructor — unregister + queue deferred destroy (all slots)
 // ---------------------------------------------------------------------------
 inline GlobalSDFMeshNode::~GlobalSDFMeshNode() {
-    // If the node was registered, tombstone the record. The record is not
-    // erased immediately because the GPU may still be iterating the list
+    // If the node was registered, tombstone all slot records. Each record is
+    // not erased immediately because the GPU may still be iterating the list
     // this frame; RenderScene::ClearTombstonedStreamingMeshes() (called at
     // frame boundary after GPU work) handles final cleanup.
-    if (streaming_mesh_.entity_id != id::invalid_id) {
-        auto* pipeline = static_cast<StandardRenderPipeline*>(RenderPipeline::Get());
-        if (pipeline) {
-            if (auto* scene = pipeline->GetCurrentScene()) {
-                scene->UnregisterStreamingMesh(streaming_mesh_.entity_id);
+    if (auto* pipeline = static_cast<StandardRenderPipeline*>(RenderPipeline::Get())) {
+        if (auto* scene = pipeline->GetCurrentScene()) {
+            for (u32 i = 0; i < kSlotCount; ++i) {
+                if (entity_ids_[i] != id::invalid_id) {
+                    scene->UnregisterStreamingMesh(entity_ids_[i]);
+                }
             }
         }
     }
 
-    // Queue each of the 5 buffer handles for deferred destruction. On Metal
+    // Queue each slot's 5 buffer handles for deferred destruction. On Metal
     // this is safe even while command buffers are in-flight because Metal
     // retains resources referenced by encoders. A Vulkan/D3D12 backend would
     // need a GPU fence wait first.
-    if (streaming_mesh_.IsValid() && GPUMesher::Get().IsReady()) {
-        GPUMesher::Get().EnqueueDeferredDestroy(streaming_mesh_.positions);
-        GPUMesher::Get().EnqueueDeferredDestroy(streaming_mesh_.elements);
-        GPUMesher::Get().EnqueueDeferredDestroy(streaming_mesh_.indices);
-        GPUMesher::Get().EnqueueDeferredDestroy(streaming_mesh_.counters);
-        GPUMesher::Get().EnqueueDeferredDestroy(streaming_mesh_.indirect_args);
+    if (GPUMesher::Get().IsReady()) {
+        for (u32 i = 0; i < kSlotCount; ++i) {
+            if (streaming_meshes_[i].IsValid()) {
+                GPUMesher::Get().EnqueueDeferredDestroy(streaming_meshes_[i].positions);
+                GPUMesher::Get().EnqueueDeferredDestroy(streaming_meshes_[i].elements);
+                GPUMesher::Get().EnqueueDeferredDestroy(streaming_meshes_[i].indices);
+                GPUMesher::Get().EnqueueDeferredDestroy(streaming_meshes_[i].counters);
+                GPUMesher::Get().EnqueueDeferredDestroy(streaming_meshes_[i].indirect_args);
+                streaming_meshes_[i] = StreamingMesh{};
+            }
+        }
     }
-
-    streaming_mesh_ = StreamingMesh{};
 }
 
 } // namespace primal::graphics::pcg

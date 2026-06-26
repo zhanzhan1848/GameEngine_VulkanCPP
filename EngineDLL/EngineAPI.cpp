@@ -117,7 +117,12 @@ EDITOR_INTERFACE u32 UnloadGameCodeDll([[maybe_unused]] const char* dll_path)
 
 EDITOR_INTERFACE u32 CreateRenderSurface(void* host, s32 width, s32 height)
 {
-	assert(host);
+	// Headless tests pass nullptr host (no NSView/NSWindow). Graceful return
+	// instead of asserting so callers can WARN + skip render validation.
+	if (!host) {
+		std::fprintf(stderr, "[CreateRenderSurface] host is null — headless mode, returning 0\n");
+		return 0;
+	}
 	platform::window_init_info info{ nullptr, host, nullptr, 0, 0, width, height };
 	graphics::render_surface rs{};
 	rs.window = platform::create_window(&info);

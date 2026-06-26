@@ -1,9 +1,14 @@
-// SurfaceNets GPU — SDF variant (Phase 9.3b, Task 3).
+// SurfaceNets GPU — SDF variant (Phase 9.3b, Task 3, architectural split 2026-06-25).
 //
-// Consumes GlobalSDF cascade textures directly, eliminating the CPU sample loop
-// (Pass 0 of 9.3a). Pass 1 (classify_cells_sdf) writes the scalar volume buffer
-// so passes 2-4 run byte-identical to 9.3a (they load the original
-// SurfaceNetsGPU.metal kernels and read from that buffer).
+// Single kernel fill_scalar_from_sdf runs Pass 0: writes the scalar volume
+// buffer from GlobalSDF cascade textures, sampling once per grid vertex.
+// Pass 1 (classify_cells, in SurfaceNetsGPU.metal) reads scalar[] as a pure
+// buffer lookup with zero texture sampling, so passes 1-4 run byte-identical
+// to 9.3a. The split is required because the previous combined
+// classify_cells_sdf kernel sampled 8 texture3D values per cell thread —
+// Apple Silicon's ~4-samples-per-thread budget returns NaN past the limit,
+// and Metal fast-math assumes no NaN inputs so isnan()/x!=x sanitizers
+// cannot fire.
 //
 // Self-contained (no #include) because GPUMesher.cpp's shader loader (LoadShaderSource,
 // Engine/Graphics/PCG/GPU/GPUMesher.cpp:55-91) reads source as raw bytes and hands them
@@ -52,13 +57,10 @@ inline bool in_cascade(float3 p, float3 origin, float extent) {
     return all(p >= origin) && all(p < origin + float3(extent));
 }
 
-// Assumes 3 cascades are always active (GlobalSDFConfig::cascade_count
-// defaults to 3 and no code path reduces it). If this ever changes, add
-// a cascade_count uniform and guard the cascade accesses.
-//
-// Samples SDF at world_pos using the finest available cascade. Returns a large
-// positive value (treated as solid) if outside all cascades. Mirrors the
-// sampleBestSDF_elseIf pattern in Lumen/SDFTraceCommon.metal:60-78.
+// Uses access::sample + filter::nearest for single-texel read via sampler
+// hardware path (different silicon from access::read). If this path is stable
+// but access::read fails past frame 55, the issue is the access::read hardware
+// path for R16_Float textures.
 inline float sample_global_sdf(
     constant SurfaceNetsSDFUniforms& u,
     texture3d<float, access::sample> t0,
@@ -66,7 +68,8 @@ inline float sample_global_sdf(
     texture3d<float, access::sample> t2,
     float3 world_pos)
 {
-    constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
+    // Nearest filter — reads exactly 1 texel, no 2x2x2 footprint.
+    constexpr sampler s(filter::nearest, address::clamp_to_edge, coord::normalized);
 
     if (in_cascade(world_pos, u.SdfOrigins[0], u.SdfExtents[0])) {
         float3 uvw = (world_pos - u.SdfOrigins[0]) / u.SdfExtents[0];
@@ -83,63 +86,53 @@ inline float sample_global_sdf(
     return 1e6f;  // outside all cascades → solid
 }
 
-// Pass 1 (SDF variant): classify_cells_sdf.
-// Same I/O contract as 9.3a classify_cells, plus:
-//   - samples 3 cascade textures instead of reading a CPU-uploaded scalar buf
-//   - writes the scalar buffer so passes 2-4 can run byte-identical to 9.3a
+// Pass 0 (SDF variant): fill_scalar_from_sdf.
+//
+// One thread per grid VERTEX (n³ total). Each thread reads exactly ONE texel
+// from the SDF texture3D via access::read + .read(uint3) — well below Apple
+// Silicon's ~4 texel reads-per-thread budget. The previous design used
+// access::sample with filter::linear, which reads 2x2x2 = 8 texels per sample
+// op — 2x over budget — and returned NaN for ~92% of grid vertices past frame
+// 55 once the GPU's in-flight queue stabilized. Splitting into Pass 0 + Pass 1
+// eliminates:
+//   (a) the over-sampling stress that caused frame 55+ NaN (linear filter
+//       reading 8 texels exceeded the hardware budget)
+//   (b) the WAW race on scalar[idx] (each grid vertex written by exactly
+//       one thread instead of up to 8 cell threads sharing a vertex)
+//
+// After this pass, the 9.3a classify_cells kernel (in SurfaceNetsGPU.metal)
+// reads scalar[] as a pure buffer lookup — no texture sampling — so passes
+// 1-4 run byte-identical to the 9.3a path.
 //
 // Bindings:
 //   buffer(0):  SurfaceNetsSDFUniforms uniforms
 //   texture(0..2): GlobalSDF cascades (finest → coarsest)
-//   buffer(1):  scalar_volume (f32[(n)³], write)
-//   buffer(2):  dual_id (u32[res³], write)
-//   buffer(3):  counters (atomic_uint, increment counters[0] = vertex_count)
+//   buffer(1):  scalar_volume (f32[n³], write)
 //
-// Dispatch: resolution³ threads (threadgroup size 4×4×4 = 64, same as 9.3a).
-//
-// NOTE: Each cell-thread writes 8 entries to scalar[]. Adjacent cells share
-// grid vertices, so the same scalar[idx] is written by multiple threads.
-// This is a benign write-after-write race: all racers write the same value
-// (world_pos → texture sample is a pure function). Metal technically calls
-// this UB, but Apple Silicon's tiled rasterizer handles same-value WAW
-// deterministically. v2 may split into a dedicated grid-vertex fill pass
-// if driver changes expose this.
-kernel void classify_cells_sdf(
+// Dispatch: n³ threads (threadgroup size 4×4×4 = 64, same as 9.3a passes).
+kernel void fill_scalar_from_sdf(
     constant SurfaceNetsSDFUniforms& u  [[buffer(0)]],
     texture3d<float, access::sample> t0 [[texture(0)]],
     texture3d<float, access::sample> t1 [[texture(1)]],
     texture3d<float, access::sample> t2 [[texture(2)]],
     device float*                   scalar   [[buffer(1)]],
-    device uint*                    dual_id  [[buffer(2)]],
-    device atomic_uint*             counters [[buffer(3)]],
     uint3                           tid      [[thread_position_in_grid]])
 {
-    const uint res = u.resolution;
-    if (any(tid >= uint3(res))) return;
+    const uint n = u.n;
+    if (any(tid >= uint3(n))) return;
 
-    // Cell (i,j,k) corner samples at grid vertices (i+c.x, j+c.y, k+c.z).
-    float cv[8];
-    uint mask = 0;
-    for (uint c = 0; c < 8; ++c) {
-        uint3 g = tid + uint3(kCornerOffset[c]);
-        float3 world_pos = float3(
-            u.origin_x + u.voxel_x * float(g.x),
-            u.origin_y + u.voxel_y * float(g.y),
-            u.origin_z + u.voxel_z * float(g.z));
-        cv[c] = sample_global_sdf(u, t0, t1, t2, world_pos);
+    float3 world_pos = float3(
+        u.origin_x + u.voxel_x * float(tid.x),
+        u.origin_y + u.voxel_y * float(tid.y),
+        u.origin_z + u.voxel_z * float(tid.z));
 
-        // Write scalar volume at grid-vertex index (same layout as 9.3a).
-        uint idx = g.x + u.n * g.y + u.n2 * g.z;
-        scalar[idx] = cv[c];
-        if (cv[c] > u.iso_value) mask |= (1u << c);
-    }
+    // Sample the GlobalSDF cascade texture at this grid vertex's world position.
+    // One sample per thread (nearest filter = single-texel read).
+    float v = sample_global_sdf(u, t0, t1, t2, world_pos);
 
-    uint cell_idx = tid.x + res * tid.y + res * res * tid.z;
-    if (mask == 0u || mask == 0xFFu) {
-        dual_id[cell_idx] = SN_INVALID_ID;
-        return;
-    }
+    // Defensive NaN guard (fast-math may eliminate this — see file header).
+    if (isnan(v)) v = 1e6f;
 
-    uint vid = atomic_fetch_add_explicit(counters, 1u, memory_order_relaxed);
-    dual_id[cell_idx] = vid;
+    uint idx = tid.x + n * tid.y + n * n * tid.z;
+    scalar[idx] = v;
 }

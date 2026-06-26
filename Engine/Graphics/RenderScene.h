@@ -44,6 +44,11 @@ struct RenderLight {
 struct StreamingMeshRecord {
     id::id_type entity_id{id::invalid_id};
     StreamingMesh* mesh{nullptr};
+    // Triple-buffer slot (0..MAX_FRAMES_IN_FLIGHT-1). Producer writes slot N
+    // in frame N; consumer reads matching slot N in the same frame. By the
+    // time CPU reuses slot N (3 frames later), GPU work from frame N is
+    // guaranteed complete — no cross-frame read-write race on the buffer set.
+    u32   slot{0};
     math::v3 bounds_min{};
     math::v3 bounds_max{};
     bool visible{true};
@@ -154,7 +159,9 @@ public:
     void Clear();
 
     // --- Streaming Mesh Management (Phase 9.3b) ---
-    id::id_type RegisterStreamingMesh(StreamingMesh* mesh,
+    // slot: triple-buffer index (0..MAX_FRAMES_IN_FLIGHT-1). Default 0 keeps
+    // C ABI clients (single-buffered) working without changes.
+    id::id_type RegisterStreamingMesh(StreamingMesh* mesh, u32 slot,
                                       const math::v3& bounds_min,
                                       const math::v3& bounds_max);
     void UpdateStreamingMesh(id::id_type entity_id, u64 generation,

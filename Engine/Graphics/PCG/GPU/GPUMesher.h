@@ -118,13 +118,15 @@ private:
     rhi::ShaderHandle write_indirect_shader_{rhi::handles::INVALID_SHADER};
 
     // --- SDF-variant pipeline state (Phase 9.3b) ---
-    // classify_cells_sdf has 3 extra texture bindings vs classify_cells, so it
-    // needs its own descriptor set layout. Passes 2-4 reuse the 9.3a pipelines
-    // since the shaders are byte-identical.
-    rhi::DescriptorSetLayoutHandle classify_sdf_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
-    rhi::PipelineLayoutHandle      classify_sdf_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
-    rhi::ShaderHandle              classify_sdf_shader_{rhi::handles::INVALID_SHADER};
-    rhi::PipelineHandle            classify_sdf_pipeline_{rhi::handles::INVALID_PIPELINE};
+    // fill_scalar_from_sdf writes scalar[] from GlobalSDF texture3D samples,
+    // 1 sample per grid vertex. After it runs, the 9.3a classify_cells kernel
+    // (above) reads scalar[] as a pure buffer lookup — no texture sampling.
+    // This split keeps per-thread texture3D samples at 1 (well below Apple
+    // Silicon's ~4-sample budget) and eliminates the WAW race on scalar[idx].
+    rhi::DescriptorSetLayoutHandle fill_scalar_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::PipelineLayoutHandle      fill_scalar_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::ShaderHandle              fill_scalar_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle            fill_scalar_pipeline_{rhi::handles::INVALID_PIPELINE};
     bool sdf_pipelines_created_{false};
 
     void CreateSDFPipelines();
@@ -136,6 +138,18 @@ private:
     // queued handles are safe to release without an explicit GPU fence wait
     // (spec §7.2). A Vulkan/D3D12 backend would need to wait on a fence first.
     utl::vector<rhi::ResourceHandle> deferred_destroy_queue_;
+
+    // --- Persistent transient buffers (Phase 9.3b Task 13a bug fix) ---
+    // Previously allocated fresh every call (3 buffers/frame = pool churn).
+    // The pool churn caused memory aliasing / hazard-tracking issues that
+    // surfaced after ~55 frames as NaN corruption in scalar_buf. Persistent
+    // allocation eliminates the churn — same buffer reused across frames.
+    // Caller waits for completion before returning, so no cross-frame race.
+    // Reallocated only if resolution changes (different n³ size).
+    rhi::ResourceHandle cached_uni_buf_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle cached_scalar_buf_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle cached_dual_id_buf_{rhi::handles::INVALID_RESOURCE};
+    u32                 cached_resolution_{0};  // resolution of cached buffers
 };
 
 } // namespace primal::graphics::pcg

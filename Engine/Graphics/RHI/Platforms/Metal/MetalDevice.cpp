@@ -430,9 +430,19 @@ void MetalDevice::initializeMemoryPool() {
     heapDesc->setSize(256 * 1024 * 1024); // 256MB
     heapDesc->setStorageMode(MTL::StorageModeShared);
     heapDesc->setCpuCacheMode(MTL::CPUCacheModeDefaultCache);
+    // Use Placement heap — RHIAdaptiveMemoryPool manually manages blocks/offsets.
+    // HazardTrackingModeTracked: Metal's default for placement heaps is
+    // Untracked, which means buffers allocated from this heap cannot override
+    // to Tracked (debug-build assertion, release-build silent fallback to
+    // Untracked). MetalBuffer::getResourceOptions forces Tracked on every
+    // buffer for cross-cmdbuf safety (SurfaceNets write in cmd buf A,
+    // DrawIndirect read in cmd buf B — without tracking, no auto-barrier is
+    // inserted between them, causing the "renders correctly for a few frames
+    // then corrupts into internal structure flickering" symptom).
+    heapDesc->setHazardTrackingMode(MTL::HazardTrackingModeTracked);
     // 使用 Placement 堆，因为 RHIAdaptiveMemoryPool 会手动管理内存块和偏移
     heapDesc->setType(MTL::HeapTypePlacement);
-    
+
     heap_ = mtlDevice_->newHeap(heapDesc);
     heapDesc->release();
     

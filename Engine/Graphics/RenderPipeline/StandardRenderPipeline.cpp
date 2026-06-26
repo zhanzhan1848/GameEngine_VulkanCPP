@@ -333,6 +333,12 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     // GPUMesher shutdown before device goes away.
     pcg::GPUMesher::Get().Shutdown();
 
+    // GlobalSDF holds a data_provider_ whose destructor issues device_->Destroy*
+    // calls. Reset it here while device_ is still alive — the singleton's own
+    // destructor runs at program exit, after the RHI device is gone, so leaving
+    // the provider alive causes a use-after-free in AnalyticSDFProvider::~.
+    nanite::GlobalSDF::Get().Shutdown();
+
     if (pcg_sdf_readback_initialized_) { pcg_sdf_readback_.Shutdown(); pcg_sdf_readback_initialized_ = false; }
 
     if (sc_ddgi_module_) { sc_ddgi_module_->Shutdown(); sc_ddgi_module_.reset(); }
@@ -1177,6 +1183,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
         forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
                                    target, cbIdx % 3);
+
+        // PCG SDF: dispatch voxelization via data_provider_ when set (Strategy
+        // pattern). This mirrors the path in Render() at line ~1644 but for
+        // the RenderWithCommandBuffer entrypoint used by TestPCGScatter.
+        auto& gsdf = nanite::GlobalSDF::Get();
+        if (pcg_sdf_readback_initialized_ && gsdf.IsInitialized() && gsdf.IsVoxelizationReady()) {
+            gsdf.DispatchVoxelization(cmd, 0);
+        }
+
         frameCount_++;
         // Frame boundary: drain deferred-destroy queue from GPUMesher.
         pcg::GPUMesher::Get().DrainDeferredDestroys();
@@ -1641,6 +1656,16 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
 
         // PCG SDF: dispatch voxelization + issue readback after scene render
         auto& gsdf = nanite::GlobalSDF::Get();
+        static int s_guard_checks = 0;
+        if (s_guard_checks < 3) {
+            std::cout << "[StdPipeline] DispatchVoxelization guard #" << s_guard_checks
+                      << " readback_init=" << pcg_sdf_readback_initialized_
+                      << " sdf_init=" << gsdf.IsInitialized()
+                      << " vox_ready=" << gsdf.IsVoxelizationReady()
+                      << " editor_mode=" << editor_mode_
+                      << std::endl;
+            ++s_guard_checks;
+        }
         if (pcg_sdf_readback_initialized_ && gsdf.IsInitialized() && gsdf.IsVoxelizationReady()) {
             gsdf.DispatchVoxelization(cmd, 0);
             pcg_sdf_readback_.IssueReadback(cmd, gsdf.GetCascade(0).sdf_texture);

@@ -91,6 +91,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/DebugDraw/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/Providers/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/Providers/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Volume/*.h"

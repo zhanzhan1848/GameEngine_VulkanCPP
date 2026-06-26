@@ -80,6 +80,8 @@ using PCGGetOutputGeometryFn = u64 (*)(u32);
 using PipelineRegisterMeshEntityFn   = u64 (*)(u64, const void*, u32);
 using PipelineUnregisterMeshEntityFn = void (*)(u64);
 using GetEngineDeviceHandleFn        = u64 (*)();
+using CreateStandardRenderPipelineFn = u32 (*)(u64);
+using DestroyStandardRenderPipelineFn = void (*)();
 
 struct RenderFrameParams {
     u32 surface_id;
@@ -121,6 +123,8 @@ static PCGGetOutputGeometryFn PCGGetOutputGeometry;
 static PipelineRegisterMeshEntityFn   PipelineRegisterMeshEntity;
 static PipelineUnregisterMeshEntityFn PipelineUnregisterMeshEntity;
 static GetEngineDeviceHandleFn        GetEngineDeviceHandle;
+static CreateStandardRenderPipelineFn CreateStandardRenderPipeline;
+static DestroyStandardRenderPipelineFn DestroyStandardRenderPipeline;
 
 // ---- Histogram helpers (Task 21) ----
 struct Histogram {
@@ -191,7 +195,9 @@ static int TestRenderBasic() {
     }
 
     const u64 entity_id = PipelineRegisterMeshEntity(cid, nullptr, 0);
-    CHECK(entity_id != 0, "PipelineRegisterMeshEntity returned non-zero");
+    // entity_id follows id::invalid_id sentinel convention: invalid_id cast
+    // to u64 is 0xffffffff, NOT 0. First valid entity slot can be 0.
+    CHECK(entity_id != INVALID_CONTENT_ID, "PipelineRegisterMeshEntity returned valid entity");
 
     // Basic forward setup.
     const u32 camera_entity = CreateEntity(0.f, 5.f, 15.f);
@@ -239,6 +245,7 @@ static int TestRenderBasic() {
     }
 
     PipelineUnregisterMeshEntity(entity_id);
+    DestroyLightSet(light_set);
     PCGDestroyGraph();
     return 0;
 }
@@ -252,7 +259,14 @@ static int TestRenderVsCPU() {
     const u32 camera_id     = CreateCamera(camera_entity, 0.25f, 16.f/9.f, 0.1f, 100.f);
     const u64 light_set     = CreateLightSet();
     u32 surface_id = CreateRenderSurface(nullptr, 800, 600);
-    if (!surface_id) { std::cerr << "[WARN] No surface — skipping\n"; return 0; }
+    if (!surface_id) {
+        std::cerr << "[WARN] No surface — skipping\n";
+        // Destroy light_set to avoid leak assertion (MetalLight.cpp:978
+        // light_sets.empty()) at engine shutdown. Camera/entity are
+        // intentionally leaked — engine shutdown reclaims them.
+        DestroyLightSet(light_set);
+        return 0;
+    }
 
     auto render_capture = [&](u32 algorithm) -> Histogram {
         PCGCreateGraph();
@@ -266,7 +280,7 @@ static int TestRenderVsCPU() {
         PCGConnect(noise, 0, mc, 0);
         PCGExecute();
         const u64 cid = PCGGetOutputGeometry(mc);
-        const u64 eid = (cid != INVALID_CONTENT_ID) ? PipelineRegisterMeshEntity(cid, nullptr, 0) : 0;
+        const u64 eid = (cid != INVALID_CONTENT_ID) ? PipelineRegisterMeshEntity(cid, nullptr, 0) : INVALID_CONTENT_ID;
 
         RenderFrameParams params{};
         params.surface_id = surface_id;
@@ -278,7 +292,7 @@ static int TestRenderVsCPU() {
 
         Histogram h = CaptureAndHistogram(surface_id);
 
-        if (eid) PipelineUnregisterMeshEntity(eid);
+        if (eid != INVALID_CONTENT_ID) PipelineUnregisterMeshEntity(eid);
         PCGDestroyGraph();
         return h;
     };
@@ -689,6 +703,8 @@ int main() {
     RESOLVE(PipelineRegisterMeshEntity, PipelineRegisterMeshEntityFn);
     RESOLVE(PipelineUnregisterMeshEntity, PipelineUnregisterMeshEntityFn);
     RESOLVE(GetEngineDeviceHandle, GetEngineDeviceHandleFn);
+    RESOLVE(CreateStandardRenderPipeline, CreateStandardRenderPipelineFn);
+    RESOLVE(DestroyStandardRenderPipeline, DestroyStandardRenderPipelineFn);
     #undef RESOLVE
 
     if (g_failures) { dlclose(handle); return 1; }
@@ -732,6 +748,19 @@ int main() {
         std::cerr << "[WARN] GetEngineDeviceHandle returned 0 — 9.3b device sub-tests will skip\n";
     }
 
+    // Create the StandardRenderPipeline inside the dylib so Pipeline* C ABIs
+    // (PipelineRegisterMeshEntity etc.) resolve through the dylib's own
+    // RenderPipeline::s_instance. Required for sub-test 11. Triggering
+    // SetLumenConfig inside Create also brings up forward_renderer_.
+    if (rhi_device && CreateStandardRenderPipeline) {
+        const u64 device_handle = reinterpret_cast<u64>(rhi_device);
+        if (CreateStandardRenderPipeline(device_handle) == 1) {
+            std::cout << "[INFO] StandardRenderPipeline created (dylib-owned)" << std::endl;
+        } else {
+            std::cerr << "[WARN] CreateStandardRenderPipeline failed — sub-test 11 will FAIL" << std::endl;
+        }
+    }
+
     // ---- Phase 9.3b headless sub-tests (run first — they don't need a surface) ----
     std::cout << "\n=================================\nPhase 9.3b headless sub-tests\n=================================\n";
     TestGPUSurfaceNetsFromGlobalSDF(rhi_device);
@@ -753,6 +782,7 @@ int main() {
     TestRenderVsCPU();
     TestPerf();
 
+    if (DestroyStandardRenderPipeline) DestroyStandardRenderPipeline();
     ShutdownEngine();
     dlclose(handle);
 
