@@ -1,5 +1,7 @@
 #include "MetalCore.h"
 
+#include <mutex>  // std::call_once, std::once_flag
+
 #include "MetalSurface.h"
 #include "MetalShader.h"
 #include "MetalPostProcess.h"
@@ -429,9 +431,20 @@ namespace primal::graphics::metal::core
         MTL::Texture* srcTexture = metalTex->GetNativeTexture();
 
         // === Lazy-init the blit PSO ===
+        // Code review flagged a check-then-act race: if Editor calls
+        // BlitRenderTargetToSurface from multiple threads, two could both
+        // observe !IsInitialized() and double-create the PSO / sampler /
+        // metallib, leaking Metal objects. Guard with std::call_once so
+        // Initialize runs at most once process-wide. A failed init still
+        // leaves IsInitialized()==false, so the next caller can retry
+        // (call_once only suppresses *entry*, not the result).
         auto& blit = MetalBlitToDrawable::Instance();
         if (!blit.IsInitialized()) {
-            if (!blit.Initialize(get_device())) return 0;
+            static std::once_flag init_flag;
+            std::call_once(init_flag, [&blit]() {
+                blit.Initialize(get_device());
+            });
+            if (!blit.IsInitialized()) return 0;
         }
 
         // === Acquire drawable + command buffer ===
@@ -442,14 +455,18 @@ namespace primal::graphics::metal::core
         // surface::render) would desync the semaphore. A dedicated queue
         // keeps Path B self-contained and avoids interference with the
         // main render loop. The queue is heap-allocated once and cached
-        // for the process lifetime.
+        // for the process lifetime. Guarded with std::call_once to avoid
+        // the same race as the PSO init above.
         static MTL::CommandQueue* s_blit_queue{ nullptr };
         if (!s_blit_queue) {
-            s_blit_queue = get_device()->newCommandQueue();
+            static std::once_flag queue_flag;
+            std::call_once(queue_flag, []() {
+                s_blit_queue = get_device()->newCommandQueue();
+                // Retain for process lifetime; intentionally never released
+                // (process exit reclaims it). Matches the pattern in
+                // metal_command's constructor.
+            });
             if (!s_blit_queue) return 0;
-            // Retain for process lifetime; intentionally never released
-            // (process exit reclaims it). Matches the pattern in
-            // metal_command's constructor.
         }
 
         CA::MetalDrawable* drawable = view->currentDrawable();
