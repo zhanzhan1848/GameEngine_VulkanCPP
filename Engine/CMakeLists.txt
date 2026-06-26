@@ -63,6 +63,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderScene.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderView.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderView.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Camera/RenderViewBuilder.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Camera/RenderViewBuilder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderProxy.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderProxy.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Material.h"
