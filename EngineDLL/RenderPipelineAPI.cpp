@@ -499,6 +499,14 @@ EDITOR_INTERFACE void PipelineUnregisterLightEntity(u64 entity_id) {
 // surface-size sanity check (headless tests with no drawable).
 
 EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u32 surface_id) {
+    // Spec §4.1 step 2: invalid camera_id → return 0. BuildRenderViewFromCameraId
+    // silently returns a default view for invalid ids, so check upfront.
+    constexpr u32 kInvalidCameraId = static_cast<u32>(~0u);
+    if (camera_id_in == kInvalidCameraId) {
+        std::fprintf(stderr, "[PipelineRenderFrame] invalid camera_id %u\n", camera_id_in);
+        return 0;
+    }
+
     auto* entry = engine_dll::GetRenderTarget(target_handle);
     if (!entry || !entry->texture) {
         std::fprintf(stderr, "[PipelineRenderFrame] invalid target_handle %llu\n",
