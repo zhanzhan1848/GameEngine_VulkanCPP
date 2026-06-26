@@ -399,8 +399,19 @@ if(APPLE)
     setup_test_target(TestRenderViewBuilder)
     target_link_libraries(TestRenderViewBuilder PRIVATE Engine)
 
+    # 27. TestPipelineLightEntity (Task 2: StandardRenderPipeline light entity methods)
+    # Validates RegisterLightEntity/UpdateLightEntity/UnregisterLightEntity round-trip
+    # through ECS and scene_sync::SyncLightsFromECS. Requires Metal device + shaders.
+    # Gracefully skips if engine init fails (CI without GPU).
+    add_executable(TestPipelineLightEntity
+        "TestPipelineLightEntity.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestPipelineLightEntity)
+    target_link_libraries(TestPipelineLightEntity PRIVATE Engine)
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

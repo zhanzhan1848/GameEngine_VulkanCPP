@@ -15,8 +15,10 @@
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Components/Entity.h"
 #include "Components/Transform.h"
+#include "Components/Light.h"
 #include "EngineAPI/GameEntity.h"
 #include "EngineAPI/GameEntity_impl.h"
+#include "EngineAPI/LightComponent.h"
 #include "Components/Material.h"
 #include <iostream>
 #include <chrono>
@@ -678,6 +680,86 @@ void StandardRenderPipeline::UnregisterMeshEntity(id::id_type entity_id) {
             return;
         }
     }
+}
+
+// ============================================================================
+// Light Entity Registration (Path B C ABI support)
+// ============================================================================
+// REVISED contract: info.entity_id is IGNORED. Pipeline creates a new ECS
+// entity internally with Transform + Light components. LightSyncSystem reads
+// from Light component (via LightComponent setters) and position from the
+// Transform world matrix. Returns new entity_id or invalid_id on failure.
+
+id::id_type StandardRenderPipeline::RegisterLightEntity(const light_init_info& info) {
+    // Create identity transform for the light entity.
+    transform::init_info tf{};
+    tf.position[0] = 0.f; tf.position[1] = 0.f; tf.position[2] = 0.f;
+    tf.rotation[0] = 0.f; tf.rotation[1] = 0.f;
+    tf.rotation[2] = 0.f; tf.rotation[3] = 1.f;  // identity quaternion
+    tf.scale[0] = 1.f; tf.scale[1] = 1.f; tf.scale[2] = 1.f;
+
+    // Map graphics::light_init_info → light::init_info (component).
+    primal::light::init_info linfo{};
+    linfo.light_set_key = info.light_set_key;
+    linfo.type = info.type;
+    linfo.intensity = info.intensity;
+    linfo.color = info.color;
+    linfo.is_enabled = info.is_enabled;
+    // Pull type-specific params from the union.
+    if (info.type == graphics::light::point) {
+        linfo.attenuation = info.point_param.attenuation;
+        linfo.range = info.point_param.range;
+    } else if (info.type == graphics::light::spot) {
+        linfo.attenuation = info.spot_param.attenuation;
+        linfo.range = info.spot_param.range;
+        linfo.umbra = info.spot_param.umbra;
+        linfo.penumbra = info.spot_param.penumbra;
+    }
+
+    // Create entity with Transform + Light components.
+    game_entity::entity_info einfo{};
+    einfo.transform = &tf;
+    einfo.light = &linfo;
+
+    game_entity::entity ent = game_entity::create(einfo);
+    if (!ent.is_valid()) return id::invalid_id;
+
+    return ent.get_id();
+}
+
+void StandardRenderPipeline::UnregisterLightEntity(id::id_type entity_id) {
+    if (entity_id == id::invalid_id) return;
+    game_entity::entity_id eid{ entity_id };
+    if (!game_entity::is_alive(eid)) return;
+    game_entity::remove(eid);
+}
+
+bool StandardRenderPipeline::UpdateLightEntity(id::id_type entity_id, const light_init_info& info) {
+    if (entity_id == id::invalid_id) return false;
+    game_entity::entity_id eid{ entity_id };
+    if (!game_entity::is_alive(eid)) return false;
+    component_mask mask = game_entity::get_component_mask(eid);
+    if ((mask & bit_mask(component_bit::Light)) == 0) return false;
+
+    // Route through Light component setters (EngineAPI/LightComponent.h).
+    primal::light::component lc{ primal::light::light_component_id{ entity_id } };
+    if (!lc.is_valid()) return false;
+
+    lc.set_color(info.color);
+    lc.set_intensity(info.intensity);
+    lc.set_enabled(info.is_enabled);
+    lc.set_light_type(info.type);
+    // Type-specific params.
+    if (info.type == graphics::light::point) {
+        lc.set_attenuation(info.point_param.attenuation);
+        lc.set_range(info.point_param.range);
+    } else if (info.type == graphics::light::spot) {
+        lc.set_attenuation(info.spot_param.attenuation);
+        lc.set_range(info.spot_param.range);
+        lc.set_cone_angles(info.spot_param.umbra, info.spot_param.penumbra);
+    }
+
+    return true;
 }
 
 // ============================================================================

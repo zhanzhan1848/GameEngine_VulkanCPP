@@ -26,6 +26,7 @@
 #include "Graphics/Nanite/ColorHistoryManager.h"
 #include "Graphics/Nanite/HZBSystem.h"
 #include "Graphics/PCG/PCGSDFReadbackManager.h"
+#include "Graphics/Renderer.h"  // for light_init_info
 #include <memory>
 
 namespace primal::graphics {
@@ -170,6 +171,14 @@ public:
                                    const id::id_type* texture_content_ids,
                                    u32 texture_count);
     void UnregisterMeshEntity(id::id_type entity_id);
+
+    // --- Light entity registration (Path B C ABI support) ---
+    // Creates an ECS entity with Transform + Light components.
+    // info.entity_id is IGNORED — pipeline creates a new entity internally.
+    // Returns invalid_id on failure. Note: 0 is a valid entity id.
+    id::id_type RegisterLightEntity(const light_init_info& info);
+    bool UpdateLightEntity(id::id_type entity_id, const light_init_info& info);
+    void UnregisterLightEntity(id::id_type entity_id);
 
     /// Hot-reload a shader. Returns true on success.
     bool ReloadShader(rhi::ShaderHandle shader, const void* data, u32 size) override;
