@@ -96,6 +96,23 @@ void apply_light_transform(id::id_type entity_id,
     }
     transform::update(&cache, 1);
 }
+
+// Validate all numeric inputs on PipelineLightDesc are finite (rejects NaN/Inf
+// which would flow into the engine unguarded and, under -ffast-math, could
+// silently corrupt downstream comparisons).
+bool light_desc_floats_ok(const PipelineLightDesc* d) {
+    using std::isfinite;
+    for (int i = 0; i < 3; ++i) {
+        if (!isfinite(d->color[i])) return false;
+        if (!isfinite(d->position[i])) return false;
+        if (!isfinite(d->direction[i])) return false;
+    }
+    if (!isfinite(d->intensity)) return false;
+    if (!isfinite(d->range)) return false;
+    if (!isfinite(d->umbra)) return false;
+    if (!isfinite(d->penumbra)) return false;
+    return true;
+}
 }
 
 extern "C" {
@@ -380,6 +397,7 @@ EDITOR_INTERFACE u64 PipelineRegisterLightEntity(const PipelineLightDesc* desc) 
     constexpr u64 kInvalid = static_cast<u64>(~0ull);
     if (!desc) return kInvalid;
     if (desc->type > 2) return kInvalid;
+    if (!light_desc_floats_ok(desc)) return kInvalid;
 
     auto* p = GetStdPipeline();
     if (!p) return kInvalid;
@@ -393,10 +411,12 @@ EDITOR_INTERFACE u64 PipelineRegisterLightEntity(const PipelineLightDesc* desc) 
     li.is_enabled = desc->is_enabled != 0;
     if (desc->type == 1) {  // point
         li.point_param.range = desc->range;
+        li.point_param.attenuation = primal::math::v3{1.f, 0.f, 0.f};
     } else if (desc->type == 2) {  // spot
         li.spot_param.range = desc->range;
         li.spot_param.umbra = desc->umbra;
         li.spot_param.penumbra = desc->penumbra;
+        li.spot_param.attenuation = primal::math::v3{1.f, 0.f, 0.f};
     }
 
     id::id_type eid = p->RegisterLightEntity(li);
@@ -418,6 +438,7 @@ EDITOR_INTERFACE u32 PipelineUpdateLightEntity(u64 entity_id, const PipelineLigh
     constexpr u64 kInvalid = static_cast<u64>(~0ull);
     if (!desc || entity_id == kInvalid) return 0;
     if (desc->type > 2) return 0;
+    if (!light_desc_floats_ok(desc)) return 0;
 
     auto* p = GetStdPipeline();
     if (!p) return 0;
@@ -430,10 +451,12 @@ EDITOR_INTERFACE u32 PipelineUpdateLightEntity(u64 entity_id, const PipelineLigh
     li.is_enabled = desc->is_enabled != 0;
     if (desc->type == 1) {
         li.point_param.range = desc->range;
+        li.point_param.attenuation = primal::math::v3{1.f, 0.f, 0.f};
     } else if (desc->type == 2) {
         li.spot_param.range = desc->range;
         li.spot_param.umbra = desc->umbra;
         li.spot_param.penumbra = desc->penumbra;
+        li.spot_param.attenuation = primal::math::v3{1.f, 0.f, 0.f};
     }
 
     const id::id_type eid = static_cast<id::id_type>(entity_id);
