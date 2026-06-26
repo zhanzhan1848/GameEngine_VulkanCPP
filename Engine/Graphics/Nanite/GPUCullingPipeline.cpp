@@ -1319,9 +1319,13 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         writeCount++;
 
         // Binding 2: Culling constants (frame-specific)
+        // WGSL uniform structs are padded to a 16-byte multiple; CullingConstants
+        // is 260 bytes of fields but the shader expects 272 (17 vec4s). The
+        // buffer itself is allocated as 272 (see CreateBuffers); the descriptor
+        // range must match or Dawn rejects the binding.
         bufferInfos[writeCount].buffer = frame_res.culling_constants_buffer;
         bufferInfos[writeCount].offset = 0;
-        bufferInfos[writeCount].range = sizeof(CullingConstants);
+        bufferInfos[writeCount].range = sizeof(float) * 68;
         writes[writeCount].dstSet = culling_descriptor_sets_[i];
         writes[writeCount].dstBinding = 2;
         writes[writeCount].descriptorCount = 1;
