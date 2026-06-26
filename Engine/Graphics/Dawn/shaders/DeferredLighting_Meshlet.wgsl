@@ -246,7 +246,11 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
             let H = normalize(V + L);
 
             let shadowFactor = sampleShadowPCF(worldPos, viewZ, N, L);
-            let radiance = light.colorAndShadow.rgb * light.directionAndIntensity.w * shadowFactor;
+            // Meshlet-only boost: lifts direct light above ForwardPBR levels
+            // so the sun reads strongly against the ACES tonemap + IBL ambient.
+            // Modes 0-6 use ForwardPBR which doesn't apply this multiplier.
+            let DIRECT_LIGHT_BOOST: f32 = 2.0;
+            let radiance = light.colorAndShadow.rgb * light.directionAndIntensity.w * shadowFactor * DIRECT_LIGHT_BOOST;
 
             let NdotL = max(dot(N, L), 0.0);
 
