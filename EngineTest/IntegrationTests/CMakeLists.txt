@@ -410,8 +410,21 @@ if(APPLE)
     setup_test_target(TestPipelineLightEntity)
     target_link_libraries(TestPipelineLightEntity PRIVATE Engine)
 
+    # 28. TestPipelineRenderFrame (Task 7: Path B PipelineRenderFrame E2E)
+    # Validates the full headless / offscreen render path via dlopen + dlsym:
+    # CreateStandardRenderPipeline -> CreateRenderTarget -> PipelineRenderFrame ->
+    # DebugReadRenderTarget -> brightness comparisons + light register/update/unregister.
+    # Requires Metal device + shaders; gracefully skips if engine init fails.
+    add_executable(TestPipelineRenderFrame
+        "TestPipelineRenderFrame.cpp"
+        "ShaderCompilation.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestPipelineRenderFrame)
+    target_link_libraries(TestPipelineRenderFrame PRIVATE EngineDLL ${CMAKE_DL_LIBS})
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame)
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

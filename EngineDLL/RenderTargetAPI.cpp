@@ -108,3 +108,31 @@ EDITOR_INTERFACE void DestroyRenderTarget(u64 handle)
     entry.texture = nullptr;
     entry.entity_id = id::invalid_id;
 }
+
+// Synchronous readback for debug / integration tests. Copies the render
+// target's pixel data into the caller-provided buffer. Caller must size
+// `out_buffer` to at least width * height * 8 bytes (RGBA16F = 8 bytes/pixel).
+// Returns 1 on success, 0 on failure (invalid handle / null buffer / etc.).
+// NOTE: synchronous — uses cmd->WaitForCompletion internally. Not for
+// production per-frame use; intended for tests and Editor screenshot paths.
+EDITOR_INTERFACE u32 DebugReadRenderTarget(u64 target_handle, void* out_buffer, u64 buffer_size)
+{
+    if (!out_buffer || buffer_size == 0) {
+        std::fprintf(stderr, "[DebugReadRenderTarget] null/empty out_buffer\n");
+        return 0;
+    }
+    auto* entry = engine_dll::GetRenderTarget(target_handle);
+    if (!entry || !entry->texture) {
+        std::fprintf(stderr, "[DebugReadRenderTarget] invalid target_handle %llu\n",
+                     static_cast<unsigned long long>(target_handle));
+        return 0;
+    }
+
+    auto* device = graphics::get_rhi_device();
+    if (!device) {
+        std::fprintf(stderr, "[DebugReadRenderTarget] no RHI device\n");
+        return 0;
+    }
+
+    return entry->texture->ReadBack(device, out_buffer, buffer_size) ? 1u : 0u;
+}

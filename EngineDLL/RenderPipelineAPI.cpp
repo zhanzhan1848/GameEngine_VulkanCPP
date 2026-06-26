@@ -20,6 +20,7 @@
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
+#include "Graphics/RenderScene.h"  // full type for unique_ptr<RenderScene> in g_fallback_scene
 #include "PipelineLightDesc.h"
 #include "Components/Transform.h"
 #include "EngineAPI/Light.h"
@@ -351,7 +352,19 @@ EDITOR_INTERFACE void PipelineSetLumenConfig(u32 quality_preset) {
 
 namespace {
 StandardRenderPipeline* g_owned_pipeline = nullptr;
+
+// Fallback RenderScene used by PipelineRenderFrame when the pipeline has no
+// current_scene_ (i.e., no prior Render() call in this process). The scene is
+// synced from ECS each frame via scene_sync::SyncLightsFromECS / SyncEntities.
+// Owned by the dylib so it lives as long as the pipeline.
+RenderScene* g_fallback_scene = nullptr;
+
+RenderScene* GetFallbackScene() {
+    if (!g_fallback_scene) g_fallback_scene = new RenderScene();
+    return g_fallback_scene;
 }
+
+} // anonymous namespace
 
 // Create + Initialize a StandardRenderPipeline owned by the dylib. Idempotent
 // (safe to call when already created). device_handle must come from
@@ -386,6 +399,9 @@ EDITOR_INTERFACE void DestroyStandardRenderPipeline() {
         delete g_owned_pipeline;
         g_owned_pipeline = nullptr;
     }
+    // Fallback scene is owned by the dylib; release on pipeline teardown.
+    delete g_fallback_scene;
+    g_fallback_scene = nullptr;
 }
 
 // ============================================================================
@@ -511,7 +527,12 @@ EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u3
         std::fprintf(stderr, "[PipelineRenderFrame] no pipeline\n");
         return 0;
     }
-    auto* scene = p->GetCurrentScene();
+    // Prefer the pipeline's current scene (set by a prior Render() call); fall
+    // back to a dylib-owned scene for headless / first-frame use. The fallback
+    // path is the common case for offscreen Editor rendering and integration
+    // tests that never went through a windowed Render() path.
+    RenderScene* scene = p->GetCurrentScene();
+    if (!scene) scene = GetFallbackScene();
     if (!scene) {
         std::fprintf(stderr, "[PipelineRenderFrame] no scene\n");
         return 0;
