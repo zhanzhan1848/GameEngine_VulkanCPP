@@ -321,7 +321,7 @@ struct FSOutput {
 };
 
 @fragment
-fn gpu_driven_fragment_shader(in: VSOutput) -> FSOutput {
+fn gpu_driven_fragment_shader(in: VSOutput, @builtin(front_facing) is_front: bool) -> FSOutput {
     var out: FSOutput;
 
     // Error sentinel: bright magenta. Visible against any valid scene color
@@ -333,6 +333,16 @@ fn gpu_driven_fragment_shader(in: VSOutput) -> FSOutput {
         out.velocity  = vec2<f32>(0.0);
         return out;
     }
+
+    // CullMode::None means back-faces render. Their stored normal points away
+    // from the camera (toward the sun on the opposite side), which without
+    // correction makes the visible back-face brightly lit while the expected
+    // front face reads dark. Flip N for back-faces and rebuild the TBN basis
+    // from the (possibly flipped) N + T — mirrors ForwardPBR.wgsl:248-251.
+    var N = normalize(in.normal);
+    if (!is_front) { N = -N; }
+    let T = normalize(in.tangent);
+    let B = normalize(cross(N, T));
 
     let mat = load_material(in.material_id);
     let scaled_uv = fract(in.uv * mat.uv_scale);
@@ -356,16 +366,16 @@ fn gpu_driven_fragment_shader(in: VSOutput) -> FSOutput {
     out.albedo = vec4<f32>(base_color, 1.0);
 
     // === Normal (tangent-space → world) ===
-    var world_normal = in.normal;
+    // N already includes the back-face flip; tangent_normal is applied in the
+    // (potentially flipped) TBN basis so normal-mapped back-faces stay
+    // consistent with the flipped geometric normal.
+    var world_normal = N;
     if (mat.normal_texture_idx != 0xFFFFFFFFu &&
         mat.normal_texture_idx < normal_array_size) {
         let normal_sample = textureSampleLevel(normal_textures, texture_sampler,
                                                scaled_uv, mat.normal_texture_idx, 0.0).rgb;
         if (length(normal_sample) > 0.1) {
             let tangent_normal = normal_sample * 2.0 - 1.0;
-            let N = normalize(in.normal);
-            let T = normalize(in.tangent);
-            let B = normalize(in.bitangent);
             var tbn: mat3x3<f32>;
             tbn[0] = T;
             tbn[1] = B;
