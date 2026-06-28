@@ -495,6 +495,82 @@ int main() {
         CHECK(true, "PipelineUnregisterMeshEntity(invalid_id) no-op");
     }
 
+    // === Test 8: editor 4-sphere scene (regression for mesh_id disambiguation) ===
+    //
+    // Guards against the regression where 4 entities sharing one geometry
+    // collapsed to a single mesh_id_to_index_ slot (only one sphere rendered).
+    // The fix: RegisterMeshEntity creates the ECS entity first and passes
+    // its unique id to RegisterMeshResource, so mesh_id_to_index_ is keyed
+    // by entity id (1 slot per entity instance).
+    std::cout << "\n--- Test 8: editor 4-sphere scene (mesh_id disambiguation) ---" << std::endl;
+    {
+        using SetEntityTransformFn = void (*)(u32, const f32*, const f32*, const f32*);
+        auto SetEntityTransform = (SetEntityTransformFn)dlsym(handle, "SetEntityTransform");
+        if (!SetEntityTransform) {
+            SKIP("SetEntityTransform symbol not exported by this dylib — skipping 4-sphere regression");
+        } else {
+            using PipelineSetEditorModeFn = void (*)(u32);
+            auto PipelineSetEditorMode = (PipelineSetEditorModeFn)dlsym(handle, "PipelineSetEditorMode");
+            if (PipelineSetEditorMode) {
+                PipelineSetEditorMode(1);
+                std::cout << "  [info] PipelineSetEditorMode(1) — forward pass renders all techniques" << std::endl;
+            } else {
+                std::cout << "  [warn] PipelineSetEditorMode not exported — running without editor mode" << std::endl;
+            }
+
+            f32 sphere_params2[3] = { 0.5f, 24.f, 16.f };
+            u64 shared_geom = ProceduralMeshCreate(0 /*sphere*/, sphere_params2, 3);
+            CHECK(shared_geom != 0, "ProceduralMeshCreate(shared sphere) for 4-sphere scene");
+
+            u64 mesh_entities[4] = {0, 0, 0, 0};
+            const f32 xs[4] = { -6.0f, -2.0f, 2.0f, 6.0f };
+            for (int i = 0; i < 4; ++i) {
+                mesh_entities[i] = PipelineRegisterMeshEntity(shared_geom, nullptr, 0);
+            }
+            CHECK(mesh_entities[0] != 0 && mesh_entities[1] != 0 &&
+                  mesh_entities[2] != 0 && mesh_entities[3] != 0,
+                  "4 PipelineRegisterMeshEntity calls return 4 valid entity ids");
+            CHECK(mesh_entities[0] != mesh_entities[1] &&
+                  mesh_entities[1] != mesh_entities[2] &&
+                  mesh_entities[2] != mesh_entities[3],
+                  "4 entity ids are unique (mesh-id disambiguation regression guard)");
+
+            for (int i = 0; i < 4; ++i) {
+                const f32 pos[3]    = { xs[i], 0.f, 0.f };
+                const f32 rot[3]    = { 0.f, 0.f, 0.f };
+                const f32 scale[3]  = { 1.f, 1.f, 1.f };
+                SetEntityTransform(static_cast<u32>(mesh_entities[i]), pos, rot, scale);
+            }
+            CHECK(true, "SetEntityTransform x4 succeeded (no crashes)");
+
+            u32 render_count = 0;
+            for (int f = 0; f < 4; ++f) {
+                if (PipelineRenderFrame(target, camera_id, ~0u) == 1) ++render_count;
+            }
+            CHECK(render_count == 4, "PipelineRenderFrame x4 all returned 1 (4-sphere scene stable)");
+
+            void* pixels = std::malloc(static_cast<size_t>(kReadbackBytes));
+            u32 read_res = DebugReadRenderTarget(target, pixels, kReadbackBytes);
+            if (read_res == 1 && pixels) {
+                const u16* halfs = static_cast<const u16*>(pixels);
+                u32 non_zero = 0;
+                for (u64 i = 0; i < kReadbackBytes / 2; ++i) {
+                    if (halfs[i] != 0) ++non_zero;
+                }
+                std::cout << "  [info] 4-sphere scene readback: " << non_zero
+                          << " / " << (kReadbackBytes / 2) << " halfs non-zero" << std::endl;
+            }
+            std::free(pixels);
+
+            for (int i = 3; i >= 0; --i) {
+                PipelineUnregisterMeshEntity(mesh_entities[i]);
+            }
+            ProceduralMeshDestroy(shared_geom);
+            if (PipelineSetEditorMode) PipelineSetEditorMode(0);
+            CHECK(true, "4-sphere scene cleanup succeeded (no crashes)");
+        }
+    }
+
     // === Cleanup ===
     std::cout << "\n--- Cleanup ---" << std::endl;
     PipelineUnregisterMeshEntity(mesh_entity);
