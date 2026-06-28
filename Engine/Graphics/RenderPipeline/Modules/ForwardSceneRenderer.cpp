@@ -1109,20 +1109,30 @@ void ForwardSceneRenderer::DestroyStaticEntities() {
 u32 ForwardSceneRenderer::RegisterMeshResource(id::id_type geometry_content_id,
                                                 id::id_type albedo_texture_id,
                                                 id::id_type normal_texture_id,
-                                                id::id_type orm_texture_id) {
-    // Create RenderMesh from content system asset
+                                                id::id_type orm_texture_id,
+                                                id::id_type entity_id) {
+    // Create RenderMesh from content system asset. Caller may pass a
+    // distinct entity_id (StandardRenderPipeline::RegisterMeshEntity does
+    // this) so multiple ECS entities can share the same geometry asset
+    // without colliding in mesh_id_to_index_ (keyed by mesh.GetEntityId).
+    const id::id_type mesh_entity_id = (entity_id != id::invalid_id) ? entity_id : geometry_content_id;
     RenderMesh* mesh = RenderMesh::CreateFromAsset(device_, geometry_content_id);
     if (!mesh) {
         std::cerr << "[ForwardSceneRenderer] RegisterMeshResource: CreateFromAsset failed for id "
                   << geometry_content_id << std::endl;
         return (u32)-1;
     }
+    if (mesh_entity_id != geometry_content_id) {
+        mesh->Unregister();
+        mesh->SetEntityId(mesh_entity_id);
+        mesh->Register();
+    }
 
     // Create SceneDataMeshInfo
     SceneDataMeshInfo info{};
     info.mesh = mesh;
-    info.meshEntityId = geometry_content_id;
-    info.name = "Imported_" + std::to_string(geometry_content_id);
+    info.meshEntityId = mesh_entity_id;
+    info.name = "Imported_" + std::to_string(mesh_entity_id);
 
     // Get texture handles from content system
     ResourceHandle albedo = white_texture_;
@@ -1163,7 +1173,7 @@ u32 ForwardSceneRenderer::RegisterMeshResource(id::id_type geometry_content_id,
 
     u32 slot = (u32)mesh_infos_.size();
     mesh_infos_.push_back(info);
-    mesh_id_to_index_[geometry_content_id] = slot;
+    mesh_id_to_index_[mesh_entity_id] = slot;
 
     scene_loaded_ = true;
     return slot;
@@ -1300,10 +1310,13 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     for (u32 t = 0; t < TechniqueCount; ++t) {
         if (all_ranges[t].empty()) continue;
 
-        // Forward pass: only render Water(3) and Transparent(4)
-        if (forward_pass && t != 3 && t != 4) continue;
-        // GBuffer pass: skip Water(3) and Transparent(4) — they render in forward pass
-        if (!shadow_pass && !forward_pass && (t == 3 || t == 4)) continue;
+        // Editor forward path: render everything (Opaque, AlphaClip,
+        // Foliage, Water, Transparent) so the editor preview matches what
+        // the production pipeline would composite.
+        if (!editor_mode_) {
+            if (forward_pass && t != 3 && t != 4) continue;
+            if (!shadow_pass && !forward_pass && (t == 3 || t == 4)) continue;
+        }
 
         // Bind technique-specific pipeline for GBuffer or forward pass
         if (!shadow_pass) {

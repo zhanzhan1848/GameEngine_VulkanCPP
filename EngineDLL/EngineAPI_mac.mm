@@ -37,7 +37,17 @@ namespace
         // dispatch_source_t pointer.
         auto* l = static_cast<editor_render_loop*>(info);
         if (!l || !l->running.load(std::memory_order_acquire)) return;
-        if (g_frame_cb) {
+        if (!g_frame_cb) return;
+
+        // GCD timer fires on a global concurrent queue worker thread, NOT
+        // the main run loop thread. NSObject autoreleased objects returned
+        // by Objective-C methods (e.g., MTKView::currentDrawable inside
+        // blit_surface_and_present) would otherwise be added to a
+        // last-resort pool and eventually crash with SIGSEGV in
+        // objc_release when the pool boundary misaligns with the actual
+        // object lifetime. Provide a per-callback autorelease pool so
+        // the autoreleased references drain deterministically.
+        @autoreleasepool {
             const u32 id = static_cast<u32>(l->id);
             const float dt = (l->fps > 0) ? (1.0f / static_cast<float>(l->fps)) : 0.016f;
             g_frame_cb(id, dt);

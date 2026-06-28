@@ -52,6 +52,7 @@ public:
 
     // RenderScene-based rendering (Phase 3d)
     void SetRenderScene(const RenderScene* scene);
+    void SetEditorMode(bool enabled) { editor_mode_ = enabled; }
     void RenderDynamicInstances(rhi::RHICommandBuffer* cmd,
                                 const math::m4x4& vp_matrix,
                                 u32 frame_index,
@@ -69,10 +70,20 @@ public:
     // Content system mesh registration (Phase 4)
     // Register a mesh that was imported via content system. Creates RenderMesh + material DS.
     // Returns mesh slot index for mesh_id_to_index_ lookup.
+    //
+    // entity_id (optional): if non-invalid, the RenderMesh is tagged with
+    // this id instead of geometry_content_id. The pipeline uses this to
+    // disambiguate per-entity instances of the same geometry asset —
+    // mesh_id_to_index_ is keyed by mesh entity id, so 4 entities sharing
+    // geometry_content_id="sphereGeom" must each get a unique entityId.
+    // Legacy callers that don't care can pass id::invalid_id and the
+    // geometry_content_id is used (1 mesh per geometry, like the legacy
+    // AddRenderItem path).
     u32 RegisterMeshResource(id::id_type geometry_content_id,
                              id::id_type albedo_texture_id,
                              id::id_type normal_texture_id,
-                             id::id_type orm_texture_id);
+                             id::id_type orm_texture_id,
+                             id::id_type entity_id = id::invalid_id);
     void UnregisterMeshResource(u32 slot_index);
 
     // Push constant with instance buffer flag
@@ -136,6 +147,7 @@ private:
     utl::vector<SceneDataMeshInfo> mesh_infos_;
     utl::vector<rhi::ResourceHandle> material_textures_; // albedo, normal, ORM per mesh
     bool scene_loaded_ = false;
+    bool editor_mode_ = false;  // when true, render all techniques in forward pass
 
     // IBL
     rhi::ResourceHandle irradiance_map_{rhi::handles::INVALID_RESOURCE};

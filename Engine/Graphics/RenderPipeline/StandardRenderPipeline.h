@@ -124,7 +124,7 @@ public:
     rhi::RHIDeviceBase* GetDevice() const { return device_; }
 
     // --- Editor mode (lightweight forward rendering) ---
-    void SetEditorMode(bool enabled) { editor_mode_ = enabled; }
+    void SetEditorMode(bool enabled);
     bool IsEditorMode() const { return editor_mode_; }
     bool LoadEditorScene(const std::string& model_path) {
         if (!forward_renderer_) return false;
