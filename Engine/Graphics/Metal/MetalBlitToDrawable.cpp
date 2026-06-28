@@ -33,20 +33,32 @@ namespace primal::graphics::metal
                 //    emitted). The file currently just contains the same
                 //    metallib blob as shaders.metallib because the source
                 //    shader is bundled alongside the editor shaders.
+                // The cwd is pinned to the binary's directory at startup
+                // (see Program::AnchorWorkingDirectoryToExecutable), so the
+                // shaders/ dir is a direct cwd-relative subdir.
+                "./shaders/metal/BlitToDrawable.metallib",
+                // 2. Cmake build dir (when launched from the build dir).
                 "./Darwin/Debug/shaders/metal/BlitToDrawable.metallib",
                 "./Darwin/Release/shaders/metal/BlitToDrawable.metallib",
-                // 2. Engine-relative for tests that chdir into EngineTest/.
+                "./Darwin/PrimalEditor_Avalonia/DebugEditor/shaders/metal/BlitToDrawable.metallib",
+                "./Darwin/PrimalEditor_Avalonia/ReleaseEditor/shaders/metal/BlitToDrawable.metallib",
+                // 3. Engine-relative for tests that chdir into EngineTest/.
                 "../Darwin/Debug/shaders/metal/BlitToDrawable.metallib",
                 "../Darwin/Release/shaders/metal/BlitToDrawable.metallib",
-                // 3. Fall back to the main shaders.metallib (which now also
+                "../shaders/metal/BlitToDrawable.metallib",
+                // 4. Fall back to the main shaders.metallib (which now also
                 //    contains blit_to_drawable_vs/fs since the shader is
                 //    compiled by build_engine_shader_blob.py alongside
                 //    EditorShaders.metal). Loaded by symbol lookup — same
                 //    library, so the function lookup works identically.
+                "./shaders/metal/shaders.metallib",
                 "./Darwin/Debug/shaders/metal/shaders.metallib",
                 "./Darwin/Release/shaders/metal/shaders.metallib",
+                "./Darwin/PrimalEditor_Avalonia/DebugEditor/shaders/metal/shaders.metallib",
+                "./Darwin/PrimalEditor_Avalonia/ReleaseEditor/shaders/metal/shaders.metallib",
                 "../Darwin/Debug/shaders/metal/shaders.metallib",
                 "../Darwin/Release/shaders/metal/shaders.metallib",
+                "../shaders/metal/shaders.metallib",
             };
             for (const char* p : candidates) {
                 if (fs::exists(p)) return std::string(p);

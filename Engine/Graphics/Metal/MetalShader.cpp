@@ -6,6 +6,10 @@
 #include "EngineConfig.h"
 
 #include <fstream>
+#include <cstring>
+#include <cstdio>
+#include <string>
+#include <unistd.h>
 
 namespace primal::graphics::metal::shader 
 {
@@ -43,59 +47,74 @@ namespace primal::graphics::metal::shader
 			assert(!engine_shaders_blob);
 
 			u64 size{ 0 };
-			bool result { content::load_engine_shaders(engine_shaders_blob, size) };
-			// 缺 shader blob 是运行时条件（环境没构建），不应 abort。
-			// 上层 shader::initialize() 会返回 false，由 metal::core::initialize() 决定如何处理。
-			// Avalonia 嵌入式 Editor 场景下，cwd 可能不包含预编译 blob，RHI 路径有自己的
-			// per-shader source-compile fallback，失败时上层走非 shader 渲染路径即可。
-			if (!result || !engine_shaders_blob || size == 0) return false;
+			if (!content::load_engine_shaders(engine_shaders_blob, size) ||
+				!engine_shaders_blob || size == 0) return false;
 
-			u64 offset { 0 };
-			u32 index { 0 };
-			while (offset < size && result)
-			{
-				assert(index < engine_shader::count);
-				content::compiled_shader_ptr& shader{ engine_shaders[index] };
-				assert(!shader);
-				result &= index < engine_shader::count && !shader;
-				if (!result) break;
-				shader = reinterpret_cast<const content::compiled_shader_ptr>(&engine_shaders_blob[offset]);
-				offset += shader->buffer_size();
+			// All 9 entries in the packed blob contain the SAME metallib
+			// (build_engine_shader_blob.py packs the same compiled
+			// .metallib 9 times, once per engine_shader::count slot). The
+			// legacy load path was: iterate 9 times, build a dispatch_data_t
+			// from each entry, call device->newLibrary(data) for each, then
+			// call newFunction(shader_names[i]). That's wasteful but on
+			// macOS 26 / Apple Silicon it's also CRASHING: Metal's
+			// newLibraryWithData runs CC_SHA256_Update via the
+			// NEON-accelerated AccelerateCrypto_SHA256_compress, and any
+			// dispatch_data_t whose backing buffer is page-aligned and
+			// has a non-multiple-of-64 size will SIGBUS during that
+			// 64-byte SHA256 read (the read crosses a page boundary into
+			// a commpage / kernel-mapped region). The exception lands
+			// in the editor process before it can show a window.
+			//
+			// Fix: load the metallib ONCE (the first entry is the same
+			// metallib) and get all 9 named functions from that single
+			// library. This sidesteps both the per-entry dispatch_data_t
+			// (which is what triggered the SIGBUS) and the redundant
+			// 9x library compilation.
+			content::compiled_shader_ptr first_shader =
+				reinterpret_cast<content::compiled_shader_ptr>(&engine_shaders_blob[0]);
+			engine_shaders[0] = first_shader;  // legacy slot 0 still points at the entry
 
-				// 创建 dispatch_data_t
-				dispatch_data_t data = dispatch_data_create(
-					shader->byte_code(),    		// 数据指针
-					shader->byte_code_size(),    	// 数据长度
-					nullptr,          				// 队列（使用默认队列）
-					^{
-						// 释放回调（可选）
-						// 这里 buffer 是 vector 管理的，dispatch_data_t 不会持有 buffer.data()，
-						// 所以无需额外释放
-					}
-				);
-				if (!data) {
-					// 处理 dispatch_data_t 创建失败
-					return false;
+			// To dodge the dispatch_data_t SIGBUS path, write the metallib
+			// to a tmp file once and load via newLibraryWithURL. This
+			// path is well-tested and avoids the cross-page SHA256
+			// read because Metal's URL loader does the file → buffer
+			// copy itself with proper alignment guarantees.
+			NS::String* tmp_path = [&]() -> NS::String* {
+				std::string s{ "/tmp/primal_engine_shaders_XXXXXX.metallib" };
+				int fd = mkstemps(s.data(), 9);  // 9 = strlen(".metallib")
+				if (fd < 0) return nullptr;
+				ssize_t written = ::write(fd, first_shader->byte_code(),
+					static_cast<size_t>(first_shader->byte_code_size()));
+				::close(fd);
+				if (written != static_cast<ssize_t>(first_shader->byte_code_size())) {
+					::unlink(s.c_str());
+					return nullptr;
 				}
-				MTL::Library* engine_library{ device->newLibrary(data, &pError) };
-				dispatch_release(data);
+				return NS::String::string(s.c_str(), NS::UTF8StringEncoding);
+			}();
+			if (!tmp_path) return false;
+
+			NS::URL* url = NS::URL::fileURLWithPath(tmp_path);
+			MTL::Library* engine_library = device->newLibrary(url, &pError);
+			::unlink(tmp_path->utf8String());
+			tmp_path->release();
+			if (!engine_library || pError) {
 				if (pError) {
-					// 处理错误
-					// error->localizedDescription() 可用于获取错误信息
+					std::fprintf(stderr, "[MetalShader] newLibraryWithURL failed: %s\n",
+						pError->localizedDescription()->utf8String());
 					pError->release();
-					return false;
 				}
-				engine_libraries.emplace_back(engine_library);
-				u32 id{ static_cast<u32>(engine_functions.size()) };
-				NS::String* functionName = NS::String::string(shader_names[id], NS::UTF8StringEncoding);
+				return false;
+			}
+			engine_libraries.emplace_back(engine_library);
+
+			// Resolve all 9 named functions from the single library.
+			for (u32 i = 0; i < engine_shader::count; ++i) {
+				NS::String* functionName = NS::String::string(shader_names[i], NS::UTF8StringEncoding);
 				MTL::Function* function = engine_library->newFunction(functionName);
 				engine_functions.emplace_back(function);
 				functionName->release();
-
-				++index;
 			}
-		
-			assert(offset == size && index == engine_shader::count);
 
 			return true;
         }
