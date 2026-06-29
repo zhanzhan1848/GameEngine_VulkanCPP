@@ -156,15 +156,23 @@ sealed class Program
         Logger.Info($"Registered {xs.Length} sphere entities");
 
         // Add one directional-style point light (matches EngineViewport3D test scene).
-        var lightDesc = new byte[64];  // PipelineLightDesc
-        // type=Directional(1), color=(1,1,1), intensity=5, pos=(0,0,0), dir=(-1,-1,-1), rest=0
-        BitConverter.GetBytes(1u).CopyTo(lightDesc, 0);
-        lightDesc[4] = 255; lightDesc[8] = 255; lightDesc[12] = 255;  // color RGB bytes
-        BitConverter.GetBytes(5f).CopyTo(lightDesc, 16);  // intensity
-        lightDesc[28] = 0xBF; lightDesc[29] = 0x80; lightDesc[30] = 0; lightDesc[31] = 0; // dir.x = -1.0f
-        lightDesc[32] = 0xBF; lightDesc[33] = 0x80; lightDesc[34] = 0; lightDesc[35] = 0; // dir.y = -1.0f
-        lightDesc[36] = 0xBF; lightDesc[37] = 0x80; lightDesc[38] = 0; lightDesc[39] = 0; // dir.z = -1.0f
-        BitConverter.GetBytes(1u).CopyTo(lightDesc, 56);  // enabled
+        // PipelineLightDesc layout (see EngineDLL/PipelineLightDesc.h):
+        //   type(u32) | color[3](3*4) | intensity(f32) |
+        //   position[3](3*4) | direction[3](3*4) | range(f32) | umbra(f32) | penumbra(f32) | is_enabled(u32)
+        // Total = 60 bytes; we allocate 64 for safety.
+        var lightDesc = new byte[64];
+        BitConverter.GetBytes(1u).CopyTo(lightDesc, 0);                // type=Directional
+        BitConverter.GetBytes(1.0f).CopyTo(lightDesc, 4);                // color.r
+        BitConverter.GetBytes(1.0f).CopyTo(lightDesc, 8);                // color.g
+        BitConverter.GetBytes(1.0f).CopyTo(lightDesc, 12);               // color.b
+        BitConverter.GetBytes(5.0f).CopyTo(lightDesc, 16);               // intensity
+        // position[3] at offset 20..32 (defaults to 0; light is direction-only)
+        BitConverter.GetBytes(-1.0f).CopyTo(lightDesc, 32);               // direction.x (downward)
+        BitConverter.GetBytes(-1.0f).CopyTo(lightDesc, 36);               // direction.y
+        BitConverter.GetBytes(0.0f).CopyTo(lightDesc, 40);                // direction.z
+        BitConverter.GetBytes(0.0f).CopyTo(lightDesc, 44);                // range (unused)
+        BitConverter.GetBytes(1.0f).CopyTo(lightDesc, 56);                // is_enabled = 1.0f
+        BitConverter.GetBytes(1u).CopyTo(lightDesc, 60);                  // is_enabled (u32, copies as 1)
         var lightId = NativeEngineBridge.PipelineRegisterLightEntity(lightDesc);
         if (lightId != 0UL) Logger.Info($"Registered light {lightId}");
 
