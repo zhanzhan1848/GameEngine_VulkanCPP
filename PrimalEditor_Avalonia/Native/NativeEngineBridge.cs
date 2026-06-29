@@ -488,6 +488,32 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("PipelineUnregisterMeshEntity failed", ex); }
     }
 
+    // ECS Camera component attach. Path B renderer wires
+    // StandardRenderPipeline::UpdatePerFrame → scene_sync::SyncCamerasFromECS,
+    // which reads the first entity holding a Camera component + Transform and
+    // overrides RenderView's view/projection matrices. Returns 1 on success.
+    //
+    // projectionType: 0 = perspective, 1 = orthographic.
+    // fieldOfView is stored as a fraction of π (MetalCamera multiplies by π at
+    // projection time), so 1f/3f → 60° vertical FOV.
+    [DllImport("PrimalEngine", EntryPoint = "AddEntityCamera", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _AddEntityCamera(uint entityId, uint projectionType, float fieldOfView, float aspectRatio, float nearZ, float farZ, IntPtr upVector);
+
+    public static uint AddEntityCamera(uint entityId, uint projectionType, float fieldOfView, float aspectRatio, float nearZ, float farZ, float[] upVector)
+    {
+        if (!_isLoaded) return 0;
+        if (upVector == null || upVector.Length != 3)
+        {
+            // up_vector is optional per the C ABI; pass IntPtr.Zero for the default (0,1,0).
+            try { return _AddEntityCamera(entityId, projectionType, fieldOfView, aspectRatio, nearZ, farZ, IntPtr.Zero); }
+            catch (Exception ex) { Logger.Error("AddEntityCamera failed", ex); return 0; }
+        }
+        var pin = GCHandle.Alloc(upVector, GCHandleType.Pinned);
+        try { return _AddEntityCamera(entityId, projectionType, fieldOfView, aspectRatio, nearZ, farZ, pin.AddrOfPinnedObject()); }
+        catch (Exception ex) { Logger.Error("AddEntityCamera failed", ex); return 0; }
+        finally { pin.Free(); }
+    }
+
     // Streaming-mesh entity registration (Phase 9.3b). streamingMesh is
     // an opaque pointer owned by the C# caller (the pipeline holds a
     // non-owning reference).

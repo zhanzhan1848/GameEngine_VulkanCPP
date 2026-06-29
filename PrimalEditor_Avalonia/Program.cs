@@ -107,6 +107,13 @@ sealed class Program
         NativeEngineBridge.SetPipelineViewportSize(width, height);
         Logger.Info("StandardRenderPipeline created (editor mode)");
 
+        // Camera setup: gfx.camera slot id (Path A — editor's actual path).
+        // PipelineRenderFrame calls BuildRenderViewFromCameraId(camera_id, ...)
+        // which queries gfx.camera::view()/projection() — these multiply the
+        // stored fov by π at projection time, so storing 1/3 yields 60° vertical
+        // FOV. (Path B's AddEntityCamera stores fov in ECS Camera component and
+        // is read by SyncCamerasFromECS for view matrices, but that's not what
+        // PipelineRenderFrame currently uses.)
         var cameraEntity = NativeEngineBridge.CreateEntity(0f, 1f, -12f);
         if (cameraEntity == 0xFFFFFFFFu)
         {
@@ -114,20 +121,22 @@ sealed class Program
             return 1;
         }
         Logger.Info($"Camera entity {cameraEntity} created");
-        const float kFov = 0.5f;  // test reference value (matches TestPipelineRenderFrame.cpp)
-        var cameraId = NativeEngineBridge.CreateCamera(cameraEntity, kFov,
-                                                       (float)width / height, 0.1f, 1000.0f);
-        if (cameraId == 0xFFFFFFFFu)
+        const float kCameraFov = 1f / 3f;  // 60° at projection time (engine multiplies by π)
+        var gfxCameraId = NativeEngineBridge.CreateCamera(
+            cameraEntity, kCameraFov, (float)width / height, 0.1f, 1000.0f);
+        if (gfxCameraId == 0xFFFFFFFFu)
         {
-            Logger.Error($"CreateCamera returned invalid_id (entity={cameraEntity} fov={kFov} aspect={width}/{height})");
+            Logger.Error($"CreateCamera returned invalid_id (entity={cameraEntity})");
             return 1;
         }
-        Logger.Info($"Camera {cameraId} created");
+        Logger.Info($"gfx.camera slot {gfxCameraId} created for entity {cameraEntity}");
 
         // One shared sphere geometry + 4 entity registrations.
+        // slot 0 is a VALID id (first allocation in geometry_hierarchies free list),
+        // so we test against the InvalidContentId sentinel rather than 0.
         var sphereParams = new float[] { 0.5f, 24f, 16f };
         var sphereGeom = NativeEngineBridge.ProceduralMeshCreate(0, sphereParams);
-        if (sphereGeom == 0UL)
+        if (sphereGeom == NativeEngineBridge.InvalidContentId)
         {
             Logger.Error("ProceduralMeshCreate failed");
             return 1;
@@ -170,7 +179,7 @@ sealed class Program
 
         for (int i = 0; i < frames; i++)
         {
-            if (!NativeEngineBridge.PipelineRenderFrame(target, cameraId, uint.MaxValue))
+            if (!NativeEngineBridge.PipelineRenderFrame(target, gfxCameraId, uint.MaxValue))
             {
                 Logger.Error($"PipelineRenderFrame failed on frame {i}");
                 return 1;
