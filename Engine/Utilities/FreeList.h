@@ -84,7 +84,21 @@ namespace primal::utl
 			assert(id < _array.size() && !already_removed(id, false));
 			T& item{ _array[id] };
 			item.~T();
-			DEBUG_OP(memset((void*)std::addressof(_array[id]), 0xcc, sizeof(T)));
+			// CRITICAL: this memset is NOT a debug-only check — it's an essential
+			// invariant for the freelist contract. The next add()'s already_removed()
+			// check (FreeList.h already_removed) scans bytes 4..sizeof(T) for 0xCC and
+			// relies on remove() leaving that pattern. Skipping the memset (e.g. when
+			// the Engine target defines NDEBUG via DebugEditor/ReleaseEditor build
+			// configs in Engine/CMakeLists.txt:348) lets stale vtable/pointer data
+			// survive into the next allocation, causing "FreeList Corruption Detected!"
+			// warnings and downstream use-after-free crashes (e.g. MetalCommandBuffer
+			// allocator's DRAW #10 SIGSEGV).
+			//
+			// Performance: one memset(sizeof(T)) per free. For sizeof(T)=232 that's
+			// 232 bytes — negligible. The next allocation runs placement-new which
+			// re-establishes the vtable at offset 0..7 via the C++ runtime, so any
+			// meta-data we write here is overwritten before user code sees the slot.
+			std::memset((void*)std::addressof(_array[id]), 0xcc, sizeof(T));
 			*(u32 *const)std::addressof(_array[id]) = _next_free_index;
 			_next_free_index = id;
 			--_size;

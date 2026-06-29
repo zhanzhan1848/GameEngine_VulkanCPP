@@ -38,6 +38,36 @@
 #include <cstring>
 #include <iostream>
 
+// CRITICAL: this file is .cpp (not .mm), so we cannot use the
+// @autoreleasepool Objective-C syntax directly. The objc_autoreleasePoolPush
+// and objc_autoreleasePoolPop functions are NOT declared in any public
+// Objective-C header on Apple Silicon — only <Foundation/NSAutoreleasePool.h>
+// references them, and that requires linking Foundation which we want to
+// avoid here. We extern-declare them and rely on libobjc.A.dylib which is
+// always linked on macOS (it's the runtime for all ObjC code in the
+// process). Both functions return a void* pool token; Pop must receive
+// the same token from Push or the per-thread pool stack gets corrupted.
+//
+// Why we need this: BlitRenderTargetToSurface calls into MetalCore.cpp
+// which uses autoreleased ObjC methods (currentDrawable(), commandBuffer(),
+// etc.). On Apple Silicon those autoreleased references accumulate in
+// the GCD worker thread's pool (set up by EngineAPI_mac.mm:50 fire_timer)
+// and one of them eventually releases a stale pointer, causing a SIGSEGV
+// in objc_release with "address not in any region". The crash signature
+// from the .ips file is objc_release → AutoreleasePoolPage::releaseUntil →
+// objc_autoreleasePoolPop → fire_timer(void*) — wrapping the per-call
+// pool here drains the references deterministically.
+extern "C" void* _objc_autoreleasePoolPush(void);
+extern "C" void  _objc_autoreleasePoolPop(void* pool);
+
+struct ScopedAutoreleasePool {
+    void* pool{ nullptr };
+    ScopedAutoreleasePool() { pool = _objc_autoreleasePoolPush(); }
+    ~ScopedAutoreleasePool() { if (pool) _objc_autoreleasePoolPop(pool); }
+    ScopedAutoreleasePool(const ScopedAutoreleasePool&) = delete;
+    ScopedAutoreleasePool& operator=(const ScopedAutoreleasePool&) = delete;
+};
+
 #endif
 
 using namespace primal;
@@ -581,6 +611,18 @@ EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u3
 // pipeline not initialized / etc.).
 
 EDITOR_INTERFACE u32 BlitRenderTargetToSurface(u64 target_handle, u32 surface_id) {
+    // See ScopedAutoreleasePool definition at the top of this file.
+    // BlitRenderTargetToSurface is the only Editor-side ABI entry that
+    // calls currentDrawable()/commandBuffer()/presentDrawable() on the
+    // GCD worker thread (fire_timer in EngineAPI_mac.mm:50 wraps the
+    // callback in @autoreleasepool already, but the autoreleased refs
+    // from the inner MetalCore.cpp calls accumulate and one eventually
+    // releases a stale pointer at DRAW #10). A per-call pool drain here
+    // is the targeted fix; other render APIs (PipelineRenderFrame,
+    // CreateRenderTarget) do not produce autoreleased objects on the
+    // GCD worker thread and don't need this.
+    ScopedAutoreleasePool arpool;
+
     auto* entry = engine_dll::GetRenderTarget(target_handle);
     if (!entry || !entry->texture) {
         std::fprintf(stderr, "[BlitRenderTargetToSurface] invalid target_handle %llu\n",
