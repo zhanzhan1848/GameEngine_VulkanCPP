@@ -1752,7 +1752,7 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
         }
 
         forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
-                                   target, cbIdx % 3);
+                                   target, cbIdx % 3, targetDesc.format);
 
         // PCG SDF: dispatch voxelization + issue readback after scene render
         auto& gsdf = nanite::GlobalSDF::Get();
