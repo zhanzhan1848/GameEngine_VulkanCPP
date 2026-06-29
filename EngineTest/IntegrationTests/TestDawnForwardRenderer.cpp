@@ -543,6 +543,20 @@ bool Engine_Test::LoadSponzaScene() {
     material->SetPipelineLayout(pipelineLayout_);
     std::cerr << "[TestDawnFR] Pipeline layout created" << std::endl;
 
+    // Pre-warm the ForwardPBR pipeline BEFORE any render pass. On WASM/Dawn,
+    // calling wgpuDeviceCreateRenderPipeline inside an active render pass
+    // encoder produces a pipeline that silently misbinds material descriptor
+    // sets — every mesh ends up sampling the same texture. Warming the cache
+    // here means OpaquePass's GetPipeline call is a cache hit, not a create.
+    {
+        auto warmupHandle = material->GetPipeline(device_, INVALID_RESOURCE, 0, PipelineFlags::None);
+        if (warmupHandle != INVALID_PIPELINE) {
+            std::cerr << "[TestDawnFR] Pipeline pre-warmed, handle=" << warmupHandle << std::endl;
+        } else {
+            std::cerr << "[TestDawnFR][WARN] Pipeline warm-up failed" << std::endl;
+        }
+    }
+
     // Create sampler for material textures
     SamplerDesc samplerDesc{};
     samplerDesc.minFilter = FilterMode::Linear;
@@ -2125,6 +2139,26 @@ bool Engine_Test::InitializeMeshletPipeline() {
                 }
             }
         }
+    }
+
+    // Rebuild materials_ so it is keyed by gpuMaterialId (matching the patched
+    // proxy.materialId). LoadScene keyed materials_ by entity_id; once we patch
+    // proxy.materialId above, ForwardRenderer::OpaquePass / TransparentPass /
+    // ShadowPass / DepthPrePass / ReflectionPass all do
+    //   materials.find(proxy->materialId)
+    // and would otherwise read mesh[N-1]'s MI for mesh[N] — the off-by-one
+    // "texture mixing" bug. ForwardPBR modes (0-4) depend on this CPU-side
+    // lookup; GBuffer/Meshlet modes (5-8) read the GPU material buffer directly
+    // and were never affected.
+    {
+        std::unordered_map<primal::id::id_type, std::shared_ptr<primal::graphics::MaterialInstance>> rebuilt;
+        rebuilt.reserve(materials_.size());
+        for (auto& meshInfo : sceneMeshInfos_) {
+            if (meshInfo.materialInstance && meshInfo.gpuMaterialId != primal::id::invalid_id) {
+                rebuilt[meshInfo.gpuMaterialId] = meshInfo.materialInstance;
+            }
+        }
+        materials_ = std::move(rebuilt);
     }
 
     auto buildJob = meshletMaterialRegistry_->BuildAsync(device_);

@@ -36,6 +36,7 @@ bool DawnDescriptorSet::Initialize(const DescriptorSetDesc& desc) {
     }
 
     const auto& layoutBindings = layout->GetBindings();
+
     for (const auto& lb : layoutBindings) {
         DawnPendingBinding pb{};
         pb.type = lb.descriptorType;

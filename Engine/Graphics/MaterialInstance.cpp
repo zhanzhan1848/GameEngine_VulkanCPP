@@ -122,7 +122,7 @@ bool MaterialInstance::Initialize(rhi::RHIDeviceBase* device) {
     if (layout != rhi::handles::INVALID_RESOURCE) {
         rhi::DescriptorSetDesc setDesc;
         setDesc.layout = layout;
-        
+
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             descriptorSets_[i] = device->CreateDescriptorSet(setDesc);
             if (descriptorSets_[i] == rhi::handles::INVALID_RESOURCE) {

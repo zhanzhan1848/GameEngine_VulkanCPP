@@ -1588,6 +1588,13 @@ void ForwardRenderer::RenderDawnGBuffer(rhi::RHICommandBuffer* cmdBuffer,
     depthToDS.subresource = 0xFFFFFFFF;
     cmdBuffer->InsertBarrier(&depthToDS, 1);
 
+    // Lazy-create pipeline BEFORE BeginRenderPass. Creating a pipeline inside
+    // an active render pass encoder on WASM/Dawn corrupts the device's bind
+    // group state — every mesh in subsequent draws samples the same texture.
+    if (dawnGBufferPipeline_ == rhi::handles::INVALID_PIPELINE) {
+        EnsureDawnGBufferPipeline();
+    }
+
     cmdBuffer->BeginRenderPass(passDesc);
 
     rhi::ViewportDesc vp;
@@ -1597,11 +1604,6 @@ void ForwardRenderer::RenderDawnGBuffer(rhi::RHICommandBuffer* cmdBuffer,
     vp.maxDepth = 1.0f;
     cmdBuffer->SetViewport(vp);
     cmdBuffer->SetScissor({{0, 0}, {width, height}});
-
-    // Lazy-create pipeline now that material DSL is available.
-    if (dawnGBufferPipeline_ == rhi::handles::INVALID_PIPELINE) {
-        EnsureDawnGBufferPipeline();
-    }
 
     if (dawnGBufferPipeline_ == rhi::handles::INVALID_PIPELINE) {
         std::cerr << "[GBuffer] Pipeline not initialized — clearing only" << std::endl;

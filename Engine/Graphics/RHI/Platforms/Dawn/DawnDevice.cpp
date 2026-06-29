@@ -1021,6 +1021,7 @@ void DawnDevice::destroyPipelineLayoutImpl(PipelineLayoutHandle handle) {
 void DawnDevice::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
     if (handle == static_cast<DescriptorSetHandle>(handles::INVALID_RESOURCE)) return;
     auto* set = GetDescriptorSet(handle);
+
     if (set) {
         set->Destroy();
     }
