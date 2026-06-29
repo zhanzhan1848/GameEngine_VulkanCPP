@@ -387,7 +387,23 @@ public partial class EngineViewport3D : UserControl
         _renderTimer = null;
     }
 
-    private void OnNativeFrame(float dt) => OnRenderFrameCore(dt);
+    private void OnNativeFrame(float dt)
+    {
+        // The native render loop fires from a GCD worker thread. Avalonia's
+        // visual tree controls are not thread-safe and PipelineRenderFrame +
+        // BlitRenderTargetToSurface touch CAMetalDrawable-backed state. Marshal
+        // to Avalonia's UI thread via InvokeAsync + Send. PostAsync would
+        // silently drop or coalesce frames on the dispatcher; Send keeps
+        // each invocation serialized like fire_timer already is.
+        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
+        {
+            OnRenderFrameCore(dt);
+        }
+        else
+        {
+            Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() => OnRenderFrameCore(dt));
+        }
+    }
 
     private void OnRenderTick(object? sender, EventArgs e)
     {
