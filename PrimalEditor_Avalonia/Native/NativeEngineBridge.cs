@@ -1020,6 +1020,18 @@ public static class NativeEngineBridge
         finally { pin.Free(); }
     }
 
+    // Headless PNG export. RGBA16F target → RGBA8 PNG file. Path defaults
+    // to "headless_render.png" in BaseDirectory if null/empty.
+    [DllImport("PrimalEngine", EntryPoint = "SaveRenderTargetAsPng", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _SaveRenderTargetAsPng(UInt64 targetHandle, [MarshalAs(UnmanagedType.LPStr)] string path);
+
+    public static bool SaveRenderTargetAsPng(UInt64 handle, string path)
+    {
+        if (!_isLoaded || handle == 0) return false;
+        try { return _SaveRenderTargetAsPng(handle, string.IsNullOrEmpty(path) ? null : path) != 0; }
+        catch (Exception ex) { Logger.Error("SaveRenderTargetAsPng failed", ex); return false; }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "PipelineRenderFrame", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _PipelineRenderFrame(UInt64 targetHandle, uint cameraId, uint surfaceId);
 

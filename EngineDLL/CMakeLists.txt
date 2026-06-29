@@ -28,6 +28,7 @@ set(SOURCE_FILES
     "LightAPI.cpp"
     "CameraAPI.cpp"
     "ProceduralMeshAPI.cpp"
+    "HeadlessRender.cpp"
     "${CMAKE_SOURCE_DIR}/Engine/Graphics/EditorShaderManager.cpp"
 )
 
@@ -120,7 +121,7 @@ elseif(APPLE)
     target_compile_options(${PROJECT_NAME} PRIVATE
         -Wall
         # -fno-rtti              # 禁用RTTI
-        -ffast-math            # 快速浮点运算
+        -ffast-math            # 快速浮数运算
         -fno-exceptions        # 禁用异常处理
         $<$<CONFIG:Debug>:-O0 -g>
         $<$<CONFIG:Release>:-O3>

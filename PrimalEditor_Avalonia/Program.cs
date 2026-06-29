@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.GameProject;
+using PrimalEditor_Avalonia.Native;
 
 namespace PrimalEditor_Avalonia;
 
@@ -20,6 +21,21 @@ sealed class Program
         if (args.Length > 0 && args[0] == "--verify-serialization")
         {
             RunSerializationVerification();
+            return;
+        }
+
+        // Headless render: bypass Avalonia entirely. Useful for verifying
+        // the renderer works without needing a real macOS GUI session
+        // (Avalonia's NSApp-activation path SIGSEGVs when WindowServer
+        // can't be reached from a non-Aqua context — see Avalonia issue
+        // #18895 and our SIGBUS pattern). Output PNG is dumped from the
+        // offscreen render target after N frames.
+        //
+        // Usage:  PrimalEditor_Avalonia --headless-render [output.png] [width] [height] [frames]
+        if (args.Length > 0 && args[0] == "--headless-render")
+        {
+            AnchorWorkingDirectoryToExecutable();
+            RunHeadlessRender(args);
             return;
         }
 
@@ -41,6 +57,143 @@ sealed class Program
         }
 
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    }
+
+    // Build the test scene used by the Avalonia editor (EngineViewport3D) and
+    // run N frames of PipelineRenderFrame into an offscreen render target.
+    // The final frame is dumped to PNG via SaveRenderTargetAsPng so a non-GUI
+    // session can verify the renderer is producing visible output.
+    private static int RunHeadlessRender(string[] args)
+    {
+        const int kDefaultWidth = 1280;
+        const int kDefaultHeight = 720;
+        const int kDefaultFrames = 4;
+        const string kDefaultPath = "headless_render.png";
+
+        string outPath = kDefaultPath;
+        int width = kDefaultWidth;
+        int height = kDefaultHeight;
+        int frames = kDefaultFrames;
+        if (args.Length >= 2) outPath = args[1];
+        if (args.Length >= 3 && int.TryParse(args[2], out var w)) width = w;
+        if (args.Length >= 4 && int.TryParse(args[3], out var h)) height = h;
+        if (args.Length >= 5 && int.TryParse(args[4], out var f)) frames = f;
+
+        Console.Error.WriteLine($"[headless] output={outPath} {width}x{height} frames={frames}");
+        Logger.Current = new ConsoleLogger();
+        Logger.Info($"Headless render: output={outPath} {width}x{height} frames={frames}");
+
+        if (!NativeEngineBridge.LoadEngine())
+        {
+            Logger.Error("Failed to load native engine");
+            return 1;
+        }
+        Logger.Info($"Engine loaded: {NativeEngineBridge.LoadedPath}");
+
+        if (!NativeEngineBridge.InitializeEngine(NativeEngineBridge.RHIPlatformMetal, false))
+        {
+            Logger.Error("InitializeEngine returned false");
+            return 1;
+        }
+        Logger.Info("Engine initialized (Metal)");
+
+        var deviceHandle = NativeEngineBridge.GetEngineDeviceHandle();
+        if (deviceHandle == 0UL || !NativeEngineBridge.CreateStandardRenderPipeline(deviceHandle))
+        {
+            Logger.Error("CreateStandardRenderPipeline failed");
+            return 1;
+        }
+        NativeEngineBridge.PipelineSetEditorMode(true);
+        NativeEngineBridge.SetPipelineViewportSize(width, height);
+        Logger.Info("StandardRenderPipeline created (editor mode)");
+
+        var cameraEntity = NativeEngineBridge.CreateEntity(0f, 1f, -12f);
+        if (cameraEntity == 0xFFFFFFFFu)
+        {
+            Logger.Error("CreateEntity returned invalid id");
+            return 1;
+        }
+        Logger.Info($"Camera entity {cameraEntity} created");
+        const float kFov = 0.5f;  // test reference value (matches TestPipelineRenderFrame.cpp)
+        var cameraId = NativeEngineBridge.CreateCamera(cameraEntity, kFov,
+                                                       (float)width / height, 0.1f, 1000.0f);
+        if (cameraId == 0xFFFFFFFFu)
+        {
+            Logger.Error($"CreateCamera returned invalid_id (entity={cameraEntity} fov={kFov} aspect={width}/{height})");
+            return 1;
+        }
+        Logger.Info($"Camera {cameraId} created");
+
+        // One shared sphere geometry + 4 entity registrations.
+        var sphereParams = new float[] { 0.5f, 24f, 16f };
+        var sphereGeom = NativeEngineBridge.ProceduralMeshCreate(0, sphereParams);
+        if (sphereGeom == 0UL)
+        {
+            Logger.Error("ProceduralMeshCreate failed");
+            return 1;
+        }
+
+        float[] xs = { -6.0f, -2.0f, 2.0f, 6.0f };
+        var meshEntities = new ulong[xs.Length];
+        var sphereTexIds = new UInt64[] { 0 };
+        for (int i = 0; i < xs.Length; i++)
+        {
+            meshEntities[i] = NativeEngineBridge.PipelineRegisterMeshEntity(sphereGeom, sphereTexIds);
+            var pos = new float[] { xs[i], 0f, 0f };
+            var rot = new float[] { 0f, 0f, 0f };
+            var scl = new float[] { 1f, 1f, 1f };
+            NativeEngineBridge.SetEntityTransform((uint)meshEntities[i], pos, rot, scl);
+        }
+        Logger.Info($"Registered {xs.Length} sphere entities");
+
+        // Add one directional-style point light (matches EngineViewport3D test scene).
+        var lightDesc = new byte[64];  // PipelineLightDesc
+        // type=Directional(1), color=(1,1,1), intensity=5, pos=(0,0,0), dir=(-1,-1,-1), rest=0
+        BitConverter.GetBytes(1u).CopyTo(lightDesc, 0);
+        lightDesc[4] = 255; lightDesc[8] = 255; lightDesc[12] = 255;  // color RGB bytes
+        BitConverter.GetBytes(5f).CopyTo(lightDesc, 16);  // intensity
+        lightDesc[28] = 0xBF; lightDesc[29] = 0x80; lightDesc[30] = 0; lightDesc[31] = 0; // dir.x = -1.0f
+        lightDesc[32] = 0xBF; lightDesc[33] = 0x80; lightDesc[34] = 0; lightDesc[35] = 0; // dir.y = -1.0f
+        lightDesc[36] = 0xBF; lightDesc[37] = 0x80; lightDesc[38] = 0; lightDesc[39] = 0; // dir.z = -1.0f
+        BitConverter.GetBytes(1u).CopyTo(lightDesc, 56);  // enabled
+        var lightId = NativeEngineBridge.PipelineRegisterLightEntity(lightDesc);
+        if (lightId != 0UL) Logger.Info($"Registered light {lightId}");
+
+        var target = NativeEngineBridge.CreateRenderTarget(
+            width, height, NativeEngineBridge.RenderTargetFormat.RGBA16F);
+        if (target == 0UL)
+        {
+            Logger.Error("CreateRenderTarget failed");
+            return 1;
+        }
+        Logger.Info($"Render target {target} created");
+
+        for (int i = 0; i < frames; i++)
+        {
+            if (!NativeEngineBridge.PipelineRenderFrame(target, cameraId, uint.MaxValue))
+            {
+                Logger.Error($"PipelineRenderFrame failed on frame {i}");
+                return 1;
+            }
+        }
+        Logger.Info($"Rendered {frames} frames");
+
+        var savedOk = NativeEngineBridge.SaveRenderTargetAsPng(target, outPath);
+        if (!savedOk)
+        {
+            Logger.Error($"SaveRenderTargetAsPng failed for path '{outPath}'");
+            return 1;
+        }
+        Logger.Info($"Saved PNG: {outPath}");
+
+        for (int i = meshEntities.Length - 1; i >= 0; i--)
+            NativeEngineBridge.PipelineUnregisterMeshEntity(meshEntities[i]);
+        NativeEngineBridge.ProceduralMeshDestroy(sphereGeom);
+        NativeEngineBridge.PipelineUnregisterLightEntity(lightId);
+        NativeEngineBridge.DestroyRenderTarget(target);
+        NativeEngineBridge.DestroyStandardRenderPipeline();
+        NativeEngineBridge.ShutdownEngine();
+        return 0;
     }
 
     private static void AnchorWorkingDirectoryToExecutable()
