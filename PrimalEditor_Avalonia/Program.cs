@@ -255,6 +255,7 @@ sealed class Program
         [DllImport(CoreVideoLibrary)]
         static extern void CVDisplayLinkRelease(IntPtr displayLink);
 
+        const int kMaxAttempts = 20;  // 10s wallclock budget before yielding
         IntPtr displayLink;
         int attempts = 0;
         while (CVDisplayLinkCreateWithActiveCGDisplays(out displayLink) != 0)
@@ -262,6 +263,11 @@ sealed class Program
             attempts++;
             if (attempts == 1)
                 Console.Error.WriteLine("[Avalonia] CVDisplayLink unavailable, retrying every 500ms (Avalonia issue #18895 workaround)");
+            if (attempts >= kMaxAttempts)
+            {
+                Console.Error.WriteLine($"[Avalonia] CVDisplayLink unavailable after {attempts} attempts; proceeding without it. Avalonia may still work.");
+                return;
+            }
             await Task.Delay(500);
         }
         if (attempts > 0)
