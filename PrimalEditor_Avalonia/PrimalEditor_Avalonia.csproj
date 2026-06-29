@@ -64,4 +64,12 @@
     <!-- Same for libEngineDLL.dylib's self-reference (it had @rpath/libEngineDLL.dylib). -->
     <Exec Command="chmod +w $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib; install_name_tool -id @loader_path/libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib 2&gt;/dev/null; true" Condition="Exists('$(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib')" />
   </Target>
+
+  <!-- Wrap the apphost binary into a macOS .app bundle so launching via
+       `open`/LaunchServices/Aqua session gives Avalonia a proper foreground
+       status. Without this, Avalonia's MainWindow opens off-process and
+       the dock icon never appears (StandardFlavor NULL). -->
+  <Target Name="WrapAsMacAppBundle" AfterTargets="CopyNativeEngineLibsUnix" Condition="'$(OS)' != 'Windows_NT'">
+    <Exec Command="bash '$(MSBuildThisFileDirectory)build/build_app.sh' '$(Configuration)'" IgnoreExitCode="true" />
+  </Target>
 </Project>
