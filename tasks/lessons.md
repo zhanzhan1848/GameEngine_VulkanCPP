@@ -1546,3 +1546,99 @@ user attaching Xcode (`Debug → Attach to Process → PrimalEditor`) and
 reading the backtrace from the SIGSEGV at DRAW #10. There's no
 further fix from bash; the engine's Metal-side resource lifetime in
 editor-mode long loop needs an in-Xcode investigation.
+
+## Attempted-but-rejected fixes for the DRAW #N SIGSEGV (2026-06-30 00:30)
+
+After landing the FreeList.h fix and seeing `FreeList Corruption Detected!`
+warnings drop from 40/frame to 0 (real progress), the SIGSEGV remains. The
+consistent .ips crash trace is:
+
+  objc_release → AutoreleasePoolPage::releaseUntil → objc_autoreleasePoolPop
+  → (anonymous namespace)::fire_timer(void*) → _dispatch_*_worker_thread
+
+ESR: Data Abort byte read Translation fault. FAR in the `0x00002Bxxxxxxxx`
+range — Apple's tagged-pointer ObjC class region, NOT Metal raw pointer range.
+
+### Fixes I tried that did NOT solve the crash:
+
+1. **`ScopedAutoreleasePool` wrapper via `_objc_autoreleasePoolPush/Pop`**
+   around `BlitRenderTargetToSurface` in
+   `EngineDLL/RenderPipelineAPI.cpp`. Result: crash site MOVED from
+   `fire_timer` to my own `~ScopedAutoreleasePool()`. The stale autoreleased
+   reference was added by an EARLIER engine call (likely
+   `PipelineRenderFrame`'s lighting/Lumen passes), so pushing a pool at the
+   BlitRenderTargetToSurface boundary was too late. Reverted.
+
+2. **Removing `mtlCommandBuffer_->retain()` at
+   `MetalCommandBuffer.cpp:169`**. Result: crash site MOVED to
+   `MetalCommandBuffer::submitImpl → objc_msgSend on an uninitialized ivar`
+   at startup (DRAW count went to 0). Buffer's `commandBuffer()` autoreleased
+   reference alone doesn't survive across `submitImpl` to `commit()` on
+   Apple Silicon because Metal's queue-holds semantics are weak in
+   AGXMetalG16X. Reverted.
+
+3. **Subagent's proposed fix: `encoder->retain()` at acquisition +
+   `currentEncoder_->release()` in `endCurrentEncoder()`** in
+   `MetalCommandBuffer.cpp`. Result: DRAW count regressed from 10 → 2.
+   Likely cause: `endCurrentEncoder` is invoked while the autoreleased
+   reference from `renderCommandEncoder:` is still in `pool_` (the inner
+   autoreleasepool created at `beginImpl:137`), causing a double-release
+   at the next pool drain. Reverted.
+
+### Verified improvements (kept):
+
+- **`Engine/Utilities/FreeList.h:87` — unconditional `memset(0xCC)` in
+  `remove()`** (replacing `DEBUG_OP(memset(...))`). This is a real fix:
+  - Headless `--headless-render` produces 6287-byte PNG with 4733
+    non-background pixels (4 spheres visible).
+  - `FreeList Corruption Detected!` log count: 0 (was 40 per 10-frame run).
+  - Crash trace after this fix: same `objc_release` signature but at
+    different DRAW counts (varies 2-10 between runs).
+
+### Honest conclusion
+
+The remaining SIGSEGV is in the engine's MTLCommandBuffer/encoder
+autorelease lifetime under Apple Silicon (macOS 26.5.1). The crash needs
+to be debugged in Xcode with `lldb` attached to a running bundle:
+
+```bash
+# From the user's GUI session Terminal:
+cd ~/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration
+lldb -o "process launch" -- \
+    Darwin/PrimalEditor_Avalonia/DebugEditor/PrimalEditor.app/Contents/MacOS/PrimalEditor_Avalonia
+
+# In lldb after crash:
+(lldb) bt all
+(lldb) frame variable self->currentEncoder_ self->pool_ self->mtlCommandBuffer_
+(lldb) po [self->currentEncoder_ retainCount]
+(lldb) po [self->mtlCommandBuffer_ retainCount]
+(lldb) image lookup -v -a $pc
+```
+
+The crash will land in `objc_release` on an unmapped `0x00002Bxxxxxxxx`
+address. The backtrace above `objc_release` should reveal which
+autoreleased reference is being released. From there, identify the
+acquisition site in `Engine/Graphics/RHI/Platforms/Metal/MetalCommandBuffer.cpp`
+and the corresponding release path. The fix will likely involve either
+explicitly retaining specific autoreleased MTL references across the
+`fire_timer` `@autoreleasepool` boundary, OR adding narrower
+`@autoreleasepool` blocks (in `.mm` files) at specific call sites.
+
+### What I would do next time (lessons learned)
+
+- **Verify the fix, not just the absence of warnings.** My FreeList fix
+  was validated by log count going to 0, but the crash didn't go away —
+  the warnings were a symptom, not the cause. Always re-measure the actual
+  crash behavior after each fix, not just the warning/error counts.
+- **Capture .ips files aggressively.** Earlier I dismissed the bundle's
+  exit-139 status as "rate-limited macOS suppression". With `codesign
+  --identifier` randomized per run, I broke the rate limit and got 3 .ips
+  files in ~/Library/Logs/DiagnosticReports/ within minutes. That was the
+  unlock — the .ips file pinpointed the crash at `fire_timer`'s
+  autoreleasepool drain.
+- **Match the fix scope to evidence, not theory.** Subagent's encoder
+  retain/release fix made intuitive sense but conflicted with the
+  `pool_` inner autoreleasepool that already drains the encoder's
+  autoreleased reference. The lesson: when the crash is in a pool drain,
+  look at the pool's contents, not at the retained members. The fix
+  needs to be at the pool boundary, not at every individual retain site.
