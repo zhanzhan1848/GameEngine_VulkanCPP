@@ -392,16 +392,26 @@ public partial class EngineViewport3D : UserControl
         // The native render loop fires from a GCD worker thread. Avalonia's
         // visual tree controls are not thread-safe and PipelineRenderFrame +
         // BlitRenderTargetToSurface touch CAMetalDrawable-backed state. Marshal
-        // to Avalonia's UI thread via InvokeAsync + Send. PostAsync would
-        // silently drop or coalesce frames on the dispatcher; Send keeps
+        // to Avalonia's UI thread via InvokeAsync. PostAsync would silently
+        // drop or coalesce frames on the dispatcher; direct InvokeAsync keeps
         // each invocation serialized like fire_timer already is.
+        //
+        // Catch exceptions on the UI thread side too — otherwise an exception
+        // inside InvokeAsync's continuation gets posted back to the dispatcher
+        // and triggers Avalonia's async-exception path, which on some builds
+        // hard-kills the editor window with an unhandled exception.
         if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
         {
-            OnRenderFrameCore(dt);
+            try { OnRenderFrameCore(dt); }
+            catch (Exception ex) { Logger.Error("OnRenderFrameCore (UI) failed", ex); }
         }
         else
         {
-            Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() => OnRenderFrameCore(dt));
+            Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                try { OnRenderFrameCore(dt); }
+                catch (Exception ex) { Logger.Error("OnRenderFrameCore (UI) failed", ex); }
+            });
         }
     }
 
