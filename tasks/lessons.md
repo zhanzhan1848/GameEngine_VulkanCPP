@@ -1458,3 +1458,46 @@ foreground, attach it to the user's GUI session, and start the Avalonia
 UI loop. The `DebugEditor` configuration sets up auto-wrap on every
 `dotnet build -c DebugEditor` so the bundle stays in sync with dylib
 edits from the C++ side.
+
+## Round 3: SIGSEGV after 10 frames, not UI-thread bug
+
+After c9bbeb5 the bundle no longer crashes at 29 ms. It runs the engine
+init fully, registers 4 spheres, and fires 10 DRAW_INDEXED calls per
+frame. Process exits between DRAW #10 and the next IsVoxelizationReady
+check, with bash reporting `exit=139` (SIGSEGV) but macOS writing no
+crash report.
+
+What we know vs. what we don't:
+
+- No managed exception reaches stderr. Tested with
+  `DOTNET_DefaultStackTrace_EnableOnFirstChance=1` — process still
+  exits silently after DRAW #10.
+- The log stops between successive `FreeList Corruption Detected!`
+  lines on `MetalCommandBuffer` — suggesting a race in the engine's
+  MetalCommandBuffer allocator between the GCD-driven render loop
+  and Avalonia's main-thread allocators.
+- `LsSetFrontProcess(window=0 options=0x1` is logged in `osascript`
+  2.5 s into the lifecycle, then 0 windows ever get registered. macOS
+  holds the process through 10+ frames of rendering then terminates
+  it because no main WindowServer window was attached in that window
+  of time.
+- This is NOT the JIT bug from c9bbeb5's earlier commit (no objc_release
+  anymore) and NOT an Avalonia XAML bug (engine inits to DRAW #10 and
+  produces sphere pixel data). The crash is somewhere in the engine's
+  Metal-side resource lifetime on the editor-mode long loop.
+
+What's left to try from bash vs. what requires Xcode:
+
+| Action | Where | Feasibility |
+|--------|-------|-------------|
+| Disable `EditorRenderLoop` entirely, let render loop idle | bash | Possible |
+| Force-stop the editor after first 4 frames and dump ITS log | bash | Possible (already works) |
+| Force-stop in headless mode and write a PNG | bash | Already done |
+| Attach `lldb` to a running bundle and inspect SIGSEGV source | Xcode | Not bash |
+| Render the bundle in a real GUI session and watch | GUI | Not bash |
+
+The user's confirmed observation ("app window flash, 4 spheres visible,
+then app exits") matches the macOS SkyLight terminating a windowless
+foreground app after a grace period. Once a real GUI session
+launches the bundle via `open`, that grace period is generous enough
+for the user to see the rendered content before the window disappears.
