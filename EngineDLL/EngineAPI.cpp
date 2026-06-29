@@ -281,6 +281,16 @@ EDITOR_INTERFACE void ShutdownEngine()
 	graphics::shutdown_rhi();
 }
 
+EDITOR_INTERFACE void FlushGPU()
+{
+	// Force GPU→CPU sync so subsequent DebugReadRenderTarget / SaveRenderTargetAsPng
+	// observes the finished frame. Without this the transfer-queue copy can run
+	// before the graphics queue's render-pass writes complete.
+	if (auto* device = graphics::get_rhi_device()) {
+		device->WaitIdle();
+	}
+}
+
 EDITOR_INTERFACE u32 IsEngineInitialized()
 {
 	return graphics::is_rhi_initialized() ? 1 : 0;

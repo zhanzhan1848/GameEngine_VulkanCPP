@@ -1051,9 +1051,19 @@ public static class NativeEngineBridge
     [DllImport("PrimalEngine", EntryPoint = "SaveRenderTargetAsPng", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _SaveRenderTargetAsPng(UInt64 targetHandle, [MarshalAs(UnmanagedType.LPStr)] string path);
 
+    [DllImport("PrimalEngine", EntryPoint = "FlushGPU", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _FlushGPU();
+
+    public static void FlushGPU()
+    {
+        if (!_isLoaded) return;
+        try { _FlushGPU(); } catch (Exception ex) { Logger.Error("FlushGPU failed", ex); }
+    }
+
     public static bool SaveRenderTargetAsPng(UInt64 handle, string path)
     {
         if (!_isLoaded || handle == 0) return false;
+        FlushGPU();
         try { return _SaveRenderTargetAsPng(handle, string.IsNullOrEmpty(path) ? null : path) != 0; }
         catch (Exception ex) { Logger.Error("SaveRenderTargetAsPng failed", ex); return false; }
     }

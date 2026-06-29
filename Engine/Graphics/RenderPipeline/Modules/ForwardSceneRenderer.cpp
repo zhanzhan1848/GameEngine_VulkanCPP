@@ -286,11 +286,13 @@ std::string ResolveTexturePath(const std::string& baseDir, const std::string& fi
 
 ForwardSceneRenderer::~ForwardSceneRenderer() { Shutdown(); }
 
-bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height) {
+bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height,
+                                       DataFormat backbuffer_format) {
     if (initialized_) return true;
     device_ = device;
     render_width_ = render_width;
     render_height_ = render_height;
+    blit_target_format_ = backbuffer_format;
 
     CreateSamplers();
     CreateDescriptorLayouts();
@@ -631,7 +633,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.layout = blit_layout_;
         desc.vertexShader = blit_vs_;
         desc.pixelShader = blit_ps_;
-        desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[0] = blit_target_format_;
         desc.renderTargetCount = 1;
         desc.depthStencilFormat = DataFormat::Unknown;
         desc.enableDepthTest = false;
@@ -1473,14 +1475,34 @@ void ForwardSceneRenderer::RenderStreamingMeshes(RHICommandBuffer* cmd, u32 fram
 // ============================================================================
 
 void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
-                                   const math::m4x4& view_matrix,
-                                   const math::m4x4& proj_matrix,
-                                   const math::v3& camera_position,
-                                   ResourceHandle backbuffer,
-                                   u32 frame_index) {
+                                    const math::m4x4& view_matrix,
+                                    const math::m4x4& proj_matrix,
+                                    const math::v3& camera_position,
+                                    ResourceHandle backbuffer,
+                                    u32 frame_index,
+                                    DataFormat backbuffer_format) {
     if (!initialized_ || !scene_loaded_) return;
 
     u32 idx = frame_index % 3;
+
+    // Lazily recreate the blit pipeline if the caller changed target format
+    // (e.g., headless creates RGBA16F, editor's MTKView backbuffer is BGRA8).
+    if (backbuffer_format != blit_target_format_) {
+        blit_target_format_ = backbuffer_format;
+        GraphicsPipelineDesc desc{};
+        desc.layout = blit_layout_;
+        desc.vertexShader = blit_vs_;
+        desc.pixelShader = blit_ps_;
+        desc.renderTargetFormats[0] = backbuffer_format;
+        desc.renderTargetCount = 1;
+        desc.depthStencilFormat = DataFormat::Unknown;
+        desc.enableDepthTest = false;
+        desc.enableDepthWrite = false;
+        desc.cullMode = CullMode::None;
+        desc.vertexAttributes.clear();
+        desc.vertexBindings.clear();
+        blit_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
 
     // Debug: first frame only
     static bool first_frame = true;

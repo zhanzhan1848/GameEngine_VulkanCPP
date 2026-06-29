@@ -18,7 +18,8 @@ public:
     ForwardSceneRenderer() = default;
     ~ForwardSceneRenderer();
 
-    bool Initialize(rhi::RHIDeviceBase* device, u32 render_width, u32 render_height);
+    bool Initialize(rhi::RHIDeviceBase* device, u32 render_width, u32 render_height,
+                    rhi::DataFormat backbuffer_format = rhi::DataFormat::BGRA8_UNorm);
     void Shutdown();
 
     // Scene loading — uses SceneDataAdapter internally
@@ -38,7 +39,8 @@ public:
                 const math::m4x4& proj_matrix,
                 const math::v3& camera_position,
                 rhi::ResourceHandle backbuffer,
-                u32 frame_index);
+                u32 frame_index,
+                rhi::DataFormat backbuffer_format = rhi::DataFormat::BGRA8_UNorm);
 
     void SetLightDirection(math::v3 dir);
     void SetLightColor(math::v4 color);
@@ -268,6 +270,11 @@ private:
                                      rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle scene_cb_[3]{rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
                                       rhi::handles::INVALID_RESOURCE};
+
+    // Backbuffer format that drives the blit pipeline's renderTargetFormats[0].
+    // If the user target changes format between frames (e.g., RGBA16F in headless
+    // tests vs BGRA8 for Avalonia MTKView), the blit pipeline is recreated lazily.
+    rhi::DataFormat blit_target_format_{rhi::DataFormat::BGRA8_UNorm};
 
     // Shadow VP constant buffers (one per cascade, avoids shared-memory timing issue)
     rhi::ResourceHandle shadow_view_cb_[2]{rhi::handles::INVALID_RESOURCE,

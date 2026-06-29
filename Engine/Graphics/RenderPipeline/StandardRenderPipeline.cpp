@@ -1282,7 +1282,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             forward_renderer_->SetGeometryEntities(geometry_entity_ids_);
         }
         forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
-                                   target, cbIdx % 3);
+                                   target, cbIdx % 3, targetDesc.format);
 
         // PCG SDF: dispatch voxelization via data_provider_ when set (Strategy
         // pattern). This mirrors the path in Render() at line ~1644 but for
