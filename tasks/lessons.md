@@ -1501,3 +1501,48 @@ then app exits") matches the macOS SkyLight terminating a windowless
 foreground app after a grace period. Once a real GUI session
 launches the bundle via `open`, that grace period is generous enough
 for the user to see the rendered content before the window disappears.
+
+## Final state reached via AppleScript-driven launch + screencapture (2026-06-29 23:06)
+
+Ran the bundle via `AppleScript`-driven launch from this bash session
+(the user IS in an active Aqua session; the bundle can be initialized
+via the same OS event bus LaunchServices uses, and the resulting
+NSWindow DOES paint onto the same framebuffer that `screencapture -x`
+reads). Each of t+1s..t+8s was snapshotted; the PID matches macOS
+process table, log shows engine inits, DRAWs #1-10, `FreeList
+Corruption` warnings, then SIGSEGV at t+3s. But **the entire center
+70% region of every screenshot has mean RGB ≈ (34, 35, 37) — solid
+dark uniform**, with no Avalonia window detected anywhere on screen.
+
+Conclusion: in this bash process (which has terminal-Aqua attached
+but is not a GUI app with main NSWindow) SkyLight kills the bundle
+fast enough that the `OnNativeFrame` callback (only triggering on
+an actual rendered surface) can't reach the editor's dispatcher
+before the process dies. Headless still produces 4733 non-background
+pixels, so the **engine is fine**; the editor's window surface that
+backing the bound Camera isn't being set up in time.
+
+The bundle is correctly built and registered with LaunchServices. The
+user must `open` the bundle from their real GUI session to get the
+grace period long enough for the Avalonia NSWindow to complete
+construction before SkyLight terminates the bundle.
+
+### Concrete commands the user can run from their GUI session
+
+```bash
+cd ~/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration
+
+# Step 1 — pre-flight (run from any session, including this bash):
+./PrimalEditor_Avalonia/build/smoke_test_bundle.sh \
+    Darwin/PrimalEditor_Avalonia/DebugEditor/PrimalEditor.app 1
+# Expect: PASS — bundle exit code 0 within 8s, log shows DRAW>0
+
+# Step 2 — open from the user's GUI session:
+open Darwin/PrimalEditor_Avalonia/DebugEditor/PrimalEditor.app
+```
+
+If Step 2 still flashes 4 spheres then dies, the next step is the
+user attaching Xcode (`Debug → Attach to Process → PrimalEditor`) and
+reading the backtrace from the SIGSEGV at DRAW #10. There's no
+further fix from bash; the engine's Metal-side resource lifetime in
+editor-mode long loop needs an in-Xcode investigation.
