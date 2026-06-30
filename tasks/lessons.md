@@ -1642,3 +1642,48 @@ explicitly retaining specific autoreleased MTL references across the
   autoreleased reference. The lesson: when the crash is in a pool drain,
   look at the pool's contents, not at the retained members. The fix
   needs to be at the pool boundary, not at every individual retain site.
+
+## Attempted fix: drop @autoreleasepool from fire_timer (2026-06-30 10:42)
+
+Hypothesis: the per-callback @autoreleasepool at EngineAPI_mac.mm:50
+was the problem. Without it, autoreleased ObjC refs would stay on the
+GCD worker thread's default pool and be drained by libdispatch's
+last-resort autoreleasepool on thread idle.
+
+Test result: same crash, different pool.
+
+.ips trace from the no-pool run:
+  thread 10: queue=com.apple.root.user-initiated-qos
+  #0: objc_release
+  #1: AutoreleasePoolPage::releaseUntil
+  #2: objcautoreleasePoolPop
+  #3: _dispatch_last_resort_autorelease_pool_pop   ← libdispatch's pool, not mine
+  #4: _dispatch_root_queue_drain
+  #5: _dispatch_worker_thread2
+
+Same tagged-pointer class address, same objc_release crash, but now
+the pool being drained is libdispatch's last-resort pool on the worker
+thread rather than my @autoreleasepool. This proves the bug is NOT
+in any particular pool — it's in the autoreleased OBJECTS THEMSELVES
+being added to whatever pool happens to be current. The references
+are stale (the underlying ObjC objects have been recycled by
+CoreFoundation), and ANY pool drain reads them.
+
+Reverted to per-callback @autoreleasepool {} for the marginal benefit
+of containing the crash within the per-callback scope rather than
+spreading it to libdispatch's wider worker pool (which would touch
+more autoreleased objects and crash sooner).
+
+This is a definitive data point: the bug is in the autoreleased
+reference lifetime, not in pool scoping. Removing pools does not
+fix it. Adding more pools does not fix it (see the EnableSurfaceAutoDraw
+attempt above which scoped to AppKit's per-callout autoreleasepool
+and also crashed with the same signature).
+
+The only remaining fix is to NOT create the autoreleased references
+in the first place. That requires touching MetalCore.cpp /
+MetalCommandBuffer.cpp / MetalBlitToDrawable.cpp to use non-autoreleased
+APIs (e.g., newCommandBuffer() instead of commandBuffer() in Metal
+terminology, then explicit release()), or to refactor the render
+path to avoid those calls entirely. Both require an engine rebuild
+and have not been attempted in this session.
