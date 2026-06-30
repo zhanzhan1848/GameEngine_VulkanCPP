@@ -194,6 +194,61 @@ EDITOR_INTERFACE void SetEmbeddedSurfaceFrame(u32 id, s32 x, s32 y, u32 w, u32 h
 		surfaces[id].surface.get_id(), x, y, w, h);
 }
 
+// Register a C function pointer as the per-frame render callback for an
+// embedded surface's MTKView, and switch the MTKView to AppKit-driven
+// automatic draw mode (CVDisplayLink drives drawRect: at the display's
+// refresh rate, ~60Hz on macOS). The callback runs INSIDE AppKit's
+// per-callout autoreleasepool (the same one that drains MTKView's own
+// drawable references), so any autoreleased ObjC refs the editor creates
+// (MTLCommandBuffer, currentDrawable, etc.) are drained by THIS pool —
+// no cross-thread pool contamination with LaunchServices' _LSExceptions
+// shared singleton, which was the root cause of the previous
+// GCD-worker-driven fire_timer SIGSEGV at DRAW #N.
+//
+// The callback signature is void(*)(void* mtk_view, float dt). mtk_view
+// is the same pointer that GetSurfaceView returns. dt is a nominal 1/60s
+// — the editor's test scene has no animated uniforms, but the value is
+// passed for completeness.
+//
+// Mac only. Other platforms are a no-op (return 0). The previous
+// GCD-worker fire_timer path in EngineAPI_mac.mm is now obsolete but
+// kept for engine test harnesses that don't use the editor's pipeline.
+EDITOR_INTERFACE u32 EnableSurfaceAutoDraw(u32 id, void(*cb)(void*, float))
+{
+#if defined(__APPLE__)
+	assert(id < surfaces.size());
+	void* view = graphics::metal::core::external_surface_view(
+		surfaces[id].surface.get_id());
+	if (!view || !cb) return 0;
+	extern void PassThroughMTKView_RegisterRenderCallback(void* view, void(*cb)(void*, float));
+	extern void PassThroughMTKView_EnableAutoDraw(void* view);
+	PassThroughMTKView_RegisterRenderCallback(view, cb);
+	PassThroughMTKView_EnableAutoDraw(view);
+	return 1;
+#else
+	(void)id; (void)cb;
+	return 0;
+#endif
+}
+
+// Disable AppKit-driven automatic draw for an embedded surface's MTKView
+// and unregister its render callback. Mac only.
+EDITOR_INTERFACE void DisableSurfaceAutoDraw(u32 id)
+{
+#if defined(__APPLE__)
+	assert(id < surfaces.size());
+	void* view = graphics::metal::core::external_surface_view(
+		surfaces[id].surface.get_id());
+	if (!view) return;
+	extern void PassThroughMTKView_DisableAutoDraw(void* view);
+	extern void PassThroughMTKView_UnregisterRenderCallback(void* view);
+	PassThroughMTKView_UnregisterRenderCallback(view);
+	PassThroughMTKView_DisableAutoDraw(view);
+#else
+	(void)id;
+#endif
+}
+
 // Returns the contentView (NSView*) of the first visible NSWindow, suitable
 // for use as the host argument to CreateEmbeddedRenderSurface. Returns NULL
 // if no visible window is found. macOS only.
