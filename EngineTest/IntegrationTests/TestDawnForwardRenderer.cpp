@@ -1012,7 +1012,8 @@ void Engine_Test::RenderFrame() {
             // the 4-RT meshlet GBuffer. Falls through to the renderGraph
             // post-processing pipeline below.
             if (renderMode_ == DawnRenderMode::MeshletNoIBL ||
-                renderMode_ == DawnRenderMode::Meshlet) {
+                renderMode_ == DawnRenderMode::Meshlet ||
+                renderMode_ == DawnRenderMode::MeshletSSGISSR) {
                 RenderMeshletFrame(cmd);
             } else if (renderMode_ == DawnRenderMode::Deferred) {
                 // G-Buffer shares the non-jittered prepass depth (LessEqual +
@@ -1113,7 +1114,7 @@ void Engine_Test::UpdateCamera(float dt) {
     // Tab (keyCode 48) to cycle render mode — edge detected.
     // V (keyCode 9) cycles meshlet debug visualization (mode 7/8 only).
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
@@ -1123,7 +1124,8 @@ void Engine_Test::UpdateCamera(float dt) {
             "G-Buffer + Deferred Lighting",
             "G-Buffer + DDGI Global Illumination",
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
-            "GPU-Driven Meshlet + Indirect Draw + IBL"
+            "GPU-Driven Meshlet + Indirect Draw + IBL",
+            "GPU-Driven Meshlet + SSGI + SSR"
         };
         // Mode 5 (ObjNormal) visualizes the raw unpacked object-space normal
         // BEFORE the world_matrix 3x3 multiplication. Comparing mode 4 (world)
@@ -1220,7 +1222,7 @@ void Engine_Test::UpdateCamera(float dt) {
     // Tab (keyCode 9) to cycle render mode — edge detected.
     // V (keyCode 86) cycles meshlet debug visualization (mode 7/8 only).
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
@@ -1230,7 +1232,8 @@ void Engine_Test::UpdateCamera(float dt) {
             "G-Buffer + Deferred Lighting",
             "G-Buffer + DDGI Global Illumination",
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
-            "GPU-Driven Meshlet + Indirect Draw + IBL"
+            "GPU-Driven Meshlet + Indirect Draw + IBL",
+            "GPU-Driven Meshlet + SSGI + SSR"
         };
         bool tabPressed = EmscriptenGetKeyState(9);
         if (tabPressed && !prevTabState_) {

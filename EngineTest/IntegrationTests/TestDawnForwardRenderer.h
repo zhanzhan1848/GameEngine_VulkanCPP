@@ -141,7 +141,7 @@ private:
     primal::graphics::rhi::CommandBufferHandle cmdBuffer_{primal::graphics::rhi::handles::INVALID_COMMAND_BUFFER};
 
     // Render mode switching (Tab key)
-    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, FullPlusSSR = 4, Deferred = 5, LumenDDGI = 6, MeshletNoIBL = 7, Meshlet = 8, Count };
+    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, FullPlusSSR = 4, Deferred = 5, LumenDDGI = 6, MeshletNoIBL = 7, Meshlet = 8, MeshletSSGISSR = 9, Count };
     DawnRenderMode renderMode_{DawnRenderMode::ShadowAndIBL};
     bool prevTabState_{false};
     bool prevVState_{false};
