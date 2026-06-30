@@ -828,7 +828,12 @@ void Engine_Test::RenderFrame() {
         }
 
         // SSR: trace reflection rays (half-res), temporal accumulate, composite into HDR.
-        if (renderMode_ == DawnRenderMode::FullPlusSSR || renderMode_ == DawnRenderMode::Deferred) {
+        const bool ssrActive =
+            renderMode_ == DawnRenderMode::FullPlusSSR ||
+            renderMode_ == DawnRenderMode::Deferred ||
+            (renderMode_ == DawnRenderMode::MeshletSSGISSR &&
+             (ssgissrSubmode_ == SSGISSRSubmode::SSROnly || ssgissrSubmode_ == SSGISSRSubmode::Both));
+        if (ssrActive) {
             const auto& ssrOut = PostProcess::AddSSRPass(*renderGraph_, taaHDR, depthRG, hzbHandle,
                                                           velMrtRG, width_, height_, fi,
                                                           view_.GetProjectionMatrix(), invProj);
