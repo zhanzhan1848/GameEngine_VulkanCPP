@@ -145,16 +145,20 @@ fn load_material(idx: u32) -> MaterialInfo {
 
 // ---- Helpers ----------------------------------------------------------------
 
-// Unpacks a 2-component normal/tangent stored as 2x i16 packed into a u32.
-// High 16 bits = x, low 16 bits = y. Maps [-32767, 32767] to [-1, 1].
-// Z sign comes from color_t_sign's high byte (bit 1, mask 0x02u) — mirrors
-// ForwardPBR's unpackNormal. Without this, every normal ends up with +Z,
-// flipping under-side / back-face normals and breaking the lighting
-// direction in deferred.
+// Unpacks a 2-component normal/tangent stored as 2x u16 packed into a u32.
+// High 16 bits = x, low 16 bits = y. Decoder must use 32767.5 (i.e. 2/65535),
+// NOT 32767 — asset encodes n=+1 as u16=65535, so /32767.0 yields 1.00003,
+// d>1.0 fallback fires, and the actual normal gets replaced with +Z. That
+// silently turned Sponza's +Y floor normal into +Z, which against the
+// (-0.549, 0.768, -0.329) sun L gave NdotL<0 on the TOP and NdotL>0 on the
+// FLIPPED back face — the "direct light on floor's back" symptom.
+// Mirrors ForwardPBR.wgsl::unpackNormal. Z sign comes from color_t_sign's
+// high byte (bit 1, mask 0x02u).
 fn unpack_normal(packed: u32, color_t_sign: u32) -> vec3<f32> {
     let hi = f32((packed >> 16u) & 0xFFFFu);
     let lo = f32(packed & 0xFFFFu);
-    var f = vec2<f32>(hi, lo) / 32767.0 - 1.0;
+    let inv = 2.0 / 65535.0;
+    var f = vec2<f32>(hi * inv - 1.0, lo * inv - 1.0);
     let d = dot(f, f);
     if (d > 1.0) {
         return vec3<f32>(0.0, 0.0, 1.0);
