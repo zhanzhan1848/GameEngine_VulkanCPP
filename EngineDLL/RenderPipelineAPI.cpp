@@ -564,6 +564,25 @@ EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u3
 
     p->Render(*scene, view, entry->texture->GetHandle(), desc,
               rhi::handles::INVALID_SYNC);
+
+    // Drain the RHI garbage collector. The default RenderSystem path
+    // calls device->BeginFrame()/EndFrame() which set currentFrame_ and
+    // run gc_.Update() to release deferred-destroy callbacks. The
+    // PipelineRenderFrame path bypasses RenderSystem, so without this
+    // the GC queue accumulates mtlCommandBuffer / mtlBuffer /
+    // mtlTexture release callbacks indefinitely — a slow leak that
+    // eventually starves the allocator and can cascade into crashes
+    // when the same memory is reused.
+    if (auto* dev = graphics::get_rhi_device()) {
+        static std::atomic<u64> s_frame_counter{0};
+        const u64 cur = s_frame_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        // 3-frame latency mirrors EndFrame's logic, ensuring in-flight
+        // command buffers are not destroyed before the GPU finishes.
+        const u64 completed = (cur > 3) ? (cur - 3) : 0;
+        auto& gc = dev->GetGarbageCollector();
+        gc.SetCurrentFrame(cur);
+        gc.Update(completed);
+    }
     return 1;
 }
 

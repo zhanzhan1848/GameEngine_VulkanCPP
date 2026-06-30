@@ -1969,3 +1969,63 @@ The user can either pull the camera back (mouse wheel) or I can adjust the C# sc
 3. `_callbacks` Dictionary accessed on GCD worker thread without lock (NativeEngineBridge.cs:1430). Race condition; not currently triggering but fragile.
 
 These three don't cause the DRAW #2 crash, but should be fixed for hygiene.
+
+## Three followup fixes verified (2026-06-30 12:00)
+
+After the rpd double-release fix, three additional bugs flagged by the
+background investigator were applied and verified individually with
+30s bundle runs after each fix. None caused new crashes (one produced
+a transient CVDisplayLink -6661 startup error that resolved after a
+re-run, not a code regression).
+
+### Fix #1: metal_command._pool never drained (Engine/Graphics/Metal/MetalCore.cpp:36, 90-95)
+
+`_pool = NS::AutoreleasePool::alloc()->init()` was created in the
+metal_command constructor and never drained. Every autoreleased
+ref added during begin_frame() (MTLCommandBuffer, currentDrawable,
+MTLRenderPassDescriptor, etc.) leaked until process exit. The fix
+drains and releases the pool in `release()`. The comment is
+terse — just enough to prevent future engineers from re-adding a
+pool that they then "forget" to drain.
+
+### Fix #2: RHIGarbageCollector::Update() not called from PipelineRenderFrame path (EngineDLL/RenderPipelineAPI.cpp:565-583)
+
+The default RenderSystem path calls `device->BeginFrame()/EndFrame()`
+which sets `currentFrame_` and runs `gc_.Update()` to release
+deferred-destroy callbacks. The PipelineRenderFrame path bypasses
+RenderSystem, so the GC queue accumulated mtlCommandBuffer /
+mtlBuffer / mtlTexture release callbacks indefinitely — a slow
+leak that would eventually starve the allocator.
+
+The fix uses a static `std::atomic<u64>` frame counter (the editor
+mode path doesn't go through RenderSystem so there's no existing
+counter), advances it by 1 each PipelineRenderFrame, then calls
+`gc.SetCurrentFrame(cur)` and `gc.Update(cur - 3)`. The 3-frame
+latency mirrors `RHIDeviceBase::EndFrame`'s logic, ensuring
+in-flight command buffers are not destroyed before the GPU finishes.
+A landmine comment documents the 3-frame rationale.
+
+### Fix #3: _callbacks Dictionary not thread-safe (PrimalEditor_Avalonia/Native/NativeEngineBridge.cs:1388)
+
+`_callbacks` is read on the GCD worker thread (inside fire_timer's
+@autoreleasepool block in EngineAPI_mac.mm) and written on the UI
+thread (Start/Stop). `System.Collections.Generic.Dictionary` is not
+thread-safe; concurrent read/write can corrupt the internal buckets
+array, producing the same tagged-pointer crash signature as the
+autoreleased-reference bug. The fix uses `ConcurrentDictionary`, and
+`Stop`'s `_callbacks.Remove(loopId)` becomes `_callbacks.TryRemove(loopId, out _)` —
+the latter is needed because C# extension method resolution picks
+`CollectionExtensions.Remove<TKey,TValue>(IDictionary, TKey, out TValue)`
+when only one argument is given, which fails to compile against
+`ConcurrentDictionary` (no such overload).
+
+### Verification protocol
+
+Each fix was applied independently, engine rebuilt, and bundle
+launched with a 30s liveness test. All three produced:
+- `t+5s: alive=yes DRAW=10`
+- `t+15s: alive=yes DRAW=10`
+- `t+30s: alive=yes DRAW=10`
+- 0 FreeList Corruption warnings
+- 0 SIGSEGV
+

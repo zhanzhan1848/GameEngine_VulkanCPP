@@ -90,6 +90,16 @@ namespace primal::graphics::metal::core
             void release()
             {
                 flush();
+                // _pool was pushed in the constructor and never drained
+                // since; without this it leaks every autoreleased ref
+                // accumulated by begin_frame() (commandBuffer, drawables,
+                // render pass descriptors) until process exit.
+                if (_pool)
+                {
+                    _pool->drain();
+                    _pool->release();
+                    _pool = nullptr;
+                }
                 core::release(_command_queue);
                 core::release(_device);
             }

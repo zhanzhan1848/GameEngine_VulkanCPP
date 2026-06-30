@@ -1385,7 +1385,15 @@ public static class NativeEngineBridge
 
     public static class EditorRenderLoop
     {
-        private static readonly System.Collections.Generic.Dictionary<uint, Action<float>> _callbacks = new();
+        // _callbacks is read on the GCD worker thread (from inside
+        // fire_timer's @autoreleasepool block in EngineAPI_mac.mm) and
+        // written on the UI thread (Start/Stop on the editor's render
+        // loop start/stop). System.Collections.Generic.Dictionary is
+        // not thread-safe — concurrent read/write can corrupt the
+        // internal buckets array, producing the same tagged-pointer
+        // crash signature as the autoreleased-reference bug. Use
+        // ConcurrentDictionary so reads and writes are safe.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<uint, Action<float>> _callbacks = new();
         private static GCHandle _thunkHandle;
         private static NativeFrameCb? _thunk;
         private static bool _thunkRegistered;
@@ -1424,7 +1432,11 @@ public static class NativeEngineBridge
         {
             if (loopId == 0 || !_isLoaded) return;
             try { _EditorStopRenderLoop(loopId); } catch { }
-            _callbacks.Remove(loopId);
+            // TryRemove avoids the CollectionExtensions.Remove extension method
+            // ambiguity (Dictionary has both, ConcurrentDictionary only has
+            // TryRemove). ConcurrentDictionary.TryRemove is the thread-safe
+            // removal API; the discarded out value is irrelevant here.
+            _callbacks.TryRemove(loopId, out _);
         }
 
         public static void Destroy(uint loopId)
