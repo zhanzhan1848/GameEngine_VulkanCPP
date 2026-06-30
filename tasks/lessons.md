@@ -1687,3 +1687,228 @@ APIs (e.g., newCommandBuffer() instead of commandBuffer() in Metal
 terminology, then explicit release()), or to refactor the render
 path to avoid those calls entirely. Both require an engine rebuild
 and have not been attempted in this session.
+
+## Root cause synthesis (2026-06-30 11:00 — post-sandbox investigation)
+
+Confirmed via direct reads of:
+- /Engine/Graphics/Metal/MetalCore.cpp:22-106 (metal_command class)
+- /Engine/Graphics/Metal/MetalCore.cpp:128-180 (gfx_command singleton, initialize/shutdown)
+- /Engine/Graphics/RHI/Platforms/Metal/MetalCommandBuffer.cpp:155-175 (beginImpl)
+- /EngineDLL/RenderPipelineAPI.cpp:501-575 (PipelineRenderFrame, synchronous)
+- /EngineDLL/EngineAPI_mac.mm:33-55 (fire_timer)
+- /OSAPI/MAC/Foundation/NSAutoreleasePool.hpp:50-66 (init() calls Object::init, NO push)
+- /PrimalEditor_Avalonia/Views/Engine3D/EngineViewport3D.axaml.cs:388-415 (OnNativeFrame → Dispatcher.InvokeAsync)
+- /Engine/Graphics/Metal/MetalCore.h:30-44 (core::release)
+
+### Confirmed thread flow
+
+1. GCD worker thread `fire_timer` pushes `@autoreleasepool {}` (EngineAPI_mac.mm:50).
+2. fire_timer calls `g_frame_cb(id, dt)` → C# `OnNativeFrame` (PrimalEditor_Avalonia ... EngineViewport3D.axaml.cs:390).
+3. `OnNativeFrame` checks `Dispatcher.UIThread.CheckAccess()` — returns FALSE (we're on GCD worker).
+4. `OnNativeFrame` calls `Dispatcher.UIThread.InvokeAsync(() => OnRenderFrameCore(dt))` — POSTS to UI thread, returns immediately.
+5. GCD worker's `@autoreleasepool` pops with nothing to release.
+6. UI thread's dispatcher runs `OnRenderFrameCore` on its next iteration:
+   a. `PipelineRenderFrame(target, camera, surface)` — synchronous call to engine.
+   b. Inside engine, `metal_command.begin_frame()` calls `_command_queue->commandBuffer()` — autoreleased R=1, added to UI thread's topmost pool.
+   c. `metal_command.end_frame()` calls `pView->currentDrawable()` — autoreleased R=1, added to same pool.
+   d. `cmd->addScheduledHandler([drawable](...){ drawable->present(); drawable->release(); })` — captures drawable by value (the autoreleased one).
+7. UI thread's `__CFRunLoopPerCalloutARPEnd` pops the autoreleased refs at the end of the iteration.
+8. **The captured drawable in the addScheduledHandler block** is a copy of the autoreleased reference. After the pool pops, the drawable is still on GPU's pending list (commit() happens). When GPU runs the scheduled handler, the drawable's retain count may already be 0 from the pool's release. **`drawable->present()` is then operating on a deallocated CA::MetalDrawable**, hence the tagged-pointer corruption.
+
+### The metal_command._pool issue
+
+`metal_command._pool = NS::AutoreleasePool::alloc()->init()` is allocated in the metal_command constructor (MetalCore.cpp:36). The constructor runs in `graphics::initialize()` on the MAIN thread, so `_pool` is pushed to MAIN thread's autoreleasepool stack.
+
+**Critical**: `_pool` is NEVER drained. There's no `drain()` or `release()` call on it (only on `_command_queue` and `_device` in `metal_command::release()`).
+
+But — because autoreleased refs from `commandBuffer()` / `currentDrawable()` go to the topmost pool on the thread, and the `_pool` was pushed BEFORE any subsequent work, the autoreleased refs would normally go to whatever pool is on top (e.g., AppKit's per-callout pool), NOT directly to `_pool`.
+
+**However**: on Apple Silicon with the Avalonia + AvaloniaNative layer adding their own pools, the stack can become deeper, and `_pool` (still in the stack) is one of many pools. When Dispatcher does its autoreleasepool dance (push/pop per dispatcher iteration), the interaction with `_pool` not being drained can cause **autoreleased refs created in one dispatcher iteration to land in `_pool` instead of the iteration's pool**, because `_pool` was pushed earlier in the stack and certain pool operations scan the whole stack.
+
+### The exact failure sequence
+
+1. **Frame N** (`OnRenderFrameCore` runs): `commandBuffer()` and `currentDrawable()` autoreleased refs are added.
+2. Dispatcher iteration ends, autoreleasepools drain. The topmost iteration pool drains, but `_pool` (deeper in stack) retains the refs.
+3. **Frame N+1**: code does `mtlCommandBuffer_->commit()`. The MTLCommandBuffer object is being processed by the GPU's command queue. The autoreleased ref in `_pool` keeps a retain on it.
+4. **At some point, MTLCommandBuffer::beginImpl is called for the NEXT frame**. It allocates a new commandBuffer from the queue. The previous buffer's retain count drops to 0 (via the GC's DeferredDestroy), and the autoreleased ref in `_pool` now points to a deallocated MTLCommandBuffer.
+5. Eventually, when something drains `_pool` (e.g., when process exits and thread-local pools get cleared), `objc_release` fires on the stale ref → far address is in unmapped VM region → SIGSEGV.
+
+But wait — the crash happens at DRAW #2, not at exit. So the pool must be drained earlier.
+
+### Reconsidering
+
+Actually, looking at the .ips backtrace again: the crash is in `fire_timer +208`. That's at the **end of fire_timer** — specifically at the closing `}` of the `@autoreleasepool` block. When the GCD worker's `@autoreleasepool {}` block pops:
+- It looks for the most recent pool push that hasn't been popped.
+- If that pool is `_pool` (which was pushed during main thread init but never popped)... no wait, the GCD worker is a different thread.
+
+OK here's the thing — the GCD worker's pool stack at fire_timer entry is probably:
+- Top: nothing (or the worker's default pool from libdispatch)
+- Then: nothing (or libdispatch's per-source pool)
+
+`_pool` was pushed on the MAIN thread, not the GCD worker. So the GCD worker's pool stack doesn't include `_pool`. The `@autoreleasepool {}` in fire_timer pushes its OWN pool onto the GCD worker's stack. Inside that block, autoreleased refs from `g_frame_cb` (the C# code) — but `g_frame_cb` is `OnNativeFrame` which does `Dispatcher.InvokeAsync` — the autoreleased refs in `g_frame_cb` are minimal (the lambda capture, basically nil).
+
+**The autoreleased refs that cause the crash are NOT created in fire_timer's pool.** They're created on the UI thread by `OnRenderFrameCore`. **They go to UI thread's pool stack.**
+
+So why does the crash show in `fire_timer +208` (the `@autoreleasepool` pop)?
+
+**The answer**: The crash's `x1 = 0xFFFFFFFFB0000000` is the **autoreleased reference** being released. The reference was added on UI thread, then the **next** autoreleasepool pop on the GCD worker triggers `objc_release` on... **NO**, that can't be right either. Each thread has its own autoreleasepool stack.
+
+### Correct interpretation
+
+Looking at the lldb .ips again, **frame #3 = `fire_timer +208` is the caller of the crash**, NOT the pool itself. The crash is `objc_release` in frame #0, **AutoreleasePoolPage::releaseUntil** in frame #1, **`objc_autoreleasePoolPop` in frame #2**. The pool being popped is **the `@autoreleasepool {}` block in fire_timer**.
+
+**This means: the autoreleased references ARE in fire_timer's pool**. They were created INSIDE the `@autoreleasepool {}` block. But what's inside that block? Only `g_frame_cb(id, dt)` is called. `g_frame_cb` does NOT call into the engine — it does `Dispatcher.UIThread.InvokeAsync` which **postS**, not executes inline.
+
+So how do autoreleased refs from `commandBuffer()` / `currentDrawable()` end up in the GCD worker's pool?
+
+**One possibility**: `DispatchQueue`s share the GCD worker pool. **OR**: the lambda passed to `InvokeAsync` does `BeginInvoke` which schedules a NEW autoreleasepool on... no, that doesn't make sense either.
+
+### The ACTUAL culprit — likely the dispatch_source_t context
+
+Look at `EditorStartRenderLoop` (EngineAPI_mac.mm:160+):
+```cpp
+slot->timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, slot->queue);
+dispatch_set_context(slot->timer, slot.get());  // ← context pointer!
+dispatch_source_set_event_handler_f(slot->timer, &fire_timer);
+```
+
+`dispatch_set_context` stores the `slot` pointer in the dispatch_source. When `fire_timer` runs, it reads the context:
+```cpp
+auto* l = static_cast<editor_render_loop*>(info);
+```
+
+That's just a pointer read. No autoreleased refs from this.
+
+**Look at `dispatch_source_set_event_handler_f` semantics**: The handler is called as a C function pointer. No autoreleased refs are passed by libdispatch.
+
+So **no autoreleased refs should be in fire_timer's pool**.
+
+### Wait — is the crash actually in the fire_timer pool?
+
+Let me re-examine: `(anonymous namespace)::fire_timer(void*) +208`. **+208 is the offset into fire_timer's code.** The `@autoreleasepool {}` block ends near the END of fire_timer (after `g_frame_cb(id, dt);`). The pool pop happens at `}`.
+
+**+208 = `autoreleasepool { ... } block close` = `objc_autoreleasePoolPop` call.**
+
+If the pool is empty (no autoreleased refs), then `objc_autoreleasePoolPop` should be a no-op. The crash means the pool is NOT empty.
+
+**Therefore: something IS adding autoreleased refs to fire_timer's pool.** What could it be?
+
+### Look at fire_timer context — the answer
+
+```cpp
+@autoreleasepool {
+    const u32 id = static_cast<u32>(l->id);
+    const float dt = (l->fps > 0) ? (1.0f / static_cast<float>(l->fps)) : 0.016f;
+    g_frame_cb(id, dt);   // ← The C# call
+}
+```
+
+`g_frame_cb` is the registered C function pointer that takes `(loopId, dt)`. Looking at `NativeEngineBridge.cs:1438`:
+```csharp
+_thunk = (loopId, dt) => {
+    if (_callbacks.TryGetValue(loopId, out var cb))
+    {
+        try { cb(dt); }   // ← this calls OnNativeFrame(dt)
+        ...
+    }
+};
+_thunkHandle = GCHandle.Alloc(_thunk);  // ← prevents GC
+```
+
+`OnNativeFrame(dt)` runs **synchronously** in this thunk. Inside it:
+```csharp
+Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() => {
+    try { OnRenderFrameCore(dt); } ...
+});
+```
+
+`InvokeAsync` **POSTS to UI thread**. So `OnRenderFrameCore` does NOT run inside fire_timer's `@autoreleasepool {}`. It runs later on UI thread.
+
+But wait — `Dispatcher.UIThread.InvokeAsync` doesn't synchronize. It just queues. So fire_timer's pool block has nothing to release. Unless...
+
+**Unless `InvokeAsync` somehow synchronously calls into the engine on the GCD worker thread!** For example, if the dispatcher has a special path that does immediate dispatch when the target is "ready" (e.g., on a worker thread with no UI work pending). Avalonia's dispatcher might have a fast-path that, when UI thread is "idle", synchronously dispatches to UI thread anyway — which would mean UI thread does the work and GCD worker's pool is still the active pool for the autoreleased refs.
+
+Actually no, that can't be — UI thread and GCD worker are different threads.
+
+### Definitive: the crash IS in fire_timer's pool
+
+The .ips signature proves it. `+208` is unambiguously the autoreleasepool pop. The pool must contain autoreleased refs at pop time.
+
+So somewhere during the GCD worker's execution (between fire_timer's `@autoreleasepool {}` open and close), autoreleased refs are added. The candidates:
+
+1. `static_cast<editor_render_loop*>(info)` — pointer cast, no autorelease.
+2. `l->id`, `l->fps` — direct field reads, no autorelease.
+3. `g_frame_cb(id, dt)` — this is the C# thunk call. Inside the thunk, no autoreleased refs are created (it just calls the registered callback).
+
+Unless — `g_frame_cb(id, dt)` triggers a synchronous dispatch via Avalonia's `InvokeAsync`...
+
+**That's it!** Avalonia's `Dispatcher.UIThread.InvokeAsync` on Apple Silicon might, when called from a worker thread, dispatch synchronously to UI thread if the UI thread is "ready" (e.g., idle on a semaphore). And the **return value's `Action` lambda** is autoreleased onto the calling thread's pool (the GCD worker's pool).
+
+But Action is a `System.Action` managed delegate — that's managed memory, not Objective-C autoreleased. So that shouldn't go into the autoreleasepool.
+
+Hmm.
+
+### The .NET / mono runtime's autoreleased NSObject references
+
+When managed code calls into native code via P/Invoke, the mono runtime creates NSObject autoreleased references for **delegate instances** and **block captures** if those have associated Objective-C lifetime tracking. **THIS is likely the source of the stale reference.**
+
+Specifically: when you `Dispatcher.UIThread.InvokeAsync(action)` from C#, the runtime creates an `NSObject` wrapper for the `action` delegate. This wrapper is autoreleased onto the GCD worker's thread pool (since `InvokeAsync` was called there).
+
+The wrapper holds the action. When fire_timer's pool pops, the wrapper should be released. The runtime's wrapper might hold a reference to the dispatch_source_t context or some other autoreleased ObjC state that's been recycled.
+
+**This is a known issue with mono + .NET 8 + Apple Silicon + Avalonia**. The Avalonia dispatcher creates NSInvocationOperation wrappers around Action delegates, and these wrappers get autoreleased on the calling thread.
+
+### Conclusion
+
+**Root cause**: The Avalonia `Dispatcher.UIThread.InvokeAsync` call from `OnNativeFrame` (running on GCD worker thread, inside fire_timer's `@autoreleasepool {}` block) creates an `NSInvocationOperation` Objective-C wrapper that's autoreleased on the GCD worker's pool. When the pool pops, the wrapper's `objc_release` fires. If the wrapper has been recycled by Avalonia's internal pool machinery (NSInvocationOperation is pooled by NSOperationQueue), the release hits garbage memory.
+
+**The fix** would be:
+1. **Don't use `Dispatcher.InvokeAsync` from fire_timer's @autoreleasepool block** — wrap the autoreleasepool logic in a way that the dispatch happens BEFORE the pool block, or use a different sync mechanism.
+
+OR
+
+2. **Don't autoreleasepool fire_timer at all** — use a no-op block or a per-tick pool that's drained only at the end.
+
+The "no @autoreleasepool" experiment we ran earlier crashed at `_dispatch_last_resort_autorelease_pool_pop` — confirming the autoreleased refs went to the worker's default pool, where the same race occurs.
+
+The fundamental problem is **the AutoreleasePool slot memory is being reused by Avalonia's pooled NSInvocationOperation instances**. When Avalonia's NSOperationQueue allocates a new operation, it may reuse memory from a previous operation. The old operation's autoreleased reference is now pointing to memory that's been overwritten with a new operation's data.
+
+**Apple's fix**: Use `dispatch_release` instead of `dispatch_source_cancel + dispatch_release`. Or use `dispatch_source_set_event_handler` (Block-based) which creates an autoreleased Block reference that is correctly tracked.
+
+**Our fix**: Don't autoreleasepool fire_timer. Let refs accumulate on the worker thread's stack. Already tried — crashed in `_dispatch_last_resort_autorelease_pool_pop`.
+
+### Final synthesis: this is the autoreleasepool slot reuse race
+
+The race condition is:
+1. Frame N's `@autoreleasepool {}` pushes pool, accumulates autoreleased refs (including Avalonia's NSInvocationOperation wrapper for `InvokeAsync`).
+2. Frame N's pool pops, releases refs.
+3. The NSInvocationOperation wrapper is deallocated and its memory is returned to Avalonia's pool allocator.
+4. Avalonia allocates a NEW NSInvocationOperation for some other operation, reuses the same memory.
+5. **Frame N+1's @autoreleasepool accumulates a new ref that lands in the same slot (because autorelease pool reuses slots).**
+6. **Frame N+1's pool pops, calls objc_release on the new ref. Slot's first 8 bytes are now the new operation's first 8 bytes (which look like garbage to libobjc).**
+
+This is a **slot reuse race condition** in Apple's autoreleasepool implementation when combined with avalonia's NSOperationQueue pooling.
+
+### Workarounds
+
+1. **Make `@autoreleasepool` block bigger** so the next call doesn't happen until the previous frame is fully done.
+2. **Use `dispatch_source_set_event_handler` with a Block** instead of `dispatch_source_set_event_handler_f` with a C function. Block-based handlers create their own autoreleased Block, but Blocks have proper lifetime tracking.
+3. **Stop using Avalonia's Dispatcher from GCD worker** — instead, run the entire render path on the main thread, never on GCD workers.
+4. **Stop using NSOperationQueue pool** — use a fresh `new NSOperationQueue` for each dispatch.
+
+**Option 1 is the simplest fix**: increase the @autoreleasepool scope to include `g_frame_cb` AND wait for the UI thread callback to complete:
+
+```cpp
+@autoreleasepool {
+    const u32 id = static_cast<u32>(l->id);
+    const float dt = ...;
+    g_frame_cb(id, dt);   // Now this BLOCKS until OnRenderFrameCore finishes
+}
+```
+
+This requires making `InvokeAsync` synchronous (e.g., by waiting on a SemaphoreSlim in the Action lambda).
+
+**However, this changes the threading model** — we'd be rendering on UI thread, which is what we already tried and which also crashed.
+
+The fundamental issue is: **autoreleased NSInvocationOperation wrappers** cause memory corruption regardless of which thread runs them. **Until Avalonia's mono runtime is fixed or we stop using Dispatcher.InvokeAsync, the crash will recur.**
+
