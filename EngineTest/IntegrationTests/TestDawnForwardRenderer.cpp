@@ -773,8 +773,17 @@ void Engine_Test::RenderFrame() {
     // Metal test (TestNaniteStreamingPipeline.cpp:3340-3341) and import the
     // meshlet pipeline's own final_depth_texture_ for post-process depth reads.
     // Forward/Deferred paths still use prepassDepthTexture_.
+    // `meshletMode` covers every mode that runs RenderMeshletFrame — including
+    // Mode 9, which reuses the meshlet draw path. This flag gates the meshlet
+    // depth import (rebinds depthRG from prepassDepthTexture_ to
+    // GPUDrivenDrawPipeline::GetFinalDepthTexture()) below.
     const bool meshletMode = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
-                              renderMode_ == DawnRenderMode::Meshlet);
+                              renderMode_ == DawnRenderMode::Meshlet ||
+                              renderMode_ == DawnRenderMode::MeshletSSGISSR);
+    // The TAA-bypass diagnostic is a SEPARATE concern: Mode 7/8 keep the bypass,
+    // Mode 9 runs TAA (its SSGI/SSR depend on the resolved HDR).
+    const bool meshletBypassTAA = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
+                                   renderMode_ == DawnRenderMode::Meshlet);
     if (meshletMode) {
         auto& gpuDrawPipeline = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
         rhi::ResourceHandle meshletDepth = gpuDrawPipeline.GetFinalDepthTexture();
@@ -809,9 +818,11 @@ void Engine_Test::RenderFrame() {
     auto tonemapOutput = hdrRG;
 
     if (renderMode_ != DawnRenderMode::NoEffects && renderMode_ != DawnRenderMode::ShadowOnly) {
-        // DIAGNOSTIC: bypass TAA for meshlet modes to confirm ghost source.
-        // TODO: re-enable once meshlet velocity (RG16F) is verified to feed TAA correctly.
-        if (!meshletMode) {
+        // Mode 8 (Meshlet) keeps its diagnostic bypass — see the velocity blit
+        // comment in RenderMeshletFrame (RG16_Float format reconciliation).
+        // Mode 9 (MeshletSSGISSR) runs TAA; SSGI/SSR depend on the resolved HDR.
+        // Velocity audit confirmed meshlet RG16F velocity is consistent end-to-end.
+        if (!meshletBypassTAA) {
             const auto& taaOut = PostProcess::AddTAAPass(*renderGraph_, hdrRG, velMrtRG, width_, height_, fi);
             taaHDR = taaOut.output;
         }
@@ -992,7 +1003,8 @@ void Engine_Test::RenderFrame() {
             //    its own shadow pipeline in RenderMeshletFrame).
             if (renderMode_ != DawnRenderMode::NoEffects &&
                 renderMode_ != DawnRenderMode::MeshletNoIBL &&
-                renderMode_ != DawnRenderMode::Meshlet) {
+                renderMode_ != DawnRenderMode::Meshlet &&
+                renderMode_ != DawnRenderMode::MeshletSSGISSR) {
                 RenderShadowPass(cmd);
                 forwardRenderer_.SetDawnShadowLightVP(lightVP_);
             }
@@ -1003,7 +1015,8 @@ void Engine_Test::RenderFrame() {
             //     own depth texture via GPUDrivenDrawPipeline::Execute.
             if (renderMode_ != DawnRenderMode::NoEffects &&
                 renderMode_ != DawnRenderMode::MeshletNoIBL &&
-                renderMode_ != DawnRenderMode::Meshlet) {
+                renderMode_ != DawnRenderMode::Meshlet &&
+                renderMode_ != DawnRenderMode::MeshletSSGISSR) {
                 forwardRenderer_.RenderDawnDepthPrepass(cmd, view_, prepassDepthTexture_, fi, width_, height_);
             }
 
@@ -2313,9 +2326,9 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
         cmd, view_, meshletGBuffer, meshletDepth, hdrTexture_, scene_,
         frameIndex_, width_, height_);
 
-    // Blit meshlet velocity (RG16_UNorm) → velocityTexture_ so downstream TAA
-    // sees per-pixel motion vectors. Note: format mismatch (UNorm vs Float) —
-    // values get quantized but the sign survives for small motion.
+    // Blit meshlet velocity (RG16_Float) → velocityTexture_ so downstream TAA
+    // sees per-pixel motion vectors. RG16_Float on both sides
+    // (GPUDrivenDrawPipeline.cpp:446, TestDawnForwardRenderer.cpp:236) — formats match.
     rhi::TextureBlitRegion velRegion{};
     velRegion.srcSubresource = {0, 0, 1};
     velRegion.srcOffsets[0] = {0, 0, 0};
