@@ -840,8 +840,19 @@ void Engine_Test::RenderFrame() {
             taaHDR = ssrOut.outputColor;
         }
 
-        // SSGI disabled — causes rendering issues on Dawn, ToneMapping falls back to dummy
+        // SSGI (Lumen Dawn variant): half-res HZB ray march gathering prev-frame color.
+        // Mode 9 only. prevFrameColor = taaHDR (self-feedback, accepts 1-frame latency).
         auto ssgiHandle = rendergraph::kInvalidRGResourceHandle;
+        const bool ssgiActive =
+            renderMode_ == DawnRenderMode::MeshletSSGISSR &&
+            (ssgissrSubmode_ == SSGISSRSubmode::SSGIOnly || ssgissrSubmode_ == SSGISSRSubmode::Both);
+        if (ssgiActive) {
+            const auto& ssgiOut = PostProcess::AddLumenSSGIPass(*renderGraph_,
+                depthRG, hzbHandle, velMrtRG, taaHDR,
+                width_, height_, fi,
+                view_.GetProjectionMatrix(), invProj);
+            ssgiHandle = ssgiOut.ssgiOutput;
+        }
 
         const auto& ssaoOut = graphics::PostProcess::AddSSAOPass(*renderGraph_, depthRG, width_, height_, fi, view_.GetProjectionMatrix(), invProj);
         auto ssaoAOHandle = ssaoOut.ssaoOutput;
