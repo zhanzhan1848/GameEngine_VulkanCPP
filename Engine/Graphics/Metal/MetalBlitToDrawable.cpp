@@ -219,7 +219,26 @@ namespace primal::graphics::metal
         enc->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
         enc->endEncoding();
 
-        // renderPassDescriptor() returns a +1 autoreleased object; release our retain.
-        rpd->release();
+        // DO NOT call rpd->release() here. rpd is autoreleased (R=1 in
+        // the calling thread's pool) — its lifetime is owned by the
+        // autoreleasepool. The previous code had a comment claiming
+        // "+1 autoreleased object" and called release() "to balance
+        // our retain", but renderPassDescriptor() does NOT return a
+        // +1 retained object; it returns an autoreleased one. Calling
+        // release() on it over-decremented the refcount to 0 while
+        // the autoreleasepool still held a reference, producing a
+        // use-after-free: the autoreleasepool later drained and
+        // observed that the slot's isa pointer was 0xD2... (garbage
+        // from a recycled allocation), causing objc_release to fault
+        // at an unmapped VM region with the SIGSEGV signature
+        // `objc_release → AutoreleasePoolPage::releaseUntil →
+        // objc_autoreleasePoolPop` on the GCD worker / main thread /
+        // libdispatch's last-resort pool. Verified by NSZombieEnabled
+        // which printed `*** -[MTLRenderPassDescriptorInternal
+        // release]: message sent to deallocated instance 0x...`
+        // pointing exactly at this line. Other RenderPassDescriptor
+        // sites (MetalPreProcess.cpp, MetalGPass.cpp, MetalTAA.cpp,
+        // MetalPostProcess.cpp, MetalCommandBuffer.cpp) correctly
+        // do NOT call release() — see them for the canonical pattern.
     }
 } // namespace primal::graphics::metal

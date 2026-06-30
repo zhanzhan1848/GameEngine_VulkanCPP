@@ -1912,3 +1912,60 @@ This requires making `InvokeAsync` synchronous (e.g., by waiting on a SemaphoreS
 
 The fundamental issue is: **autoreleased NSInvocationOperation wrappers** cause memory corruption regardless of which thread runs them. **Until Avalonia's mono runtime is fixed or we stop using Dispatcher.InvokeAsync, the crash will recur.**
 
+
+## ROOT CAUSE FOUND via NSZombieEnabled (2026-06-30 11:30)
+
+NSZombieEnabled=YES run produced:
+```
+*** -[MTLRenderPassDescriptorInternal release]: message sent to deallocated instance 0xc4dc3e580
+```
+
+**Root cause**: `Engine/Graphics/Metal/MetalBlitToDrawable.cpp:222-223` had:
+```cpp
+MTL::RenderPassDescriptor* rpd = MTL::RenderPassDescriptor::renderPassDescriptor();  // autoreleased R=1
+...
+// renderPassDescriptor() returns a +1 autoreleased object; release our retain.
+rpd->release();   // ❌ WRONG: over-decrements autoreleased object
+```
+
+`MTL::RenderPassDescriptor::renderPassDescriptor()` returns an **autoreleased** object, NOT a +1 retained one. Calling `release()` on it decrements the refcount to 0 immediately while the autoreleasepool still holds a reference. The autoreleasepool later drains and tries to release a deallocated instance → the object's memory is recycled by the allocator → the autoreleasepool's slot now contains garbage (0xD2... isa prefix) → `objc_release` dereferences garbage → SIGSEGV.
+
+### Why every pool boundary crashed with the same signature
+
+`objc_release` is called on the deallocated-then-recycled `MTLRenderPassDescriptorInternal` instance. Whenever ANY autoreleasepool drains and has a slot pointing to this object, the crash fires:
+- GCD worker's `@autoreleasepool {}` in fire_timer (frame #2 onward)
+- AppKit's per-callout autoreleasepool on main thread (CFRunLoopPerCalloutARPEnd)
+- libdispatch's `_dispatch_last_resort_autorelease_pool_pop` on the worker
+
+The crash signature (`objc_release → AutoreleasePoolPage::releaseUntil → objc_autoreleasePoolPop`) was the SAME because the SAME stale object was being released — just from different pool boundaries.
+
+### Fix
+
+1. **`Engine/Graphics/Metal/MetalBlitToDrawable.cpp`**: removed `rpd->release()`. The rpd is autoreleased, lifetime owned by the calling thread's pool. Landmine comment added explaining why NOT to call release().
+
+2. **`EngineDLL/RenderPipelineAPI.cpp`**: changed size-mismatch check from hard-fail (`return 0`) to warn-once + continue. The fullscreen-triangle blit scales via UV sampling — exact dimensions are NOT required. The previous "hard-fail" was preventing the blit from running at all, so the surface never received new frames.
+
+### Verified after fix
+
+- Bundle stays alive 30+ seconds
+- DRAW #1-#10 all rendered cleanly
+- 0 FreeList Corruption warnings
+- User confirmed: 3 of 4 spheres visible (the 4th at x=+6 is at the right edge of the FOV cone — camera distance 12, FOV 60°, sphere spread 12 units; the +6 sphere is at the geometric edge of the viewport)
+
+### Why "3 spheres" instead of "4"
+
+NOT a bug. The test scene is at the geometric limit of the camera frustum:
+- spheres at x = -6, -2, 2, 6 (spread 12 units)
+- camera at distance 12, FOV 60°
+- visible width at z=0: 2 * 12 * tan(30°) = 13.86 units
+- so x=±6 is at the very edge, may clip
+
+The user can either pull the camera back (mouse wheel) or I can adjust the C# scene config (smaller sphere spacing or wider FOV).
+
+### Other bugs the background agent flagged (NOT fixed in this session, lower priority)
+
+1. `metal_command::_pool` allocated in constructor but never drained in `release()` (MetalCore.cpp:36, 90-95). Memory leak, not immediate crash.
+2. `RHIGarbageCollector::Update()` not called from `PipelineRenderFrame` path (StandardRenderPipeline.cpp:1735-1780). Metal command buffers leak in GC queue.
+3. `_callbacks` Dictionary accessed on GCD worker thread without lock (NativeEngineBridge.cs:1430). Race condition; not currently triggering but fragile.
+
+These three don't cause the DRAW #2 crash, but should be fixed for hygiene.

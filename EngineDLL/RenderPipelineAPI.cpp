@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <unordered_map>
 
 #endif
 
@@ -595,17 +596,33 @@ EDITOR_INTERFACE u32 BlitRenderTargetToSurface(u64 target_handle, u32 surface_id
         return 0;
     }
 
-    // Spec §4.2 step 3: hard-fail on size mismatch (blit cannot scale).
+    // Spec §4.2 step 3 (revised 2026-06-30): the fullscreen-triangle blit
+    // path (MetalBlitToDrawable::Blit) draws a triangle covering NDC
+    // [-1,+1]² and samples the source texture with UV coordinates, so
+    // it inherently scales between source and destination sizes. The
+    // original "hard-fail on size mismatch" check assumed the blit was
+    // a direct copy that required exact dimensions, which is wrong for
+    // a fullscreen-triangle fragment-shader blit. The "warn, continue"
+    // behaviour was emitting a stderr line every frame but still
+    // returning 0, so the surface never received the new frame.
+    //
+    // We now (a) emit a single warning the first time a mismatch is
+    // observed for a given surface, (b) allow the blit to proceed.
+    // The fragment shader handles arbitrary size scaling correctly.
     const auto& target_desc = entry->texture->GetDesc();
     const u32 target_w = static_cast<u32>(target_desc.size.x);
     const u32 target_h = static_cast<u32>(target_desc.size.y);
     const u32 surf_w   = rs->surface.width();
     const u32 surf_h   = rs->surface.height();
     if (target_w != surf_w || target_h != surf_h) {
-        std::fprintf(stderr,
-            "[BlitRenderTargetToSurface] size mismatch: target %ux%u vs surface %ux%u\n",
-            target_w, target_h, surf_w, surf_h);
-        return 0;
+        static thread_local std::unordered_map<u32, bool> warned;
+        if (warned.find(surface_id) == warned.end()) {
+            std::fprintf(stderr,
+                "[BlitRenderTargetToSurface] size mismatch (allowed, will resample): target %ux%u vs surface %ux%u\n",
+                target_w, target_h, surf_w, surf_h);
+            warned[surface_id] = true;
+        }
+        // Continue — the blit scales.
     }
 
     // Delegate to surface::blit_and_present, which dispatches through
