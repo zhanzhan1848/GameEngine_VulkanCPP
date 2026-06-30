@@ -1161,15 +1161,16 @@ void Engine_Test::UpdateCamera(float dt) {
 
         const bool vPressed = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 9);
         if (vPressed && !prevVState_) {
-            // V key is intentionally a mode-7 affordance: it cycles the meshlet
-            // debug visualization. Mode 8 (full-lit meshlet) ignores V so the
-            // textured result stays unmodified.
             if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
+                // V key is a Mode-7 affordance: cycles meshlet debug visualization.
                 meshletDebugMode_ = (meshletDebugMode_ + 1u) % 6u;
                 std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_
                           << " (" << kDebugLabel[meshletDebugMode_] << ")" << std::endl;
-            } else {
-                std::cerr << "[Meshlet] V ignored — debug visualization only available in Mode 7 (MeshletNoIBL)" << std::endl;
+            } else if (renderMode_ == DawnRenderMode::MeshletSSGISSR) {
+                // Mode 9: V cycles SSGI/SSR sub-mode {Off, SSGIOnly, SSROnly, Both}.
+                ssgissrSubmode_ = static_cast<SSGISSRSubmode>((static_cast<u8>(ssgissrSubmode_) + 1u) % 4u);
+                static const char* kSubLabel[] = {"Off", "SSGI only", "SSR only", "Both"};
+                std::cerr << "[Mode 9] SSGI/SSR sub-mode = " << kSubLabel[static_cast<u8>(ssgissrSubmode_)] << std::endl;
             }
         }
         prevVState_ = vPressed;
@@ -1178,6 +1179,11 @@ void Engine_Test::UpdateCamera(float dt) {
         // hashed-color state via GPUDrivenDrawPipeline::SetDebugMode.
         if (renderMode_ != DawnRenderMode::MeshletNoIBL && meshletDebugMode_ != 0u) {
             meshletDebugMode_ = 0u;
+        }
+
+        // Reset Mode 9 sub-mode on exit so the next entry starts at the default (Both).
+        if (renderMode_ != DawnRenderMode::MeshletSSGISSR && ssgissrSubmode_ != SSGISSRSubmode::Both) {
+            ssgissrSubmode_ = SSGISSRSubmode::Both;
         }
 
         // Refresh title every frame so the current debug mode is visible
@@ -1265,7 +1271,6 @@ void Engine_Test::UpdateCamera(float dt) {
 
         bool vPressed = EmscriptenGetKeyState(86);
         if (vPressed && !prevVState_) {
-            // V only in Mode 7 (MeshletNoIBL) — see native handler for rationale.
             if (renderMode_ == DawnRenderMode::MeshletNoIBL) {
                 meshletDebugMode_ = (meshletDebugMode_ + 1u) % 6u;
                 std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_ << std::endl;
@@ -1274,12 +1279,24 @@ void Engine_Test::UpdateCamera(float dt) {
                         window.setMeshletDebug($0);
                     }
                 }, meshletDebugMode_);
+            } else if (renderMode_ == DawnRenderMode::MeshletSSGISSR) {
+                ssgissrSubmode_ = static_cast<SSGISSRSubmode>((static_cast<u8>(ssgissrSubmode_) + 1u) % 4u);
+                static const char* kSubLabel[] = {"Off", "SSGI only", "SSR only", "Both"};
+                std::cerr << "[Mode 9] SSGI/SSR sub-mode = " << kSubLabel[static_cast<u8>(ssgissrSubmode_)] << std::endl;
+                EM_ASM_({
+                    if (window.setSSGISSRSubmode) {
+                        window.setSSGISSRSubmode($0);
+                    }
+                }, static_cast<u8>(ssgissrSubmode_));
             }
         }
         prevVState_ = vPressed;
 
         if (renderMode_ != DawnRenderMode::MeshletNoIBL && meshletDebugMode_ != 0u) {
             meshletDebugMode_ = 0u;
+        }
+        if (renderMode_ != DawnRenderMode::MeshletSSGISSR && ssgissrSubmode_ != SSGISSRSubmode::Both) {
+            ssgissrSubmode_ = SSGISSRSubmode::Both;
         }
     }
 #endif

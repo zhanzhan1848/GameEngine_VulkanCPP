@@ -146,6 +146,10 @@ private:
     bool prevTabState_{false};
     bool prevVState_{false};
     u32 meshletDebugMode_{0};   // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id
+    // Mode 9 sub-mode: which screen-space effect(s) to apply.
+    // V key cycles Off → SSGIOnly → SSROnly → Both → Off ...
+    enum class SSGISSRSubmode : u8 { Off = 0, SSGIOnly = 1, SSROnly = 2, Both = 3 };
+    SSGISSRSubmode ssgissrSubmode_ = SSGISSRSubmode::Both;
     bool punctualLightsAdded_{false};
 
     // ---- Meshlet pipeline (mode 7) ----
