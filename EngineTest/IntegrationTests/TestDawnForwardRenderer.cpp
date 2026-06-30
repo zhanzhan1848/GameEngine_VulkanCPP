@@ -2353,8 +2353,9 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
     // Point shadow + IBL at the existing renderer-owned bindings so the meshlet
     // deferred shader sees the same shadow map / cube maps as the other modes.
     // SetDawnShadowResources was already called during init.
-    // enableIBL: Mode 7 (MeshletNoIBL) skips the IBL ambient term; Mode 8 applies it.
-    forwardRenderer_.SetDawnEnableIBL(renderMode_ == DawnRenderMode::Meshlet ? 1u : 0u);
+    // enableIBL: Mode 7 (MeshletNoIBL) skips the IBL ambient term; Mode 8/9 apply it.
+    forwardRenderer_.SetDawnEnableIBL((renderMode_ == DawnRenderMode::Meshlet ||
+                                       renderMode_ == DawnRenderMode::MeshletSSGISSR) ? 1u : 0u);
     forwardRenderer_.RenderDawnMeshletDeferredLighting(
         cmd, view_, meshletGBuffer, meshletDepth, hdrTexture_, scene_,
         frameIndex_, width_, height_);
