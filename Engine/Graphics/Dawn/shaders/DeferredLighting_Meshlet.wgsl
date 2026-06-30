@@ -237,8 +237,10 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Mode 7 (MeshletNoIBL) is intentionally unlit — flat albedo pass-through
     // so debug visualization (hash colors via V key) reads cleanly and the
-    // scene reads as "in shadow". Mode 8 (Meshlet) takes the full PBR path.
-    if (globalData.renderMode == 8u) {
+    // scene reads as "in shadow". Mode 8 (Meshlet) and Mode 9 (MeshletSSGISSR)
+    // share the full PBR path — Mode 9 layers TAA/SSR/SSGI on top of this lit
+    // base via the RenderGraph post-process chain.
+    if (globalData.renderMode >= 8u) {
         // === Directional light (first only) with CSM shadow ===
         if (lightBuffer.directionalLightCount > 0u) {
             let light = lightBuffer.directionalLights[0];
