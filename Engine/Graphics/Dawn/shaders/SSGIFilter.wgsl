@@ -44,7 +44,15 @@ fn reconstructViewNormal(pixel: vec2u, uv: vec2f, depth: f32) -> vec3f {
     let pU = reconstructViewPos(vec2f(uv.x, uv.y - ts.y), dU);
     let pD = reconstructViewPos(vec2f(uv.x, uv.y + ts.y), dD);
 
-    return normalize(cross(pD - pU, pR - pL));
+    // Guard against degenerate neighborhoods (flat surface, NaN depth) —
+    // cross of near-zero vector normalized to zero produces NaN that
+    // contaminates the SSGI chain. Same pattern as SSGITrace.wgsl.
+    let crossVec = cross(pD - pU, pR - pL);
+    let crossLen = length(crossVec);
+    if (crossLen < 1e-6 || crossLen != crossLen || abs(crossLen) > 3.4e38) {
+        return vec3f(0.0, 0.0, 1.0);
+    }
+    return crossVec / crossLen;
 }
 
 // Manual bilinear sampling for half-res -> full-res upsampling
@@ -90,9 +98,13 @@ fn ssgi_filter(@builtin(global_invocation_id) gid: vec3u) {
     var filteredDist: f32 = 0.0;
     var totalWeight: f32 = 0.0;
 
+    // Stride by 2 full-res pixels per loop iteration so dx,dy are in half-res
+    // texel units. The previous +dx,+dy (full-res) stride only covered ~2x2
+    // half-res texels at radius=2 — not enough to smooth the half-res grid,
+    // which left HZB mip-transition banding visible as diagonal stripes.
     for (var dy: i32 = -i32(radius); dy <= i32(radius); dy++) {
         for (var dx: i32 = -i32(radius); dx <= i32(radius); dx++) {
-            let samplePos = vec2i(i32(pixelPos.x) + dx, i32(pixelPos.y) + dy);
+            let samplePos = vec2i(i32(pixelPos.x) + dx * 2, i32(pixelPos.y) + dy * 2);
             if (samplePos.x < 0 || samplePos.y < 0 ||
                 samplePos.x >= i32(width) || samplePos.y >= i32(height)) {
                 continue;
@@ -103,9 +115,17 @@ fn ssgi_filter(@builtin(global_invocation_id) gid: vec3u) {
             let sampleDepth = textureLoad(depthTex, vec2u(samplePos), 0);
             let sampleNormal = reconstructViewNormal(vec2u(samplePos), sampleUV, sampleDepth);
 
-            // Depth weight
-            let depthDiff = abs(centerDepth - sampleDepth);
-            let wDepth = exp(-depthDiff * params.sigmaDepth);
+            // Depth weight — use linear view-space Z, not NDC depth.
+            // NDC depth compresses non-linearly at far distances (5m pillar vs
+            // 50m wall both map to NDC ~0.99, diff ~0.01), which made the old
+            // exp(-ndcDiff * 10) weight ~0.9 across depth discontinuities —
+            // pillar SSGI leaked onto walls behind them. View Z is linear in
+            // meters; sigmaDepth is now a real-world tolerance (0.3m).
+            let centerViewZ = reconstructViewPos(centerUV, centerDepth).z;
+            let sampleViewZ = reconstructViewPos(sampleUV, sampleDepth).z;
+            let depthDiff = abs(centerViewZ - sampleViewZ);
+            let wDepth = exp(-depthDiff * depthDiff /
+                             (2.0 * params.sigmaDepth * params.sigmaDepth));
 
             // Normal weight
             let NdotN = max(0.0, dot(centerNormal, sampleNormal));

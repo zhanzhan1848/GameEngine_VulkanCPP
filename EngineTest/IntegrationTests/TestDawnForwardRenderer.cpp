@@ -834,8 +834,11 @@ void Engine_Test::RenderFrame() {
             (renderMode_ == DawnRenderMode::MeshletSSGISSR &&
              (ssgissrSubmode_ == SSGISSRSubmode::SSROnly || ssgissrSubmode_ == SSGISSRSubmode::Both));
         if (ssrActive) {
+            // Pass frameIndex_ (true counter) — same reason as SSGI: SSR's
+            // temporal jitter hashes by params.frameIndex and would otherwise
+            // see only 3 distinct seeds cycling.
             const auto& ssrOut = PostProcess::AddSSRPass(*renderGraph_, taaHDR, depthRG, hzbHandle,
-                                                          velMrtRG, width_, height_, fi,
+                                                          velMrtRG, width_, height_, frameIndex_,
                                                           view_.GetProjectionMatrix(), invProj);
             taaHDR = ssrOut.outputColor;
         }
@@ -847,9 +850,14 @@ void Engine_Test::RenderFrame() {
             renderMode_ == DawnRenderMode::MeshletSSGISSR &&
             (ssgissrSubmode_ == SSGISSRSubmode::SSGIOnly || ssgissrSubmode_ == SSGISSRSubmode::Both);
         if (ssgiActive) {
+            // Pass frameIndex_ (true counter), not fi (swap-chain index 0..2).
+            // The SSGI trace hashes ray directions by params.frameIndex; with
+            // only 3 distinct values cycling, phi rotation had just 3 states
+            // and the per-frame noise repeated every 3 frames — temporal
+            // averaging then converged to a stationary striped pattern.
             const auto& ssgiOut = PostProcess::AddLumenSSGIPass(*renderGraph_,
                 depthRG, hzbHandle, velMrtRG, taaHDR,
-                width_, height_, fi,
+                width_, height_, frameIndex_,
                 view_.GetProjectionMatrix(), invProj);
             ssgiHandle = ssgiOut.ssgiOutput;
         }

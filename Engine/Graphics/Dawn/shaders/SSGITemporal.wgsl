@@ -126,11 +126,12 @@ fn ssgi_temporal(@builtin(global_invocation_id) gid: vec3u) {
     // Screen-edge fade
     let edgeFade = smoothstep(0.0, 0.05, min(edgeDist.x, edgeDist.y));
 
-    // Confidence-modulated blend
-    let hitConfidence = clamp(1.0 - currentHitDist / 2.0, 0.0, 1.0);
-    let confidenceScale = mix(0.6, 1.0, hitConfidence);
-
-    let effectiveFeedback = params.feedback * edgeFade * disocclusionFade * confidenceScale;
+    // Variance clip already rejects stale history; confidenceScale used to
+    // lower feedback for far-hit pixels, but with radius=15 every hit lands
+    // well past the hitDist/2.0 threshold, dropping effective feedback to
+    // ~0.54 — too short a half-life to smooth per-frame stripe variation,
+    // which showed up as flickering. Trust the variance clip instead.
+    let effectiveFeedback = params.feedback * edgeFade * disocclusionFade;
 
     let resultColor = mix(currentIrr, clampedHistory, effectiveFeedback);
     let resultDist = mix(currentHitDist, historyHitDist, effectiveFeedback);

@@ -349,8 +349,17 @@ const LumenSSGIData& AddLumenSSGIPass(RenderGraph& graph,
                     p->proj = proj;
                     p->screenSize = {(f32)width, (f32)height, 1.0f / width, 1.0f / height};
                     p->halfScreenSize = {(f32)halfW, (f32)halfH, 1.0f / halfW, 1.0f / halfH};
-                    p->rayCount = 4;
-                    p->radius = 15.0f;
+                    // rayCount 8 + per-pixel phi rotation breaks the diagonal
+                    // stripe pattern from rayCount=4's deterministic phi.
+                    // radius 10m: extended from 5m because floor→banner bounce
+                    // only registered at very close range (≤2m). At 5m radius,
+                    // distAtten smoothstep(0.3, 1.0) crushed hits past 4m to
+                    // near-zero. Doubling radius + shifting smoothstep to
+                    // (0.5, 1.0) lets the bounce read at 5-8m without boosting
+                    // close-range hits. Coarser step (0.625m vs 0.3125m) is
+                    // safe — Sponza walls/floor are thick enough to still hit.
+                    p->rayCount = 8;
+                    p->radius = 10.0f;
                     p->thickness = 0.5f;
                     p->frameIndex = frameIndex;
                     p->nearPlane = 0.1f;
@@ -481,11 +490,15 @@ const LumenSSGIData& AddLumenSSGIPass(RenderGraph& graph,
                     p->invProj = invProj;
                     p->screenSize = {(f32)width, (f32)height, 1.0f / width, 1.0f / height};
                     p->halfScreenSize = {(f32)halfW, (f32)halfH, 1.0f / halfW, 1.0f / halfH};
-                    p->sigmaDepth = 10.0f;
+                    // sigmaDepth is in linear view-Z meters (Gaussian σ).
+                    // 0.1m: pillar-to-wall gaps (>1m) get weight <1e-22,
+                    // same-surface samples (<2cm) get ~1.0. 0.3m was too
+                    // permissive — distant background still leaked through.
+                    p->sigmaDepth = 0.1f;
                     p->sigmaNormal = 16.0f;
                     p->sigmaHitDist = 8.0f;
                     p->sigmaSpatial = 2.5f;
-                    p->kernelRadius = 2;
+                    p->kernelRadius = 4;
                     device.SetBufferDirtySize(s_FilterParamsBuf[fi], sizeof(FilterParamsCPU));
                 }
 

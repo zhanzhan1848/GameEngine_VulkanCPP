@@ -1307,7 +1307,12 @@ fn reconstructViewNormal(pixel: vec2u, uv: vec2f, depth: f32) -> vec3f {
     let pU = reconstructViewPos(vec2f(uv.x, uv.y - ts.y), dU);
     let pD = reconstructViewPos(vec2f(uv.x, uv.y + ts.y), dD);
 
-    return normalize(cross(pD - pU, pR - pL));
+    let crossVec = cross(pD - pU, pR - pL);
+    let crossLen = length(crossVec);
+    if (crossLen < 1e-6 || crossLen != crossLen || abs(crossLen) > 3.4e38) {
+        return vec3f(0.0, 0.0, 1.0);
+    }
+    return crossVec / crossLen;
 }
 
 // Manual bilinear sampling for half-res -> full-res upsampling
@@ -1353,9 +1358,13 @@ fn ssgi_filter(@builtin(global_invocation_id) gid: vec3u) {
     var filteredDist: f32 = 0.0;
     var totalWeight: f32 = 0.0;
 
+    // Stride by 2 full-res pixels per loop iteration so dx,dy are in half-res
+    // texel units. The previous +dx,+dy (full-res) stride only covered ~2x2
+    // half-res texels at radius=2 — not enough to smooth the half-res grid,
+    // which left HZB mip-transition banding visible as diagonal stripes.
     for (var dy: i32 = -i32(radius); dy <= i32(radius); dy++) {
         for (var dx: i32 = -i32(radius); dx <= i32(radius); dx++) {
-            let samplePos = vec2i(i32(pixelPos.x) + dx, i32(pixelPos.y) + dy);
+            let samplePos = vec2i(i32(pixelPos.x) + dx * 2, i32(pixelPos.y) + dy * 2);
             if (samplePos.x < 0 || samplePos.y < 0 ||
                 samplePos.x >= i32(width) || samplePos.y >= i32(height)) {
                 continue;
@@ -1366,9 +1375,12 @@ fn ssgi_filter(@builtin(global_invocation_id) gid: vec3u) {
             let sampleDepth = textureLoad(depthTex, vec2u(samplePos), 0);
             let sampleNormal = reconstructViewNormal(vec2u(samplePos), sampleUV, sampleDepth);
 
-            // Depth weight
-            let depthDiff = abs(centerDepth - sampleDepth);
-            let wDepth = exp(-depthDiff * params.sigmaDepth);
+            // Depth weight — linear view-Z (NDC compresses far distances)
+            let centerViewZ = reconstructViewPos(centerUV, centerDepth).z;
+            let sampleViewZ = reconstructViewPos(sampleUV, sampleDepth).z;
+            let depthDiff = abs(centerViewZ - sampleViewZ);
+            let wDepth = exp(-depthDiff * depthDiff /
+                             (2.0 * params.sigmaDepth * params.sigmaDepth));
 
             // Normal weight
             let NdotN = max(0.0, dot(centerNormal, sampleNormal));
@@ -1586,11 +1598,12 @@ fn ssgi_temporal(@builtin(global_invocation_id) gid: vec3u) {
     // Screen-edge fade
     let edgeFade = smoothstep(0.0, 0.05, min(edgeDist.x, edgeDist.y));
 
-    // Confidence-modulated blend
-    let hitConfidence = clamp(1.0 - currentHitDist / 2.0, 0.0, 1.0);
-    let confidenceScale = mix(0.6, 1.0, hitConfidence);
-
-    let effectiveFeedback = params.feedback * edgeFade * disocclusionFade * confidenceScale;
+    // Variance clip already rejects stale history; confidenceScale used to
+    // lower feedback for far-hit pixels, but with radius=15 every hit lands
+    // well past the hitDist/2.0 threshold, dropping effective feedback to
+    // ~0.54 — too short a half-life to smooth per-frame stripe variation,
+    // which showed up as flickering. Trust the variance clip instead.
+    let effectiveFeedback = params.feedback * edgeFade * disocclusionFade;
 
     let resultColor = mix(currentIrr, clampedHistory, effectiveFeedback);
     let resultDist = mix(currentHitDist, historyHitDist, effectiveFeedback);
@@ -1612,7 +1625,6 @@ static const char* kShader_SSGITrace = R"wgsl(
 const PI: f32 = 3.14159265358979323846;
 const MAX_STEPS: u32 = 16u;
 const MAX_DISTANCE: f32 = 20.0;
-const MAX_RADIANCE: f32 = 2.0;
 
 struct SSGITraceParams {
     invProj: mat4x4<f32>,
@@ -1678,7 +1690,12 @@ fn reconstructViewNormal(pixel: vec2u, uv: vec2f, depth: f32) -> vec3f {
     let pU = reconstructViewPos(vec2f(uv.x, uv.y - ts.y), dU);
     let pD = reconstructViewPos(vec2f(uv.x, uv.y + ts.y), dD);
 
-    return normalize(cross(pD - pU, pR - pL));
+    let crossVec = cross(pD - pU, pR - pL);
+    let crossLen = length(crossVec);
+    if (crossLen < 1e-6 || crossLen != crossLen || abs(crossLen) > 3.4e38) {
+        return vec3f(0.0, 0.0, 1.0);
+    }
+    return crossVec / crossLen;
 }
 
 fn viewToScreen(viewPos: vec3f) -> vec3f {
@@ -1688,7 +1705,13 @@ fn viewToScreen(viewPos: vec3f) -> vec3f {
 }
 
 fn cosineHemisphereSample(N: vec3f, seed: vec2f, sampleIdx: u32, frameIdx: u32, rayCount: u32) -> vec3f {
-    let xi1 = fract((f32(sampleIdx) + 0.5) / f32(rayCount) + f32(frameIdx) * 0.618033988749);
+    // Per-pixel hash rotation breaks the strict 45/135/225/315° diagonal
+    // alignment that rayCount=4 produced when xi1 was deterministic in
+    // (sampleIdx, frameIdx). That alignment left every pixel casting the
+    // same four diagonal rays, which interacted with HZB mip-3 (8px) blocks
+    // to produce the stationary-then-rotating diagonal stripe pattern.
+    let perPixelRot = hash_f2(seed);
+    let xi1 = fract((f32(sampleIdx) + 0.5) / f32(rayCount) + perPixelRot + f32(frameIdx) * 0.618033988749);
     let xi2 = fract(hash_f2(seed + vec2f(f32(sampleIdx) * 0.13, f32(sampleIdx) * 0.91))
                     + f32(frameIdx) * 0.7071067811865476);
 
@@ -1759,7 +1782,14 @@ fn traceRayHZB(rayOriginView: vec3f, rayDirView: vec3f) -> TraceResult {
                 if (rayDepthLinear <= sceneDepthLinear + params.thickness) {
                     result.hit = true;
                     result.hitUV = sampleUV;
-                    result.hitDist = sceneDepthLinear;
+                    // hitDist is the ray travel distance (t), not the camera
+                    // depth of the hit surface. Using sceneDepthLinear here
+                    // made distAtten = 1-smoothstep(radius/2, radius, camDepth)
+                    // zero out GI for any surface >radius meters from camera,
+                    // regardless of how short the actual bounce was. It also
+                    // poisoned the bilateral filter's adaptiveSigma (always
+                    // large) and the temporal pass's hit-confidence gate.
+                    result.hitDist = t;
                     break;
                 }
             } else {
@@ -1824,29 +1854,32 @@ fn ssgi_trace(@builtin(global_invocation_id) gid: vec3u) {
             );
             let hitColor = sampleBilinear(prevColorTex, traceResult.hitUV, prevDims);
 
-            var radiance = min(hitColor.rgb, vec3f(MAX_RADIANCE));
+            var radiance = hitColor.rgb;
 
-            // Bright pixel dimming
-            let hitLum = dot(radiance, vec3f(0.2126, 0.7152, 0.0722));
-            let brightPenalty = 1.0 / (1.0 + max(hitLum - 1.0, 0.0) * 2.0);
-            radiance *= brightPenalty;
-
-            // Distance attenuation
-            let distAtten = 1.0 - smoothstep(params.radius * 0.5, params.radius,
-                                              traceResult.hitDist);
+            let distAtten = 1.0 - smoothstep(0.5, 1.0,
+                                              traceResult.hitDist / params.radius);
             // Edge fade
             let edgeDist = min(traceResult.hitUV, 1.0 - traceResult.hitUV);
             let edgeFade = smoothstep(0.0, 0.15, min(edgeDist.x, edgeDist.y));
 
-            totalIrradiance += radiance * PI * distAtten * edgeFade;
+            totalIrradiance += radiance * distAtten * edgeFade;
             totalHitDist += traceResult.hitDist;
         } else {
             totalHitDist += params.radius;
         }
     }
 
-    let avgHitDist = totalHitDist / f32(rayCount);
-    let outputIrradiance = totalIrradiance / f32(rayCount);
+    var avgHitDist = totalHitDist / f32(rayCount);
+    var outputIrradiance = totalIrradiance / f32(rayCount);
+
+    let nanMask = outputIrradiance != outputIrradiance;
+    let infMask = abs(outputIrradiance) > vec3f(3.4e38);
+    if (any(nanMask) || any(infMask)) {
+        outputIrradiance = vec3f(0.0);
+    }
+    if (avgHitDist != avgHitDist || abs(avgHitDist) > 3.4e38) {
+        avgHitDist = params.radius;
+    }
 
     textureStore(ssgiOutput, halfPos, vec4f(outputIrradiance, avgHitDist));
 }
@@ -1915,6 +1948,8 @@ static const char* kShader_ToneMapping = R"wgsl(
 // Set to 1 to visualize velocity buffer (debug only). Set to 0 for normal rendering.
 const DEBUG_VELOCITY: u32 = 0u;
 
+const SSGI_INTENSITY: f32 = 0.4;
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -1970,13 +2005,19 @@ fn tonemap_fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 
     var color = textureSample(sceneTexture, texSampler, uv).rgb;
 
+    let nanMask = color != color;
+    let infMask = abs(color) > vec3<f32>(3.4e38);
+    if (any(nanMask) || any(infMask)) {
+        color = vec3<f32>(0.0);
+    }
+
     // SSAO: darken occluded areas
     let ao = textureSample(aoTexture, texSampler, uv);
     color *= ao.r;
 
-    // SSGI: add indirect lighting (additive)
+    // SSGI: add indirect lighting (additive, intensity-tuned)
     let ssgi = textureSample(ssgiTexture, texSampler, uv).rgb;
-    color += ssgi;
+    color += ssgi * SSGI_INTENSITY;
 
     // Add bloom (simple additive)
     let bloom = textureSample(bloomTexture, texSampler, uv).rgb;

@@ -198,19 +198,13 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let depth = textureLoad(depthTex, pixel, 0);
 
-    // Sky pixels: write a sentinel that encodes camera X position so we can
-    // verify deferred lighting reads fresh uniforms each frame. If sky color
-    // shifts when camera moves, deferred is fresh; if static, uniforms are
-    // stale or compute isn't dispatching. Frac ensures [0,1] regardless of
-    // camera coords; small bias so 0,0,0 isn't mistaken for cleared black.
+    // Sky pixels (no geometry drawn → depth at far plane). Write black so the
+    // sentinel-color symptom can't mask the real bug. When this branch fires
+    // for the whole screen, meshlets aren't being drawn — investigate the
+    // culling pipeline (stage1/stage4 frustum cull, visible_count, indirect
+    // args), not this shader.
     if (depth >= 0.99999) {
-        let camX = globalData.cameraPositionAndViewWidth.x;
-        let camY = globalData.cameraPositionAndViewWidth.y;
-        let camZ = globalData.cameraPositionAndViewWidth.z;
-        let r = fract(camX * 0.1 + 0.1);
-        let g = fract(camY * 0.1 + 0.2);
-        let b = fract(camZ * 0.1 + 0.3);
-        textureStore(outputTex, pixel, vec4<f32>(r, g, b, 1.0));
+        textureStore(outputTex, pixel, vec4<f32>(0.0, 0.0, 0.0, 1.0));
         return;
     }
 

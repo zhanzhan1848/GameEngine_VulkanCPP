@@ -3,6 +3,12 @@
 // Set to 1 to visualize velocity buffer (debug only). Set to 0 for normal rendering.
 const DEBUG_VELOCITY: u32 = 0u;
 
+// SSGI intensity = albedo proxy. Trace outputs <Li>_cosine_weighted which
+// assumes albedo=1. Real diffuse surfaces have albedo 0.3-0.5, so we scale
+// down here. Critical to keep SSGI values < ~1.5 so ACES preserves the
+// warm color ratio — values >2 get crushed to white regardless of hue.
+const SSGI_INTENSITY: f32 = 0.4;
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -58,13 +64,24 @@ fn tonemap_fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 
     var color = textureSample(sceneTexture, texSampler, uv).rgb;
 
+    // NaN/Inf guard (diagnostic + defensive). x != x catches NaN; abs > 3.4e38
+    // catches ±Inf. If this guard fires (screen turns black where garbage
+    // color was), the NaN originates upstream in sceneColor — SSGI/SSR/TAA
+    // chain. If it doesn't fire and "pure color" persists, the source is the
+    // GBuffer/DeferredLighting writing the same finite-but-wrong value.
+    let nanMask = color != color;
+    let infMask = abs(color) > vec3<f32>(3.4e38);
+    if (any(nanMask) || any(infMask)) {
+        color = vec3<f32>(0.0);
+    }
+
     // SSAO: darken occluded areas
     let ao = textureSample(aoTexture, texSampler, uv);
     color *= ao.r;
 
-    // SSGI: add indirect lighting (additive)
+    // SSGI: add indirect lighting (additive, intensity-tuned)
     let ssgi = textureSample(ssgiTexture, texSampler, uv).rgb;
-    color += ssgi;
+    color += ssgi * SSGI_INTENSITY;
 
     // Add bloom (simple additive)
     let bloom = textureSample(bloomTexture, texSampler, uv).rgb;
