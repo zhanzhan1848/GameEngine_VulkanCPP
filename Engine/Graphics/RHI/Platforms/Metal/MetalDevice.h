@@ -23,6 +23,7 @@
 #include "MetalPipelineLayout.h"
 #include "MetalRenderPass.h"
 #include "MetalStagingAllocator.h"
+#include "Neural/MetalNeuralWrapper.h"
 #include "../../Core/RHIDevice.h"
 #include "../../Core/RHIAllocator.h"
 #include "../../Core/RHIAdaptiveMemoryPool.h"
@@ -77,6 +78,11 @@ public:
      *          be initialized before any UpdateBufferData/UpdateTextureData call.
      */
     MetalStagingAllocator& GetStagingAllocator() { return stagingAllocator_; }
+
+    /**
+     * @brief 获取 MTL4 神经渲染 wrapper(detect-only 占位)
+     */
+    MetalNeuralWrapper& GetNeuralWrapper() { return neuralWrapper_; }
 
     /**
      * @brief 获取缓冲区对象 (内部使用)
@@ -326,6 +332,9 @@ private:
 
     // Per-frame staging allocator (eliminates waitUntilCompleted from slow paths)
     MetalStagingAllocator stagingAllocator_;
+
+    // MTL4 / 神经渲染 wrapper(detect-only 占位)
+    MetalNeuralWrapper neuralWrapper_;
     
     std::atomic<u32> currentFrameIndex_{0};             ///< 当前帧索引
     

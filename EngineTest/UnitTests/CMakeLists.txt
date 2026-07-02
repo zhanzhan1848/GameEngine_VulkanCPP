@@ -334,6 +334,26 @@ if(APPLE)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
 
+    # PR4 Spike: encoder-level memoryBarrier validation
+    add_executable(TestMetalEncoderBarrierSpike Graphics/Metal/TestMetalEncoderBarrierSpike.cpp)
+    target_include_directories(TestMetalEncoderBarrierSpike PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalEncoderBarrierSpike PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalEncoderBarrierSpike COMMAND TestMetalEncoderBarrierSpike)
+    set_target_properties(TestMetalEncoderBarrierSpike PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
     # 创建Metal混合状态测试
     add_executable(TestMetalBlendState Graphics/Metal/TestMetalBlendState.cpp)
     target_include_directories(TestMetalBlendState PRIVATE 

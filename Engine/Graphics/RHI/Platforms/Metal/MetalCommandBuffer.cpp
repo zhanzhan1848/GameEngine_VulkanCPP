@@ -1251,59 +1251,56 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barr
 
 void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask,
                                       AccessFlag srcAccessMask, AccessFlag dstAccessMask) {
-    // CONSERVATIVE STRATEGY: Force encoder isolation for all GPU Culling stages
-    // This ensures proper Metal dependency tracking between compute dispatches
+    // SPIKE-VALIDATED (2026-07-02, TestMetalEncoderBarrierSpike):
+    //   For pure Compute→Compute transitions on the same compute encoder,
+    //   `computeEncoder->memoryBarrier(scope)` ALONE is sufficient — the
+    //   subsequent dispatch sees all prior writes. No encoder end needed.
+    //
+    //   We still must endCurrentEncoder() when:
+    //     - dst includes non-Compute bits (DrawIndirect / VertexInput / Transfer / Host)
+    //       → next call needs a different encoder type
+    //     - src includes Host/Transfer → producer lived in a different encoder type
+    //     - current encoder is not Compute (Render/Blit barriers handled by Metal implicitly
+    //       via encoder boundaries, but we still need to end to switch types)
 
-    if (currentEncoder_ != nullptr) {
-        switch (currentEncoderType_) {
-            case EncoderType::Compute:
-                if (auto computeEncoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_)) {
-                    // Memory barrier for compute shaders
-                    computeEncoder->memoryBarrier(MTL::BarrierScopeBuffers);
+    if (currentEncoder_ == nullptr) return;
 
-                    // Debug output for first few barriers
-                    static int barrierCount = 0;
-                    if (barrierCount < 30) {
-                        std::cerr << "[MetalBarrier] Compute memory barrier #" << barrierCount << " (CONSERVATIVE)" << std::endl;
-                        barrierCount++;
-                    }
+    if (currentEncoderType_ == EncoderType::Compute) {
+        auto computeEncoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
+        computeEncoder->memoryBarrier(MTL::BarrierScopeBuffers);
 
-                    // CONSERVATIVE APPROACH: Always end encoder for GPU Culling stages
-                    // This prevents any potential out-of-order execution between dispatches
-                    // Critical for multi-stage pipelines like: Stage0 → Stage1 → Stage2 → ... → Stage7
-                    bool isComputeToCompute = (static_cast<u32>(dstStageMask) & static_cast<u32>(PipelineStage::ComputeShader)) != 0;
-                    bool isComputeToDraw = (static_cast<u32>(dstStageMask) & static_cast<u32>(PipelineStage::DrawIndirect)) != 0;
-                    bool hasShaderWrite = (static_cast<u32>(srcAccessMask) & static_cast<u32>(AccessFlag::ShaderWrite)) != 0;
-
-                    // Force encoder isolation for:
-                    // 1. Compute-to-Compute transitions (Stage N → Stage N+1)
-                    // 2. Compute-to-Draw transitions (GPU Culling → Drawing)
-                    // 3. Any shader write operations
-                    if (isComputeToCompute || isComputeToDraw || hasShaderWrite) {
-                        endCurrentEncoder();
-                        if (barrierCount <= 30) {
-                            std::cerr << "[MetalBarrier] FORCE END: Compute encoder for strict synchronization" << std::endl;
-                            std::cerr << "[MetalBarrier]   Reason: ComputeToCompute=" << isComputeToCompute
-                                      << " ComputeToDraw=" << isComputeToDraw
-                                      << " ShaderWrite=" << hasShaderWrite << std::endl;
-                        }
-                    }
-                }
-                break;
-            case EncoderType::Render:
-                // For render encoders, we handle barriers differently
-                // End the render pass and start a new one if needed
-                endCurrentEncoder();
-                break;
-            case EncoderType::Blit:
-                // For Blit encoders, ending the encoder ensures completion of copy commands
-                endCurrentEncoder();
-                break;
-            default:
-                // For unknown encoder types, end it to be safe
-                endCurrentEncoder();
-                break;
+        static int barrierCount = 0;
+        if (barrierCount < 30) {
+            std::cerr << "[MetalBarrier] Compute memoryBarrier(scope) #" << barrierCount
+                      << std::endl;
+            ++barrierCount;
         }
+
+        // Exact Compute→Compute (no other bits)? Keep encoder open.
+        constexpr u32 kComputeOnly = static_cast<u32>(PipelineStage::ComputeShader);
+        bool srcIsComputeOnly = static_cast<u32>(srcStageMask) == kComputeOnly;
+        bool dstIsComputeOnly = static_cast<u32>(dstStageMask) == kComputeOnly;
+
+        // src includes Host/Transfer? Producer was a different encoder type — end.
+        u32 srcNonComputeBits = static_cast<u32>(srcStageMask) &
+            (static_cast<u32>(PipelineStage::Host) |
+             static_cast<u32>(PipelineStage::Transfer));
+        bool srcFromOtherEncoder = srcNonComputeBits != 0;
+
+        if (!srcIsComputeOnly || !dstIsComputeOnly || srcFromOtherEncoder) {
+            if (barrierCount <= 30) {
+                std::cerr << "[MetalBarrier] END encoder: src=0x" << std::hex
+                          << static_cast<u32>(srcStageMask)
+                          << " dst=0x" << static_cast<u32>(dstStageMask)
+                          << std::dec << std::endl;
+            }
+            endCurrentEncoder();
+        }
+        // else: pure Compute→Compute on same encoder — keep open (spike validated)
+    }
+    else {
+        // Render / Blit / other: end encoder to switch types
+        endCurrentEncoder();
     }
 }
 

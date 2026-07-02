@@ -58,6 +58,9 @@ bool MetalDevice::initializeImpl() {
     // Private-storage upload slow paths)
     stagingAllocator_.Initialize(mtlDevice_, transferQueue_);
 
+    // Detect MTL4 / neural-rendering availability (placeholder — no resources allocated)
+    neuralWrapper_.Initialize(mtlDevice_);
+
     // 预分配资源以避免多线程扩容导致指针失效
     // 尤其是 CommandBuffer，在多线程渲染中非常关键
     // 同时分配其他资源以防止 Resize 导致的指针失效 (因为 ResourceManager 缓存了指针)
@@ -101,6 +104,9 @@ void MetalDevice::shutdownImpl() {
 
     // Shutdown staging allocator before queues are released (it references transferQueue_)
     stagingAllocator_.Shutdown();
+
+    // Neural wrapper is detect-only — shutdown is a no-op, but call for symmetry
+    neuralWrapper_.Shutdown();
 
     if (transferQueue_) {
         transferQueue_->release();
