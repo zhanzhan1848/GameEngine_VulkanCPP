@@ -61,19 +61,19 @@ static float sampleBestSDF_elseIf(float3 pos,
     texture3d<float, access::sample> sdf0,
     texture3d<float, access::sample> sdf1,
     texture3d<float, access::sample> sdf2,
-    float4 origins[3],
-    float4 extents[3],
+    float4 origin0, float4 origin1, float4 origin2,
+    float4 extent0, float4 extent1, float4 extent2,
     uint cascadeCount)
 {
     if (cascadeCount > 0 &&
-        isInsideCascade(pos, origins[0].xyz, extents[0].xyz))
-        return sampleSDFCascade(sdf0, pos, origins[0].xyz, extents[0].xyz);
+        isInsideCascade(pos, origin0.xyz, extent0.xyz))
+        return sampleSDFCascade(sdf0, pos, origin0.xyz, extent0.xyz);
     else if (cascadeCount > 1 &&
-        isInsideCascade(pos, origins[1].xyz, extents[1].xyz))
-        return sampleSDFCascade(sdf1, pos, origins[1].xyz, extents[1].xyz);
+        isInsideCascade(pos, origin1.xyz, extent1.xyz))
+        return sampleSDFCascade(sdf1, pos, origin1.xyz, extent1.xyz);
     else if (cascadeCount > 2 &&
-        isInsideCascade(pos, origins[2].xyz, extents[2].xyz))
-        return sampleSDFCascade(sdf2, pos, origins[2].xyz, extents[2].xyz);
+        isInsideCascade(pos, origin2.xyz, extent2.xyz))
+        return sampleSDFCascade(sdf2, pos, origin2.xyz, extent2.xyz);
     return 1e10f;
 }
 
@@ -90,8 +90,8 @@ static SDFHitResult traceSDF_relaxed(
     texture3d<float, access::sample> sdf0,
     texture3d<float, access::sample> sdf1,
     texture3d<float, access::sample> sdf2,
-    float4 origins[3],
-    float4 extents[3],
+    float4 origin0, float4 origin1, float4 origin2,
+    float4 extent0, float4 extent1, float4 extent2,
     uint   cascadeCount)
 {
     SDFHitResult result;
@@ -107,7 +107,10 @@ static SDFHitResult traceSDF_relaxed(
         float3 pos = rayOrigin + rayDir * t;
 
         // else-if cascade selection — 1 texture3D read
-        float d = sampleBestSDF_elseIf(pos, sdf0, sdf1, sdf2, origins, extents, cascadeCount);
+        float d = sampleBestSDF_elseIf(pos, sdf0, sdf1, sdf2,
+                                       origin0, origin1, origin2,
+                                       extent0, extent1, extent2,
+                                       cascadeCount);
 
         // Outside all cascades — use fallback stride
         if (d >= 1e9f) {

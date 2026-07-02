@@ -16,6 +16,10 @@ if(CMAKE_GENERATOR MATCHES "Unix Makefiles")
     set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 endif()
 
+# macOS deployment target and architecture MUST be set before project()
+set(CMAKE_OSX_ARCHITECTURES "arm64")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0")
+
 # 设置项目名称和版本
 project(GameEngine_VulkanCPP
     VERSION 1.0
@@ -27,8 +31,6 @@ project(GameEngine_VulkanCPP
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-set(CMAKE_OSX_ARCHITECTURES "arm64")
 
 # 设置构建类型
 if(NOT CMAKE_BUILD_TYPE)

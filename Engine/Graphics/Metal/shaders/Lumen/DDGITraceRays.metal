@@ -32,8 +32,6 @@ static SDFHitResult ddgiTraceSDF(
     texture3d<float, access::sample> sdf2,
     constant DDGIVolumeData& vol)
 {
-    float4 origins[3]  = { vol.SdfOrigins[0],  vol.SdfOrigins[1],  vol.SdfOrigins[2] };
-    float4 extents[3]  = { vol.SdfExtents[0],  vol.SdfExtents[1],  vol.SdfExtents[2] };
     uint coarsest = min(2u, vol.SdfCascadeCount - 1u);
     float fallbackStride = vol.SdfExtents[coarsest].x * 0.1f;
 
@@ -41,7 +39,9 @@ static SDFHitResult ddgiTraceSDF(
         rayOrigin, rayDir, maxDist,
         vol.SdfVoxelSizes[0].x, fallbackStride,
         sdf0, sdf1, sdf2,
-        origins, extents, vol.SdfCascadeCount);
+        vol.SdfOrigins[0], vol.SdfOrigins[1], vol.SdfOrigins[2],
+        vol.SdfExtents[0], vol.SdfExtents[1], vol.SdfExtents[2],
+        vol.SdfCascadeCount);
 
     // No gradient normal — saves 6×sampleBestSDF = 18 texture3D reads.
     return result;
@@ -217,8 +217,6 @@ kernel void ddgi_trace_sdf(
     float t = 0.0f;
     float hitDistance = -1.0f;
 
-    float4 origins[3] = { volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2] };
-    float4 extents[3] = { volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2] };
     float hitThreshold = volume.SdfVoxelSizes[0].x * 0.5f;
     float minStep = volume.SdfVoxelSizes[0].x * 0.25f;
     uint coarsest = min(2u, volume.SdfCascadeCount - 1u);
@@ -229,7 +227,9 @@ kernel void ddgi_trace_sdf(
 
         // else-if cascade selection — 1 texture3D read
         float d = sampleBestSDF_elseIf(pos, sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
-                                        origins, extents, volume.SdfCascadeCount);
+                                        volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
+                                        volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
+                                        volume.SdfCascadeCount);
 
         // Outside all cascades — fallback stride
         if (d >= 1e9f) {

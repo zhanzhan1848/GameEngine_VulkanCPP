@@ -147,6 +147,8 @@ private:
     // === Lumen SSGI ===
     std::unique_ptr<primal::graphics::lumen::LumenSSGIPass> ssgiPass_;
     primal::graphics::rhi::ResourceHandle ssgi_black_texture_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    // volume scatter fallback: 1x1 (0,0,0,1) so (scene+indirect)*1 + 0 = scene+indirect
+    primal::graphics::rhi::ResourceHandle volume_scatter_fallback_texture_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
 
     // === Lumen SSAO ===
     std::unique_ptr<primal::graphics::lumen::LumenSSAOPass> ssaoPass_;
@@ -479,6 +481,6 @@ private:
     } keyState_;
 
     // SSGI visualization mode: 0=Composite(scene+SSGI), 1=SSGI only, 2=Scene only
-    u32 ssgiVisMode_{ 0 };  // Scene only (no SSGI/DDGI overlay, direct deferred output)
+    u32 ssgiVisMode_{ 0 };  // Composite (default)
     u32 mode_diag_{ 0 };    // Mode 6 diagnostic: 0=simple blit, 1=fusion same-tex, 2=fusion real, 3=7-bind simple shader
 };

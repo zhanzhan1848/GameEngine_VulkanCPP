@@ -67,33 +67,41 @@ void RenderGraph::CleanupPool() {
     }
 }
 
-RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::ResourceHandle resource) {
+RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::ResourceHandle resource,
+                                              rhi::ResourceState initialState) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphResource>(name, handle, RGResourceType::Unknown);
     rgResource->SetImportedResource(resource);
-    
+    rgResource->SetInitialState(initialState);
+
     resources_.push_back(std::move(rgResource));
     resourceMap_[name] = handle;
     return handle;
 }
 
-RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::ResourceHandle resource, const rhi::TextureDesc& desc) {
+RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::ResourceHandle resource,
+                                             const rhi::TextureDesc& desc,
+                                             rhi::ResourceState initialState) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphTexture>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
-    
+    rgResource->SetInitialState(initialState);
+
     resources_.push_back(std::move(rgResource));
     resourceMap_[name] = handle;
     return handle;
 }
 
-RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::ResourceHandle resource, const rhi::BufferDesc& desc) {
+RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::ResourceHandle resource,
+                                            const rhi::BufferDesc& desc,
+                                            rhi::ResourceState initialState) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphBuffer>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
-    
+    rgResource->SetInitialState(initialState);
+
     resources_.push_back(std::move(rgResource));
     resourceMap_[name] = handle;
     return handle;
@@ -421,7 +429,18 @@ void RenderGraph::AllocateResources() {
 void RenderGraph::InsertBarriers() {
     // 追踪每个资源的当前状态
     // index -> state
+    // 对导入资源,优先用 SetInitialState 设置的真实状态;否则保持 Unknown
+    // (Unknown 在 Metal Render encoder 中是 no-op,跨 encoder 类型可能失去同步保障)
     utl::vector<rhi::ResourceState> resourceStates(resources_.size() + 1, rhi::ResourceState::Unknown);
+    for (size_t i = 0; i < resources_.size(); ++i) {
+        const auto& res = resources_[i];
+        if (HasFlag(res->GetFlags(), RGResourceFlags::Imported)) {
+            rhi::ResourceState init = res->GetInitialState();
+            if (init != rhi::ResourceState::Unknown) {
+                resourceStates[i + 1] = init;
+            }
+        }
+    }
 
     for (auto* pass : activePasses_) {
         // 处理输入资源 (Read)

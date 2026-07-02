@@ -453,6 +453,7 @@ elseif(APPLE)
     find_library(COCOA_LIBRARY Cocoa)
     find_library(METAL_LIBRARY Metal)
     find_library(METALKIT_LIBRARY MetalKit)
+    find_library(METALFX_LIBRARY MetalFX)
     find_library(QUARTZCORE_LIBRARY QuartzCore)
     find_package(ZLIB REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -460,6 +461,7 @@ elseif(APPLE)
         ${COCOA_LIBRARY}
         ${METAL_LIBRARY}
         ${METALKIT_LIBRARY}
+        ${METALFX_LIBRARY}
         ${QUARTZCORE_LIBRARY}
         ZLIB::ZLIB
     )
