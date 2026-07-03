@@ -4,6 +4,12 @@
 
 namespace primal::graphics::metal::camera
 {
+    // Refresh the camera's view/projection matrices from the camera entity's
+    // current world transform. Free function so platform_interface wiring
+    // (MetalInterface.cpp) can take its address without going through
+    // metal_camera's member-function pointer syntax.
+    void update(camera_id id);
+
     class metal_camera
 	{
 	public:

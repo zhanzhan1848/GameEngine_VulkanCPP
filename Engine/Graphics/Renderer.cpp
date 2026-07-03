@@ -331,6 +331,12 @@ namespace primal::graphics
 		gfx.camera.set_parameter(_id, camera_parameter::far_z, &far_z, sizeof(far_z));
 	}
 
+	void camera::update() const
+	{
+		assert(is_valid());
+		gfx.camera.update(_id);
+	}
+
 	math::m4x4 camera::view() const
 	{
 		assert(is_valid());

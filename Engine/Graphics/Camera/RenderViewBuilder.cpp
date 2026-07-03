@@ -21,6 +21,16 @@ RenderView BuildRenderViewFromCameraId(camera_id id, const rhi::ViewportDesc& vi
     // view/projection matrices. The camera class asserts is_valid() internally.
     camera cam{id};
 
+    // Refresh the camera's view matrix from the camera entity's current
+    // transform. Without this, the platform camera (MetalCamera) keeps the
+    // view matrix it was constructed with, so any subsequent transform
+    // changes (e.g. editor orbit/pan/zoom via SetEntityTransform) are
+    // silently ignored — the rendered scene stays anchored to the camera's
+    // initial pose. The legacy `end_frame` path calls camera.update() in
+    // get_metal_frame_info; the StandardRenderPipeline path (Path B) goes
+    // through this function and would otherwise miss the refresh.
+    cam.update();
+
     view.SetType(ViewType::Main);
     view.SetViewMatrix(cam.view());
     view.SetProjectionMatrix(cam.projection());

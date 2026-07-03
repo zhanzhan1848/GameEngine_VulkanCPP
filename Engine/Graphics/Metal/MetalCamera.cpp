@@ -309,6 +309,13 @@ namespace primal::graphics::metal::camera
 		set_functions[parameter](camera, data, data_size);
 	}
 
+	void update(camera_id id)
+	{
+		assert(id::is_valid(id));
+		metal_camera& camera{ get(id) };
+		camera.update();
+	}
+
 	void get_parameter(camera_id id, camera_parameter::parameter parameter, void * const data, u32 data_size)
 	{
 		assert(data && data_size);

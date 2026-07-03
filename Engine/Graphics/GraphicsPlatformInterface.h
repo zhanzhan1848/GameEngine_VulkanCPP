@@ -63,6 +63,14 @@ namespace primal::graphics {
 			void(*remove)(camera_id);
 			void(*set_parameter)(camera_id, camera_parameter::parameter, const void *const, u32);
 			void(*get_parameter)(camera_id, camera_parameter::parameter, void *const, u32);
+			// Refresh the platform camera's view/projection matrices from the
+			// camera entity's current world transform. Required by callers that
+			// do not go through the legacy `end_frame` path (e.g. the
+			// StandardRenderPipeline/Path B) — without it, view()/projection()
+			// keep returning the values cached at construction time and any
+			// subsequent SetEntityTransform on the camera entity is silently
+			// ignored.
+			void(*update)(camera_id);
 		} camera;
 
 		struct {

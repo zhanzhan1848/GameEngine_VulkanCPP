@@ -46,6 +46,7 @@ namespace primal::graphics::metal
 		pi.camera.remove = camera::remove;
 		pi.camera.set_parameter = camera::set_parameter;
 		pi.camera.get_parameter = camera::get_parameter;
+		pi.camera.update = camera::update;
 
         // Resources
         pi.resources.add_submesh = content::submesh::add;
