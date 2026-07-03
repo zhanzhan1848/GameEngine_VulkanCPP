@@ -103,6 +103,19 @@ namespace primal::graphics::metal
                 nullptr,
                 ^{ /* buffer is a copy, nothing to free */ });
         }
+        // Read the metallib file into memory. Caller writes it to a tmp
+        // file before passing to MTL::Device::newLibraryWithURL — see
+        // Initialize() below for the rationale.
+        bool read_metallib_bytes(const std::string& path, std::vector<u8>& out)
+        {
+            std::ifstream file{ path, std::ios::binary | std::ios::ate };
+            if (!file) return false;
+            const auto size = file.tellg();
+            if (size <= 0) return false;
+            file.seekg(0, std::ios::beg);
+            out.resize(static_cast<size_t>(size));
+            return !!file.read(reinterpret_cast<char*>(out.data()), size);
+        }
     } // anonymous namespace
 
     MetalBlitToDrawable& MetalBlitToDrawable::Instance()
@@ -127,18 +140,49 @@ namespace primal::graphics::metal
             return false;
         }
 
-        dispatch_data_t data = read_metallib_data(path);
-        if (!data) {
+        // === Load via newLibraryWithURL, not newLibrary(dispatch_data_t) ===
+        // Engine/Graphics/Metal/MetalShader.cpp::load_engine_shaders hit a
+        // SIGBUS on macOS 26 / Apple Silicon when calling
+        // newLibrary(dispatch_data_t): Metal's newLibraryWithData runs
+        // CC_SHA256_Update via NEON-accelerated
+        // AccelerateCrypto_SHA256_compress, and any dispatch_data_t whose
+        // backing buffer is page-aligned with a non-multiple-of-64 size
+        // SIGBUS-es during the 64-byte SHA256 read. The work-around that
+        // file uses is to write the metallib to a tmp file and load via
+        // newLibraryWithURL, which goes through a different code path with
+        // proper alignment guarantees. We do the same here.
+        std::vector<u8> bytes;
+        if (!read_metallib_bytes(path, bytes)) {
             std::cerr << "[MetalBlitToDrawable] failed to read " << path << "\n";
             return false;
         }
 
+        // mkstemps requires a writable char buffer; .data() on a non-const
+        // std::string is fine in C++17.
+        std::string tmp{ "/tmp/primal_blit_to_drawable_XXXXXX.metallib" };
+        int fd = mkstemps(tmp.data(), 9);  // 9 = strlen(".metallib")
+        if (fd < 0) {
+            std::cerr << "[MetalBlitToDrawable] mkstemps failed\n";
+            return false;
+        }
+        const ssize_t written = ::write(fd, bytes.data(), bytes.size());
+        ::close(fd);
+        if (written != static_cast<ssize_t>(bytes.size())) {
+            ::unlink(tmp.c_str());
+            std::cerr << "[MetalBlitToDrawable] short write to tmp file\n";
+            return false;
+        }
+
+        NS::String* tmp_path = NS::String::string(tmp.c_str(), NS::UTF8StringEncoding);
+        NS::URL* url = NS::URL::fileURLWithPath(tmp_path);
         NS::Error* err{ nullptr };
-        MTL::Library* lib = device->newLibrary(data, &err);
-        dispatch_release(data);
+        MTL::Library* lib = device->newLibrary(url, &err);
+        ::unlink(tmp.c_str());
+        tmp_path->release();
         if (!lib || err) {
-            std::cerr << "[MetalBlitToDrawable] newLibrary failed for " << path << "\n";
-            if (err) { std::cerr << "  metal error: " << err->localizedDescription()->utf8String() << "\n"; err->release(); }
+            std::cerr << "[MetalBlitToDrawable] newLibraryWithURL failed for " << path
+                      << ": " << (err ? err->localizedDescription()->utf8String() : "null library") << "\n";
+            if (err) err->release();
             if (lib) lib->release();
             return false;
         }
