@@ -121,17 +121,35 @@ public partial class EngineViewport3D : UserControl
                 }
             }
 
-            // Step 2: Embed MTKView into Avalonia's contentView via the engine's
-            // RHI forward pipeline. The host handle is the NSView pointer of
-            // Avalonia's main window contentView, obtained via the engine's
-            // native API. The MTKView attaches as a subview with autoresizing
-            // mask set so it tracks the host's bounds.
-            IntPtr hostView = NativeEngineBridge.GetAvaloniaContentView();
+            // Step 2: Embed MTKView into the MTKViewHost's child NSView via the
+            // engine's RHI forward pipeline. The MTKViewHost is a NativeControlHost
+            // that Avalonia created inside its visual tree; its child NSView is
+            // positioned and sized by Avalonia's layout system. The MTKView
+            // attaches as a subview of that child NSView, so it inherits
+            // correct layout from Avalonia instead of fighting it (which was
+            // the root cause of the macOS 26.5.1 FramePacing crash and the
+            // 10-frame-then-deadlock pattern). Falls back to the legacy
+            // GetAvaloniaContentView path if the host's child isn't created
+            // (which would only happen on a platform other than macOS).
+            // The MTKViewHost is looked up by name via FindControl since
+            // the project does not use Avalonia's XAML compiler
+            // (Microsoft.NET.Sdk, not Avalonia.NET.Sdk), so x:Name does
+            // not auto-generate fields. The Name="MTKHostView" attribute
+            // on the XAML element is the Avalonia-level Name (not the WPF
+            // x:Name), and FindControl<T>("name") walks the visual tree
+            // looking for a control whose Name matches.
+            var mtkHost = this.FindControl<PrimalEditor_Avalonia.Views.Engine3D.MTKViewHost>("MTKHostView");
+            IntPtr hostView = mtkHost?.HostViewHandle ?? IntPtr.Zero;
             if (hostView == IntPtr.Zero)
             {
-                Logger.Warning("GetAvaloniaContentView returned null");
-                ShowPlaceholder(true);
-                return false;
+                hostView = NativeEngineBridge.GetAvaloniaContentView();
+                if (hostView == IntPtr.Zero)
+                {
+                    Logger.Warning("MTKViewHost child is null and GetAvaloniaContentView returned null");
+                    ShowPlaceholder(true);
+                    return false;
+                }
+                Logger.Warning("MTKViewHost child not created; falling back to GetAvaloniaContentView");
             }
 
             _surfaceId = NativeEngineBridge.CreateEmbeddedRenderSurface(hostView, width, height);
