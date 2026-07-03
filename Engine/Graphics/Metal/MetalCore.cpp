@@ -145,15 +145,20 @@ namespace primal::graphics::metal::core
         // per [basic.start.term]/3, it is destroyed AFTER the buffer array at
         // program exit. Reversing this order would let ~constant_buffer call
         // deferred_release on a destroyed mutex (EINVAL from pthread_mutex_lock).
+        //
+        // Heap-allocate so its lifetime exceeds the process teardown —
+        // the GCD-worker fire_timer may call this after the main thread
+        // has already begun static destruction.
         utl::vector<MTL::Resource*>				deferred_releases[frame_buffer_count]{};
         u32										deferred_release_flag[frame_buffer_count]{};
-		std::mutex								deferred_release_mutex{};
+		std::mutex*								deferred_release_mutex_ptr{ new std::mutex() };
 
         constant_buffer                         constants_buffer[frame_buffer_count];
 
         void __attribute__((noinline)) process_deferred_release(u32 frame_idx)
-		{
-			std::lock_guard lock{ deferred_release_mutex };
+ 		{
+ 			if (deferred_release_mutex_ptr)
+ 				std::lock_guard lock{ *deferred_release_mutex_ptr };
 
 			// NOTE: we clear this flag in the beginning. If we'd clear it at the end
 			//		 then it might overwrite some other thread that was trying to set it.
@@ -218,7 +223,8 @@ namespace primal::graphics::metal::core
 		void deferred_release(MTL::Resource* resource)
 		{
 			const u32 frame_idx{ current_frame_index() };
-			std::lock_guard lock{ deferred_release_mutex };
+			if (deferred_release_mutex_ptr)
+				std::lock_guard lock{ *deferred_release_mutex_ptr };
 			deferred_releases[frame_idx].push_back(resource);
 			set_deferred_release_flag();
 		}
