@@ -1,25 +1,16 @@
 #!/usr/bin/env bash
-# build_app.sh — wrap a published Avalonia apphost into a runnable macOS .app bundle.
+# build_app.sh wraps the dotnet apphost into a runnable macOS .app bundle,
+# and copies the native engine dylibs (libEngineDLL, libContentTools,
+# libfbxsdk) from the main repo's Darwin/<Config>/ into the dotnet output
+# dir. The .app wrap is required for Avalonia to register as a foreground
+# app (raw apphost gets StandardFlavor=NULL and the window never gets
+# focus). The dylib copy is required because the .NET SDK silently drops
+# AfterTargets hooks on its Build entry-point on incremental builds, so
+# we do the copy here. Repo root is discovered via `git rev-parse
+# --git-common-dir` so it works for both the main checkout and any
+# worktree at any depth.
 #
-# Why this exists:
-#   Avalonia 11 on macOS launched via `dotnet run` (or directly as a plain Mach-O
-#   apphost binary) registers with WindowServer without an Info.plist, which
-#   means macOS treats the process as a CLI tool, not a foreground app. The
-#   MainWindow is created, IsVisible is true, but it gets no focus and never
-#   appears in the visible-process list. lsappinfo reports StandardFlavor=NULL.
-#
-#   Wrapping the same binary into a proper .app bundle (Info.plist + PkgInfo +
-#   Contents/MacOS/<executable>) flips it into a foreground-eligible app:
-#   System Events sees it, WindowServer can hand it focus on launch, and the
-#   window shows up on screen.
-#
-# Usage:
-#   ./build_app.sh [configuration]    # default: DebugEditor
-#
-# Inputs:
-#   Darwin/PrimalEditor_Avalonia/<configuration>/   (the dotnet build output)
-# Outputs:
-#   Darwin/PrimalEditor_Avalonia/<configuration>/PrimalEditor.app/
+# Usage: ./build_app.sh [configuration]   # default: DebugEditor
 set -euo pipefail
 
 CONFIG="${1:-DebugEditor}"
@@ -28,6 +19,83 @@ PROJ_DIR="$(cd "$HERE/.." && pwd)"
 BUILD_DIR="$PROJ_DIR/../Darwin/PrimalEditor_Avalonia/$CONFIG"
 APP_DIR="$BUILD_DIR/PrimalEditor.app"
 APPHOST="$BUILD_DIR/PrimalEditor_Avalonia"
+
+REPO_ROOT=""
+if command -v git >/dev/null 2>&1; then
+  if git_common_dir="$(git -C "$PROJ_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+    if [[ -n "$git_common_dir" && "$git_common_dir" != "/" ]]; then
+      REPO_ROOT="$(cd "$(dirname "$git_common_dir")" && pwd -P)"
+    fi
+  fi
+fi
+if [[ -z "$REPO_ROOT" || ! -d "$REPO_ROOT/Darwin" ]]; then
+  REPO_ROOT="$(cd "$PROJ_DIR/../.." && pwd -P)"
+fi
+NATIVE_LIB_DIR="$REPO_ROOT/Darwin/$CONFIG"
+echo "[build_app] repo root:  $REPO_ROOT"
+echo "[build_app] native lib: $NATIVE_LIB_DIR"
+
+if [[ -d "$NATIVE_LIB_DIR" ]]; then
+  for dylib in libEngineDLL.dylib libContentTools.dylib libfbxsdk.dylib; do
+    src="$NATIVE_LIB_DIR/$dylib"
+    dst="$BUILD_DIR/$dylib"
+    if [[ -f "$src" ]]; then
+      cp -f "$src" "$dst"
+      echo "[build_app] copied  $src -> $dst"
+    fi
+  done
+
+  # Copy engine shader metallib (and the dedicated BlitToDrawable.metallib)
+  # into the editor's cwd. The native engine resolves the shader blob via
+  # a bare relative path (./shaders/metal/shaders.metallib), interpreted
+  # against the process cwd, which the C# program pins to the binary
+  # directory at startup. Without this copy, the editor opens but the
+  # render surface stays black because the blit-to-drawable shader can't
+  # be found and BlitRenderTargetToSurface becomes a no-op.
+  #
+  # The CMake target BuildEngineShaderBlob emits the metallib to
+  # <build-dir>/shaders/metal/. The main-repo build output
+  # (<REPO_ROOT>/Darwin/<Config>/) may or may not have it depending on
+  # which cmake target was last built. We check both.
+  for metallib in shaders.metallib BlitToDrawable.metallib; do
+    found=0
+    for src in \
+      "$REPO_ROOT/Darwin/Debug/shaders/metal/$metallib" \
+      "$REPO_ROOT/Darwin/Release/shaders/metal/$metallib" \
+      ; do
+      if [[ -f "$src" ]]; then
+        mkdir -p "$BUILD_DIR/shaders/metal"
+        cp -f "$src" "$BUILD_DIR/shaders/metal/$metallib"
+        echo "[build_app] copied  $src -> $BUILD_DIR/shaders/metal/$metallib"
+        found=1
+        break
+      fi
+    done
+    if [[ $found -eq 0 ]]; then
+      echo "[build_app] WARNING: $metallib not found in any expected location; the editor viewport will be black"
+    fi
+  done
+
+  if [[ ! -e "$BUILD_DIR/libPrimalEngine.dylib" && -f "$BUILD_DIR/libEngineDLL.dylib" ]]; then
+    ln -sf libEngineDLL.dylib "$BUILD_DIR/libPrimalEngine.dylib"
+    echo "[build_app] symlink  $BUILD_DIR/libPrimalEngine.dylib -> libEngineDLL.dylib"
+  fi
+  if [[ ! -e "$BUILD_DIR/PrimalEngine.dylib" && -f "$BUILD_DIR/libEngineDLL.dylib" ]]; then
+    ln -sf libEngineDLL.dylib "$BUILD_DIR/PrimalEngine.dylib"
+    echo "[build_app] symlink  $BUILD_DIR/PrimalEngine.dylib -> libEngineDLL.dylib"
+  fi
+
+  if [[ -f "$BUILD_DIR/libContentTools.dylib" ]]; then
+    chmod +w "$BUILD_DIR/libContentTools.dylib" 2>/dev/null || true
+    install_name_tool -change @rpath/libfbxsdk.dylib @loader_path/libfbxsdk.dylib "$BUILD_DIR/libContentTools.dylib" 2>/dev/null || true
+    install_name_tool -change @executable_path/libfbxsdk.dylib @loader_path/libfbxsdk.dylib "$BUILD_DIR/libContentTools.dylib" 2>/dev/null || true
+  fi
+  if [[ -f "$BUILD_DIR/libEngineDLL.dylib" ]]; then
+    chmod +w "$BUILD_DIR/libEngineDLL.dylib" 2>/dev/null || true
+    install_name_tool -change @rpath/libContentTools.dylib @loader_path/libContentTools.dylib "$BUILD_DIR/libEngineDLL.dylib" 2>/dev/null || true
+    install_name_tool -id @loader_path/libEngineDLL.dylib "$BUILD_DIR/libEngineDLL.dylib" 2>/dev/null || true
+  fi
+fi
 
 if [[ ! -x "$APPHOST" ]]; then
   echo "[build_app] apphost not found at $APPHOST" >&2

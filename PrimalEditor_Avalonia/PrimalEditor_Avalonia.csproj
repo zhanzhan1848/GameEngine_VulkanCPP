@@ -1,4 +1,5 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -39,37 +40,15 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <PostBuildEvent Condition="Exists('$(MSBuildThisFileDirectory)../../Darwin/DebugEditor/libEngineDLL.dylib')">copy /Y "$(MSBuildThisFileDirectory)..\..\Darwin\DebugEditor\libEngineDLL.dylib" "$(BaseOutputPath)\$(Configuration)" &amp; if exist "$(MSBuildThisFileDirectory)..\..\Darwin\DebugEditor\libContentTools.dylib" copy /Y "$(MSBuildThisFileDirectory)..\..\Darwin\DebugEditor\libContentTools.dylib" "$(BaseOutputPath)\$(Configuration)"</PostBuildEvent>
+    <PostBuildEvent Condition="'$(OS)' == 'Windows_NT' AND Exists('$(MSBuildThisFileDirectory)..\..\Darwin\$(Configuration)\PrimalEngine.dll')">copy /Y "$(MSBuildThisFileDirectory)..\..\Darwin\$(Configuration)\PrimalEngine.dll" "$(BaseOutputPath)\$(Configuration)"</PostBuildEvent>
   </PropertyGroup>
 
-  <Target Name="CopyNativeEngineLibsUnix" AfterTargets="Build" Condition="'$(OS)' != 'Windows_NT' AND Exists('$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libEngineDLL.dylib')">
-    <ItemGroup>
-      <_NativeLibs Include="$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libEngineDLL.dylib" />
-      <_NativeLibs Include="$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libContentTools.dylib" Condition="Exists('$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libContentTools.dylib')" />
-      <_NativeLibs Include="$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libfbxsdk.dylib" Condition="Exists('$(MSBuildThisFileDirectory)../Darwin/DebugEditor/libfbxsdk.dylib')" />
-    </ItemGroup>
-    <Copy SourceFiles="@(_NativeLibs)" DestinationFolder="$(BaseOutputPath)/$(Configuration)" SkipUnchangedFiles="false" />
-    <Exec Command="ln -sf libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib" Condition="!Exists('$(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib')" />
-    <Exec Command="ln -sf libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/PrimalEngine.dylib" Condition="!Exists('$(BaseOutputPath)/$(Configuration)/PrimalEngine.dylib')" />
-    <!-- Rewrite transitive dylib install names so they resolve at @loader_path
-         (the editor output dir) instead of @executable_path (the dotnet
-         libexec dir, which we can't write to). Without this, dlopen fails
-         with "Library not loaded: @executable_path/libfbxsdk.dylib". -->
-    <Exec Command="chmod +w $(BaseOutputPath)/$(Configuration)/libContentTools.dylib; install_name_tool -change @rpath/libfbxsdk.dylib @loader_path/libfbxsdk.dylib $(BaseOutputPath)/$(Configuration)/libContentTools.dylib 2&gt;/dev/null; install_name_tool -change @executable_path/libfbxsdk.dylib @loader_path/libfbxsdk.dylib $(BaseOutputPath)/$(Configuration)/libContentTools.dylib 2&gt;/dev/null; true" Condition="Exists('$(BaseOutputPath)/$(Configuration)/libContentTools.dylib')" />
-    <!-- Rewrite libEngineDLL.dylib's reference to libContentTools.dylib so it
-         uses @loader_path (the editor dir) instead of @rpath, which would
-         otherwise resolve to the cmake-build dir (Darwin/DebugEditor)
-         and load the un-rewritten libContentTools there. -->
-    <Exec Command="chmod +w $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib; install_name_tool -change @rpath/libContentTools.dylib @loader_path/libContentTools.dylib $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib 2&gt;/dev/null; true" Condition="Exists('$(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib')" />
-    <!-- Same for libEngineDLL.dylib's self-reference (it had @rpath/libEngineDLL.dylib). -->
-    <Exec Command="chmod +w $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib; install_name_tool -id @loader_path/libEngineDLL.dylib $(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib 2&gt;/dev/null; true" Condition="Exists('$(BaseOutputPath)/$(Configuration)/libEngineDLL.dylib')" />
-  </Target>
-
-  <!-- Wrap the apphost binary into a macOS .app bundle so launching via
-       `open`/LaunchServices/Aqua session gives Avalonia a proper foreground
-       status. Without this, Avalonia's MainWindow opens off-process and
-       the dock icon never appears (StandardFlavor NULL). -->
-  <Target Name="WrapAsMacAppBundle" AfterTargets="CopyNativeEngineLibsUnix" Condition="'$(OS)' != 'Windows_NT'">
-    <Exec Command="bash '$(MSBuildThisFileDirectory)build/build_app.sh' '$(Configuration)'" IgnoreExitCode="true" />
-  </Target>
+  <!--
+    The macOS .app wrap and native dylib copy happen in
+    Directory.Build.targets (sibling of this file) — see the comment
+    there for why. Attempting to do it from the csproj is unreliable
+    because the .NET SDK silently drops AfterTargets hooks on
+    incremental builds, and its BuildDependsOn element declaration
+    overrides any property assignment in this file.
+  -->
 </Project>
