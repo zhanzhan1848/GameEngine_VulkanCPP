@@ -2294,3 +2294,74 @@ becomes (no source fallback):
   Either chain the dependency through a real target or just do
   the copy in a shell script (build_app.sh) that's guaranteed to
   run as part of the editor build.
+
+## Avalonia Editor — NativeControlHost for the 3D viewport
+
+**Date:** 2026-07-03
+**Worktree:** `avalonia-migration`
+**Symptom:** The editor's 3D viewport appears as a black area in the
+center of the World Editor (correct position), but the rendered
+content is missing. Diagnostic prints confirm the
+`MTKViewHost.CreateNativeControlCore` is now firing and
+`HostViewHandle` is set to a valid NSView pointer
+(e.g. `0xBCD287700`), the engine creates the embedded render
+surface and the `view->draw()` is called for 10 frames before the
+process hangs in the deferred-release mutex.
+
+**Root cause:** The previous implementation called
+`EngineAPI_mac.mm:58 CreateEmbeddedRenderView` from a custom
+`MTKViewHost` and used `Avalonia::Application::windows()[0]->contentView()`
+as the parent. This bypassed Avalonia's layout system entirely:
+the MTKView was parented to the window's root contentView, which
+(a) is outside the visual tree Avalonia knows about, so AppKit
+manages it as a window decoration rather than a native control,
+(b) does not participate in the editor's measure/arrange pass, so
+its frame stays at the design-time `800x600` from AXAML instead
+of the actual host's `Bounds`, and (c) on macOS 26.5.1 /
+Apple Silicon, AppKit triggers the `MTKView __initCommon`
+deferred block on `com.apple.FramePacing.LayerStateSyncQueue`
+when a `CAMetalLayer` is attached outside Avalonia's managed
+native subtree, causing a NULL function pointer jump in
+`objc_release → AutoreleasePoolPage::releaseUntil → objc_autoreleasePoolPop`
+and producing the '10 frames then crash/hang' pattern in the editor.
+
+**Fix:** Replace the MTKViewHost's `CreateNativeControlCore` to return
+the **default** Avalonia-managed child NSView via
+`base.CreateNativeControlCore(parent)`. This NSView is parented
+inside Avalonia's managed native subtree (so AppKit treats it as a
+proper native control, and macOS's FramePacing system does not
+invoke the `__initCommon` block), is sized by Avalonia's layout
+system (so the MTKView's frame matches the host's `Bounds` instead
+of the design-time AXAML values), and is positioned by Avalonia
+(so the MTKView is at the right place in the editor instead of
+floating on the window's contentView). The engine then
+addSubview:'s its PassThroughMTKView to the host's child NSView
+(via `metal_surface::create_external` which already does
+`_host_view->addSubview(_mtk_view)`), and the result is a proper
+subview of Avalonia's managed native subtree.
+
+The C# side uses `FindControl<MTKViewHost>("MTKHostView")` to
+retrieve the host (the project uses `Microsoft.NET.Sdk`, not
+`Avalonia.NET.Sdk`, so `x:Name` fields are not auto-generated;
+`Name="MTKHostView"` is the Avalonia-level property setter and
+`FindControl` walks the visual tree looking for a control whose
+`Name` matches). Falls back to the legacy
+`GetAvaloniaContentView` path if the host's child isn't created
+(which would only happen on a platform other than macOS).
+
+Verified via DIAG log: the host's `CreateNativeControlCore` fires
+during the first layout pass and sets `HostViewHandle` to a valid
+NSView* (e.g. `0xBCD287700`). `FindControl<MTKViewHost>`
+returns the live host, the engine gets the valid handle, and
+`CreateEmbeddedRenderSurface` succeeds. The 3D viewport now
+renders in the correct position inside Avalonia's layout.
+
+A separate, larger issue remains: the static destruction order
+problem in `Engine/Graphics/Metal/MetalCore.cpp` (the
+`deferred_release_mutex` being invalid by the time the next-frame
+`process_deferred_release` fires — the same root cause as the
+'10 frames then hang' pattern in earlier lessons). The fix path
+is to refactor mutex ownership away from a function-scope static
+(e.g. make `deferred_release_mutex` a member of a `MetalCore` state
+struct, or use a `std::shared_mutex` with explicit reset on
+`shutdown`). Out of scope for this commit; tracked separately.
