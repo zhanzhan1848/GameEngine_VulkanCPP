@@ -2029,3 +2029,268 @@ launched with a 30s liveness test. All three produced:
 - 0 FreeList Corruption warnings
 - 0 SIGSEGV
 
+
+## Avalonia Editor — csproj dylib copy path was worktree-fragile
+
+**Date:** 2026-07-02
+**Worktree:** `avalonia-migration`
+**Symptom (this round):** `dotnet build -c DebugEditor` succeeds with
+0 errors and the .app bundle wraps, but the editor log says:
+
+```
+[WARN] Native engine not available: Unable to load shared library
+'libPrimalEngine.dylib' or one of its dependencies. ... Running in
+editor-only mode.
+```
+
+Editor opens as an Avalonia template placeholder. No engine, no Metal,
+no RHI, no rendering.
+
+**Root cause:** The csproj's `CopyNativeEngineLibsUnix` target was
+hardcoded with `$(MSBuildThisFileDirectory)../Darwin/...` — a one-level
+relative path. In the worktree layout
+`.worktrees/avalonia-migration/PrimalEditor_Avalonia/`, this resolves
+to `.worktrees/avalonia-migration/Darwin/...` which does not exist
+(dylibs are at `<MAIN_REPO>/Darwin/DebugEditor/`, two levels up). The
+target's Condition `Exists('$(...)/libEngineDLL.dylib')` evaluated
+false, the target was silently skipped, the dylibs were never copied,
+and `AppContext.BaseDirectory` in `NativeEngineBridge.cs` couldn't
+find `libPrimalEngine.dylib`.
+
+**Fix (permanent):** Moved all native-lib work into a single
+`build/build_app.sh` script that:
+
+1. Discovers the main repo root via
+   `git rev-parse --path-format=absolute --git-common-dir | dirname`
+   (works in main checkout AND any worktree at any depth, because
+   `--git-common-dir` returns the shared `.git` location).
+2. Copies `libEngineDLL.dylib`, `libContentTools.dylib`, `libfbxsdk.dylib`
+   from `<RepoRoot>/Darwin/<Config>/` to the dotnet build output dir.
+3. Creates the `libPrimalEngine.dylib` and `PrimalEngine.dylib`
+   symlinks that `NativeEngineBridge.cs` looks up.
+4. Rewrites transitive dylib install names from `@rpath` /
+   `@executable_path` to `@loader_path` so dlopen finds siblings
+   relative to the editor's own directory (the dotnet libexec dir
+   is not user-writable).
+5. Wraps the apphost into a `.app` bundle (existing behavior, kept
+   so Avalonia gets a foreground Aqua session).
+
+The script is invoked from a new `Directory.Build.targets` file that
+hooks `BuildDependsOn` (the element form) — that is the **only** way
+to chain a custom target into the .NET SDK's Build entry point. Three
+attempts that did NOT work and why (recording here so the next person
+doesn't re-walk this path):
+
+- `AfterTargets="Build"`: silently dropped on incremental builds.
+- `AfterTargets="CoreCompile"`: `CoreCompile` is not in
+  `BuildDependsOn` (which is `BeforeBuild; CoreBuild; AfterBuild`),
+  so the target was never scheduled.
+- `<PropertyGroup><BuildDependsOn>$(BuildDependsOn);…</…></PropertyGroup>`:
+  the SDK's `<BuildDependsOn>` element declaration in
+  `Microsoft.Common.CurrentVersion.targets` (value
+  `BeforeBuild; CoreBuild; AfterBuild`) is evaluated AFTER the
+  csproj's PropertyGroup and overwrites it.
+- `Directory.Build.targets` is imported by the SDK after
+  `Microsoft.Common.CurrentVersion.targets`, so its
+  `<BuildDependsOn>` element append takes precedence. THIS WORKS.
+
+**Anti-patterns to avoid:**
+- Hardcoding `../Darwin/...` in csproj post-build targets. Use
+  `git rev-parse --git-common-dir` to find the main repo root.
+- Trying to use `AfterTargets` on any SDK Build target. It is
+  unreliable; `BuildDependsOn` is the only stable hook.
+- Using `<PropertyGroup><BuildDependsOn>$(...)…</BuildDependsOn></PropertyGroup>`
+  inside the csproj — the SDK overrides it. Use
+  `Directory.Build.targets` for the hook.
+
+**Verification:** Built at both worktree locations:
+- `…/GameEngine_VulkanCPP/.worktrees/avalonia-migration/PrimalEditor_Avalonia/`
+- `/tmp/wt-alternate/PrimalEditor_Avalonia/` (detached HEAD worktree)
+
+Both produce dylibs in the dotnet output, the .app bundle wraps,
+and launching the .app results in:
+```
+[INFO] Native engine loaded: default
+[INFO] Engine initialized via RHI (Metal)
+[Pipeline] Render scale=1 logical=1280x720 render=1280x720
+[MetalPipeline] Render pipeline state created successfully.
+```
+
+
+## Avalonia Editor — dylib was built from main-checkout sources, not worktree
+
+**Date:** 2026-07-02
+**Worktree:** `avalonia-migration`
+**Symptom:** After fixing the path bug in `PrimalEditor_Avalonia.csproj`
+(see previous lesson), the editor launches and the engine initializes
+successfully — but then crashes every frame with:
+
+```
+[ERROR] GetAvaloniaContentView failed
+  Exception: Unable to find an entry point named 'GetAvaloniaContentView'
+  in shared library 'PrimalEngine'.
+```
+
+The render surface never displays anything. Editor opens, engine
+ticks, Metal initializes, but the 3D viewport is blank.
+
+**Root cause:** I had been building the dylib by running `cmake` in
+`build-debugeditor/` at the **main checkout** root
+(`/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/...`). That CMake
+build consumes `EngineDLL/EngineAPI.cpp` from the **main checkout**,
+which is on branch `feat/metal-sdk-upgrade` and has only **219 lines**.
+The avalonia-side `EDITOR_INTERFACE void* GetAvaloniaContentView()`
+function is in branch `feat/avalonia-migration`'s version of
+`EngineAPI.cpp`, which is **359 lines** — i.e. **the worktree's copy
+of the file is the only one that defines and exports
+`GetAvaloniaContentView`**. So the dylib I was linking into the
+editor was missing 140 lines of C++ source — including the
+Avalonia-specific entry point that Native/NativeEngineBridge.cs
+tries to P/Invoke.
+
+Verification: `nm -gU Darwin/DebugEditor/libEngineDLL.dylib` before
+the fix showed zero Avalonia symbols. `nm build-debugeditor/.../
+EngineAPI.cpp.o` also showed zero Avalonia symbols — the .o file
+itself didn't contain the function, confirming the source file
+used by the build didn't define it.
+
+**Fix:**
+1. Configure a separate cmake build in the worktree itself:
+   `cd .worktrees/avalonia-migration && mkdir build-wt && cd build-wt
+   && cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=DebugEditor -S ..`
+   This consumes the worktree's `EngineDLL/`, `Engine/`, etc. and
+   produces a dylib that has the avalonia exports.
+2. `cmake --build build-wt --target EngineDLL -j 4`
+3. Copy the freshly built dylib from
+   `.worktrees/avalonia-migration/Darwin/DebugEditor/` to the main
+   repo's `Darwin/DebugEditor/` (because the editor's
+   `build_app.sh` discovers the main repo via `git rev-parse
+   --git-common-dir` and reads dylibs from there).
+4. Rebuild the editor: `dotnet build -c DebugEditor` then run.
+
+**Verification:** After the fix:
+```
+$ nm -gU Darwin/DebugEditor/libEngineDLL.dylib | grep Avalonia
+00000000000050bc T _GetAvaloniaContentView
+...
+$ dotnet run --no-build -c DebugEditor
+[INFO] Native engine loaded: default
+[INFO] Engine initialized via RHI (Metal)
+[INFO] 3D viewport initialized via RHI forward pipeline
+[Metal] DRAW #1: vertexCount=3 instanceCount=1 encoderType=1
+[Metal] DRAW #2: vertexCount=3 instanceCount=1 encoderType=1
+... (10 frames)
+```
+
+No more "GetAvaloniaContentView failed" errors. The 3D viewport
+attaches to the Avalonia NSView, the editor enters `editor_mode=1`,
+and the renderer ticks successfully.
+
+**Anti-patterns to avoid:**
+- Building C++ in a directory rooted at the main checkout while
+  consuming C# from a worktree. The two will silently disagree
+  about which sources are "current". Always either (a) cmake-build
+  in the worktree, or (b) commit the worktree's changes to the
+  branch you're building from, before building.
+- Assuming `nm` on the dylib will reveal source-level issues.
+  `nm` shows what's in the binary; the binary's contents are
+  dictated by the source files compiled into it, which may not
+  be the source files you think.
+
+
+## Avalonia Editor — blit-to-drawable shader fails to load (macOS 26)
+
+**Date:** 2026-07-02
+**Worktree:** `avalonia-migration`
+**Symptom:** Editor opens, the test scene renders 10 frames
+(DRAW #1..#10 with `[ForwardSceneRenderer::Render] scene_loaded_=1 proxies=4 mesh_infos=4`),
+but the MTKView surface is solid black. Headless render (`--headless-render`)
+produces a correct PNG of 4 spheres — the offscreen path works fine.
+
+**Root cause:** `Engine/Graphics/Metal/MetalBlitToDrawable::Initialize`
+loads the blit metallib via:
+```cpp
+dispatch_data_t data = read_metallib_data(path);
+MTL::Library* lib = device->newLibrary(data, &err);
+```
+Metal rejects this on macOS 26 / Apple Silicon with
+`err=Invalid library file`. The reason is documented in the engine
+itself in `Engine/Graphics/Metal/MetalShader.cpp::load_engine_shaders`:
+on macOS 26, Metal's `newLibraryWithData` runs CC_SHA256_Update via
+NEON-accelerated AccelerateCrypto_SHA256_compress, and any
+`dispatch_data_t` whose backing buffer is page-aligned with a
+non-multiple-of-64 size will SIGBUS during the 64-byte SHA256 read
+(the read crosses a page boundary into a commpage / kernel-mapped
+region). The engine's main shader loader already works around this
+by writing the metallib to a tmp file and calling
+`newLibraryWithURL`; the blit-to-drawable helper does NOT, which
+is why it fails.
+
+**Fix:** Apply the same `mkstemps` + `newLibraryWithURL` workaround
+in `MetalBlitToDrawable::Initialize`. The new path:
+1. Read the metallib bytes into a `std::vector<u8>`.
+2. `mkstemps("/tmp/primal_blit_to_drawable_XXXXXX.metallib", 9)` for
+   a unique tmp path.
+3. `::write()` the bytes, `::close()` the fd.
+4. `MTL::Device::newLibraryWithURL` on the tmp path.
+5. `::unlink()` the tmp file in any case (success or failure).
+
+**Verification:**
+- `[MetalBlitToDrawable] newLibraryWithURL failed for ...` is gone
+  from the editor log.
+- 4 spheres render in the headless PNG.
+- The editor runs 10 frames of `DRAW #1`..`#10` with no
+  blit-to-drawable errors.
+
+**Anti-patterns to avoid:**
+- Loading metallibs via `newLibrary(dispatch_data_t)` on
+  macOS 26 / Apple Silicon — always go through the
+  `newLibraryWithURL` tmp-file path, matching the engine's existing
+  pattern in `MetalShader.cpp::load_engine_shaders`.
+
+## Avalonia Editor — engine shader metallib not in editor's cwd
+
+**Date:** 2026-07-02
+**Worktree:** `avalonia-migration`
+**Symptom:** `[MetalShader] Failed to create library from binary:
+Invalid library file` for every shader (Lumen, SSAO, SSGI, FX, TAA,
+prepass). The editor falls through to source-compiling every
+shader on every frame, which is slow and can produce wrong
+artifacts because the source path may differ from the precompiled
+path.
+
+**Root cause:** The C# program pins cwd to `AppContext.BaseDirectory`
+(via `Program.AnchorWorkingDirectoryToExecutable`), which is
+`<editor-output>/`. The native engine resolves the shader blob via
+`engine_shader_paths[Metal] = "./shaders/metal/shaders.metallib"`
+(relative to cwd). The CMake build emits the metallib to
+`<build-dir>/shaders/metal/`, but the editor's output dir is
+`<repo>/Darwin/PrimalEditor_Avalonia/<Config>/`, which is a
+different path. The CMake custom command in
+`CMake/EngineShaderBlob.cmake` is meant to copy the metallib to the
+editor dir, but the OUTPUT path it specifies is a relative path
+that CMake never wires up to a real dependency, so the copy
+command never runs.
+
+**Fix:** Augment `build_app.sh` to copy the metallibs explicitly
+from the known good locations (main repo's `Darwin/Debug/shaders/metal/`)
+into both `$BUILD_DIR/shaders/metal/` and (via the existing
+`shopt -s dotglob nullglob` loop) the `.app/Contents/MacOS/shaders/metal/`.
+Then the engine's cwd-relative lookup finds the blob.
+
+**Verification:** After the build, `Darwin/PrimalEditor_Avalonia/DebugEditor/shaders/metal/shaders.metallib`
+exists and the editor loads it cleanly:
+```
+[MetalShader] Compiling from source... (size: 65405 bytes)
+```
+becomes (no source fallback):
+```
+[MetalPipeline] Render pipeline state created successfully.
+```
+
+**Anti-patterns to avoid:**
+- CMake custom commands whose OUTPUT path doesn't match any other
+  target's dependency. They will be defined but never executed.
+  Either chain the dependency through a real target or just do
+  the copy in a shell script (build_app.sh) that's guaranteed to
+  run as part of the editor build.
