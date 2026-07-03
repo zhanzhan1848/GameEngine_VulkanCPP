@@ -424,10 +424,10 @@ bool TestNaniteStreamingPipeline::InitializeWindowAndRenderSystem() {
 
     renderWidth_ = window_.width();
     renderHeight_ = window_.height();
-#ifdef __APPLE__
-    renderWidth_ *= 2;
-    renderHeight_ *= 2;
-#endif
+    // NOTE: previously did `renderWidth_ *= 2` on Apple for retina backing, but MTKView
+    // resets drawableSize to bounds.size * contentsScale after window becomes key,
+    // leaving drawable at logical size (1280x720) while render targets are 2x (2560x1440).
+    // The mismatch trips Metal debug's SetScissor validation. Render at logical size for now.
 
     graphics::RenderSystemInitInfo sysInfo;
     sysInfo.device = device_;
@@ -724,6 +724,33 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         return false;
     }
 
+    // === No-Tonemap Blit Pipeline (samples LDR input directly, no tonemap/gamma) ===
+    // Used by mode 6 mode_diag_=1 where input is fusion_output_ (already tonemapped by fragmentFusion).
+    // Using fragmentBlit here would double-tonemap and crush spatial variation to near-uniform gray.
+    {
+        const shader_file_info noTonemap_ps_info{ "DeferredLighting.metal", "fragmentBlitNoTonemap", shader_type::pixel };
+        if (CompileShader(noTonemap_ps_info)) {
+            primal::graphics::rhi::GraphicsPipelineDesc noTonemapDesc{};
+            noTonemapDesc.layout = blit_layout_;
+            noTonemapDesc.vertexShader = shaderVariantMap[std::string(blit_vs_info.file_name) + ":" + blit_vs_info.function];
+            noTonemapDesc.pixelShader = shaderVariantMap[std::string(noTonemap_ps_info.file_name) + ":" + noTonemap_ps_info.function];
+            noTonemapDesc.renderTargetFormats[0] = primal::graphics::rhi::DataFormat::BGRA8_UNorm;
+            noTonemapDesc.renderTargetCount = 1;
+            noTonemapDesc.depthStencilFormat = primal::graphics::rhi::DataFormat::Unknown;
+            noTonemapDesc.enableDepthTest = false;
+            noTonemapDesc.enableDepthWrite = false;
+            noTonemapDesc.cullMode = primal::graphics::rhi::CullMode::None;
+            noTonemapDesc.vertexAttributes.clear();
+            noTonemapDesc.vertexBindings.clear();
+            blit_no_tonemap_pipeline_ = device_->CreateGraphicsPipeline(noTonemapDesc);
+            if (blit_no_tonemap_pipeline_ == primal::graphics::rhi::handles::INVALID_PIPELINE) {
+                std::cerr << "[TestNanite] Warning: Failed to create blit_no_tonemap pipeline (falling back to blit_pipeline_ for mode 6)" << std::endl;
+            }
+        } else {
+            std::cerr << "[TestNanite] Warning: Failed to compile fragmentBlitNoTonemap" << std::endl;
+        }
+    }
+
     //std::cout << "[TestNanite] Blit Pipeline initialized successfully" << std::endl;
 
     // === Composite Blit Pipeline (scene + SSGI) ===
@@ -856,7 +883,7 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
                     primal::graphics::rhi::DescriptorSetDesc dsDesc{ .layout = fusion_fragment_set_layout_ };
                     fusion_fragment_descriptor_set_[b] = device_->CreateDescriptorSet(dsDesc);
                 }
-                // Full-res fusion output
+                // Full-res fusion output (LDR: fragmentFusion tonemaps once)
                 TextureDesc outputDesc{};
                 outputDesc.size = {renderWidth_, renderHeight_, 1};
                 outputDesc.format = DataFormat::BGRA8_UNorm;
@@ -1119,8 +1146,9 @@ bool TestNaniteStreamingPipeline::InitializeSSGIPipeline() {
 
     // 2b. Create volume scatter fallback texture (0,0,0,1) for fragmentFusion shader
     // Shader: (scene + indirect) * vol.a + vol.rgb ; vol.a=1 passes through scene+indirect
+    // u32 little-endian RGBA8/BGRA8 byte layout: 0x00 0x00 0x00 0xFF → rgb=0, a=1
     {
-        u32 volPixel = 0x00FFFFFF; // RGBA8 little-endian: R=0,G=0,B=0,A=0xFF -> (0,0,0,1)
+        u32 volPixel = 0xFF000000;
         volume_scatter_fallback_texture_ = CreateTextureFromData(device_, 1, 1,
             reinterpret_cast<unsigned char*>(&volPixel), true);
         if (volume_scatter_fallback_texture_ == handles::INVALID_RESOURCE) {
@@ -5106,7 +5134,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             }
         );
 
-        // Import full-res fusion output
+        // Import full-res fusion output (LDR tonemapped by fragmentFusion)
         rhi::TextureDesc fusionOutputDesc{};
         fusionOutputDesc.size = {renderWidth_, renderHeight_, 1};
         fusionOutputDesc.format = DataFormat::BGRA8_UNorm;
@@ -5398,7 +5426,12 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     }
                     DescriptorData blit_params[1] = { { 0, DescriptorType::SampledImage, fusionOut } };
                     UpdateDescriptorSet(device_, blit_descriptor_set_[cbIdx], blit_params, 1);
-                    cmd->BindGraphicsPipeline(blit_pipeline_);
+                    // Use blit_no_tonemap_pipeline_ because fusion_output_ is already tonemapped
+                    // by fragmentFusion. Using blit_pipeline_ (fragmentBlit) would tonemap again,
+                    // crushing spatial variation to near-uniform gray.
+                    rhi::PipelineHandle pipe = (blit_no_tonemap_pipeline_ != rhi::handles::INVALID_PIPELINE)
+                        ? blit_no_tonemap_pipeline_ : blit_pipeline_;
+                    cmd->BindGraphicsPipeline(pipe);
                     const rhi::DescriptorSetHandle blit_sets[] = { blit_descriptor_set_[cbIdx] };
                     cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_layout_, 0, 1, blit_sets, 0, nullptr);
                     cmd->Draw(3, 0, 1, 0);

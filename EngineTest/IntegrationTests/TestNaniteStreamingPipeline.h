@@ -96,6 +96,9 @@ private:
 
     // Blit pipeline for final presentation
     primal::graphics::rhi::PipelineHandle blit_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
+    // Blit variant for LDR inputs (no tonemap/gamma). Used by mode 6 mode_diag_=1
+    // to sample already-tonemapped fusion_output_ without double-tonemapping.
+    primal::graphics::rhi::PipelineHandle blit_no_tonemap_pipeline_{ primal::graphics::rhi::handles::INVALID_PIPELINE };
     primal::graphics::rhi::PipelineLayoutHandle blit_layout_{ primal::graphics::rhi::handles::INVALID_PIPELINE_LAYOUT };
     primal::graphics::rhi::DescriptorSetLayoutHandle blit_set_layout_{ primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     primal::graphics::rhi::DescriptorSetHandle blit_descriptor_set_[3]{

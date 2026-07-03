@@ -45,7 +45,9 @@ struct ScreenProbeGlobalData {
 
 constant float PI = 3.14159265358979323846f;
 constant float GOLDEN_RATIO = 1.618033988749895f;
-constant uint  MAX_SDF_STEPS = 4;
+// Was 4 — too few for sphere tracing. Bumped to 32 so rays actually reach
+// geometry within maxDist instead of reporting miss.
+constant uint  MAX_SDF_STEPS = 32;
 constant float SDF_HIT_THRESHOLD_FACTOR = 1.5f;
 
 // ============================================================================

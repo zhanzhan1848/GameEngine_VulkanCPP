@@ -46,7 +46,10 @@ struct ScreenProbeGlobalData {
 
 constant float PI = 3.14159265358979323846f;
 constant float GOLDEN_RATIO = 1.618033988749895f;
-constant uint  MAX_SDF_STEPS = 4;
+// Was 4 — way too few for sphere tracing. Most rays failed to converge within
+// 4 steps and reported "miss", producing extremely dim SPGI output.
+// 32 gives rays enough iterations to actually reach geometry within maxDist.
+constant uint  MAX_SDF_STEPS = 32;
 
 // ============================================================================
 // Screen Probe SDF trace wrapper

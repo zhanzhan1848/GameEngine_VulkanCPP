@@ -748,7 +748,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     // Import persistent output textures into render graph
     auto giOutputHandle = graph.ImportResource("ScreenProbeGI_Output", output_texture_);
     auto giFilteredHandle = graph.ImportResource("ScreenProbeGI_Filtered", output_texture_filtered_);
-    output.gi_output = giFilteredHandle;  // Return denoised (filtered) output
+    // Bypass denoise: returning giFilteredHandle produced solid-color output in
+    // fusion composite (mode 6) while mode 5 (which reads output_texture_ via
+    // GetOutputTexture()) looked correct. Until denoise is debugged, route
+    // downstream passes through the raw Gather texture for parity with mode 5.
+    output.gi_output = giOutputHandle;
 
     // Import surface cache resources into render graph (needed for RGResourceHandle conversion)
     RGResourceHandle scLightingHandle;

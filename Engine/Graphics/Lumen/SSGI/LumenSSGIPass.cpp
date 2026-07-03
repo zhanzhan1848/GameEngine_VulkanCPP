@@ -605,6 +605,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                     float near_plane;
                     float far_plane;
                     u32   hzb_mip_levels;
+                    float max_trace_distance;
                 };
                 auto* ssgiParams = static_cast<SSGIParamsData*>(device_->MapBuffer(params_cb_[frameIdx]));
                 if (ssgiParams) {
@@ -617,6 +618,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                     ssgiParams->near_plane = 0.1f;
                     ssgiParams->far_plane = 1000.0f;
                     ssgiParams->hzb_mip_levels = hzb_mip_levels;
+                    ssgiParams->max_trace_distance = params_.max_trace_distance;
                     device_->UnmapBuffer(params_cb_[frameIdx]);
                 }
 
