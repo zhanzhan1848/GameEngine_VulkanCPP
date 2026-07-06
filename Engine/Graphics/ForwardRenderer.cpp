@@ -616,10 +616,11 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         }
 
         // ---- Meshlet deferred pipeline (Phase N2) ----
-        // 13 bindings matching DeferredLighting_Meshlet.wgsl. Same shape as the
+        // 14 bindings matching DeferredLighting_Meshlet.wgsl. Same shape as the
         // standard deferred block but with an extra depthTex binding for
-        // worldPos reconstruction (meshlet GBuffer has no WorldPos RT).
-        rhi::DescriptorSetLayoutBinding meshletBinds[13];
+        // worldPos reconstruction (meshlet GBuffer has no WorldPos RT), plus
+        // binding 13 for DDGI indirect (gi_indirect_tex).
+        rhi::DescriptorSetLayoutBinding meshletBinds[14];
         meshletBinds[0]  = {0,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
         meshletBinds[1]  = {1,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
         meshletBinds[2]  = {2,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
@@ -637,8 +638,10 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         meshletBinds[11] = {11, rhi::DescriptorType::UniformBuffer,     1, rhi::ShaderStage::Compute};
         meshletBinds[12] = {12, rhi::DescriptorType::StorageImage,      1, rhi::ShaderStage::Compute};
         meshletBinds[12].format = rhi::DataFormat::RGBA16_Float;
+        meshletBinds[13] = {13, rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[13].format = rhi::DataFormat::RGBA16_Float;
         rhi::DescriptorSetLayoutDesc meshletDslDesc;
-        meshletDslDesc.bindingCount = 13;
+        meshletDslDesc.bindingCount = 14;
         meshletDslDesc.bindings = meshletBinds;
         dawnMeshletDeferredDSL_ = device->CreateDescriptorSetLayout(meshletDslDesc);
 
@@ -646,6 +649,19 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         meshletPlDesc.setLayoutCount = 1;
         meshletPlDesc.setLayouts = &dawnMeshletDeferredDSL_;
         dawnMeshletDeferredPipelineLayout_ = device->CreatePipelineLayout(meshletPlDesc);
+
+        // 1x1 fallback for binding 13 when DDGI is off. Avoids WebGPU validation
+        // errors from binding INVALID_RESOURCE to a declared slot. The shader's
+        // enableDDGI check means this texture is never sampled when DDGI is off,
+        // so it doesn't need to be initialized to a specific value.
+        {
+            rhi::TextureDesc texDesc{};
+            texDesc.size = {1, 1, 1};
+            texDesc.format = rhi::DataFormat::RGBA16_Float;
+            texDesc.type = rhi::TextureType::Texture2D;
+            texDesc.usage = rhi::TextureUsage::ShaderResource;
+            dawnDummy1x1Tex_ = device->CreateTexture(texDesc);
+        }
 
         std::string meshletShaderSrc;
 #ifdef __EMSCRIPTEN__
@@ -1830,7 +1846,8 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
                                                        const RenderScene& scene,
                                                        u32 frameIndex,
                                                        u32 width,
-                                                       u32 height) {
+                                                       u32 height,
+                                                       rhi::ResourceHandle gi_indirect_texture) {
     if (!device_ || !cmdBuffer) return;
     if (dawnMeshletDeferredPipeline_ == rhi::handles::INVALID_PIPELINE) {
         std::cerr << "[MeshletDeferred] Pipeline not initialized" << std::endl;
@@ -1872,6 +1889,7 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
         frameData->frameCount = static_cast<float>(frameNumber_);
         frameData->renderMode = dawnRenderMode_;
         frameData->enableIBL = dawnEnableIBL_;
+        frameData->enableDDGI = dawnEnableDDGI_;
         frameData->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, static_cast<float>(width)};
         frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
         frameData->jitterOffset = utils::GetJitterOffset(frameNumber_, width, height);
@@ -1886,7 +1904,7 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
         device_->SetBufferDirtySize(lightBuffers_[fi], sizeof(rhi::ForwardLightBuffer));
     }
 
-    // Update per-frame descriptor set. All 13 bindings are written each frame.
+    // Update per-frame descriptor set. All 14 bindings are written each frame.
     rhi::DescriptorImageInfo gbInfo[DAWN_MESHLET_GBUFFER_RT_COUNT];
     rhi::DescriptorImageInfo depthInfo;
     rhi::DescriptorImageInfo shadowInfo;
@@ -1897,6 +1915,7 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
     rhi::DescriptorBufferInfo frameUB;
     rhi::DescriptorBufferInfo lightUB;
     rhi::DescriptorImageInfo outInfo;
+    rhi::DescriptorImageInfo giIndirectInfo;
 
     for (u32 i = 0; i < DAWN_MESHLET_GBUFFER_RT_COUNT; ++i) {
         gbInfo[i].imageView = gbufferTextures[i];
@@ -1922,7 +1941,13 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
     outInfo.imageView = hdrTexture;
     outInfo.imageLayout = rhi::ResourceState::UnorderedAccess;
 
-    rhi::WriteDescriptorSet writes[13];
+    // Binding 13: DDGI indirect texture. Fall back to a 1x1 dummy when the
+    // caller didn't supply one (Modes 7/8/9) so WebGPU validation is happy.
+    giIndirectInfo.imageView = (gi_indirect_texture != rhi::handles::INVALID_RESOURCE)
+                               ? gi_indirect_texture : dawnDummy1x1Tex_;
+    giIndirectInfo.imageLayout = rhi::ResourceState::ShaderResource;
+
+    rhi::WriteDescriptorSet writes[14];
     writes[0]  = {dawnMeshletDeferredSet_[fi], 0,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[0]};
     writes[1]  = {dawnMeshletDeferredSet_[fi], 1,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[1]};
     writes[2]  = {dawnMeshletDeferredSet_[fi], 2,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[2]};
@@ -1936,7 +1961,8 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
     writes[10] = {dawnMeshletDeferredSet_[fi], 10, 0, 1, rhi::DescriptorType::UniformBuffer,     nullptr, &frameUB};
     writes[11] = {dawnMeshletDeferredSet_[fi], 11, 0, 1, rhi::DescriptorType::UniformBuffer,     nullptr, &lightUB};
     writes[12] = {dawnMeshletDeferredSet_[fi], 12, 0, 1, rhi::DescriptorType::StorageImage,      &outInfo};
-    device_->UpdateDescriptorSets(13, writes);
+    writes[13] = {dawnMeshletDeferredSet_[fi], 13, 0, 1, rhi::DescriptorType::SampledImage,      &giIndirectInfo};
+    device_->UpdateDescriptorSets(14, writes);
 
     rhi::ResourceBarrier hdrBarrier{};
     hdrBarrier.resource = hdrTexture;

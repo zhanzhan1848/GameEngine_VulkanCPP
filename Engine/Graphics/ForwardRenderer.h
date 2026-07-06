@@ -106,7 +106,8 @@ public:
                                            const RenderScene& scene,
                                            u32 frameIndex,
                                            u32 width,
-                                           u32 height);
+                                           u32 height,
+                                           rhi::ResourceHandle gi_indirect_texture = rhi::handles::INVALID_RESOURCE);
 
     GeometryDebugSettings& GetDebugSettings() { return debugSettings_; }
     
@@ -249,6 +250,11 @@ private:
     // enableIBL is written into GlobalShaderData to gate the deferred IBL block.
     u32 dawnMeshletDebugMode_{0};   // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id
     u32 dawnEnableIBL_{1};
+    u32 dawnEnableDDGI_{0};  // 0 = skip DDGI indirect (default), 1 = apply (Mode 10)
+
+    // 1x1 fallback texture for binding 13 when DDGI is off. Avoids WebGPU
+    // validation errors from binding INVALID_RESOURCE to a declared slot.
+    rhi::ResourceHandle dawnDummy1x1Tex_{};
 
     // Phase 2: previous-frame state for velocity MRT
     primal::math::m4x4 prevViewProjection_{};
@@ -314,11 +320,12 @@ private:
 
     // Dawn Meshlet Deferred lighting pass (Phase N2) — compute shader reading the
     // 4-RT meshlet GBuffer + sampleable depth + shadow depth + IBL, writing HDR
-    // color. 13 bindings in set 0:
+    // color. 14 bindings in set 0:
     //   0..3 meshlet gbuffer (albedo/normal/orm/velocity),
     //   4 depthTex (SampledDepthImage), 5 shadowDepthTex (depth_2d_array),
     //   6..8 IBL (cube, cube, 2d), 9 iblSampler,
-    //   10 globalData UB, 11 lightBuffer UB, 12 outputTex storage.
+    //   10 globalData UB, 11 lightBuffer UB, 12 outputTex storage,
+    //   13 gi_indirect_tex (DDGI indirect — Mode 10 only, fallback 1x1 otherwise).
     rhi::DescriptorSetLayoutHandle dawnMeshletDeferredDSL_{rhi::handles::INVALID_RESOURCE};
     rhi::PipelineLayoutHandle dawnMeshletDeferredPipelineLayout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineHandle dawnMeshletDeferredPipeline_{rhi::handles::INVALID_PIPELINE};
@@ -342,6 +349,7 @@ public:
     void SetDawnRenderMode(u32 mode) { dawnRenderMode_ = mode; }
     void SetDawnMeshletDebugMode(u32 mode) { dawnMeshletDebugMode_ = mode; }
     void SetDawnEnableIBL(u32 enable) { dawnEnableIBL_ = enable; }
+    void SetDawnEnableDDGI(u32 enable) { dawnEnableDDGI_ = enable; }
 
     // Phase 3c-2: caller supplies the material DSL (created by the test, shared
     // with MaterialInstance descriptor sets). The G-Buffer pipeline binds this

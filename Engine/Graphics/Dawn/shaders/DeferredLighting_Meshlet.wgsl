@@ -23,6 +23,7 @@
 //  10      globalData uniform (GlobalShaderData)
 //  11      lightBuffer uniform (ForwardLightBuffer)
 //  12      outputTex (RGBA16F storage)
+//  13      gi_indirect_tex (RGBA16F sampled, DDGI indirect — Mode 10 only)
 
 struct GlobalShaderData {
     view: mat4x4<f32>,
@@ -39,6 +40,7 @@ struct GlobalShaderData {
     frameCount: f32,
     renderMode: u32,
     enableIBL: u32,   // 0 = skip IBL ambient term (meshlet NoIBL mode), 1 = apply
+    enableDDGI: u32,  // 0 = skip DDGI indirect (default), 1 = apply from binding 13 (Mode 10)
     jitterOffset: vec2<f32>,
 };
 
@@ -90,6 +92,7 @@ const PI: f32 = 3.141592653589793;
 @group(0) @binding(10) var<uniform> globalData: GlobalShaderData;
 @group(0) @binding(11) var<uniform> lightBuffer: ForwardLightBuffer;
 @group(0) @binding(12) var outputTex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(13) var gi_indirect_tex: texture_2d<f32>;
 
 // === BRDF helpers (mirrors DeferredLighting.wgsl:90-113) ===
 
@@ -324,6 +327,17 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
             let specularIBL = prefilteredColor * (kS_ibl * brdf.r + brdf.g);
             let iblStrength: f32 = 0.2;
             color = color + (kD_ibl * diffuseIBL + specularIBL) * occlusion * iblShadow * iblStrength;
+        }
+
+        // === DDGI indirect lighting ===
+        // Phase A: half-res indirect texture sampled with iblSampler. AO not yet
+        // wired from SSAO (defer to follow-up). ddgi_weight matches Metal test.
+        if (globalData.enableDDGI != 0u) {
+            let uv: vec2<f32> = vec2<f32>(f32(pixel.x) + 0.5, f32(pixel.y) + 0.5) / vec2<f32>(dims);
+            let indirect: vec3<f32> = textureSampleLevel(gi_indirect_tex, iblSampler, uv, 0.0).rgb;
+            let ao: f32 = 1.0;
+            let ddgi_weight: f32 = 0.85;
+            color = color + albedo * indirect * ddgi_weight * ao;
         }
 
         // ForwardPBR/DeferredLighting apply pow(1.3)+gamma before ToneMapping.

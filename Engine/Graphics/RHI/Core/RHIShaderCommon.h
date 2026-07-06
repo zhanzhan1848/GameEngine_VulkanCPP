@@ -27,6 +27,7 @@ struct GlobalShaderData
 
     u32 renderMode; // 0=NoEffects, 1=ShadowOnly, 2=ShadowAndIBL, 3=Full
     u32 enableIBL;  // 0 = skip IBL ambient (MeshletNoIBL), 1 = apply (Meshlet). Mirrors the WGSL GlobalShaderData slot formerly named _pad0.
+    u32 enableDDGI; // 0 = skip DDGI indirect (default), 1 = apply indirect lighting from binding 13. Mode 10 sets this to 1.
     math::v2 jitterOffset; // TAA subpixel jitter (clip-space units, applied in PBR vertex)
 };
 
