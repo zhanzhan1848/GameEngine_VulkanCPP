@@ -30,6 +30,7 @@ void EmscriptenInitInput();
 #include "Engine/Graphics/Nanite/NaniteResourceManager.h"
 #include "Engine/Content/ContentToEngine.h"
 #include "Engine/Graphics/RHI/Core/RHIMeshAsset.h"
+#include "Engine/Graphics/Lumen/StaticProbe/StaticProbeBaker.h"
 #include "Engine/Graphics/SceneDataAdapter.h"
 #include "Engine/Components/Entity.h"
 #include "Engine/Components/Cluster.h"
@@ -445,7 +446,7 @@ bool Engine_Test::LoadSponzaScene() {
     std::cerr << "[TestDawnFR] Material shaders set" << std::endl;
 
     // Vertex attributes (32-byte interleaved: pos + colorTSign + packedNormal + packedTangent + uv)
-    utl::vector<VertexInputAttribute> attrs(5);
+    primal::utl::vector<VertexInputAttribute> attrs(5);
     attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};   // position
     attrs[1] = {1, 0, DataFormat::R32_UInt, 12};      // colorTSign
     attrs[2] = {2, 0, DataFormat::R32_UInt, 16};      // packedNormal
@@ -453,7 +454,7 @@ bool Engine_Test::LoadSponzaScene() {
     attrs[4] = {4, 0, DataFormat::RG32_Float, 24};    // uv
     material->SetVertexAttributes(attrs);
 
-    utl::vector<VertexInputBinding> bindings(1);
+    primal::utl::vector<VertexInputBinding> bindings(1);
     bindings[0] = {0, 32, true};
     material->SetVertexBindings(bindings);
 
@@ -471,7 +472,7 @@ bool Engine_Test::LoadSponzaScene() {
     material->SetRasterizerState(rasterState);
 
     // Render target format — HDR + velocity MRT for Phase 2 TAA/SSR
-    utl::vector<DataFormat> rtFormats(2);
+    primal::utl::vector<DataFormat> rtFormats(2);
     rtFormats[0] = DataFormat::RGBA16_Float; // Render to HDR texture
     rtFormats[1] = DataFormat::RG16_Float;   // Velocity motion vectors
     material->SetRenderTargetFormats(rtFormats, DataFormat::D32_Float);
@@ -1442,14 +1443,14 @@ void Engine_Test::CreateShadowResources() {
         pipeDesc.depthFunc = rhi::ComparisonFunc::Less;
         pipeDesc.cullMode = rhi::CullMode::Front; // front-face culling reduces shadow acne
         // Same 32-byte interleaved vertex layout as ForwardPBR
-        utl::vector<rhi::VertexInputAttribute> shadowAttrs(5);
+        primal::utl::vector<rhi::VertexInputAttribute> shadowAttrs(5);
         shadowAttrs[0] = {0, 0, rhi::DataFormat::RGB32_Float, 0};
         shadowAttrs[1] = {1, 0, rhi::DataFormat::R32_UInt, 12};
         shadowAttrs[2] = {2, 0, rhi::DataFormat::R32_UInt, 16};
         shadowAttrs[3] = {3, 0, rhi::DataFormat::R32_UInt, 20};
         shadowAttrs[4] = {4, 0, rhi::DataFormat::RG32_Float, 24};
         pipeDesc.vertexAttributes = shadowAttrs;
-        utl::vector<rhi::VertexInputBinding> shadowBindings(1);
+        primal::utl::vector<rhi::VertexInputBinding> shadowBindings(1);
         shadowBindings[0] = {0, 32, true};
         pipeDesc.vertexBindings = shadowBindings;
         shadowPipeline_ = device_->CreateGraphicsPipeline(pipeDesc);
@@ -2292,6 +2293,216 @@ void Engine_Test::ShutdownMeshletPipeline() {
     meshletInitialized_ = false;
 }
 
+// ============================================================
+// Mode 10: DDGI (Phase A) — CPU bake + LumenDDGIPass init
+// ============================================================
+// BuildProbeBakingScene merges CPU-side mesh vertex/index arrays from
+// sceneMeshInfos_ into flat arrays suitable for the BVH ray tracer in
+// StaticProbeBaker. The merged buffers are static so the pointers handed
+// to ProbeBakingScene remain valid for the duration of the blocking Bake()
+// call (Phase A only invokes this once per Mode 10 entry).
+
+void Engine_Test::BuildProbeBakingScene(primal::graphics::lumen::ProbeBakingScene& scene) {
+    // RHIMeshAsset.position_buffer is tightly packed f32x3 (12 bytes/vertex)
+    // per ContentToEngine.cpp. Index buffer is u16 or u32 — normalize to u32.
+    static std::vector<primal::math::v3> merged_vertices;  // static: outlives the call
+    static std::vector<u32>              merged_indices;
+    merged_vertices.clear();
+    merged_indices.clear();
+
+    for (const auto& meshInfo : sceneMeshInfos_) {
+        if (meshInfo.meshEntityId == primal::id::invalid_id) continue;
+
+        primal::graphics::rhi::RHIMeshAsset asset;
+        if (!primal::content::get_rhi_mesh_asset(meshInfo.meshEntityId, asset)) continue;
+        if (asset.num_vertices == 0 || asset.num_indices == 0) continue;
+
+        const u32 vertex_base = (u32)merged_vertices.size();
+        const u32 index_base  = (u32)merged_indices.size();
+
+        // Append positions (asset.position_buffer is f32x3 tightly packed).
+    const primal::math::v3* positions = reinterpret_cast<const primal::math::v3*>(asset.position_buffer.data());
+        merged_vertices.insert(merged_vertices.end(), positions, positions + asset.num_vertices);
+
+        // Append indices with vertex-base offset; expand u16 -> u32 if needed.
+        const u32 base_index_offset = vertex_base;
+        if (asset.index_size == 4) {
+            const u32* idx = reinterpret_cast<const u32*>(asset.index_buffer.data());
+            for (u32 i = 0; i < asset.num_indices; ++i) {
+                merged_indices.push_back(idx[i] + base_index_offset);
+            }
+        } else if (asset.index_size == 2) {
+            const u16* idx = reinterpret_cast<const u16*>(asset.index_buffer.data());
+            for (u32 i = 0; i < asset.num_indices; ++i) {
+                merged_indices.push_back((u32)idx[i] + base_index_offset);
+            }
+        } else {
+            // Unknown index format — skip this asset and roll back vertex append.
+            std::cerr << "[Mode10] Skipping mesh " << meshInfo.meshEntityId
+                      << " with unknown index_size=" << asset.index_size << std::endl;
+            merged_vertices.resize(vertex_base);
+            continue;
+        }
+
+        // Defensive: if no indices actually got pushed, roll back vertices too.
+        if (merged_indices.size() == index_base) {
+            merged_vertices.resize(vertex_base);
+        }
+    }
+
+    scene.vertices      = merged_vertices.data();
+    scene.vertex_count  = (u32)merged_vertices.size();
+    scene.indices       = merged_indices.data();
+    scene.index_count   = (u32)merged_indices.size();
+
+    // Match the directional light configured at TestDawnForwardRenderer.cpp:302-307.
+    scene.light_direction = primal::math::v3{0.5f, -0.7f, 0.3f};
+    scene.light_color     = primal::math::v3{1.0f, 0.95f, 0.9f};
+    scene.light_intensity = 3.0f;
+    // Matches DDGI_SKY_COLOR in Engine/Graphics/Dawn/shaders/Lumen/DDGITraceRays.wgsl:38.
+    scene.sky_color       = primal::math::v3{0.3f, 0.3f, 0.35f};
+
+    std::cout << "[Mode10] BuildProbeBakingScene: "
+              << scene.vertex_count << " verts, "
+              << scene.index_count << " indices across "
+              << sceneMeshInfos_.size() << " meshes" << std::endl;
+}
+
+void Engine_Test::InitializeDDGIForMode10() {
+    if (ddgiEnabled_) return;  // already initialized
+    if (!device_) return;
+
+    std::cout << "[Mode10] Initializing DDGI..." << std::endl;
+
+    // 1. Create + bake StaticProbeVolume (or load from cache).
+    staticProbeVolume_ = std::make_unique<primal::graphics::lumen::StaticProbeVolume>();
+    primal::graphics::lumen::StaticProbeParams vol_params;  // defaults: 16x8x16, spacing 4, origin 0
+
+    const char* cache_path = "mode10_ddgi_cache.spch";
+    if (staticProbeVolume_->LoadFromFile(cache_path)) {
+        std::cout << "[Mode10] Loaded DDGI cache from " << cache_path << std::endl;
+    } else {
+        if (!staticProbeVolume_->Initialize(device_, vol_params)) {
+            std::cerr << "[Mode10] StaticProbeVolume init failed - DDGI disabled" << std::endl;
+            staticProbeVolume_.reset();
+            return;
+        }
+
+        primal::graphics::lumen::ProbeBakingScene scene;
+        BuildProbeBakingScene(scene);
+
+        if (scene.vertex_count == 0 || scene.index_count == 0) {
+            std::cerr << "[Mode10] Empty bake scene - DDGI disabled" << std::endl;
+            staticProbeVolume_.reset();
+            return;
+        }
+
+        primal::graphics::lumen::ProbeBakingParams params;
+        params.rays_per_probe    = 64;       // match DDGIRuntimeParams default
+        params.bounce_count      = 3;
+        params.ray_max_distance  = 50.0f;    // match DDGIRuntimeParams default
+
+        std::cout << "[Mode10] Baking DDGI probes (CPU BVH, blocking)..." << std::endl;
+        const auto bake_start = std::chrono::steady_clock::now();
+        bool ok = primal::graphics::lumen::StaticProbeBaker::Bake(*staticProbeVolume_, scene, params);
+        const auto bake_end = std::chrono::steady_clock::now();
+        const double bake_seconds = std::chrono::duration<double>(bake_end - bake_start).count();
+        std::cout << "[Mode10] Bake " << (ok ? "completed" : "FAILED")
+                  << " in " << bake_seconds << "s" << std::endl;
+
+        if (!ok) {
+            std::cerr << "[Mode10] Bake failed - DDGI disabled" << std::endl;
+            staticProbeVolume_.reset();
+            return;
+        }
+
+        staticProbeVolume_->SaveToFile(cache_path);
+    }
+
+    if (!staticProbeVolume_->UploadToGPU()) {
+        std::cerr << "[Mode10] UploadToGPU failed - DDGI disabled" << std::endl;
+        staticProbeVolume_.reset();
+        return;
+    }
+
+    // 2. Initialize LumenDDGIPass with default params (matches StaticProbeParams defaults).
+    ddgiPass_ = std::make_unique<primal::graphics::lumen::LumenDDGIPass>();
+    if (!ddgiPass_->Initialize(device_)) {
+        std::cerr << "[Mode10] LumenDDGIPass init failed - DDGI disabled" << std::endl;
+        ddgiPass_.reset();
+        staticProbeVolume_.reset();
+        return;
+    }
+    ddgiPass_->SetStaticProbeVolume(staticProbeVolume_.get());
+
+    // 3. Allocate half-res RGBA16F indirect texture (GIGather output).
+    //    WGSL binding 13 reads this as texture_2d<f32>; RGBA16F matches Lumen convention.
+    {
+        rhi::TextureDesc desc{};
+        desc.size       = {width_ / 2, height_ / 2, 1u};
+        desc.format     = rhi::DataFormat::RGBA16_Float;
+        desc.type       = rhi::TextureType::Texture2D;
+        desc.mipLevels  = 1u;
+        desc.arraySize  = 1u;
+        // UnorderedAccess = storage write (GIGather writes via textureStore).
+        // ShaderResource  = downstream DeferredLighting samples it.
+        desc.usage      = rhi::TextureUsage::ShaderResource |
+                          rhi::TextureUsage::UnorderedAccess;
+        desc.name       = "DDGI_GIIndirect";
+        giIndirectTexture_ = device_->CreateTexture(desc);
+        if (giIndirectTexture_ == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[Mode10] Failed to create giIndirectTexture_ - DDGI disabled" << std::endl;
+            ddgiPass_.reset();
+            staticProbeVolume_.reset();
+            return;
+        }
+    }
+
+    // 4. Allocate previous-frame HDR texture (DDGI trace radiance feedback).
+    //    Reuse Mode 9's hdr desc verbatim so dimensions/format match hdrTexture_.
+    {
+        rhi::TextureDesc desc = hdrDesc_;
+        desc.name              = "DDGI_PrevHDR";
+        prevHdrTexture_ = device_->CreateTexture(desc);
+        if (prevHdrTexture_ == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[Mode10] Failed to create prevHdrTexture_ - DDGI disabled" << std::endl;
+            device_->DestroyTexture(giIndirectTexture_);
+            giIndirectTexture_ = rhi::handles::INVALID_RESOURCE;
+            ddgiPass_.reset();
+            staticProbeVolume_.reset();
+            return;
+        }
+    }
+
+    ddgiEnabled_ = true;
+    std::cout << "[Mode10] DDGI initialized successfully" << std::endl;
+}
+
+void Engine_Test::ShutdownDDGIForMode10() {
+    if (!ddgiEnabled_ && !ddgiPass_ && !staticProbeVolume_) return;
+
+    if (ddgiPass_) {
+        ddgiPass_->Shutdown();
+        ddgiPass_.reset();
+    }
+    if (staticProbeVolume_) {
+        staticProbeVolume_->Shutdown();
+        staticProbeVolume_.reset();
+    }
+    if (giIndirectTexture_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(giIndirectTexture_);
+        giIndirectTexture_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (prevHdrTexture_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(prevHdrTexture_);
+        prevHdrTexture_ = rhi::handles::INVALID_RESOURCE;
+    }
+    // giGather* pipeline handles are created in Task 10 and released there.
+
+    ddgiEnabled_ = false;
+    std::cout << "[Mode10] DDGI shut down" << std::endl;
+}
+
 void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cmd) {
     if (!meshletInitialized_) {
         if (!InitializeMeshletPipeline()) {
@@ -2403,6 +2614,7 @@ void Engine_Test::run() {
 void Engine_Test::shutdown() {
 #ifndef __EMSCRIPTEN__
     ShutdownMeshletPipeline();
+    ShutdownDDGIForMode10();
 #endif
     forwardRenderer_.Shutdown();
     DestroyDepthTexture();

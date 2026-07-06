@@ -30,6 +30,11 @@
 #include "Engine/Graphics/Utils/ShaderRegistry.h"
 #include "Engine/Graphics/Lumen/DDGI/LumenDDGIPass.h"
 #include "Engine/Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
+
+// Forward-declare ProbeBakingScene instead of including StaticProbeBaker.h,
+// which transitively pulls in BVH.hpp and its primal::graphics::utl namespace
+// (conflicts with primal::utl used elsewhere in this file).
+namespace primal::graphics::lumen { struct ProbeBakingScene; }
 #include "Engine/Platform/Platform.h"
 #include <unordered_map>
 
@@ -80,7 +85,7 @@ private:
     void RenderMeshletDDGIFrame(primal::graphics::rhi::RHICommandBuffer* cmd);
     void InitializeDDGIForMode10();   // called once on first Mode 10 entry
     void ShutdownDDGIForMode10();     // releases DDGI resources
-    void BuildProbeBakingScene();
+    void BuildProbeBakingScene(primal::graphics::lumen::ProbeBakingScene& scene);
 
     primal::graphics::rhi::DawnDevice* device_{nullptr};
     primal::graphics::rhi::RHISwapChain* swapchain_{nullptr};
