@@ -15,6 +15,9 @@ namespace primal::graphics::rendergraph {
 
 namespace primal::graphics::lumen {
 
+// Forward declaration
+class StaticProbeVolume;
+
 // ============================================================================
 // DDGI Probe State (for importance-based partial update scheduling)
 // ============================================================================
@@ -168,11 +171,15 @@ public:
     // Returns true if the grid actually shifted this frame.
     bool UpdateProbeOrigin(const math::v3& camera_position);
 
+    // Set static probe volume for initialization from bake data
+    void SetStaticProbeVolume(StaticProbeVolume* volume) { static_volume_ = volume; }
+
 private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
     void CreateConstantBuffers();
     void CreateProbeTextures();
+    void InitializeProbesFromStatic();
 
     bool              initialized_{ false };
     rhi::RHIDeviceBase* device_{ nullptr };
@@ -232,6 +239,9 @@ private:
     std::vector<DDGIProbeState> probe_states_;
     rhi::ResourceHandle probe_update_list_buffer_{ rhi::handles::INVALID_RESOURCE };
     u32 max_probes_per_frame_ = 256;
+
+    // Static probe volume reference (for initialization from bake data)
+    StaticProbeVolume* static_volume_{nullptr};
 };
 
 } // namespace primal::graphics::lumen

@@ -1,4 +1,5 @@
 #include "LumenDDGIPass.h"
+#include "Engine/Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RenderGraph/RenderGraphPass.h"
@@ -219,6 +220,9 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
         updateListDesc.usage = GPUMemoryUsage::Dynamic;
         probe_update_list_buffer_ = device_->CreateBuffer(updateListDesc);
     }
+
+    // Initialize probes from static bake data (or sky estimate fallback)
+    InitializeProbesFromStatic();
 
     initialized_ = true;
 
@@ -908,6 +912,85 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
     );
 
     return output;
+}
+
+// ============================================================================
+// InitializeProbesFromStatic
+// ============================================================================
+// Seeds the dynamic DDGI probe buffers from a CPU static bake (if a
+// StaticProbeVolume is attached and dimensions match), or falls back to a
+// sky estimate. Called once at the end of Initialize().
+void LumenDDGIPass::InitializeProbesFromStatic() {
+    u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+
+    if (static_volume_ && static_volume_->IsLoaded()) {
+        // Validate dimensions match (Errata E9)
+        if (static_volume_->GridDimX() != params_.probe_count_x ||
+            static_volume_->GridDimY() != params_.probe_count_y ||
+            static_volume_->GridDimZ() != params_.probe_count_z) {
+            // Dimension mismatch — fall through to sky estimate
+            goto sky_estimate;
+        }
+
+        // Copy static → ALL THREE dynamic frame buffers
+        const math::v3* staticIrr = static_volume_->GetIrradianceData();
+        const float* staticMean = static_volume_->GetDepthMeanData();
+        const float* staticVar = static_volume_->GetDepthVarData();
+
+        for (int f = 0; f < 3; f++) {
+            // Irradiance: simd::float3 has 16-byte stride (4 bytes padding).
+            // DDGI buffer expects flat float[3] per coefficient. Must copy element-by-element.
+            float* irrMapped = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]));
+            if (irrMapped) {
+                u32 totalCoeffs = probeCount * 9;
+                for (u32 i = 0; i < totalCoeffs; ++i) {
+                    irrMapped[i * 3 + 0] = staticIrr[i].x;
+                    irrMapped[i * 3 + 1] = staticIrr[i].y;
+                    irrMapped[i * 3 + 2] = staticIrr[i].z;
+                }
+                device_->UnmapBuffer(irradiance_buffers_[f]);
+            }
+
+            // Depth: DDGI has 128 floats/probe (64 mean + 64 var)
+            //         Static has separate arrays of 64 each
+            float* depthMapped = static_cast<float*>(device_->MapBuffer(depth_buffers_[f]));
+            if (depthMapped) {
+                for (u32 p = 0; p < probeCount; p++) {
+                    u32 ddgiBase = p * 128;
+                    u32 staticBase = p * 64;
+                    for (u32 oct = 0; oct < 64; oct++) {
+                        depthMapped[ddgiBase + oct] = staticMean[staticBase + oct];       // mean
+                        depthMapped[ddgiBase + 64 + oct] = staticVar[staticBase + oct];   // variance
+                    }
+                }
+                device_->UnmapBuffer(depth_buffers_[f]);
+            }
+        }
+
+        std::cout << "[LumenDDGI] Initialized probes from static bake data ("
+                  << probeCount << " probes)" << std::endl;
+        return;
+    }
+
+sky_estimate:
+    // No bake data or dimension mismatch: sky estimate fallback
+    // Must use float* (not math::v3*) — buffer is 12 bytes/element, math::v3 is 16 bytes.
+    math::v3 skyL0 = math::v3{0.5f, 0.7f, 1.0f} * 3.14159265f; // sky color * pi
+    for (int f = 0; f < 3; f++) {
+        u64 irrSize = (u64)probeCount * 9 * 3 * sizeof(float);
+        float* mapped = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]));
+        if (mapped) {
+            memset(mapped, 0, irrSize);
+            for (u32 p = 0; p < probeCount; p++) {
+                mapped[p * 27 + 0] = skyL0.x;
+                mapped[p * 27 + 1] = skyL0.y;
+                mapped[p * 27 + 2] = skyL0.z;
+            }
+            device_->UnmapBuffer(irradiance_buffers_[f]);
+        }
+    }
+
+    std::cout << "[LumenDDGI] Initialized probes with sky estimate fallback" << std::endl;
 }
 
 } // namespace primal::graphics::lumen
