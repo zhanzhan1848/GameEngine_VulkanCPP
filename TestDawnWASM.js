@@ -1,3 +1,39 @@
+// Resizable-ArrayBuffer polyfill (Chrome 125+ rejects resizable views in
+// crypto.getRandomValues, GPUQueue.writeBuffer, GPUQueue.writeTexture).
+(function() {
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    var origRand = crypto.getRandomValues.bind(crypto);
+    crypto.getRandomValues = function(view) {
+      if (view && view.buffer && view.buffer.resizable) {
+        var copy = new view.constructor(view.byteLength / view.BYTES_PER_ELEMENT);
+        var r = origRand(copy);
+        view.set(r);
+        return r;
+      }
+      return origRand(view);
+    };
+  }
+  if (typeof GPUQueue !== 'undefined' && GPUQueue.prototype) {
+    var origWB = GPUQueue.prototype.writeBuffer;
+    GPUQueue.prototype.writeBuffer = function(buffer, offset, data) {
+      if (data && data.buffer && data.buffer.resizable) {
+        var copy = new Uint8Array(data.byteLength);
+        copy.set(data);
+        return origWB.call(this, buffer, offset, copy, arguments[3], arguments[4]);
+      }
+      return origWB.apply(this, arguments);
+    };
+    var origWT = GPUQueue.prototype.writeTexture;
+    GPUQueue.prototype.writeTexture = function(dest, data, layout, size) {
+      if (data && data.buffer && data.buffer.resizable) {
+        var copy = new Uint8Array(data.byteLength);
+        copy.set(data);
+        return origWT.call(this, dest, copy, layout, size);
+      }
+      return origWT.apply(this, arguments);
+    };
+  }
+})();
 // include: shell.js
 // include: minimum_runtime_check.js
 (function() {
@@ -1044,7 +1080,7 @@ join2:(l, r) => PATH.normalize(l + '/' + r),
 
 var initRandomFill = () => {
 
-    return (view) => {  if (view.buffer && view.buffer.resizable) {    const tmp = new Uint8Array(view.byteLength);    crypto.getRandomValues(tmp);    view.set(tmp);  } else {    crypto.getRandomValues(view);  }  return 0;};
+    return (view) => (crypto.getRandomValues(view), 0);
   };
 var randomFill = (view) => (randomFill = initRandomFill())(view);
 
