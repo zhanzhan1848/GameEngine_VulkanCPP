@@ -775,12 +775,16 @@ void Engine_Test::RenderFrame() {
     // meshlet pipeline's own final_depth_texture_ for post-process depth reads.
     // Forward/Deferred paths still use prepassDepthTexture_.
     // `meshletMode` covers every mode that runs RenderMeshletFrame — including
-    // Mode 9, which reuses the meshlet draw path. This flag gates the meshlet
-    // depth import (rebinds depthRG from prepassDepthTexture_ to
+    // Mode 9, which reuses the meshlet draw path. Mode 10 (MeshletSSGISSRDDGI)
+    // = Mode 9 + DDGI and also reuses the meshlet path (DDGI is layered on top
+    // via the enableDDGI flag + giIndirectTexture_ binding inside
+    // RenderMeshletFrame). This flag gates the meshlet depth import (rebinds
+    // depthRG from prepassDepthTexture_ to
     // GPUDrivenDrawPipeline::GetFinalDepthTexture()) below.
     const bool meshletMode = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
                               renderMode_ == DawnRenderMode::Meshlet ||
-                              renderMode_ == DawnRenderMode::MeshletSSGISSR);
+                              renderMode_ == DawnRenderMode::MeshletSSGISSR ||
+                              renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI);
     // The TAA-bypass diagnostic is a SEPARATE concern: Mode 7/8 keep the bypass,
     // Mode 9 runs TAA (its SSGI/SSR depend on the resolved HDR).
     const bool meshletBypassTAA = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
@@ -1049,7 +1053,9 @@ void Engine_Test::RenderFrame() {
             // cull + draw + meshlet deferred lighting. Produces hdrTexture_ from
             // the 4-RT meshlet GBuffer. Falls through to the renderGraph
             // post-processing pipeline below.
-            if (renderMode_ == DawnRenderMode::MeshletNoIBL ||
+            if (renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI) {
+                RenderMeshletDDGIFrame(cmd);
+            } else if (renderMode_ == DawnRenderMode::MeshletNoIBL ||
                 renderMode_ == DawnRenderMode::Meshlet ||
                 renderMode_ == DawnRenderMode::MeshletSSGISSR) {
                 RenderMeshletFrame(cmd);
@@ -1152,7 +1158,7 @@ void Engine_Test::UpdateCamera(float dt) {
     // Tab (keyCode 48) to cycle render mode — edge detected.
     // V (keyCode 9) cycles meshlet debug visualization (mode 7/8 only).
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
@@ -1266,7 +1272,7 @@ void Engine_Test::UpdateCamera(float dt) {
     // Tab (keyCode 9) to cycle render mode — edge detected.
     // V (keyCode 86) cycles meshlet debug visualization (mode 7/8 only).
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
@@ -2660,6 +2666,28 @@ void Engine_Test::ShutdownDDGIForMode10() {
     std::cout << "[Mode10] DDGI shut down" << std::endl;
 }
 
+void Engine_Test::RenderMeshletDDGIFrame(primal::graphics::rhi::RHICommandBuffer* cmd) {
+    // Mode 10 = Mode 9 meshlet path + DDGI indirect lighting.
+    // Task 11a stub: lazy-init DDGI on first Mode 10 entry, then run plain
+    // Mode 9 meshlet path. Task 11b will add the per-frame DDGI pass + GIGather
+    // dispatch + prev-HDR blit.
+
+    if (!ddgiEnabled_) {
+        InitializeDDGIForMode10();
+        // If init failed, ddgiEnabled_ stays false; RenderMeshletFrame below
+        // won't apply DDGI (applyDDGI gate in RenderDawnMeshletDeferredLighting
+        // call site falls through). Mode 10 effectively degrades to Mode 9.
+    }
+
+    // Run the standard meshlet path. The DDGI enable flag + giIndirectTexture_
+    // are read inside RenderMeshletFrame via the call-site plumbing
+    // (see "applyDDGI" in the RenderDawnMeshletDeferredLighting call).
+    RenderMeshletFrame(cmd);
+
+    // TODO(Task 11b): dispatch LumenDDGIPass::AddPass + inline GIGather.
+    // TODO(Task 11b): blit hdrTexture_ → prevHdrTexture_ at end of frame.
+}
+
 void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cmd) {
     if (!meshletInitialized_) {
         if (!InitializeMeshletPipeline()) {
@@ -2731,10 +2759,19 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
     // SetDawnShadowResources was already called during init.
     // enableIBL: Mode 7 (MeshletNoIBL) skips the IBL ambient term; Mode 8/9 apply it.
     forwardRenderer_.SetDawnEnableIBL((renderMode_ == DawnRenderMode::Meshlet ||
-                                       renderMode_ == DawnRenderMode::MeshletSSGISSR) ? 1u : 0u);
+                                       renderMode_ == DawnRenderMode::MeshletSSGISSR ||
+                                       renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI) ? 1u : 0u);
+    // Mode 10 (MeshletSSGISSRDDGI) layers DDGI indirect on top of Mode 9's meshlet
+    // path. enableDDGI gates the WGSL DDGI block in DeferredLighting_Meshlet.wgsl;
+    // giIndirectTexture_ feeds binding 13. When DDGI isn't initialized or mode !=
+    // 10, giIndirectTexture_ is INVALID_RESOURCE and ForwardRenderer falls back
+    // to its 1x1 dummy texture (no-op).
+    const bool applyDDGI = (renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI) && ddgiEnabled_;
+    forwardRenderer_.SetDawnEnableDDGI(applyDDGI ? 1u : 0u);
     forwardRenderer_.RenderDawnMeshletDeferredLighting(
         cmd, view_, meshletGBuffer, meshletDepth, hdrTexture_, scene_,
-        frameIndex_, width_, height_);
+        frameIndex_, width_, height_,
+        applyDDGI ? giIndirectTexture_ : primal::graphics::rhi::handles::INVALID_RESOURCE);
 
     // Blit meshlet velocity (RG16_Float) → velocityTexture_ so downstream TAA
     // sees per-pixel motion vectors. RG16_Float on both sides
