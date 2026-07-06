@@ -7,6 +7,7 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/Nanite/GlobalSDF.h"
+#include "Engine/Graphics/Dawn/ShaderLoader.h"  // for dawn::LoadWGSL
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -131,7 +132,22 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
     return out.str();
 }
 
-static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
+static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDeviceBase* device) {
+    auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+
+    if (platform == rhi::RHIPlatform::Dawn) {
+        // WGSL path. dawn::LoadWGSL handles both WASM (embedded kShaderMap
+        // + MEMFS fallback via ShaderLoader.h) and native (filesystem read).
+        // WGSL has no #include — each Lumen WGSL shader is self-contained.
+        std::string src = dawn::LoadWGSL(shaderName);
+        if (src.empty()) {
+            std::cerr << "[LumenDDGI] Failed to load WGSL shader: " << shaderName << std::endl;
+            return {};
+        }
+        return std::vector<u8>(src.begin(), src.end());
+    }
+
+    // Metal path (unchanged): file read + #include resolution + /tmp/ dump
     std::string shaderPath = DDGI_SHADER_DIR + shaderName + ".metal";
 
     std::string source = ReadFileToString(shaderPath);
@@ -301,7 +317,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
 
 void LumenDDGIPass::CreatePipelines() {
     auto CompileShader = [&](const char* name, const char* entry) -> ShaderHandle {
-        auto code = LoadShaderBytecode(name);
+        auto code = LoadShaderBytecode(name, device_);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
