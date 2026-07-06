@@ -50,6 +50,59 @@ jobs:
       - name: Build
         run: cmake --build build_wasm --parallel $(nproc)
 
+      - name: Patch randomFill for Chrome's resizable ArrayBuffer rejection
+        # Emscripten's _random_get passes HEAPU8.subarray() to crypto.getRandomValues.
+        # With ALLOW_MEMORY_GROWTH=1 + finite MAXIMUM_MEMORY, HEAPU8 is backed
+        # by a resizable ArrayBuffer, which recent Chrome refuses. Newer
+        # Emscripten may fix this upstream; until we pin a fixed version,
+        # route resizable views through a non-resizable intermediate.
+        # Symptom: TypeError "The provided ArrayBufferView value must not
+        # be resizable" during JobScheduler init (std::random_device).
+        run: |
+          python3 - <<'PY'
+          import pathlib, re
+          for p in pathlib.Path('WASM').glob('TestDawnWASM*.js'):
+            src = p.read_text()
+            patched = src.replace(
+              "return (view) => (crypto.getRandomValues(view), 0);",
+              "return (view) => {"
+              "  if (view.buffer && view.buffer.resizable) {"
+              "    const tmp = new Uint8Array(view.byteLength);"
+              "    crypto.getRandomValues(tmp);"
+              "    view.set(tmp);"
+              "  } else {"
+              "    crypto.getRandomValues(view);"
+              "  }"
+              "  return 0;"
+              "};"
+            )
+            if patched == src:
+              print(f"[patch] WARN: pattern not found in {p}")
+            else:
+              p.write_text(patched)
+              print(f"[patch] randomFill rewrote {p}")
+          # Also catch the build_wasm output dir as a fallback.
+          for p in pathlib.Path('build_wasm').rglob('TestDawnWASM*.js'):
+            src = p.read_text()
+            patched = src.replace(
+              "return (view) => (crypto.getRandomValues(view), 0);",
+              "return (view) => {"
+              "  if (view.buffer && view.buffer.resizable) {"
+              "    const tmp = new Uint8Array(view.byteLength);"
+              "    crypto.getRandomValues(tmp);"
+              "    view.set(tmp);"
+              "  } else {"
+              "    crypto.getRandomValues(view);"
+              "  }"
+              "  return 0;"
+              "};"
+            )
+            if patched != src:
+              p.write_text(patched)
+              print(f"[patch] randomFill rewrote {p}")
+          PY
+
+
       - name: Prepare deploy directory
         run: |
           mkdir -p deploy
