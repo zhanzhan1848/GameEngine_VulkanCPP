@@ -992,6 +992,12 @@ void ForwardRenderer::Shutdown() {
             }
         }
 
+        // Dawn meshlet-deferred cleanup
+        if (dawnDummy1x1Tex_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(dawnDummy1x1Tex_);
+            dawnDummy1x1Tex_ = rhi::handles::INVALID_RESOURCE;
+        }
+
         // Deferred lighting pipeline (Phase 3c)
         if (dawnDeferredPipeline_ != rhi::handles::INVALID_PIPELINE) {
             device_->DestroyPipeline(dawnDeferredPipeline_);
@@ -1943,6 +1949,8 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
 
     // Binding 13: DDGI indirect texture. Fall back to a 1x1 dummy when the
     // caller didn't supply one (Modes 7/8/9) so WebGPU validation is happy.
+    // TODO(Task 11): add a ResourceBarrier on gi_indirect_texture into ShaderResource state
+    // before this descriptor write when the GIGather pipeline is wired end-to-end.
     giIndirectInfo.imageView = (gi_indirect_texture != rhi::handles::INVALID_RESOURCE)
                                ? gi_indirect_texture : dawnDummy1x1Tex_;
     giIndirectInfo.imageLayout = rhi::ResourceState::ShaderResource;

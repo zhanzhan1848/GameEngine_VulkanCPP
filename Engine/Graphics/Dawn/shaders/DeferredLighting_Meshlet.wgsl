@@ -23,7 +23,7 @@
 //  10      globalData uniform (GlobalShaderData)
 //  11      lightBuffer uniform (ForwardLightBuffer)
 //  12      outputTex (RGBA16F storage)
-//  13      gi_indirect_tex (RGBA16F sampled, DDGI indirect — Mode 10 only)
+//  13      giIndirectTex (RGBA16F sampled, DDGI indirect — Mode 10 only)
 
 struct GlobalShaderData {
     view: mat4x4<f32>,
@@ -79,6 +79,10 @@ struct ForwardLightBuffer {
 
 const PI: f32 = 3.141592653589793;
 
+// Weight applied to DDGI indirect lighting. Matches Metal test reference; tuned to 0.85
+// so DDGI supplements rather than replaces IBL on flat surfaces.
+const DDGI_INDIRECT_WEIGHT: f32 = 0.85;
+
 @group(0) @binding(0) var gbufferAlbedo: texture_2d<f32>;
 @group(0) @binding(1) var gbufferNormal: texture_2d<f32>;
 @group(0) @binding(2) var gbufferOrm: texture_2d<f32>;
@@ -92,7 +96,7 @@ const PI: f32 = 3.141592653589793;
 @group(0) @binding(10) var<uniform> globalData: GlobalShaderData;
 @group(0) @binding(11) var<uniform> lightBuffer: ForwardLightBuffer;
 @group(0) @binding(12) var outputTex: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(13) var gi_indirect_tex: texture_2d<f32>;
+@group(0) @binding(13) var giIndirectTex: texture_2d<f32>;
 
 // === BRDF helpers (mirrors DeferredLighting.wgsl:90-113) ===
 
@@ -331,13 +335,11 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // === DDGI indirect lighting ===
         // Phase A: half-res indirect texture sampled with iblSampler. AO not yet
-        // wired from SSAO (defer to follow-up). ddgi_weight matches Metal test.
+        // wired from SSAO (defer to Phase B follow-up).
         if (globalData.enableDDGI != 0u) {
-            let uv: vec2<f32> = vec2<f32>(f32(pixel.x) + 0.5, f32(pixel.y) + 0.5) / vec2<f32>(dims);
-            let indirect: vec3<f32> = textureSampleLevel(gi_indirect_tex, iblSampler, uv, 0.0).rgb;
-            let ao: f32 = 1.0;
-            let ddgi_weight: f32 = 0.85;
-            color = color + albedo * indirect * ddgi_weight * ao;
+            let uv_gi: vec2<f32> = (vec2<f32>(f32(pixel.x), f32(pixel.y)) + vec2<f32>(0.5)) / vec2<f32>(dims);
+            let indirect: vec3<f32> = textureSampleLevel(giIndirectTex, iblSampler, uv_gi, 0.0).rgb;
+            color = color + albedo * indirect * DDGI_INDIRECT_WEIGHT;
         }
 
         // ForwardPBR/DeferredLighting apply pow(1.3)+gamma before ToneMapping.

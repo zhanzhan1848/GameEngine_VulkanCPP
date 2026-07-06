@@ -254,7 +254,7 @@ private:
 
     // 1x1 fallback texture for binding 13 when DDGI is off. Avoids WebGPU
     // validation errors from binding INVALID_RESOURCE to a declared slot.
-    rhi::ResourceHandle dawnDummy1x1Tex_{};
+    rhi::ResourceHandle dawnDummy1x1Tex_{rhi::handles::INVALID_RESOURCE};
 
     // Phase 2: previous-frame state for velocity MRT
     primal::math::m4x4 prevViewProjection_{};
