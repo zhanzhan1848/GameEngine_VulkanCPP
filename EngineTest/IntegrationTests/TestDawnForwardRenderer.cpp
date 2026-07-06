@@ -2534,6 +2534,16 @@ void Engine_Test::InitializeDDGIForMode10() {
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &giGatherDsl_;
         giGatherPipelineLayout_ = device_->CreatePipelineLayout(plDesc);
+        if (giGatherPipelineLayout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
+            std::cerr << "[Mode10] GIGather pipeline layout creation failed — DDGI disabled" << std::endl;
+            device_->DestroyDescriptorSetLayout(giGatherDsl_);
+            giGatherDsl_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+            device_->DestroyTexture(giIndirectTexture_);  giIndirectTexture_ = rhi::handles::INVALID_RESOURCE;
+            device_->DestroyTexture(prevHdrTexture_);     prevHdrTexture_ = rhi::handles::INVALID_RESOURCE;
+            ddgiPass_.reset();
+            staticProbeVolume_.reset();
+            return;
+        }
 
         rhi::ComputePipelineDesc pipeDesc{};
         pipeDesc.computeShader = cs;
@@ -2542,6 +2552,8 @@ void Engine_Test::InitializeDDGIForMode10() {
         giGatherPipeline_ = device_->CreateComputePipeline(pipeDesc);
         if (giGatherPipeline_ == rhi::handles::INVALID_PIPELINE) {
             std::cerr << "[Mode10] GIGather pipeline creation failed — DDGI disabled" << std::endl;
+            device_->DestroyPipelineLayout(giGatherPipelineLayout_);
+            giGatherPipelineLayout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
             device_->DestroyDescriptorSetLayout(giGatherDsl_);
             giGatherDsl_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
             device_->DestroyTexture(giIndirectTexture_);  giIndirectTexture_ = rhi::handles::INVALID_RESOURCE;
