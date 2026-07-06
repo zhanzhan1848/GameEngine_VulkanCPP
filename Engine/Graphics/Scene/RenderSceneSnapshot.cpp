@@ -14,8 +14,111 @@
 #include <iostream>
 #include <cmath>
 #include <limits>
+#include <mutex>
+#include <unordered_map>
 
 namespace primal::graphics {
+
+namespace {
+
+// Cache of local-space AABB (center + extent) keyed by geometry_id.
+// Position-buffer-derived bounds only change when the mesh asset reloads,
+// which doesn't happen at runtime for Sponza. Avoids recomputing bounds
+// per-instance per-frame for 393+ meshes.
+struct LocalBounds {
+    math::v3 center;
+    math::v3 extent;
+    bool valid;
+};
+
+std::mutex& bounds_cache_mutex() {
+    static std::mutex m;
+    return m;
+}
+std::unordered_map<id::id_type, LocalBounds>& bounds_cache() {
+    static std::unordered_map<id::id_type, LocalBounds> c;
+    return c;
+}
+
+// Computes local-space AABB for a geometry. Uses cached result when available.
+// gpu_mesh may be null on WASM (Sponza) — falls back to position_buffer.
+LocalBounds ComputeLocalBounds(nanite::NaniteRuntimeResource* resource,
+                                id::id_type geometry_id) {
+    {
+        std::lock_guard<std::mutex> lock(bounds_cache_mutex());
+        auto it = bounds_cache().find(geometry_id);
+        if (it != bounds_cache().end()) {
+            return it->second;
+        }
+    }
+
+    LocalBounds result{};
+
+    const f32* boundsMin = nullptr;
+    const f32* boundsMax = nullptr;
+    if (resource && resource->gpu_mesh) {
+        boundsMin = resource->gpu_mesh->GetBoundsMin();
+        boundsMax = resource->gpu_mesh->GetBoundsMax();
+    }
+
+    auto is_finite_bounds = [](const f32* p) -> bool {
+        if (!p) return false;
+        for (int i = 0; i < 3; ++i) {
+            if (!std::isfinite(p[i])) return false;
+            if (std::abs(p[i]) > 1.0e6f) return false;
+        }
+        return true;
+    };
+
+    if (is_finite_bounds(boundsMin) && is_finite_bounds(boundsMax)) {
+        result.center = {
+            (boundsMin[0] + boundsMax[0]) * 0.5f,
+            (boundsMin[1] + boundsMax[1]) * 0.5f,
+            (boundsMin[2] + boundsMax[2]) * 0.5f
+        };
+        result.extent = {
+            (boundsMax[0] - boundsMin[0]) * 0.5f,
+            (boundsMax[1] - boundsMin[1]) * 0.5f,
+            (boundsMax[2] - boundsMin[2]) * 0.5f
+        };
+        result.valid = true;
+    } else {
+        // Recompute from raw vertex positions in the mesh asset.
+        // Runs when gpu_mesh is null (WASM Sponza) OR when gpu_mesh
+        // exists but its bounds are garbage (SDF-baked without bounds
+        // metadata).
+        graphics::rhi::RHIMeshAsset asset;
+        if (primal::content::get_rhi_mesh_asset(geometry_id, asset)
+            && asset.num_vertices > 0
+            && asset.position_buffer.size() >= asset.num_vertices * sizeof(f32) * 3) {
+            const f32* pos = reinterpret_cast<const f32*>(asset.position_buffer.data());
+            f32 mn[3] = { std::numeric_limits<f32>::max(), std::numeric_limits<f32>::max(), std::numeric_limits<f32>::max() };
+            f32 mx[3] = { std::numeric_limits<f32>::lowest(), std::numeric_limits<f32>::lowest(), std::numeric_limits<f32>::lowest() };
+            for (u32 vi = 0; vi < asset.num_vertices; ++vi) {
+                for (int k = 0; k < 3; ++k) {
+                    f32 v = pos[vi * 3 + k];
+                    if (v < mn[k]) mn[k] = v;
+                    if (v > mx[k]) mx[k] = v;
+                }
+            }
+            result.center = { (mn[0] + mx[0]) * 0.5f, (mn[1] + mx[1]) * 0.5f, (mn[2] + mx[2]) * 0.5f };
+            result.extent = { (mx[0] - mn[0]) * 0.5f, (mx[1] - mn[1]) * 0.5f, (mx[2] - mn[2]) * 0.5f };
+            result.valid = true;
+        } else {
+            result.center = { 0, 0, 0 };
+            result.extent = { 1, 1, 1 };
+            result.valid = false;
+            std::cerr << "[BOUNDS_FALLBACK] geometry_id=" << geometry_id
+                      << " no gpu_mesh AND no position_buffer — using (0,0,0)/1.0" << std::endl;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(bounds_cache_mutex());
+    bounds_cache()[geometry_id] = result;
+    return result;
+}
+
+} // anonymous namespace
 
 bool RenderSceneSnapshot::Initialize(rhi::RHIDeviceBase* device,
                                      u32 initial_instance_capacity,
@@ -341,79 +444,25 @@ bool RenderSceneSnapshot::ExtractSceneData(const RenderScene& scene,
             // This assumes we are doing a full rebuild where cluster_refs is contiguous
             instance.cluster_map_base = instance.cluster_start;
 
-            // Calculate bounding sphere from mesh bounds
-            if (resource->gpu_mesh) {
-                const f32* boundsMin = resource->gpu_mesh->GetBoundsMin();
-                const f32* boundsMax = resource->gpu_mesh->GetBoundsMax();
+            // Local-space AABB cached by geometry_id (computed once).
+            LocalBounds lb = ComputeLocalBounds(resource, instance.geometry_id);
+            const math::v3& localCenter = lb.center;
+            const math::v3& localExtent = lb.extent;
 
-                // Validate SDF-backed bounds. Sponza meshes are baked without
-                // SDF data, leaving bounds_min/max uninitialized (garbage floats
-                // like 3.86e+27). Detect this and recompute from vertex positions.
-                auto is_finite_bounds = [](const f32* p) -> bool {
-                    for (int i = 0; i < 3; ++i) {
-                        if (!std::isfinite(p[i])) return false;
-                        if (std::abs(p[i]) > 1.0e6f) return false;
-                    }
-                    return true;
-                };
+            // Transform to world space
+            math::v4 worldCenter4 = proxy.transform * math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
+            instance.bounds_center = {worldCenter4.x, worldCenter4.y, worldCenter4.z};
 
-                // Calculate AABB center and radius in local space
-                math::v3 localCenter;
-                math::v3 localExtent;
-                if (is_finite_bounds(boundsMin) && is_finite_bounds(boundsMax)) {
-                    localCenter = {
-                        (boundsMin[0] + boundsMax[0]) * 0.5f,
-                        (boundsMin[1] + boundsMax[1]) * 0.5f,
-                        (boundsMin[2] + boundsMax[2]) * 0.5f
-                    };
-                    localExtent = {
-                        (boundsMax[0] - boundsMin[0]) * 0.5f,
-                        (boundsMax[1] - boundsMin[1]) * 0.5f,
-                        (boundsMax[2] - boundsMin[2]) * 0.5f
-                    };
-                } else {
-                    // Recompute from raw vertex positions in the mesh asset.
-                    graphics::rhi::RHIMeshAsset asset;
-                    if (primal::content::get_rhi_mesh_asset(instance.geometry_id, asset)
-                        && asset.num_vertices > 0
-                        && asset.position_buffer.size() >= asset.num_vertices * sizeof(f32) * 3) {
-                        const f32* pos = reinterpret_cast<const f32*>(asset.position_buffer.data());
-                        f32 mn[3] = { std::numeric_limits<f32>::max(), std::numeric_limits<f32>::max(), std::numeric_limits<f32>::max() };
-                        f32 mx[3] = { std::numeric_limits<f32>::lowest(), std::numeric_limits<f32>::lowest(), std::numeric_limits<f32>::lowest() };
-                        for (u32 vi = 0; vi < asset.num_vertices; ++vi) {
-                            for (int k = 0; k < 3; ++k) {
-                                f32 v = pos[vi * 3 + k];
-                                if (v < mn[k]) mn[k] = v;
-                                if (v > mx[k]) mx[k] = v;
-                            }
-                        }
-                        localCenter = { (mn[0] + mx[0]) * 0.5f, (mn[1] + mx[1]) * 0.5f, (mn[2] + mx[2]) * 0.5f };
-                        localExtent = { (mx[0] - mn[0]) * 0.5f, (mx[1] - mn[1]) * 0.5f, (mx[2] - mn[2]) * 0.5f };
-                    } else {
-                        localCenter = { 0, 0, 0 };
-                        localExtent = { 1, 1, 1 };
-                    }
-                }
+            // Calculate radius as max extent scaled by transform
+            f32 maxLocalExtent = std::max({localExtent.x, localExtent.y, localExtent.z});
 
-                // Transform to world space
-                math::v4 worldCenter4 = proxy.transform * math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
-                instance.bounds_center = {worldCenter4.x, worldCenter4.y, worldCenter4.z};
-
-                // Calculate radius as max extent scaled by transform
-                f32 maxLocalExtent = std::max({localExtent.x, localExtent.y, localExtent.z});
-
-                const math::m4x4& transform = proxy.transform;
-                f32 maxScale = std::max({
-                    std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
-                    std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
-                    std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
-                });
-                instance.bounds_radius = maxLocalExtent * maxScale;
-            } else {
-                // Fallback bounds
-                instance.bounds_center = {0, 0, 0};
-                instance.bounds_radius = 1.0f;
-            }
+            const math::m4x4& transform = proxy.transform;
+            f32 maxScale = std::max({
+                std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
+                std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
+                std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
+            });
+            instance.bounds_radius = maxLocalExtent * maxScale;
 
             instance.padding = 0;
 
@@ -506,79 +555,25 @@ bool RenderSceneSnapshot::UpdateInstances(const RenderScene& scene,
         if (resource) {
             instance.cluster_count = resource->cluster_data.cluster_count;
 
-            // Calculate bounding sphere from mesh bounds
-            if (resource->gpu_mesh) {
-                const f32* boundsMin = resource->gpu_mesh->GetBoundsMin();
-                const f32* boundsMax = resource->gpu_mesh->GetBoundsMax();
+            // Local-space AABB cached by geometry_id (computed once).
+            LocalBounds lb = ComputeLocalBounds(resource, instance.geometry_id);
+            const math::v3& localCenter = lb.center;
+            const math::v3& localExtent = lb.extent;
 
-                // Validate SDF-backed bounds. Sponza meshes are baked without
-                // SDF data, leaving bounds_min/max uninitialized (garbage floats
-                // like 3.86e+27). Detect this and recompute from vertex positions.
-                auto is_finite_bounds = [](const f32* p) -> bool {
-                    for (int i = 0; i < 3; ++i) {
-                        if (!std::isfinite(p[i])) return false;
-                        if (std::abs(p[i]) > 1.0e6f) return false;
-                    }
-                    return true;
-                };
+            // Transform to world space
+            math::v4 worldCenter4 = proxy.transform * math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
+            instance.bounds_center = {worldCenter4.x, worldCenter4.y, worldCenter4.z};
 
-                // Calculate AABB center and radius in local space
-                math::v3 localCenter;
-                math::v3 localExtent;
-                if (is_finite_bounds(boundsMin) && is_finite_bounds(boundsMax)) {
-                    localCenter = {
-                        (boundsMin[0] + boundsMax[0]) * 0.5f,
-                        (boundsMin[1] + boundsMax[1]) * 0.5f,
-                        (boundsMin[2] + boundsMax[2]) * 0.5f
-                    };
-                    localExtent = {
-                        (boundsMax[0] - boundsMin[0]) * 0.5f,
-                        (boundsMax[1] - boundsMin[1]) * 0.5f,
-                        (boundsMax[2] - boundsMin[2]) * 0.5f
-                    };
-                } else {
-                    // Recompute from raw vertex positions in the mesh asset.
-                    graphics::rhi::RHIMeshAsset asset;
-                    if (primal::content::get_rhi_mesh_asset(instance.geometry_id, asset)
-                        && asset.num_vertices > 0
-                        && asset.position_buffer.size() >= asset.num_vertices * sizeof(f32) * 3) {
-                        const f32* pos = reinterpret_cast<const f32*>(asset.position_buffer.data());
-                        f32 mn[3] = { std::numeric_limits<f32>::max(), std::numeric_limits<f32>::max(), std::numeric_limits<f32>::max() };
-                        f32 mx[3] = { std::numeric_limits<f32>::lowest(), std::numeric_limits<f32>::lowest(), std::numeric_limits<f32>::lowest() };
-                        for (u32 vi = 0; vi < asset.num_vertices; ++vi) {
-                            for (int k = 0; k < 3; ++k) {
-                                f32 v = pos[vi * 3 + k];
-                                if (v < mn[k]) mn[k] = v;
-                                if (v > mx[k]) mx[k] = v;
-                            }
-                        }
-                        localCenter = { (mn[0] + mx[0]) * 0.5f, (mn[1] + mx[1]) * 0.5f, (mn[2] + mx[2]) * 0.5f };
-                        localExtent = { (mx[0] - mn[0]) * 0.5f, (mx[1] - mn[1]) * 0.5f, (mx[2] - mn[2]) * 0.5f };
-                    } else {
-                        localCenter = { 0, 0, 0 };
-                        localExtent = { 1, 1, 1 };
-                    }
-                }
+            // Calculate radius as max extent scaled by transform
+            f32 maxLocalExtent = std::max({localExtent.x, localExtent.y, localExtent.z});
 
-                // Transform to world space
-                math::v4 worldCenter4 = proxy.transform * math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
-                instance.bounds_center = {worldCenter4.x, worldCenter4.y, worldCenter4.z};
-
-                // Calculate radius as max extent scaled by transform
-                f32 maxLocalExtent = std::max({localExtent.x, localExtent.y, localExtent.z});
-
-                const math::m4x4& transform = proxy.transform;
-                f32 maxScale = std::max({
-                    std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
-                    std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
-                    std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
-                });
-                instance.bounds_radius = maxLocalExtent * maxScale;
-            } else {
-                // Fallback bounds
-                instance.bounds_center = {0, 0, 0};
-                instance.bounds_radius = 1.0f;
-            }
+            const math::m4x4& transform = proxy.transform;
+            f32 maxScale = std::max({
+                std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
+                std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
+                std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
+            });
+            instance.bounds_radius = maxLocalExtent * maxScale;
 
             // DEBUG: Print cluster index assignment
             std::cout << "[RenderSceneSnapshot] Instance " << instances.size()

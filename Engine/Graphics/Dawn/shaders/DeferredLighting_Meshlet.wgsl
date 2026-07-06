@@ -198,13 +198,14 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let depth = textureLoad(depthTex, pixel, 0);
 
-    // Sky pixels (no geometry drawn → depth at far plane). Write black so the
-    // sentinel-color symptom can't mask the real bug. When this branch fires
-    // for the whole screen, meshlets aren't being drawn — investigate the
-    // culling pipeline (stage1/stage4 frustum cull, visible_count, indirect
-    // args), not this shader.
+    // Sky pixels (no meshlet coverage): sample IBL irradiance along view ray
+    // for a procedural sky gradient. Camera-escape or per-frame over-cull
+    // produces depth=1.0 (cleared far plane) — show sky rather than void.
     if (depth >= 0.99999) {
-        textureStore(outputTex, pixel, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        let skyWorldPos = reconstructWorldPos(pixel, 1.0, dims);
+        let viewDir = normalize(skyWorldPos - globalData.cameraPositionAndViewWidth.xyz);
+        let skyColor = textureSampleLevel(irradianceMap, iblSampler, viewDir, 0.0).rgb;
+        textureStore(outputTex, pixel, vec4<f32>(skyColor, 1.0));
         return;
     }
 
