@@ -3,13 +3,15 @@
 // Projects ray radiance into SH9 (9 coefficients per probe) and blends
 // temporally with a history buffer using a hysteresis EMA.
 //
-// Dispatch: (ProbeCountTotal, 1, 1)
-// WorkgroupSize: (1, 1, 1)
+// Dispatch: ((ProbeUpdateCount + 63) / 64, 1, 1) workgroups of (64, 1, 1) threads
 //
 // Each thread handles one probe end-to-end: accumulates 9 SH coefficients
 // in registers, then writes the temporally-blended result. There is no
-// cooperative SH projection and no threadgroup shared memory — the Metal
-// source has none, and the WGSL port mirrors that exactly.
+// cooperative SH projection and no threadgroup shared memory. Workgroup size
+// 64 matches LumenDDGIPass.cpp:355 (pipeDesc.threadGroupSize = {64, 1, 1})
+// and the dispatch divisor at LumenDDGIPass.cpp:867. The Metal source's
+// header comment claims (1,1,1), but Metal's workgroup size is set by the
+// C++ dispatch API, not the shader — WGSL requires it in the shader.
 //
 // === Binding layout ===
 // Buffers only (no textures), so engine bindings map 1:1 to WGPU bindings.
@@ -123,7 +125,7 @@ fn ddgiRayDirection(rayIndex: u32, rayCount: u32, frameIndex: u32) -> vec3<f32> 
 // Main Kernel: ddgi_update_irradiance
 // ============================================================================
 
-@compute @workgroup_size(1, 1, 1)
+@compute @workgroup_size(64, 1, 1)
 fn ddgi_update_irradiance(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
     let gid: u32 = gid_vec.x;
 
