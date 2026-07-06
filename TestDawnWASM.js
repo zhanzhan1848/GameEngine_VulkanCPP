@@ -1044,7 +1044,7 @@ join2:(l, r) => PATH.normalize(l + '/' + r),
 
 var initRandomFill = () => {
 
-    return (view) => (crypto.getRandomValues(view), 0);
+    return (view) => {  if (view.buffer && view.buffer.resizable) {    const tmp = new Uint8Array(view.byteLength);    crypto.getRandomValues(tmp);    view.set(tmp);  } else {    crypto.getRandomValues(view);  }  return 0;};
   };
 var randomFill = (view) => (randomFill = initRandomFill())(view);
 
