@@ -2474,12 +2474,158 @@ void Engine_Test::InitializeDDGIForMode10() {
         }
     }
 
+    // 5. Create inline GIGather compute pipeline (mirrors TestNaniteStreamingPipeline pattern).
+    //    WGSL bindings (see DDGIGIGather.wgsl):
+    //      0: texture_depth_2d  (gbuffer depth)
+    //      1: texture_2d<f32>   (gbuffer normal)
+    //      2: texture_storage_2d<rgba16float, write>  (half-res indirect output)
+    //      3: uniform mat4x4    (inv_view_proj)
+    //      4: uniform vec4      (probe_origin_spacing: xyz=origin, w=spacing)
+    //      5: uniform vec4      (probe_counts: xyz=Nx,Ny,Nz, w=unused)
+    //      6: storage array<vec3>  (irradianceBuffer from LumenDDGIPass)
+    //      7: storage array<f32>   (ddgiDepthBuffer from LumenDDGIPass)
+    {
+        namespace rhi = primal::graphics::rhi;
+        std::string shaderSrc = LoadShaderSource("Engine/Graphics/Dawn/shaders/Lumen/DDGIGIGather.wgsl");
+        if (shaderSrc.empty()) {
+            std::cerr << "[Mode10] Failed to load DDGIGIGather.wgsl — DDGI disabled" << std::endl;
+            // Roll back prior allocations (mirror Task 9's cleanup pattern)
+            device_->DestroyTexture(giIndirectTexture_);  giIndirectTexture_ = rhi::handles::INVALID_RESOURCE;
+            device_->DestroyTexture(prevHdrTexture_);     prevHdrTexture_ = rhi::handles::INVALID_RESOURCE;
+            ddgiPass_.reset();
+            staticProbeVolume_.reset();
+            return;
+        }
+
+        auto cs = device_->CreateShader(shaderSrc.data(), shaderSrc.size(),
+                                        rhi::ShaderStage::Compute, "ddgi_gi_gather");
+        if (cs == rhi::handles::INVALID_SHADER) {
+            std::cerr << "[Mode10] DDGIGIGather shader compile failed — DDGI disabled" << std::endl;
+            device_->DestroyTexture(giIndirectTexture_);  giIndirectTexture_ = rhi::handles::INVALID_RESOURCE;
+            device_->DestroyTexture(prevHdrTexture_);     prevHdrTexture_ = rhi::handles::INVALID_RESOURCE;
+            ddgiPass_.reset();
+            staticProbeVolume_.reset();
+            return;
+        }
+
+        // DSL: 8 bindings — 3 textures + 5 buffers
+        rhi::DescriptorSetLayoutBinding giGatherBindings[8] = {
+            {0, rhi::DescriptorType::SampledImage,  1, rhi::ShaderStage::Compute, nullptr}, // depth
+            {1, rhi::DescriptorType::SampledImage,  1, rhi::ShaderStage::Compute, nullptr}, // normal
+            {2, rhi::DescriptorType::StorageImage,  1, rhi::ShaderStage::Compute, nullptr}, // output
+            {3, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // invVP
+            {4, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // origin/spacing
+            {5, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // counts
+            {6, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // irradiance
+            {7, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // depth
+        };
+        rhi::DescriptorSetLayoutDesc dslDesc{8, giGatherBindings};
+        giGatherDsl_ = device_->CreateDescriptorSetLayout(dslDesc);
+        if (giGatherDsl_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            std::cerr << "[Mode10] GIGather DSL creation failed — DDGI disabled" << std::endl;
+            device_->DestroyTexture(giIndirectTexture_);  giIndirectTexture_ = rhi::handles::INVALID_RESOURCE;
+            device_->DestroyTexture(prevHdrTexture_);     prevHdrTexture_ = rhi::handles::INVALID_RESOURCE;
+            ddgiPass_.reset();
+            staticProbeVolume_.reset();
+            return;
+        }
+
+        rhi::PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &giGatherDsl_;
+        giGatherPipelineLayout_ = device_->CreatePipelineLayout(plDesc);
+
+        rhi::ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = cs;
+        pipeDesc.layout = giGatherPipelineLayout_;
+        pipeDesc.threadGroupSize = {8, 8, 1};
+        giGatherPipeline_ = device_->CreateComputePipeline(pipeDesc);
+        if (giGatherPipeline_ == rhi::handles::INVALID_PIPELINE) {
+            std::cerr << "[Mode10] GIGather pipeline creation failed — DDGI disabled" << std::endl;
+            device_->DestroyDescriptorSetLayout(giGatherDsl_);
+            giGatherDsl_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+            device_->DestroyTexture(giIndirectTexture_);  giIndirectTexture_ = rhi::handles::INVALID_RESOURCE;
+            device_->DestroyTexture(prevHdrTexture_);     prevHdrTexture_ = rhi::handles::INVALID_RESOURCE;
+            ddgiPass_.reset();
+            staticProbeVolume_.reset();
+            return;
+        }
+
+        rhi::DescriptorSetDesc dsDesc;
+        dsDesc.layout = giGatherDsl_;
+        giGatherDescriptorSet_ = device_->CreateDescriptorSet(dsDesc);
+
+        // 3-frame rotating Constant Buffers. Each packs GIGatherCB (96 bytes,
+        // matches TestNaniteStreamingPipeline.cpp:3734 layout):
+        //   offset 0:  m4x4 inv_view_projection  (64 bytes)
+        //   offset 64: v4 probe_origin_spacing   (16 bytes)
+        //   offset 80: v4 probe_counts           (16 bytes)
+        for (int i = 0; i < 3; ++i) {
+            rhi::BufferDesc cbDesc{};
+            cbDesc.size = 256;  // round up to 256 for CB alignment
+            cbDesc.type = rhi::BufferType::Constant;
+            cbDesc.usage = rhi::GPUMemoryUsage::Dynamic;
+            cbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+            giGatherCbBuffers_[i] = device_->CreateBuffer(cbDesc);
+            if (giGatherCbBuffers_[i] == rhi::handles::INVALID_RESOURCE) {
+                std::cerr << "[Mode10] GIGather CB[" << i << "] creation failed — DDGI disabled" << std::endl;
+                // Roll back all prior CBs + pipeline + DSL + textures + pass
+                for (int j = 0; j < i; ++j) {
+                    device_->DestroyBuffer(giGatherCbBuffers_[j]);
+                    giGatherCbBuffers_[j] = rhi::handles::INVALID_RESOURCE;
+                }
+                device_->DestroyDescriptorSet(giGatherDescriptorSet_);
+                giGatherDescriptorSet_ = rhi::handles::INVALID_DESCRIPTOR_SET;
+                device_->DestroyPipeline(giGatherPipeline_);
+                giGatherPipeline_ = rhi::handles::INVALID_PIPELINE;
+                device_->DestroyPipelineLayout(giGatherPipelineLayout_);
+                giGatherPipelineLayout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+                device_->DestroyDescriptorSetLayout(giGatherDsl_);
+                giGatherDsl_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+                device_->DestroyTexture(giIndirectTexture_);
+                giIndirectTexture_ = rhi::handles::INVALID_RESOURCE;
+                device_->DestroyTexture(prevHdrTexture_);
+                prevHdrTexture_ = rhi::handles::INVALID_RESOURCE;
+                ddgiPass_.reset();
+                staticProbeVolume_.reset();
+                return;
+            }
+        }
+
+        std::cout << "[Mode10] GIGather pipeline initialized (8x8 workgroups)" << std::endl;
+    }
+
     ddgiEnabled_ = true;
     std::cout << "[Mode10] DDGI initialized successfully" << std::endl;
 }
 
 void Engine_Test::ShutdownDDGIForMode10() {
-    if (!ddgiEnabled_ && !ddgiPass_ && !staticProbeVolume_) return;
+    if (!ddgiEnabled_ && !ddgiPass_ && !staticProbeVolume_ &&
+        giGatherPipeline_ == rhi::handles::INVALID_PIPELINE) return;
+
+    // Release GIGather pipeline + CBs (reverse order of init)
+    for (int i = 0; i < 3; ++i) {
+        if (giGatherCbBuffers_[i] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(giGatherCbBuffers_[i]);
+            giGatherCbBuffers_[i] = rhi::handles::INVALID_RESOURCE;
+        }
+    }
+    if (giGatherDescriptorSet_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
+        device_->DestroyDescriptorSet(giGatherDescriptorSet_);
+        giGatherDescriptorSet_ = rhi::handles::INVALID_DESCRIPTOR_SET;
+    }
+    if (giGatherPipeline_ != rhi::handles::INVALID_PIPELINE) {
+        device_->DestroyPipeline(giGatherPipeline_);
+        giGatherPipeline_ = rhi::handles::INVALID_PIPELINE;
+    }
+    if (giGatherPipelineLayout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+        device_->DestroyPipelineLayout(giGatherPipelineLayout_);
+        giGatherPipelineLayout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    }
+    if (giGatherDsl_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device_->DestroyDescriptorSetLayout(giGatherDsl_);
+        giGatherDsl_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
 
     if (ddgiPass_) {
         ddgiPass_->Shutdown();
@@ -2497,7 +2643,6 @@ void Engine_Test::ShutdownDDGIForMode10() {
         device_->DestroyTexture(prevHdrTexture_);
         prevHdrTexture_ = rhi::handles::INVALID_RESOURCE;
     }
-    // giGather* pipeline handles are created in Task 10 and released there.
 
     ddgiEnabled_ = false;
     std::cout << "[Mode10] DDGI shut down" << std::endl;
