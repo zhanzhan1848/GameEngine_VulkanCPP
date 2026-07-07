@@ -2395,16 +2395,20 @@ void Engine_Test::InitializeDDGIForMode10() {
     staticProbeVolume_ = std::make_unique<primal::graphics::lumen::StaticProbeVolume>();
     primal::graphics::lumen::StaticProbeParams vol_params;  // defaults: 16x8x16, spacing 4, origin 0
 
+    // Initialize unconditionally so device_ is set on the volume — required by
+    // UploadToGPU. LoadFromFile overwrites params_ + data vectors but does not
+    // touch device_; without this call the cache-hit path leaves device_ null
+    // and UploadToGPU fails.
+    if (!staticProbeVolume_->Initialize(device_, vol_params)) {
+        std::cerr << "[Mode10] StaticProbeVolume init failed - DDGI disabled" << std::endl;
+        staticProbeVolume_.reset();
+        return;
+    }
+
     const char* cache_path = "mode10_ddgi_cache.spch";
     if (staticProbeVolume_->LoadFromFile(cache_path)) {
         std::cout << "[Mode10] Loaded DDGI cache from " << cache_path << std::endl;
     } else {
-        if (!staticProbeVolume_->Initialize(device_, vol_params)) {
-            std::cerr << "[Mode10] StaticProbeVolume init failed - DDGI disabled" << std::endl;
-            staticProbeVolume_.reset();
-            return;
-        }
-
         primal::graphics::lumen::ProbeBakingScene scene;
         BuildProbeBakingScene(scene);
 
