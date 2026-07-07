@@ -136,10 +136,20 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
     auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
 
     if (platform == rhi::RHIPlatform::Dawn) {
-        // WGSL path. dawn::LoadWGSL handles both WASM (embedded kShaderMap
-        // + MEMFS fallback via ShaderLoader.h) and native (filesystem read).
-        // WGSL has no #include — each Lumen WGSL shader is self-contained.
-        std::string src = dawn::LoadWGSL(shaderName);
+        // WGSL path. dawn::LoadWGSL has two overloads (ShaderLoader.h):
+        //   WASM:   LoadWGSL(const char* name) — kShaderMap + MEMFS fallback at
+        //           /Engine/Graphics/Dawn/shaders/{name}.wgsl
+        //   Native: LoadWGSL(const std::string& path) — opens filesystem path as-is
+        // On native, the bare shader name ("DDGITraceRays") is not a valid path.
+        // DDGI shaders live in Engine/Graphics/Dawn/shaders/Lumen/, so prepend
+        // the full path before calling the native overload.
+        std::string src;
+#ifdef __EMSCRIPTEN__
+        src = dawn::LoadWGSL(shaderName);
+#else
+        std::string path = std::string("Engine/Graphics/Dawn/shaders/Lumen/") + shaderName + ".wgsl";
+        src = dawn::LoadWGSL(path);
+#endif
         if (src.empty()) {
             std::cerr << "[LumenDDGI] Failed to load WGSL shader: " << shaderName << std::endl;
             return {};

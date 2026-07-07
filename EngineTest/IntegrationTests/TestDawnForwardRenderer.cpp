@@ -2540,7 +2540,7 @@ void Engine_Test::InitializeDDGIForMode10() {
 
         // DSL: 8 bindings — 3 textures + 5 buffers
         rhi::DescriptorSetLayoutBinding giGatherBindings[8] = {
-            {0, rhi::DescriptorType::SampledImage,  1, rhi::ShaderStage::Compute, nullptr}, // depth
+            {0, rhi::DescriptorType::SampledDepthImage,  1, rhi::ShaderStage::Compute, nullptr}, // depth (texture_depth_2d in WGSL)
             {1, rhi::DescriptorType::SampledImage,  1, rhi::ShaderStage::Compute, nullptr}, // normal
             {2, rhi::DescriptorType::StorageImage,  1, rhi::ShaderStage::Compute, nullptr}, // output
             {3, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // invVP
@@ -2976,7 +2976,7 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
                 writes[0].dstSet          = giGatherDescriptorSet_;
                 writes[0].dstBinding      = 0;
                 writes[0].descriptorCount = 1;
-                writes[0].descriptorType  = rhi::DescriptorType::SampledImage;
+                writes[0].descriptorType  = rhi::DescriptorType::SampledDepthImage; // texture_depth_2d
                 writes[0].imageInfo       = &imgInfos[0];
                 writes[1].dstSet          = giGatherDescriptorSet_;
                 writes[1].dstBinding      = 1;
