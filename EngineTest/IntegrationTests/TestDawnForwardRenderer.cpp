@@ -400,10 +400,15 @@ bool Engine_Test::LoadSponzaScene() {
 #else
     std::string baseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
 #endif
-    std::string modelPath = baseDir + "Sponza.model";
+    // Prefer the processed rebuild — it includes pre-built meshlet clusters
+    // required by Mode 7-10 (meshlet pipeline). The bare Sponza.model lacks
+    // MSHL data and forces cluster synthesis, which is incomplete (see
+    // dawn-meshlet-cluster-count-synthesis-bug) and produces magenta output
+    // in Mode 10 (empty meshlet GBuffer → deferred lighting reads garbage).
+    std::string modelPath = baseDir + "Sponza_process_rebuild.model";
     std::ifstream file(modelPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        modelPath = baseDir + "Sponza_process_rebuild.model";
+        modelPath = baseDir + "Sponza.model";
         file.open(modelPath, std::ios::binary | std::ios::ate);
     }
     if (!file.is_open()) {
