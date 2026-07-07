@@ -48,6 +48,7 @@ void EmscriptenInitInput();
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <iterator>
 
 #ifdef __APPLE__
 #include <CoreGraphics/CoreGraphics.h>
@@ -1169,8 +1170,13 @@ void Engine_Test::UpdateCamera(float dt) {
             "G-Buffer + DDGI Global Illumination",
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
             "GPU-Driven Meshlet + Indirect Draw + IBL",
-            "GPU-Driven Meshlet + SSGI + SSR"
+            "GPU-Driven Meshlet + SSGI + SSR",
+            "GPU-Driven Meshlet + SSGI + SSR + DDGI"
         };
+        static_assert(std::size(kModeNames) == static_cast<u32>(DawnRenderMode::Count),
+                      "kModeNames must cover all DawnRenderMode entries");
+        static_assert(std::size(kModeDesc) == static_cast<u32>(DawnRenderMode::Count),
+                      "kModeDesc must cover all DawnRenderMode entries");
         // Mode 5 (ObjNormal) visualizes the raw unpacked object-space normal
         // BEFORE the world_matrix 3x3 multiplication. Comparing mode 4 (world)
         // vs mode 5 (object) isolates whether a tilted normal originates from
@@ -1283,8 +1289,13 @@ void Engine_Test::UpdateCamera(float dt) {
             "G-Buffer + DDGI Global Illumination",
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
             "GPU-Driven Meshlet + Indirect Draw + IBL",
-            "GPU-Driven Meshlet + SSGI + SSR"
+            "GPU-Driven Meshlet + SSGI + SSR",
+            "GPU-Driven Meshlet + SSGI + SSR + DDGI"
         };
+        static_assert(std::size(kModeNames) == static_cast<u32>(DawnRenderMode::Count),
+                      "kModeNames must cover all DawnRenderMode entries");
+        static_assert(std::size(kModeDesc) == static_cast<u32>(DawnRenderMode::Count),
+                      "kModeDesc must cover all DawnRenderMode entries");
         bool tabPressed = EmscriptenGetKeyState(9);
         if (tabPressed && !prevTabState_) {
             renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
