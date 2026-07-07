@@ -150,6 +150,10 @@ private:
     primal::graphics::rhi::ResourceHandle iblBRDFLUTTex_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::SamplerHandle iblSampler_{primal::graphics::rhi::handles::INVALID_SAMPLER};
     std::unique_ptr<primal::graphics::rendergraph::RenderGraph> renderGraph_;
+    // Separate RenderGraph for DDGI passes — built per frame inside RenderMeshletFrame
+    // between the meshlet GBuffer draw and the deferred lighting pass. Cannot share
+    // renderGraph_ because that one executes at line 1103 AFTER deferred lighting.
+    std::unique_ptr<primal::graphics::rendergraph::RenderGraph> ddgiGraph_;
     primal::graphics::rhi::CommandBufferHandle cmdBuffer_{primal::graphics::rhi::handles::INVALID_COMMAND_BUFFER};
 
     // Render mode switching (Tab key)

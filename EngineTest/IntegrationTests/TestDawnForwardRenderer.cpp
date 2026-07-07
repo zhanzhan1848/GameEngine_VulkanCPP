@@ -2452,6 +2452,19 @@ void Engine_Test::InitializeDDGIForMode10() {
     }
     ddgiPass_->SetStaticProbeVolume(staticProbeVolume_.get());
 
+    // Per-frame RenderGraph for DDGI dispatch. Allocated once, cleared/reused
+    // each frame. Cannot share renderGraph_ because that one Executes at line
+    // ~1103 (after deferred lighting), but DDGI must run between the meshlet
+    // GBuffer draw and deferred lighting.
+    ddgiGraph_ = std::make_unique<primal::graphics::rendergraph::RenderGraph>(*device_);
+    if (!ddgiGraph_) {
+        std::cerr << "[Mode10] DDGI RenderGraph allocation failed — DDGI disabled" << std::endl;
+        ddgiPass_->Shutdown();
+        ddgiPass_.reset();
+        staticProbeVolume_.reset();
+        return;
+    }
+
     // 3. Allocate half-res RGBA16F indirect texture (GIGather output).
     //    WGSL binding 13 reads this as texture_2d<f32>; RGBA16F matches Lumen convention.
     {
@@ -2656,6 +2669,11 @@ void Engine_Test::ShutdownDDGIForMode10() {
         giGatherDsl_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     }
 
+    // (ddgiGraph_ has no persistent GPU resources — Clear/Execute per frame,
+    //  so a plain reset() is sufficient before ddgiPass_->Shutdown tears down
+    //  the actual probe storage.)
+    ddgiGraph_.reset();
+
     if (ddgiPass_) {
         ddgiPass_->Shutdown();
         ddgiPass_.reset();
@@ -2695,8 +2713,43 @@ void Engine_Test::RenderMeshletDDGIFrame(primal::graphics::rhi::RHICommandBuffer
     // (see "applyDDGI" in the RenderDawnMeshletDeferredLighting call).
     RenderMeshletFrame(cmd);
 
-    // TODO(Task 11b): dispatch LumenDDGIPass::AddPass + inline GIGather.
-    // TODO(Task 11b): blit hdrTexture_ → prevHdrTexture_ at end of frame.
+    // --- End-of-frame prev-HDR blit ---
+    // Copy current HDR color into prevHdrTexture_ for NEXT frame's DDGI trace
+    // radiance feedback. Skipped on frame 0 (no prior HDR content worth feeding
+    // back) and when DDGI is disabled or prevHdrTexture_ wasn't allocated.
+    if (ddgiEnabled_ && frameIndex_ > 0 &&
+        prevHdrTexture_ != primal::graphics::rhi::handles::INVALID_RESOURCE &&
+        hdrTexture_     != primal::graphics::rhi::handles::INVALID_RESOURCE) {
+        namespace rhi = primal::graphics::rhi;
+
+        // 1. Barrier hdrTexture_: RenderTarget → ShaderResource (blit source)
+        rhi::ResourceBarrier hdrToSRV{};
+        hdrToSRV.resource      = hdrTexture_;
+        hdrToSRV.beforeState   = rhi::ResourceState::RenderTarget;
+        hdrToSRV.afterState    = rhi::ResourceState::ShaderResource;
+        hdrToSRV.subresource   = 0;
+        hdrToSRV.queueFamily   = 0;
+        cmd->InsertBarrier(&hdrToSRV, 1);
+
+        // 2. Blit (Nearest — same dimensions, no filtering needed)
+        rhi::TextureBlitRegion region{};
+        region.srcSubresource  = {0, 0, 1};
+        region.srcOffsets[0]   = {0, 0, 0};
+        region.srcOffsets[1]   = {(s32)width_, (s32)height_, 1};
+        region.dstSubresource  = {0, 0, 1};
+        region.dstOffsets[0]   = {0, 0, 0};
+        region.dstOffsets[1]   = {(s32)width_, (s32)height_, 1};
+        cmd->BlitTexture(hdrTexture_, prevHdrTexture_, &region, 1, rhi::FilterMode::Nearest);
+
+        // 3. Barrier hdrTexture_: ShaderResource → RenderTarget (restore for next frame)
+        rhi::ResourceBarrier hdrToRT{};
+        hdrToRT.resource       = hdrTexture_;
+        hdrToRT.beforeState    = rhi::ResourceState::ShaderResource;
+        hdrToRT.afterState     = rhi::ResourceState::RenderTarget;
+        hdrToRT.subresource    = 0;
+        hdrToRT.queueFamily    = 0;
+        cmd->InsertBarrier(&hdrToRT, 1);
+    }
 }
 
 void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cmd) {
@@ -2751,6 +2804,235 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
                                  view_.GetViewMatrix(), view_.GetProjectionMatrix(),
                                  cullingResults, frameIndex_, fi)) {
         std::cerr << "[Meshlet] GPUDrivenDrawPipeline::Execute failed" << std::endl;
+    }
+
+    // --- 3b. DDGI dispatch (Mode 10 only) ---
+    // Runs AFTER meshlet draw (GBuffer + depth ready) and BEFORE deferred
+    // lighting (which samples giIndirectTexture_ at binding 13).
+    //
+    // Two sub-passes are registered on a SEPARATE RenderGraph (ddgiGraph_):
+    //   (a) LumenDDGIPass::AddPass — TraceRays → UpdateIrradiance → UpdateDepth
+    //   (b) Inline GIGather compute pass — reads DDGI probe storage + GBuffer,
+    //       writes half-res giIndirectTexture_.
+    //
+    // The separate RG is required because the main renderGraph_ Executes at
+    // line ~1103 (after deferred lighting). Using it would delay DDGI past
+    // its consumer. ddgiGraph_ is cleared/rebuilt/compiled/executed per frame.
+    //
+    // Skip on frame 0: prevHdrTexture_ has no useful content yet, and the
+    // per-frame CBs haven't been populated.
+    if (renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI &&
+        ddgiEnabled_ && ddgiPass_ && ddgiGraph_ &&
+        giGatherPipeline_ != primal::graphics::rhi::handles::INVALID_PIPELINE &&
+        giIndirectTexture_ != primal::graphics::rhi::handles::INVALID_RESOURCE &&
+        prevHdrTexture_    != primal::graphics::rhi::handles::INVALID_RESOURCE &&
+        frameIndex_ > 0) {
+
+        namespace rhi = primal::graphics::rhi;
+        namespace rg  = primal::graphics::rendergraph;
+        using namespace primal::graphics::lumen;
+
+        // 1. Fresh DDGI graph for this frame
+        ddgiGraph_->Clear();
+
+        // 2. Import prev-HDR + half-res indirect output textures.
+        //    prevHdrTexture_ format/dimensions match hdrDesc_ (allocated from it).
+        auto prevHdrRG = ddgiGraph_->ImportTexture("DDGI_PrevHDR", prevHdrTexture_, hdrDesc_);
+        rhi::TextureDesc giDesc{};
+        giDesc.size   = {width_ / 2, height_ / 2, 1u};
+        giDesc.format = rhi::DataFormat::RGBA16_Float;
+        giDesc.type   = rhi::TextureType::Texture2D;
+        giDesc.usage  = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+        auto giIndirectRG = ddgiGraph_->ImportTexture("DDGI_GIIndirect", giIndirectTexture_, giDesc);
+
+        // 3. Camera data (Phase A: prev = current — no TAA history yet)
+        DDGICameraData camData{};
+        camData.camera_position   = cameraPos_;
+        camData.view_matrix       = view_.GetViewMatrix();
+        camData.proj_matrix       = view_.GetProjectionMatrix();
+        camData.prev_view_matrix  = camData.view_matrix;
+        camData.prev_proj_matrix  = camData.proj_matrix;
+        camData.light_direction   = simd::normalize(primal::math::v3{-0.5f, -1.0f, -0.3f});
+        camData.light_color       = primal::math::v3{2.5f, 2.4f, 2.1f};
+        camData.frame_index       = frameIndex_;
+        camData.delta_time        = 1.0f / 60.0f;
+
+        // 4. Register DDGI TraceRays → UpdateIrradiance → UpdateDepth
+        //    on the same (separate) graph. ddgiOut gives the irradiance/depth
+        //    RG handles that we read below in GIGather.
+        auto ddgiOut = ddgiPass_->AddPass(*ddgiGraph_, prevHdrRG, camData, frameIndex_);
+
+        // 5. Inline GIGather pass — reads DDGI output (irradiance_hist RG handle)
+        //    + GBuffer textures, writes giIndirectRG.
+        struct GIGatherData {};
+        ddgiGraph_->AddPass<GIGatherData>("GIGather",
+            rg::RGPassType::Compute,
+            rg::RGPassCategory::Lighting,
+            [giIndirectRG, ddgiIrrHist = ddgiOut.ddgi_irradiance_hist](GIGatherData&,
+                                                                       rg::RenderGraphBuilder& builder) {
+                builder.Write(giIndirectRG, rhi::ResourceState::UnorderedAccess);
+                // DDGI storage-buffer read dependency — the RG inserts a UA→SR
+                // barrier between LumenDDGIPass's write and our read.
+                if (ddgiIrrHist.IsValid()) {
+                    builder.Read(ddgiIrrHist, rhi::ResourceState::ShaderResource);
+                }
+            },
+            [this, frameIdx = frameIndex_](const GIGatherData&,
+                                           rg::RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                if (!cmd) return;
+
+                auto& gpuDraw = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+
+                // Read buffer triple-buffering: pick the slot DDGI just wrote this frame.
+                // Per LumenDDGIPass, irradiance_buffers_[frame_idx % 3] is the freshest.
+                // Canonical pattern (TestNaniteStreamingPipeline.cpp:3681) reads
+                // (currentBufferIndex + 2) % 3 for the safer "previous-frame" view;
+                // we mirror that.
+                u32 fi = frameIdx % kFrameCount;
+                u32 ddgiReadIdx = (fi + 2u) % 3u;
+                rhi::ResourceHandle irradianceBuf = ddgiPass_->GetIrradianceBuffer(ddgiReadIdx);
+                rhi::ResourceHandle depthBuf      = ddgiPass_->GetDepthBuffer(ddgiReadIdx);
+                rhi::ResourceHandle depthTex      = gpuDraw.GetGBufferDepthSampleable();
+                rhi::ResourceHandle normalTex     = gpuDraw.GetGBufferNormal();
+
+                if (irradianceBuf == rhi::handles::INVALID_RESOURCE ||
+                    depthBuf      == rhi::handles::INVALID_RESOURCE ||
+                    depthTex      == rhi::handles::INVALID_RESOURCE ||
+                    normalTex     == rhi::handles::INVALID_RESOURCE) {
+                    return;
+                }
+
+                // --- Update GIGather CB (96 bytes packed at offsets 0/64/80) ---
+                struct GIGatherCB {
+                    primal::math::m4x4 inv_view_projection;  // offset 0, 64 bytes
+                    primal::math::v4   probe_origin_spacing; // offset 64, 16 bytes
+                    primal::math::v4   probe_counts;         // offset 80, 16 bytes
+                };
+                GIGatherCB cbData{};
+                primal::math::m4x4 viewProj = view_.GetProjectionMatrix() * view_.GetViewMatrix();
+                cbData.inv_view_projection = primal::graphics::rhi::math::Inverse(viewProj);
+                const auto& volData = ddgiPass_->GetVolumeData();
+                const auto& params  = ddgiPass_->GetParams();
+                cbData.probe_origin_spacing = primal::math::v4{
+                    volData.ProbeOrigin.x, volData.ProbeOrigin.y,
+                    volData.ProbeOrigin.z, params.probe_spacing};
+                cbData.probe_counts = primal::math::v4{
+                    static_cast<f32>(params.probe_count_x),
+                    static_cast<f32>(params.probe_count_y),
+                    static_cast<f32>(params.probe_count_z), 0.0f};
+
+                // Map/Unmap pattern (Dawn Storage/Uniform buffers are GPU-owned).
+                // CB size is 256 bytes (allocated at InitializeDDGIForMode10).
+                if (void* mapped = device_->MapBuffer(giGatherCbBuffers_[fi], 0, sizeof(cbData))) {
+                    std::memcpy(mapped, &cbData, sizeof(cbData));
+                    device_->UnmapBuffer(giGatherCbBuffers_[fi]);
+                }
+
+                // --- Write descriptor set: 3 textures + 5 buffer bindings ---
+                rhi::DescriptorImageInfo imgInfos[3]{};
+                imgInfos[0].imageView   = depthTex;
+                imgInfos[0].imageLayout = rhi::ResourceState::ShaderResource;
+                imgInfos[1].imageView   = normalTex;
+                imgInfos[1].imageLayout = rhi::ResourceState::ShaderResource;
+                imgInfos[2].imageView   = giIndirectTexture_;
+                imgInfos[2].imageLayout = rhi::ResourceState::UnorderedAccess;
+
+                rhi::DescriptorBufferInfo bufInfos[5]{};
+                // bindings 3/4/5 all point at the SAME 256-byte CB, at offsets 0/64/80
+                bufInfos[0].buffer = giGatherCbBuffers_[fi];
+                bufInfos[0].offset = 0;
+                bufInfos[0].range  = 64;
+                bufInfos[1].buffer = giGatherCbBuffers_[fi];
+                bufInfos[1].offset = 64;
+                bufInfos[1].range  = 16;
+                bufInfos[2].buffer = giGatherCbBuffers_[fi];
+                bufInfos[2].offset = 80;
+                bufInfos[2].range  = 16;
+                bufInfos[3].buffer = irradianceBuf;
+                bufInfos[3].offset = 0;
+                bufInfos[3].range  = ~0ull;
+                bufInfos[4].buffer = depthBuf;
+                bufInfos[4].offset = 0;
+                bufInfos[4].range  = ~0ull;
+
+                rhi::WriteDescriptorSet writes[8]{};
+                // Textures
+                writes[0].dstSet          = giGatherDescriptorSet_;
+                writes[0].dstBinding      = 0;
+                writes[0].descriptorCount = 1;
+                writes[0].descriptorType  = rhi::DescriptorType::SampledImage;
+                writes[0].imageInfo       = &imgInfos[0];
+                writes[1].dstSet          = giGatherDescriptorSet_;
+                writes[1].dstBinding      = 1;
+                writes[1].descriptorCount = 1;
+                writes[1].descriptorType  = rhi::DescriptorType::SampledImage;
+                writes[1].imageInfo       = &imgInfos[1];
+                writes[2].dstSet          = giGatherDescriptorSet_;
+                writes[2].dstBinding      = 2;
+                writes[2].descriptorCount = 1;
+                writes[2].descriptorType  = rhi::DescriptorType::StorageImage;
+                writes[2].imageInfo       = &imgInfos[2];
+                // CB bindings 3/4/5
+                for (int i = 0; i < 3; ++i) {
+                    writes[3 + i].dstSet          = giGatherDescriptorSet_;
+                    writes[3 + i].dstBinding      = static_cast<u32>(3 + i);
+                    writes[3 + i].descriptorCount = 1;
+                    writes[3 + i].descriptorType  = rhi::DescriptorType::UniformBuffer;
+                    writes[3 + i].bufferInfo      = &bufInfos[i];
+                }
+                // Storage buffers 6/7
+                writes[6].dstSet          = giGatherDescriptorSet_;
+                writes[6].dstBinding      = 6;
+                writes[6].descriptorCount = 1;
+                writes[6].descriptorType  = rhi::DescriptorType::StorageBuffer;
+                writes[6].bufferInfo      = &bufInfos[3];
+                writes[7].dstSet          = giGatherDescriptorSet_;
+                writes[7].dstBinding      = 7;
+                writes[7].descriptorCount = 1;
+                writes[7].descriptorType  = rhi::DescriptorType::StorageBuffer;
+                writes[7].bufferInfo      = &bufInfos[4];
+
+                device_->UpdateDescriptorSets(8, writes);
+
+                // --- Barrier: DDGI storage buffers UA → SR before Gather reads ---
+                // (RenderGraph should insert these from the Read() declaration,
+                //  but the canonical pattern inserts them explicitly for safety.)
+                rhi::ResourceBarrier bufBarriers[2]{};
+                bufBarriers[0].resource     = irradianceBuf;
+                bufBarriers[0].beforeState  = rhi::ResourceState::UnorderedAccess;
+                bufBarriers[0].afterState   = rhi::ResourceState::ShaderResource;
+                bufBarriers[0].subresource  = 0xFFFFFFFFu;
+                bufBarriers[1].resource     = depthBuf;
+                bufBarriers[1].beforeState  = rhi::ResourceState::UnorderedAccess;
+                bufBarriers[1].afterState   = rhi::ResourceState::ShaderResource;
+                bufBarriers[1].subresource  = 0xFFFFFFFFu;
+                cmd->InsertBarrier(bufBarriers, 2);
+
+                // --- Bind + dispatch ---
+                cmd->BindComputePipeline(giGatherPipeline_);
+                const rhi::DescriptorSetHandle sets[] = { giGatherDescriptorSet_ };
+                cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute,
+                                        giGatherPipelineLayout_, 0, 1, sets, 0, nullptr);
+
+                u32 groupsX = (width_  / 2 + 7) / 8;
+                u32 groupsY = (height_ / 2 + 7) / 8;
+                cmd->Dispatch(groupsX, groupsY, 1);
+            });
+
+        // 6. Compile + Execute DDGI graph
+        ddgiGraph_->Compile();
+        ddgiGraph_->Execute(cmd);
+
+        // 7. Barrier: giIndirectTexture_ UnorderedAccess → ShaderResource
+        //    (DeferredLighting reads it via textureSampleLevel at binding 13.)
+        rhi::ResourceBarrier giBarrier{};
+        giBarrier.resource     = giIndirectTexture_;
+        giBarrier.beforeState  = rhi::ResourceState::UnorderedAccess;
+        giBarrier.afterState   = rhi::ResourceState::ShaderResource;
+        giBarrier.subresource  = 0;
+        giBarrier.queueFamily  = 0;
+        cmd->InsertBarrier(&giBarrier, 1);
     }
 
     // --- 4. Wire the meshlet GBuffer + sampleable depth into deferred lighting.
