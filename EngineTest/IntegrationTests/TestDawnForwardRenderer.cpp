@@ -2749,6 +2749,21 @@ void Engine_Test::RenderMeshletDDGIFrame(primal::graphics::rhi::RHICommandBuffer
         hdrToRT.subresource    = 0;
         hdrToRT.queueFamily    = 0;
         cmd->InsertBarrier(&hdrToRT, 1);
+
+        // 4. Explicitly place prevHdrTexture_ in ShaderResource state — RG will
+        //    import it correctly next frame when LumenDDGIPass declares a Read.
+        //    BlitTexture (Dawn) is a pure encoder-level CopyTextureToTexture; it
+        //    does NOT update the RHI state tracker. prevHdrTexture_ was created
+        //    with hdrDesc_ and its tracked state is still the post-create Ready
+        //    (DawnTexture::Initialize sets Ready). Transitioning Ready → SR here
+        //    gives RG a definite physical state at frame N+1 import.
+        rhi::ResourceBarrier prevHdrToSR{};
+        prevHdrToSR.resource      = prevHdrTexture_;
+        prevHdrToSR.beforeState   = rhi::ResourceState::Ready;
+        prevHdrToSR.afterState    = rhi::ResourceState::ShaderResource;
+        prevHdrToSR.subresource   = 0;
+        prevHdrToSR.queueFamily   = 0;
+        cmd->InsertBarrier(&prevHdrToSR, 1);
     }
 }
 
@@ -2995,19 +3010,11 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
 
                 device_->UpdateDescriptorSets(8, writes);
 
-                // --- Barrier: DDGI storage buffers UA → SR before Gather reads ---
-                // (RenderGraph should insert these from the Read() declaration,
-                //  but the canonical pattern inserts them explicitly for safety.)
-                rhi::ResourceBarrier bufBarriers[2]{};
-                bufBarriers[0].resource     = irradianceBuf;
-                bufBarriers[0].beforeState  = rhi::ResourceState::UnorderedAccess;
-                bufBarriers[0].afterState   = rhi::ResourceState::ShaderResource;
-                bufBarriers[0].subresource  = 0xFFFFFFFFu;
-                bufBarriers[1].resource     = depthBuf;
-                bufBarriers[1].beforeState  = rhi::ResourceState::UnorderedAccess;
-                bufBarriers[1].afterState   = rhi::ResourceState::ShaderResource;
-                bufBarriers[1].subresource  = 0xFFFFFFFFu;
-                cmd->InsertBarrier(bufBarriers, 2);
+                // Note: No explicit UA→SR barrier on irradianceBuf/depthBuf here.
+                // The RG already inserts it via the builder.Read(ddgiIrrHist, ...)
+                // declaration in the setup lambda above. Inserting a duplicate
+                // barrier here causes validation errors on stricter backends and
+                // is a no-op on Dawn (WebGPU handles sync internally).
 
                 // --- Bind + dispatch ---
                 cmd->BindComputePipeline(giGatherPipeline_);
