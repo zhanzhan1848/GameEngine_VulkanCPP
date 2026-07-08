@@ -78,15 +78,35 @@ namespace primal {
 	} // namespace game_entity
 
 	namespace script {
+			// Forward declaration — full type defined in Components/ScriptProperty.h.
+			// entity_script::reflect(property_reflector&) only needs the type declared;
+			// callers that construct a property_collector must include ScriptProperty.h.
+			class property_reflector;
+
 		class entity_script : public game_entity::entity
 		{
 		public:
 			virtual ~entity_script() = default;
 			virtual void begin_play() {}
 			virtual void update(float) {}
+
+			// === Phase 1 新增(默认空实现,向后兼容)===
+			virtual void fixed_update(float) {}        // 物理步,Phase 1 简化
+			virtual void late_update(float) {}         // update 全部完成后(相机跟随等)
+			virtual void destroy() {}                  // remove 前调,资源释放
+			virtual void on_reload([[maybe_unused]] void* old_state) {} // 热重载状态迁移(Task 7)
+			virtual void reflect(property_reflector&) {} // Task 4 实现 property_reflector
 		protected:
 			constexpr explicit entity_script(game_entity::entity entity)
 				: game_entity::entity{ entity.get_id()} {}
+
+			// === Phase 1 Task 7 新增 ===
+			// set_reload_state: 仅在 destroy() 内调用,把状态指针留给 on_reload 接收。
+			// Phase 1 简化:不强制 assert "只在 destroy 中调用"——文档化即可,信任调用方。
+			// (Phase 2 可加 _in_destroy flag + assert 强化契约。)
+			void set_reload_state(void* p) { _reload_state = p; }
+
+			void* _reload_state = nullptr;
 
 			void set_rotation(math::v4 rotation_quaternion) const { set_rotation(this, rotation_quaternion); }
 			void set_orientation(math::v3 orientation_vector) const { set_orientation(this, orientation_vector); }

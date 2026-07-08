@@ -234,6 +234,8 @@ void destroy_camera_surface(camera_surface& surface)
 
 bool test_initialize()
 {
+	script::initialize();
+
 #define GRAPHICS_API graphics::graphics_platform::vulkan_1
 
 	if constexpr (GRAPHICS_API == graphics::graphics_platform::direct3d12)
@@ -365,6 +367,8 @@ void test_shutdown()
 		destroy_camera_surface(_surfaces[i]);
 
 	graphics::shutdown();
+
+	script::shutdown();
 }
 
 bool Engine_Test::initialize()

@@ -1559,6 +1559,227 @@ target_compile_definitions(TestCameraSyncSystem PRIVATE DEBUG _DEBUG)
 set_target_properties(TestCameraSyncSystem PROPERTIES FOLDER "Tests/Components")
 
 # ==================================
+# Script System Foundation Tests
+# 主线程检查 + initialize/shutdown 基础回归
+# ==================================
+
+add_executable(TestScriptFoundation Script/TestScriptFoundation.cpp)
+target_include_directories(TestScriptFoundation PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptFoundation PRIVATE Engine)
+add_test(NAME TestScriptFoundation COMMAND TestScriptFoundation)
+set_target_properties(TestScriptFoundation PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptFoundation PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptFoundation PROPERTIES FOLDER "Tests/Components")
+# C++17 std::thread
+find_package(Threads REQUIRED)
+target_link_libraries(TestScriptFoundation PRIVATE Threads::Threads)
+
+# ==================================
+# Script System Lifecycle Tests (Phase 1 Task 2)
+# fixed_update / late_update / destroy / on_reload hooks
+# ==================================
+
+add_executable(TestScriptLifecycle Script/TestScriptLifecycle.cpp)
+target_include_directories(TestScriptLifecycle PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptLifecycle PRIVATE Engine)
+add_test(NAME TestScriptLifecycle COMMAND TestScriptLifecycle)
+set_target_properties(TestScriptLifecycle PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptLifecycle PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptLifecycle PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Script System Property Reflection Tests (Phase 1 Task 4)
+# entity_script::reflect(property_reflector&) — property_collector visitor
+# ==================================
+
+add_executable(TestScriptReflection Script/TestScriptReflection.cpp)
+target_include_directories(TestScriptReflection PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptReflection PRIVATE Engine)
+add_test(NAME TestScriptReflection COMMAND TestScriptReflection)
+set_target_properties(TestScriptReflection PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptReflection PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptReflection PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Script System Event Bus Tests (Phase 1 Task 5)
+# script_event_bus — type-erased subscribe/emit with FIFO queue,
+# re-emit isolation (depth cap 8), deferred subscribe/unsubscribe
+# ==================================
+
+add_executable(TestScriptEventBus Script/TestScriptEventBus.cpp)
+target_include_directories(TestScriptEventBus PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptEventBus PRIVATE Engine)
+add_test(NAME TestScriptEventBus COMMAND TestScriptEventBus)
+set_target_properties(TestScriptEventBus PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptEventBus PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptEventBus PROPERTIES FOLDER "Tests/Components")
+# Test uses typeid (RTTI) and std::function lambdas with captures that may throw
+# on allocation failure; mirror Script.cpp per-file -fexceptions to be safe.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptEventBus.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
+# Script System External C ABI Tests (Phase 1 Task 6)
+# script_register_external / script_create_external — C ABI adapter,
+# external_script lifecycle dispatch, C visitor reflect round-trip
+# ==================================
+
+add_executable(TestScriptExternal Script/TestScriptExternal.cpp)
+target_include_directories(TestScriptExternal PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptExternal PRIVATE Engine)
+add_test(NAME TestScriptExternal COMMAND TestScriptExternal)
+set_target_properties(TestScriptExternal PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptExternal PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptExternal PROPERTIES FOLDER "Tests/Components")
+# Mirror Script.cpp per-file -fexceptions: test verifies that thrown exceptions
+# from external callbacks are caught + logged (future test addition).
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptExternal.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
+# Script System Hot Reload Tests (Phase 1 Task 7)
+# external_script deferred reload: instance replacement, dedup,
+# reload + remove same-frame precedence
+# ==================================
+
+add_executable(TestScriptReload Script/TestScriptReload.cpp)
+target_include_directories(TestScriptReload PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptReload PRIVATE Engine)
+add_test(NAME TestScriptReload COMMAND TestScriptReload)
+set_target_properties(TestScriptReload PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptReload PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptReload PROPERTIES FOLDER "Tests/Components")
+# Mirror Script.cpp per-file -fexceptions: reload dispatch wraps each hook
+# in try/catch; test may exercise exception paths in future.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptReload.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
+# Script System Post-Main-Thread MPSC Tests (Phase 1 Task 8)
+# post_to_main_thread — lock-free MPSC queue for cross-thread callback submission
+# ==================================
+
+add_executable(TestScriptPostMainThread Script/TestScriptPostMainThread.cpp)
+target_include_directories(TestScriptPostMainThread PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptPostMainThread PRIVATE Engine)
+add_test(NAME TestScriptPostMainThread COMMAND TestScriptPostMainThread)
+set_target_properties(TestScriptPostMainThread PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptPostMainThread PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptPostMainThread PROPERTIES FOLDER "Tests/Components")
+# MPSC tests spawn std::thread — need Threads::Threads.
+find_package(Threads REQUIRED)
+target_link_libraries(TestScriptPostMainThread PRIVATE Threads::Threads)
+# Mirror Script.cpp per-file -fexceptions: drain wraps each callback in
+# try/catch; test may exercise exception paths in future.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptPostMainThread.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
+# Phase 1 Task 9: Self-Test Backend (Pure C Integration Validation)
+# Proves the C ABI in ScriptExternal.h can drive the script subsystem
+# end-to-end from a pure-C source file (the same pattern Lua/Python/C#/mods
+# will use). The .c file is compiled by the C compiler (CMake picks the
+# compiler based on the .c extension), NOT the C++ frontend.
+# ==================================
+
+add_executable(TestScriptSelfTestBackend
+    ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackend.c
+    ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackendCpp.cpp
+)
+target_include_directories(TestScriptSelfTestBackend PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptSelfTestBackend PRIVATE Engine)
+add_test(NAME TestScriptSelfTestBackend COMMAND TestScriptSelfTestBackend)
+set_target_properties(TestScriptSelfTestBackend PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptSelfTestBackend PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptSelfTestBackend PROPERTIES FOLDER "Tests/Components")
+# Mirror Script.cpp per-file -fexceptions: the C++ driver's lambdas may
+# allocate, and the adapter wraps each hook in try/catch.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackendCpp.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+# Explicitly enable C99 for the .c file (Apple Clang defaults to gnu17 but
+# this makes the intent visible and matches the // comment style we use).
+set_source_files_properties(
+    "${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackend.c"
+    PROPERTIES LANGUAGE C
+)
+
+# ==================================
 # Phase 5: DebugDrawQueue Tests
 # EngineDLL → Engine queue → ForwardSceneRenderer drain 的数据通道
 # ==================================

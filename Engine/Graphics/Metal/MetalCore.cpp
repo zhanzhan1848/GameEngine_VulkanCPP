@@ -51,19 +51,30 @@ namespace primal::graphics::metal::core
                 MTK::View* pView{ surface->view() };
                 MTL::Drawable* drawable{ pView->currentDrawable() };
 
-                // Schedule a present once the framebuffer is complete using the current drawable
+                // Use Metal's official presentDrawable: API instead of a hand-rolled
+                // addScheduledHandler + drawable->present() pair.
+                //
+                // Apple's MTLDrawable.present() docs explicitly recommend calling
+                // presentDrawable: instead — it schedules the drawable's present()
+                // to fire *after* the command queue schedules this command buffer,
+                // and Metal retains the drawable internally across the GPU schedule.
+                //
+                // The previous hand-rolled pattern captured `drawable` as a raw
+                // pointer in a scheduled-handler block. If AppKit invalidated the
+                // CAMetalDrawable between commit() and the block firing on the
+                // com.Metal.CompletionQueueDispatch queue (e.g. NSWindow closing,
+                // MTKView detached, view resized mid-flight), the block would call
+                // objc_msgSend on freed memory → EXC_BAD_ACCESS at the smashed
+                // isa pointer (crash signature: KERN_INVALID_ADDRESS at a non-VM
+                // address inside -[_MTLCommandBuffer presentDrawable:options:]_block_invoke).
+                //
+                // See Engine/Graphics/Metal/MetalCore.cpp::blit_surface_and_present
+                // and Engine/Graphics/RHI/Platforms/Metal/MetalSwapChain.cpp::Present
+                // for the canonical presentDrawable pattern in this codebase.
                 if( drawable )
                 {
-                    // Create a scheduled handler functor for Metal to present the drawable when the command
-                    // buffer has been scheduled by the kernel.
-
-                    drawable->retain();
-                    _cmd_buffer->addScheduledHandler( [drawable]( MTL::CommandBuffer* ){
-                        drawable->present();
-                        drawable->release();
-                    });
+                    _cmd_buffer->presentDrawable( drawable );
                 }
-                // _cmd_buffer->presentDrawable( pView->currentDrawable() );
                 _cmd_buffer->commit();
                 // _cmd_buffer->waitUntilCompleted();
 
@@ -71,7 +82,7 @@ namespace primal::graphics::metal::core
                 // 这确保了下一次调用 currentDrawable 时能获取到新的 drawable
                 // 而不是已经 presented 的旧 drawable
                 pView->draw();
-                
+
                 _frame_index = (_frame_index + 1) % frame_buffer_count;
                 _frame_count++;
 

@@ -418,6 +418,17 @@ else()
     endif()
 endif()
 
+# === Phase 1 Task 2: script dispatch 需要在边界 catch 脚本抛出的异常 ===
+# (spec 2026-07-07-script-core-capabilities-design.md §6.4)
+# Engine 整体 -fno-exceptions,但 Script.cpp 的 fixed_update/late_update/begin_play/destroy
+# 必须 catch + log + continue,防止单个脚本异常中断整个 dispatch。Per-file override。
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Components/Script.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
 # 根据平台添加编译定义
 if(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
