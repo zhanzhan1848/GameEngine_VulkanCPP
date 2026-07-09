@@ -86,31 +86,42 @@ namespace primal::script {
 		// from external code is logged to stderr and swallowed, matching
 		// the pattern used by script::update() / begin_play / destroy.
 		class external_script : public entity_script {
-			void* user_data_;
+			// === Phase 2b.1: dual user_data channels ===
+			// type_user_data_     — from script_register_external (shared across
+			//                      all instances of this type; may be NULL).
+			// instance_user_data_ — from script_create_external (per-instance;
+			//                      NULL falls back to type-level at dispatch time).
+			void* type_user_data_;
+			void* instance_user_data_;
 			script_external_callbacks cbs_;  // BY VALUE
 		public:
-			external_script(void* user_data, const script_external_callbacks& cbs,
+			external_script(void* type_user_data, void* instance_user_data,
+			                const script_external_callbacks& cbs,
 			                game_entity::entity e)
-				: entity_script(e), user_data_(user_data), cbs_(cbs) {}
+				: entity_script(e),
+				  type_user_data_(type_user_data),
+				  instance_user_data_(instance_user_data),
+				  cbs_(cbs) {}
 
-			// === Phase 1 Task 7: reload 支持 ===
-			// process_deferred_reloads_impl 用这两个 accessor 构造新实例。
-			// external_script 存储 cbs_ by value(见上面 lifetime fix),
-			// 所以这里返回 const ref 而不是指针。
-			void* user_data_for_reload() const { return user_data_; }
+			// Instance-level wins; NULL falls back to type-level. All 7
+			// callbacks dispatch through this helper.
+			void* effective_user_data() const {
+				return instance_user_data_ ? instance_user_data_ : type_user_data_;
+			}
+
+			// === Reload support ===
+			// process_deferred_reloads_impl reconstructs the instance from
+			// these accessors. Both user_data channels must propagate so the
+			// new instance behaves like the original.
+			void* type_user_data_for_reload() const { return type_user_data_; }
+			void* instance_user_data_for_reload() const { return instance_user_data_; }
 			const script_external_callbacks& callbacks_for_reload() const { return cbs_; }
 
-			// reload_state_for_dispatch() is protected on entity_script (it's
-			// an internal dispatch hook). external_script re-exposes it publicly
-			// so process_deferred_reloads_impl (anonymous namespace, not a
-			// friend) can read the old_state pointer after destroy(). Phase 1
-			// external backends have no C ABI for set_reload_state, so this
-			// always returns nullptr — but the path is wired for Phase 2.
 			void* reload_state_for_external() const { return _reload_state; }
 
 			void begin_play() override {
 				if (!cbs_.begin_play) return;
-				try { cbs_.begin_play(user_data_); }
+				try { cbs_.begin_play(effective_user_data()); }
 				catch (const std::exception& e) {
 					std::fprintf(stderr, "external_script::begin_play: %s\n", e.what());
 				} catch (...) {
@@ -120,7 +131,7 @@ namespace primal::script {
 
 			void update(float dt) override {
 				if (!cbs_.update) return;
-				try { cbs_.update(user_data_, dt); }
+				try { cbs_.update(effective_user_data(), dt); }
 				catch (const std::exception& e) {
 					std::fprintf(stderr, "external_script::update: %s\n", e.what());
 				} catch (...) {
@@ -130,7 +141,7 @@ namespace primal::script {
 
 			void fixed_update(float dt) override {
 				if (!cbs_.fixed_update) return;
-				try { cbs_.fixed_update(user_data_, dt); }
+				try { cbs_.fixed_update(effective_user_data(), dt); }
 				catch (const std::exception& e) {
 					std::fprintf(stderr, "external_script::fixed_update: %s\n", e.what());
 				} catch (...) {
@@ -140,7 +151,7 @@ namespace primal::script {
 
 			void late_update(float dt) override {
 				if (!cbs_.late_update) return;
-				try { cbs_.late_update(user_data_, dt); }
+				try { cbs_.late_update(effective_user_data(), dt); }
 				catch (const std::exception& e) {
 					std::fprintf(stderr, "external_script::late_update: %s\n", e.what());
 				} catch (...) {
@@ -150,7 +161,7 @@ namespace primal::script {
 
 			void destroy() override {
 				if (!cbs_.destroy) return;
-				try { cbs_.destroy(user_data_); }
+				try { cbs_.destroy(effective_user_data()); }
 				catch (const std::exception& e) {
 					std::fprintf(stderr, "external_script::destroy: %s\n", e.what());
 				} catch (...) {
@@ -160,7 +171,7 @@ namespace primal::script {
 
 			void on_reload(void* old_state) override {
 				if (!cbs_.on_reload) return;
-				try { cbs_.on_reload(user_data_, old_state); }
+				try { cbs_.on_reload(effective_user_data(), old_state); }
 				catch (const std::exception& e) {
 					std::fprintf(stderr, "external_script::on_reload: %s\n", e.what());
 				} catch (...) {
@@ -170,8 +181,6 @@ namespace primal::script {
 
 			void reflect(property_reflector& r) override {
 				if (!cbs_.reflect) return;
-				// Build a C visitor that forwards each call to the property_reflector.
-				// Captureless lambdas decay to function pointers, matching the C ABI.
 				property_visitor_c visitor;
 				visitor.state = &r;
 				visitor.property = [](void* state, const char* name, int type, u32 offset) {
@@ -189,7 +198,7 @@ namespace primal::script {
 					auto* pr = static_cast<property_reflector*>(state);
 					pr->property_with_accessor(name, (property_type)type, g, s);
 				};
-				try { cbs_.reflect(user_data_, visitor); }
+				try { cbs_.reflect(effective_user_data(), visitor); }
 				catch (const std::exception& e) {
 					std::fprintf(stderr, "external_script::reflect: %s\n", e.what());
 				} catch (...) {
@@ -409,7 +418,8 @@ namespace primal::script {
 
 				// 2-4. Construct new instance and swap in. script_id unchanged (spec §4.5).
 				auto new_ptr = std::make_unique<external_script>(
-					ext->user_data_for_reload(),
+					ext->type_user_data_for_reload(),
+					ext->instance_user_data_for_reload(),
 					ext->callbacks_for_reload(),
 					game_entity::entity{eid});
 
@@ -750,6 +760,20 @@ namespace primal::script {
 		// over stale entity_ids from a prior session (tests rely on this).
 		deferred_reloads_.clear();
 
+		// Clear script instance state. Without this, a shutdown→initialize
+		// cycle leaves stale external_script entries in entity_scripts whose
+		// instance_user_data points to backend-freed memory (e.g. LuaBackend
+		// drops its LuaScriptInstance unique_ptrs in its own shutdown). The
+		// next session's frame_tick() would dispatch update() on those stale
+		// entries and dereference dangling pointers. Clearing here matches
+		// external_types_ semantics above: embedders that reinitialize
+		// (editors, test harnesses, hot-reload) must re-register everything.
+		entity_scripts.clear();
+		dense_script_ids.clear();
+		id_mapping.clear();
+		entity_to_script.clear();
+		generations.clear();
+
 		// === Phase 1 Task 8: drop pending MPSC callbacks ===
 		// Take the chain, reverse it, and delete every node WITHOUT executing
 		// the callback. Shutdown may be called during teardown when script
@@ -867,7 +891,7 @@ u64 script_register_external(
     return type_id;
 }
 
-u64 script_create_external(u64 type_id, u64 entity_id)
+u64 script_create_external(u64 type_id, u64 entity_id, void* instance_user_data)
 {
     // Arg validation first — same ordering as script_register_external.
     // A bogus type_id fails cleanly even if script::initialize() was never called.
@@ -888,11 +912,11 @@ u64 script_create_external(u64 type_id, u64 entity_id)
     const auto& info = primal::script::external_types_[type_id];
     primal::game_entity::entity entity{ eid };
 
-    // Construct the adapter. Copy callbacks BY VALUE into the instance —
-    // this is the critical lifetime fix. The plan's original approach of
-    // storing &info.callbacks would dangle once external_types_ grows.
+    // Construct the adapter. Both user_data channels propagated: type-level
+    // from registration, instance-level from this call. Callbacks dispatch
+    // via external_script::effective_user_data() (instance wins, NULL→type).
     auto instance = std::make_unique<primal::script::external_script>(
-        info.user_data, info.callbacks, entity);
+        info.user_data, instance_user_data, info.callbacks, entity);
 
     primal::script::component sc = primal::script::create(std::move(instance), entity);
     return static_cast<u64>(sc.get_id());

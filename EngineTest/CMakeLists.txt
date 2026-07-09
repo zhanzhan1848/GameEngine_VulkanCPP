@@ -14,6 +14,7 @@ set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS"
 # 包含子目录
 add_subdirectory(UnitTests)
 add_subdirectory(IntegrationTests)
+add_subdirectory(IntegrationTests/ScriptLuaBackend)
 
 # 创建自定义目标来运行所有测试
 add_custom_target(run_all_tests

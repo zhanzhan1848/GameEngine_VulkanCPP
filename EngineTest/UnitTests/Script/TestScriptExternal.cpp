@@ -91,7 +91,7 @@ TestResult test_register_external_basic_dispatch() {
 
     // Create entity + external script
     primal::game_entity::entity entity = make_test_entity();
-    u64 script_id = script_create_external(type_id, (u64)entity.get_id());
+    u64 script_id = script_create_external(type_id, (u64)entity.get_id(), nullptr);
     if (script_id == u64_invalid_id) {
         std::fprintf(stderr, "script_create_external returned invalid_id\n");
         primal::script::shutdown();
@@ -145,7 +145,7 @@ TestResult test_null_callbacks_are_noop() {
     }
 
     primal::game_entity::entity entity = make_test_entity();
-    u64 script_id = script_create_external(type_id, (u64)entity.get_id());
+    u64 script_id = script_create_external(type_id, (u64)entity.get_id(), nullptr);
     if (script_id == u64_invalid_id) {
         std::fprintf(stderr, "script_create_external returned invalid_id for null test\n");
         primal::script::shutdown();
@@ -214,7 +214,7 @@ TestResult test_c_visitor_to_property_collector_bridge() {
 
     // Create entity + external script
     primal::game_entity::entity entity = make_test_entity();
-    u64 script_id = script_create_external(type_id, (u64)entity.get_id());
+    u64 script_id = script_create_external(type_id, (u64)entity.get_id(), nullptr);
     if (script_id == u64_invalid_id) {
         std::fprintf(stderr, "script_create_external returned invalid_id for reflect test\n");
         primal::script::shutdown();

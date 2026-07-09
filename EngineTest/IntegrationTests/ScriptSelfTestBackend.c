@@ -168,7 +168,9 @@ int self_test_register_and_create(u64 entity_id_raw,
         return 0;  // register failed
     }
 
-    u64 script_handle = script_create_external(type_id, entity_id_raw);
+    // Phase 2b.1: instance_user_data=NULL — effective_user_data() falls back to
+    // the type-level marker registered above, preserving Self-Test behavior.
+    u64 script_handle = script_create_external(type_id, entity_id_raw, NULL);
     if (script_handle == UINT64_MAX) {
         return 0;  // create failed
     }

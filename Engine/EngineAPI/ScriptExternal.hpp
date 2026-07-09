@@ -29,9 +29,10 @@ inline u64 register_external(
 
 // Convenience: create an instance of a previously registered external type.
 // Returns script_id (as u64) or (u64)-1 on failure.
-inline u64 create_external(u64 type_id, u64 entity_id)
+// instance_user_data defaults to NULL (type-level fallback).
+inline u64 create_external(u64 type_id, u64 entity_id, void* instance_user_data = nullptr)
 {
-    return script_create_external(type_id, entity_id);
+    return script_create_external(type_id, entity_id, instance_user_data);
 }
 
 } // namespace primal::script

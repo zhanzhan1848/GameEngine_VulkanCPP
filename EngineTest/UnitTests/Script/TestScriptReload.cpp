@@ -106,7 +106,7 @@ TestResult test_external_reload_replaces_instance() {
     }
 
     primal::game_entity::entity entity = make_test_entity();
-    u64 script_id = script_create_external(type_id, (u64)entity.get_id());
+    u64 script_id = script_create_external(type_id, (u64)entity.get_id(), nullptr);
     if (script_id == u64_invalid_id) {
         std::fprintf(stderr, "script_create_external failed\n");
         primal::script::shutdown();
@@ -194,7 +194,7 @@ TestResult test_reload_deduped_same_frame() {
     }
 
     primal::game_entity::entity entity = make_test_entity();
-    u64 script_id = script_create_external(type_id, (u64)entity.get_id());
+    u64 script_id = script_create_external(type_id, (u64)entity.get_id(), nullptr);
     if (script_id == u64_invalid_id) {
         std::fprintf(stderr, "script_create_external failed\n");
         primal::script::shutdown();
@@ -264,7 +264,7 @@ TestResult test_reload_and_remove_same_frame() {
     }
 
     primal::game_entity::entity entity = make_test_entity();
-    u64 script_id = script_create_external(type_id, (u64)entity.get_id());
+    u64 script_id = script_create_external(type_id, (u64)entity.get_id(), nullptr);
     if (script_id == u64_invalid_id) {
         std::fprintf(stderr, "script_create_external failed\n");
         primal::script::shutdown();

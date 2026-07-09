@@ -108,13 +108,17 @@ u64 script_register_external(
 // Create an instance of a previously-registered external type, attached to
 // the given entity_id.
 //
-// type_id:   value returned by script_register_external.
-// entity_id: the game_entity::entity_id (u64) the script should bind to.
+// type_id:             value returned by script_register_external.
+// entity_id:           the game_entity::entity_id (u64) the script should bind to.
+// instance_user_data:  opaque pointer stored on this instance. Dispatch prefers
+//                      this over the type-level user_data when non-NULL. May be
+//                      NULL — callbacks then receive the type-level pointer
+//                      (or NULL if that is also NULL).
 //
 // Returns script_id as u64 on success. Returns (u64)-1 on failure
 // (invalid type_id, invalid entity, or non-main thread in debug builds).
 // ---------------------------------------------------------------------------
-u64 script_create_external(u64 type_id, u64 entity_id);
+u64 script_create_external(u64 type_id, u64 entity_id, void* instance_user_data);
 
 #ifdef __cplusplus
 } // extern "C"
