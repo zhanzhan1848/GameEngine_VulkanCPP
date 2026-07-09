@@ -1572,7 +1572,7 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
     constants.max_lod_levels = config_.max_lod_levels;
     constants.instance_count = snapshot.GetInstanceCount();
     constants.cluster_count = snapshot.GetClusterRefCount();
-    constants.force_pass_all = 0;
+    constants.force_pass_all = force_pass_all_debug_ ? 1u : 0u;
     constants.enable_debug_output = 1;
 
     // Additional validation to prevent corrupted data
