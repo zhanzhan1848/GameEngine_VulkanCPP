@@ -1174,6 +1174,30 @@ void Engine_Test::UpdateCamera(float dt) {
         prevPState_ = pState;
     }
 
+    // ---- Diagnostic A2: Ctrl+P → toggle force_pass_all (stage4 bypass) ----
+    // Bisect switch for the gray-white bug. When force_pass_all=1, stage4 of
+    // GPUCullingPipeline.wgsl skips the instance-visibility check and the
+    // far-plane cluster cull, so all clusters survive to DrawIndirect. If the
+    // gray-white clears when this is on, the bug is in stage4 or upstream
+    // (stage1 instance data). If it persists, the bug is in stage5/6/7 or
+    // post-cull.
+    {
+        CGEventFlags flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
+        bool ctrlDown = (flags & kCGEventFlagMaskControl) != 0;
+        bool pState = keyPressed(35);  // ANSI 'P'
+        bool ctrlP = ctrlDown && pState;
+        if (ctrlP && !prevCtrlPState_) {
+            auto& cullPipeline = primal::graphics::nanite::GPUCullingPipeline::Get();
+            bool newVal = !cullPipeline.IsForcePassAll();
+            cullPipeline.SetForcePassAll(newVal);
+            std::fprintf(stderr, "[A2] force_pass_all = %s\n",
+                         newVal ? "TRUE (stage4 bypass ON)"
+                                : "FALSE (stage4 bypass OFF)");
+            std::fflush(stderr);
+        }
+        prevCtrlPState_ = ctrlP;
+    }
+
     // ESC to quit
     if (keyPressed(53)) {
         shuttingDown_ = true;
