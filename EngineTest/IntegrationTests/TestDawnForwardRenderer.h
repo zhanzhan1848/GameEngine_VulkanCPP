@@ -157,10 +157,14 @@ private:
     primal::graphics::rhi::CommandBufferHandle cmdBuffer_{primal::graphics::rhi::handles::INVALID_COMMAND_BUFFER};
 
     // Render mode switching (Tab key)
-    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, FullPlusSSR = 4, Deferred = 5, LumenDDGI = 6, MeshletNoIBL = 7, Meshlet = 8, MeshletSSGISSR = 9, MeshletSSGISSRDDGI = 10, Count };
+    enum class DawnRenderMode : u8 { NoEffects = 0, ShadowOnly = 1, ShadowAndIBL = 2, Full = 3, FullPlusSSR = 4, Deferred = 5, LumenDDGI = 6, MeshletNoIBL = 7, Meshlet = 8, MeshletSSGISSR = 9, MeshletSSGISSRDDGI = 10, MeshletDynamicDDGI = 11, Count };
     DawnRenderMode renderMode_{DawnRenderMode::ShadowAndIBL};
     bool prevTabState_{false};
     bool prevVState_{false};
+    // Edge-detect state for diagnostic key hooks (P, Ctrl+P) used to
+    // investigate the long-standing gray-white bug in meshlet modes.
+    bool prevPState_{false};
+    bool prevCtrlPState_{false};
     u32 meshletDebugMode_{0};   // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id
     // Mode 9 sub-mode: which screen-space effect(s) to apply.
     // V key cycles Off → SSGIOnly → SSROnly → Both → Off ...
