@@ -48,6 +48,7 @@ void EmscriptenInitInput();
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <iterator>
 
 #ifdef __APPLE__
@@ -1155,6 +1156,23 @@ void Engine_Test::UpdateCamera(float dt) {
     if (keyPressed(124)) cameraYaw_ -= 2.0f * dt;
     if (keyPressed(126)) cameraPitch_ += 2.0f * dt;
     if (keyPressed(125)) cameraPitch_ -= 2.0f * dt;
+
+    // ---- Diagnostic A1: P key → camera snapshot to stderr ----
+    // Used to capture exact camera state at a gray-white repro position.
+    // macOS virtual key code 35 = ANSI 'P'.
+    {
+        bool pState = keyPressed(35);
+        if (pState && !prevPState_) {
+            std::fprintf(stderr,
+                "[A1] camera snapshot: pos=(%.4f, %.4f, %.4f) yaw=%.4f pitch=%.4f "
+                "frame=%u mode=%u\n",
+                cameraPos_.x, cameraPos_.y, cameraPos_.z,
+                cameraYaw_, cameraPitch_,
+                totalFrames_, static_cast<u32>(renderMode_));
+            std::fflush(stderr);
+        }
+        prevPState_ = pState;
+    }
 
     // ESC to quit
     if (keyPressed(53)) {
