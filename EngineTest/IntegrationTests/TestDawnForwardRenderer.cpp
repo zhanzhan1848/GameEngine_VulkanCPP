@@ -2821,6 +2821,39 @@ void Engine_Test::RenderMeshletDDGIFrame(primal::graphics::rhi::RHICommandBuffer
 }
 
 void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cmd) {
+    // ---- Diagnostic A3: scan instance bounds for NaN/Inf ----
+    // If any instance has corrupt bounds, stage1 near/far tests pass (NaN
+    // comparisons are false) but stage4 cluster expansion may still produce
+    // garbage. Rate-limited to one warning per ~60 frames so a persistent
+    // NaN doesn't flood stderr.
+    static u32 lastBoundsWarningFrame = 0xFFFFFFFFu;
+    if (totalFrames_ - lastBoundsWarningFrame > 60u) {
+        const auto& instances = meshletSceneSnapshot_.GetInstanceData();
+        bool anyBad = false;
+        for (u32 i = 0; i < meshletSceneSnapshot_.GetInstanceCount(); ++i) {
+            const auto& b = instances[i];
+            const bool centerBad =
+                std::isnan(b.bounds_center.x) || std::isinf(b.bounds_center.x) ||
+                std::isnan(b.bounds_center.y) || std::isinf(b.bounds_center.y) ||
+                std::isnan(b.bounds_center.z) || std::isinf(b.bounds_center.z);
+            const bool radiusBad =
+                std::isnan(b.bounds_radius) || std::isinf(b.bounds_radius);
+            if (centerBad || radiusBad) {
+                std::fprintf(stderr,
+                    "[A3] NaN/Inf in instance[%u] bounds: "
+                    "center=(%f, %f, %f) radius=%f frame=%u\n",
+                    i,
+                    b.bounds_center.x, b.bounds_center.y, b.bounds_center.z,
+                    b.bounds_radius, totalFrames_);
+                anyBad = true;
+            }
+        }
+        if (anyBad) {
+            lastBoundsWarningFrame = totalFrames_;
+            std::fflush(stderr);
+        }
+    }
+
     if (!meshletInitialized_) {
         if (!InitializeMeshletPipeline()) {
             std::cerr << "[Meshlet] Init failed, falling back to NoEffects" << std::endl;
