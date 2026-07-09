@@ -30,6 +30,14 @@ struct LuaScriptInstance {
     u64 script_id;              // engine-returned id; key in instances_ map
 };
 
+// Per-subscription record (Phase 2b.2). One per bus.on() call.
+// user_data passed to script_event_subscribe points here.
+struct LuaSubRecord {
+    int lua_fn_ref;              // LUA_REGISTRYINDEX ref to handler function
+    void* lua_state;             // lua_State* — type->lua_state, cached for cleanup
+    u64 sub_id;                  // engine-returned subscription id (map key)
+};
+
 class LuaBackend {
 public:
     static LuaBackend& instance();
@@ -59,6 +67,16 @@ public:
     // Test-only: directly invoke the adapter's reflect callback for the
     // given instance.
     void invoke_reflect_for_test(LuaScriptInstance* inst, property_visitor_c visitor);
+
+    // === Phase 2b.2: Event Bus ===
+    // Per-instance subscription tracking for cleanup on my_destroy.
+    std::unordered_map<LuaScriptInstance*, std::vector<LuaSubRecord*>> inst_subs_;
+    std::unordered_map<u64, LuaSubRecord*> sub_to_rec_;
+
+    // Per-call "current instance" context — set by adapter hooks so bus.on
+    // (a Lua global function) knows which instance is subscribing.
+    // Single-threaded engine → safe under the Meyers singleton.
+    LuaScriptInstance* current_instance_ = nullptr;
 
 private:
     LuaBackend() = default;

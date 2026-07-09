@@ -1,10 +1,12 @@
-// === Phase 2a Task 3-4 + Phase 2b.1 Task 3-4: Lua Backend Tests ===
+// === Phase 2a Task 3-4 + Phase 2b.1 Task 3-4 + Phase 2b.2 Task 4: Lua Backend Tests ===
 //
 // Test 1: lifecycle hooks fire (begin_play x1, update x3, destroy x1) — read
 //         back via instance fields (Phase 2b.1) using find_instance().
 // Test 2: reflect declares properties via Lua-side visitor API.
 // Test 3 (added in Task 4): multi-instance isolation — two instances of the
 //         same type maintain independent hook counts.
+// Test 4 (Phase 2b.2): event bus round-trip — 2 instances subscribe to
+//         ping/pong, drain delivers across instances + re-emit isolation.
 
 #include "../UnitTests/TestFramework.h"
 #include "LuaBackend.h"
@@ -323,6 +325,83 @@ TestResult test_lua_multi_instance_per_type() {
     return TestResult::Passed;
 }
 
+// Test 4: Lua event bus round-trip — 2 instances subscribe to ping/pong,
+// each first update emits ping (both have update_count==0 entering first
+// update), ping handler re-emits pong, drain delivers all.
+TestResult test_lua_event_bus_round_trip() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity_a = make_test_entity();
+    primal::game_entity::entity entity_b = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "event_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/event_script.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        std::fprintf(stderr, "register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_a = LuaBackend::instance().create_instance(type_id, entity_a.get_id());
+    u64 script_b = LuaBackend::instance().create_instance(type_id, entity_b.get_id());
+    if (script_a == u64_invalid_id || script_b == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance failed (a=%llu, b=%llu)\n",
+                     (unsigned long long)script_a, (unsigned long long)script_b);
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst_a = LuaBackend::instance().find_instance(script_a);
+    LuaScriptInstance* inst_b = LuaBackend::instance().find_instance(script_b);
+    if (!inst_a || !inst_b) {
+        std::fprintf(stderr, "find_instance returned nullptr\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // 1 frame_tick — both A.update and B.update run while their update_count
+    // is 0, so both emit ping. drain delivers each ping to BOTH subscribers,
+    // and each ping handler emits pong → drain delivers each pong to both.
+    primal::script::frame_tick(0.016f);
+
+    int a_update = lua_get_instance_int(inst_a, "update_count");
+    int a_ping = lua_get_instance_int(inst_a, "ping_count");
+    int a_pong = lua_get_instance_int(inst_a, "pong_count");
+    int b_update = lua_get_instance_int(inst_b, "update_count");
+    int b_ping = lua_get_instance_int(inst_b, "ping_count");
+    int b_pong = lua_get_instance_int(inst_b, "pong_count");
+
+    // Cleanup
+    primal::script::remove_for_entity(entity_a.get_id());
+    primal::script::remove_for_entity(entity_b.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    // Verify: both A and B updated exactly once
+    if (a_update != 1 || b_update != 1) {
+        std::fprintf(stderr, "update counts: A=%d B=%d (expected 1/1)\n", a_update, b_update);
+        return TestResult::Failed;
+    }
+    // Both received 2 pings (one from A.update, one from B.update).
+    if (a_ping != 2 || b_ping != 2) {
+        std::fprintf(stderr, "ping counts: A=%d B=%d (expected 2/2)\n", a_ping, b_ping);
+        return TestResult::Failed;
+    }
+    // Both received 4 pongs — 2 ping events × 2 pong emits per ping (one
+    // from A's ping handler, one from B's).
+    if (a_pong != 4 || b_pong != 4) {
+        std::fprintf(stderr, "pong counts: A=%d B=%d (expected 4/4)\n", a_pong, b_pong);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
 } // anonymous namespace
 
 void RunLuaBackendTests() {
@@ -337,6 +416,10 @@ void RunLuaBackendTests() {
     suite.AddTestCase(TestCase("lua_multi_instance_per_type",
                                test_lua_multi_instance_per_type,
                                "Two instances of same type maintain independent hook counts"));
+    suite.AddTestCase(TestCase("lua_event_bus_round_trip",
+                               test_lua_event_bus_round_trip,
+                               "2 instances subscribe to ping/pong, drain delivers across "
+                               "instances + re-emit isolation"));
     suite.RunAllTests();
 }
 

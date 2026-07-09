@@ -922,4 +922,53 @@ u64 script_create_external(u64 type_id, u64 entity_id, void* instance_user_data)
     return static_cast<u64>(sc.get_id());
 }
 
+// === Phase 2b.2: Event Bus C ABI implementations ===
+// Bridge C ABI calls to script_event_bus singleton. Each handler is wrapped
+// in a std::function that forwards to the C function pointer.
+
+u64 script_event_subscribe(
+    const char* event_name,
+    void* user_data,
+    script_event_handler_t handler)
+{
+    if (!event_name || !event_name[0] || !handler) {
+        std::fprintf(stderr, "script_event_subscribe: invalid args\n");
+        return 0;
+    }
+    primal::script::detail::check_main_thread();
+
+    auto dispatcher = [handler](void* ud, const void* payload, u64 size) {
+        handler(ud, payload, size);
+    };
+    return primal::script::script_event_bus::instance().subscribe_by_name(
+        event_name, user_data, std::move(dispatcher));
+}
+
+void script_event_unsubscribe(u64 subscription_id) {
+    if (subscription_id == 0) return;
+    primal::script::detail::check_main_thread();
+    primal::script::script_event_bus::instance().unsubscribe(subscription_id);
+}
+
+void script_event_unsubscribe_all(void* user_data) {
+    primal::script::detail::check_main_thread();
+    primal::script::script_event_bus::instance().unsubscribe_all_by_data(user_data);
+}
+
+void script_event_emit(
+    const char* event_name,
+    void* payload,
+    u64 payload_size,
+    void (*deleter)(void*))
+{
+    if (!event_name || !event_name[0]) {
+        std::fprintf(stderr, "script_event_emit: invalid event_name\n");
+        if (deleter && payload) deleter(payload);
+        return;
+    }
+    primal::script::detail::check_main_thread();
+    primal::script::script_event_bus::instance().emit_by_name(
+        event_name, payload, payload_size, deleter);
+}
+
 } // extern "C"

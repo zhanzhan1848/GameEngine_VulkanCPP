@@ -120,6 +120,53 @@ u64 script_register_external(
 // ---------------------------------------------------------------------------
 u64 script_create_external(u64 type_id, u64 entity_id, void* instance_user_data);
 
+// ---------------------------------------------------------------------------
+// Phase 2b.2: String-keyed Event Bus C ABI
+//
+// Allows external backends (Lua/Python/C#) to subscribe/emit events through
+// the engine's script_event_bus. Events are keyed by string name (FNV-1a
+// hashed internally); payload is opaque bytes the engine does not interpret.
+//
+// Each subscription has a `user_data` pointer that serves two roles:
+//   1. Passed back to handler on each dispatch (handler state / capture)
+//   2. Identity for script_event_unsubscribe_all bulk cleanup
+//
+// Templated C++ subscribe<E>/emit<E> API (ScriptEventBus.h) is unaffected —
+// both channels share the same drain queue (FIFO + re-emit isolation +
+// depth cap 8) but use separate subscriber buckets.
+// ---------------------------------------------------------------------------
+
+typedef void (*script_event_handler_t)(
+    void* user_data,
+    const void* payload,
+    u64 payload_size
+);
+
+// Subscribe to a string-keyed event. Returns subscription_id (never 0 on
+// success; 0 on failure — null event_name or null handler).
+u64 script_event_subscribe(
+    const char* event_name,
+    void* user_data,
+    script_event_handler_t handler
+);
+
+// Unsubscribe by id. No-op if unknown id (allows double-unsubscribe).
+void script_event_unsubscribe(u64 subscription_id);
+
+// Remove all subscriptions whose user_data matches. Searches only the
+// string-keyed channel. O(N) over all buckets.
+void script_event_unsubscribe_all(void* user_data);
+
+// Emit a string-keyed event. Engine takes ownership of payload; deleter is
+// called after dispatch in drain(). payload_size bytes are not interpreted.
+// May be called during drain (event goes to re_emitted_ queue).
+void script_event_emit(
+    const char* event_name,
+    void* payload,
+    u64 payload_size,
+    void (*deleter)(void* payload)
+);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

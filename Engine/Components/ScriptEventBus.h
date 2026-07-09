@@ -67,19 +67,24 @@ using subscription_id_t = u64;
 
 namespace detail {
 
+// FNV-1a 64-bit hash of a null-terminated string. Shared by the templated
+// path (which hashes typeid(E).name()) and the string-keyed C ABI channel
+// (which hashes event_name). Centralizing the algorithm prevents the three
+// call sites from drifting.
+inline event_id_type fnv1a(const char* s) {
+    event_id_type h = 14695981039346656037ULL;
+    for (const char* p = s; *p; ++p) {
+        h ^= static_cast<u8>(*p);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 // FNV-1a hash of typeid(E).name() — stable across TUs for same E.
 // 用 lambda + static const 局部变量保证每个 E 只 hash 一次。
 template<typename E>
 event_id_type event_type_id() {
-    static const event_id_type id = []{
-        const char* name = typeid(E).name();
-        event_id_type h = 14695981039346656037ULL;
-        for (const char* p = name; *p; ++p) {
-            h ^= static_cast<u8>(*p);
-            h *= 1099511628211ULL;
-        }
-        return h;
-    }();
+    static const event_id_type id = fnv1a(typeid(E).name());
     return id;
 }
 
@@ -109,15 +114,37 @@ struct subscription {
     std::function<void(entity_script*, const void*)> handler_store;
 };
 
+// String-keyed subscription record (Phase 2b.2). Mirrors `subscription` but
+// uses void* as owner identity (Lua backend passes LuaSubRecord*; future C++
+// opt-in passes entity_script* or wrapper) and a wider dispatcher signature
+// that carries payload_size.
+//
+// owner-less subscriptions (user_data == nullptr) are legal — they represent
+// system-level broadcasts. Same pattern as templated path's entity_script*-null.
+struct subscription_c {
+    subscription_id_t id;
+    event_id_type type;
+    void* user_data = nullptr;
+    bool dead = false;
+    std::function<void(void* user_data, const void* payload, u64 size)> dispatcher;
+};
+
 // Queued event with type-erased payload + dispatcher.
 // dispatcher 只接收 matching-type bucket(subscribers_[eid] 的 vector),
 // 不需要再 check type(见 Bug 2 fix)。
+// Phase 2b.2: extended for string-keyed channel — payload_size, is_string_keyed
+// discriminator, and a separate dispatcher_c that receives size + subscribers_c.
 struct queued_event {
     event_id_type type;
-    void* payload;                  // heap-allocated copy of E
+    void* payload;                  // heap-allocated copy of E (templated) or opaque bytes (string-keyed)
+    u64 payload_size = 0;           // NEW: string-keyed channel uses this; templated ignores
     void(*deleter)(void*);
     void(*dispatcher)(void* payload,
-                      std::vector<subscription>& subs);
+                      std::vector<subscription>& subs);   // templated path
+    // NEW fields for string-keyed path:
+    bool is_string_keyed = false;
+    void(*dispatcher_c)(void* payload, u64 size,
+                        std::vector<subscription_c>& subs) = nullptr;
 };
 
 } // namespace detail
@@ -186,8 +213,17 @@ public:
             deferred_unsubscribes_.push_back(subscription_id);
             return;
         }
-        // Linear search — bucket count 有限,可接受。
+        // Search templated channel first
         for (auto& [type, subs] : subscribers_) {
+            for (auto& s : subs) {
+                if (s.id == subscription_id && !s.dead) {
+                    s.dead = true;
+                    return;
+                }
+            }
+        }
+        // Fall through to string-keyed channel (Phase 2b.2)
+        for (auto& [type, subs] : subscribers_c_) {
             for (auto& s : subs) {
                 if (s.id == subscription_id && !s.dead) {
                     s.dead = true;
@@ -211,6 +247,82 @@ public:
             for (auto& s : subs) {
                 if (s.subscriber == owner) s.dead = true;
             }
+        }
+    }
+
+    // === Phase 2b.2: String-keyed C ABI channel ===
+
+    // Subscribe a string-keyed handler. event_name is FNV-1a hashed to find
+    // the bucket in subscribers_c_. user_data serves two roles: passed back
+    // to dispatcher on each call, AND identity for unsubscribe_all_by_data.
+    // Returns subscription_id (never 0).
+    subscription_id_t subscribe_by_name(
+        const char* event_name,
+        void* user_data,
+        std::function<void(void*, const void*, u64)> dispatcher
+    ) {
+        const event_id_type eid = detail::fnv1a(event_name);
+
+        detail::subscription_c s;
+        s.id = next_sub_id_++;
+        s.type = eid;
+        s.user_data = user_data;
+        s.dispatcher = std::move(dispatcher);
+        const subscription_id_t returned_id = s.id;
+
+        if (draining_) {
+            deferred_subscriptions_c_.push_back(std::move(s));
+        } else {
+            subscribers_c_[eid].push_back(std::move(s));
+        }
+        return returned_id;
+    }
+
+    // Remove all subscriptions whose user_data matches. Searches only
+    // subscribers_c_ (string-keyed channel). Mirrors unsubscribe_all(owner)
+    // for the templated channel.
+    void unsubscribe_all_by_data(void* user_data) {
+        if (draining_) {
+            deferred_unsubscribe_all_data_.push_back(user_data);
+            return;
+        }
+        for (auto& [type, subs] : subscribers_c_) {
+            for (auto& s : subs) {
+                if (s.user_data == user_data) s.dead = true;
+            }
+        }
+    }
+
+    // Emit a string-keyed event. Engine takes ownership of payload; deleter
+    // is called after dispatch in drain(). payload_size bytes are not
+    // interpreted by the engine — backends encode/decode their own format.
+    void emit_by_name(
+        const char* event_name,
+        void* payload,
+        u64 payload_size,
+        void(*deleter)(void*)
+    ) {
+        const event_id_type eid = detail::fnv1a(event_name);
+
+        detail::queued_event qe;
+        qe.type = eid;
+        qe.payload = payload;
+        qe.payload_size = payload_size;
+        qe.deleter = deleter;
+        qe.is_string_keyed = true;
+        qe.dispatcher = nullptr;  // templated dispatcher unused for string-keyed
+        qe.dispatcher_c = [](void* payload_raw, u64 size,
+                             std::vector<detail::subscription_c>& subs) {
+            for (auto& s : subs) {
+                if (s.dead) continue;
+                s.dispatcher(s.user_data, payload_raw, size);
+            }
+        };
+
+        if (draining_) {
+            re_emitted_.push_back(qe);
+        } else {
+            queue_.push_back(qe);
         }
     }
 
@@ -292,9 +404,16 @@ public:
             queue_.clear();
 
             for (auto& qe : current) {
-                auto it = subscribers_.find(qe.type);
-                if (it != subscribers_.end()) {
-                    qe.dispatcher(qe.payload, it->second);
+                if (qe.is_string_keyed) {
+                    auto it = subscribers_c_.find(qe.type);
+                    if (it != subscribers_c_.end() && qe.dispatcher_c) {
+                        qe.dispatcher_c(qe.payload, qe.payload_size, it->second);
+                    }
+                } else {
+                    auto it = subscribers_.find(qe.type);
+                    if (it != subscribers_.end()) {
+                        qe.dispatcher(qe.payload, it->second);
+                    }
                 }
                 qe.deleter(qe.payload);
             }
@@ -329,6 +448,17 @@ public:
         }
         deferred_unsubscribe_owners_.clear();
 
+        // Phase 2b.2: deferred subscriptions_c_ + unsubscribe_all_by_data
+        for (auto& s : deferred_subscriptions_c_) {
+            subscribers_c_[s.type].push_back(s);
+        }
+        deferred_subscriptions_c_.clear();
+
+        for (void* user_data : deferred_unsubscribe_all_data_) {
+            unsubscribe_all_by_data(user_data);
+        }
+        deferred_unsubscribe_all_data_.clear();
+
         // I5: Auto-compact dead subscriptions. drain() is already O(n) per pass,
         // so one additional O(n) erase-remove pass is negligible. This prevents
         // dead slots from accumulating in long-running sessions (editor, runtime)
@@ -352,6 +482,14 @@ public:
                 subs.end()
             );
         }
+        // Phase 2b.2: also compact string-keyed channel
+        for (auto& [type, subs] : subscribers_c_) {
+            subs.erase(
+                std::remove_if(subs.begin(), subs.end(),
+                               [](const detail::subscription_c& s) { return s.dead; }),
+                subs.end()
+            );
+        }
     }
 
     // Test-only:reset 所有 bus state。用于测试之间清空,避免 singleton 跨测试污染。
@@ -364,8 +502,11 @@ public:
         queue_.clear();
         re_emitted_.clear();
         subscribers_.clear();
+        subscribers_c_.clear();                          // NEW
         deferred_subscriptions_.clear();
+        deferred_subscriptions_c_.clear();               // NEW
         deferred_unsubscribes_.clear();
+        deferred_unsubscribe_all_data_.clear();          // NEW
         deferred_unsubscribe_owners_.clear();
         draining_ = false;
         next_sub_id_ = 1;
@@ -382,10 +523,13 @@ private:
     script_event_bus& operator=(const script_event_bus&) = delete;
 
     std::unordered_map<event_id_type, std::vector<detail::subscription>> subscribers_;
+    std::unordered_map<event_id_type, std::vector<detail::subscription_c>> subscribers_c_;
     std::vector<detail::queued_event> queue_;
     std::vector<detail::queued_event> re_emitted_;
     std::vector<detail::subscription> deferred_subscriptions_;
+    std::vector<detail::subscription_c> deferred_subscriptions_c_;
     std::vector<subscription_id_t> deferred_unsubscribes_;
+    std::vector<void*> deferred_unsubscribe_all_data_;
     std::vector<entity_script*> deferred_unsubscribe_owners_;
     bool draining_ = false;
     subscription_id_t next_sub_id_ = 1;  // 0 是 invalid sentinel

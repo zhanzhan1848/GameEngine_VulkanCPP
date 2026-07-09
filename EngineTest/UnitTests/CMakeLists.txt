@@ -1709,6 +1709,35 @@ if(NOT MSVC)
 endif()
 
 # ==================================
+# Script System Event Bus External Tests (Phase 2b.2)
+# script_event_subscribe/emit/unsubscribe/unsubscribe_all — string-keyed
+# C ABI channel, opaque payload + deleter, parallel to templated bus
+# ==================================
+
+add_executable(TestScriptEventBusExternal Script/TestScriptEventBusExternal.cpp)
+target_include_directories(TestScriptEventBusExternal PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptEventBusExternal PRIVATE Engine)
+add_test(NAME TestScriptEventBusExternal COMMAND TestScriptEventBusExternal)
+set_target_properties(TestScriptEventBusExternal PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptEventBusExternal PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptEventBusExternal PROPERTIES FOLDER "Tests/Components")
+# Mirror TestScriptEventBus.cpp per-file -fexceptions: tests verify that
+# exceptions from handlers / deleters behave correctly.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptEventBusExternal.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
 # Script System Post-Main-Thread MPSC Tests (Phase 1 Task 8)
 # post_to_main_thread — lock-free MPSC queue for cross-thread callback submission
 # ==================================
