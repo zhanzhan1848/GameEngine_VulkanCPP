@@ -2314,37 +2314,15 @@ bool Engine_Test::InitializeMeshletPipeline() {
         return false;
     }
 
-    // 2a. GlobalSDF init — needed for Mode 11 canonical dynamic DDGI.
-    // WGSL port + Dawn RHI support (R16Float + StorageBinding) are complete;
-    // prior blocker comment was stale (audit 2026-07-10, see spec
-    // Docs/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md).
-    {
-        auto& globalSDF = primal::graphics::nanite::GlobalSDF::Get();
-        primal::graphics::nanite::GlobalSDFConfig sdfConfig;
-        sdfConfig.cascade_count = 3;
-        sdfConfig.base_resolution = 60;        // matches native test (Apple Silicon budget)
-        sdfConfig.cascade_scale_factor = 2;
-        sdfConfig.voxel_size_base = 1.0f;
-
-        if (globalSDF.Initialize(device_, sdfConfig)) {
-            // Phase 2: bind GPU geometry buffers from gpuDrawPipeline
-            auto& gpuDrawPipeline_forSDF = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
-            primal::graphics::nanite::SDFVoxelizationResources vox;
-            vox.vertex_buffer            = gpuDrawPipeline_forSDF.GetGlobalVertexBuffer();
-            vox.meshlet_buffer           = gpuDrawPipeline_forSDF.GetGlobalMeshletBuffer();
-            vox.meshlet_vertices_buffer  = gpuDrawPipeline_forSDF.GetGlobalMeshletVerticesBuffer();
-            vox.meshlet_triangles_buffer = gpuDrawPipeline_forSDF.GetGlobalMeshletTrianglesBuffer();
-            vox.cluster_map_buffer       = gpuDrawPipeline_forSDF.GetClusterMapBuffer();
-            vox.instance_data_buffer     = gpuDrawPipeline_forSDF.GetGlobalInstanceDataBuffer();
-            vox.num_instances            = meshletSceneSnapshot_.GetInstanceCount();
-            if (!globalSDF.InitVoxelization(vox)) {
-                std::cerr << "[GlobalSDF] InitVoxelization failed — Mode 11 falls back to static seed\n";
-            }
-        } else {
-            std::cerr << "[GlobalSDF] Init failed — Mode 11 falls back to static seed\n";
-        }
-        // Non-fatal: LumenDDGIPass safety-net (P2) handles unavailable SDF.
-    }
+    // NOTE: GlobalSDF init on Dawn is currently broken:
+    //   - R16Float texture format is incompatible with StorageBinding
+    //   - WGSL `voxelize_sdf` entry point missing
+    //   - Descriptor layout mismatch (Storage vs Uniform)
+    // Cascading validation errors corrupt Dawn device state for ALL subsequent
+    // pipeline creation — breaking Mode 7/8/9/10/11 (entire screen solid color).
+    // LumenDDGIPass has a safety net: `if (dynamic_mode_ && !sdfAvailable) return;`
+    // so Mode 11 falls back to the static seed (looks like Mode 10). Proper
+    // GlobalSDF Dawn port is a separate task.
 
     // 2. GPUCullingPipeline (singleton)
     auto& cullingPipeline = primal::graphics::nanite::GPUCullingPipeline::Get();
