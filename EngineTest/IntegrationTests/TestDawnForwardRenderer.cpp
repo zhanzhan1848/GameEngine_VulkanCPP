@@ -1198,6 +1198,66 @@ void Engine_Test::UpdateCamera(float dt) {
         prevCtrlPState_ = ctrlP;
     }
 
+    // ---- Diagnostic A4: B key → CPU-side stage1 cull replay ----
+    // Press B at a repro position to dump every instance's bounds + the
+    // stage1 cull decision (behind_camera, beyond_far, final verdict).
+    // Used to identify which instances stage1 is incorrectly culling and
+    // why (e.g., bounds_radius=0 makes the behind-camera test too aggressive).
+    // macOS virtual key code 11 = ANSI 'B'.
+    {
+        bool bState = keyPressed(11);
+        if (bState && !prevBState_) {
+            const auto viewMat = view_.GetViewMatrix();
+            // Stage1 reads far_plane=1000 from CullingConstants (GPUCullingPipeline.cpp:1565)
+            constexpr float farPlane = 1000.0f;
+
+            const auto& instances = meshletSceneSnapshot_.GetInstanceData();
+            const u32 instanceCount = meshletSceneSnapshot_.GetInstanceCount();
+
+            std::fprintf(stderr,
+                "[A4] stage1 replay: frame=%u mode=%u instance_count=%u\n",
+                totalFrames_, static_cast<u32>(renderMode_), instanceCount);
+
+            u32 visibleCount = 0;
+            u32 behindCount = 0;
+            u32 farCount = 0;
+            for (u32 i = 0; i < instanceCount; ++i) {
+                const auto& b = instances[i];
+                const primal::math::v4 viewCenter =
+                    viewMat * primal::math::v4{b.bounds_center.x,
+                                                b.bounds_center.y,
+                                                b.bounds_center.z, 1.0f};
+                const float vz = viewCenter.z;
+                const bool behindCamera = (vz - b.bounds_radius > 0.0f);
+                const bool beyondFar = (vz < -farPlane - b.bounds_radius);
+                const bool visible = !(behindCamera || beyondFar);
+
+                if (behindCamera) ++behindCount;
+                else if (beyondFar) ++farCount;
+                else ++visibleCount;
+
+                // Only print first 20 instances to avoid flooding stderr.
+                // Summary line at end covers the rest.
+                if (i < 20u) {
+                    std::fprintf(stderr,
+                        "[A4]   [%u] center=(%.2f,%.2f,%.2f) r=%.3f "
+                        "view_z=%.2f %s%s%s\n",
+                        i,
+                        b.bounds_center.x, b.bounds_center.y, b.bounds_center.z,
+                        b.bounds_radius, vz,
+                        behindCamera ? "[BEHIND]" : "",
+                        beyondFar ? "[FAR]" : "",
+                        visible ? "[vis]" : "");
+                }
+            }
+            std::fprintf(stderr,
+                "[A4] summary: visible=%u behind=%u far=%u (of %u)\n",
+                visibleCount, behindCount, farCount, instanceCount);
+            std::fflush(stderr);
+        }
+        prevBState_ = bState;
+    }
+
     // ESC to quit
     if (keyPressed(53)) {
         shuttingDown_ = true;

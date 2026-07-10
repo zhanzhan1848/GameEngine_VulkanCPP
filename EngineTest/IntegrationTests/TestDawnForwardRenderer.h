@@ -161,10 +161,11 @@ private:
     DawnRenderMode renderMode_{DawnRenderMode::ShadowAndIBL};
     bool prevTabState_{false};
     bool prevVState_{false};
-    // Edge-detect state for diagnostic key hooks (P, Ctrl+P) used to
+    // Edge-detect state for diagnostic key hooks (P, Ctrl+P, B) used to
     // investigate the long-standing gray-white bug in meshlet modes.
     bool prevPState_{false};
     bool prevCtrlPState_{false};
+    bool prevBState_{false};
     u32 meshletDebugMode_{0};   // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id
     // Mode 9 sub-mode: which screen-space effect(s) to apply.
     // V key cycles Off → SSGIOnly → SSROnly → Both → Off ...
