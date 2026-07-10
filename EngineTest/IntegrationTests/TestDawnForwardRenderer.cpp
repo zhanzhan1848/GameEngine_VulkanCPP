@@ -3103,13 +3103,36 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
         std::cerr << "[Meshlet] GPUDrivenDrawPipeline::Execute failed" << std::endl;
     }
 
-    // --- 3a. GlobalSDF voxelization — DISABLED on Dawn ---
-    // GlobalSDF Dawn port is incomplete (R16Float+StorageBinding incompatible,
-    // missing WGSL entry point, descriptor layout mismatch). Attempting to init
-    // corrupts Dawn device state for all subsequent pipelines. LumenDDGIPass
-    // safety-net early-returns when SDF is unavailable, so Mode 11 falls back
-    // to the static seed (visually identical to Mode 10). Proper GlobalSDF
-    // Dawn port is a separate task.
+    // --- 3a. GlobalSDF voxelization (Mode 11 only) ---
+    // Mode 10 (static) skips this — LumenDDGIPass early-returns anyway,
+    // so voxelization would be wasted GPU work.
+    if (renderMode_ == DawnRenderMode::MeshletDynamicDDGI) {
+        auto& globalSDF = primal::graphics::nanite::GlobalSDF::Get();
+        if (globalSDF.IsInitialized() && globalSDF.IsVoxelizationReady()) {
+            // Refresh buffer handles (geometry may have been uploaded after init)
+            primal::graphics::nanite::SDFVoxelizationResources fresh;
+            fresh.vertex_buffer            = gpuDrawPipeline.GetGlobalVertexBuffer();
+            fresh.meshlet_buffer           = gpuDrawPipeline.GetGlobalMeshletBuffer();
+            fresh.meshlet_vertices_buffer  = gpuDrawPipeline.GetGlobalMeshletVerticesBuffer();
+            fresh.meshlet_triangles_buffer = gpuDrawPipeline.GetGlobalMeshletTrianglesBuffer();
+            fresh.cluster_map_buffer       = gpuDrawPipeline.GetClusterMapBuffer();
+            fresh.instance_data_buffer     = gpuDrawPipeline.GetGlobalInstanceDataBuffer();
+            fresh.num_instances            = meshletSceneSnapshot_.GetInstanceCount();
+
+            if (fresh.num_instances > 0
+                && fresh.vertex_buffer != rhi::handles::INVALID_RESOURCE
+                && fresh.meshlet_buffer != rhi::handles::INVALID_RESOURCE
+                && fresh.instance_data_buffer != rhi::handles::INVALID_RESOURCE) {
+                globalSDF.SetVoxelizationResources(fresh);
+                // CPU bookkeeping — recenter cascades on camera
+                globalSDF.Update(meshletSceneSnapshot_, totalFrames_, cameraPos_);
+                // Per-cascade GPU dispatch
+                for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
+                    globalSDF.DispatchVoxelization(cmd, c);
+                }
+            }
+        }
+    }
 
     // --- 3b. DDGI dispatch (Mode 10 / Mode 11) ---
     // Runs AFTER meshlet draw (GBuffer + depth ready) and BEFORE deferred
