@@ -352,3 +352,48 @@ The implementation is complete when **all three** hold:
 3. Mode 11 visually differs from Mode 10 in Sponza courtyard after 60 frames of convergence
 
 If S5 is applied (Mode 11 falls back to static seed due to device corruption regression), the spec is not complete — write a follow-up spec targeting the specific corruption cause.
+
+---
+
+## 11. Verification Result (2026-07-11)
+
+**Status:** Layer 1 FAILED — spec audit was wrong, S5 applied.
+
+### Layer 1 outcome
+
+P3+P4 enabled init+dispatch. Ran `DAWN_FORCE_MODE=11 ./Darwin/Debug/TestDawnForwardRenderer` for 50s (well past 60-frame mark after 26s init). Stdout contained **6699 validation errors**:
+
+- `Entry point "voxelize_sdf" doesn't exist in the shader module` — WGSL names it `voxelize_sdf_main` (line 113). Spec audit claimed WGSL was "fully ported" — wrong.
+- `TextureUsage::StorageBinding ... incompatible with the format (TextureFormat::R16Float)` — WebGPU spec disallows this combo. Spec audit claimed "R16_Float mapped correctly" — true but irrelevant; the combo is rejected. Spec audit did not verify the combo.
+- Cascade: `Compute_voxelize_sdf` pipeline → Invalid → `ddgi_trace_rays` pipeline → Invalid → all subsequent TextureViews → Invalid. Per-frame dispatch repeated the cascade 60×/sec.
+
+Mode 10 (run for comparison): 10 validation errors at init time (cascade from GlobalSDF init corrupts `ddgi_trace_rays` pipeline creation). Mode 10 still renders correctly because it uses static cache, never dispatches the trace pipeline.
+
+### S5 applied
+
+- `d33821d` Revert "feat(test): enable per-frame GlobalSDF dispatch" (reverts P4 / `787b92a`)
+- `113cd1f` Revert "feat(test): enable GlobalSDF two-phase init" (reverts P3 / `b3f6d2e`)
+
+P1 (`d5581d4` Shutdown) and P2 (`6089506` stderr traces) retained — both harmless and useful for future debugging.
+
+### Post-revert verification
+
+- Mode 11: 1 validation error (pre-existing `ddgi_trace_rays` pipeline issue, unrelated to GlobalSDF — see task #45 history). Safety net fires: `[Mode11] GlobalSDF unavailable — falling back to static seed`.
+- Mode 10: 0 validation errors. Reaches `[TestDawnFR] Ready: 393 meshes, 265 visible`. Unchanged behavior.
+
+### Layer 2 outcome
+
+Pre-revert: `[Mode11] GlobalSDF available — runtime trace active` (safety net bypassed — but only because `IsInitialized()` returns true even with corrupt textures).
+Post-revert: `[Mode11] GlobalSDF unavailable — falling back to static seed` (correct).
+
+### Layer 3 outcome
+
+Not attempted — Layer 1 failed.
+
+### Side finding: "mesh stall" was a diagnostic artifact
+
+P3/P4 implementers reported the binary stalled at "Mesh 2/393". Investigation showed the loop completes in 26.3 seconds (~67ms/iter × 393 iter). The print gate `if (i < 3 || i == sceneMeshInfos_.size() - 1)` only fires for iters 0,1,2 then iter 392, creating the appearance of a stall. The 26s cost is dominated by `MaterialInstance::Initialize` calling Dawn `MapBuffer` (spin-wait on `wgpuInstanceProcessEvents`) 2× per iter. Future optimization target, not in scope of this spec.
+
+### Follow-up spec needed
+
+Per Section 10 instruction: "write a follow-up spec targeting the specific corruption cause." Memory entry `globalsdf-dawn-port-real-blockers` documents the 3 enumerated blockers for the next spec. The follow-up should NOT trust this spec's audit — start from runtime-verified findings.
