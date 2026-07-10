@@ -19,6 +19,9 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
+#include <unistd.h>
+#include <fcntl.h>
 
 extern "C" {
 #include "lua.h"
@@ -62,6 +65,25 @@ static bool lua_get_instance_bool(LuaScriptInstance* inst, const char* field) {
     lua_getfield(L, -1, field);
     bool v = lua_toboolean(L, -1) != 0;
     lua_pop(L, 2);
+    return v;
+}
+
+// Helper: call a no-arg Lua method on the instance table and return int result.
+// Equivalent to: local v = self:method_name()
+static int lua_call_instance_int(LuaScriptInstance* inst, const char* method_name) {
+    if (!inst || !inst->type || !inst->type->lua_state) return -1;
+    lua_State* L = (lua_State*)inst->type->lua_state;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, inst->instance_table_ref);  // instance_table
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return -1; }
+    lua_getfield(L, -1, method_name);  // instance_table method_fn
+    if (!lua_isfunction(L, -1)) { lua_pop(L, 2); return -1; }
+    lua_pushvalue(L, -2);  // instance_table method_fn self
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        lua_pop(L, 2);  // pop error + instance_table
+        return -1;
+    }
+    int v = (int)lua_tointeger(L, -1);
+    lua_pop(L, 2);  // pop result + instance_table
     return v;
 }
 
@@ -402,6 +424,403 @@ TestResult test_lua_event_bus_round_trip() {
     return TestResult::Passed;
 }
 
+// Test 5: LuaBackend::shutdown() safety net must survive script::shutdown()
+// being called first. This exercises the Phase 2b.2 fix: release_sub_record
+// checks script::is_initialized() and skips engine unsubscribe when false.
+//
+// Without the fix, the safety net's release_sub_record →
+// script_event_unsubscribe → check_main_thread → assert(g_initialized)
+// would fire.
+TestResult test_lua_shutdown_after_script_shutdown_safe() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity_a = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "event_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/event_script.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        std::fprintf(stderr, "register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_a = LuaBackend::instance().create_instance(type_id, entity_a.get_id());
+    if (script_a == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // 1 frame_tick — begin_play fires → subscribes to ping/pong. Update emits
+    // ping. drain delivers. Subscriptions are now live in inst_subs_.
+    primal::script::frame_tick(0.016f);
+
+    // MISUSE PATH: call script::shutdown() WITHOUT remove_for_entity. The
+    // engine bus is destroyed but LuaBackend still holds LuaSubRecord*'s
+    // referencing those (now-defunct) engine subscription ids.
+    primal::script::shutdown();
+
+    // This call previously crashed: safety net loop tried to unsubscribe via
+    // a dead engine bus. With the fix, release_sub_record sees
+    // script::is_initialized()==false and skips the engine call, only
+    // releasing the Lua refs and freeing the record.
+    LuaBackend::instance().shutdown();
+
+    // If we got here without assert/crash, the fix works.
+    return TestResult::Passed;
+}
+
+// Test 6: Lua hard reload with old_state migration.
+//   1 frame_tick: old.update_count=1, old.score=42
+//   script::reload(eid) — deferred
+//   1 more frame_tick: old.update fires (count=2), then reload fires:
+//     capture_state saves score=42 from old table
+//     destroy frees old LuaScriptInstance
+//     recreate allocates fresh LuaScriptInstance
+//     begin_play runs (fresh: count=0, score=0)
+//     on_reload(self, old_table) — Lua migrates score=42
+//   Verify new instance: update_count=0, score=42
+TestResult test_lua_reload_preserves_old_state() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "reload_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/reload_script.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        std::fprintf(stderr, "register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // 1 frame_tick: old.update_count = 1, old.score = 42
+    primal::script::frame_tick(0.016f);
+
+    // Defer reload
+    primal::script::reload(entity.get_id());
+
+    // 1 more frame_tick: old.update fires (count=2), then process_deferred_reloads
+    // constructs new instance. New instance has update_count=0 (fresh begin_play),
+    // score=42 (migrated via on_reload from captured old table).
+    primal::script::frame_tick(0.016f);
+
+    auto* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "find_instance returned nullptr after reload\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    int update_count = lua_get_instance_int(inst, "update_count");
+    int score = lua_get_instance_int(inst, "score");
+    // Phase 2b.3 Issue 1: verify old instance's Lua destroy hook fired
+    // exactly once during reload (capture_state_for_reload invokes it
+    // before transferring table ownership).
+    int destroy_count = lua_call_instance_int(inst, "get_destroy_count");
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (update_count != 0) {
+        std::fprintf(stderr, "post-reload update_count=%d (expected 0 — fresh begin_play)\n",
+                     update_count);
+        return TestResult::Failed;
+    }
+    if (score != 42) {
+        std::fprintf(stderr, "post-reload score=%d (expected 42 — migrated via on_reload)\n",
+                     score);
+        return TestResult::Failed;
+    }
+    if (destroy_count != 1) {
+        std::fprintf(stderr, "post-reload destroy_count=%d (expected 1 — old instance destroy fired during reload)\n",
+                     destroy_count);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// === Phase 2b.3 Test 7: type-level source reload ===
+//
+// Tempfile helper: writes initial content, supports rewrite. RAII unlinks on
+// destruction. Uses mkstemp for unique filename.
+class TempLuaFile {
+public:
+    const std::string& get_path() const { return path; }
+
+    explicit TempLuaFile(const std::string& content) {
+        path = "/tmp/lua_reload_type_test_XXXXXX.lua";
+        std::vector<char> tmpl(path.begin(), path.end());
+        tmpl.push_back('\0');
+        int fd = mkstemp(tmpl.data());
+        if (fd == -1) {
+            std::fprintf(stderr, "mkstemp failed\n");
+            path.clear();
+            return;
+        }
+        path = tmpl.data();
+        if (write(fd, content.data(), content.size()) != (ssize_t)content.size()) {
+            std::fprintf(stderr, "write failed\n");
+            close(fd);
+            unlink(path.c_str());
+            path.clear();
+            return;
+        }
+        close(fd);
+    }
+
+    void rewrite(const std::string& content) {
+        if (path.empty()) return;
+        int fd = open(path.c_str(), O_WRONLY | O_TRUNC);
+        if (fd == -1) {
+            std::fprintf(stderr, "rewrite open failed\n");
+            return;
+        }
+        if (write(fd, content.data(), content.size()) != (ssize_t)content.size()) {
+            std::fprintf(stderr, "rewrite write failed\n");
+            close(fd);
+            unlink(path.c_str());
+            path.clear();
+            return;
+        }
+        close(fd);
+    }
+
+    ~TempLuaFile() {
+        if (!path.empty()) unlink(path.c_str());
+    }
+
+    TempLuaFile(const TempLuaFile&) = delete;
+    TempLuaFile& operator=(const TempLuaFile&) = delete;
+
+private:
+    std::string path;
+};
+
+// Test 7: LuaBackend::reload_type re-reads .lua source from disk.
+//   register_type with file_v1 (value=1)
+//   create instance A, verify value=1
+//   modify file to v2 (value=2)
+//   reload_type — re-reads file
+//   create instance B, verify value=2 (new source)
+//   Also verify instance A still reads value=1 (decoupled — A keeps old script).
+TestResult test_lua_reload_type_re_reads_source() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    const std::string v1 =
+        "local M = {}\n"
+        "M.value = 1\n"
+        "function M.begin_play(self) end\n"
+        "function M.update(self, dt) end\n"
+        "function M.destroy(self) end\n"
+        "return M\n";
+    const std::string v2 =
+        "local M = {}\n"
+        "M.value = 2\n"
+        "function M.begin_play(self) end\n"
+        "function M.update(self, dt) end\n"
+        "function M.destroy(self) end\n"
+        "return M\n";
+
+    TempLuaFile tmp(v1);
+    if (tmp.get_path().empty()) {
+        std::fprintf(stderr, "TempLuaFile creation failed\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 type_id = LuaBackend::instance().register_type("reload_type_test", tmp.get_path().c_str());
+    if (type_id == u64_invalid_id) {
+        std::fprintf(stderr, "register_type failed\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::game_entity::entity entity_a = make_test_entity();
+    u64 script_a = LuaBackend::instance().create_instance(type_id, entity_a.get_id());
+    if (script_a == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance A failed\n");
+        primal::script::remove_for_entity(entity_a.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    auto* inst_a = LuaBackend::instance().find_instance(script_a);
+    if (!inst_a) {
+        std::fprintf(stderr, "find_instance A failed\n");
+        primal::script::remove_for_entity(entity_a.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    int value_a_first = lua_get_instance_int(inst_a, "value");
+
+    // Modify file -> reload_type
+    tmp.rewrite(v2);
+    u64 reload_rc = LuaBackend::instance().reload_type(type_id);
+    if (reload_rc == u64_invalid_id) {
+        std::fprintf(stderr, "reload_type failed\n");
+        primal::script::remove_for_entity(entity_a.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // Create instance B AFTER reload_type — should use new source (value=2)
+    primal::game_entity::entity entity_b = make_test_entity();
+    u64 script_b = LuaBackend::instance().create_instance(type_id, entity_b.get_id());
+    if (script_b == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance B failed\n");
+        primal::script::remove_for_entity(entity_b.get_id());
+        primal::script::remove_for_entity(entity_a.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    auto* inst_b = LuaBackend::instance().find_instance(script_b);
+    if (!inst_b) {
+        std::fprintf(stderr, "find_instance B failed\n");
+        primal::script::remove_for_entity(entity_b.get_id());
+        primal::script::remove_for_entity(entity_a.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    int value_b = lua_get_instance_int(inst_b, "value");
+
+    // Instance A re-reads its value (still 1 — decoupled, A's instance table
+    // holds its own shallow copy of the old script's fields).
+    int value_a_after = lua_get_instance_int(inst_a, "value");
+
+    primal::script::remove_for_entity(entity_a.get_id());
+    primal::script::remove_for_entity(entity_b.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (value_a_first != 1) {
+        std::fprintf(stderr, "A initial value=%d (expected 1)\n", value_a_first);
+        return TestResult::Failed;
+    }
+    if (value_b != 2) {
+        std::fprintf(stderr, "B value=%d (expected 2 — new source after reload_type)\n", value_b);
+        return TestResult::Failed;
+    }
+    if (value_a_after != 1) {
+        std::fprintf(stderr, "A value after reload_type=%d (expected 1 — decoupled)\n",
+                     value_a_after);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// extern "C" declarations for the Self-Test Backend (ScriptSelfTestBackend.c).
+// The .c file is linked into TestLuaBackend to verify Phase 2b.3 reload flow
+// doesn't break backends that DON'T implement the new hooks.
+// ---------------------------------------------------------------------------
+extern "C" {
+int self_test_register_and_create(u64 entity_id_raw,
+                                  u64* type_id_out,
+                                  u64* script_handle_out);
+int self_test_get_begin_play_count(void);
+int self_test_get_update_count(void);
+int self_test_get_destroy_count(void);
+int self_test_get_on_reload_count(void);
+void self_test_reset_counters(void);
+} // extern "C"
+
+namespace {
+
+// Test 8: Self-Test Backend reload regression. The Self-Test Backend
+// (ScriptSelfTestBackend.c) does NOT implement any of the three Phase 2b.3
+// hooks. The engine's new flow must fall back gracefully:
+//   capture_state_for_reload = NULL → captured_state stays null
+//   recreate_instance_user_data_for_reload = NULL → new_inst_ud = nullptr
+//   on_reload(nullptr) called — Self-Test's my_on_reload ignores old_state
+// All existing Self-Test reload counters must still increment.
+TestResult test_lua_self_test_backend_reload_unchanged() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    self_test_reset_counters();
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = 0;
+    u64 script_handle = 0;
+    int rc = self_test_register_and_create(entity.get_id(), &type_id, &script_handle);
+    if (rc != 1) {
+        std::fprintf(stderr, "self_test_register_and_create failed\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // 1 frame_tick — begin_play + 1 update on old instance
+    primal::script::frame_tick(0.016f);
+
+    int bp_before = self_test_get_begin_play_count();  // expect 1
+    int upd_before = self_test_get_update_count();     // expect 1
+
+    // Defer reload + 1 more frame_tick (old.update fires → reload fires →
+    // new begin_play + new on_reload).
+    primal::script::reload(entity.get_id());
+    primal::script::frame_tick(0.016f);
+
+    int bp_after = self_test_get_begin_play_count();    // expect 2 (1 old + 1 new)
+    int upd_after = self_test_get_update_count();       // expect 2 (2 old updates pre-reload, 0 new this frame)
+    int destroy_after = self_test_get_destroy_count();  // expect 1 (old instance destroyed)
+    int reload_after = self_test_get_on_reload_count(); // expect 1 (new instance on_reload)
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (bp_before != 1 || upd_before != 1) {
+        std::fprintf(stderr, "pre-reload counters wrong: bp=%d upd=%d\n", bp_before, upd_before);
+        return TestResult::Failed;
+    }
+    if (bp_after != 2) {
+        std::fprintf(stderr, "post-reload begin_play_count=%d (expected 2)\n", bp_after);
+        return TestResult::Failed;
+    }
+    if (upd_after != 2) {
+        std::fprintf(stderr, "post-reload update_count=%d (expected 2)\n", upd_after);
+        return TestResult::Failed;
+    }
+    if (destroy_after != 1) {
+        std::fprintf(stderr, "post-reload destroy_count=%d (expected 1)\n", destroy_after);
+        return TestResult::Failed;
+    }
+    if (reload_after != 1) {
+        std::fprintf(stderr, "post-reload on_reload_count=%d (expected 1)\n", reload_after);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
 } // anonymous namespace
 
 void RunLuaBackendTests() {
@@ -420,6 +839,19 @@ void RunLuaBackendTests() {
                                test_lua_event_bus_round_trip,
                                "2 instances subscribe to ping/pong, drain delivers across "
                                "instances + re-emit isolation"));
+    suite.AddTestCase(TestCase("lua_shutdown_after_script_shutdown_safe",
+                               test_lua_shutdown_after_script_shutdown_safe,
+                               "LuaBackend::shutdown after script::shutdown must not crash "
+                               "even with stranded subscriptions"));
+    suite.AddTestCase(TestCase("lua_reload_preserves_old_state",
+                               test_lua_reload_preserves_old_state,
+                               "Hard reload resets update_count but on_reload migrates score"));
+    suite.AddTestCase(TestCase("lua_reload_type_re_reads_source",
+                               test_lua_reload_type_re_reads_source,
+                               "reload_type re-reads .lua file; new instances use new source"));
+    suite.AddTestCase(TestCase("lua_self_test_backend_reload_unchanged",
+                               test_lua_self_test_backend_reload_unchanged,
+                               "Self-Test Backend (no Phase 2b.3 hooks) reload still works"));
     suite.RunAllTests();
 }
 

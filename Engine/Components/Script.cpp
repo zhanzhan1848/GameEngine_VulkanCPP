@@ -406,7 +406,27 @@ namespace primal::script {
 					continue;
 				}
 
-				// 1. destroy() — script may set_reload_state() (native only; external C ABI has no equivalent)
+				// === Phase 2b.3: capture/destroy/recreate flow (fixes UAF) ===
+				// Read type-level info + callbacks BEFORE destroy (ext stays
+				// valid until slot = std::move(new_ptr) below).
+				void* type_ud = ext->type_user_data_for_reload();
+				const script_external_callbacks cbs = ext->callbacks_for_reload();
+				const u64 entity_id_raw = (u64)eid;
+				const u64 script_id_raw = (u64)sid;
+
+				// 1. capture_state_for_reload — backend snapshots pre-destroy state.
+				void* captured_state = nullptr;
+				if (cbs.capture_state_for_reload) {
+					try { captured_state = cbs.capture_state_for_reload(ext->effective_user_data()); }
+					catch (const std::exception& e) {
+						std::fprintf(stderr, "script::reload capture_state exception: %s\n", e.what());
+					} catch (...) {
+						std::fprintf(stderr, "script::reload capture_state unknown exception\n");
+					}
+				}
+
+				// 2. destroy — backend frees old instance_user_data. UAF-safe
+				//    because we never read instance_user_data again.
 				try { slot->destroy(); }
 				catch (const std::exception& e) {
 					std::fprintf(stderr, "script::reload destroy exception: %s\n", e.what());
@@ -414,16 +434,26 @@ namespace primal::script {
 					std::fprintf(stderr, "script::reload destroy unknown exception\n");
 				}
 
-				void* old_state = ext->reload_state_for_external();
+				// 3. recreate — backend allocates FRESH instance_user_data
+				//    (old pointer is dangling). If hook is NULL, new_inst_ud
+				//    stays nullptr (Self-Test Backend path).
+				void* new_inst_ud = nullptr;
+				if (cbs.recreate_instance_user_data_for_reload) {
+					try {
+						new_inst_ud = cbs.recreate_instance_user_data_for_reload(
+							type_ud, entity_id_raw, script_id_raw);
+					}
+					catch (const std::exception& e) {
+						std::fprintf(stderr, "script::reload recreate exception: %s\n", e.what());
+					} catch (...) {
+						std::fprintf(stderr, "script::reload recreate unknown exception\n");
+					}
+				}
 
-				// 2-4. Construct new instance and swap in. script_id unchanged (spec §4.5).
+				// 4. Construct new external_script. script_id unchanged (spec §4.5).
 				auto new_ptr = std::make_unique<external_script>(
-					ext->type_user_data_for_reload(),
-					ext->instance_user_data_for_reload(),
-					ext->callbacks_for_reload(),
-					game_entity::entity{eid});
-
-				slot = std::move(new_ptr);  // old instance destructed here
+					type_ud, new_inst_ud, cbs, game_entity::entity{eid});
+				slot = std::move(new_ptr);  // old external_script destructed here
 
 				// 5. begin_play on new instance (spec §5.2: begin_play precedes on_reload)
 				try { slot->begin_play(); }
@@ -433,12 +463,22 @@ namespace primal::script {
 					std::fprintf(stderr, "script::reload begin_play unknown exception\n");
 				}
 
-				// 6. on_reload(old_state) — Phase 1 external: old_state is nullptr
-				try { slot->on_reload(old_state); }
+				// 6. on_reload(captured_state) — backend may migrate fields.
+				try { slot->on_reload(captured_state); }
 				catch (const std::exception& e) {
 					std::fprintf(stderr, "script::reload on_reload exception: %s\n", e.what());
 				} catch (...) {
 					std::fprintf(stderr, "script::reload on_reload unknown exception\n");
+				}
+
+				// 7. Free captured state (after on_reload consumed it).
+				if (captured_state && cbs.delete_captured_state) {
+					try { cbs.delete_captured_state(captured_state); }
+					catch (const std::exception& e) {
+						std::fprintf(stderr, "script::reload delete_state exception: %s\n", e.what());
+					} catch (...) {
+						std::fprintf(stderr, "script::reload delete_state unknown exception\n");
+					}
 				}
 			}
 		}
@@ -801,6 +841,14 @@ namespace primal::script {
 				raced = n;
 			}
 		}
+	}
+
+	bool is_initialized()
+	{
+		// No check_main_thread() — safety-net callers (LuaBackend::shutdown)
+		// may invoke this during partial teardown when the main-thread
+		// invariant no longer holds.
+		return detail::g_initialized;
 	}
 
 	void entity_script::set_rotation(const game_entity::entity *const entity, math::v4 rotation_quaternion)

@@ -18,6 +18,7 @@ struct LuaScriptType {
     void* lua_state;            // lua_State* (opaque to header consumers)
     int script_table_ref;       // root script table (LUA_REGISTRYINDEX ref)
     std::string type_name;
+    std::string file_path;      // === Phase 2b.3 === path for reload_type re-read
 };
 
 // Per-instance Lua state. One per create_instance() call. Stored as
@@ -36,6 +37,15 @@ struct LuaSubRecord {
     int lua_fn_ref;              // LUA_REGISTRYINDEX ref to handler function
     void* lua_state;             // lua_State* — type->lua_state, cached for cleanup
     u64 sub_id;                  // engine-returned subscription id (map key)
+};
+
+// === Phase 2b.3 ===
+// Captured pre-destroy state. Ownership transferred from instance to this
+// struct in capture_state_for_reload. Freed by delete_captured_state after
+// on_reload consumes it.
+struct LuaReloadState {
+    void* lua_state;            // lua_State* (back-pointer for luaL_unref on delete)
+    int captured_table_ref;     // old instance_table_ref, owned by this struct
 };
 
 class LuaBackend {
@@ -60,9 +70,23 @@ public:
     // (already destroyed or never created).
     LuaScriptInstance* find_instance(u64 script_id);
 
+    // === Phase 2b.3 ===
+    // Re-read the .lua file, replace script_table_ref in LuaScriptType.
+    // Existing instances keep old behavior until each is reloaded via
+    // script::reload(eid). Returns type_id on success, u64_invalid_id on failure.
+    u64 reload_type(u64 type_id);
+
     // Erase an instance from the map. Called by my_destroy after Lua cleanup.
     // The LuaScriptInstance* passed to the engine becomes dangling after this.
     void erase_instance(u64 script_id);
+
+    // === Phase 2b.3 ===
+    // Called by lua_recreate_instance_user_data_for_reload after my_destroy
+    // erased the old map entry. Allocates a fresh LuaScriptInstance and
+    // re-inserts under the same script_id (engine reuses script_id on reload).
+    // Returns raw pointer to the new instance (ownership stays in instances_).
+    LuaScriptInstance* recreate_instance_for_reload(
+        LuaScriptType* type, u64 entity_id, u64 script_id);
 
     // Test-only: directly invoke the adapter's reflect callback for the
     // given instance.

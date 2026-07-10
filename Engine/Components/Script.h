@@ -62,4 +62,11 @@ namespace primal::script {
 	// shutdown() 后系统回到未初始化状态,可再次 initialize。
 	void initialize();
 	void shutdown();
+
+	// === Phase 2b.2 fix: 初始化查询 API ===
+	// 返回 detail::g_initialized 的当前值。用于 LuaBackend::shutdown() 等
+	// safety-net 路径:当 engine bus 已被 shutdown 销毁时,跳过 engine
+	// 端的 unsubscribe(订阅本身已不存在),只做 backend 侧的 Lua ref 释放。
+	// 不强制主线程(safety net 可能在 shutdown 任意阶段被调用)。
+	bool is_initialized();
 }

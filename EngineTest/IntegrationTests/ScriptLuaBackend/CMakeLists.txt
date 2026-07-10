@@ -46,6 +46,7 @@ target_compile_definitions(lua_static PRIVATE LUA_USE_MACOSX=1)
 add_executable(TestLuaBackend
     ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptLuaBackend/TestLuaBackend.cpp
     ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptLuaBackend/LuaBackend.cpp
+    ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackend.c
 )
 target_include_directories(TestLuaBackend PRIVATE
     ${CMAKE_SOURCE_DIR}
@@ -70,3 +71,11 @@ if(NOT MSVC)
         PROPERTIES COMPILE_OPTIONS "-fexceptions"
     )
 endif()
+
+# Force ScriptSelfTestBackend.c to compile as C (not C++). CMake's language
+# detection should handle this, but we make it explicit to match the separate
+# TestScriptSelfTestBackend target and guarantee C ABI fidelity.
+set_source_files_properties(
+    "${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackend.c"
+    PROPERTIES LANGUAGE C
+)

@@ -83,6 +83,35 @@ typedef struct script_external_callbacks {
     void (*destroy)(void* user_data);
     void (*on_reload)(void* user_data, void* old_state);
     void (*reflect)(void* user_data, property_visitor_c visitor);
+
+    // === Phase 2b.3: Reload support (all optional) ===
+    //
+    // Called BEFORE destroy() during reload. Backend snapshots any state
+    // from user_data it wants to migrate to the new instance. Returned
+    // pointer is passed to on_reload() after the new instance is built.
+    // If NULL or returns NULL, on_reload receives nullptr.
+    //
+    // Engine owns the State* between capture and on_reload/delete.
+    void* (*capture_state_for_reload)(void* user_data);
+
+    // Free the State* blob. Called once after on_reload consumes it
+    // (or on abort paths). Required if capture is non-NULL.
+    void (*delete_captured_state)(void* state);
+
+    // Called AFTER destroy(), BEFORE new external_script is constructed.
+    // Backend allocates a FRESH user_data (old pointer is dangling — do
+    // NOT dereference). type_user_data + entity_id + script_id passed so
+    // backend can rebuild per-instance context and re-insert into its own
+    // maps without thread-local hacks or fragile lookups (my_destroy
+    // already erased the old map entry by this point).
+    //
+    // If NULL, new instance's instance_user_data is nullptr (acceptable
+    // for backends like Self-Test that don't own a per-instance pointer).
+    void* (*recreate_instance_user_data_for_reload)(
+        void* type_user_data,
+        u64 entity_id,
+        u64 script_id
+    );
 } script_external_callbacks;
 
 // ---------------------------------------------------------------------------
