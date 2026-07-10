@@ -25,6 +25,7 @@ void EmscriptenInitInput();
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.h"
 #include "Engine/Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Engine/Graphics/Nanite/GPUCullingPipeline.h"
+#include "Engine/Graphics/Nanite/GlobalSDF.h"
 #include "Engine/Graphics/Nanite/HZBSystem.h"
 #include "Engine/Graphics/Nanite/GPUMaterialRegistry.h"
 #include "Engine/Graphics/Nanite/NaniteResourceManager.h"
@@ -230,7 +231,8 @@ bool Engine_Test::initialize() {
     hdrDesc_.type = rhi::TextureType::Texture2D;
     hdrDesc_.mipLevels = 1;
     hdrDesc_.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource |
-                     rhi::TextureUsage::CopyDest | rhi::TextureUsage::UnorderedAccess;
+                     rhi::TextureUsage::CopyDest | rhi::TextureUsage::UnorderedAccess |
+                     rhi::TextureUsage::CopySource;
     hdrTexture_ = device_->CreateTexture(hdrDesc_);
 
     // Create persistent Velocity MRT texture (RG16F, written by ForwardPBR fragment)
@@ -793,7 +795,8 @@ void Engine_Test::RenderFrame() {
     const bool meshletMode = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
                               renderMode_ == DawnRenderMode::Meshlet ||
                               renderMode_ == DawnRenderMode::MeshletSSGISSR ||
-                              renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI);
+                              renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+                              renderMode_ == DawnRenderMode::MeshletDynamicDDGI);
     // The TAA-bypass diagnostic is a SEPARATE concern: Mode 7/8 keep the bypass,
     // Mode 9 runs TAA (its SSGI/SSR depend on the resolved HDR).
     const bool meshletBypassTAA = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
@@ -842,10 +845,14 @@ void Engine_Test::RenderFrame() {
         }
 
         // SSR: trace reflection rays (half-res), temporal accumulate, composite into HDR.
+        // Mode 10 (MeshletSSGISSRDDGI) and Mode 11 (MeshletDynamicDDGI) inherit Mode 9's
+        // SSR/SSGI — both are Mode 9 + DDGI (static bake vs canonical dynamic).
         const bool ssrActive =
             renderMode_ == DawnRenderMode::FullPlusSSR ||
             renderMode_ == DawnRenderMode::Deferred ||
-            (renderMode_ == DawnRenderMode::MeshletSSGISSR &&
+            ((renderMode_ == DawnRenderMode::MeshletSSGISSR ||
+              renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+              renderMode_ == DawnRenderMode::MeshletDynamicDDGI) &&
              (ssgissrSubmode_ == SSGISSRSubmode::SSROnly || ssgissrSubmode_ == SSGISSRSubmode::Both));
         if (ssrActive) {
             // Pass frameIndex_ (true counter) — same reason as SSGI: SSR's
@@ -858,10 +865,12 @@ void Engine_Test::RenderFrame() {
         }
 
         // SSGI (Lumen Dawn variant): half-res HZB ray march gathering prev-frame color.
-        // Mode 9 only. prevFrameColor = taaHDR (self-feedback, accepts 1-frame latency).
+        // Mode 9 + Mode 10 + Mode 11. prevFrameColor = taaHDR (self-feedback, accepts 1-frame latency).
         auto ssgiHandle = rendergraph::kInvalidRGResourceHandle;
         const bool ssgiActive =
-            renderMode_ == DawnRenderMode::MeshletSSGISSR &&
+            (renderMode_ == DawnRenderMode::MeshletSSGISSR ||
+             renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+             renderMode_ == DawnRenderMode::MeshletDynamicDDGI) &&
             (ssgissrSubmode_ == SSGISSRSubmode::SSGIOnly || ssgissrSubmode_ == SSGISSRSubmode::Both);
         if (ssgiActive) {
             // Pass frameIndex_ (true counter), not fi (swap-chain index 0..2).
@@ -1042,7 +1051,9 @@ void Engine_Test::RenderFrame() {
             if (renderMode_ != DawnRenderMode::NoEffects &&
                 renderMode_ != DawnRenderMode::MeshletNoIBL &&
                 renderMode_ != DawnRenderMode::Meshlet &&
-                renderMode_ != DawnRenderMode::MeshletSSGISSR) {
+                renderMode_ != DawnRenderMode::MeshletSSGISSR &&
+                renderMode_ != DawnRenderMode::MeshletSSGISSRDDGI &&
+                renderMode_ != DawnRenderMode::MeshletDynamicDDGI) {
                 RenderShadowPass(cmd);
                 forwardRenderer_.SetDawnShadowLightVP(lightVP_);
             }
@@ -1054,7 +1065,9 @@ void Engine_Test::RenderFrame() {
             if (renderMode_ != DawnRenderMode::NoEffects &&
                 renderMode_ != DawnRenderMode::MeshletNoIBL &&
                 renderMode_ != DawnRenderMode::Meshlet &&
-                renderMode_ != DawnRenderMode::MeshletSSGISSR) {
+                renderMode_ != DawnRenderMode::MeshletSSGISSR &&
+                renderMode_ != DawnRenderMode::MeshletSSGISSRDDGI &&
+                renderMode_ != DawnRenderMode::MeshletDynamicDDGI) {
                 forwardRenderer_.RenderDawnDepthPrepass(cmd, view_, prepassDepthTexture_, fi, width_, height_);
             }
 
@@ -1062,7 +1075,15 @@ void Engine_Test::RenderFrame() {
             // cull + draw + meshlet deferred lighting. Produces hdrTexture_ from
             // the 4-RT meshlet GBuffer. Falls through to the renderGraph
             // post-processing pipeline below.
-            if (renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI) {
+            //
+            // Mode 10 (MeshletSSGISSRDDGI): static-bake DDGI preserved indefinitely.
+            // Mode 11 (MeshletDynamicDDGI): canonical dynamic DDGI — runtime traces
+            // every frame, EMA-blending toward canonical radiance from static seed.
+            // The dynamic_mode_ flag is flipped inside RenderMeshletDDGIFrame AFTER
+            // the lazy init of ddgiPass_ (calling SetDynamicMode before init would
+            // dereference a null unique_ptr).
+            if (renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+                renderMode_ == DawnRenderMode::MeshletDynamicDDGI) {
                 RenderMeshletDDGIFrame(cmd);
             } else if (renderMode_ == DawnRenderMode::MeshletNoIBL ||
                 renderMode_ == DawnRenderMode::Meshlet ||
@@ -1213,11 +1234,39 @@ void Engine_Test::UpdateCamera(float dt) {
 
             const auto& instances = meshletSceneSnapshot_.GetInstanceData();
             const u32 instanceCount = meshletSceneSnapshot_.GetInstanceCount();
+            const size_t vectorSize = instances.size();
 
             std::fprintf(stderr,
-                "[A4] stage1 replay: frame=%u mode=%u instance_count=%u\n",
-                totalFrames_, static_cast<u32>(renderMode_), instanceCount);
+                "[A4] stage1 replay: frame=%u mode=%u instance_count=%u vector_size=%zu\n",
+                totalFrames_, static_cast<u32>(renderMode_), instanceCount, vectorSize);
 
+            // Dump instance[0] fully: disambiguates "struct uninitialized" vs
+            // "only bounds zero" vs "A4 reads wrong location".
+            if (vectorSize > 0) {
+                const auto& b0 = instances[0];
+                const auto& col0 = b0.world_matrix.columns[0];
+                const auto& col3 = b0.world_matrix.columns[3];
+                std::fprintf(stderr,
+                    "[A4] inst[0] geometry_id=%u material_id=%u cluster_start=%u "
+                    "cluster_count=%u\n",
+                    b0.geometry_id, b0.material_id, b0.cluster_start, b0.cluster_count);
+                std::fprintf(stderr,
+                    "[A4] inst[0] world_matrix.columns[0]=(%.3f,%.3f,%.3f,%.3f) "
+                    "columns[3]=(translation)=(%.3f,%.3f,%.3f,%.3f)\n",
+                    col0.x, col0.y, col0.z, col0.w,
+                    col3.x, col3.y, col3.z, col3.w);
+                // Raw 16 bytes of bounds_center (should be x,y,z,pad).
+                const float* bc = reinterpret_cast<const float*>(&b0.bounds_center);
+                std::fprintf(stderr,
+                    "[A4] inst[0] bounds_center raw floats at %p: (%.6f,%.6f,%.6f,%.6f)\n",
+                    (const void*)bc, bc[0], bc[1], bc[2], bc[3]);
+                const float* br = reinterpret_cast<const float*>(&b0.bounds_radius);
+                std::fprintf(stderr,
+                    "[A4] inst[0] bounds_radius raw float at %p (offset=%ld): %.6f\n",
+                    (const void*)br,
+                    reinterpret_cast<const char*>(br) - reinterpret_cast<const char*>(&b0),
+                    *br);
+            }
             u32 visibleCount = 0;
             u32 behindCount = 0;
             u32 farCount = 0;
@@ -1240,9 +1289,10 @@ void Engine_Test::UpdateCamera(float dt) {
                 // Summary line at end covers the rest.
                 if (i < 20u) {
                     std::fprintf(stderr,
-                        "[A4]   [%u] center=(%.2f,%.2f,%.2f) r=%.3f "
+                        "[A4]   [%u] geo_id=%u center=(%.2f,%.2f,%.2f) r=%.3f "
                         "view_z=%.2f %s%s%s\n",
                         i,
+                        b.geometry_id,
                         b.bounds_center.x, b.bounds_center.y, b.bounds_center.z,
                         b.bounds_radius, vz,
                         behindCamera ? "[BEHIND]" : "",
@@ -1268,7 +1318,7 @@ void Engine_Test::UpdateCamera(float dt) {
     // Tab (keyCode 48) to cycle render mode — edge detected.
     // V (keyCode 9) cycles meshlet debug visualization (mode 7/8 only).
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI", "MeshletDynamicDDGI"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
@@ -1280,7 +1330,8 @@ void Engine_Test::UpdateCamera(float dt) {
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
             "GPU-Driven Meshlet + Indirect Draw + IBL",
             "GPU-Driven Meshlet + SSGI + SSR",
-            "GPU-Driven Meshlet + SSGI + SSR + DDGI"
+            "GPU-Driven Meshlet + SSGI + SSR + DDGI",
+            "GPU-Driven Meshlet + SSGI + SSR + Canonical Dynamic DDGI"
         };
         static_assert(std::size(kModeNames) == static_cast<u32>(DawnRenderMode::Count),
                       "kModeNames must cover all DawnRenderMode entries");
@@ -1312,11 +1363,13 @@ void Engine_Test::UpdateCamera(float dt) {
                 meshletDebugMode_ = (meshletDebugMode_ + 1u) % 6u;
                 std::cerr << "[Meshlet] debug visualization mode = " << meshletDebugMode_
                           << " (" << kDebugLabel[meshletDebugMode_] << ")" << std::endl;
-            } else if (renderMode_ == DawnRenderMode::MeshletSSGISSR) {
-                // Mode 9: V cycles SSGI/SSR sub-mode {Off, SSGIOnly, SSROnly, Both}.
+            } else if (renderMode_ == DawnRenderMode::MeshletSSGISSR ||
+                       renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+                       renderMode_ == DawnRenderMode::MeshletDynamicDDGI) {
+                // Mode 9 / 10 / 11: V cycles SSGI/SSR sub-mode {Off, SSGIOnly, SSROnly, Both}.
                 ssgissrSubmode_ = static_cast<SSGISSRSubmode>((static_cast<u8>(ssgissrSubmode_) + 1u) % 4u);
                 static const char* kSubLabel[] = {"Off", "SSGI only", "SSR only", "Both"};
-                std::cerr << "[Mode 9] SSGI/SSR sub-mode = " << kSubLabel[static_cast<u8>(ssgissrSubmode_)] << std::endl;
+                std::cerr << "[Mode 9/10/11] SSGI/SSR sub-mode = " << kSubLabel[static_cast<u8>(ssgissrSubmode_)] << std::endl;
             }
         }
         prevVState_ = vPressed;
@@ -1327,8 +1380,11 @@ void Engine_Test::UpdateCamera(float dt) {
             meshletDebugMode_ = 0u;
         }
 
-        // Reset Mode 9 sub-mode on exit so the next entry starts at the default (Both).
-        if (renderMode_ != DawnRenderMode::MeshletSSGISSR && ssgissrSubmode_ != SSGISSRSubmode::Both) {
+        // Reset Mode 9/10/11 sub-mode on exit so the next entry starts at the default (Both).
+        if (renderMode_ != DawnRenderMode::MeshletSSGISSR &&
+            renderMode_ != DawnRenderMode::MeshletSSGISSRDDGI &&
+            renderMode_ != DawnRenderMode::MeshletDynamicDDGI &&
+            ssgissrSubmode_ != SSGISSRSubmode::Both) {
             ssgissrSubmode_ = SSGISSRSubmode::Both;
         }
 
@@ -1387,7 +1443,7 @@ void Engine_Test::UpdateCamera(float dt) {
     // Tab (keyCode 9) to cycle render mode — edge detected.
     // V (keyCode 86) cycles meshlet debug visualization (mode 7/8 only).
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI"};
+        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI", "MeshletDynamicDDGI"};
         static const char* kModeDesc[] = {
             "Directional light only",
             "Directional + Shadow",
@@ -1399,7 +1455,8 @@ void Engine_Test::UpdateCamera(float dt) {
             "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
             "GPU-Driven Meshlet + Indirect Draw + IBL",
             "GPU-Driven Meshlet + SSGI + SSR",
-            "GPU-Driven Meshlet + SSGI + SSR + DDGI"
+            "GPU-Driven Meshlet + SSGI + SSR + DDGI",
+            "GPU-Driven Meshlet + SSGI + SSR + Canonical Dynamic DDGI"
         };
         static_assert(std::size(kModeNames) == static_cast<u32>(DawnRenderMode::Count),
                       "kModeNames must cover all DawnRenderMode entries");
@@ -1430,10 +1487,12 @@ void Engine_Test::UpdateCamera(float dt) {
                         window.setMeshletDebug($0);
                     }
                 }, meshletDebugMode_);
-            } else if (renderMode_ == DawnRenderMode::MeshletSSGISSR) {
+            } else if (renderMode_ == DawnRenderMode::MeshletSSGISSR ||
+                       renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+                       renderMode_ == DawnRenderMode::MeshletDynamicDDGI) {
                 ssgissrSubmode_ = static_cast<SSGISSRSubmode>((static_cast<u8>(ssgissrSubmode_) + 1u) % 4u);
                 static const char* kSubLabel[] = {"Off", "SSGI only", "SSR only", "Both"};
-                std::cerr << "[Mode 9] SSGI/SSR sub-mode = " << kSubLabel[static_cast<u8>(ssgissrSubmode_)] << std::endl;
+                std::cerr << "[Mode 9/10/11] SSGI/SSR sub-mode = " << kSubLabel[static_cast<u8>(ssgissrSubmode_)] << std::endl;
                 EM_ASM_({
                     if (window.setSSGISSRSubmode) {
                         window.setSSGISSRSubmode($0);
@@ -1446,7 +1505,10 @@ void Engine_Test::UpdateCamera(float dt) {
         if (renderMode_ != DawnRenderMode::MeshletNoIBL && meshletDebugMode_ != 0u) {
             meshletDebugMode_ = 0u;
         }
-        if (renderMode_ != DawnRenderMode::MeshletSSGISSR && ssgissrSubmode_ != SSGISSRSubmode::Both) {
+        if (renderMode_ != DawnRenderMode::MeshletSSGISSR &&
+            renderMode_ != DawnRenderMode::MeshletSSGISSRDDGI &&
+            renderMode_ != DawnRenderMode::MeshletDynamicDDGI &&
+            ssgissrSubmode_ != SSGISSRSubmode::Both) {
             ssgissrSubmode_ = SSGISSRSubmode::Both;
         }
     }
@@ -2252,6 +2314,16 @@ bool Engine_Test::InitializeMeshletPipeline() {
         return false;
     }
 
+    // NOTE: GlobalSDF init on Dawn is currently broken:
+    //   - R16Float texture format is incompatible with StorageBinding
+    //   - WGSL `voxelize_sdf` entry point missing
+    //   - Descriptor layout mismatch (Storage vs Uniform)
+    // Cascading validation errors corrupt Dawn device state for ALL subsequent
+    // pipeline creation — breaking Mode 7/8/9/10/11 (entire screen solid color).
+    // LumenDDGIPass has a safety net: `if (dynamic_mode_ && !sdfAvailable) return;`
+    // so Mode 11 falls back to the static seed (looks like Mode 10). Proper
+    // GlobalSDF Dawn port is a separate task.
+
     // 2. GPUCullingPipeline (singleton)
     auto& cullingPipeline = primal::graphics::nanite::GPUCullingPipeline::Get();
     primal::graphics::nanite::CullingConfig cullingConfig;
@@ -2397,6 +2469,11 @@ bool Engine_Test::InitializeMeshletPipeline() {
 void Engine_Test::ShutdownMeshletPipeline() {
     if (!meshletInitialized_) return;
 
+    // Shutdown GlobalSDF first — it holds GPU textures created from device_.
+    // Singleton destructor races with device teardown (see memory entry
+    // global-sdf-singleton-lifecycle). Explicit Shutdown() prevents UAF.
+    primal::graphics::nanite::GlobalSDF::Get().Shutdown();
+
     auto& gpuDrawPipeline = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
     auto& cullingPipeline = primal::graphics::nanite::GPUCullingPipeline::Get();
 
@@ -2446,9 +2523,19 @@ void Engine_Test::BuildProbeBakingScene(primal::graphics::lumen::ProbeBakingScen
         const u32 vertex_base = (u32)merged_vertices.size();
         const u32 index_base  = (u32)merged_indices.size();
 
-        // Append positions (asset.position_buffer is f32x3 tightly packed).
-    const primal::math::v3* positions = reinterpret_cast<const primal::math::v3*>(asset.position_buffer.data());
-        merged_vertices.insert(merged_vertices.end(), positions, positions + asset.num_vertices);
+        // Append positions. RHIMeshAsset.position_buffer is tightly packed
+        // f32x3 (12 bytes/vertex per ContentToEngine.cpp), but math::v3 is
+        // simd::float3 with sizeof=16 on Apple. Reinterpreting as v3* would
+        // straddle vertices and produce garbled positions, which in turn
+        // makes the BVH degenerate and hangs the bake once probes are inside
+        // the scene. Read as packed floats and expand element-by-element.
+        const float* posF = reinterpret_cast<const float*>(asset.position_buffer.data());
+        for (u32 i = 0; i < asset.num_vertices; ++i) {
+            merged_vertices.push_back(primal::math::v3{
+                posF[i * 3 + 0],
+                posF[i * 3 + 1],
+                posF[i * 3 + 2]});
+        }
 
         // Append indices with vertex-base offset; expand u16 -> u32 if needed.
         const u32 base_index_offset = vertex_base;
@@ -2502,7 +2589,15 @@ void Engine_Test::InitializeDDGIForMode10() {
 
     // 1. Create + bake StaticProbeVolume (or load from cache).
     staticProbeVolume_ = std::make_unique<primal::graphics::lumen::StaticProbeVolume>();
-    primal::graphics::lumen::StaticProbeParams vol_params;  // defaults: 16x8x16, spacing 4, origin 0
+    primal::graphics::lumen::StaticProbeParams vol_params;  // defaults: 16x8x16, spacing 4
+    // Scene bounds are [-32,32]x[-16,16]x[-32,32] (user-confirmed). Default
+    // origin (0,0,0) only covers scene's upper-right octant — most pixels
+    // sample probes that never baked any scene geometry. Shift origin to
+    // the scene's min corner so the 16x8x16 grid covers [-32,32]x[-16,16]x[-32,32]:
+    //   x: -32 + 16*4 = 32 ✓
+    //   y: -16 + 8*4  = 16 ✓
+    //   z: -32 + 16*4 = 32 ✓
+    vol_params.origin = primal::math::v3{-32.0f, -16.0f, -32.0f};
 
     // Initialize unconditionally so device_ is set on the volume — required by
     // UploadToGPU. LoadFromFile overwrites params_ + data vectors but does not
@@ -2529,7 +2624,7 @@ void Engine_Test::InitializeDDGIForMode10() {
 
         primal::graphics::lumen::ProbeBakingParams params;
         params.rays_per_probe    = 64;       // match DDGIRuntimeParams default
-        params.bounce_count      = 3;
+        params.bounce_count      = 0;        // BakeProbeRadiance is single-bounce; field retained for future re-introduction
         params.ray_max_distance  = 50.0f;    // match DDGIRuntimeParams default
 
         std::cout << "[Mode10] Baking DDGI probes (CPU BVH, blocking)..." << std::endl;
@@ -2557,13 +2652,18 @@ void Engine_Test::InitializeDDGIForMode10() {
 
     // 2. Initialize LumenDDGIPass with default params (matches StaticProbeParams defaults).
     ddgiPass_ = std::make_unique<primal::graphics::lumen::LumenDDGIPass>();
+    // Attach the static volume BEFORE Initialize — InitializeProbesFromStatic
+    // seeds the runtime buffers from the cache at init time, so it needs
+    // static_volume_ already set. Calling SetStaticProbeVolume after Initialize
+    // leaves the runtime buffers on the sky-estimate fallback until the first
+    // trace pass overwrites them, which produces a one-frame magenta flash.
+    ddgiPass_->SetStaticProbeVolume(staticProbeVolume_.get());
     if (!ddgiPass_->Initialize(device_)) {
         std::cerr << "[Mode10] LumenDDGIPass init failed - DDGI disabled" << std::endl;
         ddgiPass_.reset();
         staticProbeVolume_.reset();
         return;
     }
-    ddgiPass_->SetStaticProbeVolume(staticProbeVolume_.get());
 
     // Per-frame RenderGraph for DDGI dispatch. Allocated once, cleared/reused
     // each frame. Cannot share renderGraph_ because that one Executes at line
@@ -2651,18 +2751,24 @@ void Engine_Test::InitializeDDGIForMode10() {
             return;
         }
 
-        // DSL: 8 bindings — 3 textures + 5 buffers
-        rhi::DescriptorSetLayoutBinding giGatherBindings[8] = {
+        // DSL: 6 bindings — 3 textures + 1 CB (merged invVP/origin/counts) + 2 storage.
+        // WGSL packs the 3 uniforms into one GIGatherCB struct at binding 3 because
+        // WebGPU requires uniform buffer binding offsets to be 256-byte aligned —
+        // binding the same CB at offsets 0/64/80 across 3 slots fails validation.
+        rhi::DescriptorSetLayoutBinding giGatherBindings[6] = {
             {0, rhi::DescriptorType::SampledDepthImage,  1, rhi::ShaderStage::Compute, nullptr}, // depth (texture_depth_2d in WGSL)
             {1, rhi::DescriptorType::SampledImage,  1, rhi::ShaderStage::Compute, nullptr}, // normal
             {2, rhi::DescriptorType::StorageImage,  1, rhi::ShaderStage::Compute, nullptr}, // output
-            {3, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // invVP
-            {4, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // origin/spacing
-            {5, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // counts
-            {6, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // irradiance
-            {7, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // depth
+            {3, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // GIGatherCB (invVP + origin/spacing + counts)
+            {4, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // irradiance (var<storage, read>)
+            {5, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr}, // ddgi depth (var<storage, read>)
         };
-        rhi::DescriptorSetLayoutDesc dslDesc{8, giGatherBindings};
+        // WGSL declares both storage buffers as `var<storage, read>`; Dawn maps
+        // StorageBuffer to WGPUBufferBindingType_Storage (read-write) by default,
+        // which mismatches the shader's ReadOnlyStorage and fails pipeline creation.
+        giGatherBindings[4].readonly = true;
+        giGatherBindings[5].readonly = true;
+        rhi::DescriptorSetLayoutDesc dslDesc{6, giGatherBindings};
         giGatherDsl_ = device_->CreateDescriptorSetLayout(dslDesc);
         if (giGatherDsl_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
             std::cerr << "[Mode10] GIGather DSL creation failed — DDGI disabled" << std::endl;
@@ -2821,6 +2927,14 @@ void Engine_Test::RenderMeshletDDGIFrame(primal::graphics::rhi::RHICommandBuffer
         // call site falls through). Mode 10 effectively degrades to Mode 9.
     }
 
+    // Mode 11 (MeshletDynamicDDGI): flip on canonical dynamic runtime traces.
+    // Mode 10 (MeshletSSGISSRDDGI): static-bake preserved indefinitely.
+    // Must run AFTER InitializeDDGIForMode10 — before that, ddgiPass_ is null
+    // and dereferencing it crashes on first Mode 10/11 entry.
+    if (ddgiPass_) {
+        ddgiPass_->SetDynamicMode(renderMode_ == DawnRenderMode::MeshletDynamicDDGI);
+    }
+
     // Run the standard meshlet path. The DDGI enable flag + giIndirectTexture_
     // are read inside RenderMeshletFrame via the call-site plumbing
     // (see "applyDDGI" in the RenderDawnMeshletDeferredLighting call).
@@ -2967,7 +3081,15 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
         std::cerr << "[Meshlet] GPUDrivenDrawPipeline::Execute failed" << std::endl;
     }
 
-    // --- 3b. DDGI dispatch (Mode 10 only) ---
+    // --- 3a. GlobalSDF voxelization — DISABLED on Dawn ---
+    // GlobalSDF Dawn port is incomplete (R16Float+StorageBinding incompatible,
+    // missing WGSL entry point, descriptor layout mismatch). Attempting to init
+    // corrupts Dawn device state for all subsequent pipelines. LumenDDGIPass
+    // safety-net early-returns when SDF is unavailable, so Mode 11 falls back
+    // to the static seed (visually identical to Mode 10). Proper GlobalSDF
+    // Dawn port is a separate task.
+
+    // --- 3b. DDGI dispatch (Mode 10 / Mode 11) ---
     // Runs AFTER meshlet draw (GBuffer + depth ready) and BEFORE deferred
     // lighting (which samples giIndirectTexture_ at binding 13).
     //
@@ -2980,9 +3102,16 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
     // line ~1103 (after deferred lighting). Using it would delay DDGI past
     // its consumer. ddgiGraph_ is cleared/rebuilt/compiled/executed per frame.
     //
+    // Mode 10: static-bake preserved indefinitely (LumenDDGIPass early-returns
+    // when static_volume_->IsLoaded() && !dynamic_mode_).
+    // Mode 11: canonical dynamic — LumenDDGIPass runs full TraceRays →
+    // UpdateIrradiance → UpdateDepth, EMA-blending from static seed toward
+    // canonical radiance computed at SDF hit.
+    //
     // Skip on frame 0: prevHdrTexture_ has no useful content yet, and the
     // per-frame CBs haven't been populated.
-    if (renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI &&
+    if ((renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+         renderMode_ == DawnRenderMode::MeshletDynamicDDGI) &&
         ddgiEnabled_ && ddgiPass_ && ddgiGraph_ &&
         giGatherPipeline_ != primal::graphics::rhi::handles::INVALID_PIPELINE &&
         giIndirectTexture_ != primal::graphics::rhi::handles::INVALID_RESOURCE &&
@@ -3099,30 +3228,27 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
                 imgInfos[2].imageView   = giIndirectTexture_;
                 imgInfos[2].imageLayout = rhi::ResourceState::UnorderedAccess;
 
-                rhi::DescriptorBufferInfo bufInfos[5]{};
-                // bindings 3/4/5 all point at the SAME 256-byte CB, at offsets 0/64/80
-                bufInfos[0].buffer = giGatherCbBuffers_[fi];
-                bufInfos[0].offset = 0;
-                bufInfos[0].range  = 64;
-                bufInfos[1].buffer = giGatherCbBuffers_[fi];
-                bufInfos[1].offset = 64;
-                bufInfos[1].range  = 16;
-                bufInfos[2].buffer = giGatherCbBuffers_[fi];
-                bufInfos[2].offset = 80;
-                bufInfos[2].range  = 16;
-                bufInfos[3].buffer = irradianceBuf;
-                bufInfos[3].offset = 0;
-                bufInfos[3].range  = ~0ull;
-                bufInfos[4].buffer = depthBuf;
-                bufInfos[4].offset = 0;
-                bufInfos[4].range  = ~0ull;
+                // Single CB at binding 3 holds the merged GIGatherCB block
+                // (invVP + origin_spacing + counts = 96B at offsets 0/64/80).
+                rhi::DescriptorBufferInfo cbInfo{};
+                cbInfo.buffer = giGatherCbBuffers_[fi];
+                cbInfo.offset = 0;
+                cbInfo.range  = 96;
 
-                rhi::WriteDescriptorSet writes[8]{};
-                // Textures
+                rhi::DescriptorBufferInfo storageInfos[2]{};
+                storageInfos[0].buffer = irradianceBuf;
+                storageInfos[0].offset = 0;
+                storageInfos[0].range  = ~0ull;
+                storageInfos[1].buffer = depthBuf;
+                storageInfos[1].offset = 0;
+                storageInfos[1].range  = ~0ull;
+
+                rhi::WriteDescriptorSet writes[6]{};
+                // Textures (0/1/2)
                 writes[0].dstSet          = giGatherDescriptorSet_;
                 writes[0].dstBinding      = 0;
                 writes[0].descriptorCount = 1;
-                writes[0].descriptorType  = rhi::DescriptorType::SampledDepthImage; // texture_depth_2d
+                writes[0].descriptorType  = rhi::DescriptorType::SampledDepthImage;
                 writes[0].imageInfo       = &imgInfos[0];
                 writes[1].dstSet          = giGatherDescriptorSet_;
                 writes[1].dstBinding      = 1;
@@ -3134,27 +3260,25 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
                 writes[2].descriptorCount = 1;
                 writes[2].descriptorType  = rhi::DescriptorType::StorageImage;
                 writes[2].imageInfo       = &imgInfos[2];
-                // CB bindings 3/4/5
-                for (int i = 0; i < 3; ++i) {
-                    writes[3 + i].dstSet          = giGatherDescriptorSet_;
-                    writes[3 + i].dstBinding      = static_cast<u32>(3 + i);
-                    writes[3 + i].descriptorCount = 1;
-                    writes[3 + i].descriptorType  = rhi::DescriptorType::UniformBuffer;
-                    writes[3 + i].bufferInfo      = &bufInfos[i];
-                }
-                // Storage buffers 6/7
-                writes[6].dstSet          = giGatherDescriptorSet_;
-                writes[6].dstBinding      = 6;
-                writes[6].descriptorCount = 1;
-                writes[6].descriptorType  = rhi::DescriptorType::StorageBuffer;
-                writes[6].bufferInfo      = &bufInfos[3];
-                writes[7].dstSet          = giGatherDescriptorSet_;
-                writes[7].dstBinding      = 7;
-                writes[7].descriptorCount = 1;
-                writes[7].descriptorType  = rhi::DescriptorType::StorageBuffer;
-                writes[7].bufferInfo      = &bufInfos[4];
+                // Merged CB at binding 3
+                writes[3].dstSet          = giGatherDescriptorSet_;
+                writes[3].dstBinding      = 3;
+                writes[3].descriptorCount = 1;
+                writes[3].descriptorType  = rhi::DescriptorType::UniformBuffer;
+                writes[3].bufferInfo      = &cbInfo;
+                // Storage buffers (4/5)
+                writes[4].dstSet          = giGatherDescriptorSet_;
+                writes[4].dstBinding      = 4;
+                writes[4].descriptorCount = 1;
+                writes[4].descriptorType  = rhi::DescriptorType::StorageBuffer;
+                writes[4].bufferInfo      = &storageInfos[0];
+                writes[5].dstSet          = giGatherDescriptorSet_;
+                writes[5].dstBinding      = 5;
+                writes[5].descriptorCount = 1;
+                writes[5].descriptorType  = rhi::DescriptorType::StorageBuffer;
+                writes[5].bufferInfo      = &storageInfos[1];
 
-                device_->UpdateDescriptorSets(8, writes);
+                device_->UpdateDescriptorSets(6, writes);
 
                 // Note: No explicit UA→SR barrier on irradianceBuf/depthBuf here.
                 // The RG already inserts it via the builder.Read(ddgiIrrHist, ...)
@@ -3206,13 +3330,15 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
     // enableIBL: Mode 7 (MeshletNoIBL) skips the IBL ambient term; Mode 8/9 apply it.
     forwardRenderer_.SetDawnEnableIBL((renderMode_ == DawnRenderMode::Meshlet ||
                                        renderMode_ == DawnRenderMode::MeshletSSGISSR ||
-                                       renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI) ? 1u : 0u);
+                                       renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+                                       renderMode_ == DawnRenderMode::MeshletDynamicDDGI) ? 1u : 0u);
     // Mode 10 (MeshletSSGISSRDDGI) layers DDGI indirect on top of Mode 9's meshlet
     // path. enableDDGI gates the WGSL DDGI block in DeferredLighting_Meshlet.wgsl;
-    // giIndirectTexture_ feeds binding 13. When DDGI isn't initialized or mode !=
-    // 10, giIndirectTexture_ is INVALID_RESOURCE and ForwardRenderer falls back
+    // giIndirectTexture_ feeds binding 13. When DDGI isn't initialized or mode isn't
+    // 10/11, giIndirectTexture_ is INVALID_RESOURCE and ForwardRenderer falls back
     // to its 1x1 dummy texture (no-op).
-    const bool applyDDGI = (renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI) && ddgiEnabled_;
+    const bool applyDDGI = (renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+                            renderMode_ == DawnRenderMode::MeshletDynamicDDGI) && ddgiEnabled_;
     forwardRenderer_.SetDawnEnableDDGI(applyDDGI ? 1u : 0u);
     forwardRenderer_.RenderDawnMeshletDeferredLighting(
         cmd, view_, meshletGBuffer, meshletDepth, hdrTexture_, scene_,
