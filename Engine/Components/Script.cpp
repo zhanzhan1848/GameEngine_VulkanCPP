@@ -8,9 +8,12 @@
 #include <thread>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <functional>
+#include <mutex>
+#include <queue>
 #include <unordered_set>
 
 #define USE_TRANSFORM_CACHE_MAP 1
@@ -238,6 +241,37 @@ namespace primal::script {
 		std::atomic<mpsc_node*> mpsc_head_{nullptr};
 		thread_local bool in_post_callback_ = false;
 
+		// === Phase 2b.6 Task 2: frame-delayed queue ===
+		// DelayedEntry holds both wall-clock and frame-accumulator fire times.
+		// Task 2 uses only frame_fire_time (compared against frame_elapsed_time_).
+		// wall_fire_time is reserved for Task 3's wall-clock queue.
+		struct DelayedEntry {
+			std::chrono::steady_clock::time_point wall_fire_time;   // used by wall queue (Task 3)
+			float                                 frame_fire_time;   // compared against frame_elapsed_time_
+			std::function<void()>                 callback;
+		};
+
+		// priority_queue is a MAX-heap by default; we want MIN-fire-time at top.
+		struct FrameDelayedCmp {
+			bool operator()(const DelayedEntry& a, const DelayedEntry& b) const {
+				return a.frame_fire_time > b.frame_fire_time;
+			}
+		};
+
+		std::priority_queue<DelayedEntry, std::vector<DelayedEntry>, FrameDelayedCmp> frame_delayed_queue_;
+		std::mutex                                                                    delayed_mutex_;
+		float                                                                         frame_elapsed_time_ = 0.0f;
+
+		// === Phase 2b.6 Task 3: wall-delayed queue ===
+		// Same DelayedEntry struct; wall_fire_time is the active comparator field here.
+		struct WallDelayedCmp {
+			bool operator()(const DelayedEntry& a, const DelayedEntry& b) const {
+				return a.wall_fire_time > b.wall_fire_time;
+			}
+		};
+
+		std::priority_queue<DelayedEntry, std::vector<DelayedEntry>, WallDelayedCmp> wall_delayed_queue_;
+
 #if USE_TRANSFORM_CACHE_MAP
 		transform::component_cache *const get_cache_ptr(const game_entity::entity *const entity)
 		{
@@ -341,6 +375,51 @@ namespace primal::script {
 				delete reversed;
 				reversed = next;
 			}
+
+			// === Phase 2b.6 Task 2: drain frame-delayed queue ===
+			// Pop entries whose frame_fire_time has been reached. Mutex is
+			// released per-iteration so a long callback doesn't block producers.
+			// in_post_callback_ stays true — delayed callbacks execute under the
+			// same re-entrancy guard as immediate callbacks.
+			while (true) {
+				std::function<void()> cb;
+				{
+					std::lock_guard<std::mutex> lock(delayed_mutex_);
+					if (frame_delayed_queue_.empty()) break;
+					if (frame_delayed_queue_.top().frame_fire_time > frame_elapsed_time_) break;
+					// top() returns const&; const_cast is the standard workaround
+					// for moving a member out of a priority_queue entry. Safe
+					// because the comparator ignores `callback` and we pop()
+					// immediately after.
+					cb = std::move(const_cast<DelayedEntry&>(frame_delayed_queue_.top()).callback);
+					frame_delayed_queue_.pop();
+				}
+				try { cb(); } catch (const std::exception& e) {
+					std::fprintf(stderr, "Exception in delayed callback: %s\n", e.what());
+				} catch (...) {
+					std::fprintf(stderr, "Unknown exception in delayed callback\n");
+				}
+			}
+
+			// === Phase 2b.6 Task 3: drain wall-delayed queue ===
+			// Pop entries whose wall_fire_time has been reached. Mutex is
+			// released per-iteration so a long callback doesn't block producers.
+			while (true) {
+				std::function<void()> cb;
+				{
+					std::lock_guard<std::mutex> lock(delayed_mutex_);
+					if (wall_delayed_queue_.empty()) break;
+					if (wall_delayed_queue_.top().wall_fire_time > std::chrono::steady_clock::now()) break;
+					cb = std::move(const_cast<DelayedEntry&>(wall_delayed_queue_.top()).callback);
+					wall_delayed_queue_.pop();
+				}
+				try { cb(); } catch (const std::exception& e) {
+					std::fprintf(stderr, "Exception in wall-delayed callback: %s\n", e.what());
+				} catch (...) {
+					std::fprintf(stderr, "Unknown exception in wall-delayed callback\n");
+				}
+			}
+
 			in_post_callback_ = false;
 		}
 		void apply_deferred_subscriptions_impl() { /* Task 5: drain() 内部已处理 deferred */ }
@@ -734,6 +813,10 @@ namespace primal::script {
 	void frame_tick(f32 dt)
 	{
 		detail::check_main_thread();
+		{
+			std::lock_guard<std::mutex> lock(delayed_mutex_);
+			frame_elapsed_time_ += dt;   // advance BEFORE drain so delayed callbacks see accumulated time
+		}
 		drain_callbacks_impl();
 		fixed_update(dt);
 		update(dt);
@@ -763,6 +846,37 @@ namespace primal::script {
 		auto* node = new mpsc_node{};
 		node->callback = std::move(callback);
 		node->next = mpsc_head_.exchange(node, std::memory_order_acq_rel);
+	}
+
+	// === Phase 2b.6 Task 2: frame-delayed post ===
+	// Enqueues a callback that fires when frame_elapsed_time_ (accumulated at
+	// the start of each frame_tick) reaches or exceeds delay_seconds. Drain
+	// happens inside drain_callbacks_impl after the immediate MPSC queue.
+	void post_to_main_thread_delayed(float delay_seconds, std::function<void()> callback)
+	{
+		assert(!in_post_callback_);
+		// Lock must precede reading frame_elapsed_time_ to avoid racing with frame_tick's write.
+		std::lock_guard<std::mutex> lock(delayed_mutex_);
+		DelayedEntry entry{};
+		entry.frame_fire_time = frame_elapsed_time_ + delay_seconds;
+		entry.callback        = std::move(callback);
+		frame_delayed_queue_.push(std::move(entry));
+	}
+
+	// === Phase 2b.6 Task 3: wall-delayed post ===
+	// Enqueues a callback that fires when steady_clock (wall time) elapses
+	// delay_seconds. Immune to system clock adjustments. Drain happens inside
+	// drain_callbacks_impl after the frame-delayed queue.
+	void post_to_main_thread_delayed_wall(float delay_seconds, std::function<void()> callback)
+	{
+		assert(!in_post_callback_);
+		std::lock_guard<std::mutex> lock(delayed_mutex_);
+		DelayedEntry entry{};
+		entry.wall_fire_time = std::chrono::steady_clock::now()
+		                     + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+		                           std::chrono::duration<float>(delay_seconds));
+		entry.callback       = std::move(callback);
+		wall_delayed_queue_.push(std::move(entry));
 	}
 
 	// === Phase 1 Task 7: 热重载单个 entity 的 script ===
@@ -841,6 +955,16 @@ namespace primal::script {
 				raced = n;
 			}
 		}
+
+		// === Phase 2b.6 Task 2: clear frame-delayed queue ===
+		// Drop pending delayed callbacks without executing (same safety rationale
+		// as MPSC cleanup above). Reset accumulator so next session starts clean.
+		{
+			std::lock_guard<std::mutex> lock(delayed_mutex_);
+			while (!frame_delayed_queue_.empty()) frame_delayed_queue_.pop();
+			while (!wall_delayed_queue_.empty())  wall_delayed_queue_.pop();
+		}
+		frame_elapsed_time_ = 0.0f;
 	}
 
 	bool is_initialized()

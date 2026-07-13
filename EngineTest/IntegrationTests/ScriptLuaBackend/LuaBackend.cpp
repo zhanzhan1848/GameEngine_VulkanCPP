@@ -44,6 +44,14 @@ static int lua_bus_emit(lua_State* L);
 static void register_bus_table(lua_State* L);
 static void release_sub_record(LuaSubRecord* rec);
 
+// Phase 2b.6: post(fn) global — immediate post_to_main_thread binding.
+struct LuaPostCapture;
+static void lua_post_trampoline(LuaPostCapture* cap);
+static int  lua_post(lua_State* L);
+static int  lua_post_delayed(lua_State* L);
+static int  lua_post_delayed_wall(lua_State* L);
+static void register_post_functions(lua_State* L);
+
 LuaBackend& LuaBackend::instance() {
     static LuaBackend inst;
     return inst;
@@ -136,6 +144,7 @@ u64 LuaBackend::register_type(const char* type_name, const char* lua_file_path) 
     // any script hook (begin_play) can fire. register_bus_table must run
     // before script_register_external, which may dispatch begin_play.
     register_bus_table(L);
+    register_post_functions(L);
 
     // 6. Register with engine via Phase 1 C ABI. Type-level user_data is the
     //    LuaScriptType* (preserved for future type-level queries; not used
@@ -324,6 +333,20 @@ struct LuaEventPayload {
 static_assert(sizeof(LuaEventPayload) == 16,
               "LuaEventPayload must stay 16 bytes — engine payload_size contract");
 
+// === Phase 2b.6: post(fn) global ===
+// Capture struct for posted Lua callbacks. Heap-allocated; owned by the
+// lambda passed to post_to_main_thread. Freed inside lua_post_trampoline
+// after the callback executes (or errors).
+struct LuaPostCapture {
+    lua_State* L;
+    int        func_ref;  // LUA_REGISTRYINDEX ref to the Lua function
+};
+
+// True while a posted Lua callback is executing on the main drain thread.
+// The engine asserts on re-entrant post from inside drain (Script.cpp:761);
+// this flag lets the Lua bindings silent-skip re-entrant posts instead of crash.
+static thread_local bool in_lua_post_callback_ = false;
+
 // Engine deleter for Lua-emitted events. Called after drain dispatch.
 // Releases the Lua table ref + frees the payload buffer.
 static void lua_payload_deleter(void* raw) {
@@ -372,6 +395,32 @@ static void lua_event_trampoline(void* user_data, const void* payload, u64 size)
         std::fprintf(stderr, "Lua event handler error: %s\n", err ? err : "(unknown)");
         lua_pop(L, 1);
     }
+}
+
+// Phase 2b.6: Trampoline executed on the main thread when a posted Lua
+// callback is drained. Dereferences the Lua function ref, pcall's it, then
+// unrefs the ref and frees the capture struct.
+static void lua_post_trampoline(LuaPostCapture* cap) {
+    if (!cap || !cap->L) { delete cap; return; }
+    lua_State* L = cap->L;
+    int ref = cap->func_ref;
+
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+    if (!lua_isfunction(L, -1)) {
+        std::fprintf(stderr, "Lua post: ref %d is not a function\n", ref);
+        lua_pop(L, 1);
+    } else {
+        in_lua_post_callback_ = true;
+        int rc = lua_pcall(L, 0, 0, 0);
+        in_lua_post_callback_ = false;
+        if (rc != LUA_OK) {
+            const char* err = lua_tostring(L, -1);
+            std::fprintf(stderr, "Lua error in posted callback: %s\n", err ? err : "(unknown)");
+            lua_pop(L, 1);
+        }
+    }
+    luaL_unref(L, LUA_REGISTRYINDEX, ref);
+    delete cap;
 }
 
 // Release a LuaSubRecord: unsubscribe from engine, unref the Lua handler
@@ -478,6 +527,73 @@ static void register_bus_table(lua_State* L) {
     lua_pushcfunction(L, lua_bus_off); lua_setfield(L, -2, "off");
     lua_pushcfunction(L, lua_bus_emit);lua_setfield(L, -2, "emit");
     lua_setglobal(L, "bus");
+}
+
+// === Phase 2b.6: post(fn) global ===
+
+// Lua C function: post(fn) — enqueues fn on the engine's immediate
+// post_to_main_thread queue. fn fires on the next frame_tick drain.
+// Silently skips if called from inside a posted callback (re-entrant post
+// would trigger the engine's assert in Script.cpp:761).
+static int lua_post(lua_State* L) {
+    if (in_lua_post_callback_) {
+        std::fprintf(stderr, "Lua post: cannot post from inside a posted callback (engine asserts)\n");
+        return 0;  // silent skip — protects against engine assert
+    }
+    luaL_argcheck(L, lua_isfunction(L, 1), 1, "expected function");
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);  // pops fn
+    auto* cap = new LuaPostCapture{L, ref};
+    primal::script::post_to_main_thread([cap]() { lua_post_trampoline(cap); });
+    return 0;
+}
+
+// Lua C function: post_delayed(seconds, fn) — enqueues fn on the engine's
+// frame-delayed queue. fn fires when frame_elapsed_time_ reaches the delay
+// threshold. Silently skips if called from inside a posted callback.
+static int lua_post_delayed(lua_State* L) {
+    if (in_lua_post_callback_) {
+        std::fprintf(stderr, "Lua post_delayed: cannot post from inside a posted callback (engine asserts)\n");
+        return 0;
+    }
+    luaL_argcheck(L, lua_isnumber(L, 1), 1, "expected seconds (number)");
+    luaL_argcheck(L, lua_isfunction(L, 2), 2, "expected function");
+    float seconds = (float)lua_tonumber(L, 1);
+    // Stack: [seconds, fn].  luaL_ref pops top (fn); then we pop seconds.
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_pop(L, 1);
+    auto* cap = new LuaPostCapture{L, ref};
+    primal::script::post_to_main_thread_delayed(seconds, [cap]() { lua_post_trampoline(cap); });
+    return 0;
+}
+
+// Lua C function: post_delayed_wall(seconds, fn) — enqueues fn on the engine's
+// wall-clock (steady_clock) queue. fn fires when real time elapses past the
+// delay threshold, independent of frame dt accumulation. Silently skips if
+// called from inside a posted callback.
+static int lua_post_delayed_wall(lua_State* L) {
+    if (in_lua_post_callback_) {
+        std::fprintf(stderr, "Lua post_delayed_wall: cannot post from inside a posted callback (engine asserts)\n");
+        return 0;
+    }
+    luaL_argcheck(L, lua_isnumber(L, 1), 1, "expected seconds (number)");
+    luaL_argcheck(L, lua_isfunction(L, 2), 2, "expected function");
+    float seconds = (float)lua_tonumber(L, 1);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_pop(L, 1);
+    auto* cap = new LuaPostCapture{L, ref};
+    primal::script::post_to_main_thread_delayed_wall(seconds, [cap]() { lua_post_trampoline(cap); });
+    return 0;
+}
+
+// Register the `post` global on the given lua_State.
+// Called once per type during register_type (each type has its own L).
+static void register_post_functions(lua_State* L) {
+    lua_pushcfunction(L, lua_post);
+    lua_setglobal(L, "post");
+    lua_pushcfunction(L, lua_post_delayed);
+    lua_setglobal(L, "post_delayed");
+    lua_pushcfunction(L, lua_post_delayed_wall);
+    lua_setglobal(L, "post_delayed_wall");
 }
 
 // === Adapter callbacks ===

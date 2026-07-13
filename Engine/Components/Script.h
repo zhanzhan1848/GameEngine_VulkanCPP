@@ -57,6 +57,15 @@ namespace primal::script {
 	// 这是 MPSC shutdown 的标准限制,不是 bug。
 	void post_to_main_thread(std::function<void()> callback);
 
+	// === Phase 2b.6 Task 2: frame-delayed post ===
+	// Fires when the accumulated frame dt (advanced at the start of each frame_tick)
+	// reaches or exceeds delay_seconds. Drain happens inside drain_callbacks_impl.
+	void post_to_main_thread_delayed(float delay_seconds, std::function<void()> callback);
+
+	// === Phase 2b.6 Task 3: wall-delayed post ===
+	// Fires when steady_clock elapses delay_seconds (immune to system clock adjustments).
+	void post_to_main_thread_delayed_wall(float delay_seconds, std::function<void()> callback);
+
 	// 初始化/关闭脚本子系统。initialize() 必须在主线程上调用一次,
 	// 之后所有 script API(包括 update)只能在主线程上调用(由 check_main_thread 强制)。
 	// shutdown() 后系统回到未初始化状态,可再次 initialize。

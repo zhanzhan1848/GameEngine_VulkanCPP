@@ -21,6 +21,8 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <thread>
+#include <chrono>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -1362,6 +1364,237 @@ TestResult test_lua_error_in_on_reload_does_not_break_reload() {
     return TestResult::Passed;
 }
 
+// Test 16: Lua post(fn) enqueues a callback on the engine's immediate
+// post_to_main_thread queue. The callback fires on the next frame_tick drain.
+// Verifies: (1) begin_play calls post(fn) — callback queued but not yet fired;
+// (2) frame_tick drains the queue — callback fires, setting `fired=true`.
+TestResult test_lua_post_fires_on_next_drain() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "post_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/post_script.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+
+    // (1) Callback is queued during begin_play (synchronous) but not yet fired.
+    bool fired_before = lua_get_instance_bool(inst, "fired");
+    if (fired_before) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // (2) Drain fires the posted callback.
+    primal::script::frame_tick(0.016f);
+
+    bool fired_after = lua_get_instance_bool(inst, "fired");
+    if (!fired_after) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 17: Lua post_delayed(seconds, fn) enqueues on the engine's frame-dt
+// accumulator queue. The callback fires only when frame_elapsed_time_ reaches
+// the delay threshold. Verifies:
+//   (1) After 3 frames (0.048s accumulated < 0.050s threshold) callback has
+//       NOT fired.
+//   (2) After 4th frame (0.064s >= 0.050s) callback fires, setting
+//       fired=true.
+TestResult test_lua_post_delayed_fires_after_frame_dt_accumulates() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "post_delayed_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/post_delayed_script.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+
+    // frame_elapsed_time_ accumulator: 0 -> 0.016 -> 0.032 -> 0.048 (all < 0.050 threshold)
+    primal::script::frame_tick(0.016f);
+    primal::script::frame_tick(0.016f);
+    primal::script::frame_tick(0.016f);
+
+    bool fired_after_3 = lua_get_instance_bool(inst, "fired");
+    if (fired_after_3) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // 0.048 + 0.016 = 0.064 >= 0.050 -> callback fires this frame's drain
+    primal::script::frame_tick(0.016f);
+
+    bool fired_after_4 = lua_get_instance_bool(inst, "fired");
+    if (!fired_after_4) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 18: Lua post_delayed_wall(seconds, fn) enqueues on the engine's
+// wall-clock (steady_clock) queue. The callback fires when real time elapses
+// past the delay threshold — independent of frame dt accumulation.
+// Verifies:
+//   (1) First frame_tick drains but wall time elapsed is microseconds
+//       (< 20ms threshold) — callback has NOT fired.
+//   (2) Sleep 25ms so wall-clock now exceeds the 20ms threshold.
+//   (3) Next frame_tick's drain pops the due wall entry — callback fires.
+TestResult test_lua_post_delayed_wall_fires_after_wall_clock() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "post_delayed_wall_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/post_delayed_wall_script.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+
+    // (1) First frame_tick drains but wall time elapsed is microseconds (< 20ms threshold).
+    primal::script::frame_tick(0.016f);
+    bool fired_before = lua_get_instance_bool(inst, "fired");
+    if (fired_before) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // (2) Sleep 25ms so wall-clock now exceeds the 20ms threshold.
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+
+    // (3) Next frame_tick's drain pops the due wall entry.
+    primal::script::frame_tick(0.016f);
+    bool fired_after = lua_get_instance_bool(inst, "fired");
+    if (!fired_after) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 19: Error inside a posted Lua callback does not abort the drain.
+// The trampoline (lua_post_trampoline) wraps the Lua callback in lua_pcall.
+// On error it logs to stderr, pops the error, and continues. This test posts
+// TWO callbacks in begin_play: the first calls error(...), the second sets
+// M.fired = true. After a single frame_tick drain, both should have been
+// dispatched (the first errored, the second succeeded), and fired must be true.
+TestResult test_lua_post_callback_error_does_not_break_drain() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "post_error_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/post_error_script.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+
+    // Drain fires both posted callbacks: first errors (pcall catches), second sets fired=true.
+    primal::script::frame_tick(0.016f);
+
+    bool fired = lua_get_instance_bool(inst, "fired");
+    if (!fired) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
 } // anonymous namespace
 
 void RunLuaBackendTests() {
@@ -1414,6 +1647,19 @@ void RunLuaBackendTests() {
     suite.AddTestCase(TestCase("lua_error_in_on_reload_does_not_break_reload",
                                test_lua_error_in_on_reload_does_not_break_reload,
                                "Lua error in on_reload doesn't break reload flow"));
+    suite.AddTestCase(TestCase("lua_post_fires_on_next_drain",
+                               test_lua_post_fires_on_next_drain,
+                               "Lua post(fn) enqueues on engine immediate queue; "
+                               "callback fires on next drain"));
+    suite.AddTestCase(TestCase("lua_post_delayed_fires_after_frame_dt_accumulates",
+                               test_lua_post_delayed_fires_after_frame_dt_accumulates,
+                               "Frame-dt accumulator gates delayed callback firing"));
+    suite.AddTestCase(TestCase("lua_post_delayed_wall_fires_after_wall_clock",
+                               test_lua_post_delayed_wall_fires_after_wall_clock,
+                               "steady_clock drives wall-time delayed callback firing"));
+    suite.AddTestCase(TestCase("lua_post_callback_error_does_not_break_drain",
+                               test_lua_post_callback_error_does_not_break_drain,
+                               "Error in a posted callback doesn't abort the drain"));
     suite.RunAllTests();
 }
 
