@@ -282,40 +282,29 @@ void LumenDDGIPass::Shutdown() {
 // ============================================================================
 
 void LumenDDGIPass::CreateDescriptorSetLayouts() {
-    // --- Trace: 3 SDF textures (sampled) + 1 prev_color (sampled) + 2 UBO + 1 SSBO ---
-    // Metal uses SEPARATE binding namespaces for textures and buffers.
-    // [[texture(N)]] and [[buffer(N)]] are independent.
-    // So binding 0 can be used for BOTH texture(0) and buffer(0).
-    //
-    // Dawn remaps the colliding buffer slots to higher WGPU bindings; the WGSL
-    // shader uses the remapped slots (4=GlobalData, 5=Volume, 6=ray_buffer,
-    // 7=probeUpdateList). The shader's access qualifiers (read vs read_write)
-    // drive the `readonly` flags below — Dawn maps StorageBuffer with
-    // readonly=false to WGPUBufferBindingType_Storage (read_write) and
-    // readonly=true to WGPUBufferBindingType_ReadOnlyStorage. A mismatch
-    // between shader access and layout fails pipeline creation.
+    // --- Trace: 4 sampled textures + 2 UBO + 3 SSBO, sequential bindings 0..8 ---
+    // No Metal-style texture/buffer overlap: WGPU binding == engine binding == WGSL binding.
     {
         DescriptorSetLayoutBinding traceBindings[] = {
-            // Textures (sampled) — SDF cascades + prev frame color
+            // Textures (sampled) — sequential bindings 0..3 matching WGSL
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
             {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 2
-            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev frame color (lit scene, Mode 10 path; unused in Mode 11 but kept for layout stability)
-            // Buffers (separate Metal namespace)
-            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
-            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
-            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data (read_write)
-            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list (read)
-            // Mode 11: previous-frame irradiance probe grid (read) — tetra interp source for L_i_prev
-            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev frame color (unused in Mode 11 but kept for layout stability)
+            // Buffers — sequential bindings 4..8 (NO overlap with textures, so Dawn won't remap)
+            {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data (read_write)
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list (read)
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance_history (read)
         };
         // SDF cascades are texture_3d<f32> in WGSL — layout must declare 3D view dim.
         traceBindings[0].is3D = true;
         traceBindings[1].is3D = true;
         traceBindings[2].is3D = true;
-        // prev_frame_color at slot 3 stays 2D.
-        traceBindings[7].readonly = true;  // probe update list: var<storage, read>
-        traceBindings[8].readonly = true;  // irradiance_history: var<storage, read>
+        // Read-only storage buffers (var<storage, read> in WGSL).
+        traceBindings[7].readonly = true;  // probe update list
+        traceBindings[8].readonly = true;  // irradiance_history
         DescriptorSetLayoutDesc layoutDesc{9, traceBindings};
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
@@ -925,17 +914,17 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {1, DescriptorType::SampledImage,  sdfTextures[1]},
                     {2, DescriptorType::SampledImage,  sdfTextures[2]},
                     {3, DescriptorType::SampledImage,  prevColorTex},
-                    // Metal: buffers use separate binding namespace from textures
-                    {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
-                    {2, DescriptorType::StorageBuffer, ray_data_buffer_},
-                    {3, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]},
+                    // Buffers — sequential bindings 4..8 matching WGSL.
+                    // No texture/buffer collision → no Dawn remap → WGPU binding == engine binding.
+                    {4, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                    {5, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
+                    {6, DescriptorType::StorageBuffer, ray_data_buffer_},
+                    {7, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]},
                     // Mode 11: previous-frame irradiance probe grid (L_i_prev source).
-                    // histIdx is captured by the execute lambda; irradiance_buffers_
-                    // holds the prior-frame SH coefficients written by UpdateIrradiance
-                    // last frame. Frame 0 reads the static-bake seed copied in by
-                    // InitializeProbesFromStatic.
-                    {4, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
+                    // histIdx captured by execute lambda; irradiance_buffers_ holds prior-frame
+                    // SH coefficients written by UpdateIrradiance last frame. Frame 0 reads the
+                    // static-bake seed copied in by InitializeProbesFromStatic.
+                    {8, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
                 };
                 UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 9);
 
