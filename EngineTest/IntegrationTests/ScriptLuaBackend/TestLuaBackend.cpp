@@ -17,6 +17,7 @@
 #include "Components/Transform.h"
 #include "EngineAPI/GameEntity.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -54,6 +55,25 @@ static int lua_get_instance_int(LuaScriptInstance* inst, const char* field) {
     int v = (int)lua_tointeger(L, -1);
     lua_pop(L, 2);
     return v;
+}
+
+// Read a float field from a LuaScriptInstance's instance table.
+// Used by Test 9 to verify dt propagation (float→double→float round-trip).
+static float lua_get_instance_float(LuaScriptInstance* inst, const char* field) {
+    if (!inst || !inst->type || !inst->type->lua_state) return 0.0f;
+    lua_State* L = (lua_State*)inst->type->lua_state;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, inst->instance_table_ref);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return 0.0f;
+    }
+    lua_getfield(L, -1, field);
+    float value = 0.0f;
+    if (lua_isnumber(L, -1)) {
+        value = (float)lua_tonumber(L, -1);
+    }
+    lua_pop(L, 2);
+    return value;
 }
 
 // Helper: read a boolean field from a Lua instance table.
@@ -734,6 +754,167 @@ TestResult test_lua_reload_type_re_reads_source() {
     return TestResult::Passed;
 }
 
+// Test 9: M.fixed_update + M.late_update fire when engine calls
+// script::fixed_update(dt) / script::late_update(dt). Verifies dt propagation
+// (float → lua_pushnumber → float round-trip is exact for these values).
+TestResult test_lua_fixed_update_and_late_update_dispatch() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "lifecycle_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/lifecycle_script.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        std::fprintf(stderr, "register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance returned invalid_id\n");
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    auto* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // begin_play already fired during create_instance (script_create_external
+    // calls cbs.begin_play synchronously). No frame_tick needed — and frame_tick
+    // would also fire fixed_update/late_update, polluting the counters.
+
+    // Direct dispatch — should fire M.fixed_update with dt=0.033f.
+    primal::script::fixed_update(0.033f);
+    int fixed_count = lua_get_instance_int(inst, "fixed_count");
+    float fixed_dt  = lua_get_instance_float(inst, "last_fixed_dt");
+
+    // Direct dispatch — should fire M.late_update with dt=0.016f.
+    primal::script::late_update(0.016f);
+    int late_count = lua_get_instance_int(inst, "late_count");
+    float late_dt  = lua_get_instance_float(inst, "last_late_dt");
+
+    // Second calls — counters should reach 2.
+    primal::script::fixed_update(0.033f);
+    primal::script::late_update(0.016f);
+    int fixed_count_2 = lua_get_instance_int(inst, "fixed_count");
+    int late_count_2  = lua_get_instance_int(inst, "late_count");
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (fixed_count != 1) {
+        std::fprintf(stderr, "fixed_count after 1 call = %d (expected 1)\n", fixed_count);
+        return TestResult::Failed;
+    }
+    if (late_count != 1) {
+        std::fprintf(stderr, "late_count after 1 call = %d (expected 1)\n", late_count);
+        return TestResult::Failed;
+    }
+    // float→double→float is exact for 0.033f and 0.016f. Use small epsilon
+    // defensively in case of platform differences.
+    const float eps = 1e-6f;
+    if (fabsf(fixed_dt - 0.033f) > eps) {
+        std::fprintf(stderr, "last_fixed_dt = %f (expected ~0.033)\n", fixed_dt);
+        return TestResult::Failed;
+    }
+    if (fabsf(late_dt - 0.016f) > eps) {
+        std::fprintf(stderr, "last_late_dt = %f (expected ~0.016)\n", late_dt);
+        return TestResult::Failed;
+    }
+    if (fixed_count_2 != 2) {
+        std::fprintf(stderr, "fixed_count after 2 calls = %d (expected 2)\n", fixed_count_2);
+        return TestResult::Failed;
+    }
+    if (late_count_2 != 2) {
+        std::fprintf(stderr, "late_count after 2 calls = %d (expected 2)\n", late_count_2);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// Test 10: frame_tick dispatches hooks in order fixed_update → update → late_update.
+// Uses the same lifecycle_script.lua fixture; verifies fixed_step=1, update_step=2,
+// late_step=3 (each hook records its position in the call sequence).
+//
+// Note: begin_play already fired synchronously during create_instance (it is empty
+// in the fixture and does not touch the step counter). frame_tick dispatches the
+// three dt-passing hooks in order.
+TestResult test_lua_frame_tick_lifecycle_order() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "lifecycle_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/lifecycle_script.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        std::fprintf(stderr, "register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance returned invalid_id\n");
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    auto* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // Single frame_tick — dispatches fixed_update, update, late_update in order.
+    // The fixture's step counter is file-scope; each hook snapshots it on entry.
+    primal::script::frame_tick(0.016f);
+
+    int fixed_step = lua_get_instance_int(inst, "fixed_step");
+    int update_step = lua_get_instance_int(inst, "update_step");
+    int late_step  = lua_get_instance_int(inst, "late_step");
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (fixed_step != 1) {
+        std::fprintf(stderr, "fixed_step = %d (expected 1 — fixed fires first)\n", fixed_step);
+        return TestResult::Failed;
+    }
+    if (update_step != 2) {
+        std::fprintf(stderr, "update_step = %d (expected 2 — update fires second)\n", update_step);
+        return TestResult::Failed;
+    }
+    if (late_step != 3) {
+        std::fprintf(stderr, "late_step = %d (expected 3 — late fires third)\n", late_step);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -749,6 +930,8 @@ int self_test_get_begin_play_count(void);
 int self_test_get_update_count(void);
 int self_test_get_destroy_count(void);
 int self_test_get_on_reload_count(void);
+int self_test_get_fixed_update_count(void);
+int self_test_get_late_update_count(void);
 void self_test_reset_counters(void);
 } // extern "C"
 
@@ -821,6 +1004,364 @@ TestResult test_lua_self_test_backend_reload_unchanged() {
     return TestResult::Passed;
 }
 
+// Test 11: Self-Test Backend fixed_update + late_update regression.
+// Self-Test Backend (ScriptSelfTestBackend.c) already implements both hooks
+// with counters. This test verifies the engine dispatch path still works
+// end-to-end after Phase 2b.4 Lua backend changes.
+TestResult test_lua_self_test_backend_fixed_late_unchanged() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    self_test_reset_counters();
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = 0;
+    u64 script_handle = 0;
+    int rc = self_test_register_and_create(entity.get_id(), &type_id, &script_handle);
+    if (rc != 1) {
+        std::fprintf(stderr, "self_test_register_and_create failed\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // 1 frame_tick fires begin_play + fixed_update + update + late_update once each.
+    primal::script::frame_tick(0.016f);
+
+    int fixed_before = self_test_get_fixed_update_count();
+    int late_before  = self_test_get_late_update_count();
+
+    // Direct dispatch — should add 1 to each counter.
+    primal::script::fixed_update(0.033f);
+    primal::script::late_update(0.016f);
+
+    int fixed_after = self_test_get_fixed_update_count();
+    int late_after  = self_test_get_late_update_count();
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    // frame_tick fires fixed_update + late_update once each.
+    if (fixed_before != 1) {
+        std::fprintf(stderr, "fixed_before = %d (expected 1 from frame_tick)\n", fixed_before);
+        return TestResult::Failed;
+    }
+    if (late_before != 1) {
+        std::fprintf(stderr, "late_before = %d (expected 1 from frame_tick)\n", late_before);
+        return TestResult::Failed;
+    }
+    // Direct dispatch adds 1 more.
+    if (fixed_after != 2) {
+        std::fprintf(stderr, "fixed_after = %d (expected 2 = frame_tick + direct)\n", fixed_after);
+        return TestResult::Failed;
+    }
+    if (late_after != 2) {
+        std::fprintf(stderr, "late_after = %d (expected 2 = frame_tick + direct)\n", late_after);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// Test 12: Lua error in begin_play doesn't crash engine or invalidate instance.
+// Fixture's begin_play calls error("boom in begin_play"). pcall in invoke_lua_hook
+// catches it, logs to stderr, returns. create_instance must still return a valid
+// script_id; the instance table must be populated. Direct script::update dispatch
+// then fires M.update, incrementing update_count to 1.
+TestResult test_lua_error_in_begin_play_survives() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "error_in_begin_play",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/error_in_begin_play.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        std::fprintf(stderr, "register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // create_instance fires begin_play synchronously (Phase 2b.4 verified timing).
+    // begin_play throws; pcall catches; create_instance returns a valid id.
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance returned invalid_id after begin_play error\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    auto* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // Direct dispatch — should fire M.update, incrementing update_count.
+    primal::script::update(0.016f);
+    int update_count = lua_get_instance_int(inst, "update_count");
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (update_count != 1) {
+        std::fprintf(stderr, "update_count = %d (expected 1 — update must fire after begin_play error)\n", update_count);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// Test 13: Lua error in update does not block late_update (same frame) or
+// update (next frame). Pins per-hook pcall isolation and Lua state recovery.
+// Fixture increments update_count BEFORE error() so the test can verify
+// "update was dispatched" even though pcall caught the throw.
+TestResult test_lua_error_in_update_does_not_block_late_update() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "error_in_update",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/error_in_update.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        std::fprintf(stderr, "register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance returned invalid_id\n");
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    auto* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // Frame 1: frame_tick dispatches fixed_update (empty), update (errors after
+    // incrementing counter), late_update (fires normally).
+    primal::script::frame_tick(0.016f);
+    int update_count_f1 = lua_get_instance_int(inst, "update_count");
+    int late_count_f1   = lua_get_instance_int(inst, "late_count");
+
+    // Frame 2: same dispatch order. update errors again; late fires again.
+    primal::script::frame_tick(0.016f);
+    int update_count_f2 = lua_get_instance_int(inst, "update_count");
+    int late_count_f2   = lua_get_instance_int(inst, "late_count");
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (update_count_f1 != 1) {
+        std::fprintf(stderr, "update_count after frame 1 = %d (expected 1)\n", update_count_f1);
+        return TestResult::Failed;
+    }
+    if (late_count_f1 != 1) {
+        std::fprintf(stderr, "late_count after frame 1 = %d (expected 1 — late must fire after update error)\n", late_count_f1);
+        return TestResult::Failed;
+    }
+    if (update_count_f2 != 2) {
+        std::fprintf(stderr, "update_count after frame 2 = %d (expected 2)\n", update_count_f2);
+        return TestResult::Failed;
+    }
+    if (late_count_f2 != 2) {
+        std::fprintf(stderr, "late_count after frame 2 = %d (expected 2)\n", late_count_f2);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// Test 14: Lua error in one instance doesn't affect another instance sharing
+// the same lua_State. Pins per-instance pcall isolation across multiple frames.
+// Creates two instances of different types (error_in_update + lifecycle_script),
+// runs 3 frame_ticks, and verifies both instances' update_count == 3. Multi-frame
+// is necessary to catch cumulative stack-corruption bugs that single-frame tests
+// would miss.
+TestResult test_lua_error_in_one_instance_does_not_affect_another() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity_a = make_test_entity();
+    primal::game_entity::entity entity_b = make_test_entity();
+
+    u64 error_type_id = LuaBackend::instance().register_type(
+        "error_in_update",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/error_in_update.lua"
+    );
+    if (error_type_id == u64_invalid_id) {
+        std::fprintf(stderr, "error register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 normal_type_id = LuaBackend::instance().register_type(
+        "lifecycle_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/lifecycle_script.lua"
+    );
+    if (normal_type_id == u64_invalid_id) {
+        std::fprintf(stderr, "normal register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 error_script_id = LuaBackend::instance().create_instance(error_type_id, entity_a.get_id());
+    if (error_script_id == u64_invalid_id) {
+        std::fprintf(stderr, "error create_instance returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 normal_script_id = LuaBackend::instance().create_instance(normal_type_id, entity_b.get_id());
+    if (normal_script_id == u64_invalid_id) {
+        std::fprintf(stderr, "normal create_instance returned invalid_id\n");
+        primal::script::remove_for_entity(entity_a.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    auto* error_inst  = LuaBackend::instance().find_instance(error_script_id);
+    auto* normal_inst = LuaBackend::instance().find_instance(normal_script_id);
+    if (!error_inst || !normal_inst) {
+        std::fprintf(stderr, "find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity_a.get_id());
+        primal::script::remove_for_entity(entity_b.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // 3 frame_ticks dispatch both instances' hooks. Each frame: error_inst's update
+    // throws (but increments counter first); normal_inst's update must still fire.
+    // Multi-frame proves durable isolation — a stack-corruption bug from repeated
+    // errors in error_inst would manifest in normal_inst's counter on frames 2 or 3.
+    primal::script::frame_tick(0.016f);
+    primal::script::frame_tick(0.016f);
+    primal::script::frame_tick(0.016f);
+
+    int error_update_count  = lua_get_instance_int(error_inst, "update_count");
+    int normal_update_count = lua_get_instance_int(normal_inst, "update_count");
+
+    primal::script::remove_for_entity(entity_a.get_id());
+    primal::script::remove_for_entity(entity_b.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (error_update_count != 3) {
+        std::fprintf(stderr, "error_inst update_count = %d (expected 3 — update dispatched before error in each of 3 frames)\n", error_update_count);
+        return TestResult::Failed;
+    }
+    if (normal_update_count != 3) {
+        std::fprintf(stderr, "normal_inst update_count = %d (expected 3 — must fire in all 3 frames despite other instance's error)\n", normal_update_count);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// Test 15: Lua error in on_reload doesn't break the reload flow.
+// Phase 2b.3's reload sequence: capture_state → destroy old → recreate →
+// begin_play new → on_reload. If on_reload errors, pcall catches it and the
+// reload must complete: the new instance is alive and dispatching hooks on
+// the next frame_tick.
+//
+// Timing: script::reload(entity_id) DEFERS; the actual reload drains at the
+// END of the next frame_tick (per Phase 2b.3 Test 6's pattern). So:
+//   frame_tick #1: v1.update fires (v1.update_count == 1)
+//   script::reload defers
+//   frame_tick #2: v1.update fires (v1.update_count == 2); at END of frame,
+//                  reload drains: v1 destroyed, v2 created, begin_play on v2,
+//                  on_reload on v2 throws (v2.reload_count == 1)
+//   frame_tick #3: v2.update fires (v2.update_count == 1)
+TestResult test_lua_error_in_on_reload_does_not_break_reload() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "error_in_on_reload",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/error_in_on_reload.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        std::fprintf(stderr, "register_type returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        std::fprintf(stderr, "create_instance returned invalid_id\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // Frame 1: pre-reload. v1.update fires.
+    primal::script::frame_tick(0.016f);
+
+    // Defer reload — drains at end of next frame_tick.
+    primal::script::reload(entity.get_id());
+
+    // Frame 2: v1.update fires, THEN reload drains at end of frame.
+    // on_reload on v2 throws; reload flow completes despite the error.
+    primal::script::frame_tick(0.016f);
+
+    // Frame 3: v2.update fires — proves reload completed.
+    primal::script::frame_tick(0.016f);
+
+    // find_instance(script_id) now returns v2 (v1 was destroyed during reload).
+    auto* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "find_instance returned nullptr after reload\n");
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    int update_count = lua_get_instance_int(inst, "update_count");
+    int reload_count = lua_get_instance_int(inst, "reload_count");
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (update_count != 1) {
+        std::fprintf(stderr, "v2.update_count = %d (expected 1 — post-reload update must fire)\n", update_count);
+        return TestResult::Failed;
+    }
+    if (reload_count != 1) {
+        std::fprintf(stderr, "v2.reload_count = %d (expected 1 — on_reload was dispatched)\n", reload_count);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
 } // anonymous namespace
 
 void RunLuaBackendTests() {
@@ -852,6 +1393,27 @@ void RunLuaBackendTests() {
     suite.AddTestCase(TestCase("lua_self_test_backend_reload_unchanged",
                                test_lua_self_test_backend_reload_unchanged,
                                "Self-Test Backend (no Phase 2b.3 hooks) reload still works"));
+    suite.AddTestCase(TestCase("lua_fixed_update_and_late_update_dispatch",
+                               test_lua_fixed_update_and_late_update_dispatch,
+                               "Direct script::fixed_update/late_update dispatch to Lua"));
+    suite.AddTestCase(TestCase("lua_frame_tick_lifecycle_order",
+                               test_lua_frame_tick_lifecycle_order,
+                               "frame_tick dispatches fixed→update→late in order"));
+    suite.AddTestCase(TestCase("lua_self_test_backend_fixed_late_unchanged",
+                               test_lua_self_test_backend_fixed_late_unchanged,
+                               "Self-Test Backend fixed/late counters increment (engine regression)"));
+    suite.AddTestCase(TestCase("lua_error_in_begin_play_survives",
+                               test_lua_error_in_begin_play_survives,
+                               "Lua error in begin_play is caught; instance remains usable"));
+    suite.AddTestCase(TestCase("lua_error_in_update_does_not_block_late_update",
+                               test_lua_error_in_update_does_not_block_late_update,
+                               "Lua error in update doesn't block late_update (same/next frame)"));
+    suite.AddTestCase(TestCase("lua_error_in_one_instance_does_not_affect_another",
+                               test_lua_error_in_one_instance_does_not_affect_another,
+                               "Lua error in one instance doesn't affect another (shared lua_State)"));
+    suite.AddTestCase(TestCase("lua_error_in_on_reload_does_not_break_reload",
+                               test_lua_error_in_on_reload_does_not_break_reload,
+                               "Lua error in on_reload doesn't break reload flow"));
     suite.RunAllTests();
 }
 

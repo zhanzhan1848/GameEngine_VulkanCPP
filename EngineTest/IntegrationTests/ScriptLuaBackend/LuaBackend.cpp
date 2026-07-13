@@ -21,6 +21,8 @@ namespace primal::lua_backend {
 // === Adapter callbacks (forward decls; definitions below) ===
 static void my_begin_play(void* user_data);
 static void my_update(void* user_data, float dt);
+static void my_fixed_update(void* user_data, float dt);
+static void my_late_update(void* user_data, float dt);
 static void my_destroy(void* user_data);
 static void my_reflect(void* user_data, property_visitor_c visitor);
 // === Phase 2b.3: reload hooks ===
@@ -142,6 +144,8 @@ u64 LuaBackend::register_type(const char* type_name, const char* lua_file_path) 
     script_external_callbacks cbs{};
     cbs.begin_play    = &my_begin_play;
     cbs.update        = &my_update;
+    cbs.fixed_update  = &my_fixed_update;
+    cbs.late_update   = &my_late_update;
     cbs.destroy       = &my_destroy;
     cbs.on_reload     = &my_on_reload;
     cbs.reflect       = &my_reflect;
@@ -546,6 +550,47 @@ static void invoke_lua_hook(LuaScriptInstance* inst, const char* hook_name) {
     // Stack: (empty)
 }
 
+// Invoke a one-arg Lua hook (self, dt) on the instance table:
+//   function self:hook_name(dt)
+// Silently skips missing hooks (Phase 2a §6.3). Stack-safe on every return path.
+// Used by my_update, my_fixed_update, my_late_update — DO NOT inline copies.
+static void invoke_lua_hook_dt(LuaScriptInstance* inst, const char* hook_name, float dt) {
+    if (!inst || !inst->type || !inst->type->lua_state) return;
+    lua_State* L = (lua_State*)inst->type->lua_state;
+
+    // Stack: (empty)
+    lua_rawgeti(L, LUA_REGISTRYINDEX, inst->instance_table_ref);
+    // Stack: instance_table
+    if (!lua_istable(L, -1)) {
+        std::fprintf(stderr, "Lua %s: instance table missing\n", hook_name);
+        lua_pop(L, 1);
+        return;
+    }
+
+    lua_getfield(L, -1, hook_name);
+    // Stack: instance_table hook_fn
+    if (!lua_isfunction(L, -1)) {
+        // Hook not defined — silently skip.
+        lua_pop(L, 2);
+        return;
+    }
+
+    lua_pushvalue(L, -2);    // self (instance table)
+    lua_pushnumber(L, dt);   // dt
+    // Stack: instance_table hook_fn self dt
+
+    int rc = lua_pcall(L, 2, 0, 0);
+    // Stack: instance_table [err?]
+    if (rc != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        std::fprintf(stderr, "Lua error in %s: %s\n", hook_name,
+                     err ? err : "(unknown)");
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);  // instance_table
+    // Stack: (empty)
+}
+
 static void my_begin_play(void* user_data) {
     auto* inst = static_cast<LuaScriptInstance*>(user_data);
     if (!inst || !inst->type) return;
@@ -573,39 +618,33 @@ static void my_update(void* user_data, float dt) {
     auto* prev = backend.current_instance_;
     backend.current_instance_ = inst;
 
-    lua_State* L = (lua_State*)inst->type->lua_state;
+    invoke_lua_hook_dt(inst, "update", dt);
 
-    // Stack: (empty)
-    lua_rawgeti(L, LUA_REGISTRYINDEX, inst->instance_table_ref);
-    // Stack: instance_table
-    if (!lua_istable(L, -1)) {
-        std::fprintf(stderr, "Lua update: instance table missing\n");
-        lua_pop(L, 1);
-        backend.current_instance_ = prev;
-        return;
-    }
+    backend.current_instance_ = prev;
+}
 
-    lua_getfield(L, -1, "update");
-    // Stack: instance_table update_fn
-    if (!lua_isfunction(L, -1)) {
-        lua_pop(L, 2);
-        backend.current_instance_ = prev;
-        return;
-    }
+static void my_fixed_update(void* user_data, float dt) {
+    auto* inst = static_cast<LuaScriptInstance*>(user_data);
+    if (!inst || !inst->type || !inst->type->lua_state) return;
 
-    lua_pushvalue(L, -2);  // self
-    lua_pushnumber(L, dt);
-    // Stack: instance_table update_fn self dt
+    auto& backend = LuaBackend::instance();
+    auto* prev = backend.current_instance_;
+    backend.current_instance_ = inst;
 
-    int rc = lua_pcall(L, 2, 0, 0);
-    // Stack: instance_table [err?]
-    if (rc != LUA_OK) {
-        const char* err = lua_tostring(L, -1);
-        std::fprintf(stderr, "Lua error in update: %s\n", err ? err : "(unknown)");
-        lua_pop(L, 1);
-    }
-    lua_pop(L, 1);  // instance_table
-    // Stack: (empty)
+    invoke_lua_hook_dt(inst, "fixed_update", dt);
+
+    backend.current_instance_ = prev;
+}
+
+static void my_late_update(void* user_data, float dt) {
+    auto* inst = static_cast<LuaScriptInstance*>(user_data);
+    if (!inst || !inst->type || !inst->type->lua_state) return;
+
+    auto& backend = LuaBackend::instance();
+    auto* prev = backend.current_instance_;
+    backend.current_instance_ = inst;
+
+    invoke_lua_hook_dt(inst, "late_update", dt);
 
     backend.current_instance_ = prev;
 }
