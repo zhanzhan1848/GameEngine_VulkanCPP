@@ -199,7 +199,7 @@ bool GlobalSDF::AllocateTexture(rhi::ResourceHandle& handle, u32 resolution, u32
     desc.size = {resolution, resolution, resolution};
     desc.mipLevels = mip_levels;
     desc.arraySize = 1;
-    desc.format = rhi::DataFormat::R16_Float;
+    desc.format = rhi::DataFormat::R32_Float;
     desc.type = rhi::TextureType::Texture3D;
     desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
     desc.memoryUsage = rhi::GPUMemoryUsage::Static;
@@ -278,9 +278,19 @@ static std::string ReadFileToString(const std::string& path) {
 static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* device) {
     auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
     if (platform == rhi::RHIPlatform::Dawn) {
-        // Phase 4 — WebGPU/WGSL path. ShaderLoader.h handles MEMFS embed (WASM)
-        // and filesystem read (native) uniformly via LoadWGSL(name).
-        std::string src = dawn::LoadWGSL(name);
+        // dawn::LoadWGSL has two overloads (ShaderLoader.h):
+        //   WASM:   LoadWGSL(const char* name) — kShaderMap + MEMFS fallback at
+        //           /Engine/Graphics/Dawn/shaders/{name}.wgsl
+        //   Native: LoadWGSL(const std::string& path) — opens filesystem path as-is
+        // On native, the bare shader name is not a valid path; Nanite/ shaders
+        // live in Engine/Graphics/Dawn/shaders/Nanite/, so prepend it.
+        std::string src;
+#ifdef __EMSCRIPTEN__
+        src = dawn::LoadWGSL(name);
+#else
+        std::string path = std::string("Engine/Graphics/Dawn/shaders/Nanite/") + name + ".wgsl";
+        src = dawn::LoadWGSL(path);
+#endif
         if (src.empty()) {
             std::cerr << "[GlobalSDF] Failed to load WGSL shader: " << name << std::endl;
             return {};

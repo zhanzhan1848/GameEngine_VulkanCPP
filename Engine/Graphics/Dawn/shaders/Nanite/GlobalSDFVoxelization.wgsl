@@ -2,12 +2,12 @@
 //
 // Each thread processes one voxel: walks visible instances, does bounds-cull +
 // meshlet-cull + per-triangle point-to-triangle distance, tracks min distance,
-// writes the result to the cascade SDF texture as R16_Float.
+// writes the result to the cascade SDF texture as R32_Float.
 //
 // Dispatch: (resolution, resolution, resolution), workgroup_size = (4, 4, 4).
 //
 // Bindings (WebGPU — single namespace, no Metal texture/buffer split):
-//   0: texture_storage_3d<r16float, write>  — SDF output (cascade)
+//   0: texture_storage_3d<r32float, write>  — SDF output (cascade)
 //   1: uniform CascadeUniforms
 //   2: storage<read> array<f32>             — vertex positions (packed_float3, 12 bytes/vertex)
 //   3: storage<read> array<MeshletData>     — meshlet descriptors
@@ -100,7 +100,7 @@ fn point_to_triangle_distance(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<
     return length(ap + ab * v + ac * w - p);
 }
 
-@group(0) @binding(0) var sdf_output: texture_storage_3d<r16float, write>;
+@group(0) @binding(0) var sdf_output: texture_storage_3d<r32float, write>;
 @group(0) @binding(1) var<uniform> cascade: CascadeUniforms;
 @group(0) @binding(2) var<storage, read> vertex_positions: array<f32>;
 @group(0) @binding(3) var<storage, read> meshlets: array<MeshletData>;
