@@ -110,7 +110,7 @@ fn point_to_triangle_distance(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<
 @group(0) @binding(7) var<storage, read> instance_data: array<InstanceData>;
 
 @compute @workgroup_size(4, 4, 4)
-fn voxelize_sdf_main(@builtin(global_invocation_id) tid: vec3<u32>) {
+fn voxelize_sdf(@builtin(global_invocation_id) tid: vec3<u32>) {
     let resolution = cascade.params.xyz;
     if (any(tid >= resolution)) { return; }
 
