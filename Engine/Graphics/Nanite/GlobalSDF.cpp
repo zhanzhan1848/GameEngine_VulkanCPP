@@ -282,11 +282,12 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
         //   WASM:   LoadWGSL(const char* name) — kShaderMap + MEMFS fallback at
         //           /Engine/Graphics/Dawn/shaders/{name}.wgsl
         //   Native: LoadWGSL(const std::string& path) — opens filesystem path as-is
-        // On native, the bare shader name is not a valid path; Nanite/ shaders
-        // live in Engine/Graphics/Dawn/shaders/Nanite/, so prepend it.
+        // Nanite/ shaders live in Engine/Graphics/Dawn/shaders/Nanite/, so both
+        // paths must prepend the subdirectory.
         std::string src;
 #ifdef __EMSCRIPTEN__
-        src = dawn::LoadWGSL(name);
+        std::string fullName = std::string("Nanite/") + name;
+        src = dawn::LoadWGSL(fullName.c_str());
 #else
         std::string path = std::string("Engine/Graphics/Dawn/shaders/Nanite/") + name + ".wgsl";
         src = dawn::LoadWGSL(path);
