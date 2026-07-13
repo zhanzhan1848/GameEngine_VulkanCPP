@@ -282,31 +282,56 @@ void LumenDDGIPass::Shutdown() {
 // ============================================================================
 
 void LumenDDGIPass::CreateDescriptorSetLayouts() {
-    // --- Trace: 4 sampled textures + 2 UBO + 3 SSBO, sequential bindings 0..8 ---
-    // No Metal-style texture/buffer overlap: WGPU binding == engine binding == WGSL binding.
+    // --- Trace: 4 sampled textures + 2 UBO + 3 SSBO ---
+    // Platform-branch: Dawn uses sequential 0..8 (no texture/buffer collision).
+    // Metal overlaps texture/buffer namespaces — DDGITraceRays.metal declares [[buffer(0..4)]].
     {
-        DescriptorSetLayoutBinding traceBindings[] = {
-            // Textures (sampled) — sequential bindings 0..3 matching WGSL
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
-            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
-            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 2
-            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev frame color (unused in Mode 11 but kept for layout stability)
-            // Buffers — sequential bindings 4..8 (NO overlap with textures, so Dawn won't remap)
-            {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
-            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
-            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data (read_write)
-            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list (read)
-            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance_history (read)
-        };
-        // SDF cascades are texture_3d<f32> in WGSL — layout must declare 3D view dim.
-        traceBindings[0].is3D = true;
-        traceBindings[1].is3D = true;
-        traceBindings[2].is3D = true;
-        // Read-only storage buffers (var<storage, read> in WGSL).
-        traceBindings[7].readonly = true;  // probe update list
-        traceBindings[8].readonly = true;  // irradiance_history
-        DescriptorSetLayoutDesc layoutDesc{9, traceBindings};
-        trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+        if (isDawn) {
+            // Dawn: sequential engine bindings 0..8 matching WGSL
+            // (no texture/buffer collision -> no silent remap)
+            DescriptorSetLayoutBinding traceBindings[] = {
+                {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
+                {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
+                {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 2
+                {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev frame color
+                {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
+                {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
+                {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data (read_write)
+                {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list (read)
+                {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance_history (read)
+            };
+            traceBindings[0].is3D = true;
+            traceBindings[1].is3D = true;
+            traceBindings[2].is3D = true;
+            traceBindings[7].readonly = true;
+            traceBindings[8].readonly = true;
+            DescriptorSetLayoutDesc layoutDesc{9, traceBindings};
+            trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        } else {
+            // Metal: separate texture/buffer namespaces -- overlap is idiomatic.
+            // DDGITraceRays.metal declares [[buffer(0..4)]] for the 5 buffers.
+            DescriptorSetLayoutBinding traceBindings[] = {
+                // Textures
+                {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                // Buffers (Metal namespace -- overlap with textures is fine)
+                {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+                {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+                {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            };
+            traceBindings[0].is3D = true;
+            traceBindings[1].is3D = true;
+            traceBindings[2].is3D = true;
+            traceBindings[7].readonly = true;
+            traceBindings[8].readonly = true;
+            DescriptorSetLayoutDesc layoutDesc{9, traceBindings};
+            trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        }
     }
 
     // --- Irradiance: 2 UBO + 3 SSBO (ray data + irradiance history + irradiance output) + 1 SSBO (update list) ---
@@ -908,24 +933,32 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 trace_pipeline_ != handles::INVALID_PIPELINE &&
                 ray_data_buffer_ != handles::INVALID_RESOURCE) {
                 // Update trace descriptor set
-                DescriptorData traceParams[] = {
-                    // Textures: SDF cascades + prev frame lit scene color
-                    {0, DescriptorType::SampledImage,  sdfTextures[0]},
-                    {1, DescriptorType::SampledImage,  sdfTextures[1]},
-                    {2, DescriptorType::SampledImage,  sdfTextures[2]},
-                    {3, DescriptorType::SampledImage,  prevColorTex},
-                    // Buffers — sequential bindings 4..8 matching WGSL.
-                    // No texture/buffer collision → no Dawn remap → WGPU binding == engine binding.
-                    {4, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {5, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
-                    {6, DescriptorType::StorageBuffer, ray_data_buffer_},
-                    {7, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]},
-                    // Mode 11: previous-frame irradiance probe grid (L_i_prev source).
-                    // histIdx captured by execute lambda; irradiance_buffers_ holds prior-frame
-                    // SH coefficients written by UpdateIrradiance last frame. Frame 0 reads the
-                    // static-bake seed copied in by InitializeProbesFromStatic.
-                    {8, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
-                };
+                // Platform-branch: Dawn uses sequential 0..8; Metal overlaps texture/buffer.
+                bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+                DescriptorData traceParams[9];
+                if (isDawn) {
+                    // Dawn: sequential 0..8 matching WGSL
+                    traceParams[0] = {0, DescriptorType::SampledImage,  sdfTextures[0]};
+                    traceParams[1] = {1, DescriptorType::SampledImage,  sdfTextures[1]};
+                    traceParams[2] = {2, DescriptorType::SampledImage,  sdfTextures[2]};
+                    traceParams[3] = {3, DescriptorType::SampledImage,  prevColorTex};
+                    traceParams[4] = {4, DescriptorType::UniformBuffer, global_cb_[frameIdx]};
+                    traceParams[5] = {5, DescriptorType::UniformBuffer, volume_cb_[frameIdx]};
+                    traceParams[6] = {6, DescriptorType::StorageBuffer, ray_data_buffer_};
+                    traceParams[7] = {7, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]};
+                    traceParams[8] = {8, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]};
+                } else {
+                    // Metal: overlap texture/buffer namespaces -- buffers at 0..4
+                    traceParams[0] = {0, DescriptorType::SampledImage,  sdfTextures[0]};
+                    traceParams[1] = {1, DescriptorType::SampledImage,  sdfTextures[1]};
+                    traceParams[2] = {2, DescriptorType::SampledImage,  sdfTextures[2]};
+                    traceParams[3] = {3, DescriptorType::SampledImage,  prevColorTex};
+                    traceParams[4] = {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]};
+                    traceParams[5] = {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]};
+                    traceParams[6] = {2, DescriptorType::StorageBuffer, ray_data_buffer_};
+                    traceParams[7] = {3, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]};
+                    traceParams[8] = {4, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]};
+                }
                 UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 9);
 
                 cmd->BindComputePipeline(trace_pipeline_);
