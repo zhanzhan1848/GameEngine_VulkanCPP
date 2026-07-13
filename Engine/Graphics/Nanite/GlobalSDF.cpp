@@ -41,11 +41,25 @@ bool GlobalSDF::Initialize(rhi::RHIDeviceBase* device, const GlobalSDFConfig& co
     if (!CreateCascades()) {
         return false;
     }
-    
+
     if (!CreateGlobalTexture()) {
         return false;
     }
-    
+
+    // F4: verify all cascade textures and the global texture are non-INVALID.
+    // CreateCascades/CreateGlobalTexture already return false on allocation
+    // failure, but belt-and-suspenders guards against silent regressions.
+    init_resources_valid_ = true;
+    for (const auto& cascade : cascades_) {
+        if (cascade.sdf_texture == rhi::handles::INVALID_RESOURCE) {
+            init_resources_valid_ = false;
+            break;
+        }
+    }
+    if (global_sdf_texture_ == rhi::handles::INVALID_RESOURCE) {
+        init_resources_valid_ = false;
+    }
+
     initialized_ = true;
     return true;
 }
@@ -357,6 +371,12 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     auto code = LoadShaderSource("GlobalSDFVoxelization", device_);
     if (code.empty()) {
         std::cerr << "[GlobalSDF] Failed to load voxelization shader" << std::endl;
+        // F4: shader/pipeline creation failed — IsInitialized() must return false
+        // so consumers don't proceed with corrupt state. Shutdown() releases the
+        // partial texture resources (already created in Initialize()), then we
+        // clear both flags so Shutdown() can be called again safely if needed.
+        Shutdown();
+        init_resources_valid_ = false;
         return false;
     }
 
@@ -364,6 +384,8 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
                                          rhi::ShaderStage::Compute, "voxelize_sdf");
     if (shader == rhi::handles::INVALID_SHADER) {
         std::cerr << "[GlobalSDF] Failed to compile voxelization shader" << std::endl;
+        Shutdown();
+        init_resources_valid_ = false;
         return false;
     }
 
@@ -422,6 +444,8 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
 
     if (vox_pipeline_ == rhi::handles::INVALID_PIPELINE) {
         std::cerr << "[GlobalSDF] Failed to create voxelization pipeline" << std::endl;
+        Shutdown();
+        init_resources_valid_ = false;
         return false;
     }
 

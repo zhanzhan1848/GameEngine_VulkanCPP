@@ -68,7 +68,9 @@ public:
     const GlobalSDFConfig& GetConfig() const { return config_; }
     const GlobalSDFStats& GetStats() const { return stats_; }
 
-    bool IsInitialized() const { return initialized_; }
+    bool IsInitialized() const {
+        return initialized_ && init_resources_valid_;
+    }
 
     /// Initialize the voxelization compute pipeline. Call once after Initialize().
     bool InitVoxelization(const SDFVoxelizationResources& resources);
@@ -94,6 +96,7 @@ private:
 
     std::mutex mutex_;
     std::atomic<bool> initialized_{ false };
+    bool init_resources_valid_{ false };  // F4: true only if all GPU resources non-INVALID
 
     // Voxelization pipeline resources
     bool voxelization_ready_{ false };
