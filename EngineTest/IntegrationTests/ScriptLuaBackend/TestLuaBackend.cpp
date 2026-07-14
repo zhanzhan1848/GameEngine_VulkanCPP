@@ -1595,6 +1595,225 @@ TestResult test_lua_post_callback_error_does_not_break_drain() {
     return TestResult::Passed;
 }
 
+// Test 20: All 14 dangerous entries (7 globals + 7 os fields) must be nil
+// under the whitelist sandbox. Pins the core sandbox contract.
+TestResult test_lua_unsafe_globals_are_nil() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "sandbox_check_unsafe",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/sandbox_check_unsafe.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    int nil_count = lua_get_instance_int(inst, "nil_count");
+    if (nil_count != 14) {
+        std::fprintf(stderr, "Test 20 FAIL: nil_count=%d (expected 14)\n", nil_count);
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 21: Safe base functions (pcall, pairs, tonumber, tostring, select,
+// arithmetic, string concat) all work under the sandbox. Pins that the
+// whitelist did not accidentally remove a base function scripts need.
+TestResult test_lua_safe_base_functions_work() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "sandbox_check_safe_base",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/sandbox_check_safe_base.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    int checks_passed = lua_get_instance_int(inst, "checks_passed");
+    if (checks_passed != 4) {
+        std::fprintf(stderr, "Test 21 FAIL: checks_passed=%d (expected 4)\n", checks_passed);
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 22: Standard libraries (math, string, table, utf8) are accessible
+// and produce correct results. coroutine existence is implicitly verified
+// by Test 20 (it's not in the unsafe list).
+TestResult test_lua_standard_libraries_accessible() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "sandbox_check_libs",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/sandbox_check_libs.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    int checks_passed = lua_get_instance_int(inst, "checks_passed");
+    if (checks_passed != 4) {
+        std::fprintf(stderr, "Test 22 FAIL: checks_passed=%d (expected 4)\n", checks_passed);
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 23: os safe subset (time, clock, date, difftime) exists and is
+// callable. Pins that the sandbox did not over-prune os.
+TestResult test_lua_os_safe_subset_works() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "sandbox_check_os",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/sandbox_check_os.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    bool has_time     = lua_get_instance_bool(inst, "has_time");
+    bool has_clock    = lua_get_instance_bool(inst, "has_clock");
+    bool has_date     = lua_get_instance_bool(inst, "has_date");
+    bool has_difftime = lua_get_instance_bool(inst, "has_difftime");
+
+    if (!(has_time && has_clock && has_date && has_difftime)) {
+        std::fprintf(stderr, "Test 23 FAIL: time=%d clock=%d date=%d difftime=%d\n",
+                     has_time, has_clock, has_date, has_difftime);
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 24: Common Lua sandbox escape vectors all fail. Defense-in-depth:
+// even though Test 20 already pins individual nil'd entries, this test
+// verifies that no escape vector reaches them via metatables, _G, rawget,
+// or other reflection tricks.
+TestResult test_lua_sandbox_escape_attempts_fail() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "sandbox_escape_attempts",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/sandbox_escape_attempts.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    bool escaped = lua_get_instance_bool(inst, "escaped");
+    if (escaped) {
+        std::fprintf(stderr, "Test 24 FAIL: sandbox escape detected\n");
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
 } // anonymous namespace
 
 void RunLuaBackendTests() {
@@ -1660,6 +1879,21 @@ void RunLuaBackendTests() {
     suite.AddTestCase(TestCase("lua_post_callback_error_does_not_break_drain",
                                test_lua_post_callback_error_does_not_break_drain,
                                "Error in a posted callback doesn't abort the drain"));
+    suite.AddTestCase(TestCase("lua_unsafe_globals_are_nil",
+                               test_lua_unsafe_globals_are_nil,
+                               "14 dangerous globals/os fields are nil under sandbox whitelist"));
+    suite.AddTestCase(TestCase("lua_safe_base_functions_work",
+                               test_lua_safe_base_functions_work,
+                               "pcall/pairs/tonumber/tostring/select work under sandbox"));
+    suite.AddTestCase(TestCase("lua_standard_libraries_accessible",
+                               test_lua_standard_libraries_accessible,
+                               "math/string/table/utf8 libraries accessible and correct"));
+    suite.AddTestCase(TestCase("lua_os_safe_subset_works",
+                               test_lua_os_safe_subset_works,
+                               "os.time/clock/date/difftime callable under sandbox"));
+    suite.AddTestCase(TestCase("lua_sandbox_escape_attempts_fail",
+                               test_lua_sandbox_escape_attempts_fail,
+                               "6 sandbox escape vectors (io/_G/rawget/debug/load/dofile/string-mt) all fail"));
     suite.RunAllTests();
 }
 

@@ -51,6 +51,7 @@ static int  lua_post(lua_State* L);
 static int  lua_post_delayed(lua_State* L);
 static int  lua_post_delayed_wall(lua_State* L);
 static void register_post_functions(lua_State* L);
+static void register_sandbox_globals(lua_State* L);
 
 LuaBackend& LuaBackend::instance() {
     static LuaBackend inst;
@@ -97,13 +98,13 @@ u64 LuaBackend::register_type(const char* type_name, const char* lua_file_path) 
         return u64_invalid_id;
     }
 
-    // 1. Create Lua state + open libs.
+    // 1. Create Lua state + apply sandbox whitelist (replaces luaL_openlibs).
     lua_State* L = luaL_newstate();
     if (!L) {
         std::fprintf(stderr, "luaL_newstate failed for %s\n", type_name);
         return u64_invalid_id;
     }
-    luaL_openlibs(L);
+    register_sandbox_globals(L);
 
     // 2. Load + execute the Lua file. The file should return a table.
     int rc = luaL_dofile(L, lua_file_path);
@@ -527,6 +528,43 @@ static void register_bus_table(lua_State* L) {
     lua_pushcfunction(L, lua_bus_off); lua_setfield(L, -2, "off");
     lua_pushcfunction(L, lua_bus_emit);lua_setfield(L, -2, "emit");
     lua_setglobal(L, "bus");
+}
+
+// === Phase 2b.7: sandbox whitelist ===
+// Opens only safe Lua stdlib (math/string/table/coroutine/utf8 + curated
+// base + curated os). Does NOT open io/package/debug. Nils out 4 dangerous
+// base globals (load, loadfile, dofile, collectgarbage) and 7 dangerous
+// os fields (execute, exit, getenv, remove, rename, setlocale, tmpname).
+// Called once per type from register_type (each type has its own L).
+static void register_sandbox_globals(lua_State* L) {
+    // 1. Fully open safe libraries (no dangerous functions in these).
+    luaL_requiref(L, LUA_MATHLIBNAME, luaopen_math,      1);
+    luaL_requiref(L, LUA_STRLIBNAME,  luaopen_string,    1);
+    luaL_requiref(L, LUA_TABLIBNAME,  luaopen_table,     1);
+    luaL_requiref(L, LUA_COLIBNAME,   luaopen_coroutine, 1);
+    luaL_requiref(L, LUA_UTF8LIBNAME, luaopen_utf8,      1);
+
+    // 2. Open base, then nil out dangerous globals.
+    luaL_requiref(L, LUA_GNAME, luaopen_base, 1);
+    lua_pushnil(L); lua_setglobal(L, "load");
+    lua_pushnil(L); lua_setglobal(L, "loadfile");
+    lua_pushnil(L); lua_setglobal(L, "dofile");
+    lua_pushnil(L); lua_setglobal(L, "collectgarbage");
+
+    // 3. Open os, then nil out dangerous fields.
+    luaL_requiref(L, LUA_OSLIBNAME, luaopen_os, 1);
+    lua_getglobal(L, "os");
+    lua_pushnil(L); lua_setfield(L, -2, "execute");
+    lua_pushnil(L); lua_setfield(L, -2, "exit");
+    lua_pushnil(L); lua_setfield(L, -2, "getenv");
+    lua_pushnil(L); lua_setfield(L, -2, "remove");
+    lua_pushnil(L); lua_setfield(L, -2, "rename");
+    lua_pushnil(L); lua_setfield(L, -2, "setlocale");
+    lua_pushnil(L); lua_setfield(L, -2, "tmpname");
+    lua_pop(L, 1);  // pop os table
+
+    // 4. Do NOT open: io, package, debug.
+    // (No luaL_requiref call for LUA_IOLIBNAME / LUA_LOADLIBNAME / LUA_DBLIBNAME.)
 }
 
 // === Phase 2b.6: post(fn) global ===
