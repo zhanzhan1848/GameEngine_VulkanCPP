@@ -117,8 +117,11 @@ fn ddgiRayDirection(rayIndex: u32, rayCount: u32, frameIndex: u32) -> vec3<f32> 
 @group(0) @binding(0) var<uniform> globalData: GlobalShaderData;
 @group(0) @binding(1) var<uniform> volume: DDGIVolumeData;
 @group(0) @binding(2) var<storage, read> ray_buffer: array<DDGIRayData>;
-@group(0) @binding(3) var<storage, read> irradiance_history: array<vec3<f32>>;
-@group(0) @binding(4) var<storage, read_write> irradiance_output: array<vec3<f32>>;
+// Packed float[] layout: 9 coeffs/probe * 3 floats/coeff = 27 floats/probe (12-byte stride).
+// Using array<vec3<f32>> here would silently use 16-byte stride (WGSL host-shareable
+// alignment) and corrupt/overflow the buffer the C++ side allocated at 12-byte stride.
+@group(0) @binding(3) var<storage, read> irradiance_history: array<f32>;
+@group(0) @binding(4) var<storage, read_write> irradiance_output: array<f32>;
 @group(0) @binding(5) var<storage, read> probe_update_list: array<u32>;
 
 // ============================================================================
@@ -184,7 +187,8 @@ fn ddgi_update_irradiance(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
     }
 
     // Temporal blend with history
-    let probeBase: u32 = probeIdx * 9u;
+    // 9 coeffs * 3 floats = 27 float slots per probe in the packed layout.
+    let probeBase: u32 = probeIdx * 27u;
 
     // Smooth alpha ramp: 1.0 → ProbeHysteresis over ~60 frames
     let rampFrames: f32 = 60.0;
@@ -197,10 +201,14 @@ fn ddgi_update_irradiance(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
     let l2Limit: f32 = max(length(sh0) * 2.0, 0.05);
 
     for (var i: u32 = 0u; i < 9u; i++) {
-        // Read history with NaN guard.
+        // Read history (packed float[3] per coeff) with NaN guard.
         // (Tint rejects isnan/isinf; inspect exponent bits manually.)
         // bitcast<u32> is the WGSL equivalent of Metal's as_type<uint>.
-        var history: vec3<f32> = irradiance_history[probeBase + i];
+        let coeffBase: u32 = probeBase + i * 3u;
+        var history: vec3<f32> = vec3<f32>(
+            irradiance_history[coeffBase + 0u],
+            irradiance_history[coeffBase + 1u],
+            irradiance_history[coeffBase + 2u]);
         let bits_x: u32 = bitcast<u32>(history.x);
         let bits_y: u32 = bitcast<u32>(history.y);
         let bits_z: u32 = bitcast<u32>(history.z);
@@ -231,6 +239,9 @@ fn ddgi_update_irradiance(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
             }
         }
 
-        irradiance_output[probeBase + i] = filtered;
+        // Packed write: 3 floats per coeff.
+        irradiance_output[coeffBase + 0u] = filtered.x;
+        irradiance_output[coeffBase + 1u] = filtered.y;
+        irradiance_output[coeffBase + 2u] = filtered.z;
     }
 }

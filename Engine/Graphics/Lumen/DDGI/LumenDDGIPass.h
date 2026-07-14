@@ -107,7 +107,10 @@ struct DDGIVolumeData {
     u32      SdfResolutions[3];       // offset 256
     u32      SdfCascadeCount;         // offset 268
     math::v4 LightDirection;          // offset 272: xyz = light dir, w unused
-    math::v4 LightColor;              // offset 288: xyz = light color, w unused
+    math::v4 LightColor;              // offset 288: xyz = light color, w = intensity
+    // Mode 11 (MeshletDynamicDDGI) canonical radiance inputs — match bake's ProbeBakingScene
+    math::v4 SkyColor;                // offset 304: xyz = sky color, w unused
+    math::v4 Albedo;                  // offset 320: xyz = uniform albedo, w unused
 };
 
 // ============================================================================
@@ -163,8 +166,8 @@ public:
     const DDGIVolumeData& GetVolumeData() const { return volume_data_; }
 
     // Accessors for Surface Cache → DDGI integration
-    rhi::ResourceHandle GetProbeUpdateListBuffer() const {
-        return probe_update_list_buffer_;
+    rhi::ResourceHandle GetProbeUpdateListBuffer(u32 frame_idx) const {
+        return probe_update_list_buffer_[frame_idx % 3];
     }
 
     // Update probe origin to follow camera (grid-snapped).
@@ -173,6 +176,14 @@ public:
 
     // Set static probe volume for initialization from bake data
     void SetStaticProbeVolume(StaticProbeVolume* volume) { static_volume_ = volume; }
+
+    // Mode 11 (MeshletDynamicDDGI): when true, runtime TraceRays/UpdateIrradiance/
+    // UpdateDepth run every frame even when a static_volume_ is loaded. The static
+    // data still seeds the history buffers (InitializeProbesFromStatic copies it
+    // into all 3 triple-buffered irradiance_buffers_), then runtime traces EMA-
+    // blend toward canonical dynamic DDGI. Mode 10 leaves this false to preserve
+    // the static bake indefinitely.
+    void SetDynamicMode(bool enabled) { dynamic_mode_ = enabled; }
 
 private:
     void CreateDescriptorSetLayouts();
@@ -237,11 +248,20 @@ private:
 
     // Probe state tracking (importance-based partial update)
     std::vector<DDGIProbeState> probe_states_;
-    rhi::ResourceHandle probe_update_list_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // Triple-buffered: CPU writes frameIdx's copy while GPU reads previous frames' copies.
+    // Single-buffer caused an intermittent CPU-GPU race — CPU overwrote the update list
+    // while GPU threads were still reading it from the prior frame's dispatch, corrupting
+    // probe index lookups and producing screen-filling solid color in Mode 10.
+    rhi::ResourceHandle probe_update_list_buffer_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
     u32 max_probes_per_frame_ = 256;
 
     // Static probe volume reference (for initialization from bake data)
     StaticProbeVolume* static_volume_{nullptr};
+
+    // Mode 11 flag — see SetDynamicMode comment. False = Mode 10 (static-bake only).
+    bool dynamic_mode_{false};
 };
 
 } // namespace primal::graphics::lumen

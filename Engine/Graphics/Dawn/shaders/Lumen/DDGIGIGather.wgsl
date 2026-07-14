@@ -58,11 +58,23 @@ const _C2_2: f32 = 0.546274;
 @group(0) @binding(1) var gbuffer_normal:  texture_2d<f32>;
 @group(0) @binding(2) var output_tex:      texture_storage_2d<rgba16float, write>;
 
-@group(0) @binding(3) var<uniform> inv_view_proj:       mat4x4<f32>;
-@group(0) @binding(4) var<uniform> probe_origin_spacing: vec4<f32>;
-@group(0) @binding(5) var<uniform> probe_counts:         vec4<f32>;
-@group(0) @binding(6) var<storage, read> irradiance_buffer: array<vec3<f32>>;
-@group(0) @binding(7) var<storage, read> ddgi_depth_buffer:  array<f32>;
+// Single uniform block at binding 3 — packs inv_view_proj (64B) +
+// probe_origin_spacing (16B) + probe_counts (16B) = 96B. WebGPU
+// requires uniform buffer *offsets* to be 256-byte aligned, so binding
+// the same CB at offsets 0/64/80 across 3 slots is invalid. Merging
+// into one struct at one binding sidesteps the constraint.
+struct GIGatherCB {
+    inv_view_proj:       mat4x4<f32>,
+    probe_origin_spacing: vec4<f32>,
+    probe_counts:         vec4<f32>,
+};
+
+@group(0) @binding(3) var<uniform> cb: GIGatherCB;
+// Packed float[] layout: 9 coeffs/probe * 3 floats/coeff = 27 floats/probe (12-byte stride).
+// array<vec3<f32>> would use 16-byte stride (WGSL host-shareable alignment) and
+// misread the buffer the C++ side allocated at 12-byte stride.
+@group(0) @binding(4) var<storage, read> irradiance_buffer: array<f32>;
+@group(0) @binding(5) var<storage, read> ddgi_depth_buffer:  array<f32>;
 
 // ============================================================================
 // SH helpers
@@ -260,13 +272,13 @@ fn ddgi_gi_gather(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
 
     // --- Reconstruct world position ---
     let ndc: vec2<f32> = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    let wp: vec4<f32> = inv_view_proj * vec4<f32>(ndc, depth, 1.0);
+    let wp: vec4<f32> = cb.inv_view_proj * vec4<f32>(ndc, depth, 1.0);
     let worldPos: vec3<f32> = wp.xyz / wp.w;
 
     // --- Probe grid params ---
-    let origin:  vec3<f32> = probe_origin_spacing.xyz;
-    let spacing: f32       = probe_origin_spacing.w;
-    let counts:  vec3<u32> = vec3<u32>(probe_counts.xyz);
+    let origin:  vec3<f32> = cb.probe_origin_spacing.xyz;
+    let spacing: f32       = cb.probe_origin_spacing.w;
+    let counts:  vec3<u32> = vec3<u32>(cb.probe_counts.xyz);
 
     let gp: vec3<f32> = (worldPos - origin) / spacing;
     let gridMax: vec3<f32> = vec3<f32>(
@@ -310,11 +322,15 @@ fn ddgi_gi_gather(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
         let fromProbeDir: vec3<f32> = normalize(biasedPos - probePos);
         let distToProbe: f32 = length(biasedPos - probePos);
 
-        // Read irradiance L0+L1
-        let base: u32 = tet.pi[p] * 9u;
+        // Read irradiance L0+L1 (packed float[3] per coeff).
+        let base: u32 = tet.pi[p] * 27u;  // 9 coeffs * 3 floats per coeff
         var sh: array<vec3<f32>, 4>;
         for (var i: u32 = 0u; i < 4u; i++) {
-            sh[i] = irradiance_buffer[base + i];
+            let cb_i: u32 = base + i * 3u;
+            sh[i] = vec3<f32>(
+                irradiance_buffer[cb_i + 0u],
+                irradiance_buffer[cb_i + 1u],
+                irradiance_buffer[cb_i + 2u]);
         }
         let irradiance: vec3<f32> = shDot4(sh, normal);
 
@@ -344,14 +360,26 @@ fn ddgi_gi_gather(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
     if (totalWeight > 0.0) {
         result = result / totalWeight;
     } else {
-        // Fallback: use best probe at reduced strength — always produce SOME indirect light
-        result = bestIrradiance * 0.3;
+        // Fallback: use best probe at full strength. The previous 0.3 multiplier
+        // suppressed indirect light so heavily that DDGI was invisible.
+        result = bestIrradiance;
+    }
+    // Sanitize: probe storage can contain NaN/Inf if the static bake or runtime
+    // update wrote bad values; one NaN texel would propagate through deferred
+    // lighting + TAA into a screen-filling solid colour.
+    let anyNaN: bool = (result.x != result.x) || (result.y != result.y) || (result.z != result.z);
+    let anyInf: bool = any(abs(result) > vec3<f32>(3.4e38));
+    if (anyNaN || anyInf) {
+        result = vec3<f32>(0.0);
     }
     result = max(result, vec3<f32>(0.0));
-
-    // Minimum ambient floor: prevents completely black shadow areas when
-    // probe irradiance data is near-zero (radiance source lacks indirect bounce)
-    result = max(result, vec3<f32>(0.03, 0.03, 0.035));
+    // Magnitude clamp: SH reconstruction can produce values larger than any
+    // single L0 coefficient when L1 contributions align with the surface normal.
+    // Plausible indirect is ~1.0; anything above 1.5 indicates either a hot
+    // probe (bake captured direct sun leak) or L1 ringing. ACES tonemap with
+    // exposure 1.8 in DeferredLighting saturates above ~3, so capping at 1.5
+    // keeps indirect visible without driving regions to flat colour.
+    result = min(result, vec3<f32>(1.5));
 
     textureStore(output_tex, vec2<i32>(tid), vec4<f32>(result, 1.0));
 }

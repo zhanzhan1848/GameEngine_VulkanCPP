@@ -25,13 +25,17 @@ bool DawnShader::Initialize(const void* data, size_t size, ShaderStage stage, co
     stage_ = stage;
     entryPoint_ = entryPoint;
 
-    // Treat input data as WGSL source text (null-terminated string)
-    const char* wgslSource = static_cast<const char*>(data);
+    // Treat input data as WGSL source text. The caller passes (data, size)
+    // without a guaranteed null terminator (e.g. vector<u8> from file read),
+    // so construct an std::string that owns a null-terminated copy. Reading
+    // `data` as a raw C string would walk past EOF into stale memory — that
+    // previously corrupted WGSL parsing with fragments from other shaders.
+    std::string sourceStr(static_cast<const char*>(data), size);
 
     WGPUShaderSourceWGSL wgslDesc{};
     wgslDesc.chain.next = nullptr;
     wgslDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
-    wgslDesc.code = ToWGPUStringView(wgslSource);
+    wgslDesc.code = ToWGPUStringView(sourceStr.c_str());
 
     WGPUShaderModuleDescriptor moduleDesc{};
     moduleDesc.nextInChain = &wgslDesc.chain;

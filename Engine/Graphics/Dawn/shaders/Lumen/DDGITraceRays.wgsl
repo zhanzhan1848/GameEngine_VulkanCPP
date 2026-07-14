@@ -1,48 +1,55 @@
-// DDGITraceRays.wgsl — Dawn port of DDGITraceRays.metal
+// DDGITraceRays.wgsl — Dawn port of DDGITraceRays.metal (Mode 11 canonical)
 //
 // Each thread traces one ray from one probe through the GlobalSDF volume.
-// On hit, projects the hit point to screen space and samples the previous
-// frame's lit scene color (direct + shadow + albedo) as radiance.
-// Falls back to analytical sky color for off-screen hits.
-// On miss, uses sky color.
+// At hit, computes canonical DDGI outgoing radiance using:
+//   L_out = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev)
+// where:
+//   E_direct  = LightColor.rgb * LightColor.w (intensity) * max(NdotL, 0)
+//   E_sky     = SkyColor.rgb * max(N.y, 0)
+//   L_i_prev  = tetrahedral 4-probe SH (L0+L1) sample of previous-frame probe
+//               grid at the hit point — naturally yields multi-bounce GI
+//               through temporal feedback.
 //
-// Dispatch: (ProbeUpdateCount * RaysPerProbe, 1, 1)
-// WorkgroupSize: (64, 1, 1)
+// Apple Silicon scope cuts (per design plan):
+//   - No shadow ray toward sun (would double SDF cost) — direct light leaks
+//     through walls; follow-up can add single-step SDF shadow test.
+//   - No sky occlusion ray — sky contributes under arches; same follow-up.
+//   - shDot4 (L0+L1) at hit instead of shDot9 — saves buffer reads.
 //
-// === Binding layout ===
-// The Metal descriptor set uses dual namespaces: texture(0..3) and buffer(0..3).
-// DawnDescriptorSetLayout detects the collision and remaps buffer engine bindings
-// to higher WGPU slots (remapOffset = maxBinding+1 = 4).
+// Dispatch: (ProbeUpdateCount * RaysPerProbe, 1, 1) workgroups of (64, 1, 1).
 //
-//   Engine binding   Type            WGPU binding
-//   texture(0)       SampledImage    0   SDF cascade 0
-//   texture(1)       SampledImage    1   SDF cascade 1
-//   texture(2)       SampledImage    2   SDF cascade 2
-//   texture(3)       SampledImage    3   prev frame lit color
-//   buffer(0)        UniformBuffer   4   GlobalShaderData   (remapped)
-//   buffer(1)        UniformBuffer   5   DDGIVolumeData     (remapped)
-//   buffer(2)        StorageBuffer   6   ray data (output)  (remapped)
-//   buffer(3)        StorageBuffer   7   probe update list  (remapped)
-//
-// No sampler binding is declared — consistent with the project convention for
-// Dawn compute shaders (see SSGITrace.wgsl, TAA.wgsl). textureLoad is used
-// instead of textureSampleLevel. Metal uses filter::linear; the Dawn port
-// uses nearest-neighbour textureLoad for Phase A. Manual trilinear/bilinear
-// interpolation can be added in a follow-up if fidelity requires it.
+// === Binding layout (engine namespace → WGPU after Dawn remap) ===
+// Metal uses separate namespaces for texture(N) and buffer(N). Dawn detects
+// the collision and remaps buffers to higher WGPU slots. With 4 textures
+// (maxTextureBinding = 3), remapOffset = 4:
+//   texture(0)  SDF cascade 0      → WGPU 0
+//   texture(1)  SDF cascade 1      → WGPU 1
+//   texture(2)  SDF cascade 2      → WGPU 2
+//   texture(3)  prev_frame_color   → WGPU 3   (kept declared for layout
+//                                              stability; never sampled in
+//                                              Mode 11 canonical path)
+//   buffer(0)   GlobalShaderData   → WGPU 4
+//   buffer(1)   DDGIVolumeData     → WGPU 5
+//   buffer(2)   ray_buffer (rw)    → WGPU 6
+//   buffer(3)   probeUpdateList    → WGPU 7
+//   buffer(4)   irradiance_history → WGPU 8   (NEW — prev-frame probe grid)
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 const DDGI_MAX_SDF_STEPS: u32 = 128u;
-const DDGI_SKY_COLOR: vec3f = vec3f(0.3, 0.3, 0.35);
+
+// SH constants (mirror DDGIGIGather.wgsl). L0+L1 reconstruction only —
+// L2 would add 5 more coeff reads per probe (4 probes × 5 = 20 extra buffer
+// reads), pushing past the Apple Silicon ~32 buffer reads/thread budget.
+const _C0: f32 = 0.282095;
+const _C1: f32 = 0.488603;
 
 // ============================================================================
-// Struct definitions (inlined from DDGIVolumeData.metal / CommonTypes.metal)
+// Struct definitions — must match C++ side
 // ============================================================================
 
-// GlobalShaderData — must match CommonTypes.wgsl / C++ GlobalShaderData.
-// Only PreviousViewProjection is used by the trace kernel.
 struct GlobalShaderData {
     View:               mat4x4<f32>,
     Projection:         mat4x4<f32>,
@@ -58,20 +65,15 @@ struct GlobalShaderData {
     _padding: u32,
 };
 
-// DDGIVolumeData — must match C++ DDGIVolumeData struct in LumenDDGIPass.cpp
-// (LumenDDGIPass.h lines 70-111). Every offset is reproduced below.
-// WGSL uniform layout rules (std140-equivalent) require care:
-//   - vec3/vec4 fields force 16-byte alignment on the next field.
-//   - array<T,N> has stride roundUp(16, sizeof(T)) — so array<u32,3> would
-//     balloon to 48 bytes. We avoid arrays of scalars and pack the three
-//     SdfResolutions + SdfCascadeCount into a single vec4<u32>.
+// DDGIVolumeData — matches LumenDDGIPass.h DDGIVolumeData layout byte-for-byte.
+// SkyColor + Albedo at offsets 304/320 are Mode 11 additions.
 struct DDGIVolumeData {
-    ProbeOrigin: vec4<f32>,            //   0: xyz = origin, w unused
+    ProbeOrigin: vec4<f32>,            //   0
     ProbeSpacing: f32,                 //  16
-    _pad_before_counts_0: f32,         //  20  explicit 12-byte pad
+    _pad_before_counts_0: f32,         //  20
     _pad_before_counts_1: f32,         //  24
     _pad_before_counts_2: f32,         //  28
-    ProbeCounts: vec4<u32>,            //  32: xyz = Nx,Ny,Nz, w unused
+    ProbeCounts: vec4<u32>,            //  32
     RaysPerProbe: u32,                 //  48
     ProbeCountTotal: u32,              //  52
     IrradianceBlurSigma: f32,          //  56
@@ -79,54 +81,44 @@ struct DDGIVolumeData {
     DeltaTime: f32,                    //  64
     FrameIndex: u32,                   //  68
     RayMaxDistance: f32,               //  72
-    ProbeHysteresis: f32,             //  76
-    TemporalAlpha: f32,               //  80
-    ProbeUpdateCount: u32,            //  84
-    _pad_before_relocation: f32,      //  88
-    // ProbeRelocationShift is int[3] in C++ at offset 92 (12 bytes).
-    // Use three i32 scalars to avoid vec3 16-byte alignment pushing SdfOrigins.
-    ProbeRelocationShiftX: i32,       //  92
-    ProbeRelocationShiftY: i32,       //  96
-    ProbeRelocationShiftZ: i32,       // 100
-    _pad_to_sdf_0: f32,               // 104  8-byte pad → SdfOrigins at 112
-    _pad_to_sdf_1: f32,               // 108
-    // GlobalSDF cascade data (3 cascades)
-    SdfOrigins: array<vec4<f32>, 3>,    // 112  (stride 16, matches v4)
-    SdfVoxelSizes: array<vec4<f32>, 3>, // 160
-    SdfExtents: array<vec4<f32>, 3>,    // 208
-    // C++ has u32 SdfResolutions[3] at 256 + u32 SdfCascadeCount at 268.
-    // WGSL array<u32,3> would use stride 16 (48 bytes) in a uniform — wrong.
-    // Pack [res0, res1, res2, cascadeCount] into one vec4<u32>.
-    SdfResolutionsAndCount: vec4<u32>,  // 256: xyz = resolutions, w = cascade count
-    LightDirection: vec4<f32>,          // 272: xyz = light dir, w unused
-    LightColor: vec4<f32>,              // 288: xyz = light color, w unused
+    ProbeHysteresis: f32,              //  76
+    TemporalAlpha: f32,                //  80
+    ProbeUpdateCount: u32,             //  84
+    _pad_before_relocation: f32,       //  88
+    ProbeRelocationShiftX: i32,        //  92
+    ProbeRelocationShiftY: i32,        //  96
+    ProbeRelocationShiftZ: i32,        // 100
+    _pad_to_sdf_0: f32,                // 104
+    _pad_to_sdf_1: f32,                // 108
+    SdfOrigins: array<vec4<f32>, 3>,   // 112
+    SdfVoxelSizes: array<vec4<f32>, 3>,// 160
+    SdfExtents: array<vec4<f32>, 3>,   // 208
+    SdfResolutionsAndCount: vec4<u32>, // 256
+    LightDirection: vec4<f32>,         // 272
+    LightColor: vec4<f32>,             // 288  (.w = intensity)
+    SkyColor: vec4<f32>,               // 304  (Mode 11)
+    Albedo: vec4<f32>,                 // 320  (Mode 11)
 };
 
-// DDGIRayData — storage buffer element.
-// Layout: ray_buffer[probeIdx * RaysPerProbe + rayIdx]
 struct DDGIRayData {
-    radiance_and_dist: vec4<f32>,  // xyz = radiance, w = hit_distance
+    radiance_and_dist: vec4<f32>,
 };
 
-// SDFHitResult — internal trace result (function-local, never in a buffer,
-// so field ordering is chosen for clarity rather than packing).
 struct SDFHitResult {
-    hit: u32,         // 0 = miss, 1 = hit
+    hit: u32,
     distance: f32,
     position: vec3<f32>,
     normal: vec3<f32>,
 };
 
 // ============================================================================
-// Helpers (from DDGIVolumeData.metal)
+// Existing helpers (Fibonacci direction, probe grid coord, SDF sampling/trace)
 // ============================================================================
 
-// Extract probe counts as vec3 from the packed vec4<u32>
 fn ddgiGetProbeCounts(vol: ptr<uniform, DDGIVolumeData>) -> vec3<u32> {
     return vec3<u32>((*vol).ProbeCounts.xyz);
 }
 
-// Fibonacci sphere ray direction
 fn ddgiRayDirection(rayIndex: u32, rayCount: u32, frameIndex: u32) -> vec3<f32> {
     let INV_PHI: f32 = 0.6180339887498948482;
     let PI: f32 = 3.14159265358979323846;
@@ -150,38 +142,25 @@ fn ddgiProbeWorldPos(gc: vec3<u32>, origin: vec3<f32>, spacing: f32) -> vec3<f32
     return origin + vec3<f32>(f32(gc.x), f32(gc.y), f32(gc.z)) * spacing;
 }
 
-// Convenience accessor for SdfCascadeCount (packed in SdfResolutionsAndCount.w)
 fn sdfCascadeCount(vol: ptr<uniform, DDGIVolumeData>) -> u32 {
     return (*vol).SdfResolutionsAndCount.w;
 }
 
-// ============================================================================
-// SDF Sampling Helpers (ported from DDGITraceRays.metal)
-// ============================================================================
-
-// Nearest-neighbour SDF cascade sample via textureLoad.
-// Metal uses filter::linear; Phase A Dawn port uses nearest for simplicity.
-// Manual trilinear interpolation can be added later if fidelity requires it.
 fn sampleSDFCascade(sdfTexture: texture_3d<f32>,
                     worldPos: vec3<f32>,
                     cascadeOrigin: vec3<f32>,
                     cascadeExtent: vec3<f32>,
                     resolution: u32) -> f32 {
     let uvw: vec3<f32> = (worldPos - cascadeOrigin) / cascadeExtent;
-
     if (uvw.x < 0.0 || uvw.x > 1.0 ||
         uvw.y < 0.0 || uvw.y > 1.0 ||
         uvw.z < 0.0 || uvw.z > 1.0) {
         return 1.0e10;
     }
-
-    // Convert normalized [0,1] to nearest texel coordinate.
-    // Clamp to [0, resolution-1] to avoid OOB reads.
     let resI: i32 = i32(resolution);
     let tx: i32 = clamp(i32(uvw.x * f32(resI)), 0, resI - 1);
     let ty: i32 = clamp(i32(uvw.y * f32(resI)), 0, resI - 1);
     let tz: i32 = clamp(i32(uvw.z * f32(resI)), 0, resI - 1);
-
     return textureLoad(sdfTexture, vec3<i32>(tx, ty, tz), 0).r;
 }
 
@@ -192,7 +171,6 @@ fn isInsideCascade(pos: vec3<f32>, origin: vec3<f32>, extent: vec3<f32>) -> bool
            local.z >= 0.0 && local.z < extent.z;
 }
 
-// Sample the best available SDF cascade at a position
 fn sampleBestSDF(pos: vec3<f32>,
                  sdf0: texture_3d<f32>,
                  sdf1: texture_3d<f32>,
@@ -220,10 +198,6 @@ fn sampleBestSDF(pos: vec3<f32>,
     }
     return d;
 }
-
-// ============================================================================
-// Sphere Tracing
-// ============================================================================
 
 fn traceSDF(rayOrigin: vec3<f32>,
             rayDir: vec3<f32>,
@@ -283,7 +257,6 @@ fn traceSDF(rayOrigin: vec3<f32>,
             result.position = pos;
             result.distance = t;
 
-            // Compute surface normal from SDF gradient (central differences)
             let eps: f32 = max((*vol).SdfVoxelSizes[0].x, 0.01);
             let gradient: vec3<f32> = vec3<f32>(
                 sampleBestSDF(pos + vec3<f32>(eps, 0.0, 0.0), sdf0, sdf1, sdf2, vol) -
@@ -305,18 +278,179 @@ fn traceSDF(rayOrigin: vec3<f32>,
 }
 
 // ============================================================================
-// Bindings — see layout table at file top
+// Tetrahedral 4-probe SH interpolation (ported from DDGIGIGather.wgsl)
+// Used here to sample previous-frame probe grid at SDF hit position for
+// L_i_prev in the canonical DDGI radiance formula.
+// ============================================================================
+
+struct TetraResult {
+    pi: array<u32, 4>,
+    bw: array<f32, 4>,
+};
+
+fn tetrahedral(gp: vec3<f32>, gd: vec3<u32>) -> TetraResult {
+    var r: TetraResult;
+    let b0: vec3<u32> = clamp(vec3<u32>(floor(gp)), vec3<u32>(0u), gd - 1u);
+    let b1: vec3<u32> = min(b0 + 1u, gd - 1u);
+    let gx: u32 = gd.x;
+    let gxy: u32 = gd.x * gd.y;
+
+    var p: array<u32, 8>;
+    p[0] = b0.x + b0.y * gx + b0.z * gxy;
+    p[1] = b1.x + b0.y * gx + b0.z * gxy;
+    p[2] = b0.x + b1.y * gx + b0.z * gxy;
+    p[3] = b1.x + b1.y * gx + b0.z * gxy;
+    p[4] = b0.x + b0.y * gx + b1.z * gxy;
+    p[5] = b1.x + b0.y * gx + b1.z * gxy;
+    p[6] = b0.x + b1.y * gx + b1.z * gxy;
+    p[7] = b1.x + b1.y * gx + b1.z * gxy;
+
+    let fx: f32 = fract(gp.x);
+    let fy: f32 = fract(gp.y);
+    let fz: f32 = fract(gp.z);
+
+    if (fx >= fy && fy >= fz) {
+        r.pi[0] = p[0]; r.pi[1] = p[1]; r.pi[2] = p[3]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fx; r.bw[1] = fx - fy; r.bw[2] = fy - fz; r.bw[3] = fz;
+    } else if (fx >= fz && fz >= fy) {
+        r.pi[0] = p[0]; r.pi[1] = p[1]; r.pi[2] = p[5]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fx; r.bw[1] = fx - fz; r.bw[2] = fz - fy; r.bw[3] = fy;
+    } else if (fy >= fx && fx >= fz) {
+        r.pi[0] = p[0]; r.pi[1] = p[2]; r.pi[2] = p[3]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fy; r.bw[1] = fy - fx; r.bw[2] = fx - fz; r.bw[3] = fz;
+    } else if (fy >= fz && fz >= fx) {
+        r.pi[0] = p[0]; r.pi[1] = p[2]; r.pi[2] = p[6]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fy; r.bw[1] = fy - fz; r.bw[2] = fz - fx; r.bw[3] = fx;
+    } else if (fz >= fx && fx >= fy) {
+        r.pi[0] = p[0]; r.pi[1] = p[4]; r.pi[2] = p[5]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fz; r.bw[1] = fz - fx; r.bw[2] = fx - fy; r.bw[3] = fy;
+    } else {
+        r.pi[0] = p[0]; r.pi[1] = p[4]; r.pi[2] = p[6]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fz; r.bw[1] = fz - fy; r.bw[2] = fy - fx; r.bw[3] = fx;
+    }
+
+    for (var i: u32 = 0u; i < 4u; i++) {
+        r.bw[i] = max(r.bw[i], 0.0);
+    }
+    return r;
+}
+
+// L0+L1 SH dot product (4 coefficients). Same as DDGIGIGather.wgsl:86-94.
+fn shDot4(c: array<vec3<f32>, 4>, d: vec3<f32>) -> vec3<f32> {
+    return c[0] * _C0
+         + c[1] * (-_C1 * d.y)
+         + c[2] * ( _C1 * d.z)
+         + c[3] * (-_C1 * d.x);
+}
+
+// ============================================================================
+// Previous-frame probe grid sample at SDF hit position
+// ============================================================================
+
+// Tetrahedral 4-probe interpolation of prev-frame irradiance SH (L0+L1 only)
+// folded into surface normal N. Returns the average incoming radiance L_i_avg
+// at the hit point from the previous frame's probe data.
+//
+// Outside the probe grid: returns vec3(0) — no prev bounce contribution.
+// This naturally handles hits outside the DDGI volume (e.g. far-away sky
+// occluders); canonical DDGI simply has no prior bounce data there.
+fn samplePrevProbeGrid(pos: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+    let origin: vec3<f32> = volume.ProbeOrigin.xyz;
+    let spacing: f32 = volume.ProbeSpacing;
+    let counts: vec3<u32> = ddgiGetProbeCounts(&volume);
+    let gp: vec3<f32> = (pos - origin) / spacing;
+    let gridMax: vec3<f32> = vec3<f32>(
+        f32(counts.x - 1u),
+        f32(counts.y - 1u),
+        f32(counts.z - 1u),
+    );
+    if (any(gp < vec3<f32>(0.0)) || any(gp > gridMax)) {
+        return vec3<f32>(0.0);
+    }
+
+    let tet: TetraResult = tetrahedral(gp, counts);
+
+    var result: vec3<f32> = vec3<f32>(0.0);
+    var totalWeight: f32 = 0.0;
+
+    // Packed float[] layout: 9 coeffs/probe * 3 floats/coeff = 27 floats/probe
+    // (12-byte stride — array<vec3<f32>> would silently use 16-byte stride).
+    for (var p: u32 = 0u; p < 4u; p++) {
+        if (tet.bw[p] < 0.001) { continue; }
+        let base: u32 = tet.pi[p] * 27u;
+        var sh: array<vec3<f32>, 4>;
+        for (var i: u32 = 0u; i < 4u; i++) {
+            let cb_i: u32 = base + i * 3u;
+            sh[i] = vec3<f32>(
+                irradiance_history[cb_i + 0u],
+                irradiance_history[cb_i + 1u],
+                irradiance_history[cb_i + 2u]);
+        }
+        let irradiance: vec3<f32> = shDot4(sh, N);
+        result = result + irradiance * tet.bw[p];
+        totalWeight = totalWeight + tet.bw[p];
+    }
+
+    if (totalWeight > 0.0) {
+        return result / totalWeight;
+    }
+    return vec3<f32>(0.0);
+}
+
+// ============================================================================
+// Bindings
 // ============================================================================
 
 @group(0) @binding(0) var sdf_cascade_0: texture_3d<f32>;
 @group(0) @binding(1) var sdf_cascade_1: texture_3d<f32>;
 @group(0) @binding(2) var sdf_cascade_2: texture_3d<f32>;
+// Binding 3 (prev_frame_color) is declared but never sampled in Mode 11.
+// Removing it would drop maxTextureBinding from 3 to 2, shifting all buffer
+// WGPU bindings down by 1 and breaking the irradiance_history layout.
 @group(0) @binding(3) var prev_frame_color: texture_2d<f32>;
 
 @group(0) @binding(4) var<uniform> globalData: GlobalShaderData;
 @group(0) @binding(5) var<uniform> volume: DDGIVolumeData;
 @group(0) @binding(6) var<storage, read_write> ray_buffer: array<DDGIRayData>;
 @group(0) @binding(7) var<storage, read> probeUpdateList: array<u32>;
+// Mode 11 NEW: previous-frame irradiance for canonical L_i_prev lookup.
+@group(0) @binding(8) var<storage, read> irradiance_history: array<f32>;
+// Mode 11 per-vertex albedo: GBuffer albedo sampled at SDF hit position.
+// Colored surfaces (fabric, painted walls) bounce colored light — this is
+// what makes multi-bounce GI visibly distinct from single-bounce seed.
+// Fallback to volume.Albedo when hit is outside camera frustum.
+@group(0) @binding(9) var gbuffer_albedo: texture_2d<f32>;
+
+// ============================================================================
+// Hit-position → GBuffer albedo lookup (canonical per-surface albedo)
+// ============================================================================
+
+// Projects the SDF hit position back to camera screen space, samples the
+// GBuffer albedo texture. Falls back to volume.Albedo when the hit is
+// outside the camera frustum (e.g. behind camera, beyond far plane).
+// This is what makes Mode 11 visibly distinct from Mode 10: colored
+// surfaces (green/pink/blue fabric in Sponza) bounce colored light.
+fn sampleHitAlbedo(hitPos: vec3<f32>) -> vec3<f32> {
+    let clip: vec4<f32> = globalData.ViewProjection * vec4<f32>(hitPos, 1.0);
+    if (clip.w <= 0.0) {
+        return volume.Albedo.xyz;
+    }
+    let ndc: vec3<f32> = clip.xyz / clip.w;
+    // Frustum cull: NDC x/y in [-1, 1], z in [0, 1] (WebGPU depth range).
+    if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return volume.Albedo.xyz;
+    }
+    // V-flip: WebGPU NDC is Y-up, texture (0,0) is top-left. Matches
+    // DDGIGIGather.wgsl:274 reverse projection convention.
+    let uv: vec2<f32> = vec2<f32>(
+        ndc.x * 0.5 + 0.5,
+        1.0 - (ndc.y * 0.5 + 0.5),
+    );
+    let dims: vec2<u32> = textureDimensions(gbuffer_albedo);
+    let tx: i32 = clamp(i32(uv.x * f32(dims.x)), 0, i32(dims.x) - 1);
+    let ty: i32 = clamp(i32(uv.y * f32(dims.y)), 0, i32(dims.y) - 1);
+    return textureLoad(gbuffer_albedo, vec2<i32>(tx, ty), 0).rgb;
+}
 
 // ============================================================================
 // Main Kernel: ddgi_trace_rays
@@ -333,7 +467,6 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
     let localProbeIdx: u32 = gid / volume.RaysPerProbe;
     let localRayIdx: u32 = gid % volume.RaysPerProbe;
 
-    // Map sparse update index to real probe index
     let probeIdx: u32 = probeUpdateList[localProbeIdx];
 
     let counts: vec3<u32> = ddgiGetProbeCounts(&volume);
@@ -342,7 +475,6 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
 
     let rayDir: vec3<f32> = ddgiRayDirection(localRayIdx, volume.RaysPerProbe, volume.FrameIndex);
 
-    // Trace ray through SDF
     var hit: SDFHitResult = traceSDF(
         probePos, rayDir, volume.RayMaxDistance,
         sdf_cascade_0, sdf_cascade_1, sdf_cascade_2, &volume);
@@ -350,41 +482,39 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
     var result: DDGIRayData;
 
     if (hit.hit != 0u) {
-        result.radiance_and_dist.w = hit.distance;
+        let N: vec3<f32> = hit.normal;
+        let hitPos: vec3<f32> = hit.position;
+        let PI: f32 = 3.14159265358979;
 
-        // Off-screen fallback: conservative sky color only.
-        // Surface Cache will replace this with proper off-screen radiance.
-        let analyticalRadiance: vec3<f32> = DDGI_SKY_COLOR;
+        // E_direct: analytic sun irradiance — no shadow ray (Apple Silicon
+        // scope cut). Direct light will leak through walls; documented as
+        // known trade-off in the Mode 11 plan.
+        let L: vec3<f32> = normalize(-volume.LightDirection.xyz);
+        let NdotL: f32 = max(0.0, dot(N, L));
+        let lightIntensity: f32 = volume.LightColor.w;
+        let E_direct: vec3<f32> = volume.LightColor.xyz * lightIntensity * NdotL;
 
-        // Project hit position to previous frame screen space
-        let prevClip: vec4<f32> = globalData.PreviousViewProjection * vec4<f32>(hit.position, 1.0);
-        if (prevClip.w > 0.0) {
-            var prevUV: vec2<f32> = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
-            prevUV.y = 1.0 - prevUV.y;
+        // E_sky: hemispherical sky irradiance weighted by NdotUp — no
+        // occlusion ray (same scope cut). Sky contributes even under arches.
+        let NdotUp: f32 = max(0.0, N.y);
+        let E_sky: vec3<f32> = volume.SkyColor.xyz * NdotUp;
 
-            // Smooth fade: full screen-space at center, blend to analytical at edges
-            let edgeDist: vec2<f32> = abs(prevUV - vec2<f32>(0.5)) * 2.0;
-            let edgeFade: f32 = clamp(1.0 - (max(edgeDist.x, edgeDist.y) - 0.85) / 0.15, 0.0, 1.0);
+        // L_i_prev: prev-frame probe grid sample — multi-bounce GI emerges
+        // from temporal feedback through this lookup.
+        let L_i_prev: vec3<f32> = samplePrevProbeGrid(hitPos, N);
 
-            if (edgeFade > 0.0) {
-                // Nearest-neighbour textureLoad (Phase A).
-                // Manual bilinear can be added later if fidelity requires it.
-                let dims: vec2<u32> = textureDimensions(prev_frame_color);
-                let clampedUV: vec2<f32> = clamp(prevUV, vec2<f32>(0.0), vec2<f32>(1.0));
-                let tx: i32 = clamp(i32(clampedUV.x * f32(dims.x)), 0, i32(dims.x) - 1);
-                let ty: i32 = clamp(i32(clampedUV.y * f32(dims.y)), 0, i32(dims.y) - 1);
-                let screenRadiance: vec3<f32> = textureLoad(prev_frame_color, vec2<i32>(tx, ty), 0).xyz;
-                result.radiance_and_dist.xyz = mix(analyticalRadiance, screenRadiance, vec3<f32>(edgeFade));
-            } else {
-                result.radiance_and_dist.xyz = analyticalRadiance;
-            }
-        } else {
-            result.radiance_and_dist.xyz = analyticalRadiance;
-        }
+        // Canonical DDGI Lambertian reflected radiance:
+        //   L_out = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev)
+        // albedo is sampled per-hit from GBuffer (canonical per-surface albedo
+        // → colored bounce light). Falls back to volume.Albedo when the hit is
+        // outside the camera frustum (probes behind camera see no GBuffer).
+        let albedo: vec3<f32> = sampleHitAlbedo(hitPos);
+        let L_out: vec3<f32> = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev);
+
+        result.radiance_and_dist = vec4<f32>(L_out, hit.distance);
     } else {
-        // Miss: negative distance signals miss
-        result.radiance_and_dist.w = -1.0;
-        result.radiance_and_dist.xyz = DDGI_SKY_COLOR;
+        // Miss: ray escaped to sky.
+        result.radiance_and_dist = vec4<f32>(volume.SkyColor.xyz, -1.0);
     }
 
     ray_buffer[probeIdx * volume.RaysPerProbe + localRayIdx] = result;

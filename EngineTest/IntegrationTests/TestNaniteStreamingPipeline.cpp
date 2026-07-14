@@ -3611,7 +3611,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         {3, rhi::DescriptorType::StorageBuffer, sc_card_radiance_buf_},
                         {4, rhi::DescriptorType::StorageBuffer, ddgiPass_->GetIrradianceBuffer(histIdx)},
                         {5, rhi::DescriptorType::StorageBuffer, ddgiPass_->GetIrradianceBuffer(frameIdx)},
-                        {6, rhi::DescriptorType::StorageBuffer, ddgiPass_->GetProbeUpdateListBuffer()},
+                        {6, rhi::DescriptorType::StorageBuffer, ddgiPass_->GetProbeUpdateListBuffer(frameIdx)},
                     };
                     UpdateDescriptorSet(device_, sc_probe_irr_ds_[frameIdx], params, 7);
 

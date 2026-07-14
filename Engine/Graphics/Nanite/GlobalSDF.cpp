@@ -170,9 +170,20 @@ void GlobalSDF::UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& sn
     if (!cascade.is_valid) {
         return;
     }
-    
-    cascade.origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
-    
+
+    math::v3 new_origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
+    // Mark re-voxelization needed only when the snapped grid cell changes.
+    // For static scenes this is rare (cascade_size is 60/120/240m), so the
+    // per-frame voxelization cost collapses to ~0 after the initial fill.
+    if (!cascade.ever_voxelized || new_origin.x != cascade.origin.x
+                                || new_origin.y != cascade.origin.y
+                                || new_origin.z != cascade.origin.z) {
+        cascade.needs_voxelization = true;
+    } else {
+        cascade.needs_voxelization = false;
+    }
+    cascade.origin = new_origin;
+
     cascade.extent = math::v3{
         cascade.resolution * cascade.voxel_size,
         cascade.resolution * cascade.voxel_size,
@@ -270,6 +281,11 @@ const SDFCascade& GlobalSDF::GetCascade(u32 index) const {
         return invalid_cascade;
     }
     return cascades_[index];
+}
+
+bool GlobalSDF::CascadeNeedsVoxelization(u32 index) const {
+    if (index >= cascades_.size()) return false;
+    return cascades_[index].needs_voxelization;
 }
 
 // ============================================================================
@@ -396,6 +412,9 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
     if (isDawn) {
         // WebGPU/WGSL bindings — see GlobalSDFVoxelization.wgsl header comment.
+        // F2 (2026-07-13): storage texture is R32Float 3D (was RGBA16Float 2D).
+        // All storage buffers are read-only in WGSL (`var<storage, read>`) — must
+        // mark readonly=true or Dawn validation rejects the pipeline.
         rhi::DescriptorSetLayoutBinding bindings[] = {
             {0, rhi::DescriptorType::StorageImage,  1, rhi::ShaderStage::Compute, nullptr},  // sdf_output
             {1, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // CascadeUniforms
@@ -406,6 +425,14 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
             {6, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // cluster_map
             {7, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // instance_data
         };
+        bindings[0].format = rhi::DataFormat::R32_Float;
+        bindings[0].is3D   = true;
+        bindings[2].readonly = true;
+        bindings[3].readonly = true;
+        bindings[4].readonly = true;
+        bindings[5].readonly = true;
+        bindings[6].readonly = true;
+        bindings[7].readonly = true;
         rhi::DescriptorSetLayoutDesc layoutDesc{8, bindings};
         vox_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     } else {
@@ -478,8 +505,14 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
     if (!voxelization_ready_ || !cmd) return;
     if (cascade_index >= cascades_.size()) return;
 
-    const auto& cascade = cascades_[cascade_index];
+    auto& cascade = cascades_[cascade_index];
     if (!cascade.is_valid || cascade.sdf_texture == rhi::handles::INVALID_RESOURCE) return;
+
+    // Record the dispatch for this cascade and mark it satisfied until the
+    // next origin snap. One-shot semantics: each origin change records exactly
+    // one dispatch.
+    cascade.needs_voxelization = false;
+    cascade.ever_voxelized     = true;
 
     // Determine frame index for triple-buffered resources
     u32 frameIdx = cascade_index % 3;

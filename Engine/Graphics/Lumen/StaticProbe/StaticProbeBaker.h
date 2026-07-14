@@ -13,6 +13,7 @@ struct ProbeBakingScene {
     math::v3 light_color{1.0f};
     float light_intensity{1.0f};
     math::v3 sky_color{0.5f, 0.7f, 1.0f};
+    math::v3 albedo{0.5f, 0.5f, 0.5f};  // TODO: per-vertex albedo from RHIMeshAsset
 };
 
 struct ProbeBakingParams {
@@ -29,28 +30,17 @@ public:
                      const ProbeBakingParams& params = {});
 
 private:
-    static void BakeDirectLighting(StaticProbeVolume& volume,
-                                   const utl::BVH& bvh,
-                                   const ProbeBakingScene& scene,
-                                   const ProbeBakingParams& params,
-                                   u32 probe_index);
-
-    static void PropagateBounce(StaticProbeVolume& volume,
-                                const ProbeBakingParams& params);
-
-    static bool CheckConvergence(StaticProbeVolume& volume,
-                                  float threshold);
+    static void BakeProbeRadiance(StaticProbeVolume& volume,
+                                  const utl::BVH& bvh,
+                                  const ProbeBakingScene& scene,
+                                  const ProbeBakingParams& params,
+                                  u32 probe_index);
 
     static void BakeVisibility(StaticProbeVolume& volume,
                                const utl::BVH& bvh,
                                const ProbeBakingScene& scene,
                                const ProbeBakingParams& params,
                                u32 probe_index);
-
-    static void BakeSkySH(StaticProbeVolume& volume,
-                           const ProbeBakingScene& scene,
-                           const ProbeBakingParams& params,
-                           u32 probe_index);
 
     static math::v3 ProbeWorldPos(u32 probe_index, u32 dim_x, u32 dim_y, u32 dim_z,
                                    math::v3 origin, float spacing);

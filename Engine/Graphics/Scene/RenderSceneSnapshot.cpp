@@ -70,7 +70,20 @@ LocalBounds ComputeLocalBounds(nanite::NaniteRuntimeResource* resource,
         return true;
     };
 
-    if (is_finite_bounds(boundsMin) && is_finite_bounds(boundsMax)) {
+    // Reject zero/degenerate bounds: gpu_mesh->GetBoundsMin/Max returns
+    // asset.sdf.bounds_min/max which are zero-initialized for meshes that
+    // weren't SDF-baked (common for test scenes). Trusting zeros makes
+    // bounds_radius=0, which causes stage1 to cull every instance whenever
+    // the world origin is even slightly behind the camera plane.
+    auto has_meaningful_extent = [](const f32* mn, const f32* mx) -> bool {
+        for (int i = 0; i < 3; ++i) {
+            if (mx[i] - mn[i] < 1e-6f) return false;
+        }
+        return true;
+    };
+
+    if (is_finite_bounds(boundsMin) && is_finite_bounds(boundsMax)
+        && has_meaningful_extent(boundsMin, boundsMax)) {
         result.center = {
             (boundsMin[0] + boundsMax[0]) * 0.5f,
             (boundsMin[1] + boundsMax[1]) * 0.5f,

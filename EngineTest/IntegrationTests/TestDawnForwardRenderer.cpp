@@ -1142,6 +1142,16 @@ void Engine_Test::RenderFrame() {
     device_->EndFrame();
     frameIndex_++;
     totalFrames_++;
+    // Diagnostics: rolling fps print every 120 frames (~2s at 60fps).
+    // Helps A/B Mode 11 vs Mode 10 without instrumenting lldb.
+    if (totalFrames_ > 0 && (totalFrames_ % 120u) == 0) {
+        static auto lastReport = std::chrono::steady_clock::now();
+        auto t1 = std::chrono::steady_clock::now();
+        float ms = std::chrono::duration<float, std::milli>(t1 - lastReport).count();
+        fprintf(stderr, "[Perf] mode=%u frames=%u 120-frame avg=%.1f ms/frame (%.1f fps)\n",
+                static_cast<u32>(renderMode_), totalFrames_, ms / 120.0f, 120000.0f / ms);
+        lastReport = t1;
+    }
 }
 
 void Engine_Test::UpdateCamera(float dt) {
@@ -2314,15 +2324,37 @@ bool Engine_Test::InitializeMeshletPipeline() {
         return false;
     }
 
-    // NOTE: GlobalSDF init on Dawn is currently broken:
-    //   - R16Float texture format is incompatible with StorageBinding
-    //   - WGSL `voxelize_sdf` entry point missing
-    //   - Descriptor layout mismatch (Storage vs Uniform)
-    // Cascading validation errors corrupt Dawn device state for ALL subsequent
-    // pipeline creation — breaking Mode 7/8/9/10/11 (entire screen solid color).
-    // LumenDDGIPass has a safety net: `if (dynamic_mode_ && !sdfAvailable) return;`
-    // so Mode 11 falls back to the static seed (looks like Mode 10). Proper
-    // GlobalSDF Dawn port is a separate task.
+    // 2a. GlobalSDF init — needed for Mode 11 canonical dynamic DDGI.
+    // F1-F4 (2026-07-13) fixed the 4 runtime blockers. S5 previously reverted
+    // this test-side call; re-adding it now that the engine side is sound.
+    // Spec: Docs/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md
+    {
+        auto& globalSDF = primal::graphics::nanite::GlobalSDF::Get();
+        primal::graphics::nanite::GlobalSDFConfig sdfConfig;
+        sdfConfig.cascade_count = 3;
+        sdfConfig.base_resolution = 60;        // matches native test (Apple Silicon budget)
+        sdfConfig.cascade_scale_factor = 2;
+        sdfConfig.voxel_size_base = 1.0f;
+
+        if (globalSDF.Initialize(device_, sdfConfig)) {
+            // Phase 2: bind GPU geometry buffers from gpuDrawPipeline
+            auto& gpuDrawPipeline_forSDF = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+            primal::graphics::nanite::SDFVoxelizationResources vox;
+            vox.vertex_buffer            = gpuDrawPipeline_forSDF.GetGlobalVertexBuffer();
+            vox.meshlet_buffer           = gpuDrawPipeline_forSDF.GetGlobalMeshletBuffer();
+            vox.meshlet_vertices_buffer  = gpuDrawPipeline_forSDF.GetGlobalMeshletVerticesBuffer();
+            vox.meshlet_triangles_buffer = gpuDrawPipeline_forSDF.GetGlobalMeshletTrianglesBuffer();
+            vox.cluster_map_buffer       = gpuDrawPipeline_forSDF.GetClusterMapBuffer();
+            vox.instance_data_buffer     = gpuDrawPipeline_forSDF.GetGlobalInstanceDataBuffer();
+            vox.num_instances            = meshletSceneSnapshot_.GetInstanceCount();
+            if (!globalSDF.InitVoxelization(vox)) {
+                std::cerr << "[GlobalSDF] InitVoxelization failed — Mode 11 falls back to static seed\n";
+            }
+        } else {
+            std::cerr << "[GlobalSDF] Init failed — Mode 11 falls back to static seed\n";
+        }
+        // Non-fatal: LumenDDGIPass safety-net handles unavailable SDF.
+    }
 
     // 2. GPUCullingPipeline (singleton)
     auto& cullingPipeline = primal::graphics::nanite::GPUCullingPipeline::Get();
@@ -3081,13 +3113,39 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
         std::cerr << "[Meshlet] GPUDrivenDrawPipeline::Execute failed" << std::endl;
     }
 
-    // --- 3a. GlobalSDF voxelization — DISABLED on Dawn ---
-    // GlobalSDF Dawn port is incomplete (R16Float+StorageBinding incompatible,
-    // missing WGSL entry point, descriptor layout mismatch). Attempting to init
-    // corrupts Dawn device state for all subsequent pipelines. LumenDDGIPass
-    // safety-net early-returns when SDF is unavailable, so Mode 11 falls back
-    // to the static seed (visually identical to Mode 10). Proper GlobalSDF
-    // Dawn port is a separate task.
+    // --- 3a. GlobalSDF voxelization (Mode 11 only) ---
+    // Mode 10 (static) skips this — LumenDDGIPass early-returns anyway,
+    // so voxelization would be wasted GPU work.
+    if (renderMode_ == DawnRenderMode::MeshletDynamicDDGI) {
+        auto& globalSDF = primal::graphics::nanite::GlobalSDF::Get();
+        if (globalSDF.IsInitialized() && globalSDF.IsVoxelizationReady()) {
+            // Refresh buffer handles (geometry may have been uploaded after init)
+            primal::graphics::nanite::SDFVoxelizationResources fresh;
+            fresh.vertex_buffer            = gpuDrawPipeline.GetGlobalVertexBuffer();
+            fresh.meshlet_buffer           = gpuDrawPipeline.GetGlobalMeshletBuffer();
+            fresh.meshlet_vertices_buffer  = gpuDrawPipeline.GetGlobalMeshletVerticesBuffer();
+            fresh.meshlet_triangles_buffer = gpuDrawPipeline.GetGlobalMeshletTrianglesBuffer();
+            fresh.cluster_map_buffer       = gpuDrawPipeline.GetClusterMapBuffer();
+            fresh.instance_data_buffer     = gpuDrawPipeline.GetGlobalInstanceDataBuffer();
+            fresh.num_instances            = meshletSceneSnapshot_.GetInstanceCount();
+
+            if (fresh.num_instances > 0
+                && fresh.vertex_buffer != rhi::handles::INVALID_RESOURCE
+                && fresh.meshlet_buffer != rhi::handles::INVALID_RESOURCE
+                && fresh.instance_data_buffer != rhi::handles::INVALID_RESOURCE) {
+                globalSDF.SetVoxelizationResources(fresh);
+                // CPU bookkeeping — recenter cascades on camera
+                globalSDF.Update(meshletSceneSnapshot_, totalFrames_, cameraPos_);
+                // Per-cascade GPU dispatch — gated on origin-change so static
+                // scenes don't pay re-voxelization cost every frame.
+                for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
+                    if (globalSDF.CascadeNeedsVoxelization(c)) {
+                        globalSDF.DispatchVoxelization(cmd, c);
+                    }
+                }
+            }
+        }
+    }
 
     // --- 3b. DDGI dispatch (Mode 10 / Mode 11) ---
     // Runs AFTER meshlet draw (GBuffer + depth ready) and BEFORE deferred

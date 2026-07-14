@@ -248,10 +248,13 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
                 ? WGPUTextureSampleType_UnfilterableFloat
                 : WGPUTextureSampleType_Float;
             // N0a: honor isArray for texture_2d_array bindings (meshlet material arrays).
+            // is3D takes precedence over both for texture_3d bindings (DDGI SDF cascades).
             // isCube takes precedence over 2D since cube arrays aren't requested here.
-            entry.texture.viewDimension = binding.isArray
-                ? WGPUTextureViewDimension_2DArray
-                : (binding.isCube ? WGPUTextureViewDimension_Cube : WGPUTextureViewDimension_2D);
+            entry.texture.viewDimension = binding.is3D
+                ? WGPUTextureViewDimension_3D
+                : (binding.isArray
+                    ? WGPUTextureViewDimension_2DArray
+                    : (binding.isCube ? WGPUTextureViewDimension_Cube : WGPUTextureViewDimension_2D));
             entry.texture.multisampled = false;
             break;
         }
@@ -265,8 +268,10 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
                 ? WGPUStorageTextureAccess_ReadOnly
                 : WGPUStorageTextureAccess_WriteOnly;
             entry.storageTexture.format = ToWGPUTextureFormat(binding.format);
-            entry.storageTexture.viewDimension = binding.isArray
-                ? WGPUTextureViewDimension_2DArray : WGPUTextureViewDimension_2D;
+            entry.storageTexture.viewDimension = binding.is3D
+                ? WGPUTextureViewDimension_3D
+                : (binding.isArray
+                    ? WGPUTextureViewDimension_2DArray : WGPUTextureViewDimension_2D);
             break;
         }
         case DescriptorType::Sampler: {

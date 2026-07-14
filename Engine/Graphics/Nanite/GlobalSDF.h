@@ -29,6 +29,11 @@ struct SDFCascade {
     u32 cascade_index{ 0 };
     bool needs_update{ false };
     bool is_valid{ false };
+    // True when origin snapped to a new grid cell this frame (or first-ever update).
+    // Voxelization dispatch is gated on this — static scene + static camera → 0
+    // dispatches after the initial fill.
+    bool needs_voxelization{ true };
+    bool ever_voxelized{ false };
 };
 
 struct GlobalSDFStats {
@@ -67,6 +72,11 @@ public:
     const rhi::ResourceHandle GetGlobalTexture() const { return global_sdf_texture_; }
     const GlobalSDFConfig& GetConfig() const { return config_; }
     const GlobalSDFStats& GetStats() const { return stats_; }
+
+    /// True iff this cascade's origin snapped to a new grid cell on the most
+    /// recent Update(), or it has never been voxelized yet. Callers should
+    /// gate DispatchVoxelization on this to avoid re-sweeping static geometry.
+    bool CascadeNeedsVoxelization(u32 index) const;
 
     bool IsInitialized() const {
         return initialized_ && init_resources_valid_;

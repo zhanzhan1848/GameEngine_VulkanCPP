@@ -79,9 +79,22 @@ struct ForwardLightBuffer {
 
 const PI: f32 = 3.141592653589793;
 
-// Weight applied to DDGI indirect lighting. Matches Metal test reference; tuned to 0.85
-// so DDGI supplements rather than replaces IBL on flat surfaces.
-const DDGI_INDIRECT_WEIGHT: f32 = 0.85;
+// Lambertian outgoing radiance from indirect incoming radiance.
+// shDot4 returns the SH reconstruction of L_i along the surface normal —
+// i.e. the average incoming radiance. For Lambertian:
+//   L_o = (albedo/PI) * E_indirect
+//   E_indirect ≈ PI * L_i_avg   (hemispherical integral of cos for constant radiance)
+//   L_o = albedo * L_i_avg = albedo * indirect
+// So the weight is 1.0 — no /PI factor. The previous 0.2706 (= 0.85/PI)
+// double-divided by PI and made DDGI ~3.7x too dim.
+const DDGI_INDIRECT_WEIGHT: f32 = 1.0;
+
+// Artistic albedo dimming in shadowed indirect paths. iblShadow is 0.35 in
+// shadow and 1.0 in light; we derive shadowT in [0,1] and mix albedo toward
+// this dim value so shadows read darker without changing the indirect
+// direction/color. Direct sun lighting is unaffected — only IBL diffuse and
+// DDGI use the dimmed albedo. Tunable: 0.5 = half albedo in shadow.
+const SHADOW_ALBEDO_DIM: f32 = 0.5;
 
 @group(0) @binding(0) var gbufferAlbedo: texture_2d<f32>;
 @group(0) @binding(1) var gbufferNormal: texture_2d<f32>;
@@ -313,6 +326,14 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
             color = color + Lo;
         }
 
+        // === Shadow-darkened albedo for indirect paths ===
+        // iblShadow is mix(0.35, 1.0, shadowFactor). Map it back to [0,1] so we
+        // can selectively dim albedo for IBL diffuse + DDGI without touching
+        // direct lighting. The 0.65 divisor is (1.0 - 0.35) — the lit extreme
+        // of iblShadow.
+        let shadowT = clamp((iblShadow - 0.35) / 0.65, 0.0, 1.0);
+        let albedoIndirect = albedo * mix(SHADOW_ALBEDO_DIM, 1.0, shadowT);
+
         // === IBL ambient (attenuated) ===
         // Mode 8 is the A/B counterpart to Mode 7 (MeshletNoIBL): direct + punctual
         // PBR dominates, IBL provides only a faint ambient lift so shadowed areas
@@ -324,7 +345,7 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
             let kS_ibl = fresnelSchlickRoughness(NdotV, F0, roughness);
             let kD_ibl = (vec3<f32>(1.0) - kS_ibl) * (1.0 - metallic);
             let irradiance = textureSampleLevel(irradianceMap, iblSampler, N, 0.0).rgb;
-            let diffuseIBL = irradiance * albedo;
+            let diffuseIBL = irradiance * albedoIndirect;
             let R = reflect(-V, N);
             let prefilteredColor = textureSampleLevel(prefilterMap, iblSampler, R, roughness * 4.0).rgb;
             let brdf = textureSampleLevel(brdfLUT, iblSampler, vec2<f32>(NdotV, roughness), 0.0);
@@ -334,12 +355,28 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         // === DDGI indirect lighting ===
-        // Phase A: half-res indirect texture sampled with iblSampler. AO not yet
-        // wired from SSAO (defer to Phase B follow-up).
+        // DDGI is itself the indirect bounce light — it shouldn't be attenuated
+        // by the direct-light shadow factor (iblShadow). Doing so crushed DDGI
+        // in shadowed regions (×0.35), which are exactly where bounce light
+        // should be most visible. Only AO gates it now. albedo stays full
+        // (not albedoIndirect) for the same reason — bounce off surfaces in
+        // shadow should still carry the surface's color.
+        // Guard against NaN/Inf from GIGather (uninitialised texels can read back
+        // as NaN on Apple Silicon; one NaN pixel would otherwise poison neighbours
+        // through TAA accumulation and bloom into a screen-size solid colour).
+        // Note: this Dawn build's tint rejects isnan/isinf — use x!=x and abs>3.4e38.
         if (globalData.enableDDGI != 0u) {
             let uv_gi: vec2<f32> = (vec2<f32>(f32(pixel.x), f32(pixel.y)) + vec2<f32>(0.5)) / vec2<f32>(dims);
-            let indirect: vec3<f32> = textureSampleLevel(giIndirectTex, iblSampler, uv_gi, 0.0).rgb;
-            color = color + albedo * indirect * DDGI_INDIRECT_WEIGHT;
+            let rawIndirect: vec3<f32> = textureSampleLevel(giIndirectTex, iblSampler, uv_gi, 0.0).rgb;
+            let nanMask: vec3<bool> = vec3<bool>(rawIndirect.x != rawIndirect.x,
+                                                  rawIndirect.y != rawIndirect.y,
+                                                  rawIndirect.z != rawIndirect.z);
+            let infMask: vec3<bool> = abs(rawIndirect) > vec3<f32>(3.4e38);
+            var indirect: vec3<f32> = max(rawIndirect, vec3<f32>(0.0));
+            if (any(nanMask) || any(infMask)) {
+                indirect = vec3<f32>(0.0);
+            }
+            color = color + albedo * indirect * occlusion * DDGI_INDIRECT_WEIGHT;
         }
 
         // ForwardPBR/DeferredLighting apply pow(1.3)+gamma before ToneMapping.

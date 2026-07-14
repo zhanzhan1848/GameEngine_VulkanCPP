@@ -71,6 +71,13 @@ namespace primal::graphics::utl
         // 快速遮挡检测 (Any Hit)
         bool IntersectAny(const Ray& ray, float max_dist) const;
 
+        // Diagnostics: returns node count, leaf count, max leaf primitive count,
+        // max depth, and total primitive count. Used by callers (e.g. the static
+        // probe baker) to detect degenerate builds that would make ray traversal
+        // O(N) per ray.
+        struct Stats { u32 node_count; u32 leaf_count; u32 max_leaf_size; u32 max_depth; u32 total_prims; };
+        Stats GetStats() const;
+
 	private:
 		struct BVHNode
 		{

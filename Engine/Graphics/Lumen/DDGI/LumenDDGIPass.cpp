@@ -7,11 +7,13 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/Nanite/GlobalSDF.h"
+#include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Engine/Graphics/Dawn/ShaderLoader.h"  // for dawn::LoadWGSL
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <cstring>
+#include <cstdio>
 #include <set>
 #include <algorithm>
 
@@ -288,7 +290,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
     {
         bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
         if (isDawn) {
-            // Dawn: sequential engine bindings 0..8 matching WGSL
+            // Dawn: sequential engine bindings 0..9 matching WGSL
             // (no texture/buffer collision -> no silent remap)
             DescriptorSetLayoutBinding traceBindings[] = {
                 {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
@@ -300,13 +302,19 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
                 {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data (read_write)
                 {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list (read)
                 {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance_history (read)
+                {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // gbuffer_albedo (Mode 11)
             };
             traceBindings[0].is3D = true;
             traceBindings[1].is3D = true;
             traceBindings[2].is3D = true;
+            // SDF cascades are R32Float — WebGPU classifies that as UnfilterableFloat.
+            // Layout's sampleType must match or CreateBindGroup validation fails.
+            traceBindings[0].unfilterableFloat = true;
+            traceBindings[1].unfilterableFloat = true;
+            traceBindings[2].unfilterableFloat = true;
             traceBindings[7].readonly = true;
             traceBindings[8].readonly = true;
-            DescriptorSetLayoutDesc layoutDesc{9, traceBindings};
+            DescriptorSetLayoutDesc layoutDesc{10, traceBindings};
             trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
         } else {
             // Metal: separate texture/buffer namespaces -- overlap is idiomatic.
@@ -694,6 +702,22 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 }
             }
 
+            // Mode 11 per-vertex albedo: GBuffer albedo from GPUDrivenDrawPipeline.
+            // Colored surfaces (fabric, painted walls) bounce colored light,
+            // visibly distinguishing Mode 11 from Mode 10's uniform 0.5 albedo.
+            // Falls back to INVALID_RESOURCE in non-meshlet modes (sampleHitAlbedo
+            // WGSL falls back to volume.Albedo via the textureLoad result being
+            // undefined—but the binding still must be valid for the layout to
+            // pass validation). Use prevColorTex as a safe non-null placeholder
+            // when GBuffer isn't available.
+            ResourceHandle gbufferAlbedoTex = prevColorTex;
+            if (dynamic_mode_) {
+                gbufferAlbedoTex = nanite::GPUDrivenDrawPipeline::Get().GetGBufferAlbedo();
+                if (gbufferAlbedoTex == handles::INVALID_RESOURCE) {
+                    gbufferAlbedoTex = prevColorTex;
+                }
+            }
+
             // Mode 11 safety net: canonical trace requires a populated GlobalSDF.
             // If the host (e.g. TestDawnForwardRenderer) hasn't initialized /
             // voxelized GlobalSDF, trace writes nothing and ray_data_buffer_
@@ -933,11 +957,14 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 trace_pipeline_ != handles::INVALID_PIPELINE &&
                 ray_data_buffer_ != handles::INVALID_RESOURCE) {
                 // Update trace descriptor set
-                // Platform-branch: Dawn uses sequential 0..8; Metal overlaps texture/buffer.
+                // Platform-branch: Dawn uses sequential 0..9 (added GBuffer albedo
+                // at binding 9 for Mode 11); Metal keeps 0..8 (Metal shader wasn't
+                // updated — Metal runs Mode 10 only).
                 bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
-                DescriptorData traceParams[9];
+                DescriptorData traceParams[10];
+                u32 traceParamCount = 0;
                 if (isDawn) {
-                    // Dawn: sequential 0..8 matching WGSL
+                    // Dawn: sequential 0..9 matching WGSL
                     traceParams[0] = {0, DescriptorType::SampledImage,  sdfTextures[0]};
                     traceParams[1] = {1, DescriptorType::SampledImage,  sdfTextures[1]};
                     traceParams[2] = {2, DescriptorType::SampledImage,  sdfTextures[2]};
@@ -947,6 +974,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     traceParams[6] = {6, DescriptorType::StorageBuffer, ray_data_buffer_};
                     traceParams[7] = {7, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]};
                     traceParams[8] = {8, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]};
+                    traceParams[9] = {9, DescriptorType::SampledImage,  gbufferAlbedoTex};
+                    traceParamCount = 10;
                 } else {
                     // Metal: overlap texture/buffer namespaces -- buffers at 0..4
                     traceParams[0] = {0, DescriptorType::SampledImage,  sdfTextures[0]};
@@ -958,8 +987,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     traceParams[6] = {2, DescriptorType::StorageBuffer, ray_data_buffer_};
                     traceParams[7] = {3, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]};
                     traceParams[8] = {4, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]};
+                    traceParamCount = 9;
                 }
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 9);
+                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, traceParamCount);
 
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
@@ -967,6 +997,22 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                 u32 totalRayThreads = updateCount * params_.rays_per_probe;
                 u32 gx = (totalRayThreads + 63) / 64;
+
+                // One-time trace dispatch diagnostic. Confirms trace path is
+                // firing AND the GBuffer albedo binding (Mode 11) resolves to
+                // a real texture handle rather than the prevColorTex fallback.
+                if (dynamic_mode_) {
+                    static bool tracedOnce = false;
+                    if (!tracedOnce) {
+                        bool usingGBuffer = (gbufferAlbedoTex != prevColorTex) &&
+                                            (gbufferAlbedoTex != handles::INVALID_RESOURCE);
+                        std::fprintf(stderr,
+                            "[Mode11] Trace dispatched: frame=%u updateCount=%u rays/probe=%u gx=%u gbufferAlbedo=%s\n",
+                            current_frame_index, updateCount, params_.rays_per_probe, gx,
+                            usingGBuffer ? "live" : "fallback");
+                        tracedOnce = true;
+                    }
+                }
 
                 cmd->Dispatch(gx, 1, 1);
             }
