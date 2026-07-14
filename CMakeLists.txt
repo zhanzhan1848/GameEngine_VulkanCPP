@@ -361,6 +361,13 @@ else()
         if(EXISTS "${SPONZA_MODEL}")
             string(APPEND EMBED_FLAGS " --embed-file ${SPONZA_MODEL}@/assets/Sponza.model")
         endif()
+        # Embed DDGI static probe cache (~1.6 MB). Without this, WASM falls
+        # back to StaticProbeBaker CPU ray trace at Mode 10/11 init — single-
+        # threaded WASM makes that 30+ seconds, which looks like a tab hang.
+        set(DDGI_CACHE "${CMAKE_SOURCE_DIR}/mode10_ddgi_cache.spch")
+        if(EXISTS "${DDGI_CACHE}")
+            string(APPEND EMBED_FLAGS " --embed-file ${DDGI_CACHE}@/mode10_ddgi_cache.spch")
+        endif()
         if(NOT "${EMBED_FLAGS}" STREQUAL "")
             set_target_properties(TestDawnWASM PROPERTIES LINK_FLAGS "${EMBED_FLAGS}")
         endif()

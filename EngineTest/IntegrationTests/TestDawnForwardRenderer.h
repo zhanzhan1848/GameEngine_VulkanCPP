@@ -166,6 +166,12 @@ private:
     bool prevPState_{false};
     bool prevCtrlPState_{false};
     bool prevBState_{false};
+    // Demo: sun rotation toggle (L key) — shows dynamic DDGI (Mode 11)
+    // tracking a moving sun vs static cache (Mode 10) frozen at bake time.
+    bool autoRotateSun_{false};
+    bool prevLState_{false};
+    primal::math::v3 currentSunDir_{0.5f, -0.7f, 0.3f};  // matches initial scene light + static cache bake direction
+    primal::graphics::RenderLight sunLight_{};  // mirrors scene_.lights[0] so we can UpdateLight per-frame
     u32 meshletDebugMode_{0};   // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id
     // Mode 9 sub-mode: which screen-space effect(s) to apply.
     // V key cycles Off → SSGIOnly → SSROnly → Both → Off ...

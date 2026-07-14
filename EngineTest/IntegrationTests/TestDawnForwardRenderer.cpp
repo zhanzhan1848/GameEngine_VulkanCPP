@@ -304,12 +304,11 @@ bool Engine_Test::initialize() {
     }
 
     // Setup scene lights
-    RenderLight dirLight;
-    dirLight.type = LightType::Directional;
-    dirLight.direction = primal::math::v3{0.5f, -0.7f, 0.3f};
-    dirLight.color = primal::math::v3{1.0f, 0.95f, 0.9f};
-    dirLight.intensity = 3.0f;
-    scene_.AddLight(dirLight);
+    sunLight_.type = LightType::Directional;
+    sunLight_.direction = primal::math::v3{0.5f, -0.7f, 0.3f};
+    sunLight_.color = primal::math::v3{1.0f, 0.95f, 0.9f};
+    sunLight_.intensity = 3.0f;
+    scene_.AddLight(sunLight_);
 
     // Setup camera
     UpdateCameraView();
@@ -362,9 +361,11 @@ bool Engine_Test::initialize() {
             hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>'
                 + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>'
                 + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>'
+                + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">L</kbd> to toggle sun auto-rotate (Mode 10 static vs Mode 11 dynamic)</div>'
                 + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>'
                 + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>'
-                + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>';
+                + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>'
+                + '<div id="sunRotateHud" style="color:#fd0;display:none;">Sun Auto-Rotate: OFF</div>';
             document.body.appendChild(hud);
         }
         // Define HUD update function (independent of shell.html)
@@ -376,6 +377,11 @@ bool Engine_Test::initialize() {
             // Show the meshlet-debug status line only in modes 7/8.
             var dbg = document.getElementById('meshletDbgHud');
             if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none';
+            // Show sun auto-rotate status only in modes 10/11 (where the
+            // demo is meaningful: Mode 10 cache stays frozen, Mode 11 grid
+            // follows the sun in real time).
+            var sun = document.getElementById('sunRotateHud');
+            if (sun) sun.style.display = (idx == 10 || idx == 11) ? 'block' : 'none';
         };
         // Update meshlet debug label (called from C++ on each V press).
         // Avoid array-literal commas in EM_ASM — the C preprocessor treats top-
@@ -390,6 +396,13 @@ bool Engine_Test::initialize() {
             else if (mode == 4) label = 'Normal';
             else if (mode == 5) label = 'ObjNormal';
             dbg.textContent = 'Meshlet Debug: ' + label;
+        };
+        // Update sun auto-rotate status (called from C++ on each L press).
+        window.setSunAutoRotate = function(on) {
+            var sun = document.getElementById('sunRotateHud');
+            if (!sun) return;
+            sun.textContent = 'Sun Auto-Rotate: ' + (on ? 'ON' : 'OFF');
+            sun.style.color = on ? '#0f0' : '#fd0';
         };
     });
 #endif
@@ -1188,6 +1201,35 @@ void Engine_Test::UpdateCamera(float dt) {
     if (keyPressed(126)) cameraPitch_ += 2.0f * dt;
     if (keyPressed(125)) cameraPitch_ -= 2.0f * dt;
 
+    // ---- Demo: L key → toggle auto-rotate sun around Y axis ----
+    // Shows Mode 11 (dynamic DDGI) tracking a moving sun vs Mode 10 (static cache)
+    // frozen at the bake-time direction. macOS virtual key code 37 = ANSI 'L'.
+    // Rotation: 0.4 rad/sec — full revolution every ~15.7 sec. Y component fixed
+    // at -0.7 (constant sun elevation); X and Z trace a circle in the horizontal
+    // plane. When toggle is OFF, currentSunDir_ stays at its last value so you
+    // can stop the sun at any angle for A/B comparison.
+    {
+        bool lState = keyPressed(37);
+        if (lState && !prevLState_) {
+            autoRotateSun_ = !autoRotateSun_;
+            std::fprintf(stderr, "[Demo] sun auto-rotate = %s (current dir = (%.3f, %.3f, %.3f))\n",
+                         autoRotateSun_ ? "ON" : "OFF",
+                         currentSunDir_.x, currentSunDir_.y, currentSunDir_.z);
+            std::fflush(stderr);
+        }
+        prevLState_ = lState;
+    }
+    if (autoRotateSun_) {
+        constexpr float kSunRotationSpeed = 0.4f;  // rad/sec
+        const float angle = kSunRotationSpeed * dt;
+        const float cosA = std::cos(angle);
+        const float sinA = std::sin(angle);
+        const float newX = cosA * currentSunDir_.x + sinA * currentSunDir_.z;
+        const float newZ = -sinA * currentSunDir_.x + cosA * currentSunDir_.z;
+        currentSunDir_.x = newX;
+        currentSunDir_.z = newZ;
+    }
+
     // ---- Diagnostic A1: P key → camera snapshot to stderr ----
     // Used to capture exact camera state at a gray-white repro position.
     // macOS virtual key code 35 = ANSI 'P'.
@@ -1442,6 +1484,32 @@ void Engine_Test::UpdateCamera(float dt) {
     if (EmscriptenGetKeyState(38)) cameraPitch_ += 2.0f * dt;
     if (EmscriptenGetKeyState(40)) cameraPitch_ -= 2.0f * dt;
 
+    // ---- Demo: L key (JS keyCode 76) → toggle auto-rotate sun around Y axis ----
+    // See Mac path above for full rationale. Mirrors that block so both builds
+    // support the same demo.
+    {
+        bool lState = EmscriptenGetKeyState(76);
+        if (lState && !prevLState_) {
+            autoRotateSun_ = !autoRotateSun_;
+            std::fprintf(stderr, "[Demo] sun auto-rotate = %s (current dir = (%.3f, %.3f, %.3f))\n",
+                         autoRotateSun_ ? "ON" : "OFF",
+                         currentSunDir_.x, currentSunDir_.y, currentSunDir_.z);
+            std::fflush(stderr);
+            EM_ASM_({ if (window.setSunAutoRotate) window.setSunAutoRotate($0); }, autoRotateSun_ ? 1 : 0);
+        }
+        prevLState_ = lState;
+    }
+    if (autoRotateSun_) {
+        constexpr float kSunRotationSpeed = 0.4f;  // rad/sec
+        const float angle = kSunRotationSpeed * dt;
+        const float cosA = std::cos(angle);
+        const float sinA = std::sin(angle);
+        const float newX = cosA * currentSunDir_.x + sinA * currentSunDir_.z;
+        const float newZ = -sinA * currentSunDir_.x + cosA * currentSunDir_.z;
+        currentSunDir_.x = newX;
+        currentSunDir_.z = newZ;
+    }
+
     // Mouse drag for camera rotation
     float mdx, mdy;
     EmscriptenGetMouseDelta(&mdx, &mdy);
@@ -1523,6 +1591,15 @@ void Engine_Test::UpdateCamera(float dt) {
         }
     }
 #endif
+
+    // Sync rotating sun to scene_.lights[0] so ForwardRenderer's ForwardLightBuffer
+    // (and any other scene-lights consumer) sees the same direction as the DDGI
+    // trace. UpdateLight matches by entityId; sunLight_.entityId is invalid_id
+    // (default), which matches the directional light registered in Initialize.
+    if (autoRotateSun_) {
+        sunLight_.direction = currentSunDir_;
+        scene_.UpdateLight(sunLight_.entityId, sunLight_);
+    }
 
     UpdateCameraView();
 }
@@ -1701,7 +1778,7 @@ void Engine_Test::CreateShadowResources() {
 }
 
 primal::math::m4x4 Engine_Test::ComputeLightViewProjection() const {
-    primal::math::v3 lightDir = primal::math::v3{0.5f, -0.7f, 0.3f};
+    primal::math::v3 lightDir = currentSunDir_;
     float len = sqrtf(lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z);
     lightDir = lightDir / len;
 
@@ -3080,11 +3157,17 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
     ComputeCSMViewProjections();
     for (u32 cascade = 0; cascade < 2; ++cascade) {
         primal::graphics::nanite::GPUDrivenDrawPipeline::DirectionalLightData lightData{};
-        // light dir from scene
-        const auto& lights = scene_.GetLights();
-        if (!lights.empty()) {
-            lightData.direction = primal::math::v4{lights[0].direction.x, lights[0].direction.y, lights[0].direction.z, 0.0f};
-            lightData.color = primal::math::v4{lights[0].color.x, lights[0].color.y, lights[0].color.z, lights[0].intensity};
+        // Demo: use currentSunDir_ (animated by L-key toggle) so the shadow /
+        // direct-light pass tracks the rotating sun instead of the static
+        // scene_'s first light.
+        lightData.direction = primal::math::v4{currentSunDir_.x, currentSunDir_.y, currentSunDir_.z, 0.0f};
+        {
+            const auto& lights = scene_.GetLights();
+            if (!lights.empty()) {
+                lightData.color = primal::math::v4{lights[0].color.x, lights[0].color.y, lights[0].color.z, lights[0].intensity};
+            } else {
+                lightData.color = primal::math::v4{1.0f, 0.95f, 0.9f, 3.0f};
+            }
         }
         lightData.viewPos = primal::math::v4{cameraPos_.x, cameraPos_.y, cameraPos_.z, 1.0f};
         lightData.shadowMatrix0 = cascadeVPs_[0];
@@ -3200,7 +3283,7 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
         camData.proj_matrix       = view_.GetProjectionMatrix();
         camData.prev_view_matrix  = camData.view_matrix;
         camData.prev_proj_matrix  = camData.proj_matrix;
-        camData.light_direction   = simd::normalize(primal::math::v3{-0.5f, -1.0f, -0.3f});
+        camData.light_direction   = rhi::math::Normalize(currentSunDir_);  // sun→scene direction (same convention as scene_'s dirLight.direction); WGSL negates internally
         camData.light_color       = primal::math::v3{2.5f, 2.4f, 2.1f};
         camData.frame_index       = frameIndex_;
         camData.delta_time        = 1.0f / 60.0f;

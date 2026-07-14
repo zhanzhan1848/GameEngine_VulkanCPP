@@ -264,13 +264,13 @@ if(DISABLE_PARTICLE_SYSTEM)
     list(FILTER GRAPHICS_UTILS EXCLUDE REGEX ".*/ParticlePass.*")
 endif()
 
-# Emscripten: exclude Lumen systems (Metal-specific) and ContentToEngine
-# (which has gpu_id_from_fake_pointer / sizeof(long)>sizeof(int) assertions
-# that fail under WASM). Nanite IS compiled for WASM — its Metal includes
-# are guarded by #ifdef __APPLE__ and ENABLE_WEBGPU paths are implemented.
+# Emscripten: exclude ContentToEngine (which has gpu_id_from_fake_pointer /
+# sizeof(long)>sizeof(int) assertions that fail under WASM). Lumen DDGI is
+# now Dawn-compatible (#ifdef __EMSCRIPTEN__ guards on Metal-only paths).
+# Nanite IS compiled for WASM — its Metal includes are guarded by
+# #ifdef __APPLE__ and ENABLE_WEBGPU paths are implemented.
 # StubsEmscripten.cpp provides the ContentToEngine symbols Nanite references.
 if(EMSCRIPTEN)
-    list(FILTER GRAPHICS_UTILS EXCLUDE REGEX ".*/Lumen/.*")
     list(FILTER COMMON_SOURCES EXCLUDE REGEX "Content/ContentToEngine\\.cpp")
 endif()
 
