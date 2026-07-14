@@ -28,8 +28,12 @@ struct GlobalShaderData
     u32 renderMode; // 0=NoEffects, 1=ShadowOnly, 2=ShadowAndIBL, 3=Full
     u32 enableIBL;  // 0 = skip IBL ambient (MeshletNoIBL), 1 = apply (Meshlet). Mirrors the WGSL GlobalShaderData slot formerly named _pad0.
     u32 enableDDGI; // 0 = skip DDGI indirect (default), 1 = apply indirect lighting from binding 13. Mode 10 sets this to 1.
-    math::v2 jitterOffset; // TAA subpixel jitter (clip-space units, applied in PBR vertex)
+    u32 _pad_before_jitter; // WGSL uniform layout requires vec2 at 8-byte align; Mac simd::float2 already has 8-byte align (auto-pads here), WASM float[2] has 4-byte align (needs explicit pad)
+    math::v2 jitterOffset; // TAA subpixel jitter (clip-space units, applied in PBR vertex) — offset 448 on both platforms
+    float _pad_after_jitter[2]; // round struct to 464 bytes (WebGPU uniform buffer 16-byte multiple)
 };
+
+static_assert(sizeof(GlobalShaderData) == 464, "GlobalShaderData must be 464 bytes — matches WebGPU uniform buffer size (WGSL vec2 8-byte align + 16-byte struct rounding)");
 
 struct PerObjectData
 {
