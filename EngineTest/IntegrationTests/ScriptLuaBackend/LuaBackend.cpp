@@ -1,6 +1,7 @@
 #include "LuaBackend.h"
 #include "Components/Script.h"
 #include "Components/ScriptExternal.h"
+#include "Components/ScriptState.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -9,6 +10,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <array>
+#include <stdexcept>
 
 extern "C" {
 #include "lua.h"
@@ -52,6 +55,7 @@ static int  lua_post_delayed(lua_State* L);
 static int  lua_post_delayed_wall(lua_State* L);
 static void register_post_functions(lua_State* L);
 static void register_sandbox_globals(lua_State* L);
+static void register_state_table(lua_State* L);
 
 LuaBackend& LuaBackend::instance() {
     static LuaBackend inst;
@@ -147,6 +151,11 @@ u64 LuaBackend::register_type(const char* type_name, const char* lua_file_path) 
     register_bus_table(L);
     register_post_functions(L);
 
+    // Phase 2b.8: expose the `state` global for cross-instance shared state.
+    // Must run after register_sandbox_globals (called earlier above) so the
+    // sandbox whitelist does not nil out the `state` global.
+    register_state_table(L);
+
     // 6. Register with engine via Phase 1 C ABI. Type-level user_data is the
     //    LuaScriptType* (preserved for future type-level queries; not used
     //    by current adapters because instance_user_data is always non-NULL
@@ -175,6 +184,10 @@ u64 LuaBackend::register_type(const char* type_name, const char* lua_file_path) 
     }
 
     raw_type->type_id = type_id;
+
+    // Phase 2b.8: register this type with ScriptState so state.types.<T>.* works.
+    primal::script::state().register_type(type_id, type_name);
+
     return type_id;
 }
 
@@ -632,6 +645,189 @@ static void register_post_functions(lua_State* L) {
     lua_setglobal(L, "post_delayed");
     lua_pushcfunction(L, lua_post_delayed_wall);
     lua_setglobal(L, "post_delayed_wall");
+}
+
+// === Phase 2b.8: state global ===
+struct StateProxy {
+    static constexpr size_t MAX_DEPTH = 8;
+    lua_State* L;
+    uint8_t    depth;
+    std::array<std::string, MAX_DEPTH> segs;
+};
+
+static const char* kStateProxyMetatableName = "PrimalStateProxy";
+
+static void state_push_value(lua_State* L, const primal::script::StateValue& v) {
+    using namespace primal::script;
+    switch (v.tag) {
+        case StateValue::Tag::Nil:    lua_pushnil(L); break;
+        case StateValue::Tag::Bool:   lua_pushboolean(L, v.b ? 1 : 0); break;
+        case StateValue::Tag::Number: lua_pushnumber(L, v.n); break;
+        case StateValue::Tag::String: lua_pushstring(L, v.s.c_str()); break;
+        case StateValue::Tag::Table: {
+            lua_newtable(L);
+            for (const auto& kv : v.t) {
+                lua_pushstring(L, kv.first.c_str());
+                state_push_value(L, kv.second);
+                lua_rawset(L, -3);
+            }
+            break;
+        }
+    }
+}
+
+static primal::script::StateValue state_to_value(lua_State* L, int idx, int depth,
+                                                  std::vector<const void*>& visited) {
+    using namespace primal::script;
+    // depth here is table-nesting depth within a single value (table-in-table),
+    // unrelated to StateProxy::MAX_DEPTH which limits proxy path segment traversal.
+    if (depth > 32) throw std::runtime_error("state table exceeds max depth (32)");
+    int t = lua_type(L, idx);
+    switch (t) {
+        case LUA_TNIL:     return StateValue::make_nil();
+        case LUA_TBOOLEAN: return StateValue::make_bool(lua_toboolean(L, idx) != 0);
+        case LUA_TNUMBER:  return StateValue::make_number(lua_tonumber(L, idx));
+        case LUA_TSTRING:  return StateValue::make_string(lua_tostring(L, idx));
+        case LUA_TTABLE: {
+            const void* p = lua_topointer(L, idx);
+            for (auto vp : visited) {
+                if (vp == p) throw std::runtime_error("state table has circular reference");
+            }
+            visited.push_back(p);
+            StateValue out = StateValue::make_table();
+            lua_pushnil(L);
+            while (lua_next(L, idx)) {
+                lua_pushvalue(L, -2);
+                const char* k = lua_tostring(L, -1);
+                if (!k) {
+                    lua_pop(L, 3);
+                    throw std::runtime_error("state table key cannot be converted to string");
+                }
+                std::string key(k);  // copy BEFORE pop: lua_tostring ptr is invalid after the value leaves the stack
+                lua_pop(L, 1);
+                out.t[key] = state_to_value(L, -1, depth + 1, visited);
+                lua_pop(L, 1);
+            }
+            visited.pop_back();
+            return out;
+        }
+        default:
+            throw std::runtime_error(std::string("state value type '") +
+                                     lua_typename(L, t) + "' not allowed");
+    }
+}
+
+static primal::script::StateValue state_to_value_top(lua_State* L) {
+    std::vector<const void*> visited;
+    return state_to_value(L, -1, 0, visited);
+}
+
+static int state_proxy_gc(lua_State* L) {
+    auto* p = static_cast<StateProxy*>(luaL_checkudata(L, 1, kStateProxyMetatableName));
+    p->~StateProxy();
+    return 0;
+}
+
+thread_local u64 current_writer_entity_id_ = u64_invalid_id;
+
+// RAII guard: sets current_writer_entity_id_ for the duration of a hook
+// dispatch, restoring the previous value on exit. Essential for owner-write
+// enforcement when multiple instances of the same type share one lua_State.
+struct LuaWriterIdScope {
+    u64 saved;
+    LuaWriterIdScope(u64 eid) : saved(current_writer_entity_id_) {
+        current_writer_entity_id_ = eid;
+    }
+    ~LuaWriterIdScope() { current_writer_entity_id_ = saved; }
+};
+
+static int state_proxy_index(lua_State* L) {
+    auto* p = static_cast<StateProxy*>(luaL_checkudata(L, 1, kStateProxyMetatableName));
+    if (p->depth >= StateProxy::MAX_DEPTH) {
+        return luaL_error(L, "state path exceeds max depth (%d)", StateProxy::MAX_DEPTH);
+    }
+    int keyt = lua_type(L, 2);
+    std::string seg;
+    if (keyt == LUA_TSTRING) {
+        seg = lua_tostring(L, 2);
+    } else if (keyt == LUA_TNUMBER) {
+        lua_pushvalue(L, 2);
+        seg = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    } else {
+        return luaL_error(L, "state key must be string or number (got %s)", lua_typename(L, keyt));
+    }
+
+    // Root proxy: always return a child proxy for namespace keys so that
+    // state.game.counter = 42 can reach state_proxy_newindex on the game
+    // proxy. Without this, an empty game_store_ would cause state.game to
+    // resolve to Nil, making subsequent __newindex impossible.
+    bool is_root_namespace = (p->depth == 0);
+
+    std::vector<std::string> path(p->segs.begin(), p->segs.begin() + p->depth);
+    path.push_back(seg);
+
+    primal::script::StateValue v;
+    try { v = primal::script::state().get(path); }
+    catch (const std::exception& e) { return luaL_error(L, "%s", e.what()); }
+
+    if (v.tag == primal::script::StateValue::Tag::Table || is_root_namespace) {
+        void* ud = lua_newuserdata(L, sizeof(StateProxy));
+        auto* child = new (ud) StateProxy{};
+        child->L = L;
+        child->depth = (uint8_t)(p->depth + 1);
+        for (size_t i = 0; i < p->depth; ++i) child->segs[i] = p->segs[i];
+        child->segs[child->depth - 1] = seg;
+        luaL_setmetatable(L, kStateProxyMetatableName);
+        return 1;
+    }
+    state_push_value(L, v);
+    return 1;
+}
+
+static int state_proxy_newindex(lua_State* L) {
+    auto* p = static_cast<StateProxy*>(luaL_checkudata(L, 1, kStateProxyMetatableName));
+    if (p->depth >= StateProxy::MAX_DEPTH) {
+        return luaL_error(L, "state path exceeds max depth (%d)", StateProxy::MAX_DEPTH);
+    }
+    int keyt = lua_type(L, 2);
+    std::string seg;
+    if (keyt == LUA_TSTRING) {
+        seg = lua_tostring(L, 2);
+    } else if (keyt == LUA_TNUMBER) {
+        lua_pushvalue(L, 2);
+        seg = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    } else {
+        return luaL_error(L, "state key must be string or number (got %s)", lua_typename(L, keyt));
+    }
+    std::vector<std::string> path(p->segs.begin(), p->segs.begin() + p->depth);
+    path.push_back(seg);
+
+    primal::script::StateValue v;
+    try { v = state_to_value_top(L); }
+    catch (const std::exception& e) { return luaL_error(L, "%s", e.what()); }
+
+    try { primal::script::state().set(path, v, current_writer_entity_id_); }
+    catch (const std::exception& e) { return luaL_error(L, "%s", e.what()); }
+
+    return 0;
+}
+
+static void register_state_table(lua_State* L) {
+    if (luaL_newmetatable(L, kStateProxyMetatableName)) {
+        lua_pushcfunction(L, state_proxy_index);     lua_setfield(L, -2, "__index");
+        lua_pushcfunction(L, state_proxy_newindex);  lua_setfield(L, -2, "__newindex");
+        lua_pushcfunction(L, state_proxy_gc);        lua_setfield(L, -2, "__gc");
+        lua_pop(L, 1);
+    }
+
+    void* ud = lua_newuserdata(L, sizeof(StateProxy));
+    auto* root = new (ud) StateProxy{};
+    root->L = L;
+    root->depth = 0;
+    luaL_setmetatable(L, kStateProxyMetatableName);
+    lua_setglobal(L, "state");
 }
 
 // === Adapter callbacks ===

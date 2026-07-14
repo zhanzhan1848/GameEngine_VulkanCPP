@@ -2,6 +2,7 @@
 #include "ScriptExternal.h"
 #include "ScriptProperty.h"
 #include "ScriptEventBus.h"
+#include "ScriptState.h"
 #include "Entity.h"
 #include "Transform.h"
 
@@ -890,6 +891,8 @@ namespace primal::script {
 
 	void initialize()
 	{
+		// Phase 2b.8: initialize the shared script state store.
+		ScriptState::instance().initialize();
 		// 允许重复 initialize:覆盖主线程 id(通常不变)并重新打开 g_initialized。
 		// 若已初始化,这是幂等操作。
 		detail::g_main_thread_id = std::this_thread::get_id();
@@ -898,6 +901,10 @@ namespace primal::script {
 
 	void shutdown()
 	{
+		// Phase 2b.8: shut down the shared script state store before clearing
+		// g_initialized so any script code running during teardown can still
+		// safely access ScriptState (which has its own initialized flag).
+		ScriptState::instance().shutdown();
 		// 关闭后 check_main_thread 的 g_initialized 断言会失败——任何 shutdown 后的
 		// script API 调用都被视为编程错误。event_bus / 注册表等子系统清理在后续 task 加入。
 		detail::g_initialized = false;

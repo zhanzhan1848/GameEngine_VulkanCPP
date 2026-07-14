@@ -1814,6 +1814,166 @@ TestResult test_lua_sandbox_escape_attempts_fail() {
     return TestResult::Passed;
 }
 
+// Test 25: state.game.* global Lua-owned state read/write within a single instance.
+// Pins the core shared-state contract: write a value, read it back, overwrite,
+// missing keys return nil.
+TestResult test_lua_state_global_read_write() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "state_global",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/state_global.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    bool read_after_write = lua_get_instance_bool(inst, "read_after_write");
+    bool read_missing     = lua_get_instance_bool(inst, "read_missing");
+    bool overwrite        = lua_get_instance_bool(inst, "overwrite");
+
+    if (!(read_after_write && read_missing && overwrite)) {
+        std::fprintf(stderr, "Test 25 FAIL: raw=%d miss=%d ow=%d\n",
+                     read_after_write, read_missing, overwrite);
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 26: state.types.<T>.* type-level shared state. Multiple instances of
+// the same type see the same values. Pins cross-instance type-level sharing.
+TestResult test_lua_state_type_level_shared_across_instances() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity_a = make_test_entity();
+    primal::game_entity::entity entity_b = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "StateTypeLevel",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/state_type_level.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_a = LuaBackend::instance().create_instance(type_id, entity_a.get_id());
+    u64 script_b = LuaBackend::instance().create_instance(type_id, entity_b.get_id());
+    if (script_a == u64_invalid_id || script_b == u64_invalid_id) {
+        if (script_a != u64_invalid_id) primal::script::remove_for_entity(entity_a.get_id());
+        if (script_b != u64_invalid_id) primal::script::remove_for_entity(entity_b.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst_b = LuaBackend::instance().find_instance(script_b);
+    int value_read = lua_get_instance_int(inst_b, "value_read");
+    if (value_read != 7) {
+        std::fprintf(stderr, "Test 26 FAIL: value_read=%d (expected 7)\n", value_read);
+        primal::script::remove_for_entity(entity_a.get_id());
+        primal::script::remove_for_entity(entity_b.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity_a.get_id());
+    primal::script::remove_for_entity(entity_b.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 27: state.entities.<id>.* per-entity state. Owner-writable; readable
+// by other entities. Pins cross-entity read + owner-write enforcement.
+TestResult test_lua_state_cross_entity_read() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity pub_entity = make_test_entity();
+    primal::game_entity::entity reader_entity = make_test_entity();
+
+    u64 pub_type = LuaBackend::instance().register_type(
+        "StatePublishSelf",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/state_publish_self.lua"
+    );
+    u64 reader_type = LuaBackend::instance().register_type(
+        "StateCrossEntity",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/state_cross_entity.lua"
+    );
+    if (pub_type == u64_invalid_id || reader_type == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // Create publisher FIRST so begin_play publishes health=100 + publisher_eid
+    u64 pub_script = LuaBackend::instance().create_instance(pub_type, pub_entity.get_id());
+    if (pub_script == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    LuaScriptInstance* pub_inst = LuaBackend::instance().find_instance(pub_script);
+    bool published = lua_get_instance_bool(pub_inst, "published");
+    if (!published) {
+        std::fprintf(stderr, "Test 27 FAIL: publisher failed to publish\n");
+        primal::script::remove_for_entity(pub_entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // Now create reader; it reads publisher's entity state via state.entities[eid]
+    u64 reader_script = LuaBackend::instance().create_instance(reader_type, reader_entity.get_id());
+    if (reader_script == u64_invalid_id) {
+        primal::script::remove_for_entity(pub_entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    LuaScriptInstance* reader_inst = LuaBackend::instance().find_instance(reader_script);
+    int read_target = lua_get_instance_int(reader_inst, "read_target");
+    if (read_target != 100) {
+        std::fprintf(stderr, "Test 27 FAIL: read_target=%d (expected 100)\n", read_target);
+        primal::script::remove_for_entity(pub_entity.get_id());
+        primal::script::remove_for_entity(reader_entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(pub_entity.get_id());
+    primal::script::remove_for_entity(reader_entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
 } // anonymous namespace
 
 void RunLuaBackendTests() {
@@ -1894,6 +2054,15 @@ void RunLuaBackendTests() {
     suite.AddTestCase(TestCase("lua_sandbox_escape_attempts_fail",
                                test_lua_sandbox_escape_attempts_fail,
                                "6 sandbox escape vectors (io/_G/rawget/debug/load/dofile/string-mt) all fail"));
+    suite.AddTestCase(TestCase("lua_state_global_read_write",
+                               test_lua_state_global_read_write,
+                               "state.game.* read/write/overwrite within a single instance"));
+    suite.AddTestCase(TestCase("lua_state_type_level_shared_across_instances",
+                               test_lua_state_type_level_shared_across_instances,
+                               "state.types.<T>.* shared across same-type instances"));
+    suite.AddTestCase(TestCase("lua_state_cross_entity_read",
+                               test_lua_state_cross_entity_read,
+                               "state.entities.<id>.* owner-writable, readable by others"));
     suite.RunAllTests();
 }
 
