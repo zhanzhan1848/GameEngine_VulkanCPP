@@ -21,6 +21,12 @@ struct ProbeBakingParams {
     u32 bounce_count{3};
     float convergence_threshold{0.01f};
     float ray_max_distance{50.0f};
+    // Skip Phase 2 (BakeVisibility). The runtime DDGI trace overwrites
+    // octahedral depth + sky factor every frame in dynamic mode, so the
+    // static-bake values are only read on the first few frames before
+    // convergence. WASM builds set this to skip a 5x ray cost that would
+    // otherwise make the bake take tens of minutes on single-threaded JS.
+    bool skip_visibility{false};
 };
 
 // Progress callback invoked between probe chunks during Bake().

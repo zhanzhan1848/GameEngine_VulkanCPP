@@ -2699,18 +2699,65 @@ void Engine_Test::PrebakeDDGICache() {
 #ifdef __EMSCRIPTEN__
     if (!device_) return;
 
-    // Skip if the cache is already present (e.g. deployed with --embed-file).
-    {
-        std::ifstream test("mode10_ddgi_cache.spch");
-        if (test.good()) {
-            std::cerr << "[Prebake] Cache file exists, skipping bake" << std::endl;
-            return;
-        }
+    // Mount IDBFS at /persist so the cache survives page reloads. Without
+    // this, every visit re-bakes (tens of minutes on WASM). The syncfs(true)
+    // call copies IndexedDB contents into MEMFS asynchronously; we wait for
+    // it via a JS-side flag polled with emscripten_sleep so the browser stays
+    // responsive during the sync.
+    EM_ASM({
+        try { FS.mkdir('/persist'); } catch (e) { /* already exists */ }
+        try {
+            FS.mount(IDBFS, {}, '/persist');
+        } catch (e) { /* already mounted */ }
+        window._ddgiSyncDone = false;
+        FS.syncfs(true, function(err) {
+            window._ddgiSyncDone = true;
+            if (err) console.warn('[Prebake] IDBFS syncfs(true) error:', err);
+        });
+    });
+    while (!EM_ASM_INT({ return window._ddgiSyncDone ? 1 : 0; })) {
+        emscripten_sleep(50);
+    }
+
+    // Fast sync existence check via FS.stat (avoids std::ifstream's locale
+    // + stream init overhead — measurable on WASM where every syscall is
+    // expensive). After syncfs, the file (if it exists in IDB) is in MEMFS.
+    const bool cache_exists = EM_ASM_INT({
+        try { FS.stat('/persist/mode10_ddgi_cache.spch'); return 1; }
+        catch (e) { return 0; }
+    });
+    if (cache_exists) {
+        // Copy from /persist (IDBFS-backed MEMFS) to the path
+        // InitializeDDGIForMode10 expects.
+        EM_ASM({
+            var data = FS.readFile('/persist/mode10_ddgi_cache.spch');
+            FS.writeFile('mode10_ddgi_cache.spch', data);
+        });
+        std::cerr << "[Prebake] Cache found in IDBFS, loaded. Mode 10/11 entry will be instant." << std::endl;
+        return;
+    }
+
+    // Also skip if the cache was deployed with --embed-file (MEMFS).
+    const bool embedded = EM_ASM_INT({
+        try { FS.stat('mode10_ddgi_cache.spch'); return 1; }
+        catch (e) { return 0; }
+    });
+    if (embedded) {
+        std::cerr << "[Prebake] Cache file embedded, skipping bake" << std::endl;
+        return;
     }
 
     auto temp_volume = std::make_unique<primal::graphics::lumen::StaticProbeVolume>();
     primal::graphics::lumen::StaticProbeParams vol_params;
-    vol_params.origin = primal::math::v3{-32.0f, -16.0f, -32.0f};
+    // WASM: 8x4x8 grid (256 probes vs native 16x8x16 = 2048) at spacing 8
+    // keeps the same scene coverage [-32,32]x[-16,16]x[-32,32] but cuts bake
+    // time ~8x. Combined with skip_visibility=true below, total speedup is
+    // ~40x — turns a 20+ minute bake into ~30 seconds.
+    vol_params.grid_dim_x = 8;
+    vol_params.grid_dim_y = 4;
+    vol_params.grid_dim_z = 8;
+    vol_params.spacing    = 8.0f;
+    vol_params.origin     = primal::math::v3{-32.0f, -16.0f, -32.0f};
     if (!temp_volume->Initialize(device_, vol_params)) {
         std::cerr << "[Prebake] StaticProbeVolume init failed - Mode 10/11 will fallback to inline bake on entry" << std::endl;
         return;
@@ -2724,13 +2771,11 @@ void Engine_Test::PrebakeDDGICache() {
     }
 
     primal::graphics::lumen::ProbeBakingParams params;
-    params.rays_per_probe    = 64;       // match InitializeDDGIForMode10
+    params.rays_per_probe    = 64;
     params.bounce_count      = 0;
     params.ray_max_distance  = 50.0f;
+    params.skip_visibility   = true;  // runtime trace overwrites these; saves ~5x ray cost
 
-    // Pump browser event loop between chunks so the loading overlay repaints.
-    // Without this, single-threaded WASM blocks the main thread for ~30-60s
-    // and the browser kills the tab.
     auto on_progress = [](void*, const char* phase, u32 done, u32 total) {
         EM_ASM_({
             var label = document.querySelector('#loading .label');
@@ -2741,7 +2786,7 @@ void Engine_Test::PrebakeDDGICache() {
         emscripten_sleep(0);
     };
 
-    std::cerr << "[Prebake] Starting DDGI bake for WASM Mode 10/11..." << std::endl;
+    std::cerr << "[Prebake] Starting DDGI bake for WASM Mode 10/11 (8x4x8 grid, visibility skipped)..." << std::endl;
     const auto bake_start = std::chrono::steady_clock::now();
     const bool ok = primal::graphics::lumen::StaticProbeBaker::Bake(
         *temp_volume, scene, params, on_progress, nullptr);
@@ -2754,8 +2799,27 @@ void Engine_Test::PrebakeDDGICache() {
         return;
     }
 
+    // Save to MEMFS (for InitializeDDGIForMode10's LoadFromFile) AND to /persist
+    // (so the next page load skips the bake entirely).
     temp_volume->SaveToFile("mode10_ddgi_cache.spch");
-    std::cerr << "[Prebake] Cache saved to MEMFS. Mode 10/11 entry will be instant." << std::endl;
+    EM_ASM({
+        try {
+            var data = FS.readFile('mode10_ddgi_cache.spch');
+            FS.writeFile('/persist/mode10_ddgi_cache.spch', data);
+            window._ddgiSyncDone = false;
+            FS.syncfs(false, function(err) {
+                window._ddgiSyncDone = true;
+                if (err) console.warn('[Prebake] IDBFS syncfs(false) error:', err);
+            });
+        } catch (e) {
+            console.error('[Prebake] Failed to persist cache:', e);
+            window._ddgiSyncDone = true;
+        }
+    });
+    while (!EM_ASM_INT({ return window._ddgiSyncDone ? 1 : 0; })) {
+        emscripten_sleep(50);
+    }
+    std::cerr << "[Prebake] Cache saved to MEMFS + IDBFS. Future loads will be instant." << std::endl;
 
     EM_ASM_({
         var label = document.querySelector('#loading .label');
@@ -2781,6 +2845,14 @@ void Engine_Test::InitializeDDGIForMode10() {
     //   y: -16 + 8*4  = 16 ✓
     //   z: -32 + 16*4 = 32 ✓
     vol_params.origin = primal::math::v3{-32.0f, -16.0f, -32.0f};
+#ifdef __EMSCRIPTEN__
+    // Match PrebakeDDGICache: 8x4x8 @ spacing 8 covers the same scene
+    // bounds but with 8x fewer probes so the WASM bake is tractable.
+    vol_params.grid_dim_x = 8;
+    vol_params.grid_dim_y = 4;
+    vol_params.grid_dim_z = 8;
+    vol_params.spacing    = 8.0f;
+#endif
 
     // Initialize unconditionally so device_ is set on the volume — required by
     // UploadToGPU. LoadFromFile overwrites params_ + data vectors but does not
@@ -2809,6 +2881,12 @@ void Engine_Test::InitializeDDGIForMode10() {
         params.rays_per_probe    = 64;       // match DDGIRuntimeParams default
         params.bounce_count      = 0;        // BakeProbeRadiance is single-bounce; field retained for future re-introduction
         params.ray_max_distance  = 50.0f;    // match DDGIRuntimeParams default
+#ifdef __EMSCRIPTEN__
+        // Defensive: PrebakeDDGICache should have populated the cache, but
+        // if IDBFS failed and we land here, match its skip_visibility=true
+        // so the fallback bake also stays tractable on single-threaded WASM.
+        params.skip_visibility   = true;
+#endif
 
         std::cout << "[Mode10] Baking DDGI probes (CPU BVH, blocking)..." << std::endl;
         const auto bake_start = std::chrono::steady_clock::now();

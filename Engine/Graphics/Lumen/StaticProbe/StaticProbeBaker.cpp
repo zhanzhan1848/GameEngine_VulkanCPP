@@ -381,20 +381,27 @@ static inline float Dot3(v3 a, v3 b)
 
     // --- Phase 2: Visibility + Sky Factor (parallel per probe) ---
     // Octahedral depth + sky factor — still consumed at runtime by GIGather.
-    std::cout << "[Bake] Phase 2: BakeVisibility over " << probe_count
-              << " probes (64+256 rays each)..." << std::flush;
-    auto t3_start = std::chrono::steady_clock::now();
-    for (u32 base = 0; base < probe_count; base += kProbeChunk) {
-        const u32 end = (probe_count - base < kProbeChunk) ? probe_count : (base + kProbeChunk);
-        auto handle3 = jobsystem::JobSystem::ParallelFor(end - base,
-            [&volume, bvh_ref, &scene, &params, base](u32 i) {
-                BakeVisibility(volume, *bvh_ref, scene, params, base + i);
-            });
-        jobsystem::JobSystem::Wait(handle3);
-        if (on_progress) on_progress(progress_user_data, "visibility", end, probe_count);
+    // Skipped on WASM (params.skip_visibility) where the runtime DDGI trace
+    // overwrites these buffers before they're read and the 5x ray cost would
+    // make the bake take tens of minutes on single-threaded JS.
+    if (!params.skip_visibility) {
+        std::cout << "[Bake] Phase 2: BakeVisibility over " << probe_count
+                  << " probes (64+256 rays each)..." << std::flush;
+        auto t3_start = std::chrono::steady_clock::now();
+        for (u32 base = 0; base < probe_count; base += kProbeChunk) {
+            const u32 end = (probe_count - base < kProbeChunk) ? probe_count : (base + kProbeChunk);
+            auto handle3 = jobsystem::JobSystem::ParallelFor(end - base,
+                [&volume, bvh_ref, &scene, &params, base](u32 i) {
+                    BakeVisibility(volume, *bvh_ref, scene, params, base + i);
+                });
+            jobsystem::JobSystem::Wait(handle3);
+            if (on_progress) on_progress(progress_user_data, "visibility", end, probe_count);
+        }
+        auto t3_end = std::chrono::steady_clock::now();
+        std::cout << " done in " << std::chrono::duration<double>(t3_end - t3_start).count() << "s" << std::endl;
+    } else {
+        std::cout << "[Bake] Phase 2: BakeVisibility SKIPPED (params.skip_visibility=true)" << std::endl;
     }
-    auto t3_end = std::chrono::steady_clock::now();
-    std::cout << " done in " << std::chrono::duration<double>(t3_end - t3_start).count() << "s" << std::endl;
 
     volume.MarkLoaded();
     return true;
