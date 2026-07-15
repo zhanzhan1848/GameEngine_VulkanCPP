@@ -33,6 +33,17 @@ public:
     bool LoadFromFile(const char* path);
     bool UploadToGPU();
 
+    // Populate every probe with a uniform sky-seed (no ray tracing):
+    //   irradiance L0 = sky_color * 2*sqrt(pi), L1..L8 = 0
+    //   sky_sh L0     = sky_color * 2*sqrt(pi), L1..L8 = 0
+    //   depth_mean    = ray_max_distance (no occlusion)
+    //   depth_var     = 0
+    //   sky_factor    = 1.0 (full sky visibility)
+    // Used on WASM where the full CPU bake is too slow (20+ min) but the
+    // runtime DDGI trace in Mode 11 converges from any non-zero seed within
+    // ~60 frames. Mode 10 displays this seed as uniform ambient sky light.
+    void FillWithSkySeed(const math::v3& sky_color, float ray_max_distance);
+
     bool IsLoaded() const { return is_loaded_; }
     u32 ProbeCount() const { return grid_dim_x_ * grid_dim_y_ * grid_dim_z_; }
     const StaticProbeParams& GetParams() const { return params_; }

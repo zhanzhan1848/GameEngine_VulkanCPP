@@ -2747,60 +2747,37 @@ void Engine_Test::PrebakeDDGICache() {
         return;
     }
 
+    // No cache on disk. The full CPU BVH bake takes 20+ minutes on WASM
+    // (ASYNCIFY + single-threaded JS + BVH ray cost). Instead, seed every
+    // probe with uniform sky: L0 = sky * 2*sqrt(pi), no occlusion.
+    // Mode 11's runtime DDGI trace converges from this seed within ~60
+    // frames; Mode 10 displays it as uniform ambient sky light. Persists
+    // to IDBFS so subsequent loads skip even this step.
     auto temp_volume = std::make_unique<primal::graphics::lumen::StaticProbeVolume>();
     primal::graphics::lumen::StaticProbeParams vol_params;
     // WASM: 8x4x8 grid (256 probes vs native 16x8x16 = 2048) at spacing 8
-    // keeps the same scene coverage [-32,32]x[-16,16]x[-32,32] but cuts bake
-    // time ~8x. Combined with skip_visibility=true below, total speedup is
-    // ~40x — turns a 20+ minute bake into ~30 seconds.
+    // keeps the same scene coverage [-32,32]x[-16,16]x[-32,32] but with 8x
+    // fewer probes so the runtime trace converges faster.
     vol_params.grid_dim_x = 8;
     vol_params.grid_dim_y = 4;
     vol_params.grid_dim_z = 8;
     vol_params.spacing    = 8.0f;
     vol_params.origin     = primal::math::v3{-32.0f, -16.0f, -32.0f};
     if (!temp_volume->Initialize(device_, vol_params)) {
-        std::cerr << "[Prebake] StaticProbeVolume init failed - Mode 10/11 will fallback to inline bake on entry" << std::endl;
+        std::cerr << "[Prebake] StaticProbeVolume init failed - Mode 10/11 will fallback to sky-seed on entry" << std::endl;
         return;
     }
 
-    primal::graphics::lumen::ProbeBakingScene scene;
-    BuildProbeBakingScene(scene);
-    if (scene.vertex_count == 0 || scene.index_count == 0) {
-        std::cerr << "[Prebake] Empty bake scene" << std::endl;
-        return;
-    }
-
-    primal::graphics::lumen::ProbeBakingParams params;
-    params.rays_per_probe    = 64;
-    params.bounce_count      = 0;
-    params.ray_max_distance  = 50.0f;
-    params.skip_visibility   = true;  // runtime trace overwrites these; saves ~5x ray cost
-
-    auto on_progress = [](void*, const char* phase, u32 done, u32 total) {
-        EM_ASM_({
-            var label = document.querySelector('#loading .label');
-            if (label) {
-                label.textContent = 'Baking DDGI probes (' + UTF8ToString($0) + '): ' + $1 + ' / ' + $2;
-            }
-        }, phase, done, total);
-        emscripten_sleep(0);
-    };
-
-    std::cerr << "[Prebake] Starting DDGI bake for WASM Mode 10/11 (8x4x8 grid, visibility skipped)..." << std::endl;
-    const auto bake_start = std::chrono::steady_clock::now();
-    const bool ok = primal::graphics::lumen::StaticProbeBaker::Bake(
-        *temp_volume, scene, params, on_progress, nullptr);
-    const auto bake_end = std::chrono::steady_clock::now();
-    const double bake_seconds = std::chrono::duration<double>(bake_end - bake_start).count();
-    std::cerr << "[Prebake] Bake " << (ok ? "completed" : "FAILED") << " in " << bake_seconds << "s" << std::endl;
-
-    if (!ok) {
-        std::cerr << "[Prebake] Bake failed - Mode 10/11 will fallback to inline bake on entry" << std::endl;
-        return;
-    }
+    // Sky seed matches the bake scene's sky_color (BuildProbeBakingScene
+    // default). Passed as the radiance seen by any ray that escapes the
+    // scene, so probes in open air get full sky, probes under geometry get
+    // attenuated at runtime by the SDF trace.
+    const primal::math::v3 sky_color{0.5f, 0.7f, 1.0f};
+    temp_volume->FillWithSkySeed(sky_color, 50.0f);
+    std::cerr << "[Prebake] Seeded DDGI volume with uniform sky (no bake). Mode 11 will converge at runtime." << std::endl;
 
     // Save to MEMFS (for InitializeDDGIForMode10's LoadFromFile) AND to /persist
-    // (so the next page load skips the bake entirely).
+    // (so the next page load skips even the seed step).
     temp_volume->SaveToFile("mode10_ddgi_cache.spch");
     EM_ASM({
         try {
@@ -2819,7 +2796,7 @@ void Engine_Test::PrebakeDDGICache() {
     while (!EM_ASM_INT({ return window._ddgiSyncDone ? 1 : 0; })) {
         emscripten_sleep(50);
     }
-    std::cerr << "[Prebake] Cache saved to MEMFS + IDBFS. Future loads will be instant." << std::endl;
+    std::cerr << "[Prebake] Sky-seed cache saved to MEMFS + IDBFS. Future loads will be instant." << std::endl;
 
     EM_ASM_({
         var label = document.querySelector('#loading .label');
@@ -2868,6 +2845,15 @@ void Engine_Test::InitializeDDGIForMode10() {
     if (staticProbeVolume_->LoadFromFile(cache_path)) {
         std::cout << "[Mode10] Loaded DDGI cache from " << cache_path << std::endl;
     } else {
+#ifdef __EMSCRIPTEN__
+        // WASM fallback: the full CPU BVH bake is intractable (20+ min).
+        // Use the same sky-seed as PrebakeDDGICache — Mode 11's runtime
+        // trace converges from this seed within ~60 frames.
+        const primal::math::v3 sky_color{0.5f, 0.7f, 1.0f};
+        staticProbeVolume_->FillWithSkySeed(sky_color, 50.0f);
+        std::cout << "[Mode10] Sky-seeded DDGI volume (no bake). Mode 11 will converge at runtime." << std::endl;
+        staticProbeVolume_->SaveToFile(cache_path);
+#else
         primal::graphics::lumen::ProbeBakingScene scene;
         BuildProbeBakingScene(scene);
 
@@ -2881,12 +2867,6 @@ void Engine_Test::InitializeDDGIForMode10() {
         params.rays_per_probe    = 64;       // match DDGIRuntimeParams default
         params.bounce_count      = 0;        // BakeProbeRadiance is single-bounce; field retained for future re-introduction
         params.ray_max_distance  = 50.0f;    // match DDGIRuntimeParams default
-#ifdef __EMSCRIPTEN__
-        // Defensive: PrebakeDDGICache should have populated the cache, but
-        // if IDBFS failed and we land here, match its skip_visibility=true
-        // so the fallback bake also stays tractable on single-threaded WASM.
-        params.skip_visibility   = true;
-#endif
 
         std::cout << "[Mode10] Baking DDGI probes (CPU BVH, blocking)..." << std::endl;
         const auto bake_start = std::chrono::steady_clock::now();
@@ -2903,6 +2883,7 @@ void Engine_Test::InitializeDDGIForMode10() {
         }
 
         staticProbeVolume_->SaveToFile(cache_path);
+#endif
     }
 
     if (!staticProbeVolume_->UploadToGPU()) {
