@@ -262,6 +262,8 @@ namespace primal::script {
 		std::priority_queue<DelayedEntry, std::vector<DelayedEntry>, FrameDelayedCmp> frame_delayed_queue_;
 		std::mutex                                                                    delayed_mutex_;
 		float                                                                         frame_elapsed_time_ = 0.0f;
+		u64                                                                           frame_count_      = 0;
+		float                                                                         last_frame_dt_    = 0.0f;
 
 		// === Phase 2b.6 Task 3: wall-delayed queue ===
 		// Same DelayedEntry struct; wall_fire_time is the active comparator field here.
@@ -817,6 +819,8 @@ namespace primal::script {
 		{
 			std::lock_guard<std::mutex> lock(delayed_mutex_);
 			frame_elapsed_time_ += dt;   // advance BEFORE drain so delayed callbacks see accumulated time
+			frame_count_ += 1;
+			last_frame_dt_ = dt;
 		}
 		drain_callbacks_impl();
 		fixed_update(dt);
@@ -897,6 +901,19 @@ namespace primal::script {
 		// 若已初始化,这是幂等操作。
 		detail::g_main_thread_id = std::this_thread::get_id();
 		detail::g_initialized = true;
+
+		// Phase 2b.8 Task 3: register built-in C++-owned state.engine.* getters.
+		// These read file-scope anonymous-namespace globals only (no ScriptState re-entrancy).
+		auto& s = ScriptState::instance();
+		s.register_engine_getter("frame", []() {
+			return StateValue::make_number(static_cast<double>(frame_count_));
+		});
+		s.register_engine_getter("time", []() {
+			return StateValue::make_number(static_cast<double>(frame_elapsed_time_));
+		});
+		s.register_engine_getter("dt", []() {
+			return StateValue::make_number(static_cast<double>(last_frame_dt_));
+		});
 	}
 
 	void shutdown()
@@ -972,6 +989,8 @@ namespace primal::script {
 			while (!wall_delayed_queue_.empty())  wall_delayed_queue_.pop();
 		}
 		frame_elapsed_time_ = 0.0f;
+		frame_count_ = 0;
+		last_frame_dt_ = 0.0f;
 	}
 
 	bool is_initialized()

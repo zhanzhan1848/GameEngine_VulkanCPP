@@ -225,6 +225,15 @@ u64 LuaBackend::create_instance(u64 type_id, u64 entity_id) {
 
     LuaScriptInstance* raw = inst.get();
 
+    // Phase 2b.8: Expose entity_id to Lua (per-instance global) so scripts
+    // can self-reference in state.entities[entity_id]. Set BEFORE
+    // script_create_external because begin_play fires synchronously inside it.
+    // Subsequent hook dispatches re-set this global via LuaWriterIdScope
+    // (instances of the same type share one L; without re-set, the global
+    // would carry the wrong eid for non-begin_play hooks).
+    lua_pushnumber(L, (double)entity_id);
+    lua_setglobal(L, "entity_id");
+
     // === Register with engine. Pass raw as instance_user_data so every
     // callback dispatch receives the per-instance pointer. ===
     u64 script_id = script_create_external(type_id, entity_id, /*instance_user_data=*/(void*)raw);
@@ -731,12 +740,16 @@ static int state_proxy_gc(lua_State* L) {
 thread_local u64 current_writer_entity_id_ = u64_invalid_id;
 
 // RAII guard: sets current_writer_entity_id_ for the duration of a hook
-// dispatch, restoring the previous value on exit. Essential for owner-write
-// enforcement when multiple instances of the same type share one lua_State.
+// AND mirrors it as the `entity_id` Lua global. The Lua global must be
+// re-set per dispatch because instances of the same type share one L
+// (the global from a prior create_instance would otherwise leak).
 struct LuaWriterIdScope {
     u64 saved;
-    LuaWriterIdScope(u64 eid) : saved(current_writer_entity_id_) {
+    lua_State* L;
+    LuaWriterIdScope(lua_State* L_, u64 eid) : saved(current_writer_entity_id_), L(L_) {
         current_writer_entity_id_ = eid;
+        lua_pushnumber(L, (double)eid);
+        lua_setglobal(L, "entity_id");
     }
     ~LuaWriterIdScope() { current_writer_entity_id_ = saved; }
 };
@@ -764,6 +777,12 @@ static int state_proxy_index(lua_State* L) {
     // resolve to Nil, making subsequent __newindex impossible.
     bool is_root_namespace = (p->depth == 0);
 
+    // Entity/type bucket level: state.entities[<id>] or state.types[<Name>].
+    // The underlying bucket may not exist yet (lazy creation on first write).
+    // Return a sub-proxy so subsequent __newindex creates it via set().
+    bool is_bucket_level = (p->depth == 1 &&
+        (p->segs[0] == "entities" || p->segs[0] == "types"));
+
     std::vector<std::string> path(p->segs.begin(), p->segs.begin() + p->depth);
     path.push_back(seg);
 
@@ -771,7 +790,8 @@ static int state_proxy_index(lua_State* L) {
     try { v = primal::script::state().get(path); }
     catch (const std::exception& e) { return luaL_error(L, "%s", e.what()); }
 
-    if (v.tag == primal::script::StateValue::Tag::Table || is_root_namespace) {
+    if (v.tag == primal::script::StateValue::Tag::Table ||
+        is_root_namespace || is_bucket_level) {
         void* ud = lua_newuserdata(L, sizeof(StateProxy));
         auto* child = new (ud) StateProxy{};
         child->L = L;
@@ -956,7 +976,11 @@ static void my_begin_play(void* user_data) {
     auto& backend = LuaBackend::instance();
     auto* prev = backend.current_instance_;
     backend.current_instance_ = inst;
-    invoke_lua_hook(inst, "begin_play");
+    {
+        lua_State* L = (lua_State*)inst->type->lua_state;
+        LuaWriterIdScope scope(L, inst->entity_id);
+        invoke_lua_hook(inst, "begin_play");
+    }
     backend.current_instance_ = prev;
 }
 
@@ -968,7 +992,11 @@ static void my_update(void* user_data, float dt) {
     auto* prev = backend.current_instance_;
     backend.current_instance_ = inst;
 
-    invoke_lua_hook_dt(inst, "update", dt);
+    {
+        lua_State* L = (lua_State*)inst->type->lua_state;
+        LuaWriterIdScope scope(L, inst->entity_id);
+        invoke_lua_hook_dt(inst, "update", dt);
+    }
 
     backend.current_instance_ = prev;
 }
@@ -981,7 +1009,11 @@ static void my_fixed_update(void* user_data, float dt) {
     auto* prev = backend.current_instance_;
     backend.current_instance_ = inst;
 
-    invoke_lua_hook_dt(inst, "fixed_update", dt);
+    {
+        lua_State* L = (lua_State*)inst->type->lua_state;
+        LuaWriterIdScope scope(L, inst->entity_id);
+        invoke_lua_hook_dt(inst, "fixed_update", dt);
+    }
 
     backend.current_instance_ = prev;
 }
@@ -994,7 +1026,11 @@ static void my_late_update(void* user_data, float dt) {
     auto* prev = backend.current_instance_;
     backend.current_instance_ = inst;
 
-    invoke_lua_hook_dt(inst, "late_update", dt);
+    {
+        lua_State* L = (lua_State*)inst->type->lua_state;
+        LuaWriterIdScope scope(L, inst->entity_id);
+        invoke_lua_hook_dt(inst, "late_update", dt);
+    }
 
     backend.current_instance_ = prev;
 }
@@ -1015,8 +1051,13 @@ static void my_destroy(void* user_data) {
     // Lua destroy hook and set instance_table_ref = LUA_NOREF. Skip to avoid
     // double-fire + suppress the "instance table missing" warning noise.
     if (inst->instance_table_ref != LUA_NOREF) {
+        lua_State* L = (lua_State*)inst->type->lua_state;
+        LuaWriterIdScope scope(L, inst->entity_id);
         invoke_lua_hook(inst, "destroy");
     }
+
+    // Phase 2b.8: Clear this entity's per-entity state from ScriptState.
+    primal::script::state().clear_entity(inst->entity_id);
 
     backend.current_instance_ = prev;
 
@@ -1058,7 +1099,11 @@ static void* lua_capture_state_for_reload(void* user_data) {
     // then later calls my_destroy which would normally invoke the Lua destroy
     // hook — but by then instance_table_ref has been moved to LUA_NOREF.
     // Calling it here preserves "destroy fires once per instance lifetime".
-    invoke_lua_hook(inst, "destroy");
+    {
+        lua_State* L = (lua_State*)inst->type->lua_state;
+        LuaWriterIdScope scope(L, inst->entity_id);
+        invoke_lua_hook(inst, "destroy");
+    }
 
     auto* state = new LuaReloadState{};
     state->lua_state = inst->type->lua_state;
@@ -1135,10 +1180,13 @@ static void my_on_reload(void* user_data, void* old_state) {
     }
 
     // pcall(on_reload, self, old_state)
-    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
-        const char* err = lua_tostring(L, -1);
-        std::fprintf(stderr, "lua on_reload: %s\n", err ? err : "(non-string error)");
-        lua_pop(L, 1);
+    {
+        LuaWriterIdScope scope(L, inst->entity_id);
+        if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+            const char* err = lua_tostring(L, -1);
+            std::fprintf(stderr, "lua on_reload: %s\n", err ? err : "(non-string error)");
+            lua_pop(L, 1);
+        }
     }
 
     lua_pop(L, 1);  // pop script table

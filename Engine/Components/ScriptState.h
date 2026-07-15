@@ -32,8 +32,10 @@ public:
     static ScriptState& instance();
 
     // === Lua-owned stores ===
-    // get() walks path segments; returns Nil if any segment missing.
-    // Throws std::runtime_error if path[0] is "engine" (C++-owned; use call_engine_getter).
+    // get() walks path segments; returns Nil if any segment is missing.
+    // For "engine" namespace, returns the getter result (Nil if no getter registered).
+    // For "types" namespace, returns Nil if path[1] is not a registered type name.
+    // For "entities" namespace, returns Nil if path[1] is not a valid entity id.
     StateValue get(const std::vector<std::string>& path);
     // set() walks path segments; creates intermediate Table values as needed.
     // writer_entity_id is used for state.entities.<id>.* ownership check;

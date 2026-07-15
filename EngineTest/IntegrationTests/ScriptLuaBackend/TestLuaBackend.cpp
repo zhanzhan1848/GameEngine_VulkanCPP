@@ -1890,6 +1890,17 @@ TestResult test_lua_state_type_level_shared_across_instances() {
         return TestResult::Failed;
     }
 
+    LuaScriptInstance* inst_a = LuaBackend::instance().find_instance(script_a);
+    int value_read_a = lua_get_instance_int(inst_a, "value_read");
+    if (value_read_a != 7) {
+        std::fprintf(stderr, "Test 26 FAIL: value_read_a=%d (expected 7)\n", value_read_a);
+        primal::script::remove_for_entity(entity_a.get_id());
+        primal::script::remove_for_entity(entity_b.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
     LuaScriptInstance* inst_b = LuaBackend::instance().find_instance(script_b);
     int value_read = lua_get_instance_int(inst_b, "value_read");
     if (value_read != 7) {
@@ -1958,8 +1969,10 @@ TestResult test_lua_state_cross_entity_read() {
     }
     LuaScriptInstance* reader_inst = LuaBackend::instance().find_instance(reader_script);
     int read_target = lua_get_instance_int(reader_inst, "read_target");
-    if (read_target != 100) {
-        std::fprintf(stderr, "Test 27 FAIL: read_target=%d (expected 100)\n", read_target);
+    bool write_blocked = lua_get_instance_bool(reader_inst, "write_blocked");
+    if (read_target != 100 || !write_blocked) {
+        std::fprintf(stderr, "Test 27 FAIL: read_target=%d (expected 100) write_blocked=%d (expected 1)\n",
+                     read_target, write_blocked);
         primal::script::remove_for_entity(pub_entity.get_id());
         primal::script::remove_for_entity(reader_entity.get_id());
         primal::script::shutdown();
@@ -1969,6 +1982,99 @@ TestResult test_lua_state_cross_entity_read() {
 
     primal::script::remove_for_entity(pub_entity.get_id());
     primal::script::remove_for_entity(reader_entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 28: state.engine.* C++-owned mirrors readable; writes blocked.
+// Pins the read-only contract for engine-provided getters.
+TestResult test_lua_state_engine_mirrors_readable_and_write_errors() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "StateEngineMirror",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/state_engine_mirror.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    bool frame_ok    = lua_get_instance_bool(inst, "frame_read_ok");
+    bool time_ok     = lua_get_instance_bool(inst, "time_read_ok");
+    bool dt_ok       = lua_get_instance_bool(inst, "dt_read_ok");
+    bool write_block = lua_get_instance_bool(inst, "write_blocked");
+
+    if (!(frame_ok && time_ok && dt_ok && write_block)) {
+        std::fprintf(stderr, "Test 28 FAIL: frame=%d time=%d dt=%d wb=%d\n",
+                     frame_ok, time_ok, dt_ok, write_block);
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return TestResult::Passed;
+}
+
+// Test 29: Disallowed value types (function/thread/circular table) rejected
+// at write time. Pins the type-safety contract for shared state values.
+TestResult test_lua_state_disallowed_value_types_error() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "StateDisallowed",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/state_disallowed.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    bool fn_blocked     = lua_get_instance_bool(inst, "fn_blocked");
+    bool thread_blocked = lua_get_instance_bool(inst, "thread_blocked");
+    bool deep_blocked   = lua_get_instance_bool(inst, "deep_blocked");
+
+    if (!(fn_blocked && thread_blocked && deep_blocked)) {
+        std::fprintf(stderr, "Test 29 FAIL: fn=%d th=%d deep=%d\n",
+                     fn_blocked, thread_blocked, deep_blocked);
+        primal::script::remove_for_entity(entity.get_id());
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
     primal::script::shutdown();
     LuaBackend::instance().shutdown();
     return TestResult::Passed;
@@ -2063,6 +2169,12 @@ void RunLuaBackendTests() {
     suite.AddTestCase(TestCase("lua_state_cross_entity_read",
                                test_lua_state_cross_entity_read,
                                "state.entities.<id>.* owner-writable, readable by others"));
+    suite.AddTestCase(TestCase("lua_state_engine_mirrors_readable_and_write_errors",
+                               test_lua_state_engine_mirrors_readable_and_write_errors,
+                               "state.engine.* mirrors readable, writes raise Lua error"));
+    suite.AddTestCase(TestCase("lua_state_disallowed_value_types_error",
+                               test_lua_state_disallowed_value_types_error,
+                               "functions/threads/circular tables rejected at write"));
     suite.RunAllTests();
 }
 
