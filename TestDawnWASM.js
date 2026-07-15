@@ -7742,20 +7742,19 @@ function checkIncomingModuleAPI() {
   ignoredModuleProp('wasmBinary');
 }
 var ASM_CONSTS = {
-  7847940: () => { if (!document.getElementById('modeHud')) { var hud = document.createElement('div'); hud.id = 'modeHud'; hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;'; hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">L</kbd> to toggle sun auto-rotate (Mode 10 static vs Mode 11 dynamic)</div>' + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>' + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>' + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>' + '<div id="sunRotateHud" style="color:#fd0;display:none;">Sun Auto-Rotate: OFF</div>'; document.body.appendChild(hud); } window.setRenderMode = function(idx, name, desc) { var c = document.getElementById('modeHudCurrent'); var d = document.getElementById('modeHudDesc'); if (c) c.textContent = 'Mode ' + idx + ': ' + name; if (d) d.textContent = desc; var dbg = document.getElementById('meshletDbgHud'); if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none'; var sun = document.getElementById('sunRotateHud'); if (sun) sun.style.display = (idx == 10 || idx == 11) ? 'block' : 'none'; }; window.setMeshletDebug = function(mode) { var dbg = document.getElementById('meshletDbgHud'); if (!dbg) return; var label = 'Off'; if (mode == 1) label = 'MeshletID'; else if (mode == 2) label = 'TriangleID'; else if (mode == 3) label = 'MeshID'; else if (mode == 4) label = 'Normal'; else if (mode == 5) label = 'ObjNormal'; dbg.textContent = 'Meshlet Debug: ' + label; }; window.setSunAutoRotate = function(on) { var sun = document.getElementById('sunRotateHud'); if (!sun) return; sun.textContent = 'Sun Auto-Rotate: ' + (on ? 'ON' : 'OFF'); sun.style.color = on ? '#0f0' : '#fd0'; }; },  
- 7850226: ($0) => { if (window.setSunAutoRotate) window.setSunAutoRotate($0); },  
- 7850288: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } },  
- 7850384: ($0) => { if (window.setMeshletDebug) { window.setMeshletDebug($0); } },  
- 7850448: ($0) => { if (window.setSSGISSRSubmode) { window.setSSGISSRSubmode($0); } },  
- 7850516: () => { try { FS.mkdir('/persist'); } catch (e) { } try { FS.mount(IDBFS, {}, '/persist'); } catch (e) { } window._ddgiSyncDone = false; FS.syncfs(true, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(true) error:', err); }); },  
- 7850781: () => { return window._ddgiSyncDone ? 1 : 0; },  
- 7850822: () => { try { FS.stat('/persist/mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
- 7850912: () => { var data = FS.readFile('/persist/mode10_ddgi_cache.spch'); FS.writeFile('mode10_ddgi_cache.spch', data); },  
- 7851021: () => { try { FS.stat('mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
- 7851102: () => { try { var data = FS.readFile('mode10_ddgi_cache.spch'); FS.writeFile('/persist/mode10_ddgi_cache.spch', data); window._ddgiSyncDone = false; FS.syncfs(false, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(false) error:', err); }); } catch (e) { console.error('[Prebake] Failed to persist cache:', e); window._ddgiSyncDone = true; } },  
- 7851482: () => { return window._ddgiSyncDone ? 1 : 0; },  
- 7851523: () => { var label = document.querySelector('#loading .label'); if (label) label.textContent = 'Loading...'; },  
- 7851627: ($0, $1, $2) => { var label = document.querySelector('#loading .label'); if (label) { label.textContent = 'Baking DDGI probes (' + UTF8ToString($0) + '): ' + $1 + ' / ' + $2; } }
+  7845796: () => { if (!document.getElementById('modeHud')) { var hud = document.createElement('div'); hud.id = 'modeHud'; hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;'; hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">L</kbd> to toggle sun auto-rotate (Mode 10 static vs Mode 11 dynamic)</div>' + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>' + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>' + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>' + '<div id="sunRotateHud" style="color:#fd0;display:none;">Sun Auto-Rotate: OFF</div>'; document.body.appendChild(hud); } window.setRenderMode = function(idx, name, desc) { var c = document.getElementById('modeHudCurrent'); var d = document.getElementById('modeHudDesc'); if (c) c.textContent = 'Mode ' + idx + ': ' + name; if (d) d.textContent = desc; var dbg = document.getElementById('meshletDbgHud'); if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none'; var sun = document.getElementById('sunRotateHud'); if (sun) sun.style.display = (idx == 10 || idx == 11) ? 'block' : 'none'; }; window.setMeshletDebug = function(mode) { var dbg = document.getElementById('meshletDbgHud'); if (!dbg) return; var label = 'Off'; if (mode == 1) label = 'MeshletID'; else if (mode == 2) label = 'TriangleID'; else if (mode == 3) label = 'MeshID'; else if (mode == 4) label = 'Normal'; else if (mode == 5) label = 'ObjNormal'; dbg.textContent = 'Meshlet Debug: ' + label; }; window.setSunAutoRotate = function(on) { var sun = document.getElementById('sunRotateHud'); if (!sun) return; sun.textContent = 'Sun Auto-Rotate: ' + (on ? 'ON' : 'OFF'); sun.style.color = on ? '#0f0' : '#fd0'; }; },  
+ 7848082: ($0) => { if (window.setSunAutoRotate) window.setSunAutoRotate($0); },  
+ 7848144: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } },  
+ 7848240: ($0) => { if (window.setMeshletDebug) { window.setMeshletDebug($0); } },  
+ 7848304: ($0) => { if (window.setSSGISSRSubmode) { window.setSSGISSRSubmode($0); } },  
+ 7848372: () => { try { FS.mkdir('/persist'); } catch (e) { } try { FS.mount(IDBFS, {}, '/persist'); } catch (e) { } window._ddgiSyncDone = false; FS.syncfs(true, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(true) error:', err); }); },  
+ 7848637: () => { return window._ddgiSyncDone ? 1 : 0; },  
+ 7848678: () => { try { FS.stat('/persist/mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
+ 7848768: () => { var data = FS.readFile('/persist/mode10_ddgi_cache.spch'); FS.writeFile('mode10_ddgi_cache.spch', data); },  
+ 7848877: () => { try { FS.stat('mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
+ 7848958: () => { try { var data = FS.readFile('mode10_ddgi_cache.spch'); FS.writeFile('/persist/mode10_ddgi_cache.spch', data); window._ddgiSyncDone = false; FS.syncfs(false, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(false) error:', err); }); } catch (e) { console.error('[Prebake] Failed to persist cache:', e); window._ddgiSyncDone = true; } },  
+ 7849338: () => { return window._ddgiSyncDone ? 1 : 0; },  
+ 7849379: () => { var label = document.querySelector('#loading .label'); if (label) label.textContent = 'Loading...'; }
 };
 
 // Imports from the Wasm binary.
@@ -7806,7 +7805,6 @@ var __emscripten_stack_alloc = makeInvalidEarlyAccess('__emscripten_stack_alloc'
 var _emscripten_stack_get_current = makeInvalidEarlyAccess('_emscripten_stack_get_current');
 var dynCall_v = makeInvalidEarlyAccess('dynCall_v');
 var dynCall_ii = makeInvalidEarlyAccess('dynCall_ii');
-var dynCall_viiii = makeInvalidEarlyAccess('dynCall_viiii');
 var dynCall_vi = makeInvalidEarlyAccess('dynCall_vi');
 var dynCall_iii = makeInvalidEarlyAccess('dynCall_iii');
 var dynCall_vii = makeInvalidEarlyAccess('dynCall_vii');
@@ -7815,6 +7813,7 @@ var dynCall_iiii = makeInvalidEarlyAccess('dynCall_iiii');
 var dynCall_iiiiii = makeInvalidEarlyAccess('dynCall_iiiiii');
 var dynCall_viiiiii = makeInvalidEarlyAccess('dynCall_viiiiii');
 var dynCall_jii = makeInvalidEarlyAccess('dynCall_jii');
+var dynCall_viiii = makeInvalidEarlyAccess('dynCall_viiii');
 var dynCall_iijj = makeInvalidEarlyAccess('dynCall_iijj');
 var dynCall_iiijj = makeInvalidEarlyAccess('dynCall_iiijj');
 var dynCall_vij = makeInvalidEarlyAccess('dynCall_vij');
@@ -7901,7 +7900,6 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['emscripten_stack_get_current'] != 'undefined', 'missing Wasm export: emscripten_stack_get_current');
   assert(typeof wasmExports['dynCall_v'] != 'undefined', 'missing Wasm export: dynCall_v');
   assert(typeof wasmExports['dynCall_ii'] != 'undefined', 'missing Wasm export: dynCall_ii');
-  assert(typeof wasmExports['dynCall_viiii'] != 'undefined', 'missing Wasm export: dynCall_viiii');
   assert(typeof wasmExports['dynCall_vi'] != 'undefined', 'missing Wasm export: dynCall_vi');
   assert(typeof wasmExports['dynCall_iii'] != 'undefined', 'missing Wasm export: dynCall_iii');
   assert(typeof wasmExports['dynCall_vii'] != 'undefined', 'missing Wasm export: dynCall_vii');
@@ -7910,6 +7908,7 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['dynCall_iiiiii'] != 'undefined', 'missing Wasm export: dynCall_iiiiii');
   assert(typeof wasmExports['dynCall_viiiiii'] != 'undefined', 'missing Wasm export: dynCall_viiiiii');
   assert(typeof wasmExports['dynCall_jii'] != 'undefined', 'missing Wasm export: dynCall_jii');
+  assert(typeof wasmExports['dynCall_viiii'] != 'undefined', 'missing Wasm export: dynCall_viiii');
   assert(typeof wasmExports['dynCall_iijj'] != 'undefined', 'missing Wasm export: dynCall_iijj');
   assert(typeof wasmExports['dynCall_iiijj'] != 'undefined', 'missing Wasm export: dynCall_iiijj');
   assert(typeof wasmExports['dynCall_vij'] != 'undefined', 'missing Wasm export: dynCall_vij');
@@ -7993,7 +7992,6 @@ function assignWasmExports(wasmExports) {
   _emscripten_stack_get_current = wasmExports['emscripten_stack_get_current'];
   dynCall_v = dynCalls['v'] = createExportWrapper('dynCall_v', wasmExports['dynCall_v'], 1);
   dynCall_ii = dynCalls['ii'] = createExportWrapper('dynCall_ii', wasmExports['dynCall_ii'], 2);
-  dynCall_viiii = dynCalls['viiii'] = createExportWrapper('dynCall_viiii', wasmExports['dynCall_viiii'], 5);
   dynCall_vi = dynCalls['vi'] = createExportWrapper('dynCall_vi', wasmExports['dynCall_vi'], 2);
   dynCall_iii = dynCalls['iii'] = createExportWrapper('dynCall_iii', wasmExports['dynCall_iii'], 3);
   dynCall_vii = dynCalls['vii'] = createExportWrapper('dynCall_vii', wasmExports['dynCall_vii'], 3);
@@ -8002,6 +8000,7 @@ function assignWasmExports(wasmExports) {
   dynCall_iiiiii = dynCalls['iiiiii'] = createExportWrapper('dynCall_iiiiii', wasmExports['dynCall_iiiiii'], 6);
   dynCall_viiiiii = dynCalls['viiiiii'] = createExportWrapper('dynCall_viiiiii', wasmExports['dynCall_viiiiii'], 7);
   dynCall_jii = dynCalls['jii'] = createExportWrapper('dynCall_jii', wasmExports['dynCall_jii'], 3);
+  dynCall_viiii = dynCalls['viiii'] = createExportWrapper('dynCall_viiii', wasmExports['dynCall_viiii'], 5);
   dynCall_iijj = dynCalls['iijj'] = createExportWrapper('dynCall_iijj', wasmExports['dynCall_iijj'], 4);
   dynCall_iiijj = dynCalls['iiijj'] = createExportWrapper('dynCall_iiijj', wasmExports['dynCall_iiijj'], 5);
   dynCall_vij = dynCalls['vij'] = createExportWrapper('dynCall_vij', wasmExports['dynCall_vij'], 3);
