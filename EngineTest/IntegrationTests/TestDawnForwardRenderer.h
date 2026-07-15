@@ -86,6 +86,9 @@ private:
     void InitializeDDGIForMode10();   // called once on first Mode 10 entry
     void ShutdownDDGIForMode10();     // releases DDGI resources
     void BuildProbeBakingScene(primal::graphics::lumen::ProbeBakingScene& scene);
+    // WASM only: bakes DDGI cache at startup so first Mode 10/11 entry is
+    // instant. Native loads the existing on-disk cache lazily on entry.
+    void PrebakeDDGICache();
 
     primal::graphics::rhi::DawnDevice* device_{nullptr};
     primal::graphics::rhi::RHISwapChain* swapchain_{nullptr};

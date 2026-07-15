@@ -23,11 +23,22 @@ struct ProbeBakingParams {
     float ray_max_distance{50.0f};
 };
 
+// Progress callback invoked between probe chunks during Bake().
+//   user_data: opaque pointer passed through untouched
+//   phase: "radiance" or "visibility" (which ParallelFor we're inside)
+//   done/total: probes completed in current phase
+// Used by WASM builds to pump the browser event loop (emscripten_sleep)
+// inside the callback so the page doesn't freeze during the multi-second bake.
+// Native builds pass nullptr and see no behavior change.
+using BakeProgressFn = void (*)(void* user_data, const char* phase, u32 done, u32 total);
+
 class StaticProbeBaker {
 public:
     static bool Bake(StaticProbeVolume& volume,
                      const ProbeBakingScene& scene,
-                     const ProbeBakingParams& params = {});
+                     const ProbeBakingParams& params = {},
+                     BakeProgressFn on_progress = nullptr,
+                     void* progress_user_data = nullptr);
 
 private:
     static void BakeProbeRadiance(StaticProbeVolume& volume,

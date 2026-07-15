@@ -303,6 +303,11 @@ bool Engine_Test::initialize() {
         return false;
     }
 
+    // WASM: bake DDGI cache eagerly so first Mode 10/11 entry doesn't trigger
+    // a 30+ second inline bake that freezes the browser. Native loads the
+    // existing on-disk cache lazily on Mode 10/11 entry.
+    PrebakeDDGICache();
+
     // Setup scene lights
     sunLight_.type = LightType::Directional;
     sunLight_.direction = primal::math::v3{0.5f, -0.7f, 0.3f};
@@ -2688,6 +2693,75 @@ void Engine_Test::BuildProbeBakingScene(primal::graphics::lumen::ProbeBakingScen
               << scene.vertex_count << " verts, "
               << scene.index_count << " indices across "
               << sceneMeshInfos_.size() << " meshes" << std::endl;
+}
+
+void Engine_Test::PrebakeDDGICache() {
+#ifdef __EMSCRIPTEN__
+    if (!device_) return;
+
+    // Skip if the cache is already present (e.g. deployed with --embed-file).
+    {
+        std::ifstream test("mode10_ddgi_cache.spch");
+        if (test.good()) {
+            std::cerr << "[Prebake] Cache file exists, skipping bake" << std::endl;
+            return;
+        }
+    }
+
+    auto temp_volume = std::make_unique<primal::graphics::lumen::StaticProbeVolume>();
+    primal::graphics::lumen::StaticProbeParams vol_params;
+    vol_params.origin = primal::math::v3{-32.0f, -16.0f, -32.0f};
+    if (!temp_volume->Initialize(device_, vol_params)) {
+        std::cerr << "[Prebake] StaticProbeVolume init failed - Mode 10/11 will fallback to inline bake on entry" << std::endl;
+        return;
+    }
+
+    primal::graphics::lumen::ProbeBakingScene scene;
+    BuildProbeBakingScene(scene);
+    if (scene.vertex_count == 0 || scene.index_count == 0) {
+        std::cerr << "[Prebake] Empty bake scene" << std::endl;
+        return;
+    }
+
+    primal::graphics::lumen::ProbeBakingParams params;
+    params.rays_per_probe    = 64;       // match InitializeDDGIForMode10
+    params.bounce_count      = 0;
+    params.ray_max_distance  = 50.0f;
+
+    // Pump browser event loop between chunks so the loading overlay repaints.
+    // Without this, single-threaded WASM blocks the main thread for ~30-60s
+    // and the browser kills the tab.
+    auto on_progress = [](void*, const char* phase, u32 done, u32 total) {
+        EM_ASM_({
+            var label = document.querySelector('#loading .label');
+            if (label) {
+                label.textContent = 'Baking DDGI probes (' + UTF8ToString($0) + '): ' + $1 + ' / ' + $2;
+            }
+        }, phase, done, total);
+        emscripten_sleep(0);
+    };
+
+    std::cerr << "[Prebake] Starting DDGI bake for WASM Mode 10/11..." << std::endl;
+    const auto bake_start = std::chrono::steady_clock::now();
+    const bool ok = primal::graphics::lumen::StaticProbeBaker::Bake(
+        *temp_volume, scene, params, on_progress, nullptr);
+    const auto bake_end = std::chrono::steady_clock::now();
+    const double bake_seconds = std::chrono::duration<double>(bake_end - bake_start).count();
+    std::cerr << "[Prebake] Bake " << (ok ? "completed" : "FAILED") << " in " << bake_seconds << "s" << std::endl;
+
+    if (!ok) {
+        std::cerr << "[Prebake] Bake failed - Mode 10/11 will fallback to inline bake on entry" << std::endl;
+        return;
+    }
+
+    temp_volume->SaveToFile("mode10_ddgi_cache.spch");
+    std::cerr << "[Prebake] Cache saved to MEMFS. Mode 10/11 entry will be instant." << std::endl;
+
+    EM_ASM_({
+        var label = document.querySelector('#loading .label');
+        if (label) label.textContent = 'Loading...';
+    });
+#endif
 }
 
 void Engine_Test::InitializeDDGIForMode10() {

@@ -313,7 +313,9 @@ static inline float Dot3(v3 a, v3 b)
 /*static*/ bool StaticProbeBaker::Bake(
     StaticProbeVolume& volume,
     const ProbeBakingScene& scene,
-    const ProbeBakingParams& params)
+    const ProbeBakingParams& params,
+    BakeProgressFn on_progress,
+    void* progress_user_data)
 {
     const u32 probe_count = volume.ProbeCount();
     if (probe_count == 0) return false;
@@ -354,15 +356,26 @@ static inline float Dot3(v3 a, v3 b)
     // Single-bounce indirect radiance: sky + Lambertian surface bounce.
     // No direct sun leak, no multi-bounce, no ConvolveCosineLobe — outputs
     // radiance SH matching the runtime DDGIUpdateIrradiance.wgsl convention.
+    //
+    // Process in chunks of kProbeChunk so the optional on_progress callback
+    // (used by WASM to pump the browser event loop via emscripten_sleep) gets
+    // called frequently enough to keep the page responsive. Native builds
+    // pass nullptr and still benefit from ParallelFor's worker pool inside
+    // each chunk.
     auto bvh_ref = bvh;
     std::cout << "[Bake] Phase 1: BakeProbeRadiance over " << probe_count
               << " probes (" << params.rays_per_probe << " rays each)..." << std::flush;
     auto t1_start = std::chrono::steady_clock::now();
-    auto handle1 = jobsystem::JobSystem::ParallelFor(probe_count,
-        [&volume, bvh_ref, &scene, &params](u32 i) {
-            BakeProbeRadiance(volume, *bvh_ref, scene, params, i);
-        });
-    jobsystem::JobSystem::Wait(handle1);
+    constexpr u32 kProbeChunk = 32;
+    for (u32 base = 0; base < probe_count; base += kProbeChunk) {
+        const u32 end = (probe_count - base < kProbeChunk) ? probe_count : (base + kProbeChunk);
+        auto handle1 = jobsystem::JobSystem::ParallelFor(end - base,
+            [&volume, bvh_ref, &scene, &params, base](u32 i) {
+                BakeProbeRadiance(volume, *bvh_ref, scene, params, base + i);
+            });
+        jobsystem::JobSystem::Wait(handle1);
+        if (on_progress) on_progress(progress_user_data, "radiance", end, probe_count);
+    }
     auto t1_end = std::chrono::steady_clock::now();
     std::cout << " done in " << std::chrono::duration<double>(t1_end - t1_start).count() << "s" << std::endl;
 
@@ -371,11 +384,15 @@ static inline float Dot3(v3 a, v3 b)
     std::cout << "[Bake] Phase 2: BakeVisibility over " << probe_count
               << " probes (64+256 rays each)..." << std::flush;
     auto t3_start = std::chrono::steady_clock::now();
-    auto handle3 = jobsystem::JobSystem::ParallelFor(probe_count,
-        [&volume, bvh_ref, &scene, &params](u32 i) {
-            BakeVisibility(volume, *bvh_ref, scene, params, i);
-        });
-    jobsystem::JobSystem::Wait(handle3);
+    for (u32 base = 0; base < probe_count; base += kProbeChunk) {
+        const u32 end = (probe_count - base < kProbeChunk) ? probe_count : (base + kProbeChunk);
+        auto handle3 = jobsystem::JobSystem::ParallelFor(end - base,
+            [&volume, bvh_ref, &scene, &params, base](u32 i) {
+                BakeVisibility(volume, *bvh_ref, scene, params, base + i);
+            });
+        jobsystem::JobSystem::Wait(handle3);
+        if (on_progress) on_progress(progress_user_data, "visibility", end, probe_count);
+    }
     auto t3_end = std::chrono::steady_clock::now();
     std::cout << " done in " << std::chrono::duration<double>(t3_end - t3_start).count() << "s" << std::endl;
 
