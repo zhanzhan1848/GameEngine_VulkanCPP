@@ -330,11 +330,24 @@ bool StaticProbeVolume::LoadFromFile(const char* path) {
 // the full bake take 20+ minutes. The runtime DDGI trace in Mode 11
 // converges from any non-zero seed within ~60 frames, and Mode 10 displays
 // this seed as uniform ambient sky light.
+//
+// Intensity: seed uses sky_color × kSeedAttenuation rather than raw sky.
+// Full-sky L0 reconstructed via shDot4 returns exactly sky_color, and
+// DeferredLighting_Meshlet.wgsl applies `color += albedo × indirect` — so
+// a raw-sky seed adds ~0.5 × sky per pixel even on indoor surfaces, which
+// reads as bright as direct sunlight. The 0.15 attenuation gives subtle
+// ambient (~7% of full sky after albedo) that Mode 11 brightens via trace
+// convergence and Mode 10 leaves as a dim flat fill.
 void StaticProbeVolume::FillWithSkySeed(const math::v3& sky_color, float ray_max_distance) {
     const u32 pc = ProbeCount();
     if (pc == 0) return;
 
-    const math::v3 sh0 = UniformSkySH0(sky_color);
+    constexpr float kSeedAttenuation = 0.15f;
+    const math::v3 attenuated_sky{
+        sky_color.x * kSeedAttenuation,
+        sky_color.y * kSeedAttenuation,
+        sky_color.z * kSeedAttenuation};
+    const math::v3 sh0 = UniformSkySH0(attenuated_sky);
 
     // Irradiance + sky_sh: L0 = sky_color * 2*sqrt(pi), L1..L8 = 0
     for (u32 p = 0; p < pc; ++p) {
