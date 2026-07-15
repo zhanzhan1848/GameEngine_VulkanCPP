@@ -2892,7 +2892,14 @@ void Engine_Test::InitializeDDGIForMode10() {
         return;
     }
 
-    // 2. Initialize LumenDDGIPass with default params (matches StaticProbeParams defaults).
+    // 2. Initialize LumenDDGIPass with params matching StaticProbeVolume.
+    // InitializeProbesFromStatic validates dimension match and falls through to
+    // sky_estimate (sky*pi, no attenuation) on mismatch. On WASM the static
+    // volume is 8x4x8/spacing8, so the default 16x8x16/spacing4 params caused
+    // the sky_estimate fallback — bypassing FillWithSkySeed's 0.15 attenuation
+    // and leaving the runtime irradiance buffers at full sky*pi (≈3× sky_color).
+    // Deriving params from vol_params keeps both stages on the same grid so
+    // the copy branch runs and probe_origin_ syncs to the static bake origin.
     ddgiPass_ = std::make_unique<primal::graphics::lumen::LumenDDGIPass>();
     // Attach the static volume BEFORE Initialize — InitializeProbesFromStatic
     // seeds the runtime buffers from the cache at init time, so it needs
@@ -2900,7 +2907,12 @@ void Engine_Test::InitializeDDGIForMode10() {
     // leaves the runtime buffers on the sky-estimate fallback until the first
     // trace pass overwrites them, which produces a one-frame magenta flash.
     ddgiPass_->SetStaticProbeVolume(staticProbeVolume_.get());
-    if (!ddgiPass_->Initialize(device_)) {
+    primal::graphics::lumen::DDGIRuntimeParams ddgi_params;
+    ddgi_params.probe_count_x = vol_params.grid_dim_x;
+    ddgi_params.probe_count_y = vol_params.grid_dim_y;
+    ddgi_params.probe_count_z = vol_params.grid_dim_z;
+    ddgi_params.probe_spacing = vol_params.spacing;
+    if (!ddgiPass_->Initialize(device_, ddgi_params)) {
         std::cerr << "[Mode10] LumenDDGIPass init failed - DDGI disabled" << std::endl;
         ddgiPass_.reset();
         staticProbeVolume_.reset();
