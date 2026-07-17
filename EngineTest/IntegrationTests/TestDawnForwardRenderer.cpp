@@ -2755,12 +2755,14 @@ void Engine_Test::PrebakeDDGICache() {
     // to IDBFS so subsequent loads skip even this step.
     auto temp_volume = std::make_unique<primal::graphics::lumen::StaticProbeVolume>();
     primal::graphics::lumen::StaticProbeParams vol_params;
-    // WASM: 8x4x8 grid (256 probes vs native 16x8x16 = 2048) at spacing 8
-    // keeps the same scene coverage [-32,32]x[-16,16]x[-32,32] but with 8x
-    // fewer probes so the runtime trace converges faster.
-    vol_params.grid_dim_x = 8;
-    vol_params.grid_dim_y = 4;
-    vol_params.grid_dim_z = 8;
+    // WASM: 9x5x9 grid (405 probes vs native 16x8x16 = 2048) at spacing 8.
+    // (count-1)*spacing = 64 on X/Z, 32 on Y → origin (-32,-16,-32) places
+    // the last probe exactly at (+32,+16,+32), covering Sponza's full bounds.
+    // Previous 8x4x8 left a 1-cell gap on +X/+Y/+Z faces; GIGather's
+    // out-of-grid early-return produced a hard black edge on the right half.
+    vol_params.grid_dim_x = 9;
+    vol_params.grid_dim_y = 5;
+    vol_params.grid_dim_z = 9;
     vol_params.spacing    = 8.0f;
     vol_params.origin     = primal::math::v3{-32.0f, -16.0f, -32.0f};
     if (!temp_volume->Initialize(device_, vol_params)) {
@@ -2823,11 +2825,13 @@ void Engine_Test::InitializeDDGIForMode10() {
     //   z: -32 + 16*4 = 32 ✓
     vol_params.origin = primal::math::v3{-32.0f, -16.0f, -32.0f};
 #ifdef __EMSCRIPTEN__
-    // Match PrebakeDDGICache: 8x4x8 @ spacing 8 covers the same scene
-    // bounds but with 8x fewer probes so the WASM bake is tractable.
-    vol_params.grid_dim_x = 8;
-    vol_params.grid_dim_y = 4;
-    vol_params.grid_dim_z = 8;
+    // Match PrebakeDDGICache: 9x5x9 @ spacing 8 covers Sponza [-32,+32]³
+    // exactly — (count-1)*spacing = 64 on X/Z, 32 on Y. Previous 8x4x8 left
+    // a +X/+Y/+Z edge gap that GIGather's out-of-grid branch turned into a
+    // hard black vertical line down the screen middle.
+    vol_params.grid_dim_x = 9;
+    vol_params.grid_dim_y = 5;
+    vol_params.grid_dim_z = 9;
     vol_params.spacing    = 8.0f;
 #endif
 

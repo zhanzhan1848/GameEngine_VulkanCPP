@@ -8,11 +8,11 @@ namespace primal::graphics::lumen {
 
 struct ProbeCacheHeader {
     static constexpr u32 MAGIC{0x53504348}; // 'SPCH'
-    // v2: FillWithSkySeed now attenuates by 0.15 — old v1 caches seeded at
-    // full sky brightness and made DDGI as strong as direct light. Bumping
-    // the version invalidates IDBFS-cached v1 seeds so live visitors pick
-    // up the dimmer seed without needing to clear browser storage.
-    static constexpr u32 VERSION{2};
+    // v3: grid changed from 8x4x8 to 9x5x9 so (count-1)*spacing = 64 exactly
+    // covers Sponza's [-32,+32]³ bounds. v2's 8x4x8 left [+24,+32]×[+8,+16]
+    // out-of-grid, producing a hard black edge on the right half of the screen.
+    // Bump invalidates IDBFS-cached v2 volumes so live visitors re-seed.
+    static constexpr u32 VERSION{3};
 
     u32 magic{MAGIC};
     u32 version{VERSION};
