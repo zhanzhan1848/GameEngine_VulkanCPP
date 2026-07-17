@@ -453,6 +453,64 @@ fn sampleHitAlbedo(hitPos: vec3<f32>) -> vec3<f32> {
 }
 
 // ============================================================================
+// SDF shadow test toward sun
+// ============================================================================
+
+// Hard SDF shadow march from hit position toward sun direction.
+// Returns 1.0 = unoccluded (lit), 0.0 = occluded (shadowed).
+//
+// Marches up to SHADOW_MAX_STEPS sphere-tracing steps through cascade_0 only
+// (finest 1m voxels — coarser cascades over-approximate thin occluders like
+// banners/columns and miss the leak). Cascade_0 covers ~60m around camera,
+// enough for Sponza-scale sun occluders.
+//
+// Cost: ≤8 texture3D reads per ray, only when NdotL > 0 (back-facing hits
+// skip shadow entirely). Main trace already does up to 128 steps × 3 cascades,
+// so this adds <3% texture-read overhead.
+//
+// Bias: origin offset by SHADOW_BIAS along surface normal to avoid the hit
+// surface's own SDF field self-occluding the first step.
+fn sdfShadowTest(hitPos: vec3<f32>, N: vec3<f32>, L: vec3<f32>,
+                 sdf0: texture_3d<f32>,
+                 vol: ptr<uniform, DDGIVolumeData>) -> f32 {
+    const SHADOW_MAX_STEPS: u32 = 8u;
+    const SHADOW_MAX_DIST: f32 = 30.0;
+    const SHADOW_BIAS: f32 = 0.1;
+    const SHADOW_HIT_THRESHOLD: f32 = 0.5;  // half a voxel at cascade_0
+
+    let origin: vec3<f32> = hitPos + N * SHADOW_BIAS;
+    var t: f32 = SHADOW_BIAS;
+
+    for (var step: u32 = 0u; step < SHADOW_MAX_STEPS; step++) {
+        let pos: vec3<f32> = origin + L * t;
+
+        // Outside cascade_0 → no high-detail SDF data; assume unoccluded
+        // (better to leak some direct light than to systematically darken
+        // hits near cascade boundary). Coarser cascades aren't sampled
+        // because their 2-4m voxels miss thin occluders.
+        if (!isInsideCascade(pos, (*vol).SdfOrigins[0].xyz, (*vol).SdfExtents[0].xyz)) {
+            return 1.0;
+        }
+
+        let d: f32 = sampleSDFCascade(sdf0, pos,
+                                       (*vol).SdfOrigins[0].xyz,
+                                       (*vol).SdfExtents[0].xyz,
+                                       (*vol).SdfResolutionsAndCount.x);
+
+        if (d < SHADOW_HIT_THRESHOLD) {
+            return 0.0;
+        }
+
+        t += d;
+        if (t > SHADOW_MAX_DIST) {
+            break;
+        }
+    }
+
+    return 1.0;
+}
+
+// ============================================================================
 // Main Kernel: ddgi_trace_rays
 // ============================================================================
 
@@ -486,13 +544,20 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
         let hitPos: vec3<f32> = hit.position;
         let PI: f32 = 3.14159265358979;
 
-        // E_direct: analytic sun irradiance — no shadow ray (Apple Silicon
-        // scope cut). Direct light will leak through walls; documented as
-        // known trade-off in the Mode 11 plan.
+        // E_direct: analytic sun irradiance, gated by single-step SDF shadow
+        // march toward sun. Replaces the original "no shadow ray" scope cut
+        // that let direct light leak through walls — was the dominant source
+        // of Mode 11 over-brightness vs Mode 10's shadow-gated static bake.
+        // Shadow march only fires when NdotL > 0 (back-facing hits get E_direct=0
+        // anyway), saving 8 texture3D reads per back-facing ray.
         let L: vec3<f32> = normalize(-volume.LightDirection.xyz);
         let NdotL: f32 = max(0.0, dot(N, L));
         let lightIntensity: f32 = volume.LightColor.w;
-        let E_direct: vec3<f32> = volume.LightColor.xyz * lightIntensity * NdotL;
+        var E_direct: vec3<f32> = vec3<f32>(0.0);
+        if (NdotL > 0.001) {
+            let shadowFactor: f32 = sdfShadowTest(hitPos, N, L, sdf_cascade_0, &volume);
+            E_direct = volume.LightColor.xyz * lightIntensity * NdotL * shadowFactor;
+        }
 
         // E_sky: hemispherical sky irradiance weighted by NdotUp — no
         // occlusion ray (same scope cut). Sky contributes even under arches.
