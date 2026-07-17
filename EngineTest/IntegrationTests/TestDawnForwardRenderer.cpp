@@ -2916,6 +2916,13 @@ void Engine_Test::InitializeDDGIForMode10() {
     ddgi_params.probe_count_y = vol_params.grid_dim_y;
     ddgi_params.probe_count_z = vol_params.grid_dim_z;
     ddgi_params.probe_spacing = vol_params.spacing;
+#ifdef __EMSCRIPTEN__
+    // Cover all 405 probes every frame on WASM. Default 256 + priority
+    // scheduling starves far-from-camera probes, so L-key sun rotation
+    // only reaches them after tens of frames — visually "DDGI not changing".
+    // Trace cost is still small (no shadow ray, no sky-occlusion ray).
+    ddgi_params.max_probes_per_frame = 512;
+#endif
     if (!ddgiPass_->Initialize(device_, ddgi_params)) {
         std::cerr << "[Mode10] LumenDDGIPass init failed - DDGI disabled" << std::endl;
         ddgiPass_.reset();
