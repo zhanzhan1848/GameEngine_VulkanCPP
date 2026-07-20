@@ -233,6 +233,11 @@ private:
     // Dawn shadow resources — shadow bindings go in Group 0 (bindings 13, 14)
     rhi::ResourceHandle dawnShadowDepthTex_{rhi::handles::INVALID_RESOURCE};
     rhi::SamplerHandle dawnShadowSampler_{rhi::handles::INVALID_SAMPLER};
+    // Meshlet-only: per-cascade R32_Float shadow maps produced by
+    // GPUDrivenDrawPipeline::ExecuteShadowDepthBlit. Bound at WGSL
+    // bindings 5 (cascade 0) and 14 (cascade 1) of DeferredLighting_Meshlet.
+    rhi::ResourceHandle dawnMeshletShadowMap0_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle dawnMeshletShadowMap1_{rhi::handles::INVALID_RESOURCE};
     primal::math::m4x4 dawnShadowLightVP_{};
     primal::math::m4x4 dawnCascadeVPs_[4]{};
     float dawnCascadeSplits_[4]{};
@@ -350,6 +355,16 @@ public:
     void SetDawnMeshletDebugMode(u32 mode) { dawnMeshletDebugMode_ = mode; }
     void SetDawnEnableIBL(u32 enable) { dawnEnableIBL_ = enable; }
     void SetDawnEnableDDGI(u32 enable) { dawnEnableDDGI_ = enable; }
+
+    // Meshlet shadow maps: GPUDrivenDrawPipeline renders cascades into two
+    // separate 2D R32_Float textures (shadow_map_0/1), NOT the legacy
+    // 2D-array shadowDepthTexture_. ForwardRenderer's binding 5/14 in the
+    // meshlet deferred set read these directly. Caller must refresh every
+    // frame because the underlying buffer is triple-buffered (fi % 3).
+    void SetDawnMeshletShadowMaps(rhi::ResourceHandle sm0, rhi::ResourceHandle sm1) {
+        dawnMeshletShadowMap0_ = sm0;
+        dawnMeshletShadowMap1_ = sm1;
+    }
 
     // Phase 3c-2: caller supplies the material DSL (created by the test, shared
     // with MaterialInstance descriptor sets). The G-Buffer pipeline binds this

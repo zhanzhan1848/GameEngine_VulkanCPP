@@ -3637,6 +3637,15 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
     const bool applyDDGI = (renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
                             renderMode_ == DawnRenderMode::MeshletDynamicDDGI) && ddgiEnabled_;
     forwardRenderer_.SetDawnEnableDDGI(applyDDGI ? 1u : 0u);
+    // Hand the meshlet-rendered cascade shadow maps to the deferred pass.
+    // The legacy shadowDepthTexture_ is never written in meshlet modes
+    // (RenderShadowPass is skipped at line 1069-1077); without this call,
+    // deferred lighting samples a stale/empty texture and shadows look
+    // frozen or rotated-as-a-rigid-pattern when the sun moves.
+    // Triple-buffered by fi (frameIndex % 3) — refresh every frame.
+    forwardRenderer_.SetDawnMeshletShadowMaps(
+        gpuDrawPipeline.GetShadowMap(0, fi),
+        gpuDrawPipeline.GetShadowMap(1, fi));
     forwardRenderer_.RenderDawnMeshletDeferredLighting(
         cmd, view_, meshletGBuffer, meshletDepth, hdrTexture_, scene_,
         frameIndex_, width_, height_,

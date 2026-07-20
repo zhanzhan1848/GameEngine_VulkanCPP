@@ -616,18 +616,21 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         }
 
         // ---- Meshlet deferred pipeline (Phase N2) ----
-        // 14 bindings matching DeferredLighting_Meshlet.wgsl. Same shape as the
+        // 15 bindings matching DeferredLighting_Meshlet.wgsl. Same shape as the
         // standard deferred block but with an extra depthTex binding for
-        // worldPos reconstruction (meshlet GBuffer has no WorldPos RT), plus
-        // binding 13 for DDGI indirect (gi_indirect_tex).
-        rhi::DescriptorSetLayoutBinding meshletBinds[14];
+        // worldPos reconstruction (meshlet GBuffer has no WorldPos RT),
+        // bindings 5+14 for per-cascade 2D shadow maps (meshlet path outputs
+        // R32_Float 2D textures, not a depth 2D-array), and binding 13 for
+        // DDGI indirect (gi_indirect_tex).
+        rhi::DescriptorSetLayoutBinding meshletBinds[15];
         meshletBinds[0]  = {0,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
         meshletBinds[1]  = {1,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
         meshletBinds[2]  = {2,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
         meshletBinds[3]  = {3,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
         meshletBinds[4]  = {4,  rhi::DescriptorType::SampledDepthImage, 1, rhi::ShaderStage::Compute};
-        meshletBinds[5]  = {5,  rhi::DescriptorType::SampledDepthImage, 1, rhi::ShaderStage::Compute};
-        meshletBinds[5].isArray = true; // CSM depth array — texture_depth_2d_array
+        meshletBinds[5]  = {5,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[5].format = rhi::DataFormat::R32_Float; // cascade 0 shadow map
+        meshletBinds[5].unfilterableFloat = true; // R32Float is UnfilterableFloat in WebGPU
         meshletBinds[6]  = {6,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
         meshletBinds[6].isCube = true;  // irradianceMap
         meshletBinds[7]  = {7,  rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
@@ -640,8 +643,11 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         meshletBinds[12].format = rhi::DataFormat::RGBA16_Float;
         meshletBinds[13] = {13, rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
         meshletBinds[13].format = rhi::DataFormat::RGBA16_Float;
+        meshletBinds[14] = {14, rhi::DescriptorType::SampledImage,      1, rhi::ShaderStage::Compute};
+        meshletBinds[14].format = rhi::DataFormat::R32_Float; // cascade 1 shadow map
+        meshletBinds[14].unfilterableFloat = true; // R32Float is UnfilterableFloat in WebGPU
         rhi::DescriptorSetLayoutDesc meshletDslDesc;
-        meshletDslDesc.bindingCount = 14;
+        meshletDslDesc.bindingCount = 15;
         meshletDslDesc.bindings = meshletBinds;
         dawnMeshletDeferredDSL_ = device->CreateDescriptorSetLayout(meshletDslDesc);
 
@@ -1910,10 +1916,11 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
         device_->SetBufferDirtySize(lightBuffers_[fi], sizeof(rhi::ForwardLightBuffer));
     }
 
-    // Update per-frame descriptor set. All 14 bindings are written each frame.
+    // Update per-frame descriptor set. All 15 bindings are written each frame.
     rhi::DescriptorImageInfo gbInfo[DAWN_MESHLET_GBUFFER_RT_COUNT];
     rhi::DescriptorImageInfo depthInfo;
-    rhi::DescriptorImageInfo shadowInfo;
+    rhi::DescriptorImageInfo shadow0Info;
+    rhi::DescriptorImageInfo shadow1Info;
     rhi::DescriptorImageInfo irradInfo;
     rhi::DescriptorImageInfo prefilterInfo;
     rhi::DescriptorImageInfo brdfInfo;
@@ -1929,8 +1936,19 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
     }
     depthInfo.imageView = depthTexture;
     depthInfo.imageLayout = rhi::ResourceState::ShaderResource;
-    shadowInfo.imageView = dawnShadowDepthTex_;
-    shadowInfo.imageLayout = rhi::ResourceState::ShaderResource;
+    // Meshlet shadow maps are R32_Float 2D textures produced by
+    // GPUDrivenDrawPipeline::ExecuteShadowDepthBlit. The legacy
+    // dawnShadowDepthTex_ (2D array, written by RenderShadowPass) is NEVER
+    // populated in meshlet modes — RenderShadowPass is skipped at
+    // TestDawnForwardRenderer.cpp:1069-1077. If the caller hasn't yet
+    // called SetDawnMeshletShadowMaps (e.g. before first meshlet frame),
+    // fall back to dawnShadowDepthTex_ so the binding isn't INVALID.
+    shadow0Info.imageView = (dawnMeshletShadowMap0_ != rhi::handles::INVALID_RESOURCE)
+                            ? dawnMeshletShadowMap0_ : dawnShadowDepthTex_;
+    shadow0Info.imageLayout = rhi::ResourceState::ShaderResource;
+    shadow1Info.imageView = (dawnMeshletShadowMap1_ != rhi::handles::INVALID_RESOURCE)
+                            ? dawnMeshletShadowMap1_ : dawnShadowDepthTex_;
+    shadow1Info.imageLayout = rhi::ResourceState::ShaderResource;
     irradInfo.imageView = dawnIBLIrradiance_;
     irradInfo.imageLayout = rhi::ResourceState::ShaderResource;
     prefilterInfo.imageView = dawnIBLPrefilter_;
@@ -1955,13 +1973,13 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
                                ? gi_indirect_texture : dawnDummy1x1Tex_;
     giIndirectInfo.imageLayout = rhi::ResourceState::ShaderResource;
 
-    rhi::WriteDescriptorSet writes[14];
+    rhi::WriteDescriptorSet writes[15];
     writes[0]  = {dawnMeshletDeferredSet_[fi], 0,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[0]};
     writes[1]  = {dawnMeshletDeferredSet_[fi], 1,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[1]};
     writes[2]  = {dawnMeshletDeferredSet_[fi], 2,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[2]};
     writes[3]  = {dawnMeshletDeferredSet_[fi], 3,  0, 1, rhi::DescriptorType::SampledImage,      &gbInfo[3]};
     writes[4]  = {dawnMeshletDeferredSet_[fi], 4,  0, 1, rhi::DescriptorType::SampledDepthImage, &depthInfo};
-    writes[5]  = {dawnMeshletDeferredSet_[fi], 5,  0, 1, rhi::DescriptorType::SampledDepthImage, &shadowInfo};
+    writes[5]  = {dawnMeshletDeferredSet_[fi], 5,  0, 1, rhi::DescriptorType::SampledImage,      &shadow0Info};
     writes[6]  = {dawnMeshletDeferredSet_[fi], 6,  0, 1, rhi::DescriptorType::SampledImage,      &irradInfo};
     writes[7]  = {dawnMeshletDeferredSet_[fi], 7,  0, 1, rhi::DescriptorType::SampledImage,      &prefilterInfo};
     writes[8]  = {dawnMeshletDeferredSet_[fi], 8,  0, 1, rhi::DescriptorType::SampledImage,      &brdfInfo};
@@ -1970,7 +1988,8 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
     writes[11] = {dawnMeshletDeferredSet_[fi], 11, 0, 1, rhi::DescriptorType::UniformBuffer,     nullptr, &lightUB};
     writes[12] = {dawnMeshletDeferredSet_[fi], 12, 0, 1, rhi::DescriptorType::StorageImage,      &outInfo};
     writes[13] = {dawnMeshletDeferredSet_[fi], 13, 0, 1, rhi::DescriptorType::SampledImage,      &giIndirectInfo};
-    device_->UpdateDescriptorSets(14, writes);
+    writes[14] = {dawnMeshletDeferredSet_[fi], 14, 0, 1, rhi::DescriptorType::SampledImage,      &shadow1Info};
+    device_->UpdateDescriptorSets(15, writes);
 
     rhi::ResourceBarrier hdrBarrier{};
     hdrBarrier.resource = hdrTexture;

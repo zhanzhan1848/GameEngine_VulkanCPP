@@ -101,7 +101,11 @@ const SHADOW_ALBEDO_DIM: f32 = 0.5;
 @group(0) @binding(2) var gbufferOrm: texture_2d<f32>;
 @group(0) @binding(3) var gbufferVelocity: texture_2d<f32>;
 @group(0) @binding(4) var depthTex: texture_depth_2d;
-@group(0) @binding(5) var shadowDepthTex: texture_depth_2d_array;
+// Meshlet CSM: two separate R32_Float 2D textures (one per cascade).
+// GPUDrivenDrawPipeline::ExecuteShadowDepthBlit writes these each frame;
+// the legacy 2D-array depth texture from RenderShadowPass is NOT populated
+// in meshlet modes (7-11), so we sample these directly.
+@group(0) @binding(5) var shadowMap0: texture_2d<f32>;
 @group(0) @binding(6) var irradianceMap: texture_cube<f32>;
 @group(0) @binding(7) var prefilterMap: texture_cube<f32>;
 @group(0) @binding(8) var brdfLUT: texture_2d<f32>;
@@ -110,6 +114,7 @@ const SHADOW_ALBEDO_DIM: f32 = 0.5;
 @group(0) @binding(11) var<uniform> lightBuffer: ForwardLightBuffer;
 @group(0) @binding(12) var outputTex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(13) var giIndirectTex: texture_2d<f32>;
+@group(0) @binding(14) var shadowMap1: texture_2d<f32>;
 
 // === BRDF helpers (mirrors DeferredLighting.wgsl:90-113) ===
 
@@ -149,14 +154,33 @@ fn tonemapACES(s: vec3<f32>) -> vec3<f32> {
                  vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
 }
 
-// === CSM shadow sampling (mirrors DeferredLighting.wgsl:117-155) ===
+// === CSM shadow sampling ===
+// Meshlet path has only 2 cascades (cascade 0 = shadowMap0, cascade 1 =
+// shadowMap1). The light buffer's splits array carries {10, 25, 0, 0}; any
+// viewZ past 25 would normally fall through to cascade 3, but cascade 2/3
+// don't exist in meshlet mode — clamp to 1.
 
 fn selectCascade(viewZ: f32) -> i32 {
     let splits = lightBuffer.directionalLights[0].splits;
-    for (var i: i32 = 0; i < 4; i++) {
-        if (viewZ < splits[i]) { return i; }
+    var idx: i32 = 0;
+    if (viewZ < splits[0]) {
+        idx = 0;
+    } else if (viewZ < splits[1]) {
+        idx = 1;
+    } else {
+        idx = 1; // clamp: meshlet only has 2 cascades
     }
-    return 3;
+    return idx;
+}
+
+// Pick the right cascade texture by index. Wrapped in a function so the
+// compiler only emits one textureLoad per PCF tap (select() evaluates both
+// arms unconditionally — double the bandwidth).
+fn loadShadowDepth(cascadeIdx: i32, coord: vec2<i32>) -> f32 {
+    if (cascadeIdx == 1) {
+        return textureLoad(shadowMap1, coord, 0).x;
+    }
+    return textureLoad(shadowMap0, coord, 0).x;
 }
 
 fn sampleShadowPCF(worldPos: vec3<f32>, viewZ: f32, N: vec3<f32>, lightDir: vec3<f32>) -> f32 {
@@ -174,7 +198,9 @@ fn sampleShadowPCF(worldPos: vec3<f32>, viewZ: f32, N: vec3<f32>, lightDir: vec3
                          vec2<f32>(0.001, 0.001), vec2<f32>(0.999, 0.999));
     let shadowZ = lightNDC.z;
 
-    let texSize = vec2<f32>(textureDimensions(shadowDepthTex));
+    // Both cascade textures are 2048x2048. Query dimensions from shadowMap0;
+    // shadowMap1 has the same dimensions.
+    let texSize = vec2<f32>(textureDimensions(shadowMap0));
     let bias = max(0.005 * (1.0 - dot(N, lightDir)), 0.001);
 
     let baseCoord = vec2<i32>(shadowUV * texSize);
@@ -183,7 +209,7 @@ fn sampleShadowPCF(worldPos: vec3<f32>, viewZ: f32, N: vec3<f32>, lightDir: vec3
     for (var x = -1; x <= 1; x++) {
         for (var y = -1; y <= 1; y++) {
             let coord = clamp(baseCoord + vec2<i32>(x, y), vec2<i32>(0, 0), vec2<i32>(i32(texSize.x) - 1, i32(texSize.y) - 1));
-            let depth = textureLoad(shadowDepthTex, coord, cascadeIdx, 0);
+            let depth = loadShadowDepth(cascadeIdx, coord);
             shadow += select(0.0, 1.0, depth > shadowZ - bias);
             count++;
         }
