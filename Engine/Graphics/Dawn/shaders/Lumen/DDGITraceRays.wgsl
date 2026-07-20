@@ -540,41 +540,47 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
     var result: DDGIRayData;
 
     if (hit.hit != 0u) {
-        let N: vec3<f32> = hit.normal;
+        // Screen-space DDGI: sample prev_frame_color (HDR lit buffer, includes
+        // shadow-mapped direct + IBL + previous frame's DDGI bounce) at the SDF
+        // hit position. This replaces the analytic E_direct + E_sky + L_i_prev
+        // formula that was over-bright because E_direct had no proper shadow
+        // (only cheap SDF march, leak through walls).
+        //
+        // Direct light is now correctly shadowed because we read the camera's
+        // actual shaded buffer. Multi-bounce GI emerges naturally: prev color
+        // already contains 1-bounce DDGI, sampling it gives 2 bounces, etc.,
+        // bounded by per-surface albedo attenuation each bounce.
+        //
+        // Off-screen / out-of-frustum / edge-of-screen hits fall back to sky
+        // color (matches Metal DDGITraceRays.metal:204-232 pattern).
         let hitPos: vec3<f32> = hit.position;
-        let PI: f32 = 3.14159265358979;
+        var L_out: vec3<f32> = volume.SkyColor.xyz;
 
-        // E_direct: analytic sun irradiance, gated by single-step SDF shadow
-        // march toward sun. Replaces the original "no shadow ray" scope cut
-        // that let direct light leak through walls — was the dominant source
-        // of Mode 11 over-brightness vs Mode 10's shadow-gated static bake.
-        // Shadow march only fires when NdotL > 0 (back-facing hits get E_direct=0
-        // anyway), saving 8 texture3D reads per back-facing ray.
-        let L: vec3<f32> = normalize(-volume.LightDirection.xyz);
-        let NdotL: f32 = max(0.0, dot(N, L));
-        let lightIntensity: f32 = volume.LightColor.w;
-        var E_direct: vec3<f32> = vec3<f32>(0.0);
-        if (NdotL > 0.001) {
-            let shadowFactor: f32 = sdfShadowTest(hitPos, N, L, sdf_cascade_0, &volume);
-            E_direct = volume.LightColor.xyz * lightIntensity * NdotL * shadowFactor;
+        let prevClip: vec4<f32> = globalData.PreviousViewProjection * vec4<f32>(hitPos, 1.0);
+        if (prevClip.w > 0.0) {
+            let ndc: vec3<f32> = prevClip.xyz / prevClip.w;
+            if (abs(ndc.x) <= 1.0 && abs(ndc.y) <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0) {
+                // NDC → UV with Y-flip (WebGPU NDC is Y-up, texture origin top-left)
+                let uv: vec2<f32> = vec2<f32>(
+                    ndc.x * 0.5 + 0.5,
+                    1.0 - (ndc.y * 0.5 + 0.5),
+                );
+                // Edge fade: full screen-space inside [-0.85, 0.85], blend to
+                // sky outside. Avoids artifacts at screen boundary where the
+                // hit position projects to but camera's view doesn't actually
+                // cover (false radiance lookup).
+                let edgeDist: vec2<f32> = abs(uv - vec2<f32>(0.5)) * 2.0;
+                let edgeFade: f32 = clamp(1.0 - (max(edgeDist.x, edgeDist.y) - 0.85) / 0.15, 0.0, 1.0);
+
+                if (edgeFade > 0.0) {
+                    let dims: vec2<u32> = textureDimensions(prev_frame_color);
+                    let tx: i32 = clamp(i32(uv.x * f32(dims.x)), 0, i32(dims.x) - 1);
+                    let ty: i32 = clamp(i32(uv.y * f32(dims.y)), 0, i32(dims.y) - 1);
+                    let screenRadiance: vec3<f32> = textureLoad(prev_frame_color, vec2<i32>(tx, ty), 0).rgb;
+                    L_out = mix(volume.SkyColor.xyz, screenRadiance, edgeFade);
+                }
+            }
         }
-
-        // E_sky: hemispherical sky irradiance weighted by NdotUp — no
-        // occlusion ray (same scope cut). Sky contributes even under arches.
-        let NdotUp: f32 = max(0.0, N.y);
-        let E_sky: vec3<f32> = volume.SkyColor.xyz * NdotUp;
-
-        // L_i_prev: prev-frame probe grid sample — multi-bounce GI emerges
-        // from temporal feedback through this lookup.
-        let L_i_prev: vec3<f32> = samplePrevProbeGrid(hitPos, N);
-
-        // Canonical DDGI Lambertian reflected radiance:
-        //   L_out = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev)
-        // albedo is sampled per-hit from GBuffer (canonical per-surface albedo
-        // → colored bounce light). Falls back to volume.Albedo when the hit is
-        // outside the camera frustum (probes behind camera see no GBuffer).
-        let albedo: vec3<f32> = sampleHitAlbedo(hitPos);
-        let L_out: vec3<f32> = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev);
 
         result.radiance_and_dist = vec4<f32>(L_out, hit.distance);
     } else {
