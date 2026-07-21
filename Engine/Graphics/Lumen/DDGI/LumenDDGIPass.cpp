@@ -142,12 +142,15 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
         //   WASM:   LoadWGSL(const char* name) — kShaderMap + MEMFS fallback at
         //           /Engine/Graphics/Dawn/shaders/{name}.wgsl
         //   Native: LoadWGSL(const std::string& path) — opens filesystem path as-is
-        // On native, the bare shader name ("DDGITraceRays") is not a valid path.
-        // DDGI shaders live in Engine/Graphics/Dawn/shaders/Lumen/, so prepend
-        // the full path before calling the native overload.
+        // DDGI shaders live in Engine/Graphics/Dawn/shaders/Lumen/. On native
+        // we pass the full path. On WASM, Emscripten --embed-file preserves
+        // subdirs, so the shader is at /Engine/Graphics/Dawn/shaders/Lumen/ in
+        // MEMFS — pass a relative name and let LoadWGSL's fallback construct
+        // the right path.
         std::string src;
 #ifdef __EMSCRIPTEN__
-        src = dawn::LoadWGSL(shaderName);
+        std::string lumenName = std::string("Lumen/") + shaderName;
+        src = dawn::LoadWGSL(lumenName.c_str());
 #else
         std::string path = std::string("Engine/Graphics/Dawn/shaders/Lumen/") + shaderName + ".wgsl";
         src = dawn::LoadWGSL(path);
