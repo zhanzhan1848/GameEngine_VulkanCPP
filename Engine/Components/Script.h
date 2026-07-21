@@ -2,6 +2,7 @@
 #include "ComponentsCommon.h"
 #include <functional>
 #include <memory>
+#include <thread>
 
 namespace primal::script {
 
@@ -78,4 +79,9 @@ namespace primal::script {
 	// 端的 unsubscribe(订阅本身已不存在),只做 backend 侧的 Lua ref 释放。
 	// 不强制主线程(safety net 可能在 shutdown 任意阶段被调用)。
 	bool is_initialized();
+
+	// === Phase 2b.9: thread helpers for Lua engine table ===
+	// Defined in Script.cpp; consult detail::g_main_thread_id (anonymous namespace).
+	std::thread::id get_main_thread_id();
+	bool is_main_thread();
 }

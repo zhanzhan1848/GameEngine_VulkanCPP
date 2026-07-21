@@ -11,6 +11,7 @@
 #include "../UnitTests/TestFramework.h"
 #include "LuaBackend.h"
 #include "Components/Script.h"
+#include "Components/ScriptFilesystem.h"
 #include "Components/ScriptProperty.h"
 #include "Components/ScriptExternal.h"
 #include "Components/Entity.h"
@@ -19,6 +20,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <thread>
@@ -86,6 +89,19 @@ static bool lua_get_instance_bool(LuaScriptInstance* inst, const char* field) {
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return false; }
     lua_getfield(L, -1, field);
     bool v = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 2);
+    return v;
+}
+
+// Helper: read a string field from a Lua instance table.
+static std::string lua_get_instance_string(LuaScriptInstance* inst, const char* field) {
+    if (!inst || !inst->type || !inst->type->lua_state) return "";
+    lua_State* L = (lua_State*)inst->type->lua_state;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, inst->instance_table_ref);
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return ""; }
+    lua_getfield(L, -1, field);
+    const char* s = lua_tostring(L, -1);
+    std::string v = s ? s : "";
     lua_pop(L, 2);
     return v;
 }
@@ -2080,6 +2096,384 @@ TestResult test_lua_state_disallowed_value_types_error() {
     return TestResult::Passed;
 }
 
+// === Phase 2b.9 Tests (30-39) ===
+
+// Helper: configure ScriptFilesystem with a temp-dir-based root layout.
+// Call primal::script::filesystem().shutdown() and remove_all at end of test.
+struct FilesystemFixture {
+    std::filesystem::path test_root;
+    bool setup_done = false;
+
+    void setup() {
+        namespace fs = std::filesystem;
+        test_root = fs::temp_directory_path() / "lua_fs_test";
+        fs::remove_all(test_root);
+        fs::create_directories(test_root);
+
+        auto& sf = primal::script::filesystem();
+        sf.set_root(primal::script::RootKind::Data,  test_root / "data");
+        sf.set_root(primal::script::RootKind::Save,  test_root / "save");
+        sf.set_root(primal::script::RootKind::Log,   test_root / "log");
+        sf.set_root(primal::script::RootKind::Cache, test_root / "cache");
+        sf.initialize();
+        setup_done = true;
+    }
+
+    void teardown() {
+        if (!setup_done) return;
+        primal::script::filesystem().shutdown();
+        std::error_code ec;
+        std::filesystem::remove_all(test_root, ec);
+        setup_done = false;
+    }
+
+    void place_file(const std::string& root_rel_path, const std::string& content) {
+        namespace fs = std::filesystem;
+        auto full = test_root / root_rel_path;
+        fs::create_directories(full.parent_path());
+        std::ofstream f(full);
+        f << content;
+    }
+};
+
+// Test 30: all 8 file.* functions exist and are callable.
+TestResult test_lua_file_table_available() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    FilesystemFixture ff;
+    ff.setup();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "file_table_available",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/file_table_available.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        ff.teardown();
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown();
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "Test 30 FAIL: find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown();
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    // Read 8 booleans back.
+    lua_State* L = (lua_State*)inst->type->lua_state;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, inst->instance_table_ref);
+    lua_getfield(L, -1, "available");
+    bool all_ok = true;
+    const char* keys[] = {"read", "write", "append", "exists",
+                          "size", "list", "remove", "read_async"};
+    for (const char* k : keys) {
+        lua_getfield(L, -1, k);
+        bool v = lua_toboolean(L, -1) != 0;
+        if (!v) {
+            std::fprintf(stderr, "Test 30 FAIL: file.%s not a function\n", k);
+            all_ok = false;
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 2);
+
+    primal::script::remove_for_entity(entity.get_id());
+    ff.teardown();
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    return all_ok ? TestResult::Passed : TestResult::Failed;
+}
+
+// Test 31: read happy path — data://hello.txt content + size.
+TestResult test_lua_file_read_data_success() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    FilesystemFixture ff;
+    ff.setup();
+    ff.place_file("data/hello.txt", "Hello, File API!");
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "file_read_data_success",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/file_read_data_success.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "Test 31 FAIL: find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    lua_State* L = (lua_State*)inst->type->lua_state;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, inst->instance_table_ref);
+
+    lua_getfield(L, -1, "content");
+    const char* s = lua_tostring(L, -1);
+    std::string content = s ? s : "";
+    lua_pop(L, 1);
+
+    lua_getfield(L, -1, "size_ok");
+    bool size_ok = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 2);
+
+    primal::script::remove_for_entity(entity.get_id());
+    ff.teardown();
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (content != "Hello, File API!") {
+        std::fprintf(stderr, "Test 31 FAIL: content='%s'\n", content.c_str());
+        return TestResult::Failed;
+    }
+    if (!size_ok) {
+        std::fprintf(stderr, "Test 31 FAIL: size not 16\n");
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// Test 32: read missing returns nil; exists returns false.
+TestResult test_lua_file_read_nonexistent() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    FilesystemFixture ff;
+    ff.setup();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "file_read_nonexistent",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/file_read_nonexistent.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "Test 32 FAIL: find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    std::string result = lua_get_instance_string(inst, "result");
+    bool exists_result = lua_get_instance_bool(inst, "exists_result");
+
+    primal::script::remove_for_entity(entity.get_id());
+    ff.teardown();
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (result != "nil") {
+        std::fprintf(stderr, "Test 32 FAIL: result='%s' (expected 'nil')\n", result.c_str());
+        return TestResult::Failed;
+    }
+    if (exists_result) {
+        std::fprintf(stderr, "Test 32 FAIL: exists_result=true (expected false)\n");
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// Test 33: 6 categories of illegal paths all return nil.
+TestResult test_lua_file_path_validation() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    FilesystemFixture ff;
+    ff.setup();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "file_path_validation",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/file_path_validation.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "Test 33 FAIL: find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    int count = lua_get_instance_int(inst, "illegal_count");
+
+    primal::script::remove_for_entity(entity.get_id());
+    ff.teardown();
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (count != 6) {
+        std::fprintf(stderr, "Test 33 FAIL: illegal_count=%d (expected 6)\n", count);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// Test 34: write save:// succeeds; readback matches; no .tmp.* residue on disk.
+TestResult test_lua_file_write_save_atomic() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    FilesystemFixture ff;
+    ff.setup();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "file_write_save_atomic",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/file_write_save_atomic.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "Test 34 FAIL: find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    bool write_ok = lua_get_instance_bool(inst, "write_ok");
+    bool readback_ok = lua_get_instance_bool(inst, "readback_ok");
+
+    // Check no .tmp.* residue on disk.
+    namespace fs = std::filesystem;
+    int tmp_count = 0;
+    for (auto& p : fs::directory_iterator(ff.test_root / "save")) {
+        if (p.path().filename().string().find(".tmp.") != std::string::npos) {
+            ++tmp_count;
+        }
+    }
+
+    primal::script::remove_for_entity(entity.get_id());
+    ff.teardown();
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (!write_ok) {
+        std::fprintf(stderr, "Test 34 FAIL: write_ok=false\n");
+        return TestResult::Failed;
+    }
+    if (!readback_ok) {
+        std::fprintf(stderr, "Test 34 FAIL: readback_ok=false\n");
+        return TestResult::Failed;
+    }
+    if (tmp_count != 0) {
+        std::fprintf(stderr, "Test 34 FAIL: %d .tmp.* files left in save root\n", tmp_count);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
+// Test 35: write/append/remove denied on data:// and log://.
+TestResult test_lua_file_write_permission_denied() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    FilesystemFixture ff;
+    ff.setup();
+
+    primal::game_entity::entity entity = make_test_entity();
+
+    u64 type_id = LuaBackend::instance().register_type(
+        "file_write_permission_denied",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/file_write_permission_denied.lua"
+    );
+    if (type_id == u64_invalid_id) {
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    u64 script_id = LuaBackend::instance().create_instance(type_id, entity.get_id());
+    if (script_id == u64_invalid_id) {
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst = LuaBackend::instance().find_instance(script_id);
+    if (!inst) {
+        std::fprintf(stderr, "Test 35 FAIL: find_instance returned nullptr\n");
+        primal::script::remove_for_entity(entity.get_id());
+        ff.teardown(); primal::script::shutdown(); LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+    int count = lua_get_instance_int(inst, "denied_count");
+
+    primal::script::remove_for_entity(entity.get_id());
+    ff.teardown();
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+
+    if (count != 5) {
+        std::fprintf(stderr, "Test 35 FAIL: denied_count=%d (expected 5)\n", count);
+        return TestResult::Failed;
+    }
+    return TestResult::Passed;
+}
+
 } // anonymous namespace
 
 void RunLuaBackendTests() {
@@ -2175,6 +2569,25 @@ void RunLuaBackendTests() {
     suite.AddTestCase(TestCase("lua_state_disallowed_value_types_error",
                                test_lua_state_disallowed_value_types_error,
                                "functions/threads/circular tables rejected at write"));
+    suite.AddTestCase(TestCase("lua_file_table_available",
+                               test_lua_file_table_available,
+                               "All 8 file.* functions are present with function type"));
+    suite.AddTestCase(TestCase("lua_file_read_data_success",
+                               test_lua_file_read_data_success,
+                               "file.read returns file content; file.size returns byte count"));
+    suite.AddTestCase(TestCase("lua_file_read_nonexistent",
+                               test_lua_file_read_nonexistent,
+                               "file.read returns nil for missing; file.exists returns false"));
+    suite.AddTestCase(TestCase("lua_file_path_validation",
+                               test_lua_file_path_validation,
+                               "6 categories of illegal paths (unknown root, empty rel, "
+                               "absolute, traversal, drive letter, no separator) all return nil"));
+    suite.AddTestCase(TestCase("lua_file_write_save_atomic",
+                               test_lua_file_write_save_atomic,
+                               "save:// write succeeds; readback matches; no .tmp.* residue"));
+    suite.AddTestCase(TestCase("lua_file_write_permission_denied",
+                               test_lua_file_write_permission_denied,
+                               "write/append/remove denied on data:// and log://"));
     suite.RunAllTests();
 }
 

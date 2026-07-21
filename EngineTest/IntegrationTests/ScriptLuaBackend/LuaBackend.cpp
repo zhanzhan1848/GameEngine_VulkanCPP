@@ -2,12 +2,14 @@
 #include "Components/Script.h"
 #include "Components/ScriptExternal.h"
 #include "Components/ScriptState.h"
+#include "Components/ScriptFilesystem.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <array>
@@ -56,6 +58,8 @@ static int  lua_post_delayed_wall(lua_State* L);
 static void register_post_functions(lua_State* L);
 static void register_sandbox_globals(lua_State* L);
 static void register_state_table(lua_State* L);
+static void register_file_table(lua_State* L);
+static void register_engine_table(lua_State* L);
 
 LuaBackend& LuaBackend::instance() {
     static LuaBackend inst;
@@ -69,6 +73,11 @@ void LuaBackend::initialize() {
 void LuaBackend::shutdown() {
     if (!initialized_) return;
     initialized_ = false;
+
+    // Phase 2b.9: shut down ScriptFilesystem BEFORE closing lua_State*s.
+    // Pending async callbacks hold luaL_ref integers; if L is closed first,
+    // the refs dangle and the worker thread can corrupt heap.
+    primal::script::filesystem().shutdown();
 
     // Phase 2b.2: clear bus state. Any remaining subscriptions are leaks
     // (my_destroy should have cleaned them; this is a safety net for tests
@@ -155,6 +164,13 @@ u64 LuaBackend::register_type(const char* type_name, const char* lua_file_path) 
     // Must run after register_sandbox_globals (called earlier above) so the
     // sandbox whitelist does not nil out the `state` global.
     register_state_table(L);
+
+    // Phase 2b.9: expose the `file` global for sandboxed filesystem access.
+    // Runs after state so script reload semantics are unaffected.
+    register_file_table(L);
+
+    // Phase 2b.9: expose `engine.is_main_thread()` / `engine.current_thread_id()`.
+    register_engine_table(L);
 
     // 6. Register with engine via Phase 1 C ABI. Type-level user_data is the
     //    LuaScriptType* (preserved for future type-level queries; not used
@@ -848,6 +864,161 @@ static void register_state_table(lua_State* L) {
     root->depth = 0;
     luaL_setmetatable(L, kStateProxyMetatableName);
     lua_setglobal(L, "state");
+}
+
+// === Phase 2b.9: file global ===
+
+namespace {
+constexpr size_t kLuaDefaultMaxBytes = 64 * 1024 * 1024;
+constexpr size_t kLuaAbsoluteMaxBytes = 256 * 1024 * 1024;
+
+static int l_file_read(lua_State* L) {
+    const char* vpath = luaL_checkstring(L, 1);
+    size_t max_bytes = static_cast<size_t>(luaL_optinteger(L, 2, kLuaDefaultMaxBytes));
+    if (max_bytes > kLuaAbsoluteMaxBytes) max_bytes = kLuaAbsoluteMaxBytes;
+    auto result = primal::script::filesystem().read(vpath, max_bytes);
+    if (result) {
+        lua_pushlstring(L, result->data(), result->size());
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+static int l_file_write(lua_State* L) {
+    const char* vpath = luaL_checkstring(L, 1);
+    size_t len = 0;
+    const char* data = luaL_checklstring(L, 2, &len);
+    bool ok = primal::script::filesystem().write(vpath, std::string_view(data, len));
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+static int l_file_append(lua_State* L) {
+    const char* vpath = luaL_checkstring(L, 1);
+    size_t len = 0;
+    const char* data = luaL_checklstring(L, 2, &len);
+    bool ok = primal::script::filesystem().append(vpath, std::string_view(data, len));
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+static int l_file_exists(lua_State* L) {
+    const char* vpath = luaL_checkstring(L, 1);
+    bool ok = primal::script::filesystem().exists(vpath);
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+static int l_file_size(lua_State* L) {
+    const char* vpath = luaL_checkstring(L, 1);
+    auto result = primal::script::filesystem().size(vpath);
+    if (result) {
+        lua_pushinteger(L, static_cast<lua_Integer>(*result));
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+static int l_file_list(lua_State* L) {
+    const char* vpath = luaL_checkstring(L, 1);
+    auto entries = primal::script::filesystem().list(vpath);
+    if (entries.empty()) {
+        // Could be illegal path OR empty directory — return nil for illegal,
+        // empty table for empty dir. Use resolve() to distinguish.
+        auto resolved = primal::script::filesystem().resolve(vpath);
+        if (!resolved) {
+            lua_pushnil(L);
+            return 1;
+        }
+    }
+    lua_newtable(L);
+    int i = 1;
+    for (const auto& e : entries) {
+        lua_pushinteger(L, i++);
+        lua_pushstring(L, e.c_str());
+        lua_settable(L, -3);
+    }
+    return 1;
+}
+
+static int l_file_remove(lua_State* L) {
+    const char* vpath = luaL_checkstring(L, 1);
+    bool ok = primal::script::filesystem().remove(vpath);
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+static int l_file_read_async(lua_State* L) {
+    const char* vpath = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    size_t max_bytes = static_cast<size_t>(
+        luaL_optinteger(L, 3, static_cast<lua_Integer>(kLuaDefaultMaxBytes)));
+    if (max_bytes > kLuaAbsoluteMaxBytes) max_bytes = kLuaAbsoluteMaxBytes;
+
+    // luaL_ref pops the function; integer ref is safe to pass across threads.
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    primal::script::filesystem().read_async(vpath, max_bytes,
+        [L, ref](bool ok, std::string content) {
+            // Runs on main thread (post_to_main_thread contract).
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            lua_pushboolean(L, ok ? 1 : 0);
+            lua_pushlstring(L, content.data(), content.size());
+            if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+                const char* err = lua_tostring(L, -1);
+                std::fprintf(stderr,
+                    "Lua file.read_async callback error: %s\n",
+                    err ? err : "(unknown)");
+                lua_pop(L, 1);
+            }
+            luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        });
+
+    lua_pushnil(L);  // read_async returns nil; result via callback
+    return 1;
+}
+}  // anonymous namespace
+
+static void register_file_table(lua_State* L) {
+    lua_newtable(L);                                                          // file = {}
+    lua_pushcfunction(L, l_file_read);      lua_setfield(L, -2, "read");
+    lua_pushcfunction(L, l_file_write);     lua_setfield(L, -2, "write");
+    lua_pushcfunction(L, l_file_append);    lua_setfield(L, -2, "append");
+    lua_pushcfunction(L, l_file_exists);    lua_setfield(L, -2, "exists");
+    lua_pushcfunction(L, l_file_size);      lua_setfield(L, -2, "size");
+    lua_pushcfunction(L, l_file_list);      lua_setfield(L, -2, "list");
+    lua_pushcfunction(L, l_file_remove);    lua_setfield(L, -2, "remove");
+    lua_pushcfunction(L, l_file_read_async);lua_setfield(L, -2, "read_async");
+
+    lua_pushinteger(L, static_cast<lua_Integer>(kLuaAbsoluteMaxBytes));
+    lua_setfield(L, -2, "MAX_READ_BYTES");
+    lua_pushinteger(L, static_cast<lua_Integer>(kLuaDefaultMaxBytes));
+    lua_setfield(L, -2, "DEFAULT_MAX_BYTES");
+
+    lua_setglobal(L, "file");
+}
+
+// === Phase 2b.9: engine helpers global ===
+// Separate from state.engine (which exposes read-only value getters). This
+// table exposes function helpers: is_main_thread(), current_thread_id().
+static int l_engine_is_main_thread(lua_State* L) {
+    lua_pushboolean(L, primal::script::is_main_thread() ? 1 : 0);
+    return 1;
+}
+
+static int l_engine_current_thread_id(lua_State* L) {
+    auto hash = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    lua_pushinteger(L, static_cast<lua_Integer>(hash));
+    return 1;
+}
+
+static void register_engine_table(lua_State* L) {
+    lua_newtable(L);
+    lua_pushcfunction(L, l_engine_is_main_thread);    lua_setfield(L, -2, "is_main_thread");
+    lua_pushcfunction(L, l_engine_current_thread_id); lua_setfield(L, -2, "current_thread_id");
+    lua_setglobal(L, "engine");
 }
 
 // === Adapter callbacks ===

@@ -426,6 +426,7 @@ if(NOT MSVC)
     set_source_files_properties(
         "${CMAKE_CURRENT_SOURCE_DIR}/Components/Script.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptState.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptFilesystem.cpp"
         PROPERTIES COMPILE_OPTIONS "-fexceptions"
     )
 endif()

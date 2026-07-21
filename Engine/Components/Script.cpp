@@ -1001,6 +1001,15 @@ namespace primal::script {
 		return detail::g_initialized;
 	}
 
+	// === Phase 2b.9: thread helpers for Lua engine table ===
+	std::thread::id get_main_thread_id() {
+		return detail::g_main_thread_id;
+	}
+
+	bool is_main_thread() {
+		return detail::g_initialized && std::this_thread::get_id() == detail::g_main_thread_id;
+	}
+
 	void entity_script::set_rotation(const game_entity::entity *const entity, math::v4 rotation_quaternion)
 	{
 		transform::component_cache& cache{ *get_cache_ptr(entity) };
