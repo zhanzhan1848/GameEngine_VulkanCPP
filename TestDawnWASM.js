@@ -7221,6 +7221,115 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       }),
   };
 
+  var getCFunc = (ident) => {
+      var func = Module['_' + ident]; // closure exported function
+      assert(func, `Cannot call unknown function ${ident}, make sure it is exported`);
+      return func;
+    };
+  
+  var writeArrayToMemory = (array, buffer) => {
+      assert(array.length >= 0, 'writeArrayToMemory array must have a length (should be an array or typed array)')
+      HEAP8.set(array, buffer);
+    };
+  
+  
+  
+  
+  
+  
+  
+  
+    /**
+   * @param {string|null=} returnType
+   * @param {Array=} argTypes
+   * @param {Array=} args
+   * @param {Object=} opts
+   */
+  var ccall = (ident, returnType, argTypes, args, opts) => {
+      // For fast lookup of conversion functions
+      var toC = {
+        'string': (str) => {
+          var ret = 0;
+          if (str !== null && str !== undefined && str !== 0) { // null string
+            ret = stringToUTF8OnStack(str);
+          }
+          return ret;
+        },
+        'array': (arr) => {
+          var ret = stackAlloc(arr.length);
+          writeArrayToMemory(arr, ret);
+          return ret;
+        }
+      };
+  
+      function convertReturnValue(ret) {
+        if (returnType === 'string') {
+          return UTF8ToString(ret);
+        }
+        if (returnType === 'boolean') return Boolean(ret);
+        return ret;
+      }
+  
+      var func = getCFunc(ident);
+      var cArgs = [];
+      var stack = 0;
+      assert(returnType !== 'array', 'return type should not be "array"');
+      if (args) {
+        for (var i = 0; i < args.length; i++) {
+          var converter = toC[argTypes[i]];
+          if (converter) {
+            if (stack === 0) stack = stackSave();
+            cArgs[i] = converter(args[i]);
+          } else {
+            cArgs[i] = args[i];
+          }
+        }
+      }
+      // Data for a previous async operation that was in flight before us.
+      var previousAsync = Asyncify.currData;
+      var ret = func(...cArgs);
+      function onDone(ret) {
+        runtimeKeepalivePop();
+        if (stack !== 0) stackRestore(stack);
+        return convertReturnValue(ret);
+      }
+    var asyncMode = opts?.async;
+  
+      // Keep the runtime alive through all calls. Note that this call might not be
+      // async, but for simplicity we push and pop in all calls.
+      runtimeKeepalivePush();
+      if (Asyncify.currData != previousAsync) {
+        // A change in async operation happened. If there was already an async
+        // operation in flight before us, that is an error: we should not start
+        // another async operation while one is active, and we should not stop one
+        // either. The only valid combination is to have no change in the async
+        // data (so we either had one in flight and left it alone, or we didn't have
+        // one), or to have nothing in flight and to start one.
+        assert(!(previousAsync && Asyncify.currData), 'We cannot start an async operation when one is already in flight');
+        assert(!(previousAsync && !Asyncify.currData), 'We cannot stop an async operation in flight');
+        // This is a new async operation. The wasm is paused and has unwound its stack.
+        // We need to return a Promise that resolves the return value
+        // once the stack is rewound and execution finishes.
+        assert(asyncMode, `The call to ${ident} is running asynchronously. If this was intended, add the async option to the ccall/cwrap call.`);
+        return Asyncify.whenDone().then(onDone);
+      }
+  
+      ret = onDone(ret);
+      // If this is an async ccall, ensure we return a promise
+      if (asyncMode) return Promise.resolve(ret);
+      return ret;
+    };
+
+  
+    /**
+   * @param {string=} returnType
+   * @param {Array=} argTypes
+   * @param {Object=} opts
+   */
+  var cwrap = (ident, returnType, argTypes, opts) => {
+      return (...args) => ccall(ident, returnType, argTypes, args, opts);
+    };
+
   var FS_createPath = (...args) => FS.createPath(...args);
 
 
@@ -7292,6 +7401,8 @@ if (Module['printErr']) err = Module['printErr'];
 // Begin runtime exports
   Module['addRunDependency'] = addRunDependency;
   Module['removeRunDependency'] = removeRunDependency;
+  Module['ccall'] = ccall;
+  Module['cwrap'] = cwrap;
   Module['FS_preloadFile'] = FS_preloadFile;
   Module['FS_unlink'] = FS_unlink;
   Module['FS_createPath'] = FS_createPath;
@@ -7329,8 +7440,6 @@ if (Module['printErr']) err = Module['printErr'];
   'STACK_ALIGN',
   'POINTER_SIZE',
   'ASSERTIONS',
-  'ccall',
-  'cwrap',
   'convertJsFunctionToWasm',
   'getEmptyTableSlot',
   'updateTableMap',
@@ -7346,7 +7455,6 @@ if (Module['printErr']) err = Module['printErr'];
   'UTF32ToString',
   'stringToUTF32',
   'lengthBytesUTF32',
-  'writeArrayToMemory',
   'registerWheelEventCallback',
   'registerUiEventCallback',
   'registerFocusEventCallback',
@@ -7525,6 +7633,7 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'UTF16Decoder',
   'stringToNewUTF8',
   'stringToUTF8OnStack',
+  'writeArrayToMemory',
   'JSEvents',
   'registerKeyEventCallback',
   'specialHTMLTargets',
@@ -7742,25 +7851,30 @@ function checkIncomingModuleAPI() {
   ignoredModuleProp('wasmBinary');
 }
 var ASM_CONSTS = {
-  7849508: () => { if (!document.getElementById('modeHud')) { var hud = document.createElement('div'); hud.id = 'modeHud'; hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;'; hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">L</kbd> to toggle sun auto-rotate (Mode 10 static vs Mode 11 dynamic)</div>' + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>' + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>' + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>' + '<div id="sunRotateHud" style="color:#fd0;display:none;">Sun Auto-Rotate: OFF</div>'; document.body.appendChild(hud); } window.setRenderMode = function(idx, name, desc) { var c = document.getElementById('modeHudCurrent'); var d = document.getElementById('modeHudDesc'); if (c) c.textContent = 'Mode ' + idx + ': ' + name; if (d) d.textContent = desc; var dbg = document.getElementById('meshletDbgHud'); if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none'; var sun = document.getElementById('sunRotateHud'); if (sun) sun.style.display = (idx == 10 || idx == 11) ? 'block' : 'none'; }; window.setMeshletDebug = function(mode) { var dbg = document.getElementById('meshletDbgHud'); if (!dbg) return; var label = 'Off'; if (mode == 1) label = 'MeshletID'; else if (mode == 2) label = 'TriangleID'; else if (mode == 3) label = 'MeshID'; else if (mode == 4) label = 'Normal'; else if (mode == 5) label = 'ObjNormal'; dbg.textContent = 'Meshlet Debug: ' + label; }; window.setSunAutoRotate = function(on) { var sun = document.getElementById('sunRotateHud'); if (!sun) return; sun.textContent = 'Sun Auto-Rotate: ' + (on ? 'ON' : 'OFF'); sun.style.color = on ? '#0f0' : '#fd0'; }; },  
- 7851794: ($0) => { if (window.setSunAutoRotate) window.setSunAutoRotate($0); },  
- 7851856: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } },  
- 7851952: ($0) => { if (window.setMeshletDebug) { window.setMeshletDebug($0); } },  
- 7852016: ($0) => { if (window.setSSGISSRSubmode) { window.setSSGISSRSubmode($0); } },  
- 7852084: () => { try { FS.mkdir('/persist'); } catch (e) { } try { FS.mount(IDBFS, {}, '/persist'); } catch (e) { } window._ddgiSyncDone = false; FS.syncfs(true, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(true) error:', err); }); },  
- 7852349: () => { return window._ddgiSyncDone ? 1 : 0; },  
- 7852390: () => { try { FS.stat('/persist/mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
- 7852480: () => { var data = FS.readFile('/persist/mode10_ddgi_cache.spch'); FS.writeFile('mode10_ddgi_cache.spch', data); },  
- 7852589: () => { try { FS.stat('mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
- 7852670: () => { try { var data = FS.readFile('mode10_ddgi_cache.spch'); FS.writeFile('/persist/mode10_ddgi_cache.spch', data); window._ddgiSyncDone = false; FS.syncfs(false, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(false) error:', err); }); } catch (e) { console.error('[Prebake] Failed to persist cache:', e); window._ddgiSyncDone = true; } },  
- 7853050: () => { return window._ddgiSyncDone ? 1 : 0; },  
- 7853091: () => { var label = document.querySelector('#loading .label'); if (label) label.textContent = 'Loading...'; }
+  7850548: () => { if (!document.getElementById('modeHud')) { var hud = document.createElement('div'); hud.id = 'modeHud'; hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;'; hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">L</kbd> to toggle sun auto-rotate (Mode 10 static vs Mode 11 dynamic)</div>' + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>' + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>' + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>' + '<div id="sunRotateHud" style="color:#fd0;display:none;">Sun Auto-Rotate: OFF</div>'; document.body.appendChild(hud); } window.setRenderMode = function(idx, name, desc) { var c = document.getElementById('modeHudCurrent'); var d = document.getElementById('modeHudDesc'); if (c) c.textContent = 'Mode ' + idx + ': ' + name; if (d) d.textContent = desc; var dbg = document.getElementById('meshletDbgHud'); if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none'; var sun = document.getElementById('sunRotateHud'); if (sun) sun.style.display = (idx == 10 || idx == 11) ? 'block' : 'none'; var info = document.getElementById('modeInfo'); if (info) info.textContent = 'Mode ' + idx + ': ' + name; var fwd = document.getElementById('paramGroup_forward'); var ddgi = document.getElementById('paramGroup_ddgi'); if (fwd) fwd.style.display = (idx >= 7) ? 'block' : 'none'; if (ddgi) ddgi.style.display = (idx == 7 || idx == 10 || idx == 11) ? 'block' : 'none'; }; window.setMeshletDebug = function(mode) { var dbg = document.getElementById('meshletDbgHud'); if (!dbg) return; var label = 'Off'; if (mode == 1) label = 'MeshletID'; else if (mode == 2) label = 'TriangleID'; else if (mode == 3) label = 'MeshID'; else if (mode == 4) label = 'Normal'; else if (mode == 5) label = 'ObjNormal'; dbg.textContent = 'Meshlet Debug: ' + label; }; window.setSunAutoRotate = function(on) { var sun = document.getElementById('sunRotateHud'); if (!sun) return; sun.textContent = 'Sun Auto-Rotate: ' + (on ? 'ON' : 'OFF'); sun.style.color = on ? '#0f0' : '#fd0'; }; },  
+ 7853200: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } },  
+ 7853296: ($0) => { if (window.setSunAutoRotate) window.setSunAutoRotate($0); },  
+ 7853358: ($0, $1, $2) => { if (window.setSunDirection) { window.setSunDirection($0, $1, $2); } },  
+ 7853430: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } },  
+ 7853526: ($0) => { if (window.setMeshletDebug) { window.setMeshletDebug($0); } },  
+ 7853590: ($0) => { if (window.setSSGISSRSubmode) { window.setSSGISSRSubmode($0); } },  
+ 7853658: () => { try { FS.mkdir('/persist'); } catch (e) { } try { FS.mount(IDBFS, {}, '/persist'); } catch (e) { } window._ddgiSyncDone = false; FS.syncfs(true, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(true) error:', err); }); },  
+ 7853923: () => { return window._ddgiSyncDone ? 1 : 0; },  
+ 7853964: () => { try { FS.stat('/persist/mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
+ 7854054: () => { var data = FS.readFile('/persist/mode10_ddgi_cache.spch'); FS.writeFile('mode10_ddgi_cache.spch', data); },  
+ 7854163: () => { try { FS.stat('mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
+ 7854244: () => { try { var data = FS.readFile('mode10_ddgi_cache.spch'); FS.writeFile('/persist/mode10_ddgi_cache.spch', data); window._ddgiSyncDone = false; FS.syncfs(false, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(false) error:', err); }); } catch (e) { console.error('[Prebake] Failed to persist cache:', e); window._ddgiSyncDone = true; } },  
+ 7854624: () => { return window._ddgiSyncDone ? 1 : 0; },  
+ 7854665: () => { var label = document.querySelector('#loading .label'); if (label) label.textContent = 'Loading...'; },  
+ 7854769: () => { if (window.setSunAutoRotate) window.setSunAutoRotate(0); }
 };
 
 // Imports from the Wasm binary.
 var _main = Module['_main'] = makeInvalidEarlyAccess('_main');
 var _free = makeInvalidEarlyAccess('_free');
 var _fflush = makeInvalidEarlyAccess('_fflush');
+var _setDebugParam = Module['_setDebugParam'] = makeInvalidEarlyAccess('_setDebugParam');
+var _setSunDirection = Module['_setSunDirection'] = makeInvalidEarlyAccess('_setSunDirection');
 var _malloc = makeInvalidEarlyAccess('_malloc');
 var _emwgpuCreateBindGroup = makeInvalidEarlyAccess('_emwgpuCreateBindGroup');
 var _emwgpuCreateBindGroupLayout = makeInvalidEarlyAccess('_emwgpuCreateBindGroupLayout');
@@ -7856,6 +7970,8 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['__main_argc_argv'] != 'undefined', 'missing Wasm export: __main_argc_argv');
   assert(typeof wasmExports['free'] != 'undefined', 'missing Wasm export: free');
   assert(typeof wasmExports['fflush'] != 'undefined', 'missing Wasm export: fflush');
+  assert(typeof wasmExports['setDebugParam'] != 'undefined', 'missing Wasm export: setDebugParam');
+  assert(typeof wasmExports['setSunDirection'] != 'undefined', 'missing Wasm export: setSunDirection');
   assert(typeof wasmExports['malloc'] != 'undefined', 'missing Wasm export: malloc');
   assert(typeof wasmExports['emwgpuCreateBindGroup'] != 'undefined', 'missing Wasm export: emwgpuCreateBindGroup');
   assert(typeof wasmExports['emwgpuCreateBindGroupLayout'] != 'undefined', 'missing Wasm export: emwgpuCreateBindGroupLayout');
@@ -7948,6 +8064,8 @@ function assignWasmExports(wasmExports) {
   _main = Module['_main'] = createExportWrapper('__main_argc_argv', wasmExports['__main_argc_argv'], 2);
   _free = createExportWrapper('free', wasmExports['free'], 1);
   _fflush = createExportWrapper('fflush', wasmExports['fflush'], 1);
+  _setDebugParam = Module['_setDebugParam'] = createExportWrapper('setDebugParam', wasmExports['setDebugParam'], 2);
+  _setSunDirection = Module['_setSunDirection'] = createExportWrapper('setSunDirection', wasmExports['setSunDirection'], 2);
   _malloc = createExportWrapper('malloc', wasmExports['malloc'], 1);
   _emwgpuCreateBindGroup = createExportWrapper('emwgpuCreateBindGroup', wasmExports['emwgpuCreateBindGroup'], 1);
   _emwgpuCreateBindGroupLayout = createExportWrapper('emwgpuCreateBindGroupLayout', wasmExports['emwgpuCreateBindGroupLayout'], 1);
