@@ -12,11 +12,19 @@
       color: #e0e0e0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
+      align-items: stretch;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #canvasWrap {
+      flex: 1;
+      display: flex;
       align-items: center;
       justify-content: center;
-      min-height: 100vh;
-      overflow: hidden;
+      position: relative;
+      min-width: 0;
     }
 
     #canvas {
@@ -24,6 +32,71 @@
       background: #000;
       border: 1px solid #333;
       image-rendering: pixelated;
+      max-width: 100%;
+      max-height: 100%;
+    }
+
+    /* Debug panel sidebar — visible once Module is ready */
+    #debugPanel {
+      width: 320px;
+      background: rgba(15, 15, 25, 0.95);
+      color: #e0e0e0;
+      padding: 14px 16px;
+      overflow-y: auto;
+      font-size: 13px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      border-left: 1px solid #2a2a40;
+      flex-shrink: 0;
+    }
+
+    #debugPanel h3 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      color: #00d4ff;
+    }
+
+    #debugPanel h4 {
+      margin: 14px 0 6px;
+      font-size: 13px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid #2a2a40;
+      padding-bottom: 3px;
+    }
+
+    #debugPanel hr {
+      border: 0;
+      border-top: 1px solid #2a2a40;
+      margin: 14px 0 4px;
+    }
+
+    #debugPanel label {
+      display: block;
+      margin-bottom: 10px;
+      line-height: 1.5;
+    }
+
+    #debugPanel .val {
+      display: inline-block;
+      min-width: 38px;
+      text-align: right;
+      color: #00d4ff;
+      font-family: monospace;
+      font-size: 12px;
+      float: right;
+    }
+
+    #debugPanel input[type="range"] {
+      width: 100%;
+      margin-top: 3px;
+      accent-color: #00d4ff;
+    }
+
+    #debugPanel .hint {
+      color: #888;
+      font-size: 11px;
+      margin-top: 2px;
     }
 
     #loading {
@@ -73,6 +146,7 @@
       color: #888;
       text-align: center;
       display: none;
+      z-index: 80;
     }
 
     #error {
@@ -102,37 +176,86 @@
 </head>
 <body>
 
-  <!-- Loading overlay -->
-  <div id="loading">
-    <div class="spinner"></div>
-    <div class="label">Loading WASM Module / 加载中...</div>
+  <!-- Canvas region (canvas + HUDs) -->
+  <div id="canvasWrap">
+    <!-- Loading overlay -->
+    <div id="loading">
+      <div class="spinner"></div>
+      <div class="label">Loading WASM Module / 加载中...</div>
+    </div>
+
+    <!-- WebGPU canvas -->
+    <canvas id="canvas" width="1280" height="720"></canvas>
+
+    <!-- Mode HUD overlay -->
+    <div id="modeHud" style="position:absolute; top:12px; left:12px; background:rgba(0,0,0,0.75); color:#fff; font-size:13px; padding:10px 16px; border-radius:8px; line-height:1.6; pointer-events:none; z-index:50; font-family:monospace;">
+      <div id="modeHudTitle" style="font-weight:bold; color:#00d4ff; margin-bottom:4px;">Dawn Forward Renderer</div>
+      <div id="modeHudKey">Press <kbd style="background:#333; padding:1px 6px; border-radius:3px;">Tab</kbd> to switch render mode</div>
+      <div>Press <kbd style="background:#333; padding:1px 6px; border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>
+      <div>Press <kbd style="background:#333; padding:1px 6px; border-radius:3px;">L</kbd> to toggle sun auto-rotate (Mode 10 static vs Mode 11 dynamic)</div>
+      <div id="modeHudCurrent" style="margin-top:4px; color:#4f4;">Mode 2: ShadowAndIBL</div>
+      <div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>
+    </div>
+
+    <!-- Status bar -->
+    <div id="status"></div>
+
+    <!-- Error overlay -->
+    <div id="error">
+      <h2>WebGPU Not Available</h2>
+      <p>
+        Your browser does not support WebGPU. Please use Chrome 113+, Edge 113+, or Firefox Nightly with WebGPU enabled.<br>
+        <br>
+        浏览器不支持 WebGPU，请使用 Chrome 113+、Edge 113+ 或开启 WebGPU 的 Firefox Nightly。
+      </p>
+    </div>
   </div>
 
-  <!-- WebGPU canvas -->
-  <canvas id="canvas" width="1280" height="720"></canvas>
+  <!-- Debug panel sidebar -->
+  <aside id="debugPanel">
+    <h3>Debug Panel</h3>
+    <div id="modeInfo" class="hint">Mode: —</div>
 
-  <!-- Mode HUD overlay -->
-  <div id="modeHud" style="position:fixed; top:12px; left:12px; background:rgba(0,0,0,0.75); color:#fff; font-size:13px; padding:10px 16px; border-radius:8px; line-height:1.6; pointer-events:none; z-index:50; font-family:monospace;">
-    <div id="modeHudTitle" style="font-weight:bold; color:#00d4ff; margin-bottom:4px;">Dawn Forward Renderer</div>
-    <div id="modeHudKey">Press <kbd style="background:#333; padding:1px 6px; border-radius:3px;">Tab</kbd> to switch render mode</div>
-    <div>Press <kbd style="background:#333; padding:1px 6px; border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>
-    <div>Press <kbd style="background:#333; padding:1px 6px; border-radius:3px;">L</kbd> to toggle sun auto-rotate (Mode 10 static vs Mode 11 dynamic)</div>
-    <div id="modeHudCurrent" style="margin-top:4px; color:#4f4;">Mode 2: ShadowAndIBL</div>
-    <div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>
-  </div>
+    <div id="paramGroup_forward" class="paramGroup">
+      <h4>Lighting</h4>
+      <label>Direct Light Boost<span class="val" id="val_0">2.00</span>
+        <input type="range" id="param_0" min="0" max="5" step="0.05" value="2.0">
+      </label>
+      <label>IBL Strength<span class="val" id="val_1">0.20</span>
+        <input type="range" id="param_1" min="0" max="1" step="0.01" value="0.2">
+      </label>
+      <label>Exposure<span class="val" id="val_3">1.80</span>
+        <input type="range" id="param_3" min="0" max="4" step="0.05" value="1.8">
+      </label>
+    </div>
 
-  <!-- Status bar -->
-  <div id="status"></div>
+    <div id="paramGroup_ddgi" class="paramGroup" style="display:none;">
+      <h4>DDGI</h4>
+      <label>DDGI Indirect Weight<span class="val" id="val_2">1.00</span>
+        <input type="range" id="param_2" min="0" max="3" step="0.05" value="1.0">
+      </label>
+      <label>Sky Color Intensity<span class="val" id="val_4">0.60</span>
+        <input type="range" id="param_4" min="0" max="2" step="0.05" value="0.6">
+      </label>
+      <label>Albedo Intensity<span class="val" id="val_5">0.60</span>
+        <input type="range" id="param_5" min="0" max="1" step="0.01" value="0.6">
+      </label>
+      <label>Probe Hysteresis<span class="val" id="val_6">0.08</span>
+        <input type="range" id="param_6" min="0.01" max="0.5" step="0.01" value="0.08">
+      </label>
+    </div>
 
-  <!-- Error overlay -->
-  <div id="error">
-    <h2>WebGPU Not Available</h2>
-    <p>
-      Your browser does not support WebGPU. Please use Chrome 113+, Edge 113+, or Firefox Nightly with WebGPU enabled.<br>
-      <br>
-      浏览器不支持 WebGPU，请使用 Chrome 113+、Edge 113+ 或开启 WebGPU 的 Firefox Nightly。
-    </p>
-  </div>
+    <hr>
+    <h4>Sun Direction</h4>
+    <label>Yaw<span class="val" id="val_yaw">0.00</span>
+      <input type="range" id="sunYaw" min="-3.14" max="3.14" step="0.01" value="0">
+    </label>
+    <label>Pitch<span class="val" id="val_pitch">-0.95</span>
+      <input type="range" id="sunPitch" min="-1.55" max="-0.1" step="0.01" value="-0.95">
+    </label>
+    <div class="hint">Vec: <span id="sunVec">(—, —, —)</span></div>
+    <div class="hint">Auto-rotate: <span id="autoRotateState">OFF</span></div>
+  </aside>
 
   <script>
     (function() {
@@ -153,12 +276,22 @@
         statusEl.textContent = text;
       };
 
-      // Mode switch helper - WASM calls this to update HUD
+      // Mode switch helper - WASM calls this to update HUD + panel visibility
       window.setRenderMode = function(modeIndex, modeName, modeDesc) {
         var currentEl = document.getElementById('modeHudCurrent');
         var descEl = document.getElementById('modeHudDesc');
+        var infoEl = document.getElementById('modeInfo');
         if (currentEl) currentEl.textContent = 'Mode ' + modeIndex + ': ' + modeName;
         if (descEl) descEl.textContent = modeDesc;
+        if (infoEl) infoEl.textContent = 'Mode ' + modeIndex + ': ' + modeName;
+
+        // Mode-aware visibility: DDGI group only for 7/10/11; Lighting group for 7+.
+        var showDDGI = (modeIndex === 7 || modeIndex === 10 || modeIndex === 11);
+        var showForward = (modeIndex >= 7);
+        var ddgiGroup = document.getElementById('paramGroup_ddgi');
+        var fwdGroup = document.getElementById('paramGroup_forward');
+        if (ddgiGroup) ddgiGroup.style.display = showDDGI ? 'block' : 'none';
+        if (fwdGroup) fwdGroup.style.display = showForward ? 'block' : 'none';
       };
 
       // Called by Emscripten when runtime is ready
@@ -166,11 +299,103 @@
         loadingEl.classList.add('hidden');
       };
 
+      // === Sun direction panel ↔ C++ sync ===
+      // C++ pushes sun dir every frame (auto-rotate or slider-driven); panel
+      // sliders update C++ via _setSunDirection. _userDraggingSun guards the
+      // C++→panel direction so drag focus isn't clobbered.
+      window._userDraggingSun = false;
+
+      window.setSunDirection = function(x, y, z) {
+        if (window._userDraggingSun) return;
+        var yaw = Math.atan2(x, z);
+        var len = Math.hypot(x, y, z);
+        var pitch = (len > 1e-6) ? Math.asin(Math.max(-1, Math.min(1, y / len))) : 0;
+        var yawEl = document.getElementById('sunYaw');
+        var pitchEl = document.getElementById('sunPitch');
+        if (yawEl) yawEl.value = yaw;
+        if (pitchEl) pitchEl.value = pitch;
+        var vy = document.getElementById('val_yaw');
+        var vp = document.getElementById('val_pitch');
+        if (vy) vy.textContent = yaw.toFixed(2);
+        if (vp) vp.textContent = pitch.toFixed(2);
+        var vecEl = document.getElementById('sunVec');
+        if (vecEl) vecEl.textContent = '(' + x.toFixed(2) + ', ' + y.toFixed(2) + ', ' + z.toFixed(2) + ')';
+      };
+
+      window.setSunAutoRotate = function(on) {
+        var el = document.getElementById('autoRotateState');
+        if (el) el.textContent = on ? 'ON' : 'OFF';
+      };
+
+      // Thunk helpers — Module.ccall is wired after Emscripten runtime boots.
+      // Called from slider oninput handlers below.
+      window._setDebugParam = function(idx, val) {
+        if (window.Module && typeof window.Module._setDebugParam === 'function') {
+          window.Module._setDebugParam(idx, val);
+        } else if (window.Module && window.Module.ccall) {
+          window.Module.ccall('setDebugParam', null,
+            ['int', 'float'], [idx, val], {async: true});
+        }
+      };
+
+      window._setSunDirection = function(yaw, pitch) {
+        if (window.Module && typeof window.Module._setSunDirection === 'function') {
+          window.Module._setSunDirection(yaw, pitch);
+        } else if (window.Module && window.Module.ccall) {
+          window.Module.ccall('setSunDirection', null,
+            ['float', 'float'], [yaw, pitch], {async: true});
+        }
+      };
+
+      // Wire parameter sliders (indices 0..6 — see DawnDebugParams.h)
+      function wireParamSlider(idx) {
+        var slider = document.getElementById('param_' + idx);
+        if (!slider) return;
+        slider.addEventListener('input', function(e) {
+          var v = parseFloat(e.target.value);
+          var valEl = document.getElementById('val_' + idx);
+          if (valEl) valEl.textContent = v.toFixed(2);
+          window._setDebugParam(idx, v);
+        });
+      }
+      for (var i = 0; i < 7; i++) wireParamSlider(i);
+
+      // Wire sun sliders — set _userDraggingSun on mousedown/up so C++→panel
+      // sync doesn't fight the drag
+      ['sunYaw', 'sunPitch'].forEach(function(id) {
+        var slider = document.getElementById(id);
+        if (!slider) return;
+        slider.addEventListener('mousedown', function() { window._userDraggingSun = true; });
+        slider.addEventListener('mouseup',   function() { window._userDraggingSun = false; });
+        slider.addEventListener('touchstart',function() { window._userDraggingSun = true; });
+        slider.addEventListener('touchend',  function() { window._userDraggingSun = false; });
+        slider.addEventListener('input', function() {
+          var yaw = parseFloat(document.getElementById('sunYaw').value);
+          var pitch = parseFloat(document.getElementById('sunPitch').value);
+          var vy = document.getElementById('val_yaw');
+          var vp = document.getElementById('val_pitch');
+          if (vy) vy.textContent = yaw.toFixed(2);
+          if (vp) vp.textContent = pitch.toFixed(2);
+          window._setSunDirection(yaw, pitch);
+        });
+      });
+
       // Emscripten module configuration
       var Module = {
         preRun: [],
         postRun: [function() {
           window.hideLoading();
+          // Bind ccall exports to Module now that runtime is ready
+          if (window.Module.ccall) {
+            window.Module._setDebugParam = function(idx, val) {
+              window.Module.ccall('setDebugParam', null,
+                ['int', 'float'], [idx, val]);
+            };
+            window.Module._setSunDirection = function(yaw, pitch) {
+              window.Module.ccall('setSunDirection', null,
+                ['float', 'float'], [yaw, pitch]);
+            };
+          }
         }],
         print: function(text) {
           console.log('[WASM]', text);

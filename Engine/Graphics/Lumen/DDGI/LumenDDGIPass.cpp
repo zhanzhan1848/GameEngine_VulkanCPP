@@ -812,7 +812,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.DeltaTime = camera_data.delta_time;
                     vd.FrameIndex = camera_data.frame_index;
                     vd.RayMaxDistance = params_.ray_max_distance;
-                    vd.ProbeHysteresis = 0.08f;
+                    vd.ProbeHysteresis = dawnDebugParams_.probeHysteresis;
                     vd.TemporalAlpha = 0.1f;
                     vd.LightDirection = {camera_data.light_direction.x,
                                          camera_data.light_direction.y,
@@ -823,12 +823,15 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.LightColor = {camera_data.light_color.x,
                                      camera_data.light_color.y,
                                      camera_data.light_color.z, 3.0f};
-                    // Mode 11 canonical radiance inputs — match bake's
-                    // ProbeBakingScene at TestDawnForwardRenderer.cpp:2409 and
-                    // StaticProbeBaker.h:16 default. Drives E_direct, E_sky, and
-                    // (albedo/PI) in the canonical L_out formula at SDF hit.
-                    vd.SkyColor = {0.6f, 0.6f, 0.7f, 0.0f};
-                    vd.Albedo   = {0.6f, 0.6f, 0.6f, 0.0f};
+                    // Mode 11 canonical radiance inputs — live-tunable from the
+                    // WASM debug panel (default 0.6). SkyColor.xyz are scaled by
+                    // dawnDebugParams_.skyColorIntensity preserving the 0.85/0.85/1.0
+                    // tint ratio; Albedo.xyz are set uniformly from
+                    // dawnDebugParams_.albedoIntensity.
+                    float sky = dawnDebugParams_.skyColorIntensity;
+                    float alb = dawnDebugParams_.albedoIntensity;
+                    vd.SkyColor = {sky * 0.85f, sky * 0.85f, sky * 1.0f, 0.0f};
+                    vd.Albedo   = {alb, alb, alb, 0.0f};
 
                     // Fill SDF cascade data from GlobalSDF
                     for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {

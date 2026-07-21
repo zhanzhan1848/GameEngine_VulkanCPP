@@ -368,6 +368,11 @@ else()
         if(EXISTS "${DDGI_CACHE}")
             string(APPEND EMBED_FLAGS " --embed-file ${DDGI_CACHE}@/mode10_ddgi_cache.spch")
         endif()
+        # Export ccall/cwrap (used by shell.html to call setDebugParam/setSunDirection)
+        # and export the two extern "C" functions themselves (EMSCRIPTEN_KEEPALIVE).
+        # _main must be included because EXPORTED_FUNCTIONS replaces the default list.
+        string(APPEND EMBED_FLAGS " -sEXPORTED_RUNTIME_METHODS=ccall,cwrap")
+        string(APPEND EMBED_FLAGS " -sEXPORTED_FUNCTIONS=_main,_setDebugParam,_setSunDirection")
         if(NOT "${EMBED_FLAGS}" STREQUAL "")
             set_target_properties(TestDawnWASM PROPERTIES LINK_FLAGS "${EMBED_FLAGS}")
         endif()

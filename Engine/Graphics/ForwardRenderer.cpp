@@ -1761,6 +1761,14 @@ void ForwardRenderer::RenderDawnDeferredLighting(rhi::RHICommandBuffer* cmdBuffe
         frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
         frameData->jitterOffset = utils::GetJitterOffset(frameNumber_, width, height);
 
+        // Live-tunable debug params (WASM sidebar). Forward/deferred non-meshlet
+        // paths don't read these in-shader, but the uniform block must be the
+        // full 480-byte size on every upload.
+        frameData->debug_directLightBoost = dawnDebugParams_.directLightBoost;
+        frameData->debug_iblStrength = dawnDebugParams_.iblStrength;
+        frameData->debug_ddgiIndirectWeight = dawnDebugParams_.ddgiIndirectWeight;
+        frameData->debug_exposure = dawnDebugParams_.exposure;
+
         // Reuse Render()'s SetupLights path — passes empty csm/splits maps since
         // Dawn fills cascade VPs/splits from dawnCascadeVPs_/_splits inside
         // SetupLights (line ~1581).
@@ -1905,6 +1913,13 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
         frameData->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, static_cast<float>(width)};
         frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
         frameData->jitterOffset = utils::GetJitterOffset(frameNumber_, width, height);
+
+        // Live-tunable debug params (WASM sidebar) — meshlet deferred path reads
+        // these in DeferredLighting_Meshlet.wgsl to replace hardcoded const values.
+        frameData->debug_directLightBoost = dawnDebugParams_.directLightBoost;
+        frameData->debug_iblStrength = dawnDebugParams_.iblStrength;
+        frameData->debug_ddgiIndirectWeight = dawnDebugParams_.ddgiIndirectWeight;
+        frameData->debug_exposure = dawnDebugParams_.exposure;
 
         utl::vector<RenderView> emptyCSM;
         utl::vector<float> emptySplits;
@@ -2347,6 +2362,13 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         frameData->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, static_cast<float>(width)};
         frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(height)};
         frameData->jitterOffset = utils::GetJitterOffset(frameNumber_, width, height);
+
+        // Live-tunable debug params (WASM sidebar) — forward path doesn't read
+        // these in-shader, but the uniform block must be the full 480-byte size.
+        frameData->debug_directLightBoost = dawnDebugParams_.directLightBoost;
+        frameData->debug_iblStrength = dawnDebugParams_.iblStrength;
+        frameData->debug_ddgiIndirectWeight = dawnDebugParams_.ddgiIndirectWeight;
+        frameData->debug_exposure = dawnDebugParams_.exposure;
 
         SetupLights(scene, frameIndex, frameData, csmViews, cascadeSplits, lightShadowIndices, lightViewProjs);
 
@@ -2850,6 +2872,19 @@ void ForwardRenderer::SetDawnIBLResources(rhi::ResourceHandle irradiance, rhi::R
         writes[3].imageInfo = &sampInfo;
 
         device_->UpdateDescriptorSets(4, writes);
+    }
+}
+
+void ForwardRenderer::SetDawnDebugParam(u32 index, float value) {
+    switch (index) {
+        case 0: dawnDebugParams_.directLightBoost   = value; break;
+        case 1: dawnDebugParams_.iblStrength        = value; break;
+        case 2: dawnDebugParams_.ddgiIndirectWeight = value; break;
+        case 3: dawnDebugParams_.exposure           = value; break;
+        case 4: dawnDebugParams_.skyColorIntensity  = value; break;
+        case 5: dawnDebugParams_.albedoIntensity    = value; break;
+        case 6: dawnDebugParams_.probeHysteresis    = value; break;
+        default: return;  // ignore unknown indices (forward-compat)
     }
 }
 

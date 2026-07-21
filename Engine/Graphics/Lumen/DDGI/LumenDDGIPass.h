@@ -3,6 +3,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
+#include "Graphics/Dawn/DawnDebugParams.h"
 #include <vector>
 
 namespace primal::graphics::rhi {
@@ -185,6 +186,11 @@ public:
     // the static bake indefinitely.
     void SetDynamicMode(bool enabled) { dynamic_mode_ = enabled; }
 
+    // Live-tunable debug params (WASM sidebar). Indices 4..6 of DawnDebugParams
+    // map to SkyColor intensity, Albedo intensity, ProbeHysteresis. Values are
+    // consumed in AddPass when uploading DDGIVolumeData to the GPU.
+    void SetDawnDebugParams(const DawnDebugParams& params) { dawnDebugParams_ = params; }
+
 private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
@@ -262,6 +268,11 @@ private:
 
     // Mode 11 flag — see SetDynamicMode comment. False = Mode 10 (static-bake only).
     bool dynamic_mode_{false};
+
+    // Live-tunable debug params (WASM sidebar). Only indices 4..6 are read
+    // here: SkyColor intensity, Albedo intensity, ProbeHysteresis. Applied
+    // in AddPass when uploading DDGIVolumeData.
+    DawnDebugParams dawnDebugParams_{};
 };
 
 } // namespace primal::graphics::lumen

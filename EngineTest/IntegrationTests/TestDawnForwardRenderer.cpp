@@ -387,6 +387,14 @@ bool Engine_Test::initialize() {
             // follows the sun in real time).
             var sun = document.getElementById('sunRotateHud');
             if (sun) sun.style.display = (idx == 10 || idx == 11) ? 'block' : 'none';
+            // Mirror to debug panel sidebar (wasm/index.html): update the mode
+            // label and toggle Lighting/DDGI group visibility.
+            var info = document.getElementById('modeInfo');
+            if (info) info.textContent = 'Mode ' + idx + ': ' + name;
+            var fwd = document.getElementById('paramGroup_forward');
+            var ddgi = document.getElementById('paramGroup_ddgi');
+            if (fwd) fwd.style.display = (idx >= 7) ? 'block' : 'none';
+            if (ddgi) ddgi.style.display = (idx == 7 || idx == 10 || idx == 11) ? 'block' : 'none';
         };
         // Update meshlet debug label (called from C++ on each V press).
         // Avoid array-literal commas in EM_ASM — the C preprocessor treats top-
@@ -751,6 +759,39 @@ bool Engine_Test::LoadSponzaScene() {
 
 void Engine_Test::RenderFrame() {
     if (!device_ || !swapchain_ || shuttingDown_) return;
+
+#ifdef __EMSCRIPTEN__
+    // One-time initial mode broadcast so the debug panel shows the current
+    // mode on load (Tab handler also emits this, but only fires on key press).
+    if (!initialModeBroadcast_) {
+        initialModeBroadcast_ = true;
+        static constexpr const char* kModeNames[] = {
+            "NoEffects", "ShadowOnly", "ShadowAndIBL", "Full",
+            "DeferredPBR", "DeferredDDGI", "GBufferDDGI",
+            "MeshletNoIBL", "Meshlet", "MeshletSSGISSR",
+            "MeshletDDGI", "MeshletDynamicDDGI"
+        };
+        static constexpr const char* kModeDesc[] = {
+            "Forward PBR (no shadows, no IBL)",
+            "Forward PBR + Shadow Map",
+            "Forward PBR + Shadow + IBL",
+            "Forward PBR + Shadow + IBL + SSR",
+            "G-Buffer + Deferred Lighting",
+            "G-Buffer + Deferred Lighting + DDGI",
+            "G-Buffer + DDGI Global Illumination",
+            "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
+            "GPU-Driven Meshlet + Indirect Draw + IBL",
+            "GPU-Driven Meshlet + SSGI + SSR",
+            "GPU-Driven Meshlet + SSGI + SSR + DDGI",
+            "GPU-Driven Meshlet + SSGI + SSR + Canonical Dynamic DDGI"
+        };
+        EM_ASM_({
+            if (window.setRenderMode) {
+                window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2));
+            }
+        }, static_cast<u8>(renderMode_), kModeNames[static_cast<u8>(renderMode_)], kModeDesc[static_cast<u8>(renderMode_)]);
+    }
+#endif
 
     device_->BeginFrame();
 
@@ -1514,6 +1555,15 @@ void Engine_Test::UpdateCamera(float dt) {
         currentSunDir_.x = newX;
         currentSunDir_.z = newZ;
     }
+
+    // Push current sun direction to the debug panel every frame so the yaw/pitch
+    // sliders stay in sync with auto-rotation. Panel's setSunDirection JS hook
+    // guards against clobbering user-drag (see shell.html _userDraggingSun).
+    EM_ASM_({
+        if (window.setSunDirection) {
+            window.setSunDirection($0, $1, $2);
+        }
+    }, currentSunDir_.x, currentSunDir_.y, currentSunDir_.z);
 
     // Mouse drag for camera rotation
     float mdx, mdy;
@@ -3683,6 +3733,15 @@ void Engine_Test::run() {
     lastFrameTime_ = std::chrono::steady_clock::now();
 }
 
+// Convert yaw/pitch (radians) to a unit sun direction vector. Pitch ∈ [-π/2, π/2]
+// maps to Y; yaw rotates X/Z in the horizontal plane. Used by the WASM debug
+// panel to drive sun direction from two sliders.
+void Engine_Test::SetSunDirection(float yaw, float pitch) {
+    currentSunDir_.x = std::cos(pitch) * std::sin(yaw);
+    currentSunDir_.y = std::sin(pitch);
+    currentSunDir_.z = std::cos(pitch) * std::cos(yaw);
+}
+
 void Engine_Test::shutdown() {
 #ifndef __EMSCRIPTEN__
     ShutdownMeshletPipeline();
@@ -3850,6 +3909,42 @@ bool Engine_Test::applicationShouldTerminateAfterLastWindowClosed(NS::Applicatio
     timer_.end();
     _exit(0);
 }
+#endif
+
+// ============================================================
+// WASM↔JS bridge — exports invoked from the debug panel (shell.html).
+// Both functions are no-ops on native (guarded by __EMSCRIPTEN__).
+// ============================================================
+#ifdef __EMSCRIPTEN__
+extern "C" {
+
+// Index maps to DawnDebugParams field order (see DawnDebugParams.h).
+// 0=directLightBoost, 1=iblStrength, 2=ddgiIndirectWeight, 3=exposure,
+// 4=skyColorIntensity, 5=albedoIntensity, 6=probeHysteresis.
+// 0..3 are shader-side (consumed in DeferredLighting_Meshlet.wgsl);
+// 4..6 are DDGI-side (consumed in LumenDDGIPass::AddPass).
+EMSCRIPTEN_KEEPALIVE void setDebugParam(int idx, float val) {
+    if (!g_engineTest) return;
+    auto& fr = g_engineTest->GetForwardRenderer();
+    fr.SetDawnDebugParam(static_cast<u32>(idx), val);
+    // Push DDGI-side params to LumenDDGIPass so AddPass picks them up
+    // on the next volume CB upload. ForwardRenderer stores the full
+    // DawnDebugParams struct, so we can mirror it whole.
+    if (auto* ddgi = g_engineTest->GetDDGIPass()) {
+        ddgi->SetDawnDebugParams(fr.GetDawnDebugParams());
+    }
+}
+
+// yaw/pitch → direction vector. Panel takes over sun control: auto-rotate
+// is forced off and the JS-side state mirror is updated.
+EMSCRIPTEN_KEEPALIVE void setSunDirection(float yaw, float pitch) {
+    if (!g_engineTest) return;
+    g_engineTest->SetSunDirection(yaw, pitch);
+    g_engineTest->SetSunAutoRotate(false);
+    EM_ASM_({ if (window.setSunAutoRotate) window.setSunAutoRotate(0); });
+}
+
+} // extern "C"
 #endif
 
 #endif // ENABLE_WEBGPU

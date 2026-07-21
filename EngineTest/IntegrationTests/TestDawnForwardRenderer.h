@@ -58,6 +58,14 @@ public:
 
     void RenderFrame();
 
+    // Public accessors for WASM↔JS bridge (extern "C" exports at the bottom
+    // of TestDawnForwardRenderer.cpp access these via g_engineTest). Native
+    // builds don't use them.
+    primal::graphics::ForwardRenderer& GetForwardRenderer() { return forwardRenderer_; }
+    primal::graphics::lumen::LumenDDGIPass* GetDDGIPass() { return ddgiPass_.get(); }
+    void SetSunDirection(float yaw, float pitch);
+    void SetSunAutoRotate(bool enabled) { autoRotateSun_ = enabled; }
+
 private:
 #ifdef __APPLE__
     static void DisplayLinkCallback(CFRunLoopTimerRef timer, void* info);
@@ -174,6 +182,7 @@ private:
     bool autoRotateSun_{false};
     bool prevLState_{false};
     primal::math::v3 currentSunDir_{0.5f, -0.7f, 0.3f};  // matches initial scene light + static cache bake direction
+    bool initialModeBroadcast_{false};  // EM_ASM setRenderMode emitted once after first frame
     primal::graphics::RenderLight sunLight_{};  // mirrors scene_.lights[0] so we can UpdateLight per-frame
     u32 meshletDebugMode_{0};   // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id
     // Mode 9 sub-mode: which screen-space effect(s) to apply.

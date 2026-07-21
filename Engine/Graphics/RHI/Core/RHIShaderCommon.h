@@ -30,10 +30,16 @@ struct GlobalShaderData
     u32 enableDDGI; // 0 = skip DDGI indirect (default), 1 = apply indirect lighting from binding 13. Mode 10 sets this to 1.
     u32 _pad_before_jitter; // WGSL uniform layout requires vec2 at 8-byte align; Mac simd::float2 already has 8-byte align (auto-pads here), WASM float[2] has 4-byte align (needs explicit pad)
     math::v2 jitterOffset; // TAA subpixel jitter (clip-space units, applied in PBR vertex) — offset 448 on both platforms
-    float _pad_after_jitter[2]; // round struct to 464 bytes (WebGPU uniform buffer 16-byte multiple)
+    // Live-tunable debug params (WASM sidebar). 4 shader-side floats replace the
+    // former _pad_after_jitter[2]. Total grows from 464→480 (16-byte aligned).
+    float debug_directLightBoost;     // offset 456 — replaces DeferredLighting_Meshlet.wgsl const 2.0
+    float debug_iblStrength;          // offset 460 — replaces const 0.2
+    float debug_ddgiIndirectWeight;   // offset 464 — replaces const 1.0
+    float debug_exposure;             // offset 468 — replaces const 1.8
+    float _pad_after_debug[2];        // offset 472-479 — round to 480 (WebGPU uniform 16-byte multiple)
 };
 
-static_assert(sizeof(GlobalShaderData) == 464, "GlobalShaderData must be 464 bytes — matches WebGPU uniform buffer size (WGSL vec2 8-byte align + 16-byte struct rounding)");
+static_assert(sizeof(GlobalShaderData) == 480, "GlobalShaderData must be 480 bytes — adds 16-byte debug params block after jitter (was 464)");
 
 struct PerObjectData
 {

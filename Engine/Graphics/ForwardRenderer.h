@@ -7,6 +7,7 @@
 #include "Graphics/RHI/Utils/ShadowUtils.h"
 #include "Graphics/Passes/BlurPass.h"
 #include "Graphics/Passes/SSRPass.h"
+#include "Graphics/Dawn/DawnDebugParams.h"
 #include "Graphics/Material.h"
 #ifndef DISABLE_PARTICLE_SYSTEM
 #include "Graphics/Passes/ParticlePass.h"
@@ -250,6 +251,11 @@ private:
 
     u32 dawnRenderMode_{2}; // default ShadowAndIBL
 
+    // Live-tunable debug params (WASM sidebar) — uploaded into GlobalShaderData
+    // tail every frame (4 floats) and mirrored to LumenDDGIPass for the
+    // remaining 3 DDGI-side values.
+    rhi::DawnDebugParams dawnDebugParams_{};
+
     // Debug visualization + IBL toggle for meshlet modes (7/8).
     // debugMode is forwarded to GPUDrivenDrawPipeline::SetDebugMode by the test;
     // enableIBL is written into GlobalShaderData to gate the deferred IBL block.
@@ -355,6 +361,14 @@ public:
     void SetDawnMeshletDebugMode(u32 mode) { dawnMeshletDebugMode_ = mode; }
     void SetDawnEnableIBL(u32 enable) { dawnEnableIBL_ = enable; }
     void SetDawnEnableDDGI(u32 enable) { dawnEnableDDGI_ = enable; }
+
+    // Live-tunable debug parameters (WASM sidebar). Index maps to
+    // DawnDebugParams field order: 0=directLightBoost, 1=iblStrength,
+    // 2=ddgiIndirectWeight, 3=exposure, 4=skyColorIntensity,
+    // 5=albedoIntensity, 6=probeHysteresis. Indices 0..3 are uploaded
+    // in GlobalShaderData tail; 4..6 are consumed by LumenDDGIPass.
+    void SetDawnDebugParam(u32 index, float value);
+    const rhi::DawnDebugParams& GetDawnDebugParams() const { return dawnDebugParams_; }
 
     // Meshlet shadow maps: GPUDrivenDrawPipeline renders cascades into two
     // separate 2D R32_Float textures (shadow_map_0/1), NOT the legacy
