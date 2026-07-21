@@ -558,7 +558,12 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
         let NdotL: f32 = max(0.0, dot(N, L));
         let NdotUp: f32 = max(0.0, N.y);
         let E_direct: vec3<f32> = volume.LightColor.xyz * volume.LightColor.w * NdotL;
-        let E_sky: vec3<f32> = volume.SkyColor.xyz * NdotUp;
+        // Hemisphere sky ambient: 0.5 baseline + 0.5·NdotUp. Gives walls
+        // (horizontal normal, N.y≈0) ~50% sky ambient — without this, E_sky
+        // = SkyColor·max(N.y,0) returned 0 for walls, leaving them lit only
+        // by E_direct (often shadowed) and slow-converging L_i_prev.
+        // Ceiling (N.y→+1) still gets full sky; down-facing (N.y<0) gets less.
+        let E_sky: vec3<f32> = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp);
         let L_i_prev: vec3<f32> = samplePrevProbeGrid(hitPos, N);
         let albedo: vec3<f32> = volume.Albedo.xyz;
         let L_out: vec3<f32> = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev);
