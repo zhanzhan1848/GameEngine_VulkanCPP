@@ -827,8 +827,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     // ProbeBakingScene at TestDawnForwardRenderer.cpp:2409 and
                     // StaticProbeBaker.h:16 default. Drives E_direct, E_sky, and
                     // (albedo/PI) in the canonical L_out formula at SDF hit.
-                    vd.SkyColor = {0.3f, 0.3f, 0.35f, 0.0f};
-                    vd.Albedo   = {0.5f, 0.5f, 0.5f, 0.0f};
+                    vd.SkyColor = {0.6f, 0.6f, 0.7f, 0.0f};
+                    vd.Albedo   = {0.6f, 0.6f, 0.6f, 0.0f};
 
                     // Fill SDF cascade data from GlobalSDF
                     for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
