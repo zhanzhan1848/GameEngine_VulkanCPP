@@ -473,6 +473,14 @@ public:
                               u32 offset, u32 size, const void* pValues) = 0;
 
     /**
+     * @brief 设置计算着色器小常量数据 (Metal setBytes)
+     * @param index 缓冲区绑定索引
+     * @param data 数据指针
+     * @param size 数据大小
+     */
+    virtual void SetComputeBytes(u32 index, const void* data, u32 size) = 0;
+
+    /**
      * @brief 写入时间戳
      * @param queryPool 查询池句柄
      * @param queryIndex 查询索引

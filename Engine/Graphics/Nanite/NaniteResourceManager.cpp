@@ -95,7 +95,8 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
     }
 
     graphics::rhi::RHIMeshAsset meshAsset;
-    bool hasMeshletData = primal::content::get_rhi_mesh_asset(geometry_id, meshAsset);
+    bool hasMeshletData = primal::content::get_rhi_mesh_asset(
+        primal::content::get_rhi_mesh_id(geometry_id), meshAsset);
 
     // std::cout << "[NaniteResourceManager]   get_rhi_mesh_asset returned: " << hasMeshletData << std::endl;
 
@@ -125,7 +126,8 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
         resource->cluster_data.meshlet_count = 1;
     }
 
-    resource->gpu_mesh = primal::content::get_rhi_gpu_mesh(geometry_id);
+    resource->gpu_mesh = primal::content::get_rhi_gpu_mesh(
+        primal::content::get_rhi_mesh_id(geometry_id));
     
     if (resource->gpu_mesh) {
         // std::cout << "[NaniteResourceManager]   RHIGpuMesh obtained successfully" << std::endl;

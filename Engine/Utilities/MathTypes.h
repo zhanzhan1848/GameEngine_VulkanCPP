@@ -92,7 +92,11 @@ constexpr f32 epsilon{ 1e-5f };
 	};
 	using v3a = v3;
 
-	struct v4 {
+	inline v3 operator-(const v3& v) { return {-v.x, -v.y, -v.z}; }
+	inline v3 operator*(float s, const v3& v) { return {v.x * s, v.y * s, v.z * s}; }
+	inline v3 operator+(float s, const v3& v) { return {v.x + s, v.y + s, v.z + s}; }
+
+	struct alignas(16) v4 {
 		float x, y, z, w;
 		constexpr v4() : x(0), y(0), z(0), w(0) {}
 		constexpr v4(float x, float y, float z, float w) : x(x), y(y), z(z), w(w) {}

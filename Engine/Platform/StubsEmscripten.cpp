@@ -96,6 +96,12 @@ graphics::rhi::ResourceHandle get_rhi_texture_handle(id::id_type) {
     return graphics::rhi::handles::INVALID_RESOURCE;
 }
 
+// The metal ContentToEngine encodes RHI id into a fake pointer; on WASM the side-table
+// scheme uses the same id for both layers, so get_rhi_mesh_id is the identity function.
+id::id_type get_rhi_mesh_id(id::id_type geometry_id) {
+    return geometry_id;
+}
+
 id::id_type create_resource(const void*, asset_type::type, GraphicsAPI) {
     return id::invalid_id;
 }

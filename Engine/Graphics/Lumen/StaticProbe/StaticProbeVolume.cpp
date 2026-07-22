@@ -8,7 +8,7 @@ namespace primal::graphics::lumen {
 
 static constexpr float PI_F{3.14159265358979323846f};
 // SH9 DC coefficient for a uniform radiance L projected over the sphere:
-//   L_0 = (1/4π) ∫ L · Y_0 dΩ = L · 4π · Y_0 = L · 4π / (2√π) = L · 2√π
+// L_0 = (1/4π) ∫ L · Y_0 dΩ = L · 4π · Y_0 = L · 4π / (2√π) = L · 2√π
 // Higher SH bands integrate to zero, so only L0 is non-zero.
 static inline math::v3 UniformSkySH0(const math::v3& sky_color) {
     const float sh0_scale = 2.0f * std::sqrt(PI_F);

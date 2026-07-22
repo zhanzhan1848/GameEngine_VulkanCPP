@@ -40,7 +40,30 @@ struct SurfaceCacheParams {
     uint32_t  indirect_rays_per_probe;
     float     indirect_temporal_weight;
     float     indirect_near_distance;
-    uint32_t  _pad[2];
+    uint32_t  lookup_count;     // number of CardLookup entries (mesh instances)
+    uint32_t  _pad;
+};
+
+// Per-card dispatch info for flattened texel dispatch.
+// CPU builds prefix-sum array, GPU binary-searches to map thread_id → card → atlas UV.
+struct CardDispatchInfo {
+    uint32_t texel_offset;     // prefix-sum: starting texel index for this card
+    uint32_t texel_count;      // resolution * resolution
+    uint32_t resolution;       // card texel resolution (square)
+    uint32_t atlas_offset_x;   // atlas pixel origin X
+    uint32_t atlas_offset_y;   // atlas pixel origin Y
+    uint32_t _pad[3];
+};
+static_assert(sizeof(CardDispatchInfo) == 32, "CardDispatchInfo must be 32 bytes");
+
+// Params for merged lighting pass (replaces SurfaceCacheLightingParams).
+// Eliminates tile-based dispatch; uses flattened per-card texel dispatch instead.
+struct FlattenedLightingParams {
+    SurfaceCacheParams sc_params;   // 48 bytes
+    uint32_t           total_texels; // sum of all card resolutions squared
+    uint32_t           card_count;   // number of active cards in dispatch
+    uint32_t           light_count;
+    uint32_t           _pad;
 };
 
 struct SurfaceCacheFrameData {

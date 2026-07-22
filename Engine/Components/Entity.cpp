@@ -3,108 +3,167 @@
 #include "Script.h"
 #include "Mesh.h"
 #include "Particle.h"
+#include "Cluster.h"
+#include "Geometry.h"
+#include "CommandBuffer.h"
+#include "Material.h"
+#include "Light.h"
+#include "Camera.h"
 
 namespace primal::game_entity {
 
 	namespace {
 
-		utl::vector<transform::component>			transforms;
-		utl::vector<script::component>			scripts;
-		utl::vector<mesh::component>			meshes;
-		utl::vector<particle::component>			particles;
-
 		utl::vector<id::generation_type>			generations;
 		utl::deque<entity_id>						free_ids;
+		utl::vector<component_mask>				component_masks;
 
 	}// anonymous namespace
 
 
-	entity create(entity_info info)
+	entity create()
 	{
-		assert(info.transform); //All game entities must have a transform component
-		if (!info.transform) return entity{};
-
 		entity_id id;
 
 		if (free_ids.size() > id::min_deleted_elements)
 		{
 			id = free_ids.front();
-			assert(!is_alive(id ));
 			free_ids.pop_front();
 			id = entity_id{ id::new_generation(id) };
 			++generations[id::index(id)];
+			component_masks[id::index(id)] = 0;
 		}
 		else
 		{
 			id = entity_id{ (id::id_type)generations.size() };
 			generations.push_back(0);
-
-			// Resize component
-			// NOTE: we don't call resize(), so the number of memory allocations stays low
-			transforms.emplace_back();
-			scripts.emplace_back();
-			meshes.emplace_back();
-			particles.emplace_back();
+			component_masks.emplace_back(0);
 		}
 
-		const entity new_entity{ id };
-		const id::id_type index{ id::index(id) };
+		return entity{ id };
+	}
 
-		//Create transform component
-		assert(!transforms[index].is_valid());
-		transforms[index] = transform::create(*info.transform, new_entity);
-		if (!transforms[index].is_valid()) return {};
+	entity create(entity_info info)
+	{
+		entity ent{ create() };
 
-		//Create Script component
+		if (info.transform)
+		{
+			transform::component tc = transform::create(*info.transform, ent);
+			assert(tc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Transform));
+		}
+
 		if (info.script && info.script->script_creator)
 		{
-			assert(!scripts[index].is_valid());
-			scripts[index] = script::create(*info.script, new_entity);
-			assert(scripts[index].is_valid());
+			script::component sc = script::create(*info.script, ent);
+			assert(sc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Script));
 		}
 
-		//Create Mesh component
 		if (info.mesh && info.mesh->material_count)
 		{
-			assert(!meshes[index].is_valid());
-			meshes[index] = mesh::create(*info.mesh, new_entity);
-			assert(meshes[index].is_valid());
+			mesh::component mc = mesh::create(*info.mesh, ent);
+			assert(mc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Mesh));
 		}
 
-		//Create Particle component
 		if (info.particle)
 		{
-			assert(!particles[index].is_valid());
-			particles[index] = particle::create(*info.particle, new_entity);
+			particle::component pc = particle::create(*info.particle, ent);
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Particle));
 		}
 
-		return new_entity;
+		if (info.cluster && info.cluster->geometry_content_id != id::invalid_id)
+		{
+			cluster::component cc = cluster::create(*info.cluster, ent);
+			assert(cc != id::invalid_id);
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Cluster));
+		}
 
-		return new_entity;
+		if (info.geometry && info.geometry->handle.is_valid())
+		{
+			geometry::component::geometry gc = geometry::component::create(*info.geometry, ent);
+			assert(gc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Geometry));
+		}
+
+		if (info.material)
+		{
+			material::component mc = material::create(*info.material, ent);
+			assert(mc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Material));
+		}
+
+		if (info.light)
+		{
+			light::component lc = light::create(*info.light, ent);
+			assert(lc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Light));
+		}
+
+		if (info.camera)
+		{
+			camera::component cc = camera::create(*info.camera, ent);
+			assert(cc.is_valid());
+			set_component_bit(ent.get_id(), static_cast<u8>(component_bit::Camera));
+		}
+
+		return ent;
 	}
 
 	void remove(entity_id id)
 	{
 		const id::id_type index{ id::index(id) };
 		assert(is_alive(id));
+		const component_mask mask{ component_masks[index] };
 
-		if (scripts[index].is_valid())
+		if (mask & bit_mask(component_bit::Script))
 		{
-			script::remove(scripts[index]);
-			scripts[index] = {};
+			script::remove_for_entity(id);
 		}
-		if (meshes[index].is_valid())
+		if (mask & bit_mask(component_bit::Mesh))
 		{
-			mesh::remove(meshes[index]);
-			meshes[index] = {};
+			mesh::component mc{ mesh::mesh_id{id} };
+			mesh::remove(mc);
 		}
-		if (particles[index].is_valid())
+		if (mask & bit_mask(component_bit::Particle))
 		{
-			particle::remove(particles[index]);
-			particles[index] = {};
+			particle::remove_for_entity(id);
 		}
-		transform::remove(transforms[index]);
-		transforms[index] = {};
+		if (mask & bit_mask(component_bit::Cluster))
+		{
+			cluster::component cc{ id };
+			cluster::remove(cc);
+		}
+		if (mask & bit_mask(component_bit::Geometry))
+		{
+			geometry::component::remove(id);
+		}
+		if (mask & bit_mask(component_bit::Material))
+		{
+			material::component mc{ material::material_component_id{id} };
+			material::remove(mc);
+		}
+		if (mask & bit_mask(component_bit::Light))
+		{
+			light::component lc{ light::light_component_id{id} };
+			light::remove(lc);
+		}
+		if (mask & bit_mask(component_bit::Camera))
+		{
+			camera::component cc{ camera::camera_component_id{id} };
+			camera::remove(cc);
+		}
+		// Transform is always removed last since other components may reference it
+		if (mask & bit_mask(component_bit::Transform))
+		{
+			transform::component tc{ transform::transform_id{id} };
+			transform::remove(tc);
+		}
+
+		component_masks[index] = 0;
+		free_ids.push_back(id);
 	}
 
 	bool is_alive(entity_id id)
@@ -112,34 +171,61 @@ namespace primal::game_entity {
 		assert(id::is_valid(id));
 		const id::id_type index{ id::index(id) };
 		assert(index < generations.size());
-		return (generations[index] == id::generation(id) && transforms[index].is_valid());
+		return generations[index] == id::generation(id);
 	}
 
+	component_mask get_component_mask(entity_id id)
+	{
+		assert(is_alive(id));
+		return component_masks[id::index(id)];
+	}
+
+	void set_component_bit(entity_id id, u8 bit)
+	{
+		assert(is_alive(id));
+		component_masks[id::index(id)] |= (component_mask{1} << bit);
+	}
+
+	void clear_component_bit(entity_id id, u8 bit)
+	{
+		assert(is_alive(id));
+		component_masks[id::index(id)] &= ~(component_mask{1} << bit);
+	}
+
+	// Legacy entity accessors — delegate to component systems
 	transform::component entity::transform() const
 	{
 		assert(is_alive(_id));
-		const id::id_type index{ id::index(_id) };
-		return transforms[index];
+		return transform::component{ transform::transform_id{_id} };
 	}
-	
+
 	script::component entity::script() const
 	{
 		assert(is_alive(_id));
-		const id::id_type index{ id::index(_id) };
-		return scripts[index];
+		return script::get_component_for_entity(_id);
 	}
 
 	mesh::component entity::mesh() const
 	{
 		assert(is_alive(_id));
-		const id::id_type index{ id::index(_id) };
-		return meshes[index];
+		return mesh::component{ mesh::mesh_id{_id} };
 	}
 
 	particle::component entity::particle() const
 	{
 		assert(is_alive(_id));
-		const id::id_type index{ id::index(_id) };
-		return particles[index];
+		return particle::get_component_for_entity(_id);
+	}
+
+	u32 entity_count()
+	{
+		return static_cast<u32>(generations.size());
+	}
+
+	entity_id entity_id_from_index(u32 index)
+	{
+		if (index >= generations.size()) return entity_id{ id::invalid_id };
+		const id::id_type gen{ generations[index] };
+		return entity_id{ static_cast<id::id_type>(index) | (gen << id::detail::index_bits) };
 	}
 }

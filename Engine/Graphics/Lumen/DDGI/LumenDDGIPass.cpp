@@ -1,14 +1,18 @@
 #include "LumenDDGIPass.h"
 #include "Engine/Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
+#include "Engine/Graphics/Lumen/SurfaceCache/SurfaceCacheTypes.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RenderGraph/RenderGraphPass.h"
 #include "Graphics/RenderGraph/RenderGraphResource.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Engine/Graphics/Dawn/ShaderLoader.h"  // for dawn::LoadWGSL
+#include "Graphics/Field/FieldRegistry.h"
+#include "Graphics/Field/FieldView.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -237,6 +241,9 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     // Create persistent probe textures
     CreateProbeTextures();
 
+    // Initialize probes from static bake data (or sky estimate fallback)
+    InitializeProbesFromStatic();
+
     // Initialize probe state tracking for importance-based partial update
     u32 totalProbes = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
     probe_states_.resize(totalProbes);
@@ -254,9 +261,9 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
         // so the binding fails validation. The buffer is bound as SSBO in all
         // three DDGI compute shaders.
         updateListDesc.type = BufferType::Structured;
-        updateListDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        updateListDesc.usage = GPUMemoryUsage::Dynamic;
         for (u32 i = 0; i < 3; ++i) {
-            probe_update_list_buffer_[i] = device_->CreateBuffer(updateListDesc);
+            probe_update_list_buffers_[i] = device_->CreateBuffer(updateListDesc);
         }
     }
 
@@ -287,9 +294,9 @@ void LumenDDGIPass::Shutdown() {
 // ============================================================================
 
 void LumenDDGIPass::CreateDescriptorSetLayouts() {
-    // --- Trace: 4 sampled textures + 2 UBO + 3 SSBO ---
-    // Platform-branch: Dawn uses sequential 0..8 (no texture/buffer collision).
-    // Metal overlaps texture/buffer namespaces — DDGITraceRays.metal declares [[buffer(0..4)]].
+    // --- Trace: platform-branched ---
+    // Dawn (WASM): sequential 0..9, no texture/buffer collision, includes gbuffer_albedo for Mode 11.
+    // Metal: texture/buffer namespaces overlap (idiomatic Metal), includes Surface Cache bindings.
     {
         bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
         if (isDawn) {
@@ -320,32 +327,34 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             DescriptorSetLayoutDesc layoutDesc{10, traceBindings};
             trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
         } else {
-            // Metal: separate texture/buffer namespaces -- overlap is idiomatic.
-            // DDGITraceRays.metal declares [[buffer(0..4)]] for the 5 buffers.
+            // Metal: 3 SDF textures + 1 (prev_color OR lighting_atlas) + 2 UBO + 3 SSBO + 2 SC buffers.
+            // SC params (atlas_size, lookup_count) are encoded in DDGIVolumeData at buffer(1).
             DescriptorSetLayoutBinding traceBindings[] = {
-                // Textures
-                {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-                {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-                {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-                {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-                // Buffers (Metal namespace -- overlap with textures is fine)
-                {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
-                {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
-                {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
-                {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
-                {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                // Textures (sampled) — SDF cascades + Surface Cache lighting atlas / prev_color
+                {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
+                {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
+                {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 2
+                {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev_color (non-SC) or lighting_atlas (SC)
+                // Buffers (separate Metal namespace)
+                {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
+                {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData (includes SC params)
+                {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray data
+                {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list
+                {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance_history (read)
+                {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // SC card lookups
+                {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // SC card data
             };
             traceBindings[0].is3D = true;
             traceBindings[1].is3D = true;
             traceBindings[2].is3D = true;
-            traceBindings[7].readonly = true;
-            traceBindings[8].readonly = true;
-            DescriptorSetLayoutDesc layoutDesc{9, traceBindings};
+            traceBindings[3].readonly = true;  // probe_update_list
+            traceBindings[4].readonly = true;  // irradiance_history
+            DescriptorSetLayoutDesc layoutDesc{11, traceBindings};
             trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
         }
     }
 
-    // --- Irradiance: 2 UBO + 3 SSBO (ray data + irradiance history + irradiance output) + 1 SSBO (update list) ---
+    // --- Irradiance: 2 UBO + 3 SSBO (ray data + irradiance history + irradiance output) + 1 SSBO (update list) + 1 SSBO (confidence) ---
     {
         DescriptorSetLayoutBinding irradianceBindings[] = {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
@@ -354,12 +363,13 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance history buffer (read)
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance output buffer (read_write)
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list (read)
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // confidence buffer
         };
         irradianceBindings[2].readonly = true;  // ray_buffer: var<storage, read>
         irradianceBindings[3].readonly = true;  // irradiance_history: var<storage, read>
         irradianceBindings[5].readonly = true;  // probe_update_list: var<storage, read>
         // irradianceBindings[4] (irradiance_output) stays read_write.
-        DescriptorSetLayoutDesc layoutDesc{6, irradianceBindings};
+        DescriptorSetLayoutDesc layoutDesc{7, irradianceBindings};
         irradiance_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -381,6 +391,36 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         DescriptorSetLayoutDesc layoutDesc{6, depthBindings};
         depth_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
+
+    // --- SDF Trace: texture3D-only + minimal buffer reads ---
+    // Apple Silicon stable: only 4 texture3D reads per thread, no Surface Cache buffer mixing
+    {
+        DescriptorSetLayoutBinding sdfTraceBindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 2
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // hit_distance_buffer
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probeUpdateList
+        };
+        DescriptorSetLayoutDesc layoutDesc{6, sdfTraceBindings};
+        sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    }
+
+    // --- Finalize: buffer-only + texture2D (no texture3D) ---
+    {
+        DescriptorSetLayoutBinding finalizeBindings[] = {
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // lighting_atlas
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // hit_distance_buffer
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probeUpdateList
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray_buffer
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // card_lookups
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // card_data
+        };
+        DescriptorSetLayoutDesc layoutDesc{7, finalizeBindings};
+        finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    }
 }
 
 void LumenDDGIPass::CreatePipelines() {
@@ -392,10 +432,14 @@ void LumenDDGIPass::CreatePipelines() {
 
     // Compile shaders
     auto traceShader = CompileShader("DDGITraceRays", "ddgi_trace_rays");
+    auto sdfTraceShader = CompileShader("DDGITraceRays", "ddgi_trace_sdf");
+    auto finalizeShader = CompileShader("DDGITraceRays", "ddgi_trace_finalize");
     auto irradianceShader = CompileShader("DDGIUpdateIrradiance", "ddgi_update_irradiance");
     auto depthShader = CompileShader("DDGIUpdateDepth", "ddgi_update_depth");
 
     if (traceShader == handles::INVALID_SHADER ||
+        sdfTraceShader == handles::INVALID_SHADER ||
+        finalizeShader == handles::INVALID_SHADER ||
         irradianceShader == handles::INVALID_SHADER ||
         depthShader == handles::INVALID_SHADER) {
         std::cerr << "[LumenDDGI] Shader compilation failed" << std::endl;
@@ -421,6 +465,18 @@ void LumenDDGIPass::CreatePipelines() {
         plDesc.setLayouts = &depth_set_layout_;
         depth_layout_ = device_->CreatePipelineLayout(plDesc);
     }
+    {
+        PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &sdf_trace_set_layout_;
+        sdf_trace_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
+    {
+        PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &finalize_set_layout_;
+        finalize_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
 
     // Create compute pipelines
     // Trace uses threadGroupSize (64,1,1) for ray-level parallelism
@@ -431,20 +487,36 @@ void LumenDDGIPass::CreatePipelines() {
         pipeDesc.threadGroupSize = {64, 1, 1};
         trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
-    // Irradiance update uses (64,1,1) — one thread per probe
+    // SDF trace (split pass 1): texture3D-only, (8,8,1) threadgroup
+    {
+        ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = sdfTraceShader;
+        pipeDesc.layout = sdf_trace_layout_;
+        pipeDesc.threadGroupSize = {8, 8, 1};
+        sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
+    // Finalize (split pass 2): buffer-only, (8,8,1) threadgroup
+    {
+        ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = finalizeShader;
+        pipeDesc.layout = finalize_layout_;
+        pipeDesc.threadGroupSize = {8, 8, 1};
+        finalize_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
+    // Irradiance update uses (8,8,1) — cooperative, one group per probe
     {
         ComputePipelineDesc pipeDesc{};
         pipeDesc.computeShader = irradianceShader;
         pipeDesc.layout = irradiance_layout_;
-        pipeDesc.threadGroupSize = {64, 1, 1};
+        pipeDesc.threadGroupSize = {8, 8, 1};
         irradiance_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
-    // Depth update uses (64,1,1) — one thread per probe
+    // Depth update uses (8,8,1) — cooperative, one group per probe
     {
         ComputePipelineDesc pipeDesc{};
         pipeDesc.computeShader = depthShader;
         pipeDesc.layout = depth_layout_;
-        pipeDesc.threadGroupSize = {64, 1, 1};
+        pipeDesc.threadGroupSize = {8, 8, 1};
         depth_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
 
@@ -461,6 +533,14 @@ void LumenDDGIPass::CreatePipelines() {
         {
             DescriptorSetDesc dsDesc{depth_set_layout_};
             depth_ds_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        {
+            DescriptorSetDesc dsDesc{sdf_trace_set_layout_};
+            sdf_trace_ds_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        {
+            DescriptorSetDesc dsDesc{finalize_set_layout_};
+            finalize_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
     }
 }
@@ -500,12 +580,8 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.structured.elementStride = sizeof(float);
         irradiance_buffers_[i] = device_->CreateBuffer(desc);
 
-        // Zero-initialize to prevent garbage data causing flickering
-        void* mapped = device_->MapBuffer(irradiance_buffers_[i]);
-        if (mapped) {
-            memset(mapped, 0, irradianceSize);
-            device_->UnmapBuffer(irradiance_buffers_[i]);
-        }
+        // NOTE: No zero-init here — InitializeProbesFromStatic() will fill
+        // with static bake data or sky estimate after all buffers are created.
     }
 
     // Depth buffers: octahedral 8x8 depth map per probe
@@ -542,6 +618,34 @@ void LumenDDGIPass::CreateProbeTextures() {
         }
     }
 
+    // Confidence buffers: triple-buffered (4 floats per probe)
+    {
+        u64 confSize = (u64)totalProbes * 4 * sizeof(float);
+        BufferDesc desc{};
+        desc.size = confSize;
+        desc.type = BufferType::Structured;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.structured.elementCount = totalProbes * 4;
+        desc.structured.elementStride = sizeof(float);
+
+        float initAge = (static_volume_ && static_volume_->IsLoaded()) ? 0.5f : 0.0f;
+        for (int i = 0; i < 3; i++) {
+            confidence_buffers_[i] = device_->CreateBuffer(desc);
+
+            float* mapped = static_cast<float*>(device_->MapBuffer(confidence_buffers_[i]));
+            if (mapped) {
+                for (u32 p = 0; p < totalProbes; p++) {
+                    mapped[p * 4 + 0] = 0.0f;     // rayHitRatio
+                    mapped[p * 4 + 1] = 0.0f;     // temporalStability
+                    mapped[p * 4 + 2] = 1.0f;     // visibilityConf (optimistic)
+                    mapped[p * 4 + 3] = initAge;  // convergenceAge
+                }
+                device_->UnmapBuffer(confidence_buffers_[i]);
+            }
+        }
+    }
+
     // Ray data storage buffer
     // Each probe fires rays_per_probe rays, each ray produces DDGIRayData (16 bytes)
     u64 rayDataSize = (u64)totalProbes * params_.rays_per_probe * sizeof(DDGIRayData);
@@ -556,6 +660,185 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.structured.elementStride = sizeof(DDGIRayData);
         ray_data_buffer_ = device_->CreateBuffer(desc);
     }
+
+    // Hit distance buffer (intermediate between split SDF trace and finalize dispatches)
+    // Must match ray_data_buffer_ sizing: totalProbes * rays_per_probe, because
+    // the dispatch uses updateCount = probeCountTotal groups × 64 rays = full grid.
+    {
+        u32 totalRays = totalProbes * params_.rays_per_probe;
+        BufferDesc desc{};
+        desc.size = (u64)totalRays * sizeof(float);
+        desc.type = BufferType::Structured;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.structured.elementCount = totalRays;
+        desc.structured.elementStride = sizeof(float);
+        hit_distance_buffer_ = device_->CreateBuffer(desc);
+    }
+
+    // Dummy Surface Cache buffers — always bound so the trace descriptor set
+    // is valid even when SC is not enabled. lookup_count=0 causes the shader
+    // to skip the SC loop and fall through to sky color.
+    {
+        BufferDesc desc{};
+        desc.size = 256;
+        desc.type = BufferType::Structured;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        sc_card_lookup_buffer_ = device_->CreateBuffer(desc);
+        sc_card_data_buffer_ = device_->CreateBuffer(desc);
+    }
+    {
+        BufferDesc desc{};
+        desc.size = 256;
+        desc.type = BufferType::Constant;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        sc_params_buffer_ = device_->CreateBuffer(desc);
+
+        // Upload zeroed params so lookup_count=0
+        auto* mapped = static_cast<SurfaceCacheParams*>(device_->MapBuffer(sc_params_buffer_));
+        if (mapped) {
+            memset(mapped, 0, sizeof(SurfaceCacheParams));
+            device_->UnmapBuffer(sc_params_buffer_);
+        }
+    }
+}
+
+// ============================================================================
+// Initialize probes from static bake data or sky estimate fallback
+// ============================================================================
+
+void LumenDDGIPass::InitializeProbesFromStatic() {
+    u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+
+    if (static_volume_ && static_volume_->IsLoaded()) {
+        // Validate dimensions match (Errata E9)
+        if (static_volume_->GridDimX() != params_.probe_count_x ||
+            static_volume_->GridDimY() != params_.probe_count_y ||
+            static_volume_->GridDimZ() != params_.probe_count_z) {
+            // Dimension mismatch — fall through to sky estimate
+            goto sky_estimate;
+        }
+
+        // Adopt the static volume's world-space origin as the runtime probe origin.
+        // Initialize() sets probe_origin_ to a params-centered position
+        // (-((count-1)*spacing/2) on each axis), but the bake uses its own origin
+        // (e.g. -32,-16,-32 to cover Sponza's [-32,32]³ bounds). Without this
+        // sync, the GIGather shader offsets every world position by the delta
+        // between the two origins, AND any pixel at world coords below the
+        // runtime origin early-outs to zero (outside-grid branch). Net effect:
+        // ~25% of the scene reads zero indirect, the rest reads data shifted
+        // by the origin delta. Match the bake exactly to fix both.
+        const math::v3& staticOrigin = static_volume_->GetParams().origin;
+        probe_origin_ = staticOrigin;
+        volume_data_.ProbeOrigin = math::v4{staticOrigin.x, staticOrigin.y, staticOrigin.z, 0.0f};
+        std::cout << "[LumenDDGI] Synced probe_origin_ to static bake: ("
+                  << staticOrigin.x << ", " << staticOrigin.y << ", " << staticOrigin.z << ")" << std::endl;
+
+        // Copy static → ALL THREE dynamic frame buffers
+        const math::v3* staticIrr = static_volume_->GetIrradianceData();
+        const float* staticMean = static_volume_->GetDepthMeanData();
+        const float* staticVar = static_volume_->GetDepthVarData();
+
+        for (int f = 0; f < 3; f++) {
+            // Irradiance: simd::float3 has 16-byte stride (4 bytes padding).
+            // DDGI buffer expects flat float[3] per coefficient. Must copy element-by-element.
+            float* irrMapped = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]));
+            if (irrMapped) {
+                u32 totalCoeffs = probeCount * 9;
+                for (u32 i = 0; i < totalCoeffs; ++i) {
+                    irrMapped[i * 3 + 0] = staticIrr[i].x;
+                    irrMapped[i * 3 + 1] = staticIrr[i].y;
+                    irrMapped[i * 3 + 2] = staticIrr[i].z;
+                }
+                device_->UnmapBuffer(irradiance_buffers_[f]);
+            }
+
+            // Depth: DDGI has 128 floats/probe (64 mean + 64 var)
+            //         Static has separate arrays of 64 each
+            float* depthMapped = static_cast<float*>(device_->MapBuffer(depth_buffers_[f]));
+            if (depthMapped) {
+                for (u32 p = 0; p < probeCount; p++) {
+                    u32 ddgiBase = p * 128;
+                    u32 staticBase = p * 64;
+                    for (u32 oct = 0; oct < 64; oct++) {
+                        depthMapped[ddgiBase + oct] = staticMean[staticBase + oct];       // mean
+                        depthMapped[ddgiBase + 64 + oct] = staticVar[staticBase + oct];   // variance
+                    }
+                }
+                device_->UnmapBuffer(depth_buffers_[f]);
+            }
+        }
+
+        std::cout << "[LumenDDGI] Initialized probes from static bake data ("
+                  << probeCount << " probes)" << std::endl;
+        return;
+    }
+
+sky_estimate:
+    // No bake data or dimension mismatch: sky estimate fallback
+    // Must use float* (not math::v3*) — buffer is 12 bytes/element, math::v3 is 16 bytes.
+    math::v3 skyL0 = math::v3{0.5f, 0.7f, 1.0f} * 3.14159265f; // sky color * pi
+    for (int f = 0; f < 3; f++) {
+        u64 irrSize = (u64)probeCount * 9 * 3 * sizeof(float);
+        float* mapped = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]));
+        if (mapped) {
+            memset(mapped, 0, irrSize);
+            for (u32 p = 0; p < probeCount; p++) {
+                mapped[p * 27 + 0] = skyL0.x;
+                mapped[p * 27 + 1] = skyL0.y;
+                mapped[p * 27 + 2] = skyL0.z;
+            }
+            device_->UnmapBuffer(irradiance_buffers_[f]);
+        }
+    }
+
+    std::cout << "[LumenDDGI] Initialized probes with sky estimate fallback" << std::endl;
+}
+
+// ============================================================================
+// Surface Cache integration
+// ============================================================================
+
+void LumenDDGIPass::SetSurfaceCacheResources(
+    ResourceHandle lighting_atlas,
+    ResourceHandle card_lookup_buffer,
+    ResourceHandle card_data_buffer,
+    u32 atlas_size,
+    u32 lookup_count)
+{
+    sc_lighting_atlas_ = lighting_atlas;
+    sc_card_lookup_buffer_ = card_lookup_buffer;
+    sc_card_data_buffer_ = card_data_buffer;
+    sc_atlas_size_ = atlas_size;
+    sc_lookup_count_ = lookup_count;
+
+    // Store SC params in DDGIVolumeData (triple-buffered, confirmed working)
+    // instead of a separate sc_params buffer (binding 6 was not working).
+    volume_data_.SCLookupCount = lookup_count;
+    volume_data_.SCAtlasSize = atlas_size;
+
+    sc_enabled_ = (lighting_atlas != handles::INVALID_RESOURCE &&
+                   card_lookup_buffer != handles::INVALID_RESOURCE &&
+                   card_data_buffer != handles::INVALID_RESOURCE &&
+                   lookup_count > 0);
+
+    if (sc_enabled_) {
+        std::cout << "[LumenDDGI] Surface Cache enabled: atlas_size=" << atlas_size
+                  << ", lookup_count=" << lookup_count << std::endl;
+    }
+}
+
+void LumenDDGIPass::ClearSurfaceCacheResources() {
+    sc_enabled_ = false;
+    // Do NOT clear buffer/atlas handles — Metal validates all declared
+    // bindings must be valid, even when the shader skips the SC loop.
+    // Setting SCLookupCount=0 ensures the finalize pass never reads them.
+    sc_atlas_size_ = 0;
+    sc_lookup_count_ = 0;
+    volume_data_.SCLookupCount = 0;
+    volume_data_.SCAtlasSize = 0;
 }
 
 // ============================================================================
@@ -613,7 +896,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
     RenderGraph& graph,
     RGResourceHandle prev_frame_color,
     const DDGICameraData& camera_data,
-    u32 current_frame_index)
+    u32 current_frame_index,
+    RGResourceHandle sc_lighting_atlas)
 {
     LumenDDGIOutput output{};
 
@@ -640,12 +924,19 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
         // Setup lambda: declare resource dependencies
         // ====================================================================
         [prev_frame_color, irradianceOutHandle, irradianceHistHandle,
-         depthOutHandle, depthHistHandle](
+         depthOutHandle, depthHistHandle, sc_lighting_atlas](
             LumenDDGIData& data, RenderGraphBuilder& builder) {
             // Read previous frame color (for lighting lookup during trace)
             builder.Read(prev_frame_color, ResourceState::ShaderResource);
 
             data.prev_frame_color = prev_frame_color;
+
+            // Declare dependency on SC lighting atlas when SC is active.
+            // Without this, the RG has no barrier between SC Lighting write
+            // and DDGI finalize read — data race on the atlas texture.
+            if (sc_lighting_atlas.IsValid()) {
+                builder.Read(sc_lighting_atlas, ResourceState::ShaderResource);
+            }
 
             // Write to output irradiance/depth textures
             builder.Write(irradianceOutHandle, ResourceState::UnorderedAccess);
@@ -683,6 +974,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             u32 frameIdx = current_frame_index % 3;
 
             u32 probeCountTotal = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+            u32 updateCount = std::min(max_probes_per_frame_, probeCountTotal);
 
             // Resolve physical handles from render graph
             auto ResolveTexture = [&](RGResourceHandle handle) -> ResourceHandle {
@@ -701,8 +993,12 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             };
             if (sdfAvailable) {
                 for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
-                    sdfTextures[c] = sdf.GetCascade(c).sdf_texture;
+                    const auto& cascade = sdf.GetCascade(c);
+                    if (cascade.sdf_texture != handles::INVALID_RESOURCE)
+                        sdfTextures[c] = cascade.sdf_texture;
                 }
+                // Must have at least cascade 0 with a valid texture
+                sdfAvailable = (sdfTextures[0] != handles::INVALID_RESOURCE);
             }
 
             // Mode 11 per-vertex albedo: GBuffer albedo from GPUDrivenDrawPipeline.
@@ -833,18 +1129,27 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.SkyColor = {sky * 0.85f, sky * 0.85f, sky * 1.0f, 0.0f};
                     vd.Albedo   = {alb, alb, alb, 0.0f};
 
-                    // Fill SDF cascade data from GlobalSDF
-                    for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
-                        const auto& cascade = sdf.GetCascade(c);
-                        vd.SdfOrigins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
-                        vd.SdfVoxelSizes[c] = {cascade.voxel_size, 0.0f, 0.0f, 0.0f};
-                        vd.SdfExtents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
-                        vd.SdfResolutions[c] = cascade.resolution;
+                    // Fill SDF cascade data from FieldRegistry via FieldView
+                    {
+                        field::FieldDescriptor sdf_cascades[4];
+                        u32 count = field::FieldRegistry::Get().FindCascaded(
+                            field::FieldSemantic::GlobalSDF, sdf_cascades, 4);
+                        if (count > 0) {
+                            field::FieldView::WriteSDFToDDGI(sdf_cascades, count, vd);
+                        } else {
+                            vd.SdfCascadeCount = 0;
+                        }
                     }
-                    vd.SdfCascadeCount = sdf.GetConfig().cascade_count;
 
-                    vd.ProbeUpdateCount = probeCountTotal;  // default: update all; refined below
-                    vd._pad_before_relocation = 0.0f;
+                    vd.ProbeUpdateCount = updateCount;  // matches actual dispatch count
+                    vd.ProbeRelocationShift[0] = relocation_shift_[0];
+                    vd.ProbeRelocationShift[1] = relocation_shift_[1];
+                    vd.ProbeRelocationShift[2] = relocation_shift_[2];
+
+                    // Preserve Surface Cache params (set by SetSurfaceCacheResources)
+                    // These are lost when vd{} zero-initializes. Must copy from members.
+                    vd.SCLookupCount = sc_lookup_count_;
+                    vd.SCAtlasSize = sc_atlas_size_;
 
                     *mapped = vd;
                     device_->UnmapBuffer(volume_cb_[frameIdx]);
@@ -855,10 +1160,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             }
 
             // ================================================================
-            // Priority scheduling: select top-N probes to update this frame
+            // Probe update scheduling — priority-based partial updates
             // ================================================================
-            u32 updateCount = probeCountTotal;  // default: update all probes
-
+            // updateCount already initialized above (line 962) as min(max_probes_per_frame_, probeCountTotal).
             // First frame: full update of all probes to initialize irradiance/depth.
             // Subsequent frames: priority scheduling updates only top-N probes.
             bool isFirstFrame = (camera_data.frame_index <= 1);
@@ -867,7 +1171,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // histIdx is 2 frames behind — GPU has long since finished writing to it.
             if (!isFirstFrame &&
                 probe_states_.size() == probeCountTotal &&
-                probe_update_list_buffer_[frameIdx] != handles::INVALID_RESOURCE) {
+                probe_update_list_buffers_[frameIdx] != handles::INVALID_RESOURCE) {
                 float* depthData = static_cast<float*>(device_->MapBuffer(depth_buffers_[histIdx]));
                 if (depthData) {
                     static constexpr u32 DDGI_DEPTH_TEXELS = 64;
@@ -925,13 +1229,13 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                                   });
 
                 // Write update list buffer
-                u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffer_[frameIdx]));
+                u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffers_[frameIdx]));
                 if (updateList) {
                     for (u32 i = 0; i < updateCount; ++i) {
                         updateList[i] = priorities[i].index;
                         probe_states_[priorities[i].index].last_update_frame = current_frame_index;
                     }
-                    device_->UnmapBuffer(probe_update_list_buffer_[frameIdx]);
+                    device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
                 }
 
                 // Patch ProbeUpdateCount in the volume constant buffer
@@ -946,28 +1250,92 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             }
 
             // First frame: fill update list with all probe indices (0..N-1)
-            if (isFirstFrame && probe_update_list_buffer_[frameIdx] != handles::INVALID_RESOURCE) {
-                u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffer_[frameIdx]));
+            if (isFirstFrame && probe_update_list_buffers_[frameIdx] != handles::INVALID_RESOURCE) {
+                u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffers_[frameIdx]));
                 if (updateList) {
                     for (u32 i = 0; i < updateCount; ++i) {
                         updateList[i] = i;
                     }
-                    device_->UnmapBuffer(probe_update_list_buffer_[frameIdx]);
+                    device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
                 }
             }
 
             // ================================================================
-            // Sub-pass 1: TraceRays (skip if GlobalSDF not available)
+            // Sub-pass 1: TraceRays — split into SDF trace + finalize
+            // Apple Silicon: separate texture3D reads from buffer reads
             // ================================================================
+            printf("[DDGI] Sub-pass 1: TraceRays begin (updateCount=%u, sc=%d, sdf=%d)\n",
+                   updateCount, sc_enabled_ ? 1 : 0, sdfAvailable ? 1 : 0);
+            fflush(stdout);
             if (sdfAvailable &&
+                sdf_trace_pipeline_ != handles::INVALID_PIPELINE &&
+                finalize_pipeline_ != handles::INVALID_PIPELINE &&
+                hit_distance_buffer_ != handles::INVALID_RESOURCE) {
+
+                // --- 1a: SDF trace (texture3D-only, 4 steps) ---
+                {
+                    DescriptorData sdfTraceParams[] = {
+                        {0, DescriptorType::SampledImage,  sdfTextures[0]},
+                        {1, DescriptorType::SampledImage,  sdfTextures[1]},
+                        {2, DescriptorType::SampledImage,  sdfTextures[2]},
+                        {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
+                        {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
+                        {3, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfTraceParams, 6);
+
+                    cmd->BindComputePipeline(sdf_trace_pipeline_);
+                    const DescriptorSetHandle sets[] = { sdf_trace_ds_[frameIdx] };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Compute, sdf_trace_layout_, 0, 1, sets, 0, nullptr);
+
+                    cmd->Dispatch(updateCount, 1, 1);
+                }
+
+                // Barrier: end encoder for strict Apple Silicon synchronization.
+                // memoryBarrier() alone may not flush GPU L2 cache for heap-allocated
+                // StorageModeShared buffers. Ending the encoder guarantees visibility.
+                cmd->MemoryBarrier(
+                    PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                    AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+
+                // --- 1b: Finalize (buffer + texture2D, no texture3D) ---
+                {
+                    ResourceHandle lightingAtlasTex = sc_enabled_
+                        ? sc_lighting_atlas_
+                        : prevColorTex;
+
+                    // Guard against null texture binding — nil texture in compute shader
+                    // causes GPU hang on Apple Silicon. Skip finalize if no valid source.
+                    if (lightingAtlasTex != handles::INVALID_RESOURCE) {
+
+                    DescriptorData finalizeParams[] = {
+                        {3, DescriptorType::SampledImage,  lightingAtlasTex},
+                        {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
+                        {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
+                        {3, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
+                        {4, DescriptorType::StorageBuffer, ray_data_buffer_},
+                        {5, DescriptorType::StorageBuffer, sc_card_lookup_buffer_},
+                        {6, DescriptorType::StorageBuffer, sc_card_data_buffer_},
+                    };
+                    UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 7);
+
+                    cmd->BindComputePipeline(finalize_pipeline_);
+                    const DescriptorSetHandle sets[] = { finalize_ds_[frameIdx] };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, sets, 0, nullptr);
+
+                    cmd->Dispatch(updateCount, 1, 1);
+                    }
+                }
+                printf("[DDGI] Sub-pass 1: TraceRays done\n"); fflush(stdout);
+            } else if (sdfAvailable &&
                 trace_pipeline_ != handles::INVALID_PIPELINE &&
                 ray_data_buffer_ != handles::INVALID_RESOURCE) {
                 // Update trace descriptor set
                 // Platform-branch: Dawn uses sequential 0..9 (added GBuffer albedo
-                // at binding 9 for Mode 11); Metal keeps 0..8 (Metal shader wasn't
-                // updated — Metal runs Mode 10 only).
+                // at binding 9 for Mode 11); Metal uses overlap (textures 0..3 +
+                // buffers 0..6 with SC bindings 5/6).
                 bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
-                DescriptorData traceParams[10];
+                DescriptorData traceParams[11];
                 u32 traceParamCount = 0;
                 if (isDawn) {
                     // Dawn: sequential 0..9 matching WGSL
@@ -978,64 +1346,78 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     traceParams[4] = {4, DescriptorType::UniformBuffer, global_cb_[frameIdx]};
                     traceParams[5] = {5, DescriptorType::UniformBuffer, volume_cb_[frameIdx]};
                     traceParams[6] = {6, DescriptorType::StorageBuffer, ray_data_buffer_};
-                    traceParams[7] = {7, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]};
+                    traceParams[7] = {7, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]};
                     traceParams[8] = {8, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]};
                     traceParams[9] = {9, DescriptorType::SampledImage,  gbufferAlbedoTex};
                     traceParamCount = 10;
                 } else {
-                    // Metal: overlap texture/buffer namespaces -- buffers at 0..4
-                    traceParams[0] = {0, DescriptorType::SampledImage,  sdfTextures[0]};
-                    traceParams[1] = {1, DescriptorType::SampledImage,  sdfTextures[1]};
-                    traceParams[2] = {2, DescriptorType::SampledImage,  sdfTextures[2]};
-                    traceParams[3] = {3, DescriptorType::SampledImage,  prevColorTex};
-                    traceParams[4] = {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]};
-                    traceParams[5] = {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]};
-                    traceParams[6] = {2, DescriptorType::StorageBuffer, ray_data_buffer_};
-                    traceParams[7] = {3, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]};
-                    traceParams[8] = {4, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]};
-                    traceParamCount = 9;
-                }
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, traceParamCount);
+                    // Metal: overlap texture/buffer namespaces.
+                    // Binding 3 = prevColorTex (non-SC) or lighting_atlas (SC).
+                    // Bindings 5/6 = SC card lookup/data (unused when sc_enabled_=false).
+                    ResourceHandle lightingAtlasTex = sc_enabled_
+                        ? sc_lighting_atlas_
+                        : prevColorTex;
 
-                cmd->BindComputePipeline(trace_pipeline_);
-                const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
-                cmd->BindDescriptorSets(PipelineBindPoint::Compute, trace_layout_, 0, 1, sets, 0, nullptr);
-
-                u32 totalRayThreads = updateCount * params_.rays_per_probe;
-                u32 gx = (totalRayThreads + 63) / 64;
-
-                // One-time trace dispatch diagnostic. Confirms trace path is
-                // firing AND the GBuffer albedo binding (Mode 11) resolves to
-                // a real texture handle rather than the prevColorTex fallback.
-                if (dynamic_mode_) {
-                    static bool tracedOnce = false;
-                    if (!tracedOnce) {
-                        bool usingGBuffer = (gbufferAlbedoTex != prevColorTex) &&
-                                            (gbufferAlbedoTex != handles::INVALID_RESOURCE);
-                        std::fprintf(stderr,
-                            "[Mode11] Trace dispatched: frame=%u updateCount=%u rays/probe=%u gx=%u gbufferAlbedo=%s\n",
-                            current_frame_index, updateCount, params_.rays_per_probe, gx,
-                            usingGBuffer ? "live" : "fallback");
-                        tracedOnce = true;
+                    // Same null guard as split trace path — skip trace entirely.
+                    if (lightingAtlasTex == handles::INVALID_RESOURCE) {
+                        // traceParamCount stays 0; dispatch is skipped below.
+                    } else {
+                        traceParams[0] = {0, DescriptorType::SampledImage,  sdfTextures[0]};
+                        traceParams[1] = {1, DescriptorType::SampledImage,  sdfTextures[1]};
+                        traceParams[2] = {2, DescriptorType::SampledImage,  sdfTextures[2]};
+                        traceParams[3] = {3, DescriptorType::SampledImage,  lightingAtlasTex};
+                        traceParams[4] = {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]};
+                        traceParams[5] = {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]};
+                        traceParams[6] = {2, DescriptorType::StorageBuffer, ray_data_buffer_};
+                        traceParams[7] = {3, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]};
+                        traceParams[8] = {4, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]};
+                        traceParams[9] = {5, DescriptorType::StorageBuffer, sc_card_lookup_buffer_};
+                        traceParams[10] = {6, DescriptorType::StorageBuffer, sc_card_data_buffer_};
+                        traceParamCount = 11;
                     }
                 }
 
-                cmd->Dispatch(gx, 1, 1);
+                if (traceParamCount == 0) {
+                    // Null lighting atlas or invalid binding — skip trace dispatch.
+                } else {
+                    UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, traceParamCount);
+
+                    cmd->BindComputePipeline(trace_pipeline_);
+                    const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Compute, trace_layout_, 0, 1, sets, 0, nullptr);
+
+                    u32 totalRayThreads = updateCount * params_.rays_per_probe;
+                    u32 gx = (totalRayThreads + 63) / 64;
+
+                    // One-time trace dispatch diagnostic. Confirms trace path is
+                    // firing AND the GBuffer albedo binding (Mode 11) resolves to
+                    // a real texture handle rather than the prevColorTex fallback.
+                    if (dynamic_mode_) {
+                        static bool tracedOnce = false;
+                        if (!tracedOnce) {
+                            bool usingGBuffer = (gbufferAlbedoTex != prevColorTex) &&
+                                                (gbufferAlbedoTex != handles::INVALID_RESOURCE);
+                            std::fprintf(stderr,
+                                "[Mode11] Trace dispatched: frame=%u updateCount=%u rays/probe=%u gx=%u gbufferAlbedo=%s\n",
+                                current_frame_index, updateCount, params_.rays_per_probe, gx,
+                                usingGBuffer ? "live" : "fallback");
+                            tracedOnce = true;
+                        }
+                    }
+
+                    cmd->Dispatch(gx, 1, 1);
+                }
             }
 
-            // Barrier: ray data Storage -> ShaderResource (for irradiance/depth update reads)
-            {
-                ResourceBarrier barrier{};
-                barrier.resource = ray_data_buffer_;
-                barrier.beforeState = ResourceState::UnorderedAccess;
-                barrier.afterState = ResourceState::ShaderResource;
-                barrier.subresource = 0xFFFFFFFF;
-                cmd->InsertBarrier(&barrier, 1);
-            }
+            // Barrier: end encoder for strict synchronization
+            cmd->MemoryBarrier(
+                PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
 
             // ================================================================
             // Sub-pass 2: UpdateIrradiance
             // ================================================================
+            printf("[DDGI] Sub-pass 2: UpdateIrradiance begin\n"); fflush(stdout);
             if (irradiance_pipeline_ != handles::INVALID_PIPELINE &&
                 irradiance_buffers_[outIdx] != handles::INVALID_RESOURCE) {
                 // Update irradiance descriptor set
@@ -1045,39 +1427,29 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {2, DescriptorType::StorageBuffer, ray_data_buffer_},
                     {3, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
                     {4, DescriptorType::StorageBuffer, irradiance_buffers_[outIdx]},
-                    {5, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]},
+                    {5, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
+                    {6, DescriptorType::StorageBuffer, confidence_buffers_[outIdx]},
                 };
-                UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 6);
+                UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 7);
 
                 cmd->BindComputePipeline(irradiance_pipeline_);
                 const DescriptorSetHandle sets[] = { irradiance_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, irradiance_layout_, 0, 1, sets, 0, nullptr);
 
-                cmd->Dispatch((updateCount + 63) / 64, 1, 1);
+                cmd->Dispatch(updateCount, 1, 1);
+                printf("[DDGI] Sub-pass 2: UpdateIrradiance dispatched\n"); fflush(stdout);
             }
-
-            // Barrier: irradiance UAV -> SRV
-            {
-                ResourceBarrier barrier{};
-                barrier.resource = irradiance_buffers_[outIdx];
-                barrier.beforeState = ResourceState::UnorderedAccess;
-                barrier.afterState = ResourceState::ShaderResource;
-                barrier.subresource = 0xFFFFFFFF;
-                cmd->InsertBarrier(&barrier, 1);
-            }
-
-            // Sub-pass 3: UpdateDepth (buffer-based, no texture3D)
             // ================================================================
             if (depth_pipeline_ != handles::INVALID_PIPELINE &&
                 depth_buffers_[outIdx] != handles::INVALID_RESOURCE) {
-                // Update depth descriptor set (buffers only, no textures)
+                printf("[DDGI] Sub-pass 3: UpdateDepth begin\n"); fflush(stdout);
                 DescriptorData depthParams[] = {
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
                     {2, DescriptorType::StorageBuffer, ray_data_buffer_},
                     {3, DescriptorType::StorageBuffer, depth_buffers_[histIdx]},  // history
                     {4, DescriptorType::StorageBuffer, depth_buffers_[outIdx]},   // output
-                    {5, DescriptorType::StorageBuffer, probe_update_list_buffer_[frameIdx]},
+                    {5, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
                 };
                 UpdateDescriptorSet(device_, depth_ds_[frameIdx], depthParams, 6);
 
@@ -1085,116 +1457,16 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 const DescriptorSetHandle sets[] = { depth_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, depth_layout_, 0, 1, sets, 0, nullptr);
 
-                cmd->Dispatch((updateCount + 63) / 64, 1, 1);
+                cmd->Dispatch(updateCount, 1, 1);
+                printf("[DDGI] Sub-pass 3: UpdateDepth dispatched\n"); fflush(stdout);
             }
-
-            // Barrier: depth buffer UAV -> SRV
-            {
-                ResourceBarrier barrier{};
-                barrier.resource = depth_buffers_[outIdx];
-                barrier.beforeState = ResourceState::UnorderedAccess;
-                barrier.afterState = ResourceState::ShaderResource;
-                barrier.subresource = 0xFFFFFFFF;
-                cmd->InsertBarrier(&barrier, 1);
-            }
+            cmd->MemoryBarrier(
+                PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
         }
     );
 
     return output;
-}
-
-// ============================================================================
-// InitializeProbesFromStatic
-// ============================================================================
-// Seeds the dynamic DDGI probe buffers from a CPU static bake (if a
-// StaticProbeVolume is attached and dimensions match), or falls back to a
-// sky estimate. Called once at the end of Initialize().
-void LumenDDGIPass::InitializeProbesFromStatic() {
-    u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
-
-    if (static_volume_ && static_volume_->IsLoaded()) {
-        // Validate dimensions match (Errata E9)
-        if (static_volume_->GridDimX() != params_.probe_count_x ||
-            static_volume_->GridDimY() != params_.probe_count_y ||
-            static_volume_->GridDimZ() != params_.probe_count_z) {
-            // Dimension mismatch — fall through to sky estimate
-            goto sky_estimate;
-        }
-
-        // Adopt the static volume's world-space origin as the runtime probe origin.
-        // Initialize() sets probe_origin_ to a params-centered position
-        // (-((count-1)*spacing/2) on each axis), but the bake uses its own origin
-        // (e.g. -32,-16,-32 to cover Sponza's [-32,32]³ bounds). Without this
-        // sync, the GIGather shader offsets every world position by the delta
-        // between the two origins, AND any pixel at world coords below the
-        // runtime origin early-outs to zero (outside-grid branch). Net effect:
-        // ~25% of the scene reads zero indirect, the rest reads data shifted
-        // by the origin delta. Match the bake exactly to fix both.
-        const math::v3& staticOrigin = static_volume_->GetParams().origin;
-        probe_origin_ = staticOrigin;
-        volume_data_.ProbeOrigin = math::v4{staticOrigin.x, staticOrigin.y, staticOrigin.z, 0.0f};
-        std::cout << "[LumenDDGI] Synced probe_origin_ to static bake: ("
-                  << staticOrigin.x << ", " << staticOrigin.y << ", " << staticOrigin.z << ")" << std::endl;
-
-        // Copy static → ALL THREE dynamic frame buffers
-        const math::v3* staticIrr = static_volume_->GetIrradianceData();
-        const float* staticMean = static_volume_->GetDepthMeanData();
-        const float* staticVar = static_volume_->GetDepthVarData();
-
-        for (int f = 0; f < 3; f++) {
-            // Irradiance: simd::float3 has 16-byte stride (4 bytes padding).
-            // DDGI buffer expects flat float[3] per coefficient. Must copy element-by-element.
-            float* irrMapped = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]));
-            if (irrMapped) {
-                u32 totalCoeffs = probeCount * 9;
-                for (u32 i = 0; i < totalCoeffs; ++i) {
-                    irrMapped[i * 3 + 0] = staticIrr[i].x;
-                    irrMapped[i * 3 + 1] = staticIrr[i].y;
-                    irrMapped[i * 3 + 2] = staticIrr[i].z;
-                }
-                device_->UnmapBuffer(irradiance_buffers_[f]);
-            }
-
-            // Depth: DDGI has 128 floats/probe (64 mean + 64 var)
-            //         Static has separate arrays of 64 each
-            float* depthMapped = static_cast<float*>(device_->MapBuffer(depth_buffers_[f]));
-            if (depthMapped) {
-                for (u32 p = 0; p < probeCount; p++) {
-                    u32 ddgiBase = p * 128;
-                    u32 staticBase = p * 64;
-                    for (u32 oct = 0; oct < 64; oct++) {
-                        depthMapped[ddgiBase + oct] = staticMean[staticBase + oct];       // mean
-                        depthMapped[ddgiBase + 64 + oct] = staticVar[staticBase + oct];   // variance
-                    }
-                }
-                device_->UnmapBuffer(depth_buffers_[f]);
-            }
-        }
-
-        std::cout << "[LumenDDGI] Initialized probes from static bake data ("
-                  << probeCount << " probes)" << std::endl;
-        return;
-    }
-
-sky_estimate:
-    // No bake data or dimension mismatch: sky estimate fallback
-    // Must use float* (not math::v3*) — buffer is 12 bytes/element, math::v3 is 16 bytes.
-    math::v3 skyL0 = math::v3{0.5f, 0.7f, 1.0f} * 3.14159265f; // sky color * pi
-    for (int f = 0; f < 3; f++) {
-        u64 irrSize = (u64)probeCount * 9 * 3 * sizeof(float);
-        float* mapped = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]));
-        if (mapped) {
-            memset(mapped, 0, irrSize);
-            for (u32 p = 0; p < probeCount; p++) {
-                mapped[p * 27 + 0] = skyL0.x;
-                mapped[p * 27 + 1] = skyL0.y;
-                mapped[p * 27 + 2] = skyL0.z;
-            }
-            device_->UnmapBuffer(irradiance_buffers_[f]);
-        }
-    }
-
-    std::cout << "[LumenDDGI] Initialized probes with sky estimate fallback" << std::endl;
 }
 
 } // namespace primal::graphics::lumen

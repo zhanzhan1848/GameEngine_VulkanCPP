@@ -4,6 +4,7 @@
 
 #include "Particles/ParticleSystem.h"
 #include "Graphics/RHI/Platforms/Metal/MetalCommandBuffer.h"
+#include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Engine/Content/ContentToEngine.h"
 #include "Utilities/IOStream.h"
 
@@ -548,37 +549,35 @@ void ParticlePass::update_descriptor_set(u32 frame_index) {
 }
 
 void ParticlePass::create_default_texture() {
-    // Create 1x1 white texture using content system
-    u32 width = 1;
-    u32 height = 1;
-    rhi::DataFormat format = rhi::DataFormat::RGBA8_UNorm;
-    u32 row_pitch = 4;
-    u32 slice_pitch = 4;
-    
-    // White pixel data (RGBA)
-    u8 white_pixel[4] = { 255, 255, 255, 255 };
-    
-    size_t blob_size = (6 * sizeof(u32)) + (2 * sizeof(u32) + slice_pitch);
-    utl::vector<u8> blob(blob_size);
-    utl::blob_stream_writer writer(blob.data(), blob.size());
-    
-    writer.write(width);
-    writer.write(height);
-    writer.write((u32)1);  // array_size
-    writer.write((u32)0);  // flags
-    writer.write((u32)1);  // mip_levels
-    writer.write((u32)format);
-    writer.write(row_pitch);
-    writer.write(slice_pitch);
-    writer.write(white_pixel, slice_pitch);
+    // Create 1x1 white texture with CPU-accessible storage for data upload
+    rhi::TextureDesc desc{};
+    desc.size.x = 1;
+    desc.size.y = 1;
+    desc.size.z = 1;
+    desc.mipLevels = 1;
+    desc.arraySize = 1;
+    desc.format = rhi::DataFormat::RGBA8_UNorm;
+    desc.type = rhi::TextureType::Texture2D;
+    desc.usage = rhi::TextureUsage::ShaderResource;
+    desc.memoryUsage = rhi::GPUMemoryUsage::Staging;
+    desc.name = "ParticleDefaultWhite";
 
-    id::id_type id = content::create_resource(blob.data(), content::asset_type::texture);
-    if (id::is_valid(id)) {
-        particle_texture_ = content::get_rhi_texture_handle(id);
-        std::cout << "ParticlePass: Created default white texture" << std::endl;
-    } else {
+    particle_texture_ = device_->CreateTexture(desc);
+    if (particle_texture_ == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "ParticlePass: Failed to create default texture" << std::endl;
+        return;
     }
+
+#ifdef __APPLE__
+    auto* metalDevice = static_cast<rhi::MetalDevice*>(device_);
+    auto* metalTex = metalDevice->GetTexture(particle_texture_);
+    if (metalTex && metalTex->GetNativeTexture()) {
+        u8 white_pixel[4] = { 255, 255, 255, 255 };
+        MTL::Region region = MTL::Region::Make2D(0, 0, 1, 1);
+        metalTex->GetNativeTexture()->replaceRegion(region, 0, white_pixel, 4);
+        std::cout << "ParticlePass: Created default white texture" << std::endl;
+    }
+#endif
 }
 
 } // namespace primal::graphics

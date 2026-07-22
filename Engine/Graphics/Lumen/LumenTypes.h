@@ -5,6 +5,8 @@
 
 namespace primal::graphics::lumen {
 
+enum class ShadowQuality { Hard = 0, PCF_16 = 1, PCSS = 2 };
+
 /**
  * @brief Lumen GI quality presets
  */
@@ -65,6 +67,7 @@ struct LumenConfig {
     u32 shadow_map_resolution = 2048;
     float shadow_cascade_split_0 = 60.0f;
     float shadow_cascade_split_1 = 500.0f;
+    ShadowQuality shadow_quality = ShadowQuality::PCF_16;
 
     // Screen Probes settings
     u32 screen_probes_spacing = 8;

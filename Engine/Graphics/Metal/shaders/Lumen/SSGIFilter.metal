@@ -16,7 +16,7 @@
 using namespace metal;
 
 #include "CommonTypes.metal"
-#include "CommonFunction.metal"
+#include "Common.h"
 
 constant float LUMEN_PI = 3.14159265358979323846f;
 

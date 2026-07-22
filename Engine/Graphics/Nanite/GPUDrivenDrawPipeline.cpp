@@ -9,6 +9,8 @@
 #include "../RHI/Core/RHIMath.h"
 #include "../RHI/Core/RHIGpuMesh.h"
 #include "../Scene/RenderSceneSnapshot.h"
+#include "../RenderScene.h"
+#include "../RenderPipeline/StreamingMesh.h"
 #include "../../Content/ContentToEngine.h" // Needed for get_rhi_mesh_asset
 #include "../Dawn/ShaderLoader.h"
 #include "../Utils/ShaderRegistry.h"
@@ -841,7 +843,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             gpuDrawPipelineDesc.depthStencilFormat = rhi::DataFormat::D32_Float;
             gpuDrawPipelineDesc.enableDepthTest = true;
             gpuDrawPipelineDesc.enableDepthWrite = true;
-            gpuDrawPipelineDesc.depthFunc = rhi::ComparisonFunc::Less;  // Use Less (strict) to prevent Z-fighting
+            gpuDrawPipelineDesc.depthFunc = rhi::ComparisonFunc::Less;
 
             // Match Metal TestNaniteStreamingPipeline:1435 — double-sided so walls/
             // banners/floor visible from any angle. Default CullMode::Back culls
@@ -850,6 +852,8 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
 
             // No blending for opaque geometry
             gpuDrawPipelineDesc.enableBlend = false;
+
+            gpuDrawPipelineDesc.cullMode = rhi::CullMode::None; // Keep disabled - meshlet winding may vary
 
             draw_pipeline_ = device_->CreateGraphicsPipeline(gpuDrawPipelineDesc);
             if (draw_pipeline_ != rhi::handles::INVALID_PIPELINE) {
@@ -1089,11 +1093,12 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
         return;
     }
 
-    // std::cout << "[GPUDrivenDrawPipeline] Total Stats:" << std::endl;
-    // std::cout << "  Meshlets: " << totalMeshlets << std::endl;
-    // std::cout << "  Vertices: " << totalVertices << std::endl;
-    // std::cout << "  Triangles: " << totalTriangles << std::endl;
-    // std::cout << "  Positions: " << totalPositions << std::endl;
+    std::cout << "[GPUDrivenDrawPipeline] Building Global Buffers:" << std::endl;
+    std::cout << "  Meshlets: " << totalMeshlets << std::endl;
+    std::cout << "  Vertices: " << totalVertices << std::endl;
+    std::cout << "  Triangles: " << totalTriangles << std::endl;
+    std::cout << "  Positions: " << totalPositions << std::endl;
+    std::cout << "  Elements: " << totalElements << std::endl;
 
     // 2. Allocate Global Buffers
     // Meshlets
@@ -1253,7 +1258,8 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
         if (processedGeometries.count(instance.geometry_id)) continue;
         
         graphics::rhi::RHIMeshAsset meshAsset;
-        if (primal::content::get_rhi_mesh_asset(instance.geometry_id, meshAsset)) {
+        if (primal::content::get_rhi_mesh_asset(
+                primal::content::get_rhi_mesh_id(instance.geometry_id), meshAsset)) {
             
             geometryToGlobalMeshletBase[instance.geometry_id] = currentMeshletOffset;
             
@@ -1306,15 +1312,27 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
                     memcpy(&dest.uv, src + uvOffset, sizeof(math::v2));
                     mergedElements.push_back(dest);
                 }
+            } else if (meshAsset.element_buffer.size() >= elemCount * 8) {
+                // 8-byte source format (static_normal: color[3]+t_sign+normal[2]) - convert to 24-byte
+                const u8* srcData = meshAsset.element_buffer.data();
+                for(u32 i=0; i<elemCount; ++i) {
+                    const u8* src = srcData + i * 8;
+                    VertexElement dest{};
+                    dest.colorTSign = (u32)src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16) | ((u32)src[3] << 24);
+                    u16 n0 = *reinterpret_cast<const u16*>(src + 4);
+                    u16 n1 = *reinterpret_cast<const u16*>(src + 6);
+                    dest.normal = ((u32)n0 << 16) | (u32)n1;
+                    dest.tangent = 0; // No tangent data
+                    dest.padding = 0;
+                    dest.uv = math::v2{0.0f, 0.0f};
+                    mergedElements.push_back(dest);
+                }
             } else {
                 // Element buffer missing or wrong size - fill with defaults
-                std::cerr << "[GPUDrivenDrawPipeline] Warning: Element buffer too small for geometry "
-                          << instance.geometry_id << " (have " << meshAsset.element_buffer.size()
-                          << ", need " << elemCount * 20 << ")" << std::endl;
                 VertexElement defaultElem{};
                 defaultElem.colorTSign = 0xFFFFFFFF;
-                defaultElem.normal = 0xFFFF8000;
-                defaultElem.tangent = 0xFFFF8000;
+                defaultElem.normal = 0x80008000; // {0, 0} → Z=1 (up)
+                defaultElem.tangent = 0x80008000;
                 defaultElem.uv = math::v2{0.0f, 0.0f};
                 for(u32 i=0; i<elemCount; ++i) mergedElements.push_back(defaultElem);
             }
@@ -1487,7 +1505,10 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     global_instance_data_buffer_ = device_->CreateBuffer(instDesc);
     UploadBuffer(global_instance_data_buffer_, instanceDataFull.data(), instanceDataFull.size() * sizeof(graphics::InstanceData));
 
-//    std::cout << "[GPUDrivenDrawPipeline] Uploaded " << instanceDataFull.size()
+    std::cout << "[GPUDraw] Global buffers built: totalMeshlets=" << totalMeshlets
+              << " totalPositions=" << totalPositions
+              << " totalElements=" << totalElements
+              << " totalInstances=" << instanceData.size() << std::endl;
 //              << " instances (full InstanceData with material_id)" << std::endl;
 
     total_meshlet_count_ = totalMeshlets;
@@ -1679,6 +1700,38 @@ void GPUDrivenDrawPipeline::UploadGeometryData(const RenderSceneSnapshot& scene_
     }
 }
 
+// Phase 9.3b: Draw streaming meshes via non-indexed DrawIndirect.
+// Each StreamingMesh's indirect_args is a MTLDrawPrimitivesIndirectCommand
+// {vertexStart, vertexCount, instanceCount, instanceStart} written by Pass 4 of
+// the SurfaceNets GPU meshing kernel. v1 binds positions to slot 0 and elements
+// (packed normal+uv) to slot 1, then issues one DrawIndirect per visible mesh.
+// No index buffer is bound — the draw is non-indexed (vertexCount in the indirect
+// args equals the index count from generation; the vertices are read sequentially).
+// v1: relies on whatever material/pipeline is currently bound (Task 12 validates).
+void GPUDrivenDrawPipeline::DrawStreamingMeshes(rhi::RHICommandBuffer* cmd_buffer) {
+    if (render_scene_ == nullptr) return;
+
+    // Iterate under RenderScene::mutex_ — a PCG node thread may concurrently
+    // RegisterStreamingMesh / UpdateStreamingMesh / UnregisterStreamingMesh and
+    // invalidate the vector reference returned by GetStreamingMeshes().
+    render_scene_->ForEachStreamingMesh([&](const StreamingMeshRecord& sm) {
+        if (!sm.visible || sm.tombstoned) return;
+        if (sm.mesh == nullptr || !sm.mesh->IsValid()) return;
+
+        // NOTE: v1 — draw_pipeline_ uses storage-buffer vertex pulling (no vertex
+        // input attributes in the pipeline desc). This BindVertexBuffers call has
+        // no effect until Task 12 introduces a dedicated vertex-input pipeline for
+        // streaming meshes. Kept here so the binding site is already correct.
+        rhi::ResourceHandle vb_handles[2] = { sm.mesh->positions, sm.mesh->elements };
+        u64 vb_offsets[2] = { 0, 0 };
+        cmd_buffer->BindVertexBuffers(0, 2, vb_handles, vb_offsets);
+
+        // Non-indexed indirect draw. The indirect_args buffer contains a
+        // MTLDrawPrimitivesIndirectCommand (4 x u32) written by the GPU meshing pass.
+        cmd_buffer->DrawIndirect(sm.mesh->indirect_args, 0, 1);
+    });
+}
+
 bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
                                    const RenderSceneSnapshot& scene_snapshot,
                                    const math::m4x4& view_matrix,
@@ -1815,6 +1868,15 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
                                                  u32 buffer_index) {
     (void)intermediate_results;
 
+    static u32 s3diag = 0;
+    if (s3diag < 5) {
+        std::cout << "[Stage3] ENTER frame=" << frame_index << " bufIdx=" << buffer_index
+                  << " draw_pipeline=" << draw_pipeline_ << " renderPass=" << final_render_pass_
+                  << " cluster_map=" << cluster_map_buffer_ << " instance_data=" << global_instance_data_buffer_
+                  << " final_color=" << final_color_texture_ << std::endl;
+        s3diag++;
+    }
+
     if (results_.bin_count == 0) {
         results_.bin_count = 1;
         results_.total_clusters_rendered = 0;
@@ -1851,10 +1913,12 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     if (resourceIndex >= frame_resources_.size()) resourceIndex = 0;
     FrameResource& currentFrame = frame_resources_[resourceIndex];
 
-    // CRITICAL FIX: Calculate read_buffer_index BEFORE using it for descriptor updates
-    // The current frame's culling pipeline writes to buffer_index, but we need to read
-    // from the PREVIOUS frame's buffer that has already been computed.
-    u32 read_buffer_index = (buffer_index + 2) % 3; // Read from frame N-2 (wrapping around)
+    // CRITICAL FIX: Use N-2 delay for reading culling results.
+    // The culling pipeline writes to buffer[N], but the GPU may still be reading
+    // from buffer[N] when frame N+3's Stage 0 resets it. Reading from buffer[(N+1)%3]
+    // (1-frame delay) ensures the GPU has finished reading before we write again.
+    // This is the standard triple-buffer synchronization pattern.
+    u32 read_buffer_index = (buffer_index + frame_resources_.size() - 1) % frame_resources_.size();
 
     rhi::DescriptorSetHandle globalDrawDS = currentFrame.global_draw_descriptor_set;
     rhi::ResourceHandle cameraConstBuffer = currentFrame.camera_constants_buffer;
@@ -1922,6 +1986,7 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     rhi::DescriptorBufferInfo compactClusterInfo{ correctVisibleClusterBuffer, 0, ~0ULL };
     rhi::DescriptorBufferInfo clusterMapInfo{ cluster_map_buffer_, 0, ~0ULL };
     rhi::DescriptorBufferInfo instanceInfo{ global_instance_data_buffer_, 0, ~0ULL };
+
 
     // 🔥 NEW: Element buffer (Normal, Tangent, UV)
     rhi::DescriptorBufferInfo elementBufferInfo{ global_element_buffer_, 0, ~0ULL };
@@ -2036,11 +2101,20 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     u32 dynOffsets[1] = { 0 };
     cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, draw_pipeline_layout_, 0, 1, dsHandles, 1, dynOffsets);
 
+    // Phase 9.3b: Draw streaming meshes (GPU SurfaceNets terrain) before the
+    // Nanite cluster draw. Uses the same render pass and currently-bound pipeline
+    // (v1 limitation — Task 12 will validate visually and wire a proper default
+    // material pipeline if needed).
+    DrawStreamingMeshes(cmd_buffer);
+
     // Indirect Draw
-    // std::cout << "[GPUDraw] DEBUG: culling_pipeline_=" << culling_pipeline_
-    //           << ", current_buffer_index=" << buffer_index
-    //           << ", read_buffer_index=" << read_buffer_index << std::endl;
-    // std::cout << "[GPUDraw] DEBUG: culling_results.indirect_args_buffer=" << culling_results.indirect_args_buffer << std::endl;
+    static u32 drawDiag = 0;
+    if (drawDiag < 5) {
+        std::cout << "[Stage3] PreDraw: culling_pipeline=" << (void*)culling_pipeline_
+                  << " read_bufIdx=" << read_buffer_index
+                  << " draw_pipeline=" << draw_pipeline_ << std::endl;
+        drawDiag++;
+    }
 
     // DrawIndirect — use the culling pipeline's indirect args from the SAME
     // frame slot as the visible cluster list (read_buffer_index). Mixing
@@ -2607,6 +2681,14 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
 
             totalMeshlets = static_cast<u32>(visibleClusters.size());
 
+            // TEMP DIAGNOSTIC
+            static u32 cullDiag = 0;
+            if (cullDiag < 6) {
+                std::cout << "[CullDiag] cascade=" << cascade_index << " instances=" << instances.size()
+                          << " visibleClusters=" << totalMeshlets << std::endl;
+                cullDiag++;
+            }
+
             // Write visible clusters to GPU buffer
             void* clusterMapped = device_->MapBuffer(frame.visible_clusters_buffer[cascade_index],
                                                       0, totalMeshlets * sizeof(u32));
@@ -2622,10 +2704,10 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
         void* args = device_->MapBuffer(frame.indirect_draw_buffer[cascade_index], 0, sizeof(u32) * 4);
         if (args) {
             u32* p = static_cast<u32*>(args);
-            p[0] = 126 * 3;           // vertex_count
-            p[1] = totalMeshlets;      // instance_count
-            p[2] = 0;                  // first_vertex
-            p[3] = 0;                  // first_instance
+            p[0] = 126 * 3;           // vertexCount
+            p[1] = totalMeshlets;      // instanceCount
+            p[2] = 0;                  // vertexStart
+            p[3] = 0;                  // baseInstance
             device_->UnmapBuffer(frame.indirect_draw_buffer[cascade_index]);
         }
     }
@@ -2639,6 +2721,15 @@ bool GPUDrivenDrawPipeline::ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffe
                                                   u32 buffer_index) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
     if (cascade_index > 1) return false;
+
+    // TEMP DIAGNOSTIC
+    static u32 rasterDiag = 0;
+    if (rasterDiag < 4) {
+        std::cout << "[RasterDiag] cascade=" << cascade_index
+                  << " pipeline=" << shadow_depth_pipeline_
+                  << " layout=" << shadow_depth_layout_ << std::endl;
+        rasterDiag++;
+    }
 
     u32 bi = buffer_index % 3;
     auto& frame = shadow_frames_[bi];

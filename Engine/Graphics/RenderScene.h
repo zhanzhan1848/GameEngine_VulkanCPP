@@ -4,8 +4,11 @@
 #include "Graphics/RHI/Core/RHIGeometry.h"
 #include <vector>
 #include <mutex>
+#include <functional>
 
 namespace primal::graphics {
+
+struct StreamingMesh;  // defined in Graphics/RenderPipeline/StreamingMesh.h
 
 enum class LightType {
     Directional,
@@ -30,6 +33,27 @@ struct RenderLight {
     
     bool castShadow{false};
     f32 shadowBias{0.005f};
+};
+
+// --- Streaming Mesh Record (Phase 9.3b) ---
+// Bridges GlobalSDFMeshNode (PCG side) and GPUDrivenDrawPipeline (draw side).
+// Tombstone lifecycle: when a node dies mid-frame we cannot remove the record
+// immediately (the GPU may still be iterating the list). We mark tombstoned=true
+// and let ClearTombstonedStreamingMeshes() erase it at frame boundary after GPU
+// work is finished. `mesh` is node-owned; RenderScene does not free it.
+struct StreamingMeshRecord {
+    id::id_type entity_id{id::invalid_id};
+    StreamingMesh* mesh{nullptr};
+    // Triple-buffer slot (0..MAX_FRAMES_IN_FLIGHT-1). Producer writes slot N
+    // in frame N; consumer reads matching slot N in the same frame. By the
+    // time CPU reuses slot N (3 frames later), GPU work from frame N is
+    // guaranteed complete — no cross-frame read-write race on the buffer set.
+    u32   slot{0};
+    math::v3 bounds_min{};
+    math::v3 bounds_max{};
+    bool visible{true};
+    bool tombstoned{false};                        // pending removal at frame end
+    u64  last_drawn_generation{0};
 };
 
 /**
@@ -81,6 +105,13 @@ public:
      */
     void UpdateLight(id::id_type entityId, const RenderLight& light);
 
+    /**
+     * @brief 清空所有光源（保留 proxies）
+     * @details 用于每帧 ECS Light 同步前清空旧状态。
+     *          与 Clear() 不同，只清 lights_，不动 proxies_ 和 reflectionPlanes_。
+     */
+    void ClearLights();
+
     // --- Reflection Plane Management ---
 
     struct RenderReflectionPlane {
@@ -127,10 +158,36 @@ public:
      */
     void Clear();
 
+    // --- Streaming Mesh Management (Phase 9.3b) ---
+    // slot: triple-buffer index (0..MAX_FRAMES_IN_FLIGHT-1). Default 0 keeps
+    // C ABI clients (single-buffered) working without changes.
+    id::id_type RegisterStreamingMesh(StreamingMesh* mesh, u32 slot,
+                                      const math::v3& bounds_min,
+                                      const math::v3& bounds_max);
+    void UpdateStreamingMesh(id::id_type entity_id, u64 generation,
+                             const math::v3& bounds_min, const math::v3& bounds_max);
+    void UnregisterStreamingMesh(id::id_type entity_id);
+    void ClearTombstonedStreamingMeshes();   // call at frame boundary after GPU work
+
+    // --- Thread-safe streaming mesh iteration ---
+    // GetStreamingMeshes() returns a const ref WITHOUT holding mutex_. Callers
+    // that iterate while PCG node threads may mutate the list must use
+    // ForEachStreamingMesh instead — it holds mutex_ for the full iteration so
+    // a concurrent push_back / erase_unordered cannot invalidate the reference.
+    void ForEachStreamingMesh(const std::function<void(const StreamingMeshRecord&)>& fn) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& sm : streaming_meshes_) {
+            fn(sm);
+        }
+    }
+    const utl::vector<StreamingMeshRecord>& GetStreamingMeshes() const { return streaming_meshes_; }
+
 private:
     utl::vector<RenderProxy> proxies_;      ///< Store all RenderProxies linearly
     utl::vector<RenderLight> lights_;       ///< Store all RenderLights linearly
     utl::vector<RenderReflectionPlane> reflectionPlanes_;
+    utl::vector<StreamingMeshRecord> streaming_meshes_;
+    id::id_type next_streaming_entity_id_{1}; ///< Monotonic entity id for streaming meshes
     mutable std::mutex mutex_;              ///< Thread safety mutex
 };
 

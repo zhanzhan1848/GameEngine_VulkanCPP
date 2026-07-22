@@ -14,7 +14,7 @@
 using namespace metal;
 
 #include "CommonTypes.metal"
-#include "CommonFunction.metal"
+#include "Common.h"
 
 constant float LUMEN_PI = 3.14159265358979323846f;
 
@@ -23,22 +23,23 @@ constant float LUMEN_PI = 3.14159265358979323846f;
 // ============================================================================
 
 struct SSGIParams {
-    uint  ray_count;         // Number of rays per pixel (default 4)
-    float radius;            // World-space sampling radius (default 2.0)
-    float thickness;         // Surface thickness for depth test (default 0.25)
-    uint  frame_index;       // Frame index for temporal rotation
-    uint  output_width;      // Half-resolution output width
-    uint  output_height;     // Half-resolution output height
-    float near_plane;        // Near clip plane distance
-    float far_plane;         // Far clip plane distance
-    uint  hzb_mip_levels;    // Number of mip levels in HZB pyramid
+    uint  ray_count;             // Number of rays per pixel (default 4)
+    float radius;                // Spatial filter kernel radius (world units, default 2.0)
+    float thickness;             // Surface thickness for depth test (default 0.25)
+    uint  frame_index;           // Frame index for temporal rotation
+    uint  output_width;          // Half-resolution output width
+    uint  output_height;         // Half-resolution output height
+    float near_plane;            // Near clip plane distance
+    float far_plane;             // Far clip plane distance
+    uint  hzb_mip_levels;        // Number of mip levels in HZB pyramid
+    float max_trace_distance;    // Ray march cap (world units, default 30.0)
 };
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-constant uint   SSGI_MAX_STEPS    = 16;
+constant uint   SSGI_MAX_STEPS    = 64;     // Was 16 — too few for far-field GI
 constant float  SSGI_MAX_DISTANCE = 20.0f;
 constant float  SSGI_MAX_RADIANCE = 2.0f;  // Clamp to suppress direct light fireflies
 
@@ -146,7 +147,10 @@ static bool traceRayHZB(float2 origin_uv,
                          thread float& hit_depth)
 {
     // Base step: world-space distance per step at mip 0
-    float baseStep = params.radius / float(SSGI_MAX_STEPS);
+    // Decoupled from `radius` (filter kernel) — uses max_trace_distance so rays
+    // can reach far-field geometry. Old code: `params.radius / SSGI_MAX_STEPS`
+    // capped travel at 2 world units, killing all far-field indirect light.
+    float baseStep = params.max_trace_distance / float(SSGI_MAX_STEPS);
 
     float t   = 0.0f;
     uint  mip = 1; // Start at mip 1 for faster initial traversal
@@ -156,8 +160,8 @@ static bool traceRayHZB(float2 origin_uv,
         float mipScale = float(1u << mip);
         t += baseStep * mipScale;
 
-        // Clamp to max radius
-        if (t > params.radius) {
+        // Clamp to max trace distance (was params.radius — too short)
+        if (t > params.max_trace_distance) {
             break;
         }
 
@@ -360,10 +364,13 @@ kernel void ssgi_trace(
                 float brightPenalty = 1.0f / (1.0f + max(hitLum - 1.0f, 0.0f) * 2.0f);
                 clamped_radiance *= brightPenalty;
 
-                // Distance attenuation: fade out hits that are too far
-                float distAttenuation = 1.0f - smoothstep(params.radius * 0.5f,
-                                                            params.radius,
-                                                            hit_depth);
+                // Distance attenuation: fade out hits near max_trace_distance.
+                // Was: `1 - smoothstep(radius*0.5, radius, hit_depth)` which killed
+                // any hit beyond `radius` (2.0). Now hits up to 70% of
+                // max_trace_distance contribute fully; fades to 0 at the cap.
+                float distAttenuation = 1.0f - smoothstep(params.max_trace_distance * 0.7f,
+                                                          params.max_trace_distance,
+                                                          hit_depth);
 
                 // Edge fade: reduce contribution near screen borders
                 float2 edgeDist = min(hit_uv, 1.0f - hit_uv);
@@ -374,8 +381,8 @@ kernel void ssgi_trace(
                 hit_count++;
             }
         } else {
-            // No hit: use max distance as fallback for average distance calculation
-            total_hit_dist += params.radius;
+            // No hit: use max trace distance as fallback for average distance calculation
+            total_hit_dist += params.max_trace_distance;
         }
     }
 

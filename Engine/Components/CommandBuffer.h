@@ -14,6 +14,7 @@ namespace primal::command_buffer {
 
     component create(const info& initial_info, game_entity::entity entity);
     void remove(component c);
+    void remove_for_entity(game_entity::entity_id eid);
     bool is_valid(component c);
     
     graphics::rhi::CommandBufferHandle get_handle(component c);

@@ -714,6 +714,24 @@ void DawnCommandBuffer::DispatchIndirect(ResourceHandle buffer, u64 offset) {
     UpdateStats(CommandType::DispatchIndirect);
 }
 
+void DawnCommandBuffer::SetComputeBytes(u32 index, const void* data, u32 size) {
+    // WebGPU has no direct setBytes equivalent — small constants must go through a
+    // uniform buffer + BindDescriptorSets. This stub exists to satisfy the RHI pure-virtual
+    // contract; Metal-only call sites (Lumen ScreenProbes, PCGScatterCompute) are not
+    // exercised on WASM. If a WASM-visible caller is added later, route through a
+    // per-frame scratch uniform buffer instead.
+    static bool warned = false;
+    if (!warned) {
+        std::cerr << "[DawnCommandBuffer] SetComputeBytes(" << index << ", " << size
+                  << "B) called — WebGPU stub, data ignored. (future callers need a uniform buffer)"
+                  << std::endl;
+        warned = true;
+    }
+    (void)index;
+    (void)data;
+    (void)size;
+}
+
 // === Barriers (NO-OP in WebGPU) ===
 
 void DawnCommandBuffer::MemoryBarrier(PipelineStage srcStageMask,

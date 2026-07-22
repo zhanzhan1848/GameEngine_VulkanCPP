@@ -3,6 +3,7 @@ using namespace metal;
 #include "../CommonTypes.metal"
 #include "../CommonFunction.metal"
 #include "SurfaceCacheData.metal"
+#include "SDFTraceCommon.metal"
 
 struct IndirectTraceParams {
     SurfaceCacheParams sc_params;
@@ -25,23 +26,45 @@ struct ProbeRayHit {
     float  _pad;
 };
 
+static uint findOwningCard(uint2 uv, constant SurfaceCacheCard* cards, uint count) {
+    // Apple Silicon: cap device reads to ~24 to stay within limits
+    uint limit = min(count, 24u);
+    for (uint i = 0; i < limit; ++i) {
+        if (uv.x >= cards[i].atlas_offset_x && uv.x < cards[i].atlas_offset_x + cards[i].resolution &&
+            uv.y >= cards[i].atlas_offset_y && uv.y < cards[i].atlas_offset_y + cards[i].resolution)
+            return i;
+    }
+    return count;
+}
+
+// Apple Silicon: else-if cascade selection = 1 texture3D read per step (not 3)
 static float sampleSDF(float3 pos,
     texture3d<float, access::sample> sdf0,
     texture3d<float, access::sample> sdf1,
     texture3d<float, access::sample> sdf2,
     constant IndirectTraceParams& params)
 {
-    float d = 1e6;
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-    for (uint c = 0; c < params.sdf_cascade_count; ++c) {
-        float3 local_p = (pos - params.sdf_origins[c].xyz) / params.sdf_extents[c].xyz;
+
+    if (params.sdf_cascade_count > 0) {
+        float3 local_p = (pos - params.sdf_origins[0].xyz) / params.sdf_extents[0].xyz;
         float3 uvw = local_p * 0.5 + 0.5;
-        if (uvw.x < 0 || uvw.x > 1 || uvw.y < 0 || uvw.y > 1 || uvw.z < 0 || uvw.z > 1) continue;
-        texture3d<float, access::sample> sdf_tex = (c == 0) ? sdf0 : ((c == 1) ? sdf1 : sdf2);
-        float sd = sdf_tex.sample(s, uvw).r * params.sdf_extents[c].x;
-        d = min(d, sd);
+        if (uvw.x >= 0 && uvw.x <= 1 && uvw.y >= 0 && uvw.y <= 1 && uvw.z >= 0 && uvw.z <= 1)
+            return sdf0.sample(s, uvw).r * params.sdf_extents[0].x;
     }
-    return d;
+    if (params.sdf_cascade_count > 1) {
+        float3 local_p = (pos - params.sdf_origins[1].xyz) / params.sdf_extents[1].xyz;
+        float3 uvw = local_p * 0.5 + 0.5;
+        if (uvw.x >= 0 && uvw.x <= 1 && uvw.y >= 0 && uvw.y <= 1 && uvw.z >= 0 && uvw.z <= 1)
+            return sdf1.sample(s, uvw).r * params.sdf_extents[1].x;
+    }
+    if (params.sdf_cascade_count > 2) {
+        float3 local_p = (pos - params.sdf_origins[2].xyz) / params.sdf_extents[2].xyz;
+        float3 uvw = local_p * 0.5 + 0.5;
+        if (uvw.x >= 0 && uvw.x <= 1 && uvw.y >= 0 && uvw.y <= 1 && uvw.z >= 0 && uvw.z <= 1)
+            return sdf2.sample(s, uvw).r * params.sdf_extents[2].x;
+    }
+    return 1e6;
 }
 
 kernel void surfaceCacheIndirectTrace(
@@ -58,6 +81,7 @@ kernel void surfaceCacheIndirectTrace(
 {
     uint probe_x = global_id.x;
     uint probe_y = global_id.y;
+    if (params.tile_size == 0) return;
     uint tiles_x = params.sc_params.atlas_size / params.tile_size;
     uint probe_idx = probe_y * tiles_x + probe_x;
 
@@ -71,12 +95,15 @@ kernel void surfaceCacheIndirectTrace(
     float2 enc_n = normal_atlas.read(tile_origin).rg;
     float3 probe_normal = octDecode(enc_n);
 
-    // Reconstruct world pos from card
-    float3 probe_pos = cardTexelToWorld(tile_origin, depth, cards[0]);
+    // Find owning card for correct world position
+    uint card_idx = findOwningCard(tile_origin, cards, params.sc_params.max_cards);
+    if (card_idx >= params.sc_params.max_cards) return;
+    float3 probe_pos = cardTexelToWorld(tile_origin, depth, cards[card_idx]);
 
     uint rays = params.rays_per_probe;
+    // Apple Silicon: 4 SDF steps × 1 texture3D read/step = 4 reads/ray (within ~4 limit)
+    constexpr uint kMaxSDFSteps = 4;
     for (uint r = 0; r < rays; ++r) {
-        // Cosine-weighted hemisphere
         float2 seed = float2(hash(float2(float(probe_idx * rays + r), float(params.frame_index))),
                              hash(float2(float(params.frame_index), float(probe_idx * rays + r))));
         float r1 = seed.x;
@@ -94,12 +121,25 @@ kernel void surfaceCacheIndirectTrace(
         bool hit = false;
         float3 hit_pos = float3(0.0);
 
-        for (uint step = 0; step < 64; ++step) {
+        // Adaptive threshold based on finest cascade voxel size
+        float hitThreshold = params.sdf_extents[0].x * 0.5f;
+        float minStep = params.sdf_extents[0].x * 0.25f;
+
+        for (uint step = 0; step < kMaxSDFSteps; ++step) {
             float3 p = probe_pos + ray_dir * t;
             float d = sampleSDF(p, sdf0, sdf1, sdf2, params);
-            if (d < 0.01) { hit = true; hit_pos = p; break; }
+
+            if (d < hitThreshold) { hit = true; hit_pos = p; break; }
             if (t > params.max_ray_distance) break;
-            t += max(d, 0.01);
+
+            // Relaxed advancement: overstep when far, conservative when close
+            float advance;
+            if (d > hitThreshold * 4.0f) {
+                advance = d * 1.2f;
+            } else {
+                advance = max(d, minStep);
+            }
+            t += advance;
         }
 
         uint hit_idx = probe_idx * rays + r;

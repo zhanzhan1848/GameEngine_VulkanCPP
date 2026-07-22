@@ -100,7 +100,7 @@ public:
     bool IsInitialized() const { return initialized_; }
 
     /// Get the output GI texture for direct sampling in other passes.
-    rhi::ResourceHandle GetOutputTexture() const { return output_texture_filtered_; }
+    rhi::ResourceHandle GetOutputTexture() const { return output_texture_; }  // DEBUG: bypass denoise
 
     const ScreenProbeParams& GetParams() const { return params_; }
 
@@ -133,9 +133,11 @@ private:
     u32               grid_width_{ 0 };
     u32               grid_height_{ 0 };
 
-    // Compute pipelines (7 sub-passes)
+    // Compute pipelines (7 sub-passes + split trace)
     rhi::PipelineHandle place_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle sdf_trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle finalize_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle avg_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle temporal_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle spatial_pipeline_{ rhi::handles::INVALID_PIPELINE };
@@ -145,6 +147,8 @@ private:
     // Pipeline layouts
     rhi::PipelineLayoutHandle place_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle sdf_trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle finalize_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle avg_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle temporal_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle spatial_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
@@ -154,6 +158,8 @@ private:
     // Descriptor set layouts
     rhi::DescriptorSetLayoutHandle place_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle sdf_trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle finalize_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle avg_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle temporal_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle spatial_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
@@ -165,6 +171,12 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
     rhi::DescriptorSetHandle trace_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle sdf_trace_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle finalize_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
     rhi::DescriptorSetHandle avg_ds_[3]{
@@ -198,6 +210,7 @@ private:
     rhi::ResourceHandle probe_radiance_buffer_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };  // gridW * gridH * raysPerProbe * float4
+    rhi::ResourceHandle hit_distance_buffer_{ rhi::handles::INVALID_RESOURCE };  // GPU-only intermediate (single buffer)
     rhi::ResourceHandle probe_avg_radiance_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };  // gridW * gridH * 4 * float4 (SH2: L0+L1 coefficients per probe)
@@ -217,6 +230,10 @@ private:
     // Output textures (full-resolution RGBA16_Float)
     rhi::ResourceHandle output_texture_{ rhi::handles::INVALID_RESOURCE };           // Gather output (raw)
     rhi::ResourceHandle output_texture_filtered_{ rhi::handles::INVALID_RESOURCE };  // Denoise output (filtered)
+
+    // Dummy resources for Metal validation (bound when surface cache is unavailable)
+    rhi::ResourceHandle dummy_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle dummy_texture_2d_{ rhi::handles::INVALID_RESOURCE };
 
     // Surface Cache integration
     rhi::ResourceHandle surface_cache_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };

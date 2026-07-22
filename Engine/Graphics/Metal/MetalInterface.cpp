@@ -7,6 +7,12 @@
 #include "MetalContent.h"
 #include "MetalLight.h"
 
+// === Phase 1 Sub-step 1.2.6': 本文件实现旧 platform_interface 的 Metal 填充器 ===
+// 函数签名 + pi.X = ... 赋值都依赖已废弃的 platform_interface。
+// RHI 路径已用 MetalDevice + RHIDeviceFactory 替代此填充逻辑，Phase 2 删除整个文件。
+#ifdef __clang__
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 
 namespace primal::graphics::metal
 {
@@ -22,6 +28,8 @@ namespace primal::graphics::metal
         pi.surface.width = core::surface_width;
         pi.surface.height = core::surface_height;
         pi.surface.render = core::render_surface;
+        // Path B: offscreen render → blit to drawable → present.
+        pi.surface.blit_and_present = core::blit_surface_and_present;
 
         // Light
         pi.light.create_light_set = light::create_light_set;

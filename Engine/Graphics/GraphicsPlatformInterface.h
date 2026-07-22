@@ -3,7 +3,22 @@
 #include "Renderer.h"
 
 namespace primal::graphics {
-	struct platform_interface
+	// === Phase 1 Sub-step 1.2.6': platform_interface 已废弃 ===
+	// 整套 platform_interface 函数指针表是旧的"后端动态分发"机制，
+	// 已被 RHI 抽象（RHIDeviceBase + MetalDevice）+ bind_rhi_device_to_legacy 替代。
+	// 新代码不应再持有/传递/读取 platform_interface；旧 Metal/Vulkan/D3D12 后端目录
+	// （Metal/MetalInterface.cpp、Vulkan/VulkanInterface.cpp、Direct3D12/D3D12Interface.cpp）
+	// 都是这张表的填充者，整体会在 Phase 2 删除。
+	// 合法的持有/使用点仅限于：
+	//   - Renderer.cpp 旧 forwarding 实现（gfx 静态变量）
+	//   - GraphicsPlatform.cpp 旧 set_platform_interface 实现
+	//   - 各后端 *Interface.cpp 的 get_platform_interface 实现
+	// 这三处都已加 file-scope deprecation suppress。
+	struct [[deprecated(
+		"platform_interface is deprecated. Use RHI device path: "
+		"initialize_with_device + bind_rhi_device_to_legacy + initialize(metal). "
+		"See Phase 1 Sub-step 1.2.6' notes."
+	)]] platform_interface
 	{
 		bool(*initialize)(void);
 		void(*shutdown)(void);
@@ -17,6 +32,13 @@ namespace primal::graphics {
 			u32(*width)(surface_id);
 			u32(*height)(surface_id);
 			void(*render)(surface_id, frame_info);
+			// Blit `src` (RHI ResourceHandle, which is a u64 alias) into the
+			// surface's current drawable and present. Used by Path B
+			// (BlitRenderTargetToSurface C ABI). Returns 1 on success, 0 on
+			// failure (invalid id / null src / etc.). Declared as u64 (not
+			// rhi::ResourceHandle) to keep this deprecated header decoupled
+			// from the RHI layer.
+			u32(*blit_and_present)(surface_id, u64);
 		} surface;
 
 		struct

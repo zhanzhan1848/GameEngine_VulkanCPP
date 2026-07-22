@@ -42,7 +42,7 @@ struct DDGIRuntimeParams {
     float irradiance_temporal_weight = 0.02f;   // EMA alpha for irradiance
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
     float ray_max_distance = 50.0f;             // Must reach geometry across probe grid
-    u32   max_probes_per_frame = 256;            // Max probes updated per frame (importance-based)
+    u32   max_probes_per_frame = 512;            // Max probes updated per frame (importance-based)
 };
 
 /// Per-frame camera data that the caller must provide.
@@ -95,10 +95,11 @@ struct DDGIVolumeData {
 
     // Partial update scheduling
     u32      ProbeUpdateCount;        // offset 84 — number of probes to update this frame
-    float    _pad_before_relocation;  // offset 88
+    u32      SCLookupCount;           // offset 88 — Surface Cache card lookup count (was _pad)
+    u32      SCAtlasSize;             // offset 92 — Surface Cache lighting atlas size
 
     // Probe grid relocation (camera-following grid shift, in probe cells)
-    int      ProbeRelocationShift[3]; // offset 92, 12 bytes — fills padding before SdfOrigins
+    int      ProbeRelocationShift[3]; // offset 96, 12 bytes — fills padding before SdfOrigins
 
     // GlobalSDF cascade data — v4 matches Metal's float4 alignment
     // C++ inserts implicit padding 104→112 for v4 16-byte alignment
@@ -152,7 +153,8 @@ public:
         rendergraph::RenderGraph& graph,
         rendergraph::RGResourceHandle prev_frame_color,
         const DDGICameraData& camera_data,
-        u32 current_frame_index);
+        u32 current_frame_index,
+        rendergraph::RGResourceHandle sc_lighting_atlas = {});
 
     bool IsInitialized() const { return initialized_; }
 
@@ -167,8 +169,8 @@ public:
     const DDGIVolumeData& GetVolumeData() const { return volume_data_; }
 
     // Accessors for Surface Cache → DDGI integration
-    rhi::ResourceHandle GetProbeUpdateListBuffer(u32 frame_idx) const {
-        return probe_update_list_buffer_[frame_idx % 3];
+    rhi::ResourceHandle GetProbeUpdateListBuffer(u32 frame_idx = 0) const {
+        return probe_update_list_buffers_[frame_idx % 3];
     }
 
     // Update probe origin to follow camera (grid-snapped).
@@ -191,6 +193,25 @@ public:
     // consumed in AddPass when uploading DDGIVolumeData to the GPU.
     void SetDawnDebugParams(const DawnDebugParams& params) { dawnDebugParams_ = params; }
 
+    // Accessor for confidence buffer (for Task 5 later)
+    rhi::ResourceHandle GetConfidenceBuffer(u32 frame_idx = 0) const {
+        return confidence_buffers_[frame_idx % 3];
+    }
+
+    // Set Surface Cache resources for view-independent radiance in TraceRays.
+    // Must be called before AddPass when Surface Cache is active.
+    void SetSurfaceCacheResources(
+        rhi::ResourceHandle lighting_atlas,
+        rhi::ResourceHandle card_lookup_buffer,
+        rhi::ResourceHandle card_data_buffer,
+        u32 atlas_size,
+        u32 lookup_count);
+
+    // Clear Surface Cache resources — call when leaving SC mode to prevent
+    // DDGI finalize from reading stale SC card data and racing with the
+    // irradiance update pass on irradiance_buffers_.
+    void ClearSurfaceCacheResources();
+
 private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
@@ -211,15 +232,23 @@ private:
     rhi::PipelineHandle irradiance_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle depth_pipeline_{ rhi::handles::INVALID_PIPELINE };
 
+    // Split trace pipelines (Apple Silicon: separate texture3D from buffer reads)
+    rhi::PipelineHandle sdf_trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle finalize_pipeline_{ rhi::handles::INVALID_PIPELINE };
+
     // Pipeline layouts
     rhi::PipelineLayoutHandle trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle irradiance_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle depth_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle sdf_trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle finalize_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
 
     // Descriptor set layouts
     rhi::DescriptorSetLayoutHandle trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle irradiance_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle depth_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle sdf_trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle finalize_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
 
     // Descriptor sets (triple-buffered)
     rhi::DescriptorSetHandle trace_ds_[3]{
@@ -229,6 +258,12 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
     rhi::DescriptorSetHandle depth_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle sdf_trace_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle finalize_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
 
@@ -252,16 +287,20 @@ private:
     // Ray data storage buffer (single, reused each frame)
     rhi::ResourceHandle ray_data_buffer_{ rhi::handles::INVALID_RESOURCE };
 
+    // Hit distance buffer (intermediate between split trace dispatches)
+    rhi::ResourceHandle hit_distance_buffer_{ rhi::handles::INVALID_RESOURCE };
+
     // Probe state tracking (importance-based partial update)
     std::vector<DDGIProbeState> probe_states_;
     // Triple-buffered: CPU writes frameIdx's copy while GPU reads previous frames' copies.
     // Single-buffer caused an intermittent CPU-GPU race — CPU overwrote the update list
     // while GPU threads were still reading it from the prior frame's dispatch, corrupting
     // probe index lookups and producing screen-filling solid color in Mode 10.
-    rhi::ResourceHandle probe_update_list_buffer_[3]{
+    rhi::ResourceHandle probe_update_list_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
     u32 max_probes_per_frame_ = 256;
+    u32 probe_update_offset_ = 0;  // round-robin offset for partial updates
 
     // Static probe volume reference (for initialization from bake data)
     StaticProbeVolume* static_volume_{nullptr};
@@ -273,6 +312,20 @@ private:
     // here: SkyColor intensity, Albedo intensity, ProbeHysteresis. Applied
     // in AddPass when uploading DDGIVolumeData.
     DawnDebugParams dawnDebugParams_{};
+
+    // Confidence buffers (triple-buffered to avoid read-write race with GI Gather)
+    rhi::ResourceHandle confidence_buffers_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+
+    // Surface Cache resources (set externally before AddPass)
+    rhi::ResourceHandle sc_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle sc_card_lookup_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle sc_card_data_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle sc_params_buffer_{ rhi::handles::INVALID_RESOURCE };
+    u32                 sc_atlas_size_ = 0;
+    u32                 sc_lookup_count_ = 0;
+    bool                sc_enabled_ = false;
 };
 
 } // namespace primal::graphics::lumen

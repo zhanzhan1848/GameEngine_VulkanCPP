@@ -131,7 +131,7 @@ vertex VertexOut vertexMain(uint vertexID [[vertex_id]]) {
 }
 
 // ================================================================================================
-// Shadow Helper
+// Shadow Helper — reads pre-filtered visibility texture from ShadowFilter pass
 // ================================================================================================
 
 // Diagnostic: read raw shadow map depth (no PCF, no comparison)
@@ -149,38 +149,10 @@ float ReadRawShadowDepth(float3 worldPos, float4x4 shadowMatrix, texture2d<float
     return shadowMap.sample(shadowSampler, shadowCoord.xy).r;
 }
 
-float GetShadow(float3 worldPos, float3 normal, float3 lightDir, float4x4 shadowMatrix, texture2d<float> shadowMap, sampler passedSampler) {
-    constexpr sampler shadowSampler(coord::normalized, filter::nearest, mip_filter::none, address::clamp_to_edge);
-
-    float4 clipPos = shadowMatrix * float4(worldPos, 1.0);
-    float3 shadowCoord = clipPos.xyz / clipPos.w;
-
-    // NDC to UV (Metal Y is inverted: clipY=+1 → texture row 0 → UV.y=0)
-    shadowCoord.x = shadowCoord.x * 0.5 + 0.5;
-    shadowCoord.y = shadowCoord.y * -0.5 + 0.5;
-
-    // Check bounds
-    if (shadowCoord.x < 0.0 || shadowCoord.x > 1.0 ||
-        shadowCoord.y < 0.0 || shadowCoord.y > 1.0 ||
-        shadowCoord.z < 0.0 || shadowCoord.z > 1.0) {
-        return -1.0; // Return -1 to indicate “Out of Bounds”
-    }
-
-    // PCF 3x3
-    float shadow = 0.0;
-    float currentDepth = shadowCoord.z;
-    float NdotL = max(dot(normalize(normal), normalize(lightDir)), 0.0);
-    float bias = 0.002 + (1.0 - NdotL) * 0.02;
-    float2 texelSize = float2(1.0 / 2048.0, 1.0 / 2048.0);
-
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
-            float pcfDepth = shadowMap.sample(shadowSampler, shadowCoord.xy + float2(x, y) * texelSize).r;
-            shadow += (currentDepth - bias > pcfDepth) ? 0.0 : 1.0;
-        }
-    }
-
-    return shadow / 9.0;
+// Sample pre-filtered shadow visibility (half-res, bilinear upsample)
+float GetShadowVisibility(float2 uv, texture2d<float> shadowVisibility, sampler sm) {
+    float v = shadowVisibility.sample(sm, uv).r;
+    return saturate(v);
 }
 
 // ================================================================================================
@@ -196,8 +168,7 @@ fragment float4 fragmentLighting_v3(
     texture2d<float> normalTex [[texture(3)]],
     texture2d<float> ormTex [[texture(4)]],
     depth2d<float> depthTex [[texture(5)]],
-    texture2d<float> shadowMap0 [[texture(6)]],
-    texture2d<float> shadowMap1 [[texture(7)]],
+    texture2d<float> shadowVisibility [[texture(6)]],
     texturecube<float> irradianceMap [[texture(8)]],
     texturecube<float> prefilterMap [[texture(9)]],
     texture2d<float> brdfLUT [[texture(10)]],
@@ -255,18 +226,11 @@ fragment float4 fragmentLighting_v3(
     float3 V = normalize(sceneData.viewPos.xyz - worldPos);
     float3 R = reflect(-V, N);
 
-    // 3. Calculate Shadow (Cascade 0 first, then Cascade 1 if out of bounds)
-    float3 L_shadow = normalize(sceneData.lightPos.xyz);
-    float shadow = GetShadow(worldPos, N, L_shadow, sceneData.shadowMatrix0, shadowMap0, defaultSampler);
-    if (shadow < 0.0) {
-        shadow = GetShadow(worldPos, N, L_shadow, sceneData.shadowMatrix1, shadowMap1, defaultSampler);
-        if (shadow < 0.0) {
-            shadow = 1.0; // Outside all cascades, default to fully lit
-        }
-    }
+    // 3. Shadow — read pre-filtered visibility texture (half-res, bilinear upsample)
+    float shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
 
     // F0 for Fresnel
-    float3 F0 = float3(0.04); 
+    float3 F0 = float3(0.04);
     F0 = mix(F0, albedo.rgb, metallic);
 
     float3 Lo = float3(0.0);
@@ -461,8 +425,7 @@ fragment float4 fragmentLighting_gpuDriven(
     texture2d<float> normalTex [[texture(3)]],
     texture2d<float> ormTex [[texture(4)]],
     depth2d<float> depthTex [[texture(5)]],
-    texture2d<float> shadowMap0 [[texture(6)]],
-    texture2d<float> shadowMap1 [[texture(7)]],
+    texture2d<float> shadowVisibility [[texture(6)]],
 
     sampler defaultSampler [[sampler(8)]]
 ) {
@@ -495,21 +458,12 @@ fragment float4 fragmentLighting_gpuDriven(
     float4 worldPos4 = viewData.invViewProjection * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
 
-    // 3. Calculate Shadow (Cascade 0 first, then Cascade 1 if out of bounds)
-    float3 N = normalize(normal);
-    float3 L = normalize(sceneData.lightPos.xyz);
-
-    // Cascade selection: try cascade 0 first, fall back to cascade 1
-    float shadow = GetShadow(worldPos, N, L, sceneData.shadowMatrix0, shadowMap0, defaultSampler);
-    if (shadow < 0.0) {
-        // Outside cascade 0 — try cascade 1
-        shadow = GetShadow(worldPos, N, L, sceneData.shadowMatrix1, shadowMap1, defaultSampler);
-        if (shadow < 0.0) {
-            shadow = 1.0; // Outside both cascades, fully lit
-        }
-    }
+    // 3. Shadow — read pre-filtered visibility texture (half-res, bilinear upsample)
+    float shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
 
     // 4. Direct Lighting (Cook-Torrance PBR + shadow)
+    float3 N = normalize(normal);
+    float3 L = normalize(sceneData.lightPos.xyz);
     float3 V = normalize(sceneData.viewPos.xyz - worldPos);
 
     // F0 for Fresnel
@@ -579,82 +533,142 @@ fragment float4 fragmentBlitComposite(
 
     return float4(result, 1.0);
 }
+// ================================================================================================
+// Compute-based fusion: split into two passes to stay within Apple Silicon texture read limits.
+// Each pass reads max 4 textures + 1 write (stable on Apple Silicon).
+// ================================================================================================
 
 // ================================================================================================
-// Full GI Fusion Blit: DDGI (low-freq) + SPGI (mid-freq) + SSGI (high-freq) + Direct
+// Fragment-based Fusion: Apple Silicon TBDR optimized
+// Reads multiple textures in fragment shader where tile cache handles bandwidth efficiently.
 // ================================================================================================
 
-fragment float4 fragmentBlitFusion(
+// Fusion Pass 1 (half-res): pre-combine GI sources + albedo + ssao → indirect contribution
+fragment float4 fragmentFusionIndirect(
     VertexOut in [[stage_in]],
-    texture2d<float> sceneColor  [[texture(0)]],   // direct lighting (deferred output), A = shadow
-    texture2d<float> ssgiColor   [[texture(1)]],   // SSGI irradiance
-    texture2d<float> ddgiColor   [[texture(2)]],   // DDGI irradiance (half-res)
-    texture2d<float> spgiColor   [[texture(3)]],   // Screen Probe GI irradiance
-    texture2d<float> albedoTex   [[texture(4)]],   // GBuffer albedo
-    texture2d<float> depthTex    [[texture(5)]],   // GBuffer depth
-    texture2d<float> ssaoTex     [[texture(6)]])   // SSAO
+    texture2d<float> ssgiColor   [[texture(0)]],
+    texture2d<float> ddgiColor   [[texture(1)]],
+    texture2d<float> spgiColor   [[texture(2)]],
+    texture2d<float> albedoTex   [[texture(3)]],
+    texture2d<float> ssaoTex     [[texture(4)]])
 {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
-    constexpr sampler ds(coord::normalized, filter::nearest, mip_filter::none, address::clamp_to_edge);
-
-    float2 uv = in.uv;
-    float depth = depthTex.sample(ds, uv).r;
-
-    // Background: pass through scene color (skybox)
-    if (depth >= 1.0f) {
-        float3 sky = sceneColor.sample(s, uv).rgb;
-        sky = sky / (sky + float3(1.0f));
-        sky = pow(sky, float3(1.0f / 2.2f));
-        return float4(sky, 1.0f);
-    }
-
-    // Direct lighting + shadow factor (from deferred output alpha)
-    float4 sceneSample = sceneColor.sample(s, uv);
-    float3 direct = sceneSample.rgb;
-    float directShadow = sceneSample.a;
-
-    float3 albedo  = albedoTex.sample(s, uv).rgb;
-
-    // SSAO: contact occlusion modulates all indirect
-    float ssao = ssaoTex.sample(s, uv).r;
+    float4 ssgi4   = ssgiColor.sample(s, in.uv);
+    float3 ddgi    = ddgiColor.sample(s, in.uv).rgb;
+    float3 spgi    = spgiColor.sample(s, in.uv).rgb;
+    float3 albedo  = albedoTex.sample(s, in.uv).rgb;
+    float  ssao    = ssaoTex.sample(s, in.uv).r;
     if (ssao <= 0.0f) ssao = 1.0f;
-    float ao = ssao;
+    float ao = pow(ssao, 1.5f);
 
-    // Shadow on indirect: REMOVED — DDGI probes already contain visibility info.
-    // Applying direct shadow to indirect light causes double-darkening artifacts.
+    // SSGI alpha encodes average hit distance in world units (range 0..max_trace_distance,
+    // default 30). Older formula `1 - hit/2.0` saturated to 0 for any non-trivial hit,
+    // zeroing SSGI contribution. Match fragmentBlitComposite (mode 0): use raw irradiance.
+    float3 ssgi_irr = ssgi4.rgb;
 
-    // DDGI irradiance (low-frequency global indirect)
-    float3 ddgi_irr = ddgiColor.sample(s, uv).rgb;
-    // NaN guard
-    uint3 bits = as_type<uint3>(ddgi_irr);
-    if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u)
-        ddgi_irr = float3(0.0f);
+    albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
-    // Screen Probe GI irradiance (medium-frequency screen-space indirect)
-    float4 spgi_sample = spgiColor.sample(s, uv);
-    float3 spgi_irr = spgi_sample.rgb;
-    float  spgi_conf = spgi_sample.a;
+    float3 indirect = albedo * (ddgi * 0.08f + spgi * 0.5f + ssgi_irr * 0.3f);
+    indirect *= ao;
 
-    // SSGI irradiance (high-frequency contact indirect)
-    float4 ssgi_sample = ssgiColor.sample(s, uv);
-    float3 ssgi_irr = ssgi_sample.rgb;
-    float  ssgi_hit_dist = ssgi_sample.a;
+    return float4(indirect, 1.0f);
+}
 
-    // ================================================================
-    // GI Fusion: frequency-separated + confidence-driven
-    // ================================================================
-    float3 base_irr = ddgi_irr
-                    + spgi_irr * spgi_conf;
+// Fusion Pass 2 (full-res): scene + pre-combined indirect + volume scatter → tonemapped output
+// Tonemap happens here (single tonemap). FinalBlit's mode 6 path uses fragmentBlitNoTonemap
+// to sample this LDR result directly, avoiding double-tonemap.
+fragment float4 fragmentFusion(
+    VertexOut in [[stage_in]],
+    texture2d<float> sceneColor    [[texture(0)]],
+    texture2d<float> indirectColor [[texture(1)]],
+    texture2d<float> volumeScatter [[texture(2)]])
+{
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    float3 scene   = sceneColor.sample(s, in.uv).rgb;
+    float3 indirect = indirectColor.sample(s, in.uv).rgb;
+    float4 vol     = volumeScatter.sample(s, in.uv);
 
-    float ssgi_hit_conf = saturate(1.0f - ssgi_hit_dist / 2.0f);
-    float ssgi_conf = ssgi_hit_conf * (1.0f - spgi_conf);
-
-    float3 indirect = albedo * (base_irr + ssgi_irr * ssgi_conf * 0.3f) * ao;
-
-    float3 result = direct + indirect;
-
-    // Tone map + gamma
+    float3 result = (scene + indirect) * vol.a + vol.rgb;
+    result = clamp(result, float3(0.0f), float3(64.0f));
     result = toneMap(result);
 
     return float4(result, 1.0f);
+}
+
+// Blit variant that samples LDR input directly (no tonemap, no gamma).
+// Used by FinalBlit for mode 6 mode_diag_=1, where input is fusion_output_ already tonemapped.
+fragment float4 fragmentBlitNoTonemap(
+    VertexOut in [[stage_in]],
+    texture2d<float> inputTex [[texture(0)]])
+{
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    float3 color = inputTex.sample(s, in.uv).rgb;
+    return float4(color, 1.0);
+}
+
+// Pass 1: compute indirect lighting from GI sources (DDGI + SPGI + SSGI)
+// Uses access::read + read() matching SSGI's stable pattern (not access::sample)
+kernel void computeFusionIndirect(
+    texture2d<float, access::read> ssgiColor   [[texture(0)]],
+    texture2d<float, access::read> ddgiColor   [[texture(1)]],
+    texture2d<float, access::read> spgiColor   [[texture(2)]],
+    texture2d<float, access::read> albedoTex   [[texture(3)]],
+    texture2d<float, access::write> indirectOut [[texture(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint w = indirectOut.get_width();
+    uint h = indirectOut.get_height();
+    if (gid.x >= w || gid.y >= h) return;
+
+    float4 ssgi4  = ssgiColor.read(gid);
+    float3 albedo = albedoTex.read(gid).rgb;
+    float3 spgi   = spgiColor.read(gid).rgb;
+
+    // DDGI is half-resolution: read at half pixel coords
+    uint2 ddgiCoord = gid / 2u;
+    uint ddgiW = ddgiColor.get_width();
+    uint ddgiH = ddgiColor.get_height();
+    float3 ddgi = (ddgiCoord.x < ddgiW && ddgiCoord.y < ddgiH)
+        ? ddgiColor.read(ddgiCoord).rgb : float3(0.0f);
+
+    float3 ssgi_irr = ssgi4.rgb;
+    float  ssgi_hit = ssgi4.a;
+
+    albedo = clamp(albedo, float3(0.0f), float3(1.0f));
+
+    float ssgi_conf = saturate(1.0f - ssgi_hit / 2.0f);
+    float3 indirect_ddgi = albedo * ddgi * 0.08f;
+    float3 indirect_spgi = albedo * spgi * 0.5f;
+    float3 indirect_ssgi = albedo * ssgi_irr * ssgi_conf * 0.3f;
+    float3 indirect = indirect_ddgi + indirect_spgi + indirect_ssgi;
+
+    indirectOut.write(float4(indirect, 1.0f), gid);
+}
+
+// Pass 2: composite direct + indirect + volume scatter, tone map to output
+kernel void computeFusionComposite(
+    texture2d<float, access::read> sceneColor  [[texture(0)]],
+    texture2d<float, access::read> indirectTex [[texture(1)]],
+    texture2d<float, access::read> ssaoTex     [[texture(2)]],
+    texture2d<float, access::write>  outputTex   [[texture(3)]],
+    texture2d<float, access::sample> volumeScatter [[texture(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint w = outputTex.get_width();
+    uint h = outputTex.get_height();
+    if (gid.x >= w || gid.y >= h) return;
+
+    float3 scene   = sceneColor.read(gid).rgb;
+    float3 indirect = indirectTex.read(gid).rgb;
+
+    // Volume scatter (half-res, bilinear sample at full-res UV)
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5f) / float2(w, h);
+    float4 vol = volumeScatter.sample(s, uv);
+
+    float3 result = (scene + indirect) * vol.a + vol.rgb;
+    result = clamp(result, float3(0.0f), float3(64.0f));
+    result = toneMap(result);
+
+    outputTex.write(float4(result, 1.0f), gid);
 }

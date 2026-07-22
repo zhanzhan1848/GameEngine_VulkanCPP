@@ -107,6 +107,7 @@ static inline float Dot3(v3 a, v3 b)
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // BakeProbeRadiance — single-bounce indirect radiance SH per probe
 // ---------------------------------------------------------------------------
 // For each ray from the probe:
@@ -254,6 +255,146 @@ static inline float Dot3(v3 a, v3 b)
 }
 
 // ---------------------------------------------------------------------------
+// PropagateBounce — iterative SH bounce lighting
+// ---------------------------------------------------------------------------
+/*static*/ void StaticProbeBaker::PropagateBounce(
+    StaticProbeVolume& volume,
+    const ProbeBakingParams& params)
+{
+    const u32 probe_count = volume.ProbeCount();
+    const u32 dim_x = volume.GridDimX();
+    const u32 dim_y = volume.GridDimY();
+    const u32 dim_z = volume.GridDimZ();
+    const float spacing = volume.Spacing();
+    const v3 origin = volume.Origin();
+
+    // Temporary buffer for bounce accumulation
+    std::vector<SH9Color> bounce_accum(probe_count);
+
+    for (u32 bounce = 0; bounce < params.bounce_count; ++bounce) {
+        // Clear bounce accumulator
+        for (u32 i = 0; i < probe_count; ++i) {
+            bounce_accum[i].Reset();
+        }
+
+        // For each probe, gather from 26 neighbors
+        for (u32 pz = 0; pz < dim_z; ++pz) {
+            for (u32 py = 0; py < dim_y; ++py) {
+                for (u32 px = 0; px < dim_x; ++px) {
+                    const u32 probe_idx = pz * (dim_x * dim_y) + py * dim_x + px;
+                    const v3 probe_pos = ProbeWorldPos(probe_idx, dim_x, dim_y, dim_z, origin, spacing);
+
+                    SH9Color bounce_sh;
+                    bounce_sh.Reset();
+                    float total_weight = 0.0f;
+
+                    // Iterate 26 neighbors (skip self)
+                    for (s32 nz = -1; nz <= 1; ++nz) {
+                        for (s32 ny = -1; ny <= 1; ++ny) {
+                            for (s32 nx = -1; nx <= 1; ++nx) {
+                                if (nx == 0 && ny == 0 && nz == 0) continue;
+
+                                const s32 gx = (s32)px + nx;
+                                const s32 gy = (s32)py + ny;
+                                const s32 gz = (s32)pz + nz;
+
+                                // Skip out-of-bounds neighbors
+                                if (gx < 0 || gx >= (s32)dim_x ||
+                                    gy < 0 || gy >= (s32)dim_y ||
+                                    gz < 0 || gz >= (s32)dim_z)
+                                    continue;
+
+                                const u32 neighbor_idx = (u32)gz * (dim_x * dim_y) +
+                                                         (u32)gy * dim_x +
+                                                         (u32)gx;
+
+                                // Distance-based weight (1/d^2)
+                                const v3 neighbor_pos = ProbeWorldPos(neighbor_idx, dim_x, dim_y, dim_z, origin, spacing);
+                                const float dx = neighbor_pos.x - probe_pos.x;
+                                const float dy = neighbor_pos.y - probe_pos.y;
+                                const float dz = neighbor_pos.z - probe_pos.z;
+                                const float dist_sq = dx * dx + dy * dy + dz * dz;
+                                const float w = (dist_sq > 1e-8f) ? (1.0f / dist_sq) : 1.0f;
+
+                                // Read neighbor's irradiance SH (already cosine-convolved)
+                                const math::v3* neighbor_irradiance = volume.GetIrradianceData() + neighbor_idx * 9;
+                                SH9Color neighbor_sh;
+                                for (int i = 0; i < 9; ++i) {
+                                    neighbor_sh.coeffs[i] = neighbor_irradiance[i];
+                                }
+
+                                // Do NOT convolve with cosine lobe again — neighbor data
+                                // is already irradiance (cosine-convolved radiance).
+                                // Applying ConvolveCosineLobe again multiplies L0 by PI per bounce,
+                                // causing exponential energy amplification (PI^3 ≈ 31x for 3 bounces).
+
+                                // Accumulate weighted bounce (1/PI for Lambertian BRDF albedo term)
+                                constexpr float bounce_scale = 1.0f / PI;
+                                for (int i = 0; i < 9; ++i) {
+                                    bounce_sh.coeffs[i].x += neighbor_sh.coeffs[i].x * w * bounce_scale;
+                                    bounce_sh.coeffs[i].y += neighbor_sh.coeffs[i].y * w * bounce_scale;
+                                    bounce_sh.coeffs[i].z += neighbor_sh.coeffs[i].z * w * bounce_scale;
+                                }
+                                total_weight += w;
+                            }
+                        }
+                    }
+
+                    // Normalize by total weight
+                    if (total_weight > 1e-8f) {
+                        const float inv_w = 1.0f / total_weight;
+                        bounce_sh *= inv_w;
+                    }
+
+                    bounce_accum[probe_idx] = bounce_sh;
+                }
+            }
+        }
+
+        // Additive update to irradiance data
+        math::v3* irradiance = volume.GetIrradianceData();
+        for (u32 i = 0; i < probe_count; ++i) {
+            for (int c = 0; c < 9; ++c) {
+                irradiance[i * 9 + c].x += bounce_accum[i].coeffs[c].x;
+                irradiance[i * 9 + c].y += bounce_accum[i].coeffs[c].y;
+                irradiance[i * 9 + c].z += bounce_accum[i].coeffs[c].z;
+            }
+        }
+
+        // Check convergence after each bounce
+        if (CheckConvergence(volume, params.convergence_threshold)) {
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CheckConvergence — simplified: check L0 magnitude change
+// ---------------------------------------------------------------------------
+/*static*/ bool StaticProbeBaker::CheckConvergence(
+    StaticProbeVolume& volume,
+    float threshold)
+{
+    // Simplified convergence check: measure average L0 coefficient magnitude
+    // across all probes. This is a placeholder — in practice you'd diff
+    // against the previous iteration's data.
+    const u32 probe_count = volume.ProbeCount();
+    if (probe_count == 0) return true;
+
+    const math::v3* irradiance = volume.GetIrradianceData();
+    float total_l0 = 0.0f;
+    for (u32 i = 0; i < probe_count; ++i) {
+        const v3 l0 = irradiance[i * 9]; // L0 coefficient
+        total_l0 += std::abs(l0.x) + std::abs(l0.y) + std::abs(l0.z);
+    }
+
+    // Suppress unused warning
+    (void)total_l0;
+    (void)threshold;
+    return false; // Always continue bouncing (up to bounce_count)
+}
+
+// ---------------------------------------------------------------------------
 // BakeVisibility — octahedral depth + sky factor per probe
 // ---------------------------------------------------------------------------
 /*static*/ void StaticProbeBaker::BakeVisibility(
@@ -305,6 +446,62 @@ static inline float Dot3(v3 a, v3 b)
     }
 
     volume.GetSkyFactorData()[probe_index] = (float)sky_hits / (float)sky_rays;
+}
+
+// ---------------------------------------------------------------------------
+// BakeSkySH — per-probe sky SH contribution
+// ---------------------------------------------------------------------------
+/*static*/ void StaticProbeBaker::BakeSkySH(
+    StaticProbeVolume& volume,
+    const ProbeBakingScene& scene,
+    const ProbeBakingParams& params,
+    u32 probe_index)
+{
+    // Sky factor for this probe (already computed by BakeVisibility)
+    const float sky_factor = volume.GetSkyFactorData()[probe_index];
+
+    // Project sky color weighted by sky visibility into SH
+    // This represents the ambient sky contribution for this specific probe
+    SH9Color sky_sh;
+    sky_sh.Reset();
+
+    const u32 ray_count = params.rays_per_probe;
+    SH9 basis;
+
+    for (u32 r = 0; r < ray_count; ++r) {
+        const v3 dir = FibonacciDirection(r, ray_count);
+
+        // Sky SH accumulates sky_color with a weight proportional to the probe's sky factor
+        const float weight = sky_factor;
+
+        // Simple hemispherical sky gradient: lighter at zenith, darker at horizon
+        float sky_gradient = 0.5f + 0.5f * dir.y; // y is up
+        v3 sky_rad{
+            scene.sky_color.x * sky_gradient * weight,
+            scene.sky_color.y * sky_gradient * weight,
+            scene.sky_color.z * sky_gradient * weight
+        };
+
+        EvalSHBasis(dir, basis);
+        for (int i = 0; i < 9; ++i) {
+            sky_sh.coeffs[i].x += sky_rad.x * basis.coeffs[i];
+            sky_sh.coeffs[i].y += sky_rad.y * basis.coeffs[i];
+            sky_sh.coeffs[i].z += sky_rad.z * basis.coeffs[i];
+        }
+    }
+
+    const float sh_weight = 4.0f * PI / (float)ray_count;
+    for (int i = 0; i < 9; ++i) {
+        sky_sh.coeffs[i].x *= sh_weight;
+        sky_sh.coeffs[i].y *= sh_weight;
+        sky_sh.coeffs[i].z *= sh_weight;
+    }
+
+    // Write to sky SH data
+    math::v3* sky_data = volume.GetSkySHData() + probe_index * 9;
+    for (int i = 0; i < 9; ++i) {
+        sky_data[i] = sky_sh.coeffs[i];
+    }
 }
 
 // ---------------------------------------------------------------------------

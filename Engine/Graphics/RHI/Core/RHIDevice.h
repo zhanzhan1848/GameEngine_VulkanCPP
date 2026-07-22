@@ -208,6 +208,16 @@ public:
     virtual void SetBufferDirtySize(ResourceHandle handle, u64 size) = 0;
     virtual double GetTimestampPeriod() const = 0;
 
+    /// Upload data into an existing buffer using the device's own handle→buffer map.
+    /// Required because ResourceManager is a global singleton that doesn't share state
+    /// across dylib boundaries (ODR violation when executable links Engine statically
+    /// AND dynamically via EngineDLL). Use this instead of
+    /// `ResourceManager::Instance().GetResource(h)->UpdateData(...)`.
+    virtual bool UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset = 0) {
+        (void)handle; (void)data; (void)size; (void)offset;
+        return false;
+    }
+
     /**
      * @brief 获取设备平台类型
      * @return 设备运行的平台
@@ -219,6 +229,12 @@ public:
      * @return 垃圾回收器引用
      */
     virtual RHIGarbageCollector& GetGarbageCollector() = 0;
+
+    /// Hot-reload a shader's bytecode. Returns true on success.
+    virtual bool ReloadShader(ShaderHandle shader, const void* data, size_t size) {
+        (void)shader; (void)data; (void)size;
+        return false;
+    }
 };
 
 /**

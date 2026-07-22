@@ -54,6 +54,13 @@ bool MetalDevice::initializeImpl() {
 
     initializeMemoryPool();
 
+    // Initialize per-frame staging allocator (eliminates waitUntilCompleted from
+    // Private-storage upload slow paths)
+    stagingAllocator_.Initialize(mtlDevice_, transferQueue_);
+
+    // Detect MTL4 / neural-rendering availability (placeholder — no resources allocated)
+    neuralWrapper_.Initialize(mtlDevice_);
+
     // 预分配资源以避免多线程扩容导致指针失效
     // 尤其是 CommandBuffer，在多线程渲染中非常关键
     // 同时分配其他资源以防止 Resize 导致的指针失效 (因为 ResourceManager 缓存了指针)
@@ -76,45 +83,30 @@ bool MetalDevice::initializeImpl() {
 }
 
 void MetalDevice::shutdownImpl() {
-    // std::cout << "[MetalDevice] Shutdown started." << std::endl;
-    // 1. 清理所有延迟销毁的资源 (必须在 Allocator Shutdown 之前，否则会导致 Double Free)
-    // std::cout << "[MetalDevice] Shutting down GC..." << std::endl;
     gc_.Shutdown();
 
-    // 2. 释放所有分配的资源
-    // std::cout << "[MetalDevice] Shutting down allocators..." << std::endl;
-    // std::cout << "  CommandBuffer..." << std::endl; 
     commandBufferAllocator_.Shutdown();
-    // std::cout << "  Buffer..." << std::endl; 
     bufferAllocator_.Shutdown();
-    // std::cout << "  Texture..." << std::endl; 
     textureAllocator_.Shutdown();
-    // std::cout << "  Sync..." << std::endl; 
     syncAllocator_.Shutdown();
-    // std::cout << "  QueryPool..." << std::endl; 
     queryPoolAllocator_.Shutdown();
-    // std::cout << "  Shader..." << std::endl; 
     shaderAllocator_.Shutdown();
-    // std::cout << "  Pipeline..." << std::endl; 
     pipelineAllocator_.Shutdown();
-    // std::cout << "  PipelineLayout..." << std::endl; 
     pipelineLayoutAllocator_.Shutdown();
-    // std::cout << "  Sampler..." << std::endl; 
     samplerAllocator_.Shutdown();
-    // std::cout << "  DescriptorSetLayout..." << std::endl; 
     descriptorSetLayoutAllocator_.Shutdown();
-    // std::cout << "  DescriptorSet..." << std::endl; 
     descriptorSetAllocator_.Shutdown();
 
-    // 3. 再次清理 GC，处理 Allocator Shutdown 产生的新垃圾 (关键修复：防止 MemoryPool 销毁后 GC 回调访问悬空指针)
-    // std::cout << "[MetalDevice] Shutting down GC (Pass 2)..." << std::endl;
+    // 再次清理 GC，处理 Allocator Shutdown 产生的新垃圾
     gc_.Shutdown();
 
-    // 4. 销毁内存池
-    // std::cout << "[MetalDevice] Shutting down memory pool..." << std::endl;
     shutdownMemoryPool();
-    // std::cout << "[MetalDevice] Shutdown finished." << std::endl;
 
+    // Shutdown staging allocator before queues are released (it references transferQueue_)
+    stagingAllocator_.Shutdown();
+
+    // Neural wrapper is detect-only — shutdown is a no-op, but call for symmetry
+    neuralWrapper_.Shutdown();
 
     if (transferQueue_) {
         transferQueue_->release();
@@ -236,7 +228,10 @@ void MetalDevice::waitIdleImpl() const {
 }
 
 void MetalDevice::beginFrameImpl() {
-    // 帧开始逻辑
+    // Rotate staging pool to the next frame slot. RenderSystem has already
+    // waited on the per-frame fence for frame N-FRAME_COUNT, so the pool we're
+    // about to reclaim is GPU-safe to overwrite.
+    stagingAllocator_.BeginFrame();
 }
 
 void MetalDevice::endFrameImpl() {
@@ -279,6 +274,12 @@ u32 MetalDevice::getCurrentFrameIndexImpl() const {
 
 MetalBuffer* MetalDevice::GetBuffer(ResourceHandle handle) {
     return bufferAllocator_.Get(static_cast<u32>(handle));
+}
+
+bool MetalDevice::UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset) {
+    MetalBuffer* buffer = GetBuffer(handle);
+    if (!buffer || !data || size == 0) return false;
+    return buffer->updateDataImpl(data, size, offset);
 }
 
 MetalTexture* MetalDevice::GetTexture(ResourceHandle handle) {
@@ -377,7 +378,7 @@ bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
         if (info.signalSemaphore != handles::INVALID_SYNC) {
             cmdBuf->AddSignalSemaphore(info.signalSemaphore, 1);
         }
-        
+
         if (info.signalFence != handles::INVALID_SYNC) {
             MetalSync* sync = GetSync(info.signalFence);
             if (sync && sync->GetNativeEvent()) {
@@ -389,10 +390,17 @@ bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
                  }
             }
         }
-        
+
+        // Encode all pending staging blits for this frame BEFORE the user's
+        // render/compute passes so subsequent passes see the uploaded data.
+        // EncodePendingBlits is a no-op when there are no pending blits.
+        if (cmdBuf->mtlCommandBuffer_) {
+            stagingAllocator_.EncodePendingBlits(cmdBuf->mtlCommandBuffer_);
+        }
+
         return cmdBuf->Submit();
     }
-    return false; 
+    return false;
 }
 
 SyncHandle MetalDevice::createSyncImpl() {
@@ -445,9 +453,19 @@ void MetalDevice::initializeMemoryPool() {
     heapDesc->setSize(256 * 1024 * 1024); // 256MB
     heapDesc->setStorageMode(MTL::StorageModeShared);
     heapDesc->setCpuCacheMode(MTL::CPUCacheModeDefaultCache);
+    // Use Placement heap — RHIAdaptiveMemoryPool manually manages blocks/offsets.
+    // HazardTrackingModeTracked: Metal's default for placement heaps is
+    // Untracked, which means buffers allocated from this heap cannot override
+    // to Tracked (debug-build assertion, release-build silent fallback to
+    // Untracked). MetalBuffer::getResourceOptions forces Tracked on every
+    // buffer for cross-cmdbuf safety (SurfaceNets write in cmd buf A,
+    // DrawIndirect read in cmd buf B — without tracking, no auto-barrier is
+    // inserted between them, causing the "renders correctly for a few frames
+    // then corrupts into internal structure flickering" symptom).
+    heapDesc->setHazardTrackingMode(MTL::HazardTrackingModeTracked);
     // 使用 Placement 堆，因为 RHIAdaptiveMemoryPool 会手动管理内存块和偏移
     heapDesc->setType(MTL::HeapTypePlacement);
-    
+
     heap_ = mtlDevice_->newHeap(heapDesc);
     heapDesc->release();
     
@@ -509,7 +527,13 @@ ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
         if (buffer->Initialize()) {
             buffer->SetHandle(ResourceHandle(id));
             ResourceManager::Instance().RegisterResource(buffer);
-            // std::cerr << "[MetalDevice] Created Buffer - ID: " << id << " Address: " << buffer << std::endl;
+            static bool loggedRM = false;
+            if (!loggedRM) {
+                std::cerr << "[MetalDevice] RM addr=" << &ResourceManager::Instance()
+                          << " registered buffer id=" << id
+                          << " handle=" << ResourceHandle(id) << std::endl;
+                loggedRM = true;
+            }
             return ResourceHandle(id);
         } else {
              std::cerr << "[MetalDevice] Buffer Initialize failed for id: " << id << std::endl;
@@ -522,14 +546,6 @@ ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
 }
 
 ResourceHandle MetalDevice::createTextureImpl(const TextureDesc& desc) {
-    /*
-    std::cout << "[MetalDevice] Creating Texture: " << desc.name 
-              << " Type: " << (int)desc.type 
-              << " Format: " << (int)desc.format 
-              << " Size: " << desc.size.x << "x" << desc.size.y << "x" << desc.size.z 
-              << " Array: " << desc.arraySize 
-              << " Mips: " << desc.mipLevels << std::endl;
-    */
     u32 id = textureAllocator_.Allocate(*this, desc);
     MetalTexture* texture = textureAllocator_.Get(id);
     if (texture) {
@@ -744,7 +760,10 @@ CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) 
 
 void MetalDevice::destroyBufferImpl(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
-    // std::cout << "[MetalDevice] Destroying Buffer - ID: " << (u32)handle << std::endl;
+    if (!bufferAllocator_.Get(static_cast<u32>(handle))) {
+        std::cerr << "[MetalDevice] Double-free buffer handle=" << (u32)handle << " — skipping" << std::endl;
+        return;
+    }
     ResourceManager::Instance().UnregisterResource(handle);
     bufferAllocator_.Free(static_cast<u32>(handle));
 }
@@ -785,6 +804,11 @@ void MetalDevice::unmapBufferImpl(ResourceHandle handle) {
 }
 
 void MetalDevice::destroyTextureImpl(ResourceHandle handle) {
+    if (handle == handles::INVALID_RESOURCE) return;
+    if (!textureAllocator_.Get(static_cast<u32>(handle))) {
+        std::cerr << "[MetalDevice] Double-free texture handle=" << (u32)handle << " — skipping" << std::endl;
+        return;
+    }
     ResourceManager::Instance().UnregisterResource(handle);
     textureAllocator_.Free(static_cast<u32>(handle));
 }

@@ -68,7 +68,7 @@ bool MetalQueryPool::GetResults(u32 firstQuery, u32 queryCount, void* data, size
         NS::Data* resultData = buffer_->resolveCounterRange(range);
         if (resultData) {
             // Timestamp 结果通常是 u64
-            const void* bytes = resultData->mutableBytes();
+            const void* bytes = resultData->bytes();
             // 这里假设 data 也是 u64 数组，且 stride 是 sizeof(u64)
             // 如果 stride 不同，需要逐个拷贝
             if (stride == sizeof(u64)) {

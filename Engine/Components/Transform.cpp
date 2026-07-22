@@ -219,7 +219,18 @@ namespace primal::transform {
 		}
 		else
 		{
-			assert(positions.size() == entity_index);
+			// Handle gap: recycled entity IDs may have index > positions.size()
+			while (positions.size() < entity_index)
+			{
+				positions.emplace_back(math::v3{0,0,0});
+				orientations.emplace_back(calculate_orientation(math::v4{0,0,0,1}));
+				rotations.emplace_back(math::v4{0,0,0,1});
+				scales.emplace_back(math::v3{1,1,1});
+				has_transform.emplace_back((u8)0);
+				to_world.emplace_back();
+				inv_world.emplace_back();
+				changes_from_previous_frame.emplace_back((u8)0);
+			}
 			positions.emplace_back(math::v3{ info.position[0], info.position[1], info.position[2] });
 			orientations.emplace_back(calculate_orientation(math::v4{ info.rotation[0], info.rotation[1], info.rotation[2], info.rotation[3] }));
 			rotations.emplace_back(math::v4{ info.rotation[0], info.rotation[1], info.rotation[2], info.rotation[3] });

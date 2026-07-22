@@ -8,14 +8,16 @@ RenderProxy::RenderProxy()
       worldAABB(),
       meshId(id::invalid_id),
       materialId(id::invalid_id),
-      entityId(id::invalid_id) {}
+      entityId(id::invalid_id),
+      technique(ShaderTechnique::Opaque) {}
 
 RenderProxy::RenderProxy(id::id_type entity, id::id_type mesh, id::id_type material)
     : transform(rhi::math::CreateTranslationMatrix(math::v3{0.f, 0.f, 0.f})),
       worldAABB(),
       meshId(mesh),
       materialId(material),
-      entityId(entity) {
+      entityId(entity),
+      technique(ShaderTechnique::Opaque) {
     RecalculateWorldAABB();
 }
 

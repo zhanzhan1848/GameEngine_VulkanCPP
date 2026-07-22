@@ -1801,7 +1801,11 @@ bool GPUCullingPipeline::Stage7_BuildIndirectCommands(rhi::RHICommandBuffer* cmd
                                                      const RenderSceneSnapshot& snapshot,
                                                      u32 bufferIndex) {
     if (indirect_command_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        // std::cout << "[GPUCulling] Indirect command pipeline not available, skipping" << std::endl;
+        static bool warned = false;
+        if (!warned) {
+            std::cerr << "[GPUCulling] Stage7: indirect_command_pipeline_ is INVALID! Skipping." << std::endl;
+            warned = true;
+        }
         return true;
     }
 

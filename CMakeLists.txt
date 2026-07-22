@@ -16,6 +16,10 @@ if(CMAKE_GENERATOR MATCHES "Unix Makefiles")
     set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 endif()
 
+# macOS deployment target and architecture MUST be set before project()
+set(CMAKE_OSX_ARCHITECTURES "arm64")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0")
+
 # 设置项目名称和版本
 project(GameEngine_VulkanCPP
     VERSION 1.0
@@ -29,13 +33,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_OSX_ARCHITECTURES "arm64")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0")
 
 # Emscripten WASM build support
 if(EMSCRIPTEN)
     add_definitions(-D__EMSCRIPTEN__)
     set(CMAKE_EXECUTABLE_SUFFIX ".js")
 endif()
-
 # 设置构建类型
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose build type: Debug Release" FORCE)
@@ -88,6 +92,9 @@ elseif(APPLE AND NOT EMSCRIPTEN)
 
     # macOS特定设置
     set(CMAKE_MACOSX_RPATH ON)
+
+    # Metal shader validation (xcrun compile check)
+    include(CMake/MetalShaderValidation.cmake)
 
     # FBX SDK 自动检测和安装
     set(FBX_SDK_VERSION "2020.3.7")

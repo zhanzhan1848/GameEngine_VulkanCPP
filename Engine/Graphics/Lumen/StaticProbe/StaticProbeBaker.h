@@ -53,11 +53,22 @@ private:
                                   const ProbeBakingParams& params,
                                   u32 probe_index);
 
+    static void PropagateBounce(StaticProbeVolume& volume,
+                                const ProbeBakingParams& params);
+
+    static bool CheckConvergence(StaticProbeVolume& volume,
+                                  float threshold);
+
     static void BakeVisibility(StaticProbeVolume& volume,
                                const utl::BVH& bvh,
                                const ProbeBakingScene& scene,
                                const ProbeBakingParams& params,
                                u32 probe_index);
+
+    static void BakeSkySH(StaticProbeVolume& volume,
+                           const ProbeBakingScene& scene,
+                           const ProbeBakingParams& params,
+                           u32 probe_index);
 
     static math::v3 ProbeWorldPos(u32 probe_index, u32 dim_x, u32 dim_y, u32 dim_z,
                                    math::v3 origin, float spacing);

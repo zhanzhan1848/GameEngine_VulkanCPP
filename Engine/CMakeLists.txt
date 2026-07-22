@@ -70,12 +70,16 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderScene.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderView.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderView.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Camera/RenderViewBuilder.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Camera/RenderViewBuilder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderProxy.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderProxy.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Material.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Material.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialInstance.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialInstance.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ParticleMaterial.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ParticleMaterial.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/SceneDataAdapter.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/SceneDataAdapter.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ForwardRenderer.h"
@@ -92,15 +96,42 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Passes/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Scene/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Scene/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/DebugDraw/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/DebugDraw/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/Providers/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/Providers/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Volume/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Volume/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Field/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Field/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Fluid/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Fluid/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Nodes/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Nodes/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Noise/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Noise/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/GPU/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/GPU/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/Nodes/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ShaderIR/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ShaderIR/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialPreview/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialPreview/*.cpp"
     # Ensure SSRPass is included (GLOB_RECURSE should pick it up, but touching file forces rescan)
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/Modules/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/Modules/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Debug/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Debug/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/PostProcess/*.h"
@@ -212,7 +243,7 @@ else()
 endif()
 
 # 收集通用源文件（排除平台特定文件）
-file(GLOB_RECURSE COMMON_SOURCES 
+file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/Common/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Common/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Components/*.h"
@@ -223,6 +254,9 @@ file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/EngineAPI/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Utilities/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/Algorithms/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Particles/*.h"
@@ -275,6 +309,9 @@ if(EMSCRIPTEN)
 endif()
 
 # 合并所有源文件
+# Module .cpp files are included in Engine library (used by StandardRenderPipeline)
+# list(FILTER GRAPHICS_UTILS EXCLUDE REGEX "Modules/.*\\.cpp$")
+
 set(ALL_SOURCES
     ${COMMON_SOURCES}
     ${PLATFORM_SOURCES}
@@ -426,6 +463,19 @@ else()
     endif()
 endif()
 
+# === Phase 1 Task 2: script dispatch 需要在边界 catch 脚本抛出的异常 ===
+# (spec 2026-07-07-script-core-capabilities-design.md §6.4)
+# Engine 整体 -fno-exceptions,但 Script.cpp 的 fixed_update/late_update/begin_play/destroy
+# 必须 catch + log + continue,防止单个脚本异常中断整个 dispatch。Per-file override。
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Components/Script.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptState.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptFilesystem.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
 # 根据平台添加编译定义
 if(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -461,13 +511,17 @@ elseif(APPLE AND NOT EMSCRIPTEN)
     find_library(COCOA_LIBRARY Cocoa)
     find_library(METAL_LIBRARY Metal)
     find_library(METALKIT_LIBRARY MetalKit)
+    find_library(METALFX_LIBRARY MetalFX)
     find_library(QUARTZCORE_LIBRARY QuartzCore)
+    find_package(ZLIB REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         ${FOUNDATION_LIBRARY}
         ${COCOA_LIBRARY}
         ${METAL_LIBRARY}
         ${METALKIT_LIBRARY}
+        ${METALFX_LIBRARY}
         ${QUARTZCORE_LIBRARY}
+        ZLIB::ZLIB
     )
 
     # find_library(ACCELERATE Accelerate)

@@ -10,11 +10,11 @@ using namespace metal;
 //   [20-23] u16[2]  packed tangent
 //   [24-31] float2  uv
 struct PackedVertex {
-    float3  position;   // offset 0
-    uint32_t packed_ct; // offset 12: color[3] + t_sign
-    uint32_t packed_n;  // offset 16: packed normal u16[2]
-    uint32_t packed_t;  // offset 20: packed tangent u16[2]
-    float2  uv;         // offset 24
+    packed_float3 position;   // offset 0, 12 bytes — packed to match CPU-side 32-byte stride
+    uint32_t packed_ct;       // offset 12: color[3] + t_sign
+    uint32_t packed_n;        // offset 16: packed normal u16[2]
+    uint32_t packed_t;        // offset 20: packed tangent u16[2]
+    float2  uv;               // offset 24
 };
 
 // Per-draw constant data (updated between draw calls)
@@ -61,11 +61,11 @@ static float3 decodePackedNormal(uint32_t packed) {
 vertex VertexOut cardCaptureVS(
     uint vid [[vertex_id]],
     constant CapturePassData& pass [[buffer(0)]],
-    constant PackedVertex* vertices [[buffer(1)]])
+    device const PackedVertex* vertices [[buffer(1)]])
 {
     PackedVertex v = vertices[vid];
 
-    float4 worldPos = pass.world_matrix * float4(v.position, 1.0);
+    float4 worldPos = pass.world_matrix * float4(float3(v.position), 1.0);
     float4 clipPos = pass.view_proj * worldPos;
 
     // Decode local-space normal and transform to world space

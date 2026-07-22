@@ -1,3 +1,6 @@
+#ifndef SURFACE_CACHE_DATA_METAL
+#define SURFACE_CACHE_DATA_METAL
+
 #include <metal_stdlib>
 using namespace metal;
 
@@ -33,7 +36,8 @@ struct SurfaceCacheParams {
     uint    indirect_rays_per_probe;
     float   indirect_temporal_weight;
     float   indirect_near_distance;
-    uint    _pad[2];
+    uint    lookup_count;     // number of CardLookup entries (mesh instances)
+    uint    _pad;
 };
 
 // Shared light info for LightCull and LightEval shaders
@@ -44,6 +48,25 @@ struct LightInfo {
     float4  position;     // xyz = position, w = radius
     float4  color;        // xyz = color, w = unused
     float4  direction;    // xyz = direction, w = type (as float, cast to uint when needed)
+};
+
+// Per-card dispatch info for flattened texel dispatch (matches C++ CardDispatchInfo).
+struct CardDispatchInfo {
+    uint texel_offset;     // prefix-sum: starting texel index
+    uint texel_count;      // resolution * resolution
+    uint resolution;       // card texel resolution (square)
+    uint atlas_offset_x;   // atlas pixel origin X
+    uint atlas_offset_y;   // atlas pixel origin Y
+    uint _pad[3];
+};
+
+// Params for merged lighting pass (matches C++ FlattenedLightingParams).
+struct FlattenedLightingParams {
+    SurfaceCacheParams sc_params;  // 48 bytes
+    uint total_texels;
+    uint card_count;
+    uint light_count;
+    uint _pad;
 };
 
 // Reconstruct world position from card atlas UV + depth
@@ -125,3 +148,37 @@ static float3 octDecode(float2 f) {
     n.xy += select(float2(-t), float2(t), n.xy >= 0.0);
     return normalize(n);
 }
+
+// Device-addressable variant of worldToCardUV for use in compute shaders
+// where card data is in device (not constant) address space.
+static bool worldToCardUVDevice(float3 world_pos,
+                                 device const SurfaceCacheCard& card,
+                                 thread float2& out_uv)
+{
+    float3 local = world_pos - card.center.xyz;
+    float u, v, depth;
+    uint axis = card.axis_direction & 0xFF;
+    uint dir = (card.axis_direction >> 8) & 0xFF;
+
+    if (axis == 0) {
+        depth = local.x * (dir ? 1.0 : -1.0);
+        u = (local.y / (card.extent.y * 2.0)) + 0.5;
+        v = (local.z / (card.extent.z * 2.0)) + 0.5;
+    } else if (axis == 1) {
+        depth = local.y * (dir ? 1.0 : -1.0);
+        u = (local.x / (card.extent.x * 2.0)) + 0.5;
+        v = (local.z / (card.extent.z * 2.0)) + 0.5;
+    } else {
+        depth = local.z * (dir ? 1.0 : -1.0);
+        u = (local.x / (card.extent.x * 2.0)) + 0.5;
+        v = (local.y / (card.extent.y * 2.0)) + 0.5;
+    }
+
+    if (depth < 0.0 || u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return false;
+
+    out_uv.x = float(card.atlas_offset_x) + u * float(card.resolution);
+    out_uv.y = float(card.atlas_offset_y) + v * float(card.resolution);
+    return true;
+}
+
+#endif // SURFACE_CACHE_DATA_METAL

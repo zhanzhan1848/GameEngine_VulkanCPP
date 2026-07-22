@@ -43,7 +43,7 @@ kernel void ComputeMain(
     }
 
     // Read visibility buffer entry
-    uint visibility_data = visibility_buffer.read(global_id);
+    uint visibility_data = visibility_buffer.read(global_id).r;
 
     // Extract triangle_id and material_id
     uint triangle_id = visibility_data & 0x00FFFFFF;      // Lower 24 bits

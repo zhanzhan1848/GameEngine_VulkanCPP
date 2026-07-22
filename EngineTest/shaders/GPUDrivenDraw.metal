@@ -69,14 +69,12 @@ struct ClusterMap {
     uint padding;     // Maintain 16-byte alignment
 };
 
-// 🔥 NEW: Helper to unpack normal/tangent from uint
-// Matches original format
 float3 UnpackNormal(uint packed) {
     float2 f = float2((packed >> 16) & 0xFFFF, packed & 0xFFFF);
-    f = f / 32767.0 - 1.0;  // Convert from [0, 65535] to [-1, 1]
+    f = f * (2.0 / 65535.0) - 1.0;
     float d = dot(f, f);
     if (d > 1.0f) {
-        return float3(0.0f, 0.0f, 1.0f);  // Default normal
+        return float3(0.0f, 0.0f, 1.0f);
     }
     float z = sqrt(max(0.0f, 1.0f - d));
     return float3(f.x, f.y, z);
@@ -194,10 +192,16 @@ vertex VertexOut gpu_driven_vertex_shader(
     float3 normal = UnpackNormal(element.normal);
     float3 tangent = UnpackNormal(element.tangent);
 
-    // Extract tangent sign from colorTSign field (stored in high byte)
-    // colorTSign format: color[0](bits 0-7) | color[1](8-15) | color[2](16-23) | t_sign(24-31)
-    // t_sign is non-zero (0xFF) for negative tangent handedness
-    float tangentSign = (element.colorTSign & 0xFF000000) ? -1.0 : 1.0;
+    // t_sign byte (high byte of colorTSign):
+    //   bit 0 = tangent handedness (1 = left-handed)
+    //   bit 1 = normal Z-sign (1 = positive Z)
+    uint t_sign = (element.colorTSign >> 24) & 0xFF;
+    float tangentSign = (t_sign & 0x01) ? -1.0 : 1.0;
+
+    // Recover normal Z-sign (UnpackNormal always returns positive Z)
+    if (!(t_sign & 0x02)) {
+        normal.z = -normal.z;
+    }
 
     // UV coordinates (flip Y axis for Metal texture coordinate system)
     float2 uv = float2(element.uv.x, 1.0 - element.uv.y);

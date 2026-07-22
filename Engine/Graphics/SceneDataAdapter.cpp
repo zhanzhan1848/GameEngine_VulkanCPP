@@ -811,13 +811,14 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
             }
 
             RenderMesh* mesh = new RenderMesh();
-            // 使用 Hash 或者其他方式生成临时的 EntityID，或者使用 invalid_id
-            // 这里我们使用 invalid_id，意味着它不会注册到全局表，需要手动管理生命周期
-            // SceneDataMeshInfo 会持有这个指针
-            
+
             rhi::DataIndexType indexType = (indexSize == 2) ? rhi::DataIndexType::UInt16 : rhi::DataIndexType::UInt32;
 
-            if (mesh->Create(device, primal::id::invalid_id, 
+            // Generate a unique ID for mesh registry lookup
+            static primal::id::id_type fallback_mesh_id = 0x80000000;
+            primal::id::id_type meshId = fallback_mesh_id++;
+
+            if (mesh->Create(device, meshId, 
                              interleavedData.data(), numVertices, vertexSize,
                              indexData, numIndices, indexType)) {
                 
@@ -840,6 +841,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
                 info.normalTexturePath = normalPath;
                 info.material = assignedMaterial;
                 info.materialInstance = assignedMatInst;
+                info.meshEntityId = meshId;
                 result.push_back(info);
             } else {
                 delete mesh;
@@ -941,6 +943,224 @@ std::shared_ptr<Material> SceneDataAdapter::LoadMaterial(rhi::RHIDeviceBase* dev
     }
 
     return material;
+}
+
+// Phase 4: Parse binary scene data → register RHIMeshAssets → return content IDs
+ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) {
+    ImportedResources result;
+    if (!data) return result;
+
+    BlobReader reader(static_cast<const u8*>(data), size);
+
+    // 1. Materials header
+    u32 numMaterials = reader.Read<u32>();
+    struct TempMat { std::string diffuse, normal, orm; };
+    utl::vector<TempMat> tempMaterials;
+
+    if (numMaterials < 10000) {
+        tempMaterials.reserve(numMaterials);
+        for (u32 i = 0; i < numMaterials; ++i) {
+            if (reader.Remaining() < 4) break;
+            u32 nameLen = reader.Read<u32>();
+            if (nameLen > 1000) break;
+            reader.Skip(nameLen);
+
+            u32 diffLen = reader.Read<u32>();
+            std::string diffuse = reader.ReadString(diffLen);
+
+            u32 normLen = reader.Read<u32>();
+            std::string normal = reader.ReadString(normLen);
+
+            u32 roughLen = reader.Read<u32>();
+            std::string roughness = reader.ReadString(roughLen);
+
+            u32 metalLen = reader.Read<u32>();
+            reader.Skip(metalLen);
+
+            tempMaterials.push_back({diffuse, normal, roughness});
+        }
+    }
+
+    // 2. LODs
+    if (reader.Remaining() < 4) return result;
+    u32 lodCount = reader.Read<u32>();
+    utl::vector<float> thresholds(lodCount);
+    if (reader.Remaining() < sizeof(float) * lodCount) return result;
+    reader.Read(thresholds.data(), sizeof(float) * lodCount);
+    if (reader.Remaining() < sizeof(u32) * lodCount) return result;
+    reader.Skip(sizeof(u32) * lodCount);
+
+    for (u32 lod = 0; lod < lodCount; ++lod) {
+        if (reader.Remaining() < 8) break;
+        u32 submeshCount = reader.Read<u32>();
+        reader.Skip(4); // sizeOfSubmeshes
+
+        for (u32 i = 0; i < submeshCount; ++i) {
+            if (reader.Remaining() < 4) break;
+
+            s32 materialIndex = -1;
+            u32 elementSize = 0, vertexCount = 0, indexCount = 0, indexSize = 2;
+            u32 elementsType = 0;
+            std::string meshName;
+            bool isCompactFormat = false;
+
+            u32 firstVal = reader.Read<u32>();
+            if (firstVal > 0 && firstVal < 200 && reader.Remaining() >= firstVal + 32) {
+                const char* namePtr = static_cast<const char*>(reader.GetCurrentPtr());
+                bool looksLikeString = true;
+                for (u32 c = 0; c < firstVal && c < 50; ++c) {
+                    char ch = namePtr[c];
+                    if (ch != 0 && (ch < 32 || ch > 126)) { looksLikeString = false; break; }
+                }
+                if (looksLikeString) {
+                    meshName = std::string(namePtr, firstVal);
+                    reader.Skip(firstVal);
+                    u32 lodId = reader.Read<u32>();
+                    materialIndex = (s32)reader.Read<u32>();
+                    elementSize = reader.Read<u32>();
+                    elementsType = reader.Read<u32>();
+                    vertexCount = reader.Read<u32>();
+                    indexSize = reader.Read<u32>();
+                    indexCount = reader.Read<u32>();
+                    float lodThreshold;
+                    reader.Read(&lodThreshold, sizeof(float));
+                    if (elementSize == 20 && (indexSize == 2 || indexSize == 4) &&
+                        vertexCount > 0 && vertexCount < 10000000 && indexCount > 0 && indexCount < 30000000) {
+                        isCompactFormat = true;
+                    }
+                }
+            }
+
+            if (!isCompactFormat) {
+                elementSize = reader.Read<u32>();
+                if (elementSize > 200) {
+                    vertexCount = elementSize;
+                    elementSize = firstVal;
+                    materialIndex = -1;
+                    indexCount = reader.Read<u32>();
+                    elementsType = reader.Read<u32>();
+                    reader.Skip(4); // primitiveTopology
+                    indexSize = (vertexCount < (1 << 16)) ? 2 : 4;
+                } else {
+                    materialIndex = (s32)firstVal;
+                    if (reader.Remaining() < 16) break;
+                    vertexCount = reader.Read<u32>();
+                    indexCount = reader.Read<u32>();
+                    elementsType = reader.Read<u32>();
+                    reader.Skip(4); // primitiveTopology
+                    indexSize = (vertexCount < (1 << 16)) ? 2 : 4;
+                }
+            }
+
+            (void)elementsType;
+
+            u32 positionSize = 12 * vertexCount;
+            u32 elementBufferSize = elementSize * vertexCount;
+            u32 indexBufferSize = indexSize * indexCount;
+
+            size_t currentOffset = reader.GetOffset();
+            u32 posPadding = 0;
+            if (vertexCount > 0) {
+                size_t endPos = currentOffset + positionSize;
+                posPadding = (u32)(((endPos + 15) & ~15) - endPos);
+            }
+            u32 elemPadding = 0;
+            if (elementBufferSize > 0) {
+                size_t elemOff = currentOffset + positionSize + posPadding;
+                elemPadding = (u32)(((elemOff + elementBufferSize + 15) & ~15) - (elemOff + elementBufferSize));
+            }
+
+            const u8* posPtr = static_cast<const u8*>(reader.GetCurrentPtr());
+            const u8* elemPtr = posPtr + positionSize + posPadding;
+            const u8* idxPtr = elemPtr + elementBufferSize + elemPadding;
+
+            u32 totalSize = positionSize + posPadding + elementBufferSize + elemPadding + indexBufferSize;
+            if (reader.Remaining() < totalSize) break;
+
+            // Create and register RHIMeshAsset
+            rhi::RHIMeshAsset meshAsset;
+            meshAsset.lod_id = lod;
+            meshAsset.material_idx = (materialIndex >= 0) ? materialIndex : 0;
+            meshAsset.lod_threshold = thresholds[lod];
+            meshAsset.index_size = indexSize;
+            meshAsset.num_vertices = vertexCount;
+            meshAsset.num_indices = indexCount;
+            meshAsset.elements_type = elementsType;
+            meshAsset.position_buffer.resize(positionSize);
+            memcpy(meshAsset.position_buffer.data(), posPtr, positionSize);
+            meshAsset.element_buffer.resize(elementBufferSize);
+            memcpy(meshAsset.element_buffer.data(), elemPtr, elementBufferSize);
+            meshAsset.index_buffer.resize(indexBufferSize);
+            memcpy(meshAsset.index_buffer.data(), idxPtr, indexBufferSize);
+
+            reader.Skip(totalSize);
+
+            // Skip meshlets + SDF (same as LoadRenderItemData)
+            if (reader.Remaining() >= 8) {
+                const u8* peekPtr = static_cast<const u8*>(reader.GetCurrentPtr());
+                u32 meshletMagic = *reinterpret_cast<const u32*>(peekPtr);
+                if (meshletMagic == 0x4C48534D) {
+                    reader.Skip(4);
+                    u32 meshletCount = reader.Read<u32>();
+                    if (meshletCount > 0 && meshletCount < 100000) {
+                        meshAsset.meshlets.resize(meshletCount);
+                        for (u32 m = 0; m < meshletCount; ++m) {
+                            reader.Skip(60); // RHIMeshlet is 60 bytes
+                        }
+                        u32 mvCount = reader.Read<u32>();
+                        if (mvCount > 0) { meshAsset.meshlet_vertices.resize(mvCount); reader.Read(meshAsset.meshlet_vertices.data(), mvCount * 4); }
+                        u32 mtCount = reader.Read<u32>();
+                        if (mtCount > 0) { meshAsset.meshlet_triangles.resize(mtCount); reader.Read(meshAsset.meshlet_triangles.data(), mtCount); }
+                    }
+                }
+            }
+            if (reader.Remaining() >= 8) {
+                const u8* peekPtr = static_cast<const u8*>(reader.GetCurrentPtr());
+                u32 sdfMagic = *reinterpret_cast<const u32*>(peekPtr);
+                if (sdfMagic == 0x20464453) {
+                    reader.Skip(4);
+                    reader.Read(meshAsset.sdf.resolution, 12);
+                    reader.Read(meshAsset.sdf.bounds_min, 12);
+                    reader.Read(meshAsset.sdf.bounds_max, 12);
+                    u32 sdfSize = reader.Read<u32>();
+                    if (sdfSize > 0 && sdfSize < 100000000) {
+                        meshAsset.sdf.data.resize(sdfSize);
+                        reader.Read(meshAsset.sdf.data.data(), sdfSize * 2);
+                    }
+                    if (reader.Remaining() >= 4) {
+                        u32 voxSize = reader.Read<u32>();
+                        if (voxSize > 0 && voxSize < 100000000) {
+                            meshAsset.sdf.voxels.resize(voxSize);
+                            reader.Read(meshAsset.sdf.voxels.data(), voxSize);
+                        }
+                    }
+                    if (reader.Remaining() >= 4) {
+                        u32 vfSize = reader.Read<u32>();
+                        if (vfSize > 0 && vfSize < 100000000) {
+                            meshAsset.sdf.vector_field.resize(vfSize);
+                            reader.Read(meshAsset.sdf.vector_field.data(), vfSize * 2);
+                        }
+                    }
+                }
+            }
+
+            id::id_type meshId = content::register_mesh_asset(meshAsset);
+
+            ImportedResources::MeshEntry entry;
+            entry.mesh_content_id = meshId;
+            entry.material_index = materialIndex;
+            if (materialIndex >= 0 && (size_t)materialIndex < tempMaterials.size()) {
+                entry.diffuse_path = tempMaterials[materialIndex].diffuse;
+                entry.normal_path = tempMaterials[materialIndex].normal;
+                entry.orm_path = tempMaterials[materialIndex].orm;
+            }
+            result.meshes.push_back(entry);
+        }
+    }
+
+    std::cout << "[SceneDataAdapter::ImportResources] Imported " << result.meshes.size()
+              << " mesh resources" << std::endl;
+    return result;
 }
 
 } // namespace primal::graphics

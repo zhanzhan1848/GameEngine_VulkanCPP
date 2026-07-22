@@ -46,6 +46,9 @@ public:
     // Compute
     void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
     void DispatchIndirect(ResourceHandle buffer, u64 offset) override;
+    // WebGPU lacks a direct setBytes equivalent; calls are logged once and ignored.
+    // Metal-only callers (Lumen ScreenProbes, PCG) route through BindDescriptorSets on Dawn.
+    void SetComputeBytes(u32 index, const void* data, u32 size) override;
 
     // Barriers (no-op in WebGPU)
     void MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask, AccessFlag srcAccessMask, AccessFlag dstAccessMask) override;

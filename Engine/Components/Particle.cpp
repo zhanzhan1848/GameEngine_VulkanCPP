@@ -16,6 +16,7 @@ struct particle_component {
 };
 
 std::unordered_map<particle_id, particle_component> component_map;
+std::unordered_map<id::id_type, particle_id> entity_to_particle;
 std::mutex component_mutex;
 
 } // anonymous namespace
@@ -39,6 +40,7 @@ component create(init_info info, game_entity::entity entity) {
         comp.is_active = info.auto_activate;
         
         component_map[id] = comp;
+        entity_to_particle[entity.get_id()] = id;
     }
     
     particles::particle_emitter* emitter_ptr = particles::get_emitter(new_emitter);
@@ -58,6 +60,7 @@ void remove(component c) {
     
     auto it = component_map.find(c.get_id());
     if (it != component_map.end()) {
+        entity_to_particle.erase(it->second.entity_id);
         particles::destroy_emitter(it->second.emitter);
         component_map.erase(it);
     }
@@ -246,6 +249,30 @@ u32 component::get_active_particle_count() const {
 
 particles::emitter_id component::get_emitter_id() const {
     return particle::get_emitter_id(*this);
+}
+
+component get_component_for_entity(game_entity::entity_id eid) {
+    std::lock_guard<std::mutex> lock(component_mutex);
+    auto it = entity_to_particle.find(eid);
+    if (it != entity_to_particle.end()) {
+        return component{ it->second };
+    }
+    return component{};
+}
+
+void remove_for_entity(game_entity::entity_id eid) {
+    std::lock_guard<std::mutex> lock(component_mutex);
+    auto it = entity_to_particle.find(eid);
+    if (it != entity_to_particle.end()) {
+        particle_id pid = it->second;
+        entity_to_particle.erase(it);
+
+        auto comp_it = component_map.find(pid);
+        if (comp_it != component_map.end()) {
+            particles::destroy_emitter(comp_it->second.emitter);
+            component_map.erase(comp_it);
+        }
+    }
 }
 
 } // namespace primal::particle

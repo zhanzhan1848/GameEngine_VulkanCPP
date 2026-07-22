@@ -405,6 +405,7 @@ inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
     // Column-major storage: each v4 is a COLUMN of the view matrix.
     // The standard view matrix rows are: [right | newUp | -forward | translation]
     // Transposing to column-major: column j = (row0[j], row1[j], row2[j], row3[j])
+    // simd::float4x4 stores columns: m4x4{col0, col1, col2, col3}.
     return m4x4{
         v4{right.x, newUp.x, -forward.x, 0.0f},
         v4{right.y, newUp.y, -forward.y, 0.0f},

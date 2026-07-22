@@ -46,6 +46,8 @@ GPUMaterialRegistry::MaterialData MaterialDataBuilder::ExtractMaterialData(
     data.metallic_factor = metallic;
     data.roughness_factor = roughness;
     data.normal_scale = 1.0f;
+    data.uv_scale[0] = 1.0f;
+    data.uv_scale[1] = 1.0f;
     data.flags = 0;
 
     return data;

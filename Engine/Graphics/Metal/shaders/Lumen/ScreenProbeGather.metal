@@ -1,24 +1,29 @@
 /**
  * @file ScreenProbeGather.metal
- * @brief Screen Probe GI - Visibility-constrained log-space interpolation
+ * @brief Screen Probe GI - Gather pass (SH evaluation + probe bilateral filter)
  *
- * Core principle: never interpolate across visibility boundaries.
+ * Two bugs fixed vs. prior version:
+ *  1. SH evaluation now actually uses the surface normal. Old code summed all
+ *     SH bands as scalars (L0 + |L1|), which collapsed to a spatially-uniform
+ *     result — every pixel sharing a probe got the same color. The correct
+ *     irradiance reconstruction is E(N) = Σ SH_C_i * Y_i(N).
+ *  2. Pixel-level probe gather. Old code read exactly one probe per pixel
+ *     (the one the pixel fell inside), so pixels whose assigned probe was
+ *     inactive got zero. We now gather center + 4 cardinal neighbors
+ *     (5-tap cross, matching SpatialFilter's probe-level kernel) with
+ *     bilateral weights, which fills sparse coverage.
  *
- * Visibility constraints (all must pass for a probe to contribute):
- *   1. Pixel→Probe: dot(pixelNormal, probeDir) > 0  (probe is above pixel horizon)
- *   2. Probe→Pixel: dot(probeNormal, pixelDir) > 0   (pixel is above probe horizon)
- *   3. Depth layer: screen-space depth difference is small (same surface)
- *   4. World distance: probe is close enough to influence this pixel
+ * Apple Silicon constraint: keep per-thread device buffer reads ≤ 32.
+ *   5 probes × (4 SH + 1 pos + 1 normal) = 30 reads.
  *
- * Interpolation: log-space weighted average prevents HDR dominance.
- * Firefly clamping happens at probe level (Average), not here.
- *
- * Output: float4(irradiance * GI_INTENSITY, confidence)
- *
- * Buffer reads per pixel: 4(pos) + 4(normal) + 4×4(SH) = 24 total
- *
- * Dispatch: (renderW * renderH + 63) / 64, 1, 1
- * ThreadGroupSize: (64, 1, 1)
+ * Buffers:
+ *   texture(0): depthTexture       (full-res, sampled)
+ *   texture(1): normalTexture      (full-res, sampled) -- GBuffer normals, N*0.5+0.5
+ *   texture(2): outputTexture      (full-res RGBA16F, storage)
+ *   buffer(0):  probePositions     (gridW * gridH float4, xyz=pos w=active)
+ *   buffer(2):  probeSH            (gridW * gridH * 4 float4, filtered SH)
+ *   buffer(3):  global data        (ScreenProbeGlobalData, set via setBytes)
+ *   buffer(4):  probeNormals       (gridW * gridH float4, xyz=normal w=valid)
  */
 
 #include <metal_stdlib>
@@ -28,158 +33,28 @@ struct ScreenProbeGlobalData {
     float4x4 view_projection;
     float4x4 inv_view_projection;
     float4   camera_position;
-
-    float4   grid_params;     // x=gridW, y=gridH, z=downsample, w=raysPerProbe
-    float4   trace_params;    // x=maxRayDist, y=gatherRadius, z=renderWidth, w=renderHeight
-
+    float4   grid_params;      // x=gridW, y=gridH, z=downsample, w=raysPerProbe
+    float4   trace_params;     // x=maxRayDist, y=gatherRadius, z=renderWidth, w=renderHeight
     float4   sdf_origins[3];
     float4   sdf_voxel_sizes[3];
     float4   sdf_extents[3];
     float4   sdf_resolutions;
+    float4   surface_cache_params; // x=atlasSize, y=cardCount, z=surfaceCacheAvailable, w=unused
 };
 
-static float4 shBasis(float3 d) {
-    return float4(
-        0.282095f,
-        0.488603f * d.y,
-        0.488603f * d.z,
-        0.488603f * d.x
-    );
-}
-
-static float3 reconstructWorldPos(float2 uv, float depth,
-                                  constant float4x4& invVP) {
-    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 clipPos = float4(ndc, depth, 1.0f);
-    float4 worldPos = invVP * clipPos;
-    return worldPos.xyz / worldPos.w;
-}
-
-static float luminance(float3 c) {
-    return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
-}
-
-// Evaluate irradiance from 4 SH coefficients at a given normal
-static float3 evalSH(float3 sh0, float3 sh1, float3 sh2, float3 sh3, float4 Y) {
-    float3 irr = sh0 * Y.x + sh1 * Y.y + sh2 * Y.z + sh3 * Y.w;
-    return max(irr, float3(0.0f));
-}
-
-// Result from probe gathering
-struct GatherResult {
-    float3 logGI;
-    float  totalWeight;
-    float  bilinearSum;
-};
-
-static GatherResult gatherProbes(
-    int2 baseProbe, float2 frac,
-    uint gridW, uint gridH,
-    device const float4* probePositions,
-    device const float4* probeNormals,
-    device const float4* probeSH,
-    float3 worldPos, float3 normal, float pixelDepthNDC,
-    float4 Y_normal, constant float4x4& viewProjection,
-    bool constrained)
+// SH basis (must match ScreenProbeAverage::shBasis):
+//   Y0 = 0.282095
+//   Y1 = 0.488603 * d.y
+//   Y2 = 0.488603 * d.z
+//   Y3 = 0.488603 * d.x
+// Average stores SH coefficients C_i such that E(N) = Σ C_i * Y_i(N).
+static inline float3 evalSH(float3 sh0, float3 sh1, float3 sh2, float3 sh3,
+                            float3 N)
 {
-    GatherResult result;
-    result.logGI = float3(0.0f);
-    result.totalWeight = 0.0f;
-    result.bilinearSum = 0.0f;
-
-    constexpr float DEPTH_SIGMA = 0.8f;       // world-space plane distance
-    constexpr float NDC_DEPTH_THRESHOLD = 0.02f; // screen-space depth layer threshold
-    constexpr float WORLD_DIST_SIGMA = 8.0f;  // world-space distance falloff
-    constexpr float MAX_RADIANCE = 8.0f;
-    constexpr float BRIGHT_THRESHOLD = 2.0f;
-
-    for (int dy = 0; dy <= 1; ++dy) {
-        for (int dx = 0; dx <= 1; ++dx) {
-            int kx = baseProbe.x + dx;
-            int ky = baseProbe.y + dy;
-
-            if (kx < 0 || kx >= int(gridW) || ky < 0 || ky >= int(gridH)) continue;
-
-            uint pidx = uint(ky) * gridW + uint(kx);
-
-            float4 posData = probePositions[pidx];
-            if (posData.w <= 0.0f) continue;
-
-            uint shBase = pidx * 4;
-            if (probeSH[shBase + 0].w <= 0.0f) continue;
-
-            float3 probePos = posData.xyz;
-
-            // Bilinear weight
-            float wx = (dx == 0) ? (1.0f - frac.x) : frac.x;
-            float wy = (dy == 0) ? (1.0f - frac.y) : frac.y;
-            float bilinear = wx * wy;
-
-            result.bilinearSum += bilinear;
-
-            float weight = bilinear;
-
-            if (constrained) {
-                // ===== Visibility gate 1: pixel → probe (above horizon) =====
-                float3 probeDir = normalize(probePos - worldPos);
-                float cosPixelToProbe = dot(normal, probeDir);
-                if (cosPixelToProbe < 0.0f) continue;  // hard reject: probe is behind surface
-
-                // ===== Visibility gate 2: probe → pixel (reciprocal) =====
-                float4 normData = probeNormals[pidx];
-                if (normData.w > 0.0f) {
-                    float3 probeNormal = normalize(normData.xyz);
-                    float3 pixelDir = normalize(worldPos - probePos);
-                    float cosProbeToPixel = dot(probeNormal, pixelDir);
-                    if (cosProbeToPixel < 0.0f) continue;  // hard reject: pixel behind probe's surface
-                }
-
-                // ===== Visibility gate 3: depth layer (screen-space) =====
-                float4 probeClipPos = viewProjection * float4(probePos, 1.0f);
-                float probeDepthNDC = probeClipPos.z / probeClipPos.w;
-                float ndcDepthDiff = abs(pixelDepthNDC - probeDepthNDC);
-                if (ndcDepthDiff > NDC_DEPTH_THRESHOLD) continue;  // hard reject: different depth layer
-
-                // ===== World-space distance penalty =====
-                float worldDist = distance(probePos, worldPos);
-                float w_dist = exp(-worldDist * worldDist / (WORLD_DIST_SIGMA * WORLD_DIST_SIGMA));
-                weight *= w_dist;
-
-                // ===== Plane distance (soft) =====
-                float planeDist = abs(dot(probePos - worldPos, normal));
-                float w_plane = exp(-planeDist * planeDist / (DEPTH_SIGMA * DEPTH_SIGMA));
-                weight *= w_plane;
-
-                // ===== Horizon soft transition =====
-                float w_visibility = smoothstep(0.0f, 0.3f, cosPixelToProbe);
-                weight *= w_visibility;
-            }
-
-            // Evaluate SH at pixel normal → irradiance
-            float3 probeIrr = evalSH(
-                probeSH[shBase + 0].rgb, probeSH[shBase + 1].rgb,
-                probeSH[shBase + 2].rgb, probeSH[shBase + 3].rgb, Y_normal);
-
-            // Residual bright clamp (probe-level clamping in Average handles most)
-            float lum = luminance(probeIrr);
-            if (lum > MAX_RADIANCE) {
-                probeIrr *= MAX_RADIANCE / lum;
-                lum = MAX_RADIANCE;
-            }
-
-            // Bright probe penalty
-            if (lum > BRIGHT_THRESHOLD) {
-                weight *= exp(-(lum - BRIGHT_THRESHOLD) * 0.5f);
-            }
-
-            // Accumulate in log space
-            float3 logIrr = log(1.0f + probeIrr);
-            result.logGI += logIrr * weight;
-            result.totalWeight += weight;
-        }
-    }
-
-    return result;
+    return sh0 * 0.282095f
+         + sh1 * (0.488603f * N.y)
+         + sh2 * (0.488603f * N.z)
+         + sh3 * (0.488603f * N.x);
 }
 
 kernel void screen_probe_gather(
@@ -192,92 +67,105 @@ kernel void screen_probe_gather(
     constant ScreenProbeGlobalData& global [[buffer(3)]],
     device const float4* probeNormals     [[buffer(4)]],
 
-    uint global_id [[thread_position_in_grid]])
+    uint2 tid [[thread_position_in_grid]])
 {
     uint renderW = uint(global.trace_params.z);
     uint renderH = uint(global.trace_params.w);
-    uint totalPixels = renderW * renderH;
 
-    if (global_id >= totalPixels) return;
+    if (tid.x >= renderW || tid.y >= renderH) return;
 
-    uint px = global_id % renderW;
-    uint py = global_id / renderW;
-    uint2 gid = uint2(px, py);
-
-    uint  gridW = uint(global.grid_params.x);
-    uint  gridH = uint(global.grid_params.y);
+    uint gridW = uint(global.grid_params.x);
+    uint gridH = uint(global.grid_params.y);
     float downsample = global.grid_params.z;
 
-    float2 uv = float2(float(px) + 0.5f, float(py) + 0.5f) / float2(renderW, renderH);
+    // ---------------------------------------------------------------
+    // Read pixel depth + normal (normalTexture was previously unused)
+    // ---------------------------------------------------------------
+    float2 invRes = 1.0f / float2(renderW, renderH);
+    float2 pixelUV = (float2(tid) + 0.5f) * invRes;
 
-    sampler pointSamp(coord::normalized, filter::nearest, address::clamp_to_edge);
-    sampler linearSamp(coord::normalized, filter::linear, address::clamp_to_edge);
-
-    float depth = depthTexture.sample(pointSamp, uv).r;
+    constexpr sampler screenSamp(coord::normalized, filter::linear, address::clamp_to_edge);
+    float depth = depthTexture.sample(screenSamp, pixelUV).r;
 
     if (depth <= 0.0001f || depth >= 0.999f) {
-        outputTexture.write(float4(0.0f, 0.0f, 0.0f, 0.0f), gid);
+        outputTexture.write(float4(0.0f, 0.0f, 0.0f, 0.0f), tid);
         return;
     }
 
-    float3 worldPos = reconstructWorldPos(uv, depth, global.inv_view_projection);
-    float3 normal = normalize(normalTexture.sample(linearSamp, uv).rgb * 2.0f - 1.0f);
+    float4 normalEncoded = normalTexture.sample(screenSamp, pixelUV);
+    float3 surfaceNormal = normalize(normalEncoded.xyz * 2.0f - 1.0f);
 
-    float4 Y_normal = shBasis(normal);
+    // ---------------------------------------------------------------
+    // Center probe coord for this pixel
+    // ---------------------------------------------------------------
+    int2 centerProbe = int2(int(tid.x) / int(downsample),
+                            int(tid.y) / int(downsample));
 
-    float2 gridPos = float2(float(px), float(py)) / downsample;
-    int2 baseProbe = int2(floor(gridPos));
-    float2 frac = gridPos - float2(baseProbe);
+    // 5-tap cross pattern: center + 4 cardinals (matches SpatialFilter kernel).
+    thread const int2 offsets[5] = {
+        int2( 0,  0),
+        int2(-1,  0), int2( 1,  0),
+        int2( 0, -1), int2( 0,  1),
+    };
 
-    // =====================================================================
-    // Phase 1: Visibility-constrained interpolation
-    // =====================================================================
-    GatherResult result = gatherProbes(
-        baseProbe, frac, gridW, gridH,
-        probePositions, probeNormals, probeSH,
-        worldPos, normal, depth, Y_normal,
-        global.view_projection,
-        true);
+    // Spatial weights for the cross (center gets 2.0, neighbors 1.0).
+    // This mirrors SpatialFilter's "center-weighted" blending so we don't
+    // double-smooth — Gather just evaluates the already-filtered SH at this
+    // pixel's actual surface normal.
+    thread const float spatialW[5] = { 2.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
-    // =====================================================================
-    // Phase 2: Fallback — relax to pure bilinear (no visibility gates)
-    // =====================================================================
-    bool usedFallback = false;
-    constexpr float MIN_WEIGHT_SUM = 0.01f;
+    float3 irradianceSum = float3(0.0f);
+    float  confidenceOut = 0.0f;
+    float  weightSum     = 0.0f;
 
-    if (result.totalWeight < MIN_WEIGHT_SUM) {
-        usedFallback = true;
-        result = gatherProbes(
-            baseProbe, frac, gridW, gridH,
-            probePositions, probeNormals, probeSH,
-            worldPos, normal, depth, Y_normal,
-            global.view_projection,
-            false);  // no visibility constraints
+    for (int i = 0; i < 5; ++i) {
+        int2 npc = centerProbe + offsets[i];
+        if (npc.x < 0 || npc.y < 0 ||
+            npc.x >= int(gridW) || npc.y >= int(gridH)) {
+            continue;
+        }
+
+        uint probeIdx = uint(npc.y) * gridW + uint(npc.x);
+
+        float4 posData = probePositions[probeIdx];
+        if (posData.w <= 0.0f) continue;
+
+        uint shBase = probeIdx * 4;
+        float sh0w = probeSH[shBase + 0].w;
+        if (sh0w <= 0.0f) continue;
+
+        float3 sh0 = probeSH[shBase + 0].rgb;
+        float3 sh1 = probeSH[shBase + 1].rgb;
+        float3 sh2 = probeSH[shBase + 2].rgb;
+        float3 sh3 = probeSH[shBase + 3].rgb;
+
+        // Proper SH evaluation at the pixel's surface normal.
+        float3 irr = evalSH(sh0, sh1, sh2, sh3, surfaceNormal);
+        irr = max(irr, float3(0.0f));
+
+        // Reject probes whose normal faces away from the pixel's surface.
+        float normalWeight = 1.0f;
+        float4 probeNormData = probeNormals[probeIdx];
+        if (probeNormData.w > 0.0f) {
+            float3 probeN = normalize(probeNormData.xyz);
+            float nDot = max(dot(surfaceNormal, probeN), 0.0f);
+            // Gentle falloff: probes facing similar direction contribute fully,
+            // orthogonal probes contribute half, opposite probes contribute ~0.
+            normalWeight = pow(nDot, 2.0f);
+        }
+
+        float w = spatialW[i] * normalWeight * sh0w;
+        irradianceSum += irr * w;
+        confidenceOut += sh0w * w;
+        weightSum += w;
     }
 
-    // =====================================================================
-    // Confidence + output
-    // =====================================================================
-    float confidence = 0.0f;
-    if (result.bilinearSum > 0.01f) {
-        confidence = saturate(result.totalWeight / result.bilinearSum);
-    }
-    if (usedFallback) {
-        confidence *= 0.2f;
+    if (weightSum <= 0.0f) {
+        outputTexture.write(float4(0.0f, 0.0f, 0.0f, 0.0f), tid);
+        return;
     }
 
-    // Log-space → linear conversion
-    constexpr float WEIGHT_FLOOR = 0.05f;
-    float normWeight = max(result.totalWeight, WEIGHT_FLOOR);
-    float3 irradiance = float3(0.0f);
-
-    if (result.totalWeight > 0.001f) {
-        float3 avgLog = result.logGI / normWeight;
-        irradiance = exp(avgLog) - 1.0f;
-    }
-
-    constexpr float GI_INTENSITY = 5.0f;
-    irradiance *= GI_INTENSITY;
-
-    outputTexture.write(float4(irradiance, confidence), gid);
+    float3 finalIrr = irradianceSum / weightSum;
+    float  finalConf = confidenceOut / weightSum;
+    outputTexture.write(float4(max(finalIrr, float3(0.0f)), finalConf), tid);
 }

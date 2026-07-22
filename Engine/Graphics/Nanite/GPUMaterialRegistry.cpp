@@ -15,7 +15,30 @@ GPUMaterialRegistry::GPUMaterialRegistry() {
 
 GPUMaterialRegistry::~GPUMaterialRegistry() {
 //    std::cout << "[GPUMaterialRegistry] Destroyed, releasing GPU resources" << std::endl;
-    // GPU resources will be released by RHI when ResourceHandles go out of scope
+}
+
+void GPUMaterialRegistry::Shutdown(RHIDeviceBase* device) {
+    if (!device) return;
+    if (materialIDBuffer_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyBuffer(materialIDBuffer_);
+        materialIDBuffer_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (materialDataBuffer_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyBuffer(materialDataBuffer_);
+        materialDataBuffer_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (albedoTextureArray_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyTexture(albedoTextureArray_);
+        albedoTextureArray_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (normalTextureArray_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyTexture(normalTextureArray_);
+        normalTextureArray_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (ormTextureArray_ != rhi::handles::INVALID_RESOURCE) {
+        device->DestroyTexture(ormTextureArray_);
+        ormTextureArray_ = rhi::handles::INVALID_RESOURCE;
+    }
 }
 
 GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterMaterial(graphics::MaterialInstance* instance) {
@@ -158,7 +181,11 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         }
 
         // 🎨 Phase 5: Update material data with texture indices
-//        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 5: Updating material data..." << std::endl;
+        std::cout << "[GPUMaterialRegistry] Phase 5: Rebuilding " << instances.size()
+                  << " materials with texture context ("
+                  << texCtx.albedoToIndex.size() << " albedo, "
+                  << texCtx.normalToIndex.size() << " normal, "
+                  << texCtx.ormToIndex.size() << " ORM unique textures)" << std::endl;
 
         // Rebuild materials_ vector with correct texture indices
         materials_.clear();
@@ -170,6 +197,17 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
             // Extract material data with texture mapping
             MaterialData data = MaterialDataBuilder::ExtractMaterialData(instance, texCtx);
             materials_.push_back(data);
+        }
+
+        // Diagnostic: print first 3 materials' key fields
+        for (size_t i = 0; i < std::min(materials_.size(), (size_t)3); ++i) {
+            const auto& m = materials_[i];
+            std::cout << "  [MaterialID=" << i << "] albedo_idx=" << m.albedo_texture_idx
+                      << " normal_idx=" << m.normal_texture_idx
+                      << " orm_idx=" << m.orm_texture_idx
+                      << " uv_scale=(" << m.uv_scale[0] << "," << m.uv_scale[1] << ")"
+                      << " tint=(" << m.albedo_tint[0] << "," << m.albedo_tint[1] << "," << m.albedo_tint[2] << ")"
+                      << std::endl;
         }
 
         // 🎨 Phase 6: Wait for GPU operations to complete
@@ -253,6 +291,16 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
     if (mappedData) {
         memcpy(mappedData, materials_.data(), materials_.size() * sizeof(MaterialData));
         device->UnmapBuffer(materialDataBuffer_);
+
+        // Diagnostic: verify what was uploaded
+        std::cout << "[GPUMaterialRegistry] UploadToGPU: " << materials_.size()
+                  << " materials, sizeof(MaterialData)=" << sizeof(MaterialData) << std::endl;
+        for (size_t i = 0; i < std::min(materials_.size(), (size_t)3); ++i) {
+            const auto& m = materials_[i];
+            std::cout << "  [MaterialID=" << i << "] UPLOAD: albedo_idx=" << m.albedo_texture_idx
+                      << " uv_scale=(" << m.uv_scale[0] << "," << m.uv_scale[1] << ")"
+                      << std::endl;
+        }
     } else {
         buildError_ = "Failed to map material data buffer";
         std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;

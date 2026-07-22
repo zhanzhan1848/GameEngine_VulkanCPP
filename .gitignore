@@ -379,7 +379,7 @@ xcode_build/
 openspec/
 tasks/
 lib/
-CMake/
+
 .DS_Store
 *.bak
 .vscode/

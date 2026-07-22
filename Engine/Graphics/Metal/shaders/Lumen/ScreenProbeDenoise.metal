@@ -36,7 +36,7 @@ kernel void screen_probe_denoise(
 
     texture2d<float, access::sample> giInput        [[texture(0)]],
     texture2d<float, access::sample> normalTexture   [[texture(1)]],
-    depth2d<float, access::read>     depthTexture    [[texture(2)]],
+    texture2d<float, access::read>   depthTexture    [[texture(2)]],
     texture2d<float, access::write>  giOutput        [[texture(3)]],
 
     constant DenoiseParams& params [[buffer(0)]])
@@ -52,7 +52,7 @@ kernel void screen_probe_denoise(
     sampler bilinear(coord::normalized, filter::linear, address::clamp_to_edge);
 
     float4 centerGI     = giInput.sample(bilinear, centerUV);
-    float  centerDepth  = depthTexture.read(pixel_pos);
+    float  centerDepth  = depthTexture.read(pixel_pos).r;
     float3 centerNormal = decodeNormal(normalTexture.sample(bilinear, centerUV));
 
     // Early out for sky pixels
@@ -86,7 +86,7 @@ kernel void screen_probe_denoise(
             float2 sampleUV = (float2(samplePos) + 0.5f) * invRes;
             float4 sampleGI = giInput.sample(bilinear, sampleUV);
 
-            float  sampleDepth  = depthTexture.read(uint2(samplePos));
+            float  sampleDepth  = depthTexture.read(uint2(samplePos)).r;
             float3 sampleNormal = decodeNormal(normalTexture.sample(bilinear, sampleUV));
 
             // Depth weight

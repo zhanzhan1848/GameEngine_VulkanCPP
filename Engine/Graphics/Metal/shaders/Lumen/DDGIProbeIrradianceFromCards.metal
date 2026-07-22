@@ -6,8 +6,12 @@
  * and SH projection weights, then multiplies by per-card radiance (from
  * DDGICardRadianceAvg) to produce updated probe irradiance SH coefficients.
  *
- * Replaces DDGIUpdateIrradiance when using Surface Cache as radiance source.
- * Uses only L0+L1 (4 SH bands) — L2 coefficients are copied from history.
+ * Confidence-based blending with Path A (SDF Ray Trace):
+ *   - Reads convergenceAge from confidence buffer
+ *   - Young probes (age < 0.33): SC projection dominates (bootstrap)
+ *   - Mature probes (age >= 0.33): Path A result preserved, B contribution = 0
+ *
+ * Uses only L0+L1 (4 SH bands) — L2 coefficients preserved from Path A.
  *
  * Dispatch: (ProbeUpdateCount, 1, 1), threadGroupSize = (64, 1, 1)
  */
@@ -36,7 +40,8 @@ kernel void ddgi_probe_irradiance_from_cards(
     device const float3* card_radiance           [[buffer(3)]],
     device const float3* irradiance_history      [[buffer(4)]],
     device float3* irradiance_output             [[buffer(5)]],
-    device const uint* probeUpdateList           [[buffer(6)]]
+    device const uint* probeUpdateList           [[buffer(6)]],
+    device const float* confidenceBuffer         [[buffer(7)]]
 ) {
     if (gid >= vol.ProbeUpdateCount) return;
 
@@ -56,27 +61,20 @@ kernel void ddgi_probe_irradiance_from_cards(
         sh[3] += c.sh_weights[3] * radiance;
     }
 
-    // Temporal blend with history (same logic as UpdateIrradiance)
     uint base = probeIdx * 9u;
-
     float alpha = vol.ProbeHysteresis;
-
-    // Energy clamping limits
     float3 sh0 = sh[0];
     float l1Limit = max(length(sh0) * 3.0f, 0.1f);
 
-    // Write L0 + L1 (bands 0-3)
+    // Step 1: Compute SC-filtered results (temporal blend with history + energy clamp)
+    float3 scResult[4];
     for (uint i = 0; i < 4u; ++i) {
         float3 history = irradiance_history[base + i];
-
-        // NaN guard
         uint3 bits = as_type<uint3>(history);
         if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u)
             history = float3(0.0);
 
         float3 filtered = mix(history, sh[i], alpha);
-
-        // Energy clamp
         if (i == 0u) {
             float mag = length(filtered);
             if (mag > 10.0f) filtered *= 10.0f / mag;
@@ -84,12 +82,24 @@ kernel void ddgi_probe_irradiance_from_cards(
             float mag = length(filtered);
             if (mag > l1Limit) filtered *= l1Limit / mag;
         }
-
-        irradiance_output[base + i] = filtered;
+        scResult[i] = filtered;
     }
 
-    // L2 bands (4-8): copy from history (not enough card samples for reliable L2)
-    for (uint i = 4u; i < 9u; ++i) {
-        irradiance_output[base + i] = irradiance_history[base + i];
+    // Step 2: Read Path A result (SDF ray trace already wrote to output this frame)
+    float3 pathA[4];
+    for (uint i = 0; i < 4u; ++i) {
+        pathA[i] = irradiance_output[base + i];
     }
+
+    // Step 3: Confidence-based blend
+    // convergenceAge ramps 0→1 over ~30 frames; young probes get SC bootstrap
+    float convergenceAge = confidenceBuffer[probeIdx * 4u + 3u];
+    float bootstrapWeight = saturate(1.0 - convergenceAge * 3.0);
+
+    // Write blended L0 + L1
+    for (uint i = 0; i < 4u; ++i) {
+        irradiance_output[base + i] = mix(pathA[i], scResult[i], bootstrapWeight);
+    }
+
+    // L2 bands (4-8): preserve Path A values (already in output from SDF ray trace)
 }

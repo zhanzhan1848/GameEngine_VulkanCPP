@@ -1,4 +1,4 @@
-#include "CommonFunction.metal"
+#include "Common.h"
 
 // Box Distance
 float boxDistance( float3 position, float3 center ) 
