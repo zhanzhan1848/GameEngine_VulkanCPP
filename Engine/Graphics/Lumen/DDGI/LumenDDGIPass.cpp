@@ -403,6 +403,17 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // hit_distance_buffer
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probeUpdateList
         };
+        // R32Float 3D cascades must be declared as 3D + UnfilterableFloat on Dawn
+        // (see trace_set_layout_ block above). Without these flags, CreateBindGroup
+        // validation fails every frame and the pipeline collapses to [Invalid],
+        // leaving Mode 11 a solid color.
+        sdfTraceBindings[0].is3D = true;
+        sdfTraceBindings[1].is3D = true;
+        sdfTraceBindings[2].is3D = true;
+        sdfTraceBindings[0].unfilterableFloat = true;
+        sdfTraceBindings[1].unfilterableFloat = true;
+        sdfTraceBindings[2].unfilterableFloat = true;
+        sdfTraceBindings[5].readonly = true;  // probe_update_list: var<storage, read>
         DescriptorSetLayoutDesc layoutDesc{6, sdfTraceBindings};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
@@ -487,21 +498,39 @@ void LumenDDGIPass::CreatePipelines() {
         pipeDesc.threadGroupSize = {64, 1, 1};
         trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
-    // SDF trace (split pass 1): texture3D-only, (8,8,1) threadgroup
-    {
-        ComputePipelineDesc pipeDesc{};
-        pipeDesc.computeShader = sdfTraceShader;
-        pipeDesc.layout = sdf_trace_layout_;
-        pipeDesc.threadGroupSize = {8, 8, 1};
-        sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
-    }
-    // Finalize (split pass 2): buffer-only, (8,8,1) threadgroup
-    {
-        ComputePipelineDesc pipeDesc{};
-        pipeDesc.computeShader = finalizeShader;
-        pipeDesc.layout = finalize_layout_;
-        pipeDesc.threadGroupSize = {8, 8, 1};
-        finalize_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    // SDF trace (split pass 1) + Finalize (split pass 2) — Apple Silicon optimization
+    // that splits texture3D-only tracing from buffer-only card search.
+    //
+    // SKIP ON DAWN: the split-pass WGSL entry points (ddgi_trace_sdf,
+    // ddgi_trace_finalize) were never ported from Metal. Compiling the pipeline
+    // against the existing ddgi_trace_rays module produces a non-null but
+    // [Invalid] pipeline (Dawn returns invalid-but-non-null on validation
+    // failure). The `!= INVALID_PIPELINE` check at the dispatch site then
+    // passes, BindComputePipeline([Invalid]) poisons the command buffer, and
+    // every subsequent encode — including the meshlet GBuffer pass — becomes
+    // [Invalid] too, collapsing Mode 11 to solid clear color.
+    //
+    // Leaving both as INVALID_PIPELINE routes Dawn through the legacy
+    // trace_pipeline_ path below, which uses ddgi_trace_rays (entry that
+    // exists in WGSL).
+    const bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    if (!isDawn) {
+        // SDF trace (split pass 1): texture3D-only, (8,8,1) threadgroup
+        {
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = sdfTraceShader;
+            pipeDesc.layout = sdf_trace_layout_;
+            pipeDesc.threadGroupSize = {8, 8, 1};
+            sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+        }
+        // Finalize (split pass 2): buffer-only, (8,8,1) threadgroup
+        {
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = finalizeShader;
+            pipeDesc.layout = finalize_layout_;
+            pipeDesc.threadGroupSize = {8, 8, 1};
+            finalize_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+        }
     }
     // Irradiance update uses (8,8,1) — cooperative, one group per probe
     {
@@ -955,6 +984,24 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
 
+            // === [Mode11 Perf] per-section timing instrumentation ===
+            // Tracks CPU-side encoding/upload time within the Execute lambda.
+            // GPU work is async — Dispatch returns immediately. If GPU were the
+            // bottleneck, these CPU times would all be <5ms; GPUTask in the trace
+            // would show the actual GPU cost.
+            namespace chr = std::chrono;
+            struct PerfAccum {
+                u64 total_us = 0, upload_global_us = 0, upload_volume_us = 0;
+                u64 trace_us = 0, irradiance_us = 0, depth_us = 0;
+                u32 samples = 0;
+            };
+            static PerfAccum s_perf;
+            auto T0 = chr::steady_clock::now();
+            auto _sec = [](chr::steady_clock::time_point a, chr::steady_clock::time_point b) -> u64 {
+                return (u64)chr::duration_cast<chr::microseconds>(b - a).count();
+            };
+            chr::steady_clock::time_point _t1, _t2, _t3, _t4, _t5;
+
             // Static-bake mode (Mode 10): skip runtime TraceRays/UpdateIrradiance/UpdateDepth.
             // The static data was copied into all 3 irradiance_buffers_/depth_buffers_
             // by InitializeProbesFromStatic; runtime EMA blending would progressively
@@ -1042,6 +1089,41 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 }
             }
 
+            // === [Mode 11 Diagnostic] One-shot dump of dispatch-relevant state ===
+            if (dynamic_mode_) {
+                static bool diagOnce = false;
+                if (!diagOnce) {
+                    diagOnce = true;
+                    std::fprintf(stderr,
+                        "=== [Mode11 Diag] frame=%u ===\n"
+                        "  sdfAvailable=%d sdfTex[0..2]=%llu %llu %llu\n"
+                        "  trace_pipeline=%llu sdf_trace_pipeline=%llu finalize_pipeline=%llu\n"
+                        "  ray_data_buffer=%llu hit_distance_buffer=%llu\n"
+                        "  prevColorTex=%llu gbufferAlbedoTex=%llu\n"
+                        "  sc_enabled=%d updateCount=%u rays/probe=%u\n"
+                        "  probeCountTotal=%u max_probes_per_frame=%u\n",
+                        (unsigned)current_frame_index,
+                        sdfAvailable ? 1 : 0,
+                        (unsigned long long)sdfTextures[0],
+                        (unsigned long long)sdfTextures[1],
+                        (unsigned long long)sdfTextures[2],
+                        (unsigned long long)trace_pipeline_,
+                        (unsigned long long)sdf_trace_pipeline_,
+                        (unsigned long long)finalize_pipeline_,
+                        (unsigned long long)ray_data_buffer_,
+                        (unsigned long long)hit_distance_buffer_,
+                        (unsigned long long)prevColorTex,
+                        (unsigned long long)gbufferAlbedoTex,
+                        sc_enabled_ ? 1 : 0,
+                        (unsigned)updateCount,
+                        (unsigned)params_.rays_per_probe,
+                        (unsigned)probeCountTotal,
+                        (unsigned)max_probes_per_frame_);
+                    std::fflush(stderr);
+                }
+            }
+
+            _t1 = chr::steady_clock::now();
             // ---- Upload GlobalShaderData ----
             {
                 // Must match CommonTypes.metal GlobalShaderData layout
@@ -1088,6 +1170,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 }
             }
 
+            _t2 = chr::steady_clock::now();
             // ---- Upload DDGIVolumeData ----
             {
                 auto* mapped = static_cast<DDGIVolumeData*>(device_->MapBuffer(volume_cb_[frameIdx]));
@@ -1129,17 +1212,17 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.SkyColor = {sky * 0.85f, sky * 0.85f, sky * 1.0f, 0.0f};
                     vd.Albedo   = {alb, alb, alb, 0.0f};
 
-                    // Fill SDF cascade data from FieldRegistry via FieldView
-                    {
-                        field::FieldDescriptor sdf_cascades[4];
-                        u32 count = field::FieldRegistry::Get().FindCascaded(
-                            field::FieldSemantic::GlobalSDF, sdf_cascades, 4);
-                        if (count > 0) {
-                            field::FieldView::WriteSDFToDDGI(sdf_cascades, count, vd);
-                        } else {
-                            vd.SdfCascadeCount = 0;
-                        }
+                    // Fill SDF cascade data from GlobalSDF (matches reference path —
+                    // FieldRegistry indirection was returning count=0 on WASM where
+                    // the registry isn't populated by the test harness).
+                    for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
+                        const auto& cascade = sdf.GetCascade(c);
+                        vd.SdfOrigins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
+                        vd.SdfVoxelSizes[c] = {cascade.voxel_size, 0.0f, 0.0f, 0.0f};
+                        vd.SdfExtents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
+                        vd.SdfResolutions[c] = cascade.resolution;
                     }
+                    vd.SdfCascadeCount = sdf.GetConfig().cascade_count;
 
                     vd.ProbeUpdateCount = updateCount;  // matches actual dispatch count
                     vd.ProbeRelocationShift[0] = relocation_shift_[0];
@@ -1169,7 +1252,17 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
             // Read back variance from previous frame's depth buffer for priority scheduling.
             // histIdx is 2 frames behind — GPU has long since finished writing to it.
-            if (!isFirstFrame &&
+            //
+            // SKIP ON WASM/Dawn: MapBuffer on a GPU-only storage buffer returns a
+            // zeroed staging buffer (per Dawn backend semantics), and the Unmap
+            // writes those zeros back into the GPU buffer — clobbering the depth
+            // history that next frame's temporal EMA depends on. The readback is
+            // also a GPU sync point, killing CPU/GPU parallelism and tanking
+            // framerate (Mode 11 dropped to ~2 FPS with it on). Fall back to
+            // distance + age priority only on WASM.
+            const bool isWasm = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+            if (!isWasm &&
+                !isFirstFrame &&
                 probe_states_.size() == probeCountTotal &&
                 probe_update_list_buffers_[frameIdx] != handles::INVALID_RESOURCE) {
                 float* depthData = static_cast<float*>(device_->MapBuffer(depth_buffers_[histIdx]));
@@ -1260,13 +1353,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 }
             }
 
+            _t3 = chr::steady_clock::now();
             // ================================================================
             // Sub-pass 1: TraceRays — split into SDF trace + finalize
             // Apple Silicon: separate texture3D reads from buffer reads
             // ================================================================
-            printf("[DDGI] Sub-pass 1: TraceRays begin (updateCount=%u, sc=%d, sdf=%d)\n",
-                   updateCount, sc_enabled_ ? 1 : 0, sdfAvailable ? 1 : 0);
-            fflush(stdout);
             if (sdfAvailable &&
                 sdf_trace_pipeline_ != handles::INVALID_PIPELINE &&
                 finalize_pipeline_ != handles::INVALID_PIPELINE &&
@@ -1326,7 +1417,6 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     cmd->Dispatch(updateCount, 1, 1);
                     }
                 }
-                printf("[DDGI] Sub-pass 1: TraceRays done\n"); fflush(stdout);
             } else if (sdfAvailable &&
                 trace_pipeline_ != handles::INVALID_PIPELINE &&
                 ray_data_buffer_ != handles::INVALID_RESOURCE) {
@@ -1414,10 +1504,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                 AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
 
+            _t4 = chr::steady_clock::now();
             // ================================================================
             // Sub-pass 2: UpdateIrradiance
             // ================================================================
-            printf("[DDGI] Sub-pass 2: UpdateIrradiance begin\n"); fflush(stdout);
             if (irradiance_pipeline_ != handles::INVALID_PIPELINE &&
                 irradiance_buffers_[outIdx] != handles::INVALID_RESOURCE) {
                 // Update irradiance descriptor set
@@ -1436,13 +1526,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 const DescriptorSetHandle sets[] = { irradiance_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, irradiance_layout_, 0, 1, sets, 0, nullptr);
 
-                cmd->Dispatch(updateCount, 1, 1);
-                printf("[DDGI] Sub-pass 2: UpdateIrradiance dispatched\n"); fflush(stdout);
+                cmd->Dispatch((updateCount + 63) / 64, 1, 1);
             }
             // ================================================================
             if (depth_pipeline_ != handles::INVALID_PIPELINE &&
                 depth_buffers_[outIdx] != handles::INVALID_RESOURCE) {
-                printf("[DDGI] Sub-pass 3: UpdateDepth begin\n"); fflush(stdout);
                 DescriptorData depthParams[] = {
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
@@ -1457,12 +1545,34 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 const DescriptorSetHandle sets[] = { depth_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, depth_layout_, 0, 1, sets, 0, nullptr);
 
-                cmd->Dispatch(updateCount, 1, 1);
-                printf("[DDGI] Sub-pass 3: UpdateDepth dispatched\n"); fflush(stdout);
+                cmd->Dispatch((updateCount + 63) / 64, 1, 1);
             }
             cmd->MemoryBarrier(
                 PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                 AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+
+            // === [Mode11 Perf] report ===
+            _t5 = chr::steady_clock::now();
+            s_perf.samples++;
+            s_perf.total_us       += _sec(T0, _t5);
+            s_perf.upload_global_us += _sec(T0, _t2);   // entry → end of GlobalShaderData
+            s_perf.upload_volume_us += _sec(_t2, _t3);  // VolumeData upload + priority sched
+            s_perf.trace_us       += _sec(_t3, _t4);
+            s_perf.irradiance_us  += _sec(_t4, _t5);    // irradiance + depth combined
+            if (s_perf.samples >= 60) {
+                std::fprintf(stderr,
+                    "[DDGI-Perf] samples=%u avg_total=%.2fms\n"
+                    "  pre+global_upload=%.2fms  volume_upload+sched=%.2fms\n"
+                    "  trace_subpass=%.2fms  irrad+depth_subpass=%.2fms\n",
+                    s_perf.samples,
+                    s_perf.total_us / 1000.0 / s_perf.samples,
+                    s_perf.upload_global_us / 1000.0 / s_perf.samples,
+                    s_perf.upload_volume_us / 1000.0 / s_perf.samples,
+                    s_perf.trace_us / 1000.0 / s_perf.samples,
+                    s_perf.irradiance_us / 1000.0 / s_perf.samples);
+                std::fflush(stderr);
+                s_perf = PerfAccum{};
+            }
         }
     );
 

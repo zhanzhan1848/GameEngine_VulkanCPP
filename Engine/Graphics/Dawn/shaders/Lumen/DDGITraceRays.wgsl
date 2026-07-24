@@ -541,12 +541,17 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
 
     if (hit.hit != 0u) {
         // Canonical DDGI radiance (Majercik et al. JCGT 2019). At the SDF hit:
-        //   L_out = (albedo/π) · (E_direct + E_sky + π · L_i_prev)
+        //   L_out = (albedo/π) · (E_direct + E_sky + π · L_i_prev · feedback_weight)
         // where L_i_prev is the previous-frame probe grid's incoming radiance
         // folded into the surface normal via SH (samplePrevProbeGrid → shDot4).
         // Multi-bounce emerges naturally: prev frame's irradiance already
         // contains 1-bounce, this frame re-traces and contributes it back,
         // bounded by per-surface albedo each bounce.
+        //
+        // feedback_weight (0.85) damps the multi-bounce feedback loop. Without
+        // it the steady-state is probe = (albedo/π)·(E_dir+E_sky)/(1-albedo),
+        // which for albedo=0.6 amplifies irradiance 2.5× and saturates ACES.
+        // 0.85 is canonical DDGI's per-bounce hysteresis (RTXGI SDK default).
         //
         // Scope cuts vs RTXGI SDK: no shadow ray at hit (direct light leaks
         // through walls — known trade-off), no sky occlusion ray (sky radiates
@@ -566,7 +571,8 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
         let E_sky: vec3<f32> = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp);
         let L_i_prev: vec3<f32> = samplePrevProbeGrid(hitPos, N);
         let albedo: vec3<f32> = volume.Albedo.xyz;
-        let L_out: vec3<f32> = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev);
+        let feedback_weight: f32 = 0.85;
+        let L_out: vec3<f32> = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev * feedback_weight);
         result.radiance_and_dist = vec4<f32>(L_out, hit.distance);
     } else {
         // Miss: ray escaped to sky.

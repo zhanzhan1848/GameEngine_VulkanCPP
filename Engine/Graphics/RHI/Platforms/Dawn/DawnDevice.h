@@ -69,6 +69,13 @@ public:
         u32 x, u32 y, u32 z, u32 width, u32 height, u32 depth, u32 rowPitch,
         u32 mipLevel = 0);
 
+    // Buffer data upload via wgpuQueueWriteBuffer. Without this override, the
+    // base class default returns false and RenderMesh::Create silently fails
+    // to upload vertex/index data — every ForwardPBR/ShadowAndIBL/Deferred
+    // draw call then reads uninitialized buffers and the screen renders as
+    // the clear color.
+    bool UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset = 0) override;
+
     // Flush all persistently mapped staging buffers (call before direct wgpuQueueSubmit)
     void FlushStagingBuffers();
 

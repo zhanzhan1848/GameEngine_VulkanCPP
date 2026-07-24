@@ -221,7 +221,22 @@ void GlobalSDF::UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& sn
         return;
     }
 
-    cascade.origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
+    // Mark re-voxelization needed only when the snapped grid cell changes.
+    // For static scenes this is rare (cascade_size is 60/120/240m), so the
+    // per-frame voxelization cost collapses to ~0 after the initial fill.
+    // Without this guard, needs_voxelization stays true forever (default at
+    // init) and TestDawnForwardRenderer's `if (CascadeNeedsVoxelization(c))`
+    // dispatches a 262K-invocation compute shader EVERY FRAME for EACH of
+    // the 3 cascades. This was the Mode 11 WASM perf cliff: 4 FPS → expected
+    // 100+ FPS once restored.
+    math::v3 new_origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
+    if (!cascade.ever_voxelized
+        || new_origin.x != cascade.origin.x
+        || new_origin.y != cascade.origin.y
+        || new_origin.z != cascade.origin.z) {
+        cascade.needs_voxelization = true;
+    }
+    cascade.origin = new_origin;
 }
 
 void GlobalSDF::MergeCascades() {
@@ -604,7 +619,7 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
         ++s_dv_calls;
     }
 
-    const auto& cascade = cascades_[cascade_index];
+    auto& cascade = cascades_[cascade_index];
     if (!cascade.is_valid || cascade.sdf_texture == rhi::handles::INVALID_RESOURCE) return;
 
     // Strategy path — preferred when a provider is plugged in (e.g., editor_mode
@@ -704,6 +719,13 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
     u32 gy = (res + 3) / 4;
     u32 gz = (res + 3) / 4;
     cmd->Dispatch(gx, gy, gz);
+
+    // Record the dispatch for this cascade and mark it satisfied until the
+    // next origin snap. One-shot semantics: each origin change records exactly
+    // one dispatch. Without this, needs_voxelization stays true forever and
+    // TestDawnForwardRenderer re-dispatches every frame.
+    cascade.needs_voxelization = false;
+    cascade.ever_voxelized     = true;
 
     // Barrier: SDF texture UAV → SRV (for DDGI trace to read)
     {

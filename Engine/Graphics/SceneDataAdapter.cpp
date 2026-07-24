@@ -131,32 +131,31 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         materials.reserve(numMaterials);
         tempMaterials.reserve(numMaterials);
         
-        // Detect fields-per-material by probing the data at two candidate offsets:
-        //   3-field format (name, diffuse, normal): after numMaterials*3 strings,
-        //     the next u32 should be lodCount (typically 1-10).
-        //   5-field format (name, diffuse, normal, roughness, metallic): after
-        //     numMaterials*5 strings, the next u32 should be lodCount.
-        // We scan forward from the start of material data to count how many
-        // consecutive length-prefixed strings exist before hitting a non-string u32,
-        // then divide by numMaterials to get the field count.
+        // Detect fields-per-material by reading EXACTLY numMaterials*N strings
+        // (N=5 then N=3) and validating that the next u32 is a plausible lod_count.
+        // The previous "count consecutive strings" heuristic would over-count when
+        // the lod_count itself looked like a string length (e.g. Sponza_process_rebuild
+        // has 5-field materials ending at u32=381 lod_count, which the old probe
+        // miscounted as a 126th string and fell back to 3-field — corrupting all
+        // subsequent offsets).
         int fieldsPerMaterial = 3; // default: older format
-        {
-            size_t probeOffset = reader.GetOffset();
-            int stringCount = 0;
-            for (int s = 0; s < (int)(numMaterials * 6); ++s) {
-                if (probeOffset + 4 > size) break;
-                u32 sLen = *reinterpret_cast<const u32*>(static_cast<const u8*>(data) + probeOffset);
-                if (sLen > 500) break; // not a string length
-                probeOffset += 4 + sLen;
-                if (probeOffset > size) break;
-                stringCount++;
+        auto tryFieldCount = [&](int fieldsCount) -> bool {
+            size_t probe = reader.GetOffset();
+            for (int s = 0; s < (int)numMaterials * fieldsCount; ++s) {
+                if (probe + 4 > size) return false;
+                u32 sLen = *reinterpret_cast<const u32*>(static_cast<const u8*>(data) + probe);
+                if (sLen > 500) return false; // implausible string length
+                probe += 4 + sLen;
+                if (probe > size) return false;
             }
-            if (stringCount == (int)(numMaterials * 5)) {
-                fieldsPerMaterial = 5;
-            } else if (stringCount == (int)(numMaterials * 3)) {
-                fieldsPerMaterial = 3;
-            }
-            // else: keep default 3
+            if (probe + 4 > size) return false;
+            u32 maybeLodCount = *reinterpret_cast<const u32*>(static_cast<const u8*>(data) + probe);
+            return maybeLodCount > 0 && maybeLodCount < 100000;
+        };
+        if (tryFieldCount(5)) {
+            fieldsPerMaterial = 5;
+        } else if (tryFieldCount(3)) {
+            fieldsPerMaterial = 3;
         }
 
         for (u32 i = 0; i < numMaterials; ++i) {

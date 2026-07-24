@@ -1142,6 +1142,12 @@ void DawnDevice::setBufferDirtySizeImpl(ResourceHandle handle, u64 size) {
     buf->SetDirtySize(size);
 }
 
+bool DawnDevice::UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset) {
+    DawnBuffer* buf = GetBuffer(handle);
+    if (!buf || !data || size == 0) return false;
+    return buf->updateDataImpl(data, size, offset);
+}
+
 void DawnDevice::UpdateTextureData(ResourceHandle handle, const void* data,
     u32 x, u32 y, u32 z, u32 width, u32 height, u32 depth, u32 rowPitch,
     u32 mipLevel) {
