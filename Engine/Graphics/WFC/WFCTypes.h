@@ -41,7 +41,7 @@ struct WFCTile {
     u32              variant_count;
     bool             is_organic;
     bool             is_rotationally_symmetric;
-    u8               _pad[6];               // explicit pad to 8-byte boundary
+    u8               _pad[6];               // explicit tail pad; sizeof(WFCTile)=304, alignof=16 (driven by v3)
 };
 
 // Per-cell wave state (kept small for cache efficiency)
@@ -97,5 +97,12 @@ constexpr WFCFace OppositeFace(WFCFace f) {
     u32 v = static_cast<u32>(f);
     return static_cast<WFCFace>(v ^ 1);
 }
+
+static_assert(static_cast<u32>(WFCFace::PosX) == 0 && static_cast<u32>(WFCFace::NegX) == 1,
+              "WFCFace must maintain +/- pair ordering for OppositeFace XOR trick");
+static_assert(static_cast<u32>(WFCFace::PosY) == 2 && static_cast<u32>(WFCFace::NegY) == 3,
+              "WFCFace must maintain +/- pair ordering for OppositeFace XOR trick");
+static_assert(static_cast<u32>(WFCFace::PosZ) == 4 && static_cast<u32>(WFCFace::NegZ) == 5,
+              "WFCFace must maintain +/- pair ordering for OppositeFace XOR trick");
 
 } // namespace primal::graphics::wfc
