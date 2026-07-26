@@ -26,7 +26,12 @@ utl::vector<TileAdjacencyTable::Compatibility>
 TileAdjacencyTable::GetCompatible(wfc_tile_id a, u32 a_var, WFCFace face) const {
     // Phase A.1: linear scan (replaced with lookup table in Phase A.2 if perf needs)
     utl::vector<Compatibility> result;
-    const u64 prefix_mask = 0xFFFF'FF'F'F00000000ULL; // top 32 bits
+    // Mask only the 28-bit prefix (tile_a + variant_a + face); exclude pad bits [35:32]
+    // reserved for future flags. Build expression from field widths so it stays in sync
+    // with MakeKey's layout.
+    const u64 prefix_mask = (static_cast<u64>(0xFFFF) << 48)  // tile_a
+                          | (static_cast<u64>(0xFF)   << 40)  // variant_a
+                          | (static_cast<u64>(0xF)    << 36); // face
     const u64 prefix = (static_cast<u64>(static_cast<u32>(a) & 0xFFFF) << 48)
                      | (static_cast<u64>(a_var & 0xFF) << 40)
                      | (static_cast<u64>(static_cast<u32>(face) & 0xF) << 36);
