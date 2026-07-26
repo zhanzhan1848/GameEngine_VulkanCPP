@@ -1878,3 +1878,18 @@ set_target_properties(TestWFCConfig PROPERTIES
 target_compile_definitions(TestWFCConfig PRIVATE DEBUG _DEBUG)
 set_target_properties(TestWFCConfig PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestWFCSolveBudget Graphics/WFC/TestWFCSolveBudget.cpp)
+target_include_directories(TestWFCSolveBudget PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCSolveBudget PRIVATE Engine)
+add_test(NAME TestWFCSolveBudget COMMAND TestWFCSolveBudget)
+set_target_properties(TestWFCSolveBudget PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCSolveBudget PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCSolveBudget PROPERTIES FOLDER "Tests/Graphics/WFC")
+
