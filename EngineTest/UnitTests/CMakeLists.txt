@@ -1848,3 +1848,18 @@ set_target_properties(TestWaveGrid PROPERTIES
 target_compile_definitions(TestWaveGrid PRIVATE DEBUG _DEBUG)
 set_target_properties(TestWaveGrid PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestTileAdjacency Graphics/WFC/TestTileAdjacency.cpp)
+target_include_directories(TestTileAdjacency PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestTileAdjacency PRIVATE Engine)
+add_test(NAME TestTileAdjacency COMMAND TestTileAdjacency)
+set_target_properties(TestTileAdjacency PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestTileAdjacency PRIVATE DEBUG _DEBUG)
+set_target_properties(TestTileAdjacency PROPERTIES FOLDER "Tests/Graphics/WFC")
+
