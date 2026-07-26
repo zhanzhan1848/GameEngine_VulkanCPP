@@ -33,4 +33,19 @@ const WFCCell& WaveGrid::CellAt(WFCGridCoord c) const {
     return cells_[CoordToIndex(c)];
 }
 
+void WaveGrid::Resize(WFCGridCoord new_size) {
+    assert(new_size.x > 0 && new_size.y > 0 && new_size.z > 0);
+    size_ = new_size;
+
+    const u32 count = static_cast<u32>(new_size.x) * new_size.y * new_size.z;
+    cells_.resize(count);
+    propagation_dirty_.resize(count, 0);
+
+    // Reset all cells to default state — preserve no state across resize
+    // (solver state is invalid for new topology anyway)
+    for (u32 i = 0; i < count; ++i) {
+        cells_[i] = WFCCell{};
+    }
+}
+
 } // namespace primal::graphics::wfc

@@ -37,11 +37,43 @@ TestResult TestWaveGrid_Initialize_Clears_Cells() {
     return TestResult::Passed;
 }
 
+TestResult TestWaveGrid_Resize_Grows() {
+    WaveGrid grid;
+    grid.Initialize({2, 2, 2}, 8);
+    grid.Resize({4, 4, 4});
+    TEST_ASSERT_EQ(4, grid.Size().x, "Resize updates X");
+    TEST_ASSERT_EQ(4, grid.Size().y, "Resize updates Y");
+    TEST_ASSERT_EQ(4, grid.Size().z, "Resize updates Z");
+    TEST_ASSERT_EQ(64u, grid.CellCount(), "Resize updates CellCount");
+    return TestResult::Passed;
+}
+
+TestResult TestWaveGrid_Resize_Shrinks() {
+    WaveGrid grid;
+    grid.Initialize({4, 4, 4}, 8);
+    grid.CellAt({0, 0, 0}).collapsed = true;
+    grid.Resize({2, 2, 2});
+    TEST_ASSERT_EQ(8u, grid.CellCount(), "Shrunk CellCount");
+    TEST_ASSERT(!grid.Cells()[0].collapsed, "Shrink resets cells");
+    return TestResult::Passed;
+}
+
+TestResult TestWaveGrid_Resize_Preserves_MaxTileVariants() {
+    WaveGrid grid;
+    grid.Initialize({2, 2, 2}, 16);
+    grid.Resize({8, 8, 8});
+    TEST_ASSERT_EQ(16u, grid.MaxTileVariants(), "Resize preserves max tile variants");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WaveGrid");
     TEST_CASE(suite, "Initialize_And_Size", TestWaveGrid_Initialize_And_Size);
     TEST_CASE(suite, "CellAt_Valid_Coord", TestWaveGrid_CellAt_Valid_Coord);
     TEST_CASE(suite, "Initialize_Clears_Cells", TestWaveGrid_Initialize_Clears_Cells);
+    TEST_CASE(suite, "Resize_Grows", TestWaveGrid_Resize_Grows);
+    TEST_CASE(suite, "Resize_Shrinks", TestWaveGrid_Resize_Shrinks);
+    TEST_CASE(suite, "Resize_Preserves_MaxTileVariants", TestWaveGrid_Resize_Preserves_MaxTileVariants);
     suite.RunAllTests();
     return 0;
 }
