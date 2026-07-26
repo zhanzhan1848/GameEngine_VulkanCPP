@@ -1828,3 +1828,23 @@ set_target_properties(TestDebugDrawQueue PROPERTIES
 target_compile_definitions(TestDebugDrawQueue PRIVATE DEBUG _DEBUG)
 set_target_properties(TestDebugDrawQueue PROPERTIES FOLDER "Tests/Graphics")
 
+# ==================================
+# WFC (Wave Function Collapse) Tests
+# Phase A.1 foundation: WaveGrid Initialize/CellAt/Size
+# ==================================
+
+add_executable(TestWaveGrid Graphics/WFC/TestWaveGrid.cpp)
+target_include_directories(TestWaveGrid PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWaveGrid PRIVATE Engine)
+add_test(NAME TestWaveGrid COMMAND TestWaveGrid)
+set_target_properties(TestWaveGrid PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWaveGrid PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWaveGrid PROPERTIES FOLDER "Tests/Graphics/WFC")
+
