@@ -1,6 +1,10 @@
 #include "../../TestFramework.h"
 #include "Engine/Graphics/WFC/WFCStepBuffer.h"
 
+#include <thread>
+#include <atomic>
+#include <vector>
+
 using namespace primal::graphics::wfc;
 using namespace Engine::Test;
 
@@ -49,11 +53,54 @@ TestResult TestWFCStepBuffer_Empty_Consume_Returns_Zero() {
     return TestResult::Passed;
 }
 
+TestResult TestWFCStepBuffer_Concurrent_Producer_Consumer() {
+    WFCStepBuffer buf;
+    std::atomic<bool>     producer_done{false};
+    std::atomic<u32>      total_pushed{0};
+    std::atomic<u32>      total_consumed{0};
+    constexpr u32         kItems = 5000;
+
+    // Producer thread: push kItems steps
+    std::thread producer([&]() {
+        for (u32 i = 0; i < kItems; ++i) {
+            WFCStep s{};
+            s.kind = WFCStepKind::Collapse;
+            s.coord = {static_cast<s32>(i), 0, 0};
+            buf.Push(s);
+            total_pushed.fetch_add(1, std::memory_order_relaxed);
+        }
+        producer_done.store(true, std::memory_order_release);
+    });
+
+    // Consumer thread: drain until producer done AND buffer empty
+    std::thread consumer([&]() {
+        WFCStep batch[64];
+        while (true) {
+            u32 n = buf.Consume(batch, 64);
+            total_consumed.fetch_add(n, std::memory_order_relaxed);
+            if (producer_done.load(std::memory_order_acquire) && buf.Empty()) {
+                // Final drain after producer finished
+                n = buf.Consume(batch, 64);
+                total_consumed.fetch_add(n, std::memory_order_relaxed);
+                if (n == 0) break;
+            }
+        }
+    });
+
+    producer.join();
+    consumer.join();
+
+    TEST_ASSERT_EQ(kItems, total_pushed.load(), "All items pushed");
+    TEST_ASSERT_EQ(kItems, total_consumed.load(), "All items consumed");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCStepBuffer");
     TEST_CASE(suite, "Push_And_Consume_Single", TestWFCStepBuffer_Push_And_Consume_Single);
     TEST_CASE(suite, "Consume_Respects_Max_Count", TestWFCStepBuffer_Consume_Respects_Max_Count);
     TEST_CASE(suite, "Empty_Consume_Returns_Zero", TestWFCStepBuffer_Empty_Consume_Returns_Zero);
+    TEST_CASE(suite, "Concurrent_Producer_Consumer", TestWFCStepBuffer_Concurrent_Producer_Consumer);
     suite.RunAllTests();
     return 0;
 }
