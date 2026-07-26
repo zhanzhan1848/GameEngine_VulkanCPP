@@ -33,6 +33,16 @@ const WFCCell& WaveGrid::CellAt(WFCGridCoord c) const {
     return cells_[CoordToIndex(c)];
 }
 
+void WaveGrid::Reset() {
+    const u32 count = cells_.size();
+    for (u32 i = 0; i < count; ++i) {
+        cells_[i] = WFCCell{};
+    }
+    for (u32 i = 0; i < count; ++i) {
+        propagation_dirty_[i] = 0;
+    }
+}
+
 void WaveGrid::Resize(WFCGridCoord new_size) {
     assert(new_size.x > 0 && new_size.y > 0 && new_size.z > 0);
     size_ = new_size;

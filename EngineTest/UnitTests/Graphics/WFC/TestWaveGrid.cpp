@@ -66,6 +66,20 @@ TestResult TestWaveGrid_Resize_Preserves_MaxTileVariants() {
     return TestResult::Passed;
 }
 
+TestResult TestWaveGrid_Reset_Clears_Collapse_But_Keeps_Size() {
+    WaveGrid grid;
+    grid.Initialize({3, 3, 3}, 8);
+    grid.CellAt({1, 1, 1}).collapsed = true;
+    grid.CellAt({1, 1, 1}).candidate_count = 3;
+    grid.Reset();
+    TEST_ASSERT_EQ(27u, grid.CellCount(), "Reset preserves CellCount");
+    for (const auto& c : grid.Cells()) {
+        TEST_ASSERT(!c.collapsed, "Reset clears collapsed flag");
+        TEST_ASSERT_EQ(0u, c.candidate_count, "Reset clears candidate_count");
+    }
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WaveGrid");
     TEST_CASE(suite, "Initialize_And_Size", TestWaveGrid_Initialize_And_Size);
@@ -74,6 +88,7 @@ int main() {
     TEST_CASE(suite, "Resize_Grows", TestWaveGrid_Resize_Grows);
     TEST_CASE(suite, "Resize_Shrinks", TestWaveGrid_Resize_Shrinks);
     TEST_CASE(suite, "Resize_Preserves_MaxTileVariants", TestWaveGrid_Resize_Preserves_MaxTileVariants);
+    TEST_CASE(suite, "Reset_Clears_Collapse_But_Keeps_Size", TestWaveGrid_Reset_Clears_Collapse_But_Keeps_Size);
     suite.RunAllTests();
     return 0;
 }
