@@ -1863,3 +1863,18 @@ set_target_properties(TestTileAdjacency PROPERTIES
 target_compile_definitions(TestTileAdjacency PRIVATE DEBUG _DEBUG)
 set_target_properties(TestTileAdjacency PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestWFCConfig Graphics/WFC/TestWFCConfig.cpp)
+target_include_directories(TestWFCConfig PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCConfig PRIVATE Engine)
+add_test(NAME TestWFCConfig COMMAND TestWFCConfig)
+set_target_properties(TestWFCConfig PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCConfig PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCConfig PROPERTIES FOLDER "Tests/Graphics/WFC")
+
