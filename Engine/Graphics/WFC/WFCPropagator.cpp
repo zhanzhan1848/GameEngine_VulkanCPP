@@ -38,14 +38,92 @@ void WFCPropagator::OnCellCollapsed(const WaveGrid& grid, WFCGridCoord coord,
     TryEnqueueNeighbor(dirty_queue_, grid, {coord.x, coord.y, coord.z - 1});
 }
 
-u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& /*adjacency*/,
+u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
                            bool& out_contradiction) {
-    // Phase A.2 Task 4 will fill this in with AC-4 logic.
-    // For Task 3 we just clear the queue (no propagation yet) so tests pass.
-    (void)grid;
     out_contradiction = false;
     u32 changed = 0;
-    dirty_queue_.clear();
+
+    // Snapshot the queue at pass start. Any neighbors enqueued during this pass
+    // (via OnCellCollapsed below) land in dirty_queue_ for the NEXT pass — the
+    // caller is expected to invoke RunPass in a loop until DirtyQueueSize()==0.
+    utl::vector<WFCGridCoord> current_queue;
+    current_queue.swap(dirty_queue_);
+
+    for (WFCGridCoord c : current_queue) {
+        WFCCell& cell = grid.CellAt(c);
+        if (cell.collapsed) continue;
+
+        // For each face direction, look at the neighbor. If the neighbor is
+        // collapsed, prune any of our candidates that are not compatible with
+        // the neighbor's (tile, variant) on the opposite face.
+        u64 old_mask = cell.candidate_mask;
+        u64 new_mask = old_mask;
+
+        static const struct {
+            WFCFace my_face;
+            WFCFace neighbor_face;
+            s32 dx, dy, dz;
+        } kFaces[] = {
+            {WFCFace::PosX, WFCFace::NegX,  1,  0,  0},
+            {WFCFace::NegX, WFCFace::PosX, -1,  0,  0},
+            {WFCFace::PosY, WFCFace::NegY,  0,  1,  0},
+            {WFCFace::NegY, WFCFace::PosY,  0, -1,  0},
+            {WFCFace::PosZ, WFCFace::NegZ,  0,  0,  1},
+            {WFCFace::NegZ, WFCFace::PosZ,  0,  0, -1},
+        };
+
+        WFCGridCoord size = grid.Size();
+        for (auto& f : kFaces) {
+            WFCGridCoord n{c.x + f.dx, c.y + f.dy, c.z + f.dz};
+            if (n.x < 0 || n.x >= size.x) continue;
+            if (n.y < 0 || n.y >= size.y) continue;
+            if (n.z < 0 || n.z >= size.z) continue;
+            const WFCCell& neighbor = grid.CellAt(n);
+            if (!neighbor.collapsed) continue;
+
+            // Build the mask of candidates that survive this face's filter.
+            //
+            // Phase A.2 candidate space convention: each bit b represents the
+            // (tile_id == b, variant == b) pair. This collapses the multi-tile
+            // candidate space into a single bit index so the foundation can be
+            // exercised without a full tile registry. Phase A.3 will introduce
+            // proper (tile, variant) candidate packing.
+            u64 allowed = 0;
+            u64 m = new_mask;
+            while (m) {
+                u32 bit = __builtin_ctzll(m);
+                m &= m - 1;
+                wfc_tile_id my_tile{bit};
+                u32 my_variant = bit;
+                if (adjacency.Compatible(my_tile, my_variant, f.my_face,
+                                         neighbor.collapsed_tile,
+                                         neighbor.collapsed_variant)) {
+                    allowed |= (1ULL << bit);
+                }
+            }
+            new_mask &= allowed;
+        }
+
+        if (new_mask != old_mask) {
+            cell.candidate_mask = new_mask;
+            cell.candidate_count = static_cast<u32>(__builtin_popcountll(new_mask));
+            cell.entropy = static_cast<u8>(cell.candidate_count);
+            ++changed;
+
+            if (cell.candidate_count == 0) {
+                out_contradiction = true;
+            } else {
+                // Our candidate set shrank — neighbors may now need to
+                // re-check their compatibility against us. OnCellCollapsed's
+                // only effect is enqueueing face-neighbors, which is exactly
+                // the re-queue semantics we want here. (The name is mildly
+                // misleading for the non-collapsed case; revisit in Phase B.)
+                OnCellCollapsed(grid, c, cell.collapsed_tile,
+                                cell.collapsed_variant);
+            }
+        }
+    }
+
     return changed;
 }
 
