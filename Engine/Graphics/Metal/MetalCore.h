@@ -74,7 +74,7 @@ namespace primal::graphics::metal::core
     [[nodiscard]] constant_buffer& cbuffer();
 
     surface create_surface(platform::window window);
-    surface create_external_surface(void* host_view, u32 width, u32 height);
+    surface create_external_surface(platform::window window);
     void* external_surface_view(surface_id id);
     void external_surface_view_frame(surface_id id, s32 x, s32 y, u32 w, u32 h);
     void remove_surface(surface_id id);

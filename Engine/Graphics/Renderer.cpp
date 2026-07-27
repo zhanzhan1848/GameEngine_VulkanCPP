@@ -98,9 +98,9 @@ namespace primal::graphics
 		return gfx.surface.create(window);
 	}
 
-	surface create_external_surface(void* host_view, u32 width, u32 height)
+	surface create_external_surface(platform::window window)
 	{
-		return gfx.surface.create_external ? gfx.surface.create_external(host_view, width, height) : surface{};
+		return gfx.surface.create_external ? gfx.surface.create_external(window) : surface{};
 	}
 
 	void* get_surface_native_view(surface_id id)

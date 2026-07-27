@@ -613,6 +613,16 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("CreateCamera failed", ex); return 0; }
     }
 
+    [DllImport("PrimalEngine", EntryPoint = "SetEntityCameraAspectRatio", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _SetEntityCameraAspectRatio(uint entityId, float aspect);
+
+    public static bool SetEntityCameraAspectRatio(uint entityId, float aspect)
+    {
+        if (!_isLoaded) return false;
+        try { return _SetEntityCameraAspectRatio(entityId, aspect) != 0; }
+        catch (Exception ex) { Logger.Error("SetEntityCameraAspectRatio failed", ex); return false; }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "SetEntityTransform", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _SetEntityTransform(uint entityId, float[] position, float[] rotation, float[] scale);
 
@@ -771,7 +781,7 @@ public static class NativeEngineBridge
         try { _RemoveEntityLight(entityId); } catch (Exception ex) { Logger.Error("RemoveEntityLight failed", ex); }
     }
 
-    [DllImport("PrimalEngine", EntryPoint = "CreateEmbeddedRenderView", CallingConvention = CallingConvention.Cdecl)]
+[DllImport("PrimalEngine", EntryPoint = "CreateEmbeddedRenderView", CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr _CreateEmbeddedRenderView(IntPtr parent, int width, int height);
 
     [DllImport("PrimalEngine", EntryPoint = "DestroyEmbeddedRenderView", CallingConvention = CallingConvention.Cdecl)]
@@ -779,67 +789,6 @@ public static class NativeEngineBridge
 
     [DllImport("PrimalEngine", EntryPoint = "ResizeEmbeddedRenderView", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _ResizeEmbeddedRenderView(IntPtr view, int width, int height);
-
-    // ====== Editor Render Bridge (EngineAPI_mac.mm) =====
-    [DllImport("PrimalEngine", EntryPoint = "InitializeEditorRenderer", CallingConvention = CallingConvention.Cdecl)]
-    private static extern IntPtr _InitializeEditorRenderer(IntPtr host_view, double screen_x, double screen_y, double screen_w, double screen_h);
-
-    [DllImport("PrimalEngine", EntryPoint = "MoveEditorRenderer", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void _MoveEditorRenderer(double screen_x, double screen_y, double screen_w, double screen_h);
-
-    [DllImport("PrimalEngine", EntryPoint = "RunEditorFrame", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void _RunEditorFrame(float delta_time);
-
-    [DllImport("PrimalEngine", EntryPoint = "ResizeEditorSurface", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void _ResizeEditorSurface(int width, int height);
-
-    [DllImport("PrimalEngine", EntryPoint = "ShutdownEditorRenderer", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void _ShutdownEditorRenderer();
-
-    [DllImport("PrimalEngine", EntryPoint = "GetEditorWindowHandle", CallingConvention = CallingConvention.Cdecl)]
-    private static extern IntPtr _GetEditorWindowHandle();
-
-    public static IntPtr GetEditorWindowHandle()
-    {
-        if (!_isLoaded) return IntPtr.Zero;
-        try { return _GetEditorWindowHandle(); }
-        catch (Exception ex) { Logger.Error("GetEditorWindowHandle failed", ex); return IntPtr.Zero; }
-    }
-
-    public static IntPtr InitializeEditorRenderer(IntPtr hostView, double screenX, double screenY, double screenW, double screenH)
-    {
-        if (!_isLoaded) return IntPtr.Zero;
-        try { return _InitializeEditorRenderer(hostView, screenX, screenY, screenW, screenH); }
-        catch (Exception ex) { Logger.Error("InitializeEditorRenderer failed", ex); return IntPtr.Zero; }
-    }
-
-    public static void MoveEditorRenderer(double screenX, double screenY, double screenW, double screenH)
-    {
-        if (!_isLoaded) return;
-        try { _MoveEditorRenderer(screenX, screenY, screenW, screenH); }
-        catch (Exception ex) { Logger.Error("MoveEditorRenderer failed", ex); }
-    }
-
-    public static void RunEditorFrame(float deltaTime)
-    {
-        if (!_isLoaded) return;
-        try { _RunEditorFrame(deltaTime); }
-        catch (Exception ex) { Logger.Error("RunEditorFrame failed", ex); }
-    }
-
-    public static void ResizeEditorSurface(int width, int height)
-    {
-        if (!_isLoaded) return;
-        try { _ResizeEditorSurface(width, height); }
-        catch (Exception ex) { Logger.Error("ResizeEditorSurface failed", ex); }
-    }
-
-    public static void ShutdownEditorRenderer()
-    {
-        if (!_isLoaded) return;
-        try { _ShutdownEditorRenderer(); }
-        catch (Exception ex) { Logger.Error("ShutdownEditorRenderer failed", ex); }
-    }
 
     public static uint LoadGameCodeDll(string dllPath)
     {
@@ -1375,7 +1324,17 @@ public static class NativeEngineBridge
     private static extern uint _EditorCreateRenderLoop(int fps);
 
     [DllImport("PrimalEngine", EntryPoint = "EditorStartRenderLoop", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void _EditorStartRenderLoop(uint loopId);
+    private static extern uint _EditorStartRenderLoop(uint loopId);
+
+    // Returns the loop id on success, 0 on failure. The native side returns
+    // 0 when the loop is already destroyed (slot freed) or CFRunLoopTimerCreate
+    // failed. Treating it as void previously hid both failure modes from C#.
+    public static uint StartRenderLoopRaw(uint loopId)
+    {
+        if (!_isLoaded || loopId == 0) return 0;
+        try { return _EditorStartRenderLoop(loopId); }
+        catch (Exception ex) { Logger.Error("EditorStartRenderLoop failed", ex); return 0; }
+    }
 
     [DllImport("PrimalEngine", EntryPoint = "EditorStopRenderLoop", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _EditorStopRenderLoop(uint loopId);
@@ -1424,7 +1383,16 @@ public static class NativeEngineBridge
             if (loopId == 0) return 0;
 
             _callbacks[loopId] = onFrame;
-            _EditorStartRenderLoop(loopId);
+            // Propagate the native-side success/failure signal. A return of
+            // 0 means the CFRunLoopTimer could not be created (e.g. OOM or
+            // running off the AppKit main thread) — caller should Destroy
+            // and report the failure rather than treat the loop as running.
+            uint started = StartRenderLoopRaw(loopId);
+            if (started == 0)
+            {
+                Destroy(loopId);
+                return 0;
+            }
             return loopId;
         }
 

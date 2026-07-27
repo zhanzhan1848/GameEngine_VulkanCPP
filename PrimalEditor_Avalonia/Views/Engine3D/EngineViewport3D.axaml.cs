@@ -128,9 +128,25 @@ public partial class EngineViewport3D : UserControl
             // attaches as a subview of that child NSView, so it inherits
             // correct layout from Avalonia instead of fighting it (which was
             // the root cause of the macOS 26.5.1 FramePacing crash and the
-            // 10-frame-then-deadlock pattern). Falls back to the legacy
-            // GetAvaloniaContentView path if the host's child isn't created
-            // (which would only happen on a platform other than macOS).
+            // 10-frame-then-deadlock pattern).
+            //
+            // The MTKViewHost is the **only** supported host. There is no
+            // fallback to NSWindow.contentView (a previous legacy path that
+            // did `NS::Application::sharedApplication()->windows()[0]->contentView()`):
+            // that path is unreliable because (a) `windows()[0]` is not
+            // guaranteed to be the editor's MainWindow (Avalonia may register
+            // other hidden windows), (b) the contentView is the Avalonia
+            // root, not a NativeControlHost's child NSView, and (c) its
+            // bounds may be 0×0 at the time the engine first tries to draw
+            // (mid-layout). All three cases produce a `currentDrawable` that
+            // is either nil or has a 0×0 backing texture, and a
+            // `presentDrawable:` block then fires on the freed drawable
+            // when the MTKView is later reparented by Avalonia's layout
+            // pass — the EXC_BAD_ACCESS at
+            // -[_MTLCommandBuffer presentDrawable:options:]_block_invoke
+            // signature we've seen. Failing fast here is safer than
+            // silently using the wrong host.
+            //
             // The MTKViewHost is looked up by name via FindControl since
             // the project does not use Avalonia's XAML compiler
             // (Microsoft.NET.Sdk, not Avalonia.NET.Sdk), so x:Name does
@@ -142,14 +158,11 @@ public partial class EngineViewport3D : UserControl
             IntPtr hostView = mtkHost?.HostViewHandle ?? IntPtr.Zero;
             if (hostView == IntPtr.Zero)
             {
-                hostView = NativeEngineBridge.GetAvaloniaContentView();
-                if (hostView == IntPtr.Zero)
-                {
-                    Logger.Warning("MTKViewHost child is null and GetAvaloniaContentView returned null");
-                    ShowPlaceholder(true);
-                    return false;
-                }
-                Logger.Warning("MTKViewHost child not created; falling back to GetAvaloniaContentView");
+                // Schedule a retry — the MTKViewHost's CreateNativeControlCore
+                // may fire on the next layout pass. Don't fall back to the
+                // legacy windows()[0] path; that was the original bug.
+                Logger.Warning("MTKViewHost child is null; will retry on next layout pass");
+                return false;
             }
 
             _surfaceId = NativeEngineBridge.CreateEmbeddedRenderSurface(hostView, width, height);
@@ -160,6 +173,20 @@ public partial class EngineViewport3D : UserControl
                 return false;
             }
             Logger.Info($"Embedded render surface {_surfaceId} created ({width}x{height})");
+
+            // Defensive double-check: verify the engine actually attached an
+            // MTKView to the host. The C ABI returns a non-error id even when
+            // the host view had 0x0 bounds at creation time (the surface is
+            // created on the next layout pass), so a non-error id alone is not
+            // a guarantee that a drawable is reachable.
+            var surfaceView = NativeEngineBridge.GetSurfaceView(_surfaceId);
+            if (surfaceView == IntPtr.Zero)
+            {
+                Logger.Warning($"CreateEmbeddedRenderSurface returned id {_surfaceId} but no MTKView is attached (host view likely had 0x0 bounds); will retry");
+                _surfaceId = uint.MaxValue;
+                ShowPlaceholder(true);
+                return false;
+            }
 
             // Position the MTKView over the EngineViewport3D control's bounds
             // (in the host's coordinate space — the Avalonia contentView's
@@ -257,6 +284,7 @@ public partial class EngineViewport3D : UserControl
             Logger.Warning($"ProceduralMeshCreate(Sphere) returned 0x{sphereGeom:X} (invalid) — skipping test scene");
             return;
         }
+        Logger.Info($"sphere geometry allocated at slot {sphereGeom} (0x{sphereGeom:X16})");
         _testSceneGeometry = sphereGeom;
 
         // StandardRenderPipeline::RegisterMeshEntity creates an ECS entity with
@@ -375,6 +403,13 @@ public partial class EngineViewport3D : UserControl
     private DateTime _lastTick;
     private uint _nativeRenderLoopId;
 
+    // Tracks every live native render loop id so App.OnExit can Destroy
+    // each one with the correct id. EditorRenderLoop.Stop(0)/Destroy(0)
+    // are no-ops by design, so App can't simply call them — it needs the
+    // concrete id(s) the viewports allocated. A static set is sufficient
+    // because there is exactly one EngineViewport3D instance in the editor.
+    private static readonly System.Collections.Generic.HashSet<uint> s_liveLoopIds = new();
+
     private void StartRenderLoop()
     {
         if (_nativeRenderLoopId != 0) return;
@@ -382,6 +417,7 @@ public partial class EngineViewport3D : UserControl
         _nativeRenderLoopId = NativeEngineBridge.EditorRenderLoop.Start(60, OnNativeFrame);
         if (_nativeRenderLoopId != 0)
         {
+            s_liveLoopIds.Add(_nativeRenderLoopId);
             Logger.Info("Editor render loop started (60Hz native, RHI forward pipeline)");
             return;
         }
@@ -398,12 +434,26 @@ public partial class EngineViewport3D : UserControl
     {
         if (_nativeRenderLoopId != 0)
         {
-            NativeEngineBridge.EditorRenderLoop.Stop(_nativeRenderLoopId);
+            // Stop invalidates the timer but the C++ slot in g_render_loops
+            // is freed only by Destroy. Without Destroy, repeated init/teardown
+            // of the viewport leaks one slot per cycle and grows g_render_loops
+            // without bound. Destroy internally calls Stop first so calling
+            // Stop here would be redundant.
+            NativeEngineBridge.EditorRenderLoop.Destroy(_nativeRenderLoopId);
+            s_liveLoopIds.Remove(_nativeRenderLoopId);
             _nativeRenderLoopId = 0;
         }
         _renderTimer?.Stop();
         _renderTimer = null;
     }
+
+    /// <summary>
+    /// Returns the set of native render-loop ids currently owned by any live
+    /// EngineViewport3D instance. App.OnExit iterates this set and Destroy()s
+    /// each id (Destroy internally calls Stop, so the loop is fully cleaned
+    /// up before the engine shuts down).
+    /// </summary>
+    public static System.Collections.Generic.IReadOnlyCollection<uint> LiveNativeLoopIds => s_liveLoopIds;
 
     private void OnNativeFrame(float dt)
     {
@@ -500,11 +550,7 @@ public partial class EngineViewport3D : UserControl
         var height = (int)Bounds.Height;
         if (width <= 0 || height <= 0) return;
 
-        var currentOrigin = this.PointToScreen(new Point(0, 0));
         var sizeChanged = _lastWidth != width || _lastHeight != height;
-        var positionChanged = _lastPositionX != (int)currentOrigin.X
-                           || _lastPositionY != (int)currentOrigin.Y;
-
         if (sizeChanged)
         {
             _lastWidth = width;
@@ -514,17 +560,41 @@ public partial class EngineViewport3D : UserControl
             // keyed off the viewport size; update it in lockstep with
             // the surface resize so internal buffers don't go stale.
             NativeEngineBridge.SetPipelineViewportSize(width, height);
-        }
-        if (sizeChanged || positionChanged)
-        {
-            _lastPositionX = (int)currentOrigin.X;
-            _lastPositionY = (int)currentOrigin.Y;
+
+            // The offscreen _renderTarget (RGBA16F, where the forward
+            // pipeline renders before blitting into the MTKView drawable)
+            // is sized once at init and never rebuilt. On viewport resize
+            // the target keeps the old dimensions and the pipeline either
+            // stretches or samples outside it. Tear it down and recreate at
+            // the new size.
+            if (_renderTarget != 0)
+            {
+                NativeEngineBridge.DestroyRenderTarget(_renderTarget);
+                _renderTarget = NativeEngineBridge.CreateRenderTarget(
+                    width, height, NativeEngineBridge.RenderTargetFormat.RGBA16F);
+                if (_renderTarget == 0)
+                {
+                    Logger.Warning("CreateRenderTarget (resize) failed — viewport may show stale content");
+                }
+                else
+                {
+                    _renderTargetWidth = width;
+                    _renderTargetHeight = height;
+                }
+            }
+
+            // Camera aspect ratio must follow the surface aspect so the
+            // projected view doesn't stretch on resize. The constructor
+            // captured the initial aspect; update it here.
+            if (_cameraEntityId != 0 && width > 0 && height > 0)
+            {
+                NativeEngineBridge.SetEntityCameraAspectRatio(_cameraEntityId, (float)width / height);
+            }
+
             PositionEmbeddedSurface(width, height);
         }
     }
 
-    private int _lastPositionX = int.MinValue;
-    private int _lastPositionY = int.MinValue;
     private int _lastWidth;
     private int _lastHeight;
 
@@ -532,34 +602,17 @@ public partial class EngineViewport3D : UserControl
     // fire before the parent Border has a real layout (Bounds = 0x0), which
     // would place the MTKView at the wrong screen coordinates.
 
-
-    // Translate this control's Avalonia coordinates into the host NSView's
-    // coordinate space and tell the engine to place the MTKView there.
+    // The MTKView is attached as a subview of the NativeControlHost's child
+    // NSView (MTKViewHost). That host NSView's bounds already match this
+    // control's Bounds thanks to Avalonia's layout pass, so the MTKView
+    // should always fill its host at host-local origin (0, 0). Translating
+    // screen coordinates to host-local was double-counting the host's
+    // already-correct position and was clipping the MTKView to the top-left
+    // corner or hiding it entirely on resize.
     private void PositionEmbeddedSurface(int width, int height)
     {
         if (_surfaceId == uint.MaxValue) return;
-
-        // PointToScreen returns screen coordinates (top-left origin).
-        // The host NSView (Avalonia contentView) shares the window's
-        // coordinate space, so we subtract the host view's screen origin
-        // to get the MTKView's frame inside the host.
-        var origin = this.PointToScreen(new Point(0, 0));
-        var hostOrigin = GetHostViewScreenOrigin();
-        int x = (int)(origin.X - hostOrigin.X);
-        int y = (int)(origin.Y - hostOrigin.Y);
-
-        NativeEngineBridge.SetEmbeddedSurfaceFrame(_surfaceId, x, y, (uint)width, (uint)height);
-    }
-
-    private Avalonia.PixelPoint GetHostViewScreenOrigin()
-    {
-        // Avalonia's contentView fills the window's content area starting at
-        // the title bar's bottom. macOS screen coordinates have Y growing up
-        // while NSView coordinates have Y growing down, but both use the
-        // title bar bottom as the origin so the math works out.
-        var window = TopLevel.GetTopLevel(this) as Window;
-        if (window == null) return new Avalonia.PixelPoint(0, 0);
-        return window.PointToScreen(new Point(0, 0));
+        NativeEngineBridge.SetEmbeddedSurfaceFrame(_surfaceId, 0, 0, (uint)width, (uint)height);
     }
 
     private int _retryCount;

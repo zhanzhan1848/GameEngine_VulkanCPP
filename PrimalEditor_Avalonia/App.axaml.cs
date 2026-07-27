@@ -50,7 +50,31 @@ public partial class App : Application
         EngineTick.Stop();
         if (NativeEngineBridge.IsLoaded)
         {
-            NativeEngineBridge.ShutdownAssetSystem();
+            // Tear down in the documented order: render loop first (so
+            // the CFRunLoop timer stops firing on the AppKit main thread
+            // before we begin dismantling the engine), then the render
+            // pipeline, then any embedded render surfaces (so the MTKView
+            // detaches cleanly), then the engine itself, then the asset
+            // system. Doing these in the wrong order either leaks
+            // GPU/renderer objects (dylib unloads with Metal still alive)
+            // or tears down the asset system before the renderer that
+            // consumes it.
+            //
+            // EditorRenderLoop.Stop(0)/Destroy(0) are deliberately no-ops;
+            // we have to iterate the live loop ids returned by
+            // EngineViewport3D.LiveNativeLoopIds and Destroy() each one.
+            // We snapshot the set before iterating because Destroy()s
+            // remove from the set as a side effect.
+            foreach (var loopId in PrimalEditor_Avalonia.Views.EngineViewport3D.LiveNativeLoopIds.ToArray())
+            {
+                try { NativeEngineBridge.EditorRenderLoop.Destroy(loopId); } catch { /* tolerate per-loop failure */ }
+            }
+            // Embedded surfaces owned by this process — best-effort removal.
+            // The list isn't tracked here; future cleanup pass can wire a
+            // dedicated ShutdownAllSurfaces P/Invoke if needed.
+            try { NativeEngineBridge.DestroyStandardRenderPipeline(); } catch { }
+            try { NativeEngineBridge.ShutdownEngine(); } catch { }
+            try { NativeEngineBridge.ShutdownAssetSystem(); } catch { }
             NativeEngineBridge.UnloadEngine();
         }
     }

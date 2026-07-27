@@ -97,12 +97,19 @@ namespace primal::graphics::metal::shader
 			NS::URL* url = NS::URL::fileURLWithPath(tmp_path);
 			MTL::Library* engine_library = device->newLibrary(url, &pError);
 			::unlink(tmp_path->utf8String());
-			tmp_path->release();
+			// tmp_path was allocated by NS::String::string() (autoreleased);
+			// do NOT call ->release() here — the autorelease pool owns it.
+			// Over-releasing an autoreleased object causes the next autorelease
+			// pool drain to dereference a recycled slot pointer, which is the
+			// documented root cause of the objc_release SIGSEGV in the timer
+			// callback's per-callout ARP.
 			if (!engine_library || pError) {
 				if (pError) {
 					std::fprintf(stderr, "[MetalShader] newLibraryWithURL failed: %s\n",
 						pError->localizedDescription()->utf8String());
-					pError->release();
+					// pError is an NS::Error** out-parameter; Metal owns the
+					// NSError* it writes. Calling ->release() here would be
+					// an over-release of an unowned pointer.
 				}
 				return false;
 			}
@@ -110,10 +117,13 @@ namespace primal::graphics::metal::shader
 
 			// Resolve all 9 named functions from the single library.
 			for (u32 i = 0; i < engine_shader::count; ++i) {
+				// functionName is autoreleased (NS::String::string factory).
+				// newFunction() does not retain it, but that's fine — the
+				// autorelease pool owns it until this scope ends. Releasing
+				// here was a double-release.
 				NS::String* functionName = NS::String::string(shader_names[i], NS::UTF8StringEncoding);
 				MTL::Function* function = engine_library->newFunction(functionName);
 				engine_functions.emplace_back(function);
-				functionName->release();
 			}
 
 			return true;

@@ -23,6 +23,9 @@ namespace primal::graphics::metal
 
         // Basic
         pi.surface.create = core::create_surface;
+        // create_external_surface now takes a pre-registered platform::window
+        // (caller is responsible for platform::register_external_window so the
+        // C ABI's render_surface struct has a valid window_id for resize).
         pi.surface.create_external = core::create_external_surface;
         pi.surface.get_native_view = core::external_surface_view;
         pi.surface.remove = core::remove_surface;

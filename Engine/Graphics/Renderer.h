@@ -295,7 +295,7 @@ namespace primal::graphics
 	const char* get_engine_shaders_path(graphics_platform platform);
 
 	surface create_surface(platform::window window);
-	surface create_external_surface(void* host_view, u32 width, u32 height);
+	surface create_external_surface(platform::window window);
 	void* get_surface_native_view(surface_id id);
 	void remove_surface(surface_id id);
 

@@ -20,6 +20,11 @@ BUILD_DIR="$PROJ_DIR/../Darwin/PrimalEditor_Avalonia/$CONFIG"
 APP_DIR="$BUILD_DIR/PrimalEditor.app"
 APPHOST="$BUILD_DIR/PrimalEditor_Avalonia"
 
+# Resolve repository root (main checkout). Used only as a LAST-RESORT fallback
+# for native dylibs and shader metallibs. The worktree's own build outputs take
+# priority so the running binary matches the code under review; silently copying
+# from the main checkout was the root cause of "I edited the worktree but the
+# .app keeps using stale dylib" reports.
 REPO_ROOT=""
 if command -v git >/dev/null 2>&1; then
   if git_common_dir="$(git -C "$PROJ_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
@@ -31,9 +36,33 @@ fi
 if [[ -z "$REPO_ROOT" || ! -d "$REPO_ROOT/Darwin" ]]; then
   REPO_ROOT="$(cd "$PROJ_DIR/../.." && pwd -P)"
 fi
-NATIVE_LIB_DIR="$REPO_ROOT/Darwin/$CONFIG"
+
+# WT_NATIVE_DIR: the worktree's own Darwin/<Config>/ build output. This is the
+# SAME directory layout CMake/PrimalEditor_Avalonia.cmake emits when the user
+# builds with the standard out-of-source flow inside the worktree.
+WT_NATIVE_DIR="$PROJ_DIR/../Darwin/$CONFIG"
+
+# Pick the first existing directory for the dylib source.
+NATIVE_LIB_DIR=""
+LIB_SRC_LABEL=""
+if [[ -d "$WT_NATIVE_DIR" ]]; then
+  NATIVE_LIB_DIR="$WT_NATIVE_DIR"
+  LIB_SRC_LABEL="worktree"
+elif [[ -d "$REPO_ROOT/Darwin/$CONFIG" ]]; then
+  NATIVE_LIB_DIR="$REPO_ROOT/Darwin/$CONFIG"
+  LIB_SRC_LABEL="main checkout"
+  echo "[build_app] WARNING: using main-checkout dylib at $NATIVE_LIB_DIR; the current worktree's edits are NOT running" >&2
+  echo "[build_app]   worktree path tried: $WT_NATIVE_DIR" >&2
+  echo "[build_app]   build it inside the worktree with: cmake --build build-wt --config $CONFIG" >&2
+else
+  echo "[build_app] ERROR: native dylib not found in either:" >&2
+  echo "[build_app]   worktree: $WT_NATIVE_DIR" >&2
+  echo "[build_app]   main:     $REPO_ROOT/Darwin/$CONFIG" >&2
+  echo "[build_app]   build the engine first (cmake --build build-wt --config $CONFIG inside the worktree)" >&2
+  exit 1
+fi
 echo "[build_app] repo root:  $REPO_ROOT"
-echo "[build_app] native lib: $NATIVE_LIB_DIR"
+echo "[build_app] native lib: $NATIVE_LIB_DIR (source: $LIB_SRC_LABEL)"
 
 if [[ -d "$NATIVE_LIB_DIR" ]]; then
   for dylib in libEngineDLL.dylib libContentTools.dylib libfbxsdk.dylib; do
@@ -42,6 +71,24 @@ if [[ -d "$NATIVE_LIB_DIR" ]]; then
     if [[ -f "$src" ]]; then
       cp -f "$src" "$dst"
       echo "[build_app] copied  $src -> $dst"
+      # Verify the engine dylib copy actually wrote identical bytes. cp -f can
+      # silently truncate-and-stale when src is being concurrently rebuilt; a
+      # checksum mismatch means the running binary will not match the code
+      # under review, so fail loud rather than ship a confused .app.
+      if [[ "$dylib" == "libEngineDLL.dylib" ]] && command -v shasum >/dev/null 2>&1; then
+        src_sum="$(shasum -a 256 "$src" 2>/dev/null | awk '{print $1}')"
+        dst_sum="$(shasum -a 256 "$dst" 2>/dev/null | awk '{print $1}')"
+        echo "[build_app] checksum  libEngineDLL.dylib src=$src_sum dst=$dst_sum"
+        if [[ -n "$src_sum" && -n "$dst_sum" && "$src_sum" != "$dst_sum" ]]; then
+          echo "[build_app] ERROR: libEngineDLL.dylib checksum mismatch after copy" >&2
+          echo "[build_app]   src: $src" >&2
+          echo "[build_app]   dst: $dst" >&2
+          echo "[build_app]   this usually means the source file was overwritten" >&2
+          echo "[build_app]   mid-copy by a parallel build. Rebuild and retry." >&2
+          rm -f "$dst"
+          exit 1
+        fi
+      fi
     fi
   done
 
@@ -56,14 +103,65 @@ if [[ -d "$NATIVE_LIB_DIR" ]]; then
   # The CMake target BuildEngineShaderBlob emits the metallib to
   # <build-dir>/shaders/metal/. The main-repo build output
   # (<REPO_ROOT>/Darwin/<Config>/) may or may not have it depending on
-  # which cmake target was last built. We check both.
+  # which cmake target was last built. We check both the legacy main-repo
+  # build path AND the cmake build-tree path. The cmake build-tree path
+  # is the source of truth for `cmake --build build-wt --target
+  # BuildEngineShaderBlob` (the build directory the worktree's build-wt
+  # uses); the legacy path is the main checkout's Darwin/Debug/...
+  # directory. The editor's render surface stays BLACK if neither path has
+  # the shader blob, because EngineShader::load_engine_shaders silently
+  # returns false → fx::initialize, prepass::initialize, taa::initialize,
+  # and ssgi::initialize all log "shader blob missing function or PSO
+  # descriptor invalid" and disable their passes. The clear-color
+  # fallback in MetalPostProcess then draws a black surface instead of
+  # the composited scene.
+  # The engine reads the shader blob via Engine/Graphics/Metal/MetalShader.cpp
+  # ::load_engine_shaders, which expects the LEGACY PACKED format (9 copies of
+  # u64 size + 16-byte hash + metallib, packed by build_engine_shader_blob.py
+  # into shaders.metallib.packed). The raw shaders.metallib (single metallib,
+  # starts with MTLB) is NOT what the engine wants — copying the raw one
+  # produces a black surface because the engine reads the leading 8 bytes
+  # as a huge u64 size and fails the tmp-file write.
+  #
+  # The CMake build (CMake/EngineShaderBlob.cmake) emits BOTH the raw
+  # metallib (.metallib) and the packed blob (.metallib.packed) into
+  # <build-dir>/shaders/metal/. We always prefer the .packed form and
+  # fall back to the raw form only if the packed form is absent (older
+  # builds that predate the packer).
+  #
+  # Search order (worktree first, then main checkout fallback):
+  #   1. <worktree>/build-wt/shaders/metal/        (cmake --build build-wt path)
+  #   2. <worktree>/Darwin/<Config>/shaders/metal/ (premake/legacy path)
+  #   3. <main checkout>/Darwin/<Config>/shaders/metal/   (last-resort; WARNING)
   for metallib in shaders.metallib BlitToDrawable.metallib; do
     found=0
     for src in \
+      "$PROJ_DIR/../build-wt/shaders/metal/${metallib}.packed" \
+      "$PROJ_DIR/../../build-wt/shaders/metal/${metallib}.packed" \
+      "$PROJ_DIR/../Darwin/$CONFIG/shaders/metal/${metallib}.packed" \
+      "$PROJ_DIR/../Darwin/Debug/shaders/metal/${metallib}.packed" \
+      "$PROJ_DIR/../Darwin/Release/shaders/metal/${metallib}.packed" \
+      "$REPO_ROOT/Darwin/Debug/shaders/metal/${metallib}.packed" \
+      "$REPO_ROOT/Darwin/Release/shaders/metal/${metallib}.packed" \
+      "$PROJ_DIR/../build-wt/shaders/metal/$metallib" \
+      "$PROJ_DIR/../../build-wt/shaders/metal/$metallib" \
+      "$PROJ_DIR/../Darwin/$CONFIG/shaders/metal/$metallib" \
+      "$PROJ_DIR/../Darwin/Debug/shaders/metal/$metallib" \
+      "$PROJ_DIR/../Darwin/Release/shaders/metal/$metallib" \
       "$REPO_ROOT/Darwin/Debug/shaders/metal/$metallib" \
       "$REPO_ROOT/Darwin/Release/shaders/metal/$metallib" \
       ; do
       if [[ -f "$src" ]]; then
+        # If the first match comes from a main-checkout path, warn so the user
+        # knows the worktree's edits are not the ones running.
+        case "$src" in
+          # Worktree paths live under the worktree dir, which is itself a
+          # child of $REPO_ROOT, so a bare "$REPO_ROOT"/* pattern would
+          # mis-flag them. Skip any path under the worktree root.
+          "$REPO_ROOT/$WT_NATIVE_DIR"|"$PROJ_DIR"/*|"$PROJ_DIR/.."/*) ;;
+          "$REPO_ROOT"/*)
+            echo "[build_app] WARNING: shader $metallib resolved from main-checkout fallback ($src); worktree path missing" >&2 ;;
+        esac
         mkdir -p "$BUILD_DIR/shaders/metal"
         cp -f "$src" "$BUILD_DIR/shaders/metal/$metallib"
         echo "[build_app] copied  $src -> $BUILD_DIR/shaders/metal/$metallib"

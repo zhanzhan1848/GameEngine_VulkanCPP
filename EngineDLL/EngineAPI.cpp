@@ -78,6 +78,7 @@ EDITOR_INTERFACE void ResizeRenderSurface(u32 id)
 #include "../Platform/Platform.h"
 #include <dlfcn.h>
 #include <cstdio>
+#include <iostream>
 #if defined(__APPLE__)
 #include <objc/runtime.h>
 #include <objc/message.h>
@@ -164,9 +165,23 @@ EDITOR_INTERFACE u32 CreateEmbeddedRenderSurface(void* host_view, s32 width, s32
 {
 	assert(host_view);
 	graphics::render_surface rs{};
+	// Register the external host view as a platform window FIRST so the
+	// render_surface has a valid window_id for later ResizeRenderSurface
+	// calls. create_external_surface takes the pre-registered window instead
+	// of registering it itself — the previous design had both sites calling
+	// platform::register_external_window, which leaked one slot per embed
+	// and left rs.window invalid (a default-constructed window_id) so any
+	// resize from C# dereferenced out-of-bounds memory and SIGBUS'd.
 	rs.window = platform::register_external_window(host_view, (u32)width, (u32)height);
-	rs.surface = graphics::create_external_surface(host_view, (u32)width, (u32)height);
-	if (!rs.surface.is_valid()) return (u32)-1;
+	rs.surface = graphics::create_external_surface(rs.window);
+	if (!rs.surface.is_valid()) {
+		std::cerr << "[EngineAPI] CreateEmbeddedRenderSurface failed: host view "
+		          << host_view << " rejected by graphics::create_external_surface "
+		          << "(likely 0x0 bounds or MTKView alloc failed)" << std::endl;
+		// Roll back the window slot too so it doesn't leak.
+		platform::remove_window(rs.window.get_id());
+		return (u32)-1;
+	}
 	surfaces.emplace_back(rs);
 	return (u32)surfaces.size() - 1;
 }
@@ -252,29 +267,51 @@ EDITOR_INTERFACE void DisableSurfaceAutoDraw(u32 id)
 // Returns the contentView (NSView*) of the first visible NSWindow, suitable
 // for use as the host argument to CreateEmbeddedRenderSurface. Returns NULL
 // if no visible window is found. macOS only.
+//
+// DEPRECATED 2026-07-03 — DO NOT USE. This function uses
+// `NS::Application::sharedApplication()->windows()[0]->contentView()`, which
+// is unreliable for three reasons documented by the editor maintainer:
+//
+//   1. `windows()[0]` is not guaranteed to be the editor's MainWindow.
+//      Avalonia (and many other frameworks) registers hidden windows at
+//      index 0 (splash, transient, accessibility), so the first window is
+//      often NOT the window containing the 3D viewport.
+//
+//   2. The returned contentView is the AvaloniaRootView, not a
+//      NativeControlHost's child NSView. Attaching the MTKView to it puts
+//      the engine outside Avalonia's managed native subtree, which on
+//      macOS 26.5.1 / Apple Silicon triggers
+//      com.apple.FramePacing.LayerStateSyncQueue to invoke an
+//      MTKView __initCommon deferred block that crashes with a NULL
+//      function pointer jump inside objc_release. The 10-frame-then-
+//      deadlock pattern in the editor was this exact crash.
+//
+//   3. Even if `windows()[0]` happens to be the right window, the
+//      contentView's bounds may be 0×0 at the time the engine first tries
+//      to acquire a drawable (Avalonia's Measure/Arrange/Loaded sequence
+//      is not yet complete). `currentDrawable` returns nil, the engine
+//      logs a "first draw too early" warning, and the surface never
+//      receives the first frame.
+//
+// The supported path is to obtain the host view from a NativeControlHost
+// subclass (see `PrimalEditor_Avalonia/Views/Engine3D/MTKViewHost.cs`).
+// That NSView is positioned by Avalonia's layout system, parented inside
+// Avalonia's managed native subtree, and has non-zero bounds at the
+// time TryInitializeFromLayout runs (gated by LayoutUpdated).
+//
+// This function is preserved as a deprecation stub that always returns
+// nullptr, so any legacy caller fails fast instead of attaching the
+// MTKView to the wrong NSView. The symbol remains exported for ABI
+// compatibility with already-built editor binaries.
 EDITOR_INTERFACE void* GetAvaloniaContentView()
 {
 #if defined(__APPLE__)
-    NS::Application* app = NS::Application::sharedApplication();
-    if (!app) return nullptr;
-
-    NS::Array* windows = app->windows();
-    if (!windows) return nullptr;
-
-    const NS::UInteger count = windows->count();
-    if (count == 0) return nullptr;
-
-    for (NS::UInteger i = 0; i < count; ++i) {
-        NS::Object* win = windows->object<NS::Object>(i);
-        if (!win) continue;
-        // Some hosts (Avalonia) create NSWindows without the standard style
-        // mask — skip the visible check to be permissive.
-        NS::Window* w = (NS::Window*)win;
-        NS::View* contentView = w->contentView();
-        if (contentView) return (void*)contentView;
-    }
-#endif
+    // Intentionally return nullptr. See deprecation comment above.
+    (void)NS::Application::sharedApplication();  // suppress unused-warning
     return nullptr;
+#else
+    return nullptr;
+#endif
 }
 
 EDITOR_INTERFACE void ResizeRenderSurface(u32 id, u32 width, u32 height)
