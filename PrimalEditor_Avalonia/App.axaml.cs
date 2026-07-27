@@ -50,31 +50,38 @@ public partial class App : Application
         EngineTick.Stop();
         if (NativeEngineBridge.IsLoaded)
         {
-            // Tear down in the documented order: render loop first (so
-            // the CFRunLoop timer stops firing on the AppKit main thread
-            // before we begin dismantling the engine), then the render
-            // pipeline, then any embedded render surfaces (so the MTKView
-            // detaches cleanly), then the engine itself, then the asset
-            // system. Doing these in the wrong order either leaks
-            // GPU/renderer objects (dylib unloads with Metal still alive)
-            // or tears down the asset system before the renderer that
-            // consumes it.
+            // Teardown order is critical to avoid AutoreleasePoolPage::busted
+            // and the EXC_BAD_ACCESS-in-presentDrawable crashes documented in
+            // Engine/Graphics/Metal/MetalCore.cpp and tasks/lessons.md.
+            //
+            //   1. Stop every render loop (CFRunLoopTimer must not fire again).
+            //   2. Block new frames from entering the engine.
+            //   3. FlushGPU: wait for in-flight command buffers to complete.
+            //      Without this, Metal's completion-queue dispatch can fire
+            //      a presentDrawable: block AFTER the MTKView it captured has
+            //      been deallocated by AppKit.
+            //   4. Destroy the render pipeline (releases GPU-bound resources).
+            //   5. ShutdownAssetSystem (releases file-backed assets).
+            //   6. ShutdownEngine (releases Metal device + RHI).
+            //   7. UnloadEngine (dlclose the dylib).
             //
             // EditorRenderLoop.Stop(0)/Destroy(0) are deliberately no-ops;
-            // we have to iterate the live loop ids returned by
-            // EngineViewport3D.LiveNativeLoopIds and Destroy() each one.
-            // We snapshot the set before iterating because Destroy()s
-            // remove from the set as a side effect.
+            // we iterate the live loop ids returned by
+            // EngineViewport3D.LiveNativeLoopIds and Destroy() each one. We
+            // snapshot the set before iterating because Destroy()s remove
+            // from the set as a side effect.
             foreach (var loopId in PrimalEditor_Avalonia.Views.EngineViewport3D.LiveNativeLoopIds.ToArray())
             {
                 try { NativeEngineBridge.EditorRenderLoop.Destroy(loopId); } catch { /* tolerate per-loop failure */ }
             }
-            // Embedded surfaces owned by this process — best-effort removal.
-            // The list isn't tracked here; future cleanup pass can wire a
-            // dedicated ShutdownAllSurfaces P/Invoke if needed.
+
+            // Wait for the GPU to finish any in-flight work before tearing
+            // down anything that might still be in use.
+            try { NativeEngineBridge.FlushGPU(); } catch { /* tolerate; device may already be down */ }
+
             try { NativeEngineBridge.DestroyStandardRenderPipeline(); } catch { }
-            try { NativeEngineBridge.ShutdownEngine(); } catch { }
             try { NativeEngineBridge.ShutdownAssetSystem(); } catch { }
+            try { NativeEngineBridge.ShutdownEngine(); } catch { }
             NativeEngineBridge.UnloadEngine();
         }
     }
