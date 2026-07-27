@@ -1968,3 +1968,18 @@ set_target_properties(TestRestartPolicy PROPERTIES
 target_compile_definitions(TestRestartPolicy PRIVATE DEBUG _DEBUG)
 set_target_properties(TestRestartPolicy PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestWFCTileRegistry Graphics/WFC/TestWFCTileRegistry.cpp)
+target_include_directories(TestWFCTileRegistry PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCTileRegistry PRIVATE Engine)
+add_test(NAME TestWFCTileRegistry COMMAND TestWFCTileRegistry)
+set_target_properties(TestWFCTileRegistry PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCTileRegistry PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCTileRegistry PROPERTIES FOLDER "Tests/Graphics/WFC")
+
