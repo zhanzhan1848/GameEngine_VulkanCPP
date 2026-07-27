@@ -3,6 +3,7 @@
 
 #include "../../Common/CommonHeaders.h"
 #include "../../Common/Id.h"
+#include "../../Geometry/GeometryTypes.h"
 #include "../../Utilities/MathTypes.h"
 
 namespace primal::graphics::wfc {
@@ -36,13 +37,16 @@ struct WFCTile {
 
     wfc_tile_id      id;
     const char*      name;                  // static-lifetime string (no engine string type)
+    geometry::geometry_id mesh_handle;      // Phase A.3: registered via register_mesh_asset (u32-backed)
     SocketEncoding   sockets[MaxVariants];  // per-variant socket encoding
     math::v3         bounds_extents;        // 16-byte aligned (simd::float3)
     u32              variant_count;
     bool             is_organic;
     bool             is_rotationally_symmetric;
-    u8               _pad[6];               // explicit tail pad; sizeof(WFCTile)=304, alignof=16 (driven by v3)
+    u8               _pad[10];              // explicit tail pad; sizeof(WFCTile)=320, alignof=16 (driven by v3)
 };
+
+static_assert(sizeof(WFCTile) == 320, "WFCTile layout drifted");
 
 // Per-cell wave state (kept small for cache efficiency)
 struct WFCCell {
