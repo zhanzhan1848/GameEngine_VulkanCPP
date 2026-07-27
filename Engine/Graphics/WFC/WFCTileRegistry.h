@@ -18,6 +18,21 @@ public:
     u32 Count() const { return static_cast<u32>(tiles_.size()); }
     u32 MaxVariants() const { return max_variants_; }
 
+    // Phase A.3 multi-tile packing: bit = tile_id * MaxVariantsPerTile + variant.
+    // 8 tiles × 8 variants = 64 candidates fits exactly in a u64 candidate_mask.
+    static constexpr u32 MaxVariantsPerTile = 8;
+    static constexpr u32 MaxTiles           = 8;
+
+    static u32 BitForTileVariant(wfc_tile_id tile, u32 variant) {
+        return static_cast<u32>(tile) * MaxVariantsPerTile + variant;
+    }
+    static wfc_tile_id TileForBit(u32 bit) {
+        return wfc_tile_id{bit / MaxVariantsPerTile};
+    }
+    static u32 VariantForBit(u32 bit) {
+        return bit % MaxVariantsPerTile;
+    }
+
 private:
     utl::vector<WFCTile> tiles_;
     u32                  max_variants_{0};
