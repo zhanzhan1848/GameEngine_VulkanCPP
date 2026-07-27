@@ -1923,3 +1923,18 @@ set_target_properties(TestWFCRandom PROPERTIES
 target_compile_definitions(TestWFCRandom PRIVATE DEBUG _DEBUG)
 set_target_properties(TestWFCRandom PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestWFCObserver Graphics/WFC/TestWFCObserver.cpp)
+target_include_directories(TestWFCObserver PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCObserver PRIVATE Engine)
+add_test(NAME TestWFCObserver COMMAND TestWFCObserver)
+set_target_properties(TestWFCObserver PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCObserver PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCObserver PROPERTIES FOLDER "Tests/Graphics/WFC")
+
