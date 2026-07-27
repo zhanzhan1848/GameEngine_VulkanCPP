@@ -82,6 +82,10 @@ void WFCSolver::PopulateAllCandidates(WaveGrid& grid, const WFCTileRegistry& reg
 
 void WFCSolver::CollapseCell(WaveGrid& grid, WFCGridCoord coord,
                              const WFCTileRegistry& /*registry*/) {
+    // Phase A.3: registry is currently unused here — we decode (tile, variant)
+    // from the chosen bit using WFCTileRegistry's static packing helpers, so
+    // no per-tile lookup is required. The parameter is kept in the signature
+    // for future extensions (e.g. weighted tile picks, tile-specific RNG).
     WFCCell& c = grid.CellAt(coord);
     u32 candidate_count = c.candidate_count;
     // FIXED: The plan had `TEST_ASSERT(candidate_count > 0, ...)` here, but
@@ -110,25 +114,33 @@ void WFCSolver::CollapseCell(WaveGrid& grid, WFCGridCoord coord,
         --pick;
     }
 
+    // Phase A.3: decode (tile, variant) from chosen_bit using registry packing.
+    // Bit layout: bit = tile_id * MaxVariantsPerTile + variant (see
+    // WFCTileRegistry::BitForTileVariant). The previous Phase A.2 code assumed
+    // a single-tile registry and hard-coded collapsed_tile=0 with
+    // variant=chosen_bit — wrong for any tile beyond the first.
+    wfc_tile_id chosen_tile    = WFCTileRegistry::TileForBit(chosen_bit);
+    u32         chosen_variant = WFCTileRegistry::VariantForBit(chosen_bit);
+
     c.candidate_mask    = (1ULL << chosen_bit);
     c.candidate_count   = 1;
     c.entropy           = 0;
     c.collapsed         = true;
-    c.collapsed_tile    = wfc_tile_id{0};  // Phase A.2 single-tile assumption
-    c.collapsed_variant = chosen_bit;
+    c.collapsed_tile    = chosen_tile;
+    c.collapsed_variant = chosen_variant;
 
     // Record the step so the main thread (or test) can observe progress.
     WFCStep step{};
     step.kind     = WFCStepKind::Collapse;
     step.coord    = coord;
-    step.tile     = c.collapsed_tile;
-    step.variant  = chosen_bit;
+    step.tile     = chosen_tile;
+    step.variant  = chosen_variant;
     step_buffer_->Push(step);
 
     // Queue face-neighbors for the propagation cascade. The propagator's
     // OnCellCollapsed takes (tile, variant) so Phase A.3 can swap in a real
     // multi-tile candidate picker without changing the propagator contract.
-    propagator_.OnCellCollapsed(grid, coord, c.collapsed_tile, chosen_bit);
+    propagator_.OnCellCollapsed(grid, coord, chosen_tile, chosen_variant);
 }
 
 bool WFCSolver::RunPropagationCascade(WaveGrid& grid, const TileAdjacencyTable& adjacency,

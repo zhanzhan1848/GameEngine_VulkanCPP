@@ -337,6 +337,87 @@ TestResult TestWFCSolver_Initialize_Populates_Multi_Tile_Candidates() {
     return TestResult::Passed;
 }
 
+// Task 4 (Phase A.3): CollapseCell must decode (tile, variant) from chosen_bit
+// using WFCTileRegistry::TileForBit / VariantForBit instead of the Phase A.2
+// single-tile assumption (collapsed_tile=0, variant=chosen_bit).
+//
+// Fixture: 1x1x1 grid with two tiles — cube (1 variant, bit 0) and ramp
+// (4 variants, bits 8-11). The cell has 5 candidate bits set.
+//
+// Discriminating assertion: collapsed_variant must be < the chosen tile's
+// variant_count. The Phase A.2 bug writes collapsed_variant=chosen_bit, so
+// for seed=42 (which picks bit 11 = ramp var 3) the buggy code stores
+// variant=11, which exceeds ramp.variant_count=4. A correct decode yields
+// variant=3, which passes.
+//
+// Note on seed choice: seed=42's RNG draws pick=4 from [0,5). Walking the
+// mask {bit0, bit8, bit9, bit10, bit11} → 4th set bit = bit11 = ramp var 3.
+// (Cube-only candidates would land on bit0; using seed 42 guarantees a
+// multi-tile pick that exposes the decode bug.)
+TestResult TestWFCSolver_CollapseCell_Decodes_Multi_Tile() {
+    WFCConfig config;
+    config.grid_size = {1, 1, 1};
+    config.max_cells_per_frame = 1;
+    config.max_ms_per_frame = 100;
+    config.seed = 42;
+    config.max_generations = 4;
+
+    WaveGrid grid;
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCStepBuffer buf;
+
+    WFCTile cube{};
+    cube.name = "cube";
+    cube.variant_count = 1;
+    cube.mesh_handle = primal::geometry::geometry_id{100};
+    reg.Register(cube);
+
+    WFCTile ramp{};
+    ramp.name = "ramp";
+    ramp.variant_count = 4;
+    ramp.mesh_handle = primal::geometry::geometry_id{200};
+    reg.Register(ramp);
+
+    WFCSolver solver;
+    solver.Initialize(config, grid, reg, adj, buf);
+
+    WFCSolveBudget budget(10, 100);
+    budget.Reset();
+    solver.Step(budget);
+
+    // The single cell must be collapsed, and collapsed_tile must be 0 (cube) or 1 (ramp)
+    const WFCCell& c = grid.CellAt({0, 0, 0});
+    TEST_ASSERT(c.collapsed, "Cell collapsed after Step");
+    u32 tile_val = static_cast<u32>(c.collapsed_tile);
+    TEST_ASSERT(tile_val == 0 || tile_val == 1, "collapsed_tile is 0 (cube) or 1 (ramp)");
+
+    // Discriminating check: variant must be a real variant of the chosen tile,
+    // not the raw chosen_bit. This is what separates the buggy single-tile
+    // assumption (variant = bit, e.g. 11) from correct multi-tile decode
+    // (variant = bit % MaxVariantsPerTile, e.g. 3).
+    u32 variant_val = c.collapsed_variant;
+    u32 chosen_tile_variant_count = reg.Get(wfc_tile_id{tile_val}).variant_count;
+    TEST_ASSERT(variant_val < chosen_tile_variant_count,
+                "collapsed_variant is a valid variant of the chosen tile "
+                "(< variant_count), not the raw chosen_bit");
+
+    // Verify the step record matches
+    WFCStep steps[8];
+    u32 n = buf.Consume(steps, 8);
+    TEST_ASSERT(n >= 1, "Step buffer has a Collapse record");
+    bool found = false;
+    for (u32 i = 0; i < n; ++i) {
+        if (steps[i].kind == WFCStepKind::Collapse) {
+            TEST_ASSERT_EQ(tile_val, static_cast<u32>(steps[i].tile), "Step tile matches cell");
+            TEST_ASSERT_EQ(variant_val, steps[i].variant, "Step variant matches cell");
+            found = true;
+        }
+    }
+    TEST_ASSERT(found, "Found Collapse record");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCSolver");
     TEST_CASE(suite, "Initialize_Populates_Candidate_Masks", TestWFCSolver_Initialize_Populates_Candidate_Masks);
@@ -346,6 +427,7 @@ int main() {
     TEST_CASE(suite, "Solves_2x2x2_AllWildcard", TestWFCSolver_Solves_2x2x2_AllWildcard);
     TEST_CASE(suite, "Budget_Stops_Mid_Solve", TestWFCSolver_Budget_Stops_Mid_Solve);
     TEST_CASE(suite, "Demo_4x4x4_TwoTile", TestWFCSolver_Demo_4x4x4_TwoTile);
+    TEST_CASE(suite, "CollapseCell_Decodes_Multi_Tile", TestWFCSolver_CollapseCell_Decodes_Multi_Tile);
     suite.RunAllTests();
     return 0;
 }
