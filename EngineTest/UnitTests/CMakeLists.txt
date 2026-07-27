@@ -1908,3 +1908,18 @@ set_target_properties(TestWFCStepBuffer PROPERTIES
 target_compile_definitions(TestWFCStepBuffer PRIVATE DEBUG _DEBUG)
 set_target_properties(TestWFCStepBuffer PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestWFCRandom Graphics/WFC/TestWFCRandom.cpp)
+target_include_directories(TestWFCRandom PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCRandom PRIVATE Engine)
+add_test(NAME TestWFCRandom COMMAND TestWFCRandom)
+set_target_properties(TestWFCRandom PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCRandom PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCRandom PROPERTIES FOLDER "Tests/Graphics/WFC")
+
