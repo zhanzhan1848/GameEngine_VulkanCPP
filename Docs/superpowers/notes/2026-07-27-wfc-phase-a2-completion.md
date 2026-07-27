@@ -65,7 +65,10 @@ All 11 binaries pass. No regressions on Phase A.1.
 
 ## Known limitations to address in Phase A.3
 
-- **Single-tile candidate space**: Propagator assumes `bit index = variant index of tile 0`. Multi-tile support requires `(tile_id, variant)` pair packing or per-tile candidate masks. Phase A.3 introduces multi-tile propagation.
+- **Single-tile candidate space (two sites, must be relaxed together)**:
+  - `WFCSolver::PopulateAllCandidates` (`Engine/Graphics/WFC/WFCSolver.cpp:57`) — assumes `bit index = variant index of tile 0`. Multi-tile requires `(tile_id, variant)` pair packing or per-tile candidate masks.
+  - `WFCPropagator::RunPass` (`Engine/Graphics/WFC/WFCPropagator.cpp:96-97`) — **stronger** assumption: `wfc_tile_id my_tile{bit}` and `my_variant = bit`. Bit index is used as BOTH tile_id and variant. This is acceptable for Phase A.2 because tests register single-variant tiles only (so `tile_id==variant` by construction). If Phase A.3 relaxes `WFCSolver` without also touching the propagator, multi-tile propagation will silently misbehave. Update both sites in the same change.
+- **Observer heap drift after propagation**: `WFCSolver::Step` never calls `observer_.OnCellChanged` after `RunPropagationCascade` shrinks candidate sets. The lazy filter in `WFCObserver::PickNextCollapse` recovers correctness (re-push on entropy mismatch), but each stale pop costs an extra heap operation. Not a correctness bug — a per-Step performance hazard. Phase B can fix by having the propagator notify the observer (would require an observer pointer on `WFCPropagator`).
 - **No entropy biasing from conflict memory**: `RestartPolicy` records conflict coords but doesn't bias the Observer. Phase B will add this.
 - **No parallel propagation**: All work on main thread. Phase B adds `ParallelFor`.
 - **No real tile sockets**: Phase A.3 introduces `AutoSocketClassifier` and real socket encodings from `PCGTile` data.
