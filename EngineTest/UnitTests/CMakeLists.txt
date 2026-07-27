@@ -1953,3 +1953,18 @@ set_target_properties(TestWFCPropagator PROPERTIES
 target_compile_definitions(TestWFCPropagator PRIVATE DEBUG _DEBUG)
 set_target_properties(TestWFCPropagator PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestRestartPolicy Graphics/WFC/TestRestartPolicy.cpp)
+target_include_directories(TestRestartPolicy PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestRestartPolicy PRIVATE Engine)
+add_test(NAME TestRestartPolicy COMMAND TestRestartPolicy)
+set_target_properties(TestRestartPolicy PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestRestartPolicy PRIVATE DEBUG _DEBUG)
+set_target_properties(TestRestartPolicy PROPERTIES FOLDER "Tests/Graphics/WFC")
+
