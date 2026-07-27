@@ -27,13 +27,38 @@ namespace primal::graphics::metal::core
     {
         class metal_command
         {
+        // Authoritative note on autorelease pool ownership (July 2026 fix):
+        //
+        // This class intentionally does NOT own an NS::AutoreleasePool. The
+        // previous design constructed a pool in the ctor and drained it in
+        // release(), but that pool's lifetime spanned many AppKit run-loop
+        // iterations and was popped at shutdown from inside AppKit's
+        // windowWillClose autorelease pool scope. autorelease pools are
+        // strictly LIFO — popping an outer pool while AppKit's inner pool
+        // is still active corrupts the slot table, and the per-callout
+        // autorelease pool drain at -[NSWindow __close] detects the
+        // inconsistency and aborts via AutoreleasePoolPage::busted
+        // (SIGKILL/EXC_CRASH, signature
+        //  objc_autoreleasePoolPop → AutoreleasePoolPage::busted
+        //   → WindowBaseImpl::Close).
+        //
+        // The fix is to delegate autorelease-pool ownership to the calling
+        // thread. The render loop fires from CFRunLoopTimerCreate on the
+        // AppKit main run loop, which manages its own per-callout pool —
+        // that pool drains at the end of every run-loop iteration, which is
+        // sufficient for the autoreleased commandBuffer / drawable refs
+        // produced by begin_frame/end_frame. No per-class pool needed.
+        //
+        // Test paths that run off-AppKit threads must push their own local
+        // pool around each render call (the only test entry currently is
+        // TestRenderer/TestRendererMac, which calls initialize without
+        // invoking render_surface, so no pool is needed there either).
         public:
             metal_command() = default;
             DISABLE_COPY_AND_MOVE(metal_command);
             explicit metal_command(MTL::Device* device) : _device{ device->retain() }
             {
                 _command_queue = _device->newCommandQueue();
-                _pool = NS::AutoreleasePool::alloc()->init();
                 _semaphore = dispatch_semaphore_create(frame_buffer_count);
             }
 
@@ -90,16 +115,35 @@ namespace primal::graphics::metal::core
             void release()
             {
                 flush();
-                // _pool was pushed in the constructor and never drained
-                // since; without this it leaks every autoreleased ref
-                // accumulated by begin_frame() (commandBuffer, drawables,
-                // render pass descriptors) until process exit.
-                if (_pool)
+                // Wait for any in-flight GPU work to finish before tearing down
+                // any Metal objects. Without this, Metal's
+                // com.Metal.CompletionQueueDispatch can fire a
+                // presentDrawable: block AFTER the MTKView it captured has
+                // been deallocated by AppKit — the block dereferences a
+                // smashed isa pointer, producing EXC_BAD_ACCESS at a
+                // non-VM address (crash signature: KERN_INVALID_ADDRESS at
+                // 0x... inside -[_MTLCommandBuffer
+                // presentDrawable:options:]_block_invoke). This is the
+                // SIGSEGV we've seen during Avalonia editor teardown.
+                //
+                // waitUntilCompleted() blocks until the GPU finishes the
+                // command buffer's scheduled handlers. On a healthy system
+                // this returns within a frame; only a stuck GPU would hang
+                // (which is itself a fatal error). After this returns, the
+                // MTKView reference held by the in-flight present block is
+                // released by Metal before our own autoreleased reference
+                // goes out of scope.
+                if (_cmd_buffer)
                 {
-                    _pool->drain();
-                    _pool->release();
-                    _pool = nullptr;
+                    const MTL::CommandBufferStatus status = _cmd_buffer->status();
+                    if (status == MTL::CommandBufferStatus::CommandBufferStatusCommitted ||
+                        status == MTL::CommandBufferStatus::CommandBufferStatusScheduled)
+                    {
+                        _cmd_buffer->waitUntilCompleted();
+                    }
+                    _cmd_buffer = nullptr;
                 }
+
                 core::release(_command_queue);
                 core::release(_device);
             }
@@ -111,7 +155,6 @@ namespace primal::graphics::metal::core
         private:
             MTL::Device*                        _device{};
             MTL::CommandQueue*                  _command_queue{};
-            NS::AutoreleasePool*                _pool{};
             MTL::CommandBuffer*                 _cmd_buffer;
             u32									_frame_index{ 0 };
             u32									_frame_count{ 0 };
@@ -362,15 +405,27 @@ namespace primal::graphics::metal::core
         return surface{ id };
     }
 
-    surface create_external_surface(void* host_view, u32 width, u32 height)
+    surface create_external_surface(platform::window win)
     {
-        // Forward the host view (e.g. Avalonia's NSView) to the platform layer
-        // so metal_surface::create_external() can attach the MTKView as a
-        // subview. Previously this handle was discarded and the bridge layer
-        // did the attachment itself.
-        platform::window win = platform::register_external_window(host_view, width, height);
+        // The platform window must already be registered by the caller (via
+        // platform::register_external_window). Previously this function also
+        // called register_external_window itself, which double-registered the
+        // host view in the platform's free list when the C ABI
+        // CreateEmbeddedRenderSurface also registered it for the
+        // render_surface window field — leaking one slot per embed and
+        // leaving rs.window invalid on later attempts to resize.
         surface_id id{ _surfaces.add(win) };
-        _surfaces[id].create_external();
+        if (!_surfaces[id].create_external()) {
+            // Tear down the just-allocated slot so we don't leak a half-
+            // initialized metal_surface, and return an invalid surface so
+            // the C ABI caller can detect failure. Without this, a host
+            // view with 0×0 bounds or a failed MTKView allocation would
+            // still report a valid id and the editor would enter its
+            // render loop against a non-functional surface (the documented
+            // P0 #3 / black-screen signature).
+            _surfaces.remove(id);
+            return surface{};
+        }
         return surface{ id };
     }
 
@@ -392,7 +447,9 @@ namespace primal::graphics::metal::core
 
     void resize_surface(surface_id id, u32 width, u32 height)
     {
-
+        if (!id::is_valid(id)) return;
+        if (width == 0 || height == 0) return;
+        _surfaces[id].resize(width, height);
     }
 
     u32 surface_width(surface_id id)
