@@ -54,18 +54,26 @@ void WFCSolver::Initialize(const WFCConfig& config,
 }
 
 void WFCSolver::PopulateAllCandidates(WaveGrid& grid, const WFCTileRegistry& registry) {
-    // Phase A.2 single-tile assumption: bit index = variant index of tile 0.
-    // (Phase A.3 will generalize to multi-tile via combined mask layout.)
-    u32 max_variants = registry.MaxVariants();
-    if (max_variants == 0) max_variants = 1;
-    u64 full_mask = (max_variants >= 64) ? ~0ULL : ((1ULL << max_variants) - 1);
+    // Phase A.3 multi-tile: iterate registry tiles, set bit for each (tile, variant).
+    // Bit layout: bit = tile_id * MaxVariantsPerTile + variant (see WFCTileRegistry).
+    u64 full_mask = 0;
+    for (u32 t = 0; t < registry.Count(); ++t) {
+        const WFCTile& tile = registry.Get(wfc_tile_id{t});
+        for (u32 v = 0; v < tile.variant_count; ++v) {
+            u32 bit = WFCTileRegistry::BitForTileVariant(wfc_tile_id{t}, v);
+            if (bit < 64) {
+                full_mask |= (1ULL << bit);
+            }
+        }
+    }
+    u32 total_candidates = static_cast<u32>(__builtin_popcountll(full_mask));
 
     auto& cells = grid.CellsMutable();
     for (u32 i = 0; i < cells.size(); ++i) {
         WFCCell& c = cells[i];
         c.candidate_mask    = full_mask;
-        c.candidate_count   = max_variants;
-        c.entropy           = static_cast<u8>(max_variants);
+        c.candidate_count   = total_candidates;
+        c.entropy           = static_cast<u8>(total_candidates);
         c.collapsed         = false;
         c.collapsed_tile    = wfc_tile_id{0};
         c.collapsed_variant = 0;
