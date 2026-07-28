@@ -115,6 +115,12 @@ public class WorldEditorViewModel : ViewModelBase, ISceneEntityContext
 
     public ObservableCollection<Scene> Scenes { get; } = new();
 
+    public System.Collections.Generic.IReadOnlyList<string> BuildConfigurations { get; } =
+        GameProject.Project.BuildConfigurationNames;
+
+    public System.Windows.Input.ICommand BuildProjectCommand { get; } =
+        new Common.RelayCommand(_ => BuildProjectStatic());
+
     public Scene? ActiveScene
     {
         get => _activeScene;
@@ -192,6 +198,20 @@ public class WorldEditorViewModel : ViewModelBase, ISceneEntityContext
         Scenes.Add(scene);
         ActiveScene = scene;
         PrimalEditor_Avalonia.Common.Logger.Info($"Added scene: {name}");
+    }
+
+    private static void BuildProjectStatic()
+    {
+        PrimalEditor_Avalonia.Common.Logger.Info(
+            "[Build] Placeholder — VS integration not wired in Avalonia build.");
+    }
+
+    private void BuildProject()
+    {
+        var config = _project?.BuildConfigName ?? "(no project)";
+        PrimalEditor_Avalonia.Common.Logger.Info(
+            $"[Build] Placeholder — would build project in '{config}'. " +
+            "(VS integration not wired in Avalonia build.)");
     }
 
     public void RemoveScene(Scene? scene)

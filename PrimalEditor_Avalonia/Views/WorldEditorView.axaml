@@ -8,9 +8,20 @@
 
     <Grid Background="#FF1E1E1E">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="#FF2D2D30" Padding="5">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock Text="Build:" Foreground="#FFEEE" VerticalAlignment="Center"/>
+                <ComboBox Width="140"
+                          ItemsSource="{Binding BuildConfigurations}"
+                          SelectedItem="{Binding Project.BuildConfigName}"/>
+                <Button Content="Build" Command="{Binding BuildProjectCommand}" Padding="10,2"/>
+            </StackPanel>
+        </Border>
 
         <Grid Grid.Row="0" ColumnDefinitions="250,*,300" Background="#FF1E1E1E">
             <DockPanel Grid.Column="0" Background="#FF1E1E1E">

@@ -77,7 +77,22 @@ public class Project : ViewModelBase
             {
                 _buildConfig = value;
                 OnPropertyChanged(nameof(BuildConfig));
+                OnPropertyChanged(nameof(BuildConfigName));
             }
+        }
+    }
+
+    [JsonIgnore]
+    public static readonly string[] BuildConfigurationNames = { "Debug", "DebugEditor", "Release", "ReleaseEditor" };
+
+    [JsonIgnore]
+    public string BuildConfigName
+    {
+        get => BuildConfigurationNames[System.Math.Clamp(BuildConfig, 0, BuildConfigurationNames.Length - 1)];
+        set
+        {
+            var idx = System.Array.IndexOf(BuildConfigurationNames, value);
+            if (idx >= 0) BuildConfig = idx;
         }
     }
 
