@@ -73,7 +73,7 @@
                                 <Path Grid.Column="0" Width="24" Height="24" Stretch="Uniform"
                                       Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
                                       Fill="#A0A0A0"/>
-                                <TextBlock Grid.Column="1" Text="{Binding Name}" VerticalAlignment="Center" Margin="5,0"/>
+                                <TextBlock Grid.Column="1" Text="{Binding FileName}" VerticalAlignment="Center" Margin="5,0"/>
                                 <TextBlock Grid.Column="2" Text="{Binding SizeDisplay}" VerticalAlignment="Center" Foreground="Gray"/>
                             </Grid>
                         </DataTemplate>
@@ -115,10 +115,10 @@
                                               VerticalAlignment="Center"/>
                                     </Panel>
                                 </Border>
-                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                                <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
                                            MaxWidth="100" TextAlignment="Center"
                                            HorizontalAlignment="Center" Margin="0,4,0,0"
-                                           ToolTip.Tip="{Binding Name}"/>
+                                           ToolTip.Tip="{Binding FullPath}"/>
                             </StackPanel>
                         </DataTemplate>
                     </ListBox.ItemTemplate>

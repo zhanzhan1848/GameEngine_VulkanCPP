@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.Native;
 using PrimalEditor_Avalonia.ViewModels;
@@ -23,38 +24,18 @@ public enum FileViewMode
     Thumbnails,
 }
 
-public class ContentFile : ViewModelBase
-{
-    public string Name { get; set; } = string.Empty;
-    public string FullPath { get; set; } = string.Empty;
-    public long Size { get; set; }
-    public AssetType Type { get; set; } = AssetType.Unknown;
-    public bool IsImage =>
-        Type == AssetType.Texture &&
-        (Name.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
-         Name.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
-         Name.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
-         Name.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase));
-    public string SizeDisplay => Size switch
-    {
-        < 1024 => $"{Size} B",
-        < 1024 * 1024 => $"{Size / 1024.0:F1} KB",
-        _ => $"{Size / (1024.0 * 1024.0):F1} MB",
-    };
-}
-
 public class ContentBrowserViewModel : ViewModelBase
 {
     private Project? _project;
     private ContentFolder? _selectedFolder;
-    private ContentFile? _selectedFile;
+    private AssetInfo? _selectedFile;
     private string _statusMessage = string.Empty;
     private bool _isImporting;
     private string _importingStatus = string.Empty;
     private FileViewMode _viewMode = FileViewMode.List;
 
     public ObservableCollection<ContentFolder> Folders { get; } = new();
-    public ObservableCollection<ContentFile> Files { get; } = new();
+    public ObservableCollection<AssetInfo> Files { get; } = new();
 
     public Project? Project
     {
@@ -84,7 +65,7 @@ public class ContentBrowserViewModel : ViewModelBase
         }
     }
 
-    public ContentFile? SelectedFile
+    public AssetInfo? SelectedFile
     {
         get => _selectedFile;
         set
@@ -158,9 +139,12 @@ public class ContentBrowserViewModel : ViewModelBase
         Folders.Clear();
         if (_project == null || !Directory.Exists(_project.ContentPath))
         {
+            AssetRegistry.Reset();
             StatusMessage = "No project loaded";
             return;
         }
+
+        AssetRegistry.Initialize(_project.ContentPath);
 
         try
         {
@@ -246,21 +230,19 @@ public class ContentBrowserViewModel : ViewModelBase
 
         try
         {
+            AssetRegistry.Register(SelectedFolder.FullPath);
+            foreach (var dir in Directory.GetDirectories(SelectedFolder.FullPath))
+                AssetRegistry.Register(dir);
             foreach (var file in Directory.GetFiles(SelectedFolder.FullPath))
             {
                 var name = Path.GetFileName(file);
                 if (name.StartsWith('.')) continue;
 
-                var info = new FileInfo(file);
-                Files.Add(new ContentFile
-                {
-                    Name = name,
-                    FullPath = info.FullName,
-                    Size = info.Length,
-                    Type = AssetImporter.DetectType(name),
-                });
+                var info = AssetRegistry.Register(file);
+                if (info != null && info.Type != AssetType.Unknown)
+                    Files.Add(info);
             }
-            StatusMessage = $"{Files.Count} file(s)";
+            StatusMessage = $"{Files.Count} asset(s)";
         }
         catch (UnauthorizedAccessException ex)
         {
