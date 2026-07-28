@@ -1,0 +1,7 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Editors.Geometry"
+             x:Class="PrimalEditor_Avalonia.Editors.Geometry.GeometryEditorView"
+             x:DataType="vm:GeometryEditorViewModel">
+  <TextBlock Text="Geometry Editor (T8) — pending implementation"/>
+</UserControl>

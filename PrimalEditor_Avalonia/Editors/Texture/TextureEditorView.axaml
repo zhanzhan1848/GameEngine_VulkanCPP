@@ -1,0 +1,7 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Editors.Texture"
+             x:Class="PrimalEditor_Avalonia.Editors.Texture.TextureEditorView"
+             x:DataType="vm:TextureEditorViewModel">
+  <TextBlock Text="Texture Editor (T7) — pending implementation"/>
+</UserControl>

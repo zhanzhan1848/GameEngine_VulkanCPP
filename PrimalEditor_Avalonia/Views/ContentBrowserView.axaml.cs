@@ -1,6 +1,8 @@
 using System.Linq;
 using Avalonia.Controls;
 using Avalonia.Markup.Xaml;
+using PrimalEditor_Avalonia.Content;
+using PrimalEditor_Avalonia.Editors;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.Views;
@@ -27,7 +29,13 @@ public partial class ContentBrowserView : UserControl
 
     private void OnFileDoubleClick(object? sender, Avalonia.Input.TappedEventArgs e)
     {
-        if (DataContext is ContentBrowserViewModel vm)
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        if (vm.SelectedFile is AssetInfo info)
+        {
+            if (AssetEditorRegistry.Open(info) == null)
+                vm.OpenSelectedFile();
+        }
+        else
         {
             vm.OpenSelectedFile();
         }

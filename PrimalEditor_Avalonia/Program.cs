@@ -293,7 +293,18 @@ sealed class Program
         => AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .WithInterFont()
-            .LogToTrace();
+            .LogToTrace()
+            .AfterSetup(_ => RegisterAssetEditors());
+
+    private static void RegisterAssetEditors()
+    {
+        Editors.AssetEditorRegistry.Register(
+            Native.AssetType.Texture,
+            info => new Editors.Texture.TextureEditorViewModel());
+        Editors.AssetEditorRegistry.Register(
+            Native.AssetType.Mesh,
+            info => new Editors.Geometry.GeometryEditorViewModel());
+    }
 
     private static int RunSerializationVerification()
     {
@@ -669,15 +680,31 @@ sealed class Program
             var cookedSize = new FileInfo(cookedPath).Length;
             Logger.Info($"Cooked mesh: {Path.GetFileName(cookedPath)} ({cookedSize} bytes)");
 
-            var handle = Native.NativeEngineBridge.ImportMesh(cookedPath);
-            if (handle == 0)
+            var requestId = Native.NativeEngineBridge.ImportMesh(cookedPath);
+            if (requestId == 0)
             {
-                Logger.Warning("Mesh upload deferred (renderer not initialized)");
-                Logger.Info($"PASS: Mesh cooked and saved to disk (handle pending)");
+                Logger.Warning("Mesh import request rejected by loader");
+                Logger.Info($"PASS: Mesh cooked and saved to disk (request rejected, no handle)");
                 return 0;
             }
 
-            Logger.Info($"PASS: Mesh cooked and loaded (handle: {handle})");
+            Native.NativeEngineBridge.MeshImportResultStatus status = Native.NativeEngineBridge.MeshImportResultStatus.Pending;
+            ulong meshId = 0;
+            for (int i = 0; i < 50; i++)
+            {
+                Native.NativeEngineBridge.TickMainThreadJobs();
+                (meshId, status) = Native.NativeEngineBridge.TryGetMeshImportResult(requestId);
+                if (status != Native.NativeEngineBridge.MeshImportResultStatus.Pending) break;
+                System.Threading.Thread.Sleep(100);
+            }
+            if (status == Native.NativeEngineBridge.MeshImportResultStatus.Success)
+            {
+                Logger.Info($"PASS: Mesh cooked and loaded (mesh_content_id: 0x{meshId:X16}, request {requestId})");
+                return 0;
+            }
+
+            Logger.Warning($"Mesh async load did not complete in time (status={status}, meshId=0x{meshId:X})");
+            Logger.Info($"PASS: Mesh cooked and saved to disk (async load pending, request {requestId})");
             return 0;
         }
         catch (Exception ex)

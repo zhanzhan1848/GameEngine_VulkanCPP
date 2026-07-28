@@ -1,0 +1,7 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Editors.PrimitiveMesh"
+             x:Class="PrimalEditor_Avalonia.Editors.PrimitiveMesh.PrimitiveMeshView"
+             x:DataType="vm:PrimitiveMeshViewModel">
+  <TextBlock Text="Primitive Mesh (T6) — pending implementation"/>
+</UserControl>
