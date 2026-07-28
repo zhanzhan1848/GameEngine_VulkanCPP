@@ -2,6 +2,11 @@
 #include "Engine/Graphics/WFC/WFCTileCatalog.h"
 #include "Engine/Graphics/WFC/WFCTileRegistry.h"
 #include "Engine/Graphics/WFC/TileAdjacency.h"
+#include "Engine/Graphics/WFC/WaveGrid.h"
+#include "Engine/Graphics/WFC/WFCSolver.h"
+#include "Engine/Graphics/WFC/WFCStepBuffer.h"
+#include "Engine/Graphics/WFC/WFCConfig.h"
+#include "Engine/Graphics/WFC/WFCSolveBudget.h"
 
 using namespace primal::graphics::wfc;
 using namespace Engine::Test;
@@ -66,6 +71,41 @@ TestResult TestWFCTileCatalog_Ramp_Self_Compat_On_PosZ() {
     return TestResult::Passed;
 }
 
+TestResult TestWFCTileCatalog_Solves_4x4x4_With_Catalog() {
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCTileCatalog::Populate(reg, adj);
+
+    WFCConfig config;
+    config.grid_size = {4, 4, 4};
+    config.max_cells_per_frame = 256;
+    config.max_ms_per_frame = 1000;
+    config.seed = 7;
+    config.max_generations = 8;
+
+    WaveGrid grid;
+    grid.Initialize(config.grid_size, 8);
+
+    WFCStepBuffer buf;
+    WFCSolver solver;
+    solver.Initialize(config, grid, reg, adj, buf);
+
+    WFCSolveBudget budget(config.max_cells_per_frame, config.max_ms_per_frame);
+    budget.Reset();
+
+    WFCSolver::StepResult result = WFCSolver::StepResult::InProgress;
+    u32 steps = 0;
+    while (result == WFCSolver::StepResult::InProgress && steps < 1000) {
+        result = solver.Step(budget);
+        ++steps;
+    }
+
+    TEST_ASSERT(result == WFCSolver::StepResult::Done ||
+                result == WFCSolver::StepResult::GivenUp,
+                "Solver terminates with catalog tiles");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCTileCatalog");
     TEST_CASE(suite, "Populate_Registers_Five_Tiles", TestWFCTileCatalog_Populate_Registers_Five_Tiles);
@@ -73,6 +113,7 @@ int main() {
     TEST_CASE(suite, "Tiles_Have_Valid_Mesh_Handles", TestWFCTileCatalog_Tiles_Have_Valid_Mesh_Handles);
     TEST_CASE(suite, "Cube_Self_Compat_On_All_Faces", TestWFCTileCatalog_Cube_Self_Compat_On_All_Faces);
     TEST_CASE(suite, "Ramp_Self_Compat_On_PosZ", TestWFCTileCatalog_Ramp_Self_Compat_On_PosZ);
+    TEST_CASE(suite, "Solves_4x4x4_With_Catalog", TestWFCTileCatalog_Solves_4x4x4_With_Catalog);
     suite.RunAllTests();
     return 0;
 }
