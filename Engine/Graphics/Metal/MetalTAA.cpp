@@ -59,9 +59,15 @@ namespace primal::graphics::metal::taa
             MTL::RenderPipelineDescriptor* info{ MTL::RenderPipelineDescriptor::alloc()->init() };
 
             // 获取着色器函数并检查有效性
+            std::fprintf(stderr, "[MetalTAA] BEFORE get_engine_shader\n");
+            std::fflush(stderr);
             auto vertex_shader = shader::get_engine_shader( shader::engine_shader::fullscreen_triangle_vs );
             auto fragment_shader = shader::get_engine_shader( shader::engine_shader::taa_pass );
 
+            std::fprintf(stderr, "[MetalTAA] vs=%p fs=%p vs.get()=%p fs.get()=%p\n",
+                (void*)vertex_shader.get(), (void*)fragment_shader.get(),
+                (void*)vertex_shader.get(), (void*)fragment_shader.get());
+            std::fflush(stderr);
             if (!vertex_shader.get() || !fragment_shader.get()) {
                 std::cerr << "[MetalTAA] create_pipeline: missing shader (vs="
                           << (vertex_shader.get() ? "ok" : "NULL")
@@ -79,7 +85,10 @@ namespace primal::graphics::metal::taa
             if (pError) {
                 std::cerr << "[MetalTAA] create_pipeline PSO error: "
                           << pError->localizedDescription()->utf8String() << std::endl;
-                pError->release();
+                // pError is an NS::Error** out-parameter; Metal owns it. Do
+                // NOT release — over-releasing an autoreleased NSError was
+                // the documented root cause of the timer callback
+                // objc_release SIGSEGV (see MetalBlitToDrawable.cpp).
             } else if (!taa_pipeline) {
                 std::cerr << "[MetalTAA] create_pipeline: newRenderPipelineState returned null without error" << std::endl;
             }

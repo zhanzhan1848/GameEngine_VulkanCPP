@@ -23,6 +23,13 @@ namespace primal::graphics::metal
         // editors that need to keep the render surface aligned with a
         // specific UI control's bounds.
         void set_external_frame(s32 x, s32 y, u32 w, u32 h);
+        // Updates the underlying platform window's stored size and the
+        // attached MTKView's drawableSize so the next frame renders at the
+        // new resolution. Safe to call repeatedly; no-op if the size hasn't
+        // changed. Required because the engine's resize path used to be a
+        // stub, leaving the MTKView at the initial 0x0 / stale size after
+        // a viewport resize.
+        void resize(u32 w, u32 h);
         void release();
         u32 width() const { return _window.width(); }
         u32 height() const { return _window.height(); }

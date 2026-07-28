@@ -79,19 +79,30 @@ namespace primal::graphics::metal::core
                 MTK::View* pView{ static_cast<MTK::View*>(surface->view()) };
                 MTL::Drawable* drawable{ pView->currentDrawable() };
 
-                // Schedule a present once the framebuffer is complete using the current drawable
+                // Use Metal's official presentDrawable: API instead of a hand-rolled
+                // addScheduledHandler + drawable->present() pair.
+                //
+                // Apple's MTLDrawable.present() docs explicitly recommend calling
+                // presentDrawable: instead — it schedules the drawable's present()
+                // to fire *after* the command queue schedules this command buffer,
+                // and Metal retains the drawable internally across the GPU schedule.
+                //
+                // The previous hand-rolled pattern captured `drawable` as a raw
+                // pointer in a scheduled-handler block. If AppKit invalidated the
+                // CAMetalDrawable between commit() and the block firing on the
+                // com.Metal.CompletionQueueDispatch queue (e.g. NSWindow closing,
+                // MTKView detached, view resized mid-flight), the block would call
+                // objc_msgSend on freed memory → EXC_BAD_ACCESS at the smashed
+                // isa pointer (crash signature: KERN_INVALID_ADDRESS at a non-VM
+                // address inside -[_MTLCommandBuffer presentDrawable:options:]_block_invoke).
+                //
+                // See Engine/Graphics/Metal/MetalCore.cpp::blit_surface_and_present
+                // and Engine/Graphics/RHI/Platforms/Metal/MetalSwapChain.cpp::Present
+                // for the canonical presentDrawable pattern in this codebase.
                 if( drawable )
                 {
-                    // Create a scheduled handler functor for Metal to present the drawable when the command
-                    // buffer has been scheduled by the kernel.
-
-                    drawable->retain();
-                    _cmd_buffer->addScheduledHandler( [drawable]( MTL::CommandBuffer* ){
-                        drawable->present();
-                        drawable->release();
-                    });
+                    _cmd_buffer->presentDrawable( drawable );
                 }
-                // _cmd_buffer->presentDrawable( pView->currentDrawable() );
                 _cmd_buffer->commit();
                 // _cmd_buffer->waitUntilCompleted();
 
@@ -99,7 +110,7 @@ namespace primal::graphics::metal::core
                 // 这确保了下一次调用 currentDrawable 时能获取到新的 drawable
                 // 而不是已经 presented 的旧 drawable
                 pView->draw();
-                
+
                 _frame_index = (_frame_index + 1) % frame_buffer_count;
                 _frame_count++;
 
@@ -595,22 +606,78 @@ namespace primal::graphics::metal::core
         CA::MetalDrawable* drawable = view->currentDrawable();
         if (!drawable) return 0;
 
-        // Current render pass descriptor would reconfigure the drawable's
-        // load/store; we want our own descriptor targeting the drawable
-        // texture with DontCare/Store. MetalBlitToDrawable::Blit builds it.
+        // Validate the drawable has a usable texture size BEFORE encoding.
+        // MTKView with paused=true / enableSetNeedsDisplay=true returns a
+        // drawable immediately, but the drawable's backing CAMetalDrawable
+        // may have a 0×0 texture when (a) the view hasn't been laid out yet
+        // (Avalonia layout pass not complete, host NSView bounds = 0×0),
+        // (b) the host NSView was detached and reattached with new bounds
+        // but MTKView hasn't picked up the resize yet, or (c) the editor
+        // is being torn down. Present-ing a 0×0 drawable produces a
+        // CAMetalDrawable whose backing texture is invalid; the GPU then
+        // schedules a presentDrawable: block that calls objc_msgSend on a
+        // 0-sized texture reference at completion, which is the root
+        // cause of the SIGSEGV on com.Metal.CompletionQueueDispatch
+        // (crash signature: KERN_INVALID_ADDRESS at a non-VM address
+        // inside -[_MTLCommandBuffer presentDrawable:options:]_block_invoke).
+        // Bail out cleanly so the next frame can retry with valid bounds.
         MTL::Texture* drawableTex = drawable->texture();
         if (!drawableTex) return 0;
+        const NS::UInteger texWidth = drawableTex->width();
+        const NS::UInteger texHeight = drawableTex->height();
+        std::fprintf(stderr, "[blit_surface_and_present] drawableTex=%p size=%zux%zu\n",
+            (void*)drawableTex, (size_t)texWidth, (size_t)texHeight);
+        std::fflush(stderr);
+        if (texWidth == 0 || texHeight == 0) return 0;
 
         MTL::CommandBuffer* cmd = s_blit_queue->commandBuffer();
         if (!cmd) return 0;
+        std::fprintf(stderr, "[blit_surface_and_present] cmd=%p srcTex=%p drawableTex=%p\n",
+            (void*)cmd, (void*)srcTexture, (void*)drawableTex);
+        std::fflush(stderr);
 
         blit.Blit(cmd, srcTexture, drawableTex);
 
-        // Present + commit. presentDrawable retains the drawable across the
-        // GPU schedule, so we don't need an explicit retain here (unlike
-        // metal_command::end_frame which adds a scheduledHandler).
+        // === Explicit drawable lifetime management ===
+        //
+        // `currentDrawable()` returns an autoreleased CAMetalDrawable. The
+        // previous code relied on the autorelease pool of this calling
+        // thread staying alive until GPU completion — which is fragile:
+        //
+        //   - When called from Avalonia's UI thread (the editor's
+        //     BlitRenderTargetToSurface path), the per-callout pool drains
+        //     as soon as AppKit returns control to the run loop. The
+        //     drawable's autorelease ref-count hits 0 BEFORE Metal's GPU
+        //     completion queue fires the presentDrawable: completion block.
+        //   - When called from a libdispatch worker (the GCD fire_timer
+        //     path used by some editor tests), the worker's last-resort
+        //     pool is even more aggressive about recycling slots.
+        //
+        // The documented fix is: explicit retain on acquire, explicit
+        // release in the command buffer's completedHandler (which Metal
+        // guarantees runs on the GPU completion queue, in its own
+        // autorelease pool, after Metal itself is done with the drawable).
+        //
+        // This decouples drawable lifetime from this calling thread's
+        // autorelease pool entirely. The drawable is now owned by the
+        // command buffer's completion handler for the duration of GPU
+        // execution, then released.
+        drawable->retain();
+
         cmd->presentDrawable(drawable);
+
+        __block CA::MetalDrawable* block_drawable = drawable;
+        cmd->addCompletedHandler(^(MTL::CommandBuffer* /*cb*/) {
+            // GPU is done with the drawable. Metal's presentDrawable:
+            // completion block has fired (or been skipped on error paths —
+            // addCompletedHandler fires regardless of presentDrawable:
+            // success/failure). Safe to release our explicit retain.
+            block_drawable->release();
+        });
+
         cmd->commit();
+        std::fprintf(stderr, "[blit_surface_and_present] presentDrawable + commit done\n");
+        std::fflush(stderr);
 
         // MTKView in manual mode (paused=true, enableSetNeedsDisplay=true,
         // see MetalSurface::create) needs draw() to advance currentDrawable
@@ -618,6 +685,8 @@ namespace primal::graphics::metal::core
         // subsequent BlitRenderTargetToSurface would re-blit into the same
         // (already-presented) drawable.
         view->draw();
+        std::fprintf(stderr, "[blit_surface_and_present] view->draw() done\n");
+        std::fflush(stderr);
 
         return 1;
     }

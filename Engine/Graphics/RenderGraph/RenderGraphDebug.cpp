@@ -95,6 +95,16 @@ void RenderGraphDebug::CreatePipeline() {
         std::string absolutePath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath_;
         std::cout << "Retrying with absolute path: " << absolutePath << std::endl;
         source = ShaderLoader::LoadShaderSource(absolutePath);
+        if (source.empty()) {
+            // Best-effort second fallback: try the worktree path that
+            // matches the current build. Both fallbacks are project-
+            // specific and may not match the user's local checkout.
+            // Proper fix: embed pre-compiled metallib bytes in the
+            // dylib so the runtime doesn't need to find .metal files.
+            std::string worktreePath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/" + shaderPath_;
+            std::cout << "Retrying with worktree path: " << worktreePath << std::endl;
+            source = ShaderLoader::LoadShaderSource(worktreePath);
+        }
     }
     
     if (source.empty()) {

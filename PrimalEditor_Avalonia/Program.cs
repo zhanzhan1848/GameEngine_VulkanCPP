@@ -114,7 +114,17 @@ sealed class Program
         // FOV. (Path B's AddEntityCamera stores fov in ECS Camera component and
         // is read by SyncCamerasFromECS for view matrices, but that's not what
         // PipelineRenderFrame currently uses.)
-        var cameraEntity = NativeEngineBridge.CreateEntity(0f, 1f, -12f);
+        // DIAGNOSTIC: support --cam-x, --cam-y, --cam-z CLI args to test different
+        // camera positions. If sphere visibility depends on camera position,
+        // the issue is camera/view related.
+        float camX = 0f, camY = 1f, camZ = -12f;
+        for (int ai = 0; ai < args.Length - 1; ++ai) {
+            if (args[ai] == "--cam-x" && float.TryParse(args[ai + 1], out var vx)) camX = vx;
+            else if (args[ai] == "--cam-y" && float.TryParse(args[ai + 1], out var vy)) camY = vy;
+            else if (args[ai] == "--cam-z" && float.TryParse(args[ai + 1], out var vz)) camZ = vz;
+        }
+        Logger.Info($"Camera at ({camX}, {camY}, {camZ})");
+        var cameraEntity = NativeEngineBridge.CreateEntity(camX, camY, camZ);
         if (cameraEntity == 0xFFFFFFFFu)
         {
             Logger.Error("CreateEntity returned invalid id");
@@ -141,6 +151,10 @@ sealed class Program
             Logger.Error("ProceduralMeshCreate failed");
             return 1;
         }
+        // slot 0 is a valid id (first allocation) — distinguish from InvalidContentId sentinel.
+        // If we got 0xFFFFFFFF (InvalidContentId), the engine returned failure.
+        // Anything else (including 0) means the engine allocated a slot successfully.
+        Logger.Info($"sphere geometry allocated at slot {sphereGeom} (0x{sphereGeom:X16})");
 
         float[] xs = { -6.0f, -2.0f, 2.0f, 6.0f };
         var meshEntities = new ulong[xs.Length];

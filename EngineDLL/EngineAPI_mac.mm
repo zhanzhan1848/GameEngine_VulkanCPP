@@ -15,43 +15,65 @@ namespace
     struct editor_render_loop
     {
         u32 id{ 0 };
-        // GCD dispatch source timer. GCD timers fire on a dedicated dispatch
-        // queue and don't depend on the thread that scheduled them, which is
-        // more robust than CFRunLoopTimer when the caller is a P/Invoke
-        // from a managed runtime (dotnet) where the relationship between the
-        // calling thread and the macOS main run loop is non-obvious.
-        dispatch_source_t timer{ nullptr };
-        dispatch_queue_t queue{ nullptr };
+        // CFRunLoopTimerRef registered with the main run loop. The timer
+        // fires on the AppKit main thread, whose autoreleasepool stack is
+        // stable across event loop iterations (AppKit's per-callout pool
+        // is reset every iteration and managed by the run loop, not by
+        // libdispatch).
+        //
+        // The PREVIOUS implementation used dispatch_source_t on a global
+        // concurrent queue (GCD worker thread). That thread's autoreleasepool
+        // is libdispatch's last-resort pool, which recycles pool slot memory
+        // aggressively when the worker goes idle. Combined with Avalonia's
+        // NSOperationQueue free list reusing NSInvocationOperation wrapper
+        // memory, this produced a use-after-free in __CFRunLoopPerCalloutARPEnd
+        // on the main thread (Thread 0 in the crash dump): the per-callout
+        // pool drain read a stale slot pointer pointing into recycled
+        // wrapper memory. The crash signature was
+        //     EXC_BAD_ACCESS KERN_INVALID_ADDRESS
+        //     Thread 0: objc_release → AutoreleasePoolPage::releaseUntil
+        //              → objc_autoreleasePoolPop → __CFRunLoopPerCalloutARPEnd
+        //
+        // Switching to CFRunLoopTimerRef on the main run loop eliminates
+        // the GCD-worker-thread autoreleasepool entirely. The timer's
+        // callback runs on the same thread as AppKit's per-callout pool,
+        // so any autoreleased ObjC refs created inside the callback (engine
+        // MetalCommandBuffer, MTKView::currentDrawable, etc.) land in the
+        // per-callout pool and are drained by AppKit in the same iteration
+        // — AppKit does not recycle pool slot memory mid-iteration. The
+        // pattern matches `EngineTest`'s displayLinkCallback (see
+        // EngineTest/IntegrationTests/TestRenderer.h:79).
+        CFRunLoopTimerRef timer{ nullptr };
         s32 fps{ 60 };
-        std::atomic<bool> running{ false };
+        bool running{ false };
     };
 
     std::vector<std::unique_ptr<editor_render_loop>> g_render_loops;
 
     void (*g_frame_cb)(u32, float) = nullptr;
 
-    void fire_timer(void* info)
+    void fire_timer(CFRunLoopTimerRef /*timer*/, void* info)
     {
-        // For dispatch_source_set_event_handler_f, the first argument is
-        // the user-set context (via dispatch_set_context). It's NOT the
-        // dispatch_source_t pointer.
+        // The first argument is the CFRunLoopTimerRef (unused — we recover
+        // the editor_render_loop pointer from the context passed to
+        // CFRunLoopTimerCreate). Runs on the AppKit main thread.
         auto* l = static_cast<editor_render_loop*>(info);
-        if (!l || !l->running.load(std::memory_order_acquire)) return;
+        if (!l || !l->running) return;
         if (!g_frame_cb) return;
 
-        // GCD timer fires on a global concurrent queue worker thread, NOT
-        // the main run loop thread. NSObject autoreleased objects returned
-        // by Objective-C methods (e.g., MTKView::currentDrawable inside
-        // blit_surface_and_present) would otherwise be added to a
-        // last-resort pool and eventually crash with SIGSEGV in
-        // objc_release when the pool boundary misaligns with the actual
-        // object lifetime. Provide a per-callback autorelease pool so
-        // the autoreleased references drain deterministically.
-        @autoreleasepool {
-            const u32 id = static_cast<u32>(l->id);
-            const float dt = (l->fps > 0) ? (1.0f / static_cast<float>(l->fps)) : 0.016f;
-            g_frame_cb(id, dt);
-        }
+        const u32 id = static_cast<u32>(l->id);
+        const float dt = (l->fps > 0) ? (1.0f / static_cast<float>(l->fps)) : 0.016f;
+
+        // No @autoreleasepool block needed. The C# thunk is pinned via
+        // GCHandle.Alloc in NativeEngineBridge.cs (see _thunkHandle), so
+        // its delegate wrapper memory is not recycled. Autoreleased refs
+        // created during the engine's synchronous render path
+        // (PipelineRenderFrame + BlitRenderTargetToSurface) land in the
+        // current per-callout autoreleasepool on the AppKit main thread
+        // and are drained by __CFRunLoopPerCalloutARPEnd after this
+        // callback returns — exactly the same lifecycle as AppKit's own
+        // NSView drawing.
+        g_frame_cb(id, dt);
     }
 }
 
@@ -120,15 +142,11 @@ EDITOR_INTERFACE u32 EditorCreateRenderLoop(s32 fps)
 {
     if (fps <= 0) fps = 60;
     auto l = std::make_unique<editor_render_loop>();
+    const u32 id = static_cast<u32>(g_render_loops.size()) + 1;
+    l->id = id;
     l->fps = fps;
-    // Use a high-priority global concurrent queue so the timer fires
-    // regardless of which thread scheduled it (P/Invoke from dotnet,
-    // CFRunLoopGetMain() may return a different run loop than the one
-    // Avalonia is pumping on macOS).
-    l->queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-    l->id = static_cast<u32>(g_render_loops.size()) + 1;
     g_render_loops.push_back(std::move(l));
-    return g_render_loops.back()->id;
+    return id;
 }
 
 EDITOR_INTERFACE void EditorDestroyRenderLoop(u32 loop_id)
@@ -137,8 +155,14 @@ EDITOR_INTERFACE void EditorDestroyRenderLoop(u32 loop_id)
     auto& slot = g_render_loops[loop_id - 1];
     if (!slot) return;
     if (slot->timer) {
-        dispatch_source_cancel(slot->timer);
-        dispatch_release(slot->timer);
+        CFRunLoopTimerInvalidate(slot->timer);
+        // Invalidate removes the timer from the run loop (which releases
+        // the run loop's retain on it) but does NOT release the caller-
+        // owned +1 from CFRunLoopTimerCreate. Without this CFRelease the
+        // timer leaks one ref per Destroy. Per Apple's CFRunLoopTimer
+        // docs: "If you want to release the timer after invalidation,
+        // call CFRelease."
+        CFRelease(slot->timer);
         slot->timer = nullptr;
     }
     slot.reset();
@@ -149,35 +173,46 @@ EDITOR_INTERFACE void EditorStopRenderLoop(u32 loop_id)
     if (loop_id == 0 || loop_id > g_render_loops.size()) return;
     auto& slot = g_render_loops[loop_id - 1];
     if (!slot) return;
-    slot->running.store(false, std::memory_order_release);
+    slot->running = false;
     if (slot->timer) {
-        dispatch_source_cancel(slot->timer);
-        dispatch_release(slot->timer);
+        CFRunLoopTimerInvalidate(slot->timer);
+        // Same caller-retain rule as EditorDestroyRenderLoop above.
+        CFRelease(slot->timer);
         slot->timer = nullptr;
     }
 }
 
-EDITOR_INTERFACE void EditorStartRenderLoop(u32 loop_id)
+EDITOR_INTERFACE u32 EditorStartRenderLoop(u32 loop_id)
 {
-    if (loop_id == 0 || loop_id > g_render_loops.size()) return;
+    if (loop_id == 0 || loop_id > g_render_loops.size()) return 0;
     auto& slot = g_render_loops[loop_id - 1];
-    if (!slot || !slot->queue) return;
-    if (slot->running.load(std::memory_order_acquire)) {
+    if (!slot) return 0;
+    if (slot->running) {
         EditorStopRenderLoop(loop_id);
     }
-    slot->timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, slot->queue);
-    if (!slot->timer) return;
-    // Stash the loop pointer in the source's context so fire_timer can
-    // recover it (GCD timers don't pass user data to the event handler).
-    dispatch_set_context(slot->timer, slot.get());
-    const uint64_t interval_ns = static_cast<uint64_t>(1e9) / static_cast<uint64_t>(slot->fps);
-    dispatch_source_set_timer(slot->timer,
-        dispatch_time(DISPATCH_TIME_NOW, interval_ns),
-        interval_ns,
-        interval_ns / 10);  // 10% tolerance
-    dispatch_source_set_event_handler_f(slot->timer, &fire_timer);
-    slot->running.store(true, std::memory_order_release);
-    dispatch_resume(slot->timer);
+
+    // Fire on the AppKit main run loop (CFRunLoopGetMain()). When called
+    // from the editor process, this is the same run loop Avalonia is
+    // pumping its AppKit thread on, so the timer's callback runs on the
+    // same thread as Avalonia's UI compositor. Autoreleased ObjC refs
+    // created inside the callback land in the AppKit per-callout
+    // autoreleasepool — drained by AppKit in the same iteration, no
+    // memory recycling between iterations.
+    CFRunLoopTimerContext context{};
+    context.info = slot.get();
+    slot->timer = CFRunLoopTimerCreate(
+        kCFAllocatorDefault,
+        CFAbsoluteTimeGetCurrent(),
+        1.0 / static_cast<CFTimeInterval>(slot->fps),
+        0,  // flags (no tolerance)
+        0,  // order (default priority)
+        &fire_timer,
+        &context);
+    if (!slot->timer) return 0;
+    CFRunLoopAddTimer(CFRunLoopGetMain(), slot->timer, kCFRunLoopCommonModes);
+
+    slot->running = true;
+    return loop_id;
 }
 
 #endif

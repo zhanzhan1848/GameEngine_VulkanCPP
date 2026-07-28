@@ -106,9 +106,32 @@ bool metal_surface::create()
         }
         _is_external = true;
 
+        // Validate the host view has non-zero bounds BEFORE allocating the
+        // MTKView. The editor's MTKViewHost is a NativeControlHost whose
+        // child NSView is laid out by Avalonia; if TryInitializeFromLayout
+        // is called before the host's child has been laid out
+        // (parent.Bounds = 0,0), the host's NSView.bounds is {{0,0},{0,0}}.
+        // Allocating a MTKView with frame {0,0,0,0} produces a CAMetalLayer
+        // whose drawableSize is 0,0; the first call to currentDrawable then
+        // returns either nil or a drawable whose backing texture is invalid.
+        // Either way, the first presentDrawable: block fires inside the
+        // GPU completion queue with a freed / invalid drawable and we
+        // crash with the EXC_BAD_ACCESS at
+        // -[_MTLCommandBuffer presentDrawable:options:]_block_invoke
+        // signature. Bail out cleanly so the editor can retry the next
+        // layout pass when the host is actually laid out.
+        const CGRect hostBounds = _host_view->bounds();
+        if (hostBounds.size.width <= 0.0 || hostBounds.size.height <= 0.0) {
+            std::cerr << "[metal_surface::create_external] host view has zero-size "
+                         "bounds (" << hostBounds.size.width << "x"
+                      << hostBounds.size.height << "); deferring until layout pass" << std::endl;
+            _is_external = false;
+            _host_view = nullptr;
+            return false;
+        }
+
         const CGFloat width  = static_cast<CGFloat>(_window.width());
         const CGFloat height = static_cast<CGFloat>(_window.height());
-        CGRect frame{ { 0.f, 0.f }, { width, height } };
 
         // Allocate a PassThroughMTKView (subclass of MTKView) so the
         // view's -hitTest: returns nil and pointer events fall through
@@ -162,5 +185,33 @@ bool metal_surface::create()
                      { static_cast<CGFloat>(w), static_cast<CGFloat>(h) } };
         _mtk_view->setFrame(frame);
         _mtk_view->setDrawableSize(CGSizeMake(static_cast<CGFloat>(w), static_cast<CGFloat>(h)));
+    }
+
+    void metal_surface::resize(u32 w, u32 h)
+    {
+        if (w == 0 || h == 0) return;
+
+        // Update the platform window's stored size so metal_surface::width()
+        // /height() and downstream consumers (rendering passes, frame_info)
+        // see the new dimensions. resize_window is a no-op when w/h match
+        // the platform's stored value, so this is cheap on a no-op resize.
+        _window.resize(w, h);
+
+        if (!_mtk_view) return;
+
+        // MTKView's frame and drawableSize are independent: frame is the
+        // on-screen position+size in points, drawableSize is the backing
+        // texture resolution in pixels (multiplied by the screen's scale
+        // factor if you go through CAMetalLayer directly, but MTKView
+        // handles the scaling for us when we set the same w/h as the
+        // frame). Setting only one leaves the GPU drawing into a stale-
+        // sized CAMetalDrawable, which is the root cause of the
+        // post-resize black surface.
+        _mtk_view->setFrame(CGRect{
+            { 0.f, 0.f },
+            { static_cast<CGFloat>(w), static_cast<CGFloat>(h) }
+        });
+        _mtk_view->setDrawableSize(CGSizeMake(
+            static_cast<CGFloat>(w), static_cast<CGFloat>(h)));
     }
 }

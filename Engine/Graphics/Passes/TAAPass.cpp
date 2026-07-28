@@ -76,8 +76,20 @@ bool TAAPass::Initialize(rhi::RHIDeviceBase* device, u32 width, u32 height, rhi:
     auto loadShader = [&](const std::string& path, rhi::ShaderStage stage, const char* entry) -> rhi::ShaderHandle {
         std::ifstream file(path, std::ios::ate | std::ios::binary);
         if (!file.is_open()) {
+             // Try the main checkout first (legacy hardcoded path that
+             // worked when this worktree didn't exist). If that fails,
+             // try the worktree path that matches the current build.
+             // Both paths are project-specific and may not match the
+             // user's local checkout — the path is best-effort, not
+             // reliable. The proper fix is to embed pre-compiled metallib
+             // bytes in the dylib so the runtime doesn't need to find
+             // .metal files at all (tracked separately).
              std::string absPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
              file.open(absPath, std::ios::ate | std::ios::binary);
+             if (!file.is_open()) {
+                 absPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/" + path;
+                 file.open(absPath, std::ios::ate | std::ios::binary);
+             }
         }
         if (!file.is_open()) return rhi::handles::INVALID_SHADER;
         

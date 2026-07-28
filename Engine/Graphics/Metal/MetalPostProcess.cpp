@@ -51,9 +51,16 @@ namespace primal::graphics::metal::fx
             info->colorAttachments()->object(0)->setPixelFormat( MTL::PixelFormat::PixelFormatRGBA16Float );
             post_process_pipeline = device->newRenderPipelineState( info, &pError );
             if (pError) {
+                std::fprintf(stderr, "[MetalPostProcess] post_process_pipeline PSO error: %s\n",
+                          pError->localizedDescription()->utf8String());
+                std::fflush(stderr);
                 std::cerr << "[MetalPostProcess] post_process_pipeline PSO error: "
                           << pError->localizedDescription()->utf8String() << std::endl;
-                pError->release();
+                // pError is an NS::Error** out-parameter; Metal owns the
+                // NSError* it writes. Calling ->release() over-released an
+                // autoreleased NSError that the per-callout autorelease
+                // pool later dereferenced, producing the objc_release
+                // SIGSEGV documented in MetalBlitToDrawable.cpp.
             } else if (!post_process_pipeline) {
                 std::cerr << "[MetalPostProcess] post_process_pipeline: newRenderPipelineState returned null without error" << std::endl;
             }

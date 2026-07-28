@@ -525,6 +525,8 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     static u32 viewDiag = 0;
     if (viewDiag < 3) {
         std::cout << "[Diag] View: col0=(" << view_matrix_.columns[0][0] << "," << view_matrix_.columns[0][1] << "," << view_matrix_.columns[0][2] << ")"
+                  << " col1=(" << view_matrix_.columns[1][0] << "," << view_matrix_.columns[1][1] << "," << view_matrix_.columns[1][2] << ")"
+                  << " col2=(" << view_matrix_.columns[2][0] << "," << view_matrix_.columns[2][1] << "," << view_matrix_.columns[2][2] << ")"
                   << " col3=(" << view_matrix_.columns[3][0] << "," << view_matrix_.columns[3][1] << "," << view_matrix_.columns[3][2] << ")"
                   << " Proj11=" << proj_matrix_.columns[1][1] << " Proj22=" << proj_matrix_.columns[2][2]
                   << std::endl;

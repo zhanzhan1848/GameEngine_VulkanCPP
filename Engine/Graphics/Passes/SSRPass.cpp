@@ -55,8 +55,16 @@ bool SSRPass::Initialize(rhi::RHIDeviceBase* device) {
     std::string shaderPath = "Engine/Graphics/Metal/shaders/SSRPass.metal";
     std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
+        // Best-effort fallback: try the main checkout, then the
+        // worktree. Both are project-specific and may not match the
+        // user's local checkout. Proper fix: embed pre-compiled
+        // metallib bytes in the dylib.
         shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
         file.open(shaderPath, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+            shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/" + shaderPath;
+            file.open(shaderPath, std::ios::ate | std::ios::binary);
+        }
     }
 
     if (!file.is_open()) {

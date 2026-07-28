@@ -114,11 +114,23 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set,
     device->UpdateDescriptorSets(count, writes.data());
 }
 
+// Forward scene renderer shader search paths. The main-checkout path
+// is tried first (legacy default); the worktree path is tried second
+// (current build location). Both are project-specific and may not
+// match the user's local checkout. The proper fix is to embed
+// pre-compiled metallib bytes in the dylib so the runtime doesn't
+// need to find .metal files at all (tracked separately).
 static const std::string SHADER_DIR =
     "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Forward/";
 
 static const std::string RHI_SHADER_DIR =
     "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/";
+
+static const std::string SHADER_DIR_WT =
+    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/Engine/Graphics/Metal/shaders/Forward/";
+
+static const std::string RHI_SHADER_DIR_WT =
+    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCpp/.worktrees/avalonia-migration/Engine/Graphics/RHI/Shaders/";
 
 static std::string ReadFileToString(const std::string& path) {
     std::ifstream file(path);
@@ -129,8 +141,11 @@ static std::string ReadFileToString(const std::string& path) {
 }
 
 static std::string ResolveInclude(const std::string& name) {
-    // Search Forward/ then RHI/Shaders/
-    for (const auto& dir : {SHADER_DIR, RHI_SHADER_DIR}) {
+    // Search Forward/ then RHI/Shaders/, both main-checkout and
+    // worktree variants. Best-effort: if the project is checked out
+    // at a different path, all of these will fail and the engine
+    // falls back to source compilation of whatever it can find.
+    for (const auto& dir : {SHADER_DIR, RHI_SHADER_DIR, SHADER_DIR_WT, RHI_SHADER_DIR_WT}) {
         auto content = ReadFileToString(dir + name);
         if (!content.empty()) return content;
     }
@@ -179,8 +194,15 @@ static std::string InlineIncludes(const std::string& source, int depth,
 }
 
 static std::vector<u8> LoadShaderSource(const char* filename) {
-    std::string path = SHADER_DIR + filename + std::string(".metal");
-    std::string source = ReadFileToString(path);
+    // Search main-checkout first, then worktree, then give up. The
+    // path layout is project-specific; the proper fix is to embed
+    // pre-compiled metallib bytes in the dylib.
+    std::string source;
+    for (const auto& dir : {SHADER_DIR, SHADER_DIR_WT}) {
+        std::string path = dir + filename + std::string(".metal");
+        source = ReadFileToString(path);
+        if (!source.empty()) break;
+    }
     if (source.empty()) {
         std::cerr << "[ForwardSceneRenderer] Failed to load shader: " << filename << std::endl;
         return {};
@@ -550,6 +572,21 @@ void ForwardSceneRenderer::CreateShaders() {
     streaming_ps_ = load("StreamingGBuffer", "streamingFragmentMain", ShaderStage::Pixel);
 }
 
+// Configure vertex layout for geometry-rendering pipelines. Matches GBuffer.metal
+// VertexInput struct: position at offset 0 (12B), ColorTSign 12 (4B),
+// Normal 16 (4B), Tangent 20 (4B), UV 24 (8B). Stride 32B, bound at slot 20
+// by RenderMesh::Draw(cmd, count, 0, 20). Without this, Metal sees no vertex
+// attributes and the vertex shader reads garbage → spheres don't transform →
+// no depth writes → black viewport.
+static void ConfigureGeometryVertexLayout(GraphicsPipelineDesc& desc) {
+    desc.vertexAttributes.push_back({0, 20, DataFormat::RGB32_Float, 0});
+    desc.vertexAttributes.push_back({1, 20, DataFormat::R32_UInt,    12});
+    desc.vertexAttributes.push_back({2, 20, DataFormat::RG16_UInt,   16});
+    desc.vertexAttributes.push_back({3, 20, DataFormat::RG16_UInt,   20});
+    desc.vertexAttributes.push_back({4, 20, DataFormat::RG32_Float,  24});
+    desc.vertexBindings.push_back({20, 32, true});
+}
+
 void ForwardSceneRenderer::CreatePipelines() {
     PushConstantRange modelPush{ShaderStage::Vertex, 2, sizeof(PCGPushConsts)};
 
@@ -572,8 +609,10 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        ConfigureGeometryVertexLayout(desc);
         gbuffer_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
+
     // Shadow
     {
         DescriptorSetLayoutHandle sets[] = {global_set_layout_, material_set_layout_};
@@ -659,6 +698,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        ConfigureGeometryVertexLayout(desc);
         alphaclip_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Unlit technique — shares gbuffer layout, different shader
@@ -677,6 +717,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        ConfigureGeometryVertexLayout(desc);
         unlit_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Foliage technique — two-sided, wind animation, alpha discard
@@ -695,6 +736,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        ConfigureGeometryVertexLayout(desc);
         foliage_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Water technique — alpha blend, no depth write
@@ -720,6 +762,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        ConfigureGeometryVertexLayout(desc);
         water_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Transparent technique — alpha blend, no depth write
@@ -745,6 +788,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        ConfigureGeometryVertexLayout(desc);
         transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Forward Water — single RT (lighting_output_), blend over deferred result, depth test against GBuffer
@@ -767,6 +811,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        ConfigureGeometryVertexLayout(desc);
         forward_water_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Forward Transparent — same configuration
@@ -789,6 +834,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        ConfigureGeometryVertexLayout(desc);
         forward_transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Streaming mesh pipeline — same layout/RTs/depth as GBuffer, different VS/PS
@@ -808,6 +854,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        ConfigureGeometryVertexLayout(desc);
         streaming_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
 }
