@@ -20,6 +20,8 @@
                           ItemsSource="{Binding BuildConfigurations}"
                           SelectedItem="{Binding Project.BuildConfigName}"/>
                 <Button Content="Build" Command="{Binding BuildProjectCommand}" Padding="10,2"/>
+                <Separator Margin="6,0"/>
+                <Button Content="Primitive Mesh…" Click="OnCreatePrimitiveMeshClick" Padding="10,2"/>
             </StackPanel>
         </Border>
 

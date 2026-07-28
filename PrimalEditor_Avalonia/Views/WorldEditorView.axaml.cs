@@ -55,6 +55,16 @@ public partial class WorldEditorView : UserControl
         }
     }
 
+    private async void OnCreatePrimitiveMeshClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var dlg = new Editors.PrimitiveMesh.PrimitiveMeshView
+        {
+            DataContext = new Editors.PrimitiveMesh.PrimitiveMeshViewModel(),
+        };
+        var window = TopLevel.GetTopLevel(this) as Window;
+        if (window != null) await dlg.ShowDialog<bool?>(window);
+    }
+
     private void OnAddEntityClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is WorldEditorViewModel vm)

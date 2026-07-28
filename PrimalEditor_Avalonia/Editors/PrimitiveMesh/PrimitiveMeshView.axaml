@@ -1,7 +1,62 @@
-<UserControl xmlns="https://github.com/avaloniaui"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:vm="using:PrimalEditor_Avalonia.Editors.PrimitiveMesh"
-             x:Class="PrimalEditor_Avalonia.Editors.PrimitiveMesh.PrimitiveMeshView"
-             x:DataType="vm:PrimitiveMeshViewModel">
-  <TextBlock Text="Primitive Mesh (T6) — pending implementation"/>
-</UserControl>
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:PrimalEditor_Avalonia.Editors.PrimitiveMesh"
+        xmlns:ctrl="using:PrimalEditor_Avalonia.Controls"
+        x:Class="PrimalEditor_Avalonia.Editors.PrimitiveMesh.PrimitiveMeshView"
+        x:DataType="vm:PrimitiveMeshViewModel"
+        Title="Create Primitive Mesh"
+        Width="520" Height="560"
+        WindowStartupLocation="CenterOwner">
+
+  <Grid Margin="20" RowDefinitions="Auto,*,Auto,Auto">
+
+    <StackPanel Grid.Row="0" Spacing="6">
+      <TextBlock Text="Geometry Type" FontWeight="SemiBold"/>
+      <ComboBox ItemsSource="{Binding AllTypes}" SelectedItem="{Binding Type}"
+                HorizontalAlignment="Stretch"/>
+    </StackPanel>
+
+    <ScrollViewer Grid.Row="1" Margin="0,12">
+      <StackPanel Spacing="10">
+        <StackPanel>
+          <TextBlock Text="Segments" FontWeight="SemiBold" Margin="0,0,0,4"/>
+          <StackPanel Orientation="Horizontal" Spacing="4">
+            <ctrl:NumberBox Value="{Binding SegmentsX, Mode=TwoWay}" Kind="Int" Width="110"/>
+            <ctrl:NumberBox Value="{Binding SegmentsY, Mode=TwoWay}" Kind="Int" Width="110"/>
+            <ctrl:NumberBox Value="{Binding SegmentsZ, Mode=TwoWay}" Kind="Int" Width="110"/>
+          </StackPanel>
+        </StackPanel>
+
+        <StackPanel>
+          <TextBlock Text="Size" FontWeight="SemiBold" Margin="0,0,0,4"/>
+          <StackPanel Orientation="Horizontal" Spacing="4">
+            <ctrl:NumberBox Value="{Binding SizeX, Mode=TwoWay}" Kind="Float" Width="110"/>
+            <ctrl:NumberBox Value="{Binding SizeY, Mode=TwoWay}" Kind="Float" Width="110"/>
+            <ctrl:NumberBox Value="{Binding SizeZ, Mode=TwoWay}" Kind="Float" Width="110"/>
+          </StackPanel>
+        </StackPanel>
+
+        <StackPanel>
+          <TextBlock Text="LOD" FontWeight="SemiBold" Margin="0,0,0,4"/>
+          <ctrl:NumberBox Value="{Binding LOD, Mode=TwoWay}" Kind="Int" Width="110"/>
+        </StackPanel>
+
+        <StackPanel>
+          <TextBlock Text="Smoothing Angle (degrees)" FontWeight="SemiBold" Margin="0,0,0,4"/>
+          <ctrl:NumberBox Value="{Binding SmoothingAngle, Mode=TwoWay}" Kind="Float" Width="110"/>
+        </StackPanel>
+      </StackPanel>
+    </ScrollViewer>
+
+    <StackPanel Grid.Row="2" Spacing="4" Margin="0,8,0,0">
+      <TextBlock Text="Output File Name" FontWeight="SemiBold"/>
+      <TextBox Text="{Binding OutputName, Mode=TwoWay}"/>
+    </StackPanel>
+
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6" Margin="0,16,0,0">
+      <Button Content="Cancel" Click="OnCancelClick" Width="90"/>
+      <Button Content="Create" Click="OnCreateClick" Width="90" IsDefault="True"
+              Classes="accent"/>
+    </StackPanel>
+  </Grid>
+</Window>
