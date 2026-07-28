@@ -2013,3 +2013,18 @@ set_target_properties(TestWFCTileRegistryPacking PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCTileRegistryPacking PRIVATE DEBUG _DEBUG)
 
+add_executable(TestWFCTileCatalog
+    Graphics/WFC/TestWFCTileCatalog.cpp)
+target_include_directories(TestWFCTileCatalog PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCTileCatalog PRIVATE Engine)
+add_test(NAME TestWFCTileCatalog COMMAND TestWFCTileCatalog)
+set_target_properties(TestWFCTileCatalog PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCTileCatalog PRIVATE DEBUG _DEBUG)
+
