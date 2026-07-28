@@ -30,6 +30,8 @@
                 <Separator/>
                 <MenuItem Header="_Import _Asset..." Click="OnImportAssetClick"
                           InputGesture="Ctrl+I"/>
+                <MenuItem Header="_New Script..." Click="OnNewScriptClick"
+                          IsEnabled="False" ToolTip.Tip="VS integration skipped per user request"/>
                 <Separator/>
                 <MenuItem Header="E_xit" Command="{Binding ExitCommand}"/>
             </MenuItem>
