@@ -39,11 +39,40 @@ TestResult TestWFCTileCatalog_Tiles_Have_Valid_Mesh_Handles() {
     return TestResult::Passed;
 }
 
+TestResult TestWFCTileCatalog_Cube_Self_Compat_On_All_Faces() {
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCTileCatalog::Populate(reg, adj);
+
+    const wfc_tile_id cube{0};
+    for (u32 face = 0; face < 6; ++face) {
+        WFCFace f = static_cast<WFCFace>(face);
+        TEST_ASSERT(adj.Compatible(cube, 0, f, cube, 0),
+                    "Cube self-compatible on all faces");
+    }
+    return TestResult::Passed;
+}
+
+TestResult TestWFCTileCatalog_Ramp_Self_Compat_On_PosZ() {
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCTileCatalog::Populate(reg, adj);
+
+    const wfc_tile_id ramp{1};
+    TEST_ASSERT(adj.Compatible(ramp, 0, WFCFace::PosZ, ramp, 0),
+                "Ramp var 0 self-compat +Z");
+    TEST_ASSERT(adj.Compatible(ramp, 0, WFCFace::NegZ, ramp, 0),
+                "Ramp var 0 self-compat -Z (mirror)");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCTileCatalog");
     TEST_CASE(suite, "Populate_Registers_Five_Tiles", TestWFCTileCatalog_Populate_Registers_Five_Tiles);
     TEST_CASE(suite, "Ramp_Has_Four_Variants", TestWFCTileCatalog_Ramp_Has_Four_Variants);
     TEST_CASE(suite, "Tiles_Have_Valid_Mesh_Handles", TestWFCTileCatalog_Tiles_Have_Valid_Mesh_Handles);
+    TEST_CASE(suite, "Cube_Self_Compat_On_All_Faces", TestWFCTileCatalog_Cube_Self_Compat_On_All_Faces);
+    TEST_CASE(suite, "Ramp_Self_Compat_On_PosZ", TestWFCTileCatalog_Ramp_Self_Compat_On_PosZ);
     suite.RunAllTests();
     return 0;
 }

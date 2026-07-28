@@ -91,8 +91,35 @@ void WFCTileCatalog::Populate(WFCTileRegistry& registry, TileAdjacencyTable& adj
     registry.Register(MakeCornerOutTile());
     registry.Register(MakePillarTile());
 
-    // Adjacency rules added in Task 7 (next task).
-    (void)adjacency;
+    const wfc_tile_id cube{0};
+    const wfc_tile_id ramp{1};
+    const wfc_tile_id corner_in{2};
+    const wfc_tile_id corner_out{3};
+    const wfc_tile_id pillar{4};
+
+    // Helper: full pairwise compat on all 6 faces (for tiles that always fit together)
+    auto AddFullCompat = [&](wfc_tile_id a, u32 a_var, wfc_tile_id b, u32 b_var) {
+        adjacency.AddCompatibility(a, a_var, WFCFace::PosX, b, b_var);
+        adjacency.AddCompatibility(a, a_var, WFCFace::NegX, b, b_var);
+        adjacency.AddCompatibility(a, a_var, WFCFace::PosY, b, b_var);
+        adjacency.AddCompatibility(a, a_var, WFCFace::NegY, b, b_var);
+        adjacency.AddCompatibility(a, a_var, WFCFace::PosZ, b, b_var);
+        adjacency.AddCompatibility(a, a_var, WFCFace::NegZ, b, b_var);
+    };
+
+    // Phase A.3 simplified rules: cube is universally compatible (wildcard structural tile).
+    // Other tiles self-compatible + cube-compatible on all faces.
+    for (u32 v = 0; v < 4; ++v) {
+        AddFullCompat(cube, 0, ramp, v);
+        AddFullCompat(ramp, v, ramp, v);  // ramp self-compat (same variant)
+    }
+    AddFullCompat(cube, 0, corner_in, 0);
+    AddFullCompat(cube, 0, corner_out, 0);
+    AddFullCompat(cube, 0, pillar, 0);
+    AddFullCompat(corner_in, 0, corner_in, 0);
+    AddFullCompat(corner_out, 0, corner_out, 0);
+    AddFullCompat(pillar, 0, pillar, 0);
+    AddFullCompat(cube, 0, cube, 0);  // cube self-compat
 }
 
 } // namespace primal::graphics::wfc
