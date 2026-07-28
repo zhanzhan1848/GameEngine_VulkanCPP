@@ -52,6 +52,8 @@
 #include "TestMaterialPreview.h"
 #elif TEST_MATERIAL_PREVIEW_EDITOR
 #include "TestMaterialPreviewEditor.h"
+#elif TEST_WFC_RENDERING
+#include "Graphics/WFC/TestWFCRendering.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif
