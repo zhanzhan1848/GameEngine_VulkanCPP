@@ -4,9 +4,9 @@
 //
 // Mirrors the TestPCGScatter scaffolding pattern: a RenderTestCase that owns
 // a Metal device + RenderSystem + StandardRenderPipeline + empty RenderScene.
-// Task 2 stops here — window opens, 60 frames render headlessly, test exits.
-// Task 3 registers catalog meshes and runs the WFC solver; Task 4 will spawn
-// the collapsed tile instances into the scene.
+// Task 2: open window + render 60 headless frames. Task 3: register catalog
+// meshes + run solver + emit point set. Task 4: spawn the collapsed tile
+// instances into the scene as ECS Entities and hand them to the pipeline.
 
 #include "RenderTestFramework.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
@@ -37,6 +37,13 @@ private:
     // Builds the WFC catalog, runs the solver on a 4x4x4 grid, drains Collapse
     // steps into wfc_point_set. Leaves Task 4 to spawn entities from the set.
     void RunSolverAndEmit();
+
+    // --- Task 4 helper ---
+    // Feeds wfc_point_set into PCGEntityFactory::CreateEntities to mint ECS
+    // Entities, then hands the entity_ids + mesh_slot_indices to
+    // pipeline->SetPCGEntities so Render() syncs RenderProxies for each tile
+    // instance into the RenderScene. Must run after RunSolverAndEmit.
+    void SpawnWFCEntities();
 
     std::unique_ptr<primal::graphics::rhi::RHIDeviceBase> device;
     primal::platform::window window;

@@ -4,11 +4,17 @@
 // empty RenderScene, run a per-frame render loop. The test exits cleanly after
 // kHeadlessFrameCap frames so it can run headlessly in CI.
 //
-// Task 3 (this file): RegisterWFCCatalogMeshes() registers 5 procedural meshes
+// Task 3: RegisterWFCCatalogMeshes() registers 5 procedural meshes
 // (cube/ramp/corner_in/corner_out/pillar) and overrides the WFC catalog's
 // placeholder mesh_handles (1000-1004) with real slot indices. RunSolverAndEmit()
 // drives a 4x4x4 collapse and drains Collapse steps into wfc_point_set via
-// WFCOutput::ConsumeSteps. No entities are spawned — that's Task 4.
+// WFCOutput::ConsumeSteps.
+//
+// Task 4 (this file): SpawnWFCEntities() feeds wfc_point_set through
+// PCGEntityFactory::CreateEntities to mint ECS Entities, then hands the
+// entity_ids + mesh_slot_indices to pipeline->SetPCGEntities so the render
+// loop syncs RenderProxies into the RenderScene. The 4x4x4 grid is now
+// visible (in interactive mode) / rendered headlessly (CI mode).
 
 #include "TestWFCRendering.h"
 #include "Engine/Common/CommonHeaders.h"
@@ -28,6 +34,7 @@
 #include "Engine/Graphics/WFC/WFCSolveBudget.h"
 #include "Engine/Graphics/WFC/WFCOutput.h"
 #include "Engine/Graphics/PCG/PCGTypes.h"
+#include "Engine/Graphics/PCG/PCGEntityFactory.h"
 
 #ifdef __APPLE__
 #include <AppKit/AppKit.hpp>
@@ -119,8 +126,58 @@ bool WFCRenderingTestCase::Initialize() {
     RegisterWFCCatalogMeshes();
     RunSolverAndEmit();
 
+    // 8. Task 4: mint ECS Entities from the emitted point set and hand them
+    //    to the pipeline so Render() syncs RenderProxies for each tile
+    //    instance into the RenderScene. Must come after RunSolverAndEmit
+    //    (consumes wfc_point_set) and before we return (so the very first
+    //    Run() frame already has entities to draw).
+    SpawnWFCEntities();
+
     std::cout << "[TestWFCRendering] Pipeline + scene ready" << std::endl;
     return true;
+}
+
+// ============================================================================
+// WFCRenderingTestCase::SpawnWFCEntities
+// ============================================================================
+//
+// Converts wfc_point_set (populated by RunSolverAndEmit) into ECS Entities via
+// PCGEntityFactory::CreateEntities, then pushes the entity_ids + mesh_slot
+// indices into the pipeline. Pattern mirrors TestPCGScatter's integration.
+//
+// Key difference from TestPCGScatter: we do NOT offset mesh_slot_indices.
+// RunSolverAndEmit already overwrote the WFC catalog's placeholder
+// mesh_handles (sentinel 1000-1004) with the real ForwardSceneRenderer slot
+// indices captured in RegisterWFCCatalogMeshes, and WFCOutput::ConsumeSteps
+// writes tile.mesh_handle into the MeshIndex attr verbatim — so the slot
+// indices coming out of CreateEntities are already correct. TestPCGScatter
+// adds += procedural_slot_base_ because its scatter graph emits abstract
+// {0,1,2} tags that need to be offset to its procedural mesh range; the WFC
+// path bakes the real slot in at catalog-build time.
+
+void WFCRenderingTestCase::SpawnWFCEntities() {
+    using namespace primal::graphics::pcg;
+
+    if (wfc_point_set.count == 0) {
+        std::cout << "[TestWFCRendering] SpawnWFCEntities: empty point set, "
+                  << "skipping" << std::endl;
+        return;
+    }
+
+    // CreateEntities mints one Entity per point with a Transform (pos/rot/scale
+    // from the point's attrs) and records MeshIndex into mesh_slot_indices.
+    auto result = PCGEntityFactory::CreateEntities(wfc_point_set);
+
+    // Keep a copy on the test case for Shutdown cleanup. Then hand the
+    // originals to the pipeline by move so we don't hold two live copies
+    // through the render loop. (Mirrors ReScatterPCG in TestPCGScatter.)
+    wfc_entity_ids = result.entity_ids;
+    wfc_mesh_slots = result.mesh_slot_indices;
+    pipeline->SetPCGEntities(std::move(result.entity_ids),
+                             std::move(result.mesh_slot_indices));
+
+    std::cout << "[TestWFCRendering] Spawned " << wfc_entity_ids.size()
+              << " WFC entities" << std::endl;
 }
 
 // ============================================================================
@@ -317,9 +374,21 @@ void WFCRenderingTestCase::Shutdown() {
     if (!pipeline && !scene) return;  // already shut down — idempotent
     std::cout << "[TestWFCRendering] Shutting down..." << std::endl;
 
-    // Task 4 will own wfc_entity_ids — for now the vector stays empty.
+    // Task 4 entities: drop them from the pipeline first so Render() stops
+    // syncing RenderProxies for IDs we're about to invalidate, then destroy
+    // the ECS Entities themselves. Order matters — ClearPCGEntities just
+    // clears the id list on the pipeline, DestroyEntities actually removes
+    // the Entities from the game_entity component pool.
     if (pipeline) {
         pipeline->ClearPCGEntities();
+    }
+    if (!wfc_entity_ids.empty()) {
+        primal::graphics::pcg::PCGEntityFactory::DestroyEntities(wfc_entity_ids);
+        wfc_entity_ids.clear();
+        wfc_mesh_slots.clear();
+    }
+
+    if (pipeline) {
         pipeline->Shutdown();
         delete pipeline;
         pipeline = nullptr;
