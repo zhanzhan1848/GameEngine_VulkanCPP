@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Text.Json.Serialization;
 using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.ViewModels;
@@ -71,4 +72,9 @@ public class GameEntity : ViewModelBase
     {
         Name = name;
     }
+
+    public T? GetComponent<T>() where T : Component =>
+        Components.OfType<T>().FirstOrDefault();
+
+    public Transform? GetTransform() => GetComponent<Transform>();
 }

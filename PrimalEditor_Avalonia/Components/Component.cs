@@ -8,4 +8,6 @@ public abstract class Component : ViewModelBase
 {
     [JsonPropertyName("IsEnabled")]
     public bool IsEnabled { get; set; } = true;
+
+    public abstract IMSComponent GetMultiselectionComponent(MSEntity msEntity);
 }

@@ -140,4 +140,6 @@ public class Transform : Component
             }
         }
     }
+
+    public override IMSComponent GetMultiselectionComponent(MSEntity msEntity) => new MSTransform(msEntity);
 }
