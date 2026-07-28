@@ -423,8 +423,30 @@ if(APPLE)
     setup_test_target(TestPipelineRenderFrame)
     target_link_libraries(TestPipelineRenderFrame PRIVATE EngineDLL ${CMAKE_DL_LIBS})
 
+    # 29. TestWFC3DParametric (WFC Phase A.3 Task 11: end-to-end integration test)
+    # Headless, no GPU. Exercises the full parametric WFC pipeline:
+    #   WFCTileCatalog::Populate -> WFCSolver (multi-tile) -> WFCOutput::ConsumeSteps
+    # Wired as a standalone block (mirrors UnitTests/Graphics/WFC/CMakeLists pattern)
+    # rather than via setup_test_target, to avoid pulling Cocoa/Metal frameworks and
+    # shader-asset POST_BUILD copies that the WFC path does not need.
+    add_executable(TestWFC3DParametric
+        Graphics/WFC/TestWFC3DParametric.cpp
+    )
+    target_include_directories(TestWFC3DParametric PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFC3DParametric PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFC3DParametric COMMAND TestWFC3DParametric)
+    set_target_properties(TestWFC3DParametric PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFC3DParametric PRIVATE DEBUG _DEBUG)
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric)
 
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)
