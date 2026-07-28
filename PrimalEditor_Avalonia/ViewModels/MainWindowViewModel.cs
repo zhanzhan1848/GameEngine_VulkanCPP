@@ -55,10 +55,12 @@ public class MainWindowViewModel : ViewModelBase
                 {
                     WindowTitle = $"{value.Name} - PrimalEditor Avalonia";
                     WorldEditor.ActiveScene = value.ActiveScene;
+                    PrimalEditor_Avalonia.Content.ContentWatcher.Initialize(value.ContentPath);
                 }
                 else
                 {
                     WindowTitle = "PrimalEditor Avalonia";
+                    PrimalEditor_Avalonia.Content.ContentWatcher.Reset();
                 }
                 PrimalEditor_Avalonia.Common.AutoSaveService.Track(value);
             }

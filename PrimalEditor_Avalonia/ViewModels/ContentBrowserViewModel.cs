@@ -37,6 +37,19 @@ public class ContentBrowserViewModel : ViewModelBase
     public ObservableCollection<ContentFolder> Folders { get; } = new();
     public ObservableCollection<AssetInfo> Files { get; } = new();
 
+    public ContentBrowserViewModel()
+    {
+        ContentWatcher.ContentModified += OnContentModified;
+    }
+
+    private void OnContentModified(object? sender, ContentModifiedEventArgs e)
+    {
+        if (string.IsNullOrEmpty(e.FullPath))
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(RefreshFolders);
+        }
+    }
+
     public Project? Project
     {
         get => _project;
