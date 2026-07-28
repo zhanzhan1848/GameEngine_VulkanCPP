@@ -16,6 +16,9 @@ public partial class App : Application
     public override void Initialize()
     {
         AvaloniaXamlLoader.Load(this);
+        Styles.Add(new Avalonia.Markup.Xaml.Styling.StyleInclude(
+            new System.Uri("avares:PrimalEditor_Avalonia/Controls/Controls.axaml")));
+
         Logger.Current = new ConsoleLogger();
         NativeEngineBridge.LoadEngine();
         if (NativeEngineBridge.IsLoaded)
@@ -50,35 +53,11 @@ public partial class App : Application
         EngineTick.Stop();
         if (NativeEngineBridge.IsLoaded)
         {
-            // Teardown order is critical to avoid AutoreleasePoolPage::busted
-            // and the EXC_BAD_ACCESS-in-presentDrawable crashes documented in
-            // Engine/Graphics/Metal/MetalCore.cpp and tasks/lessons.md.
-            //
-            //   1. Stop every render loop (CFRunLoopTimer must not fire again).
-            //   2. Block new frames from entering the engine.
-            //   3. FlushGPU: wait for in-flight command buffers to complete.
-            //      Without this, Metal's completion-queue dispatch can fire
-            //      a presentDrawable: block AFTER the MTKView it captured has
-            //      been deallocated by AppKit.
-            //   4. Destroy the render pipeline (releases GPU-bound resources).
-            //   5. ShutdownAssetSystem (releases file-backed assets).
-            //   6. ShutdownEngine (releases Metal device + RHI).
-            //   7. UnloadEngine (dlclose the dylib).
-            //
-            // EditorRenderLoop.Stop(0)/Destroy(0) are deliberately no-ops;
-            // we iterate the live loop ids returned by
-            // EngineViewport3D.LiveNativeLoopIds and Destroy() each one. We
-            // snapshot the set before iterating because Destroy()s remove
-            // from the set as a side effect.
             foreach (var loopId in PrimalEditor_Avalonia.Views.EngineViewport3D.LiveNativeLoopIds.ToArray())
             {
-                try { NativeEngineBridge.EditorRenderLoop.Destroy(loopId); } catch { /* tolerate per-loop failure */ }
+                try { NativeEngineBridge.EditorRenderLoop.Destroy(loopId); } catch { }
             }
-
-            // Wait for the GPU to finish any in-flight work before tearing
-            // down anything that might still be in use.
-            try { NativeEngineBridge.FlushGPU(); } catch { /* tolerate; device may already be down */ }
-
+            try { NativeEngineBridge.FlushGPU(); } catch { }
             try { NativeEngineBridge.DestroyStandardRenderPipeline(); } catch { }
             try { NativeEngineBridge.ShutdownAssetSystem(); } catch { }
             try { NativeEngineBridge.ShutdownEngine(); } catch { }

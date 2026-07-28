@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
+    <AvaloniaResource Include="Controls\*.axaml" />
   </ItemGroup>
 
   <ItemGroup>

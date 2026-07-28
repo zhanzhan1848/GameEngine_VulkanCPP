@@ -1,0 +1,46 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ctrl="using:PrimalEditor_Avalonia.Controls">
+
+  <Design.PreviewWith>
+    <Border Padding="20" Background="#FF1E1E1E">
+      <StackPanel Spacing="8">
+        <ctrl:NumberBox Value="0.000" Width="120"/>
+        <ctrl:NumberBox Value="42" Width="120"/>
+        <ctrl:NumberBox Value="-3.14" Width="120"/>
+      </StackPanel>
+    </Border>
+  </Design.PreviewWith>
+
+  <Style Selector="ctrl|NumberBox">
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Background="#FF2D2D30" BorderBrush="#FF555" BorderThickness="1"
+                CornerRadius="2" Padding="0">
+          <Panel>
+            <TextBlock Name="PART_TextBlock"
+                       Text="{TemplateBinding Value}"
+                       Foreground="#FFEEE"
+                       VerticalAlignment="Center"
+                       HorizontalAlignment="Stretch"
+                       Padding="6,0"
+                       TextAlignment="Right"
+                       FontFamily="Consolas,Menlo,monospace"
+                       FontSize="12"/>
+            <TextBox Name="PART_TextBox"
+                     Text="{TemplateBinding Value, Mode=TwoWay}"
+                     Background="#FF1E1E1E"
+                     Foreground="#FFEEE"
+                     CaretBrush="#FFEEE"
+                     BorderThickness="0"
+                     Padding="6,0"
+                     TextAlignment="Right"
+                     FontFamily="Consolas,Menlo,monospace"
+                     FontSize="12"/>
+          </Panel>
+        </Border>
+      </ControlTemplate>
+    </Setter>
+  </Style>
+
+</Styles>
