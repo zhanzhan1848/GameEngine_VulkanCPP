@@ -2043,3 +2043,18 @@ set_target_properties(TestParametricTileNode PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestParametricTileNode PRIVATE DEBUG _DEBUG)
 
+add_executable(TestWFCOutput
+    Graphics/WFC/TestWFCOutput.cpp)
+target_include_directories(TestWFCOutput PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCOutput PRIVATE Engine)
+add_test(NAME TestWFCOutput COMMAND TestWFCOutput)
+set_target_properties(TestWFCOutput PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCOutput PRIVATE DEBUG _DEBUG)
+
