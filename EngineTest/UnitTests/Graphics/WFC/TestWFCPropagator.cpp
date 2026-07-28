@@ -2,6 +2,7 @@
 #include "Engine/Graphics/WFC/WFCPropagator.h"
 #include "Engine/Graphics/WFC/WaveGrid.h"
 #include "Engine/Graphics/WFC/TileAdjacency.h"
+#include "Engine/Graphics/WFC/WFCTileRegistry.h"
 
 using namespace primal::graphics::wfc;
 using namespace Engine::Test;
@@ -75,23 +76,29 @@ TestResult TestWFCPropagator_RunPass_Removes_Incompatible_Candidates() {
     c1.collapsed_variant = 0;
     c1.entropy = 0;
 
-    // Set up adjacency: A's -X face only compatible with B (variant 1) on +X
+    // Single-tile registry (Phase A.2 layout): bit b <-> (tile 0, variant b).
+    WFCTileRegistry registry;
+    WFCTile tile{};
+    tile.variant_count = 8;
+    registry.Register(tile);
+
+    // Set up adjacency: (tile 0, var 0) -X (tile 0, var 1)
+    // (mirror auto-adds: (tile 0, var 1) +X (tile 0, var 0))
     TileAdjacencyTable adjacency;
-    const wfc_tile_id A{0}, B{1};
-    adjacency.AddCompatibility(A, 0, WFCFace::NegX, B, 1);
-    // (mirror auto-adds: B's +X face compatible with A's -X face)
+    const wfc_tile_id A{0};
+    adjacency.AddCompatibility(A, 0, WFCFace::NegX, A, 1);
 
     WFCPropagator prop;
     prop.Initialize(grid);
     prop.OnCellCollapsed(grid, {1, 0, 0}, A, 0);
 
     bool contradiction = false;
-    u32 changed = prop.RunPass(grid, adjacency, contradiction);
+    u32 changed = prop.RunPass(grid, adjacency, registry, contradiction);
 
-    // Cell 0 should have only B (variant 1) remaining as candidate after propagation.
+    // Cell 0 should have only (tile 0, var 1) -> bit 1 remaining as candidate.
     const WFCCell& result = grid.CellAt({0, 0, 0});
     TEST_ASSERT(!result.collapsed, "Cell 0 not collapsed, just reduced candidates");
-    TEST_ASSERT_EQ(0b010u, result.candidate_mask, "Cell 0 should have only B (bit 1) remaining");
+    TEST_ASSERT_EQ(0b010u, result.candidate_mask, "Cell 0 should have only bit 1 remaining");
     TEST_ASSERT_EQ(1u, result.candidate_count, "Cell 0 has 1 candidate now");
     TEST_ASSERT(changed >= 1u, "At least one cell changed");
     TEST_ASSERT(!contradiction, "No contradiction expected");
@@ -112,6 +119,11 @@ TestResult TestWFCPropagator_RunPass_Detects_Contradiction() {
     c1.collapsed_variant = 0;
     c1.entropy = 0;
 
+    WFCTileRegistry registry;
+    WFCTile tile{};
+    tile.variant_count = 8;
+    registry.Register(tile);
+
     // Empty adjacency: A's -X face compatible with NOTHING
     TileAdjacencyTable adjacency;
     WFCPropagator prop;
@@ -119,7 +131,7 @@ TestResult TestWFCPropagator_RunPass_Detects_Contradiction() {
     prop.OnCellCollapsed(grid, {1, 0, 0}, wfc_tile_id{0}, 0);
 
     bool contradiction = false;
-    prop.RunPass(grid, adjacency, contradiction);
+    prop.RunPass(grid, adjacency, registry, contradiction);
 
     // Cell 0 has only candidate A, but A's +X is not compatible with A's -X → all candidates removed
     TEST_ASSERT(contradiction, "Should detect contradiction when cell has no candidates");
@@ -142,6 +154,11 @@ TestResult TestWFCPropagator_RunPass_No_Change_On_Already_Collapsed() {
     c0.collapsed_variant = 0;
     c0.entropy = 0;
 
+    WFCTileRegistry registry;
+    WFCTile tile{};
+    tile.variant_count = 8;
+    registry.Register(tile);
+
     TileAdjacencyTable adjacency;
     WFCPropagator prop;
     prop.Initialize(grid);
@@ -149,9 +166,62 @@ TestResult TestWFCPropagator_RunPass_No_Change_On_Already_Collapsed() {
     // Manually queue cell 0 too (simulating it being a neighbor of cell 1)
     // — but it's already collapsed so RunPass should skip it.
     bool contradiction = false;
-    u32 changed = prop.RunPass(grid, adjacency, contradiction);
+    u32 changed = prop.RunPass(grid, adjacency, registry, contradiction);
     TEST_ASSERT_EQ(0u, changed, "Already-collapsed cell should not be modified");
     TEST_ASSERT(!contradiction, "No contradiction from collapsed cells");
+    return TestResult::Passed;
+}
+
+TestResult TestWFCPropagator_RunPass_Multi_Tile_Filter() {
+    WaveGrid grid;
+    grid.Initialize({2, 1, 1}, 8);
+
+    // Cell 0 has candidates: cube(var 0) at bit 0, ramp(var 0) at bit 8
+    WFCCell& c0 = grid.CellAt({0, 0, 0});
+    c0.candidate_mask = (1ULL << 0) | (1ULL << 8);
+    c0.candidate_count = 2;
+    c0.entropy = 2;
+    c0.collapsed = false;
+
+    // Cell 1 collapsed to ramp variant 0 (tile=1, variant=0 -> bit 8)
+    WFCCell& c1 = grid.CellAt({1, 0, 0});
+    c1.candidate_mask = (1ULL << 8);
+    c1.candidate_count = 1;
+    c1.collapsed = true;
+    c1.collapsed_tile = wfc_tile_id{1};  // ramp
+    c1.collapsed_variant = 0;
+    c1.entropy = 0;
+
+    // Set up registry with cube (1 variant) + ramp (4 variants)
+    WFCTileRegistry registry;
+    WFCTile cube{};
+    cube.variant_count = 1;
+    registry.Register(cube);
+    WFCTile ramp{};
+    ramp.variant_count = 4;
+    registry.Register(ramp);
+
+    // Adjacency: cube(NegX) compatible with ramp(PosX) mirror + ramp self-compat
+    TileAdjacencyTable adj;
+    const wfc_tile_id cube_id{0};
+    const wfc_tile_id ramp_id{1};
+    adj.AddCompatibility(ramp_id, 0, WFCFace::NegX, cube_id, 0);  // cube at +X accepts ramp at -X via mirror
+    adj.AddCompatibility(ramp_id, 0, WFCFace::PosX, ramp_id, 0);  // ramp self-compat +X
+    adj.AddCompatibility(ramp_id, 0, WFCFace::PosY, ramp_id, 0);
+    adj.AddCompatibility(ramp_id, 0, WFCFace::PosZ, ramp_id, 0);
+
+    WFCPropagator prop;
+    prop.Initialize(grid);
+    prop.OnCellCollapsed(grid, {1, 0, 0}, ramp_id, 0);
+
+    bool contradiction = false;
+    prop.RunPass(grid, adj, registry, contradiction);
+
+    // Cell 0 sits at +X of cell 1 (ramp). Cell 0 candidates {cube, ramp}.
+    // Cube(var 0) at +X is compatible with ramp(var 0) at -X (rule added).
+    // Ramp(var 0) at +X is compatible with ramp(var 0) at -X (self-compat).
+    // -> Both candidates survive -> no contradiction
+    TEST_ASSERT(!contradiction, "No contradiction when cube+ramp both compatible with ramp neighbor");
     return TestResult::Passed;
 }
 
@@ -163,6 +233,7 @@ int main() {
     TEST_CASE(suite, "RunPass_Removes_Incompatible_Candidates", TestWFCPropagator_RunPass_Removes_Incompatible_Candidates);
     TEST_CASE(suite, "RunPass_Detects_Contradiction", TestWFCPropagator_RunPass_Detects_Contradiction);
     TEST_CASE(suite, "RunPass_No_Change_On_Already_Collapsed", TestWFCPropagator_RunPass_No_Change_On_Already_Collapsed);
+    TEST_CASE(suite, "RunPass_Multi_Tile_Filter", TestWFCPropagator_RunPass_Multi_Tile_Filter);
     suite.RunAllTests();
     return 0;
 }

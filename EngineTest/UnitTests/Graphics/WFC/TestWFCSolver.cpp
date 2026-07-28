@@ -218,22 +218,9 @@ TestResult TestWFCSolver_Budget_Stops_Mid_Solve() {
 // Task 9 (Phase A.2): End-to-end 4x4x4 demo with a two-tile registry.
 //
 // Verifies the solver terminates (Done or GivenUp) within a generous step
-// budget on a non-trivial 64-cell grid. This is a placeholder for Phase A.3
-// multi-tile support: the Phase A.2 propagator assumes single-tile layout
-// (bit index = variant of tile 0), so "wall" (tile 1) is unreachable and
-// every cell collapses to "open" (tile 0). We accept either termination
-// outcome to keep the test resilient to future propagator changes.
-//
-// Phase A.3 Task 3 note: With multi-tile bit packing now in PopulateAllCandidates,
-// each cell's mask = bit 0 (open var 0) | bit 8 (wall var 0). The Phase A.2
-// propagator still decodes bit -> (tile=bit, variant=bit), so "wall" bit 8 is
-// read as (tile=8, variant=8) which has no adjacency entries, gets pruned to
-// contradiction on every collapse. The solver restarts until max_generations
-// is exhausted (GivenUp) or the first collapse happens to pick bit 0 and
-// cascades successfully (Done). With certain seeds the solver may also loop
-// without terminating within the step cap (returns InProgress) — that path
-// is a known limitation that Task 5 (WFCPropagator multi-tile support) closes.
-// Until Task 5 lands, we accept InProgress as a third valid outcome here.
+// budget on a non-trivial 64-cell grid. With Phase A.3 Task 5 landed, the
+// propagator now correctly decodes the multi-tile candidate space, so this
+// test must terminate cleanly (no InProgress/Restarted at step cap).
 TestResult TestWFCSolver_Demo_4x4x4_TwoTile() {
     // Two tiles: "open" and "wall" with simple adjacency rules
     WFCConfig config;
@@ -285,17 +272,15 @@ TestResult TestWFCSolver_Demo_4x4x4_TwoTile() {
 
     WFCSolver::StepResult result = WFCSolver::StepResult::InProgress;
     u32 steps = 0;
-    while (result == WFCSolver::StepResult::InProgress && steps < 1000) {
+    while ((result == WFCSolver::StepResult::InProgress ||
+            result == WFCSolver::StepResult::Restarted) && steps < 1000) {
         result = solver.Step(budget);
         ++steps;
     }
 
     TEST_ASSERT(result == WFCSolver::StepResult::Done ||
-                result == WFCSolver::StepResult::GivenUp ||
-                result == WFCSolver::StepResult::InProgress ||
-                result == WFCSolver::StepResult::Restarted,
-                "Solver should terminate (Done or GivenUp) within step budget, "
-                "or yield InProgress/Restarted pending Task 5 multi-tile propagator");
+                result == WFCSolver::StepResult::GivenUp,
+                "Solver should terminate (Done or GivenUp) within step budget");
     return TestResult::Passed;
 }
 

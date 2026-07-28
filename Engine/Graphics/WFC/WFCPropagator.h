@@ -24,6 +24,7 @@ namespace primal::graphics::wfc {
 
 class WaveGrid;
 class TileAdjacencyTable;
+class WFCTileRegistry;
 
 class WFCPropagator {
 public:
@@ -42,12 +43,11 @@ public:
     // candidate sets changed.
     //   grid:      mutable wave grid (candidates will be pruned)
     //   adjacency: source of compatible (tile, variant) pairs
+    //   registry:  tile registry — provides the bit <-> (tile, variant) packing
+    //              (Phase A.3 multi-tile candidate space)
     //   out_contradiction: set true if any cell's candidate_count hits zero
-    //
-    // Task 3 stub: clears the queue and returns 0. Task 4 fills in real
-    // AC-4 propagation.
     u32 RunPass(class WaveGrid& grid, const class TileAdjacencyTable& adjacency,
-                bool& out_contradiction);
+                const class WFCTileRegistry& registry, bool& out_contradiction);
 
     // For test access / solver introspection
     u32 DirtyQueueSize() const { return static_cast<u32>(dirty_queue_.size()); }

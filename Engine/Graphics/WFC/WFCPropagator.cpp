@@ -2,6 +2,7 @@
 #include "WFCPropagator.h"
 #include "WaveGrid.h"
 #include "TileAdjacency.h"
+#include "WFCTileRegistry.h"
 
 namespace primal::graphics::wfc {
 
@@ -39,7 +40,8 @@ void WFCPropagator::OnCellCollapsed(const WaveGrid& grid, WFCGridCoord coord,
 }
 
 u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
-                           bool& out_contradiction) {
+                           const WFCTileRegistry& registry, bool& out_contradiction) {
+    (void)registry;  // Phase A.3 uses static helpers; instance not yet needed
     out_contradiction = false;
     u32 changed = 0;
 
@@ -83,18 +85,18 @@ u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
 
             // Build the mask of candidates that survive this face's filter.
             //
-            // Phase A.2 candidate space convention: each bit b represents the
-            // (tile_id == b, variant == b) pair. This collapses the multi-tile
-            // candidate space into a single bit index so the foundation can be
-            // exercised without a full tile registry. Phase A.3 will introduce
-            // proper (tile, variant) candidate packing.
+            // Phase A.3 multi-tile candidate space: each bit b decodes to
+            // (tile = TileForBit(b), variant = VariantForBit(b)) via the
+            // registry's static packing. The previous Phase A.2 code assumed
+            // a single-tile registry (bit == variant of tile 0), which was
+            // incorrect for any tile beyond the first.
             u64 allowed = 0;
             u64 m = new_mask;
             while (m) {
                 u32 bit = __builtin_ctzll(m);
                 m &= m - 1;
-                wfc_tile_id my_tile{bit};
-                u32 my_variant = bit;
+                wfc_tile_id my_tile = WFCTileRegistry::TileForBit(bit);
+                u32 my_variant = WFCTileRegistry::VariantForBit(bit);
                 if (adjacency.Compatible(my_tile, my_variant, f.my_face,
                                          neighbor.collapsed_tile,
                                          neighbor.collapsed_variant)) {
