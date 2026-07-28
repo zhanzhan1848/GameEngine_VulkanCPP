@@ -394,28 +394,28 @@ inline id::id_type create_ramp_mesh(f32 sx, f32 sy, f32 sz, f32 slope_height) {
     u32 ii = 0;
 
     // Bottom face
-    idx[ii++] = 0; idx[ii++] = 2; idx[ii++] = 1;
-    idx[ii++] = 0; idx[ii++] = 3; idx[ii++] = 2;
+    idx[ii++] = 0; idx[ii++] = 1; idx[ii++] = 2;
+    idx[ii++] = 0; idx[ii++] = 2; idx[ii++] = 3;
 
     // -Z back face
-    idx[ii++] = 0; idx[ii++] = 1; idx[ii++] = 5;
-    idx[ii++] = 0; idx[ii++] = 5; idx[ii++] = 4;
+    idx[ii++] = 0; idx[ii++] = 5; idx[ii++] = 1;
+    idx[ii++] = 0; idx[ii++] = 4; idx[ii++] = 5;
 
     // +Z front face
-    idx[ii++] = 3; idx[ii++] = 6; idx[ii++] = 2;
-    idx[ii++] = 3; idx[ii++] = 7; idx[ii++] = 6;
+    idx[ii++] = 3; idx[ii++] = 2; idx[ii++] = 6;
+    idx[ii++] = 3; idx[ii++] = 6; idx[ii++] = 7;
 
     // -X left face
-    idx[ii++] = 0; idx[ii++] = 4; idx[ii++] = 7;
-    idx[ii++] = 0; idx[ii++] = 7; idx[ii++] = 3;
+    idx[ii++] = 0; idx[ii++] = 7; idx[ii++] = 4;
+    idx[ii++] = 0; idx[ii++] = 3; idx[ii++] = 7;
 
     // +X right face
-    idx[ii++] = 1; idx[ii++] = 2; idx[ii++] = 6;
-    idx[ii++] = 1; idx[ii++] = 6; idx[ii++] = 5;
+    idx[ii++] = 1; idx[ii++] = 6; idx[ii++] = 2;
+    idx[ii++] = 1; idx[ii++] = 5; idx[ii++] = 6;
 
     // Slope top
-    idx[ii++] = 4; idx[ii++] = 5; idx[ii++] = 6;
-    idx[ii++] = 4; idx[ii++] = 6; idx[ii++] = 7;
+    idx[ii++] = 4; idx[ii++] = 6; idx[ii++] = 5;
+    idx[ii++] = 4; idx[ii++] = 7; idx[ii++] = 6;
 
     return RegisterProceduralMesh(asset);
 }
