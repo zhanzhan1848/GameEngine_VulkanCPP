@@ -5,8 +5,8 @@
 // Mirrors the TestPCGScatter scaffolding pattern: a RenderTestCase that owns
 // a Metal device + RenderSystem + StandardRenderPipeline + empty RenderScene.
 // Task 2 stops here — window opens, 60 frames render headlessly, test exits.
-// Task 3 will populate the catalog meshes and run the WFC solver; Task 4 will
-// spawn the collapsed tile instances into the scene.
+// Task 3 registers catalog meshes and runs the WFC solver; Task 4 will spawn
+// the collapsed tile instances into the scene.
 
 #include "RenderTestFramework.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
@@ -16,6 +16,7 @@
 #include "Engine/Graphics/RenderProxy.h"
 #include "Engine/Platform/Platform.h"
 #include "Engine/Graphics/RHI/Systems/RenderSystem.h"
+#include "Engine/Graphics/PCG/PCGTypes.h"
 
 class WFCRenderingTestCase : public primal::test::RenderTestCase {
 public:
@@ -25,6 +26,17 @@ public:
 
 private:
     void UpdateCamera();
+
+    // --- Task 3 helpers ---
+    // Registers 5 procedural meshes (cube/ramp/corner_in/corner_out/pillar)
+    // via StandardRenderPipeline::RegisterMeshEntity and captures their slot
+    // indices. Overrides the WFC catalog's placeholder mesh_handles with the
+    // captured slots, so the emitted PCGPointSet's MeshIndex attr resolves to
+    // a real renderable mesh in Task 4.
+    void RegisterWFCCatalogMeshes();
+    // Builds the WFC catalog, runs the solver on a 4x4x4 grid, drains Collapse
+    // steps into wfc_point_set. Leaves Task 4 to spawn entities from the set.
+    void RunSolverAndEmit();
 
     std::unique_ptr<primal::graphics::rhi::RHIDeviceBase> device;
     primal::platform::window window;
@@ -50,6 +62,20 @@ private:
     // Filled in Task 3 (RegisterWFCCatalogMeshes) and Task 4 (RunSolverAndEmit).
     std::vector<primal::id::id_type> wfc_entity_ids;
     std::vector<u32> wfc_mesh_slots;
+
+    // Slot indices for the 5 catalog tile types (cube, ramp, corner_in,
+    // corner_out, pillar). Captured from ForwardSceneRenderer::GetMeshInfoCount
+    // before/after RegisterWFCCatalogMeshes runs. The catalog's placeholder
+    // mesh_handles (1000-1004) are overwritten with these slots so the emitted
+    // PCGPointSet's MeshIndex attr points at real renderable meshes.
+    u32 slot_cube{0};
+    u32 slot_ramp{0};
+    u32 slot_corner_in{0};
+    u32 slot_corner_out{0};
+    u32 slot_pillar{0};
+
+    // Emitted by RunSolverAndEmit; consumed by SpawnWFCEntities in Task 4.
+    primal::graphics::pcg::PCGPointSet wfc_point_set{};
 };
 
 class Engine_Test : public primal::test::RenderTestRunner {

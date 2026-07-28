@@ -10,8 +10,7 @@
 // Position encoding: world_pos = cell_coord * cell_size (uniform grid)
 // MeshIndex attr:    tile.mesh_handle from registry
 // Scale attrs:       1.0 (uniform)
-// RotationY attr:    0.0 (Phase A.3 ignores variant rotation; Phase B can
-//                     derive from variant later)
+// RotationY attr:    ramp tile (id=1) variant 0-3 → 0/π/2/π/3π/2; other tiles 0
 #pragma once
 
 #include "../../Common/CommonHeaders.h"

@@ -64,7 +64,17 @@ PCGPointSet WFCOutput::ConsumeSteps(WFCStepBuffer& buf,
         result.SetAttr(out_idx, PCGAttr::ScaleX, 1.0f);
         result.SetAttr(out_idx, PCGAttr::ScaleY, 1.0f);
         result.SetAttr(out_idx, PCGAttr::ScaleZ, 1.0f);
-        result.SetAttr(out_idx, PCGAttr::RotationY, 0.0f);
+        // Phase A.4: ramp (tile_id=1) variants 0-3 map to 0/90/180/270 degrees.
+        // Other tiles are single-variant so rotation stays 0 regardless.
+        // TestWFCOutput's 4 cases all use tile_id 0 (cube), so they're
+        // unaffected by this branch.
+        f32 rot_y = 0.0f;
+        const u32 tile_id_u32 = static_cast<u32>(s.tile);
+        if (tile_id_u32 == 1) {  // ramp
+            constexpr f32 kHalfPi = 1.5707963267948966f;
+            rot_y = static_cast<f32>(s.variant) * kHalfPi;
+        }
+        result.SetAttr(out_idx, PCGAttr::RotationY, rot_y);
         result.SetAttr(out_idx, PCGAttr::MeshIndex,
                        static_cast<f32>(static_cast<u32>(tile.mesh_handle)));
         result.SetAttr(out_idx, PCGAttr::TechniqueIndex, 0.0f);
