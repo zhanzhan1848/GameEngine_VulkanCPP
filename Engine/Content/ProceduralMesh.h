@@ -351,6 +351,75 @@ inline id::id_type create_box_mesh(f32 sx, f32 sy, f32 sz) {
     return RegisterProceduralMesh(asset);
 }
 
+// --- Ramp (wedge) ---
+// Generates a ramp mesh: a box where the +Z face slopes from full height (at -Z)
+// down to slope_height (at +Z). Used by WFC catalog with RotationY to produce
+// 4 rotations.
+//
+// Layout:
+//   sx, sy, sz     : full extents (same as box)
+//   slope_height   : height of the +Z end (0 = full ramp, sy = box)
+inline id::id_type create_ramp_mesh(f32 sx, f32 sy, f32 sz, f32 slope_height) {
+    if (slope_height < 0.0f) slope_height = 0.0f;
+    if (slope_height > sy) slope_height = sy;
+
+    const u32 vertCount = 8;
+    const u32 idxCount = 30;
+
+    graphics::rhi::RHIMeshAsset asset;
+    asset.num_vertices = vertCount;
+    asset.num_indices = idxCount;
+    asset.position_buffer.resize(vertCount * 12);
+    asset.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
+    asset.index_buffer.resize(idxCount * 4);
+
+    u8* pos = asset.position_buffer.data();
+    u8* elem = asset.element_buffer.data();
+    const f32 hx = sx * 0.5f, hy = sy * 0.5f, hz = sz * 0.5f;
+    const f32 top_slope = slope_height * 0.5f;
+
+    // Bottom face vertices (y = -hy)
+    WriteVertex(pos+ 0*12, elem+ 0*20, -hx, -hy, -hz,  0,-1, 0,  0, 0);
+    WriteVertex(pos+ 1*12, elem+ 1*20,  hx, -hy, -hz,  0,-1, 0,  1, 0);
+    WriteVertex(pos+ 2*12, elem+ 2*20,  hx, -hy,  hz,  0,-1, 0,  1, 1);
+    WriteVertex(pos+ 3*12, elem+ 3*20, -hx, -hy,  hz,  0,-1, 0,  0, 1);
+
+    // Top: y=+hy at -Z, y=top_slope at +Z
+    WriteVertex(pos+ 4*12, elem+ 4*20, -hx,  hy, -hz,  0, 0,-1,  0, 0);
+    WriteVertex(pos+ 5*12, elem+ 5*20,  hx,  hy, -hz,  0, 0,-1,  1, 0);
+    WriteVertex(pos+ 6*12, elem+ 6*20,  hx, top_slope, hz,  0, 0, 1,  1, 1);
+    WriteVertex(pos+ 7*12, elem+ 7*20, -hx, top_slope, hz,  0, 0, 1,  0, 1);
+
+    u32* idx = reinterpret_cast<u32*>(asset.index_buffer.data());
+    u32 ii = 0;
+
+    // Bottom face
+    idx[ii++] = 0; idx[ii++] = 2; idx[ii++] = 1;
+    idx[ii++] = 0; idx[ii++] = 3; idx[ii++] = 2;
+
+    // -Z back face
+    idx[ii++] = 0; idx[ii++] = 1; idx[ii++] = 5;
+    idx[ii++] = 0; idx[ii++] = 5; idx[ii++] = 4;
+
+    // +Z front face
+    idx[ii++] = 3; idx[ii++] = 6; idx[ii++] = 2;
+    idx[ii++] = 3; idx[ii++] = 7; idx[ii++] = 6;
+
+    // -X left face
+    idx[ii++] = 0; idx[ii++] = 4; idx[ii++] = 7;
+    idx[ii++] = 0; idx[ii++] = 7; idx[ii++] = 3;
+
+    // +X right face
+    idx[ii++] = 1; idx[ii++] = 2; idx[ii++] = 6;
+    idx[ii++] = 1; idx[ii++] = 6; idx[ii++] = 5;
+
+    // Slope top
+    idx[ii++] = 4; idx[ii++] = 5; idx[ii++] = 6;
+    idx[ii++] = 4; idx[ii++] = 6; idx[ii++] = 7;
+
+    return RegisterProceduralMesh(asset);
+}
+
 // --- Torus ---
 inline id::id_type create_torus_mesh(f32 outerRadius, f32 innerRadius, u32 segments, u32 sides) {
     const u32 vertCount = (segments + 1) * (sides + 1);
