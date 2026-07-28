@@ -1,19 +1,19 @@
 // Engine/Graphics/WFC/WFCPropagator.h
 //
-// Task 3 (Phase A.2): Constraint propagation scaffolding for the WFC solver.
+// AC-4-style constraint propagation for the WFC solver.
 //
 // The Propagator maintains a dirty queue of cell coords that need their
 // candidate sets re-evaluated after a collapse. OnCellCollapsed enqueues the
-// 6 face-neighbors of the just-collapsed cell; RunPass (Task 4) will drain
-// the queue using AC-4-style constraint propagation against a
-// TileAdjacencyTable.
+// 6 face-neighbors of the just-collapsed cell; RunPass drains the queue by
+// pruning each neighbor's candidate mask against a TileAdjacencyTable.
+//
+// Candidate bits are decoded via WFCTileRegistry::TileForBit / VariantForBit
+// so multi-tile registries work correctly (Phase A.3).
 //
 // Design notes:
 //   * State is intentionally minimal — just a utl::vector<WFCGridCoord>.
-//     Task 4 will likely add an in-queue bitset to suppress duplicates.
 //   * OOB and already-collapsed neighbors are filtered at enqueue time so
 //     RunPass does not have to worry about them.
-//   * RunPass is a no-op stub in Task 3; the real AC-4 logic lands in Task 4.
 #pragma once
 
 #include "../../Common/CommonHeaders.h"
@@ -30,7 +30,7 @@ class WFCPropagator {
 public:
     // Reset internal state. The grid is passed so future implementations can
     // pre-size auxiliary structures (e.g. an in-queue bitset sized to the
-    // cell count); Task 3 just clears the queue.
+    // cell count); current implementation just clears the queue.
     void Initialize(const class WaveGrid& grid);
 
     // Called when (coord) just collapsed to (tile, variant). Queues the

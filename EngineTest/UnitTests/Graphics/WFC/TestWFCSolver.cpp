@@ -256,13 +256,6 @@ TestResult TestWFCSolver_Demo_4x4x4_TwoTile() {
     adj.AddCompatibility(wall_id, 0, WFCFace::PosY, wall_id, 0);
     adj.AddCompatibility(wall_id, 0, WFCFace::PosZ, wall_id, 0);
 
-    // NOTE: This test uses multi-tile registry, which the Phase A.2 propagator
-    // does NOT yet support (it assumes single-tile: bit index = variant of tile 0).
-    // For Phase A.2, this test will likely fail or hit contradiction repeatedly.
-    // The expected behavior is: solver either reaches Done or exhausts generations (GivenUp).
-    // We accept either outcome for this demo test — it's a placeholder for Phase A.3
-    // when multi-tile support lands.
-
     WFCStepBuffer buf;
     WFCSolver solver;
     solver.Initialize(config, grid, reg, adj, buf);

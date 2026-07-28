@@ -41,7 +41,7 @@ void WFCPropagator::OnCellCollapsed(const WaveGrid& grid, WFCGridCoord coord,
 
 u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
                            const WFCTileRegistry& registry, bool& out_contradiction) {
-    (void)registry;  // Phase A.3 uses static helpers; instance not yet needed
+    (void)registry;  // static helpers only; instance reserved for Phase B
     out_contradiction = false;
     u32 changed = 0;
 
