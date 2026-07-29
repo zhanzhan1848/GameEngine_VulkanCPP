@@ -483,7 +483,7 @@ inline id::id_type create_corner_in_mesh(f32 sx, f32 sy, f32 sz) {
     SideQuad(0, 1);  // edge P0-P1, outward -Z
     SideQuad(1, 2);  // edge P1-P2, outward +X
     SideQuad(2, 3);  // edge P2-P3, outward +Z (notch wall)
-    SideQuad(3, 4);  // edge P3-P4, outward -X (notch wall)
+    SideQuad(3, 4);  // edge P3-P4, outward +X (notch wall)
     SideQuad(4, 5);  // edge P4-P5, outward +Z
     SideQuad(5, 0);  // edge P5-P0, outward -X
 
