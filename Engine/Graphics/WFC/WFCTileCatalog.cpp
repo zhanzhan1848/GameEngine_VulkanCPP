@@ -45,7 +45,7 @@ WFCTile MakeCornerInTile() {
     WFCTile t{};
     t.name = "corner_in";
     t.mesh_handle = kCornerInMeshPlaceholder;
-    t.variant_count = 1;
+    t.variant_count = 4;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
     t.is_organic = false;
     t.is_rotationally_symmetric = false;
@@ -59,7 +59,7 @@ WFCTile MakeCornerOutTile() {
     WFCTile t{};
     t.name = "corner_out";
     t.mesh_handle = kCornerOutMeshPlaceholder;
-    t.variant_count = 1;
+    t.variant_count = 4;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
     t.is_organic = false;
     t.is_rotationally_symmetric = false;
@@ -113,11 +113,13 @@ void WFCTileCatalog::Populate(WFCTileRegistry& registry, TileAdjacencyTable& adj
         AddFullCompat(cube, 0, ramp, v);
         AddFullCompat(ramp, v, ramp, v);  // ramp self-compat (same variant)
     }
-    AddFullCompat(cube, 0, corner_in, 0);
-    AddFullCompat(cube, 0, corner_out, 0);
+    for (u32 v = 0; v < 4; ++v) {
+        AddFullCompat(cube, 0, corner_in, v);
+        AddFullCompat(cube, 0, corner_out, v);
+        AddFullCompat(corner_in, v, corner_in, v);   // self-compat same variant
+        AddFullCompat(corner_out, v, corner_out, v); // self-compat same variant
+    }
     AddFullCompat(cube, 0, pillar, 0);
-    AddFullCompat(corner_in, 0, corner_in, 0);
-    AddFullCompat(corner_out, 0, corner_out, 0);
     AddFullCompat(pillar, 0, pillar, 0);
     AddFullCompat(cube, 0, cube, 0);  // cube self-compat
 }
