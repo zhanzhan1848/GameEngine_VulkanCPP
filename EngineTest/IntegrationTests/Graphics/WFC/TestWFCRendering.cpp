@@ -35,6 +35,7 @@
 #include "Engine/Graphics/WFC/WFCOutput.h"
 #include "Engine/Graphics/PCG/PCGTypes.h"
 #include "Engine/Graphics/PCG/PCGEntityFactory.h"
+#include "Engine/Input/Input.h"
 
 #ifdef __APPLE__
 #include <AppKit/AppKit.hpp>
@@ -117,36 +118,41 @@ bool WFCRenderingTestCase::Initialize() {
     viewport.size.x = static_cast<float>(window_width_);
     viewport.size.y = static_cast<float>(window_height_);
     view->SetViewport(viewport);
-    UpdateCamera();
 
-    // 7. Task 3: register catalog meshes + run the WFC solver. Emits a
-    //    PCGPointSet that Task 4 will turn into renderable entities. Done at
-    //    the end of Initialize so the pipeline + camera are ready in case
-    //    Task 4 needs them.
+    // 7. Phase B.1: register catalog meshes once (slots captured on the test
+    //    case), build the WFC catalog once (registry_ + adjacency_ owned by
+    //    the test case so CycleMode doesn't rebuild), run the solver for the
+    //    current mode (3D by default, 2D under WFC_MODE_2D_SMOKE), spawn the
+    //    emitted tile instances as ECS entities, then snap the camera to the
+    //    mode-appropriate position.
+#ifdef WFC_MODE_2D_SMOKE
+    mode_ = RenderMode::TwoD;
+    std::cout << "[TestWFCRendering] CI smoke mode: starting in 2D" << std::endl;
+#endif
+
     RegisterWFCCatalogMeshes();
-    RunSolverAndEmit();
+    SetupWFCCatalog();
+    RunSolverForCurrentMode();
+    SpawnEntitiesForCurrentMode();
 
-    // 8. Task 4: mint ECS Entities from the emitted point set and hand them
-    //    to the pipeline so Render() syncs RenderProxies for each tile
-    //    instance into the RenderScene. Must come after RunSolverAndEmit
-    //    (consumes wfc_point_set) and before we return (so the very first
-    //    Run() frame already has entities to draw).
-    SpawnWFCEntities();
+    // Snap camera to mode-appropriate position.
+    SnapCameraForCurrentMode();
 
     std::cout << "[TestWFCRendering] Pipeline + scene ready" << std::endl;
     return true;
 }
 
 // ============================================================================
-// WFCRenderingTestCase::SpawnWFCEntities
+// WFCRenderingTestCase::SpawnEntitiesForCurrentMode
 // ============================================================================
 //
-// Converts wfc_point_set (populated by RunSolverAndEmit) into ECS Entities via
-// PCGEntityFactory::CreateEntities, then pushes the entity_ids + mesh_slot
-// indices into the pipeline. Pattern mirrors TestPCGScatter's integration.
+// Converts wfc_point_set (populated by RunSolverForCurrentMode) into ECS
+// Entities via PCGEntityFactory::CreateEntities, then pushes the entity_ids +
+// mesh_slot indices into the pipeline. Pattern mirrors TestPCGScatter's
+// integration.
 //
 // Key difference from TestPCGScatter: we do NOT offset mesh_slot_indices.
-// RunSolverAndEmit already overwrote the WFC catalog's placeholder
+// SetupWFCCatalog already overwrote the WFC catalog's placeholder
 // mesh_handles (sentinel 1000-1004) with the real ForwardSceneRenderer slot
 // indices captured in RegisterWFCCatalogMeshes, and WFCOutput::ConsumeSteps
 // writes tile.mesh_handle into the MeshIndex attr verbatim — so the slot
@@ -155,11 +161,11 @@ bool WFCRenderingTestCase::Initialize() {
 // {0,1,2} tags that need to be offset to its procedural mesh range; the WFC
 // path bakes the real slot in at catalog-build time.
 
-void WFCRenderingTestCase::SpawnWFCEntities() {
+void WFCRenderingTestCase::SpawnEntitiesForCurrentMode() {
     using namespace primal::graphics::pcg;
 
     if (wfc_point_set.count == 0) {
-        std::cout << "[TestWFCRendering] SpawnWFCEntities: empty point set, "
+        std::cout << "[TestWFCRendering] SpawnEntitiesForCurrentMode: empty point set, "
                   << "skipping" << std::endl;
         return;
     }
@@ -177,7 +183,9 @@ void WFCRenderingTestCase::SpawnWFCEntities() {
                              std::move(result.mesh_slot_indices));
 
     std::cout << "[TestWFCRendering] Spawned " << wfc_entity_ids.size()
-              << " WFC entities" << std::endl;
+              << " WFC entities (mode="
+              << (mode_ == RenderMode::TwoD ? "2D" : "3D") << ")"
+              << std::endl;
 }
 
 // ============================================================================
@@ -213,8 +221,8 @@ void WFCRenderingTestCase::RegisterWFCCatalogMeshes() {
     //   0=cube, 1=ramp, 2=corner_in, 3=corner_out, 4=pillar
     auto cube_geo       = create_box_mesh(1.0f, 1.0f, 1.0f);
     auto ramp_geo       = create_ramp_mesh(1.0f, 1.0f, 1.0f, 0.0f);  // full ramp
-    auto corner_in_geo  = create_box_mesh(1.0f, 1.0f, 1.0f);          // Phase A.4 simplification
-    auto corner_out_geo = create_box_mesh(1.0f, 1.0f, 1.0f);          // Phase A.4 simplification
+    auto corner_in_geo  = create_corner_in_mesh(1.0f, 1.0f, 1.0f);   // Phase B.1: dedicated L-shape
+    auto corner_out_geo = create_corner_out_mesh(1.0f, 1.0f, 1.0f);  // Phase B.1: dedicated octant frame
     auto pillar_geo     = create_box_mesh(0.25f, 2.0f, 0.25f);        // tall thin
 
     pipeline->RegisterMeshEntity(cube_geo,       noTex, 3);
@@ -242,47 +250,65 @@ void WFCRenderingTestCase::RegisterWFCCatalogMeshes() {
 }
 
 // ============================================================================
-// WFCRenderingTestCase::RunSolverAndEmit
+// WFCRenderingTestCase::SetupWFCCatalog
 // ============================================================================
 //
-// Builds the WFC catalog (placeholder mesh_handles 1000-1004), overrides those
-// placeholders with the real slot indices captured in RegisterWFCCatalogMeshes,
-// then runs the solver on a 4x4x4 grid. Collapse steps are drained into
-// wfc_point_set via WFCOutput::ConsumeSteps for Task 4 to consume.
-//
-// Pattern mirrors TestWFC3DParametric (Phase A.3 reference). The only
-// additions are the mesh_handle override and storing the emitted point set on
-// the test case instead of discarding it.
+// Phase B.1: extracted from the old RunSolverAndEmit. Builds the WFC catalog
+// once (registry_ + adjacency_ owned by the test case) and overrides the
+// placeholder mesh_handles with the real ForwardSceneRenderer slot indices
+// captured in RegisterWFCCatalogMeshes. Called once from Initialize so
+// CycleMode can re-solve without rebuilding the catalog each toggle.
 
-void WFCRenderingTestCase::RunSolverAndEmit() {
+void WFCRenderingTestCase::SetupWFCCatalog() {
     using namespace primal::graphics::wfc;
+    registry_ = std::make_unique<WFCTileRegistry>();
+    adjacency_ = std::make_unique<TileAdjacencyTable>();
+    WFCTileCatalog::Populate(*registry_, *adjacency_);
 
-    // 1. Build catalog -> registry + adjacency (placeholders 1000-1004).
-    WFCTileRegistry reg;
-    TileAdjacencyTable adj;
-    WFCTileCatalog::Populate(reg, adj);
-
-    // 2. Override placeholder mesh_handles with real slot indices. The
-    //    catalog's mesh_handle is a geometry::geometry_id (u32-backed), so a
-    //    plain static_cast from the slot is enough — no content system lookup
-    //    needed since ForwardSceneRenderer resolves meshes by slot index.
-    reg.GetMutable(wfc_tile_id{0}).mesh_handle =
+    // Override placeholder mesh_handles with real slot indices captured in
+    // RegisterWFCCatalogMeshes. Same logic as the old RunSolverAndEmit lines
+    // 269-278, but now runs once and is reused by CycleMode.
+    registry_->GetMutable(wfc_tile_id{0}).mesh_handle =
         primal::geometry::geometry_id{slot_cube};
-    reg.GetMutable(wfc_tile_id{1}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{1}).mesh_handle =
         primal::geometry::geometry_id{slot_ramp};
-    reg.GetMutable(wfc_tile_id{2}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{2}).mesh_handle =
         primal::geometry::geometry_id{slot_corner_in};
-    reg.GetMutable(wfc_tile_id{3}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{3}).mesh_handle =
         primal::geometry::geometry_id{slot_corner_out};
-    reg.GetMutable(wfc_tile_id{4}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{4}).mesh_handle =
         primal::geometry::geometry_id{slot_pillar};
 
-    // 3. Configure solver: 4x4x4 = 64 cells max.
+    std::cout << "[TestWFCRendering] Catalog ready (5 tiles, "
+              << registry_->Count() << " registered)" << std::endl;
+}
+
+// ============================================================================
+// WFCRenderingTestCase::RunSolverForCurrentMode
+// ============================================================================
+//
+// Phase B.1: mode-aware grid size (3D=4x4x4, 2D=4x4x1). Runs the solver on
+// registry_ + adjacency_ (built once in SetupWFCCatalog), drains Collapse
+// steps into wfc_point_set.
+//
+// Architectural caveat (plan Step 4 Note): the solver internally always
+// passes WFC_FACE_COUNT_3D. The 2D path still works correctly because the 2D
+// grid has grid_size.z=1, so ±Z neighbors are always out-of-bounds and get
+// filtered by the OOB check in WFCPropagator. Threading face_count through
+// the solver is a Phase B.2 follow-up.
+
+void WFCRenderingTestCase::RunSolverForCurrentMode() {
+    using namespace primal::graphics::wfc;
+
     WFCConfig config;
-    config.grid_size = {4, 4, 4};
+    if (mode_ == RenderMode::TwoD) {
+        config.grid_size = {4, 4, 1};
+    } else {
+        config.grid_size = {4, 4, 4};
+    }
     config.max_cells_per_frame = 256;
     config.max_ms_per_frame = 1000;
-    config.seed = 7;
+    config.seed = 7;  // Same seed for both modes (fair A/B comparison)
     config.max_generations = 8;
 
     WaveGrid grid;
@@ -290,9 +316,8 @@ void WFCRenderingTestCase::RunSolverAndEmit() {
 
     WFCStepBuffer buf;
     WFCSolver solver;
-    solver.Initialize(config, grid, reg, adj, buf);
+    solver.Initialize(config, grid, *registry_, *adjacency_, buf);
 
-    // 4. Run solver to completion (or GivenUp — Phase A.3 known limitation).
     WFCSolveBudget budget(config.max_cells_per_frame, config.max_ms_per_frame);
     budget.Reset();
     WFCSolver::StepResult result = WFCSolver::StepResult::InProgress;
@@ -302,12 +327,47 @@ void WFCRenderingTestCase::RunSolverAndEmit() {
         ++steps;
     }
 
-    // 5. Drain Collapse steps into the point set. Task 4 will spawn entities.
-    wfc_point_set = WFCOutput::ConsumeSteps(buf, reg, 1.0f);
+    wfc_point_set = WFCOutput::ConsumeSteps(buf, *registry_, 1.0f);
     std::cout << "[TestWFCRendering] Solver emitted "
               << wfc_point_set.count << " tile instances"
-              << " (result=" << static_cast<u32>(result)
+              << " (mode=" << (mode_ == RenderMode::TwoD ? "2D" : "3D")
+              << " result=" << static_cast<u32>(result)
               << " steps=" << steps << ")" << std::endl;
+}
+
+// ============================================================================
+// WFCRenderingTestCase::CycleMode
+// ============================================================================
+//
+// Phase B.1: toggle ThreeD <-> TwoD. Destroys current ECS entities + pipeline
+// proxies, flips mode_, re-solves on the new grid size, re-spawns entities,
+// and snaps the camera. Registry/adjacency are preserved (built once in
+// SetupWFCCatalog) — same seed (7) means only grid shape differs between modes.
+
+void WFCRenderingTestCase::CycleMode() {
+    using namespace primal::graphics::pcg;
+    using namespace primal::graphics::wfc;
+
+    // 1. Destroy current entities (ECS + pipeline proxies).
+    if (pipeline) pipeline->ClearPCGEntities();
+    if (!wfc_entity_ids.empty()) {
+        PCGEntityFactory::DestroyEntities(wfc_entity_ids);
+        wfc_entity_ids.clear();
+        wfc_mesh_slots.clear();
+    }
+
+    // 2. Flip mode.
+    mode_ = (mode_ == RenderMode::ThreeD) ? RenderMode::TwoD : RenderMode::ThreeD;
+
+    // 3. Re-solve + re-spawn. Registry/adjacency are preserved (built once in
+    //    SetupWFCCatalog). Same seed (7) -> only grid shape differs.
+    RunSolverForCurrentMode();
+    SpawnEntitiesForCurrentMode();
+    SnapCameraForCurrentMode();
+
+    std::cout << "[TestWFCRendering] Mode cycled to "
+              << (mode_ == RenderMode::TwoD ? "2D (4x4x1)" : "3D (4x4x4)")
+              << std::endl;
 }
 
 // ============================================================================
@@ -316,6 +376,22 @@ void WFCRenderingTestCase::RunSolverAndEmit() {
 
 void WFCRenderingTestCase::Run() {
     if (!pipeline || !scene || !view) return;
+
+    // Phase B.1: key M cycles between 3D (4x4x4) and 2D (4x4x1) modes.
+    // Rising-edge detection — one cycle per key press, not per frame.
+    {
+        using namespace primal::input;
+        input_value val{};
+        get(input_source::keyboard, input_code::key_m, val);
+        if (val.current.x > 0.0f) {
+            if (!key_m_pressed_) {
+                key_m_pressed_ = true;
+                CycleMode();
+            }
+        } else {
+            key_m_pressed_ = false;
+        }
+    }
 
     UpdateCamera();
     view->UpdateFrustum();
@@ -388,6 +464,11 @@ void WFCRenderingTestCase::Shutdown() {
         wfc_mesh_slots.clear();
     }
 
+    // Phase B.1: release catalog before pipeline (registry mesh_handles point
+    // at ForwardSceneRenderer slots that the pipeline owns).
+    registry_.reset();
+    adjacency_.reset();
+
     if (pipeline) {
         pipeline->Shutdown();
         delete pipeline;
@@ -403,6 +484,28 @@ void WFCRenderingTestCase::Shutdown() {
     // Mirror TestPCGScatter teardown: content subsystem holds free_lists that
     // assert on destruction if entries remain.
     primal::content::shutdown();
+}
+
+// ============================================================================
+// WFCRenderingTestCase::SnapCameraForCurrentMode
+// ============================================================================
+//
+// Phase B.1: sets camera_pos_/yaw_/pitch_ based on mode_. Called from
+// Initialize + CycleMode. UpdateCamera applies the state to the RenderView.
+
+void WFCRenderingTestCase::SnapCameraForCurrentMode() {
+    if (mode_ == RenderMode::TwoD) {
+        // 2D grid on XY plane (z=0). View from +Z toward origin.
+        // pos (2,2,6) -> forward = (0,0,-1). yaw=0, pitch=0.
+        camera_pos_ = primal::math::v3{2.0f, 2.0f, 6.0f};
+        camera_yaw_ = 0.0f;
+        camera_pitch_ = 0.0f;
+    } else {
+        camera_pos_ = primal::math::v3{8.0f, 8.0f, 8.0f};
+        camera_yaw_ = 0.0f;
+        camera_pitch_ = -0.4f;
+    }
+    UpdateCamera();
 }
 
 // ============================================================================

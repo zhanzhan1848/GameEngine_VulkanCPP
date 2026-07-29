@@ -462,8 +462,26 @@ if(APPLE)
     )
     target_compile_definitions(TestWFCRendering PRIVATE "TEST_WFC_RENDERING=1" "TEST_RENDERER=0")
 
+    # 31. TestWFCRendering2DSmoke (Phase B.1: same sources, WFC_MODE_2D_SMOKE=1 define)
+    # CI smoke variant: Initialize() starts in 2D mode (4x4x1 grid) so the 2D
+    # collapse path is exercised without interactive input. Mirrors the
+    # TestWFCRendering target exactly except for the extra compile definition.
+    add_executable(TestWFCRendering2DSmoke
+        "Main.cpp"
+        "Graphics/WFC/TestWFCRendering.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestWFCRendering2DSmoke)
+    target_include_directories(TestWFCRendering2DSmoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC
+    )
+    target_compile_definitions(TestWFCRendering2DSmoke PRIVATE
+        "TEST_WFC_RENDERING=1" "TEST_RENDERER=0" "WFC_MODE_2D_SMOKE=1")
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke)
 
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)
