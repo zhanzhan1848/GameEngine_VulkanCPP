@@ -8,8 +8,8 @@ class WFCTileRegistry;
 class TileAdjacencyTable;
 
 // Hand-authored tile catalog for Phase A.3.
-// 5 tile types: cube (1 variant), ramp (4 variants), corner_in (1), corner_out (1), pillar (1).
-// Total: 8 tile-variant pairs, fits within 8x8 = 64 candidate bits.
+// 5 tile types: cube (1 variant), ramp (4 variants), corner_in (4), corner_out (4), pillar (1).
+// Total: 14 tile-variant pairs, fits within 8x8 = 64 candidate bits.
 //
 // Phase A.3 uses placeholder mesh_handles (sentinel IDs 1000-1004).
 // Phase A.4 will swap these for real procedural mesh registrations.
