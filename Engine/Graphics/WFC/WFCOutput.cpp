@@ -64,13 +64,11 @@ PCGPointSet WFCOutput::ConsumeSteps(WFCStepBuffer& buf,
         result.SetAttr(out_idx, PCGAttr::ScaleX, 1.0f);
         result.SetAttr(out_idx, PCGAttr::ScaleY, 1.0f);
         result.SetAttr(out_idx, PCGAttr::ScaleZ, 1.0f);
-        // Phase A.4: ramp (tile_id=1) variants 0-3 map to 0/90/180/270 degrees.
-        // Other tiles are single-variant so rotation stays 0 regardless.
-        // TestWFCOutput's 4 cases all use tile_id 0 (cube), so they're
-        // unaffected by this branch.
+        // Phase B.1: flag-driven rotation. Any non-symmetric tile (ramp,
+        // corner_in, corner_out) gets variant * 90°. Symmetric tiles
+        // (cube, pillar) stay at rotation 0 regardless of variant.
         f32 rot_y = 0.0f;
-        const u32 tile_id_u32 = static_cast<u32>(s.tile);
-        if (tile_id_u32 == 1) {  // ramp
+        if (!tile.is_rotationally_symmetric) {
             constexpr f32 kHalfPi = 1.5707963267948966f;
             rot_y = static_cast<f32>(s.variant) * kHalfPi;
         }
