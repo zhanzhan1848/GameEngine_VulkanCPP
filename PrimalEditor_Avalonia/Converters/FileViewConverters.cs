@@ -14,6 +14,20 @@ public static class FileViewModeConverters
     public static readonly IValueConverter IsThumbnails = new ViewModeToBoolConverter { Target = FileViewMode.Thumbnails };
 }
 
+public sealed class BoolInverterConverter : IValueConverter
+{
+    public static readonly BoolInverterConverter Instance = new();
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is bool b ? !b : (object?)false;
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is bool b ? !b : (object?)false;
+}
+
+public static class CommonConverters
+{
+    public static readonly IValueConverter InvertBool = BoolInverterConverter.Instance;
+}
+
 public class ViewModeToBoolConverter : IValueConverter
 {
     public FileViewMode Target { get; set; }
