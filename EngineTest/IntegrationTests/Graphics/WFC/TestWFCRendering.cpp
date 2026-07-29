@@ -53,6 +53,18 @@ Engine_Test::Engine_Test()
 {}
 
 // ============================================================================
+// WFCRenderingTestCase ctor (Phase B.2)
+// ============================================================================
+//
+// WFCSolveBudget has no default ctor (requires max_cells_per_frame +
+// max_ms_per_frame), so the test case can't be aggregate-initialized once
+// budget_ becomes a member. 2 cells/frame keeps the streaming visible on
+// screen (tiles appear one-by-one); 8ms is generous for a headless frame.
+
+WFCRenderingTestCase::WFCRenderingTestCase()
+    : budget_(2u, 8u) {}
+
+// ============================================================================
 // WFCRenderingTestCase::Initialize
 // ============================================================================
 
@@ -115,12 +127,11 @@ bool WFCRenderingTestCase::Initialize() {
     viewport.size.y = static_cast<float>(window_height_);
     view->SetViewport(viewport);
 
-    // 7. Phase B.1: register catalog meshes once (slots captured on the test
+    // 7. Phase B.2: register catalog meshes once (slots captured on the test
     //    case), build the WFC catalog once (registry_ + adjacency_ owned by
-    //    the test case so CycleMode doesn't rebuild), run the solver for the
-    //    current mode (3D by default, 2D under WFC_MODE_2D_SMOKE), spawn the
-    //    emitted tile instances as ECS entities, then snap the camera to the
-    //    mode-appropriate position.
+    //    the test case so CycleMode doesn't rebuild), then set up the
+    //    streaming solver state (grid_/buf_/solver_). Per-frame Step + drain
+    //    + spawn happens in Run() via PumpSolverFrame.
 #ifdef WFC_MODE_2D_SMOKE
     mode_ = RenderMode::TwoD;
     std::cout << "[TestWFCRendering] CI smoke mode: starting in 2D" << std::endl;
@@ -128,60 +139,11 @@ bool WFCRenderingTestCase::Initialize() {
 
     RegisterWFCCatalogMeshes();
     SetupWFCCatalog();
-    RunSolverForCurrentMode();
-    SpawnEntitiesForCurrentMode();
-
-    // Snap camera to mode-appropriate position.
+    ReseedSolver();           // Phase B.2: sets up grid_/buf_/solver_ with rng_seed_=7
     SnapCameraForCurrentMode();
 
     std::cout << "[TestWFCRendering] Pipeline + scene ready" << std::endl;
     return true;
-}
-
-// ============================================================================
-// WFCRenderingTestCase::SpawnEntitiesForCurrentMode
-// ============================================================================
-//
-// Converts wfc_point_set (populated by RunSolverForCurrentMode) into ECS
-// Entities via PCGEntityFactory::CreateEntities, then pushes the entity_ids +
-// mesh_slot indices into the pipeline. Pattern mirrors TestPCGScatter's
-// integration.
-//
-// Key difference from TestPCGScatter: we do NOT offset mesh_slot_indices.
-// SetupWFCCatalog already overwrote the WFC catalog's placeholder
-// mesh_handles (sentinel 1000-1004) with the real ForwardSceneRenderer slot
-// indices captured in RegisterWFCCatalogMeshes, and WFCOutput::ConsumeSteps
-// writes tile.mesh_handle into the MeshIndex attr verbatim — so the slot
-// indices coming out of CreateEntities are already correct. TestPCGScatter
-// adds += procedural_slot_base_ because its scatter graph emits abstract
-// {0,1,2} tags that need to be offset to its procedural mesh range; the WFC
-// path bakes the real slot in at catalog-build time.
-
-void WFCRenderingTestCase::SpawnEntitiesForCurrentMode() {
-    using namespace primal::graphics::pcg;
-
-    if (wfc_point_set.count == 0) {
-        std::cout << "[TestWFCRendering] SpawnEntitiesForCurrentMode: empty point set, "
-                  << "skipping" << std::endl;
-        return;
-    }
-
-    // CreateEntities mints one Entity per point with a Transform (pos/rot/scale
-    // from the point's attrs) and records MeshIndex into mesh_slot_indices.
-    auto result = PCGEntityFactory::CreateEntities(wfc_point_set);
-
-    // Keep a copy on the test case for Shutdown cleanup. Then hand the
-    // originals to the pipeline by move so we don't hold two live copies
-    // through the render loop. (Mirrors ReScatterPCG in TestPCGScatter.)
-    wfc_entity_ids = result.entity_ids;
-    wfc_mesh_slots = result.mesh_slot_indices;
-    pipeline->SetPCGEntities(std::move(result.entity_ids),
-                             std::move(result.mesh_slot_indices));
-
-    std::cout << "[TestWFCRendering] Spawned " << wfc_entity_ids.size()
-              << " WFC entities (mode="
-              << (mode_ == RenderMode::TwoD ? "2D" : "3D") << ")"
-              << std::endl;
 }
 
 // ============================================================================
@@ -279,90 +241,172 @@ void WFCRenderingTestCase::SetupWFCCatalog() {
 }
 
 // ============================================================================
-// WFCRenderingTestCase::RunSolverForCurrentMode
+// WFCRenderingTestCase::CellSizeForCurrentMode / GridSizeForCurrentMode
 // ============================================================================
 //
-// Phase B.1: mode-aware grid size (3D=4x4x4, 2D=4x4x1). Runs the solver on
-// registry_ + adjacency_ (built once in SetupWFCCatalog), drains Collapse
-// steps into wfc_point_set.
-//
-// Architectural caveat (plan Step 4 Note): the solver internally always
-// passes WFC_FACE_COUNT_3D. The 2D path still works correctly because the 2D
-// grid has grid_size.z=1, so ±Z neighbors are always out-of-bounds and get
-// filtered by the OOB check in WFCPropagator. Threading face_count through
-// the solver is a Phase B.2 follow-up.
+// Phase B.2: per-mode constants for the streaming solver. Tiles are 1×1×1
+// world units (matches RegisterWFCCatalogMeshes). Grid shape matches the
+// Phase B.1 RunSolverForCurrentMode defaults (3D=4x4x4, 2D=4x4x1).
 
-void WFCRenderingTestCase::RunSolverForCurrentMode() {
+f32 WFCRenderingTestCase::CellSizeForCurrentMode() const {
+    return 1.0f;  // tiles are 1×1×1 world units
+}
+
+primal::graphics::wfc::WFCGridCoord
+WFCRenderingTestCase::GridSizeForCurrentMode() const {
+    using namespace primal::graphics::wfc;
+    if (mode_ == RenderMode::TwoD) {
+        return WFCGridCoord{4, 4, 1};
+    }
+    return WFCGridCoord{4, 4, 4};  // Phase B.1 default; bump to {16,16,16} for stress
+}
+
+// ============================================================================
+// WFCRenderingTestCase::DestroyAllSpawnedEntities
+// ============================================================================
+//
+// Phase B.2: destroys all currently-spawned ECS entities + clears the
+// cumulative vectors + tells the pipeline to drop its PCG entity list. Used
+// on Restart (DrainStream flagged restart_seen), on ReseedSolver (so 'R'/'M'
+// start from a clean scene), and on Shutdown.
+
+void WFCRenderingTestCase::DestroyAllSpawnedEntities() {
+    using namespace primal::graphics::pcg;
+    if (!wfc_entity_ids.empty()) {
+        PCGEntityFactory::DestroyEntities(wfc_entity_ids);
+    }
+    wfc_entity_ids.clear();
+    wfc_mesh_slots.clear();
+    if (pipeline) pipeline->ClearPCGEntities();
+}
+
+// ============================================================================
+// WFCRenderingTestCase::ReseedSolver
+// ============================================================================
+//
+// Phase B.2: destroys current entities, recreates grid_/buf_/solver_ with
+// rng_seed_++ and GridSizeForCurrentMode(). Catalog (registry_ + adjacency_)
+// is preserved — built once in SetupWFCCatalog. Called from Initialize and
+// CycleMode (and, in Task 3, from the 'R' key handler).
+//
+// Mirrors the Phase B.1 RunSolverForCurrentMode config construction, with
+// two changes:
+//   * seed increments each call (was fixed at 7) so 'R' shows variation.
+//   * grid/buffer/solver are long-lived members (were locals) so Step can
+//     be called once per frame from PumpSolverFrame.
+
+void WFCRenderingTestCase::ReseedSolver() {
     using namespace primal::graphics::wfc;
 
+    DestroyAllSpawnedEntities();
+
+    // Fresh grid + buffer (caller-owned, passed by ref to solver.Initialize).
+    grid_ = std::make_unique<WaveGrid>();
+    buf_  = std::make_unique<WFCStepBuffer>();
+
+    // WFCConfig: same shape RunSolverForCurrentMode used in Phase B.1.
+    // seed increments each call so 'R' shows a different solve.
     WFCConfig config;
-    if (mode_ == RenderMode::TwoD) {
-        config.grid_size = {4, 4, 1};
-    } else {
-        config.grid_size = {4, 4, 4};
+    config.grid_size  = GridSizeForCurrentMode();
+    config.seed       = rng_seed_++;
+    config.max_generations = 8;  // generous; restarts are visual, not fatal
+
+    // WaveGrid::Initialize takes the grid dimensions + max_variants hint (8
+    // matches the Phase B.1 local-grid path; the registry has 5 tiles so the
+    // candidate mask fits in one u8).
+    grid_->Initialize(config.grid_size, 8);
+
+    solver_ = std::make_unique<WFCSolver>();
+    solver_->Initialize(config, *grid_, *registry_, *adjacency_, *buf_);
+
+    solver_state_    = WFCSolver::StepResult::InProgress;
+    solver_done_     = false;
+    total_collapses_ = 0;
+    total_restarts_  = 0;
+
+    std::cout << "[TestWFCRendering] solver reseeded: grid="
+              << config.grid_size.x << "x" << config.grid_size.y
+              << "x" << config.grid_size.z
+              << " seed=" << (rng_seed_ - 1) << std::endl;
+}
+
+// ============================================================================
+// WFCRenderingTestCase::PumpSolverFrame
+// ============================================================================
+//
+// Phase B.2: one streaming step per frame.
+//   1. Reset per-frame budget + advance solver by one Step.
+//   2. Drain whatever steps landed in the buffer this frame via
+//      WFCOutput::DrainStream (keeps only post-last-Restart Collapse points).
+//   3. On restart_seen: destroy prior entities before appending survivors.
+//   4. Spawn entities for new Collapse points (if any). Append to the
+//      cumulative vectors and re-publish via SetPCGEntities (which replaces,
+//      not appends — so we pass the full cumulative list).
+//   5. Detect completion (Done / GivenUp).
+
+void WFCRenderingTestCase::PumpSolverFrame() {
+    using namespace primal::graphics::wfc;
+    using namespace primal::graphics::pcg;
+
+    if (solver_done_ || !solver_) return;
+
+    // 1. Reset per-frame budget + advance solver by one Step.
+    budget_.Reset();
+    solver_state_ = solver_->Step(budget_);
+
+    // 2. Drain whatever steps landed in the buffer this frame.
+    WFCStreamDrainResult drain = WFCOutput::DrainStream(
+        *buf_, *registry_, CellSizeForCurrentMode());
+
+    // 3. Handle Restart: destroy prior entities before appending survivors.
+    if (drain.restart_seen) {
+        total_restarts_ += drain.restart_count;
+        DestroyAllSpawnedEntities();
+        std::cout << "[TestWFCRendering] restart #" << total_restarts_
+                  << " — replaying " << drain.new_points.count
+                  << " new collapses" << std::endl;
     }
-    config.max_cells_per_frame = 256;
-    config.max_ms_per_frame = 1000;
-    config.seed = 7;  // Same seed for both modes (fair A/B comparison)
-    config.max_generations = 8;
 
-    WaveGrid grid;
-    grid.Initialize(config.grid_size, 8);
-
-    WFCStepBuffer buf;
-    WFCSolver solver;
-    solver.Initialize(config, grid, *registry_, *adjacency_, buf);
-
-    WFCSolveBudget budget(config.max_cells_per_frame, config.max_ms_per_frame);
-    budget.Reset();
-    WFCSolver::StepResult result = WFCSolver::StepResult::InProgress;
-    u32 steps = 0;
-    while (result == WFCSolver::StepResult::InProgress && steps < 1000) {
-        result = solver.Step(budget);
-        ++steps;
+    // 4. Spawn entities for new Collapse points (if any).
+    if (drain.new_points.count > 0) {
+        total_collapses_ += drain.new_points.count;
+        auto spawn = PCGEntityFactory::CreateEntities(drain.new_points);
+        // Append to cumulative vectors.
+        wfc_entity_ids.insert(wfc_entity_ids.end(),
+                              spawn.entity_ids.begin(), spawn.entity_ids.end());
+        wfc_mesh_slots.insert(wfc_mesh_slots.end(),
+                              spawn.mesh_slot_indices.begin(),
+                              spawn.mesh_slot_indices.end());
+        // Re-publish the full cumulative list to the pipeline.
+        // SetPCGEntities replaces (not appends), so we pass the full list.
+        pipeline->SetPCGEntities(wfc_entity_ids, wfc_mesh_slots);
     }
 
-    wfc_point_set = WFCOutput::ConsumeSteps(buf, *registry_, 1.0f);
-    std::cout << "[TestWFCRendering] Solver emitted "
-              << wfc_point_set.count << " tile instances"
-              << " (mode=" << (mode_ == RenderMode::TwoD ? "2D" : "3D")
-              << " result=" << static_cast<u32>(result)
-              << " steps=" << steps << ")" << std::endl;
+    // 5. Detect completion.
+    if (solver_state_ == WFCSolver::StepResult::Done ||
+        solver_state_ == WFCSolver::StepResult::GivenUp) {
+        solver_done_ = true;
+        std::cout << "[TestWFCRendering] solver done: collapses="
+                  << total_collapses_ << " restarts=" << total_restarts_
+                  << " state=" << static_cast<u32>(solver_state_) << std::endl;
+    }
 }
 
 // ============================================================================
 // WFCRenderingTestCase::CycleMode
 // ============================================================================
 //
-// Phase B.1: toggle ThreeD <-> TwoD. Destroys current ECS entities + pipeline
-// proxies, flips mode_, re-solves on the new grid size, re-spawns entities,
-// and snaps the camera. Registry/adjacency are preserved (built once in
-// SetupWFCCatalog) — same seed (7) means only grid shape differs between modes.
+// Phase B.2: destroy current entities, flip mode, reseed solver with the new
+// grid size. Catalog (registry_ + adjacency_ + slot_*) is mode-independent —
+// built once in SetupWFCCatalog. Camera snaps to the new mode-appropriate
+// position.
 
 void WFCRenderingTestCase::CycleMode() {
-    using namespace primal::graphics::pcg;
-    using namespace primal::graphics::wfc;
-
-    // 1. Destroy current entities (ECS + pipeline proxies).
-    if (pipeline) pipeline->ClearPCGEntities();
-    if (!wfc_entity_ids.empty()) {
-        PCGEntityFactory::DestroyEntities(wfc_entity_ids);
-        wfc_entity_ids.clear();
-        wfc_mesh_slots.clear();
-    }
-
-    // 2. Flip mode.
     mode_ = (mode_ == RenderMode::ThreeD) ? RenderMode::TwoD : RenderMode::ThreeD;
-
-    // 3. Re-solve + re-spawn. Registry/adjacency are preserved (built once in
-    //    SetupWFCCatalog). Same seed (7) -> only grid shape differs.
-    RunSolverForCurrentMode();
-    SpawnEntitiesForCurrentMode();
+    ReseedSolver();
     SnapCameraForCurrentMode();
-
-    std::cout << "[TestWFCRendering] Mode cycled to "
-              << (mode_ == RenderMode::TwoD ? "2D (4x4x1)" : "3D (4x4x4)")
-              << std::endl;
+    std::cout << "[TestWFCRendering] mode -> "
+              << (mode_ == RenderMode::TwoD ? "2D" : "3D") << std::endl;
 }
 
 // ============================================================================
@@ -386,6 +430,12 @@ void WFCRenderingTestCase::Run() {
         } else {
             key_m_pressed_ = false;
         }
+    }
+
+    // Phase B.2: streaming pump. paused_ is toggled by 'Space' in Task 3;
+    // for now it stays false so the solve advances every frame.
+    if (!paused_) {
+        PumpSolverFrame();
     }
 
     UpdateCamera();
@@ -422,7 +472,8 @@ void WFCRenderingTestCase::Run() {
     ++frame_count_;
     if (frame_count_ >= kHeadlessFrameCap) {
         std::cout << "[TestWFCRendering] Rendered " << frame_count_
-                  << " frames" << std::endl;
+                  << " frames, collapses=" << total_collapses_
+                  << " restarts=" << total_restarts_ << std::endl;
 #ifdef __APPLE__
         // Tear down engine state BEFORE AppKit starts closing windows.
         // NS::Application::terminate() drives AppKit's window teardown which
@@ -450,14 +501,17 @@ void WFCRenderingTestCase::Shutdown() {
     // the ECS Entities themselves. Order matters — ClearPCGEntities just
     // clears the id list on the pipeline, DestroyEntities actually removes
     // the Entities from the game_entity component pool.
-    if (pipeline) {
-        pipeline->ClearPCGEntities();
-    }
-    if (!wfc_entity_ids.empty()) {
-        primal::graphics::pcg::PCGEntityFactory::DestroyEntities(wfc_entity_ids);
-        wfc_entity_ids.clear();
-        wfc_mesh_slots.clear();
-    }
+    //
+    // Phase B.2: DestroyAllSpawnedEntities does exactly this; call it so the
+    // Shutdown path stays in lock-step with Restart/ReseedSolver.
+    DestroyAllSpawnedEntities();
+
+    // Phase B.2: release streaming state before the catalog (solver_ holds
+    // raw pointers into grid_/buf_/registry_/adjacency_, so drop solver_
+    // first, then the grid/buf it references, then the catalog).
+    solver_.reset();
+    buf_.reset();
+    grid_.reset();
 
     // Phase B.1: release catalog before pipeline (registry mesh_handles point
     // at ForwardSceneRenderer slots that the pipeline owns).
