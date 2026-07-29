@@ -2074,3 +2074,19 @@ set_target_properties(TestWFCCornerMeshes PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCCornerMeshes PRIVATE DEBUG _DEBUG)
 
+# WFC Phase B.2 Task 1: TestWFCStreamDrain — DrainStream unit tests
+add_executable(TestWFCStreamDrain
+    Graphics/WFC/TestWFCStreamDrain.cpp)
+target_include_directories(TestWFCStreamDrain PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCStreamDrain PRIVATE Engine)
+add_test(NAME TestWFCStreamDrain COMMAND TestWFCStreamDrain)
+set_target_properties(TestWFCStreamDrain PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCStreamDrain PRIVATE DEBUG _DEBUG)
+

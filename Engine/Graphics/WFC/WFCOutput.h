@@ -1,16 +1,3 @@
-// Engine/Graphics/WFC/WFCOutput.h
-//
-// Task 10 (Phase A.3): Bridge from WFC solver output to PCG point set.
-//
-// The WFC solver emits a stream of WFCStep records (Collapse / Propagate /
-// Restart) into a WFCStepBuffer. WFCOutput::ConsumeSteps drains the buffer
-// once per frame and converts the Collapse records into a PCGPointSet of
-// tile instances ready for PCGEntityFactory consumption.
-//
-// Position encoding: world_pos = cell_coord * cell_size (uniform grid)
-// MeshIndex attr:    tile.mesh_handle from registry
-// Scale attrs:       1.0 (uniform)
-// RotationY attr:    ramp tile (id=1) variant 0-3 → 0/π/2/π/3π/2; other tiles 0
 #pragma once
 
 #include "../../Common/CommonHeaders.h"
@@ -18,20 +5,32 @@
 
 namespace primal::graphics::wfc {
 
-class WFCStepBuffer;
 class WFCTileRegistry;
+class WFCStepBuffer;
 
-// Converts solver output (WFCStepBuffer of Collapse records) into a PCGPointSet
-// of tile instances.
+// Phase B.2: streaming drain result. Caller spawns entities from new_points,
+// and (if restart_seen) destroys all previously-spawned entities first.
+struct WFCStreamDrainResult {
+    pcg::PCGPointSet new_points;
+    bool             restart_seen{false};
+    u32              restart_count{0};
+};
+
 class WFCOutput {
 public:
-    // Drains `buf` and emits a PCGPointSet with one point per Collapse step.
-    // Non-Collapse steps (Propagate / Restart) are skipped.
-    // `cell_size` scales grid coords to world positions.
-    static primal::graphics::pcg::PCGPointSet ConsumeSteps(
-        WFCStepBuffer& buf,
-        const WFCTileRegistry& registry,
-        f32 cell_size);
+    // Phase A.3: batch consume. Drains the buffer and returns one PCGPoint
+    // per Collapse step. Used by one-shot solve-and-emit flows.
+    static pcg::PCGPointSet ConsumeSteps(WFCStepBuffer& buf,
+                                         const WFCTileRegistry& registry,
+                                         f32 cell_size);
+
+    // Phase B.2: streaming consume. Drains the buffer and returns only the
+    // post-last-Restart Collapse points (prior Collapse steps within the
+    // same snapshot are discarded). Caller uses restart_seen to decide
+    // whether to destroy previously-spawned entities before appending.
+    static WFCStreamDrainResult DrainStream(WFCStepBuffer& buf,
+                                            const WFCTileRegistry& registry,
+                                            f32 cell_size);
 };
 
 } // namespace primal::graphics::wfc
