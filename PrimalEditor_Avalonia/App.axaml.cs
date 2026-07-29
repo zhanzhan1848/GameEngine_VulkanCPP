@@ -53,7 +53,7 @@ public partial class App : Application
         EngineTick.Stop();
         if (NativeEngineBridge.IsLoaded)
         {
-            foreach (var loopId in PrimalEditor_Avalonia.Views.EngineViewport3D.LiveNativeLoopIds.ToArray())
+            foreach (var loopId in PrimalEditor_Avalonia.Views.Engine3D.EngineViewport3D.LiveNativeLoopIds.ToArray())
             {
                 try { NativeEngineBridge.EditorRenderLoop.Destroy(loopId); } catch { }
             }
