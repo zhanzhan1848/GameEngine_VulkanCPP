@@ -86,6 +86,7 @@ NANITE_SHADERS=(
     GlobalSDFVoxelization        # T4.4.2: SDF voxelization (3D storage image write)
     ShadowDepth                  # T4.4.3: shadow depth vertex shader (vertex pulling)
     GPUCullingPipeline           # T4.4.4: 8-stage GPU culling (compute, multi-entry)
+    GPUDrivenDraw                # T4.4.5: meshlet draw VS+FS (vertex pulling, MRT)
 )
 
 echo

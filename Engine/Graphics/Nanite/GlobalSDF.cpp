@@ -277,7 +277,7 @@ bool GlobalSDF::AllocateTexture(rhi::ResourceHandle& handle, u32 resolution, u32
     desc.arraySize = 1;
     desc.format = rhi::DataFormat::R32_Float;
     desc.type = rhi::TextureType::Texture3D;
-    desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+    desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::CopySource;
     desc.memoryUsage = rhi::GPUMemoryUsage::Static;
     
     handle = device_->CreateTexture(desc);

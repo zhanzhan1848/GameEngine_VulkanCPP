@@ -450,6 +450,32 @@ if(ENABLE_VULKAN)
                 $<TARGET_FILE_DIR:TestVulkanForwardRendererIntegration>/Engine/Graphics/Vulkan/shaders
     )
 
+    # Tier 4.4.6: Nanite runtime smoke (HZBSystem + GlobalSDF + GPUCulling).
+    # Validates that the 3 Nanite systems shipped in T4.4.0-T4.4.5 actually
+    # initialize + execute on a Vulkan device without validation errors.
+    add_executable(TestVulkanNaniteSmoke
+        RHI/Core/TestVulkanNaniteSmoke.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanNaniteSmoke PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanNaniteSmoke PRIVATE Engine)
+    target_compile_definitions(TestVulkanNaniteSmoke PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanNaniteSmoke COMMAND TestVulkanNaniteSmoke)
+    set_target_properties(TestVulkanNaniteSmoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanNaniteSmoke POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+                $<TARGET_FILE_DIR:TestVulkanNaniteSmoke>/Engine/Graphics/Vulkan/shaders
+    )
+
     # Phase 4b-T3.5b: IBL Equirectangular → Cube (compute).
     add_executable(TestVulkanIBL_Equirect
         RHI/Core/TestVulkanIBL_Equirect.cpp

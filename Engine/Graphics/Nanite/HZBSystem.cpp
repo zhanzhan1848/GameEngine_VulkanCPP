@@ -98,7 +98,7 @@ bool HZBSystem::CreateHZBTexture() {
     hzbDesc.format = rhi::DataFormat::R32_Float;  // Color format for compute shader write access
     hzbDesc.type = rhi::TextureType::Texture2D;
     hzbDesc.mipLevels = mip_levels_;
-    hzbDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+    hzbDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::CopySource;
 
     hzb_texture_ = device_->CreateTexture(hzbDesc);
     if (hzb_texture_ == rhi::handles::INVALID_RESOURCE) {
