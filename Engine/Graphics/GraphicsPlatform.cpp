@@ -17,6 +17,9 @@ set_platform_interface(graphics_platform platform, platform_interface& pi)
 {
     switch (platform)
     {
+    // D3D12 / legacy-Vulkan 只在 Win32+Linux 编入(见 CMake glob),Apple 上没 dispatch。
+    // Phase 4b: 新 RHI Vulkan 走 self-contained 路径,不经 legacy platform_interface,
+    // 所以 macOS 上 InitializeEngine(Vulkan) 会跳过 graphics::initialize(legacyPlatform) 整步。
 #ifndef __APPLE__
     case graphics_platform::direct3d12:
         d3d12::get_platform_interface(pi);

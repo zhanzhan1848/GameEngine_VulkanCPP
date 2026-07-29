@@ -14,6 +14,10 @@
 #include "../Platforms/Metal/MetalDevice.h"
 #endif
 
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+#include "../Platforms/Vulkan/VulkanDevice.h"
+#endif
+
 namespace primal::graphics::rhi {
 
 RHIDeviceBase* CreateRHIDevice(const DeviceDesc& desc) {
@@ -28,9 +32,16 @@ RHIDeviceBase* CreateRHIDevice(const DeviceDesc& desc) {
 #endif
             return nullptr;
         }
-        case RHIPlatform::Vulkan:
-            // 未实现：RHI/Platforms/Vulkan/ 为空目录
+        case RHIPlatform::Vulkan: {
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+            auto* device = new VulkanDevice(desc);
+            if (device && device->Initialize()) {
+                return device;
+            }
+            delete device;
+#endif
             return nullptr;
+        }
         case RHIPlatform::D3D12:
             // 未实现：RHI/Platforms/D3D12/ 为空目录
             return nullptr;

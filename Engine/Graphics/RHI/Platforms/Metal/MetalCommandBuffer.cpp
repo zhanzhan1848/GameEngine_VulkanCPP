@@ -1344,7 +1344,20 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
                 return {16, 1, 1};
             case MTL::PixelFormatR32Float:
                 return {4, 1, 1};
-            
+
+            // Depth formats (bytes-per-pixel matches the raw depth data layout
+            // for blit copies). Stencil8 shares byte size with R8.
+            case 100: // MTL::PixelFormatDepth16Unorm
+                return {2, 1, 1};
+            case 252: // MTL::PixelFormatDepth32Float
+                return {4, 1, 1};
+            case 253: // MTL::PixelFormatStencil8
+                return {1, 1, 1};
+            case 255: // MTL::PixelFormatDepth24Unorm_Stencil8 (32bpp, packed)
+                return {4, 1, 1};
+            case 260: // MTL::PixelFormatDepth32Float_Stencil8 (8bpp: 4 depth + 4 stencil pad)
+                return {8, 1, 1};
+
             // Compressed formats (BC/DXT)
             case MTL::PixelFormatBC1_RGBA:
             case MTL::PixelFormatBC1_RGBA_sRGB:

@@ -40,7 +40,13 @@ TestResult TestUnimplementedBackendsReturnNull() {
     desc.enableDebug = false;
 
     desc.platform = RHIPlatform::Vulkan;
-    TEST_ASSERT(CreateRHIDevice(desc) == nullptr, "Vulkan backend should return nullptr (not implemented)");
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+    RHIDeviceBase* vk = CreateRHIDevice(desc);
+    TEST_ASSERT(vk != nullptr, "Vulkan backend should return non-null when ENABLE_VULKAN is defined");
+    DestroyRHIDevice(vk);
+#else
+    TEST_ASSERT(CreateRHIDevice(desc) == nullptr, "Vulkan backend should return nullptr when ENABLE_VULKAN is undefined");
+#endif
 
     desc.platform = RHIPlatform::D3D12;
     TEST_ASSERT(CreateRHIDevice(desc) == nullptr, "D3D12 backend should return nullptr (not implemented)");

@@ -1,0 +1,116 @@
+/**
+ * @file VulkanTexture.h
+ * @brief Vulkan RHI 纹理实现
+ * @details Phase 3 范围:VkImage + VmaAllocation + default VkImageView + VkImageLayout 跟踪。
+ *          支持被 VulkanCommandBuffer 的 CopyBufferToTexture / BlitTexture / GenerateMipmaps 使用。
+ *          Layout 跟踪是 CommandBuffer 隐式 transition 的关键(Metal 没有这层概念)。
+ * @author GameEngine VulkanCPP Team
+ * @date 2026-07-26
+ */
+
+#pragma once
+
+#include "VulkanCommon.h"
+
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+
+#include "VulkanMath.h"
+#include "../../Core/RHIResource.h"
+
+#include <unordered_map>
+
+namespace primal::graphics::rhi {
+
+class VulkanDevice;
+
+class VulkanTexture : public RHIResource {
+    friend class VulkanDevice;
+    friend class VulkanCommandBuffer;
+    friend class VulkanSwapChain;
+public:
+    /// 常规构造 — VMA 分配新 VkImage,Initialize() 走 vmaCreateImage 路径。
+    VulkanTexture(VulkanDevice& device, const TextureDesc& desc);
+
+    /// Phase 4b wrap 构造 — 包裹一个外部已存在的 VkImage(例如 swapchain image)。
+    /// 不拥有 VkImage(由 caller 拥有),但自己创建并拥有 VkImageView。
+    /// Initialize() 会跳过 vmaCreateImage,只创建 view。
+    VulkanTexture(VulkanDevice& device, const TextureDesc& desc, VkImage existingImage);
+
+    VulkanTexture(VulkanTexture&& other) noexcept;
+    VulkanTexture& operator=(VulkanTexture&& other) noexcept;
+    VulkanTexture(const VulkanTexture&) = delete;
+    VulkanTexture& operator=(const VulkanTexture&) = delete;
+    virtual ~VulkanTexture();
+
+    bool Initialize() override;
+
+    VkImage GetNativeImage() const { return vkImage_; }
+    VkImageView GetNativeView() const { return vkView_; }
+    VmaAllocation GetAllocation() const { return allocation_; }
+    bool OwnsImage() const { return ownsImage_; }
+
+    /// 获取 array texture 的某层 view(layer=N),viewType=2D,baseArrayLayer=N,layerCount=1。
+    /// 用于 BeginRenderPass 把 render target 绑到特定 cascade layer(Metal 用 setSlice 实现同等语义)。
+    /// 默认 vkView_ 只覆盖 layer 0;调用 GetLayerView(N>=1) 会 lazy-create 一个 layer-specific view。
+    /// 单层 texture (arraySize<=1) 直接返回 vkView_,跳过 cache 查找。
+    VkImageView GetLayerView(u32 layer);
+
+    /// 原始 TextureDesc(包含 width/height/depth/mipLevels 等真实几何,
+    /// RHIResource 基类的 ResourceDesc::size 是 u64 字节数,无法承载这些信息)
+    const TextureDesc& GetTextureDesc() const { return texDesc_; }
+
+    /// 当前 image layout — barrier 计算需要它(Per-mip 简化:全局 layout,
+    /// 不支持 per-mip layout 跟踪,Mipmap 生成会自己显式跟踪)
+    VkImageLayout GetCurrentLayout() const { return currentLayout_; }
+    void SetCurrentLayout(VkImageLayout l) { currentLayout_ = l; }
+
+    /// 当前 mip layout 数组(GenerateMipmaps 用)
+    VkImageLayout GetMipLayout(u32 mip) const {
+        return mip < mipLayouts_.size() ? mipLayouts_[mip] : currentLayout_;
+    }
+    void SetMipLayout(u32 mip, VkImageLayout l) {
+        if (mip < mipLayouts_.size()) mipLayouts_[mip] = l;
+    }
+
+    /// 该纹理应使用的 image aspect mask — 深度格式(DEPTH 或 DEPTH+STENCIL)返回
+    /// `VK_IMAGE_ASPECT_DEPTH_BIT`,其它返回 `VK_IMAGE_ASPECT_COLOR_BIT`。
+    /// 给 VulkanCommandBuffer 的 copy/blit/barrier 路径使用,替代旧的硬编码 COLOR_BIT。
+    /// (与 Initialize() 中 VkImageView 的 aspectMask 计算保持一致 — 见 VulkanTexture.cpp:185,258。)
+    VkImageAspectFlags GetAspectMask() const {
+        return (vkFormat_ == VK_FORMAT_D32_SFLOAT ||
+                vkFormat_ == VK_FORMAT_D24_UNORM_S8_UINT ||
+                vkFormat_ == VK_FORMAT_D32_SFLOAT_S8_UINT)
+                   ? VK_IMAGE_ASPECT_DEPTH_BIT
+                   : VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+
+protected:
+    void destroyImpl() override;
+    void* mapImpl(u64 offset, u64 size) override { return nullptr; }     // Texture 不支持 map
+    void unmapImpl() override {}
+    bool updateDataImpl(const void* data, u64 size, u64 offset) override { return false; }
+
+private:
+    VkImage          vkImage_{VK_NULL_HANDLE};
+    VkImageView      vkView_{VK_NULL_HANDLE};
+    VmaAllocation    allocation_{nullptr};
+
+    /// Per-layer ImageView cache for array textures (key = array layer index).
+    /// Lazily populated by GetLayerView(). Single-layer textures never touch this.
+    std::unordered_map<u32, VkImageView> layerViews_;
+
+    VkImageUsageFlags vkUsageFlags_{0};  // 构造时从 TextureDesc 缓存
+    VkFormat         vkFormat_{VK_FORMAT_UNDEFINED};
+
+    bool             ownsImage_{true};   /// false = 外部拥有 VkImage(swapchain wrap 模式)
+    VkImage          wrappedImage_{VK_NULL_HANDLE};  /// wrap 模式下的外部 image(Initialize 用)
+
+    VkImageLayout    currentLayout_{VK_IMAGE_LAYOUT_UNDEFINED};
+    std::vector<VkImageLayout> mipLayouts_;  // GenerateMipmaps 需要 per-mip
+
+    TextureDesc      texDesc_;  // 完整保留原始 desc(width/height/depth/mipLevels/format 等)
+};
+
+} // namespace primal::graphics::rhi
+
+#endif // ENABLE_VULKAN

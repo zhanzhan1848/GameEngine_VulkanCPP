@@ -157,13 +157,25 @@ EDITOR_INTERFACE void ResizeRenderSurface(u32 id, u32 width, u32 height)
 
 // === Phase 1 Sub-step 1.2.5': Engine lifecycle entry for Editor ===
 // 一站式封装 Editor 启动/关闭引擎的标准序列：
-//   initialize_with_device → bind_rhi_device_to_legacy → initialize(metal)
+//   initialize_with_device → bind_rhi_device_to_legacy → initialize(<mapped platform>)
 // Editor (C#) 通过 P/Invoke 调用，不需要知道三步顺序。
 //
 // rhiPlatform: RHIPlatform 枚举值（u32）。
-//   - Mac 目前只支持 Metal (1)。
 // enableDebug: 0=false, 非 0=true。
 // 返回 1=成功，0=失败（任何一步失败都会回滚已初始化的部分）。
+
+namespace {
+graphics::graphics_platform MapRHIPlatformToGraphicsPlatform(graphics::rhi::RHIPlatform p)
+{
+    switch (p) {
+    case graphics::rhi::RHIPlatform::D3D12:   return graphics::graphics_platform::direct3d12;
+    case graphics::rhi::RHIPlatform::Vulkan:  return graphics::graphics_platform::vulkan_1;
+    case graphics::rhi::RHIPlatform::Metal:   return graphics::graphics_platform::metal;
+    case graphics::rhi::RHIPlatform::Dawn:    return graphics::graphics_platform::dawn;
+    default:                                  return graphics::graphics_platform::metal;
+    }
+}
+} // anonymous namespace
 
 EDITOR_INTERFACE u32 InitializeEngine(u32 rhiPlatform, u32 enableDebug)
 {
@@ -182,15 +194,19 @@ EDITOR_INTERFACE u32 InitializeEngine(u32 rhiPlatform, u32 enableDebug)
 		return 0;
 	}
 
-	// 当前 RHI 只实现了 Metal，legacy path 固定 metal。
-	// RHI 多后端落地后，这里按 rhiPlatform 映射到 graphics_platform。
+	// Phase 4b: 按 RHIPlatform 决定是否走 legacy graphics::initialize(<platform>)。
+	// Metal 走 metal::core(set_external_device 注入的 legacy path);
+	// Vulkan/Dawn 是 self-contained RHI,不经 legacy platform_interface,跳过这一步。
+	if (desc.platform == graphics::rhi::RHIPlatform::Metal) {
+		const auto legacyPlatform = MapRHIPlatformToGraphicsPlatform(desc.platform);
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-	if (!graphics::initialize(graphics::graphics_platform::metal)) {
+		if (!graphics::initialize(legacyPlatform)) {
 #pragma GCC diagnostic pop
-		std::fprintf(stderr, "[InitializeEngine] graphics::initialize(metal) failed (often shader blob path issue)\n");
-		graphics::shutdown_rhi();
-		return 0;
+			std::fprintf(stderr, "[InitializeEngine] graphics::initialize(metal) failed (often shader blob path issue)\n");
+			graphics::shutdown_rhi();
+			return 0;
+		}
 	}
 
 	return 1;

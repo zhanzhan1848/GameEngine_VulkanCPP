@@ -511,20 +511,28 @@ namespace primal::graphics
 	{
 		if (!g_rhiDevice) return false;
 
+		// Phase 4b: 按 RHI platform 分发。Metal 注入 metal::core;Vulkan/Dawn 走 RHI 直通,
+		// 不依赖 legacy core(legacy Engine/Graphics/Vulkan/ 是 dormant dead code)。
+		const auto platform = g_rhiDevice->GetPlatform();
+
 #if defined(__APPLE__)
-		// 通过 dynamic_cast 拿到 MetalDevice 的原生 MTL::Device 注入到 metal::core
-		auto* metalDevice = dynamic_cast<rhi::MetalDevice*>(g_rhiDevice);
-		if (!metalDevice) return false;
+		if (platform == rhi::RHIPlatform::Metal) {
+			auto* metalDevice = dynamic_cast<rhi::MetalDevice*>(g_rhiDevice);
+			if (!metalDevice) return false;
 
-		MTL::Device* native = metalDevice->GetNativeDevice();
-		if (!native) return false;
+			MTL::Device* native = metalDevice->GetNativeDevice();
+			if (!native) return false;
 
-		metal::core::set_external_device(native);
-		return true;
-#else
-		// 非 Apple 平台目前没有 RHI Metal 后端，旧 backend 仍走自己的 create_device
-		return false;
+			metal::core::set_external_device(native);
+			return true;
+		}
 #endif
+		if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::Dawn) {
+			// RHI 直通路径 — 所有渲染走 rhi::*Device,不经 legacy core。
+			return true;
+		}
+
+		return false;
 	}
 
 }

@@ -44,8 +44,521 @@ target_link_libraries(TestRHIDeviceFactory PRIVATE
     "-framework MetalKit"
     "-framework QuartzCore"
 )
+if(ENABLE_VULKAN)
+    # Vulkan 后端测试需要 ENABLE_VULKAN 编译定义,以匹配 Engine 内对 VulkanDevice 的启用逻辑。
+    target_compile_definitions(TestRHIDeviceFactory PRIVATE ENABLE_VULKAN=1)
+endif()
 add_test(NAME TestRHIDeviceFactory COMMAND TestRHIDeviceFactory)
 set_target_properties(TestRHIDeviceFactory PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+# Vulkan RHI 后端设备测试 — 仅在 ENABLE_VULKAN 时编入 Vulkan 代码路径。
+# ENABLE_VULKAN 未定义时此 TU 仍可编译（main 返回 0），但不会连接 Vulkan SDK。
+if(ENABLE_VULKAN)
+    # Phase 1: 设备骨架
+    add_executable(TestVulkanDevice RHI/Core/TestVulkanDevice.cpp)
+    target_include_directories(TestVulkanDevice PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanDevice PRIVATE Engine)
+    target_compile_definitions(TestVulkanDevice PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanDevice COMMAND TestVulkanDevice)
+    set_target_properties(TestVulkanDevice PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # Phase 2: Buffer / VMA persistent-map 路径
+    add_executable(TestVulkanBuffer RHI/Core/TestVulkanBuffer.cpp)
+    target_include_directories(TestVulkanBuffer PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanBuffer PRIVATE Engine)
+    target_compile_definitions(TestVulkanBuffer PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanBuffer COMMAND TestVulkanBuffer)
+    set_target_properties(TestVulkanBuffer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # Phase 2: Sync (VkFence + VkSemaphore) 句柄池 + timeout 行为
+    add_executable(TestVulkanSync RHI/Core/TestVulkanSync.cpp)
+    target_include_directories(TestVulkanSync PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanSync PRIVATE Engine)
+    target_compile_definitions(TestVulkanSync PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanSync COMMAND TestVulkanSync)
+    set_target_properties(TestVulkanSync PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # Phase 3: CommandBuffer Copy/Blit/Barrier/Mipmap + Begin/End/Submit/Wait
+    add_executable(TestVulkanCommandBuffer RHI/Core/TestVulkanCommandBuffer.cpp)
+    target_include_directories(TestVulkanCommandBuffer PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanCommandBuffer PRIVATE Engine)
+    target_compile_definitions(TestVulkanCommandBuffer PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanCommandBuffer COMMAND TestVulkanCommandBuffer)
+    set_target_properties(TestVulkanCommandBuffer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # Phase 4: Triangle rendering (offscreen SPIR-V pipeline end-to-end)
+    add_executable(TestVulkanTriangle RHI/Core/TestVulkanTriangle.cpp)
+    target_include_directories(TestVulkanTriangle PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanTriangle PRIVATE Engine)
+    target_compile_definitions(TestVulkanTriangle PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanTriangle COMMAND TestVulkanTriangle)
+    set_target_properties(TestVulkanTriangle PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    # Test reads "Assets/Shaders/SPIRV/*.spv" relative to its CWD — copy next to the binary.
+    add_custom_command(TARGET TestVulkanTriangle POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanTriangle>/Assets
+    )
+
+    # Phase 5: PushConstants + Shader HotReload
+    add_executable(TestVulkanPushConstants RHI/Core/TestVulkanPushConstants.cpp)
+    target_include_directories(TestVulkanPushConstants PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanPushConstants PRIVATE Engine)
+    target_compile_definitions(TestVulkanPushConstants PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanPushConstants COMMAND TestVulkanPushConstants)
+    set_target_properties(TestVulkanPushConstants PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanPushConstants POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanPushConstants>/Assets
+    )
+
+    # Phase 6: UBO DescriptorSet binding
+    add_executable(TestVulkanDescriptorSet RHI/Core/TestVulkanDescriptorSet.cpp)
+    target_include_directories(TestVulkanDescriptorSet PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanDescriptorSet PRIVATE Engine)
+    target_compile_definitions(TestVulkanDescriptorSet PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanDescriptorSet COMMAND TestVulkanDescriptorSet)
+    set_target_properties(TestVulkanDescriptorSet PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanDescriptorSet POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanDescriptorSet>/Assets
+    )
+
+    # Phase 4b-T2.4: Vulkan raw RHI PBR parity test.
+    # Renders sphere via SimplePBR.{vert,frag}.spv → 64×64 RGBA16F RT →
+    # readback → RGBA16F→RGBA8 tonemap → save sphere_vulkan.png for inspection.
+    # Validates Vulkan end of raw RHI path (vertex/index/UBO/desc-set/pipeline).
+    add_executable(TestVulkanSimplePBR
+        RHI/Core/TestVulkanSimplePBR.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanSimplePBR PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanSimplePBR PRIVATE Engine)
+    target_compile_definitions(TestVulkanSimplePBR PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanSimplePBR COMMAND TestVulkanSimplePBR)
+    set_target_properties(TestVulkanSimplePBR PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanSimplePBR POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanSimplePBR>/Assets
+    )
+
+    # Phase 6: Rapid create/destroy stress (GC + free_list correctness)
+    add_executable(TestVulkanStress RHI/Core/TestVulkanStress.cpp)
+    target_include_directories(TestVulkanStress PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanStress PRIVATE Engine)
+    target_compile_definitions(TestVulkanStress PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanStress COMMAND TestVulkanStress)
+    set_target_properties(TestVulkanStress PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanStress POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanStress>/Assets
+    )
+
+    # Phase 4b: SwapChain acquire/present end-to-end (uses platform window)
+    add_executable(TestVulkanSwapChain RHI/Core/TestVulkanSwapChain.cpp)
+    target_include_directories(TestVulkanSwapChain PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestVulkanSwapChain PRIVATE Engine)
+    target_compile_definitions(TestVulkanSwapChain PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanSwapChain COMMAND TestVulkanSwapChain)
+    set_target_properties(TestVulkanSwapChain PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # Phase 4b-T3.0: D32_FLOAT aspect mask end-to-end (staging → tex → readback).
+    add_executable(TestVulkanDepthAspect RHI/Core/TestVulkanDepthAspect.cpp)
+    target_include_directories(TestVulkanDepthAspect PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanDepthAspect PRIVATE Engine)
+    target_compile_definitions(TestVulkanDepthAspect PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanDepthAspect COMMAND TestVulkanDepthAspect)
+    set_target_properties(TestVulkanDepthAspect PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # Phase 4b-T3.1: DepthPrePass (CameraDepth.wgsl via naga + hand-written noop.frag).
+    add_executable(TestVulkanDepthPrePass
+        RHI/Core/TestVulkanDepthPrePass.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanDepthPrePass PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanDepthPrePass PRIVATE Engine)
+    target_compile_definitions(TestVulkanDepthPrePass PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanDepthPrePass COMMAND TestVulkanDepthPrePass)
+    set_target_properties(TestVulkanDepthPrePass PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanDepthPrePass POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanDepthPrePass>/Assets
+    )
+
+    # Phase 4b-T3.2: ShadowPass + CSM (ShadowDepth.wgsl + 4-layer D32 2D-array).
+    # Renders sphere to 4 cascades of a D32 2D-array RT with same light VP, reads
+    # back each layer individually, SSIM-compares per layer against Metal references.
+    add_executable(TestVulkanShadowPass
+        RHI/Core/TestVulkanShadowPass.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanShadowPass PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanShadowPass PRIVATE Engine)
+    target_compile_definitions(TestVulkanShadowPass PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanShadowPass COMMAND TestVulkanShadowPass)
+    set_target_properties(TestVulkanShadowPass PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanShadowPass POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanShadowPass>/Assets
+    )
+
+    # Phase 4b-T3.3: BlurPass VSM (compute, 5-tap separable Gaussian).
+    # Dispatches BlurPass.spv on 32×32 RGBA16F pattern, compares against
+    # CPU-computed reference (no Metal reference needed — CPU is ground truth).
+    add_executable(TestVulkanBlurPass
+        RHI/Core/TestVulkanBlurPass.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanBlurPass PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanBlurPass PRIVATE Engine)
+    target_compile_definitions(TestVulkanBlurPass PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanBlurPass COMMAND TestVulkanBlurPass)
+    set_target_properties(TestVulkanBlurPass PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanBlurPass POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanBlurPass>/Assets
+    )
+
+    # Phase 4b-T3.4: ToneMap (ACES + gamma, full-screen triangle).
+    # Renders HDR gradient via ToneMapping.spv (multi-entry-point SPIR-V),
+    # Y-flips readback, SSIM-compares vs Metal reference.
+    add_executable(TestVulkanToneMap
+        RHI/Core/TestVulkanToneMap.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanToneMap PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanToneMap PRIVATE Engine)
+    target_compile_definitions(TestVulkanToneMap PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanToneMap COMMAND TestVulkanToneMap)
+    set_target_properties(TestVulkanToneMap PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanToneMap POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanToneMap>/Assets
+    )
+
+    # Phase 4b-T3.4: Bloom bright-pass extraction.
+    # Single-pass luminance threshold; CPU reference comparison (no Metal).
+    add_executable(TestVulkanBloom
+        RHI/Core/TestVulkanBloom.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanBloom PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanBloom PRIVATE Engine)
+    target_compile_definitions(TestVulkanBloom PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanBloom COMMAND TestVulkanBloom)
+    set_target_properties(TestVulkanBloom PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanBloom POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanBloom>/Assets
+    )
+
+    # Phase 4b-T3.5a: IBL BRDF Integration LUT (compute, no input).
+    # 1024-sample Hammersley integration; CPU reference comparison.
+    add_executable(TestVulkanIBL_BRDFLUT
+        RHI/Core/TestVulkanIBL_BRDFLUT.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanIBL_BRDFLUT PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanIBL_BRDFLUT PRIVATE Engine)
+    target_compile_definitions(TestVulkanIBL_BRDFLUT PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanIBL_BRDFLUT COMMAND TestVulkanIBL_BRDFLUT)
+    set_target_properties(TestVulkanIBL_BRDFLUT PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanIBL_BRDFLUT POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanIBL_BRDFLUT>/Assets
+    )
+
+    # Phase 4b-T3.5b: IBL Equirectangular → Cube (compute).
+    add_executable(TestVulkanIBL_Equirect
+        RHI/Core/TestVulkanIBL_Equirect.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanIBL_Equirect PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanIBL_Equirect PRIVATE Engine)
+    target_compile_definitions(TestVulkanIBL_Equirect PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanIBL_Equirect COMMAND TestVulkanIBL_Equirect)
+    set_target_properties(TestVulkanIBL_Equirect PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanIBL_Equirect POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanIBL_Equirect>/Assets
+    )
+
+    # Phase 4b-T3.5c: IBL Irradiance Convolution + Specular Prefilter (compute).
+    add_executable(TestVulkanIBL_IrradiancePrefilter
+        RHI/Core/TestVulkanIBL_IrradiancePrefilter.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanIBL_IrradiancePrefilter PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanIBL_IrradiancePrefilter PRIVATE Engine)
+    target_compile_definitions(TestVulkanIBL_IrradiancePrefilter PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanIBL_IrradiancePrefilter COMMAND TestVulkanIBL_IrradiancePrefilter)
+    set_target_properties(TestVulkanIBL_IrradiancePrefilter PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanIBL_IrradiancePrefilter POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanIBL_IrradiancePrefilter>/Assets
+    )
+
+    # Phase 4b-T3.6: SSR Pass placeholder (compute, multi-texture + mat4 UBO).
+    add_executable(TestVulkanSSRPass
+        RHI/Core/TestVulkanSSRPass.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanSSRPass PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanSSRPass PRIVATE Engine)
+    target_compile_definitions(TestVulkanSSRPass PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanSSRPass COMMAND TestVulkanSSRPass)
+    set_target_properties(TestVulkanSSRPass PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanSSRPass POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanSSRPass>/Assets
+    )
+
+    # Phase 4b-T3.6: SSR Composite (Fresnel-weighted additive blend with SSR).
+    add_executable(TestVulkanSSRComposite
+        RHI/Core/TestVulkanSSRComposite.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanSSRComposite PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanSSRComposite PRIVATE Engine)
+    target_compile_definitions(TestVulkanSSRComposite PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanSSRComposite COMMAND TestVulkanSSRComposite)
+    set_target_properties(TestVulkanSSRComposite PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanSSRComposite POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanSSRComposite>/Assets
+    )
+
+    # Phase 4b-T3.6: SSR Trace smoke test (HZB ray march; finite-output check).
+    add_executable(TestVulkanSSRTrace
+        RHI/Core/TestVulkanSSRTrace.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanSSRTrace PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanSSRTrace PRIVATE Engine)
+    target_compile_definitions(TestVulkanSSRTrace PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanSSRTrace COMMAND TestVulkanSSRTrace)
+    set_target_properties(TestVulkanSSRTrace PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanSSRTrace POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanSSRTrace>/Assets
+    )
+
+    # Phase 4b-T3.7: ForwardPBR_Lite — ForwardLightBuffer (25808B) layout validation.
+    add_executable(TestVulkanForwardPBR_Lite
+        RHI/Core/TestVulkanForwardPBR_Lite.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanForwardPBR_Lite PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanForwardPBR_Lite PRIVATE Engine)
+    target_compile_definitions(TestVulkanForwardPBR_Lite PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanForwardPBR_Lite COMMAND TestVulkanForwardPBR_Lite)
+    set_target_properties(TestVulkanForwardPBR_Lite PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanForwardPBR_Lite POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanForwardPBR_Lite>/Assets
+    )
+endif()
+
+# Phase 4b-T2.0: ImageCompare utility (PNG save/load + Wang-Bovik SSIM).
+# No GPU dependency — pure host code. Linked into a self-test binary now;
+# T2.1 (TestGenerateMetalReference) and T2.4 (TestVulkanForwardRenderer)
+# will include the same .cpp as a source so they don't need a shared library.
+add_executable(TestImageCompare
+    RHI/Core/TestImageCompare.cpp
+    ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+)
+target_include_directories(TestImageCompare PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest
+    ${CMAKE_SOURCE_DIR}/third_party/stb
+)
+add_test(NAME TestImageCompare COMMAND TestImageCompare)
+set_target_properties(TestImageCompare PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
@@ -416,13 +929,13 @@ if(APPLE)
 
     # 创建 Metal Descriptor Set 测试
     add_executable(TestMetalDescriptorSet Graphics/Metal/TestMetalDescriptorSet.cpp)
-    target_include_directories(TestMetalDescriptorSet PRIVATE 
+    target_include_directories(TestMetalDescriptorSet PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/Engine
         ${CMAKE_SOURCE_DIR}/Engine/Common
         ${CMAKE_SOURCE_DIR}/OSAPI/MAC
     )
-    target_link_libraries(TestMetalDescriptorSet PRIVATE 
+    target_link_libraries(TestMetalDescriptorSet PRIVATE
         Engine
         "-framework Foundation"
         "-framework Metal"
@@ -432,6 +945,128 @@ if(APPLE)
     add_test(NAME TestMetalDescriptorSet COMMAND TestMetalDescriptorSet)
     set_target_properties(TestMetalDescriptorSet PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # Phase 4b-T2.1: Metal raw RHI PBR parity test.
+    # Mirrors TestVulkanSimplePBR — renders sphere via embedded MSL SimplePBR shader
+    # → 64×64 RGBA16F RT → readback → RGBA16F→RGBA8 tonemap → save sphere_metal.png.
+    # Output PNG is the parity reference for the Vulkan SSIM check (target ≥ 0.95).
+    add_executable(TestMetalSimplePBR
+        Graphics/Metal/TestMetalSimplePBR.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestMetalSimplePBR PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestMetalSimplePBR PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalSimplePBR COMMAND TestMetalSimplePBR)
+    set_target_properties(TestMetalSimplePBR PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # Phase 4b-T3.1: Metal reference generator for DepthPrePass parity.
+    # Mirrors TestVulkanDepthPrePass — renders sphere via embedded MSL camera-depth
+    # shader → 64×64 D32_FLOAT depth-only RT → readback → Depth32ToRGBA8 → save
+    # Assets/ReferenceImages/P4b-T3/depth_sphere_metal.png.
+    # Output PNG is the parity reference for TestVulkanDepthPrePass's SSIM check.
+    add_executable(TestMetalDepthPrePass
+        Graphics/Metal/TestMetalDepthPrePass.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestMetalDepthPrePass PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestMetalDepthPrePass PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalDepthPrePass COMMAND TestMetalDepthPrePass)
+    set_target_properties(TestMetalDepthPrePass PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestMetalDepthPrePass POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestMetalDepthPrePass>/Assets
+    )
+
+    # T3.2: Metal reference generator for ShadowPass parity (4 cascade layers).
+    add_executable(TestMetalShadowPass
+        Graphics/Metal/TestMetalShadowPass.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestMetalShadowPass PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestMetalShadowPass PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalShadowPass COMMAND TestMetalShadowPass)
+    set_target_properties(TestMetalShadowPass PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestMetalShadowPass POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestMetalShadowPass>/Assets
+    )
+
+    # T3.4: Metal reference generator for ToneMap parity (ACES + gamma).
+    add_executable(TestMetalToneMap
+        Graphics/Metal/TestMetalToneMap.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestMetalToneMap PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestMetalToneMap PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalToneMap COMMAND TestMetalToneMap)
+    set_target_properties(TestMetalToneMap PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestMetalToneMap POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestMetalToneMap>/Assets
     )
 
     # 创建Metal命令编码测试
