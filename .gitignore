@@ -402,6 +402,11 @@ EngineTest/assets/*
 # ReferenceImages/. Re-include those file types explicitly per subdir.
 !EngineTest/assets/Shaders/**
 !EngineTest/assets/ReferenceImages/**
+
+# Production Vulkan shaders (SPIR-V binaries) — needed by ForwardRenderer on
+# Vulkan devices via ShaderRegistry. Re-include the .spv files explicitly.
+!Engine/Graphics/Vulkan/shaders/**
+
 .trae/
 .venv/
 .sisyphus/

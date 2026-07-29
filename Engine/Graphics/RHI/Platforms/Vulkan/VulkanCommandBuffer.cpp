@@ -617,8 +617,13 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
             TransitionImageLayout(tex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         }
 
+        // Caller may leave format=Unknown (Metal backend derives from texture).
+        // Fall back to the texture's actual format so VK_FORMAT_UNDEFINED is never passed in.
+        const DataFormat effectiveFormat = (a.format != DataFormat::Unknown)
+            ? a.format : tex->GetTextureDesc().format;
+
         VkAttachmentDescription d{};
-        d.format = vulkan::ToVkFormat(a.format);
+        d.format = vulkan::ToVkFormat(effectiveFormat);
         d.samples = VK_SAMPLE_COUNT_1_BIT;
         d.loadOp = (a.loadOp == LoadAction::Load) ? VK_ATTACHMENT_LOAD_OP_LOAD :
                    (a.loadOp == LoadAction::Clear) ? VK_ATTACHMENT_LOAD_OP_CLEAR :
@@ -643,7 +648,8 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
 
     VkAttachmentReference depthRef{};
     bool hasDepth = (desc.depthAttachment.texture != handles::INVALID_RESOURCE &&
-                     desc.depthAttachment.format != DataFormat::Unknown);
+                     (desc.depthAttachment.format != DataFormat::Unknown ||
+                      vk.GetTexture(desc.depthAttachment.texture) != nullptr));
     if (hasDepth) {
         const auto& a = desc.depthAttachment;
         VulkanTexture* tex = vk.GetTexture(a.texture);
@@ -651,8 +657,11 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
             if (tex->GetCurrentLayout() != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
                 TransitionImageLayout(tex, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
             }
+            // See color-attachment note: derive format from texture when caller left it Unknown.
+            const DataFormat effectiveDepthFormat = (a.format != DataFormat::Unknown)
+                ? a.format : tex->GetTextureDesc().format;
             VkAttachmentDescription d{};
-            d.format = vulkan::ToVkFormat(a.format);
+            d.format = vulkan::ToVkFormat(effectiveDepthFormat);
             d.samples = VK_SAMPLE_COUNT_1_BIT;
             d.loadOp = (a.loadOp == LoadAction::Load) ? VK_ATTACHMENT_LOAD_OP_LOAD :
                        (a.loadOp == LoadAction::Clear) ? VK_ATTACHMENT_LOAD_OP_CLEAR :
@@ -692,13 +701,32 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
         return;
     }
 
+    // ForwardRenderer doesn't set desc.viewport/scissor on passDesc (relies on
+    // SetViewport/SetScissor after BeginRenderPass — Metal derives dimensions
+    // from the drawable). Fall back through: explicit desc → texture dims.
+    u32 fbW = static_cast<u32>(desc.viewport.size.x);
+    u32 fbH = static_cast<u32>(desc.viewport.size.y);
+    if (fbW == 0 || fbH == 0) {
+        // Pull from the first valid attachment's texture desc.
+        for (const auto viewTex : {vk.GetTexture(desc.colorAttachments.empty() ? handles::INVALID_RESOURCE : desc.colorAttachments[0].texture),
+                                    vk.GetTexture(desc.depthAttachment.texture)}) {
+            if (viewTex) {
+                fbW = viewTex->GetTextureDesc().size.x;
+                fbH = viewTex->GetTextureDesc().size.y;
+                break;
+            }
+        }
+    }
+    fbW = std::max<u32>(1u, fbW);
+    fbH = std::max<u32>(1u, fbH);
+
     VkFramebufferCreateInfo fbci{};
     fbci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fbci.renderPass = rp;
     fbci.attachmentCount = static_cast<u32>(fbAttachments.size());
     fbci.pAttachments = fbAttachments.data();
-    fbci.width  = std::max<u32>(1u, desc.viewport.size.x);
-    fbci.height = std::max<u32>(1u, desc.viewport.size.y);
+    fbci.width  = fbW;
+    fbci.height = fbH;
     fbci.layers = 1;
     VkFramebuffer fb;
     if (vkCreateFramebuffer(dev, &fbci, nullptr, &fb) != VK_SUCCESS) {
@@ -711,10 +739,12 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     bi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     bi.renderPass = rp;
     bi.framebuffer = fb;
+    const u32 areaW = (desc.scissor.extent.x > 0) ? desc.scissor.extent.x : fbW;
+    const u32 areaH = (desc.scissor.extent.y > 0) ? desc.scissor.extent.y : fbH;
     bi.renderArea.offset.x = desc.scissor.offset.x;
     bi.renderArea.offset.y = desc.scissor.offset.y;
-    bi.renderArea.extent.width = desc.scissor.extent.x;
-    bi.renderArea.extent.height = desc.scissor.extent.y;
+    bi.renderArea.extent.width = areaW;
+    bi.renderArea.extent.height = areaH;
     bi.clearValueCount = static_cast<u32>(clears.size());
     bi.pClearValues = clears.data();
 
@@ -726,8 +756,18 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     pendingFramebuffer_ = fb;
 
     // 自动设置 viewport/scissor(pipeline 用 dynamic state)
-    SetViewport(desc.viewport);
-    SetScissor(desc.scissor);
+    // Apply the same fallback as renderArea: if caller left desc.viewport at {0,0},
+    // use the framebuffer dimensions we derived.
+    ViewportDesc effectiveVP = desc.viewport;
+    if (effectiveVP.size.x <= 0.0f || effectiveVP.size.y <= 0.0f) {
+        effectiveVP.size.x = static_cast<float>(fbW);
+        effectiveVP.size.y = static_cast<float>(fbH);
+    }
+    SetViewport(effectiveVP);
+    Rect effectiveScissor = desc.scissor;
+    if (effectiveScissor.extent.x == 0) effectiveScissor.extent.x = areaW;
+    if (effectiveScissor.extent.y == 0) effectiveScissor.extent.y = areaH;
+    SetScissor(effectiveScissor);
     UpdateStats(CommandType::BeginRenderPass);
 }
 

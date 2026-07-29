@@ -108,6 +108,33 @@ std::string IBLPrecomputer::LoadShaderSource(const std::string& filename) {
 }
 
 ShaderHandle IBLPrecomputer::CreateComputeShader(const std::string& filename, const char* entryPoint) {
+    auto platform = device_->GetPlatform();
+
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        // SPIR-V path: load precompiled .spv bytes.
+        utl::vector<std::string> searchPaths;
+        searchPaths.push_back("Engine/Graphics/Vulkan/shaders/");
+        searchPaths.push_back("../Engine/Graphics/Vulkan/shaders/");
+        searchPaths.push_back("../../Engine/Graphics/Vulkan/shaders/");
+        searchPaths.push_back("../../../Engine/Graphics/Vulkan/shaders/");
+        searchPaths.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Vulkan/shaders/");
+
+        for (const auto& prefix : searchPaths) {
+            std::string path = prefix + filename;
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            auto size = file.tellg();
+            if (size <= 0) continue;
+            utl::vector<char> bytes(static_cast<size_t>(size));
+            file.seekg(0);
+            file.read(bytes.data(), size);
+            return device_->CreateShader(bytes.data(), bytes.size(), ShaderStage::Compute, entryPoint);
+        }
+        std::cerr << "[IBLPrecomputer] Failed to open SPIR-V shader file: " << filename << std::endl;
+        return handles::INVALID_SHADER;
+    }
+
+    // Text path: Metal .metal or Dawn .wgsl, loaded with #include resolution.
     std::string source = LoadShaderSource(filename);
     if (source.empty()) return handles::INVALID_SHADER;
     return device_->CreateShader(source.data(), source.size(), ShaderStage::Compute, entryPoint);
@@ -191,9 +218,18 @@ bool IBLPrecomputer::CreatePipelines() {
     brdfPipelineLayout_ = device_->CreatePipelineLayout(brdfPipeLayoutDesc);
 
     // 3. Create Shaders
-    ShaderHandle irradianceShader = CreateComputeShader("IBL_IrradianceConvolution.metal", "CS_IrradianceConvolution");
-    ShaderHandle prefilterShader = CreateComputeShader("IBL_SpecularPrefilter.metal", "CS_SpecularPrefilter");
-    ShaderHandle brdfShader = CreateComputeShader("IBL_BRDFIntegration.metal", "CS_BRDFIntegration");
+    auto platform = device_->GetPlatform();
+    const bool isVulkan = (platform == rhi::RHIPlatform::Vulkan);
+    const char* ext = isVulkan ? ".spv" : ".metal";
+    // SPIR-V preserves the WGSL entry-point name (naga does not rewrite to
+    // "main"). WGSL convention: cs_main for compute.
+    const char* irradianceEntry = isVulkan ? "cs_main" : "CS_IrradianceConvolution";
+    const char* prefilterEntry = isVulkan ? "cs_main" : "CS_SpecularPrefilter";
+    const char* brdfEntry = isVulkan ? "cs_main" : "CS_BRDFIntegration";
+
+    ShaderHandle irradianceShader = CreateComputeShader(std::string("IBL_IrradianceConvolution") + ext, irradianceEntry);
+    ShaderHandle prefilterShader = CreateComputeShader(std::string("IBL_SpecularPrefilter") + ext, prefilterEntry);
+    ShaderHandle brdfShader = CreateComputeShader(std::string("IBL_BRDFIntegration") + ext, brdfEntry);
 
     if (irradianceShader == handles::INVALID_SHADER ||
         prefilterShader == handles::INVALID_SHADER ||
@@ -553,14 +589,18 @@ ResourceHandle IBLPrecomputer::ComputeBRDFIntegrationMap(u32 outputSize) {
 
     TextureDesc desc;
     desc.type = TextureType::Texture2D;
-    desc.format = DataFormat::RG16_Float;
+    // WGSL source declares texture_storage_2d<rgba16float, write>; SPIR-V
+    // OpTypeImage encodes Rgba16f and Vulkan requires the VkImage format to
+    // match. Metal's texture2d<float, access::write> is format-agnostic and
+    // accepts RG16F silently, which masked this mismatch pre-Vulkan.
+    desc.format = DataFormat::RGBA16_Float;
     desc.size = {outputSize, outputSize, 1};
     desc.arraySize = 1;
     desc.mipLevels = 1;
-    desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+    desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopySource;
     desc.memoryUsage = GPUMemoryUsage::Static;
     desc.name = "IBL_BRDF_LUT";
-    
+
     ResourceHandle outputTexture = device_->CreateTexture(desc);
     if (outputTexture == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
 
@@ -569,6 +609,18 @@ ResourceHandle IBLPrecomputer::ComputeBRDFIntegrationMap(u32 outputSize) {
     if (!cmd) return handles::INVALID_RESOURCE;
 
     cmd->Begin();
+
+    // Fresh texture is in Unknown/UNDEFINED layout — transition to UnorderedAccess
+    // (GENERAL on Vulkan) before the compute shader writes to it. Metal's encoder-
+    // level tracking makes this a no-op there; Vulkan requires an explicit barrier.
+    ResourceBarrier toUA{};
+    toUA.resource = outputTexture;
+    toUA.beforeState = ResourceState::Unknown;
+    toUA.afterState = ResourceState::UnorderedAccess;
+    toUA.subresource = 0xFFFFFFFF;
+    toUA.queueFamily = 0xFFFFFFFF;
+    cmd->InsertBarrier(&toUA, 1);
+
     cmd->BindComputePipeline(brdfPipeline_);
 
     DescriptorSetDesc dsDesc;

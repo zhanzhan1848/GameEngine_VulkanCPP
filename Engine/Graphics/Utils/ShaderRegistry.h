@@ -13,6 +13,8 @@ public:
             return "Engine/Graphics/Metal/shaders/";
         case rhi::RHIPlatform::Dawn:
             return "Engine/Graphics/Dawn/shaders/";
+        case rhi::RHIPlatform::Vulkan:
+            return "Engine/Graphics/Vulkan/shaders/";
         default:
             return "Engine/Graphics/Metal/shaders/";
         }
@@ -28,6 +30,8 @@ public:
             return ".metal";
         case rhi::RHIPlatform::Dawn:
             return ".wgsl";
+        case rhi::RHIPlatform::Vulkan:
+            return ".spv";
         default:
             return ".metal";
         }

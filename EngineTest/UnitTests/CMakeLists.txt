@@ -397,6 +397,59 @@ if(ENABLE_VULKAN)
                 $<TARGET_FILE_DIR:TestVulkanIBL_BRDFLUT>/Assets
     )
 
+    # Phase 4b-T4.0: production IBLPrecomputer path on Vulkan (smoke).
+    # Validates T4.0.4 SPIR-V branch — IBLPrecomputer loads .spv via
+    # ShaderRegistry path, dispatches, readback non-zero.
+    add_executable(TestVulkanIBLPrecomputer
+        RHI/Core/TestVulkanIBLPrecomputer.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanIBLPrecomputer PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanIBLPrecomputer PRIVATE Engine)
+    target_compile_definitions(TestVulkanIBLPrecomputer PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanIBLPrecomputer COMMAND TestVulkanIBLPrecomputer)
+    set_target_properties(TestVulkanIBLPrecomputer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanIBLPrecomputer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanIBLPrecomputer>/Assets
+    )
+
+    # Phase 4b-T4.2: production ForwardRenderer end-to-end smoke test on Vulkan.
+    # Validates T4.1 bypassProd gating — ForwardRenderer::Initialize creates
+    # dawn* bypass resources via the (isDawn || isVulkan) branch, Render()
+    # completes without crash/validation errors, output matches clear color.
+    add_executable(TestVulkanForwardRendererIntegration
+        RHI/Core/TestVulkanForwardRendererIntegration.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanForwardRendererIntegration PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanForwardRendererIntegration PRIVATE Engine)
+    target_compile_definitions(TestVulkanForwardRendererIntegration PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanForwardRendererIntegration COMMAND TestVulkanForwardRendererIntegration)
+    set_target_properties(TestVulkanForwardRendererIntegration PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanForwardRendererIntegration POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+                $<TARGET_FILE_DIR:TestVulkanForwardRendererIntegration>/Engine/Graphics/Vulkan/shaders
+    )
+
     # Phase 4b-T3.5b: IBL Equirectangular → Cube (compute).
     add_executable(TestVulkanIBL_Equirect
         RHI/Core/TestVulkanIBL_Equirect.cpp

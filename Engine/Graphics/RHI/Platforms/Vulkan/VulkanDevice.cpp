@@ -10,6 +10,7 @@
 
 #include "Engine/Common/CommonHeaders.h"
 
+#include "Graphics/RHI/Core/RHICommand.h"
 #include "VulkanTexture.h"
 #include "VulkanCommandBuffer.h"
 // Phase 4
@@ -493,6 +494,10 @@ CommandBufferHandle VulkanDevice::createCommandBufferImpl(CommandQueueType type)
         return handles::INVALID_COMMAND_BUFFER;
     }
     cmd->SetHandle(CommandBufferHandle(id));
+    // Mirror Metal: register with global CommandBufferManager so production
+    // code paths using rhi::GetCommandBuffer() (e.g. IBLPrecomputer) work
+    // uniformly across backends.
+    RegisterCommandBuffer(cmd);
     return CommandBufferHandle(id);
 }
 
@@ -504,6 +509,7 @@ void VulkanDevice::destroyCommandBufferImpl(CommandBufferHandle handle) {
                   << " — skipping" << std::endl;
         return;
     }
+    UnregisterCommandBuffer(handle);
     // VulkanCommandBuffer::~VulkanCommandBuffer 同步 vkDestroyFence/Pool — 因为命令缓冲内部
     // submit fence 由本对象独占,submit 后 WaitForCompletion 才能销毁(无 deferred 需要)。
     commandBufferAllocator_->Free(static_cast<u32>(handle));
