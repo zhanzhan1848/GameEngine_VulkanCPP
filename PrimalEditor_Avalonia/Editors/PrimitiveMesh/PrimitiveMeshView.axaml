@@ -55,6 +55,8 @@
 
     <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6" Margin="0,16,0,0">
       <Button Content="Cancel" Click="OnCancelClick" Width="90"/>
+      <Button Name="ReimportButton" Content="Re-cook" Click="OnReimportClick" Width="90"
+              IsVisible="{Binding HasAsset}"/>
       <Button Content="Create" Click="OnCreateClick" Width="90" IsDefault="True"
               Classes="accent"/>
     </StackPanel>

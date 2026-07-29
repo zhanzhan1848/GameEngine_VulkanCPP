@@ -15,6 +15,19 @@ public partial class PrimitiveMeshView : Window
 
     private void OnCancelClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e) => Close(false);
 
+    private void OnReimportClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not PrimitiveMeshViewModel vm) return;
+        if (vm.Reimport())
+        {
+            Logger.Info($"Re-cook succeeded: {vm.Asset?.FileName}");
+        }
+        else
+        {
+            Logger.Warning($"Re-cook failed: {vm.LastError}");
+        }
+    }
+
     private void OnCreateClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not PrimitiveMeshViewModel vm) { Close(false); return; }
