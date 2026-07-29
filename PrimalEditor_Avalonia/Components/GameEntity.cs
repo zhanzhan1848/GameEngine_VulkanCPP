@@ -54,6 +54,17 @@ public class GameEntity : ViewModelBase
         }
     }
 
+    /// <summary>
+    /// Optional absolute path to an asset (e.g. <c>Content/Models/foo.mesh</c>)
+    /// that this entity is bound to. When the scene is reopened, the
+    /// editor re-imports this asset through the engine and reattaches
+    /// the resulting mesh content id to the entity via
+    /// <see cref="WorldEditorViewModel.LoadEntity"/>. Empty string for
+    /// entities that aren't bound to an asset (the typical case).
+    /// </summary>
+    [JsonPropertyName("AssetPath")]
+    public string AssetPath { get; set; } = string.Empty;
+
     [JsonPropertyName("Components")]
     public ObservableCollection<Component> Components { get; set; } = new();
 
