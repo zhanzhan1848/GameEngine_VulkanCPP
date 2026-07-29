@@ -10,37 +10,156 @@ using PrimalEditor_Avalonia.Native;
 
 namespace PrimalEditor_Avalonia.Editors.Texture;
 
-public class TextureEditorViewModel : AssetEditorViewModel
+public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
 {
-    public TextureImportSettings Settings { get; } = new();
+    public TextureImportSettings Settings { get; private set; } = new();
     public TextureInfo Info { get; private set; } = new();
 
+    private bool _isDirty;
+    public new bool IsDirty
+    {
+        get => _isDirty;
+        private set { if (_isDirty != value) { _isDirty = value; OnPropertyChanged(); } }
+    }
+    public override void MarkDirty() => IsDirty = true;
+    public override void ClearDirty() => IsDirty = false;
+
     private Bitmap? _bitmap;
+    private byte[]? _rawRgba;
+    private int _rawWidth;
+    private int _rawHeight;
     public Bitmap? Preview
     {
         get => _bitmap;
         private set { _bitmap = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasPreview)); }
     }
-
-    private bool _showR = true, _showG = true, _showB = true, _showA = true;
-    public bool ShowR { get => _showR; set { _showR = value; OnPropertyChanged(); UpdateChannelBitmap(); } }
-    public bool ShowG { get => _showG; set { _showG = value; OnPropertyChanged(); UpdateChannelBitmap(); } }
-    public bool ShowB { get => _showB; set { _showB = value; OnPropertyChanged(); UpdateChannelBitmap(); } }
-    public bool ShowA { get => _showA; set { _showA = value; OnPropertyChanged(); UpdateChannelBitmap(); } }
-    public bool IsNormalMap { get; set; }
-
     public bool HasPreview => Preview != null;
 
-    public override async void SetAsset(AssetInfo info)
+    public bool ShowR { get => Settings.Compress ? _showR : true; set { _showR = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowG)); RebuildPreview(); } }
+    public bool ShowG { get => _showG; set { _showG = value; OnPropertyChanged(); RebuildPreview(); } }
+    public bool ShowB { get => _showB; set { _showB = value; OnPropertyChanged(); RebuildPreview(); } }
+    public bool ShowA { get => _showA; set { _showA = value; OnPropertyChanged(); RebuildPreview(); } }
+    private bool _showR = true, _showG = true, _showB = true, _showA = true;
+
+    public bool IsNormalMap
+    {
+        get => Settings.IsSRGB;
+        set
+        {
+            if (Settings.IsSRGB == value) return;
+            var prev = Settings.IsSRGB;
+            Settings.IsSRGB = value;
+            RecordChange(new DelegateAction(
+                "Toggle Normal Map",
+                () => { Settings.IsSRGB = prev; OnPropertyChanged(); MarkDirty(); RebuildPreview(); },
+                () => { Settings.IsSRGB = value; OnPropertyChanged(); MarkDirty(); RebuildPreview(); }));
+            OnPropertyChanged(); MarkDirty(); RebuildPreview();
+        }
+    }
+    public bool IsSRGB
+    {
+        get => Settings.IsSRGB;
+        set
+        {
+            if (Settings.IsSRGB == value) return;
+            var prev = Settings.IsSRGB;
+            Settings.IsSRGB = value;
+            RecordChange(new DelegateAction(
+                "Toggle sRGB",
+                () => { Settings.IsSRGB = prev; OnPropertyChanged(); MarkDirty(); },
+                () => { Settings.IsSRGB = value; OnPropertyChanged(); MarkDirty(); }));
+            OnPropertyChanged(); MarkDirty();
+        }
+    }
+    public TextureFormat OutputFormat
+    {
+        get => Settings.OutputFormat;
+        set
+        {
+            if (Settings.OutputFormat == value) return;
+            var prev = Settings.OutputFormat;
+            Settings.OutputFormat = value;
+            RecordChange(new DelegateAction(
+                $"Set OutputFormat={value}",
+                () => { Settings.OutputFormat = prev; OnPropertyChanged(); MarkDirty(); },
+                () => { Settings.OutputFormat = value; OnPropertyChanged(); MarkDirty(); }));
+            OnPropertyChanged(); MarkDirty();
+        }
+    }
+    public IReadOnlyList<TextureFormat> AllFormats { get; } = (TextureFormat[])Enum.GetValues(typeof(TextureFormat));
+
+    private int _mipIndex;
+    public int MipIndex
+    {
+        get => _mipIndex;
+        set
+        {
+            var v = Math.Clamp(value, 0, MaxMipIndex);
+            if (_mipIndex != v)
+            {
+                _mipIndex = v;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(MipDisplay));
+            }
+        }
+    }
+    public int MaxMipIndex => Math.Max(0, Settings.MipLevels - 1);
+    public string MipDisplay => $"Mip: {_mipIndex}/{MaxMipIndex}";
+
+    private int _arrayIndex;
+    public int ArrayIndex
+    {
+        get => _arrayIndex;
+        set
+        {
+            var v = Math.Clamp(value, 0, MaxArrayIndex);
+            if (_arrayIndex != v) { _arrayIndex = v; OnPropertyChanged(); OnPropertyChanged(nameof(ArrayDisplay)); }
+        }
+    }
+    public int MaxArrayIndex => Math.Max(0, Settings.ArraySize - 1);
+    public string ArrayDisplay => $"Array: {_arrayIndex}/{MaxArrayIndex}";
+
+    private int _depthIndex;
+    public int DepthIndex
+    {
+        get => _depthIndex;
+        set
+        {
+            var v = Math.Clamp(value, 0, MaxDepthIndex);
+            if (_depthIndex != v) { _depthIndex = v; OnPropertyChanged(); OnPropertyChanged(nameof(DepthDisplay)); }
+        }
+    }
+    public int MaxDepthIndex => Math.Max(0, Settings.Depth - 1);
+    public string DepthDisplay => $"Depth: {_depthIndex}/{MaxDepthIndex}";
+
+    public bool CanReimport => Asset != null && !IsBusy;
+    public bool CanSave => Asset != null && IsDirty && !IsBusy;
+
+    private bool IsBusy =>
+        State == AssetEditorState.Loading
+     || State == AssetEditorState.Importing
+     || State == AssetEditorState.Processing
+     || State == AssetEditorState.Saving;
+
+    public override void SetAsset(AssetInfo info)
     {
         base.SetAsset(info);
+        Settings = AssetImportSettingsStore.Load<TextureImportSettings>(info.FullPath);
+        ClearDirty();
+        _mipIndex = 0; _arrayIndex = 0; _depthIndex = 0;
         State = AssetEditorState.Loading;
+        _ = LoadAsync(info.FullPath);
+    }
+
+    private async Task LoadAsync(string path)
+    {
         try
         {
-            await Task.Run(() => LoadFromDisk(info.FullPath));
+            await Task.Run(() => LoadFromDisk(path));
             State = AssetEditorState.Done;
             OnPropertyChanged(nameof(Info));
-            OnPropertyChanged(nameof(HasPreview));
+            OnPropertyChanged(nameof(CanReimport));
+            OnPropertyChanged(nameof(CanSave));
         }
         catch (Exception ex)
         {
@@ -52,22 +171,34 @@ public class TextureEditorViewModel : AssetEditorViewModel
     private void LoadFromDisk(string path)
     {
         if (!File.Exists(path)) { Logger.Warning($"Texture missing: {path}"); return; }
-
         try
         {
             using var fs = File.OpenRead(path);
             var bmp = new Bitmap(fs);
+            int w = bmp.PixelSize.Width;
+            int h = bmp.PixelSize.Height;
+            _rawWidth = w; _rawHeight = h;
+            _rawRgba = new byte[w * h * 4];
+            var stride = w * 4;
+            var handle = System.Runtime.InteropServices.GCHandle.Alloc(_rawRgba, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                bmp.CopyPixels(new Avalonia.PixelRect(0, 0, w, h), handle.AddrOfPinnedObject(), _rawRgba.Length, stride);
+            }
+            finally
+            {
+                handle.Free();
+            }
             Info = new TextureInfo
             {
-                Width = bmp.PixelSize.Width,
-                Height = bmp.PixelSize.Height,
-                ArraySize = 1,
-                MipLevels = 1,
-                Depth = 1,
-                Format = TextureFormat.R8G8B8A8_UNORM,
+                Width = w,
+                Height = h,
+                ArraySize = Settings.ArraySize,
+                MipLevels = Math.Max(1, Settings.MipLevels),
+                Depth = Math.Max(1, Settings.Depth),
+                Format = Settings.OutputFormat,
             };
-
-            Dispatcher.UIThread.Post(() => Preview = bmp);
+            Dispatcher.UIThread.Post(RebuildPreview);
         }
         catch (Exception ex)
         {
@@ -75,36 +206,110 @@ public class TextureEditorViewModel : AssetEditorViewModel
         }
     }
 
-    private void UpdateChannelBitmap()
+    private void RebuildPreview()
     {
-        if (NativeEngineBridge.IsLoaded)
+        if (_rawRgba == null || _rawWidth == 0 || _rawHeight == 0) return;
+        var bytes = new byte[_rawRgba.Length];
+        float r = _showR ? 1f : 0f;
+        float g = _showG ? 1f : 0f;
+        float b = _showB ? 1f : 0f;
+        float a = _showA ? 1f : 0f;
+        bool normal = Settings.IsSRGB;
+        for (int i = 0; i < bytes.Length; i += 4)
         {
-            Logger.Info("Channel mask updated — re-cook via native pipeline (stub)");
+            byte sr = _rawRgba[i + 0], sg = _rawRgba[i + 1], sb = _rawRgba[i + 2], sa = _rawRgba[i + 3];
+            if (normal)
+            {
+                sr = (byte)Math.Clamp(sr * 2 - 255, 0, 255);
+                sg = (byte)Math.Clamp(sg * 2 - 255, 0, 255);
+                sb = (byte)Math.Clamp(sb * 2 - 255, 0, 255);
+            }
+            bytes[i + 0] = (byte)(sr * r);
+            bytes[i + 1] = (byte)(sg * g);
+            bytes[i + 2] = (byte)(sb * b);
+            bytes[i + 3] = (byte)(sa * a);
         }
-        else
+        // WriteableBitmap takes a pointer to existing pixel memory. We
+        // pin the bytes array via GCHandle so the GC can't move it while
+        // the bitmap is alive. The handle is captured by the lambda-free
+        // path: Avalonia copies the pixels into its own buffer at ctor
+        // time, so freeing the GCHandle immediately is safe.
+        var handle = System.Runtime.InteropServices.GCHandle.Alloc(bytes, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
         {
-            Logger.Debug("Channel mask updated — preview reflects new mask on next Reimport.");
+            Preview = new WriteableBitmap(
+                Avalonia.Platform.PixelFormat.Rgba8888,
+                Avalonia.Platform.AlphaFormat.Premul,
+                handle.AddrOfPinnedObject(),
+                new Avalonia.PixelSize(_rawWidth, _rawHeight),
+                new Avalonia.Vector(96, 96),
+                _rawWidth * 4);
+        }
+        finally
+        {
+            handle.Free();
         }
     }
 
     public void Reimport()
     {
-        if (Asset == null) return;
+        if (Asset == null || !CanReimport) return;
         State = AssetEditorState.Importing;
-        Task.Run(() =>
+        OnPropertyChanged(nameof(CanReimport));
+        OnPropertyChanged(nameof(CanSave));
+        var path = Asset.FullPath;
+        var task = Task.Run(() =>
         {
             if (NativeEngineBridge.IsLoaded)
-                Logger.Info($"Reimport: {Asset.FullPath} — cooking via native pipeline (stub)");
+            {
+                var result = NativeEngineBridge.ImportTexture(path);
+                if (result.HasValue)
+                {
+                    var info = result.Value;
+                    Logger.Info(info.Success != 0
+                        ? $"Reimport cook ok: {path} ({info.Width}x{info.Height})"
+                        : $"Reimport cook failed: {path} — {info.ErrorMessage}");
+                }
+                else
+                {
+                    Logger.Warning($"Reimport: {path} — engine call returned no result");
+                }
+            }
             else
-                Logger.Info($"Reimport: {Asset.FullPath} — engine not loaded, no GPU upload");
-
-            Dispatcher.UIThread.Post(() => SetAsset(Asset));
+            {
+                Logger.Info($"Reimport: {path} — engine not loaded, settings-only round trip");
+            }
+            AssetImportSettingsStore.Save(path, Settings);
+            Dispatcher.UIThread.Post(() =>
+            {
+                ClearDirty();
+                State = AssetEditorState.Done;
+                OnPropertyChanged(nameof(CanReimport));
+                OnPropertyChanged(nameof(CanSave));
+            });
         });
     }
 
-    public void Save()
+    public override void Save()
+    {
+        if (Asset == null || !CanSave) return;
+        var ok = AssetImportSettingsStore.Save(Asset.FullPath, Settings);
+        if (ok)
+        {
+            ClearDirty();
+            OnPropertyChanged(nameof(CanSave));
+            Logger.Info($"Saved texture settings: {Asset.FileName}");
+        }
+    }
+
+    public override void Discard()
     {
         if (Asset == null) return;
-        Logger.Info($"Save: settings for {Asset.FileName} cached (binary round-trip)");
+        Settings = AssetImportSettingsStore.Load<TextureImportSettings>(Asset.FullPath);
+        ClearDirty();
+        RebuildPreview();
+        OnPropertyChanged(nameof(IsSRGB));
+        OnPropertyChanged(nameof(OutputFormat));
+        OnPropertyChanged(nameof(CanSave));
     }
 }

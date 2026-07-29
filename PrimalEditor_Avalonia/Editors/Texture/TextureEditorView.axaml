@@ -1,7 +1,6 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:PrimalEditor_Avalonia.Editors.Texture"
-             xmlns:views="using:PrimalEditor_Avalonia.Editors.Texture"
              x:Class="PrimalEditor_Avalonia.Editors.Texture.TextureEditorView"
              x:DataType="vm:TextureEditorViewModel">
 
@@ -14,12 +13,15 @@
       <CheckBox Content="B" IsChecked="{Binding ShowB}"/>
       <CheckBox Content="A" IsChecked="{Binding ShowA}"/>
       <Separator Margin="6,0"/>
+      <CheckBox Content="sRGB" IsChecked="{Binding IsSRGB}"/>
       <CheckBox Content="Normal Map" IsChecked="{Binding IsNormalMap, Mode=TwoWay}"/>
       <Separator Margin="6,0"/>
-      <TextBlock Text="Mip:" VerticalAlignment="Center"/>
-      <TextBox Text="0" Width="40" IsReadOnly="True"/>
-      <TextBlock Text="Array:" VerticalAlignment="Center"/>
-      <TextBox Text="0" Width="40" IsReadOnly="True"/>
+      <TextBlock Text="{Binding MipDisplay}" VerticalAlignment="Center"/>
+      <TextBlock Text="{Binding ArrayDisplay}" VerticalAlignment="Center"/>
+      <TextBlock Text="{Binding DepthDisplay}" VerticalAlignment="Center"/>
+      <Separator Margin="6,0"/>
+      <TextBlock Text="Format:" VerticalAlignment="Center"/>
+      <ComboBox ItemsSource="{Binding AllFormats}" SelectedItem="{Binding OutputFormat}" Width="140"/>
     </StackPanel>
 
     <Border Grid.Row="1" Background="#FF202020" ClipToBounds="True">
@@ -32,15 +34,20 @@
       </Grid>
     </Border>
 
-    <Grid Grid.Row="2" ColumnDefinitions="*,Auto,Auto" Margin="6">
+    <Grid Grid.Row="2" ColumnDefinitions="*,Auto,Auto,Auto" Margin="6">
       <TextBlock Grid.Column="0"
                  Text="{Binding Info.Summary}"
                  FontFamily="Consolas,Menlo,monospace"
                  VerticalAlignment="Center"/>
-      <Button Grid.Column="1" Content="Reimport" Margin="4,0"
-              Click="OnReimportClick"/>
-      <Button Grid.Column="2" Content="Save"
-              Click="OnSaveClick"/>
+      <Button Grid.Column="1" Content="Discard" Margin="4,0"
+              Click="OnDiscardClick"
+              IsEnabled="{Binding IsDirty}"/>
+      <Button Grid.Column="2" Content="Reimport" Margin="4,0"
+              Click="OnReimportClick"
+              IsEnabled="{Binding CanReimport}"/>
+      <Button Grid.Column="3" Content="Save"
+              Click="OnSaveClick"
+              IsEnabled="{Binding CanSave}"/>
     </Grid>
   </Grid>
 </UserControl>

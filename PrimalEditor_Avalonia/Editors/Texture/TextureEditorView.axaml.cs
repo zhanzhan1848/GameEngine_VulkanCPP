@@ -17,4 +17,9 @@ public partial class TextureEditorView : UserControl
     {
         if (DataContext is TextureEditorViewModel vm) vm.Save();
     }
+
+    private void OnDiscardClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is TextureEditorViewModel vm) vm.Discard();
+    }
 }
