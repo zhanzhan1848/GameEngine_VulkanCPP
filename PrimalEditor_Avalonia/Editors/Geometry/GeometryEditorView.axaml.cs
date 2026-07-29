@@ -4,7 +4,6 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
 using Avalonia.Markup.Xaml;
-using Avalonia.Threading;
 using PrimalEditor_Avalonia.Common;
 
 namespace PrimalEditor_Avalonia.Editors.Geometry;
@@ -54,6 +53,21 @@ public partial class GeometryEditorView : UserControl
     {
         _drag = false;
         e.Pointer.Capture(null);
+    }
+
+    private void OnDiscardClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is GeometryEditorViewModel vm) vm.Discard();
+    }
+
+    private void OnReimportClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is GeometryEditorViewModel vm) vm.Reimport();
+    }
+
+    private void OnSaveClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is GeometryEditorViewModel vm) vm.Save();
     }
 
     private void Render()
@@ -145,7 +159,7 @@ public partial class GeometryEditorView : UserControl
 
         var brush = new SolidColorBrush(Color.FromRgb(120, 220, 120));
         var triangles = indices.Length / 3;
-        for (int t = 0; t < triangles; t++)
+        for (var t = 0; t < triangles; t++)
         {
             var i0 = indices[t * 3 + 0];
             var i1 = indices[t * 3 + 1];

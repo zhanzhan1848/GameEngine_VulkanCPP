@@ -4,7 +4,7 @@
              x:Class="PrimalEditor_Avalonia.Editors.Geometry.GeometryEditorView"
              x:DataType="vm:GeometryEditorViewModel">
 
-  <Grid RowDefinitions="Auto,*">
+  <Grid RowDefinitions="Auto,*,Auto">
 
     <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="6">
       <TextBlock Text="LOD:" VerticalAlignment="Center" FontWeight="SemiBold"/>
@@ -15,6 +15,10 @@
       <TextBlock Text="{Binding VertexCount}" VerticalAlignment="Center" FontFamily="Consolas,Menlo,monospace"/>
       <TextBlock Text="Tris:" VerticalAlignment="Center"/>
       <TextBlock Text="{Binding TriangleCount}" VerticalAlignment="Center" FontFamily="Consolas,Menlo,monospace"/>
+      <TextBlock Text="Submeshes:" VerticalAlignment="Center"/>
+      <TextBlock Text="{Binding SubmeshCount}" VerticalAlignment="Center" FontFamily="Consolas,Menlo,monospace"/>
+      <Separator Margin="6,0"/>
+      <TextBlock Text="{Binding BoundsSummary}" VerticalAlignment="Center" FontFamily="Consolas,Menlo,monospace" Foreground="LightGray"/>
       <Separator Margin="6,0"/>
       <TextBlock Text="(drag to orbit)" Foreground="Gray" VerticalAlignment="Center"/>
     </StackPanel>
@@ -25,5 +29,11 @@
              PointerMoved="OnPointerMoved"
              PointerReleased="OnPointerReleased"/>
     </Border>
+
+    <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="6" Margin="6" HorizontalAlignment="Right">
+      <Button Content="Discard" Click="OnDiscardClick" IsEnabled="{Binding IsDirty}"/>
+      <Button Content="Reimport" Click="OnReimportClick"/>
+      <Button Content="Save" Click="OnSaveClick" IsEnabled="{Binding CanSave}"/>
+    </StackPanel>
   </Grid>
 </UserControl>
