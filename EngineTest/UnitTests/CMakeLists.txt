@@ -2058,3 +2058,19 @@ set_target_properties(TestWFCOutput PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCOutput PRIVATE DEBUG _DEBUG)
 
+# WFC Phase B.1 Task 5: TestWFCCornerMeshes — corner_in/out generator sanity
+add_executable(TestWFCCornerMeshes
+    Graphics/WFC/TestWFCCornerMeshes.cpp)
+target_include_directories(TestWFCCornerMeshes PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCCornerMeshes PRIVATE Engine)
+add_test(NAME TestWFCCornerMeshes COMMAND TestWFCCornerMeshes)
+set_target_properties(TestWFCCornerMeshes PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCCornerMeshes PRIVATE DEBUG _DEBUG)
+

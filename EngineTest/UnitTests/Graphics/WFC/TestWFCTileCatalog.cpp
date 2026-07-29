@@ -106,6 +106,19 @@ TestResult TestWFCTileCatalog_Solves_4x4x4_With_Catalog() {
     return TestResult::Passed;
 }
 
+TestResult TestWFCTileCatalog_Corners_Has_Four_Variants_Each() {
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCTileCatalog::Populate(reg, adj);
+
+    const WFCTile& corner_in = reg.Get(wfc_tile_id{2});
+    TEST_ASSERT_EQ(4u, corner_in.variant_count, "corner_in has 4 variants (Phase B.1)");
+
+    const WFCTile& corner_out = reg.Get(wfc_tile_id{3});
+    TEST_ASSERT_EQ(4u, corner_out.variant_count, "corner_out has 4 variants (Phase B.1)");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCTileCatalog");
     TEST_CASE(suite, "Populate_Registers_Five_Tiles", TestWFCTileCatalog_Populate_Registers_Five_Tiles);
@@ -114,6 +127,8 @@ int main() {
     TEST_CASE(suite, "Cube_Self_Compat_On_All_Faces", TestWFCTileCatalog_Cube_Self_Compat_On_All_Faces);
     TEST_CASE(suite, "Ramp_Self_Compat_On_PosZ", TestWFCTileCatalog_Ramp_Self_Compat_On_PosZ);
     TEST_CASE(suite, "Solves_4x4x4_With_Catalog", TestWFCTileCatalog_Solves_4x4x4_With_Catalog);
+    TEST_CASE(suite, "Corners_Has_Four_Variants_Each",
+              TestWFCTileCatalog_Corners_Has_Four_Variants_Each);
     suite.RunAllTests();
     return 0;
 }
