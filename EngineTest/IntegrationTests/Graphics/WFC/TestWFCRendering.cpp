@@ -39,6 +39,7 @@
 
 #include <iostream>
 #include <cmath>
+#include <cassert>
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
@@ -311,11 +312,6 @@ void WFCRenderingTestCase::ReseedSolver() {
     config.seed       = rng_seed_++;
     config.max_generations = 8;  // generous; restarts are visual, not fatal
 
-    // WaveGrid::Initialize takes the grid dimensions + max_variants hint (8
-    // matches the Phase B.1 local-grid path; the registry has 5 tiles so the
-    // candidate mask fits in one u8).
-    grid_->Initialize(config.grid_size, 8);
-
     solver_ = std::make_unique<WFCSolver>();
     solver_->Initialize(config, *grid_, *registry_, *adjacency_, *buf_);
 
@@ -379,6 +375,7 @@ void WFCRenderingTestCase::PumpSolverFrame() {
                               spawn.mesh_slot_indices.end());
         // Re-publish the full cumulative list to the pipeline.
         // SetPCGEntities replaces (not appends), so we pass the full list.
+        assert(wfc_entity_ids.size() == wfc_mesh_slots.size());
         pipeline->SetPCGEntities(wfc_entity_ids, wfc_mesh_slots);
     }
 

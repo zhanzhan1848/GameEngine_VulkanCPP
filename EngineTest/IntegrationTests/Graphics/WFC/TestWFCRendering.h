@@ -12,10 +12,8 @@
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
 #include "Engine/Graphics/RenderView.h"
 #include "Engine/Graphics/RenderScene.h"
-#include "Engine/Graphics/RenderProxy.h"
 #include "Engine/Platform/Platform.h"
 #include "Engine/Graphics/RHI/Systems/RenderSystem.h"
-#include "Engine/Graphics/PCG/PCGTypes.h"
 #include "Engine/Graphics/WFC/WFCTileRegistry.h"
 #include "Engine/Graphics/WFC/TileAdjacency.h"
 #include "Engine/Graphics/WFC/WaveGrid.h"
@@ -23,7 +21,6 @@
 #include "Engine/Graphics/WFC/WFCStepBuffer.h"
 #include "Engine/Graphics/WFC/WFCSolveBudget.h"
 #include "Engine/Graphics/WFC/WFCConfig.h"
-#include "Engine/Graphics/WFC/TileAdjacency.h"
 #include <memory>
 
 class WFCRenderingTestCase : public primal::test::RenderTestCase {
@@ -44,8 +41,6 @@ private:
 #endif
     bool key_m_pressed_{false};
     // Phase B.2: re-seed + pause
-    bool key_r_pressed_{false};
-    bool key_space_pressed_{false};
     bool paused_{false};
 
     // --- Catalog setup (Phase B.1) ---
