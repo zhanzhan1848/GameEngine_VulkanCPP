@@ -44,10 +44,28 @@ public class ContentBrowserViewModel : ViewModelBase
 
     private void OnContentModified(object? sender, ContentModifiedEventArgs e)
     {
-        if (string.IsNullOrEmpty(e.FullPath))
+        // The debouncer emits a single "All" event when its timer fires;
+        // every other invocation carries an OldPath or NewPath that we
+        // can apply directly. Re-register the affected path on the
+        // AssetRegistry so the GUI sees the new/removed asset.
+        switch (e.ChangeType)
         {
-            Avalonia.Threading.Dispatcher.UIThread.Post(RefreshFolders);
+            case System.IO.WatcherChangeTypes.Created when !string.IsNullOrEmpty(e.NewPath):
+                PrimalEditor_Avalonia.Content.AssetRegistry.Register(e.NewPath!);
+                break;
+            case System.IO.WatcherChangeTypes.Deleted when !string.IsNullOrEmpty(e.OldPath):
+                PrimalEditor_Avalonia.Content.AssetRegistry.Unregister(e.NewPath ?? e.OldPath!);
+                break;
+            case System.IO.WatcherChangeTypes.Renamed when !string.IsNullOrEmpty(e.OldPath) && !string.IsNullOrEmpty(e.NewPath):
+                PrimalEditor_Avalonia.Content.AssetRegistry.Unregister(e.OldPath!);
+                PrimalEditor_Avalonia.Content.AssetRegistry.Register(e.NewPath!);
+                break;
+            case System.IO.WatcherChangeTypes.All:
+                // Debounced flush — refresh the whole tree.
+                Avalonia.Threading.Dispatcher.UIThread.Post(RefreshFolders);
+                return;
         }
+        Avalonia.Threading.Dispatcher.UIThread.Post(RefreshFolders);
     }
 
     public Project? Project
