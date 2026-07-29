@@ -906,6 +906,21 @@ public static class NativeEngineBridge
     // RHIPlatform values must match EngineAPI.cpp InitializeEngine.
     // Metal=3, Vulkan=2, D3D12=1 (see RHITypes.h RHIPlatform enum).
     public const uint RHIPlatformMetal = 3;
+    public const uint RHIPlatformVulkan = 2;
+    public const uint RHIPlatformD3D12 = 1;
+
+    /// <summary>
+    /// Returns the RHI platform id for the current host OS. This is the
+    /// single point at which the editor maps "running on macOS" to "use
+    /// Metal"; callers (CLI headless init, the MacMetalViewportHost
+    /// implementation) use this rather than hard-coding the constant.
+    /// </summary>
+    public static uint DefaultRHIPlatformForCurrentPlatform()
+    {
+        if (System.OperatingSystem.IsMacOS()) return RHIPlatformMetal;
+        if (System.OperatingSystem.IsWindows()) return RHIPlatformD3D12;
+        return RHIPlatformVulkan;
+    }
 
     public static bool InitializeEngine(uint rhiPlatform = RHIPlatformMetal, bool enableDebug = false)
     {
@@ -1223,11 +1238,17 @@ public static class NativeEngineBridge
     [DllImport("PrimalEngine", EntryPoint = "ImportMeshAsync", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern ulong _ImportMeshAsync(IntPtr path);
 
+    [DllImport("PrimalEngine", EntryPoint = "TryGetMeshImportResult", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _TryGetMeshImportResult(ulong requestId, out ulong meshContentId, out uint status);
+
     [DllImport("libContentTools", EntryPoint = "CookMesh", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern uint _CookMesh(IntPtr input, IntPtr output);
 
     [DllImport("PrimalEngine", EntryPoint = "TickAssetSystem", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _TickAssetSystem();
+
+    [DllImport("PrimalEngine", EntryPoint = "TickMainThreadJobs", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _TickMainThreadJobs();
 
     [DllImport("PrimalEngine", EntryPoint = "GetPendingUploadCount", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _GetPendingUploadCount();
@@ -1270,6 +1291,26 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("ImportMesh failed", ex); return 0; }
     }
 
+    public enum MeshImportResultStatus : uint
+    {
+        Pending = 0,
+        Success = 1,
+        Failed = 2,
+        NotFound = 3,
+    }
+
+    public static (ulong meshContentId, MeshImportResultStatus status) TryGetMeshImportResult(ulong requestId)
+    {
+        if (!_isLoaded || requestId == 0)
+            return (0, MeshImportResultStatus.NotFound);
+        try
+        {
+            _TryGetMeshImportResult(requestId, out var meshId, out var status);
+            return (meshId, (MeshImportResultStatus)status);
+        }
+        catch (Exception ex) { Logger.Error("TryGetMeshImportResult failed", ex); return (0, MeshImportResultStatus.Failed); }
+    }
+
     public static bool CookMesh(string input, string output)
     {
         if (!_isLoaded) return false;
@@ -1287,6 +1328,13 @@ public static class NativeEngineBridge
         if (!_isLoaded) return;
         try { _TickAssetSystem(); }
         catch (Exception ex) { Logger.Error("TickAssetSystem failed", ex); }
+    }
+
+    public static void TickMainThreadJobs()
+    {
+        if (!_isLoaded) return;
+        try { _TickMainThreadJobs(); }
+        catch (Exception ex) { Logger.Error("TickMainThreadJobs failed", ex); }
     }
 
     public static uint GetPendingUploadCount()
