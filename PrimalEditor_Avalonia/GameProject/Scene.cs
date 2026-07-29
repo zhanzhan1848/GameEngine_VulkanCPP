@@ -1,14 +1,16 @@
 using System.Collections.ObjectModel;
 using System.Text.Json.Serialization;
+using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.GameProject;
 
-public class Scene : ViewModelBase
+public class Scene : ViewModelBase, IDirtyTrackable
 {
     private string _name = "New Scene";
     private bool _isActive;
+    private bool _isDirty;
 
     [JsonPropertyName("Name")]
     public string Name
@@ -40,6 +42,23 @@ public class Scene : ViewModelBase
 
     [JsonPropertyName("Entities")]
     public ObservableCollection<GameEntity> Entities { get; set; } = new();
+
+    [JsonIgnore]
+    public bool IsDirty
+    {
+        get => _isDirty;
+        private set
+        {
+            if (_isDirty != value)
+            {
+                _isDirty = value;
+                OnPropertyChanged(nameof(IsDirty));
+            }
+        }
+    }
+
+    public void MarkDirty() => IsDirty = true;
+    public void ClearDirty() => IsDirty = false;
 
     [JsonIgnore]
     public Scene? ParentScene { get; set; }
