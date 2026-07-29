@@ -2,11 +2,12 @@ using System;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Text.Json.Serialization;
+using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.GameProject;
 
-public class Project : ViewModelBase
+public class Project : ViewModelBase, IDirtyTrackable
 {
     public static string Extension { get; } = ".primal";
     public static int SchemaVersion { get; } = 1;
@@ -16,6 +17,7 @@ public class Project : ViewModelBase
     private int _buildConfig;
     private Scene? _activeScene;
     private readonly ObservableCollection<Scene> _scenes = new();
+    private bool _isDirty;
 
     [JsonPropertyName("SchemaVersion")]
     public int CurrentSchemaVersion { get; set; } = SchemaVersion;
@@ -130,6 +132,23 @@ public class Project : ViewModelBase
             }
         }
     }
+
+    [JsonIgnore]
+    public bool IsDirty
+    {
+        get => _isDirty;
+        private set
+        {
+            if (_isDirty != value)
+            {
+                _isDirty = value;
+                OnPropertyChanged(nameof(IsDirty));
+            }
+        }
+    }
+
+    public void MarkDirty() => IsDirty = true;
+    public void ClearDirty() => IsDirty = false;
 
     public Project() { }
 
