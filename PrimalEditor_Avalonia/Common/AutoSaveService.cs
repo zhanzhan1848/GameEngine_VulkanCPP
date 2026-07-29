@@ -12,7 +12,7 @@ public class AutoSaveService
     private static DispatcherTimer? _timer;
     private static Project? _trackedProject;
     private static string? _trackedPath;
-    private static DateTime _lastChange = DateTime.MinValue;
+    private static DateTime _lastDirtyAt = DateTime.MinValue;
 
     public static TimeSpan Interval { get; set; } = TimeSpan.FromMinutes(5);
     public static TimeSpan DebounceDelay { get; set; } = TimeSpan.FromSeconds(10);
@@ -34,27 +34,38 @@ public class AutoSaveService
 
     public static void Track(Project? project)
     {
+        if (_trackedProject != null)
+        {
+            _trackedProject.PropertyChanged -= OnTrackedProjectPropertyChanged;
+        }
         _trackedProject = project;
         _trackedPath = project?.FullPath;
-        _lastChange = DateTime.UtcNow;
+        if (project != null)
+        {
+            project.PropertyChanged += OnTrackedProjectPropertyChanged;
+            if (project.IsDirty) _lastDirtyAt = DateTime.UtcNow;
+        }
+    }
+
+    private static void OnTrackedProjectPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(Project.IsDirty) && _trackedProject?.IsDirty == true)
+        {
+            _lastDirtyAt = DateTime.UtcNow;
+        }
     }
 
     public static void NotifyChanged()
     {
-        _lastChange = DateTime.UtcNow;
+        _lastDirtyAt = DateTime.UtcNow;
     }
 
     private static void OnTick(object? sender, EventArgs e)
     {
         if (_trackedProject == null || _trackedPath == null) return;
+        if (!_trackedProject.IsDirty) return;
 
-        if (DateTime.UtcNow - _lastChange < DebounceDelay) return;
-
-        if (File.Exists(_trackedPath))
-        {
-            var lastWrite = File.GetLastWriteTimeUtc(_trackedPath);
-            if (DateTime.UtcNow - lastWrite < Interval) return;
-        }
+        if (DateTime.UtcNow - _lastDirtyAt < DebounceDelay) return;
 
         _ = SaveBackupAsync();
     }
