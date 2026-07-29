@@ -4,7 +4,11 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="600"
-             x:Class="PrimalEditor_Avalonia.Views.EngineViewport3D"
+             x:Class="PrimalEditor_Avalonia.Views.Engine3D.EngineViewport3D"
              Background="#FF202020">
-  <views:MTKViewHost Name="MTKHostView" />
+  <Grid>
+    <views:MTKViewHost Name="MTKHostView" />
+    <views:ViewportOverlay Name="Overlay" IsHitTestVisible="False" />
+    <views:GizmoOverlay Name="Gizmo" />
+  </Grid>
 </UserControl>

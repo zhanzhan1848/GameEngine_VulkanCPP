@@ -7,15 +7,13 @@ using Avalonia.Threading;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Native;
 
-namespace PrimalEditor_Avalonia.Views;
+namespace PrimalEditor_Avalonia.Views.Engine3D;
 
 public partial class EngineViewport3D : UserControl
 {
-    // RHI forward pipeline state — drives EngineAPI.cpp directly.
-    private uint _surfaceId = uint.MaxValue;
+    private IEditorViewportHost? _host;
     private uint _cameraId;
     private uint _cameraEntityId;  // entity the camera is bound to; mutated by orbit/pan/zoom
-    private bool _engineInitialized;
     private bool _viewportInitialized;
     private float _animTime;
 
@@ -36,6 +34,36 @@ public partial class EngineViewport3D : UserControl
     private const float kPanSpeed = 0.0025f;   // world units per pixel of drag delta, scaled by distance
     private const float kZoomSpeed = 1.15f;    // multiplicative factor per wheel notch
     private const float kWheelZoomStep = 0.12f; // distance change per wheel notch (fraction of current)
+
+    // Public camera state for managed overlays (Gizmo / picker / focus math).
+    public float CameraYaw => _cameraYaw;
+    public float CameraPitch => _cameraPitch;
+    public float CameraDistance => _cameraDistance;
+    public float CameraTargetX => _cameraTarget[0];
+    public float CameraTargetY => _cameraTarget[1];
+    public float CameraTargetZ => _cameraTarget[2];
+
+    private bool _isOrthographic;
+    public bool IsOrthographic
+    {
+        get => _isOrthographic;
+        set
+        {
+            if (_isOrthographic != value)
+            {
+                _isOrthographic = value;
+                InvalidateOverlay();
+            }
+        }
+    }
+
+    private void InvalidateOverlay()
+    {
+        if (this.FindControl<ViewportOverlay>("Overlay") is ViewportOverlay overlay)
+            overlay.InvalidateVisual();
+        if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
+            gizmo.InvalidateVisual();
+    }
 
     // Pointer interaction state. Pointer events on this control fire only
     // while the cursor is over the render surface, so the hit-test the user
@@ -96,105 +124,45 @@ public partial class EngineViewport3D : UserControl
 
         try
         {
-            // Step 1: 3-step RHI engine init. Idempotent — only runs once.
-            if (!_engineInitialized)
+            if (_host == null)
             {
-                if (!NativeEngineBridge.InitializeEngine(NativeEngineBridge.RHIPlatformMetal, enableDebug: false))
+                var mtkHost = this.FindControl<PrimalEditor_Avalonia.Views.Engine3D.MTKViewHost>("MTKHostView");
+                if (mtkHost == null)
                 {
-                    Logger.Warning("InitializeEngine returned false");
-                    ShowPlaceholder(true);
+                    Logger.Warning("MTKViewHost not in visual tree; will retry on next layout pass");
                     return false;
                 }
-                _engineInitialized = true;
-                Logger.Info("Engine initialized via RHI (Metal)");
-
-                UInt64 deviceHandle = NativeEngineBridge.GetEngineDeviceHandle();
-                if (deviceHandle != 0 && NativeEngineBridge.CreateStandardRenderPipeline(deviceHandle))
-                {
-                    Logger.Info("StandardRenderPipeline created (Lumen=Low)");
-                    NativeEngineBridge.PipelineSetEditorMode(true);
-                    NativeEngineBridge.SetPipelineViewportSize(width, height);
-                }
-                else
-                {
-                    Logger.Warning("StandardRenderPipeline creation failed — falling back to legacy gpass path");
-                }
+                _host = EditorViewportHostFactory.CreateForCurrentPlatform(mtkHost);
+                Logger.Info($"Editor viewport host: {_host.Name}");
             }
 
-            // Step 2: Embed MTKView into the MTKViewHost's child NSView via the
-            // engine's RHI forward pipeline. The MTKViewHost is a NativeControlHost
-            // that Avalonia created inside its visual tree; its child NSView is
-            // positioned and sized by Avalonia's layout system. The MTKView
-            // attaches as a subview of that child NSView, so it inherits
-            // correct layout from Avalonia instead of fighting it (which was
-            // the root cause of the macOS 26.5.1 FramePacing crash and the
-            // 10-frame-then-deadlock pattern).
-            //
-            // The MTKViewHost is the **only** supported host. There is no
-            // fallback to NSWindow.contentView (a previous legacy path that
-            // did `NS::Application::sharedApplication()->windows()[0]->contentView()`):
-            // that path is unreliable because (a) `windows()[0]` is not
-            // guaranteed to be the editor's MainWindow (Avalonia may register
-            // other hidden windows), (b) the contentView is the Avalonia
-            // root, not a NativeControlHost's child NSView, and (c) its
-            // bounds may be 0×0 at the time the engine first tries to draw
-            // (mid-layout). All three cases produce a `currentDrawable` that
-            // is either nil or has a 0×0 backing texture, and a
-            // `presentDrawable:` block then fires on the freed drawable
-            // when the MTKView is later reparented by Avalonia's layout
-            // pass — the EXC_BAD_ACCESS at
-            // -[_MTLCommandBuffer presentDrawable:options:]_block_invoke
-            // signature we've seen. Failing fast here is safer than
-            // silently using the wrong host.
-            //
-            // The MTKViewHost is looked up by name via FindControl since
-            // the project does not use Avalonia's XAML compiler
-            // (Microsoft.NET.Sdk, not Avalonia.NET.Sdk), so x:Name does
-            // not auto-generate fields. The Name="MTKHostView" attribute
-            // on the XAML element is the Avalonia-level Name (not the WPF
-            // x:Name), and FindControl<T>("name") walks the visual tree
-            // looking for a control whose Name matches.
-            var mtkHost = this.FindControl<PrimalEditor_Avalonia.Views.Engine3D.MTKViewHost>("MTKHostView");
-            IntPtr hostView = mtkHost?.HostViewHandle ?? IntPtr.Zero;
-            if (hostView == IntPtr.Zero)
+            if (!_host.TryInitialize(width, height))
             {
-                // Schedule a retry — the MTKViewHost's CreateNativeControlCore
-                // may fire on the next layout pass. Don't fall back to the
-                // legacy windows()[0] path; that was the original bug.
-                Logger.Warning("MTKViewHost child is null; will retry on next layout pass");
+                // Host reported the underlying view is not yet ready
+                // (host view handle zero, or surface creation refused).
+                // The host has already cleaned up; caller may retry on
+                // the next layout pass.
                 return false;
             }
 
-            _surfaceId = NativeEngineBridge.CreateEmbeddedRenderSurface(hostView, width, height);
-            if (_surfaceId == uint.MaxValue)
-            {
-                Logger.Warning("CreateEmbeddedRenderSurface failed");
-                ShowPlaceholder(true);
-                return false;
-            }
-            Logger.Info($"Embedded render surface {_surfaceId} created ({width}x{height})");
+            // The RHI is now bound; size the StandardRenderPipeline to
+            // match. StandardRenderPipeline owns its own render targets
+            // keyed off the viewport size.
+            NativeEngineBridge.PipelineSetEditorMode(true);
+            NativeEngineBridge.SetPipelineViewportSize(width, height);
 
-            // Defensive double-check: verify the engine actually attached an
-            // MTKView to the host. The C ABI returns a non-error id even when
-            // the host view had 0x0 bounds at creation time (the surface is
-            // created on the next layout pass), so a non-error id alone is not
-            // a guarantee that a drawable is reachable.
-            var surfaceView = NativeEngineBridge.GetSurfaceView(_surfaceId);
-            if (surfaceView == IntPtr.Zero)
+            UInt64 deviceHandle = NativeEngineBridge.GetEngineDeviceHandle();
+            if (deviceHandle != 0 && NativeEngineBridge.CreateStandardRenderPipeline(deviceHandle))
             {
-                Logger.Warning($"CreateEmbeddedRenderSurface returned id {_surfaceId} but no MTKView is attached (host view likely had 0x0 bounds); will retry");
-                _surfaceId = uint.MaxValue;
-                ShowPlaceholder(true);
-                return false;
+                Logger.Info("StandardRenderPipeline created (Lumen=Low)");
+            }
+            else
+            {
+                Logger.Warning("StandardRenderPipeline creation failed — falling back to legacy gpass path");
             }
 
-            // Position the MTKView over the EngineViewport3D control's bounds
-            // (in the host's coordinate space — the Avalonia contentView's
-            // top-left origin).
-            PositionEmbeddedSurface(width, height);
-
-            // Step 3: Set up a default editor camera so the forward pipeline
-            // has a view to render from. Scene content (entities, lights,
+            // Set up a default editor camera so the forward pipeline has
+            // a view to render from. Scene content (entities, lights,
             // render items) is set up via RenderPipelineAPI / EntityAPI.
             _cameraId = CreateEditorCamera(width, height);
             if (_cameraId != 0)
@@ -202,16 +170,12 @@ public partial class EngineViewport3D : UserControl
                 Logger.Info($"Editor camera {_cameraId} created");
             }
 
-            // Step 4: Populate a small test scene so the viewport renders
-            // something more interesting than the post-process clear color.
-            // 4 spheres in a row + a directional-style point light above.
+            // Populate a small test scene so the viewport renders something
+            // more interesting than the post-process clear color.
             CreateTestScene();
 
             // Push the initial orbit state to the engine so the camera
-            // starts at the expected default view (looking at origin from
-            // -Z, distance 12, level with target). The entity CreateEntity
-            // already wrote (0, 1, -12) which is offset by +1 in Y from
-            // our target=origin default, so we apply once to reconcile.
+            // starts at the expected default view.
             ApplyCameraTransform();
 
             _renderTarget = NativeEngineBridge.CreateRenderTarget(
@@ -230,16 +194,15 @@ public partial class EngineViewport3D : UserControl
             ShowPlaceholder(false);
             StartRenderLoop();
 
-            // Configure the StandardRenderPipeline for editor preview.
-            // Editor mode uses the lightweight forward path; viewport
-            // size must mirror the surface size so internal buffers
-            // scale correctly. Both calls are no-ops if the pipeline
-            // singleton is not yet created (graceful early start).
-            NativeEngineBridge.PipelineSetEditorMode(true);
-            NativeEngineBridge.SetPipelineViewportSize(width, height);
-
-            Logger.Info("3D viewport initialized via RHI forward pipeline");
+            Logger.Info($"3D viewport initialized via {_host.Name} forward pipeline");
             return true;
+        }
+        catch (NotImplementedException ex)
+        {
+            Logger.Warning($"3D viewport host not implemented on this platform: {ex.Message}");
+            ShowPlaceholder(true);
+            _host = null;
+            return false;
         }
         catch (Exception ex)
         {
@@ -497,11 +460,13 @@ public partial class EngineViewport3D : UserControl
     {
         if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return;
         if (_renderTarget == 0) return;
+        if (_host == null || !_host.IsReady) return;
         if (_testSceneRenderItems.Count == 0) return;
         _animTime += dt;
 
-        NativeEngineBridge.PipelineRenderFrame(_renderTarget, _cameraId, _surfaceId);
-        NativeEngineBridge.BlitRenderTargetToSurface(_renderTarget, _surfaceId);
+        var surfaceId = (uint)_host.SurfaceId;
+        NativeEngineBridge.PipelineRenderFrame(_renderTarget, _cameraId, surfaceId);
+        NativeEngineBridge.BlitRenderTargetToSurface(_renderTarget, surfaceId);
     }
 
     private void OnDetached(object? sender, VisualTreeAttachmentEventArgs e)
@@ -509,11 +474,7 @@ public partial class EngineViewport3D : UserControl
         StopRenderLoop();
         LayoutUpdated -= OnLayoutUpdated;
         DestroyTestScene();
-        if (_surfaceId != uint.MaxValue)
-        {
-            NativeEngineBridge.RemoveRenderSurface(_surfaceId);
-            _surfaceId = uint.MaxValue;
-        }
+        _host?.Destroy();
         _viewportInitialized = false;
     }
 
@@ -545,7 +506,7 @@ public partial class EngineViewport3D : UserControl
         }
 
         if (!_viewportInitialized) return;
-        if (_surfaceId == uint.MaxValue) return;
+        if (_host == null || !_host.IsReady) return;
         var width = (int)Bounds.Width;
         var height = (int)Bounds.Height;
         if (width <= 0 || height <= 0) return;
@@ -555,7 +516,7 @@ public partial class EngineViewport3D : UserControl
         {
             _lastWidth = width;
             _lastHeight = height;
-            NativeEngineBridge.ResizeRenderSurface(_surfaceId, (uint)width, (uint)height);
+            _host.Resize(width, height);
             // StandardRenderPipeline maintains its own render targets
             // keyed off the viewport size; update it in lockstep with
             // the surface resize so internal buffers don't go stale.
@@ -590,8 +551,57 @@ public partial class EngineViewport3D : UserControl
             {
                 NativeEngineBridge.SetEntityCameraAspectRatio(_cameraEntityId, (float)width / height);
             }
+        }
 
-            PositionEmbeddedSurface(width, height);
+        // Sync camera state to the managed overlay (grid/axes/gizmo) on
+        // every layout pass. Cheap — the overlay only invalidates if
+        // anything actually changed.
+        SyncOverlay();
+    }
+
+    private void SyncOverlay()
+    {
+        if (this.FindControl<ViewportOverlay>("Overlay") is ViewportOverlay overlay)
+        {
+            overlay.CameraYaw = _cameraYaw;
+            overlay.CameraPitch = _cameraPitch;
+            overlay.CameraDistance = _cameraDistance;
+            overlay.CameraTarget = (_cameraTarget[0], _cameraTarget[1], _cameraTarget[2]);
+        }
+        if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
+        {
+            gizmo.UpdateCamera(_cameraYaw, _cameraPitch, _cameraDistance, (float)Bounds.Width, (float)Bounds.Height);
+        }
+    }
+
+    /// <summary>Move the gizmo anchor to <paramref name="worldX/Y/Z"/>.</summary>
+    public void SetGizmoTarget(float worldX, float worldY, float worldZ)
+    {
+        if (this.FindControl<ViewportOverlay>("Overlay") is ViewportOverlay overlay)
+        {
+            overlay.GizmoTarget = (worldX, worldY, worldZ);
+        }
+        if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
+        {
+            gizmo.SetTarget(worldX, worldY, worldZ);
+        }
+    }
+
+    /// <summary>Subscribe to gizmo drag. The handler receives (axis, delta) where
+    /// delta is a screen-space unit. The handler is responsible for
+    /// translating delta to world-space and updating the selected entity.</summary>
+    public event System.EventHandler<(GizmoOverlay.GizmoAxis axis, float delta)>? GizmoDrag;
+
+    private void ConnectGizmo()
+    {
+        if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
+        {
+            gizmo.OnDelta += (s, e) => GizmoDrag?.Invoke(this, e);
+            // Forward pointer events to the gizmo overlay so its
+            // hit-test can run. The gizmo itself is IsHitTestVisible=False
+            // (declared in XAML), so its callbacks fire when the user
+            // pressed down on the viewport — the parent Grid routes
+            // events to the topmost child, which is the gizmo overlay.
         }
     }
 
@@ -601,19 +611,6 @@ public partial class EngineViewport3D : UserControl
     // LayoutUpdated drives init and positioning because OnSizeChanged can
     // fire before the parent Border has a real layout (Bounds = 0x0), which
     // would place the MTKView at the wrong screen coordinates.
-
-    // The MTKView is attached as a subview of the NativeControlHost's child
-    // NSView (MTKViewHost). That host NSView's bounds already match this
-    // control's Bounds thanks to Avalonia's layout pass, so the MTKView
-    // should always fill its host at host-local origin (0, 0). Translating
-    // screen coordinates to host-local was double-counting the host's
-    // already-correct position and was clipping the MTKView to the top-left
-    // corner or hiding it entirely on resize.
-    private void PositionEmbeddedSurface(int width, int height)
-    {
-        if (_surfaceId == uint.MaxValue) return;
-        NativeEngineBridge.SetEmbeddedSurfaceFrame(_surfaceId, 0, 0, (uint)width, (uint)height);
-    }
 
     private int _retryCount;
     private void ScheduleRetry()
@@ -645,14 +642,68 @@ public partial class EngineViewport3D : UserControl
         _activeButton = point.Properties.IsLeftButtonPressed
             ? Avalonia.Input.MouseButton.Left
             : Avalonia.Input.MouseButton.Right;
+
+        // Left click on the gizmo takes precedence over entity picking.
+        if (_activeButton == Avalonia.Input.MouseButton.Left
+            && this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
+        {
+            gizmo.OnPointerPressed(point.Position);
+            if (gizmo.IsDragging)
+            {
+                Focus();
+                e.Handled = true;
+                return;
+            }
+        }
+
+        // Left click: ray-pick an entity. If a hit is found, raise
+        // EntityPicked and skip the orbit-camera path so the click
+        // doesn't accidentally rotate the view.
+        if (_activeButton == Avalonia.Input.MouseButton.Left && _entityCandidates != null)
+        {
+            var (ox, oy, oz, dx, dy, dz) = ScreenToRay(
+                (float)point.Position.X, (float)point.Position.Y,
+                (float)Bounds.Width, (float)Bounds.Height);
+            var hit = ViewportPicker.PickNearest(_entityCandidates, ox, oy, oz, dx, dy, dz);
+            if (hit.HasValue)
+            {
+                EntityPicked?.Invoke(this, hit.Value.EntityId);
+                _activeButton = Avalonia.Input.MouseButton.None;
+                Focus();
+                e.Handled = true;
+                return;
+            }
+        }
+
         _lastPointer = point.Position;
         Focus();
         e.Handled = true;
     }
 
+    /// <summary>
+    /// Set the world-space entity list that the picker tests against.
+    /// Pass <c>null</c> to disable picking. Each entry is
+    /// <c>(entityId, worldX, worldY, worldZ, boundingRadius)</c>.
+    /// </summary>
+    public void SetPickerCandidates(System.Collections.Generic.IReadOnlyList<(uint id, ViewportPicker.AABB bounds)>? candidates)
+    {
+        _entityCandidates = candidates;
+    }
+
+    private System.Collections.Generic.IReadOnlyList<(uint id, ViewportPicker.AABB bounds)>? _entityCandidates;
+
+    /// <summary>Fires when the user left-clicks an entity in the viewport.</summary>
+    public event EventHandler<uint>? EntityPicked;
+
     private void OnPointerMoved(object? sender, Avalonia.Input.PointerEventArgs e)
     {
         try { System.IO.File.AppendAllText("/tmp/wheel.log", $"[MOVE] button={_activeButton} pos={e.GetCurrentPoint(this).Position} timestamp={DateTime.UtcNow:HH:mm:ss.fff}\n"); } catch {}
+        if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo && gizmo.IsDragging)
+        {
+            gizmo.OnPointerMoved(e.GetCurrentPoint(this).Position);
+            e.Handled = true;
+            return;
+        }
         if (_activeButton == Avalonia.Input.MouseButton.None) return;
         var p = e.GetCurrentPoint(this).Position;
         float dx = (float)(p.X - _lastPointer.X);
@@ -699,6 +750,12 @@ public partial class EngineViewport3D : UserControl
 
     private void OnPointerReleased(object? sender, Avalonia.Input.PointerReleasedEventArgs e)
     {
+        if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo && gizmo.IsDragging)
+        {
+            gizmo.OnPointerReleased();
+            e.Handled = true;
+            return;
+        }
         if (e.InitialPressMouseButton == _activeButton)
         {
             _activeButton = Avalonia.Input.MouseButton.None;
@@ -774,7 +831,11 @@ public partial class EngineViewport3D : UserControl
 
     private void OnKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
     {
-        // F = frame the test scene (reset orbit state to the default view).
+        // F = reset orbit state to default view. Only fires when this
+        // control is focused (e.g. user clicked into the viewport and
+        // pressed F with no entity selected). The outer WorldEditorView
+        // consumes F when an entity is selected, so this branch is the
+        // "no selection, reset view" path.
         if (e.Key == Avalonia.Input.Key.F)
         {
             _cameraTarget = new float[] { 0f, 0f, 0f };
@@ -785,5 +846,75 @@ public partial class EngineViewport3D : UserControl
             Logger.Info("Camera reset to default view (F)");
             e.Handled = true;
         }
+    }
+
+    /// <summary>
+    /// Move the orbit camera to frame the entity at <paramref name="entityId"/>.
+    /// Reads the entity's world position via <see cref="NativeEngineBridge.GetEntityPosition"/>
+    /// and re-aims the orbit camera at that point with a default framing distance.
+    /// </summary>
+    public void FocusOnEntity(uint entityId)
+    {
+        if (!NativeEngineBridge.IsLoaded) return;
+        if (entityId == 0 || entityId == NativeEngineBridge.InvalidEntityId) return;
+        var pos = NativeEngineBridge.GetEntityPosition(entityId);
+        _cameraTarget = new[] { pos.x, pos.y, pos.z };
+        _cameraDistance = 8f;
+        ApplyCameraTransform();
+        SetGizmoTarget(pos.x, pos.y, pos.z);
+        Logger.Info($"Focus on entity {entityId} at ({pos.x:0.##},{pos.y:0.##},{pos.z:0.##})");
+    }
+
+    /// <summary>
+    /// Cast a ray from a screen-space point into the world. Used by
+    /// managed pickers and Gizmo unproject.
+    /// </summary>
+    public (float ox, float oy, float oz, float dx, float dy, float dz) ScreenToRay(float screenX, float screenY, float viewportWidth, float viewportHeight)
+    {
+        float cy = MathF.Cos(_cameraYaw);
+        float sy = MathF.Sin(_cameraYaw);
+        float cp = MathF.Cos(_cameraPitch);
+        float sp = MathF.Sin(_cameraPitch);
+        // forward = (sy*cp, sp, cy*cp) (camera looks at -forward).
+        float[] forward = new[] { sy * cp, sp, cy * cp };
+        float[] worldUp = new[] { 0f, 1f, 0f };
+        float[] right = new[] { forward[1] * worldUp[2] - forward[2] * worldUp[1], forward[2] * worldUp[0] - forward[0] * worldUp[2], forward[0] * worldUp[1] - forward[1] * worldUp[0] };
+        float rlen = MathF.Sqrt(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+        if (rlen > 1e-6f) { right[0] /= rlen; right[1] /= rlen; right[2] /= rlen; }
+        float[] screenUp = new[] { right[1] * forward[2] - right[2] * forward[1], right[2] * forward[0] - right[0] * forward[2], right[0] * forward[1] - right[1] * forward[0] };
+
+        // Camera position: in perspective mode the camera orbits at
+        // target - forward*distance; in orthographic mode the camera
+        // sits at target and the ray direction is purely forward (no
+        // divergence). The origin matters for ray-AABB math: in ortho
+        // we anchor the origin at the target plane so entry/exit tests
+        // work against world-space bounds.
+        float camX = _cameraTarget[0] - (_isOrthographic ? 0f : forward[0] * _cameraDistance);
+        float camY = _cameraTarget[1] - (_isOrthographic ? 0f : forward[1] * _cameraDistance);
+        float camZ = _cameraTarget[2] - (_isOrthographic ? 0f : forward[2] * _cameraDistance);
+
+        // In ortho mode each world unit maps to roughly viewportHeight /
+        // (2 * distance) pixels. Use that ratio so the picker hits the
+        // same world-space position regardless of zoom.
+        float ux, vy, depth;
+        if (_isOrthographic)
+        {
+            float scale = viewportHeight / MathF.Max(_cameraDistance, 0.1f) * 0.5f;
+            ux = (screenX - viewportWidth * 0.5f) / scale;
+            vy = -(screenY - viewportHeight * 0.5f) / scale;
+            depth = 1f; // direction only, magnitude normalized by caller
+        }
+        else
+        {
+            float focal = MathF.Min(viewportWidth, viewportHeight) * 0.5f;
+            ux = (screenX - viewportWidth * 0.5f) / focal;
+            vy = -(screenY - viewportHeight * 0.5f) / focal; // invert Y
+            depth = 1f;
+        }
+
+        float dx = forward[0] * depth + right[0] * ux + screenUp[0] * vy;
+        float dy = forward[1] * depth + right[1] * ux + screenUp[1] * vy;
+        float dz = forward[2] * depth + right[2] * ux + screenUp[2] * vy;
+        return (camX, camY, camZ, dx, dy, dz);
     }
 }
