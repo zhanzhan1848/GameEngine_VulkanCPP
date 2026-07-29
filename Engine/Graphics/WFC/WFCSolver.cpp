@@ -151,7 +151,8 @@ bool WFCSolver::RunPropagationCascade(WaveGrid& grid, const TileAdjacencyTable& 
     // so further passes won't make progress.
     bool contradiction = false;
     while (propagator_.HasDirty()) {
-        u32 changed = propagator_.RunPass(grid, adjacency, *registry_, contradiction);
+        u32 changed = propagator_.RunPass(grid, adjacency, *registry_,
+                                          WFC_FACE_COUNT_3D, contradiction);
         if (contradiction) return false;
         if (changed == 0) break;
     }

@@ -40,7 +40,8 @@ void WFCPropagator::OnCellCollapsed(const WaveGrid& grid, WFCGridCoord coord,
 }
 
 u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
-                           const WFCTileRegistry& registry, bool& out_contradiction) {
+                           const WFCTileRegistry& registry,
+                           u32 face_count, bool& out_contradiction) {
     (void)registry;  // static helpers only; instance reserved for Phase B
     out_contradiction = false;
     u32 changed = 0;
@@ -75,7 +76,10 @@ u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
         };
 
         WFCGridCoord size = grid.Size();
-        for (auto& f : kFaces) {
+        // face_count: 6 = full 3D, 4 = 2D (skip ±Z entries at indices 4, 5).
+        // kFaces[] still has all 6 entries; the loop bound controls which are queried.
+        for (u32 fi = 0; fi < face_count && fi < 6; ++fi) {
+            const auto& f = kFaces[fi];
             WFCGridCoord n{c.x + f.dx, c.y + f.dy, c.z + f.dz};
             if (n.x < 0 || n.x >= size.x) continue;
             if (n.y < 0 || n.y >= size.y) continue;

@@ -93,7 +93,7 @@ TestResult TestWFCPropagator_RunPass_Removes_Incompatible_Candidates() {
     prop.OnCellCollapsed(grid, {1, 0, 0}, A, 0);
 
     bool contradiction = false;
-    u32 changed = prop.RunPass(grid, adjacency, registry, contradiction);
+    u32 changed = prop.RunPass(grid, adjacency, registry, WFC_FACE_COUNT_3D, contradiction);
 
     // Cell 0 should have only (tile 0, var 1) -> bit 1 remaining as candidate.
     const WFCCell& result = grid.CellAt({0, 0, 0});
@@ -131,7 +131,7 @@ TestResult TestWFCPropagator_RunPass_Detects_Contradiction() {
     prop.OnCellCollapsed(grid, {1, 0, 0}, wfc_tile_id{0}, 0);
 
     bool contradiction = false;
-    prop.RunPass(grid, adjacency, registry, contradiction);
+    prop.RunPass(grid, adjacency, registry, WFC_FACE_COUNT_3D, contradiction);
 
     // Cell 0 has only candidate A, but A's +X is not compatible with A's -X → all candidates removed
     TEST_ASSERT(contradiction, "Should detect contradiction when cell has no candidates");
@@ -166,7 +166,7 @@ TestResult TestWFCPropagator_RunPass_No_Change_On_Already_Collapsed() {
     // Manually queue cell 0 too (simulating it being a neighbor of cell 1)
     // — but it's already collapsed so RunPass should skip it.
     bool contradiction = false;
-    u32 changed = prop.RunPass(grid, adjacency, registry, contradiction);
+    u32 changed = prop.RunPass(grid, adjacency, registry, WFC_FACE_COUNT_3D, contradiction);
     TEST_ASSERT_EQ(0u, changed, "Already-collapsed cell should not be modified");
     TEST_ASSERT(!contradiction, "No contradiction from collapsed cells");
     return TestResult::Passed;
@@ -215,13 +215,111 @@ TestResult TestWFCPropagator_RunPass_Multi_Tile_Filter() {
     prop.OnCellCollapsed(grid, {1, 0, 0}, ramp_id, 0);
 
     bool contradiction = false;
-    prop.RunPass(grid, adj, registry, contradiction);
+    prop.RunPass(grid, adj, registry, WFC_FACE_COUNT_3D, contradiction);
 
     // Cell 0 sits at +X of cell 1 (ramp). Cell 0 candidates {cube, ramp}.
     // Cube(var 0) at +X is compatible with ramp(var 0) at -X (rule added).
     // Ramp(var 0) at +X is compatible with ramp(var 0) at -X (self-compat).
     // -> Both candidates survive -> no contradiction
     TEST_ASSERT(!contradiction, "No contradiction when cube+ramp both compatible with ramp neighbor");
+    return TestResult::Passed;
+}
+
+TestResult TestWFCPropagator_RunPass_FaceCount2D_Still_Processes_XY_Neighbors() {
+    // 3x1x1 grid. Cell at (1,0,0) collapses. In 2D mode (face_count=4), the
+    // ±X neighbors at (0,0,0) and (2,0,0) are still processed because kFaces
+    // indices 0,1 are PosX/NegX. This test verifies the 2D face_count doesn't
+    // accidentally skip X-axis filtering.
+    WaveGrid grid;
+    grid.Initialize({3, 1, 1}, 8);
+    SetCellCandidates(grid, {0, 0, 0}, 0b111u, 3);
+    SetCellCandidates(grid, {1, 0, 0}, 0b111u, 3);
+    SetCellCandidates(grid, {2, 0, 0}, 0b111u, 3);
+
+    WFCCell& c1 = grid.CellAt({1, 0, 0});
+    c1.candidate_mask = 0b001u;
+    c1.candidate_count = 1;
+    c1.collapsed = true;
+    c1.collapsed_tile = wfc_tile_id{0};
+    c1.collapsed_variant = 0;
+    c1.entropy = 0;
+
+    WFCTileRegistry registry;
+    WFCTile tile{};
+    tile.variant_count = 8;
+    registry.Register(tile);
+
+    TileAdjacencyTable adjacency;
+    const wfc_tile_id A{0};
+    // Symmetric ±X rules so both -X and +X neighbors of c1 reduce to bit 1.
+    // (NegX rule alone would leave c1's +X face with no compatible variant,
+    // emptying cell {2,0,0} and triggering a contradiction unrelated to 2D.)
+    adjacency.AddCompatibility(A, 0, WFCFace::NegX, A, 1);
+    adjacency.AddCompatibility(A, 0, WFCFace::PosX, A, 1);
+
+    WFCPropagator prop;
+    prop.Initialize(grid);
+    prop.OnCellCollapsed(grid, {1, 0, 0}, A, 0);
+
+    bool contradiction = false;
+    u32 changed = prop.RunPass(grid, adjacency, registry,
+                               WFC_FACE_COUNT_2D, contradiction);
+
+    // Cell {0,0,0} is at -X of c1. Its filter uses my_face=+X, neighbor_face=-X.
+    // Cell {2,0,0} is at +X of c1. Its filter uses my_face=-X, neighbor_face=+X.
+    // 2D mode face_count=4 still includes ±X faces (indices 0,1 in kFaces).
+    // With symmetric ±X rules, both X neighbors reduce to bit 1 only — no
+    // contradiction — proving the 2D loop bound does not skip X-axis filtering.
+    const WFCCell& c0 = grid.CellAt({0, 0, 0});
+    TEST_ASSERT(!c0.collapsed, "Cell 0 not collapsed in 2D mode");
+    TEST_ASSERT_EQ(0b010u, c0.candidate_mask, "Cell 0 has only bit 1 in 2D mode");
+    TEST_ASSERT(changed >= 1u, "2D mode still processes X/Y neighbors");
+    TEST_ASSERT(!contradiction, "No contradiction in 2D mode for X-axis filter");
+    return TestResult::Passed;
+}
+
+TestResult TestWFCPropagator_RunPass_FaceCount2D_Ignores_Z_Compat() {
+    // Grid {1,1,3} (3 cells along Z). Collapse cell at z=1. In 3D mode, the
+    // ±Z neighbors (z=0, z=2) get filtered by adjacency on ±Z faces. In 2D
+    // mode face_count=4, those entries (indices 4,5 in kFaces) are skipped,
+    // so neighbors at ±Z are NOT filtered even if their compatibility is
+    // empty.
+    WaveGrid grid;
+    grid.Initialize({1, 1, 3}, 8);
+    SetCellCandidates(grid, {0, 0, 0}, 0b001u, 1);
+    SetCellCandidates(grid, {0, 0, 1}, 0b001u, 1);
+    SetCellCandidates(grid, {0, 0, 2}, 0b001u, 1);
+
+    WFCCell& c1 = grid.CellAt({0, 0, 1});
+    c1.collapsed = true;
+    c1.candidate_mask = 0b001u;
+    c1.candidate_count = 1;
+    c1.collapsed_tile = wfc_tile_id{0};
+    c1.collapsed_variant = 0;
+    c1.entropy = 0;
+
+    WFCTileRegistry registry;
+    WFCTile tile{};
+    tile.variant_count = 8;
+    registry.Register(tile);
+
+    // Empty adjacency: A's ±Z faces compatible with NOTHING.
+    TileAdjacencyTable adjacency;
+    WFCPropagator prop;
+    prop.Initialize(grid);
+    prop.OnCellCollapsed(grid, {0, 0, 1}, wfc_tile_id{0}, 0);
+
+    bool contradiction = false;
+    prop.RunPass(grid, adjacency, registry,
+                 WFC_FACE_COUNT_2D, contradiction);
+
+    // In 2D mode, ±Z entries skipped → cell {0,0,0} and {0,0,2} keep their
+    // candidates unchanged despite the empty adjacency on ±Z faces.
+    TEST_ASSERT(!contradiction, "2D mode ignores ±Z incompatibility");
+    TEST_ASSERT_EQ(1u, grid.CellAt({0, 0, 0}).candidate_count,
+                   "Cell z=0 unchanged in 2D mode");
+    TEST_ASSERT_EQ(1u, grid.CellAt({0, 0, 2}).candidate_count,
+                   "Cell z=2 unchanged in 2D mode");
     return TestResult::Passed;
 }
 
@@ -234,6 +332,10 @@ int main() {
     TEST_CASE(suite, "RunPass_Detects_Contradiction", TestWFCPropagator_RunPass_Detects_Contradiction);
     TEST_CASE(suite, "RunPass_No_Change_On_Already_Collapsed", TestWFCPropagator_RunPass_No_Change_On_Already_Collapsed);
     TEST_CASE(suite, "RunPass_Multi_Tile_Filter", TestWFCPropagator_RunPass_Multi_Tile_Filter);
+    TEST_CASE(suite, "RunPass_FaceCount2D_Still_Processes_XY_Neighbors",
+              TestWFCPropagator_RunPass_FaceCount2D_Still_Processes_XY_Neighbors);
+    TEST_CASE(suite, "RunPass_FaceCount2D_Ignores_Z_Compat",
+              TestWFCPropagator_RunPass_FaceCount2D_Ignores_Z_Compat);
     suite.RunAllTests();
     return 0;
 }

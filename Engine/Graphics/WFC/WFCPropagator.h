@@ -46,8 +46,11 @@ public:
     //   registry:  tile registry — provides the bit <-> (tile, variant) packing
     //              (Phase A.3 multi-tile candidate space)
     //   out_contradiction: set true if any cell's candidate_count hits zero
+    // face_count: 6 for 3D (default 3D path), 4 for 2D (skips ±Z entries in
+    // kFaces[]). Use WFC_FACE_COUNT_3D / WFC_FACE_COUNT_2D from WFCTypes.h.
     u32 RunPass(class WaveGrid& grid, const class TileAdjacencyTable& adjacency,
-                const class WFCTileRegistry& registry, bool& out_contradiction);
+                const class WFCTileRegistry& registry,
+                u32 face_count, bool& out_contradiction);
 
     // For test access / solver introspection
     u32 DirtyQueueSize() const { return static_cast<u32>(dirty_queue_.size()); }
