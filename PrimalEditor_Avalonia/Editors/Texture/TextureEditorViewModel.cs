@@ -12,8 +12,57 @@ namespace PrimalEditor_Avalonia.Editors.Texture;
 
 public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
 {
+    private ITextureSliceDecoder _decoder;
     public TextureImportSettings Settings { get; private set; } = new();
     public TextureInfo Info { get; private set; } = new();
+
+    public TextureEditorViewModel() : this(new AvaloniaTextureSliceDecoder()) { }
+    public TextureEditorViewModel(ITextureSliceDecoder decoder)
+    {
+        _decoder = decoder;
+    }
+
+    public void SetDecoder(ITextureSliceDecoder decoder) => _decoder = decoder;
+
+    /// <summary>
+    /// Test hook: install the given decoded slices and refresh all
+    /// derived properties. Production code uses <see cref="SetAsset"/>
+    /// which calls into the configured decoder; tests bypass file IO
+    /// by supplying a <see cref="TextureDecoded"/> directly.
+    /// </summary>
+    public void SetSlicesForTest(TextureDecoded? decoded)
+    {
+        if (decoded == null)
+        {
+            _slices = null;
+        }
+        else
+        {
+            _slices = new TextureSliceSet(decoded.Width, decoded.Height, decoded.ArrayCount, decoded.MipCount, decoded.Rgba);
+        }
+        _mipIndex = Clamp(_mipIndex, 0, MaxMipIndex);
+        _arrayIndex = Clamp(_arrayIndex, 0, MaxArrayIndex);
+        _depthIndex = Clamp(_depthIndex, 0, MaxDepthIndex);
+        if (decoded != null)
+        {
+            Info = new TextureInfo
+            {
+                Width = decoded.Width,
+                Height = decoded.Height,
+                ArraySize = Math.Max(decoded.ArrayCount, Settings.ArraySize),
+                MipLevels = Math.Max(decoded.MipCount, Settings.MipLevels),
+                Depth = Math.Max(decoded.Depth, Settings.Depth),
+                Format = Settings.OutputFormat,
+            };
+        }
+        OnPropertyChanged(nameof(MaxMipIndex));
+        OnPropertyChanged(nameof(MaxArrayIndex));
+        OnPropertyChanged(nameof(MaxDepthIndex));
+        OnPropertyChanged(nameof(MipDisplay));
+        OnPropertyChanged(nameof(ArrayDisplay));
+        OnPropertyChanged(nameof(DepthDisplay));
+        OnPropertyChanged(nameof(Info));
+    }
 
     private bool _isDirty;
     public new bool IsDirty
@@ -25,9 +74,6 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
     public override void ClearDirty() => IsDirty = false;
 
     private Bitmap? _bitmap;
-    private byte[]? _rawRgba;
-    private int _rawWidth;
-    private int _rawHeight;
     public Bitmap? Preview
     {
         get => _bitmap;
@@ -43,16 +89,16 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
 
     public bool IsNormalMap
     {
-        get => Settings.IsSRGB;
+        get => Settings.IsNormalMap;
         set
         {
-            if (Settings.IsSRGB == value) return;
-            var prev = Settings.IsSRGB;
-            Settings.IsSRGB = value;
+            if (Settings.IsNormalMap == value) return;
+            var prev = Settings.IsNormalMap;
+            Settings.IsNormalMap = value;
             RecordChange(new DelegateAction(
                 "Toggle Normal Map",
-                () => { Settings.IsSRGB = prev; OnPropertyChanged(); MarkDirty(); RebuildPreview(); },
-                () => { Settings.IsSRGB = value; OnPropertyChanged(); MarkDirty(); RebuildPreview(); }));
+                () => { Settings.IsNormalMap = prev; OnPropertyChanged(); MarkDirty(); RebuildPreview(); },
+                () => { Settings.IsNormalMap = value; OnPropertyChanged(); MarkDirty(); RebuildPreview(); }));
             OnPropertyChanged(); MarkDirty(); RebuildPreview();
         }
     }
@@ -88,13 +134,15 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
     }
     public IReadOnlyList<TextureFormat> AllFormats { get; } = (TextureFormat[])Enum.GetValues(typeof(TextureFormat));
 
+    private TextureSliceSet? _slices;
+
     private int _mipIndex;
     public int MipIndex
     {
         get => _mipIndex;
         set
         {
-            var v = Math.Clamp(value, 0, MaxMipIndex);
+            var v = Clamp(value, 0, MaxMipIndex);
             if (_mipIndex != v)
             {
                 _mipIndex = v;
@@ -103,7 +151,7 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
             }
         }
     }
-    public int MaxMipIndex => Math.Max(0, Settings.MipLevels - 1);
+    public int MaxMipIndex => _slices?.MipCount > 0 ? _slices.MipCount - 1 : 0;
     public string MipDisplay => $"Mip: {_mipIndex}/{MaxMipIndex}";
 
     private int _arrayIndex;
@@ -112,11 +160,11 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
         get => _arrayIndex;
         set
         {
-            var v = Math.Clamp(value, 0, MaxArrayIndex);
+            var v = Clamp(value, 0, MaxArrayIndex);
             if (_arrayIndex != v) { _arrayIndex = v; OnPropertyChanged(); OnPropertyChanged(nameof(ArrayDisplay)); }
         }
     }
-    public int MaxArrayIndex => Math.Max(0, Settings.ArraySize - 1);
+    public int MaxArrayIndex => _slices?.ArrayCount > 0 ? _slices.ArrayCount - 1 : 0;
     public string ArrayDisplay => $"Array: {_arrayIndex}/{MaxArrayIndex}";
 
     private int _depthIndex;
@@ -125,12 +173,14 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
         get => _depthIndex;
         set
         {
-            var v = Math.Clamp(value, 0, MaxDepthIndex);
+            var v = Clamp(value, 0, MaxDepthIndex);
             if (_depthIndex != v) { _depthIndex = v; OnPropertyChanged(); OnPropertyChanged(nameof(DepthDisplay)); }
         }
     }
-    public int MaxDepthIndex => Math.Max(0, Settings.Depth - 1);
+    public int MaxDepthIndex => _slices?.Depth > 0 ? _slices.Depth - 1 : 0;
     public string DepthDisplay => $"Depth: {_depthIndex}/{MaxDepthIndex}";
+
+    private static int Clamp(int value, int min, int max) => Math.Max(min, Math.Min(max, value));
 
     public bool CanReimport => Asset != null && !IsBusy;
     public bool CanSave => Asset != null && IsDirty && !IsBusy;
@@ -171,53 +221,49 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
     private void LoadFromDisk(string path)
     {
         if (!File.Exists(path)) { Logger.Warning($"Texture missing: {path}"); return; }
+        TextureDecoded? decoded;
         try
         {
-            using var fs = File.OpenRead(path);
-            var bmp = new Bitmap(fs);
-            int w = bmp.PixelSize.Width;
-            int h = bmp.PixelSize.Height;
-            _rawWidth = w; _rawHeight = h;
-            _rawRgba = new byte[w * h * 4];
-            var stride = w * 4;
-            var handle = System.Runtime.InteropServices.GCHandle.Alloc(_rawRgba, System.Runtime.InteropServices.GCHandleType.Pinned);
-            try
-            {
-                bmp.CopyPixels(new Avalonia.PixelRect(0, 0, w, h), handle.AddrOfPinnedObject(), _rawRgba.Length, stride);
-            }
-            finally
-            {
-                handle.Free();
-            }
-            Info = new TextureInfo
-            {
-                Width = w,
-                Height = h,
-                ArraySize = Settings.ArraySize,
-                MipLevels = Math.Max(1, Settings.MipLevels),
-                Depth = Math.Max(1, Settings.Depth),
-                Format = Settings.OutputFormat,
-            };
-            Dispatcher.UIThread.Post(RebuildPreview);
+            decoded = _decoder.TryDecode(path);
         }
         catch (Exception ex)
         {
             Logger.Error($"Texture decode: {ex.Message}", ex);
+            return;
         }
+        if (decoded == null) return;
+        _slices = new TextureSliceSet(decoded.Width, decoded.Height, decoded.ArrayCount, decoded.MipCount, decoded.Rgba);
+        OnPropertyChanged(nameof(MaxMipIndex));
+        OnPropertyChanged(nameof(MaxArrayIndex));
+        OnPropertyChanged(nameof(MaxDepthIndex));
+        OnPropertyChanged(nameof(MipDisplay));
+        OnPropertyChanged(nameof(ArrayDisplay));
+        OnPropertyChanged(nameof(DepthDisplay));
+        Info = new TextureInfo
+        {
+            Width = decoded.Width,
+            Height = decoded.Height,
+            ArraySize = Math.Max(decoded.ArrayCount, Settings.ArraySize),
+            MipLevels = Math.Max(decoded.MipCount, Settings.MipLevels),
+            Depth = Math.Max(decoded.Depth, Settings.Depth),
+            Format = Settings.OutputFormat,
+        };
+        Dispatcher.UIThread.Post(RebuildPreview);
     }
 
     private void RebuildPreview()
     {
-        if (_rawRgba == null || _rawWidth == 0 || _rawHeight == 0) return;
-        var bytes = new byte[_rawRgba.Length];
+        if (_slices == null) return;
+        var src = _slices.Rgba.Span;
+        var bytes = new byte[src.Length];
         float r = _showR ? 1f : 0f;
         float g = _showG ? 1f : 0f;
         float b = _showB ? 1f : 0f;
         float a = _showA ? 1f : 0f;
-        bool normal = Settings.IsSRGB;
+        bool normal = Settings.IsNormalMap;
         for (int i = 0; i < bytes.Length; i += 4)
         {
-            byte sr = _rawRgba[i + 0], sg = _rawRgba[i + 1], sb = _rawRgba[i + 2], sa = _rawRgba[i + 3];
+            byte sr = src[i + 0], sg = src[i + 1], sb = src[i + 2], sa = src[i + 3];
             if (normal)
             {
                 sr = (byte)Math.Clamp(sr * 2 - 255, 0, 255);
@@ -229,11 +275,6 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
             bytes[i + 2] = (byte)(sb * b);
             bytes[i + 3] = (byte)(sa * a);
         }
-        // WriteableBitmap takes a pointer to existing pixel memory. We
-        // pin the bytes array via GCHandle so the GC can't move it while
-        // the bitmap is alive. The handle is captured by the lambda-free
-        // path: Avalonia copies the pixels into its own buffer at ctor
-        // time, so freeing the GCHandle immediately is safe.
         var handle = System.Runtime.InteropServices.GCHandle.Alloc(bytes, System.Runtime.InteropServices.GCHandleType.Pinned);
         try
         {
@@ -241,9 +282,9 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
                 Avalonia.Platform.PixelFormat.Rgba8888,
                 Avalonia.Platform.AlphaFormat.Premul,
                 handle.AddrOfPinnedObject(),
-                new Avalonia.PixelSize(_rawWidth, _rawHeight),
+                new Avalonia.PixelSize(_slices.Width, _slices.Height),
                 new Avalonia.Vector(96, 96),
-                _rawWidth * 4);
+                _slices.Width * 4);
         }
         finally
         {
@@ -308,6 +349,7 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
         Settings = AssetImportSettingsStore.Load<TextureImportSettings>(Asset.FullPath);
         ClearDirty();
         RebuildPreview();
+        OnPropertyChanged(nameof(IsNormalMap));
         OnPropertyChanged(nameof(IsSRGB));
         OnPropertyChanged(nameof(OutputFormat));
         OnPropertyChanged(nameof(CanSave));

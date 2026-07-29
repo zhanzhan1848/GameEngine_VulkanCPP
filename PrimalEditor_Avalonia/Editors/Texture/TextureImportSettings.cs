@@ -21,6 +21,7 @@ public class TextureImportSettings : IAssetImportSettings
     public TextureCompressionMode CompressionMode { get; set; } = TextureCompressionMode.Fast;
     public int ArraySize { get; set; } = 1;
     public int Depth { get; set; } = 1;
+    public bool IsNormalMap { get; set; } = false;
 
     public void ToBinary(BinaryWriter w)
     {
@@ -36,6 +37,7 @@ public class TextureImportSettings : IAssetImportSettings
         w.Write((int)CompressionMode);
         w.Write(ArraySize);
         w.Write(Depth);
+        w.Write(IsNormalMap);
     }
 
     public void FromBinary(BinaryReader r)
@@ -61,5 +63,7 @@ public class TextureImportSettings : IAssetImportSettings
             ArraySize = r.ReadInt32();
         if (r.BaseStream.Position < r.BaseStream.Length)
             Depth = r.ReadInt32();
+        if (r.BaseStream.Position < r.BaseStream.Length)
+            IsNormalMap = r.ReadBoolean();
     }
 }
