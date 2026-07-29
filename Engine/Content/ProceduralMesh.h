@@ -420,6 +420,131 @@ inline id::id_type create_ramp_mesh(f32 sx, f32 sy, f32 sz, f32 slope_height) {
     return RegisterProceduralMesh(asset);
 }
 
+// --- Corner in (concave L-shape) ---
+// Generates an interior-corner mesh: a cube with the (+X,+Z) vertical
+// quadrant removed. Footprint is an L-shape in XZ, extruded in Y.
+// Used by WFC catalog with RotationY to produce 4 rotations.
+//
+//   sx, sy, sz : full extents (same as box)
+inline id::id_type create_corner_in_mesh(f32 sx, f32 sy, f32 sz) {
+    const u32 vertCount = 12;     // 6 footprint corners × 2 (top + bottom)
+    const u32 idxCount  = 60;     // 20 triangles: 4 bot + 4 top + 12 sides
+
+    graphics::rhi::RHIMeshAsset asset;
+    asset.num_vertices = vertCount;
+    asset.num_indices  = idxCount;
+    asset.position_buffer.resize(vertCount * 12);
+    asset.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
+    asset.index_buffer.resize(idxCount * 4);
+
+    u8* pos = asset.position_buffer.data();
+    u8* elem = asset.element_buffer.data();
+    const f32 hx = sx * 0.5f, hy = sy * 0.5f, hz = sz * 0.5f;
+
+    // Bottom layer (y = -hy), normal -Y. Footprint CCW from +Y view.
+    WriteVertex(pos+ 0*12, elem+ 0*20, -hx, -hy, -hz,  0,-1, 0,  0.0f, 0.0f); // v0
+    WriteVertex(pos+ 1*12, elem+ 1*20,  hx, -hy, -hz,  0,-1, 0,  0.25f, 0.0f); // v1
+    WriteVertex(pos+ 2*12, elem+ 2*20,  hx, -hy,  0,   0,-1, 0,  0.25f, 0.5f); // v2
+    WriteVertex(pos+ 3*12, elem+ 3*20,  0,   -hy,  0,   0,-1, 0,  0.5f, 0.5f);  // v3
+    WriteVertex(pos+ 4*12, elem+ 4*20,  0,   -hy,  hz,  0,-1, 0,  0.5f, 0.75f); // v4
+    WriteVertex(pos+ 5*12, elem+ 5*20, -hx, -hy,  hz,  0,-1, 0,  0.0f, 0.75f); // v5
+
+    // Top layer (y = +hy), normal +Y. Same footprint, CCW from +Y view.
+    WriteVertex(pos+ 6*12, elem+ 6*20, -hx,  hy, -hz,  0, 1, 0,  0.0f, 0.0f); // v6
+    WriteVertex(pos+ 7*12, elem+ 7*20,  hx,  hy, -hz,  0, 1, 0,  0.25f, 0.0f); // v7
+    WriteVertex(pos+ 8*12, elem+ 8*20,  hx,  hy,  0,   0, 1, 0,  0.25f, 0.5f); // v8
+    WriteVertex(pos+ 9*12, elem+ 9*20,  0,    hy,  0,   0, 1, 0,  0.5f, 0.5f);  // v9
+    WriteVertex(pos+10*12, elem+10*20,  0,    hy,  hz,  0, 1, 0,  0.5f, 0.75f); // v10
+    WriteVertex(pos+11*12, elem+11*20, -hx,  hy,  hz,  0, 1, 0,  0.0f, 0.75f); // v11
+
+    u32* idx = reinterpret_cast<u32*>(asset.index_buffer.data());
+    u32 ii = 0;
+
+    // Bottom hexagon fan (CCW from below = CW from above, but normal is -Y so CCW from -Y view)
+    idx[ii++] = 0; idx[ii++] = 1; idx[ii++] = 2;
+    idx[ii++] = 0; idx[ii++] = 2; idx[ii++] = 3;
+    idx[ii++] = 0; idx[ii++] = 3; idx[ii++] = 4;
+    idx[ii++] = 0; idx[ii++] = 4; idx[ii++] = 5;
+
+    // Top hexagon fan (CCW from above, normal +Y)
+    idx[ii++] = 6;  idx[ii++] = 7;  idx[ii++] = 8;
+    idx[ii++] = 6;  idx[ii++] = 8;  idx[ii++] = 9;
+    idx[ii++] = 6;  idx[ii++] = 9;  idx[ii++] = 10;
+    idx[ii++] = 6;  idx[ii++] = 10; idx[ii++] = 11;
+
+    // Side quads: each pair (v_n bottom, v_{n+6} top) at footprint corner P_n.
+    // Edge P_n -> P_{(n+1)%6}, quad = (v_n, v_{n+6}, v_{(n+1)%6+6}, v_{n+1}).
+    // Outward normal is axial (perpendicular to the edge in the XZ plane).
+    auto SideQuad = [&](u32 n, u32 m) {
+        // CCW from outside: v_n (bot, P_n) -> v_{n+6} (top, P_n) -> v_{m+6} (top, P_m) -> v_m (bot, P_m)
+        idx[ii++] = n;     idx[ii++] = n + 6; idx[ii++] = m + 6;
+        idx[ii++] = n;     idx[ii++] = m + 6; idx[ii++] = m;
+    };
+    SideQuad(0, 1);  // edge P0-P1, outward -Z
+    SideQuad(1, 2);  // edge P1-P2, outward +X
+    SideQuad(2, 3);  // edge P2-P3, outward +Z (notch wall)
+    SideQuad(3, 4);  // edge P3-P4, outward -X (notch wall)
+    SideQuad(4, 5);  // edge P4-P5, outward +Z
+    SideQuad(5, 0);  // edge P5-P0, outward -X
+
+    return RegisterProceduralMesh(asset);
+}
+
+// --- Corner out (convex octant frame) ---
+// Generates an exterior-corner mesh: three rectangular quads meeting at
+// the (+X,+Y,+Z) corner. Open on the other 3 sides. Used by WFC catalog
+// with RotationY to produce 4 rotations.
+//
+//   sx, sy, sz : full extents (same as box)
+inline id::id_type create_corner_out_mesh(f32 sx, f32 sy, f32 sz) {
+    const u32 vertCount = 12;     // 3 quads × 4 verts (separate normals per face)
+    const u32 idxCount  = 18;     // 3 quads × 2 triangles × 3 indices
+
+    graphics::rhi::RHIMeshAsset asset;
+    asset.num_vertices = vertCount;
+    asset.num_indices  = idxCount;
+    asset.position_buffer.resize(vertCount * 12);
+    asset.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
+    asset.index_buffer.resize(idxCount * 4);
+
+    u8* pos = asset.position_buffer.data();
+    u8* elem = asset.element_buffer.data();
+    const f32 hx = sx * 0.5f, hy = sy * 0.5f, hz = sz * 0.5f;
+
+    // +X wall (normal +X): verts 0-3
+    WriteVertex(pos+ 0*12, elem+ 0*20,  hx, -hy, -hz,  1, 0, 0,  0.0f, 0.0f); // v0
+    WriteVertex(pos+ 1*12, elem+ 1*20,  hx,  hy, -hz,  1, 0, 0,  0.0f, 1.0f); // v1
+    WriteVertex(pos+ 2*12, elem+ 2*20,  hx,  hy,  hz,  1, 0, 0,  1.0f, 1.0f); // v2
+    WriteVertex(pos+ 3*12, elem+ 3*20,  hx, -hy,  hz,  1, 0, 0,  1.0f, 0.0f); // v3
+
+    // +Y wall (normal +Y): verts 4-7
+    WriteVertex(pos+ 4*12, elem+ 4*20, -hx,  hy, -hz,  0, 1, 0,  0.0f, 0.0f); // v4
+    WriteVertex(pos+ 5*12, elem+ 5*20,  hx,  hy, -hz,  0, 1, 0,  1.0f, 0.0f); // v5
+    WriteVertex(pos+ 6*12, elem+ 6*20,  hx,  hy,  hz,  0, 1, 0,  1.0f, 1.0f); // v6
+    WriteVertex(pos+ 7*12, elem+ 7*20, -hx,  hy,  hz,  0, 1, 0,  0.0f, 1.0f); // v7
+
+    // +Z wall (normal +Z): verts 8-11
+    WriteVertex(pos+ 8*12, elem+ 8*20, -hx, -hy,  hz,  0, 0, 1,  0.0f, 0.0f); // v8
+    WriteVertex(pos+ 9*12, elem+ 9*20,  hx, -hy,  hz,  0, 0, 1,  1.0f, 0.0f); // v9
+    WriteVertex(pos+10*12, elem+10*20,  hx,  hy,  hz,  0, 0, 1,  1.0f, 1.0f); // v10
+    WriteVertex(pos+11*12, elem+11*20, -hx,  hy,  hz,  0, 0, 1,  0.0f, 1.0f); // v11
+
+    u32* idx = reinterpret_cast<u32*>(asset.index_buffer.data());
+    u32 ii = 0;
+
+    // +X wall: v0, v1, v2, v3 CCW from +X viewer
+    idx[ii++] = 0; idx[ii++] = 1; idx[ii++] = 2;
+    idx[ii++] = 0; idx[ii++] = 2; idx[ii++] = 3;
+    // +Y wall: v4, v5, v6, v7 CCW from +Y viewer
+    idx[ii++] = 4; idx[ii++] = 5; idx[ii++] = 6;
+    idx[ii++] = 4; idx[ii++] = 6; idx[ii++] = 7;
+    // +Z wall: v8, v9, v10, v11 CCW from +Z viewer
+    idx[ii++] = 8;  idx[ii++] = 9;  idx[ii++] = 10;
+    idx[ii++] = 8;  idx[ii++] = 10; idx[ii++] = 11;
+
+    return RegisterProceduralMesh(asset);
+}
+
 // --- Torus ---
 inline id::id_type create_torus_mesh(f32 outerRadius, f32 innerRadius, u32 segments, u32 sides) {
     const u32 vertCount = (segments + 1) * (sides + 1);
