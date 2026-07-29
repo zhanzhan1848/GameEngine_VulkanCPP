@@ -56,8 +56,8 @@
                           InputGesture="F2"/>
             </MenuItem>
             <MenuItem Header="_View">
-                <MenuItem Header="Toggle _World Editor" InputGesture="F4"/>
-                <MenuItem Header="Toggle _Content Browser" InputGesture="F5"/>
+                <MenuItem Header="Toggle _World Editor" Command="{Binding ToggleWorldEditorTabCommand}" InputGesture="F4"/>
+                <MenuItem Header="Toggle _Content Browser" Command="{Binding ToggleContentBrowserTabCommand}" InputGesture="F5"/>
                 <MenuItem Header="Toggle _Logger" Click="OnToggleLogger" InputGesture="F6"/>
             </MenuItem>
             <MenuItem Header="_Help">
@@ -75,7 +75,7 @@
 
         <Grid RowDefinitions="*,4,180">
 
-            <TabControl Grid.Row="0">
+            <TabControl Grid.Row="0" SelectedIndex="{Binding SelectedTabIndex}">
                 <TabItem Header="World Editor">
                     <views:WorldEditorView DataContext="{Binding WorldEditor}"/>
                 </TabItem>
