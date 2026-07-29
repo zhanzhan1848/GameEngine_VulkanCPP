@@ -2,7 +2,6 @@
 #include "WFCStepBuffer.h"
 #include "WFCTileRegistry.h"
 #include "WFCTypes.h"
-#include "WFCSolveBudget.h"
 
 #include <vector>
 
