@@ -1,12 +1,13 @@
 #pragma once
 
-// TestWFCRendering.h — WFC Phase A.4 visual demo
+// TestWFCRendering.h — WFC visual demo (Phase A.4 + Phase B.1)
 //
 // Mirrors the TestPCGScatter scaffolding pattern: a RenderTestCase that owns
-// a Metal device + RenderSystem + StandardRenderPipeline + empty RenderScene.
-// Task 2: open window + render 60 headless frames. Task 3: register catalog
-// meshes + run solver + emit point set. Task 4: spawn the collapsed tile
-// instances into the scene as ECS Entities and hand them to the pipeline.
+// a Metal device + RenderSystem + StandardRenderPipeline + RenderScene.
+// Phase A.4: register catalog meshes + run solver + emit point set + spawn
+// entities into the scene as ECS Entities and hand them to the pipeline.
+// Phase B.1: interactive Mode toggle ('M' key) cycles 3D <-> 2D; CI smoke
+// variant via -DWFC_MODE_2D_SMOKE=1.
 
 #include "RenderTestFramework.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"

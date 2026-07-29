@@ -1,20 +1,16 @@
-// TestWFCRendering.cpp — WFC Phase A.4 visual demo
+// TestWFCRendering.cpp — WFC visual demo (Phase A.4 + Phase B.1)
 //
-// Task 2: open a Metal-backed window, set up StandardRenderPipeline + camera +
-// empty RenderScene, run a per-frame render loop. The test exits cleanly after
-// kHeadlessFrameCap frames so it can run headlessly in CI.
+// Phase A.4 scaffolding: open a Metal-backed window, set up
+// StandardRenderPipeline + camera + RenderScene, register the 5 catalog
+// procedural meshes, run the solver, spawn ECS entities from the emitted
+// point set, render loop. Exits cleanly after kHeadlessFrameCap frames.
 //
-// Task 3: RegisterWFCCatalogMeshes() registers 5 procedural meshes
-// (cube/ramp/corner_in/corner_out/pillar) and overrides the WFC catalog's
-// placeholder mesh_handles (1000-1004) with real slot indices. RunSolverAndEmit()
-// drives a 4x4x4 collapse and drains Collapse steps into wfc_point_set via
-// WFCOutput::ConsumeSteps.
-//
-// Task 4 (this file): SpawnWFCEntities() feeds wfc_point_set through
-// PCGEntityFactory::CreateEntities to mint ECS Entities, then hands the
-// entity_ids + mesh_slot_indices to pipeline->SetPCGEntities so the render
-// loop syncs RenderProxies into the RenderScene. The 4x4x4 grid is now
-// visible (in interactive mode) / rendered headlessly (CI mode).
+// Phase B.1 additions:
+// - Dedicated corner geometry (create_corner_in_mesh / create_corner_out_mesh).
+// - Interactive Mode toggle: press 'M' to cycle 3D (4x4x4) <-> 2D (4x4x1).
+// - CI smoke variant: compile with -DWFC_MODE_2D_SMOKE=1 to start in 2D mode.
+// - Catalog built once (SetupWFCCatalog); CycleMode re-solves on the same
+//   registry + adjacency.
 
 #include "TestWFCRendering.h"
 #include "Engine/Common/CommonHeaders.h"
@@ -65,7 +61,7 @@ bool WFCRenderingTestCase::Initialize() {
 
     // 1. Window
     primal::platform::window_init_info winInfo{};
-    winInfo.caption = "TestWFCRendering - WFC Phase A.4";
+    winInfo.caption = "TestWFCRendering - WFC Phase B.1";
     winInfo.width = window_width_;
     winInfo.height = window_height_;
     window = primal::platform::create_window(&winInfo);
@@ -195,10 +191,9 @@ void WFCRenderingTestCase::SpawnEntitiesForCurrentMode() {
 // Registers 5 procedural meshes (cube/ramp/corner_in/corner_out/pillar) with
 // the StandardRenderPipeline and captures their ForwardSceneRenderer slot
 // indices. The ramp uses create_ramp_mesh with slope_height=0 (full slope);
-// corner_in/corner_out are Phase A.4 simplifications that reuse the cube mesh
-// (the catalog still emits them as separate tile IDs so Task 4 can swap in
-// dedicated geometry later without touching the solver wiring). Pillar is a
-// tall thin box.
+// corner_in/corner_out use dedicated Phase B.1 generators (L-shape and
+// octant frame respectively, each with 4 rotation variants via RotationY).
+// Pillar is a tall thin box.
 //
 // Slot indices are captured via GetMeshInfoCount() before/after the 5
 // RegisterMeshEntity calls — same pattern TestPCGScatter uses for its
