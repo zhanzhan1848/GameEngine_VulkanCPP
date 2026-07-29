@@ -90,7 +90,7 @@ sealed class Program
         }
         Logger.Info($"Engine loaded: {NativeEngineBridge.LoadedPath}");
 
-        if (!NativeEngineBridge.InitializeEngine(NativeEngineBridge.RHIPlatformMetal, false))
+        if (!NativeEngineBridge.InitializeEngine(NativeEngineBridge.DefaultRHIPlatformForCurrentPlatform(), false))
         {
             Logger.Error("InitializeEngine returned false");
             return 1;
