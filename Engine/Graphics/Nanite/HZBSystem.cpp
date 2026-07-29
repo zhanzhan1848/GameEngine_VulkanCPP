@@ -137,13 +137,18 @@ bool HZBSystem::CreateHZBSampler() {
 bool HZBSystem::CreateHZBComputePipeline() {
 //    std::cout << "[HZBSystem] ========== Creating HZB Compute Pipeline ==========" << std::endl;
 
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    const rhi::RHIPlatform platform = device_->GetPlatform();
+    const bool isDawn = (platform == rhi::RHIPlatform::Dawn);
+    const bool isVulkan = (platform == rhi::RHIPlatform::Vulkan);
+    // Dawn + Vulkan share the same DSL/descriptor semantics (separate depth/color
+    // sampled image types). Metal uses a single SampledImage for both.
+    const bool isCrossPlatform = isDawn || isVulkan;
 
-    if (isDawn) {
-        // ---- Dawn path: split copy + mip into separate layouts ----
+    if (isCrossPlatform) {
+        // ---- Dawn/Vulkan path: split copy + mip into separate layouts ----
         // Copy stage binds texture_depth_2d (SampledDepthImage); mip stage binds
-        // texture_2d<f32> (SampledImage). WGSL forbids both binding types at
-        // slot 0 in a single module, so we use two files + two DSLs.
+        // texture_2d<f32> (SampledImage). WGSL/SPIR-V both require separate
+        // layouts because the binding 0 type differs between stages.
 
         // Mip-stage layout (also used by existing hzb_descriptor_layout_).
         rhi::DescriptorSetLayoutBinding mipBindings[] = {
@@ -151,7 +156,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
             { 1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute, nullptr }
         };
         mipBindings[0].unfilterableFloat = true; // source is R32Float (UnfilterableFloat in WebGPU)
-        mipBindings[1].format = rhi::DataFormat::R32_Float;  // HZBMip.wgsl: texture_storage_2d<r32float, write>
+        mipBindings[1].format = rhi::DataFormat::R32_Float;  // HZBMip: texture_storage_2d<r32float, write>
         rhi::DescriptorSetLayoutDesc mipLayoutDesc{ 2, mipBindings };
         hzb_descriptor_layout_ = device_->CreateDescriptorSetLayout(mipLayoutDesc);
         if (hzb_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
@@ -171,7 +176,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
             { 0, rhi::DescriptorType::SampledDepthImage, 1, rhi::ShaderStage::Compute, nullptr },
             { 1, rhi::DescriptorType::StorageImage,      1, rhi::ShaderStage::Compute, nullptr }
         };
-        copyBindings[1].format = rhi::DataFormat::R32_Float;  // HZBCopy.wgsl: texture_storage_2d<r32float, write>
+        copyBindings[1].format = rhi::DataFormat::R32_Float;  // HZBCopy: texture_storage_2d<r32float, write>
         rhi::DescriptorSetLayoutDesc copyLayoutDesc{ 2, copyBindings };
         hzb_copy_descriptor_layout_ = device_->CreateDescriptorSetLayout(copyLayoutDesc);
         if (hzb_copy_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
@@ -186,10 +191,9 @@ bool HZBSystem::CreateHZBComputePipeline() {
             return false;
         }
 
-        // Load WGSL shaders — use vector<u8> with explicit null terminator
-        // (matches GPUDrivenDrawPipeline's loader). ToWGPUStringView uses
-        // WGPU_STRLEN which calls strlen on the buffer.
-        auto loadWgsl = [](const char* name) -> std::vector<u8> {
+        // Shader loader: Dawn loads WGSL text (null-terminated for WGPU_STRLEN);
+        // Vulkan loads SPIR-V binary (no null terminator, multiple of 4 bytes).
+        auto loadShader = [platform](const char* name) -> std::vector<u8> {
 #ifdef __EMSCRIPTEN__
             std::string fullName = std::string("Nanite/") + name;
             std::string src = dawn::LoadWGSL(fullName.c_str());
@@ -198,36 +202,38 @@ bool HZBSystem::CreateHZBComputePipeline() {
             bytecode.push_back(0);
             return bytecode;
 #else
-            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(
-                rhi::RHIPlatform::Dawn, name);
+            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
             std::ifstream file(path, std::ios::binary | std::ios::ate);
             if (!file.is_open()) {
-                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.claude/worktrees/dawn-webgpu-backend/" + path;
+                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
                 file.open(path, std::ios::binary | std::ios::ate);
             }
             if (!file.is_open()) {
-                std::cerr << "[HZBSystem] Failed to open WGSL: " << path << std::endl;
+                std::cerr << "[HZBSystem] Failed to open shader: " << path << std::endl;
                 return {};
             }
             std::streamsize size = file.tellg();
             file.seekg(0, std::ios::beg);
-            std::vector<u8> bytecode(static_cast<size_t>(size) + 1, 0);
+            // Dawn/WGSL needs a null terminator (WGPU_STRLEN). Vulkan/SPIR-V takes
+            // exact byte count (VulkanShader rejects if size % 4 != 0).
+            size_t pad = (platform == rhi::RHIPlatform::Vulkan) ? 0 : 1;
+            std::vector<u8> bytecode(static_cast<size_t>(size) + pad, 0);
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[HZBSystem] Failed to read WGSL: " << path << std::endl;
+                std::cerr << "[HZBSystem] Failed to read shader: " << path << std::endl;
                 return {};
             }
             return bytecode;
 #endif
         };
 
-        std::vector<u8> copySrc = loadWgsl("HZBCopy");
+        std::vector<u8> copySrc = loadShader("HZBCopy");
         if (copySrc.empty()) {
-            std::cerr << "[HZBSystem] Failed to load HZBCopy.wgsl" << std::endl;
+            std::cerr << "[HZBSystem] Failed to load HZBCopy shader" << std::endl;
             return false;
         }
-        std::vector<u8> mipSrc = loadWgsl("HZBMip");
+        std::vector<u8> mipSrc = loadShader("HZBMip");
         if (mipSrc.empty()) {
-            std::cerr << "[HZBSystem] Failed to load HZBMip.wgsl" << std::endl;
+            std::cerr << "[HZBSystem] Failed to load HZBMip shader" << std::endl;
             return false;
         }
         std::cerr << "[HZB] Loaded shaders: HZBCopy=" << copySrc.size()
@@ -444,7 +450,8 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 
     std::vector<rhi::ResourceHandle> temporaryViews;
 
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    const bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                         device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
 
     // On Dawn the copy stage needs a separate descriptor set (reads texture_depth_2d
     // via SampledDepthImage); mip stages share the regular SampledImage layout.

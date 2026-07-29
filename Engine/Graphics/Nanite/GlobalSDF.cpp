@@ -3,8 +3,11 @@
 #include "../RHI/Core/RHICommand.h"
 #include "../RHI/Core/RHIMath.h"
 #include "../Dawn/ShaderLoader.h"
+#include "../Utils/ShaderRegistry.h"
 #if !defined(__EMSCRIPTEN__)
 #include "../RHI/Platforms/Metal/MetalDevice.h"
+#include "../RHI/Platforms/Vulkan/VulkanDevice.h"
+#include "../RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
 #endif
 #include "Graphics/Field/FieldRegistry.h"
 #include <algorithm>
@@ -416,6 +419,28 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
         }
         return std::vector<u8>(src.begin(), src.end());
     }
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        // SPIR-V binary via ShaderRegistry. Path resolves to
+        // Engine/Graphics/Vulkan/shaders/Nanite/<name>.spv.
+        std::string path = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            std::string alt = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
+            file.open(alt, std::ios::binary | std::ios::ate);
+        }
+        if (!file.is_open()) {
+            std::cerr << "[GlobalSDF] Failed to open SPIR-V: " << path << std::endl;
+            return {};
+        }
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        std::vector<u8> bytecode(static_cast<size_t>(size));
+        if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+            std::cerr << "[GlobalSDF] Failed to read SPIR-V: " << path << std::endl;
+            return {};
+        }
+        return bytecode;
+    }
     std::string path = SDF_SHADER_DIR + std::string(name) + ".metal";
     std::string source = ReadFileToString(path);
     if (source.empty()) {
@@ -496,8 +521,9 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     // Create descriptor set layout
     // Metal: texture(0) = SDF output, buffer(0..6) = cascade + geometry data
     //        (Metal has separate texture/buffer namespaces — indices can overlap)
-    // WebGPU: single namespace — texture + UBO + 6 SSBOs use bindings 0..7
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    // WebGPU/Vulkan: single namespace — texture + UBO + 6 SSBOs use bindings 0..7
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
     if (isDawn) {
         // WebGPU/WGSL bindings — see GlobalSDFVoxelization.wgsl header comment.
         // F2 (2026-07-13): storage texture is R32Float 3D (was RGBA16Float 2D).
@@ -676,7 +702,8 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
     }
 
     // Update descriptor set
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
     {
         if (isDawn) {
             // WebGPU/WGSL bindings: 0=texture, 1=UBO, 2-7=SSBOs (matches WGSL header).
@@ -820,13 +847,17 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
         // Bypass rhi::GetCommandBuffer (global singleton): test binaries that use
         // C++ engine APIs link both libEngine.a (static) and libEngineDLL.dylib,
         // producing two singleton instances. The dylib registers, the static
-        // reads — lookup fails. MetalDevice::GetCommandBuffer routes through
+        // reads — lookup fails. PlatformDevice::GetCommandBuffer routes through
         // the device's own allocator and is singleton-free.
 #if defined(__EMSCRIPTEN__)
         auto* cmd = rhi::GetCommandBuffer(cmdHandle);
 #else
-        auto* metal_dev = dynamic_cast<rhi::MetalDevice*>(device_);
-        auto* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmdHandle) : nullptr;
+        rhi::RHICommandBuffer* cmd = nullptr;
+        if (auto* metal_dev = dynamic_cast<rhi::MetalDevice*>(device_)) {
+            cmd = metal_dev->GetCommandBuffer(cmdHandle);
+        } else if (auto* vk_dev = dynamic_cast<rhi::VulkanDevice*>(device_)) {
+            cmd = vk_dev->GetCommandBuffer(cmdHandle);
+        }
 #endif
         if (!cmd) { all_ok = false; continue; }
 

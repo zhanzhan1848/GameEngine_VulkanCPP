@@ -25,9 +25,12 @@ GPUCullingPipeline& GPUCullingPipeline::Get() {
 
 namespace {
     // N0c: Forks shader loading on backend.
-    //   Metal: loads from EngineTest/shaders/<name>.metal (existing path).
-    //   Dawn:  loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
-    //          (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    //   Metal:  loads from EngineTest/shaders/<name>.metal (existing path).
+    //   Dawn:   loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
+    //           (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    //   Vulkan: loads SPIR-V binary from Engine/Graphics/Vulkan/shaders/Nanite/<name>.spv
+    //           via ShaderRegistry. No null terminator (VulkanShader rejects if
+    //           size % 4 != 0 — padding bytes would break the SPIR-V parser).
     std::vector<u8> LoadShaderBytecode(const char* shaderName, const char* entryPoint,
                                        rhi::RHIDeviceBase* device) {
         auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
@@ -66,6 +69,30 @@ namespace {
             file.read(reinterpret_cast<char*>(buffer.data()), size);
             return buffer;
 #endif
+        }
+
+        if (platform == rhi::RHIPlatform::Vulkan) {
+            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
+                file.open(path, std::ios::binary | std::ios::ate);
+            }
+            if (!file.is_open()) {
+                std::cerr << "[GPUCullingPipeline] Failed to load SPIR-V shader: "
+                          << shaderName << " (entry: " << entryPoint << ")" << std::endl;
+                return {};
+            }
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            // Exact byte count — VulkanShader rejects SPIR-V whose size % 4 != 0.
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[GPUCullingPipeline] Failed to read SPIR-V shader: "
+                          << shaderName << std::endl;
+                return {};
+            }
+            return bytecode;
         }
 
         // Metal path (unchanged)

@@ -27,9 +27,12 @@ namespace primal::graphics::nanite {
 
 namespace {
     // N0c: Forks shader loading on backend.
-    //   Metal: loads from EngineTest/shaders/<name>.metal (existing path).
-    //   Dawn:  loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
-    //          (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    //   Metal:  loads from EngineTest/shaders/<name>.metal (existing path).
+    //   Dawn:   loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
+    //           (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    //   Vulkan: loads SPIR-V binary from Engine/Graphics/Vulkan/shaders/Nanite/<name>.spv
+    //           via ShaderRegistry. No null terminator (VulkanShader rejects if
+    //           size % 4 != 0 — padding bytes would break the SPIR-V parser).
     std::vector<u8> LoadShaderBytecode(const char* shaderName, const char* entryPoint,
                                        rhi::RHIDeviceBase* device) {
         auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
@@ -72,6 +75,30 @@ namespace {
             }
             return bytecode;
 #endif
+        }
+
+        if (platform == rhi::RHIPlatform::Vulkan) {
+            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
+                file.open(path, std::ios::binary | std::ios::ate);
+            }
+            if (!file.is_open()) {
+                std::cerr << "[GPUDrivenDrawPipeline] Failed to load SPIR-V shader: "
+                          << shaderName << " (entry: " << entryPoint << ")" << std::endl;
+                return {};
+            }
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            // Exact byte count — VulkanShader rejects SPIR-V whose size % 4 != 0.
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[GPUDrivenDrawPipeline] Failed to read SPIR-V shader: "
+                          << shaderName << std::endl;
+                return {};
+            }
+            return bytecode;
         }
 
         // Metal path (unchanged)
@@ -2336,7 +2363,8 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
     // must be bound as SampledDepthImage. Metal treats depth and color textures
     // uniformly via SampledImage.
     {
-        bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+        bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
         rhi::DescriptorSetLayoutBinding blitBindings[3];
         blitBindings[0].binding = 0;
         blitBindings[0].descriptorType = isDawn ? rhi::DescriptorType::SampledDepthImage
@@ -2842,7 +2870,8 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
     rhi::DescriptorImageInfo dstInfo{ rhi::handles::INVALID_SAMPLER, shadowMap, rhi::ResourceState::UnorderedAccess };
     rhi::DescriptorBufferInfo resInfo{ frame.blit_resolution_cb[cascade_index], 0, 8 };
 
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
     rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
                                          : rhi::DescriptorType::SampledImage;
 
@@ -2881,7 +2910,8 @@ bool GPUDrivenDrawPipeline::ExecuteGBufferDepthBlit(rhi::RHICommandBuffer* cmd_b
     rhi::DescriptorImageInfo dstInfo{ rhi::handles::INVALID_SAMPLER, gbuffer_depth_sampleable_, rhi::ResourceState::UnorderedAccess };
     rhi::DescriptorBufferInfo resInfo{ gbuffer_depth_blit_cb_, 0, 8 };
 
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
     rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
                                          : rhi::DescriptorType::SampledImage;
 

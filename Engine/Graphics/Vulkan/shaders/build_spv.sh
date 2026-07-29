@@ -78,5 +78,37 @@ for s in "${WGSL_SHADERS[@]}"; do
     rm -rf "$tmpdir"
 done
 
+# Nanite subdir (T4.4.1+) — WGSL shaders in Dawn/shaders/Nanite/, output to Vulkan/shaders/Nanite/
+NANITE_SHADERS=(
+    HZBCopy                      # HZB base mip copy (compute, depth-tex read)
+    HZBMip                       # HZB mip reduction (compute, color-tex read)
+    ShadowBlit                   # D32 → R32 depth blit (compute, depth-tex read)
+    GlobalSDFVoxelization        # T4.4.2: SDF voxelization (3D storage image write)
+    ShadowDepth                  # T4.4.3: shadow depth vertex shader (vertex pulling)
+    GPUCullingPipeline           # T4.4.4: 8-stage GPU culling (compute, multi-entry)
+)
+
+echo
+echo "==> Nanite WGSL (naga) ===="
+mkdir -p "$DEST_DIR/Nanite"
+for s in "${NANITE_SHADERS[@]}"; do
+    src="$ENGINE_DAWN_DIR/Nanite/$s.wgsl"
+    if [ ! -f "$src" ]; then
+        echo "MISS  Nanite/$s.wgsl (skipped)"
+        continue
+    fi
+    tmpdir="$(mktemp -d)"
+    tmp="$tmpdir/$s.wgsl"
+    inline_includes "$src" > "$tmp"
+    if naga "$tmp" "$DEST_DIR/Nanite/$s.spv" 2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$DEST_DIR/Nanite/$s.spv")
+        printf "OK    Nanite/%-30s (%d bytes)\n" "$s.spv" "$sz"
+    else
+        echo "FAIL  Nanite/$s.wgsl"
+        sed 's/^/    /' "$tmpdir/err"
+    fi
+    rm -rf "$tmpdir"
+done
+
 echo
 echo "Done."
