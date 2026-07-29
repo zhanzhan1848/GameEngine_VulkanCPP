@@ -12,6 +12,7 @@ public class MainWindowViewModel : ViewModelBase
     private Project? _project;
     private string _windowTitle = "PrimalEditor Avalonia";
     private bool _isLoggerVisible = true;
+    private int _selectedTabIndex;
 
     public WorldEditorViewModel WorldEditor { get; } = new WorldEditorViewModel();
 
@@ -32,10 +33,26 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
+    public int SelectedTabIndex
+    {
+        get => _selectedTabIndex;
+        set
+        {
+            if (_selectedTabIndex != value)
+            {
+                _selectedTabIndex = value;
+                OnPropertyChanged(nameof(SelectedTabIndex));
+            }
+        }
+    }
+
     public void ToggleLogger()
     {
         IsLoggerVisible = !IsLoggerVisible;
     }
+
+    public void ToggleWorldEditorTab() => SelectedTabIndex = 0;
+    public void ToggleContentBrowserTab() => SelectedTabIndex = 1;
 
     public Project? Project
     {
@@ -44,6 +61,7 @@ public class MainWindowViewModel : ViewModelBase
         {
             if (_project != value)
             {
+                if (_project != null) _project.PropertyChanged -= OnProjectPropertyChanged;
                 _project = value;
                 OnPropertyChanged(nameof(Project));
                 OnPropertyChanged(nameof(ProjectPathDisplay));
@@ -53,6 +71,9 @@ public class MainWindowViewModel : ViewModelBase
                 ContentBrowser.Project = value;
                 if (value != null)
                 {
+                    value.PropertyChanged += OnProjectPropertyChanged;
+                    value.ClearDirty();
+                    if (value.ActiveScene != null) value.ActiveScene.ClearDirty();
                     WindowTitle = $"{value.Name} - PrimalEditor Avalonia";
                     WorldEditor.ActiveScene = value.ActiveScene;
                     PrimalEditor_Avalonia.Content.ContentWatcher.Initialize(value.ContentPath);
@@ -67,17 +88,31 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
+    private void OnProjectPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(GameProject.Project.IsDirty))
+        {
+            OnPropertyChanged(nameof(WindowTitle));
+        }
+    }
+
     public string WindowTitle
     {
         get => _windowTitle;
         set
         {
-            if (_windowTitle != value)
+            var newTitle = value + (_project?.IsDirty == true ? " *" : string.Empty);
+            if (_windowTitle != newTitle)
             {
-                _windowTitle = value;
+                _windowTitle = newTitle;
                 OnPropertyChanged(nameof(WindowTitle));
             }
         }
+    }
+
+    private void OnProjectDirtyChanged()
+    {
+        OnPropertyChanged(nameof(WindowTitle));
     }
 
     public string ProjectPathDisplay => _project?.FullPath ?? "No project loaded";
@@ -112,6 +147,8 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand CopyCommand { get; }
     public ICommand PasteCommand { get; }
     public ICommand AboutCommand { get; }
+    public ICommand ToggleWorldEditorTabCommand { get; }
+    public ICommand ToggleContentBrowserTabCommand { get; }
 
     private List<GameEntity> _clipboard = new();
 
@@ -128,6 +165,8 @@ public class MainWindowViewModel : ViewModelBase
         RenameEntityCommand = new RelayCommand(_ => RenameEntityExecute());
         DuplicateEntityCommand = new RelayCommand(_ => DuplicateEntityExecute());
         CutCommand = new RelayCommand(_ => CutExecute(), _ => WorldEditor.SelectedEntities.Length > 0);
+        ToggleWorldEditorTabCommand = new RelayCommand(_ => ToggleWorldEditorTab());
+        ToggleContentBrowserTabCommand = new RelayCommand(_ => ToggleContentBrowserTab());
         CopyCommand = new RelayCommand(_ => CopyExecute(), _ => WorldEditor.SelectedEntities.Length > 0);
         PasteCommand = new RelayCommand(_ => PasteExecute(), _ => _clipboard.Count > 0 && WorldEditor.ActiveScene != null);
         AboutCommand = new RelayCommand(_ => AboutExecute());
@@ -153,39 +192,42 @@ public class MainWindowViewModel : ViewModelBase
     public void PasteExecute()
     {
         if (WorldEditor.ActiveScene == null || _clipboard.Count == 0) return;
-        foreach (var source in _clipboard)
+        using (WorldEditor.UndoRedo.BeginTransaction($"Paste {_clipboard.Count} entity(ies)"))
         {
-            var clone = new Components.GameEntity(source.Name + "_Copy")
+            foreach (var source in _clipboard)
             {
-                IsEnabled = source.IsEnabled,
-                IsActive = source.IsActive,
-            };
-            foreach (var component in source.Components)
-            {
-                if (component is Components.Transform t)
+                var clone = new Components.GameEntity(source.Name + "_Copy")
                 {
-                    clone.Components.Add(new Components.Transform
+                    IsEnabled = source.IsEnabled,
+                    IsActive = source.IsActive,
+                };
+                foreach (var component in source.Components)
+                {
+                    if (component is Components.Transform t)
                     {
-                        PositionX = t.PositionX,
-                        PositionY = t.PositionY,
-                        PositionZ = t.PositionZ,
-                        RotationX = t.RotationX,
-                        RotationY = t.RotationY,
-                        RotationZ = t.RotationZ,
-                        ScaleX = t.ScaleX,
-                        ScaleY = t.ScaleY,
-                        ScaleZ = t.ScaleZ,
-                    });
+                        clone.Components.Add(new Components.Transform
+                        {
+                            PositionX = t.PositionX,
+                            PositionY = t.PositionY,
+                            PositionZ = t.PositionZ,
+                            RotationX = t.RotationX,
+                            RotationY = t.RotationY,
+                            RotationZ = t.RotationZ,
+                            ScaleX = t.ScaleX,
+                            ScaleY = t.ScaleY,
+                            ScaleZ = t.ScaleZ,
+                        });
+                    }
                 }
+                var action = new Common.AddEntityAction(WorldEditor, clone);
+                WorldEditor.UndoRedo.Add(action);
+                action.Redo();
             }
-            var action = new Common.AddEntityAction(WorldEditor, clone);
-            WorldEditor.UndoRedo.Add(action);
-            action.Redo();
         }
         PrimalEditor_Avalonia.Common.Logger.Info($"Pasted {_clipboard.Count} entity(ies)");
     }
 
-    public void AboutExecute()
+    public async void AboutExecute()
     {
         var topLevel = Avalonia.Application.Current?.ApplicationLifetime is
             Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
@@ -193,7 +235,7 @@ public class MainWindowViewModel : ViewModelBase
         if (topLevel != null)
         {
             var dialog = new Views.AboutDialog();
-            dialog.ShowDialog(topLevel);
+            await dialog.ShowDialog(topLevel);
         }
     }
 
@@ -234,18 +276,7 @@ public class MainWindowViewModel : ViewModelBase
     public void SaveProjectExecute()
     {
         if (_project == null) return;
-        try
-        {
-            Serializer.SaveProject(_project);
-            if (_project.ActiveScene != null)
-            {
-                NewProject.SaveScene(_project.ActiveScene, _project);
-            }
-        }
-        catch (System.Exception ex)
-        {
-            PrimalEditor_Avalonia.Common.Logger.Error("Save failed", ex);
-        }
+        PrimalEditor_Avalonia.Common.EditorSaveService.Instance.SaveAll(_project);
     }
 
     public void ExitExecute()
@@ -262,22 +293,31 @@ public class MainWindowViewModel : ViewModelBase
         if (WorldEditor.ActiveScene == null) return;
         var entity = new Components.GameEntity("NewEntity");
         entity.Components.Add(new Components.Transform());
-        var action = new AddEntityAction(WorldEditor, entity);
-        WorldEditor.UndoRedo.Add(action);
-        action.Redo();
+        using (WorldEditor.UndoRedo.BeginTransaction("Add Entity"))
+        {
+            var action = new AddEntityAction(WorldEditor, entity);
+            WorldEditor.UndoRedo.Add(action);
+            action.Redo();
+        }
+        MarkProjectDirty();
     }
 
     public void DeleteEntityExecute()
     {
-        foreach (var entity in WorldEditor.SelectedEntities)
+        if (WorldEditor.SelectedEntities.Length == 0) return;
+        using (WorldEditor.UndoRedo.BeginTransaction($"Delete {WorldEditor.SelectedEntities.Length} entity(ies)"))
         {
-            var action = new RemoveEntityAction(WorldEditor, entity);
-            WorldEditor.UndoRedo.Add(action);
-            action.Redo();
+            foreach (var entity in WorldEditor.SelectedEntities)
+            {
+                var action = new RemoveEntityAction(WorldEditor, entity);
+                WorldEditor.UndoRedo.Add(action);
+                action.Redo();
+            }
         }
+        MarkProjectDirty();
     }
 
-    public void RenameEntityExecute()
+    public async void RenameEntityExecute()
     {
         if (WorldEditor.SelectedEntities.Length != 1) return;
         var entity = WorldEditor.SelectedEntities[0];
@@ -285,25 +325,37 @@ public class MainWindowViewModel : ViewModelBase
         var window = GetMainWindow();
         if (window != null)
         {
-            var result = dialog.ShowDialog<string?>(window);
-            result.Wait();
-            if (!string.IsNullOrEmpty(result.Result))
+            var result = await dialog.ShowDialog<string?>(window);
+            if (!string.IsNullOrEmpty(result))
             {
-                var action = new RenameEntityAction(entity, result.Result);
+                var action = new RenameEntityAction(entity, result);
                 WorldEditor.UndoRedo.Add(action);
                 action.Redo();
+                MarkProjectDirty();
             }
         }
     }
 
     public void DuplicateEntityExecute()
     {
-        foreach (var entity in WorldEditor.SelectedEntities)
+        if (WorldEditor.SelectedEntities.Length == 0) return;
+        using (WorldEditor.UndoRedo.BeginTransaction($"Duplicate {WorldEditor.SelectedEntities.Length} entity(ies)"))
         {
-            var action = new DuplicateEntityAction(WorldEditor, entity);
-            WorldEditor.UndoRedo.Add(action);
-            action.Redo();
+            foreach (var entity in WorldEditor.SelectedEntities)
+            {
+                var action = new DuplicateEntityAction(WorldEditor, entity);
+                WorldEditor.UndoRedo.Add(action);
+                action.Redo();
+            }
         }
+        MarkProjectDirty();
+    }
+
+    private void MarkProjectDirty()
+    {
+        if (_project == null) return;
+        _project.MarkDirty();
+        WorldEditor.ActiveScene?.MarkDirty();
     }
 
     private Avalonia.Controls.Window? GetMainWindow()
