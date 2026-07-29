@@ -50,6 +50,9 @@ public static class AssetImporter
         ".py", ".lua", ".cs"
     };
 
+    private const int MeshPollTimeoutMs = 60_000;
+    private const int MeshPollIntervalMs = 50;
+
     public static AssetType DetectType(string filePath)
     {
         var ext = Path.GetExtension(filePath);
@@ -60,10 +63,6 @@ public static class AssetImporter
         return AssetType.Unknown;
     }
 
-    /// <summary>
-    /// Copy a file into the project's Content directory and trigger native import
-    /// (if the engine is loaded).
-    /// </summary>
     public static async Task<ImportedAsset?> ImportAsync(
         string sourcePath, string projectContentPath, string? subfolder = null)
     {
@@ -126,8 +125,12 @@ public static class AssetImporter
             }
             else
             {
-                asset.ErrorMessage = "GPU upload pending (renderer not initialized)";
-                Logger.Debug($"Imported {fileName} to disk; GPU upload deferred: {result?.ErrorMessage ?? "engine returned no result"}");
+                var err = result?.ErrorMessage;
+                asset.ErrorMessage = string.IsNullOrEmpty(err)
+                    ? "GPU upload failed"
+                    : $"GPU upload failed: {err}";
+                asset.Success = false;
+                Logger.Warning($"Texture import failed: {fileName} — {asset.ErrorMessage}");
             }
         }
         else if (type == AssetType.Mesh)
@@ -142,21 +145,33 @@ public static class AssetImporter
                 return asset;
             }
 
-            if (!NativeEngineBridge.IsLoaded)
+            var requestId = NativeEngineBridge.ImportMesh(cookedPath);
+            if (requestId == 0)
             {
-                Logger.Info($"Imported {fileName} to disk (cooked: {Path.GetFileName(cookedPath)})");
+                asset.ErrorMessage = "Mesh loader rejected the request (job system down?)";
+                asset.Success = false;
+                Logger.Warning($"Mesh import failed: {fileName} — loader rejected the request");
                 return asset;
             }
 
-            asset.NativeHandle = NativeEngineBridge.ImportMesh(cookedPath);
-            if (asset.NativeHandle != 0)
+            Logger.Debug($"Mesh import queued: {fileName} → {Path.GetFileName(cookedPath)} (request {requestId})");
+
+            var (meshContentId, finalStatus) = await WaitForMeshAsync(requestId);
+            if (finalStatus == NativeEngineBridge.MeshImportResultStatus.Success)
             {
-                Logger.Info($"Imported mesh: {fileName} → {Path.GetFileName(cookedPath)} (handle: {asset.NativeHandle})");
+                asset.NativeHandle = meshContentId;
+                Logger.Info($"Imported mesh: {fileName} → {Path.GetFileName(cookedPath)} (mesh_content_id: 0x{meshContentId:X})");
             }
             else
             {
-                asset.ErrorMessage = "Mesh upload pending (renderer not initialized)";
-                Logger.Debug($"Imported {fileName}; mesh upload deferred (renderer not ready)");
+                asset.ErrorMessage = finalStatus switch
+                {
+                    NativeEngineBridge.MeshImportResultStatus.Failed => "Engine create_resource() returned invalid_id",
+                    NativeEngineBridge.MeshImportResultStatus.NotFound => "Internal: request id lost (engine reloaded?)",
+                    _ => $"Mesh import timed out after {MeshPollTimeoutMs / 1000}s"
+                };
+                asset.Success = false;
+                Logger.Warning($"Mesh import failed: {fileName} — {asset.ErrorMessage}");
             }
         }
         else
@@ -167,9 +182,20 @@ public static class AssetImporter
         return asset;
     }
 
-    /// <summary>
-    /// Batch import all assets from a directory.
-    /// </summary>
+    private static async Task<(ulong meshContentId, NativeEngineBridge.MeshImportResultStatus status)> WaitForMeshAsync(ulong requestId)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(MeshPollTimeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            NativeEngineBridge.TickMainThreadJobs();
+            var (meshId, status) = NativeEngineBridge.TryGetMeshImportResult(requestId);
+            if (status != NativeEngineBridge.MeshImportResultStatus.Pending)
+                return (meshId, status);
+            await Task.Delay(MeshPollIntervalMs);
+        }
+        return (0, NativeEngineBridge.MeshImportResultStatus.Pending);
+    }
+
     public static async Task<List<ImportedAsset>> ImportDirectoryAsync(
         string sourceDir, string projectContentPath, string? subfolder = null)
     {
