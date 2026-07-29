@@ -467,10 +467,10 @@ inline id::id_type create_corner_in_mesh(f32 sx, f32 sy, f32 sz) {
     idx[ii++] = 0; idx[ii++] = 4; idx[ii++] = 5;
 
     // Top hexagon fan (CCW from above, normal +Y)
-    idx[ii++] = 6;  idx[ii++] = 7;  idx[ii++] = 8;
-    idx[ii++] = 6;  idx[ii++] = 8;  idx[ii++] = 9;
-    idx[ii++] = 6;  idx[ii++] = 9;  idx[ii++] = 10;
-    idx[ii++] = 6;  idx[ii++] = 10; idx[ii++] = 11;
+    idx[ii++] = 6;  idx[ii++] = 8;  idx[ii++] = 7;
+    idx[ii++] = 6;  idx[ii++] = 9;  idx[ii++] = 8;
+    idx[ii++] = 6;  idx[ii++] = 10; idx[ii++] = 9;
+    idx[ii++] = 6;  idx[ii++] = 11; idx[ii++] = 10;
 
     // Side quads: each pair (v_n bottom, v_{n+6} top) at footprint corner P_n.
     // Edge P_n -> P_{(n+1)%6}, quad = (v_n, v_{n+6}, v_{(n+1)%6+6}, v_{n+1}).
@@ -536,8 +536,8 @@ inline id::id_type create_corner_out_mesh(f32 sx, f32 sy, f32 sz) {
     idx[ii++] = 0; idx[ii++] = 1; idx[ii++] = 2;
     idx[ii++] = 0; idx[ii++] = 2; idx[ii++] = 3;
     // +Y wall: v4, v5, v6, v7 CCW from +Y viewer
-    idx[ii++] = 4; idx[ii++] = 5; idx[ii++] = 6;
-    idx[ii++] = 4; idx[ii++] = 6; idx[ii++] = 7;
+    idx[ii++] = 4; idx[ii++] = 6; idx[ii++] = 5;
+    idx[ii++] = 4; idx[ii++] = 7; idx[ii++] = 6;
     // +Z wall: v8, v9, v10, v11 CCW from +Z viewer
     idx[ii++] = 8;  idx[ii++] = 9;  idx[ii++] = 10;
     idx[ii++] = 8;  idx[ii++] = 10; idx[ii++] = 11;
