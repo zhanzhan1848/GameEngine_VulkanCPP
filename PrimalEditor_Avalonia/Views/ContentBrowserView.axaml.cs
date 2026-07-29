@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Markup.Xaml;
 using PrimalEditor_Avalonia.Content;
@@ -161,5 +162,120 @@ public partial class ContentBrowserView : UserControl
         {
             await vm.ImportAssetAsync();
         }
+    }
+
+    private async void OnNewFolderClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        if (vm.Project == null) return;
+        var parent = vm.SelectedFolder != null && vm.SelectedFolder.FullPath != vm.Project.ContentPath
+            ? vm.SelectedFolder.FullPath
+            : vm.Project.ContentPath;
+        var name = await PromptForTextAsync("New Folder", "Folder name:", "NewFolder");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            var newPath = System.IO.Path.Combine(parent, name);
+            if (System.IO.Directory.Exists(newPath))
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning($"NewFolder: '{newPath}' already exists");
+                return;
+            }
+            System.IO.Directory.CreateDirectory(newPath);
+            AssetRegistry.Register(newPath);
+            vm.RefreshFolders();
+        }
+        catch (System.Exception ex)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Error("NewFolder failed", ex);
+        }
+    }
+
+    private async void OnRenameClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        if (vm.SelectedFile == null) return;
+        var oldPath = vm.SelectedFile.FullPath;
+        var oldName = System.IO.Path.GetFileName(oldPath);
+        var newName = await PromptForTextAsync("Rename", "New name:", oldName);
+        if (string.IsNullOrWhiteSpace(newName) || newName == oldName) return;
+        try
+        {
+            var parent = System.IO.Path.GetDirectoryName(oldPath);
+            if (string.IsNullOrEmpty(parent)) return;
+            var newPath = System.IO.Path.Combine(parent, newName);
+            if (System.IO.File.Exists(newPath) || System.IO.Directory.Exists(newPath))
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning($"Rename: '{newPath}' already exists");
+                return;
+            }
+            if (System.IO.File.Exists(oldPath))
+            {
+                System.IO.File.Move(oldPath, newPath);
+                // Move the sidecar too if it exists.
+                var oldMeta = oldPath + ".meta";
+                if (System.IO.File.Exists(oldMeta))
+                {
+                    System.IO.File.Move(oldMeta, newPath + ".meta");
+                }
+            }
+            else
+            {
+                System.IO.Directory.Move(oldPath, newPath);
+            }
+            AssetRegistry.Unregister(oldPath);
+            AssetRegistry.Register(newPath);
+            vm.RefreshFolders();
+        }
+        catch (System.Exception ex)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Error("Rename failed", ex);
+        }
+    }
+
+    private async void OnDeleteClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        if (vm.SelectedFile == null) return;
+        var path = vm.SelectedFile.FullPath;
+        var name = System.IO.Path.GetFileName(path);
+        var isDir = System.IO.Directory.Exists(path);
+        var dlg = PrimalEditor_Avalonia.Views.ConfirmDialog.Create(
+            "Delete asset",
+            $"Are you sure you want to delete '{(isDir ? name + "/" : name)}'? This cannot be undone.");
+        var top = TopLevel.GetTopLevel(this) as Window;
+        if (top == null) return;
+        var r = await dlg.ShowDialogAsync(top);
+        if (r != ConfirmResult.Save && r != PrimalEditor_Avalonia.Views.ConfirmResult.Discard) return;
+        try
+        {
+            if (isDir)
+            {
+                System.IO.Directory.Delete(path, recursive: true);
+            }
+            else
+            {
+                System.IO.File.Delete(path);
+                var meta = path + ".meta";
+                if (System.IO.File.Exists(meta)) System.IO.File.Delete(meta);
+            }
+            AssetRegistry.Unregister(path);
+            vm.RefreshFolders();
+        }
+        catch (System.Exception ex)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Error("Delete failed", ex);
+        }
+    }
+
+    private Task<string?> PromptForTextAsync(string title, string prompt, string initial)
+    {
+        var tcs = new System.Threading.Tasks.TaskCompletionSource<string?>();
+        var dlg = new PrimalEditor_Avalonia.Views.TextInputDialog(title, prompt, initial);
+        var top = TopLevel.GetTopLevel(this) as Window;
+        if (top == null) { tcs.SetResult(null); return tcs.Task; }
+        dlg.ShowDialogAsync(top).ContinueWith(t => tcs.SetResult(t.Result),
+            System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext());
+        return tcs.Task;
     }
 }

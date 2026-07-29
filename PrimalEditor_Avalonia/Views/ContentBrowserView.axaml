@@ -40,9 +40,12 @@
                DragDrop.DragOver="OnDragOver"
                DragDrop.Drop="OnFileDrop">
             <DockPanel>
-                <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto" Margin="5">
+                <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" Margin="5">
                     <TextBlock Grid.Column="0" Text="Files" FontWeight="Bold" VerticalAlignment="Center"/>
-                    <ToggleButton Grid.Column="1"
+                    <Button Grid.Column="1" Content="+ Folder" Click="OnNewFolderClick" Width="80" Margin="0,0,4,0"/>
+                    <Button Grid.Column="2" Content="Rename" Click="OnRenameClick" Width="70" Margin="0,0,4,0"/>
+                    <Button Grid.Column="3" Content="Delete" Click="OnDeleteClick" Width="60" Margin="0,0,4,0"/>
+                    <ToggleButton Grid.Column="4"
                                   IsChecked="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.ToThumbnails}, Mode=TwoWay}"
                                   ToolTip.Tip="Toggle thumbnails view"
                                   Margin="0,0,5,0"
@@ -52,7 +55,7 @@
                             <TextBlock Text="⊞" FontSize="14" IsVisible="{Binding $parent[ToggleButton].IsChecked}"/>
                         </Panel>
                     </ToggleButton>
-                    <Button Grid.Column="2" Content="Import..." Click="OnImportClick" Width="80"/>
+                    <Button Grid.Column="5" Content="Import..." Click="OnImportClick" Width="80"/>
                 </Grid>
                 <StackPanel DockPanel.Dock="Bottom" Margin="5"
                             IsVisible="{Binding IsImporting}">
