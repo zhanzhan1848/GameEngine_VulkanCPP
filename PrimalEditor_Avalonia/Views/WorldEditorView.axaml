@@ -2,6 +2,9 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
              xmlns:views="using:PrimalEditor_Avalonia.Views"
+             xmlns:views3d="using:PrimalEditor_Avalonia.Views.Engine3D"
+             xmlns:conv="using:PrimalEditor_Avalonia.Converters"
+             xmlns:self="using:PrimalEditor_Avalonia.Views"
              x:Class="PrimalEditor_Avalonia.Views.WorldEditorView"
              x:DataType="vm:WorldEditorViewModel"
              Background="#01000000">
@@ -11,21 +14,34 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="120"/>
         </Grid.RowDefinitions>
 
+        <!-- Row 0 (Auto): toolbar (single owner) -->
         <Border Grid.Row="0" Background="#FF2D2D30" Padding="5">
             <StackPanel Orientation="Horizontal" Spacing="6">
                 <TextBlock Text="Build:" Foreground="#FFEEE" VerticalAlignment="Center"/>
                 <ComboBox Width="140"
                           ItemsSource="{Binding BuildConfigurations}"
                           SelectedItem="{Binding Project.BuildConfigName}"/>
-                <Button Content="Build" Command="{Binding BuildProjectCommand}" Padding="10,2"/>
+                <Button Content="Build" Click="OnBuildClick" Padding="10,2"
+                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
+                <Button Content="Rebuild" Click="OnRebuildClick" Padding="10,2"
+                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
+                <Button Content="Run" Click="OnRunClick" Padding="10,2"
+                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
+                <Button Name="StopBuild" Content="Stop" Click="OnBuildStopClick" Padding="10,2"
+                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}}"/>
                 <Separator Margin="6,0"/>
                 <Button Content="Primitive Mesh…" Click="OnCreatePrimitiveMeshClick" Padding="10,2"/>
+                <Separator Margin="6,0"/>
+                <CheckBox Name="OrthoToggle" Content="Ortho" VerticalAlignment="Center"
+                          Click="OnOrthoToggleClick"/>
             </StackPanel>
         </Border>
 
-        <Grid Grid.Row="0" ColumnDefinitions="250,*,300" Background="#FF1E1E1E">
+        <!-- Row 1 (*): main editor area (Hierarchy | Viewport | Inspector) -->
+        <Grid Grid.Row="1" ColumnDefinitions="250,*,300" Background="#FF1E1E1E">
             <DockPanel Grid.Column="0" Background="#FF1E1E1E">
                 <Border DockPanel.Dock="Top" BorderBrush="LightGray" BorderThickness="0,0,0,1" Background="#FF2D2D30">
                     <StackPanel Margin="5,5,5,3">
@@ -75,10 +91,13 @@
                 </TreeView>
             </DockPanel>
 
-            <Border Grid.Column="1" BorderBrush="Gray" BorderThickness="1,0" Background="#FF1E1E1E">
-                <views:EngineViewport3D MinHeight="200" MinWidth="200"
-                                        HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
-                                        Background="#FF000000"/>
+            <Border Grid.Column="1" BorderBrush="Gray" BorderThickness="1,0" Background="#FF1E1E1E"
+                    DragDrop.AllowDrop="True"
+                    DragDrop.Drop="OnAssetDrop"
+                    DragDrop.DragOver="OnDragOver">
+                <views3d:EngineViewport3D Name="WorldViewport" MinHeight="200" MinWidth="200"
+                                            HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                            Background="#FF000000"/>
             </Border>
 
             <DockPanel Grid.Column="2" Background="#FF1E1E1E">
@@ -87,8 +106,25 @@
             </DockPanel>
         </Grid>
 
-        <TextBlock Grid.Row="1"
+        <!-- Row 2 (Auto): status / debug bar -->
+        <TextBlock Grid.Row="2"
                    Text="{Binding DebugMessage}"
                    Background="LightGray" Padding="5"/>
+
+        <!-- Row 3: build log -->
+        <Border Grid.Row="3" Background="#FF1E1E1E" BorderBrush="#FF444" BorderThickness="0,1,0,0">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Top" Text="Build Log" FontWeight="Bold"
+                           Foreground="#FFEEE" Padding="5,2"/>
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <TextBox Name="BuildLogText" IsReadOnly="True"
+                             AcceptsReturn="True" TextWrapping="Wrap"
+                             FontFamily="Consolas,Menlo,monospace" FontSize="11"
+                             Background="#FF202020" Foreground="#FFCCCC"
+                             DoubleTapped="OnBuildLogDoubleClick"
+                             Padding="5"/>
+                </ScrollViewer>
+            </DockPanel>
+        </Border>
     </Grid>
 </UserControl>
