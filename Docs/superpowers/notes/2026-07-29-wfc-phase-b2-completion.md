@@ -17,11 +17,11 @@ Phase B.2 converts WFC generation from "emit complete scene in one frame" to a s
 
 4. **TestWFCStreaming integration binary** — New target #32 (`EngineTest/IntegrationTests/Graphics/WFC/TestWFCStreaming.{h,cpp}`). Quantitative counterpart to TestWFCRendering: pumps **4** solver Steps per frame (vs 1) so a 4×4×4 grid completes in ~16 frames, then asserts `solver_state_ == Done` and `total_collapses_ == 64`. Catalog setup is copied verbatim from TestWFCRendering (engine convention: helpers are not shared across test cases).
 
-5. **TestWFCStreamDrain unit binary** — New target in `EngineTest/UnitTests/Graphics/WFC/TestWFCStreamDrain.cpp`. 5 cases: `EmptyBuffer_ReturnsEmpty`, `SingleCollapse_ProducesOnePoint`, `MultipleCollapses_ProducesAllPointsInOrder`, `RestartClearsNewPoints_AndSetsFlag`, `MultipleRestarts_IncrementsCountAndKeepsLastBatch`. Covers the restart-clears-prior-batch contract directly.
+5. **TestWFCStreamDrain unit binary** — New target in `EngineTest/UnitTests/Graphics/WFC/TestWFCStreamDrain.cpp`. 6 cases: `EmptyBuffer_ReturnsEmpty`, `SingleCollapse_ProducesOnePoint`, `MultipleCollapses_ProducesAllPointsInOrder`, `RestartClearsNewPoints_AndSetsFlag`, `MultipleRestarts_IncrementsCountAndKeepsLastBatch`, `RestartAsLastStep_YieldsZeroPoints` (added during final review). Covers the restart-clears-prior-batch contract directly, including the edge case where Restart is the final step with zero subsequent Collapses.
 
 ## Test totals (verified 2026-07-29)
 
-**Unit tests:** 79 cases across 17 binaries, 0 failures.
+**Unit tests:** 80 cases across 17 binaries, 0 failures.
 
 | Binary | Cases |
 |---|---|
@@ -41,10 +41,10 @@ Phase B.2 converts WFC generation from "emit complete scene in one frame" to a s
 | TestRestartPolicy | 3 |
 | TestTileAdjacency | 5 |
 | TestWFCCornerMeshes | 4 |
-| **TestWFCStreamDrain** | **5 (new)** |
-| **Total** | **79** |
+| **TestWFCStreamDrain** | **6 (new)** |
+| **Total** | **80** |
 
-**Phase B.2 unit-test additions:** +5 cases in new TestWFCStreamDrain binary.
+**Phase B.2 unit-test additions:** +6 cases in new TestWFCStreamDrain binary.
 
 **Integration tests:** all 4 binaries exit 0.
 - `TestWFC3DParametric`: unchanged.
@@ -83,9 +83,10 @@ This is documented in the TestWFCStreaming header comment.
 | `6d38bad` | fix(wfc): TestWFCRendering Task 2 cleanup — unused fields, redundant init, duplicate include |
 | `6290b07` | feat(wfc): TestWFCRendering 'R' re-seed + 'Space' pause keys |
 | `cf7ef7f` | test(wfc): TestWFCStreaming integration binary — streaming invariants |
-| (this commit) | docs(wfc): Phase B.2 completion checkpoint |
+| `9546185` | docs(wfc): Phase B.2 completion checkpoint |
+| `ffacc9f` | test(wfc): address Phase B.2 final review nits |
 
-The three fixup commits (`925b162`, `6d38bad`, and the spec-compliance pass that preceded `cf7ef7f`) address unused-include, YAGNI cleanup, and ctor-signature issues caught during the two-stage review (spec compliance → code quality) per task.
+The three fixup commits (`925b162`, `6d38bad`, and the spec-compliance pass that preceded `cf7ef7f`) address unused-include, YAGNI cleanup, and ctor-signature issues caught during the two-stage review (spec compliance → code quality) per task. `ffacc9f` addresses the two nits from the final cross-phase review (spec edge-case coverage + stale comment).
 
 ## Subagent-driven development summary
 
