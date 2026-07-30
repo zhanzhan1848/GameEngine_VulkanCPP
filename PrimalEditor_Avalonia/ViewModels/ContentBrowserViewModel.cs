@@ -33,9 +33,12 @@ public class ContentBrowserViewModel : ViewModelBase
     private bool _isImporting;
     private string _importingStatus = string.Empty;
     private FileViewMode _viewMode = FileViewMode.List;
+    private string _searchQuery = string.Empty;
 
     public ObservableCollection<ContentFolder> Folders { get; } = new();
     public ObservableCollection<AssetInfo> Files { get; } = new();
+    public ObservableCollection<AssetInfo> FilteredFiles { get; } = new();
+    public ObservableCollection<BreadcrumbSegment> Breadcrumbs { get; } = new();
 
     public ContentBrowserViewModel()
     {
@@ -78,6 +81,7 @@ public class ContentBrowserViewModel : ViewModelBase
                 _project = value;
                 OnPropertyChanged(nameof(Project));
                 RefreshFolders();
+                RebuildBreadcrumbs();
             }
         }
     }
@@ -92,6 +96,7 @@ public class ContentBrowserViewModel : ViewModelBase
                 _selectedFolder = value;
                 OnPropertyChanged(nameof(SelectedFolder));
                 LoadFilesForSelectedFolder();
+                RebuildBreadcrumbs();
             }
         }
     }
@@ -164,6 +169,34 @@ public class ContentBrowserViewModel : ViewModelBase
         }
     }
 
+    public string SearchQuery
+    {
+        get => _searchQuery;
+        set
+        {
+            if (_searchQuery != value)
+            {
+                _searchQuery = value ?? string.Empty;
+                OnPropertyChanged(nameof(SearchQuery));
+                OnPropertyChanged(nameof(HasActiveSearch));
+                RebuildFilteredFiles();
+                OnPropertyChanged(nameof(ResultCountDisplay));
+            }
+        }
+    }
+
+    public bool HasActiveSearch => !string.IsNullOrEmpty(_searchQuery);
+
+    public string ResultCountDisplay =>
+        HasActiveSearch
+            ? $"{FilteredFiles.Count} of {Files.Count}"
+            : string.Empty;
+
+    public void ClearSearch()
+    {
+        SearchQuery = string.Empty;
+    }
+
     public void RefreshFolders()
     {
         var previouslySelected = _selectedFolder?.FullPath;
@@ -232,6 +265,46 @@ public class ContentBrowserViewModel : ViewModelBase
         return null;
     }
 
+    private void RebuildFilteredFiles()
+    {
+        FilteredFiles.Clear();
+        foreach (var file in Files)
+        {
+            if (AssetSearchFilter.Match(file.FileName, _searchQuery))
+                FilteredFiles.Add(file);
+        }
+    }
+
+    private void RebuildBreadcrumbs()
+    {
+        Breadcrumbs.Clear();
+        var root = _project?.ContentPath;
+        if (string.IsNullOrEmpty(root))
+        {
+            OnPropertyChanged(nameof(HasBreadcrumbs));
+            return;
+        }
+        var selected = _selectedFolder?.FullPath;
+        foreach (var seg in BreadcrumbBuilder.Build(root, selected))
+            Breadcrumbs.Add(seg);
+        OnPropertyChanged(nameof(HasBreadcrumbs));
+    }
+
+    public bool HasBreadcrumbs => Breadcrumbs.Count > 0;
+
+    public void NavigateToBreadcrumb(BreadcrumbSegment segment)
+    {
+        if (segment == null || _project == null) return;
+        if (segment.IsRoot)
+        {
+            var root = Folders.FirstOrDefault();
+            if (root != null) SelectedFolder = root;
+            return;
+        }
+        var match = FindFolderByPath(Folders, segment.FullPath);
+        if (match != null) SelectedFolder = match;
+    }
+
     private void LoadSubfolders(ContentFolder folder)
     {
         try
@@ -256,6 +329,8 @@ public class ContentBrowserViewModel : ViewModelBase
         Files.Clear();
         if (SelectedFolder == null || !Directory.Exists(SelectedFolder.FullPath))
         {
+            RebuildFilteredFiles();
+            OnPropertyChanged(nameof(ResultCountDisplay));
             return;
         }
 
@@ -274,6 +349,8 @@ public class ContentBrowserViewModel : ViewModelBase
                     Files.Add(info);
             }
             StatusMessage = $"{Files.Count} asset(s)";
+            RebuildFilteredFiles();
+            OnPropertyChanged(nameof(ResultCountDisplay));
         }
         catch (UnauthorizedAccessException ex)
         {

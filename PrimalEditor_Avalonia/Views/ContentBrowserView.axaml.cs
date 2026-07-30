@@ -13,6 +13,7 @@ public partial class ContentBrowserView : UserControl
     public ContentBrowserView()
     {
         InitializeComponent();
+        KeyDown += OnContentBrowserKeyDown;
     }
 
     private void InitializeComponent()
@@ -25,6 +26,45 @@ public partial class ContentBrowserView : UserControl
         if (DataContext is ContentBrowserViewModel vm)
         {
             vm.LoadFilesForSelectedFolder();
+        }
+    }
+
+    private void OnBreadcrumbClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        if (sender is Avalonia.Controls.Button btn && btn.Tag is BreadcrumbSegment seg)
+        {
+            vm.NavigateToBreadcrumb(seg);
+        }
+    }
+
+    private void OnClearSearchClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is ContentBrowserViewModel vm) vm.ClearSearch();
+        SearchBox?.Focus();
+    }
+
+    private void OnSearchKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+    {
+        if (e.Key == Avalonia.Input.Key.Escape && DataContext is ContentBrowserViewModel vm)
+        {
+            vm.ClearSearch();
+            e.Handled = true;
+        }
+    }
+
+    private void OnContentBrowserKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+    {
+        // Cmd+F (macOS) / Ctrl+F (Windows/Linux) — focus the search box.
+        var modifiers = e.KeyModifiers;
+        bool hasCmdOrCtrl =
+            (modifiers & Avalonia.Input.KeyModifiers.Meta) != 0 ||
+            (modifiers & Avalonia.Input.KeyModifiers.Control) != 0;
+        if (hasCmdOrCtrl && e.Key == Avalonia.Input.Key.F)
+        {
+            SearchBox?.Focus();
+            SearchBox?.SelectAll();
+            e.Handled = true;
         }
     }
 

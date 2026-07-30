@@ -40,22 +40,63 @@
                DragDrop.DragOver="OnDragOver"
                DragDrop.Drop="OnFileDrop">
             <DockPanel>
-                <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" Margin="5">
-                    <TextBlock Grid.Column="0" Text="Files" FontWeight="Bold" VerticalAlignment="Center"/>
-                    <Button Grid.Column="1" Content="+ Folder" Click="OnNewFolderClick" Width="80" Margin="0,0,4,0"/>
-                    <Button Grid.Column="2" Content="Rename" Click="OnRenameClick" Width="70" Margin="0,0,4,0"/>
-                    <Button Grid.Column="3" Content="Delete" Click="OnDeleteClick" Width="60" Margin="0,0,4,0"/>
-                    <ToggleButton Grid.Column="4"
-                                  IsChecked="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.ToThumbnails}, Mode=TwoWay}"
-                                  ToolTip.Tip="Toggle thumbnails view"
-                                  Margin="0,0,5,0"
-                                  Padding="6,2">
-                        <Panel>
-                            <TextBlock Text="☰" FontSize="14"/>
-                            <TextBlock Text="⊞" FontSize="14" IsVisible="{Binding $parent[ToggleButton].IsChecked}"/>
-                        </Panel>
-                    </ToggleButton>
-                    <Button Grid.Column="5" Content="Import..." Click="OnImportClick" Width="80"/>
+                <Grid DockPanel.Dock="Top" RowDefinitions="Auto,Auto" Margin="5">
+                    <ItemsControl Grid.Row="0" ItemsSource="{Binding Breadcrumbs}"
+                                  IsVisible="{Binding HasBreadcrumbs}"
+                                  Margin="0,0,0,4">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" Spacing="2"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Spacing="2">
+                                    <Button Content="{Binding Name}"
+                                            Click="OnBreadcrumbClick"
+                                            Tag="{Binding}"
+                                            Padding="6,1"
+                                            Background="Transparent"
+                                            BorderThickness="0"/>
+                                    <TextBlock Text="›" VerticalAlignment="Center" Foreground="Gray"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Grid Grid.Row="1" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
+                        <TextBlock Grid.Column="0" Text="Files" FontWeight="Bold" VerticalAlignment="Center"/>
+                        <TextBox Grid.Column="1"
+                                 Name="SearchBox"
+                                 Watermark="Search..."
+                                 Text="{Binding SearchQuery, Mode=TwoWay}"
+                                 Width="180"
+                                 Margin="8,0,4,0"
+                                 KeyDown="OnSearchKeyDown"/>
+                        <Button Grid.Column="2" Content="×"
+                                Click="OnClearSearchClick"
+                                IsVisible="{Binding HasActiveSearch}"
+                                ToolTip.Tip="Clear search"
+                                Width="24" Margin="0,0,4,0" Padding="0"/>
+                        <TextBlock Grid.Column="3"
+                                   Text="{Binding ResultCountDisplay}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"
+                                   Foreground="Gray"/>
+                        <Button Grid.Column="4" Content="+ Folder" Click="OnNewFolderClick" Width="80" Margin="0,0,4,0"/>
+                        <Button Grid.Column="5" Content="Rename" Click="OnRenameClick" Width="70" Margin="0,0,4,0"/>
+                        <Button Grid.Column="6" Content="Delete" Click="OnDeleteClick" Width="60" Margin="0,0,4,0"/>
+                        <ToggleButton Grid.Column="7"
+                                      IsChecked="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.ToThumbnails}, Mode=TwoWay}"
+                                      ToolTip.Tip="Toggle thumbnails view"
+                                      Margin="0,0,4,0"
+                                      Padding="6,2">
+                            <Panel>
+                                <TextBlock Text="☰" FontSize="14"/>
+                                <TextBlock Text="⊞" FontSize="14" IsVisible="{Binding $parent[ToggleButton].IsChecked}"/>
+                            </Panel>
+                        </ToggleButton>
+                        <Button Grid.Column="8" Content="Import..." Click="OnImportClick" Width="80"/>
+                    </Grid>
                 </Grid>
                 <StackPanel DockPanel.Dock="Bottom" Margin="5"
                             IsVisible="{Binding IsImporting}">
@@ -66,7 +107,7 @@
                            Text="{Binding StatusMessage}" Foreground="Gray"
                            IsVisible="{Binding HasStatus}" Padding="5"/>
 
-                <ListBox ItemsSource="{Binding Files}"
+                <ListBox ItemsSource="{Binding FilteredFiles}"
                          SelectedItem="{Binding SelectedFile}"
                          DoubleTapped="OnFileDoubleClick"
                          IsVisible="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.IsList}}">
@@ -83,7 +124,7 @@
                     </ListBox.ItemTemplate>
                 </ListBox>
 
-                <ListBox ItemsSource="{Binding Files}"
+                <ListBox ItemsSource="{Binding FilteredFiles}"
                          SelectedItem="{Binding SelectedFile}"
                          DoubleTapped="OnFileDoubleClick"
                          IsVisible="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.IsThumbnails}}">
