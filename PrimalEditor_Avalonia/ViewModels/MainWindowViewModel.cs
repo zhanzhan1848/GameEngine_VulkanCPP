@@ -13,7 +13,8 @@ public class MainWindowViewModel : ViewModelBase
     private Project? _project;
     private string _windowTitle = "PrimalEditor Avalonia";
     private bool _isLoggerVisible = true;
-    private int _selectedTabIndex;
+    private bool _isWorldEditorVisible = true;
+    private bool _isContentBrowserVisible = true;
 
     public WorldEditorViewModel WorldEditor { get; } = new WorldEditorViewModel();
 
@@ -48,26 +49,66 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
-    public int SelectedTabIndex
+    public bool IsWorldEditorVisible
     {
-        get => _selectedTabIndex;
+        get => _isWorldEditorVisible;
         set
         {
-            if (_selectedTabIndex != value)
+            if (_isWorldEditorVisible != value)
             {
-                _selectedTabIndex = value;
-                OnPropertyChanged(nameof(SelectedTabIndex));
+                _isWorldEditorVisible = value;
+                OnPropertyChanged(nameof(IsWorldEditorVisible));
+                ApplyDockableVisibility(WorldEditor, value);
             }
         }
     }
 
-    public void ToggleLogger()
+    public bool IsContentBrowserVisible
     {
-        IsLoggerVisible = !IsLoggerVisible;
+        get => _isContentBrowserVisible;
+        set
+        {
+            if (_isContentBrowserVisible != value)
+            {
+                _isContentBrowserVisible = value;
+                OnPropertyChanged(nameof(IsContentBrowserVisible));
+                ApplyDockableVisibility(ContentBrowser, value);
+            }
+        }
     }
 
-    public void ToggleWorldEditorTab() => SelectedTabIndex = 0;
-    public void ToggleContentBrowserTab() => SelectedTabIndex = 1;
+    public void ToggleLogger() => IsLoggerVisible = !IsLoggerVisible;
+    public void ToggleWorldEditorTab() => IsWorldEditorVisible = !IsWorldEditorVisible;
+    public void ToggleContentBrowserTab() => IsContentBrowserVisible = !IsContentBrowserVisible;
+
+    /// <summary>
+    /// Add or remove a dockable from <see cref="Layout"/>'s
+    /// <c>VisibleDockables</c>. The single DocumentDock is the
+    /// parent; toggling the world editor tab means adding/removing
+    /// <see cref="WorldEditor"/> from that document list. No-op if
+    /// <paramref name="visible"/> matches current state, so
+    /// repeated calls don't double-add.
+    /// </summary>
+    private void ApplyDockableVisibility(Dock.Model.Core.IDockable dockable, bool visible)
+    {
+        if (Layout == null || dockable == null) return;
+        foreach (var rootChild in Layout.VisibleDockables)
+        {
+            if (rootChild is Dock.Model.Mvvm.Controls.DocumentDock docs)
+            {
+                bool contains = docs.VisibleDockables.Contains(dockable);
+                if (visible && !contains)
+                {
+                    docs.VisibleDockables.Add(dockable);
+                }
+                else if (!visible && contains)
+                {
+                    docs.VisibleDockables.Remove(dockable);
+                }
+                return;
+            }
+        }
+    }
 
     public Project? Project
     {

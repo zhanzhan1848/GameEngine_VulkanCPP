@@ -57,8 +57,16 @@
                           InputGesture="F2"/>
             </MenuItem>
             <MenuItem Header="_View">
-                <MenuItem Header="Toggle _World Editor" Command="{Binding ToggleWorldEditorTabCommand}" InputGesture="F4"/>
-                <MenuItem Header="Toggle _Content Browser" Command="{Binding ToggleContentBrowserTabCommand}" InputGesture="F5"/>
+                <MenuItem Header="Toggle _World Editor" Command="{Binding ToggleWorldEditorTabCommand}" InputGesture="F4">
+                    <MenuItem.Icon>
+                        <CheckBox IsChecked="{Binding IsWorldEditorVisible}" IsHitTestVisible="False"/>
+                    </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Toggle _Content Browser" Command="{Binding ToggleContentBrowserTabCommand}" InputGesture="F5">
+                    <MenuItem.Icon>
+                        <CheckBox IsChecked="{Binding IsContentBrowserVisible}" IsHitTestVisible="False"/>
+                    </MenuItem.Icon>
+                </MenuItem>
                 <MenuItem Header="Toggle _Logger" Click="OnToggleLogger" InputGesture="F6"/>
             </MenuItem>
             <MenuItem Header="_Help">
