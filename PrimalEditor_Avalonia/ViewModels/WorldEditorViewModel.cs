@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Dock.Model.Mvvm.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.Content;
@@ -13,7 +14,7 @@ using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.ViewModels;
 
-public class WorldEditorViewModel : ViewModelBase, ISceneEntityContext
+public class WorldEditorViewModel : Document, ISceneEntityContext
 {
     private Project? _project;
     private Scene? _activeScene;

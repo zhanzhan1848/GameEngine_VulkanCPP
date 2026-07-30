@@ -1,5 +1,6 @@
 ﻿using System.Collections.Generic;
 using System.Windows.Input;
+using Dock.Model.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.GameProject;
@@ -19,6 +20,20 @@ public class MainWindowViewModel : ViewModelBase
     public ContentBrowserViewModel ContentBrowser { get; } = new ContentBrowserViewModel();
 
     public LoggerViewModel Logger { get; } = new LoggerViewModel();
+
+    private IRootDock? _layout;
+    public IRootDock? Layout
+    {
+        get => _layout;
+        private set
+        {
+            if (_layout != value)
+            {
+                _layout = value;
+                OnPropertyChanged(nameof(Layout));
+            }
+        }
+    }
 
     public bool IsLoggerVisible
     {
@@ -154,6 +169,10 @@ public class MainWindowViewModel : ViewModelBase
 
     public MainWindowViewModel()
     {
+        var factory = new MainWindowDockFactory(this);
+        Layout = factory.CreateLayout();
+        factory.InitLayout(Layout!);
+
         NewProjectCommand = new RelayCommand(_ => NewProjectExecute());
         OpenProjectCommand = new RelayCommand(_ => OpenProjectExecute());
         SaveProjectCommand = new RelayCommand(_ => SaveProjectExecute(), _ => _project != null);

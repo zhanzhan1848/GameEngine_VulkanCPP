@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Dock.Model.Mvvm.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.GameProject;
@@ -24,7 +25,7 @@ public enum FileViewMode
     Thumbnails,
 }
 
-public class ContentBrowserViewModel : ViewModelBase
+public class ContentBrowserViewModel : Document
 {
     private Project? _project;
     private ContentFolder? _selectedFolder;
