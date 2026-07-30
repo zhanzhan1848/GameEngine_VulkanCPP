@@ -54,7 +54,7 @@ public class AssetEditorHost : Window
         if (view is null) return new TextBlock { Text = $"Editor for {vm.GetType().Name} not yet implemented" };
         var dock = new DockPanel();
         _statusBar.ViewModel = vm;
-        DockPanel.SetDock(_statusBar, Dock.Bottom);
+        DockPanel.SetDock(_statusBar, Avalonia.Controls.Dock.Bottom);
         dock.Children.Add(_statusBar);
         dock.Children.Add(view);
         return dock;

@@ -68,7 +68,7 @@ public static class ErrorDialog
         okButton.Click += (_, _) => dialog.Close();
 
         var panel = new DockPanel();
-        DockPanel.SetDock(okButton, Dock.Bottom);
+        DockPanel.SetDock(okButton, Avalonia.Controls.Dock.Bottom);
         panel.Children.Add(okButton);
         panel.Children.Add(textBlock);
 
