@@ -429,8 +429,41 @@ void WFCRenderingTestCase::Run() {
         }
     }
 
-    // Phase B.2: streaming pump. paused_ is toggled by 'Space' in Task 3;
-    // for now it stays false so the solve advances every frame.
+    // Phase B.2: 'R' re-seeds the solver with a new RNG seed.
+    {
+        using namespace primal::input;
+        input_value val{};
+        get(input_source::keyboard, input_code::key_r, val);
+        if (val.current.x > 0.0f) {
+            if (!key_r_pressed_) {
+                key_r_pressed_ = true;
+                ReseedSolver();
+                std::cout << "[TestWFCRendering] re-seed (new solver run)" << std::endl;
+            }
+        } else {
+            key_r_pressed_ = false;
+        }
+    }
+
+    // Phase B.2: 'Space' pauses/resumes streaming.
+    {
+        using namespace primal::input;
+        input_value val{};
+        get(input_source::keyboard, input_code::key_space, val);
+        if (val.current.x > 0.0f) {
+            if (!key_space_pressed_) {
+                key_space_pressed_ = true;
+                paused_ = !paused_;
+                std::cout << "[TestWFCRendering] " << (paused_ ? "paused" : "resumed")
+                          << std::endl;
+            }
+        } else {
+            key_space_pressed_ = false;
+        }
+    }
+
+    // Phase B.2: streaming pump. 'Space' toggles paused_ above so the user
+    // can freeze generation and inspect the current grid.
     if (!paused_) {
         PumpSolverFrame();
     }

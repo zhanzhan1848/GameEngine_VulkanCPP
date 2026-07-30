@@ -40,6 +40,8 @@ private:
     static_assert(WFC_MODE_2D_SMOKE == 1, "WFC_MODE_2D_SMOKE must be 1 if defined");
 #endif
     bool key_m_pressed_{false};
+    bool key_r_pressed_{false};
+    bool key_space_pressed_{false};
     // Phase B.2: re-seed + pause
     bool paused_{false};
 
