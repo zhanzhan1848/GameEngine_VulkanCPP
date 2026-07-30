@@ -165,10 +165,47 @@ TestResult TestVulkanStandardPipeline_EditorMode_NoOpRender() {
     return TestResult::Passed;
 }
 
+// Tier 4.6 probe — exercises InitializeSubsystems path on Vulkan.
+//
+// SetLumenConfig triggers InitializeSubsystems which creates ALL heavy
+// subsystems: GPUDrivenDrawPipeline, GPUCullingPipeline, HZBSystem,
+// NaniteResourceManager, GlobalSDF, scene_snapshot_, ShadowMapModule,
+// DeferredLightingModule, FinalBlitModule, and crucially forward_renderer_
+// (ForwardSceneRenderer).
+//
+// STATUS: Skipped — crashes during GPUCullingPipeline::UpdateHZBBindings
+// (descriptor type mismatch at binding 8). Multiple T4.6 sub-issues found:
+//
+//   1. vkCreateImage D32_SFLOAT rejected: mixed COLOR_ATTACHMENT +
+//      DEPTH_STENCIL usage bits on same texture (StandardRenderPipeline
+//      subsystem creates a D32 tex with both RenderTarget + DepthStencil
+//      TextureUsage flags — Vulkan forbids this combo).
+//   2. GPUDrivenDrawPipeline 4 missing SPIR-V shaders:
+//      ClusterBinning/cluster_binning_kernel, VisibilityBuffer × 2
+//      (vertex + fragment), VisibilityBufferResolve/ComputeMain.
+//      T4.4.3 ported some shaders but missed these 4.
+//   3. HZB descriptor type mismatch (VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+//      write to layout binding 8 declared as STORAGE_BUFFER).
+//      GPUCullingPipeline.cpp:165 declares SampledImage but validation
+//      sees STORAGE_BUFFER — possibly bindings_ vector truncation in
+//      RHIDescriptorSetLayout base ctor or stale layout handle.
+//   4. Segfault inside GPUCullingPipeline::UpdateHZBBindings called
+//      eagerly from SetHZBSystem (GPUCullingPipeline.h:130). The
+//      validation-layer crash in vvl::BufferDescriptor::WriteUpdate
+//      suggests the bufferInfo pointer or descriptor state is corrupt.
+//
+// Each issue warrants its own investigation. See memory
+// vulkan-rhi-t46-subsystems-probe-findings.md for full details.
+TestResult TestVulkanStandardPipeline_SubsystemsProbe() {
+    std::cout << "[SubsystemsProbe] SKIPPED — T4.6 multi-issue scope. See test comment for punch list." << std::endl;
+    return TestResult::Skipped;
+}
+
 void RegisterVulkanStandardPipelineSmoke_Tests() {
     auto suite = std::make_shared<TestSuite>("VulkanStandardPipelineSmoke_Tests");
     suite->AddTestCase(TestCase("Initialize_Smoke",          TestVulkanStandardPipeline_Initialize_Smoke));
     suite->AddTestCase(TestCase("EditorMode_NoOpRender",     TestVulkanStandardPipeline_EditorMode_NoOpRender));
+    suite->AddTestCase(TestCase("SubsystemsProbe",           TestVulkanStandardPipeline_SubsystemsProbe));
     TestRunner::RegisterTestSuite(suite);
 }
 
