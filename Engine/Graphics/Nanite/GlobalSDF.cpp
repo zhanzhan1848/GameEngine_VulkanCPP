@@ -796,7 +796,7 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
     }
     if (max_res == 0) return false;
 
-    const u64 staging_bytes = static_cast<u64>(max_res) * max_res * max_res * sizeof(u16);
+    const u64 staging_bytes = static_cast<u64>(max_res) * max_res * max_res * sizeof(f32);
     rhi::BufferDesc bufDesc{
         staging_bytes,
         rhi::BufferType::Unknown,
@@ -808,7 +808,9 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
     if (staging == rhi::handles::INVALID_RESOURCE) return false;
 
     // Scratch CPU buffer for the largest cascade; reused for smaller ones.
-    utl::vector<u16> cpu_data;
+    // Cascade textures are R32_Float (AllocateTexture line 278), so we write
+    // f32 directly — no f32_to_f16 conversion needed.
+    utl::vector<f32> cpu_data;
     cpu_data.resize(max_res * max_res * max_res);
 
     bool all_ok = true;
@@ -832,12 +834,12 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
                         c.origin.y + (static_cast<f32>(y) + 0.5f) * voxel_step.y,
                         c.origin.z + (static_cast<f32>(z) + 0.5f) * voxel_step.z};
                     const f32 d = sdf_fn(p);
-                    cpu_data[(z * res + y) * res + x] = f32_to_f16(d);
+                    cpu_data[(z * res + y) * res + x] = d;
                 }
             }
         }
 
-        const u64 cascade_bytes = static_cast<u64>(res) * res * res * sizeof(u16);
+        const u64 cascade_bytes = static_cast<u64>(res) * res * res * sizeof(f32);
         if (!device_->UpdateBufferData(staging, cpu_data.data(), cascade_bytes, 0)) {
             all_ok = false;
             continue;
@@ -872,6 +874,19 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
         region.imageOffset = {0, 0, 0};
         region.imageExtent = {res, res, res};
         cmd->CopyBufferToTexture(staging, c.sdf_texture, &region, 1);
+
+        // Vulkan: CopyBufferToTexture leaves dst in TRANSFER_DST_OPTIMAL; cascade
+        // textures are bound as StorageImage in voxelization shaders which
+        // requires GENERAL. Transition back so subsequent dispatches don't hit
+        // VUID-vkCmdDraw-None-09600. Dawn/Metal InsertBarrier are no-ops.
+        rhi::ResourceBarrier toUA{};
+        toUA.resource = c.sdf_texture;
+        toUA.beforeState = rhi::ResourceState::CopyDest;
+        toUA.afterState = rhi::ResourceState::UnorderedAccess;
+        toUA.subresource = 0xFFFFFFFF;
+        toUA.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&toUA, 1);
+
         cmd->End();
 
         rhi::QueueSubmitInfo submit{};

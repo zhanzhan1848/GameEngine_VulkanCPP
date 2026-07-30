@@ -336,13 +336,18 @@ bool VulkanTexture::Initialize() {
 
     // === Default VkImageView ===
     // Choose viewType by TextureType:
+    //   - Texture3D          → VK_IMAGE_VIEW_TYPE_3D         (SPIR-V texture_3d / storage_3d)
     //   - TextureCube        → VK_IMAGE_VIEW_TYPE_CUBE       (6 faces, sampler uses direction)
     //   - arraySize > 1      → VK_IMAGE_VIEW_TYPE_2D_ARRAY   (SPIR-V texture_2d_array / storage_2d_array)
     //   - else (single)      → VK_IMAGE_VIEW_TYPE_2D         (SPIR-V texture_2d / storage_2d)
     // Storage cube is not supported in Vulkan core; engine cube-storage paths use 2D-array.
+    const bool is3D = (texDesc_.type == TextureType::Texture3D || texDesc_.size.z > 1);
     VkImageViewType viewType;
     u32 viewLayerCount;
-    if (isCube) {
+    if (is3D) {
+        viewType = VK_IMAGE_VIEW_TYPE_3D;
+        viewLayerCount = 1u;
+    } else if (isCube) {
         viewType = VK_IMAGE_VIEW_TYPE_CUBE;
         viewLayerCount = 6u;
     } else if (texDesc_.arraySize > 1) {
