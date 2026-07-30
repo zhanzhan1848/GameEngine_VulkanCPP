@@ -20,6 +20,14 @@ public sealed class EditorLayout
     public WindowState MainWindow { get; set; } = new WindowState { W = 1400, H = 900 };
     public List<string> OpenAssets { get; set; } = new();
     public Dictionary<string, WindowState> AssetWindows { get; set; } = new();
+    /// <summary>
+    /// Optional saved dock layout (P1.d Step 6). Null when first
+    /// running or when an older build's <c>editor-layout.json</c>
+    /// pre-dates this field — the JSON deserializer leaves
+    /// missing fields at their default (null) value, so older
+    /// files load without error.
+    /// </summary>
+    public DockingLayout? DockLayout { get; set; }
 }
 
 public static class EditorLayoutSettings

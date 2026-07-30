@@ -121,7 +121,17 @@ public partial class MainWindow : Window
         base.OnClosing(e);
         if (e.Cancel) return;
 
-        if (DataContext is not MainWindowViewModel vm) return;
+        if (DataContext is not MainWindowViewModel vm)
+        {
+            SaveDockLayout();
+            return;
+        }
+
+        // Always persist the dock layout (tabs, side panels) on
+        // close, regardless of project-dirty state — the layout is
+        // a workspace preference, not a project artifact.
+        SaveDockLayout();
+
         if (vm.Project is not { IsDirty: true } project) return;
 
         e.Cancel = true;
@@ -142,5 +152,13 @@ public partial class MainWindow : Window
             case null:
                 break;
         }
+    }
+
+    private void SaveDockLayout()
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var snapshot = EditorLayoutSettings.Load();
+        snapshot.DockLayout = vm.CaptureLayoutForSave();
+        EditorLayoutSettings.Save(snapshot);
     }
 }

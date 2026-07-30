@@ -191,6 +191,37 @@ public class MainWindowViewModel : ViewModelBase
         AboutCommand = new RelayCommand(_ => AboutExecute());
     }
 
+    /// <summary>
+    /// Replace the current <see cref="Layout"/> with one built
+    /// from a previously-saved <see cref="DockingLayout"/>. No-op
+    /// if <paramref name="saved"/> is null (first run / older
+    /// editor-layout.json without the dock field). The same VM
+    /// instances (<see cref="WorldEditor"/>,
+    /// <see cref="ContentBrowser"/>) are reused as Dockables, so
+    /// Edit-menu commands still operate on the same view models
+    /// that DockControl renders as tabs.
+    /// </summary>
+    public void ApplyLayout(DockingLayout? saved)
+    {
+        if (saved == null || saved.Entries.Count == 0) return;
+        var factory = new MainWindowDockFactory(this);
+        Layout = DockingLayoutBridge.ToDockTree(saved, factory, entry => entry.Id switch
+        {
+            "WorldEditor" => WorldEditor,
+            "ContentBrowser" => ContentBrowser,
+            _ => null,
+        });
+        factory.InitLayout(Layout!);
+    }
+
+    /// <summary>
+    /// Snapshot the current <see cref="Layout"/> to a flat
+    /// <see cref="DockingLayout"/> for persistence. Caller writes
+    /// the result to <c>EditorLayout.DockLayout</c> and saves
+    /// through <see cref="EditorLayoutSettings"/>.
+    /// </summary>
+    public DockingLayout CaptureLayoutForSave() => DockingLayoutBridge.FromDockTree(Layout!);
+
     public void CutExecute()
     {
         CopyExecute();

@@ -127,4 +127,71 @@ public static class DockingLayoutBridge
         }
         root.VisibleDockables.Add(tools);
     }
+
+    /// <summary>
+    /// Walk a live <see cref="IRootDock"/> tree and emit a flat
+    /// <see cref="DockingLayout"/> snapshot. Reverse of
+    /// <see cref="ToDockTree"/>; used to capture the current dock
+    /// state for persistence (P1.d Step 6).
+    ///
+    /// Only <see cref="DocumentDock"/> children of the root are
+    /// captured in this v1 — left/right/top/bottom zones
+    /// (ProportionalDock siblings) are deferred to a later step
+    /// because the runtime tree only has a single DocumentDock
+    /// (MainWindowDockFactory). The function returns a non-null
+    /// <see cref="DockingLayout"/> for any non-null root.
+    /// </summary>
+    public static DockingLayout FromDockTree(IRootDock root)
+    {
+        var layout = new DockingLayout();
+        if (root == null) return layout;
+
+        int tabIndex = 0;
+        foreach (var rootChild in root.VisibleDockables)
+        {
+            switch (rootChild)
+            {
+                case DocumentDock docs:
+                    foreach (var doc in docs.VisibleDockables)
+                    {
+                        if (doc == null) continue;
+                        layout.Entries.Add(new DockEntry
+                        {
+                            Id = doc.Id ?? string.Empty,
+                            Zone = DockZone.Center,
+                            TabIndex = tabIndex++,
+                        });
+                    }
+                    break;
+                case ToolDock tools when tools.Alignment == Alignment.Left:
+                    EmitToolDock(tools, layout, DockZone.Left);
+                    break;
+                case ToolDock tools when tools.Alignment == Alignment.Right:
+                    EmitToolDock(tools, layout, DockZone.Right);
+                    break;
+                case ToolDock tools when tools.Alignment == Alignment.Top:
+                    EmitToolDock(tools, layout, DockZone.Top);
+                    break;
+                case ToolDock tools when tools.Alignment == Alignment.Bottom:
+                    EmitToolDock(tools, layout, DockZone.Bottom);
+                    break;
+            }
+        }
+        return layout;
+    }
+
+    private static void EmitToolDock(ToolDock tools, DockingLayout layout, DockZone zone)
+    {
+        int tabIndex = 0;
+        foreach (var dockable in tools.VisibleDockables)
+        {
+            if (dockable == null) continue;
+            layout.Entries.Add(new DockEntry
+            {
+                Id = dockable.Id ?? string.Empty,
+                Zone = zone,
+                TabIndex = tabIndex++,
+            });
+        }
+    }
 }

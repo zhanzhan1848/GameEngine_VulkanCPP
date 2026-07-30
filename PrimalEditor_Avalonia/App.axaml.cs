@@ -34,9 +34,12 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             DisableAvaloniaDataAnnotationValidation();
+            var savedLayout = EditorLayoutSettings.Load().DockLayout;
+            var vm = new MainWindowViewModel();
+            if (savedLayout != null) vm.ApplyLayout(savedLayout);
             desktop.MainWindow = new MainWindow
             {
-                DataContext = new MainWindowViewModel(),
+                DataContext = vm,
             };
             desktop.MainWindow.Show();
             desktop.MainWindow.WindowState = Avalonia.Controls.WindowState.Normal;
