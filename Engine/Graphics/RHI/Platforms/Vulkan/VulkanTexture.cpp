@@ -104,6 +104,32 @@ VulkanTexture::VulkanTexture(VulkanDevice& device, const TextureDesc& desc, VkIm
     mipLayouts_.assign(std::max<u32>(1u, desc.mipLevels), VK_IMAGE_LAYOUT_UNDEFINED);
 }
 
+VulkanTexture::VulkanTexture(VulkanDevice& device, const TextureViewDesc& viewDesc, VulkanTexture& src)
+    : RHIResource(device, ResourceDesc(
+          ResourceType::Texture,
+          ResourceUsage::None,
+          src.texDesc_.memoryUsage,
+          0,
+          "TextureView")),
+      vkUsageFlags_(src.vkUsageFlags_),
+      vkFormat_(vulkan::ToVkFormat(viewDesc.format != DataFormat::Unknown ? viewDesc.format
+                                                                          : src.texDesc_.format)),
+      ownsImage_(false),
+      isView_(true),
+      viewDesc_(viewDesc),
+      viewSrc_(&src),
+      currentLayout_(src.currentLayout_),
+      texDesc_(src.texDesc_)
+{
+    // View 子集 geometry: 维度不变,只 subresourceRange 缩窄。texDesc_ 主要给
+    // GetTextureDesc() caller 提供 format/type 信息;真实 GPU extent 来自源 image。
+    texDesc_.type = viewDesc.viewType;
+    texDesc_.format = viewDesc.format != DataFormat::Unknown ? viewDesc.format : src.texDesc_.format;
+    texDesc_.mipLevels = std::max<u32>(1u, viewDesc.mipCount);
+    texDesc_.arraySize = std::max<u32>(1u, viewDesc.arraySize);
+    mipLayouts_ = src.mipLayouts_;  // 跟随 source per-mip layout
+}
+
 VulkanTexture::VulkanTexture(VulkanTexture&& other) noexcept
     : RHIResource(std::move(other)),
       vkImage_(other.vkImage_),
@@ -113,6 +139,9 @@ VulkanTexture::VulkanTexture(VulkanTexture&& other) noexcept
       vkFormat_(other.vkFormat_),
       ownsImage_(other.ownsImage_),
       wrappedImage_(other.wrappedImage_),
+      isView_(other.isView_),
+      viewDesc_(other.viewDesc_),
+      viewSrc_(other.viewSrc_),
       currentLayout_(other.currentLayout_),
       mipLayouts_(std::move(other.mipLayouts_)),
       texDesc_(std::move(other.texDesc_)) {
@@ -121,6 +150,8 @@ VulkanTexture::VulkanTexture(VulkanTexture&& other) noexcept
     other.allocation_ = nullptr;
     other.ownsImage_ = true;
     other.wrappedImage_ = VK_NULL_HANDLE;
+    other.isView_ = false;
+    other.viewSrc_ = nullptr;
     other.currentLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
@@ -135,6 +166,9 @@ VulkanTexture& VulkanTexture::operator=(VulkanTexture&& other) noexcept {
         vkFormat_ = other.vkFormat_;
         ownsImage_ = other.ownsImage_;
         wrappedImage_ = other.wrappedImage_;
+        isView_ = other.isView_;
+        viewDesc_ = other.viewDesc_;
+        viewSrc_ = other.viewSrc_;
         currentLayout_ = other.currentLayout_;
         mipLayouts_ = std::move(other.mipLayouts_);
         texDesc_ = std::move(other.texDesc_);
@@ -143,6 +177,8 @@ VulkanTexture& VulkanTexture::operator=(VulkanTexture&& other) noexcept {
         other.allocation_ = nullptr;
         other.ownsImage_ = true;
         other.wrappedImage_ = VK_NULL_HANDLE;
+        other.isView_ = false;
+        other.viewSrc_ = nullptr;
         other.currentLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     }
     return *this;
@@ -162,6 +198,55 @@ bool VulkanTexture::Initialize() {
     if (vkFormat_ == VK_FORMAT_UNDEFINED) {
         std::cerr << "[VulkanTexture] DataFormat not mapped to VkFormat" << std::endl;
         return false;
+    }
+
+    // === Phase 5 view 模式:alias source VkImage + 创建受限 subresourceRange view ===
+    // 不拥有 VkImage(viewSrc_ 拥有),只创建+拥有 VkImageView。
+    if (isView_) {
+        if (!viewSrc_ || viewSrc_->vkImage_ == VK_NULL_HANDLE) {
+            std::cerr << "[VulkanTexture] view mode but source image is null" << std::endl;
+            return false;
+        }
+        vkImage_ = viewSrc_->vkImage_;  // 别名,不拥有
+
+        VkImageViewCreateInfo vci{};
+        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image = vkImage_;
+        // viewType 推导:2D/3D/Cube 直接映射,Unknown 兜底 2D。
+        switch (viewDesc_.viewType) {
+            case TextureType::Texture3D:
+                vci.viewType = VK_IMAGE_VIEW_TYPE_3D;
+                break;
+            case TextureType::TextureCube:
+                vci.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+                break;
+            case TextureType::Texture2D:
+            case TextureType::Unknown:
+            default:
+                vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                break;
+        }
+        vci.format = vkFormat_;
+        vci.components = VkComponentMapping{ VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                             VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+        vci.subresourceRange.aspectMask =
+            (vkFormat_ == VK_FORMAT_D32_SFLOAT || vkFormat_ == VK_FORMAT_D24_UNORM_S8_UINT ||
+             vkFormat_ == VK_FORMAT_D32_SFLOAT_S8_UINT)
+            ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.baseMipLevel = viewDesc_.mostDetailedMip;
+        vci.subresourceRange.levelCount   = std::max<u32>(1u, viewDesc_.mipCount);
+        vci.subresourceRange.baseArrayLayer = viewDesc_.firstArraySlice;
+        vci.subresourceRange.layerCount   = std::max<u32>(1u, viewDesc_.arraySize);
+
+        if (vkCreateImageView(dev, &vci, nullptr, &vkView_) != VK_SUCCESS) {
+            std::cerr << "[VulkanTexture] view: vkCreateImageView failed" << std::endl;
+            vkImage_ = VK_NULL_HANDLE;
+            return false;
+        }
+        // Layout 跟随 source(view 共享同一 VkImage;layout 是 image-wide)。
+        currentLayout_ = viewSrc_->currentLayout_;
+        state_ = ResourceState::Ready;
+        return true;
     }
 
     // === wrap 模式:跳过 VMA 分配,直接用外部 image(swapchain image) ===

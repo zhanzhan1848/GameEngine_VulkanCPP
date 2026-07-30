@@ -199,11 +199,12 @@ TestResult TestVulkanHZBSystem_Smoke() {
               << " non_zero_count=" << non_zero << "/" << (W * H) << std::endl;
     fx.base->UnmapBuffer(readback);
 
-    // HZB mip 0 should preserve source depth (~0.5). With the layout-transition
-    // bug fixed, this would be > (W*H)/2. Currently 0 due to known bug — log
-    // the value without asserting, so the test passes while the bug is open.
-    std::cout << "[TestVulkanHZBSystem] known-bug: non_zero_count=" << non_zero
-              << " (expected >" << (W * H) / 2 << " once layout bug fixed)" << std::endl;
+    // HZB mip 0 should preserve source depth (~0.5) — the compute write must
+    // land now that per-mip layout transitions are in place. Sample mip 0 with
+    // a relaxed threshold: source cleared to 0.5, but HZBCopy is a straight
+    // depth copy so non-zero should be near-total.
+    TEST_ASSERT(non_zero > (W * H) / 2,
+                "HZB mip 0 non-zero pixel count (compute dispatch wrote data)");
 
     // Cleanup.
     fx.base->DestroyBuffer(readback);

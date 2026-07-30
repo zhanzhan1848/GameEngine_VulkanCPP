@@ -36,6 +36,11 @@ public:
     /// Initialize() 会跳过 vmaCreateImage,只创建 view。
     VulkanTexture(VulkanDevice& device, const TextureDesc& desc, VkImage existingImage);
 
+    /// Phase 5 view 构造 — 由 createTextureViewImpl 调用。
+    /// 包裹 (src.vkImage_, per-mip/layer VkImageView),不拥有 VkImage 但拥有 VkImageView。
+    /// Initialize() 走 InitializeAsView 路径:alias source image,创建受限 subresourceRange 的 view。
+    VulkanTexture(VulkanDevice& device, const TextureViewDesc& viewDesc, VulkanTexture& src);
+
     VulkanTexture(VulkanTexture&& other) noexcept;
     VulkanTexture& operator=(VulkanTexture&& other) noexcept;
     VulkanTexture(const VulkanTexture&) = delete;
@@ -104,6 +109,12 @@ private:
 
     bool             ownsImage_{true};   /// false = 外部拥有 VkImage(swapchain wrap 模式)
     VkImage          wrappedImage_{VK_NULL_HANDLE};  /// wrap 模式下的外部 image(Initialize 用)
+
+    /// Phase 5 view 模式标志 — true = 由 createTextureViewImpl 创建,Initialize
+    /// 走 InitializeAsView 路径(alias src image,创建受限 subresourceRange view)。
+    bool             isView_{false};
+    TextureViewDesc  viewDesc_{};
+    VulkanTexture*   viewSrc_{nullptr};
 
     VkImageLayout    currentLayout_{VK_IMAGE_LAYOUT_UNDEFINED};
     std::vector<VkImageLayout> mipLayouts_;  // GenerateMipmaps 需要 per-mip

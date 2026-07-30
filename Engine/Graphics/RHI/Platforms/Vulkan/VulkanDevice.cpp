@@ -580,7 +580,32 @@ void VulkanDevice::destroySwapChainImpl(RHISwapChain* swapChain) {
     delete static_cast<VulkanSwapChain*>(swapChain);
 }
 
-ResourceHandle VulkanDevice::createTextureViewImpl(const TextureViewDesc&) { return handles::INVALID_RESOURCE; }  // Phase 5
+ResourceHandle VulkanDevice::createTextureViewImpl(const TextureViewDesc& desc) {
+    if (desc.texture == handles::INVALID_RESOURCE || !textureAllocator_) {
+        std::cerr << "[VulkanDevice] createTextureViewImpl: invalid source texture handle" << std::endl;
+        return handles::INVALID_RESOURCE;
+    }
+    auto* srcTex = textureAllocator_->Get(static_cast<u32>(desc.texture));
+    if (!srcTex || srcTex->GetNativeImage() == VK_NULL_HANDLE) {
+        std::cerr << "[VulkanDevice] createTextureViewImpl: source texture not found or null image" << std::endl;
+        return handles::INVALID_RESOURCE;
+    }
+
+    // 分配新 VulkanTexture slot,view 模式构造(alias src image,自创受限 VkImageView)。
+    u32 id = textureAllocator_->Allocate(*this, desc, *srcTex);
+    VulkanTexture* viewTex = textureAllocator_->Get(id);
+    if (!viewTex) {
+        std::cerr << "[VulkanDevice] Texture view free-list allocation failed" << std::endl;
+        return handles::INVALID_RESOURCE;
+    }
+    if (!viewTex->Initialize()) {
+        std::cerr << "[VulkanDevice] VulkanTexture::Initialize (view mode) failed for id=" << id << std::endl;
+        textureAllocator_->Free(id);
+        return handles::INVALID_RESOURCE;
+    }
+    viewTex->SetHandle(ResourceHandle(id));
+    return ResourceHandle(id);
+}
 
 VulkanShader* VulkanDevice::GetShader(ShaderHandle handle) {
     if (handle == handles::INVALID_SHADER || !shaderAllocator_) return nullptr;

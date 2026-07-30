@@ -452,6 +452,22 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 
     const bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
                          device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    // Vulkan requires explicit per-mip layout transitions (UNDEFINED → GENERAL for
+    // StorageImage write, GENERAL → SHADER_READ_ONLY for next iteration's source).
+    // Dawn's InsertBarrier is a no-op (WebGPU tracks internally). Metal's path
+    // reuses the single descriptor layout and doesn't reach this branch.
+    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    auto emitImageBarrier = [&](rhi::ResourceHandle tex, u32 mip,
+                                 rhi::ResourceState before, rhi::ResourceState after) {
+        if (!isVulkan) return;
+        rhi::ResourceBarrier b{};
+        b.resource = tex;
+        b.beforeState = before;
+        b.afterState = after;
+        b.subresource = mip;
+        b.queueFamily = 0xFFFFFFFF;
+        cmd_buffer->InsertBarrier(&b, 1);
+    };
 
     // On Dawn the copy stage needs a separate descriptor set (reads texture_depth_2d
     // via SampledDepthImage); mip stages share the regular SampledImage layout.
@@ -521,6 +537,15 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     device_->UpdateDescriptorSets(2, baseWrites);
 
     const rhi::DescriptorSetHandle copyDescriptorSets[] = { copyDescriptorSet };
+
+    // Vulkan: source depth is in DepthStencilAttachment (render pass finalLayout);
+    // HZBCopy samples it via SampledDepthImage → needs ShaderResource.
+    // HZB mip 0 starts UNDEFINED; StorageImage write needs GENERAL (UnorderedAccess).
+    emitImageBarrier(depth_texture, 0xFFFFFFFFu,
+                     rhi::ResourceState::DepthStencil, rhi::ResourceState::ShaderResource);
+    emitImageBarrier(hzb_texture_, 0,
+                     rhi::ResourceState::Unknown, rhi::ResourceState::UnorderedAccess);
+
     cmd_buffer->BindComputePipeline(hzb_copy_pipeline_);
     cmd_buffer->BindDescriptorSets(
         rhi::PipelineBindPoint::Compute,
@@ -539,6 +564,11 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         rhi::AccessFlag::ShaderWrite,
         rhi::AccessFlag::ShaderRead
     );
+
+    // Vulkan: HZBCopy wrote mip 0 in GENERAL. First HZBMip iteration samples mip 0
+    // via SampledImage → needs ShaderResource (SHADER_READ_ONLY_OPTIMAL).
+    emitImageBarrier(hzb_texture_, 0,
+                     rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
 
     for (u32 mip_level = 0; mip_level < mip_levels_ - 1; ++mip_level) {
         rhi::TextureViewDesc sourceViewDesc{};
@@ -610,6 +640,10 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         threadGroupsX = (target_width + 15) / 16;
         threadGroupsY = (target_height + 15) / 16;
 
+        // Vulkan: target mip (level+1) is still UNDEFINED; StorageImage write needs GENERAL.
+        emitImageBarrier(hzb_texture_, mip_level + 1,
+                         rhi::ResourceState::Unknown, rhi::ResourceState::UnorderedAccess);
+
         // 🔇 DISABLED: Verbose HZB output
         // std::cout << "[HZBSystem] 🚀 Generating mip " << (mip_level + 1) << " from mip " << mip_level
         //           << " (" << target_width << "x" << target_height << ")" << std::endl;
@@ -622,6 +656,11 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
             rhi::AccessFlag::ShaderWrite,
             rhi::AccessFlag::ShaderRead
         );
+
+        // Vulkan: target mip (level+1) becomes the source for the next iteration's
+        // SampledImage read → transition UA → ShaderResource.
+        emitImageBarrier(hzb_texture_, mip_level + 1,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
 
     }
 
