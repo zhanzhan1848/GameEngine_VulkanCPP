@@ -476,6 +476,27 @@ if(ENABLE_VULKAN)
                 $<TARGET_FILE_DIR:TestVulkanNaniteSmoke>/Engine/Graphics/Vulkan/shaders
     )
 
+    # Tier 4.5.1: StandardRenderPipeline plumbing smoke on Vulkan.
+    # Validates minimal Initialize() + no-op RenderWithCommandBuffer path.
+    # Editor render itself is blocked — ForwardSceneRenderer hardcodes .metal
+    # shaders; needs SPIR-V port (T4.6 scope).
+    add_executable(TestVulkanStandardPipelineSmoke
+        RHI/Core/TestVulkanStandardPipelineSmoke.cpp
+    )
+    target_include_directories(TestVulkanStandardPipelineSmoke PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanStandardPipelineSmoke PRIVATE Engine)
+    target_compile_definitions(TestVulkanStandardPipelineSmoke PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanStandardPipelineSmoke COMMAND TestVulkanStandardPipelineSmoke)
+    set_target_properties(TestVulkanStandardPipelineSmoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
     # Phase 4b-T3.5b: IBL Equirectangular → Cube (compute).
     add_executable(TestVulkanIBL_Equirect
         RHI/Core/TestVulkanIBL_Equirect.cpp
