@@ -369,7 +369,6 @@ project_rules.md
 *.xcbkptlist
 *.plist
 
-build/
 xcode_build/
 .claude/
 .opencode/worktrees/
