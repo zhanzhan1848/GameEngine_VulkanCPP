@@ -38,7 +38,11 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
         }
         else
         {
-            _slices = new TextureSliceSet(decoded.Width, decoded.Height, decoded.ArrayCount, decoded.MipCount, decoded.Rgba);
+            _slices = new TextureSliceSet(
+                decoded.Width, decoded.Height,
+                Math.Max(decoded.ArrayCount, Settings.ArraySize),
+                Math.Max(decoded.MipCount, Settings.MipLevels),
+                decoded.Rgba);
         }
         _mipIndex = Clamp(_mipIndex, 0, MaxMipIndex);
         _arrayIndex = Clamp(_arrayIndex, 0, MaxArrayIndex);
@@ -62,6 +66,36 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
         OnPropertyChanged(nameof(ArrayDisplay));
         OnPropertyChanged(nameof(DepthDisplay));
         OnPropertyChanged(nameof(Info));
+    }
+
+    /// <summary>
+    /// Test hook: returns the currently-installed slice set's RGBA
+    /// buffer. Used to assert that <see cref="RecomputeMaxIndices"/>
+    /// preserves the same ReadOnlyMemory&lt;byte&gt; reference across
+    /// re-constructions (WriteableBitmap pins it).
+    /// </summary>
+    public ReadOnlyMemory<byte> SlicesForTestRgba() => _slices?.Rgba ?? default;
+
+    private void RecomputeMaxIndices()
+    {
+        if (_slices == null) return;
+        var currentRgba = _slices.Rgba;
+        var w = _slices.Width;
+        var h = _slices.Height;
+        _slices = new TextureSliceSet(
+            w, h,
+            Math.Max(1, Settings.ArraySize),
+            Math.Max(1, Settings.MipLevels),
+            currentRgba);
+        _mipIndex = Clamp(_mipIndex, 0, MaxMipIndex);
+        _arrayIndex = Clamp(_arrayIndex, 0, MaxArrayIndex);
+        _depthIndex = Clamp(_depthIndex, 0, MaxDepthIndex);
+        OnPropertyChanged(nameof(MaxMipIndex));
+        OnPropertyChanged(nameof(MaxArrayIndex));
+        OnPropertyChanged(nameof(MaxDepthIndex));
+        OnPropertyChanged(nameof(MipDisplay));
+        OnPropertyChanged(nameof(ArrayDisplay));
+        OnPropertyChanged(nameof(DepthDisplay));
     }
 
     private bool _isDirty;
@@ -232,7 +266,11 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
             return;
         }
         if (decoded == null) return;
-        _slices = new TextureSliceSet(decoded.Width, decoded.Height, decoded.ArrayCount, decoded.MipCount, decoded.Rgba);
+        _slices = new TextureSliceSet(
+            decoded.Width, decoded.Height,
+            Math.Max(decoded.ArrayCount, Settings.ArraySize),
+            Math.Max(decoded.MipCount, Settings.MipLevels),
+            decoded.Rgba);
         OnPropertyChanged(nameof(MaxMipIndex));
         OnPropertyChanged(nameof(MaxArrayIndex));
         OnPropertyChanged(nameof(MaxDepthIndex));
@@ -347,6 +385,7 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
     {
         if (Asset == null) return;
         Settings = AssetImportSettingsStore.Load<TextureImportSettings>(Asset.FullPath);
+        RecomputeMaxIndices();
         ClearDirty();
         RebuildPreview();
         OnPropertyChanged(nameof(IsNormalMap));
