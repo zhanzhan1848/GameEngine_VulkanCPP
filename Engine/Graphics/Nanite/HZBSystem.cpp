@@ -449,6 +449,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 //    std::cout << "[HZBSystem] ✅ HZB texture is valid: " << hzb_texture_ << std::endl;
 
     std::vector<rhi::ResourceHandle> temporaryViews;
+    std::vector<rhi::DescriptorSetHandle> temporaryDescriptorSets;
 
     const bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
                          device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
@@ -474,10 +475,17 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     rhi::DescriptorSetDesc descriptorDesc{};
     descriptorDesc.layout = hzb_descriptor_layout_;
 
-    rhi::DescriptorSetHandle descriptorSet = device_->CreateDescriptorSet(descriptorDesc);
-    if (descriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
-        std::cerr << "[HZBSystem] Failed to create HZB descriptor set" << std::endl;
-        return false;
+    // Metal reuses one descriptor set for both stages. Dawn/Vulkan allocate a
+    // fresh set per HZBMip iteration — updating a bound set without
+    // UPDATE_AFTER_BIND trips Vulkan validation ("descriptor set updated without
+    // UPDATE_AFTER_BIND").
+    rhi::DescriptorSetHandle descriptorSet = rhi::handles::INVALID_DESCRIPTOR_SET;
+    if (!isDawn) {
+        descriptorSet = device_->CreateDescriptorSet(descriptorDesc);
+        if (descriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
+            std::cerr << "[HZBSystem] Failed to create HZB descriptor set" << std::endl;
+            return false;
+        }
     }
 
     rhi::DescriptorSetHandle copyDescriptorSet = rhi::handles::INVALID_DESCRIPTOR_SET;
@@ -487,9 +495,9 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         copyDescriptorSet = device_->CreateDescriptorSet(copyDesc);
         if (copyDescriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
             std::cerr << "[HZBSystem] Failed to create HZB copy descriptor set" << std::endl;
-            device_->DestroyDescriptorSet(descriptorSet);
             return false;
         }
+        temporaryDescriptorSets.push_back(copyDescriptorSet);
     } else {
         // Metal path reuses the single descriptorSet for both stages.
         copyDescriptorSet = descriptorSet;
@@ -506,8 +514,8 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     rhi::ResourceHandle hzbMip0View = device_->CreateTextureView(baseTargetViewDesc);
     if (hzbMip0View == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[HZBSystem] Failed to create HZB mip0 view" << std::endl;
-        device_->DestroyDescriptorSet(descriptorSet);
-        if (isDawn) device_->DestroyDescriptorSet(copyDescriptorSet);
+        if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
+        for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
         return false;
     }
     temporaryViews.push_back(hzbMip0View);
@@ -583,7 +591,8 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         if (sourceView == rhi::handles::INVALID_RESOURCE) {
             std::cerr << "[HZBSystem] Failed to create source mip view" << std::endl;
             for (auto view : temporaryViews) device_->DestroyTexture(view);
-            device_->DestroyDescriptorSet(descriptorSet);
+            for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
+            if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
             return false;
         }
         temporaryViews.push_back(sourceView);
@@ -600,10 +609,31 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         if (targetView == rhi::handles::INVALID_RESOURCE) {
             std::cerr << "[HZBSystem] Failed to create target mip view" << std::endl;
             for (auto view : temporaryViews) device_->DestroyTexture(view);
-            device_->DestroyDescriptorSet(descriptorSet);
+            for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
+            if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
             return false;
         }
         temporaryViews.push_back(targetView);
+
+        // Dawn/Vulkan: allocate a fresh descriptor set per iteration. Updating a
+        // descriptor set after it's been bound to the command buffer (without
+        // UPDATE_AFTER_BIND) trips Vulkan validation. Metal's API is permissive
+        // and reuses the single descriptorSet across iterations.
+        rhi::DescriptorSetHandle iterDescriptorSet;
+        if (isDawn) {
+            rhi::DescriptorSetDesc iterDesc{};
+            iterDesc.layout = hzb_descriptor_layout_;
+            iterDescriptorSet = device_->CreateDescriptorSet(iterDesc);
+            if (iterDescriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
+                std::cerr << "[HZBSystem] Failed to create HZB mip descriptor set" << std::endl;
+                for (auto view : temporaryViews) device_->DestroyTexture(view);
+                for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
+                return false;
+            }
+            temporaryDescriptorSets.push_back(iterDescriptorSet);
+        } else {
+            iterDescriptorSet = descriptorSet;
+        }
 
         rhi::DescriptorImageInfo sourceInfo{};
         sourceInfo.imageView = sourceView;
@@ -614,12 +644,12 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         targetInfo.imageLayout = rhi::ResourceState::UnorderedAccess;
         targetInfo.sampler = rhi::handles::INVALID_SAMPLER;
         rhi::WriteDescriptorSet mipWrites[2]{};
-        mipWrites[0].dstSet = descriptorSet;
+        mipWrites[0].dstSet = iterDescriptorSet;
         mipWrites[0].dstBinding = 0;
         mipWrites[0].descriptorCount = 1;
         mipWrites[0].descriptorType = rhi::DescriptorType::SampledImage;
         mipWrites[0].imageInfo = &sourceInfo;
-        mipWrites[1].dstSet = descriptorSet;
+        mipWrites[1].dstSet = iterDescriptorSet;
         mipWrites[1].dstBinding = 1;
         mipWrites[1].descriptorCount = 1;
         mipWrites[1].descriptorType = rhi::DescriptorType::StorageImage;
@@ -627,7 +657,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         device_->UpdateDescriptorSets(2, mipWrites);
 
         cmd_buffer->BindComputePipeline(hzb_downsample_pipeline_);
-        const rhi::DescriptorSetHandle mipDescriptorSets[] = { descriptorSet };
+        const rhi::DescriptorSetHandle mipDescriptorSets[] = { iterDescriptorSet };
         cmd_buffer->BindDescriptorSets(
             rhi::PipelineBindPoint::Compute,
             hzb_pipeline_layout_,
@@ -664,9 +694,24 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 
     }
 
+    // Vulkan: validation tracks every bound StorageImage descriptor against the
+    // image's final layout at vkQueueSubmit time. StorageImage descriptor
+    // imageLayout must be GENERAL per VUID-04152; the post-dispatch transitions
+    // above leave mips in SHADER_READ_ONLY_OPTIMAL, mismatching the descriptors.
+    // Transition all mips back to GENERAL to satisfy the submit-time check.
+    // (Downstream passes that sample hzb_texture_ must re-transition to
+    // ShaderResource before their SampledImage dispatches.)
+    if (isVulkan) {
+        for (u32 m = 0; m < mip_levels_; ++m) {
+            emitImageBarrier(hzb_texture_, m,
+                             rhi::ResourceState::ShaderResource,
+                             rhi::ResourceState::UnorderedAccess);
+        }
+    }
+
     for (auto view : temporaryViews) device_->DestroyTexture(view);
-    device_->DestroyDescriptorSet(descriptorSet);
-    if (isDawn) device_->DestroyDescriptorSet(copyDescriptorSet);
+    for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
+    if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
 
     // 🔇 DISABLED: Verbose HZB output
     // std::cout << "[HZBSystem] ✅ HZB generation dispatch completed" << std::endl;

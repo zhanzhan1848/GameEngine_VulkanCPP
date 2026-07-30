@@ -58,9 +58,21 @@ bool VulkanDescriptorSet::Initialize() {
 }
 
 void VulkanDescriptorSet::destroyImpl() {
-    // VkDescriptorSet 自身无需手动 free — 它随 pool 一起销毁。
-    // 但 pool 是 per-layout 的,如果 pool 还在,可以 vkFreeDescriptorSets。
-    // Phase 4 简化:什么都不做,让 layout 的 pool 销毁时一并回收。
+    if (set_ == VK_NULL_HANDLE) return;
+    // VkDescriptorSet must outlive any command buffer that references it.
+    // HZBSystem + similar per-call creators destroy the set before the command
+    // buffer is submitted — validation flags this as UAF. Defer vkFreeDescriptorSets
+    // to GC purge so the set stays alive until the device is satisfied the GPU
+    // work has completed (or Shutdown flushes the queue).
+    VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
+    VulkanDescriptorSetLayout* layout = static_cast<VulkanDevice&>(device_).GetDescriptorSetLayout(layoutHandle_);
+    VkDescriptorSet set = set_;
+    VkDescriptorPool pool = layout ? layout->GetNativePool() : VK_NULL_HANDLE;
+    if (dev != VK_NULL_HANDLE && pool != VK_NULL_HANDLE) {
+        device_.GetGarbageCollector().DeferredDestroy([dev, pool, set]() {
+            vkFreeDescriptorSets(dev, pool, 1, &set);
+        });
+    }
     set_ = VK_NULL_HANDLE;
 }
 
