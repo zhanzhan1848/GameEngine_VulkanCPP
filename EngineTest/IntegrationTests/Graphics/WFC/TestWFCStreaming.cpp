@@ -346,10 +346,11 @@ void WFCStreamingTestCase::Run() {
 // WFCStreamingTestCase::Shutdown
 // ============================================================================
 //
-// Mirrors TestWFCRendering::Shutdown cleanup order: release streaming state
-// before the catalog (solver_ holds raw pointers into grid_/buf_/registry_/
+// Cleanup order for streaming + catalog state: release streaming state before
+// the catalog (solver_ holds raw pointers into grid_/buf_/registry_/
 // adjacency_), then catalog before pipeline (registry mesh_handles point at
-// ForwardSceneRenderer slots).
+// ForwardSceneRenderer slots). This test never spawns entities (PumpSolverFrame
+// asserts on collapse count, not rendering), so no entity-destroy step.
 
 void WFCStreamingTestCase::Shutdown() {
     if (!pipeline && !scene) return;  // idempotent

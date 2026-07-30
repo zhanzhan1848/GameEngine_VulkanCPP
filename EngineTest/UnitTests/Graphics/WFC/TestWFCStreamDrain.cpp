@@ -119,6 +119,20 @@ TestResult DrainStream_MultipleRestarts_IncrementsCountAndKeepsLastBatch() {
     return TestResult::Passed;
 }
 
+TestResult DrainStream_RestartAsLastStep_YieldsZeroPoints() {
+    WFCStepBuffer buf;
+    WFCTileRegistry reg = MakeOneTileRegistry();
+    buf.Push(MakeCollapse(1, 1, 1, wfc_tile_id{0}, 0));
+    buf.Push(MakeRestart(1));
+
+    WFCStreamDrainResult r = WFCOutput::DrainStream(buf, reg, 1.0f);
+
+    TEST_ASSERT(r.restart_seen, "restart_seen");
+    TEST_ASSERT_EQ(1u, r.restart_count, "one restart");
+    TEST_ASSERT_EQ(0u, r.new_points.count, "no post-restart collapses -> 0 points");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCStreamDrain");
     TEST_CASE(suite, "EmptyBuffer_ReturnsEmpty",
@@ -131,6 +145,8 @@ int main() {
               DrainStream_RestartClearsNewPoints_AndSetsFlag);
     TEST_CASE(suite, "MultipleRestarts_IncrementsCountAndKeepsLastBatch",
               DrainStream_MultipleRestarts_IncrementsCountAndKeepsLastBatch);
+    TEST_CASE(suite, "RestartAsLastStep_YieldsZeroPoints",
+              DrainStream_RestartAsLastStep_YieldsZeroPoints);
     suite.RunAllTests();
     return 0;
 }
