@@ -64,7 +64,66 @@ fi
 echo "[build_app] repo root:  $REPO_ROOT"
 echo "[build_app] native lib: $NATIVE_LIB_DIR (source: $LIB_SRC_LABEL)"
 
+# Staleness check: if any tracked C++ source under ContentTools/ or
+# EngineDLL/ is newer than the corresponding dylib in WT_NATIVE_DIR,
+# the editor will load stale code on next launch. Warn (but don't fail)
+# so the user notices and can rebuild. We don't fail because the user
+# may have intentionally skipped a rebuild (e.g. only editing XAML).
+#
+# WT_ROOT is the root of the tree that owns WT_NATIVE_DIR (worktree
+# root in worktree setups, main checkout root otherwise). Source dirs
+# are looked up under WT_ROOT, not PROJ_DIR.
+WT_ROOT="$(cd "$PROJ_DIR/.." && pwd -P)"
+if [[ "$LIB_SRC_LABEL" == "worktree" && -d "$WT_NATIVE_DIR" ]]; then
+  stale=0
+  for dylib in libEngineDLL.dylib libContentTools.dylib; do
+    src_dir=""
+    case "$dylib" in
+      libEngineDLL.dylib)   src_dir="EngineDLL"   ;;
+      libContentTools.dylib) src_dir="ContentTools" ;;
+    esac
+    [[ -z "$src_dir" ]] && continue
+    dylib_path="$WT_NATIVE_DIR/$dylib"
+    [[ -f "$dylib_path" ]] || continue
+    newer_count="$(find "$WT_ROOT/$src_dir" \( -name '*.cpp' -o -name '*.mm' \) \
+                    -newer "$dylib_path" -print -quit 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ -n "$newer_count" && "$newer_count" != "0" ]]; then
+      echo "[build_app] WARNING: $dylib in $WT_NATIVE_DIR is older than at least one source under $src_dir/" >&2
+      stale=1
+    fi
+  done
+  if [[ "$stale" == "1" ]]; then
+    echo "[build_app]   rebuild before launching the editor:" >&2
+    echo "[build_app]     $PROJ_DIR/build/build_engine.sh $CONFIG" >&2
+    echo "[build_app]   (continuing anyway — the dylib may still be runnable; this is a warning, not an error)" >&2
+  fi
+fi
+
 if [[ -d "$NATIVE_LIB_DIR" ]]; then
+  # In-place install-name fixup at WT_NATIVE_DIR. CMake emits the
+  # dylibs with @executable_path/libfbxsdk.dylib and @rpath/@loader_path
+  # mismatches that only resolve inside an .app bundle. Anyone
+  # dlopening the WT_NATIVE_DIR dylib directly (smoke tests, the
+  # dotnet apphost before build_app finishes, the build's own
+  # verification step) would otherwise get a silent "Library not
+  # loaded" failure that looks like a missing entry point. Fixing
+  # at the source means a single cmake build is self-contained.
+  for dylib in libContentTools.dylib libEngineDLL.dylib; do
+    src="$NATIVE_LIB_DIR/$dylib"
+    [[ -f "$src" ]] || continue
+    chmod +w "$src" 2>/dev/null || true
+    case "$dylib" in
+      libContentTools.dylib)
+        install_name_tool -change @rpath/libfbxsdk.dylib @loader_path/libfbxsdk.dylib "$src" 2>/dev/null || true
+        install_name_tool -change @executable_path/libfbxsdk.dylib @loader_path/libfbxsdk.dylib "$src" 2>/dev/null || true
+        ;;
+      libEngineDLL.dylib)
+        install_name_tool -change @rpath/libContentTools.dylib @loader_path/libContentTools.dylib "$src" 2>/dev/null || true
+        install_name_tool -id @loader_path/libEngineDLL.dylib "$src" 2>/dev/null || true
+        ;;
+    esac
+  done
+
   for dylib in libEngineDLL.dylib libContentTools.dylib libfbxsdk.dylib; do
     src="$NATIVE_LIB_DIR/$dylib"
     dst="$BUILD_DIR/$dylib"
