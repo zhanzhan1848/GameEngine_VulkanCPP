@@ -5,6 +5,7 @@
 #include "../../Common/Id.h"
 #include "../../Geometry/GeometryTypes.h"
 #include "../../Utilities/MathTypes.h"
+#include "WFCCategory.h"
 
 namespace primal::graphics::wfc {
 
@@ -43,7 +44,8 @@ struct WFCTile {
     u32              variant_count;
     bool             is_organic;
     bool             is_rotationally_symmetric;
-    u8               _pad[10];              // explicit tail pad; sizeof(WFCTile)=320, alignof=16 (driven by v3)
+    WFCCategory      category{WFCCategory::Primitive};  // Phase C.1: thematic group (Primitive/Ruins/...)
+    u8               _pad[9];               // explicit tail pad; sizeof(WFCTile)=320, alignof=16 (driven by v3)
 };
 
 static_assert(sizeof(WFCTile) == 320, "WFCTile layout drifted");

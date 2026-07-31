@@ -1998,6 +1998,20 @@ set_target_properties(TestWFCSolver PROPERTIES
 target_compile_definitions(TestWFCSolver PRIVATE DEBUG _DEBUG)
 set_target_properties(TestWFCSolver PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestWFCCategory
+    Graphics/WFC/TestWFCCategory.cpp)
+target_include_directories(TestWFCCategory PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests)
+target_link_libraries(TestWFCCategory PRIVATE Engine)
+add_test(NAME TestWFCCategory COMMAND TestWFCCategory)
+set_target_properties(TestWFCCategory PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCCategory PRIVATE DEBUG _DEBUG)
+
 add_executable(TestWFCTileRegistryPacking
     Graphics/WFC/TestWFCTileRegistryPacking.cpp)
 target_include_directories(TestWFCTileRegistryPacking PRIVATE
