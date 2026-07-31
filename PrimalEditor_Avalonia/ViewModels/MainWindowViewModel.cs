@@ -1,6 +1,8 @@
 ﻿using System.Collections.Generic;
 using System.Windows.Input;
 using Dock.Model.Controls;
+using Dock.Model.Core;
+using Dock.Model.Mvvm.Core;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.GameProject;
@@ -35,6 +37,15 @@ public class MainWindowViewModel : ViewModelBase
             }
         }
     }
+
+    /// <summary>
+    /// The factory that built <see cref="Layout"/>. DockControl's
+    /// <c>Factory</c> property binds here so the control can call
+    /// back into the factory for floating-window creation, dock
+    /// state tracking, etc. Without this binding, DockControl shows
+    /// an empty canvas even when <see cref="Layout"/> is populated.
+    /// </summary>
+    public IFactory Factory { get; }
 
     public bool IsLoggerVisible
     {
@@ -210,9 +221,9 @@ public class MainWindowViewModel : ViewModelBase
 
     public MainWindowViewModel()
     {
-        var factory = new MainWindowDockFactory(this);
-        Layout = factory.CreateLayout();
-        factory.InitLayout(Layout!);
+        Factory = new MainWindowDockFactory(this);
+        Layout = Factory.CreateLayout();
+        Factory.InitLayout(Layout!);
 
         NewProjectCommand = new RelayCommand(_ => NewProjectExecute());
         OpenProjectCommand = new RelayCommand(_ => OpenProjectExecute());
@@ -245,14 +256,18 @@ public class MainWindowViewModel : ViewModelBase
     public void ApplyLayout(DockingLayout? saved)
     {
         if (saved == null || saved.Entries.Count == 0) return;
-        var factory = new MainWindowDockFactory(this);
-        Layout = DockingLayoutBridge.ToDockTree(saved, factory, entry => entry.Id switch
+        // Reuse the existing factory so DockControl's `Factory`
+        // binding (which points at this VM's `Factory` property)
+        // still references the same instance — otherwise swapping
+        // the factory reference would also reset DockControl's
+        // internal state.
+        Layout = DockingLayoutBridge.ToDockTree(saved, Factory, entry => entry.Id switch
         {
             "WorldEditor" => WorldEditor,
             "ContentBrowser" => ContentBrowser,
             _ => null,
         });
-        factory.InitLayout(Layout!);
+        Factory.InitLayout(Layout!);
     }
 
     /// <summary>

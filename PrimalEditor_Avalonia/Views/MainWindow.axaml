@@ -84,7 +84,11 @@
 
         <Grid RowDefinitions="*,4,180">
 
-            <dock:DockControl Grid.Row="0" Layout="{Binding Layout}"/>
+            <dock:DockControl Grid.Row="0"
+                              InitializeLayout="True"
+                              InitializeFactory="True"
+                              Factory="{Binding Factory}"
+                              Layout="{Binding Layout}"/>
 
             <GridSplitter Grid.Row="1"
                           Height="4"
