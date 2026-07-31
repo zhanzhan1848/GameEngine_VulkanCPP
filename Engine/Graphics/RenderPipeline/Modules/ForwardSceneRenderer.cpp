@@ -196,17 +196,22 @@ static std::string InlineIncludes(const std::string& source, int depth,
 }
 
 // T4.6.5: LoadShaderSource is platform-aware.
-//   Metal: text-mode .metal with #include inlining.
-//   Vulkan: binary .spv (precompiled; no #include processing).
+//   Metal: text-mode .metal with #include inlining. Entry-point name passed
+//          through to CreateShader as-is.
+//   Vulkan: binary .spv with stage suffix (e.g. "Skybox.vert.spv",
+//           "Skybox.frag.spv"). Single entry point per file named "main".
 //
 // Note: full Vulkan activation is blocked beyond just file existence — the
 // existing SPIR-V ports use different stage models (e.g. DeferredLighting.spv
 // is a GLCompute shader, but the Metal path loads vertexMain/fragmentLighting_v3
 // as vertex+fragment). Removing the T4.6.3 skip requires aligning stage models,
 // not just adding more .spv files. See plan T4.6.5 for the full blocker list.
-static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platform) {
+static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platform,
+                                        ShaderStage stage) {
     if (platform == RHIPlatform::Vulkan) {
-        std::string path = VULKAN_SHADER_DIR + filename + std::string(".spv");
+        // Convention: <Name>.<stage>.spv with entry point "main"
+        const char* stageSuffix = (stage == ShaderStage::Vertex) ? ".vert" : ".frag";
+        std::string path = VULKAN_SHADER_DIR + filename + stageSuffix + ".spv";
         auto bytes = ReadFileToBytes(path);
         if (bytes.empty()) {
             std::cerr << "[ForwardSceneRenderer] Failed to load SPIR-V: " << path << std::endl;
@@ -326,24 +331,26 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     if (initialized_) return true;
 
     // T4.6.5: ForwardSceneRenderer still deferred on Vulkan.
-    // T4.6.5 part 1 (this commit) shipped the platform-aware loader
-    // (LoadShaderSource now reads .spv on Vulkan) and fixed push-constant
-    // offset (2 → 0; VUID-VkPushConstantRange-offset-00295).
+    // T4.6.5 part 1 shipped the platform-aware loader (LoadShaderSource reads
+    // .spv on Vulkan) + push-constant offset fix (2 → 0).
+    // T4.6.5 part 2 (this commit) verified the loader works: DepthOnly and
+    // Skybox SPIR-V files load silently (no "Failed to load" message), proving
+    // the stage-suffixed naming + "main" entry convention is correct.
     //
     // Remaining blockers (multi-session scope):
     //   1. Stage-model mismatch: existing DeferredLighting.spv is a GLCompute
     //      shader, but ForwardSceneRenderer loads vertexMain/fragmentLighting_v3
     //      as vertex+fragment. The Metal and Vulkan paths use fundamentally
     //      different shader architectures for deferred lighting.
-    //   2. 8 of 11 ForwardSceneRenderer shaders have no SPIR-V port at all:
-    //      DepthOnly, Skybox, GBufferAlphaClip, GBufferUnlit, GBufferFoliage,
-    //      GBufferWater, GBufferTransparent, ForwardTransparency, StreamingGBuffer
+    //   2. 9 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
+    //      GBuffer, GBufferAlphaClip, GBufferUnlit, GBufferFoliage, GBufferWater,
+    //      GBufferTransparent, ForwardTransparency, StreamingGBuffer, DeferredLighting
     //   3. Vertex buffer binding slot 0/1 convention differs (Metal uses
     //      [[buffer(1)]] for vertices; Vulkan expects binding 0).
     // Keep the skip in place until those are resolved.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
-        std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (loader + push-const "
-                     "fixed T4.6.5; deferred — needs stage-model + 8 SPIR-V ports)"
+        std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (T4.6.5: "
+                     "loader works; 9 of 11 shaders still need SPIR-V ports)"
                   << std::endl;
         return false;
     }
@@ -562,12 +569,15 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
 void ForwardSceneRenderer::CreateShaders() {
     const RHIPlatform platform = device_->GetPlatform();
     auto load = [this, platform](const char* file, const char* entry, ShaderStage stage) -> ShaderHandle {
-        auto src = LoadShaderSource(file, platform);
+        auto src = LoadShaderSource(file, platform, stage);
         if (src.empty()) {
             std::cerr << "[ForwardSceneRenderer] Failed to load shader: " << file << "/" << entry << std::endl;
             return handles::INVALID_SHADER;
         }
-        auto handle = device_->CreateShader(src.data(), src.size(), stage, entry);
+        // Vulkan SPIR-V files use "main" entry point; Metal uses named entries.
+        const char* vkEntry = "main";
+        const char* useEntry = (platform == RHIPlatform::Vulkan) ? vkEntry : entry;
+        auto handle = device_->CreateShader(src.data(), src.size(), stage, useEntry);
         if (handle == handles::INVALID_SHADER) {
             std::cerr << "[ForwardSceneRenderer] Failed to compile shader: " << file << "/" << entry << std::endl;
         }
