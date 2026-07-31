@@ -14,6 +14,20 @@ LineBatchRenderer::~LineBatchRenderer() {
 
 bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     if (initialized_) return true;
+
+    // T4.6.4: LineBatchRenderer deferred on Vulkan. Hardcoded .metal shader
+    // path (line ~21), push-constant offset=2 (Metal [[buffer(2)]] index —
+    // Vulkan requires 4-aligned offset, VUID-VkPushConstantRange-offset-00295),
+    // and BindVertexBuffers slot 1 with no slot 0 (relies on Metal's
+    // per-buffer index binding). Non-critical debug visualization; deferred
+    // alongside ParticlePass + ForwardSceneRenderer. See plan T4.6.5+.
+    if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
+        std::cerr << "[LineBatchRenderer] Skipped on Vulkan (deferred — needs .metal "
+                     "loader path + SPIR-V port + push-constant offset fix, plan T4.6.5+)"
+                  << std::endl;
+        return false;
+    }
+
     device_ = device;
 
     // Load shaders

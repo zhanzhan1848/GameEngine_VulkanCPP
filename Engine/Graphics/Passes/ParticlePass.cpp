@@ -22,13 +22,25 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
     if (!device) {
         return false;
     }
-    
+
     // Prevent double initialization - shutdown must be called first
     if (device_) {
         // Already initialized, return success
         return true;
     }
-    
+
+    // T4.6.4: ParticlePass deferred on Vulkan. Hardcoded .metal shader path
+    // (line ~34) and CreateShader receives MSL source text — on Vulkan that
+    // gets treated as SPIR-V binary and fails the magic-number check. A SPIR-V
+    // port would also need to drop the CombinedImageSampler binding (WGSL/naga
+    // cannot emit it). Non-critical visualization helper; deferred alongside
+    // LineBatchRenderer + ForwardSceneRenderer. See plan T4.6.5+.
+    if (device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        std::cerr << "[ParticlePass] Skipped on Vulkan (deferred — needs .metal "
+                     "loader path + SPIR-V port, plan T4.6.5+)" << std::endl;
+        return false;
+    }
+
     device_ = device;
     // Load particle shader from shaders directory (relative to executable)
     std::string shader_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/ParticleAtlas.metal";
