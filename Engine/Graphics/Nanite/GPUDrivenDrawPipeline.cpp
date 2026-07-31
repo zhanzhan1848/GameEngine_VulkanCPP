@@ -486,8 +486,11 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     rhi::TextureDesc finalDepthDesc{};
     finalDepthDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
     finalDepthDesc.format = rhi::DataFormat::D32_Float;
-    // CRITICAL: Add ShaderResource usage to allow depth texture to be sampled by HZB generation shader
-    finalDepthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    // DepthStencil = render target for depth. ShaderResource = HZB sampling.
+    // (Do NOT add TextureUsage::RenderTarget — that maps to COLOR_ATTACHMENT_BIT
+    // in Vulkan, which is illegal on a D32_SFLOAT image. Metal silently accepts
+    // the redundant bit; Vulkan rejects with VUID-VkImageCreateInfo-imageCreateMaxMipLevels-02251.)
+    finalDepthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
 
     final_depth_texture_ = device_->CreateTexture(finalDepthDesc);
     if (final_depth_texture_ == rhi::handles::INVALID_RESOURCE) {
