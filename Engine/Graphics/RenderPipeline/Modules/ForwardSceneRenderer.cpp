@@ -122,12 +122,27 @@ static const std::string SHADER_DIR =
 static const std::string RHI_SHADER_DIR =
     "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/";
 
+static const std::string VULKAN_SHADER_DIR =
+    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Vulkan/shaders/Forward/";
+
 static std::string ReadFileToString(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) return {};
     std::stringstream ss;
     ss << file.rdbuf();
     return ss.str();
+}
+
+// Binary file reader for precompiled SPIR-V. Returns empty vector on failure.
+static std::vector<u8> ReadFileToBytes(const std::string& path) {
+    std::ifstream file(path, std::ios::ate | std::ios::binary);
+    if (!file.is_open()) return {};
+    const std::streamsize size = file.tellg();
+    if (size <= 0) return {};
+    file.seekg(0, std::ios::beg);
+    std::vector<u8> bytes(static_cast<size_t>(size));
+    file.read(reinterpret_cast<char*>(bytes.data()), size);
+    return bytes;
 }
 
 static std::string ResolveInclude(const std::string& name) {
@@ -180,7 +195,26 @@ static std::string InlineIncludes(const std::string& source, int depth,
     return result;
 }
 
-static std::vector<u8> LoadShaderSource(const char* filename) {
+// T4.6.5: LoadShaderSource is platform-aware.
+//   Metal: text-mode .metal with #include inlining.
+//   Vulkan: binary .spv (precompiled; no #include processing).
+//
+// Note: full Vulkan activation is blocked beyond just file existence — the
+// existing SPIR-V ports use different stage models (e.g. DeferredLighting.spv
+// is a GLCompute shader, but the Metal path loads vertexMain/fragmentLighting_v3
+// as vertex+fragment). Removing the T4.6.3 skip requires aligning stage models,
+// not just adding more .spv files. See plan T4.6.5 for the full blocker list.
+static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platform) {
+    if (platform == RHIPlatform::Vulkan) {
+        std::string path = VULKAN_SHADER_DIR + filename + std::string(".spv");
+        auto bytes = ReadFileToBytes(path);
+        if (bytes.empty()) {
+            std::cerr << "[ForwardSceneRenderer] Failed to load SPIR-V: " << path << std::endl;
+            return {};
+        }
+        return bytes;
+    }
+
     std::string path = SHADER_DIR + filename + std::string(".metal");
     std::string source = ReadFileToString(path);
     if (source.empty()) {
@@ -291,19 +325,25 @@ ForwardSceneRenderer::~ForwardSceneRenderer() { Shutdown(); }
 bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height) {
     if (initialized_) return true;
 
-    // T4.6.3: ForwardSceneRenderer deferred on Vulkan. Two blockers:
-    //   1. CreateShaders() (line ~504) hardcodes the `.metal` extension when
-    //      building shader paths; on Vulkan every shader fails to compile and
-    //      all pipelines stay INVALID.
-    //   2. PCGPushConsts pipeline layout uses offset=2 (matching Metal's
-    //      [[buffer(2)]]) — Vulkan requires push-constant offsets to be a
-    //      multiple of 4 (VUID-VkPushConstantRange-offset-00295).
-    // Full Editor render path needs a platform-aware shader loader + 11 SPIR-V
-    // shader ports (GBuffer, DepthOnly, DeferredLighting, Skybox, etc.) — that
-    // is multi-session scope (plan T4.6.5).
+    // T4.6.5: ForwardSceneRenderer still deferred on Vulkan.
+    // T4.6.5 part 1 (this commit) shipped the platform-aware loader
+    // (LoadShaderSource now reads .spv on Vulkan) and fixed push-constant
+    // offset (2 → 0; VUID-VkPushConstantRange-offset-00295).
+    //
+    // Remaining blockers (multi-session scope):
+    //   1. Stage-model mismatch: existing DeferredLighting.spv is a GLCompute
+    //      shader, but ForwardSceneRenderer loads vertexMain/fragmentLighting_v3
+    //      as vertex+fragment. The Metal and Vulkan paths use fundamentally
+    //      different shader architectures for deferred lighting.
+    //   2. 8 of 11 ForwardSceneRenderer shaders have no SPIR-V port at all:
+    //      DepthOnly, Skybox, GBufferAlphaClip, GBufferUnlit, GBufferFoliage,
+    //      GBufferWater, GBufferTransparent, ForwardTransparency, StreamingGBuffer
+    //   3. Vertex buffer binding slot 0/1 convention differs (Metal uses
+    //      [[buffer(1)]] for vertices; Vulkan expects binding 0).
+    // Keep the skip in place until those are resolved.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
-        std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (deferred — needs "
-                     "platform-aware shader loader + 11 SPIR-V ports, plan T4.6.5)"
+        std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (loader + push-const "
+                     "fixed T4.6.5; deferred — needs stage-model + 8 SPIR-V ports)"
                   << std::endl;
         return false;
     }
@@ -520,8 +560,9 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
 }
 
 void ForwardSceneRenderer::CreateShaders() {
-    auto load = [this](const char* file, const char* entry, ShaderStage stage) -> ShaderHandle {
-        auto src = LoadShaderSource(file);
+    const RHIPlatform platform = device_->GetPlatform();
+    auto load = [this, platform](const char* file, const char* entry, ShaderStage stage) -> ShaderHandle {
+        auto src = LoadShaderSource(file, platform);
         if (src.empty()) {
             std::cerr << "[ForwardSceneRenderer] Failed to load shader: " << file << "/" << entry << std::endl;
             return handles::INVALID_SHADER;
@@ -569,7 +610,7 @@ void ForwardSceneRenderer::CreateShaders() {
 }
 
 void ForwardSceneRenderer::CreatePipelines() {
-    PushConstantRange modelPush{ShaderStage::Vertex, 2, sizeof(PCGPushConsts)};
+    PushConstantRange modelPush{ShaderStage::Vertex, 0, sizeof(PCGPushConsts)};
 
     // GBuffer
     {
@@ -1343,7 +1384,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
             PCGPushConsts pc{};
             pc.transform = MatrixIdentity();
             pc.use_instances = 1;
-            cmd->PushConstants(layout, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+            cmd->PushConstants(layout, ShaderStage::Vertex, 0, sizeof(PCGPushConsts), &pc);
             mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
         }
     }
@@ -1431,7 +1472,7 @@ void ForwardSceneRenderer::RenderStreamingMeshes(RHICommandBuffer* cmd, u32 fram
     PCGPushConsts pc{};
     pc.transform = MatrixIdentity();
     pc.use_instances = 0;
-    cmd->PushConstants(gbuffer_layout_, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+    cmd->PushConstants(gbuffer_layout_, ShaderStage::Vertex, 0, sizeof(PCGPushConsts), &pc);
 
     render_scene_->ForEachStreamingMesh([&](const StreamingMeshRecord& sm) {
         if (sm.slot != target_slot) return;  // skip non-matching triple-buffer slots

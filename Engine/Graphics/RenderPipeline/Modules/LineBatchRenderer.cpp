@@ -15,12 +15,12 @@ LineBatchRenderer::~LineBatchRenderer() {
 bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     if (initialized_) return true;
 
-    // T4.6.4: LineBatchRenderer deferred on Vulkan. Hardcoded .metal shader
-    // path (line ~21), push-constant offset=2 (Metal [[buffer(2)]] index —
-    // Vulkan requires 4-aligned offset, VUID-VkPushConstantRange-offset-00295),
-    // and BindVertexBuffers slot 1 with no slot 0 (relies on Metal's
-    // per-buffer index binding). Non-critical debug visualization; deferred
-    // alongside ParticlePass + ForwardSceneRenderer. See plan T4.6.5+.
+    // T4.6.5: LineBatchRenderer still deferred on Vulkan.
+    // Push-constant offset fixed (2→0; T4.6.5 part 1). Remaining blockers:
+    //   1. Hardcoded .metal shader path (line ~21) — needs SPIR-V port
+    //   2. BindVertexBuffers slot 1 with no slot 0 (relies on Metal's
+    //      per-buffer index binding; Vulkan convention is binding 0)
+    // Non-critical debug visualization.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
         std::cerr << "[LineBatchRenderer] Skipped on Vulkan (deferred — needs .metal "
                      "loader path + SPIR-V port + push-constant offset fix, plan T4.6.5+)"
@@ -63,7 +63,7 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     pl_desc.pushConstantRangeCount = 1;
     PushConstantRange pc_range;
     pc_range.stageFlags = ShaderStage::Vertex;
-    pc_range.offset     = 2;
+    pc_range.offset     = 0;
     pc_range.size       = 64; // sizeof(float4x4)
     pl_desc.pushConstantRanges = &pc_range;
 
@@ -150,7 +150,7 @@ void LineBatchRenderer::Render(RHICommandBuffer* cmd, const math::m4x4& view_pro
 
     // Bind pipeline and push view_proj
     cmd->BindGraphicsPipeline(pipeline_);
-    cmd->PushConstants(layout_, ShaderStage::Vertex, 2, sizeof(math::m4x4), &view_proj);
+    cmd->PushConstants(layout_, ShaderStage::Vertex, 0, sizeof(math::m4x4), &view_proj);
 
     // Bind vertex buffer at slot 1 (matches shader [[buffer(1)]])
     const u64 offset = 0;
