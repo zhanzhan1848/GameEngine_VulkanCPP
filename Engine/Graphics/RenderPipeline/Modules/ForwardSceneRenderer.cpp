@@ -350,23 +350,29 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     // T4.6.5 part 3: Path A blit — Blit.vert/Blit.frag authored.
     // T4.6.5 part 4: Path B foundation — Storage usage + compute desc layout.
     // T4.6.5 part 5: Path B pipeline — CreateComputePipeline for lighting.
-    // T4.6.5 part 6 (this commit): Path B UBOs — GlobalShaderData (480B) +
+    // T4.6.5 part 6: Path B UBOs — GlobalShaderData (480B) +
     //                ForwardLightBuffer (25808B) triple-buffered + mapped.
-    //                Descriptor set write + bind-site Dispatch are still
-    //                pending (part 7).
+    // T4.6.5 part 7 (this commit): Path B bind-site Dispatch — writes
+    //                lighting_compute_ds_[idx] with all 12 bindings + swaps
+    //                BeginRenderPass+Draw to BindComputePipeline+Dispatch.
+    //                UBO fill logic (per-frame update from camera + scene)
+    //                still pending (part 8).
     //
     // Remaining blockers (multi-session scope):
-    //   1. Path B bind-site conversion: write lighting_compute_ds_[idx] with
-    //      all 12 bindings + swap BeginRenderPass+Draw to Dispatch.
-    //   2. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
+    //   1. Path B UBO fill: per-frame write of GlobalShaderData +
+    //      ForwardLightBuffer from camera + render_scene (UBOs are mapped
+    //      but currently never filled — Dispatch will read stale/zero data).
+    //   2. Layout transitions for lighting_output_ around the Dispatch
+    //      (GENERAL ↔ SHADER_READ_ONLY — may need InsertBarrier calls).
+    //   3. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
     //      GBuffer, GBufferAlphaClip, GBufferUnlit, GBufferFoliage, GBufferWater,
     //      GBufferTransparent, ForwardTransparency, StreamingGBuffer
-    //   3. Vertex buffer binding slot 0/1 convention differs (Metal uses
+    //   4. Vertex buffer binding slot 0/1 convention differs (Metal uses
     //      [[buffer(1)]] for vertices; Vulkan expects binding 0).
     // Keep the skip in place until those are resolved.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
         std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (T4.6.5: "
-                     "3/11 shaders ported; Path B UBOs ready, bind-site Dispatch pending)"
+                     "3/11 shaders ported; Path B Dispatch ready, UBO fill pending)"
                   << std::endl;
         return false;
     }
@@ -1838,7 +1844,31 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
     RenderStreamingMeshes(cmd, idx);
 
     // Pass 4: Deferred Lighting
-    {
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        // T4.6.5 part 7 Path B: compute dispatch using existing .spv. Writes
+        // HDR output via OpImageStore (no render pass, no Draw).
+        // Bindings match Engine/Graphics/Vulkan/shaders/DeferredLighting.spv.
+        DescData params[] = {
+            {0,  DescriptorType::SampledImage,   gbuffer_albedo_[idx]},
+            {1,  DescriptorType::SampledImage,   gbuffer_normal_[idx]},
+            {2,  DescriptorType::SampledImage,   gbuffer_orm_[idx]},
+            {3,  DescriptorType::SampledImage,   gbuffer_velocity_[idx]},
+            {4,  DescriptorType::SampledImage,   shadow_map_[0]},
+            {5,  DescriptorType::SampledImage,   ibl_ready_ ? irradiance_map_ : black_cube_texture_},
+            {6,  DescriptorType::SampledImage,   ibl_ready_ ? prefiltered_map_ : black_cube_texture_},
+            {7,  DescriptorType::SampledImage,   ibl_ready_ ? brdf_lut_ : white_texture_},
+            {8,  DescriptorType::Sampler,        static_cast<ResourceHandle>(default_sampler_)},
+            {9,  DescriptorType::UniformBuffer,  lighting_global_ubos_[idx]},
+            {10, DescriptorType::UniformBuffer,  lighting_light_ubos_[idx]},
+            {11, DescriptorType::StorageImage,   lighting_output_[idx]},
+        };
+        UpdateDesc(device_, lighting_compute_ds_[idx], params, 12);
+
+        cmd->BindComputePipeline(lighting_pipeline_);
+        const DescriptorSetHandle sets[] = {lighting_compute_ds_[idx]};
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, lighting_compute_layout_, 0, 1, sets, 0, nullptr);
+        cmd->Dispatch((render_width_ + 7) / 8, (render_height_ + 7) / 8, 1);
+    } else {
         DescData params[] = {
             {0, DescriptorType::UniformBuffer, view_cb_[idx]},
             {1, DescriptorType::UniformBuffer, scene_cb_[idx]},
