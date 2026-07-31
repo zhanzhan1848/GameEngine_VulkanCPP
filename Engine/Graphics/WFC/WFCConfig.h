@@ -52,6 +52,10 @@ struct WFCConfig {
     u32            parametric_tile_count{12};
     u32            organic_tile_count{8};
 
+    // ---- Categories ----
+    // Default = all bits set (every category eligible). Bit index = WFCCategory enum value.
+    u64            active_category_mask{~0ULL};
+
     // ---- Reflection ----
     // Fills `out` with up to `max_count` descriptors and returns the total
     // descriptor count (which may exceed `max_count` if the buffer was too

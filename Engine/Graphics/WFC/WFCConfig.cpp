@@ -16,9 +16,10 @@ namespace primal::graphics::wfc {
 
 u32 WFCConfig::GetParamDescriptors(pcg::PCGParamDescriptor* out, u32 max_count) {
     // Static-lifetime strings — pointer-stable for editor hot-reload.
-    static const char* kGroup_Solver = "Solver";
-    static const char* kGroup_Grid   = "Grid";
-    static const char* kGroup_Render = "Render";
+    static const char* kGroup_Solver    = "Solver";
+    static const char* kGroup_Grid      = "Grid";
+    static const char* kGroup_Render    = "Render";
+    static const char* kGroup_Category  = "Category";
 
     // Comma-separated enum labels for Mode (matches PCG convention).
     static const char* kEnumNames_Mode = "Independent2D,Independent3D,Layered,SingleDomain";
@@ -56,6 +57,17 @@ u32 WFCConfig::GetParamDescriptors(pcg::PCGParamDescriptor* out, u32 max_count) 
         { "max_ms_per_frame", kGroup_Render, pcg::PCGParamType::UInt,
           { 1.0f, 33.0f, 1.0f },
           WFC_OFFSETOF(WFCConfig, max_ms_per_frame), sizeof(u32),
+          nullptr },
+
+        // ---- Category ----
+        // Bitmask over WFCCategory (bit index = enum value). Stored as u64;
+        // PCGParamType has no U64 variant, so we expose it as UInt — the editor
+        // reads the full 8 bytes via `size` (sizeof(u64)). Range covers the
+        // low 32 bits (f32 cannot represent the full u64 range); high bits are
+        // expected to be edited through category-aware UI in later phases.
+        { "active_category_mask", kGroup_Category, pcg::PCGParamType::UInt,
+          { 0.0f, 4294967295.0f, 1.0f },
+          WFC_OFFSETOF(WFCConfig, active_category_mask), sizeof(u64),
           nullptr },
     };
     constexpr u32 kCount = static_cast<u32>(sizeof(descs) / sizeof(descs[0]));

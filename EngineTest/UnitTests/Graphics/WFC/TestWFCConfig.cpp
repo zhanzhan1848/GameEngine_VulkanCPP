@@ -1,5 +1,6 @@
 #include "../../TestFramework.h"
 #include "Engine/Graphics/WFC/WFCConfig.h"
+#include "Engine/Graphics/WFC/WFCCategory.h"
 #include "Engine/Graphics/PCG/PCGReflection.h"
 
 #include <string>
@@ -49,11 +50,28 @@ TestResult TestWFCConfig_GetParamDescriptors_Reflects_Offsets() {
     return TestResult::Passed;
 }
 
+TestResult TestWFCConfig_DefaultCategoryMask_AllCategories() {
+    WFCConfig cfg;
+    // Default = all bits set — every category is eligible.
+    TEST_ASSERT_EQ(~0ULL, cfg.active_category_mask, "default = all categories");
+    return TestResult::Passed;
+}
+
+TestResult TestWFCConfig_CategoryMask_Roundtrip() {
+    WFCConfig cfg;
+    cfg.active_category_mask = CategoryMaskFor(WFCCategory::Ruins);
+    TEST_ASSERT_EQ(CategoryMaskFor(WFCCategory::Ruins),
+                   cfg.active_category_mask, "Ruins-only mask survives roundtrip");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCConfig");
     TEST_CASE(suite, "Default_Values", TestWFCConfig_Default_Values);
     TEST_CASE(suite, "GetParamDescriptors_Returns_Expected_Count", TestWFCConfig_GetParamDescriptors_Returns_Expected_Count);
     TEST_CASE(suite, "GetParamDescriptors_Reflects_Offsets", TestWFCConfig_GetParamDescriptors_Reflects_Offsets);
+    TEST_CASE(suite, "DefaultCategoryMask_AllCategories", TestWFCConfig_DefaultCategoryMask_AllCategories);
+    TEST_CASE(suite, "CategoryMask_Roundtrip",            TestWFCConfig_CategoryMask_Roundtrip);
     suite.RunAllTests();
     return 0;
 }
