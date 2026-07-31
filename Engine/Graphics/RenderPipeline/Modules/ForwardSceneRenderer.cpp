@@ -210,6 +210,19 @@ static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platfo
                                         ShaderStage stage) {
     if (platform == RHIPlatform::Vulkan) {
         // Convention: <Name>.<stage>.spv with entry point "main"
+        // Compute path: existing DeferredLighting.spv lives in the parent
+        // shaders/ dir (not Forward/), with no stage suffix (single .spv file).
+        // Caller passes "DeferredLighting" + ShaderStage::Compute to hit that path.
+        if (stage == ShaderStage::Compute) {
+            std::string path = std::string("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/")
+                             + "Engine/Graphics/Vulkan/shaders/" + filename + ".spv";
+            auto bytes = ReadFileToBytes(path);
+            if (bytes.empty()) {
+                std::cerr << "[ForwardSceneRenderer] Failed to load compute SPIR-V: " << path << std::endl;
+                return {};
+            }
+            return bytes;
+        }
         const char* stageSuffix = (stage == ShaderStage::Vertex) ? ".vert" : ".frag";
         std::string path = VULKAN_SHADER_DIR + filename + stageSuffix + ".spv";
         auto bytes = ReadFileToBytes(path);
@@ -357,7 +370,7 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     // Keep the skip in place until those are resolved.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
         std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (T4.6.5: "
-                     "3/11 shaders ported; Path B foundation in, pipeline conv pending)"
+                     "3/11 shaders ported; Path B compute pipeline wired, bind-site Dispatch pending)"
                   << std::endl;
         return false;
     }
@@ -622,8 +635,15 @@ void ForwardSceneRenderer::CreateShaders() {
     gbuffer_ps_ = load("GBuffer", "fragmentMain", ShaderStage::Pixel);
     shadow_vs_ = load("DepthOnly", "shadow_mapping_vs", ShaderStage::Vertex);
 
-    lighting_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
-    lighting_ps_ = load("DeferredLighting", "fragmentLighting_v3", ShaderStage::Pixel);
+    // T4.6.5 part 5 Path B: Vulkan loads single compute shader for lighting
+    // (existing Engine/Graphics/Vulkan/shaders/DeferredLighting.spv). The
+    // Metal vert/frag path stays untouched.
+    if (platform == RHIPlatform::Vulkan) {
+        lighting_cs_ = load("DeferredLighting", "main", ShaderStage::Compute);
+    } else {
+        lighting_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
+        lighting_ps_ = load("DeferredLighting", "fragmentLighting_v3", ShaderStage::Pixel);
+    }
     // T4.6.5 part 3: Vulkan uses dedicated Blit shaders (Path A); Metal still
     // uses the multi-entry DeferredLighting.metal fragmentBlit.
     if (platform == RHIPlatform::Vulkan) {
@@ -701,7 +721,18 @@ void ForwardSceneRenderer::CreatePipelines() {
         shadow_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Lighting
-    {
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        // T4.6.5 part 5 Path B: Vulkan uses compute dispatch. Existing .spv
+        // declares workgroup_size 8x8x1; threadGroupSize here is informational
+        // (actual dispatch happens at bind site with explicit group counts).
+        lighting_compute_layout_ = device_->CreatePipelineLayout({1, &lighting_compute_set_layout_});
+
+        ComputePipelineDesc desc{};
+        desc.layout = lighting_compute_layout_;
+        desc.computeShader = lighting_cs_;
+        desc.threadGroupSize = {8, 8, 1};
+        lighting_pipeline_ = device_->CreateComputePipeline(desc);
+    } else {
         lighting_layout_ = device_->CreatePipelineLayout({1, &lighting_set_layout_});
 
         GraphicsPipelineDesc desc{};
