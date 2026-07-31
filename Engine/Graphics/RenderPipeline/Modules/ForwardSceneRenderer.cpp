@@ -1,5 +1,6 @@
 #include "ForwardSceneRenderer.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/RHI/Core/RHIShaderCommon.h"  // T4.6.5 part 6: GlobalShaderData + ForwardLightBuffer
 #if !defined(__EMSCRIPTEN__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
@@ -345,23 +346,18 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
 
     // T4.6.5: ForwardSceneRenderer still deferred on Vulkan.
     // T4.6.5 part 1: platform-aware loader (.spv binary on Vulkan).
-    // T4.6.5 part 2: stage-suffix naming + "main" entry convention. DepthOnly +
-    //                Skybox ports verified loading silently.
-    // T4.6.5 part 3: Path A blit — Blit.vert/Blit.frag authored +
-    //                blit_set_layout_ gained Sampler binding + load() picks
-    //                "Blit" file on Vulkan.
-    // T4.6.5 part 4 (this commit): Path B foundation — lighting_output_ gains
-    //                UnorderedAccess usage on Vulkan + new compute-stage
-    //                descriptor set layout (12 bindings matching existing .spv)
-    //                + lighting_compute_set_layout_/ds_/layout_ members. The
-    //                pipeline itself still uses the (broken on Vulkan) graphics
-    //                path; compute conversion (CreateComputePipeline + Dispatch
-    //                bind-site) is part 5.
+    // T4.6.5 part 2: stage-suffix naming + "main" entry convention.
+    // T4.6.5 part 3: Path A blit — Blit.vert/Blit.frag authored.
+    // T4.6.5 part 4: Path B foundation — Storage usage + compute desc layout.
+    // T4.6.5 part 5: Path B pipeline — CreateComputePipeline for lighting.
+    // T4.6.5 part 6 (this commit): Path B UBOs — GlobalShaderData (480B) +
+    //                ForwardLightBuffer (25808B) triple-buffered + mapped.
+    //                Descriptor set write + bind-site Dispatch are still
+    //                pending (part 7).
     //
     // Remaining blockers (multi-session scope):
-    //   1. Path B pipeline conversion: swap lighting_pipeline_ creation to
-    //      CreateComputePipeline using existing DeferredLighting.spv + convert
-    //      bind site (cpp:1754) from BeginRenderPass+Draw to Dispatch.
+    //   1. Path B bind-site conversion: write lighting_compute_ds_[idx] with
+    //      all 12 bindings + swap BeginRenderPass+Draw to Dispatch.
     //   2. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
     //      GBuffer, GBufferAlphaClip, GBufferUnlit, GBufferFoliage, GBufferWater,
     //      GBufferTransparent, ForwardTransparency, StreamingGBuffer
@@ -370,7 +366,7 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     // Keep the skip in place until those are resolved.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
         std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (T4.6.5: "
-                     "3/11 shaders ported; Path B compute pipeline wired, bind-site Dispatch pending)"
+                     "3/11 shaders ported; Path B UBOs ready, bind-site Dispatch pending)"
                   << std::endl;
         return false;
     }
@@ -502,6 +498,19 @@ void ForwardSceneRenderer::Shutdown() {
         }
         if (view_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(view_cb_[i]); view_cb_[i] = handles::INVALID_RESOURCE; }
         if (scene_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(scene_cb_[i]); scene_cb_[i] = handles::INVALID_RESOURCE; }
+        // T4.6.5 part 6 Path B: Vulkan-only UBOs.
+        if (lighting_global_ubos_[i] != handles::INVALID_RESOURCE) {
+            device_->UnmapBuffer(lighting_global_ubos_[i]);
+            device_->DestroyBuffer(lighting_global_ubos_[i]);
+            lighting_global_ubos_[i] = handles::INVALID_RESOURCE;
+            lighting_global_mapped_[i] = nullptr;
+        }
+        if (lighting_light_ubos_[i] != handles::INVALID_RESOURCE) {
+            device_->UnmapBuffer(lighting_light_ubos_[i]);
+            device_->DestroyBuffer(lighting_light_ubos_[i]);
+            lighting_light_ubos_[i] = handles::INVALID_RESOURCE;
+            lighting_light_mapped_[i] = nullptr;
+        }
     }
     for (int i = 0; i < 2; i++) {
         if (shadow_view_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(shadow_view_cb_[i]); shadow_view_cb_[i] = handles::INVALID_RESOURCE; }
@@ -1021,6 +1030,30 @@ void ForwardSceneRenderer::CreatePersistentResources() {
         gbuffer_velocity_[i] = makeTex(DataFormat::RG16_Float, "FwdVelocity", false);
         gbuffer_depth_[i] = makeTex(DataFormat::D32_Float, "FwdDepth", false);
         lighting_output_[i] = makeTex(DataFormat::RGBA16_Float, "FwdLighting", lightingNeedsUAV);
+
+        // T4.6.5 part 6 Path B: Vulkan-only UBOs for compute lighting.
+        // Mirror ForwardRenderer.cpp:54-85 pattern (triple-buffered, mapped).
+        if (lightingNeedsUAV) {
+            BufferDesc globalDesc{};
+            globalDesc.size = sizeof(rhi::GlobalShaderData);
+            globalDesc.type = BufferType::Constant;
+            globalDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            globalDesc.usage = GPUMemoryUsage::Dynamic;
+            globalDesc.bindFlags = static_cast<u32>(ResourceUsage::ConstantBuffer);
+            lighting_global_ubos_[i] = device_->CreateBuffer(globalDesc);
+            lighting_global_mapped_[i] = device_->MapBuffer(lighting_global_ubos_[i], 0,
+                                                            sizeof(rhi::GlobalShaderData));
+
+            BufferDesc lightDesc{};
+            lightDesc.size = sizeof(rhi::ForwardLightBuffer);
+            lightDesc.type = BufferType::Constant;
+            lightDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            lightDesc.usage = GPUMemoryUsage::Dynamic;
+            lightDesc.bindFlags = static_cast<u32>(ResourceUsage::ConstantBuffer);
+            lighting_light_ubos_[i] = device_->CreateBuffer(lightDesc);
+            lighting_light_mapped_[i] = device_->MapBuffer(lighting_light_ubos_[i], 0,
+                                                           sizeof(rhi::ForwardLightBuffer));
+        }
     }
 }
 

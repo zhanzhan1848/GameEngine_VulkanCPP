@@ -237,6 +237,18 @@ private:
     rhi::DescriptorSetHandle lighting_compute_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};
+
+    // T4.6.5 part 6 Path B: Vulkan-only UBOs for compute lighting pass.
+    // GlobalShaderData (480B) and ForwardLightBuffer (25808B) match the engine
+    // UBO layout that existing DeferredLighting.spv expects at bindings 9 and 10.
+    rhi::ResourceHandle lighting_global_ubos_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle lighting_light_ubos_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
+    void* lighting_global_mapped_[3]{nullptr, nullptr, nullptr};
+    void* lighting_light_mapped_[3]{nullptr, nullptr, nullptr};
     rhi::DescriptorSetHandle skybox_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};
