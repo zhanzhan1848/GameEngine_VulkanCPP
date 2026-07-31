@@ -4,23 +4,24 @@ Hand-ported GLSL counterparts to `Engine/Graphics/Metal/shaders/Forward/*.metal`
 compiled to SPIR-V via `glslangValidator` and consumed by
 `ForwardSceneRenderer::CreateShaders()` on Vulkan.
 
-## Status (T4.6.5 part 2)
+## Status (T4.6.5 part 3)
 
-| Shader               | Stages       | Status   | Notes                              |
-|----------------------|--------------|----------|------------------------------------|
-| DepthOnly            | vert         | DONE     | Vertex-only (shadow depth pass)    |
-| Skybox               | vert + frag  | DONE     | Procedural cube, samplerless tex   |
-| GBuffer              | vert + frag  | TODO     | PBR GBuffer fill (complex)         |
-| GBufferAlphaClip     | vert + frag  | TODO     | Alpha-tested foliage gate          |
-| GBufferUnlit         | vert + frag  | TODO     | Unlit emission                     |
-| GBufferFoliage       | vert + frag  | TODO     | 2-pass foliage (alpha + lit)       |
-| GBufferWater         | vert + frag  | TODO     | Animated water surface             |
-| GBufferTransparent   | vert + frag  | TODO     | Transparent GBuffer                |
-| ForwardTransparency  | vert + frag  | TODO     | 4 entries (Water + Transparent)    |
-| StreamingGBuffer     | vert + frag  | TODO     | SoA vertex pulling                 |
-| DeferredLighting     | vert + frag  | BLOCKER  | Architectural mismatch (see below) |
+| Shader               | Stages       | Status   | Notes                                     |
+|----------------------|--------------|----------|-------------------------------------------|
+| DepthOnly            | vert         | DONE     | Vertex-only (shadow depth pass)           |
+| Skybox               | vert + frag  | DONE     | Procedural cube, samplerless tex          |
+| Blit                 | vert + frag  | DONE     | T4.6.5 part 3 (Path A: tone-map ACES blit)|
+| GBuffer              | vert + frag  | TODO     | PBR GBuffer fill (complex)                |
+| GBufferAlphaClip     | vert + frag  | TODO     | Alpha-tested foliage gate                 |
+| GBufferUnlit         | vert + frag  | TODO     | Unlit emission                            |
+| GBufferFoliage       | vert + frag  | TODO     | 2-pass foliage (alpha + lit)              |
+| GBufferWater         | vert + frag  | TODO     | Animated water surface                    |
+| GBufferTransparent   | vert + frag  | TODO     | Transparent GBuffer                       |
+| ForwardTransparency  | vert + frag  | TODO     | 4 entries (Water + Transparent)           |
+| StreamingGBuffer     | vert + frag  | TODO     | SoA vertex pulling                        |
+| DeferredLighting     | (compute)    | Path B   | See "DeferredLighting path" below         |
 
-11 shaders needed; 2 done; 9 remaining.
+11 shaders needed; 3 done; 8 remaining + DeferredLighting path decision.
 
 ## Build
 
@@ -78,22 +79,41 @@ For each remaining shader, the port workflow is:
 8. Run `./build_spv.sh`
 9. Test by re-enabling ForwardSceneRenderer on Vulkan temporarily
 
-## DeferredLighting architectural blocker
+## DeferredLighting path
 
-`DeferredLighting.metal` has 9 entry points spanning vertex + 7 fragment stages
-(vertexMain, fragmentLighting_v3, fragmentBlit, fragmentBlitDDGI,
-fragmentLighting_gpuDriven, fragmentBlitComposite, fragmentFusionIndirect,
-fragmentFusion). The existing `Engine/Graphics/Vulkan/shaders/DeferredLighting.spv`
-(outside this directory) was compiled from `Dawn/shaders/DeferredLighting.wgsl`
-as a **GLCompute** shader (`deferred_lighting_cs`) — fundamentally different
-rendering architecture.
+`DeferredLighting.metal` has 11 entry points (vertexMain + 7 fragments + 2 compute
+kernels). ForwardSceneRenderer consumes only 3: vertexMain (procedural full-screen
+tri), fragmentLighting_v3 (PBR + IBL), fragmentBlit (tone-map).
 
-Two paths forward (multi-session scope):
-1. **Match Metal** — author 9 SPIR-V vert/frag shaders matching the Metal path's
-   rasterization-based deferred lighting. Required if ForwardSceneRenderer keeps
-   its current shape.
-2. **Match Dawn** — rewrite ForwardSceneRenderer to dispatch deferred lighting
-   as compute. Bigger code change but reuses existing compute shader.
+The existing `Engine/Graphics/Vulkan/shaders/DeferredLighting.spv` (outside this
+directory) is a single-entry **GLCompute** shader (`deferred_lighting_cs` → main),
+compiled from `Dawn/shaders/DeferredLighting.wgsl`. Inputs/outputs use the engine
+UBO layout (GlobalShaderData + ForwardLightBuffer), not Metal's ViewData/SceneData.
 
-Until this is resolved, ForwardSceneRenderer stays skipped on Vulkan (T4.6.3
-skip in `ForwardSceneRenderer.cpp:Initialize`).
+**T4.6.5 part 3 decision: Hybrid (Path B lighting + Path A blit).**
+
+- **Blit (Path A, DONE)**: `Blit.vert` + `Blit.frag` in this directory author
+  the tone-map blit as a graphics pipeline. Matches Metal fragmentBlit semantics
+  (ACES + exposure + gamma). Replaces the multi-entry DeferredLighting.metal
+  fragmentBlit path on Vulkan.
+- **Lighting (Path B, TODO)**: Convert ForwardSceneRenderer's `lighting_pipeline_`
+  from graphics to compute. Reuses existing `DeferredLighting.spv`. Requires:
+  1. Add `TextureUsage::Storage` to `lighting_output_` (cpp:934).
+  2. New compute-stage descriptor set layout matching the .spv's 12 bindings.
+  3. Replace `CreateGraphicsPipeline` call (cpp:678) with `CreateComputePipeline`.
+  4. Replace bind site (cpp:1754-1762) `BeginRenderPass+Draw` with
+     `BindComputePipeline+Dispatch((W+7)/8, (H+7)/8, 1)`.
+
+Binding layout for the .spv (set 0):
+| Binding | Type                | Purpose                          |
+|---------|---------------------|----------------------------------|
+| 0-3     | SampledImage        | GBuffer albedo/normal/orm/velocity |
+| 4       | SampledImage        | Shadow depth (2D array)          |
+| 5-7     | SampledImage        | IBL irradiance/prefilter/brdfLUT |
+| 8       | Sampler             | IBL sampler                      |
+| 9       | UniformBuffer       | GlobalShaderData                 |
+| 10      | UniformBuffer       | ForwardLightBuffer (25808B CSM)  |
+| 11      | StorageImage        | HDR output                       |
+
+Until Path B lands, ForwardSceneRenderer stays skipped on Vulkan (T4.6.3 skip
+in `ForwardSceneRenderer.cpp:Initialize`).

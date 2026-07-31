@@ -27,6 +27,7 @@ declare -a SHADERS=(
     # name                stages
     "DepthOnly            vert"
     "Skybox               vert frag"
+    "Blit                 vert frag"   # T4.6.5 part 3: tone-map blit (replaces DeferredLighting fragmentBlit)
     "GBuffer              vert frag"
     "GBufferAlphaClip     vert frag"
     "GBufferUnlit         vert frag"
@@ -35,7 +36,7 @@ declare -a SHADERS=(
     "GBufferTransparent   vert frag"
     "ForwardTransparency  vert frag"   # 4 entry points: forwardWaterVS/FS + forwardTransparentVS/FS
     "StreamingGBuffer     vert frag"
-    # DeferredLighting special: Metal has multiple vert+frag entries; Vulkan port TBD
+    # DeferredLighting special: Path B will use existing compute .spv; see README
 )
 
 for entry in "${SHADERS[@]}"; do

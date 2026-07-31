@@ -331,26 +331,28 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     if (initialized_) return true;
 
     // T4.6.5: ForwardSceneRenderer still deferred on Vulkan.
-    // T4.6.5 part 1 shipped the platform-aware loader (LoadShaderSource reads
-    // .spv on Vulkan) + push-constant offset fix (2 → 0).
-    // T4.6.5 part 2 (this commit) verified the loader works: DepthOnly and
-    // Skybox SPIR-V files load silently (no "Failed to load" message), proving
-    // the stage-suffixed naming + "main" entry convention is correct.
+    // T4.6.5 part 1: platform-aware loader (.spv binary on Vulkan).
+    // T4.6.5 part 2: stage-suffix naming + "main" entry convention. DepthOnly +
+    //                Skybox ports verified loading silently.
+    // T4.6.5 part 3 (this commit): Path A blit — Blit.vert/Blit.frag authored
+    //                + blit_set_layout_ gained Sampler binding + load() now
+    //                picks "Blit" file on Vulkan. Lighting pipeline conversion
+    //                to compute (Path B) still pending.
     //
     // Remaining blockers (multi-session scope):
-    //   1. Stage-model mismatch: existing DeferredLighting.spv is a GLCompute
-    //      shader, but ForwardSceneRenderer loads vertexMain/fragmentLighting_v3
-    //      as vertex+fragment. The Metal and Vulkan paths use fundamentally
-    //      different shader architectures for deferred lighting.
-    //   2. 9 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
+    //   1. Path B lighting compute conversion: lighting_pipeline_ still loads
+    //      DeferredLighting vertexMain/fragmentLighting_v3 as vert/frag, but
+    //      only a GLCompute .spv exists. Need to swap to CreateComputePipeline
+    //      + Dispatch at the bind site.
+    //   2. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
     //      GBuffer, GBufferAlphaClip, GBufferUnlit, GBufferFoliage, GBufferWater,
-    //      GBufferTransparent, ForwardTransparency, StreamingGBuffer, DeferredLighting
+    //      GBufferTransparent, ForwardTransparency, StreamingGBuffer
     //   3. Vertex buffer binding slot 0/1 convention differs (Metal uses
     //      [[buffer(1)]] for vertices; Vulkan expects binding 0).
     // Keep the skip in place until those are resolved.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
         std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (T4.6.5: "
-                     "loader works; 9 of 11 shaders still need SPIR-V ports)"
+                     "3/11 shaders ported; Path B lighting + 8 more pending)"
                   << std::endl;
         return false;
     }
@@ -561,8 +563,9 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
     {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
+            {1, DescriptorType::Sampler, 1, ShaderStage::Pixel},
         };
-        blit_set_layout_ = device_->CreateDescriptorSetLayout({1, bindings});
+        blit_set_layout_ = device_->CreateDescriptorSetLayout({2, bindings});
     }
 }
 
@@ -590,8 +593,15 @@ void ForwardSceneRenderer::CreateShaders() {
 
     lighting_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
     lighting_ps_ = load("DeferredLighting", "fragmentLighting_v3", ShaderStage::Pixel);
-    blit_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
-    blit_ps_ = load("DeferredLighting", "fragmentBlit", ShaderStage::Pixel);
+    // T4.6.5 part 3: Vulkan uses dedicated Blit shaders (Path A); Metal still
+    // uses the multi-entry DeferredLighting.metal fragmentBlit.
+    if (platform == RHIPlatform::Vulkan) {
+        blit_vs_ = load("Blit", "main", ShaderStage::Vertex);
+        blit_ps_ = load("Blit", "main", ShaderStage::Pixel);
+    } else {
+        blit_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
+        blit_ps_ = load("DeferredLighting", "fragmentBlit", ShaderStage::Pixel);
+    }
 
     skybox_vs_ = load("Skybox", "vertexSkybox", ShaderStage::Vertex);
     skybox_ps_ = load("Skybox", "fragmentSkybox", ShaderStage::Pixel);
@@ -1798,8 +1808,9 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
     {
         DescData params[] = {
             {0, DescriptorType::SampledImage, lighting_output_[idx]},
+            {1, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
         };
-        UpdateDesc(device_, blit_ds_[idx], params, 1);
+        UpdateDesc(device_, blit_ds_[idx], params, 2);
 
         RenderPassDesc rpDesc{};
         rpDesc.colorAttachments.resize(1);
