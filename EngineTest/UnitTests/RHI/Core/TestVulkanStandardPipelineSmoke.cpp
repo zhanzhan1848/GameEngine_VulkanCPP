@@ -173,23 +173,24 @@ TestResult TestVulkanStandardPipeline_EditorMode_NoOpRender() {
 // NaniteResourceManager, GlobalSDF, scene_snapshot_, ShadowMapModule,
 // DeferredLightingModule, FinalBlitModule, and ForwardSceneRenderer.
 //
-// STATUS: PASSING (was Skipped before T4.6.1). Root cause of original
-// segfault was `std::array<DescriptorSetHandle, 3>{ INVALID_DESCRIPTOR_SET }`
-// in GPUCullingPipeline.h — this brace-init only sets element 0; elements
-// 1-2 zero-init to valid handle 0 (belonging to GPUDrivenDraw's layout).
-// UpdateHZBBindings then wrote SampledImage updates to foreign descriptor
-// sets, triggering validation crash inside vvl::BufferDescriptor::WriteUpdate.
-// Fixed at GPUCullingPipeline.h:201.
+// STATUS: PASSING with zero validation errors (T4.6.1 + T4.6.2 + T4.6.3).
 //
-// Remaining non-fatal validation errors (T4.6.2+ scope):
-//   1. vkCreateImage D32_SFLOAT + COLOR_ATTACHMENT_BIT usage — some
-//      subsystem creates a depth tex with mixed RenderTarget + DepthStencil
-//      TextureUsage bits. Vulkan forbids this combination.
-//   2. ParticlePass + LineBatchRenderer fail to load shaders — hardcoded
-//      `.metal` extension (same pattern as ForwardSceneRenderer blocker).
-//   3. ForwardSceneRenderer::CreateShaders load failures (11 .metal files).
-//      ForwardSceneRenderer still reports Initialized but pipelines are
-//      INVALID — actual render path still blocked.
+// Fixes shipped:
+//   - T4.6.1: GPUCullingPipeline `std::array<DescriptorSetHandle, 3>{ INVALID }`
+//     under-init (only element 0 set; elements 1-2 zero-init to valid handle 0).
+//   - T4.6.2: GPUDrivenDrawPipeline final_depth_texture_ had RenderTarget bit
+//     on a D32_SFLOAT image (illegal in Vulkan).
+//   - T4.6.3: 5 Lumen passes + ForwardSceneRenderer early-skip on Vulkan
+//     (Metal overlapping binding namespace + .metal hardcode + push-constant
+//     offset=2 not 4-aligned).
+//
+// Deferred (T4.6.4+ scope, NOT blocking this probe):
+//   1. ParticlePass + LineBatchRenderer hardcoded `.metal` shader load
+//      (T4.6.4 — platform-aware shader loader).
+//   2. ForwardSceneRenderer platform-aware shader loader + 11 SPIR-V ports
+//      (T4.6.5 — full Editor render path).
+//   3. Lumen suite ~25 SPIR-V shader ports + sequential-binding layouts
+//      (multi-session).
 TestResult TestVulkanStandardPipeline_SubsystemsProbe() {
     DeviceFixture fx;
     TEST_ASSERT(fx.Init(), "Vulkan device init");
