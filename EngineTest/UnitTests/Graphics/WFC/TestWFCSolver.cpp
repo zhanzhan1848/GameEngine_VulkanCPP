@@ -306,12 +306,18 @@ TestResult TestWFCSolver_Initialize_Populates_Multi_Tile_Candidates() {
     WFCSolver solver;
     solver.Initialize(config, grid, reg, adj, buf);
 
-    // After Initialize: cell should have 5 candidate bits set
-    // bit 0 (cube var 0) + bits 8,9,10,11 (ramp vars 0-3) using BitForTileVariant packing
+    // After Initialize: cell should have 5 candidate bits set.
+    // Phase C.1 16×4 packing: cube (t0,v0)=bit 0; ramp (t1,v0..3)=bits 4,5,6,7.
+    // Compute via BitForTileVariant so the test tracks the registry's packing
+    // constants rather than hardcoding bit positions that drift across phases.
     const WFCCell& c = grid.CellAt({0, 0, 0});
     TEST_ASSERT_EQ(5u, c.candidate_count, "5 candidates: 1 cube + 4 ramp variants");
-    u64 expected_mask = (1ULL << 0) | (1ULL << 8) | (1ULL << 9) | (1ULL << 10) | (1ULL << 11);
-    TEST_ASSERT_EQ(expected_mask, c.candidate_mask, "Candidate mask has cube bit 0 + ramp bits 8-11");
+    u64 expected_mask = 0;
+    expected_mask |= (1ULL << WFCTileRegistry::BitForTileVariant(wfc_tile_id{0}, 0));
+    for (u32 v = 0; v < 4; ++v) {
+        expected_mask |= (1ULL << WFCTileRegistry::BitForTileVariant(wfc_tile_id{1}, v));
+    }
+    TEST_ASSERT_EQ(expected_mask, c.candidate_mask, "Candidate mask = cube bit + 4 ramp bits");
     return TestResult::Passed;
 }
 
