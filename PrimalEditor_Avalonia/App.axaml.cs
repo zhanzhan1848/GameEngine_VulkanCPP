@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Data.Core;
 using Avalonia.Data.Core.Plugins;
@@ -16,8 +17,6 @@ public partial class App : Application
     public override void Initialize()
     {
         AvaloniaXamlLoader.Load(this);
-        Styles.Add(new Avalonia.Markup.Xaml.Styling.StyleInclude(
-            new System.Uri("avares:PrimalEditor_Avalonia/Controls/Controls.axaml")));
 
         Logger.Current = new ConsoleLogger();
         NativeEngineBridge.LoadEngine();
