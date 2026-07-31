@@ -149,6 +149,8 @@ private:
     rhi::ShaderHandle shadow_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle lighting_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle lighting_ps_{rhi::handles::INVALID_SHADER};
+    // T4.6.5 part 4 Path B: Vulkan-only compute shader replacing lighting_vs_+lighting_ps_.
+    rhi::ShaderHandle lighting_cs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle skybox_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle skybox_ps_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle blit_vs_{rhi::handles::INVALID_SHADER};
@@ -209,6 +211,8 @@ private:
     rhi::PipelineLayoutHandle gbuffer_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle shadow_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle lighting_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    // T4.6.5 part 4 Path B: Vulkan-only compute pipeline layout (12 bindings).
+    rhi::PipelineLayoutHandle lighting_compute_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle skybox_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle blit_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
 
@@ -216,6 +220,9 @@ private:
     rhi::DescriptorSetLayoutHandle global_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle material_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle lighting_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    // T4.6.5 part 4 Path B: Vulkan-only compute descriptor set layout matching
+    // Engine/Graphics/Vulkan/shaders/DeferredLighting.spv (12 bindings).
+    rhi::DescriptorSetLayoutHandle lighting_compute_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle skybox_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle blit_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
 
@@ -224,6 +231,10 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};
     rhi::DescriptorSetHandle lighting_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET};
+    // T4.6.5 part 4 Path B: Vulkan-only compute descriptor sets (12 bindings).
+    rhi::DescriptorSetHandle lighting_compute_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};
     rhi::DescriptorSetHandle skybox_ds_[3]{

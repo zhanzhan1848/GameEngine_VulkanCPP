@@ -334,16 +334,21 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     // T4.6.5 part 1: platform-aware loader (.spv binary on Vulkan).
     // T4.6.5 part 2: stage-suffix naming + "main" entry convention. DepthOnly +
     //                Skybox ports verified loading silently.
-    // T4.6.5 part 3 (this commit): Path A blit — Blit.vert/Blit.frag authored
-    //                + blit_set_layout_ gained Sampler binding + load() now
-    //                picks "Blit" file on Vulkan. Lighting pipeline conversion
-    //                to compute (Path B) still pending.
+    // T4.6.5 part 3: Path A blit — Blit.vert/Blit.frag authored +
+    //                blit_set_layout_ gained Sampler binding + load() picks
+    //                "Blit" file on Vulkan.
+    // T4.6.5 part 4 (this commit): Path B foundation — lighting_output_ gains
+    //                UnorderedAccess usage on Vulkan + new compute-stage
+    //                descriptor set layout (12 bindings matching existing .spv)
+    //                + lighting_compute_set_layout_/ds_/layout_ members. The
+    //                pipeline itself still uses the (broken on Vulkan) graphics
+    //                path; compute conversion (CreateComputePipeline + Dispatch
+    //                bind-site) is part 5.
     //
     // Remaining blockers (multi-session scope):
-    //   1. Path B lighting compute conversion: lighting_pipeline_ still loads
-    //      DeferredLighting vertexMain/fragmentLighting_v3 as vert/frag, but
-    //      only a GLCompute .spv exists. Need to swap to CreateComputePipeline
-    //      + Dispatch at the bind site.
+    //   1. Path B pipeline conversion: swap lighting_pipeline_ creation to
+    //      CreateComputePipeline using existing DeferredLighting.spv + convert
+    //      bind site (cpp:1754) from BeginRenderPass+Draw to Dispatch.
     //   2. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
     //      GBuffer, GBufferAlphaClip, GBufferUnlit, GBufferFoliage, GBufferWater,
     //      GBufferTransparent, ForwardTransparency, StreamingGBuffer
@@ -352,7 +357,7 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     // Keep the skip in place until those are resolved.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
         std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (T4.6.5: "
-                     "3/11 shaders ported; Path B lighting + 8 more pending)"
+                     "3/11 shaders ported; Path B foundation in, pipeline conv pending)"
                   << std::endl;
         return false;
     }
@@ -400,6 +405,12 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
 
         desc.layout = lighting_set_layout_;
         lighting_ds_[i] = device_->CreateDescriptorSet(desc);
+
+        // T4.6.5 part 4 Path B: Vulkan-only compute descriptor sets.
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            desc.layout = lighting_compute_set_layout_;
+            lighting_compute_ds_[i] = device_->CreateDescriptorSet(desc);
+        }
 
         desc.layout = skybox_set_layout_;
         skybox_ds_[i] = device_->CreateDescriptorSet(desc);
@@ -458,12 +469,12 @@ void ForwardSceneRenderer::Shutdown() {
         if (*p != handles::INVALID_PIPELINE) { device_->DestroyPipeline(*p); *p = handles::INVALID_PIPELINE; }
     }
     // Destroy layouts
-    for (auto* l : {&gbuffer_layout_, &shadow_layout_, &lighting_layout_,
+    for (auto* l : {&gbuffer_layout_, &shadow_layout_, &lighting_layout_, &lighting_compute_layout_,
                     &skybox_layout_, &blit_layout_}) {
         if (*l != handles::INVALID_PIPELINE_LAYOUT) { device_->DestroyPipelineLayout(*l); *l = handles::INVALID_PIPELINE_LAYOUT; }
     }
     // Destroy descriptor set layouts
-    for (auto* d : {&global_set_layout_, &material_set_layout_, &lighting_set_layout_,
+    for (auto* d : {&global_set_layout_, &material_set_layout_, &lighting_set_layout_, &lighting_compute_set_layout_,
                     &skybox_set_layout_, &blit_set_layout_}) {
         if (*d != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device_->DestroyDescriptorSetLayout(*d); *d = handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
     }
@@ -548,6 +559,26 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
             {12, DescriptorType::Sampler, 1, ShaderStage::Pixel},
         };
         lighting_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
+    }
+    // T4.6.5 part 4 Path B: Vulkan-only compute lighting set (matches existing
+    // Engine/Graphics/Vulkan/shaders/DeferredLighting.spv bindings).
+    // Metal path keeps the 13-binding lighting_set_layout_ above.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {1,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {2,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {3,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {4,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {5,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {6,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {7,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {8,  DescriptorType::Sampler,        1, ShaderStage::Compute},
+            {9,  DescriptorType::UniformBuffer,  1, ShaderStage::Compute},
+            {10, DescriptorType::UniformBuffer,  1, ShaderStage::Compute},
+            {11, DescriptorType::StorageImage,   1, ShaderStage::Compute},
+        };
+        lighting_compute_set_layout_ = device_->CreateDescriptorSetLayout({12, bindings});
     }
     // Skybox set
     {
@@ -935,24 +966,30 @@ void ForwardSceneRenderer::CreatePersistentResources() {
     }
 
     // Triple-buffered GBuffer + lighting textures
+    // T4.6.5 part 4 Path B: lighting_output_ gains UnorderedAccess usage on
+    // Vulkan so the compute DeferredLighting.spv can write HDR output via
+    // OpImageStore.
+    const RHIPlatform platform = device_->GetPlatform();
+    const bool lightingNeedsUAV = (platform == RHIPlatform::Vulkan);
     for (int i = 0; i < 3; i++) {
-        auto makeTex = [&](DataFormat fmt, const char* name) -> ResourceHandle {
+        auto makeTex = [&](DataFormat fmt, const char* name, bool uav) -> ResourceHandle {
             TextureDesc desc{};
             desc.size = {render_width_, render_height_, 1};
             desc.format = fmt;
             desc.type = TextureType::Texture2D;
-            desc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+            TextureUsage usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+            if (uav) usage = usage | TextureUsage::UnorderedAccess;
+            desc.usage = usage;
             desc.memoryUsage = GPUMemoryUsage::Static;
             desc.name = name;
             return device_->CreateTexture(desc);
         };
-
-        gbuffer_albedo_[i] = makeTex(DataFormat::BGRA8_UNorm, "FwdAlbedo");
-        gbuffer_normal_[i] = makeTex(DataFormat::RGBA16_Float, "FwdNormal");
-        gbuffer_orm_[i] = makeTex(DataFormat::BGRA8_UNorm, "FwdORM");
-        gbuffer_velocity_[i] = makeTex(DataFormat::RG16_Float, "FwdVelocity");
-        gbuffer_depth_[i] = makeTex(DataFormat::D32_Float, "FwdDepth");
-        lighting_output_[i] = makeTex(DataFormat::RGBA16_Float, "FwdLighting");
+        gbuffer_albedo_[i] = makeTex(DataFormat::BGRA8_UNorm, "FwdAlbedo", false);
+        gbuffer_normal_[i] = makeTex(DataFormat::RGBA16_Float, "FwdNormal", false);
+        gbuffer_orm_[i] = makeTex(DataFormat::BGRA8_UNorm, "FwdORM", false);
+        gbuffer_velocity_[i] = makeTex(DataFormat::RG16_Float, "FwdVelocity", false);
+        gbuffer_depth_[i] = makeTex(DataFormat::D32_Float, "FwdDepth", false);
+        lighting_output_[i] = makeTex(DataFormat::RGBA16_Float, "FwdLighting", lightingNeedsUAV);
     }
 }
 
