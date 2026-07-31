@@ -40,6 +40,7 @@
 #include "Graphics/Scene/RenderSceneSnapshot.h"  // complete type for unique_ptr<RenderSceneSnapshot> destructor
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
+#include "Graphics/Lumen/LumenTypes.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 #include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
@@ -170,35 +171,37 @@ TestResult TestVulkanStandardPipeline_EditorMode_NoOpRender() {
 // SetLumenConfig triggers InitializeSubsystems which creates ALL heavy
 // subsystems: GPUDrivenDrawPipeline, GPUCullingPipeline, HZBSystem,
 // NaniteResourceManager, GlobalSDF, scene_snapshot_, ShadowMapModule,
-// DeferredLightingModule, FinalBlitModule, and crucially forward_renderer_
-// (ForwardSceneRenderer).
+// DeferredLightingModule, FinalBlitModule, and ForwardSceneRenderer.
 //
-// STATUS: Skipped — crashes during GPUCullingPipeline::UpdateHZBBindings
-// (descriptor type mismatch at binding 8). Multiple T4.6 sub-issues found:
+// STATUS: PASSING (was Skipped before T4.6.1). Root cause of original
+// segfault was `std::array<DescriptorSetHandle, 3>{ INVALID_DESCRIPTOR_SET }`
+// in GPUCullingPipeline.h — this brace-init only sets element 0; elements
+// 1-2 zero-init to valid handle 0 (belonging to GPUDrivenDraw's layout).
+// UpdateHZBBindings then wrote SampledImage updates to foreign descriptor
+// sets, triggering validation crash inside vvl::BufferDescriptor::WriteUpdate.
+// Fixed at GPUCullingPipeline.h:201.
 //
-//   1. vkCreateImage D32_SFLOAT rejected: mixed COLOR_ATTACHMENT +
-//      DEPTH_STENCIL usage bits on same texture (StandardRenderPipeline
-//      subsystem creates a D32 tex with both RenderTarget + DepthStencil
-//      TextureUsage flags — Vulkan forbids this combo).
-//   2. GPUDrivenDrawPipeline 4 missing SPIR-V shaders:
-//      ClusterBinning/cluster_binning_kernel, VisibilityBuffer × 2
-//      (vertex + fragment), VisibilityBufferResolve/ComputeMain.
-//      T4.4.3 ported some shaders but missed these 4.
-//   3. HZB descriptor type mismatch (VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
-//      write to layout binding 8 declared as STORAGE_BUFFER).
-//      GPUCullingPipeline.cpp:165 declares SampledImage but validation
-//      sees STORAGE_BUFFER — possibly bindings_ vector truncation in
-//      RHIDescriptorSetLayout base ctor or stale layout handle.
-//   4. Segfault inside GPUCullingPipeline::UpdateHZBBindings called
-//      eagerly from SetHZBSystem (GPUCullingPipeline.h:130). The
-//      validation-layer crash in vvl::BufferDescriptor::WriteUpdate
-//      suggests the bufferInfo pointer or descriptor state is corrupt.
-//
-// Each issue warrants its own investigation. See memory
-// vulkan-rhi-t46-subsystems-probe-findings.md for full details.
+// Remaining non-fatal validation errors (T4.6.2+ scope):
+//   1. vkCreateImage D32_SFLOAT + COLOR_ATTACHMENT_BIT usage — some
+//      subsystem creates a depth tex with mixed RenderTarget + DepthStencil
+//      TextureUsage bits. Vulkan forbids this combination.
+//   2. ParticlePass + LineBatchRenderer fail to load shaders — hardcoded
+//      `.metal` extension (same pattern as ForwardSceneRenderer blocker).
+//   3. ForwardSceneRenderer::CreateShaders load failures (11 .metal files).
+//      ForwardSceneRenderer still reports Initialized but pipelines are
+//      INVALID — actual render path still blocked.
 TestResult TestVulkanStandardPipeline_SubsystemsProbe() {
-    std::cout << "[SubsystemsProbe] SKIPPED — T4.6 multi-issue scope. See test comment for punch list." << std::endl;
-    return TestResult::Skipped;
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+
+    StandardRenderPipeline pipeline;
+    TEST_ASSERT(pipeline.Initialize(fx.base), "Initialize");
+
+    lumen::LumenConfig lumenConfig{};
+    pipeline.SetLumenConfig(lumenConfig);
+
+    pipeline.Shutdown();
+    return TestResult::Passed;
 }
 
 void RegisterVulkanStandardPipelineSmoke_Tests() {

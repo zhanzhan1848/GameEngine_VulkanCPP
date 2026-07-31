@@ -198,7 +198,10 @@ private:
 
     rhi::PipelineLayoutHandle culling_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle culling_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    std::array<rhi::DescriptorSetHandle, 3> culling_descriptor_sets_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    // Note: brace-init with a single value only initializes element 0 — the rest
+    // get value-initialized to 0, which is a VALID DescriptorSetHandle. UpdateHZBBindings
+    // would then write to descriptor sets belonging to OTHER layouts (silent corruption).
+    std::array<rhi::DescriptorSetHandle, 3> culling_descriptor_sets_{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };
     
     rhi::PipelineLayoutHandle streaming_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle streaming_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
