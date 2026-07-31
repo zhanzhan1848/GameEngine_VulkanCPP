@@ -290,6 +290,24 @@ ForwardSceneRenderer::~ForwardSceneRenderer() { Shutdown(); }
 
 bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height) {
     if (initialized_) return true;
+
+    // T4.6.3: ForwardSceneRenderer deferred on Vulkan. Two blockers:
+    //   1. CreateShaders() (line ~504) hardcodes the `.metal` extension when
+    //      building shader paths; on Vulkan every shader fails to compile and
+    //      all pipelines stay INVALID.
+    //   2. PCGPushConsts pipeline layout uses offset=2 (matching Metal's
+    //      [[buffer(2)]]) — Vulkan requires push-constant offsets to be a
+    //      multiple of 4 (VUID-VkPushConstantRange-offset-00295).
+    // Full Editor render path needs a platform-aware shader loader + 11 SPIR-V
+    // shader ports (GBuffer, DepthOnly, DeferredLighting, Skybox, etc.) — that
+    // is multi-session scope (plan T4.6.5).
+    if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
+        std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (deferred — needs "
+                     "platform-aware shader loader + 11 SPIR-V ports, plan T4.6.5)"
+                  << std::endl;
+        return false;
+    }
+
     device_ = device;
     render_width_ = render_width;
     render_height_ = render_height;

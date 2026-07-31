@@ -219,6 +219,22 @@ LumenDDGIPass::~LumenDDGIPass() {
 bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& params) {
     if (initialized_) return true;
 
+    // T4.6.3: Lumen DDGI deferred on Vulkan. Two blockers:
+    //   1. CreateDescriptorSetLayouts() Metal branch uses overlapping texture/buffer
+    //      binding numbers (Metal's [[texture(N)]] / [[buffer(N)]] namespaces are
+    //      independent). Vulkan forbids duplicate binding numbers in a single
+    //      VkDescriptorSetLayout (VUID-VkDescriptorSetLayoutCreateInfo-binding-00279).
+    //   2. No SPIR-V ports of DDGITraceRays / DDGIUpdateIrradiance / DDGIUpdateDepth
+    //      exist yet (LoadShaderBytecode returns empty → CreatePipelines no-ops but
+    //      pipelines stay INVALID).
+    // Skipping cleanly here lets StandardRenderPipeline probe InitializeSubsystems
+    // complete; full Lumen port is multi-session scope (see plan T4.4+ deferred).
+    if (device && device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        std::cerr << "[LumenDDGI] Skipped on Vulkan (deferred — needs SPIR-V ports + "
+                     "non-overlapping descriptor bindings)" << std::endl;
+        return false;
+    }
+
     device_ = device;
     params_ = params;
 

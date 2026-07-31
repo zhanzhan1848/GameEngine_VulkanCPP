@@ -174,6 +174,16 @@ bool LumenSSGIPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
                                const SSGIParams& params) {
     if (initialized_) return true;
 
+    // T4.6.3: Lumen SSGI deferred on Vulkan — CreateDescriptorSetLayouts() uses
+    // Metal's overlapping texture/buffer binding idiom (rejected by Vulkan), and
+    // no SPIR-V ports of the SSGI shaders exist yet. See LumenDDGIPass::Initialize
+    // for the full rationale.
+    if (device && device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        std::cerr << "[LumenSSGI] Skipped on Vulkan (deferred — needs SPIR-V ports + "
+                     "non-overlapping descriptor bindings)" << std::endl;
+        return false;
+    }
+
     device_ = device;
     render_width_ = render_width;
     render_height_ = render_height;
