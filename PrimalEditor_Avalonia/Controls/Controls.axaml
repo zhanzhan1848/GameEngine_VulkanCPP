@@ -15,12 +15,12 @@
   <Style Selector="ctrl|NumberBox">
     <Setter Property="Template">
       <ControlTemplate>
-        <Border Background="#FF2D2D30" BorderBrush="#FF555" BorderThickness="1"
+        <Border Background="#FF2D2D30" BorderBrush="#FF555555" BorderThickness="1"
                 CornerRadius="2" Padding="0">
           <Panel>
             <TextBlock Name="PART_TextBlock"
                        Text="{TemplateBinding Value}"
-                       Foreground="#FFEEE"
+                       Foreground="#FFEEEEEE"
                        VerticalAlignment="Center"
                        HorizontalAlignment="Stretch"
                        Padding="6,0"
@@ -30,8 +30,8 @@
             <TextBox Name="PART_TextBox"
                      Text="{TemplateBinding Value, Mode=TwoWay}"
                      Background="#FF1E1E1E"
-                     Foreground="#FFEEE"
-                     CaretBrush="#FFEEE"
+                     Foreground="#FFEEEEEE"
+                     CaretBrush="#FFEEEEEE"
                      BorderThickness="0"
                      Padding="6,0"
                      TextAlignment="Right"

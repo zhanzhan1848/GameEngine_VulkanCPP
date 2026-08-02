@@ -3,7 +3,7 @@
              x:Class="PrimalEditor_Avalonia.Editors.AssetEditorStatusBar"
              x:DataType="vm:AssetEditorViewModel"
              xmlns:vm="using:PrimalEditor_Avalonia.Editors">
-  <Border Background="#FF2D2D30" BorderBrush="#FF444" BorderThickness="0,1,0,0" Padding="6,3">
+  <Border Background="#FF2D2D30" BorderBrush="#FF444444" BorderThickness="0,1,0,0" Padding="6,3">
     <Grid ColumnDefinitions="*,Auto,Auto">
       <TextBlock Grid.Column="0" Name="AssetPathText"
                  FontFamily="Consolas,Menlo,monospace" FontSize="11"

@@ -20,7 +20,7 @@
         <!-- Row 0 (Auto): toolbar (single owner) -->
         <Border Grid.Row="0" Background="#FF2D2D30" Padding="5">
             <StackPanel Orientation="Horizontal" Spacing="6">
-                <TextBlock Text="Build:" Foreground="#FFEEE" VerticalAlignment="Center"/>
+                <TextBlock Text="Build:" Foreground="#FFEEEEEE" VerticalAlignment="Center"/>
                 <ComboBox Width="140"
                           ItemsSource="{Binding BuildConfigurations}"
                           SelectedItem="{Binding Project.BuildConfigName}"/>
@@ -112,10 +112,10 @@
                    Background="LightGray" Padding="5"/>
 
         <!-- Row 3: build log -->
-        <Border Grid.Row="3" Background="#FF1E1E1E" BorderBrush="#FF444" BorderThickness="0,1,0,0">
+        <Border Grid.Row="3" Background="#FF1E1E1E" BorderBrush="#FF444444" BorderThickness="0,1,0,0">
             <DockPanel>
                 <TextBlock DockPanel.Dock="Top" Text="Build Log" FontWeight="Bold"
-                           Foreground="#FFEEE" Padding="5,2"/>
+                           Foreground="#FFEEEEEE" Padding="5,2"/>
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <TextBox Name="BuildLogText" IsReadOnly="True"
                              AcceptsReturn="True" TextWrapping="Wrap"
