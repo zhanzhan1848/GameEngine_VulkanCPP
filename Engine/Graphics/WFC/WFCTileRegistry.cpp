@@ -4,6 +4,8 @@
 namespace primal::graphics::wfc {
 
 wfc_tile_id WFCTileRegistry::Register(const WFCTile& tile) {
+    assert(tile.variant_count <= MaxVariantsPerTile &&
+           "variant_count exceeds packing slot; would collide with next tile's bits");
     u32 idx = static_cast<u32>(tiles_.size());
     WFCTile copy = tile;
     copy.id = wfc_tile_id{idx};

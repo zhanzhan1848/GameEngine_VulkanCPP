@@ -24,10 +24,10 @@ TestResult TestWFCTileRegistry_MaxVariants_Across_Tiles() {
     WFCTile a{};
     a.variant_count = 2;
     WFCTile b{};
-    b.variant_count = 5;
+    b.variant_count = 4;  // MaxVariantsPerTile cap; assert in Register rejects > 4.
     registry.Register(a);
     registry.Register(b);
-    TEST_ASSERT_EQ(5u, registry.MaxVariants(), "Max variants = max across registered tiles");
+    TEST_ASSERT_EQ(4u, registry.MaxVariants(), "Max variants = max across registered tiles");
     return TestResult::Passed;
 }
 

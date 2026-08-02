@@ -19,6 +19,8 @@ public:
     u32 MaxVariants() const { return max_variants_; }
 
     // Phase C.1 packing: 16 tiles × 4 variants = 64 candidates in a u64 mask.
+    // NOTE: WFCTile::MaxVariants (WFCTypes.h) is the sockets[] array bound and is
+    // independent of this packing constant. Phase C.1 will reconcile them.
     static constexpr u32 MaxVariantsPerTile = 4;
     static constexpr u32 MaxTiles           = 16;
 

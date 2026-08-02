@@ -76,10 +76,12 @@ TestResult TestWFCPropagator_RunPass_Removes_Incompatible_Candidates() {
     c1.collapsed_variant = 0;
     c1.entropy = 0;
 
-    // Single-tile registry (Phase A.2 layout): bit b <-> (tile 0, variant b).
+    // Single-tile registry (16×4 packing): bit b <-> (tile 0, variant b) for b in [0,4).
+    // variant_count caps at MaxVariantsPerTile=4 (asserted in Register); these tests
+    // only exercise variants 0-2, so capping at 4 preserves semantics.
     WFCTileRegistry registry;
     WFCTile tile{};
-    tile.variant_count = 8;
+    tile.variant_count = 4;
     registry.Register(tile);
 
     // Set up adjacency: (tile 0, var 0) -X (tile 0, var 1)
@@ -121,7 +123,7 @@ TestResult TestWFCPropagator_RunPass_Detects_Contradiction() {
 
     WFCTileRegistry registry;
     WFCTile tile{};
-    tile.variant_count = 8;
+    tile.variant_count = 4;
     registry.Register(tile);
 
     // Empty adjacency: A's -X face compatible with NOTHING
@@ -156,7 +158,7 @@ TestResult TestWFCPropagator_RunPass_No_Change_On_Already_Collapsed() {
 
     WFCTileRegistry registry;
     WFCTile tile{};
-    tile.variant_count = 8;
+    tile.variant_count = 4;
     registry.Register(tile);
 
     TileAdjacencyTable adjacency;
@@ -176,19 +178,27 @@ TestResult TestWFCPropagator_RunPass_Multi_Tile_Filter() {
     WaveGrid grid;
     grid.Initialize({2, 1, 1}, 8);
 
-    // Cell 0 has candidates: cube(var 0) at bit 0, ramp(var 0) at bit 8
+    // Bit positions track the registry's packing constants via BitForTileVariant,
+    // so this test stays correct if MaxVariantsPerTile changes. Under the current
+    // 16×4 layout: cube(t0,v0)=bit 0, ramp(t1,v0)=bit 4.
+    const wfc_tile_id cube_id{0};
+    const wfc_tile_id ramp_id{1};
+    const u32 cube_bit = WFCTileRegistry::BitForTileVariant(cube_id, 0);
+    const u32 ramp_bit = WFCTileRegistry::BitForTileVariant(ramp_id, 0);
+
+    // Cell 0 has candidates: cube(var 0) and ramp(var 0).
     WFCCell& c0 = grid.CellAt({0, 0, 0});
-    c0.candidate_mask = (1ULL << 0) | (1ULL << 8);
+    c0.candidate_mask = (1ULL << cube_bit) | (1ULL << ramp_bit);
     c0.candidate_count = 2;
     c0.entropy = 2;
     c0.collapsed = false;
 
-    // Cell 1 collapsed to ramp variant 0 (tile=1, variant=0 -> bit 8)
+    // Cell 1 collapsed to ramp variant 0.
     WFCCell& c1 = grid.CellAt({1, 0, 0});
-    c1.candidate_mask = (1ULL << 8);
+    c1.candidate_mask = (1ULL << ramp_bit);
     c1.candidate_count = 1;
     c1.collapsed = true;
-    c1.collapsed_tile = wfc_tile_id{1};  // ramp
+    c1.collapsed_tile = ramp_id;
     c1.collapsed_variant = 0;
     c1.entropy = 0;
 
@@ -203,8 +213,6 @@ TestResult TestWFCPropagator_RunPass_Multi_Tile_Filter() {
 
     // Adjacency: cube(NegX) compatible with ramp(PosX) mirror + ramp self-compat
     TileAdjacencyTable adj;
-    const wfc_tile_id cube_id{0};
-    const wfc_tile_id ramp_id{1};
     adj.AddCompatibility(ramp_id, 0, WFCFace::NegX, cube_id, 0);  // cube at +X accepts ramp at -X via mirror
     adj.AddCompatibility(ramp_id, 0, WFCFace::PosX, ramp_id, 0);  // ramp self-compat +X
     adj.AddCompatibility(ramp_id, 0, WFCFace::PosY, ramp_id, 0);
@@ -217,11 +225,18 @@ TestResult TestWFCPropagator_RunPass_Multi_Tile_Filter() {
     bool contradiction = false;
     prop.RunPass(grid, adj, registry, WFC_FACE_COUNT_3D, contradiction);
 
-    // Cell 0 sits at +X of cell 1 (ramp). Cell 0 candidates {cube, ramp}.
-    // Cube(var 0) at +X is compatible with ramp(var 0) at -X (rule added).
-    // Ramp(var 0) at +X is compatible with ramp(var 0) at -X (self-compat).
-    // -> Both candidates survive -> no contradiction
+    // Cell 0 sits at -X of cell 1 (ramp). For cell 0's PosX face (pointing at
+    // cell 1's NegX), each surviving candidate must be compatible with ramp(v0).
+    // Cube(var 0) at PosX is compatible with ramp(var 0) at NegX (rule added).
+    // Ramp(var 0) at PosX is compatible with ramp(var 0) at NegX (self-compat).
+    // -> Both candidates survive -> no contradiction, mask unchanged.
     TEST_ASSERT(!contradiction, "No contradiction when cube+ramp both compatible with ramp neighbor");
+    const WFCCell& result = grid.CellAt({0, 0, 0});
+    const u64 expected_mask = (1ULL << cube_bit) | (1ULL << ramp_bit);
+    TEST_ASSERT_EQ(expected_mask, result.candidate_mask,
+                   "Both cube and ramp candidates must survive the multi-tile filter");
+    TEST_ASSERT_EQ(2u, result.candidate_count,
+                   "Cell 0 retains exactly 2 candidates after propagation");
     return TestResult::Passed;
 }
 
@@ -246,7 +261,7 @@ TestResult TestWFCPropagator_RunPass_FaceCount2D_Still_Processes_XY_Neighbors() 
 
     WFCTileRegistry registry;
     WFCTile tile{};
-    tile.variant_count = 8;
+    tile.variant_count = 4;
     registry.Register(tile);
 
     TileAdjacencyTable adjacency;
@@ -300,7 +315,7 @@ TestResult TestWFCPropagator_RunPass_FaceCount2D_Ignores_Z_Compat() {
 
     WFCTileRegistry registry;
     WFCTile tile{};
-    tile.variant_count = 8;
+    tile.variant_count = 4;
     registry.Register(tile);
 
     // Empty adjacency: A's ±Z faces compatible with NOTHING.
