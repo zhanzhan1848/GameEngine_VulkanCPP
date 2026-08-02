@@ -355,21 +355,21 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     // T4.6.5 part 7: Path B bind-site Dispatch — writes
     //                lighting_compute_ds_[idx] with all 12 bindings + swaps
     //                BeginRenderPass+Draw to BindComputePipeline+Dispatch.
-    // T4.6.5 part 8 (this commit): Path B UBO fill — per-frame memcpy of
-    //                GlobalShaderData + ForwardLightBuffer from camera +
-    //                render_scene lights + cached_shadow_vp_.
+    // T4.6.5 part 8: Path B UBO fill — per-frame memcpy of GlobalShaderData +
+    //                ForwardLightBuffer from camera + render_scene lights.
+    // T4.6.5 part 9 (this commit): Path B layout transitions — InsertBarrier
+    //                lighting_output_ ShaderResource ↔ UnorderedAccess around
+    //                the Dispatch. StorageImage descriptor requires GENERAL.
     //
-    // Path B is now functionally complete on the C++ side. Lighting Dispatch
-    // has all data it needs — but the skip remains until layout transitions
-    // around Dispatch are verified and the 8 GBuffer shaders are ported.
+    // Path B C++ side is now complete: dispatch + data + barriers all wired.
+    // The skip remains because 8 GBuffer shaders aren't ported yet, so
+    // Initialize() would still fail at CreateShaders() / CreatePipelines().
     //
     // Remaining blockers (multi-session scope):
-    //   1. Layout transitions for lighting_output_ around the Dispatch
-    //      (GENERAL ↔ SHADER_READ_ONLY — may need InsertBarrier calls).
-    //   2. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
+    //   1. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
     //      GBuffer, GBufferAlphaClip, GBufferUnlit, GBufferFoliage, GBufferWater,
     //      GBufferTransparent, ForwardTransparency, StreamingGBuffer
-    //   3. Vertex buffer binding slot 0/1 convention differs (Metal uses
+    //   2. Vertex buffer binding slot 0/1 convention differs (Metal uses
     //      [[buffer(1)]] for vertices; Vulkan expects binding 0).
     // Keep the skip in place until those are resolved.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
@@ -1926,6 +1926,21 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         // T4.6.5 part 7 Path B: compute dispatch using existing .spv. Writes
         // HDR output via OpImageStore (no render pass, no Draw).
         // Bindings match Engine/Graphics/Vulkan/shaders/DeferredLighting.spv.
+        //
+        // T4.6.5 part 9: explicit layout transitions for lighting_output_.
+        // StorageImage descriptor (binding 11) requires GENERAL layout — fresh
+        // texture starts Unknown, and previous frame's Blit left it in
+        // SHADER_READ_ONLY. After Dispatch, transition back to ShaderResource
+        // so Pass 4b (Forward Transparency render pass) or Pass 5 (Blit
+        // sample) can read it.
+        ResourceBarrier toUA{};
+        toUA.resource = lighting_output_[idx];
+        toUA.beforeState = ResourceState::ShaderResource;
+        toUA.afterState = ResourceState::UnorderedAccess;
+        toUA.subresource = 0xFFFFFFFF;
+        toUA.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&toUA, 1);
+
         DescData params[] = {
             {0,  DescriptorType::SampledImage,   gbuffer_albedo_[idx]},
             {1,  DescriptorType::SampledImage,   gbuffer_normal_[idx]},
@@ -1946,6 +1961,14 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         const DescriptorSetHandle sets[] = {lighting_compute_ds_[idx]};
         cmd->BindDescriptorSets(PipelineBindPoint::Compute, lighting_compute_layout_, 0, 1, sets, 0, nullptr);
         cmd->Dispatch((render_width_ + 7) / 8, (render_height_ + 7) / 8, 1);
+
+        ResourceBarrier toSR{};
+        toSR.resource = lighting_output_[idx];
+        toSR.beforeState = ResourceState::UnorderedAccess;
+        toSR.afterState = ResourceState::ShaderResource;
+        toSR.subresource = 0xFFFFFFFF;
+        toSR.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&toSR, 1);
     } else {
         DescData params[] = {
             {0, DescriptorType::UniformBuffer, view_cb_[idx]},
