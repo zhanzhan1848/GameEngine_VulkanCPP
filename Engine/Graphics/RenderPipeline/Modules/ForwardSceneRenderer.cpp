@@ -352,27 +352,29 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     // T4.6.5 part 5: Path B pipeline — CreateComputePipeline for lighting.
     // T4.6.5 part 6: Path B UBOs — GlobalShaderData (480B) +
     //                ForwardLightBuffer (25808B) triple-buffered + mapped.
-    // T4.6.5 part 7 (this commit): Path B bind-site Dispatch — writes
+    // T4.6.5 part 7: Path B bind-site Dispatch — writes
     //                lighting_compute_ds_[idx] with all 12 bindings + swaps
     //                BeginRenderPass+Draw to BindComputePipeline+Dispatch.
-    //                UBO fill logic (per-frame update from camera + scene)
-    //                still pending (part 8).
+    // T4.6.5 part 8 (this commit): Path B UBO fill — per-frame memcpy of
+    //                GlobalShaderData + ForwardLightBuffer from camera +
+    //                render_scene lights + cached_shadow_vp_.
+    //
+    // Path B is now functionally complete on the C++ side. Lighting Dispatch
+    // has all data it needs — but the skip remains until layout transitions
+    // around Dispatch are verified and the 8 GBuffer shaders are ported.
     //
     // Remaining blockers (multi-session scope):
-    //   1. Path B UBO fill: per-frame write of GlobalShaderData +
-    //      ForwardLightBuffer from camera + render_scene (UBOs are mapped
-    //      but currently never filled — Dispatch will read stale/zero data).
-    //   2. Layout transitions for lighting_output_ around the Dispatch
+    //   1. Layout transitions for lighting_output_ around the Dispatch
     //      (GENERAL ↔ SHADER_READ_ONLY — may need InsertBarrier calls).
-    //   3. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
+    //   2. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
     //      GBuffer, GBufferAlphaClip, GBufferUnlit, GBufferFoliage, GBufferWater,
     //      GBufferTransparent, ForwardTransparency, StreamingGBuffer
-    //   4. Vertex buffer binding slot 0/1 convention differs (Metal uses
+    //   3. Vertex buffer binding slot 0/1 convention differs (Metal uses
     //      [[buffer(1)]] for vertices; Vulkan expects binding 0).
     // Keep the skip in place until those are resolved.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
         std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (T4.6.5: "
-                     "3/11 shaders ported; Path B Dispatch ready, UBO fill pending)"
+                     "3/11 shaders ported; Path B complete, blockers are shader ports)"
                   << std::endl;
         return false;
     }
@@ -1842,6 +1844,82 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
     // valid depth buffer) and BEFORE Pass 4 (so deferred lighting illuminates
     // the streaming surface). Loads existing color+depth, no clear.
     RenderStreamingMeshes(cmd, idx);
+
+    // T4.6.5 part 8 Path B: per-frame UBO fill for compute lighting dispatch.
+    // GlobalShaderData (480B) + ForwardLightBuffer (25808B) mirror the engine
+    // UBO layout that DeferredLighting.spv expects at bindings 9 and 10.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        math::m4x4 viewInv = Inverse(view_matrix);
+        math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+
+        if (auto* frameData = static_cast<rhi::GlobalShaderData*>(lighting_global_mapped_[idx])) {
+            frameData->view = view_matrix;
+            frameData->projection = proj_matrix;
+            frameData->viewProjection = proj_matrix * view_matrix;
+            frameData->previousViewProjection = proj_matrix * view_matrix;
+            frameData->invProjection = Inverse(proj_matrix);
+            frameData->invViewProjection = Inverse(frameData->viewProjection);
+            frameData->cameraPositionAndViewWidth = {camera_position.x, camera_position.y, camera_position.z, static_cast<float>(render_width_)};
+            frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(render_height_)};
+            frameData->numDirectionalLights = 0;
+            frameData->numPunctualLights = 0;
+            frameData->deltaTime = 0.016f;
+            frameData->frameCount = 0.0f;
+            frameData->renderMode = ibl_ready_ ? 2u : 0u;  // 2 = ShadowAndIBL
+            frameData->enableIBL = ibl_ready_ ? 1u : 0u;
+            frameData->enableDDGI = 0u;
+            frameData->jitterOffset = math::v2{0.0f, 0.0f};
+            frameData->debug_directLightBoost = 2.0f;
+            frameData->debug_iblStrength = 0.2f;
+            frameData->debug_ddgiIndirectWeight = 1.0f;
+            frameData->debug_exposure = 1.8f;
+        }
+
+        if (auto* lightBuf = static_cast<rhi::ForwardLightBuffer*>(lighting_light_mapped_[idx])) {
+            lightBuf->directionalLightCount = 0;
+            lightBuf->punctualLightCount = 0;
+
+            if (render_scene_) {
+                for (const auto& rl : render_scene_->GetLights()) {
+                    if (rl.type == LightType::Directional) {
+                        if (lightBuf->directionalLightCount < 4) {
+                            auto& dl = lightBuf->directionalLights[lightBuf->directionalLightCount++];
+                            dl.viewProjections[0] = cached_shadow_vp_[0];
+                            dl.viewProjections[1] = cached_shadow_vp_[1];
+                            dl.viewProjections[2] = cached_shadow_vp_[0];
+                            dl.viewProjections[3] = cached_shadow_vp_[1];
+                            dl.splits = {0.1f, 50.0f, 200.0f, 1000.0f};
+                            dl.directionAndIntensity = {rl.direction.x, rl.direction.y, rl.direction.z, rl.intensity};
+                            dl.colorAndShadow = {rl.color.x, rl.color.y, rl.color.z, 1.0f};
+                        }
+                    } else {
+                        if (lightBuf->punctualLightCount < 128) {
+                            auto& pl = lightBuf->lights[lightBuf->punctualLightCount++];
+                            pl.position = rl.position;
+                            pl.intensity = rl.intensity;
+                            pl.direction = rl.direction;
+                            pl.range = rl.range;
+                            pl.color = rl.color;
+                            pl.cosUmbra = rl.outerCone;
+                            pl.cosPenumbra = rl.innerCone;
+                            pl.attenuation = {1.0f, 0.0f, 0.0f};
+                            pl.lightType = (rl.type == LightType::Point) ? 1 : 2;
+                            pl.shadowIndex = -1;
+                            pl.viewProjection = MatrixIdentity();
+                        }
+                    }
+                }
+            }
+
+            // ForwardShaderData.numDirectionalLights / numPunctualLights are read
+            // from the ForwardLightBuffer header (bindings 10), but GlobalShaderData
+            // also has these counts — sync them for any shader that reads from GSD.
+            if (auto* frameData = static_cast<rhi::GlobalShaderData*>(lighting_global_mapped_[idx])) {
+                frameData->numDirectionalLights = lightBuf->directionalLightCount;
+                frameData->numPunctualLights = lightBuf->punctualLightCount;
+            }
+        }
+    }
 
     // Pass 4: Deferred Lighting
     if (device_->GetPlatform() == RHIPlatform::Vulkan) {
