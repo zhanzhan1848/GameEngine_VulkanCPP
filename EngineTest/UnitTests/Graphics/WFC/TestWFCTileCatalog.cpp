@@ -179,6 +179,45 @@ TestResult TestMakeVineCubeTile_FourVariants_RuinsCategory() {
     return TestResult::Passed;
 }
 
+TestResult TestMakeCollapsedPillarTile_FourVariants_RuinsCategory() {
+    WFCTileRegistry reg;
+    reg.Register(MakeCollapsedPillarTile());
+    const WFCTile& t = reg.Get(wfc_tile_id{0});
+    TEST_ASSERT_EQ(4u, t.variant_count, "collapsed_pillar has 4 variants");
+    TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Ruins),
+                   static_cast<u32>(t.category), "collapsed_pillar is Ruins");
+    TEST_ASSERT(!t.is_rotationally_symmetric, "collapsed_pillar NOT rotationally symmetric");
+    for (u32 v = 0; v < 4u; ++v) {
+        TEST_ASSERT(t.mesh_handles[v] != primal::geometry::geometry_id{0},
+                    "collapsed_pillar variant has non-zero mesh_handles");
+    }
+    return TestResult::Passed;
+}
+
+TestResult TestMakeCrackedWallTile_SingleVariant_RuinsCategory() {
+    WFCTileRegistry reg;
+    reg.Register(MakeCrackedWallTile());
+    const WFCTile& t = reg.Get(wfc_tile_id{0});
+    TEST_ASSERT_EQ(1u, t.variant_count, "cracked_wall has 1 variant");
+    TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Ruins),
+                   static_cast<u32>(t.category), "cracked_wall is Ruins");
+    TEST_ASSERT(t.mesh_handles[0] != primal::geometry::geometry_id{0},
+                "cracked_wall mesh_handles[0] set");
+    return TestResult::Passed;
+}
+
+TestResult TestMakeWeatheredStoneTile_SingleVariant_RuinsCategory() {
+    WFCTileRegistry reg;
+    reg.Register(MakeWeatheredStoneTile());
+    const WFCTile& t = reg.Get(wfc_tile_id{0});
+    TEST_ASSERT_EQ(1u, t.variant_count, "weathered_stone has 1 variant");
+    TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Ruins),
+                   static_cast<u32>(t.category), "weathered_stone is Ruins");
+    TEST_ASSERT(t.mesh_handles[0] != primal::geometry::geometry_id{0},
+                "weathered_stone mesh_handles[0] set");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCTileCatalog");
     TEST_CASE(suite, "Populate_Registers_Five_Tiles", TestWFCTileCatalog_Populate_Registers_Five_Tiles);
@@ -197,6 +236,12 @@ int main() {
               TestMakeMossyCubeTile_SingleVariant_RuinsCategory);
     TEST_CASE(suite, "MakeVineCubeTile_FourVariants_RuinsCategory",
               TestMakeVineCubeTile_FourVariants_RuinsCategory);
+    TEST_CASE(suite, "MakeCollapsedPillarTile_FourVariants_RuinsCategory",
+              TestMakeCollapsedPillarTile_FourVariants_RuinsCategory);
+    TEST_CASE(suite, "MakeCrackedWallTile_SingleVariant_RuinsCategory",
+              TestMakeCrackedWallTile_SingleVariant_RuinsCategory);
+    TEST_CASE(suite, "MakeWeatheredStoneTile_SingleVariant_RuinsCategory",
+              TestMakeWeatheredStoneTile_SingleVariant_RuinsCategory);
     suite.RunAllTests();
     return 0;
 }

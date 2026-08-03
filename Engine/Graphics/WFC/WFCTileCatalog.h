@@ -27,5 +27,8 @@ public:
 WFCTile MakeBrokenCubeTile();
 WFCTile MakeMossyCubeTile();
 WFCTile MakeVineCubeTile();
+WFCTile MakeCollapsedPillarTile();
+WFCTile MakeCrackedWallTile();
+WFCTile MakeWeatheredStoneTile();
 
 } // namespace primal::graphics::wfc
