@@ -1,5 +1,7 @@
 // Engine/Graphics/WFC/TileAdjacency.cpp
 #include "TileAdjacency.h"
+#include "WFCSocketOps.h"
+#include "WFCTileRegistry.h"
 
 namespace primal::graphics::wfc {
 
@@ -44,6 +46,37 @@ TileAdjacencyTable::GetCompatible(wfc_tile_id a, u32 a_var, WFCFace face) const 
         }
     }
     return result;
+}
+
+u32 TileAdjacencyTable::AddAutoFromSockets(const WFCTileRegistry& reg, bool skip_existing) {
+    u32 added = 0;
+    const u32 tile_count = reg.Count();
+    for (u32 ta = 0; ta < tile_count; ++ta) {
+        const WFCTile& tile_a = reg.Get(wfc_tile_id{ta});
+        for (u32 va = 0; va < tile_a.variant_count; ++va) {
+            for (u32 tb = 0; tb < tile_count; ++tb) {
+                const WFCTile& tile_b = reg.Get(wfc_tile_id{tb});
+                for (u32 vb = 0; vb < tile_b.variant_count; ++vb) {
+                    for (u32 f = 0; f < WFC_FACE_COUNT_3D; ++f) {
+                        WFCFace face_a = static_cast<WFCFace>(f);
+                        WFCFace face_b = OppositeFace(face_a);
+                        u8 sig_a = ComputeFaceSignature(tile_a, va, face_a);
+                        u8 sig_b = ComputeFaceSignature(tile_b, vb, face_b);
+                        if (!AreSocketsCompatible(sig_a, sig_b, face_a)) continue;
+                        if (skip_existing &&
+                            Compatible(wfc_tile_id{ta}, va, face_a,
+                                       wfc_tile_id{tb}, vb)) {
+                            continue;
+                        }
+                        AddCompatibility(wfc_tile_id{ta}, va, face_a,
+                                         wfc_tile_id{tb}, vb);
+                        ++added;
+                    }
+                }
+            }
+        }
+    }
+    return added;
 }
 
 } // namespace primal::graphics::wfc

@@ -8,6 +8,8 @@
 
 namespace primal::graphics::wfc {
 
+class WFCTileRegistry;  // forward decl — full definition in WFCTileRegistry.h
+
 // TileAdjacencyTable — records which (tile, variant) pairs may be placed next
 // to each other along a given face. Stores compatibilities as a hash set of
 // packed 64-bit keys for O(1) lookup. AddCompatibility automatically records
@@ -32,6 +34,22 @@ public:
 
     // Phase A.2 lookup: returns all (tile, variant) pairs compatible with (a, a_var) at face.
     utl::vector<Compatibility> GetCompatible(wfc_tile_id a, u32 a_var, WFCFace face) const;
+
+    // Phase C.1 Task 16: iterate all (tile_a, variant_a, face_a) x
+    // (tile_b, variant_b, face_b=opposite) pairs in `reg`, and call
+    // AddCompatibility for each pair whose per-face socket signatures are
+    // compatible per AreSocketsCompatible (strict OR mirror match).
+    //
+    // skip_existing=true: when Compatible(a, va, fa, b, vb) already returns
+    // true (e.g. because the mirror entry was recorded by a prior symmetric
+    // iteration), skip the AddCompatibility call so the entry isn't double-
+    // counted in the return value. AddCompatibility's auto-mirror behaviour
+    // already prevents duplicate set entries; this flag only affects the
+    // returned count.
+    //
+    // Returns the count of newly-added forward entries (one per
+    // AddCompatibility call that actually fired).
+    u32 AddAutoFromSockets(const WFCTileRegistry& reg, bool skip_existing = true);
 
 private:
     // Pack (tile_a, variant_a, face, tile_b, variant_b) into u64 key

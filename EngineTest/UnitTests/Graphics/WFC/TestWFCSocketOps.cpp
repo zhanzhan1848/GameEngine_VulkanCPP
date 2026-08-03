@@ -1,6 +1,8 @@
 #include "../../TestFramework.h"
 #include "Engine/Graphics/WFC/WFCFaceCorners.h"
 #include "Engine/Graphics/WFC/WFCSocketOps.h"
+#include "Engine/Graphics/WFC/TileAdjacency.h"
+#include "Engine/Graphics/WFC/WFCTileRegistry.h"
 #include <cmath>
 #include <cstring>
 
@@ -199,6 +201,120 @@ TestResult TestDeriveSocketEncoding_Top16BitsReserved() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// Phase C.1 Task 16: AreSocketsCompatible + AddAutoFromSockets tests
+// ============================================================================
+//
+// AreSocketsCompatible(sig_a, sig_b, face) returns true when sig_a strictly
+// equals sig_b, OR when sig_a equals the mirror of sig_b. The mirror operation
+// swaps corner pairs across the seam: c0<->c3 and c1<->c2. Geometrically this
+// is what happens when two tiles abut — the corners of one tile, viewed from
+// its own face, are the corners of the opposite tile viewed from the reverse
+// face, in reverse order.
+//
+// Quartile layout reminder: 8-bit signature packs 4 corner quartiles,
+//   bits[1:0] = c0, bits[3:2] = c1, bits[5:4] = c2, bits[7:6] = c3.
+//
+// Plan-bug note: The Phase C.1 plan claimed the mirror of 0xE4 was 0x27 and
+// decomposed 0xE4 as "0b 11 01 10 00". Both are wrong:
+//   * 0xE4 = 228 = 0b11100100, not 0b11011000. (The latter is 0xD8.)
+//   * Decomposing 0xE4 by 2-bit groups (LSB first): c0=00, c1=01, c2=10, c3=11.
+//     Mirror swaps c0<->c3 and c1<->c2 -> new c0=11, c1=10, c2=01, c3=00.
+//     Packed: (00<<6)|(01<<4)|(10<<2)|(11<<0) = 0|16|8|3 = 27 = 0x1B, not 0x27.
+// We avoid the confusing pattern entirely by using a clean test pair.
+
+TestResult TestAreSocketsCompatible_StrictMatch() {
+    u8 sig = 0xA5;
+    TEST_ASSERT(AreSocketsCompatible(sig, sig, WFCFace::PosZ), "strict match");
+    return TestResult::Passed;
+}
+
+// Clean mirror pair: 0xF0 = 0b11110000 -> c0=0,c1=0,c2=3,c3=3.
+// Mirror swaps c0<->c3 and c1<->c2 -> c0=3,c1=3,c2=0,c3=0
+//   -> packed 0b00001111 = 0x0F.
+TestResult TestAreSocketsCompatible_MirrorMatch() {
+    u8 sig      = 0xF0;
+    u8 mirrored = 0x0F;
+    TEST_ASSERT(AreSocketsCompatible(sig, mirrored, WFCFace::PosZ), "mirror match");
+    // Symmetric direction (mirror of mirror is identity):
+    TEST_ASSERT(AreSocketsCompatible(mirrored, sig, WFCFace::PosZ), "mirror match (reverse)");
+    return TestResult::Passed;
+}
+
+TestResult TestAreSocketsCompatible_Incompatible() {
+    // 0xFF mirrored = 0xFF (all-high is self-mirror), so this is genuinely
+    // incompatible: neither 0xFF==0x00 nor 0xFF==Mirror(0x00)=0xFF holds for sig_b=0x00.
+    // Wait — Mirror(0x00) = 0x00, so this is 0xFF vs {0x00, 0x00} -> false. Good.
+    TEST_ASSERT(!AreSocketsCompatible(0xFF, 0x00, WFCFace::PosZ), "all-high vs all-low");
+    return TestResult::Passed;
+}
+
+// AddAutoFromSockets iterates all (tile_a, variant_a, face_a) x (tile_b,
+// variant_b, face_b=opposite) pairs and calls AddCompatibility for each pair
+// whose face signatures are compatible. AddCompatibility itself records the
+// mirror entry, so callers only declare one side of a symmetric pair.
+//
+// For a unit cube {1,1,1}:
+//   * Side faces (+X, -X, +Z, -Z) each have signature 0x3C (2 high + 2 low
+//     corners). Each side face is its own mirror, so cube<->cube is auto-
+//     compatible on side faces.
+//   * Top face (+Y) signature is 0xFF (all-high corners).
+//   * Bottom face (-Y) signature is 0x00 (all-low corners).
+//   * Top vs bottom signatures are NOT compatible (neither strict-equal nor
+//     mirror-equal: Mirror(0xFF)=0xFF != 0x00, Mirror(0x00)=0x00 != 0xFF),
+//     so AddAutoFromSockets correctly skips the +Y/-Y pairs.
+//
+// Expected `added` count walks through 6 face iterations for the single
+// cube-cube pair (variant_count=1):
+//   f=0 (+X): sig=sig=0x3C, compatible, no mirror yet -> AddCompatibility fires.
+//             Auto-mirror records (cube,-X)<-(cube,+X). added=1.
+//   f=1 (-X): sig=sig=0x3C, compatible, but Compatible(cube,-X,cube,+X)=true
+//             (set by f=0's auto-mirror) -> skip_existing=true skips. added=1.
+//   f=2 (+Y): sig_a=0xFF, sig_b=0x00, NOT compatible -> skip.
+//   f=3 (-Y): sig_a=0x00, sig_b=0xFF, NOT compatible -> skip.
+//   f=4 (+Z): sig=sig=0x3C, compatible, no mirror yet -> AddCompatibility fires.
+//             Auto-mirror records (cube,-Z)<-(cube,+Z). added=2.
+//   f=5 (-Z): Compatible(cube,-Z,cube,+Z)=true -> skip. added=2.
+//
+// Final `added` = 2. Side faces report Compatible=true (4 of 6 faces); the
+// +Y/-Y faces were correctly rejected.
+TestResult TestAddAutoFromSockets_CubeToCubeStrict() {
+    WFCTileRegistry reg;
+    WFCTile cube{};
+    cube.name = "cube";
+    cube.bounds_extents = primal::math::v3{1, 1, 1};
+    cube.variant_count = 1;
+    cube.category = WFCCategory::Primitive;
+    reg.Register(cube);
+
+    TileAdjacencyTable adj;
+    u32 added = adj.AddAutoFromSockets(reg, /*skip_existing=*/true);
+    // 2 forward AddCompatibility calls fire (+X side and +Z side). The -X/-Z
+    // iterations are skipped because their mirror entries were auto-recorded;
+    // +Y/-Y are skipped because their signatures are mutually incompatible.
+    TEST_ASSERT(added == 2u, "cube auto-adjacency == 2 (side faces only)");
+
+    // Sanity: 4 side faces must report cube<->cube compatible.
+    wfc_tile_id cube_id{0};
+    TEST_ASSERT(adj.Compatible(cube_id, 0, WFCFace::PosX, cube_id, 0),
+                "cube<->cube compatible on +X after auto-add");
+    TEST_ASSERT(adj.Compatible(cube_id, 0, WFCFace::NegX, cube_id, 0),
+                "cube<->cube compatible on -X after auto-add");
+    TEST_ASSERT(adj.Compatible(cube_id, 0, WFCFace::PosZ, cube_id, 0),
+                "cube<->cube compatible on +Z after auto-add");
+    TEST_ASSERT(adj.Compatible(cube_id, 0, WFCFace::NegZ, cube_id, 0),
+                "cube<->cube compatible on -Z after auto-add");
+
+    // Sanity: top/bottom faces must report NOT compatible (0xFF vs 0x00 are
+    // neither strict-equal nor mirror-equal).
+    TEST_ASSERT(!adj.Compatible(cube_id, 0, WFCFace::PosY, cube_id, 0),
+                "cube<->cube NOT compatible on +Y (0xFF vs 0x00)");
+    TEST_ASSERT(!adj.Compatible(cube_id, 0, WFCFace::NegY, cube_id, 0),
+                "cube<->cube NOT compatible on -Y (0x00 vs 0xFF)");
+
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCSocketOps");
     TEST_CASE(suite, "GetFaceCorners_AllFaces",  TestGetFaceCorners_AllFaces);
@@ -208,6 +324,10 @@ int main() {
     TEST_CASE(suite, "ComputeFaceSignature_CubeVariantInvariant",  TestComputeFaceSignature_CubeVariantInvariant);
     TEST_CASE(suite, "DeriveSocketEncoding_CubeKnownLayout",  TestDeriveSocketEncoding_CubeKnownLayout);
     TEST_CASE(suite, "DeriveSocketEncoding_Top16BitsReserved", TestDeriveSocketEncoding_Top16BitsReserved);
+    TEST_CASE(suite, "AreSocketsCompatible_StrictMatch",        TestAreSocketsCompatible_StrictMatch);
+    TEST_CASE(suite, "AreSocketsCompatible_MirrorMatch",        TestAreSocketsCompatible_MirrorMatch);
+    TEST_CASE(suite, "AreSocketsCompatible_Incompatible",       TestAreSocketsCompatible_Incompatible);
+    TEST_CASE(suite, "AddAutoFromSockets_CubeToCubeStrict",     TestAddAutoFromSockets_CubeToCubeStrict);
     suite.RunAllTests();
     return 0;
 }

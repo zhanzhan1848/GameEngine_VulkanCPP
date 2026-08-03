@@ -66,10 +66,23 @@ SocketEncoding DeriveSocketEncoding(const WFCTile& tile, u32 variant) {
     return enc;
 }
 
-bool AreSocketsCompatible(u8 sig_a, u8 sig_b, WFCFace face) {
-    (void)sig_a;
-    (void)sig_b;
-    (void)face;
+// Mirror a face signature by swapping the two corner pairs that meet at the
+// seam when two tiles abut. With quartile layout c0=bits[1:0], c1=bits[3:2],
+// c2=bits[5:4], c3=bits[7:6], the mirror swaps c0<->c3 and c1<->c2.
+static u8 MirrorSignature(u8 sig) {
+    u8 c0 = static_cast<u8>((sig >> 0) & 0x3);
+    u8 c1 = static_cast<u8>((sig >> 2) & 0x3);
+    u8 c2 = static_cast<u8>((sig >> 4) & 0x3);
+    u8 c3 = static_cast<u8>((sig >> 6) & 0x3);
+    return static_cast<u8>((c3 << 0) | (c2 << 2) | (c1 << 4) | (c0 << 6));
+}
+
+bool AreSocketsCompatible(u8 sig_a, u8 sig_b, WFCFace /*face*/) {
+    // Strict match: identical signatures (covers mirror-symmetric faces like a
+    // cube side, where mirroring the signature returns the same value).
+    if (sig_a == sig_b) return true;
+    // Mirror match: sig_a equals the seam-mirror of sig_b.
+    if (sig_a == MirrorSignature(sig_b)) return true;
     return false;
 }
 

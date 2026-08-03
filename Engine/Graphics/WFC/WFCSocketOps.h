@@ -22,11 +22,13 @@ namespace primal::graphics::wfc {
 u8 ComputeFaceSignature(const WFCTile& tile, u32 variant, WFCFace face);
 
 // Full 6-face encoding packed in u64 (48 bits used, 16 reserved).
-// STUB in T14 — full implementation lands in T15.
+// Implemented in Phase C.1 T15.
 SocketEncoding DeriveSocketEncoding(const WFCTile& tile, u32 variant);
 
 // Strict + mirror socket compatibility test (Phase C.1).
-// STUB in T14 — full implementation lands in T16.
+// Returns true when sig_a == sig_b OR sig_a == Mirror(sig_b). The mirror
+// operation swaps corner pairs across the seam: c0<->c3 and c1<->c2.
+// Implemented in Phase C.1 T16.
 bool AreSocketsCompatible(u8 sig_a, u8 sig_b, WFCFace face);
 
 } // namespace primal::graphics::wfc
