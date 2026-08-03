@@ -457,13 +457,15 @@ inline void create_broken_cube_mesh(graphics::rhi::RHIMeshAsset& out,
 
     // Flip the winding of the triangle mapped to the chosen corner.
     // Each anchor vert is unique to one triangle (see mapping above).
+    const u32 corner_idx = static_cast<u32>(corner);
+    assert(corner_idx < 4 && "BrokenCorner out of range");
     static constexpr u32 kCornerTriangle[4] = {
         /* PosXYZ   */ 0,   // face 0 (+Z), tri (0,1,2) — anchor vert 1
         /* PosXNegZ */ 2,   // face 1 (-Z), tri (4,5,6) — anchor vert 4
         /* NegXPosZ */ 6,   // face 3 (-X), tri (12,13,14) — anchor vert 13
         /* NegXNegZ */ 10,  // face 5 (-Y), tri (20,21,22) — anchor vert 20
     };
-    const u32 tri_base = kCornerTriangle[static_cast<u32>(corner)];
+    const u32 tri_base = kCornerTriangle[corner_idx];
     std::swap(idx[tri_base * 3 + 1], idx[tri_base * 3 + 2]);
 }
 
