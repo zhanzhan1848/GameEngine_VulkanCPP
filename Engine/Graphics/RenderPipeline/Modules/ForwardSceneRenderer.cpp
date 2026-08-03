@@ -719,6 +719,12 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+
+        // T4.6.5 part 10: Vulkan GBuffer.vert/frag ported. Pipeline creation
+        // requires C++ vertex input declaration (vertexBindings/vertexAttributes),
+        // push-constant std140 layout adjustment, and RG16_UInt ToVkFormat
+        // mapping — see remaining-blockers comment at the top of Initialize().
+        // Skip stays until those land + remaining 7 shaders port.
         gbuffer_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Shadow
