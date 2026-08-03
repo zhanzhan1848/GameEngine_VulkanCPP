@@ -23,6 +23,7 @@
 
 #include "../../Common/CommonHeaders.h"
 #include "WFCConfig.h"
+#include "WFCCategory.h"
 #include "WFCObserver.h"
 #include "WFCPropagator.h"
 #include "RestartPolicy.h"
@@ -68,6 +69,11 @@ public:
 
     u32 Generation() const { return generation_; }
 
+    // Debug/test only: returns the candidate mask computed by the last
+    // PopulateAllCandidates call (post category-mask filtering). Zero if
+    // PopulateAllCandidates has not run yet.
+    u64 LastPopulatedMaskForTest() const { return last_populated_mask_; }
+
 private:
     // Fills every cell with the full candidate mask derived from the registry's
     // MaxVariants(). Phase A.2 single-tile assumption: bit index == variant
@@ -102,6 +108,12 @@ private:
     WFCGridCoord    last_picked_{-1, -1, -1};
     u32             generation_{0};
     u32             max_generations_{8};
+
+    // Phase C.1: cached from WFCConfig in Initialize so PopulateAllCandidates
+    // (also called on restart) can re-apply the category filter without needing
+    // the config passed back in. Default ~0ULL = all categories eligible.
+    u64             active_category_mask_{~0ULL};
+    u64             last_populated_mask_{0};
 };
 
 } // namespace primal::graphics::wfc

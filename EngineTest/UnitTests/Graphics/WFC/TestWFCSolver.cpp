@@ -17,6 +17,7 @@
 #include "Engine/Graphics/WFC/WFCStepBuffer.h"
 #include "Engine/Graphics/WFC/WFCSolveBudget.h"
 #include "Engine/Graphics/WFC/WFCConfig.h"
+#include "Engine/Graphics/WFC/WFCCategory.h"
 
 using namespace primal::graphics::wfc;
 using namespace Engine::Test;
@@ -402,6 +403,59 @@ TestResult TestWFCSolver_CollapseCell_Decodes_Multi_Tile() {
     return TestResult::Passed;
 }
 
+// Task 5 (Phase C.1): PopulateAllCandidates must honor active_category_mask.
+//
+// Discriminating assertion: only Ruins-category tiles should have their bits
+// set in the populated candidate mask. With 2 Primitive tiles + 1 Ruins tile
+// registered and config.active_category_mask == CategoryMaskFor(Ruins), the
+// populated mask must contain only the Ruins tile's bit (bit 8 under the
+// 16×4 packing: tile_id=2 * MaxVariantsPerTile=4 + variant=0).
+//
+// IMPORTANT: category-mask bits (CategoryMaskFor) and candidate-mask bits
+// (BitForTileVariant) are different namespaces within u64 — do not AND them
+// against each other. Compute the expected candidate mask directly from the
+// Ruins tile's (tile_id, variant) pairs instead.
+//
+// Note on Initialize signature: the real signature is 5-arg (config, grid,
+// registry, adjacency, step_buffer), not the 3-arg shown in the plan prose.
+// The test constructs the auxiliary objects and passes them in.
+TestResult TestWFCSolver_PopulateRespectsCategoryMask() {
+    WFCTileRegistry reg;
+    auto makeTile = [](const char* name, WFCCategory cat, u32 vc) {
+        WFCTile t{};
+        t.name = name;
+        t.category = cat;
+        t.variant_count = vc;
+        t.bounds_extents = primal::math::v3{1.0f, 1.0f, 1.0f};
+        return t;
+    };
+    reg.Register(makeTile("prim_a", WFCCategory::Primitive, 1));
+    reg.Register(makeTile("prim_b", WFCCategory::Primitive, 1));
+    reg.Register(makeTile("ruin_a", WFCCategory::Ruins, 1));
+
+    WFCConfig cfg;
+    cfg.grid_size = WFCGridCoord{2, 2, 2};
+    cfg.active_category_mask = CategoryMaskFor(WFCCategory::Ruins);
+
+    WaveGrid grid;
+    TileAdjacencyTable adj;
+    WFCStepBuffer buf;
+
+    WFCSolver solver;
+    solver.Initialize(cfg, grid, reg, adj, buf);
+
+    // Expected: only ruin_a's candidate bit survives. ruin_a is tile_id=2;
+    // under 16×4 packing its variant-0 bit = 2 * 4 + 0 = 8.
+    u64 expected_ruw_mask = 0;
+    expected_ruw_mask |= (1ULL << WFCTileRegistry::BitForTileVariant(wfc_tile_id{2}, 0));
+
+    u64 populated = solver.LastPopulatedMaskForTest();
+    TEST_ASSERT_EQ(expected_ruw_mask, populated,
+                   "populated mask = only ruin_a's candidate bit (prims filtered out)");
+    TEST_ASSERT(populated != 0, "mask non-zero");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCSolver");
     TEST_CASE(suite, "Initialize_Populates_Candidate_Masks", TestWFCSolver_Initialize_Populates_Candidate_Masks);
@@ -412,6 +466,7 @@ int main() {
     TEST_CASE(suite, "Budget_Stops_Mid_Solve", TestWFCSolver_Budget_Stops_Mid_Solve);
     TEST_CASE(suite, "Demo_4x4x4_TwoTile", TestWFCSolver_Demo_4x4x4_TwoTile);
     TEST_CASE(suite, "CollapseCell_Decodes_Multi_Tile", TestWFCSolver_CollapseCell_Decodes_Multi_Tile);
+    TEST_CASE(suite, "PopulateRespectsCategoryMask", TestWFCSolver_PopulateRespectsCategoryMask);
     suite.RunAllTests();
     return 0;
 }

@@ -35,6 +35,9 @@ void WFCSolver::Initialize(const WFCConfig& config,
     generation_   = 0;
     max_generations_ = config.max_generations;
     restart_      = RestartPolicy{config.max_generations};
+    // Phase C.1: cache the category mask so PopulateAllCandidates (which runs
+    // here and on every restart) can filter without re-threading the config.
+    active_category_mask_ = config.active_category_mask;
 
     // The solver owns the responsibility of sizing the grid to match the
     // config. This keeps the test fixture (and downstream PCG callers) from
@@ -56,9 +59,12 @@ void WFCSolver::Initialize(const WFCConfig& config,
 void WFCSolver::PopulateAllCandidates(WaveGrid& grid, const WFCTileRegistry& registry) {
     // Phase A.3 multi-tile: iterate registry tiles, set bit for each (tile, variant).
     // Bit layout: bit = tile_id * MaxVariantsPerTile + variant (see WFCTileRegistry).
+    // Phase C.1: skip tiles whose category isn't in active_category_mask_ so a
+    // solver can restrict the wave to one thematic group (e.g. Ruins-only).
     u64 full_mask = 0;
     for (u32 t = 0; t < registry.Count(); ++t) {
         const WFCTile& tile = registry.Get(wfc_tile_id{t});
+        if (!CategoryInMask(tile.category, active_category_mask_)) continue;
         for (u32 v = 0; v < tile.variant_count; ++v) {
             u32 bit = WFCTileRegistry::BitForTileVariant(wfc_tile_id{t}, v);
             if (bit < 64) {
@@ -66,6 +72,7 @@ void WFCSolver::PopulateAllCandidates(WaveGrid& grid, const WFCTileRegistry& reg
             }
         }
     }
+    last_populated_mask_ = full_mask;
     u32 total_candidates = static_cast<u32>(__builtin_popcountll(full_mask));
 
     auto& cells = grid.CellsMutable();
