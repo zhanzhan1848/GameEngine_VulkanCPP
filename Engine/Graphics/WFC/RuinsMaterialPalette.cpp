@@ -21,6 +21,7 @@ const RuinsMaterial kRuinsPalette[kRuinsPaletteCount] = {
     /* 4 rubble_earth      */ {math::v3{0.32f, 0.26f, 0.18f}, 0.0f, 1.00f},
     /* 5 weathered_lime    */ {math::v3{0.55f, 0.50f, 0.42f}, 0.0f, 0.80f},
     /* 6 cracked_concrete  */ {math::v3{0.42f, 0.40f, 0.38f}, 0.0f, 0.75f},
+    /* 7 vine_cube_avg     */ {math::v3{0.40f, 0.45f, 0.325f}, 0.0f, 0.95f},
 };
 
 u32 GetRuinsMaterialId(u32 palette_idx) {

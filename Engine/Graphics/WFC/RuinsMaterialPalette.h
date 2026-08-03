@@ -17,7 +17,7 @@ struct RuinsMaterial {
     f32      roughness;
 };
 
-constexpr u32 kRuinsPaletteCount = 7;
+constexpr u32 kRuinsPaletteCount = 8;
 
 extern const RuinsMaterial kRuinsPalette[kRuinsPaletteCount];
 
