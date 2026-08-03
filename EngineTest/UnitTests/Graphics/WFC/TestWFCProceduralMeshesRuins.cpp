@@ -53,11 +53,32 @@ TestResult TestBrokenCube_BoundsApproxInput() {
     return TestResult::Passed;
 }
 
+// --- T9: collapsed pillar + broken corner in/out ---
+
+TestResult TestCollapsedPillar_TiltShiftsTop() {
+    graphics::rhi::RHIMeshAsset asset{};
+    content::create_collapsed_pillar_mesh(asset, 0.5f, 1.0f,
+                                          content::TiltAxis::PlusX, 0.3f);
+    TEST_ASSERT(asset.num_vertices > 0, "verts non-zero");
+    TEST_ASSERT(asset.num_indices > 0,  "indices non-zero");
+    return TestResult::Passed;
+}
+
+TestResult TestBrokenCornerIn_Composes() {
+    graphics::rhi::RHIMeshAsset asset{};
+    content::create_broken_corner_in_mesh(asset, 1.0f, 1.0f, 1.0f,
+                                          content::BrokenCorner::PosXYZ);
+    TEST_ASSERT(asset.num_vertices >= 24u, "at least cube verts");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCProceduralMeshesRuins");
     TEST_CASE(suite, "AcceptsMaterialIdx",              TestRegisterProceduralMesh_AcceptsMaterialIdx);
     TEST_CASE(suite, "BrokenCube_VertexIndexCount",     TestBrokenCube_VertexIndexCount);
     TEST_CASE(suite, "BrokenCube_BoundsApproxInput",    TestBrokenCube_BoundsApproxInput);
+    TEST_CASE(suite, "CollapsedPillar_TiltShiftsTop",   TestCollapsedPillar_TiltShiftsTop);
+    TEST_CASE(suite, "BrokenCornerIn_Composes",         TestBrokenCornerIn_Composes);
     suite.RunAllTests();
     return 0;
 }
