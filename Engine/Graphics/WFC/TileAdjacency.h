@@ -28,6 +28,10 @@ public:
 
     void Clear();
 
+    // Returns the total number of unique compatibility entries in the table
+    // (forward + mirror, deduplicated by the underlying unordered_set).
+    u32 EntryCount() const { return static_cast<u32>(compatibility_set_.size()); }
+
     // Returns true if (a, a_var) at face accepts (b, b_var) on opposite face.
     bool Compatible(wfc_tile_id a, u32 a_var, WFCFace face,
                     wfc_tile_id b, u32 b_var) const;

@@ -276,19 +276,32 @@ WFCTile MakeBrokenCornerOutTile() {
 }
 
 void WFCTileCatalog::Populate(WFCTileRegistry& registry, TileAdjacencyTable& adjacency) {
-    registry.Register(MakeCubeTile());
-    registry.Register(MakeRampTile());
-    registry.Register(MakeCornerInTile());
-    registry.Register(MakeCornerOutTile());
-    registry.Register(MakePillarTile());
+    // 5 Primitive tiles (tile_id = 0..4).
+    registry.Register(MakeCubeTile());        // 0
+    registry.Register(MakeRampTile());        // 1
+    registry.Register(MakeCornerInTile());    // 2
+    registry.Register(MakeCornerOutTile());   // 3
+    registry.Register(MakePillarTile());      // 4
 
+    // 10 Ruins tiles (tile_id = 5..14).
+    registry.Register(MakeBrokenCubeTile());       // 5
+    registry.Register(MakeMossyCubeTile());        // 6
+    registry.Register(MakeCollapsedPillarTile());  // 7
+    registry.Register(MakeRubblePileTile());       // 8
+    registry.Register(MakeCrackedWallTile());      // 9
+    registry.Register(MakeVineCubeTile());         // 10
+    registry.Register(MakeWeatheredStoneTile());   // 11
+    registry.Register(MakeBrokenCornerInTile());   // 12
+    registry.Register(MakeBrokenCornerOutTile());  // 13
+    registry.Register(MakeDebrisSmallTile());      // 14
+
+    // Hand-written structural rules. Cube is the universal structural tile:
+    // players expect cubes to stack and to abut every other tile type on
+    // every face. Strict socket matching would reject cube-cube on +Y/-Y
+    // (0xFF vs 0x00) — hand-write cube wildcard to override.
     const wfc_tile_id cube{0};
-    const wfc_tile_id ramp{1};
-    const wfc_tile_id corner_in{2};
-    const wfc_tile_id corner_out{3};
-    const wfc_tile_id pillar{4};
 
-    // Helper: full pairwise compat on all 6 faces (for tiles that always fit together)
+    // Helper: full 6-face wildcard compat between (a, a_var) and (b, b_var).
     auto AddFullCompat = [&](wfc_tile_id a, u32 a_var, wfc_tile_id b, u32 b_var) {
         adjacency.AddCompatibility(a, a_var, WFCFace::PosX, b, b_var);
         adjacency.AddCompatibility(a, a_var, WFCFace::NegX, b, b_var);
@@ -298,21 +311,18 @@ void WFCTileCatalog::Populate(WFCTileRegistry& registry, TileAdjacencyTable& adj
         adjacency.AddCompatibility(a, a_var, WFCFace::NegZ, b, b_var);
     };
 
-    // Phase A.3 simplified rules: cube is universally compatible (wildcard structural tile).
-    // Other tiles self-compatible + cube-compatible on all faces.
-    for (u32 v = 0; v < 4; ++v) {
-        AddFullCompat(cube, 0, ramp, v);
-        AddFullCompat(ramp, v, ramp, v);  // ramp self-compat (same variant)
+    // Cube self-compat (all 6 faces) — overrides socket-signature mismatch.
+    AddFullCompat(cube, 0, cube, 0);
+
+    // Cube wildcard with every other tile (variants 0 only, to keep rule set
+    // manageable — solver can pick variant via socket matching elsewhere).
+    for (u32 t = 1; t < 15; ++t) {
+        AddFullCompat(cube, 0, wfc_tile_id{t}, 0);
     }
-    for (u32 v = 0; v < 4; ++v) {
-        AddFullCompat(cube, 0, corner_in, v);
-        AddFullCompat(cube, 0, corner_out, v);
-        AddFullCompat(corner_in, v, corner_in, v);   // self-compat same variant
-        AddFullCompat(corner_out, v, corner_out, v); // self-compat same variant
-    }
-    AddFullCompat(cube, 0, pillar, 0);
-    AddFullCompat(pillar, 0, pillar, 0);
-    AddFullCompat(cube, 0, cube, 0);  // cube self-compat
+
+    // Auto-derive remaining rules via socket compatibility.
+    // skip_existing=true avoids double-counting already-hand-written pairs.
+    adjacency.AddAutoFromSockets(registry, /*skip_existing=*/true);
 }
 
 } // namespace primal::graphics::wfc

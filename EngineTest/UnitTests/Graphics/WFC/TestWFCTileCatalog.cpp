@@ -17,7 +17,7 @@ TestResult TestWFCTileCatalog_Populate_Registers_Five_Tiles() {
     TileAdjacencyTable adj;
     WFCTileCatalog::Populate(reg, adj);
 
-    TEST_ASSERT_EQ(5u, reg.Count(), "5 tile types registered");
+    TEST_ASSERT_EQ(15u, reg.Count(), "15 tile types registered (5 primitive + 10 ruins)");
     return TestResult::Passed;
 }
 
@@ -39,8 +39,8 @@ TestResult TestWFCTileCatalog_Tiles_Have_Valid_Mesh_Handles() {
 
     for (u32 i = 0; i < reg.Count(); ++i) {
         const WFCTile& t = reg.Get(wfc_tile_id{i});
-        TEST_ASSERT(static_cast<u32>(t.mesh_handles[0]) != 0 || i == 0,
-                    "Mesh handle[0] set (0 acceptable only for cube as placeholder)");
+        TEST_ASSERT(static_cast<u32>(t.mesh_handles[0]) != 0,
+                    "Mesh handle[0] set for all 15 catalog tiles");
     }
     return TestResult::Passed;
 }
@@ -96,7 +96,13 @@ TestResult TestWFCTileCatalog_Solves_4x4x4_With_Catalog() {
 
     WFCSolver::StepResult result = WFCSolver::StepResult::InProgress;
     u32 steps = 0;
-    while (result == WFCSolver::StepResult::InProgress && steps < 1000) {
+    // Continue stepping through InProgress AND Restarted states: the solver
+    // may hit contradictions and restart (seed=7 catalog with 15 tiles can
+    // restart up to max_generations=8 times before settling or giving up).
+    // Only Done / GivenUp are terminal.
+    while ((result == WFCSolver::StepResult::InProgress ||
+            result == WFCSolver::StepResult::Restarted) &&
+           steps < 2000) {
         result = solver.Step(budget);
         ++steps;
     }
@@ -125,7 +131,8 @@ TestResult TestWFCTileCatalog_Primitive_Tiles_Have_Primitive_Category() {
     TileAdjacencyTable adj;
     WFCTileCatalog::Populate(reg, adj);
 
-    TEST_ASSERT_EQ(5u, reg.Count(), "5 primitive tiles registered");
+    TEST_ASSERT_EQ(15u, reg.Count(), "15 tiles registered (5 primitive + 10 ruins)");
+    // First 5 tiles are Primitive category (T22 catalog layout).
     for (u32 i = 0; i < 5u; ++i) {
         const WFCTile& t = reg.Get(wfc_tile_id{i});
         TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Primitive),
@@ -133,6 +140,13 @@ TestResult TestWFCTileCatalog_Primitive_Tiles_Have_Primitive_Category() {
                        "primitive tile category == Primitive");
         TEST_ASSERT(t.mesh_handles[0] != primal::geometry::geometry_id{0},
                     "primitive tile mesh_handles[0] populated");
+    }
+    // Tiles 5..14 are Ruins category.
+    for (u32 i = 5; i < 15u; ++i) {
+        const WFCTile& t = reg.Get(wfc_tile_id{i});
+        TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Ruins),
+                       static_cast<u32>(t.category),
+                       "ruins tile category == Ruins");
     }
     return TestResult::Passed;
 }
@@ -279,6 +293,48 @@ TestResult TestMakeBrokenCornerOutTile_FourVariants_RuinsCategory() {
     return TestResult::Passed;
 }
 
+TestResult TestCatalogPopulate_15TilesAndRuleCount() {
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCTileCatalog::Populate(reg, adj);
+
+    TEST_ASSERT_EQ(15u, reg.Count(), "15 tiles total (5 primitive + 10 ruins)");
+
+    // Verify expected tile-id mapping.
+    TEST_ASSERT_STR_EQ("cube",            reg.Get(wfc_tile_id{0}).name,  "tile 0 = cube");
+    TEST_ASSERT_STR_EQ("pillar",          reg.Get(wfc_tile_id{4}).name,  "tile 4 = pillar");
+    TEST_ASSERT_STR_EQ("broken_cube",     reg.Get(wfc_tile_id{5}).name,  "tile 5 = broken_cube");
+    TEST_ASSERT_STR_EQ("debris_small",    reg.Get(wfc_tile_id{14}).name, "tile 14 = debris_small");
+
+    // Sanity: at least 60 rules so the solver has meaningful adjacency.
+    u32 rule_count = adj.EntryCount();
+    TEST_ASSERT(rule_count >= 60u, ">= 60 adjacency rules");
+    // Upper bound: empirically determined. Auto-derive iterates all
+    // (tile, variant, face) x (tile, variant, opposite-face) pairs; most ruins
+    // tiles share box-like geometry → similar socket signatures → most pairs
+    // match. Observed: ~6142 on macOS Clang. Bound at 6500 for cross-platform
+    // tolerance (compiler/socket-derivation drift). See commit msg.
+    TEST_ASSERT(rule_count <= 6500u, "<= 6500 adjacency rules (auto-derive upper envelope)");
+    return TestResult::Passed;
+}
+
+TestResult TestCatalogPopulate_CubeSelfCompat_OnAllFaces() {
+    // Regression guard: cube must remain self-compatible on all 6 faces
+    // (hand-written rule overrides socket-signature mismatch on +Y/-Y where
+    // 0xFF vs 0x00 would otherwise be rejected).
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCTileCatalog::Populate(reg, adj);
+
+    const wfc_tile_id cube{0};
+    for (u32 f = 0; f < WFC_FACE_COUNT_3D; ++f) {
+        WFCFace face = static_cast<WFCFace>(f);
+        TEST_ASSERT(adj.Compatible(cube, 0, face, cube, 0),
+                    "cube self-compat on all 6 faces (hand-written wildcard)");
+    }
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCTileCatalog");
     TEST_CASE(suite, "Populate_Registers_Five_Tiles", TestWFCTileCatalog_Populate_Registers_Five_Tiles);
@@ -311,6 +367,10 @@ int main() {
               TestMakeBrokenCornerInTile_FourVariants_RuinsCategory);
     TEST_CASE(suite, "MakeBrokenCornerOutTile_FourVariants_RuinsCategory",
               TestMakeBrokenCornerOutTile_FourVariants_RuinsCategory);
+    TEST_CASE(suite, "CatalogPopulate_15TilesAndRuleCount",
+              TestCatalogPopulate_15TilesAndRuleCount);
+    TEST_CASE(suite, "CatalogPopulate_CubeSelfCompat_OnAllFaces",
+              TestCatalogPopulate_CubeSelfCompat_OnAllFaces);
     suite.RunAllTests();
     return 0;
 }
