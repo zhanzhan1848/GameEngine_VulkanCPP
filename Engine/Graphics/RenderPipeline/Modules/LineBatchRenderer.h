@@ -28,6 +28,11 @@ private:
     rhi::PipelineHandle        pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineLayoutHandle  layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
 
+    // T4.6.5 part 16.4: Vulkan-only. SSBO binding (Line.vert reads vertices
+    // from set 0 / binding 1; Metal uses BindVertexBuffers(1, ...) instead).
+    rhi::DescriptorSetLayoutHandle set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::DescriptorSetHandle       descriptor_set_{rhi::handles::INVALID_DESCRIPTOR_SET};
+
     rhi::ResourceHandle        vertex_buffer_{rhi::handles::INVALID_RESOURCE};
     u32                        buffer_capacity_{0};
 

@@ -117,14 +117,34 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set,
     device->UpdateDescriptorSets(count, writes.data());
 }
 
+// T4.6.5 part 16.2: shader dir paths are now relative (worktree-portable).
+// Test cwd is `build/Tests/UnitTests/`; CMake POST_BUILD copies Engine/ tree
+// next to the binary. Absolute path used as fallback for dev-machine runs
+// where the POST_BUILD copy hasn't populated yet.
 static const std::string SHADER_DIR =
-    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Forward/";
+    "Engine/Graphics/Metal/shaders/Forward/";
 
 static const std::string RHI_SHADER_DIR =
-    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/";
+    "Engine/Graphics/RHI/Shaders/";
 
 static const std::string VULKAN_SHADER_DIR =
-    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Vulkan/shaders/Forward/";
+    "Engine/Graphics/Vulkan/shaders/Forward/";
+
+static const std::string VULKAN_COMPUTE_SHADER_DIR =
+    "Engine/Graphics/Vulkan/shaders/";
+
+static const char* SHADER_FALLBACK_ROOT =
+    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/";
+
+// T4.6.5 part 16.2: try `relPath` first (matches POST_BUILD copy layout);
+// fall back to `<dev-machine-root>/<relPath>` if the test binary is run from
+// a cwd where the copy hasn't been done (e.g. ad-hoc dev runs).
+static std::string ResolveShaderPath(const std::string& relPath) {
+    if (std::ifstream(relPath).is_open()) return relPath;
+    std::string fb = std::string(SHADER_FALLBACK_ROOT) + relPath;
+    if (std::ifstream(fb).is_open()) return fb;
+    return relPath;  // let the caller's open() produce the error
+}
 
 static std::string ReadFileToString(const std::string& path) {
     std::ifstream file(path);
@@ -149,7 +169,7 @@ static std::vector<u8> ReadFileToBytes(const std::string& path) {
 static std::string ResolveInclude(const std::string& name) {
     // Search Forward/ then RHI/Shaders/
     for (const auto& dir : {SHADER_DIR, RHI_SHADER_DIR}) {
-        auto content = ReadFileToString(dir + name);
+        auto content = ReadFileToString(ResolveShaderPath(dir + name));
         if (!content.empty()) return content;
     }
     return {};
@@ -215,8 +235,8 @@ static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platfo
         // shaders/ dir (not Forward/), with no stage suffix (single .spv file).
         // Caller passes "DeferredLighting" + ShaderStage::Compute to hit that path.
         if (stage == ShaderStage::Compute) {
-            std::string path = std::string("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/")
-                             + "Engine/Graphics/Vulkan/shaders/" + filename + ".spv";
+            std::string relPath = VULKAN_COMPUTE_SHADER_DIR + filename + ".spv";
+            std::string path = ResolveShaderPath(relPath);
             auto bytes = ReadFileToBytes(path);
             if (bytes.empty()) {
                 std::cerr << "[ForwardSceneRenderer] Failed to load compute SPIR-V: " << path << std::endl;
@@ -225,7 +245,8 @@ static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platfo
             return bytes;
         }
         const char* stageSuffix = (stage == ShaderStage::Vertex) ? ".vert" : ".frag";
-        std::string path = VULKAN_SHADER_DIR + filename + stageSuffix + ".spv";
+        std::string relPath = VULKAN_SHADER_DIR + filename + stageSuffix + ".spv";
+        std::string path = ResolveShaderPath(relPath);
         auto bytes = ReadFileToBytes(path);
         if (bytes.empty()) {
             std::cerr << "[ForwardSceneRenderer] Failed to load SPIR-V: " << path << std::endl;
@@ -234,7 +255,7 @@ static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platfo
         return bytes;
     }
 
-    std::string path = SHADER_DIR + filename + std::string(".metal");
+    std::string path = ResolveShaderPath(SHADER_DIR + filename + std::string(".metal"));
     std::string source = ReadFileToString(path);
     if (source.empty()) {
         std::cerr << "[ForwardSceneRenderer] Failed to load shader: " << filename << std::endl;
@@ -344,36 +365,11 @@ ForwardSceneRenderer::~ForwardSceneRenderer() { Shutdown(); }
 bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height) {
     if (initialized_) return true;
 
-    // T4.6.5: ForwardSceneRenderer still deferred on Vulkan.
-    // T4.6.5 part 1: platform-aware loader (.spv binary on Vulkan).
-    // T4.6.5 part 2: stage-suffix naming + "main" entry convention.
-    // T4.6.5 part 3: Path A blit — Blit.vert/Blit.frag authored.
-    // T4.6.5 part 4: Path B foundation — Storage usage + compute desc layout.
-    // T4.6.5 part 5: Path B pipeline — CreateComputePipeline for lighting.
-    // T4.6.5 part 6: Path B UBOs — GlobalShaderData (480B) +
-    //                ForwardLightBuffer (25808B) triple-buffered + mapped.
-    // T4.6.5 part 7: Path B bind-site Dispatch — writes
-    //                lighting_compute_ds_[idx] with all 12 bindings + swaps
-    //                BeginRenderPass+Draw to BindComputePipeline+Dispatch.
-    // T4.6.5 part 8: Path B UBO fill — per-frame memcpy of GlobalShaderData +
-    //                ForwardLightBuffer from camera + render_scene lights.
-    // T4.6.5 part 9 (this commit): Path B layout transitions — InsertBarrier
-    //                lighting_output_ ShaderResource ↔ UnorderedAccess around
-    //                the Dispatch. StorageImage descriptor requires GENERAL.
-    //
-    // Path B C++ side is now complete: dispatch + data + barriers all wired.
-    // The skip remains because 8 GBuffer shaders aren't ported yet, so
-    // Initialize() would still fail at CreateShaders() / CreatePipelines().
-    //
-    // Remaining blockers (multi-session scope):
-    //   1. 8 of 11 ForwardSceneRenderer shaders still have no SPIR-V port:
-    //      GBuffer, GBufferAlphaClip, GBufferUnlit, GBufferFoliage, GBufferWater,
-    //      GBufferTransparent, ForwardTransparency, StreamingGBuffer
-    //   2. Vertex buffer binding slot 0/1 convention differs (Metal uses
-    //      [[buffer(1)]] for vertices; Vulkan expects binding 0).
-    // T4.6.5 parts 1-15: skip LIFTED. All 11 ForwardSceneRenderer shaders ported
-    // (parts 1-14), runtime wiring complete (parts 15.1-15.4: instance buffer,
-    // shadow VP, SoA streaming all wired via Vulkan descriptor writes).
+    // T4.6.5 complete: all 11 ForwardSceneRenderer shaders ported to SPIR-V
+    // (parts 1-14), runtime wiring done (parts 15.1-15.4: instance buffer,
+    // shadow VP, SoA streaming all wired via Vulkan descriptor writes),
+    // Initialize() skip lifted (part 15.5), Editor render smoke passing
+    // (part 15.6). Runs end-to-end on Vulkan via StandardRenderPipeline.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
         std::cout << "[ForwardSceneRenderer] Initializing on Vulkan (T4.6.5 parts 1-15 complete)"
                   << std::endl;
@@ -1147,7 +1143,14 @@ void ForwardSceneRenderer::CreatePersistentResources() {
             desc.size = {render_width_, render_height_, 1};
             desc.format = fmt;
             desc.type = TextureType::Texture2D;
-            TextureUsage usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+            // T4.6.5 part 16.3: D32 depth can't take RenderTarget on Vulkan
+            // (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT illegal on D32_SFLOAT).
+            // Use DepthStencil which maps to depth-attachment usage. Metal
+            // accepts the redundant bit silently; Vulkan validation rejects it.
+            const bool isDepth = (fmt == DataFormat::D32_Float);
+            TextureUsage baseUsage = isDepth ? TextureUsage::DepthStencil
+                                             : TextureUsage::RenderTarget;
+            TextureUsage usage = baseUsage | TextureUsage::ShaderResource;
             if (uav) usage = usage | TextureUsage::UnorderedAccess;
             desc.usage = usage;
             desc.memoryUsage = GPUMemoryUsage::Static;

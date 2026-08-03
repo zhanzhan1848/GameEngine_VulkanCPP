@@ -496,6 +496,16 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanStandardPipelineSmoke PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
+    # T4.6.5 part 16.2: copy Vulkan shaders + Metal sources (for #include fallback)
+    # next to the binary so ForwardSceneRenderer's relative shader dir resolves.
+    add_custom_command(TARGET TestVulkanStandardPipelineSmoke POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+                $<TARGET_FILE_DIR:TestVulkanStandardPipelineSmoke>/Engine/Graphics/Vulkan/shaders
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Metal/shaders
+                $<TARGET_FILE_DIR:TestVulkanStandardPipelineSmoke>/Engine/Graphics/Metal/shaders
+    )
 
     # Phase 4b-T3.5b: IBL Equirectangular → Cube (compute).
     add_executable(TestVulkanIBL_Equirect

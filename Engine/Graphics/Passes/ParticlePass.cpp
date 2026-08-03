@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <iostream>
+#include <vector>
 
 namespace primal::graphics {
 
@@ -29,57 +30,90 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
         return true;
     }
 
-    // T4.6.4: ParticlePass deferred on Vulkan. Hardcoded .metal shader path
-    // (line ~34) and CreateShader receives MSL source text — on Vulkan that
-    // gets treated as SPIR-V binary and fails the magic-number check. A SPIR-V
-    // port would also need to drop the CombinedImageSampler binding (WGSL/naga
-    // cannot emit it). Non-critical visualization helper; deferred alongside
-    // LineBatchRenderer + ForwardSceneRenderer. See plan T4.6.5+.
-    if (device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
-        std::cerr << "[ParticlePass] Skipped on Vulkan (deferred — needs .metal "
-                     "loader path + SPIR-V port, plan T4.6.5+)" << std::endl;
-        return false;
-    }
-
+    // T4.6.5 part 16.3: ParticlePass now active on Vulkan. Loads pre-compiled
+    // SPIR-V (Particle.vert.spv / Particle.frag.spv) instead of MSL text. Entry
+    // point on Vulkan is "main" (vs Metal's particle_vertex_instanced / particle_fragment).
     device_ = device;
-    // Load particle shader from shaders directory (relative to executable)
-    std::string shader_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/ParticleAtlas.metal";
-    std::ifstream shader_file(shader_path);
-    
-    if (!shader_file.is_open()) {
-        std::cerr << "ParticlePass: Failed to open shader file: " << shader_path << std::endl;
-        return false;
+    const bool isVulkan = (device->GetPlatform() == rhi::RHIPlatform::Vulkan);
+
+    auto loadSpvBinary = [](const char* relPath) -> std::vector<u8> {
+        // Try relative path first (POST_BUILD copy layout), then dev-machine fallback.
+        std::ifstream f0(relPath, std::ios::ate | std::ios::binary);
+        if (f0.is_open()) {
+            const std::streamsize sz = f0.tellg();
+            f0.seekg(0, std::ios::beg);
+            std::vector<u8> bytes(static_cast<size_t>(sz));
+            f0.read(reinterpret_cast<char*>(bytes.data()), sz);
+            return bytes;
+        }
+        std::string fb = std::string("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/") + relPath;
+        std::ifstream f1(fb, std::ios::ate | std::ios::binary);
+        if (f1.is_open()) {
+            const std::streamsize sz = f1.tellg();
+            f1.seekg(0, std::ios::beg);
+            std::vector<u8> bytes(static_cast<size_t>(sz));
+            f1.read(reinterpret_cast<char*>(bytes.data()), sz);
+            return bytes;
+        }
+        return {};
+    };
+
+    if (isVulkan) {
+        auto vertBytes = loadSpvBinary("Engine/Graphics/Vulkan/shaders/Particle/Particle.vert.spv");
+        auto fragBytes = loadSpvBinary("Engine/Graphics/Vulkan/shaders/Particle/Particle.frag.spv");
+        if (vertBytes.empty() || fragBytes.empty()) {
+            std::cerr << "ParticlePass: Failed to load Vulkan SPIR-V shaders" << std::endl;
+            return false;
+        }
+        vertex_shader_ = device->CreateShader(
+            vertBytes.data(), vertBytes.size(), rhi::ShaderStage::Vertex, "main");
+        if (vertex_shader_ == rhi::handles::INVALID_SHADER) {
+            std::cerr << "ParticlePass: Failed to create vertex shader" << std::endl;
+            return false;
+        }
+        fragment_shader_ = device->CreateShader(
+            fragBytes.data(), fragBytes.size(), rhi::ShaderStage::Pixel, "main");
+        if (fragment_shader_ == rhi::handles::INVALID_SHADER) {
+            std::cerr << "ParticlePass: Failed to create fragment shader" << std::endl;
+            return false;
+        }
+    } else {
+        // Metal path: load .metal text, use named entry points.
+        std::string shader_path = "EngineTest/shaders/ParticleAtlas.metal";
+        std::ifstream shader_file(shader_path);
+        if (!shader_file.is_open()) {
+            shader_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/ParticleAtlas.metal";
+            shader_file.open(shader_path);
+        }
+        if (!shader_file.is_open()) {
+            std::cerr << "ParticlePass: Failed to open shader file: " << shader_path << std::endl;
+            return false;
+        }
+        std::string shader_code((std::istreambuf_iterator<char>(shader_file)),
+                                std::istreambuf_iterator<char>());
+        shader_file.close();
+
+        vertex_shader_ = device->CreateShader(
+            shader_code.c_str(), shader_code.size(),
+            rhi::ShaderStage::Vertex, "particle_vertex_instanced");
+        if (vertex_shader_ == rhi::handles::INVALID_SHADER) {
+            std::cerr << "ParticlePass: Failed to create vertex shader" << std::endl;
+            return false;
+        }
+        fragment_shader_ = device->CreateShader(
+            shader_code.c_str(), shader_code.size(),
+            rhi::ShaderStage::Pixel, "particle_fragment");
+        if (fragment_shader_ == rhi::handles::INVALID_SHADER) {
+            std::cerr << "ParticlePass: Failed to create fragment shader" << std::endl;
+            return false;
+        }
     }
     
-    std::string shader_code((std::istreambuf_iterator<char>(shader_file)), 
-                           std::istreambuf_iterator<char>());
-    shader_file.close();
-    
-    vertex_shader_ = device->CreateShader(
-        shader_code.c_str(),
-        shader_code.size(),
-        rhi::ShaderStage::Vertex,
-        "particle_vertex_instanced"
-    );
-    
-    if (vertex_shader_ == rhi::handles::INVALID_SHADER) {
-        std::cerr << "ParticlePass: Failed to create vertex shader" << std::endl;
-        return false;
-    }
-    
-    fragment_shader_ = device->CreateShader(
-        shader_code.c_str(),
-        shader_code.size(),
-        rhi::ShaderStage::Pixel,
-        "particle_fragment"
-    );
-    
-    if (fragment_shader_ == rhi::handles::INVALID_SHADER) {
-        std::cerr << "ParticlePass: Failed to create fragment shader" << std::endl;
-        return false;
-    }
-    
-    // Create pipeline layout with push constants
+    // Create pipeline layout. T4.6.5 part 16.3: Vulkan skips the push-constant
+    // range because ParticlePushConstants is 152B > Vulkan's default 128B limit.
+    // The Vulkan shader reads uniforms from the UBO at binding 0 instead; the
+    // C++ write at render time mirrors view_projection/view_matrix into both
+    // the push-constant call (no-op on Vulkan) and the UBO memcpy.
     {
         rhi::DescriptorSetLayoutBinding bindings[] = {
             { 0, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Vertex },  // Uniforms
@@ -87,22 +121,24 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
             { 2, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Vertex },  // Visible count
             { 3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::ShaderStage::Pixel },  // Texture
         };
-        
+
         rhi::DescriptorSetLayoutDesc layout_desc{};
         layout_desc.bindings = bindings;
         layout_desc.bindingCount = 4;
         descriptor_set_layout_ = device->CreateDescriptorSetLayout(layout_desc);
-        
+
         rhi::PushConstantRange push_ranges[] = {
             { rhi::ShaderStage::Vertex, 0, sizeof(ParticlePushConstants) }
         };
-        
+
         rhi::PipelineLayoutDesc pl_desc{};
         pl_desc.setLayoutCount = 1;
         pl_desc.setLayouts = &descriptor_set_layout_;
-        pl_desc.pushConstantRangeCount = 1;
-        pl_desc.pushConstantRanges = push_ranges;
-        
+        if (!isVulkan) {
+            pl_desc.pushConstantRangeCount = 1;
+            pl_desc.pushConstantRanges = push_ranges;
+        }
+
         pipeline_layout_ = device->CreatePipelineLayout(pl_desc);
     }
     
@@ -130,6 +166,11 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
     samplerDesc.magFilter = rhi::FilterMode::Linear;
     samplerDesc.addressU = rhi::TextureAddressMode::Clamp;
     samplerDesc.addressV = rhi::TextureAddressMode::Clamp;
+    // T4.6.5 part 16.3: SamplerDesc.comparisonFunc defaults to Always →
+    // VulkanSampler treats non-Never as compareEnable=TRUE → portability
+    // VUID on MoltenVK (mutableComparisonSamplers=FALSE). Non-comparison
+    // sampler (CombinedImageSampler path) must explicitly opt out.
+    samplerDesc.comparisonFunc = rhi::ComparisonFunc::Never;
     defaultSampler_ = device_->CreateSampler(samplerDesc);
     
     // Update descriptor sets with texture and sampler
@@ -146,12 +187,14 @@ bool ParticlePass::create_buffers() {
     uniform_desc.size = sizeof(ParticlePushConstants);
     uniform_desc.type = rhi::BufferType::Constant;
     uniform_desc.usage = rhi::GPUMemoryUsage::Dynamic;
+    uniform_desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;  // T4.6.5 part 16.3: VulkanBuffer keys off memoryUsage for HOST_VISIBLE
     
     // Create particle data buffers (large enough for max particles)
     rhi::BufferDesc particle_desc{};
     particle_desc.size = MAX_PARTICLE_BUFFER_SIZE;
     particle_desc.type = rhi::BufferType::Structured;
     particle_desc.usage = rhi::GPUMemoryUsage::Dynamic;
+    particle_desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     particle_desc.structured.elementCount = MAX_PARTICLE_BUFFER_SIZE / sizeof(particles::particle_data);
     particle_desc.structured.elementStride = sizeof(particles::particle_data);
     
@@ -160,6 +203,7 @@ bool ParticlePass::create_buffers() {
     count_desc.size = sizeof(u32) * 4;  // Small buffer for count
     count_desc.type = rhi::BufferType::Structured;
     count_desc.usage = rhi::GPUMemoryUsage::Dynamic;
+    count_desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     count_desc.structured.elementCount = 4;
     count_desc.structured.elementStride = sizeof(u32);
     
@@ -318,8 +362,13 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     pc.texture_frames_y = texture_frames_y_;
     pc.frame_rate = texture_frame_rate_;
     
-    cmd_buffer->PushConstants(pipeline_layout_, rhi::ShaderStage::Vertex, 0, sizeof(pc), &pc);
-    
+    // T4.6.5 part 16.3: Vulkan reads uniforms from UBO at binding 0
+    // (ParticlePushConstants is 152B > Vulkan default maxPushConstantsSize 128B).
+    // Metal still uses push constants; that path is unchanged.
+    if (device_->GetPlatform() != rhi::RHIPlatform::Vulkan) {
+        cmd_buffer->PushConstants(pipeline_layout_, rhi::ShaderStage::Vertex, 0, sizeof(pc), &pc);
+    }
+
     // Update uniform buffer (already mapped)
     if (uniform_buffer_mapped_[frame_index]) {
         memcpy(uniform_buffer_mapped_[frame_index], &pc, sizeof(pc));
@@ -580,16 +629,59 @@ void ParticlePass::create_default_texture() {
         return;
     }
 
+    // T4.6.5 part 16.3: Metal-path uses native replaceRegion. Vulkan needs
+    // staging buffer + CopyBufferToTexture. Guard via runtime platform check
+    // (NOT __APPLE__ — macOS Vulkan via MoltenVK is __APPLE__ but not Metal).
+    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+
 #ifdef __APPLE__
-    auto* metalDevice = static_cast<rhi::MetalDevice*>(device_);
-    auto* metalTex = metalDevice->GetTexture(particle_texture_);
-    if (metalTex && metalTex->GetNativeTexture()) {
-        u8 white_pixel[4] = { 255, 255, 255, 255 };
-        MTL::Region region = MTL::Region::Make2D(0, 0, 1, 1);
-        metalTex->GetNativeTexture()->replaceRegion(region, 0, white_pixel, 4);
-        std::cout << "ParticlePass: Created default white texture" << std::endl;
+    if (!isVulkan) {
+        auto* metalDevice = static_cast<rhi::MetalDevice*>(device_);
+        auto* metalTex = metalDevice->GetTexture(particle_texture_);
+        if (metalTex && metalTex->GetNativeTexture()) {
+            u8 white_pixel[4] = { 255, 255, 255, 255 };
+            MTL::Region region = MTL::Region::Make2D(0, 0, 1, 1);
+            metalTex->GetNativeTexture()->replaceRegion(region, 0, white_pixel, 4);
+            std::cout << "ParticlePass: Created default white texture" << std::endl;
+        }
     }
 #endif
+    if (isVulkan) {
+        u8 white_pixel[4] = { 255, 255, 255, 255 };
+        rhi::BufferDesc staging{};
+        staging.size = 4;
+        staging.usage = rhi::GPUMemoryUsage::Dynamic;
+        staging.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        rhi::ResourceHandle stagingHandle = device_->CreateBuffer(staging);
+        if (stagingHandle != rhi::handles::INVALID_RESOURCE) {
+            void* mapped = device_->MapBuffer(stagingHandle);
+            if (mapped) {
+                std::memcpy(mapped, white_pixel, 4);
+                device_->UnmapBuffer(stagingHandle);
+            }
+            rhi::SyncHandle fence = device_->CreateSync();
+            auto cmdHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+            auto* cmd = rhi::GetCommandBuffer(cmdHandle);
+            cmd->Begin();
+            rhi::BufferTextureCopyRegion region{};
+            region.bufferOffset = 0;
+            region.imageSubresource.baseArrayLayer = 0;
+            region.imageSubresource.layerCount = 1;
+            region.imageOffset = {0, 0, 0};
+            region.imageExtent = {1, 1, 1};
+            cmd->CopyBufferToTexture(stagingHandle, particle_texture_, &region, 1);
+            cmd->End();
+            rhi::QueueSubmitInfo submitInfo{};
+            submitInfo.cmdBuffer = cmdHandle;
+            submitInfo.signalFence = fence;
+            device_->Submit(submitInfo);
+            device_->WaitForSync(fence, UINT32_MAX);
+            device_->DestroySync(fence);
+            device_->DestroyCommandBuffer(cmdHandle);
+            device_->DestroyBuffer(stagingHandle);
+            std::cout << "ParticlePass: Created default white texture (Vulkan)" << std::endl;
+        }
+    }
 }
 
 } // namespace primal::graphics

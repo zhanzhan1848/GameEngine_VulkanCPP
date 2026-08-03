@@ -112,4 +112,30 @@ for s in "${NANITE_SHADERS[@]}"; do
 done
 
 echo
+echo "==> Hand-written GLSL (glslangValidator) ===="
+# T4.6.5 part 16.3+: Particle + Line shaders are hand-written GLSL (no WGSL
+# source). Compile each .vert/.frag pair to .spv. Format: rel path without
+# extension → adds .vert/.frag and outputs .vert.spv/.frag.spv next to source.
+# Bash 3.2 (macOS default) lacks associative arrays — use parallel arrays.
+GLSL_NAMES=( "Particle/Particle" "Forward/Line" )
+for pair in "${GLSL_NAMES[@]}"; do
+    src_dir="$(dirname "$pair")"
+    src_name="$(basename "$pair")"
+    for stage in vert frag; do
+        src="$DEST_DIR/$src_dir/$src_name.$stage"
+        if [ ! -f "$src" ]; then
+            echo "MISS  $src_dir/$src_name.$stage (skipped)"
+            continue
+        fi
+        out="$DEST_DIR/$src_dir/$src_name.$stage.spv"
+        if glslangValidator -V "$src" -o "$out" 2>/dev/null; then
+            sz=$(stat -f %z "$out")
+            printf "OK    %-36s (%d bytes)\n" "$src_dir/$src_name.$stage.spv" "$sz"
+        else
+            echo "FAIL  $src_dir/$src_name.$stage"
+        fi
+    done
+done
+
+echo
 echo "Done."
