@@ -219,6 +219,11 @@ void GPUDrivenDrawPipeline::Shutdown() {
         if (global_element_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_element_buffer_); // 🔥 NEW
         if (cluster_map_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cluster_map_buffer_);
         if (global_instance_data_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_instance_data_buffer_);
+        if (owns_material_data_buffer_ && global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(global_material_data_buffer_);
+        }
+        global_material_data_buffer_ = rhi::handles::INVALID_RESOURCE;
+        owns_material_data_buffer_ = false;
         
         // Destroy test geometry buffers
         if (vertex_position_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(vertex_position_buffer_);
@@ -386,6 +391,28 @@ bool GPUDrivenDrawPipeline::CreateResources() {
     // 🎨 NOTE: Texture arrays are currently placeholder (1x1)
     // TODO: Initialize with white color or upload actual texture data
     // For now, textures will use default values
+
+    // Material data buffer: if no caller wired one up via SetMaterialDataBuffer,
+    // allocate a small dummy SSBO so binding 9 isn't VK_NULL_HANDLE. Without this,
+    // vkUpdateDescriptorSets + vkCmdDrawIndirect both fire validation errors
+    // (VUID-VkWriteDescriptorSet-descriptorType-00330 + VUID-vkCmdDraw-None-02749).
+    // The pipeline doesn't sample material data when materials aren't bound, so a
+    // 16-byte zeroed buffer is sufficient.
+    if (global_material_data_buffer_ == rhi::handles::INVALID_RESOURCE) {
+        rhi::BufferDesc matDesc{};
+        matDesc.size = 16;
+        matDesc.type = rhi::BufferType::Structured;
+        matDesc.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::Storage);
+        matDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
+        matDesc.name = "GPUDrivenDrawPipeline_dummy_material_data";
+        global_material_data_buffer_ = device_->CreateBuffer(matDesc);
+        if (global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
+            owns_material_data_buffer_ = true;
+        } else {
+            std::cerr << "[GPUDrivenDrawPipeline] Failed to create dummy material data buffer" << std::endl;
+            return false;
+        }
+    }
 
     // std::cout << "[GPUDrivenDrawPipeline] Resources created successfully" << std::endl;
     return true;
@@ -1870,6 +1897,27 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
     // Cache camera matrices for use in Stage3
     cached_view_matrix_ = view_matrix;
     cached_proj_matrix_ = projection_matrix;
+
+    // First-frame: transition placeholder texture arrays (albedo/normal/ORM, 1×1
+    // RGBA8_UNorm) from VK_IMAGE_LAYOUT_UNDEFINED to SHADER_READ_ONLY_OPTIMAL.
+    // Without this, descriptor writes at Stage3 reference SHADER_READ_ONLY but the
+    // images are still in UNDEFINED — vkQueueSubmit validation fires VUID for
+    // each texture (3 errors). The pipeline owns these placeholder textures so
+    // the transition belongs here, not in callers.
+    if (!placeholder_textures_layout_done_) {
+        rhi::ResourceBarrier barriers[3];
+        barriers[0].resource = albedo_texture_array_;
+        barriers[0].beforeState = rhi::ResourceState::Unknown;
+        barriers[0].afterState  = rhi::ResourceState::ShaderResource;
+        barriers[1].resource = normal_texture_array_;
+        barriers[1].beforeState = rhi::ResourceState::Unknown;
+        barriers[1].afterState  = rhi::ResourceState::ShaderResource;
+        barriers[2].resource = orm_texture_array_;
+        barriers[2].beforeState = rhi::ResourceState::Unknown;
+        barriers[2].afterState  = rhi::ResourceState::ShaderResource;
+        cmd_buffer->InsertBarrier(barriers, 3);
+        placeholder_textures_layout_done_ = true;
+    }
 
     // Update geometry data from scene snapshot
     UpdateGeometryData(scene_snapshot);

@@ -507,12 +507,14 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     // destroy_resource releases the underlying mesh asset (otherwise
     // ~free_list asserts !_size at process exit).
 
-    // Note: 10 validation errors still fire during cull.Execute + gpuDraw.Execute
-    // (null descriptor at binding 9, image layout UNDEFINED vs SHADER_READ_ONLY
-    // for placeholder texture arrays, vkCmdPipelineBarrier dstAccessMask
-    // mismatch). These are tracked engine-side bugs; the cull pipeline
-    // nonetheless produces valid indirect args (index_count=384
-    // instance_count=3 matching ClusterRefCount). See T4.6.5 part 18 known-issues.
+    // Note: previously 7-10 validation errors fired during cull.Execute +
+    // gpuDraw.Execute (Bug A: GPUCullingPipeline MemoryBarrier had invalid
+    // ShaderRead in dstAccessMask for DrawIndirect/VertexInput stages;
+    // Bug B: GPUDrivenDrawPipeline placeholder texture arrays never transitioned
+    // UNDEFINED→SHADER_READ_ONLY; Bug C: binding 9 material data descriptor
+    // was VK_NULL_HANDLE). All three fixed in T4.6.5 part 18.5. Test now runs
+    // zero validation errors and produces valid indirect args (index_count=384
+    // instance_count=3 matching ClusterRefCount).
     fx.base->DestroyBuffer(readback);
     gpuDraw.Shutdown();
     cull.Shutdown();

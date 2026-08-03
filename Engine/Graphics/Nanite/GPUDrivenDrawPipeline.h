@@ -286,6 +286,8 @@ private:
     rhi::ResourceHandle cluster_map_buffer_{ rhi::handles::INVALID_RESOURCE }; // Cluster ID -> (MeshletID, InstanceID)
     rhi::ResourceHandle global_instance_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Instance ID -> World Matrix
     rhi::ResourceHandle global_material_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Material Data (for material sampling)
+    bool owns_material_data_buffer_{ false };     // True if pipeline allocated a dummy buffer
+    bool placeholder_textures_layout_done_{ false }; // True after first Execute transitions placeholder arrays to ShaderResource
 
     // 🎨 Texture arrays for material sampling
     rhi::ResourceHandle albedo_texture_array_{ rhi::handles::INVALID_RESOURCE };    // Albedo texture array

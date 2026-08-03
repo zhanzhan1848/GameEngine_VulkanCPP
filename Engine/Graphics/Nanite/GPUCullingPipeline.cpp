@@ -855,11 +855,18 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
 
     // CRITICAL: Insert a final global barrier to ensure all indirect commands and buffers are fully visible
     // This is essential before any DrawIndirect calls
+    //
+    // dstAccessMask notes (T4.6.5 part 18.5): removed ShaderRead from the previous
+    // mask — DRAW_INDIRECT and VERTEX_INPUT stages don't support VK_ACCESS_SHADER_READ_BIT
+    // (VUID-vkCmdPipelineBarrier-dstAccessMask-02816). The indirect_args buffer is
+    // consumed by DRAW_INDIRECT (IndirectCommandRead) and the vertex/index buffers by
+    // VERTEX_INPUT (VertexAttributeRead); the vertex shader never reads these buffers
+    // directly via a SSBO binding, so ShaderRead isn't needed.
     cmdBuffer->MemoryBarrier(
         rhi::PipelineStage::ComputeShader,
-        rhi::PipelineStage::DrawIndirect | rhi::PipelineStage::VertexInput | rhi::PipelineStage::VertexShader,
+        rhi::PipelineStage::DrawIndirect | rhi::PipelineStage::VertexInput,
         rhi::AccessFlag::ShaderWrite,
-        rhi::AccessFlag::IndirectCommandRead | rhi::AccessFlag::ShaderRead | rhi::AccessFlag::VertexAttributeRead
+        rhi::AccessFlag::IndirectCommandRead | rhi::AccessFlag::VertexAttributeRead
     );
 
     // === GPU TO CPU COPY FOR DEBUGGING ===
@@ -1854,13 +1861,17 @@ bool GPUCullingPipeline::Stage7_BuildIndirectCommands(rhi::RHICommandBuffer* cmd
     // Single thread to build the indirect command
     cmdBuffer->Dispatch(1, 1, 1);
 
-    // CRITICAL BARRIER: Ensure indirect commands are fully written before Draw stage reads them
-    // Enhanced barrier: Sync with DrawIndirect AND VertexInput (for safety)
+    // CRITICAL BARRIER: Ensure indirect commands are fully written before Draw stage reads them.
+    //
+    // dstAccessMask notes (T4.6.5 part 18.5): removed ShaderRead — DRAW_INDIRECT and
+    // VERTEX_INPUT don't support VK_ACCESS_SHADER_READ_BIT. Indirect args are consumed
+    // by DRAW_INDIRECT only; VertexInput is included defensively for any subsequent
+    // vertex-fetch from related buffers.
     cmdBuffer->MemoryBarrier(
         rhi::PipelineStage::ComputeShader,
         rhi::PipelineStage::DrawIndirect | rhi::PipelineStage::VertexInput,
         rhi::AccessFlag::ShaderWrite,
-        rhi::AccessFlag::IndirectCommandRead | rhi::AccessFlag::ShaderRead
+        rhi::AccessFlag::IndirectCommandRead
     );
 
     // NOTE: A previous debug readback here mapped indirect_args_buffer (a GPU-only
