@@ -1,5 +1,6 @@
 #include "../../TestFramework.h"
 #include "Engine/Graphics/WFC/WFCFaceCorners.h"
+#include "Engine/Graphics/WFC/WFCSocketOps.h"
 #include <cmath>
 #include <cstring>
 
@@ -87,11 +88,51 @@ TestResult TestQuantizeTo2Bit_OutOfRange() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// Phase C.1 Task 14: ComputeFaceSignature tests
+// ============================================================================
+
+// Unit cube {1,1,1} (half-extent convention; corners in [-1,+1]).
+// GetFaceCorners(PosZ) returns corners in this order:
+//   [0] = {-1,-1,+1}  y=-1 -> normalized 0 -> quartile 0 -> bits[0:1]=00
+//   [1] = {-1,+1,+1}  y=+1 -> normalized 1 -> quartile 3 -> bits[2:3]=11
+//   [2] = {+1,+1,+1}  y=+1 -> normalized 1 -> quartile 3 -> bits[4:5]=11
+//   [3] = {+1,-1,+1}  y=-1 -> normalized 0 -> quartile 0 -> bits[6:7]=00
+// Packed little-endian (corner 0 in low 2 bits): 0b 00 11 11 00 = 0x3C
+//
+// Note: The Phase C.1 plan claimed cube +Z = 0xFF (all four corners high).
+// That is geometrically impossible for a cube — a +Z face has 2 corners at
+// y=-hy and 2 at y=+hy by construction. The plan's 0xFF was a documentation
+// bug; this test encodes the actual correct value 0x3C and the corner-walk
+// derivation above so future readers can audit it.
+TestResult TestComputeFaceSignature_CubePosZ_KnownPattern() {
+    WFCTile tile{};
+    tile.bounds_extents = primal::math::v3{1.0f, 1.0f, 1.0f};
+    u8 sig = ComputeFaceSignature(tile, /*variant*/ 0, WFCFace::PosZ);
+    TEST_ASSERT_EQ(0x3Cu, static_cast<u32>(sig), "cube +Z = 0x3C (2 high + 2 low)");
+    return TestResult::Passed;
+}
+
+// A cube is rotationally symmetric about Y, so variant 0 and variant 1 must
+// produce identical signatures for the +Z face (the rotated corner set
+// covers the same y-polygon).
+TestResult TestComputeFaceSignature_Variant1RotatesY() {
+    WFCTile tile{};
+    tile.bounds_extents = primal::math::v3{1.0f, 1.0f, 1.0f};
+    u8 sig_v0 = ComputeFaceSignature(tile, 0, WFCFace::PosZ);
+    u8 sig_v1 = ComputeFaceSignature(tile, 1, WFCFace::PosZ);
+    TEST_ASSERT_EQ(static_cast<u32>(sig_v0), static_cast<u32>(sig_v1),
+                   "cube invariant under Y rotation");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCSocketOps");
     TEST_CASE(suite, "GetFaceCorners_AllFaces",  TestGetFaceCorners_AllFaces);
     TEST_CASE(suite, "QuantizeTo2Bit_Boundaries", TestQuantizeTo2Bit_Boundaries);
     TEST_CASE(suite, "QuantizeTo2Bit_OutOfRange", TestQuantizeTo2Bit_OutOfRange);
+    TEST_CASE(suite, "ComputeFaceSignature_CubePosZ_KnownPattern", TestComputeFaceSignature_CubePosZ_KnownPattern);
+    TEST_CASE(suite, "ComputeFaceSignature_Variant1RotatesY",      TestComputeFaceSignature_Variant1RotatesY);
     suite.RunAllTests();
     return 0;
 }
