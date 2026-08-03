@@ -71,9 +71,10 @@ inline void WriteVertex(u8* pos, u8* elem, f32 px, f32 py, f32 pz,
     PackVertexElement(elem, nx, ny, nz, u, v);
 }
 
-inline id::id_type RegisterProceduralMesh(graphics::rhi::RHIMeshAsset& asset) {
+inline id::id_type RegisterProceduralMesh(graphics::rhi::RHIMeshAsset& asset,
+                                          u32 material_idx = 0) {
     asset.lod_id = 0;
-    asset.material_idx = 0;
+    asset.material_idx = material_idx;
     asset.lod_threshold = 0.f;
     asset.index_size = 4;
     asset.elements_type = PROC_ELEMENTS_TYPE;

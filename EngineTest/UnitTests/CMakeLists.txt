@@ -2118,6 +2118,22 @@ set_target_properties(TestWFCRuinsMaterialPalette PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCRuinsMaterialPalette PRIVATE DEBUG _DEBUG)
 
+# WFC Phase C.1 Task 7: TestWFCProceduralMeshesRuins — RegisterProceduralMesh signature
+add_executable(TestWFCProceduralMeshesRuins
+    Graphics/WFC/TestWFCProceduralMeshesRuins.cpp)
+target_include_directories(TestWFCProceduralMeshesRuins PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCProceduralMeshesRuins PRIVATE Engine)
+add_test(NAME TestWFCProceduralMeshesRuins COMMAND TestWFCProceduralMeshesRuins)
+set_target_properties(TestWFCProceduralMeshesRuins PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCProceduralMeshesRuins PRIVATE DEBUG _DEBUG)
+
 # WFC Phase B.2 Task 1: TestWFCStreamDrain — DrainStream unit tests
 add_executable(TestWFCStreamDrain
     Graphics/WFC/TestWFCStreamDrain.cpp)
