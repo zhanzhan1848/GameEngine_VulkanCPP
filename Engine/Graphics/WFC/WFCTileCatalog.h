@@ -32,5 +32,7 @@ WFCTile MakeCrackedWallTile();
 WFCTile MakeWeatheredStoneTile();
 WFCTile MakeRubblePileTile();
 WFCTile MakeDebrisSmallTile();
+WFCTile MakeBrokenCornerInTile();
+WFCTile MakeBrokenCornerOutTile();
 
 } // namespace primal::graphics::wfc

@@ -247,6 +247,38 @@ TestResult TestMakeDebrisSmallTile_SingleVariant_RuinsCategory() {
     return TestResult::Passed;
 }
 
+TestResult TestMakeBrokenCornerInTile_FourVariants_RuinsCategory() {
+    WFCTileRegistry reg;
+    reg.Register(MakeBrokenCornerInTile());
+    const WFCTile& t = reg.Get(wfc_tile_id{0});
+    TEST_ASSERT_EQ(4u, t.variant_count, "broken_corner_in has 4 variants");
+    TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Ruins),
+                   static_cast<u32>(t.category), "broken_corner_in is Ruins");
+    TEST_ASSERT(!t.is_rotationally_symmetric,
+                "broken_corner_in NOT rotationally symmetric (4 distinct corners)");
+    for (u32 v = 0; v < 4u; ++v) {
+        TEST_ASSERT(t.mesh_handles[v] != primal::geometry::geometry_id{0},
+                    "broken_corner_in variant has non-zero mesh_handles");
+    }
+    return TestResult::Passed;
+}
+
+TestResult TestMakeBrokenCornerOutTile_FourVariants_RuinsCategory() {
+    WFCTileRegistry reg;
+    reg.Register(MakeBrokenCornerOutTile());
+    const WFCTile& t = reg.Get(wfc_tile_id{0});
+    TEST_ASSERT_EQ(4u, t.variant_count, "broken_corner_out has 4 variants");
+    TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Ruins),
+                   static_cast<u32>(t.category), "broken_corner_out is Ruins");
+    TEST_ASSERT(!t.is_rotationally_symmetric,
+                "broken_corner_out NOT rotationally symmetric");
+    for (u32 v = 0; v < 4u; ++v) {
+        TEST_ASSERT(t.mesh_handles[v] != primal::geometry::geometry_id{0},
+                    "broken_corner_out variant has non-zero mesh_handles");
+    }
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCTileCatalog");
     TEST_CASE(suite, "Populate_Registers_Five_Tiles", TestWFCTileCatalog_Populate_Registers_Five_Tiles);
@@ -275,6 +307,10 @@ int main() {
               TestMakeRubblePileTile_SingleVariant_RuinsCategory);
     TEST_CASE(suite, "MakeDebrisSmallTile_SingleVariant_RuinsCategory",
               TestMakeDebrisSmallTile_SingleVariant_RuinsCategory);
+    TEST_CASE(suite, "MakeBrokenCornerInTile_FourVariants_RuinsCategory",
+              TestMakeBrokenCornerInTile_FourVariants_RuinsCategory);
+    TEST_CASE(suite, "MakeBrokenCornerOutTile_FourVariants_RuinsCategory",
+              TestMakeBrokenCornerOutTile_FourVariants_RuinsCategory);
     suite.RunAllTests();
     return 0;
 }

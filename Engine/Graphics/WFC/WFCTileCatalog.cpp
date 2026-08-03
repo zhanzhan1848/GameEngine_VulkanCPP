@@ -30,6 +30,10 @@ constexpr geometry::geometry_id kWeatheredStoneMeshPlaceholder{2500};
 constexpr geometry::geometry_id kRubblePileMeshPlaceholder{2600};
 constexpr geometry::geometry_id kDebrisSmallMeshPlaceholder{2700};
 
+// T21: broken_corner_in/out (4 variants each, one per corner).
+constexpr geometry::geometry_id kBrokenCornerInMeshBase{2800};   // +v per variant
+constexpr geometry::geometry_id kBrokenCornerOutMeshBase{2900};  // +v per variant
+
 WFCTile MakeCubeTile() {
     WFCTile t{};
     t.name = "cube";
@@ -229,6 +233,42 @@ WFCTile MakeDebrisSmallTile() {
     t.is_organic = false;
     t.is_rotationally_symmetric = true;  // debris is unordered; Y-symmetric
     t.mesh_handles[0] = kDebrisSmallMeshPlaceholder;
+    for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+        t.sockets[v] = DeriveSocketEncoding(t, v);
+    }
+    return t;
+}
+
+WFCTile MakeBrokenCornerInTile() {
+    WFCTile t{};
+    t.name = "broken_corner_in";
+    t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Ruins;
+    t.variant_count = 4;
+    t.is_organic = false;
+    t.is_rotationally_symmetric = false;  // 4 distinct broken corners
+    for (u32 v = 0; v < 4; ++v) {
+        t.mesh_handles[v] = geometry::geometry_id{
+            static_cast<u32>(kBrokenCornerInMeshBase) + v};
+    }
+    for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+        t.sockets[v] = DeriveSocketEncoding(t, v);
+    }
+    return t;
+}
+
+WFCTile MakeBrokenCornerOutTile() {
+    WFCTile t{};
+    t.name = "broken_corner_out";
+    t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Ruins;
+    t.variant_count = 4;
+    t.is_organic = false;
+    t.is_rotationally_symmetric = false;  // 4 distinct broken corners
+    for (u32 v = 0; v < 4; ++v) {
+        t.mesh_handles[v] = geometry::geometry_id{
+            static_cast<u32>(kBrokenCornerOutMeshBase) + v};
+    }
     for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
         t.sockets[v] = DeriveSocketEncoding(t, v);
     }
