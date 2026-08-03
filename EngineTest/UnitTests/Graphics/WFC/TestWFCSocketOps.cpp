@@ -113,16 +113,24 @@ TestResult TestComputeFaceSignature_CubePosZ_KnownPattern() {
     return TestResult::Passed;
 }
 
-// A cube is rotationally symmetric about Y, so variant 0 and variant 1 must
-// produce identical signatures for the +Z face (the rotated corner set
-// covers the same y-polygon).
-TestResult TestComputeFaceSignature_Variant1RotatesY() {
+// A cube is rotationally symmetric about Y; the Y values of any face's 4
+// corners are unchanged by Y-axis rotation, so the cube's signature must be
+// invariant across all 4 elements of the rotation group. This verifies the
+// 4-element invariance (not rotation correctness per se — Y rotation cannot
+// change corner Y values for an axis-aligned box, by definition).
+TestResult TestComputeFaceSignature_CubeVariantInvariant() {
     WFCTile tile{};
     tile.bounds_extents = primal::math::v3{1.0f, 1.0f, 1.0f};
     u8 sig_v0 = ComputeFaceSignature(tile, 0, WFCFace::PosZ);
     u8 sig_v1 = ComputeFaceSignature(tile, 1, WFCFace::PosZ);
+    u8 sig_v2 = ComputeFaceSignature(tile, 2, WFCFace::PosZ);
+    u8 sig_v3 = ComputeFaceSignature(tile, 3, WFCFace::PosZ);
     TEST_ASSERT_EQ(static_cast<u32>(sig_v0), static_cast<u32>(sig_v1),
-                   "cube invariant under Y rotation");
+                   "cube v0 == v1 (Y-preservation)");
+    TEST_ASSERT_EQ(static_cast<u32>(sig_v0), static_cast<u32>(sig_v2),
+                   "cube v0 == v2 (Y-preservation)");
+    TEST_ASSERT_EQ(static_cast<u32>(sig_v0), static_cast<u32>(sig_v3),
+                   "cube v0 == v3 (Y-preservation)");
     return TestResult::Passed;
 }
 
@@ -132,7 +140,7 @@ int main() {
     TEST_CASE(suite, "QuantizeTo2Bit_Boundaries", TestQuantizeTo2Bit_Boundaries);
     TEST_CASE(suite, "QuantizeTo2Bit_OutOfRange", TestQuantizeTo2Bit_OutOfRange);
     TEST_CASE(suite, "ComputeFaceSignature_CubePosZ_KnownPattern", TestComputeFaceSignature_CubePosZ_KnownPattern);
-    TEST_CASE(suite, "ComputeFaceSignature_Variant1RotatesY",      TestComputeFaceSignature_Variant1RotatesY);
+    TEST_CASE(suite, "ComputeFaceSignature_CubeVariantInvariant",  TestComputeFaceSignature_CubeVariantInvariant);
     suite.RunAllTests();
     return 0;
 }

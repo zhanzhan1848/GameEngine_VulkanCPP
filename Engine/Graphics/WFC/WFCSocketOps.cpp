@@ -2,6 +2,7 @@
 // WFC Phase C.1 Task 14: 8-bit-per-face socket signature encoder.
 #include "WFCSocketOps.h"
 #include "WFCFaceCorners.h"
+#include <cassert>
 
 namespace primal::graphics::wfc {
 
@@ -18,6 +19,7 @@ namespace primal::graphics::wfc {
 // group about Y. The convention chosen here is right-hand +90 deg increments
 // starting at variant 0 (identity); variant 1 = +90, variant 3 = -90.
 static math::v3 RotateCornerY(math::v3 v, u32 variant) {
+    assert(variant < 4 && "variant must be 0..3 (rotation group)");
     switch (variant & 3u) {
         case 0: return v;
         case 1: return math::v3{  v.z, v.y, -v.x };  // +90 deg Y

@@ -16,7 +16,7 @@ namespace primal::graphics::wfc {
 
 // Compute the 8-bit signature for a single face of `tile` after applying
 // the variant's Y-axis rotation (variant * 90 degrees).
-//   variant 0 = identity, 1 = 90 deg Y, 2 = 180 deg Y, 3 = -90 deg Y.
+//   variant 0 = identity, 1 = +90 deg Y (right-hand), 2 = 180, 3 = -90 (=+270).
 // Quartile mapping: corner.y in [-hy, +hy] is normalized to [0,1] and then
 // quantized via QuantizeTo2Bit (see WFCFaceCorners.h).
 u8 ComputeFaceSignature(const WFCTile& tile, u32 variant, WFCFace face);
