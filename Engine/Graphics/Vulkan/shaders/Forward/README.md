@@ -4,24 +4,47 @@ Hand-ported GLSL counterparts to `Engine/Graphics/Metal/shaders/Forward/*.metal`
 compiled to SPIR-V via `glslangValidator` and consumed by
 `ForwardSceneRenderer::CreateShaders()` on Vulkan.
 
-## Status (T4.6.5 part 10)
+## Status (T4.6.5 part 14)
 
 | Shader               | Stages       | Status   | Notes                                     |
 |----------------------|--------------|----------|-------------------------------------------|
 | DepthOnly            | vert         | PIPELINE-OK | T4.6.5 parts 2+13. Push constant 80B + InstanceBuffer SSBO binding 2 + vertex input declared. Pipeline creates successfully on Vulkan. |
 | Skybox               | vert + frag  | DONE     | Procedural cube, samplerless tex          |
 | Blit                 | vert + frag  | DONE     | T4.6.5 part 3 (Path A: tone-map ACES blit)|
-| GBuffer              | vert + frag  | PIPELINE-OK | T4.6.5 parts 10-12. Loads + compiles + pipeline creates successfully on Vulkan. Runtime render not yet exercised (skip in Initialize() still active pending 7 remaining shader ports). |
-| GBufferAlphaClip     | vert + frag  | TODO     | Alpha-tested foliage gate                 |
-| GBufferUnlit         | vert + frag  | TODO     | Unlit emission                            |
-| GBufferFoliage       | vert + frag  | TODO     | 2-pass foliage (alpha + lit)              |
-| GBufferWater         | vert + frag  | TODO     | Animated water surface                    |
-| GBufferTransparent   | vert + frag  | TODO     | Transparent GBuffer                       |
-| ForwardTransparency  | vert + frag  | TODO     | 4 entries (Water + Transparent)           |
-| StreamingGBuffer     | vert + frag  | TODO     | SoA vertex pulling                        |
+| GBuffer              | vert + frag  | PIPELINE-OK | T4.6.5 parts 10-12. Loads + compiles + pipeline creates successfully on Vulkan. Runtime render not yet exercised (skip in Initialize() still active). |
+| GBufferAlphaClip     | vert + frag  | DONE     | T4.6.5 part 14. Alpha cutoff 0.5.         |
+| GBufferUnlit         | vert + frag  | DONE     | T4.6.5 part 14. Emissive only.            |
+| GBufferFoliage       | vert + frag  | DONE     | T4.6.5 part 14. Wind anim + alpha-test.   |
+| GBufferWater         | vert + frag  | DONE     | T4.6.5 part 14. Wave + Fresnel.           |
+| GBufferTransparent   | vert + frag  | DONE     | T4.6.5 part 14. Per-instance material.    |
+| ForwardWater         | vert + frag  | DONE     | T4.6.5 part 14. Split from ForwardTransparency.metal:forwardWaterVS/FS. |
+| ForwardTransparent   | vert + frag  | DONE     | T4.6.5 part 14. Split from ForwardTransparency.metal:forwardTransparentVS/FS. |
+| StreamingGBuffer     | vert + frag  | DONE     | T4.6.5 part 14. SoA vertex pulling via SSBOs at set 0 bindings 3/4/5. |
 | DeferredLighting     | (compute)    | Path B   | See "DeferredLighting path" below         |
 
-11 shaders needed; 3 done; 1 partial (GBuffer loads, pipeline create blocked); 7 remaining + DeferredLighting path decision.
+All 11 ForwardSceneRenderer shaders ported + loaded + pipelines create on Vulkan. Skip in Initialize() remains pending runtime wiring (instance buffer binding 2 not yet attached; SoA streaming buffers not yet descriptor-written).
+
+## T4.6.5 part 14 status
+
+ALL 7 remaining shaders ported. Pipeline creation VERIFIED by temporarily
+lifting the Initialize() skip + using worktree shader path:
+- `ForwardSceneRenderer Initialized (1280x720)` printed with zero validation errors.
+- All 11 shader pairs load + all 11 pipelines create successfully.
+
+Vertex input declarations added via `applyGBufferVertexInput` helper lambda at
+top of CreatePipelines: 5 attrs (RGB32_Float pos, R32_UInt colorTSign,
+RG16_UInt normal/tangent, RG32_Float uv), 1 binding stride=32. Applied to
+GBuffer, AlphaClip, Unlit, Foliage, Water, Transparent, ForwardWater,
+ForwardTransparent pipelines. StreamingGBuffer pipeline gets cleared vertex
+input (SoA via SSBOs at set 0 bindings 3/4/5).
+
+ForwardTransparency.metal had 4 entry points (forwardWaterVS/FS +
+forwardTransparentVS/FS). Split into 4 SPIR-V files: ForwardWater.{vert,frag}
++ ForwardTransparent.{vert,frag}, each with single `main` entry. C++ loader
+dispatches on platform at ForwardSceneRenderer.cpp:728-741.
+
+GBufferFoliage.vert uses `#define sceneTime sceneData.padding.x` to read the
+8-byte `vec2 padding` slot as scene time (matches Metal SceneData.time).
 
 ## T4.6.5 part 13 status
 
@@ -70,9 +93,10 @@ Remaining blockers (NOT addressed in part 11+12+13):
 1. ~~Vertex input declaration missing in C++ (GBuffer pipeline)~~ — fixed in part 12
 2. ~~DepthOnly.vert push constant + InstanceBuffer + vertex input~~ — fixed in part 13
 3. MoltenVK portability on RGB32_Float vertex format — turns out to be supported (no validation error); README claim was overstated
-4. 7 of 11 ForwardSceneRenderer shaders still missing SPIR-V ports (alphaclip/unlit/foliage/water/transparent/ForwardTransparency/StreamingGBuffer)
-5. Other pipelines (alphaclip/unlit/etc.) still need vertex input declaration once shaders are ported
+4. ~~7 of 11 ForwardSceneRenderer shaders still missing SPIR-V ports~~ — fixed in part 14
+5. ~~Other pipelines (alphaclip/unlit/etc.) still need vertex input declaration once shaders are ported~~ — fixed in part 14 via `applyGBufferVertexInput` helper
 6. Runtime instance buffer wiring — StorageBuffer binding 2 declared but no buffer attached yet (DepthOnly.vert references `instanceData.models[gl_InstanceIndex]` when use_instances != 0)
+7. SoA streaming buffer descriptor writes — RenderStreamingMeshes still calls BindVertexBuffers(20,3,...) on Vulkan; needs C++ wiring to populate SSBO bindings 3/4/5
 
 ## Build
 

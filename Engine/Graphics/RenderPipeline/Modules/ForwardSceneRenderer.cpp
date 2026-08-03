@@ -565,13 +565,28 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
         // doesn't need a descriptor slot. Declaring an extra binding that
         // other shaders (GBuffer.vert) don't use is valid in Vulkan (just
         // unused).
+        //
+        // T4.6.5 part 15: Vulkan StreamingGBuffer.vert declares three more SoA
+        // SSBOs at set 0 bindings 3/4/5 (positions, elements, indices) for
+        // manual indexed drawing indirection. Metal path uses BindVertexBuffers
+        // (20,3,...) + per-vertex [[buffer(N)]] semantics; Vulkan cannot express
+        // `attributes[indices[gl_VertexIndex]]` via vkCmdBindVertexBuffers alone,
+        // so we expose the SoA buffers as SSBOs and replicate the indirection
+        // in GLSL. RenderStreamingMeshes still calls BindVertexBuffers(20,3,...)
+        // on Vulkan (no-op until C++ wires up the SoA descriptor set writes);
+        // the streaming_pipeline_ creation succeeds and an early-out in
+        // RenderStreamingMeshes skips draws when streaming_material_ds_ is the
+        // default white-fallback DS.
         if (device_->GetPlatform() == RHIPlatform::Vulkan) {
             DescriptorSetLayoutBinding vkBindings[] = {
                 bindings[0],
                 bindings[1],
                 {2, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex},
+                {3, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex},
+                {4, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex},
+                {5, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex},
             };
-            global_set_layout_ = device_->CreateDescriptorSetLayout({3, vkBindings});
+            global_set_layout_ = device_->CreateDescriptorSetLayout({6, vkBindings});
         } else {
             global_set_layout_ = device_->CreateDescriptorSetLayout({2, bindings});
         }
@@ -710,11 +725,20 @@ void ForwardSceneRenderer::CreateShaders() {
     transparent_vs_ = load("GBufferTransparent", "vertexMain", ShaderStage::Vertex);
     transparent_ps_ = load("GBufferTransparent", "fragmentMain", ShaderStage::Pixel);
 
-    // Forward pass shaders for Water/Transparent (inline PBR, rendered after deferred lighting)
-    forward_water_vs_ = load("ForwardTransparency", "forwardWaterVS", ShaderStage::Vertex);
-    forward_water_ps_ = load("ForwardTransparency", "forwardWaterFS", ShaderStage::Pixel);
-    forward_transparent_vs_ = load("ForwardTransparency", "forwardTransparentVS", ShaderStage::Vertex);
-    forward_transparent_ps_ = load("ForwardTransparency", "forwardTransparentFS", ShaderStage::Pixel);
+    // Forward pass shaders for Water/Transparent (inline PBR, rendered after deferred lighting).
+    // T4.6.5 part 14: Metal funnels 4 entry points into one ForwardTransparency.metal; Vulkan
+    // splits them into 4 SPIR-V files with a single `main` entry each.
+    if (platform == RHIPlatform::Vulkan) {
+        forward_water_vs_ = load("ForwardWater", "main", ShaderStage::Vertex);
+        forward_water_ps_ = load("ForwardWater", "main", ShaderStage::Pixel);
+        forward_transparent_vs_ = load("ForwardTransparent", "main", ShaderStage::Vertex);
+        forward_transparent_ps_ = load("ForwardTransparent", "main", ShaderStage::Pixel);
+    } else {
+        forward_water_vs_ = load("ForwardTransparency", "forwardWaterVS", ShaderStage::Vertex);
+        forward_water_ps_ = load("ForwardTransparency", "forwardWaterFS", ShaderStage::Pixel);
+        forward_transparent_vs_ = load("ForwardTransparency", "forwardTransparentVS", ShaderStage::Vertex);
+        forward_transparent_ps_ = load("ForwardTransparency", "forwardTransparentFS", ShaderStage::Pixel);
+    }
 
     // Streaming mesh shaders (Phase 9.3b Task 12) — SoA vertex pulling
     streaming_vs_ = load("StreamingGBuffer", "streamingVertexMain", ShaderStage::Vertex);
@@ -723,6 +747,26 @@ void ForwardSceneRenderer::CreateShaders() {
 
 void ForwardSceneRenderer::CreatePipelines() {
     PushConstantRange modelPush{ShaderStage::Vertex, 0, sizeof(PCGPushConsts)};
+
+    // T4.6.5 part 14: every GBuffer-style vert shader (GBuffer, AlphaClip, Unlit,
+    // Foliage, Water, Transparent, ForwardWater, ForwardTransparent) declares
+    // the same 5-location vertex input matching the engine VertexInput layout
+    // (32-byte stride). Apply the declaration on Vulkan only — Metal relies on
+    // [[buffer(N)]] auto-binding from the shader. StreamingGBuffer uses SoA
+    // SSBOs (no vertex attributes); Skybox/Blit are procedural (cleared).
+    auto applyGBufferVertexInput = [this](GraphicsPipelineDesc& desc) {
+        if (device_->GetPlatform() != RHIPlatform::Vulkan) return;
+        utl::vector<VertexInputAttribute> attrs(5);
+        attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};
+        attrs[1] = {1, 0, DataFormat::R32_UInt,     12};
+        attrs[2] = {2, 0, DataFormat::RG16_UInt,    16};
+        attrs[3] = {3, 0, DataFormat::RG16_UInt,    20};
+        attrs[4] = {4, 0, DataFormat::RG32_Float,   24};
+        desc.vertexAttributes = attrs;
+        utl::vector<VertexInputBinding> binds(1);
+        binds[0] = {0, 32, true};
+        desc.vertexBindings = binds;
+    };
 
     // GBuffer
     {
@@ -871,6 +915,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        applyGBufferVertexInput(desc);
         alphaclip_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Unlit technique — shares gbuffer layout, different shader
@@ -889,6 +934,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        applyGBufferVertexInput(desc);
         unlit_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Foliage technique — two-sided, wind animation, alpha discard
@@ -907,6 +953,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        applyGBufferVertexInput(desc);
         foliage_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Water technique — alpha blend, no depth write
@@ -932,6 +979,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        applyGBufferVertexInput(desc);
         water_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Transparent technique — alpha blend, no depth write
@@ -957,6 +1005,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        applyGBufferVertexInput(desc);
         transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Forward Water — single RT (lighting_output_), blend over deferred result, depth test against GBuffer
@@ -979,6 +1028,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        applyGBufferVertexInput(desc);
         forward_water_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Forward Transparent — same configuration
@@ -1001,6 +1051,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        applyGBufferVertexInput(desc);
         forward_transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Streaming mesh pipeline — same layout/RTs/depth as GBuffer, different VS/PS
@@ -1020,6 +1071,13 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        // T4.6.5 part 14: StreamingGBuffer.vert pulls vertices from SoA SSBOs
+        // (positions/elements/indices) at set 0 bindings 3/4/5 using
+        // gl_VertexIndex — no vertex attributes or bindings needed.
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            desc.vertexAttributes.clear();
+            desc.vertexBindings.clear();
+        }
         streaming_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
 }

@@ -1,0 +1,137 @@
+#version 450 core
+
+// T4.6.5 part 10 — Vulkan port of Forward/GBufferFoliage.metal vertex stage.
+// Entry point: main
+//
+// Foliage-specific logic vs GBuffer.vert:
+//   - Wind animation: sinusoidal XZ displacement scaled by vertex height,
+//     driven by sceneData.time (reinterpreted from the padding vec2 .x slot).
+//   - Per-instance material override: when use_instances != 0 the renderer
+//     would source baseColor/roughness/metallic from an InstanceData SSBO.
+//     ForwardSceneRenderer's Vulkan path doesn't wire that SSBO yet, so this
+//     port mirrors GBuffer.vert and emits neutral defaults (white, 0.5, 0.0).
+//     The defaults are forwarded to the fragment stage as varyings so the
+//     .frag shader can implement the same tint + alpha-test gate.
+//
+// Descriptor set layout (matches ForwardSceneRenderer::CreateDescriptorLayouts):
+//   set 0 (global): binding 0 = ViewData UBO, binding 1 = SceneData UBO
+// Push constants (PCGPushConsts at offset 0): mat4 transform; uint use_instances; uvec3 _pad
+//
+// Vertex input (matches Metal VertexInput struct, 32-byte stride):
+//   location 0  vec3 position    (offset 0, packed_float3)
+//   location 1  uint  colorTSign (offset 12)
+//   location 2  uvec2 normal     (offset 16, packed_ushort2)
+//   location 3  uvec2 tangent    (offset 20, packed_ushort2)
+//   location 4  vec2  uv         (offset 24, packed_float2)
+
+#define SET_GLOBAL 0
+
+layout(set = SET_GLOBAL, binding = 0) uniform ViewData {
+    mat4 viewProjection;
+    mat4 invViewProjection;
+    mat4 previousViewProjection;
+} viewData;
+
+// SceneData layout must match C++ SceneData UBO. The Metal source splits the
+// post-previousJitter slot into `float time; float _timePad;` whereas the
+// stock GBuffer shader packs it as `vec2 padding;`. Both occupy 8 bytes —
+// we keep the vec2 here for layout parity with the rest of the Forward family
+// and reinterpret .x as `time` for the wind animation.
+layout(set = SET_GLOBAL, binding = 1) uniform SceneData {
+    mat4 model;
+    vec4 lightPos;
+    vec4 lightColor;
+    vec4 reflectionPlane;
+    vec4 reflectionPlane2;
+    vec4 reflectionPlane3;
+    mat4 previousModel;
+    vec2 jitter;
+    vec2 previousJitter;
+    vec2 padding;   // .x reinterpreted as sceneTime (see metal SceneData.time)
+    vec4 viewPos;
+    mat4 shadowMatrix0;
+    mat4 shadowMatrix1;
+} sceneData;
+#define sceneTime sceneData.padding.x
+
+// std140 layout trap (see GBuffer.vert): use_instances + pad fit in one vec4
+// so the block stays at 80 bytes matching C++ PCGPushConsts.
+layout(push_constant) uniform PushConsts {
+    mat4 transform;
+    vec4 _use_pad;  // .x = use_instances, .yzw = _pad[0..2]
+} pc;
+#define use_instances _use_pad.x
+
+layout(location = 0) in vec3  in_position;
+layout(location = 1) in uint  in_colorTSign;
+layout(location = 2) in uvec2 in_normal;     // packed_ushort2
+layout(location = 3) in uvec2 in_tangent;    // packed_ushort2
+layout(location = 4) in vec2  in_uv;
+
+layout(location = 0) out vec3 outWorldPos;
+layout(location = 1) out vec3 outWorldNormal;
+layout(location = 2) out vec3 outWorldTangent;
+layout(location = 3) out vec2 outUV;
+layout(location = 4) out vec4 outCurrentPos;
+layout(location = 5) out vec4 outPreviousPos;
+// Foliage-specific instance material varyings (defaults; InstanceData SSBO not wired yet).
+layout(location = 6) out vec4 outInstanceBaseColor;
+layout(location = 7) out float outInstanceRoughness;
+layout(location = 8) out float outInstanceMetallic;
+
+const float InvIntervals = 2.0 / ((1 << 16) - 1);
+
+vec3 UnpackNormal(uvec2 p) {
+    vec2 f = vec2(p);
+    f = f * InvIntervals - 1.0;
+    float d = dot(f, f);
+    if (d > 1.0) {
+        return vec3(0.0, 0.0, 1.0);  // invalid data fallback
+    }
+    float z = sqrt(max(0.0, 1.0 - d));
+    return vec3(f.x, f.y, z);
+}
+
+void main() {
+    mat4 model = pc.transform;  // use_instances path not yet wired (no SSBO binding)
+
+    // Forward neutral instance material defaults (would come from InstanceData
+    // in the use_instances branch once that SSBO is plumbed in).
+    vec4 instanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
+    float instanceRoughness = 0.5;
+    float instanceMetallic  = 0.0;
+
+    vec4 worldPos = model * vec4(in_position, 1.0);
+
+    // Wind animation (matches GBufferFoliage.metal:120-123):
+    //   heightFactor saturates at y=2, sinusoid sweeps XZ with two phase offsets.
+    float heightFactor = clamp(in_position.y / 2.0, 0.0, 1.0);
+    float windX = sin(sceneTime * 1.5 + worldPos.x * 0.8 + worldPos.z * 0.3) * 0.15 * heightFactor;
+    float windZ = sin(sceneTime * 1.2 + worldPos.z * 0.6 + worldPos.x * 0.4) * 0.15 * heightFactor;
+    worldPos.x += windX;
+    worldPos.z += windZ;
+
+    outWorldPos = worldPos.xyz;
+
+    mat3 normalMatrix = mat3(model[0].xyz, model[1].xyz, model[2].xyz);
+
+    vec3 rawNormal = UnpackNormal(in_normal);
+    outWorldNormal = normalize(normalMatrix * rawNormal);
+
+    vec3 rawTangent = UnpackNormal(in_tangent);
+    outWorldTangent = normalize(normalMatrix * rawTangent);
+
+    // V-flip UV to match Metal convention (GBufferFoliage.metal:132).
+    outUV = vec2(in_uv.x, 1.0 - in_uv.y);
+
+    gl_Position = viewData.viewProjection * worldPos;
+
+    outCurrentPos = gl_Position;
+    // Note: previousPos uses the un-wind-displaced position (matches Metal
+    // behavior — wind is a current-frame effect, prior frame had its own).
+    outPreviousPos = viewData.previousViewProjection * (sceneData.previousModel * vec4(in_position, 1.0));
+
+    outInstanceBaseColor = instanceBaseColor;
+    outInstanceRoughness = instanceRoughness;
+    outInstanceMetallic  = instanceMetallic;
+}

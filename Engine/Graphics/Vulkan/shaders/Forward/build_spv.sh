@@ -34,7 +34,11 @@ declare -a SHADERS=(
     "GBufferFoliage       vert frag"
     "GBufferWater         vert frag"
     "GBufferTransparent   vert frag"
-    "ForwardTransparency  vert frag"   # 4 entry points: forwardWaterVS/FS + forwardTransparentVS/FS
+    # T4.6.5 part 14: Metal ForwardTransparency.metal has 4 entry points; Vulkan
+    # splits into one SPIR-V per entry point → ForwardWater.{vert,frag} and
+    # ForwardTransparent.{vert,frag}. Each .spv has a single `main` entry.
+    "ForwardWater         vert frag"
+    "ForwardTransparent   vert frag"
     "StreamingGBuffer     vert frag"
     # DeferredLighting special: Path B will use existing compute .spv; see README
 )
