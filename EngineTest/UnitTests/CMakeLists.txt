@@ -2102,6 +2102,22 @@ set_target_properties(TestWFCCornerMeshes PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCCornerMeshes PRIVATE DEBUG _DEBUG)
 
+# WFC Phase C.1 Task 6: TestWFCRuinsMaterialPalette — ruins palette sanity
+add_executable(TestWFCRuinsMaterialPalette
+    Graphics/WFC/TestWFCRuinsMaterialPalette.cpp)
+target_include_directories(TestWFCRuinsMaterialPalette PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCRuinsMaterialPalette PRIVATE Engine)
+add_test(NAME TestWFCRuinsMaterialPalette COMMAND TestWFCRuinsMaterialPalette)
+set_target_properties(TestWFCRuinsMaterialPalette PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCRuinsMaterialPalette PRIVATE DEBUG _DEBUG)
+
 # WFC Phase B.2 Task 1: TestWFCStreamDrain — DrainStream unit tests
 add_executable(TestWFCStreamDrain
     Graphics/WFC/TestWFCStreamDrain.cpp)
