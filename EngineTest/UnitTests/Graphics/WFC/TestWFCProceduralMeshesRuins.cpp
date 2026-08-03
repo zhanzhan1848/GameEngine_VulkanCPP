@@ -146,6 +146,67 @@ TestResult TestBrokenCornerIn_Composes() {
     return TestResult::Passed;
 }
 
+// --- T10: weathered_cube + cracked_wall (Strategy B: vertex displacement) ---
+//
+// weathered_cube: deterministic per-vertex displacement along the face normal.
+// Each vert of the cube gets a hash(seed, vert_index) → scalar in [-1, 1],
+// scaled by `amplitude` and added along that vert's face normal.
+//
+// Position buffer layout (verified from emit_box_geometry): tightly packed
+// f32x3, stride = 12 bytes. Face→vert mapping:
+//   Face 0 (+Z), verts 0..3   Face 2 (+X), verts 8..11  Face 4 (+Y), verts 16..19
+//   Face 1 (-Z), verts 4..7   Face 3 (-X), verts 12..15 Face 5 (-Y), verts 20..23
+// So vert index / 4 → face index → known cube face normal.
+
+TestResult TestWeatheredCube_Reproducible() {
+    graphics::rhi::RHIMeshAsset a{};
+    graphics::rhi::RHIMeshAsset b{};
+    content::create_weathered_cube_mesh(a, 1.0f, 1.0f, 1.0f, /*seed*/ 42, /*amp*/ 0.05f);
+    content::create_weathered_cube_mesh(b, 1.0f, 1.0f, 1.0f, /*seed*/ 42, /*amp*/ 0.05f);
+    TEST_ASSERT_EQ(a.num_vertices, b.num_vertices, "same seed → same vert count");
+    TEST_ASSERT_EQ(24u, a.num_vertices, "cube vert count");
+    TEST_ASSERT_EQ(36u, a.num_indices,  "cube index count");
+
+    // Same seed → bitwise identical position_buffer. Vert 0 lives on the +Z
+    // face, so weathering displaces its .z component. Compare the full f32x3
+    // to be thorough.
+    const f32* pa = reinterpret_cast<const f32*>(a.position_buffer.data());
+    const f32* pb = reinterpret_cast<const f32*>(b.position_buffer.data());
+    TEST_ASSERT_EQ(pa[0], pb[0], "vert[0].x reproducible (same seed)");
+    TEST_ASSERT_EQ(pa[1], pb[1], "vert[0].y reproducible (same seed)");
+    TEST_ASSERT_EQ(pa[2], pb[2], "vert[0].z reproducible (same seed)");
+
+    return TestResult::Passed;
+}
+
+TestResult TestWeatheredCube_SeedChangesOutput() {
+    // Different seeds should (very likely) produce different vert[0].z, since
+    // vert 0 is on the +Z face and the displacement lands on the .z axis.
+    graphics::rhi::RHIMeshAsset a{};
+    graphics::rhi::RHIMeshAsset b{};
+    content::create_weathered_cube_mesh(a, 1.0f, 1.0f, 1.0f, /*seed*/ 42,  /*amp*/ 0.05f);
+    content::create_weathered_cube_mesh(b, 1.0f, 1.0f, 1.0f, /*seed*/ 999, /*amp*/ 0.05f);
+    const f32* pa = reinterpret_cast<const f32*>(a.position_buffer.data());
+    const f32* pb = reinterpret_cast<const f32*>(b.position_buffer.data());
+    TEST_ASSERT(pa[2] != pb[2], "different seed → different vert[0].z");
+
+    // Sanity: vert[0].x and .y are NOT touched by +Z-face weathering, so
+    // they should match across seeds. This guards against accidental axis
+    // bleed (e.g. a future bug that displaces along all three axes).
+    TEST_ASSERT_FLOAT_EQ(pa[0], pb[0], 1e-6f, "vert[0].x untouched by +Z weathering");
+    TEST_ASSERT_FLOAT_EQ(pa[1], pb[1], 1e-6f, "vert[0].y untouched by +Z weathering");
+
+    return TestResult::Passed;
+}
+
+TestResult TestCrackedWall_VertexIndexCount() {
+    graphics::rhi::RHIMeshAsset asset{};
+    content::create_cracked_wall_mesh(asset, 1.0f, 1.0f, 1.0f, /*seed*/ 7);
+    TEST_ASSERT_EQ(24u, asset.num_vertices, "verts");
+    TEST_ASSERT_EQ(36u, asset.num_indices,  "indices");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCProceduralMeshesRuins");
     TEST_CASE(suite, "AcceptsMaterialIdx",              TestRegisterProceduralMesh_AcceptsMaterialIdx);
@@ -153,6 +214,9 @@ int main() {
     TEST_CASE(suite, "BrokenCube_BoundsApproxInput",    TestBrokenCube_BoundsApproxInput);
     TEST_CASE(suite, "CollapsedPillar_TiltShiftsTop",   TestCollapsedPillar_TiltShiftsTop);
     TEST_CASE(suite, "BrokenCornerIn_Composes",         TestBrokenCornerIn_Composes);
+    TEST_CASE(suite, "WeatheredCube_Reproducible",      TestWeatheredCube_Reproducible);
+    TEST_CASE(suite, "WeatheredCube_SeedChangesOutput", TestWeatheredCube_SeedChangesOutput);
+    TEST_CASE(suite, "CrackedWall_VertexIndexCount",    TestCrackedWall_VertexIndexCount);
     suite.RunAllTests();
     return 0;
 }

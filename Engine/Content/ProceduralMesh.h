@@ -547,6 +547,82 @@ inline void create_broken_corner_out_mesh(graphics::rhi::RHIMeshAsset& out,
     create_broken_cube_mesh(out, sx, sy, sz, corner);
 }
 
+// --- T10: weathered cube + cracked wall (Strategy B: vertex displacement) ---
+//
+// Phase C.1 §3 ruins tile generators. Both build on emit_box_geometry (so the
+// geometry counts are unchanged: 24 verts / 36 indices) and then mutate the
+// position_buffer in place. Position is tightly packed f32x3 (stride = 12
+// bytes), so we use a typed f32* view to mutate — no element_buffer changes
+// are needed (normals stay face-aligned; weathering is sub-pixel amplitude).
+//
+// Face → vert mapping (verified from emit_box_geometry above):
+//   Face 0 (+Z), verts 0..3   Face 2 (+X), verts 8..11  Face 4 (+Y), verts 16..19
+//   Face 1 (-Z), verts 4..7   Face 3 (-X), verts 12..15 Face 5 (-Y), verts 20..23
+// Vert index / 4 → face index; face index → known cube face normal.
+
+// create_weathered_cube_mesh — deterministic per-vertex displacement along the
+// face normal. Hash(seed, vert_index) → scalar in [-1, 1], scaled by `amplitude`
+// and added along the vert's face normal.
+//
+// Determinism contract: same (seed, sx, sy, sz, amplitude) → bitwise identical
+// position_buffer. The hash is a Knuth-multiplicative hash on (seed, vert_index)
+// — no RNG state, no environment dependency.
+inline void create_weathered_cube_mesh(graphics::rhi::RHIMeshAsset& out,
+                                       f32 sx, f32 sy, f32 sz,
+                                       u32 seed, f32 amplitude) {
+    assert(amplitude >= 0.0f && "amplitude should be non-negative");
+
+    emit_box_geometry(out, sx, sy, sz);
+
+    // Face index → face normal. Order matches emit_box_geometry:
+    //   0=+Z, 1=-Z, 2=+X, 3=-X, 4=+Y, 5=-Y
+    static const f32 kFaceNormals[6][3] = {
+        { 0.0f,  0.0f, +1.0f},  // +Z
+        { 0.0f,  0.0f, -1.0f},  // -Z
+        {+1.0f,  0.0f,  0.0f},  // +X
+        {-1.0f,  0.0f,  0.0f},  // -X
+        { 0.0f, +1.0f,  0.0f},  // +Y
+        { 0.0f, -1.0f,  0.0f},  // -Y
+    };
+
+    f32* positions = reinterpret_cast<f32*>(out.position_buffer.data());
+
+    for (u32 i = 0; i < out.num_vertices; ++i) {
+        const u32 face = i / 4u;  // 4 verts per face
+        assert(face < 6 && "cube vert index out of expected range");
+        const f32* n = kFaceNormals[face];
+
+        // Deterministic hash → [-1, 1]. Knuth multiplicative + xorshift mix.
+        u32 h = seed * 2654435761u + i * 40503u;
+        h ^= h >> 16;
+        const f32 t = (h & 0x00FFFFFFu) / static_cast<f32>(0x00FFFFFFu);  // [0, 1]
+        const f32 n01 = t * 2.0f - 1.0f;                                  // [-1, 1]
+
+        // Displacement along the face normal.
+        positions[i * 3 + 0] += n[0] * n01 * amplitude;
+        positions[i * 3 + 1] += n[1] * n01 * amplitude;
+        positions[i * 3 + 2] += n[2] * n01 * amplitude;
+    }
+}
+
+// create_cracked_wall_mesh — Phase C.1 simplification stub.
+//
+// Plan §3 envisioned crack patterns encoded in a second UV channel (UV2),
+// but RHIMeshAsset's static_normal_texture element layout only carries one
+// UV pair (see PackVertexElement: f32 UV[2] at byte offset 12..19). Without
+// UV2 in the vertex format, the crack pattern cannot be carried per-vert.
+//
+// For now we emit a plain cube and leave the crack encoding to a future task
+// that either (a) extends the vertex format with UV2, or (b) bakes the crack
+// pattern into a material texture and feeds it via the material slot. The
+// signature keeps `seed` so the future implementation can be deterministic
+// without an API break.
+inline void create_cracked_wall_mesh(graphics::rhi::RHIMeshAsset& out,
+                                     f32 sx, f32 sy, f32 sz, u32 seed) {
+    emit_box_geometry(out, sx, sy, sz);
+    (void)seed;  // unused until UV2 / crack-texture path lands
+}
+
 // --- Ramp (wedge) ---
 // Generates a ramp mesh: a box where the +Z face slopes from full height (at -Z)
 // down to slope_height (at +Z). Used by WFC catalog with RotationY to produce
