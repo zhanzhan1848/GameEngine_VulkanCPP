@@ -2150,3 +2150,19 @@ set_target_properties(TestWFCStreamDrain PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCStreamDrain PRIVATE DEBUG _DEBUG)
 
+# WFC Phase C.1 Task 13: TestWFCSocketOps — GetFaceCorners + QuantizeTo2Bit helpers
+add_executable(TestWFCSocketOps
+    Graphics/WFC/TestWFCSocketOps.cpp)
+target_include_directories(TestWFCSocketOps PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCSocketOps PRIVATE Engine)
+add_test(NAME TestWFCSocketOps COMMAND TestWFCSocketOps)
+set_target_properties(TestWFCSocketOps PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCSocketOps PRIVATE DEBUG _DEBUG)
+
