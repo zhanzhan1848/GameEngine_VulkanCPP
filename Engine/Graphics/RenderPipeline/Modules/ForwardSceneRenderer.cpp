@@ -729,11 +729,24 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
 
-        // T4.6.5 part 10: Vulkan GBuffer.vert/frag ported. Pipeline creation
-        // requires C++ vertex input declaration (vertexBindings/vertexAttributes),
-        // push-constant std140 layout adjustment, and RG16_UInt ToVkFormat
-        // mapping — see remaining-blockers comment at the top of Initialize().
-        // Skip stays until those land + remaining 7 shaders port.
+        // T4.6.5 part 12: Vulkan needs explicit vertex input declaration.
+        // Mirror ForwardRenderer bypassProd pattern (cpp:347-356): single
+        // binding stride=32, 5 attributes. Use RG16_UInt for normal/tangent
+        // to match GBuffer.vert's `uvec2` declaration (ForwardRenderer uses
+        // R32_UInt because ForwardPBR_Lite reads them as u32; GBuffer.vert
+        // declares uvec2 so we use the 2-component RG16_UInt format).
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            utl::vector<VertexInputAttribute> attrs(5);
+            attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};   // position
+            attrs[1] = {1, 0, DataFormat::R32_UInt,     12};  // colorTSign
+            attrs[2] = {2, 0, DataFormat::RG16_UInt,    16};  // normal (packed_ushort2)
+            attrs[3] = {3, 0, DataFormat::RG16_UInt,    20};  // tangent (packed_ushort2)
+            attrs[4] = {4, 0, DataFormat::RG32_Float,   24};  // uv
+            desc.vertexAttributes = attrs;
+            utl::vector<VertexInputBinding> binds(1);
+            binds[0] = {0, 32, true};
+            desc.vertexBindings = binds;
+        }
         gbuffer_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Shadow
