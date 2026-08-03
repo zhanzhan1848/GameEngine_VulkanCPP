@@ -4,6 +4,7 @@
 //   - QuantizeTo2Bit:  maps normalized height [0,1] to 4 buckets (0..3)
 #pragma once
 
+#include <cassert>
 #include "../../Common/CommonHeaders.h"
 #include "../../Utilities/MathTypes.h"
 #include "WFCTypes.h"
@@ -15,7 +16,7 @@ namespace primal::graphics::wfc {
 // half-extent (= WFCTile::bounds_extents), so the cube spans [-extent, +extent]
 // on each axis. Corner ordering per face is CCW from outside (i.e. as seen by
 // an observer looking at the face from outside the cube).
-inline void GetFaceCorners(math::v3 extent, WFCFace face, math::v3 out[4]) {
+inline void GetFaceCorners(const math::v3& extent, WFCFace face, math::v3 out[4]) {
     const f32 hx = extent.x;
     const f32 hy = extent.y;
     const f32 hz = extent.z;
@@ -56,16 +57,21 @@ inline void GetFaceCorners(math::v3 extent, WFCFace face, math::v3 out[4]) {
             out[2] = math::v3{-hx, +hy, -hz};
             out[3] = math::v3{-hx, -hy, -hz};
             break;
+        default:
+            assert(false && "unknown WFCFace");
+            break;
     }
 }
 
 // Quantize a normalized height [0, 1] to 2 bits (0..3).
 // Boundary semantics: [0, 0.25) -> 0; [0.25, 0.5) -> 1; [0.5, 0.75) -> 2; [0.75, ..] -> 3.
+// Precondition: 0 <= normalized <= 1. Out-of-range values are clamped; NaN maps to 0.
 inline u8 QuantizeTo2Bit(f32 normalized) {
-    if (normalized < 0.25f) return 0;
-    if (normalized < 0.50f) return 1;
-    if (normalized < 0.75f) return 2;
-    return 3;
+    if (!(normalized > 0.0f)) return 0;   // covers NaN and non-positive values
+    if (normalized >= 0.75f) return 3;
+    if (normalized >= 0.50f) return 2;
+    if (normalized >= 0.25f) return 1;
+    return 0;
 }
 
 } // namespace primal::graphics::wfc
