@@ -218,6 +218,35 @@ TestResult TestMakeWeatheredStoneTile_SingleVariant_RuinsCategory() {
     return TestResult::Passed;
 }
 
+TestResult TestMakeRubblePileTile_SingleVariant_RuinsCategory() {
+    WFCTileRegistry reg;
+    reg.Register(MakeRubblePileTile());
+    const WFCTile& t = reg.Get(wfc_tile_id{0});
+    TEST_ASSERT_EQ(1u, t.variant_count, "rubble_pile has 1 variant");
+    TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Ruins),
+                   static_cast<u32>(t.category), "rubble_pile is Ruins");
+    TEST_ASSERT(t.mesh_handles[0] != primal::geometry::geometry_id{0},
+                "rubble_pile mesh_handles[0] set");
+    // rubble_pile has flat extents (sy=0.5 < sx=sz=1.0)
+    TEST_ASSERT(t.bounds_extents.y < t.bounds_extents.x, "rubble_pile y < x");
+    TEST_ASSERT(t.bounds_extents.y < t.bounds_extents.z, "rubble_pile y < z");
+    return TestResult::Passed;
+}
+
+TestResult TestMakeDebrisSmallTile_SingleVariant_RuinsCategory() {
+    WFCTileRegistry reg;
+    reg.Register(MakeDebrisSmallTile());
+    const WFCTile& t = reg.Get(wfc_tile_id{0});
+    TEST_ASSERT_EQ(1u, t.variant_count, "debris_small has 1 variant");
+    TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Ruins),
+                   static_cast<u32>(t.category), "debris_small is Ruins");
+    TEST_ASSERT(t.mesh_handles[0] != primal::geometry::geometry_id{0},
+                "debris_small mesh_handles[0] set");
+    // debris_small is smaller than rubble_pile overall
+    TEST_ASSERT(t.bounds_extents.x < 1.0f, "debris_small x < 1");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCTileCatalog");
     TEST_CASE(suite, "Populate_Registers_Five_Tiles", TestWFCTileCatalog_Populate_Registers_Five_Tiles);
@@ -242,6 +271,10 @@ int main() {
               TestMakeCrackedWallTile_SingleVariant_RuinsCategory);
     TEST_CASE(suite, "MakeWeatheredStoneTile_SingleVariant_RuinsCategory",
               TestMakeWeatheredStoneTile_SingleVariant_RuinsCategory);
+    TEST_CASE(suite, "MakeRubblePileTile_SingleVariant_RuinsCategory",
+              TestMakeRubblePileTile_SingleVariant_RuinsCategory);
+    TEST_CASE(suite, "MakeDebrisSmallTile_SingleVariant_RuinsCategory",
+              TestMakeDebrisSmallTile_SingleVariant_RuinsCategory);
     suite.RunAllTests();
     return 0;
 }

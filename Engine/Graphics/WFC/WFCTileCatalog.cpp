@@ -26,6 +26,10 @@ constexpr geometry::geometry_id kCollapsedPillarMeshBase{2300};  // +v per varia
 constexpr geometry::geometry_id kCrackedWallMeshPlaceholder{2400};
 constexpr geometry::geometry_id kWeatheredStoneMeshPlaceholder{2500};
 
+// T20: rubble_pile + debris_small (single variant each).
+constexpr geometry::geometry_id kRubblePileMeshPlaceholder{2600};
+constexpr geometry::geometry_id kDebrisSmallMeshPlaceholder{2700};
+
 WFCTile MakeCubeTile() {
     WFCTile t{};
     t.name = "cube";
@@ -195,6 +199,36 @@ WFCTile MakeWeatheredStoneTile() {
     t.is_organic = false;
     t.is_rotationally_symmetric = true;  // box geometry, Y-symmetric
     t.mesh_handles[0] = kWeatheredStoneMeshPlaceholder;
+    for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+        t.sockets[v] = DeriveSocketEncoding(t, v);
+    }
+    return t;
+}
+
+WFCTile MakeRubblePileTile() {
+    WFCTile t{};
+    t.name = "rubble_pile";
+    t.bounds_extents = math::v3{1.0f, 0.5f, 1.0f};  // flat pile
+    t.category = WFCCategory::Ruins;
+    t.variant_count = 1;
+    t.is_organic = false;
+    t.is_rotationally_symmetric = true;  // rubble is unordered; Y-symmetric
+    t.mesh_handles[0] = kRubblePileMeshPlaceholder;
+    for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+        t.sockets[v] = DeriveSocketEncoding(t, v);
+    }
+    return t;
+}
+
+WFCTile MakeDebrisSmallTile() {
+    WFCTile t{};
+    t.name = "debris_small";
+    t.bounds_extents = math::v3{0.8f, 0.25f, 0.8f};  // small flat debris
+    t.category = WFCCategory::Ruins;
+    t.variant_count = 1;
+    t.is_organic = false;
+    t.is_rotationally_symmetric = true;  // debris is unordered; Y-symmetric
+    t.mesh_handles[0] = kDebrisSmallMeshPlaceholder;
     for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
         t.sockets[v] = DeriveSocketEncoding(t, v);
     }

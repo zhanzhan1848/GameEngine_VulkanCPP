@@ -30,5 +30,7 @@ WFCTile MakeVineCubeTile();
 WFCTile MakeCollapsedPillarTile();
 WFCTile MakeCrackedWallTile();
 WFCTile MakeWeatheredStoneTile();
+WFCTile MakeRubblePileTile();
+WFCTile MakeDebrisSmallTile();
 
 } // namespace primal::graphics::wfc
