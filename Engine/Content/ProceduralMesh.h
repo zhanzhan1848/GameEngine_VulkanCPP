@@ -623,6 +623,150 @@ inline void create_cracked_wall_mesh(graphics::rhi::RHIMeshAsset& out,
     (void)seed;  // unused until UV2 / crack-texture path lands
 }
 
+// --- T11: rubble_pile + debris_small (compound: multiple sub-boxes) ---
+//
+// Phase C.1 §3 ruins tile generators. Both compose N sub-boxes (each 24 verts /
+// 36 indices from emit_box_geometry) into a single RHIMeshAsset, translating
+// each sub-box to `center` and offsetting its indices by `base_vert_offset`.
+//
+// Composition strategy (chosen after investigating RHIMeshAsset buffer types):
+//   - position_buffer / element_buffer / index_buffer are utl::vector<u8>
+//   - utl::vector has insert(pos, first, last) for range appends
+//   - We emit each sub-box into a temporary RHIMeshAsset via emit_box_geometry,
+//     translate its positions by `center`, offset its indices by
+//     base_vert_offset, then append the byte ranges into `out`.
+// This keeps emit_box_geometry unchanged (no vert_offset / center param needed)
+// and is robust to future layout changes in emit_box_geometry.
+//
+// Determinism contract: same (seed, radius) → bitwise identical position_buffer.
+// The hash is a Knuth-multiplicative hash on (seed, i) — no RNG state, no
+// environment dependency.
+
+namespace detail {
+
+// append_box — emit a sub-box centered at `center` with `extents` (sx, sy, sz),
+// into `dst` starting at vert offset `base_vert_offset`. Updates dst's
+// num_vertices / num_indices and resizes dst's buffers up-front if needed.
+//
+// Pre-condition: dst is sized for the FULL compound (box_count * 24 verts,
+// box_count * 36 indices). Caller must size before the first call. This avoids
+// O(N²) reallocations when appending many sub-boxes.
+inline void append_box(graphics::rhi::RHIMeshAsset& dst,
+                       const math::v3& center, const math::v3& extents,
+                       u32 base_vert_offset) {
+    // Emit sub-box geometry into a temp asset (24 verts / 36 indices).
+    graphics::rhi::RHIMeshAsset tmp;
+    emit_box_geometry(tmp, extents.x, extents.y, extents.z);
+
+    // Translate positions by `center` (positions are f32x3 packed at 12B stride).
+    f32* pos = reinterpret_cast<f32*>(tmp.position_buffer.data());
+    for (u32 i = 0; i < tmp.num_vertices; ++i) {
+        pos[i * 3 + 0] += center.x;
+        pos[i * 3 + 1] += center.y;
+        pos[i * 3 + 2] += center.z;
+    }
+
+    // Offset indices by base_vert_offset so they reference the merged buffer.
+    u32* idx = reinterpret_cast<u32*>(tmp.index_buffer.data());
+    for (u32 i = 0; i < tmp.num_indices; ++i) {
+        idx[i] += base_vert_offset;
+    }
+
+    // Append byte ranges into dst at the appropriate offsets.
+    //   box_index = base_vert_offset / 24  (24 verts per box)
+    //   pos_byte  = base_vert_offset * 12   (12B per vert position)
+    //   elem_byte = base_vert_offset * 20   (PROC_ELEM_STRIDE per vert element)
+    //   idx_byte  = box_index * 36 * 4      (36 indices × 4B per box)
+    const u32 box_index   = base_vert_offset / 24u;
+    const u32 dst_pos_byte  = base_vert_offset * 12u;
+    const u32 dst_elem_byte = base_vert_offset * PROC_ELEM_STRIDE;
+    const u32 dst_idx_byte  = box_index * 36u * 4u;
+
+    std::memcpy(dst.position_buffer.data() + dst_pos_byte,
+                tmp.position_buffer.data(),
+                tmp.position_buffer.size());
+    std::memcpy(dst.element_buffer.data() + dst_elem_byte,
+                tmp.element_buffer.data(),
+                tmp.element_buffer.size());
+    std::memcpy(dst.index_buffer.data() + dst_idx_byte,
+                tmp.index_buffer.data(),
+                tmp.index_buffer.size());
+}
+
+} // namespace detail
+
+// create_rubble_pile_mesh — N (4..6) sub-boxes scattered within `radius`.
+// Y offset is biased downward (dy ∈ [-0.25, 0]) so the pile sits near the
+// floor; sub-box extents ∈ [0.2, 0.4] per axis.
+inline void create_rubble_pile_mesh(graphics::rhi::RHIMeshAsset& out,
+                                    u32 seed, f32 radius) {
+    const u32 box_count = 4u + (seed % 3u);  // 4..6
+
+    // Pre-size out for the full compound (avoids O(N²) reallocs inside append_box).
+    const u32 total_verts = box_count * 24u;
+    const u32 total_idx   = box_count * 36u;
+    out.num_vertices      = total_verts;
+    out.num_indices       = total_idx;
+    out.index_size        = 4;
+    out.elements_type     = PROC_ELEMENTS_TYPE;
+    out.position_buffer.resize(total_verts * 12u);
+    out.element_buffer.resize(total_verts * PROC_ELEM_STRIDE);
+    out.index_buffer.resize(total_idx * 4u);
+
+    for (u32 i = 0; i < box_count; ++i) {
+        // Knuth-multiplicative hash on (seed, i) — deterministic per-call.
+        u32 h = seed * 2654435761u + i * 40503u;
+        const f32 angle = (h & 0xFFFFu) / 65535.0f * 6.28318f;
+        const f32 r     = radius * (0.3f + ((h >> 16) & 0xFF) / 255.0f * 0.7f);
+        const f32 dy    = -0.25f + ((h >> 8) & 0xFF) / 255.0f * 0.25f;
+        const math::v3 center{
+            r * std::cos(angle),
+            dy,
+            r * std::sin(angle)};
+        const math::v3 extents{
+            0.2f + ((h >> 4)  & 0xF) / 15.0f * 0.2f,
+            0.2f + ((h >> 8)  & 0xF) / 15.0f * 0.2f,
+            0.2f + ((h >> 12) & 0xF) / 15.0f * 0.2f};
+        detail::append_box(out, center, extents, i * 24u);
+    }
+}
+
+// create_debris_small_mesh — N (2..3) smaller sub-boxes scattered within
+// `radius`, biased slightly upward (Y ∈ [-0.1, 0.05]) and with smaller extents
+// (each axis ∈ [0.1, 0.25]).
+inline void create_debris_small_mesh(graphics::rhi::RHIMeshAsset& out,
+                                     u32 seed, f32 radius) {
+    const u32 box_count = 2u + (seed % 2u);  // 2..3
+
+    const u32 total_verts = box_count * 24u;
+    const u32 total_idx   = box_count * 36u;
+    out.num_vertices      = total_verts;
+    out.num_indices       = total_idx;
+    out.index_size        = 4;
+    out.elements_type     = PROC_ELEMENTS_TYPE;
+    out.position_buffer.resize(total_verts * 12u);
+    out.element_buffer.resize(total_verts * PROC_ELEM_STRIDE);
+    out.index_buffer.resize(total_idx * 4u);
+
+    for (u32 i = 0; i < box_count; ++i) {
+        u32 h = seed * 2654435761u + i * 40503u;
+        const f32 angle = (h & 0xFFFFu) / 65535.0f * 6.28318f;
+        const f32 r     = radius * (0.3f + ((h >> 16) & 0xFF) / 255.0f * 0.7f);
+        // Slightly upward bias vs rubble — debris sits on top of rubble piles.
+        const f32 dy    = -0.10f + ((h >> 8) & 0xFF) / 255.0f * 0.15f;
+        const math::v3 center{
+            r * std::cos(angle),
+            dy,
+            r * std::sin(angle)};
+        // Smaller extents than rubble_pile: [0.1, 0.25] per axis.
+        const math::v3 extents{
+            0.10f + ((h >> 4)  & 0xF) / 15.0f * 0.15f,
+            0.10f + ((h >> 8)  & 0xF) / 15.0f * 0.15f,
+            0.10f + ((h >> 12) & 0xF) / 15.0f * 0.15f};
+        detail::append_box(out, center, extents, i * 24u);
+    }
+}
+
 // --- Ramp (wedge) ---
 // Generates a ramp mesh: a box where the +Z face slopes from full height (at -Z)
 // down to slope_height (at +Z). Used by WFC catalog with RotationY to produce

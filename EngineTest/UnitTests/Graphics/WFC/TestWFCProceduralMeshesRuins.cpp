@@ -207,6 +207,36 @@ TestResult TestCrackedWall_VertexIndexCount() {
     return TestResult::Passed;
 }
 
+// --- T11: rubble_pile + debris_small (compound: multiple sub-boxes) ---
+//
+// Both generators compose N sub-boxes (each 24 verts / 36 indices from
+// emit_box_geometry) into a single RHIMeshAsset. The vert count is therefore
+// N * 24, where N is deterministic from seed:
+//   rubble_pile:  box_count = 4 + (seed % 3)  → 4..6 sub-boxes → 96..144 verts
+//   debris_small: box_count = 2 + (seed % 2)  → 2..3 sub-boxes → 48..72 verts
+//
+// Tests verify the determinism contract on num_vertices only. Position
+// distribution (radius, angle, Y offset, extents) is verified by T27 visual
+// demo, not by unit tests — too brittle.
+
+TestResult TestRubblePile_HasMultipleBoxes() {
+    graphics::rhi::RHIMeshAsset asset{};
+    content::create_rubble_pile_mesh(asset, /*seed*/ 99, /*radius*/ 0.5f);
+    // Compound: 4-6 sub-boxes × 24 verts each → 96..144 verts expected.
+    TEST_ASSERT(asset.num_vertices >= 96u,  "at least 4 sub-boxes");
+    TEST_ASSERT(asset.num_vertices <= 144u, "at most 6 sub-boxes");
+    return TestResult::Passed;
+}
+
+TestResult TestDebrisSmall_HasFewerBoxes() {
+    graphics::rhi::RHIMeshAsset asset{};
+    content::create_debris_small_mesh(asset, /*seed*/ 7, /*radius*/ 0.4f);
+    // 2-3 sub-boxes × 24 verts = 48..72.
+    TEST_ASSERT(asset.num_vertices >= 48u, "at least 2 sub-boxes");
+    TEST_ASSERT(asset.num_vertices <= 72u, "at most 3 sub-boxes");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCProceduralMeshesRuins");
     TEST_CASE(suite, "AcceptsMaterialIdx",              TestRegisterProceduralMesh_AcceptsMaterialIdx);
@@ -217,6 +247,8 @@ int main() {
     TEST_CASE(suite, "WeatheredCube_Reproducible",      TestWeatheredCube_Reproducible);
     TEST_CASE(suite, "WeatheredCube_SeedChangesOutput", TestWeatheredCube_SeedChangesOutput);
     TEST_CASE(suite, "CrackedWall_VertexIndexCount",    TestCrackedWall_VertexIndexCount);
+    TEST_CASE(suite, "RubblePile_HasMultipleBoxes",     TestRubblePile_HasMultipleBoxes);
+    TEST_CASE(suite, "DebrisSmall_HasFewerBoxes",       TestDebrisSmall_HasFewerBoxes);
     suite.RunAllTests();
     return 0;
 }
