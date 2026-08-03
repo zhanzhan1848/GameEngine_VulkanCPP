@@ -2,6 +2,7 @@
 #include "WFCTileRegistry.h"
 #include "TileAdjacency.h"
 #include "WFCTypes.h"
+#include "WFCSocketOps.h"
 
 namespace primal::graphics::wfc {
 
@@ -12,6 +13,13 @@ constexpr geometry::geometry_id kRampMeshPlaceholder{1001};
 constexpr geometry::geometry_id kCornerInMeshPlaceholder{1002};
 constexpr geometry::geometry_id kCornerOutMeshPlaceholder{1003};
 constexpr geometry::geometry_id kPillarMeshPlaceholder{1004};
+
+// Phase C.1 T18: Ruins tile placeholders. Real mesh registration happens in
+// T22/T27 integration (engine-booted), not here — see primitive factories
+// above for the same pattern.
+constexpr geometry::geometry_id kBrokenCubeMeshBase{2000};   // +v per variant
+constexpr geometry::geometry_id kMossyCubeMeshPlaceholder{2100};
+constexpr geometry::geometry_id kVineCubeMeshBase{2200};     // +v per variant
 
 WFCTile MakeCubeTile() {
     WFCTile t{};
@@ -88,6 +96,57 @@ WFCTile MakePillarTile() {
     return t;
 }
 } // namespace
+
+WFCTile MakeBrokenCubeTile() {
+    WFCTile t{};
+    t.name = "broken_cube";
+    t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Ruins;
+    t.variant_count = 4;
+    t.is_organic = false;
+    t.is_rotationally_symmetric = false;
+    for (u32 v = 0; v < 4; ++v) {
+        t.mesh_handles[v] = geometry::geometry_id{
+            static_cast<u32>(kBrokenCubeMeshBase) + v};
+    }
+    for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+        t.sockets[v] = DeriveSocketEncoding(t, v);
+    }
+    return t;
+}
+
+WFCTile MakeMossyCubeTile() {
+    WFCTile t{};
+    t.name = "mossy_cube";
+    t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Ruins;
+    t.variant_count = 1;
+    t.is_organic = false;
+    t.is_rotationally_symmetric = true;  // mossy cube = cube geometry, Y-symmetric
+    t.mesh_handles[0] = kMossyCubeMeshPlaceholder;
+    for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+        t.sockets[v] = DeriveSocketEncoding(t, v);
+    }
+    return t;
+}
+
+WFCTile MakeVineCubeTile() {
+    WFCTile t{};
+    t.name = "vine_cube";
+    t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Ruins;
+    t.variant_count = 4;
+    t.is_organic = false;
+    t.is_rotationally_symmetric = true;  // vine cube = cube geometry, Y-symmetric
+    for (u32 v = 0; v < 4; ++v) {
+        t.mesh_handles[v] = geometry::geometry_id{
+            static_cast<u32>(kVineCubeMeshBase) + v};
+    }
+    for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+        t.sockets[v] = DeriveSocketEncoding(t, v);
+    }
+    return t;
+}
 
 void WFCTileCatalog::Populate(WFCTileRegistry& registry, TileAdjacencyTable& adjacency) {
     registry.Register(MakeCubeTile());

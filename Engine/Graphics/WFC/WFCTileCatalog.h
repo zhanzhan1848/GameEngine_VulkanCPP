@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../Common/CommonHeaders.h"
+#include "WFCTypes.h"
 
 namespace primal::graphics::wfc {
 
@@ -19,5 +20,12 @@ public:
     // Tile IDs assigned: 0=cube, 1=ramp, 2=corner_in, 3=corner_out, 4=pillar.
     static void Populate(WFCTileRegistry& registry, TileAdjacencyTable& adjacency);
 };
+
+// Phase C.1 T18+: Ruins tile factories. Used by WFCTileCatalog::Populate (T22)
+// and directly by integration tests. Mesh handles are placeholders until T27
+// (visual demo) wires real procedural mesh registration.
+WFCTile MakeBrokenCubeTile();
+WFCTile MakeMossyCubeTile();
+WFCTile MakeVineCubeTile();
 
 } // namespace primal::graphics::wfc
