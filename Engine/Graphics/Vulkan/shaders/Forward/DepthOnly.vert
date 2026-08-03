@@ -25,12 +25,13 @@ layout(set = SET_GLOBAL, binding = 0) uniform ViewData {
     mat4 previousViewProjection;
 } viewData;
 
-// PCGPushConsts (ForwardSceneRenderer.h:79): mat4 transform; uint use_instances; uvec3 _pad
+// T4.6.5 part 13: vec4 _use_pad trick — see GBuffer.vert part 11 comment.
+// Pack (use_instances + _pad[3]) into vec4 to match C++ PCGPushConsts 80B.
 layout(push_constant) uniform PushConsts {
     mat4 transform;
-    uint use_instances;
-    uvec3 _pad;
+    vec4 _use_pad;  // .x = use_instances, .yzw = _pad[0..2]
 } pc;
+#define use_instances _use_pad.x
 
 // Instance models SSBO — Metal [[buffer(3)]], Vulkan: set 0 binding 1 (re-using global set,
 // since ForwardSceneRenderer's global set layout has only 2 UBO bindings, this is a porting

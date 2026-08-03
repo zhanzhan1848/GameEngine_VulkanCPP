@@ -559,7 +559,22 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Vertex | ShaderStage::Pixel},
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Vertex | ShaderStage::Pixel},
         };
-        global_set_layout_ = device_->CreateDescriptorSetLayout({2, bindings});
+        // T4.6.5 part 13: Vulkan DepthOnly.vert declares instanceData SSBO at
+        // set 0 binding 2 for skeletal/PCG instancing. Add StorageBuffer binding
+        // on Vulkan only — Metal path uses [[buffer(N)]] auto-binding and
+        // doesn't need a descriptor slot. Declaring an extra binding that
+        // other shaders (GBuffer.vert) don't use is valid in Vulkan (just
+        // unused).
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            DescriptorSetLayoutBinding vkBindings[] = {
+                bindings[0],
+                bindings[1],
+                {2, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex},
+            };
+            global_set_layout_ = device_->CreateDescriptorSetLayout({3, vkBindings});
+        } else {
+            global_set_layout_ = device_->CreateDescriptorSetLayout({2, bindings});
+        }
     }
     // Material set (albedo + normal + ORM + sampler)
     {
@@ -763,6 +778,17 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        // T4.6.5 part 13: DepthOnly.vert reads only `in_position` at location 0.
+        // Same 32-byte stride as GBuffer, but only the position attribute is
+        // declared (shader doesn't read normal/uv/etc).
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            utl::vector<VertexInputAttribute> attrs(1);
+            attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};
+            desc.vertexAttributes = attrs;
+            utl::vector<VertexInputBinding> binds(1);
+            binds[0] = {0, 32, true};
+            desc.vertexBindings = binds;
+        }
         shadow_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Lighting

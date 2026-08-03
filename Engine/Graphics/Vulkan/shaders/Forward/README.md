@@ -8,7 +8,7 @@ compiled to SPIR-V via `glslangValidator` and consumed by
 
 | Shader               | Stages       | Status   | Notes                                     |
 |----------------------|--------------|----------|-------------------------------------------|
-| DepthOnly            | vert         | DONE     | Vertex-only (shadow depth pass)           |
+| DepthOnly            | vert         | PIPELINE-OK | T4.6.5 parts 2+13. Push constant 80B + InstanceBuffer SSBO binding 2 + vertex input declared. Pipeline creates successfully on Vulkan. |
 | Skybox               | vert + frag  | DONE     | Procedural cube, samplerless tex          |
 | Blit                 | vert + frag  | DONE     | T4.6.5 part 3 (Path A: tone-map ACES blit)|
 | GBuffer              | vert + frag  | PIPELINE-OK | T4.6.5 parts 10-12. Loads + compiles + pipeline creates successfully on Vulkan. Runtime render not yet exercised (skip in Initialize() still active pending 7 remaining shader ports). |
@@ -22,6 +22,31 @@ compiled to SPIR-V via `glslangValidator` and consumed by
 | DeferredLighting     | (compute)    | Path B   | See "DeferredLighting path" below         |
 
 11 shaders needed; 3 done; 1 partial (GBuffer loads, pipeline create blocked); 7 remaining + DeferredLighting path decision.
+
+## T4.6.5 part 13 status
+
+DepthOnly.vert (shadow pipeline) UNBLOCKED on Vulkan. Three fixes shipped:
+1. **Push constant** — same `vec4 _use_pad` trick as GBuffer.vert part 11. PushConsts
+   block now 80B (was 92B).
+2. **InstanceBuffer SSBO** — added StorageBuffer binding 2 to global_set_layout_
+   on Vulkan only. Metal path unchanged (uses `[[buffer(N)]]` auto-binding).
+3. **Vertex input** — shadow pipeline gets single binding stride=32, 1 attribute
+   (RGB32_Float position @0). Shader only reads `in_position`.
+
+Verified by temporarily lifting skip + worktree-path hardcoded shader dir:
+`shadow_pipeline_` and `gbuffer_pipeline_` both return OK handle. Zero
+push-constant validation errors (was [0,92] before).
+
+**Important verification gotcha (parts 11-13)**: hardcoded shader dir at
+`ForwardSceneRenderer.cpp:127` points to main repo
+(`GameEngine_VulkanCPP/Engine/Graphics/Vulkan/shaders/Forward/`), NOT the
+worktree. macOS APFS is case-insensitive so "shaders" matches the main repo's
+"Shaders" directory. For meaningful verification of worktree .spv changes,
+temporarily edit the path to include `.worktrees/vulkan-rhi/`. The main repo
+has STALE .spv files (no parts 11-13 fixes), so validation errors persist when
+using the default path — but MoltenVK is lenient about push constant range
+mismatches so pipelines still create. This is a pre-existing dev-machine-specific
+hardcode that should be fixed in a future cleanup.
 
 ## T4.6.5 part 12 status
 
@@ -41,13 +66,13 @@ Three of part 10's four blockers fixed:
 2. ~~Push constant std140 layout~~ — fixed via `vec4 _use_pad` trick in GBuffer.vert
 3. ~~DeferredLighting entry point mismatch~~ — load lambda in `ForwardSceneRenderer.cpp:635` now special-cases DeferredLighting compute to use `deferred_lighting_cs` instead of forcing `main`
 
-Remaining blockers (NOT addressed in part 11+12):
+Remaining blockers (NOT addressed in part 11+12+13):
 1. ~~Vertex input declaration missing in C++ (GBuffer pipeline)~~ — fixed in part 12
-2. MoltenVK portability on RGB32_Float vertex format — turns out to be supported (no validation error); README claim was overstated
-3. DepthOnly.vert push constant still uses 3-member 92B layout (separate shader, predates T4.6.5)
-4. DepthOnly.vert InstanceBuffer SSBO binding 2 not in global_set_layout_
-5. 8 of 11 ForwardSceneRenderer shaders still missing SPIR-V ports (alphaclip/unlit/foliage/water/transparent/ForwardTransparency/StreamingGBuffer)
-6. Other pipelines (alphaclip/unlit/etc.) still need vertex input declaration once shaders are ported
+2. ~~DepthOnly.vert push constant + InstanceBuffer + vertex input~~ — fixed in part 13
+3. MoltenVK portability on RGB32_Float vertex format — turns out to be supported (no validation error); README claim was overstated
+4. 7 of 11 ForwardSceneRenderer shaders still missing SPIR-V ports (alphaclip/unlit/foliage/water/transparent/ForwardTransparency/StreamingGBuffer)
+5. Other pipelines (alphaclip/unlit/etc.) still need vertex input declaration once shaders are ported
+6. Runtime instance buffer wiring — StorageBuffer binding 2 declared but no buffer attached yet (DepthOnly.vert references `instanceData.models[gl_InstanceIndex]` when use_instances != 0)
 
 ## Build
 
