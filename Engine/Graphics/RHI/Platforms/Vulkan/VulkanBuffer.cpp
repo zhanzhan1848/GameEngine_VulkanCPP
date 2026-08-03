@@ -35,8 +35,20 @@ static ResourceUsage GetResourceUsageFromBufferType(BufferType type, u32 /*bindF
 
 namespace {
 
-// BufferType → VkBufferUsageFlags 转换(独立函数,供构造和 Initialize 复用)
-VkBufferUsageFlags BufferTypeToVkUsage(BufferType type) {
+// BufferType + bindFlags → VkBufferUsageFlags 转换(独立函数,供构造和 Initialize 复用)
+//
+// 引擎很多 caller 设置 desc.bindFlags 包含 ResourceUsage bits(IndirectArg/
+// ConstantBuffer/UnorderedAccess/...)和 BufferUsageFlags bits(Indirect/Uniform/
+// Storage/Vertex/Index/TransferSrc|Dst),但只有 desc.type 进入 BufferTypeToVkUsage
+// 时被翻译。结果:
+//   - GPUCullingPipeline indirect_args_buffer (bindFlags=IndirectArg|TransferDst,
+//     type=Structured):缺 INDIRECT_BUFFER_BIT
+//   - GPUDrivenDrawPipeline indirect_draw_buffer (bindFlags=Indirect|Storage,
+//     type=Unknown):只剩 TRANSFER_SRC|DST,验证错误 "descriptorType STORAGE_BUFFER
+//     but only TRANSFER flags"
+//
+// 这里把 desc.bindFlags 的两套位都翻译到 Vulkan 等价 bit。
+VkBufferUsageFlags BufferDescToVkUsage(BufferType type, u32 bindFlags) {
     VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT
                              | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     switch (type) {
@@ -48,6 +60,26 @@ VkBufferUsageFlags BufferTypeToVkUsage(BufferType type) {
         case BufferType::Indirect:  usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT; break;
         default: break;
     }
+
+    // ResourceUsage bits (engine-wide convention; matches RHIResource.h enum)
+    if (bindFlags & static_cast<u32>(ResourceUsage::ShaderResource))  usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (bindFlags & static_cast<u32>(ResourceUsage::UnorderedAccess)) usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (bindFlags & static_cast<u32>(ResourceUsage::CopySource))      usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (bindFlags & static_cast<u32>(ResourceUsage::CopyDest))        usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (bindFlags & static_cast<u32>(ResourceUsage::IndexBuffer))     usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    if (bindFlags & static_cast<u32>(ResourceUsage::VertexBuffer))    usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    if (bindFlags & static_cast<u32>(ResourceUsage::ConstantBuffer))  usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    if (bindFlags & static_cast<u32>(ResourceUsage::IndirectArg))     usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+
+    // BufferUsageFlags bits (RHI-side fine-grained flags; mirrors VkBufferUsageFlagBits)
+    if (bindFlags & static_cast<u32>(BufferUsageFlags::TransferSrc)) usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (bindFlags & static_cast<u32>(BufferUsageFlags::TransferDst)) usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (bindFlags & static_cast<u32>(BufferUsageFlags::Uniform))     usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    if (bindFlags & static_cast<u32>(BufferUsageFlags::Storage))     usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (bindFlags & static_cast<u32>(BufferUsageFlags::Index))       usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    if (bindFlags & static_cast<u32>(BufferUsageFlags::Vertex))      usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    if (bindFlags & static_cast<u32>(BufferUsageFlags::Indirect))    usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+
     return usage;
 }
 
@@ -57,10 +89,13 @@ VulkanBuffer::VulkanBuffer(VulkanDevice& device, const BufferDesc& desc)
     : RHIResource(device, ResourceDesc(
           ResourceType::Buffer,
           GetResourceUsageFromBufferType(desc.type, desc.bindFlags),
-          desc.memoryUsage,
+          // Engine callers split between `desc.usage` (legacy/primary) and
+          // `desc.memoryUsage` (compat field). Pick whichever is set so
+          // neither convention silently falls through to GPU-only allocation.
+          (desc.memoryUsage != GPUMemoryUsage::Unknown) ? desc.memoryUsage : desc.usage,
           desc.size,
           desc.name.c_str())),
-      vkUsageFlags_(BufferTypeToVkUsage(desc.type))
+      vkUsageFlags_(BufferDescToVkUsage(desc.type, desc.bindFlags))
 {
 }
 

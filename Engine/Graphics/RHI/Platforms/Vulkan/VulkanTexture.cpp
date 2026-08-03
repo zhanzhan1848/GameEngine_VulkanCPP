@@ -338,8 +338,10 @@ bool VulkanTexture::Initialize() {
     // Choose viewType by TextureType:
     //   - Texture3D          → VK_IMAGE_VIEW_TYPE_3D         (SPIR-V texture_3d / storage_3d)
     //   - TextureCube        → VK_IMAGE_VIEW_TYPE_CUBE       (6 faces, sampler uses direction)
-    //   - arraySize > 1      → VK_IMAGE_VIEW_TYPE_2D_ARRAY   (SPIR-V texture_2d_array / storage_2d_array)
-    //   - else (single)      → VK_IMAGE_VIEW_TYPE_2D         (SPIR-V texture_2d / storage_2d)
+    //   - Texture2DArray     → VK_IMAGE_VIEW_TYPE_2D_ARRAY   (always — even arraySize=1; SPIR-V
+    //                                                        OpTypeImage Arrayed=1 must match)
+    //   - arraySize > 1      → VK_IMAGE_VIEW_TYPE_2D_ARRAY
+    //   - else (single)      → VK_IMAGE_VIEW_TYPE_2D
     // Storage cube is not supported in Vulkan core; engine cube-storage paths use 2D-array.
     const bool is3D = (texDesc_.type == TextureType::Texture3D || texDesc_.size.z > 1);
     VkImageViewType viewType;
@@ -350,6 +352,12 @@ bool VulkanTexture::Initialize() {
     } else if (isCube) {
         viewType = VK_IMAGE_VIEW_TYPE_CUBE;
         viewLayerCount = 6u;
+    } else if (texDesc_.type == TextureType::Texture2DArray) {
+        // Shader declares `texture_2d_array` → SPIR-V OpTypeImage Arrayed=1 → Vulkan
+        // requires VK_IMAGE_VIEW_TYPE_2D_ARRAY, even when arraySize==1. Otherwise
+        // vkCmdDrawIndirect throws VUID-vkCmdDrawIndirect-viewType-07752.
+        viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        viewLayerCount = std::max<u32>(texDesc_.arraySize, 1u);
     } else if (texDesc_.arraySize > 1) {
         viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
         viewLayerCount = texDesc_.arraySize;
