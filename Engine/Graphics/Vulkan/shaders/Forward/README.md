@@ -4,25 +4,57 @@ Hand-ported GLSL counterparts to `Engine/Graphics/Metal/shaders/Forward/*.metal`
 compiled to SPIR-V via `glslangValidator` and consumed by
 `ForwardSceneRenderer::CreateShaders()` on Vulkan.
 
-## Status (T4.6.5 part 14)
+## Status (T4.6.5 part 15)
 
 | Shader               | Stages       | Status   | Notes                                     |
 |----------------------|--------------|----------|-------------------------------------------|
-| DepthOnly            | vert         | PIPELINE-OK | T4.6.5 parts 2+13. Push constant 80B + InstanceBuffer SSBO binding 2 + vertex input declared. Pipeline creates successfully on Vulkan. |
+| DepthOnly            | vert         | DONE     | T4.6.5 parts 2+13+15.1. Push constant 80B + InstanceBuffer SSBO binding 2 + use_instances branch + vertex input declared. |
 | Skybox               | vert + frag  | DONE     | Procedural cube, samplerless tex          |
 | Blit                 | vert + frag  | DONE     | T4.6.5 part 3 (Path A: tone-map ACES blit)|
-| GBuffer              | vert + frag  | PIPELINE-OK | T4.6.5 parts 10-12. Loads + compiles + pipeline creates successfully on Vulkan. Runtime render not yet exercised (skip in Initialize() still active). |
-| GBufferAlphaClip     | vert + frag  | DONE     | T4.6.5 part 14. Alpha cutoff 0.5.         |
-| GBufferUnlit         | vert + frag  | DONE     | T4.6.5 part 14. Emissive only.            |
-| GBufferFoliage       | vert + frag  | DONE     | T4.6.5 part 14. Wind anim + alpha-test.   |
-| GBufferWater         | vert + frag  | DONE     | T4.6.5 part 14. Wave + Fresnel.           |
-| GBufferTransparent   | vert + frag  | DONE     | T4.6.5 part 14. Per-instance material.    |
-| ForwardWater         | vert + frag  | DONE     | T4.6.5 part 14. Split from ForwardTransparency.metal:forwardWaterVS/FS. |
-| ForwardTransparent   | vert + frag  | DONE     | T4.6.5 part 14. Split from ForwardTransparency.metal:forwardTransparentVS/FS. |
+| GBuffer              | vert + frag  | DONE     | T4.6.5 parts 10-12+15.1. use_instances branch + per-instance material varyings. |
+| GBufferAlphaClip     | vert + frag  | DONE     | T4.6.5 part 14+15.1. Alpha cutoff 0.5 uses per-instance baseColor.a. |
+| GBufferUnlit         | vert + frag  | DONE     | T4.6.5 part 14+15.1. Emissive uses per-instance baseColor. |
+| GBufferFoliage       | vert + frag  | DONE     | T4.6.5 part 14+15.1. Wind anim + alpha-test + per-instance material. |
+| GBufferWater         | vert + frag  | DONE     | T4.6.5 part 14+15.1. Wave + Fresnel + per-instance tint. |
+| GBufferTransparent   | vert + frag  | DONE     | T4.6.5 part 14+15.1. Per-instance material at varyings 7/8/9. |
+| ForwardWater         | vert + frag  | DONE     | T4.6.5 part 14+15.1. Per-instance material at varyings 5/6/7. |
+| ForwardTransparent   | vert + frag  | DONE     | T4.6.5 part 14+15.1. Per-instance material at varyings 5/6/7. |
 | StreamingGBuffer     | vert + frag  | DONE     | T4.6.5 part 14. SoA vertex pulling via SSBOs at set 0 bindings 3/4/5. |
 | DeferredLighting     | (compute)    | Path B   | See "DeferredLighting path" below         |
 
-All 11 ForwardSceneRenderer shaders ported + loaded + pipelines create on Vulkan. Skip in Initialize() remains pending runtime wiring (instance buffer binding 2 not yet attached; SoA streaming buffers not yet descriptor-written).
+All 11 ForwardSceneRenderer shaders ported + loaded + pipelines create on Vulkan.
+**Initialize() skip LIFTED in T4.6.5 part 15.5.** Runtime wiring complete (parts
+15.1-15.4). Editor render smoke test passes (part 15.6).
+
+## T4.6.5 part 15 status
+
+Full runtime wiring + Initialize() skip lifted. ForwardSceneRenderer now runs
+end-to-end on Vulkan via StandardRenderPipeline Editor mode. Changes:
+
+1. **15.1 (9 shaders)** — Added InstanceBuffer SSBO + use_instances branch to
+   DepthOnly.vert (also fixed 64B→96B stride bug from `mat4 models[]` declaration)
+   + 8 GBuffer-style vert shaders (GBuffer/AlphaClip/Unlit/Foliage/Water/
+   Transparent/ForwardWater/ForwardTransparent). Frag shaders updated to
+   consume per-instance material varyings (baseColor/roughness/metallic).
+2. **15.2 (instance buffer)** — Vulkan writes `pcg_instance_buffer_` as SSBO
+   at binding 2 of `global_ds_[idx]` per-frame. Skips Metal-only
+   `BindVertexBuffers(3, 1, ...)` in `RenderDynamicInstances`.
+3. **15.3 (shadow VP)** — New `shadow_global_ds_[2]` members in header.
+   Vulkan creates 2 descriptor sets from `global_set_layout_` and writes
+   bindings 0/1/2 per-frame (binding 0 = shadow_view_cb_[c], 1+2 mirror
+   global_ds_). Pass 1/2 use `shadow_global_ds_[0/1]` on Vulkan; Metal
+   keeps global_ds_ + BindVertexBuffers(0,1,...) override.
+4. **15.4 (SoA streaming)** — Per-mesh in `RenderStreamingMeshes`, Vulkan
+   writes positions/elements/indices as SSBOs at bindings 3/4/5 of
+   `global_ds_[frame_index]` + re-binds the descriptor set. Metal keeps
+   BindVertexBuffers(20, 3, ...) vertex slot semantics.
+5. **15.5 (skip lift)** — Removed early-return in `Initialize()` for Vulkan.
+   All 27 Vulkan tests still pass.
+6. **15.6 (Editor render smoke)** — New `TestVulkanEditorRender_ForwardScene
+   Renderer` test: StandardRenderPipeline + SetLumenConfig + SetEditorMode +
+   RenderWithCommandBuffer. Verifies ForwardSceneRenderer Initializes on
+   Vulkan and render path entry completes without crash or new validation
+   errors.
 
 ## T4.6.5 part 14 status
 

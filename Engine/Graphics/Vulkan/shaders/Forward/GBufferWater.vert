@@ -21,9 +21,10 @@
 //   location 3  uvec2 tangent    (offset 20, packed_ushort2)
 //   location 4  vec2  uv         (offset 24, packed_float2)
 //
-// Note: use_instances path is not wired (matches GBuffer.vert convention) —
-// instanceBaseColor defaults to (1,1,1,1) in fragment. Follow-up tracked
-// with GBuffer vertex-input declaration work.
+// Note: use_instances path is wired (T4.6.5 part 15.1) — InstanceBuffer SSBO
+// at set 0 binding 2 mirrors Metal buffer(3). Per-instance baseColor flows
+// to fragment for water tint; per-instance roughness/metallic are forwarded
+// for parity but unused by the water frag (which hardcodes ORM at (1,0.05,0)).
 
 #define SET_GLOBAL 0
 
@@ -32,6 +33,19 @@ layout(set = SET_GLOBAL, binding = 0) uniform ViewData {
     mat4 invViewProjection;
     mat4 previousViewProjection;
 } viewData;
+
+struct InstanceData {
+    mat4  transform;
+    vec4  baseColor;
+    float roughness;
+    float metallic;
+    float alphaCutoff;
+    float _pad;
+};
+
+layout(set = SET_GLOBAL, binding = 2) readonly buffer InstanceBuffer {
+    InstanceData models[];
+} instanceData;
 
 layout(set = SET_GLOBAL, binding = 1) uniform SceneData {
     mat4 model;
@@ -71,6 +85,9 @@ layout(location = 2) out vec3 outWorldTangent;
 layout(location = 3) out vec2 outUV;
 layout(location = 4) out vec4 outCurrentPos;
 layout(location = 5) out vec4 outPreviousPos;
+layout(location = 6) out vec4 outInstanceBaseColor;
+layout(location = 7) out float outInstanceRoughness;
+layout(location = 8) out float outInstanceMetallic;
 
 const float InvIntervals = 2.0 / ((1 << 16) - 1);
 
@@ -86,7 +103,19 @@ vec3 UnpackNormal(uvec2 p) {
 }
 
 void main() {
-    mat4 model = pc.transform;  // use_instances path not yet wired
+    mat4 model;
+    if (pc.use_instances != 0u) {
+        InstanceData inst = instanceData.models[gl_InstanceIndex];
+        model = inst.transform;
+        outInstanceBaseColor = inst.baseColor;
+        outInstanceRoughness = inst.roughness;
+        outInstanceMetallic  = inst.metallic;
+    } else {
+        model = pc.transform;
+        outInstanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
+        outInstanceRoughness = 0.5;
+        outInstanceMetallic  = 0.0;
+    }
 
     vec4 worldPos = model * vec4(in_position, 1.0);
     outWorldPos = worldPos.xyz;

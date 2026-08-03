@@ -230,6 +230,11 @@ private:
     rhi::DescriptorSetHandle global_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};
+    // T4.6.5 part 15.3: Vulkan-only shadow-pass descriptor sets. Replaces Metal's
+    // BindVertexBuffers(0, 1, &shadow_view_cb_[c], ...) per-vertex slot override.
+    // One per cascade: binding 0 = shadow_view_cb_[c], bindings 1+2 mirror global_ds_.
+    rhi::DescriptorSetHandle shadow_global_ds_[2]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET};
     rhi::DescriptorSetHandle lighting_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};

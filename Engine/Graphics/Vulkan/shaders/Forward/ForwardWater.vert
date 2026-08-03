@@ -68,6 +68,21 @@ layout(location = 5) out vec4 outInstanceBaseColor;
 layout(location = 6) out float outInstanceRoughness;
 layout(location = 7) out float outInstanceMetallic;
 
+// T4.6.5 part 15.1 — wire use_instances code path. Mirrors Metal forwardWaterVS
+// (buffer 3 in Metal → global set binding 2 here; keep parity with ForwardSceneRenderer
+// CreateDescriptorLayouts).
+struct InstanceData {
+    mat4  transform;
+    vec4  baseColor;
+    float roughness;
+    float metallic;
+    float alphaCutoff;
+    float _pad;
+};
+layout(set = SET_GLOBAL, binding = 2) readonly buffer InstanceBuffer {
+    InstanceData models[];
+} instanceData;
+
 const float InvIntervals = 2.0 / ((1 << 16) - 1);
 
 vec3 UnpackNormal(uvec2 p) {
@@ -82,12 +97,19 @@ vec3 UnpackNormal(uvec2 p) {
 }
 
 void main() {
-    // use_instances path not yet wired (global set has no SSBO binding). Mirror
-    // GBuffer.vert: fall back to push-constant transform + default material.
-    mat4 model = pc.transform;
-    outInstanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
-    outInstanceRoughness = 0.5;
-    outInstanceMetallic  = 0.0;
+    mat4 model;
+    if (pc.use_instances != 0u) {
+        InstanceData inst = instanceData.models[gl_InstanceIndex];
+        model = inst.transform;
+        outInstanceBaseColor = inst.baseColor;
+        outInstanceRoughness = inst.roughness;
+        outInstanceMetallic  = inst.metallic;
+    } else {
+        model = pc.transform;
+        outInstanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
+        outInstanceRoughness = 0.5;
+        outInstanceMetallic  = 0.0;
+    }
 
     vec4 worldPos = model * vec4(in_position, 1.0);
     outWorldPos = worldPos.xyz;

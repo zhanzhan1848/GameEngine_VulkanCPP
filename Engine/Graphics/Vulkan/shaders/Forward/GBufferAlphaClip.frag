@@ -1,12 +1,14 @@
 #version 450 core
 
-// T4.6.5 part 10 — Vulkan port of Forward/GBufferAlphaClip.metal fragment stage.
+// T4.6.5 part 10/15.1 — Vulkan port of Forward/GBufferAlphaClip.metal fragment stage.
 // Entry point: main
 //
 // GBuffer + alpha-tested discard. Mirrors GBuffer.frag plus an alpha-clip
 // branch after sampling albedo. The Metal source (line 148) tests against
-// `in.instanceBaseColor.a * 0.5`; with no instance path wired in this port
-// (instanceBaseColor defaults to vec4(1.0)), the cutoff collapses to 0.5.
+// `in.instanceBaseColor.a * 0.5`. As of part 15.1 the use_instances path is
+// wired: albedo is multiplied by inInstanceBaseColor, ORM channels scale by
+// inInstanceRoughness/inInstanceMetallic, and the cutoff uses the instance
+// alpha. When use_instances==0 the vert feeds vec4(1,1,1,1)/0.5/0.0 defaults.
 //
 // Descriptor set layout (matches ForwardSceneRenderer::material_set_layout_):
 //   set 1 binding 0 = SampledImage albedo
@@ -33,6 +35,9 @@ layout(location = 2) in vec3 inWorldTangent;
 layout(location = 3) in vec2 inUV;
 layout(location = 4) in vec4 inCurrentPos;
 layout(location = 5) in vec4 inPreviousPos;
+layout(location = 6) in vec4 inInstanceBaseColor;
+layout(location = 7) in float inInstanceRoughness;
+layout(location = 8) in float inInstanceMetallic;
 
 layout(location = 0) out vec4 outAlbedo;
 layout(location = 1) out vec4 outNormal;
@@ -41,19 +46,22 @@ layout(location = 3) out vec2 outVelocity;
 
 void main() {
     vec4 albedoSample = texture(sampler2D(albedoMap, defaultSampler), inUV);
-    outAlbedo = albedoSample;
+    outAlbedo = albedoSample * inInstanceBaseColor;
 
     // AlphaClip: discard fragments below threshold (GBufferAlphaClip.metal:148).
-    // use_instances path not wired; instanceBaseColor.a defaults to 1.0, so cutoff = 0.5.
-    if (outAlbedo.a < 0.5) {
+    // Metal compares out.albedo.a (post-multiply) against in.instanceBaseColor.a * 0.5.
+    if (outAlbedo.a < inInstanceBaseColor.a * 0.5) {
         discard;
     }
 
     vec4 ormSample = texture(sampler2D(ormMap, defaultSampler), inUV);
     if (length(ormSample.rgb) < 0.01) {
-        outORM = vec4(1.0, 0.5, 0.0, 1.0);
+        outORM = vec4(1.0, inInstanceRoughness, inInstanceMetallic, 1.0);
     } else {
-        outORM = vec4(ormSample.r, ormSample.g * 0.5, ormSample.b * 0.0, 1.0);
+        outORM = vec4(ormSample.r,
+                      ormSample.g * inInstanceRoughness,
+                      ormSample.b * inInstanceMetallic,
+                      1.0);
         outORM.r = max(outORM.r, 0.1);
     }
 

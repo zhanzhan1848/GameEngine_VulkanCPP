@@ -60,6 +60,9 @@ layout(location = 2) in vec3 inWorldTangent;
 layout(location = 3) in vec2 inUV;
 layout(location = 4) in vec4 inCurrentPos;
 layout(location = 5) in vec4 inPreviousPos;
+layout(location = 6) in vec4 inInstanceBaseColor;
+layout(location = 7) in float inInstanceRoughness;
+layout(location = 8) in float inInstanceMetallic;
 
 layout(location = 0) out vec4 outAlbedo;
 layout(location = 1) out vec4 outNormal;
@@ -88,9 +91,8 @@ void main() {
     vec3 shallowColor = vec3(0.1, 0.6, 0.7);
     vec3 deepColor    = vec3(0.02, 0.1, 0.3);
     vec3 waterColor = mix(shallowColor, deepColor, fresnel);
-    // instanceBaseColor defaults to (1,1,1,1) — use_instances path not wired
-    // (see vertex shader comment). Multiplication preserved for parity.
-    waterColor *= vec3(1.0, 1.0, 1.0);
+    // Metal reference: waterColor *= in.instanceBaseColor.rgb (line 162).
+    waterColor *= inInstanceBaseColor.rgb;
 
     float opacity = mix(0.4, 0.95, fresnel);
     outAlbedo = vec4(waterColor, opacity);

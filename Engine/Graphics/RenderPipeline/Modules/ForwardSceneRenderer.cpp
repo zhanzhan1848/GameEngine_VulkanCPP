@@ -371,12 +371,12 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     //      GBufferTransparent, ForwardTransparency, StreamingGBuffer
     //   2. Vertex buffer binding slot 0/1 convention differs (Metal uses
     //      [[buffer(1)]] for vertices; Vulkan expects binding 0).
-    // Keep the skip in place until those are resolved.
+    // T4.6.5 parts 1-15: skip LIFTED. All 11 ForwardSceneRenderer shaders ported
+    // (parts 1-14), runtime wiring complete (parts 15.1-15.4: instance buffer,
+    // shadow VP, SoA streaming all wired via Vulkan descriptor writes).
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
-        std::cerr << "[ForwardSceneRenderer] Skipped on Vulkan (T4.6.5: "
-                     "3/11 shaders ported; Path B complete, blockers are shader ports)"
+        std::cout << "[ForwardSceneRenderer] Initializing on Vulkan (T4.6.5 parts 1-15 complete)"
                   << std::endl;
-        return false;
     }
 
     device_ = device;
@@ -434,6 +434,16 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
 
         desc.layout = blit_set_layout_;
         blit_ds_[i] = device_->CreateDescriptorSet(desc);
+    }
+
+    // T4.6.5 part 15.3: Vulkan-only shadow-pass descriptor sets, one per cascade.
+    // Bindings are written per-frame in Render() once shadow VP + scene CB are updated.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        for (int c = 0; c < 2; c++) {
+            DescriptorSetDesc desc{};
+            desc.layout = global_set_layout_;
+            shadow_global_ds_[c] = device_->CreateDescriptorSet(desc);
+        }
     }
 
     // Streaming mesh default material DS — created after white_texture_ and
@@ -1617,8 +1627,12 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
         }
 
         for (auto& [meshIdx, range] : all_ranges[t]) {
+            // T4.6.5 part 15.2: instance buffer bound via SSBO descriptor at binding 2
+            // on Vulkan; Metal still uses BindVertexBuffers(3, 1, ...) at vertex stage.
             u64 inst_offset = range.offset * sizeof(graphics::InstanceData);
-            cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+            if (device_->GetPlatform() != RHIPlatform::Vulkan) {
+                cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+            }
             auto matSet = (meshIdx < material_ds_.size()) ? material_ds_[meshIdx] : material_ds_[0];
             const DescriptorSetHandle matSets[] = {matSet};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, layout, 1, 1, matSets, 0, nullptr);
@@ -1745,12 +1759,26 @@ void ForwardSceneRenderer::RenderStreamingMeshes(RHICommandBuffer* cmd, u32 fram
             ++s_render_diag;
         }
 
-        // Bind positions (20), elements (21), indices (22). The shader does
-        // manual indexed drawing — DrawIndirect issues idx_count invocations,
-        // and indices[vid] maps each invocation to the actual vertex.
-        ResourceHandle vb[3] = { sm.mesh->positions, sm.mesh->elements, sm.mesh->indices };
-        u64 offsets[3] = { 0, 0, 0 };
-        cmd->BindVertexBuffers(20, 3, vb, offsets);
+        // T4.6.5 part 15.4: Vulkan writes SoA buffers as SSBOs at bindings 3/4/5
+        // of global_ds_ per-mesh; Metal keeps BindVertexBuffers(20, 3, ...) vertex
+        // slot semantics. Per-mesh UpdateDesc churn is accepted for correctness.
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            DescData soaParams[] = {
+                {3, DescriptorType::StorageBuffer, sm.mesh->positions},
+                {4, DescriptorType::StorageBuffer, sm.mesh->elements},
+                {5, DescriptorType::StorageBuffer, sm.mesh->indices},
+            };
+            UpdateDesc(device_, global_ds_[frame_index], soaParams, 3);
+            const DescriptorSetHandle globalSets[] = {global_ds_[frame_index]};
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbuffer_layout_, 0, 1, globalSets, 0, nullptr);
+        } else {
+            // Bind positions (20), elements (21), indices (22). The shader does
+            // manual indexed drawing — DrawIndirect issues idx_count invocations,
+            // and indices[vid] maps each invocation to the actual vertex.
+            ResourceHandle vb[3] = { sm.mesh->positions, sm.mesh->elements, sm.mesh->indices };
+            u64 offsets[3] = { 0, 0, 0 };
+            cmd->BindVertexBuffers(20, 3, vb, offsets);
+        }
         cmd->DrawIndirect(sm.mesh->indirect_args, 0, 1);
     });
 
@@ -1856,6 +1884,15 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         UpdateDesc(device_, global_ds_[idx], params, 2);
     }
 
+    // T4.6.5 part 15.2: Vulkan wires pcg_instance_buffer_ as SSBO at binding 2 of
+    // global_ds_. Metal path uses BindVertexBuffers(3, 1, ...) at vertex stage —
+    // see RenderDynamicInstances (cpp:1621) — which has no equivalent on Vulkan.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan &&
+        pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
+        DescData instParam = {2, DescriptorType::StorageBuffer, pcg_instance_buffer_};
+        UpdateDesc(device_, global_ds_[idx], &instParam, 1);
+    }
+
     // --- Direct rendering (bypass render graph for reliability) ---
 
     // Pre-fill shadow VP constant buffers (before any render passes)
@@ -1866,6 +1903,22 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         svd.previousViewProjection = svd.viewProjection;
         auto* mapped = static_cast<ViewData*>(device_->MapBuffer(shadow_view_cb_[c]));
         if (mapped) { *mapped = svd; device_->UnmapBuffer(shadow_view_cb_[c]); }
+    }
+
+    // T4.6.5 part 15.3: write shadow_global_ds_[c] bindings per-frame on Vulkan.
+    // Binding 0 = shadow_view_cb_[c] (cascade-specific VP); 1+2 mirror global_ds_.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        for (int c = 0; c < 2; c++) {
+            DescData params[] = {
+                {0, DescriptorType::UniformBuffer, shadow_view_cb_[c]},
+                {1, DescriptorType::UniformBuffer, scene_cb_[idx]},
+            };
+            UpdateDesc(device_, shadow_global_ds_[c], params, 2);
+            if (pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
+                DescData instParam = {2, DescriptorType::StorageBuffer, pcg_instance_buffer_};
+                UpdateDesc(device_, shadow_global_ds_[c], &instParam, 1);
+            }
+        }
     }
 
     // Pass 1: Shadow cascade 0
@@ -1880,12 +1933,18 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->BindGraphicsPipeline(shadow_pipeline_);
         cmd->SetViewport({{0, 0}, {2048.0f, 2048.0f}, 0, 1});
         cmd->SetScissor({{0, 0}, {2048, 2048}});
-        const DescriptorSetHandle globalSets[] = {global_ds_[idx]};
+        // T4.6.5 part 15.3: Vulkan uses shadow_global_ds_[0] (binding 0 pre-set to
+        // shadow_view_cb_[0]). Metal keeps global_ds_[idx] + BindVertexBuffers override.
+        const DescriptorSetHandle globalSets[] = {
+            (device_->GetPlatform() == RHIPlatform::Vulkan) ? shadow_global_ds_[0] : global_ds_[idx]
+        };
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 0, 1, globalSets, 0, nullptr);
 
-        // Override buffer slot 0 with dedicated shadow VP CB for this cascade
-        u64 zeroOffset = 0;
-        cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[0], &zeroOffset);
+        // Metal-only: override vertex slot 0 with dedicated shadow VP CB for this cascade.
+        if (device_->GetPlatform() != RHIPlatform::Vulkan) {
+            u64 zeroOffset = 0;
+            cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[0], &zeroOffset);
+        }
 
         RenderDynamicInstances(cmd, cached_shadow_vp_[0], idx, true);
 
@@ -1904,12 +1963,16 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->BindGraphicsPipeline(shadow_pipeline_);
         cmd->SetViewport({{0, 0}, {2048.0f, 2048.0f}, 0, 1});
         cmd->SetScissor({{0, 0}, {2048, 2048}});
-        const DescriptorSetHandle globalSets[] = {global_ds_[idx]};
+        const DescriptorSetHandle globalSets[] = {
+            (device_->GetPlatform() == RHIPlatform::Vulkan) ? shadow_global_ds_[1] : global_ds_[idx]
+        };
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 0, 1, globalSets, 0, nullptr);
 
-        // Override buffer slot 0 with dedicated shadow VP CB for this cascade
-        u64 zeroOffset = 0;
-        cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[1], &zeroOffset);
+        // Metal-only: override vertex slot 0 with dedicated shadow VP CB for this cascade.
+        if (device_->GetPlatform() != RHIPlatform::Vulkan) {
+            u64 zeroOffset = 0;
+            cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[1], &zeroOffset);
+        }
 
         RenderDynamicInstances(cmd, cached_shadow_vp_[1], idx, true);
 

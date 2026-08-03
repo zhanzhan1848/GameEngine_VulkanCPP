@@ -7,14 +7,14 @@
 //   - Wind animation: sinusoidal XZ displacement scaled by vertex height,
 //     driven by sceneData.time (reinterpreted from the padding vec2 .x slot).
 //   - Per-instance material override: when use_instances != 0 the renderer
-//     would source baseColor/roughness/metallic from an InstanceData SSBO.
-//     ForwardSceneRenderer's Vulkan path doesn't wire that SSBO yet, so this
-//     port mirrors GBuffer.vert and emits neutral defaults (white, 0.5, 0.0).
-//     The defaults are forwarded to the fragment stage as varyings so the
-//     .frag shader can implement the same tint + alpha-test gate.
+//     sources transform + baseColor/roughness/metallic from the InstanceData
+//     SSBO (set 0 binding 2). T4.6.5 part 15.1 wired this branch; the values
+//     are forwarded to the fragment stage as varyings so .frag can apply the
+//     same tint + alpha-test gate.
 //
 // Descriptor set layout (matches ForwardSceneRenderer::CreateDescriptorLayouts):
-//   set 0 (global): binding 0 = ViewData UBO, binding 1 = SceneData UBO
+//   set 0 (global): binding 0 = ViewData UBO, binding 1 = SceneData UBO,
+//                   binding 2 = InstanceData SSBO (use_instances branch)
 // Push constants (PCGPushConsts at offset 0): mat4 transform; uint use_instances; uvec3 _pad
 //
 // Vertex input (matches Metal VertexInput struct, 32-byte stride):
@@ -25,6 +25,21 @@
 //   location 4  vec2  uv         (offset 24, packed_float2)
 
 #define SET_GLOBAL 0
+
+// T4.6.5 part 15.1: InstanceData SSBO (set 0 binding 2). Mirrors
+// Forward/InstanceData.metal: 96B stride (mat4 transform + vec4 baseColor +
+// 4 scalars). Matches DepthOnly.vert declaration for layout parity.
+struct InstanceData {
+    mat4  transform;
+    vec4  baseColor;
+    float roughness;
+    float metallic;
+    float alphaCutoff;
+    float _pad;
+};
+layout(set = SET_GLOBAL, binding = 2) readonly buffer InstanceBuffer {
+    InstanceData models[];
+} instanceData;
 
 layout(set = SET_GLOBAL, binding = 0) uniform ViewData {
     mat4 viewProjection;
@@ -74,7 +89,8 @@ layout(location = 2) out vec3 outWorldTangent;
 layout(location = 3) out vec2 outUV;
 layout(location = 4) out vec4 outCurrentPos;
 layout(location = 5) out vec4 outPreviousPos;
-// Foliage-specific instance material varyings (defaults; InstanceData SSBO not wired yet).
+// Foliage-specific instance material varyings (populated from InstanceData
+// SSBO when use_instances != 0; neutral defaults otherwise).
 layout(location = 6) out vec4 outInstanceBaseColor;
 layout(location = 7) out float outInstanceRoughness;
 layout(location = 8) out float outInstanceMetallic;
@@ -93,13 +109,19 @@ vec3 UnpackNormal(uvec2 p) {
 }
 
 void main() {
-    mat4 model = pc.transform;  // use_instances path not yet wired (no SSBO binding)
-
-    // Forward neutral instance material defaults (would come from InstanceData
-    // in the use_instances branch once that SSBO is plumbed in).
-    vec4 instanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
-    float instanceRoughness = 0.5;
-    float instanceMetallic  = 0.0;
+    mat4 model;
+    if (pc.use_instances != 0u) {
+        InstanceData inst = instanceData.models[gl_InstanceIndex];
+        model = inst.transform;
+        outInstanceBaseColor = inst.baseColor;
+        outInstanceRoughness = inst.roughness;
+        outInstanceMetallic  = inst.metallic;
+    } else {
+        model = pc.transform;
+        outInstanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
+        outInstanceRoughness = 0.5;
+        outInstanceMetallic  = 0.0;
+    }
 
     vec4 worldPos = model * vec4(in_position, 1.0);
 
@@ -130,8 +152,4 @@ void main() {
     // Note: previousPos uses the un-wind-displaced position (matches Metal
     // behavior — wind is a current-frame effect, prior frame had its own).
     outPreviousPos = viewData.previousViewProjection * (sceneData.previousModel * vec4(in_position, 1.0));
-
-    outInstanceBaseColor = instanceBaseColor;
-    outInstanceRoughness = instanceRoughness;
-    outInstanceMetallic  = instanceMetallic;
 }

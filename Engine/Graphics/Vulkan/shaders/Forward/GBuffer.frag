@@ -28,6 +28,9 @@ layout(location = 2) in vec3 inWorldTangent;
 layout(location = 3) in vec2 inUV;
 layout(location = 4) in vec4 inCurrentPos;
 layout(location = 5) in vec4 inPreviousPos;
+layout(location = 6) in vec4 inInstanceBaseColor;
+layout(location = 7) in float inInstanceRoughness;
+layout(location = 8) in float inInstanceMetallic;
 
 layout(location = 0) out vec4 outAlbedo;
 layout(location = 1) out vec4 outNormal;
@@ -36,13 +39,13 @@ layout(location = 3) out vec2 outVelocity;
 
 void main() {
     vec4 albedoSample = texture(sampler2D(albedoMap, defaultSampler), inUV);
-    outAlbedo = albedoSample;
+    outAlbedo = vec4(albedoSample.rgb * inInstanceBaseColor.rgb, albedoSample.a * inInstanceBaseColor.a);
 
     vec4 ormSample = texture(sampler2D(ormMap, defaultSampler), inUV);
     if (length(ormSample.rgb) < 0.01) {
-        outORM = vec4(1.0, 0.5, 0.0, 1.0);
+        outORM = vec4(1.0, inInstanceRoughness, inInstanceMetallic, 1.0);
     } else {
-        outORM = vec4(ormSample.r, ormSample.g * 0.5, ormSample.b * 0.0, 1.0);
+        outORM = vec4(ormSample.r, ormSample.g * inInstanceRoughness, ormSample.b * inInstanceMetallic, 1.0);
         outORM.r = max(outORM.r, 0.1);
     }
 

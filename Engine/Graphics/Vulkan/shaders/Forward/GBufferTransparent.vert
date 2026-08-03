@@ -42,6 +42,21 @@ layout(set = SET_GLOBAL, binding = 1) uniform SceneData {
     mat4 shadowMatrix1;
 } sceneData;
 
+// Per-instance material terms (matches Metal InstanceData.metal — buffer(3) /
+// global set binding 2 here). Drives baseColor/roughness/metallic for the
+// transparent GBuffer when pc.use_instances != 0.
+struct InstanceData {
+    mat4  transform;
+    vec4  baseColor;
+    float roughness;
+    float metallic;
+    float alphaCutoff;
+    float _pad;
+};
+layout(set = SET_GLOBAL, binding = 2) readonly buffer InstanceBuffer {
+    InstanceData models[];
+} instanceData;
+
 // std140 layout trap: see GBuffer.vert comment. Pack (use_instances + _pad[3])
 // into a single vec4 for an exact 80-byte PCGPushConsts match.
 layout(push_constant) uniform PushConsts {
@@ -81,12 +96,19 @@ vec3 UnpackNormal(uvec2 p) {
 }
 
 void main() {
-    // use_instances path not yet wired (global set has no SSBO binding); mirror
-    // GBuffer.vert and use the fallback else-branch for instance material terms.
-    mat4 model = pc.transform;
-    outInstanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
-    outInstanceRoughness  = 0.5;
-    outInstanceMetallic   = 0.0;
+    mat4 model;
+    if (pc.use_instances != 0u) {
+        InstanceData inst = instanceData.models[gl_InstanceIndex];
+        model = inst.transform;
+        outInstanceBaseColor = inst.baseColor;
+        outInstanceRoughness = inst.roughness;
+        outInstanceMetallic  = inst.metallic;
+    } else {
+        model = pc.transform;
+        outInstanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
+        outInstanceRoughness = 0.5;
+        outInstanceMetallic  = 0.0;
+    }
 
     vec4 worldPos = model * vec4(in_position, 1.0);
     outWorldPos = worldPos.xyz;

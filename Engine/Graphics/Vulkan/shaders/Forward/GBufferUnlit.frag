@@ -44,6 +44,9 @@ layout(location = 2) in vec3 inWorldTangent;
 layout(location = 3) in vec2 inUV;
 layout(location = 4) in vec4 inCurrentPos;
 layout(location = 5) in vec4 inPreviousPos;
+layout(location = 6) in vec4 inInstanceBaseColor;
+layout(location = 7) in float inInstanceRoughness;
+layout(location = 8) in float inInstanceMetallic;
 
 layout(location = 0) out vec4 outAlbedo;
 layout(location = 1) out vec4 outNormal;
@@ -51,11 +54,10 @@ layout(location = 2) out vec4 outORM;
 layout(location = 3) out vec2 outVelocity;
 
 void main() {
-    // Unlit: output base color directly, no lighting. The Metal version uses
-    // in.instanceBaseColor from the vertex stage; the Vulkan GBuffer vertex
-    // template doesn't yet pipe instance material through, so default to white
-    // (matches the Metal non-instance branch: float4(1.0, 1.0, 1.0, 1.0)).
-    outAlbedo = vec4(1.0, 1.0, 1.0, 1.0);
+    // Unlit: output base color directly, no lighting (matches Metal fragmentMain
+    // line `out.albedo = in.instanceBaseColor`). Vertex stage pipes the instance
+    // material through; the non-instance branch defaults to white.
+    outAlbedo = inInstanceBaseColor;
 
     // Flat normal facing +Z — encoded as (0.5, 0.5, 1.0) so downstream deferred
     // lighting (which does normal * 2.0 - 1.0) reconstructs (0, 0, +1).

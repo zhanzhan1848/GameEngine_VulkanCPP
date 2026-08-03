@@ -33,12 +33,20 @@ layout(push_constant) uniform PushConsts {
 } pc;
 #define use_instances _use_pad.x
 
-// Instance models SSBO — Metal [[buffer(3)]], Vulkan: set 0 binding 1 (re-using global set,
-// since ForwardSceneRenderer's global set layout has only 2 UBO bindings, this is a porting
-// deviation: real port should add a 3rd binding to global_set_layout_ — tracked as TODO
-// to fix the descriptor layout in C++ before activating this shader).
+// Instance models SSBO — Metal [[buffer(3)]], Vulkan: set 0 binding 2.
+// T4.6.5 part 15.1: declared with full InstanceData struct (96B stride) to match
+// C++ graphics::InstanceData layout. Earlier `mat4 models[]` declaration
+// strides by 64B and reads wrong data when use_instances != 0.
+struct InstanceData {
+    mat4  transform;
+    vec4  baseColor;
+    float roughness;
+    float metallic;
+    float alphaCutoff;
+    float _pad;
+};
 layout(set = SET_GLOBAL, binding = 2) readonly buffer InstanceBuffer {
-    mat4 models[];
+    InstanceData models[];
 } instanceData;
 
 // Vertex input — Metal [[buffer(20)]] with 32-byte stride (12 bytes position + 20 padding)
@@ -46,7 +54,7 @@ layout(location = 0) in vec3 in_position;
 
 void main() {
     mat4 model = (pc.use_instances != 0u)
-        ? instanceData.models[gl_InstanceIndex]
+        ? instanceData.models[gl_InstanceIndex].transform
         : pc.transform;
 
     vec4 worldPos = model * vec4(in_position, 1.0);

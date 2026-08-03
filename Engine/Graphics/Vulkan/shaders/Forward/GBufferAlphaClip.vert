@@ -52,6 +52,20 @@ layout(push_constant) uniform PushConsts {
 } pc;
 #define use_instances _use_pad.x
 
+// T4.6.5 part 15.1 — InstanceBuffer SSBO mirrors Metal InstanceData.metal.
+// Bound at set 0 binding 2 (same global set as ViewData/SceneData UBOs).
+struct InstanceData {
+    mat4  transform;
+    vec4  baseColor;
+    float roughness;
+    float metallic;
+    float alphaCutoff;
+    float _pad;
+};
+layout(set = SET_GLOBAL, binding = 2) readonly buffer InstanceBuffer {
+    InstanceData models[];
+} instanceData;
+
 layout(location = 0) in vec3  in_position;
 layout(location = 1) in uint  in_colorTSign;
 layout(location = 2) in uvec2 in_normal;     // packed_ushort2
@@ -64,6 +78,9 @@ layout(location = 2) out vec3 outWorldTangent;
 layout(location = 3) out vec2 outUV;
 layout(location = 4) out vec4 outCurrentPos;
 layout(location = 5) out vec4 outPreviousPos;
+layout(location = 6) out vec4 outInstanceBaseColor;
+layout(location = 7) out float outInstanceRoughness;
+layout(location = 8) out float outInstanceMetallic;
 
 const float InvIntervals = 2.0 / ((1 << 16) - 1);
 
@@ -79,7 +96,19 @@ vec3 UnpackNormal(uvec2 p) {
 }
 
 void main() {
-    mat4 model = pc.transform;  // use_instances path not yet wired (global set has no SSBO binding)
+    mat4 model;
+    if (pc.use_instances != 0u) {
+        InstanceData inst = instanceData.models[gl_InstanceIndex];
+        model = inst.transform;
+        outInstanceBaseColor = inst.baseColor;
+        outInstanceRoughness = inst.roughness;
+        outInstanceMetallic  = inst.metallic;
+    } else {
+        model = pc.transform;
+        outInstanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
+        outInstanceRoughness = 0.5;
+        outInstanceMetallic  = 0.0;
+    }
 
     vec4 worldPos = model * vec4(in_position, 1.0);
     outWorldPos = worldPos.xyz;
