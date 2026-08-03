@@ -352,6 +352,121 @@ inline id::id_type create_box_mesh(f32 sx, f32 sy, f32 sz) {
     return RegisterProceduralMesh(asset);
 }
 
+// --- Broken cube (Phase C.1 T8: topology-mod ruins tile generator) ---
+// Strategy A: take a unit cube, then flip the winding of ONE triangle that
+// touches the chosen corner. The flipped triangle becomes back-facing under
+// default CCW culling, producing a visual "notch" at that corner.
+//
+// Unlike create_box_mesh, this variant populates a caller-provided asset
+// (no registration) so the ruins catalog can post-process / compose further.
+//
+// Corner -> triangle index mapping (VERIFIED by tracing create_box_mesh):
+//
+//   Box layout (center-origin, hx=sx/2, hy=sy/2, hz=sz/2):
+//     Face 0 (+Z), verts 0..3:  (-hx,-hy,hz), (hx,-hy,hz), (hx,hy,hz), (-hx,hy,hz)
+//     Face 1 (-Z), verts 4..7:  (hx,-hy,-hz), (-hx,-hy,-hz), (-hx,hy,-hz), (hx,hy,-hz)
+//     Face 2 (+X), verts 8..11: (hx,-hy,hz), (hx,-hy,-hz), (hx,hy,-hz), (hx,hy,hz)
+//     Face 3 (-X), verts 12..15:(-hx,-hy,-hz), (-hx,-hy,hz), (-hx,hy,hz), (-hx,hy,-hz)
+//     Face 4 (+Y), verts 16..19:(-hx,hy,hz), (hx,hy,hz), (hx,hy,-hz), (-hx,hy,-hz)
+//     Face 5 (-Y), verts 20..23:(-hx,-hy,-hz), (hx,-hy,-hz), (hx,-hy,hz), (-hx,-hy,hz)
+//
+//   Per-face index buffer: face f contributes indices [f*6+0..5] = (b,b+1,b+2,b,b+2,b+3)
+//   Triangle index t = global_tri, vertices = idx[t*3+0..2].
+//
+//   The 4 plan corners (all at y=-hy, ruins are floor tiles) map to:
+//     PosXYZ   (+hx,-hy,+hz): touched by verts 1 (+Z), 8 (+X), 22 (-Y)
+//                              -> flip tri 0  (face 0, (0,1,2), unique to vert 1)
+//     PosXNegZ (+hx,-hy,-hz): touched by verts 4 (-Z), 9 (+X), 21 (-Y)
+//                              -> flip tri 2  (face 1, (4,5,6), unique to vert 4)
+//     NegXPosZ (-hx,-hy,+hz): touched by verts 0 (+Z), 13 (-X), 23 (-Y)
+//                              -> flip tri 6  (face 3, (12,13,14), unique to vert 13)
+//     NegXNegZ (-hx,-hy,-hz): touched by verts 5 (-Z), 12 (-X), 20 (-Y)
+//                              -> flip tri 10 (face 5, (20,21,22), unique to vert 20)
+//
+//   Each chosen triangle is the UNIQUE triangle containing its anchor vert,
+//   so flipping it produces a clean single-triangle notch. Plan's original
+//   guess of {0,1,2,3} was wrong for 3 of 4 corners — corrected here.
+//
+// NOTE: This is a 1-triangle winding flip only. Geometrically it produces a
+// hole/notch visible under back-face culling, not a true geometric removal.
+// Acceptable for the ruins catalog demo (T27). If true volumetric notch is
+// needed later, switch to a vertex-displacement approach.
+enum class BrokenCorner : u8 {
+    PosXYZ   = 0,
+    PosXNegZ = 1,
+    NegXPosZ = 2,
+    NegXNegZ = 3,
+};
+
+inline void create_broken_cube_mesh(graphics::rhi::RHIMeshAsset& out,
+                                    f32 sx, f32 sy, f32 sz,
+                                    BrokenCorner corner) {
+    // Mirror create_box_mesh geometry into `out` (no registration).
+    const u32 vertCount = 24;
+    const u32 idxCount  = 36;
+
+    out.num_vertices    = vertCount;
+    out.num_indices     = idxCount;
+    out.index_size      = 4; // u32 indices
+    out.position_buffer.resize(vertCount * 12);
+    out.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
+    out.index_buffer.resize(idxCount * 4);
+
+    u8* pos  = out.position_buffer.data();
+    u8* elem = out.element_buffer.data();
+    const f32 hx = sx * 0.5f, hy = sy * 0.5f, hz = sz * 0.5f;
+
+    //    pos                           normal          UV
+    // +Z face
+    WriteVertex(pos+ 0*12, elem+ 0*20, -hx,-hy, hz,  0, 0, 1,  0, 0);
+    WriteVertex(pos+ 1*12, elem+ 1*20,  hx,-hy, hz,  0, 0, 1,  1, 0);
+    WriteVertex(pos+ 2*12, elem+ 2*20,  hx, hy, hz,  0, 0, 1,  1, 1);
+    WriteVertex(pos+ 3*12, elem+ 3*20, -hx, hy, hz,  0, 0, 1,  0, 1);
+    // -Z face
+    WriteVertex(pos+ 4*12, elem+ 4*20,  hx,-hy,-hz,  0, 0,-1,  0, 0);
+    WriteVertex(pos+ 5*12, elem+ 5*20, -hx,-hy,-hz,  0, 0,-1,  1, 0);
+    WriteVertex(pos+ 6*12, elem+ 6*20, -hx, hy,-hz,  0, 0,-1,  1, 1);
+    WriteVertex(pos+ 7*12, elem+ 7*20,  hx, hy,-hz,  0, 0,-1,  0, 1);
+    // +X face
+    WriteVertex(pos+ 8*12, elem+ 8*20,  hx,-hy, hz,  1, 0, 0,  0, 0);
+    WriteVertex(pos+ 9*12, elem+ 9*20,  hx,-hy,-hz,  1, 0, 0,  1, 0);
+    WriteVertex(pos+10*12, elem+10*20,  hx, hy,-hz,  1, 0, 0,  1, 1);
+    WriteVertex(pos+11*12, elem+11*20,  hx, hy, hz,  1, 0, 0,  0, 1);
+    // -X face
+    WriteVertex(pos+12*12, elem+12*20, -hx,-hy,-hz, -1, 0, 0,  0, 0);
+    WriteVertex(pos+13*12, elem+13*20, -hx,-hy, hz, -1, 0, 0,  1, 0);
+    WriteVertex(pos+14*12, elem+14*20, -hx, hy, hz, -1, 0, 0,  1, 1);
+    WriteVertex(pos+15*12, elem+15*20, -hx, hy,-hz, -1, 0, 0,  0, 1);
+    // +Y face
+    WriteVertex(pos+16*12, elem+16*20, -hx, hy, hz,  0, 1, 0,  0, 0);
+    WriteVertex(pos+17*12, elem+17*20,  hx, hy, hz,  0, 1, 0,  1, 0);
+    WriteVertex(pos+18*12, elem+18*20,  hx, hy,-hz,  0, 1, 0,  1, 1);
+    WriteVertex(pos+19*12, elem+19*20, -hx, hy,-hz,  0, 1, 0,  0, 1);
+    // -Y face
+    WriteVertex(pos+20*12, elem+20*20, -hx,-hy,-hz,  0,-1, 0,  0, 0);
+    WriteVertex(pos+21*12, elem+21*20,  hx,-hy,-hz,  0,-1, 0,  1, 0);
+    WriteVertex(pos+22*12, elem+22*20,  hx,-hy, hz,  0,-1, 0,  1, 1);
+    WriteVertex(pos+23*12, elem+23*20, -hx,-hy, hz,  0,-1, 0,  0, 1);
+
+    u32* idx = reinterpret_cast<u32*>(out.index_buffer.data());
+    for (u32 f = 0; f < 6; ++f) {
+        u32 b = f * 4;
+        idx[f*6+0] = b;   idx[f*6+1] = b+1; idx[f*6+2] = b+2;
+        idx[f*6+3] = b;   idx[f*6+4] = b+2; idx[f*6+5] = b+3;
+    }
+
+    // Flip the winding of the triangle mapped to the chosen corner.
+    // Each anchor vert is unique to one triangle (see mapping above).
+    static constexpr u32 kCornerTriangle[4] = {
+        /* PosXYZ   */ 0,   // face 0 (+Z), tri (0,1,2) — anchor vert 1
+        /* PosXNegZ */ 2,   // face 1 (-Z), tri (4,5,6) — anchor vert 4
+        /* NegXPosZ */ 6,   // face 3 (-X), tri (12,13,14) — anchor vert 13
+        /* NegXNegZ */ 10,  // face 5 (-Y), tri (20,21,22) — anchor vert 20
+    };
+    const u32 tri_base = kCornerTriangle[static_cast<u32>(corner)];
+    std::swap(idx[tri_base * 3 + 1], idx[tri_base * 3 + 2]);
+}
+
 // --- Ramp (wedge) ---
 // Generates a ramp mesh: a box where the +Z face slopes from full height (at -Z)
 // down to slope_height (at +Z). Used by WFC catalog with RotationY to produce
