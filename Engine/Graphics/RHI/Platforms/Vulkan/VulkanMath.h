@@ -56,6 +56,7 @@ inline VkFormat ToVkFormat(DataFormat fmt) {
         case DataFormat::RGBA8_sRGB:          return VK_FORMAT_R8G8B8A8_SRGB;
         case DataFormat::R16_Float:           return VK_FORMAT_R16_SFLOAT;
         case DataFormat::R16_UInt:            return VK_FORMAT_R16_UINT;
+        case DataFormat::RG16_UInt:           return VK_FORMAT_R16G16_UINT;
         case DataFormat::RG16_Float:          return VK_FORMAT_R16G16_SFLOAT;
         case DataFormat::RGBA16_Float:        return VK_FORMAT_R16G16B16A16_SFLOAT;
         case DataFormat::R32_Float:           return VK_FORMAT_R32_SFLOAT;

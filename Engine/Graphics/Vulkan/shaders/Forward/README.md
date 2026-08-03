@@ -4,14 +4,14 @@ Hand-ported GLSL counterparts to `Engine/Graphics/Metal/shaders/Forward/*.metal`
 compiled to SPIR-V via `glslangValidator` and consumed by
 `ForwardSceneRenderer::CreateShaders()` on Vulkan.
 
-## Status (T4.6.5 part 3)
+## Status (T4.6.5 part 10)
 
 | Shader               | Stages       | Status   | Notes                                     |
 |----------------------|--------------|----------|-------------------------------------------|
 | DepthOnly            | vert         | DONE     | Vertex-only (shadow depth pass)           |
 | Skybox               | vert + frag  | DONE     | Procedural cube, samplerless tex          |
 | Blit                 | vert + frag  | DONE     | T4.6.5 part 3 (Path A: tone-map ACES blit)|
-| GBuffer              | vert + frag  | TODO     | PBR GBuffer fill (complex)                |
+| GBuffer              | vert + frag  | LOAD-OK  | T4.6.5 part 10. Loads + compiles. Pipeline create blocked by vertex format issues (see below). |
 | GBufferAlphaClip     | vert + frag  | TODO     | Alpha-tested foliage gate                 |
 | GBufferUnlit         | vert + frag  | TODO     | Unlit emission                            |
 | GBufferFoliage       | vert + frag  | TODO     | 2-pass foliage (alpha + lit)              |
@@ -21,7 +21,21 @@ compiled to SPIR-V via `glslangValidator` and consumed by
 | StreamingGBuffer     | vert + frag  | TODO     | SoA vertex pulling                        |
 | DeferredLighting     | (compute)    | Path B   | See "DeferredLighting path" below         |
 
-11 shaders needed; 3 done; 8 remaining + DeferredLighting path decision.
+11 shaders needed; 3 done; 1 partial (GBuffer loads, pipeline create blocked); 7 remaining + DeferredLighting path decision.
+
+## T4.6.5 part 11 status
+
+Three of part 10's four blockers fixed:
+1. ~~RG16_UInt missing in VulkanMath.h~~ — fixed at `VulkanMath.h:59`
+2. ~~Push constant std140 layout~~ — fixed via `vec4 _use_pad` trick in GBuffer.vert
+3. ~~DeferredLighting entry point mismatch~~ — load lambda in `ForwardSceneRenderer.cpp:635` now special-cases DeferredLighting compute to use `deferred_lighting_cs` instead of forcing `main`
+
+Remaining blockers (NOT addressed in part 11):
+1. Vertex input declaration missing in C++ (VUID-VkGraphicsPipelineCreateInfo-Input-07904)
+2. MoltenVK portability on RGB32_Float vertex format
+3. DepthOnly.vert push constant still uses 3-member 92B layout (separate shader, predates T4.6.5)
+4. DepthOnly.vert InstanceBuffer SSBO binding 2 not in global_set_layout_
+5. 8 of 11 ForwardSceneRenderer shaders still missing SPIR-V ports
 
 ## Build
 

@@ -638,9 +638,16 @@ void ForwardSceneRenderer::CreateShaders() {
             std::cerr << "[ForwardSceneRenderer] Failed to load shader: " << file << "/" << entry << std::endl;
             return handles::INVALID_SHADER;
         }
-        // Vulkan SPIR-V files use "main" entry point; Metal uses named entries.
-        const char* vkEntry = "main";
-        const char* useEntry = (platform == RHIPlatform::Vulkan) ? vkEntry : entry;
+        // Vulkan SPIR-V files use "main" entry point by convention; Metal uses
+        // named entries. Exception: DeferredLighting.spv is a Dawn WGSL→SPIR-V
+        // product (naga) that keeps its original WGSL entry "deferred_lighting_cs".
+        const char* useEntry = entry;
+        if (platform == RHIPlatform::Vulkan) {
+            const bool isLightingCompute =
+                (std::strcmp(file, "DeferredLighting") == 0) &&
+                (stage == ShaderStage::Compute);
+            useEntry = isLightingCompute ? "deferred_lighting_cs" : "main";
+        }
         auto handle = device_->CreateShader(src.data(), src.size(), stage, useEntry);
         if (handle == handles::INVALID_SHADER) {
             std::cerr << "[ForwardSceneRenderer] Failed to compile shader: " << file << "/" << entry << std::endl;
@@ -656,7 +663,9 @@ void ForwardSceneRenderer::CreateShaders() {
     // (existing Engine/Graphics/Vulkan/shaders/DeferredLighting.spv). The
     // Metal vert/frag path stays untouched.
     if (platform == RHIPlatform::Vulkan) {
-        lighting_cs_ = load("DeferredLighting", "main", ShaderStage::Compute);
+        // entry name "deferred_lighting_cs" is rewritten inside `load` for this
+        // specific file/stage combination (see load lambda above).
+        lighting_cs_ = load("DeferredLighting", "deferred_lighting_cs", ShaderStage::Compute);
     } else {
         lighting_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
         lighting_ps_ = load("DeferredLighting", "fragmentLighting_v3", ShaderStage::Pixel);

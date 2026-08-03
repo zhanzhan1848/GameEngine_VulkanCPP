@@ -44,11 +44,15 @@ layout(set = SET_GLOBAL, binding = 1) uniform SceneData {
     mat4 shadowMatrix1;
 } sceneData;
 
+// T4.6.5 part 11: std140 layout trap. `uvec3 _pad` aligns to 16B boundary →
+// block becomes 92B (exceeds C++ PCGPushConsts 80B). `uint _pad[3]` is worse
+// (48B array). Trick: pack (use_instances + _pad[3]) into a single vec4,
+// giving exactly 64 + 16 = 80 bytes. Read .x as use_instances; .yzw unused.
 layout(push_constant) uniform PushConsts {
     mat4 transform;
-    uint use_instances;
-    uint _pad[3];
+    vec4 _use_pad;  // .x = use_instances, .yzw = _pad[0..2]
 } pc;
+#define use_instances _use_pad.x
 
 layout(location = 0) in vec3  in_position;
 layout(location = 1) in uint  in_colorTSign;
