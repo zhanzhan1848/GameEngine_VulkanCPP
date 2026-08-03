@@ -53,6 +53,15 @@ namespace {
 // inline-Get() read when the test binary also statically links libEngine.a.
 extern StandardRenderPipeline* g_owned_pipeline;
 
+// The editor learns the native viewport size before it creates the owned
+// pipeline.  Preserve that size so CreateStandardRenderPipeline can apply it
+// before SetLumenConfig initializes ForwardSceneRenderer and its fixed-size
+// render targets.  Previously SetPipelineViewportSize silently returned when
+// no pipeline existed, leaving the renderer at its 1280x720 defaults even
+// when the embedded target was a different size (for example 846x407).
+u32 g_pending_viewport_width = 0;
+u32 g_pending_viewport_height = 0;
+
 StandardRenderPipeline* GetStdPipeline() {
     if (g_owned_pipeline) return g_owned_pipeline;
     auto* p = RenderPipeline::Get();
@@ -196,6 +205,9 @@ EDITOR_INTERFACE void GetPipelinePassInfo(u32 pass_id,
 // ============================================================================
 
 EDITOR_INTERFACE void SetPipelineViewportSize(u32 width, u32 height) {
+    if (width == 0 || height == 0) return;
+    g_pending_viewport_width = width;
+    g_pending_viewport_height = height;
     auto* p = GetStdPipeline();
     if (!p) return;
     p->SetViewportSize(width, height);
@@ -370,6 +382,10 @@ EDITOR_INTERFACE u32 CreateStandardRenderPipeline(u64 device_handle) {
         std::cerr << "[CreateStandardRenderPipeline] Initialize failed" << std::endl;
         delete pipeline;
         return 0;
+    }
+    if (g_pending_viewport_width != 0 && g_pending_viewport_height != 0) {
+        pipeline->SetViewportSize(g_pending_viewport_width,
+                                  g_pending_viewport_height);
     }
     // InitializeSubsystems is lazy-triggered from SetLumenConfig. Low preset
     // keeps memory + startup cost down for tests.

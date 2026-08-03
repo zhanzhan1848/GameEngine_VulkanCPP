@@ -582,26 +582,20 @@ namespace primal::graphics::metal::core
         }
 
         // === Acquire drawable + command buffer ===
-        // NOTE: we deliberately use a per-blit command queue rather than
-        // gfx_command's queue. gfx_command is paired with render_surface's
-        // frame semaphore + end_frame present cadence; reusing it from
-        // Path B (which runs *after* PipelineRenderFrame, not via
-        // surface::render) would desync the semaphore. A dedicated queue
-        // keeps Path B self-contained and avoids interference with the
-        // main render loop. The queue is heap-allocated once and cached
-        // for the process lifetime. Guarded with std::call_once to avoid
-        // the same race as the PSO init above.
-        static MTL::CommandQueue* s_blit_queue{ nullptr };
-        if (!s_blit_queue) {
-            static std::once_flag queue_flag;
-            std::call_once(queue_flag, []() {
-                s_blit_queue = get_device()->newCommandQueue();
-                // Retain for process lifetime; intentionally never released
-                // (process exit reclaims it). Matches the pattern in
-                // metal_command's constructor.
-            });
-            if (!s_blit_queue) return 0;
-        }
+        // PipelineRenderFrame submits the offscreen render to the RHI
+        // device's graphics queue immediately before this function is called.
+        // The blit must use that same queue: Metal only guarantees command
+        // buffer ordering within one MTLCommandQueue.  A separate private
+        // queue races the render with the texture sample below, so the
+        // drawable can repeatedly receive the render target's initial black
+        // contents even though the forward pass itself completed correctly.
+        //
+        // Reusing the graphics queue does not involve the legacy
+        // gfx_command frame semaphore.  It merely places this standalone
+        // command buffer after the RHI render command buffer, establishing
+        // render -> blit -> present ordering without a CPU wait.
+        MTL::CommandQueue* blit_queue = metalDevice->GetGraphicsQueue();
+        if (!blit_queue) return 0;
 
         CA::MetalDrawable* drawable = view->currentDrawable();
         if (!drawable) return 0;
@@ -630,7 +624,7 @@ namespace primal::graphics::metal::core
         std::fflush(stderr);
         if (texWidth == 0 || texHeight == 0) return 0;
 
-        MTL::CommandBuffer* cmd = s_blit_queue->commandBuffer();
+        MTL::CommandBuffer* cmd = blit_queue->commandBuffer();
         if (!cmd) return 0;
         std::fprintf(stderr, "[blit_surface_and_present] cmd=%p srcTex=%p drawableTex=%p\n",
             (void*)cmd, (void*)srcTexture, (void*)drawableTex);

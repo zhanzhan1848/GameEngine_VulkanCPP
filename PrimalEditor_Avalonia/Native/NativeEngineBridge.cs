@@ -925,6 +925,15 @@ public static class NativeEngineBridge
     public static bool InitializeEngine(uint rhiPlatform = RHIPlatformMetal, bool enableDebug = false)
     {
         if (!_isLoaded) return false;
+        // C++ initialize_with_device() returns false on a second call because
+        // g_rhiDevice is already non-null. The MacMetalViewportHost path calls
+        // InitializeEngine from inside TryInitialize, which itself is retried
+        // every 50ms until the host NSView grows non-zero bounds. On the
+        // retry after the first successful init, the native call "fails"
+        // (returning 0) and the bridge prints a spurious warning even
+        // though the engine is fully running. Treat "already initialized"
+        // as success so retries are silent.
+        if (IsEngineInitialized()) return true;
         try
         {
             var result = _InitializeEngine(rhiPlatform, enableDebug ? 1u : 0u);

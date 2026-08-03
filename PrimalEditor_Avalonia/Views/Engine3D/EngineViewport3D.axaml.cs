@@ -148,12 +148,17 @@ public partial class EngineViewport3D : UserControl
             // The RHI is now bound; size the StandardRenderPipeline to
             // match. StandardRenderPipeline owns its own render targets
             // keyed off the viewport size.
-            NativeEngineBridge.PipelineSetEditorMode(true);
             NativeEngineBridge.SetPipelineViewportSize(width, height);
 
             UInt64 deviceHandle = NativeEngineBridge.GetEngineDeviceHandle();
             if (deviceHandle != 0 && NativeEngineBridge.CreateStandardRenderPipeline(deviceHandle))
             {
+                // CreateStandardRenderPipeline initializes the forward
+                // renderer.  Set editor mode only after that succeeds;
+                // calling it before creation is a silent no-op in the C ABI
+                // and leaves PipelineRenderFrame on the deferred/GPU-driven
+                // path, which cannot see the four forward-renderer spheres.
+                NativeEngineBridge.PipelineSetEditorMode(true);
                 Logger.Info("StandardRenderPipeline created (Lumen=Low)");
             }
             else
