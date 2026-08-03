@@ -49,12 +49,21 @@ u8 ComputeFaceSignature(const WFCTile& tile, u32 variant, WFCFace face) {
     return sig;
 }
 
-// --- T15/T16 stubs ---
+// --- T16 stub ---
 
+// Phase C.1 Task 15: pack 6 face signatures into a u64.
+// Layout: [posX:8][negX:8][posY:8][negY:8][posZ:8][negZ:8][reserved:16]
+// Face order matches the WFCFace enum (PosX=0, NegX=1, ..., NegZ=5), so byte f
+// of the encoding is the signature for WFCFace f. Top 16 bits are reserved
+// for future extensions (e.g. half-tile or sub-face variants) and left at 0.
 SocketEncoding DeriveSocketEncoding(const WFCTile& tile, u32 variant) {
-    (void)tile;
-    (void)variant;
-    return 0;
+    SocketEncoding enc = 0;
+    for (u32 f = 0; f < WFC_FACE_COUNT_3D; ++f) {
+        WFCFace face = static_cast<WFCFace>(f);
+        u8 sig = ComputeFaceSignature(tile, variant, face);
+        enc |= static_cast<u64>(sig) << (f * 8);
+    }
+    return enc;
 }
 
 bool AreSocketsCompatible(u8 sig_a, u8 sig_b, WFCFace face) {
