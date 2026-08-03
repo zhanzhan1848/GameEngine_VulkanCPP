@@ -119,6 +119,23 @@ TestResult TestWFCTileCatalog_Corners_Has_Four_Variants_Each() {
     return TestResult::Passed;
 }
 
+TestResult TestWFCTileCatalog_Primitive_Tiles_Have_Primitive_Category() {
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCTileCatalog::Populate(reg, adj);
+
+    TEST_ASSERT_EQ(5u, reg.Count(), "5 primitive tiles registered");
+    for (u32 i = 0; i < 5u; ++i) {
+        const WFCTile& t = reg.Get(wfc_tile_id{i});
+        TEST_ASSERT_EQ(static_cast<u32>(WFCCategory::Primitive),
+                       static_cast<u32>(t.category),
+                       "primitive tile category == Primitive");
+        TEST_ASSERT(t.mesh_handles[0] != primal::geometry::geometry_id{0},
+                    "primitive tile mesh_handles[0] populated");
+    }
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCTileCatalog");
     TEST_CASE(suite, "Populate_Registers_Five_Tiles", TestWFCTileCatalog_Populate_Registers_Five_Tiles);
@@ -129,6 +146,8 @@ int main() {
     TEST_CASE(suite, "Solves_4x4x4_With_Catalog", TestWFCTileCatalog_Solves_4x4x4_With_Catalog);
     TEST_CASE(suite, "Corners_Has_Four_Variants_Each",
               TestWFCTileCatalog_Corners_Has_Four_Variants_Each);
+    TEST_CASE(suite, "Primitive_Tiles_Have_Primitive_Category",
+              TestWFCTileCatalog_Primitive_Tiles_Have_Primitive_Category);
     suite.RunAllTests();
     return 0;
 }

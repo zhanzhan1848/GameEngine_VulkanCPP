@@ -19,6 +19,7 @@ WFCTile MakeCubeTile() {
     t.mesh_handles[0] = kCubeMeshPlaceholder;
     t.variant_count = 1;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Primitive;
     t.is_organic = false;
     t.is_rotationally_symmetric = true;
     for (u32 i = 0; i < WFCTile::MaxVariants; ++i) {
@@ -33,6 +34,7 @@ WFCTile MakeRampTile() {
     t.mesh_handles[0] = kRampMeshPlaceholder;
     t.variant_count = 4;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Primitive;
     t.is_organic = false;
     t.is_rotationally_symmetric = false;
     for (u32 i = 0; i < WFCTile::MaxVariants; ++i) {
@@ -47,6 +49,7 @@ WFCTile MakeCornerInTile() {
     t.mesh_handles[0] = kCornerInMeshPlaceholder;
     t.variant_count = 4;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Primitive;
     t.is_organic = false;
     t.is_rotationally_symmetric = false;
     for (u32 i = 0; i < WFCTile::MaxVariants; ++i) {
@@ -61,6 +64,7 @@ WFCTile MakeCornerOutTile() {
     t.mesh_handles[0] = kCornerOutMeshPlaceholder;
     t.variant_count = 4;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Primitive;
     t.is_organic = false;
     t.is_rotationally_symmetric = false;
     for (u32 i = 0; i < WFCTile::MaxVariants; ++i) {
@@ -75,6 +79,7 @@ WFCTile MakePillarTile() {
     t.mesh_handles[0] = kPillarMeshPlaceholder;
     t.variant_count = 1;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+    t.category = WFCCategory::Primitive;
     t.is_organic = false;
     t.is_rotationally_symmetric = true;
     for (u32 i = 0; i < WFCTile::MaxVariants; ++i) {
