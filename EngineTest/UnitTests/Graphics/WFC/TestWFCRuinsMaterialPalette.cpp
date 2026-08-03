@@ -4,8 +4,7 @@
 using namespace primal::graphics::wfc;
 using namespace Engine::Test;
 
-TestResult TestPalette_Has7Entries() {
-    // Name kept for stable test registration; count grew to 8 in T12 (vine_cube_avg).
+TestResult TestPalette_HasExpectedCount() {
     TEST_ASSERT_EQ(8u, kRuinsPaletteCount, "palette size");
     return TestResult::Passed;
 }
@@ -45,7 +44,7 @@ TestResult TestPalette_VineCubeAverageColor() {
 
 int main() {
     TestSuite suite("WFCRuinsMaterialPalette");
-    TEST_CASE(suite, "Has7Entries",               TestPalette_Has7Entries);
+    TEST_CASE(suite, "HasExpectedCount",          TestPalette_HasExpectedCount);
     TEST_CASE(suite, "StoneGrayValues",           TestPalette_StoneGrayValues);
     TEST_CASE(suite, "GetRuinsMaterialId_Stable", TestPalette_GetRuinsMaterialId_Stable);
     TEST_CASE(suite, "VineCubeAverageColor",      TestPalette_VineCubeAverageColor);
