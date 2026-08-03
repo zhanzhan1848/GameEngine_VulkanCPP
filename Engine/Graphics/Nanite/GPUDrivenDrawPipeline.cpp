@@ -653,9 +653,49 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         );
 
         if (binningShader != rhi::handles::INVALID_SHADER) {
+            // T4.6.5 part 17.2: Vulkan validation rejects pipelines whose SPIR-V
+            // uses descriptors not declared in the layout. Metal is permissive —
+            // empty PipelineLayoutDesc still allows buffer(N) binding at runtime.
+            // Build a 4-binding DSL (clusters/config/bins/bin_counter) on Vulkan
+            // to match ClusterBinning.comp.
+            rhi::PipelineLayoutHandle binningLayout = rhi::handles::INVALID_PIPELINE_LAYOUT;
+            const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+            if (isVulkan) {
+                rhi::DescriptorSetLayoutBinding binningBindings[4]{};
+                binningBindings[0].binding = 0;
+                binningBindings[0].descriptorType = rhi::DescriptorType::StorageBuffer;
+                binningBindings[0].descriptorCount = 1;
+                binningBindings[0].stageFlags = rhi::ShaderStage::Compute;
+                binningBindings[1].binding = 1;
+                binningBindings[1].descriptorType = rhi::DescriptorType::UniformBuffer;
+                binningBindings[1].descriptorCount = 1;
+                binningBindings[1].stageFlags = rhi::ShaderStage::Compute;
+                binningBindings[2].binding = 2;
+                binningBindings[2].descriptorType = rhi::DescriptorType::StorageBuffer;
+                binningBindings[2].descriptorCount = 1;
+                binningBindings[2].stageFlags = rhi::ShaderStage::Compute;
+                binningBindings[3].binding = 3;
+                binningBindings[3].descriptorType = rhi::DescriptorType::StorageBuffer;
+                binningBindings[3].descriptorCount = 1;
+                binningBindings[3].stageFlags = rhi::ShaderStage::Compute;
+
+                rhi::DescriptorSetLayoutDesc dslDesc{};
+                dslDesc.bindingCount = 4;
+                dslDesc.bindings = binningBindings;
+                rhi::DescriptorSetLayoutHandle dsl = device_->CreateDescriptorSetLayout(dslDesc);
+
+                rhi::PipelineLayoutDesc plDesc{};
+                plDesc.setLayoutCount = 1;
+                plDesc.setLayouts = &dsl;
+                binningLayout = device_->CreatePipelineLayout(plDesc);
+                // DSL lifecycle: short-lived; safe to release after layout built.
+                device_->DestroyDescriptorSetLayout(dsl);
+            }
+
             rhi::ComputePipelineDesc binningPipelineDesc{};
             binningPipelineDesc.computeShader = binningShader;
-            binningPipelineDesc.threadGroupSize = {64, 1, 1}; // Adjust based on cluster count
+            binningPipelineDesc.threadGroupSize = {64, 1, 1};
+            if (isVulkan) binningPipelineDesc.layout = binningLayout;
 
             binning_pipeline_ = device_->CreateComputePipeline(binningPipelineDesc);
             if (binning_pipeline_ != rhi::handles::INVALID_PIPELINE) {
@@ -663,6 +703,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             } else {
                 std::cerr << "[GPUDrivenDrawPipeline] Failed to create Cluster Binning pipeline" << std::endl;
             }
+            if (isVulkan) device_->DestroyPipelineLayout(binningLayout);
         }
     } else {
         // std::cout << "[GPUDrivenDrawPipeline] Cluster Binning shader not found, using CPU fallback" << std::endl;
@@ -688,10 +729,47 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         );
 
         if (visibilityVS != rhi::handles::INVALID_SHADER && visibilityFS != rhi::handles::INVALID_SHADER) {
-            // Create pipeline layout for visibility buffer
+            // T4.6.5 part 17.3: Vulkan validation rejects pipelines whose SPIR-V
+            // uses descriptors not declared in the layout. Metal is permissive.
+            // Build a 5-binding DSL matching VisibilityBuffer.vert/.frag.
+            const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+            rhi::DescriptorSetLayoutHandle visDSL = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+            if (isVulkan) {
+                rhi::DescriptorSetLayoutBinding visBindings[5]{};
+                visBindings[0].binding = 0;  // UBO  DrawConstants
+                visBindings[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+                visBindings[0].descriptorCount = 1;
+                visBindings[0].stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel;
+                visBindings[1].binding = 1;  // SSBO MeshletData[]
+                visBindings[1].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[1].descriptorCount = 1;
+                visBindings[1].stageFlags = rhi::ShaderStage::Vertex;
+                visBindings[2].binding = 2;  // SSBO meshlet_vertices
+                visBindings[2].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[2].descriptorCount = 1;
+                visBindings[2].stageFlags = rhi::ShaderStage::Vertex;
+                visBindings[3].binding = 3;  // SSBO meshlet_triangles
+                visBindings[3].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[3].descriptorCount = 1;
+                visBindings[3].stageFlags = rhi::ShaderStage::Vertex;
+                visBindings[4].binding = 4;  // SSBO positions
+                visBindings[4].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[4].descriptorCount = 1;
+                visBindings[4].stageFlags = rhi::ShaderStage::Vertex;
+
+                rhi::DescriptorSetLayoutDesc dslDesc{};
+                dslDesc.bindingCount = 5;
+                dslDesc.bindings = visBindings;
+                visDSL = device_->CreateDescriptorSetLayout(dslDesc);
+            }
+
             rhi::PipelineLayoutDesc visibilityLayoutDesc{};
-            // TODO: Add descriptor set layouts for cluster data, vertex buffers, etc.
+            if (isVulkan) {
+                visibilityLayoutDesc.setLayoutCount = 1;
+                visibilityLayoutDesc.setLayouts = &visDSL;
+            }
             visibility_pipeline_layout_ = device_->CreatePipelineLayout(visibilityLayoutDesc);
+            if (isVulkan) device_->DestroyDescriptorSetLayout(visDSL);
 
             if (visibility_pipeline_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
                 rhi::GraphicsPipelineDesc visibilityPipelineDesc{};
@@ -910,26 +988,37 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     
     // std::cout << "[GPUDrivenDrawPipeline] Creating Visibility Buffer Resolve compute pipeline..." << std::endl;
     
-    rhi::DescriptorSetLayoutBinding resolveBindings[4];
+    rhi::DescriptorSetLayoutBinding resolveBindings[5];
+    // T4.6.5 part 17.4: Vulkan unified buffer+texture namespace. Mirror the
+    // Metal layout (3 textures + 2 buffers) into a single binding sequence:
+    //   0: visibility_buffer (usampler2D / R32UINT combined image sampler)
+    //   1: depth_buffer (sampler2D / D32 combined image sampler)
+    //   2: output_color (storage image RGBA8, write-only)
+    //   3: DrawConstants (UBO)
+    //   4: ClusterData[] (SSBO)
     resolveBindings[0].binding = 0;
-    resolveBindings[0].descriptorType = rhi::DescriptorType::SampledImage;
+    resolveBindings[0].descriptorType = rhi::DescriptorType::CombinedImageSampler;
     resolveBindings[0].descriptorCount = 1;
     resolveBindings[0].stageFlags = rhi::ShaderStage::Compute;
     resolveBindings[1].binding = 1;
-    resolveBindings[1].descriptorType = rhi::DescriptorType::SampledImage;
+    resolveBindings[1].descriptorType = rhi::DescriptorType::CombinedImageSampler;
     resolveBindings[1].descriptorCount = 1;
     resolveBindings[1].stageFlags = rhi::ShaderStage::Compute;
     resolveBindings[2].binding = 2;
-    resolveBindings[2].descriptorType = rhi::DescriptorType::SampledImage;
+    resolveBindings[2].descriptorType = rhi::DescriptorType::StorageImage;
     resolveBindings[2].descriptorCount = 1;
     resolveBindings[2].stageFlags = rhi::ShaderStage::Compute;
     resolveBindings[3].binding = 3;
-    resolveBindings[3].descriptorType = rhi::DescriptorType::StorageBuffer;
+    resolveBindings[3].descriptorType = rhi::DescriptorType::UniformBuffer;
     resolveBindings[3].descriptorCount = 1;
     resolveBindings[3].stageFlags = rhi::ShaderStage::Compute;
+    resolveBindings[4].binding = 4;
+    resolveBindings[4].descriptorType = rhi::DescriptorType::StorageBuffer;
+    resolveBindings[4].descriptorCount = 1;
+    resolveBindings[4].stageFlags = rhi::ShaderStage::Compute;
     
     rhi::DescriptorSetLayoutDesc resolveLayoutDesc{};
-    resolveLayoutDesc.bindingCount = 4;
+    resolveLayoutDesc.bindingCount = 5;
     resolveLayoutDesc.bindings = resolveBindings;
     resolve_descriptor_layout_ = device_->CreateDescriptorSetLayout(resolveLayoutDesc);
     if (resolve_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {

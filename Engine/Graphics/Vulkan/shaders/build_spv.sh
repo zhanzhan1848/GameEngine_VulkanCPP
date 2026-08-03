@@ -87,6 +87,7 @@ NANITE_SHADERS=(
     ShadowDepth                  # T4.4.3: shadow depth vertex shader (vertex pulling)
     GPUCullingPipeline           # T4.4.4: 8-stage GPU culling (compute, multi-entry)
     GPUDrivenDraw                # T4.4.5: meshlet draw VS+FS (vertex pulling, MRT)
+    ShadowCulling                # T4.6.5 part 17.1: shadow cluster culling (compute, 2 entries)
 )
 
 echo
@@ -136,6 +137,46 @@ for pair in "${GLSL_NAMES[@]}"; do
         fi
     done
 done
+
+# T4.6.5 part 17.2+: Nanite hand-written GLSL. Each is a single-stage compute
+# or a combined vert+frag (VisibilityBuffer) that needs spirv-link to merge.
+# Compute: simple glslangValidator call with --source-entrypoint main -e NAME.
+# VisibilityBuffer: compile vert+frag separately, then spirv-link into one .spv.
+echo
+echo "==> Nanite hand-written GLSL ===="
+
+# ClusterBinning (compute, entry cluster_binning_kernel)
+src="$DEST_DIR/Nanite/ClusterBinning.comp"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/Nanite/ClusterBinning.spv"
+    if glslangValidator -V --source-entrypoint main -e cluster_binning_kernel "$src" -o "$out" 2>/dev/null; then
+        sz=$(stat -f %z "$out"); printf "OK    Nanite/ClusterBinning.spv          (%d bytes)\n" "$sz"
+    else echo "FAIL  Nanite/ClusterBinning.comp"; fi
+else echo "MISS  Nanite/ClusterBinning.comp (skipped)"; fi
+
+# VisibilityBuffer (combined vert+frag, 2 entries)
+vb_dir="$DEST_DIR/Nanite"
+if [ -f "$vb_dir/VisibilityBuffer.vert" ] && [ -f "$vb_dir/VisibilityBuffer.frag" ]; then
+    tmpdir="$(mktemp -d)"
+    if glslangValidator -V --source-entrypoint main -e visibility_vertex_shader \
+           "$vb_dir/VisibilityBuffer.vert" -o "$tmpdir/vb.vert.spv" 2>/dev/null && \
+       glslangValidator -V --source-entrypoint main -e visibility_fragment_shader \
+           "$vb_dir/VisibilityBuffer.frag" -o "$tmpdir/vb.frag.spv" 2>/dev/null && \
+       spirv-link "$tmpdir/vb.vert.spv" "$tmpdir/vb.frag.spv" -o "$vb_dir/VisibilityBuffer.spv" 2>/dev/null; then
+        sz=$(stat -f %z "$vb_dir/VisibilityBuffer.spv")
+        printf "OK    Nanite/VisibilityBuffer.spv         (%d bytes)\n" "$sz"
+    else echo "FAIL  Nanite/VisibilityBuffer (vert+frag link)"; fi
+    rm -rf "$tmpdir"
+else echo "MISS  Nanite/VisibilityBuffer.vert/.frag (skipped)"; fi
+
+# VisibilityBufferResolve (compute, entry ComputeMain)
+src="$DEST_DIR/Nanite/VisibilityBufferResolve.comp"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/Nanite/VisibilityBufferResolve.spv"
+    if glslangValidator -V --source-entrypoint main -e ComputeMain "$src" -o "$out" 2>/dev/null; then
+        sz=$(stat -f %z "$out"); printf "OK    Nanite/VisibilityBufferResolve.spv (%d bytes)\n" "$sz"
+    else echo "FAIL  Nanite/VisibilityBufferResolve.comp"; fi
+else echo "MISS  Nanite/VisibilityBufferResolve.comp (skipped)"; fi
 
 echo
 echo "Done."
