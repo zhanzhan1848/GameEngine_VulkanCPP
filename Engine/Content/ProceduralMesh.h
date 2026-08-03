@@ -698,8 +698,15 @@ inline void append_box(graphics::rhi::RHIMeshAsset& dst,
 // create_rubble_pile_mesh — N (4..6) sub-boxes scattered within `radius`.
 // Y offset is biased downward (dy ∈ [-0.25, 0]) so the pile sits near the
 // floor; sub-box extents ∈ [0.2, 0.4] per axis.
+//
+// Two independent Knuth-style hashes (h_pos for position, h_ext for extents)
+// ensure dy and extents.y are uncorrelated. The original single-hash scheme
+// reused the (h >> 8) window for both, producing an unwanted correlation:
+// higher boxes were also thicker in Y.
 inline void create_rubble_pile_mesh(graphics::rhi::RHIMeshAsset& out,
                                     u32 seed, f32 radius) {
+    assert(radius > 0.0f && "radius must be positive");
+
     const u32 box_count = 4u + (seed % 3u);  // 4..6
 
     // Pre-size out for the full compound (avoids O(N²) reallocs inside append_box).
@@ -714,19 +721,23 @@ inline void create_rubble_pile_mesh(graphics::rhi::RHIMeshAsset& out,
     out.index_buffer.resize(total_idx * 4u);
 
     for (u32 i = 0; i < box_count; ++i) {
-        // Knuth-multiplicative hash on (seed, i) — deterministic per-call.
-        u32 h = seed * 2654435761u + i * 40503u;
-        const f32 angle = (h & 0xFFFFu) / 65535.0f * 6.28318f;
-        const f32 r     = radius * (0.3f + ((h >> 16) & 0xFF) / 255.0f * 0.7f);
-        const f32 dy    = -0.25f + ((h >> 8) & 0xFF) / 255.0f * 0.25f;
+        // Position hash: angle[16] + r[8] + dy[8] from one hash.
+        const u32 h_pos = seed * 2654435761u + i * 40503u;
+        const f32 angle = (h_pos & 0xFFFFu) / 65535.0f * 6.28318f;
+        const f32 r     = radius * (0.3f + ((h_pos >> 16) & 0xFF) / 255.0f * 0.7f);
+        const f32 dy    = -0.25f + ((h_pos >> 24) & 0xFF) / 255.0f * 0.25f;
         const math::v3 center{
             r * std::cos(angle),
             dy,
             r * std::sin(angle)};
+
+        // Extents hash: independent of position. Different multiplier/offset
+        // so changes in dy cannot coincide with changes in extents.y.
+        const u32 h_ext = h_pos * 2246822519u + i * 60749u;
         const math::v3 extents{
-            0.2f + ((h >> 4)  & 0xF) / 15.0f * 0.2f,
-            0.2f + ((h >> 8)  & 0xF) / 15.0f * 0.2f,
-            0.2f + ((h >> 12) & 0xF) / 15.0f * 0.2f};
+            0.2f + ((h_ext >> 0)  & 0xF) / 15.0f * 0.2f,
+            0.2f + ((h_ext >> 4)  & 0xF) / 15.0f * 0.2f,
+            0.2f + ((h_ext >> 8)  & 0xF) / 15.0f * 0.2f};
         detail::append_box(out, center, extents, i * 24u);
     }
 }
@@ -734,8 +745,16 @@ inline void create_rubble_pile_mesh(graphics::rhi::RHIMeshAsset& out,
 // create_debris_small_mesh — N (2..3) smaller sub-boxes scattered within
 // `radius`, biased slightly upward (Y ∈ [-0.1, 0.05]) and with smaller extents
 // (each axis ∈ [0.1, 0.25]).
+//
+// Uses different hash multipliers/offsets than create_rubble_pile_mesh so the
+// same (seed, i) pair produces a different cluster center in each generator —
+// otherwise rubble and debris would geometrically coincide for matching seeds.
+// Extents use an independent hash derived from h_pos to avoid correlation
+// between dy and extents.y (see create_rubble_pile_mesh for details).
 inline void create_debris_small_mesh(graphics::rhi::RHIMeshAsset& out,
                                      u32 seed, f32 radius) {
+    assert(radius > 0.0f && "radius must be positive");
+
     const u32 box_count = 2u + (seed % 2u);  // 2..3
 
     const u32 total_verts = box_count * 24u;
@@ -749,20 +768,24 @@ inline void create_debris_small_mesh(graphics::rhi::RHIMeshAsset& out,
     out.index_buffer.resize(total_idx * 4u);
 
     for (u32 i = 0; i < box_count; ++i) {
-        u32 h = seed * 2654435761u + i * 40503u;
-        const f32 angle = (h & 0xFFFFu) / 65535.0f * 6.28318f;
-        const f32 r     = radius * (0.3f + ((h >> 16) & 0xFF) / 255.0f * 0.7f);
+        // Different multipliers/offsets than rubble_pile (2246822519u / 60749u
+        // for h_pos; 2654435761u / 40503u for h_ext — swapped from rubble's
+        // scheme) so the same seed produces different cluster centers.
+        const u32 h_pos = seed * 2246822519u + i * 60749u;
+        const f32 angle = (h_pos & 0xFFFFu) / 65535.0f * 6.28318f;
+        const f32 r     = radius * (0.3f + ((h_pos >> 16) & 0xFF) / 255.0f * 0.7f);
         // Slightly upward bias vs rubble — debris sits on top of rubble piles.
-        const f32 dy    = -0.10f + ((h >> 8) & 0xFF) / 255.0f * 0.15f;
+        const f32 dy    = -0.10f + ((h_pos >> 24) & 0xFF) / 255.0f * 0.15f;
         const math::v3 center{
             r * std::cos(angle),
             dy,
             r * std::sin(angle)};
-        // Smaller extents than rubble_pile: [0.1, 0.25] per axis.
+        // Extents hash independent of position — same scheme as rubble_pile.
+        const u32 h_ext = h_pos * 2654435761u + i * 40503u;
         const math::v3 extents{
-            0.10f + ((h >> 4)  & 0xF) / 15.0f * 0.15f,
-            0.10f + ((h >> 8)  & 0xF) / 15.0f * 0.15f,
-            0.10f + ((h >> 12) & 0xF) / 15.0f * 0.15f};
+            0.10f + ((h_ext >> 0)  & 0xF) / 15.0f * 0.15f,
+            0.10f + ((h_ext >> 4)  & 0xF) / 15.0f * 0.15f,
+            0.10f + ((h_ext >> 8)  & 0xF) / 15.0f * 0.15f};
         detail::append_box(out, center, extents, i * 24u);
     }
 }

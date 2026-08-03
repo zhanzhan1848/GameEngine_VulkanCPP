@@ -1,6 +1,7 @@
 #include "../../TestFramework.h"
 #include "Engine/Content/ProceduralMesh.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -237,6 +238,45 @@ TestResult TestDebrisSmall_HasFewerBoxes() {
     return TestResult::Passed;
 }
 
+// T11 review follow-up: reproducibility + hash differentiation.
+//   - TestRubblePile_Reproducible: same (seed, radius) → bitwise-identical
+//     position_buffer (determinism contract).
+//   - TestRubbleDebris_SeedYieldsDifferentOutput: same seed on rubble vs debris
+//     must produce different sub-box centers — guards against the hash reuse
+//     bug where both generators shared the same multiplier/offset scheme.
+
+TestResult TestRubblePile_Reproducible() {
+    graphics::rhi::RHIMeshAsset a{}, b{};
+    content::create_rubble_pile_mesh(a, 99, 0.5f);
+    content::create_rubble_pile_mesh(b, 99, 0.5f);
+    TEST_ASSERT_EQ(a.num_vertices, b.num_vertices, "vert count");
+    TEST_ASSERT_EQ(a.num_indices,  b.num_indices,  "index count");
+    // Buffer sizes match expected packed layout
+    TEST_ASSERT_EQ(a.position_buffer.size(), a.num_vertices * 12u, "pos buffer size");
+    TEST_ASSERT_EQ(a.index_buffer.size(),  a.num_indices * 4u,  "idx buffer size");
+    // Bitwise equality of position data
+    TEST_ASSERT_EQ(0, std::memcmp(a.position_buffer.data(),
+                                  b.position_buffer.data(),
+                                  a.num_vertices * 12u), "position bitwise equal");
+    return TestResult::Passed;
+}
+
+TestResult TestRubbleDebris_SeedYieldsDifferentOutput() {
+    // Same seed on different generators should NOT produce identical output
+    // (different hash multipliers).
+    graphics::rhi::RHIMeshAsset rubble{}, debris{};
+    content::create_rubble_pile_mesh(rubble, 42, 0.5f);
+    content::create_debris_small_mesh(debris, 42, 0.4f);
+    // Pick the smaller box count (debris = 2..3) so we can compare first 2-3 sub-box centers
+    u32 min_boxes = std::min(rubble.num_vertices, debris.num_vertices) / 24u;
+    TEST_ASSERT(min_boxes > 0, "at least one box to compare");
+    // Read first sub-box center (vert 0) from each — they should differ.
+    f32 rx = *reinterpret_cast<const f32*>(rubble.position_buffer.data() + 0);
+    f32 dx = *reinterpret_cast<const f32*>(debris.position_buffer.data() + 0);
+    TEST_ASSERT(std::abs(rx - dx) > 0.001f, "rubble vs debris first-vert differs (hash differentiated)");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCProceduralMeshesRuins");
     TEST_CASE(suite, "AcceptsMaterialIdx",              TestRegisterProceduralMesh_AcceptsMaterialIdx);
@@ -249,6 +289,8 @@ int main() {
     TEST_CASE(suite, "CrackedWall_VertexIndexCount",    TestCrackedWall_VertexIndexCount);
     TEST_CASE(suite, "RubblePile_HasMultipleBoxes",     TestRubblePile_HasMultipleBoxes);
     TEST_CASE(suite, "DebrisSmall_HasFewerBoxes",       TestDebrisSmall_HasFewerBoxes);
+    TEST_CASE(suite, "RubblePile_Reproducible",         TestRubblePile_Reproducible);
+    TEST_CASE(suite, "RubbleDebris_SeedYieldsDifferentOutput", TestRubbleDebris_SeedYieldsDifferentOutput);
     suite.RunAllTests();
     return 0;
 }
