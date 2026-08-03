@@ -226,15 +226,15 @@ void WFCRenderingTestCase::SetupWFCCatalog() {
     // Override placeholder mesh_handles with real slot indices captured in
     // RegisterWFCCatalogMeshes. Same logic as the old RunSolverAndEmit lines
     // 269-278, but now runs once and is reused by CycleMode.
-    registry_->GetMutable(wfc_tile_id{0}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{0}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_cube};
-    registry_->GetMutable(wfc_tile_id{1}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{1}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_ramp};
-    registry_->GetMutable(wfc_tile_id{2}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{2}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_corner_in};
-    registry_->GetMutable(wfc_tile_id{3}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{3}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_corner_out};
-    registry_->GetMutable(wfc_tile_id{4}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{4}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_pillar};
 
     std::cout << "[TestWFCRendering] Catalog ready (5 tiles, "

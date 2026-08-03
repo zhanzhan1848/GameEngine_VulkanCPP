@@ -38,8 +38,8 @@ TestResult TestWFCTileCatalog_Tiles_Have_Valid_Mesh_Handles() {
 
     for (u32 i = 0; i < reg.Count(); ++i) {
         const WFCTile& t = reg.Get(wfc_tile_id{i});
-        TEST_ASSERT(static_cast<u32>(t.mesh_handle) != 0 || i == 0,
-                    "Mesh handle set (0 acceptable only for cube as placeholder)");
+        TEST_ASSERT(static_cast<u32>(t.mesh_handles[0]) != 0 || i == 0,
+                    "Mesh handle[0] set (0 acceptable only for cube as placeholder)");
     }
     return TestResult::Passed;
 }

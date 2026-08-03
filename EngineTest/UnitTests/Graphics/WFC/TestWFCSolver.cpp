@@ -294,13 +294,13 @@ TestResult TestWFCSolver_Initialize_Populates_Multi_Tile_Candidates() {
     WFCTile cube{};
     cube.name = "cube";
     cube.variant_count = 1;
-    cube.mesh_handle = primal::geometry::geometry_id{0};
+    cube.mesh_handles[0] = primal::geometry::geometry_id{0};
     reg.Register(cube);
 
     WFCTile ramp{};
     ramp.name = "ramp";
     ramp.variant_count = 4;
-    ramp.mesh_handle = primal::geometry::geometry_id{1};
+    ramp.mesh_handles[0] = primal::geometry::geometry_id{1};
     reg.Register(ramp);
 
     WFCSolver solver;
@@ -354,13 +354,13 @@ TestResult TestWFCSolver_CollapseCell_Decodes_Multi_Tile() {
     WFCTile cube{};
     cube.name = "cube";
     cube.variant_count = 1;
-    cube.mesh_handle = primal::geometry::geometry_id{100};
+    cube.mesh_handles[0] = primal::geometry::geometry_id{100};
     reg.Register(cube);
 
     WFCTile ramp{};
     ramp.name = "ramp";
     ramp.variant_count = 4;
-    ramp.mesh_handle = primal::geometry::geometry_id{200};
+    ramp.mesh_handles[0] = primal::geometry::geometry_id{200};
     reg.Register(ramp);
 
     WFCSolver solver;

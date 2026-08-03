@@ -10,7 +10,7 @@ namespace primal::graphics::wfc {
 //
 // Each output point carries:
 //   - position = (0, 0, 0)  (caller places via TransformNode downstream)
-//   - MeshIndex attr = tile.mesh_handle (Phase A.3 placeholder IDs 1000-1004)
+//   - MeshIndex attr = tile.mesh_handles[0] (Phase A.3 placeholder IDs 1000-1004)
 //   - ScaleX/Y/Z = 1.0
 //   - RotationY  = 0.0
 //   - TechniqueIndex = 0

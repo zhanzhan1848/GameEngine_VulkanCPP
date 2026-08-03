@@ -34,21 +34,23 @@ struct WFCGridCoord {
 
 // Tile prototype (registry entry)
 struct WFCTile {
-    static constexpr u32 MaxVariants = 32;
+    static constexpr u32 MaxVariants = 4;   // Phase C.1: 4 variants per tile (packing 16×4)
 
     wfc_tile_id      id;
     const char*      name;                  // static-lifetime string (no engine string type)
-    geometry::geometry_id mesh_handle;      // Phase A.3: registered via register_mesh_asset (u32-backed)
-    SocketEncoding   sockets[MaxVariants];  // per-variant socket encoding
+    geometry::geometry_id mesh_handles[MaxVariants];  // per-variant geometry (X1)
+    SocketEncoding   sockets[MaxVariants];             // per-variant socket encoding
     math::v3         bounds_extents;        // 16-byte aligned (simd::float3)
+    WFCCategory      category{WFCCategory::Primitive};  // Phase C.1: thematic group (Primitive/Ruins/...)
     u32              variant_count;
     bool             is_organic;
     bool             is_rotationally_symmetric;
-    WFCCategory      category{WFCCategory::Primitive};  // Phase C.1: thematic group (Primitive/Ruins/...)
-    u8               _pad[9];               // explicit tail pad; sizeof(WFCTile)=320, alignof=16 (driven by v3)
+    u8               _pad[6];               // tail pad to 16-byte alignment
 };
 
-static_assert(sizeof(WFCTile) == 320, "WFCTile layout drifted");
+// sizeof(WFCTile) recomputed after Phase C.1 Task 4 refactor (MaxVariants 32 → 4,
+// mesh_handle → mesh_handles[MaxVariants]). alignof=16 (driven by v3 / simd::float3).
+static_assert(sizeof(WFCTile) == 96, "WFCTile layout drifted");
 
 // Per-cell wave state (kept small for cache efficiency)
 struct WFCCell {

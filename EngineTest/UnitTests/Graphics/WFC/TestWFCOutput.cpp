@@ -16,7 +16,7 @@ TestResult TestWFCOutput_Empty_Step_Buffer_Produces_Empty_Point_Set() {
     WFCStepBuffer buf;
     WFCTileRegistry reg;
     WFCTile t{};
-    t.mesh_handle = geometry_id{42};
+    t.mesh_handles[0] = geometry_id{42};
     reg.Register(t);
 
     PCGPointSet ps = WFCOutput::ConsumeSteps(buf, reg, 1.0f);
@@ -29,7 +29,7 @@ TestResult TestWFCOutput_One_Collapse_Step_Produces_One_Point() {
     WFCTileRegistry reg;
     WFCTile t{};
     t.name = "test";
-    t.mesh_handle = geometry_id{42};
+    t.mesh_handles[0] = geometry_id{42};
     reg.Register(t);
 
     WFCStep step{};
@@ -51,7 +51,7 @@ TestResult TestWFCOutput_MeshIndex_Matches_Tile_Registry() {
     WFCStepBuffer buf;
     WFCTileRegistry reg;
     WFCTile t{};
-    t.mesh_handle = geometry_id{777};
+    t.mesh_handles[0] = geometry_id{777};
     reg.Register(t);
 
     WFCStep step{};
@@ -63,7 +63,7 @@ TestResult TestWFCOutput_MeshIndex_Matches_Tile_Registry() {
 
     PCGPointSet ps = WFCOutput::ConsumeSteps(buf, reg, 1.0f);
     f32 mesh_idx = ps.GetAttr(0, PCGAttr::MeshIndex);
-    TEST_ASSERT_EQ(777.0f, mesh_idx, "MeshIndex attr = tile.mesh_handle");
+    TEST_ASSERT_EQ(777.0f, mesh_idx, "MeshIndex attr = tile.mesh_handles[0]");
     return TestResult::Passed;
 }
 
@@ -71,7 +71,7 @@ TestResult TestWFCOutput_Multi_Step_Drains_Buffer() {
     WFCStepBuffer buf;
     WFCTileRegistry reg;
     WFCTile t{};
-    t.mesh_handle = geometry_id{1};
+    t.mesh_handles[0] = geometry_id{1};
     reg.Register(t);
 
     for (u32 i = 0; i < 5; ++i) {

@@ -2012,6 +2012,20 @@ set_target_properties(TestWFCCategory PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCCategory PRIVATE DEBUG _DEBUG)
 
+add_executable(TestWFCTileLayout
+    Graphics/WFC/TestWFCTileLayout.cpp)
+target_include_directories(TestWFCTileLayout PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests)
+target_link_libraries(TestWFCTileLayout PRIVATE Engine)
+add_test(NAME TestWFCTileLayout COMMAND TestWFCTileLayout)
+set_target_properties(TestWFCTileLayout PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCTileLayout PRIVATE DEBUG _DEBUG)
+
 add_executable(TestWFCTileRegistryPacking
     Graphics/WFC/TestWFCTileRegistryPacking.cpp)
 target_include_directories(TestWFCTileRegistryPacking PRIVATE

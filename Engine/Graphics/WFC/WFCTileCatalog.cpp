@@ -16,7 +16,7 @@ constexpr geometry::geometry_id kPillarMeshPlaceholder{1004};
 WFCTile MakeCubeTile() {
     WFCTile t{};
     t.name = "cube";
-    t.mesh_handle = kCubeMeshPlaceholder;
+    t.mesh_handles[0] = kCubeMeshPlaceholder;
     t.variant_count = 1;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
     t.is_organic = false;
@@ -30,7 +30,7 @@ WFCTile MakeCubeTile() {
 WFCTile MakeRampTile() {
     WFCTile t{};
     t.name = "ramp";
-    t.mesh_handle = kRampMeshPlaceholder;
+    t.mesh_handles[0] = kRampMeshPlaceholder;
     t.variant_count = 4;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
     t.is_organic = false;
@@ -44,7 +44,7 @@ WFCTile MakeRampTile() {
 WFCTile MakeCornerInTile() {
     WFCTile t{};
     t.name = "corner_in";
-    t.mesh_handle = kCornerInMeshPlaceholder;
+    t.mesh_handles[0] = kCornerInMeshPlaceholder;
     t.variant_count = 4;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
     t.is_organic = false;
@@ -58,7 +58,7 @@ WFCTile MakeCornerInTile() {
 WFCTile MakeCornerOutTile() {
     WFCTile t{};
     t.name = "corner_out";
-    t.mesh_handle = kCornerOutMeshPlaceholder;
+    t.mesh_handles[0] = kCornerOutMeshPlaceholder;
     t.variant_count = 4;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
     t.is_organic = false;
@@ -72,7 +72,7 @@ WFCTile MakeCornerOutTile() {
 WFCTile MakePillarTile() {
     WFCTile t{};
     t.name = "pillar";
-    t.mesh_handle = kPillarMeshPlaceholder;
+    t.mesh_handles[0] = kPillarMeshPlaceholder;
     t.variant_count = 1;
     t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
     t.is_organic = false;

@@ -30,7 +30,7 @@ void WritePointToSet(const WFCStep& s, const WFCTileRegistry& registry,
     }
     ps.SetAttr(out_idx, pcg::PCGAttr::RotationY, rot_y);
     ps.SetAttr(out_idx, pcg::PCGAttr::MeshIndex,
-               static_cast<f32>(static_cast<u32>(tile.mesh_handle)));
+               static_cast<f32>(static_cast<u32>(tile.mesh_handles[0])));
     ps.SetAttr(out_idx, pcg::PCGAttr::TechniqueIndex, 0.0f);
 }
 

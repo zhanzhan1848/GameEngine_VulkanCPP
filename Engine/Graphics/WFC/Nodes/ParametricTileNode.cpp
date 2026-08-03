@@ -36,7 +36,7 @@ void ParametricTileNode::BuildCatalogPointSet() {
         ps->SetAttr(i, PCGAttr::ScaleZ, 1.0f);
         ps->SetAttr(i, PCGAttr::RotationY, 0.0f);
         ps->SetAttr(i, PCGAttr::MeshIndex,
-                    static_cast<f32>(static_cast<u32>(tile.mesh_handle)));
+                    static_cast<f32>(static_cast<u32>(tile.mesh_handles[0])));
         ps->SetAttr(i, PCGAttr::TechniqueIndex, 0.0f);
     }
 }

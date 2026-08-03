@@ -10,12 +10,12 @@ using namespace primal::graphics::wfc;
 using namespace primal::graphics::pcg;
 using namespace Engine::Test;
 
-// Registry fixture: one tile, id 0, mesh_handle=42, rotationally symmetric.
+// Registry fixture: one tile, id 0, mesh_handles[0]=42, rotationally symmetric.
 static WFCTileRegistry MakeOneTileRegistry() {
     WFCTileRegistry reg;
     WFCTile t{};
     t.name = "test";
-    t.mesh_handle = geometry_id{42};
+    t.mesh_handles[0] = geometry_id{42};
     t.variant_count = 1;
     t.is_rotationally_symmetric = true;
     reg.Register(t);

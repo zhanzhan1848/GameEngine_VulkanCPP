@@ -246,15 +246,15 @@ void WFCStreamingTestCase::SetupWFCCatalog() {
     adjacency_ = std::make_unique<TileAdjacencyTable>();
     WFCTileCatalog::Populate(*registry_, *adjacency_);
 
-    registry_->GetMutable(wfc_tile_id{0}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{0}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_cube};
-    registry_->GetMutable(wfc_tile_id{1}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{1}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_ramp};
-    registry_->GetMutable(wfc_tile_id{2}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{2}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_corner_in};
-    registry_->GetMutable(wfc_tile_id{3}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{3}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_corner_out};
-    registry_->GetMutable(wfc_tile_id{4}).mesh_handle =
+    registry_->GetMutable(wfc_tile_id{4}).mesh_handles[0] =
         primal::geometry::geometry_id{slot_pillar};
 
     std::cout << "[TestWFCStreaming] Catalog ready (5 tiles, "
