@@ -18,6 +18,8 @@
 #include "Engine/Graphics/WFC/WFCSolveBudget.h"
 #include "Engine/Graphics/WFC/WFCConfig.h"
 #include "Engine/Graphics/WFC/WFCCategory.h"
+#include "Engine/Graphics/WFC/WFCMinEntropyObserver.h"
+#include <memory>
 
 using namespace primal::graphics::wfc;
 using namespace Engine::Test;
@@ -456,6 +458,94 @@ TestResult TestWFCSolver_PopulateRespectsCategoryMask() {
     return TestResult::Passed;
 }
 
+// Task 4 (Observer Strategy Refactor): Default-constructed WFCSolver uses
+// MinEntropy. On a 3x1x1 grid with a single self-compatible wildcard tile,
+// every cell has equal entropy (1), so MinEntropy's heap order is row-major
+// scan order — first pick is (0,0,0). Locks in that the unique_ptr migration
+// preserved default behavior.
+TestResult TestWFCSolver_DefaultObserver_IsMinEntropy() {
+    WFCConfig config;
+    config.grid_size = {3, 1, 1};
+    config.max_cells_per_frame = 1;
+    config.max_ms_per_frame = 100;
+    config.seed = 42;
+    config.max_generations = 4;
+
+    WFCTile t{};
+    t.name = "trivial";
+    t.variant_count = 1;
+    t.sockets[0] = 0xFFFFFFFFFFFFFFFFULL;  // wildcard socket
+
+    WaveGrid grid;
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCStepBuffer buf;
+
+    reg.Register(t);
+    // Without self-compatibility entries, propagating the first collapse to
+    // neighbors would fail (no adjacency → contradiction → restart → state
+    // wipe → assertion sees the wrong state). Wire wildcard self-compat on
+    // all 3 axes, mirroring TestWFCSolver_Solves_2x2x2_AllWildcard.
+    const wfc_tile_id wildcard{0};
+    adj.AddCompatibility(wildcard, 0, WFCFace::PosX, wildcard, 0);
+    adj.AddCompatibility(wildcard, 0, WFCFace::PosY, wildcard, 0);
+    adj.AddCompatibility(wildcard, 0, WFCFace::PosZ, wildcard, 0);
+
+    WFCSolver solver;  // default-constructed observer is MinEntropy
+    solver.Initialize(config, grid, reg, adj, buf);
+
+    WFCSolveBudget budget(10, 100);
+    budget.Reset();
+    solver.Step(budget);
+
+    TEST_ASSERT(grid.CellAt({0, 0, 0}).collapsed,
+                "MinEntropy default collapses (0,0,0) first on tie (row-major)");
+    TEST_ASSERT(!grid.CellAt({1, 0, 0}).collapsed, "(1,0,0) NOT collapsed first");
+    return TestResult::Passed;
+}
+
+// Task 4: SetObserver(make_unique<MinEntropyObserver>()) explicitly must match
+// the default behavior. Locks in that SetObserver doesn't break solver state.
+// Also documents the precondition: SetObserver must be called BEFORE Initialize
+// — the observer's heap is populated during Initialize, so swapping mid-solve
+// would leave the new observer empty until the next Initialize/restart.
+TestResult TestWFCSolver_SetObserver_ReplacesDefault() {
+    WFCConfig config;
+    config.grid_size = {3, 1, 1};
+    config.max_cells_per_frame = 1;
+    config.max_ms_per_frame = 100;
+    config.seed = 42;
+    config.max_generations = 4;
+
+    WFCTile t{};
+    t.name = "trivial";
+    t.variant_count = 1;
+    t.sockets[0] = 0xFFFFFFFFFFFFFFFFULL;
+
+    WaveGrid grid;
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCStepBuffer buf;
+
+    reg.Register(t);
+    const wfc_tile_id wildcard{0};
+    adj.AddCompatibility(wildcard, 0, WFCFace::PosX, wildcard, 0);
+    adj.AddCompatibility(wildcard, 0, WFCFace::PosY, wildcard, 0);
+    adj.AddCompatibility(wildcard, 0, WFCFace::PosZ, wildcard, 0);
+
+    WFCSolver solver;
+    solver.SetObserver(std::make_unique<WFCMinEntropyObserver>());
+    solver.Initialize(config, grid, reg, adj, buf);
+
+    WFCSolveBudget budget(10, 100);
+    budget.Reset();
+    solver.Step(budget);
+
+    TEST_ASSERT(grid.CellAt({0, 0, 0}).collapsed,
+                "SetObserver(MinEntropy) preserves default collapse behavior");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCSolver");
     TEST_CASE(suite, "Initialize_Populates_Candidate_Masks", TestWFCSolver_Initialize_Populates_Candidate_Masks);
@@ -467,6 +557,8 @@ int main() {
     TEST_CASE(suite, "Demo_4x4x4_TwoTile", TestWFCSolver_Demo_4x4x4_TwoTile);
     TEST_CASE(suite, "CollapseCell_Decodes_Multi_Tile", TestWFCSolver_CollapseCell_Decodes_Multi_Tile);
     TEST_CASE(suite, "PopulateRespectsCategoryMask", TestWFCSolver_PopulateRespectsCategoryMask);
+    TEST_CASE(suite, "DefaultObserver_IsMinEntropy", TestWFCSolver_DefaultObserver_IsMinEntropy);
+    TEST_CASE(suite, "SetObserver_ReplacesDefault", TestWFCSolver_SetObserver_ReplacesDefault);
     suite.RunAllTests();
     return 0;
 }
