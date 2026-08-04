@@ -500,16 +500,26 @@ TestResult TestWFCSolver_DefaultObserver_IsMinEntropy() {
 
     TEST_ASSERT(grid.CellAt({0, 0, 0}).collapsed,
                 "MinEntropy default collapses (0,0,0) first on tie (row-major)");
-    TEST_ASSERT(!grid.CellAt({1, 0, 0}).collapsed, "(1,0,0) NOT collapsed first");
+    // Stronger than just checking (1,0,0): assert no other cell collapsed, so
+    // a future observer change (e.g. picking (2,0,0)) doesn't silently pass.
+    for (u32 i = 0; i < grid.CellCount(); ++i) {
+        if (i != 0u) {
+            TEST_ASSERT(!grid.Cells()[i].collapsed, "Only (0,0,0) collapsed this Step");
+        }
+    }
     return TestResult::Passed;
 }
 
 // Task 4: SetObserver(make_unique<MinEntropyObserver>()) explicitly must match
-// the default behavior. Locks in that SetObserver doesn't break solver state.
-// Also documents the precondition: SetObserver must be called BEFORE Initialize
-// — the observer's heap is populated during Initialize, so swapping mid-solve
-// would leave the new observer empty until the next Initialize/restart.
-TestResult TestWFCSolver_SetObserver_ReplacesDefault() {
+// the default behavior. Locks in that SetObserver doesn't break solver state
+// (ownership transfer, virtual dispatch through the unique_ptr, etc.). This
+// test does NOT prove SetObserver actually REPLACES the strategy — that's
+// Task 6's job (SetObserver_DistanceChangesOrder uses WFCDistanceObserver to
+// prove a non-MinEntropy strategy takes effect). Also documents the
+// precondition: SetObserver must be called BEFORE Initialize — the observer's
+// heap is populated during Initialize, so swapping mid-solve would leave the
+// new observer empty until the next Initialize/restart.
+TestResult TestWFCSolver_SetObserver_PreservesDefaultBehavior() {
     WFCConfig config;
     config.grid_size = {3, 1, 1};
     config.max_cells_per_frame = 1;
@@ -543,6 +553,13 @@ TestResult TestWFCSolver_SetObserver_ReplacesDefault() {
 
     TEST_ASSERT(grid.CellAt({0, 0, 0}).collapsed,
                 "SetObserver(MinEntropy) preserves default collapse behavior");
+    // Same strengthened negative assertion as DefaultObserver_IsMinEntropy —
+    // verifies ONLY (0,0,0) collapsed this Step.
+    for (u32 i = 0; i < grid.CellCount(); ++i) {
+        if (i != 0u) {
+            TEST_ASSERT(!grid.Cells()[i].collapsed, "Only (0,0,0) collapsed this Step");
+        }
+    }
     return TestResult::Passed;
 }
 
@@ -558,7 +575,7 @@ int main() {
     TEST_CASE(suite, "CollapseCell_Decodes_Multi_Tile", TestWFCSolver_CollapseCell_Decodes_Multi_Tile);
     TEST_CASE(suite, "PopulateRespectsCategoryMask", TestWFCSolver_PopulateRespectsCategoryMask);
     TEST_CASE(suite, "DefaultObserver_IsMinEntropy", TestWFCSolver_DefaultObserver_IsMinEntropy);
-    TEST_CASE(suite, "SetObserver_ReplacesDefault", TestWFCSolver_SetObserver_ReplacesDefault);
+    TEST_CASE(suite, "SetObserver_PreservesDefaultBehavior", TestWFCSolver_SetObserver_PreservesDefaultBehavior);
     suite.RunAllTests();
     return 0;
 }
