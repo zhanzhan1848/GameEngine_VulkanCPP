@@ -9,7 +9,7 @@
 
 Refactor `WFCObserver` from a concrete class (hardcoded min-entropy binary heap) into a pluggable strategy interface. Ship two standard implementations as core capabilities — `WFCMinEntropyObserver` (existing behavior, migrated) and `WFCDistanceObserver` (new, Euclidean). The Kenney tile showcase gains hotkeys to switch strategy and distance-observer origin at runtime, alongside the existing grid-size and reseed controls.
 
-**Scope:** This spec covers the engine core refactor + Metal (native macOS) application-layer integration only. The Emscripten/WebGPU port for online demo deployment is a separate follow-up spec — see Out of Scope.
+**Scope:** This spec covers the engine core refactor + application-layer integration in `TestKenneyTilePreview`. All code changes are RHI-agnostic and build-target-agnostic — `TestKenneyTilePreview` already goes through `StandardRenderPipeline` + `primal::input` + `primal::platform::window`, so the same `.cpp/.h` files compile and run unchanged under both native (Metal) and WASM (WebGPU via Dawn) builds. Wiring `TestKenneyTilePreview` into the WASM build target (CMake target + asset preload + shell.html + deployment) is a separate follow-up spec — see Out of Scope.
 
 ## Motivation
 
@@ -279,12 +279,12 @@ For the demo's N = 1024, both are negligible. Distance becomes a regression cand
 
 ## Out of Scope / Future Work
 
-- **WASM/Emscripten port of TestKenneyTilePreview** — deferred to a separate follow-up spec (task #126, file TBD). The follow-up covers:
-  - Platform input bridging between `primal::input::get` and `EmscriptenInput`'s `EmscriptenGetKeyState`
-  - Asset handling: embed or preload the `kenney_dungeon_tiles/` directory + `colormap.png` atlas into MEMFS
-  - WASM target wiring in root `CMakeLists.txt` mirroring the `TestDawnWASM` pattern (`add_executable(TestKenneyTilePreviewWASM ...)` under `if(EMSCRIPTEN AND ENABLE_WEBGPU)`)
-  - Online-deployment `shell.html` (canvas + HUD showing current observer strategy + origin preset)
-  - Deployment to the production web environment
+- **WASM/Emscripten build target + deployment for TestKenneyTilePreview** — deferred to a separate follow-up spec (task #126, file TBD). This is **pure build/deploy work, zero code changes** to the engine core or application logic — the RHI (`StandardRenderPipeline`) + input (`primal::input`) + platform (`primal::platform::window`) abstractions already make the code portable. The follow-up covers:
+  - Adding `TestKenneyTilePreviewWASM` target to root `CMakeLists.txt` under `if(EMSCRIPTEN AND ENABLE_WEBGPU)`, mirroring the `TestDawnWASM` pattern
+  - Asset preload (`--preload-file` or `--embed-file`) for `EngineTest/assets/Processed/kenney_dungeon_tiles/` + `colormap.png`
+  - Confirming `primal::input::get` is wired to `EmscriptenInput` under WASM (if not already, this is an engine input-system task, not an application-layer concern)
+  - Online-deployment `shell.html` (canvas + optional HUD for current observer/origin)
+  - Deploy to the production web environment
 
   Dependency: this spec must land first — the WASM demo needs the distance observer to be a meaningful showcase of the strategy-switching capability.
 
