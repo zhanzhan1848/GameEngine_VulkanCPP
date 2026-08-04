@@ -383,9 +383,15 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
                                  v3{ 1.0f,  1.0f,  1.0f});
     scene.AddProxy(proxy);
 
-    // 5. View + projection matrices (camera 5 units back, looking at origin).
+    // 5. View + projection matrices (camera at z=+5 looking at origin).
+    // Right-handed view space (matches Stage1 frustum shader at
+    // GPUCullingPipeline.wgsl:230-232: "camera looks down -Z, visible objects
+    // have negative Z"). view_matrix must put the sphere at view_z=-5, so the
+    // translation column is -5 (inverse of camera world position). With the
+    // prior +5 sign the sphere landed behind the camera, Stage1 correctly
+    // marked is_visible=0, and Stage4 with ForcePassAll=false skipped it.
     m4x4 viewMat = make_identity_m4x4();
-    viewMat.columns[3][2] = 5.0f;
+    viewMat.columns[3][2] = -5.0f;
     m4x4 projMat{};
     std::memset(&projMat, 0, sizeof(projMat));
     constexpr float pi = 3.14159265358979323846f;
@@ -455,12 +461,11 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
                 "GPUCullingPipeline::Initialize");
 
     cull.SetGPUDrawPipeline(&gpuDraw);
-    // ForcePassAll=true bypasses stage4 frustum/backface (stage4 has a separate
-    // bug with this snapshot's worldAABB that drops instance_count to 0 when
-    // ForcePassAll=false). We keep ForcePassAll=true to isolate the HZB path,
-    // which is the new code surface exercised in Part 19. Stage5 occlusion
-    // culling runs unconditionally — driven by enable_occlusion_culling=true.
-    cull.SetForcePassAll(true);
+    // ForcePassAll=false runs the real Stage1 (near/far frustum) + Stage4
+    // (per-instance visibility check) + Stage5 (HZB occlusion) pipeline.
+    // Sphere at view_z=-5 with HZB cleared to 1.0 (no occluders) survives
+    // all three stages.
+    cull.SetForcePassAll(false);
     cull.SetHZBSystem(&hzb);      // wire HZB texture to descriptor slot 8
     gpuDraw.SetCullingPipeline(&cull);
 
