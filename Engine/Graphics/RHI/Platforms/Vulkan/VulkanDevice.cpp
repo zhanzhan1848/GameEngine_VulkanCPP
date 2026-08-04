@@ -534,6 +534,18 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
         }
     }
 
+    // T4.6.5 part 24.6 (B8 fix): fall back to the cmd buffer's internal fence
+    // when the caller didn't provide one. Without a signaled fence,
+    // WaitForCompletion can't synchronize and DestroyCommandBuffer triggers
+    // VUID-vkFreeCommandBuffers-pCommandBuffers-00047 (cmd still pending).
+    // Always reset before submit — vkQueueSubmit requires unsignaled fences.
+    if (signalFence == VK_NULL_HANDLE) {
+        signalFence = cmd->GetSubmitFence();
+        if (signalFence != VK_NULL_HANDLE) {
+            vkResetFences(device_, 1, &signalFence);
+        }
+    }
+
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
     VkSubmitInfo si{};

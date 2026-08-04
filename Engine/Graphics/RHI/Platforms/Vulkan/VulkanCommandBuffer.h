@@ -95,6 +95,13 @@ private:
     void TransitionImageLayout(VulkanTexture* tex, VkImageLayout newLayout,
                                u32 baseMip = 0, u32 mipCount = 0xFFFFFFFFu);
 
+    // T4.6.5 part 24.6 (B8 fix): expose internal fence so submitImpl can
+    // signal it when caller doesn't provide one. Without this, device-side
+    // Submit + WaitForCompletion pair can't synchronize (cmd's fence isn't
+    // signaled), and destroying the cmd buffer triggers
+    // VUID-vkFreeCommandBuffers-pCommandBuffers-00047.
+    VkFence GetSubmitFence() const { return submitFence_; }
+
     VkCommandPool   cmdPool_{VK_NULL_HANDLE};
     VkCommandBuffer cmdBuffer_{VK_NULL_HANDLE};
     VkFence         submitFence_{VK_NULL_HANDLE};

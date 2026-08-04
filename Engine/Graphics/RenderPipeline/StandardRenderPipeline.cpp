@@ -1823,6 +1823,15 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
     submitInfo.signalFence = signalFence;
     device_->Submit(submitInfo);
 
+    // T4.6.5 part 24.6 (B8 fix): wait for cmd buffer completion before
+    // destroying. Submit returns immediately while the GPU is still
+    // processing; destroying the cmd buffer (which owns the VkFence) before
+    // completion triggers VUID-vkFreeCommandBuffers-pCommandBuffers-00047 +
+    // cascades into GPU lost. WaitForCompletion is a no-op on Metal/Dawn
+    // (their cmd buffers don't expose per-buffer fences this way) but is
+    // required on Vulkan.
+    cmd->WaitForCompletion();
+
     const auto& cmdStats = cmd->GetStats();
     stats_.drawCallCount = cmdStats.drawCallCount;
     stats_.gpuFrameTimeMs = cmdStats.commandExecutionTime;
