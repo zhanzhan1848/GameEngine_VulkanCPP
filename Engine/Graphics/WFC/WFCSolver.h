@@ -30,6 +30,8 @@
 #include "WFCRandom.h"
 #include "WFCTypes.h"
 
+#include <memory>
+
 namespace primal::graphics::wfc {
 
 class WaveGrid;
@@ -46,6 +48,12 @@ public:
         Restarted  = 2,  // hit a contradiction; re-initialized from scratch
         GivenUp    = 3,  // exhausted max_generations; caller must fall back
     };
+
+    // Default-constructs the observer to WFCMinEntropyObserver. WFCSolver is
+    // default-constructible so test fixtures and PCG callers can write
+    // `WFCSolver solver;` without knowing about the strategy API. Use
+    // SetObserver() to inject a custom strategy before Initialize().
+    WFCSolver();
 
     // Wires up subsystem pointers and seeds the RNG. Idempotent: safe to call
     // again on restart (the test fixture relies on this — re-Initialize wipes
@@ -66,6 +74,14 @@ public:
     // Reset() it at frame start. If budget.ShouldContinue() is false on
     // entry, Step returns InProgress without doing any work.
     StepResult Step(WFCSolveBudget& budget);
+
+    // Replace the current observer. Must be called before Initialize.
+    // nullptr is rejected in debug builds; use ResetToDefaultObserver() to
+    // restore the default MinEntropy observer.
+    void SetObserver(std::unique_ptr<WFCObserver> observer);
+
+    // Restore the default MinEntropy observer.
+    void ResetToDefaultObserver();
 
     u32 Generation() const { return generation_; }
 
@@ -96,7 +112,7 @@ private:
     const TileAdjacencyTable*  adjacency_{nullptr};
     WFCStepBuffer*             step_buffer_{nullptr};
 
-    WFCObserver     observer_;
+    std::unique_ptr<WFCObserver> observer_;
     WFCPropagator   propagator_;
     // RestartPolicy has no default ctor (requires max_generations); give it
     // a placeholder so WFCSolver itself remains default-constructible. The

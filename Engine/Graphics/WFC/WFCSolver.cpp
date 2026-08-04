@@ -17,10 +17,14 @@
 #include "WFCTileRegistry.h"
 #include "WFCStepBuffer.h"
 #include "WFCSolveBudget.h"
+#include "WFCMinEntropyObserver.h"
 
 #include <cassert>
 
 namespace primal::graphics::wfc {
+
+WFCSolver::WFCSolver()
+    : observer_(std::make_unique<WFCMinEntropyObserver>()) {}
 
 void WFCSolver::Initialize(const WFCConfig& config,
                            WaveGrid& grid,
@@ -52,7 +56,7 @@ void WFCSolver::Initialize(const WFCConfig& config,
     grid.Initialize(config.grid_size, max_variants);
 
     PopulateAllCandidates(grid, registry);
-    observer_.Initialize(grid);
+    observer_->Initialize(grid);
     propagator_.Initialize(grid);
 }
 
@@ -171,7 +175,7 @@ WFCSolver::StepResult WFCSolver::Step(WFCSolveBudget& budget) {
     // Step within the same frame.
     if (!budget.ShouldContinue()) return StepResult::InProgress;
 
-    WFCGridCoord coord = observer_.PickNextCollapse(*grid_);
+    WFCGridCoord coord = observer_->PickNextCollapse(*grid_);
     if (coord.x < 0) {
         // Observer returns {-1,-1,-1} when every cell is collapsed (or every
         // remaining cell is a zero-candidate contradiction, which we treat as
@@ -195,7 +199,7 @@ WFCSolver::StepResult WFCSolver::Step(WFCSolveBudget& budget) {
         // emit a Restart step so consumers can wipe their derived state.
         ++generation_;
         PopulateAllCandidates(*grid_, *registry_);
-        observer_.Initialize(*grid_);
+        observer_->Initialize(*grid_);
         propagator_.Initialize(*grid_);
 
         WFCStep step{};
@@ -210,10 +214,19 @@ WFCSolver::StepResult WFCSolver::Step(WFCSolveBudget& budget) {
     // cell (otherwise a 1x1x1 grid would require two Steps: InProgress then
     // Done). We avoid calling PickNextCollapse here because that would pop a
     // real coord and force us to push it back; Empty() is a cheap peek.
-    if (observer_.Empty()) {
+    if (observer_->Empty()) {
         return StepResult::Done;
     }
     return StepResult::InProgress;
+}
+
+void WFCSolver::SetObserver(std::unique_ptr<WFCObserver> observer) {
+    assert(observer && "SetObserver(nullptr) is not allowed; use ResetToDefaultObserver()");
+    observer_ = std::move(observer);
+}
+
+void WFCSolver::ResetToDefaultObserver() {
+    observer_ = std::make_unique<WFCMinEntropyObserver>();
 }
 
 } // namespace primal::graphics::wfc
