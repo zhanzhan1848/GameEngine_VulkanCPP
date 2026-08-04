@@ -3,19 +3,23 @@
 // TestWFCRuinsRendering.h — WFC Phase C.1 T27 visual smoke binary.
 //
 // Boots the Metal-backed window + StandardRenderPipeline, registers all 15
-// catalog procedural meshes (5 primitive + 10 ruins placeholders using box
-// variants), runs the solver on an 8×4×8 Ruins-only grid to completion in
-// Initialize, spawns the collapsed cells as ECS entities, and renders
-// kHeadlessFrameCap frames before exiting.
+// catalog procedural meshes (5 primitive + 10 ruins real-factory meshes),
+// and streams an 8×4×8 Ruins-only solve across frames:
 //
-// Smoke assertion: ≥ 50 cells collapsed (loose; an 8×4×8 = 256-cell grid
-// should fully collapse under max_generations=32 with T25's ruins-vertical
-// wildcard in place). Visual quality is human-reviewed — open the window
-// and inspect that ruins tiles actually appear.
+//   Initialize  → build catalog + create grid/buffer/solver (no solve yet)
+//   Run         → PumpSolverFrame (Step + DrainStream + spawn new entities)
+//                 then render one frame
 //
-// Cloned from TestWFCRendering.h (Phase A.4 + B.1 + B.2) with the
-// interactive/streaming logic stripped: T27 is a one-shot solve + render,
-// not a streaming demo.
+// WFCSolver::Step collapses exactly one cell per call regardless of the
+// budget's max_cells_per_frame (the budget is a cap, not a target). So at
+// 1 Step per frame, the viewer watches the ruins-style grid fill in over
+// ~256 frames (8×4×8 = 256 cells). Cumulative entity tracking survives
+// non-restart steps; Restart destroys the prior batch and replays survivors.
+//
+// Smoke assertion: ≥ 50 cells collapsed by kHeadlessFrameCap. Full collapse
+// (256 cells) is expected around frame 256 with the T25 ruins-vertical-
+// wildcard fix in place; the cap is 300 to allow ~50 viewing frames after
+// completion. Visual quality is human-reviewed.
 
 #include "RenderTestFramework.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
@@ -35,7 +39,7 @@
 
 class WFCRuinsRenderingTestCase : public primal::test::RenderTestCase {
 public:
-    WFCRuinsRenderingTestCase();
+    WFCRuinsRenderingTestCase();  // constructs budget_ (no default ctor)
     bool Initialize() override;
     void Run() override;
     void Shutdown() override;
@@ -43,7 +47,9 @@ public:
 private:
     void RegisterWFCCatalogMeshes();
     void SetupWFCCatalog();
-    void RunSolverAndSpawn();
+    void ReseedSolver();
+    void DestroyAllSpawnedEntities();
+    void PumpSolverFrame();
     void UpdateCamera();
 
     std::unique_ptr<primal::graphics::rhi::RHIDeviceBase> device;
@@ -56,19 +62,31 @@ private:
     std::unique_ptr<primal::graphics::wfc::WFCTileRegistry>    registry_;
     std::unique_ptr<primal::graphics::wfc::TileAdjacencyTable> adjacency_;
 
-    // Slot indices for all 15 catalog tiles. Index = wfc_tile_id (0..14).
-    // 0..4 = primitive (cube/ramp/corner_in/corner_out/pillar)
-    // 5..14 = ruins placeholders (simple box variants)
-    u32 slot_tiles[15]{};
+    // Streaming solver state. Created in ReseedSolver (called from Initialize).
+    std::unique_ptr<primal::graphics::wfc::WaveGrid>      grid_;
+    std::unique_ptr<primal::graphics::wfc::WFCStepBuffer> buf_;
+    std::unique_ptr<primal::graphics::wfc::WFCSolver>     solver_;
+    primal::graphics::wfc::WFCSolveBudget                 budget_;
+    primal::graphics::wfc::WFCSolver::StepResult          solver_state_{
+        primal::graphics::wfc::WFCSolver::StepResult::InProgress};
+    bool solver_done_{false};
+    u32  total_collapses_{0};
+    u32  total_restarts_{0};
+    u32  rng_seed_{42};
 
-    // Spawned ECS entities (for clean Shutdown).
+    // Cumulative spawned entities (cleared on Restart).
     std::vector<primal::id::id_type> wfc_entity_ids;
     std::vector<u32>                 wfc_mesh_slots;
+
+    // Slot indices for the 15 catalog tiles. Index = wfc_tile_id (0..14).
+    u32 slot_tiles[15]{};
 
     u32 window_width_{1280};
     u32 window_height_{720};
     u64 frame_count_{0};
-    static constexpr u64 kHeadlessFrameCap = 60;
+    // 256-cell grid (8×4×8) at 1 cell-per-frame Step + ~50 frames viewing
+    // the finished state. ~5s @ 60fps.
+    static constexpr u64 kHeadlessFrameCap = 300;
 
     // Camera state.
     primal::math::v3 camera_pos_{12.0f, 12.0f, 12.0f};

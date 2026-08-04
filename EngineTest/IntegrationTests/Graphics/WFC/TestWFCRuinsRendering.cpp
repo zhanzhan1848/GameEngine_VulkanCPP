@@ -1,19 +1,19 @@
 // TestWFCRuinsRendering.cpp — WFC Phase C.1 T27 visual smoke binary.
 //
 // Boots Metal-backed window + StandardRenderPipeline + 15-tile catalog
-// (5 primitive + 10 ruins placeholder meshes), runs an 8×4×8 Ruins-only
-// solve to completion, spawns collapsed cells as ECS entities, renders
-// kHeadlessFrameCap frames, then exits.
+// (5 primitive + 10 ruins real-factory meshes), streams an 8×4×8 Ruins-only
+// solve across frames (1 collapse per frame), spawns each new cell as an
+// ECS entity, renders kHeadlessFrameCap=300 frames, then exits.
 //
-// Smoke assertion: ≥ 50 cells collapsed. Full collapse (256 cells) is
-// expected with T25's ruins-vertical-wildcard fix in place; anything
-// less than 50 indicates a real catalog bug.
+// Smoke assertion: ≥ 50 cells collapsed by frame cap. With streaming
+// working and the T25 ruins-vertical-wildcard fix in place, the solver
+// reaches Done at frame ~256 with 256 collapses + 0 restarts.
 //
 // Cloned from TestWFCRendering.cpp (Phase A.4 + B.1 + B.2). Differences:
 //   * Single mode (3D, 8×4×8) — no 2D toggle.
-//   * Solver runs to completion in Initialize; Run() only renders.
+//   * Ruins-only category mask (10 ruins tiles, primitives filtered out).
 //   * No 'R'/'M'/'Space' interactivity.
-//   * 15 mesh slots vs 5 (registers 10 ruins placeholder meshes).
+//   * 15 mesh slots vs 5 (registers 10 ruins real-factory meshes).
 
 #include "TestWFCRuinsRendering.h"
 #include "Engine/Common/CommonHeaders.h"
@@ -59,7 +59,7 @@ Engine_Test::Engine_Test()
 // ============================================================================
 
 WFCRuinsRenderingTestCase::WFCRuinsRenderingTestCase()
-{}
+    : budget_(4u, 16u) {}  // 4 cells/frame → ~64 frames for full 256-cell collapse
 
 // ============================================================================
 // Initialize
@@ -116,12 +116,14 @@ bool WFCRuinsRenderingTestCase::Initialize() {
     view->SetViewport(viewport);
 
     // 6. Register all 15 catalog meshes + build the 15-tile catalog with
-    //    placeholder overrides pointing at the registered slot indices.
+    //    mesh_handles overrides pointing at the registered slot indices.
     RegisterWFCCatalogMeshes();
     SetupWFCCatalog();
 
-    // 7. Run the ruins-only solver to completion + spawn ECS entities.
-    RunSolverAndSpawn();
+    // 7. Reseed streaming solver state (grid/buffer/solver). Streaming
+    //    happens in Run() via PumpSolverFrame — viewer watches cells
+    //    collapse one-by-one across frames.
+    ReseedSolver();
 
     // 8. Camera framing for an 8×4×8 grid centered near origin.
     UpdateCamera();
@@ -279,81 +281,106 @@ void WFCRuinsRenderingTestCase::SetupWFCCatalog() {
 }
 
 // ============================================================================
-// RunSolverAndSpawn
+// ReseedSolver
 // ============================================================================
 //
-// Runs the WFC solver to completion on an 8×4×8 Ruins-only grid (seed=42,
-// max_generations=32), drains the step buffer into a PCGPointSet, spawns
-// ECS entities for each collapsed cell, and publishes them to the pipeline.
-//
-// Asserts ≥ 50 cells collapsed (smoke criterion). Full collapse (256 cells)
-// is the expected outcome with the T25 ruins-vertical-wildcard fix.
+// Destroys current entities (if any), then creates fresh grid_/buf_/solver_
+// with the ruins-only 8×4×8 config and rng_seed_. Catalog (registry_ +
+// adjacency_) is preserved — built once in SetupWFCCatalog. Catalog slot
+// overrides are stable across reseeds.
 
-void WFCRuinsRenderingTestCase::RunSolverAndSpawn() {
+void WFCRuinsRenderingTestCase::ReseedSolver() {
+    using namespace primal::graphics::wfc;
+
+    DestroyAllSpawnedEntities();
+
+    grid_ = std::make_unique<WaveGrid>();
+    buf_  = std::make_unique<WFCStepBuffer>();
+
+    WFCConfig config;
+    config.grid_size  = WFCGridCoord{8, 4, 8};
+    config.seed       = rng_seed_;
+    config.max_generations = 32;
+    config.active_category_mask = CategoryMaskFor(WFCCategory::Ruins);
+
+    solver_ = std::make_unique<WFCSolver>();
+    solver_->Initialize(config, *grid_, *registry_, *adjacency_, *buf_);
+
+    solver_state_    = WFCSolver::StepResult::InProgress;
+    solver_done_     = false;
+    total_collapses_ = 0;
+    total_restarts_  = 0;
+
+    std::cout << "[TestWFCRuinsRendering] solver reseeded: grid=8x4x8 seed="
+              << rng_seed_ << std::endl;
+}
+
+// ============================================================================
+// DestroyAllSpawnedEntities
+// ============================================================================
+
+void WFCRuinsRenderingTestCase::DestroyAllSpawnedEntities() {
+    using namespace primal::graphics::pcg;
+    if (!wfc_entity_ids.empty()) {
+        PCGEntityFactory::DestroyEntities(wfc_entity_ids);
+    }
+    wfc_entity_ids.clear();
+    wfc_mesh_slots.clear();
+    if (pipeline) pipeline->ClearPCGEntities();
+}
+
+// ============================================================================
+// PumpSolverFrame
+// ============================================================================
+//
+// One streaming step per frame. Mirrors TestWFCRendering::PumpSolverFrame:
+//   1. Reset per-frame budget + advance solver by one Step.
+//   2. Drain whatever steps landed in the buffer via WFCOutput::DrainStream
+//      (keeps only post-last-Restart Collapse points).
+//   3. On restart_seen: destroy prior entities before appending survivors.
+//   4. Spawn entities for new Collapse points (if any). Append to the
+//      cumulative vectors and re-publish via SetPCGEntities.
+//   5. Detect completion (Done / GivenUp) + assert smoke criterion.
+
+void WFCRuinsRenderingTestCase::PumpSolverFrame() {
     using namespace primal::graphics::wfc;
     using namespace primal::graphics::pcg;
 
-    WaveGrid grid;
-    WFCStepBuffer buf;
-    WFCSolver solver;
+    if (solver_done_ || !solver_) return;
 
-    WFCConfig cfg;
-    cfg.grid_size = WFCGridCoord{8, 4, 8};
-    cfg.seed = 42;
-    cfg.max_generations = 32;
-    cfg.max_cells_per_frame = 256;
-    cfg.max_ms_per_frame = 1000;
-    cfg.active_category_mask = CategoryMaskFor(WFCCategory::Ruins);
+    budget_.Reset();
+    solver_state_ = solver_->Step(budget_);
 
-    grid.Initialize(cfg.grid_size, 8);
-    solver.Initialize(cfg, grid, *registry_, *adjacency_, buf);
+    WFCStreamDrainResult drain = WFCOutput::DrainStream(
+        *buf_, *registry_, /*cell_size=*/1.0f);
 
-    WFCSolveBudget budget(cfg.max_cells_per_frame, cfg.max_ms_per_frame);
-    budget.Reset();
-
-    WFCSolver::StepResult result = WFCSolver::StepResult::InProgress;
-    u32 steps = 0;
-    while ((result == WFCSolver::StepResult::InProgress ||
-            result == WFCSolver::StepResult::Restarted) &&
-           steps < 2000) {
-        result = solver.Step(budget);
-        ++steps;
-        if (result == WFCSolver::StepResult::Restarted) {
-            budget.Reset();
-        }
+    if (drain.restart_seen) {
+        total_restarts_ += drain.restart_count;
+        DestroyAllSpawnedEntities();
+        std::cout << "[TestWFCRuinsRendering] restart #" << total_restarts_
+                  << " — replaying " << drain.new_points.count
+                  << " new collapses" << std::endl;
     }
 
-    if (result != WFCSolver::StepResult::Done &&
-        result != WFCSolver::StepResult::GivenUp) {
-        std::cerr << "[TestWFCRuinsRendering] solver did not terminate (last="
-                  << static_cast<u32>(result) << " steps=" << steps << ")"
-                  << std::endl;
-    }
-
-    PCGPointSet instances = WFCOutput::ConsumeSteps(buf, *registry_, 1.0f);
-
-    std::cout << "[TestWFCRuinsRendering] solver result="
-              << static_cast<u32>(result)
-              << " steps=" << steps
-              << " instances=" << instances.count
-              << std::endl;
-
-    if (instances.count < 50u) {
-        std::cerr << "[TestWFCRuinsRendering] SMOKE FAIL: only "
-                  << instances.count << " cells collapsed (expected ≥ 50)"
-                  << std::endl;
-    }
-
-    if (instances.count > 0) {
-        auto spawn = PCGEntityFactory::CreateEntities(instances);
-        wfc_entity_ids = std::move(spawn.entity_ids);
-        wfc_mesh_slots = std::move(spawn.mesh_slot_indices);
+    if (drain.new_points.count > 0) {
+        total_collapses_ += drain.new_points.count;
+        auto spawn = PCGEntityFactory::CreateEntities(drain.new_points);
+        wfc_entity_ids.insert(wfc_entity_ids.end(),
+                              spawn.entity_ids.begin(), spawn.entity_ids.end());
+        wfc_mesh_slots.insert(wfc_mesh_slots.end(),
+                              spawn.mesh_slot_indices.begin(),
+                              spawn.mesh_slot_indices.end());
+        assert(wfc_entity_ids.size() == wfc_mesh_slots.size());
         pipeline->SetPCGEntities(wfc_entity_ids, wfc_mesh_slots);
     }
 
-    // Soft assertion: log a warning but don't crash. The renderer still needs
-    // to render whatever collapsed so a human can inspect the partial frame.
-    assert(instances.count >= 50u && "smoke criterion: ≥ 50 cells collapsed");
+    if (solver_state_ == WFCSolver::StepResult::Done ||
+        solver_state_ == WFCSolver::StepResult::GivenUp) {
+        solver_done_ = true;
+        std::cout << "[TestWFCRuinsRendering] solver done: collapses="
+                  << total_collapses_ << " restarts=" << total_restarts_
+                  << " state=" << static_cast<u32>(solver_state_) << std::endl;
+    }
 }
 
 // ============================================================================
@@ -386,6 +413,9 @@ void WFCRuinsRenderingTestCase::UpdateCamera() {
 void WFCRuinsRenderingTestCase::Run() {
     if (!pipeline || !scene || !view) return;
 
+    // Streaming pump: collapses a few more cells this frame, spawns entities.
+    PumpSolverFrame();
+
     view->UpdateFrustum();
     view->Cull(*scene);
 
@@ -416,7 +446,21 @@ void WFCRuinsRenderingTestCase::Run() {
     ++frame_count_;
     if (frame_count_ >= kHeadlessFrameCap) {
         std::cout << "[TestWFCRuinsRendering] Rendered " << frame_count_
-                  << " frames" << std::endl;
+                  << " frames, collapses=" << total_collapses_
+                  << " restarts=" << total_restarts_
+                  << " entities=" << wfc_entity_ids.size()
+                  << " final_state=" << static_cast<u32>(solver_state_)
+                  << std::endl;
+        // Smoke criterion: ≥ 50 cells collapsed. With streaming working,
+        // 300 frames at 1 cell-per-frame should yield ≥ 256 collapses (full
+        // 8×4×8 grid). Loose lower bound catches catastrophic regressions
+        // (catalog mismatch, budget exhaustion, solver hang).
+        if (total_collapses_ < 50u) {
+            std::cerr << "[TestWFCRuinsRendering] SMOKE FAIL: only "
+                      << total_collapses_ << " cells collapsed (expected ≥ 50)"
+                      << std::endl;
+        }
+        assert(total_collapses_ >= 50u && "smoke criterion: >= 50 cells collapsed");
 #ifdef __APPLE__
         // Tear down engine state BEFORE AppKit starts closing windows.
         Shutdown();
@@ -439,6 +483,12 @@ void WFCRuinsRenderingTestCase::Shutdown() {
     wfc_entity_ids.clear();
     wfc_mesh_slots.clear();
     if (pipeline) pipeline->ClearPCGEntities();
+
+    // Drop streaming state before the catalog (solver holds raw pointers
+    // into grid_/buf_/registry_/adjacency_).
+    solver_.reset();
+    buf_.reset();
+    grid_.reset();
 
     registry_.reset();
     adjacency_.reset();
