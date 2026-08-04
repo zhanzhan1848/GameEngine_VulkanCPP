@@ -497,8 +497,30 @@ if(APPLE)
     )
     target_compile_definitions(TestWFCStreaming PRIVATE "TEST_WFC_STREAMING=1" "TEST_RENDERER=0")
 
+    # 33. TestWFCCategorySolve (WFC Phase C.1 T23: category-mask integration test)
+    # Headless, no GPU. Verifies that solving a 4×2×4 grid with
+    # active_category_mask=Ruins produces a grid where every collapsed cell
+    # holds a Ruins-category tile — proving the T5 PopulateAllCandidates
+    # category-mask plumbing flows through end-to-end.
+    # Wired as a standalone block mirroring TestWFC3DParametric (block 29).
+    add_executable(TestWFCCategorySolve
+        Graphics/WFC/TestWFCCategorySolve.cpp
+    )
+    target_include_directories(TestWFCCategorySolve PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCCategorySolve PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCCategorySolve COMMAND TestWFCCategorySolve)
+    set_target_properties(TestWFCCategorySolve PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCCategorySolve PRIVATE DEBUG _DEBUG)
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve)
 
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)
