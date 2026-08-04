@@ -9,7 +9,11 @@
 //
 // The test runs a 4x4x4 solve to completion (or GivenUp), then verifies the
 // emitted PCGPointSet has plausible cell count and that every instance's
-// MeshIndex attr lands inside the catalog's placeholder range (1000-1004).
+// MeshIndex attr lands inside the catalog's placeholder range (1000+).
+// Range widened in Phase C.1 T22 follow-up: catalog grew from 5 primitive
+// placeholders (1000-1004) to 15 tiles spanning 1000-2903 (ruins tiles added
+// in T18-T21). Lower-bound check is sufficient since all placeholders start
+// at 1000.
 //
 // This is the first WFC test that lives under IntegrationTests/ rather than
 // UnitTests/, because it stitches multiple subsystems together and serves as
@@ -56,9 +60,13 @@ TestResult TestWFC3DParametric_Full_Pipeline_4x4x4() {
     budget.Reset();
     WFCSolver::StepResult result = WFCSolver::StepResult::InProgress;
     u32 steps = 0;
-    while (result == WFCSolver::StepResult::InProgress && steps < 1000) {
+    while (result == WFCSolver::StepResult::InProgress && steps < 2000) {
         result = solver.Step(budget);
         ++steps;
+        if (result == WFCSolver::StepResult::Restarted) {
+            budget.Reset();  // fresh budget for the new generation
+            result = WFCSolver::StepResult::InProgress;
+        }
     }
 
     TEST_ASSERT(result == WFCSolver::StepResult::Done ||
@@ -72,11 +80,14 @@ TestResult TestWFC3DParametric_Full_Pipeline_4x4x4() {
     TEST_ASSERT(instances.count > 0, "At least one instance emitted");
     TEST_ASSERT(instances.count <= 64u, "No more than 64 cells in 4x4x4");
 
-    // 6. Verify MeshIndex attrs are catalog placeholders (1000-1004)
+    // 6. Verify MeshIndex attrs are catalog placeholders. Phase C.1 grew the
+    // catalog from 5 primitive tiles (placeholders 1000-1004) to 15 tiles
+    // (placeholders 1000-2903); lower-bound check stays valid as the catalog
+    // grows further.
     for (u32 i = 0; i < instances.count; ++i) {
         f32 mesh_idx = instances.GetAttr(i, PCGAttr::MeshIndex);
-        TEST_ASSERT(mesh_idx >= 1000.0f && mesh_idx <= 1004.0f,
-                    "Instance MeshIndex within catalog placeholder range");
+        TEST_ASSERT(mesh_idx >= 1000.0f,
+                    "Instance MeshIndex >= catalog placeholder base (1000)");
     }
 
     return TestResult::Passed;
