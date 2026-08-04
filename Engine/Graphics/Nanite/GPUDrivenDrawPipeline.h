@@ -121,16 +121,18 @@ public:
     // Get the final output texture that was rendered to
     rhi::ResourceHandle GetFinalOutputTexture() const { return final_color_texture_; }
 
-    // T4.6.5 part 20: ResolveVisibilityBuffer output (RGBA8_UNorm, W×H from VisibilityBufferConfig).
-    // Written when the test/caller invokes ResolveVisibilityBuffer() after Execute().
+    // T4.6.5 part 23: ResolveVisibilityBuffer output (RGBA8_UNorm, W×H from
+    // VisibilityBufferConfig). Populated automatically at the end of Execute().
     rhi::ResourceHandle GetResolveOutputTexture() const { return resolve_output_texture_; }
 
     // T4.6.5 part 22.1: diagnostic accessor for tests to read back visibility_buffer_
     // (R32_UInt) directly and verify Stage2 actually rasterized geometry.
     rhi::ResourceHandle GetVisibilityBuffer() const { return visibility_buffer_; }
 
-    // T4.6.5 part 20: Dispatch the resolve compute shader. Caller invokes this
-    // after Execute() inside the same cmd buffer. Reads visibility_buffer_ +
+    // T4.6.5 part 23: Dispatch the resolve compute shader. Auto-called at the
+    // end of Execute() — external callers no longer need to invoke this. Kept
+    // public for rare cases where a caller wants to re-resolve with different
+    // state (e.g., after a debug-mode change). Reads visibility_buffer_ +
     // final_depth_texture_, writes resolve_output_texture_.
     void ResolveVisibilityBuffer(rhi::RHICommandBuffer* cmd_buffer);
 

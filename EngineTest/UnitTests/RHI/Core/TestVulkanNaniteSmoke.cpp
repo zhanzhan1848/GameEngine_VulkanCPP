@@ -515,12 +515,11 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
                                    cull.GetResults(), /*frame=*/0, /*cbIdx=*/1);
     TEST_ASSERT(drawOk, "GPUDrivenDrawPipeline::Execute");
 
-    // T4.6.5 part 20 + part 22: dispatch the resolve compute shader. Stage2
-    // now rasterizes meshlets into visibility_buffer_ (R32_UINT packed
-    // meshlet_id/primitive_id). Resolve decodes visibility_buffer_ + depth
-    // into RGBA8 colors. Non-background pixels prove Stage2 actually
-    // rasterized visible geometry.
-    gpuDraw.ResolveVisibilityBuffer(vcmd);
+    // T4.6.5 part 23: ResolveVisibilityBuffer is now auto-called at the end of
+    // Execute(). Stage2 rasterized meshlets into visibility_buffer_ (R32_UINT
+    // packed meshlet_id/primitive_id); Execute's auto-resolve decodes that +
+    // depth into RGBA8 colors. Non-background pixels in the readback prove
+    // Stage2 actually rasterized visible geometry.
 
     TEST_ASSERT(vcmd->End() && vcmd->Submit(0) && vcmd->WaitForCompletion(),
                 "Submit cull + draw");

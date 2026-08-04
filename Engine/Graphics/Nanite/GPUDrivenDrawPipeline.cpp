@@ -2014,6 +2014,11 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
         return false;
     }
 
+    // T4.6.5 part 23: auto-resolve. Execute() now leaves resolve_output_texture_
+    // populated; callers no longer need a separate ResolveVisibilityBuffer() call.
+    // Self-gates on INVALID handles, so this is safe even when Stage2 was skipped.
+    ResolveVisibilityBuffer(cmd_buffer);
+
     if (frame_index == 0) {
 //        std::cout << "[GPUDrivenDrawPipeline] Pipeline execution complete" << std::endl;
 //        std::cout << "  Total Draw Calls: " << results_.total_draw_calls << std::endl;
