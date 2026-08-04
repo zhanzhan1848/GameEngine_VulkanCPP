@@ -1,67 +1,426 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Text;
 using System.Text.Json;
 using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.Components;
+using PrimalEditor_Avalonia.GameProject.Documents;
+using PrimalEditor_Avalonia.GameProject.Identifiers;
 
 namespace PrimalEditor_Avalonia.GameProject;
 
 public static class Serializer
 {
-    private static readonly JsonSerializerOptions Options = new()
-    {
-        WriteIndented = true,
-        IncludeFields = false,
-    };
-
     public static void SaveProject(Project project, string? path = null)
     {
+        ArgumentNullException.ThrowIfNull(project);
         var filePath = path ?? project.FullPath;
+        var partialPath = filePath + ".partial";
+        var document = ToDocument(project);
+        if (!document.IsValid) throw new InvalidDataException("Project manifest is invalid.");
+
         try
         {
             var directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+            var json = JsonSerializer.Serialize(document, ProjectDocument.JsonOptions) + Environment.NewLine;
+            using (var stream = new FileStream(partialPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
             {
-                Directory.CreateDirectory(directory);
+                writer.Write(json);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
             }
 
-            var json = JsonSerializer.Serialize(project, Options);
-            File.WriteAllText(filePath, json);
+            var validation = JsonSerializer.Deserialize<ProjectDocument>(File.ReadAllText(partialPath), ProjectDocument.JsonOptions);
+            if (validation is not { IsValid: true }) throw new InvalidDataException("Project manifest validation failed.");
+            File.Move(partialPath, filePath, overwrite: true);
             Logger.Info($"Project saved: {filePath}");
         }
-        catch (Exception ex)
+        catch
         {
-            Logger.Error($"Failed to save project: {filePath}", ex);
+            try { if (File.Exists(partialPath)) File.Delete(partialPath); } catch { }
             throw;
         }
     }
 
     public static Project? LoadProject(string filePath)
     {
+        if (!File.Exists(filePath))
+        {
+            Logger.Error($"Project file not found: {filePath}");
+            return null;
+        }
+
         try
         {
-            if (!File.Exists(filePath))
+            using var json = JsonDocument.Parse(File.ReadAllText(filePath));
+            if (!json.RootElement.TryGetProperty("SchemaVersion", out var version) ||
+                version.GetInt32() != ProjectDocument.CurrentSchemaVersion)
             {
-                Logger.Error($"Project file not found: {filePath}");
+                Logger.Warning($"Project requires migration before loading: {filePath}");
                 return null;
             }
 
-            var json = File.ReadAllText(filePath);
-            var project = JsonSerializer.Deserialize<Project>(json, Options);
-            if (project != null)
-            {
-                Logger.Info($"Project loaded: {filePath}");
-            }
-            return project;
-        }
-        catch (JsonException ex)
-        {
-            Logger.Error($"Project file is corrupted: {filePath}", ex);
-            return null;
+            var document = json.RootElement.Deserialize<ProjectDocument>(ProjectDocument.JsonOptions);
+            if (document is not { IsValid: true }) return null;
+            return FromDocument(document, filePath);
         }
         catch (Exception ex)
         {
             Logger.Error($"Failed to load project: {filePath}", ex);
             return null;
+        }
+    }
+
+    public static ProjectDocument ToDocument(Project project)
+    {
+        var sceneGuids = project.Scenes.Select(scene => scene.Guid).ToList();
+        return new ProjectDocument
+        {
+            ProjectGuid = project.Guid,
+            Name = project.Name,
+            BuildConfig = project.BuildConfigName,
+            DefaultScene = project.ActiveScene?.Guid,
+            Scenes = sceneGuids,
+            RenderSettings = new RenderSettingsDocument()
+        };
+    }
+
+    /// <summary>
+    /// Build a <see cref="Project"/> skeleton from a manifest without
+    /// touching the disk for the per-scene payloads. Each entry in
+    /// <see cref="ProjectDocument.Scenes"/> becomes a placeholder
+    /// <see cref="Scene"/> with an empty entity list; the caller is
+    /// responsible for filling them in via
+    /// <see cref="LoadProjectScenesAsync"/> (or the synchronous
+    /// <see cref="LoadProjectScenes"/>) right after this returns.
+    /// </summary>
+    public static Project FromDocument(ProjectDocument document, string filePath)
+    {
+        var fullPath = Path.GetFullPath(filePath);
+        var project = new Project
+        {
+            Guid = document.ProjectGuid,
+            CurrentSchemaVersion = document.SchemaVersion,
+            Name = Path.GetFileNameWithoutExtension(fullPath),
+            Path = Path.GetDirectoryName(fullPath) ?? string.Empty,
+            BuildConfigName = document.BuildConfig
+        };
+
+        foreach (var sceneGuid in document.Scenes)
+            project.Scenes.Add(new Scene { Guid = sceneGuid, Name = sceneGuid.Value.ToString("D") });
+
+        if (document.DefaultScene is { } defaultGuid)
+            project.ActiveScene = project.Scenes.FirstOrDefault(scene => scene.Guid == defaultGuid);
+
+        return project;
+    }
+
+    /// <summary>
+    /// Convert a v2 scene guid to its on-disk path inside the project's
+    /// Scenes directory. The file name is the guid + ".scene"; the
+    /// directory is supplied by the caller so this stays a pure
+    /// projection.
+    /// </summary>
+    public static string ScenePath(Project project, SceneGuid guid)
+        => Path.Combine(project.ScenesPath, guid.Value.ToString("D") + Scene.Extension);
+
+    /// <summary>
+    /// Populate every placeholder <see cref="Scene"/> in <paramref name="project"/>
+    /// by deserializing the matching <c>{guid}.scene</c> file under
+    /// <see cref="Project.ScenesPath"/>. Scenes whose file is missing
+    /// are logged and left as empty placeholders so the project still
+    /// opens. Failures are logged and skipped — opening a half-broken
+    /// project is preferable to refusing to open entirely.
+    /// </summary>
+    public static void LoadProjectScenes(Project project)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        if (string.IsNullOrEmpty(project.Path)) return;
+
+        for (var i = 0; i < project.Scenes.Count; i++)
+        {
+            var scene = project.Scenes[i];
+            var path = ScenePath(project, scene.Guid);
+            if (!File.Exists(path))
+            {
+                Logger.Warning($"Scene payload missing, keeping empty placeholder: {path}");
+                continue;
+            }
+
+            try
+            {
+                var loaded = LoadScene(path);
+                if (loaded == null)
+                {
+                    Logger.Warning($"Scene payload unreadable, keeping empty placeholder: {path}");
+                    continue;
+                }
+                // Preserve the placeholder's position so that
+                // WorldEditorViewModel.ActiveScene setter (which
+                // compares by reference) keeps working. We swap the
+                // placeholder's content in-place.
+                scene.Name = loaded.Name;
+                scene.Entities.Clear();
+                foreach (var entity in loaded.Entities)
+                    scene.Entities.Add(entity);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Scene payload failed to load ({path}): {ex.Message}");
+            }
+        }
+    }
+
+    public static SceneDocument ToSceneDocument(Scene scene)
+    {
+        var entities = new List<EntityDocument>();
+        var seen = new HashSet<EntityGuid>();
+        FlattenEntities(scene.Entities, null, seen, entities);
+
+        return new SceneDocument
+        {
+            SceneGuid = scene.Guid,
+            Name = scene.Name,
+            Entities = entities
+        };
+    }
+
+    private static void FlattenEntities(IEnumerable<GameEntity> entities, EntityGuid? parentGuid, HashSet<EntityGuid> seen, List<EntityDocument> output)
+    {
+        foreach (var entity in entities)
+        {
+            // Editor mutations (OnAddEntityClick) can leave a child on both
+            // scene.Entities and parent.Children simultaneously. Dedupe by
+            // EntityGuid so the file is written exactly once.
+            if (!seen.Add(entity.EntityGuid)) continue;
+
+            var entityDoc = new EntityDocument
+            {
+                EntityGuid = entity.EntityGuid,
+                Name = entity.Name,
+                IsEnabled = entity.IsEnabled,
+                ParentEntityGuid = parentGuid,
+                Components = new List<ComponentDocument>()
+            };
+
+            foreach (var component in entity.Components)
+            {
+                var componentJson = component switch
+                {
+                    Transform transform => JsonSerializer.SerializeToElement(transform, SceneDocument.JsonOptions),
+                    MeshRendererComponent renderer => JsonSerializer.SerializeToElement(renderer, SceneDocument.JsonOptions),
+                    MaterialOverrideComponent overrideComp => JsonSerializer.SerializeToElement(overrideComp, SceneDocument.JsonOptions),
+                    LightComponent light => JsonSerializer.SerializeToElement(light, SceneDocument.JsonOptions),
+                    CameraComponent camera => JsonSerializer.SerializeToElement(camera, SceneDocument.JsonOptions),
+                    PrimalEditor_Avalonia.Components.PrefabInstanceComponent prefabInstance => JsonSerializer.SerializeToElement(prefabInstance, SceneDocument.JsonOptions),
+                    PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent crossScene => JsonSerializer.SerializeToElement(crossScene, SceneDocument.JsonOptions),
+                    _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
+                };
+                var componentDoc = new ComponentDocument
+                {
+                    Type = GetComponentTypeDiscriminator(component),
+                    Data = componentJson
+                };
+                entityDoc.Components.Add(componentDoc);
+            }
+
+            output.Add(entityDoc);
+
+            if (entity.Children.Count > 0)
+            {
+                FlattenEntities(entity.Children, entity.EntityGuid, seen, output);
+            }
+        }
+    }
+
+    private static string GetComponentTypeDiscriminator(Component component)
+    {
+        return component switch
+        {
+            Transform => "transform",
+            MeshRendererComponent => "meshRenderer",
+            MaterialOverrideComponent => "materialOverride",
+            LightComponent => "light",
+            CameraComponent => "camera",
+            PrimalEditor_Avalonia.Components.PrefabInstanceComponent => "prefabInstance",
+            PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent => "crossSceneReference",
+            _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
+        };
+    }
+
+    public static Scene FromSceneDocument(SceneDocument document)
+    {
+        var scene = new Scene(document.Name)
+        {
+            Guid = document.SceneGuid
+        };
+
+        var entityMap = new Dictionary<EntityGuid, GameEntity>();
+
+        foreach (var entityDoc in document.Entities)
+        {
+            if (entityMap.ContainsKey(entityDoc.EntityGuid))
+            {
+                throw new InvalidOperationException($"Duplicate EntityGuid detected: {entityDoc.EntityGuid}");
+            }
+
+            var entity = new GameEntity(entityDoc.Name)
+            {
+                EntityGuid = entityDoc.EntityGuid,
+                IsEnabled = entityDoc.IsEnabled,
+                ParentScene = scene
+            };
+
+            foreach (var componentDoc in entityDoc.Components)
+            {
+                var component = DeserializeComponent(componentDoc);
+                if (component != null)
+                {
+                    entity.Components.Add(component);
+                }
+            }
+
+            entityMap[entityDoc.EntityGuid] = entity;
+            if (entityDoc.ParentEntityGuid is null) scene.Entities.Add(entity);
+        }
+
+        ValidateAndBuildHierarchy(document, entityMap);
+
+        return scene;
+    }
+
+    private static Component? DeserializeComponent(ComponentDocument componentDoc)
+    {
+        return componentDoc.Type.ToLowerInvariant() switch
+        {
+            "transform" => JsonSerializer.Deserialize<Transform>(componentDoc.Data.GetRawText()),
+            "meshrenderer" => JsonSerializer.Deserialize<MeshRendererComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "materialoverride" => JsonSerializer.Deserialize<MaterialOverrideComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "light" => JsonSerializer.Deserialize<LightComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "camera" => JsonSerializer.Deserialize<CameraComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "prefabinstance" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.PrefabInstanceComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "crossscenereference" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            _ => throw new NotSupportedException($"Unknown component type discriminator: '{componentDoc.Type}'")
+        };
+    }
+
+    private static void ValidateAndBuildHierarchy(SceneDocument document, Dictionary<EntityGuid, GameEntity> entityMap)
+    {
+        var visited = new HashSet<EntityGuid>();
+        var recursionStack = new HashSet<EntityGuid>();
+
+        foreach (var entityDoc in document.Entities)
+        {
+            if (entityDoc.ParentEntityGuid is { } parentGuid)
+            {
+                if (!entityMap.TryGetValue(parentGuid, out var parentEntity))
+                {
+                    throw new InvalidOperationException($"Parent EntityGuid '{parentGuid}' not found for entity '{entityDoc.EntityGuid}'");
+                }
+
+                if (entityMap.TryGetValue(entityDoc.EntityGuid, out var childEntity))
+                {
+                    childEntity.Parent = parentEntity;
+                    parentEntity.Children.Add(childEntity);
+
+                    if (!visited.Contains(entityDoc.EntityGuid))
+                    {
+                        if (HasCycle(entityDoc.EntityGuid, document, entityMap, visited, recursionStack))
+                        {
+                            throw new InvalidOperationException($"Cycle detected in entity hierarchy starting from EntityGuid '{entityDoc.EntityGuid}'");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static bool HasCycle(EntityGuid current, SceneDocument document, Dictionary<EntityGuid, GameEntity> entityMap, HashSet<EntityGuid> visited, HashSet<EntityGuid> recursionStack)
+    {
+        visited.Add(current);
+        recursionStack.Add(current);
+
+        var entityDoc = document.Entities.FirstOrDefault(e => e.EntityGuid == current);
+        if (entityDoc != null && entityDoc.ParentEntityGuid is { } parentGuid)
+        {
+            if (recursionStack.Contains(parentGuid))
+            {
+                return true;
+            }
+
+            if (!visited.Contains(parentGuid))
+            {
+                if (HasCycle(parentGuid, document, entityMap, visited, recursionStack))
+                {
+                    return true;
+                }
+            }
+        }
+
+        recursionStack.Remove(current);
+        return false;
+    }
+
+    public static void SaveScene(Scene scene, string scenePath)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        var partialPath = scenePath + ".partial";
+        var document = ToSceneDocument(scene);
+        if (document.SceneGuid.Value == Guid.Empty)
+        {
+            throw new InvalidDataException("Scene Guid cannot be empty.");
+        }
+
+        try
+        {
+            var directory = Path.GetDirectoryName(scenePath);
+            if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+            var json = JsonSerializer.Serialize(document, SceneDocument.JsonOptions) + Environment.NewLine;
+            using (var stream = new FileStream(partialPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+            {
+                writer.Write(json);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
+            var validation = JsonSerializer.Deserialize<SceneDocument>(File.ReadAllText(partialPath), SceneDocument.JsonOptions);
+            if (validation is not { IsValid: true }) throw new InvalidDataException("Scene document validation failed.");
+            File.Move(partialPath, scenePath, overwrite: true);
+            Logger.Info($"Scene saved: {scenePath}");
+        }
+        catch
+        {
+            try { if (File.Exists(partialPath)) File.Delete(partialPath); } catch { }
+            throw;
+        }
+    }
+
+    public static Scene? LoadScene(string scenePath)
+    {
+        var partialPath = scenePath + ".partial";
+        if (!File.Exists(scenePath))
+        {
+            try { if (File.Exists(partialPath)) File.Delete(partialPath); } catch { }
+            Logger.Error($"Scene file not found: {scenePath}");
+            return null;
+        }
+
+        try
+        {
+            using var json = JsonDocument.Parse(File.ReadAllText(scenePath));
+            var document = json.RootElement.Deserialize<SceneDocument>(SceneDocument.JsonOptions);
+            if (document is not { IsValid: true })
+                throw new InvalidDataException($"Scene document is invalid: {scenePath}");
+            return FromSceneDocument(document);
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException or InvalidOperationException)
+        {
+            throw new InvalidDataException($"Failed to load scene '{scenePath}': {ex.Message}", ex);
         }
     }
 }
