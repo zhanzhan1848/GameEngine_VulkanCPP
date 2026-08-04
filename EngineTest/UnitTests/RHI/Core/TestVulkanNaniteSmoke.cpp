@@ -410,6 +410,32 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
               << " ClusterRefCount=" << snap.GetClusterRefCount() << std::endl;
     TEST_ASSERT(snap.GetInstanceCount() >= 1, "snapshot has 1+ instance");
 
+    // 6b. Depth texture + HZBSystem for occlusion culling.
+    // 256×256 matches Test 1 dimensions. Camera at z=5 with sphere radius=1
+    // fills the near field; clearing depth to 0.5 means "geometry at mid-depth
+    // is visible everywhere" → HZB mip chain reports full visibility → sphere
+    // passes the occlusion test in Stage5.
+    constexpr u32 kDepthW = 256, kDepthH = 256;
+    TextureDesc depthDesc{
+        {kDepthW, kDepthH, 1}, 1, 1,
+        DataFormat::D32_Float,
+        TextureType::Texture2D,
+        TextureUsage::DepthStencil | TextureUsage::CopySource | TextureUsage::ShaderResource,
+        GPUMemoryUsage::Static,
+        "Test3_HZBDepth"
+    };
+    ResourceHandle depthTex = fx.base->CreateTexture(depthDesc);
+    TEST_ASSERT(depthTex != handles::INVALID_RESOURCE, "CreateTexture depthTex");
+
+    HZBSystem hzb;
+    HZBSystem::Config hzbCfg{};
+    hzbCfg.max_width = kDepthW;
+    hzbCfg.max_height = kDepthH;
+    hzbCfg.min_mip_size = 8;
+    hzbCfg.enable_compression = false;
+    hzbCfg.generate_on_gpu = true;
+    TEST_ASSERT(hzb.Initialize(fx.base, hzbCfg), "HZBSystem::Initialize");
+
     // 7. Pipeline initialization + cross-wiring.
     GPUDrivenDrawPipeline& gpuDraw = GPUDrivenDrawPipeline::Get();
     VisibilityBufferConfig visCfg{};
@@ -422,14 +448,20 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
 
     GPUCullingPipeline& cull = GPUCullingPipeline::Get();
     CullingConfig cullCfg{};
-    cullCfg.enable_occlusion_culling = false;  // skip HZB
+    cullCfg.enable_occlusion_culling = true;   // exercise HZB visibility path
     cullCfg.enable_lod_selection = false;
     cullCfg.enable_streaming_feedback = false;
     TEST_ASSERT(cull.Initialize(fx.base, cullCfg),
                 "GPUCullingPipeline::Initialize");
 
     cull.SetGPUDrawPipeline(&gpuDraw);
-    cull.SetForcePassAll(true);  // bypass visibility culling math
+    // ForcePassAll=true bypasses stage4 frustum/backface (stage4 has a separate
+    // bug with this snapshot's worldAABB that drops instance_count to 0 when
+    // ForcePassAll=false). We keep ForcePassAll=true to isolate the HZB path,
+    // which is the new code surface exercised in Part 19. Stage5 occlusion
+    // culling runs unconditionally — driven by enable_occlusion_culling=true.
+    cull.SetForcePassAll(true);
+    cull.SetHZBSystem(&hzb);      // wire HZB texture to descriptor slot 8
     gpuDraw.SetCullingPipeline(&cull);
 
     // 8. Execute: snapshot upload → cull → draw.
@@ -438,6 +470,24 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     TEST_ASSERT(vcmd->Reset() && vcmd->Begin(), "Begin");
 
     snap.UploadToGPUBuffers(vcmd);
+
+    // Render-pass clear depth to 1.0 (far plane = "no occluders present"),
+    // then build HZB. HZB stores closest-geometry depth per tile; with depth
+    // = far everywhere, Stage5 occlusion test passes for all clusters in frustum.
+    // (Clearing to a mid-value like 0.5 false-occludes the sphere which sits at
+    // NDC depth ~0.98 with camera at z=5, near=0.1, far=100.)
+    RenderPassDesc depthPassDesc{};
+    depthPassDesc.depthAttachment.texture = depthTex;
+    depthPassDesc.depthAttachment.format = DataFormat::D32_Float;
+    depthPassDesc.depthAttachment.loadOp = LoadAction::Clear;
+    depthPassDesc.depthAttachment.storeOp = StoreAction::Store;
+    depthPassDesc.depthAttachment.clearValue.depth = 1.0f;
+    vcmd->BeginRenderPass(depthPassDesc);
+    vcmd->EndRenderPass();
+
+    HZBSystem::BuildResult hzbResult = hzb.BuildHZB(depthTex, vcmd);
+    TEST_ASSERT(hzbResult.hzb_texture != handles::INVALID_RESOURCE, "BuildHZB hzb_texture");
+    TEST_ASSERT(hzbResult.mip_levels >= 1, "BuildHZB mip_levels >= 1");
 
     bool cullOk = cull.Execute(vcmd, snap, viewMat, projMat, nullptr, 0);
     TEST_ASSERT(cullOk, "GPUCullingPipeline::Execute");
@@ -518,6 +568,8 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     fx.base->DestroyBuffer(readback);
     gpuDraw.Shutdown();
     cull.Shutdown();
+    hzb.Shutdown();
+    fx.base->DestroyTexture(depthTex);
     snap.Shutdown();
     cluster::remove(clusterComp);
     game_entity::remove(entity.get_id());
