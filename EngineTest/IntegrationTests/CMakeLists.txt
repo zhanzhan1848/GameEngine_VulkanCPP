@@ -604,8 +604,27 @@ if(APPLE)
         FOLDER "EngineTest/IntegrationTests")
     target_compile_definitions(TestWFCRuinsRestart PRIVATE DEBUG _DEBUG)
 
+    # 38. TestWFCRuinsRendering (WFC Phase C.1 T27 visual smoke binary)
+    # Live Metal window + StandardRenderPipeline. Boots engine, registers 15
+    # catalog meshes (5 primitive + 10 ruins placeholders), runs an 8×4×8
+    # ruins-only solver to completion, spawns collapsed cells as ECS entities,
+    # renders kHeadlessFrameCap frames, exits. Smoke asserts ≥ 50 cells
+    # collapsed; visual quality is human-reviewed.
+    add_executable(TestWFCRuinsRendering
+        "Main.cpp"
+        "Graphics/WFC/TestWFCRuinsRendering.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestWFCRuinsRendering)
+    target_include_directories(TestWFCRuinsRendering PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC
+    )
+    target_compile_definitions(TestWFCRuinsRendering PRIVATE "TEST_WFC_RUINS_RENDERING=1" "TEST_RENDERER=0")
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall TestWFCRuinsMixedCategories TestWFCRuinsRestart)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall TestWFCRuinsMixedCategories TestWFCRuinsRestart TestWFCRuinsRendering)
 
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)

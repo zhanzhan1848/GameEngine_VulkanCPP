@@ -54,6 +54,8 @@
 #include "TestMaterialPreviewEditor.h"
 #elif TEST_WFC_RENDERING
 #include "Graphics/WFC/TestWFCRendering.h"
+#elif TEST_WFC_RUINS_RENDERING
+#include "Graphics/WFC/TestWFCRuinsRendering.h"
 #elif TEST_WFC_STREAMING
 #include "Graphics/WFC/TestWFCStreaming.h"
 #else
