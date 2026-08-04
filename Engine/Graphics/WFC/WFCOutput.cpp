@@ -2,6 +2,7 @@
 #include "WFCStepBuffer.h"
 #include "WFCTileRegistry.h"
 #include "WFCTypes.h"
+#include "RuinsMaterialPalette.h"
 
 #include <vector>
 
@@ -32,6 +33,15 @@ void WritePointToSet(const WFCStep& s, const WFCTileRegistry& registry,
     ps.SetAttr(out_idx, pcg::PCGAttr::MeshIndex,
                static_cast<f32>(static_cast<u32>(tile.mesh_handles[0])));
     ps.SetAttr(out_idx, pcg::PCGAttr::TechniqueIndex, 0.0f);
+
+    // Ruins tint: look up the tile's palette entry and write the linear-RGB
+    // tint into BaseColorR/G/B. Primitive tiles have no tint (helper returns
+    // nullptr) — PCGEntityFactory defaults those to white (1,1,1).
+    if (const RuinsMaterial* mat = GetRuinsMaterialForTile(static_cast<u32>(s.tile))) {
+        ps.SetAttr(out_idx, pcg::PCGAttr::BaseColorR, mat->albedo_tint.x);
+        ps.SetAttr(out_idx, pcg::PCGAttr::BaseColorG, mat->albedo_tint.y);
+        ps.SetAttr(out_idx, pcg::PCGAttr::BaseColorB, mat->albedo_tint.z);
+    }
 }
 
 // Phase B.2: shared drain loop. Pulls everything out of the buffer into a

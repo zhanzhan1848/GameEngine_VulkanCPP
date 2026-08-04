@@ -44,4 +44,26 @@ extern const RuinsMaterial kRuinsPalette[kRuinsPaletteCount];
 // given process" and not assert the value.
 u32 GetRuinsMaterialId(u32 palette_idx);
 
+// Maps a catalog tile_id to its ruins-style material tint. Primitive tiles
+// (id 0..4) return nullptr so callers can leave the default white tint
+// intact. Ruins tiles (id 5..14) return a pointer into kRuinsPalette.
+//
+// Used by WFCOutput::WritePointToSet to populate BaseColorR/G/B attrs on
+// each spawned PCG point so the renderer's GBuffer shader multiplies the
+// default white albedo texture by the per-tile tint (`out.albedo =
+// albedoSample * in.instanceBaseColor` in GBuffer.metal:204).
+//
+// Mapping (informed by the tile name + palette intent):
+//   5  broken_cube       → 0 stone_gray
+//   6  mossy_cube        → 2 moss_green
+//   7  collapsed_pillar  → 3 wood_brown
+//   8  rubble_pile       → 4 rubble_earth
+//   9  cracked_wall      → 6 cracked_concrete
+//   10 vine_cube         → 7 vine_cube_avg
+//   11 weathered_stone   → 5 weathered_lime
+//   12 broken_corner_in  → 1 stone_dark
+//   13 broken_corner_out → 0 stone_gray
+//   14 debris_small      → 4 rubble_earth
+const RuinsMaterial* GetRuinsMaterialForTile(u32 tile_id);
+
 } // namespace primal::graphics::wfc

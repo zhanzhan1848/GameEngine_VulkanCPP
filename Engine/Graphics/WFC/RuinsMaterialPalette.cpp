@@ -38,4 +38,22 @@ u32 GetRuinsMaterialId(u32 palette_idx) {
     return palette_idx;
 }
 
+const RuinsMaterial* GetRuinsMaterialForTile(u32 tile_id) {
+    // Primitive tiles (0..4) have no ruins tint — caller leaves default white.
+    // Ruins tiles (5..14) map to a palette entry by visual intent (see header).
+    switch (tile_id) {
+        case 5:  return &kRuinsPalette[0];  // broken_cube       → stone_gray
+        case 6:  return &kRuinsPalette[2];  // mossy_cube        → moss_green
+        case 7:  return &kRuinsPalette[3];  // collapsed_pillar  → wood_brown
+        case 8:  return &kRuinsPalette[4];  // rubble_pile       → rubble_earth
+        case 9:  return &kRuinsPalette[6];  // cracked_wall      → cracked_concrete
+        case 10: return &kRuinsPalette[7];  // vine_cube         → vine_cube_avg
+        case 11: return &kRuinsPalette[5];  // weathered_stone   → weathered_lime
+        case 12: return &kRuinsPalette[1];  // broken_corner_in  → stone_dark
+        case 13: return &kRuinsPalette[0];  // broken_corner_out → stone_gray
+        case 14: return &kRuinsPalette[4];  // debris_small      → rubble_earth
+        default: return nullptr;
+    }
+}
+
 } // namespace primal::graphics::wfc
