@@ -92,10 +92,15 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
     // Triple-buffered output textures (RGBA16_Float for HDR)
+    // T4.6.5 part 24.3 (B5 fix): CopySource required because the output is
+    // blitted FROM into ColorHistoryManager each frame
+    // (ColorHistoryManager::CopyColorTexture at line 225). Without
+    // TRANSFER_SRC_BIT, vkCmdBlitImage triggers
+    // VUID-vkCmdBlitImage-srcImage-00219.
     TextureDesc outputDesc{};
     outputDesc.size = {render_width, render_height, 1};
     outputDesc.format = DataFormat::RGBA16_Float;
-    outputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+    outputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource | TextureUsage::CopySource;
     outputDesc.memoryUsage = GPUMemoryUsage::Static;
     for (int i = 0; i < 3; ++i)
         output_textures_[i] = device->CreateTexture(outputDesc);
