@@ -1,5 +1,6 @@
 #include "DeferredLightingModule.h"
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
+#include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
@@ -140,12 +141,63 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     }
 
     // T4.6.5 part 24.4 (B2 fix): 1x1 white fallback texture.
+    // T4.6.5 part 24.9 (B7 fix): on Vulkan, initialize the texture with a
+    // 4-byte staging copy + barrier to ShaderResource. Without this, the
+    // texture stays in UNDEFINED layout and descriptor writes (which hardcode
+    // SHADER_READ_ONLY_OPTIMAL) trigger VUID-vkCmdDraw-None-09600 when the
+    // bound descriptor is read at the deferred lighting draw.
     TextureDesc fallbackDesc{};
     fallbackDesc.size = {1, 1, 1};
     fallbackDesc.format = DataFormat::RGBA8_UNorm;
     fallbackDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
     fallbackDesc.memoryUsage = GPUMemoryUsage::Static;
     fallback_tex_ = device->CreateTexture(fallbackDesc);
+
+    if (fallback_tex_ != handles::INVALID_RESOURCE &&
+        device->GetPlatform() == RHIPlatform::Vulkan) {
+        u8 white_pixel[4] = { 255, 255, 255, 255 };
+        BufferDesc staging{};
+        staging.size = 4;
+        staging.memoryUsage = GPUMemoryUsage::Dynamic;
+        ResourceHandle stagingHandle = device->CreateBuffer(staging);
+        if (stagingHandle != handles::INVALID_RESOURCE) {
+            void* mapped = device->MapBuffer(stagingHandle);
+            if (mapped) {
+                std::memcpy(mapped, white_pixel, 4);
+                device->UnmapBuffer(stagingHandle);
+            }
+            SyncHandle fence = device->CreateSync();
+            auto cmdHandle = device->CreateCommandBuffer(CommandQueueType::Graphics);
+            auto* cmd = GetCommandBuffer(cmdHandle);
+            if (cmd && cmd->Begin()) {
+                BufferTextureCopyRegion region{};
+                region.bufferOffset = 0;
+                region.imageSubresource.baseArrayLayer = 0;
+                region.imageSubresource.layerCount = 1;
+                region.imageOffset = {0, 0, 0};
+                region.imageExtent = {1, 1, 1};
+                cmd->CopyBufferToTexture(stagingHandle, fallback_tex_, &region, 1);
+
+                ResourceBarrier toSRV;
+                toSRV.resource = fallback_tex_;
+                toSRV.beforeState = ResourceState::CopyDest;
+                toSRV.afterState = ResourceState::ShaderResource;
+                toSRV.subresource = RHI_ALL_SUBRESOURCES;
+                toSRV.queueFamily = 0xFFFFFFFF;
+                cmd->InsertBarrier(&toSRV, 1);
+
+                cmd->End();
+                QueueSubmitInfo submitInfo{};
+                submitInfo.cmdBuffer = cmdHandle;
+                submitInfo.signalFence = fence;
+                device->Submit(submitInfo);
+                device->WaitForSync(fence, UINT32_MAX);
+            }
+            device->DestroySync(fence);
+            device->DestroyCommandBuffer(cmdHandle);
+            device->DestroyBuffer(stagingHandle);
+        }
+    }
 
     // Graphics pipeline
     if (vertex_shader != handles::INVALID_SHADER && pixel_shader != handles::INVALID_SHADER) {

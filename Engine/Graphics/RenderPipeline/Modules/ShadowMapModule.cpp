@@ -186,6 +186,16 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     ShadowMapOutputs outputs{};
     if (!gpu_draw_pipeline_ || !inputs.scene_snapshot) return outputs;
 
+    // T4.6.5 part 24.9 (B7 fix): skip shadow passes entirely on empty scene.
+    // ExecuteShadowRaster + ExecuteShadowDepthBlit already self-guard via the
+    // INVALID-buffer check, but the ShadowFilter dispatch at the tail still
+    // references sm0/sm1 (R32_Float) which are never written in empty scene,
+    // staying UNDEFINED → VUID-vkCmdDraw-None-09600 (color aspect UNDEFINED).
+    if (inputs.scene_snapshot->GetInstanceCount() == 0 ||
+        inputs.scene_snapshot->GetClusterRefCount() == 0) {
+        return outputs;
+    }
+
     u32 cbIdx = inputs.current_buffer_index % 3;
     math::v3 lightDir = Normalize(inputs.light_direction);
 

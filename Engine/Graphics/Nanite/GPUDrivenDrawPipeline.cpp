@@ -3335,6 +3335,18 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
     if (!shadow_initialized_ || !cmd_buffer) return false;
     if (cascade_index > 1) return false;
 
+    // T4.6.5 part 24.9 (B7 fix): mirror ExecuteShadowRaster's empty-scene
+    // guard. In empty scene, ExecuteShadowRaster early-returns leaving
+    // shadow_depth_rt_X in UNDEFINED layout; without this guard, the blit
+    // shader reads UNDEFINED depth + writes UNDEFINED shadow_map_X via
+    // StorageImage, triggering VUID-vkCmdDraw-None-09600 (2 depth + 1 color
+    // layout UNDEFINED errors per frame).
+    if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE) {
+        return true;
+    }
+
     u32 bi = buffer_index % 3;
     auto& frame = shadow_frames_[bi];
     auto& ds = frame.shadow_blit_descriptor_set[cascade_index];
