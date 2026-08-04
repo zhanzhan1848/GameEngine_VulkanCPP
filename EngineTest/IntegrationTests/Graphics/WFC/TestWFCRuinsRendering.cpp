@@ -144,6 +144,9 @@ bool WFCRuinsRenderingTestCase::Initialize() {
 
 void WFCRuinsRenderingTestCase::RegisterWFCCatalogMeshes() {
     using namespace primal::content;
+    // NOTE: do NOT add `using namespace primal;` here — global 'id' from
+    // objc/runtime.h collides with primal::id and creates ambiguity. Use
+    // explicit primal::graphics:: / primal::id:: qualifications below.
 
     auto* fwd = pipeline ? pipeline->GetForwardRenderer() : nullptr;
     const u32 slot_base = fwd ? fwd->GetMeshInfoCount() : 0;
@@ -165,39 +168,66 @@ void WFCRuinsRenderingTestCase::RegisterWFCCatalogMeshes() {
     pipeline->RegisterMeshEntity(corner_out_geo, noTex, 3);
     pipeline->RegisterMeshEntity(pillar_geo,     noTex, 3);
 
-    // Tile id 5..14 = ruins placeholders. Sizes vary slightly so different
-    // ruins tiles read as visually distinct in the rendered frame.
-    //   5: broken_cube        — 0.95 cube (slightly smaller, like eroded)
-    //   6: mossy_cube         — 1.0 cube (full size, "mossy" reads as normal cube here)
-    //   7: collapsed_pillar   — short flat box (like a fallen pillar)
-    //   8: rubble_pile        — 0.9 × 0.5 × 0.9 flat box (matches bounds_extents.y=0.5)
-    //   9: cracked_wall       — 1.0 × 1.0 × 1.0 (box)
-    //  10: vine_cube          — 0.98 cube
-    //  11: weathered_stone    — 0.92 cube
-    //  12: broken_corner_in   — corner_in shape (reuse)
-    //  13: broken_corner_out  — corner_out shape (reuse)
-    //  14: debris_small       — 0.5 cube (matches bounds_extents 0.4)
-    auto ruins_5_broken_cube       = create_box_mesh(0.95f, 0.95f, 0.95f);
-    auto ruins_6_mossy_cube        = create_box_mesh(1.0f,  1.0f,  1.0f);
-    auto ruins_7_collapsed_pillar  = create_box_mesh(0.6f,  0.3f,  1.6f);
-    auto ruins_8_rubble_pile       = create_box_mesh(0.9f,  0.5f,  0.9f);
-    auto ruins_9_cracked_wall      = create_box_mesh(1.0f,  1.0f,  1.0f);
-    auto ruins_10_vine_cube        = create_box_mesh(0.98f, 0.98f, 0.98f);
-    auto ruins_11_weathered_stone  = create_box_mesh(0.92f, 0.92f, 0.92f);
-    auto ruins_12_broken_corner_in = create_corner_in_mesh(1.0f, 1.0f, 1.0f);
-    auto ruins_13_broken_corner_out = create_corner_out_mesh(1.0f, 1.0f, 1.0f);
-    auto ruins_14_debris_small     = create_box_mesh(0.5f,  0.25f, 0.5f);
+    // Tile id 5..14 = ruins. Real factory calls — each writes into an
+    // RHIMeshAsset and the caller registers via RegisterProceduralMesh.
+    // Variants within a multi-variant tile share the same mesh (tile-level
+    // visual distinction is the smoke goal; variant-level distinction
+    // would require 4 meshes per multi-variant tile = 30+ total, deferred).
+    //   5: broken_cube        — winding-flipped cube, PosXYZ corner broken
+    //   6: mossy_cube         — weathered cube, low-amplitude jitter (moss-like)
+    //   7: collapsed_pillar   — pillar box tilted 30° around +X (toppled)
+    //   8: rubble_pile        — 4-6 small boxes scattered near floor
+    //   9: cracked_wall       — plain cube (crack encoding needs UV2, TODO)
+    //  10: vine_cube          — weathered cube, medium amplitude + different seed
+    //  11: weathered_stone    — weathered cube, larger amplitude (rough surface)
+    //  12: broken_corner_in   — broken cube (corner_in L-shape substituted by cube)
+    //  13: broken_corner_out  — broken cube (corner_out octant substituted by cube)
+    //  14: debris_small       — 2-3 tiny boxes scattered near floor
+    auto register_ruins = [&](primal::graphics::rhi::RHIMeshAsset& asset) -> primal::id::id_type {
+        return RegisterProceduralMesh(asset);
+    };
 
-    pipeline->RegisterMeshEntity(ruins_5_broken_cube,        noTex, 3);
-    pipeline->RegisterMeshEntity(ruins_6_mossy_cube,         noTex, 3);
-    pipeline->RegisterMeshEntity(ruins_7_collapsed_pillar,   noTex, 3);
-    pipeline->RegisterMeshEntity(ruins_8_rubble_pile,        noTex, 3);
-    pipeline->RegisterMeshEntity(ruins_9_cracked_wall,       noTex, 3);
-    pipeline->RegisterMeshEntity(ruins_10_vine_cube,         noTex, 3);
-    pipeline->RegisterMeshEntity(ruins_11_weathered_stone,   noTex, 3);
-    pipeline->RegisterMeshEntity(ruins_12_broken_corner_in,  noTex, 3);
-    pipeline->RegisterMeshEntity(ruins_13_broken_corner_out, noTex, 3);
-    pipeline->RegisterMeshEntity(ruins_14_debris_small,      noTex, 3);
+    primal::graphics::rhi::RHIMeshAsset a_broken_cube;
+    create_broken_cube_mesh(a_broken_cube, 1.0f, 1.0f, 1.0f, BrokenCorner::PosXYZ);
+
+    primal::graphics::rhi::RHIMeshAsset a_mossy_cube;
+    create_weathered_cube_mesh(a_mossy_cube, 1.0f, 1.0f, 1.0f, /*seed=*/11u, /*amp=*/0.03f);
+
+    primal::graphics::rhi::RHIMeshAsset a_collapsed_pillar;
+    create_collapsed_pillar_mesh(a_collapsed_pillar, /*radius=*/0.5f, /*height=*/2.0f,
+                                 TiltAxis::PlusX, /*angle_rad=*/0.52f);  // ~30°
+
+    primal::graphics::rhi::RHIMeshAsset a_rubble_pile;
+    create_rubble_pile_mesh(a_rubble_pile, /*seed=*/7u, /*radius=*/0.9f);
+
+    primal::graphics::rhi::RHIMeshAsset a_cracked_wall;
+    create_cracked_wall_mesh(a_cracked_wall, 1.0f, 1.0f, 1.0f, /*seed=*/3u);
+
+    primal::graphics::rhi::RHIMeshAsset a_vine_cube;
+    create_weathered_cube_mesh(a_vine_cube, 1.0f, 1.0f, 1.0f, /*seed=*/23u, /*amp=*/0.08f);
+
+    primal::graphics::rhi::RHIMeshAsset a_weathered_stone;
+    create_weathered_cube_mesh(a_weathered_stone, 0.92f, 0.92f, 0.92f, /*seed=*/41u, /*amp=*/0.15f);
+
+    primal::graphics::rhi::RHIMeshAsset a_broken_corner_in;
+    create_broken_corner_in_mesh(a_broken_corner_in, 1.0f, 1.0f, 1.0f, BrokenCorner::PosXYZ);
+
+    primal::graphics::rhi::RHIMeshAsset a_broken_corner_out;
+    create_broken_corner_out_mesh(a_broken_corner_out, 1.0f, 1.0f, 1.0f, BrokenCorner::NegXPosZ);
+
+    primal::graphics::rhi::RHIMeshAsset a_debris_small;
+    create_debris_small_mesh(a_debris_small, /*seed=*/5u, /*radius=*/0.4f);
+
+    pipeline->RegisterMeshEntity(register_ruins(a_broken_cube),        noTex, 3);
+    pipeline->RegisterMeshEntity(register_ruins(a_mossy_cube),         noTex, 3);
+    pipeline->RegisterMeshEntity(register_ruins(a_collapsed_pillar),   noTex, 3);
+    pipeline->RegisterMeshEntity(register_ruins(a_rubble_pile),        noTex, 3);
+    pipeline->RegisterMeshEntity(register_ruins(a_cracked_wall),       noTex, 3);
+    pipeline->RegisterMeshEntity(register_ruins(a_vine_cube),          noTex, 3);
+    pipeline->RegisterMeshEntity(register_ruins(a_weathered_stone),    noTex, 3);
+    pipeline->RegisterMeshEntity(register_ruins(a_broken_corner_in),   noTex, 3);
+    pipeline->RegisterMeshEntity(register_ruins(a_broken_corner_out),  noTex, 3);
+    pipeline->RegisterMeshEntity(register_ruins(a_debris_small),       noTex, 3);
 
     if (fwd) {
         const u32 after = fwd->GetMeshInfoCount();
