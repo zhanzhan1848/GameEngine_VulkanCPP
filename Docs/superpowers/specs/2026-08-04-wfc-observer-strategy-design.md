@@ -9,6 +9,8 @@
 
 Refactor `WFCObserver` from a concrete class (hardcoded min-entropy binary heap) into a pluggable strategy interface. Ship two standard implementations as core capabilities — `WFCMinEntropyObserver` (existing behavior, migrated) and `WFCDistanceObserver` (new, Euclidean). The Kenney tile showcase gains hotkeys to switch strategy and distance-observer origin at runtime, alongside the existing grid-size and reseed controls.
 
+**Scope:** This spec covers the engine core refactor + Metal (native macOS) application-layer integration only. The Emscripten/WebGPU port for online demo deployment is a separate follow-up spec — see Out of Scope.
+
 ## Motivation
 
 Today `WFCObserver` is a concrete class held by value inside `WFCSolver` (`observer_`). Its only selection strategy is min-entropy. Adding alternative strategies — e.g. distance-from-origin for radial-expansion demos — requires modifying engine source.
@@ -276,6 +278,15 @@ For the demo's N = 1024, both are negligible. Distance becomes a regression cand
 | Modify or new | `EngineTest/UnitTests/Graphics/WFC/TestWFCSolver.cpp` (or similar existing) | `SetObserver` integration tests |
 
 ## Out of Scope / Future Work
+
+- **WASM/Emscripten port of TestKenneyTilePreview** — deferred to a separate follow-up spec (task #126, file TBD). The follow-up covers:
+  - Platform input bridging between `primal::input::get` and `EmscriptenInput`'s `EmscriptenGetKeyState`
+  - Asset handling: embed or preload the `kenney_dungeon_tiles/` directory + `colormap.png` atlas into MEMFS
+  - WASM target wiring in root `CMakeLists.txt` mirroring the `TestDawnWASM` pattern (`add_executable(TestKenneyTilePreviewWASM ...)` under `if(EMSCRIPTEN AND ENABLE_WEBGPU)`)
+  - Online-deployment `shell.html` (canvas + HUD showing current observer strategy + origin preset)
+  - Deployment to the production web environment
+
+  Dependency: this spec must land first — the WASM demo needs the distance observer to be a meaningful showcase of the strategy-switching capability.
 
 - **Other strategies** (BFS, random, weighted, learned priors): not needed for current demos. Adding them is purely additive — new subclasses, no solver changes (open-closed).
 - **Distance observer perf optimization** (priority queue keyed by distance, pre-sorted order): deferred until grids grow large enough to matter.
