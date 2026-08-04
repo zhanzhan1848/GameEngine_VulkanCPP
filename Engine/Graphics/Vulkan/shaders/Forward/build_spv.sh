@@ -40,7 +40,11 @@ declare -a SHADERS=(
     "ForwardWater         vert frag"
     "ForwardTransparent   vert frag"
     "StreamingGBuffer     vert frag"
-    # DeferredLighting special: Path B will use existing compute .spv; see README
+    # T4.6.5 part 24.10: minimal graphics variant for DeferredLightingModule.
+    # The existing DeferredLighting.spv at the parent dir is the compute-shader
+    # variant ported from Dawn WGSL. This graphics variant matches the module's
+    # 9-binding descriptor set layout (Forward/DeferredLighting.vert+frag).
+    "DeferredLighting     vert frag"
 )
 
 for entry in "${SHADERS[@]}"; do

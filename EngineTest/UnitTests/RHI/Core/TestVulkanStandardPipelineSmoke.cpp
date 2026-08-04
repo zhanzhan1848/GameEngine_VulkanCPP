@@ -315,7 +315,10 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     StandardRenderPipeline pipeline;
     TEST_ASSERT(pipeline.Initialize(fx.base), "Initialize");
 
-    // T4.6.5 part 24: Load Blit.vert + Blit.frag as placeholder shaders.
+    // T4.6.5 part 24.10: Load real DeferredLighting.vert/.frag SPIR-V
+    // (matches DeferredLightingModule's 9-binding descriptor set layout).
+    // Blit.vert/.frag still used for FinalBlitModule (its 2-binding layout
+    // matches Blit shader declaration).
     auto loadSpv = [](const char* relpath) -> std::vector<u8> {
         std::ifstream f(relpath, std::ios::binary | std::ios::ate);
         if (!f) return {};
@@ -325,11 +328,21 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
         f.read(reinterpret_cast<char*>(bytes.data()), sz);
         return bytes;
     };
+    auto deferredVsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting.vert.spv");
+    auto deferredFsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting.frag.spv");
+    TEST_ASSERT(!deferredVsBytes.empty() && !deferredFsBytes.empty(),
+                "Load DeferredLighting.vert.spv + .frag.spv");
     auto blitVsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Blit.vert.spv");
     auto blitFsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Blit.frag.spv");
     TEST_ASSERT(!blitVsBytes.empty() && !blitFsBytes.empty(),
                 "Load Blit.vert.spv + Blit.frag.spv");
 
+    ShaderHandle deferredVs = fx.base->CreateShader(
+        deferredVsBytes.data(), deferredVsBytes.size(), ShaderStage::Vertex, "main");
+    ShaderHandle deferredFs = fx.base->CreateShader(
+        deferredFsBytes.data(), deferredFsBytes.size(), ShaderStage::Pixel, "main");
+    TEST_ASSERT(deferredVs != handles::INVALID_SHADER, "CreateShader DeferredLighting.vert");
+    TEST_ASSERT(deferredFs != handles::INVALID_SHADER, "CreateShader DeferredLighting.frag");
     ShaderHandle blitVs = fx.base->CreateShader(
         blitVsBytes.data(), blitVsBytes.size(), ShaderStage::Vertex, "main");
     ShaderHandle blitFs = fx.base->CreateShader(
@@ -338,8 +351,8 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     TEST_ASSERT(blitFs != handles::INVALID_SHADER, "CreateShader Blit.frag");
 
     StandardRenderPipeline::ShaderHandles handles;
-    handles.deferred_vs = blitVs;
-    handles.deferred_ps = blitFs;
+    handles.deferred_vs = deferredVs;
+    handles.deferred_ps = deferredFs;
     handles.blit_vs = blitVs;
     handles.blit_ps = blitFs;
     pipeline.SetShaderHandles(handles);

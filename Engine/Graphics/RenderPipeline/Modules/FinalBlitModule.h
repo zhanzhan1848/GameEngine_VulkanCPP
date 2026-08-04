@@ -38,6 +38,9 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET
     };
+    // T4.6.5 part 24.10: separate Sampler binding for Vulkan — Metal has
+    // implicit default samplers, Vulkan requires an explicit descriptor.
+    rhi::SamplerHandle default_sampler_{rhi::handles::INVALID_SAMPLER};
 };
 
 } // namespace primal::graphics
