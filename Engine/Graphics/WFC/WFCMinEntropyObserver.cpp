@@ -9,9 +9,15 @@ namespace primal::graphics::wfc {
 namespace {
 // std::*_heap use comparator with "greater" semantics for a min-heap:
 // returns true when a should be ordered AFTER (i.e. deeper than) b.
+// On entropy ties, break by row-major scan order (x varies fastest, then y,
+// then z) so the first-popped cell is deterministic — matches the
+// WFCDistanceObserver tie-break contract.
 bool ComparePairGreater(const std::pair<u8, WFCGridCoord>& a,
                         const std::pair<u8, WFCGridCoord>& b) {
-    return a.first > b.first;
+    if (a.first != b.first) return a.first > b.first;
+    if (a.second.z != b.second.z) return a.second.z > b.second.z;
+    if (a.second.y != b.second.y) return a.second.y > b.second.y;
+    return a.second.x > b.second.x;
 }
 } // namespace
 

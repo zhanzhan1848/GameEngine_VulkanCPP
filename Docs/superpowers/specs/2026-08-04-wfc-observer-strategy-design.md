@@ -78,7 +78,7 @@ private:
 };
 ```
 
-Implementation: byte-for-byte the current `WFCObserver.cpp` body (binary min-heap with lazy deletion). Migration is mechanical.
+Implementation: byte-for-byte the current `WFCObserver.cpp` body (binary min-heap with lazy deletion), with one **determinism hardening** change — the heap comparator gains a row-major tie-break on equal entropy. Without it, `std::make_heap` is not stable and the popped cell on a tie is unspecified. The tie-break matches `WFCDistanceObserver`'s row-major contract, so both strategies agree on what "first cell" means.
 
 ### `WFCDistanceObserver` — new radial-expansion strategy
 
