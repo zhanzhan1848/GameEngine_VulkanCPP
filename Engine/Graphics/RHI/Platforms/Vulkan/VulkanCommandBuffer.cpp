@@ -572,16 +572,63 @@ void VulkanCommandBuffer::TransitionImageLayout(VulkanTexture* tex, VkImageLayou
     b.subresourceRange.baseArrayLayer = 0;
     b.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 
+    // T4.6.5 part 22.1: stage masks must match the access masks above, or
+    // validation rejects the barrier (VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02819).
+    // The old code hardcoded TRANSFER_BIT for everything except UNDEFINED; that
+    // broke SHADER_READ_ONLY_OPTIMAL src (access=SHADER_READ, stage=TRANSFER)
+    // — sync2 reports it as ALL_TRANSFER + SHADER_READ mismatch. Stage must
+    // reflect the LAST operation that wrote/read the texture in oldLayout.
     VkPipelineStageFlags srcStage, dstStage;
-    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
-        srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    } else {
-        srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    switch (oldLayout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+            srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            // Could be fragment or compute read; ALL_GRAPHICS_BIT doesn't
+            // include compute. Use ALL_COMMANDS_BIT for the conservative case
+            // — validation accepts ALL_COMMANDS paired with any access mask.
+            srcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            srcStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_GENERAL:
+            // UA/storage image — typically compute, but could be any shader.
+            srcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            break;
+        default:
+            srcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            break;
     }
-    if (newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    } else {
-        dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    switch (newLayout) {
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            dstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            dstStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_GENERAL:
+            dstStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            break;
+        default:
+            dstStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            break;
     }
 
     vkCmdPipelineBarrier(cmdBuffer_, srcStage, dstStage, 0,

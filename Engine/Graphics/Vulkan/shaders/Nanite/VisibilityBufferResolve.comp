@@ -49,11 +49,16 @@ void main() {
         return;
     }
 
-    uint visibility_data = texture(visibility_buffer, vec2(gid)).r;
+    // T4.6.5 part 22.1 FIX: gid is integer pixel coordinate, not normalized UV.
+    // Metal texture.read(uint2) uses integer coords; the GLSL port mistakenly
+    // used texture(sampler, vec2) which expects normalized [0,1] UV — sampling
+    // at vec2(0..63) wraps/repeats and never hits the actual pixel data, so
+    // resolve output stays at the background-blue branch.
+    uint visibility_data = texelFetch(visibility_buffer, ivec2(gid), 0).r;
     uint triangle_id = visibility_data & 0x00FFFFFFu;
     uint material_id = (visibility_data >> 24u) & 0xFFu;
 
-    float depth = texture(depth_buffer, vec2(gid)).r;
+    float depth = texelFetch(depth_buffer, ivec2(gid), 0).r;
 
     vec4 final_color = vec4(0.0, 0.2, 0.4, 1.0);
 

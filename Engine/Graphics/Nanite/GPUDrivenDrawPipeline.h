@@ -125,6 +125,10 @@ public:
     // Written when the test/caller invokes ResolveVisibilityBuffer() after Execute().
     rhi::ResourceHandle GetResolveOutputTexture() const { return resolve_output_texture_; }
 
+    // T4.6.5 part 22.1: diagnostic accessor for tests to read back visibility_buffer_
+    // (R32_UInt) directly and verify Stage2 actually rasterized geometry.
+    rhi::ResourceHandle GetVisibilityBuffer() const { return visibility_buffer_; }
+
     // T4.6.5 part 20: Dispatch the resolve compute shader. Caller invokes this
     // after Execute() inside the same cmd buffer. Reads visibility_buffer_ +
     // final_depth_texture_, writes resolve_output_texture_.
@@ -231,7 +235,9 @@ private:
                                   const RenderSceneSnapshot& scene_snapshot,
                                   const math::m4x4& view_matrix,
                                   const math::m4x4& projection_matrix,
-                                  u32 frame_index);
+                                  const CullingResults& culling_results,
+                                  u32 frame_index,
+                                  u32 buffer_index);
 
     bool Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffer,
                              const RenderSceneSnapshot& scene_snapshot,
@@ -354,6 +360,19 @@ private:
     // T4.6.5 part 20: per-frame DrawConstants CB for the resolve compute shader + one-shot descriptor write flag.
     rhi::ResourceHandle resolve_cb_{ rhi::handles::INVALID_RESOURCE };
     bool resolve_descriptor_written_{ false };
+
+    // T4.6.5 part 22: Stage2 visibility-buffer raster resources.
+    // visibility_cb_ holds DrawConstants (3 m4x4 + 4 u32 = 208 bytes, padded to 256B).
+    // visibility_descriptor_set_ is a per-frame set wrapping 5 bindings:
+    //   0=UBO (visibility_cb_), 1=SSBO (global_meshlet_buffer_),
+    //   2=SSBO (global_meshlet_vertices_buffer_), 3=SSBO (global_meshlet_triangles_buffer_),
+    //   4=SSBO (global_vertex_buffer_).
+    // visibility_descriptor_set_layout_ retained so we can allocate descriptor sets
+    //   from it after pipeline creation (was previously destroyed immediately).
+    rhi::ResourceHandle visibility_cb_{ rhi::handles::INVALID_RESOURCE };
+    rhi::DescriptorSetHandle visibility_descriptor_set_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    rhi::DescriptorSetLayoutHandle visibility_descriptor_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    bool visibility_descriptor_written_{ false };
 
     // ---- Shadow Mapping Resources ----
     ShadowFrameResources shadow_frames_[3];                         // Triple-buffered per-frame

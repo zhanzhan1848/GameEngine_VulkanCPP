@@ -392,6 +392,14 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     // marked is_visible=0, and Stage4 with ForcePassAll=false skipped it.
     m4x4 viewMat = make_identity_m4x4();
     viewMat.columns[3][2] = -5.0f;
+    // T4.6.5 part 22.1: projection uses right-handed Vulkan/Metal convention
+    // (NDC z [0,1], camera looks down -Z). P[3][2] = -1 so clip.w = -view.z,
+    // which is positive for visible points (view.z negative). The prior
+    // +1 sign produced clip.w < 0 for all sphere vertices → clipped by GPU,
+    // empty visibility_buffer_, all-background resolve. The HZB occlusion
+    // test passes anyway because the shader defensively returns "visible"
+    // when clip.w <= 0 (GPUCullingPipeline.wgsl:458-460), but rasterization
+    // has no such out — vertices are simply clipped.
     m4x4 projMat{};
     std::memset(&projMat, 0, sizeof(projMat));
     constexpr float pi = 3.14159265358979323846f;
@@ -401,7 +409,7 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     projMat.columns[0][0] = f / aspect;
     projMat.columns[1][1] = f;
     projMat.columns[2][2] = 50.0f / (0.1f - 100.0f);
-    projMat.columns[2][3] = 1.0f;
+    projMat.columns[2][3] = -1.0f;
     projMat.columns[3][2] = -(0.1f * 100.0f) / (0.1f - 100.0f);
 
     // 6. RenderSceneSnapshot — walks proxies, resolves cluster components,
@@ -454,7 +462,7 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
 
     GPUCullingPipeline& cull = GPUCullingPipeline::Get();
     CullingConfig cullCfg{};
-    cullCfg.enable_occlusion_culling = true;   // exercise HZB visibility path
+    cullCfg.enable_occlusion_culling = true;  // T4.6.5 part 22.1: real HZB occlusion
     cullCfg.enable_lod_selection = false;
     cullCfg.enable_streaming_feedback = false;
     TEST_ASSERT(cull.Initialize(fx.base, cullCfg),
@@ -497,15 +505,21 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     bool cullOk = cull.Execute(vcmd, snap, viewMat, projMat, nullptr, 0);
     TEST_ASSERT(cullOk, "GPUCullingPipeline::Execute");
 
+    // T4.6.5 part 22.1 FIX: GPUDrivenDrawPipeline reads cull results from
+    // slot (cbIdx + N - 1) % N (production pipelining — gpuDraw reads frame
+    // N-1's cull output while cull runs for frame N). For a one-shot test
+    // this means cbIdx=0 reads slot 2 which was never written → DrawIndirect
+    // gets garbage → 0 fragments. Passing cbIdx=1 makes gpuDraw read slot 0
+    // (the slot cull just wrote via cull.Execute(bufIdx=0)).
     bool drawOk = gpuDraw.Execute(vcmd, snap, viewMat, projMat,
-                                   cull.GetResults(), /*frame=*/0, /*cbIdx=*/0);
+                                   cull.GetResults(), /*frame=*/0, /*cbIdx=*/1);
     TEST_ASSERT(drawOk, "GPUDrivenDrawPipeline::Execute");
 
-    // T4.6.5 part 20: dispatch the resolve compute shader. Stage3 renders to
-    // final_color_texture_ (not visibility_buffer_) in this port, so the resolve
-    // shader reads an unwritten visibility_buffer_ and writes background blue to
-    // every pixel. Smoke bar is "non-zero bytes in readback" — proves dispatch
-    // fired + shader executed + imageStore wrote pixels.
+    // T4.6.5 part 20 + part 22: dispatch the resolve compute shader. Stage2
+    // now rasterizes meshlets into visibility_buffer_ (R32_UINT packed
+    // meshlet_id/primitive_id). Resolve decodes visibility_buffer_ + depth
+    // into RGBA8 colors. Non-background pixels prove Stage2 actually
+    // rasterized visible geometry.
     gpuDraw.ResolveVisibilityBuffer(vcmd);
 
     TEST_ASSERT(vcmd->End() && vcmd->Submit(0) && vcmd->WaitForCompletion(),
@@ -563,6 +577,80 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
 
     TEST_ASSERT(instance_count >= 1, "indirect args non-zero instance_count");
 
+    // 9a. T4.6.5 part 22.1: read back visibility_buffer_ directly to verify
+    // Stage2 rasterized geometry. R32_UInt = 4 bytes/pixel. The buffer is
+    // cleared to 0 by the visibility render pass; non-zero u32s indicate
+    // meshlet fragments were written. Also read final_color_texture_ for
+    // Stage3 comparison — both should show non-trivial content.
+    {
+        ResourceHandle visTex = gpuDraw.GetVisibilityBuffer();
+        constexpr u64 kVisBytes = (u64)W * H * 4;
+        BufferDesc visRbDesc{};
+        visRbDesc.size = kVisBytes;
+        visRbDesc.type = BufferType::Raw;
+        visRbDesc.memoryUsage = GPUMemoryUsage::Readback;
+        visRbDesc.name = "VisBuffer_Readback";
+        ResourceHandle visRb = fx.base->CreateBuffer(visRbDesc);
+        TEST_ASSERT(visRb != handles::INVALID_RESOURCE, "CreateBuffer visRb");
+
+        cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        vcmd = fx.vk->GetCommandBuffer(cmd);
+        TEST_ASSERT(vcmd->Reset() && vcmd->Begin(), "Begin vis readback");
+        BufferTextureCopyRegion visRegion{};
+        visRegion.imageSubresource = { 0, 0, 1 };
+        visRegion.imageExtent = { W, H, 1 };
+        vcmd->CopyTextureToBuffer(visTex, visRb, &visRegion, 1);
+        TEST_ASSERT(vcmd->End() && vcmd->Submit(0) && vcmd->WaitForCompletion(),
+                    "Submit vis readback");
+        fx.base->DestroyCommandBuffer(cmd);
+
+        u32* visMapped = static_cast<u32*>(fx.base->MapBuffer(visRb, 0, kVisBytes));
+        if (visMapped) {
+            u32 nonZero = 0;
+            for (u64 i = 0; i < kVisBytes / 4; ++i) {
+                if (visMapped[i] != 0) ++nonZero;
+            }
+            std::cout << "[TestGPUCulling] visibility_buffer_ non-zero u32s: "
+                      << nonZero << "/" << (kVisBytes / 4) << std::endl;
+            TEST_ASSERT(nonZero > 0, "Stage2 wrote visibility_buffer_ (meshlet fragments)");
+            fx.base->UnmapBuffer(visRb);
+        }
+        fx.base->DestroyBuffer(visRb);
+
+        // Also read back final_color_texture_ (Stage3 output) for comparison.
+        ResourceHandle finalTex = gpuDraw.GetFinalOutputTexture();
+        BufferDesc finalRbDesc{};
+        finalRbDesc.size = kVisBytes;  // RGBA16F or RGBA8 = 4 bytes/pixel min
+        finalRbDesc.type = BufferType::Raw;
+        finalRbDesc.memoryUsage = GPUMemoryUsage::Readback;
+        finalRbDesc.name = "FinalColor_Readback";
+        ResourceHandle finalRb = fx.base->CreateBuffer(finalRbDesc);
+        TEST_ASSERT(finalRb != handles::INVALID_RESOURCE, "CreateBuffer finalRb");
+
+        cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        vcmd = fx.vk->GetCommandBuffer(cmd);
+        TEST_ASSERT(vcmd->Reset() && vcmd->Begin(), "Begin final readback");
+        BufferTextureCopyRegion finalRegion{};
+        finalRegion.imageSubresource = { 0, 0, 1 };
+        finalRegion.imageExtent = { W, H, 1 };
+        vcmd->CopyTextureToBuffer(finalTex, finalRb, &finalRegion, 1);
+        TEST_ASSERT(vcmd->End() && vcmd->Submit(0) && vcmd->WaitForCompletion(),
+                    "Submit final readback");
+        fx.base->DestroyCommandBuffer(cmd);
+
+        u8* finalMapped = static_cast<u8*>(fx.base->MapBuffer(finalRb, 0, kVisBytes));
+        if (finalMapped) {
+            u64 nonZero = 0;
+            for (u64 i = 0; i < kVisBytes; ++i) {
+                if (finalMapped[i] != 0) ++nonZero;
+            }
+            std::cout << "[TestGPUCulling] final_color non-zero bytes: "
+                      << nonZero << "/" << kVisBytes << std::endl;
+            fx.base->UnmapBuffer(finalRb);
+        }
+        fx.base->DestroyBuffer(finalRb);
+    }
+
     // 9b. T4.6.5 part 20: read back resolve_output_texture_ to verify the resolve
     // compute shader actually wrote pixels. Pattern mirrors TestVulkanCommandBuffer
     // :222-248 (CopyTextureToBuffer + non-zero byte check). The output is RGBA8_UNorm
@@ -600,6 +688,20 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
             if (resolveMapped[i] != 0) { anyNonZero = true; break; }
         }
         TEST_ASSERT(anyNonZero, "resolve output non-trivial (shader wrote pixels)");
+        // T4.6.5 part 22.1: stronger bar — Stage2 rasterized real geometry via
+        // the rewritten meshlet-aware vertex puller, so the resolve output
+        // should NOT be uniformly background blue (0, 51, 102, 255).
+        u32 nonBgCount = 0;
+        for (u64 i = 0; i + 3 < kResolveBytes; i += 4) {
+            if (resolveMapped[i] != 0   || resolveMapped[i + 1] != 51 ||
+                resolveMapped[i + 2] != 102 || resolveMapped[i + 3] != 255) {
+                ++nonBgCount;
+            }
+        }
+        std::cout << "[TestGPUCulling] resolve non-background pixels: "
+                  << nonBgCount << "/" << (kResolveBytes / 4) << std::endl;
+        TEST_ASSERT(nonBgCount >= 1,
+                    "resolve output has non-background pixels (Stage2 wrote geometry)");
         fx.base->UnmapBuffer(resolveRb);
     }
     fx.base->DestroyBuffer(resolveRb);
