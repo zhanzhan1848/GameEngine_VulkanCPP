@@ -65,6 +65,8 @@ public:
     void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
     void DispatchIndirect(ResourceHandle buffer, u64 offset = 0) override;
     void WriteTimestamp(QueryPoolHandle queryPool, u32 queryIndex) override;
+    // T4.6.5 part 24.2 (B6 fix): GPU-side query pool reset.
+    void ResetQueryPool(QueryPoolHandle queryPool, u32 firstQuery, u32 queryCount) override;
 
     // === 资源操作命令(Phase 3 实现)===
     void MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask,

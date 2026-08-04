@@ -51,7 +51,21 @@ VulkanQueryPool::VulkanQueryPool(VkDevice device, QueryType type, u32 count)
     if (vkCreateQueryPool(device_, &ci, nullptr, &pool_) != VK_SUCCESS) {
         std::cerr << "[VulkanQueryPool] vkCreateQueryPool failed" << std::endl;
         pool_ = VK_NULL_HANDLE;
+        return;
     }
+    // T4.6.5 part 24.2 (B6 fix): Vulkan spec requires queries to be reset
+    // before first use. CPU-side vkResetQueryPool needs the hostQueryReset
+    // device feature enabled (VUID-vkResetQueryPool-None-02665) which the
+    // engine does NOT currently enable. Use GPU-side vkCmdResetQueryPool via
+    // RenderGraph's per-frame cmd buffer reset instead — works without the
+    // feature and is more reliable on MoltenVK.
+}
+
+void VulkanQueryPool::Reset(u32 firstQuery, u32 queryCount) {
+    if (!pool_ || firstQuery + queryCount > count_) return;
+    // NOTE: requires hostQueryReset feature. Not currently enabled — left for
+    // future use if CPU-side reset is needed.
+    vkResetQueryPool(device_, pool_, firstQuery, queryCount);
 }
 
 VulkanQueryPool::~VulkanQueryPool() {

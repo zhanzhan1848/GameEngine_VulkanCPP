@@ -1004,6 +1004,13 @@ void VulkanCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, u32 queryInd
                         qp->GetNativePool(), queryIndex);
 }
 
+void VulkanCommandBuffer::ResetQueryPool(QueryPoolHandle queryPool, u32 firstQuery, u32 queryCount) {
+    VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
+    VulkanQueryPool* qp = vk.GetQueryPool(queryPool);
+    if (!qp) return;
+    vkCmdResetQueryPool(cmdBuffer_, qp->GetNativePool(), firstQuery, queryCount);
+}
+
 } // namespace primal::graphics::rhi
 
 #endif // ENABLE_VULKAN

@@ -177,6 +177,9 @@ public:
     virtual void DestroySync(SyncHandle handle) = 0;
     virtual QueryPoolHandle CreateQueryPool(const QueryPoolDesc& desc) = 0;
     virtual void DestroyQueryPool(QueryPoolHandle handle) = 0;
+    // T4.6.5 part 24.2 (B6 fix): non-pure virtual — backends without query pool
+    // support (Metal, Dawn) inherit empty default.
+    virtual void ResetQueryPool(QueryPoolHandle handle, u32 firstQuery, u32 queryCount) {}
     virtual SamplerHandle CreateSampler(const SamplerDesc& desc) = 0;
     virtual void DestroySampler(SamplerHandle handle) = 0;
     virtual DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) = 0;
@@ -698,6 +701,11 @@ public:
             derived().destroyQueryPoolImpl(handle);
         }
     }
+
+    // T4.6.5 part 24.2 (B6 fix): ResetQueryPool is intentionally NOT overridden
+    // here. The base RHIDeviceBase has a non-pure virtual with empty body —
+    // Metal/Dawn inherit that default. VulkanDevice overrides the virtual
+    // directly. No CRTP shim needed.
 
     /**
      * @brief 销毁采样器

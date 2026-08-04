@@ -287,25 +287,17 @@ QueryPoolHandle VulkanDevice::createQueryPoolImpl(const QueryPoolDesc& desc) {
 
 void VulkanDevice::destroyQueryPoolImpl(QueryPoolHandle handle) {
     if (handle == handles::INVALID_QUERY_POOL) return;
-    VulkanQueryPool* pool = GetQueryPool(handle);
-    if (pool) {
-        VkQueryPool native = pool->GetNativePool();
-        VkDevice dev = device_;
-        if (native != VK_NULL_HANDLE) {
-            gc_.DeferredDestroy([dev, native]() {
-                if (dev != VK_NULL_HANDLE && native != VK_NULL_HANDLE) {
-                    vkDestroyQueryPool(dev, native, nullptr);
-                }
-            });
-        }
-        // 把 native 置 NULL,析构时不再 vkDestroyQueryPool(转移 ownership 给 lambda)
-        // VulkanQueryPool 析构会做 null check
-        // 但当前实现没有 DetachNative — 让 ~VulkanQueryPool 直接 vkDestroyQueryPool 即可,
-        // 然后我们不再 deferred;简化路径。回退:
-    }
-    // 简化:立即 free。VulkanQueryPool 析构在 free_list remove 时触发,vkDestroyQueryPool 同步调用。
-    // 因为 query pool 通常不每帧创建,延迟销毁的收益微小,先保持简单。
+    // T4.6.5 part 24.2 (B9 fix): synchronous destroy. Previous DeferredDestroy
+    // lambda raced with ~VulkanQueryPool's own vkDestroyQueryPool call (no
+    // DetachNative method exists), causing "Couldn't find VkQueryPool" shutdown
+    // errors + GPU lost. Query pools aren't created per-frame, so deferred
+    // destruction adds no value — keep it simple.
     queryPoolAllocator_.Free(static_cast<u32>(handle));
+}
+
+void VulkanDevice::ResetQueryPool(QueryPoolHandle handle, u32 firstQuery, u32 queryCount) {
+    VulkanQueryPool* pool = GetQueryPool(handle);
+    if (pool) pool->Reset(firstQuery, queryCount);
 }
 
 bool VulkanDevice::getQueryPoolResultsImpl(QueryPoolHandle handle, u32 firstQuery,

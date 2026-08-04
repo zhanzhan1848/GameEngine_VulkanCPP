@@ -43,6 +43,16 @@ public:
      */
     bool GetResults(u32 firstQuery, u32 queryCount, void* data, size_t stride);
 
+    /**
+     * @brief 重置查询池中的查询（vkResetQueryPool，CPU 端）
+     * @param firstQuery 起始 query 索引
+     * @param queryCount 重置数量
+     * @details T4.6.5 part 24.2 (B6 fix): Vulkan spec 要求 query 创建后 + 每次
+     *          复用前必须 reset。CPU 端 reset 要求 GPU 不再使用该池（本引擎
+     *          submit+wait 后调用安全）。
+     */
+    void Reset(u32 firstQuery, u32 queryCount);
+
 private:
     VkDevice device_{VK_NULL_HANDLE};
     VkQueryPool pool_{VK_NULL_HANDLE};

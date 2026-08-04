@@ -521,6 +521,16 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
     rhi::QueryPoolHandle queryPool = currentFrameData.queryPool;
     bool enableTimestamp = (queryPool != rhi::handles::INVALID_QUERY_POOL);
 
+    // T4.6.5 part 24.2 (B6 fix): Vulkan spec requires queries to be reset
+    // between uses. Pool is reused across frames (rebuilt only on capacity
+    // growth at line 200); without per-frame reset, every frame after the
+    // first fires VUID-vkCmdWriteTimestamp-None-00830. GPU-side vkCmdResetQueryPool
+    // recorded into the cmd buffer is more reliable than CPU-side vkResetQueryPool
+    // on MoltenVK + validation layer. No-op on Metal/Dawn (empty base virtual).
+    if (enableTimestamp) {
+        cmdBuffer->ResetQueryPool(queryPool, 0, currentFrameData.capacity);
+    }
+
     for (size_t i = 0; i < activePasses_.size(); ++i) {
         auto* pass = activePasses_[i];
         

@@ -486,6 +486,17 @@ public:
      * @param queryIndex 查询索引
      */
     virtual void WriteTimestamp(QueryPoolHandle queryPool, u32 queryIndex) = 0;
+
+    /**
+     * @brief 重置查询池中的查询（GPU 端，vkCmdResetQueryPool）
+     * @param queryPool 查询池句柄
+     * @param firstQuery 起始 query 索引
+     * @param queryCount 重置数量
+     * @details T4.6.5 part 24.2 (B6 fix): Vulkan spec 要求 query 在 cmd buffer
+     *          使用前 reset。GPU 端 reset 比 CPU 端 vkResetQueryPool 在某些
+     *          验证层/MoltenVK 路径上更可靠。Metal/Dawn 实现为 no-op。
+     */
+    virtual void ResetQueryPool(QueryPoolHandle queryPool, u32 firstQuery, u32 queryCount) {}
     
     /**
      * @brief 绘制
