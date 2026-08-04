@@ -142,10 +142,34 @@ public partial class MainWindow : Window
         switch (result)
         {
             case ConfirmResult.Save:
-                PrimalEditor_Avalonia.Common.EditorSaveService.Instance.SaveAll(project);
-                Close();
+                if (PrimalEditor_Avalonia.Common.EditorSaveService.Instance.SaveAll(project))
+                {
+                    e.Cancel = false;
+                    Close();
+                }
+                else
+                {
+                    // SaveAll reported a partial failure. Project stays dirty;
+                    // surface the failures in a follow-up dialog so the user
+                    // knows what didn't make it to disk. The user can choose
+                    // to discard-and-close, retry, or stay open.
+                    var failText = PrimalEditor_Avalonia.Common.EditorSaveService.LastSaveAllFailures.Count == 0
+                        ? "Save failed (no details logged)."
+                        : string.Join("\n", PrimalEditor_Avalonia.Common.EditorSaveService.LastSaveAllFailures);
+                    var failDlg = ConfirmDialog.Create(
+                        "Save failed",
+                        $"{failText}\n\nClose anyway (discard), or cancel and retry?");
+                    var follow = await failDlg.ShowDialogAsync(this);
+                    if (follow == ConfirmResult.Discard)
+                    {
+                        e.Cancel = false;
+                        Close();
+                    }
+                    // else: stay open, project remains dirty.
+                }
                 break;
             case ConfirmResult.Discard:
+                e.Cancel = false;
                 Close();
                 break;
             case ConfirmResult.Cancel:
