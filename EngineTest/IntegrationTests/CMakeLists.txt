@@ -539,8 +539,30 @@ if(APPLE)
         FOLDER "EngineTest/IntegrationTests")
     target_compile_definitions(TestWFCRuinsAdjacencyConsistency PRIVATE DEBUG _DEBUG)
 
+    # 35. TestWFCRuinsSolveSmall (WFC Phase C.1 T25)
+    # Headless, no GPU. Small 3×3×3 Ruins-only solve that requires all 27
+    # cells to collapse to a Ruins-category tile. Tighter than T23: catches
+    # partial-collapse/GivenUp that surfaces only after several cells are
+    # already fixed in place (the failure mode T25 exposed in the catalog).
+    add_executable(TestWFCRuinsSolveSmall
+        Graphics/WFC/TestWFCRuinsSolveSmall.cpp
+    )
+    target_include_directories(TestWFCRuinsSolveSmall PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCRuinsSolveSmall PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCRuinsSolveSmall
+             COMMAND TestWFCRuinsSolveSmall)
+    set_target_properties(TestWFCRuinsSolveSmall PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCRuinsSolveSmall PRIVATE DEBUG _DEBUG)
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall)
 
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)

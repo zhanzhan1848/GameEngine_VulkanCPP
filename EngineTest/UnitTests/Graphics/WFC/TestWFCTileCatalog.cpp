@@ -314,7 +314,7 @@ TestResult TestCatalogPopulate_15TilesAndRuleCount() {
     // tiles share box-like geometry → similar socket signatures → most pairs
     // match. Observed: ~6142 on macOS Clang. Bound at 6500 for cross-platform
     // tolerance (compiler/socket-derivation drift). See commit msg.
-    TEST_ASSERT(rule_count <= 6500u, "<= 6500 adjacency rules (auto-derive upper envelope)");
+    TEST_ASSERT(rule_count <= 10000u, "<= 10000 adjacency rules (cube wildcard + ruins vertical wildcard + auto-derive)");
     return TestResult::Passed;
 }
 

@@ -328,6 +328,31 @@ void WFCTileCatalog::Populate(WFCTileRegistry& registry, TileAdjacencyTable& adj
         }
     }
 
+    // Ruins vertical-stacking wildcard. All 10 ruins tiles are box-derived
+    // geometry with PosY=0xFF / NegY=0x00 signatures — strict + mirror socket
+    // matching rejects vertical stacking. When active_category_mask filters
+    // out the Primitive cube wildcard above (e.g. Ruins-only solves), ruins
+    // tiles dead-end on +Y/-Y and the solver hangs after exhausting restarts.
+    // Hand-write vertical compatibility between every ruins-tile pair so a
+    // ruins-only grid can collapse fully. Side faces (+X/-X/+Z/-Z) are left
+    // to AddAutoFromSockets since ruins side signatures already match.
+    const u32 kFirstRuins = 5;   // broken_cube
+    const u32 kLastRuins  = 14;  // debris_small
+    for (u32 ta = kFirstRuins; ta <= kLastRuins; ++ta) {
+        const u32 va_count = registry.Get(wfc_tile_id{ta}).variant_count;
+        for (u32 va = 0; va < va_count; ++va) {
+            for (u32 tb = kFirstRuins; tb <= kLastRuins; ++tb) {
+                const u32 vb_count = registry.Get(wfc_tile_id{tb}).variant_count;
+                for (u32 vb = 0; vb < vb_count; ++vb) {
+                    adjacency.AddCompatibility(wfc_tile_id{ta}, va, WFCFace::PosY,
+                                               wfc_tile_id{tb}, vb);
+                    adjacency.AddCompatibility(wfc_tile_id{ta}, va, WFCFace::NegY,
+                                               wfc_tile_id{tb}, vb);
+                }
+            }
+        }
+    }
+
     // Auto-derive remaining rules via socket compatibility.
     // skip_existing=true avoids double-counting already-hand-written pairs.
     adjacency.AddAutoFromSockets(registry, /*skip_existing=*/true);
