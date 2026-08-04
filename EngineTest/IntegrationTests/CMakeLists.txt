@@ -561,8 +561,51 @@ if(APPLE)
         FOLDER "EngineTest/IntegrationTests")
     target_compile_definitions(TestWFCRuinsSolveSmall PRIVATE DEBUG _DEBUG)
 
+    # 36. TestWFCRuinsMixedCategories (WFC Phase C.1 T26)
+    # Headless, no GPU. 6×3×6 Primitive+Ruins mixed solve: asserts collapse
+    # completes and primitive share lands in [10%, 50%]. Loose smoke test
+    # catches catastrophic regressions (cube wildcard removed, ruins-only
+    # bias wiping primitives, etc.).
+    add_executable(TestWFCRuinsMixedCategories
+        Graphics/WFC/TestWFCRuinsMixedCategories.cpp
+    )
+    target_include_directories(TestWFCRuinsMixedCategories PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCRuinsMixedCategories PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCRuinsMixedCategories
+             COMMAND TestWFCRuinsMixedCategories)
+    set_target_properties(TestWFCRuinsMixedCategories PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCRuinsMixedCategories PRIVATE DEBUG _DEBUG)
+
+    # 37. TestWFCRuinsRestart (WFC Phase C.1 T26)
+    # Headless, no GPU. 8×4×8 Ruins-only solve on seed=0xDEAD1: asserts the
+    # solver either completes the full 256-cell collapse or restarts ≥ 1
+    # generation. Validates RestartPolicy fires under deadlocks.
+    add_executable(TestWFCRuinsRestart
+        Graphics/WFC/TestWFCRuinsRestart.cpp
+    )
+    target_include_directories(TestWFCRuinsRestart PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCRuinsRestart PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCRuinsRestart
+             COMMAND TestWFCRuinsRestart)
+    set_target_properties(TestWFCRuinsRestart PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCRuinsRestart PRIVATE DEBUG _DEBUG)
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall TestWFCRuinsMixedCategories TestWFCRuinsRestart)
 
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)
