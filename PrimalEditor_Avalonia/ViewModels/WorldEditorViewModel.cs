@@ -133,6 +133,15 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         {
             if (_activeScene != value)
             {
+                // Single sync path: SceneRuntimeSynchronizer. Earlier
+                // iterations also called EngineSync.PushScene and
+                // LoadEntitiesAsync here, but those duplicated the
+                // creation of native entities (one engine entity per
+                // C# GameEntity x2) and left ghost IDs behind on
+                // teardown. Anything that needs the legacy
+                // CreateGameEntity path should call those APIs
+                // explicitly during creation, never from a scene-swap.
+                SceneSynchronizer.Teardown();
                 _activeScene = value;
                 _allEntities.Clear();
                 Entities.Clear();
@@ -145,17 +154,26 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
                     }
                     if (NativeEngineBridge.IsLoaded)
                     {
-                        EngineSync.PushScene(_activeScene);
-                        // Re-import any entity bound to an asset so the
-                        // native mesh content id maps to the entity.
-                        // This restores the editor-side _entityNativeIds
-                        // table on scene load.
-                        _ = LoadEntitiesAsync();
+                        SceneSynchronizer.Sync(_activeScene);
                     }
                 }
                 OnPropertyChanged(nameof(ActiveScene));
             }
         }
+    }
+
+    internal RuntimeEntityMap RuntimeEntityMap { get; } = new();
+    internal RuntimeAssetMap RuntimeAssetMap { get; } = new();
+    internal RuntimeMaterialMap RuntimeMaterialMap { get; } = new();
+    internal SceneRuntimeSynchronizer SceneSynchronizer { get; }
+
+    public WorldEditorViewModel()
+    {
+        SceneSynchronizer = new SceneRuntimeSynchronizer(
+            new NativeEngineBridgeAdapter(),
+            RuntimeEntityMap,
+            RuntimeAssetMap,
+            RuntimeMaterialMap);
     }
 
     public string DebugMessage
@@ -183,6 +201,7 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         {
             entity.Parent.Children.Add(entity);
         }
+        MarkProjectDirty();
     }
 
     public void RemoveEntity(GameEntity entity)
@@ -198,6 +217,7 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         }
         entity.Parent = null;
         entity.ParentScene = null;
+        MarkProjectDirty();
     }
 
     public void AddScene(string name = "New Scene")
@@ -207,21 +227,26 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         _project.Scenes.Add(scene);
         Scenes.Add(scene);
         ActiveScene = scene;
+        MarkProjectDirty();
         PrimalEditor_Avalonia.Common.Logger.Info($"Added scene: {name}");
     }
 
     private static void BuildProjectStatic()
     {
-        PrimalEditor_Avalonia.Common.Logger.Info(
-            "[Build] Placeholder — VS integration not wired in Avalonia build.");
+        var current = ProjectContextLocator.Current;
+        if (current == null)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning("[Build] No active project; skipping.");
+            return;
+        }
+        BuildPipeline.ExecuteRebuild(current);
     }
 
     private void BuildProject()
     {
         var config = _project?.BuildConfigName ?? "(no project)";
-        PrimalEditor_Avalonia.Common.Logger.Info(
-            $"[Build] Placeholder — would build project in '{config}'. " +
-            "(VS integration not wired in Avalonia build.)");
+        PrimalEditor_Avalonia.Common.Logger.Info($"[Build] Starting rebuild in '{config}'.");
+        BuildPipeline.ExecuteRebuild(_project!);
     }
 
     public void RemoveScene(Scene? scene)
@@ -233,7 +258,15 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         {
             ActiveScene = _project.Scenes.FirstOrDefault();
         }
+        MarkProjectDirty();
         PrimalEditor_Avalonia.Common.Logger.Info($"Removed scene: {scene.Name}");
+    }
+
+    public void MarkProjectDirty()
+    {
+        if (_project == null) return;
+        _project.MarkDirty();
+        _activeScene?.MarkDirty();
     }
 
     // Native entity id <-> C# GameEntity mapping. Kept here (not on
@@ -299,11 +332,9 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         }
 
         var entityName = System.IO.Path.GetFileNameWithoutExtension(info.FullPath);
-        var entity = new GameEntity(entityName)
-        {
-            AssetPath = info.FullPath,
-        };
+        var entity = new GameEntity(entityName);
         entity.Components.Add(new Transform { PositionX = posX, PositionY = posY, PositionZ = posZ });
+        entity.Components.Add(new MeshRendererComponent { MeshGuid = new AssetGuid(info.Guid) });
 
         if (NativeEngineBridge.IsLoaded)
         {
@@ -361,6 +392,7 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
     /// can then write back to the engine without the user having to
     /// re-drag the asset.
     /// </summary>
+    [Obsolete("Reads the v1 AssetPath field; v2 scenes use MeshRendererComponent.MeshGuid and are now driven by SceneRuntimeSynchronizer. Retained only for migration tooling.")]
     public async Task LoadEntitiesAsync()
     {
         if (_activeScene == null) return;
