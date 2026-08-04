@@ -377,9 +377,31 @@ void WFCRuinsRenderingTestCase::PumpSolverFrame() {
     if (solver_state_ == WFCSolver::StepResult::Done ||
         solver_state_ == WFCSolver::StepResult::GivenUp) {
         solver_done_ = true;
+        // Print per-tile distribution so a reader can confirm the ruins-only
+        // solve actually used multiple tile kinds (vs. collapsing to a single
+        // tile kind because of an adjacency bug).
+        const auto& cells = grid_->Cells();
+        u32 per_tile[15]{};
+        for (u32 i = 0; i < cells.size(); ++i) {
+            if (!cells[i].collapsed) continue;
+            const u32 tid = static_cast<u32>(cells[i].collapsed_tile);
+            if (tid < 15) ++per_tile[tid];
+        }
         std::cout << "[TestWFCRuinsRendering] solver done: collapses="
                   << total_collapses_ << " restarts=" << total_restarts_
                   << " state=" << static_cast<u32>(solver_state_) << std::endl;
+        std::cout << "[TestWFCRuinsRendering] tile distribution:" << std::endl;
+        static const char* kTileNames[15] = {
+            "cube", "ramp", "corner_in", "corner_out", "pillar",
+            "broken_cube", "mossy_cube", "collapsed_pillar", "rubble_pile",
+            "cracked_wall", "vine_cube", "weathered_stone",
+            "broken_corner_in", "broken_corner_out", "debris_small"
+        };
+        for (u32 t = 0; t < 15; ++t) {
+            if (per_tile[t] == 0) continue;
+            std::cout << "  [" << t << "] " << kTileNames[t]
+                      << ": " << per_tile[t] << std::endl;
+        }
     }
 }
 
@@ -388,13 +410,11 @@ void WFCRuinsRenderingTestCase::PumpSolverFrame() {
 // ============================================================================
 
 void WFCRuinsRenderingTestCase::UpdateCamera() {
-    float cy = std::cos(camera_yaw_);
-    float sy = std::sin(camera_yaw_);
-    float cp = std::cos(camera_pitch_);
-    float sp = std::sin(camera_pitch_);
-    v3 forward{sy * cp, sp, -cy * cp};
+    // Aim camera at grid center (8×4×8 grid → world center ≈ (4, 2, 4)).
+    // The yaw/pitch params still drive camera_pos_ for orbit, but the look-at
+    // target is the grid center, not an arbitrary point along forward.
     v3 up{0, 1, 0};
-    v3 target = camera_pos_ + simd_normalize(forward);
+    v3 target{4.0f, 2.0f, 4.0f};
     m4x4 viewMat = metal::CreateLookAtMatrix(camera_pos_, target, up);
     constexpr float fov = 60.0f * (pi / 180.0f);
     const float aspect = static_cast<float>(window_width_) /

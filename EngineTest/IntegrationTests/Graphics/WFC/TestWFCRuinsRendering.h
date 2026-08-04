@@ -88,8 +88,9 @@ private:
     // the finished state. ~5s @ 60fps.
     static constexpr u64 kHeadlessFrameCap = 300;
 
-    // Camera state.
-    primal::math::v3 camera_pos_{12.0f, 12.0f, 12.0f};
+    // Camera state. Position aims at grid center (4, 2, 4); yaw/pitch now
+    // unused for orbit (kept for future iteration / keyboard control).
+    primal::math::v3 camera_pos_{14.0f, 12.0f, 14.0f};
     float camera_yaw_{0.0f};
     float camera_pitch_{-0.5f};
 };
