@@ -1,5 +1,5 @@
 #include "../../TestFramework.h"
-#include "Engine/Graphics/WFC/WFCObserver.h"
+#include "Engine/Graphics/WFC/WFCMinEntropyObserver.h"
 #include "Engine/Graphics/WFC/WaveGrid.h"
 
 using namespace primal::graphics::wfc;
@@ -23,7 +23,7 @@ TestResult TestWFCObserver_Picks_Minimum_Entropy() {
     SetCellCandidates(grid, {1, 0, 0}, 0b00000011u, 1);
     SetCellCandidates(grid, {2, 0, 0}, 0b00000111u, 2);
 
-    WFCObserver observer;
+    WFCMinEntropyObserver observer;
     observer.Initialize(grid);
     WFCGridCoord picked = observer.PickNextCollapse(grid);
     TEST_ASSERT_EQ(1, picked.x, "Should pick cell with entropy 1 (lowest)");
@@ -39,7 +39,7 @@ TestResult TestWFCObserver_Picks_Invalid_When_All_Collapsed() {
     a.collapsed = true; a.entropy = 0; a.candidate_count = 0;
     b.collapsed = true; b.entropy = 0; b.candidate_count = 0;
 
-    WFCObserver observer;
+    WFCMinEntropyObserver observer;
     observer.Initialize(grid);
     WFCGridCoord picked = observer.PickNextCollapse(grid);
     // Invalid coord: any negative value or out-of-range
@@ -55,7 +55,7 @@ TestResult TestWFCObserver_OnCellChanged_Updates_Heap() {
     SetCellCandidates(grid, {1, 0, 0}, 0b00000011u, 1);
     SetCellCandidates(grid, {2, 0, 0}, 0b00000111u, 2);
 
-    WFCObserver observer;
+    WFCMinEntropyObserver observer;
     observer.Initialize(grid);
     // Now lower cell 2's entropy to 0 (collapsed)
     SetCellCandidates(grid, {2, 0, 0}, 0b00000001u, 1);
