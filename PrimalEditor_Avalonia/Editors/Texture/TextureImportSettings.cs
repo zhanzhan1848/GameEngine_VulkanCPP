@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Text.Json.Nodes;
 using PrimalEditor_Avalonia.Content;
 
 namespace PrimalEditor_Avalonia.Editors.Texture;
@@ -65,5 +66,133 @@ public class TextureImportSettings : IAssetImportSettings
             Depth = r.ReadInt32();
         if (r.BaseStream.Position < r.BaseStream.Length)
             IsNormalMap = r.ReadBoolean();
+    }
+
+    public void FromJson(JsonObject settings)
+    {
+        if (settings.TryGetPropertyValue("Sources", out var sourcesNode) && sourcesNode is JsonArray sourcesArray)
+        {
+            Sources.Clear();
+            foreach (var item in sourcesArray)
+            {
+                if (item is JsonValue value && value.TryGetValue(out string? source))
+                {
+                    Sources.Add(source!);
+                }
+            }
+        }
+
+        if (settings.TryGetPropertyValue("Dimension", out var dimensionNode) && dimensionNode is JsonValue dimensionValue)
+        {
+            if (dimensionValue.TryGetValue(out int dimensionInt))
+            {
+                Dimension = (TextureDimension)dimensionInt;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("MipLevels", out var mipLevelsNode) && mipLevelsNode is JsonValue mipLevelsValue)
+        {
+            if (mipLevelsValue.TryGetValue(out int mipLevels))
+            {
+                MipLevels = mipLevels;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("AlphaThreshold", out var alphaThresholdNode) && alphaThresholdNode is JsonValue alphaThresholdValue)
+        {
+            if (alphaThresholdValue.TryGetValue(out float alphaThreshold))
+            {
+                AlphaThreshold = alphaThreshold;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("PreferBC7", out var preferBC7Node) && preferBC7Node is JsonValue preferBC7Value)
+        {
+            if (preferBC7Value.TryGetValue(out bool preferBC7))
+            {
+                PreferBC7 = preferBC7;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("OutputFormat", out var outputFormatNode) && outputFormatNode is JsonValue outputFormatValue)
+        {
+            if (outputFormatValue.TryGetValue(out int outputFormatInt))
+            {
+                OutputFormat = (TextureFormat)outputFormatInt;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("Compress", out var compressNode) && compressNode is JsonValue compressValue)
+        {
+            if (compressValue.TryGetValue(out bool compress))
+            {
+                Compress = compress;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("IsSRGB", out var isSRGBNode) && isSRGBNode is JsonValue isSRGBValue)
+        {
+            if (isSRGBValue.TryGetValue(out bool isSRGB))
+            {
+                IsSRGB = isSRGB;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("CompressionMode", out var compressionModeNode) && compressionModeNode is JsonValue compressionModeValue)
+        {
+            if (compressionModeValue.TryGetValue(out int compressionModeInt))
+            {
+                CompressionMode = (TextureCompressionMode)compressionModeInt;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("ArraySize", out var arraySizeNode) && arraySizeNode is JsonValue arraySizeValue)
+        {
+            if (arraySizeValue.TryGetValue(out int arraySize))
+            {
+                ArraySize = arraySize;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("Depth", out var depthNode) && depthNode is JsonValue depthValue)
+        {
+            if (depthValue.TryGetValue(out int depth))
+            {
+                Depth = depth;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("IsNormalMap", out var isNormalMapNode) && isNormalMapNode is JsonValue isNormalMapValue)
+        {
+            if (isNormalMapValue.TryGetValue(out bool isNormalMap))
+            {
+                IsNormalMap = isNormalMap;
+            }
+        }
+    }
+
+    public JsonObject ToJson()
+    {
+        var sourcesArray = new JsonArray();
+        foreach (var source in Sources)
+        {
+            sourcesArray.Add(source);
+        }
+
+        return new JsonObject
+        {
+            ["Sources"] = sourcesArray,
+            ["Dimension"] = (int)Dimension,
+            ["MipLevels"] = MipLevels,
+            ["AlphaThreshold"] = AlphaThreshold,
+            ["PreferBC7"] = PreferBC7,
+            ["OutputFormat"] = (int)OutputFormat,
+            ["Compress"] = Compress,
+            ["IsSRGB"] = IsSRGB,
+            ["CompressionMode"] = (int)CompressionMode,
+            ["ArraySize"] = ArraySize,
+            ["Depth"] = Depth,
+            ["IsNormalMap"] = IsNormalMap
+        };
     }
 }

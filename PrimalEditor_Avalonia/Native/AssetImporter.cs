@@ -14,6 +14,9 @@ public enum AssetType
     Mesh,
     Audio,
     Script,
+    Material,
+    Shader,
+    Prefab,
 }
 
 public class ImportedAsset

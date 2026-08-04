@@ -45,14 +45,13 @@ public static class NewProject
     {
         try
         {
-            var scenePath = Path.Combine(project.ScenesPath, scene.Name + ".scene");
+            var sceneGuid = scene.Guid.Value.ToString("D").ToLowerInvariant();
+            var scenePath = System.IO.Path.Combine(project.ScenesPath, $"{sceneGuid}.scene");
             if (!Directory.Exists(project.ScenesPath))
             {
                 Directory.CreateDirectory(project.ScenesPath);
             }
-            var json = System.Text.Json.JsonSerializer.Serialize(scene,
-                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(scenePath, json);
+            Serializer.SaveScene(scene, scenePath);
             Logger.Info($"Scene saved: {scenePath}");
         }
         catch (Exception ex)

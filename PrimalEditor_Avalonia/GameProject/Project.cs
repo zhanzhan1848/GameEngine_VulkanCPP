@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Text.Json.Serialization;
 using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.GameProject.Identifiers;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.GameProject;
@@ -10,7 +11,9 @@ namespace PrimalEditor_Avalonia.GameProject;
 public class Project : ViewModelBase, IDirtyTrackable
 {
     public static string Extension { get; } = ".primal";
-    public static int SchemaVersion { get; } = 1;
+    public static int SchemaVersion { get; } = 2;
+
+    public ProjectGuid Guid { get; set; } = new ProjectGuid(System.Guid.NewGuid());
 
     private string _name = "New Project";
     private string _path = string.Empty;
@@ -36,7 +39,7 @@ public class Project : ViewModelBase, IDirtyTrackable
         }
     }
 
-    [JsonPropertyName("Path")]
+    [JsonIgnore]
     public string Path
     {
         get => _path;
@@ -98,7 +101,7 @@ public class Project : ViewModelBase, IDirtyTrackable
         }
     }
 
-    [JsonPropertyName("Scenes")]
+    [JsonIgnore]
     public ObservableCollection<Scene> Scenes
     {
         get => _scenes;
@@ -119,7 +122,7 @@ public class Project : ViewModelBase, IDirtyTrackable
         }
     }
 
-    [JsonPropertyName("ActiveScene")]
+    [JsonIgnore]
     public Scene? ActiveScene
     {
         get => _activeScene;

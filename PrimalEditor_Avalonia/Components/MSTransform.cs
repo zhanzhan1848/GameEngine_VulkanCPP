@@ -1,9 +1,8 @@
 using System;
-using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.Components;
 
-public class MSTransform : MSComponent<Transform>
+public class MSTransform : MSComponentBase<Transform>
 {
     private float? _posX, _posY, _posZ, _rotX, _rotY, _rotZ, _scaleX, _scaleY, _scaleZ;
 
@@ -65,12 +64,5 @@ public class MSTransform : MSComponent<Transform>
         foreach (var t in SelectedComponents)
             if (Math.Abs(sel(t) - v) > 1e-4f) return null;
         return v;
-    }
-
-    private static bool Same(float? a, float? b)
-    {
-        if (a == null && b == null) return true;
-        if (a == null || b == null) return false;
-        return Math.Abs(a.Value - b.Value) < 1e-4f;
     }
 }

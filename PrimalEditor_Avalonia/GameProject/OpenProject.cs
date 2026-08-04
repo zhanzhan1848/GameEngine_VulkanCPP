@@ -1,5 +1,6 @@
 using System.IO;
 using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.GameProject.Migration;
 
 namespace PrimalEditor_Avalonia.GameProject;
 
@@ -10,6 +11,13 @@ public static class OpenProject
         if (!File.Exists(filePath))
         {
             Logger.Error($"Project file not found: {filePath}");
+            return null;
+        }
+
+        var migration = new ProjectMigrationService().MigrateIfNeeded(filePath);
+        if (!migration.Success)
+        {
+            Logger.Error($"Project migration failed: {migration.ErrorMessage}");
             return null;
         }
 
@@ -26,7 +34,12 @@ public static class OpenProject
             Directory.CreateDirectory(project.TempFolder);
         }
 
-        Logger.Info($"Project opened: {project.FullPath}");
+        // Load every scene referenced by the manifest so the
+        // project doesn't show empty placeholders. Failures are
+        // logged per-scene and the project still opens.
+        Serializer.LoadProjectScenes(project);
+
+        Logger.Info($"Project opened: {project.FullPath} ({project.Scenes.Count} scene(s))");
         return project;
     }
 }

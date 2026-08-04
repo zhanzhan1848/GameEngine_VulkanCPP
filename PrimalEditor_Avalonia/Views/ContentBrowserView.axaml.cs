@@ -249,22 +249,11 @@ public partial class ContentBrowserView : UserControl
                 PrimalEditor_Avalonia.Common.Logger.Warning($"Rename: '{newPath}' already exists");
                 return;
             }
-            if (System.IO.File.Exists(oldPath))
-            {
-                System.IO.File.Move(oldPath, newPath);
-                // Move the sidecar too if it exists.
-                var oldMeta = oldPath + ".meta";
-                if (System.IO.File.Exists(oldMeta))
-                {
-                    System.IO.File.Move(oldMeta, newPath + ".meta");
-                }
-            }
-            else
-            {
-                System.IO.Directory.Move(oldPath, newPath);
-            }
-            AssetRegistry.Unregister(oldPath);
-            AssetRegistry.Register(newPath);
+            // AssetRegistry.RenameAsset moves the file + sidecar in
+            // lockstep and refreshes both the in-memory cache and the
+            // SQLite index with the new relative path. The GUID
+            // baked into the .meta survives.
+            AssetRegistry.RenameAsset(oldPath, newPath);
             vm.RefreshFolders();
         }
         catch (System.Exception ex)
@@ -280,9 +269,27 @@ public partial class ContentBrowserView : UserControl
         var path = vm.SelectedFile.FullPath;
         var name = System.IO.Path.GetFileName(path);
         var isDir = System.IO.Directory.Exists(path);
+
+        // Pre-flight: list dependents so the user understands the
+        // blast radius before pulling the trigger. Direct dependents
+        // only (no recursion); we surface names so the dialog is
+        // meaningful even with a large project.
+        var dependents = AssetRegistry.ListDeletionImpact(path);
+        string impact;
+        if (dependents.Count == 0)
+        {
+            impact = "No other assets reference this one.";
+        }
+        else
+        {
+            var preview = string.Join(", ", dependents.Take(8).Select(d => d.FileName));
+            var more = dependents.Count > 8 ? $", and {dependents.Count - 8} more" : string.Empty;
+            impact = $"{dependents.Count} asset(s) reference this one and will need their GUIDs broken: {preview}{more}.";
+        }
+
         var dlg = PrimalEditor_Avalonia.Views.ConfirmDialog.Create(
             "Delete asset",
-            $"Are you sure you want to delete '{(isDir ? name + "/" : name)}'? This cannot be undone.");
+            $"Are you sure you want to delete '{(isDir ? name + "/" : name)}'? This cannot be undone.\n\n{impact}");
         var top = TopLevel.GetTopLevel(this) as Window;
         if (top == null) return;
         var r = await dlg.ShowDialogAsync(top);

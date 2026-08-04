@@ -2,12 +2,17 @@ using System.Collections.ObjectModel;
 using System.Text.Json.Serialization;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
+using PrimalEditor_Avalonia.GameProject.Identifiers;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.GameProject;
 
 public class Scene : ViewModelBase, IDirtyTrackable
 {
+    public const string Extension = ".scene";
+
+    public SceneGuid Guid { get; set; } = new SceneGuid(System.Guid.NewGuid());
+
     private string _name = "New Scene";
     private bool _isActive;
     private bool _isDirty;

@@ -32,7 +32,13 @@ public sealed class EditorComponentDescriptor
 
 public static class EditorComponentRegistry
 {
-    private static readonly Dictionary<string, EditorComponentDescriptor> _byId = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, EditorComponentDescriptor> _byId = new(StringComparer.Ordinal)
+    {
+        ["transform"] = new("transform", "Transform", typeof(Transform), () => new Transform(), required: true),
+        ["meshRenderer"] = new("meshRenderer", "Mesh Renderer", typeof(MeshRendererComponent), () => new MeshRendererComponent()),
+        ["light"] = new("light", "Light", typeof(LightComponent), () => new LightComponent()),
+        ["camera"] = new("camera", "Camera", typeof(CameraComponent), () => new CameraComponent())
+    };
 
     public static IReadOnlyCollection<EditorComponentDescriptor> All => _byId.Values;
 

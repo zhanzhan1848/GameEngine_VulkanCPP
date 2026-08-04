@@ -130,6 +130,7 @@ public class MainWindowViewModel : ViewModelBase
             {
                 if (_project != null) _project.PropertyChanged -= OnProjectPropertyChanged;
                 _project = value;
+                PrimalEditor_Avalonia.Common.ProjectContextLocator.SetCurrent(value);
                 OnPropertyChanged(nameof(Project));
                 OnPropertyChanged(nameof(ProjectPathDisplay));
                 OnPropertyChanged(nameof(SceneCountDisplay));
@@ -142,8 +143,16 @@ public class MainWindowViewModel : ViewModelBase
                     value.ClearDirty();
                     if (value.ActiveScene != null) value.ActiveScene.ClearDirty();
                     WindowTitle = $"{value.Name} - PrimalEditor Avalonia";
-                    WorldEditor.ActiveScene = value.ActiveScene;
                     PrimalEditor_Avalonia.Content.ContentWatcher.Initialize(value.ContentPath);
+
+                    // SQLite index lives in .Primal/, canonical GUID lives
+                    // in .meta files. Both configured here so every scan
+                    // downstream (AssetRegistry, BuildManifestGenerator)
+                    // is talking to the same database.
+                    var sqlitePath = System.IO.Path.Combine(value.Path, ".Primal", "AssetDatabase.sqlite");
+                    PrimalEditor_Avalonia.Content.AssetRegistry.ConfigureSqliteBackend(sqlitePath);
+                    PrimalEditor_Avalonia.Content.AssetRegistry.Initialize(value.ContentPath, value.Path);
+                    WorldEditor.ActiveScene = value.ActiveScene;
                 }
                 else
                 {

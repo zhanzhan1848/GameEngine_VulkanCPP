@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Text.Json;
 using PrimalEditor_Avalonia.Content;
+using PrimalEditor_Avalonia.Content.Metadata;
 
 namespace PrimalEditor_Avalonia.Common;
 
@@ -19,6 +21,13 @@ public static class AssetImportSettingsStore
     public const uint CurrentVersion = 1;
     public const int MaxSidecarBytes = 4 * 1024 * 1024;
 
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    private static readonly JsonAssetMetaStore JsonStore = new();
+
     public static string SidecarPath(string assetPath) => assetPath + ".meta";
 
     /// <summary>
@@ -35,12 +44,34 @@ public static class AssetImportSettingsStore
         {
             using var fs = File.OpenRead(path);
             if (fs.Length > MaxSidecarBytes) return t;
-            using var br = new BinaryReader(fs);
-            var magic = br.ReadUInt32();
-            if (magic != Magic) return t;
-            var version = br.ReadUInt32();
-            if (version != CurrentVersion) return t; // future version, refuse to misparse
-            t.FromBinary(br);
+
+            var firstBytes = new byte[8];
+            var bytesRead = fs.Read(firstBytes, 0, 8);
+            if (bytesRead < 8) return t;
+
+            var magic = BitConverter.ToUInt32(firstBytes, 0);
+            if (magic == Magic)
+            {
+                var version = BitConverter.ToUInt32(firstBytes, 4);
+                if (version == CurrentVersion)
+                {
+                    fs.Position = 0;
+                    using var br = new BinaryReader(fs);
+                    br.ReadUInt32();
+                    br.ReadUInt32();
+                    t.FromBinary(br);
+                    return t;
+                }
+            }
+
+            fs.Position = 0;
+            using var reader = new StreamReader(fs);
+            var json = reader.ReadToEnd();
+            var document = JsonSerializer.Deserialize<AssetMetaDocument>(json, JsonOptions);
+            if (document?.Settings != null)
+            {
+                t.FromJson(document.Settings);
+            }
             return t;
         }
         catch (Exception ex)
@@ -58,28 +89,37 @@ public static class AssetImportSettingsStore
     public static bool Save<T>(string assetPath, T settings) where T : IAssetImportSettings
     {
         if (settings == null) return false;
-        var path = SidecarPath(assetPath);
-        var partial = path + ".partial";
+
         try
         {
-            var dir = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            using (var fs = File.Create(partial))
-            using (var bw = new BinaryWriter(fs))
+            var document = JsonStore.Read(assetPath);
+            var guid = document?.Guid ?? new AssetGuid(Guid.NewGuid());
+            document = new AssetMetaDocument
             {
-                bw.Write(Magic);
-                bw.Write(CurrentVersion);
-                settings.ToBinary(bw);
-            }
-            if (File.Exists(path)) File.Delete(path);
-            File.Move(partial, path);
-            return true;
+                MetaVersion = AssetMetaDocument.CurrentVersion,
+                Guid = guid,
+                Importer = GetImporterName<T>(),
+                Settings = settings.ToJson()
+            };
+
+            return JsonStore.Write(assetPath, document);
         }
         catch (Exception ex)
         {
-            Logger.Error($"AssetImportSettingsStore: failed to write {path}", ex);
-            try { if (File.Exists(partial)) File.Delete(partial); } catch { }
+            Logger.Error($"AssetImportSettingsStore: failed to write {SidecarPath(assetPath)}", ex);
             return false;
         }
+    }
+
+    private static string GetImporterName<T>() where T : IAssetImportSettings
+    {
+        if (typeof(T) == typeof(PrimalEditor_Avalonia.Editors.Texture.TextureImportSettings))
+            return "TextureImporter";
+        if (typeof(T) == typeof(PrimalEditor_Avalonia.Editors.Geometry.GeometryImportSettings))
+            return "GeometryImporter";
+        if (typeof(T) == typeof(PrimalEditor_Avalonia.Editors.PrimitiveMesh.PrimitiveInitInfo))
+            return "PrimitiveMeshImporter";
+
+        return typeof(T).Name;
     }
 }

@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+             xmlns:components="using:PrimalEditor_Avalonia.Components"
              x:Class="PrimalEditor_Avalonia.Views.PropertiesView"
              x:DataType="vm:PropertiesViewModel">
 
@@ -49,6 +50,106 @@
                 <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"/>
                 <TextBox Grid.Row="0" Grid.Column="2" Text="{Binding ScaleZ, Mode=TwoWay}" Margin="2,0,0,0"/>
             </Grid>
+
+            <Separator Margin="0,10"/>
+
+            <TextBlock Text="Light" FontWeight="SemiBold" FontSize="14"/>
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" Margin="0,3">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Type" VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="0" Grid.Column="1"
+                          ItemsSource="{Binding $parent[Window].DataContext}"
+                          SelectedItem="{Binding Light.LightType, Mode=TwoWay}">
+                    <ComboBoxItem>Directional</ComboBoxItem>
+                    <ComboBoxItem>Point</ComboBoxItem>
+                    <ComboBoxItem>Spot</ComboBoxItem>
+                </ComboBox>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Intensity" VerticalAlignment="Center"/>
+                <TextBox  Grid.Row="1" Grid.Column="1" Text="{Binding Light.Intensity, Mode=TwoWay}"/>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Range" VerticalAlignment="Center"/>
+                <TextBox  Grid.Row="2" Grid.Column="1" Text="{Binding Light.Range, Mode=TwoWay}"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Umbra" VerticalAlignment="Center"/>
+                <TextBox  Grid.Row="3" Grid.Column="1" Text="{Binding Light.UmbraAngle, Mode=TwoWay}"/>
+
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Penumbra" VerticalAlignment="Center"/>
+                <TextBox  Grid.Row="4" Grid.Column="1" Text="{Binding Light.PenumbraAngle, Mode=TwoWay}"/>
+
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="Color RGB" VerticalAlignment="Center"/>
+                <StackPanel Grid.Row="5" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                    <TextBox Text="{Binding Light.ColorR, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding Light.ColorG, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding Light.ColorB, Mode=TwoWay}" Width="60"/>
+                </StackPanel>
+
+                <CheckBox Grid.Row="6" Grid.Column="1"
+                          Content="Cast Shadow"
+                          IsChecked="{Binding Light.CastShadow, Mode=TwoWay}"
+                          Margin="0,4,0,0"/>
+            </Grid>
+
+            <Separator Margin="0,10"/>
+
+            <TextBlock Text="Camera" FontWeight="SemiBold" FontSize="14"/>
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" Margin="0,3">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Projection" VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="0" Grid.Column="1"
+                          SelectedItem="{Binding Camera.Projection, Mode=TwoWay}">
+                    <ComboBoxItem>Perspective</ComboBoxItem>
+                    <ComboBoxItem>Orthographic</ComboBoxItem>
+                </ComboBox>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="FOV (°)" VerticalAlignment="Center"/>
+                <TextBox  Grid.Row="1" Grid.Column="1" Text="{Binding Camera.Fov, Mode=TwoWay}"/>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Near / Far" VerticalAlignment="Center"/>
+                <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                    <TextBox Text="{Binding Camera.NearPlane, Mode=TwoWay}" Width="80"/>
+                    <TextBox Text="{Binding Camera.FarPlane, Mode=TwoWay}" Width="80"/>
+                </StackPanel>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Clear Color" VerticalAlignment="Center"/>
+                <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                    <TextBox Text="{Binding Camera.ClearColorR, Mode=TwoWay}" Width="50"/>
+                    <TextBox Text="{Binding Camera.ClearColorG, Mode=TwoWay}" Width="50"/>
+                    <TextBox Text="{Binding Camera.ClearColorB, Mode=TwoWay}" Width="50"/>
+                    <TextBox Text="{Binding Camera.ClearColorA, Mode=TwoWay}" Width="50"/>
+                </StackPanel>
+
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Ortho Size" VerticalAlignment="Center"/>
+                <TextBox  Grid.Row="4" Grid.Column="1" Text="{Binding Camera.OrthoSize, Mode=TwoWay}"/>
+            </Grid>
+
+            <Separator Margin="0,10"/>
+
+            <TextBlock Text="Mesh Renderer" FontWeight="SemiBold" FontSize="14"/>
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto" Margin="0,3">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Mesh Guid" VerticalAlignment="Center"/>
+                <TextBox  Grid.Row="0" Grid.Column="1" Text="{Binding MeshRenderer.MeshGuid, Mode=TwoWay}"/>
+
+                <CheckBox Grid.Row="1" Grid.Column="1"
+                          Content="Cast Shadow"
+                          IsChecked="{Binding MeshRenderer.CastShadow, Mode=TwoWay}"/>
+                <CheckBox Grid.Row="2" Grid.Column="1"
+                          Content="Receive Shadow"
+                          IsChecked="{Binding MeshRenderer.ReceiveShadow, Mode=TwoWay}"/>
+            </Grid>
+
+            <TextBlock Text="Material Override" FontWeight="SemiBold" FontSize="14" Margin="0,10,0,0"/>
+            <ItemsControl ItemsSource="{Binding MaterialOverrides}" Margin="20,3,0,0">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="components:MaterialOverrideViewModel">
+                        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto" Margin="0,3">
+                            <TextBlock Grid.Column="0" Text="{Binding SlotName}" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                                <TextBox Text="{Binding MaterialGuid, Mode=TwoWay}" Width="220"/>
+                                <Button Content="…" Width="28" Click="OnPickMaterial"/>
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
 
             <TextBlock Text="{Binding MixedValueMessage}"
                        Foreground="Orange" FontStyle="Italic"

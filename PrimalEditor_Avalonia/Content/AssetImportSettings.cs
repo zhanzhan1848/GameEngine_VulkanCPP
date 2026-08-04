@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json.Nodes;
 
 namespace PrimalEditor_Avalonia.Content;
 
@@ -6,6 +7,8 @@ public interface IAssetImportSettings
 {
     void ToBinary(BinaryWriter writer);
     void FromBinary(BinaryReader reader);
+    void FromJson(JsonObject settings);
+    JsonObject ToJson();
 }
 
 public static class AssetImportSettingsExtensions

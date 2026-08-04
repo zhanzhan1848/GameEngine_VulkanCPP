@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json.Nodes;
 using PrimalEditor_Avalonia.Content;
 
 namespace PrimalEditor_Avalonia.Editors.PrimitiveMesh;
@@ -43,5 +44,105 @@ public class PrimitiveInitInfo : IAssetImportSettings
         SmoothingAngle = r.ReadSingle();
         if (r.BaseStream.Position < r.BaseStream.Length)
             OutputName = r.ReadString() ?? "Primitive_Mesh";
+    }
+
+    public void FromJson(JsonObject settings)
+    {
+        if (settings.TryGetPropertyValue("Type", out var typeNode) && typeNode is JsonValue typeValue)
+        {
+            if (typeValue.TryGetValue(out int typeInt))
+            {
+                Type = (PrimitiveMeshType)typeInt;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("SegmentsX", out var segmentsXNode) && segmentsXNode is JsonValue segmentsXValue)
+        {
+            if (segmentsXValue.TryGetValue(out int segmentsX))
+            {
+                SegmentsX = segmentsX;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("SegmentsY", out var segmentsYNode) && segmentsYNode is JsonValue segmentsYValue)
+        {
+            if (segmentsYValue.TryGetValue(out int segmentsY))
+            {
+                SegmentsY = segmentsY;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("SegmentsZ", out var segmentsZNode) && segmentsZNode is JsonValue segmentsZValue)
+        {
+            if (segmentsZValue.TryGetValue(out int segmentsZ))
+            {
+                SegmentsZ = segmentsZ;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("SizeX", out var sizeXNode) && sizeXNode is JsonValue sizeXValue)
+        {
+            if (sizeXValue.TryGetValue(out float sizeX))
+            {
+                SizeX = sizeX;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("SizeY", out var sizeYNode) && sizeYNode is JsonValue sizeYValue)
+        {
+            if (sizeYValue.TryGetValue(out float sizeY))
+            {
+                SizeY = sizeY;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("SizeZ", out var sizeZNode) && sizeZNode is JsonValue sizeZValue)
+        {
+            if (sizeZValue.TryGetValue(out float sizeZ))
+            {
+                SizeZ = sizeZ;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("LOD", out var lodNode) && lodNode is JsonValue lodValue)
+        {
+            if (lodValue.TryGetValue(out int lod))
+            {
+                LOD = lod;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("SmoothingAngle", out var smoothingAngleNode) && smoothingAngleNode is JsonValue smoothingAngleValue)
+        {
+            if (smoothingAngleValue.TryGetValue(out float smoothingAngle))
+            {
+                SmoothingAngle = smoothingAngle;
+            }
+        }
+
+        if (settings.TryGetPropertyValue("OutputName", out var outputNameNode) && outputNameNode is JsonValue outputNameValue)
+        {
+            if (outputNameValue.TryGetValue(out string? outputName))
+            {
+                OutputName = outputName ?? "Primitive_Mesh";
+            }
+        }
+    }
+
+    public JsonObject ToJson()
+    {
+        return new JsonObject
+        {
+            ["Type"] = (int)Type,
+            ["SegmentsX"] = SegmentsX,
+            ["SegmentsY"] = SegmentsY,
+            ["SegmentsZ"] = SegmentsZ,
+            ["SizeX"] = SizeX,
+            ["SizeY"] = SizeY,
+            ["SizeZ"] = SizeZ,
+            ["LOD"] = LOD,
+            ["SmoothingAngle"] = SmoothingAngle,
+            ["OutputName"] = OutputName ?? "Primitive_Mesh"
+        };
     }
 }

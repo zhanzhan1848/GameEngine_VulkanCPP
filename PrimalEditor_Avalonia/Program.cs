@@ -304,6 +304,12 @@ sealed class Program
         Editors.AssetEditorRegistry.Register(
             Native.AssetType.Mesh,
             info => new Editors.Geometry.GeometryEditorViewModel());
+        Editors.AssetEditorRegistry.Register(
+            Native.AssetType.Material,
+            info => new Editors.Material.MaterialEditorViewModel());
+        Editors.AssetEditorRegistry.Register(
+            Native.AssetType.Shader,
+            info => new Editors.Shaders.ShaderEditorViewModel());
     }
 
     private static int RunSerializationVerification()

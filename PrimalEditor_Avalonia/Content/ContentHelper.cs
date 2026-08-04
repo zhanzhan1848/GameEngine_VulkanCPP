@@ -18,6 +18,15 @@ public static class ContentHelper
     private static readonly string[] ScriptExts = {
         ".py", ".lua", ".cs"
     };
+    private static readonly string[] MaterialExts = {
+        ".material"
+    };
+    private static readonly string[] ShaderExts = {
+        ".shader"
+    };
+    private static readonly string[] PrefabExts = {
+        ".prefab"
+    };
 
     public static AssetType GetAssetType(string filePath)
     {
@@ -26,6 +35,9 @@ public static class ContentHelper
         if (Array.IndexOf(MeshExts,   ext) >= 0) return AssetType.Mesh;
         if (Array.IndexOf(AudioExts,  ext) >= 0) return AssetType.Audio;
         if (Array.IndexOf(ScriptExts, ext) >= 0) return AssetType.Script;
+        if (Array.IndexOf(MaterialExts, ext) >= 0) return AssetType.Material;
+        if (Array.IndexOf(ShaderExts,  ext) >= 0) return AssetType.Shader;
+        if (Array.IndexOf(PrefabExts,  ext) >= 0) return AssetType.Prefab;
         return AssetType.Unknown;
     }
 

@@ -53,6 +53,7 @@ public class EngineEntityMap
 /// Call SyncAll to push the current editor scene to the engine; call OnEditorChanged
 /// incrementally to keep the engine in sync as the user edits.
 /// </summary>
+[System.Obsolete("Replaced by SceneRuntimeSynchronizer; retained only for legacy migration tooling. New code should depend on SceneRuntimeSynchronizer and not call PushScene/PushEntity at scene swap time.")]
 public static class EngineSync
 {
     private static readonly EngineEntityMap _map = new();

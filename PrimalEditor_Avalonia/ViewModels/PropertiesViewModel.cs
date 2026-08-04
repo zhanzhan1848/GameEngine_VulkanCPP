@@ -43,6 +43,12 @@ public class PropertiesViewModel : ViewModelBase
     }
 
     public MSTransform? Transform { get; private set; }
+    public MSLight? Light { get; private set; }
+    public MSCamera? Camera { get; private set; }
+    public MSMeshRenderer? MeshRenderer { get; private set; }
+
+    public System.Collections.ObjectModel.ObservableCollection<MaterialOverrideViewModel> MaterialOverrides { get; }
+        = new System.Collections.ObjectModel.ObservableCollection<MaterialOverrideViewModel>();
 
     public GameEntity[] Entities
     {
@@ -52,8 +58,37 @@ public class PropertiesViewModel : ViewModelBase
             if (value != null)
                 foreach (var e in value) ms.SelectedEntities.Add(e);
             MSEntity = ms;
-            Transform = ms.SelectedEntities.Count > 0 ? new MSTransform(ms) : null;
+
+            if (ms.SelectedEntities.Count == 0)
+            {
+                Transform = null;
+                Light = null;
+                Camera = null;
+                MeshRenderer = null;
+                MaterialOverrides.Clear();
+            }
+            else
+            {
+                Transform = new MSTransform(ms);
+                Light = new MSLight(ms);
+                Camera = new MSCamera(ms);
+                MeshRenderer = new MSMeshRenderer(ms);
+                RebuildMaterialOverrides(ms.SelectedEntities);
+            }
             UpdateFromEntities();
+        }
+    }
+
+    private void RebuildMaterialOverrides(System.Collections.Generic.IList<Components.GameEntity> entities)
+    {
+        MaterialOverrides.Clear();
+        if (entities.Count == 0) return;
+        var first = entities[0];
+        var firstOverride = first.GetComponent<Components.MaterialOverrideComponent>();
+        if (firstOverride == null) return;
+        for (int i = 0; i < firstOverride.Slots.Count; i++)
+        {
+            MaterialOverrides.Add(new MaterialOverrideViewModel(firstOverride.Slots[i], i));
         }
     }
 
@@ -179,6 +214,13 @@ public class PropertiesViewModel : ViewModelBase
         OnPropertyChanged(nameof(PosX));   OnPropertyChanged(nameof(PosY));   OnPropertyChanged(nameof(PosZ));
         OnPropertyChanged(nameof(RotX));   OnPropertyChanged(nameof(RotY));   OnPropertyChanged(nameof(RotZ));
         OnPropertyChanged(nameof(ScaleX)); OnPropertyChanged(nameof(ScaleY)); OnPropertyChanged(nameof(ScaleZ));
+
+        Light?.Refresh();
+        Camera?.Refresh();
+        MeshRenderer?.Refresh();
+        OnPropertyChanged(nameof(Light));
+        OnPropertyChanged(nameof(Camera));
+        OnPropertyChanged(nameof(MeshRenderer));
 
         MixedValueMessage = _msEntity.SelectedEntities.Count > 1
             ? "Multiple entities selected - showing first value or '-' for mixed"
