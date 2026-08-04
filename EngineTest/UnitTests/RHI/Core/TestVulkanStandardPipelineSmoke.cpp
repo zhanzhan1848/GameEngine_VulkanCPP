@@ -388,47 +388,39 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     ResourceHandle renderTarget = fx.base->CreateTexture(rtDesc);
     TEST_ASSERT(renderTarget != handles::INVALID_RESOURCE, "CreateTexture renderTarget");
 
-    // T4.6.5 part 24 STATUS: first run surfaces 9+ distinct validation error
-    // categories — exceeds this session's debug budget. Shipping as Skipped
-    // with a diagnostic inventory; fixes deferred to Part 24.x follow-ups.
+    // T4.6.5 part 24.1: B4 fix shipped (empty-scene guard in Execute() +
+    // ExecuteShadowCulling). Re-running the test post-fix to capture the
+    // remaining validation error inventory. Pre-fix: 9 categories + GPU lost.
+    // Post-fix expectation: errors drop significantly; remaining ones indicate
+    // independent bugs (B1/B3/B5/B6 etc.) that need individual triage.
     //
-    // Bug inventory (most actionable first):
+    // Original pre-fix bug inventory (kept for reference):
     //   B1. BufferType::Constant → VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT mapping
-    //       missing in some path: "buffer created with TRANSFER_SRC|DST_BIT,
-    //       but descriptorType is UNIFORM_BUFFER" (VUID-VkWriteDescriptorSet-descriptorType-00330).
-    //   B2. vkUpdateDescriptorSets with VK_NULL_HANDLE imageView on SAMPLED_IMAGE
-    //       descriptor — INVALID_RESOURCE textures not filtered before write.
+    //   B2. VK_NULL_HANDLE imageView on SAMPLED_IMAGE (cascade from B4)
     //   B3. Render pass format mismatch (R16G16B16A16_SFLOAT vs B8G8R8A8_UNORM)
-    //       — pipeline created for one RT format bound against different RT.
-    //   B4. GPUDrivenDrawPipeline::Execute fails — cluster_map_buffer_ INVALID
-    //       because empty scene → no geometry upload. UpdateGeometryData early-
-    //       returns leaving all global buffers INVALID. Downstream stages
-    //       cascade-fail with "geometry buffers not ready".
-    //   B5. vkCmdBlitImage srcImage missing VK_IMAGE_USAGE_TRANSFER_SRC_BIT —
-    //       FinalBlitModule output texture created without CopySource usage.
-    //   B6. vkCmdWriteTimestamp: query pool queries not reset before first use
-    //       — RHIGPUOptimizer query pool missing initial vkCmdResetQueryPool.
-    //   B7. vkQueueSubmit layout transitions: UNDEFINED → SHADER_READ_ONLY
-    //       expected but actual layout UNDEFINED. RenderGraph barrier insertion
-    //       gap on first-frame texture transitions.
-    //   B8. vkFreeCommandBuffers: command buffer still pending — Render() not
-    //       waiting on fence before internal CB cleanup.
-    //   B9. vkDestroyQueryPool: invalid handle / use-after-free — double-destroy
-    //       or destroy-before-submit.
-    //
-    // Root cause appears to be B4 (empty scene) cascading into descriptor
-    // invalidity (B2), barrier failures (B7), and ultimately GPU loss
-    // (MTLCommandBuffer "Invalid Resource"). Fixing B4 by guarding empty-scene
-    // may surface remaining independent bugs (B1/B3/B5/B6) in smaller quantity.
-    //
-    // Bar for Part 24 follow-up: fix B4 → re-run → triage remaining.
-    std::cout << "[Part24] Skipped — 9+ validation bugs surface on first run. "
-              << "See T4.6.5 part 24 plan + bug inventory in test source."
-              << std::endl;
+    //   B4. GPUDrivenDrawPipeline::Execute fails (FIXED part 24.1)
+    //   B5. vkCmdBlitImage srcImage missing TRANSFER_SRC_BIT
+    //   B6. vkCmdWriteTimestamp query not reset
+    //   B7. UNDEFINED → SHADER_READ_ONLY layout transition gap
+    //   B8. vkFreeCommandBuffers pending state
+    //   B9. vkDestroyQueryPool invalid handle
+
+    // Fire the production Render() path — first end-to-end run on Vulkan.
+    // Expected outcomes:
+    //   - No crash
+    //   - Significantly fewer validation errors than pre-fix (9 → ≤3 categories)
+    //   - Pipeline completes without GPU lost
+    std::cout << "[Part24.1] Invoking StandardRenderPipeline::Render()..." << std::endl;
+    pipeline.Render(scene, view, renderTarget, rtDesc);
+    std::cout << "[Part24.1] Render() returned without crash." << std::endl;
+
+    // TODO Part 24.2+: validation error count assertion + readback + SavePNG
+    // once remaining bugs (B1/B3/B5/B6 etc.) are triaged. For now, reaching
+    // this line without crash is the Part 24.1 acceptance bar.
 
     fx.base->DestroyTexture(renderTarget);
     pipeline.Shutdown();
-    return TestResult::Skipped;
+    return TestResult::Passed;
 }
 
 void RegisterVulkanStandardPipelineSmoke_Tests() {

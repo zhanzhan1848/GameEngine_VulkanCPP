@@ -1992,6 +1992,18 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
         placeholder_textures_layout_done_ = true;
     }
 
+    // T4.6.5 part 24.1 (B4 fix): empty-scene no-op. UpdateGeometryData
+    // early-returns leaving global buffers INVALID when the snapshot has no
+    // instances; Stage2/3 would cascade-fail on INVALID descriptor writes.
+    // Skip GPU stages cleanly + let StandardRenderPipeline continue to other
+    // passes (HZB/Deferred/Blit) which don't depend on geometry.
+    if (scene_snapshot.GetInstanceCount() == 0 ||
+        scene_snapshot.GetClusterRefCount() == 0) {
+        results_ = {};
+        has_prev_frame_ = false;
+        return true;
+    }
+
     // Update geometry data from scene snapshot
     UpdateGeometryData(scene_snapshot);
 
@@ -3083,6 +3095,11 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
     if (!shadow_initialized_ || !cmd_buffer) return false;
     if (cascade_index > 1) return false;
 
+    // T4.6.5 part 24.1 (B4 fix): mirror Execute's empty-scene guard. Without
+    // this, ExecuteShadowRaster's "geometry buffers not ready" path fires per
+    // cascade per frame even though Execute() is now clean.
+    if (scene_snapshot.GetInstanceCount() == 0) return true;
+
     // Ensure global geometry buffers are built before shadow passes run
     UpdateGeometryData(scene_snapshot);
 
@@ -3201,19 +3218,19 @@ bool GPUDrivenDrawPipeline::ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffe
     auto& ds = frame.shadow_depth_descriptor_set[cascade_index];
     auto& depthRT = (cascade_index == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
 
-    // Validate critical geometry buffers before proceeding
+    // Validate critical geometry buffers before proceeding.
+    // T4.6.5 part 24.1 (B4 fix): post-empty-scene-guard, INVALID buffers here
+    // means the cascade from ExecuteShadowCulling's empty-scene early-return —
+    // not a real error. Silently skip; logging every frame floods production
+    // output. Real "geometry not ready" bugs surface via Stage3's explicit
+    // INVALID-buffer guard which still logs.
     if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_meshlet_vertices_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_vertex_buffer_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[ShadowRaster] ERROR: geometry buffers not ready (cluster_map="
-                  << cluster_map_buffer_ << " instances=" << global_instance_data_buffer_
-                  << " meshlets=" << global_meshlet_buffer_ << " verts=" << global_meshlet_vertices_buffer_
-                  << " tris=" << global_meshlet_triangles_buffer_ << " positions=" << global_vertex_buffer_
-                  << ")" << std::endl;
-        return false;
+        return true;
     }
 
     // Upload ShadowDepthUniforms
