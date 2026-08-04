@@ -565,6 +565,13 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
         std::cerr << "[VulkanDevice] submitImpl vkQueueSubmit failed: " << res << std::endl;
         return false;
     }
+    // T4.6.5 part 24.7 (B8 root cause): mark cmd buffer state as Submitted so
+    // the base class WaitForCompletion() gate (RHICommand.h:362) lets
+    // waitForCompletionImpl actually fire. Without this, state_ stays at
+    // RecordingEnded; WaitForCompletion returns false without calling
+    // vkWaitForFences; the fence stays pending; DestroyCommandBuffer triggers
+    // VUID-vkFreeCommandBuffers-pCommandBuffers-00047 + VUID-vkDestroyFence-fence-01120.
+    cmd->SetState(rhi::CommandBufferState::Submitted);
     return true;
 }
 
