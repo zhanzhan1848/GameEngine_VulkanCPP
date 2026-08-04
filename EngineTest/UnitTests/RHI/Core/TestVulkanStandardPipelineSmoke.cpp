@@ -377,9 +377,11 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     view.SetProjectionMatrix(proj);
     view.Cull(scene);
 
+    // T4.6.5 part 24.4 (B3 fix): BGRA8_UNorm matches FinalBlitModule's
+    // hardcoded pipeline RT format (matches macOS swapchain convention).
     TextureDesc rtDesc{
         {W, H, 1}, 1, 1,
-        DataFormat::RGBA16_Float,
+        DataFormat::BGRA8_UNorm,
         TextureType::Texture2D,
         TextureUsage::RenderTarget | TextureUsage::CopySource | TextureUsage::ShaderResource,
         GPUMemoryUsage::Static,

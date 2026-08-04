@@ -106,14 +106,21 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         output_textures_[i] = device->CreateTexture(outputDesc);
 
     // Triple-buffered constant buffers
+    // T4.6.5 part 24.4 (B1 fix): type=Constant required so VulkanBuffer
+    // translates to VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT. Without it, the
+    // default BufferType falls through the switch in BufferDescToVkUsage
+    // and the buffer only gets TRANSFER_SRC|DST_BIT — vkUpdateDescriptorSets
+    // rejects it for UNIFORM_BUFFER descriptor (VUID-...-00330).
     for (int i = 0; i < 3; ++i) {
         BufferDesc viewCbDesc{};
         viewCbDesc.size = sizeof(ViewData);
+        viewCbDesc.type = BufferType::Constant;
         viewCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         view_cb_[i] = device->CreateBuffer(viewCbDesc);
 
         BufferDesc sceneCbDesc{};
         sceneCbDesc.size = sizeof(SceneData);
+        sceneCbDesc.type = BufferType::Constant;
         sceneCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         scene_cb_[i] = device->CreateBuffer(sceneCbDesc);
 
@@ -131,6 +138,14 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         desc.addressW = TextureAddressMode::Clamp;
         sampler_ = device->CreateSampler(desc);
     }
+
+    // T4.6.5 part 24.4 (B2 fix): 1x1 white fallback texture.
+    TextureDesc fallbackDesc{};
+    fallbackDesc.size = {1, 1, 1};
+    fallbackDesc.format = DataFormat::RGBA8_UNorm;
+    fallbackDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    fallbackDesc.memoryUsage = GPUMemoryUsage::Static;
+    fallback_tex_ = device->CreateTexture(fallbackDesc);
 
     // Graphics pipeline
     if (vertex_shader != handles::INVALID_SHADER && pixel_shader != handles::INVALID_SHADER) {
@@ -241,20 +256,29 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
 
             // Bind resources
             auto depthSampleable = inputs.gpu_draw_pipeline->GetGBufferDepthSampleable();
-            // Note: SSAOPass is forward-declared in the header; the caller sets ssao_pass = nullptr.
-            // SSAO texture binding is handled separately via FusionCompositeModule.
-            ResourceHandle ssaoTex = handles::INVALID_RESOURCE;
+            // T4.6.5 part 24.4 (B2 fix): use fallback_tex_ for invalid bindings
+            // so descriptor has a valid imageView. SSAO/shadow_visibility may
+            // be INVALID when those features aren't enabled.
+            auto validOrFallback = [](ResourceHandle h, ResourceHandle fb) {
+                return h != handles::INVALID_RESOURCE ? h : fb;
+            };
+
+            ResourceHandle albedoTex = validOrFallback(inputs.gpu_draw_pipeline->GetGBufferAlbedo(), fallback_tex_);
+            ResourceHandle normalTex = validOrFallback(inputs.gpu_draw_pipeline->GetGBufferNormal(), fallback_tex_);
+            ResourceHandle ormTex = validOrFallback(inputs.gpu_draw_pipeline->GetGBufferORM(), fallback_tex_);
+            ResourceHandle depthTex = validOrFallback(depthSampleable, fallback_tex_);
+            ResourceHandle shadowVisTex = validOrFallback(inputs.shadow_visibility_tex, fallback_tex_);
 
             DescData params[] = {
                 {0, DescriptorType::UniformBuffer, view_cb_[cbIdx]},
                 {1, DescriptorType::UniformBuffer, scene_cb_[cbIdx]},
-                {2, DescriptorType::SampledImage, inputs.gpu_draw_pipeline->GetGBufferAlbedo()},
-                {3, DescriptorType::SampledImage, inputs.gpu_draw_pipeline->GetGBufferNormal()},
-                {4, DescriptorType::SampledImage, inputs.gpu_draw_pipeline->GetGBufferORM()},
-                {5, DescriptorType::SampledImage, depthSampleable},
-                {6, DescriptorType::SampledImage, inputs.shadow_visibility_tex},
+                {2, DescriptorType::SampledImage, albedoTex},
+                {3, DescriptorType::SampledImage, normalTex},
+                {4, DescriptorType::SampledImage, ormTex},
+                {5, DescriptorType::SampledImage, depthTex},
+                {6, DescriptorType::SampledImage, shadowVisTex},
                 {8, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},
-                {9, DescriptorType::SampledImage, ssaoTex},
+                {9, DescriptorType::SampledImage, fallback_tex_},
             };
             UpdateDesc(device_, descriptor_sets_[cbIdx], params, 9);
 

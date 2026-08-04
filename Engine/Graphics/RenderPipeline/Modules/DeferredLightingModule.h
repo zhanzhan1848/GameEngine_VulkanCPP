@@ -88,6 +88,12 @@ private:
         rhi::handles::INVALID_RESOURCE
     };
     rhi::SamplerHandle sampler_{rhi::handles::INVALID_SAMPLER};
+
+    // T4.6.5 part 24.4 (B2 fix): 1x1 fallback texture for invalid bindings
+    // (SSAO/shadow_visibility when those features aren't enabled). Vulkan
+    // validation rejects VK_NULL_HANDLE imageView without nullDescriptor
+    // feature — use a real texture as a safe fallback.
+    rhi::ResourceHandle fallback_tex_{rhi::handles::INVALID_RESOURCE};
 };
 
 } // namespace primal::graphics
