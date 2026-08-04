@@ -1997,8 +1997,38 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
     // instances; Stage2/3 would cascade-fail on INVALID descriptor writes.
     // Skip GPU stages cleanly + let StandardRenderPipeline continue to other
     // passes (HZB/Deferred/Blit) which don't depend on geometry.
+    //
+    // T4.6.5 part 24.8 (B7 fix): fire Stage3's render pass + transition GBuffer
+    // textures to ShaderResource. Without this, the GBuffer textures stay in
+    // UNDEFINED layout and DeferredLighting's descriptor reads (expecting
+    // SHADER_READ_ONLY_OPTIMAL) trigger VUID-vkCmdDraw-None-09600. RenderGraph
+    // skips barriers for imported resources (RenderGraph.cpp:337-340), so the
+    // transition must happen here in the producer.
     if (scene_snapshot.GetInstanceCount() == 0 ||
         scene_snapshot.GetClusterRefCount() == 0) {
+        if (final_render_pass_ != rhi::handles::INVALID_RENDER_PASS) {
+            cmd_buffer->BeginRenderPass(final_render_pass_);
+            cmd_buffer->EndRenderPass();
+
+            // T4.6.5 part 24.8 (B7 fix): transition GBuffer color textures
+            // (albedo/normal/orm/velocity) to ShaderResource. Depth is left
+            // in DEPTH_STENCIL_ATTACHMENT_OPTIMAL from final_render_pass_ —
+            // downstream HZB read needs ShaderResource but a separate
+            // barrier fires VUID-vkCmdPipelineBarrier-None-01224 because the
+            // render pass auto-transition already put the texture in a known
+            // state. The depth UNDEFINED errors come from shadow cascade
+            // textures, not final_depth_texture_.
+            rhi::ResourceBarrier barriers[4];
+            barriers[0].resource = gbuffer_albedo_texture_;
+            barriers[0].beforeState = rhi::ResourceState::RenderTarget;
+            barriers[0].afterState  = rhi::ResourceState::ShaderResource;
+            barriers[0].subresource = rhi::RHI_ALL_SUBRESOURCES;
+            barriers[0].queueFamily = 0xFFFFFFFF;
+            barriers[1] = barriers[0]; barriers[1].resource = gbuffer_normal_texture_;
+            barriers[2] = barriers[0]; barriers[2].resource = gbuffer_orm_texture_;
+            barriers[3] = barriers[0]; barriers[3].resource = gbuffer_velocity_texture_;
+            cmd_buffer->InsertBarrier(barriers, 4);
+        }
         results_ = {};
         has_prev_frame_ = false;
         return true;
