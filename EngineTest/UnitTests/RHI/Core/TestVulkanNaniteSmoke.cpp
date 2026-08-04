@@ -501,6 +501,13 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
                                    cull.GetResults(), /*frame=*/0, /*cbIdx=*/0);
     TEST_ASSERT(drawOk, "GPUDrivenDrawPipeline::Execute");
 
+    // T4.6.5 part 20: dispatch the resolve compute shader. Stage3 renders to
+    // final_color_texture_ (not visibility_buffer_) in this port, so the resolve
+    // shader reads an unwritten visibility_buffer_ and writes background blue to
+    // every pixel. Smoke bar is "non-zero bytes in readback" — proves dispatch
+    // fired + shader executed + imageStore wrote pixels.
+    gpuDraw.ResolveVisibilityBuffer(vcmd);
+
     TEST_ASSERT(vcmd->End() && vcmd->Submit(0) && vcmd->WaitForCompletion(),
                 "Submit cull + draw");
     fx.base->DestroyCommandBuffer(cmd);
@@ -555,6 +562,47 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     fx.base->UnmapBuffer(readback);
 
     TEST_ASSERT(instance_count >= 1, "indirect args non-zero instance_count");
+
+    // 9b. T4.6.5 part 20: read back resolve_output_texture_ to verify the resolve
+    // compute shader actually wrote pixels. Pattern mirrors TestVulkanCommandBuffer
+    // :222-248 (CopyTextureToBuffer + non-zero byte check). The output is RGBA8_UNorm
+    // so each pixel is 4 bytes; total size = W*H*4.
+    ResourceHandle resolveTex = gpuDraw.GetResolveOutputTexture();
+    TEST_ASSERT(resolveTex != handles::INVALID_RESOURCE, "resolve_output_texture valid");
+
+    constexpr u64 kResolveBytes = (u64)W * H * 4;
+    BufferDesc resolveRbDesc{};
+    resolveRbDesc.size = kResolveBytes;
+    resolveRbDesc.type = BufferType::Raw;
+    resolveRbDesc.memoryUsage = GPUMemoryUsage::Readback;
+    resolveRbDesc.name = "ResolveOutput_Readback";
+    ResourceHandle resolveRb = fx.base->CreateBuffer(resolveRbDesc);
+    TEST_ASSERT(resolveRb != handles::INVALID_RESOURCE, "CreateBuffer resolveRb");
+
+    cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+    vcmd = fx.vk->GetCommandBuffer(cmd);
+    TEST_ASSERT(vcmd->Reset() && vcmd->Begin(), "Begin resolve readback");
+
+    BufferTextureCopyRegion region{};
+    region.imageSubresource = { 0, 0, 1 };  // { baseArrayLayer, mipLevel, layerCount }
+    region.imageExtent = { W, H, 1 };
+    vcmd->CopyTextureToBuffer(resolveTex, resolveRb, &region, 1);
+
+    TEST_ASSERT(vcmd->End() && vcmd->Submit(0) && vcmd->WaitForCompletion(),
+                "Submit resolve readback");
+    fx.base->DestroyCommandBuffer(cmd);
+
+    u8* resolveMapped = static_cast<u8*>(fx.base->MapBuffer(resolveRb, 0, kResolveBytes));
+    TEST_ASSERT(resolveMapped != nullptr, "MapBuffer resolveRb");
+    if (resolveMapped) {
+        bool anyNonZero = false;
+        for (u64 i = 0; i < kResolveBytes; ++i) {
+            if (resolveMapped[i] != 0) { anyNonZero = true; break; }
+        }
+        TEST_ASSERT(anyNonZero, "resolve output non-trivial (shader wrote pixels)");
+        fx.base->UnmapBuffer(resolveRb);
+    }
+    fx.base->DestroyBuffer(resolveRb);
 
     // 10. Cleanup. Order matters: pipelines → snapshot → cluster → entity →
     // resourceManager → procedural mesh asset. The cluster::remove path releases

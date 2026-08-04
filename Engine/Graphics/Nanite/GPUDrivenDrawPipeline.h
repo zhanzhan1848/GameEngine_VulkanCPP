@@ -121,6 +121,15 @@ public:
     // Get the final output texture that was rendered to
     rhi::ResourceHandle GetFinalOutputTexture() const { return final_color_texture_; }
 
+    // T4.6.5 part 20: ResolveVisibilityBuffer output (RGBA8_UNorm, W×H from VisibilityBufferConfig).
+    // Written when the test/caller invokes ResolveVisibilityBuffer() after Execute().
+    rhi::ResourceHandle GetResolveOutputTexture() const { return resolve_output_texture_; }
+
+    // T4.6.5 part 20: Dispatch the resolve compute shader. Caller invokes this
+    // after Execute() inside the same cmd buffer. Reads visibility_buffer_ +
+    // final_depth_texture_, writes resolve_output_texture_.
+    void ResolveVisibilityBuffer(rhi::RHICommandBuffer* cmd_buffer);
+
     // Get the final depth texture for HZB generation
     rhi::ResourceHandle GetFinalDepthTexture() const { return final_depth_texture_; }
 
@@ -232,7 +241,6 @@ private:
                              u32 buffer_index);
 
     void SetupVisibilityBufferPipeline(rhi::RHICommandBuffer* cmd_buffer);
-    void ResolveVisibilityBuffer(rhi::RHICommandBuffer* cmd_buffer);
     rhi::ResourceHandle GetPreviousFrameDepth();
 
     rhi::RHIDeviceBase* device_{ nullptr };
@@ -342,6 +350,10 @@ private:
 
     rhi::ResourceHandle resolve_output_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::SamplerHandle resolve_sampler_{ rhi::handles::INVALID_SAMPLER };
+
+    // T4.6.5 part 20: per-frame DrawConstants CB for the resolve compute shader + one-shot descriptor write flag.
+    rhi::ResourceHandle resolve_cb_{ rhi::handles::INVALID_RESOURCE };
+    bool resolve_descriptor_written_{ false };
 
     // ---- Shadow Mapping Resources ----
     ShadowFrameResources shadow_frames_[3];                         // Triple-buffered per-frame

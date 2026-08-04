@@ -259,6 +259,12 @@ void GPUDrivenDrawPipeline::Shutdown() {
         if (orm_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(orm_texture_array_);
         if (texture_sampler_ != rhi::handles::INVALID_SAMPLER) device_->DestroySampler(texture_sampler_);
 
+        // T4.6.5 part 20: resolve pipeline resources
+        if (resolve_cb_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(resolve_cb_);
+        if (resolve_output_texture_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(resolve_output_texture_);
+        if (resolve_sampler_ != rhi::handles::INVALID_SAMPLER) device_->DestroySampler(resolve_sampler_);
+        resolve_descriptor_written_ = false;
+
         // Cleanup shadow resources
         ShutdownShadowResources();
     }
@@ -1088,16 +1094,32 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     rhi::SamplerDesc resolveSamplerDesc{};
     resolveSamplerDesc.minFilter = rhi::FilterMode::Nearest;
     resolveSamplerDesc.magFilter = rhi::FilterMode::Nearest;
+    // T4.6.5 part 20: R32_UINT visibility buffer has no SAMPLED_IMAGE_FILTER_LINEAR_BIT format
+    // feature — mip filter must also be Nearest or vkCmdDispatch validation fires.
+    resolveSamplerDesc.mipFilter = rhi::FilterMode::Nearest;
     resolveSamplerDesc.addressU = rhi::TextureAddressMode::Clamp;
     resolveSamplerDesc.addressV = rhi::TextureAddressMode::Clamp;
+    // T4.6.5 part 20: MoltenVK portability requires compareEnable=FALSE on non-comparison samplers.
+    // SamplerDesc defaults comparisonFunc=Always which VulkanSampler treats as compareEnable=TRUE
+    // (VUID-VkDescriptorImageInfo-mutableComparisonSamplers-04450).
+    resolveSamplerDesc.comparisonFunc = rhi::ComparisonFunc::Never;
     resolve_sampler_ = device_->CreateSampler(resolveSamplerDesc);
-    
+
     rhi::TextureDesc resolveOutputDesc{};
     resolveOutputDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
     resolveOutputDesc.format = rhi::DataFormat::RGBA8_UNorm;
-    resolveOutputDesc.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+    // T4.6.5 part 20: UnorderedAccess for imageStore + CopySource for test readback.
+    resolveOutputDesc.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopySource;
     resolve_output_texture_ = device_->CreateTexture(resolveOutputDesc);
-    
+
+    // T4.6.5 part 20: per-frame DrawConstants CB for the resolve compute shader.
+    // Layout: 3 m4x4 (192B) + 4 u32 (16B) = 208 bytes; pad to 256 for 16-byte alignment safety.
+    rhi::BufferDesc resolveCbDesc{};
+    resolveCbDesc.size = 256;
+    resolveCbDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Uniform | rhi::BufferUsageFlags::TransferDst);
+    resolveCbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    resolve_cb_ = device_->CreateBuffer(resolveCbDesc);
+
     resolve_descriptor_set_ = device_->CreateDescriptorSet({resolve_descriptor_layout_});
     
     // std::cout << "[GPUDrivenDrawPipeline] Visibility Buffer Resolve resources created successfully!" << std::endl;
@@ -2354,18 +2376,108 @@ rhi::ResourceHandle GPUDrivenDrawPipeline::GetPreviousFrameDepth() {
 }
 
 void GPUDrivenDrawPipeline::ResolveVisibilityBuffer(rhi::RHICommandBuffer* cmd_buffer) {
-//    std::cout << "[GPUDrivenDrawPipeline] Resolving Visibility Buffer..." << std::endl;
+    if (!initialized_) return;
+    if (resolve_pipeline_ == rhi::handles::INVALID_PIPELINE) return;
+    if (visibility_buffer_ == rhi::handles::INVALID_RESOURCE) return;
+    if (final_depth_texture_ == rhi::handles::INVALID_RESOURCE) return;
+    if (resolve_cb_ == rhi::handles::INVALID_RESOURCE) return;
+    if (resolve_descriptor_set_ == rhi::handles::INVALID_DESCRIPTOR_SET) return;
 
-    // TODO: Implement full-screen quad render to resolve visibility buffer
-    // This should:
-    // 1. Render a full-screen quad
-    // 2. In fragment shader, read visibility buffer and depth buffer
-    // 3. For each pixel, reconstruct geometry from visibility data
-    // 4. Apply proper materials and lighting
-    // 5. Write final color to output
+    // 1. Fill DrawConstants CB (matches shader layout at VisibilityBufferResolve.comp:23-31).
+    struct ResolveDrawConstants {
+        math::m4x4 view_matrix;
+        math::m4x4 proj_matrix;
+        math::m4x4 world_matrix;
+        u32 view_width;
+        u32 view_height;
+        u32 meshlet_count;
+        u32 _pad;
+    };
+    ResolveDrawConstants dc{
+        cached_view_matrix_,
+        cached_proj_matrix_,
+        rhi::math::MatrixIdentity(),
+        visibility_config_.width,
+        visibility_config_.height,
+        total_meshlet_count_,
+        0
+    };
+    void* mapped = device_->MapBuffer(resolve_cb_);
+    if (mapped) {
+        memcpy(mapped, &dc, sizeof(dc));
+        device_->UnmapBuffer(resolve_cb_);
+    }
 
-    // For now, this is a placeholder
-//    std::cout << "[GPUDrivenDrawPipeline] Visibility buffer resolve - PLACEHOLDER" << std::endl;
+    // 2. Write descriptor set (once — resource handles don't change across frames).
+    if (!resolve_descriptor_written_) {
+        rhi::DescriptorImageInfo visInfo{ resolve_sampler_, visibility_buffer_, rhi::ResourceState::ShaderResource };
+        rhi::DescriptorImageInfo depthInfo{ resolve_sampler_, final_depth_texture_, rhi::ResourceState::ShaderResource };
+        rhi::DescriptorImageInfo outInfo{ rhi::handles::INVALID_SAMPLER, resolve_output_texture_, rhi::ResourceState::UnorderedAccess };
+        rhi::DescriptorBufferInfo cbInfo{ resolve_cb_, 0, ~0ULL };
+        rhi::DescriptorBufferInfo meshletInfo{ global_meshlet_buffer_, 0, ~0ULL };
+
+        rhi::WriteDescriptorSet writes[5];
+        writes[0].dstSet = resolve_descriptor_set_;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = rhi::DescriptorType::CombinedImageSampler;
+        writes[0].imageInfo = &visInfo;
+        writes[1] = writes[0];
+        writes[1].dstBinding = 1;
+        writes[1].imageInfo = &depthInfo;
+        writes[2] = writes[0];
+        writes[2].dstBinding = 2;
+        writes[2].descriptorType = rhi::DescriptorType::StorageImage;
+        writes[2].imageInfo = &outInfo;
+        writes[3] = writes[0];
+        writes[3].dstBinding = 3;
+        writes[3].descriptorType = rhi::DescriptorType::UniformBuffer;
+        writes[3].imageInfo = nullptr;
+        writes[3].bufferInfo = &cbInfo;
+        writes[4] = writes[3];
+        writes[4].dstBinding = 4;
+        writes[4].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[4].bufferInfo = &meshletInfo;
+
+        device_->UpdateDescriptorSets(5, writes);
+        resolve_descriptor_written_ = true;
+    }
+
+    // 3. Layout transitions before dispatch.
+    //    visibility_buffer_ + final_depth_texture_ → ShaderResource (combined sampler,
+    //    VulkanDescriptorSet writes SHADER_READ_ONLY_OPTIMAL at line 131).
+    //    resolve_output_texture_ → UnorderedAccess (storage image, maps to GENERAL at line 148).
+    rhi::ResourceBarrier barriers[3];
+    barriers[0].resource = visibility_buffer_;
+    barriers[0].beforeState = rhi::ResourceState::Unknown;
+    barriers[0].afterState = rhi::ResourceState::ShaderResource;
+    barriers[1].resource = final_depth_texture_;
+    barriers[1].beforeState = rhi::ResourceState::Unknown;
+    barriers[1].afterState = rhi::ResourceState::ShaderResource;
+    barriers[2].resource = resolve_output_texture_;
+    barriers[2].beforeState = rhi::ResourceState::Unknown;
+    barriers[2].afterState = rhi::ResourceState::UnorderedAccess;
+    cmd_buffer->InsertBarrier(barriers, 3);
+
+    // 4. Bind + dispatch.
+    cmd_buffer->BindComputePipeline(resolve_pipeline_);
+    const rhi::DescriptorSetHandle sets[] = { resolve_descriptor_set_ };
+    cmd_buffer->BindDescriptorSets(
+        rhi::PipelineBindPoint::Compute,
+        resolve_pipeline_layout_,
+        0, 1, sets,
+        0, nullptr
+    );
+    const u32 gx = (visibility_config_.width + 7) / 8;
+    const u32 gy = (visibility_config_.height + 7) / 8;
+    cmd_buffer->Dispatch(gx, gy, 1);
+
+    // 5. Transition output to CopySource so the test/caller can read it back.
+    rhi::ResourceBarrier after;
+    after.resource = resolve_output_texture_;
+    after.beforeState = rhi::ResourceState::UnorderedAccess;
+    after.afterState = rhi::ResourceState::CopySource;
+    cmd_buffer->InsertBarrier(&after, 1);
 }
 
 // ============================================================================
