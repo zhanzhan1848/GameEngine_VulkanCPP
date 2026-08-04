@@ -519,8 +519,28 @@ if(APPLE)
         FOLDER "EngineTest/IntegrationTests")
     target_compile_definitions(TestWFCCategorySolve PRIVATE DEBUG _DEBUG)
 
+    # 34. TestWFCRuinsAdjacencyConsistency (WFC Phase C.1 T24)
+    # Headless, no GPU. Verifies every (tile, variant, face) has >= 1 partner
+    # so the solver can never dead-lock on a zero-adjacency cell.
+    add_executable(TestWFCRuinsAdjacencyConsistency
+        Graphics/WFC/TestWFCRuinsAdjacencyConsistency.cpp
+    )
+    target_include_directories(TestWFCRuinsAdjacencyConsistency PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCRuinsAdjacencyConsistency PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCRuinsAdjacencyConsistency
+             COMMAND TestWFCRuinsAdjacencyConsistency)
+    set_target_properties(TestWFCRuinsAdjacencyConsistency PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCRuinsAdjacencyConsistency PRIVATE DEBUG _DEBUG)
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency)
 
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)

@@ -48,6 +48,24 @@ TileAdjacencyTable::GetCompatible(wfc_tile_id a, u32 a_var, WFCFace face) const 
     return result;
 }
 
+bool TileAdjacencyTable::HasAnyPair(wfc_tile_id a, u32 a_var, WFCFace face) const {
+    // Phase C.1 T24: prefix-scan that returns true on the first match without
+    // materializing a vector. Identical mask/prefix construction to
+    // GetCompatible so the two queries agree on every key.
+    const u64 prefix_mask = (static_cast<u64>(0xFFFF) << 48)  // tile_a
+                          | (static_cast<u64>(0xFF)   << 40)  // variant_a
+                          | (static_cast<u64>(0xF)    << 36); // face
+    const u64 prefix = (static_cast<u64>(static_cast<u32>(a) & 0xFFFF) << 48)
+                     | (static_cast<u64>(a_var & 0xFF) << 40)
+                     | (static_cast<u64>(static_cast<u32>(face) & 0xF) << 36);
+    for (u64 key : compatibility_set_) {
+        if ((key & prefix_mask) == (prefix & prefix_mask)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 u32 TileAdjacencyTable::AddAutoFromSockets(const WFCTileRegistry& reg, bool skip_existing) {
     u32 added = 0;
     const u32 tile_count = reg.Count();

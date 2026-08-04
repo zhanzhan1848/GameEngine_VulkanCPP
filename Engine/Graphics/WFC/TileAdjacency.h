@@ -39,6 +39,11 @@ public:
     // Phase A.2 lookup: returns all (tile, variant) pairs compatible with (a, a_var) at face.
     utl::vector<Compatibility> GetCompatible(wfc_tile_id a, u32 a_var, WFCFace face) const;
 
+    // Phase C.1 T24: returns true if at least one (tile_b, variant_b) is recorded
+    // as compatible with (a, a_var) at `face`. Used by integration tests to verify
+    // the solver can never dead-lock on a tile with no adjacency partners.
+    bool HasAnyPair(wfc_tile_id a, u32 a_var, WFCFace face) const;
+
     // Phase C.1 Task 16: iterate all (tile_a, variant_a, face_a) x
     // (tile_b, variant_b, face_b=opposite) pairs in `reg`, and call
     // AddCompatibility for each pair whose per-face socket signatures are

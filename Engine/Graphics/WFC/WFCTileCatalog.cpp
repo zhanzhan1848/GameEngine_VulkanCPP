@@ -314,10 +314,18 @@ void WFCTileCatalog::Populate(WFCTileRegistry& registry, TileAdjacencyTable& adj
     // Cube self-compat (all 6 faces) — overrides socket-signature mismatch.
     AddFullCompat(cube, 0, cube, 0);
 
-    // Cube wildcard with every other tile (variants 0 only, to keep rule set
-    // manageable — solver can pick variant via socket matching elsewhere).
+    // Cube wildcard with every other tile. T24 widened this from variant 0
+    // only to ALL variants of every other tile: socket matching on the +Y/-Y
+    // faces is structurally impossible (every +Y face encodes to 0xFF, every
+    // -Y face to 0x00, so vertical seams can never strict-or-mirror match
+    // without a wildcard). Without all-variant coverage, multi-variant tiles
+    // like ramp/broken_cube dead-end on +Y/-Y and the solver hangs. Cube
+    // remains the universal connector tile, so it is the natural wildcard
+    // for stacking any tile on any face.
     for (u32 t = 1; t < 15; ++t) {
-        AddFullCompat(cube, 0, wfc_tile_id{t}, 0);
+        for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+            AddFullCompat(cube, 0, wfc_tile_id{t}, v);
+        }
     }
 
     // Auto-derive remaining rules via socket compatibility.
