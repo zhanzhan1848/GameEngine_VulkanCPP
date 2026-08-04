@@ -1938,6 +1938,21 @@ set_target_properties(TestWFCObserver PROPERTIES
 target_compile_definitions(TestWFCObserver PRIVATE DEBUG _DEBUG)
 set_target_properties(TestWFCObserver PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestWFCDistanceObserver Graphics/WFC/TestWFCDistanceObserver.cpp)
+target_include_directories(TestWFCDistanceObserver PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCDistanceObserver PRIVATE Engine)
+add_test(NAME TestWFCDistanceObserver COMMAND TestWFCDistanceObserver)
+set_target_properties(TestWFCDistanceObserver PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCDistanceObserver PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCDistanceObserver PROPERTIES FOLDER "Tests/Graphics/WFC")
+
 add_executable(TestWFCPropagator Graphics/WFC/TestWFCPropagator.cpp)
 target_include_directories(TestWFCPropagator PRIVATE
     ${CMAKE_SOURCE_DIR}
