@@ -4,7 +4,6 @@
 // became an abstract base. See WFCObserver.h for the strategy interface.
 #pragma once
 
-#include "../../Common/CommonHeaders.h"
 #include "WFCTypes.h"
 
 #include <vector>
