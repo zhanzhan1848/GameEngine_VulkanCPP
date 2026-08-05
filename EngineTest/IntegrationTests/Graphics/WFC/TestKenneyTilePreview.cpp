@@ -365,6 +365,13 @@ void KenneyTilePreviewTestCase::PrintGridState(const char* why) {
 
 void KenneyTilePreviewTestCase::DestroyAllSpawnedEntities() {
     using namespace primal::graphics::pcg;
+    // Drain RenderScene proxies BEFORE clearing the list —
+    // SyncEntitiesToRenderScene only RemoveProxy's for entities that are
+    // still in pcg_entity_ids_. If we let ClearPCGEntities() empty the list
+    // first, the stale proxies stay in RenderScene::proxies_ and keep rendering.
+    if (scene) {
+        for (auto eid : wfc_entity_ids_) scene->RemoveProxy(eid);
+    }
     if (!wfc_entity_ids_.empty()) {
         PCGEntityFactory::DestroyEntities(wfc_entity_ids_);
     }

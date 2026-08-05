@@ -321,6 +321,13 @@ void WFCRuinsRenderingTestCase::ReseedSolver() {
 
 void WFCRuinsRenderingTestCase::DestroyAllSpawnedEntities() {
     using namespace primal::graphics::pcg;
+    // Drain RenderScene proxies BEFORE clearing the list — same rationale as
+    // TestKenneyTilePreview: SyncEntitiesToRenderScene only RemoveProxy's for
+    // entities still in pcg_entity_ids_, so ClearPCGEntities first would
+    // leave stale proxies in RenderScene::proxies_.
+    if (scene) {
+        for (auto eid : wfc_entity_ids) scene->RemoveProxy(eid);
+    }
     if (!wfc_entity_ids.empty()) {
         PCGEntityFactory::DestroyEntities(wfc_entity_ids);
     }
