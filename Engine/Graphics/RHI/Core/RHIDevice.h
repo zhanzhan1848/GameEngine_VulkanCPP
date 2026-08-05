@@ -827,7 +827,14 @@ public:
      * @return 设备指针
      */
     RHIDeviceBase* GetDevice(u32 deviceId) const;
-    
+
+    /**
+     * @brief 返回最后注册的设备。硬编码 GetDevice(1) 在测试序贯运行时
+     *        会取到前面测试遗留的已销毁设备；GetActiveDevice() 总是
+     *        返回最新注册的。
+     */
+    RHIDeviceBase* GetActiveDevice() const;
+
 private:
     utl::vector<std::pair<u32, RHIDeviceBase*>> devices_;
     u32 nextDeviceId_ = 1;

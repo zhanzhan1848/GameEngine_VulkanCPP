@@ -56,6 +56,19 @@
 #include "Components/Transform.h"
 #include "JobSystem/JobSystem.h"
 
+// T4.6.5 part 29: windowed render headers.
+#include "Engine/Platform/Platform.h"
+#include "Engine/Platform/PlatformTypes.h"
+#include "Graphics/RHI/Core/RHISwapChain.h"
+#ifdef __APPLE__
+// MacTypes.h defines a global `struct Rect` that conflicts with
+// primal::graphics::rhi::Rect once `using namespace primal::graphics::rhi;`
+// is in scope. Rename MacTypes' version out of the way for this TU only.
+#define Rect primal_macos_Rect_kludge
+#include <CoreFoundation/CoreFoundation.h>  // CFRunLoopRunInMode
+#undef Rect
+#endif
+
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
 
@@ -783,6 +796,503 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     return TestResult::Passed;
 }
 
+// T4.6.5 part 29 — windowed Sponza render on Vulkan.
+//
+// First visible-window Vulkan render. Opens a 1280×720 NSWindow via
+// platform::create_window, creates a Vulkan SwapChain bound to the window's
+// CAMetalLayer surface, and runs an interactive render loop:
+//
+//   while (!win.is_closed()) {
+//     drain events (CFRunLoopRunInMode)
+//     acquire swapchain image
+//     pipeline.RenderWithCommandBuffer(scene, view, offscreenRT)
+//     blit offscreenRT → backbuffer (CopyTexture, same BGRA8 format)
+//     submit (waits image sem, signals render sem)
+//     present (waits render sem)
+//   }
+//
+// Reuses Part 26's Sponza + scene + pipeline + material registry setup
+// verbatim (lines 421-662). Differences:
+//   - Window + SwapChain created up front
+//   - Render target is offscreen (BGRA8_UNorm, matches swapchain format)
+//   - Render loop runs until user closes the window
+//   - Offscreen RT is blitted to swapchain backbuffer each frame
+//
+// On close button click, NSWindowWillCloseNotification fires →
+// PlatformMacWindowDelegate.mm observer calls notify_any_window_closed()
+// → global g_any_window_closed flag set → win.is_closed() returns true →
+// loop exits cleanly.
+TestResult TestVulkanStandardPipelineRender_Windowed() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+
+    if (!primal::jobsystem::JobSystem::Initialize(
+            primal::jobsystem::JobSchedulerConfig::Default())) {
+        std::cerr << "[Part29] JobSystem init failed" << std::endl;
+        return TestResult::Failed;
+    }
+
+    // -------------------------------------------------------------
+    // Step 1: Create window + Vulkan device + SwapChain.
+    // -------------------------------------------------------------
+    constexpr u32 W = 1280, H = 720;
+    primal::platform::window_init_info wi{};
+    wi.caption = "Vulkan Sponza Window Render (close window to exit)";
+    wi.width = W;
+    wi.height = H;
+    primal::platform::window win = primal::platform::create_window(&wi);
+    if (!win.is_valid()) {
+        std::cerr << "[Part29] platform::create_window failed — skip (headless CI)" << std::endl;
+        primal::jobsystem::JobSystem::Shutdown();
+        return TestResult::Skipped;
+    }
+    std::cout << "[Part29] Window created. Close window to exit render loop." << std::endl;
+
+    rhi::g_deviceManager.RegisterDevice(fx.base);
+
+    SwapChainDesc scd{};
+    scd.window = win.handle();
+    scd.width = W;
+    scd.height = H;
+    scd.format = DataFormat::BGRA8_UNorm;
+    scd.bufferCount = 2;
+    scd.presentMode = PresentMode::FIFO;
+    RHISwapChain* sc = fx.base->CreateSwapChain(scd);
+    TEST_ASSERT(sc != nullptr, "CreateSwapChain");
+
+    // -------------------------------------------------------------
+    // Step 2: StandardRenderPipeline + shaders + LumenConfig.
+    // -------------------------------------------------------------
+    StandardRenderPipeline pipeline;
+    TEST_ASSERT(pipeline.Initialize(fx.base), "Initialize");
+
+    auto loadSpv = [](const char* relpath) -> std::vector<u8> {
+        std::ifstream f(relpath, std::ios::binary | std::ios::ate);
+        if (!f) return {};
+        std::streamsize sz = f.tellg();
+        f.seekg(0);
+        std::vector<u8> bytes(static_cast<size_t>(sz));
+        f.read(reinterpret_cast<char*>(bytes.data()), sz);
+        return bytes;
+    };
+    auto deferredVsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting.vert.spv");
+    auto deferredFsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting.frag.spv");
+    TEST_ASSERT(!deferredVsBytes.empty() && !deferredFsBytes.empty(),
+                "Load DeferredLighting.vert.spv + .frag.spv");
+    auto blitVsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Blit.vert.spv");
+    auto blitFsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Blit.frag.spv");
+    TEST_ASSERT(!blitVsBytes.empty() && !blitFsBytes.empty(),
+                "Load Blit.vert.spv + Blit.frag.spv");
+
+    ShaderHandle deferredVs = fx.base->CreateShader(
+        deferredVsBytes.data(), deferredVsBytes.size(), ShaderStage::Vertex, "main");
+    ShaderHandle deferredFs = fx.base->CreateShader(
+        deferredFsBytes.data(), deferredFsBytes.size(), ShaderStage::Pixel, "main");
+    ShaderHandle blitVs = fx.base->CreateShader(
+        blitVsBytes.data(), blitVsBytes.size(), ShaderStage::Vertex, "main");
+    ShaderHandle blitFs = fx.base->CreateShader(
+        blitFsBytes.data(), blitFsBytes.size(), ShaderStage::Pixel, "main");
+
+    StandardRenderPipeline::ShaderHandles shaderHandles;
+    shaderHandles.deferred_vs = deferredVs;
+    shaderHandles.deferred_ps = deferredFs;
+    shaderHandles.blit_vs = blitVs;
+    shaderHandles.blit_ps = blitFs;
+    pipeline.SetShaderHandles(shaderHandles);
+
+    lumen::LumenConfig lumenConfig{};
+    pipeline.SetLumenConfig(lumenConfig);
+
+    // -------------------------------------------------------------
+    // Step 3: Load Sponza + per-mesh materials + entities + proxies.
+    // (Mirrors Part 26 verbatim — see lines 474-662.)
+    // -------------------------------------------------------------
+    const std::string baseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
+    const std::string modelPath = baseDir + "Sponza.model";
+    std::ifstream file(modelPath, std::ios::binary | std::ios::ate);
+    TEST_ASSERT(file.is_open(), "Open Sponza.model");
+    std::streamsize modelSize = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<char> modelBuffer(static_cast<size_t>(modelSize));
+    TEST_ASSERT(file.read(modelBuffer.data(), modelSize), "Read Sponza.model");
+
+    SceneDataAdapter adapter;
+    auto sceneMeshes = adapter.LoadRenderItemData(
+        fx.base, modelBuffer.data(), (u32)modelBuffer.size());
+    TEST_ASSERT(!sceneMeshes.empty(), "LoadRenderItemData");
+    std::cout << "[Part29] Loaded " << sceneMeshes.size() << " meshes from Sponza.model" << std::endl;
+
+    auto material = std::make_shared<Material>();
+    constexpr u32 FALLBACK_SIZE = 1024;
+    std::vector<unsigned char> whiteBuf(FALLBACK_SIZE * FALLBACK_SIZE * 4, 255);
+    std::vector<unsigned char> flatNormalBuf(FALLBACK_SIZE * FALLBACK_SIZE * 4, 0);
+    for (u32 i = 0; i < FALLBACK_SIZE * FALLBACK_SIZE; ++i) {
+        flatNormalBuf[i * 4 + 0] = 128;
+        flatNormalBuf[i * 4 + 1] = 128;
+        flatNormalBuf[i * 4 + 2] = 255;
+        flatNormalBuf[i * 4 + 3] = 255;
+    }
+    std::vector<unsigned char> defaultORMBuf(FALLBACK_SIZE * FALLBACK_SIZE * 4, 0);
+    for (u32 i = 0; i < FALLBACK_SIZE * FALLBACK_SIZE; ++i) {
+        defaultORMBuf[i * 4 + 0] = 255;
+        defaultORMBuf[i * 4 + 1] = 128;
+        defaultORMBuf[i * 4 + 2] = 0;
+        defaultORMBuf[i * 4 + 3] = 255;
+    }
+    ResourceHandle fallbackDiffuse = CreateTextureFromData(
+        fx.base, FALLBACK_SIZE, FALLBACK_SIZE, whiteBuf.data(), DataFormat::RGBA8_sRGB);
+    ResourceHandle fallbackNormal = CreateTextureFromData(
+        fx.base, FALLBACK_SIZE, FALLBACK_SIZE, flatNormalBuf.data());
+    ResourceHandle fallbackORM = CreateTextureFromData(
+        fx.base, FALLBACK_SIZE, FALLBACK_SIZE, defaultORMBuf.data());
+
+    SamplerDesc samplerDesc{};
+    samplerDesc.minFilter = FilterMode::Linear;
+    samplerDesc.magFilter = FilterMode::Linear;
+    samplerDesc.addressU = TextureAddressMode::Wrap;
+    samplerDesc.addressV = TextureAddressMode::Wrap;
+    samplerDesc.addressW = TextureAddressMode::Wrap;
+    samplerDesc.comparisonFunc = ComparisonFunc::Never;
+    SamplerHandle materialSampler = fx.base->CreateSampler(samplerDesc);
+
+    RenderScene scene;
+    std::vector<std::shared_ptr<MaterialInstance>> materialInstances;
+    std::vector<primal::game_entity::entity> entities;
+    std::vector<primal::cluster::component> clusterComps;
+
+    for (u32 i = 0; i < sceneMeshes.size(); ++i) {
+        auto& meshInfo = sceneMeshes[i];
+        meshInfo.material = material;
+
+        auto matInst = std::make_shared<MaterialInstance>(material.get());
+        if (!matInst->Initialize(fx.base)) {
+            matInst = std::make_shared<MaterialInstance>(material.get());
+        }
+
+        ResourceHandle diffuseTex = handles::INVALID_RESOURCE;
+        std::string diffusePath = ResolveTexturePath(baseDir, meshInfo.diffuseTexturePath);
+        if (!diffusePath.empty()) diffuseTex = LoadTextureFromFile(fx.base, diffusePath);
+        if (diffuseTex == handles::INVALID_RESOURCE) diffuseTex = fallbackDiffuse;
+
+        ResourceHandle normalTex = handles::INVALID_RESOURCE;
+        std::string normalPath = ResolveTexturePath(baseDir, meshInfo.normalTexturePath);
+        if (!normalPath.empty()) normalTex = LoadTextureFromFile(fx.base, normalPath);
+        if (normalTex == handles::INVALID_RESOURCE) normalTex = fallbackNormal;
+
+        ResourceHandle ormTex = handles::INVALID_RESOURCE;
+        std::string ormPath = ResolveTexturePath(baseDir, meshInfo.ormTexturePath);
+        if (!ormPath.empty()) ormTex = LoadTextureFromFile(fx.base, ormPath);
+        if (ormTex == handles::INVALID_RESOURCE) ormTex = fallbackORM;
+
+        matInst->SetTexture(0, diffuseTex);
+        matInst->SetTexture(1, normalTex);
+        matInst->SetTexture(2, ormTex);
+        matInst->SetSampler(3, materialSampler);
+        matInst->Update(fx.base);
+
+        meshInfo.materialInstance = matInst;
+        materialInstances.push_back(matInst);
+
+        primal::game_entity::entity_info entInfo{};
+        primal::transform::init_info tfInfo{};
+        tfInfo.rotation[3] = 1.0f;
+        entInfo.transform = &tfInfo;
+        primal::game_entity::entity entity = primal::game_entity::create(entInfo);
+        entities.push_back(entity);
+
+        primal::cluster::init_info clusterInit{};
+        clusterInit.geometry_content_id = meshInfo.meshEntityId;
+        primal::cluster::component clusterComp = primal::cluster::create(clusterInit, entity);
+        clusterComps.push_back(clusterComp);
+
+        RenderProxy proxy;
+        proxy.materialId = meshInfo.meshEntityId;
+        proxy.entityId = meshInfo.meshEntityId;
+        proxy.meshId = clusterComp;
+        proxy.transform = rhimath::MatrixIdentity();
+        if (meshInfo.mesh && meshInfo.mesh->IsValid()) {
+            proxy.worldAABB = meshInfo.mesh->GetLocalAABB();
+        }
+        scene.AddProxy(proxy);
+    }
+    std::cout << "[Part29] Scene proxies: " << scene.GetProxies().size() << std::endl;
+
+    auto* registry = new primal::graphics::nanite::GPUMaterialRegistry();
+    for (auto& meshInfo : sceneMeshes) {
+        if (meshInfo.materialInstance) {
+            auto matID = registry->RegisterMaterial(meshInfo.materialInstance.get());
+            if (matID != primal::graphics::nanite::GPUMaterialRegistry::INVALID_MATERIAL_ID) {
+                meshInfo.gpuMaterialId = matID;
+            }
+        }
+    }
+    for (auto& meshInfo : sceneMeshes) {
+        if (meshInfo.materialInstance && meshInfo.gpuMaterialId != primal::id::invalid_id) {
+            for (const auto& proxy : scene.GetProxies()) {
+                if (proxy.entityId == meshInfo.meshEntityId) {
+                    RenderProxy patched = proxy;
+                    patched.materialId = meshInfo.gpuMaterialId;
+                    scene.UpdateProxy(meshInfo.meshEntityId, patched);
+                    break;
+                }
+            }
+        }
+    }
+    auto buildJob = registry->BuildAsync(fx.base);
+    buildJob.Wait();
+    TEST_ASSERT(registry->UploadToGPU(fx.base), "Material upload");
+
+    auto& gpuDraw = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+    gpuDraw.SetMaterialDataBuffer(registry->GetMaterialDataBuffer());
+    SamplerDesc texSamplerDesc{};
+    texSamplerDesc.minFilter = FilterMode::Linear;
+    texSamplerDesc.magFilter = FilterMode::Linear;
+    texSamplerDesc.mipFilter = FilterMode::Linear;
+    texSamplerDesc.addressU = TextureAddressMode::Wrap;
+    texSamplerDesc.addressV = TextureAddressMode::Wrap;
+    texSamplerDesc.addressW = TextureAddressMode::Wrap;
+    texSamplerDesc.comparisonFunc = ComparisonFunc::Never;
+    SamplerHandle texSampler = fx.base->CreateSampler(texSamplerDesc);
+    gpuDraw.SetTextureArrays(
+        registry->GetAlbedoTextureArray(),
+        registry->GetNormalTextureArray(),
+        registry->GetORMTextureArray(),
+        texSampler);
+
+    // -------------------------------------------------------------
+    // Step 4: Directional light + camera (TestDawnForwardRenderer defaults).
+    // -------------------------------------------------------------
+    RenderLight sunLight;
+    sunLight.type = LightType::Directional;
+    sunLight.direction = v3{0.5f, -0.7f, 0.3f};
+    sunLight.color = v3{1.0f, 0.95f, 0.9f};
+    sunLight.intensity = 3.0f;
+    scene.AddLight(sunLight);
+
+    v3 cameraPos{0.0f, 5.0f, -10.0f};
+    float cameraYaw = 3.14159265f;
+    float cameraPitch = -0.291f;
+    float cosPitch = cosf(cameraPitch);
+    v3 forward{
+        -sinf(cameraYaw) * cosPitch,
+        sinf(cameraPitch),
+        -cosf(cameraYaw) * cosPitch
+    };
+    v3 target = cameraPos + forward;
+    v3 up{0.0f, 1.0f, 0.0f};
+
+    RenderView view;
+    m4x4 viewMat = rhimath::CreateLookAtMatrix(cameraPos, target, up);
+    view.SetViewMatrix(viewMat);
+    m4x4 projMat = rhimath::CreatePerspectiveMatrix(
+        60.0f * rhimath::constants::DEG_TO_RAD,
+        static_cast<float>(W) / static_cast<float>(H), 0.1f, 1000.0f);
+    view.SetProjectionMatrix(projMat);
+    view.Cull(scene);
+
+    // -------------------------------------------------------------
+    // Step 5: Offscreen RT (BGRA8 = swapchain format) + depth.
+    // -------------------------------------------------------------
+    TextureDesc rtDesc{
+        {W, H, 1}, 1, 1,
+        DataFormat::BGRA8_UNorm,
+        TextureType::Texture2D,
+        TextureUsage::RenderTarget | TextureUsage::CopySource | TextureUsage::ShaderResource,
+        GPUMemoryUsage::Static,
+        "WindowedOffscreenRT"
+    };
+    ResourceHandle offscreenRT = fx.base->CreateTexture(rtDesc);
+    TEST_ASSERT(offscreenRT != handles::INVALID_RESOURCE, "CreateTexture offscreenRT");
+
+    // -------------------------------------------------------------
+    // Step 6: Per-frame sync primitives (triple-buffered).
+    // -------------------------------------------------------------
+    constexpr int kMaxInflight = 3;
+    SyncHandle imageSems[kMaxInflight], renderSems[kMaxInflight];
+    for (int i = 0; i < kMaxInflight; ++i) {
+        imageSems[i] = fx.base->CreateSync();
+        renderSems[i] = fx.base->CreateSync();
+        TEST_ASSERT(imageSems[i] != handles::INVALID_SYNC && renderSems[i] != handles::INVALID_SYNC,
+                    "CreateSync");
+    }
+
+    // -------------------------------------------------------------
+    // Step 7: Render loop — until window closed.
+    // -------------------------------------------------------------
+    std::cout << "[Part29] Render loop starting. Frame counter prints every 60 frames." << std::endl;
+    int frame = 0;
+    int frameSlot = 0;
+    constexpr int kSafetyFrameCap = 100000;  // hard stop after ~28 hours at 60Hz
+    bool loopOk = true;
+
+    while (!win.is_closed() && frame < kSafetyFrameCap) {
+#ifdef __APPLE__
+        // Drain pending system events (close button, drag, etc.) without blocking.
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, false);
+#endif
+
+        int slot = frameSlot % kMaxInflight;
+
+        u32 imageIdx = UINT32_MAX;
+        if (!sc->AcquireNextImage(&imageIdx, imageSems[slot])) {
+            std::cerr << "[Part29] AcquireNextImage failed at frame " << frame << std::endl;
+            loopOk = false;
+            break;
+        }
+
+        CommandBufferHandle cmdHandle = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        VulkanCommandBuffer* vcmd = fx.vk->GetCommandBuffer(cmdHandle);
+        if (!vcmd->Reset() || !vcmd->Begin()) {
+            std::cerr << "[Part29] cmd Begin failed at frame " << frame << std::endl;
+            loopOk = false;
+            fx.base->DestroyCommandBuffer(cmdHandle);
+            break;
+        }
+
+        // Render Sponza to offscreen RT (records into our cmd buffer).
+        pipeline.RenderWithCommandBuffer(scene, view, offscreenRT, rtDesc,
+                                          vcmd, (u32)slot, cmdHandle,
+                                          handles::INVALID_SYNC);
+
+        // Blit offscreen → backbuffer. Both are BGRA8_UNorm, no format conversion.
+        ResourceHandle backbuffer = sc->GetBackBuffer(imageIdx);
+        if (backbuffer == handles::INVALID_RESOURCE) {
+            std::cerr << "[Part29] GetBackBuffer failed at frame " << frame << std::endl;
+            loopOk = false;
+            fx.base->DestroyCommandBuffer(cmdHandle);
+            break;
+        }
+
+        ResourceBarrier barriers[2];
+        barriers[0].resource = offscreenRT;
+        barriers[0].beforeState = ResourceState::RenderTarget;
+        barriers[0].afterState = ResourceState::CopySource;
+        barriers[0].subresource = 0xFFFFFFFFu;
+        barriers[0].queueFamily = 0xFFFFFFFFu;
+        barriers[1].resource = backbuffer;
+        barriers[1].beforeState = ResourceState::Unknown;  // post-acquire UNDEFINED
+        barriers[1].afterState = ResourceState::CopyDest;
+        barriers[1].subresource = 0xFFFFFFFFu;
+        barriers[1].queueFamily = 0xFFFFFFFFu;
+        vcmd->InsertBarrier(barriers, 2);
+
+        // T4.6.5 part 29: BlitTexture (texture-to-texture copy with possible format conversion).
+        // Both offscreenRT + backbuffer are BGRA8_UNorm, so a 1:1 region blit works.
+        TextureBlitRegion blitRegion{};
+        blitRegion.srcSubresource = { 0, 0, 1 };
+        blitRegion.srcOffsets[0] = { 0, 0, 0 };
+        blitRegion.srcOffsets[1] = { (s32)W, (s32)H, 1 };
+        blitRegion.dstSubresource = { 0, 0, 1 };
+        blitRegion.dstOffsets[0] = { 0, 0, 0 };
+        blitRegion.dstOffsets[1] = { (s32)W, (s32)H, 1 };
+        vcmd->BlitTexture(offscreenRT, backbuffer, &blitRegion, 1, FilterMode::Nearest);
+
+        // Transition backbuffer → Present.
+        ResourceBarrier presentBarrier{};
+        presentBarrier.resource = backbuffer;
+        presentBarrier.beforeState = ResourceState::CopyDest;
+        presentBarrier.afterState = ResourceState::Present;
+        presentBarrier.subresource = 0xFFFFFFFFu;
+        presentBarrier.queueFamily = 0xFFFFFFFFu;
+        vcmd->InsertBarrier(&presentBarrier, 1);
+
+        if (!vcmd->End()) {
+            std::cerr << "[Part29] cmd End failed at frame " << frame << std::endl;
+            loopOk = false;
+            fx.base->DestroyCommandBuffer(cmdHandle);
+            break;
+        }
+
+        QueueSubmitInfo qi{};
+        qi.cmdBuffer = cmdHandle;
+        qi.waitSemaphore = imageSems[slot];
+        qi.signalSemaphore = renderSems[slot];
+        if (!fx.base->Submit(qi)) {
+            std::cerr << "[Part29] Submit failed at frame " << frame << std::endl;
+            loopOk = false;
+            fx.base->DestroyCommandBuffer(cmdHandle);
+            break;
+        }
+
+        sc->Present(renderSems[slot]);
+        fx.base->DestroyCommandBuffer(cmdHandle);
+
+        ++frame;
+        ++frameSlot;
+        if (frame % 60 == 0) {
+            std::cout << "[Part29] frame " << frame << std::endl;
+        }
+    }
+
+    fx.base->WaitIdle();
+    std::cout << "[Part29] Render loop exited after " << frame << " frames (loopOk="
+              << (loopOk ? "true" : "false") << ")" << std::endl;
+
+    // -------------------------------------------------------------
+    // Step 8: Read back final offscreen frame for PNG verification.
+    // -------------------------------------------------------------
+    constexpr u64 kBytes = (u64)W * H * 4;
+    BufferDesc rbDesc{};
+    rbDesc.size = kBytes;
+    rbDesc.type = BufferType::Raw;
+    rbDesc.memoryUsage = GPUMemoryUsage::Readback;
+    rbDesc.name = "WindowedReadback";
+    ResourceHandle readback = fx.base->CreateBuffer(rbDesc);
+    if (readback != handles::INVALID_RESOURCE) {
+        CommandBufferHandle cmdHandle = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        VulkanCommandBuffer* vcmd = fx.vk->GetCommandBuffer(cmdHandle);
+        if (vcmd->Reset() && vcmd->Begin()) {
+            // offscreenRT is in CopySource state after the loop's last blit.
+            // For readback we need it in CopySource still (already there) —
+            // CopyTextureToBuffer reads from CopySource.
+            BufferTextureCopyRegion region{};
+            region.imageSubresource = { 0, 0, 1 };
+            region.imageExtent = { W, H, 1 };
+            vcmd->CopyTextureToBuffer(offscreenRT, readback, &region, 1);
+            vcmd->End();
+            vcmd->Submit(0);
+            vcmd->WaitForCompletion();
+        }
+        fx.base->DestroyCommandBuffer(cmdHandle);
+
+        u8* mapped = static_cast<u8*>(fx.base->MapBuffer(readback, 0, kBytes));
+        if (mapped) {
+            EngineTest::SavePNG("sponza_windowed.png", mapped, W, H);
+            std::cout << "[Part29] Saved sponza_windowed.png (" << W << "x" << H << ")" << std::endl;
+            fx.base->UnmapBuffer(readback);
+        }
+        fx.base->DestroyBuffer(readback);
+    }
+
+    // -------------------------------------------------------------
+    // Step 9: Cleanup.
+    // -------------------------------------------------------------
+    for (int i = 0; i < kMaxInflight; ++i) {
+        fx.base->DestroySync(renderSems[i]);
+        fx.base->DestroySync(imageSems[i]);
+    }
+    fx.base->DestroyTexture(offscreenRT);
+    fx.base->DestroySwapChain(sc);
+
+    pipeline.Shutdown();
+    registry->Shutdown(fx.base);
+    delete registry;
+
+    for (auto& c : clusterComps) primal::cluster::remove(c);
+    for (auto& e : entities) { if (e.is_valid()) primal::game_entity::remove(e.get_id()); }
+
+    // texSampler ownership transferred to GPUDrivenDrawPipeline via SetTextureArrays.
+    fx.base->DestroySampler(materialSampler);
+    fx.base->DestroyTexture(fallbackDiffuse);
+    fx.base->DestroyTexture(fallbackNormal);
+    fx.base->DestroyTexture(fallbackORM);
+
+    primal::platform::remove_window(win.get_id());
+    primal::jobsystem::JobSystem::Shutdown();
+
+    return loopOk ? TestResult::Passed : TestResult::Failed;
+}
+
 void RegisterVulkanStandardPipelineSmoke_Tests() {
     auto suite = std::make_shared<TestSuite>("VulkanStandardPipelineSmoke_Tests");
     suite->AddTestCase(TestCase("Initialize_Smoke",          TestVulkanStandardPipeline_Initialize_Smoke));
@@ -792,6 +1302,8 @@ void RegisterVulkanStandardPipelineSmoke_Tests() {
                                 TestVulkanEditorRender_ForwardSceneRenderer));
     suite->AddTestCase(TestCase("Render_NonEditor",
                                 TestVulkanStandardPipelineRender_NonEditor));
+    suite->AddTestCase(TestCase("Render_Windowed",
+                                TestVulkanStandardPipelineRender_Windowed));
     TestRunner::RegisterTestSuite(suite);
 }
 

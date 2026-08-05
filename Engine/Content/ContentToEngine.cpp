@@ -750,7 +750,7 @@ namespace primal::content
 
 			// Try RHI first
 			if (graphics::rhi::g_deviceManager.GetDeviceCount() > 0) {
-				auto* device = graphics::rhi::g_deviceManager.GetDevice(1);
+				auto* device = graphics::rhi::g_deviceManager.GetActiveDevice();
 				if (device && device->GetDesc().platform == graphics::rhi::RHIPlatform::Metal) {
 #ifdef __APPLE__
 					utl::blob_stream_reader blob(raw_ptr);					const u32 width{ blob.read<u32>() };
@@ -1155,7 +1155,7 @@ namespace primal::content
             if (!get_rhi_mesh_asset(id, asset)) return nullptr;
         }
 
-        auto* device = graphics::rhi::g_deviceManager.GetDevice(1); // Use device 1 as per convention in this file
+        auto* device = graphics::rhi::g_deviceManager.GetActiveDevice();
         if (!device) return nullptr;
 
         auto mesh = std::make_unique<graphics::rhi::RHIGpuMesh>();

@@ -381,4 +381,9 @@ RHIDeviceBase* RHIDeviceManager::GetDevice(u32 deviceId) const {
 // 全局设备管理器实例定义
 RHIDeviceManager g_deviceManager;
 
+RHIDeviceBase* RHIDeviceManager::GetActiveDevice() const {
+    if (devices_.empty()) return nullptr;
+    return devices_.back().second;
+}
+
 } // namespace primal::graphics::rhi

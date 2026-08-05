@@ -5,12 +5,17 @@
 #define CA_PRIVATE_IMPLEMENTATION
 #include <OSAPI/MAC/AppKit/AppKit.hpp>
 #include <CoreGraphics/CGGeometry.h>
+#include <atomic>
+
+// T4.6.5 part 29: NSWindowWillCloseNotification observer installer.
+// Defined in PlatformMacWindowDelegate.mm with C linkage.
+extern "C" void primal_install_window_close_observer();
 
 namespace primal::platform
 {
-	namespace 
+	namespace
 	{
-		
+
 		struct window_info
 		{
 			void*		    hwnd{ nullptr };
@@ -22,6 +27,15 @@ namespace primal::platform
 		};
 
 		utl::free_list<window_info> windows;
+
+		// T4.6.5 part 29: flipped to true by NSWindowWillCloseNotification
+		// observer (installed by PlatformMacWindowDelegate.mm). Per-window
+		// info.is_closed is never set by current engine code; this global is
+		// the only signal source. Test render loop polls window::is_closed()
+		// which returns true once ANY window is closed. Sufficient for tests
+		// with a single window; multi-window scenarios would need per-window
+		// tracking via NSWindowDelegate + hwnd-keyed map (deferred).
+		std::atomic<bool> g_any_window_closed{ false };
 
 		window_info& get_from_id(window_id id)
 		{
@@ -91,12 +105,29 @@ namespace primal::platform
 
 		bool is_window_closed(window_id id)
 		{
-			return get_from_id(id).is_closed;
+			// T4.6.5 part 29: check both per-window flag (legacy, never set today)
+			// and the global close-notification flag (set by observer in
+			// PlatformMacWindowDelegate.mm when NSWindowWillCloseNotification fires).
+			return get_from_id(id).is_closed || g_any_window_closed.load(std::memory_order_relaxed);
 		}
 	}// anonymous namespace
 
+	// T4.6.5 part 29: called from PlatformMacWindowDelegate.mm's NSWindowWillClose
+	// observer. Sets the global flag polled by is_window_closed.
+	void notify_any_window_closed()
+	{
+		g_any_window_closed.store(true, std::memory_order_relaxed);
+	}
+
 	window create_window(const window_init_info* init_info /* = nullptr */)
 	{
+		// T4.6.5 part 29: install NSWindowWillCloseNotification observer on
+		// first window creation. The observer (defined in
+		// PlatformMacWindowDelegate.mm) sets g_any_window_closed on close,
+		// breaking test render loops that poll window::is_closed().
+		static bool observer_installed = []{ primal_install_window_close_observer(); return true; }();
+		(void)observer_installed;
+
 		window_proc callback{ init_info ? init_info->callback : nullptr };
 		window_handle parent{ init_info ? init_info->parent : nullptr };
 

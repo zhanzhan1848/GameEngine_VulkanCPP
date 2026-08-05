@@ -36,8 +36,9 @@ if(WIN32)
         "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputWin32.cpp"
     )
 elseif(APPLE)
-    file(GLOB_RECURSE PLATFORM_SOURCES 
+    file(GLOB_RECURSE PLATFORM_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformMac.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Platform/*.mm"
         "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputMac.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputMac.mm"
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.h"
