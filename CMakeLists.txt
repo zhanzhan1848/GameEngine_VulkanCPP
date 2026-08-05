@@ -446,11 +446,46 @@ else()
             -g
             -O1
         )
-        # Export ccall/cwrap + main (Task 5 will add asset preload + JS exports).
+        # Export ccall/cwrap + main, plus --embed-file flags for asset preload.
+        # LINK_FLAGS is a single shell-evaluated string — combining exports and
+        # embed-file in one property avoids CMake @-escaping issues and matches
+        # the TestDawnWASM pattern.
         set(KENNEY_LINK_FLAGS "")
         string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_RUNTIME_METHODS=ccall,cwrap")
         string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_FUNCTIONS=_main")
+
+        # Asset preload — embed Kenney tiles + colormap into the .wasm binary
+        # (synchronous access from main(); --preload-file's async XHR would race).
+        # Paths mirror what TestKenneyTilePreview.cpp's DirCandidate[] expects
+        # (relative to CWD, which under WASM is "/"). Mount layout:
+        #   /EngineTest/assets/Processed/kenney_dungeon_tiles/*.engine_mesh
+        #   /EngineTest/assets/Raw/kenney_dungeon_tiles/Textures/colormap.png
+        set(KENNEY_MESH_DIR "${CMAKE_SOURCE_DIR}/EngineTest/assets/Processed/kenney_dungeon_tiles")
+        set(KENNEY_COLORMAP "${CMAKE_SOURCE_DIR}/EngineTest/assets/Raw/kenney_dungeon_tiles/Textures/colormap.png")
+        if(EXISTS "${KENNEY_MESH_DIR}")
+            string(APPEND KENNEY_LINK_FLAGS " --embed-file ${KENNEY_MESH_DIR}@/EngineTest/assets/Processed/kenney_dungeon_tiles")
+        endif()
+        if(EXISTS "${KENNEY_COLORMAP}")
+            string(APPEND KENNEY_LINK_FLAGS " --embed-file ${KENNEY_COLORMAP}@/EngineTest/assets/Raw/kenney_dungeon_tiles/Textures/colormap.png")
+        endif()
         set_target_properties(TestKenneyTilePreviewWASM PROPERTIES LINK_FLAGS "${KENNEY_LINK_FLAGS}")
+
+        # ============================================================================
+        # POST_BUILD copy — drop .js + .wasm into wfc/ so the launcher's
+        # iframe finds them at the relative path wfc/shell.html expects.
+        # (--embed-file packages assets into the .wasm, so there's no .data.)
+        # ============================================================================
+        set(WFC_DEPLOY_DIR "${CMAKE_SOURCE_DIR}/wfc")
+        file(MAKE_DIRECTORY "${WFC_DEPLOY_DIR}")
+        add_custom_command(TARGET TestKenneyTilePreviewWASM POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE_DIR:TestKenneyTilePreviewWASM>/TestKenneyTilePreviewWASM.js"
+                "${WFC_DEPLOY_DIR}/TestKenneyTilePreviewWASM.js"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE_DIR:TestKenneyTilePreviewWASM>/TestKenneyTilePreviewWASM.wasm"
+                "${WFC_DEPLOY_DIR}/TestKenneyTilePreviewWASM.wasm"
+            COMMENT "Copying TestKenneyTilePreviewWASM artifacts to wfc/"
+        )
     endif()
 endif()
 
