@@ -1,11 +1,13 @@
 // TestKenneyTilePreview.cpp — see header for architecture rationale.
 //
-// Boots Metal-backed window + StandardRenderPipeline, loads every .engine_mesh
-// in EngineTest/assets/Processed/kenney_dungeon_tiles/ via KenneyTileCatalog,
-// builds a WFC registry from 8 of those tiles, then streams a 16×1×16
-// Dungeon-only solve across frames. Each frame: solver Step() collapses a
-// few cells, DrainStream() pulls post-restart Collapse points, entities are
-// spawned via PCGEntityFactory and re-published to the pipeline.
+// Native-only (Metal) today. Boots a Metal-backed window + StandardRender
+// Pipeline, loads every .engine_mesh in EngineTest/assets/Processed/
+// kenney_dungeon_tiles/ via KenneyTileCatalog, builds a WFC registry from 8
+// of those tiles, then streams a 16×1×16 Dungeon-only solve across frames.
+// Each frame: solver Step() collapses a few cells, DrainStream() pulls
+// post-restart Collapse points, entities are spawned via PCGEntityFactory
+// and re-published to the pipeline. WASM/WebGPU port is tracked separately
+// as task #126 (follow-up spec).
 //
 // The viewer watches the dungeon grow tile-by-tile. WASD + arrows fly the
 // camera. Window-close / Ctrl-C quits.
@@ -140,7 +142,10 @@ bool KenneyTilePreviewTestCase::Initialize() {
         return false;
     }
 
-    InitWFC();
+    if (!InitWFC()) {
+        std::cerr << "[TestKenneyTilePreview] InitWFC failed — aborting." << std::endl;
+        return false;
+    }
     UpdateCamera();
     PrintControls();
     PrintGridState("init");
@@ -160,7 +165,7 @@ bool KenneyTilePreviewTestCase::Initialize() {
 // adjacency survive a restart inside the solver; mesh_handles point at the
 // same render slots.
 
-void KenneyTilePreviewTestCase::InitWFC() {
+bool KenneyTilePreviewTestCase::InitWFC() {
     using namespace primal::graphics::wfc;
 
     registry_  = std::make_unique<WFCTileRegistry>();
@@ -171,10 +176,11 @@ void KenneyTilePreviewTestCase::InitWFC() {
         std::cerr << "[TestKenneyTilePreview] BuildWFCRegistry failed"
                   << " (catalog missing one of the 8 required Kenney tiles)"
                   << std::endl;
-        return;
+        return false;
     }
 
     ReseedSolver();
+    return true;
 }
 
 // ============================================================================
@@ -276,7 +282,6 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
     };
 
     bool changed      = false;
-    bool new_seed     = false;
     const char* why   = "manual";
 
     const u32 kSideMin = 4, kSideMax = 32;
@@ -308,7 +313,7 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
         // on some platforms; mix in steady_clock for entropy.
         const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
         rng_seed_ = static_cast<u32>(ticks & 0xFFFFFFFFu);
-        changed = true; new_seed = true; why = "reseed-new";
+        changed = true; why = "reseed-new";
     }
     if (just_pressed_(static_cast<u32>(ic::key_o), key_now(ic::key_o))) {
         observer_kind_ = (observer_kind_ == ObserverKind::MinEntropy)
@@ -324,7 +329,6 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
 
     if (!changed) return;
 
-    (void)new_seed;  // (currently informational; rng_seed_ already mutated)
     ReseedSolver();
     PrintGridState(why);
 }
@@ -351,8 +355,7 @@ void KenneyTilePreviewTestCase::PrintGridState(const char* why) {
             case OriginPreset::BottomCenter: std::cout << "BottomCenter"; break;
         }
     }
-    std::cout << " (WASD fly, R/T regen, [/] X, ,/. Z, -/+ Y, O observer, P origin)"
-              << std::endl;
+    std::cout << std::endl;
 }
 
 // ============================================================================
@@ -435,6 +438,22 @@ void KenneyTilePreviewTestCase::PumpSolverFrame() {
             std::cout << "  [" << t << "] " << (tile.name ? tile.name : "?")
                       << " (vc=" << tile.variant_count << "): "
                       << per_tile[t] << std::endl;
+        }
+
+        // Smoke: verify the showcase actually produced a real grid.
+        u32 distinct_tiles = 0;
+        for (u32 count : per_tile) {
+            if (count > 0) ++distinct_tiles;
+        }
+        if (total_collapses_ < kMinCellsCollapsed) {
+            std::cerr << "[TestKenneyTilePreview] SMOKE FAIL: only "
+                      << total_collapses_ << " cells collapsed (need >="
+                      << kMinCellsCollapsed << ")" << std::endl;
+        }
+        if (distinct_tiles < kMinDistinctTiles) {
+            std::cerr << "[TestKenneyTilePreview] SMOKE FAIL: only "
+                      << distinct_tiles << " distinct tile ids (need >="
+                      << kMinDistinctTiles << ")" << std::endl;
         }
     }
 }

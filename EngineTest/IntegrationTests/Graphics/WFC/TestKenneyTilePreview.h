@@ -17,6 +17,9 @@
 // engine's content::create_resource + StandardRenderPipeline::RegisterMeshEntity
 // + PCGEntityFactory + WFC subsystems compose into a working showcase.
 //
+// Native-only (Metal) today. WASM/WebGPU port is tracked separately as
+// task #126 (follow-up spec).
+//
 // Smoke assertion: ≥ 100 cells collapsed AND ≥ 1 tile variety (≥ 3 distinct
 // tile ids in the final grid). Visual quality (orientation, layout, materials)
 // is human-reviewed — engine team will eyeball the running window.
@@ -35,7 +38,6 @@
 #include "Engine/Graphics/WFC/WFCStepBuffer.h"
 #include "Engine/Graphics/WFC/WFCSolveBudget.h"
 #include "Engine/Graphics/WFC/WFCObserver.h"
-#include "Engine/Graphics/WFC/WFCMinEntropyObserver.h"
 #include "Engine/Graphics/WFC/WFCDistanceObserver.h"
 #include "KenneyTileCatalog.h"
 #include <memory>
@@ -49,7 +51,7 @@ public:
     void Shutdown() override;
 
 private:
-    void InitWFC();
+    bool InitWFC();
     void ReseedSolver();
     void PumpSolverFrame();
     void DestroyAllSpawnedEntities();
@@ -113,6 +115,12 @@ private:
     u32 window_width_{1280};
     u32 window_height_{720};
     u64 frame_count_{0};
+
+    // Smoke criteria: enforced in PumpSolverFrame on solver completion. The
+    // showcase is a GUI binary, so failure logs to stderr rather than crashing
+    // the window (no hard assert).
+    static constexpr u32 kMinCellsCollapsed = 100;
+    static constexpr u32 kMinDistinctTiles  = 3;
 
     // FPS-style camera. Yaw spins around +Y, pitch clamps to ±~89° to avoid
     // flip. Forward/Right derived each frame from yaw/pitch for translation.
