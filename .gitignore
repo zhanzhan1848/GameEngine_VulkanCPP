@@ -392,6 +392,10 @@ GameEngine_VulkanCPP_Debug/
 *.model
 *.texture
 EngineTest/assets/
+# WFC demo needs Kenney tiles + colormap to embed in the WASM binary;
+# CI has no BatchConvert pipeline, so the processed assets must live in git.
+!EngineTest/assets/Processed/kenney_dungeon_tiles/
+!EngineTest/assets/Raw/kenney_dungeon_tiles/Textures/colormap.png
 .trae/
 .venv/
 .sisyphus/
