@@ -501,6 +501,16 @@ void VulkanDevice::destroyCommandBufferImpl(CommandBufferHandle handle) {
                   << " — skipping" << std::endl;
         return;
     }
+    // T4.6.5 part 30.3 (fence-in-use fix): if the cmd buffer is still in
+    // Submitted state, its internal fence is pending on the GPU. Destroying
+    // now fires VUID-vkDestroyFence-fence-01120 + VUID-vkFreeCommandBuffers-
+    // pCommandBuffers-00047. StandardRenderPipeline's Render() and the windowed
+    // test both destroy per-frame cmd buffers immediately after Submit — they
+    // rely on the device layer to handle sync. Wait for the fence before
+    // freeing; WaitForCompletion is a no-op if state_ != Submitted.
+    if (cmd->GetState() == rhi::CommandBufferState::Submitted) {
+        cmd->WaitForCompletion();
+    }
     UnregisterCommandBuffer(handle);
     // VulkanCommandBuffer::~VulkanCommandBuffer 同步 vkDestroyFence/Pool — 因为命令缓冲内部
     // submit fence 由本对象独占,submit 后 WaitForCompletion 才能销毁(无 deferred 需要)。

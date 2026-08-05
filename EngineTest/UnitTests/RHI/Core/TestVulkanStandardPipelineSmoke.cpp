@@ -1122,9 +1122,10 @@ TestResult TestVulkanStandardPipelineRender_Windowed() {
     std::cout << "[Part29] Render loop starting. Frame counter prints every 60 frames." << std::endl;
     int frame = 0;
     int frameSlot = 0;
-    // T4.6.5 part 30 phase B — temporary debug: capture first 3 frames of stderr
-    // to identify null descriptor set source. Restore to 100000 after Part 30.2 lands.
-    constexpr int kSafetyFrameCap = 3;
+    // T4.6.5 part 30 phase B — debug: keep first 30 frames so validation behavior
+    // past the first 3 (fence fix territory) gets a chance to surface. Bump back
+    // to 100000 once Part 30.3 validation is fully clean.
+    constexpr int kSafetyFrameCap = 30;
     bool loopOk = true;
 
     while (!win.is_closed() && frame < kSafetyFrameCap) {

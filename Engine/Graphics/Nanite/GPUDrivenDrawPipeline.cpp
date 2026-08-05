@@ -2153,6 +2153,22 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
     if (visibility_cb_ == rhi::handles::INVALID_RESOURCE) return true;
     if (visibility_descriptor_set_ == rhi::handles::INVALID_DESCRIPTOR_SET) return true;
 
+    // T4.6.5 part 30.3 (null-buffer guard): Stage2 writes 8 descriptor bindings
+    // from global geometry buffers. If UpdateGeometryData hasn't populated them
+    // yet (first frame, or empty scene slipped past the Execute-level guard),
+    // the writes would feed VK_NULL_HANDLE to vkUpdateDescriptorSets and the
+    // subsequent DrawIndirect would fire VUID-vkCmdDraw-None-02729. Skip
+    // cleanly — Stage3 has the same guard, and Execute's auto-resolve is a
+    // no-op when visibility_buffer_ was never written.
+    if (global_meshlet_buffer_           == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_vertices_buffer_  == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_vertex_buffer_            == rhi::handles::INVALID_RESOURCE ||
+        cluster_map_buffer_              == rhi::handles::INVALID_RESOURCE ||
+        global_instance_data_buffer_     == rhi::handles::INVALID_RESOURCE) {
+        return true;
+    }
+
     if (results_.bin_count == 0) {
         results_.bin_count = 1;
         results_.total_clusters_rendered = 0;
@@ -2319,11 +2335,22 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     // Validate that we have the necessary pre-built buffers
     if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
-        final_color_texture_ == rhi::handles::INVALID_RESOURCE) {
+        final_color_texture_ == rhi::handles::INVALID_RESOURCE ||
+        // T4.6.5 part 30.3: extend guard to cover all 8 SSBOs written below.
+        // Without these, vkUpdateDescriptorSets feeds VK_NULL_HANDLE and
+        // DrawIndirect fires VUID-vkCmdDraw-None-02729 cascade.
+        global_meshlet_buffer_           == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_vertices_buffer_  == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_vertex_buffer_            == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[GPUDraw] Frame " << frame_index << " ERROR: Invalid resources:" << std::endl;
         std::cerr << "  cluster_map_buffer_: " << cluster_map_buffer_ << std::endl;
         std::cerr << "  global_instance_data_buffer_: " << global_instance_data_buffer_ << std::endl;
         std::cerr << "  final_color_texture_: " << final_color_texture_ << std::endl;
+        std::cerr << "  global_meshlet_buffer_: " << global_meshlet_buffer_ << std::endl;
+        std::cerr << "  global_meshlet_vertices_buffer_: " << global_meshlet_vertices_buffer_ << std::endl;
+        std::cerr << "  global_meshlet_triangles_buffer_: " << global_meshlet_triangles_buffer_ << std::endl;
+        std::cerr << "  global_vertex_buffer_: " << global_vertex_buffer_ << std::endl;
         cmd_buffer->EndRenderPass();
         return false;
     }
