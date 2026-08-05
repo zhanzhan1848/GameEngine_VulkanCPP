@@ -2,6 +2,7 @@
 #include "Graphics/RHI/Core/RHIMath.h"
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 #include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"
+#include "Graphics/Dawn/ShaderLoader.h"
 #endif
 #if !defined(__EMSCRIPTEN__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
@@ -454,12 +455,14 @@ void ForwardSceneRenderer::CreateSamplers() {
     SamplerDesc linearWrap{
         .minFilter = FilterMode::Linear, .magFilter = FilterMode::Linear, .mipFilter = FilterMode::Linear,
         .addressU = TextureAddressMode::Wrap, .addressV = TextureAddressMode::Wrap, .addressW = TextureAddressMode::Wrap,
+        .comparisonFunc = ComparisonFunc::Never,
     };
     default_sampler_ = device_->CreateSampler(linearWrap);
 
     SamplerDesc linearClamp{
         .minFilter = FilterMode::Linear, .magFilter = FilterMode::Linear,
         .addressU = TextureAddressMode::Clamp, .addressV = TextureAddressMode::Clamp,
+        .comparisonFunc = ComparisonFunc::Never,
     };
     brdf_sampler_ = device_->CreateSampler(linearClamp);
 }
@@ -483,31 +486,41 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
         };
         material_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
     }
-    // Lighting set (13 bindings)
+    // Lighting set (13 bindings). On Dawn the depth texture (binding 5) AND
+    // shadow maps (bindings 6/7) must be SampledDepthImage so WGSL can declare
+    // them as `texture_depth_2d` — WebGPU rejects binding a depth-format
+    // texture to a regular Float-sampled slot. Irradiance/prefilter (8/9) are
+    // cube maps: isCube=true so Dawn creates a CubeView dimension.
     {
+        constexpr DescriptorType depthType =
+#ifdef __EMSCRIPTEN__
+            DescriptorType::SampledDepthImage;
+#else
+            DescriptorType::SampledImage;
+#endif
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel},
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel},
             {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
             {3, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
             {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
-            {5, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
-            {6, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
-            {7, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
-            {8, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
-            {9, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
+            {5, depthType,                   1, ShaderStage::Pixel},
+            {6, depthType,                   1, ShaderStage::Pixel},
+            {7, depthType,                   1, ShaderStage::Pixel},
+            {8, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr, DescriptorBindingFlags::None, DataFormat::RGBA16_Float, false, false, true},
+            {9, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr, DescriptorBindingFlags::None, DataFormat::RGBA16_Float, false, false, true},
             {10, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
             {11, DescriptorType::Sampler, 1, ShaderStage::Pixel},
             {12, DescriptorType::Sampler, 1, ShaderStage::Pixel},
         };
         lighting_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
     }
-    // Skybox set
+    // Skybox set — binding 2 is a texture_cube, needs isCube=true on Dawn.
     {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Vertex},
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Vertex},
-            {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
+            {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr, DescriptorBindingFlags::None, DataFormat::RGBA16_Float, false, false, true},
             {3, DescriptorType::Sampler, 1, ShaderStage::Pixel},
         };
         skybox_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
@@ -523,18 +536,37 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
 
 void ForwardSceneRenderer::CreateShaders() {
 #ifdef __EMSCRIPTEN__
-    // ForwardSceneRenderer's Metal shaders (GBuffer.metal, DeferredLighting.metal,
-    // Skybox.metal, DepthOnly.metal + technique variants) are not yet ported to
-    // WGSL — the existing GBuffer.wgsl/DeferredLighting.wgsl target the meshlet
-    // compute path with different entry points and descriptor layouts.
-    // On WASM we leave all shader handles INVALID; pipelines become INVALID too,
-    // and Render() early-returns. Entity registration (RegisterMeshEntity) does
-    // not depend on shaders, so the rest of the pipeline still works.
-    std::cout << "[ForwardSceneRenderer] WASM build: skipping Metal shader load ("
-                 "port pending)" << std::endl;
-    return;
-#endif
+    // WASM WGSL ports live in Engine/Graphics/Dawn/shaders/ForwardScene/.
+    // Technique variants (AlphaClip/Unlit/Foliage/Water/Transparent) and the
+    // StreamingGBuffer path are not ported — their handles stay INVALID and
+    // the corresponding pipelines become INVALID. Render() only routes
+    // standard-technique proxies through the GBuffer pipeline on WASM.
+    auto loadWgsl = [this](const char* name, const char* entry, ShaderStage stage) -> ShaderHandle {
+        std::string src = dawn::LoadWGSL(name);
+        if (src.empty()) {
+            std::cerr << "[ForwardSceneRenderer] WASM: failed to load WGSL: "
+                      << name << "/" << entry << std::endl;
+            return handles::INVALID_SHADER;
+        }
+        auto handle = device_->CreateShader(src.data(), src.size(), stage, entry);
+        if (handle == handles::INVALID_SHADER) {
+            std::cerr << "[ForwardSceneRenderer] WASM: failed to compile WGSL: "
+                      << name << "/" << entry << std::endl;
+        }
+        return handle;
+    };
 
+    gbuffer_vs_  = loadWgsl("ForwardScene/GBuffer",          "vertexMain",         ShaderStage::Vertex);
+    gbuffer_ps_  = loadWgsl("ForwardScene/GBuffer",          "fragmentMain",       ShaderStage::Pixel);
+    shadow_vs_   = loadWgsl("ForwardScene/DepthOnly",        "shadow_mapping_vs",  ShaderStage::Vertex);
+    lighting_vs_ = loadWgsl("ForwardScene/DeferredLighting", "vertexMain",         ShaderStage::Vertex);
+    lighting_ps_ = loadWgsl("ForwardScene/DeferredLighting", "fragmentLighting_v3", ShaderStage::Pixel);
+    blit_vs_     = loadWgsl("ForwardScene/Blit",             "vertexMain",         ShaderStage::Vertex);
+    blit_ps_     = loadWgsl("ForwardScene/Blit",             "fragmentBlit",       ShaderStage::Pixel);
+    skybox_vs_   = loadWgsl("ForwardScene/Skybox",           "vertexSkybox",       ShaderStage::Vertex);
+    skybox_ps_   = loadWgsl("ForwardScene/Skybox",           "fragmentSkybox",     ShaderStage::Pixel);
+    return;
+#else
     auto load = [this](const char* file, const char* entry, ShaderStage stage) -> ShaderHandle {
         auto src = LoadShaderSource(file);
         if (src.empty()) {
@@ -581,15 +613,40 @@ void ForwardSceneRenderer::CreateShaders() {
     // Streaming mesh shaders (Phase 9.3b Task 12) — SoA vertex pulling
     streaming_vs_ = load("StreamingGBuffer", "streamingVertexMain", ShaderStage::Vertex);
     streaming_ps_ = load("StreamingGBuffer", "streamingFragmentMain", ShaderStage::Pixel);
+#endif
 }
 
 void ForwardSceneRenderer::CreatePipelines() {
+    // Helper: WebGPU cannot expose bound vertex buffers as storage, so we use
+    // standard @location(N) attributes (5 vertex inputs at slot 0, stride 32B)
+    // and instance-rate attributes for InstanceData at slot 1 (96B stride).
+    // Metal keeps the legacy slot-20/3 vertex-pulling pattern.
+    auto populateWasmVertexInput = [](GraphicsPipelineDesc& desc) {
 #ifdef __EMSCRIPTEN__
-    // Pipelines depend on shaders loaded in CreateShaders; on WASM all shader
-    // handles are INVALID, so every CreateGraphicsPipeline call would fail and
-    // spam the console. Skip pipeline creation entirely — Render() early-returns.
-    return;
+        // Vertex attributes (slot 0, 32B stride):
+        //   position(0-11) | color_t_sign(12-15) | packed_normal(16-19)
+        //   | packed_tangent(20-23) | uv(24-31)
+        // Instance attributes (slot 1, 96B stride = sizeof(InstanceData)):
+        //   transform mat4x4 (4 rows) | baseColor vec4 | roughness/metallic/alphaCutoff/pad
+        utl::vector<rhi::VertexInputAttribute> attrs(11);
+        attrs[0]  = {0,  0, rhi::DataFormat::RGB32_Float, 0};   // position
+        attrs[1]  = {1,  0, rhi::DataFormat::R32_UInt,    12};  // color_t_sign
+        attrs[2]  = {2,  0, rhi::DataFormat::R32_UInt,    16};  // packed_normal
+        attrs[3]  = {3,  0, rhi::DataFormat::R32_UInt,    20};  // packed_tangent
+        attrs[4]  = {4,  0, rhi::DataFormat::RG32_Float,  24};  // uv
+        attrs[5]  = {5,  1, rhi::DataFormat::RGBA32_Float, 0};  // transform row 0
+        attrs[6]  = {6,  1, rhi::DataFormat::RGBA32_Float, 16}; // transform row 1
+        attrs[7]  = {7,  1, rhi::DataFormat::RGBA32_Float, 32}; // transform row 2
+        attrs[8]  = {8,  1, rhi::DataFormat::RGBA32_Float, 48}; // transform row 3
+        attrs[9]  = {9,  1, rhi::DataFormat::RGBA32_Float, 64}; // baseColor
+        attrs[10] = {10, 1, rhi::DataFormat::RGBA32_Float, 80}; // roughness/metallic/alphaCutoff/pad
+        desc.vertexAttributes = attrs;
+        utl::vector<rhi::VertexInputBinding> binds(2);
+        binds[0] = {0, 32, true};   // perVertex
+        binds[1] = {1, 96, false};  // perInstance
+        desc.vertexBindings = binds;
 #endif
+    };
 
     PushConstantRange modelPush{ShaderStage::Vertex, 2, sizeof(PCGPushConsts)};
 
@@ -612,6 +669,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        populateWasmVertexInput(desc);
         gbuffer_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Shadow
@@ -628,6 +686,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        populateWasmVertexInput(desc);
         shadow_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Lighting
@@ -684,6 +743,12 @@ void ForwardSceneRenderer::CreatePipelines() {
         blit_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // AlphaClip technique — shares gbuffer layout, different shader
+#ifndef __EMSCRIPTEN__
+    // Technique variants (AlphaClip/Unlit/Foliage/Water/Transparent/Forward*)
+    // are not ported to WASM yet — their Metal shaders don't load on WASM
+    // and CreateGraphicsPipeline fails with INVALID_SHADER vertex handles,
+    // cascading into device-level validation. Skip creation entirely; the
+    // WFC demo uses only standard GBuffer materials.
     {
         GraphicsPipelineDesc desc{};
         desc.layout = gbuffer_layout_;
@@ -831,8 +896,11 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.alphaBlendOp = BlendOp::Add;
         forward_transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
+#endif // !__EMSCRIPTEN__
     // Streaming mesh pipeline — same layout/RTs/depth as GBuffer, different VS/PS
     // (Phase 9.3b Task 12). Reads SoA buffers at slots 20/21 instead of AoS.
+#ifndef __EMSCRIPTEN__
+    // Streaming mesh pipeline also uses Metal-only shaders on WASM.
     {
         GraphicsPipelineDesc desc{};
         desc.layout = gbuffer_layout_;
@@ -850,6 +918,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.cullMode = CullMode::None;
         streaming_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
+#endif // !__EMSCRIPTEN__
 }
 
 void ForwardSceneRenderer::CreatePersistentResources() {
@@ -1358,7 +1427,13 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
 
         for (auto& [meshIdx, range] : all_ranges[t]) {
             u64 inst_offset = range.offset * sizeof(graphics::InstanceData);
+#ifdef __EMSCRIPTEN__
+            // WASM uses standard vertex attributes (slot 0) + instance-rate
+            // attributes (slot 1). Metal keeps the legacy slot-20/3 vertex-pull.
+            cmd->BindVertexBuffers(1, 1, &pcg_instance_buffer_, &inst_offset);
+#else
             cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+#endif
             auto matSet = (meshIdx < material_ds_.size()) ? material_ds_[meshIdx] : material_ds_[0];
             const DescriptorSetHandle matSets[] = {matSet};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, layout, 1, 1, matSets, 0, nullptr);
@@ -1366,7 +1441,11 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
             pc.transform = MatrixIdentity();
             pc.use_instances = 1;
             cmd->PushConstants(layout, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+#ifdef __EMSCRIPTEN__
+            mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 0);
+#else
             mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
+#endif
         }
     }
 }
@@ -1403,6 +1482,13 @@ math::m4x4 ForwardSceneRenderer::ComputeCascadeVP(math::v3 lightDir, math::v3 ca
 
 void ForwardSceneRenderer::RenderStreamingMeshes(RHICommandBuffer* cmd, u32 frame_index) {
     if (!render_scene_) return;
+#ifdef __EMSCRIPTEN__
+    // StreamingMesh binds positions/elements/indices at slots 20/21/22 with
+    // DrawIndirect — separate WASM port needed (slot-20 vertex pull won't work
+    // on Dawn). WFC demo uses RegisterMeshEntity path, not StreamingMesh, so
+    // skip on WASM until a separate port lands.
+    return;
+#endif
     if (streaming_pipeline_ == handles::INVALID_PIPELINE) return;
     if (streaming_material_ds_ == handles::INVALID_DESCRIPTOR_SET) return;
 
@@ -1508,14 +1594,6 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
                                    ResourceHandle backbuffer,
                                    u32 frame_index) {
     if (!initialized_ || !scene_loaded_) return;
-#ifdef __EMSCRIPTEN__
-    // WASM build has no Metal shaders ported (see CreateShaders). All pipelines
-    // are INVALID; calling BindGraphicsPipeline on them would crash. Editor mode
-    // rendering is dormant on WASM until the ForwardSceneRenderer WGSL port
-    // exists. The meshlet path (used in non-editor mode) is the ported WASM
-    // rendering route.
-    return;
-#endif
 
     u32 idx = frame_index % 3;
 
@@ -1617,6 +1695,12 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
     }
 
     // Pass 1: Shadow cascade 0
+#ifndef __EMSCRIPTEN__
+    // Shadow pass is skipped on WASM — the Metal path uses a vertex-buffer
+    // slot-0 aliasing trick to override the per-cascade VP, which doesn't
+    // translate to WebGPU (vertex slot 0 is real vertex data; shadow VP needs
+    // to flow through a uniform). Lighting shader sees cleared depth (1.0)
+    // and treats all pixels as fully lit. WFC demo renders without shadows.
     {
         RenderPassDesc rpDesc{};
         rpDesc.depthAttachment.texture = shadow_map_[0];
@@ -1663,6 +1747,7 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
 
         cmd->EndRenderPass();
     }
+#endif // !__EMSCRIPTEN__
 
     // Pass 3: GBuffer
     {
@@ -1707,13 +1792,19 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
 
     // Pass 4: Deferred Lighting
     {
+        constexpr DescriptorType depthType =
+#ifdef __EMSCRIPTEN__
+            DescriptorType::SampledDepthImage;
+#else
+            DescriptorType::SampledImage;
+#endif
         DescData params[] = {
             {0, DescriptorType::UniformBuffer, view_cb_[idx]},
             {1, DescriptorType::UniformBuffer, scene_cb_[idx]},
             {2, DescriptorType::SampledImage, gbuffer_albedo_[idx]},
             {3, DescriptorType::SampledImage, gbuffer_normal_[idx]},
             {4, DescriptorType::SampledImage, gbuffer_orm_[idx]},
-            {5, DescriptorType::SampledImage, gbuffer_depth_[idx]},
+            {5, depthType,                    gbuffer_depth_[idx]},
             {6, DescriptorType::SampledImage, shadow_map_[0]},
             {7, DescriptorType::SampledImage, shadow_map_[1]},
             {8, DescriptorType::SampledImage, ibl_ready_ ? irradiance_map_ : black_cube_texture_},

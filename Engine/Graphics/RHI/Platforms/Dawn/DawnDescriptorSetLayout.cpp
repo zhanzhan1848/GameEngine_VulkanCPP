@@ -280,7 +280,9 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
             entry.nextInChain = nullptr;
             entry.binding = wgpuBinding;
             entry.visibility = visibility;
-            entry.sampler.type = WGPUSamplerBindingType_Filtering;
+            entry.sampler.type = binding.isNonFiltering
+                ? WGPUSamplerBindingType_NonFiltering
+                : WGPUSamplerBindingType_Filtering;
             break;
         }
         case DescriptorType::CombinedImageSampler: {

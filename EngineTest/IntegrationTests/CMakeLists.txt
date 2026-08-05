@@ -623,8 +623,29 @@ if(APPLE)
     )
     target_compile_definitions(TestWFCRuinsRendering PRIVATE "TEST_WFC_RUINS_RENDERING=1" "TEST_RENDERER=0")
 
+    # 39. TestKenneyTilePreview (Kenney dungeon tile asset-pack preview)
+    # Live Metal window + StandardRenderPipeline. Loads every .engine_mesh in
+    # EngineTest/assets/Processed/kenney_dungeon_tiles/ via KenneyTileCatalog
+    # (application-layer loader, NOT engine core), places tiles in an 8×5 grid
+    # at cell_size=4m, spawns ECS entities via PCGEntityFactory, renders
+    # kHeadlessFrameCap=120 frames, exits. Smoke asserts ≥ 1 tile loaded AND
+    # spawned; visual quality is human-reviewed.
+    add_executable(TestKenneyTilePreview
+        "Main.cpp"
+        "Graphics/WFC/TestKenneyTilePreview.cpp"
+        "Graphics/WFC/KenneyTileCatalog.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestKenneyTilePreview)
+    target_include_directories(TestKenneyTilePreview PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC
+    )
+    target_compile_definitions(TestKenneyTilePreview PRIVATE "TEST_KENNEY_TILE_PREVIEW=1" "TEST_RENDERER=0")
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall TestWFCRuinsMixedCategories TestWFCRuinsRestart TestWFCRuinsRendering)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall TestWFCRuinsMixedCategories TestWFCRuinsRestart TestWFCRuinsRendering TestKenneyTilePreview)
 
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)

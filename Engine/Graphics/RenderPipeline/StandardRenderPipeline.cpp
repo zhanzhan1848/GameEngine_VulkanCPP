@@ -224,6 +224,12 @@ bool StandardRenderPipeline::ApplyConfigChanges() {
 // ============================================================================
 
 void StandardRenderPipeline::InitializeSubsystems() {
+#ifndef __EMSCRIPTEN__
+    // --- Meshlet/Nanite subsystems (not yet ported to WASM/Dawn WGSL) ---
+    // The WFC demo runs in editor mode (ForwardSceneRenderer path) which is
+    // self-contained and does not touch any of the subsystems below. Skipping
+    // their init avoids cascading pipeline-creation failures from missing
+    // meshlet WGSL shaders (ClusterBinning, VisibilityBuffer, etc.).
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
     if (!gpuDraw.IsInitialized()) {
         nanite::BinningConfig binningConfig{};
@@ -334,6 +340,7 @@ void StandardRenderPipeline::InitializeSubsystems() {
 
     // --- Lumen passes ---
     InitializeLumenPasses();
+#endif // !__EMSCRIPTEN__
 
     // --- Forward renderer (editor mode) ---
     forward_renderer_ = std::make_unique<ForwardSceneRenderer>();

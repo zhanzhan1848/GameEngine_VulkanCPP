@@ -571,6 +571,7 @@ struct DescriptorSetLayoutBinding {
     bool isCube{ false }; // true = SampledImage uses Cube view dimension
     bool is3D{ false }; // true = SampledImage/StorageImage uses 3D view dimension (texture_3d)
     bool unfilterableFloat{ false }; // true = SampledImage uses UnfilterableFloat sample type (required for R32Float in WebGPU)
+    bool isNonFiltering{ false }; // true = Sampler uses NonFiltering binding type (required to sample depth textures in WebGPU)
     u64 minBindingSize{ 0 }; // For buffer types: minimum buffer size (0 = infer from shader)
 };
 

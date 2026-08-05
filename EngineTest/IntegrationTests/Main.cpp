@@ -58,6 +58,8 @@
 #include "Graphics/WFC/TestWFCRuinsRendering.h"
 #elif TEST_WFC_STREAMING
 #include "Graphics/WFC/TestWFCStreaming.h"
+#elif TEST_KENNEY_TILE_PREVIEW
+#include "Graphics/WFC/TestKenneyTilePreview.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif
