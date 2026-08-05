@@ -16,8 +16,11 @@
 #include "Engine/Common/CommonHeaders.h"
 #include "Engine/Content/ContentToEngine.h"
 #include "Engine/EngineAPI/Input.h"
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+#include "Engine/Graphics/RHI/Platforms/Dawn/DawnDevice.h"
+#elif defined(__APPLE__)
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalDevice.h"
-#include "Engine/Graphics/RHI/Platforms/Metal/MetalMath.h"
+#endif
 #include "Engine/Graphics/RHI/Core/RHITypes.h"
 #include "Engine/Graphics/Lumen/LumenTypes.h"
 #include "Engine/Graphics/WFC/WFCConfig.h"
@@ -75,16 +78,25 @@ bool KenneyTilePreviewTestCase::Initialize() {
     window = primal::platform::create_window(&winInfo);
     if (!window.is_valid()) return false;
 
-    // 2. Metal device + register with global device_manager.
+    // 2. RHI device + register with global device_manager.
+    //    ENABLE_WEBGPU path uses Dawn (works on macOS native + WASM).
+    //    __APPLE__ path uses Metal (native macOS only).
     DeviceDesc desc;
-    desc.platform = RHIPlatform::Metal;
     desc.enableDebug = true;
-    auto* metalDevice = new MetalDevice(desc);
-    if (!metalDevice || !metalDevice->Initialize()) {
-        delete metalDevice;
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+    desc.platform = RHIPlatform::Dawn;
+    auto* rhiDevice = new DawnDevice(desc);
+#elif defined(__APPLE__)
+    desc.platform = RHIPlatform::Metal;
+    auto* rhiDevice = new MetalDevice(desc);
+#else
+    #error "TestKenneyTilePreview requires either ENABLE_WEBGPU or __APPLE__"
+#endif
+    if (!rhiDevice || !rhiDevice->Initialize()) {
+        delete rhiDevice;
         return false;
     }
-    device.reset(metalDevice);
+    device.reset(rhiDevice);
     g_deviceManager.RegisterDevice(device.get());
 
     // 3. RenderSystem (owning swap chain + per-frame command buffers)
