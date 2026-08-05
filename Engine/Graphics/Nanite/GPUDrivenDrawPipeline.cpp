@@ -3361,6 +3361,25 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
         device_->UnmapBuffer(frame.blit_resolution_cb[cascade_index]);
     }
 
+    // T4.6.5 part 28 (B7+HZB layout fix): insert layout transitions before the
+    // blit dispatch. ExecuteShadowRaster's render pass left depthRT in
+    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL; the blit shader samples it as
+    // SHADER_READ_ONLY (per DescriptorImageInfo::ShaderResource → validation
+    // expects SHADER_READ_ONLY_OPTIMAL). shadowMap has no prior write — its
+    // actual layout is UNDEFINED, so use Unknown (maps to UNDEFINED) for the
+    // beforeState. Without these barriers, dispatch triggers
+    // VUID-vkCmdDraw-None-09600 (2 errors per cascade per frame).
+    {
+        rhi::ResourceBarrier barriers[2];
+        barriers[0].resource = depthRT;
+        barriers[0].beforeState = rhi::ResourceState::DepthStencil;
+        barriers[0].afterState = rhi::ResourceState::ShaderResource;
+        barriers[1].resource = shadowMap;
+        barriers[1].beforeState = rhi::ResourceState::Unknown;
+        barriers[1].afterState = rhi::ResourceState::UnorderedAccess;
+        cmd_buffer->InsertBarrier(barriers, 2);
+    }
+
     // Update descriptor set (3 bindings)
     rhi::DescriptorImageInfo srcInfo{ rhi::handles::INVALID_SAMPLER, depthRT, rhi::ResourceState::ShaderResource };
     rhi::DescriptorImageInfo dstInfo{ rhi::handles::INVALID_SAMPLER, shadowMap, rhi::ResourceState::UnorderedAccess };

@@ -546,11 +546,14 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 
     const rhi::DescriptorSetHandle copyDescriptorSets[] = { copyDescriptorSet };
 
-    // Vulkan: source depth is in DepthStencilAttachment (render pass finalLayout);
-    // HZBCopy samples it via SampledDepthImage → needs ShaderResource.
-    // HZB mip 0 starts UNDEFINED; StorageImage write needs GENERAL (UnorderedAccess).
+    // T4.6.5 part 28: source depth may be in DepthStencil (Stage3 left) OR
+    // ShaderResource (ResolveVisibilityBuffer's barrier left — Resolve auto-
+    // fires at end of Execute() before HZBBuild pass). Using Unknown (UNDEFINED)
+    // accepts either actual layout; MoltenVK preserves content in practice.
+    // Hardcoding DepthStencil trips VUID-VkImageMemoryBarrier-oldLayout-01197
+    // when Resolve already transitioned to ShaderResource.
     emitImageBarrier(depth_texture, 0xFFFFFFFFu,
-                     rhi::ResourceState::DepthStencil, rhi::ResourceState::ShaderResource);
+                     rhi::ResourceState::Unknown, rhi::ResourceState::ShaderResource);
     emitImageBarrier(hzb_texture_, 0,
                      rhi::ResourceState::Unknown, rhi::ResourceState::UnorderedAccess);
 
