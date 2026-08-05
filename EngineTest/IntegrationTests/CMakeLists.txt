@@ -234,6 +234,20 @@ if(APPLE)
     setup_test_target(TestNaniteStreamingPipeline)
     target_compile_definitions(TestNaniteStreamingPipeline PRIVATE "TEST_NANITE_STREAMING_PIPELINE=1" "TEST_RENDERER=0")
 
+    # 10b. TestVulkanSponzaRenderGraph (T4.6.5 part 30.4)
+    # First visible-window Vulkan Sponza render via RenderSystem abstraction.
+    # Mirrors TestNaniteStreamingPipeline scaffolding (RenderTestRunner + RenderSystem)
+    # but drives StandardRenderPipeline::RenderWithCommandBuffer on a Vulkan device.
+    add_executable(TestVulkanSponzaRenderGraph
+        "Main.cpp"
+        "TestVulkanSponzaRenderGraph.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Input/InputMac.mm"
+    )
+    setup_test_target(TestVulkanSponzaRenderGraph)
+    target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
+
     # 11. TestHZBStandalone
     add_executable(TestHZBStandalone
         "HZBStandaloneTest.cpp"

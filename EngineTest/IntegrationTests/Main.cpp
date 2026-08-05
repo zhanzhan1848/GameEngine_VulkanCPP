@@ -32,6 +32,8 @@
 #include "TestParticleSponza.h"
 #elif TEST_NANITE_STREAMING_PIPELINE
 #include "TestNaniteStreamingPipeline.h"
+#elif TEST_VULKAN_SPONZA_RENDERGRAPH
+#include "TestVulkanSponzaRenderGraph.h"
 #elif defined(TEST_DAWN_RENDERING)
 #include "TestDawnRendering.h"
 #elif defined(TEST_DAWN_RENDERGRAPH)
