@@ -19,6 +19,7 @@
 #include "Engine/Graphics/WFC/WFCConfig.h"
 #include "Engine/Graphics/WFC/WFCCategory.h"
 #include "Engine/Graphics/WFC/WFCMinEntropyObserver.h"
+#include "Engine/Graphics/WFC/WFCDistanceObserver.h"
 #include <memory>
 
 using namespace primal::graphics::wfc;
@@ -563,6 +564,64 @@ TestResult TestWFCSolver_SetObserver_PreservesDefaultBehavior() {
     return TestResult::Passed;
 }
 
+// Task 6: SetObserver(make_unique<WFCDistanceObserver>(origin)) on a 3x1x3
+// grid where all cells have equal entropy. MinEntropy's row-major tie-break
+// would collapse (0,0,0) first. Distance observer with origin (1,0,1) must
+// collapse (1,0,1) first instead — origin is distance 0, strictly less than
+// any other cell. This is the discriminating test: only a correctly-wired
+// strategy swap produces this outcome.
+TestResult TestWFCSolver_SetObserver_DistanceChangesOrder() {
+    WFCConfig config;
+    config.grid_size = {3, 1, 3};
+    config.max_cells_per_frame = 1;
+    config.max_ms_per_frame = 100;
+    config.seed = 42;
+    config.max_generations = 4;
+
+    WFCTile t{};
+    t.name = "trivial";
+    t.variant_count = 1;
+    t.sockets[0] = 0xFFFFFFFFFFFFFFFFULL;  // wildcard
+
+    WaveGrid grid;
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCStepBuffer buf;
+
+    reg.Register(t);
+    // Self-compat on all 3 axes so propagation doesn't trigger a contradiction
+    // after the first collapse (mirrors TestWFCSolver_DefaultObserver_IsMinEntropy).
+    const wfc_tile_id wildcard{0};
+    adj.AddCompatibility(wildcard, 0, WFCFace::PosX, wildcard, 0);
+    adj.AddCompatibility(wildcard, 0, WFCFace::PosY, wildcard, 0);
+    adj.AddCompatibility(wildcard, 0, WFCFace::PosZ, wildcard, 0);
+
+    WFCSolver solver;
+    solver.SetObserver(std::make_unique<WFCDistanceObserver>(WFCGridCoord{1, 0, 1}));
+    solver.Initialize(config, grid, reg, adj, buf);
+
+    WFCSolveBudget budget(10, 100);
+    budget.Reset();
+    solver.Step(budget);
+
+    TEST_ASSERT(grid.CellAt({1, 0, 1}).collapsed,
+                "Distance observer collapses origin (1,0,1) first");
+    // Strengthen: no other cell should be collapsed this Step. (MinEntropy
+    // would have collapsed (0,0,0); a misbehaving strategy might collapse
+    // multiple cells if a bug regressed propagation.)
+    WFCGridCoord size = grid.Size();
+    for (s32 z = 0; z < size.z; ++z) {
+        for (s32 y = 0; y < size.y; ++y) {
+            for (s32 x = 0; x < size.x; ++x) {
+                if (x == 1 && y == 0 && z == 1) continue;
+                TEST_ASSERT(!grid.CellAt({x, y, z}).collapsed,
+                            "Only origin (1,0,1) collapsed this Step");
+            }
+        }
+    }
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCSolver");
     TEST_CASE(suite, "Initialize_Populates_Candidate_Masks", TestWFCSolver_Initialize_Populates_Candidate_Masks);
@@ -576,6 +635,7 @@ int main() {
     TEST_CASE(suite, "PopulateRespectsCategoryMask", TestWFCSolver_PopulateRespectsCategoryMask);
     TEST_CASE(suite, "DefaultObserver_IsMinEntropy", TestWFCSolver_DefaultObserver_IsMinEntropy);
     TEST_CASE(suite, "SetObserver_PreservesDefaultBehavior", TestWFCSolver_SetObserver_PreservesDefaultBehavior);
+    TEST_CASE(suite, "SetObserver_DistanceChangesOrder", TestWFCSolver_SetObserver_DistanceChangesOrder);
     suite.RunAllTests();
     return 0;
 }
