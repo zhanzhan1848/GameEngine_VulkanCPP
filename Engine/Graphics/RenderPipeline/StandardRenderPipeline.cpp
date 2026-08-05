@@ -103,6 +103,33 @@ bool StandardRenderPipeline::Initialize(RHIDeviceBase* device) {
         desc.format = DataFormat::RGBA16_Float;
         desc.usage = TextureUsage::ShaderResource;
         black_texture_ = device->CreateTexture(desc);
+
+        // T4.6.5 part 24.12 (B7 fix): one-time transition UNDEFINED → ShaderResource.
+        // FusionComposite samples black_texture_ as fallback when SSGI/DDGI/SPGI/AO
+        // aren't populated; without this, validation fires VUID-vkCmdDraw-None-09600
+        // on every FusionComposite draw. Apple Silicon's zero-init masks the visual
+        // bug (samples zeros) but Vulkan validation still tracks the layout.
+        if (black_texture_ != handles::INVALID_RESOURCE) {
+            CommandBufferHandle cmdH = device->CreateCommandBuffer(CommandQueueType::Graphics);
+            if (cmdH != handles::INVALID_COMMAND_BUFFER) {
+                RHICommandBuffer* cmd = GetCommandBuffer(cmdH);
+                if (cmd && cmd->Begin()) {
+                    ResourceBarrier b{};
+                    b.resource = black_texture_;
+                    b.beforeState = ResourceState::Unknown;
+                    b.afterState = ResourceState::ShaderResource;
+                    b.subresource = RHI_ALL_SUBRESOURCES;
+                    b.queueFamily = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&b, 1);
+                    cmd->End();
+                    QueueSubmitInfo si{};
+                    si.cmdBuffer = cmdH;
+                    device->Submit(si);
+                    cmd->WaitForCompletion();
+                }
+                device->DestroyCommandBuffer(cmdH);
+            }
+        }
     }
 
     return true;
