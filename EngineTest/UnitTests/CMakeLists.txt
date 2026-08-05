@@ -482,6 +482,7 @@ if(ENABLE_VULKAN)
     # shaders; needs SPIR-V port (T4.6 scope).
     add_executable(TestVulkanStandardPipelineSmoke
         RHI/Core/TestVulkanStandardPipelineSmoke.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
     )
     target_include_directories(TestVulkanStandardPipelineSmoke PRIVATE
         ${CMAKE_SOURCE_DIR}
