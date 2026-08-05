@@ -39,6 +39,22 @@
 #include <cassert>
 #include <chrono>
 #include <filesystem>
+#include <cstdio>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+// Bridges observer/origin state to the wfc/shell.html HUD via JS.
+// No-op on native builds (the entire function body is ifdef'd out).
+static void SyncWfcHudIfWasm(const char* obs, const char* origin) {
+    char buf[160];
+    std::snprintf(buf, sizeof(buf),
+                  "if (window.setWfcHud) window.setWfcHud('%s', '%s');",
+                  obs, origin);
+    emscripten_run_script(buf);
+}
+#else
+static inline void SyncWfcHudIfWasm(const char*, const char*) {}
+#endif
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
@@ -162,6 +178,9 @@ bool KenneyTilePreviewTestCase::Initialize() {
     UpdateCamera();
     PrintControls();
     PrintGridState("init");
+
+    // Push initial observer/origin to the WASM HUD (no-op on native).
+    SyncWfcHudIfWasm("MinEntropy", "Center");
 
     std::cout << "[TestKenneyTilePreview] Pipeline + scene + " << loaded
               << " catalog tiles + WFC registry ready" << std::endl;
@@ -341,6 +360,20 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
     }
 
     if (!changed) return;
+
+    // Sync HUD before reseed so the WFC iframe shows the new observer/origin
+    // as the solve restarts. No-op on native builds.
+    {
+        const char* obs = (observer_kind_ == ObserverKind::MinEntropy)
+                          ? "MinEntropy" : "DistanceFromOrigin";
+        const char* origin = nullptr;
+        switch (origin_preset_) {
+            case OriginPreset::Center:       origin = "Center";       break;
+            case OriginPreset::Corner:       origin = "Corner";       break;
+            case OriginPreset::BottomCenter: origin = "BottomCenter"; break;
+        }
+        SyncWfcHudIfWasm(obs, origin);
+    }
 
     ReseedSolver();
     PrintGridState(why);

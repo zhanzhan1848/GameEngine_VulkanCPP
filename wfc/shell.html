@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Game Engine - WFC Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0f0f1a;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Header */
+    #header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      background: #16162a;
+      border-bottom: 1px solid #2a2a4a;
+      flex-shrink: 0;
+    }
+
+    #header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #00d4ff;
+    }
+
+    #header .subtitle {
+      font-size: 12px;
+      color: #666;
+    }
+
+    #controls-info {
+      font-size: 12px;
+      color: #888;
+      text-align: right;
+      line-height: 1.5;
+    }
+
+    #controls-info kbd {
+      display: inline-block;
+      background: #2a2a4a;
+      border: 1px solid #444;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 11px;
+      color: #ccc;
+    }
+
+    /* Main row: canvas area + debug sidebar */
+    #main-row {
+      flex: 1;
+      display: flex;
+      flex-direction: row;
+      min-height: 0;
+    }
+
+    /* Canvas area */
+    #canvas-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+      position: relative;
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    #canvas {
+      display: block;
+      background: #000;
+    }
+
+    /* Debug panel sidebar */
+    #debugPanel {
+      width: 320px;
+      background: rgba(15, 15, 25, 0.95);
+      color: #e0e0e0;
+      padding: 14px 16px;
+      overflow-y: auto;
+      font-size: 13px;
+      border-left: 1px solid #2a2a40;
+      flex-shrink: 0;
+    }
+
+    #debugPanel h3 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      color: #00d4ff;
+    }
+
+    #debugPanel h4 {
+      margin: 14px 0 6px;
+      font-size: 13px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid #2a2a40;
+      padding-bottom: 3px;
+    }
+
+    #debugPanel hr {
+      border: 0;
+      border-top: 1px solid #2a2a40;
+      margin: 14px 0 4px;
+    }
+
+    #debugPanel label {
+      display: block;
+      margin-bottom: 10px;
+      line-height: 1.5;
+    }
+
+    #debugPanel .val {
+      display: inline-block;
+      min-width: 38px;
+      text-align: right;
+      color: #00d4ff;
+      font-family: monospace;
+      font-size: 12px;
+      float: right;
+    }
+
+    #debugPanel input[type="range"] {
+      width: 100%;
+      margin-top: 3px;
+      accent-color: #00d4ff;
+    }
+
+    #debugPanel .hint {
+      color: #888;
+      font-size: 11px;
+      margin-top: 2px;
+    }
+
+    /* Loading overlay */
+    #loading-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 15, 26, 0.95);
+      z-index: 10;
+      transition: opacity 0.6s ease;
+    }
+
+    #loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #loading-overlay .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid #2a2a4a;
+      border-top-color: #00d4ff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 20px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Progress bar */
+    #progress-wrap {
+      width: 320px;
+      max-width: 80%;
+    }
+
+    #progress-bar {
+      width: 100%;
+      height: 4px;
+      background: #2a2a4a;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    #progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #00d4ff, #00ff88);
+      border-radius: 2px;
+      transition: width 0.3s ease;
+    }
+
+    #progress-text {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #888;
+      text-align: center;
+    }
+
+    /* Status bar */
+    #status-bar {
+      padding: 6px 20px;
+      background: #16162a;
+      border-top: 1px solid #2a2a4a;
+      font-size: 12px;
+      color: #666;
+      display: flex;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    /* Error overlay */
+    #error-overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 15, 26, 0.98);
+      z-index: 20;
+      padding: 40px;
+    }
+
+    #error-overlay .icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    #error-overlay h2 {
+      color: #ff4444;
+      font-size: 22px;
+      margin-bottom: 12px;
+    }
+
+    #error-overlay p {
+      color: #aaa;
+      max-width: 480px;
+      text-align: center;
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    #error-overlay .browser-list {
+      margin-top: 16px;
+      font-size: 13px;
+      color: #666;
+    }
+
+    #error-overlay .browser-list a {
+      color: #00d4ff;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- WFC showcase HUD: observer kind + origin preset -->
+  <div id="wfc-hud" style="
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      padding: 8px 12px;
+      background: rgba(15, 15, 26, 0.75);
+      color: #e0e0e0;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      border-radius: 4px;
+      border: 1px solid #2a2a4a;
+      pointer-events: none;
+      z-index: 100;
+  ">
+    <div id="wfc-hud-observer">Observer: MinEntropy</div>
+    <div id="wfc-hud-origin">Origin: Center</div>
+    <div style="margin-top: 4px; color: #888;">[O] cycle observer &nbsp; [P] cycle origin</div>
+  </div>
+
+  <!-- Header -->
+  <div id="header">
+    <div>
+      <h1>Game Engine WebGPU Demo</h1>
+      <div class="subtitle">Dawn WebGPU Backend / Emscripten WASM</div>
+    </div>
+    <div id="controls-info">
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>Arrow Keys</kbd> Move Camera / 移动镜头<br>
+      Mouse Drag to Look Around / 鼠标拖拽旋转视角
+    </div>
+  </div>
+
+  <!-- Main row: canvas + sidebar -->
+  <div id="main-row">
+    <!-- Canvas area -->
+    <div id="canvas-wrap">
+      <canvas id="canvas" width="1280" height="720"></canvas>
+
+      <!-- Loading overlay -->
+      <div id="loading-overlay">
+        <div class="spinner"></div>
+        <div id="progress-wrap">
+          <div id="progress-bar">
+            <div id="progress-fill"></div>
+          </div>
+          <div id="progress-text">Initializing... / 初始化中...</div>
+        </div>
+      </div>
+
+      <!-- Error overlay -->
+      <div id="error-overlay">
+        <div class="icon">&#9888;</div>
+        <h2>WebGPU Not Available</h2>
+        <p>
+          Your browser does not support WebGPU.<br>
+          WebGPU is required to run this demo.<br>
+          <br>
+          浏览器不支持 WebGPU，无法运行此演示。
+        </p>
+        <div class="browser-list">
+          Supported browsers / 支持的浏览器:<br>
+          <a href="https://www.google.com/chrome/">Chrome 113+</a> |
+          <a href="https://www.microsoft.com/edge">Edge 113+</a> |
+          Firefox Nightly (with <code>dom.webgpu.enabled</code>)
+        </div>
+      </div>
+    </div>
+
+    <!-- Debug panel sidebar -->
+    <aside id="debugPanel">
+      <h3>Debug Panel</h3>
+      <div id="modeInfo" class="hint">Mode: —</div>
+
+      <div id="paramGroup_forward" class="paramGroup">
+        <h4>Lighting</h4>
+        <label>Direct Light Boost<span class="val" id="val_0">2.00</span>
+          <input type="range" id="param_0" min="0" max="5" step="0.05" value="2.0">
+        </label>
+        <label>IBL Strength<span class="val" id="val_1">0.20</span>
+          <input type="range" id="param_1" min="0" max="1" step="0.01" value="0.2">
+        </label>
+        <label>Exposure<span class="val" id="val_3">1.80</span>
+          <input type="range" id="param_3" min="0" max="4" step="0.05" value="1.8">
+        </label>
+      </div>
+
+      <div id="paramGroup_ddgi" class="paramGroup" style="display:none;">
+        <h4>DDGI</h4>
+        <label>DDGI Indirect Weight<span class="val" id="val_2">1.00</span>
+          <input type="range" id="param_2" min="0" max="3" step="0.05" value="1.0">
+        </label>
+        <label>Sky Color Intensity<span class="val" id="val_4">0.60</span>
+          <input type="range" id="param_4" min="0" max="2" step="0.05" value="0.6">
+        </label>
+        <label>Albedo Intensity<span class="val" id="val_5">0.60</span>
+          <input type="range" id="param_5" min="0" max="1" step="0.01" value="0.6">
+        </label>
+        <label>Probe Hysteresis<span class="val" id="val_6">0.08</span>
+          <input type="range" id="param_6" min="0.01" max="0.5" step="0.01" value="0.08">
+        </label>
+      </div>
+
+      <hr>
+      <h4>Sun Direction</h4>
+      <label>Yaw<span class="val" id="val_yaw">0.00</span>
+        <input type="range" id="sunYaw" min="-3.14" max="3.14" step="0.01" value="0">
+      </label>
+      <label>Pitch<span class="val" id="val_pitch">-0.95</span>
+        <input type="range" id="sunPitch" min="-1.55" max="-0.1" step="0.01" value="-0.95">
+      </label>
+      <div class="hint">Vec: <span id="sunVec">(—, —, —)</span></div>
+      <div class="hint">Auto-rotate: <span id="autoRotateState">OFF</span></div>
+    </aside>
+  </div>
+
+  <!-- Status bar -->
+  <div id="status-bar">
+    <span id="status-left">Ready</span>
+    <span id="status-right"></span>
+  </div>
+
+  <script>
+    (function() {
+      var errorOverlay = document.getElementById('error-overlay');
+      var loadingOverlay = document.getElementById('loading-overlay');
+      var progressFill = document.getElementById('progress-fill');
+      var progressText = document.getElementById('progress-text');
+      var statusLeft = document.getElementById('status-left');
+      var statusRight = document.getElementById('status-right');
+      var canvas = document.getElementById('canvas');
+
+      // WebGPU check
+      if (!navigator.gpu) {
+        errorOverlay.style.display = 'flex';
+        loadingOverlay.style.display = 'none';
+        statusLeft.textContent = 'Error: WebGPU not supported';
+        return;
+      }
+
+      // Resize canvas to fit container while maintaining 16:9 aspect ratio.
+      // Sidebar takes 320px from the right; canvas-wrap gets the remainder.
+      function resizeCanvas() {
+        var wrap = document.getElementById('canvas-wrap');
+        var maxW = wrap.clientWidth;
+        var maxH = wrap.clientHeight;
+        var aspect = 16 / 9;
+
+        var w = maxW;
+        var h = w / aspect;
+        if (h > maxH) {
+          h = maxH;
+          w = h * aspect;
+        }
+
+        canvas.style.width = Math.floor(w) + 'px';
+        canvas.style.height = Math.floor(h) + 'px';
+      }
+
+      window.addEventListener('resize', resizeCanvas);
+      resizeCanvas();
+
+      // Update progress
+      function setProgress(pct, text) {
+        progressFill.style.width = pct + '%';
+        if (text) progressText.textContent = text;
+      }
+
+      // Status helpers (can be called from WASM via ccall or from JS)
+      window.setStatus = function(text) {
+        statusLeft.textContent = text;
+      };
+
+      // WFC HUD helper — called by the WASM binary on observer/origin change.
+      // obs is "MinEntropy" or "DistanceFromOrigin".
+      // origin is "Center", "Corner", or "BottomCenter".
+      window.setWfcHud = function(obs, origin) {
+        var obsEl = document.getElementById('wfc-hud-observer');
+        var orgEl = document.getElementById('wfc-hud-origin');
+        if (obsEl) obsEl.textContent = 'Observer: ' + obs;
+        if (orgEl) orgEl.textContent = 'Origin: ' + origin;
+      };
+
+      window.hideLoading = function() {
+        loadingOverlay.classList.add('hidden');
+        statusLeft.textContent = 'Running';
+        // Notify parent launcher (if any) that this iframe's demo is ready.
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: 'wfc-loaded' }, '*');
+        }
+      };
+
+      // Mode switch helper — WASM calls this to update HUD + panel visibility
+      window.setRenderMode = function(modeIndex, modeName, modeDesc) {
+        var infoEl = document.getElementById('modeInfo');
+        if (infoEl) infoEl.textContent = 'Mode ' + modeIndex + ': ' + modeName;
+
+        // Mode-aware visibility: DDGI group only for 7/10/11; Lighting group for 7+.
+        var showDDGI = (modeIndex === 7 || modeIndex === 10 || modeIndex === 11);
+        var showForward = (modeIndex >= 7);
+        var ddgiGroup = document.getElementById('paramGroup_ddgi');
+        var fwdGroup = document.getElementById('paramGroup_forward');
+        if (ddgiGroup) ddgiGroup.style.display = showDDGI ? 'block' : 'none';
+        if (fwdGroup) fwdGroup.style.display = showForward ? 'block' : 'none';
+      };
+
+      // === Sun direction panel ↔ C++ sync ===
+      // C++ pushes sun dir every frame (auto-rotate or slider-driven); panel
+      // sliders update C++ via _setSunDirection. _userDraggingSun guards the
+      // C++→panel direction so drag focus isn't clobbered.
+      window._userDraggingSun = false;
+
+      window.setSunDirection = function(x, y, z) {
+        if (window._userDraggingSun) return;
+        var yaw = Math.atan2(x, z);
+        var len = Math.hypot(x, y, z);
+        var pitch = (len > 1e-6) ? Math.asin(Math.max(-1, Math.min(1, y / len))) : 0;
+        var yawEl = document.getElementById('sunYaw');
+        var pitchEl = document.getElementById('sunPitch');
+        if (yawEl) yawEl.value = yaw;
+        if (pitchEl) pitchEl.value = pitch;
+        var vy = document.getElementById('val_yaw');
+        var vp = document.getElementById('val_pitch');
+        if (vy) vy.textContent = yaw.toFixed(2);
+        if (vp) vp.textContent = pitch.toFixed(2);
+        var vecEl = document.getElementById('sunVec');
+        if (vecEl) vecEl.textContent = '(' + x.toFixed(2) + ', ' + y.toFixed(2) + ', ' + z.toFixed(2) + ')';
+      };
+
+      window.setSunAutoRotate = function(on) {
+        var el = document.getElementById('autoRotateState');
+        if (el) el.textContent = on ? 'ON' : 'OFF';
+      };
+
+      // Thunk helpers — Module.ccall is wired after Emscripten runtime boots.
+      // Called from slider oninput handlers below.
+      window._setDebugParam = function(idx, val) {
+        if (window.Module && typeof window.Module._setDebugParam === 'function') {
+          window.Module._setDebugParam(idx, val);
+        } else if (window.Module && window.Module.ccall) {
+          window.Module.ccall('setDebugParam', null,
+            ['int', 'float'], [idx, val], {async: true});
+        }
+      };
+
+      window._setSunDirection = function(yaw, pitch) {
+        if (window.Module && typeof window.Module._setSunDirection === 'function') {
+          window.Module._setSunDirection(yaw, pitch);
+        } else if (window.Module && window.Module.ccall) {
+          window.Module.ccall('setSunDirection', null,
+            ['float', 'float'], [yaw, pitch], {async: true});
+        }
+      };
+
+      // Wire parameter sliders (indices 0..6 — see DawnDebugParams.h)
+      function wireParamSlider(idx) {
+        var slider = document.getElementById('param_' + idx);
+        if (!slider) return;
+        slider.addEventListener('input', function(e) {
+          var v = parseFloat(e.target.value);
+          var valEl = document.getElementById('val_' + idx);
+          if (valEl) valEl.textContent = v.toFixed(2);
+          window._setDebugParam(idx, v);
+        });
+      }
+      for (var i = 0; i < 7; i++) wireParamSlider(i);
+
+      // Wire sun sliders — set _userDraggingSun on mousedown/up so C++→panel
+      // sync doesn't fight the drag
+      ['sunYaw', 'sunPitch'].forEach(function(id) {
+        var slider = document.getElementById(id);
+        if (!slider) return;
+        slider.addEventListener('mousedown', function() { window._userDraggingSun = true; });
+        slider.addEventListener('mouseup',   function() { window._userDraggingSun = false; });
+        slider.addEventListener('touchstart',function() { window._userDraggingSun = true; });
+        slider.addEventListener('touchend',  function() { window._userDraggingSun = false; });
+        slider.addEventListener('input', function() {
+          var yaw = parseFloat(document.getElementById('sunYaw').value);
+          var pitch = parseFloat(document.getElementById('sunPitch').value);
+          var vy = document.getElementById('val_yaw');
+          var vp = document.getElementById('val_pitch');
+          if (vy) vy.textContent = yaw.toFixed(2);
+          if (vp) vp.textContent = pitch.toFixed(2);
+          window._setSunDirection(yaw, pitch);
+        });
+      });
+
+      // FPS counter
+      var frameCount = 0;
+      var lastFpsTime = performance.now();
+      function updateFps() {
+        frameCount++;
+        var now = performance.now();
+        if (now - lastFpsTime >= 1000) {
+          var fps = Math.round(frameCount * 1000 / (now - lastFpsTime));
+          statusRight.textContent = fps + ' FPS';
+          frameCount = 0;
+          lastFpsTime = now;
+        }
+        requestAnimationFrame(updateFps);
+      }
+      requestAnimationFrame(updateFps);
+
+      // Emscripten module config
+      // We fetch all needed files (shaders + assets) at runtime into MEMFS so
+      // the page loads instantly (no 400MB+ data file). The file list comes
+      // from wasm_manifest.js, which CMake regenerates on every build.
+      //
+      // Note: the IIFE that defines Module runs *before* the manifest script
+      // loads (manifest is appended dynamically). The preRun callback runs
+      // much later, so we resolve the asset list lazily inside stageAssets().
+      function getAssetList() {
+        if (window.WASM_MANIFEST) {
+          return (window.WASM_MANIFEST.shaders || []).concat(window.WASM_MANIFEST.assets || []);
+        }
+        // Sponza.model is embedded, fallback list only needs textures
+        return [];
+      }
+
+      function fetchAndStage(item) {
+        return new Promise(function(resolve) {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', item.url, true);
+          xhr.responseType = 'arraybuffer';
+          xhr.onload = function() {
+            if (xhr.status === 200) {
+              try {
+                var dir = item.fsPath.substring(0, item.fsPath.lastIndexOf('/'));
+                if (dir && dir !== '' && !FS.analyzePath(dir).exists) {
+                  FS.mkdirTree(dir);
+                }
+                FS.writeFile(item.fsPath, new Uint8Array(xhr.response));
+              } catch (err) {
+                console.warn('[Assets] Failed to stage ' + item.fsPath + ':', err);
+              }
+            }
+            resolve();
+          };
+          xhr.onerror = function() { resolve(); };
+          xhr.send();
+        });
+      }
+
+      // Sponza.model is embedded directly in the WASM binary (--embed-file in
+      // CMakeLists.txt), so it's already in MEMFS before main() runs.
+      // Textures are fetched in preRun so they're available before main() starts.
+      function stageAllAssets() {
+        var list = getAssetList();
+        var textures = list.filter(function(item) {
+          return item.fsPath !== '/assets/Sponza.model';
+        });
+        console.log('[Assets] Pre-fetching ' + textures.length + ' textures before main()');
+        setProgress(10, 'Loading textures 0/' + textures.length);
+
+        addRunDependency('textures');
+
+        var concurrency = 8;
+        var idx = 0;
+        var completed = 0;
+        function next() {
+          if (idx >= textures.length) return;
+          var current = idx++;
+          fetchAndStage(textures[current]).then(function() {
+            completed++;
+            if (completed % 5 === 0 || completed === textures.length) {
+              var pct = Math.round(10 + (completed / textures.length) * 80);
+              setProgress(pct, 'Loading textures ' + completed + '/' + textures.length);
+            }
+            if (completed === textures.length) {
+              console.log('[Assets] All ' + textures.length + ' textures staged');
+              setProgress(90, 'Initializing engine...');
+              removeRunDependency('textures');
+            }
+            next();
+          });
+        }
+        for (var i = 0; i < Math.min(concurrency, textures.length); i++) {
+          next();
+        }
+      }
+
+      var Module = {
+        preRun: [function() {
+          stageAllAssets();
+        }],
+        postRun: [function() {
+          // Loading overlay hidden by C++ after GPU texture upload.
+          // _setDebugParam / _setSunDirection are wired via EXPORTED_FUNCTIONS
+          // in CMakeLists.txt — no postRun override needed (overriding here
+          // would clobber the WASM export and recurse via ccall).
+        }],
+        print: function(text) {
+          console.log('[WASM]', text);
+        },
+        printErr: function(text) {
+          console.error('[WASM]', text);
+          window.setStatus(text);
+        },
+        canvas: canvas,
+        setStatus: function(text) {
+          if (text) {
+            setProgress(95, text);
+          }
+        },
+        totalDependencies: 0,
+        monitorRunDependencies: function(left) {
+          this.totalDependencies = Math.max(this.totalDependencies, left);
+          if (left) {
+            var d = this.totalDependencies - left;
+            var pct = Math.round(d / this.totalDependencies * 100);
+            setProgress(pct, 'WASM loading (' + d + '/' + this.totalDependencies + ')...');
+          } else {
+            setProgress(95, 'WASM ready. / WASM 已就绪');
+          }
+        }
+      };
+
+      window.Module = Module;
+
+      // Load the asset manifest (auto-generated by CMake, lists all WGSL
+      // shaders + Sponza assets the WASM module will need at runtime)
+      var manifestScript = document.createElement('script');
+      manifestScript.src = 'wasm_manifest.js';
+      manifestScript.onload = function() {
+        // Once manifest is loaded, kick off the Emscripten module
+        setProgress(10, 'Loading engine... / 加载引擎...');
+        var script = document.createElement('script');
+        script.src = 'TestKenneyTilePreviewWASM.js';
+        script.onload = function() {
+          setProgress(15, 'Engine loaded. / 引擎已加载');
+        };
+        script.onerror = function() {
+          setProgress(0, 'Failed to load TestKenneyTilePreviewWASM.js / 加载失败');
+          statusLeft.textContent = 'Error: Failed to load WASM module';
+        };
+        document.body.appendChild(script);
+      };
+      manifestScript.onerror = function() {
+        statusLeft.textContent = 'Error: Failed to load asset manifest';
+      };
+      document.body.appendChild(manifestScript);
+    })();
+  </script>
+
+</body>
+</html>
