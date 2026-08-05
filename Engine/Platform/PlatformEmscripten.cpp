@@ -21,7 +21,7 @@ namespace primal::platform
     }
 
     window create_window(const window_init_info* const init_info) {
-        window_id id = windows.add();
+        window_id id{windows.add()};
         window_info& info = windows[id];
 
         if (init_info) {

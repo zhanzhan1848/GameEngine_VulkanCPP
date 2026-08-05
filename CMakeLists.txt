@@ -403,6 +403,54 @@ else()
                 "${MANIFEST_FILE}" "${CMAKE_SOURCE_DIR}/wasm/wasm_manifest.js"
             COMMENT "Copying WASM asset manifest"
         )
+
+        # ============================================================================
+        # TestKenneyTilePreviewWASM — WFC showcase WASM binary.
+        # Mirrors TestDawnWASM structure. Asset preload + POST_BUILD copy
+        # added in Task 5.
+        # ============================================================================
+        add_executable(TestKenneyTilePreviewWASM
+            EngineTest/IntegrationTests/TestKenneyMain.cpp
+            EngineTest/IntegrationTests/Graphics/WFC/TestKenneyTilePreview.cpp
+            EngineTest/IntegrationTests/Graphics/WFC/KenneyTileCatalog.cpp
+            EngineTest/IntegrationTests/EmscriptenInput.cpp
+        )
+        target_include_directories(TestKenneyTilePreviewWASM PUBLIC
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/Engine
+            ${CMAKE_SOURCE_DIR}/Engine/Common
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Platforms/Dawn
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderGraph
+            ${CMAKE_SOURCE_DIR}/third_party/stb
+            ${CMAKE_SOURCE_DIR}/EngineTest
+            ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests
+        )
+        target_compile_definitions(TestKenneyTilePreviewWASM PRIVATE
+            ENABLE_WEBGPU=1
+            DISABLE_PARTICLE_SYSTEM=1
+            PRIMAL_PLUS
+        )
+        target_compile_options(TestKenneyTilePreviewWASM PRIVATE "--use-port=emdawnwebgpu")
+        target_link_libraries(TestKenneyTilePreviewWASM PRIVATE Engine)
+        target_link_options(TestKenneyTilePreviewWASM PRIVATE
+            "--use-port=emdawnwebgpu"
+            -sALLOW_MEMORY_GROWTH=1
+            -sMAXIMUM_MEMORY=2147418112
+            -sINITIAL_MEMORY=268435456
+            -sTOTAL_STACK=16777216
+            -sENVIRONMENT=web
+            -sEXIT_RUNTIME=0
+            -sASYNCIFY
+            -sASSERTIONS=1
+            --shell-file ${CMAKE_SOURCE_DIR}/wasm/shell.html
+            -g
+            -O1
+        )
+        # Export ccall/cwrap + main (Task 5 will add asset preload + JS exports).
+        set(KENNEY_LINK_FLAGS "")
+        string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_RUNTIME_METHODS=ccall,cwrap")
+        string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_FUNCTIONS=_main")
+        set_target_properties(TestKenneyTilePreviewWASM PROPERTIES LINK_FLAGS "${KENNEY_LINK_FLAGS}")
     endif()
 endif()
 

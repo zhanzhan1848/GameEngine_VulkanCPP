@@ -106,6 +106,13 @@ id::id_type create_resource(const void*, asset_type::type, GraphicsAPI) {
     return id::invalid_id;
 }
 
+void shutdown() {
+    // Stub: WASM side-tables (asset_table, gpu_mesh_table) tear down at process
+    // exit. Native ContentToEngine.cpp::shutdown() drains those maps under
+    // mutex; here the maps are static locals in accessor functions and are
+    // cleaned up by their destructors at static-storage teardown.
+}
+
 } // namespace primal::content
 
 // NaniteResourceManager is now compiled for WASM (CMakeLists filter removed);
