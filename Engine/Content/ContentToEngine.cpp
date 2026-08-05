@@ -15,6 +15,10 @@
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 #include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"
 #endif
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+#include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
+#include "Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
+#endif
 
 // Metal Headers for parsing and upload
 #ifdef __APPLE__
@@ -946,9 +950,11 @@ namespace primal::content
 				}
 				else if (device && device->GetDesc().platform == graphics::rhi::RHIPlatform::Vulkan) {
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
-					// T4.6.5 part 26: Vulkan texture resource creation.
-					// Same blob format as Dawn/Metal (width, height, array_size,
-					// flags, mip_levels, dxgi_format, row_pitch, slice_pitch, pixels).
+					// T4.6.5 part 27: real pixel upload via staging buffer +
+					// CopyBufferToTexture (mirrors Metal/Dawn pattern through
+					// the RHI abstraction). Same blob format as Metal/Dawn:
+					// header (width,height,array_size,flags,mip_levels,format)
+					// then per (slice, mip): row_pitch(u32) + slice_pitch(u32) + pixels.
 					utl::blob_stream_reader blob((const u8*)data);
 					const u32 width{ blob.read<u32>() };
 					const u32 height{ blob.read<u32>() };
@@ -979,18 +985,80 @@ namespace primal::content
 						return id::invalid_id;
 					}
 
-					// Skip pixel upload — Vulkan RHIDeviceBase has no UpdateTextureData.
-					// MaterialDataBuilder placeholder textures are uninitialised but
-					// only used as fallback when source textures are missing — acceptable
-					// for smoke. Production path needs staging buffer + CopyBufferToTexture
-					// (T4.6.5 part 27 scope).
-					blob.skip(array_size * mip_levels * 2 * sizeof(u32));  // skip row_pitch + slice_pitch per slice
-					(void)blob.read<u32>();  // first row_pitch (consumed by above)
-					(void)blob.read<u32>();  // first slice_pitch (consumed by above)
-					// Actually just skip remaining pixel bytes via skip().
-					// Above skip() handles all row/slice pitch u32s; pixel data remains.
-					// For simplicity, ignore — blob_stream_reader is read-once and we're
-					// done with it.
+					// Walk blob once: capture per-region metadata + accumulate pixel
+					// bytes into a contiguous CPU buffer. Each region is one
+					// (slice, mip) layer.
+					struct RegionInfo {
+						u32 slice;
+						u32 mip;
+						u64 bufferOffset;
+					};
+					std::vector<RegionInfo> regions;
+					std::vector<u8> pixels;
+					regions.reserve((size_t)array_size * mip_levels);
+					for (u32 i = 0; i < array_size; ++i) {
+						for (u32 j = 0; j < mip_levels; ++j) {
+							const u32 row_pitch = blob.read<u32>();
+							const u32 slice_pitch = blob.read<u32>();
+							RegionInfo r;
+							r.slice = i;
+							r.mip = j;
+							r.bufferOffset = pixels.size();
+							regions.push_back(r);
+							const u8* p = blob.position();
+							pixels.insert(pixels.end(), p, p + slice_pitch);
+							blob.skip(slice_pitch);
+							(void)row_pitch;  // tightly packed in staging; Vulkan computes from imageExtent
+						}
+					}
+
+					// Single staging buffer + per-region CopyBufferToTexture via
+					// one cmd buffer submit. Pattern from TestVulkanStandardPipelineSmoke.cpp
+					// CreateTextureFromData helper.
+					if (!pixels.empty()) {
+						using namespace graphics::rhi;
+						BufferDesc sdesc{};
+						sdesc.size = pixels.size();
+						sdesc.type = BufferType::Raw;
+						sdesc.memoryUsage = GPUMemoryUsage::Dynamic;
+						sdesc.name = "CTE_TexStaging";
+						ResourceHandle staging = device->CreateBuffer(sdesc);
+						if (staging == handles::INVALID_RESOURCE) {
+							std::cerr << "[CTE/Vulkan] Failed to create staging buffer" << std::endl;
+						} else if (!device->UpdateBufferData(staging, pixels.data(), pixels.size(), 0)) {
+							std::cerr << "[CTE/Vulkan] UpdateBufferData failed for texture staging" << std::endl;
+							device->DestroyBuffer(staging);
+						} else {
+							CommandBufferHandle cmd = device->CreateCommandBuffer(CommandQueueType::Graphics);
+							if (cmd != handles::INVALID_COMMAND_BUFFER) {
+								auto* vk = static_cast<VulkanDevice*>(device);
+								VulkanCommandBuffer* vcmd = vk->GetCommandBuffer(cmd);
+								if (vcmd && vcmd->Reset() && vcmd->Begin()) {
+									std::vector<BufferTextureCopyRegion> copyRegions;
+									copyRegions.reserve(regions.size());
+									for (const auto& r : regions) {
+										u32 mipW = std::max(1u, width >> r.mip);
+										u32 mipH = std::max(1u, height >> r.mip);
+										BufferTextureCopyRegion cr{};
+										cr.bufferOffset = r.bufferOffset;
+										cr.bufferRowLength = 0;  // tightly packed
+										cr.bufferImageHeight = 0;
+										cr.imageSubresource = { r.slice, r.mip, 1 };  // { baseArrayLayer, mipLevel, layerCount }
+										cr.imageOffset = { 0, 0, 0 };
+										cr.imageExtent = { mipW, mipH, 1 };
+										copyRegions.push_back(cr);
+									}
+									vcmd->CopyBufferToTexture(staging, handle, copyRegions.data(),
+									                          (u32)copyRegions.size());
+									vcmd->End();
+									vcmd->Submit(0);
+									vcmd->WaitForCompletion();
+								}
+								device->DestroyCommandBuffer(cmd);
+							}
+							device->DestroyBuffer(staging);
+						}
+					}
 
 					id::id_type new_id = rhi_texture_id_counter++;
 					{
