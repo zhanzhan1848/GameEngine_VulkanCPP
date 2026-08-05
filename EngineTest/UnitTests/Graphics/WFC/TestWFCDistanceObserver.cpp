@@ -84,6 +84,8 @@ TestResult TestWFCDistanceObserver_TieBreakRowMajor() {
 }
 
 // All cells collapsed -> returns {-1,-1,-1} and Empty()==true.
+// Also verifies the empty_ latch resets on the next Initialize (so the
+// observer can be reused across WFCSolver restarts).
 TestResult TestWFCDistanceObserver_AllCollapsed() {
     WaveGrid grid;
     grid.Initialize({2, 1, 2}, 8);
@@ -101,6 +103,17 @@ TestResult TestWFCDistanceObserver_AllCollapsed() {
     TEST_ASSERT(picked.x < 0 || picked.y < 0 || picked.z < 0,
                 "Should return invalid coord when all collapsed");
     TEST_ASSERT(observer.Empty(), "Empty() should be true after no candidate found");
+
+    // Latch reset: re-Initialize against a fresh grid with uncollapsed cells.
+    // Empty() must return false, and PickNextCollapse must scan again.
+    WaveGrid fresh;
+    fresh.Initialize({2, 1, 2}, 8);
+    SetCellCandidates(fresh, {0, 0, 0}, 0b00001111u, 3);
+    observer.Initialize(fresh);
+    TEST_ASSERT(!observer.Empty(), "Initialize must reset the empty_ latch");
+    WFCGridCoord repick = observer.PickNextCollapse(fresh);
+    TEST_ASSERT(repick.x >= 0 && repick.y >= 0 && repick.z >= 0,
+                "After re-Initialize, PickNextCollapse returns a valid coord");
     return TestResult::Passed;
 }
 

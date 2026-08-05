@@ -4,8 +4,10 @@
 
 namespace primal::graphics::wfc {
 
-void WFCDistanceObserver::Initialize(const WaveGrid& grid) {
-    grid_size_ = grid.Size();
+void WFCDistanceObserver::Initialize(const WaveGrid& /*grid*/) {
+    // PickNextCollapse re-reads grid.Size() on every call (the grid may be
+    // re-sized between Picks via WFCSolver::Initialize on restart), so we
+    // don't cache it. Just reset the empty_ latch.
     empty_ = false;
 }
 

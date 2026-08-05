@@ -24,7 +24,6 @@ public:
 
 private:
     WFCGridCoord origin_;
-    WFCGridCoord grid_size_{0, 0, 0};
     bool empty_{false};
 };
 
