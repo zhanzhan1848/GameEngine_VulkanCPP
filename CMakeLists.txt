@@ -454,6 +454,15 @@ else()
         string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_RUNTIME_METHODS=ccall,cwrap")
         string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_FUNCTIONS=_main")
 
+        # Embed WGSL shaders — same pattern as TestDawnWASM. The Dawn
+        # ShaderLoader's MEMFS fallback (ShaderLoader.h:2276) reads from
+        # /Engine/Graphics/Dawn/shaders/. Without this, every subsystem that
+        # calls LoadWGSL silently no-ops and pipelines cascade-fail.
+        set(SHADERS_ROOT "${CMAKE_SOURCE_DIR}/Engine/Graphics/Dawn/shaders")
+        if(EXISTS "${SHADERS_ROOT}")
+            string(APPEND KENNEY_LINK_FLAGS " --embed-file ${SHADERS_ROOT}@/Engine/Graphics/Dawn/shaders")
+        endif()
+
         # Asset preload — embed Kenney tiles + colormap into the .wasm binary
         # (synchronous access from main(); --preload-file's async XHR would race).
         # Paths mirror what TestKenneyTilePreview.cpp's DirCandidate[] expects

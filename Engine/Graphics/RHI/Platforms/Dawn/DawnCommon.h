@@ -28,8 +28,12 @@ inline WGPUTextureFormat ToWGPUTextureFormat(DataFormat format) {
         case DataFormat::RGBA32_Float:      return WGPUTextureFormat_RGBA32Float;
         case DataFormat::R16_UNorm:         return WGPUTextureFormat_R16Unorm;
         case DataFormat::R16_Float:         return WGPUTextureFormat_R16Float;
+        case DataFormat::R16_UInt:          return WGPUTextureFormat_R16Uint;
         case DataFormat::R32_Float:         return WGPUTextureFormat_R32Float;
+        case DataFormat::R32_UInt:          return WGPUTextureFormat_R32Uint;
+        case DataFormat::R32_SInt:          return WGPUTextureFormat_R32Sint;
         case DataFormat::R8_UNorm:          return WGPUTextureFormat_R8Unorm;
+        case DataFormat::R8_UInt:           return WGPUTextureFormat_R8Uint;
         case DataFormat::RG16_Float:        return WGPUTextureFormat_RG16Float;
         case DataFormat::RG32_Float:        return WGPUTextureFormat_RG32Float;
         case DataFormat::D16_UNorm:         return WGPUTextureFormat_Depth16Unorm;

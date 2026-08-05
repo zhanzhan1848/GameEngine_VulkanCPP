@@ -16,6 +16,14 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     if (initialized_) return true;
     device_ = device;
 
+#ifdef __EMSCRIPTEN__
+    // LineBatchRenderer is a debug overlay and is not yet ported to WGSL.
+    // Mark initialized so the renderer doesn't keep retrying; draw calls
+    // become no-ops. ForwardSceneRenderer::Initialize ignores our return
+    // value anyway, but we keep the contract honest.
+    initialized_ = true;
+    return true;
+#else
     // Load shaders
     const char* shader_path =
         "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Forward/Line.metal";
@@ -87,6 +95,7 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     std::cout << "[LineBatchRenderer] Initialized successfully." << std::endl;
     initialized_ = true;
     return true;
+#endif
 }
 
 void LineBatchRenderer::Shutdown() {
@@ -119,6 +128,10 @@ void LineBatchRenderer::AddLines(const math::v3* vertices, u32 vertex_count) {
 
 void LineBatchRenderer::Render(RHICommandBuffer* cmd, const math::m4x4& view_proj) {
     if (!initialized_ || line_vertices_.empty()) return;
+#ifdef __EMSCRIPTEN__
+    // WASM build skips pipeline creation — nothing to draw.
+    return;
+#endif
 
     const u32 vertex_count = static_cast<u32>(line_vertices_.size());
 

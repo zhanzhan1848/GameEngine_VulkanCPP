@@ -522,6 +522,19 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
 }
 
 void ForwardSceneRenderer::CreateShaders() {
+#ifdef __EMSCRIPTEN__
+    // ForwardSceneRenderer's Metal shaders (GBuffer.metal, DeferredLighting.metal,
+    // Skybox.metal, DepthOnly.metal + technique variants) are not yet ported to
+    // WGSL — the existing GBuffer.wgsl/DeferredLighting.wgsl target the meshlet
+    // compute path with different entry points and descriptor layouts.
+    // On WASM we leave all shader handles INVALID; pipelines become INVALID too,
+    // and Render() early-returns. Entity registration (RegisterMeshEntity) does
+    // not depend on shaders, so the rest of the pipeline still works.
+    std::cout << "[ForwardSceneRenderer] WASM build: skipping Metal shader load ("
+                 "port pending)" << std::endl;
+    return;
+#endif
+
     auto load = [this](const char* file, const char* entry, ShaderStage stage) -> ShaderHandle {
         auto src = LoadShaderSource(file);
         if (src.empty()) {
@@ -571,6 +584,13 @@ void ForwardSceneRenderer::CreateShaders() {
 }
 
 void ForwardSceneRenderer::CreatePipelines() {
+#ifdef __EMSCRIPTEN__
+    // Pipelines depend on shaders loaded in CreateShaders; on WASM all shader
+    // handles are INVALID, so every CreateGraphicsPipeline call would fail and
+    // spam the console. Skip pipeline creation entirely — Render() early-returns.
+    return;
+#endif
+
     PushConstantRange modelPush{ShaderStage::Vertex, 2, sizeof(PCGPushConsts)};
 
     // GBuffer
@@ -1488,6 +1508,14 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
                                    ResourceHandle backbuffer,
                                    u32 frame_index) {
     if (!initialized_ || !scene_loaded_) return;
+#ifdef __EMSCRIPTEN__
+    // WASM build has no Metal shaders ported (see CreateShaders). All pipelines
+    // are INVALID; calling BindGraphicsPipeline on them would crash. Editor mode
+    // rendering is dormant on WASM until the ForwardSceneRenderer WGSL port
+    // exists. The meshlet path (used in non-editor mode) is the ported WASM
+    // rendering route.
+    return;
+#endif
 
     u32 idx = frame_index % 3;
 
