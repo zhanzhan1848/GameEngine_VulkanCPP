@@ -1,5 +1,8 @@
 #include "ForwardSceneRenderer.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+#include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"
+#endif
 #if !defined(__EMSCRIPTEN__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
@@ -195,6 +198,23 @@ static std::vector<u8> LoadShaderSource(const char* filename) {
 
 static void WriteTextureImmediate(RHIDeviceBase* device, ResourceHandle texture,
                                    const void* data, u64 size, u32 w, u32 h, u32 layer) {
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+    // Dawn path: wgpuQueueWriteTexture handles 256-byte row padding internally.
+    // The generic staging-buffer + CopyBufferToTexture path below requires
+    // bufferRowLength to be a multiple of 256, but every caller passes 0
+    // (= "tightly packed"). For 1x1 RGBA8 fallbacks (4 bytes/row) WebGPU
+    // rejects the copy outright — "byte size of each row (4) > bytesPerRow (0)".
+    auto* dawnDev = dynamic_cast<DawnDevice*>(device);
+    if (dawnDev) {
+        // Derive row pitch from size & height. Layer is the cube face index;
+        // the staging data is a single face so size = rowPitch * h.
+        u32 rowPitch = (h > 0) ? static_cast<u32>(size / h) : static_cast<u32>(size);
+        dawnDev->UpdateTextureData(texture, data,
+                                   0, 0, layer, w, h, 1, rowPitch, 0);
+        return;
+    }
+#endif
+
     BufferDesc stagingDesc{};
     stagingDesc.size = size;
     stagingDesc.usage = GPUMemoryUsage::Dynamic;
