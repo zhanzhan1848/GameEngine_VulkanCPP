@@ -71,6 +71,17 @@ bool VulkanCommandBuffer::Initialize() {
     VkDevice dev = vk.GetNativeDevice();
     if (!dev) return false;
 
+    // T4.6.5 part 24.11 (B-leak fix): make Initialize idempotent. Metal's
+    // Initialize short-circuits via state_ check; Vulkan must too — otherwise
+    // StandardRenderPipeline::Render()'s `cmd->Initialize()` call (after
+    // CreateCommandBuffer already invoked Initialize once) creates a 2nd set
+    // of VkCommandPool/VkCommandBuffer/VkFence, leaking the 1st set
+    // (3 objects per Render() call).
+    if (cmdPool_ != VK_NULL_HANDLE && cmdBuffer_ != VK_NULL_HANDLE &&
+        submitFence_ != VK_NULL_HANDLE) {
+        return true;
+    }
+
     // Phase 1-3 都用 graphics queue family
     queueFamily_ = vk.GetGraphicsQueueFamily();
     if (queueFamily_ == UINT32_MAX) {
