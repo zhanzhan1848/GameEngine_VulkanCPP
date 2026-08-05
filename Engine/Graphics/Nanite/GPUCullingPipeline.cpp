@@ -494,11 +494,60 @@ void GPUCullingPipeline::Shutdown() {
         }
     }
 
+    // T4.6.5 part 30.2: tear down everything Execute() creates lazily. Without
+    // this, culling_descriptor_sets_ + placeholder_meshlet_buffer_ +
+    // streaming_constant_buffers_ leak across sub-tests; the next sub-test's
+    // Execute sees them as already-valid (stale handles from the dead device)
+    // and binds them, triggering the null descriptor set cascade.
+    for (u32 i = 0; i < 3; ++i) {
+        if (culling_descriptor_sets_[i] != rhi::handles::INVALID_DESCRIPTOR_SET) {
+            device_->DestroyDescriptorSet(culling_descriptor_sets_[i]);
+            culling_descriptor_sets_[i] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
+        if (streaming_constant_buffers_[i] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(streaming_constant_buffers_[i]);
+            streaming_constant_buffers_[i] = rhi::handles::INVALID_RESOURCE;
+        }
+    }
+    if (placeholder_meshlet_buffer_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyBuffer(placeholder_meshlet_buffer_);
+        placeholder_meshlet_buffer_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (culling_descriptor_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device_->DestroyDescriptorSetLayout(culling_descriptor_layout_);
+        culling_descriptor_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
+    if (culling_pipeline_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+        device_->DestroyPipelineLayout(culling_pipeline_layout_);
+        culling_pipeline_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    }
+    // Stage 0-7 compute pipelines. CreatePipelines() recreates them on re-init.
+    auto destroyPipe = [this](rhi::PipelineHandle& p) {
+        if (p != rhi::handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(p);
+            p = rhi::handles::INVALID_PIPELINE;
+        }
+    };
+    destroyPipe(reset_buffers_pipeline_);
+    destroyPipe(frustum_culling_pipeline_);
+    destroyPipe(distance_culling_pipeline_);
+    destroyPipe(lod_selection_pipeline_);
+    destroyPipe(cluster_expansion_pipeline_);
+    destroyPipe(occlusion_culling_pipeline_);
+    destroyPipe(compaction_pipeline_);
+    destroyPipe(indirect_command_pipeline_);
+    execute_call_count_ = 0;
+    basic_descriptor_sets_created_ = false;
+    backface_descriptor_sets_created_ = false;
+    hzb_bindings_updated_ = false;
+    matrix_print_count_ = 0;
+    warned_streaming_constants_invalid_ = false;
+
     device_ = nullptr;
     initialized_ = false;
 }
 
-static u32 callCount = 0;
+static u32 callCount = 0;  // T4.6.5 part 30.2: legacy file-scope static kept for debug-log only — production state is execute_call_count_ member.
 
 bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                  const RenderSceneSnapshot& snapshot,
@@ -506,10 +555,11 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                  const math::m4x4& projectionMatrix,
                  NaniteStreamingManager* streamingManager,
                  u32 bufferIndex) {
-    if (callCount == 0) {
+    if (execute_call_count_ == 0) {
 //        std::cout << "[GPUCulling] GPU Progressive Filtering Execute called, initialized_=" << initialized_ << std::endl;
     }
-    callCount++;
+    ++execute_call_count_;
+    callCount = execute_call_count_;  // mirror for any debug-log reads; remove after Part 30 cleanup.
 
     if (!initialized_) {
         std::cerr << "GPUCullingPipeline: Not initialized" << std::endl;
@@ -517,7 +567,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     }
 
     if (!config_.enable_gpu_culling) {
-        if (callCount == 1) {
+        if (execute_call_count_ == 1) {
 //            std::cout << "[GPUCulling] GPU culling disabled, skipping" << std::endl;
         }
         return true;
@@ -529,11 +579,10 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
 
     // 🔥 CRITICAL: Check if HZB system became ready and update bindings if needed
     // This fixes the issue where descriptor sets are created before HZB is ready
-    static bool hzb_bindings_updated = false;
-    if (!hzb_bindings_updated && hzb_system_ && hzb_system_->IsReady()) {
-//        std::cout << "[GPUCulling] HZB system became ready at call #" << callCount << ", updating bindings..." << std::endl;
+    if (!hzb_bindings_updated_ && hzb_system_ && hzb_system_->IsReady()) {
+//        std::cout << "[GPUCulling] HZB system became ready at call #" << execute_call_count_ << ", updating bindings..." << std::endl;
         if (UpdateHZBBindings()) {
-            hzb_bindings_updated = true;
+            hzb_bindings_updated_ = true;
 //            std::cout << "[GPUCulling] HZB bindings updated successfully!" << std::endl;
         } else {
             std::cerr << "[GPUCulling] Failed to update HZB bindings" << std::endl;
@@ -541,8 +590,8 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     }
 
     // Reduce spam: only print first 5 calls
-    if (callCount <= 5) {
-        // std::cout << "[GPUCulling] Execute call #" << callCount << " using buffer_index=" << bufferIndex << " (resource " << current_frame_resource_ << ")" << std::endl;
+    if (execute_call_count_ <= 5) {
+        // std::cout << "[GPUCulling] Execute call #" << execute_call_count_ << " using buffer_index=" << bufferIndex << " (resource " << current_frame_resource_ << ")" << std::endl;
     }
 
     const u32 instanceCount = snapshot.GetInstanceCount();
@@ -564,7 +613,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     const u32 safeInstanceCount = std::min(instanceCount, config_.max_instances_per_dispatch);
     const u32 safeClusterCount = std::min(clusterCount, config_.max_clusters_per_dispatch);
 
-    if (callCount == 1) {
+    if (execute_call_count_ == 1) {
         // std::cout << "[GPUCulling] Camera parameters:" << std::endl;
         // std::cout << "  Camera position: " << cameraPos.x << ", " << cameraPos.y << ", " << cameraPos.z << std::endl;
         // std::cout << "  Instance count: " << instanceCount << " (safe: " << safeInstanceCount << ")" << std::endl;
@@ -722,20 +771,19 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // 🔥 FIX: Handle meshlet buffer availability across triple buffering
     // Frame 1: Create basic descriptor sets (meshlet buffer not ready yet)
     // Frame 3: Recreate descriptor sets with meshlet buffer binding for backface culling
-    static bool basic_descriptor_sets_created = false;
-    static bool backface_descriptor_sets_created = false;
+    // T4.6.5 part 30.2: basic_/backface_descriptor_sets_created_ are members now (reset on Shutdown).
 
-    if (!basic_descriptor_sets_created && callCount == 1) {
+    if (!basic_descriptor_sets_created_ && callCount == 1) {
 //        std::cout << "[GPUCulling] Frame " << bufferIndex << ": Creating basic descriptor sets (backface culling disabled until frame 3)..." << std::endl;
         if (!CreateDescriptorSets(snapshot)) {
             std::cerr << "Failed to create basic descriptor sets" << std::endl;
             return false;
         }
-        basic_descriptor_sets_created = true;
+        basic_descriptor_sets_created_ = true;
     }
 
     // Frame 3: Recreate descriptor sets with meshlet buffer for backface culling
-    if (!backface_descriptor_sets_created && callCount >= 3) {
+    if (!backface_descriptor_sets_created_ && callCount >= 3) {
         // Check if meshlet buffer is now available
         if (gpuDrawPipeline_) {
             auto meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();
@@ -755,7 +803,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                     std::cerr << "Failed to recreate descriptor sets with meshlet buffer" << std::endl;
                     return false;
                 }
-                backface_descriptor_sets_created = true;
+                backface_descriptor_sets_created_ = true;
 //                std::cout << "[GPUCulling] Frame " << bufferIndex << ": Backface culling descriptor sets created successfully!" << std::endl;
             } else {
                 if (bufferIndex == 0) {
@@ -1194,17 +1242,17 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
     
     // Wait, `StreamingFeedback` is called once per frame.
     // I can make `static rhi::ResourceHandle s_streamingConstantBuffers[3]` to cycle them.
-    
-    static rhi::ResourceHandle s_streamingConstantBuffers[3] = { rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
-    
+    // T4.6.5 part 30.2: converted to streaming_constant_buffers_ member for proper
+    // cross-test cleanup. Statics leaked buffers across sub-tests when device changed.
+
     // Destroy the old buffer for this frame slot if it exists
-    if (s_streamingConstantBuffers[bufferIndex % 3] != rhi::handles::INVALID_RESOURCE) {
-        device_->DestroyBuffer(s_streamingConstantBuffers[bufferIndex % 3]);
-        s_streamingConstantBuffers[bufferIndex % 3] = rhi::handles::INVALID_RESOURCE;
+    if (streaming_constant_buffers_[bufferIndex % 3] != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyBuffer(streaming_constant_buffers_[bufferIndex % 3]);
+        streaming_constant_buffers_[bufferIndex % 3] = rhi::handles::INVALID_RESOURCE;
     }
 
     // Assign the new buffer to the slot
-    s_streamingConstantBuffers[bufferIndex % 3] = constantBuffer;
+    streaming_constant_buffers_[bufferIndex % 3] = constantBuffer;
     
     // device_->DestroyBuffer(constantBuffer); // REMOVED
 }
@@ -1473,17 +1521,17 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         if (global_meshlet_buffer == rhi::handles::INVALID_RESOURCE) {
             // Create a placeholder buffer if meshlet buffer is not available yet
             // This prevents Metal validation errors while waiting for meshlet buffer to be ready
-            static rhi::ResourceHandle placeholder_meshlet_buffer = rhi::handles::INVALID_RESOURCE;
-            if (placeholder_meshlet_buffer == rhi::handles::INVALID_RESOURCE) {
+            // T4.6.5 part 30.2: converted to placeholder_meshlet_buffer_ member for cross-test cleanup.
+            if (placeholder_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE) {
                 rhi::BufferDesc placeholderDesc{};
                 placeholderDesc.size = sizeof(float) * 16; // Minimal valid buffer size
                 placeholderDesc.type = rhi::BufferType::Structured;
                 placeholderDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
                 placeholderDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ShaderResource);
-                placeholder_meshlet_buffer = device_->CreateBuffer(placeholderDesc);
+                placeholder_meshlet_buffer_ = device_->CreateBuffer(placeholderDesc);
 //                std::cout << "[GPUCulling] Created placeholder meshlet buffer for binding 11" << std::endl;
             }
-            global_meshlet_buffer = placeholder_meshlet_buffer;
+            global_meshlet_buffer = placeholder_meshlet_buffer_;
         }
 
         bufferInfos[writeCount].buffer = global_meshlet_buffer;

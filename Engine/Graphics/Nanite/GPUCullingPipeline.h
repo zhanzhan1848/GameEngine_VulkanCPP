@@ -212,11 +212,20 @@ private:
 
     // Execution state tracking (replaces static locals in Execute())
     // These must be member variables to reset properly across Initialize/Shutdown cycles
+    // T4.6.5 part 30.2: previously these were file/function-scope statics, which
+    // leaked across sub-tests in the same binary — singleton Shutdown left them
+    // set, so the next sub-test's Execute never re-created descriptor sets on
+    // the new device → null descriptor set cascade.
     u32 execute_call_count_{ 0 };
     bool basic_descriptor_sets_created_{ false };
     bool backface_descriptor_sets_created_{ false };
     bool hzb_bindings_updated_{ false };
     u32 matrix_print_count_{ 0 };
+
+    // T4.6.5 part 30.2: converted from function-scope statics for the same reason.
+    rhi::ResourceHandle placeholder_meshlet_buffer_{ rhi::handles::INVALID_RESOURCE };
+    std::array<rhi::ResourceHandle, 3> streaming_constant_buffers_{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    bool warned_streaming_constants_invalid_{ false };
 
     // Reflects CullingConstants.force_pass_all for the diagnostic toggle.
     // Default false so production behavior is unchanged.

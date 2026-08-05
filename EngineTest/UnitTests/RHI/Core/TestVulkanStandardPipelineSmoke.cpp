@@ -1122,7 +1122,9 @@ TestResult TestVulkanStandardPipelineRender_Windowed() {
     std::cout << "[Part29] Render loop starting. Frame counter prints every 60 frames." << std::endl;
     int frame = 0;
     int frameSlot = 0;
-    constexpr int kSafetyFrameCap = 100000;  // hard stop after ~28 hours at 60Hz
+    // T4.6.5 part 30 phase B — temporary debug: capture first 3 frames of stderr
+    // to identify null descriptor set source. Restore to 100000 after Part 30.2 lands.
+    constexpr int kSafetyFrameCap = 3;
     bool loopOk = true;
 
     while (!win.is_closed() && frame < kSafetyFrameCap) {
