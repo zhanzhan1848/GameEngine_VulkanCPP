@@ -784,6 +784,20 @@ bool MaterialDataBuilder::CreateTextureArray(
 
     // If we owned the command buffer, submit and wait now.
     if (ownedCmdHandle != rhi::handles::INVALID_RESOURCE) {
+        // T4.6.5 part 30: BlitTexture leaves the array in TRANSFER_DST_OPTIMAL.
+        // Subsequent descriptor writes hardcode SHADER_READ_ONLY_OPTIMAL
+        // (VulkanDescriptorSet.cpp:131) → VUID-vkCmdDraw-None-09600 fires.
+        // Transition all layers+mips to ShaderResource so sampling works.
+        // When the caller passes its own cmd buffer, the caller owns this
+        // transition (mirror CopyBufferToTexture contract).
+        rhi::ResourceBarrier toSRV;
+        toSRV.resource = outArray;
+        toSRV.beforeState = rhi::ResourceState::CopyDest;
+        toSRV.afterState = rhi::ResourceState::ShaderResource;
+        toSRV.subresource = rhi::RHI_ALL_SUBRESOURCES;
+        toSRV.queueFamily = 0xFFFFFFFF;
+        activeCmd->InsertBarrier(&toSRV, 1);
+
         activeCmd->End();
         rhi::QueueSubmitInfo submitInfo{};
         submitInfo.cmdBuffer = ownedCmdHandle;
