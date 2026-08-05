@@ -43,17 +43,18 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
-// Bridges observer/origin state to the wfc/shell.html HUD via JS.
+// Bridges observer/origin/grid dims/seed to the wfc/shell.html HUD via JS.
 // No-op on native builds (the entire function body is ifdef'd out).
-static void SyncWfcHudIfWasm(const char* obs, const char* origin) {
-    char buf[160];
+static void SyncWfcHudIfWasm(const char* obs, const char* origin,
+                              u32 grid_w, u32 grid_h, u32 grid_d, u32 seed) {
+    char buf[256];
     std::snprintf(buf, sizeof(buf),
-                  "if (window.setWfcHud) window.setWfcHud('%s', '%s');",
-                  obs, origin);
+                  "if (window.setWfcHud) window.setWfcHud('%s','%s',%u,%u,%u,%u);",
+                  obs, origin, grid_w, grid_h, grid_d, seed);
     emscripten_run_script(buf);
 }
 #else
-static inline void SyncWfcHudIfWasm(const char*, const char*) {}
+static inline void SyncWfcHudIfWasm(const char*, const char*, u32, u32, u32, u32) {}
 #endif
 
 using namespace primal::graphics;
@@ -129,8 +130,13 @@ bool KenneyTilePreviewTestCase::Initialize() {
     pipeline->SetOutputResource(handles::INVALID_RESOURCE, {});
     pipeline->SetViewportSize(window_width_, window_height_);
 
+    // Off preset: skip SSAO/SSGI/DDGI subsystem init entirely.
+    // WebGPU rejects LumenSSAOPass's R16Float + StorageBinding textures
+    // (R16Float is not in the storage-texture allowed-format list), so any
+    // preset with enable_ssao=true crashes on first frame. WFC uses
+    // ForwardSceneRenderer via editor mode — no Lumen GI needed.
     lumen::LumenConfig lumenConfig;
-    lumenConfig.quality = lumen::LumenQualityPreset::Low;
+    lumenConfig.quality = lumen::LumenQualityPreset::Off;
     pipeline->SetLumenConfig(lumenConfig);
     pipeline->SetEditorMode(true);
 
@@ -179,8 +185,8 @@ bool KenneyTilePreviewTestCase::Initialize() {
     PrintControls();
     PrintGridState("init");
 
-    // Push initial observer/origin to the WASM HUD (no-op on native).
-    SyncWfcHudIfWasm("MinEntropy", "Center");
+    // Push initial observer/origin/grid to the WASM HUD (no-op on native).
+    SyncWfcHudIfWasm("MinEntropy", "Center", grid_w_, grid_h_, grid_d_, rng_seed_);
 
     std::cout << "[TestKenneyTilePreview] Pipeline + scene + " << loaded
               << " catalog tiles + WFC registry ready" << std::endl;
@@ -362,7 +368,7 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
     if (!changed) return;
 
     // Sync HUD before reseed so the WFC iframe shows the new observer/origin
-    // as the solve restarts. No-op on native builds.
+    // and grid dims as the solve restarts. No-op on native builds.
     {
         const char* obs = (observer_kind_ == ObserverKind::MinEntropy)
                           ? "MinEntropy" : "DistanceFromOrigin";
@@ -372,7 +378,7 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
             case OriginPreset::Corner:       origin = "Corner";       break;
             case OriginPreset::BottomCenter: origin = "BottomCenter"; break;
         }
-        SyncWfcHudIfWasm(obs, origin);
+        SyncWfcHudIfWasm(obs, origin, grid_w_, grid_h_, grid_d_, rng_seed_);
     }
 
     ReseedSolver();
