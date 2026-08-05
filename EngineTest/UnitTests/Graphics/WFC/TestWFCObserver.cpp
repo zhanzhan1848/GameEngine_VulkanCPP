@@ -70,7 +70,7 @@ TestResult TestWFCObserver_OnCellChanged_Updates_Heap() {
 }
 
 int main() {
-    TestSuite suite("WFCObserver");
+    TestSuite suite("WFCMinEntropyObserver");
     TEST_CASE(suite, "Picks_Minimum_Entropy", TestWFCObserver_Picks_Minimum_Entropy);
     TEST_CASE(suite, "Picks_Invalid_When_All_Collapsed", TestWFCObserver_Picks_Invalid_When_All_Collapsed);
     TEST_CASE(suite, "OnCellChanged_Updates_Heap", TestWFCObserver_OnCellChanged_Updates_Heap);

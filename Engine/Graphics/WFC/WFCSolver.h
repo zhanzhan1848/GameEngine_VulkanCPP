@@ -3,7 +3,8 @@
 // Task 7 (Phase A.2): WFC solver orchestrator.
 //
 // The solver ties together the four Phase A.2 primitives:
-//   * WFCObserver     — picks the next cell to collapse (min-entropy).
+//   * WFCObserver     — picks the next cell to collapse (strategy-injected;
+//                       default is MinEntropy; see SetObserver / ResetToDefaultObserver).
 //   * WFCPropagator   — AC-4-style candidate pruning after each collapse.
 //   * RestartPolicy   — decides restart-vs-give-up on contradiction.
 //   * WFCRandom       — deterministic tie-breaking when picking variants.

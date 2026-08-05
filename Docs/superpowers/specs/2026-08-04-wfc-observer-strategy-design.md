@@ -267,8 +267,8 @@ For the demo's N = 1024, both are negligible. Distance becomes a regression cand
 ### Application layer — `EngineTest/IntegrationTests/Graphics/WFC/`
 | Op | File | Notes |
 |---|---|---|
-| Modify | `TestKenneyTilePreview.h` | Add `ObserverKind` / `OriginPreset` enums + new members |
-| Modify | `TestKenneyTilePreview.cpp` | Hotkeys `O`/`P`; `ReseedSolver` constructs observer per kind; `ComputeOrigin` helper |
+| New | `TestKenneyTilePreview.h` | Add `ObserverKind` / `OriginPreset` enums + new members (file did not exist before this refactor) |
+| New | `TestKenneyTilePreview.cpp` | Hotkeys `O`/`P`; `ReseedSolver` constructs observer per kind; `ComputeOrigin` helper |
 
 ### Tests
 | Op | File | Notes |
