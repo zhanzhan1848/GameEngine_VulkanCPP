@@ -23,6 +23,7 @@
 #include "Engine/Graphics/WFC/WFCConfig.h"
 #include "Engine/Graphics/WFC/WFCOutput.h"
 #include "Engine/Graphics/WFC/WFCCategory.h"
+#include "Engine/Graphics/WFC/WFCDistanceObserver.h"
 #include "Engine/Graphics/PCG/PCGTypes.h"
 #include "Engine/Graphics/PCG/PCGEntityFactory.h"
 

@@ -38,7 +38,6 @@
 #include "Engine/Graphics/WFC/WFCStepBuffer.h"
 #include "Engine/Graphics/WFC/WFCSolveBudget.h"
 #include "Engine/Graphics/WFC/WFCObserver.h"
-#include "Engine/Graphics/WFC/WFCDistanceObserver.h"
 #include "KenneyTileCatalog.h"
 #include <memory>
 #include <vector>
