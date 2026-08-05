@@ -65,6 +65,7 @@ jobs:
         # JS — patches crypto.getRandomValues and GPUQueue.prototype methods
         # to copy resizable views through fixed intermediates. Runs once
         # before main() so all downstream call sites are covered.
+        # Applies to BOTH TestDawnWASM.js and TestKenneyTilePreviewWASM.js.
         run: |
           python3 - <<'PY'
           import pathlib
@@ -105,10 +106,10 @@ jobs:
             }
           })();
           '''
-          targets = list(pathlib.Path('WASM').glob('TestDawnWASM*.js'))
-          targets += list(pathlib.Path('build_wasm').rglob('TestDawnWASM*.js'))
+          targets = list(pathlib.Path('WASM').glob('Test*WASM*.js'))
+          targets += list(pathlib.Path('build_wasm').rglob('Test*WASM*.js'))
           if not targets:
-            raise SystemExit('[patch] no TestDawnWASM.js found')
+            raise SystemExit('[patch] no Test*WASM.js found')
           for p in targets:
             src = p.read_text()
             if 'Resizable-ArrayBuffer polyfill' in src:
@@ -122,16 +123,43 @@ jobs:
       - name: Prepare deploy directory
         run: |
           mkdir -p deploy
-          # CMakeLists.txt sets CMAKE_RUNTIME_OUTPUT_DIRECTORY to WASM/
+          # Flat layout — every demo HTML loads its binary + assets via
+          # relative ./ paths, so binaries and the assets/ tree must live
+          # alongside the HTML in the same directory. We rename the demo
+          # HTMLs to avoid clashes (each demo keeps its source-tree name
+          # in the repo but flattens on deploy).
+          #   deploy/index.html      — launcher (root)
+          #   deploy/wfc.html        — WFC demo (renamed from wfc/shell.html)
+          #   deploy/wasm.html       — basic-rendering demo (renamed from wasm/index.html)
+          #   deploy/Test*WASM.{js,wasm}
+          #   deploy/wasm_manifest.js + assets/   — runtime assets
+
+          # Binaries
           cp WASM/TestDawnWASM.js WASM/TestDawnWASM.wasm deploy/ 2>/dev/null || true
-          # Also check build_wasm just in case
-          find build_wasm -maxdepth 3 \( -name '*.js' -o -name '*.wasm' -o -name '*.data' \) \
+          cp WASM/TestKenneyTilePreviewWASM.js WASM/TestKenneyTilePreviewWASM.wasm deploy/ 2>/dev/null || true
+          # CMake occasionally parks outputs in build_wasm/ — sweep it as a fallback.
+          find build_wasm -maxdepth 3 \( -name 'TestDawnWASM.*' -o -name 'TestKenneyTilePreviewWASM.*' \) \
             -exec cp {} deploy/ \; 2>/dev/null || true
-          # Copy landing page
-          if [ -f wasm/index.html ]; then
-            cp wasm/index.html deploy/index.html
+
+          # Launcher (root index.html). Must be the LAST copy for index.html
+          # — don't let wasm/index.html overwrite it.
+          if [ -f index.html ]; then
+            cp index.html deploy/index.html
           fi
-          # Copy runtime assets (Sponza model + textures, ~114MB)
+
+          # Demo HTMLs, renamed.
+          if [ -f wfc/shell.html ]; then
+            cp wfc/shell.html deploy/wfc.html
+          fi
+          if [ -f wasm/index.html ]; then
+            cp wasm/index.html deploy/wasm.html
+          fi
+
+          # Runtime assets + manifest (TestDawnWASM.js fetches wasm_manifest.js
+          # from ./; textures are loaded via relative assets/...png URLs.)
+          if [ -f build_wasm/wasm_manifest.js ]; then
+            cp build_wasm/wasm_manifest.js deploy/
+          fi
           mkdir -p deploy/assets/models/Sponza
           cp EngineTest/assets/Sponza.model deploy/assets/
           cp EngineTest/assets/models/Sponza/*.png deploy/assets/models/Sponza/ 2>/dev/null || true
