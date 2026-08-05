@@ -1379,6 +1379,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
         }
         BufferDesc desc{};
         desc.size = required_size;
+        desc.type = BufferType::Vertex;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
         pcg_instance_buffer_ = device_->CreateBuffer(desc);
