@@ -490,11 +490,11 @@ void KenneyTilePreviewTestCase::UpdateCamera() {
     };
     v3 up{0, 1, 0};
     v3 target = camera_pos_ + forward;
-    m4x4 viewMat = metal::CreateLookAtMatrix(camera_pos_, target, up);
+    m4x4 viewMat = math::CreateLookAtMatrix(camera_pos_, target, up);
     constexpr float fov = 60.0f * (pi / 180.0f);
     const float aspect = static_cast<float>(window_width_) /
                          static_cast<float>(window_height_);
-    m4x4 projMat = metal::CreatePerspectiveMatrix(fov, aspect, 0.1f, 1000.0f);
+    m4x4 projMat = math::CreatePerspectiveMatrix(fov, aspect, 0.1f, 1000.0f);
     if (view) {
         view->SetViewMatrix(viewMat);
         view->SetProjectionMatrix(projMat);
