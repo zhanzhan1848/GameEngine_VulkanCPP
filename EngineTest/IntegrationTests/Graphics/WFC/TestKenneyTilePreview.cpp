@@ -308,14 +308,14 @@ bool KenneyTilePreviewTestCase::InitMixedMultiCategory() {
 
     // Register ruins procedural meshes for rendering + capture RHIMeshAsset*.
     //
-    // All 15 ruins tiles share a weathered-cube mesh factory call (different
-    // seed/amp per tile so they aren't bit-identical). We deliberately avoid
-    // create_ramp_mesh / create_corner_in/out_mesh — those are register-only
-    // factory variants that don't expose the RHIMeshAsset, and the
-    // AutoSocketClassifier needs the raw mesh to ray-trace. Visual variety
-    // within Ruins is sacrificed here for the multi-category smoke target;
-    // task 14's research goal is "do mixed categories converge", not "do
-    // 15 distinct ruins shapes render".
+    // Each of the 15 ruins tile IDs dispatches to its matching factory so the
+    // demo shows distinct topology (cube, ramp, corner_in/out, broken_cube,
+    // collapsed_pillar, rubble_pile, debris_small). Tiles 0/6/10/11 stay on
+    // weathered_cube_mesh with different seed/amp so cube variants still
+    // differ by texture. Tiles 9 (cracked_wall) and 12/13 (broken_corner_in/
+    // out) currently fall back to cube/notched-cube geometry — see
+    // ProceduralMesh.h comments at create_cracked_wall_mesh (line 699) and
+    // create_broken_corner_in_mesh (line 617) for the Phase C.1 stub status.
     primal::id::id_type noTex[3] = {
         primal::id::invalid_id, primal::id::invalid_id, primal::id::invalid_id
     };
@@ -327,13 +327,68 @@ bool KenneyTilePreviewTestCase::InitMixedMultiCategory() {
         auto* fwd = pipeline->GetForwardRenderer();
         return fwd ? (fwd->GetMeshInfoCount() - 1u) : 0u;
     };
+    // Per-tile factory dispatch. Params chosen for visual variety within
+    // each factory's output range (different seeds, slopes, tilt axes).
+    auto build_tile_asset = [&](RHIMeshAsset& out, u32 tid) {
+        using namespace primal::content;
+        switch (tid) {
+            case 0:  // cube
+                create_weathered_cube_mesh(out, 1,1,1, 100u, 0.020f);
+                break;
+            case 1:  // ramp — full slope (slope_height=0 → ramp top to floor at +Z)
+                create_ramp_mesh(out, 1.0f, 1.0f, 1.0f, 0.0f);
+                break;
+            case 2:  // corner_in — concave L-shape
+                create_corner_in_mesh(out, 1.0f, 1.0f, 1.0f);
+                break;
+            case 3:  // corner_out — convex octant frame
+                create_corner_out_mesh(out, 1.0f, 1.0f, 1.0f);
+                break;
+            case 4:  // pillar — collapsed_pillar standing (small tilt)
+                create_collapsed_pillar_mesh(out, 0.5f, 1.0f,
+                                             TiltAxis::PlusX, 0.05f);
+                break;
+            case 5:  // broken_cube — notched corner
+                create_broken_cube_mesh(out, 1.0f, 1.0f, 1.0f,
+                                        BrokenCorner::PosXYZ);
+                break;
+            case 6:  // mossy_cube — low-amp weathering (dense moss)
+                create_weathered_cube_mesh(out, 1,1,1, 600u, 0.005f);
+                break;
+            case 7:  // collapsed_pillar — heavier tilt, different axis
+                create_collapsed_pillar_mesh(out, 0.5f, 1.0f,
+                                             TiltAxis::PlusZ, 0.20f);
+                break;
+            case 8:  // rubble_pile — multi-box cluster
+                create_rubble_pile_mesh(out, 800u, 0.5f);
+                break;
+            case 9:  // cracked_wall — Phase C.1 stub (emits plain cube)
+                create_cracked_wall_mesh(out, 1.0f, 1.0f, 1.0f, 900u);
+                break;
+            case 10: // vine_cube — high-amp weathering (deep vines)
+                create_weathered_cube_mesh(out, 1,1,1, 700u, 0.030f);
+                break;
+            case 11: // weathered_stone — medium-amp weathering
+                create_weathered_cube_mesh(out, 1,1,1, 800u, 0.015f);
+                break;
+            case 12: // broken_corner_in — notched at PosX-NegZ corner
+                create_broken_corner_in_mesh(out, 1.0f, 1.0f, 1.0f,
+                                             BrokenCorner::PosXNegZ);
+                break;
+            case 13: // broken_corner_out — notched at NegX-PosZ corner
+                create_broken_corner_out_mesh(out, 1.0f, 1.0f, 1.0f,
+                                              BrokenCorner::NegXPosZ);
+                break;
+            case 14: // debris_small — small scattered boxes
+                create_debris_small_mesh(out, 900u, 0.35f);
+                break;
+            default: // unreachable (ruins_count == 15)
+                create_weathered_cube_mesh(out, 1,1,1, 999u, 0.020f);
+                break;
+        }
+    };
     for (u32 tid = 0; tid < ruins_count; ++tid) {
-        // Per-tile seed/amp so the renderer can still tell tiles apart by
-        // weathering pattern, even though topology is identical.
-        const u32 seed = 100u + tid * 7u;
-        const f32 amp = 0.02f + 0.01f * static_cast<f32>(tid % 5);
-        content::create_weathered_cube_mesh(ruins_meshes_[tid],
-                                            1.0f, 1.0f, 1.0f, seed, amp);
+        build_tile_asset(ruins_meshes_[tid], tid);
     }
 
     // Override WFCTile::mesh_handles[v] with the render slot index. All

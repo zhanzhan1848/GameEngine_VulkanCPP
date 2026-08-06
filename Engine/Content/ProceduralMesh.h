@@ -877,22 +877,27 @@ inline void create_debris_small_mesh(graphics::rhi::RHIMeshAsset& out,
 // Layout:
 //   sx, sy, sz     : full extents (same as box)
 //   slope_height   : height of the +Z end (0 = full ramp, sy = box)
-inline id::id_type create_ramp_mesh(f32 sx, f32 sy, f32 sz, f32 slope_height) {
+// emit_ramp_geometry — populate `out` with ramp mesh data. No registration.
+// Mirrors emit_box_geometry pattern so AutoSocketClassifier (which ray-traces
+// against the raw RHIMeshAsset) can use the asset without a register→query
+// round-trip.
+inline void emit_ramp_geometry(graphics::rhi::RHIMeshAsset& out,
+                               f32 sx, f32 sy, f32 sz, f32 slope_height) {
     if (slope_height < 0.0f) slope_height = 0.0f;
     if (slope_height > sy) slope_height = sy;
 
     const u32 vertCount = 8;
     const u32 idxCount = 30;
 
-    graphics::rhi::RHIMeshAsset asset;
-    asset.num_vertices = vertCount;
-    asset.num_indices = idxCount;
-    asset.position_buffer.resize(vertCount * 12);
-    asset.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
-    asset.index_buffer.resize(idxCount * 4);
+    out.num_vertices = vertCount;
+    out.num_indices  = idxCount;
+    out.index_size   = 4;
+    out.position_buffer.resize(vertCount * 12);
+    out.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
+    out.index_buffer.resize(idxCount * 4);
 
-    u8* pos = asset.position_buffer.data();
-    u8* elem = asset.element_buffer.data();
+    u8* pos = out.position_buffer.data();
+    u8* elem = out.element_buffer.data();
     const f32 hx = sx * 0.5f, hy = sy * 0.5f, hz = sz * 0.5f;
     const f32 top_slope = slope_height * 0.5f;
 
@@ -908,7 +913,7 @@ inline id::id_type create_ramp_mesh(f32 sx, f32 sy, f32 sz, f32 slope_height) {
     WriteVertex(pos+ 6*12, elem+ 6*20,  hx, top_slope, hz,  0, 0, 1,  1, 1);
     WriteVertex(pos+ 7*12, elem+ 7*20, -hx, top_slope, hz,  0, 0, 1,  0, 1);
 
-    u32* idx = reinterpret_cast<u32*>(asset.index_buffer.data());
+    u32* idx = reinterpret_cast<u32*>(out.index_buffer.data());
     u32 ii = 0;
 
     // Bottom face
@@ -934,8 +939,18 @@ inline id::id_type create_ramp_mesh(f32 sx, f32 sy, f32 sz, f32 slope_height) {
     // Slope top
     idx[ii++] = 4; idx[ii++] = 6; idx[ii++] = 5;
     idx[ii++] = 4; idx[ii++] = 7; idx[ii++] = 6;
+}
 
-    return RegisterProceduralMesh(asset);
+// create_ramp_mesh — RHIMeshAsset overload (no registration).
+inline void create_ramp_mesh(graphics::rhi::RHIMeshAsset& out,
+                             f32 sx, f32 sy, f32 sz, f32 slope_height) {
+    emit_ramp_geometry(out, sx, sy, sz, slope_height);
+}
+
+inline id::id_type create_ramp_mesh(f32 sx, f32 sy, f32 sz, f32 slope_height) {
+    graphics::rhi::RHIMeshAsset a;
+    emit_ramp_geometry(a, sx, sy, sz, slope_height);
+    return RegisterProceduralMesh(a);
 }
 
 // --- Corner in (concave L-shape) ---
@@ -944,19 +959,22 @@ inline id::id_type create_ramp_mesh(f32 sx, f32 sy, f32 sz, f32 slope_height) {
 // Used by WFC catalog with RotationY to produce 4 rotations.
 //
 //   sx, sy, sz : full extents (same as box)
-inline id::id_type create_corner_in_mesh(f32 sx, f32 sy, f32 sz) {
+// emit_corner_in_geometry — populate `out` with concave L-shape mesh data.
+// No registration. Used by AutoSocketClassifier ray-trace path.
+inline void emit_corner_in_geometry(graphics::rhi::RHIMeshAsset& out,
+                                    f32 sx, f32 sy, f32 sz) {
     const u32 vertCount = 12;     // 6 footprint corners × 2 (top + bottom)
     const u32 idxCount  = 60;     // 20 triangles: 4 bot + 4 top + 12 sides
 
-    graphics::rhi::RHIMeshAsset asset;
-    asset.num_vertices = vertCount;
-    asset.num_indices  = idxCount;
-    asset.position_buffer.resize(vertCount * 12);
-    asset.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
-    asset.index_buffer.resize(idxCount * 4);
+    out.num_vertices = vertCount;
+    out.num_indices  = idxCount;
+    out.index_size   = 4;
+    out.position_buffer.resize(vertCount * 12);
+    out.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
+    out.index_buffer.resize(idxCount * 4);
 
-    u8* pos = asset.position_buffer.data();
-    u8* elem = asset.element_buffer.data();
+    u8* pos = out.position_buffer.data();
+    u8* elem = out.element_buffer.data();
     const f32 hx = sx * 0.5f, hy = sy * 0.5f, hz = sz * 0.5f;
 
     // Bottom layer (y = -hy), normal -Y. Footprint CCW from +Y view.
@@ -975,7 +993,7 @@ inline id::id_type create_corner_in_mesh(f32 sx, f32 sy, f32 sz) {
     WriteVertex(pos+10*12, elem+10*20,  0,    hy,  hz,  0, 1, 0,  0.5f, 0.75f); // v10
     WriteVertex(pos+11*12, elem+11*20, -hx,  hy,  hz,  0, 1, 0,  0.0f, 0.75f); // v11
 
-    u32* idx = reinterpret_cast<u32*>(asset.index_buffer.data());
+    u32* idx = reinterpret_cast<u32*>(out.index_buffer.data());
     u32 ii = 0;
 
     // Bottom hexagon fan (CCW from below = CW from above, but normal is -Y so CCW from -Y view)
@@ -1004,8 +1022,18 @@ inline id::id_type create_corner_in_mesh(f32 sx, f32 sy, f32 sz) {
     SideQuad(3, 4);  // edge P3-P4, outward +X (notch wall)
     SideQuad(4, 5);  // edge P4-P5, outward +Z
     SideQuad(5, 0);  // edge P5-P0, outward -X
+}
 
-    return RegisterProceduralMesh(asset);
+// create_corner_in_mesh — RHIMeshAsset overload (no registration).
+inline void create_corner_in_mesh(graphics::rhi::RHIMeshAsset& out,
+                                  f32 sx, f32 sy, f32 sz) {
+    emit_corner_in_geometry(out, sx, sy, sz);
+}
+
+inline id::id_type create_corner_in_mesh(f32 sx, f32 sy, f32 sz) {
+    graphics::rhi::RHIMeshAsset a;
+    emit_corner_in_geometry(a, sx, sy, sz);
+    return RegisterProceduralMesh(a);
 }
 
 // --- Corner out (convex octant frame) ---
@@ -1014,19 +1042,22 @@ inline id::id_type create_corner_in_mesh(f32 sx, f32 sy, f32 sz) {
 // with RotationY to produce 4 rotations.
 //
 //   sx, sy, sz : full extents (same as box)
-inline id::id_type create_corner_out_mesh(f32 sx, f32 sy, f32 sz) {
+// emit_corner_out_geometry — populate `out` with convex octant frame data.
+// No registration. Used by AutoSocketClassifier ray-trace path.
+inline void emit_corner_out_geometry(graphics::rhi::RHIMeshAsset& out,
+                                     f32 sx, f32 sy, f32 sz) {
     const u32 vertCount = 12;     // 3 quads × 4 verts (separate normals per face)
     const u32 idxCount  = 18;     // 3 quads × 2 triangles × 3 indices
 
-    graphics::rhi::RHIMeshAsset asset;
-    asset.num_vertices = vertCount;
-    asset.num_indices  = idxCount;
-    asset.position_buffer.resize(vertCount * 12);
-    asset.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
-    asset.index_buffer.resize(idxCount * 4);
+    out.num_vertices = vertCount;
+    out.num_indices  = idxCount;
+    out.index_size   = 4;
+    out.position_buffer.resize(vertCount * 12);
+    out.element_buffer.resize(vertCount * PROC_ELEM_STRIDE);
+    out.index_buffer.resize(idxCount * 4);
 
-    u8* pos = asset.position_buffer.data();
-    u8* elem = asset.element_buffer.data();
+    u8* pos = out.position_buffer.data();
+    u8* elem = out.element_buffer.data();
     const f32 hx = sx * 0.5f, hy = sy * 0.5f, hz = sz * 0.5f;
 
     // +X wall (normal +X): verts 0-3
@@ -1047,7 +1078,7 @@ inline id::id_type create_corner_out_mesh(f32 sx, f32 sy, f32 sz) {
     WriteVertex(pos+10*12, elem+10*20,  hx,  hy,  hz,  0, 0, 1,  1.0f, 1.0f); // v10
     WriteVertex(pos+11*12, elem+11*20, -hx,  hy,  hz,  0, 0, 1,  0.0f, 1.0f); // v11
 
-    u32* idx = reinterpret_cast<u32*>(asset.index_buffer.data());
+    u32* idx = reinterpret_cast<u32*>(out.index_buffer.data());
     u32 ii = 0;
 
     // +X wall: v0, v1, v2, v3 CCW from +X viewer
@@ -1059,8 +1090,18 @@ inline id::id_type create_corner_out_mesh(f32 sx, f32 sy, f32 sz) {
     // +Z wall: v8, v9, v10, v11 CCW from +Z viewer
     idx[ii++] = 8;  idx[ii++] = 9;  idx[ii++] = 10;
     idx[ii++] = 8;  idx[ii++] = 10; idx[ii++] = 11;
+}
 
-    return RegisterProceduralMesh(asset);
+// create_corner_out_mesh — RHIMeshAsset overload (no registration).
+inline void create_corner_out_mesh(graphics::rhi::RHIMeshAsset& out,
+                                   f32 sx, f32 sy, f32 sz) {
+    emit_corner_out_geometry(out, sx, sy, sz);
+}
+
+inline id::id_type create_corner_out_mesh(f32 sx, f32 sy, f32 sz) {
+    graphics::rhi::RHIMeshAsset a;
+    emit_corner_out_geometry(a, sx, sy, sz);
+    return RegisterProceduralMesh(a);
 }
 
 // --- Torus ---
