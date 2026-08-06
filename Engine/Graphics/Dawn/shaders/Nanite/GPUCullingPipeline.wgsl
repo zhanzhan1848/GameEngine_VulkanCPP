@@ -460,7 +460,13 @@ fn stage5_occlusion_culling(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let ndc = clip_pos.xy / clip_pos.w;
-    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5);
+    // T4.6.5 part 35: HZB texture has top-left origin (framebuffer convention
+    // after naga's automatic Y-flip in vertex shaders). NDC.y = +1 (world-up)
+    // → top of screen → uv.y = 0 (row 0 of HZB). NDC.y = -1 (world-down) →
+    // bottom → uv.y = 1. Old math `ndc.y * 0.5 + 0.5` assumed OpenGL
+    // bottom-left texture origin and produced world-up geometry sampling
+    // world-down HZB region → false-occlusion of ceiling / upper-half scene.
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         return; // Off-screen, assume visible.
     }

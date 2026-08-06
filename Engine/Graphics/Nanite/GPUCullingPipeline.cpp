@@ -122,10 +122,10 @@ namespace {
 bool GPUCullingPipeline::Initialize(rhi::RHIDeviceBase* device, const CullingConfig& config) {
     if (!device) return false;
     if (initialized_) return true;
-    
+
     device_ = device;
     config_ = config;
-    
+
     if (!CreatePipelines()) {
         std::cerr << "Failed to create pipelines" << std::endl;
         return false;
