@@ -13,8 +13,15 @@ class WFCTileRegistry;
 // AutoSocketClassifier — doorway-aware socket signature encoder.
 //   RayTriangle: backface-culling intersection primitive.
 //   ClassifyFace / MirrorFlipU: 8×8 occupancy-grid signatures.
+//   ClassifyTile: convenience wrapper that classifies all 6 faces at once.
 class AutoSocketClassifier {
 public:
+    // Per-face signatures for one tile variant. face[f] holds the 64-bit
+    // occupancy encoding for WFCFace f (index = static_cast<u32>(face)).
+    struct FaceSignatures {
+        SocketEncoding face[WFC_FACE_COUNT_3D];
+    };
+
     // Möller–Trumbore ray-triangle intersection with backface cull.
     // `*t` (if non-null) returns the hit parameter in units of |dir| — callers
     // that pass a unit dir get a true distance; callers that pass a scaled dir
@@ -51,6 +58,14 @@ public:
     // Mirror-flip the U axis of a signature (used for opposing-face comparison).
     // Each 8-bit row has its bits reversed: bit 0 ↔ bit 7, bit 1 ↔ bit 6, etc.
     static SocketEncoding MirrorFlipU(SocketEncoding sig);
+
+    // Convenience wrapper: classify all 6 faces of a tile in one call, returning
+    // a FaceSignatures struct. Equivalent to calling ClassifyFace once per face
+    // with the same mesh + variant_transform. Useful when populating a tile's
+    // socket set at registration time.
+    static FaceSignatures ClassifyTile(
+        const graphics::rhi::RHIMeshAsset& mesh,
+        const math::m4x4& variant_transform);
 };
 
 } // namespace primal::graphics::wfc

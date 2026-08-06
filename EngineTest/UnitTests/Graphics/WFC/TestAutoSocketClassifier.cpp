@@ -82,6 +82,41 @@ TestResult TestMirrorFlipU() {
     return TestResult::Passed;
 }
 
+// ClassifyTile wraps ClassifyFace for all 6 faces. A solid unit cube must
+// produce all-ones signatures on every face.
+TestResult TestClassifyTileReturnsSixFaces() {
+    RHIMeshAsset cube;
+    emit_box_geometry(cube, 1.0f, 1.0f, 1.0f);
+
+    AutoSocketClassifier::FaceSignatures sigs =
+        AutoSocketClassifier::ClassifyTile(cube, matrix_identity_float4x4);
+    for (u32 f = 0; f < 6; ++f) {
+        TEST_ASSERT_EQ(0xFFFFFFFFFFFFFFFFULL, sigs.face[f], "all faces solid");
+    }
+    return TestResult::Passed;
+}
+
+// Doorway cube: +X face is a picture frame (solid border, 4x4 opening in the
+// center). ClassifyFace must read corners solid and center cells as opening,
+// proving the classifier detects holes — not just solid surfaces.
+TestResult TestClassifyDoorwayCube() {
+    RHIMeshAsset doorway;
+    emit_doorway_cube_geometry(doorway, 1.0f, 1.0f, 1.0f);
+
+    const SocketEncoding sig = AutoSocketClassifier::ClassifyFace(
+        doorway, WFCFace::PosX, matrix_identity_float4x4);
+
+    // Corners solid (row 0/7, col 0/7)
+    TEST_ASSERT((sig & (SocketEncoding{1} << 0))  != 0, "(0,0) solid");
+    TEST_ASSERT((sig & (SocketEncoding{1} << 7))  != 0, "(7,0) solid");
+    TEST_ASSERT((sig & (SocketEncoding{1} << 56)) != 0, "(0,7) solid");
+    TEST_ASSERT((sig & (SocketEncoding{1} << 63)) != 0, "(7,7) solid");
+    // Center 4x4 opening (rows 2-5, cols 2-5)
+    TEST_ASSERT((sig & (SocketEncoding{1} << (3 + 3*8))) == 0, "(3,3) opening");
+    TEST_ASSERT((sig & (SocketEncoding{1} << (4 + 4*8))) == 0, "(4,4) opening");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("AutoSocketClassifier");
     TEST_CASE(suite, "RayTriangleHit",         TestRayTriangleHit);
@@ -90,6 +125,8 @@ int main() {
     TEST_CASE(suite, "ClassifyFaceSolidCube",  TestClassifyFaceSolidCube);
     TEST_CASE(suite, "ClassifyFaceEmptyMesh",  TestClassifyFaceEmptyMesh);
     TEST_CASE(suite, "MirrorFlipU",            TestMirrorFlipU);
+    TEST_CASE(suite, "ClassifyTileReturnsSixFaces", TestClassifyTileReturnsSixFaces);
+    TEST_CASE(suite, "ClassifyDoorwayCube",    TestClassifyDoorwayCube);
     suite.RunAllTests();
     return 0;
 }

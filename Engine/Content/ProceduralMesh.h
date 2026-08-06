@@ -463,6 +463,85 @@ inline void emit_box_geometry(graphics::rhi::RHIMeshAsset& out,
     }
 }
 
+// emit_doorway_cube_geometry — picture-frame +X face test fixture.
+// Builds a unit cube where the +X face is a frame (solid border + 4×4 cell
+// opening in the center), used to verify ClassifyFace detects openings rather
+// than treating any mesh triangle as solid. The other 5 faces stay solid.
+//
+// Strategy: start from a full cube via emit_box_geometry, then append 4
+// inner-ring verts (indices 24..27) on the +X face plane and rewrite the +X
+// face's index slot [12..17] with 8 picture-frame triangles (24 indices).
+// Final mesh: 28 verts, 54 indices.
+//
+// Inner ring uses half-extents in Y and Z (±hy/2, ±hz/2), which comfortably
+// covers cell centers (3,3) and (4,4) of the 8×8 occupancy grid without
+// touching cells in row/col 1 or 6.
+//
+// Winding note: every frame triangle is CCW from +X viewer (front-facing
+// under the classifier's backface cull). Verified via cross product, not
+// derived from a mirror/flip heuristic — Y and Z mirrors each flip winding,
+// so the per-strip triangle orders are not pure rotations of each other.
+inline void emit_doorway_cube_geometry(graphics::rhi::RHIMeshAsset& out,
+                                      f32 sx, f32 sy, f32 sz) {
+    emit_box_geometry(out, sx, sy, sz);
+
+    const u32 baseVerts = 24;
+    const u32 innerRingCount = 4;
+    const u32 newVertCount = baseVerts + innerRingCount;
+    const u32 newIdxCount  = 36 - 6 + 24;  // drop +X face's 6, add 24 frame indices
+
+    // Grow position + element buffers to fit the 4 new verts.
+    out.position_buffer.resize(newVertCount * 12);
+    out.element_buffer.resize(newVertCount * PROC_ELEM_STRIDE);
+    out.num_vertices = newVertCount;
+
+    // Grow index buffer: rewrite +X face's [12..17] as 24 frame indices, so
+    // the buffer must hold (36 - 6) + 24 = 54 u32 indices total. We preserve
+    // the other 5 faces' indices in slots [0..11] and [18..35] by copying
+    // them into a freshly-sized buffer.
+    utl::vector<u8> newIndexBuf(newIdxCount * 4);
+    u32* src = reinterpret_cast<u32*>(out.index_buffer.data());
+    u32* dst = reinterpret_cast<u32*>(newIndexBuf.data());
+    // Faces 0,1 (+Z, -Z): indices [0..11] copy verbatim.
+    for (u32 i = 0; i < 12; ++i) dst[i] = src[i];
+    // Faces 3,4,5 (-X, +Y, -Y): indices [18..35] shift down by 6 to [12..29].
+    for (u32 i = 0; i < 18; ++i) dst[12 + i] = src[18 + i];
+    out.index_buffer = std::move(newIndexBuf);
+    out.num_indices = newIdxCount;
+
+    const f32 hx = sx * 0.5f, hy = sy * 0.5f, hz = sz * 0.5f;
+    u8* pos  = out.position_buffer.data();
+    u8* elem = out.element_buffer.data();
+
+    // Inner ring on +X face: half-extents in Y and Z.
+    //   v24 corresponds to v8  (low-Y,  high-Z)
+    //   v25 corresponds to v9  (low-Y,  low-Z)
+    //   v26 corresponds to v10 (high-Y, low-Z)
+    //   v27 corresponds to v11 (high-Y, high-Z)
+    WriteVertex(pos + 24 * 12, elem + 24 * 20, +hx, -hy * 0.5f, +hz * 0.5f, 1, 0, 0, 0.25f, 0.25f);
+    WriteVertex(pos + 25 * 12, elem + 25 * 20, +hx, -hy * 0.5f, -hz * 0.5f, 1, 0, 0, 0.75f, 0.25f);
+    WriteVertex(pos + 26 * 12, elem + 26 * 20, +hx, +hy * 0.5f, -hz * 0.5f, 1, 0, 0, 0.75f, 0.75f);
+    WriteVertex(pos + 27 * 12, elem + 27 * 20, +hx, +hy * 0.5f, +hz * 0.5f, 1, 0, 0, 0.25f, 0.75f);
+
+    // +X face picture-frame triangles, all CCW from +X viewer. Each strip is
+    // a quad split into 2 triangles; winding per strip was verified by hand
+    // via cross product (see comment above).
+    u32* idx = reinterpret_cast<u32*>(out.index_buffer.data());
+    u32 k = 12;  // +X face's index slot starts at offset 12
+    // Bottom strip (Y = -hy outer, -hy/2 inner)
+    idx[k++] = 8;  idx[k++] = 9;  idx[k++] = 25;
+    idx[k++] = 8;  idx[k++] = 25; idx[k++] = 24;
+    // Top strip (Y = +hy outer, +hy/2 inner)
+    idx[k++] = 11; idx[k++] = 27; idx[k++] = 26;
+    idx[k++] = 11; idx[k++] = 26; idx[k++] = 10;
+    // Left strip (Z = +hz outer, +hz/2 inner)
+    idx[k++] = 8;  idx[k++] = 24; idx[k++] = 27;
+    idx[k++] = 8;  idx[k++] = 27; idx[k++] = 11;
+    // Right strip (Z = -hz outer, -hz/2 inner)
+    idx[k++] = 10; idx[k++] = 26; idx[k++] = 25;
+    idx[k++] = 10; idx[k++] = 25; idx[k++] = 9;
+}
+
 inline void create_broken_cube_mesh(graphics::rhi::RHIMeshAsset& out,
                                     f32 sx, f32 sy, f32 sz,
                                     BrokenCorner corner) {

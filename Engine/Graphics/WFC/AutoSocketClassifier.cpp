@@ -205,4 +205,15 @@ SocketEncoding AutoSocketClassifier::MirrorFlipU(SocketEncoding sig) {
     return out;
 }
 
+AutoSocketClassifier::FaceSignatures
+AutoSocketClassifier::ClassifyTile(
+    const graphics::rhi::RHIMeshAsset& mesh,
+    const math::m4x4& variant_transform) {
+    FaceSignatures out;
+    for (u32 f = 0; f < WFC_FACE_COUNT_3D; ++f) {
+        out.face[f] = ClassifyFace(mesh, static_cast<WFCFace>(f), variant_transform);
+    }
+    return out;
+}
+
 } // namespace primal::graphics::wfc
