@@ -53,12 +53,19 @@ TestResult TestVulkanSyncCreateDestroy() {
 // === 用例 2:非信号态 fence,WaitForSync 必须在 timeout 内返回 false ===
 // 关键点:VulkanSync::WaitFence 内部 vkWaitForFences 应正确处理 timeout。
 //         如果挂死永远 block,本测试会在 ctest 超时被 kill。
+// T4.6.5 part 32: CreateSync 默认 signaled=true(避免 RenderSystem 首帧 stall),
+//                  本测试需显式 ResetFence 才能验证 timeout 行为。
 TestResult TestVulkanSyncTimeoutOnUnsignaled() {
     VulkanDeviceFixture fx;
     TEST_ASSERT_NOT_NULL(fx.vk, "VulkanDevice should be created");
 
     SyncHandle h = fx.base->CreateSync();
     TEST_ASSERT(h != handles::INVALID_SYNC, "CreateSync should succeed");
+
+    // CreateSync 默认 signaled,显式 reset 后才能测 timeout 路径。
+    VulkanSync* sync = fx.vk->GetSync(h);
+    TEST_ASSERT_NOT_NULL(sync, "GetSync should return valid pointer");
+    sync->ResetFence();
 
     // 100ms 应足够让 vkWaitForFences 返回 TIMEOUT。返回 false = 未 signal,符合预期。
     bool signaled = fx.base->WaitForSync(h, 100);

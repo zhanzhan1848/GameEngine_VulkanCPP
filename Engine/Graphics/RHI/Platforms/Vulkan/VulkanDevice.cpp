@@ -240,8 +240,11 @@ u32 VulkanDevice::getCurrentFrameIndexImpl() const {
 // ============================================================================
 
 SyncHandle VulkanDevice::createSyncImpl() {
-    // signaled=false:fence 初始 unsignaled,submit 后才 ping
-    u32 id = syncAllocator_.Allocate(device_, false);
+    // T4.6.5 part 32: fence 初始 signaled=true。RenderSystem 持有 MAX_FRAMES_IN_FLIGHT 个
+    // frameFences_,首帧 Wait 立即返回(避免 ~1s timeout × N slots 的启动卡顿)。
+    // submit-then-wait 调用方安全:submitImpl 在 vkQueueSubmit 前调 ResetFence(无论初始态)。
+    // 显式需要 unsignaled 语义的测试/调用方应在 CreateSync 后手动 ResetFence。
+    u32 id = syncAllocator_.Allocate(device_, true);
     return SyncHandle(id);
 }
 

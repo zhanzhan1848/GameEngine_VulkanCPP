@@ -100,6 +100,14 @@ public:
     VulkanPipeline*            GetPipeline(PipelineHandle handle);
     VulkanRenderPass*          GetRenderPass(RenderPassHandle handle);
 
+    // T4.6.5 part 32: GetSync hoisted to public so tests can call ResetFence()
+    // on a freshly-created fence to validate timeout behavior. Previously
+    // protected with comment "future 可能 hoist 出来" — that future is now.
+    VulkanSync* GetSync(SyncHandle handle) {
+        if (handle == handles::INVALID_SYNC) return nullptr;
+        return syncAllocator_.Get(static_cast<u32>(handle));
+    }
+
 protected:
     // === CRTP 实现接口 ===
     bool initializeImpl();
@@ -116,10 +124,6 @@ protected:
     VulkanBuffer* GetBuffer(ResourceHandle handle) {
         if (handle == handles::INVALID_RESOURCE) return nullptr;
         return bufferAllocator_.Get(static_cast<u32>(handle));
-    }
-    VulkanSync* GetSync(SyncHandle handle) {
-        if (handle == handles::INVALID_SYNC) return nullptr;
-        return syncAllocator_.Get(static_cast<u32>(handle));
     }
     VulkanQueryPool* GetQueryPool(QueryPoolHandle handle) {
         if (handle == handles::INVALID_QUERY_POOL) return nullptr;
