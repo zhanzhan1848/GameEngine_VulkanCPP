@@ -144,6 +144,7 @@ private:
     utl::vector<rhi::CommandBufferHandle> cmdBufferHandles_;
     utl::vector<rhi::RHICommandBuffer*> cmdBuffers_;
     utl::vector<rhi::SyncHandle> frameFences_; // CPU-GPU sync fences
+    utl::vector<rhi::SyncHandle> imageSemaphores_; // T4.6.5 part 30.5: GPU-GPU acquire→draw semaphores
     u32 currentFrameIndex_{0};
     u32 currentImageIndex_{0}; // Index of the swapchain image acquired for the current frame
 

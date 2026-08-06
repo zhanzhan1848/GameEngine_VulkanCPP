@@ -74,6 +74,7 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
     cmdBufferHandles_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_COMMAND_BUFFER);
     cmdBuffers_.resize(rhi::MAX_FRAMES_IN_FLIGHT, nullptr);
     frameFences_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_SYNC);
+    imageSemaphores_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_SYNC);
 
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         cmdBufferHandles_[i] = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
@@ -90,6 +91,17 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
         frameFences_[i] = device_->CreateSync();
         if (frameFences_[i] == rhi::handles::INVALID_SYNC) {
              std::cerr << "RenderSystem::Initialize failed: Could not create fence " << i << std::endl;
+             return false;
+        }
+        // T4.6.5 part 30.5 (Bug A): per-frame acquire semaphore. Vulkan spec
+        // requires at least one of (semaphore, fence) be non-NULL on
+        // vkAcquireNextImageKHR. Passing the fence would work but lacks GPU-GPU
+        // sync between acquire→draw — caller would have to CPU-wait before
+        // recording. Semaphore lets the draw cmd buffer queue immediately,
+        // GPU blocks on semaphore until acquire completes.
+        imageSemaphores_[i] = device_->CreateSync();
+        if (imageSemaphores_[i] == rhi::handles::INVALID_SYNC) {
+             std::cerr << "RenderSystem::Initialize failed: Could not create image semaphore " << i << std::endl;
              return false;
         }
     }
@@ -137,6 +149,11 @@ void RenderSystem::Shutdown() {
         device_->DestroySync(fence);
     }
     frameFences_.clear();
+
+    for (auto sem : imageSemaphores_) {
+        if (sem != rhi::handles::INVALID_SYNC) device_->DestroySync(sem);
+    }
+    imageSemaphores_.clear();
 
     device_ = nullptr;
     std::cout << "[RenderSystem] Shutdown End" << std::endl;
@@ -203,12 +220,17 @@ bool RenderSystem::BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandl
     // Internal Frame Sync
     Wait(currentFrameIndex_);
 
-    // Acquire Next Image
-    if (!swapChain_->AcquireNextImage(&currentImageIndex_)) {
+    // Acquire Next Image — T4.6.5 part 30.5 (Bug A): pass GPU-GPU acquire
+    // semaphore. Vulkan spec requires semaphore OR fence be non-NULL.
+    // Without this, validation fires VUID-vkAcquireNextImageKHR-semaphore-01780
+    // every frame, and the swapchain image is never properly acquired (which
+    // cascades into "image has not been acquired" errors on Submit/Present).
+    const rhi::SyncHandle imageSem = imageSemaphores_[currentFrameIndex_];
+    if (!swapChain_->AcquireNextImage(&currentImageIndex_, imageSem)) {
         std::cerr << "RenderSystem: Failed to acquire next image." << std::endl;
         return false;
     }
-    
+
     outBackBuffer = swapChain_->GetBackBuffer(currentImageIndex_);
     outSignalFence = frameFences_[currentFrameIndex_];
     return true;

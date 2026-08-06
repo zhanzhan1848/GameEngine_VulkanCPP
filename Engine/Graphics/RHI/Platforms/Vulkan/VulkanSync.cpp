@@ -61,10 +61,14 @@ bool VulkanSync::WaitFence(u64 timeoutNs) const {
 
 void VulkanSync::ResetFence() {
     if (fence_ == VK_NULL_HANDLE) return;
-    if (signaled_) {
-        vkResetFences(device_, 1, &fence_);
-        signaled_ = false;
-    }
+    // T4.6.5 part 30.6 (Bug B): call vkResetFences unconditionally. Spec
+    // allows calling on an unsignaled fence (no-op). The prior `if (signaled_)`
+    // guard was broken: WaitFence() returned true without flipping
+    // signaled_, so the next ResetFence skipped vkResetFences — but the
+    // actual VkFence was in fact signaled from the prior vkQueueSubmit.
+    // vkQueueSubmit then fired VUID-vkQueueSubmit-fence-00063 every frame.
+    vkResetFences(device_, 1, &fence_);
+    signaled_ = false;
 }
 
 void VulkanSync::DetachNatives(VkFence* outFence, VkSemaphore* outSem) {

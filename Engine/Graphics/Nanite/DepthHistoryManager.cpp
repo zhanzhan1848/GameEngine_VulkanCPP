@@ -220,6 +220,18 @@ bool DepthHistoryManager::CopyDepthTexture(rhi::ResourceHandle source,
 }
 
 bool DepthHistoryManager::CreateCopyPipeline() {
+    // T4.6.5 part 30.10 (Bug G): Vulkan skip. Hardcoded Metal shader path
+    // (HZBAnimation.metal, 10941 bytes non-multiple-of-4) is rejected by
+    // VulkanShader which requires SPIR-V binary (size % 4 == 0). Depth history
+    // is only consumed by temporal effects (TAA, motion blur) — both disabled
+    // on Vulkan per current scope. Early-return leaves depth_copy_pipeline_
+    // INVALID, and Capture() guards with that check (line 193).
+    if (device_ && device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        std::cerr << "[DepthHistoryManager] Skipped on Vulkan (Metal-only depth copy shader; "
+                     "TAA/motion-blur not yet active on this backend)" << std::endl;
+        return true;
+    }
+
     // Descriptor layout: texture(0) = SampledImage (D32 depth), texture(1) = StorageImage (R32 history)
     rhi::DescriptorSetLayoutBinding bindings[] = {
         { 0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute, nullptr },
