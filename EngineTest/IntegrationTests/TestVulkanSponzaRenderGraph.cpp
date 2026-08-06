@@ -25,6 +25,9 @@
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
 
+#define NS_PRIVATE_IMPLEMENTATION
+#include <AppKit/AppKit.hpp>
+
 #include <iostream>
 #include <cstring>
 #include <fstream>
@@ -518,6 +521,13 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
 }
 
 void TestVulkanSponzaRenderGraph::Run() {
+    // T4.6.5 part 30.4: safety-net close check. applicationShouldTerminateAfterLastWindowClosed
+    // is the primary path, but some edge cases (e.g. window never ordered front) skip it.
+    if (window_.is_closed()) {
+        NS::Application::sharedApplication()->terminate(nullptr);
+        return;
+    }
+
     ResourceHandle backBuffer;
     SyncHandle imageAvailable;
     if (!renderSystem_.BeginFrame(backBuffer, imageAvailable)) {

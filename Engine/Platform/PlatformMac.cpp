@@ -5,6 +5,7 @@
 #define CA_PRIVATE_IMPLEMENTATION
 #include <OSAPI/MAC/AppKit/AppKit.hpp>
 #include <CoreGraphics/CGGeometry.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <atomic>
 
 // T4.6.5 part 29: NSWindowWillCloseNotification observer installer.
@@ -149,6 +150,13 @@ namespace primal::platform
 			// if (callback) SetWindowLongPtr(info.hwnd, 0, (LONG_PTR)callback);
 			nsWindow->setTitle(init_info->caption);
 			nsWindow->makeKeyAndOrderFront(nullptr);
+			// T4.6.5 part 30.4: makeKeyAndOrderFront is queued; the window
+			// server doesn't actually paint until the run loop spins. If
+			// create_window runs inside applicationDidFinishLaunching and the
+			// caller then blocks the main thread for ~60s of heavy init
+			// (StandardRenderPipeline::InitializeSubsystems), the user sees
+			// nothing. Force one event drain so the window appears immediately.
+			while (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, false) == kCFRunLoopRunHandledSource) {}
 
 			window_id id{ (id::id_type)windows.add(info) };
 
