@@ -16,6 +16,15 @@ wfc_tile_id WFCTileRegistry::Register(const WFCTile& tile) {
     return wfc_tile_id{idx};
 }
 
+void WFCTileRegistry::RegisterFromCatalog(const std::vector<WFCTile>& tiles,
+                                          WFCCategory category) {
+    for (const auto& t : tiles) {
+        WFCTile copy = t;
+        copy.category = category;
+        Register(copy);
+    }
+}
+
 const WFCTile& WFCTileRegistry::Get(wfc_tile_id id) const {
     assert(static_cast<u32>(id) < tiles_.size());
     return tiles_[static_cast<u32>(id)];

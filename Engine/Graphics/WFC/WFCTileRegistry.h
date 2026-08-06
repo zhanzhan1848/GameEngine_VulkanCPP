@@ -3,6 +3,7 @@
 #include "../../Common/CommonHeaders.h"
 #include "../../Utilities/Vector.h"
 #include "WFCTypes.h"
+#include <vector>
 
 namespace primal::graphics::wfc {
 
@@ -11,6 +12,13 @@ public:
     // Registers a tile and returns its handle. The registry owns a copy.
     // id is auto-assigned (sequential starting at 0).
     wfc_tile_id Register(const WFCTile& tile);
+
+    // Phase C.1 Mixed: append every tile from a catalog vector, overwriting
+    // each tile's .category with `category`. Multi-source composition uses
+    // this to register Kenney (Dungeon) + Ruins + ProceduralRoomPack tiles
+    // into one registry, with the category filter driving which set the
+    // solver draws from per cell.
+    void RegisterFromCatalog(const std::vector<WFCTile>& tiles, WFCCategory category);
 
     const WFCTile& Get(wfc_tile_id id) const;
     WFCTile&       GetMutable(wfc_tile_id id);
