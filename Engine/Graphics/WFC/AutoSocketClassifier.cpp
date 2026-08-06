@@ -1,9 +1,14 @@
 // Engine/Graphics/WFC/AutoSocketClassifier.cpp
 #include "AutoSocketClassifier.h"
 
+#include <cassert>
+
 namespace primal::graphics::wfc {
 
 namespace {
+
+// f32x3 packed positions in RHIMeshAsset (3 floats, tightly packed, no pad).
+constexpr u32 kPositionStride = 12;
 
 // Local math helpers — keeps this .cpp self-contained.
 // (Engine has no global cross/dot for math::v3; component-wise inline
@@ -123,15 +128,24 @@ SocketEncoding AutoSocketClassifier::ClassifyFace(
     if (mesh.position_buffer.empty() || mesh.index_buffer.empty()) return 0;
     if (mesh.num_indices == 0 || mesh.num_vertices == 0) return 0;
 
+    // Only u32-indexed meshes are supported. u16 indices would silently
+    // read 2× the buffer as garbage u32s.
+    if (mesh.index_size != 4) return 0;
+
     const u32 tri_count = mesh.num_indices / 3;
     if (tri_count == 0) return 0;
+    const u32 num_verts = mesh.num_vertices;
 
     const u8* pos_bytes = mesh.position_buffer.data();
     const u32* indices  = reinterpret_cast<const u32*>(mesh.index_buffer.data());
 
     const FaceBasis fb = GetFaceBasis(face);
-    constexpr f32 kSampleOffset = 0.005f;   // start outside face surface
-    constexpr f32 kRayLength    = 0.05f;    // short ray into the cube
+    // Sample offset: how far outside the face the ray starts. Small enough that
+    // the ray clearly clears the face plane even after variant rotation rounding.
+    // Ray length: how far the ray reaches into the cube. 5cm is enough to hit
+    // any face of a unit (1m) cube with margin for variant-rotated geometry.
+    constexpr f32 kSampleOffset = 0.005f;
+    constexpr f32 kRayLength    = 0.05f;
     constexpr u32 kGridN        = 8;
 
     SocketEncoding sig = 0;
@@ -148,7 +162,7 @@ SocketEncoding AutoSocketClassifier::ClassifyFace(
             const math::v3 world_nrm = TransformDirection(variant_transform, fb.normal);
 
             const math::v3 ray_origin = world_pos + world_nrm * kSampleOffset;
-            const math::v3 ray_dir    = math::v3{ -world_nrm.x, -world_nrm.y, -world_nrm.z };
+            const math::v3 ray_dir    = -world_nrm;
 
             bool solid = false;
             f32 nearest_t = kRayLength;
@@ -156,13 +170,11 @@ SocketEncoding AutoSocketClassifier::ClassifyFace(
                 const u32 i0 = indices[t * 3 + 0];
                 const u32 i1 = indices[t * 3 + 1];
                 const u32 i2 = indices[t * 3 + 2];
-                if (i0 >= mesh.num_vertices ||
-                    i1 >= mesh.num_vertices ||
-                    i2 >= mesh.num_vertices) continue;  // OOB guard
+                assert(i0 < num_verts && i1 < num_verts && i2 < num_verts);
 
-                const f32* p0 = reinterpret_cast<const f32*>(pos_bytes + i0 * 12);
-                const f32* p1 = reinterpret_cast<const f32*>(pos_bytes + i1 * 12);
-                const f32* p2 = reinterpret_cast<const f32*>(pos_bytes + i2 * 12);
+                const f32* p0 = reinterpret_cast<const f32*>(pos_bytes + i0 * kPositionStride);
+                const f32* p1 = reinterpret_cast<const f32*>(pos_bytes + i1 * kPositionStride);
+                const f32* p2 = reinterpret_cast<const f32*>(pos_bytes + i2 * kPositionStride);
                 const math::v3 v0 = TransformPoint(variant_transform, math::v3{p0[0], p0[1], p0[2]});
                 const math::v3 v1 = TransformPoint(variant_transform, math::v3{p1[0], p1[1], p1[2]});
                 const math::v3 v2 = TransformPoint(variant_transform, math::v3{p2[0], p2[1], p2[2]});
@@ -177,7 +189,7 @@ SocketEncoding AutoSocketClassifier::ClassifyFace(
             }
 
             const u32 bit_index = i + j * kGridN;
-            if (solid) sig |= (1ULL << bit_index);
+            if (solid) sig |= (SocketEncoding{1} << bit_index);
         }
     }
     return sig;

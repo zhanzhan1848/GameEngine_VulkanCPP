@@ -45,8 +45,6 @@ TestResult TestRayTriangleBackfaceCull() {
     return TestResult::Passed;
 }
 
-// --- Task 6: ClassifyFace + MirrorFlipU ---
-
 // A solid unit cube: every face is fully solid (all 64 bits = 1).
 // emit_box_geometry populates a 24-vert / 36-index cube without registration.
 TestResult TestClassifyFaceSolidCube() {

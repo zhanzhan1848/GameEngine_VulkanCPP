@@ -11,8 +11,8 @@ namespace primal::graphics::wfc {
 class WFCTileRegistry;
 
 // AutoSocketClassifier — doorway-aware socket signature encoder.
-//   Task 5: ray-triangle intersection primitive (backface-culling).
-//   Task 6: 8×8 occupancy-grid ClassifyFace + MirrorFlipU (this header).
+//   RayTriangle: backface-culling intersection primitive.
+//   ClassifyFace / MirrorFlipU: 8×8 occupancy-grid signatures.
 class AutoSocketClassifier {
 public:
     // Möller–Trumbore ray-triangle intersection with backface cull.
@@ -36,7 +36,10 @@ public:
     // Bit ordering: row-major, bit_index = i + j * 8, where i is the U-axis
     // column 0..7 and j is the V-axis row 0..7.
     //
-    // mesh:            tile geometry (positions + indices, pre-registration)
+    // mesh:            tile geometry (positions + indices, pre-registration).
+    //                  IMPORTANT: only u32-indexed meshes are supported
+    //                  (mesh.index_size == 4). u16-indexed meshes return 0
+    //                  (callers must convert to u32 first).
     // face:            which of the 6 cube faces to classify
     // variant_transform: rotation matrix applied to sample frame AND verts
     //                    (callers bake variant * 90° rotations into this)
