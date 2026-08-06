@@ -53,10 +53,17 @@ static void SyncWfcHudIfWasm(const char* obs, const char* origin,
                   obs, origin, grid_w, grid_h, grid_d, seed);
     emscripten_run_script(buf);
 }
-// Mouse input from EmscriptenInput.cpp — left-button drag rotates camera.
+// Mouse + keyboard from EmscriptenInput.cpp. We use EmscriptenGetKeyState
+// (raw keyCode lookup against a local array updated by emscripten callbacks)
+// instead of primal::input — primal::input's keyboard path is unused on WASM
+// and routes through a different system than the basic renderer demo. The
+// basic renderer uses this exact pattern and WASD works there.
+//   W=87 A=65 S=83 D=68 Q=81 E=69 Shift=16
+//   Arrows: left=37 up=38 right=39 down=40
 extern "C" {
 void EmscriptenGetMouseDelta(float* dx, float* dy);
 bool EmscriptenGetMouseButton(int button);
+bool EmscriptenGetKeyState(int keyCode);
 }
 #else
 static inline void SyncWfcHudIfWasm(const char*, const char*, u32, u32, u32, u32) {}
@@ -324,12 +331,36 @@ bool KenneyTilePreviewTestCase::just_pressed_(u32 code, bool now) {
 }
 
 void KenneyTilePreviewTestCase::HandleGridEditKeys() {
+#ifdef __EMSCRIPTEN__
+    // On WASM we read keyboard state via EmscriptenGetKeyState (raw keyCode
+    // lookup against the array maintained by emscripten callbacks). The
+    // panel UI also drains here, so WASM has two input paths both ending
+    // at the same ReseedSolver call.
+    auto key_now = [](int emscripten_key) {
+        return EmscriptenGetKeyState(emscripten_key);
+    };
+    // Emscripten keyCodes used below (kept as int so the lambda call matches).
+    constexpr int kBracketOpen = 219, kBracketClose = 221;
+    constexpr int kComma = 188, kPeriod = 190, kMinus = 189, kPlus = 187;
+    constexpr int kR = 82, kT = 84, kO = 79, kP = 80;
+#else
     using ic = primal::input::input_code;
     auto key_now = [](ic::code c) {
         primal::input::input_value v{};
         primal::input::get(primal::input::input_source::keyboard, c, v);
         return v.current.x > 0.5f;
     };
+    constexpr ic::code kBracketOpen  = ic::key_bracket_open;
+    constexpr ic::code kBracketClose = ic::key_brack_close;
+    constexpr ic::code kComma   = ic::key_comma;
+    constexpr ic::code kPeriod  = ic::key_period;
+    constexpr ic::code kMinus   = ic::key_minus;
+    constexpr ic::code kPlus    = ic::key_plus;
+    constexpr ic::code kR       = ic::key_r;
+    constexpr ic::code kT       = ic::key_t;
+    constexpr ic::code kO       = ic::key_o;
+    constexpr ic::code kP       = ic::key_p;
+#endif
 
     bool changed      = false;
     const char* why   = "manual";
@@ -385,41 +416,41 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
         changed = true; why = "panel:reseed-new";
     }
 
-    if (just_pressed_(static_cast<u32>(ic::key_bracket_open), key_now(ic::key_bracket_open))) {
+    if (just_pressed_(kBracketOpen, key_now(kBracketOpen))) {
         if (grid_w_ > kSideMin) { --grid_w_; changed = true; why = "X--"; }
     }
-    if (just_pressed_(static_cast<u32>(ic::key_brack_close), key_now(ic::key_brack_close))) {
+    if (just_pressed_(kBracketClose, key_now(kBracketClose))) {
         if (grid_w_ < kSideMax) { ++grid_w_; changed = true; why = "X++"; }
     }
-    if (just_pressed_(static_cast<u32>(ic::key_comma), key_now(ic::key_comma))) {
+    if (just_pressed_(kComma, key_now(kComma))) {
         if (grid_d_ > kSideMin) { --grid_d_; changed = true; why = "Z--"; }
     }
-    if (just_pressed_(static_cast<u32>(ic::key_period), key_now(ic::key_period))) {
+    if (just_pressed_(kPeriod, key_now(kPeriod))) {
         if (grid_d_ < kSideMax) { ++grid_d_; changed = true; why = "Z++"; }
     }
-    if (just_pressed_(static_cast<u32>(ic::key_minus), key_now(ic::key_minus))) {
+    if (just_pressed_(kMinus, key_now(kMinus))) {
         if (grid_h_ > kLayerMin) { --grid_h_; changed = true; why = "Y--"; }
     }
-    if (just_pressed_(static_cast<u32>(ic::key_plus), key_now(ic::key_plus))) {
+    if (just_pressed_(kPlus, key_now(kPlus))) {
         if (grid_h_ < kLayerMax) { ++grid_h_; changed = true; why = "Y++"; }
     }
-    if (just_pressed_(static_cast<u32>(ic::key_r), key_now(ic::key_r))) {
+    if (just_pressed_(kR, key_now(kR))) {
         changed = true; why = "reseed-same";
     }
-    if (just_pressed_(static_cast<u32>(ic::key_t), key_now(ic::key_t))) {
+    if (just_pressed_(kT, key_now(kT))) {
         // Reroll seed from wall clock. std::random_device may be deterministic
         // on some platforms; mix in steady_clock for entropy.
         const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
         rng_seed_ = static_cast<u32>(ticks & 0xFFFFFFFFu);
         changed = true; why = "reseed-new";
     }
-    if (just_pressed_(static_cast<u32>(ic::key_o), key_now(ic::key_o))) {
+    if (just_pressed_(kO, key_now(kO))) {
         observer_kind_ = (observer_kind_ == ObserverKind::MinEntropy)
                              ? ObserverKind::DistanceFromOrigin
                              : ObserverKind::MinEntropy;
         changed = true; why = "observer cycled";
     }
-    if (just_pressed_(static_cast<u32>(ic::key_p), key_now(ic::key_p))) {
+    if (just_pressed_(kP, key_now(kP))) {
         origin_preset_ = static_cast<OriginPreset>(
             (static_cast<u32>(origin_preset_) + 1) % 3);
         changed = true; why = "origin preset cycled";
@@ -627,14 +658,31 @@ void KenneyTilePreviewTestCase::UpdateCameraFromInput() {
     const float dt = chr::duration<float>(now - last_time).count();
     last_time = now;
 
+#ifdef __EMSCRIPTEN__
+    // On WASM we bypass primal::input — that path isn't wired on WASM and the
+    // basic renderer demo (TestDawnForwardRenderer) uses raw keyCode lookups
+    // directly. Emscripten keyCodes: A=65 W=87 S=83 D=68 Q=81 E=69 Shift=16
+    // Arrows: left=37 up=38 right=39 down=40.
+    auto key_down = [](int emscripten_key) {
+        return EmscriptenGetKeyState(emscripten_key);
+    };
+    constexpr int kW = 87, kA = 65, kS = 83, kD = 68, kQ = 81, kE = 69;
+    constexpr int kShift = 16;
+    constexpr int kLeft = 37, kUp = 38, kRight = 39, kDown = 40;
+#else
     auto key_down = [](primal::input::input_code::code code) {
         primal::input::input_value v{};
         primal::input::get(primal::input::input_source::keyboard, code, v);
         return v.current.x > 0.5f;
     };
+    using ic = primal::input::input_code;
+    auto kW = ic::key_w, kA = ic::key_a, kS = ic::key_s, kD = ic::key_d;
+    auto kQ = ic::key_q, kE = ic::key_e, kShift = ic::key_shift;
+    auto kLeft = ic::key_left, kUp = ic::key_up, kRight = ic::key_right, kDown = ic::key_down;
+#endif
 
     float speed = camera_speed_;
-    if (key_down(primal::input::input_code::key_shift)) speed *= 3.0f;
+    if (key_down(kShift)) speed *= 3.0f;
 
     // Ground-plane forward (yaw only) — natural FPS movement.
     // Matches TestForwardRenderer convention: forward=(sy,0,-cy), right=(cy,0,sy).
@@ -644,20 +692,12 @@ void KenneyTilePreviewTestCase::UpdateCameraFromInput() {
     v3 right_ground{cy, 0.0f, sy};
 
     v3 move{0.0f, 0.0f, 0.0f};
-    if (key_down(primal::input::input_code::key_w)) {
-        move = move + fwd_ground;
-    }
-    if (key_down(primal::input::input_code::key_s)) {
-        move = move - fwd_ground;
-    }
-    if (key_down(primal::input::input_code::key_d)) {
-        move = move + right_ground;
-    }
-    if (key_down(primal::input::input_code::key_a)) {
-        move = move - right_ground;
-    }
-    if (key_down(primal::input::input_code::key_e)) move.y += 1.0f;
-    if (key_down(primal::input::input_code::key_q)) move.y -= 1.0f;
+    if (key_down(kW)) move = move + fwd_ground;
+    if (key_down(kS)) move = move - fwd_ground;
+    if (key_down(kD)) move = move + right_ground;
+    if (key_down(kA)) move = move - right_ground;
+    if (key_down(kE)) move.y += 1.0f;
+    if (key_down(kQ)) move.y -= 1.0f;
 
     const float len = std::sqrt(move.x * move.x + move.y * move.y + move.z * move.z);
     if (len > 0.001f) {
@@ -667,10 +707,10 @@ void KenneyTilePreviewTestCase::UpdateCameraFromInput() {
 
     // Look — arrow keys adjust yaw/pitch.
     constexpr float kLookSensitivity = 1.5f;  // radians per second
-    if (key_down(primal::input::input_code::key_left))  camera_yaw_   += kLookSensitivity * dt;
-    if (key_down(primal::input::input_code::key_right)) camera_yaw_   -= kLookSensitivity * dt;
-    if (key_down(primal::input::input_code::key_up))    camera_pitch_ += kLookSensitivity * dt;
-    if (key_down(primal::input::input_code::key_down))  camera_pitch_ -= kLookSensitivity * dt;
+    if (key_down(kLeft))  camera_yaw_   += kLookSensitivity * dt;
+    if (key_down(kRight)) camera_yaw_   -= kLookSensitivity * dt;
+    if (key_down(kUp))    camera_pitch_ += kLookSensitivity * dt;
+    if (key_down(kDown))  camera_pitch_ -= kLookSensitivity * dt;
 
 #ifdef __EMSCRIPTEN__
     // Mouse drag — left button held rotates camera. Matches TestDawnForwardRenderer
