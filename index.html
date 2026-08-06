@@ -101,7 +101,7 @@
     <div class="tab"        data-src="wasm.html">基础渲染</div>
   </div>
   <div id="frame-wrap">
-    <iframe id="frame" src="wfc.html"></iframe>
+    <iframe id="frame" src="wfc.html" tabindex="0"></iframe>
     <div id="switch-overlay">
       <div class="spinner"></div>
     </div>
@@ -151,6 +151,10 @@
         if (!e.data) return;
         if (e.data.type === 'wfc-loaded' || e.data.type === 'forward-loaded') {
           hideOverlay();
+          // Auto-focus the iframe so keyboard events (WASD/QE/arrows) work
+          // immediately. Without this, the iframe lacks focus on initial
+          // load and keydown never fires until the user clicks inside it.
+          FRAME.focus();
         }
       });
 

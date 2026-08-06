@@ -393,7 +393,7 @@
   <div id="main-row">
     <!-- Canvas area -->
     <div id="canvas-wrap">
-      <canvas id="canvas" width="1280" height="720"></canvas>
+      <canvas id="canvas" width="1280" height="720" tabindex="0"></canvas>
 
       <!-- WFC showcase HUD: anchored to canvas top-left so it doesn't
            overlap the page header logo. pointer-events:none so it never
@@ -678,9 +678,16 @@
         loadingOverlay.classList.add('hidden');
         statusLeft.textContent = 'Running';
         // Notify parent launcher (if any) that this iframe's demo is ready.
+        // The launcher listens for this message and calls FRAME.focus() so
+        // keyboard events (WASD/QE) fire without an initial click.
         if (window.parent && window.parent !== window) {
           window.parent.postMessage({ type: 'wfc-loaded' }, '*');
         }
+        // When accessed directly (not via launcher iframe), give the canvas
+        // focus so keyboard events fire immediately. tabindex on canvas
+        // element makes it focusable.
+        var c = document.getElementById('canvas');
+        if (c && c.focus) { try { c.focus(); } catch (e) {} }
       };
 
       // FPS counter
