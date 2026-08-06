@@ -3,14 +3,16 @@
 
 #include "../../Common/CommonHeaders.h"
 #include "../../Utilities/MathTypes.h"
+#include "../RHI/Core/RHIMeshAsset.h"
+#include "WFCTypes.h"
 
 namespace primal::graphics::wfc {
 
 class WFCTileRegistry;
 
 // AutoSocketClassifier — doorway-aware socket signature encoder.
-// (Tasks 6/7 add ClassifyFace, MirrorFlipU, ClassifyTile. Task 5 ships
-// only the ray-triangle primitive that those will lean on.)
+//   Task 5: ray-triangle intersection primitive (backface-culling).
+//   Task 6: 8×8 occupancy-grid ClassifyFace + MirrorFlipU (this header).
 class AutoSocketClassifier {
 public:
     // Möller–Trumbore ray-triangle intersection with backface cull.
@@ -21,6 +23,31 @@ public:
     static bool RayTriangle(const math::v3& origin, const math::v3& dir,
                             const math::v3& v0, const math::v3& v1, const math::v3& v2,
                             f32 max_t, f32* t);
+
+    // Compute a 64-bit occupancy signature for one face of a tile mesh by
+    // casting 64 rays (8×8 grid) from outside the face inward.
+    //
+    // Operates directly on the RHIMeshAsset — classifier runs at
+    // mesh-generation time (before RegisterProceduralMesh uploads to GPU), so
+    // callers feed the same asset they just populated via emit_box_geometry
+    // etc. Reads positions as f32x3 (12-byte stride) and indices as u32.
+    //
+    // Each ray hits a mesh triangle → bit=1 (solid); misses → bit=0 (opening).
+    // Bit ordering: row-major, bit_index = i + j * 8, where i is the U-axis
+    // column 0..7 and j is the V-axis row 0..7.
+    //
+    // mesh:            tile geometry (positions + indices, pre-registration)
+    // face:            which of the 6 cube faces to classify
+    // variant_transform: rotation matrix applied to sample frame AND verts
+    //                    (callers bake variant * 90° rotations into this)
+    static SocketEncoding ClassifyFace(
+        const graphics::rhi::RHIMeshAsset& mesh,
+        WFCFace face,
+        const math::m4x4& variant_transform);
+
+    // Mirror-flip the U axis of a signature (used for opposing-face comparison).
+    // Each 8-bit row has its bits reversed: bit 0 ↔ bit 7, bit 1 ↔ bit 6, etc.
+    static SocketEncoding MirrorFlipU(SocketEncoding sig);
 };
 
 } // namespace primal::graphics::wfc
