@@ -1893,6 +1893,21 @@ set_target_properties(TestAutoSocketClassifier PROPERTIES
 target_compile_definitions(TestAutoSocketClassifier PRIVATE DEBUG _DEBUG)
 set_target_properties(TestAutoSocketClassifier PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestProceduralRoomPack Graphics/WFC/TestProceduralRoomPack.cpp)
+target_include_directories(TestProceduralRoomPack PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestProceduralRoomPack PRIVATE Engine)
+add_test(NAME TestProceduralRoomPack COMMAND TestProceduralRoomPack)
+set_target_properties(TestProceduralRoomPack PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestProceduralRoomPack PRIVATE DEBUG _DEBUG)
+set_target_properties(TestProceduralRoomPack PROPERTIES FOLDER "Tests/Graphics/WFC")
+
 add_executable(TestWFCSolveBudget Graphics/WFC/TestWFCSolveBudget.cpp)
 target_include_directories(TestWFCSolveBudget PRIVATE
     ${CMAKE_SOURCE_DIR}
