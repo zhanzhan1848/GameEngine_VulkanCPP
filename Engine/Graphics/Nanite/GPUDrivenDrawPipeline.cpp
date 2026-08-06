@@ -265,15 +265,21 @@ void GPUDrivenDrawPipeline::Shutdown() {
         if (resolve_sampler_ != rhi::handles::INVALID_SAMPLER) device_->DestroySampler(resolve_sampler_);
         resolve_descriptor_written_ = false;
 
-        // T4.6.5 part 22: Stage2 visibility pipeline resources.
-        if (visibility_cb_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(visibility_cb_);
-        if (visibility_descriptor_set_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
-            device_->DestroyDescriptorSet(visibility_descriptor_set_);
+        // T4.6.5 part 22 + part 30 X10: Stage2 visibility pipeline resources.
+        // Per-frame CB + descriptor set are triple-buffered in frame_resources_.
+        for (auto& fr : frame_resources_) {
+            if (fr.visibility_cb != rhi::handles::INVALID_RESOURCE) {
+                device_->DestroyBuffer(fr.visibility_cb);
+                fr.visibility_cb = rhi::handles::INVALID_RESOURCE;
+            }
+            if (fr.visibility_descriptor_set != rhi::handles::INVALID_DESCRIPTOR_SET) {
+                device_->DestroyDescriptorSet(fr.visibility_descriptor_set);
+                fr.visibility_descriptor_set = rhi::handles::INVALID_DESCRIPTOR_SET;
+            }
         }
         if (visibility_descriptor_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
             device_->DestroyDescriptorSetLayout(visibility_descriptor_set_layout_);
         }
-        visibility_descriptor_written_ = false;
 
         // Cleanup shadow resources
         ShutdownShadowResources();
@@ -866,17 +872,23 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
 
                 visibility_pipeline_ = device_->CreateGraphicsPipeline(visibilityPipelineDesc);
                 if (visibility_pipeline_ != rhi::handles::INVALID_PIPELINE) {
-                    // T4.6.5 part 22.4: Allocate per-frame CB + descriptor set for Stage2.
+                    // T4.6.5 part 22.4 + part 30 X10: Allocate per-frame CB + descriptor
+                    // set for Stage2, triple-buffered (one slot per FrameResource).
+                    // Single-set version caused VUID-vkUpdateDescriptorSets-None-03047
+                    // when the next frame's Stage2 updated the same set the prior frame's
+                    // cmd buffer was still referencing.
                     if (isVulkan && visibility_descriptor_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
                         rhi::BufferDesc visCbDesc{};
                         visCbDesc.size = 256;  // DrawConstants is 208B (3 m4x4 + 4 u32); 256B padded
                         visCbDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Uniform | rhi::BufferUsageFlags::TransferDst);
                         visCbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-                        visibility_cb_ = device_->CreateBuffer(visCbDesc);
-
-                        visibility_descriptor_set_ = device_->CreateDescriptorSet({ visibility_descriptor_set_layout_ });
-                        if (visibility_descriptor_set_ == rhi::handles::INVALID_DESCRIPTOR_SET) {
-                            std::cerr << "[GPUDrivenDrawPipeline] Failed to allocate visibility descriptor set" << std::endl;
+                        for (u32 i = 0; i < frame_resources_.size(); ++i) {
+                            frame_resources_[i].visibility_cb = device_->CreateBuffer(visCbDesc);
+                            frame_resources_[i].visibility_descriptor_set =
+                                device_->CreateDescriptorSet({ visibility_descriptor_set_layout_ });
+                            if (frame_resources_[i].visibility_descriptor_set == rhi::handles::INVALID_DESCRIPTOR_SET) {
+                                std::cerr << "[GPUDrivenDrawPipeline] Failed to allocate visibility descriptor set " << i << std::endl;
+                            }
                         }
                     }
                     // std::cout << "[GPUDrivenDrawPipeline] Visibility Buffer pipeline created successfully" << std::endl;
@@ -2150,8 +2162,13 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
     if (visibility_pipeline_ == rhi::handles::INVALID_PIPELINE) return true;
     if (visibility_render_pass_ == rhi::handles::INVALID_RENDER_PASS) return true;
     if (visibility_buffer_ == rhi::handles::INVALID_RESOURCE) return true;
-    if (visibility_cb_ == rhi::handles::INVALID_RESOURCE) return true;
-    if (visibility_descriptor_set_ == rhi::handles::INVALID_DESCRIPTOR_SET) return true;
+
+    // T4.6.5 part 30 X10: per-frame CB + descriptor set (triple-buffered).
+    u32 visResourceIndex = buffer_index;
+    if (visResourceIndex >= frame_resources_.size()) visResourceIndex = 0;
+    FrameResource& visFrame = frame_resources_[visResourceIndex];
+    if (visFrame.visibility_cb == rhi::handles::INVALID_RESOURCE) return true;
+    if (visFrame.visibility_descriptor_set == rhi::handles::INVALID_DESCRIPTOR_SET) return true;
 
     // T4.6.5 part 30.3 (null-buffer guard): Stage2 writes 8 descriptor bindings
     // from global geometry buffers. If UpdateGeometryData hasn't populated them
@@ -2193,10 +2210,10 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
     dc.view_height = visibility_config_.height;
     dc.meshlet_count = total_meshlet_count_;
 
-    void* mapped = device_->MapBuffer(visibility_cb_);
+    void* mapped = device_->MapBuffer(visFrame.visibility_cb);
     if (mapped) {
         memcpy(mapped, &dc, sizeof(dc));
-        device_->UnmapBuffer(visibility_cb_);
+        device_->UnmapBuffer(visFrame.visibility_cb);
     }
 
     // 2. Resolve read_buffer_index + per-frame buffers FIRST.
@@ -2218,8 +2235,8 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
         correctVisibleClusterBuffer = culling_pipeline_->GetVisibleClusterListBuffer(read_buffer_index);
     }
 
-    // 3. Write descriptor set every frame (8 bindings).
-    rhi::DescriptorBufferInfo cbInfo{ visibility_cb_, 0, ~0ULL };
+    // 3. Write descriptor set every frame (8 bindings) into the per-frame set.
+    rhi::DescriptorBufferInfo cbInfo{ visFrame.visibility_cb, 0, ~0ULL };
     rhi::DescriptorBufferInfo meshletInfo{ global_meshlet_buffer_, 0, ~0ULL };
     rhi::DescriptorBufferInfo meshletVertsInfo{ global_meshlet_vertices_buffer_, 0, ~0ULL };
     rhi::DescriptorBufferInfo meshletTrisInfo{ global_meshlet_triangles_buffer_, 0, ~0ULL };
@@ -2229,56 +2246,55 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
     rhi::DescriptorBufferInfo instanceInfo{ global_instance_data_buffer_, 0, ~0ULL };
 
     rhi::WriteDescriptorSet writes[8];
-    writes[0].dstSet = visibility_descriptor_set_;
+    writes[0].dstSet = visFrame.visibility_descriptor_set;
     writes[0].dstBinding = 0;
     writes[0].descriptorCount = 1;
     writes[0].descriptorType = rhi::DescriptorType::UniformBuffer;
     writes[0].bufferInfo = &cbInfo;
 
-    writes[1].dstSet = visibility_descriptor_set_;
+    writes[1].dstSet = visFrame.visibility_descriptor_set;
     writes[1].dstBinding = 1;
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[1].bufferInfo = &meshletInfo;
 
-    writes[2].dstSet = visibility_descriptor_set_;
+    writes[2].dstSet = visFrame.visibility_descriptor_set;
     writes[2].dstBinding = 2;
     writes[2].descriptorCount = 1;
     writes[2].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[2].bufferInfo = &meshletVertsInfo;
 
-    writes[3].dstSet = visibility_descriptor_set_;
+    writes[3].dstSet = visFrame.visibility_descriptor_set;
     writes[3].dstBinding = 3;
     writes[3].descriptorCount = 1;
     writes[3].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[3].bufferInfo = &meshletTrisInfo;
 
-    writes[4].dstSet = visibility_descriptor_set_;
+    writes[4].dstSet = visFrame.visibility_descriptor_set;
     writes[4].dstBinding = 4;
     writes[4].descriptorCount = 1;
     writes[4].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[4].bufferInfo = &positionsInfo;
 
-    writes[5].dstSet = visibility_descriptor_set_;
+    writes[5].dstSet = visFrame.visibility_descriptor_set;
     writes[5].dstBinding = 5;
     writes[5].descriptorCount = 1;
     writes[5].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[5].bufferInfo = &compactClusterInfo;
 
-    writes[6].dstSet = visibility_descriptor_set_;
+    writes[6].dstSet = visFrame.visibility_descriptor_set;
     writes[6].dstBinding = 6;
     writes[6].descriptorCount = 1;
     writes[6].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[6].bufferInfo = &clusterMapInfo;
 
-    writes[7].dstSet = visibility_descriptor_set_;
+    writes[7].dstSet = visFrame.visibility_descriptor_set;
     writes[7].dstBinding = 7;
     writes[7].descriptorCount = 1;
     writes[7].descriptorType = rhi::DescriptorType::StorageBuffer;
     writes[7].bufferInfo = &instanceInfo;
 
     device_->UpdateDescriptorSets(8, writes);
-    visibility_descriptor_written_ = true;
 
     // 4. BeginRenderPass + viewport + bind + draw.
     cmd_buffer->BeginRenderPass(visibility_render_pass_);
@@ -2293,7 +2309,7 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
     });
     cmd_buffer->BindGraphicsPipeline(visibility_pipeline_);
 
-    const rhi::DescriptorSetHandle dsHandles[] = { visibility_descriptor_set_ };
+    const rhi::DescriptorSetHandle dsHandles[] = { visFrame.visibility_descriptor_set };
     cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics,
                                     visibility_pipeline_layout_,
                                     0, 1, dsHandles, 0, nullptr);

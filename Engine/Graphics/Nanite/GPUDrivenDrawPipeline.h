@@ -276,6 +276,12 @@ private:
     struct FrameResource {
         rhi::ResourceHandle camera_constants_buffer{ rhi::handles::INVALID_RESOURCE };
         rhi::DescriptorSetHandle global_draw_descriptor_set{ rhi::handles::INVALID_DESCRIPTOR_SET };
+        // T4.6.5 part 30 X10: per-frame Stage2 visibility-buffer resources.
+        // Previously a single visibility_descriptor_set_ was written every frame;
+        // the prior frame's cmd buffer was still pending when the next frame's
+        // vkUpdateDescriptorSets fired → VUID-vkUpdateDescriptorSets-None-03047.
+        rhi::ResourceHandle visibility_cb{ rhi::handles::INVALID_RESOURCE };
+        rhi::DescriptorSetHandle visibility_descriptor_set{ rhi::handles::INVALID_DESCRIPTOR_SET };
     };
 
     utl::vector<FrameResource> frame_resources_;
@@ -364,17 +370,10 @@ private:
     bool resolve_descriptor_written_{ false };
 
     // T4.6.5 part 22: Stage2 visibility-buffer raster resources.
-    // visibility_cb_ holds DrawConstants (3 m4x4 + 4 u32 = 208 bytes, padded to 256B).
-    // visibility_descriptor_set_ is a per-frame set wrapping 5 bindings:
-    //   0=UBO (visibility_cb_), 1=SSBO (global_meshlet_buffer_),
-    //   2=SSBO (global_meshlet_vertices_buffer_), 3=SSBO (global_meshlet_triangles_buffer_),
-    //   4=SSBO (global_vertex_buffer_).
+    // Per-frame CB + descriptor set live in FrameResource (triple-buffered, X10 fix).
     // visibility_descriptor_set_layout_ retained so we can allocate descriptor sets
     //   from it after pipeline creation (was previously destroyed immediately).
-    rhi::ResourceHandle visibility_cb_{ rhi::handles::INVALID_RESOURCE };
-    rhi::DescriptorSetHandle visibility_descriptor_set_{ rhi::handles::INVALID_DESCRIPTOR_SET };
     rhi::DescriptorSetLayoutHandle visibility_descriptor_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    bool visibility_descriptor_written_{ false };
 
     // ---- Shadow Mapping Resources ----
     ShadowFrameResources shadow_frames_[3];                         // Triple-buffered per-frame

@@ -23,8 +23,6 @@
 
 #include <iostream>
 #include <algorithm>
-#include <set>
-#include <dlfcn.h>
 
 namespace primal::graphics::rhi {
 
@@ -929,35 +927,9 @@ void VulkanCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint, Pipeli
     if (!descriptorSets || setCount == 0) return;
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     std::vector<VkDescriptorSet> sets(setCount);
-    bool any_null = false;
     for (u32 i = 0; i < setCount; ++i) {
         VulkanDescriptorSet* ds = vk.GetDescriptorSet(descriptorSets[i]);
-        if (!ds) any_null = true;
         sets[i] = ds ? ds->GetNativeSet() : VK_NULL_HANDLE;
-    }
-    // T4.6.5 part 30 phase B (debug): log first unique caller of null-set bind.
-    // Validation layer confirms "pDescriptorSets[i] is not a valid VkDescriptorSet"
-    // but doesn't tell us which module's set it was. dladdr gives caller symbol;
-    // resolve to file:line with `atos -o <binary> <caller_ra>` after the run.
-    if (any_null) {
-        static std::set<void*> logged_callers;
-        void* caller = __builtin_return_address(0);
-        if (logged_callers.insert(caller).second) {
-            Dl_info info{};
-            dladdr(caller, &info);
-            ptrdiff_t ofs = (info.dli_saddr)
-                            ? static_cast<char*>(caller) - static_cast<char*>(info.dli_saddr)
-                            : -1;
-            std::cerr << "[T4.6.5 p30 NULL DESC] ra=" << caller
-                      << " sym=" << (info.dli_sname ? info.dli_sname : "?")
-                      << " ofs=" << ofs
-                      << " img=" << (info.dli_fname ? info.dli_fname : "?")
-                      << " bindPoint=" << static_cast<int>(bindPoint)
-                      << " firstSet=" << firstSet
-                      << " count=" << setCount
-                      << " pipelineLayoutHandle=" << boundPipelineLayout_
-                      << std::endl;
-        }
     }
     VkPipelineBindPoint pbp = (bindPoint == PipelineBindPoint::Compute)
                               ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;
