@@ -44,10 +44,39 @@
 
 class KenneyTilePreviewTestCase : public primal::test::RenderTestCase {
 public:
+    // Observer strategy. OriginPreset is honored only when ObserverKind ==
+    // DistanceFromOrigin; MinEntropy ignores it.
+    enum class ObserverKind : u32 { MinEntropy = 0, DistanceFromOrigin = 1 };
+    enum class OriginPreset : u32 { Center = 0, Corner = 1, BottomCenter = 2 };
+
     KenneyTilePreviewTestCase();
     bool Initialize() override;
     void Run() override;
     void Shutdown() override;
+
+    // Singleton pointer set in Initialize() / cleared in Shutdown().
+    // Used by TestKenneyMain.cpp's WASM C ABI exports to route panel
+    // actions to the live test case. Native builds don't reference it.
+    static KenneyTilePreviewTestCase* Instance() { return g_instance_; }
+
+    // WASM↔JS bridge — called from EMSCRIPTEN_KEEPALIVE exports in
+    // TestKenneyMain.cpp. Set the pending flag; HandleGridEditKeys()
+    // drains them next frame and reseeds. Safe to call from JS thread
+    // (emscripten runs single-threaded so no locking needed).
+    void RequestObserver(u32 kind)   { pending_observer_ = kind; has_pending_observer_ = true; }
+    void RequestOrigin(u32 preset)   { pending_origin_   = preset; has_pending_origin_   = true; }
+    void RequestGridW(u32 w)         { pending_grid_w_   = w; has_pending_grid_w_ = true; }
+    void RequestGridH(u32 h)         { pending_grid_h_   = h; has_pending_grid_h_ = true; }
+    void RequestGridD(u32 d)         { pending_grid_d_   = d; has_pending_grid_d_ = true; }
+    void RequestReseedSame()         { pending_reseed_same_ = true; }
+    void RequestReseedNew()          { pending_reseed_new_  = true; }
+
+    ObserverKind GetObserverKind() const { return observer_kind_; }
+    OriginPreset GetOriginPreset() const { return origin_preset_; }
+    u32 GetGridW() const { return grid_w_; }
+    u32 GetGridH() const { return grid_h_; }
+    u32 GetGridD() const { return grid_d_; }
+    u32 GetSeed()   const { return rng_seed_; }
 
 private:
     bool InitWFC();
@@ -90,19 +119,33 @@ private:
 
     // Dynamic grid dimensions. Adjusted live via hotkeys; ReseedSolver uses
     // these. Clamps keep the solver / camera framing well-defined.
-    u32 grid_w_{16};   // X — clamped [4, 32]
-    u32 grid_h_{4};    // Y (layers) — clamped [1, 8]
-    u32 grid_d_{16};   // Z — clamped [4, 32]
+    u32 grid_w_{16};   // X — clamped [4, 64]
+    u32 grid_h_{4};    // Y (layers) — clamped [1, 32]
+    u32 grid_d_{16};   // Z — clamped [4, 64]
 
     // Observer strategy state. O cycles ObserverKind; P cycles OriginPreset.
     // Both hotkeys trigger ReseedSolver() so the demo always reflects the
     // current strategy. OriginPreset is honored only when ObserverKind ==
     // DistanceFromOrigin; MinEntropy ignores it.
-    enum class ObserverKind : u32 { MinEntropy = 0, DistanceFromOrigin = 1 };
-    enum class OriginPreset : u32 { Center = 0, Corner = 1, BottomCenter = 2 };
-
     ObserverKind  observer_kind_{ObserverKind::MinEntropy};
     OriginPreset  origin_preset_{OriginPreset::Center};
+
+    // Pending actions set by the WASM panel bridge. Drained in
+    // HandleGridEditKeys() — JS writes happen between frames so we just
+    // latch the latest value. has_pending_* collapses multiple writes into
+    // one drain.
+    u32  pending_observer_{0};
+    u32  pending_origin_{0};
+    u32  pending_grid_w_{0};
+    u32  pending_grid_h_{0};
+    u32  pending_grid_d_{0};
+    bool has_pending_observer_{false};
+    bool has_pending_origin_{false};
+    bool has_pending_grid_w_{false};
+    bool has_pending_grid_h_{false};
+    bool has_pending_grid_d_{false};
+    bool pending_reseed_same_{false};
+    bool pending_reseed_new_{false};
 
     primal::graphics::wfc::WFCGridCoord ComputeOrigin() const;
 
@@ -132,6 +175,8 @@ private:
     float camera_yaw_{-0.7853982f};    // ~-45° → looks toward -X/-Z (back at origin)
     float camera_pitch_{-0.6108652f};  // ~-35° → looks down at the grid
     float camera_speed_{14.0f};        // meters/second; Shift = 3× sprint
+
+    static KenneyTilePreviewTestCase* g_instance_;
 };
 
 class Engine_Test : public primal::test::RenderTestRunner {

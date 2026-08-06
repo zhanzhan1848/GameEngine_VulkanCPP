@@ -452,7 +452,7 @@ else()
         # the TestDawnWASM pattern.
         set(KENNEY_LINK_FLAGS "")
         string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_RUNTIME_METHODS=ccall,cwrap")
-        string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_FUNCTIONS=_main")
+        string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_FUNCTIONS=_main,_wfc_set_observer,_wfc_set_origin,_wfc_set_grid_w,_wfc_set_grid_h,_wfc_set_grid_d,_wfc_reseed_same,_wfc_reseed_new,_wfc_get_observer,_wfc_get_origin,_wfc_get_grid_w,_wfc_get_grid_h,_wfc_get_grid_d")
 
         # Embed WGSL shaders — same pattern as TestDawnWASM. The Dawn
         # ShaderLoader's MEMFS fallback (ShaderLoader.h:2276) reads from

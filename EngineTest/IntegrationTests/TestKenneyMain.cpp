@@ -34,6 +34,70 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     return 0;
 }
 
+// ============================================================
+// WASM↔JS bridge — exports invoked from the debug panel (shell.html).
+// Each one latches a "pending" value; the test case drains them at the
+// top of the next frame inside HandleGridEditKeys(). The singleton
+// pointer is set by KenneyTilePreviewTestCase::Initialize() — if JS
+// calls these before init or after shutdown, they no-op.
+// ============================================================
+extern "C" {
+
+EMSCRIPTEN_KEEPALIVE void wfc_set_observer(int kind) {
+    if (auto* t = KenneyTilePreviewTestCase::Instance()) t->RequestObserver(static_cast<u32>(kind));
+}
+
+EMSCRIPTEN_KEEPALIVE void wfc_set_origin(int preset) {
+    if (auto* t = KenneyTilePreviewTestCase::Instance()) t->RequestOrigin(static_cast<u32>(preset));
+}
+
+EMSCRIPTEN_KEEPALIVE void wfc_set_grid_w(int w) {
+    if (auto* t = KenneyTilePreviewTestCase::Instance()) t->RequestGridW(static_cast<u32>(w));
+}
+
+EMSCRIPTEN_KEEPALIVE void wfc_set_grid_h(int h) {
+    if (auto* t = KenneyTilePreviewTestCase::Instance()) t->RequestGridH(static_cast<u32>(h));
+}
+
+EMSCRIPTEN_KEEPALIVE void wfc_set_grid_d(int d) {
+    if (auto* t = KenneyTilePreviewTestCase::Instance()) t->RequestGridD(static_cast<u32>(d));
+}
+
+EMSCRIPTEN_KEEPALIVE void wfc_reseed_same() {
+    if (auto* t = KenneyTilePreviewTestCase::Instance()) t->RequestReseedSame();
+}
+
+EMSCRIPTEN_KEEPALIVE void wfc_reseed_new() {
+    if (auto* t = KenneyTilePreviewTestCase::Instance()) t->RequestReseedNew();
+}
+
+EMSCRIPTEN_KEEPALIVE int wfc_get_observer() {
+    auto* t = KenneyTilePreviewTestCase::Instance();
+    return t ? static_cast<int>(t->GetObserverKind()) : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int wfc_get_origin() {
+    auto* t = KenneyTilePreviewTestCase::Instance();
+    return t ? static_cast<int>(t->GetOriginPreset()) : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int wfc_get_grid_w() {
+    auto* t = KenneyTilePreviewTestCase::Instance();
+    return t ? static_cast<int>(t->GetGridW()) : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int wfc_get_grid_h() {
+    auto* t = KenneyTilePreviewTestCase::Instance();
+    return t ? static_cast<int>(t->GetGridH()) : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int wfc_get_grid_d() {
+    auto* t = KenneyTilePreviewTestCase::Instance();
+    return t ? static_cast<int>(t->GetGridD()) : 0;
+}
+
+} // extern "C"
+
 #else // !__EMSCRIPTEN__
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {

@@ -53,6 +53,11 @@ static void SyncWfcHudIfWasm(const char* obs, const char* origin,
                   obs, origin, grid_w, grid_h, grid_d, seed);
     emscripten_run_script(buf);
 }
+// Mouse input from EmscriptenInput.cpp — left-button drag rotates camera.
+extern "C" {
+void EmscriptenGetMouseDelta(float* dx, float* dy);
+bool EmscriptenGetMouseButton(int button);
+}
 #else
 static inline void SyncWfcHudIfWasm(const char*, const char*, u32, u32, u32, u32) {}
 #endif
@@ -60,6 +65,10 @@ static inline void SyncWfcHudIfWasm(const char*, const char*, u32, u32, u32, u32
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
 using namespace primal::math;
+
+// Singleton instance pointer — set in Initialize, cleared in Shutdown.
+// Lets the WASM C ABI exports route panel actions to the live test case.
+KenneyTilePreviewTestCase* KenneyTilePreviewTestCase::g_instance_{nullptr};
 
 // ============================================================================
 // Engine_Test
@@ -86,6 +95,9 @@ KenneyTilePreviewTestCase::KenneyTilePreviewTestCase() {
 
 bool KenneyTilePreviewTestCase::Initialize() {
     std::cout << "[TestKenneyTilePreview] Initializing..." << std::endl;
+
+    // Register singleton (used by WASM C ABI panel bridge).
+    g_instance_ = this;
 
     // 1. Window
     primal::platform::window_init_info winInfo{};
@@ -322,8 +334,56 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
     bool changed      = false;
     const char* why   = "manual";
 
-    const u32 kSideMin = 4, kSideMax = 32;
-    const u32 kLayerMin = 1, kLayerMax = 8;
+    const u32 kSideMin = 4, kSideMax = 64;
+    const u32 kLayerMin = 1, kLayerMax = 32;
+
+    // Drain pending UI panel actions first (WASM JS → C ABI). Each latched
+    // value is clamped to the same range as the keyboard hotkeys so both
+    // paths stay consistent. has_pending_* collapses repeated writes into
+    // a single reseed.
+    if (has_pending_observer_) {
+        has_pending_observer_ = false;
+        const u32 k = pending_observer_ % 2u;  // 0=MinEntropy, 1=Distance
+        auto new_kind = static_cast<ObserverKind>(k);
+        if (new_kind != observer_kind_) {
+            observer_kind_ = new_kind;
+            changed = true; why = "panel:observer";
+        }
+    }
+    if (has_pending_origin_) {
+        has_pending_origin_ = false;
+        const u32 p = pending_origin_ % 3u;  // 0=Center, 1=Corner, 2=BottomCenter
+        auto new_origin = static_cast<OriginPreset>(p);
+        if (new_origin != origin_preset_) {
+            origin_preset_ = new_origin;
+            changed = true; why = "panel:origin";
+        }
+    }
+    if (has_pending_grid_w_) {
+        has_pending_grid_w_ = false;
+        const u32 new_w = std::clamp(pending_grid_w_, kSideMin, kSideMax);
+        if (new_w != grid_w_) { grid_w_ = new_w; changed = true; why = "panel:grid-w"; }
+    }
+    if (has_pending_grid_h_) {
+        has_pending_grid_h_ = false;
+        const u32 new_h = std::clamp(pending_grid_h_, kLayerMin, kLayerMax);
+        if (new_h != grid_h_) { grid_h_ = new_h; changed = true; why = "panel:grid-h"; }
+    }
+    if (has_pending_grid_d_) {
+        has_pending_grid_d_ = false;
+        const u32 new_d = std::clamp(pending_grid_d_, kSideMin, kSideMax);
+        if (new_d != grid_d_) { grid_d_ = new_d; changed = true; why = "panel:grid-d"; }
+    }
+    if (pending_reseed_same_) {
+        pending_reseed_same_ = false;
+        changed = true; why = "panel:reseed-same";
+    }
+    if (pending_reseed_new_) {
+        pending_reseed_new_ = false;
+        const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+        rng_seed_ = static_cast<u32>(ticks & 0xFFFFFFFFu);
+        changed = true; why = "panel:reseed-new";
+    }
 
     if (just_pressed_(static_cast<u32>(ic::key_bracket_open), key_now(ic::key_bracket_open))) {
         if (grid_w_ > kSideMin) { --grid_w_; changed = true; why = "X--"; }
@@ -612,6 +672,18 @@ void KenneyTilePreviewTestCase::UpdateCameraFromInput() {
     if (key_down(primal::input::input_code::key_up))    camera_pitch_ += kLookSensitivity * dt;
     if (key_down(primal::input::input_code::key_down))  camera_pitch_ -= kLookSensitivity * dt;
 
+#ifdef __EMSCRIPTEN__
+    // Mouse drag — left button held rotates camera. Matches TestDawnForwardRenderer
+    // convention: yaw -= dx, pitch -= dy, sensitivity 0.002 rad/px.
+    float mdx = 0.0f, mdy = 0.0f;
+    EmscriptenGetMouseDelta(&mdx, &mdy);
+    if (EmscriptenGetMouseButton(0)) {
+        constexpr float kMouseSensitivity = 0.002f;
+        camera_yaw_   -= mdx * kMouseSensitivity;
+        camera_pitch_ -= mdy * kMouseSensitivity;
+    }
+#endif
+
     // Clamp pitch to ±~89° to avoid flip at the poles.
     constexpr float kPitchLimit = 1.55334f;  // ~89°
     if (camera_pitch_ >  kPitchLimit) camera_pitch_ =  kPitchLimit;
@@ -703,6 +775,10 @@ void KenneyTilePreviewTestCase::Run() {
 void KenneyTilePreviewTestCase::Shutdown() {
     if (!pipeline && !scene) return;  // idempotent
     std::cout << "[TestKenneyTilePreview] Shutting down..." << std::endl;
+
+    // Clear singleton before destroying subsystems — JS panel may still hold
+    // a pointer if the user closes the tab mid-frame.
+    g_instance_ = nullptr;
 
     DestroyAllSpawnedEntities();
 
