@@ -71,8 +71,8 @@ void WaveGrid::SetCandidateCount(WFCGridCoord c, u32 count) {
         u32 in_word = WFCTileRegistry::MaskBitInWord(b);
         cell.candidate_mask[w] |= (1ULL << in_word);
     }
-    cell.candidate_count = count;
-    cell.entropy = static_cast<u8>(count);
+    cell.candidate_count = set_count;
+    cell.entropy = static_cast<u8>(set_count);
     cell.collapsed = false;
 }
 
