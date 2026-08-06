@@ -1908,6 +1908,21 @@ set_target_properties(TestProceduralRoomPack PROPERTIES
 target_compile_definitions(TestProceduralRoomPack PRIVATE DEBUG _DEBUG)
 set_target_properties(TestProceduralRoomPack PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestTileAdjacencyBuild Graphics/WFC/TestTileAdjacencyBuild.cpp)
+target_include_directories(TestTileAdjacencyBuild PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestTileAdjacencyBuild PRIVATE Engine)
+add_test(NAME TestTileAdjacencyBuild COMMAND TestTileAdjacencyBuild)
+set_target_properties(TestTileAdjacencyBuild PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestTileAdjacencyBuild PRIVATE DEBUG _DEBUG)
+set_target_properties(TestTileAdjacencyBuild PROPERTIES FOLDER "Tests/Graphics/WFC")
+
 add_executable(TestWFCSolveBudget Graphics/WFC/TestWFCSolveBudget.cpp)
 target_include_directories(TestWFCSolveBudget PRIVATE
     ${CMAKE_SOURCE_DIR}

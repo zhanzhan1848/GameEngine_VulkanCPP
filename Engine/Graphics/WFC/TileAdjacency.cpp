@@ -1,9 +1,57 @@
 // Engine/Graphics/WFC/TileAdjacency.cpp
 #include "TileAdjacency.h"
+#include "AutoSocketClassifier.h"
 #include "WFCSocketOps.h"
 #include "WFCTileRegistry.h"
 
 namespace primal::graphics::wfc {
+
+namespace {
+
+// Build a Y-axis rotation matrix for variant N (right-hand rule, +N*90°).
+// Convention matches WFCSocketOps::RotateCornerY:
+//   variant 0 = identity
+//   variant 1 = +90° Y: (x, z) → (z, -x)
+//   variant 2 = 180°  : (x, z) → (-x, -z)
+//   variant 3 = -90° Y: (x, z) → (-z, x)
+//
+// Columns are constructed directly because math::m4x4 lays out as
+// `columns[4]` (each entry a column vector). This convention matches
+// AutoSocketClassifier::TransformPoint, which reads m.columns[i][j] for
+// row j of column i — the same on simd::float4x4 (Apple) and on the
+// struct m4x4 fallback (WASM/other).
+math::m4x4 ComputeVariantTransformY(u32 variant) {
+    math::m4x4 m{};
+    switch (variant & 3u) {
+        case 0:  // identity
+            m.columns[0] = math::v4{1, 0, 0, 0};
+            m.columns[1] = math::v4{0, 1, 0, 0};
+            m.columns[2] = math::v4{0, 0, 1, 0};
+            m.columns[3] = math::v4{0, 0, 0, 1};
+            break;
+        case 1:  // +90° Y: +X → -Z, +Z → +X
+            m.columns[0] = math::v4{0, 0, -1, 0};
+            m.columns[1] = math::v4{0, 1,  0, 0};
+            m.columns[2] = math::v4{1, 0,  0, 0};
+            m.columns[3] = math::v4{0, 0,  0, 1};
+            break;
+        case 2:  // 180°: +X → -X, +Z → -Z
+            m.columns[0] = math::v4{-1, 0,  0, 0};
+            m.columns[1] = math::v4{ 0, 1,  0, 0};
+            m.columns[2] = math::v4{ 0, 0, -1, 0};
+            m.columns[3] = math::v4{ 0, 0,  0, 1};
+            break;
+        case 3:  // -90° Y: +X → +Z, +Z → -X
+            m.columns[0] = math::v4{ 0, 0, 1, 0};
+            m.columns[1] = math::v4{ 0, 1, 0, 0};
+            m.columns[2] = math::v4{-1, 0, 0, 0};
+            m.columns[3] = math::v4{ 0, 0, 0, 1};
+            break;
+    }
+    return m;
+}
+
+} // anonymous namespace
 
 void TileAdjacencyTable::AddCompatibility(wfc_tile_id tile_a, u32 variant_a, WFCFace face_a,
                                           wfc_tile_id tile_b, u32 variant_b) {
@@ -86,6 +134,44 @@ u32 TileAdjacencyTable::AddAutoFromSockets(const WFCTileRegistry& reg, bool skip
                                        wfc_tile_id{tb}, vb)) {
                             continue;
                         }
+                        AddCompatibility(wfc_tile_id{ta}, va, face_a,
+                                         wfc_tile_id{tb}, vb);
+                        ++added;
+                    }
+                }
+            }
+        }
+    }
+    return added;
+}
+
+u32 TileAdjacencyTable::BuildFromClassifier(const WFCTileRegistry& reg,
+                                            ClassifierMeshLookup lookup) {
+    u32 added = 0;
+    if (!lookup) return 0;
+    const u32 tile_count = reg.Count();
+    for (u32 ta = 0; ta < tile_count; ++ta) {
+        const WFCTile& tile_a = reg.Get(wfc_tile_id{ta});
+        for (u32 va = 0; va < tile_a.variant_count; ++va) {
+            const graphics::rhi::RHIMeshAsset* mesh_a = lookup(ta, va);
+            if (!mesh_a) continue;
+            const math::m4x4 var_a = ComputeVariantTransformY(va);
+            for (u32 f = 0; f < WFC_FACE_COUNT_3D; ++f) {
+                const WFCFace face_a = static_cast<WFCFace>(f);
+                const SocketEncoding sig_a = AutoSocketClassifier::ClassifyFace(
+                    *mesh_a, face_a, var_a);
+                for (u32 tb = ta; tb < tile_count; ++tb) {
+                    const WFCTile& tile_b = reg.Get(wfc_tile_id{tb});
+                    for (u32 vb = 0; vb < tile_b.variant_count; ++vb) {
+                        const graphics::rhi::RHIMeshAsset* mesh_b = lookup(tb, vb);
+                        if (!mesh_b) continue;
+                        const math::m4x4 var_b = ComputeVariantTransformY(vb);
+                        const WFCFace face_b = OppositeFace(face_a);
+                        const SocketEncoding sig_b = AutoSocketClassifier::ClassifyFace(
+                            *mesh_b, face_b, var_b);
+                        const SocketEncoding sig_b_mirror =
+                            AutoSocketClassifier::MirrorFlipU(sig_b);
+                        if (sig_a != sig_b_mirror) continue;
                         AddCompatibility(wfc_tile_id{ta}, va, face_a,
                                          wfc_tile_id{tb}, vb);
                         ++added;

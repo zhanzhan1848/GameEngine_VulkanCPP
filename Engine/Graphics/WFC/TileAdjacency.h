@@ -3,7 +3,9 @@
 
 #include "../../Common/CommonHeaders.h"
 #include "../../Utilities/Vector.h"
+#include "../RHI/Core/RHIMeshAsset.h"
 #include "WFCTypes.h"
+#include <functional>
 #include <unordered_set>
 
 namespace primal::graphics::wfc {
@@ -59,6 +61,27 @@ public:
     // Returns the count of newly-added forward entries (one per
     // AddCompatibility call that actually fired).
     u32 AddAutoFromSockets(const WFCTileRegistry& reg, bool skip_existing = true);
+
+    // Phase C.1 Task 11: classifier-based adjacency builder.
+    //
+    // Walks every (tile_a, variant_a, face_a) × (tile_b, variant_b) pair in
+    // `reg`, calls AutoSocketClassifier::ClassifyFace on each side (the
+    // opposing face for tile_b), mirror-flips tile_b's signature, and
+    // records a compatibility entry when the two 8×8 occupancy grids agree.
+    //
+    // `lookup` is a caller-provided callback that maps (tile_index,
+    // variant_index) → const RHIMeshAsset*. Returning nullptr skips that
+    // pair gracefully (treated as no-mesh / no compatibility). The registry
+    // stores only geometry_ids, so the caller (typically a GUI binary or
+    // integration test) bridges the gap by indexing its own mesh storage.
+    //
+    // Variants are rotated about +Y by variant * 90° (right-hand rule,
+    // matching WFCSocketOps' RotateCornerY convention).
+    //
+    // Returns the count of newly-added forward entries (each fires
+    // AddCompatibility, which also auto-records the mirror entry).
+    using ClassifierMeshLookup = std::function<const graphics::rhi::RHIMeshAsset*(u32, u32)>;
+    u32 BuildFromClassifier(const WFCTileRegistry& reg, ClassifierMeshLookup lookup);
 
 private:
     // Pack (tile_a, variant_a, face, tile_b, variant_b) into u64 key
