@@ -6,12 +6,11 @@ using namespace primal::graphics::wfc;
 using namespace Engine::Test;
 
 namespace {
-void SetCellCandidates(WaveGrid& grid, WFCGridCoord c, u64 mask, u32 count) {
-    WFCCell& cell = grid.CellAt(c);
-    cell.candidate_mask = mask;
-    cell.candidate_count = count;
-    cell.entropy = static_cast<u8>(count);
-    cell.collapsed = false;
+// Phase C.1 Task 2: candidate_mask is now u64[WFCCell::kMaskWords]; the scalar
+// `mask` arg is vestigial. Delegate to WaveGrid::SetCandidateCount, which
+// matches the existing caller intent of "N candidates possible".
+void SetCellCandidates(WaveGrid& grid, WFCGridCoord c, u64 /*mask*/, u32 count) {
+    grid.SetCandidateCount(c, count);
 }
 }
 

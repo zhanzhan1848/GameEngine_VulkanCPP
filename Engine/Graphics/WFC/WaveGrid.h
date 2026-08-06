@@ -16,6 +16,16 @@ public:
     WFCCell&       CellAt(WFCGridCoord c);
     const WFCCell& CellAt(WFCGridCoord c) const;
 
+    // Test/setup convenience: set the first `count` candidate bits (bits 0..count-1)
+    // and clear the rest. Useful for tests that want "this cell has N candidates
+    // possible" without constructing a specific mask across the u64[kMaskWords]
+    // bitset. Bits ≥ kMaskWords*64 are ignored.
+    void SetCandidateCount(WFCGridCoord c, u32 count);
+
+    // Test/introspection helper: true iff candidate bit `bit` is set on cell c.
+    // `bit` indexes the same packing used by WFCTileRegistry::BitForTileVariant.
+    bool HasCandidateBit(WFCGridCoord c, u32 bit) const;
+
     WFCGridCoord   Size() const { return size_; }
     u32            CellCount() const { return cells_.size(); }
     u32            BytesPerCell() const { return sizeof(WFCCell); }

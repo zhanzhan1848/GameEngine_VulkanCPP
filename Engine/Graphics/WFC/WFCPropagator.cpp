@@ -59,8 +59,15 @@ u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
         // For each face direction, look at the neighbor. If the neighbor is
         // collapsed, prune any of our candidates that are not compatible with
         // the neighbor's (tile, variant) on the opposite face.
-        u64 old_mask = cell.candidate_mask;
-        u64 new_mask = old_mask;
+        //
+        // Phase C.1 Task 2: candidate_mask is now u64[kMaskWords] (256 bits),
+        // so the snapshot / working set / writeback are all per-word arrays.
+        u64 old_mask[WFCCell::kMaskWords];
+        u64 new_mask[WFCCell::kMaskWords];
+        for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+            old_mask[w] = cell.candidate_mask[w];
+            new_mask[w] = old_mask[w];
+        }
 
         static const struct {
             WFCFace my_face;
@@ -87,32 +94,44 @@ u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
             const WFCCell& neighbor = grid.CellAt(n);
             if (!neighbor.collapsed) continue;
 
-            // Build the mask of candidates that survive this face's filter.
-            //
-            // Phase A.3 multi-tile candidate space: each bit b decodes to
-            // (tile = TileForBit(b), variant = VariantForBit(b)) via the
-            // registry's static packing. The previous Phase A.2 code assumed
-            // a single-tile registry (bit == variant of tile 0), which was
-            // incorrect for any tile beyond the first.
-            u64 allowed = 0;
-            u64 m = new_mask;
-            while (m) {
-                u32 bit = __builtin_ctzll(m);
-                m &= m - 1;
-                wfc_tile_id my_tile = WFCTileRegistry::TileForBit(bit);
-                u32 my_variant = WFCTileRegistry::VariantForBit(bit);
-                if (adjacency.Compatible(my_tile, my_variant, f.my_face,
-                                         neighbor.collapsed_tile,
-                                         neighbor.collapsed_variant)) {
-                    allowed |= (1ULL << bit);
+            // Build the per-word allowed mask by scanning set bits of new_mask[]
+            // across all kMaskWords words. Each set bit b at word w / in-word
+            // position p decodes to global bit (w*64 + p), which maps to
+            // (tile, variant) via the registry's static packing.
+            u64 allowed[WFCCell::kMaskWords] = {0, 0, 0, 0};
+            for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+                u64 m = new_mask[w];
+                while (m) {
+                    u32 in_word = __builtin_ctzll(m);
+                    m &= m - 1;
+                    u32 bit = w * WFCTileRegistry::kBitsPerMaskWord + in_word;
+                    wfc_tile_id my_tile = WFCTileRegistry::TileForBit(bit);
+                    u32 my_variant = WFCTileRegistry::VariantForBit(bit);
+                    if (adjacency.Compatible(my_tile, my_variant, f.my_face,
+                                             neighbor.collapsed_tile,
+                                             neighbor.collapsed_variant)) {
+                        allowed[w] |= (1ULL << in_word);
+                    }
                 }
             }
-            new_mask &= allowed;
+            for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+                new_mask[w] &= allowed[w];
+            }
         }
 
-        if (new_mask != old_mask) {
-            cell.candidate_mask = new_mask;
-            cell.candidate_count = static_cast<u32>(__builtin_popcountll(new_mask));
+        // Detect change + writeback across all words; accumulate popcount.
+        bool cell_changed = false;
+        u32 total_count = 0;
+        for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+            if (new_mask[w] != old_mask[w]) {
+                cell.candidate_mask[w] = new_mask[w];
+                cell_changed = true;
+            }
+            total_count += static_cast<u32>(__builtin_popcountll(new_mask[w]));
+        }
+
+        if (cell_changed) {
+            cell.candidate_count = total_count;
             cell.entropy = static_cast<u8>(cell.candidate_count);
             ++changed;
 

@@ -65,24 +65,36 @@ void WFCSolver::PopulateAllCandidates(WaveGrid& grid, const WFCTileRegistry& reg
     // Bit layout: bit = tile_id * MaxVariantsPerTile + variant (see WFCTileRegistry).
     // Phase C.1: skip tiles whose category isn't in active_category_mask_ so a
     // solver can restrict the wave to one thematic group (e.g. Ruins-only).
-    u64 full_mask = 0;
+    //
+    // Phase C.1 Task 2 (mechanical port): candidate_mask is now u64[kMaskWords]
+    // (256 bits). full_mask[] spreads across all words; popcount is summed.
+    // NOTE: last_populated_mask_ stays scalar u64 (word 0 only) — Task 3 will
+    // widen the test accessor if multi-word introspection is needed.
+    u64 full_mask[WFCCell::kMaskWords] = {0, 0, 0, 0};
     for (u32 t = 0; t < registry.Count(); ++t) {
         const WFCTile& tile = registry.Get(wfc_tile_id{t});
         if (!CategoryInMask(tile.category, active_category_mask_)) continue;
         for (u32 v = 0; v < tile.variant_count; ++v) {
             u32 bit = WFCTileRegistry::BitForTileVariant(wfc_tile_id{t}, v);
-            if (bit < 64) {
-                full_mask |= (1ULL << bit);
+            if (bit < WFCCell::kMaskWords * 64u) {
+                u32 w = WFCTileRegistry::MaskWordForBit(bit);
+                u32 b = WFCTileRegistry::MaskBitInWord(bit);
+                full_mask[w] |= (1ULL << b);
             }
         }
     }
-    last_populated_mask_ = full_mask;
-    u32 total_candidates = static_cast<u32>(__builtin_popcountll(full_mask));
+    last_populated_mask_ = full_mask[0];
+    u32 total_candidates = 0;
+    for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+        total_candidates += static_cast<u32>(__builtin_popcountll(full_mask[w]));
+    }
 
     auto& cells = grid.CellsMutable();
     for (u32 i = 0; i < cells.size(); ++i) {
         WFCCell& c = cells[i];
-        c.candidate_mask    = full_mask;
+        for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+            c.candidate_mask[w] = full_mask[w];
+        }
         c.candidate_count   = total_candidates;
         c.entropy           = static_cast<u8>(total_candidates);
         c.collapsed         = false;
@@ -112,18 +124,35 @@ void WFCSolver::CollapseCell(WaveGrid& grid, WFCGridCoord coord,
     // Pick the Nth set bit in candidate_mask, where N is in [0, candidate_count).
     // Example: mask=0b1010 (bits 1,3 set), candidate_count=2.
     //   pick=0 → bit 1,   pick=1 → bit 3.
+    //
+    // Phase C.1 Task 2 (mechanical port): walk words 0..kMaskWords-1, scanning
+    // each word's set bits. chosen_bit is the global bit index (w*64 + in_word).
     u32 pick = rng_.NextRange(candidate_count);
-    u64 m = c.candidate_mask;
     u32 chosen_bit = 0;
-    while (m) {
-        if (pick == 0) {
-            chosen_bit = __builtin_ctzll(m);
-            break;
+    bool found = false;
+    for (u32 w = 0; w < WFCCell::kMaskWords && !found; ++w) {
+        u64 m = c.candidate_mask[w];
+        while (m) {
+            if (pick == 0) {
+                chosen_bit = w * WFCTileRegistry::kBitsPerMaskWord + __builtin_ctzll(m);
+                found = true;
+                break;
+            }
+            m &= m - 1;             // clear the lowest set bit
+            --pick;
         }
-        m &= m - 1;             // clear the lowest set bit
-        chosen_bit = __builtin_ctzll(m);
-        --pick;
     }
+    // Defensive: if pick never reached 0 (candidate_count mismatched actual
+    // popcount), fall back to the first set bit we can find.
+    if (!found) {
+        for (u32 w = 0; w < WFCCell::kMaskWords && !found; ++w) {
+            if (c.candidate_mask[w]) {
+                chosen_bit = w * WFCTileRegistry::kBitsPerMaskWord + __builtin_ctzll(c.candidate_mask[w]);
+                found = true;
+            }
+        }
+    }
+    assert(found);
 
     // Phase A.3: decode (tile, variant) from chosen_bit using registry packing.
     // Bit layout: bit = tile_id * MaxVariantsPerTile + variant (see
@@ -133,7 +162,12 @@ void WFCSolver::CollapseCell(WaveGrid& grid, WFCGridCoord coord,
     wfc_tile_id chosen_tile    = WFCTileRegistry::TileForBit(chosen_bit);
     u32         chosen_variant = WFCTileRegistry::VariantForBit(chosen_bit);
 
-    c.candidate_mask    = (1ULL << chosen_bit);
+    for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+        c.candidate_mask[w] = 0;
+    }
+    u32 chosen_w = WFCTileRegistry::MaskWordForBit(chosen_bit);
+    u32 chosen_b = WFCTileRegistry::MaskBitInWord(chosen_bit);
+    c.candidate_mask[chosen_w] |= (1ULL << chosen_b);
     c.candidate_count   = 1;
     c.entropy           = 0;
     c.collapsed         = true;

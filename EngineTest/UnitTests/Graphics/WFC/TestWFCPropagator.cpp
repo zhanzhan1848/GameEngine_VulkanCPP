@@ -8,12 +8,32 @@ using namespace primal::graphics::wfc;
 using namespace Engine::Test;
 
 namespace {
-void SetCellCandidates(WaveGrid& grid, WFCGridCoord c, u64 mask, u32 count) {
+// Phase C.1 Task 2: candidate_mask is now u64[WFCCell::kMaskWords]. The `mask`
+// arg is vestigial — kept for source compatibility with existing call sites,
+// which all pass a count-N bit pattern that matched the old single-u64 layout.
+// We now delegate to WaveGrid::SetCandidateCount, which sets the first `count`
+// bits (bits 0..count-1) and clears the rest, matching what every existing
+// caller actually wants ("N candidates possible").
+void SetCellCandidates(WaveGrid& grid, WFCGridCoord c, u64 /*mask*/, u32 count) {
+    grid.SetCandidateCount(c, count);
+}
+
+// Helper for tests that manually collapse a cell to a single (tile, variant):
+// sets candidate_mask to have only `bit` set (across the u64[kMaskWords] array)
+// and marks the cell collapsed with the given tile/variant.
+void CollapseCellToBit(WaveGrid& grid, WFCGridCoord c,
+                       wfc_tile_id tile, u32 variant) {
     WFCCell& cell = grid.CellAt(c);
-    cell.candidate_mask = mask;
-    cell.candidate_count = count;
-    cell.entropy = static_cast<u8>(count);
-    cell.collapsed = false;
+    for (u32 w = 0; w < WFCCell::kMaskWords; ++w) cell.candidate_mask[w] = 0;
+    u32 bit = WFCTileRegistry::BitForTileVariant(tile, variant);
+    u32 w = WFCTileRegistry::MaskWordForBit(bit);
+    u32 b = WFCTileRegistry::MaskBitInWord(bit);
+    cell.candidate_mask[w] |= (1ULL << b);
+    cell.candidate_count = 1;
+    cell.collapsed = true;
+    cell.collapsed_tile = tile;
+    cell.collapsed_variant = variant;
+    cell.entropy = 0;
 }
 }
 
@@ -68,13 +88,8 @@ TestResult TestWFCPropagator_RunPass_Removes_Incompatible_Candidates() {
     SetCellCandidates(grid, {1, 0, 0}, 0b111u, 3);
 
     // Cell 1 collapses to variant 0 (tile A)
-    WFCCell& c1 = grid.CellAt({1, 0, 0});
-    c1.candidate_mask = 0b001u;
-    c1.candidate_count = 1;
-    c1.collapsed = true;
-    c1.collapsed_tile = wfc_tile_id{0};
-    c1.collapsed_variant = 0;
-    c1.entropy = 0;
+    const wfc_tile_id A{0};
+    CollapseCellToBit(grid, {1, 0, 0}, A, 0);
 
     // Single-tile registry (16×4 packing): bit b <-> (tile 0, variant b) for b in [0,4).
     // variant_count caps at MaxVariantsPerTile=4 (asserted in Register); these tests
@@ -87,7 +102,6 @@ TestResult TestWFCPropagator_RunPass_Removes_Incompatible_Candidates() {
     // Set up adjacency: (tile 0, var 0) -X (tile 0, var 1)
     // (mirror auto-adds: (tile 0, var 1) +X (tile 0, var 0))
     TileAdjacencyTable adjacency;
-    const wfc_tile_id A{0};
     adjacency.AddCompatibility(A, 0, WFCFace::NegX, A, 1);
 
     WFCPropagator prop;
@@ -100,7 +114,10 @@ TestResult TestWFCPropagator_RunPass_Removes_Incompatible_Candidates() {
     // Cell 0 should have only (tile 0, var 1) -> bit 1 remaining as candidate.
     const WFCCell& result = grid.CellAt({0, 0, 0});
     TEST_ASSERT(!result.collapsed, "Cell 0 not collapsed, just reduced candidates");
-    TEST_ASSERT_EQ(0b010u, result.candidate_mask, "Cell 0 should have only bit 1 remaining");
+    TEST_ASSERT(grid.HasCandidateBit({0, 0, 0}, 1u),
+                "Cell 0 should have bit 1 (var 1) remaining");
+    TEST_ASSERT(!grid.HasCandidateBit({0, 0, 0}, 0u),
+                "Cell 0 should not have bit 0 (var 0) remaining");
     TEST_ASSERT_EQ(1u, result.candidate_count, "Cell 0 has 1 candidate now");
     TEST_ASSERT(changed >= 1u, "At least one cell changed");
     TEST_ASSERT(!contradiction, "No contradiction expected");
@@ -113,13 +130,7 @@ TestResult TestWFCPropagator_RunPass_Detects_Contradiction() {
     SetCellCandidates(grid, {0, 0, 0}, 0b001u, 1);  // only A
     SetCellCandidates(grid, {1, 0, 0}, 0b001u, 1);  // only A
 
-    WFCCell& c1 = grid.CellAt({1, 0, 0});
-    c1.collapsed = true;
-    c1.candidate_mask = 0b001u;
-    c1.candidate_count = 1;
-    c1.collapsed_tile = wfc_tile_id{0};
-    c1.collapsed_variant = 0;
-    c1.entropy = 0;
+    CollapseCellToBit(grid, {1, 0, 0}, wfc_tile_id{0}, 0);
 
     WFCTileRegistry registry;
     WFCTile tile{};
@@ -148,13 +159,7 @@ TestResult TestWFCPropagator_RunPass_No_Change_On_Already_Collapsed() {
     SetCellCandidates(grid, {1, 0, 0}, 0b11u, 2);
 
     // Mark cell 0 as collapsed (shouldn't be re-modified)
-    WFCCell& c0 = grid.CellAt({0, 0, 0});
-    c0.collapsed = true;
-    c0.candidate_mask = 0b001u;
-    c0.candidate_count = 1;
-    c0.collapsed_tile = wfc_tile_id{0};
-    c0.collapsed_variant = 0;
-    c0.entropy = 0;
+    CollapseCellToBit(grid, {0, 0, 0}, wfc_tile_id{0}, 0);
 
     WFCTileRegistry registry;
     WFCTile tile{};
@@ -186,21 +191,19 @@ TestResult TestWFCPropagator_RunPass_Multi_Tile_Filter() {
     const u32 cube_bit = WFCTileRegistry::BitForTileVariant(cube_id, 0);
     const u32 ramp_bit = WFCTileRegistry::BitForTileVariant(ramp_id, 0);
 
-    // Cell 0 has candidates: cube(var 0) and ramp(var 0).
+    // Cell 0 has candidates: cube(var 0) and ramp(var 0). These two bits live
+    // in word 0 (both < 64), so we set them in candidate_mask[0] directly.
+    // (Multi-word layout sanity-check is in TestPropagatorClearsAcrossWords.)
     WFCCell& c0 = grid.CellAt({0, 0, 0});
-    c0.candidate_mask = (1ULL << cube_bit) | (1ULL << ramp_bit);
+    for (u32 w = 0; w < WFCCell::kMaskWords; ++w) c0.candidate_mask[w] = 0;
+    c0.candidate_mask[WFCTileRegistry::MaskWordForBit(cube_bit)] |= (1ULL << WFCTileRegistry::MaskBitInWord(cube_bit));
+    c0.candidate_mask[WFCTileRegistry::MaskWordForBit(ramp_bit)] |= (1ULL << WFCTileRegistry::MaskBitInWord(ramp_bit));
     c0.candidate_count = 2;
     c0.entropy = 2;
     c0.collapsed = false;
 
     // Cell 1 collapsed to ramp variant 0.
-    WFCCell& c1 = grid.CellAt({1, 0, 0});
-    c1.candidate_mask = (1ULL << ramp_bit);
-    c1.candidate_count = 1;
-    c1.collapsed = true;
-    c1.collapsed_tile = ramp_id;
-    c1.collapsed_variant = 0;
-    c1.entropy = 0;
+    CollapseCellToBit(grid, {1, 0, 0}, ramp_id, 0);
 
     // Set up registry with cube (1 variant) + ramp (4 variants)
     WFCTileRegistry registry;
@@ -232,9 +235,10 @@ TestResult TestWFCPropagator_RunPass_Multi_Tile_Filter() {
     // -> Both candidates survive -> no contradiction, mask unchanged.
     TEST_ASSERT(!contradiction, "No contradiction when cube+ramp both compatible with ramp neighbor");
     const WFCCell& result = grid.CellAt({0, 0, 0});
-    const u64 expected_mask = (1ULL << cube_bit) | (1ULL << ramp_bit);
-    TEST_ASSERT_EQ(expected_mask, result.candidate_mask,
-                   "Both cube and ramp candidates must survive the multi-tile filter");
+    TEST_ASSERT(grid.HasCandidateBit({0, 0, 0}, cube_bit),
+                "Cube candidate must survive the multi-tile filter");
+    TEST_ASSERT(grid.HasCandidateBit({0, 0, 0}, ramp_bit),
+                "Ramp candidate must survive the multi-tile filter");
     TEST_ASSERT_EQ(2u, result.candidate_count,
                    "Cell 0 retains exactly 2 candidates after propagation");
     return TestResult::Passed;
@@ -251,13 +255,7 @@ TestResult TestWFCPropagator_RunPass_FaceCount2D_Still_Processes_XY_Neighbors() 
     SetCellCandidates(grid, {1, 0, 0}, 0b111u, 3);
     SetCellCandidates(grid, {2, 0, 0}, 0b111u, 3);
 
-    WFCCell& c1 = grid.CellAt({1, 0, 0});
-    c1.candidate_mask = 0b001u;
-    c1.candidate_count = 1;
-    c1.collapsed = true;
-    c1.collapsed_tile = wfc_tile_id{0};
-    c1.collapsed_variant = 0;
-    c1.entropy = 0;
+    CollapseCellToBit(grid, {1, 0, 0}, wfc_tile_id{0}, 0);
 
     WFCTileRegistry registry;
     WFCTile tile{};
@@ -287,7 +285,8 @@ TestResult TestWFCPropagator_RunPass_FaceCount2D_Still_Processes_XY_Neighbors() 
     // contradiction — proving the 2D loop bound does not skip X-axis filtering.
     const WFCCell& c0 = grid.CellAt({0, 0, 0});
     TEST_ASSERT(!c0.collapsed, "Cell 0 not collapsed in 2D mode");
-    TEST_ASSERT_EQ(0b010u, c0.candidate_mask, "Cell 0 has only bit 1 in 2D mode");
+    TEST_ASSERT(grid.HasCandidateBit({0, 0, 0}, 1u), "Cell 0 has bit 1 in 2D mode");
+    TEST_ASSERT(!grid.HasCandidateBit({0, 0, 0}, 0u), "Cell 0 has bit 0 cleared in 2D mode");
     TEST_ASSERT(changed >= 1u, "2D mode still processes X/Y neighbors");
     TEST_ASSERT(!contradiction, "No contradiction in 2D mode for X-axis filter");
     return TestResult::Passed;
@@ -305,13 +304,7 @@ TestResult TestWFCPropagator_RunPass_FaceCount2D_Ignores_Z_Compat() {
     SetCellCandidates(grid, {0, 0, 1}, 0b001u, 1);
     SetCellCandidates(grid, {0, 0, 2}, 0b001u, 1);
 
-    WFCCell& c1 = grid.CellAt({0, 0, 1});
-    c1.collapsed = true;
-    c1.candidate_mask = 0b001u;
-    c1.candidate_count = 1;
-    c1.collapsed_tile = wfc_tile_id{0};
-    c1.collapsed_variant = 0;
-    c1.entropy = 0;
+    CollapseCellToBit(grid, {0, 0, 1}, wfc_tile_id{0}, 0);
 
     WFCTileRegistry registry;
     WFCTile tile{};
@@ -338,6 +331,41 @@ TestResult TestWFCPropagator_RunPass_FaceCount2D_Ignores_Z_Compat() {
     return TestResult::Passed;
 }
 
+TestResult TestPropagatorClearsAcrossWords() {
+    // Phase C.1 Task 2 layout sanity check: candidate_mask is now u64[4] (256
+    // bits). SetCandidateCount(200) must spread bits across words 0-3 (bits
+    // 0-63 in word 0, 64-127 in word 1, 128-191 in word 2, 192-199 in word 3),
+    // and HasCandidateBit must read back high bits correctly across the array.
+    // This catches regressions where someone reverts candidate_mask to scalar
+    // u64 or only writes to word 0.
+    WaveGrid grid;
+    grid.Initialize({1, 1, 1}, /*max_tile_variants=*/64);
+    WFCGridCoord c{0, 0, 0};
+    grid.SetCandidateCount(c, 200);
+
+    const WFCCell& cell = grid.CellAt(c);
+    // All 4 words must be non-zero (200 bits spans all 4 words).
+    TEST_ASSERT_NE(0ull, cell.candidate_mask[0], "word 0 non-zero");
+    TEST_ASSERT_NE(0ull, cell.candidate_mask[1], "word 1 non-zero");
+    TEST_ASSERT_NE(0ull, cell.candidate_mask[2], "word 2 non-zero");
+    TEST_ASSERT_NE(0ull, cell.candidate_mask[3], "word 3 non-zero");
+
+    // Low / mid / high / top bits via HasCandidateBit.
+    TEST_ASSERT(grid.HasCandidateBit(c, 0u),   "bit 0 set");
+    TEST_ASSERT(grid.HasCandidateBit(c, 63u),  "bit 63 set (word 0 top)");
+    TEST_ASSERT(grid.HasCandidateBit(c, 64u),  "bit 64 set (word 1 bottom)");
+    TEST_ASSERT(grid.HasCandidateBit(c, 100u), "bit 100 set (word 1)");
+    TEST_ASSERT(grid.HasCandidateBit(c, 150u), "bit 150 set (word 2)");
+    TEST_ASSERT(grid.HasCandidateBit(c, 199u), "bit 199 set (word 3, last set)");
+    // Bits ≥ 200 must be cleared.
+    TEST_ASSERT(!grid.HasCandidateBit(c, 200u), "bit 200 cleared");
+    TEST_ASSERT(!grid.HasCandidateBit(c, 255u), "bit 255 cleared (word 3 top)");
+
+    // Count matches request.
+    TEST_ASSERT_EQ(200u, cell.candidate_count, "candidate_count == 200");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCPropagator");
     TEST_CASE(suite, "OnCellCollapsed_Queues_Dirty_Neighbors", TestWFCPropagator_OnCellCollapsed_Queues_Dirty_Neighbors);
@@ -351,6 +379,7 @@ int main() {
               TestWFCPropagator_RunPass_FaceCount2D_Still_Processes_XY_Neighbors);
     TEST_CASE(suite, "RunPass_FaceCount2D_Ignores_Z_Compat",
               TestWFCPropagator_RunPass_FaceCount2D_Ignores_Z_Compat);
+    TEST_CASE(suite, "PropagatorClearsAcrossWords", TestPropagatorClearsAcrossWords);
     suite.RunAllTests();
     return 0;
 }
