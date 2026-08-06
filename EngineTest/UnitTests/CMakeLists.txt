@@ -2181,3 +2181,21 @@ set_target_properties(TestWFCSocketOps PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCSocketOps PRIVATE DEBUG _DEBUG)
 
+# WFC Phase C.1 Mixed Task 1: TestWFCCandidateLayout — u64[4] mask layout + MaxTiles bump
+# NOTE: Header-only test (no Engine link) — layout constants live in WFCTypes.h /
+# WFCTileRegistry.h as constexpr / inline statics. Skipping Engine link lets this
+# canary ship before Tasks 2-3 refactor WFCPropagator.cpp / WFCSolver.cpp.
+add_executable(TestWFCCandidateLayout
+    Graphics/WFC/TestWFCCandidateLayout.cpp)
+target_include_directories(TestWFCCandidateLayout PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME TestWFCCandidateLayout COMMAND TestWFCCandidateLayout)
+set_target_properties(TestWFCCandidateLayout PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCCandidateLayout PRIVATE DEBUG _DEBUG)
+

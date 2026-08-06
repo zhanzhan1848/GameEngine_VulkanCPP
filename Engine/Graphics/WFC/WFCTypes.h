@@ -54,12 +54,14 @@ static_assert(sizeof(WFCTile) == 96, "WFCTile layout drifted");
 
 // Per-cell wave state (kept small for cache efficiency)
 struct WFCCell {
-    static constexpr u32 MaxTileCandidates = 64;
+    // Phase C.1 Mixed: widened from u64 (64 candidates) to u64[4] (256 candidates).
+    // Capacity supports 64 tiles × 4 variants = 256, see WFCTileRegistry::MaxTiles.
+    static constexpr u32 kMaskWords       = 4;   // 4 × u64 = 256-bit candidate set
+    static constexpr u32 MaxTileCandidates = 64 * 4;  // legacy name retained (64 tiles × 4 variants)
 
-    // Bitset of currently-possible tile variants.
-    // For >64 variants in future, this becomes utl::vector<u64>.
-    // For Phase A foundation we cap at 64.
-    u64              candidate_mask;
+    // Bitset of currently-possible tile variants, split across kMaskWords u64 words.
+    // Bit i lives in word (i / 64), bit (i % 64). See WFCTileRegistry helpers.
+    u64              candidate_mask[kMaskWords];
     u32              candidate_count;
     u8               entropy;               // popcount approx for fast compare
     bool             collapsed;
