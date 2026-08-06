@@ -57,7 +57,10 @@ struct WFCCell {
     // Phase C.1 Mixed: widened from u64 (64 candidates) to u64[4] (256 candidates).
     // Capacity supports 64 tiles × 4 variants = 256, see WFCTileRegistry::MaxTiles.
     static constexpr u32 kMaskWords       = 4;   // 4 × u64 = 256-bit candidate set
-    static constexpr u32 MaxTileCandidates = 64 * 4;  // legacy name retained (64 tiles × 4 variants)
+    // Legacy name for the candidate bit budget, retained for WaveGrid/WFCSolver.
+    // Value bumped 64 → 256 in Phase C.1 Mixed (was the old single-u64 bit count;
+    // now equals kMaskWords * 64). To be removed after Task 3 migrates callers.
+    static constexpr u32 MaxTileCandidates = kMaskWords * 64;
 
     // Bitset of currently-possible tile variants, split across kMaskWords u64 words.
     // Bit i lives in word (i / 64), bit (i % 64). See WFCTileRegistry helpers.

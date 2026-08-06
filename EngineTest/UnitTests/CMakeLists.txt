@@ -2182,9 +2182,10 @@ set_target_properties(TestWFCSocketOps PROPERTIES
 target_compile_definitions(TestWFCSocketOps PRIVATE DEBUG _DEBUG)
 
 # WFC Phase C.1 Mixed Task 1: TestWFCCandidateLayout — u64[4] mask layout + MaxTiles bump
-# NOTE: Header-only test (no Engine link) — layout constants live in WFCTypes.h /
-# WFCTileRegistry.h as constexpr / inline statics. Skipping Engine link lets this
-# canary ship before Tasks 2-3 refactor WFCPropagator.cpp / WFCSolver.cpp.
+# NOTE: Header-only canary — verifies WFCTypes/WFCTileRegistry constexpr layout
+# (kMaskWords, MaxTiles, BitForTileVariant). No Engine link needed because the
+# test never constructs a WFCTileRegistry instance. Tasks 2-3 do not need to
+# revisit this entry; the bypass is intentional and permanent for this file.
 add_executable(TestWFCCandidateLayout
     Graphics/WFC/TestWFCCandidateLayout.cpp)
 target_include_directories(TestWFCCandidateLayout PRIVATE
