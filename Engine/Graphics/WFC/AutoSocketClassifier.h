@@ -3,7 +3,6 @@
 
 #include "../../Common/CommonHeaders.h"
 #include "../../Utilities/MathTypes.h"
-#include "WFCTypes.h"
 
 namespace primal::graphics::wfc {
 
@@ -15,8 +14,10 @@ class WFCTileRegistry;
 class AutoSocketClassifier {
 public:
     // Möller–Trumbore ray-triangle intersection with backface cull.
-    // Returns true on hit; fills *t with hit distance.
-    // max_t caps the ray length (face sample rays are 0.05m).
+    // `*t` (if non-null) returns the hit parameter in units of |dir| — callers
+    // that pass a unit dir get a true distance; callers that pass a scaled dir
+    // get t in those same scaled units. max_t uses the same units.
+    // Returns true on hit; false on miss / backface / out-of-range.
     static bool RayTriangle(const math::v3& origin, const math::v3& dir,
                             const math::v3& v0, const math::v3& v1, const math::v3& v2,
                             f32 max_t, f32* t);

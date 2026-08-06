@@ -1,6 +1,5 @@
 #include "../../TestFramework.h"
 #include "Engine/Graphics/WFC/AutoSocketClassifier.h"
-#include "Engine/Graphics/WFC/WFCTypes.h"
 
 using namespace primal::math;
 using namespace primal::graphics::wfc;
