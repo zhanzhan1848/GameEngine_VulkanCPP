@@ -27,6 +27,7 @@
 #include "RenderTestFramework.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
+#include "Engine/Graphics/RHI/Core/RHIMeshAsset.h"
 #include "Engine/Graphics/RenderView.h"
 #include "Engine/Graphics/RenderScene.h"
 #include "Engine/Platform/Platform.h"
@@ -49,6 +50,21 @@ public:
     enum class ObserverKind : u32 { MinEntropy = 0, DistanceFromOrigin = 1 };
     enum class OriginPreset : u32 { Center = 0, Corner = 1, BottomCenter = 2 };
 
+    // Phase C.1 Mixed (Tasks 14–15): two tile-source compositions.
+    //   KenneyOnly  — original behavior: 8 hand-authored Kenney tiles loaded
+    //                 from disk (Dungeon category, hand-coded 0x00/0xFF/0xAA
+    //                 sockets via KenneyTileCatalog::BuildWFCRegistry).
+    //   MixedMulti  — Ruins (15 tiles, Ruins category) + ProceduralRoomPack
+    //                 (12 tiles, Primitive category) = 27 tiles spanning 2
+    //                 categories. Adjacency rebuilt via
+    //                 AutoSocketClassifier::BuildFromClassifier (8×8 occupancy
+    //                 grid). Active category mask = Ruins | Primitive.
+    //
+    // Switching modes rebuilds registry_+adjacency_ from scratch via InitWFC,
+    // not just ReseedSolver. Triggered by the 'M' hotkey or the WASM panel
+    // bridge (wfc_set_solve_mode).
+    enum class SolveMode : u32 { KenneyOnly = 0, MixedMulti = 1 };
+
     KenneyTilePreviewTestCase();
     bool Initialize() override;
     void Run() override;
@@ -70,9 +86,14 @@ public:
     void RequestGridD(u32 d)         { pending_grid_d_   = d; has_pending_grid_d_ = true; }
     void RequestReseedSame()         { pending_reseed_same_ = true; }
     void RequestReseedNew()          { pending_reseed_new_  = true; }
+    // Phase C.1 Task 14: switch tile-source composition. Drain detects a
+    // change vs current mode and re-runs InitWFC (not just ReseedSolver)
+    // because each mode owns a different registry/adjacency set.
+    void RequestSolveMode(u32 mode)  { pending_solve_mode_ = mode; has_pending_solve_mode_ = true; }
 
     ObserverKind GetObserverKind() const { return observer_kind_; }
     OriginPreset GetOriginPreset() const { return origin_preset_; }
+    SolveMode    GetSolveMode() const    { return solve_mode_; }
     u32 GetGridW() const { return grid_w_; }
     u32 GetGridH() const { return grid_h_; }
     u32 GetGridD() const { return grid_d_; }
@@ -80,6 +101,12 @@ public:
 
 private:
     bool InitWFC();
+    // Phase C.1 Task 14: build registry_+adjacency_ for the MixedMulti mode
+    // (Ruins + ProceduralRoomPack). Captures RHIMeshAsset pointers in
+    // mesh_lookup_ so AutoSocketClassifier can ray-trace against the original
+    // meshes. Also wires mesh_handles to render slots so spawned entities
+    // render correctly. Returns false if procedural mesh registration fails.
+    bool InitMixedMultiCategory();
     void ReseedSolver();
     void PumpSolverFrame();
     void DestroyAllSpawnedEntities();
@@ -88,6 +115,15 @@ private:
     void UpdateCameraFromInput();
     void PrintControls();
     void PrintGridState(const char* why);
+    // Phase C.1 Task 15: end-of-solve smoke check. Logs PASS/FAIL but never
+    // crashes (GUI binary keeps the window open on failure for inspection).
+    // Criteria: ≥ kMinCellsCollapsed cells, ≥ kMinDistinctTiles tile ids,
+    // and (MixedMulti mode only) ≥ kMinDistinctCategories categories.
+    void CheckSmokeAsserts();
+    // Phase C.1 Task 15: when max_generations is exhausted without a solve,
+    // narrow active_category_mask to Ruins only and reseed. Logs the
+    // degradation so the operator knows the solver gave up on the mixed set.
+    void DegradeToSingleSet();
 
     std::unique_ptr<primal::graphics::rhi::RHIDeviceBase> device;
     primal::platform::window window;
@@ -107,6 +143,19 @@ private:
     std::unique_ptr<primal::graphics::wfc::WFCStepBuffer>     buf_;
     std::unique_ptr<primal::graphics::wfc::WFCSolver>         solver_;
     std::unique_ptr<primal::graphics::wfc::WFCSolveBudget>    budget_;
+
+    // Phase C.1 Task 14: MixedMulti mode owns procedural mesh assets so they
+    // outlive the solver. RHIMeshAsset is a value type (no refcount) — the
+    // vectors below keep the underlying buffers alive for the duration of the
+    // mode. mesh_lookup_ maps registry tile index → mesh pointer for the
+    // AutoSocketClassifier callback in InitMixedMultiCategory.
+    //
+    // ruins_meshes_ holds the 15 ruins procedural meshes; procedural_room_meshes_
+    // holds the 12 ProceduralRoomPack tiles. Order in mesh_lookup_ matches
+    // registry tile index (ruins first, then procedural).
+    std::vector<primal::graphics::rhi::RHIMeshAsset> ruins_meshes_;
+    std::vector<primal::graphics::rhi::RHIMeshAsset> procedural_room_meshes_;
+    std::vector<const primal::graphics::rhi::RHIMeshAsset*> mesh_lookup_;
 
     std::vector<primal::id::id_type> wfc_entity_ids_;
     std::vector<u32>                 wfc_mesh_slots_;
@@ -130,6 +179,11 @@ private:
     ObserverKind  observer_kind_{ObserverKind::MinEntropy};
     OriginPreset  origin_preset_{OriginPreset::Center};
 
+    // Phase C.1 Task 14: tile-source composition. M cycles between
+    // KenneyOnly and MixedMulti. Switching mode re-runs InitWFC (rebuilt
+    // registry/adjacency from scratch), not just ReseedSolver.
+    SolveMode     solve_mode_{SolveMode::KenneyOnly};
+
     // Pending actions set by the WASM panel bridge. Drained in
     // HandleGridEditKeys() — JS writes happen between frames so we just
     // latch the latest value. has_pending_* collapses multiple writes into
@@ -139,13 +193,20 @@ private:
     u32  pending_grid_w_{0};
     u32  pending_grid_h_{0};
     u32  pending_grid_d_{0};
+    u32  pending_solve_mode_{0};
     bool has_pending_observer_{false};
     bool has_pending_origin_{false};
     bool has_pending_grid_w_{false};
     bool has_pending_grid_h_{false};
     bool has_pending_grid_d_{false};
+    bool has_pending_solve_mode_{false};
     bool pending_reseed_same_{false};
     bool pending_reseed_new_{false};
+
+    // Phase C.1 Task 15: when the solver exhausts max_generations on
+    // MixedMulti mode, the next PumpSolverFrame fires DegradeToSingleSet
+    // to fall back to a Ruins-only solve. Cleared on every ReseedSolver.
+    bool degraded_to_single_set_{false};
 
     primal::graphics::wfc::WFCGridCoord ComputeOrigin() const;
 
@@ -163,6 +224,12 @@ private:
     // the window (no hard assert).
     static constexpr u32 kMinCellsCollapsed = 100;
     static constexpr u32 kMinDistinctTiles  = 3;
+    // Phase C.1 Task 15: MixedMulti mode must show actual cross-category
+    // mixing (≥ 2 distinct WFCCategory values among collapsed cells). The
+    // threshold catches the silent failure mode where BuildFromClassifier
+    // prunes one category's tiles out of every cell, leaving a single-set
+    // solve dressed up as a multi-set one.
+    static constexpr u32 kMinDistinctCategories = 2;
 
     // FPS-style camera. Yaw spins around +Y, pitch clamps to ±~89° to avoid
     // flip. Forward/Right derived each frame from yaw/pitch for translation.

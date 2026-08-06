@@ -15,6 +15,7 @@
 #include "TestKenneyTilePreview.h"
 #include "Engine/Common/CommonHeaders.h"
 #include "Engine/Content/ContentToEngine.h"
+#include "Engine/Content/ProceduralMesh.h"
 #include "Engine/EngineAPI/Input.h"
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 #include "Engine/Graphics/RHI/Platforms/Dawn/DawnDevice.h"
@@ -27,6 +28,9 @@
 #include "Engine/Graphics/WFC/WFCOutput.h"
 #include "Engine/Graphics/WFC/WFCCategory.h"
 #include "Engine/Graphics/WFC/WFCDistanceObserver.h"
+#include "Engine/Graphics/WFC/WFCTileCatalog.h"
+#include "Engine/Graphics/WFC/AutoSocketClassifier.h"
+#include "Engine/Graphics/WFC/ProceduralRoomPack.h"
 #include "Engine/Graphics/PCG/PCGTypes.h"
 #include "Engine/Graphics/PCG/PCGEntityFactory.h"
 
@@ -40,6 +44,7 @@
 #include <chrono>
 #include <filesystem>
 #include <cstdio>
+#include <set>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -228,16 +233,168 @@ bool KenneyTilePreviewTestCase::InitWFC() {
     registry_  = std::make_unique<WFCTileRegistry>();
     adjacency_ = std::make_unique<TileAdjacencyTable>();
 
-    const u32 registered = catalog_.BuildWFCRegistry(*registry_, *adjacency_);
-    if (registered == 0) {
-        std::cerr << "[TestKenneyTilePreview] BuildWFCRegistry failed"
-                  << " (catalog missing one of the 8 required Kenney tiles)"
-                  << std::endl;
-        return false;
+    // Phase C.1 Task 14: dispatch on tile-source composition. MixedMulti
+    // builds a brand-new registry/adjacency set (Ruins + ProceduralRoomPack)
+    // via InitMixedMultiCategory; KenneyOnly keeps the original catalog
+    // path. Each branch fully initializes registry_ + adjacency_.
+    if (solve_mode_ == SolveMode::MixedMulti) {
+        if (!InitMixedMultiCategory()) {
+            std::cerr << "[TestKenneyTilePreview] InitMixedMultiCategory failed"
+                      << " — falling back to KenneyOnly" << std::endl;
+            solve_mode_ = SolveMode::KenneyOnly;
+            registry_  = std::make_unique<WFCTileRegistry>();
+            adjacency_ = std::make_unique<TileAdjacencyTable>();
+        }
+    }
+
+    if (solve_mode_ == SolveMode::KenneyOnly) {
+        const u32 registered = catalog_.BuildWFCRegistry(*registry_, *adjacency_);
+        if (registered == 0) {
+            std::cerr << "[TestKenneyTilePreview] BuildWFCRegistry failed"
+                      << " (catalog missing one of the 8 required Kenney tiles)"
+                      << std::endl;
+            return false;
+        }
     }
 
     ReseedSolver();
     return true;
+}
+
+// ============================================================================
+// InitMixedMultiCategory (Phase C.1 Task 14)
+// ============================================================================
+//
+// Composes a 27-tile registry from two sources:
+//   * Ruins (15 tiles, WFCCategory::Ruins) via WFCTileCatalog::Populate,
+//     which also auto-fills the placeholder socket adjacency. We discard
+//     that adjacency and rebuild from the AutoSocketClassifier below so
+//     both sources share one socket encoding (8×8 occupancy grid).
+//   * ProceduralRoomPack (12 tiles, WFCCategory::Primitive) generated
+//     procedurally at runtime — no disk assets.
+//
+// Mesh data flow:
+//   1. Each tile's RHIMeshAsset is owned by ruins_meshes_ /
+//      procedural_room_meshes_ (value-typed vectors; assets outlive the
+//      solver). Pointers are captured in mesh_lookup_ for the classifier.
+//   2. Each tile is also registered as a render entity via
+//      RegisterProceduralMesh + RegisterMeshEntity so spawned ECS entities
+//      render correctly. The render slot index is written into
+//      WFCTile::mesh_handles[0..variant_count-1].
+//   3. WFCTile::mesh_handles[] store the slot index (cast to geometry_id),
+//      matching the convention used by TestWFCRuinsRendering and
+//      TestWFCStreaming.
+//
+// Adjacency:
+//   AutoSocketClassifier ray-traces each face against the original
+//   RHIMeshAsset, builds a 64-bit occupancy signature, and matches opposing
+//   faces after MirrorFlipU. This replaces the corner-byte socket encoding
+//   that Populate just wrote, so both categories share one compatibility
+//   table.
+
+bool KenneyTilePreviewTestCase::InitMixedMultiCategory() {
+    using namespace primal::graphics::wfc;
+    using namespace primal::graphics::rhi;
+    namespace content = primal::content;
+
+    // -- 1. Ruins: 15 tiles via WFCTileCatalog::Populate --
+    WFCTileCatalog::Populate(*registry_, *adjacency_);
+    const u32 ruins_count = registry_->Count();   // expected 15
+    if (ruins_count == 0) {
+        std::cerr << "[TestKenneyTilePreview] Populate yielded 0 tiles"
+                  << std::endl;
+        return false;
+    }
+
+    // Register ruins procedural meshes for rendering + capture RHIMeshAsset*.
+    //
+    // All 15 ruins tiles share a weathered-cube mesh factory call (different
+    // seed/amp per tile so they aren't bit-identical). We deliberately avoid
+    // create_ramp_mesh / create_corner_in/out_mesh — those are register-only
+    // factory variants that don't expose the RHIMeshAsset, and the
+    // AutoSocketClassifier needs the raw mesh to ray-trace. Visual variety
+    // within Ruins is sacrificed here for the multi-category smoke target;
+    // task 14's research goal is "do mixed categories converge", not "do
+    // 15 distinct ruins shapes render".
+    primal::id::id_type noTex[3] = {
+        primal::id::invalid_id, primal::id::invalid_id, primal::id::invalid_id
+    };
+    ruins_meshes_.clear();
+    ruins_meshes_.resize(ruins_count);
+    auto register_mesh = [&](RHIMeshAsset& asset) -> u32 {
+        const primal::id::id_type geo = content::RegisterProceduralMesh(asset);
+        pipeline->RegisterMeshEntity(geo, noTex, 3);
+        auto* fwd = pipeline->GetForwardRenderer();
+        return fwd ? (fwd->GetMeshInfoCount() - 1u) : 0u;
+    };
+    for (u32 tid = 0; tid < ruins_count; ++tid) {
+        // Per-tile seed/amp so the renderer can still tell tiles apart by
+        // weathering pattern, even though topology is identical.
+        const u32 seed = 100u + tid * 7u;
+        const f32 amp = 0.02f + 0.01f * static_cast<f32>(tid % 5);
+        content::create_weathered_cube_mesh(ruins_meshes_[tid],
+                                            1.0f, 1.0f, 1.0f, seed, amp);
+    }
+
+    // Override WFCTile::mesh_handles[v] with the render slot index. All
+    // variants within one tile share a mesh (variant rotation is a socket
+    // concern). Also build mesh_lookup_ for the classifier callback.
+    mesh_lookup_.clear();
+    mesh_lookup_.resize(ruins_count, nullptr);
+    for (u32 tid = 0; tid < ruins_count; ++tid) {
+        WFCTile& t = registry_->GetMutable(wfc_tile_id{tid});
+        const u32 slot = register_mesh(ruins_meshes_[tid]);
+        for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+            t.mesh_handles[v] = primal::geometry::geometry_id{slot};
+        }
+        // Force category = Ruins for the populated set. Populate already
+        // sets this for tiles 5..14, but tiles 0..4 inherit Primitive from
+        // the WFCTile default. Override so the active_category_mask logic
+        // (Ruins | Primitive) draws from both sources as intended.
+        t.category = WFCCategory::Ruins;
+        mesh_lookup_[tid] = &ruins_meshes_[tid];
+    }
+
+    // -- 2. ProceduralRoomPack: 12 tiles, appended after ruins --
+    procedural_room_meshes_.clear();
+    procedural_room_meshes_.resize(ProceduralRoomPack::kTileCount);
+    for (u32 i = 0; i < ProceduralRoomPack::kTileCount; ++i) {
+        ProceduralRoomPack::GenerateTileMesh(i, procedural_room_meshes_[i]);
+
+        WFCTile t{};
+        t.name = ProceduralRoomPack::TileDefs()[i].name;
+        t.category = WFCCategory::Primitive;
+        t.variant_count = 1;
+        t.bounds_extents = math::v3{1.0f, 1.0f, 1.0f};
+
+        const u32 slot = register_mesh(procedural_room_meshes_[i]);
+        for (u32 v = 0; v < WFCTile::MaxVariants; ++v) {
+            t.mesh_handles[v] = primal::geometry::geometry_id{slot};
+        }
+        registry_->Register(t);
+        mesh_lookup_.push_back(&procedural_room_meshes_[i]);
+    }
+
+    // -- 3. Rebuild adjacency from classifier --
+    // WFCTileCatalog::Populate filled adjacency_ with corner-byte entries
+    // (placeholder sockets). Those encodings are not the 8×8 grid format
+    // we use here — clear and rebuild from the AutoSocketClassifier so
+    // both Ruins and Primitive tiles share one compatibility table.
+    adjacency_->Clear();
+    const u32 added = adjacency_->BuildFromClassifier(
+        *registry_,
+        [this](u32 tile_index, u32 /*variant*/) -> const RHIMeshAsset* {
+            return tile_index < mesh_lookup_.size() ? mesh_lookup_[tile_index]
+                                                    : nullptr;
+        });
+
+    std::cout << "[TestKenneyTilePreview] MixedMulti registry: "
+              << registry_->Count() << " tiles ("
+              << ruins_count << " ruins + "
+              << ProceduralRoomPack::kTileCount << " procedural), "
+              << added << " adjacency entries"
+              << std::endl;
+    return added > 0;
 }
 
 // ============================================================================
@@ -288,7 +445,22 @@ void KenneyTilePreviewTestCase::ReseedSolver() {
         static_cast<s32>(grid_d_)};
     config.seed       = rng_seed_;
     config.max_generations = 32;
-    config.active_category_mask = CategoryMaskFor(WFCCategory::Dungeon);
+
+    // Phase C.1 Task 14: category mask depends on mode + degradation state.
+    //   KenneyOnly                       → Dungeon
+    //   MixedMulti (nominal)             → Ruins | Primitive
+    //   MixedMulti (degraded, see T15)   → Ruins only
+    if (solve_mode_ == SolveMode::MixedMulti) {
+        if (degraded_to_single_set_) {
+            config.active_category_mask = CategoryMaskFor(WFCCategory::Ruins);
+        } else {
+            config.active_category_mask =
+                CategoryMaskFor(WFCCategory::Ruins) |
+                CategoryMaskFor(WFCCategory::Primitive);
+        }
+    } else {
+        config.active_category_mask = CategoryMaskFor(WFCCategory::Dungeon);
+    }
 
     solver_ = std::make_unique<WFCSolver>();
 
@@ -342,7 +514,7 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
     // Emscripten keyCodes used below (kept as int so the lambda call matches).
     constexpr int kBracketOpen = 219, kBracketClose = 221;
     constexpr int kComma = 188, kPeriod = 190, kMinus = 189, kPlus = 187;
-    constexpr int kR = 82, kT = 84, kO = 79, kP = 80;
+    constexpr int kR = 82, kT = 84, kO = 79, kP = 80, kM = 77;
 #else
     using ic = primal::input::input_code;
     auto key_now = [](ic::code c) {
@@ -360,9 +532,11 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
     constexpr ic::code kT       = ic::key_t;
     constexpr ic::code kO       = ic::key_o;
     constexpr ic::code kP       = ic::key_p;
+    constexpr ic::code kM       = ic::key_m;
 #endif
 
     bool changed      = false;
+    bool mode_changed = false;   // mode switch needs InitWFC, not ReseedSolver
     const char* why   = "manual";
 
     const u32 kSideMin = 4, kSideMax = 64;
@@ -388,6 +562,17 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
         if (new_origin != origin_preset_) {
             origin_preset_ = new_origin;
             changed = true; why = "panel:origin";
+        }
+    }
+    if (has_pending_solve_mode_) {
+        has_pending_solve_mode_ = false;
+        const u32 m = pending_solve_mode_ % 2u;  // 0=KenneyOnly, 1=MixedMulti
+        auto new_mode = static_cast<SolveMode>(m);
+        if (new_mode != solve_mode_) {
+            solve_mode_ = new_mode;
+            changed = true; mode_changed = true;
+            degraded_to_single_set_ = false;
+            why = "panel:solve-mode";
         }
     }
     if (has_pending_grid_w_) {
@@ -455,6 +640,17 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
             (static_cast<u32>(origin_preset_) + 1) % 3);
         changed = true; why = "origin preset cycled";
     }
+    if (just_pressed_(kM, key_now(kM))) {
+        // Phase C.1 Task 14: toggle MixedMulti ↔ KenneyOnly. Mode switch
+        // requires rebuilding registry_+adjacency_ (not just ReseedSolver)
+        // because the two modes use different tile sets + socket encodings.
+        solve_mode_ = (solve_mode_ == SolveMode::KenneyOnly)
+                          ? SolveMode::MixedMulti
+                          : SolveMode::KenneyOnly;
+        degraded_to_single_set_ = false;
+        changed = true; mode_changed = true;
+        why = "solve mode cycled";
+    }
 
     if (!changed) return;
 
@@ -472,7 +668,15 @@ void KenneyTilePreviewTestCase::HandleGridEditKeys() {
         SyncWfcHudIfWasm(obs, origin, grid_w_, grid_h_, grid_d_, rng_seed_);
     }
 
-    ReseedSolver();
+    if (mode_changed) {
+        // Mode switch: rebuild registry_+adjacency_ from scratch, then
+        // reseed the solver against the new tile set.
+        registry_  = std::make_unique<primal::graphics::wfc::WFCTileRegistry>();
+        adjacency_ = std::make_unique<primal::graphics::wfc::TileAdjacencyTable>();
+        InitWFC();
+    } else {
+        ReseedSolver();
+    }
     PrintGridState(why);
 }
 
@@ -590,22 +794,107 @@ void KenneyTilePreviewTestCase::PumpSolverFrame() {
                       << per_tile[t] << std::endl;
         }
 
-        // Smoke: verify the showcase actually produced a real grid.
-        u32 distinct_tiles = 0;
-        for (u32 count : per_tile) {
-            if (count > 0) ++distinct_tiles;
+        // Phase C.1 Task 15: degrade-to-single-set fallback. Only fires
+        // on GivenUp in MixedMulti mode (KenneyOnly has no fallback path —
+        // if it gives up, the user just reseeds manually). After degrade,
+        // the solver re-initializes with a Ruins-only mask and PumpSolverFrame
+        // returns early; the next frame picks up the new solve.
+        if (solver_state_ == WFCSolver::StepResult::GivenUp &&
+            solve_mode_ == SolveMode::MixedMulti &&
+            !degraded_to_single_set_) {
+            DegradeToSingleSet();
+            return;
         }
-        if (total_collapses_ < kMinCellsCollapsed) {
-            std::cerr << "[TestKenneyTilePreview] SMOKE FAIL: only "
-                      << total_collapses_ << " cells collapsed (need >="
-                      << kMinCellsCollapsed << ")" << std::endl;
-        }
-        if (distinct_tiles < kMinDistinctTiles) {
-            std::cerr << "[TestKenneyTilePreview] SMOKE FAIL: only "
-                      << distinct_tiles << " distinct tile ids (need >="
-                      << kMinDistinctTiles << ")" << std::endl;
+
+        CheckSmokeAsserts();
+    }
+}
+
+// ============================================================================
+// CheckSmokeAsserts (Phase C.1 Task 15)
+// ============================================================================
+//
+// Logs PASS/FAIL against the kMin* criteria. Never crashes — the GUI binary
+// keeps the window open on failure so the operator can inspect the grid.
+// In MixedMulti mode the smoke also enforces ≥ kMinDistinctCategories so
+// the silent failure mode where BuildFromClassifier prunes one category to
+// zero doesn't pass.
+
+void KenneyTilePreviewTestCase::CheckSmokeAsserts() {
+    using namespace primal::graphics::wfc;
+    if (!grid_ || !registry_) return;
+
+    const auto& cells = grid_->Cells();
+    const u32 tile_count = registry_->Count();
+
+    u32 collapsed_count = 0;
+    std::set<u32> distinct_tile_ids;
+    std::set<WFCCategory> distinct_categories;
+    for (u32 i = 0; i < cells.size(); ++i) {
+        if (!cells[i].collapsed) continue;
+        ++collapsed_count;
+        const u32 tid = static_cast<u32>(cells[i].collapsed_tile);
+        if (tid < tile_count) {
+            distinct_tile_ids.insert(tid);
+            distinct_categories.insert(registry_->Get(wfc_tile_id{tid}).category);
         }
     }
+
+    bool pass = true;
+    if (collapsed_count < kMinCellsCollapsed) {
+        std::cerr << "[TestKenneyTilePreview] SMOKE FAIL: only "
+                  << collapsed_count << " cells collapsed (need >="
+                  << kMinCellsCollapsed << ")" << std::endl;
+        pass = false;
+    }
+    if (distinct_tile_ids.size() < kMinDistinctTiles) {
+        std::cerr << "[TestKenneyTilePreview] SMOKE FAIL: only "
+                  << distinct_tile_ids.size() << " distinct tile ids (need >="
+                  << kMinDistinctTiles << ")" << std::endl;
+        pass = false;
+    }
+    if (solve_mode_ == SolveMode::MixedMulti &&
+        distinct_categories.size() < kMinDistinctCategories) {
+        std::cerr << "[TestKenneyTilePreview] SMOKE FAIL (MixedMulti): only "
+                  << distinct_categories.size() << " categories (need >="
+                  << kMinDistinctCategories
+                  << ") — one source was likely pruned by the classifier"
+                  << std::endl;
+        pass = false;
+    }
+
+    if (pass) {
+        std::cout << "[TestKenneyTilePreview] SMOKE PASS: "
+                  << collapsed_count << " cells, "
+                  << distinct_tile_ids.size() << " tiles, "
+                  << distinct_categories.size() << " categories"
+                  << (degraded_to_single_set_ ? " (after degrade)" : "")
+                  << std::endl;
+    }
+}
+
+// ============================================================================
+// DegradeToSingleSet (Phase C.1 Task 15)
+// ============================================================================
+//
+// Last-resort fallback when the mixed solver exhausts max_generations
+// without converging. Narrows active_category_mask to Ruins only and
+// reseeds — the simpler Ruins-only solve is much more likely to converge
+// since every tile shares solid-cube face signatures (classifier returns
+// all-ones for every face of a weathered cube). The degraded flag is
+// sticky until the next ReseedSolver triggered by a non-degrade path
+// (reseed / mode switch / panel edit), so CheckSmokeAsserts can report
+// "after degrade" status.
+
+void KenneyTilePreviewTestCase::DegradeToSingleSet() {
+    using namespace primal::graphics::wfc;
+    std::cout << "[TestKenneyTilePreview] degrading to Ruins-only after "
+              << total_restarts_ << " restarts (mixed solve gave up)"
+              << std::endl;
+    degraded_to_single_set_ = true;
+    // Bump the seed so the degraded solve doesn't repeat the same deadlock.
+    ++rng_seed_;
+    ReseedSolver();
 }
 
 // ============================================================================
