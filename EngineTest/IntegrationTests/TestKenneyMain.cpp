@@ -71,6 +71,14 @@ EMSCRIPTEN_KEEPALIVE void wfc_reseed_new() {
     if (auto* t = KenneyTilePreviewTestCase::Instance()) t->RequestReseedNew();
 }
 
+// Phase C.1 Task 16: switch tile-source composition. KenneyOnly = 0 (8 hand-authored
+// Kenney tiles, Dungeon category); MixedMulti = 1 (15 Ruins + 12 ProceduralRoomPack
+// tiles spanning 2 categories, adjacency via AutoSocketClassifier). Switching mode
+// rebuilds registry+adjacency from scratch — heavier than a reseed.
+EMSCRIPTEN_KEEPALIVE void wfc_set_solve_mode(int mode) {
+    if (auto* t = KenneyTilePreviewTestCase::Instance()) t->RequestSolveMode(static_cast<u32>(mode));
+}
+
 EMSCRIPTEN_KEEPALIVE int wfc_get_observer() {
     auto* t = KenneyTilePreviewTestCase::Instance();
     return t ? static_cast<int>(t->GetObserverKind()) : 0;
@@ -94,6 +102,11 @@ EMSCRIPTEN_KEEPALIVE int wfc_get_grid_h() {
 EMSCRIPTEN_KEEPALIVE int wfc_get_grid_d() {
     auto* t = KenneyTilePreviewTestCase::Instance();
     return t ? static_cast<int>(t->GetGridD()) : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int wfc_get_solve_mode() {
+    auto* t = KenneyTilePreviewTestCase::Instance();
+    return t ? static_cast<int>(t->GetSolveMode()) : 0;
 }
 
 } // extern "C"

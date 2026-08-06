@@ -468,6 +468,15 @@
         Origin applies only when observer = Distance.
       </div>
 
+      <h4>Tile Source</h4>
+      <select id="wfc-solve-mode-select" class="wfc-select">
+        <option value="0">Kenney Dungeon (8 tiles, 1 category)</option>
+        <option value="1">Mixed Multi (27 tiles, 2 categories)</option>
+      </select>
+      <div class="hint">
+        Mixed = Ruins (15) + ProceduralRoomPack (12). Auto-socket classifier.
+      </div>
+
       <h4>Grid Dimensions</h4>
       <div class="kv-row">
         <span class="kv-label">Width (X) <span class="kv-val" id="wfc-grid-w-val">16</span></span>
@@ -630,6 +639,16 @@
         if (orgSel) {
           orgSel.addEventListener('change', function() {
             wfcCall('wfc_set_origin', ['number'], [parseInt(orgSel.value)]);
+          });
+        }
+
+        // Tile source / solve-mode dropdown — switches between Kenney-only
+        // (Dungeon category) and Mixed Multi (Ruins + ProceduralRoomPack).
+        // Switching rebuilds registry+adjacency, so it's heavier than a reseed.
+        var modeSel = document.getElementById('wfc-solve-mode-select');
+        if (modeSel) {
+          modeSel.addEventListener('change', function() {
+            wfcCall('wfc_set_solve_mode', ['number'], [parseInt(modeSel.value)]);
           });
         }
 
