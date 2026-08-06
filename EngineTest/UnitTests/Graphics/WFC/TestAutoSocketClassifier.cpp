@@ -74,8 +74,8 @@ TestResult TestClassifyFaceEmptyMesh() {
 // Symmetric bit pattern (bit 0 and bit 7 both set in row 0) mirrors to itself.
 TestResult TestMirrorFlipU() {
     SocketEncoding sig = 0;
-    sig |= (1ULL << 0);   // bit (i=0, j=0) — first bit of row 0
-    sig |= (1ULL << 7);   // bit (i=7, j=0) — last bit of row 0
+    sig |= (SocketEncoding{1} << 0);   // bit (i=0, j=0) — first bit of row 0
+    sig |= (SocketEncoding{1} << 7);   // bit (i=7, j=0) — last bit of row 0
     const SocketEncoding mirrored = AutoSocketClassifier::MirrorFlipU(sig);
     TEST_ASSERT_EQ(sig, mirrored,
                    "row symmetric pattern (bits 0 and 7) mirrors to itself");

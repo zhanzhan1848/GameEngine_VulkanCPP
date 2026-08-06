@@ -518,10 +518,10 @@ inline void emit_doorway_cube_geometry(graphics::rhi::RHIMeshAsset& out,
     //   v25 corresponds to v9  (low-Y,  low-Z)
     //   v26 corresponds to v10 (high-Y, low-Z)
     //   v27 corresponds to v11 (high-Y, high-Z)
-    WriteVertex(pos + 24 * 12, elem + 24 * 20, +hx, -hy * 0.5f, +hz * 0.5f, 1, 0, 0, 0.25f, 0.25f);
-    WriteVertex(pos + 25 * 12, elem + 25 * 20, +hx, -hy * 0.5f, -hz * 0.5f, 1, 0, 0, 0.75f, 0.25f);
-    WriteVertex(pos + 26 * 12, elem + 26 * 20, +hx, +hy * 0.5f, -hz * 0.5f, 1, 0, 0, 0.75f, 0.75f);
-    WriteVertex(pos + 27 * 12, elem + 27 * 20, +hx, +hy * 0.5f, +hz * 0.5f, 1, 0, 0, 0.25f, 0.75f);
+    WriteVertex(pos + 24 * 12, elem + 24 * PROC_ELEM_STRIDE, +hx, -hy * 0.5f, +hz * 0.5f, 1, 0, 0, 0.25f, 0.25f);
+    WriteVertex(pos + 25 * 12, elem + 25 * PROC_ELEM_STRIDE, +hx, -hy * 0.5f, -hz * 0.5f, 1, 0, 0, 0.75f, 0.25f);
+    WriteVertex(pos + 26 * 12, elem + 26 * PROC_ELEM_STRIDE, +hx, +hy * 0.5f, -hz * 0.5f, 1, 0, 0, 0.75f, 0.75f);
+    WriteVertex(pos + 27 * 12, elem + 27 * PROC_ELEM_STRIDE, +hx, +hy * 0.5f, +hz * 0.5f, 1, 0, 0, 0.25f, 0.75f);
 
     // +X face picture-frame triangles, all CCW from +X viewer. Each strip is
     // a quad split into 2 triangles; winding per strip was verified by hand
