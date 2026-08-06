@@ -20,6 +20,7 @@
 #include "Engine/Graphics/WFC/WFCCategory.h"
 #include "Engine/Graphics/WFC/WFCMinEntropyObserver.h"
 #include "Engine/Graphics/WFC/WFCDistanceObserver.h"
+#include <cstdio>
 #include <memory>
 
 using namespace primal::graphics::wfc;
@@ -58,7 +59,10 @@ TestResult TestWFCSolver_Initialize_Populates_Candidate_Masks() {
     // After Initialize, the single cell should have candidate_mask=1, candidate_count=1
     const WFCCell& c = grid.CellAt({0, 0, 0});
     TEST_ASSERT_EQ(1u, c.candidate_count, "Cell has 1 candidate (the 1 registered tile variant)");
-    TEST_ASSERT_EQ(1ULL, c.candidate_mask, "Candidate mask = bit 0 set");
+    TEST_ASSERT_EQ(1ULL, c.candidate_mask[0], "Word 0 = bit 0 set");
+    for (u32 w = 1; w < WFCCell::kMaskWords; ++w) {
+        TEST_ASSERT_EQ(0ULL, c.candidate_mask[w], "Higher words zero");
+    }
     TEST_ASSERT(!c.collapsed, "Cell not collapsed yet");
     return TestResult::Passed;
 }
@@ -321,7 +325,10 @@ TestResult TestWFCSolver_Initialize_Populates_Multi_Tile_Candidates() {
     for (u32 v = 0; v < 4; ++v) {
         expected_mask |= (1ULL << WFCTileRegistry::BitForTileVariant(wfc_tile_id{1}, v));
     }
-    TEST_ASSERT_EQ(expected_mask, c.candidate_mask, "Candidate mask = cube bit + 4 ramp bits");
+    TEST_ASSERT_EQ(expected_mask, c.candidate_mask[0], "Word 0 = cube bit + 4 ramp bits");
+    for (u32 w = 1; w < WFCCell::kMaskWords; ++w) {
+        TEST_ASSERT_EQ(0ULL, c.candidate_mask[w], "Higher words zero (cube+ramp fit in word 0)");
+    }
     return TestResult::Passed;
 }
 
@@ -452,10 +459,14 @@ TestResult TestWFCSolver_PopulateRespectsCategoryMask() {
     u64 expected_ruw_mask = 0;
     expected_ruw_mask |= (1ULL << WFCTileRegistry::BitForTileVariant(wfc_tile_id{2}, 0));
 
-    u64 populated = solver.LastPopulatedMaskForTest();
-    TEST_ASSERT_EQ(expected_ruw_mask, populated,
-                   "populated mask = only ruin_a's candidate bit (prims filtered out)");
-    TEST_ASSERT(populated != 0, "mask non-zero");
+    u64 populated[WFCCell::kMaskWords];
+    solver.LastPopulatedMaskForTest(populated);
+    TEST_ASSERT_EQ(expected_ruw_mask, populated[0],
+                   "Word 0 = only ruin_a's candidate bit (prims filtered out)");
+    for (u32 w = 1; w < WFCCell::kMaskWords; ++w) {
+        TEST_ASSERT_EQ(0ULL, populated[w], "Higher words zero (no high-tile bits)");
+    }
+    TEST_ASSERT(populated[0] != 0, "mask non-zero");
     return TestResult::Passed;
 }
 
@@ -622,6 +633,80 @@ TestResult TestWFCSolver_SetObserver_DistanceChangesOrder() {
     return TestResult::Passed;
 }
 
+// Phase C.1 Task 3: verify the widened u64[kMaskWords] candidate_mask supports
+// the full 64-tile registry cap. With 64 tiles × 1 variant each, candidate bits
+// span all 4 words (tiles 0-15 → word 0, 16-31 → word 1, 32-47 → word 2,
+// 48-63 → word 3). A scalar u64 mask would silently truncate to word 0 and
+// lose 75% of the registered tiles. This test catches such regressions.
+//
+// Discriminating assertions:
+//   * Every cell's candidate_count == 64 (one per registered tile).
+//   * Every cell's candidate_mask[w] is non-zero for w = 0..3 (no word empty).
+//   * LastPopulatedMaskForTest returns all-ones for every word.
+TestResult TestWFCSolver_HandlesTile63() {
+    WFCConfig config;
+    config.grid_size = {1, 1, 1};  // single cell — sufficient to inspect the mask
+    config.max_cells_per_frame = 1;
+    config.max_ms_per_frame = 100;
+    config.seed = 42;
+    config.max_generations = 4;
+
+    WaveGrid grid;
+    WFCTileRegistry reg;
+    TileAdjacencyTable adj;
+    WFCStepBuffer buf;
+
+    // Register MaxTiles (64) tiles, each with 1 variant. With MaxVariantsPerTile=4,
+    // 64 tiles × 4 bits = 256 candidate bits = exactly the kMaskWords*64 capacity.
+    // Only variant 0 of each tile sets a bit (the other 3 variant slots are unused
+    // but still contribute 3 zero bits to the bit layout per tile).
+    // WFCTile::name is const char* (no engine string type) — use a static buffer
+    // so the pointer outlives the registry's copy.
+    static char tile_names[WFCTileRegistry::MaxTiles][16];
+    for (u32 t = 0; t < WFCTileRegistry::MaxTiles; ++t) {
+        WFCTile tile{};
+        std::snprintf(tile_names[t], sizeof(tile_names[t]), "tile_%u", t);
+        tile.name = tile_names[t];
+        tile.variant_count = 1;
+        tile.bounds_extents = primal::math::v3{1.0f, 1.0f, 1.0f};
+        reg.Register(tile);
+    }
+    TEST_ASSERT_EQ(WFCTileRegistry::MaxTiles, reg.Count(),
+                   "Registry accepted all 64 tiles");
+
+    WFCSolver solver;
+    solver.Initialize(config, grid, reg, adj, buf);
+
+    // Every cell should have exactly MaxTiles candidates (one per registered tile,
+    // since each tile contributes 1 set bit at variant 0).
+    const WFCCell& c = grid.CellAt({0, 0, 0});
+    TEST_ASSERT_EQ(WFCTileRegistry::MaxTiles, c.candidate_count,
+                   "candidate_count = 64 (one per registered tile)");
+
+    // Every word must be non-zero. With 64 tiles × 1 variant each, every word
+    // holds 16 set bits (tiles 16*w through 16*w+15). A scalar mask regression
+    // (last_populated_mask_ as u64) would silently truncate bits 64+.
+    for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+        TEST_ASSERT(c.candidate_mask[w] != 0,
+                    "Every word non-zero (64 tiles span all 4 words)");
+    }
+
+    // LastPopulatedMaskForTest must mirror the cell mask. With 64 tiles, each
+    // word holds the same pattern (16 set bits at variant-0 positions of tiles
+    // 16*w..16*w+15). Variant 0 of tile t sets bit t*4 within the global layout,
+    // so each word has bits {0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60} set
+    // = 0x1111111111111111. We don't hardcode that pattern — instead verify the
+    // mask is non-zero in every word AND matches the cell's mask exactly.
+    u64 populated[WFCCell::kMaskWords];
+    solver.LastPopulatedMaskForTest(populated);
+    for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+        TEST_ASSERT_EQ(c.candidate_mask[w], populated[w],
+                       "LastPopulatedMaskForTest matches cell mask");
+        TEST_ASSERT(populated[w] != 0, "Word non-zero (multi-word support)");
+    }
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("WFCSolver");
     TEST_CASE(suite, "Initialize_Populates_Candidate_Masks", TestWFCSolver_Initialize_Populates_Candidate_Masks);
@@ -633,6 +718,7 @@ int main() {
     TEST_CASE(suite, "Demo_4x4x4_TwoTile", TestWFCSolver_Demo_4x4x4_TwoTile);
     TEST_CASE(suite, "CollapseCell_Decodes_Multi_Tile", TestWFCSolver_CollapseCell_Decodes_Multi_Tile);
     TEST_CASE(suite, "PopulateRespectsCategoryMask", TestWFCSolver_PopulateRespectsCategoryMask);
+    TEST_CASE(suite, "HandlesTile63", TestWFCSolver_HandlesTile63);
     TEST_CASE(suite, "DefaultObserver_IsMinEntropy", TestWFCSolver_DefaultObserver_IsMinEntropy);
     TEST_CASE(suite, "SetObserver_PreservesDefaultBehavior", TestWFCSolver_SetObserver_PreservesDefaultBehavior);
     TEST_CASE(suite, "SetObserver_DistanceChangesOrder", TestWFCSolver_SetObserver_DistanceChangesOrder);

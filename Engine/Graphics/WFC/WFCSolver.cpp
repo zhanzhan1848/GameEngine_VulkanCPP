@@ -68,8 +68,8 @@ void WFCSolver::PopulateAllCandidates(WaveGrid& grid, const WFCTileRegistry& reg
     //
     // Phase C.1 Task 2 (mechanical port): candidate_mask is now u64[kMaskWords]
     // (256 bits). full_mask[] spreads across all words; popcount is summed.
-    // TODO(Task 3): last_populated_mask_ stays scalar u64 (word 0 only) — Task 3
-    // should widen the test accessor if multi-word introspection is needed.
+    // Phase C.1 Task 3: last_populated_mask_ is widened to u64[kMaskWords] so
+    // test introspection (LastPopulatedMaskForTest) can verify multi-word masks.
     u64 full_mask[WFCCell::kMaskWords] = {0, 0, 0, 0};
     for (u32 t = 0; t < registry.Count(); ++t) {
         const WFCTile& tile = registry.Get(wfc_tile_id{t});
@@ -83,7 +83,9 @@ void WFCSolver::PopulateAllCandidates(WaveGrid& grid, const WFCTileRegistry& reg
             }
         }
     }
-    last_populated_mask_ = full_mask[0];  // TODO(Task 3): widen to u64[kMaskWords]
+    for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+        last_populated_mask_[w] = full_mask[w];
+    }
     u32 total_candidates = 0;
     for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
         total_candidates += static_cast<u32>(__builtin_popcountll(full_mask[w]));
@@ -252,6 +254,12 @@ WFCSolver::StepResult WFCSolver::Step(WFCSolveBudget& budget) {
         return StepResult::Done;
     }
     return StepResult::InProgress;
+}
+
+void WFCSolver::LastPopulatedMaskForTest(u64 out[WFCCell::kMaskWords]) const {
+    for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
+        out[w] = last_populated_mask_[w];
+    }
 }
 
 void WFCSolver::SetObserver(std::unique_ptr<WFCObserver> observer) {

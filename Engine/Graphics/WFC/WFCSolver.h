@@ -86,10 +86,11 @@ public:
 
     u32 Generation() const { return generation_; }
 
-    // Debug/test only: returns the candidate mask computed by the last
-    // PopulateAllCandidates call (post category-mask filtering). Zero if
-    // PopulateAllCandidates has not run yet.
-    u64 LastPopulatedMaskForTest() const { return last_populated_mask_; }
+    // Debug/test only: fills `out` with the full u64[kMaskWords] candidate
+    // mask computed by the last PopulateAllCandidates call (post category-mask
+    // filtering). All-zero if PopulateAllCandidates has not run yet.
+    // C++ arrays can't be returned by value, so we use an output parameter.
+    void LastPopulatedMaskForTest(u64 out[WFCCell::kMaskWords]) const;
 
 private:
     // Fills every cell with the full candidate mask derived from the registry's
@@ -130,7 +131,10 @@ private:
     // (also called on restart) can re-apply the category filter without needing
     // the config passed back in. Default ~0ULL = all categories eligible.
     u64             active_category_mask_{~0ULL};
-    u64             last_populated_mask_{0};
+    // Phase C.1 Task 3: widened to full u64[kMaskWords] so test introspection
+    // can verify multi-word populated masks (e.g. 64-tile registrations where
+    // bits span words 0..3). All-zero until PopulateAllCandidates runs.
+    u64             last_populated_mask_[WFCCell::kMaskWords] = {0, 0, 0, 0};
 };
 
 } // namespace primal::graphics::wfc
