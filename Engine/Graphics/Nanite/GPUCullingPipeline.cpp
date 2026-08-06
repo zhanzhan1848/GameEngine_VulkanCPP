@@ -126,6 +126,27 @@ bool GPUCullingPipeline::Initialize(rhi::RHIDeviceBase* device, const CullingCon
     device_ = device;
     config_ = config;
 
+    // T4.6.5 part 35.1: Vulkan — disable HZB occlusion culling.
+    // Root cause: Stage5 samples HZB at cluster-center with min-filter mip
+    // chain. For Sponza's thin geometry (pillars, cloth, banners), mip 1+ at
+    // mid-frustum returns depth of NEARBY closer geometry (floor, walls) — not
+    // the cluster itself. Cluster is falsely marked occluded (hzb_depth <
+    // cluster_depth - bias), even though its actual rasterized triangles are
+    // fully visible. Point-sampling at the center cannot represent the
+    // cluster's projected footprint, and the bias is too tight for thin
+    // objects at mid-distance (5-30 units).
+    //
+    // Y-flip UV math fix from part 35 (commit 11f7220) is preserved as a
+    // defensive improvement (was correct as framebuffer top-left convention)
+    // but does not address this issue — the failing clusters are at
+    // mid-screen (NDC.y≈0), which is symmetric under Y-flip.
+    //
+    // Tier 5 fix: cone cull or multi-tap HZB sample across cluster's projected
+    // bounds (matches UE5 Nanite approach). Multi-session scope.
+    if (device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        config_.enable_occlusion_culling = false;
+    }
+
     if (!CreatePipelines()) {
         std::cerr << "Failed to create pipelines" << std::endl;
         return false;
