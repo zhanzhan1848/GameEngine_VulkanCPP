@@ -919,8 +919,6 @@ async function createWasm() {
       setTempRet0(0);
       return 0;
     };
-  var ___cxa_find_matching_catch_2 = () => findMatchingCatch([]);
-
   var ___cxa_find_matching_catch_3 = (arg0) => findMatchingCatch([arg0]);
 
   var ___cxa_find_matching_catch_4 = (arg0,arg1) => findMatchingCatch([arg0,arg1]);
@@ -988,10 +986,6 @@ async function createWasm() {
       // Initialize ExceptionInfo content after it was allocated in __cxa_allocate_exception.
       info.init(type, destructor);
       uncaughtExceptionCount++;
-      assert(false, 'Exception thrown, but exception catching is not enabled. Compile with -sNO_DISABLE_EXCEPTION_CATCHING or -sEXCEPTION_CATCHING_ALLOWED=[..] to catch.');
-    };
-
-  var ___resumeException = (ptr) => {
       assert(false, 'Exception thrown, but exception catching is not enabled. Compile with -sNO_DISABLE_EXCEPTION_CATCHING or -sEXCEPTION_CATCHING_ALLOWED=[..] to catch.');
     };
 
@@ -1276,7 +1270,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
             } catch (e) {
               throw new FS.ErrnoError(29);
             }
-            if (result === undefined && bytesRead === 0) {
+            if (result === undefined && !bytesRead) {
               throw new FS.ErrnoError(6);
             }
             if (result === null || result === undefined) break;
@@ -1597,10 +1591,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           node.mtime = node.ctime = Date.now();
   
           if (canOwn) {
-            assert(position === 0, 'canOwn must imply no weird position inside the file');
+            assert(!position, 'canOwn must imply no weird position inside the file');
             node.contents = buffer.subarray(offset, offset + length);
             node.usedBytes = length;
-          } else if (node.usedBytes === 0 && position === 0) { // If this is a simple first write to an empty file, do a fast set since we don't need to care about old data.
+          } else if (!node.usedBytes && !position) { // If this is a simple first write to an empty file, do a fast set since we don't need to care about old data.
             node.contents = buffer.slice(offset, offset + length);
             node.usedBytes = length;
           } else {
@@ -1888,7 +1882,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       assert(id, 'addRunDependency requires an ID')
       assert(!runDependencyTracking[id]);
       runDependencyTracking[id] = 1;
-      if (runDependencyWatcher === null && globalThis.setInterval) {
+      if (!runDependencyWatcher && globalThis.setInterval) {
         // Check for missing dependencies every few seconds
         runDependencyWatcher = setInterval(() => {
           if (ABORT) {
@@ -3140,8 +3134,8 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         // to write to file opened in read-only mode with MAP_PRIVATE flag,
         // as all modifications will be visible only in the memory of
         // the current process.
-        if ((prot & 2) !== 0
-            && (flags & 2) === 0
+        if ((prot & 2)
+            && !(flags & 2)
             && (stream.flags & 2097155) !== 2) {
           throw new FS.ErrnoError(2);
         }
@@ -3234,7 +3228,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         // use a buffer to avoid overhead of individual crypto calls per byte
         var randomBuffer = new Uint8Array(1024), randomLeft = 0;
         var randomByte = () => {
-          if (randomLeft === 0) {
+          if (!randomLeft) {
             randomFill(randomBuffer);
             randomLeft = randomBuffer.byteLength;
           }
@@ -3450,7 +3444,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
               } catch (e) {
                 throw new FS.ErrnoError(29);
               }
-              if (result === undefined && bytesRead === 0) {
+              if (result === undefined && !bytesRead) {
                 throw new FS.ErrnoError(6);
               }
               if (result === null || result === undefined) break;
@@ -4264,7 +4258,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         function arraysHaveEqualContent(arrA, arrB) {
           if (arrA.length != arrB.length) return false;
   
-          for (var i in arrA) {
+          for (var i = 0; i < arrA.length; i++) {
             if (arrA[i] != arrB[i]) return false;
           }
           return true;
@@ -4645,7 +4639,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   fakeRequestAnimationFrame(func) {
         // try to keep 60fps between calls to here
         var now = Date.now();
-        if (MainLoop.nextRAF === 0) {
+        if (!MainLoop.nextRAF) {
           MainLoop.nextRAF = now + 1000/60;
         } else {
           while (now + 2 >= MainLoop.nextRAF) { // fudge a little, to avoid timer jitter causing us to do lots of delay:0
@@ -6158,7 +6152,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       var stream = SYSCALLS.getStreamFromFD(fd);
       FS.llseek(stream, offset, whence);
       HEAP64[((newOffset)>>3)] = BigInt(stream.position);
-      if (stream.getdents && offset === 0 && whence === 0) stream.getdents = null; // reset readdir state
+      if (stream.getdents && !offset && whence === 0) stream.getdents = null; // reset readdir state
       return 0;
     } catch (e) {
     if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
@@ -7220,7 +7214,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   maybeStopUnwind() {
         if (Asyncify.currData &&
             Asyncify.state === Asyncify.State.Unwinding &&
-            Asyncify.exportCallStack.length === 0) {
+            !Asyncify.exportCallStack.length) {
           // We just finished unwinding.
           // Be sure to set the state before calling any other functions to avoid
           // possible infinite recursion here (For example in debug pthread builds
@@ -7436,7 +7430,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         for (var i = 0; i < args.length; i++) {
           var converter = toC[argTypes[i]];
           if (converter) {
-            if (stack === 0) stack = stackSave();
+            if (!stack) stack = stackSave();
             cArgs[i] = converter(args[i]);
           } else {
             cArgs[i] = args[i];
@@ -7448,7 +7442,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       var ret = func(...cArgs);
       function onDone(ret) {
         runtimeKeepalivePop();
-        if (stack !== 0) stackRestore(stack);
+        if (stack) stackRestore(stack);
         return convertReturnValue(ret);
       }
     var asyncMode = opts?.async;
@@ -8005,6 +7999,18 @@ function checkIncomingModuleAPI() {
 
 // Imports from the Wasm binary.
 var _main = Module['_main'] = makeInvalidEarlyAccess('_main');
+var _wfc_set_observer = Module['_wfc_set_observer'] = makeInvalidEarlyAccess('_wfc_set_observer');
+var _wfc_set_origin = Module['_wfc_set_origin'] = makeInvalidEarlyAccess('_wfc_set_origin');
+var _wfc_set_grid_w = Module['_wfc_set_grid_w'] = makeInvalidEarlyAccess('_wfc_set_grid_w');
+var _wfc_set_grid_h = Module['_wfc_set_grid_h'] = makeInvalidEarlyAccess('_wfc_set_grid_h');
+var _wfc_set_grid_d = Module['_wfc_set_grid_d'] = makeInvalidEarlyAccess('_wfc_set_grid_d');
+var _wfc_reseed_same = Module['_wfc_reseed_same'] = makeInvalidEarlyAccess('_wfc_reseed_same');
+var _wfc_reseed_new = Module['_wfc_reseed_new'] = makeInvalidEarlyAccess('_wfc_reseed_new');
+var _wfc_get_observer = Module['_wfc_get_observer'] = makeInvalidEarlyAccess('_wfc_get_observer');
+var _wfc_get_origin = Module['_wfc_get_origin'] = makeInvalidEarlyAccess('_wfc_get_origin');
+var _wfc_get_grid_w = Module['_wfc_get_grid_w'] = makeInvalidEarlyAccess('_wfc_get_grid_w');
+var _wfc_get_grid_h = Module['_wfc_get_grid_h'] = makeInvalidEarlyAccess('_wfc_get_grid_h');
+var _wfc_get_grid_d = Module['_wfc_get_grid_d'] = makeInvalidEarlyAccess('_wfc_get_grid_d');
 var _free = makeInvalidEarlyAccess('_free');
 var _malloc = makeInvalidEarlyAccess('_malloc');
 var _fflush = makeInvalidEarlyAccess('_fflush');
@@ -8108,6 +8114,18 @@ var wasmTable = makeInvalidEarlyAccess('wasmTable');
 
 function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['__main_argc_argv'] != 'undefined', 'missing Wasm export: __main_argc_argv');
+  assert(typeof wasmExports['wfc_set_observer'] != 'undefined', 'missing Wasm export: wfc_set_observer');
+  assert(typeof wasmExports['wfc_set_origin'] != 'undefined', 'missing Wasm export: wfc_set_origin');
+  assert(typeof wasmExports['wfc_set_grid_w'] != 'undefined', 'missing Wasm export: wfc_set_grid_w');
+  assert(typeof wasmExports['wfc_set_grid_h'] != 'undefined', 'missing Wasm export: wfc_set_grid_h');
+  assert(typeof wasmExports['wfc_set_grid_d'] != 'undefined', 'missing Wasm export: wfc_set_grid_d');
+  assert(typeof wasmExports['wfc_reseed_same'] != 'undefined', 'missing Wasm export: wfc_reseed_same');
+  assert(typeof wasmExports['wfc_reseed_new'] != 'undefined', 'missing Wasm export: wfc_reseed_new');
+  assert(typeof wasmExports['wfc_get_observer'] != 'undefined', 'missing Wasm export: wfc_get_observer');
+  assert(typeof wasmExports['wfc_get_origin'] != 'undefined', 'missing Wasm export: wfc_get_origin');
+  assert(typeof wasmExports['wfc_get_grid_w'] != 'undefined', 'missing Wasm export: wfc_get_grid_w');
+  assert(typeof wasmExports['wfc_get_grid_h'] != 'undefined', 'missing Wasm export: wfc_get_grid_h');
+  assert(typeof wasmExports['wfc_get_grid_d'] != 'undefined', 'missing Wasm export: wfc_get_grid_d');
   assert(typeof wasmExports['free'] != 'undefined', 'missing Wasm export: free');
   assert(typeof wasmExports['malloc'] != 'undefined', 'missing Wasm export: malloc');
   assert(typeof wasmExports['fflush'] != 'undefined', 'missing Wasm export: fflush');
@@ -8207,6 +8225,18 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['memory'] != 'undefined', 'missing Wasm export: memory');
   assert(typeof wasmExports['__indirect_function_table'] != 'undefined', 'missing Wasm export: __indirect_function_table');
   _main = Module['_main'] = createExportWrapper('__main_argc_argv', wasmExports['__main_argc_argv'], 2);
+  _wfc_set_observer = Module['_wfc_set_observer'] = createExportWrapper('wfc_set_observer', wasmExports['wfc_set_observer'], 1);
+  _wfc_set_origin = Module['_wfc_set_origin'] = createExportWrapper('wfc_set_origin', wasmExports['wfc_set_origin'], 1);
+  _wfc_set_grid_w = Module['_wfc_set_grid_w'] = createExportWrapper('wfc_set_grid_w', wasmExports['wfc_set_grid_w'], 1);
+  _wfc_set_grid_h = Module['_wfc_set_grid_h'] = createExportWrapper('wfc_set_grid_h', wasmExports['wfc_set_grid_h'], 1);
+  _wfc_set_grid_d = Module['_wfc_set_grid_d'] = createExportWrapper('wfc_set_grid_d', wasmExports['wfc_set_grid_d'], 1);
+  _wfc_reseed_same = Module['_wfc_reseed_same'] = createExportWrapper('wfc_reseed_same', wasmExports['wfc_reseed_same'], 0);
+  _wfc_reseed_new = Module['_wfc_reseed_new'] = createExportWrapper('wfc_reseed_new', wasmExports['wfc_reseed_new'], 0);
+  _wfc_get_observer = Module['_wfc_get_observer'] = createExportWrapper('wfc_get_observer', wasmExports['wfc_get_observer'], 0);
+  _wfc_get_origin = Module['_wfc_get_origin'] = createExportWrapper('wfc_get_origin', wasmExports['wfc_get_origin'], 0);
+  _wfc_get_grid_w = Module['_wfc_get_grid_w'] = createExportWrapper('wfc_get_grid_w', wasmExports['wfc_get_grid_w'], 0);
+  _wfc_get_grid_h = Module['_wfc_get_grid_h'] = createExportWrapper('wfc_get_grid_h', wasmExports['wfc_get_grid_h'], 0);
+  _wfc_get_grid_d = Module['_wfc_get_grid_d'] = createExportWrapper('wfc_get_grid_d', wasmExports['wfc_get_grid_d'], 0);
   _free = createExportWrapper('free', wasmExports['free'], 1);
   _malloc = createExportWrapper('malloc', wasmExports['malloc'], 1);
   _fflush = createExportWrapper('fflush', wasmExports['fflush'], 1);
@@ -8315,15 +8345,11 @@ var wasmImports = {
   /** @export */
   __cxa_end_catch: ___cxa_end_catch,
   /** @export */
-  __cxa_find_matching_catch_2: ___cxa_find_matching_catch_2,
-  /** @export */
   __cxa_find_matching_catch_3: ___cxa_find_matching_catch_3,
   /** @export */
   __cxa_find_matching_catch_4: ___cxa_find_matching_catch_4,
   /** @export */
   __cxa_throw: ___cxa_throw,
-  /** @export */
-  __resumeException: ___resumeException,
   /** @export */
   __syscall_fcntl64: ___syscall_fcntl64,
   /** @export */
@@ -8401,11 +8427,7 @@ var wasmImports = {
   /** @export */
   fd_write: _fd_write,
   /** @export */
-  invoke_ii,
-  /** @export */
   invoke_vi,
-  /** @export */
-  invoke_vii,
   /** @export */
   llvm_eh_typeid_for: _llvm_eh_typeid_for,
   /** @export */
@@ -8500,28 +8522,6 @@ function invoke_vi(index,a1) {
   var sp = stackSave();
   try {
     dynCall_vi(index,a1);
-  } catch(e) {
-    stackRestore(sp);
-    if (!(e instanceof EmscriptenEH)) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_ii(index,a1) {
-  var sp = stackSave();
-  try {
-    return dynCall_ii(index,a1);
-  } catch(e) {
-    stackRestore(sp);
-    if (!(e instanceof EmscriptenEH)) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_vii(index,a1,a2) {
-  var sp = stackSave();
-  try {
-    dynCall_vii(index,a1,a2);
   } catch(e) {
     stackRestore(sp);
     if (!(e instanceof EmscriptenEH)) throw e;

@@ -175,6 +175,89 @@
       line-height: 1.7;
     }
 
+    #debugPanel .btn-row {
+      display: flex;
+      gap: 4px;
+      margin-top: 4px;
+      flex-wrap: wrap;
+    }
+
+    #debugPanel .btn {
+      flex: 1 1 0;
+      min-width: 60px;
+      padding: 5px 8px;
+      background: #2a2a4a;
+      color: #ccc;
+      border: 1px solid #444;
+      border-radius: 3px;
+      font-size: 11px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s, color 0.15s;
+      text-align: center;
+    }
+
+    #debugPanel .btn:hover {
+      background: #3a3a5a;
+      color: #fff;
+    }
+
+    #debugPanel .btn.active {
+      background: #00d4ff;
+      color: #0f0f1a;
+      border-color: #00d4ff;
+      font-weight: 600;
+    }
+
+    #debugPanel .btn-reseed {
+      background: #4a2a2a;
+      border-color: #6a3a3a;
+    }
+
+    #debugPanel .btn-reseed:hover {
+      background: #5a3a3a;
+    }
+
+    #debugPanel .btn-reroll {
+      background: #2a4a2a;
+      border-color: #3a6a3a;
+    }
+
+    #debugPanel .btn-reroll:hover {
+      background: #3a5a3a;
+    }
+
+    #debugPanel input[type="range"].grid-slider {
+      width: 100%;
+      margin-top: 2px;
+      accent-color: #00d4ff;
+    }
+
+    #debugPanel select.wfc-select {
+      width: 100%;
+      padding: 5px 8px;
+      background: #2a2a4a;
+      color: #ccc;
+      border: 1px solid #444;
+      border-radius: 3px;
+      font-size: 11px;
+      font-family: inherit;
+      cursor: pointer;
+      margin-top: 4px;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+
+    #debugPanel select.wfc-select:hover {
+      background: #3a3a5a;
+      color: #fff;
+    }
+
+    #debugPanel select.wfc-select:focus {
+      outline: none;
+      border-color: #00d4ff;
+      color: #fff;
+    }
+
     /* Loading overlay */
     #loading-overlay {
       position: absolute;
@@ -294,27 +377,6 @@
 </head>
 <body>
 
-  <!-- WFC showcase HUD: observer kind + origin preset -->
-  <div id="wfc-hud" style="
-      position: absolute;
-      top: 12px;
-      left: 12px;
-      padding: 8px 12px;
-      background: rgba(15, 15, 26, 0.75);
-      color: #e0e0e0;
-      font-family: 'SF Mono', Menlo, Consolas, monospace;
-      font-size: 12px;
-      line-height: 1.6;
-      border-radius: 4px;
-      border: 1px solid #2a2a4a;
-      pointer-events: none;
-      z-index: 100;
-  ">
-    <div id="wfc-hud-observer">Observer: MinEntropy</div>
-    <div id="wfc-hud-origin">Origin: Center</div>
-    <div style="margin-top: 4px; color: #888;">[O] cycle observer &nbsp; [P] cycle origin</div>
-  </div>
-
   <!-- Header -->
   <div id="header">
     <div>
@@ -332,6 +394,28 @@
     <!-- Canvas area -->
     <div id="canvas-wrap">
       <canvas id="canvas" width="1280" height="720"></canvas>
+
+      <!-- WFC showcase HUD: anchored to canvas top-left so it doesn't
+           overlap the page header logo. pointer-events:none so it never
+           blocks canvas mouse-drag camera rotation. -->
+      <div id="wfc-hud" style="
+          position: absolute;
+          top: 12px;
+          left: 12px;
+          padding: 8px 12px;
+          background: rgba(15, 15, 26, 0.75);
+          color: #e0e0e0;
+          font-family: 'SF Mono', Menlo, Consolas, monospace;
+          font-size: 12px;
+          line-height: 1.6;
+          border-radius: 4px;
+          border: 1px solid #2a2a4a;
+          pointer-events: none;
+          z-index: 100;
+      ">
+        <div id="wfc-hud-observer">Observer: MinEntropy</div>
+        <div id="wfc-hud-origin">Origin: Center</div>
+      </div>
 
       <!-- Loading overlay -->
       <div id="loading-overlay">
@@ -369,57 +453,54 @@
       <div id="modeInfo" class="hint">Wave Function Collapse — Kenney Dungeon Tiles</div>
 
       <h4>Observer Strategy</h4>
-      <div class="kv-row">
-        <span class="kv-label">Active</span>
-        <span class="kv-val" id="wfc-observer">MinEntropy</span>
-      </div>
-      <div class="hint">
-        <kbd>O</kbd> cycle: MinEntropy ↔ DistanceFromOrigin
-      </div>
+      <select id="wfc-observer-select" class="wfc-select">
+        <option value="0">MinEntropy</option>
+        <option value="1">Distance From Origin</option>
+      </select>
 
       <h4>Origin Preset</h4>
-      <div class="kv-row">
-        <span class="kv-label">Active</span>
-        <span class="kv-val" id="wfc-origin">Center</span>
-      </div>
+      <select id="wfc-origin-select" class="wfc-select">
+        <option value="0">Center</option>
+        <option value="1">Corner</option>
+        <option value="2">Bottom Center</option>
+      </select>
       <div class="hint">
-        <kbd>P</kbd> cycle: Center → Corner → BottomCenter
+        Origin applies only when observer = Distance.
       </div>
 
       <h4>Grid Dimensions</h4>
       <div class="kv-row">
-        <span class="kv-label">Width (X)</span>
-        <span class="kv-val" id="wfc-grid-w">—</span>
+        <span class="kv-label">Width (X) <span class="kv-val" id="wfc-grid-w-val">16</span></span>
       </div>
-      <div class="kv-row">
-        <span class="kv-label">Height (Y)</span>
-        <span class="kv-val" id="wfc-grid-h">—</span>
+      <input type="range" class="grid-slider" id="wfc-grid-w-slider" min="4" max="64" step="1" value="16">
+
+      <div class="kv-row" style="margin-top: 8px;">
+        <span class="kv-label">Height (Y) <span class="kv-val" id="wfc-grid-h-val">4</span></span>
       </div>
-      <div class="kv-row">
-        <span class="kv-label">Depth (Z)</span>
-        <span class="kv-val" id="wfc-grid-d">—</span>
+      <input type="range" class="grid-slider" id="wfc-grid-h-slider" min="1" max="32" step="1" value="4">
+
+      <div class="kv-row" style="margin-top: 8px;">
+        <span class="kv-label">Depth (Z) <span class="kv-val" id="wfc-grid-d-val">16</span></span>
       </div>
-      <div class="hint">
-        <kbd>[</kbd><kbd>]</kbd> X −/+ (4..32) &nbsp;
-        <kbd>-</kbd><kbd>+</kbd> Y −/+ (1..8) &nbsp;
-        <kbd>,</kbd><kbd>.</kbd> Z −/+ (4..32)
-      </div>
+      <input type="range" class="grid-slider" id="wfc-grid-d-slider" min="4" max="64" step="1" value="16">
 
       <h4>Random Seed</h4>
       <div class="kv-row">
         <span class="kv-label">Seed</span>
         <span class="kv-val" id="wfc-seed">—</span>
       </div>
-      <div class="hint">
-        <kbd>R</kbd> reseed same &nbsp; <kbd>T</kbd> reroll new
+      <div class="btn-row">
+        <button type="button" class="btn btn-reseed" id="wfc-reseed-same">Reseed Same</button>
+        <button type="button" class="btn btn-reroll" id="wfc-reseed-new">Reroll New</button>
       </div>
 
       <hr>
       <h4>Camera</h4>
       <div class="hint">
-        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows — move<br>
-        Mouse drag — look<br>
-        <kbd>Space</kbd> / <kbd>Shift</kbd> — up / down
+        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> — move<br>
+        <kbd>Q</kbd> / <kbd>E</kbd> — down / up<br>
+        <kbd>Shift</kbd> — sprint (3×)<br>
+        <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> — look
       </div>
     </aside>
   </div>
@@ -492,19 +573,106 @@
         if (obsEl) obsEl.textContent = 'Observer: ' + obs;
         if (orgEl) orgEl.textContent = 'Origin: ' + origin;
 
-        var set = function(id, v) {
-          var el = document.getElementById(id);
-          if (el) el.textContent = v;
-        };
-        set('wfc-observer', obs);
-        set('wfc-origin',   origin);
-        set('wfc-grid-w',   gw);
-        set('wfc-grid-h',   gh);
-        set('wfc-grid-d',   gd);
+        // Sync dropdowns + slider values + labels.
+        var obsIdx = (obs === 'DistanceFromOrigin') ? 1 : 0;
+        var originIdx = (origin === 'Corner') ? 1 : (origin === 'BottomCenter' ? 2 : 0);
+        var obsSel = document.getElementById('wfc-observer-select');
+        if (obsSel) obsSel.value = String(obsIdx);
+        var orgSel = document.getElementById('wfc-origin-select');
+        if (orgSel) orgSel.value = String(originIdx);
+
+        function setSlider(id, val, labelId) {
+          var s = document.getElementById(id);
+          if (s && parseInt(s.value) !== parseInt(val)) s.value = val;
+          var lbl = document.getElementById(labelId);
+          if (lbl) lbl.textContent = val;
+        }
+        setSlider('wfc-grid-w-slider', gw, 'wfc-grid-w-val');
+        setSlider('wfc-grid-h-slider', gh, 'wfc-grid-h-val');
+        setSlider('wfc-grid-d-slider', gd, 'wfc-grid-d-val');
+
         // seed is u32 — render as unsigned hex (compact, easier to compare).
         var seedUnsigned = seed >>> 0;
-        set('wfc-seed',    '0x' + seedUnsigned.toString(16).toUpperCase().padStart(8, '0'));
+        var seedEl = document.getElementById('wfc-seed');
+        if (seedEl) seedEl.textContent = '0x' + seedUnsigned.toString(16).toUpperCase().padStart(8, '0');
       };
+
+      // WFC panel wiring — call into WASM C ABI exports.
+      // Each handler uses ccall (synchronous) so the pending action is
+      // latched before the handler returns. The actual reseed happens on
+      // the next frame in HandleGridEditKeys().
+      function wfcCall(name, argTypes, args) {
+        if (typeof Module === 'undefined' || !Module.ccall) return;
+        try { Module.ccall(name, null, argTypes, args); } catch (e) { console.warn(e); }
+      }
+
+      function wfcCallRet(name, retType, argTypes, args) {
+        if (typeof Module === 'undefined' || !Module.ccall) return 0;
+        try { return Module.ccall(name, retType, argTypes, args); } catch (e) { console.warn(e); return 0; }
+      }
+
+      function wireWfcPanel() {
+        // C++ Initialize() already called window.setWfcHud with the live
+        // initial state (obs/origin/grid/seed). The setWfcHud hook keeps
+        // buttons + sliders in sync whenever C++ re-emits. Here we only
+        // attach event handlers — no read-back needed.
+
+        // Observer dropdown
+        var obsSel = document.getElementById('wfc-observer-select');
+        if (obsSel) {
+          obsSel.addEventListener('change', function() {
+            wfcCall('wfc_set_observer', ['number'], [parseInt(obsSel.value)]);
+          });
+        }
+
+        // Origin dropdown
+        var orgSel = document.getElementById('wfc-origin-select');
+        if (orgSel) {
+          orgSel.addEventListener('change', function() {
+            wfcCall('wfc_set_origin', ['number'], [parseInt(orgSel.value)]);
+          });
+        }
+
+        // Grid sliders — fire on change (release) to avoid reseed spam
+        // while dragging. 'input' updates the value label live.
+        function bindSlider(sliderId, valLabelId, fnName) {
+          var s = document.getElementById(sliderId);
+          var lbl = document.getElementById(valLabelId);
+          if (!s) return;
+          s.addEventListener('input', function() {
+            if (lbl) lbl.textContent = s.value;
+          });
+          s.addEventListener('change', function() {
+            wfcCall(fnName, ['number'], [parseInt(s.value)]);
+          });
+        }
+        bindSlider('wfc-grid-w-slider', 'wfc-grid-w-val', 'wfc_set_grid_w');
+        bindSlider('wfc-grid-h-slider', 'wfc-grid-h-val', 'wfc_set_grid_h');
+        bindSlider('wfc-grid-d-slider', 'wfc-grid-d-val', 'wfc_set_grid_d');
+
+        // Reseed buttons
+        var reseedSame = document.getElementById('wfc-reseed-same');
+        if (reseedSame) reseedSame.addEventListener('click', function() {
+          wfcCall('wfc_reseed_same', [], []);
+        });
+        var reseedNew = document.getElementById('wfc-reseed-new');
+        if (reseedNew) reseedNew.addEventListener('click', function() {
+          wfcCall('wfc_reseed_new', [], []);
+        });
+      }
+
+      // Wire after the WASM module is ready (ccall available).
+      // Use a small poll loop — Module.onRuntimeInitialized is set by
+      // Emscripten boilerplate we don't control here.
+      var wireTries = 0;
+      function tryWire() {
+        if (typeof Module !== 'undefined' && Module.ccall) {
+          wireWfcPanel();
+        } else if (++wireTries < 100) {
+          setTimeout(tryWire, 100);
+        }
+      }
+      tryWire();
 
       window.hideLoading = function() {
         loadingOverlay.classList.add('hidden');

@@ -919,8 +919,6 @@ async function createWasm() {
       setTempRet0(0);
       return 0;
     };
-  var ___cxa_find_matching_catch_2 = () => findMatchingCatch([]);
-
   var ___cxa_find_matching_catch_4 = (arg0,arg1) => findMatchingCatch([arg0,arg1]);
 
   
@@ -986,10 +984,6 @@ async function createWasm() {
       // Initialize ExceptionInfo content after it was allocated in __cxa_allocate_exception.
       info.init(type, destructor);
       uncaughtExceptionCount++;
-      assert(false, 'Exception thrown, but exception catching is not enabled. Compile with -sNO_DISABLE_EXCEPTION_CATCHING or -sEXCEPTION_CATCHING_ALLOWED=[..] to catch.');
-    };
-
-  var ___resumeException = (ptr) => {
       assert(false, 'Exception thrown, but exception catching is not enabled. Compile with -sNO_DISABLE_EXCEPTION_CATCHING or -sEXCEPTION_CATCHING_ALLOWED=[..] to catch.');
     };
 
@@ -1274,7 +1268,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
             } catch (e) {
               throw new FS.ErrnoError(29);
             }
-            if (result === undefined && bytesRead === 0) {
+            if (result === undefined && !bytesRead) {
               throw new FS.ErrnoError(6);
             }
             if (result === null || result === undefined) break;
@@ -1595,10 +1589,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           node.mtime = node.ctime = Date.now();
   
           if (canOwn) {
-            assert(position === 0, 'canOwn must imply no weird position inside the file');
+            assert(!position, 'canOwn must imply no weird position inside the file');
             node.contents = buffer.subarray(offset, offset + length);
             node.usedBytes = length;
-          } else if (node.usedBytes === 0 && position === 0) { // If this is a simple first write to an empty file, do a fast set since we don't need to care about old data.
+          } else if (!node.usedBytes && !position) { // If this is a simple first write to an empty file, do a fast set since we don't need to care about old data.
             node.contents = buffer.slice(offset, offset + length);
             node.usedBytes = length;
           } else {
@@ -1886,7 +1880,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       assert(id, 'addRunDependency requires an ID')
       assert(!runDependencyTracking[id]);
       runDependencyTracking[id] = 1;
-      if (runDependencyWatcher === null && globalThis.setInterval) {
+      if (!runDependencyWatcher && globalThis.setInterval) {
         // Check for missing dependencies every few seconds
         runDependencyWatcher = setInterval(() => {
           if (ABORT) {
@@ -3138,8 +3132,8 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         // to write to file opened in read-only mode with MAP_PRIVATE flag,
         // as all modifications will be visible only in the memory of
         // the current process.
-        if ((prot & 2) !== 0
-            && (flags & 2) === 0
+        if ((prot & 2)
+            && !(flags & 2)
             && (stream.flags & 2097155) !== 2) {
           throw new FS.ErrnoError(2);
         }
@@ -3232,7 +3226,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         // use a buffer to avoid overhead of individual crypto calls per byte
         var randomBuffer = new Uint8Array(1024), randomLeft = 0;
         var randomByte = () => {
-          if (randomLeft === 0) {
+          if (!randomLeft) {
             randomFill(randomBuffer);
             randomLeft = randomBuffer.byteLength;
           }
@@ -3448,7 +3442,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
               } catch (e) {
                 throw new FS.ErrnoError(29);
               }
-              if (result === undefined && bytesRead === 0) {
+              if (result === undefined && !bytesRead) {
                 throw new FS.ErrnoError(6);
               }
               if (result === null || result === undefined) break;
@@ -4195,7 +4189,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         function arraysHaveEqualContent(arrA, arrB) {
           if (arrA.length != arrB.length) return false;
   
-          for (var i in arrA) {
+          for (var i = 0; i < arrA.length; i++) {
             if (arrA[i] != arrB[i]) return false;
           }
           return true;
@@ -4576,7 +4570,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   fakeRequestAnimationFrame(func) {
         // try to keep 60fps between calls to here
         var now = Date.now();
-        if (MainLoop.nextRAF === 0) {
+        if (!MainLoop.nextRAF) {
           MainLoop.nextRAF = now + 1000/60;
         } else {
           while (now + 2 >= MainLoop.nextRAF) { // fudge a little, to avoid timer jitter causing us to do lots of delay:0
@@ -6089,7 +6083,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       var stream = SYSCALLS.getStreamFromFD(fd);
       FS.llseek(stream, offset, whence);
       HEAP64[((newOffset)>>3)] = BigInt(stream.position);
-      if (stream.getdents && offset === 0 && whence === 0) stream.getdents = null; // reset readdir state
+      if (stream.getdents && !offset && whence === 0) stream.getdents = null; // reset readdir state
       return 0;
     } catch (e) {
     if (typeof FS == 'undefined' || !(e.name === 'ErrnoError')) throw e;
@@ -7166,7 +7160,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   maybeStopUnwind() {
         if (Asyncify.currData &&
             Asyncify.state === Asyncify.State.Unwinding &&
-            Asyncify.exportCallStack.length === 0) {
+            !Asyncify.exportCallStack.length) {
           // We just finished unwinding.
           // Be sure to set the state before calling any other functions to avoid
           // possible infinite recursion here (For example in debug pthread builds
@@ -7384,7 +7378,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         for (var i = 0; i < args.length; i++) {
           var converter = toC[argTypes[i]];
           if (converter) {
-            if (stack === 0) stack = stackSave();
+            if (!stack) stack = stackSave();
             cArgs[i] = converter(args[i]);
           } else {
             cArgs[i] = args[i];
@@ -7396,7 +7390,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       var ret = func(...cArgs);
       function onDone(ret) {
         runtimeKeepalivePop();
-        if (stack !== 0) stackRestore(stack);
+        if (stack) stackRestore(stack);
         return convertReturnValue(ret);
       }
     var asyncMode = opts?.async;
@@ -7953,22 +7947,22 @@ function checkIncomingModuleAPI() {
   ignoredModuleProp('wasmBinary');
 }
 var ASM_CONSTS = {
-  7878628: () => { if (!document.getElementById('modeHud')) { var hud = document.createElement('div'); hud.id = 'modeHud'; hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;'; hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">L</kbd> to toggle sun auto-rotate (Mode 10 static vs Mode 11 dynamic)</div>' + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>' + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>' + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>' + '<div id="sunRotateHud" style="color:#fd0;display:none;">Sun Auto-Rotate: OFF</div>'; document.body.appendChild(hud); } window.setRenderMode = function(idx, name, desc) { var c = document.getElementById('modeHudCurrent'); var d = document.getElementById('modeHudDesc'); if (c) c.textContent = 'Mode ' + idx + ': ' + name; if (d) d.textContent = desc; var dbg = document.getElementById('meshletDbgHud'); if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none'; var sun = document.getElementById('sunRotateHud'); if (sun) sun.style.display = (idx == 10 || idx == 11) ? 'block' : 'none'; var info = document.getElementById('modeInfo'); if (info) info.textContent = 'Mode ' + idx + ': ' + name; var fwd = document.getElementById('paramGroup_forward'); var ddgi = document.getElementById('paramGroup_ddgi'); if (fwd) fwd.style.display = (idx >= 7) ? 'block' : 'none'; if (ddgi) ddgi.style.display = (idx == 7 || idx == 10 || idx == 11) ? 'block' : 'none'; }; window.setMeshletDebug = function(mode) { var dbg = document.getElementById('meshletDbgHud'); if (!dbg) return; var label = 'Off'; if (mode == 1) label = 'MeshletID'; else if (mode == 2) label = 'TriangleID'; else if (mode == 3) label = 'MeshID'; else if (mode == 4) label = 'Normal'; else if (mode == 5) label = 'ObjNormal'; dbg.textContent = 'Meshlet Debug: ' + label; }; window.setSunAutoRotate = function(on) { var sun = document.getElementById('sunRotateHud'); if (!sun) return; sun.textContent = 'Sun Auto-Rotate: ' + (on ? 'ON' : 'OFF'); sun.style.color = on ? '#0f0' : '#fd0'; }; },  
- 7881280: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } },  
- 7881376: ($0) => { if (window.setSunAutoRotate) window.setSunAutoRotate($0); },  
- 7881438: ($0, $1, $2) => { if (window.setSunDirection) { window.setSunDirection($0, $1, $2); } },  
- 7881510: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } },  
- 7881606: ($0) => { if (window.setMeshletDebug) { window.setMeshletDebug($0); } },  
- 7881670: ($0) => { if (window.setSSGISSRSubmode) { window.setSSGISSRSubmode($0); } },  
- 7881738: () => { try { FS.mkdir('/persist'); } catch (e) { } try { FS.mount(IDBFS, {}, '/persist'); } catch (e) { } window._ddgiSyncDone = false; FS.syncfs(true, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(true) error:', err); }); },  
- 7882003: () => { return window._ddgiSyncDone ? 1 : 0; },  
- 7882044: () => { try { FS.stat('/persist/mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
- 7882134: () => { var data = FS.readFile('/persist/mode10_ddgi_cache.spch'); FS.writeFile('mode10_ddgi_cache.spch', data); },  
- 7882243: () => { try { FS.stat('mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
- 7882324: () => { try { var data = FS.readFile('mode10_ddgi_cache.spch'); FS.writeFile('/persist/mode10_ddgi_cache.spch', data); window._ddgiSyncDone = false; FS.syncfs(false, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(false) error:', err); }); } catch (e) { console.error('[Prebake] Failed to persist cache:', e); window._ddgiSyncDone = true; } },  
- 7882704: () => { return window._ddgiSyncDone ? 1 : 0; },  
- 7882745: () => { var label = document.querySelector('#loading .label'); if (label) label.textContent = 'Loading...'; },  
- 7882849: () => { if (window.setSunAutoRotate) window.setSunAutoRotate(0); }
+  7878804: () => { if (!document.getElementById('modeHud')) { var hud = document.createElement('div'); hud.id = 'modeHud'; hud.style.cssText = 'position:fixed;top:12px;left:12px;background:rgba(0,0,0,0.85);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;line-height:1.6;z-index:9999;font-family:monospace;border:1px solid #333;'; hud.innerHTML = '<div style="font-weight:bold;color:#00d4ff;margin-bottom:4px;">Dawn Forward Renderer</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">Tab</kbd> to switch render mode</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">V</kbd> to cycle meshlet debug (mode 7/8)</div>' + '<div>Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;">L</kbd> to toggle sun auto-rotate (Mode 10 static vs Mode 11 dynamic)</div>' + '<div id="modeHudCurrent" style="margin-top:4px;color:#4f4;">Mode 2: ShadowAndIBL</div>' + '<div id="modeHudDesc" style="color:#aaa;">Directional + Shadow + IBL</div>' + '<div id="meshletDbgHud" style="color:#fd0;display:none;">Meshlet Debug: Off</div>' + '<div id="sunRotateHud" style="color:#fd0;display:none;">Sun Auto-Rotate: OFF</div>'; document.body.appendChild(hud); } window.setRenderMode = function(idx, name, desc) { var c = document.getElementById('modeHudCurrent'); var d = document.getElementById('modeHudDesc'); if (c) c.textContent = 'Mode ' + idx + ': ' + name; if (d) d.textContent = desc; var dbg = document.getElementById('meshletDbgHud'); if (dbg) dbg.style.display = (idx == 7 || idx == 8) ? 'block' : 'none'; var sun = document.getElementById('sunRotateHud'); if (sun) sun.style.display = (idx == 10 || idx == 11) ? 'block' : 'none'; var info = document.getElementById('modeInfo'); if (info) info.textContent = 'Mode ' + idx + ': ' + name; var fwd = document.getElementById('paramGroup_forward'); var ddgi = document.getElementById('paramGroup_ddgi'); if (fwd) fwd.style.display = (idx >= 7) ? 'block' : 'none'; if (ddgi) ddgi.style.display = (idx == 7 || idx == 10 || idx == 11) ? 'block' : 'none'; }; window.setMeshletDebug = function(mode) { var dbg = document.getElementById('meshletDbgHud'); if (!dbg) return; var label = 'Off'; if (mode == 1) label = 'MeshletID'; else if (mode == 2) label = 'TriangleID'; else if (mode == 3) label = 'MeshID'; else if (mode == 4) label = 'Normal'; else if (mode == 5) label = 'ObjNormal'; dbg.textContent = 'Meshlet Debug: ' + label; }; window.setSunAutoRotate = function(on) { var sun = document.getElementById('sunRotateHud'); if (!sun) return; sun.textContent = 'Sun Auto-Rotate: ' + (on ? 'ON' : 'OFF'); sun.style.color = on ? '#0f0' : '#fd0'; }; },  
+ 7881456: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } },  
+ 7881552: ($0) => { if (window.setSunAutoRotate) window.setSunAutoRotate($0); },  
+ 7881614: ($0, $1, $2) => { if (window.setSunDirection) { window.setSunDirection($0, $1, $2); } },  
+ 7881686: ($0, $1, $2) => { if (window.setRenderMode) { window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2)); } },  
+ 7881782: ($0) => { if (window.setMeshletDebug) { window.setMeshletDebug($0); } },  
+ 7881846: ($0) => { if (window.setSSGISSRSubmode) { window.setSSGISSRSubmode($0); } },  
+ 7881914: () => { try { FS.mkdir('/persist'); } catch (e) { } try { FS.mount(IDBFS, {}, '/persist'); } catch (e) { } window._ddgiSyncDone = false; FS.syncfs(true, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(true) error:', err); }); },  
+ 7882179: () => { return window._ddgiSyncDone ? 1 : 0; },  
+ 7882220: () => { try { FS.stat('/persist/mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
+ 7882310: () => { var data = FS.readFile('/persist/mode10_ddgi_cache.spch'); FS.writeFile('mode10_ddgi_cache.spch', data); },  
+ 7882419: () => { try { FS.stat('mode10_ddgi_cache.spch'); return 1; } catch (e) { return 0; } },  
+ 7882500: () => { try { var data = FS.readFile('mode10_ddgi_cache.spch'); FS.writeFile('/persist/mode10_ddgi_cache.spch', data); window._ddgiSyncDone = false; FS.syncfs(false, function(err) { window._ddgiSyncDone = true; if (err) console.warn('[Prebake] IDBFS syncfs(false) error:', err); }); } catch (e) { console.error('[Prebake] Failed to persist cache:', e); window._ddgiSyncDone = true; } },  
+ 7882880: () => { return window._ddgiSyncDone ? 1 : 0; },  
+ 7882921: () => { var label = document.querySelector('#loading .label'); if (label) label.textContent = 'Loading...'; },  
+ 7883025: () => { if (window.setSunAutoRotate) window.setSunAutoRotate(0); }
 };
 
 // Imports from the Wasm binary.
@@ -8283,13 +8277,9 @@ var wasmImports = {
   /** @export */
   __cxa_end_catch: ___cxa_end_catch,
   /** @export */
-  __cxa_find_matching_catch_2: ___cxa_find_matching_catch_2,
-  /** @export */
   __cxa_find_matching_catch_4: ___cxa_find_matching_catch_4,
   /** @export */
   __cxa_throw: ___cxa_throw,
-  /** @export */
-  __resumeException: ___resumeException,
   /** @export */
   __syscall_fcntl64: ___syscall_fcntl64,
   /** @export */
@@ -8361,11 +8351,7 @@ var wasmImports = {
   /** @export */
   fd_write: _fd_write,
   /** @export */
-  invoke_ii,
-  /** @export */
   invoke_vi,
-  /** @export */
-  invoke_vii,
   /** @export */
   llvm_eh_typeid_for: _llvm_eh_typeid_for,
   /** @export */
@@ -8466,28 +8452,6 @@ function invoke_vi(index,a1) {
   var sp = stackSave();
   try {
     dynCall_vi(index,a1);
-  } catch(e) {
-    stackRestore(sp);
-    if (!(e instanceof EmscriptenEH)) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_ii(index,a1) {
-  var sp = stackSave();
-  try {
-    return dynCall_ii(index,a1);
-  } catch(e) {
-    stackRestore(sp);
-    if (!(e instanceof EmscriptenEH)) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_vii(index,a1,a2) {
-  var sp = stackSave();
-  try {
-    dynCall_vii(index,a1,a2);
   } catch(e) {
     stackRestore(sp);
     if (!(e instanceof EmscriptenEH)) throw e;
