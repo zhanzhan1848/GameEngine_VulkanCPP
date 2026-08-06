@@ -411,8 +411,16 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (!device_) return;
     const auto& config = settings_.lumen;
 
+    // T4.6.5 part 33: Lumen suite (DDGI/SSAO/SSGI/SurfaceCache) is deferred on
+    // Vulkan — needs SPIR-V ports + non-overlapping descriptor bindings per
+    // memory vulkan-rhi-t46-subsystems-probe-findings.md. Silently skip the
+    // init call rather than let Initialize() return false + print alarming
+    // "init failed" log. The bypassProd flag in ForwardRenderer already keeps
+    // production code paths off Vulkan; Lumen modules remain nullptr here.
+    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+
     // DDGI
-    if (settings_.quality.enable_ddgi) {
+    if (settings_.quality.enable_ddgi && !isVulkan) {
         ddgi_pass_ = std::make_unique<lumen::LumenDDGIPass>();
         lumen::DDGIRuntimeParams ddgiParams{};
         ddgiParams.probe_count_x = config.ddgi_probe_count_x;
@@ -430,7 +438,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     }
 
     // SSAO
-    if (settings_.quality.enable_ssao) {
+    if (settings_.quality.enable_ssao && !isVulkan) {
         ssao_pass_ = std::make_unique<lumen::LumenSSAOPass>();
         lumen::SSAOParams ssaoParams{};
         ssaoParams.radius = config.gtao_radius;
@@ -444,7 +452,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     }
 
     // SSGI
-    if (settings_.quality.enable_ssgi) {
+    if (settings_.quality.enable_ssgi && !isVulkan) {
         ssgi_pass_ = std::make_unique<lumen::LumenSSGIPass>();
         lumen::SSGIParams ssgiParams{};
         if (!ssgi_pass_->Initialize(device_, render_width_, render_height_, ssgiParams)) {

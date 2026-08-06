@@ -62,7 +62,10 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
         auto vertBytes = loadSpvBinary("Engine/Graphics/Vulkan/shaders/Particle/Particle.vert.spv");
         auto fragBytes = loadSpvBinary("Engine/Graphics/Vulkan/shaders/Particle/Particle.frag.spv");
         if (vertBytes.empty() || fragBytes.empty()) {
-            std::cerr << "ParticlePass: Failed to load Vulkan SPIR-V shaders" << std::endl;
+            // T4.6.5 part 33: Particle Vulkan SPIR-V shaders not yet ported
+            // (deferred to Tier 5). Caller (ForwardRenderer.cpp:850) handles
+            // the false return via bypassProd check + prints "skipped (bypass)"
+            // — no need to spam stderr here.
             return false;
         }
         vertex_shader_ = device->CreateShader(
