@@ -1878,6 +1878,21 @@ set_target_properties(TestWFCConfig PROPERTIES
 target_compile_definitions(TestWFCConfig PRIVATE DEBUG _DEBUG)
 set_target_properties(TestWFCConfig PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestAutoSocketClassifier Graphics/WFC/TestAutoSocketClassifier.cpp)
+target_include_directories(TestAutoSocketClassifier PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestAutoSocketClassifier PRIVATE Engine)
+add_test(NAME TestAutoSocketClassifier COMMAND TestAutoSocketClassifier)
+set_target_properties(TestAutoSocketClassifier PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestAutoSocketClassifier PRIVATE DEBUG _DEBUG)
+set_target_properties(TestAutoSocketClassifier PROPERTIES FOLDER "Tests/Graphics/WFC")
+
 add_executable(TestWFCSolveBudget Graphics/WFC/TestWFCSolveBudget.cpp)
 target_include_directories(TestWFCSolveBudget PRIVATE
     ${CMAKE_SOURCE_DIR}
