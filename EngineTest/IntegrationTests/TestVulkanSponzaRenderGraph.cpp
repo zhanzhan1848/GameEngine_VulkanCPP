@@ -365,8 +365,44 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
 
     // Per-mesh MaterialInstance + game_entity + cluster + RenderProxy
     // (mirror NonEditor Step 3).
+    //
+    // T4.6.5 part 30.7 (Track 2): parallelize texture decode via JobSystem.
+    // stbi_load is I/O + CPU bound (TGA decode) and runs ~0.5-2s total
+    // across 393 meshes. device_->CreateTexture + MaterialInstance::Update
+    // touch RHI state and may not be thread-safe, so they stay on main
+    // thread after the parallel decode phase completes.
+    const u32 meshCount = (u32)sceneMeshes_.size();
+    struct DecodedTex {
+        int width{0}, height{0};
+        unsigned char* data{nullptr};
+        bool valid{false};
+    };
+    std::vector<DecodedTex> decAlbedo(meshCount), decNormal(meshCount), decORM(meshCount);
+
+    auto decodeJob = [&](u32 i, u32) {
+        auto& meshInfo = sceneMeshes_[i];
+        auto decode = [](const std::string& path, DecodedTex& out) {
+            if (path.empty()) return;
+            out.data = stbi_load(path.c_str(), &out.width, &out.height, nullptr, 4);
+            out.valid = (out.data != nullptr);
+        };
+        decode(ResolveTexturePath(baseDir, meshInfo.diffuseTexturePath), decAlbedo[i]);
+        decode(ResolveTexturePath(baseDir, meshInfo.normalTexturePath), decNormal[i]);
+        decode(ResolveTexturePath(baseDir, meshInfo.ormTexturePath), decORM[i]);
+    };
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto decodeHandle = primal::jobsystem::JobSystem::ParallelForWithThread(meshCount, decodeJob);
+    primal::jobsystem::JobSystem::Wait(decodeHandle);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> decodeMs = t1 - t0;
+    std::cout << "[Part30.4] Parallel texture decode: " << meshCount
+              << " meshes in " << decodeMs.count() << " ms" << std::endl;
+
+    // Serial phase: CreateTextureFromData + material/entity setup.
+    // RHI device + MaterialInstance are not thread-safe.
     u32 texLoaded = 0, texFailed = 0;
-    for (u32 i = 0; i < sceneMeshes_.size(); ++i) {
+    for (u32 i = 0; i < meshCount; ++i) {
         auto& meshInfo = sceneMeshes_[i];
         meshInfo.material = sharedMaterial_;
 
@@ -377,20 +413,32 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         }
 
         ResourceHandle diffuseTex = handles::INVALID_RESOURCE;
-        std::string diffusePath = ResolveTexturePath(baseDir, meshInfo.diffuseTexturePath);
-        if (!diffusePath.empty()) diffuseTex = LoadTextureFromFile(device_, diffusePath);
+        if (decAlbedo[i].valid) {
+            diffuseTex = CreateTextureFromData(
+                device_, decAlbedo[i].width, decAlbedo[i].height,
+                decAlbedo[i].data, DataFormat::RGBA8_sRGB);
+        }
         if (diffuseTex == handles::INVALID_RESOURCE) { diffuseTex = fallbackDiffuse_; texFailed++; }
         else texLoaded++;
 
         ResourceHandle normalTex = handles::INVALID_RESOURCE;
-        std::string normalPath = ResolveTexturePath(baseDir, meshInfo.normalTexturePath);
-        if (!normalPath.empty()) normalTex = LoadTextureFromFile(device_, normalPath);
+        if (decNormal[i].valid) {
+            normalTex = CreateTextureFromData(
+                device_, decNormal[i].width, decNormal[i].height, decNormal[i].data);
+        }
         if (normalTex == handles::INVALID_RESOURCE) normalTex = fallbackNormal_;
 
         ResourceHandle ormTex = handles::INVALID_RESOURCE;
-        std::string ormPath = ResolveTexturePath(baseDir, meshInfo.ormTexturePath);
-        if (!ormPath.empty()) ormTex = LoadTextureFromFile(device_, ormPath);
+        if (decORM[i].valid) {
+            ormTex = CreateTextureFromData(
+                device_, decORM[i].width, decORM[i].height, decORM[i].data);
+        }
         if (ormTex == handles::INVALID_RESOURCE) ormTex = fallbackORM_;
+
+        // Free stbi buffers now that CreateTextureFromData has copied the pixels.
+        if (decAlbedo[i].data) stbi_image_free(decAlbedo[i].data);
+        if (decNormal[i].data) stbi_image_free(decNormal[i].data);
+        if (decORM[i].data) stbi_image_free(decORM[i].data);
 
         matInst->SetTexture(0, diffuseTex);
         matInst->SetTexture(1, normalTex);
