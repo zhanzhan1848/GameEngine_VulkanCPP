@@ -5,11 +5,13 @@
 // pair E-W, all four). Used by WFC as a third tile source (alongside Kenney
 // and Ruins) to stress-test the mixed-category solver without depending on
 // external art assets.
+//
+// All tiles are emitted into a unit cube (extent ±0.5) so they fit the WFC
+// wave grid (1m × 1m × 1m cells). footprint_cells is metadata only — it
+// identifies the tile topology but does not affect mesh size.
 #pragma once
 
-#include "../../Common/CommonHeaders.h"
-#include "../../Common/Id.h"
-#include "../../Geometry/GeometryTypes.h"
+#include "../RHI/Core/RHIMeshAsset.h"
 #include "WFCCategory.h"
 
 namespace primal::graphics::wfc {
@@ -18,7 +20,7 @@ class ProceduralRoomPack {
 public:
     struct RoomTileDef {
         const char*  name;
-        u32          footprint_cells;   // 3, 5, or 7
+        u32          footprint_cells;   // 3, 5, or 7 (metadata only)
         u32          door_mask;         // bit 0=+X, 1=-X, 2=+Z, 3=-Z
         WFCCategory  category;          // always Primitive
     };
@@ -29,10 +31,11 @@ public:
     // so callers can iterate without copying.
     static const RoomTileDef (&TileDefs())[kTileCount];
 
-    // Generate mesh for tile N (0..11). Returns a geometry_id registered with
-    // the engine content module. Mesh: floor + ceiling + 4 walls with door
-    // openings per door_mask. Implementation lives in ProceduralRoomPack.cpp.
-    static geometry::geometry_id GenerateTileMesh(u32 tile_index);
+    // Populate `out` with the tile's mesh (floor + ceiling + 4 walls with
+    // optional door cutouts per door_mask). Caller is responsible for
+    // registering the asset via content::RegisterProceduralMesh if a
+    // geometry_id is needed.
+    static void GenerateTileMesh(u32 tile_index, graphics::rhi::RHIMeshAsset& out);
 };
 
 } // namespace primal::graphics::wfc
