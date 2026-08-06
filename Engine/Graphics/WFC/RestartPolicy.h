@@ -61,6 +61,25 @@ public:
     // Phase C.1 Task 12: full records for observer biasing.
     const utl::vector<ConflictRecord>& ConflictRecords() const { return conflicts_; }
 
+    // Phase C.1 Task 13: bias queries for the observer.
+    //
+    // BiasForCell returns the sum of occurrence_count across all records at
+    // `coord` (cells that fail on multiple tiles accumulate a larger penalty).
+    // The observer adds this to the cell's base entropy so conflict-prone
+    // cells get picked later under a lowest-entropy heuristic.
+    f32 BiasForCell(WFCGridCoord coord) const;
+
+    // BiasForTileInCell returns the occurrence_count for a specific (coord,
+    // tile) pair, or 0 if the pair has never failed. The observer subtracts
+    // this from the candidate's weight so the picker avoids re-selecting the
+    // same failed tile.
+    f32 BiasForTileInCell(WFCGridCoord coord, wfc_tile_id tile) const;
+
+    // Halve every ConflictRecord's occurrence_count (integer division) and
+    // drop records that reach zero. Called at the start of each restart so
+    // old conflicts fade — transient failures don't permanently block tiles.
+    void DecayAll();
+
 private:
     utl::vector<ConflictRecord> conflicts_;
     u32                         max_generations_;

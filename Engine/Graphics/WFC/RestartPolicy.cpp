@@ -29,4 +29,45 @@ RestartPolicy::Decision RestartPolicy::OnContradiction(WFCGridCoord coord,
         : Decision::GiveUp;
 }
 
+f32 RestartPolicy::BiasForCell(WFCGridCoord coord) const {
+    f32 sum = 0.0f;
+    for (const auto& r : conflicts_) {
+        if (r.coord.x == coord.x && r.coord.y == coord.y && r.coord.z == coord.z) {
+            sum += static_cast<f32>(r.occurrence_count);
+        }
+    }
+    return sum;
+}
+
+f32 RestartPolicy::BiasForTileInCell(WFCGridCoord coord, wfc_tile_id tile) const {
+    for (const auto& r : conflicts_) {
+        if (r.coord.x == coord.x && r.coord.y == coord.y && r.coord.z == coord.z
+            && r.tile == tile) {
+            return static_cast<f32>(r.occurrence_count);
+        }
+    }
+    return 0.0f;
+}
+
+void RestartPolicy::DecayAll() {
+    for (auto& r : conflicts_) {
+        r.occurrence_count /= 2u;
+    }
+    // Drop records that have decayed to zero — they no longer influence bias.
+    // utl::vector::erase takes a single element pointer (not an iterator pair),
+    // so we compact in-place: walk once, keep records with count > 0.
+    u32 write = 0;
+    for (u32 read = 0; read < conflicts_.size(); ++read) {
+        if (conflicts_[read].occurrence_count != 0) {
+            if (write != read) {
+                conflicts_[write] = conflicts_[read];
+            }
+            ++write;
+        }
+    }
+    while (conflicts_.size() > write) {
+        conflicts_.erase(conflicts_.size() - 1);
+    }
+}
+
 } // namespace primal::graphics::wfc

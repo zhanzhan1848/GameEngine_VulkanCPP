@@ -68,6 +68,69 @@ TestResult TestResetClearsConflictRecords() {
     return TestResult::Passed;
 }
 
+// --- Task 13: ApplyBias + Decay ---
+
+// BiasForCell sums occurrence_count over all (coord, *) records — a cell that
+// has failed on multiple tiles accumulates a larger penalty than one that
+// failed on a single tile. The observer adds this to base entropy so
+// conflict-prone cells get picked later (more entropy = picked later under
+// the lowest-entropy heuristic).
+TestResult TestBiasForCellSumsAcrossTiles() {
+    RestartPolicy rp(/*max_generations=*/8);
+    rp.OnContradiction(WFCGridCoord{1, 2, 3}, wfc_tile_id{5}, /*gen=*/0);
+    rp.OnContradiction(WFCGridCoord{1, 2, 3}, wfc_tile_id{5}, /*gen=*/0);
+    rp.OnContradiction(WFCGridCoord{1, 2, 3}, wfc_tile_id{6}, /*gen=*/0);
+    // 2 occurrences on tile 5 + 1 on tile 6 = 3 total
+    TEST_ASSERT_EQ(3.0f, rp.BiasForCell(WFCGridCoord{1, 2, 3}), "cell bias sums");
+    // An unrelated cell must read zero.
+    TEST_ASSERT_EQ(0.0f, rp.BiasForCell(WFCGridCoord{9, 9, 9}),
+                   "no bias for untracked cell");
+    return TestResult::Passed;
+}
+
+// BiasForTileInCell returns the occurrence_count for a specific (cell, tile)
+// pair, or 0 if the pair has never failed. The observer subtracts this from
+// the candidate's weight so the picker avoids re-selecting the same failed tile.
+TestResult TestBiasForTileInCell() {
+    RestartPolicy rp(/*max_generations=*/8);
+    rp.OnContradiction(WFCGridCoord{1, 2, 3}, wfc_tile_id{5}, /*gen=*/0);
+    rp.OnContradiction(WFCGridCoord{1, 2, 3}, wfc_tile_id{5}, /*gen=*/0);
+    TEST_ASSERT_EQ(2.0f, rp.BiasForTileInCell(WFCGridCoord{1, 2, 3}, wfc_tile_id{5}),
+                   "tile bias matches occurrence_count");
+    TEST_ASSERT_EQ(0.0f, rp.BiasForTileInCell(WFCGridCoord{1, 2, 3}, wfc_tile_id{6}),
+                   "untracked tile bias zero");
+    return TestResult::Passed;
+}
+
+// DecayAll halves every occurrence_count (integer division) and drops records
+// that hit zero. Called at the start of each restart so old conflicts fade —
+// transient failures don't permanently block a tile from re-selection.
+TestResult TestDecayHalvesAndDropsZero() {
+    RestartPolicy rp(/*max_generations=*/8);
+    rp.OnContradiction(WFCGridCoord{1, 2, 3}, wfc_tile_id{5}, /*gen=*/0);
+    rp.OnContradiction(WFCGridCoord{1, 2, 3}, wfc_tile_id{5}, /*gen=*/0);  // count=2
+    rp.OnContradiction(WFCGridCoord{4, 5, 6}, wfc_tile_id{7}, /*gen=*/0);  // count=1
+    rp.DecayAll();
+    auto records = rp.ConflictRecords();
+    TEST_ASSERT_EQ(1u, records.size(), "single-occurrence record decayed to 0 and dropped");
+    TEST_ASSERT_EQ(1u, records[0].occurrence_count, "count=2 halved to 1");
+    return TestResult::Passed;
+}
+
+// Idempotent decay: decaying an empty policy is a no-op (no crash, no records
+// appear). Decaying twice in a row should be the same as decaying once when
+// there's only a count=1 record (already gone after first call).
+TestResult TestDecayIdempotentOnEmpty() {
+    RestartPolicy rp(/*max_generations=*/8);
+    rp.DecayAll();
+    TEST_ASSERT_EQ(0u, rp.ConflictCount(), "empty stays empty");
+    rp.OnContradiction(WFCGridCoord{0, 0, 0}, wfc_tile_id{1}, /*gen=*/0);
+    rp.DecayAll();
+    rp.DecayAll();
+    TEST_ASSERT_EQ(0u, rp.ConflictCount(), "count=1 gone after one decay");
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("ConflictSeedMemory");
     TEST_CASE(suite, "RecordConflictIncrementsOccurrence",
@@ -80,6 +143,14 @@ int main() {
               TestConflictCountCountsDistinctRecords);
     TEST_CASE(suite, "ResetClearsConflictRecords",
               TestResetClearsConflictRecords);
+    TEST_CASE(suite, "BiasForCellSumsAcrossTiles",
+              TestBiasForCellSumsAcrossTiles);
+    TEST_CASE(suite, "BiasForTileInCell",
+              TestBiasForTileInCell);
+    TEST_CASE(suite, "DecayHalvesAndDropsZero",
+              TestDecayHalvesAndDropsZero);
+    TEST_CASE(suite, "DecayIdempotentOnEmpty",
+              TestDecayIdempotentOnEmpty);
     suite.RunAllTests();
     return 0;
 }
