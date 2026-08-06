@@ -83,6 +83,19 @@ private:
     primal::math::m4x4 viewMatrix_{primal::graphics::rhi::math::MatrixIdentity()};
     primal::math::m4x4 projMatrix_{primal::graphics::rhi::math::MatrixIdentity()};
 
+    // T4.6.5 part 30.13 (X5 fix): per-swapchain-image render-done semaphores.
+    // Validation hint (VUID-vkQueueSubmit-pSignalSemaphores-00067): "Swapchain
+    // image N was presented but was not re-acquired, so VkSemaphore may still
+    // be in use and cannot be safely reused with image index M." Single
+    // semaphore cycles too fast under FIFO; per-image index guarantees the
+    // semaphore isn't reused until that image comes back via AcquireNextImage.
+    static constexpr u32 kMaxSwapchainImages = 3;
+    primal::graphics::rhi::SyncHandle renderDoneSemaphores_[kMaxSwapchainImages] = {
+        primal::graphics::rhi::handles::INVALID_SYNC,
+        primal::graphics::rhi::handles::INVALID_SYNC,
+        primal::graphics::rhi::handles::INVALID_SYNC
+    };
+
     u64 frameCount_{0};
     bool subsystemsInitialized_{false};
 };

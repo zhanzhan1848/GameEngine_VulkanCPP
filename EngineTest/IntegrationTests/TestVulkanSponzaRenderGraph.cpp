@@ -213,6 +213,16 @@ bool TestVulkanSponzaRenderGraph::InitializeWindowAndRenderSystem() {
         std::cerr << "[Part30.4] RenderSystem::Initialize failed" << std::endl;
         return false;
     }
+
+    // T4.6.5 part 30.13 (X5 fix): per-swapchain-image render-done semaphores.
+    // Index by currentImageIndex_ when picking which to signal/submit/present.
+    for (u32 i = 0; i < kMaxSwapchainImages; ++i) {
+        renderDoneSemaphores_[i] = device_->CreateSync();
+        if (renderDoneSemaphores_[i] == primal::graphics::rhi::handles::INVALID_SYNC) {
+            std::cerr << "[Part30.4] CreateSync (renderDoneSemaphores_[" << i << "]) failed" << std::endl;
+            return false;
+        }
+    }
     return true;
 }
 
@@ -529,14 +539,20 @@ void TestVulkanSponzaRenderGraph::Run() {
     }
 
     ResourceHandle backBuffer;
-    SyncHandle imageAvailable;
-    if (!renderSystem_.BeginFrame(backBuffer, imageAvailable)) {
+    SyncHandle signalFence;
+    if (!renderSystem_.BeginFrame(backBuffer, signalFence)) {
         return;
     }
 
     auto cmd = renderSystem_.GetCurrentCommandBuffer();
     auto cmdHandle = renderSystem_.GetCurrentCommandBufferHandle();
     u32 frameIdx = renderSystem_.GetCurrentFrameIndex();
+
+    // T4.6.5 part 30.14: BeginFrame's 2nd param is the CPU-GPU fence, NOT the
+    // GPU-GPU acquire semaphore. The acquire semaphore is exposed separately.
+    // Submit MUST wait on it, otherwise vkAcquireNextImageKHR's signal op has
+    // no consumer → VUID-vkQueueSubmit-pWaitSemaphores-03238.
+    SyncHandle imageAvailable = renderSystem_.GetCurrentImageAvailableSemaphore();
 
     if (!cmd->Reset()) return;
     if (!cmd->Begin()) return;
@@ -548,14 +564,37 @@ void TestVulkanSponzaRenderGraph::Run() {
         backBuffer, targetDesc,
         cmd, frameIdx, cmdHandle, imageAvailable);
 
+    // T4.6.5 part 30.6 (X3 fix): StandardRenderPipeline's FinalBlit pass leaves
+    // the backbuffer in COLOR_ATTACHMENT_OPTIMAL. Vulkan spec requires
+    // PRESENT_SRC_KHR at Present time (VUID-VkPresentInfoKHR-pImageIndices-01430).
+    // Insert explicit transition before Submit.
+    {
+        rhi::ResourceBarrier toPresent{};
+        toPresent.resource = backBuffer;
+        toPresent.beforeState = rhi::ResourceState::RenderTarget;
+        toPresent.afterState = rhi::ResourceState::Present;
+        toPresent.subresource = 0xFFFFFFFF;
+        toPresent.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&toPresent, 1);
+    }
+
     cmd->End();
+
+    // T4.6.5 part 30.13 (X5 fix): pick render-done semaphore by acquired
+    // image index. FIFO Present keeps the semaphore in flight until that
+    // specific image is re-acquired. Indexing by frameIdx would race when
+    // frame N+3 acquires a different image than frame N presented.
+    const u32 imgIdx = renderSystem_.GetCurrentImageIndex() % kMaxSwapchainImages;
+    const SyncHandle renderDoneSem = renderDoneSemaphores_[imgIdx];
 
     QueueSubmitInfo submitInfo{};
     submitInfo.cmdBuffer = cmdHandle;
-    submitInfo.signalFence = imageAvailable;
+    submitInfo.waitSemaphore = imageAvailable;
+    submitInfo.signalSemaphore = renderDoneSem;
+    submitInfo.signalFence = renderSystem_.GetFrameFence(frameIdx);
     device_->Submit(submitInfo);
 
-    renderSystem_.EndFrame();
+    renderSystem_.EndFrame(renderDoneSem);
     frameCount_++;
 }
 
@@ -589,6 +628,14 @@ void TestVulkanSponzaRenderGraph::Shutdown() {
     sceneMeshes_.clear();
 
     renderSystem_.Shutdown();
+
+    // T4.6.5 part 30.13 (X5 fix): destroy per-image render-done semaphores.
+    for (u32 i = 0; i < kMaxSwapchainImages; ++i) {
+        if (renderDoneSemaphores_[i] != handles::INVALID_SYNC) {
+            device_->DestroySync(renderDoneSemaphores_[i]);
+            renderDoneSemaphores_[i] = handles::INVALID_SYNC;
+        }
+    }
 
     if (texSampler_ != handles::INVALID_SAMPLER) {
         device_->DestroySampler(texSampler_);

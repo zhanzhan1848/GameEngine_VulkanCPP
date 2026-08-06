@@ -440,9 +440,12 @@ void GPUCullingPipeline::Shutdown() {
         device_->DestroyDescriptorSetLayout(streaming_descriptor_layout_);
         streaming_descriptor_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     }
-    if (streaming_descriptor_set_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
-        device_->DestroyDescriptorSet(streaming_descriptor_set_);
-        streaming_descriptor_set_ = rhi::handles::INVALID_DESCRIPTOR_SET;
+    // T4.6.5 part 30.6 (X6 fix): triple-buffered streaming descriptor sets.
+    for (u32 i = 0; i < 3; ++i) {
+        if (streaming_descriptor_sets_[i] != rhi::handles::INVALID_DESCRIPTOR_SET) {
+            device_->DestroyDescriptorSet(streaming_descriptor_sets_[i]);
+            streaming_descriptor_sets_[i] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
     }
     
     // Destroy triple-buffered frame resources
@@ -1125,20 +1128,24 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         device_->UnmapBuffer(constantBuffer);
     }
     
-    if (streaming_descriptor_set_ == rhi::handles::INVALID_DESCRIPTOR_SET) {
+    // T4.6.5 part 30.6 (X6 fix): triple-buffer the streaming descriptor set.
+    // Single-set variant updated every frame while the prior frame's cmd
+    // buffer was still in flight → VUID-vkUpdateDescriptorSets-None-03047.
+    const u32 slot = bufferIndex % 3;
+    if (streaming_descriptor_sets_[slot] == rhi::handles::INVALID_DESCRIPTOR_SET) {
         rhi::DescriptorSetDesc desc{};
         desc.layout = streaming_descriptor_layout_;
-        streaming_descriptor_set_ = device_->CreateDescriptorSet(desc);
+        streaming_descriptor_sets_[slot] = device_->CreateDescriptorSet(desc);
     }
-    
-    if (streaming_descriptor_set_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
+
+    if (streaming_descriptor_sets_[slot] != rhi::handles::INVALID_DESCRIPTOR_SET) {
         rhi::WriteDescriptorSet writes[4];
         rhi::DescriptorBufferInfo bufferInfos[4];
         
         bufferInfos[0].buffer = residencyBuffer;
         bufferInfos[0].offset = 0;
         bufferInfos[0].range = ~0ull;
-        writes[0].dstSet = streaming_descriptor_set_;
+        writes[0].dstSet = streaming_descriptor_sets_[slot];
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = rhi::DescriptorType::StorageBuffer;
@@ -1147,7 +1154,7 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         bufferInfos[1].buffer = requestBuffer;
         bufferInfos[1].offset = 0;
         bufferInfos[1].range = ~0ull;
-        writes[1].dstSet = streaming_descriptor_set_;
+        writes[1].dstSet = streaming_descriptor_sets_[slot];
         writes[1].dstBinding = 1;
         writes[1].descriptorCount = 1;
         writes[1].descriptorType = rhi::DescriptorType::StorageBuffer;
@@ -1156,7 +1163,7 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         bufferInfos[2].buffer = feedbackBuffer;
         bufferInfos[2].offset = 0;
         bufferInfos[2].range = ~0ull;
-        writes[2].dstSet = streaming_descriptor_set_;
+        writes[2].dstSet = streaming_descriptor_sets_[slot];
         writes[2].dstBinding = 2;
         writes[2].descriptorCount = 1;
         writes[2].descriptorType = rhi::DescriptorType::StorageBuffer;
@@ -1165,7 +1172,7 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         bufferInfos[3].buffer = constantBuffer;
         bufferInfos[3].offset = 0;
         bufferInfos[3].range = sizeof(StreamingConstants);
-        writes[3].dstSet = streaming_descriptor_set_;
+        writes[3].dstSet = streaming_descriptor_sets_[slot];
         writes[3].dstBinding = 3;
         writes[3].descriptorCount = 1;
         writes[3].descriptorType = rhi::DescriptorType::UniformBuffer;
@@ -1176,15 +1183,11 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         cmdBuffer->BindComputePipeline(streaming_feedback_pipeline_);
         cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute,
                                        streaming_pipeline_layout_,
-                                       0, 1, &streaming_descriptor_set_,
+                                       0, 1, &streaming_descriptor_sets_[slot],
                                        0, nullptr);
         
         u32 threadGroups = (constants.cluster_count + 63) / 64;
         cmdBuffer->Dispatch(threadGroups, 1, 1);
-    }
-    
-    if (streaming_descriptor_set_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
-        // ... (update descriptor set) ...
     }
 
     // Wait for the compute shader to finish reading the constant buffer before destroying it

@@ -244,6 +244,18 @@ void RenderSystem::EndFrame() {
     }
 }
 
+void RenderSystem::EndFrame(rhi::SyncHandle renderDoneSemaphore) {
+    if (swapChain_) {
+        // T4.6.5 part 30.12 (X1 fix): Present waits on the render-done semaphore
+        // signaled by Submit. The prior Present(INVALID_SYNC) skipped GPU-GPU
+        // sync, so the next AcquireNextImage could fire while the previous
+        // frame's draws were still pending (validation VUID-vkQueuePresentKHR
+        // semaphores chain broken).
+        swapChain_->Present(renderDoneSemaphore);
+        currentFrameIndex_ = (currentFrameIndex_ + 1) % rhi::MAX_FRAMES_IN_FLIGHT;
+    }
+}
+
 rhi::TextureDesc RenderSystem::GetBackBufferDesc() const {
     rhi::TextureDesc desc{};
     if (swapChain_) {

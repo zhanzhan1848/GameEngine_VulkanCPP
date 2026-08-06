@@ -280,13 +280,110 @@ bool VulkanBuffer::updateDataImpl(const void* data, u64 size, u64 offset) {
         return true;
     }
 
-    // Slow path:Static/Immutable 走 staging blit
-    // 暂时占位 — Phase 3 接入 VulkanStagingAllocator + VulkanCommandBuffer 后填充
-    // 当前先返回 false,让调用方知道这条路未实现
-    std::cerr << "[VulkanBuffer] updateDataImpl slow path (staging blit) not yet wired — "
-              << "size=" << size << " offset=" << offset << " name='"
-              << (desc_.name ? desc_.name : "") << "'" << std::endl;
-    return false;
+    // T4.6.5 part 30.11 (Bug H): slow path — Static/Immutable buffers are
+    // DEVICE_LOCAL (no CPU mapping). Stage through a transient HOST_VISIBLE
+    // buffer + vkCmdCopyBuffer on the graphics queue. This is called once per
+    // Sponza mesh at init (~400 calls) and silently failing here was the root
+    // cause of pure-black output: mesh vertex/index buffers stayed zeroed,
+    // Stage2/Stage3 rasterized degenerate triangles, GBuffer stayed at clear.
+    VulkanDevice& vkDev = static_cast<VulkanDevice&>(device_);
+    VmaAllocator allocator = vkDev.GetVmaAllocator();
+    if (allocator == VK_NULL_HANDLE || vkBuffer_ == VK_NULL_HANDLE) return false;
+
+    // 1. Create + fill staging buffer (HOST_VISIBLE, persistent-mapped).
+    VkBufferCreateInfo stagingCI{};
+    stagingCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingCI.size = size;
+    stagingCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo stagingACI{};
+    stagingACI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                     | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    stagingACI.usage = VMA_MEMORY_USAGE_AUTO;
+
+    VkBuffer stagingBuf = VK_NULL_HANDLE;
+    VmaAllocation stagingAlloc = nullptr;
+    VmaAllocationInfo stagingInfo{};
+    if (vmaCreateBuffer(allocator, &stagingCI, &stagingACI,
+                        &stagingBuf, &stagingAlloc, &stagingInfo) != VK_SUCCESS) {
+        std::cerr << "[VulkanBuffer] updateDataImpl: staging vmaCreateBuffer failed"
+                  << " size=" << size << std::endl;
+        return false;
+    }
+    std::memcpy(stagingInfo.pMappedData, data, size);
+
+    // 2. One-time-use command buffer on the graphics queue.
+    // T4.6.5 part 30.11: each VulkanCommandBuffer owns its own VkCommandPool;
+    // there is no device-wide accessor. Create a transient pool here, use
+    // once, and tear down. Transient pool flag lets the driver recycle.
+    VkDevice vkDevice = vkDev.GetNativeDevice();
+    u32 queueFamily = vkDev.GetGraphicsQueueFamily();
+    if (queueFamily == UINT32_MAX) {
+        vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+        return false;
+    }
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pci.queueFamilyIndex = queueFamily;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (vkCreateCommandPool(vkDevice, &pci, nullptr, &pool) != VK_SUCCESS) {
+        vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+        return false;
+    }
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    allocInfo.commandPool = pool;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(vkDevice, &allocInfo, &cmd) != VK_SUCCESS) {
+        vkDestroyCommandPool(vkDevice, pool, nullptr);
+        vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+        return false;
+    }
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    VkBufferCopy region{};
+    region.srcOffset = 0;
+    region.dstOffset = offset;
+    region.size = size;
+    vkCmdCopyBuffer(cmd, stagingBuf, vkBuffer_, 1, &region);
+
+    VkBufferMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT
+                          | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = vkBuffer_;
+    barrier.offset = offset;
+    barrier.size = size;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+            | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 1, &barrier, 0, nullptr);
+
+    vkEndCommandBuffer(cmd);
+
+    // 3. Submit + wait (synchronous — caller expects data ready on return).
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(vkDev.GetGraphicsQueue(), 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(vkDev.GetGraphicsQueue());
+
+    vkFreeCommandBuffers(vkDevice, pool, 1, &cmd);
+    vkDestroyCommandPool(vkDevice, pool, nullptr);
+    vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+    return true;
 }
 
 } // namespace primal::graphics::rhi

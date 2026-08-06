@@ -107,6 +107,14 @@ private:
     VkFence         submitFence_{VK_NULL_HANDLE};
     u32             queueFamily_{UINT32_MAX};
 
+    // T4.6.5 part 30.6 (X7 fix): tracks whether the last device->Submit
+    // call supplied an external signalFence. If true, vkQueueSubmit signals
+    // that external fence (NOT this cmd buffer's internal submitFence_),
+    // so waitForCompletionImpl must NOT wait on submitFence_ — it would
+    // never be signaled. Caller's WaitForSync(external_fence) is the
+    // authoritative sync. Reset to false in resetImpl.
+    bool            externalFenceSignaled_{false};
+
     // scope 状态(Phase 4 用,Phase 3 仅记录)
     enum class Scope : u8 { None, RenderPass, Compute, Blit };
     Scope scope_{Scope::None};

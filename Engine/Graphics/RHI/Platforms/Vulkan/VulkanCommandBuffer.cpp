@@ -160,6 +160,8 @@ bool VulkanCommandBuffer::resetImpl() {
     if (submitFence_ != VK_NULL_HANDLE) {
         vkResetFences(dev, 1, &submitFence_);
     }
+    // T4.6.5 part 30.6 (X7 fix): clear external-fence flag — fresh submit.
+    externalFenceSignaled_ = false;
     scope_ = Scope::None;
     return true;
 }
@@ -211,6 +213,12 @@ bool VulkanCommandBuffer::submitImpl(u32 /*waitFlags*/) {
 }
 
 bool VulkanCommandBuffer::waitForCompletionImpl() {
+    // T4.6.5 part 30.6 (X7 fix): if the last device->Submit used an external
+    // signalFence, this cmd buffer's internal submitFence_ was NOT signaled
+    // by that submit. Caller's WaitForSync(external_fence) is authoritative;
+    // waiting on our unused internal fence would always 5s-timeout.
+    if (externalFenceSignaled_) return true;
+
     VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
     if (submitFence_ == VK_NULL_HANDLE) return false;
     VkResult res = vkWaitForFences(dev, 1, &submitFence_, VK_TRUE, 5ULL * 1000ULL * 1000ULL * 1000ULL);

@@ -205,7 +205,14 @@ private:
     
     rhi::PipelineLayoutHandle streaming_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle streaming_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    rhi::DescriptorSetHandle streaming_descriptor_set_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    // T4.6.5 part 30.6 (X6 fix): triple-buffer streaming descriptor set.
+    // Single-set variant updated every frame while the prior frame's cmd
+    // buffer was still in flight → VUID-vkUpdateDescriptorSets-None-03047.
+    std::array<rhi::DescriptorSetHandle, 3> streaming_descriptor_sets_{
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET
+    };
 
     bool initialized_{ false };
     std::mutex mutex_;

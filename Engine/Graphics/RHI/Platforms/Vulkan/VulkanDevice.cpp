@@ -549,11 +549,19 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
     // WaitForCompletion can't synchronize and DestroyCommandBuffer triggers
     // VUID-vkFreeCommandBuffers-pCommandBuffers-00047 (cmd still pending).
     // Always reset before submit — vkQueueSubmit requires unsignaled fences.
+    //
+    // T4.6.5 part 30.6 (X7 fix): track whether we used an external fence.
+    // If true, the cmd's internal submitFence_ is NEVER signaled by this
+    // submit — VulkanCommandBuffer::waitForCompletionImpl must skip its
+    // vkWaitForFences call (would 5s-timeout on the unused fence).
     if (signalFence == VK_NULL_HANDLE) {
         signalFence = cmd->GetSubmitFence();
         if (signalFence != VK_NULL_HANDLE) {
             vkResetFences(device_, 1, &signalFence);
         }
+        cmd->externalFenceSignaled_ = false;
+    } else {
+        cmd->externalFenceSignaled_ = true;
     }
 
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;

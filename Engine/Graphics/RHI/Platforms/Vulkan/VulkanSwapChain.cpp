@@ -37,6 +37,16 @@ VulkanSwapChain::~VulkanSwapChain() {
 // ============================================================================
 
 bool VulkanSwapChain::Initialize() {
+    // T4.6.5 part 30.6 (X4 secondary fix): idempotency guard.
+    // VulkanDevice::createSwapChainImpl already called Initialize() before
+    // returning the constructed object; RenderSystem::Initialize at line 47
+    // calls it again. Without this guard, the second call destroys + recreates
+    // the swapchain + backbuffer textures, leaking the VkSwapchainKHR handle
+    // and orphaning the previously-allocated ResourceHandle slots.
+    if (swapchain_ != VK_NULL_HANDLE) {
+        state_ = ResourceState::Ready;
+        return true;
+    }
     if (!createSurface()) return false;
     if (!createSwapchain()) {
         destroySurface();

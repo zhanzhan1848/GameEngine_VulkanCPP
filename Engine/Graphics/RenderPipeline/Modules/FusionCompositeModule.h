@@ -8,33 +8,37 @@ namespace rendergraph { class RenderGraph; }
 
 struct FusionInputs {
     // Scene color (deferred output or raw albedo)
-    rendergraph::RGResourceHandle primary_input_rg;
-    rhi::ResourceHandle primary_input_tex;
+    rendergraph::RGResourceHandle primary_input_rg{};
+    rhi::ResourceHandle primary_input_tex{rhi::handles::INVALID_RESOURCE};
 
     // GI textures (may be invalid if feature disabled)
-    rendergraph::RGResourceHandle ssgi_rg;
-    rhi::ResourceHandle ssgi_tex;
-    rendergraph::RGResourceHandle ddgi_rg;
-    rhi::ResourceHandle ddgi_tex;
-    rendergraph::RGResourceHandle spgi_rg;
-    rhi::ResourceHandle spgi_tex;
-    rendergraph::RGResourceHandle ssao_rg;
-    rhi::ResourceHandle ssao_tex;
-    rhi::ResourceHandle gbuffer_albedo;
+    rendergraph::RGResourceHandle ssgi_rg{};
+    rhi::ResourceHandle ssgi_tex{rhi::handles::INVALID_RESOURCE};
+    rendergraph::RGResourceHandle ddgi_rg{};
+    rhi::ResourceHandle ddgi_tex{rhi::handles::INVALID_RESOURCE};
+    rendergraph::RGResourceHandle spgi_rg{};
+    rhi::ResourceHandle spgi_tex{rhi::handles::INVALID_RESOURCE};
+    rendergraph::RGResourceHandle ssao_rg{};
+    rhi::ResourceHandle ssao_tex{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle gbuffer_albedo{rhi::handles::INVALID_RESOURCE};
 
     // Volume scatter (RGBA16_Float: RGB=scatter, A=transmittance)
-    rendergraph::RGResourceHandle volume_scatter_rg;
-    rhi::ResourceHandle volume_scatter_tex;
+    rendergraph::RGResourceHandle volume_scatter_rg{};
+    rhi::ResourceHandle volume_scatter_tex{rhi::handles::INVALID_RESOURCE};
 
     u32 current_buffer_index = 0;
     u32 render_width = 0;
     u32 render_height = 0;
-    rhi::ResourceHandle black_texture;
+    rhi::ResourceHandle black_texture{rhi::handles::INVALID_RESOURCE};
 };
 
+// T4.6.5 part 30.6 (X4 fix): default member initializers prevent stack garbage.
+// Call sites that skip AddPasses (e.g. fusion_module_==nullptr OR Lumen disabled)
+// leave FusionOutputs uninitialized → garbage output_tex=0 resolves via FreeList
+// to slot 0 (first swapchain backbuffer) → FinalBlit samples a non-SAMPLED image.
 struct FusionOutputs {
-    rendergraph::RGResourceHandle output_rg;
-    rhi::ResourceHandle output_tex;
+    rendergraph::RGResourceHandle output_rg{};
+    rhi::ResourceHandle output_tex{rhi::handles::INVALID_RESOURCE};
 };
 
 class FusionCompositeModule {
