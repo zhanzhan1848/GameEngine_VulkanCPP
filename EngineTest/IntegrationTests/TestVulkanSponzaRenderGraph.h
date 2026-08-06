@@ -12,6 +12,7 @@
 #include "RenderTestFramework.h"
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
 #include "Engine/Graphics/RHI/Systems/RenderSystem.h"
+#include "Engine/Graphics/RHI/Components/RHICamera.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
 #include "Engine/Graphics/RenderScene.h"
 #include "Engine/Graphics/RenderView.h"
@@ -82,6 +83,13 @@ private:
 
     primal::math::m4x4 viewMatrix_{primal::graphics::rhi::math::MatrixIdentity()};
     primal::math::m4x4 projMatrix_{primal::graphics::rhi::math::MatrixIdentity()};
+
+    // T4.6.5 part 31: WASD + right-mouse-look camera. Lazy-initialized on first
+    // Run() to the same view {0,5,-10} looking +Z and slightly down that
+    // LoadSponzaScene hard-coded before. Each frame: camera_.Update(1/60) +
+    // view_.SetViewMatrix(camera_.GetViewMatrix()) + view_.UpdateFrustum().
+    primal::graphics::rhi::RHICamera camera_;
+    bool cameraInitialized_{false};
 
     // T4.6.5 part 30.13 (X5 fix): per-swapchain-image render-done semaphores.
     // Validation hint (VUID-vkQueueSubmit-pSignalSemaphores-00067): "Swapchain

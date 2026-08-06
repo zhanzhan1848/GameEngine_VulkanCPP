@@ -586,6 +586,23 @@ void TestVulkanSponzaRenderGraph::Run() {
         return;
     }
 
+    // T4.6.5 part 31: WASD + right-mouse-look camera. Lazy-init on first frame
+    // to the orientation LoadSponzaScene originally hard-coded (cameraPos
+    // {0,5,-10}, looking +Z and slightly down). RHICamera's forward formula
+    // {cos(yaw)*cos(pitch), sin(pitch), sin(yaw)*cos(pitch)} matches the test's
+    // {-sin(yaw)*cos(pitch), ..., -cos(yaw)*cos(pitch)} when RHICamera yaw = 90°
+    // and Sponza test yaw = 180°. Pitch -16.67° = -0.291 rad. Per-frame dt is
+    // 1/60 since RenderTestRunner fires Run() at 60 FPS via CFRunLoopTimer.
+    if (!cameraInitialized_) {
+        camera_.Initialize({0.0f, 5.0f, -10.0f}, {-16.67f, 90.0f, 0.0f});
+        camera_.SetSpeed(10.0f, 0.1f);
+        cameraInitialized_ = true;
+    }
+    camera_.Update(1.0f / 60.0f);
+    view_.SetViewMatrix(camera_.GetViewMatrix());
+    view_.UpdateFrustum();
+    view_.Cull(scene_);
+
     ResourceHandle backBuffer;
     SyncHandle signalFence;
     if (!renderSystem_.BeginFrame(backBuffer, signalFence)) {
