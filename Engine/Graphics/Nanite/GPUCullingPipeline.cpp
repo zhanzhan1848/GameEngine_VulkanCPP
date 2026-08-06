@@ -126,26 +126,13 @@ bool GPUCullingPipeline::Initialize(rhi::RHIDeviceBase* device, const CullingCon
     device_ = device;
     config_ = config;
 
-    // T4.6.5 part 35.1: Vulkan — disable HZB occlusion culling.
-    // Root cause: Stage5 samples HZB at cluster-center with min-filter mip
-    // chain. For Sponza's thin geometry (pillars, cloth, banners), mip 1+ at
-    // mid-frustum returns depth of NEARBY closer geometry (floor, walls) — not
-    // the cluster itself. Cluster is falsely marked occluded (hzb_depth <
-    // cluster_depth - bias), even though its actual rasterized triangles are
-    // fully visible. Point-sampling at the center cannot represent the
-    // cluster's projected footprint, and the bias is too tight for thin
-    // objects at mid-distance (5-30 units).
-    //
-    // Y-flip UV math fix from part 35 (commit 11f7220) is preserved as a
-    // defensive improvement (was correct as framebuffer top-left convention)
-    // but does not address this issue — the failing clusters are at
-    // mid-screen (NDC.y≈0), which is symmetric under Y-flip.
-    //
-    // Tier 5 fix: cone cull or multi-tap HZB sample across cluster's projected
-    // bounds (matches UE5 Nanite approach). Multi-session scope.
-    if (device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
-        config_.enable_occlusion_culling = false;
-    }
+    // T4.6.5 part 35.2: HZB occlusion culling now enabled on all platforms.
+    // Prior hotfix (part 35.1) disabled it on Vulkan because Stage4's
+    // instance-bounds-for-all-clusters mitigation made Stage5 HZB test at
+    // instance center → pillars/cloth false-occluded by closer nearby floor.
+    // Stage4 now reads per-cluster bounds via cluster_map → meshlets (binding
+    // 12); small clusters fall under Stage5's conservative 0.08 screen-space
+    // threshold and skip HZB entirely.
 
     if (!CreatePipelines()) {
         std::cerr << "Failed to create pipelines" << std::endl;
@@ -190,20 +177,27 @@ bool GPUCullingPipeline::CreatePipelines() {
         { 10, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
         // Binding 11: Global meshlet buffer (read-only, for Normal Cone backface culling)
         { 11, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
+        // T4.6.5 part 35.2: Binding 12: cluster_map buffer (read-only).
+        // Maps flatClusterID → globalMeshletIndex. Stage4 uses this to fetch
+        // per-cluster bounds for HZB occlusion testing instead of falling
+        // back to instance bounds (which caused false-occlusion of pillars
+        // and cloth at mid-frustum).
+        { 12, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
     };
 
     // WebGPU requires the layout's buffer access mode to match the shader's
-    // `var<storage, ...>` declaration exactly. Bindings 0, 3, 11 are declared
-    // `var<storage, read>` in WGSL → mark them read-only so DawnDescriptorSetLayout
-    // emits WGPUBufferBindingType_ReadOnlyStorage.
+    // `var<storage, ...>` declaration exactly. Bindings 0, 3, 11, 12 are
+    // declared `var<storage, read>` in WGSL → mark them read-only so
+    // DawnDescriptorSetLayout emits WGPUBufferBindingType_ReadOnlyStorage.
     cullingBindings[0].readonly = true;  // instances
     cullingBindings[3].readonly = true;  // cluster_refs
     cullingBindings[8].unfilterableFloat = true; // HZB R32Float
     cullingBindings[11].readonly = true; // meshlets
+    cullingBindings[12].readonly = true; // cluster_map
 
     rhi::DescriptorSetLayoutDesc cullingLayoutDesc{
         .bindings = cullingBindings,
-        .bindingCount = 12  // Updated from 11 to 12 (added meshlet buffer)
+        .bindingCount = 13  // T4.6.5 part 35.2: bumped from 12 to 13 (added cluster_map)
     };
 
     culling_descriptor_layout_ = device_->CreateDescriptorSetLayout(cullingLayoutDesc);
@@ -1397,8 +1391,8 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
 
         // Set up all bindings for this frame's descriptor set
         auto& frame_res = frame_resources_[i];
-        rhi::WriteDescriptorSet writes[12];  // Updated from 11 to 12 (added meshlet buffer)
-        rhi::DescriptorBufferInfo bufferInfos[12];  // Updated from 11 to 12 (added meshlet buffer)
+        rhi::WriteDescriptorSet writes[13];  // T4.6.5 part 35.2: bumped from 12 to 13 (added cluster_map)
+        rhi::DescriptorBufferInfo bufferInfos[13];  // T4.6.5 part 35.2: bumped from 12 to 13
         rhi::DescriptorImageInfo imageInfo;
         u32 writeCount = 0;
 
@@ -1568,6 +1562,34 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         writes[writeCount].bufferInfo = &bufferInfos[writeCount];
         writeCount++;
 
+        // T4.6.5 part 35.2: Binding 12: cluster_map (flatClusterID → globalMeshletIndex).
+        // Critical for per-cluster bounds in Stage4. Falls back to placeholder
+        // (same as binding 11) when GPUDrivenDrawPipeline hasn't populated it
+        // yet — Stage4 shader detects OOB via total_meshlet_count uniform
+        // and falls back to instance bounds.
+        auto cluster_map_buffer = gpuDrawPipeline_ ? gpuDrawPipeline_->GetClusterMapBuffer() : rhi::handles::INVALID_RESOURCE;
+        if (cluster_map_buffer == rhi::handles::INVALID_RESOURCE) {
+            if (placeholder_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE) {
+                rhi::BufferDesc placeholderDesc{};
+                placeholderDesc.size = sizeof(float) * 16;
+                placeholderDesc.type = rhi::BufferType::Structured;
+                placeholderDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
+                placeholderDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ShaderResource);
+                placeholder_meshlet_buffer_ = device_->CreateBuffer(placeholderDesc);
+            }
+            cluster_map_buffer = placeholder_meshlet_buffer_;
+        }
+
+        bufferInfos[writeCount].buffer = cluster_map_buffer;
+        bufferInfos[writeCount].offset = 0;
+        bufferInfos[writeCount].range = ~0ull;
+        writes[writeCount].dstSet = culling_descriptor_sets_[i];
+        writes[writeCount].dstBinding = 12;
+        writes[writeCount].descriptorCount = 1;
+        writes[writeCount].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[writeCount].bufferInfo = &bufferInfos[writeCount];
+        writeCount++;
+
         device_->UpdateDescriptorSets(writeCount, writes);
         // std::cout << "[GPUCulling] Created and configured descriptor set for frame " << i << std::endl;
     }
@@ -1680,6 +1702,12 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
     constants.cluster_count = snapshot.GetClusterRefCount();
     constants.force_pass_all = force_pass_all_debug_ ? 1u : 0u;
     constants.enable_debug_output = 1;
+    // T4.6.5 part 35.2: per-cluster bounds OOB guard. 0 on first frame
+    // (gpuDraw hasn't run yet) — Stage4 falls back to instance bounds.
+    constants.total_meshlet_count = gpuDrawPipeline_ ? gpuDrawPipeline_->GetTotalMeshletCount() : 0u;
+    constants._pad_cm0 = 0;
+    constants._pad_cm1 = 0;
+    constants._pad_cm2 = 0;
 
     // Additional validation to prevent corrupted data
     if (constants.instance_count > 100000) {

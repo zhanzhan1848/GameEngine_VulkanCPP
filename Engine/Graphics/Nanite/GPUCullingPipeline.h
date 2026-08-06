@@ -257,6 +257,11 @@ private:
         u32 cluster_count;
         u32 force_pass_all; // 🔥 DEBUG: Force all geometry to pass culling
         u32 enable_debug_output; // 🔥 DEBUG: Enable debug output
+        // T4.6.5 part 35.2: OOB guard for cluster_map → meshlets lookup.
+        u32 total_meshlet_count;
+        u32 _pad_cm0;
+        u32 _pad_cm1;
+        u32 _pad_cm2;
     };
 
     bool CreatePipelines();

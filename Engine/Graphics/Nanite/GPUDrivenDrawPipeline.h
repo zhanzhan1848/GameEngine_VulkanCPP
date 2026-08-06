@@ -220,6 +220,10 @@ public:
     rhi::ResourceHandle GetClusterMapBuffer() const { return cluster_map_buffer_; }
     rhi::ResourceHandle GetGlobalInstanceDataBuffer() const { return global_instance_data_buffer_; }
 
+    // T4.6.5 part 35.2: total meshlet count for OOB validation in culling
+    // shader's per-cluster bounds lookup. Returns 0 before first Execute().
+    u32 GetTotalMeshletCount() const { return total_meshlet_count_; }
+
 private:
     GPUDrivenDrawPipeline() = default;
 
