@@ -1923,6 +1923,21 @@ set_target_properties(TestTileAdjacencyBuild PROPERTIES
 target_compile_definitions(TestTileAdjacencyBuild PRIVATE DEBUG _DEBUG)
 set_target_properties(TestTileAdjacencyBuild PROPERTIES FOLDER "Tests/Graphics/WFC")
 
+add_executable(TestConflictSeedMemory Graphics/WFC/TestConflictSeedMemory.cpp)
+target_include_directories(TestConflictSeedMemory PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestConflictSeedMemory PRIVATE Engine)
+add_test(NAME TestConflictSeedMemory COMMAND TestConflictSeedMemory)
+set_target_properties(TestConflictSeedMemory PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestConflictSeedMemory PRIVATE DEBUG _DEBUG)
+set_target_properties(TestConflictSeedMemory PROPERTIES FOLDER "Tests/Graphics/WFC")
+
 add_executable(TestWFCSolveBudget Graphics/WFC/TestWFCSolveBudget.cpp)
 target_include_directories(TestWFCSolveBudget PRIVATE
     ${CMAKE_SOURCE_DIR}
