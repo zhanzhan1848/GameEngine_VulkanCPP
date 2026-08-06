@@ -278,7 +278,7 @@
   <div id="main-row">
     <!-- Canvas area -->
     <div id="canvas-wrap">
-      <canvas id="canvas" width="1280" height="720"></canvas>
+      <canvas id="canvas" width="1280" height="720" tabindex="0"></canvas>
 
       <!-- Loading overlay -->
       <div id="loading-overlay">
@@ -417,6 +417,16 @@
       window.hideLoading = function() {
         loadingOverlay.classList.add('hidden');
         statusLeft.textContent = 'Running';
+        // Notify parent launcher (if any) that this iframe's demo is ready.
+        // The launcher listens for this and calls FRAME.focus() so keyboard
+        // events (WASD/QE) fire without an initial click inside the iframe.
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: 'forward-loaded' }, '*');
+        }
+        // When accessed directly (not via launcher iframe), give the canvas
+        // focus so keyboard events fire immediately.
+        var c = document.getElementById('canvas');
+        if (c && c.focus) { try { c.focus(); } catch (e) {} }
       };
 
       // Mode switch helper — WASM calls this to update HUD + panel visibility
