@@ -1,13 +1,17 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Dock.Model.Mvvm.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.GameProject;
+using PrimalEditor_Avalonia.Import;
 using PrimalEditor_Avalonia.Native;
+using PrimalEditor_Avalonia.Native.Importers;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.ViewModels;
@@ -55,14 +59,16 @@ public class ContentBrowserViewModel : Document
         switch (e.ChangeType)
         {
             case System.IO.WatcherChangeTypes.Created when !string.IsNullOrEmpty(e.NewPath):
-                PrimalEditor_Avalonia.Content.AssetRegistry.Register(e.NewPath!);
+                if (!IsMetaSidecarPath(e.NewPath!))
+                    PrimalEditor_Avalonia.Content.AssetRegistry.Register(e.NewPath!);
                 break;
             case System.IO.WatcherChangeTypes.Deleted when !string.IsNullOrEmpty(e.OldPath):
                 PrimalEditor_Avalonia.Content.AssetRegistry.Unregister(e.NewPath ?? e.OldPath!);
                 break;
             case System.IO.WatcherChangeTypes.Renamed when !string.IsNullOrEmpty(e.OldPath) && !string.IsNullOrEmpty(e.NewPath):
                 PrimalEditor_Avalonia.Content.AssetRegistry.Unregister(e.OldPath!);
-                PrimalEditor_Avalonia.Content.AssetRegistry.Register(e.NewPath!);
+                if (!IsMetaSidecarPath(e.NewPath!))
+                    PrimalEditor_Avalonia.Content.AssetRegistry.Register(e.NewPath!);
                 break;
             case System.IO.WatcherChangeTypes.All:
                 // Debounced flush — refresh the whole tree.
@@ -70,6 +76,12 @@ public class ContentBrowserViewModel : Document
                 return;
         }
         Avalonia.Threading.Dispatcher.UIThread.Post(RefreshFolders);
+    }
+
+    private static bool IsMetaSidecarPath(string path)
+    {
+        var name = System.IO.Path.GetFileName(path);
+        return name.EndsWith(".meta", System.StringComparison.OrdinalIgnoreCase);
     }
 
     public Project? Project
@@ -111,6 +123,7 @@ public class ContentBrowserViewModel : Document
             {
                 _selectedFile = value;
                 OnPropertyChanged(nameof(SelectedFile));
+                PreviewViewModel.Asset = value;
             }
         }
     }
@@ -169,6 +182,13 @@ public class ContentBrowserViewModel : Document
             }
         }
     }
+
+    /// <summary>
+    /// Side-pane preview VM bound by ContentBrowserView's third column.
+    /// Owned here so its lifetime matches the browser and so the same
+    /// instance can be reused across selection changes.
+    /// </summary>
+    public ContentBrowserPreviewViewModel PreviewViewModel { get; } = new();
 
     public string SearchQuery
     {
@@ -433,21 +453,40 @@ public class ContentBrowserViewModel : Document
             ? Path.GetFileName(SelectedFolder.FullPath)
             : null;
 
+        var paths = files.Select(f => f.Path.LocalPath).ToList();
+        var settingsPerFile = new Dictionary<string, IAssetImportSettings>();
+
+        foreach (var group in paths.GroupBy(p => AssetImporterRegistry.ResolveForFile(p)?.GetType() ?? typeof(object))
+                     .Where(g => g.Key != typeof(object)))
+        {
+            var firstPath = group.First();
+            var plugin = AssetImporterRegistry.ResolveForFile(firstPath);
+            if (plugin == null) continue;
+
+            var defaults = ImportSettingsDefaults.ResolveDefaults(plugin, _project, group.ToList());
+            var (accepted, settings) = await ImportSettingsDialog.ShowAsync(topLevel, plugin, group.ToList(), defaults);
+            if (!accepted || settings == null) continue;
+            foreach (var p in group)
+                settingsPerFile[p] = settings;
+        }
+
+        var destDir = string.IsNullOrEmpty(subfolder) ? _project.ContentPath : Path.Combine(_project.ContentPath, subfolder);
         var imported = 0;
         var failed = 0;
         var firstError = string.Empty;
-        var total = files.Count;
+        var total = settingsPerFile.Count;
         var index = 0;
 
         IsImporting = true;
         try
         {
-            foreach (var file in files)
+            foreach (var (sourcePath, settings) in settingsPerFile)
             {
                 index++;
-                var name = Path.GetFileName(file.Path.LocalPath);
-                var type = AssetImporter.DetectType(name);
-                if (type == AssetType.Mesh)
+                var name = Path.GetFileName(sourcePath);
+                var plugin = AssetImporterRegistry.ResolveForFile(sourcePath);
+                if (plugin == null) continue;
+                if (plugin is MeshImporterPlugin)
                 {
                     ImportingStatus = $"Cooking {name} → {Path.ChangeExtension(name, ".mesh")} ({index}/{total}) — large meshes may take several minutes...";
                 }
@@ -456,31 +495,26 @@ public class ContentBrowserViewModel : Document
                     ImportingStatus = $"Importing {name} ({index}/{total})...";
                 }
 
-                var asset = await AssetImporter.ImportAsync(file.Path.LocalPath, _project.ContentPath, subfolder);
+                var asset = await plugin.RunAsync(new ImportRequest
+                {
+                    SourcePath = sourcePath,
+                    DestinationDir = destDir,
+                    Subfolder = subfolder,
+                    Settings = settings,
+                }, progress: null, CancellationToken.None);
+
                 if (asset != null && asset.Success)
                 {
                     imported++;
+                    AssetRegistry.Register(asset.DestinationPath);
                     Logger.Info($"Imported: {Path.GetFileName(asset.DestinationPath)} ({asset.Type})");
                 }
                 else
                 {
                     failed++;
-                    if (asset?.ErrorMessage != null)
-                    {
-                        Logger.Warning($"Import failed: {name} - {asset.ErrorMessage}");
-                        if (string.IsNullOrEmpty(firstError))
-                        {
-                            firstError = $"{name}: {asset.ErrorMessage}";
-                        }
-                    }
-                    else
-                    {
-                        Logger.Warning($"Import failed: {name}");
-                        if (string.IsNullOrEmpty(firstError))
-                        {
-                            firstError = $"{name}: unknown error (engine returned no result)";
-                        }
-                    }
+                    var msg = asset?.ErrorMessage ?? "unknown error";
+                    Logger.Warning($"Import failed: {name} - {msg}");
+                    if (string.IsNullOrEmpty(firstError)) firstError = $"{name}: {msg}";
                 }
             }
         }
@@ -490,7 +524,7 @@ public class ContentBrowserViewModel : Document
             ImportingStatus = string.Empty;
         }
 
-        StatusMessage = failed > 0 && !string.IsNullOrEmpty(firstError)
+        StatusMessage = failed > 0
             ? $"Imported: {imported}, Failed: {failed}. First error: {firstError}"
             : $"Imported: {imported}, Failed: {failed}";
         RefreshFolders();

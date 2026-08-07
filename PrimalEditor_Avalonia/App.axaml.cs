@@ -6,7 +6,9 @@ using Avalonia.Data.Core.Plugins;
 using System.Linq;
 using Avalonia.Markup.Xaml;
 using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.Native;
+using PrimalEditor_Avalonia.Native.Importers;
 using PrimalEditor_Avalonia.ViewModels;
 using PrimalEditor_Avalonia.Views;
 
@@ -26,6 +28,11 @@ public partial class App : Application
             EngineTick.Start();
         }
         PrimalEditor_Avalonia.Common.AutoSaveService.Start();
+
+        System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(TextureImporterPlugin).TypeHandle);
+        System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(MeshImporterPlugin).TypeHandle);
+        System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(PrimitiveMeshImporterPlugin).TypeHandle);
+        Logger.Info($"AssetImporterRegistry: {AssetImporterRegistry.Plugins.Count} plugin(s) registered");
     }
 
     public override void OnFrameworkInitializationCompleted()
@@ -33,24 +40,120 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             DisableAvaloniaDataAnnotationValidation();
-            var savedLayout = EditorLayoutSettings.Load().DockLayout;
-            var vm = new MainWindowViewModel();
-            if (savedLayout != null) vm.ApplyLayout(savedLayout);
-            desktop.MainWindow = new MainWindow
-            {
-                DataContext = vm,
-            };
-            desktop.MainWindow.Show();
-            desktop.MainWindow.WindowState = Avalonia.Controls.WindowState.Normal;
-            desktop.MainWindow.Activate();
+
+            // Avalonia's StartCore auto-shows whatever is assigned to
+            // desktop.MainWindow. To delay the main window until the
+            // user picks a project, we keep desktop.MainWindow unset
+            // and show the project browser first as a free-floating
+            // top-level window (no owner — ShowDialog requires a
+            // visible owner, which the main window isn't yet).
+            //
+            // ShutdownMode defaults to OnLastWindowClose, which is
+            // exactly what we want: the browser is the only visible
+            // window until the user picks a project, so cancelling
+            // it auto-exits. After we ShowMain we close the browser
+            // so the main window becomes the sole window, and
+            // closing it also auto-exits the app and fires Exit
+            // (which runs OnExit to release native resources).
             desktop.Exit += (_, _) => OnExit();
+
+            ShowProjectBrowserThenMain(desktop);
         }
 
         base.OnFrameworkInitializationCompleted();
     }
 
+    /// <summary>
+    /// Show the project browser dialog before the main window. The
+    /// browser lets the user open an existing project or create a
+    /// new one. If the user cancels, the application exits (matching
+    /// the WPF ProjectBrowserDialog behaviour). Otherwise the chosen
+    /// project is assigned and the main window is shown.
+    /// </summary>
+    private static void ShowProjectBrowserThenMain(IClassicDesktopStyleApplicationLifetime desktop)
+    {
+        var savedLayout = EditorLayoutSettings.Load().DockLayout;
+        var vm = new MainWindowViewModel();
+        if (savedLayout != null) vm.ApplyLayout(savedLayout);
+
+        var mainWindow = new MainWindow
+        {
+            DataContext = vm,
+        };
+
+        var browser = new ProjectBrowserView(new ProjectBrowserViewModel());
+        browser.Closed += (_, _) => OnProjectBrowserClosed(desktop, browser, vm, mainWindow);
+        browser.Show();
+    }
+
+    private static async void OnProjectBrowserClosed(
+        IClassicDesktopStyleApplicationLifetime desktop,
+        ProjectBrowserView browser,
+        MainWindowViewModel vm,
+        MainWindow mainWindow)
+    {
+        switch (browser.Result)
+        {
+            case ProjectBrowserView.BrowserResult.OpenProject:
+                var path = browser.SelectedProjectPath;
+                if (path == null)
+                {
+                    return;
+                }
+                var bundles = AutoSaveRecoveryService.DiscoverBundles(
+                    System.IO.Path.GetDirectoryName(path) ?? string.Empty);
+                var candidate = AutoSaveRecoveryService.SelectNewestEligible(path, bundles);
+                if (candidate == null)
+                {
+                    var opened = OpenProject.Open(path);
+                    if (opened == null)
+                    {
+                        return;
+                    }
+                    vm.Project = opened;
+                }
+                else
+                {
+                    await mainWindow.PromptAndApplyRecoveryAsync(
+                        new AutoSaveRecoveryCoordinator.RecoveryCandidate(candidate, path));
+                }
+                ShowMain(desktop, mainWindow, vm);
+                break;
+
+            case ProjectBrowserView.BrowserResult.NewProject:
+                if (browser.CreatedProject != null)
+                {
+                    vm.Project = browser.CreatedProject;
+                    ShowMain(desktop, mainWindow, vm);
+                }
+                break;
+
+            default:
+                // Cancelled or unrecognised: leave the browser closed.
+                // OnLastWindowClose will auto-exit because no other
+                // window is open yet.
+                break;
+        }
+    }
+
+    private static void ShowMain(
+        IClassicDesktopStyleApplicationLifetime desktop,
+        MainWindow mainWindow,
+        MainWindowViewModel vm)
+    {
+        desktop.MainWindow = mainWindow;
+        mainWindow.Show();
+        mainWindow.WindowState = Avalonia.Controls.WindowState.Normal;
+        mainWindow.Activate();
+    }
+
     private void OnExit()
     {
+        // Workaround: the native engine's JobSystem workers still hold
+        // ResourceManager locks for ~1s after ShutdownEngine returns;
+        // calling UnloadEngine synchronously while they run causes a
+        // pthread mutex deadlock (SIGABRT). A small delay lets the
+        // workers drain before the library is freed.
         PrimalEditor_Avalonia.Common.AutoSaveService.Stop();
         EngineTick.Stop();
         if (NativeEngineBridge.IsLoaded)
@@ -63,7 +166,8 @@ public partial class App : Application
             try { NativeEngineBridge.DestroyStandardRenderPipeline(); } catch { }
             try { NativeEngineBridge.ShutdownAssetSystem(); } catch { }
             try { NativeEngineBridge.ShutdownEngine(); } catch { }
-            NativeEngineBridge.UnloadEngine();
+            try { System.Threading.Thread.Sleep(1500); } catch { }
+            try { NativeEngineBridge.UnloadEngine(); } catch { }
         }
     }
 
