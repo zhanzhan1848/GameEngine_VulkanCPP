@@ -72,15 +72,32 @@ namespace {
         }
 
         if (platform == rhi::RHIPlatform::Vulkan) {
-            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
-            if (!file.is_open()) {
-                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
-                file.open(path, std::ios::binary | std::ios::ate);
+            // T4.6.5 part 35.3: lookup order matters. The previous single
+            // fallback resolved to /Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/
+            // which is the MAIN repo (feat/wfc-pcg branch) — its stale .spv
+            // files bypassed Part 35.2's per-cluster bounds + Y-flip fixes.
+            // Try CWD-relative first (works when shaders are bundled next to
+            // the test binary via CMake POST_BUILD), then worktree source root.
+            const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
+
+            std::vector<std::string> candidates;
+            candidates.push_back(relPath);
+            candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+
+            std::ifstream file;
+            std::string openedPath;
+            for (const auto& candidate : candidates) {
+                file.open(candidate, std::ios::binary | std::ios::ate);
+                if (file.is_open()) {
+                    openedPath = candidate;
+                    break;
+                }
             }
             if (!file.is_open()) {
                 std::cerr << "[GPUCullingPipeline] Failed to load SPIR-V shader: "
-                          << shaderName << " (entry: " << entryPoint << ")" << std::endl;
+                          << shaderName << " (entry: " << entryPoint << ")"
+                          << "\n  tried: " << candidates[0]
+                          << "\n  tried: " << candidates[1] << std::endl;
                 return {};
             }
             std::streamsize size = file.tellg();
@@ -89,7 +106,7 @@ namespace {
             std::vector<u8> bytecode(static_cast<size_t>(size));
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
                 std::cerr << "[GPUCullingPipeline] Failed to read SPIR-V shader: "
-                          << shaderName << std::endl;
+                          << shaderName << " from " << openedPath << std::endl;
                 return {};
             }
             return bytecode;
@@ -385,7 +402,13 @@ bool GPUCullingPipeline::CreateBuffers() {
 
         // Culling constants buffer
         rhi::BufferDesc constantsDesc{};
-        constantsDesc.size = sizeof(float) * 68; // Match Metal shader CullingUniforms size (272 bytes)
+        // T4.6.5 part 35.3: struct is 276 bytes (3 m4x4 + v4 + 17 u32/float
+        // after Part 35.2 added total_meshlet_count). Round up to 16-byte
+        // alignment for Vulkan UBO requirements (288 bytes). Previous 272-byte
+        // allocation caused memcpy to overflow by 4 bytes and WGSL reads of
+        // _pad_cm1/_pad_cm2 were outside the descriptor range.
+        constexpr u32 kCullingConstantsBufSize = 288;
+        constantsDesc.size = kCullingConstantsBufSize;
         constantsDesc.type = rhi::BufferType::Constant;
         constantsDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
         constantsDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ConstantBuffer) | static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
@@ -1420,12 +1443,12 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
 
         // Binding 2: Culling constants (frame-specific)
         // WGSL uniform structs are padded to a 16-byte multiple; CullingConstants
-        // is 260 bytes of fields but the shader expects 272 (17 vec4s). The
-        // buffer itself is allocated as 272 (see CreateBuffers); the descriptor
-        // range must match or Dawn rejects the binding.
+        // T4.6.5 part 35.3: descriptor range matches the 288-byte buffer
+        // allocation. WGSL CullingUniforms has 21 fields (3 mat4 + 1 vec4 +
+        // 17 u32/float) = 276 bytes; 16-byte aligned → 288.
         bufferInfos[writeCount].buffer = frame_res.culling_constants_buffer;
         bufferInfos[writeCount].offset = 0;
-        bufferInfos[writeCount].range = sizeof(float) * 68;
+        bufferInfos[writeCount].range = 288;
         writes[writeCount].dstSet = culling_descriptor_sets_[i];
         writes[writeCount].dstBinding = 2;
         writes[writeCount].descriptorCount = 1;
@@ -1602,7 +1625,18 @@ bool GPUCullingPipeline::UpdateCullingConstants(u32 frame_index, const CullingCo
     if (current_frame_res.culling_constants_buffer != rhi::handles::INVALID_RESOURCE) {
         void* mapped = device_->MapBuffer(current_frame_res.culling_constants_buffer);
         if (mapped) {
-            memcpy(mapped, &constants, sizeof(CullingConstants));
+            // T4.6.5 part 35.3: struct sizeof on Apple is 288 bytes (m4x4
+            // alignment-16 forces trailing pad; field layout is 3*64 + 16 +
+            // 17*4 = 276, padded to 288). Buffer allocation is also 288, so
+            // the memcpy covers the full struct.
+            constexpr u32 kStructBytes = sizeof(CullingConstants);
+            constexpr u32 kBufBytes = 288;
+            static_assert(kStructBytes == 288, "CullingConstants layout changed");
+            memcpy(mapped, &constants, kStructBytes);
+            // Defensive: if struct ever shrinks, zero the trailing bytes.
+            if (kBufBytes > kStructBytes) {
+                memset(static_cast<u8*>(mapped) + kStructBytes, 0, kBufBytes - kStructBytes);
+            }
             device_->UnmapBuffer(current_frame_res.culling_constants_buffer);
             return true;
         }

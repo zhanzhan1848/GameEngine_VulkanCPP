@@ -248,6 +248,18 @@ if(APPLE)
     setup_test_target(TestVulkanSponzaRenderGraph)
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
 
+    # T4.6.5 part 35.3: bundle Vulkan SPIR-V shaders next to the test binary.
+    # Without this, LoadShaderBytecode falls back to
+    # /Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/ + relative path, which
+    # resolves to the MAIN repo (feat/wfc-pcg branch) containing stale
+    # pre-Part-35.2 .spv files. The relative-path lookup only works if the
+    # .spv files exist at <binary_dir>/Engine/Graphics/Vulkan/shaders/...
+    add_custom_command(TARGET TestVulkanSponzaRenderGraph POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+        $<TARGET_FILE_DIR:TestVulkanSponzaRenderGraph>/Engine/Graphics/Vulkan/shaders
+    )
+
     # 11. TestHZBStandalone
     add_executable(TestHZBStandalone
         "HZBStandaloneTest.cpp"

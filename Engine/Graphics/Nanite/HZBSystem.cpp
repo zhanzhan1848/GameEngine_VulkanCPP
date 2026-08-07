@@ -202,14 +202,25 @@ bool HZBSystem::CreateHZBComputePipeline() {
             bytecode.push_back(0);
             return bytecode;
 #else
-            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
-            if (!file.is_open()) {
-                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
-                file.open(path, std::ios::binary | std::ios::ate);
+            // T4.6.5 part 35.3: try CWD-relative first, then worktree source root.
+            const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
+            std::vector<std::string> candidates;
+            candidates.push_back(relPath);
+            candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+
+            std::ifstream file;
+            std::string openedPath;
+            for (const auto& candidate : candidates) {
+                file.open(candidate, std::ios::binary | std::ios::ate);
+                if (file.is_open()) {
+                    openedPath = candidate;
+                    break;
+                }
             }
             if (!file.is_open()) {
-                std::cerr << "[HZBSystem] Failed to open shader: " << path << std::endl;
+                std::cerr << "[HZBSystem] Failed to open shader: " << name
+                          << "\n  tried: " << candidates[0]
+                          << "\n  tried: " << candidates[1] << std::endl;
                 return {};
             }
             std::streamsize size = file.tellg();
@@ -219,7 +230,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
             size_t pad = (platform == rhi::RHIPlatform::Vulkan) ? 0 : 1;
             std::vector<u8> bytecode(static_cast<size_t>(size) + pad, 0);
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[HZBSystem] Failed to read shader: " << path << std::endl;
+                std::cerr << "[HZBSystem] Failed to read shader: " << openedPath << std::endl;
                 return {};
             }
             return bytecode;

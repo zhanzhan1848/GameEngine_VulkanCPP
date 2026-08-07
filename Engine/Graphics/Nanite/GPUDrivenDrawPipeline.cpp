@@ -78,15 +78,29 @@ namespace {
         }
 
         if (platform == rhi::RHIPlatform::Vulkan) {
-            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
-            if (!file.is_open()) {
-                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
-                file.open(path, std::ios::binary | std::ios::ate);
+            // T4.6.5 part 35.3: CWD-relative first (works when shaders are
+            // bundled next to the test binary), then worktree source root.
+            // The previous single fallback resolved to the MAIN repo
+            // (feat/wfc-pcg branch) which has stale .spv files.
+            const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
+            std::vector<std::string> candidates;
+            candidates.push_back(relPath);
+            candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+
+            std::ifstream file;
+            std::string openedPath;
+            for (const auto& candidate : candidates) {
+                file.open(candidate, std::ios::binary | std::ios::ate);
+                if (file.is_open()) {
+                    openedPath = candidate;
+                    break;
+                }
             }
             if (!file.is_open()) {
                 std::cerr << "[GPUDrivenDrawPipeline] Failed to load SPIR-V shader: "
-                          << shaderName << " (entry: " << entryPoint << ")" << std::endl;
+                          << shaderName << " (entry: " << entryPoint << ")"
+                          << "\n  tried: " << candidates[0]
+                          << "\n  tried: " << candidates[1] << std::endl;
                 return {};
             }
             std::streamsize size = file.tellg();
@@ -95,7 +109,7 @@ namespace {
             std::vector<u8> bytecode(static_cast<size_t>(size));
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
                 std::cerr << "[GPUDrivenDrawPipeline] Failed to read SPIR-V shader: "
-                          << shaderName << std::endl;
+                          << shaderName << " from " << openedPath << std::endl;
                 return {};
             }
             return bytecode;

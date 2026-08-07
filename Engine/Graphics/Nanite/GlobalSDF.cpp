@@ -420,23 +420,34 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
         return std::vector<u8>(src.begin(), src.end());
     }
     if (platform == rhi::RHIPlatform::Vulkan) {
-        // SPIR-V binary via ShaderRegistry. Path resolves to
-        // Engine/Graphics/Vulkan/shaders/Nanite/<name>.spv.
-        std::string path = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
-            std::string alt = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + path;
-            file.open(alt, std::ios::binary | std::ios::ate);
+        // T4.6.5 part 35.3: CWD-relative first (bundled next to test binary),
+        // then worktree source root. Previous single fallback hit the MAIN
+        // repo (feat/wfc-pcg) with stale .spv files.
+        const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
+        std::vector<std::string> candidates;
+        candidates.push_back(relPath);
+        candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+
+        std::ifstream file;
+        std::string openedPath;
+        for (const auto& candidate : candidates) {
+            file.open(candidate, std::ios::binary | std::ios::ate);
+            if (file.is_open()) {
+                openedPath = candidate;
+                break;
+            }
         }
         if (!file.is_open()) {
-            std::cerr << "[GlobalSDF] Failed to open SPIR-V: " << path << std::endl;
+            std::cerr << "[GlobalSDF] Failed to open SPIR-V: " << name
+                      << "\n  tried: " << candidates[0]
+                      << "\n  tried: " << candidates[1] << std::endl;
             return {};
         }
         std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);
         std::vector<u8> bytecode(static_cast<size_t>(size));
         if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-            std::cerr << "[GlobalSDF] Failed to read SPIR-V: " << path << std::endl;
+            std::cerr << "[GlobalSDF] Failed to read SPIR-V: " << openedPath << std::endl;
             return {};
         }
         return bytecode;
