@@ -138,6 +138,7 @@ add_subdirectory(tests)
 # reach them.
 target_link_libraries(${PROJECT_NAME} PRIVATE
     contenttools_repair
+    contenttools_remesh
 )
 
 # 平台特定设置

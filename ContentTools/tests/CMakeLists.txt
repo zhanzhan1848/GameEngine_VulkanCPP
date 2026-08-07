@@ -59,3 +59,30 @@ add_test(NAME TestRepair COMMAND TestRepair)
 set_target_properties(TestRepair PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- M4 remesh module test ------------------------------------------------
+
+add_executable(TestRemesh TestRemesh.cpp)
+
+target_include_directories(TestRemesh PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestRemesh PRIVATE ContentTools contenttools_remesh)
+
+target_compile_options(TestRemesh PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestRemesh COMMAND TestRemesh)
+set_target_properties(TestRemesh PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)
