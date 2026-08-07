@@ -1236,6 +1236,60 @@ public static class NativeEngineBridge
         public string ErrorMessage;
     }
 
+    /// <summary>
+    /// Cook result for a single source image. Created by
+    /// <see cref="NativeEngineBridge.CookTexture"/>; the slices/icon byte
+    /// arrays are caller-owned and may be passed to a TEXR writer on the
+    /// managed side.
+    /// </summary>
+    public sealed class CookedTexturePayload
+    {
+        public string SourcePath { get; }
+        public byte[] Slices { get; }
+        public byte[] Icon { get; }
+        public uint Width { get; }
+        public uint Height { get; }
+        public uint ArraySize { get; }
+        public uint MipLevels { get; }
+        public uint Format { get; }
+        public uint Flags { get; }
+        public uint SourcesLen { get; }
+        public uint SourceCount { get; }
+        public uint SettingsDimension { get; }
+        public uint SettingsMipLevels { get; }
+        public float SettingsAlphaThreshold { get; }
+        public uint SettingsPreferBc7 { get; }
+        public uint SettingsOutputFormat { get; }
+        public uint SettingsCompress { get; }
+
+        public CookedTexturePayload(
+            string sourcePath, byte[] slices, byte[] icon,
+            uint width, uint height, uint arraySize, uint mipLevels,
+            uint format, uint flags,
+            uint sourcesLen, uint sourceCount,
+            uint settingsDimension, uint settingsMipLevels, float settingsAlphaThreshold,
+            uint settingsPreferBc7, uint settingsOutputFormat, uint settingsCompress)
+        {
+            SourcePath = sourcePath;
+            Slices = slices;
+            Icon = icon;
+            Width = width;
+            Height = height;
+            ArraySize = arraySize;
+            MipLevels = mipLevels;
+            Format = format;
+            Flags = flags;
+            SourcesLen = sourcesLen;
+            SourceCount = sourceCount;
+            SettingsDimension = settingsDimension;
+            SettingsMipLevels = settingsMipLevels;
+            SettingsAlphaThreshold = settingsAlphaThreshold;
+            SettingsPreferBc7 = settingsPreferBc7;
+            SettingsOutputFormat = settingsOutputFormat;
+            SettingsCompress = settingsCompress;
+        }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "InitializeAssetSystem", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _InitializeAssetSystem();
 
@@ -1264,6 +1318,39 @@ public static class NativeEngineBridge
         [MarshalAs(UnmanagedType.U1)] bool import_embedded_textures,
         [MarshalAs(UnmanagedType.U1)] bool import_animations,
         [MarshalAs(UnmanagedType.U1)] bool coalesce_meshes);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TextureCookResult
+    {
+        public uint InfoWidth;
+        public uint InfoHeight;
+        public uint InfoArraySize;
+        public uint InfoMipLevels;
+        public uint InfoFormat;
+        public uint InfoFlags;
+        public uint ImportError;
+        public uint SourcesLen;
+        public uint SourceCount;
+        public uint SettingsDimension;
+        public uint SettingsMipLevels;
+        public float SettingsAlphaThreshold;
+        public uint SettingsPreferBc7;
+        public uint SettingsOutputFormat;
+        public uint SettingsCompress;
+        public uint SlicesSize;
+        public uint IconSize;
+        public uint ImportSucceeded;
+    }
+
+    [DllImport("libContentTools", EntryPoint = "CookTexture", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern uint _CookTexture(
+        IntPtr input,
+        uint dimension, float alpha_threshold,
+        uint mip_levels_setting, uint prefer_bc7,
+        uint output_format, uint compress,
+        IntPtr slices_buffer, uint slices_capacity, out uint out_slices_size,
+        IntPtr icon_buffer,   uint icon_capacity,   out uint out_icon_size,
+        out TextureCookResult out_info);
 
     [DllImport("PrimalEngine", EntryPoint = "TickAssetSystem", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _TickAssetSystem();
@@ -1362,6 +1449,68 @@ public static class NativeEngineBridge
                 settings.CoalesceMeshes) != 0;
         }
         catch (Exception ex) { Logger.Error("CookMesh failed", ex); return false; }
+    }
+
+    /// <summary>
+    /// Cook a texture via ContentTools::CookTexture. Returns null on failure.
+    /// Caller owns the returned slices/icon byte arrays and may read them
+    /// synchronously; the unmanaged buffers are released before this method returns.
+    /// </summary>
+    public static CookedTexturePayload? CookTexture(
+        string input, Editors.Texture.TextureImportSettings settings)
+    {
+        if (!_isLoaded || string.IsNullOrEmpty(input)) return null;
+
+        IntPtr pInput = IntPtr.Zero;
+        IntPtr pSlices = IntPtr.Zero;
+        IntPtr pIcon = IntPtr.Zero;
+        try
+        {
+            pInput = MarshalUtf8(input);
+            const int initialCapacity = 16 * 1024 * 1024; // 16 MiB; PNG cook output is well below this.
+            pSlices = Marshal.AllocHGlobal(initialCapacity);
+            pIcon = Marshal.AllocHGlobal(4 * 1024 * 1024); // 4 MiB; icon is small (BC decoded, low mip).
+
+            var managed = new Editors.Texture.TextureImportSettings();
+            PrimalEditor_Avalonia.Content.AssetImportSettingsExtensions.CopyImportSettings(settings, managed);
+
+            var info = new TextureCookResult();
+            var ok = _CookTexture(
+                pInput,
+                (uint)managed.Dimension, managed.AlphaThreshold,
+                (uint)managed.MipLevels, managed.PreferBC7 ? 1u : 0u,
+                (uint)managed.OutputFormat, managed.Compress ? 1u : 0u,
+                pSlices, (uint)initialCapacity, out uint slicesSize,
+                pIcon,   (uint)(4 * 1024 * 1024), out uint iconSize,
+                out info);
+
+            if (ok == 0 || info.ImportSucceeded == 0) return null;
+
+            var slices = new byte[slicesSize];
+            var icon   = new byte[iconSize];
+            if (slicesSize > 0) Marshal.Copy(pSlices, slices, 0, (int)slicesSize);
+            if (iconSize   > 0) Marshal.Copy(pIcon,   icon,   0, (int)iconSize);
+
+            return new CookedTexturePayload(
+                input,
+                slices, icon,
+                info.InfoWidth, info.InfoHeight, info.InfoArraySize, info.InfoMipLevels,
+                info.InfoFormat, info.InfoFlags,
+                info.SourcesLen, info.SourceCount,
+                info.SettingsDimension, info.SettingsMipLevels, info.SettingsAlphaThreshold,
+                info.SettingsPreferBc7, info.SettingsOutputFormat, info.SettingsCompress);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("CookTexture failed", ex);
+            return null;
+        }
+        finally
+        {
+            if (pInput != IntPtr.Zero) Marshal.FreeHGlobal(pInput);
+            if (pSlices != IntPtr.Zero) Marshal.FreeHGlobal(pSlices);
+            if (pIcon != IntPtr.Zero) Marshal.FreeHGlobal(pIcon);
+        }
     }
 
     public static void TickAssetSystem()

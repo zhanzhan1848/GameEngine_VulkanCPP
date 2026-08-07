@@ -7,6 +7,7 @@ using Avalonia.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors.Texture;
+using PrimalEditor_Avalonia.Import;
 using PrimalEditor_Avalonia.Import.Settings;
 
 namespace PrimalEditor_Avalonia.Native.Importers;
@@ -36,50 +37,64 @@ public sealed class TextureImporterPlugin : IAssetImporterPlugin
 
     public async Task<ImportedAsset> RunAsync(ImportRequest request, IProgress<double>? progress, CancellationToken ct)
     {
-        var destPath = Path.Combine(request.DestinationDir, Path.GetFileName(request.SourcePath));
+        var sourceName = Path.GetFileNameWithoutExtension(request.SourcePath);
+        var destTexPath = Path.Combine(request.DestinationDir, sourceName + EngineAssetExtension);
         Directory.CreateDirectory(request.DestinationDir);
 
-        try { File.Copy(request.SourcePath, destPath, overwrite: true); }
+        if (!NativeEngineBridge.IsLoaded)
+        {
+            return new ImportedAsset
+            {
+                SourcePath = request.SourcePath,
+                DestinationPath = request.SourcePath,
+                Type = AssetType.Texture,
+                Success = false,
+                ErrorMessage = "ContentTools not loaded; cannot cook texture.",
+            };
+        }
+
+        TextureImportSettings settings = (TextureImportSettings)request.Settings;
+        var cooked = await Task.Run(() => NativeEngineBridge.CookTexture(request.SourcePath, settings), ct);
+        if (cooked == null)
+        {
+            return new ImportedAsset
+            {
+                SourcePath = request.SourcePath,
+                DestinationPath = destTexPath,
+                Type = AssetType.Texture,
+                Success = false,
+                ErrorMessage = "ContentTools::CookTexture returned no result (corrupt source, unsupported format, or cook capacity exceeded).",
+            };
+        }
+
+        try
+        {
+            TextureTexrWriter.Write(destTexPath, cooked);
+        }
         catch (Exception ex)
         {
             return new ImportedAsset
             {
                 SourcePath = request.SourcePath,
-                DestinationPath = destPath,
+                DestinationPath = destTexPath,
                 Type = AssetType.Texture,
                 Success = false,
-                ErrorMessage = ex.Message,
+                ErrorMessage = $"TEXR write failed: {ex.Message}",
             };
         }
 
-        AssetImportSettingsStore.Save<TextureImportSettings>(destPath, (TextureImportSettings)request.Settings);
-
-        if (!NativeEngineBridge.IsLoaded)
-            return new ImportedAsset { SourcePath = request.SourcePath, DestinationPath = destPath, Type = AssetType.Texture, Success = true };
-
-        var result = await Task.Run(() => NativeEngineBridge.ImportTexture(destPath), ct);
-        if (!result.HasValue || result.Value.Success == 0)
-        {
-            var err = result?.ErrorMessage;
-            return new ImportedAsset
-            {
-                SourcePath = request.SourcePath,
-                DestinationPath = destPath,
-                Type = AssetType.Texture,
-                Success = false,
-                ErrorMessage = string.IsNullOrEmpty(err) ? "Texture import returned no result" : err,
-            };
-        }
+        AssetImportSettingsStore.Save<TextureImportSettings>(destTexPath, settings);
 
         return new ImportedAsset
         {
             SourcePath = request.SourcePath,
-            DestinationPath = destPath,
+            DestinationPath = destTexPath,
             Type = AssetType.Texture,
             Success = true,
-            NativeHandle = result.Value.Handle,
-            Width = (int)result.Value.Width,
-            Height = (int)result.Value.Height,
+            Width = (int)cooked.Width,
+            Height = (int)cooked.Height,
         };
     }
+
+    public const string EngineAssetExtension = ".texture";
 }

@@ -722,6 +722,101 @@ namespace primal::tools
 			texture_info_from_metadata(scratch.GetMetadata(), data->info);
 		}
 	}
+
+	/// ABI-visible cooked result written into caller-supplied buffers.
+	struct cook_result
+	{
+		u32 info_width{ 0 };
+		u32 info_height{ 0 };
+		u32 info_array_size{ 0 };
+		u32 info_mip_levels{ 0 };
+		u32 info_format{ 0 };
+		u32 info_flags{ 0 };
+		u32 import_error{ 0 };
+		u32 sources_len{ 0 };
+		u32 source_count{ 0 };
+		u32 settings_dimension{ 0 };
+		u32 settings_mip_levels{ 0 };
+		f32 settings_alpha_threshold{ 0.0f };
+		u32 settings_prefer_bc7{ 0 };
+		u32 settings_output_format{ 0 };
+		u32 settings_compress{ 0 };
+		u32 slices_size{ 0 };
+		u32 icon_size{ 0 };
+		u32 import_succeeded{ 0 };
+	};
+
+	/// Reads `input` (PNG / TGA / HDR / DDS), runs the full settings-driven
+	/// cook pipeline, and writes the cooked slices + icon into caller-
+	/// supplied buffers. Returns 1 on success, 0 on any failure.
+	EDITOR_INTERFACE u32 CookTexture(
+		const char* input,
+		u32 dimension, f32 alpha_threshold,
+		u32 mip_levels_setting, u32 prefer_bc7,
+		u32 output_format, u32 compress,
+		u8* slices_buffer, u32 slices_capacity, u32* out_slices_size,
+		u8* icon_buffer,   u32 icon_capacity,   u32* out_icon_size,
+		cook_result* out_info)
+	{
+		if (!input || !slices_buffer || !out_slices_size || !icon_buffer || !out_icon_size || !out_info)
+			return 0;
+
+		*out_slices_size = 0;
+		*out_icon_size = 0;
+		std::memset(out_info, 0, sizeof(cook_result));
+
+		texture_data data{};
+		data.import_settings.dimension = dimension;
+		data.import_settings.mip_levels = mip_levels_setting;
+		data.import_settings.alpha_threshold = alpha_threshold;
+		data.import_settings.prefer_bc7 = prefer_bc7;
+		data.import_settings.output_format = output_format;
+		data.import_settings.compress = compress;
+		data.import_settings.sources = const_cast<char*>(input);
+		data.import_settings.source_count = 1;
+
+		Import(&data);
+
+		if (data.info.import_error != 0) return 0;
+		if (!data.subresource_data || data.subresource_size == 0) return 0;
+		if (data.subresource_size > slices_capacity) return 0;
+
+		std::memcpy(slices_buffer, data.subresource_data, data.subresource_size);
+		*out_slices_size = data.subresource_size;
+
+		if (data.icon && data.icon_size > 0)
+		{
+			if (data.icon_size > icon_capacity)
+			{
+				CoTaskMemFree(data.subresource_data);
+				CoTaskMemFree(data.icon);
+				return 0;
+			}
+			std::memcpy(icon_buffer, data.icon, data.icon_size);
+			*out_icon_size = data.icon_size;
+		}
+
+		out_info->info_width          = data.info.width;
+		out_info->info_height         = data.info.height;
+		out_info->info_array_size     = data.info.array_size;
+		out_info->info_mip_levels     = data.info.mip_levels;
+		out_info->info_format         = data.info.format;
+		out_info->info_flags          = data.info.flags;
+		out_info->import_error        = data.info.import_error;
+		out_info->sources_len         = data.import_settings.sources ? (u32)std::strlen(data.import_settings.sources) : 0;
+		out_info->source_count        = data.import_settings.source_count;
+		out_info->settings_dimension  = data.import_settings.dimension;
+		out_info->settings_mip_levels = data.import_settings.mip_levels;
+		out_info->settings_alpha_threshold = data.import_settings.alpha_threshold;
+		out_info->settings_prefer_bc7 = data.import_settings.prefer_bc7;
+		out_info->settings_output_format = data.import_settings.output_format;
+		out_info->settings_compress   = data.import_settings.compress;
+		out_info->import_succeeded    = 1;
+
+		CoTaskMemFree(data.subresource_data);
+		CoTaskMemFree(data.icon);
+		return 1;
+	}
 }
 #elif defined(__clang__)
 
@@ -2558,6 +2653,101 @@ namespace primal::tools
 			copy_subresources(scratch, data);
 			texture_info_from_metadata(scratch.metadata, data->info);
 		}
+	}
+
+	/// ABI-visible cooked result written into caller-supplied buffers.
+	struct cook_result
+	{
+		u32 info_width{ 0 };
+		u32 info_height{ 0 };
+		u32 info_array_size{ 0 };
+		u32 info_mip_levels{ 0 };
+		u32 info_format{ 0 };
+		u32 info_flags{ 0 };
+		u32 import_error{ 0 };
+		u32 sources_len{ 0 };
+		u32 source_count{ 0 };
+		u32 settings_dimension{ 0 };
+		u32 settings_mip_levels{ 0 };
+		f32 settings_alpha_threshold{ 0.0f };
+		u32 settings_prefer_bc7{ 0 };
+		u32 settings_output_format{ 0 };
+		u32 settings_compress{ 0 };
+		u32 slices_size{ 0 };
+		u32 icon_size{ 0 };
+		u32 import_succeeded{ 0 };
+	};
+
+	/// Reads `input` (PNG / TGA / HDR / DDS), runs the full settings-driven
+	/// cook pipeline, and writes the cooked slices + icon into caller-
+	/// supplied buffers. Returns 1 on success, 0 on any failure.
+	EDITOR_INTERFACE u32 CookTexture(
+		const char* input,
+		u32 dimension, f32 alpha_threshold,
+		u32 mip_levels_setting, u32 prefer_bc7,
+		u32 output_format, u32 compress,
+		u8* slices_buffer, u32 slices_capacity, u32* out_slices_size,
+		u8* icon_buffer,   u32 icon_capacity,   u32* out_icon_size,
+		cook_result* out_info)
+	{
+		if (!input || !slices_buffer || !out_slices_size || !icon_buffer || !out_icon_size || !out_info)
+			return 0;
+
+		*out_slices_size = 0;
+		*out_icon_size = 0;
+		std::memset(out_info, 0, sizeof(cook_result));
+
+		texture_data data{};
+		data.import_settings.dimension = dimension;
+		data.import_settings.mip_levels = mip_levels_setting;
+		data.import_settings.alpha_threshold = alpha_threshold;
+		data.import_settings.prefer_bc7 = prefer_bc7;
+		data.import_settings.output_format = output_format;
+		data.import_settings.compress = compress;
+		data.import_settings.sources = const_cast<char*>(input);
+		data.import_settings.source_count = 1;
+
+		Import(&data);
+
+		if (data.info.import_error != 0) return 0;
+		if (!data.subresource_data || data.subresource_size == 0) return 0;
+		if (data.subresource_size > slices_capacity) return 0;
+
+		std::memcpy(slices_buffer, data.subresource_data, data.subresource_size);
+		*out_slices_size = data.subresource_size;
+
+		if (data.icon && data.icon_size > 0)
+		{
+			if (data.icon_size > icon_capacity)
+			{
+				std::free(data.subresource_data);
+				std::free(data.icon);
+				return 0;
+			}
+			std::memcpy(icon_buffer, data.icon, data.icon_size);
+			*out_icon_size = data.icon_size;
+		}
+
+		out_info->info_width          = data.info.width;
+		out_info->info_height         = data.info.height;
+		out_info->info_array_size     = data.info.array_size;
+		out_info->info_mip_levels     = data.info.mip_levels;
+		out_info->info_format         = data.info.format;
+		out_info->info_flags          = data.info.flags;
+		out_info->import_error        = data.info.import_error;
+		out_info->sources_len         = data.import_settings.sources ? (u32)std::strlen(data.import_settings.sources) : 0;
+		out_info->source_count        = data.import_settings.source_count;
+		out_info->settings_dimension  = data.import_settings.dimension;
+		out_info->settings_mip_levels = data.import_settings.mip_levels;
+		out_info->settings_alpha_threshold = data.import_settings.alpha_threshold;
+		out_info->settings_prefer_bc7 = data.import_settings.prefer_bc7;
+		out_info->settings_output_format = data.import_settings.output_format;
+		out_info->settings_compress   = data.import_settings.compress;
+		out_info->import_succeeded    = 1;
+
+		std::free(data.subresource_data);
+		std::free(data.icon);
+		return 1;
 	}
 }
 #endif
