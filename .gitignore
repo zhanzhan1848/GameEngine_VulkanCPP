@@ -372,6 +372,7 @@ project_rules.md
 build/
 xcode_build/
 .claude/
+MEMORY.md
 .opencode/worktrees/
 .worktrees/
 .opencode/
