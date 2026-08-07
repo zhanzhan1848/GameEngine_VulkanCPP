@@ -37,7 +37,7 @@ public class ContentBrowserViewModel : Document
     private string _statusMessage = string.Empty;
     private bool _isImporting;
     private string _importingStatus = string.Empty;
-    private FileViewMode _viewMode = FileViewMode.List;
+    private FileViewMode _viewMode = FileViewMode.Thumbnails;
     private string _searchQuery = string.Empty;
 
     public ObservableCollection<ContentFolder> Folders { get; } = new();

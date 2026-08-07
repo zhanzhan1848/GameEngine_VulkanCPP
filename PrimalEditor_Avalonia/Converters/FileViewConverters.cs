@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Concurrent;
 using System.Globalization;
 using Avalonia.Data.Converters;
 using Avalonia.Media;
+using PrimalEditor_Avalonia.Content;
+using PrimalEditor_Avalonia.Import;
 using PrimalEditor_Avalonia.Native;
 using PrimalEditor_Avalonia.ViewModels;
 
@@ -49,6 +52,43 @@ public class ViewModeToBoolConverter : IValueConverter
 public static class FileTypeConverters
 {
     public static readonly IValueConverter ToIcon = new FileTypeToIconConverter();
+    public static readonly IValueConverter ToThumbnailSource = new AssetThumbnailConverter();
+}
+
+public class AssetThumbnailConverter : IValueConverter
+{
+    private static readonly ConcurrentDictionary<string, WeakReference<Avalonia.Media.Imaging.Bitmap>> _cache = new();
+
+    /// <summary>
+    /// Returns a renderable source for an asset thumbnail. For engine
+    /// textures (.texture/TEXR) this decodes mip-0 via
+    /// <see cref="TextureTexrReader"/> (cached per path); for other image
+    /// formats it returns the path so Avalonia decodes natively.
+    /// </summary>
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value is not AssetInfo info) return null;
+
+        var ext = System.IO.Path.GetExtension(info.FullPath).ToLowerInvariant();
+        if (ext == ".texture")
+        {
+            if (_cache.TryGetValue(info.FullPath, out var weak) && weak.TryGetTarget(out var cached))
+                return cached;
+
+            if (TextureTexrReader.TryDecodeBitmap(info.FullPath, out var bmp, out var decodeError) && bmp != null)
+            {
+                _cache[info.FullPath] = new WeakReference<Avalonia.Media.Imaging.Bitmap>(bmp);
+                return bmp;
+            }
+            PrimalEditor_Avalonia.Common.Logger.Warning($"Thumbnail decode failed for {info.FullPath}: {decodeError}");
+            return null;
+        }
+
+        return info.FullPath;
+    }
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
 }
 
 public class FileTypeToIconConverter : IValueConverter
