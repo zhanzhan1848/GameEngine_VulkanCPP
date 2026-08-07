@@ -113,3 +113,30 @@ add_test(NAME TestSubdivide COMMAND TestSubdivide)
 set_target_properties(TestSubdivide PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- M6 uvatlas module test -----------------------------------------------
+
+add_executable(TestUvAtlas TestUvAtlas.cpp)
+
+target_include_directories(TestUvAtlas PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestUvAtlas PRIVATE ContentTools contenttools_uvatlas)
+
+target_compile_options(TestUvAtlas PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestUvAtlas COMMAND TestUvAtlas)
+set_target_properties(TestUvAtlas PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)

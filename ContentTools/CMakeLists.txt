@@ -140,6 +140,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     contenttools_repair
     contenttools_remesh
     contenttools_subdivide
+    contenttools_uvatlas
 )
 
 # 平台特定设置
