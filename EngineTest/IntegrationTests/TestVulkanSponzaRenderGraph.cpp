@@ -582,6 +582,16 @@ void TestVulkanSponzaRenderGraph::Run() {
     // T4.6.5 part 30.4: safety-net close check. applicationShouldTerminateAfterLastWindowClosed
     // is the primary path, but some edge cases (e.g. window never ordered front) skip it.
     if (window_.is_closed()) {
+        // T4.6.5 part 35.7: NSWindowWillCloseNotification sets g_any_window_closed
+        // synchronously, but NSApplication only processes applicationShouldTerminate
+        // AfterLastWindowClosed on its own event pass — which races with this timer
+        // callback. If terminate fires first, exit() runs static destructors without
+        // ever calling Shutdown(), leaking the window_info free_list slot and tripping
+        // ~free_list's !_size assert. Call Shutdown() explicitly here.
+        if (!hasShutdown_) {
+            hasShutdown_ = true;
+            Shutdown();
+        }
         NS::Application::sharedApplication()->terminate(nullptr);
         return;
     }
@@ -664,6 +674,14 @@ void TestVulkanSponzaRenderGraph::Run() {
 }
 
 void TestVulkanSponzaRenderGraph::Shutdown() {
+    // T4.6.5 part 35.7: re-entrancy guard. Run()'s safety net calls Shutdown()
+    // before terminate; if NSApplication also fires
+    // applicationShouldTerminateAfterLastWindowClosed → shutdown() before
+    // exit, the framework would call this again. Idempotent either way, but
+    // the guard keeps the log message honest and skips wasted work.
+    if (hasShutdown_) return;
+    hasShutdown_ = true;
+
     std::cout << "[Part30.4] Shutdown — rendered " << frameCount_ << " frames" << std::endl;
 
     if (device_) {

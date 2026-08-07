@@ -106,4 +106,5 @@ private:
 
     u64 frameCount_{0};
     bool subsystemsInitialized_{false};
+    bool hasShutdown_{false};  // T4.6.5 part 35.7: re-entrancy guard
 };
