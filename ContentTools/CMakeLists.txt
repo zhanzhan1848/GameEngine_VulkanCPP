@@ -26,6 +26,15 @@ set(PROJECTION_SOURCES
     ObjImporter.h
     PrimitiveMesh.h
     NormalMapIdentification.h
+    # Phase 1 asset pipeline shared sources (M2)
+    common/SDF.h
+    common/SDF.cpp
+    common/ProcessableMesh.h
+    common/ProcessableMesh.cpp
+    common/ErrorReport.h
+    common/PipelineTypes.h
+    common/MeshConverters.h
+    common/MeshConverters.cpp
 )
 
 set(MESHOPT_DIR "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src")
@@ -119,6 +128,10 @@ add_subdirectory(modules/uvatlas)
 add_subdirectory(modules/lod)
 add_subdirectory(modules/meshlet)
 add_subdirectory(modules/collision)
+
+# Phase 1 unit tests (M2.6+). Each module ships its own test binary here as
+# it lands (M3 repair, M4 remesh, etc.).
+add_subdirectory(tests)
 
 # 平台特定设置
 if(WIN32)
