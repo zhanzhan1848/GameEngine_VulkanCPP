@@ -129,6 +129,9 @@ add_subdirectory(modules/lod)
 add_subdirectory(modules/meshlet)
 add_subdirectory(modules/collision)
 
+# Phase 1 M8: pipeline orchestration layer (AssetPipeline + SceneBlobWriter).
+add_subdirectory(pipeline)
+
 # Phase 1 unit tests (M2.6+). Each module ships its own test binary here as
 # it lands (M3 repair, M4 remesh, etc.).
 add_subdirectory(tests)
@@ -144,6 +147,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     contenttools_lod
     contenttools_meshlet
     contenttools_collision
+    contenttools_pipeline
 )
 
 # 平台特定设置

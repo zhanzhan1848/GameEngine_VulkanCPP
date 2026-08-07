@@ -221,3 +221,57 @@ add_test(NAME TestCollision COMMAND TestCollision)
 set_target_properties(TestCollision PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- M8 SceneBlobWriter test ----------------------------------------------
+
+add_executable(TestSceneBlobWriter TestSceneBlobWriter.cpp)
+
+target_include_directories(TestSceneBlobWriter PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestSceneBlobWriter PRIVATE ContentTools contenttools_pipeline)
+
+target_compile_options(TestSceneBlobWriter PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestSceneBlobWriter COMMAND TestSceneBlobWriter)
+set_target_properties(TestSceneBlobWriter PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)
+
+# ---- M8 AssetPipeline integration test ------------------------------------
+
+add_executable(TestAssetPipeline TestAssetPipeline.cpp)
+
+target_include_directories(TestAssetPipeline PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestAssetPipeline PRIVATE ContentTools contenttools_pipeline)
+
+target_compile_options(TestAssetPipeline PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestAssetPipeline COMMAND TestAssetPipeline)
+set_target_properties(TestAssetPipeline PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)
