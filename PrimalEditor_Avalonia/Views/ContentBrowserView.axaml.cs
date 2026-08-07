@@ -129,71 +129,8 @@ public partial class ContentBrowserView : UserControl
 
         if (paths.Count == 0) return;
 
-        var subfolder = vm.SelectedFolder != null && vm.SelectedFolder.FullPath != vm.Project.ContentPath
-            ? System.IO.Path.GetFileName(vm.SelectedFolder.FullPath)
-            : null;
-
-        var imported = 0;
-        var failed = 0;
-        var firstError = string.Empty;
-        var total = paths.Count;
-        var index = 0;
-
-        vm.IsImporting = true;
-        try
-        {
-            foreach (var path in paths)
-            {
-                index++;
-                var name = System.IO.Path.GetFileName(path);
-                var type = Native.AssetImporter.DetectType(name);
-                if (type == Native.AssetType.Mesh)
-                {
-                    vm.ImportingStatus = $"Cooking {name} → {System.IO.Path.ChangeExtension(name, ".mesh")} ({index}/{total}) — large meshes may take several minutes...";
-                }
-                else
-                {
-                    vm.ImportingStatus = $"Importing {name} ({index}/{total})...";
-                }
-
-                var asset = await Native.AssetImporter.ImportAsync(path, vm.Project.ContentPath, subfolder);
-                if (asset != null && asset.Success)
-                {
-                    imported++;
-                    PrimalEditor_Avalonia.Common.Logger.Info($"Imported (drop): {name}");
-                }
-                else
-                {
-                    failed++;
-                    if (asset?.ErrorMessage != null)
-                    {
-                        PrimalEditor_Avalonia.Common.Logger.Warning($"Drop import failed: {name} - {asset.ErrorMessage}");
-                        if (string.IsNullOrEmpty(firstError))
-                        {
-                            firstError = $"{name}: {asset.ErrorMessage}";
-                        }
-                    }
-                    else
-                    {
-                        PrimalEditor_Avalonia.Common.Logger.Warning($"Drop import failed: {name}");
-                        if (string.IsNullOrEmpty(firstError))
-                        {
-                            firstError = $"{name}: unknown error (engine returned no result)";
-                        }
-                    }
-                }
-            }
-        }
-        finally
-        {
-            vm.IsImporting = false;
-            vm.ImportingStatus = string.Empty;
-        }
-
-        vm.StatusMessage = failed > 0 && !string.IsNullOrEmpty(firstError)
-            ? $"Imported: {imported}, Failed: {failed}. First error: {firstError}"
-            : $"Imported: {imported}, Failed: {failed}";
-        vm.RefreshFolders();
+        var ownerWindow = Avalonia.Controls.TopLevel.GetTopLevel(this) as Avalonia.Controls.Window;
+        if (ownerWindow != null) await vm.ImportPathsAsync(paths, ownerWindow);
     }
 
     private async void OnImportClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)

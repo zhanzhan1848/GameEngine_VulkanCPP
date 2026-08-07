@@ -449,11 +449,29 @@ public class ContentBrowserViewModel : Document
         var files = await topLevel.StorageProvider.OpenFilePickerAsync(options);
         if (files == null || files.Count == 0) return;
 
+        await ImportPathsAsync(files.Select(f => f.Path.LocalPath).ToList(), topLevel);
+    }
+
+    /// <summary>
+    /// Drive the per-category dialog flow + plugin dispatch for an arbitrary
+    /// set of file paths. Used by both the Import button (with picker paths)
+    /// and the drag-and-drop handler (with dropped paths). Caller supplies
+    /// the owner window for modal dialogs.
+    /// </summary>
+    public async Task ImportPathsAsync(IReadOnlyList<string> sourcePaths, Avalonia.Controls.Window owner)
+    {
+        if (_project == null)
+        {
+            Logger.Warning("Cannot import asset: no project loaded");
+            return;
+        }
+        if (sourcePaths == null || sourcePaths.Count == 0) return;
+
         var subfolder = SelectedFolder != null && SelectedFolder.FullPath != _project.ContentPath
             ? Path.GetFileName(SelectedFolder.FullPath)
             : null;
 
-        var paths = files.Select(f => f.Path.LocalPath).ToList();
+        var paths = sourcePaths.ToList();
         var settingsPerFile = new Dictionary<string, IAssetImportSettings>();
 
         foreach (var group in paths.GroupBy(p => AssetImporterRegistry.ResolveForFile(p)?.GetType() ?? typeof(object))
@@ -464,10 +482,16 @@ public class ContentBrowserViewModel : Document
             if (plugin == null) continue;
 
             var defaults = ImportSettingsDefaults.ResolveDefaults(plugin, _project, group.ToList());
-            var (accepted, settings) = await ImportSettingsDialog.ShowAsync(topLevel, plugin, group.ToList(), defaults);
+            var (accepted, settings) = await ImportSettingsDialog.ShowAsync(owner, plugin, group.ToList(), defaults);
             if (!accepted || settings == null) continue;
             foreach (var p in group)
                 settingsPerFile[p] = settings;
+        }
+
+        if (settingsPerFile.Count == 0)
+        {
+            RefreshFolders();
+            return;
         }
 
         var destDir = string.IsNullOrEmpty(subfolder) ? _project.ContentPath : Path.Combine(_project.ContentPath, subfolder);
