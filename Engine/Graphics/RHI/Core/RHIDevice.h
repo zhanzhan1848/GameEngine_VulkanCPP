@@ -171,6 +171,16 @@ public:
     virtual const DeviceDesc& GetDesc() const = 0;
     virtual void WaitIdle() const = 0;
     virtual void Shutdown() = 0;
+    // T4.6.5 part 35.6: frame lifecycle entrypoints exposed via the polymorphic
+    // base so RenderSystem can drive them. RHIDevice::BeginFrame bumps
+    // frameCount_ + gc_.SetCurrentFrame; EndFrame runs gc_.Update to actually
+    // free deferred-destroy items. Without these driven from the render loop,
+    // per-frame descriptor set allocations accumulate in the GC queue and
+    // exhaust the per-layout descriptor pool within ~20 frames.
+    // Non-pure (empty default) so mocks that inherit RHIDeviceBase directly
+    // remain concrete without needing to stub these.
+    virtual void BeginFrame() {}
+    virtual void EndFrame() {}
     virtual bool Submit(const QueueSubmitInfo& info) = 0;
     virtual SyncHandle CreateSync() = 0;
     virtual bool WaitForSync(SyncHandle handle, u32 timeoutMs) = 0;
@@ -315,22 +325,29 @@ public:
     /**
      * @brief 开始新的一帧
      */
-    void BeginFrame() {
+    void BeginFrame() override {
         assert(isValid_ && "Device not initialized");
         frameCount_++;
         gc_.SetCurrentFrame(frameCount_);
         derived().beginFrameImpl();
     }
-    
+
     /**
      * @brief 结束当前帧
      */
-    void EndFrame() {
+    void EndFrame() override {
         assert(isValid_ && "Device not initialized");
         derived().endFrameImpl();
-        
-        // 假设最大飞行帧数为 2 (MaxFramesInFlight - 1)
-        u64 completedFrame = frameCount_ > 2 ? frameCount_ - 2 : 0;
+
+        // T4.6.5 part 35.6: GC offset must match MAX_FRAMES_IN_FLIGHT (3), not
+        // 2. RenderSystem.BeginFrame waits on the per-slot fence before
+        // re-using that slot, so frame N-3 has fully completed by the time
+        // frame N starts recording. Items deferred at frame K are safe to
+        // free at frame K+3 (currentFrame - 3 >= K). The prior offset of 2
+        // freed descriptor sets while the cmd buffer that referenced them
+        // was still in flight (VUID-vkDestroy* in-use errors).
+        constexpr u64 kGcOffset = 3;
+        u64 completedFrame = frameCount_ > kGcOffset ? frameCount_ - kGcOffset : 0;
         gc_.Update(completedFrame);
     }
     

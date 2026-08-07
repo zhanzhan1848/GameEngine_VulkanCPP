@@ -217,6 +217,14 @@ void RenderSystem::Resize(u32 width, u32 height) {
 bool RenderSystem::BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandle& outSignalFence) {
     if (!device_ || !swapChain_) return false;
 
+    // T4.6.5 part 35.6: drive device-level frame lifecycle so the GC's
+    // currentFrame_ advances and DeferredDestroy items eventually get
+    // processed. Without this, per-frame descriptor set allocations
+    // (HZBSystem allocates ~11 sets per BuildHZB) accumulate in the GC
+    // queue forever and exhaust the per-layout descriptor pool after
+    // ~20 frames ("vkAllocateDescriptorSets failed").
+    device_->BeginFrame();
+
     // Internal Frame Sync
     Wait(currentFrameIndex_);
 
@@ -242,6 +250,9 @@ void RenderSystem::EndFrame() {
         // Advance frame index
         currentFrameIndex_ = (currentFrameIndex_ + 1) % rhi::MAX_FRAMES_IN_FLIGHT;
     }
+    // T4.6.5 part 35.6: drive GC update so deferred descriptor set destroys
+    // actually fire. Otherwise pools exhaust within ~20 frames.
+    device_->EndFrame();
 }
 
 void RenderSystem::EndFrame(rhi::SyncHandle renderDoneSemaphore) {
@@ -254,6 +265,9 @@ void RenderSystem::EndFrame(rhi::SyncHandle renderDoneSemaphore) {
         swapChain_->Present(renderDoneSemaphore);
         currentFrameIndex_ = (currentFrameIndex_ + 1) % rhi::MAX_FRAMES_IN_FLIGHT;
     }
+    // T4.6.5 part 35.6: drive GC update so deferred descriptor set destroys
+    // actually fire. Otherwise pools exhaust within ~20 frames.
+    device_->EndFrame();
 }
 
 rhi::TextureDesc RenderSystem::GetBackBufferDesc() const {

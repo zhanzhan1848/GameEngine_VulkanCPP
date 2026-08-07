@@ -1354,6 +1354,18 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                         cullingResults, static_cast<u32>(frameCount_), cbIdx);
     }
 
+    // T4.6.5 part 35.5: Build HZB from this frame's GBuffer depth. The
+    // non-Editor path was missing this — Culling samples hzb_texture_ in
+    // Stage5 occlusion, but without BuildHZB the texture contained only
+    // the initialization-time allocation (uninitialized/stale data).
+    // Result: false-occlusion of mid-frustum geometry (pillars, cloth) that
+    // varied frame-to-frame because the stale HZB never matched the live
+    // scene. BuildHZB writes nearest-depth mip chain via MIN filter so
+    // next frame's Stage5 has correct occluder depths.
+    if (hzb_system_ && hzb_system_->IsReady() && gpuDraw.IsInitialized()) {
+        hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), cmd);
+    }
+
     // After draw: Shadow + Deferred + FinalBlit via RenderGraph
     if (deferred_module_ && final_blit_module_) {
         renderGraph_->Clear();

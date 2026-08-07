@@ -87,8 +87,14 @@ bool VulkanDescriptorSetLayout::Initialize() {
     }
     std::vector<VkDescriptorPoolSize> sizes;
     sizes.reserve(poolSizes.size());
+    // T4.6.5 part 35.6: pool size multiplier 16 was too small for per-frame
+    // descriptor set allocators (HZBSystem allocates ~11 sets per BuildHZB
+    // call). With 3 frames in flight + GC offset 3, peak alive is ~33 sets;
+    // 16-descriptor cap per type caused vkAllocateDescriptorSets to fail
+    // after ~2 frames. Bumped to 256 to match maxSets headroom. The cost
+    // is per-pool memory overhead (a few KB per layout) — acceptable.
     for (const auto& kv : poolSizes) {
-        sizes.push_back({ kv.first, kv.second * 16 });  // 16 sets 容量(Phase 4 简化)
+        sizes.push_back({ kv.first, kv.second * 256 });
     }
 
     VkDescriptorPoolCreateInfo pci{};
