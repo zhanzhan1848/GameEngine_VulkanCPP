@@ -443,6 +443,17 @@ bool GPUCullingPipeline::CreateBuffers() {
         }
     }
 
+    // T4.6.5 part 35.4: triple-buffered host-visible staging for indirect_args.
+    // Size matches indirectDesc (5 u32 + padding = 20 bytes; round to 32).
+    for (u32 i = 0; i < 3; ++i) {
+        rhi::BufferDesc readbackDesc{};
+        readbackDesc.size = 32;
+        readbackDesc.type = rhi::BufferType::Raw;
+        readbackDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+        readbackDesc.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
+        indirect_readback_staging_[i] = device_->CreateBuffer(readbackDesc);
+    }
+
 //    std::cout << "GPU Culling buffers created successfully with triple buffering" << std::endl;
 
     // Note: Descriptor sets will be created later when we have scene snapshot
@@ -534,6 +545,16 @@ void GPUCullingPipeline::Shutdown() {
             debug_buffer = rhi::handles::INVALID_RESOURCE;
         }
     }
+
+    // T4.6.5 part 35.4: destroy indirect_args readback staging.
+    for (auto& staging : indirect_readback_staging_) {
+        if (staging != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(staging);
+            staging = rhi::handles::INVALID_RESOURCE;
+        }
+    }
+    indirect_readback_idx_ = 0;
+    indirect_readback_filled_ = 0;
 
     // T4.6.5 part 30.2: tear down everything Execute() creates lazily. Without
     // this, culling_descriptor_sets_ + placeholder_meshlet_buffer_ +
@@ -671,6 +692,28 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                       << " hzbReady=" << (hzbReady ? 1 : 0)
                       << " hzbBound=" << (hzb_bindings_updated_ ? 1 : 0)
                       << std::endl;
+        }
+    }
+
+    // T4.6.5 part 35.4: drain previous frame's indirect_args readback. We
+    // staged a copy last frame; the test loop's WaitForCompletion guarantees
+    // the GPU has finished, so the staging slot is safe to map.
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+        indirect_readback_filled_ >= 1 &&
+        execute_call_count_ >= 2) {
+        const u32 readSlot = (indirect_readback_idx_ + (3 - indirect_readback_filled_)) % 3;
+        if (indirect_readback_staging_[readSlot] != rhi::handles::INVALID_RESOURCE) {
+            const u32* mapped = static_cast<const u32*>(device_->MapBuffer(indirect_readback_staging_[readSlot]));
+            if (mapped) {
+                // Layout: [vertex_count, instance_count, first_vertex, first_instance]
+                static u32 visibleCounter = 0;
+                if ((visibleCounter++ % 30) == 0) {
+                    std::cerr << "[CullDiag] gpu_post_cull visible=" << mapped[1]
+                              << "/" << safeClusterCount
+                              << " vertex_count=" << mapped[0] << std::endl;
+                }
+                device_->UnmapBuffer(indirect_readback_staging_[readSlot]);
+            }
         }
     }
 
@@ -987,6 +1030,20 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     //     cmdBuffer->CopyBuffer(current_frame_res.instance_visibility_buffer, debug_readback_buffer_, 0, 0, copySize);
     //     results_.needs_readback = true;
     // }
+
+    // T4.6.5 part 35.4: schedule indirect_args readback. Stage7 wrote
+    // visible_count into indirect_commands[1] on the GPU. indirect_args is
+    // GPU-only on Vulkan, so we copy to a host-visible staging slot and read
+    // the previous frame's slot at the top of the next Execute().
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+        current_frame_res.indirect_args_buffer != rhi::handles::INVALID_RESOURCE &&
+        indirect_readback_staging_[indirect_readback_idx_] != rhi::handles::INVALID_RESOURCE) {
+        cmdBuffer->CopyBuffer(current_frame_res.indirect_args_buffer,
+                              indirect_readback_staging_[indirect_readback_idx_],
+                              0, 0, 16);
+        indirect_readback_idx_ = (indirect_readback_idx_ + 1) % 3;
+        if (indirect_readback_filled_ < 3) ++indirect_readback_filled_;
+    }
 
     // Set buffers for GPU-driven draw pipeline using current frame resource
     results_.indirect_args_buffer = current_frame_res.indirect_args_buffer;

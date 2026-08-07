@@ -196,6 +196,15 @@ private:
     std::array<rhi::ResourceHandle, 3> culling_debug_buffers_{ rhi::handles::INVALID_RESOURCE };
     static constexpr u32 MAX_DEBUG_ENTRIES = 1000; // Limit debug data size
 
+    // T4.6.5 part 35.4: triple-buffered staging for indirect_args readback.
+    // Stage7 writes visible_count to indirect_commands[1] on the GPU; we copy
+    // to host-visible staging at the end of Execute() and read it on the NEXT
+    // frame (after WaitForCompletion in the test loop). Required because the
+    // indirect_args buffer itself is GPU-only (host-invisible) on Vulkan.
+    std::array<rhi::ResourceHandle, 3> indirect_readback_staging_{ rhi::handles::INVALID_RESOURCE };
+    u32 indirect_readback_idx_{ 0 };          // triple-buffer ring slot
+    u32 indirect_readback_filled_{ 0 };       // count of staged frames (gates readback)
+
     rhi::PipelineLayoutHandle culling_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle culling_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     // Note: brace-init with a single value only initializes element 0 — the rest
