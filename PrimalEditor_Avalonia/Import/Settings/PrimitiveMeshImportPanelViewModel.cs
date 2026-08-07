@@ -1,3 +1,4 @@
+using System;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors.PrimitiveMesh;
 using PrimalEditor_Avalonia.Native.Importers;
@@ -15,6 +16,9 @@ public sealed class PrimitiveMeshImportPanelViewModel : ImportSettingsViewModelB
 
     public override IAssetImportSettings Settings => _settings;
     public override string ImporterName => "PrimitiveMeshImporter";
+
+    public System.Collections.Generic.IReadOnlyList<PrimitiveMeshType> AvailableTypes { get; } =
+        (PrimitiveMeshType[])Enum.GetValues(typeof(PrimitiveMeshType));
 
     public PrimitiveMeshType Type { get => _settings.Type; set { _settings.Type = value; OnPropertyChanged(); } }
     public int SegmentsX { get => _settings.SegmentsX; set { _settings.SegmentsX = value; OnPropertyChanged(); } }

@@ -1,3 +1,4 @@
+using System;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors.Texture;
 using PrimalEditor_Avalonia.Native.Importers;
@@ -16,7 +17,13 @@ public sealed class TextureImportPanelViewModel : ImportSettingsViewModelBase
     public override IAssetImportSettings Settings => _settings;
     public override string ImporterName => "TextureImporter";
 
-    public System.Collections.Generic.List<string> Sources { get => _settings.Sources; set { _settings.Sources = value; OnPropertyChanged(); } }
+    public System.Collections.Generic.IReadOnlyList<TextureDimension> AvailableDimensions { get; } =
+        (TextureDimension[])Enum.GetValues(typeof(TextureDimension));
+    public System.Collections.Generic.IReadOnlyList<TextureFormat> AvailableFormats { get; } =
+        (TextureFormat[])Enum.GetValues(typeof(TextureFormat));
+    public System.Collections.Generic.IReadOnlyList<TextureCompressionMode> AvailableCompressionModes { get; } =
+        (TextureCompressionMode[])Enum.GetValues(typeof(TextureCompressionMode));
+
     public TextureDimension Dimension { get => _settings.Dimension; set { _settings.Dimension = value; OnPropertyChanged(); } }
     public int MipLevels { get => _settings.MipLevels; set { _settings.MipLevels = value; OnPropertyChanged(); } }
     public float AlphaThreshold { get => _settings.AlphaThreshold; set { _settings.AlphaThreshold = value; OnPropertyChanged(); } }

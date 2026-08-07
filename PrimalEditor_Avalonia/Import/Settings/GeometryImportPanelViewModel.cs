@@ -1,3 +1,4 @@
+using System;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors.Geometry;
 using PrimalEditor_Avalonia.Native.Importers;
@@ -15,6 +16,11 @@ public sealed class GeometryImportPanelViewModel : ImportSettingsViewModelBase
 
     public override IAssetImportSettings Settings => _settings;
     public override string ImporterName => "GeometryImporter";
+
+    public System.Collections.Generic.IReadOnlyList<LodGenerationMode> AvailableLodModes { get; } =
+        (LodGenerationMode[])Enum.GetValues(typeof(LodGenerationMode));
+    public System.Collections.Generic.IReadOnlyList<MeshCompressionMode> AvailableCompressions { get; } =
+        (MeshCompressionMode[])Enum.GetValues(typeof(MeshCompressionMode));
 
     public LodGenerationMode LodMode { get => _settings.LodMode; set { _settings.LodMode = value; OnPropertyChanged(); } }
     public float Lod0Threshold { get => _settings.Lod0Threshold; set { _settings.Lod0Threshold = value; OnPropertyChanged(); } }

@@ -1,0 +1,38 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Import.Settings"
+             x:Class="PrimalEditor_Avalonia.Import.Settings.GeometryImportPanel"
+             x:DataType="vm:GeometryImportPanelViewModel">
+  <ScrollViewer>
+    <StackPanel Spacing="6">
+      <TextBlock Text="LOD Mode"/>
+      <ComboBox ItemsSource="{Binding AvailableLodModes}"
+                SelectedItem="{Binding LodMode}"
+                HorizontalAlignment="Stretch"/>
+      <TextBlock Text="LOD Thresholds (distance)"/>
+      <Grid ColumnDefinitions="*,*">
+        <TextBox Grid.Column="0" Watermark="LOD 0" Text="{Binding Lod0Threshold}"/>
+        <TextBox Grid.Column="1" Watermark="LOD 1" Text="{Binding Lod1Threshold}"/>
+      </Grid>
+      <TextBox Watermark="LOD 2" Text="{Binding Lod2Threshold}"/>
+      <CheckBox Content="Generate Tangent Space" IsChecked="{Binding GenerateTangentSpace}"/>
+      <CheckBox Content="Recalculate Normals" IsChecked="{Binding RecalculateNormals}"/>
+      <TextBlock Text="Compression"/>
+      <ComboBox ItemsSource="{Binding AvailableCompressions}"
+                SelectedItem="{Binding Compression}"
+                HorizontalAlignment="Stretch"/>
+      <CheckBox Content="Force Single LOD" IsChecked="{Binding ForceSingleLod}"/>
+
+      <TextBlock Text="Cook Mesh With Settings — C++ engine parameters"
+                 FontWeight="SemiBold" Margin="0,10,0,4"/>
+      <TextBlock Text="Smoothing Angle (degrees)"/>
+      <TextBox Text="{Binding SmoothingAngle}"/>
+      <CheckBox Content="Calculate Normals" IsChecked="{Binding CalculateNormals}"/>
+      <CheckBox Content="Calculate Tangents" IsChecked="{Binding CalculateTangents}"/>
+      <CheckBox Content="Reverse Handedness" IsChecked="{Binding ReverseHandedness}"/>
+      <CheckBox Content="Import Embedded Textures" IsChecked="{Binding ImportEmbeddedTextures}"/>
+      <CheckBox Content="Import Animations" IsChecked="{Binding ImportAnimations}"/>
+      <CheckBox Content="Coalesce Meshes" IsChecked="{Binding CoalesceMeshes}"/>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
