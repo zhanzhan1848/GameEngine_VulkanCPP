@@ -33,6 +33,40 @@ public partial class App : Application
         System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(MeshImporterPlugin).TypeHandle);
         System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(PrimitiveMeshImporterPlugin).TypeHandle);
         Logger.Info($"AssetImporterRegistry: {AssetImporterRegistry.Plugins.Count} plugin(s) registered");
+
+        EnsureAstcencAvailable();
+    }
+
+    /// <summary>
+    /// ContentTools' Metal texture cook shells out to the external astcenc CLI
+    /// (astcenc-neon). Point it at the binary before the first import: prefer
+    /// an existing PRIMAL_ASTCENC_PATH, then probe common locations next to the
+    /// editor output and in the repo's third_party checkout.
+    /// </summary>
+    private static void EnsureAstcencAvailable()
+    {
+        if (!string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("PRIMAL_ASTCENC_PATH")))
+            return;
+
+        string baseDir = System.AppContext.BaseDirectory;
+        var candidates = new[]
+        {
+            System.IO.Path.Combine(baseDir, "astcenc-neon"),
+            System.IO.Path.Combine(baseDir, "..", "astcenc-neon"),
+            System.IO.Path.Combine(baseDir, "..", "..", "third_party", "astc-encoder", "build", "Source", "astcenc-neon"),
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (System.IO.File.Exists(candidate))
+            {
+                System.Environment.SetEnvironmentVariable("PRIMAL_ASTCENC_PATH", candidate);
+                Logger.Info($"astcenc found at {candidate}");
+                return;
+            }
+        }
+
+        Logger.Warning("astcenc-neon not found; texture compression via ContentTools will fail. Set PRIMAL_ASTCENC_PATH to the astcenc binary.");
     }
 
     public override void OnFrameworkInitializationCompleted()

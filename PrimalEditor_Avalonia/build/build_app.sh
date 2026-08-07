@@ -151,6 +151,18 @@ if [[ -d "$NATIVE_LIB_DIR" ]]; then
     fi
   done
 
+  # Copy the astcenc CLI binary used by ContentTools' Metal texture cook.
+  # Prefer the worktree's built binary; fall back to the editor output dir.
+  for astcenc in \
+    "$REPO_ROOT/third_party/astc-encoder/build/Source/astcenc-neon" \
+    "$BUILD_DIR/astcenc-neon"; do
+    if [[ -f "$astcenc" ]]; then
+      cp -f "$astcenc" "$BUILD_DIR/astcenc-neon"
+      echo "[build_app] copied  astcenc-neon -> $BUILD_DIR/astcenc-neon"
+      break
+    fi
+  done
+
   # Copy engine shader metallib (and the dedicated BlitToDrawable.metallib)
   # into the editor's cwd. The native engine resolves the shader blob via
   # a bare relative path (./shaders/metal/shaders.metallib), interpreted

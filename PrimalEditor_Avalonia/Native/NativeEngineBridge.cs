@@ -1459,15 +1459,30 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("CookMesh failed", ex); return false; }
     }
 
+    public enum CookTextureStatus
+    {
+        NativeUnavailable = -1,
+        InvalidArgument = -2,
+        ProbeFailed = -3,
+        CookFailed = -4,
+        CapacityExceeded = -5,
+        ProbeSucceeded = 0,
+    }
+
     /// <summary>
     /// Cook a texture via ContentTools. Two-phase: first probe the
     /// required buffer sizes (<c>CookTextureQuery</c>), then run
-    /// <c>CookTexture</c> with pre-sized buffers. Returns null on failure.
+    /// <c>CookTexture</c> with pre-sized buffers. On failure, status
+    /// carries the C++ <c>info.import_error</c> code from the cook probe
+    /// (1=max_size_exceeded, 2=compress, 4=load, 8=size_mismatch,
+    /// 9=format_mismatch, 9=file_not_found etc. — see
+    /// ContentTools/TextureImporter.cpp::import_error).
     /// </summary>
-    public static CookedTexturePayload? CookTexture(
+    public static (CookedTexturePayload? payload, CookTextureStatus status, uint nativeErrorCode) CookTexture(
         string input, Editors.Texture.TextureImportSettings settings)
     {
-        if (!_isLoaded || string.IsNullOrEmpty(input)) return null;
+        if (!_isLoaded) return (null, CookTextureStatus.NativeUnavailable, 0);
+        if (string.IsNullOrEmpty(input)) return (null, CookTextureStatus.InvalidArgument, 0);
 
         IntPtr pInput = IntPtr.Zero;
         try
@@ -1487,7 +1502,7 @@ public static class NativeEngineBridge
 
             if (probeOk == 0 || probeInfo.ImportSucceeded == 0)
             {
-                return null;
+                return (null, CookTextureStatus.ProbeFailed, probeInfo.ImportError);
             }
 
             uint neededSlices = probeInfo.SlicesSize;
@@ -1508,8 +1523,8 @@ public static class NativeEngineBridge
 
                 if (ok == 0 || info.ImportSucceeded == 0)
                 {
-                    Logger.Error($"CookTexture probe-vs-cook mismatch (probe ok={probeInfo.SlicesSize}/{probeInfo.IconSize}, cook ok={slicesSize}/{iconSize}, error={info.ImportError}).");
-                    return null;
+                    Logger.Error($"CookTexture cook phase failed. probe slices/icon={probeInfo.SlicesSize}/{probeInfo.IconSize}, cook slices/icon={slicesSize}/{iconSize}, nativeError={info.ImportError}");
+                    return (null, CookTextureStatus.CookFailed, info.ImportError);
                 }
 
                 var slices = new byte[slicesSize];
@@ -1517,14 +1532,15 @@ public static class NativeEngineBridge
                 if (slicesSize > 0) Marshal.Copy(pSlices, slices, 0, (int)slicesSize);
                 if (iconSize   > 0) Marshal.Copy(pIcon,   icon,   0, (int)iconSize);
 
-                return new CookedTexturePayload(
+                return (new CookedTexturePayload(
                     input,
                     slices, icon,
                     info.InfoWidth, info.InfoHeight, info.InfoArraySize, info.InfoMipLevels,
                     info.InfoFormat, info.InfoFlags,
                     info.SourcesLen, info.SourceCount,
                     info.SettingsDimension, info.SettingsMipLevels, info.SettingsAlphaThreshold,
-                    info.SettingsPreferBc7, info.SettingsOutputFormat, info.SettingsCompress);
+                    info.SettingsPreferBc7, info.SettingsOutputFormat, info.SettingsCompress),
+                    CookTextureStatus.ProbeSucceeded, info.ImportError);
             }
             finally
             {
@@ -1535,7 +1551,7 @@ public static class NativeEngineBridge
         catch (Exception ex)
         {
             Logger.Error("CookTexture failed", ex);
-            return null;
+            return (null, CookTextureStatus.CookFailed, 0);
         }
         finally
         {

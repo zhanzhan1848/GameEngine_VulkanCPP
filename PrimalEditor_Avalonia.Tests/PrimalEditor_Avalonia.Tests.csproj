@@ -29,6 +29,22 @@
     <None Update="Fixtures\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libContentTools.dylib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libContentTools.dylib</Link>
+    </None>
+    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libfbxsdk.dylib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libfbxsdk.dylib</Link>
+    </None>
+    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libPrimalEngine.dylib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libPrimalEngine.dylib</Link>
+    </None>
+    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libEngineDLL.dylib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libEngineDLL.dylib</Link>
+    </None>
   </ItemGroup>
 
 </Project>

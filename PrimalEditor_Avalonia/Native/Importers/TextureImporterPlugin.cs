@@ -54,7 +54,7 @@ public sealed class TextureImporterPlugin : IAssetImporterPlugin
         }
 
         TextureImportSettings settings = (TextureImportSettings)request.Settings;
-        var cooked = await Task.Run(() => NativeEngineBridge.CookTexture(request.SourcePath, settings), ct);
+        var (cooked, status, nativeError) = await Task.Run(() => NativeEngineBridge.CookTexture(request.SourcePath, settings), ct);
         if (cooked == null)
         {
             return new ImportedAsset
@@ -63,7 +63,7 @@ public sealed class TextureImporterPlugin : IAssetImporterPlugin
                 DestinationPath = destTexPath,
                 Type = AssetType.Texture,
                 Success = false,
-                ErrorMessage = "ContentTools::CookTexture returned no result (corrupt source, unsupported format, or cook capacity exceeded).",
+                ErrorMessage = $"ContentTools::CookTexture failed (status={status}, nativeError={nativeError}; 0=ok,1=max_size_exceeded,2=compress,3=decompress,4=load,5=mipmap,7=size_mismatch,8=format_mismatch,9=file_not_found,10=need_six_images).",
             };
         }
 
