@@ -30,3 +30,32 @@ add_test(NAME TestMeshConverters COMMAND TestMeshConverters)
 set_target_properties(TestMeshConverters PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- M3 repair module test ------------------------------------------------
+
+add_executable(TestRepair TestRepair.cpp)
+
+target_include_directories(TestRepair PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/third_party/pmp-library/src
+    ${CMAKE_SOURCE_DIR}/third_party/eigen
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestRepair PRIVATE ContentTools contenttools_repair)
+
+target_compile_options(TestRepair PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestRepair COMMAND TestRepair)
+set_target_properties(TestRepair PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)

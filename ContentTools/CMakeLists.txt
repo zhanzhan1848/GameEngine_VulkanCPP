@@ -133,6 +133,13 @@ add_subdirectory(modules/collision)
 # it lands (M3 repair, M4 remesh, etc.).
 add_subdirectory(tests)
 
+# Compose Phase 1 module static libs into the SHARED ContentTools dylib.
+# Each module exposes its symbols as PUBLIC so callers of the dylib can
+# reach them.
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    contenttools_repair
+)
+
 # 平台特定设置
 if(WIN32)
     # Windows平台设置
