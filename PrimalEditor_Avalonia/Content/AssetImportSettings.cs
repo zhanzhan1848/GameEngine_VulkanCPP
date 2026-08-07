@@ -21,9 +21,9 @@ public static class AssetImportSettingsExtensions
             throw new System.ArgumentException("Arguments should be of the same type.");
 
         using var ms = new MemoryStream();
-        using (var w = new BinaryWriter(ms)) { from.ToBinary(w); w.Flush(); }
+        using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8, leaveOpen: true)) { from.ToBinary(w); w.Flush(); }
         ms.Position = 0;
-        using var r = new BinaryReader(ms);
+        using var r = new BinaryReader(ms, System.Text.Encoding.UTF8, leaveOpen: true);
         to.FromBinary(r);
     }
 }
