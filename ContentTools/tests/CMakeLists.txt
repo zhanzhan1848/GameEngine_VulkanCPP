@@ -86,3 +86,30 @@ add_test(NAME TestRemesh COMMAND TestRemesh)
 set_target_properties(TestRemesh PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- M5 subdivide module test ---------------------------------------------
+
+add_executable(TestSubdivide TestSubdivide.cpp)
+
+target_include_directories(TestSubdivide PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestSubdivide PRIVATE ContentTools contenttools_subdivide)
+
+target_compile_options(TestSubdivide PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestSubdivide COMMAND TestSubdivide)
+set_target_properties(TestSubdivide PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)
