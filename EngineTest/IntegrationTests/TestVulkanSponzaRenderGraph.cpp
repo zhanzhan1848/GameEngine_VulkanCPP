@@ -542,6 +542,13 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         materialRegistry_->GetNormalTextureArray(),
         materialRegistry_->GetORMTextureArray(),
         texSampler_);
+    // T4.6.5 part 35.7: GPUDrivenDrawPipeline::SetTextureArrays stores the
+    // sampler handle and destroys it on Shutdown (cpp:274). Mark ownership
+    // transferred so this test doesn't double-destroy. The engine-side
+    // destroySamplerImpl now also has a double-free guard (VulkanDevice.cpp),
+    // so even without this marker the abort is gone — but skipping the
+    // redundant call keeps the diagnostic log clean.
+    (void)texSampler_;
 
     // Directional light + camera (TestDawnForwardRenderer defaults).
     RenderLight sunLight;
@@ -588,8 +595,15 @@ void TestVulkanSponzaRenderGraph::Run() {
         // callback. If terminate fires first, exit() runs static destructors without
         // ever calling Shutdown(), leaking the window_info free_list slot and tripping
         // ~free_list's !_size assert. Call Shutdown() explicitly here.
+        std::cerr << "[Part35.7] Run() safety net fired, hasShutdown_=" << hasShutdown_ << std::endl;
+        // T4.6.5 part 35.7 fixup: do NOT pre-set hasShutdown_ here. Shutdown()
+        // manages the flag itself — pre-setting makes Shutdown()'s own guard
+        // (line below: `if (hasShutdown_) return;`) skip the entire body,
+        // including remove_window. Result: window_info slot leaks, ~free_list
+        // asserts at static destruction. Just call Shutdown(); it sets the
+        // flag on entry, so re-entry from applicationShouldTerminateAfter-
+        // LastWindowClosed's shutdown() delegate is a clean no-op.
         if (!hasShutdown_) {
-            hasShutdown_ = true;
             Shutdown();
         }
         NS::Application::sharedApplication()->terminate(nullptr);
@@ -674,32 +688,44 @@ void TestVulkanSponzaRenderGraph::Run() {
 }
 
 void TestVulkanSponzaRenderGraph::Shutdown() {
-    // T4.6.5 part 35.7: re-entrancy guard. Run()'s safety net calls Shutdown()
-    // before terminate; if NSApplication also fires
-    // applicationShouldTerminateAfterLastWindowClosed → shutdown() before
-    // exit, the framework would call this again. Idempotent either way, but
-    // the guard keeps the log message honest and skips wasted work.
+    // T4.6.5 part 35.7: re-entrancy guard. Two callers can fire Shutdown():
+    //   (1) Run()'s safety net (this file) — when CFRunLoopTimer polls
+    //       is_closed() and finds it true (NSWindowWillCloseNotification
+    //       set g_any_window_closed synchronously, beating NSApplication's
+    //       own delegate dispatch).
+    //   (2) RenderTestRunner::shutdown() — via
+    //       applicationShouldTerminateAfterLastWindowClosed → terminate.
+    // Whichever wins, the loser's call must be a clean no-op. The flag is
+    // set on ENTRY (not by the caller) so the body runs exactly once and
+    // remove_window is guaranteed to execute.
     if (hasShutdown_) return;
     hasShutdown_ = true;
 
-    std::cout << "[Part30.4] Shutdown — rendered " << frameCount_ << " frames" << std::endl;
+    std::cerr << "[Part30.4] Shutdown — rendered " << frameCount_ << " frames" << std::endl;
 
     if (device_) {
+        std::cerr << "[Part35.7] WaitIdle..." << std::endl;
         device_->WaitIdle();
+        std::cerr << "[Part35.7] WaitIdle done" << std::endl;
     }
 
     if (pipeline_) {
+        std::cerr << "[Part35.7] pipeline_->Shutdown..." << std::endl;
         pipeline_->Shutdown();
         pipeline_.reset();
+        std::cerr << "[Part35.7] pipeline_ done" << std::endl;
     }
 
     if (materialRegistry_) {
+        std::cerr << "[Part35.7] materialRegistry_->Shutdown..." << std::endl;
         materialRegistry_->Shutdown(device_);
         delete materialRegistry_;
         materialRegistry_ = nullptr;
+        std::cerr << "[Part35.7] materialRegistry_ done" << std::endl;
     }
 
     // Remove cluster components + entities (reverse order).
+    std::cerr << "[Part35.7] removing " << clusterComps_.size() << " clusters + " << entities_.size() << " entities" << std::endl;
     for (auto& c : clusterComps_) primal::cluster::remove(c);
     clusterComps_.clear();
     for (auto& e : entities_) {
@@ -709,51 +735,73 @@ void TestVulkanSponzaRenderGraph::Shutdown() {
     materialInstances_.clear();
     sharedMaterial_.reset();
     sceneMeshes_.clear();
+    std::cerr << "[Part35.7] entities done" << std::endl;
 
+    std::cerr << "[Part35.7] renderSystem_.Shutdown..." << std::endl;
     renderSystem_.Shutdown();
+    std::cerr << "[Part35.7] renderSystem_ done" << std::endl;
 
     // T4.6.5 part 30.13 (X5 fix): destroy per-image render-done semaphores.
     for (u32 i = 0; i < kMaxSwapchainImages; ++i) {
         if (renderDoneSemaphores_[i] != handles::INVALID_SYNC) {
+            std::cerr << "[Part35.7] DestroySync renderDoneSemaphores_[" << i << "]..." << std::endl;
             device_->DestroySync(renderDoneSemaphores_[i]);
             renderDoneSemaphores_[i] = handles::INVALID_SYNC;
+            std::cerr << "[Part35.7] DestroySync " << i << " done" << std::endl;
         }
     }
 
     if (texSampler_ != handles::INVALID_SAMPLER) {
+        std::cerr << "[Part35.7] DestroySampler texSampler_..." << std::endl;
         device_->DestroySampler(texSampler_);
         texSampler_ = handles::INVALID_SAMPLER;
+        std::cerr << "[Part35.7] texSampler_ done" << std::endl;
     }
     if (materialSampler_ != handles::INVALID_SAMPLER) {
+        std::cerr << "[Part35.7] DestroySampler materialSampler_..." << std::endl;
         device_->DestroySampler(materialSampler_);
         materialSampler_ = handles::INVALID_SAMPLER;
+        std::cerr << "[Part35.7] materialSampler_ done" << std::endl;
     }
     if (fallbackDiffuse_ != handles::INVALID_RESOURCE) {
+        std::cerr << "[Part35.7] DestroyTexture fallbackDiffuse_..." << std::endl;
         device_->DestroyTexture(fallbackDiffuse_);
         fallbackDiffuse_ = handles::INVALID_RESOURCE;
+        std::cerr << "[Part35.7] fallbackDiffuse_ done" << std::endl;
     }
     if (fallbackNormal_ != handles::INVALID_RESOURCE) {
+        std::cerr << "[Part35.7] DestroyTexture fallbackNormal_..." << std::endl;
         device_->DestroyTexture(fallbackNormal_);
         fallbackNormal_ = handles::INVALID_RESOURCE;
+        std::cerr << "[Part35.7] fallbackNormal_ done" << std::endl;
     }
     if (fallbackORM_ != handles::INVALID_RESOURCE) {
+        std::cerr << "[Part35.7] DestroyTexture fallbackORM_..." << std::endl;
         device_->DestroyTexture(fallbackORM_);
         fallbackORM_ = handles::INVALID_RESOURCE;
+        std::cerr << "[Part35.7] fallbackORM_ done" << std::endl;
     }
+    std::cerr << "[Part35.7] samplers/textures done" << std::endl;
 
     primal::content::shutdown();
     primal::content::AsyncResourceLoader::Shutdown();
+    std::cerr << "[Part35.7] content shutdown done" << std::endl;
 
+    std::cerr << "[Part35.7] window_.is_valid()=" << window_.is_valid() << std::endl;
     if (window_.is_valid()) {
         primal::platform::remove_window(window_.get_id());
+        std::cerr << "[Part35.7] remove_window done" << std::endl;
     }
 
     if (device_) {
         device_->GetGarbageCollector().Flush();
+        std::cerr << "[Part35.7] GC flush done" << std::endl;
     }
 
     deviceOwnership_.reset();
     device_ = nullptr;
+    std::cerr << "[Part35.7] device reset done" << std::endl;
 
     primal::jobsystem::JobSystem::Shutdown();
+    std::cerr << "[Part35.7] Shutdown complete" << std::endl;
 }

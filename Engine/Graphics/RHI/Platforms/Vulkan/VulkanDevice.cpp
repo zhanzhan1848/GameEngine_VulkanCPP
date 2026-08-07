@@ -687,7 +687,18 @@ SamplerHandle VulkanDevice::createSamplerImpl(const SamplerDesc& desc) {
 void VulkanDevice::destroySamplerImpl(SamplerHandle handle) {
     if (handle == handles::INVALID_SAMPLER) return;
     VulkanSampler* s = GetSampler(handle);
-    if (s) s->Destroy();
+    if (!s) {
+        // T4.6.5 part 35.7: mirror destroyTextureImpl's double-free guard.
+        // Without this, Free() below hits free_list::remove's "already
+        // removed" assertion when a sampler is destroyed twice (e.g., the
+        // pipeline destroys texture_sampler_ on Shutdown, then the caller
+        // also destroys its own handle that was the same sampler passed
+        // via SetTextureArrays).
+        std::cerr << "[VulkanDevice] Double-free sampler handle=" << static_cast<u32>(handle)
+                  << " — skipping" << std::endl;
+        return;
+    }
+    s->Destroy();
     samplerAllocator_->Free(static_cast<u32>(handle));
 }
 
