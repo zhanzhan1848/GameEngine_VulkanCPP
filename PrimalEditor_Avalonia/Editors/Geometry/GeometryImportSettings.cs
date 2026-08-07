@@ -18,6 +18,14 @@ public class GeometryImportSettings : IAssetImportSettings
     public MeshCompressionMode Compression { get; set; } = MeshCompressionMode.None;
     public bool ForceSingleLod { get; set; } = false;
 
+    public float SmoothingAngle { get; set; } = 178f;
+    public bool CalculateNormals { get; set; } = true;
+    public bool CalculateTangents { get; set; } = true;
+    public bool ReverseHandedness { get; set; } = false;
+    public bool ImportEmbeddedTextures { get; set; } = false;
+    public bool ImportAnimations { get; set; } = false;
+    public bool CoalesceMeshes { get; set; } = true;
+
     public void ToBinary(BinaryWriter w)
     {
         w.Write((int)LodMode);
@@ -28,6 +36,13 @@ public class GeometryImportSettings : IAssetImportSettings
         w.Write(RecalculateNormals);
         w.Write((int)Compression);
         w.Write(ForceSingleLod);
+        w.Write(SmoothingAngle);
+        w.Write(CalculateNormals);
+        w.Write(CalculateTangents);
+        w.Write(ReverseHandedness);
+        w.Write(ImportEmbeddedTextures);
+        w.Write(ImportAnimations);
+        w.Write(CoalesceMeshes);
     }
 
     public void FromBinary(BinaryReader r)
@@ -39,8 +54,14 @@ public class GeometryImportSettings : IAssetImportSettings
         GenerateTangentSpace = r.ReadBoolean();
         RecalculateNormals = r.ReadBoolean();
         Compression = (MeshCompressionMode)r.ReadInt32();
-        if (r.BaseStream.Position < r.BaseStream.Length)
-            ForceSingleLod = r.ReadBoolean();
+        ForceSingleLod = r.ReadBoolean();
+        if (r.BaseStream.Position < r.BaseStream.Length) SmoothingAngle = r.ReadSingle();
+        if (r.BaseStream.Position < r.BaseStream.Length) CalculateNormals = r.ReadBoolean();
+        if (r.BaseStream.Position < r.BaseStream.Length) CalculateTangents = r.ReadBoolean();
+        if (r.BaseStream.Position < r.BaseStream.Length) ReverseHandedness = r.ReadBoolean();
+        if (r.BaseStream.Position < r.BaseStream.Length) ImportEmbeddedTextures = r.ReadBoolean();
+        if (r.BaseStream.Position < r.BaseStream.Length) ImportAnimations = r.ReadBoolean();
+        if (r.BaseStream.Position < r.BaseStream.Length) CoalesceMeshes = r.ReadBoolean();
     }
 
     public void FromJson(JsonObject settings)
@@ -108,6 +129,14 @@ public class GeometryImportSettings : IAssetImportSettings
                 ForceSingleLod = forceSingleLod;
             }
         }
+
+        if (settings.TryGetPropertyValue("SmoothingAngle", out var sN0) && sN0 is JsonValue vN0 && vN0.TryGetValue(out float fN0)) SmoothingAngle = fN0;
+        if (settings.TryGetPropertyValue("CalculateNormals", out var sN1) && sN1 is JsonValue vN1 && vN1.TryGetValue(out bool bN1)) CalculateNormals = bN1;
+        if (settings.TryGetPropertyValue("CalculateTangents", out var sN2) && sN2 is JsonValue vN2 && vN2.TryGetValue(out bool bN2)) CalculateTangents = bN2;
+        if (settings.TryGetPropertyValue("ReverseHandedness", out var sN3) && sN3 is JsonValue vN3 && vN3.TryGetValue(out bool bN3)) ReverseHandedness = bN3;
+        if (settings.TryGetPropertyValue("ImportEmbeddedTextures", out var sN4) && sN4 is JsonValue vN4 && vN4.TryGetValue(out bool bN4)) ImportEmbeddedTextures = bN4;
+        if (settings.TryGetPropertyValue("ImportAnimations", out var sN5) && sN5 is JsonValue vN5 && vN5.TryGetValue(out bool bN5)) ImportAnimations = bN5;
+        if (settings.TryGetPropertyValue("CoalesceMeshes", out var sN6) && sN6 is JsonValue vN6 && vN6.TryGetValue(out bool bN6)) CoalesceMeshes = bN6;
     }
 
     public JsonObject ToJson()
@@ -121,7 +150,14 @@ public class GeometryImportSettings : IAssetImportSettings
             ["GenerateTangentSpace"] = GenerateTangentSpace,
             ["RecalculateNormals"] = RecalculateNormals,
             ["Compression"] = (int)Compression,
-            ["ForceSingleLod"] = ForceSingleLod
+            ["ForceSingleLod"] = ForceSingleLod,
+            ["SmoothingAngle"] = SmoothingAngle,
+            ["CalculateNormals"] = CalculateNormals,
+            ["CalculateTangents"] = CalculateTangents,
+            ["ReverseHandedness"] = ReverseHandedness,
+            ["ImportEmbeddedTextures"] = ImportEmbeddedTextures,
+            ["ImportAnimations"] = ImportAnimations,
+            ["CoalesceMeshes"] = CoalesceMeshes
         };
     }
 }
