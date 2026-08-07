@@ -19,7 +19,11 @@ EDITOR_INTERFACE void ShutDownContentTools()
 	ShutDownTextureTools();
 }
 
-EDITOR_INTERFACE u32 CookMesh(const char* input, const char* output)
+EDITOR_INTERFACE u32 CookMeshWithSettings(const char* input, const char* output,
+	f32 smoothing_angle,
+	u8 calculate_normals, u8 calculate_tangents,
+	u8 reverse_handedness, u8 import_embedded_textures,
+	u8 import_animations, u8 coalesce_meshes)
 {
 	using namespace primal::tools;
 
@@ -29,13 +33,13 @@ EDITOR_INTERFACE u32 CookMesh(const char* input, const char* output)
 	if (!ext) return 0;
 
 	scene_data data{};
-	data.settings.smoothing_angle = 178.0f;
-	data.settings.calculate_normals = 1;
-	data.settings.calculate_tangents = 1;
-	data.settings.reverse_handedness = 0;
-	data.settings.import_embedded_textures = 0;
-	data.settings.import_animations = 0;
-	data.settings.coalesce_meshes = 1;
+	data.settings.smoothing_angle = smoothing_angle;
+	data.settings.calculate_normals = calculate_normals;
+	data.settings.calculate_tangents = calculate_tangents;
+	data.settings.reverse_handedness = reverse_handedness;
+	data.settings.import_embedded_textures = import_embedded_textures;
+	data.settings.import_animations = import_animations;
+	data.settings.coalesce_meshes = coalesce_meshes;
 
 	if (strcasecmp(ext, ".fbx") == 0)
 	{
@@ -64,4 +68,10 @@ EDITOR_INTERFACE u32 CookMesh(const char* input, const char* output)
 	std::free(data.buffer);
 
 	return (written == data.buffer_size) ? 1u : 0u;
+}
+
+EDITOR_INTERFACE u32 CookMesh(const char* input, const char* output)
+{
+	return CookMeshWithSettings(input, output,
+		178.0f, 1, 1, 0, 0, 0, 1);
 }
