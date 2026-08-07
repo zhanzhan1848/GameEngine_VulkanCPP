@@ -143,6 +143,18 @@ public class OpenProjectViewModel : ViewModelBase
         }
     }
 
+    public string? GetSelectedProjectPath()
+    {
+        ErrorMessage = string.Empty;
+        if (SelectedProject == null)
+        {
+            ErrorMessage = "Please select a project";
+            return null;
+        }
+
+        return SelectedProject.Path;
+    }
+
     public Project? OpenSelectedProject()
     {
         ErrorMessage = string.Empty;

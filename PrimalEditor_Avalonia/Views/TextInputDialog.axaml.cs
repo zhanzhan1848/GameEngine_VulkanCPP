@@ -11,29 +11,13 @@ public partial class TextInputDialog : Window
     {
         InitializeComponent();
         Title = title;
-        var promptText = this.FindControl<TextBlock>("PromptText");
-        if (promptText != null) promptText.Text = prompt;
-        var inputBox = this.FindControl<TextBox>("InputBox");
-        if (inputBox != null) inputBox.Text = initial;
-    }
-
-    private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
-
-    public new string? Title
-    {
-        get => base.Title;
-        set
-        {
-            base.Title = value ?? string.Empty;
-            var promptText = this.FindControl<TextBlock>("PromptText");
-            if (promptText != null) promptText.Text = value;
-        }
+        PromptText.Text = prompt;
+        InputBox.Text = initial;
     }
 
     public async System.Threading.Tasks.Task<string?> ShowDialogAsync(Window owner)
     {
-        var inputBox = this.FindControl<TextBox>("InputBox");
-        if (inputBox != null) inputBox.Focus();
+        InputBox.Focus();
         return await ShowDialog<string?>(owner);
     }
 
@@ -41,8 +25,5 @@ public partial class TextInputDialog : Window
         => Close(null);
 
     private void OnOkClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        var inputBox = this.FindControl<TextBox>("InputBox");
-        Close(inputBox?.Text);
-    }
+        => Close(InputBox.Text);
 }

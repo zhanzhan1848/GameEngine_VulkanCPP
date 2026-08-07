@@ -1,19 +1,17 @@
+using System;
 using Avalonia.Controls;
-using Avalonia.Markup.Xaml;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.Views;
 
-public partial class OpenProjectView : Window
+public partial class OpenProjectView : UserControl
 {
+    public event EventHandler<string?>? ProjectSelected;
+    public event EventHandler? Cancelled;
+
     public OpenProjectView()
     {
         InitializeComponent();
-    }
-
-    private void InitializeComponent()
-    {
-        AvaloniaXamlLoader.Load(this);
     }
 
     private void OnBrowseClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -34,17 +32,17 @@ public partial class OpenProjectView : Window
 
     private void OnCancelClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        Close(null);
+        Cancelled?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnOpenClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is OpenProjectViewModel vm)
         {
-            var result = vm.OpenSelectedProject();
-            if (result != null)
+            var path = vm.GetSelectedProjectPath();
+            if (path != null)
             {
-                Close(result);
+                ProjectSelected?.Invoke(this, path);
             }
         }
     }
@@ -53,10 +51,10 @@ public partial class OpenProjectView : Window
     {
         if (DataContext is OpenProjectViewModel vm)
         {
-            var result = vm.OpenSelectedProject();
-            if (result != null)
+            var path = vm.GetSelectedProjectPath();
+            if (path != null)
             {
-                Close(result);
+                ProjectSelected?.Invoke(this, path);
             }
         }
     }

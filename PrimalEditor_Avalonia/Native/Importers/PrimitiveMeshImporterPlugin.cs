@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia.Controls;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors.PrimitiveMesh;
 using PrimalEditor_Avalonia.Import.Settings;
@@ -23,8 +24,12 @@ public sealed class PrimitiveMeshImporterPlugin : IAssetImporterPlugin
 
     public bool CanClaim(string filePath) => false;
 
-    public ImportSettingsViewModelBase CreateSettingsViewModel(IAssetImportSettings defaults)
-        => new PrimitiveMeshImportPanelViewModel(defaults);
+    public UserControl CreatePanel(IAssetImportSettings defaults)
+    {
+        var vm = new PrimitiveMeshImportPanelViewModel(defaults);
+        var panel = new PrimitiveMeshImportPanel { DataContext = vm };
+        return panel;
+    }
 
     public Task<ImportedAsset> RunAsync(ImportRequest request, IProgress<double>? progress, CancellationToken ct)
     {

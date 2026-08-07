@@ -34,6 +34,7 @@ public sealed class JsonAssetMetaStore : IAssetMetaStore
     public bool Write(string assetPath, AssetMetaDocument document)
     {
         if (document is not { IsValid: true }) return false;
+        if (IsMetaSuffixedPath(assetPath)) return false;
 
         var metaPath = GetMetaPath(assetPath);
         var partialPath = metaPath + ".partial";
@@ -72,4 +73,10 @@ public sealed class JsonAssetMetaStore : IAssetMetaStore
     }
 
     private static string GetMetaPath(string assetPath) => assetPath + ".meta";
+
+    private static bool IsMetaSuffixedPath(string path)
+    {
+        var name = Path.GetFileName(path);
+        return name.EndsWith(".meta", StringComparison.OrdinalIgnoreCase);
+    }
 }

@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Linq;
 using System.Windows.Input;
 using Dock.Model.Controls;
 using Dock.Model.Core;
@@ -124,44 +125,52 @@ public class MainWindowViewModel : ViewModelBase
     public Project? Project
     {
         get => _project;
-        set
-        {
-            if (_project != value)
-            {
-                if (_project != null) _project.PropertyChanged -= OnProjectPropertyChanged;
-                _project = value;
-                PrimalEditor_Avalonia.Common.ProjectContextLocator.SetCurrent(value);
-                OnPropertyChanged(nameof(Project));
-                OnPropertyChanged(nameof(ProjectPathDisplay));
-                OnPropertyChanged(nameof(SceneCountDisplay));
-                OnPropertyChanged(nameof(EntityCountDisplay));
-                WorldEditor.Project = value;
-                ContentBrowser.Project = value;
-                if (value != null)
-                {
-                    value.PropertyChanged += OnProjectPropertyChanged;
-                    value.ClearDirty();
-                    if (value.ActiveScene != null) value.ActiveScene.ClearDirty();
-                    WindowTitle = $"{value.Name} - PrimalEditor Avalonia";
-                    PrimalEditor_Avalonia.Content.ContentWatcher.Initialize(value.ContentPath);
+        set => AssignProject(value, markRecoveredDirty: false);
+    }
 
-                    // SQLite index lives in .Primal/, canonical GUID lives
-                    // in .meta files. Both configured here so every scan
-                    // downstream (AssetRegistry, BuildManifestGenerator)
-                    // is talking to the same database.
-                    var sqlitePath = System.IO.Path.Combine(value.Path, ".Primal", "AssetDatabase.sqlite");
-                    PrimalEditor_Avalonia.Content.AssetRegistry.ConfigureSqliteBackend(sqlitePath);
-                    PrimalEditor_Avalonia.Content.AssetRegistry.Initialize(value.ContentPath, value.Path);
-                    WorldEditor.ActiveScene = value.ActiveScene;
-                }
-                else
-                {
-                    WindowTitle = "PrimalEditor Avalonia";
-                    PrimalEditor_Avalonia.Content.ContentWatcher.Reset();
-                }
-                PrimalEditor_Avalonia.Common.AutoSaveService.Track(value);
+    /// <summary>
+    /// Assign <paramref name="project"/> to <see cref="Project"/> and
+    /// optionally mark it dirty along with every scene. The dirty
+    /// flag is cleared during normal assignment so the editor's
+    /// baseline reflects the on-disk state; recovered autosaves are
+    /// marked dirty after that clear so the editor surfaces them as
+    /// unsaved work until the user explicitly saves.
+    /// </summary>
+    public void AssignProject(Project? project, bool markRecoveredDirty)
+    {
+        if (_project == project && !markRecoveredDirty) return;
+        if (_project != null) _project.PropertyChanged -= OnProjectPropertyChanged;
+        _project = project;
+        PrimalEditor_Avalonia.Common.ProjectContextLocator.SetCurrent(project);
+        OnPropertyChanged(nameof(Project));
+        OnPropertyChanged(nameof(ProjectPathDisplay));
+        OnPropertyChanged(nameof(SceneCountDisplay));
+        OnPropertyChanged(nameof(EntityCountDisplay));
+        WorldEditor.Project = project;
+        ContentBrowser.Project = project;
+        if (project != null)
+        {
+            project.PropertyChanged += OnProjectPropertyChanged;
+            project.ClearDirty();
+            if (project.ActiveScene != null) project.ActiveScene.ClearDirty();
+            if (markRecoveredDirty)
+            {
+                PrimalEditor_Avalonia.Common.AutoSaveRecoveryService.MarkRecoveredDirty(project);
             }
+            WindowTitle = $"{project.Name} - PrimalEditor Avalonia";
+            PrimalEditor_Avalonia.Content.ContentWatcher.Initialize(project.ContentPath);
+
+            var sqlitePath = System.IO.Path.Combine(project.Path, ".Primal", "AssetDatabase.sqlite");
+            PrimalEditor_Avalonia.Content.AssetRegistry.ConfigureSqliteBackend(sqlitePath);
+            PrimalEditor_Avalonia.Content.AssetRegistry.Initialize(project.ContentPath, project.Path);
+            WorldEditor.ActiveScene = project.ActiveScene;
         }
+        else
+        {
+            WindowTitle = "PrimalEditor Avalonia";
+            PrimalEditor_Avalonia.Content.ContentWatcher.Reset();
+        }
+        PrimalEditor_Avalonia.Common.AutoSaveService.Track(project);
     }
 
     private void OnProjectPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -356,10 +365,7 @@ public class MainWindowViewModel : ViewModelBase
 
     public async void NewProjectExecute()
     {
-        var dialog = new NewProjectView
-        {
-            DataContext = new NewProjectViewModel(),
-        };
+        var dialog = new NewProjectDialogWindow(new NewProjectViewModel());
         var window = GetMainWindow();
         if (window != null)
         {
@@ -373,18 +379,35 @@ public class MainWindowViewModel : ViewModelBase
 
     public async void OpenProjectExecute()
     {
-        var dialog = new OpenProjectView
-        {
-            DataContext = new OpenProjectViewModel(),
-        };
+        var openVm = new OpenProjectViewModel();
+        var dialog = new OpenProjectDialogWindow(openVm);
         var window = GetMainWindow();
-        if (window != null)
+        if (window == null) return;
+        var selectedPath = await dialog.ShowDialog<string?>(window);
+        if (selectedPath == null) return;
+
+        var projectDir = System.IO.Path.GetDirectoryName(selectedPath) ?? string.Empty;
+        var bundles = PrimalEditor_Avalonia.Common.AutoSaveRecoveryService
+            .DiscoverBundles(projectDir);
+        var candidate = PrimalEditor_Avalonia.Common.AutoSaveRecoveryService
+            .SelectNewestEligible(selectedPath, bundles);
+        if (candidate == null)
         {
-            var result = await dialog.ShowDialog<Project?>(window);
-            if (result != null)
-            {
-                Project = result;
-            }
+            var opened = openVm.OpenSelectedProject();
+            if (opened != null) Project = opened;
+            return;
+        }
+
+        if (window is PrimalEditor_Avalonia.Views.MainWindow mainWindow)
+        {
+            await mainWindow.PromptAndApplyRecoveryAsync(
+                        new PrimalEditor_Avalonia.Common.AutoSaveRecoveryCoordinator.RecoveryCandidate(
+                    candidate, selectedPath));
+        }
+        else
+        {
+            var opened = openVm.OpenSelectedProject();
+            if (opened != null) Project = opened;
         }
     }
 

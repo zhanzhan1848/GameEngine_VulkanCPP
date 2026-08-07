@@ -2,20 +2,29 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="PrimalEditor_Avalonia.Views.NewScriptDialog"
         Title="New Script"
-        Width="380" Height="220"
+        Width="400" Height="260"
         WindowStartupLocation="CenterOwner"
-        CanResize="False">
-  <StackPanel Margin="20" Spacing="10">
-    <TextBlock Text="Name:"/>
-    <TextBox Name="NameBox" Text="NewScript"/>
-    <TextBlock Text="Language:"/>
-    <ComboBox Name="LanguageBox" SelectedIndex="0" HorizontalAlignment="Stretch">
-      <ComboBoxItem Content="Python (.py)"/>
-      <ComboBoxItem Content="Lua (.lua)"/>
-    </ComboBox>
-    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6" Margin="0,12,0,0">
-      <Button Content="Cancel" Click="OnCancelClick" Width="80"/>
-      <Button Content="Create" Click="OnCreateClick" Width="80" IsDefault="True" Classes="accent"/>
+        CanResize="False"
+        Background="{StaticResource VoidBrush}">
+  <Border Classes="floating" Margin="10">
+    <StackPanel Margin="24" Spacing="10">
+      <TextBlock Text="SCRIPT NAME"
+                 FontFamily="{StaticResource FontDisplay}"
+                 FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                 Foreground="{StaticResource ElectricBlueBrush}"/>
+      <TextBox Name="NameBox" Text="NewScript"/>
+      <TextBlock Text="LANGUAGE"
+                 FontFamily="{StaticResource FontDisplay}"
+                 FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                 Foreground="{StaticResource ElectricBlueBrush}"/>
+      <ComboBox Name="LanguageBox" SelectedIndex="0" HorizontalAlignment="Stretch">
+        <ComboBoxItem Content="Python (.py)"/>
+        <ComboBoxItem Content="Lua (.lua)"/>
+      </ComboBox>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
+        <Button Content="Cancel" Click="OnCancelClick" Width="90"/>
+        <Button Content="Create" Click="OnCreateClick" Width="90" IsDefault="True" Classes="accent"/>
+      </StackPanel>
     </StackPanel>
-  </StackPanel>
+  </Border>
 </Window>

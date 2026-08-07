@@ -2,38 +2,65 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:PrimalEditor_Avalonia.Editors.Geometry"
              x:Class="PrimalEditor_Avalonia.Editors.Geometry.GeometryEditorView"
-             x:DataType="vm:GeometryEditorViewModel">
+             x:DataType="vm:GeometryEditorViewModel"
+             Background="{StaticResource VoidBrush}">
 
-  <Grid RowDefinitions="Auto,*,Auto">
+  <Grid RowDefinitions="Auto,*,Auto" Background="{StaticResource VoidBrush}">
 
-    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="6">
-      <TextBlock Text="LOD:" VerticalAlignment="Center" FontWeight="SemiBold"/>
-      <ComboBox ItemsSource="{Binding LODList}" SelectedItem="{Binding LODIndex}"/>
-      <CheckBox Content="Auto LOD" IsChecked="{Binding AutoLOD}"/>
-      <Separator Margin="6,0"/>
-      <TextBlock Text="Verts:" VerticalAlignment="Center"/>
-      <TextBlock Text="{Binding VertexCount}" VerticalAlignment="Center" FontFamily="Consolas,Menlo,monospace"/>
-      <TextBlock Text="Tris:" VerticalAlignment="Center"/>
-      <TextBlock Text="{Binding TriangleCount}" VerticalAlignment="Center" FontFamily="Consolas,Menlo,monospace"/>
-      <TextBlock Text="Submeshes:" VerticalAlignment="Center"/>
-      <TextBlock Text="{Binding SubmeshCount}" VerticalAlignment="Center" FontFamily="Consolas,Menlo,monospace"/>
-      <Separator Margin="6,0"/>
-      <TextBlock Text="{Binding BoundsSummary}" VerticalAlignment="Center" FontFamily="Consolas,Menlo,monospace" Foreground="LightGray"/>
-      <Separator Margin="6,0"/>
-      <TextBlock Text="(drag to orbit)" Foreground="Gray" VerticalAlignment="Center"/>
-    </StackPanel>
+    <Border Grid.Row="0" Classes="floating" Margin="6,6,6,2">
+      <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="8,4">
+        <TextBlock Text="LOD:"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource ElectricBlueBrush}"
+                   VerticalAlignment="Center"/>
+        <ComboBox ItemsSource="{Binding LODList}" SelectedItem="{Binding LODIndex}"/>
+        <CheckBox Content="Auto LOD" IsChecked="{Binding AutoLOD}"
+                  Foreground="{StaticResource PrimaryTextBrush}"/>
+        <Separator Margin="6,0"/>
+        <TextBlock Text="Verts:" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource SecondaryTextBrush}"/>
+        <TextBlock Text="{Binding VertexCount}" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontMono}"/>
+        <TextBlock Text="Tris:" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource SecondaryTextBrush}"/>
+        <TextBlock Text="{Binding TriangleCount}" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontMono}"/>
+        <TextBlock Text="Submeshes:" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource SecondaryTextBrush}"/>
+        <TextBlock Text="{Binding SubmeshCount}" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontMono}"/>
+        <Separator Margin="6,0"/>
+        <TextBlock Text="{Binding BoundsSummary}" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontMono}"
+                   Foreground="{StaticResource MutedTextBrush}"/>
+        <Separator Margin="6,0"/>
+        <TextBlock Text="(drag to orbit)" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource SecondaryTextBrush}"/>
+      </StackPanel>
+    </Border>
 
-    <Border Grid.Row="1" Background="#FF202020" ClipToBounds="True">
-      <Panel x:Name="RenderPanel" Background="Transparent"
+    <Border Grid.Row="1" Classes="floating" Margin="6,2">
+      <Panel x:Name="RenderPanel" Background="{StaticResource VoidBrush}"
              PointerPressed="OnPointerPressed"
              PointerMoved="OnPointerMoved"
              PointerReleased="OnPointerReleased"/>
     </Border>
 
-    <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="6" Margin="6" HorizontalAlignment="Right">
-      <Button Content="Discard" Click="OnDiscardClick" IsEnabled="{Binding IsDirty}"/>
-      <Button Content="Reimport" Click="OnReimportClick"/>
-      <Button Content="Save" Click="OnSaveClick" IsEnabled="{Binding CanSave}"/>
-    </StackPanel>
+    <Border Grid.Row="2" Classes="floating" Margin="6,2,6,6">
+      <StackPanel Orientation="Horizontal" Spacing="6" Margin="8,4" HorizontalAlignment="Right">
+        <Button Content="Discard" Click="OnDiscardClick" IsEnabled="{Binding IsDirty}"/>
+        <Button Content="Reimport" Click="OnReimportClick"/>
+        <Button Content="Save" Click="OnSaveClick" IsEnabled="{Binding CanSave}" Classes="accent"/>
+      </StackPanel>
+    </Border>
   </Grid>
 </UserControl>

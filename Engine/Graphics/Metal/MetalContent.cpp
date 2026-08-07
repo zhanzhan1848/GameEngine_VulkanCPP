@@ -10,6 +10,20 @@
 
 namespace primal::graphics::metal::content
 {
+	MTL::PixelFormat mtl_pixel_format_from_dxgi(u32 format_u32)
+	{
+		switch (format_u32)
+		{
+			case 28: return MTL::PixelFormatRGBA8Unorm;
+			case 29: return MTL::PixelFormatRGBA8Unorm_sRGB;
+			case 71: return MTL::PixelFormatBC1_RGBA;
+			case 72: return MTL::PixelFormatBC1_RGBA_sRGB;
+			case 98: return MTL::PixelFormatBC7_RGBAUnorm;
+			case 99: return MTL::PixelFormatBC7_RGBAUnorm_sRGB;
+			default: return MTL::PixelFormatRGBA8Unorm;
+		}
+	}
+
 	namespace
     {
         struct pso_id
@@ -428,7 +442,7 @@ namespace primal::graphics::metal::content
 			u32 array_size{ blob.read<u32>() };
 			const u32 flags{ blob.read<u32>() };
 			const u32 mip_levels{ blob.read<u32>() };
-			const MTL::PixelFormat format{ (MTL::PixelFormat)blob.read<u32>() };
+			const MTL::PixelFormat format{ mtl_pixel_format_from_dxgi(blob.read<u32>()) };
 			const bool is_3d{ (flags & primal::content::texture_flags::is_volume_map) != 0 };
 
 			assert(mip_levels <= metal_texture::max_mips);

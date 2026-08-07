@@ -2,52 +2,71 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:PrimalEditor_Avalonia.Editors.Texture"
              x:Class="PrimalEditor_Avalonia.Editors.Texture.TextureEditorView"
-             x:DataType="vm:TextureEditorViewModel">
+             x:DataType="vm:TextureEditorViewModel"
+             Background="{StaticResource VoidBrush}">
 
-  <Grid RowDefinitions="Auto,*,Auto">
+  <Grid RowDefinitions="Auto,*,Auto" Background="{StaticResource VoidBrush}">
 
-    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="6">
-      <TextBlock Text="Channels:" VerticalAlignment="Center" FontWeight="SemiBold"/>
-      <CheckBox Content="R" IsChecked="{Binding ShowR}"/>
-      <CheckBox Content="G" IsChecked="{Binding ShowG}"/>
-      <CheckBox Content="B" IsChecked="{Binding ShowB}"/>
-      <CheckBox Content="A" IsChecked="{Binding ShowA}"/>
-      <Separator Margin="6,0"/>
-      <CheckBox Content="sRGB" IsChecked="{Binding IsSRGB}"/>
-      <CheckBox Content="Normal Map" IsChecked="{Binding IsNormalMap, Mode=TwoWay}"/>
-      <Separator Margin="6,0"/>
-      <TextBlock Text="{Binding MipDisplay}" VerticalAlignment="Center"/>
-      <TextBlock Text="{Binding ArrayDisplay}" VerticalAlignment="Center"/>
-      <TextBlock Text="{Binding DepthDisplay}" VerticalAlignment="Center"/>
-      <Separator Margin="6,0"/>
-      <TextBlock Text="Format:" VerticalAlignment="Center"/>
-      <ComboBox ItemsSource="{Binding AllFormats}" SelectedItem="{Binding OutputFormat}" Width="140"/>
-    </StackPanel>
+    <Border Grid.Row="0" Classes="floating" Margin="6,6,6,2">
+      <StackPanel Orientation="Horizontal" Spacing="10" Margin="8,4">
+        <TextBlock Text="CHANNELS"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource ElectricBlueBrush}"
+                   VerticalAlignment="Center"/>
+        <CheckBox Content="R" IsChecked="{Binding ShowR}"/>
+        <CheckBox Content="G" IsChecked="{Binding ShowG}"/>
+        <CheckBox Content="B" IsChecked="{Binding ShowB}"/>
+        <CheckBox Content="A" IsChecked="{Binding ShowA}"/>
+        <Separator Margin="6,0"/>
+        <CheckBox Content="sRGB" IsChecked="{Binding IsSRGB}"/>
+        <CheckBox Content="Normal Map" IsChecked="{Binding IsNormalMap, Mode=TwoWay}"/>
+        <Separator Margin="6,0"/>
+        <TextBlock Text="{Binding MipDisplay}" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontMono}"/>
+        <TextBlock Text="{Binding ArrayDisplay}" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontMono}"/>
+        <TextBlock Text="{Binding DepthDisplay}" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontMono}"/>
+        <Separator Margin="6,0"/>
+        <TextBlock Text="FORMAT"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource ElectricBlueBrush}"
+                   VerticalAlignment="Center"/>
+        <ComboBox ItemsSource="{Binding AllFormats}" SelectedItem="{Binding OutputFormat}" Width="140"/>
+      </StackPanel>
+    </Border>
 
-    <Border Grid.Row="1" Background="#FF202020" ClipToBounds="True">
+    <Border Grid.Row="1" Classes="floating" Margin="6,2">
       <Grid>
         <Image Source="{Binding Preview}" Stretch="Uniform"
                IsVisible="{Binding HasPreview}"/>
         <TextBlock Text="(no preview — decoder unavailable)"
-                   Foreground="Gray" HorizontalAlignment="Center" VerticalAlignment="Center"
+                   FontFamily="{StaticResource FontMono}"
+                   Foreground="{StaticResource MutedTextBrush}"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
                    IsVisible="{Binding !HasPreview}"/>
       </Grid>
     </Border>
 
-    <Grid Grid.Row="2" ColumnDefinitions="*,Auto,Auto,Auto" Margin="6">
-      <TextBlock Grid.Column="0"
-                 Text="{Binding Info.Summary}"
-                 FontFamily="Consolas,Menlo,monospace"
-                 VerticalAlignment="Center"/>
-      <Button Grid.Column="1" Content="Discard" Margin="4,0"
-              Click="OnDiscardClick"
-              IsEnabled="{Binding IsDirty}"/>
-      <Button Grid.Column="2" Content="Reimport" Margin="4,0"
-              Click="OnReimportClick"
-              IsEnabled="{Binding CanReimport}"/>
-      <Button Grid.Column="3" Content="Save"
-              Click="OnSaveClick"
-              IsEnabled="{Binding CanSave}"/>
-    </Grid>
+    <Border Grid.Row="2" Classes="floating" Margin="6,2,6,6">
+      <Grid ColumnDefinitions="*,Auto,Auto,Auto" Margin="8,4">
+        <TextBlock Grid.Column="0"
+                   Text="{Binding Info.Summary}"
+                   FontFamily="{StaticResource FontMono}"
+                   Foreground="{StaticResource SecondaryTextBrush}"
+                   VerticalAlignment="Center"/>
+        <Button Grid.Column="1" Content="Discard" Margin="4,0"
+                Click="OnDiscardClick"
+                IsEnabled="{Binding IsDirty}"/>
+        <Button Grid.Column="2" Content="Reimport" Margin="4,0"
+                Click="OnReimportClick"
+                IsEnabled="{Binding CanReimport}"/>
+        <Button Grid.Column="3" Content="Save" Classes="accent"
+                Click="OnSaveClick"
+                IsEnabled="{Binding CanSave}"/>
+      </Grid>
+    </Border>
   </Grid>
 </UserControl>

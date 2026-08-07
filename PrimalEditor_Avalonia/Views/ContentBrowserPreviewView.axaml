@@ -1,0 +1,148 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+             xmlns:views="using:PrimalEditor_Avalonia.Views"
+             xmlns:conv="using:PrimalEditor_Avalonia.Converters"
+             xmlns:ed="using:PrimalEditor_Avalonia.Editors"
+             x:Class="PrimalEditor_Avalonia.Views.ContentBrowserPreviewView"
+             x:DataType="vm:ContentBrowserPreviewViewModel"
+             Background="{StaticResource VoidBrush}">
+
+    <UserControl.Resources>
+        <DataTemplate x:Key="TexturePreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
+            <Panel>
+                <Image Source="{Binding TextureBitmap}"
+                       Stretch="Uniform"
+                       IsVisible="{Binding HasTextureBitmap}"/>
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                            IsVisible="{Binding !HasTextureBitmap}">
+                    <TextBlock Text="(no texture preview)"
+                               FontFamily="{StaticResource FontMono}"
+                               Foreground="{StaticResource MutedTextBrush}"/>
+                    <TextBlock Text="{Binding StatusMessage}"
+                               FontFamily="{StaticResource FontMono}"
+                               Foreground="{StaticResource AmberBrush}"
+                               Margin="0,4,0,0"/>
+                </StackPanel>
+            </Panel>
+        </DataTemplate>
+
+        <DataTemplate x:Key="MeshPreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
+            <Grid RowDefinitions="*,Auto">
+                <views:MeshPreviewCanvas Name="MeshCanvas"
+                                         Grid.Row="0"
+                                         ViewModel="{Binding}"/>
+                <Border Grid.Row="1" Padding="8,4">
+                    <TextBlock Text="{Binding MeshSummary}"
+                               FontFamily="{StaticResource FontMono}"
+                               Foreground="{StaticResource SecondaryTextBrush}"/>
+                </Border>
+            </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="MaterialPreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
+            <Grid RowDefinitions="*,Auto">
+                <Border Grid.Row="0" Margin="12" CornerRadius="4"
+                        BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1">
+                    <Rectangle Fill="{Binding MaterialSwatch}"/>
+                </Border>
+                <TextBlock Grid.Row="1" Margin="12,0,12,12"
+                           Text="{Binding MaterialSummary}"
+                           FontFamily="{StaticResource FontMono}"
+                           Foreground="{StaticResource FontBrush}"
+                           TextWrapping="Wrap"/>
+            </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="ScriptPreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                <TextBox Text="{Binding ScriptPreview, Mode=OneWay}"
+                         IsReadOnly="True"
+                         FontFamily="avares://PrimalEditor_Avalonia/Assets/Fonts/#JetBrains Mono"
+                         FontSize="11"
+                         Background="{StaticResource VoidBrush}"
+                         Foreground="{StaticResource MintBrush}"
+                         BorderThickness="0"
+                         AcceptsReturn="True" TextWrapping="NoWrap"
+                         Padding="10"/>
+            </ScrollViewer>
+        </DataTemplate>
+
+        <DataTemplate x:Key="ShaderPreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                <TextBox Text="{Binding ShaderPreview, Mode=OneWay}"
+                         IsReadOnly="True"
+                         FontFamily="avares://PrimalEditor_Avalonia/Assets/Fonts/#JetBrains Mono"
+                         FontSize="11"
+                         Background="{StaticResource VoidBrush}"
+                         Foreground="{StaticResource MintBrush}"
+                         BorderThickness="0"
+                         AcceptsReturn="True" TextWrapping="NoWrap"
+                         Padding="10"/>
+            </ScrollViewer>
+        </DataTemplate>
+
+        <DataTemplate x:Key="AudioPreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
+            <TextBlock Text="{Binding AudioSummary}"
+                       FontFamily="{StaticResource FontMono}"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Margin="20"/>
+        </DataTemplate>
+
+        <DataTemplate x:Key="EmptyPreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
+            <TextBlock Text="(select an asset to preview)"
+                       FontFamily="{StaticResource FontMono}"
+                       Foreground="{StaticResource MutedTextBrush}"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"/>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Border Classes="floating" Margin="3,6,6,6">
+        <DockPanel>
+            <Border DockPanel.Dock="Top" Padding="8,8,8,4">
+                <TextBlock Text="PREVIEW"
+                           FontFamily="{StaticResource FontDisplay}"
+                           FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                           Foreground="{StaticResource ElectricBlueBrush}"/>
+            </Border>
+
+            <TextBlock DockPanel.Dock="Bottom"
+                       Text="{Binding StatusMessage}"
+                       FontFamily="{StaticResource FontMono}"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       IsVisible="{Binding HasStatus}"
+                       Padding="8,4"/>
+
+            <!-- Type-specific body. Manual switch keeps template
+                 resolution simple and predictable. -->
+            <Panel>
+                <ContentControl Content="{Binding}"
+                                ContentTemplate="{StaticResource EmptyPreviewTemplate}"
+                                IsVisible="{Binding !HasAsset}"/>
+                <ContentControl Content="{Binding}"
+                                ContentTemplate="{StaticResource TexturePreviewTemplate}"
+                                IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsTexture}}"/>
+                <ContentControl Content="{Binding}"
+                                ContentTemplate="{StaticResource MeshPreviewTemplate}"
+                                IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsMesh}}"/>
+                <ContentControl Content="{Binding}"
+                                ContentTemplate="{StaticResource MaterialPreviewTemplate}"
+                                IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsMaterial}}"/>
+                <ContentControl Content="{Binding}"
+                                ContentTemplate="{StaticResource ScriptPreviewTemplate}"
+                                IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsScript}}"/>
+                <ContentControl Content="{Binding}"
+                                ContentTemplate="{StaticResource ShaderPreviewTemplate}"
+                                IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsShader}}"/>
+                <ContentControl Content="{Binding}"
+                                ContentTemplate="{StaticResource AudioPreviewTemplate}"
+                                IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsAudio}}"/>
+            </Panel>
+        </DockPanel>
+    </Border>
+</UserControl>

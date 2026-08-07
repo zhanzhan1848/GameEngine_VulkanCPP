@@ -1,19 +1,18 @@
+using System;
 using Avalonia.Controls;
-using Avalonia.Markup.Xaml;
+using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.Views;
 
-public partial class NewProjectView : Window
+public partial class NewProjectView : UserControl
 {
+    public event EventHandler<Project?>? ProjectCreated;
+    public event EventHandler? Cancelled;
+
     public NewProjectView()
     {
         InitializeComponent();
-    }
-
-    private void InitializeComponent()
-    {
-        AvaloniaXamlLoader.Load(this);
     }
 
     private void OnBrowseClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -26,7 +25,7 @@ public partial class NewProjectView : Window
 
     private void OnCancelClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        Close(null);
+        Cancelled?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnCreateClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -36,7 +35,7 @@ public partial class NewProjectView : Window
             var result = vm.CreateProject();
             if (result != null)
             {
-                Close(result);
+                ProjectCreated?.Invoke(this, result);
             }
         }
     }

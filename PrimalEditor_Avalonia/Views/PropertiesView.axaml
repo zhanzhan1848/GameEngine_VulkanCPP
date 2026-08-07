@@ -3,59 +3,107 @@
              xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
              xmlns:components="using:PrimalEditor_Avalonia.Components"
              x:Class="PrimalEditor_Avalonia.Views.PropertiesView"
-             x:DataType="vm:PropertiesViewModel">
+             x:DataType="vm:PropertiesViewModel"
+             Background="{StaticResource VoidBrush}">
 
     <ScrollViewer>
-        <StackPanel Margin="10" Spacing="5" IsEnabled="{Binding HasSelection}">
+        <StackPanel Margin="12" Spacing="6" IsEnabled="{Binding HasSelection}">
 
-            <TextBlock Text="Properties" FontSize="16" FontWeight="Bold" Margin="0,0,0,10"/>
+            <TextBlock Text="PROPERTIES"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="13" LetterSpacing="1"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Margin="0,0,0,12">
+            </TextBlock>
 
-            <TextBlock Text="Name" FontWeight="SemiBold"/>
-            <TextBox Text="{Binding EntityName, Mode=TwoWay}"/>
+            <TextBlock Text="NAME"
+                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontSize="11" LetterSpacing="2"
+                       Foreground="{StaticResource ElectricBlueBrush}"/>
+            <TextBox Text="{Binding EntityName, Mode=TwoWay}" Margin="0,2,0,4"/>
 
             <CheckBox Content="Is Enabled"
                       IsChecked="{Binding IsEnabled, Mode=TwoWay}"
-                      Margin="0,5,0,0"/>
+                      Margin="0,4,0,8"/>
 
-            <Separator Margin="0,10"/>
+            <Separator Margin="0,8"/>
 
-            <TextBlock Text="Transform" FontWeight="SemiBold" FontSize="14"/>
+            <TextBlock Text="TRANSFORM"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,0,0,6"/>
 
-            <TextBlock Text="Position" FontWeight="SemiBold" Margin="0,5,0,0"/>
+            <TextBlock Text="Position"
+                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontSize="10" LetterSpacing="2"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       Margin="0,4,0,0"/>
             <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto,Auto,Auto" Margin="0,3">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="X" VerticalAlignment="Center"/>
-                <TextBox Grid.Row="1" Grid.Column="0" Text="{Binding PosX, Mode=TwoWay}"/>
-                <TextBlock Grid.Row="0" Grid.Column="1" Text="Y" VerticalAlignment="Center"/>
-                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding PosY, Mode=TwoWay}"/>
-                <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"/>
-                <TextBox Grid.Row="1" Grid.Column="2" Text="{Binding PosZ, Mode=TwoWay}"/>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="X" VerticalAlignment="Center"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                <TextBox Grid.Row="1" Grid.Column="0" Text="{Binding PosX, Mode=TwoWay}" Margin="0,0,2,0"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="Y" VerticalAlignment="Center"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding PosY, Mode=TwoWay}" Margin="2,0"/>
+                <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                <TextBox Grid.Row="1" Grid.Column="2" Text="{Binding PosZ, Mode=TwoWay}" Margin="2,0,0,0"/>
             </Grid>
 
-            <TextBlock Text="Rotation" FontWeight="SemiBold" Margin="0,5,0,0"/>
+            <TextBlock Text="Rotation"
+                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontSize="10" LetterSpacing="2"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       Margin="0,4,0,0"/>
             <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto,Auto" Margin="0,3">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="X" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="X" VerticalAlignment="Center"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="0" Text="{Binding RotX, Mode=TwoWay}" Margin="0,0,2,0"/>
-                <TextBlock Grid.Row="0" Grid.Column="1" Text="Y" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="Y" VerticalAlignment="Center"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding RotY, Mode=TwoWay}" Margin="2,0"/>
-                <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="2" Text="{Binding RotZ, Mode=TwoWay}" Margin="2,0,0,0"/>
             </Grid>
 
-            <TextBlock Text="Scale" FontWeight="SemiBold" Margin="0,5,0,0"/>
+            <TextBlock Text="Scale"
+                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontSize="10" LetterSpacing="2"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       Margin="0,4,0,0"/>
             <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto" Margin="0,3">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="X" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="X" VerticalAlignment="Center"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="0" Text="{Binding ScaleX, Mode=TwoWay}" Margin="0,0,2,0"/>
-                <TextBlock Grid.Row="0" Grid.Column="1" Text="Y" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="Y" VerticalAlignment="Center"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ScaleY, Mode=TwoWay}" Margin="2,0"/>
-                <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="2" Text="{Binding ScaleZ, Mode=TwoWay}" Margin="2,0,0,0"/>
             </Grid>
 
-            <Separator Margin="0,10"/>
+            <Separator Margin="0,12"/>
 
-            <TextBlock Text="Light" FontWeight="SemiBold" FontSize="14"/>
+            <TextBlock Text="LIGHT"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,0,0,6"/>
             <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" Margin="0,3">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="Type" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Type" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <ComboBox Grid.Row="0" Grid.Column="1"
                           ItemsSource="{Binding $parent[Window].DataContext}"
                           SelectedItem="{Binding Light.LightType, Mode=TwoWay}">
@@ -64,19 +112,24 @@
                     <ComboBoxItem>Spot</ComboBoxItem>
                 </ComboBox>
 
-                <TextBlock Grid.Row="1" Grid.Column="0" Text="Intensity" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Intensity" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="1" Grid.Column="1" Text="{Binding Light.Intensity, Mode=TwoWay}"/>
 
-                <TextBlock Grid.Row="2" Grid.Column="0" Text="Range" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Range" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="2" Grid.Column="1" Text="{Binding Light.Range, Mode=TwoWay}"/>
 
-                <TextBlock Grid.Row="3" Grid.Column="0" Text="Umbra" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Umbra" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="3" Grid.Column="1" Text="{Binding Light.UmbraAngle, Mode=TwoWay}"/>
 
-                <TextBlock Grid.Row="4" Grid.Column="0" Text="Penumbra" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Penumbra" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="4" Grid.Column="1" Text="{Binding Light.PenumbraAngle, Mode=TwoWay}"/>
 
-                <TextBlock Grid.Row="5" Grid.Column="0" Text="Color RGB" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="Color RGB" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <StackPanel Grid.Row="5" Grid.Column="1" Orientation="Horizontal" Spacing="2">
                     <TextBox Text="{Binding Light.ColorR, Mode=TwoWay}" Width="60"/>
                     <TextBox Text="{Binding Light.ColorG, Mode=TwoWay}" Width="60"/>
@@ -89,27 +142,35 @@
                           Margin="0,4,0,0"/>
             </Grid>
 
-            <Separator Margin="0,10"/>
+            <Separator Margin="0,12"/>
 
-            <TextBlock Text="Camera" FontWeight="SemiBold" FontSize="14"/>
+            <TextBlock Text="CAMERA"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,0,0,6"/>
             <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" Margin="0,3">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="Projection" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Projection" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <ComboBox Grid.Row="0" Grid.Column="1"
                           SelectedItem="{Binding Camera.Projection, Mode=TwoWay}">
                     <ComboBoxItem>Perspective</ComboBoxItem>
                     <ComboBoxItem>Orthographic</ComboBoxItem>
                 </ComboBox>
 
-                <TextBlock Grid.Row="1" Grid.Column="0" Text="FOV (°)" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="FOV (°)" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="1" Grid.Column="1" Text="{Binding Camera.Fov, Mode=TwoWay}"/>
 
-                <TextBlock Grid.Row="2" Grid.Column="0" Text="Near / Far" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Near / Far" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Spacing="2">
                     <TextBox Text="{Binding Camera.NearPlane, Mode=TwoWay}" Width="80"/>
                     <TextBox Text="{Binding Camera.FarPlane, Mode=TwoWay}" Width="80"/>
                 </StackPanel>
 
-                <TextBlock Grid.Row="3" Grid.Column="0" Text="Clear Color" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Clear Color" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Spacing="2">
                     <TextBox Text="{Binding Camera.ClearColorR, Mode=TwoWay}" Width="50"/>
                     <TextBox Text="{Binding Camera.ClearColorG, Mode=TwoWay}" Width="50"/>
@@ -117,15 +178,21 @@
                     <TextBox Text="{Binding Camera.ClearColorA, Mode=TwoWay}" Width="50"/>
                 </StackPanel>
 
-                <TextBlock Grid.Row="4" Grid.Column="0" Text="Ortho Size" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Ortho Size" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="4" Grid.Column="1" Text="{Binding Camera.OrthoSize, Mode=TwoWay}"/>
             </Grid>
 
-            <Separator Margin="0,10"/>
+            <Separator Margin="0,12"/>
 
-            <TextBlock Text="Mesh Renderer" FontWeight="SemiBold" FontSize="14"/>
+            <TextBlock Text="MESH RENDERER"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,0,0,6"/>
             <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto" Margin="0,3">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="Mesh Guid" VerticalAlignment="Center"/>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Mesh Guid" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="0" Grid.Column="1" Text="{Binding MeshRenderer.MeshGuid, Mode=TwoWay}"/>
 
                 <CheckBox Grid.Row="1" Grid.Column="1"
@@ -136,12 +203,17 @@
                           IsChecked="{Binding MeshRenderer.ReceiveShadow, Mode=TwoWay}"/>
             </Grid>
 
-            <TextBlock Text="Material Override" FontWeight="SemiBold" FontSize="14" Margin="0,10,0,0"/>
-            <ItemsControl ItemsSource="{Binding MaterialOverrides}" Margin="20,3,0,0">
+            <TextBlock Text="MATERIAL OVERRIDE"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,12,0,6"/>
+            <ItemsControl ItemsSource="{Binding MaterialOverrides}" Margin="4,3,0,0">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="components:MaterialOverrideViewModel">
                         <Grid ColumnDefinitions="120,*" RowDefinitions="Auto" Margin="0,3">
-                            <TextBlock Grid.Column="0" Text="{Binding SlotName}" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="0" Text="{Binding SlotName}" VerticalAlignment="Center"
+                                       Foreground="{StaticResource SecondaryTextBrush}"/>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
                                 <TextBox Text="{Binding MaterialGuid, Mode=TwoWay}" Width="220"/>
                                 <Button Content="…" Width="28" Click="OnPickMaterial"/>
@@ -152,9 +224,11 @@
             </ItemsControl>
 
             <TextBlock Text="{Binding MixedValueMessage}"
-                       Foreground="Orange" FontStyle="Italic"
+                       FontFamily="{StaticResource FontMono}"
+                       FontStyle="Italic"
+                       Foreground="{StaticResource AmberBrush}"
                        IsVisible="{Binding HasMixedValues}"
-                       Margin="0,10,0,0"/>
+                       Margin="0,12,0,0"/>
         </StackPanel>
     </ScrollViewer>
 </UserControl>

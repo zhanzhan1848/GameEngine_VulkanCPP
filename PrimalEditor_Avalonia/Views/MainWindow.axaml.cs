@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors;
+using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.Views;
@@ -10,6 +11,8 @@ namespace PrimalEditor_Avalonia.Views;
 public partial class MainWindow : Window
 {
     private bool _reopenAttempted;
+    private bool _recoveryScanned;
+    private readonly System.Threading.SemaphoreSlim _recoveryPromptGate = new(1, 1);
 
     public MainWindow()
     {
@@ -23,7 +26,7 @@ public partial class MainWindow : Window
     /// <see cref="EditorLayoutSettings"/>. Runs once per process to
     /// avoid re-opening on every layout pass.
     /// </summary>
-    private void OnMainWindowOpened(object? sender, System.EventArgs e)
+    private async void OnMainWindowOpened(object? sender, System.EventArgs e)
     {
         if (_reopenAttempted) return;
         _reopenAttempted = true;
@@ -34,6 +37,104 @@ public partial class MainWindow : Window
         catch (System.Exception ex)
         {
             Logger.Error("MainWindow: failed to reopen last session", ex);
+        }
+        await ScanForRecoveryOnceAsync();
+    }
+
+    /// <summary>
+    /// Scan recent projects for the newest eligible autosave
+    /// recovery candidate. Runs at most once per MainWindow
+    /// instance. The dialog itself only runs on the UI thread
+    /// (via the caller's awaited promise). Skipped entirely if a
+    /// project has already been assigned (e.g. by an earlier
+    /// recovery or programmatic load).
+    /// </summary>
+    public async System.Threading.Tasks.Task ScanForRecoveryOnceAsync()
+    {
+        if (_recoveryScanned) return;
+        if (DataContext is MainWindowViewModel alreadyAssigned && alreadyAssigned.Project != null) return;
+        _recoveryScanned = true;
+        try
+        {
+            var recent = new RecentProjectsManager();
+            recent.Load();
+            if (recent.RecentProjects.Count == 0) return;
+            var coordinator = new AutoSaveRecoveryCoordinator(recent.RecentProjects);
+            AutoSaveRecoveryCoordinator.RecoveryCandidate? candidate;
+            try
+            {
+                candidate = await System.Threading.Tasks.Task.Run(
+                    () => coordinator.ScanForRecoveryCandidates());
+            }
+            catch (System.Exception ex)
+            {
+                Logger.Error("MainWindow: recovery coordinator failed", ex);
+                return;
+            }
+            if (candidate == null) return;
+            if (DataContext is MainWindowViewModel vm && vm.Project != null) return;
+            await PromptAndApplyRecoveryAsync(candidate);
+        }
+        catch (System.Exception ex)
+        {
+            Logger.Error("MainWindow: recovery scan failed", ex);
+        }
+    }
+
+    /// <summary>
+    /// Show the recovery dialog and apply the user's decision. Called
+    /// from both the startup scan and the explicit project-open path.
+    /// </summary>
+    public async System.Threading.Tasks.Task PromptAndApplyRecoveryAsync(
+        AutoSaveRecoveryCoordinator.RecoveryCandidate candidate)
+    {
+        if (candidate == null) return;
+        await _recoveryPromptGate.WaitAsync();
+        try
+        {
+            if (DataContext is not MainWindowViewModel vm) return;
+
+            var dialog = new RecoverAutosaveDialog(
+                candidate.Bundle.ProjectName,
+                candidate.Bundle.Timestamp,
+                candidate.Bundle.BundlePath,
+                candidate.OriginalProjectFilePath);
+
+            var decision = await dialog.ShowDialog<AutoSaveRecoveryDecision?>(this);
+            switch (decision)
+            {
+                case AutoSaveRecoveryDecision.RecoverAutosave:
+                {
+                    var loaded = AutoSaveRecoveryService.LoadBundle(
+                        candidate.Bundle, candidate.OriginalProjectFilePath);
+                    if (loaded == null)
+                    {
+                        Logger.Error($"AutoSave recovery: failed to load bundle {candidate.Bundle.BundlePath}");
+                        return;
+                    }
+                    vm.AssignProject(loaded, markRecoveredDirty: true);
+                    break;
+                }
+                case AutoSaveRecoveryDecision.OpenSavedVersion:
+                {
+                    var loadedLive = OpenProject.Open(candidate.OriginalProjectFilePath);
+                    if (loadedLive == null)
+                    {
+                        Logger.Error($"AutoSave recovery: failed to load live project for '{candidate.OriginalProjectFilePath}'; backup left eligible.");
+                        return;
+                    }
+                    AutoSaveRecoveryService.MarkDismissed(candidate.Bundle);
+                    vm.Project = loadedLive;
+                    break;
+                }
+                case AutoSaveRecoveryDecision.Later:
+                default:
+                    break;
+            }
+        }
+        finally
+        {
+            _recoveryPromptGate.Release();
         }
     }
 

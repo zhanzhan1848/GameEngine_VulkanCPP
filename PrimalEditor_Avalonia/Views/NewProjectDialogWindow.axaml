@@ -1,0 +1,7 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PrimalEditor_Avalonia.Views.NewProjectDialogWindow"
+        Title="New Project"
+        Width="600" Height="500"
+        WindowStartupLocation="CenterOwner">
+</Window>

@@ -5,60 +5,85 @@
         x:Class="PrimalEditor_Avalonia.Editors.PrimitiveMesh.PrimitiveMeshView"
         x:DataType="vm:PrimitiveMeshViewModel"
         Title="Create Primitive Mesh"
-        Width="520" Height="560"
-        WindowStartupLocation="CenterOwner">
+        Width="560" Height="600"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource VoidBrush}">
 
-  <Grid Margin="20" RowDefinitions="Auto,*,Auto,Auto">
+  <Border Classes="floating" Margin="10">
+    <Grid Margin="20" RowDefinitions="Auto,*,Auto,Auto">
 
-    <StackPanel Grid.Row="0" Spacing="6">
-      <TextBlock Text="Geometry Type" FontWeight="SemiBold"/>
-      <ComboBox ItemsSource="{Binding AllTypes}" SelectedItem="{Binding Type}"
-                HorizontalAlignment="Stretch"/>
-    </StackPanel>
-
-    <ScrollViewer Grid.Row="1" Margin="0,12">
-      <StackPanel Spacing="10">
-        <StackPanel>
-          <TextBlock Text="Segments" FontWeight="SemiBold" Margin="0,0,0,4"/>
-          <StackPanel Orientation="Horizontal" Spacing="4">
-            <ctrl:NumberBox Value="{Binding SegmentsX, Mode=TwoWay}" Kind="Int" Width="110"/>
-            <ctrl:NumberBox Value="{Binding SegmentsY, Mode=TwoWay}" Kind="Int" Width="110"/>
-            <ctrl:NumberBox Value="{Binding SegmentsZ, Mode=TwoWay}" Kind="Int" Width="110"/>
-          </StackPanel>
-        </StackPanel>
-
-        <StackPanel>
-          <TextBlock Text="Size" FontWeight="SemiBold" Margin="0,0,0,4"/>
-          <StackPanel Orientation="Horizontal" Spacing="4">
-            <ctrl:NumberBox Value="{Binding SizeX, Mode=TwoWay}" Kind="Float" Width="110"/>
-            <ctrl:NumberBox Value="{Binding SizeY, Mode=TwoWay}" Kind="Float" Width="110"/>
-            <ctrl:NumberBox Value="{Binding SizeZ, Mode=TwoWay}" Kind="Float" Width="110"/>
-          </StackPanel>
-        </StackPanel>
-
-        <StackPanel>
-          <TextBlock Text="LOD" FontWeight="SemiBold" Margin="0,0,0,4"/>
-          <ctrl:NumberBox Value="{Binding LOD, Mode=TwoWay}" Kind="Int" Width="110"/>
-        </StackPanel>
-
-        <StackPanel>
-          <TextBlock Text="Smoothing Angle (degrees)" FontWeight="SemiBold" Margin="0,0,0,4"/>
-          <ctrl:NumberBox Value="{Binding SmoothingAngle, Mode=TwoWay}" Kind="Float" Width="110"/>
-        </StackPanel>
+      <StackPanel Grid.Row="0" Spacing="6">
+        <TextBlock Text="GEOMETRY TYPE"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource ElectricBlueBrush}"/>
+        <ComboBox ItemsSource="{Binding AllTypes}" SelectedItem="{Binding Type}"
+                  HorizontalAlignment="Stretch"/>
       </StackPanel>
-    </ScrollViewer>
 
-    <StackPanel Grid.Row="2" Spacing="4" Margin="0,8,0,0">
-      <TextBlock Text="Output File Name" FontWeight="SemiBold"/>
-      <TextBox Text="{Binding OutputName, Mode=TwoWay}"/>
-    </StackPanel>
+      <ScrollViewer Grid.Row="1" Margin="0,12">
+        <StackPanel Spacing="10">
+          <StackPanel>
+            <TextBlock Text="SEGMENTS"
+                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontSize="11" LetterSpacing="2"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Margin="0,0,0,4"/>
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <ctrl:NumberBox Value="{Binding SegmentsX, Mode=TwoWay}" Kind="Int" Width="110"/>
+              <ctrl:NumberBox Value="{Binding SegmentsY, Mode=TwoWay}" Kind="Int" Width="110"/>
+              <ctrl:NumberBox Value="{Binding SegmentsZ, Mode=TwoWay}" Kind="Int" Width="110"/>
+            </StackPanel>
+          </StackPanel>
 
-    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6" Margin="0,16,0,0">
-      <Button Content="Cancel" Click="OnCancelClick" Width="90"/>
-      <Button Name="ReimportButton" Content="Re-cook" Click="OnReimportClick" Width="90"
-              IsVisible="{Binding HasAsset}"/>
-      <Button Content="Create" Click="OnCreateClick" Width="90" IsDefault="True"
-              Classes="accent"/>
-    </StackPanel>
-  </Grid>
+          <StackPanel>
+            <TextBlock Text="SIZE"
+                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontSize="11" LetterSpacing="2"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Margin="0,0,0,4"/>
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <ctrl:NumberBox Value="{Binding SizeX, Mode=TwoWay}" Kind="Float" Width="110"/>
+              <ctrl:NumberBox Value="{Binding SizeY, Mode=TwoWay}" Kind="Float" Width="110"/>
+              <ctrl:NumberBox Value="{Binding SizeZ, Mode=TwoWay}" Kind="Float" Width="110"/>
+            </StackPanel>
+          </StackPanel>
+
+          <StackPanel>
+            <TextBlock Text="LOD"
+                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontSize="11" LetterSpacing="2"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Margin="0,0,0,4"/>
+            <ctrl:NumberBox Value="{Binding LOD, Mode=TwoWay}" Kind="Int" Width="110"/>
+          </StackPanel>
+
+          <StackPanel>
+            <TextBlock Text="SMOOTHING ANGLE (DEGREES)"
+                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontSize="11" LetterSpacing="2"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Margin="0,0,0,4"/>
+            <ctrl:NumberBox Value="{Binding SmoothingAngle, Mode=TwoWay}" Kind="Float" Width="110"/>
+          </StackPanel>
+        </StackPanel>
+      </ScrollViewer>
+
+      <StackPanel Grid.Row="2" Spacing="4" Margin="0,8,0,0">
+        <TextBlock Text="OUTPUT FILE NAME"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource ElectricBlueBrush}"/>
+        <TextBox Text="{Binding OutputName, Mode=TwoWay}"/>
+      </StackPanel>
+
+      <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6" Margin="0,16,0,0">
+        <Button Content="Cancel" Click="OnCancelClick" Width="90"/>
+        <Button Name="ReimportButton" Content="Re-cook" Click="OnReimportClick" Width="100"
+                IsVisible="{Binding HasAsset}"/>
+        <Button Content="Create" Click="OnCreateClick" Width="90" IsDefault="True"
+                Classes="accent"/>
+      </StackPanel>
+    </Grid>
+  </Border>
 </Window>

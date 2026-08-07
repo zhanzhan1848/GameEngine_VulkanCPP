@@ -8,17 +8,8 @@ public partial class AboutDialog : Window
     public AboutDialog()
     {
         InitializeComponent();
-        var runtimeVersion = this.FindControl<TextBlock>("RuntimeVersion");
-        var osVersion = this.FindControl<TextBlock>("OsVersion");
-        if (runtimeVersion != null)
-            runtimeVersion.Text = System.Environment.Version.ToString();
-        if (osVersion != null)
-            osVersion.Text = $"{System.Environment.OSVersion.Platform} {System.Environment.OSVersion.Version}";
-    }
-
-    private void InitializeComponent()
-    {
-        AvaloniaXamlLoader.Load(this);
+        RuntimeVersion.Text = System.Environment.Version.ToString();
+        OsVersion.Text = $"{System.Environment.OSVersion.Platform} {System.Environment.OSVersion.Version}";
     }
 
     private void OnOkClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)

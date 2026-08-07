@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors.Geometry;
@@ -29,8 +30,12 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
     public IReadOnlyList<AssetType> HandledTypes { get; } = new[] { AssetType.Mesh };
     public Type SettingsType => typeof(GeometryImportSettings);
     public bool CanClaim(string filePath) => _exts.Contains(Path.GetExtension(filePath));
-    public ImportSettingsViewModelBase CreateSettingsViewModel(IAssetImportSettings defaults)
-        => new GeometryImportPanelViewModel(defaults);
+    public UserControl CreatePanel(IAssetImportSettings defaults)
+    {
+        var vm = new GeometryImportPanelViewModel(defaults);
+        var panel = new GeometryImportPanel { DataContext = vm };
+        return panel;
+    }
 
     public async Task<ImportedAsset> RunAsync(ImportRequest request, IProgress<double>? progress, CancellationToken ct)
     {

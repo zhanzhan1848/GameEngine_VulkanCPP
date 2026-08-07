@@ -3,7 +3,7 @@
         xmlns:ctrl="using:PrimalEditor_Avalonia.Controls">
 
   <Design.PreviewWith>
-    <Border Padding="20" Background="#FF1E1E1E">
+    <Border Padding="20" Background="{StaticResource VoidBrush}">
       <StackPanel Spacing="8">
         <ctrl:NumberBox Value="0.000" Width="120"/>
         <ctrl:NumberBox Value="42" Width="120"/>
@@ -15,32 +15,37 @@
   <Style Selector="ctrl|NumberBox">
     <Setter Property="Template">
       <ControlTemplate>
-        <Border Background="#FF2D2D30" BorderBrush="#FF555555" BorderThickness="1"
-                CornerRadius="2" Padding="0">
+        <Border Background="{StaticResource VoidBrush}" BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
+                CornerRadius="4" Padding="0">
           <Panel>
+            <!-- Magic parts preserved for NumberBox.cs logic -->
             <TextBlock Name="PART_TextBlock"
                        Text="{TemplateBinding Value}"
-                       Foreground="#FFEEEEEE"
+                       Foreground="{StaticResource ElectricBlueBrush}"
                        VerticalAlignment="Center"
                        HorizontalAlignment="Stretch"
-                       Padding="6,0"
+                       Padding="8,0"
                        TextAlignment="Right"
-                       FontFamily="Consolas,Menlo,monospace"
+                       FontFamily="avares://PrimalEditor_Avalonia/Assets/Fonts/#JetBrains Mono"
                        FontSize="12"/>
             <TextBox Name="PART_TextBox"
                      Text="{TemplateBinding Value, Mode=TwoWay}"
-                     Background="#FF1E1E1E"
-                     Foreground="#FFEEEEEE"
-                     CaretBrush="#FFEEEEEE"
+                     Background="{StaticResource VoidBrush}"
+                     Foreground="{StaticResource ElectricBlueBrush}"
+                     CaretBrush="{StaticResource ElectricBlueBrush}"
+                     SelectionBrush="{StaticResource BlueTint25}"
                      BorderThickness="0"
-                     Padding="6,0"
+                     Padding="8,0"
                      TextAlignment="Right"
-                     FontFamily="Consolas,Menlo,monospace"
+                     FontFamily="avares://PrimalEditor_Avalonia/Assets/Fonts/#JetBrains Mono"
                      FontSize="12"/>
           </Panel>
         </Border>
       </ControlTemplate>
     </Setter>
   </Style>
+
+  <!-- NumberBox is a TemplatedControl; focus glow handled by its inner Border in the template above. -->
+
 
 </Styles>

@@ -10,7 +10,7 @@ namespace PrimalEditor_Avalonia.Converters;
 public static class FileViewModeConverters
 {
     public static readonly IValueConverter ToThumbnails = new ViewModeToBoolConverter { Target = FileViewMode.Thumbnails };
-    public static readonly IValueConverter IsList = new ViewModeToBoolConverter { Target = FileViewMode.List, Inverted = true };
+    public static readonly IValueConverter IsList = new ViewModeToBoolConverter { Target = FileViewMode.List };
     public static readonly IValueConverter IsThumbnails = new ViewModeToBoolConverter { Target = FileViewMode.Thumbnails };
 }
 
@@ -70,6 +70,27 @@ public class FileTypeToIconConverter : IValueConverter
             _ => FileIcon,
         };
     }
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
+public static class PreviewAssetTypeConverters
+{
+    public static readonly IValueConverter IsTexture = new AssetTypeEqualityConverter { Target = AssetType.Texture };
+    public static readonly IValueConverter IsMesh = new AssetTypeEqualityConverter { Target = AssetType.Mesh };
+    public static readonly IValueConverter IsMaterial = new AssetTypeEqualityConverter { Target = AssetType.Material };
+    public static readonly IValueConverter IsScript = new AssetTypeEqualityConverter { Target = AssetType.Script };
+    public static readonly IValueConverter IsShader = new AssetTypeEqualityConverter { Target = AssetType.Shader };
+    public static readonly IValueConverter IsAudio = new AssetTypeEqualityConverter { Target = AssetType.Audio };
+}
+
+public class AssetTypeEqualityConverter : IValueConverter
+{
+    public AssetType Target { get; set; }
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is AssetType t && t == Target;
 
     public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotSupportedException();

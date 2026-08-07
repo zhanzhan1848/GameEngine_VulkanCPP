@@ -1,0 +1,61 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls">
+
+  <Design.PreviewWith>
+    <Border Padding="20" Background="{StaticResource VoidBrush}">
+      <StackPanel Spacing="12">
+        <ctrl:CyberCorner Width="280" Height="80">
+          <TextBlock Text="CHAMFERED PANEL"
+                     FontFamily="{StaticResource FontDisplay}"
+                     Foreground="{StaticResource ElectricBlueBrush}"
+                     FontWeight="SemiBold"
+                     HorizontalAlignment="Center"
+                     VerticalAlignment="Center"/>
+        </ctrl:CyberCorner>
+      </StackPanel>
+    </Border>
+  </Design.PreviewWith>
+
+  <Style Selector="ctrl|CyberCorner">
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Panel>
+          <Border Name="PART_Fill"
+                  Background="{TemplateBinding FillColor}"
+                  BorderThickness="0"
+                  ClipToBounds="True">
+            <Border.Clip>
+              <PathGeometry>
+                <PathFigure StartPoint="0,14">
+                  <LineSegment Point="0,100"/>
+                  <LineSegment Point="14,100"/>
+                  <LineSegment Point="14,98"/>
+                  <LineSegment Point="2,98"/>
+                  <LineSegment Point="2,14"/>
+                  <LineSegment Point="14,14"/>
+                  <LineSegment Point="14,0"/>
+                  <LineSegment Point="100,0"/>
+                  <LineSegment Point="100,14"/>
+                </PathFigure>
+              </PathGeometry>
+            </Border.Clip>
+            <ContentPresenter Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              Margin="20,14,8,8"/>
+          </Border>
+
+          <Canvas IsHitTestVisible="False">
+            <Path Stroke="{TemplateBinding GlowColor}"
+                  StrokeThickness="1.5"
+                  Data="M 14,0 L 0,14"/>
+            <Path Stroke="{TemplateBinding GlowColor}"
+                  StrokeThickness="1.5"
+                  Data="M 0,86 L 14,100"/>
+          </Canvas>
+        </Panel>
+      </ControlTemplate>
+    </Setter>
+  </Style>
+
+</Styles>

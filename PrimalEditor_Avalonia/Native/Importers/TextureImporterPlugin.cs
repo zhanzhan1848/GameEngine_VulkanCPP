@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors.Texture;
@@ -26,8 +27,12 @@ public sealed class TextureImporterPlugin : IAssetImporterPlugin
     public IReadOnlyList<AssetType> HandledTypes { get; } = new[] { AssetType.Texture };
     public Type SettingsType => typeof(TextureImportSettings);
     public bool CanClaim(string filePath) => _exts.Contains(Path.GetExtension(filePath));
-    public ImportSettingsViewModelBase CreateSettingsViewModel(IAssetImportSettings defaults)
-        => new TextureImportPanelViewModel(defaults);
+    public UserControl CreatePanel(IAssetImportSettings defaults)
+    {
+        var vm = new TextureImportPanelViewModel(defaults);
+        var panel = new TextureImportPanel { DataContext = vm };
+        return panel;
+    }
 
     public async Task<ImportedAsset> RunAsync(ImportRequest request, IProgress<double>? progress, CancellationToken ct)
     {

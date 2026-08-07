@@ -1,49 +1,68 @@
-<Window xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
-        x:Class="PrimalEditor_Avalonia.Views.NewProjectView"
-        x:DataType="vm:NewProjectViewModel"
-        Title="New Project"
-        Width="600" Height="500"
-        WindowStartupLocation="CenterOwner">
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+             x:Class="PrimalEditor_Avalonia.Views.NewProjectView"
+             x:DataType="vm:NewProjectViewModel">
 
     <Grid Margin="20" RowDefinitions="Auto,*,Auto,Auto,Auto,Auto" ColumnDefinitions="*,*">
 
-        <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="Create New Project"
-                   FontSize="20" FontWeight="Bold" Margin="0,0,0,20"/>
+        <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="CREATE NEW PROJECT"
+                   FontFamily="{StaticResource FontDisplay}"
+                   FontWeight="SemiBold" FontSize="16" LetterSpacing="1"
+                   Foreground="{StaticResource ElectricBlueBrush}"
+                   Margin="0,0,0,20">
+        </TextBlock>
 
         <ListBox Grid.Row="1" Grid.ColumnSpan="2"
                  ItemsSource="{Binding Templates}"
                  SelectedItem="{Binding SelectedTemplate}"
-                 Margin="0,0,0,20">
+                 Margin="0,0,0,20"
+                 Background="{StaticResource VoidBrush}"
+                 BorderBrush="{StaticResource ElectricBlueBrush}"
+                 BorderThickness="1">
             <ListBox.ItemTemplate>
                 <DataTemplate>
                     <StackPanel>
-                        <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold"/>
-                        <TextBlock Text="{Binding Description}" FontSize="11" Foreground="Gray"/>
+                        <TextBlock Text="{Binding Name}"
+                                   FontFamily="{StaticResource FontDisplay}"
+                                   FontWeight="SemiBold" FontSize="14" LetterSpacing="2"
+                                   Foreground="{StaticResource ElectricBlueBrush}"/>
+                        <TextBlock Text="{Binding Description}" FontSize="11"
+                                   Classes="mono dim"
+                                   Foreground="{StaticResource SecondaryTextBrush}"/>
                     </StackPanel>
                 </DataTemplate>
             </ListBox.ItemTemplate>
         </ListBox>
 
-        <TextBlock Grid.Row="2" Grid.Column="0" Text="Project Name:" VerticalAlignment="Center"/>
+        <TextBlock Grid.Row="2" Grid.Column="0" Text="Project Name:"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource ElectricBlueBrush}"
+                   VerticalAlignment="Center"/>
         <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding ProjectName}" Margin="0,5"/>
 
-        <TextBlock Grid.Row="3" Grid.Column="0" Text="Project Path:" VerticalAlignment="Center"/>
+        <TextBlock Grid.Row="3" Grid.Column="0" Text="Project Path:"
+                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontSize="11" LetterSpacing="2"
+                   Foreground="{StaticResource ElectricBlueBrush}"
+                   VerticalAlignment="Center"/>
         <Grid Grid.Row="3" Grid.Column="1" ColumnDefinitions="*,Auto" Margin="0,5">
             <TextBox Grid.Column="0" Text="{Binding ProjectPath}"/>
-            <Button Grid.Column="1" Content="Browse..." Click="OnBrowseClick" Margin="5,0,0,0"/>
+            <Button Grid.Column="1" Content="Browse..." Click="OnBrowseClick" Margin="6,0,0,0"/>
         </Grid>
 
         <TextBlock Grid.Row="4" Grid.ColumnSpan="2"
-                   Text="{Binding ErrorMessage}" Foreground="Red"
+                   Text="{Binding ErrorMessage}"
+                   FontFamily="{StaticResource FontMono}"
+                   Foreground="{StaticResource CoralDeepBrush}"
                    IsVisible="{Binding HasError}" Margin="0,10"/>
 
         <StackPanel Grid.Row="5" Grid.ColumnSpan="2"
                     Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
-            <Button Content="Cancel" Click="OnCancelClick" Margin="0,0,10,0" Width="80"/>
-            <Button Content="Create" Click="OnCreateClick" Width="80"
-                    IsDefault="True" IsEnabled="{Binding CanCreate}"/>
+            <Button Content="Cancel" Click="OnCancelClick" Margin="0,0,10,0" Width="90"/>
+            <Button Content="Create" Click="OnCreateClick" Width="90"
+                    IsDefault="True" IsEnabled="{Binding CanCreate}" Classes="accent"/>
         </StackPanel>
     </Grid>
-</Window>
+</UserControl>

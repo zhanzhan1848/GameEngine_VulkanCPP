@@ -17,8 +17,14 @@ public static class Serializer
     {
         ArgumentNullException.ThrowIfNull(project);
         var filePath = path ?? project.FullPath;
-        var partialPath = filePath + ".partial";
         var document = ToDocument(project);
+        SaveProjectDocument(document, filePath);
+    }
+
+    internal static void SaveProjectDocument(ProjectDocument document, string filePath)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        var partialPath = filePath + ".partial";
         if (!document.IsValid) throw new InvalidDataException("Project manifest is invalid.");
 
         try
@@ -368,8 +374,14 @@ public static class Serializer
     public static void SaveScene(Scene scene, string scenePath)
     {
         ArgumentNullException.ThrowIfNull(scene);
-        var partialPath = scenePath + ".partial";
         var document = ToSceneDocument(scene);
+        SaveSceneDocument(document, scenePath);
+    }
+
+    internal static void SaveSceneDocument(SceneDocument document, string scenePath)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        var partialPath = scenePath + ".partial";
         if (document.SceneGuid.Value == Guid.Empty)
         {
             throw new InvalidDataException("Scene Guid cannot be empty.");

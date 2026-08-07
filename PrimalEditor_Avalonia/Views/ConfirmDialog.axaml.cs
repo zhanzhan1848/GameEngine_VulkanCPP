@@ -17,13 +17,11 @@ public partial class ConfirmDialog : Window
         InitializeComponent();
     }
 
-    private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
-
     public static ConfirmDialog Create(string title, string message)
     {
         var dlg = new ConfirmDialog();
         dlg.Title = title;
-        dlg.FindControl<TextBlock>("MessageText")!.Text = message;
+        dlg.MessageText.Text = message;
         return dlg;
     }
 

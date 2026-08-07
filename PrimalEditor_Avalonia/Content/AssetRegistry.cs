@@ -100,6 +100,7 @@ public static class AssetRegistry
     public static AssetInfo? Register(string fullPath)
     {
         if (!File.Exists(fullPath) && !Directory.Exists(fullPath)) return null;
+        if (IsMetaSidecarPath(fullPath)) return null;
         if (_byPath.TryGetValue(fullPath, out var existing)) return existing;
 
         var info = new AssetInfo
@@ -326,6 +327,12 @@ public static class AssetRegistry
     /// sync with the asset file.
     /// </summary>
     public static string SidecarPath(string assetPath) => assetPath + ".meta";
+
+    private static bool IsMetaSidecarPath(string path)
+    {
+        var name = Path.GetFileName(path);
+        return name.EndsWith(".meta", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static AssetMetaDocument? LoadOrMigrateMeta(string fullPath)
     {
