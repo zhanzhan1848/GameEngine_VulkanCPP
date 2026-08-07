@@ -45,28 +45,13 @@ public partial class App : Application
     /// </summary>
     private static void EnsureAstcencAvailable()
     {
-        if (!string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("PRIMAL_ASTCENC_PATH")))
+        var resolved = AstcencLocator.EnsureExported();
+        if (resolved == null)
+        {
+            Logger.Warning("astcenc-neon not found; texture compression via ContentTools will fail. Set PRIMAL_ASTCENC_PATH to the astcenc binary.");
             return;
-
-        string baseDir = System.AppContext.BaseDirectory;
-        var candidates = new[]
-        {
-            System.IO.Path.Combine(baseDir, "astcenc-neon"),
-            System.IO.Path.Combine(baseDir, "..", "astcenc-neon"),
-            System.IO.Path.Combine(baseDir, "..", "..", "third_party", "astc-encoder", "build", "Source", "astcenc-neon"),
-        };
-
-        foreach (var candidate in candidates)
-        {
-            if (System.IO.File.Exists(candidate))
-            {
-                System.Environment.SetEnvironmentVariable("PRIMAL_ASTCENC_PATH", candidate);
-                Logger.Info($"astcenc found at {candidate}");
-                return;
-            }
         }
-
-        Logger.Warning("astcenc-neon not found; texture compression via ContentTools will fail. Set PRIMAL_ASTCENC_PATH to the astcenc binary.");
+        Logger.Info($"astcenc resolved: {resolved}");
     }
 
     public override void OnFrameworkInitializationCompleted()

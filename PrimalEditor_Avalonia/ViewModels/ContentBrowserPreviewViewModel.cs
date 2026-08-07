@@ -214,17 +214,33 @@ public class ContentBrowserPreviewViewModel : ViewModelBase, IDisposable
 
     private void LoadTexture(AssetInfo info)
     {
+        if (!File.Exists(info.FullPath)) { StatusMessage = "Texture file missing on disk"; return; }
+
+        var ext = Path.GetExtension(info.FullPath).ToLowerInvariant();
+
+        if (ext == ".texture")
+        {
+            if (PrimalEditor_Avalonia.Import.TextureTexrReader.TryDecodeBitmap(info.FullPath, out var texBmp, out var texErr) && texBmp != null)
+            {
+                TextureBitmap = texBmp;
+                StatusMessage = $"{texBmp.PixelSize.Width}×{texBmp.PixelSize.Height} (engine texture)";
+            }
+            else
+            {
+                StatusMessage = $"Preview unavailable: {texErr ?? "TEXR decode failed"}";
+            }
+            return;
+        }
+
         // Only decode formats Avalonia can open natively without an
         // importer sidecar. TGA/DDS/HDR show a "convert before preview"
         // hint instead of failing the whole pane.
-        var ext = Path.GetExtension(info.FullPath).ToLowerInvariant();
         var decodable = ext is ".png" or ".jpg" or ".jpeg" or ".bmp" or ".gif";
         if (!decodable)
         {
             StatusMessage = $"Preview unavailable for {ext} (re-import to enable)";
             return;
         }
-        if (!File.Exists(info.FullPath)) { StatusMessage = "Texture file missing on disk"; return; }
 
         try
         {

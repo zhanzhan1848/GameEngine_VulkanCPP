@@ -48,6 +48,10 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="PrimalEditor_Avalonia.Tests" />
+  </ItemGroup>
+
   <PropertyGroup>
     <PostBuildEvent Condition="'$(OS)' == 'Windows_NT' AND Exists('$(MSBuildThisFileDirectory)..\..\Darwin\$(Configuration)\PrimalEngine.dll')">copy /Y "$(MSBuildThisFileDirectory)..\..\Darwin\$(Configuration)\PrimalEngine.dll" "$(BaseOutputPath)\$(Configuration)"</PostBuildEvent>
   </PropertyGroup>

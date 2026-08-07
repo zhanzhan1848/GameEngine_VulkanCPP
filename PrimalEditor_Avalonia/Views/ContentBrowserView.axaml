@@ -187,7 +187,7 @@
                                             Background="{StaticResource VoidBrush}"
                                             ClipToBounds="True">
                                         <Panel>
-                                            <Image Source="{Binding FullPath}" Stretch="Uniform"
+                                            <Image Source="{Binding, Converter={x:Static conv:FileTypeConverters.ToThumbnailSource}}" Stretch="Uniform"
                                                    IsVisible="{Binding IsImage}"/>
                                             <Path Width="40" Height="40" Stretch="Uniform"
                                                   Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"

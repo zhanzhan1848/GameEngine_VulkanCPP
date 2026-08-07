@@ -36,5 +36,6 @@ public sealed class AssetInfo
     public bool IsImage =>
         Type == AssetType.Texture &&
         (Extension == ".png" || Extension == ".jpg" ||
-         Extension == ".jpeg" || Extension == ".bmp");
+         Extension == ".jpeg" || Extension == ".bmp" ||
+         Extension == ".texture");
 }

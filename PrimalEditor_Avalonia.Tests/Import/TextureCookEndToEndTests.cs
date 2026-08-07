@@ -14,13 +14,17 @@ public sealed class TextureCookEndToEndTests
     {
         // P/Invoke resolves libContentTools.dylib at runtime; if the
         // macOS dylib is missing from the test bin dir, skip cleanly.
-        return NativeEngineBridge.LoadEngine();
+        if (!NativeEngineBridge.LoadEngine()) return false;
+
+        // Compressed cooks shell out to astcenc; make it available to the
+        // native side or the tests will fail with nativeError=2 (compress).
+        return AstcencLocator.EnsureExported() != null;
     }
 
     private static NativeEngineBridge.CookTextureStatus CookOnce(string fixturePath, TextureImportSettings settings, out uint nativeError)
     {
         nativeError = 0;
-        var dir = Path.Combine(Path.GetTempPath(), "PrimalTexSmoke_" + System.Guid.NewGuid().ToString("N"));
+        var dir = Path.Combine(Path.GetTempPath(), "PrimalTexSmoke_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         try
         {
