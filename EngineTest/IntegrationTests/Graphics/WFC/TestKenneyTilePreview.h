@@ -1,28 +1,32 @@
 #pragma once
 
-// TestKenneyTilePreview.h — Kenney dungeon tile WFC streaming showcase.
+// TestKenneyTilePreview.h — WFC tile-source composition showcase.
 //
-// Application-layer binary (NOT engine core). Loads every .engine_mesh in
-// EngineTest/assets/Processed/kenney_dungeon_tiles/ via KenneyTileCatalog,
-// builds a hand-authored WFC registry from 8 of those tiles (wall + corridor
-// variants + room + stairs), then streams a 16×1×16 Dungeon-only solve
-// across frames. Each frame collapses a few cells, drains the post-restart
-// Collapse steps from the buffer, spawns ECS entities via PCGEntityFactory,
-// and re-publishes the cumulative list to StandardRenderPipeline.
+// Application-layer binary (NOT engine core). Composes one or more
+// IWFCTileStyle implementations (registered in
+// graphics::wfc::WFCTileStyleRegistry) into a single WFCTileRegistry, then
+// streams a solve across frames. Each frame collapses a few cells, drains
+// the post-restart Collapse steps from the buffer, spawns ECS entities via
+// PCGEntityFactory, and re-publishes the cumulative list to
+// StandardRenderPipeline.
 //
 // Architecture: this binary proves the "Core Layer as Capability Provider"
-// principle — a brand-new asset pack (Kenney dungeon tiles, unrelated to the
-// ruins tile set baked into WFCTileCatalog) runs the full WFC pipeline with
-// zero changes to Engine/Graphics/WFC/ or any other engine-core module. The
-// engine's content::create_resource + StandardRenderPipeline::RegisterMeshEntity
-// + PCGEntityFactory + WFC subsystems compose into a working showcase.
+// principle — the engine exposes IWFCTileStyle + WFCTileStyleRegistry as
+// composable building blocks; this binary (EngineTest layer) registers its
+// own KenneyDungeonStyle (Kenney FBX = demo fixture) alongside the
+// engine-native RuinsStyle + ProceduralRoomPackStyle and lets the registry's
+// Compose() build a unified registry/adjacency set. Adding a new style = one
+// RegisterStyle call; no other site needs editing.
 //
-// Native-only (Metal) today. WASM/WebGPU port is tracked separately as
-// task #126 (follow-up spec).
+// Native (Metal/Vulkan) + WASM (Dawn). The WASM panel dropdown auto-
+// populates from the registry via the wfc_get_style_* C ABI; an "Advanced"
+// multi-select path calls wfc_compose(indices, count).
 //
 // Smoke assertion: ≥ 100 cells collapsed AND ≥ 1 tile variety (≥ 3 distinct
-// tile ids in the final grid). Visual quality (orientation, layout, materials)
-// is human-reviewed — engine team will eyeball the running window.
+// tile ids in the final grid). Multi-style compositions additionally enforce
+// ≥ 2 distinct categories (catches the silent failure mode where the
+// classifier prunes one source out of every cell). Visual quality
+// (orientation, layout, materials) is human-reviewed.
 
 #include "RenderTestFramework.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
@@ -39,7 +43,7 @@
 #include "Engine/Graphics/WFC/WFCStepBuffer.h"
 #include "Engine/Graphics/WFC/WFCSolveBudget.h"
 #include "Engine/Graphics/WFC/WFCObserver.h"
-#include "KenneyTileCatalog.h"
+#include "Engine/Graphics/WFC/WFCTileStyleRegistry.h"
 #include <memory>
 #include <vector>
 
@@ -49,21 +53,6 @@ public:
     // DistanceFromOrigin; MinEntropy ignores it.
     enum class ObserverKind : u32 { MinEntropy = 0, DistanceFromOrigin = 1 };
     enum class OriginPreset : u32 { Center = 0, Corner = 1, BottomCenter = 2 };
-
-    // Phase C.1 Mixed (Tasks 14–15): two tile-source compositions.
-    //   KenneyOnly  — original behavior: 8 hand-authored Kenney tiles loaded
-    //                 from disk (Dungeon category, hand-coded 0x00/0xFF/0xAA
-    //                 sockets via KenneyTileCatalog::BuildWFCRegistry).
-    //   MixedMulti  — Ruins (15 tiles, Ruins category) + ProceduralRoomPack
-    //                 (12 tiles, Primitive category) = 27 tiles spanning 2
-    //                 categories. Adjacency rebuilt via
-    //                 AutoSocketClassifier::BuildFromClassifier (8×8 occupancy
-    //                 grid). Active category mask = Ruins | Primitive.
-    //
-    // Switching modes rebuilds registry_+adjacency_ from scratch via InitWFC,
-    // not just ReseedSolver. Triggered by the 'M' hotkey or the WASM panel
-    // bridge (wfc_set_solve_mode).
-    enum class SolveMode : u32 { KenneyOnly = 0, MixedMulti = 1 };
 
     KenneyTilePreviewTestCase();
     bool Initialize() override;
@@ -86,27 +75,35 @@ public:
     void RequestGridD(u32 d)         { pending_grid_d_   = d; has_pending_grid_d_ = true; }
     void RequestReseedSame()         { pending_reseed_same_ = true; }
     void RequestReseedNew()          { pending_reseed_new_  = true; }
-    // Phase C.1 Task 14: switch tile-source composition. Drain detects a
-    // change vs current mode and re-runs InitWFC (not just ReseedSolver)
-    // because each mode owns a different registry/adjacency set.
-    void RequestSolveMode(u32 mode)  { pending_solve_mode_ = mode; has_pending_solve_mode_ = true; }
+    // Compose a subset of registered styles. style_indices reference the
+    // WFCTileStyleRegistry's stable index (registration order). Empty vector
+    // is a no-op; the next HandleGridEditKeys keeps the current composition.
+    void RequestCompose(std::vector<u32> style_indices) {
+        pending_compose_ = std::move(style_indices);
+        has_pending_compose_ = true;
+    }
 
     ObserverKind GetObserverKind() const { return observer_kind_; }
     OriginPreset GetOriginPreset() const { return origin_preset_; }
-    SolveMode    GetSolveMode() const    { return solve_mode_; }
+    const std::vector<u32>& GetActiveStyles() const { return active_styles_; }
     u32 GetGridW() const { return grid_w_; }
     u32 GetGridH() const { return grid_h_; }
     u32 GetGridD() const { return grid_d_; }
     u32 GetSeed()   const { return rng_seed_; }
 
 private:
-    bool InitWFC();
-    // Phase C.1 Task 14: build registry_+adjacency_ for the MixedMulti mode
-    // (Ruins + ProceduralRoomPack). Captures RHIMeshAsset pointers in
-    // mesh_lookup_ so AutoSocketClassifier can ray-trace against the original
-    // meshes. Also wires mesh_handles to render slots so spawned entities
-    // render correctly. Returns false if procedural mesh registration fails.
-    bool InitMixedMultiCategory();
+    // Register the 3 built-in styles (KenneyDungeon, Ruins,
+    // ProceduralRoomPack) into WFCTileStyleRegistry on first call. Idempotent
+    // — subsequent calls are no-ops. The registry owns the Style objects for
+    // program lifetime; we hold raw pointers / indices, never the unique_ptrs.
+    void RegisterStylesIfNeeded();
+
+    // Build registry_+adjacency_ from active_styles_ via Compose, then wire
+    // per-tile mesh_handles to render slots. Dungeon-category tiles self-
+    // register rendering inside their Style (LoadFromDirectory already called
+    // RegisterMeshResource); Ruins/Primitive tiles are registered here via
+    // content::RegisterProceduralMesh + pipeline->RegisterMeshEntity.
+    bool InitFromActiveStyles();
     void ReseedSolver();
     void PumpSolverFrame();
     void DestroyAllSpawnedEntities();
@@ -115,14 +112,15 @@ private:
     void UpdateCameraFromInput();
     void PrintControls();
     void PrintGridState(const char* why);
-    // Phase C.1 Task 15: end-of-solve smoke check. Logs PASS/FAIL but never
-    // crashes (GUI binary keeps the window open on failure for inspection).
-    // Criteria: ≥ kMinCellsCollapsed cells, ≥ kMinDistinctTiles tile ids,
-    // and (MixedMulti mode only) ≥ kMinDistinctCategories categories.
+    // End-of-solve smoke check. Logs PASS/FAIL but never crashes (GUI binary
+    // keeps the window open on failure for inspection). Criteria:
+    // ≥ kMinCellsCollapsed cells, ≥ kMinDistinctTiles tile ids, and (when
+    // active_styles_ spans multiple categories) ≥ kMinDistinctCategories.
     void CheckSmokeAsserts();
-    // Phase C.1 Task 15: when max_generations is exhausted without a solve,
-    // narrow active_category_mask to Ruins only and reseed. Logs the
-    // degradation so the operator knows the solver gave up on the mixed set.
+    // When max_generations is exhausted without a solve, narrow
+    // active_category_mask to the first category in active_styles_ and
+    // reseed. Logs the degradation so the operator knows the solver gave up
+    // on the mixed set.
     void DegradeToSingleSet();
 
     std::unique_ptr<primal::graphics::rhi::RHIDeviceBase> device;
@@ -132,8 +130,10 @@ private:
     primal::graphics::RenderScene* scene = nullptr;
     primal::graphics::RenderView* view = nullptr;
 
-    // Asset catalog (owns std::strings backing WFCTile::name pointers).
-    primal::test::kenney::KenneyTileCatalog catalog_;
+    // Kenney asset directory (resolved at Initialize). Forwarded to
+    // KenneyDungeonStyle on first registration.
+    std::string kenney_dir_;
+    std::string kenney_colormap_;
 
     // WFC streaming state. Order matters on shutdown: solver holds raw
     // pointers into grid_/buf_/registry_/adjacency_, so solver_.reset() first.
@@ -143,19 +143,6 @@ private:
     std::unique_ptr<primal::graphics::wfc::WFCStepBuffer>     buf_;
     std::unique_ptr<primal::graphics::wfc::WFCSolver>         solver_;
     std::unique_ptr<primal::graphics::wfc::WFCSolveBudget>    budget_;
-
-    // Phase C.1 Task 14: MixedMulti mode owns procedural mesh assets so they
-    // outlive the solver. RHIMeshAsset is a value type (no refcount) — the
-    // vectors below keep the underlying buffers alive for the duration of the
-    // mode. mesh_lookup_ maps registry tile index → mesh pointer for the
-    // AutoSocketClassifier callback in InitMixedMultiCategory.
-    //
-    // ruins_meshes_ holds the 15 ruins procedural meshes; procedural_room_meshes_
-    // holds the 12 ProceduralRoomPack tiles. Order in mesh_lookup_ matches
-    // registry tile index (ruins first, then procedural).
-    std::vector<primal::graphics::rhi::RHIMeshAsset> ruins_meshes_;
-    std::vector<primal::graphics::rhi::RHIMeshAsset> procedural_room_meshes_;
-    std::vector<const primal::graphics::rhi::RHIMeshAsset*> mesh_lookup_;
 
     std::vector<primal::id::id_type> wfc_entity_ids_;
     std::vector<u32>                 wfc_mesh_slots_;
@@ -179,10 +166,27 @@ private:
     ObserverKind  observer_kind_{ObserverKind::MinEntropy};
     OriginPreset  origin_preset_{OriginPreset::Center};
 
-    // Phase C.1 Task 14: tile-source composition. M cycles between
-    // KenneyOnly and MixedMulti. Switching mode re-runs InitWFC (rebuilt
-    // registry/adjacency from scratch), not just ReseedSolver.
-    SolveMode     solve_mode_{SolveMode::KenneyOnly};
+    // Active style composition (indices into WFCTileStyleRegistry). Default
+    // = {0} (first registered style = KenneyDungeon). M cycles through the
+    // 4 presets below; WASM panel dropdown / Compose panel write via
+    // RequestCompose. Switching the composition re-runs InitFromActiveStyles
+    // (rebuilds registry_/adjacency_ from scratch), not just ReseedSolver.
+    //
+    // M preset cycle (registration order: 0=Kenney, 1=Ruins, 2=Pack):
+    //   {0}     → Kenney only
+    //   {1}     → Ruins only
+    //   {2}     → Pack only
+    //   {1,2}   → Ruins + Pack (multi-category mix)
+    std::vector<u32> active_styles_{0};
+
+    // OR of CategoryMaskFor(style->GetCategory()) over active_styles_.
+    // Populated by InitFromActiveStyles (via Compose's out_category_mask) and
+    // consumed by ReseedSolver when not degraded.
+    u64 active_category_mask_{0};
+
+    // Set true once RegisterStylesIfNeeded has run; prevents re-running on
+    // every composition change.
+    bool styles_registered_{false};
 
     // Pending actions set by the WASM panel bridge. Drained in
     // HandleGridEditKeys() — JS writes happen between frames so we just
@@ -193,19 +197,20 @@ private:
     u32  pending_grid_w_{0};
     u32  pending_grid_h_{0};
     u32  pending_grid_d_{0};
-    u32  pending_solve_mode_{0};
+    std::vector<u32> pending_compose_;
     bool has_pending_observer_{false};
     bool has_pending_origin_{false};
     bool has_pending_grid_w_{false};
     bool has_pending_grid_h_{false};
     bool has_pending_grid_d_{false};
-    bool has_pending_solve_mode_{false};
+    bool has_pending_compose_{false};
     bool pending_reseed_same_{false};
     bool pending_reseed_new_{false};
 
-    // Phase C.1 Task 15: when the solver exhausts max_generations on
-    // MixedMulti mode, the next PumpSolverFrame fires DegradeToSingleSet
-    // to fall back to a Ruins-only solve. Cleared on every ReseedSolver.
+    // When the solver exhausts max_generations on the active composition,
+    // the next PumpSolverFrame fires DegradeToSingleSet to fall back to a
+    // single-category solve (the first style's category). Cleared on every
+    // ReseedSolver.
     bool degraded_to_single_set_{false};
 
     primal::graphics::wfc::WFCGridCoord ComputeOrigin() const;
@@ -224,12 +229,13 @@ private:
     // the window (no hard assert).
     static constexpr u32 kMinCellsCollapsed = 100;
     static constexpr u32 kMinDistinctTiles  = 3;
-    // Phase C.1 Task 15: MixedMulti mode must show actual cross-category
-    // mixing (≥ 2 distinct WFCCategory values among collapsed cells). The
-    // threshold catches the silent failure mode where BuildFromClassifier
-    // prunes one category's tiles out of every cell, leaving a single-set
-    // solve dressed up as a multi-set one.
-    static constexpr u32 kMinDistinctCategories = 2;
+    // Multi-style compositions (active_styles_.size() > 1) must show actual
+    // cross-category mixing (≥ 2 distinct WFCCategory values among collapsed
+    // cells). The threshold catches the silent failure mode where
+    // BuildFromClassifier prunes one category's tiles out of every cell,
+    // leaving a single-set solve dressed up as a multi-set one. Single-style
+    // compositions are exempt (only 1 category exists in the registry).
+    static constexpr u32 kMinDistinctCategoriesMulti = 2;
 
     // FPS-style camera. Yaw spins around +Y, pitch clamps to ±~89° to avoid
     // flip. Forward/Right derived each frame from yaw/pitch for translation.

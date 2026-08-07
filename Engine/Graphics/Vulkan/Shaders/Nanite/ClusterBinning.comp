@@ -1,0 +1,73 @@
+#version 450 core
+
+// T4.6.5 part 17.2 — Vulkan port of EngineTest/shaders/ClusterBinning.metal
+// Entry point: cluster_binning_kernel (compute, workgroup_size=1, dispatch N
+// invocations — one per cluster).
+//
+// Bindings (mirror Metal [[buffer(N)]]):
+//   0: SSBO ClusterData[]     clusters
+//   1: UBO  BinningConfig      config
+//   2: SSBO BinData[]          bins
+//   3: SSBO uint               bin_counter (atomic)
+
+struct ClusterData {
+    uint cluster_id;
+    vec3 center;
+    float radius;
+    uint primitive_count;
+    uint vertex_offset;
+    uint index_offset;
+};
+
+struct BinningConfig {
+    uint bin_size;
+    uint max_bins;
+    uint max_clusters_per_bin;
+    uint enable_spatial_sorting;
+};
+
+struct BinData {
+    uint cluster_count;  // atomic
+    uint clusters[256];
+};
+
+layout(set = 0, binding = 0) readonly buffer ClusterBuffer {
+    ClusterData clusters[];
+} clusterData;
+
+layout(set = 0, binding = 1) uniform ConfigBlock {
+    BinningConfig config;
+} cfg;
+
+layout(set = 0, binding = 2) buffer BinBuffer {
+    BinData bins[];
+} binData;
+
+layout(set = 0, binding = 3) buffer CounterBuffer {
+    uint bin_counter;
+} counter;
+
+void cluster_binning_kernel() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= 10000u) return;
+
+    ClusterData c = clusterData.clusters[gid];
+
+    // Calculate screen space position
+    vec4 clip_pos = vec4(c.center, 1.0);
+    // TODO: Apply view-projection transform (matches Metal stub)
+
+    uint sx = uint(clip_pos.x);
+    uint sy = uint(clip_pos.y);
+    uint bin_index = (sy / cfg.config.bin_size) * (1920u / cfg.config.bin_size) +
+                     (sx / cfg.config.bin_size);
+
+    if (bin_index >= cfg.config.max_bins) return;
+
+    // Atomic increment cluster count for this bin
+    uint slot = atomicAdd(binData.bins[bin_index].cluster_count, 1u);
+    if (slot < cfg.config.max_clusters_per_bin) {
+        binData.bins[bin_index].clusters[slot] = c.cluster_id;
+    }
+}
+

@@ -122,6 +122,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Nodes/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Nodes/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Styles/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Styles/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/Nodes/*.h"

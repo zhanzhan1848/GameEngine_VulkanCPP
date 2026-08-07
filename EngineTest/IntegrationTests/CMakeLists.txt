@@ -634,6 +634,7 @@ if(APPLE)
         "Main.cpp"
         "Graphics/WFC/TestKenneyTilePreview.cpp"
         "Graphics/WFC/KenneyTileCatalog.cpp"
+        "Graphics/WFC/Styles/KenneyDungeonStyle.cpp"
         "MacKeyboard.mm"
         ${COMMON_HEADERS}
     )
@@ -641,6 +642,7 @@ if(APPLE)
     target_include_directories(TestKenneyTilePreview PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Styles
     )
     target_compile_definitions(TestKenneyTilePreview PRIVATE "TEST_KENNEY_TILE_PREVIEW=1" "TEST_RENDERER=0")
 

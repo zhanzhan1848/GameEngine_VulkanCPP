@@ -413,6 +413,7 @@ else()
             EngineTest/IntegrationTests/TestKenneyMain.cpp
             EngineTest/IntegrationTests/Graphics/WFC/TestKenneyTilePreview.cpp
             EngineTest/IntegrationTests/Graphics/WFC/KenneyTileCatalog.cpp
+            EngineTest/IntegrationTests/Graphics/WFC/Styles/KenneyDungeonStyle.cpp
             EngineTest/IntegrationTests/EmscriptenInput.cpp
         )
         target_include_directories(TestKenneyTilePreviewWASM PUBLIC
@@ -424,6 +425,7 @@ else()
             ${CMAKE_SOURCE_DIR}/third_party/stb
             ${CMAKE_SOURCE_DIR}/EngineTest
             ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests
+            ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/Graphics/WFC/Styles
         )
         target_compile_definitions(TestKenneyTilePreviewWASM PRIVATE
             ENABLE_WEBGPU=1
@@ -452,7 +454,7 @@ else()
         # the TestDawnWASM pattern.
         set(KENNEY_LINK_FLAGS "")
         string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_RUNTIME_METHODS=ccall,cwrap")
-        string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_FUNCTIONS=_main,_wfc_set_observer,_wfc_set_origin,_wfc_set_grid_w,_wfc_set_grid_h,_wfc_set_grid_d,_wfc_reseed_same,_wfc_reseed_new,_wfc_get_observer,_wfc_get_origin,_wfc_get_grid_w,_wfc_get_grid_h,_wfc_get_grid_d,_wfc_set_solve_mode,_wfc_get_solve_mode")
+        string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_FUNCTIONS=_main,_wfc_set_observer,_wfc_set_origin,_wfc_set_grid_w,_wfc_set_grid_h,_wfc_set_grid_d,_wfc_reseed_same,_wfc_reseed_new,_wfc_get_observer,_wfc_get_origin,_wfc_get_grid_w,_wfc_get_grid_h,_wfc_get_grid_d,_wfc_get_style_count,_wfc_get_style_name,_wfc_get_style_display_name,_wfc_get_active_style_count,_wfc_get_active_style,_wfc_compose")
 
         # Embed WGSL shaders — same pattern as TestDawnWASM. The Dawn
         # ShaderLoader's MEMFS fallback (ShaderLoader.h:2276) reads from

@@ -469,12 +469,23 @@
       </div>
 
       <h4>Tile Source</h4>
-      <select id="wfc-solve-mode-select" class="wfc-select">
-        <option value="0">Kenney Dungeon (8 tiles, 1 category)</option>
-        <option value="1">Mixed Multi (27 tiles, 2 categories)</option>
+      <select id="wfc-style-select" class="wfc-select">
+        <!-- Options populated by populateStyleDropdown() once the WASM
+             module is ready. The trailing option is a static "Compose…"
+             entry that toggles the multi-select panel below. -->
       </select>
       <div class="hint">
-        Mixed = Ruins (15) + ProceduralRoomPack (12). Auto-socket classifier.
+        Each style is a composable tile source. Select "Compose…" to
+        mix multiple styles in one solve.
+      </div>
+
+      <div id="wfc-compose-panel" style="display:none; margin-top: 8px;">
+        <div class="hint">Pick one or more styles to compose:</div>
+        <div id="wfc-compose-checkboxes"></div>
+        <div class="btn-row" style="margin-top: 6px;">
+          <button type="button" class="btn btn-reseed" id="wfc-compose-apply">Apply</button>
+          <button type="button" class="btn btn-reroll" id="wfc-compose-cancel">Cancel</button>
+        </div>
       </div>
 
       <h4>Grid Dimensions</h4>
@@ -642,15 +653,153 @@
           });
         }
 
-        // Tile source / solve-mode dropdown — switches between Kenney-only
-        // (Dungeon category) and Mixed Multi (Ruins + ProceduralRoomPack).
-        // Switching rebuilds registry+adjacency, so it's heavier than a reseed.
-        var modeSel = document.getElementById('wfc-solve-mode-select');
-        if (modeSel) {
-          modeSel.addEventListener('change', function() {
-            wfcCall('wfc_set_solve_mode', ['number'], [parseInt(modeSel.value)]);
+        // Tile source / style dropdown — populated from
+        // WFCTileStyleRegistry via wfc_get_style_count/_display_name.
+        // Selecting a real style index calls wfc_compose([index], 1) and
+        // hides the compose panel; selecting "Compose…" (-1) shows the
+        // multi-select panel instead.
+        var styleSel = document.getElementById('wfc-style-select');
+        var composePanel = document.getElementById('wfc-compose-panel');
+        var composeBoxes = document.getElementById('wfc-compose-checkboxes');
+
+        // Cached signature ("idx:name;...|activeCSV") to detect whether the
+        // dropdown / checkboxes actually need a rebuild. Skips the innerHTML
+        // rewrite when nothing changed so we don't interrupt a user's open
+        // select popup or checkbox interaction.
+        var lastStyleSig = '';
+
+        function readActiveSet() {
+          var active = {};
+          var n = Module.ccall('wfc_get_active_style_count', 'number', [], []);
+          for (var i = 0; i < n; ++i) {
+            active[Module.ccall('wfc_get_active_style',
+                                'number', ['number'], [i])] = true;
+          }
+          return active;
+        }
+
+        function populateStyleDropdown() {
+          if (!styleSel) return;
+          var count = Module.ccall('wfc_get_style_count', 'number', [], []);
+          var active = readActiveSet();
+          var activeCount = 0;
+          for (var k in active) { if (active.hasOwnProperty(k)) ++activeCount; }
+
+          // Build signature for this state; skip rebuild if unchanged.
+          var sig = '';
+          for (var i = 0; i < count; ++i) {
+            sig += i + ':' + Module.ccall('wfc_get_style_display_name',
+                                          'string', ['number'], [i]) + ';';
+          }
+          sig += '|';
+          for (var j = 0; j < count; ++j) {
+            if (active[j]) sig += j + ',';
+          }
+          if (sig === lastStyleSig) return;
+          lastStyleSig = sig;
+
+          styleSel.innerHTML = '';
+          for (var i = 0; i < count; ++i) {
+            var name = Module.ccall('wfc_get_style_display_name',
+                                    'string', ['number'], [i]);
+            var opt = document.createElement('option');
+            opt.value = String(i);
+            opt.textContent = name;
+            styleSel.appendChild(opt);
+          }
+          var compose = document.createElement('option');
+          compose.value = '-1';
+          compose.textContent = 'Compose…';
+          styleSel.appendChild(compose);
+
+          // If only one style is active, show it as selected. If multiple,
+          // show "Compose…" since the active set isn't a single dropdown entry.
+          if (activeCount === 1) {
+            for (var k = 0; k < count; ++k) {
+              if (active[k]) { styleSel.value = String(k); break; }
+            }
+          } else if (activeCount > 1) {
+            styleSel.value = '-1';
+          }
+
+          // Rebuild the compose panel checkboxes to match.
+          if (composeBoxes) {
+            composeBoxes.innerHTML = '';
+            for (var j = 0; j < count; ++j) {
+              var label = document.createElement('label');
+              label.style.display = 'block';
+              var cb = document.createElement('input');
+              cb.type = 'checkbox';
+              cb.value = String(j);
+              cb.checked = !!active[j];
+              label.appendChild(cb);
+              label.appendChild(document.createTextNode(' ' + Module.ccall(
+                  'wfc_get_style_display_name', 'string', ['number'], [j])));
+              composeBoxes.appendChild(label);
+            }
+          }
+        }
+
+        if (styleSel) {
+          styleSel.addEventListener('change', function() {
+            var v = parseInt(styleSel.value);
+            if (v === -1) {
+              if (composePanel) composePanel.style.display = '';
+            } else {
+              if (composePanel) composePanel.style.display = 'none';
+              // Single-style compose: allocate 1 i32 on the WASM heap and
+              // pass (ptr, count=1) to wfc_compose.
+              var ptr = Module._malloc(4);
+              if (ptr) {
+                Module.setValue(ptr, v, 'i32');
+                try {
+                  Module.ccall('wfc_compose', 'number',
+                               ['number', 'number'], [ptr, 1]);
+                } finally {
+                  Module._free(ptr);
+                }
+              }
+            }
           });
         }
+        var applyBtn = document.getElementById('wfc-compose-apply');
+        if (applyBtn) applyBtn.addEventListener('click', function() {
+          if (!composeBoxes) return;
+          var cbs = composeBoxes.querySelectorAll('input[type=checkbox]');
+          var picked = [];
+          for (var i = 0; i < cbs.length; ++i) {
+            if (cbs[i].checked) picked.push(parseInt(cbs[i].value));
+          }
+          if (picked.length === 0) return;
+          // Allocate i32 array on WASM heap, write indices, call wfc_compose.
+          var n = picked.length;
+          var ptr = Module._malloc(n * 4);
+          if (!ptr) return;
+          for (var i = 0; i < n; ++i) {
+            Module.setValue(ptr + i * 4, picked[i], 'i32');
+          }
+          try {
+            Module.ccall('wfc_compose', 'number',
+                         ['number', 'number'], [ptr, n]);
+          } finally {
+            Module._free(ptr);
+          }
+          if (composePanel) composePanel.style.display = 'none';
+        });
+        var cancelBtn = document.getElementById('wfc-compose-cancel');
+        if (cancelBtn) cancelBtn.addEventListener('click', function() {
+          if (composePanel) composePanel.style.display = 'none';
+          // Re-sync dropdown to the current active set.
+          populateStyleDropdown();
+        });
+
+        // Initial population — also called again after a successful compose
+        // so the dropdown reflects the active set.
+        populateStyleDropdown();
+
+        // Periodic re-sync (every ~500ms) so M-hotkey preset cycling on the
+        // C side keeps the dropdown + checkboxes in sync.
+        setInterval(populateStyleDropdown, 500);
 
         // Grid sliders — fire on change (release) to avoid reseed spam
         // while dragging. 'input' updates the value label live.
