@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.Editors.Geometry;
 
 namespace PrimalEditor_Avalonia.Native;
 
@@ -1253,6 +1254,17 @@ public static class NativeEngineBridge
     [DllImport("libContentTools", EntryPoint = "CookMesh", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern uint _CookMesh(IntPtr input, IntPtr output);
 
+    [DllImport("libContentTools", EntryPoint = "CookMeshWithSettings", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern uint _CookMeshWithSettings(
+        IntPtr input, IntPtr output,
+        float smoothing_angle,
+        [MarshalAs(UnmanagedType.U1)] bool calculate_normals,
+        [MarshalAs(UnmanagedType.U1)] bool calculate_tangents,
+        [MarshalAs(UnmanagedType.U1)] bool reverse_handedness,
+        [MarshalAs(UnmanagedType.U1)] bool import_embedded_textures,
+        [MarshalAs(UnmanagedType.U1)] bool import_animations,
+        [MarshalAs(UnmanagedType.U1)] bool coalesce_meshes);
+
     [DllImport("PrimalEngine", EntryPoint = "TickAssetSystem", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _TickAssetSystem();
 
@@ -1328,6 +1340,26 @@ public static class NativeEngineBridge
             var i = MarshalUtf8(input);
             var o = MarshalUtf8(output);
             return _CookMesh(i, o) != 0;
+        }
+        catch (Exception ex) { Logger.Error("CookMesh failed", ex); return false; }
+    }
+
+    public static bool CookMesh(string input, string output, GeometryImportSettings settings)
+    {
+        if (!_isLoaded) return false;
+        try
+        {
+            var i = MarshalUtf8(input);
+            var o = MarshalUtf8(output);
+            return _CookMeshWithSettings(
+                i, o,
+                settings.SmoothingAngle,
+                settings.CalculateNormals,
+                settings.CalculateTangents,
+                settings.ReverseHandedness,
+                settings.ImportEmbeddedTextures,
+                settings.ImportAnimations,
+                settings.CoalesceMeshes) != 0;
         }
         catch (Exception ex) { Logger.Error("CookMesh failed", ex); return false; }
     }
