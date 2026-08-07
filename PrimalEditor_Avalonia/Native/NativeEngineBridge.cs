@@ -1352,6 +1352,14 @@ public static class NativeEngineBridge
         IntPtr icon_buffer,   uint icon_capacity,   out uint out_icon_size,
         out TextureCookResult out_info);
 
+    [DllImport("libContentTools", EntryPoint = "CookTextureQuery", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern uint _CookTextureQuery(
+        IntPtr input,
+        uint dimension, float alpha_threshold,
+        uint mip_levels_setting, uint prefer_bc7,
+        uint output_format, uint compress,
+        out TextureCookResult out_info);
+
     [DllImport("PrimalEngine", EntryPoint = "TickAssetSystem", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _TickAssetSystem();
 
@@ -1452,9 +1460,9 @@ public static class NativeEngineBridge
     }
 
     /// <summary>
-    /// Cook a texture via ContentTools::CookTexture. Returns null on failure.
-    /// Caller owns the returned slices/icon byte arrays and may read them
-    /// synchronously; the unmanaged buffers are released before this method returns.
+    /// Cook a texture via ContentTools. Two-phase: first probe the
+    /// required buffer sizes (<c>CookTextureQuery</c>), then run
+    /// <c>CookTexture</c> with pre-sized buffers. Returns null on failure.
     /// </summary>
     public static CookedTexturePayload? CookTexture(
         string input, Editors.Texture.TextureImportSettings settings)
@@ -1462,43 +1470,67 @@ public static class NativeEngineBridge
         if (!_isLoaded || string.IsNullOrEmpty(input)) return null;
 
         IntPtr pInput = IntPtr.Zero;
-        IntPtr pSlices = IntPtr.Zero;
-        IntPtr pIcon = IntPtr.Zero;
         try
         {
             pInput = MarshalUtf8(input);
-            const int initialCapacity = 16 * 1024 * 1024; // 16 MiB; PNG cook output is well below this.
-            pSlices = Marshal.AllocHGlobal(initialCapacity);
-            pIcon = Marshal.AllocHGlobal(4 * 1024 * 1024); // 4 MiB; icon is small (BC decoded, low mip).
 
             var managed = new Editors.Texture.TextureImportSettings();
             PrimalEditor_Avalonia.Content.AssetImportSettingsExtensions.CopyImportSettings(settings, managed);
 
-            var info = new TextureCookResult();
-            var ok = _CookTexture(
+            var probeInfo = new TextureCookResult();
+            var probeOk = _CookTextureQuery(
                 pInput,
                 (uint)managed.Dimension, managed.AlphaThreshold,
                 (uint)managed.MipLevels, managed.PreferBC7 ? 1u : 0u,
                 (uint)managed.OutputFormat, managed.Compress ? 1u : 0u,
-                pSlices, (uint)initialCapacity, out uint slicesSize,
-                pIcon,   (uint)(4 * 1024 * 1024), out uint iconSize,
-                out info);
+                out probeInfo);
 
-            if (ok == 0 || info.ImportSucceeded == 0) return null;
+            if (probeOk == 0 || probeInfo.ImportSucceeded == 0)
+            {
+                return null;
+            }
 
-            var slices = new byte[slicesSize];
-            var icon   = new byte[iconSize];
-            if (slicesSize > 0) Marshal.Copy(pSlices, slices, 0, (int)slicesSize);
-            if (iconSize   > 0) Marshal.Copy(pIcon,   icon,   0, (int)iconSize);
+            uint neededSlices = probeInfo.SlicesSize;
+            uint neededIcon   = probeInfo.IconSize;
+            IntPtr pSlices = neededSlices > 0 ? Marshal.AllocHGlobal((int)neededSlices) : IntPtr.Zero;
+            IntPtr pIcon   = neededIcon   > 0 ? Marshal.AllocHGlobal((int)neededIcon)   : IntPtr.Zero;
+            try
+            {
+                var info = new TextureCookResult();
+                var ok = _CookTexture(
+                    pInput,
+                    (uint)managed.Dimension, managed.AlphaThreshold,
+                    (uint)managed.MipLevels, managed.PreferBC7 ? 1u : 0u,
+                    (uint)managed.OutputFormat, managed.Compress ? 1u : 0u,
+                    pSlices, neededSlices, out uint slicesSize,
+                    pIcon,   neededIcon,   out uint iconSize,
+                    out info);
 
-            return new CookedTexturePayload(
-                input,
-                slices, icon,
-                info.InfoWidth, info.InfoHeight, info.InfoArraySize, info.InfoMipLevels,
-                info.InfoFormat, info.InfoFlags,
-                info.SourcesLen, info.SourceCount,
-                info.SettingsDimension, info.SettingsMipLevels, info.SettingsAlphaThreshold,
-                info.SettingsPreferBc7, info.SettingsOutputFormat, info.SettingsCompress);
+                if (ok == 0 || info.ImportSucceeded == 0)
+                {
+                    Logger.Error($"CookTexture probe-vs-cook mismatch (probe ok={probeInfo.SlicesSize}/{probeInfo.IconSize}, cook ok={slicesSize}/{iconSize}, error={info.ImportError}).");
+                    return null;
+                }
+
+                var slices = new byte[slicesSize];
+                var icon   = new byte[iconSize];
+                if (slicesSize > 0) Marshal.Copy(pSlices, slices, 0, (int)slicesSize);
+                if (iconSize   > 0) Marshal.Copy(pIcon,   icon,   0, (int)iconSize);
+
+                return new CookedTexturePayload(
+                    input,
+                    slices, icon,
+                    info.InfoWidth, info.InfoHeight, info.InfoArraySize, info.InfoMipLevels,
+                    info.InfoFormat, info.InfoFlags,
+                    info.SourcesLen, info.SourceCount,
+                    info.SettingsDimension, info.SettingsMipLevels, info.SettingsAlphaThreshold,
+                    info.SettingsPreferBc7, info.SettingsOutputFormat, info.SettingsCompress);
+            }
+            finally
+            {
+                if (pSlices != IntPtr.Zero) Marshal.FreeHGlobal(pSlices);
+                if (pIcon   != IntPtr.Zero) Marshal.FreeHGlobal(pIcon);
+            }
         }
         catch (Exception ex)
         {
@@ -1508,8 +1540,6 @@ public static class NativeEngineBridge
         finally
         {
             if (pInput != IntPtr.Zero) Marshal.FreeHGlobal(pInput);
-            if (pSlices != IntPtr.Zero) Marshal.FreeHGlobal(pSlices);
-            if (pIcon != IntPtr.Zero) Marshal.FreeHGlobal(pIcon);
         }
     }
 

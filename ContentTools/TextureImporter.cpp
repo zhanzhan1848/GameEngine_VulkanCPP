@@ -817,6 +817,63 @@ namespace primal::tools
 		CoTaskMemFree(data.icon);
 		return 1;
 	}
+
+	/// Probe how many bytes the cook pipeline will produce for the given
+	/// `input` and `settings`. Runs the full cook and discards the buffer,
+	/// reporting only the produced sizes via `out_info`. Call this before
+	/// CookTexture() to size the caller's destination buffers correctly.
+	EDITOR_INTERFACE u32 CookTextureQuery(
+		const char* input,
+		u32 dimension, f32 alpha_threshold,
+		u32 mip_levels_setting, u32 prefer_bc7,
+		u32 output_format, u32 compress,
+		cook_result* out_info)
+	{
+		if (!input || !out_info) return 0;
+		std::memset(out_info, 0, sizeof(cook_result));
+
+		texture_data data{};
+		data.import_settings.dimension = dimension;
+		data.import_settings.mip_levels = mip_levels_setting;
+		data.import_settings.alpha_threshold = alpha_threshold;
+		data.import_settings.prefer_bc7 = prefer_bc7;
+		data.import_settings.output_format = output_format;
+		data.import_settings.compress = compress;
+		data.import_settings.sources = const_cast<char*>(input);
+		data.import_settings.source_count = 1;
+
+		Import(&data);
+
+		out_info->info_width          = data.info.width;
+		out_info->info_height         = data.info.height;
+		out_info->info_array_size     = data.info.array_size;
+		out_info->info_mip_levels     = data.info.mip_levels;
+		out_info->info_format         = data.info.format;
+		out_info->info_flags          = data.info.flags;
+		out_info->import_error        = data.info.import_error;
+		out_info->sources_len         = data.import_settings.sources ? (u32)std::strlen(data.import_settings.sources) : 0;
+		out_info->source_count        = data.import_settings.source_count;
+		out_info->settings_dimension  = data.import_settings.dimension;
+		out_info->settings_mip_levels = data.import_settings.mip_levels;
+		out_info->settings_alpha_threshold = data.import_settings.alpha_threshold;
+		out_info->settings_prefer_bc7 = data.import_settings.prefer_bc7;
+		out_info->settings_output_format = data.import_settings.output_format;
+		out_info->settings_compress   = data.import_settings.compress;
+		out_info->slices_size         = data.subresource_size;
+		out_info->icon_size           = data.icon_size;
+
+		if (data.info.import_error != 0)
+		{
+			CoTaskMemFree(data.subresource_data);
+			CoTaskMemFree(data.icon);
+			return 0;
+		}
+
+		out_info->import_succeeded = 1;
+		CoTaskMemFree(data.subresource_data);
+		CoTaskMemFree(data.icon);
+		return 1;
+	}
 }
 #elif defined(__clang__)
 
@@ -2745,6 +2802,63 @@ namespace primal::tools
 		out_info->settings_compress   = data.import_settings.compress;
 		out_info->import_succeeded    = 1;
 
+		std::free(data.subresource_data);
+		std::free(data.icon);
+		return 1;
+	}
+
+	/// Probe how many bytes the cook pipeline will produce for the given
+	/// `input` and `settings`. Runs the full cook and discards the buffer,
+	/// reporting only the produced sizes via `out_info`. Call this before
+	/// CookTexture() to size the caller's destination buffers correctly.
+	EDITOR_INTERFACE u32 CookTextureQuery(
+		const char* input,
+		u32 dimension, f32 alpha_threshold,
+		u32 mip_levels_setting, u32 prefer_bc7,
+		u32 output_format, u32 compress,
+		cook_result* out_info)
+	{
+		if (!input || !out_info) return 0;
+		std::memset(out_info, 0, sizeof(cook_result));
+
+		texture_data data{};
+		data.import_settings.dimension = dimension;
+		data.import_settings.mip_levels = mip_levels_setting;
+		data.import_settings.alpha_threshold = alpha_threshold;
+		data.import_settings.prefer_bc7 = prefer_bc7;
+		data.import_settings.output_format = output_format;
+		data.import_settings.compress = compress;
+		data.import_settings.sources = const_cast<char*>(input);
+		data.import_settings.source_count = 1;
+
+		Import(&data);
+
+		out_info->info_width          = data.info.width;
+		out_info->info_height         = data.info.height;
+		out_info->info_array_size     = data.info.array_size;
+		out_info->info_mip_levels     = data.info.mip_levels;
+		out_info->info_format         = data.info.format;
+		out_info->info_flags          = data.info.flags;
+		out_info->import_error        = data.info.import_error;
+		out_info->sources_len         = data.import_settings.sources ? (u32)std::strlen(data.import_settings.sources) : 0;
+		out_info->source_count        = data.import_settings.source_count;
+		out_info->settings_dimension  = data.import_settings.dimension;
+		out_info->settings_mip_levels = data.import_settings.mip_levels;
+		out_info->settings_alpha_threshold = data.import_settings.alpha_threshold;
+		out_info->settings_prefer_bc7 = data.import_settings.prefer_bc7;
+		out_info->settings_output_format = data.import_settings.output_format;
+		out_info->settings_compress   = data.import_settings.compress;
+		out_info->slices_size         = data.subresource_size;
+		out_info->icon_size           = data.icon_size;
+
+		if (data.info.import_error != 0)
+		{
+			std::free(data.subresource_data);
+			std::free(data.icon);
+			return 0;
+		}
+
+		out_info->import_succeeded = 1;
 		std::free(data.subresource_data);
 		std::free(data.icon);
 		return 1;
