@@ -7,7 +7,8 @@ namespace PrimalEditor_Avalonia.Content;
 public static class ContentHelper
 {
     private static readonly string[] ImageExts  = {
-        ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".dds", ".hdr", ".exr", ".ktx", ".ktx2"
+        ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".dds", ".hdr", ".exr", ".ktx", ".ktx2",
+        ".texture"
     };
     private static readonly string[] MeshExts   = {
         ".fbx", ".obj", ".gltf", ".glb", ".dae", ".blend", ".mesh"
