@@ -654,6 +654,26 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     const u32 safeInstanceCount = std::min(instanceCount, config_.max_instances_per_dispatch);
     const u32 safeClusterCount = std::min(clusterCount, config_.max_clusters_per_dispatch);
 
+    // T4.6.5 part 35.4 diagnostic: capture cull-time state every 30 frames to
+    // narrow down "pillars/cloth missing in mid-frustum" symptom. Logs only on
+    // Vulkan to avoid spam on Metal/Dawn where the issue isn't reported.
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        static u32 diagCounter = 0;
+        if ((diagCounter++ % 30) == 0) {
+            const u32 totalMeshlets = gpuDrawPipeline_ ? gpuDrawPipeline_->GetTotalMeshletCount() : 0u;
+            const bool hzbReady = hzb_system_ ? hzb_system_->IsReady() : false;
+            std::cerr << "[CullDiag] frame=" << execute_call_count_
+                      << " inst=" << safeInstanceCount << "/" << instanceCount
+                      << " cluster=" << safeClusterCount << "/" << clusterCount
+                      << " occ=" << (config_.enable_occlusion_culling ? 1 : 0)
+                      << " force_pass=" << (force_pass_all_debug_ ? 1 : 0)
+                      << " totalMeshlet=" << totalMeshlets
+                      << " hzbReady=" << (hzbReady ? 1 : 0)
+                      << " hzbBound=" << (hzb_bindings_updated_ ? 1 : 0)
+                      << std::endl;
+        }
+    }
+
     if (execute_call_count_ == 1) {
         // std::cout << "[GPUCulling] Camera parameters:" << std::endl;
         // std::cout << "  Camera position: " << cameraPos.x << ", " << cameraPos.y << ", " << cameraPos.z << std::endl;
