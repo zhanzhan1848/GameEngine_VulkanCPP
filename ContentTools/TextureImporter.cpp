@@ -746,6 +746,20 @@ namespace primal::tools
 		u32 import_succeeded{ 0 };
 	};
 
+	// Maps the managed editor TextureFormat enum (0=R8G8B8A8_UNORM,1=BC7,
+	// 2=BC1,3=BC3,4=BC5) to the native DXGI_FORMAT the cook pipeline expects.
+	static inline u32 map_managed_output_format(u32 managed)
+	{
+		static constexpr u32 map[] = {
+			DXGI_FORMAT_R8G8B8A8_UNORM,
+			DXGI_FORMAT_BC7_UNORM,
+			DXGI_FORMAT_BC1_UNORM,
+			DXGI_FORMAT_BC3_UNORM,
+			DXGI_FORMAT_BC5_UNORM,
+		};
+		return managed < 5 ? map[managed] : DXGI_FORMAT_UNKNOWN;
+	}
+
 	/// Reads `input` (PNG / TGA / HDR / DDS), runs the full settings-driven
 	/// cook pipeline, and writes the cooked slices + icon into caller-
 	/// supplied buffers. Returns 1 on success, 0 on any failure.
@@ -758,7 +772,7 @@ namespace primal::tools
 		u8* icon_buffer,   u32 icon_capacity,   u32* out_icon_size,
 		cook_result* out_info)
 	{
-		if (!input || !slices_buffer || !out_slices_size || !icon_buffer || !out_icon_size || !out_info)
+		if (!input || !slices_buffer || !out_slices_size || !out_icon_size || !out_info)
 			return 0;
 
 		*out_slices_size = 0;
@@ -770,7 +784,7 @@ namespace primal::tools
 		data.import_settings.mip_levels = mip_levels_setting;
 		data.import_settings.alpha_threshold = alpha_threshold;
 		data.import_settings.prefer_bc7 = prefer_bc7;
-		data.import_settings.output_format = output_format;
+		data.import_settings.output_format = map_managed_output_format(output_format);
 		data.import_settings.compress = compress;
 		data.import_settings.sources = const_cast<char*>(input);
 		data.import_settings.source_count = 1;
@@ -786,6 +800,7 @@ namespace primal::tools
 
 		if (data.icon && data.icon_size > 0)
 		{
+			if (!icon_buffer) return 0;
 			if (data.icon_size > icon_capacity)
 			{
 				CoTaskMemFree(data.subresource_data);
@@ -837,7 +852,7 @@ namespace primal::tools
 		data.import_settings.mip_levels = mip_levels_setting;
 		data.import_settings.alpha_threshold = alpha_threshold;
 		data.import_settings.prefer_bc7 = prefer_bc7;
-		data.import_settings.output_format = output_format;
+		data.import_settings.output_format = map_managed_output_format(output_format);
 		data.import_settings.compress = compress;
 		data.import_settings.sources = const_cast<char*>(input);
 		data.import_settings.source_count = 1;
@@ -1732,16 +1747,17 @@ namespace primal::tools
 			CGImageRef image = CGImageSourceCreateImageAtIndex(imageSource, 0, NULL);
 			CFRelease(imageSource);
 
-			u64 bpp = CGImageGetBitsPerPixel(image);
-			if (bpp != 32) {
-				data->info.import_error = import_error::size_mismatch;
-				return {};
-			}
-			
 			if (!image) {
 				data->info.import_error = import_error::load;
 				return {};
 			}
+
+			// CGContextDrawImage normalizes any source pixel format (8-bit
+			// grayscale, 16-bit RGBA, etc.) into the destination buffer
+			// we create below (8-bit per component, 4 channels = 32bpp),
+			// so we accept any source bitsPerPixel here.
+			u64 bpp = CGImageGetBitsPerPixel(image);
+			(void)bpp;
 
 			// 获取图像尺寸和属性
 			u64 width = CGImageGetWidth(image);
@@ -2118,6 +2134,18 @@ namespace primal::tools
 			return output_format;
 		}
 
+		// Resolves the astcenc CLI binary. Prefers the PRIMAL_ASTCENC_PATH
+		// env var (set it to the built binary), then falls back to a bare
+		// "astcenc-neon" so the shell PATH lookup applies.
+		std::string get_astcenc_path()
+		{
+			if (const char* env = std::getenv("PRIMAL_ASTCENC_PATH"))
+			{
+				if (env && *env) return std::string(env);
+			}
+			return "astcenc-neon";
+		}
+
 		/**
 		 * @brief 使用astcenc库压缩纹理
 		 * @param src 源图像
@@ -2220,8 +2248,8 @@ namespace primal::tools
 				colorProfile = " -cl";
 			}
 			
-			std::string cmd = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCP/third_party/astc-encoder/build/Source/astcenc-neon "  + colorProfile + " " 
-				+ tempInputPath + " " + tempOutputPath + " " + 
+			std::string cmd = get_astcenc_path() + " " + colorProfile + " "
+				+ tempInputPath + " " + tempOutputPath + " " +
 				blockSize + " " + quality;
 			
 			// 执行命令
@@ -2439,7 +2467,7 @@ namespace primal::tools
 			}
 			
 			// astcenc解压缩命令
-			std::string cmd = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/astc-encoder/build/Source/astcenc-neon "  + colorProfile + " " + tempInputPath + " " + tempOutputPath;
+			std::string cmd = get_astcenc_path() + " " + colorProfile + " " + tempInputPath + " " + tempOutputPath;
 			
 			// 执行命令
 			int result = system(cmd.c_str());
@@ -2735,6 +2763,22 @@ namespace primal::tools
 		u32 import_succeeded{ 0 };
 	};
 
+	// Maps the managed editor TextureFormat enum (0=R8G8B8A8_UNORM,1=BC7,
+	// 2=BC1,3=BC3,4=BC5) to the native MTLPixelFormat the cook pipeline
+	// expects. Metal has no BC block-compression; astcenc handles ASTC,
+	// so every block-compressed request maps to ASTC_4x4_LDR.
+	static inline u32 map_managed_output_format(u32 managed)
+	{
+		static constexpr u32 map[] = {
+			tools::MTLPixelFormatRGBA8Unorm,
+			tools::MTLPixelFormatASTC_4x4_LDR,
+			tools::MTLPixelFormatASTC_4x4_LDR,
+			tools::MTLPixelFormatASTC_4x4_LDR,
+			tools::MTLPixelFormatASTC_4x4_LDR,
+		};
+		return managed < 5 ? map[managed] : 0;
+	}
+
 	/// Reads `input` (PNG / TGA / HDR / DDS), runs the full settings-driven
 	/// cook pipeline, and writes the cooked slices + icon into caller-
 	/// supplied buffers. Returns 1 on success, 0 on any failure.
@@ -2747,7 +2791,7 @@ namespace primal::tools
 		u8* icon_buffer,   u32 icon_capacity,   u32* out_icon_size,
 		cook_result* out_info)
 	{
-		if (!input || !slices_buffer || !out_slices_size || !icon_buffer || !out_icon_size || !out_info)
+		if (!input || !slices_buffer || !out_slices_size || !out_icon_size || !out_info)
 			return 0;
 
 		*out_slices_size = 0;
@@ -2759,22 +2803,23 @@ namespace primal::tools
 		data.import_settings.mip_levels = mip_levels_setting;
 		data.import_settings.alpha_threshold = alpha_threshold;
 		data.import_settings.prefer_bc7 = prefer_bc7;
-		data.import_settings.output_format = output_format;
+		data.import_settings.output_format = map_managed_output_format(output_format);
 		data.import_settings.compress = compress;
 		data.import_settings.sources = const_cast<char*>(input);
 		data.import_settings.source_count = 1;
 
 		Import(&data);
 
-		if (data.info.import_error != 0) return 0;
-		if (!data.subresource_data || data.subresource_size == 0) return 0;
-		if (data.subresource_size > slices_capacity) return 0;
+		if (data.info.import_error != 0) { return 0; }
+		if (!data.subresource_data || data.subresource_size == 0) { return 0; }
+		if (data.subresource_size > slices_capacity) { return 0; }
 
 		std::memcpy(slices_buffer, data.subresource_data, data.subresource_size);
 		*out_slices_size = data.subresource_size;
 
 		if (data.icon && data.icon_size > 0)
 		{
+			if (!icon_buffer) return 0;
 			if (data.icon_size > icon_capacity)
 			{
 				std::free(data.subresource_data);
@@ -2826,7 +2871,7 @@ namespace primal::tools
 		data.import_settings.mip_levels = mip_levels_setting;
 		data.import_settings.alpha_threshold = alpha_threshold;
 		data.import_settings.prefer_bc7 = prefer_bc7;
-		data.import_settings.output_format = output_format;
+		data.import_settings.output_format = map_managed_output_format(output_format);
 		data.import_settings.compress = compress;
 		data.import_settings.sources = const_cast<char*>(input);
 		data.import_settings.source_count = 1;
