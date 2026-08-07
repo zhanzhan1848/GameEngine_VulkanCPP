@@ -141,6 +141,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     contenttools_remesh
     contenttools_subdivide
     contenttools_uvatlas
+    contenttools_lod
+    contenttools_meshlet
+    contenttools_collision
 )
 
 # 平台特定设置

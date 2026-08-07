@@ -140,3 +140,84 @@ add_test(NAME TestUvAtlas COMMAND TestUvAtlas)
 set_target_properties(TestUvAtlas PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- M7 lod module test ---------------------------------------------------
+
+add_executable(TestLod TestLod.cpp)
+
+target_include_directories(TestLod PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestLod PRIVATE ContentTools contenttools_lod)
+
+target_compile_options(TestLod PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestLod COMMAND TestLod)
+set_target_properties(TestLod PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)
+
+# ---- M7 meshlet module test -----------------------------------------------
+
+add_executable(TestMeshlet TestMeshlet.cpp)
+
+target_include_directories(TestMeshlet PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestMeshlet PRIVATE ContentTools contenttools_meshlet)
+
+target_compile_options(TestMeshlet PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestMeshlet COMMAND TestMeshlet)
+set_target_properties(TestMeshlet PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)
+
+# ---- M7 collision module test ---------------------------------------------
+
+add_executable(TestCollision TestCollision.cpp)
+
+target_include_directories(TestCollision PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestCollision PRIVATE ContentTools contenttools_collision)
+
+target_compile_options(TestCollision PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestCollision COMMAND TestCollision)
+set_target_properties(TestCollision PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)
