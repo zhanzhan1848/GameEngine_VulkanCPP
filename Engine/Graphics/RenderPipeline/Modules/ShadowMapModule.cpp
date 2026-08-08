@@ -70,20 +70,42 @@ void ShadowMapModule::Shutdown() {
     for (int b = 0; b < 3; ++b)
         for (int c = 0; c < 2; ++c)
             shadow_cache_valid_[b][c] = false;
+
+    // T4.6.5 part 40: sampler cleanup. Other resources (pipeline/layout/DS/
+    // CB/texture) are owned by gpu_draw_pipeline_ via ShutdownShadowResources
+    // or by the device GC; sampler is module-local.
+    if (shadow_filter_sampler_ != handles::INVALID_SAMPLER && device_) {
+        device_->DestroySampler(shadow_filter_sampler_);
+        shadow_filter_sampler_ = handles::INVALID_SAMPLER;
+    }
 }
 
 bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) {
-    if (!device_ || shadow_filter_shader == handles::INVALID_SHADER) return false;
+    if (!device_) {
+        std::cerr << "[ShadowMapModule] InitializeShadowFilter: device is null" << std::endl;
+        return false;
+    }
+    if (shadow_filter_shader == handles::INVALID_SHADER) {
+        std::cerr << "[ShadowMapModule] InitializeShadowFilter: shadow_filter_shader is INVALID_SHADER "
+                  << "(real shadows disabled — DeferredLighting binding 6 falls back to 1x1 white)"
+                  << std::endl;
+        return false;
+    }
 
+    // T4.6.5 part 40: layout mirrors ShadowFilter.comp bindings 0-6. The
+    // previous layout declared binding 0 twice (UBO + SampledImage overlap)
+    // which is invalid Vulkan and silently masked by InitializeShadowFilter
+    // never running until Part 40.
     DescriptorSetLayoutBinding bindings[] = {
-        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
-        {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-        {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-        {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-        {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
-        {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // Params UBO
+        {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadowMap0
+        {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadowMap1
+        {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // visibilityOut
+        {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normalTex
+        {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depthTex
+        {6, DescriptorType::Sampler,       1, ShaderStage::Compute, nullptr},  // linearSampler
     };
-    shadow_filter_set_layout_ = device_->CreateDescriptorSetLayout({6, bindings});
+    shadow_filter_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
     shadow_filter_layout_ = device_->CreatePipelineLayout({1, &shadow_filter_set_layout_});
 
     for (int i = 0; i < 3; ++i)
@@ -106,8 +128,24 @@ bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) 
     for (int i = 0; i < 3; ++i) {
         BufferDesc cbDesc{};
         cbDesc.size = 512;
+        cbDesc.type = BufferType::Constant;  // T4.6.5 part 40: UBO usage flag
         cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         shadow_filter_cb_[i] = device_->CreateBuffer(cbDesc);
+    }
+
+    // T4.6.5 part 40: linear sampler for all ShadowFilter texture samples.
+    // comparisonFunc MUST be Never — VulkanSampler treats != Never as
+    // compareEnable=TRUE which produces a comparison sampler incompatible with
+    // plain SampledImage (per memory vulkan-sampler-comparison-default-trap.md).
+    SamplerDesc samplerDesc{};
+    samplerDesc.addressU = TextureAddressMode::Clamp;
+    samplerDesc.addressV = TextureAddressMode::Clamp;
+    samplerDesc.addressW = TextureAddressMode::Clamp;
+    samplerDesc.comparisonFunc = ComparisonFunc::Never;
+    shadow_filter_sampler_ = device_->CreateSampler(samplerDesc);
+    if (shadow_filter_sampler_ == handles::INVALID_SAMPLER) {
+        std::cerr << "[ShadowMapModule] CreateSampler failed" << std::endl;
+        return false;
     }
     return true;
 }
@@ -356,13 +394,14 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
 
                 DescData params[] = {
                     {0, DescriptorType::UniformBuffer, shadow_filter_cb_[cbIdx]},
-                    {0, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()},
                     {1, DescriptorType::SampledImage, sm0},
                     {2, DescriptorType::SampledImage, sm1},
                     {3, DescriptorType::StorageImage, shadow_visibility_tex_},
                     {4, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferNormal()},
+                    {5, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()},
+                    {6, DescriptorType::Sampler, shadow_filter_sampler_},
                 };
-                UpdateDesc(device_, shadow_filter_ds_[cbIdx], params, 6);
+                UpdateDesc(device_, shadow_filter_ds_[cbIdx], params, 7);
 
                 cmd->BindComputePipeline(shadow_filter_pipeline_);
                 const DescriptorSetHandle sets[] = { shadow_filter_ds_[cbIdx] };

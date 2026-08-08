@@ -178,5 +178,16 @@ if [ -f "$src" ]; then
     else echo "FAIL  Nanite/VisibilityBufferResolve.comp"; fi
 else echo "MISS  Nanite/VisibilityBufferResolve.comp (skipped)"; fi
 
+# T4.6.5 part 40: ShadowFilter (compute, entry main) — half-res visibility
+# producer consumed by DeferredLighting binding 6. Mirrors
+# EngineTest/shaders/ShadowFilter.metal:94-148.
+src="$DEST_DIR/ShadowFilter.comp"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/ShadowFilter.spv"
+    if glslangValidator -V --source-entrypoint main -e main "$src" -o "$out" 2>/dev/null; then
+        sz=$(stat -f %z "$out"); printf "OK    ShadowFilter.spv                       (%d bytes)\n" "$sz"
+    else echo "FAIL  ShadowFilter.comp"; fi
+else echo "MISS  ShadowFilter.comp (skipped)"; fi
+
 echo
 echo "Done."

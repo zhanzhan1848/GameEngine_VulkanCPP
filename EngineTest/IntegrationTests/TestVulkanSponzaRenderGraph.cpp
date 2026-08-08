@@ -343,6 +343,14 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
         std::cerr << "[Part30.4] Missing Blit SPIR-V" << std::endl;
         return false;
     }
+    // T4.6.5 part 40: ShadowFilter compute shader — half-res visibility
+    // producer consumed by DeferredLighting binding 6. Without this,
+    // shadow_visibility_tex_ stays INVALID and DeferredLighting falls back to
+    // 1x1 white (no shadows).
+    auto shadowFilterBytes = loadSpv("Engine/Graphics/Vulkan/shaders/ShadowFilter.spv");
+    if (shadowFilterBytes.empty()) {
+        std::cerr << "[Part40] Missing ShadowFilter SPIR-V — shadows disabled" << std::endl;
+    }
 
     ShaderHandle deferredVs = device_->CreateShader(
         deferredVsBytes.data(), deferredVsBytes.size(), ShaderStage::Vertex, "main");
@@ -352,12 +360,17 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
         blitVsBytes.data(), blitVsBytes.size(), ShaderStage::Vertex, "main");
     ShaderHandle blitFs = device_->CreateShader(
         blitFsBytes.data(), blitFsBytes.size(), ShaderStage::Pixel, "main");
+    ShaderHandle shadowFilter = shadowFilterBytes.empty() ? handles::INVALID_SHADER
+        : device_->CreateShader(
+            shadowFilterBytes.data(), shadowFilterBytes.size(),
+            ShaderStage::Compute, "main");
 
     StandardRenderPipeline::ShaderHandles handles;
     handles.deferred_vs = deferredVs;
     handles.deferred_ps = deferredFs;
     handles.blit_vs = blitVs;
     handles.blit_ps = blitFs;
+    handles.shadow_filter = shadowFilter;
     pipeline_->SetShaderHandles(handles);
 
     // Default LumenConfig disables most Lumen modules. Triggers

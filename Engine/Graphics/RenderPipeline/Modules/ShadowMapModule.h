@@ -74,6 +74,10 @@ private:
         rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE
     };
+    // T4.6.5 part 40: linear sampler shared across all ShadowFilter texture
+    // samples (shadowMap0/1, normalTex, depthTex). Sampler binding lives at
+    // descriptor slot 6 (see InitializeShadowFilter layout).
+    rhi::SamplerHandle shadow_filter_sampler_{rhi::handles::INVALID_SAMPLER};
 };
 
 } // namespace primal::graphics
