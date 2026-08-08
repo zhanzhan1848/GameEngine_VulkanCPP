@@ -275,3 +275,32 @@ add_test(NAME TestAssetPipeline COMMAND TestAssetPipeline)
 set_target_properties(TestAssetPipeline PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- M9 SceneBlobReader test ----------------------------------------------
+# Verifies the reader correctly skips the pack_data scene wrapper
+# (scene_name + materials + lod_group wrapper) before walking meshes.
+
+add_executable(TestSceneBlobReader TestSceneBlobReader.cpp)
+
+target_include_directories(TestSceneBlobReader PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestSceneBlobReader PRIVATE ContentTools contenttools_pipeline)
+
+target_compile_options(TestSceneBlobReader PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestSceneBlobReader COMMAND TestSceneBlobReader)
+set_target_properties(TestSceneBlobReader PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)
