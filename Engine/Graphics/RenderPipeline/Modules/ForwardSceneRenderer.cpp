@@ -2214,6 +2214,13 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         }
     }
 
+    // Pass 4c: Particles (T4.6.5 part 38). Blend additive particles over the
+    // deferred-lit scene before Blit. ParticlePass internally gates on
+    // active_count==0 (ParticlePass.cpp:336), so zero-particle frames are no-op.
+#ifndef DISABLE_PARTICLE_SYSTEM
+    RenderParticlePass(cmd, idx, view_matrix, proj_matrix);
+#endif
+
     // Pass 5: Blit to backbuffer
     {
         DescData params[] = {
@@ -2287,5 +2294,35 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->EndRenderPass();
     }
 }
+
+// T4.6.5 part 38: ParticlePass runtime wiring. Blends additive particles over
+// the deferred-lit scene (lighting_output_[idx]) before Pass 5 Blit. Caller
+// gates by check that ParticleSystem has emitted at least one particle this
+// frame; ParticlePass::execute additionally early-returns on active_count==0.
+// ParticlePass does NOT begin its own render pass — caller wraps it.
+#ifndef DISABLE_PARTICLE_SYSTEM
+void ForwardSceneRenderer::RenderParticlePass(rhi::RHICommandBuffer* cmd, u32 frame_index,
+                                              const math::m4x4& view_matrix,
+                                              const math::m4x4& proj_matrix) {
+    if (!initialized_) return;
+    u32 idx = frame_index % 3;
+
+    RenderPassDesc rpDesc{};
+    rpDesc.colorAttachments.resize(1);
+    rpDesc.colorAttachments[0].texture = lighting_output_[idx];
+    rpDesc.colorAttachments[0].loadOp  = LoadAction::Load;
+    rpDesc.colorAttachments[0].storeOp = StoreAction::Store;
+    rpDesc.depthAttachment.texture  = gbuffer_depth_[idx];
+    rpDesc.depthAttachment.loadOp   = LoadAction::Load;
+    rpDesc.depthAttachment.storeOp  = StoreAction::DontCare;
+    cmd->BeginRenderPass(rpDesc);
+    cmd->SetViewport({{0, 0}, {(float)render_width_, (float)render_height_}, 0, 1});
+    cmd->SetScissor ({{0, 0}, {render_width_, render_height_}});
+
+    particle_pass_.execute(cmd, frame_index, view_matrix, proj_matrix);
+
+    cmd->EndRenderPass();
+}
+#endif // DISABLE_PARTICLE_SYSTEM
 
 } // namespace primal::graphics

@@ -202,6 +202,46 @@ bool TestVulkanSponzaRenderGraph::Initialize() {
         std::cerr << "[Part30.4] LoadSponzaScene failed" << std::endl;
         return false;
     }
+    // T4.6.5 part 37: Tier 5 IBL (sunset.hdr environment). Failure is non-fatal —
+    // pipeline falls back to flat 0.03*albedo ambient (DeferredLightingModule
+    // binds a 1x1 white fallback when IBL handles are INVALID). Test still
+    // passes without IBL; visible fidelity is degraded.
+    if (!InitializeIBL()) {
+        std::cerr << "[Part37] InitializeIBL failed — continuing without IBL" << std::endl;
+    }
+
+    // T4.6.5 part 38: ParticleSystem emitter. Config-driven (no per-frame
+    // emit() call); ParticleSystem::update(dt) advances the simulation, then
+    // ForwardSceneRenderer::RenderParticlePass (Pass 4c) drains the frame pool.
+    // Failure is non-fatal — test still renders Sponza without particles.
+#ifndef DISABLE_PARTICLE_SYSTEM
+    if (primal::particles::initialize()) {
+        primal::particles::emitter_config cfg;
+        cfg.max_particles   = 5000;
+        cfg.spawn_rate      = 50.0f;            // particles/sec
+        cfg.lifetime_min    = 1.5f;
+        cfg.lifetime_max    = 3.0f;
+        cfg.velocity_min    = primal::math::v3{-0.5f, 0.5f, -0.5f};
+        cfg.velocity_max    = primal::math::v3{ 0.5f, 2.0f,  0.5f};
+        cfg.color_start     = primal::math::v4{1.0f, 0.8f, 0.3f, 1.0f};  // warm yellow
+        cfg.color_end       = primal::math::v4{0.9f, 0.2f, 0.1f, 0.0f};  // fade to red
+        cfg.scale_min       = primal::math::v2{0.3f, 0.3f};
+        cfg.scale_max       = primal::math::v2{0.8f, 0.8f};
+        cfg.gravity         = primal::math::v3{0.0f, -3.0f, 0.0f};       // gentle fall
+        cfg.drag            = 0.2f;
+        cfg.blending        = primal::particles::blend_mode::additive;
+        cfg.depth_write     = false;
+        particleEmitter_    = primal::particles::create_emitter(cfg);
+        if (particleEmitter_ != primal::particles::invalid_id) {
+            particlesInitialized_ = true;
+            std::cout << "[Part38] particle emitter created (spawn_rate=50/s, max=5000)" << std::endl;
+        } else {
+            std::cerr << "[Part38] create_emitter returned invalid_id" << std::endl;
+        }
+    } else {
+        std::cerr << "[Part38] particles::initialize failed — continuing without particles" << std::endl;
+    }
+#endif
 
     std::cout << "[Part30.4] Initialization complete — window open, close it to exit."
               << std::endl;
@@ -981,6 +1021,36 @@ void TestVulkanSponzaRenderGraph::Run() {
     view_.UpdateFrustum();
     view_.Cull(scene_);
 
+    // T4.6.5 part 38: advance particle simulation each frame. dt=1/60 matches
+    // the CFRunLoopTimer cadence. ForwardSceneRenderer::Render → Pass 4c drains
+    // the per-frame pool that ParticlePass::execute reads via get_frame_pool.
+#ifndef DISABLE_PARTICLE_SYSTEM
+    if (particlesInitialized_) {
+        primal::particles::update(1.0f / 60.0f);
+    }
+#endif
+
+    // T4.6.5 part 38: debug line grid + RGB axes around origin. Triggers
+    // ForwardSceneRenderer Pass 6 (LineBatchRenderer) via debug_draw::drain_into.
+    // Camera {0,5,-10} looking +Z sees the grid edge-on at floor level + axes
+    // sticking up — sufficient to verify Pass 6 fires per frame.
+    {
+        constexpr float kGridExtent = 5.0f;
+        constexpr float kGridStep   = 1.0f;
+        for (float x = -kGridExtent; x <= kGridExtent; x += kGridStep) {
+            primal::graphics::debug_draw::add_line(
+                x, 0.0f, -kGridExtent, x, 0.0f, kGridExtent, 0x404040);
+        }
+        for (float z = -kGridExtent; z <= kGridExtent; z += kGridStep) {
+            primal::graphics::debug_draw::add_line(
+                -kGridExtent, 0.0f, z, kGridExtent, 0.0f, z, 0x404040);
+        }
+        // RGB world axes (length 3.0).
+        primal::graphics::debug_draw::add_line(0,0,0, 3,0,0, 0xFF0000); // +X red
+        primal::graphics::debug_draw::add_line(0,0,0, 0,3,0, 0x00FF00); // +Y green
+        primal::graphics::debug_draw::add_line(0,0,0, 0,0,3, 0x0000FF); // +Z blue
+    }
+
     ResourceHandle backBuffer;
     SyncHandle signalFence;
     if (!renderSystem_.BeginFrame(backBuffer, signalFence)) {
@@ -1069,6 +1139,20 @@ void TestVulkanSponzaRenderGraph::Shutdown() {
         pipeline_.reset();
         std::cerr << "[Part35.7] pipeline_ done" << std::endl;
     }
+
+    // T4.6.5 part 38: shutdown particle system AFTER pipeline (which consumes
+    // it in Pass 4c) but before device teardown. destroy_emitter happens
+    // implicitly inside shutdown(). Idempotent — safe to call even if init
+    // failed.
+#ifndef DISABLE_PARTICLE_SYSTEM
+    if (particlesInitialized_) {
+        std::cerr << "[Part38] particles::shutdown..." << std::endl;
+        primal::particles::shutdown();
+        particlesInitialized_ = false;
+        particleEmitter_ = primal::particles::invalid_id;
+        std::cerr << "[Part38] particles::shutdown done" << std::endl;
+    }
+#endif
 
     if (materialRegistry_) {
         std::cerr << "[Part35.7] materialRegistry_->Shutdown..." << std::endl;

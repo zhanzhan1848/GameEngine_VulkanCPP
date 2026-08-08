@@ -32,6 +32,8 @@
 #include "Engine/Platform/Platform.h"
 #include "Engine/Platform/Window.h"
 #include "Engine/Platform/PlatformTypes.h"
+#include "Engine/Particles/ParticleSystem.h"
+#include "Engine/Graphics/DebugDraw/DebugDrawQueue.h"
 
 #include <memory>
 #include <vector>
@@ -125,4 +127,11 @@ private:
     u64 frameCount_{0};
     bool subsystemsInitialized_{false};
     bool hasShutdown_{false};  // T4.6.5 part 35.7: re-entrancy guard
+
+    // T4.6.5 part 38: ParticleSystem emitter for ForwardSceneRenderer Pass 4c.
+    // Emitter is config-driven (no per-frame emit() call needed); update(dt)
+    // advances simulation. RenderWithCommandBuffer → ForwardSceneRenderer::Render
+    // → Pass 4c → particle_pass_.execute drains the per-frame pool.
+    primal::particles::emitter_id particleEmitter_{primal::particles::invalid_id};
+    bool particlesInitialized_{false};
 };
