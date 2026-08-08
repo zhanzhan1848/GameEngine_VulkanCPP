@@ -117,6 +117,16 @@ public:
         sc_probe_irradiance_shader_ = handles.sc_probe_irradiance;
     }
 
+    /// T4.6.5 part 37: IBL resources (Tier 5 visual fidelity). Pass output of
+    /// IBLPrecomputer::ComputeIrradianceMap / ComputePrefilteredEnvironmentMap /
+    /// ComputeBRDFIntegrationMap. Safe to call before or after SetLumenConfig —
+    /// the deferred module is consulted lazily on each AddPasses. Pass
+    /// INVALID_RESOURCE for any handle to disable that IBL component (shader
+    /// samples a 1x1 white fallback — effectively no IBL).
+    void SetIBLResources(rhi::ResourceHandle irradiance,
+                         rhi::ResourceHandle prefilter,
+                         rhi::ResourceHandle brdfLUT);
+
     lumen::SurfaceCachePass* GetSurfaceCachePass() const {
         return surface_cache_pass_ ? surface_cache_pass_.get() : nullptr;
     }
@@ -296,6 +306,13 @@ private:
     // --- Utility textures ---
     rhi::ResourceHandle black_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle white_texture_{rhi::handles::INVALID_RESOURCE};
+
+    // T4.6.5 part 37: IBL cached handles. Forwarded to deferred_module_ when
+    // it's created by InitializeSubsystems. Allows SetIBLResources to be
+    // called before SetLumenConfig.
+    rhi::ResourceHandle ibl_irradiance_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ibl_prefilter_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ibl_brdf_lut_{rhi::handles::INVALID_RESOURCE};
 
     // --- PCG SDF readback ---
     pcg::PCGSDFReadbackManager pcg_sdf_readback_;

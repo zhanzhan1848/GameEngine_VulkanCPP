@@ -109,6 +109,43 @@ ResourceHandle LoadTextureFromFile(RHIDeviceBase* device, const std::string& pat
     return tex;
 }
 
+// T4.6.5 part 37: Float32 → Float16 conversion for HDR data (mirrors
+// TestDawnForwardRenderer.cpp:132). Sunset.hdr is loaded via stbi_loadf as
+// float32 RGBA — engine's RGBA16_Float texture format needs f16 encoding.
+static uint16_t f32_to_f16(float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, 4);
+    uint16_t sign = (bits >> 16) & 0x8000u;
+    int32_t exp = ((bits >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = (bits >> 13) & 0x3FFu;
+    if (exp <= 0) return sign;
+    if (exp >= 31) return sign | 0x7C00u;
+    return sign | (uint16_t(exp) << 10) | uint16_t(mantissa);
+}
+
+// T4.6.5 part 37: load precompiled .spv bytes (binary SPIR-V). Mirrors the
+// SPIR-V loader pattern in InitializePipeline (lines 238-256) — try direct
+// path first, then walk up parent dirs.
+std::vector<u8> LoadSpvBytes(const char* relpath) {
+    auto tryPath = [](const std::string& p) -> std::vector<u8> {
+        std::ifstream f(p, std::ios::binary | std::ios::ate);
+        if (!f) return {};
+        std::streamsize sz = f.tellg();
+        f.seekg(0);
+        std::vector<u8> bytes(static_cast<size_t>(sz));
+        f.read(reinterpret_cast<char*>(bytes.data()), sz);
+        return bytes;
+    };
+    std::vector<u8> bytes = tryPath(relpath);
+    if (!bytes.empty()) return bytes;
+    for (int i = 1; i <= 6 && bytes.empty(); ++i) {
+        std::string prefix;
+        for (int j = 0; j < i; ++j) prefix += "../";
+        bytes = tryPath(prefix + relpath);
+    }
+    return bytes;
+}
+
 std::string ResolveTexturePath(const std::string& base, const std::string& filename) {
     if (filename.empty()) return "";
     std::string path = base + filename;
@@ -585,6 +622,323 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     return true;
 }
 
+// T4.6.5 part 37 — Tier 5 IBL setup.
+//
+// Loads sunset.hdr (RGBA32F) → converts to RGBA16F → uploads to equirectTex_
+// (Texture2D). Dispatches IBL_EquirectangularToCube.spv to write envCube_
+// (TextureCube, 6 faces) via its 2DArray storage view. Then runs IBLPrecomputer
+// to generate irradiance/prefilter cubes + brdfLUT 2D. All four resources are
+// forwarded to deferred_module_ via pipeline_->SetIBLResources().
+//
+// envMap dimensions: sunset.hdr is 2048×1024 → faceSize = 2048/4 = 512. Cube
+// is 512×512×6 (RGBA16F). IBLPrecomputer output: irradiance 32³, prefilter
+// 128³, brdfLUT 512².
+//
+// NOTE: This method is non-fatal on failure — Initialize() proceeds without
+// IBL. DeferredLighting.frag falls back to flat 0.03*albedo ambient when
+// IBL bindings are invalid (bindings 10/11/12 set to INVALID_RESOURCE).
+bool TestVulkanSponzaRenderGraph::InitializeIBL() {
+    // ----- 1. Locate sunset.hdr -----
+    const char* kHdrPaths[] = {
+        "EngineTest/assets/textures/hdr/sunset.hdr",
+        "textures/hdr/sunset.hdr",
+        "Assets/Textures/HDR/sunset.hdr",
+        "sunset.hdr",
+    };
+    std::string hdrPath;
+    for (const char* p : kHdrPaths) {
+        std::ifstream f(p);
+        if (f.is_open()) { hdrPath = p; break; }
+    }
+    // T4.6.5 part 37: walk up parent dirs as fallback (test runs from various cwd).
+    if (hdrPath.empty()) {
+        for (int i = 1; i <= 6; ++i) {
+            std::string prefix;
+            for (int j = 0; j < i; ++j) prefix += "../";
+            std::ifstream f(prefix + "EngineTest/assets/textures/hdr/sunset.hdr");
+            if (f.is_open()) {
+                hdrPath = prefix + "EngineTest/assets/textures/hdr/sunset.hdr";
+                break;
+            }
+        }
+    }
+    if (hdrPath.empty()) {
+        std::cerr << "[Part37] sunset.hdr not found — IBL disabled" << std::endl;
+        return false;
+    }
+    std::cerr << "[Part37] Loading HDR: " << hdrPath << std::endl;
+
+    // ----- 2. stbi_loadf → RGBA32F -----
+    int hdrW, hdrH, hdrC;
+    float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrC, 4);
+    if (!hdrData) {
+        std::cerr << "[Part37] stbi_loadf failed: " << hdrPath << std::endl;
+        return false;
+    }
+    std::cerr << "[Part37] HDR loaded: " << hdrW << "x" << hdrH << std::endl;
+
+    // ----- 3. Convert f32 → f16 (RGBA16F) -----
+    const size_t kPixels = size_t(hdrW) * hdrH;
+    std::vector<u8> rgba16(kPixels * 8);  // 4 channels × 2 bytes
+    for (size_t i = 0; i < kPixels; ++i) {
+        u16 r = f32_to_f16(hdrData[i * 4 + 0]);
+        u16 g = f32_to_f16(hdrData[i * 4 + 1]);
+        u16 b = f32_to_f16(hdrData[i * 4 + 2]);
+        u16 a = f32_to_f16(hdrData[i * 4 + 3]);
+        std::memcpy(rgba16.data() + i * 8 + 0, &r, 2);
+        std::memcpy(rgba16.data() + i * 8 + 2, &g, 2);
+        std::memcpy(rgba16.data() + i * 8 + 4, &b, 2);
+        std::memcpy(rgba16.data() + i * 8 + 6, &a, 2);
+    }
+    stbi_image_free(hdrData);
+
+    // ----- 4. Create equirectTex_ (Texture2D RGBA16F) -----
+    TextureDesc equirectDesc{};
+    equirectDesc.size = {(u32)hdrW, (u32)hdrH, 1};
+    equirectDesc.mipLevels = 1;
+    equirectDesc.arraySize = 1;
+    equirectDesc.format = DataFormat::RGBA16_Float;
+    equirectDesc.type = TextureType::Texture2D;
+    equirectDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    equirectDesc.memoryUsage = GPUMemoryUsage::Static;
+    equirectDesc.name = "IBL_Equirect";
+    equirectTex_ = device_->CreateTexture(equirectDesc);
+    if (equirectTex_ == handles::INVALID_RESOURCE) {
+        std::cerr << "[Part37] CreateTexture equirectTex_ failed" << std::endl;
+        return false;
+    }
+
+    // Upload via staging buffer + CopyBufferToTexture.
+    BufferDesc eqStagingDesc{};
+    eqStagingDesc.size = kPixels * 8;
+    eqStagingDesc.type = BufferType::Raw;
+    eqStagingDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    eqStagingDesc.name = "IBL_Equirect_Staging";
+    ResourceHandle eqStaging = device_->CreateBuffer(eqStagingDesc);
+    if (eqStaging == handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(equirectTex_);
+        equirectTex_ = handles::INVALID_RESOURCE;
+        return false;
+    }
+    if (!device_->UpdateBufferData(eqStaging, rgba16.data(), eqStagingDesc.size, 0)) {
+        device_->DestroyBuffer(eqStaging);
+        device_->DestroyTexture(equirectTex_);
+        equirectTex_ = handles::INVALID_RESOURCE;
+        return false;
+    }
+
+    {
+        CommandBufferHandle cmd = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        VulkanCommandBuffer* vcmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(cmd);
+        vcmd->Reset(); vcmd->Begin();
+        BufferTextureCopyRegion region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource = {0, 0, 1};
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {(u32)hdrW, (u32)hdrH, 1};
+        vcmd->CopyBufferToTexture(eqStaging, equirectTex_, &region, 1);
+
+        // Transition equirectTex_ CopyDest → ShaderResource.
+        ResourceBarrier toSRV{};
+        toSRV.resource = equirectTex_;
+        toSRV.beforeState = ResourceState::CopyDest;
+        toSRV.afterState = ResourceState::ShaderResource;
+        toSRV.subresource = 0xFFFFFFFF;
+        toSRV.queueFamily = 0xFFFFFFFF;
+        vcmd->InsertBarrier(&toSRV, 1);
+
+        vcmd->End();
+        vcmd->Submit(0);
+        vcmd->WaitForCompletion();
+        device_->DestroyCommandBuffer(cmd);
+    }
+    device_->DestroyBuffer(eqStaging);
+    std::cerr << "[Part37] equirectTex_ ready" << std::endl;
+
+    // ----- 5. Create envCube_ (TextureCube RGBA16F) -----
+    // faceSize = hdrW / 4 (mirror TestVulkanIBL_Equirect convention).
+    // 2048 → 512. Sufficient resolution for IBL convolution quality.
+    const u32 faceSize = static_cast<u32>(hdrW) / 4;
+    TextureDesc cubeDesc{};
+    cubeDesc.size = {faceSize, faceSize, 1};
+    cubeDesc.mipLevels = 1;
+    cubeDesc.arraySize = 6;
+    cubeDesc.format = DataFormat::RGBA16_Float;
+    cubeDesc.type = TextureType::TextureCube;
+    // StorageImage binding for equirect→cube write + SampledImage for IBL prefilter.
+    cubeDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource | TextureUsage::CopySource;
+    cubeDesc.memoryUsage = GPUMemoryUsage::Static;
+    cubeDesc.name = "IBL_EnvCube";
+    envCube_ = device_->CreateTexture(cubeDesc);
+    if (envCube_ == handles::INVALID_RESOURCE) {
+        std::cerr << "[Part37] CreateTexture envCube_ failed" << std::endl;
+        device_->DestroyTexture(equirectTex_);
+        equirectTex_ = handles::INVALID_RESOURCE;
+        return false;
+    }
+
+    // Create 2DArray storage view of envCube_ for the equirect→cube shader
+    // (shader writes via texture_storage_2d_array<rgba16float, write>).
+    TextureViewDesc arrayViewDesc{};
+    arrayViewDesc.texture = envCube_;
+    arrayViewDesc.viewType = TextureType::Texture2DArray;
+    arrayViewDesc.format = DataFormat::RGBA16_Float;
+    arrayViewDesc.mostDetailedMip = 0;
+    arrayViewDesc.mipCount = 1;
+    arrayViewDesc.firstArraySlice = 0;
+    arrayViewDesc.arraySize = 6;
+    envCubeArrayView_ = device_->CreateTextureView(arrayViewDesc);
+    if (envCubeArrayView_ == handles::INVALID_RESOURCE) {
+        std::cerr << "[Part37] CreateTextureView envCubeArrayView_ failed" << std::endl;
+        device_->DestroyTexture(envCube_);
+        envCube_ = handles::INVALID_RESOURCE;
+        device_->DestroyTexture(equirectTex_);
+        equirectTex_ = handles::INVALID_RESOURCE;
+        return false;
+    }
+
+    // ----- 6. Load IBL_EquirectangularToCube.spv + create compute pipeline -----
+    auto eqCubeSpv = LoadSpvBytes("Engine/Graphics/Vulkan/shaders/IBL_EquirectangularToCube.spv");
+    if (eqCubeSpv.empty()) {
+        eqCubeSpv = LoadSpvBytes("Assets/Shaders/IBL_EquirectangularToCube.spv");
+    }
+    if (eqCubeSpv.empty()) {
+        std::cerr << "[Part37] IBL_EquirectangularToCube.spv not found" << std::endl;
+        // TextureView is destroyed via DestroyTexture (unified ResourceHandle).
+        device_->DestroyTexture(envCubeArrayView_);
+        envCubeArrayView_ = handles::INVALID_RESOURCE;
+        device_->DestroyTexture(envCube_);
+        envCube_ = handles::INVALID_RESOURCE;
+        device_->DestroyTexture(equirectTex_);
+        equirectTex_ = handles::INVALID_RESOURCE;
+        return false;
+    }
+    ShaderHandle eqCubeCs = device_->CreateShader(eqCubeSpv.data(), eqCubeSpv.size(),
+                                                   ShaderStage::Compute, "cs_main");
+    if (eqCubeCs == handles::INVALID_SHADER) {
+        std::cerr << "[Part37] CreateShader eqCubeCs failed" << std::endl;
+        return false;
+    }
+
+    // 2-binding descriptor layout: 0=SampledImage equirect, 1=StorageImage arrayView.
+    DescriptorSetLayoutBinding eqBindings[2]{};
+    eqBindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    eqBindings[1] = {1, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr};
+    DescriptorSetLayoutDesc eqLayoutDesc{};
+    eqLayoutDesc.bindingCount = 2;
+    eqLayoutDesc.bindings = eqBindings;
+    DescriptorSetLayoutHandle eqLayout = device_->CreateDescriptorSetLayout(eqLayoutDesc);
+
+    PipelineLayoutDesc eqPLDesc{};
+    eqPLDesc.setLayoutCount = 1;
+    eqPLDesc.setLayouts = &eqLayout;
+    eqPLDesc.pushConstantRangeCount = 0;
+    PipelineLayoutHandle eqPL = device_->CreatePipelineLayout(eqPLDesc);
+
+    DescriptorSetDesc eqDsDesc{}; eqDsDesc.layout = eqLayout;
+    DescriptorSetHandle eqDs = device_->CreateDescriptorSet(eqDsDesc);
+
+    DescriptorImageInfo eqSrcInfo{handles::INVALID_SAMPLER, equirectTex_, ResourceState::ShaderResource};
+    DescriptorImageInfo eqDstInfo{handles::INVALID_SAMPLER, envCubeArrayView_, ResourceState::UnorderedAccess};
+    WriteDescriptorSet eqWrites[2]{};
+    eqWrites[0] = {eqDs, 0, 0, 1, DescriptorType::SampledImage, &eqSrcInfo, nullptr};
+    eqWrites[1] = {eqDs, 1, 0, 1, DescriptorType::StorageImage, &eqDstInfo, nullptr};
+    device_->UpdateDescriptorSets(2, eqWrites);
+
+    ComputePipelineDesc eqCpDesc{};
+    eqCpDesc.computeShader = eqCubeCs;
+    eqCpDesc.layout = eqPL;
+    PipelineHandle eqPipe = device_->CreateComputePipeline(eqCpDesc);
+    if (eqPipe == handles::INVALID_PIPELINE) {
+        std::cerr << "[Part37] CreateComputePipeline eqPipe failed" << std::endl;
+        return false;
+    }
+
+    // ----- 7. Dispatch equirect→cube -----
+    {
+        CommandBufferHandle cmd = device_->CreateCommandBuffer(CommandQueueType::Compute);
+        VulkanCommandBuffer* vcmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(cmd);
+        vcmd->Reset(); vcmd->Begin();
+
+        // envCube_ UNDEFINED → GENERAL (StorageImage write).
+        // T4.6.5 part 37: barrier applies to the underlying image (envCube_),
+        // not the view — views inherit layout from base image.
+        ResourceBarrier toUA{};
+        toUA.resource = envCube_;
+        toUA.beforeState = ResourceState::Unknown;
+        toUA.afterState = ResourceState::UnorderedAccess;
+        toUA.subresource = 0xFFFFFFFF;
+        toUA.queueFamily = 0xFFFFFFFF;
+        vcmd->InsertBarrier(&toUA, 1);
+
+        vcmd->BindComputePipeline(eqPipe);
+        vcmd->BindDescriptorSets(PipelineBindPoint::Compute, eqPL, 0, 1, &eqDs, 0, nullptr);
+
+        // WGSL workgroup_size(16,16,1). faceSize/16 in XY, Z=6 for layers.
+        const u32 gx = (faceSize + 15) / 16;
+        const u32 gy = (faceSize + 15) / 16;
+        vcmd->Dispatch(gx, gy, 6);
+
+        // envCube_ → ShaderResource (for IBL precompute sampling).
+        ResourceBarrier toSRV{};
+        toSRV.resource = envCube_;
+        toSRV.beforeState = ResourceState::UnorderedAccess;
+        toSRV.afterState = ResourceState::ShaderResource;
+        toSRV.subresource = 0xFFFFFFFF;
+        toSRV.queueFamily = 0xFFFFFFFF;
+        vcmd->InsertBarrier(&toSRV, 1);
+
+        vcmd->End();
+        vcmd->Submit(0);
+        vcmd->WaitForCompletion();
+        device_->DestroyCommandBuffer(cmd);
+    }
+    std::cerr << "[Part37] envCube_ populated (faceSize=" << faceSize << ")" << std::endl;
+
+    // Cleanup equirect→cube pipeline resources (no longer needed).
+    device_->DestroyPipeline(eqPipe);
+    device_->DestroyDescriptorSet(eqDs);
+    device_->DestroyPipelineLayout(eqPL);
+    device_->DestroyDescriptorSetLayout(eqLayout);
+    device_->DestroyShader(eqCubeCs);
+
+    // ----- 8. IBLPrecomputer: irradiance + prefilter + brdfLUT -----
+    iblPrecomputer_ = std::make_unique<IBLPrecomputer>(device_);
+    if (!iblPrecomputer_->Initialize()) {
+        std::cerr << "[Part37] IBLPrecomputer.Initialize failed" << std::endl;
+        return false;
+    }
+
+    iblIrradiance_ = iblPrecomputer_->ComputeIrradianceMap(envCube_, 32);
+    if (iblIrradiance_ == handles::INVALID_RESOURCE) {
+        std::cerr << "[Part37] ComputeIrradianceMap failed" << std::endl;
+        return false;
+    }
+    std::cerr << "[Part37] irradiance map ready (32^3)" << std::endl;
+
+    iblPrefilter_ = iblPrecomputer_->ComputePrefilteredEnvironmentMap(envCube_, 128);
+    if (iblPrefilter_ == handles::INVALID_RESOURCE) {
+        std::cerr << "[Part37] ComputePrefilteredEnvironmentMap failed" << std::endl;
+        return false;
+    }
+    std::cerr << "[Part37] prefilter map ready (128^3)" << std::endl;
+
+    iblBrdfLUT_ = iblPrecomputer_->ComputeBRDFIntegrationMap(512);
+    if (iblBrdfLUT_ == handles::INVALID_RESOURCE) {
+        std::cerr << "[Part37] ComputeBRDFIntegrationMap failed" << std::endl;
+        return false;
+    }
+    std::cerr << "[Part37] brdfLUT ready (512^2)" << std::endl;
+
+    // ----- 9. Forward to StandardRenderPipeline → DeferredLightingModule -----
+    pipeline_->SetIBLResources(iblIrradiance_, iblPrefilter_, iblBrdfLUT_);
+    std::cerr << "[Part37] IBL wired to pipeline" << std::endl;
+
+    return true;
+}
+
 void TestVulkanSponzaRenderGraph::Run() {
     // T4.6.5 part 30.4: safety-net close check. applicationShouldTerminateAfterLastWindowClosed
     // is the primary path, but some edge cases (e.g. window never ordered front) skip it.
@@ -782,6 +1136,50 @@ void TestVulkanSponzaRenderGraph::Shutdown() {
         std::cerr << "[Part35.7] fallbackORM_ done" << std::endl;
     }
     std::cerr << "[Part35.7] samplers/textures done" << std::endl;
+
+    // T4.6.5 part 37: IBL cleanup. Reset precomputer BEFORE pipeline_ (below)
+    // since precomputer holds pipeline/layout state used during generation;
+    // its generated ResourceHandles are device-owned and survive until
+    // device destroys them via deferred GC. envCube_ + equirectTex_ are
+    // intermediate textures not owned by deferred_module_ — destroy explicitly.
+    if (iblPrecomputer_) {
+        std::cerr << "[Part37] iblPrecomputer_.reset()..." << std::endl;
+        iblPrecomputer_->Shutdown();
+        iblPrecomputer_.reset();
+        std::cerr << "[Part37] iblPrecomputer_ done" << std::endl;
+    }
+    if (iblIrradiance_ != handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(iblIrradiance_);
+        iblIrradiance_ = handles::INVALID_RESOURCE;
+        std::cerr << "[Part37] DestroyTexture iblIrradiance_ done" << std::endl;
+    }
+    if (iblPrefilter_ != handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(iblPrefilter_);
+        iblPrefilter_ = handles::INVALID_RESOURCE;
+        std::cerr << "[Part37] DestroyTexture iblPrefilter_ done" << std::endl;
+    }
+    if (iblBrdfLUT_ != handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(iblBrdfLUT_);
+        iblBrdfLUT_ = handles::INVALID_RESOURCE;
+        std::cerr << "[Part37] DestroyTexture iblBrdfLUT_ done" << std::endl;
+    }
+    if (envCubeArrayView_ != handles::INVALID_RESOURCE) {
+        // TextureView is a ResourceHandle — destroyed via DestroyTexture.
+        // (Engine RHI unifies them; no separate DestroyTextureView path.)
+        device_->DestroyTexture(envCubeArrayView_);
+        envCubeArrayView_ = handles::INVALID_RESOURCE;
+        std::cerr << "[Part37] DestroyTextureView(envCubeArrayView_) done" << std::endl;
+    }
+    if (envCube_ != handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(envCube_);
+        envCube_ = handles::INVALID_RESOURCE;
+        std::cerr << "[Part37] DestroyTexture envCube_ done" << std::endl;
+    }
+    if (equirectTex_ != handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(equirectTex_);
+        equirectTex_ = handles::INVALID_RESOURCE;
+        std::cerr << "[Part37] DestroyTexture equirectTex_ done" << std::endl;
+    }
 
     primal::content::shutdown();
     primal::content::AsyncResourceLoader::Shutdown();

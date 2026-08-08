@@ -199,6 +199,23 @@ void StandardRenderPipeline::SetPassEnabled(RenderPassID pass, bool enabled) {
     }
 }
 
+void StandardRenderPipeline::SetIBLResources(rhi::ResourceHandle irradiance,
+                                             rhi::ResourceHandle prefilter,
+                                             rhi::ResourceHandle brdfLUT) {
+    // T4.6.5 part 37: cache handles — apply to deferred module once it exists.
+    // If subsystems are already initialized, forward immediately; otherwise
+    // InitializeSubsystems will pick them up when it creates the deferred
+    // module (call sequence: SetShaderHandles -> SetIBLResources -> SetLumenConfig
+    // triggers InitializeSubsystems).
+    if (deferred_module_) {
+        deferred_module_->SetIBLResources(irradiance, prefilter, brdfLUT);
+    }
+    // Stash on members for late-init path.
+    ibl_irradiance_ = irradiance;
+    ibl_prefilter_ = prefilter;
+    ibl_brdf_lut_ = brdfLUT;
+}
+
 bool StandardRenderPipeline::IsPassEnabled(RenderPassID pass) const {
     return settings_.quality.IsPassEnabled(pass);
 }
@@ -338,6 +355,9 @@ void StandardRenderPipeline::InitializeSubsystems() {
 
     deferred_module_ = std::make_unique<DeferredLightingModule>();
     deferred_module_->Initialize(device_, deferred_vs_, deferred_ps_, render_width_, render_height_);
+    // T4.6.5 part 37: forward cached IBL handles (if SetIBLResources was
+    // called before SetLumenConfig).
+    deferred_module_->SetIBLResources(ibl_irradiance_, ibl_prefilter_, ibl_brdf_lut_);
 
     final_blit_module_ = std::make_unique<FinalBlitModule>();
     final_blit_module_->Initialize(device_, blit_vs_, blit_ps_);

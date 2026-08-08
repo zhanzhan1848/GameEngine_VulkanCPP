@@ -1,12 +1,14 @@
 #version 450 core
 
-// T4.6.5 part 25 — real Cook-Torrance PBR port of Metal
+// T4.6.5 part 37 — Cook-Torrance PBR + IBL port of Metal
 // `fragmentLighting_v3` (DeferredLighting.metal:197-290).
 //
 // Differences from Metal original:
-//   - No IBL: bindings 8/9/10 (irradiance/prefilter cubes + brdfLUT) not
-//     wired in DeferredLightingModule.cpp descriptor layout. Flat ambient
-//     fallback `0.03 * albedo * ao` instead.
+//   - IBL: bindings 10/11/12 wired (irradiance cube + prefilter cube + brdfLUT
+//     2D) via DeferredLightingModule SetIBLResources. When handles are
+//     INVALID, C++ binds a 1x1 white fallback — sampling returns white, so
+//     IBL term becomes white * albedo (slight bright tint). Production code
+//     path uses real env map (TestVulkanSponzaRenderGraph loads sunset.hdr).
 //   - No ACES tonemap: output HDR linear. Tonemap is the FinalBlit
 //     module's responsibility (matches Metal fragmentBlit).
 //   - Y convention: Vulkan NDC Y is unflipped at vertex stage; UV origin
@@ -16,7 +18,7 @@
 //
 // Entry point: main.
 //
-// Descriptor layout (matches DeferredLightingModule::Initialize cpp:81-91):
+// Descriptor layout (matches DeferredLightingModule::Initialize):
 //   set 0 binding 0 = UniformBuffer ViewData (Vertex|Pixel)
 //   set 0 binding 1 = UniformBuffer SceneData
 //   set 0 binding 2 = SampledImage albedo
@@ -25,7 +27,10 @@
 //   set 0 binding 5 = SampledImage depth
 //   set 0 binding 6 = SampledImage shadowVisibility
 //   set 0 binding 8 = Sampler
-//   set 0 binding 9 = SampledImage fallback (unused in this port)
+//   set 0 binding 9 = SampledImage fallback (unused)
+//   set 0 binding 10 = SampledImage irradianceMap (cube, IBL)
+//   set 0 binding 11 = SampledImage prefilterMap (cube, IBL)
+//   set 0 binding 12 = SampledImage brdfLUT (2D, IBL)
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
@@ -58,6 +63,10 @@ layout(set = 0, binding = 5) uniform texture2D depthTex;
 layout(set = 0, binding = 6) uniform texture2D shadowVisTex;
 layout(set = 0, binding = 8) uniform sampler defaultSampler;
 layout(set = 0, binding = 9) uniform texture2D fallbackTex;  // unused
+// T4.6.5 part 37: IBL resources (cube + 2D).
+layout(set = 0, binding = 10) uniform textureCube irradianceMap;
+layout(set = 0, binding = 11) uniform textureCube prefilterMap;
+layout(set = 0, binding = 12) uniform texture2D brdfLUT;
 
 layout(location = 0) in vec2 inUv;
 layout(location = 0) out vec4 outColor;
@@ -89,6 +98,14 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float k) {
 
 vec3 FresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// T4.6.5 part 37: roughness-aware Fresnel for IBL (mirror Metal
+// FresnelSchlickRoughness in RHIShaderPBR.metal). The roughness term blends
+// F0 toward 1.0 as roughness increases — gives metals a softer grazing tint.
+vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0)
+         * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 void main() {
@@ -142,8 +159,26 @@ void main() {
 
     vec3 Lo = (diffuse + specular) * lightColor.rgb * NdotL * shadowVisibility;
 
-    // Flat ambient fallback (IBL deferred — cube + BRDF LUT not in C++ layout).
-    vec3 ambient = vec3(0.03) * albedo * ao;
+    // T4.6.5 part 37: IBL ambient (image-based lighting).
+    // Mirror Metal fragmentLighting_v3 lines 270-287. Cube samples use the
+    // shared defaultSampler (linear + repeat — fine for env maps). Prefilter
+    // uses textureLod with roughness × MAX_PREFILTER_LOD to pick the mip.
+    vec3 Fil = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+    vec3 kSil = Fil;
+    vec3 kDil = (vec3(1.0) - kSil) * (1.0 - metallic);
+
+    vec3 irradiance = texture(samplerCube(irradianceMap, defaultSampler), N).rgb;
+    vec3 diffuseIBL = irradiance * albedo;
+
+    const float MAX_PREFILTER_LOD = 4.0;
+    vec3 R = reflect(-V, N);
+    vec3 prefilteredColor = textureLod(samplerCube(prefilterMap, defaultSampler),
+                                       R, roughness * MAX_PREFILTER_LOD).rgb;
+    vec2 brdf = texture(sampler2D(brdfLUT, defaultSampler),
+                        vec2(max(dot(N, V), 0.0), roughness)).rg;
+    vec3 specularIBL = prefilteredColor * (Fil * brdf.x + brdf.y);
+
+    vec3 ambient = (kDil * diffuseIBL + specularIBL) * ao;
 
     outColor = vec4(Lo + ambient, 1.0);
 }

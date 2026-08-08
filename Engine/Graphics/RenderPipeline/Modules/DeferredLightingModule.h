@@ -51,6 +51,13 @@ public:
 
     rhi::ResourceHandle GetOutputTexture(u32 buffer_index) const;
 
+    // T4.6.5 part 37: IBL resources (Tier 5 visual fidelity). Call after
+    // Initialize. Pass INVALID_RESOURCE to disable IBL (shader falls back to
+    // flat ambient). irradiance/prefilter are cube maps; brdfLUT is 2D.
+    void SetIBLResources(rhi::ResourceHandle irradiance,
+                         rhi::ResourceHandle prefilter,
+                         rhi::ResourceHandle brdfLUT);
+
     rhi::ResourceHandle GetViewCB(u32 idx) const { return idx < 3 ? view_cb_[idx] : rhi::handles::INVALID_RESOURCE; }
     rhi::ResourceHandle GetSceneCB(u32 idx) const { return idx < 3 ? scene_cb_[idx] : rhi::handles::INVALID_RESOURCE; }
     rhi::DescriptorSetHandle GetDescriptorSet(u32 idx) const { return idx < 3 ? descriptor_sets_[idx] : rhi::handles::INVALID_DESCRIPTOR_SET; }
@@ -94,6 +101,12 @@ private:
     // validation rejects VK_NULL_HANDLE imageView without nullDescriptor
     // feature — use a real texture as a safe fallback.
     rhi::ResourceHandle fallback_tex_{rhi::handles::INVALID_RESOURCE};
+
+    // T4.6.5 part 37: IBL resources (Tier 5 visual fidelity).
+    // Set via SetIBLResources before first AddPasses call.
+    rhi::ResourceHandle ibl_irradiance_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ibl_prefilter_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ibl_brdf_lut_{rhi::handles::INVALID_RESOURCE};
 };
 
 } // namespace primal::graphics

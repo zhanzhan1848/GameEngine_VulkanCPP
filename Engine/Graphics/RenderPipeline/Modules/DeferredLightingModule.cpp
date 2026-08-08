@@ -77,7 +77,11 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     render_height_ = render_height;
 
     // Descriptor set layout: matches fragmentLighting_gpuDriven shader signature
-    // buffer(0)=ViewData, buffer(1)=SceneData, texture(2-6,9), sampler(8)
+    // buffer(0)=ViewData, buffer(1)=SceneData, texture(2-6,9), sampler(8).
+    // T4.6.5 part 37: bindings 10/11/12 are IBL resources (Tier 5 visual
+    // fidelity). 10=irradianceMap (cube), 11=prefilterMap (cube),
+    // 12=brdfLUT (2D). Descriptor type is SampledImage (combined with
+    // sampler at binding 8 in the shader via samplerCube(...)/sampler2D(...)).
     DescriptorSetLayoutBinding bindings[] = {
         {0, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel | ShaderStage::Vertex, nullptr},
         {1, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr},
@@ -88,8 +92,11 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         {6, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
         {8, DescriptorType::Sampler,       1, ShaderStage::Pixel, nullptr},
         {9, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
+        {10, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
+        {11, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
+        {12, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
     };
-    set_layout_ = device->CreateDescriptorSetLayout({9, bindings});
+    set_layout_ = device->CreateDescriptorSetLayout({12, bindings});
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
     // Triple-buffered output textures (RGBA16_Float for HDR)
@@ -227,6 +234,14 @@ ResourceHandle DeferredLightingModule::GetOutputTexture(u32 buffer_index) const 
     return (buffer_index < 3) ? output_textures_[buffer_index] : handles::INVALID_RESOURCE;
 }
 
+void DeferredLightingModule::SetIBLResources(rhi::ResourceHandle irradiance,
+                                             rhi::ResourceHandle prefilter,
+                                             rhi::ResourceHandle brdfLUT) {
+    ibl_irradiance_ = irradiance;
+    ibl_prefilter_ = prefilter;
+    ibl_brdf_lut_ = brdfLUT;
+}
+
 DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGraph& graph,
                                                            const DeferredLightingInputs& inputs) {
     DeferredLightingOutputs outputs{};
@@ -331,8 +346,17 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                 {6, DescriptorType::SampledImage, shadowVisTex},
                 {8, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},
                 {9, DescriptorType::SampledImage, fallback_tex_},
+                // T4.6.5 part 37: IBL bindings 10/11/12. Fall back to the 1x1
+                // white texture when IBL isn't configured — shader's IBL branch
+                // still samples something valid (white = no ambient tint added).
+                {10, DescriptorType::SampledImage,
+                 validOrFallback(ibl_irradiance_, fallback_tex_)},
+                {11, DescriptorType::SampledImage,
+                 validOrFallback(ibl_prefilter_, fallback_tex_)},
+                {12, DescriptorType::SampledImage,
+                 validOrFallback(ibl_brdf_lut_, fallback_tex_)},
             };
-            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 9);
+            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 12);
 
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});

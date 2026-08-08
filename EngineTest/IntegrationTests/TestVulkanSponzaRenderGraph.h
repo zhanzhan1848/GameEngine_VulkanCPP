@@ -13,6 +13,7 @@
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
 #include "Engine/Graphics/RHI/Systems/RenderSystem.h"
 #include "Engine/Graphics/RHI/Components/RHICamera.h"
+#include "Engine/Graphics/RHI/Utils/IBLPrecomputer.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
 #include "Engine/Graphics/RenderScene.h"
 #include "Engine/Graphics/RenderView.h"
@@ -57,6 +58,8 @@ private:
     bool InitializeWindowAndRenderSystem();
     bool InitializePipeline();
     bool LoadSponzaScene();
+    // T4.6.5 part 37: load HDR + equirect→cube + IBL precompute + SetIBLResources.
+    bool InitializeIBL();
 
     primal::platform::window window_;
     primal::graphics::rhi::RHIDeviceBase* device_{nullptr};
@@ -83,6 +86,21 @@ private:
 
     primal::math::m4x4 viewMatrix_{primal::graphics::rhi::math::MatrixIdentity()};
     primal::math::m4x4 projMatrix_{primal::graphics::rhi::math::MatrixIdentity()};
+
+    // T4.6.5 part 37: IBL resources (Tier 5 visual fidelity). sunset.hdr →
+    // envCube (TextureCube) → irradiance/prefilter cubes + brdfLUT 2D via
+    // IBLPrecomputer. All forwarded to deferred_module_ via
+    // pipeline_->SetIBLResources(). precomputer_ must outlive pipeline_ since
+    // the generated ResourceHandles are owned by the device, but the
+    // precomputer object manages pipeline/layout state used during generation.
+    std::unique_ptr<primal::graphics::rhi::IBLPrecomputer> iblPrecomputer_;
+    primal::graphics::rhi::ResourceHandle iblIrradiance_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle iblPrefilter_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle iblBrdfLUT_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    // Intermediate envCube + its 2DArray storage view (for equirect→cube write).
+    primal::graphics::rhi::ResourceHandle envCube_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle envCubeArrayView_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle equirectTex_{primal::graphics::rhi::handles::INVALID_RESOURCE};
 
     // T4.6.5 part 31: WASD + right-mouse-look camera. Lazy-initialized on first
     // Run() to the same view {0,5,-10} looking +Z and slightly down that

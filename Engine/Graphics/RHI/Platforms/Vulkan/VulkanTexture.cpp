@@ -212,13 +212,18 @@ bool VulkanTexture::Initialize() {
         VkImageViewCreateInfo vci{};
         vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         vci.image = vkImage_;
-        // viewType 推导:2D/3D/Cube 直接映射,Unknown 兜底 2D。
+        // viewType 推导:2D/2DArray/3D/Cube 直接映射,Unknown 兜底 2D。
+        // T4.6.5 part 37: 2DArray 视图支持(创建 cube texture 的 2D-array 存储
+        // 视图用于 equirect→cube 转换 shader 写入)。
         switch (viewDesc_.viewType) {
             case TextureType::Texture3D:
                 vci.viewType = VK_IMAGE_VIEW_TYPE_3D;
                 break;
             case TextureType::TextureCube:
                 vci.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+                break;
+            case TextureType::Texture2DArray:
+                vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
                 break;
             case TextureType::Texture2D:
             case TextureType::Unknown:
