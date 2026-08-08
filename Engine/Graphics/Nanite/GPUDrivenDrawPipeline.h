@@ -36,6 +36,24 @@ struct VisibilityBufferConfig {
     bool enable_conservative_rasterization{ false };
 };
 
+// T4.6.5 part 39: Stage2/Stage3 mutual exclusion. Determines which raster
+// path runs in Execute() and what downstream passes (HZB / Shadow / Deferred
+// / FinalBlit) read from.
+//   GBuffer              — (default) Stage3 rasterizes GBuffer RTs; Stage2
+//                          skipped. DeferredLighting + shadows + SSAO all
+//                          consume GBuffer. FinalBlit reads deferred output.
+//   VisibilityBufferOnly — Stage2 rasterizes visibility_buffer_; Stage3 +
+//                          DeferredLighting + shadows + SSAO skipped (HZB
+//                          still works — Stage2 writes final_depth_texture_).
+//                          FinalBlit reads resolve_output_texture_.
+//   Hybrid               — Both stages run (current behavior pre-Part 39).
+//                          Downstream reads Stage3 output. Kept for debugging.
+enum class GPURenderMode : u32 {
+    GBuffer              = 0,
+    VisibilityBufferOnly = 1,
+    Hybrid               = 2,
+};
+
 struct IndirectDrawCommand {
     u32 indexCount;
     u32 instanceCount;
@@ -95,6 +113,12 @@ public:
     // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id (instance).
     // Written into DrawConstants.debug_mode each frame.
     void SetDebugMode(u32 mode) { meshlet_debug_mode_ = mode; }
+
+    // T4.6.5 part 39: Stage2/Stage3 mutual exclusion switch. Default = GBuffer
+    // (production). Switch to VisibilityBufferOnly for debug visualization of
+    // meshlet IDs. Hybrid runs both stages (wasteful; for debugging only).
+    void SetRenderMode(GPURenderMode mode) { render_mode_ = mode; }
+    GPURenderMode GetRenderMode() const { return render_mode_; }
 
     // Phase 9.3b: Streaming terrain — RenderScene accessor for iterating
     // GetStreamingMeshes() and issuing one DrawIndirect per visible mesh.
@@ -337,6 +361,7 @@ private:
     math::m4x4 prev_proj_matrix_;   // Previous frame proj matrix for velocity
     bool has_prev_frame_{ false };   // Whether previous frame data is available
     u32 meshlet_debug_mode_{ 0 };   // 0=off, 1=meshlet, 2=triangle, 3=mesh (mirrors DrawConstants.debug_mode)
+    GPURenderMode render_mode_{ GPURenderMode::GBuffer };  // T4.6.5 part 39
     u32 vertex_count_{ 0 };
     u32 index_count_{ 0 };
     rhi::DataFormat index_format_{ rhi::DataFormat::R32_UInt };

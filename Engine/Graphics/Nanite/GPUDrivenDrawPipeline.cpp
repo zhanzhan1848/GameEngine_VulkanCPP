@@ -2076,10 +2076,18 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
         return false;
     }
 
-    // Stage 3: GPU Draw Calls
-    if (!Stage3_GPUDrawCalls(cmd_buffer, scene_snapshot, culling_results, results_, frame_index, buffer_index)) {
-        std::cerr << "[GPUDrivenDrawPipeline] GPU Draw Calls failed" << std::endl;
-        return false;
+    // T4.6.5 part 39: Stage3 only runs in GBuffer (default) or Hybrid modes.
+    // VisibilityBufferOnly mode skips Stage3 — downstream passes read
+    // resolve_output_texture_ instead of GBuffer RTs. Stage2 self-gates on
+    // visibility_pipeline_ != INVALID; in GBuffer mode it's effectively a
+    // no-op (visibility_buffer_ cleared but ResolveVisibilityBuffer produces
+    // background blue).
+    if (render_mode_ != GPURenderMode::VisibilityBufferOnly) {
+        // Stage 3: GPU Draw Calls
+        if (!Stage3_GPUDrawCalls(cmd_buffer, scene_snapshot, culling_results, results_, frame_index, buffer_index)) {
+            std::cerr << "[GPUDrivenDrawPipeline] GPU Draw Calls failed" << std::endl;
+            return false;
+        }
     }
 
     // T4.6.5 part 23: auto-resolve. Execute() now leaves resolve_output_texture_

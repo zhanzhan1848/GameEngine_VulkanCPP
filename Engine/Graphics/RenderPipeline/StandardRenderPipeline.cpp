@@ -1374,6 +1374,12 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                         cullingResults, static_cast<u32>(frameCount_), cbIdx);
     }
 
+    // T4.6.5 part 39: Stage2/Stage3 mutual exclusion. In VisibilityBufferOnly
+    // mode, Stage3 is skipped (gpuDraw.Execute gates internally). Downstream
+    // passes that read GBuffer RTs must also be skipped — their input handles
+    // are INVALID_RESOURCE which would cause validation errors.
+    const bool wants_gbuffer = (gpuDraw.GetRenderMode() != nanite::GPURenderMode::VisibilityBufferOnly);
+
     // T4.6.5 part 35.5: Build HZB from this frame's GBuffer depth. The
     // non-Editor path was missing this — Culling samples hzb_texture_ in
     // Stage5 occlusion, but without BuildHZB the texture contained only
@@ -1386,8 +1392,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), cmd);
     }
 
-    // After draw: Shadow + Deferred + FinalBlit via RenderGraph
-    if (deferred_module_ && final_blit_module_) {
+    // After draw: Shadow + Deferred + FinalBlit via RenderGraph.
+    // T4.6.5 part 39: GBuffer path requires Stage3 to have populated the
+    // GBuffer RTs. In VisibilityBufferOnly mode, skip the entire block and
+    // fall through to the resolve-output blit instead.
+    if (wants_gbuffer && deferred_module_ && final_blit_module_) {
         renderGraph_->Clear();
         auto& graph = *renderGraph_;
 
@@ -1723,6 +1732,26 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         graph.Compile();
         graph.Execute(cmd);
+    } else if (!wants_gbuffer && final_blit_module_) {
+        // T4.6.5 part 39: VisibilityBufferOnly path. Stage2 rasterized into
+        // visibility_buffer_, ResolveVisibilityBuffer (auto-called in
+        // gpuDraw.Execute) wrote resolve_output_texture_. Skip Shadow +
+        // Deferred + SSAO + Fusion entirely; FinalBlit reads resolve_output_texture_
+        // directly as the backbuffer source.
+        renderGraph_->Clear();
+        auto& graph = *renderGraph_;
+
+        FinalBlitInputs blitIn;
+        blitIn.input_rg = graph.ImportResource("ResolveOutput_DL", gpuDraw.GetResolveOutputTexture());
+        blitIn.input_tex = gpuDraw.GetResolveOutputTexture();
+        blitIn.backbuffer_rg = graph.ImportResource("BackBuffer", target);
+        blitIn.current_buffer_index = cbIdx;
+        blitIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+        blitIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        final_blit_module_->AddPass(graph, blitIn);
+
+        graph.Compile();
+        graph.Execute(cmd);
     } else {
         // Fallback: manual blit GBuffer albedo to backbuffer
         RenderPassDesc rpDesc{};
@@ -1745,7 +1774,12 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             write.dstArrayElement = 0;
             write.descriptorCount = 1;
             write.descriptorType = DescriptorType::SampledImage;
-            imgInfo.imageView = gpuDraw.GetGBufferAlbedo();
+            // T4.6.5 part 39: fallback path fires only when final_blit_module_
+            // is null (subsystems not initialized). In that case render_mode_
+            // is at its default GBuffer; pick the right source texture anyway
+            // for defensive correctness.
+            imgInfo.imageView = wants_gbuffer ? gpuDraw.GetGBufferAlbedo()
+                                              : gpuDraw.GetResolveOutputTexture();
             imgInfo.imageLayout = ResourceState::ShaderResource;
             write.imageInfo = &imgInfo;
             device_->UpdateDescriptorSets(1, &write);
