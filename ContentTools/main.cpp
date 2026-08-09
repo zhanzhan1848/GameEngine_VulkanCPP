@@ -19,7 +19,10 @@
 #include <iostream>
 #include <string>
 
-// ProcessAIAsset is defined in ContentTools.cpp.
+// ProcessAIAsset is defined in ContentTools.cpp. This local mirror must
+// match the canonical layout in ContentTools.cpp exactly — both are kept
+// in sync manually (Phase 1 has no shared header for the POD). The C#
+// Editor mirror is the third copy at PrimalEditor/ContentToolsAPI.cs.
 struct ai_asset_pipeline_params {
     const char*                 input_path;
     primal::tools::scene_data*  out_data;
@@ -30,7 +33,14 @@ struct ai_asset_pipeline_params {
     u8                          enable_lod;
     u8                          enable_meshlet;
     u8                          enable_collision;
+    u8                          enable_derive;
+    u8                          auto_derive_after_subdivide;
+    u8                          subdivide_scheme;     // 0=Loop, 1=CatmullClark
+    u8                          derive_normal_mode;   // 0=Faceted, 1=Smooth, 2=AreaWeighted, 3=AngleWeighted
+    u8                          derive_tangent_mode;  // 0=None, 1=AreaWeighted, 2=MikkTSpace
+    u32                         subdivide_levels;
     f32                         lod_ratio;
+    f32                         derive_faceted_angle_deg;
     u32                         mesh_count;
     u32                         meshlet_count;
     u32                         validation_errors;
@@ -120,7 +130,14 @@ int run_pipeline(int argc, char* argv[]) {
         std::cerr << "Usage: ContentToolsCLI --pipeline <input> <output> "
                      "[--repair] [--remesh] [--subdivide] [--uvatlas] "
                      "[--no-lod] [--no-meshlet] [--collision] "
-                     "[--lod-ratio <f>]\n";
+                     "[--lod-ratio <f>]\n"
+                     "  Subdivide:    --subdivide-levels N (default 1)\n"
+                     "                --subdivide-scheme loop|catmull (default loop)\n"
+                     "  Derive (M11): --derive (standalone; auto-cascade after --subdivide is on by default)\n"
+                     "                --no-auto-derive (turn off post-subdivide cascade)\n"
+                     "                --derive-normal faceted|smooth|area|angle (default area)\n"
+                     "                --derive-tangent none|area|mikkt (default mikkt)\n"
+                     "                --faceted-angle <deg> (default 60)\n";
         return 1;
     }
     const char* input_file = argv[2];
@@ -132,6 +149,15 @@ int run_pipeline(int argc, char* argv[]) {
     params.enable_lod = 1;
     params.enable_meshlet = 1;
     params.lod_ratio = 0.5f;
+    // M11 defaults: match derive::Params and subdivide::Params invariants.
+    // auto_derive_after_subdivide defaults to ON so callers opting into
+    // --subdivide don't ship a mesh with zeroed normals.
+    params.auto_derive_after_subdivide = 1;
+    params.subdivide_levels = 1;
+    params.subdivide_scheme = 0;  // Loop
+    params.derive_normal_mode = 2;  // AreaWeighted (matches derive::Params default)
+    params.derive_tangent_mode = 2;  // MikkTSpace (matches derive::Params default)
+    params.derive_faceted_angle_deg = 60.f;
 
     for (int i = 4; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -142,8 +168,44 @@ int run_pipeline(int argc, char* argv[]) {
         else if (arg == "--no-lod")     params.enable_lod = 0;
         else if (arg == "--no-meshlet") params.enable_meshlet = 0;
         else if (arg == "--collision")  params.enable_collision = 1;
+        else if (arg == "--derive")     params.enable_derive = 1;
+        else if (arg == "--no-auto-derive") params.auto_derive_after_subdivide = 0;
         else if (arg == "--lod-ratio" && i + 1 < argc) {
             params.lod_ratio = (f32)std::stof(argv[++i]);
+        } else if (arg == "--subdivide-levels" && i + 1 < argc) {
+            params.subdivide_levels = (u32)std::stoul(argv[++i]);
+        } else if (arg == "--subdivide-scheme" && i + 1 < argc) {
+            const std::string s = argv[++i];
+            if      (s == "loop")    params.subdivide_scheme = 0;
+            else if (s == "catmull") params.subdivide_scheme = 1;
+            else {
+                std::cerr << "Unknown --subdivide-scheme value: " << s
+                          << " (expected loop|catmull)\n";
+                return 1;
+            }
+        } else if (arg == "--derive-normal" && i + 1 < argc) {
+            const std::string s = argv[++i];
+            if      (s == "faceted") params.derive_normal_mode = 0;
+            else if (s == "smooth")  params.derive_normal_mode = 1;
+            else if (s == "area")    params.derive_normal_mode = 2;
+            else if (s == "angle")   params.derive_normal_mode = 3;
+            else {
+                std::cerr << "Unknown --derive-normal value: " << s
+                          << " (expected faceted|smooth|area|angle)\n";
+                return 1;
+            }
+        } else if (arg == "--derive-tangent" && i + 1 < argc) {
+            const std::string s = argv[++i];
+            if      (s == "none")   params.derive_tangent_mode = 0;
+            else if (s == "area")   params.derive_tangent_mode = 1;
+            else if (s == "mikkt")  params.derive_tangent_mode = 2;
+            else {
+                std::cerr << "Unknown --derive-tangent value: " << s
+                          << " (expected none|area|mikkt)\n";
+                return 1;
+            }
+        } else if (arg == "--faceted-angle" && i + 1 < argc) {
+            params.derive_faceted_angle_deg = (f32)std::stof(argv[++i]);
         } else {
             std::cerr << "Unknown --pipeline flag: " << arg << "\n";
             return 1;

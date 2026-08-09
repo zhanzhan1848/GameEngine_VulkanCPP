@@ -128,6 +128,7 @@ add_subdirectory(modules/uvatlas)
 add_subdirectory(modules/lod)
 add_subdirectory(modules/meshlet)
 add_subdirectory(modules/collision)
+add_subdirectory(modules/derive_attributes)
 
 # Phase 1 M8: pipeline orchestration layer (AssetPipeline + SceneBlobWriter).
 add_subdirectory(pipeline)
@@ -147,6 +148,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     contenttools_lod
     contenttools_meshlet
     contenttools_collision
+    contenttools_derive
     contenttools_pipeline
 )
 

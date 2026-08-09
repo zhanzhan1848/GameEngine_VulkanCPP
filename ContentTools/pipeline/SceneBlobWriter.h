@@ -51,4 +51,28 @@ void Serialize(const PackedMesh& pm, utl::blob_stream_writer& blob);
 // to size the backing buffer before calling Serialize.
 size_t GetPackedMeshSize(const PackedMesh& pm);
 
+// ---- Phase 2 (M12.3): full-scene wrapper serialization -------------------
+//
+// SerializeScene emits the full scene_data.buffer layout: scene_name +
+// materials + 1 lod_group containing all `meshes`. Byte-for-byte alignment
+// with Geometry.cpp::pack_data (lines 865-910). Use this when re-encoding a
+// pipeline::Result for ProcessAIAsset output.
+//
+// The lod_group is emitted with an empty name — ProcessableScene has no
+// lod_group_name concept, and the legacy pack_data path typically emits a
+// single nameless group anyway.
+//
+// Memory ownership: caller allocates a buffer of GetSceneSize bytes and
+// wraps it in a blob_stream_writer; SerializeScene fills it. The buffer's
+// allocator MUST match what downstream consumers expect (CoTaskMemAlloc on
+// Windows, malloc elsewhere) — caller's responsibility, not the writer's.
+size_t GetSceneSize(const std::string& scene_name,
+                    const utl::vector<material>& materials,
+                    const utl::vector<PackedMesh>& meshes);
+
+void SerializeScene(const std::string& scene_name,
+                    const utl::vector<material>& materials,
+                    const utl::vector<PackedMesh>& meshes,
+                    utl::blob_stream_writer& blob);
+
 }  // namespace primal::tools::pipeline

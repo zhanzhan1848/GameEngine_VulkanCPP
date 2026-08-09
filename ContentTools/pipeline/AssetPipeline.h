@@ -3,10 +3,18 @@
 // AssetPipeline: Phase 1 orchestration layer.
 //
 // Module order (fixed in Phase 1, DAG in Phase 2):
-//   repair -> remesh -> subdivide -> uvatlas -> lod -> meshlet -> (sdf)
-//   -> SceneBlobWriter.
+//   repair -> remesh -> subdivide -> derive -> uvatlas -> lod -> meshlet
+//   -> (sdf) -> SceneBlobWriter.
 // Each module is gated by an enable flag in pipeline::Config. The default
 // config matches Phase 1's primary use case: lod + meshlet on, others off.
+//
+// derive_attributes is auto-cascaded after subdivide when
+// `auto_derive_after_subdivide` is true (the default) and subdivide ran.
+// This exists because subdivide emits zeroed normals/tangents on new verts
+// (Subdivide.h:8-13); the cascade gives callers "subdivide just works"
+// behavior without forcing them to remember the derive step. Set
+// `auto_derive_after_subdivide=false` to opt out, or `enable_derive=true`
+// to run derive standalone (independent of subdivide).
 //
 // collision (VHACD) runs in parallel with the blob-writing path — its
 // output stays in Result.hulls and never enters scene_data.buffer (Phase 1
@@ -18,6 +26,7 @@
 #include "modules/repair/Repair.h"
 #include "modules/remesh/Remesh.h"
 #include "modules/subdivide/Subdivide.h"
+#include "modules/derive_attributes/DeriveAttributes.h"
 #include "modules/uvatlas/UvAtlas.h"
 #include "modules/lod/Lod.h"
 #include "modules/meshlet/Meshlet.h"
@@ -33,6 +42,8 @@ struct Config {
     bool                    enable_repair{false};
     bool                    enable_remesh{false};
     bool                    enable_subdivide{false};
+    bool                    enable_derive{false};  // standalone derive (independent of subdivide cascade)
+    bool                    auto_derive_after_subdivide{true};  // auto-cascade derive after subdivide runs
     bool                    enable_uvatlas{false};
     bool                    enable_lod{true};
     bool                    enable_meshlet{true};
@@ -42,6 +53,7 @@ struct Config {
     repair::Params          repair_params;
     remesh::Params          remesh_params;
     subdivide::Params       subdivide_params;
+    derive::Params          derive_params;
     uvatlas::Params         uvatlas_params;
     lod::Params             lod_params;
     meshlet::Params         meshlet_params;

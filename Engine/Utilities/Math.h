@@ -39,7 +39,7 @@ namespace primal::math
 	}
 
 	template<u32 bits>
-	[[nodiscard]] constexpr u32 unpack_to_unit_float(u32 i)
+	[[nodiscard]] constexpr f32 unpack_to_unit_float(u32 i)
 	{
 		static_assert(bits <= sizeof(u32) * 8);
 		assert(i < ((u32)1 << bits));

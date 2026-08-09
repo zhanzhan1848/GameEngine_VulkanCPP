@@ -272,4 +272,54 @@ void Serialize(const PackedMesh& pm, utl::blob_stream_writer& blob) {
     }
 }
 
+// ---- Phase 2 (M12.3): SerializeScene ----------------------------------------
+
+size_t GetSceneSize(const std::string& scene_name,
+                    const utl::vector<material>& materials,
+                    const utl::vector<PackedMesh>& meshes) {
+    constexpr u64 su32 = sizeof(u32);
+    u64 size = su32 + scene_name.size() + su32;  // name_len + name + material_count
+    for (const auto& m : materials) {
+        size += su32 + m.name.size();
+        size += su32 + m.diffuse_texture.size();
+        size += su32 + m.normal_texture.size();
+    }
+    size += su32;  // lod_group_count (always 1)
+    // Single lod_group with empty name.
+    size += su32 + 0;  // lod_name_size (= 0) + 0 name bytes
+    size += su32;      // mesh_count
+    for (const auto& pm : meshes) {
+        size += GetPackedMeshSize(pm);
+    }
+    return (size_t)size;
+}
+
+void SerializeScene(const std::string& scene_name,
+                    const utl::vector<material>& materials,
+                    const utl::vector<PackedMesh>& meshes,
+                    utl::blob_stream_writer& blob) {
+    // Scene name
+    blob.write((u32)scene_name.size());
+    blob.write(scene_name.c_str(), scene_name.size());
+
+    // Materials
+    blob.write((u32)materials.size());
+    for (const auto& m : materials) {
+        blob.write((u32)m.name.size());
+        blob.write(m.name.c_str(), m.name.size());
+        blob.write((u32)m.diffuse_texture.size());
+        blob.write(m.diffuse_texture.c_str(), m.diffuse_texture.size());
+        blob.write((u32)m.normal_texture.size());
+        blob.write(m.normal_texture.c_str(), m.normal_texture.size());
+    }
+
+    // Single lod_group, empty name, all meshes
+    blob.write((u32)1);              // lod_group_count
+    blob.write((u32)0);              // lod_name_size = 0
+    blob.write((u32)meshes.size());  // mesh_count
+    for (const auto& pm : meshes) {
+        Serialize(pm, blob);
+    }
+}
+
 }  // namespace primal::tools::pipeline

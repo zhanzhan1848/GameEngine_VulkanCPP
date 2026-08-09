@@ -62,4 +62,31 @@ u32 WalkSceneBlob(const scene_data& data,
                   const std::function<void(u32, const PackedMeshView&)>& visitor,
                   utl::vector<ErrorReport>& errors);
 
+// Phase 2 (M12.2): parsed scene wrapper contents. Used by PackedMeshDecoder
+// to rebuild ProcessableScene.name + .materials before decoding meshes.
+// `lod_group_count` is informational — Phase 2 PackedMeshDecoder flattens
+// all (lod_group, mesh) pairs into ProcessableScene.lods[0].meshes, but
+// future multi-lod_group consumers can use this to drive their own grouping.
+struct SceneHeader {
+    std::string                 scene_name;
+    utl::vector<material>       materials;
+    u32                         lod_group_count{0};
+};
+
+// Parse the scene wrapper (scene_name + materials + lod_group_count) without
+// touching per-lod_group or per-mesh data. On success, `cursor` advances
+// past the wrapper's u32 lod_group_count, landing at the first lod_group's
+// name_size u32 — the caller then iterates skip_lod_group_header +
+// ReadNextPackedMesh to walk the bodies.
+//
+// Returns false on truncation or unreasonable counts; `errors` carries
+// diagnostic detail. Cursor is left unchanged on failure.
+bool ReadSceneHeader(const u8*& cursor, const u8* end, SceneHeader& out,
+                     utl::vector<ErrorReport>& errors);
+
+// Convenience overload: ReadSceneHeader on a scene_data.buffer. Cursor
+// starts at byte 0 of `data.buffer`.
+bool ReadSceneHeader(const scene_data& data, SceneHeader& out,
+                     utl::vector<ErrorReport>& errors);
+
 }  // namespace primal::tools::pipeline

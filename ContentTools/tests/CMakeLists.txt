@@ -304,3 +304,59 @@ add_test(NAME TestSceneBlobReader COMMAND TestSceneBlobReader)
 set_target_properties(TestSceneBlobReader PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- M11 derive_attributes module test ------------------------------------
+
+add_executable(TestDeriveAttributes TestDeriveAttributes.cpp)
+
+target_include_directories(TestDeriveAttributes PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestDeriveAttributes PRIVATE ContentTools contenttools_derive)
+
+target_compile_options(TestDeriveAttributes PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestDeriveAttributes COMMAND TestDeriveAttributes)
+set_target_properties(TestDeriveAttributes PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)
+
+# ---- M12 PackedMeshDecoder + ReadSceneHeader test --------------------------
+# Round-trip tests for all 4 static_* elements_types + edge cases (index
+# widening, empty mesh, multi-mesh scene, truncated buffer).
+
+add_executable(TestPackedMeshDecoder TestPackedMeshDecoder.cpp)
+
+target_include_directories(TestPackedMeshDecoder PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestPackedMeshDecoder PRIVATE ContentTools contenttools_pipeline)
+
+target_compile_options(TestPackedMeshDecoder PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+    -Wno-unused-variable
+)
+
+add_test(NAME TestPackedMeshDecoder COMMAND TestPackedMeshDecoder)
+set_target_properties(TestPackedMeshDecoder PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)

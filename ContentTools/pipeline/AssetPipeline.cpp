@@ -11,12 +11,27 @@ namespace {
 // Run per-mesh in-place modules on a single ProcessableMesh. Each module is
 // gated by its enable flag and emits warnings/info into `out` (errors are
 // also collected but do not halt the pipeline — caller decides policy).
+//
+// derive_attributes is special-cased: it has two trigger paths.
+//   (a) auto-cascade after subdivide (auto_derive_after_subdivide=true)
+//       fires whenever subdivide ran, regardless of enable_derive;
+//   (b) standalone (enable_derive=true) fires independently of subdivide.
+// Both paths share cfg.derive_params. If both paths fire on the same mesh
+// (subdivide on + auto-cascade on + standalone on), derive runs twice —
+// the second run is idempotent for non-Faceted normal modes and just
+// recomputes the same tangents for MikkTSpace. We accept the redundant
+// run rather than tracking "did subdivide actually mutate" state, which
+// would couple run_in_place_modules to subdivide's internals.
 void run_in_place_modules(ProcessableMesh& m,
                           const Config& cfg,
                           utl::vector<ErrorReport>& reports) {
     if (cfg.enable_repair)    repair::Run(m, cfg.repair_params, reports);
     if (cfg.enable_remesh)    remesh::Run(m, cfg.remesh_params, reports);
     if (cfg.enable_subdivide) subdivide::Run(m, cfg.subdivide_params, reports);
+    if (cfg.enable_subdivide && cfg.auto_derive_after_subdivide) {
+        derive::Run(m, cfg.derive_params, reports);
+    }
+    if (cfg.enable_derive)    derive::Run(m, cfg.derive_params, reports);
     if (cfg.enable_uvatlas)   uvatlas::Run(m, cfg.uvatlas_params, reports);
 }
 

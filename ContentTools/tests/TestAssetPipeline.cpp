@@ -204,6 +204,86 @@ bool test_empty_scene_returns_warning_no_crash() {
     return found;
 }
 
+// ---- Derive auto-cascade after subdivide --------------------------------
+
+// Verify that the auto-derive cascade fires when subdivide runs and that
+// turning it off leaves the mesh in subdivide's raw output state. We don't
+// assert specific normal values — DeriveAttributes has its own coverage —
+// we just check the orchestration: derive runs iff (subdivide ran AND
+// auto_derive_after_subdivide=true) OR enable_derive=true.
+//
+// Contract: post-cascade LOD 0 has unit-length normals for every position.
+// Without the cascade, subdivide's new verts get zeroed normals (per
+// Subdivide.h:8-13), so length != 1 on at least one vert.
+
+bool test_subdivide_auto_derive_fills_normals() {
+    ProcessableScene s = make_cube_scene();
+    Config cfg;
+    cfg.enable_lod = false;
+    cfg.enable_meshlet = false;
+    cfg.enable_subdivide = true;
+    cfg.subdivide_params.scheme = subdivide::Scheme::Loop;
+    cfg.subdivide_params.levels = 1;
+    cfg.auto_derive_after_subdivide = true;  // default, but explicit
+    cfg.derive_params.normal_mode = derive::NormalMode::AreaWeighted;
+    cfg.derive_params.tangent_mode = derive::TangentMode::None;
+    Result out;
+    Run(std::move(s), cfg, out);
+
+    if (out.scene.lods.empty() || out.scene.lods[0].meshes.empty()) return false;
+    const ProcessableMesh& m = out.scene.lods[0].meshes[0];
+    if (m.normals.size() != m.positions.size()) {
+        std::cout << "  normals.size()=" << m.normals.size()
+                  << " positions.size()=" << m.positions.size() << "\n";
+        return false;
+    }
+    for (u32 i = 0; i < (u32)m.positions.size(); ++i) {
+        const f32 L = std::sqrt(m.normals[i].x * m.normals[i].x +
+                                m.normals[i].y * m.normals[i].y +
+                                m.normals[i].z * m.normals[i].z);
+        if (std::fabs(L - 1.f) > 1e-3f) {
+            std::cout << "  vert " << i << " normal length=" << L << "\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool test_subdivide_no_auto_derive_leaves_raw() {
+    ProcessableScene s = make_cube_scene();
+    Config cfg;
+    cfg.enable_lod = false;
+    cfg.enable_meshlet = false;
+    cfg.enable_subdivide = true;
+    cfg.subdivide_params.scheme = subdivide::Scheme::Loop;
+    cfg.subdivide_params.levels = 1;
+    cfg.auto_derive_after_subdivide = false;  // opt out
+    cfg.derive_params.normal_mode = derive::NormalMode::AreaWeighted;
+    Result out;
+    Run(std::move(s), cfg, out);
+
+    if (out.scene.lods.empty() || out.scene.lods[0].meshes.empty()) return false;
+    const ProcessableMesh& m = out.scene.lods[0].meshes[0];
+    // Subdivide grew positions (cube: 8 → ~26 after one Loop step). The
+    // untouched normals array is whatever Subdivide.cpp chose to emit —
+    // either zero-length (new verts) or stale-size. Both are "raw" state.
+    // The cascade is verified by ABSOLUTE position growth without a
+    // matching normal rebuild.
+    if (m.positions.size() <= 8) return false;
+    // If normals were rebuilt, every entry would be unit-length. Find at
+    // least one entry that is NOT unit-length (proves cascade didn't run).
+    bool found_non_unit = false;
+    for (u32 i = 0; i < (u32)m.normals.size(); ++i) {
+        const f32 L = std::sqrt(m.normals[i].x * m.normals[i].x +
+                                m.normals[i].y * m.normals[i].y +
+                                m.normals[i].z * m.normals[i].z);
+        if (std::fabs(L - 1.f) > 1e-3f) { found_non_unit = true; break; }
+    }
+    // Also accept normals.size() != positions.size() as proof the cascade
+    // didn't run (Subdivide may not resize normals to match).
+    return found_non_unit || m.normals.size() != m.positions.size();
+}
+
 // ---- Test runner --------------------------------------------------------
 
 struct Case { const char* name; bool (*fn)(); };
@@ -219,6 +299,8 @@ int main() {
         CASE(test_meshlet_disabled_empty_meshlet_section),
         CASE(test_collision_enabled_produces_hulls),
         CASE(test_empty_scene_returns_warning_no_crash),
+        CASE(test_subdivide_auto_derive_fills_normals),
+        CASE(test_subdivide_no_auto_derive_leaves_raw),
     };
 
     int passed = 0, failed = 0;

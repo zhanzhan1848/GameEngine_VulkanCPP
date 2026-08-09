@@ -113,9 +113,96 @@ bool skip_scene_header(cursor& c, u32* out_lod_group_count,
     return true;
 }
 
+// Phase 2 (M12.2) variant: parses the scene wrapper AND extracts scene_name +
+// materials + lod_group_count. Mirrors skip_scene_header byte-for-byte but
+// populates `out`. Used by PackedMeshDecoder::DecodeScene to rebuild
+// ProcessableScene.{name, materials} before iterating meshes.
+//
+// On success the cursor sits exactly where skip_scene_header would leave it:
+// right past the lod_group_count u32, at the first lod_group's name_size.
+bool read_scene_header(cursor& c, SceneHeader& out, utl::vector<ErrorReport>& errors) {
+    out = SceneHeader{};
+
+    u32 scene_name_size;
+    if (!c.read_u32(scene_name_size)) {
+        errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_scene_name",
+            "blob_read: truncated at scene_name_size", "blob_read"});
+        return false;
+    }
+    if (scene_name_size > 4096) {
+        errors.emplace_back(ErrorReport{Severity::Error, "blob_read.bad_scene_name_size",
+            "blob_read: scene_name_size unreasonably large", "blob_read"});
+        return false;
+    }
+    {
+        const u8* name_bytes;
+        if (!c.read_bytes(name_bytes, scene_name_size)) {
+            errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_scene_name_bytes",
+                "blob_read: truncated at scene_name bytes", "blob_read"});
+            return false;
+        }
+        out.scene_name.assign(reinterpret_cast<const char*>(name_bytes), scene_name_size);
+    }
+
+    u32 material_count;
+    if (!c.read_u32(material_count)) {
+        errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_material_count",
+            "blob_read: truncated at material_count", "blob_read"});
+        return false;
+    }
+    if (material_count > 100000) {
+        errors.emplace_back(ErrorReport{Severity::Error, "blob_read.bad_material_count",
+            "blob_read: material_count unreasonably large", "blob_read"});
+        return false;
+    }
+    out.materials.reserve(material_count);
+    for (u32 i = 0; i < material_count; ++i) {
+        material mat{};
+        const char* field_names[3] = {"name", "diffuse_texture", "normal_texture"};
+        std::string* field_dst[3] = {&mat.name, &mat.diffuse_texture, &mat.normal_texture};
+        for (u32 s = 0; s < 3; ++s) {
+            u32 str_size;
+            if (!c.read_u32(str_size)) {
+                errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_material_string",
+                    "blob_read: truncated in material " + std::string(field_names[s]), "blob_read"});
+                return false;
+            }
+            if (str_size > 65536) {
+                errors.emplace_back(ErrorReport{Severity::Error, "blob_read.bad_material_string",
+                    "blob_read: material " + std::string(field_names[s]) + " length unreasonably large",
+                    "blob_read"});
+                return false;
+            }
+            const u8* str_bytes;
+            if (!c.read_bytes(str_bytes, str_size)) {
+                errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_material_string_bytes",
+                    "blob_read: truncated material " + std::string(field_names[s]) + " bytes", "blob_read"});
+                return false;
+            }
+            field_dst[s]->assign(reinterpret_cast<const char*>(str_bytes), str_size);
+        }
+        out.materials.emplace_back(std::move(mat));
+    }
+
+    if (!c.read_u32(out.lod_group_count)) {
+        errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_lod_group_count",
+            "blob_read: truncated at lod_group_count", "blob_read"});
+        return false;
+    }
+    if (out.lod_group_count > 100000) {
+        errors.emplace_back(ErrorReport{Severity::Error, "blob_read.bad_lod_group_count",
+            "blob_read: lod_group_count unreasonably large", "blob_read"});
+        return false;
+    }
+    return true;
+}
+
 // Skip a lod_group wrapper: u32 lod_name_size + name + u32 mesh_count.
-// Returns the mesh_count (caller iterates that many meshes). On error, returns u32_invalid_id.
-u32 skip_lod_group_header(cursor& c, utl::vector<ErrorReport>& errors) {
+// Optionally captures the lod_name into `*out_name` when non-null.
+// Returns the mesh_count (caller iterates that many meshes). On error,
+// returns u32_invalid_id.
+u32 skip_lod_group_header(cursor& c, std::string* out_name,
+                           utl::vector<ErrorReport>& errors) {
     u32 lod_name_size;
     if (!c.read_u32(lod_name_size)) {
         errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_lod_name",
@@ -128,11 +215,14 @@ u32 skip_lod_group_header(cursor& c, utl::vector<ErrorReport>& errors) {
         return u32_invalid_id;
     }
     {
-        const u8* skip;
-        if (!c.read_bytes(skip, lod_name_size)) {
+        const u8* name_bytes;
+        if (!c.read_bytes(name_bytes, lod_name_size)) {
             errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_lod_name_bytes",
                 "blob_read: truncated at lod_name bytes", "blob_read"});
             return u32_invalid_id;
+        }
+        if (out_name) {
+            out_name->assign(reinterpret_cast<const char*>(name_bytes), lod_name_size);
         }
     }
     u32 mesh_count;
@@ -327,7 +417,7 @@ u32 WalkSceneBlob(const scene_data& data,
     if (!skip_scene_header(c, &lod_group_count, errors)) return 0;
 
     for (u32 lg = 0; lg < lod_group_count; ++lg) {
-        const u32 mesh_count = skip_lod_group_header(c, errors);
+        const u32 mesh_count = skip_lod_group_header(c, nullptr, errors);
         if (mesh_count == u32_invalid_id) return visited;
         if (mesh_count > 1000000) {
             errors.emplace_back(ErrorReport{Severity::Error, "blob_read.bad_mesh_count",
@@ -343,6 +433,30 @@ u32 WalkSceneBlob(const scene_data& data,
     }
 
     return visited;
+}
+
+// ---- Phase 2 (M12.2): ReadSceneHeader ---------------------------------------
+
+bool ReadSceneHeader(const u8*& cursor_in, const u8* end, SceneHeader& out,
+                     utl::vector<ErrorReport>& errors) {
+    cursor c{cursor_in, end};
+    if (!read_scene_header(c, out, errors)) return false;
+    // Cursor sits at the first lod_group's name_size u32 — ready for the
+    // caller to iterate skip_lod_group_header + ReadNextPackedMesh.
+    cursor_in = c.p;
+    return true;
+}
+
+bool ReadSceneHeader(const scene_data& data, SceneHeader& out,
+                     utl::vector<ErrorReport>& errors) {
+    if (!data.buffer || data.buffer_size == 0) {
+        errors.emplace_back(ErrorReport{Severity::Warning, "blob_read.empty_buffer",
+            "blob_read: scene_data.buffer is empty", "blob_read"});
+        return false;
+    }
+    const u8* p = data.buffer;
+    const u8* end = data.buffer + data.buffer_size;
+    return ReadSceneHeader(p, end, out, errors);
 }
 
 }  // namespace primal::tools::pipeline
