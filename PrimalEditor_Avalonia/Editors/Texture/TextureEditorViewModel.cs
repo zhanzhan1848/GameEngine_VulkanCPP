@@ -313,21 +313,22 @@ public class TextureEditorViewModel : AssetEditorViewModel, IDirtyTrackable
             bytes[i + 2] = (byte)(sb * b);
             bytes[i + 3] = (byte)(sa * a);
         }
-        var handle = System.Runtime.InteropServices.GCHandle.Alloc(bytes, System.Runtime.InteropServices.GCHandleType.Pinned);
-        try
-        {
-            Preview = new WriteableBitmap(
-                Avalonia.Platform.PixelFormat.Rgba8888,
-                Avalonia.Platform.AlphaFormat.Premul,
-                handle.AddrOfPinnedObject(),
-                new Avalonia.PixelSize(_slices.Width, _slices.Height),
-                new Avalonia.Vector(96, 96),
-                _slices.Width * 4);
-        }
-        finally
-        {
-            handle.Free();
-        }
+
+        // Avalonia's `WriteableBitmap(IntPtr, ...)` captures the address
+        // without copying, so the pin must survive as long as the bitmap.
+        // The ctor needs an address up-front, so we pin twice: the first
+        // slot is temporary, the second is rebound to the bitmap itself
+        // and outlives the call.
+        var addr = BitmapPinStore.PinAndAttach(new object(), bytes);
+        var bitmap = new WriteableBitmap(
+            Avalonia.Platform.PixelFormat.Rgba8888,
+            Avalonia.Platform.AlphaFormat.Premul,
+            addr,
+            new Avalonia.PixelSize(_slices.Width, _slices.Height),
+            new Avalonia.Vector(96, 96),
+            _slices.Width * 4);
+        BitmapPinStore.PinAndAttach(bitmap, bytes);
+        Preview = bitmap;
     }
 
     public void Reimport()

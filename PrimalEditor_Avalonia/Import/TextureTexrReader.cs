@@ -232,18 +232,29 @@ public static class TextureTexrReader
             if (proc.ExitCode != 0 || !File.Exists(tempPng)) return null;
 
             var bmp = new Avalonia.Media.Imaging.Bitmap(tempPng);
-            using var ms2 = new MemoryStream();
-            bmp.Save(ms2);
-            var pngBytes = ms2.ToArray();
-            var slice = new Slice
+            int w = bmp.PixelSize.Width;
+            int h = bmp.PixelSize.Height;
+            if (w <= 0 || h <= 0) return null;
+
+            var rgba = new byte[w * h * 4];
+            var handle = System.Runtime.InteropServices.GCHandle.Alloc(rgba, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
             {
-                Width = (uint)bmp.PixelSize.Width,
-                Height = (uint)bmp.PixelSize.Height,
-                RowPitch = (uint)(bmp.PixelSize.Width * 4),
-                SlicePitch = (uint)(bmp.PixelSize.Width * 4 * bmp.PixelSize.Height),
-                Pixels = pngBytes,
+                bmp.CopyPixels(new Avalonia.PixelRect(0, 0, w, h), handle.AddrOfPinnedObject(), rgba.Length, w * 4);
+            }
+            finally
+            {
+                handle.Free();
+            }
+
+            return new Slice
+            {
+                Width = (uint)w,
+                Height = (uint)h,
+                RowPitch = (uint)(w * 4),
+                SlicePitch = (uint)(rgba.Length),
+                Pixels = rgba,
             };
-            return slice;
         }
         catch
         {
@@ -259,22 +270,27 @@ public static class TextureTexrReader
     private static Bitmap? BitmapFromSlice(Slice slice)
     {
         if (slice.Pixels == null || slice.Pixels.Length == 0) return null;
-        var handle = System.Runtime.InteropServices.GCHandle.Alloc(slice.Pixels, System.Runtime.InteropServices.GCHandleType.Pinned);
-        try
+
+        var pixels = slice.Pixels;
+
+        // Avalonia's `WriteableBitmap(IntPtr, ...)` captures the address
+        // without copying, so the pin must survive as long as the bitmap.
+        // The `WriteableBitmap` ctor needs an address up-front, so we pin
+        // twice: the first slot is temporary, the second is rebound to
+        // the bitmap itself and outlives the call.
+        var addr = BitmapPinStore.PinAndAttach(new object(), pixels);
+        var bitmap = new WriteableBitmap(
+            PixelFormat.Rgba8888,
+            AlphaFormat.Premul,
+            addr,
+            new Avalonia.PixelSize((int)slice.Width, (int)slice.Height),
+            new Avalonia.Vector(96, 96),
+            (int)slice.RowPitch);
+        if (bitmap is WriteableBitmap wb)
         {
-            // Slice is RGBA8 (loaded by ContentTools into a 32bpp RGBA buffer).
-            return new WriteableBitmap(
-                PixelFormat.Rgba8888,
-                AlphaFormat.Premul,
-                handle.AddrOfPinnedObject(),
-                new Avalonia.PixelSize((int)slice.Width, (int)slice.Height),
-                new Avalonia.Vector(96, 96),
-                (int)slice.RowPitch);
+            BitmapPinStore.PinAndAttach(wb, pixels);
         }
-        finally
-        {
-            handle.Free();
-        }
+        return bitmap;
     }
 
     private static bool IsCompressed(int format) => Array.IndexOf(CompressedPixelFormats, format) >= 0;

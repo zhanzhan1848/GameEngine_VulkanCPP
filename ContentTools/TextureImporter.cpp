@@ -2052,87 +2052,72 @@ namespace primal::tools
 			return scratch;
 		}
 
-		/**
-		 * @brief 确定Metal纹理的输出格式（对应DirectXTex的determine_output_format）
-		 * @param data 纹理数据指针
-		 * @param scratch 临时图像数据
-		 * @param image 源图像指针
-		 * @return 确定的Metal像素格式
-		 */
-		tools::MTLPixelFormat determine_output_format_metal(texture_data *const data, ScratchImage& scratch, const tools::Image *const image)
+	/**
+	 * @brief 确定Metal纹理的输出格式
+	 *
+	 * macOS 上唯一的块压缩器是 astcenc（仅支持 ASTC 4x4 / 6x6 / 8x8）。
+	 * 因此当 compress=true 时，本函数必须始终返回一个 ASTC 格式。
+	 * 如果调用方传入的 output_format 不是 ASTC（例如 RGBA8Unorm 或 BC*），
+	 * 则自动回退到 ASTC_4x4_LDR，并按需升级为 sRGB 变体。
+	 *
+	 * @param data 纹理数据指针
+	 * @param scratch 临时图像数据
+	 * @param image 源图像指针
+	 * @return 确定的Metal像素格式（始终为 ASTC）
+	 */
+	tools::MTLPixelFormat determine_output_format_metal(texture_data *const data, ScratchImage& scratch, const tools::Image *const image)
+	{
+		assert(data && data->import_settings.compress);
+		using namespace primal::content;
+		tools::MTLPixelFormat output_format{ (tools::MTLPixelFormat)data->import_settings.output_format };
+
+		// compress_with_astcenc 仅支持以下 ASTC 块大小
+		auto is_supported_astc = [](tools::MTLPixelFormat f)
 		{
-			assert(data && data->import_settings.compress);
-			using namespace primal::content;
-			const tools::MTLPixelFormat image_format{ image->format };
-			tools::MTLPixelFormat output_format{ (tools::MTLPixelFormat)data->import_settings.output_format };
+			switch (f)
+			{
+			case tools::MTLPixelFormatASTC_4x4_LDR:
+			case tools::MTLPixelFormatASTC_4x4_sRGB:
+			case tools::MTLPixelFormatASTC_6x6_LDR:
+			case tools::MTLPixelFormatASTC_6x6_sRGB:
+			case tools::MTLPixelFormatASTC_8x8_LDR:
+			case tools::MTLPixelFormatASTC_8x8_sRGB:
+				return true;
+			default:
+				return false;
+			}
+		};
 
-			// 如果导入设置明确指定了格式，则使用该格式
-			if (output_format != tools::MTLPixelFormatInvalid)
-			{
-				goto _done;
-			}
-
-			// 如果是HDR纹理，使用BC6H等效的Metal格式
-			if ((data->info.flags & texture_flags::is_hdr) ||
-				image_format == tools::MTLPixelFormatRGBA32Float)
-			{
-				// Metal没有直接的BC6H等效格式，使用RGBA32Float
-				output_format = tools::MTLPixelFormatRGBA32Float;
-			}
-			// 如果源图像是灰度或单通道格式，使用R8格式
-			else if (image_format == tools::MTLPixelFormatR8Unorm)
-			{
-				output_format = tools::MTLPixelFormatR8Unorm;
-			}
-			// 测试是否为法线贴图，如果是则使用RG格式
-			else if (is_normal_map(image))
+		// 如果调用方显式指定了一个受支持的 ASTC 格式，直接使用。
+		// 否则（RGBA8Unorm、BC*、Invalid 等非 ASTC 格式），回退到 ASTC_4x4_LDR，
+		// 因为这是 macOS 上唯一可用的块压缩器。
+		if (!is_supported_astc(output_format))
+		{
+			// 检测法线贴图并设置引擎标志（格式仍用 ASTC）
+			if (is_normal_map(image))
 			{
 				data->info.flags |= texture_flags::is_imported_as_normal_map;
-				output_format = tools::MTLPixelFormatBC5_RGUnorm;
 			}
-			// 默认使用RGBA格式
-			else
-			{
-				// Metal的压缩格式选择
-				if (data->import_settings.prefer_bc7)
-				{
-					output_format = tools::MTLPixelFormatBC7_RGBAUnorm_sRGB;
-				}
-				else
-				{
-					// 检查是否有Alpha通道
-					bool hasAlpha = HasAlphaChannel(image_format);
-					if (hasAlpha)
-					{
-						output_format = tools::MTLPixelFormatBC3_RGBA_sRGB;
-					}
-					else
-					{
-						// 无Alpha通道，可以使用压缩格式
-						output_format = tools::MTLPixelFormatASTC_4x4_LDR;
-					}
-				}
-			}
-
-		_done:
-			if (HasAlphaChannel(output_format)) data->info.flags |= texture_flags::has_alpha;
-
-			// 处理sRGB格式
-			if (scratch.metadata.isSRGB)
-			{
-				switch (output_format)
-				{
-				case tools::MTLPixelFormatRGBA8Unorm:
-					return tools::MTLPixelFormatRGBA8Unorm_sRGB;
-				case tools::MTLPixelFormatASTC_4x4_LDR:
-					return tools::MTLPixelFormatASTC_4x4_sRGB;
-				default:
-					return output_format;
-				}
-			}
-
-			return output_format;
+			output_format = tools::MTLPixelFormatASTC_4x4_LDR;
 		}
+
+		// ASTC 格式始终支持 alpha 通道
+		data->info.flags |= texture_flags::has_alpha;
+
+		// 如果源内容是 sRGB，升级到对应的 sRGB ASTC 变体
+		if (scratch.metadata.isSRGB)
+		{
+			switch (output_format)
+			{
+			case tools::MTLPixelFormatASTC_4x4_LDR: return tools::MTLPixelFormatASTC_4x4_sRGB;
+			case tools::MTLPixelFormatASTC_6x6_LDR: return tools::MTLPixelFormatASTC_6x6_sRGB;
+			case tools::MTLPixelFormatASTC_8x8_LDR: return tools::MTLPixelFormatASTC_8x8_sRGB;
+			default: break;
+			}
+		}
+
+		return output_format;
+	}
 
 		// Resolves the astcenc CLI binary. Prefers the PRIMAL_ASTCENC_PATH
 		// env var (set it to the built binary), then falls back to a bare
@@ -2331,44 +2316,70 @@ namespace primal::tools
 		 * @param scratch 临时图像数据
 		 * @return 压缩后的图像数据
 		 */
-		[[nodiscard]] ScratchImage compress_image_metal(texture_data *const data, ScratchImage& scratch)
+	[[nodiscard]] ScratchImage compress_image_metal(texture_data *const data, ScratchImage& scratch)
+	{
+		assert(data && data->import_settings.compress && !scratch.m_images.empty());
+
+		const tools::Image *const image{ &scratch.m_images[0] };
+		if (!image)
 		{
-			assert(data && data->import_settings.compress && !scratch.m_images.empty());
-
-			const tools::Image *const image{ &scratch.m_images[0] };
-			if (!image)
-			{
-				data->info.import_error = import_error::unknown;
-				return {};
-			}
-
-			const tools::MTLPixelFormat output_format{ determine_output_format_metal(data, scratch, image) };
-			bool success = false;
-			ScratchImage compressed_scratch;
-			
-			// 初始化压缩后的ScratchImage
-			compressed_scratch.metadata = scratch.metadata;
-			compressed_scratch.metadata.format = output_format;
-			compressed_scratch.m_nimages = scratch.m_nimages;
-			compressed_scratch.m_images.resize(scratch.m_nimages);
-			
-			// 直接使用texturetool进行压缩，不再尝试GPU或CPU压缩
-			for (u64 img = 0; img < scratch.m_nimages; ++img)
-			{
-				success = compress_with_astcenc(scratch.m_images[img], 
-					compressed_scratch.m_images[img], output_format);
-				if (!success) break;
-			}
-
-			if (!success)
-			{
-				data->info.import_error = import_error::compress;
-				return {};
-			}
-
-			data->info.import_error = import_error::succeeded;
-			return compressed_scratch;
+			data->info.import_error = import_error::unknown;
+			return {};
 		}
+
+		const tools::MTLPixelFormat output_format{ determine_output_format_metal(data, scratch, image) };
+		bool success = false;
+		ScratchImage compressed_scratch;
+
+		compressed_scratch.metadata = scratch.metadata;
+		compressed_scratch.metadata.format = output_format;
+		compressed_scratch.m_nimages = scratch.m_nimages;
+		compressed_scratch.m_images.resize(scratch.m_nimages);
+
+		for (u64 img = 0; img < scratch.m_nimages; ++img)
+		{
+			success = compress_with_astcenc(scratch.m_images[img],
+				compressed_scratch.m_images[img], output_format);
+			if (!success) break;
+		}
+
+		if (!success)
+		{
+			for (u64 img = 0; img < compressed_scratch.m_nimages; ++img)
+			{
+				delete[] compressed_scratch.m_images[img].pixels;
+				compressed_scratch.m_images[img].pixels = nullptr;
+			}
+			data->info.import_error = import_error::compress;
+			return {};
+		}
+
+		// compress_with_astcenc allocates each image's pixels via new[].
+		// Consolidate them into compressed_scratch.pixels so the ScratchImage
+		// owns the data and frees it on destruction.
+		{
+			u64 total_size = 0;
+			for (u64 img = 0; img < compressed_scratch.m_nimages; ++img)
+				total_size += compressed_scratch.m_images[img].slicePitch;
+
+			compressed_scratch.pixels.resize(total_size);
+			u64 offset = 0;
+			for (u64 img = 0; img < compressed_scratch.m_nimages; ++img)
+			{
+				tools::Image& ref = compressed_scratch.m_images[img];
+				if (ref.pixels && ref.slicePitch > 0)
+				{
+					std::memcpy(compressed_scratch.pixels.data() + offset, ref.pixels, ref.slicePitch);
+					delete[] ref.pixels;
+				}
+				ref.pixels = compressed_scratch.pixels.data() + offset;
+				offset += ref.slicePitch;
+			}
+		}
+
+		data->info.import_error = import_error::succeeded;
+		return compressed_scratch;
+	}
 
 		/**
 		 * @brief 使用astcenc解压缩纹理
