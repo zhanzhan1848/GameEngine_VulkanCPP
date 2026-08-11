@@ -127,7 +127,10 @@ public class AssetEditorHost : Window
 
     protected override void OnClosed(System.EventArgs e)
     {
-        SaveLayoutNow();
+        // Close path: strip this asset from layout.OpenAssets so the next
+        // session doesn't reopen it; bounds still live in AssetWindows.
+        SaveLayoutNow(isClosing: true);
+        AssetEditorRegistry.Unregister(this);
         base.OnClosed(e);
         if (ViewModel != null) ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
     }
@@ -172,22 +175,31 @@ public class AssetEditorHost : Window
         _saveLayoutTimer.Start();
     }
 
-    private void SaveLayoutNow()
+    private void SaveLayoutNow(bool isClosing = false)
     {
         if (ViewModel?.Asset == null) return;
         var layout = EditorLayoutSettings.Load();
-        var s = new L
+        var path = ViewModel.Asset.FullPath;
+        if (isClosing)
         {
-            X = Position.X,
-            Y = Position.Y,
-            W = (int)Width,
-            H = (int)Height,
-            State = WindowState == Avalonia.Controls.WindowState.Maximized ? 1 : 0,
-        };
-        layout.AssetWindows[ViewModel.Asset.FullPath] = s;
-        if (!layout.OpenAssets.Contains(ViewModel.Asset.FullPath))
+            layout.OpenAssets.Remove(path);
+            // Keep AssetWindows[path] so the next manual open restores bounds.
+        }
+        else
         {
-            layout.OpenAssets.Add(ViewModel.Asset.FullPath);
+            var s = new L
+            {
+                X = Position.X,
+                Y = Position.Y,
+                W = (int)Width,
+                H = (int)Height,
+                State = WindowState == Avalonia.Controls.WindowState.Maximized ? 1 : 0,
+            };
+            layout.AssetWindows[path] = s;
+            if (!layout.OpenAssets.Contains(path))
+            {
+                layout.OpenAssets.Add(path);
+            }
         }
         EditorLayoutSettings.Save(layout);
     }

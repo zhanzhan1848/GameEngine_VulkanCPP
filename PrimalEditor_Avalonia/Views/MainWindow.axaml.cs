@@ -1,4 +1,5 @@
 using System.IO;
+using System.Linq;
 using Avalonia.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
@@ -285,5 +286,26 @@ public partial class MainWindow : Window
         var snapshot = EditorLayoutSettings.Load();
         snapshot.DockLayout = vm.CaptureLayoutForSave();
         EditorLayoutSettings.Save(snapshot);
+    }
+
+    /// <summary>
+    /// Tear down every open asset editor when the main window goes away.
+    /// Without this, Avalonia's default ShutdownMode.OnLastWindowClose
+    /// keeps the process alive while any AssetEditorHost window is still
+    /// open. Closing them here also runs each host's OnClosed, which
+    /// strips its path from editor-layout.json's OpenAssets list so
+    /// the next session doesn't auto-reopen closed assets.
+    /// </summary>
+    protected override void OnClosed(System.EventArgs e)
+    {
+        foreach (var host in AssetEditorRegistry.OpenHosts.ToArray())
+        {
+            try { host.Close(); }
+            catch (System.Exception ex)
+            {
+                Logger.Error($"MainWindow: failed to close asset editor '{host.ViewModel?.Asset?.FileName}'", ex);
+            }
+        }
+        base.OnClosed(e);
     }
 }
