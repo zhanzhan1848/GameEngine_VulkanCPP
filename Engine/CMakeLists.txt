@@ -474,11 +474,17 @@ endif()
 # Engine 整体 -fno-exceptions,但 Script.cpp 的 fixed_update/late_update/begin_play/destroy
 # 必须 catch + log + continue,防止单个脚本异常中断整个 dispatch。Per-file override。
 if(NOT MSVC)
+    # NOTE: 用 COMPILE_FLAGS 而非 COMPILE_OPTIONS。CMake 4.x 的 Unix Makefiles
+    # 生成器对 source-file 级 COMPILE_OPTIONS 在 -fno-exceptions 已由 target 级
+    # PRIVATE 选项设定时不会追加(实际编译命令仅含 $(CXX_FLAGS),override 丢失,
+    # 导致 Script.cpp 的 try/catch 报 "cannot use 'try' with exceptions disabled")。
+    # COMPILE_FLAGS 是 per-file 字符串属性,生成器会去重后追加到该文件命令末尾,
+    # -fexceptions 出现在 -fno-exceptions 之后由 clang last-wins 解析生效。
     set_source_files_properties(
         "${CMAKE_CURRENT_SOURCE_DIR}/Components/Script.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptState.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptFilesystem.cpp"
-        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+        PROPERTIES COMPILE_FLAGS "-fexceptions"
     )
 endif()
 
