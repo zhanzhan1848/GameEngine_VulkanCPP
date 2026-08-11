@@ -76,6 +76,12 @@ struct ai_asset_pipeline_params
     u32                         meshlet_count;
     u32                         validation_errors;
     u32                         validation_warnings;
+    // Remesh params (appended at tail to preserve C# mirror superset).
+    // target_edge_length: 0 = use remesh::Params default (0.05); callers
+    // should set a value appropriate to the asset's world-space scale.
+    // remesh_iterations: 0 = use default (10).
+    f32                         target_edge_length;
+    u32                         remesh_iterations;
 };
 
 namespace {
@@ -144,6 +150,16 @@ void ConfigurePipelineFromPOD(const ai_asset_pipeline_params& p, Config& cfg) {
     cfg.derive_params.tangent_mode =
         (derive::TangentMode)p.derive_tangent_mode;
     cfg.derive_params.faceted_angle_degrees = p.derive_faceted_angle_deg;
+
+    // Remesh params: target_edge_length <= 0 means AUTO (per-mesh bbox).
+    // remesh::Params::target_edge_length defaults to 0.0f (AUTO), so we
+    // only override when the caller explicitly set a positive value.
+    if (p.target_edge_length > 0.f) {
+        cfg.remesh_params.target_edge_length = p.target_edge_length;
+    }
+    if (p.remesh_iterations > 0) {
+        cfg.remesh_params.iterations = p.remesh_iterations;
+    }
 
     cfg.lod_params.ratio = (p.lod_ratio > 0.f) ? p.lod_ratio : 0.5f;
     cfg.lod_params.max_levels = 6;  // Phase 1 default; POD has no field yet.

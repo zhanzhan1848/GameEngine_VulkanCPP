@@ -45,6 +45,9 @@ struct ai_asset_pipeline_params {
     u32                         meshlet_count;
     u32                         validation_errors;
     u32                         validation_warnings;
+    // Remesh params (must match ContentTools.cpp's POD layout exactly).
+    f32                         target_edge_length;
+    u32                         remesh_iterations;
 };
 extern "C" void ProcessAIAsset(ai_asset_pipeline_params*);
 
@@ -137,7 +140,9 @@ int run_pipeline(int argc, char* argv[]) {
                      "                --no-auto-derive (turn off post-subdivide cascade)\n"
                      "                --derive-normal faceted|smooth|area|angle (default area)\n"
                      "                --derive-tangent none|area|mikkt (default mikkt)\n"
-                     "                --faceted-angle <deg> (default 60)\n";
+                     "                --faceted-angle <deg> (default 60)\n"
+                     "  Remesh:       --target-edge-length <f> (default 0.05; MUST match asset scale!)\n"
+                     "                --remesh-iters N (default 10)\n";
         return 1;
     }
     const char* input_file = argv[2];
@@ -145,9 +150,13 @@ int run_pipeline(int argc, char* argv[]) {
 
     ai_asset_pipeline_params params{};
     params.input_path = input_file;
-    // Phase 1 defaults: lod + meshlet on, others off.
+    // Phase 1 defaults: lod + meshlet + remesh on.
+    // remesh uses split-only long-edge bisection (no collapse): breaks giant
+    // triangles into smaller pieces without losing detail. Smart-skip skips
+    // meshes that are already fine. Use --no-remesh to disable.
     params.enable_lod = 1;
     params.enable_meshlet = 1;
+    params.enable_remesh = 1;
     params.lod_ratio = 0.5f;
     // M11 defaults: match derive::Params and subdivide::Params invariants.
     // auto_derive_after_subdivide defaults to ON so callers opting into
@@ -163,6 +172,7 @@ int run_pipeline(int argc, char* argv[]) {
         const std::string arg = argv[i];
         if      (arg == "--repair")     params.enable_repair = 1;
         else if (arg == "--remesh")     params.enable_remesh = 1;
+        else if (arg == "--no-remesh")  params.enable_remesh = 0;
         else if (arg == "--subdivide")  params.enable_subdivide = 1;
         else if (arg == "--uvatlas")    params.enable_uvatlas = 1;
         else if (arg == "--no-lod")     params.enable_lod = 0;
@@ -206,6 +216,10 @@ int run_pipeline(int argc, char* argv[]) {
             }
         } else if (arg == "--faceted-angle" && i + 1 < argc) {
             params.derive_faceted_angle_deg = (f32)std::stof(argv[++i]);
+        } else if (arg == "--target-edge-length" && i + 1 < argc) {
+            params.target_edge_length = (f32)std::stof(argv[++i]);
+        } else if (arg == "--remesh-iters" && i + 1 < argc) {
+            params.remesh_iterations = (u32)std::stoul(argv[++i]);
         } else {
             std::cerr << "Unknown --pipeline flag: " << arg << "\n";
             return 1;

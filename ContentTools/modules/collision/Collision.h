@@ -32,7 +32,11 @@ struct Params {
 
     // Voxel grid resolution used internally. Higher = better quality but
     // slower. 100k is VHACD's default; 10k is fine for runtime colliders.
+    // When auto_resolution is true (default), voxel_resolution is treated as
+    // an upper bound and scaled down based on triangle count to avoid the
+    // VHACD re-voxelization retry storm on large meshes.
     u32     voxel_resolution{100000};
+    bool    auto_resolution{true};
 
     // Maximum concavity allowed per hull (0..1). Lower = more aggressive
     // splitting = more hulls. VHACD default 0.001.

@@ -285,14 +285,14 @@ bool DecodeScene(const scene_data& src, ProcessableScene& dst,
     dst.name      = std::move(header.scene_name);
     dst.materials = std::move(header.materials);
 
-    // Phase 2: walk lod_groups + meshes, flattening all meshes into lods[0].
-    // Phase 2 ProcessableScene treats all decoded meshes as LOD 0 source.
-    ProcessableLod lod0;
-    lod0.screen_threshold = 0.5f;  // AssetPipeline default for generated LODs
+    // Phase 2: walk lod_groups + meshes, distributing meshes into lods[]
+    // by their PackedMeshView.lod_id. This preserves the source asset's
+    // original LOD structure so the pipeline can detect "already has LOD"
+    // and skip regeneration. Meshes with lod_id == u32_invalid_id (no LOD
+    // info) go into lods[0]; lod_id 0 also maps to lods[0], lod_id N → lods[N].
+    u32 max_lod_id = 0;  // track highest lod_id seen
 
     for (u32 lg = 0; lg < header.lod_group_count; ++lg) {
-        // skip_lod_group_header lives in the .cpp's anonymous namespace; we
-        // re-implement the minimal skip here since it's not exposed publicly.
         u32 lod_name_size;
         if (cursor + 4 > end) {
             errors.emplace_back(ErrorReport{Severity::Error, "blob_decode.truncated_lod_name",
@@ -311,7 +311,7 @@ bool DecodeScene(const scene_data& src, ProcessableScene& dst,
                 "blob_decode: truncated at lod_name bytes", "blob_decode"});
             return false;
         }
-        cursor += lod_name_size;  // discard lod_group name — IR has no concept
+        cursor += lod_name_size;
 
         if (cursor + 4 > end) {
             errors.emplace_back(ErrorReport{Severity::Error, "blob_decode.truncated_mesh_count",
@@ -331,11 +331,35 @@ bool DecodeScene(const scene_data& src, ProcessableScene& dst,
             if (!ReadNextPackedMesh(cursor, end, view, errors)) return false;
             ProcessableMesh pm;
             if (!DecodePackedMesh(view, pm, errors)) return false;
-            lod0.meshes.emplace_back(std::move(pm));
+
+            // Determine which LOD level this mesh belongs to.
+            // lod_id == u32_invalid_id or 0 → LOD 0 (original).
+            const u32 effective_lod = (view.lod_id == u32_invalid_id) ? 0 : view.lod_id;
+            if (effective_lod > max_lod_id) max_lod_id = effective_lod;
+
+            // Ensure lods[] has enough levels.
+            while ((u32)dst.lods.size() <= effective_lod) {
+                ProcessableLod new_lod;
+                new_lod.screen_threshold = 0.5f;
+                dst.lods.emplace_back(std::move(new_lod));
+            }
+
+            // If this mesh has a lod_threshold, update the LOD level's threshold.
+            if (view.lod_threshold > 0.f) {
+                dst.lods[effective_lod].screen_threshold = view.lod_threshold;
+            }
+
+            dst.lods[effective_lod].meshes.emplace_back(std::move(pm));
         }
     }
 
-    dst.lods.emplace_back(std::move(lod0));
+    // Ensure at least lods[0] exists (empty scene edge case).
+    if (dst.lods.empty()) {
+        ProcessableLod lod0;
+        lod0.screen_threshold = 0.5f;
+        dst.lods.emplace_back(std::move(lod0));
+    }
+    (void)max_lod_id;
     return true;
 }
 

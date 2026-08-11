@@ -24,10 +24,30 @@ enum class Mode : u8 {
 };
 
 struct Params {
+    // Default Isotropic: faster than Adaptive (no curvature computation).
+    // The avg-edge AUTO target + large-mesh guard (skip >5000 tris) makes
+    // this practical for multi-scale scenes. Adaptive is available for
+    // meshes where curvature-aware density control is needed.
     Mode    mode             {Mode::Isotropic};
     // Isotropic / Adaptive: target edge length in model units.
     // Decimate: ignored (use ratio instead).
-    f32     target_edge_length {0.05f};
+    // ** SPECIAL VALUE 0.0f = AUTO from bbox **: when target_edge_length <= 0,
+    // the actual target is computed per-mesh as bbox_diagonal / auto_subdiv.
+    // This is the correct mode for multi-mesh scenes where submeshes have
+    // wildly different scales (e.g. Sponza: 5m pillars vs 0.5m vases).
+    // A fixed target_edge_length that's fine for one mesh will collapse or
+    // over-tessellate another.
+    f32     target_edge_length {0.0f};
+
+    // AUTO mode only: target = avg_edge_length / auto_subdiv.
+    //   subdiv=1 → keep existing density (Adaptive mode min/max range prevents
+    //              over-collapse of small triangles while splitting large ones)
+    //   subdiv=2 → double density (halve edge lengths, 4× triangles, slow SDF)
+    // Default 1: with Adaptive mode, the min=target*0.5 / max=target*2.0 range
+    // preserves edges shorter than min (protecting fine detail) while splitting
+    // edges longer than max (breaking up large flat triangles). This is the
+    // best balance for multi-scale scenes like Sponza.
+    u32     auto_subdiv      {1};
 
     // Adaptive only: max approximation error allowed during remeshing.
     f32     adaptive_approx_error{0.001f};

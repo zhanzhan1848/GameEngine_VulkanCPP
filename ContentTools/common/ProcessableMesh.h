@@ -57,6 +57,11 @@ struct ProcessableMesh {
     utl::vector<UVSet>          uv_sets;
     utl::vector<math::v3>       colors;
     u32                         material_idx{u32_invalid_id};
+    // Dirty flags: set by geometry-mutating modules (repair/remesh/subdivide),
+    // cleared by derive. When true, the corresponding attribute channel no
+    // longer matches the current positions/indices and must be recomputed.
+    bool                        normals_dirty{false};
+    bool                        tangents_dirty{false};
 };
 
 // One level of detail. `screen_threshold` is the engine's LOD switch trigger

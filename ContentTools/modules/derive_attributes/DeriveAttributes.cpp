@@ -391,6 +391,11 @@ bool Run(ProcessableMesh& io, const Params& params,
             break;
     }
 
+    // Derive recomputed both channels from current positions/indices — clear
+    // dirty flags so downstream (SDF bridge, packing) knows they're valid.
+    io.normals_dirty = false;
+    io.tangents_dirty = false;
+
     errors.emplace_back(ErrorReport{
         Severity::Info, "derive.ok",
         std::string("derive: normal=") +

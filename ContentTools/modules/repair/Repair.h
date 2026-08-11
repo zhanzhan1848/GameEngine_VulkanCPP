@@ -20,6 +20,8 @@
 #include "common/ProcessableMesh.h"
 #include "common/ErrorReport.h"
 
+#include <vector>
+
 // Forward-declare pmp::SurfaceMesh so the public Repair API can reference it
 // without dragging the PMP (and transitively Eigen) headers into every TU.
 // Repair.cpp is the single TU that actually #includes pmp/surface_mesh.h.
@@ -60,10 +62,11 @@ bool Run(ProcessableMesh& io, const Params& params,
 // Returns the number of faces removed.
 u32 remove_degenerate_faces(class pmp::SurfaceMesh& m, f32 epsilon = 1e-12f);
 
-// For every pair of boundary vertices within stitch_distance, merges them
-// by re-targeting one to the other's position via vertex property collapse.
-// Returns the number of merges performed.
-u32 stitch_borders(class pmp::SurfaceMesh& m, f32 stitch_distance);
+// Compute a vertex remap that merges coincident boundary vertices within
+// stitch_distance, operating directly on the ProcessableMesh IR (post-from_pmp).
+// Uses IR dense vertex indices — no PMP idx mismatch. Returns merge count.
+u32 compute_ir_boundary_remap(const ProcessableMesh& io, f32 stitch_distance,
+                              std::vector<u32>& out_remap);
 
 // Calls pmp::fill_hole on every boundary halfedge whose loop length is
 // ≤ max_hole_size (0 = unlimited). Returns the number of holes filled.

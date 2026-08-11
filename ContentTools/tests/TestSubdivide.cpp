@@ -134,6 +134,47 @@ bool test_levels_zero_is_noop() {
     return face_count(m) == faces_before;
 }
 
+// Two tetrahedra sharing a single edge — both cap triangles share that edge,
+// making it non-manifold (4 incident faces). Pre-M13 this crashed with
+// pmp::TopologyException. Post-fix: subdivide drops the offending faces,
+// emits a "subdivide.dropped_non_manifold" warning, and subdivides the
+// remaining manifold portion.
+bool test_non_manifold_input_drops_instead_of_crashing() {
+    ProcessableMesh m;
+    m.positions.emplace_back(v3{ 0.f, 0.f, 0.f});  // 0
+    m.positions.emplace_back(v3{ 1.f, 0.f, 0.f});  // 1  (shared edge 0-1)
+    m.positions.emplace_back(v3{ 0.f, 1.f, 0.f});  // 2  (tet A cap)
+    m.positions.emplace_back(v3{ 0.f, 0.f, 1.f});  // 3  (tet A apex)
+    m.positions.emplace_back(v3{ 0.f,-1.f, 0.f});  // 4  (tet B cap)
+    m.positions.emplace_back(v3{ 0.f, 0.f,-1.f});  // 5  (tet B apex)
+    // Tet A: edge 0-1 has 2 incident faces (0,1,2)(0,3,1)
+    static const u32 tet_a[] = {0,1,2, 0,3,1};
+    for (auto i : tet_a) m.indices.emplace_back(i);
+    // Tet B: edge 0-1 gets 2 more incident faces (0,4,1)(0,1,5) → non-manifold
+    static const u32 tet_b[] = {0,4,1, 0,1,5};
+    for (auto i : tet_b) m.indices.emplace_back(i);
+
+    const u32 faces_before = face_count(m);   // 4
+    Params p;
+    p.scheme = Scheme::Loop;
+    p.levels = 1;
+    primal::utl::vector<ErrorReport> errs;
+    const bool ok = Run(m, p, errs);
+    if (!ok) return false;
+
+    bool found_warning = false;
+    for (const auto& e : errs) {
+        if (e.code == "subdivide.dropped_non_manifold") {
+            found_warning = true;
+            break;
+        }
+    }
+    if (!found_warning) return false;
+    // Result should have grown from the manifold portion (>= 2 faces survived
+    // × 4 from Loop = >= 8). Exact count depends on which faces were dropped.
+    return face_count(m) >= 8 && face_count(m) < faces_before * 4;
+}
+
 // --- Test runner ----------------------------------------------------------
 
 struct Case { const char* name; bool (*fn)(); };
@@ -147,6 +188,7 @@ int main() {
         CASE(test_catmull_clark_runs_and_grows_face_count),
         CASE(test_empty_mesh_returns_warning),
         CASE(test_levels_zero_is_noop),
+        CASE(test_non_manifold_input_drops_instead_of_crashing),
     };
 
     int passed = 0, failed = 0;

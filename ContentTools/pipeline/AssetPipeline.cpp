@@ -3,10 +3,29 @@
 #include "SceneBlobWriter.h"
 #include "common/SDF.h"
 
+#include <algorithm>
+#include <csignal>
+#include <csetjmp>
+#include <cstdio>
 #include <utility>
 
 namespace primal::tools::pipeline {
 namespace {
+
+// Pipeline-level SIGABRT safety net. Third-party libraries (PMP uniform_remeshing,
+// xatlas normalize) can trigger C assert() → abort() on degenerate geometry.
+// These are NOT catchable C++ exceptions. The handler longjmps back to skip
+// ALL in-place modules for the current mesh, preserving the pre-module IR state.
+thread_local std::jmp_buf pipeline_jmp_buf;
+thread_local bool pipeline_handler_active = false;
+void pipeline_sigabrt_handler(int sig) {
+    (void)sig;
+    if (pipeline_handler_active) {
+        longjmp(pipeline_jmp_buf, 1);
+    }
+    std::signal(SIGABRT, SIG_DFL);
+    std::raise(SIGABRT);
+}
 
 // Run per-mesh in-place modules on a single ProcessableMesh. Each module is
 // gated by its enable flag and emits warnings/info into `out` (errors are
@@ -63,6 +82,21 @@ void build_packed_for_mesh(const ProcessableMesh& m,
                 bridge.vertices[i].uv = m.uv_sets[0].coords[i];
         }
         bridge.indices = m.indices;
+        // Validate index range before SDF: upstream modules (repair/remesh)
+        // can leave indices referencing vertices beyond positions.size()
+        // after compaction. Clamp/drop bad triangles to avoid SIGBUS in SDF.
+        {
+            u32 w = 0;
+            for (u32 r = 0; r < (u32)bridge.indices.size(); r += 3) {
+                if (bridge.indices[r]     >= bridge.vertices.size()) continue;
+                if (bridge.indices[r + 1] >= bridge.vertices.size()) continue;
+                if (bridge.indices[r + 2] >= bridge.vertices.size()) continue;
+                bridge.indices[w++] = bridge.indices[r];
+                bridge.indices[w++] = bridge.indices[r + 1];
+                bridge.indices[w++] = bridge.indices[r + 2];
+            }
+            bridge.indices.resize(w);
+        }
         generate_sdf(bridge);
         pm.sdf = std::move(bridge.sdf);
     }
@@ -89,54 +123,110 @@ void Run(ProcessableScene&& in, const Config& cfg, Result& out) {
     // generation so each LOD level derives from cleaned-up geometry.
     ProcessableLod& lod0 = out.scene.lods[0];
     for (auto& m : lod0.meshes) {
-        run_in_place_modules(m, cfg, out.warnings);
+        // Snapshot the IR before in-place modules so we can restore on abort.
+        // Some third-party operations (PMP remesh, xatlas) trigger C assert()
+        // → abort() on degenerate geometry. The SIGABRT handler longjmps back
+        // here; we restore the snapshot and skip modules for this mesh.
+        ProcessableMesh snapshot = m;
 
-        if (cfg.enable_collision) {
+        pipeline_handler_active = true;
+        auto* prev_handler = std::signal(SIGABRT, pipeline_sigabrt_handler);
+        bool aborted = (setjmp(pipeline_jmp_buf) != 0);
+
+        if (!aborted) {
+            run_in_place_modules(m, cfg, out.warnings);
+        }
+
+        if (aborted) {
+            // Restore pre-module state and emit a warning.
+            m = std::move(snapshot);
+            out.warnings.emplace_back(ErrorReport{
+                Severity::Warning, "pipeline.module_aborted",
+                "pipeline: third-party module aborted (SIGABRT) on this mesh; "
+                "skipping all in-place modules, preserving pre-module geometry",
+                "pipeline"});
+        }
+
+        pipeline_handler_active = false;
+        std::signal(SIGABRT, prev_handler);
+
+        if (!aborted && cfg.enable_collision) {
             auto hulls = collision::Run(m, cfg.collision_params, out.warnings);
             for (auto& h : hulls) out.hulls.emplace_back(std::move(h));
         }
     }
 
-    // ---- Phase 2: LOD generation ----------------------------------------
-    // lod::Run on LOD 0's first mesh produces N additional LOD levels.
-    // Phase 1 assumes one mesh per LOD (multi-mesh LOD chains are Phase 2).
-    if (cfg.enable_lod && lod0.meshes.size() == 1) {
-        ProcessableMesh& hi = lod0.meshes[0];
-        const f32 base_threshold = lod0.screen_threshold > 0.f
-            ? lod0.screen_threshold : 0.5f;
-        // Mark LOD 0 with its threshold; subsequent LODs get progressively
-        // larger thresholds (halved each level under the default ratio=0.5).
-        if (lod0.screen_threshold <= 0.f) lod0.screen_threshold = base_threshold;
+    // ---- Phase 2: per-mesh LOD generation ------------------------------
+    // If the source asset already has LOD levels (lods.size() > 1), preserve
+    // them as-is — don't auto-generate additional LODs. Otherwise, generate
+    // LOD chains per-mesh: only meshes with vertex_count >= min_vertices_for_lod
+    // get simplified; small meshes are left at LOD 0 only.
+    const bool source_has_lod = out.scene.lods.size() > 1;
 
-        utl::vector<ErrorReport> lod_reports;
-        utl::vector<ProcessableMesh> lower_lods = lod::Run(hi, cfg.lod_params, lod_reports);
-        for (auto& r : lod_reports) out.warnings.emplace_back(std::move(r));
+    struct LodEntry { ProcessableMesh mesh; f32 threshold; };
+    struct MeshLodChain {
+        utl::vector<LodEntry> levels;  // [0] = LOD 0 (original), [1..N] = lower
+    };
+    utl::vector<MeshLodChain> mesh_lod_chains;
 
-        f32 threshold = base_threshold;
-        for (u32 i = 0; i < (u32)lower_lods.size(); ++i) {
-            // Each LOD's switch threshold = previous threshold / ratio.
-            // So if ratio=0.5, thresholds go 0.5, 1.0, 2.0, 4.0 ... (in
-            // terms of "switch when screen size drops below"). This mirrors
-            // how LOD thresholds are interpreted downstream.
-            threshold /= (cfg.lod_params.ratio > 0.f ? cfg.lod_params.ratio : 0.5f);
-            ProcessableLod new_lod;
-            new_lod.screen_threshold = threshold;
-            new_lod.meshes.emplace_back(std::move(lower_lods[i]));
-            out.scene.lods.emplace_back(std::move(new_lod));
+    const u32 num_lod0_meshes = (u32)lod0.meshes.size();
+    mesh_lod_chains.resize(num_lod0_meshes);
+
+    const f32 base_threshold = lod0.screen_threshold > 0.f
+        ? lod0.screen_threshold : 0.5f;
+    if (lod0.screen_threshold <= 0.f) lod0.screen_threshold = base_threshold;
+
+    if (source_has_lod) {
+        // Source asset already has LOD: distribute existing levels into chains.
+        // Each LOD level's meshes are paired by index with LOD 0's meshes.
+        for (u32 mi = 0; mi < num_lod0_meshes; ++mi) {
+            mesh_lod_chains[mi].levels.push_back({lod0.meshes[mi], base_threshold});
+            for (u32 li = 1; li < (u32)out.scene.lods.size(); ++li) {
+                auto& lod_level = out.scene.lods[li];
+                if (mi < (u32)lod_level.meshes.size()) {
+                    mesh_lod_chains[mi].levels.push_back(
+                        {lod_level.meshes[mi], lod_level.screen_threshold});
+                }
+            }
         }
-    } else if (cfg.enable_lod) {
         out.warnings.emplace_back(ErrorReport{
-            Severity::Warning, "pipeline.lod_multi_mesh_unsupported",
-            "pipeline: lod generation with multiple meshes per LOD is Phase 2; skipped",
+            Severity::Info, "pipeline.lod_preserved",
+            "pipeline: source asset has " + std::to_string(out.scene.lods.size()) +
+            " LOD levels; preserving existing LOD structure (no auto-generation)",
             "pipeline"});
+    } else {
+        // No existing LOD: auto-generate per mesh.
+        for (u32 mi = 0; mi < num_lod0_meshes; ++mi) {
+            auto& m = lod0.meshes[mi];
+            mesh_lod_chains[mi].levels.push_back({m, base_threshold});
+
+            if (!cfg.enable_lod) continue;
+
+            // Vertex-count gate: skip LOD for meshes below the threshold.
+            if ((u32)m.positions.size() < cfg.min_vertices_for_lod) continue;
+
+            utl::vector<ErrorReport> lod_reports;
+            utl::vector<ProcessableMesh> lower_lods = lod::Run(m, cfg.lod_params, lod_reports);
+            for (auto& r : lod_reports) out.warnings.emplace_back(std::move(r));
+
+            f32 threshold = base_threshold;
+            for (u32 i = 0; i < (u32)lower_lods.size(); ++i) {
+                threshold /= (cfg.lod_params.ratio > 0.f ? cfg.lod_params.ratio : 0.5f);
+                mesh_lod_chains[mi].levels.push_back({std::move(lower_lods[i]), threshold});
+            }
+        }
     }
 
-    // ---- Phase 3: build packed meshes for every LOD level ---------------
-    for (u32 lod_idx = 0; lod_idx < (u32)out.scene.lods.size(); ++lod_idx) {
-        ProcessableLod& lod = out.scene.lods[lod_idx];
-        const u32 lod_id = (lod_idx == 0) ? u32_invalid_id : lod_idx;
-        for (auto& m : lod.meshes) {
-            build_packed_for_mesh(m, lod_id, lod.screen_threshold, cfg, out);
+    // ---- Phase 3: build packed meshes from per-mesh LOD chains ---------
+    // Flatten mesh_lod_chains → PackedMesh entries. Each mesh's LOD levels
+    // get lod_id = 0 (original), 1, 2, ... with their respective thresholds.
+    // Meshes that didn't generate LODs only emit lod_id=0.
+    for (u32 mi = 0; mi < num_lod0_meshes; ++mi) {
+        auto& chain = mesh_lod_chains[mi];
+        for (u32 li = 0; li < (u32)chain.levels.size(); ++li) {
+            const u32 lod_id = (li == 0) ? u32_invalid_id : li;
+            build_packed_for_mesh(chain.levels[li].mesh, lod_id,
+                                  chain.levels[li].threshold, cfg, out);
         }
     }
 }

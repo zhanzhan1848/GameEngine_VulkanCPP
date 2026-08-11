@@ -58,7 +58,25 @@ utl::vector<Hull> Run(const ProcessableMesh& m, const Params& params,
         return hulls;
     }
 
-    const VHACD::IVHACD::Parameters vp = make_vhacd_params(params);
+    // Adaptive voxel resolution: VHACD's default 100k (per-axis dim ≈ 46)
+    // triggers up to 5 re-voxelization retries on large meshes (each retry
+    // re-rasterizes the full triangle set). Scale down by triangle count so
+    // runtime colliders complete in reasonable time.
+    VHACD::IVHACD::Parameters vp = make_vhacd_params(params);
+    if (params.auto_resolution) {
+        const u32 tri_count = (u32)m.indices.size() / 3;
+        u32 effective = params.voxel_resolution;
+        if      (tri_count > 10000) effective = std::min(effective, 10000u);
+        else if (tri_count > 1000)  effective = std::min(effective, 40000u);
+        // tri_count <= 1000: keep full resolution for small meshes.
+        if (effective != vp.m_resolution) {
+            vp.m_resolution = effective;
+            errors.emplace_back(ErrorReport{
+                Severity::Info, "collision.auto_resolution",
+                "collision: auto voxel_resolution=" + std::to_string(effective) +
+                " (tri_count=" + std::to_string(tri_count) + ")", "collision"});
+        }
+    }
 
     const bool ok = vhacd->Compute(
         reinterpret_cast<const float*>(m.positions.data()),

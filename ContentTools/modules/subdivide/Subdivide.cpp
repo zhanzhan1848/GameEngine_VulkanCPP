@@ -3,6 +3,8 @@
 #include "pmp/surface_mesh.h"
 #include "pmp/algorithms/subdivision.h"
 
+#include <unordered_map>
+
 namespace primal::tools::subdivide {
 namespace {
 
@@ -22,7 +24,61 @@ struct AttributeChannels {
     std::vector<pmp::VertexProperty<math::v2>*> uvs;
 };
 
-SurfaceMesh to_pmp(const ProcessableMesh& ir, AttributeChannels& attrs) {
+// Pre-validate triangle list for non-manifold edges before handing it to
+// pmp. pmp::SurfaceMesh::add_triangle throws TopologyException on any edge
+// that already has 2 incident faces. Real-world FBX assets (Sponza, gate-
+// metal-bars) routinely violate this. We mark each face keep/drop in a
+// pass separate from to_pmp so the IR↔PMP bridge stays untouched (the
+// bridge has known-good behavior with vertex properties; mixing edge-count
+// state into it caused a regression on the normals round-trip test).
+//
+// Returns a keep/drop mask sized to num_tris. dropped_count gets the total.
+std::vector<bool> mark_non_manifold_faces(const ProcessableMesh& ir,
+                                          u32& dropped_count) {
+    const u32 num_tris = (u32)ir.indices.size() / 3;
+    std::vector<bool> keep(num_tris, true);
+    dropped_count = 0;
+
+    // Edge key: ordered (min,max) u32 pair. Hash via Cantor pairing.
+    struct EdgeKey {
+        u32 a, b;
+        bool operator==(const EdgeKey& o) const noexcept { return a == o.a && b == o.b; }
+    };
+    struct EdgeKeyHash {
+        size_t operator()(const EdgeKey& k) const noexcept {
+            return ((size_t)k.a + (size_t)k.b) * ((size_t)k.a + (size_t)k.b + 1) / 2 + k.b;
+        }
+    };
+    std::unordered_map<EdgeKey, u32, EdgeKeyHash> edge_face_count;
+    edge_face_count.reserve(static_cast<size_t>(num_tris) * 3);
+
+    for (u32 t = 0; t < num_tris; ++t) {
+        const u32 i0 = ir.indices[t * 3 + 0];
+        const u32 i1 = ir.indices[t * 3 + 1];
+        const u32 i2 = ir.indices[t * 3 + 2];
+        if (i0 == i1 || i1 == i2 || i2 == i0) {
+            keep[t] = false;
+            ++dropped_count;
+            continue;
+        }
+        const EdgeKey e01{i0 < i1 ? i0 : i1, i0 < i1 ? i1 : i0};
+        const EdgeKey e12{i1 < i2 ? i1 : i2, i1 < i2 ? i2 : i1};
+        const EdgeKey e20{i2 < i0 ? i2 : i0, i2 < i0 ? i0 : i2};
+        if (edge_face_count[e01] >= 2 || edge_face_count[e12] >= 2 ||
+            edge_face_count[e20] >= 2) {
+            keep[t] = false;
+            ++dropped_count;
+            continue;
+        }
+        ++edge_face_count[e01];
+        ++edge_face_count[e12];
+        ++edge_face_count[e20];
+    }
+    return keep;
+}
+
+SurfaceMesh to_pmp(const ProcessableMesh& ir, AttributeChannels& attrs,
+                   const std::vector<bool>& keep_mask) {
     SurfaceMesh m;
     m.reserve(static_cast<unsigned>(ir.positions.size()),
               static_cast<unsigned>(ir.positions.size() * 3),
@@ -70,6 +126,7 @@ SurfaceMesh to_pmp(const ProcessableMesh& ir, AttributeChannels& attrs) {
 
     const u32 num_tris = (u32)ir.indices.size() / 3;
     for (u32 t = 0; t < num_tris; ++t) {
+        if (!keep_mask[t]) continue;
         const u32 i0 = ir.indices[t * 3 + 0];
         const u32 i1 = ir.indices[t * 3 + 1];
         const u32 i2 = ir.indices[t * 3 + 2];
@@ -92,7 +149,9 @@ void from_pmp(const SurfaceMesh& m, const AttributeChannels& attrs,
     const bool want_tangents = attrs.tangents != nullptr;
     const bool want_colors   = attrs.colors   != nullptr;
 
-    std::vector<u32> vmap(m.n_vertices(), u32_invalid_id);
+    // vmap must be sized to vertices_size() (includes deleted verts) not
+    // n_vertices() — see Repair.cpp from_pmp for the same fix.
+    std::vector<u32> vmap(m.vertices_size(), u32_invalid_id);
     u32 next_v = 0;
     for (auto v : m.vertices()) {
         vmap[v.idx()] = next_v++;
@@ -147,7 +206,14 @@ bool Run(ProcessableMesh& io, const Params& params,
     }
 
     AttributeChannels attrs;
-    SurfaceMesh m = to_pmp(io, attrs);
+    u32 dropped_non_manifold = 0;
+    std::vector<bool> keep_mask = mark_non_manifold_faces(io, dropped_non_manifold);
+    // NOTE: must use copy-init, not default-construct + move-assign.
+    // pmp::SurfaceMesh move-assign leaves VertexProperty<T> handles (raw
+    // pointers into PropertyArray storage) dangling — the destination
+    // reallocates its property container. With copy-init, attrs.normals's
+    // parray_ stays valid because no second SurfaceMesh exists to shadow it.
+    SurfaceMesh m = to_pmp(io, attrs, keep_mask);
     try {
         for (u32 i = 0; i < params.levels; ++i) {
             if (params.scheme == Scheme::Loop) {
@@ -168,6 +234,14 @@ bool Run(ProcessableMesh& io, const Params& params,
             "subdivide: PMP threw unknown exception", "subdivide"});
         release_attrs(attrs);
         return false;
+    }
+
+    if (dropped_non_manifold > 0) {
+        errors.emplace_back(ErrorReport{
+            Severity::Warning, "subdivide.dropped_non_manifold",
+            "subdivide: dropped " + std::to_string(dropped_non_manifold) +
+            " non-manifold face(s) before subdivision (pmp requires 2-manifold input)",
+            "subdivide"});
     }
 
     from_pmp(m, attrs, io);

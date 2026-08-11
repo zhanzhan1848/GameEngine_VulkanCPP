@@ -40,7 +40,11 @@ namespace primal::tools::pipeline {
 // opt into per asset.
 struct Config {
     bool                    enable_repair{false};
-    bool                    enable_remesh{false};
+    // remesh defaults ON: uses split-only long-edge bisection (no collapse),
+    // which breaks giant triangles (walls, floors) into smaller pieces without
+    // losing any existing detail. Smart-skip (max_edge / bbox_diag < 0.2)
+    // skips meshes that are already well-tessellated.
+    bool                    enable_remesh{true};
     bool                    enable_subdivide{false};
     bool                    enable_derive{false};  // standalone derive (independent of subdivide cascade)
     bool                    auto_derive_after_subdivide{true};  // auto-cascade derive after subdivide runs
@@ -49,6 +53,13 @@ struct Config {
     bool                    enable_meshlet{true};
     bool                    enable_collision{false};
     bool                    enable_sdf{false};  // Phase 1: off (legacy SDF consumer is ImportFbx only)
+
+    // Minimum vertex count for LOD generation per mesh. Meshes with fewer
+    // vertices are too simple to benefit from LOD (simplifying a 50-vertex
+    // vase produces a degenerate blob). Default 1000: balances coverage of
+    // meaningful meshes with avoiding degenerate LOD output on small meshes
+    // (especially after remesh changes geometry density).
+    u32                     min_vertices_for_lod{500};
 
     repair::Params          repair_params;
     remesh::Params          remesh_params;
