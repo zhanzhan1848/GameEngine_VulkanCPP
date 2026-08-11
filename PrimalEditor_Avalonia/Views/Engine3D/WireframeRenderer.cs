@@ -33,7 +33,7 @@ public static class WireframeRenderer
         }
     }
 
-    public static void Draw(DrawingContext ctx, MeshLOD? lod, ViewState view, float yawHint = 0f)
+    public static void Draw(DrawingContext ctx, MeshLOD? lod, ViewState view, float yawHint = 0f, int? submeshIndex = null)
     {
         if (lod == null) return;
         if (lod.Meshes.Count == 0) return;
@@ -63,8 +63,10 @@ public static class WireframeRenderer
         var h = view.ViewportHeight;
         float focal = MathF.Min(w, h) * 0.5f;
 
-        foreach (var mesh in lod.Meshes)
+        for (int meshIdx = 0; meshIdx < lod.Meshes.Count; ++meshIdx)
         {
+            if (submeshIndex.HasValue && submeshIndex.Value != meshIdx) continue;
+            var mesh = lod.Meshes[meshIdx];
             var pos = mesh.GetPositionsAsFloat3();
             var idx = mesh.GetIndicesAsInt();
 

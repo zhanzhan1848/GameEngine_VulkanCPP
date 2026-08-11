@@ -58,56 +58,108 @@ public class Geometry
         {
             using var fs = System.IO.File.OpenRead(path);
             using var br = new System.IO.BinaryReader(fs);
-            var magic = br.ReadUInt64();
-            if (magic != 0x48534D4550474D2DUL)
+
+            // Wire format mirrors ContentTools/Geometry.cpp::pack_data:
+            //   scene_name (u32 len + bytes)
+            //   material_count (u32) + per-material {name, diffuse_tex, normal_tex}
+            //   lod_count (u32) + per-lod {name, mesh_count, meshes}
+            //   per-mesh {name, lod_id, material_idx, element_size, elements_type,
+            //             num_vertices, index_size, num_indices, lod_threshold,
+            //             position_buffer, element_buffer, index_buffer,
+            //             MSHL meshlets block, SDF block}
+            ReadU32LengthString(br); // scene name
+            var materialCount = br.ReadUInt32();
+            for (uint i = 0; i < materialCount; ++i)
             {
-                LoadFallback(path);
-                return LODs.Count > 0;
+                ReadU32LengthString(br);
+                ReadU32LengthString(br);
+                ReadU32LengthString(br);
             }
 
             var lodCount = br.ReadUInt32();
             for (uint i = 0; i < lodCount; ++i)
             {
-                var lod = new MeshLOD { Name = br.ReadString(), LodThreshold = br.ReadSingle() };
+                var lodName = ReadU32LengthString(br);
                 var meshCount = br.ReadUInt32();
+                var lod = new MeshLOD { Name = lodName, LodThreshold = 0f };
                 for (uint m = 0; m < meshCount; ++m)
                 {
-                    var mesh = new Mesh { Name = br.ReadString() };
-                    mesh.VertexCount  = (int)br.ReadUInt32();
-                    mesh.IndexCount   = (int)br.ReadUInt32();
-                    mesh.IndexSize    = (int)br.ReadUInt32();
+                    var mesh = new Mesh
+                    {
+                        Name = ReadU32LengthString(br),
+                    };
+                    br.ReadUInt32();  // lod_id (unused in CPU preview)
+                    br.ReadUInt32();  // material_idx
+                    var elementSize = (int)br.ReadUInt32();
                     mesh.ElementsType = (ElementsType)br.ReadUInt32();
-                    var posBytes  = mesh.VertexCount * sizeof(float) * 3;
-                    var elemBytes = (int)br.ReadUInt32();
+                    mesh.VertexCount  = (int)br.ReadUInt32();
+                    mesh.IndexSize    = (int)br.ReadUInt32();
+                    mesh.IndexCount   = (int)br.ReadUInt32();
+                    lod.LodThreshold  = br.ReadSingle();
+
+                    var posBytes = mesh.VertexCount * sizeof(float) * 3;
                     mesh.Positions = br.ReadBytes(posBytes);
-                    mesh.Elements  = br.ReadBytes(elemBytes);
+                    mesh.Elements  = br.ReadBytes(mesh.VertexCount * elementSize);
                     mesh.Indices   = br.ReadBytes(mesh.IndexCount * mesh.IndexSize);
+
+                    SkipMeshletBlock(br);
+                    SkipSdfBlock(br);
+
                     lod.Meshes.Add(mesh);
                 }
                 LODs.Add(lod);
             }
-            return true;
+            return LODs.Count > 0;
         }
         catch (Exception ex)
         {
-            System.Console.Error.WriteLine($"Geometry.Load failed: {ex.Message}");
-            LoadFallback(path);
-            return LODs.Count > 0;
+            PrimalEditor_Avalonia.Common.Logger.Warning($"Geometry.Load failed: {ex.Message}");
+            return false;
         }
     }
 
-    private void LoadFallback(string path)
+    private static string ReadU32LengthString(System.IO.BinaryReader br)
     {
-        try
+        var len = (int)br.ReadUInt32();
+        if (len <= 0) return string.Empty;
+        var bytes = br.ReadBytes(len);
+        return System.Text.Encoding.UTF8.GetString(bytes);
+    }
+
+    private static void SkipMeshletBlock(System.IO.BinaryReader br)
+    {
+        var magic = br.ReadUInt32();
+        if (magic != 0x4C48534D) // 'MSHL' (LE)
         {
-            var lod = new MeshLOD { Name = "default", LodThreshold = 0f };
-            var mesh = new Mesh { Name = System.IO.Path.GetFileNameWithoutExtension(path) };
-            mesh.VertexCount = 1;
-            mesh.IndexCount = 0;
-            mesh.Positions = new byte[sizeof(float) * 3];
-            lod.Meshes.Add(mesh);
-            LODs.Add(lod);
+            br.BaseStream.Position -= 4;
+            return;
         }
-        catch { }
+        var meshletCount = (int)br.ReadUInt32();
+        // sizeof(mesh::meshlet) = 4 vertex_offset + 4 triangle_offset +
+        //   4 vertex_count + 4 triangle_count + 12 cone_apex + 12 cone_axis
+        //   + 4 cone_cutoff + 12 center + 4 radius = 60 bytes
+        br.BaseStream.Seek(meshletCount * 60, System.IO.SeekOrigin.Current);
+        var meshletVertCount = (int)br.ReadUInt32();
+        br.BaseStream.Seek(meshletVertCount * 4, System.IO.SeekOrigin.Current);
+        var meshletTriCount = (int)br.ReadUInt32();
+        br.BaseStream.Seek(meshletTriCount, System.IO.SeekOrigin.Current);
+    }
+
+    private static void SkipSdfBlock(System.IO.BinaryReader br)
+    {
+        var magic = br.ReadUInt32();
+        if (magic != 0x20464453) // 'SDF ' (LE)
+        {
+            br.BaseStream.Position -= 4;
+            return;
+        }
+        br.BaseStream.Seek(sizeof(uint) * 3, System.IO.SeekOrigin.Current);
+        br.BaseStream.Seek(sizeof(float) * 6, System.IO.SeekOrigin.Current);
+        var sdfDataSize = (int)br.ReadUInt32();
+        br.BaseStream.Seek(sdfDataSize * sizeof(ushort), System.IO.SeekOrigin.Current);
+        var voxelSize = (int)br.ReadUInt32();
+        br.BaseStream.Seek(voxelSize, System.IO.SeekOrigin.Current);
+        var vectorFieldSize = (int)br.ReadUInt32();
+        br.BaseStream.Seek(vectorFieldSize * sizeof(ushort), System.IO.SeekOrigin.Current);
     }
 }

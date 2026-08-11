@@ -11,8 +11,16 @@ public static class ContentHelper
         ".texture"
     };
     private static readonly string[] MeshExts   = {
-        ".fbx", ".obj", ".gltf", ".glb", ".dae", ".blend", ".mesh"
+        ".fbx", ".obj", ".gltf", ".glb", ".dae", ".blend"
     };
+    private static readonly string[] ModelExts  = {
+        ".model"
+    };
+
+    // ".model.json" is the multi-extension sidecar ContentTools writes
+    // next to a cooked .mesh. Path.GetExtension only returns the last
+    // suffix (`.json`), so we need a second-hand check by file name.
+    private const string ModelSidecarSuffix = ".model.json";
     private static readonly string[] AudioExts  = {
         ".wav", ".mp3", ".ogg", ".flac"
     };
@@ -29,10 +37,21 @@ public static class ContentHelper
         ".prefab"
     };
 
+    // Cooked .mesh files are not user-facing assets; they're managed
+    // by the model container and never appear directly in the Content Browser.
+    private static readonly string[] HiddenExts = {
+        ".mesh"
+    };
+
     public static AssetType GetAssetType(string filePath)
     {
+        if (IsDirectory(filePath)) return AssetType.Folder;
+        var fileName = Path.GetFileName(filePath).ToLowerInvariant();
         var ext = Path.GetExtension(filePath).ToLowerInvariant();
+        if (Array.IndexOf(HiddenExts,  ext) >= 0) return AssetType.Unknown;
         if (Array.IndexOf(ImageExts,  ext) >= 0) return AssetType.Texture;
+        if (Array.IndexOf(ModelExts,  ext) >= 0) return AssetType.Model;
+        if (fileName.EndsWith(ModelSidecarSuffix, StringComparison.Ordinal)) return AssetType.Model;
         if (Array.IndexOf(MeshExts,   ext) >= 0) return AssetType.Mesh;
         if (Array.IndexOf(AudioExts,  ext) >= 0) return AssetType.Audio;
         if (Array.IndexOf(ScriptExts, ext) >= 0) return AssetType.Script;

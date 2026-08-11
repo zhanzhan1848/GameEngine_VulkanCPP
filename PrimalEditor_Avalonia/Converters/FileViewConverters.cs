@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Globalization;
 using Avalonia.Data.Converters;
 using Avalonia.Media;
@@ -94,15 +95,21 @@ public class AssetThumbnailConverter : IValueConverter
 public class FileTypeToIconConverter : IValueConverter
 {
     private static readonly StreamGeometry MeshIcon = StreamGeometry.Parse("M0,0 L40,0 L40,40 L0,40 Z M10,10 L30,10 L20,30 Z");
+    // Model = three stacked meshes (signals "container with submeshes").
+    private static readonly StreamGeometry ModelIcon = StreamGeometry.Parse("M0,5 L40,5 L40,15 L0,15 Z M0,18 L40,18 L40,28 L0,28 Z M10,31 L30,31 L20,40 Z");
     private static readonly StreamGeometry TextureIcon = StreamGeometry.Parse("M0,0 L40,0 L40,40 L0,40 Z M5,5 L35,5 L35,35 L5,35 Z M5,5 L20,20 L35,5 M5,35 L20,20 L35,35");
     private static readonly StreamGeometry AudioIcon = StreamGeometry.Parse("M0,0 L40,0 L40,40 L0,40 Z M10,5 L10,35 M20,10 L20,30 M30,15 L30,25");
     private static readonly StreamGeometry ScriptIcon = StreamGeometry.Parse("M0,0 L40,0 L40,40 L0,40 Z M10,5 L30,5 M10,15 L30,15 M10,25 L25,25 M10,35 L20,35");
     private static readonly StreamGeometry FileIcon = StreamGeometry.Parse("M0,0 L25,0 L40,15 L40,40 L0,40 Z M25,0 L25,15 L40,15");
+    // Folder = standard "manila folder" outline (rectangle with a tab).
+    private static readonly StreamGeometry FolderIcon = StreamGeometry.Parse("M0,12 L0,38 L0,40 L2,40 L38,40 L40,40 L40,16 L40,14 L22,14 L18,8 L18,8 L18,6 L4,6 L2,6 L0,8 L0,12 Z");
 
     public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
     {
         return value switch
         {
+            AssetType.Folder => FolderIcon,
+            AssetType.Model => ModelIcon,
             AssetType.Mesh => MeshIcon,
             AssetType.Texture => TextureIcon,
             AssetType.Audio => AudioIcon,
@@ -119,6 +126,10 @@ public static class PreviewAssetTypeConverters
 {
     public static readonly IValueConverter IsTexture = new AssetTypeEqualityConverter { Target = AssetType.Texture };
     public static readonly IValueConverter IsMesh = new AssetTypeEqualityConverter { Target = AssetType.Mesh };
+    public static readonly IValueConverter IsModel = new AssetTypeEqualityConverter { Target = AssetType.Model };
+    public static readonly IValueConverter IsMeshOrModel = new AssetTypeInSetConverter {
+        Targets = new HashSet<AssetType> { AssetType.Mesh, AssetType.Model }
+    };
     public static readonly IValueConverter IsMaterial = new AssetTypeEqualityConverter { Target = AssetType.Material };
     public static readonly IValueConverter IsScript = new AssetTypeEqualityConverter { Target = AssetType.Script };
     public static readonly IValueConverter IsShader = new AssetTypeEqualityConverter { Target = AssetType.Shader };
@@ -131,6 +142,17 @@ public class AssetTypeEqualityConverter : IValueConverter
 
     public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
         => value is AssetType t && t == Target;
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
+public class AssetTypeInSetConverter : IValueConverter
+{
+    public HashSet<AssetType> Targets { get; set; } = new();
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is AssetType t && Targets.Contains(t);
 
     public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotSupportedException();

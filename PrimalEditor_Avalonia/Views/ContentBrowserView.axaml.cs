@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Avalonia.Controls;
@@ -73,6 +76,22 @@ public partial class ContentBrowserView : UserControl
         if (DataContext is not ContentBrowserViewModel vm) return;
         if (vm.SelectedFile is AssetInfo info)
         {
+            // Submesh children have synthetic paths; double-click is
+            // equivalent to single-select in OnFileSelectionChanged.
+            // The actual preview was already wired up by the selection
+            // event, so there's nothing further to do here.
+            if (!info.IsContainer && FindParentOf(info) != null) return;
+
+            // Folder entry: navigate into it the same way the left
+            // tree handles double-click. Update SelectedFolder and
+            // breadcrumb, then reload the file list.
+            if (info.IsFolder && Directory.Exists(info.FullPath))
+            {
+                NavigateToFolder(info.FullPath);
+                e.Handled = true;
+                return;
+            }
+
             if (AssetEditorRegistry.Open(info) == null)
                 vm.OpenSelectedFile();
         }
@@ -80,6 +99,129 @@ public partial class ContentBrowserView : UserControl
         {
             vm.OpenSelectedFile();
         }
+    }
+
+    private void NavigateToFolder(string folderPath)
+    {
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        // Find the matching ContentFolder in the existing Folders tree
+        // (so breadcrumbs and the left tree selection stay in sync),
+        // or fall back to a temporary folder entry if none exists.
+        var folder = FindFolderByPath(vm.Folders, folderPath);
+        if (folder != null)
+        {
+            vm.SelectedFolder = folder;
+        }
+        else
+        {
+            // Manually trigger a refresh by setting SelectedFolder to
+            // null first (forces a clean state) then to the new folder.
+            vm.SelectedFolder = null;
+            var stub = new ContentFolder { Name = Path.GetFileName(folderPath), FullPath = folderPath };
+            vm.SelectedFolder = stub;
+        }
+    }
+
+    private static ContentFolder? FindFolderByPath(IEnumerable<ContentFolder> folders, string fullPath)
+    {
+        foreach (var f in folders)
+        {
+            if (string.Equals(f.FullPath, fullPath, StringComparison.OrdinalIgnoreCase)) return f;
+            var nested = FindFolderByPath(f.Subfolders, fullPath);
+            if (nested != null) return nested;
+        }
+        return null;
+    }
+
+    private void OnFileSelectionChanged(object? sender, Avalonia.Controls.SelectionChangedEventArgs e)
+    {
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        // Pull the new selection from the event args. The vm.SelectedFile
+        // binding may not have propagated yet when this handler runs,
+        // so e.AddedItems is the only reliable source for the new item.
+        // A quirk of TreeView is that the items themselves may come
+        // through wrapped in a node container, so we accept the first
+        // AssetInfo we find among the added items.
+        AssetInfo? selected = null;
+        if (e.AddedItems != null)
+        {
+            foreach (var item in e.AddedItems)
+            {
+                if (item is AssetInfo ai) { selected = ai; break; }
+            }
+        }
+        // Fall back to vm.SelectedFile if the event args don't carry
+        // anything useful (e.g. keyboard navigation that doesn't change
+        // the AddedItems list).
+        selected ??= vm.SelectedFile;
+        if (selected == null) return;
+
+        // Submesh selection: find the parent first so the auto-collapse
+        // pass below can preserve the parent's expansion.
+        AssetInfo? parentForCollapse = null;
+        if (!selected.IsContainer)
+        {
+            parentForCollapse = FindParentOf(selected);
+        }
+
+        // Auto-collapse every previously-expanded container except
+        // (a) the one we just clicked, and (b) the parent of a submesh
+        // click — submesh tiles must stay visible while previewing the
+        // submesh. The user expects only the most recently touched
+        // container to be expanded at a time.
+        foreach (var info in AssetRegistry.Assets)
+        {
+            if (!info.IsContainer) continue;
+            if (info == selected) continue;
+            if (info == parentForCollapse) continue;
+            if (info.IsExpanded) info.IsExpanded = false;
+        }
+
+        if (selected.IsContainer)
+        {
+            // Container row (.model.json): toggle expansion so the
+            // submesh tiles appear inline below, and preview the parent.
+            selected.IsExpanded = !selected.IsExpanded;
+            // SetAssetAndRefresh resets SelectedSubmeshIndex to 0 inside
+            // Refresh(), so we apply the index *after* the refresh.
+            vm.PreviewViewModel.SetAssetAndRefresh(selected);
+            vm.PreviewViewModel.SelectedSubmeshIndex = 0;
+            return;
+        }
+
+        // Submesh child: forward to the preview VM as (parent,
+        // submesh_index). The preview VM's LoadMesh then refreshes
+        // the wireframe to the parent geometry.
+        var parent = parentForCollapse ?? FindParentOf(selected);
+        if (parent != null)
+        {
+            var idx = parent.Children.IndexOf(selected);
+            if (idx >= 0)
+            {
+                vm.SelectSubmesh(parent, idx);
+                return;
+            }
+        }
+
+        // Ordinary asset (texture, material, script, .fbx, etc.): preview
+        // directly. Folders are excluded — they have no previewable
+        // content and double-click navigates into them instead.
+        if (selected.IsFolder) return;
+        vm.PreviewViewModel.Asset = selected;
+    }
+
+    private static AssetInfo? FindParentOf(AssetInfo child)
+    {
+        // Walk the global AssetRegistry for any model container whose
+        // Children list contains this child reference. The legacy
+        // Application.Current.DataContext lookup used to live here
+        // but it's typically null, so the lookup always returned null
+        // and submesh clicks never reached the parent preview path.
+        foreach (var info in AssetRegistry.Assets)
+        {
+            if (info.IsContainer && info.Children.Contains(child)) return info;
+        }
+        return null;
     }
 
     private void OnDragEnter(object? sender, Avalonia.Input.DragEventArgs e)

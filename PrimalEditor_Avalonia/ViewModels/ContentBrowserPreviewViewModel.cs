@@ -11,6 +11,7 @@ using PrimalEditor_Avalonia.Content.Materials;
 using PrimalEditor_Avalonia.Native;
 using MeshGeometry = PrimalEditor_Avalonia.Editors.Geometry.Geometry;
 using MeshLOD = PrimalEditor_Avalonia.Editors.Geometry.MeshLOD;
+using MeshData = PrimalEditor_Avalonia.Editors.Geometry.Mesh;
 
 namespace PrimalEditor_Avalonia.ViewModels;
 
@@ -51,13 +52,74 @@ public class ContentBrowserPreviewViewModel : ViewModelBase, IDisposable
             OnPropertyChanged(nameof(Asset));
             OnPropertyChanged(nameof(HasAsset));
             OnPropertyChanged(nameof(Type));
+            OnPropertyChanged(nameof(SubmeshNames));
+            OnPropertyChanged(nameof(HasSubmeshes));
+            OnPropertyChanged(nameof(SubmeshDisplay));
             Refresh();
         }
+    }
+
+    /// <summary>
+    /// Force LoadMesh to run even when the new Asset is the same
+    /// reference as the current one. The Asset setter's early-return
+    /// guard avoids unnecessary work, but the submesh click handler
+    /// routes through SelectSubmesh with the same parent ref twice in
+    /// a row and needs a real re-render each time.
+    /// </summary>
+    public void SetAssetAndRefresh(AssetInfo? asset)
+    {
+        _asset = asset;
+        OnPropertyChanged(nameof(Asset));
+        OnPropertyChanged(nameof(HasAsset));
+        OnPropertyChanged(nameof(Type));
+        OnPropertyChanged(nameof(SubmeshNames));
+        OnPropertyChanged(nameof(HasSubmeshes));
+        OnPropertyChanged(nameof(SubmeshDisplay));
+        Refresh();
     }
 
     public bool HasAsset => _asset != null;
 
     public AssetType Type => _asset?.Type ?? AssetType.Unknown;
+
+    private int _selectedSubmeshIndex;
+
+    public int SelectedSubmeshIndex
+    {
+        get => _selectedSubmeshIndex;
+        set
+        {
+            var clamped = Math.Max(0, value);
+            if (_selectedSubmeshIndex != clamped)
+            {
+                _selectedSubmeshIndex = clamped;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(ActiveMesh));
+                OnPropertyChanged(nameof(SubmeshDisplay));
+            }
+        }
+    }
+
+    public System.Collections.ObjectModel.ObservableCollection<string> SubmeshNames { get; } = new();
+
+    public bool HasSubmeshes => SubmeshNames.Count > 0;
+
+    public string SubmeshDisplay =>
+        HasSubmeshes && _selectedSubmeshIndex < SubmeshNames.Count
+            ? $"Submesh {_selectedSubmeshIndex + 1} of {SubmeshNames.Count}: {SubmeshNames[_selectedSubmeshIndex]}"
+            : string.Empty;
+
+    public MeshData? ActiveMesh
+    {
+        get
+        {
+            var lod = PreviewLOD;
+            if (lod == null) return null;
+            if (lod.Meshes.Count == 0) return null;
+            var idx = Math.Clamp(_selectedSubmeshIndex, 0, lod.Meshes.Count - 1);
+            return lod.Meshes[idx];
+        }
+    }
 
     public Bitmap? TextureBitmap
     {
@@ -164,6 +226,7 @@ public class ContentBrowserPreviewViewModel : ViewModelBase, IDisposable
         _geometry = null;
         OnPropertyChanged(nameof(PreviewLOD));
         OnPropertyChanged(nameof(MeshLodIndices));
+        OnPropertyChanged(nameof(ActiveMesh));
         Material = null;
         MaterialSwatch = Brushes.Gray;
         MaterialSummary = string.Empty;
@@ -173,6 +236,11 @@ public class ContentBrowserPreviewViewModel : ViewModelBase, IDisposable
         AudioSummary = string.Empty;
         StatusMessage = string.Empty;
         MeshLodIndex = 0;
+        SelectedSubmeshIndex = 0;
+        SubmeshNames.Clear();
+        OnPropertyChanged(nameof(SubmeshNames));
+        OnPropertyChanged(nameof(HasSubmeshes));
+        OnPropertyChanged(nameof(SubmeshDisplay));
         OnPropertyChanged(nameof(MeshLodIndices));
 
         var info = _asset;
@@ -186,6 +254,7 @@ public class ContentBrowserPreviewViewModel : ViewModelBase, IDisposable
                     LoadTexture(info);
                     break;
                 case AssetType.Mesh:
+                case AssetType.Model:
                     LoadMesh(info);
                     break;
                 case AssetType.Material:
@@ -256,10 +325,45 @@ public class ContentBrowserPreviewViewModel : ViewModelBase, IDisposable
 
     private void LoadMesh(AssetInfo info)
     {
-        if (!File.Exists(info.FullPath)) { StatusMessage = "Mesh file missing on disk"; return; }
+        // Resolve the cooked .mesh path. A model container (.model.json)
+        // stores the cooked .mesh path inside the sidecar; a bare .fbx or
+        // .mesh has the .mesh alongside it. Path.ChangeExtension is
+        // unsafe here — it only replaces the last extension, so applying
+        // it to "foo.model.json" yields "foo.model.model.json" instead
+        // of the expected sibling "foo.mesh".
+        string? meshPath = null;
+        ModelSidecar? sidecar = null;
+        if (info.Type == AssetType.Model)
+        {
+            // info.FullPath is the .model.json sidecar itself.
+            sidecar = ModelSidecar.Load(info.FullPath);
+            // ContentTools derives the sidecar from the cooked mesh path
+            // by replacing ".mesh" with ".model.json"; the reverse mapping
+            // is therefore "foo.model.json" → "foo.mesh".
+            var siblingMesh = SiblingMeshPath(info.FullPath);
+            if (sidecar != null && !string.IsNullOrEmpty(sidecar.Mesh) && File.Exists(sidecar.Mesh))
+            {
+                meshPath = sidecar.Mesh;
+            }
+            else if (File.Exists(siblingMesh))
+            {
+                meshPath = siblingMesh;
+            }
+        }
+        else if (info.Type == AssetType.Mesh)
+        {
+            // info.FullPath is e.g. foo.fbx; sibling .mesh is foo.mesh.
+            var siblingMesh = Path.ChangeExtension(info.FullPath, ".mesh");
+            meshPath = File.Exists(siblingMesh) ? siblingMesh : null;
+        }
+        if (meshPath == null)
+        {
+            StatusMessage = "Cooked .mesh file missing on disk";
+            return;
+        }
 
         var geom = new MeshGeometry();
-        if (!geom.Load(info.FullPath))
+        if (!geom.Load(meshPath))
         {
             StatusMessage = "Could not parse mesh file";
             return;
@@ -267,12 +371,48 @@ public class ContentBrowserPreviewViewModel : ViewModelBase, IDisposable
         _geometry = geom;
         OnPropertyChanged(nameof(PreviewLOD));
         OnPropertyChanged(nameof(MeshLodIndices));
+        OnPropertyChanged(nameof(ActiveMesh));
+
+        // Populate the submesh list. For a model container the names
+        // come from the sidecar; for a raw mesh we fall back to indexed
+        // names ("Submesh 0", "Submesh 1", ...).
+        SubmeshNames.Clear();
+        if (sidecar != null)
+        {
+            foreach (var s in sidecar.Submeshes)
+                SubmeshNames.Add(string.IsNullOrEmpty(s.Name) ? $"submesh_{s.MeshIndex}" : s.Name);
+        }
+        if (SubmeshNames.Count == 0)
+        {
+            int idx = 0;
+            foreach (var lod in geom.LODs)
+                foreach (var _ in lod.Meshes)
+                    SubmeshNames.Add($"Submesh {idx++}");
+        }
+        SelectedSubmeshIndex = 0;
+        OnPropertyChanged(nameof(SubmeshNames));
+        OnPropertyChanged(nameof(HasSubmeshes));
+        OnPropertyChanged(nameof(SubmeshDisplay));
+
         var lodCount = geom.LODs.Count;
         var vertexSum = geom.LODs.Sum(l => l.Meshes.Sum(m => m.VertexCount));
         var triSum = geom.LODs.Sum(l => l.Meshes.Sum(m => m.IndexCount / 3));
         MeshSummary = $"LODs: {lodCount}   Vertices: {vertexSum:N0}   Triangles: {triSum:N0}";
         StatusMessage = $"{info.FileName}";
         StartSpin();
+    }
+
+    internal static string SiblingMeshPath(string sidecarPath)
+    {
+        // Inverse of ContentTools/ContentTools.cpp::derive_sidecar_path:
+        // given a "<name>.model.json" sidecar, return the sibling
+        // "<name>.mesh" cooked file. We must strip the ".model.json"
+        // suffix as a whole — splitting on Path.GetExtension will not
+        // work because the engine's name uses two extensions.
+        const string suffix = ".model.json";
+        if (sidecarPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            return sidecarPath.Substring(0, sidecarPath.Length - suffix.Length) + ".mesh";
+        return Path.ChangeExtension(sidecarPath, ".mesh");
     }
 
     private void LoadMaterial(AssetInfo info)

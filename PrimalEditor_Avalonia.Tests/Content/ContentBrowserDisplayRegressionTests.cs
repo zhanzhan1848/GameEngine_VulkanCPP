@@ -9,8 +9,10 @@ namespace PrimalEditor_Avalonia.Tests.Content;
 
 /// <summary>
 /// Regression: importing a .fbx writes <c>foo.fbx</c>, <c>foo.mesh</c>,
-/// and <c>foo.fbx.meta</c> into Content/Assets. The Content Browser
-/// must list the visible assets (.fbx, .mesh) after the import flow.
+/// and <c>foo.fbx.meta</c> into Content/Assets. As of the model
+/// container feature, the Content Browser lists only the user-facing
+/// assets (.fbx / .model) and hides the cooked .mesh binary, so the
+/// visible-asset count is one per imported source file.
 /// </summary>
 public sealed class ContentBrowserDisplayRegressionTests
 {
@@ -33,7 +35,8 @@ public sealed class ContentBrowserDisplayRegressionTests
             AssetRegistry.Initialize(contentRoot);
 
             Assert.Contains(AssetRegistry.Assets, a => a.FullPath == fbxPath);
-            Assert.Contains(AssetRegistry.Assets, a => a.FullPath == meshPath);
+            // Cooked .mesh is no longer a user-visible asset.
+            Assert.DoesNotContain(AssetRegistry.Assets, a => a.FullPath == meshPath);
         }
         finally
         {
@@ -61,7 +64,9 @@ public sealed class ContentBrowserDisplayRegressionTests
                 .Where(i => i != null && i.Type != AssetType.Unknown)
                 .ToList();
 
-            Assert.Equal(2, files.Count);
+            // Only the .fbx is visible; the cooked .mesh is filtered out.
+            Assert.Single(files);
+            Assert.Equal("corridor.fbx", files[0]!.FileName);
         }
         finally
         {
@@ -97,9 +102,8 @@ public sealed class ContentBrowserDisplayRegressionTests
                 .Where(i => i != null && i.Type != AssetType.Unknown)
                 .ToList();
 
-            Assert.Equal(2, visible.Count);
-            Assert.Contains(visible, i => i!.FileName == "corridor.fbx");
-            Assert.Contains(visible, i => i!.FileName == "corridor.mesh");
+            Assert.Single(visible);
+            Assert.Equal("corridor.fbx", visible[0]!.FileName);
         }
         finally
         {

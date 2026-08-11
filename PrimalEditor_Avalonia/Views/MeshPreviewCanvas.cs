@@ -37,14 +37,41 @@ public class MeshPreviewCanvas : Control
     public MeshPreviewCanvas()
     {
         ClipToBounds = true;
+        // Subscribe/unsubscribe around the visual tree lifetime. The
+        // template visual tree is torn down and rebuilt whenever the
+        // previewed type changes (e.g. switching from a mesh wireframe
+        // to a texture bitmap), so the listener must follow the visual
+        // attachment rather than the static DataContext reference.
+        AttachedToVisualTree += (_, _) => AttachListener();
+        DetachedFromVisualTree += (_, _) => DetachListener();
+        DataContextChanged += (_, _) => AttachListener();
+    }
+
+    private void AttachListener()
+    {
+        var newVm = DataContext as ContentBrowserPreviewViewModel;
+        if (ReferenceEquals(newVm, _attached)) return;
+        if (_attached != null) _attached.PropertyChanged -= OnViewModelPropertyChanged;
+        _attached = newVm;
+        if (newVm != null) newVm.PropertyChanged += OnViewModelPropertyChanged;
+        InvalidateVisual();
+    }
+
+    private void DetachListener()
+    {
+        if (_attached == null) return;
+        _attached.PropertyChanged -= OnViewModelPropertyChanged;
+        _attached = null;
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         // MeshYaw ticks every frame from the spin timer; PreviewLOD
-        // flips on selection change. Both need a repaint.
+        // flips on selection change; SelectedSubmeshIndex changes
+        // which submesh inside the LOD is highlighted.
         if (e.PropertyName is nameof(ContentBrowserPreviewViewModel.MeshYaw)
-            or nameof(ContentBrowserPreviewViewModel.PreviewLOD))
+            or nameof(ContentBrowserPreviewViewModel.PreviewLOD)
+            or nameof(ContentBrowserPreviewViewModel.SelectedSubmeshIndex))
         {
             InvalidateVisual();
         }
@@ -54,7 +81,12 @@ public class MeshPreviewCanvas : Control
     {
         context.FillRectangle(Brushes.Black, new Rect(Bounds.Size));
 
-        var vm = ViewModel;
+        // Read the view model from DataContext directly — the
+        // StyledProperty is set via {Binding} but Avalonia 11 may not
+        // fire the setter when the reference does not change, leaving
+        // this canvas pointing at a stale VM. DataContext inheritance
+        // is reliable and reflects the live PreviewViewModel.
+        var vm = DataContext as ContentBrowserPreviewViewModel;
         var lod = vm?.PreviewLOD;
         if (lod == null) return;
 
@@ -68,6 +100,12 @@ public class MeshPreviewCanvas : Control
             distance: 3f,
             tx: 0f, ty: 0f, tz: 0f,
             vw: w, vh: h);
-        WireframeRenderer.Draw(context, lod, view);
+        WireframeRenderer.Draw(context, lod, view, submeshIndex: vm.SelectedSubmeshIndex);
+
+        // Do NOT call InvalidateVisual() here. Avalonia's render pass
+        // forbids marking a visual dirty while it is being drawn (it
+        // throws "Visual was invalidated during the render pass"). The
+        // spin timer's MeshYaw PropertyChanged handler repaints the
+        // canvas via the listener attached in AttachListener().
     }
 }

@@ -31,7 +31,7 @@
             <Grid RowDefinitions="*,Auto">
                 <views:MeshPreviewCanvas Name="MeshCanvas"
                                          Grid.Row="0"
-                                         ViewModel="{Binding}"/>
+                                         ViewModel="{Binding .}"/>
                 <Border Grid.Row="1" Padding="8,4">
                     <TextBlock Text="{Binding MeshSummary}"
                                FontFamily="{StaticResource FontMono}"
@@ -129,7 +129,7 @@
                                 IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsTexture}}"/>
                 <ContentControl Content="{Binding}"
                                 ContentTemplate="{StaticResource MeshPreviewTemplate}"
-                                IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsMesh}}"/>
+                                IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsMeshOrModel}}"/>
                 <ContentControl Content="{Binding}"
                                 ContentTemplate="{StaticResource MaterialPreviewTemplate}"
                                 IsVisible="{Binding Type, Converter={x:Static conv:PreviewAssetTypeConverters.IsMaterial}}"/>

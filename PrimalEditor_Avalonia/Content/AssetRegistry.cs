@@ -107,7 +107,7 @@ public static class AssetRegistry
         {
             FullPath = fullPath,
             Type = ContentHelper.IsDirectory(fullPath)
-                ? AssetType.Unknown
+                ? AssetType.Folder
                 : ContentHelper.GetAssetType(fullPath),
             RegisterTime = DateTime.UtcNow,
             ImportDate = File.Exists(fullPath)
@@ -168,6 +168,37 @@ public static class AssetRegistry
             {
                 var deps = AssetDependencyExtractor.ExtractByExtension(fullPath).ToList();
                 if (deps.Count > 0) _dependenciesByPath[fullPath] = new HashSet<Guid>(deps);
+            }
+        }
+
+        // Attach submesh children for a model container. A model asset
+        // is the .model.json sidecar itself; the sidecar carries one
+        // entry per submesh the cooked .mesh contains.
+        if (info.Type == AssetType.Model)
+        {
+            var sidecar = ModelSidecar.Load(fullPath);
+            if (sidecar != null)
+            {
+                info.Children.Clear();
+                var parentDir = Path.GetDirectoryName(fullPath) ?? string.Empty;
+                var parentName = Path.GetFileNameWithoutExtension(fullPath);
+                foreach (var s in sidecar.Submeshes)
+                {
+                    // Each child gets a synthetic path of the form
+                    // <parent>.submesh/<name>. This makes the child
+                    // show up in the UI as a row labelled with the
+                    // submesh name, while the directory component keeps
+                    // it visually grouped under the parent model.
+                    var subPath = Path.Combine(parentDir, parentName + ".submesh", s.Name);
+                    info.Children.Add(new AssetInfo
+                    {
+                        Type = AssetType.Mesh,
+                        FullPath = subPath,
+                        Guid = Guid.NewGuid(),
+                        ImportDate = info.ImportDate,
+                        RegisterTime = info.RegisterTime,
+                    });
+                }
             }
         }
         _byPath[fullPath] = info;

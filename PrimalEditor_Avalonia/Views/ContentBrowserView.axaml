@@ -12,6 +12,7 @@
         <SolidColorBrush x:Key="DropHighlightBrush" Color="#4000F0FF"/>
 
         <StreamGeometry x:Key="MeshIconGeometry">M0,0 L40,0 L40,40 L0,40 Z M10,10 L30,10 L20,30 Z</StreamGeometry>
+        <StreamGeometry x:Key="ModelIconGeometry">M0,5 L40,5 L40,15 L0,15 Z M0,18 L40,18 L40,28 L0,28 Z M10,31 L30,31 L20,40 Z</StreamGeometry>
         <StreamGeometry x:Key="TextureIconGeometry">M0,0 L40,0 L40,40 L0,40 Z M5,5 L35,5 L35,35 L5,35 Z M5,5 L20,20 L35,5 M5,35 L20,20 L35,35</StreamGeometry>
         <StreamGeometry x:Key="AudioIconGeometry">M0,0 L40,0 L40,40 L0,40 Z M10,5 L10,35 M20,10 L20,30 M30,15 L30,25</StreamGeometry>
         <StreamGeometry x:Key="ScriptIconGeometry">M0,0 L40,0 L40,40 L0,40 Z M10,5 L30,5 M10,15 L30,15 M10,25 L25,25 M10,35 L20,35</StreamGeometry>
@@ -36,6 +37,15 @@
                           Margin="2,0,2,6"
                           Background="Transparent"
                           BorderThickness="0">
+                    <TreeView.Styles>
+                        <Style Selector="TreeViewItem" x:CompileBindings="False">
+                            <Setter Property="(TreeViewItem.IsExpanded)">
+                                <Setter.Value>
+                                    <Binding Path="IsExpanded" Mode="TwoWay"/>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </TreeView.Styles>
                     <TreeView.ItemTemplate>
                         <TreeDataTemplate ItemsSource="{Binding Subfolders}">
                             <TextBlock Text="{Binding Name}"/>
@@ -133,9 +143,11 @@
                                Foreground="{StaticResource SecondaryTextBrush}"
                                IsVisible="{Binding HasStatus}" Padding="8,6"/>
 
-                    <!-- List view -->
+                    <!-- List view (compact rows; submesh expansion happens in
+                         the thumbnails view instead, so this is a flat list). -->
                     <ListBox ItemsSource="{Binding FilteredFiles}"
                              SelectedItem="{Binding SelectedFile}"
+                             SelectionChanged="OnFileSelectionChanged"
                              DoubleTapped="OnFileDoubleClick"
                              IsVisible="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.IsList}}"
                              Background="Transparent" BorderThickness="0" Padding="6">
@@ -171,35 +183,98 @@
                         </ListBox.ItemsPanel>
                         <ListBox.Styles>
                             <Style Selector="ListBoxItem">
-                                <Setter Property="Width" Value="140"/>
-                                <Setter Property="Height" Value="150"/>
-                                <Setter Property="Padding" Value="6"/>
+                                <Setter Property="Width" Value="160"/>
+                                <Setter Property="MinHeight" Value="150"/>
+                                <Setter Property="VerticalAlignment" Value="Top"/>
+                                <Setter Property="VerticalContentAlignment" Value="Top"/>
+                                <Setter Property="Padding" Value="4"/>
                                 <Setter Property="Margin" Value="3"/>
                             </Style>
                         </ListBox.Styles>
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="content:AssetInfo">
-                                <StackPanel HorizontalAlignment="Center">
-                                    <Border Width="96" Height="96"
+                                <Panel>
+                                    <!-- Ordinary asset (texture, .fbx, material, etc.): single tile -->
+                                    <Border IsVisible="{Binding !IsContainer}"
+                                            Width="140" Height="150"
                                             BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
                                             Background="{StaticResource VoidBrush}"
                                             ClipToBounds="True">
-                                        <Panel>
-                                            <Image Source="{Binding, Converter={x:Static conv:FileTypeConverters.ToThumbnailSource}}" Stretch="Uniform"/>
-                                            <Path Width="48" Height="48" Stretch="Uniform"
-                                                  Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
-                                                  Fill="{StaticResource ElectricBlueBrush}"
-                                                  IsVisible="{Binding !IsImage}"
-                                                  HorizontalAlignment="Center"
-                                                  VerticalAlignment="Center"/>
-                                        </Panel>
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <Panel Width="96" Height="96" Margin="0,4,0,0">
+                                                <Image Source="{Binding, Converter={x:Static conv:FileTypeConverters.ToThumbnailSource}}" Stretch="Uniform"/>
+                                                <Path Width="48" Height="48" Stretch="Uniform"
+                                                      Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
+                                                      Fill="{StaticResource ElectricBlueBrush}"
+                                                      IsVisible="{Binding !IsImage}"
+                                                      HorizontalAlignment="Center"
+                                                      VerticalAlignment="Center"/>
+                                            </Panel>
+                                            <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
+                                                       MaxWidth="130" TextAlignment="Center"
+                                                       Classes="mono"
+                                                       HorizontalAlignment="Center" Margin="0,6,0,0"
+                                                       ToolTip.Tip="{Binding FullPath}"/>
+                                        </StackPanel>
                                     </Border>
-                                    <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
-                                               MaxWidth="130" TextAlignment="Center"
-                                               Classes="mono"
-                                               HorizontalAlignment="Center" Margin="0,6,0,0"
-                                               ToolTip.Tip="{Binding FullPath}"/>
-                                </StackPanel>
+
+<!-- Container asset (.model.json): its model tile plus submesh
+                                         tiles flow inline with the rest of the grid — no wrapper
+                                         box. The submeshes visually push the next siblings down
+                                         because the WrapPanel treats them as additional items. -->
+                                    <StackPanel IsVisible="{Binding IsContainer}" Width="140">
+                                        <Border Width="140" Height="150"
+                                                BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
+                                                Background="{StaticResource VoidBrush}"
+                                                ClipToBounds="True">
+                                            <StackPanel HorizontalAlignment="Center">
+                                                <Panel Width="96" Height="96" Margin="0,4,0,0">
+                                                    <Path Width="48" Height="48" Stretch="Uniform"
+                                                          Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
+                                                          Fill="{StaticResource ElectricBlueBrush}"
+                                                          HorizontalAlignment="Center"
+                                                          VerticalAlignment="Center"/>
+                                                </Panel>
+                                                <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
+                                                           MaxWidth="130" TextAlignment="Center"
+                                                           Classes="mono"
+                                                           HorizontalAlignment="Center" Margin="0,6,0,0"
+                                                           ToolTip.Tip="{Binding FullPath}"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <ItemsControl ItemsSource="{Binding Children}" Margin="0,6,0,0"
+                                                    IsVisible="{Binding IsExpanded}">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate>
+                                                    <WrapPanel Orientation="Horizontal"/>
+                                                </ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Width="140" Height="150"
+                                                            BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
+                                                            Background="{StaticResource VoidBrush}"
+                                                            ClipToBounds="True">
+                                                        <StackPanel HorizontalAlignment="Center">
+                                                            <Panel Width="96" Height="96" Margin="0,4,0,0">
+                                                                <Path Width="48" Height="48" Stretch="Uniform"
+                                                                      Data="M0,0 L40,0 L40,40 L0,40 Z M10,10 L30,10 L20,30 Z"
+                                                                      Fill="{StaticResource ElectricBlueBrush}"
+                                                                      HorizontalAlignment="Center"
+                                                                      VerticalAlignment="Center"/>
+                                                            </Panel>
+                                                            <TextBlock Text="{Binding FileName}"
+                                                                       TextTrimming="CharacterEllipsis"
+                                                                       MaxWidth="130" TextAlignment="Center"
+                                                                       Classes="mono"
+                                                                       HorizontalAlignment="Center" Margin="0,6,0,0"/>
+                                                        </StackPanel>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Panel>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>

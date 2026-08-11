@@ -1,12 +1,19 @@
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Serialization;
 using PrimalEditor_Avalonia.Native;
 
 namespace PrimalEditor_Avalonia.Content;
 
-public sealed class AssetInfo
+public sealed class AssetInfo : INotifyPropertyChanged
 {
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void OnPropertyChanged([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     [JsonPropertyName("Guid")]         public Guid Guid { get; set; } = Guid.NewGuid();
     [JsonPropertyName("Type")]         public AssetType Type { get; set; } = AssetType.Unknown;
     [JsonPropertyName("FullPath")]     public string FullPath { get; set; } = string.Empty;
@@ -38,4 +45,32 @@ public sealed class AssetInfo
         (Extension == ".png" || Extension == ".jpg" ||
          Extension == ".jpeg" || Extension == ".bmp" ||
          Extension == ".texture");
+
+    [JsonIgnore]
+    public bool IsContainer => Type == AssetType.Model;
+
+    /// <summary>True when the entry is a folder on disk.</summary>
+    [JsonIgnore]
+    public bool IsFolder => Type == AssetType.Folder;
+
+    [JsonIgnore]
+    public List<AssetInfo> Children { get; set; } = new();
+
+    private bool _isExpanded;
+
+    /// <summary>
+    /// Whether the container's children are currently expanded in the
+    /// browser UI. Tracked per instance — not persisted.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set
+        {
+            if (_isExpanded == value) return;
+            _isExpanded = value;
+            OnPropertyChanged();
+        }
+    }
 }

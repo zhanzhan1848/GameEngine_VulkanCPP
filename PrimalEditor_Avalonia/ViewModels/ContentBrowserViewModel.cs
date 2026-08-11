@@ -21,6 +21,19 @@ public class ContentFolder : ViewModelBase
     public string Name { get; set; } = string.Empty;
     public string FullPath { get; set; } = string.Empty;
     public ObservableCollection<ContentFolder> Subfolders { get; } = new();
+
+    private bool _isExpanded;
+
+    /// <summary>
+    /// Tracks whether the folder is expanded in the left TreeView. The
+    /// view binds TreeViewItem.IsExpanded to this so programmatic
+    /// navigation from the middle panel can reveal the target node.
+    /// </summary>
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set { _isExpanded = value; OnPropertyChanged(); }
+    }
 }
 
 public enum FileViewMode
@@ -110,6 +123,11 @@ public class ContentBrowserViewModel : Document
                 OnPropertyChanged(nameof(SelectedFolder));
                 LoadFilesForSelectedFolder();
                 RebuildBreadcrumbs();
+                // Reveal the new selection in the left TreeView by
+                // expanding each ancestor. If the value was created
+                // ad-hoc (stub from double-click) and isn't in the
+                // tree, ExpandPathTo is a no-op.
+                ExpandPathTo(_selectedFolder!);
             }
         }
     }
@@ -123,7 +141,12 @@ public class ContentBrowserViewModel : Document
             {
                 _selectedFile = value;
                 OnPropertyChanged(nameof(SelectedFile));
-                PreviewViewModel.Asset = value;
+                // The preview wiring is owned by the view's
+                // OnFileSelectionChanged handler, which decides whether
+                // to forward to the parent (for submesh children) or
+                // pass the asset through directly. Pushing the asset
+                // here too would race the handler and could clobber a
+                // submesh preview with the synthetic child AssetInfo.
             }
         }
     }
@@ -326,6 +349,36 @@ public class ContentBrowserViewModel : Document
         if (match != null) SelectedFolder = match;
     }
 
+    /// <summary>
+    /// Walks the Folders tree and expands every ancestor on the path
+    /// leading to <paramref name="folder"/>, so the left TreeView
+    /// reveals the node the middle panel just navigated into.
+    /// </summary>
+    public void ExpandPathTo(ContentFolder folder)
+    {
+        if (folder == null) return;
+        var path = BuildPathTo(Folders, folder);
+        if (path == null) return;
+        foreach (var ancestor in path)
+            ancestor.IsExpanded = true;
+    }
+
+    private static List<ContentFolder>? BuildPathTo(IEnumerable<ContentFolder> roots, ContentFolder target)
+    {
+        foreach (var root in roots)
+        {
+            if (ReferenceEquals(root, target))
+                return new List<ContentFolder>();
+            var nested = BuildPathTo(root.Subfolders, target);
+            if (nested != null)
+            {
+                nested.Insert(0, root);
+                return nested;
+            }
+        }
+        return null;
+    }
+
     private void LoadSubfolders(ContentFolder folder)
     {
         try
@@ -358,8 +411,15 @@ public class ContentBrowserViewModel : Document
         try
         {
             AssetRegistry.Register(SelectedFolder.FullPath);
+            // Subdirectories first so they appear at the top of the
+            // list. Each one becomes a Folder AssetInfo that the user
+            // can double-click to navigate into.
             foreach (var dir in Directory.GetDirectories(SelectedFolder.FullPath))
-                AssetRegistry.Register(dir);
+            {
+                var dirInfo = AssetRegistry.Register(dir);
+                if (dirInfo != null && dirInfo.Type == AssetType.Folder)
+                    Files.Add(dirInfo);
+            }
             foreach (var file in Directory.GetFiles(SelectedFolder.FullPath))
             {
                 var name = Path.GetFileName(file);
@@ -369,7 +429,7 @@ public class ContentBrowserViewModel : Document
                 if (info != null && info.Type != AssetType.Unknown)
                     Files.Add(info);
             }
-            StatusMessage = $"{Files.Count} asset(s)";
+            StatusMessage = $"{Files.Count} item(s)";
             RebuildFilteredFiles();
             OnPropertyChanged(nameof(ResultCountDisplay));
         }
@@ -402,6 +462,28 @@ public class ContentBrowserViewModel : Document
             StatusMessage = $"Cannot open file: {ex.Message}";
             Logger.Error("Failed to open file", ex);
         }
+    }
+
+    /// <summary>
+    /// Route a submesh child selection back to the preview view model
+    /// as (parent model, submesh_index). The Content Browser's
+    /// TreeView treats both the parent and its submesh children as
+    /// AssetInfo items; this method lets the view convert a child
+    /// selection into a meaningful preview state.
+    /// </summary>
+    public void SelectSubmesh(AssetInfo parent, int submeshIndex)
+    {
+        if (parent == null || parent.IsContainer == false) return;
+        if (submeshIndex < 0 || submeshIndex >= parent.Children.Count) return;
+        // Wire preview state directly. We bypass the Asset setter's
+        // reference-equality early-return by setting the field through
+        // Refresh(), so SelectSubmesh always re-runs LoadMesh even when
+        // the user clicks the same parent twice (parent → submesh →
+        // parent → submesh). SetAssetAndRefresh resets SelectedSubmeshIndex
+        // to 0 inside Refresh(), so we must apply the user's index after
+        // the refresh runs.
+        PreviewViewModel.SetAssetAndRefresh(parent);
+        PreviewViewModel.SelectedSubmeshIndex = submeshIndex;
     }
 
     public async Task ImportAssetAsync()

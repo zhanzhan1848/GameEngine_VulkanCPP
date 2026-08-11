@@ -10,8 +10,10 @@ namespace PrimalEditor_Avalonia.Native;
 public enum AssetType
 {
     Unknown,
+    Folder,
     Texture,
     Mesh,
+    Model,
     Audio,
     Script,
     Material,
