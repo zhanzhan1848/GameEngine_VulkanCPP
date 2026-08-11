@@ -215,4 +215,23 @@ namespace primal::tools {
 	void process_scene(scene& scene, const geometry_import_settings& settings, progression *const progression);
 	void pack_data(const scene& scene, scene_data& data);
 	bool coalesce_meshes(const lod_group& lod, mesh& combined_mesh, progression *const progression);
+
+	// Lightweight per-mesh metadata used by the editor's Content Browser to
+	// display model -> submesh hierarchy. Populated by extract_submesh_metadata
+	// from a cooked .mesh binary without re-importing the source asset.
+	struct submesh_meta
+	{
+		std::string					name;
+		u32							lod_id{ u32_invalid_id };
+		u32							lod_index{ u32_invalid_id };
+		u32							mesh_index{ u32_invalid_id };
+		u32							material_idx{ u32_invalid_id };
+		u32							num_vertices{ 0 };
+		u32							num_indices{ 0 };
+	};
+
+	// Walks a cooked scene_data buffer and returns one submesh_meta per mesh,
+	// ordered by (lod_index, mesh_index). Returns false if the buffer is malformed.
+	// Used by ContentTools.cpp to write .model.json sidecars.
+	bool extract_submesh_metadata(const u8* buffer, u32 buffer_size, utl::vector<submesh_meta>& out);
 }
