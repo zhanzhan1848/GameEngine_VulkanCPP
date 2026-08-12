@@ -115,49 +115,53 @@ struct Frustum {
      * @brief 从视图投影矩阵构造视锥
      * @param viewProjection 视图投影矩阵
      */
-    inline void FromMatrix(const math::m4x4& viewProjection) {
-        // 从视图投影矩阵提取6个裁剪平面
-        // 左平面: row4 + row1
+    inline void FromMatrix(const math::m4x4& vp) {
+        // Gribbs-Hartmann method for column-major matrices with column vectors.
+        // clip = VP * p, so clip.x = row0·p, clip.y = row1·p, clip.z = row2·p, clip.w = row3·p
+        // Row i = {col0[i], col1[i], col2[i], col3[i]}
+        // Planes are extracted from ROWS (not columns).
+
+        // Left: clip.x + clip.w >= 0 → (row0 + row3)
         planes[0] = math::v4{
-            viewProjection.columns[3][0] + viewProjection.columns[0][0],
-            viewProjection.columns[3][1] + viewProjection.columns[0][1],
-            viewProjection.columns[3][2] + viewProjection.columns[0][2],
-            viewProjection.columns[3][3] + viewProjection.columns[0][3]
+            vp.columns[0][0] + vp.columns[0][3],
+            vp.columns[1][0] + vp.columns[1][3],
+            vp.columns[2][0] + vp.columns[2][3],
+            vp.columns[3][0] + vp.columns[3][3]
         };
-        // 右平面: row4 - row1
+        // Right: clip.w - clip.x >= 0 → (row3 - row0)
         planes[1] = math::v4{
-            viewProjection.columns[3][0] - viewProjection.columns[0][0],
-            viewProjection.columns[3][1] - viewProjection.columns[0][1],
-            viewProjection.columns[3][2] - viewProjection.columns[0][2],
-            viewProjection.columns[3][3] - viewProjection.columns[0][3]
+            vp.columns[0][3] - vp.columns[0][0],
+            vp.columns[1][3] - vp.columns[1][0],
+            vp.columns[2][3] - vp.columns[2][0],
+            vp.columns[3][3] - vp.columns[3][0]
         };
-        // 上平面: row4 - row2
+        // Top: clip.w - clip.y >= 0 → (row3 - row1)
         planes[2] = math::v4{
-            viewProjection.columns[3][0] - viewProjection.columns[1][0],
-            viewProjection.columns[3][1] - viewProjection.columns[1][1],
-            viewProjection.columns[3][2] - viewProjection.columns[1][2],
-            viewProjection.columns[3][3] - viewProjection.columns[1][3]
+            vp.columns[0][3] - vp.columns[0][1],
+            vp.columns[1][3] - vp.columns[1][1],
+            vp.columns[2][3] - vp.columns[2][1],
+            vp.columns[3][3] - vp.columns[3][1]
         };
-        // 下平面: row4 + row2
+        // Bottom: clip.y + clip.w >= 0 → (row1 + row3)
         planes[3] = math::v4{
-            viewProjection.columns[3][0] + viewProjection.columns[1][0],
-            viewProjection.columns[3][1] + viewProjection.columns[1][1],
-            viewProjection.columns[3][2] + viewProjection.columns[1][2],
-            viewProjection.columns[3][3] + viewProjection.columns[1][3]
+            vp.columns[0][1] + vp.columns[0][3],
+            vp.columns[1][1] + vp.columns[1][3],
+            vp.columns[2][1] + vp.columns[2][3],
+            vp.columns[3][1] + vp.columns[3][3]
         };
-        // 近平面: row4 + row3
+        // Near: Metal/Dawn [0,1] depth — clip.z >= 0 → row2
         planes[4] = math::v4{
-            viewProjection.columns[3][0] + viewProjection.columns[2][0],
-            viewProjection.columns[3][1] + viewProjection.columns[2][1],
-            viewProjection.columns[3][2] + viewProjection.columns[2][2],
-            viewProjection.columns[3][3] + viewProjection.columns[2][3]
+            vp.columns[0][2],
+            vp.columns[1][2],
+            vp.columns[2][2],
+            vp.columns[3][2]
         };
-        // 远平面: row4 - row3
+        // Far: clip.w - clip.z >= 0 → (row3 - row2)
         planes[5] = math::v4{
-            viewProjection.columns[3][0] - viewProjection.columns[2][0],
-            viewProjection.columns[3][1] - viewProjection.columns[2][1],
-            viewProjection.columns[3][2] - viewProjection.columns[2][2],
-            viewProjection.columns[3][3] - viewProjection.columns[2][3]
+            vp.columns[0][3] - vp.columns[0][2],
+            vp.columns[1][3] - vp.columns[1][2],
+            vp.columns[2][3] - vp.columns[2][2],
+            vp.columns[3][3] - vp.columns[3][2]
         };
         
         // 归一化平面方程

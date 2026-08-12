@@ -47,6 +47,7 @@ namespace primal::graphics::rhi
         u32 GetIndexCount() const { return index_count_; }
         u32 GetVertexCount() const { return vertex_count_; }
         u32 GetMeshletCount() const { return meshlet_count_; }
+        u32 GetIndexSize() const { return index_size_; } // Returns 2 or 4
 
     private:
         RHIDeviceBase* device_{ nullptr };
@@ -64,6 +65,7 @@ namespace primal::graphics::rhi
         u32 index_count_{ 0 };
         u32 vertex_count_{ 0 };
         u32 meshlet_count_{ 0 };
+        u32 index_size_{ 0 }; // 2 for u16, 4 for u32
         
         u32 sdf_resolution_[3] = {0, 0, 0};
         u32 voxel_resolution_[3] = {0, 0, 0};

@@ -9,6 +9,8 @@ namespace primal::particle {
     DEFINE_TYPED_ID(particle_id);
 }
 
+#ifndef DISABLE_PARTICLE_SYSTEM
+
 namespace std {
     template<>
     struct hash<primal::particle::particle_id> {
@@ -17,8 +19,6 @@ namespace std {
         }
     };
 }
-
-#ifndef DISABLE_PARTICLE_SYSTEM
 
 namespace primal::particle {
 
@@ -95,7 +95,7 @@ public:
     constexpr bool is_valid() const { return false; }
 };
 
-inline component create(init_info, game_entity::entity) { return component{}; }
+inline component create(init_info, const game_entity::entity&) { return component{}; }
 inline void remove(component) {}
 inline void update(const component_cache*, u32) {}
 

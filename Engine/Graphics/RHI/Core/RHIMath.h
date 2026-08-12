@@ -61,6 +61,7 @@ namespace constants {
 template<typename T>
 float dot(const T& a, const T& b) {
     float result = 0.0f;
+#if defined(__APPLE__)
     if constexpr (std::is_same_v<T, simd::float3>) {
         result = a.x * b.x + a.y * b.y + a.z * b.z;
     } else if constexpr (std::is_same_v<T, simd::float4>) {
@@ -68,12 +69,17 @@ float dot(const T& a, const T& b) {
     } else if constexpr (std::is_same_v<T, simd::float2>) {
         result = a.x * b.x + a.y * b.y;
     } else {
-        // 通用实现，假设支持[]
         constexpr int size = sizeof(T) / sizeof(float);
         for (int i = 0; i < size; ++i) {
             result += a[i] * b[i];
         }
     }
+#else
+    constexpr int size = sizeof(T) / sizeof(float);
+    for (int i = 0; i < size; ++i) {
+        result += a[i] * b[i];
+    }
+#endif
     return result;
 }
 
@@ -218,11 +224,12 @@ inline m4x4 MatrixIdentity() {
 #elif defined(_WIN32)
     return DirectX::XMMatrixIdentity();
 #else
-    // 默认实现：手动构造单位矩阵
-    m4x4 result{};
-    // 根据具体的m4x4类型进行初始化
-    // 这里假设m4x4有合适的构造函数或成员访问方式
-    return result;
+    return m4x4{
+        v4{1.0f, 0.0f, 0.0f, 0.0f},
+        v4{0.0f, 1.0f, 0.0f, 0.0f},
+        v4{0.0f, 0.0f, 1.0f, 0.0f},
+        v4{0.0f, 0.0f, 0.0f, 1.0f}
+    };
 #endif
 }
 
@@ -352,13 +359,13 @@ inline m4x4 CreateRotationMatrixEuler(const v3& euler) {
  */
 inline m4x4 CreatePerspectiveMatrix(float fovY, float aspect, float nearPlane, float farPlane) {
     float tanHalfFov = tanf(fovY * 0.5f);
-    
+
     return m4x4{
         v4{1.0f / (aspect * tanHalfFov), 0.0f, 0.0f, 0.0f},
         v4{0.0f, 1.0f / tanHalfFov, 0.0f, 0.0f},
         v4{0.0f, 0.0f, farPlane / (nearPlane - farPlane), -1.0f},
         v4{0.0f, 0.0f, (nearPlane * farPlane) / (nearPlane - farPlane), 0.0f}
-    };
+    }; // Metal/Dawn [0,1] depth range. column 3 w=0: clip.w = -z_view
 }
 
 /**
@@ -372,11 +379,13 @@ inline m4x4 CreatePerspectiveMatrix(float fovY, float aspect, float nearPlane, f
  * @return 4x4正交投影矩阵
  */
 inline m4x4 CreateOrthographicMatrix(float left, float right, float bottom, float top, float nearPlane, float farPlane) {
+    // Z formula accounts for view-space Z being negative (CreateLookAtMatrix maps look direction to -Z):
+    //   z_view = -near → z_clip = 0,  z_view = -far → z_clip = 1   (Metal [0,1] depth range)
     return m4x4{
         v4{2.0f / (right - left), 0.0f, 0.0f, 0.0f},
         v4{0.0f, 2.0f / (top - bottom), 0.0f, 0.0f},
         v4{0.0f, 0.0f, 1.0f / (nearPlane - farPlane), 0.0f},
-        v4{(left + right) / (left - right), (top + bottom) / (bottom - top), 
+        v4{(left + right) / (left - right), (top + bottom) / (bottom - top),
            nearPlane / (nearPlane - farPlane), 1.0f}
     };
 }
@@ -392,7 +401,11 @@ inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
     v3 forward = Normalize(target - eye);
     v3 right = Normalize(Cross(forward, up));
     v3 newUp = Cross(right, forward);
-    
+
+    // Column-major storage: each v4 is a COLUMN of the view matrix.
+    // The standard view matrix rows are: [right | newUp | -forward | translation]
+    // Transposing to column-major: column j = (row0[j], row1[j], row2[j], row3[j])
+    // simd::float4x4 stores columns: m4x4{col0, col1, col2, col3}.
     return m4x4{
         v4{right.x, newUp.x, -forward.x, 0.0f},
         v4{right.y, newUp.y, -forward.y, 0.0f},
@@ -423,6 +436,9 @@ inline m4x4 Transpose(const m4x4& mat) {
  * @return 逆矩阵，如果矩阵不可逆则返回单位矩阵
  */
 inline m4x4 Inverse(const m4x4& m) {
+#if defined(__APPLE__)
+    return simd::inverse(m);
+#else
     float m00 = m.columns[0][0], m01 = m.columns[0][1], m02 = m.columns[0][2], m03 = m.columns[0][3];
     float m10 = m.columns[1][0], m11 = m.columns[1][1], m12 = m.columns[1][2], m13 = m.columns[1][3];
     float m20 = m.columns[2][0], m21 = m.columns[2][1], m22 = m.columns[2][2], m23 = m.columns[2][3];
@@ -489,6 +505,7 @@ inline m4x4 Inverse(const m4x4& m) {
     out.columns[2][0] = d20; out.columns[2][1] = d21; out.columns[2][2] = d22; out.columns[2][3] = d23;
     out.columns[3][0] = d30; out.columns[3][1] = d31; out.columns[3][2] = d32; out.columns[3][3] = d33;
     return out;
+#endif
 }
 
 /**
@@ -637,21 +654,24 @@ inline v3 HSVToRGB(const v3& hsv) {
  */
 inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ) {
 #if defined(__APPLE__)
-    // 手动实现透视矩阵
+    // Metal使用的透视矩阵（NDC Z范围[0,1]，右手坐标系）
     float f = 1.0f / std::tanf(fovY * 0.5f);
     simd::float4x4 result{};
     result.columns[0] = simd::float4{f / aspect, 0.0f, 0.0f, 0.0f};
     result.columns[1] = simd::float4{0.0f, f, 0.0f, 0.0f};
-    result.columns[2] = simd::float4{0.0f, 0.0f, (farZ + nearZ) / (nearZ - farZ), -1.0f};
-    result.columns[3] = simd::float4{0.0f, 0.0f, (2.0f * farZ * nearZ) / (nearZ - farZ), 0.0f};
+    result.columns[2] = simd::float4{0.0f, 0.0f, farZ / (nearZ - farZ), -1.0f};
+    result.columns[3] = simd::float4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 1.0f};
     return result;
 #elif defined(_WIN32)
     return DirectX::XMMatrixPerspectiveFovLH(fovY, aspect, nearZ, farZ);
 #else
-    // 默认实现：手动构造透视矩阵
-    m4x4 result{};
-    // 这里需要根据具体的m4x4类型手动构造
-    return result;
+    float f = 1.0f / std::tanf(fovY * 0.5f);
+    return m4x4{
+        v4{f / aspect, 0.0f, 0.0f, 0.0f},
+        v4{0.0f, f, 0.0f, 0.0f},
+        v4{0.0f, 0.0f, farZ / (nearZ - farZ), -1.0f},
+        v4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 0.0f}
+    };
 #endif
 }
 
@@ -669,10 +689,12 @@ inline m4x4 MatrixTranslation(const v3& translation) {
 #elif defined(_WIN32)
     return DirectX::XMMatrixTranslation(translation.x, translation.y, translation.z);
 #else
-    // 默认实现：手动构造平移矩阵
-    m4x4 result{};
-    // 这里需要根据具体的m4x4类型手动构造
-    return result;
+    return m4x4{
+        v4{1.0f, 0.0f, 0.0f, 0.0f},
+        v4{0.0f, 1.0f, 0.0f, 0.0f},
+        v4{0.0f, 0.0f, 1.0f, 0.0f},
+        v4{translation.x, translation.y, translation.z, 1.0f}
+    };
 #endif
 }
 

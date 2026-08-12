@@ -118,4 +118,12 @@ namespace primal::command_buffer {
         assert(is_valid(c));
         return queue_types[id::index(c.get_id())];
     }
+
+    void remove_for_entity(game_entity::entity_id eid) {
+        const id::id_type entity_index = id::index(eid);
+        if (entity_index < entity_to_component.size() && id::is_valid(entity_to_component[entity_index])) {
+            remove(component{ entity_to_component[entity_index] });
+            entity_to_component[entity_index] = command_buffer_id{ id::invalid_id };
+        }
+    }
 }

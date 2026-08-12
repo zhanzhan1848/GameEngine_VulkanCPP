@@ -129,6 +129,21 @@ bool MetalBuffer::Initialize() {
         mtlBuffer_->setLabel(name);
     }
 
+    // CRITICAL FIX: Zero-initialize StorageModeShared buffers.
+    // Metal's newBuffer/newBufferFromHeap do NOT guarantee zero-initialized memory.
+    // For GPU-driven pipelines with triple buffering, the first frame reads from a
+    // buffer slot that hasn't been written to yet by the GPU. Garbage data in that
+    // buffer causes non-deterministic rendering (some geometry disappears) that
+    // varies between program runs due to ASLR affecting heap address layout.
+    // Only zero Shared-mode buffers (CPU/GPU coherent) since Private buffers
+    // are not CPU-accessible and must be written via GPU commands.
+    if (options & MTL::ResourceStorageModeShared) {
+        void* contents = mtlBuffer_->contents();
+        if (contents) {
+            memset(contents, 0, desc_.size);
+        }
+    }
+
     state_ = ResourceState::Ready;
     // std::cout << "[MetalBuffer] Initialized at address: " << this << " Handle: " << handle_ << std::endl;
     return true;
@@ -140,7 +155,7 @@ void MetalBuffer::destroyImpl() {
     auto poolHandle = poolHandle_;
 
     if (mtlBuffer || (pool && poolHandle != 0)) {
-        std::cout << "[MetalBuffer] Destroying buffer at " << mtlBuffer << std::endl;
+        // std::cout << "[MetalBuffer] Destroying buffer at " << mtlBuffer << std::endl;
         device_.GetGarbageCollector().DeferredDestroy([mtlBuffer, pool, poolHandle]() {
             if (mtlBuffer) {
                 mtlBuffer->release();
@@ -230,60 +245,40 @@ bool MetalBuffer::updateDataImpl(const void* data, u64 size, u64 offset) {
                 }
             }
 
-            // 如果不可映射（如 Private 存储模式），使用 Staging Buffer
+            // 如果不可映射（如 Private 存储模式），使用 Staging Allocator
+            // 路径 A: 异步 — 通过 per-frame ring pool + deferred blit
+            //         (调用方在 frame 内调用,本帧 submit 时由 MetalDevice 统一 encode blit)
+            // 路径 B: 同步 — FlushBlocking 创建一次性 cmdbuf 并 waitUntilCompleted
+            //         (调用方在 frame 外调用,如 asset load)
             static bool loggedSlowPath = false;
             if (!loggedSlowPath) {
                 std::cerr << "[MetalBuffer] updateDataImpl used SLOW Path (Staging) for buffer at " << this
-                          << " CanMap: " << CanMap() 
-                          << " MemoryUsage: " << (int)desc_.memoryUsage 
+                          << " CanMap: " << CanMap()
+                          << " MemoryUsage: " << (int)desc_.memoryUsage
                           << std::endl;
                 loggedSlowPath = true;
             }
 
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
-    MTL::Device* mtlDevice = metalDevice.GetNativeDevice();
-    MTL::CommandQueue* transferQueue = metalDevice.GetTransferQueue();
+    MetalStagingAllocator& allocator = metalDevice.GetStagingAllocator();
 
-    if (!mtlDevice || !transferQueue) {
-        std::cerr << "[MetalBuffer] updateDataImpl failed: mtlDevice or transferQueue is null. Device: " << mtlDevice << " Queue: " << transferQueue << std::endl;
+    if (!allocator.IsInitialized()) {
+        std::cerr << "[MetalBuffer] updateDataImpl: staging allocator not initialized" << std::endl;
         return false;
     }
 
-    // 1. 创建暂存缓冲区 (Shared Mode)
-    MTL::Buffer* stagingBuffer = mtlDevice->newBuffer(size, MTL::ResourceStorageModeShared);
-    if (!stagingBuffer) {
-        std::cerr << "[MetalBuffer] updateDataImpl failed: Failed to create staging buffer. Size: " << size << std::endl;
+    // 1. 从 per-frame pool 分配 CPU 可写 staging
+    MetalStagingAllocator::Allocation alloc = allocator.Allocate(size, 256);
+    if (alloc.overflow) {
+        std::cerr << "[MetalBuffer] updateDataImpl: staging pool overflow, size=" << size << std::endl;
         return false;
     }
 
-    // 2. 将数据拷贝到暂存缓冲区
-    memcpy(stagingBuffer->contents(), data, size);
-    
-    // 3. 创建命令缓冲区和Blit编码器
-    MTL::CommandBuffer* cmdBuffer = transferQueue->commandBuffer();
-    if (!cmdBuffer) {
-        std::cerr << "[MetalBuffer] updateDataImpl failed: Failed to create command buffer" << std::endl;
-        stagingBuffer->release();
-        return false;
-    }
+    // 2. 拷贝数据到 staging
+    std::memcpy(alloc.cpuPtr, data, size);
 
-    MTL::BlitCommandEncoder* blitEncoder = cmdBuffer->blitCommandEncoder();
-    if (!blitEncoder) {
-        std::cerr << "[MetalBuffer] updateDataImpl failed: Failed to create blit encoder" << std::endl;
-        stagingBuffer->release();
-        return false;
-    }
-
-    // 4. 编码拷贝命令
-    blitEncoder->copyFromBuffer(stagingBuffer, 0, mtlBuffer_, offset, size);
-    blitEncoder->endEncoding();
-
-    // 5. 提交并等待完成
-    cmdBuffer->commit();
-    cmdBuffer->waitUntilCompleted();
-
-    // 6. 释放暂存缓冲区
-    stagingBuffer->release();
+    // 3. 排队 blit,等待本帧 submit 时统一 encode
+    allocator.QueueBlit_Buffer(alloc, mtlBuffer_, offset, size);
 
     return true;
 }
@@ -321,7 +316,26 @@ MTL::ResourceOptions MetalBuffer::getResourceOptions() const {
             options |= MTL::ResourceStorageModeShared;
             break;
     }
-    
+
+    // Cross-cmdbuf hazard tracking. Metal only auto-syncs accesses to
+    // TRACKED resources across different command buffers on the same queue.
+    // Untracked buffers (the default) allow concurrent cmd buffers to
+    // overlap, racing producer/consumer patterns like SurfaceNets (compute
+    // write in one cmdbuf) → DrawIndirect (read in next cmdbuf). Forcing
+    // Tracked on all GPU-accessible buffers closes that hole.
+    //
+    // Within a single cmdbuf, Metal inserts implicit barriers at pass
+    // boundaries regardless of tracking mode, so this flag only adds
+    // cross-cmdbuf sync — no perf hit for the common single-cmdbuf case.
+    options |= MTL::ResourceHazardTrackingModeTracked;
+
+    static int s_tracked_buf_count = 0;
+    if (s_tracked_buf_count < 30) {
+        std::cerr << "[MetalBuffer] Tracked buf opts=0x" << std::hex << options
+                  << " size=" << std::dec << desc_.size
+                  << " mem=" << static_cast<int>(desc_.memoryUsage) << std::endl;
+        ++s_tracked_buf_count;
+    }
     return options;
 }
 

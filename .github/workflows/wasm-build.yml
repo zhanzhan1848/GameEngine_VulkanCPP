@@ -1,0 +1,176 @@
+name: WASM Build & Deploy
+
+on:
+  push:
+    branches:
+      - dawn-webgpu-backend
+      - features/dawn-webgpu-backend
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      - name: Verify Emscripten
+        run: emcc --version
+
+      - name: Cache Emscripten ports
+        uses: actions/cache@v4
+        with:
+          path: ~/.emscripten_cache
+          key: emscripten-ports-${{ runner.os }}-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            emscripten-ports-${{ runner.os }}-
+
+      - name: Pre-fetch emdawnwebgpu port
+        run: embuilder build emdawnwebgpu --force 2>&1 || true
+
+      - name: Configure (Emscripten + WebGPU)
+        run: |
+          emcmake cmake -B build_wasm \
+            -DENABLE_WEBGPU=ON \
+            -DCMAKE_BUILD_TYPE=MinSizeRel
+
+      - name: Build
+        run: cmake --build build_wasm --parallel $(nproc)
+
+      - name: Patch generated JS for Chrome's resizable ArrayBuffer rejection
+        # WebAssembly.Memory uses a resizable ArrayBuffer when ALLOW_MEMORY_GROWTH=1
+        # + finite MAXIMUM_MEMORY (our config). Recent Chrome refuses resizable
+        # views in crypto.getRandomValues, GPUQueue.writeBuffer, and
+        # GPUQueue.writeTexture. Emscripten's bindings (libwasi randomFill,
+        # libwebgpu _wgpuQueueWrite{Buffer,Texture}) pass HEAPU8.subarray
+        # directly, so the call sites all throw TypeError.
+        # Symptom (randomFill): "The provided ArrayBufferView value must not
+        #   be resizable" during JobScheduler init via std::random_device.
+        # Symptom (writeTexture): same TypeError during DawnDevice::UpdateTextureData
+        #   → IBL/probe/staging uploads.
+        # Insert a single prototype-level polyfill at the top of the generated
+        # JS — patches crypto.getRandomValues and GPUQueue.prototype methods
+        # to copy resizable views through fixed intermediates. Runs once
+        # before main() so all downstream call sites are covered.
+        # Applies to BOTH TestDawnWASM.js and TestKenneyTilePreviewWASM.js.
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          POLY = '''// Resizable-ArrayBuffer polyfill (Chrome 125+ rejects resizable views in
+          // crypto.getRandomValues, GPUQueue.writeBuffer, GPUQueue.writeTexture).
+          (function() {
+            if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+              var origRand = crypto.getRandomValues.bind(crypto);
+              crypto.getRandomValues = function(view) {
+                if (view && view.buffer && view.buffer.resizable) {
+                  var copy = new view.constructor(view.byteLength / view.BYTES_PER_ELEMENT);
+                  var r = origRand(copy);
+                  view.set(r);
+                  return r;
+                }
+                return origRand(view);
+              };
+            }
+            if (typeof GPUQueue !== 'undefined' && GPUQueue.prototype) {
+              var origWB = GPUQueue.prototype.writeBuffer;
+              GPUQueue.prototype.writeBuffer = function(buffer, offset, data) {
+                if (data && data.buffer && data.buffer.resizable) {
+                  var copy = new Uint8Array(data.byteLength);
+                  copy.set(data);
+                  return origWB.call(this, buffer, offset, copy, arguments[3], arguments[4]);
+                }
+                return origWB.apply(this, arguments);
+              };
+              var origWT = GPUQueue.prototype.writeTexture;
+              GPUQueue.prototype.writeTexture = function(dest, data, layout, size) {
+                if (data && data.buffer && data.buffer.resizable) {
+                  var copy = new Uint8Array(data.byteLength);
+                  copy.set(data);
+                  return origWT.call(this, dest, copy, layout, size);
+                }
+                return origWT.apply(this, arguments);
+              };
+            }
+          })();
+          '''
+          targets = list(pathlib.Path('WASM').glob('Test*WASM*.js'))
+          targets += list(pathlib.Path('build_wasm').rglob('Test*WASM*.js'))
+          if not targets:
+            raise SystemExit('[patch] no Test*WASM.js found')
+          for p in targets:
+            src = p.read_text()
+            if 'Resizable-ArrayBuffer polyfill' in src:
+              print(f'[patch] already present in {p}')
+              continue
+            p.write_text(POLY + src)
+            print(f'[patch] inserted polyfill in {p}')
+          PY
+
+
+      - name: Prepare deploy directory
+        run: |
+          mkdir -p deploy
+          # Flat layout — every demo HTML loads its binary + assets via
+          # relative ./ paths, so binaries and the assets/ tree must live
+          # alongside the HTML in the same directory. We rename the demo
+          # HTMLs to avoid clashes (each demo keeps its source-tree name
+          # in the repo but flattens on deploy).
+          #   deploy/index.html      — launcher (root)
+          #   deploy/wfc.html        — WFC demo (renamed from wfc/shell.html)
+          #   deploy/wasm.html       — basic-rendering demo (renamed from wasm/index.html)
+          #   deploy/Test*WASM.{js,wasm}
+          #   deploy/wasm_manifest.js + assets/   — runtime assets
+
+          # Binaries
+          cp WASM/TestDawnWASM.js WASM/TestDawnWASM.wasm deploy/ 2>/dev/null || true
+          cp WASM/TestKenneyTilePreviewWASM.js WASM/TestKenneyTilePreviewWASM.wasm deploy/ 2>/dev/null || true
+          # CMake occasionally parks outputs in build_wasm/ — sweep it as a fallback.
+          find build_wasm -maxdepth 3 \( -name 'TestDawnWASM.*' -o -name 'TestKenneyTilePreviewWASM.*' \) \
+            -exec cp {} deploy/ \; 2>/dev/null || true
+
+          # Launcher (root index.html). Must be the LAST copy for index.html
+          # — don't let wasm/index.html overwrite it.
+          if [ -f index.html ]; then
+            cp index.html deploy/index.html
+          fi
+
+          # Demo HTMLs, renamed.
+          if [ -f wfc/shell.html ]; then
+            cp wfc/shell.html deploy/wfc.html
+          fi
+          if [ -f wasm/index.html ]; then
+            cp wasm/index.html deploy/wasm.html
+          fi
+
+          # Runtime assets + manifest (TestDawnWASM.js fetches wasm_manifest.js
+          # from ./; textures are loaded via relative assets/...png URLs.)
+          if [ -f build_wasm/wasm_manifest.js ]; then
+            cp build_wasm/wasm_manifest.js deploy/
+          fi
+          mkdir -p deploy/assets/models/Sponza
+          cp EngineTest/assets/Sponza.model deploy/assets/
+          cp EngineTest/assets/models/Sponza/*.png deploy/assets/models/Sponza/ 2>/dev/null || true
+          echo "=== Deploy contents ==="
+          du -sh deploy/
+          ls -la deploy/
+
+      - name: Deploy to GitHub Pages
+        if: success()
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deploy
+          publish_branch: gh-pages

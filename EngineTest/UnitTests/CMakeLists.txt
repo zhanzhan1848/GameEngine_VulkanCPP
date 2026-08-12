@@ -29,6 +29,26 @@ set_target_properties(StandaloneRHI_Device_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_Device_Test PRIVATE DEBUG _DEBUG)
 
+# 创建RHI设备工厂测试（端到端验证 CreateRHIDevice/DestroyRHIDevice）
+add_executable(TestRHIDeviceFactory RHI/Core/TestRHIDeviceFactory.cpp)
+target_include_directories(TestRHIDeviceFactory PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+target_link_libraries(TestRHIDeviceFactory PRIVATE
+    Engine
+    "-framework Foundation"
+    "-framework Metal"
+    "-framework MetalKit"
+    "-framework QuartzCore"
+)
+add_test(NAME TestRHIDeviceFactory COMMAND TestRHIDeviceFactory)
+set_target_properties(TestRHIDeviceFactory PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 # 创建RHI资源管理测试
 add_executable(StandaloneRHI_Resource_Test RHI/Core/TestRHIResource.cpp)
 # 不依赖任何Engine头文件或库，完全独立
@@ -314,6 +334,26 @@ if(APPLE)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
 
+    # PR4 Spike: encoder-level memoryBarrier validation
+    add_executable(TestMetalEncoderBarrierSpike Graphics/Metal/TestMetalEncoderBarrierSpike.cpp)
+    target_include_directories(TestMetalEncoderBarrierSpike PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalEncoderBarrierSpike PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalEncoderBarrierSpike COMMAND TestMetalEncoderBarrierSpike)
+    set_target_properties(TestMetalEncoderBarrierSpike PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
     # 创建Metal混合状态测试
     add_executable(TestMetalBlendState Graphics/Metal/TestMetalBlendState.cpp)
     target_include_directories(TestMetalBlendState PRIVATE 
@@ -409,9 +449,9 @@ if(APPLE)
     )
     target_compile_definitions(TestMetalCommandEncoding PRIVATE DEBUG _DEBUG)
 
-    # 创建Metal Shader 熱重载测试
+    # 创建 Metal Shader 熱重载测试
     add_executable(TestMetalHotReload Graphics/Metal/TestMetalHotReload.cpp)
-    target_include_directories(TestMetalHotReload PRIVATE 
+    target_include_directories(TestMetalHotReload PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/Engine
         ${CMAKE_SOURCE_DIR}/Engine/Common
@@ -423,6 +463,20 @@ if(APPLE)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
     target_compile_definitions(TestMetalHotReload PRIVATE DEBUG _DEBUG)
+
+    # 创建 ShaderIR + MaterialGraphToIR 测试
+    add_executable(TestShaderIR Graphics/TestShaderIR.cpp)
+    target_include_directories(TestShaderIR PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestShaderIR PRIVATE Engine "-framework Foundation" "-framework Metal" "-framework QuartzCore")
+    add_test(NAME TestShaderIR COMMAND TestShaderIR)
+    set_target_properties(TestShaderIR PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    target_compile_definitions(TestShaderIR PRIVATE DEBUG _DEBUG)
 
     # 创建 IBL Shader 测试
     add_executable(StandaloneGraphics_IBL_Test Graphics/TestIBLShaders.cpp)
@@ -506,6 +560,120 @@ if(APPLE)
     set_target_properties(TestMetalPRT PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
+
+
+    #### Nanite 单元测试 ####
+
+    # 创建 Nanite Resource 测试
+    add_executable(TestNaniteResourceManager Nanite/TestNaniteResourceManager.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Nanite/NaniteResourceManager.cpp
+    )
+    target_include_directories(TestNaniteResourceManager PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestNaniteResourceManager PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    target_compile_definitions(TestNaniteResourceManager PRIVATE 
+        DEBUG 
+        _DEBUG 
+        PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+    )
+    add_test(NAME TestNaniteResourceManager COMMAND TestNaniteResourceManager)
+    set_target_properties(TestNaniteResourceManager PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建 Nanite Streaming Manager 测试
+    add_executable(TestNaniteStreamingManager Graphics/TestNaniteStreamingManager.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Nanite/NaniteStreamingManager.cpp
+    )
+    target_include_directories(TestNaniteStreamingManager PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestNaniteStreamingManager PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    target_compile_definitions(TestNaniteStreamingManager PRIVATE 
+        DEBUG 
+        _DEBUG 
+        PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+    )
+    add_test(NAME TestNaniteStreamingManager COMMAND TestNaniteStreamingManager)
+    set_target_properties(TestNaniteStreamingManager PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建 Cluster Component 测试
+    add_executable(TestClusterComponent Components/TestClusterComponent.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Components/Cluster.cpp
+    )
+    target_include_directories(TestClusterComponent PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestClusterComponent PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    target_compile_definitions(TestClusterComponent PRIVATE 
+        DEBUG 
+        _DEBUG 
+        PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+    )
+    add_test(NAME TestClusterComponent COMMAND TestClusterComponent)
+    set_target_properties(TestClusterComponent PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # 创建 Scene Snapshot 测试
+    add_executable(TestSceneSnapshot Graphics/TestSceneSnapshot.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Scene/RenderSceneSnapshot.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Scene/SceneExtractionSystem.cpp
+    )
+    target_include_directories(TestSceneSnapshot PRIVATE 
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestSceneSnapshot PRIVATE 
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    target_compile_definitions(TestSceneSnapshot PRIVATE 
+        DEBUG 
+        _DEBUG 
+        PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+    )
+    add_test(NAME TestSceneSnapshot COMMAND TestSceneSnapshot)
+    set_target_properties(TestSceneSnapshot PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    ####
 
 endif()
 
@@ -1241,4 +1409,854 @@ set_target_properties(TestJobSystem PROPERTIES FOLDER "Tests/JobSystem")
 # JobSystem thread support
 find_package(Threads REQUIRED)
 target_link_libraries(TestJobSystem PRIVATE Threads::Threads)
+
+# ==================================
+# MaterialGraphAPI Tests
+# ==================================
+
+add_executable(TestMaterialGraphAPI TestMaterialGraphAPI.cpp)
+target_include_directories(TestMaterialGraphAPI PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestMaterialGraphAPI PRIVATE EngineDLL)
+add_test(NAME TestMaterialGraphAPI COMMAND TestMaterialGraphAPI)
+set_target_properties(TestMaterialGraphAPI PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestMaterialGraphAPI PRIVATE DEBUG _DEBUG)
+set_target_properties(TestMaterialGraphAPI PROPERTIES FOLDER "Tests/MaterialGraph")
+
+# ==================================
+# MaterialGraph Reflection Tests (P0.2+P0.3+P0.4)
+# ==================================
+
+add_executable(TestMaterialReflection Graphics/TestMaterialReflection.cpp)
+target_include_directories(TestMaterialReflection PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestMaterialReflection PRIVATE Engine)
+add_test(NAME TestMaterialReflection COMMAND TestMaterialReflection)
+set_target_properties(TestMaterialReflection PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestMaterialReflection PRIVATE DEBUG _DEBUG)
+set_target_properties(TestMaterialReflection PROPERTIES FOLDER "Tests/MaterialGraph")
+
+# ==================================
+# ParticleMaterialAPI Tests (P2.8)
+# ==================================
+
+add_executable(TestParticleMaterialAPI Graphics/TestParticleMaterialAPI.cpp)
+target_include_directories(TestParticleMaterialAPI PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestParticleMaterialAPI PRIVATE EngineDLL)
+add_test(NAME TestParticleMaterialAPI COMMAND TestParticleMaterialAPI)
+set_target_properties(TestParticleMaterialAPI PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestParticleMaterialAPI PRIVATE DEBUG _DEBUG)
+set_target_properties(TestParticleMaterialAPI PROPERTIES FOLDER "Tests/MaterialGraph")
+
+# ==================================
+# Material API Extended Tests (P1 Textures + P2.9 Batch)
+# ==================================
+
+add_executable(TestMaterialAPIExtended Graphics/TestMaterialAPIExtended.cpp)
+target_include_directories(TestMaterialAPIExtended PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestMaterialAPIExtended PRIVATE EngineDLL)
+add_test(NAME TestMaterialAPIExtended COMMAND TestMaterialAPIExtended)
+set_target_properties(TestMaterialAPIExtended PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestMaterialAPIExtended PRIVATE DEBUG _DEBUG)
+set_target_properties(TestMaterialAPIExtended PROPERTIES FOLDER "Tests/Material")
+
+# ==================================
+# ECS Light/Camera Component Tests
+# ==================================
+
+add_executable(TestLightComponent Components/TestLightComponent.cpp)
+target_include_directories(TestLightComponent PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(TestLightComponent PRIVATE Engine)
+add_test(NAME TestLightComponent COMMAND TestLightComponent)
+set_target_properties(TestLightComponent PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestLightComponent PRIVATE DEBUG _DEBUG)
+set_target_properties(TestLightComponent PROPERTIES FOLDER "Tests/Components")
+
+add_executable(TestCameraComponent Components/TestCameraComponent.cpp)
+target_include_directories(TestCameraComponent PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(TestCameraComponent PRIVATE Engine)
+add_test(NAME TestCameraComponent COMMAND TestCameraComponent)
+set_target_properties(TestCameraComponent PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestCameraComponent PRIVATE DEBUG _DEBUG)
+set_target_properties(TestCameraComponent PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Phase 4.5: LightSyncSystem Integration Tests
+# 验证 ECS Light + Transform → RenderScene::lights_ 闭环
+# ==================================
+
+add_executable(TestLightSyncSystem Components/TestLightSyncSystem.cpp)
+target_include_directories(TestLightSyncSystem PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestLightSyncSystem PRIVATE Engine)
+add_test(NAME TestLightSyncSystem COMMAND TestLightSyncSystem)
+set_target_properties(TestLightSyncSystem PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestLightSyncSystem PRIVATE DEBUG _DEBUG)
+set_target_properties(TestLightSyncSystem PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Phase 3: CameraSyncSystem Integration Tests
+# 验证 ECS Camera + Transform → RenderView 矩阵闭环
+# ==================================
+
+add_executable(TestCameraSyncSystem Components/TestCameraSyncSystem.cpp)
+target_include_directories(TestCameraSyncSystem PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestCameraSyncSystem PRIVATE Engine)
+add_test(NAME TestCameraSyncSystem COMMAND TestCameraSyncSystem)
+set_target_properties(TestCameraSyncSystem PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestCameraSyncSystem PRIVATE DEBUG _DEBUG)
+set_target_properties(TestCameraSyncSystem PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Script System Foundation Tests
+# 主线程检查 + initialize/shutdown 基础回归
+# ==================================
+
+add_executable(TestScriptFoundation Script/TestScriptFoundation.cpp)
+target_include_directories(TestScriptFoundation PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptFoundation PRIVATE Engine)
+add_test(NAME TestScriptFoundation COMMAND TestScriptFoundation)
+set_target_properties(TestScriptFoundation PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptFoundation PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptFoundation PROPERTIES FOLDER "Tests/Components")
+# C++17 std::thread
+find_package(Threads REQUIRED)
+target_link_libraries(TestScriptFoundation PRIVATE Threads::Threads)
+
+# ==================================
+# Script System Lifecycle Tests (Phase 1 Task 2)
+# fixed_update / late_update / destroy / on_reload hooks
+# ==================================
+
+add_executable(TestScriptLifecycle Script/TestScriptLifecycle.cpp)
+target_include_directories(TestScriptLifecycle PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptLifecycle PRIVATE Engine)
+add_test(NAME TestScriptLifecycle COMMAND TestScriptLifecycle)
+set_target_properties(TestScriptLifecycle PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptLifecycle PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptLifecycle PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Script System Property Reflection Tests (Phase 1 Task 4)
+# entity_script::reflect(property_reflector&) — property_collector visitor
+# ==================================
+
+add_executable(TestScriptReflection Script/TestScriptReflection.cpp)
+target_include_directories(TestScriptReflection PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptReflection PRIVATE Engine)
+add_test(NAME TestScriptReflection COMMAND TestScriptReflection)
+set_target_properties(TestScriptReflection PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptReflection PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptReflection PROPERTIES FOLDER "Tests/Components")
+
+# ==================================
+# Script System Event Bus Tests (Phase 1 Task 5)
+# script_event_bus — type-erased subscribe/emit with FIFO queue,
+# re-emit isolation (depth cap 8), deferred subscribe/unsubscribe
+# ==================================
+
+add_executable(TestScriptEventBus Script/TestScriptEventBus.cpp)
+target_include_directories(TestScriptEventBus PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptEventBus PRIVATE Engine)
+add_test(NAME TestScriptEventBus COMMAND TestScriptEventBus)
+set_target_properties(TestScriptEventBus PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptEventBus PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptEventBus PROPERTIES FOLDER "Tests/Components")
+# Test uses typeid (RTTI) and std::function lambdas with captures that may throw
+# on allocation failure; mirror Script.cpp per-file -fexceptions to be safe.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptEventBus.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
+# Script System External C ABI Tests (Phase 1 Task 6)
+# script_register_external / script_create_external — C ABI adapter,
+# external_script lifecycle dispatch, C visitor reflect round-trip
+# ==================================
+
+add_executable(TestScriptExternal Script/TestScriptExternal.cpp)
+target_include_directories(TestScriptExternal PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptExternal PRIVATE Engine)
+add_test(NAME TestScriptExternal COMMAND TestScriptExternal)
+set_target_properties(TestScriptExternal PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptExternal PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptExternal PROPERTIES FOLDER "Tests/Components")
+# Mirror Script.cpp per-file -fexceptions: test verifies that thrown exceptions
+# from external callbacks are caught + logged (future test addition).
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptExternal.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
+# Script System Hot Reload Tests (Phase 1 Task 7)
+# external_script deferred reload: instance replacement, dedup,
+# reload + remove same-frame precedence
+# ==================================
+
+add_executable(TestScriptReload Script/TestScriptReload.cpp)
+target_include_directories(TestScriptReload PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptReload PRIVATE Engine)
+add_test(NAME TestScriptReload COMMAND TestScriptReload)
+set_target_properties(TestScriptReload PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptReload PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptReload PROPERTIES FOLDER "Tests/Components")
+# Mirror Script.cpp per-file -fexceptions: reload dispatch wraps each hook
+# in try/catch; test may exercise exception paths in future.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptReload.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
+# Script System Event Bus External Tests (Phase 2b.2)
+# script_event_subscribe/emit/unsubscribe/unsubscribe_all — string-keyed
+# C ABI channel, opaque payload + deleter, parallel to templated bus
+# ==================================
+
+add_executable(TestScriptEventBusExternal Script/TestScriptEventBusExternal.cpp)
+target_include_directories(TestScriptEventBusExternal PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptEventBusExternal PRIVATE Engine)
+add_test(NAME TestScriptEventBusExternal COMMAND TestScriptEventBusExternal)
+set_target_properties(TestScriptEventBusExternal PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptEventBusExternal PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptEventBusExternal PROPERTIES FOLDER "Tests/Components")
+# Mirror TestScriptEventBus.cpp per-file -fexceptions: tests verify that
+# exceptions from handlers / deleters behave correctly.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptEventBusExternal.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
+# Script System Post-Main-Thread MPSC Tests (Phase 1 Task 8)
+# post_to_main_thread — lock-free MPSC queue for cross-thread callback submission
+# ==================================
+
+add_executable(TestScriptPostMainThread Script/TestScriptPostMainThread.cpp)
+target_include_directories(TestScriptPostMainThread PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptPostMainThread PRIVATE Engine)
+add_test(NAME TestScriptPostMainThread COMMAND TestScriptPostMainThread)
+set_target_properties(TestScriptPostMainThread PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptPostMainThread PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptPostMainThread PROPERTIES FOLDER "Tests/Components")
+# MPSC tests spawn std::thread — need Threads::Threads.
+find_package(Threads REQUIRED)
+target_link_libraries(TestScriptPostMainThread PRIVATE Threads::Threads)
+# Mirror Script.cpp per-file -fexceptions: drain wraps each callback in
+# try/catch; test may exercise exception paths in future.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Script/TestScriptPostMainThread.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+
+# ==================================
+# Phase 1 Task 9: Self-Test Backend (Pure C Integration Validation)
+# Proves the C ABI in ScriptExternal.h can drive the script subsystem
+# end-to-end from a pure-C source file (the same pattern Lua/Python/C#/mods
+# will use). The .c file is compiled by the C compiler (CMake picks the
+# compiler based on the .c extension), NOT the C++ frontend.
+# ==================================
+
+add_executable(TestScriptSelfTestBackend
+    ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackend.c
+    ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackendCpp.cpp
+)
+target_include_directories(TestScriptSelfTestBackend PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestScriptSelfTestBackend PRIVATE Engine)
+add_test(NAME TestScriptSelfTestBackend COMMAND TestScriptSelfTestBackend)
+set_target_properties(TestScriptSelfTestBackend PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestScriptSelfTestBackend PRIVATE DEBUG _DEBUG)
+set_target_properties(TestScriptSelfTestBackend PROPERTIES FOLDER "Tests/Components")
+# Mirror Script.cpp per-file -fexceptions: the C++ driver's lambdas may
+# allocate, and the adapter wraps each hook in try/catch.
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackendCpp.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions"
+    )
+endif()
+# Explicitly enable C99 for the .c file (Apple Clang defaults to gnu17 but
+# this makes the intent visible and matches the // comment style we use).
+set_source_files_properties(
+    "${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptSelfTestBackend.c"
+    PROPERTIES LANGUAGE C
+)
+
+# ==================================
+# Phase 5: DebugDrawQueue Tests
+# EngineDLL → Engine queue → ForwardSceneRenderer drain 的数据通道
+# ==================================
+
+add_executable(TestDebugDrawQueue Graphics/TestDebugDrawQueue.cpp)
+target_include_directories(TestDebugDrawQueue PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestDebugDrawQueue PRIVATE Engine pthread)
+add_test(NAME TestDebugDrawQueue COMMAND TestDebugDrawQueue)
+set_target_properties(TestDebugDrawQueue PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestDebugDrawQueue PRIVATE DEBUG _DEBUG)
+set_target_properties(TestDebugDrawQueue PROPERTIES FOLDER "Tests/Graphics")
+
+# ==================================
+# WFC (Wave Function Collapse) Tests
+# Phase A.1 foundation: WaveGrid Initialize/CellAt/Size
+# ==================================
+
+add_executable(TestWaveGrid Graphics/WFC/TestWaveGrid.cpp)
+target_include_directories(TestWaveGrid PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWaveGrid PRIVATE Engine)
+add_test(NAME TestWaveGrid COMMAND TestWaveGrid)
+set_target_properties(TestWaveGrid PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWaveGrid PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWaveGrid PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestTileAdjacency Graphics/WFC/TestTileAdjacency.cpp)
+target_include_directories(TestTileAdjacency PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestTileAdjacency PRIVATE Engine)
+add_test(NAME TestTileAdjacency COMMAND TestTileAdjacency)
+set_target_properties(TestTileAdjacency PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestTileAdjacency PRIVATE DEBUG _DEBUG)
+set_target_properties(TestTileAdjacency PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCConfig Graphics/WFC/TestWFCConfig.cpp)
+target_include_directories(TestWFCConfig PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCConfig PRIVATE Engine)
+add_test(NAME TestWFCConfig COMMAND TestWFCConfig)
+set_target_properties(TestWFCConfig PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCConfig PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCConfig PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestAutoSocketClassifier Graphics/WFC/TestAutoSocketClassifier.cpp)
+target_include_directories(TestAutoSocketClassifier PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestAutoSocketClassifier PRIVATE Engine)
+add_test(NAME TestAutoSocketClassifier COMMAND TestAutoSocketClassifier)
+set_target_properties(TestAutoSocketClassifier PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestAutoSocketClassifier PRIVATE DEBUG _DEBUG)
+set_target_properties(TestAutoSocketClassifier PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestProceduralRoomPack Graphics/WFC/TestProceduralRoomPack.cpp)
+target_include_directories(TestProceduralRoomPack PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestProceduralRoomPack PRIVATE Engine)
+add_test(NAME TestProceduralRoomPack COMMAND TestProceduralRoomPack)
+set_target_properties(TestProceduralRoomPack PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestProceduralRoomPack PRIVATE DEBUG _DEBUG)
+set_target_properties(TestProceduralRoomPack PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestTileAdjacencyBuild Graphics/WFC/TestTileAdjacencyBuild.cpp)
+target_include_directories(TestTileAdjacencyBuild PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestTileAdjacencyBuild PRIVATE Engine)
+add_test(NAME TestTileAdjacencyBuild COMMAND TestTileAdjacencyBuild)
+set_target_properties(TestTileAdjacencyBuild PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestTileAdjacencyBuild PRIVATE DEBUG _DEBUG)
+set_target_properties(TestTileAdjacencyBuild PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestConflictSeedMemory Graphics/WFC/TestConflictSeedMemory.cpp)
+target_include_directories(TestConflictSeedMemory PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestConflictSeedMemory PRIVATE Engine)
+add_test(NAME TestConflictSeedMemory COMMAND TestConflictSeedMemory)
+set_target_properties(TestConflictSeedMemory PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestConflictSeedMemory PRIVATE DEBUG _DEBUG)
+set_target_properties(TestConflictSeedMemory PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCSolveBudget Graphics/WFC/TestWFCSolveBudget.cpp)
+target_include_directories(TestWFCSolveBudget PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCSolveBudget PRIVATE Engine)
+add_test(NAME TestWFCSolveBudget COMMAND TestWFCSolveBudget)
+set_target_properties(TestWFCSolveBudget PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCSolveBudget PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCSolveBudget PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCStepBuffer Graphics/WFC/TestWFCStepBuffer.cpp)
+target_include_directories(TestWFCStepBuffer PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCStepBuffer PRIVATE Engine)
+add_test(NAME TestWFCStepBuffer COMMAND TestWFCStepBuffer)
+set_target_properties(TestWFCStepBuffer PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCStepBuffer PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCStepBuffer PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCRandom Graphics/WFC/TestWFCRandom.cpp)
+target_include_directories(TestWFCRandom PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCRandom PRIVATE Engine)
+add_test(NAME TestWFCRandom COMMAND TestWFCRandom)
+set_target_properties(TestWFCRandom PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCRandom PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCRandom PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCObserver Graphics/WFC/TestWFCObserver.cpp)
+target_include_directories(TestWFCObserver PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCObserver PRIVATE Engine)
+add_test(NAME TestWFCObserver COMMAND TestWFCObserver)
+set_target_properties(TestWFCObserver PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCObserver PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCObserver PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCDistanceObserver Graphics/WFC/TestWFCDistanceObserver.cpp)
+target_include_directories(TestWFCDistanceObserver PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCDistanceObserver PRIVATE Engine)
+add_test(NAME TestWFCDistanceObserver COMMAND TestWFCDistanceObserver)
+set_target_properties(TestWFCDistanceObserver PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCDistanceObserver PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCDistanceObserver PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCPropagator Graphics/WFC/TestWFCPropagator.cpp)
+target_include_directories(TestWFCPropagator PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCPropagator PRIVATE Engine)
+add_test(NAME TestWFCPropagator COMMAND TestWFCPropagator)
+set_target_properties(TestWFCPropagator PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCPropagator PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCPropagator PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestRestartPolicy Graphics/WFC/TestRestartPolicy.cpp)
+target_include_directories(TestRestartPolicy PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestRestartPolicy PRIVATE Engine)
+add_test(NAME TestRestartPolicy COMMAND TestRestartPolicy)
+set_target_properties(TestRestartPolicy PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestRestartPolicy PRIVATE DEBUG _DEBUG)
+set_target_properties(TestRestartPolicy PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCTileRegistry Graphics/WFC/TestWFCTileRegistry.cpp)
+target_include_directories(TestWFCTileRegistry PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCTileRegistry PRIVATE Engine)
+add_test(NAME TestWFCTileRegistry COMMAND TestWFCTileRegistry)
+set_target_properties(TestWFCTileRegistry PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCTileRegistry PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCTileRegistry PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCSolver Graphics/WFC/TestWFCSolver.cpp)
+target_include_directories(TestWFCSolver PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCSolver PRIVATE Engine)
+add_test(NAME TestWFCSolver COMMAND TestWFCSolver)
+set_target_properties(TestWFCSolver PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_compile_definitions(TestWFCSolver PRIVATE DEBUG _DEBUG)
+set_target_properties(TestWFCSolver PROPERTIES FOLDER "Tests/Graphics/WFC")
+
+add_executable(TestWFCCategory
+    Graphics/WFC/TestWFCCategory.cpp)
+target_include_directories(TestWFCCategory PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests)
+target_link_libraries(TestWFCCategory PRIVATE Engine)
+add_test(NAME TestWFCCategory COMMAND TestWFCCategory)
+set_target_properties(TestWFCCategory PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCCategory PRIVATE DEBUG _DEBUG)
+
+add_executable(TestWFCTileLayout
+    Graphics/WFC/TestWFCTileLayout.cpp)
+target_include_directories(TestWFCTileLayout PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests)
+target_link_libraries(TestWFCTileLayout PRIVATE Engine)
+add_test(NAME TestWFCTileLayout COMMAND TestWFCTileLayout)
+set_target_properties(TestWFCTileLayout PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCTileLayout PRIVATE DEBUG _DEBUG)
+
+add_executable(TestWFCTileRegistryPacking
+    Graphics/WFC/TestWFCTileRegistryPacking.cpp)
+target_include_directories(TestWFCTileRegistryPacking PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCTileRegistryPacking PRIVATE Engine)
+add_test(NAME TestWFCTileRegistryPacking COMMAND TestWFCTileRegistryPacking)
+set_target_properties(TestWFCTileRegistryPacking PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCTileRegistryPacking PRIVATE DEBUG _DEBUG)
+
+add_executable(TestWFCTileCatalog
+    Graphics/WFC/TestWFCTileCatalog.cpp)
+target_include_directories(TestWFCTileCatalog PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCTileCatalog PRIVATE Engine)
+add_test(NAME TestWFCTileCatalog COMMAND TestWFCTileCatalog)
+set_target_properties(TestWFCTileCatalog PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCTileCatalog PRIVATE DEBUG _DEBUG)
+
+add_executable(TestParametricTileNode
+    Graphics/WFC/TestParametricTileNode.cpp)
+target_include_directories(TestParametricTileNode PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestParametricTileNode PRIVATE Engine)
+add_test(NAME TestParametricTileNode COMMAND TestParametricTileNode)
+set_target_properties(TestParametricTileNode PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestParametricTileNode PRIVATE DEBUG _DEBUG)
+
+add_executable(TestWFCOutput
+    Graphics/WFC/TestWFCOutput.cpp)
+target_include_directories(TestWFCOutput PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCOutput PRIVATE Engine)
+add_test(NAME TestWFCOutput COMMAND TestWFCOutput)
+set_target_properties(TestWFCOutput PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCOutput PRIVATE DEBUG _DEBUG)
+
+# WFC Phase B.1 Task 5: TestWFCCornerMeshes — corner_in/out generator sanity
+add_executable(TestWFCCornerMeshes
+    Graphics/WFC/TestWFCCornerMeshes.cpp)
+target_include_directories(TestWFCCornerMeshes PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCCornerMeshes PRIVATE Engine)
+add_test(NAME TestWFCCornerMeshes COMMAND TestWFCCornerMeshes)
+set_target_properties(TestWFCCornerMeshes PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCCornerMeshes PRIVATE DEBUG _DEBUG)
+
+# WFC Phase C.1 Task 6: TestWFCRuinsMaterialPalette — ruins palette sanity
+add_executable(TestWFCRuinsMaterialPalette
+    Graphics/WFC/TestWFCRuinsMaterialPalette.cpp)
+target_include_directories(TestWFCRuinsMaterialPalette PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCRuinsMaterialPalette PRIVATE Engine)
+add_test(NAME TestWFCRuinsMaterialPalette COMMAND TestWFCRuinsMaterialPalette)
+set_target_properties(TestWFCRuinsMaterialPalette PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCRuinsMaterialPalette PRIVATE DEBUG _DEBUG)
+
+# WFC Phase C.1 Task 7: TestWFCProceduralMeshesRuins — RegisterProceduralMesh signature
+add_executable(TestWFCProceduralMeshesRuins
+    Graphics/WFC/TestWFCProceduralMeshesRuins.cpp)
+target_include_directories(TestWFCProceduralMeshesRuins PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCProceduralMeshesRuins PRIVATE Engine)
+add_test(NAME TestWFCProceduralMeshesRuins COMMAND TestWFCProceduralMeshesRuins)
+set_target_properties(TestWFCProceduralMeshesRuins PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCProceduralMeshesRuins PRIVATE DEBUG _DEBUG)
+
+# WFC Phase B.2 Task 1: TestWFCStreamDrain — DrainStream unit tests
+add_executable(TestWFCStreamDrain
+    Graphics/WFC/TestWFCStreamDrain.cpp)
+target_include_directories(TestWFCStreamDrain PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCStreamDrain PRIVATE Engine)
+add_test(NAME TestWFCStreamDrain COMMAND TestWFCStreamDrain)
+set_target_properties(TestWFCStreamDrain PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCStreamDrain PRIVATE DEBUG _DEBUG)
+
+# WFC Phase C.1 Task 13: TestWFCSocketOps — GetFaceCorners + QuantizeTo2Bit helpers
+add_executable(TestWFCSocketOps
+    Graphics/WFC/TestWFCSocketOps.cpp)
+target_include_directories(TestWFCSocketOps PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(TestWFCSocketOps PRIVATE Engine)
+add_test(NAME TestWFCSocketOps COMMAND TestWFCSocketOps)
+set_target_properties(TestWFCSocketOps PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCSocketOps PRIVATE DEBUG _DEBUG)
+
+# WFC Phase C.1 Mixed Task 1: TestWFCCandidateLayout — u64[4] mask layout + MaxTiles bump
+# NOTE: Header-only canary — verifies WFCTypes/WFCTileRegistry constexpr layout
+# (kMaskWords, MaxTiles, BitForTileVariant). No Engine link needed because the
+# test never constructs a WFCTileRegistry instance. Tasks 2-3 do not need to
+# revisit this entry; the bypass is intentional and permanent for this file.
+add_executable(TestWFCCandidateLayout
+    Graphics/WFC/TestWFCCandidateLayout.cpp)
+target_include_directories(TestWFCCandidateLayout PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+add_test(NAME TestWFCCandidateLayout COMMAND TestWFCCandidateLayout)
+set_target_properties(TestWFCCandidateLayout PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "EngineTest/UnitTests")
+target_compile_definitions(TestWFCCandidateLayout PRIVATE DEBUG _DEBUG)
 

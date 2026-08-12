@@ -9,13 +9,15 @@ project(${PROJECT_NAME})
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-execute_process(
-        COMMAND xcrun --sdk macosx --show-sdk-path
-        OUTPUT_VARIABLE MACOSX_PREFIX
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-set(CMAKE_OSX_SYSROOT "${MACOSX_PREFIX}")
-set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
+if(APPLE AND NOT EMSCRIPTEN)
+    execute_process(
+            COMMAND xcrun --sdk macosx --show-sdk-path
+            OUTPUT_VARIABLE MACOSX_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    set(CMAKE_OSX_SYSROOT "${MACOSX_PREFIX}")
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
+endif()
 
 # 根据平台分别收集源文件
 file(GLOB_RECURSE PLATFORM_UTILS
@@ -43,8 +45,13 @@ elseif(APPLE)
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.mm"
     )
 elseif(LINUX)
-    file(GLOB_RECURSE PLATFORM_SOURCES 
+    file(GLOB_RECURSE PLATFORM_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformLinux.cpp"
+    )
+elseif(EMSCRIPTEN)
+    file(GLOB_RECURSE PLATFORM_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformEmscripten.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Platform/StubsEmscripten.cpp"
     )
 endif()
 
@@ -63,12 +70,16 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderScene.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderView.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderView.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Camera/RenderViewBuilder.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Camera/RenderViewBuilder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderProxy.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderProxy.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Material.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Material.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialInstance.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialInstance.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ParticleMaterial.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ParticleMaterial.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/SceneDataAdapter.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/SceneDataAdapter.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ForwardRenderer.h"
@@ -83,11 +94,50 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Components/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Passes/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Passes/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Scene/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Scene/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/DebugDraw/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/DebugDraw/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/Providers/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Nanite/Providers/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Volume/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Volume/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Field/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Field/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Fluid/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Fluid/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Nodes/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Nodes/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Noise/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/Noise/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/GPU/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/PCG/GPU/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Nodes/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Nodes/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Styles/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Styles/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialGraph/Nodes/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ShaderIR/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ShaderIR/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialPreview/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialPreview/*.cpp"
     # Ensure SSRPass is included (GLOB_RECURSE should pick it up, but touching file forces rescan)
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderGraph/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/Modules/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/Modules/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Debug/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Debug/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/PostProcess/*.h"
@@ -133,11 +183,23 @@ endif()
 
 # 添加WebGPU平台支持（如果启用）
 if(ENABLE_WEBGPU)
-    # 设置Dawn库路径
-    set(DAWN_ROOT_DIR ${CMAKE_SOURCE_DIR}/third_party/dawn)
-    
-    # 检查Dawn库是否存在
-    if(EXISTS ${DAWN_ROOT_DIR})
+    if(EMSCRIPTEN)
+        # Emscripten: use browser's native WebGPU, don't compile Dawn
+        file(GLOB_RECURSE WEBGPU_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Dawn/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Dawn/*.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Dawn/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Dawn/*.cpp"
+        )
+        list(APPEND GRAPHICS_SOURCES ${WEBGPU_SOURCES})
+        add_definitions(-DENABLE_WEBGPU=1)
+        message(STATUS "WebGPU platform configured for Emscripten (browser WebGPU)")
+    else()
+        # Native: compile Dawn from source
+        set(DAWN_ROOT_DIR ${CMAKE_SOURCE_DIR}/third_party/dawn)
+
+        # 检查Dawn库是否存在
+        if(EXISTS ${DAWN_ROOT_DIR})
         message(STATUS "Found Dawn library at: ${DAWN_ROOT_DIR}")
         
         # 添加Dawn库作为子项目
@@ -145,12 +207,12 @@ if(ENABLE_WEBGPU)
         
         # 设置Dawn库目标
         set(DAWN_LIBRARIES
+            webgpu_dawn
             dawn_native
             dawn_proc
             dawn_wire
             dawn_platform
             dawn_common
-            dawn_utils
         )
         
         # 设置Dawn包含目录
@@ -162,9 +224,11 @@ if(ENABLE_WEBGPU)
         )
         
         # 收集WebGPU平台源文件
-        file(GLOB_RECURSE WEBGPU_SOURCES 
-            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/WebGPU/*.h"
-            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platform/WebGPU/*.cpp"
+        file(GLOB_RECURSE WEBGPU_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Dawn/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Dawn/*.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Dawn/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Dawn/*.cpp"
         )
         
         # 将WebGPU源文件添加到图形源文件列表
@@ -179,12 +243,13 @@ if(ENABLE_WEBGPU)
         message(WARNING "WebGPU support will be disabled")
         set(ENABLE_WEBGPU OFF)
     endif()
+    endif() # closes if(EMSCRIPTEN) else()
 else()
     message(STATUS "WebGPU support disabled")
 endif()
 
 # 收集通用源文件（排除平台特定文件）
-file(GLOB_RECURSE COMMON_SOURCES 
+file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/Common/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Common/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Components/*.h"
@@ -195,6 +260,9 @@ file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/EngineAPI/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Utilities/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/Algorithms/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Particles/*.h"
@@ -230,9 +298,26 @@ list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*_test\\.cpp$")  # 排除测试文件
 if(DISABLE_PARTICLE_SYSTEM)
     message(STATUS "Particle system disabled - excluding from build")
     list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*/Particles/.*")
+    list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*/ParticlePass.*")
+    list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*Particle\\.")
+    list(FILTER GRAPHICS_SOURCES EXCLUDE REGEX ".*/ParticlePass.*")
+    list(FILTER GRAPHICS_UTILS EXCLUDE REGEX ".*/ParticlePass.*")
+endif()
+
+# Emscripten: exclude ContentToEngine (which has gpu_id_from_fake_pointer /
+# sizeof(long)>sizeof(int) assertions that fail under WASM). Lumen DDGI is
+# now Dawn-compatible (#ifdef __EMSCRIPTEN__ guards on Metal-only paths).
+# Nanite IS compiled for WASM — its Metal includes are guarded by
+# #ifdef __APPLE__ and ENABLE_WEBGPU paths are implemented.
+# StubsEmscripten.cpp provides the ContentToEngine symbols Nanite references.
+if(EMSCRIPTEN)
+    list(FILTER COMMON_SOURCES EXCLUDE REGEX "Content/ContentToEngine\\.cpp")
 endif()
 
 # 合并所有源文件
+# Module .cpp files are included in Engine library (used by StandardRenderPipeline)
+# list(FILTER GRAPHICS_UTILS EXCLUDE REGEX "Modules/.*\\.cpp$")
+
 set(ALL_SOURCES
     ${COMMON_SOURCES}
     ${PLATFORM_SOURCES}
@@ -261,36 +346,29 @@ if(WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/Common
         $ENV{VULKAN_SDK}/include
     )
-elseif(APPLE)
-    
+elseif(APPLE AND NOT EMSCRIPTEN)
+
     # 设置LLVM编译器
     # set(CMAKE_CXX_COMPILER /opt/homebrew/Cellar/llvm/20.1.5/bin/clang++)
-    
+
     # 设置编译器标志
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++17")
-    
+
     # 设置Objective-C++标志
     set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -std=c++17")
-    
+
     # 设置链接器标志
     # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L/opt/homebrew/Cellar/llvm/20.1.5/lib -Wl,-rpath,/opt/homebrew/Cellar/llvm/20.1.5/lib")
-    
-    # 添加系统头文件目录（顺序很重要）
-    include_directories(SYSTEM BEFORE
-        # /opt/homebrew/Cellar/llvm/20.1.5/include/c++/v1
-        # /opt/homebrew/Cellar/llvm/20.1.5/lib/clang/19/include
-        ${MACOSX_PREFIX}/usr/include
-        ${MACOSX_PREFIX}/System/Library/Frameworks
-    )
-    
+
     # 添加项目头文件
     target_include_directories(${PROJECT_NAME} PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/Common
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+        ${CMAKE_SOURCE_DIR}/third_party/stb
     )
-    
+
     # 添加编译器选项
     target_compile_options(${PROJECT_NAME} PRIVATE
         -Wall
@@ -299,6 +377,15 @@ elseif(APPLE)
         -Wno-unused-parameter
         -Wno-c++17-extensions
         -Wignored-qualifiers
+    )
+
+elseif(EMSCRIPTEN)
+
+    target_include_directories(${PROJECT_NAME} PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Common
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/stb
     )
 endif()
 
@@ -382,6 +469,25 @@ else()
     endif()
 endif()
 
+# === Phase 1 Task 2: script dispatch 需要在边界 catch 脚本抛出的异常 ===
+# (spec 2026-07-07-script-core-capabilities-design.md §6.4)
+# Engine 整体 -fno-exceptions,但 Script.cpp 的 fixed_update/late_update/begin_play/destroy
+# 必须 catch + log + continue,防止单个脚本异常中断整个 dispatch。Per-file override。
+if(NOT MSVC)
+    # NOTE: 用 COMPILE_FLAGS 而非 COMPILE_OPTIONS。CMake 4.x 的 Unix Makefiles
+    # 生成器对 source-file 级 COMPILE_OPTIONS 在 -fno-exceptions 已由 target 级
+    # PRIVATE 选项设定时不会追加(实际编译命令仅含 $(CXX_FLAGS),override 丢失,
+    # 导致 Script.cpp 的 try/catch 报 "cannot use 'try' with exceptions disabled")。
+    # COMPILE_FLAGS 是 per-file 字符串属性,生成器会去重后追加到该文件命令末尾,
+    # -fexceptions 出现在 -fno-exceptions 之后由 clang last-wins 解析生效。
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Components/Script.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptState.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptFilesystem.cpp"
+        PROPERTIES COMPILE_FLAGS "-fexceptions"
+    )
+endif()
+
 # 根据平台添加编译定义
 if(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -412,18 +518,22 @@ if(UNIX AND NOT APPLE)
         dl
         pthread
     )
-elseif(APPLE)
+elseif(APPLE AND NOT EMSCRIPTEN)
     find_library(FOUNDATION_LIBRARY Foundation)
     find_library(COCOA_LIBRARY Cocoa)
     find_library(METAL_LIBRARY Metal)
     find_library(METALKIT_LIBRARY MetalKit)
+    find_library(METALFX_LIBRARY MetalFX)
     find_library(QUARTZCORE_LIBRARY QuartzCore)
+    find_package(ZLIB REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         ${FOUNDATION_LIBRARY}
         ${COCOA_LIBRARY}
         ${METAL_LIBRARY}
         ${METALKIT_LIBRARY}
+        ${METALFX_LIBRARY}
         ${QUARTZCORE_LIBRARY}
+        ZLIB::ZLIB
     )
 
     # find_library(ACCELERATE Accelerate)
@@ -464,13 +574,19 @@ endif()
 
 # 添加WebGPU/Dawn库支持（如果启用）
 if(ENABLE_WEBGPU)
-    # 添加Dawn包含目录
-    target_include_directories(${PROJECT_NAME} PRIVATE ${DAWN_INCLUDE_DIRS})
-    
-    # 链接Dawn库
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${DAWN_LIBRARIES})
+    if(EMSCRIPTEN)
+        # Emscripten: link browser WebGPU via emdawnwebgpu port
+        target_compile_options(${PROJECT_NAME} PUBLIC "--use-port=emdawnwebgpu")
+        target_link_options(${PROJECT_NAME} PUBLIC "--use-port=emdawnwebgpu" -sALLOW_MEMORY_GROWTH=1)
+    else()
+        # 添加Dawn包含目录
+        target_include_directories(${PROJECT_NAME} PRIVATE ${DAWN_INCLUDE_DIRS})
+
+        # 链接Dawn库
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${DAWN_LIBRARIES})
     
     # 根据平台添加特定的Dawn依赖
+    if(NOT EMSCRIPTEN)
     if(WIN32)
         # Windows特定依赖
         target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -495,11 +611,13 @@ if(ENABLE_WEBGPU)
             dl
         )
     endif()
-    
+    endif() # closes if(NOT EMSCRIPTEN)
+
     # 添加WebGPU平台定义
-    target_compile_definitions(${PROJECT_NAME} PRIVATE 
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
         PLATFORM_WEBGPU=1
     )
+    endif() # closes if(EMSCRIPTEN) else() for linking
 endif()
 
 # 输出目录

@@ -8,12 +8,18 @@
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RHI/Core/RHIMeshAsset.h"
 #include "Graphics/RHI/Core/RHIGpuMesh.h"
+#ifdef __APPLE__
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
+#endif
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+#include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"
+#endif
 
 // Metal Headers for parsing and upload
 #ifdef __APPLE__
 #include <Metal/Metal.hpp>
+#include <zlib.h>
 #endif
 
 namespace primal::graphics::rhi {
@@ -131,24 +137,6 @@ namespace primal::content
 			const u32 num_indices{ blob.read<u32>() };
 			blob.skip(sizeof(f32)); // threshold
 
-			// Pos Buffer
-			blob.skip(12 * num_vertices);
-			// Elem Buffer
-			blob.skip(elem_size * num_vertices);
-			// Index Buffer
-			blob.skip(index_size * num_indices);
-
-			// Meshlets
-			blob.skip(sizeof(u32)); // magic_mshl
-			const u32 meshlet_count{ blob.read<u32>() };
-			blob.skip(meshlet_count * sizeof(graphics::rhi::RHIMeshlet));
-			
-			const u32 meshlet_vert_count{ blob.read<u32>() };
-			blob.skip(meshlet_vert_count * sizeof(u32));
-			
-			const u32 meshlet_tri_count{ blob.read<u32>() };
-			blob.skip(meshlet_tri_count * sizeof(u8));
-			
 			// SDF
 			blob.skip(sizeof(u32)); // magic_sdf
 			blob.skip(sizeof(u32) * 3); // Res
@@ -338,7 +326,7 @@ namespace primal::content
 		id::id_type create_mesh_hierarchy(const void *const data)
 		{
 			assert(data);
-			std::cout << "create_mesh_hierarchy called." << std::endl;
+			// std::cout << "create_mesh_hierarchy called." << std::endl;
 			const u32 size{ get_geometry_hierarchy_buffer_size(data) };
 			u8 *const hierarchy_buffer{ (u8 *const)malloc(size) };
 
@@ -359,7 +347,7 @@ namespace primal::content
 				for (u32 id_idx{ 0 }; id_idx < id_count; ++id_idx)
 				{
 					const u8* at{ blob.position() };
-					std::cout << "create_mesh_hierarchy: calling graphics::add_submesh for LOD " << lod_idx << ", id " << id_idx << std::endl;
+					// std::cout << "create_mesh_hierarchy: calling graphics::add_submesh for LOD " << lod_idx << ", id " << id_idx << std::endl;
 					gpu_ids[submesh_index++] = graphics::add_submesh(at);
 					skip_mesh_in_blob(blob);
 					assert(submesh_index < (1 << 16));
@@ -387,14 +375,14 @@ namespace primal::content
 		id::id_type create_single_submesh(const void *const data)
 		{
 			assert(data);
-			std::cout << "create_single_submesh called." << std::endl;
+			// std::cout << "create_single_submesh called." << std::endl;
 			utl::blob_stream_reader blob{ (const u8*)data };
 			// skip lod_count, lod_threshold, submesh_count and size_of_submeshes
 			blob.skip(sizeof(u32) + sizeof(f32) + sizeof(u32) + sizeof(u32));
 			const u8* at{ blob.position() };
-			std::cout << "create_single_submesh: calling graphics::add_submesh..." << std::endl;
+			// std::cout << "create_single_submesh: calling graphics::add_submesh..." << std::endl;
 			const id::id_type gpu_id{ graphics::add_submesh(at) };
-			std::cout << "create_single_submesh: graphics::add_submesh returned " << gpu_id << std::endl;
+			// std::cout << "create_single_submesh: graphics::add_submesh returned " << gpu_id << std::endl;
 
 			// create a fake pointer and put it in the geometry hierarchies
 			static_assert(sizeof(uintptr_t) > sizeof(id::id_type));
@@ -553,9 +541,9 @@ namespace primal::content
 		[[nodiscard]] id::id_type create_geometry_resource(const void *const data)
 		{
 			assert(data);
-			std::cout << "create_geometry_resource: Checking is_single_mesh..." << std::endl;
+			// std::cout << "create_geometry_resource: Checking is_single_mesh..." << std::endl;
 			bool single = is_single_mesh(data);
-			std::cout << "create_geometry_resource: is_single_mesh = " << single << std::endl;
+			// std::cout << "create_geometry_resource: is_single_mesh = " << single << std::endl;
 			return single ? create_single_submesh(data) : create_mesh_hierarchy(data);
 		}
 
@@ -669,13 +657,99 @@ namespace primal::content
 		{
 			assert(data);
 
+			// Detect TEXR format (import_texture.py) and convert to raw format
+			const u8* raw_ptr = static_cast<const u8*>(data);
+			utl::vector<u8> converted_buffer;
+
+			if (raw_ptr[0] == 'T' && raw_ptr[1] == 'E' && raw_ptr[2] == 'X' && raw_ptr[3] == 'R') {
+#ifdef __APPLE__
+				utl::blob_stream_reader hdr(raw_ptr);
+				hdr.skip(4);
+				hdr.skip(4);
+				u32 srcLen = hdr.read<u32>(); hdr.skip(srcLen);
+				hdr.skip(4);
+				hdr.skip(4);
+				hdr.skip(4);
+				hdr.skip(4);
+				hdr.skip(4);
+				hdr.skip(4);
+				hdr.skip(4);
+
+				u32 tex_width = hdr.read<u32>();
+				u32 tex_height = hdr.read<u32>();
+				u32 tex_array = hdr.read<u32>();
+				u32 tex_flags = hdr.read<u32>();
+				u32 tex_mips = hdr.read<u32>();
+				u32 tex_format = hdr.read<u32>();
+
+				u32 compLen = hdr.read<u32>();
+				const u8* compData = hdr.position();
+
+				// Calculate expected decompressed size from texture dimensions
+				uLongf decSize = 0;
+				for (u32 j = 0; j < tex_mips; ++j) {
+					u32 mw = std::max(1u, tex_width >> j);
+					u32 mh = std::max(1u, tex_height >> j);
+					decSize += 16 + (mw * mh * 4);
+				}
+				decSize *= tex_array;
+				
+				utl::vector<u8> decBuf(decSize);
+				int zret = uncompress(decBuf.data(), &decSize, compData, compLen);
+				if (zret != Z_OK) {
+					std::cerr << "TEXR: zlib decompress failed (" << zret
+					          << ") compLen=" << compLen << " decSize=" << decSize << std::endl;
+					return id::invalid_id;
+				}
+				decBuf.resize(decSize);
+
+				utl::blob_stream_reader slices(decBuf.data());
+				u32 rawSize = 6 * 4;
+				for (u32 i = 0; i < tex_array; ++i) {
+					for (u32 j = 0; j < tex_mips; ++j) {
+						slices.skip(8);
+						u32 rp = slices.read<u32>();
+						u32 sp = slices.read<u32>();
+						rawSize += 4 + 4 + sp;
+						slices.skip(sp);
+					}
+				}
+
+				converted_buffer.resize(rawSize);
+				u8* dst = converted_buffer.data();
+				memcpy(dst, &tex_width, 4); dst += 4;
+				memcpy(dst, &tex_height, 4); dst += 4;
+				memcpy(dst, &tex_array, 4); dst += 4;
+				memcpy(dst, &tex_flags, 4); dst += 4;
+				memcpy(dst, &tex_mips, 4); dst += 4;
+				memcpy(dst, &tex_format, 4); dst += 4;
+
+				utl::blob_stream_reader slices2(decBuf.data());
+				for (u32 i = 0; i < tex_array; ++i) {
+					for (u32 j = 0; j < tex_mips; ++j) {
+						slices2.skip(8);
+						u32 rp = slices2.read<u32>();
+						u32 sp = slices2.read<u32>();
+						const u8* px = slices2.position();
+						memcpy(dst, &rp, 4); dst += 4;
+						memcpy(dst, &sp, 4); dst += 4;
+						memcpy(dst, px, sp); dst += sp;
+						slices2.skip(sp);
+					}
+				}
+				raw_ptr = converted_buffer.data();
+#else
+				std::cerr << "TEXR: not supported on this platform" << std::endl;
+				return id::invalid_id;
+#endif
+			}
+
 			// Try RHI first
 			if (graphics::rhi::g_deviceManager.GetDeviceCount() > 0) {
-				auto* device = graphics::rhi::g_deviceManager.GetDevice(1); 
+				auto* device = graphics::rhi::g_deviceManager.GetDevice(1);
 				if (device && device->GetDesc().platform == graphics::rhi::RHIPlatform::Metal) {
 #ifdef __APPLE__
-					utl::blob_stream_reader blob((const u8*)data);
-					const u32 width{ blob.read<u32>() };
+					utl::blob_stream_reader blob(raw_ptr);					const u32 width{ blob.read<u32>() };
 					const u32 height{ blob.read<u32>() };
 					const u32 array_size{ blob.read<u32>() };
 					const u32 flags{ blob.read<u32>() };
@@ -702,7 +776,7 @@ namespace primal::content
 			else if (format_u32 == 99) desc.format = graphics::rhi::DataFormat::BC7_sRGB;
 			else desc.format = graphics::rhi::DataFormat::RGBA8_UNorm; // Fallback
 					
-					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest;
+					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest | graphics::rhi::TextureUsage::CopySource;
 
 					auto handle = device->CreateTexture(desc);
 					if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
@@ -717,7 +791,7 @@ namespace primal::content
                         if (!mtlTexture) {
                             std::cerr << "Failed to get native Metal texture." << std::endl;
                         } else {
-                            std::cout << "Got native Metal texture: " << mtlTexture << std::endl;
+                            // std::cout << "Got native Metal texture: " << mtlTexture << std::endl;
                         }
 						
 						for (u32 i{ 0 }; i < array_size; ++i)
@@ -801,7 +875,77 @@ namespace primal::content
                     return new_id;
 #endif
 				}
+				else if (device && device->GetDesc().platform == graphics::rhi::RHIPlatform::Dawn) {
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+					utl::blob_stream_reader blob((const u8*)data);
+					const u32 width{ blob.read<u32>() };
+					const u32 height{ blob.read<u32>() };
+					const u32 array_size{ blob.read<u32>() };
+					[[maybe_unused]] const u32 flags{ blob.read<u32>() };
+					const u32 mip_levels{ blob.read<u32>() };
+					const u32 format_u32{ blob.read<u32>() };
+
+					std::cerr << "[CTE/Dawn] create_texture_resource w=" << width << " h=" << height
+					          << " arr=" << array_size << " mips=" << mip_levels
+					          << " fmt_u32=" << format_u32 << std::endl;
+
+					graphics::rhi::TextureDesc desc{};
+					desc.size = { width, height, 1 };
+					desc.arraySize = array_size;
+					desc.mipLevels = mip_levels;
+					desc.type = (array_size > 1) ? graphics::rhi::TextureType::Texture2DArray : graphics::rhi::TextureType::Texture2D;
+
+					if (format_u32 == 28) desc.format = graphics::rhi::DataFormat::RGBA8_UNorm;
+					else if (format_u32 == 29) desc.format = graphics::rhi::DataFormat::RGBA8_sRGB;
+					else if (format_u32 == 71) desc.format = graphics::rhi::DataFormat::BC1_UNorm;
+					else if (format_u32 == 72) desc.format = graphics::rhi::DataFormat::BC1_sRGB;
+					else if (format_u32 == 98) desc.format = graphics::rhi::DataFormat::BC7_UNorm;
+					else if (format_u32 == 99) desc.format = graphics::rhi::DataFormat::BC7_sRGB;
+					else desc.format = graphics::rhi::DataFormat::RGBA8_UNorm;
+
+					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest | graphics::rhi::TextureUsage::CopySource;
+
+					std::cerr << "[CTE/Dawn] Calling CreateTexture..." << std::endl;
+					auto handle = device->CreateTexture(desc);
+					std::cerr << "[CTE/Dawn] CreateTexture result: " << handle << std::endl;
+					if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
+						std::cerr << "[ContentToEngine] Failed to create Dawn texture." << std::endl;
+						return id::invalid_id;
+					}
+
+					auto* dawnDevice = static_cast<graphics::rhi::DawnDevice*>(device);
+
+					for (u32 i{ 0 }; i < array_size; ++i) {
+						for (u32 j{ 0 }; j < mip_levels; ++j) {
+							const u32 row_pitch{ blob.read<u32>() };
+							const u32 slice_pitch{ blob.read<u32>() };
+							u32 mipWidth = std::max(1u, width >> j);
+							u32 mipHeight = std::max(1u, height >> j);
+
+							std::cerr << "[CTE/Dawn] UpdateTextureData mip=" << j << " slice=" << i
+							          << " " << mipWidth << "x" << mipHeight
+							          << " row_pitch=" << row_pitch << std::endl;
+							dawnDevice->UpdateTextureData(handle, blob.position(),
+								0, 0, i, mipWidth, mipHeight, 1, row_pitch, j);
+							std::cerr << "[CTE/Dawn] UpdateTextureData done" << std::endl;
+
+							blob.skip(slice_pitch);
+						}
+					}
+
+					id::id_type new_id = rhi_texture_id_counter++;
+					{
+						std::lock_guard lock(rhi_texture_mutex());
+						rhi_texture_map()[new_id] = handle;
+					}
+					std::cerr << "[CTE/Dawn] create_texture_resource done id=" << new_id << std::endl;
+					return new_id;
+#else
+					return id::invalid_id;
+#endif
+				}
 			}
+
 
 			return graphics::add_texture((const u8 *const)data);
 		}
@@ -901,8 +1045,36 @@ namespace primal::content
 
     id::id_type register_mesh_asset(graphics::rhi::RHIMeshAsset& asset)
     {
-        std::lock_guard lock{ rhi_mesh_mutex };
-        return rhi_mesh_assets.add(std::move(asset));
+        id::id_type rhi_id;
+        {
+            std::lock_guard lock{ rhi_mesh_mutex };
+            rhi_id = rhi_mesh_assets.add(std::move(asset));
+        }
+
+        // Create geometry_hierarchies entry (single_mesh_marker encoding) so the
+        // returned ID is compatible with create_resource() and all downstream consumers.
+        static_assert(sizeof(uintptr_t) > sizeof(id::id_type));
+        constexpr u8 shift_bits{ (sizeof(uintptr_t) - sizeof(id::id_type)) << 3 };
+        u8* const fake_pointer{ (u8*)((((uintptr_t)rhi_id) << shift_bits) | single_mesh_marker) };
+        std::lock_guard geometry_lock{ geometry_mutex };
+        return geometry_hierarchies.add(fake_pointer);
+    }
+
+    id::id_type get_rhi_mesh_id(id::id_type geometry_id)
+    {
+        std::lock_guard lock{ geometry_mutex };
+        u8* const pointer{ geometry_hierarchies[geometry_id] };
+        if ((uintptr_t)pointer & single_mesh_marker)
+        {
+            constexpr u8 shift_bits{ (sizeof(uintptr_t) - sizeof(id::id_type)) << 3 };
+            return (id::id_type)((uintptr_t)pointer >> shift_bits);
+        }
+        else
+        {
+            // Multi-submesh hierarchy: return first submesh's rhi_id
+            geometry_hierarchy_stream stream{ pointer };
+            return stream.gpu_ids()[0];
+        }
     }
 
     void foreach_gpu_mesh(GpuMeshCallback callback)
@@ -940,6 +1112,8 @@ namespace primal::content
     void shutdown()
     {
         // Clear GPU Meshes first as they depend on Device
+        // IMPORTANT: Let unique_ptr handle cleanup automatically to avoid double-free
+        // The RHIGpuMesh destructor is safe and will not crash if device is invalid
         {
             std::lock_guard lock{ rhi_gpu_mesh_mutex };
             rhi_gpu_meshes.clear();

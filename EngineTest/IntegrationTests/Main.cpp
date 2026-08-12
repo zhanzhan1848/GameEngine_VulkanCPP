@@ -14,6 +14,8 @@
 #include "TestWindow.h"
 #elif TEST_STANDARD_PIPELINE
 #include "TestStandardPipeline.h"
+#elif TEST_MODULAR_PIPELINE
+#include "TestModularPipeline.h"
 #elif TEST_RENDERER
 #include "TestRenderer.h"
 #elif TEST_CSM_INTEGRATION
@@ -22,12 +24,42 @@
 #include "TestCSMIntegrationRenderGraph.h"
 #elif TEST_MULTIVIEW
 #include "TestMultiView.h"
-#elif defined(TEST_SPONZA_RENDERGRAPH)
+#elif TEST_SPONZA_RENDERGRAPH
 #include "TestSponzaRenderGraph.h"
-#elif defined(TEST_GEOMETRY_DEBUG_SPONZA)
+#elif TEST_GEOMETRY_DEBUG_SPONZA
 #include "TestGeometryDebugSponza.h"
-#elif defined(TEST_PARTICLE_SPONZA)
+#elif TEST_PARTICLE_SPONZA
 #include "TestParticleSponza.h"
+#elif TEST_NANITE_STREAMING_PIPELINE
+#include "TestNaniteStreamingPipeline.h"
+#elif defined(TEST_DAWN_RENDERING)
+#include "TestDawnRendering.h"
+#elif defined(TEST_DAWN_RENDERGRAPH)
+#include "TestDawnRenderGraph.h"
+#elif defined(TEST_DAWN_SPONZA)
+#include "TestDawnSponza.h"
+#elif defined(TEST_DAWN_FORWARD_RENDERER)
+#include "TestDawnForwardRenderer.h"
+#elif TEST_FORWARD_RENDERER
+#include "TestForwardRenderer.h"
+#elif TEST_PCG_SCATTER
+#include "TestPCGScatter.h"
+#elif TEST_GEOMETRY_API
+#include "TestGeometryAPI.h"
+#elif TEST_FIELD_DRIVEN_SCATTER
+#include "TestFieldDrivenScatter.h"
+#elif TEST_MATERIAL_PREVIEW
+#include "TestMaterialPreview.h"
+#elif TEST_MATERIAL_PREVIEW_EDITOR
+#include "TestMaterialPreviewEditor.h"
+#elif TEST_WFC_RENDERING
+#include "Graphics/WFC/TestWFCRendering.h"
+#elif TEST_WFC_RUINS_RENDERING
+#include "Graphics/WFC/TestWFCRuinsRendering.h"
+#elif TEST_WFC_STREAMING
+#include "Graphics/WFC/TestWFCStreaming.h"
+#elif TEST_KENNEY_TILE_PREVIEW
+#include "Graphics/WFC/TestKenneyTilePreview.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif
@@ -147,17 +179,24 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[])
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
     try
     {
+#if defined(TEST_DAWN_SPONZA)
+        Engine_Test test{};
+        NS::Application* app = NS::Application::sharedApplication();
+        app->setDelegate(&test);
+        app->run();
+#else
         Engine_Test test{};
         NS::Application* app = NS::Application::sharedApplication();
         monitorKeyboardInput();
         app->setDelegate(&test);
         app->run();
+#endif
     }
     catch(const std::exception& e)
     {
         std::cerr << "Error: " << e.what() << std::endl;
     }
-    
+
     pool->release();
     return 0;
 }

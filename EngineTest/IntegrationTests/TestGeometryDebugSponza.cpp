@@ -9,7 +9,7 @@
 #include "Engine/Input/Input.h"
 #include "ShaderCompilation.h"
 
-#include "third_party/astc-encoder/Source/ThirdParty/stb_image.h"
+#include "stb_image.h"  // third_party/stb submodule
 
 #include <iostream>
 #include <fstream>
@@ -1005,7 +1005,8 @@ bool TestGeometryDebugSponza::LoadScene() {
         int gpuMeshCount = 0;
         for (const auto& meshInfo : sceneMeshes) {
             if (meshInfo.meshEntityId != primal::id::invalid_id) {
-                auto* gpuMesh = content::get_rhi_gpu_mesh(meshInfo.meshEntityId);
+                auto* gpuMesh = content::get_rhi_gpu_mesh(
+                    content::get_rhi_mesh_id(meshInfo.meshEntityId));
                 if (gpuMesh) {
                     gpuMeshCount++;
                 }
@@ -1030,7 +1031,8 @@ bool TestGeometryDebugSponza::LoadScene() {
         int gpuMeshCount = 0;
         for (const auto& meshInfo : sceneMeshes) {
             if (meshInfo.meshEntityId != primal::id::invalid_id) {
-                auto* gpuMesh = content::get_rhi_gpu_mesh(meshInfo.meshEntityId);
+                auto* gpuMesh = content::get_rhi_gpu_mesh(
+                    content::get_rhi_mesh_id(meshInfo.meshEntityId));
                 if (gpuMesh) {
                     gpuMeshCount++;
                 }

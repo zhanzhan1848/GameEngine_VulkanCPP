@@ -23,8 +23,10 @@ MaterialInstance::MaterialInstance(MaterialInstance&& other) noexcept
       uniformDirty_(other.uniformDirty_),
       pendingTextures_(std::move(other.pendingTextures_)),
       pendingSamplers_(std::move(other.pendingSamplers_)),
+      pendingBuffers_(std::move(other.pendingBuffers_)),
+      boundTextures_(std::move(other.boundTextures_)),
       device_(other.device_) {
-    
+
     other.descriptorSets_.clear();
     other.uniformBuffers_.clear();
     other.uniformBuffersMapped_.clear();
@@ -59,6 +61,8 @@ MaterialInstance& MaterialInstance::operator=(MaterialInstance&& other) noexcept
         uniformDirty_ = other.uniformDirty_;
         pendingTextures_ = std::move(other.pendingTextures_);
         pendingSamplers_ = std::move(other.pendingSamplers_);
+        pendingBuffers_ = std::move(other.pendingBuffers_);
+        boundTextures_ = std::move(other.boundTextures_);
         device_ = other.device_;
         
         // Invalidate other
@@ -118,7 +122,7 @@ bool MaterialInstance::Initialize(rhi::RHIDeviceBase* device) {
     if (layout != rhi::handles::INVALID_RESOURCE) {
         rhi::DescriptorSetDesc setDesc;
         setDesc.layout = layout;
-        
+
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
             descriptorSets_[i] = device->CreateDescriptorSet(setDesc);
             if (descriptorSets_[i] == rhi::handles::INVALID_RESOURCE) {
@@ -155,6 +159,15 @@ void MaterialInstance::SetTexture(u32 binding, rhi::ResourceHandle texture, u32 
     update.arrayElement = arrayElement;
     update.texture = texture;
     pendingTextures_.push_back(update);
+
+    // Mirror into boundTextures_ so GetTextureHandle returns the most recent
+    // value even after Update() clears pendingTextures_. GPU-driven paths
+    // (GPUMaterialRegistry / MaterialDataBuilder) query handles long after
+    // SetTexture + Update have run.
+    if (binding >= boundTextures_.size()) {
+        boundTextures_.resize(binding + 1, rhi::handles::INVALID_RESOURCE);
+    }
+    boundTextures_[binding] = texture;
 }
 
 void MaterialInstance::SetSampler(u32 binding, rhi::SamplerHandle sampler, u32 arrayElement) {
@@ -287,8 +300,64 @@ void MaterialInstance::Update(rhi::RHIDeviceBase* device) {
     pendingSamplers_.clear();
     pendingBuffers_.clear();
     
-    // We do NOT auto-increment currentFrameIndex_ anymore. 
+    // We do NOT auto-increment currentFrameIndex_ anymore.
     // It should be set via SetCurrentFrame() by the renderer.
 }
+
+// ============================================================================
+// 🔥 NEW METHODS: GPU Material Registry Support (Task 4)
+// ============================================================================
+
+rhi::ResourceHandle MaterialInstance::GetTextureHandle(u32 binding) const {
+    // Read committed state (kept current in SetTexture, persists across
+    // Update() calls). Fall back to pendingTextures_ for any caller that
+    // queries between SetTexture and the next Update — same handle value,
+    // just defensive.
+    if (binding < boundTextures_.size() && boundTextures_[binding] != rhi::handles::INVALID_RESOURCE) {
+        return boundTextures_[binding];
+    }
+    for (const auto& update : pendingTextures_) {
+        if (update.binding == binding) {
+            return update.texture;
+        }
+    }
+    return rhi::handles::INVALID_RESOURCE;
+}
+
+void MaterialInstance::GetMaterialFactors(
+    math::v3& out_albedo_tint,
+    float& out_metallic,
+    float& out_roughness
+) const {
+    // Try to get from material template
+    if (material_) {
+        // Assuming material template has methods to get factors
+        // For now, return default values
+        // TODO: Implement proper material factor extraction
+        out_albedo_tint = math::v3{1.0f, 1.0f, 1.0f};
+        out_metallic = 0.0f;
+        out_roughness = 0.5f;
+    } else {
+        // Default values
+        out_albedo_tint = math::v3{1.0f, 1.0f, 1.0f};
+        out_metallic = 0.0f;
+        out_roughness = 0.5f;
+    }
+}
+
+void MaterialInstance::GetBoundTextures(
+    rhi::ResourceHandle& out_albedo,
+    rhi::ResourceHandle& out_normal,
+    rhi::ResourceHandle& out_orm
+) const {
+    // Standard binding indices: 0=albedo, 1=normal, 2=ORM
+    out_albedo = GetTextureHandle(0);
+    out_normal = GetTextureHandle(1);
+    out_orm = GetTextureHandle(2);
+}
+
+// ============================================================================
+// END NEW METHODS
+// ============================================================================
 
 } // namespace primal::graphics

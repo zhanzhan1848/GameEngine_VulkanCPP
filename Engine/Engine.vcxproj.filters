@@ -182,7 +182,6 @@
     </ClInclude>
     <ClInclude Include="Graphics\Vulkan\VulkanCamera.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanTexture.h" />
-    <ClInclude Include="Content\stb_image.h" />
     <ClInclude Include="Content\tiny_obj_loader.h" />
     <ClInclude Include="Graphics\Vulkan\VulkanShader.h" />
     <ClInclude Include="EngineAPI\Input.h" />

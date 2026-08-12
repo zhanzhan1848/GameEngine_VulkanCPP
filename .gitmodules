@@ -13,3 +13,27 @@
 [submodule "third_party/meshoptimizer"]
 	path = third_party/meshoptimizer
 	url = https://github.com/zeux/meshoptimizer.git
+[submodule "third_party/stb"]
+	path = third_party/stb
+	url = https://github.com/nothings/stb.git
+[submodule "third_party/PhysX"]
+	path = third_party/PhysX
+	url = https://github.com/NVIDIAGameWorks/PhysX.git
+[submodule "third_party/lua"]
+	path = third_party/lua
+	url = https://github.com/lua/lua.git
+[submodule "third_party/eigen"]
+	path = third_party/eigen
+	url = https://gitlab.com/libeigen/eigen.git
+[submodule "third_party/libigl"]
+	path = third_party/libigl
+	url = https://github.com/libigl/libigl.git
+[submodule "third_party/pmp-library"]
+	path = third_party/pmp-library
+	url = https://github.com/pmp-library/pmp-library.git
+[submodule "third_party/VHACD"]
+	path = third_party/VHACD
+	url = https://github.com/Unity-Technologies/VHACD.git
+[submodule "third_party/xatlas"]
+	path = third_party/xatlas
+	url = https://github.com/jpcy/xatlas.git

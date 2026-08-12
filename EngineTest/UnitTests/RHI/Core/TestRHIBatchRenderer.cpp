@@ -69,7 +69,11 @@ public:
     ResourceHandle createTextureImpl(const TextureDesc& desc) {
         return handles::INVALID_RESOURCE;
     }
-    
+
+    ResourceHandle createTextureViewImpl(const TextureViewDesc& desc) {
+        return handles::INVALID_RESOURCE;
+    }
+
     ShaderHandle createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint) {
         return handles::INVALID_SHADER;
     }
@@ -285,7 +289,9 @@ protected:
     void BlitTexture(ResourceHandle src, ResourceHandle dst, const TextureBlitRegion* regions, uint32_t regionCount, FilterMode filter) override { (void)src; (void)dst; (void)regions; (void)regionCount; (void)filter; }
     void GenerateMipmaps(ResourceHandle texture) override { (void)texture; }
     void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override { (void)barriers; (void)barrierCount; }
-    
+    void MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask, AccessFlag srcAccessMask, AccessFlag dstAccessMask) override { (void)srcStageMask; (void)dstStageMask; (void)srcAccessMask; (void)dstAccessMask; }
+    void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags, uint32_t offset, uint32_t size, const void* pValues) override { (void)layout; (void)stageFlags; (void)offset; (void)size; (void)pValues; }
+
     void destroyImpl() override {}
     bool resetImpl() override { return true; }
     bool beginImpl() override { return true; }

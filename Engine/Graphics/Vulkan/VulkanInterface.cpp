@@ -8,6 +8,14 @@
 #include "Graphics/GraphicsPlatformInterface.h"
 #include "VulkanContent.h"
 
+// === Phase 1 Sub-step 1.2.6': 本文件实现旧 platform_interface 的 Vulkan 填充器 ===
+// 当前 Mac 构建里 Vulkan 后端不在 GraphicsPlatform.cpp 的 switch case 中（被
+// #ifndef __APPLE__ 排除），所以 get_platform_interface 实际是死代码。
+// RHI 抽象层后续在 RHI/Platforms/Vulkan/ 接入新实现。Phase 2 删除整个旧目录。
+#ifdef __clang__
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
 namespace primal::graphics::vulkan {
 
     void get_platform_interface(platform_interface& pi)

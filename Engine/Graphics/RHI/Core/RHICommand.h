@@ -25,6 +25,60 @@ struct ColorBlendState;
 struct DepthStencilState;
 struct RasterizerState;
 
+// === 管线阶段和访问标志枚举 ===
+
+/**
+ * @brief 管线阶段标志
+ */
+enum class PipelineStage : u32 {
+    TopOfPipe = 0x00000001,
+    DrawIndirect = 0x00000002,
+    VertexInput = 0x00000004,
+    VertexShader = 0x00000008,
+    FragmentShader = 0x00000010,
+    EarlyFragmentTests = 0x00000020,
+    LateFragmentTests = 0x00000040,
+    ColorAttachmentOutput = 0x00000080,
+    ComputeShader = 0x00000100,
+    Transfer = 0x00000200,
+    BottomOfPipe = 0x00000400,
+    Host = 0x00000800,
+    AllGraphics = 0x00001000,
+    AllCommands = 0x00002000
+};
+
+/**
+ * @brief 访问标志
+ */
+enum class AccessFlag : u32 {
+    IndirectCommandRead = 0x00000001,
+    IndexRead = 0x00000002,
+    VertexAttributeRead = 0x00000004,
+    UniformRead = 0x00000008,
+    InputAttachmentRead = 0x00000010,
+    ShaderRead = 0x00000020,
+    ShaderWrite = 0x00000040,
+    ColorAttachmentRead = 0x00000080,
+    ColorAttachmentWrite = 0x00000100,
+    DepthStencilAttachmentRead = 0x00000200,
+    DepthStencilAttachmentWrite = 0x00000400,
+    TransferRead = 0x00000800,
+    TransferWrite = 0x00001000,
+    HostRead = 0x00002000,
+    HostWrite = 0x00004000,
+    MemoryRead = 0x00008000,
+    MemoryWrite = 0x00010000
+};
+
+// 位运算操作符重载
+constexpr AccessFlag operator|(AccessFlag lhs, AccessFlag rhs) {
+    return static_cast<AccessFlag>(static_cast<u32>(lhs) | static_cast<u32>(rhs));
+}
+
+constexpr PipelineStage operator|(PipelineStage lhs, PipelineStage rhs) {
+    return static_cast<PipelineStage>(static_cast<u32>(lhs) | static_cast<u32>(rhs));
+}
+
 /**
  * @brief 获取命令缓冲区实例
  * @param handle 命令缓冲区句柄
@@ -419,6 +473,14 @@ public:
                               u32 offset, u32 size, const void* pValues) = 0;
 
     /**
+     * @brief 设置计算着色器小常量数据 (Metal setBytes)
+     * @param index 缓冲区绑定索引
+     * @param data 数据指针
+     * @param size 数据大小
+     */
+    virtual void SetComputeBytes(u32 index, const void* data, u32 size) = 0;
+
+    /**
      * @brief 写入时间戳
      * @param queryPool 查询池句柄
      * @param queryIndex 查询索引
@@ -477,7 +539,18 @@ public:
      * @param offset 偏移量
      */
     virtual void DispatchIndirect(ResourceHandle buffer, u64 offset = 0) = 0;
-    
+
+    /**
+     * @brief 内存屏障
+     * @details 确保之前的内存操作对后续操作可见
+     * @param srcStageMask 源管线阶段掩码
+     * @param dstStageMask 目标管线阶段掩码
+     * @param srcAccessMask 源访问掩码
+     * @param dstAccessMask 目标访问掩码
+     */
+    virtual void MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask,
+                              AccessFlag srcAccessMask, AccessFlag dstAccessMask) = 0;
+
     // === 资源操作命令 ===
     
     /**

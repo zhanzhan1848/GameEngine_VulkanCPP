@@ -1,4 +1,5 @@
 #include "RenderScene.h"
+#include "Graphics/RenderPipeline/StreamingMesh.h"
 #include <algorithm>
 
 namespace primal::graphics {
@@ -58,6 +59,11 @@ void RenderScene::UpdateLight(id::id_type entityId, const RenderLight& newLight)
     lights_.push_back(newLight);
 }
 
+void RenderScene::ClearLights() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    lights_.clear();
+}
+
 void RenderScene::AddReflectionPlane(const RenderReflectionPlane& plane) {
     std::lock_guard<std::mutex> lock(mutex_);
     reflectionPlanes_.push_back(plane);
@@ -92,6 +98,17 @@ utl::vector<const RenderProxy*> RenderScene::Cull(const rhi::Frustum& frustum) c
 
 void RenderScene::Cull(const rhi::Frustum& frustum, utl::vector<const RenderProxy*>& outProxies) const {
     std::lock_guard<std::mutex> lock(mutex_);
+#ifdef __EMSCRIPTEN__
+    // TODO: frustum culling returns 0 visible on WASM, bypassing for now
+    (void)frustum;
+    if (outProxies.capacity() < outProxies.size() + proxies_.size()) {
+        outProxies.reserve(outProxies.size() + proxies_.size());
+    }
+    for (const auto& proxy : proxies_) {
+        outProxies.push_back(&proxy);
+    }
+    return;
+#endif
     // 预估容量，避免频繁分配
     if (outProxies.capacity() < outProxies.size() + proxies_.size()) {
         outProxies.reserve(outProxies.size() + proxies_.size());
@@ -119,6 +136,63 @@ void RenderScene::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     proxies_.clear();
     lights_.clear();
+}
+
+// --- Streaming Mesh Management (Phase 9.3b) ---
+
+id::id_type RenderScene::RegisterStreamingMesh(StreamingMesh* mesh, u32 slot,
+                                                const math::v3& bounds_min,
+                                                const math::v3& bounds_max) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    StreamingMeshRecord rec{};
+    rec.entity_id  = next_streaming_entity_id_++;
+    rec.mesh       = mesh;
+    rec.slot       = slot;
+    rec.bounds_min = bounds_min;
+    rec.bounds_max = bounds_max;
+    rec.visible    = true;
+    rec.tombstoned = false;
+    rec.last_drawn_generation = 0;
+    streaming_meshes_.push_back(rec);
+    return rec.entity_id;
+}
+
+void RenderScene::UpdateStreamingMesh(id::id_type entity_id, u64 generation,
+                                       const math::v3& bounds_min,
+                                       const math::v3& bounds_max) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& r : streaming_meshes_) {
+        if (r.entity_id == entity_id && !r.tombstoned) {
+            if (r.mesh != nullptr) r.mesh->generation = generation;
+            r.bounds_min = bounds_min;
+            r.bounds_max = bounds_max;
+            return;
+        }
+    }
+}
+
+void RenderScene::UnregisterStreamingMesh(id::id_type entity_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& r : streaming_meshes_) {
+        if (r.entity_id == entity_id && !r.tombstoned) {
+            r.tombstoned = true;
+            return;
+        }
+    }
+}
+
+void RenderScene::ClearTombstonedStreamingMeshes() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // utl::vector has no iterator-based erase(begin,end); use swap-pop on the
+    // raw pointer range. We iterate from the end so swap-pop from back is O(1)
+    // per removal and preserves relative order of surviving records.
+    u64 i = streaming_meshes_.size();
+    while (i > 0) {
+        --i;
+        if (streaming_meshes_[i].tombstoned) {
+            streaming_meshes_.erase_unordered(i);
+        }
+    }
 }
 
 } // namespace primal::graphics

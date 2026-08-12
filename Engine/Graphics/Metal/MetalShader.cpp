@@ -44,7 +44,9 @@ namespace primal::graphics::metal::shader
 
 			u64 size{ 0 };
 			bool result { content::load_engine_shaders(engine_shaders_blob, size) };
-			assert(engine_shaders_blob && size);
+			// 缺 shader blob 是运行时条件（环境没构建），不应 abort。
+			// 上层 shader::initialize() 会返回 false，由 metal::core::initialize() 决定如何处理。
+			if (!result || !engine_shaders_blob || size == 0) return false;
 
 			u64 offset { 0 };
 			u32 index { 0 };

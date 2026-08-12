@@ -1,6 +1,7 @@
 #include "MetalDescriptorSet.h"
 #include "MetalDevice.h"
 #include "MetalDescriptorSetLayout.h"
+#include <iostream>
 
 namespace primal::graphics::rhi {
 
@@ -60,20 +61,34 @@ void MetalDescriptorSet::Destroy() {
 void MetalDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCount) {
     for (u32 i = 0; i < writeCount; ++i) {
         const WriteDescriptorSet& write = writes[i];
-        
+
         // Find the binding in our vector
-        // Since we didn't index by binding number directly (to save space if bindings are sparse),
-        // we search for it.
+        // CRITICAL: Metal uses separate binding namespaces for textures and buffers.
+        // Multiple entries can share the same binding number but with different types
+        // (e.g. binding 0 = SampledImage AND binding 0 = UniformBuffer).
+        // We must match BOTH binding number AND descriptor type.
         MetalDescriptorBinding* targetBinding = nullptr;
         for (auto& b : bindings_) {
-            if (b.binding == write.dstBinding) {
+            if (b.binding == write.dstBinding && b.type == write.descriptorType) {
                 targetBinding = &b;
                 break;
             }
         }
-        
+
         if (!targetBinding) {
             // Binding not found in layout?
+            // DEBUG: Log the mismatch for shadow pipeline debugging
+            static int logCount = 0;
+            if (logCount < 20) {
+                std::cerr << "[MetalDescSet] UPDATE SKIP: write binding=" << write.dstBinding
+                          << " type=" << (int)write.descriptorType
+                          << " — no match in layout bindings:";
+                for (const auto& b : bindings_) {
+                    std::cerr << " [" << b.binding << "/t=" << (int)b.type << "]";
+                }
+                std::cerr << std::endl;
+                logCount++;
+            }
             continue;
         }
         

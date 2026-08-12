@@ -65,6 +65,7 @@ public:
     
     ResourceHandle CreateBuffer(const BufferDesc& desc) override { return handles::INVALID_RESOURCE; }
     ResourceHandle CreateTexture(const TextureDesc& desc) override { return handles::INVALID_RESOURCE; }
+    ResourceHandle CreateTextureView(const TextureViewDesc& desc) override { return handles::INVALID_RESOURCE; }
     CommandBufferHandle CreateCommandBuffer(CommandQueueType type) override { return handles::INVALID_COMMAND_BUFFER; }
     void DestroyCommandBuffer(CommandBufferHandle handle) override {}
     void DestroyBuffer(ResourceHandle handle) override {}

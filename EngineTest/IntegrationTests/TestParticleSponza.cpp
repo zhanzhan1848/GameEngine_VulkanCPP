@@ -9,7 +9,7 @@
 #include "Engine/Input/Input.h"
 #include "ShaderCompilation.h"
 
-#include "Engine/Content/stb_image.h"
+#include "stb_image.h"  // third_party/stb submodule
 
 #include <iostream>
 #include <fstream>
@@ -1284,7 +1284,7 @@ void CompareModelFiles(primal::graphics::rhi::RHIDeviceBase* device) {
     }
 
     // Logical Comparison via SceneDataAdapter
-    auto LoadMeshes = [&](const std::vector<uint8_t>& data) -> std::vector<SceneDataMeshInfo> {
+    auto LoadMeshes = [&](const std::vector<uint8_t>& data) -> utl::vector<SceneDataMeshInfo> {
         if (data.empty()) return {};
         SceneDataAdapter adapter;
         return adapter.LoadRenderItemData(device, data.data(), (uint32_t)data.size());
@@ -1335,7 +1335,8 @@ bool TestParticleSponza::LoadScene() {
         int gpuMeshCount = 0;
         for (const auto& meshInfo : sceneMeshes) {
             if (meshInfo.meshEntityId != primal::id::invalid_id) {
-                auto* gpuMesh = content::get_rhi_gpu_mesh(meshInfo.meshEntityId);
+                auto* gpuMesh = content::get_rhi_gpu_mesh(
+                    content::get_rhi_mesh_id(meshInfo.meshEntityId));
                 if (gpuMesh) {
                     gpuMeshCount++;
                 }
@@ -1360,7 +1361,8 @@ bool TestParticleSponza::LoadScene() {
         int gpuMeshCount = 0;
         for (const auto& meshInfo : sceneMeshes) {
             if (meshInfo.meshEntityId != primal::id::invalid_id) {
-                auto* gpuMesh = content::get_rhi_gpu_mesh(meshInfo.meshEntityId);
+                auto* gpuMesh = content::get_rhi_gpu_mesh(
+                    content::get_rhi_mesh_id(meshInfo.meshEntityId));
                 if (gpuMesh) {
                     gpuMeshCount++;
                 }
@@ -1433,9 +1435,8 @@ bool TestParticleSponza::LoadScene() {
     
     // Remove duplicate texture paths
     std::sort(_pendingTexturePaths.begin(), _pendingTexturePaths.end());
-    _pendingTexturePaths.erase(
-        std::unique(_pendingTexturePaths.begin(), _pendingTexturePaths.end()),
-        _pendingTexturePaths.end());
+    auto new_end = std::unique(_pendingTexturePaths.begin(), _pendingTexturePaths.end());
+    _pendingTexturePaths.resize(new_end - _pendingTexturePaths.begin());
     
     _asyncTexturesTotalCount = static_cast<u32>(_pendingTexturePaths.size());
     std::cout << "Collected " << _pendingTexturePaths.size() << " unique textures for async loading" << std::endl;
@@ -1980,7 +1981,7 @@ void TestParticleSponza::StartAsyncTextureLoading()
     // Start async loading using JobSystem
     _asyncLoadHandle = content::AsyncResourceLoader::Get()->LoadTexturesAsync(
         _pendingTexturePaths,
-        [this](const std::vector<content::TextureLoadResult>& results)
+        [this](const utl::vector<content::TextureLoadResult>& results)
         {
             // This callback runs on main thread
             std::cout << "[Async] Texture loading complete!" << std::endl;

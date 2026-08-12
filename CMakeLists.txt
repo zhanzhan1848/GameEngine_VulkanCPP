@@ -16,6 +16,10 @@ if(CMAKE_GENERATOR MATCHES "Unix Makefiles")
     set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 endif()
 
+# macOS deployment target and architecture MUST be set before project()
+set(CMAKE_OSX_ARCHITECTURES "arm64")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0")
+
 # 设置项目名称和版本
 project(GameEngine_VulkanCPP
     VERSION 1.0
@@ -29,16 +33,28 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_OSX_ARCHITECTURES "arm64")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0")
 
+# Emscripten WASM build support
+if(EMSCRIPTEN)
+    add_definitions(-D__EMSCRIPTEN__)
+    set(CMAKE_EXECUTABLE_SUFFIX ".js")
+endif()
 # 设置构建类型
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose build type: Debug Release" FORCE)
 endif()
 
 # 设置输出目录
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/${CMAKE_BUILD_TYPE})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/${CMAKE_BUILD_TYPE})
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/${CMAKE_BUILD_TYPE})
+if(EMSCRIPTEN)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/WASM)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/WASM)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/WASM)
+else()
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/${CMAKE_BUILD_TYPE})
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/${CMAKE_BUILD_TYPE})
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/${CMAKE_BUILD_TYPE})
+endif()
 
 # 定义全局路径变量
 set(ENGINE_ASSETS_DIR ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/Assets)
@@ -68,14 +84,17 @@ if(WIN32)
     # Windows特定设置
     set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
     
-elseif(APPLE)
+elseif(APPLE AND NOT EMSCRIPTEN)
     add_definitions(
         -DAPPLE
         -DMACOS
     )
-    
+
     # macOS特定设置
     set(CMAKE_MACOSX_RPATH ON)
+
+    # Metal shader validation (xcrun compile check)
+    include(CMake/MetalShaderValidation.cmake)
 
     # FBX SDK 自动检测和安装
     set(FBX_SDK_VERSION "2020.3.7")
@@ -107,12 +126,19 @@ elseif(APPLE)
 
     # 检查 submodule 是否已初始化
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src/meshoptimizer.h")
-        message(FATAL_ERROR 
+        message(FATAL_ERROR
             "Git submodules not initialized!\n"
             "Please run the following command to initialize submodules:\n"
             "    git submodule update --init --recursive"
         )
     endif()
+
+    # === PhysX (Engine/Simulation/) ===
+    # TODO: 使用 git submodule 集成 PhysX 源码：
+    #   git submodule add https://github.com/NVIDIAGameWorks/PhysX.git third_party/PhysX
+    # Engine/Simulation/ 中保留了 include 头文件和桥接层，预编译二进制已移除。
+    # 当前状态：未集成到 CMake 构建系统，代码中暂无使用。
+    message(STATUS "PhysX: not yet integrated as submodule (Engine/Simulation/ has headers only)")
     
     # 如果没有找到FBX SDK，提供安装指导
     if(NOT FBX_SDK_FOUND)
@@ -266,25 +292,226 @@ include_directories(
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
-    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    ${CMAKE_SOURCE_DIR}/third_party/stb
 )
+if(NOT EMSCRIPTEN)
+    include_directories(${CMAKE_SOURCE_DIR}/OSAPI/MAC)
+endif()
 
 # 添加子项目
-add_subdirectory(ContentTools)
+if(NOT EMSCRIPTEN)
+    add_subdirectory(ContentTools)
+endif()
+# Emscripten: Particles/*.cpp pulls in Metal headers and breaks the WASM build.
+# Set the option BEFORE add_subdirectory(Engine) so the source-file filter runs.
+if(EMSCRIPTEN)
+    set(DISABLE_PARTICLE_SYSTEM ON CACHE BOOL "Force-disable particle system" FORCE)
+endif()
 add_subdirectory(Engine)
-add_subdirectory(EngineDLL)
-add_subdirectory(EngineTest)
+if(NOT EMSCRIPTEN)
+    add_subdirectory(EngineDLL)
+    add_subdirectory(EngineTest)
+else()
+    # Emscripten WASM test executable
+    if(ENABLE_WEBGPU)
+        # DISABLE_PARTICLE_SYSTEM was set above (before add_subdirectory(Engine))
+        # so the source filter in Engine/CMakeLists.txt actually excludes
+        # Particles/*.cpp. The test target still gets the compile definition
+        # for safety in case any other translation unit reads it directly.
+        add_executable(TestDawnWASM
+            EngineTest/IntegrationTests/TestDawnMain.cpp
+            EngineTest/IntegrationTests/TestDawnForwardRenderer.cpp
+            EngineTest/IntegrationTests/EmscriptenInput.cpp
+        )
+        target_include_directories(TestDawnWASM PUBLIC
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/Engine
+            ${CMAKE_SOURCE_DIR}/Engine/Common
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Platforms/Dawn
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderGraph
+            ${CMAKE_SOURCE_DIR}/third_party/stb
+        )
+        target_compile_definitions(TestDawnWASM PRIVATE
+            ENABLE_WEBGPU=1
+            TEST_DAWN_FORWARD_RENDERER=1
+            DISABLE_PARTICLE_SYSTEM=1
+            PRIMAL_PLUS
+        )
+        target_compile_options(TestDawnWASM PRIVATE "--use-port=emdawnwebgpu")
+        target_link_libraries(TestDawnWASM PRIVATE Engine)
+        target_link_options(TestDawnWASM PRIVATE
+            "--use-port=emdawnwebgpu"
+            -sALLOW_MEMORY_GROWTH=1
+            -sMAXIMUM_MEMORY=2147418112
+            -sINITIAL_MEMORY=268435456
+            -sTOTAL_STACK=16777216
+            -sENVIRONMENT=web
+            -sEXIT_RUNTIME=0
+            -sASYNCIFY
+            -sASSERTIONS=1
+            --shell-file ${CMAKE_SOURCE_DIR}/wasm/shell.html
+            -g
+            -O1
+        )
+        # Shaders are tiny (~50 KB total) so we embed them directly in the WASM
+        # binary. This avoids the CMake @-escaping problem with --preload-file
+        # and guarantees shaders are available in MEMFS before main() runs.
+        set(EMBED_FLAGS "")
+        set(SHADERS_ROOT "${CMAKE_SOURCE_DIR}/Engine/Graphics/Dawn/shaders")
+        if(EXISTS "${SHADERS_ROOT}")
+            string(APPEND EMBED_FLAGS " --embed-file ${SHADERS_ROOT}@/Engine/Graphics/Dawn/shaders")
+        endif()
+        # Embed Sponza.model (~7 MB) so it's in MEMFS before main() runs.
+        # This avoids the async preRun timing issue where XHR fetch completes
+        # after main() has already tried to open the file.
+        set(SPONZA_MODEL "${CMAKE_SOURCE_DIR}/EngineTest/assets/Sponza.model")
+        if(EXISTS "${SPONZA_MODEL}")
+            string(APPEND EMBED_FLAGS " --embed-file ${SPONZA_MODEL}@/assets/Sponza.model")
+        endif()
+        # Embed DDGI static probe cache (~1.6 MB). Without this, WASM falls
+        # back to StaticProbeBaker CPU ray trace at Mode 10/11 init — single-
+        # threaded WASM makes that 30+ seconds, which looks like a tab hang.
+        set(DDGI_CACHE "${CMAKE_SOURCE_DIR}/mode10_ddgi_cache.spch")
+        if(EXISTS "${DDGI_CACHE}")
+            string(APPEND EMBED_FLAGS " --embed-file ${DDGI_CACHE}@/mode10_ddgi_cache.spch")
+        endif()
+        # Export ccall/cwrap (used by shell.html to call setDebugParam/setSunDirection)
+        # and export the two extern "C" functions themselves (EMSCRIPTEN_KEEPALIVE).
+        # _main must be included because EXPORTED_FUNCTIONS replaces the default list.
+        string(APPEND EMBED_FLAGS " -sEXPORTED_RUNTIME_METHODS=ccall,cwrap")
+        string(APPEND EMBED_FLAGS " -sEXPORTED_FUNCTIONS=_main,_setDebugParam,_setSunDirection")
+        if(NOT "${EMBED_FLAGS}" STREQUAL "")
+            set_target_properties(TestDawnWASM PROPERTIES LINK_FLAGS "${EMBED_FLAGS}")
+        endif()
+
+        # Generate manifest for runtime-fetched assets (textures only — model is embedded)
+        set(MANIFEST_FILE "${CMAKE_BINARY_DIR}/wasm_manifest.js")
+        set(ASSETS_ROOT "${CMAKE_SOURCE_DIR}/EngineTest/assets")
+
+        file(WRITE "${MANIFEST_FILE}" "// Auto-generated by CMake. Lists runtime-fetched assets.\nwindow.WASM_MANIFEST = {\n  shaders: [],\n  assets: [\n")
+        if(EXISTS "${ASSETS_ROOT}/models/Sponza")
+            file(GLOB_RECURSE SPONZA_TEX "${ASSETS_ROOT}/models/Sponza/*.png")
+            foreach(f ${SPONZA_TEX})
+                get_filename_component(name "${f}" NAME)
+                file(APPEND "${MANIFEST_FILE}" "    { url: 'assets/models/Sponza/${name}', fsPath: '/assets/models/Sponza/${name}' },\n")
+            endforeach()
+        endif()
+        file(APPEND "${MANIFEST_FILE}" "  ],\n};\n")
+
+        add_custom_command(TARGET TestDawnWASM POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${MANIFEST_FILE}" "${CMAKE_SOURCE_DIR}/wasm/wasm_manifest.js"
+            COMMENT "Copying WASM asset manifest"
+        )
+
+        # ============================================================================
+        # TestKenneyTilePreviewWASM — WFC showcase WASM binary.
+        # Mirrors TestDawnWASM structure. Asset preload + POST_BUILD copy
+        # added in Task 5.
+        # ============================================================================
+        add_executable(TestKenneyTilePreviewWASM
+            EngineTest/IntegrationTests/TestKenneyMain.cpp
+            EngineTest/IntegrationTests/Graphics/WFC/TestKenneyTilePreview.cpp
+            EngineTest/IntegrationTests/Graphics/WFC/KenneyTileCatalog.cpp
+            EngineTest/IntegrationTests/Graphics/WFC/Styles/KenneyDungeonStyle.cpp
+            EngineTest/IntegrationTests/EmscriptenInput.cpp
+        )
+        target_include_directories(TestKenneyTilePreviewWASM PUBLIC
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/Engine
+            ${CMAKE_SOURCE_DIR}/Engine/Common
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Platforms/Dawn
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderGraph
+            ${CMAKE_SOURCE_DIR}/third_party/stb
+            ${CMAKE_SOURCE_DIR}/EngineTest
+            ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests
+            ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/Graphics/WFC/Styles
+        )
+        target_compile_definitions(TestKenneyTilePreviewWASM PRIVATE
+            ENABLE_WEBGPU=1
+            DISABLE_PARTICLE_SYSTEM=1
+            PRIMAL_PLUS
+        )
+        target_compile_options(TestKenneyTilePreviewWASM PRIVATE "--use-port=emdawnwebgpu")
+        target_link_libraries(TestKenneyTilePreviewWASM PRIVATE Engine)
+        target_link_options(TestKenneyTilePreviewWASM PRIVATE
+            "--use-port=emdawnwebgpu"
+            -sALLOW_MEMORY_GROWTH=1
+            -sMAXIMUM_MEMORY=2147418112
+            -sINITIAL_MEMORY=268435456
+            -sTOTAL_STACK=16777216
+            -sENVIRONMENT=web
+            -sEXIT_RUNTIME=0
+            -sASYNCIFY
+            -sASSERTIONS=1
+            --shell-file ${CMAKE_SOURCE_DIR}/wasm/shell.html
+            -g
+            -O1
+        )
+        # Export ccall/cwrap + main, plus --embed-file flags for asset preload.
+        # LINK_FLAGS is a single shell-evaluated string — combining exports and
+        # embed-file in one property avoids CMake @-escaping issues and matches
+        # the TestDawnWASM pattern.
+        set(KENNEY_LINK_FLAGS "")
+        string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_RUNTIME_METHODS=ccall,cwrap")
+        string(APPEND KENNEY_LINK_FLAGS " -sEXPORTED_FUNCTIONS=_main,_wfc_set_observer,_wfc_set_origin,_wfc_set_grid_w,_wfc_set_grid_h,_wfc_set_grid_d,_wfc_reseed_same,_wfc_reseed_new,_wfc_get_observer,_wfc_get_origin,_wfc_get_grid_w,_wfc_get_grid_h,_wfc_get_grid_d,_wfc_get_style_count,_wfc_get_style_name,_wfc_get_style_display_name,_wfc_get_active_style_count,_wfc_get_active_style,_wfc_compose")
+
+        # Embed WGSL shaders — same pattern as TestDawnWASM. The Dawn
+        # ShaderLoader's MEMFS fallback (ShaderLoader.h:2276) reads from
+        # /Engine/Graphics/Dawn/shaders/. Without this, every subsystem that
+        # calls LoadWGSL silently no-ops and pipelines cascade-fail.
+        set(SHADERS_ROOT "${CMAKE_SOURCE_DIR}/Engine/Graphics/Dawn/shaders")
+        if(EXISTS "${SHADERS_ROOT}")
+            string(APPEND KENNEY_LINK_FLAGS " --embed-file ${SHADERS_ROOT}@/Engine/Graphics/Dawn/shaders")
+        endif()
+
+        # Asset preload — embed Kenney tiles + colormap into the .wasm binary
+        # (synchronous access from main(); --preload-file's async XHR would race).
+        # Paths mirror what TestKenneyTilePreview.cpp's DirCandidate[] expects
+        # (relative to CWD, which under WASM is "/"). Mount layout:
+        #   /EngineTest/assets/Processed/kenney_dungeon_tiles/*.engine_mesh
+        #   /EngineTest/assets/Raw/kenney_dungeon_tiles/Textures/colormap.png
+        set(KENNEY_MESH_DIR "${CMAKE_SOURCE_DIR}/EngineTest/assets/Processed/kenney_dungeon_tiles")
+        set(KENNEY_COLORMAP "${CMAKE_SOURCE_DIR}/EngineTest/assets/Raw/kenney_dungeon_tiles/Textures/colormap.png")
+        if(EXISTS "${KENNEY_MESH_DIR}")
+            string(APPEND KENNEY_LINK_FLAGS " --embed-file ${KENNEY_MESH_DIR}@/EngineTest/assets/Processed/kenney_dungeon_tiles")
+        endif()
+        if(EXISTS "${KENNEY_COLORMAP}")
+            string(APPEND KENNEY_LINK_FLAGS " --embed-file ${KENNEY_COLORMAP}@/EngineTest/assets/Raw/kenney_dungeon_tiles/Textures/colormap.png")
+        endif()
+        set_target_properties(TestKenneyTilePreviewWASM PROPERTIES LINK_FLAGS "${KENNEY_LINK_FLAGS}")
+
+        # ============================================================================
+        # POST_BUILD copy — drop .js + .wasm into wfc/ so the launcher's
+        # iframe finds them at the relative path wfc/shell.html expects.
+        # (--embed-file packages assets into the .wasm, so there's no .data.)
+        # ============================================================================
+        set(WFC_DEPLOY_DIR "${CMAKE_SOURCE_DIR}/wfc")
+        file(MAKE_DIRECTORY "${WFC_DEPLOY_DIR}")
+        add_custom_command(TARGET TestKenneyTilePreviewWASM POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE_DIR:TestKenneyTilePreviewWASM>/TestKenneyTilePreviewWASM.js"
+                "${WFC_DEPLOY_DIR}/TestKenneyTilePreviewWASM.js"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE_DIR:TestKenneyTilePreviewWASM>/TestKenneyTilePreviewWASM.wasm"
+                "${WFC_DEPLOY_DIR}/TestKenneyTilePreviewWASM.wasm"
+            COMMENT "Copying TestKenneyTilePreviewWASM artifacts to wfc/"
+        )
+    endif()
+endif()
 
 # 设置构建顺序依赖
-add_dependencies(ContentTools Engine)
-add_dependencies(EngineDLL Engine ContentTools)
+if(NOT EMSCRIPTEN)
+    add_dependencies(ContentTools Engine)
+    add_dependencies(EngineDLL Engine ContentTools)
 
-# 配置安装规则
-install(TARGETS Engine EngineDLL ContentTools
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
+    # 配置安装规则
+    install(TARGETS Engine EngineDLL ContentTools
+        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+    )
+endif()
 
 # 打印配置信息
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")

@@ -41,6 +41,15 @@ namespace primal::mesh {
         }
     } // anonymous namespace
 
+    // 函数说明: 获取 Mesh 组件的几何资源 id
+    id::id_type get_geometry_id(component c)
+    {
+        assert(c.is_valid());
+        const id::id_type eindex{ id::index(c.get_id()) };
+        assert(eindex < geometry_ids.size());
+        return geometry_ids[eindex];
+    }
+
     // 函数说明: 创建 Mesh 组件并绑定渲染项
     mesh::component create(init_info info, game_entity::entity entity)
     {

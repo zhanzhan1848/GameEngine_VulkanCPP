@@ -9,10 +9,31 @@ set(SOURCE_FILES
     "DllMain.cpp"
     "EngineAPI.cpp"
     "EntityAPI.cpp"
+    "AssetAPI.cpp"
+    "RenderPipelineAPI.cpp"
+    "PCGAPI.cpp"
+    "GeometryAPI.cpp"
+    "MaterialAPI.cpp"
+    "MaterialPreviewAPI.cpp"
+    "MaterialGraphAPI.cpp"
+    "MaterialGraphReflectionAPI.cpp"
+    "ParticleMaterialAPI.cpp"
+    "ShaderCompilerAPI.cpp"
+    "FrameAPI.cpp"
+    "ResourceAPI.cpp"
+    "DebugDrawAPI.cpp"
+    "CaptureAPI.cpp"
+    "RenderTargetAPI.cpp"
+    "LightAPI.cpp"
+    "CameraAPI.cpp"
+    "ProceduralMeshAPI.cpp"
 )
 
 set(HEADER_FILES
     "Common.h"
+    "EngineAPIInternal.h"
+    "FrameAPI.h"
+    "PipelineLightDesc.h"
 )
 
 # 添加共享库目标
@@ -37,6 +58,8 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     # "${CMAKE_CURRENT_SOURCE_DIR}/../Engine/Common"
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/Engine/Content
+    ${CMAKE_SOURCE_DIR}/Content
 )
 
 # 平台特定设置

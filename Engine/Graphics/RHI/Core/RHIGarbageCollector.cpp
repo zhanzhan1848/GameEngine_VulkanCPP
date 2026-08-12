@@ -8,6 +8,7 @@
 
 #include "RHIGarbageCollector.h"
 #include <iostream>
+#include <vector>
 
 namespace primal::graphics::rhi {
 
@@ -61,7 +62,9 @@ void RHIGarbageCollector::DeferredDestroy(std::function<void()>&& callback) {
 }
 
 void RHIGarbageCollector::Update(u64 completedFrame, double maxDurationMs) {
-    utl::vector<std::function<void()>> callbacksToRun;
+    // Must use std::vector, not utl::vector — std::function is non-trivially
+    // copyable and utl::vector's realloc-based growth would corrupt it.
+    std::vector<std::function<void()>> callbacksToRun;
     
     // 1. Collect all valid candidates
     {

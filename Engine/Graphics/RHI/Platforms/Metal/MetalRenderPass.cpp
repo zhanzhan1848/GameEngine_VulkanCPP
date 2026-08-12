@@ -128,12 +128,12 @@ void MetalRenderPass::buildDescriptor() {
         MetalTexture* texture = metalDevice.GetTexture(desc_.depthAttachment.texture);
         if (texture && texture->GetNativeTexture()) {
             cachedDepthAttachment_.nativeTexture = texture->GetNativeTexture();
-            
+
             MTL::RenderPassDepthAttachmentDescriptor* da = mtlPassDesc_->depthAttachment();
             da->setTexture(cachedDepthAttachment_.nativeTexture);
             da->setSlice(desc_.depthAttachment.arrayLayer);
             da->setLevel(desc_.depthAttachment.mipLevel);
-            
+
             MTL::LoadAction metalLoadAction = MTL::LoadActionDontCare;
             switch (desc_.depthAttachment.loadOp) {
                 case LoadAction::Load: metalLoadAction = MTL::LoadActionLoad; break;
@@ -142,13 +142,20 @@ void MetalRenderPass::buildDescriptor() {
             }
             da->setLoadAction(metalLoadAction);
             da->setClearDepth(desc_.depthAttachment.clearValue.depth);
-            
+
             MTL::StoreAction metalStoreAction = MTL::StoreActionDontCare;
             switch (desc_.depthAttachment.storeOp) {
                 case StoreAction::Store: metalStoreAction = MTL::StoreActionStore; break;
                 case StoreAction::DontCare: metalStoreAction = MTL::StoreActionDontCare; break;
             }
             da->setStoreAction(metalStoreAction);
+        } else {
+            // CRITICAL DIAGNOSTIC: Depth attachment setup FAILED
+            std::cerr << "[MetalRenderPass] WARNING: Depth attachment setup FAILED!" << std::endl;
+            std::cerr << "  handle=" << desc_.depthAttachment.texture
+                      << " texture=" << (void*)texture
+                      << " nativeTex=" << (void*)(texture ? texture->GetNativeTexture() : nullptr)
+                      << std::endl;
         }
     }
 
@@ -187,6 +194,35 @@ MTL::RenderPassDescriptor* MetalRenderPass::GetNativeRenderPassDescriptor() {
     if (isDirty()) {
         buildDescriptor();
     }
+
+    // Defensive check: if depth attachment SHOULD exist but descriptor doesn't have one,
+    // force rebuild. This catches cases where buildDescriptor() ran before the texture
+    // was fully initialized.
+    if (desc_.depthAttachment.texture != handles::INVALID_RESOURCE &&
+        cachedDepthAttachment_.nativeTexture == nullptr) {
+        static bool loggedOnce = false;
+        if (!loggedOnce) {
+            std::cerr << "[MetalRenderPass] RETRY: Depth attachment was null, rebuilding descriptor" << std::endl;
+            loggedOnce = true;
+        }
+        buildDescriptor();
+    }
+
+    // DIAGNOSTIC: Verify depth attachment store action on first few calls
+    {
+        static std::unordered_map<MetalRenderPass*, u32> callCount;
+        u32& count = callCount[this];
+        if (count < 3 && desc_.depthAttachment.texture != handles::INVALID_RESOURCE) {
+            auto* da = mtlPassDesc_->depthAttachment();
+            std::cout << "[MetalRenderPass DIAG] " << (void*)this
+                      << " depthTex=" << (void*)(da ? da->texture() : nullptr)
+                      << " loadAction=" << (da ? (int)da->loadAction() : -1)
+                      << " storeAction=" << (da ? (int)da->storeAction() : -1)
+                      << " call#" << count << std::endl;
+        }
+        count++;
+    }
+
     return mtlPassDesc_;
 }
 

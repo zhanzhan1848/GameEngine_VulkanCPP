@@ -195,6 +195,9 @@ bool MetalCommandBuffer::endImpl() {
 bool MetalCommandBuffer::submitImpl(u32 waitFlags) {
     if (!mtlCommandBuffer_) return false;
 
+    // Defensive: ensure no encoder is active before commit
+    endCurrentEncoder();
+
     // Process wait semaphores
     for (const auto& semInfo : waitSemaphores_) {
         MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
@@ -294,8 +297,8 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     static int passCount = 0;
     passCount++;
     
-    // Log first 50 render passes with texture details
-    if (passCount <= 50) {
+    // Log first 5 render passes with texture details
+    if (passCount <= 5) {
         std::cout << "[Metal] BeginRenderPass #" << passCount << ": colorAttachments=" << desc.colorAttachments.size();
         if (!desc.colorAttachments.empty()) {
             std::cout << " texture[0]=" << desc.colorAttachments[0].texture
@@ -447,7 +450,41 @@ void MetalCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
         MTL::RenderCommandEncoder* encoder = mtlCommandBuffer_->renderCommandEncoder(passDesc);
         currentEncoder_ = encoder;
         currentEncoderType_ = EncoderType::Render;
-        
+
+        if (!encoder) {
+            static int nullEncoderCount = 0;
+            nullEncoderCount++;
+            if (nullEncoderCount <= 3) {
+                std::cerr << "[MetalCommandBuffer] CRITICAL: renderCommandEncoder returned nilULL!" << std::endl;
+                std::cerr << "  This means the render pass will be completely silent (no draws, no depth writes)." << std::endl;
+            }
+        } else {
+            // DIAGNOSTIC: Check ALL attachments in the descriptor
+            static int okCount = 0;
+            okCount++;
+            if (okCount <= 3) {
+                auto* colorAttachments = passDesc->colorAttachments();
+                int colorCount = 0;
+                for (int i = 0; i < 8; ++i) {
+                    auto* ca = colorAttachments->object(i);
+                    if (ca && ca->texture()) colorCount++;
+                }
+                auto* depthDesc = passDesc->depthAttachment();
+                std::cout << "[MetalCMD] BeginRenderPass OK: colorAttachments=" << colorCount
+                          << " depthTex=" << (void*)(depthDesc ? depthDesc->texture() : nullptr)
+                          << " depthLoad=" << (depthDesc ? (int)depthDesc->loadAction() : -1)
+                          << " descColors=" << pass->GetDesc().colorAttachments.size()
+                          << std::endl;
+                // Print each color attachment texture pointer
+                for (size_t i = 0; i < pass->GetDesc().colorAttachments.size() && i < 4; ++i) {
+                    auto* ca = colorAttachments->object(i);
+                    std::cout << "  color[" << i << "] tex=" << (void*)(ca ? ca->texture() : nullptr)
+                              << " loadAction=" << (ca ? (int)ca->loadAction() : -1)
+                              << " storeAction=" << (ca ? (int)ca->storeAction() : -1) << std::endl;
+                }
+            }
+        }
+
         // Initial state setup (viewport, scissor)
         const auto& desc = pass->GetDesc();
         SetViewport(desc.viewport);
@@ -785,6 +822,27 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     MetalBuffer* buffer = metalDevice.GetBuffer(binding.resources[0]);
                     if (buffer && buffer->GetNativeBuffer()) {
                                 u64 offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
+
+                                // DEBUG: Log uniform buffer binding
+                                if (binding.type == DescriptorType::UniformBuffer && slot == 3) {
+                                    // std::cout << "[MetalCommandBuffer] DEBUG - Binding uniform buffer to slot 3:" << std::endl;
+                                    // std::cout << "  Buffer native pointer: " << buffer->GetNativeBuffer() << std::endl;
+                                    // std::cout << "  Offset: " << offset << std::endl;
+                                    // std::cout << "  Buffer contents address: " << buffer->GetNativeBuffer()->contents() << std::endl;
+
+                                    // Debug: Check data at different offsets
+                                    float* testData = static_cast<float*>(buffer->GetNativeBuffer()->contents());
+                                    // std::cout << "  Offset 0 (view_matrix[0]): " << testData[0] << ", " << testData[1] << ", " << testData[2] << ", " << testData[3] << std::endl;
+                                    // std::cout << "  Offset 16 (view_matrix[1]): " << testData[4] << ", " << testData[5] << ", " << testData[6] << ", " << testData[7] << std::endl;
+
+                                    // Check camera_position at offset 192 bytes = 48 floats
+                                    // std::cout << "  Offset 192 (camera_position): " << testData[48] << ", " << testData[49] << ", " << testData[50] << std::endl;
+
+                                    // Check frame_index at offset 216 bytes = 54 floats
+                                    u32* uintData = reinterpret_cast<u32*>(testData);
+                                    // std::cout << "  Offset 216 (frame_index): " << uintData[54] << std::endl;
+                                }
+
                                 if (renderEncoder) {
                                     if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Vertex))
                                         renderEncoder->setVertexBuffer(buffer->GetNativeBuffer(), offset, slot);
@@ -793,6 +851,14 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                         } else if (computeEncoder) {
                             if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                                 computeEncoder->setBuffer(buffer->GetNativeBuffer(), offset, slot);
+                        }
+                    } else {
+                        // std::cerr << "[MetalCommandBuffer] ERROR - Failed to bind buffer at slot " << slot
+                        //           << " (binding type: " << (int)binding.type << ")" << std::endl;
+                        if (!buffer) {
+                            std::cerr << "  Buffer is null" << std::endl;
+                        } else if (!buffer->GetNativeBuffer()) {
+                            std::cerr << "  Native buffer is null" << std::endl;
                         }
                     }
                     break;
@@ -919,10 +985,10 @@ void MetalCommandBuffer::WriteTimestamp(QueryPoolHandle queryPool, u32 queryInde
 }
 
 void MetalCommandBuffer::Draw(u32 vertexCount, u32 startVertex, u32 instanceCount, u32 startInstance) {
-    // DEBUG: Log ALL draw calls for first 50 calls
+    // DEBUG: Log ALL draw calls for first 10 calls
     static int totalDrawCount = 0;
     totalDrawCount++;
-    if (totalDrawCount <= 50) {
+    if (totalDrawCount <= 10) {
         std::cout << "[Metal] DRAW #" << totalDrawCount << ": vertexCount=" << vertexCount 
                   << " instanceCount=" << instanceCount 
                   << " encoderType=" << (int)currentEncoderType_ << std::endl;
@@ -969,21 +1035,58 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
     if (currentEncoderType_ == EncoderType::Render) {
         MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
         MetalBuffer* mtlBuffer = metalDevice.GetBuffer(buffer);
-        
+
         if (mtlBuffer && mtlBuffer->GetNativeBuffer()) {
             MTL::RenderCommandEncoder* encoder = static_cast<MTL::RenderCommandEncoder*>(currentEncoder_);
+
+            // DIAGNOSTIC: Check if encoder is valid
+            if (!encoder) {
+                static int nullEncoderDrawCount = 0;
+                nullEncoderDrawCount++;
+                if (nullEncoderDrawCount <= 3) {
+                    std::cerr << "[MetalCMD] DrawIndirect ERROR: encoder is NULL! Draws will be silently dropped." << std::endl;
+                }
+                return;
+            }
+
             MTL::Buffer* nativeBuffer = mtlBuffer->GetNativeBuffer();
-            
+
+            // Use Metal's proper indirect drawing API
             for (u32 i = 0; i < drawCount; ++i) {
-                // Metal indirect buffer layout matches RHI
-                // MTLDrawPrimitivesIndirectArguments
                 encoder->drawPrimitives(
                     currentPrimitiveType_,
                     nativeBuffer,
                     offset + i * sizeof(MTL::DrawPrimitivesIndirectArguments)
                 );
             }
+
+            // DIAGNOSTIC: Verify draw call on first few frames
+            {
+                static u32 drawDiagCount = 0;
+                drawDiagCount++;
+                if (drawDiagCount <= 5) {
+                    // Read indirect args from CPU (this is the buffer from 2 frames ago)
+                    void* mapped = nativeBuffer->contents();
+                    if (mapped) {
+                        u32* args = reinterpret_cast<u32*>((u8*)mapped + offset);
+                        std::cout << "[MetalCMD] DrawIndirect #" << drawDiagCount
+                                  << " vertexStart=" << args[0]
+                                  << " vertexCount=" << args[1]
+                                  << " instanceCount=" << args[2]
+                                  << " instanceStart=" << args[3] << std::endl;
+                    }
+                }
+            }
+        } else {
+            // std::cerr << "[Metal] DrawIndirect ERROR: Invalid buffer or native buffer is null!" << std::endl;
+            if (!mtlBuffer) {
+                std::cerr << "  MetalBuffer is null" << std::endl;
+            } else {
+                std::cerr << "  NativeBuffer is null" << std::endl;
+            }
         }
+    } else {
+        std::cerr << "[Metal] DrawIndirect ERROR: Not in render encoder! Current encoder type: " << (int)currentEncoderType_ << std::endl;
     }
 }
 
@@ -1031,6 +1134,13 @@ void MetalCommandBuffer::PushConstants(PipelineLayoutHandle layout, ShaderStage 
     } else if (currentEncoderType_ == EncoderType::Compute) {
         auto encoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
         encoder->setBytes(pValues, size, 2);
+    }
+}
+
+void MetalCommandBuffer::SetComputeBytes(u32 index, const void* data, u32 size) {
+    auto encoder = getComputeEncoder();
+    if (encoder) {
+        encoder->setBytes(data, size, index);
     }
 }
 
@@ -1099,8 +1209,99 @@ void MetalCommandBuffer::CopyBuffer(ResourceHandle src, ResourceHandle dst, u64 
 }
 
 void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) {
-    // Metal handles many barriers implicitly, but fences/events might be needed for specific synchronization.
-    // For now, empty.
+    if (!currentEncoder_ || barrierCount == 0) return;
+
+    switch (currentEncoderType_) {
+        case EncoderType::Compute: {
+            auto* computeEncoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
+
+            // Accumulate barrier scope based on actual resource types
+            MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+            MTL::BarrierScope scope = 0;
+            for (u32 i = 0; i < barrierCount; ++i) {
+                auto handle = barriers[i].resource;
+                if (handle == handles::INVALID_RESOURCE) continue;
+                // Distinguish texture vs buffer by trying both allocators
+                if (metalDevice.GetTexture(handle) != nullptr) {
+                    scope |= MTL::BarrierScopeTextures;
+                } else if (metalDevice.GetBuffer(handle) != nullptr) {
+                    scope |= MTL::BarrierScopeBuffers;
+                }
+            }
+
+            // Fallback: if no specific resources matched, barrier both scopes
+            if (scope == 0) {
+                scope = MTL::BarrierScopeTextures | MTL::BarrierScopeBuffers;
+            }
+
+            computeEncoder->memoryBarrier(scope);
+            break;
+        }
+        case EncoderType::Render: {
+            // Render encoder doesn't have memoryBarrier; handled implicitly by Metal.
+            break;
+        }
+        case EncoderType::Blit:
+            // Blit operations are serialized within the encoder; no explicit barrier needed.
+            break;
+        default:
+            break;
+    }
+}
+
+void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask,
+                                      AccessFlag srcAccessMask, AccessFlag dstAccessMask) {
+    // SPIKE-VALIDATED (2026-07-02, TestMetalEncoderBarrierSpike):
+    //   For pure Compute→Compute transitions on the same compute encoder,
+    //   `computeEncoder->memoryBarrier(scope)` ALONE is sufficient — the
+    //   subsequent dispatch sees all prior writes. No encoder end needed.
+    //
+    //   We still must endCurrentEncoder() when:
+    //     - dst includes non-Compute bits (DrawIndirect / VertexInput / Transfer / Host)
+    //       → next call needs a different encoder type
+    //     - src includes Host/Transfer → producer lived in a different encoder type
+    //     - current encoder is not Compute (Render/Blit barriers handled by Metal implicitly
+    //       via encoder boundaries, but we still need to end to switch types)
+
+    if (currentEncoder_ == nullptr) return;
+
+    if (currentEncoderType_ == EncoderType::Compute) {
+        auto computeEncoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
+        computeEncoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+        static int barrierCount = 0;
+        if (barrierCount < 30) {
+            std::cerr << "[MetalBarrier] Compute memoryBarrier(scope) #" << barrierCount
+                      << std::endl;
+            ++barrierCount;
+        }
+
+        // Exact Compute→Compute (no other bits)? Keep encoder open.
+        constexpr u32 kComputeOnly = static_cast<u32>(PipelineStage::ComputeShader);
+        bool srcIsComputeOnly = static_cast<u32>(srcStageMask) == kComputeOnly;
+        bool dstIsComputeOnly = static_cast<u32>(dstStageMask) == kComputeOnly;
+
+        // src includes Host/Transfer? Producer was a different encoder type — end.
+        u32 srcNonComputeBits = static_cast<u32>(srcStageMask) &
+            (static_cast<u32>(PipelineStage::Host) |
+             static_cast<u32>(PipelineStage::Transfer));
+        bool srcFromOtherEncoder = srcNonComputeBits != 0;
+
+        if (!srcIsComputeOnly || !dstIsComputeOnly || srcFromOtherEncoder) {
+            if (barrierCount <= 30) {
+                std::cerr << "[MetalBarrier] END encoder: src=0x" << std::hex
+                          << static_cast<u32>(srcStageMask)
+                          << " dst=0x" << static_cast<u32>(dstStageMask)
+                          << std::dec << std::endl;
+            }
+            endCurrentEncoder();
+        }
+        // else: pure Compute→Compute on same encoder — keep open (spike validated)
+    }
+    else {
+        // Render / Blit / other: end encoder to switch types
+        endCurrentEncoder();
+    }
 }
 
     // Helper to get pixel format info for block-based calculation
@@ -1113,7 +1314,7 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barr
     static PixelFormatInfo GetPixelFormatInfo(MTL::PixelFormat format) {
         // Debug print to ensure we are running the new version
         u64 fmt = (u64)format;
-        std::cout << "DEBUG: GetPixelFormatInfo(" << fmt << ")" << std::endl;
+        // std::cout << "DEBUG: GetPixelFormatInfo(" << fmt << ")" << std::endl;
         switch (fmt) {
             // Uncompressed formats
             case 10: // MTL::PixelFormatR8Unorm
@@ -1288,28 +1489,44 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barr
 void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                                      const TextureBlitRegion* regions, u32 regionCount,
                                      FilterMode filter) {
-    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
-    if (!encoder) return;
+    // Metal's BlitCommandEncoder has limitations - use render pass for proper blitting
+    // For now, use a simple copy approach which should work better
 
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     MetalTexture* srcTex = metalDevice.GetTexture(src);
     MetalTexture* dstTex = metalDevice.GetTexture(dst);
 
-    if (srcTex && dstTex && srcTex->GetNativeTexture() && dstTex->GetNativeTexture()) {
-        for (u32 i = 0; i < regionCount; ++i) {
-            const auto& region = regions[i];
-            
-            MTL::Origin srcOrigin(region.srcOffsets[0].x, region.srcOffsets[0].y, region.srcOffsets[0].z);
-            MTL::Size srcSize(
-                region.srcOffsets[1].x - region.srcOffsets[0].x,
-                region.srcOffsets[1].y - region.srcOffsets[0].y,
-                region.srcOffsets[1].z - region.srcOffsets[0].z
-            );
-            
-            MTL::Origin dstOrigin(region.dstOffsets[0].x, region.dstOffsets[0].y, region.dstOffsets[0].z);
-            
-            // MTLBlitCommandEncoder copyFromTexture does not support scaling.
-            // This implementation assumes 1:1 copy for now.
+    if (!srcTex || !dstTex || !srcTex->GetNativeTexture() || !dstTex->GetNativeTexture()) {
+        std::cerr << "[MetalCommandBuffer] BlitTexture: Invalid textures" << std::endl;
+        return;
+    }
+
+    // For Metal, we need to use a render pass approach for proper blitting
+    // But for now, let's try using the blit encoder with proper format checking
+    MTL::BlitCommandEncoder* encoder = getBlitEncoder();
+    if (!encoder) return;
+
+    for (u32 i = 0; i < regionCount; ++i) {
+        const auto& region = regions[i];
+
+        MTL::Origin srcOrigin(region.srcOffsets[0].x, region.srcOffsets[0].y, region.srcOffsets[0].z);
+        MTL::Size srcSize(
+            region.srcOffsets[1].x - region.srcOffsets[0].x,
+            region.srcOffsets[1].y - region.srcOffsets[0].y,
+            region.srcOffsets[1].z - region.srcOffsets[0].z
+        );
+
+        MTL::Origin dstOrigin(region.dstOffsets[0].x, region.dstOffsets[0].y, region.dstOffsets[0].z);
+
+        // Metal's blit encoder can copy between formats as long as the block size matches.
+        // Depth32Float (32-bit) <-> R32Float (32-bit) is a common cross-format copy needed
+        // for sampling depth in shaders (Metal TBDR cannot sample D32 directly).
+        auto srcFmt = srcTex->GetNativeTexture()->pixelFormat();
+        auto dstFmt = dstTex->GetNativeTexture()->pixelFormat();
+
+        // Metal docs: "Depth and stencil pixel formats are not compatible with color pixel formats."
+        // D32_Float -> R32_Float requires a compute shader (e.g. ShadowBlit.metal), NOT the blit encoder.
+        if (srcFmt == dstFmt) {
             encoder->copyFromTexture(
                 srcTex->GetNativeTexture(),
                 region.srcSubresource.baseArrayLayer,
@@ -1321,8 +1538,17 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                 region.dstSubresource.mipLevel,
                 dstOrigin
             );
+        } else {
+            // CRITICAL: Metal blit encoder does NOT support depth<->color format copies
+            // even when byte sizes match (D32_Float <-> R32_Float).
+            // Use ExecuteGBufferDepthBlit() compute shader instead.
+            std::cerr << "[MetalCommandBuffer] BlitTexture: Incompatible formats src="
+                      << (int)srcFmt << " dst=" << (int)dstFmt
+                      << " — Metal does not support depth<->color copies via blit encoder. "
+                      << "Use compute shader (ShadowBlit.metal) instead." << std::endl;
         }
     }
+
 }
 
 void MetalCommandBuffer::GenerateMipmaps(ResourceHandle texture) {

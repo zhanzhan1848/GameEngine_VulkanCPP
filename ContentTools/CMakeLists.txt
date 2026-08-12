@@ -26,6 +26,15 @@ set(PROJECTION_SOURCES
     ObjImporter.h
     PrimitiveMesh.h
     NormalMapIdentification.h
+    # Phase 1 asset pipeline shared sources (M2)
+    common/SDF.h
+    common/SDF.cpp
+    common/ProcessableMesh.h
+    common/ProcessableMesh.cpp
+    common/ErrorReport.h
+    common/PipelineTypes.h
+    common/MeshConverters.h
+    common/MeshConverters.cpp
 )
 
 set(MESHOPT_DIR "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src")
@@ -34,6 +43,24 @@ set(MESHOPT_DIR "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src")
 if(NOT EXISTS "${MESHOPT_DIR}/meshoptimizer.h")
     message(FATAL_ERROR "meshoptimizer submodule not found at ${MESHOPT_DIR}. Please run 'git submodule update --init --recursive'.")
 endif()
+
+# ---------------------------------------------------------------------------
+# Phase 1 AI asset pipeline submodules (see Docs/2026-08-07-asset-pipeline-
+# phase1-library-survey.md and ~/.claude/plans/memoized-dancing-boot.md).
+# ---------------------------------------------------------------------------
+set(PHASE1_SUBMODULES
+    "third_party/eigen/Eigen/Dense"
+    "third_party/libigl/include/igl/igl_inline.h"
+    "third_party/pmp-library/CMakeLists.txt"
+    "third_party/VHACD/src/VHACD_Lib/public/VHACD.h"
+    "third_party/xatlas/source/xatlas/xatlas.h"
+)
+foreach(_submod_path IN LISTS PHASE1_SUBMODULES)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/${_submod_path}")
+        message(FATAL_ERROR "Phase 1 submodule missing: ${_submod_path}. "
+            "Run 'git submodule update --init --recursive'.")
+    endif()
+endforeach()
 
 set(MESHOPT_SOURCES
     ${MESHOPT_DIR}/meshoptimizer.h
@@ -74,10 +101,56 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/OSAPI/MAC/
     ${MACOSX_PREFIX}/usr/include
     ${MACOSX_PREFIX}/System/Library/Frameworks
+    # Phase 1 asset pipeline: header-only Eigen + libigl core (no [cgal]).
+    ${CMAKE_SOURCE_DIR}/third_party/eigen
+    ${CMAKE_SOURCE_DIR}/third_party/libigl/include
 )
+
+# Phase 1: PMP Library compiled static lib (repair / remesh / subdivide).
+# Disable everything we don't need before add_subdirectory.
+set(PMP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(PMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(PMP_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(PMP_BUILD_VIS OFF CACHE BOOL "" FORCE)
+set(PMP_STRICT_COMPILATION OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/third_party/pmp-library ${CMAKE_BINARY_DIR}/pmp-library EXCLUDE_FROM_ALL)
 
 # 创建库
 add_library(${PROJECT_NAME} SHARED ${CONTENT_TOOLS_SOURCES})
+
+# Phase 1 atomic modules. CMakeLists.txt are M1 stubs; M3-M7 populates
+# each with module sources (Repair / Remesh / Subdivide / UVAtlas / Lod /
+# Meshlet / Collision).
+add_subdirectory(modules/repair)
+add_subdirectory(modules/remesh)
+add_subdirectory(modules/subdivide)
+add_subdirectory(modules/uvatlas)
+add_subdirectory(modules/lod)
+add_subdirectory(modules/meshlet)
+add_subdirectory(modules/collision)
+add_subdirectory(modules/derive_attributes)
+
+# Phase 1 M8: pipeline orchestration layer (AssetPipeline + SceneBlobWriter).
+add_subdirectory(pipeline)
+
+# Phase 1 unit tests (M2.6+). Each module ships its own test binary here as
+# it lands (M3 repair, M4 remesh, etc.).
+add_subdirectory(tests)
+
+# Compose Phase 1 module static libs into the SHARED ContentTools dylib.
+# Each module exposes its symbols as PUBLIC so callers of the dylib can
+# reach them.
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    contenttools_repair
+    contenttools_remesh
+    contenttools_subdivide
+    contenttools_uvatlas
+    contenttools_lod
+    contenttools_meshlet
+    contenttools_collision
+    contenttools_derive
+    contenttools_pipeline
+)
 
 # 平台特定设置
 if(WIN32)

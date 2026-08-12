@@ -1,5 +1,7 @@
 #include "MetalCore.h"
 
+#include <mutex>  // std::call_once, std::once_flag
+
 #include "MetalSurface.h"
 #include "MetalShader.h"
 #include "MetalPostProcess.h"
@@ -10,6 +12,11 @@
 #include "MetalContent.h"
 #include "MetalLight.h"
 #include "MetalPreProcess.h"
+#include "MetalBlitToDrawable.h"
+#include "Graphics/Renderer.h"
+#include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
 
 namespace primal::graphics::metal::core
 {
@@ -44,19 +51,30 @@ namespace primal::graphics::metal::core
                 MTK::View* pView{ surface->view() };
                 MTL::Drawable* drawable{ pView->currentDrawable() };
 
-                // Schedule a present once the framebuffer is complete using the current drawable
+                // Use Metal's official presentDrawable: API instead of a hand-rolled
+                // addScheduledHandler + drawable->present() pair.
+                //
+                // Apple's MTLDrawable.present() docs explicitly recommend calling
+                // presentDrawable: instead — it schedules the drawable's present()
+                // to fire *after* the command queue schedules this command buffer,
+                // and Metal retains the drawable internally across the GPU schedule.
+                //
+                // The previous hand-rolled pattern captured `drawable` as a raw
+                // pointer in a scheduled-handler block. If AppKit invalidated the
+                // CAMetalDrawable between commit() and the block firing on the
+                // com.Metal.CompletionQueueDispatch queue (e.g. NSWindow closing,
+                // MTKView detached, view resized mid-flight), the block would call
+                // objc_msgSend on freed memory → EXC_BAD_ACCESS at the smashed
+                // isa pointer (crash signature: KERN_INVALID_ADDRESS at a non-VM
+                // address inside -[_MTLCommandBuffer presentDrawable:options:]_block_invoke).
+                //
+                // See Engine/Graphics/Metal/MetalCore.cpp::blit_surface_and_present
+                // and Engine/Graphics/RHI/Platforms/Metal/MetalSwapChain.cpp::Present
+                // for the canonical presentDrawable pattern in this codebase.
                 if( drawable )
                 {
-                    // Create a scheduled handler functor for Metal to present the drawable when the command
-                    // buffer has been scheduled by the kernel.
-
-                    drawable->retain();
-                    _cmd_buffer->addScheduledHandler( [drawable]( MTL::CommandBuffer* ){
-                        drawable->present();
-                        drawable->release();
-                    });
+                    _cmd_buffer->presentDrawable( drawable );
                 }
-                // _cmd_buffer->presentDrawable( pView->currentDrawable() );
                 _cmd_buffer->commit();
                 // _cmd_buffer->waitUntilCompleted();
 
@@ -64,7 +82,7 @@ namespace primal::graphics::metal::core
                 // 这确保了下一次调用 currentDrawable 时能获取到新的 drawable
                 // 而不是已经 presented 的旧 drawable
                 pView->draw();
-                
+
                 _frame_index = (_frame_index + 1) % frame_buffer_count;
                 _frame_count++;
 
@@ -99,9 +117,16 @@ namespace primal::graphics::metal::core
         };
 
         MTL::Device* _device{ nullptr };
+        // === RHI 桥接（Phase 1 Sub-step 1.2.3'）===
+        // 由 set_external_device() 注入；非空时 get_device() 优先返回它。
+        // 与 _device 互斥使用：create_device() 检测到 _external_device 非空时跳过创建。
+        MTL::Device* _external_device{ nullptr };
 
         bool create_device()
         {
+            // 外部已注入 device，跳过自动创建
+            if (_external_device) return true;
+
             _device = MTL::CreateSystemDefaultDevice();
 
             if(_device) return true;
@@ -202,7 +227,7 @@ namespace primal::graphics::metal::core
 			NAME_METAL_OBJECT_INDEXED(constants_buffer[i].buffer(), i, "Global Constant Buffer");
 		}
 
-        new (&gfx_command) metal_command(_device);
+        new (&gfx_command) metal_command(get_device());
 
         if(!(shader::initialize() 
             && gpass::initialize()
@@ -251,11 +276,39 @@ namespace primal::graphics::metal::core
 		process_deferred_release(0);
 
         if(_device)  release(_device);
+
+        // === RHI 桥接（Phase 1 Sub-step 1.2.3'）===
+        // 释放我们对 _external_device 的 retain()，但 rhi::MetalDevice 自身的所有权不受影响。
+        if(_external_device)
+        {
+            _external_device->release();
+            _external_device = nullptr;
+        }
     }
 
     MTL::Device* get_device()
     {
-        return _device;
+        // 外部注入优先；否则返回自动创建的 device
+        return _external_device ? _external_device : _device;
+    }
+
+    void set_external_device(MTL::Device* device)
+    {
+        // 同一指针重复设置无操作
+        if (_external_device == device) return;
+
+        // 释放旧的 retain
+        if (_external_device)
+        {
+            _external_device->release();
+            _external_device = nullptr;
+        }
+
+        // 设置新的并 retain（rhi::MetalDevice 也持有，双引用计数安全）
+        if (device)
+        {
+            _external_device = device->retain();
+        }
     }
 
     u32 current_frame_index()
@@ -360,5 +413,100 @@ namespace primal::graphics::metal::core
 
             gfx_command.end_frame(surface);
         }
+    }
+
+    MTK::View* get_surface_view(surface_id id)
+    {
+        // _surfaces is in the anonymous namespace above. Out-of-range access
+        // to utl::free_list asserts in debug; we treat invalid_id as null.
+        if (!id::is_valid(id)) return nullptr;
+        return _surfaces[id].view();
+    }
+
+    u32 blit_surface_and_present(surface_id id, u64 src_handle)
+    {
+        if (!id::is_valid(id)) return 0;
+
+        MTK::View* view = _surfaces[id].view();
+        if (!view) return 0;
+
+        // === Resolve src texture from the RHI device ===
+        // rhi::ResourceHandle is a u64 alias; the C ABI passes it opaquely.
+        // Resolve via graphics::get_rhi_device() → MetalDevice → MetalTexture.
+        auto* rhiDevice = graphics::get_rhi_device();
+        if (!rhiDevice) return 0;
+        auto* metalDevice = dynamic_cast<rhi::MetalDevice*>(rhiDevice);
+        if (!metalDevice) return 0;
+        auto* metalTex = metalDevice->GetTexture(static_cast<rhi::ResourceHandle>(src_handle));
+        if (!metalTex || !metalTex->GetNativeTexture()) return 0;
+        MTL::Texture* srcTexture = metalTex->GetNativeTexture();
+
+        // === Lazy-init the blit PSO ===
+        // Code review flagged a check-then-act race: if Editor calls
+        // BlitRenderTargetToSurface from multiple threads, two could both
+        // observe !IsInitialized() and double-create the PSO / sampler /
+        // metallib, leaking Metal objects. Guard with std::call_once so
+        // Initialize runs at most once process-wide. A failed init still
+        // leaves IsInitialized()==false, so the next caller can retry
+        // (call_once only suppresses *entry*, not the result).
+        auto& blit = MetalBlitToDrawable::Instance();
+        if (!blit.IsInitialized()) {
+            static std::once_flag init_flag;
+            std::call_once(init_flag, [&blit]() {
+                blit.Initialize(get_device());
+            });
+            if (!blit.IsInitialized()) return 0;
+        }
+
+        // === Acquire drawable + command buffer ===
+        // NOTE: we deliberately use a per-blit command queue rather than
+        // gfx_command's queue. gfx_command is paired with render_surface's
+        // frame semaphore + end_frame present cadence; reusing it from
+        // Path B (which runs *after* PipelineRenderFrame, not via
+        // surface::render) would desync the semaphore. A dedicated queue
+        // keeps Path B self-contained and avoids interference with the
+        // main render loop. The queue is heap-allocated once and cached
+        // for the process lifetime. Guarded with std::call_once to avoid
+        // the same race as the PSO init above.
+        static MTL::CommandQueue* s_blit_queue{ nullptr };
+        if (!s_blit_queue) {
+            static std::once_flag queue_flag;
+            std::call_once(queue_flag, []() {
+                s_blit_queue = get_device()->newCommandQueue();
+                // Retain for process lifetime; intentionally never released
+                // (process exit reclaims it). Matches the pattern in
+                // metal_command's constructor.
+            });
+            if (!s_blit_queue) return 0;
+        }
+
+        CA::MetalDrawable* drawable = view->currentDrawable();
+        if (!drawable) return 0;
+
+        // Current render pass descriptor would reconfigure the drawable's
+        // load/store; we want our own descriptor targeting the drawable
+        // texture with DontCare/Store. MetalBlitToDrawable::Blit builds it.
+        MTL::Texture* drawableTex = drawable->texture();
+        if (!drawableTex) return 0;
+
+        MTL::CommandBuffer* cmd = s_blit_queue->commandBuffer();
+        if (!cmd) return 0;
+
+        blit.Blit(cmd, srcTexture, drawableTex);
+
+        // Present + commit. presentDrawable retains the drawable across the
+        // GPU schedule, so we don't need an explicit retain here (unlike
+        // metal_command::end_frame which adds a scheduledHandler).
+        cmd->presentDrawable(drawable);
+        cmd->commit();
+
+        // MTKView in manual mode (paused=true, enableSetNeedsDisplay=true,
+        // see MetalSurface::create) needs draw() to advance currentDrawable
+        // to the next frame's drawable after we present. Without this, a
+        // subsequent BlitRenderTargetToSurface would re-blit into the same
+        // (already-presented) drawable.
+        view->draw();
+
+        return 1;
     }
 }

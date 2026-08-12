@@ -63,6 +63,11 @@ public:
      * @brief 析构函数
      */
     ~RHIAllocator() {
+        if (_stats.activeAllocations > 0) {
+            std::cerr << "[RHIAllocator] LEAK: " << _stats.activeAllocations.load()
+                      << " active allocations (T=" << typeid(T).name()
+                      << ", size=" << sizeof(T) << ")" << std::endl;
+        }
         Destroy();
     }
 
@@ -104,14 +109,11 @@ public:
      */
     void Shutdown() {
         std::unique_lock<std::shared_mutex> lock(_mutex);
-        u32 cap = _pool.capacity();
-        // std::cout << "[RHIAllocator] Shutdown: capacity=" << cap << ", size=" << _pool.size() << std::endl;
-        for (u32 i = 0; i < cap; ++i) {
+        for (u32 i = 0; i < _pool.capacity(); ++i) {
             if (_pool.is_valid(i)) {
                 FreeInternal(i);
             }
         }
-        // std::cout << "[RHIAllocator] Shutdown complete. Final size=" << _pool.size() << std::endl;
     }
 
     /**
@@ -124,10 +126,6 @@ public:
     u32 Allocate(Args&&... args) {
         std::unique_lock<std::shared_mutex> lock(_mutex);
         u32 id = _pool.add(std::forward<Args>(args)...);
-        
-        if (sizeof(T) == 232) { // Trace MetalCommandBuffer
-             // printf("Allocator Alloc: id=%u, T size=%zu\n", id, sizeof(T));
-        }
 
         // 如果是 RHIResource 的子类，自动设置 Handle
         if constexpr (std::is_base_of_v<RHIResource, T>) {
@@ -186,6 +184,21 @@ public:
     }
 
     /**
+     * @brief Iterate over all active (valid) objects
+     * @param callback Called for each active object
+     */
+    template<typename F>
+    void ForEach(F&& callback) {
+        std::shared_lock<std::shared_mutex> lock(_mutex);
+        u32 cap = _pool.capacity();
+        for (u32 i = 0; i < cap; ++i) {
+            if (_pool.is_valid(i)) {
+                callback(_pool[i]);
+            }
+        }
+    }
+
+    /**
      * @brief 执行内存碎片整理
      * @details 尝试缩减未使用的内存。注意：由于依赖底层实现，可能不会物理移动对象。
      */
@@ -203,10 +216,6 @@ private:
     void FreeInternal(u32 id) {
         // 简单的范围检查
         if (id >= _pool.capacity()) return;
-        
-        if (sizeof(T) == 232) { // Trace MetalCommandBuffer
-             // printf("Allocator Free: id=%u, T size=%zu\n", id, sizeof(T));
-        }
 
         _pool.remove(id);
         _stats.totalFreed++;

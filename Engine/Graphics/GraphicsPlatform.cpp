@@ -5,6 +5,10 @@
 #include "Vulkan/VulkanInterface.h"
 #include "Metal/MetalInterface.h"
 
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+#include "Dawn/DawnInterface.h"
+#endif
+
 namespace primal::graphics {
 #include "GraphicsPlatform.h"
 
@@ -24,6 +28,11 @@ set_platform_interface(graphics_platform platform, platform_interface& pi)
     case graphics_platform::metal:
         metal::get_platform_interface(pi);
         break;
+#if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+    case graphics_platform::dawn:
+        dawn::get_platform_interface(pi);
+        break;
+#endif
     default:
         return false;
     }

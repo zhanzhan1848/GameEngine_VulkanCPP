@@ -1,6 +1,6 @@
 #include "Graphics/Passes/BlurPass.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include <fstream>
-#include <iostream>
 #include <iostream>
 
 namespace primal::graphics {
@@ -16,7 +16,8 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     if (!device_) return false;
 
     // 1. Load Shader
-    std::string shaderPath = "Engine/Graphics/Metal/shaders/BlurPass.metal";
+    auto platform = device_->GetPlatform();
+    std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "BlurPass");
     std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
         shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;

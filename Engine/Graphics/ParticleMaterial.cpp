@@ -15,46 +15,46 @@ u32 next_material_id = 1;
 
 rhi::BlendState get_blend_state_for_mode(particles::blend_mode mode) {
     rhi::BlendState state{};
-    state.blendEnable = true;
-    
+    state.enableBlend = true;
+
     switch (mode) {
         case particles::blend_mode::additive:
-            state.srcBlend = rhi::BlendFactor::SrcAlpha;
-            state.dstBlend = rhi::BlendFactor::One;
-            state.blendOp = rhi::BlendOp::Add;
-            state.srcBlendAlpha = rhi::BlendFactor::One;
-            state.dstBlendAlpha = rhi::BlendFactor::One;
-            state.blendOpAlpha = rhi::BlendOp::Add;
+            state.srcColorBlendFactor = rhi::BlendFactor::SrcAlpha;
+            state.dstColorBlendFactor = rhi::BlendFactor::One;
+            state.colorBlendOp = rhi::BlendOp::Add;
+            state.srcAlphaBlendFactor = rhi::BlendFactor::One;
+            state.dstAlphaBlendFactor = rhi::BlendFactor::One;
+            state.alphaBlendOp = rhi::BlendOp::Add;
             break;
-            
+
         case particles::blend_mode::alpha:
-            state.srcBlend = rhi::BlendFactor::SrcAlpha;
-            state.dstBlend = rhi::BlendFactor::OneMinusSrcAlpha;
-            state.blendOp = rhi::BlendOp::Add;
-            state.srcBlendAlpha = rhi::BlendFactor::One;
-            state.dstBlendAlpha = rhi::BlendFactor::OneMinusSrcAlpha;
-            state.blendOpAlpha = rhi::BlendOp::Add;
+            state.srcColorBlendFactor = rhi::BlendFactor::SrcAlpha;
+            state.dstColorBlendFactor = rhi::BlendFactor::InvSrcAlpha;
+            state.colorBlendOp = rhi::BlendOp::Add;
+            state.srcAlphaBlendFactor = rhi::BlendFactor::One;
+            state.dstAlphaBlendFactor = rhi::BlendFactor::InvSrcAlpha;
+            state.alphaBlendOp = rhi::BlendOp::Add;
             break;
-            
+
         case particles::blend_mode::multiply:
-            state.srcBlend = rhi::BlendFactor::DstColor;
-            state.dstBlend = rhi::BlendFactor::OneMinusSrcAlpha;
-            state.blendOp = rhi::BlendOp::Add;
-            state.srcBlendAlpha = rhi::BlendFactor::One;
-            state.dstBlendAlpha = rhi::BlendFactor::OneMinusSrcAlpha;
-            state.blendOpAlpha = rhi::BlendOp::Add;
+            state.srcColorBlendFactor = rhi::BlendFactor::DestColor;
+            state.dstColorBlendFactor = rhi::BlendFactor::InvSrcAlpha;
+            state.colorBlendOp = rhi::BlendOp::Add;
+            state.srcAlphaBlendFactor = rhi::BlendFactor::One;
+            state.dstAlphaBlendFactor = rhi::BlendFactor::InvSrcAlpha;
+            state.alphaBlendOp = rhi::BlendOp::Add;
             break;
-            
+
         case particles::blend_mode::premultiplied:
-            state.srcBlend = rhi::BlendFactor::One;
-            state.dstBlend = rhi::BlendFactor::OneMinusSrcAlpha;
-            state.blendOp = rhi::BlendOp::Add;
-            state.srcBlendAlpha = rhi::BlendFactor::One;
-            state.dstBlendAlpha = rhi::BlendFactor::OneMinusSrcAlpha;
-            state.blendOpAlpha = rhi::BlendOp::Add;
+            state.srcColorBlendFactor = rhi::BlendFactor::One;
+            state.dstColorBlendFactor = rhi::BlendFactor::InvSrcAlpha;
+            state.colorBlendOp = rhi::BlendOp::Add;
+            state.srcAlphaBlendFactor = rhi::BlendFactor::One;
+            state.dstAlphaBlendFactor = rhi::BlendFactor::InvSrcAlpha;
+            state.alphaBlendOp = rhi::BlendOp::Add;
             break;
     }
-    
+
     return state;
 }
 
@@ -82,7 +82,7 @@ void ParticleMaterial::set_depth_write_enabled(bool enabled) {
     depth_write_enabled_ = enabled;
     if (material_) {
         rhi::DepthStencilState depth = material_->GetDepthStencilState();
-        depth.depthWriteEnable = enabled;
+        depth.enableDepthWrite = enabled;
         material_->SetDepthStencilState(depth);
     }
 }
@@ -100,25 +100,24 @@ bool ParticleMaterial::initialize(rhi::RHIDeviceBase* device) {
     if (!device) {
         return false;
     }
-    
+
     device_ = device;
     material_ = std::make_unique<Material>();
-    
+
     update_blend_state();
-    
+
     rhi::DepthStencilState depth{};
-    depth.depthTestEnable = true;
-    depth.depthWriteEnable = depth_write_enabled_;
-    depth.depthCompareOp = rhi::CompareOp::LessOrEqual;
+    depth.enableDepthTest = true;
+    depth.enableDepthWrite = depth_write_enabled_;
+    depth.depthFunc = rhi::ComparisonFunc::LessEqual;
     material_->SetDepthStencilState(depth);
-    
+
     rhi::RasterizerState raster{};
     raster.cullMode = rhi::CullMode::None;
-    raster.frontFace = rhi::FrontFace::CounterClockwise;
     material_->SetRasterizerState(raster);
-    
+
     material_->SetTopology(rhi::PrimitiveTopology::TriangleList);
-    
+
     return true;
 }
 
@@ -170,17 +169,7 @@ void destroy(material_id id) {
 
 ParticleMaterial* get(material_id id) {
     std::lock_guard<std::mutex> lock(material_cache_mutex);
-    
-    auto it = material_cache.find(id);
-    if (it != material_cache.end()) {
-        return it->second.get();
-    }
-    return nullptr;
-}
 
-const ParticleMaterial* get(material_id id) const {
-    std::lock_guard<std::mutex> lock(material_cache_mutex);
-    
     auto it = material_cache.find(id);
     if (it != material_cache.end()) {
         return it->second.get();
