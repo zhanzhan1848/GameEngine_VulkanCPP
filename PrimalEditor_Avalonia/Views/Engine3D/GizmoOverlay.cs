@@ -20,6 +20,8 @@ public class GizmoOverlay : Control
         set { if (_mode != value) { _mode = value; InvalidateVisual(); } }
     }
 
+    public bool IsVisibleInViewport { get; set; }
+
     private (float tx, float ty, float tz) _target = (0, 0, 0);
     public void SetTarget(float x, float y, float z)
     {
@@ -27,30 +29,31 @@ public class GizmoOverlay : Control
         InvalidateVisual();
     }
 
-    private (float yaw, float pitch, float distance, float vw, float vh) _camera;
-    public void UpdateCamera(float yaw, float pitch, float distance, float vw, float vh)
+    private (float yaw, float pitch, float distance, float targetX, float targetY, float targetZ, float vw, float vh) _camera;
+    public void UpdateCamera(float yaw, float pitch, float distance,
+        float targetX, float targetY, float targetZ, float vw, float vh)
     {
-        _camera = (yaw, pitch, distance, vw, vh);
+        _camera = (yaw, pitch, distance, targetX, targetY, targetZ, vw, vh);
         InvalidateVisual();
     }
 
     private GizmoAxis _active = GizmoAxis.None;
     private Point _lastMouse;
+    private (float x, float y) _activeScreenDirection = (1f, 0f);
     public bool IsDragging => _dragging;
     private bool _dragging;
-    private IPointer? _capturedPointer;
-
     protected override Size MeasureOverride(Size availableSize) => availableSize;
 
     public override void Render(DrawingContext ctx)
     {
+        if (!IsVisibleInViewport) return;
         var b = Bounds;
         if (b.Width <= 4 || b.Height <= 4) return;
-        var (yaw, pitch, distance, vw, vh) = _camera;
-        float focal = MathF.Min((float)b.Width, (float)b.Height) * 0.5f;
+        var (yaw, pitch, distance, targetX, targetY, targetZ, vw, vh) = _camera;
+        float focal = WorldProjector.PerspectiveFocalLength((float)b.Height);
 
         WorldProjector.ComputeCameraBasis(
-            0f, 0f, 0f, yaw, pitch, distance,
+            targetX, targetY, targetZ, yaw, pitch, distance,
             out var camX, out var camY, out var camZ,
             out var rx, out var ry, out var rz,
             out var ux, out var uy, out var uz,
@@ -128,18 +131,23 @@ public class GizmoOverlay : Control
 
     private (float sx, float sy)? GetGizmoScreenCenter()
     {
+        return ProjectWorld(_target.tx, _target.ty, _target.tz);
+    }
+
+    private (float sx, float sy)? ProjectWorld(float x, float y, float z)
+    {
         var b = Bounds;
-        if (b.Width <= 4) return null;
-        var (yaw, pitch, distance, _, _) = _camera;
-        float focal = MathF.Min((float)b.Width, (float)b.Height) * 0.5f;
+        if (b.Width <= 4 || b.Height <= 4) return null;
+        var (yaw, pitch, distance, targetX, targetY, targetZ, _, _) = _camera;
+        float focal = WorldProjector.PerspectiveFocalLength((float)b.Height);
         WorldProjector.ComputeCameraBasis(
-            0f, 0f, 0f, yaw, pitch, distance,
+            targetX, targetY, targetZ, yaw, pitch, distance,
             out var camX, out var camY, out var camZ,
             out var rx, out var ry, out var rz,
             out var ux, out var uy, out var uz,
             out var fx, out var fy, out var fz);
         return WorldProjector.Project(
-            _target.tx, _target.ty, _target.tz,
+            x, y, z,
             camX, camY, camZ,
             rx, ry, rz, ux, uy, uz, fx, fy, fz,
             (float)b.Width, (float)b.Height, focal);
@@ -147,22 +155,64 @@ public class GizmoOverlay : Control
 
     private (float fx, float fy) GetForward()
     {
-        var (_, pitch, distance, _, _) = _camera;
+        var (_, pitch, distance, _, _, _, _, _) = _camera;
         var yaw = _camera.yaw;
         return (MathF.Sin(yaw) * MathF.Cos(pitch), MathF.Sin(pitch));
     }
 
     public bool TryStartDrag(Point p)
     {
+        if (!IsVisibleInViewport) return false;
         var center = GetGizmoScreenCenter();
         if (center == null) return false;
         float cx = center.Value.sx, cy = center.Value.sy;
-        float len = MathF.Min((float)Bounds.Width, (float)Bounds.Height) * 0.12f;
-        var (fx, fy) = GetForward();
+        float worldLen = Math.Clamp(_camera.distance * 0.12f, 0.65f, 4f);
 
-        float dX = DistanceToSegment(p, new Point(cx, cy), new Point(cx + len, cy));
-        float dY = DistanceToSegment(p, new Point(cx, cy), new Point(cx, cy - len));
-        float dZ = DistanceToSegment(p, new Point(cx, cy), new Point(cx + len * 0.6f * fx, cy + len * 0.6f * fy));
+        float RingDistance(int plane)
+        {
+            const int segments = 48;
+            var best = float.MaxValue;
+            (float sx, float sy)? previous = null;
+            for (var i = 0; i <= segments; ++i)
+            {
+                var a = MathF.Tau * i / segments;
+                var world = plane switch
+                {
+                    0 => (_target.tx, _target.ty + MathF.Cos(a) * worldLen, _target.tz + MathF.Sin(a) * worldLen),
+                    1 => (_target.tx + MathF.Cos(a) * worldLen, _target.ty, _target.tz + MathF.Sin(a) * worldLen),
+                    _ => (_target.tx + MathF.Cos(a) * worldLen, _target.ty + MathF.Sin(a) * worldLen, _target.tz),
+                };
+                var current = ProjectWorld(world.Item1, world.Item2, world.Item3);
+                if (previous.HasValue && current.HasValue)
+                {
+                    best = MathF.Min(best, DistanceToSegment(
+                        p,
+                        new Point(previous.Value.sx, previous.Value.sy),
+                        new Point(current.Value.sx, current.Value.sy)));
+                }
+                previous = current;
+            }
+            return best;
+        }
+
+        float dX, dY, dZ;
+        if (_mode == GizmoMode.Rotate)
+        {
+            dX = RingDistance(0);
+            dY = RingDistance(1);
+            dZ = RingDistance(2);
+        }
+        else
+        {
+            var xEnd = ProjectWorld(_target.tx + worldLen, _target.ty, _target.tz);
+            var yEnd = ProjectWorld(_target.tx, _target.ty + worldLen, _target.tz);
+            var zEnd = ProjectWorld(_target.tx, _target.ty, _target.tz + worldLen);
+            if (!xEnd.HasValue || !yEnd.HasValue || !zEnd.HasValue) return false;
+            var origin = new Point(cx, cy);
+            dX = DistanceToSegment(p, origin, new Point(xEnd.Value.sx, xEnd.Value.sy));
+            dY = DistanceToSegment(p, origin, new Point(yEnd.Value.sx, yEnd.Value.sy));
+            dZ = DistanceToSegment(p, origin, new Point(zEnd.Value.sx, zEnd.Value.sy));
+        }
 
         const float pickRadius = 14f;
         float best = MathF.Min(MathF.Min(dX, dY), dZ);
@@ -171,6 +221,24 @@ public class GizmoOverlay : Control
         if (best == dX) _active = GizmoAxis.X;
         else if (best == dY) _active = GizmoAxis.Y;
         else _active = GizmoAxis.Z;
+
+        if (_mode != GizmoMode.Rotate)
+        {
+            var axisEnd = _active switch
+            {
+                GizmoAxis.X => ProjectWorld(_target.tx + worldLen, _target.ty, _target.tz),
+                GizmoAxis.Y => ProjectWorld(_target.tx, _target.ty + worldLen, _target.tz),
+                _ => ProjectWorld(_target.tx, _target.ty, _target.tz + worldLen),
+            };
+            if (axisEnd.HasValue)
+            {
+                var dirX = axisEnd.Value.sx - cx;
+                var dirY = axisEnd.Value.sy - cy;
+                var dirLength = MathF.Sqrt(dirX * dirX + dirY * dirY);
+                if (dirLength > 1e-4f)
+                    _activeScreenDirection = (dirX / dirLength, dirY / dirLength);
+            }
+        }
 
         _lastMouse = p;
         _dragging = true;
@@ -184,11 +252,13 @@ public class GizmoOverlay : Control
         float dx = (float)(p.X - _lastMouse.X);
         float dy = (float)(p.Y - _lastMouse.Y);
         _lastMouse = p;
+        float alongAxis = dx * _activeScreenDirection.x + dy * _activeScreenDirection.y;
 
         float dist = _camera.distance;
         if (_mode == GizmoMode.Translate)
         {
-            float delta = (_active == GizmoAxis.X) ? dx * dist * 0.01f : -dy * dist * 0.01f;
+            var focal = WorldProjector.PerspectiveFocalLength((float)Bounds.Height);
+            float delta = alongAxis * dist / MathF.Max(focal, 1f);
             OnDelta?.Invoke(this, (_mode, _active, delta));
         }
         else if (_mode == GizmoMode.Rotate)
@@ -198,7 +268,7 @@ public class GizmoOverlay : Control
         }
         else
         {
-            float ratio = 1f + ((_active == GizmoAxis.X) ? dx : -dy) * 0.01f;
+            float ratio = 1f + alongAxis * 0.01f;
             OnDelta?.Invoke(this, (_mode, _active, ratio));
         }
     }
@@ -207,6 +277,7 @@ public class GizmoOverlay : Control
     {
         _dragging = false;
         _active = GizmoAxis.None;
+        _activeScreenDirection = (1f, 0f);
         InvalidateVisual();
     }
 }

@@ -190,6 +190,39 @@ EDITOR_INTERFACE void GetEntityTransform(id::id_type id, f32* position, f32* rot
 	}
 }
 
+// Read just the forward-orientation vector (3 floats) without paying
+// for the full position+rotation+scale copy. Returns the entity's
+// local +Z axis in world space, which is the convention the rest of
+// the editor uses for "where is this entity looking".
+EDITOR_INTERFACE u32 GetEntityOrientation(id::id_type id, f32* out_xyz)
+{
+	if (!id::is_valid(id) || !out_xyz) return 0;
+	game_entity::entity entity{ entity_from_id(id) };
+	if (!entity.is_valid()) return 0;
+	const math::v3 ori{ entity.orientation() };
+	out_xyz[0] = ori.x;
+	out_xyz[1] = ori.y;
+	out_xyz[2] = ori.z;
+	return 1;
+}
+
+// Write the forward-orientation vector. The other axes are derived
+// by the engine from the up vector, so callers only need to
+// provide the direction they're "facing".
+EDITOR_INTERFACE u32 SetEntityOrientation(id::id_type id, const f32* xyz)
+{
+	if (!id::is_valid(id) || !xyz) return 0;
+	game_entity::entity entity{ entity_from_id(id) };
+	if (!entity.is_valid()) return 0;
+	// The C# side passes a forward vector; the engine normalizes
+	// internally to a unit length. The Transform component is the
+	// canonical owner of orientation / position / scale; entity-level
+	// setters are thin wrappers around the component API.
+	transform::component tc{ transform::transform_id{ id } };
+	transform::set_orientation(tc, math::v3{ xyz[0], xyz[1], xyz[2] });
+	return 1;
+}
+
 EDITOR_INTERFACE void SetEntityTransform(id::id_type id, const f32* position, const f32* rotation, const f32* scale)
 {
 	if (!id::is_valid(id)) return;

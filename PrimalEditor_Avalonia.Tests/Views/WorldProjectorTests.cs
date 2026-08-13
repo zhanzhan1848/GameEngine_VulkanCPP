@@ -7,6 +7,15 @@ namespace PrimalEditor_Avalonia.Tests.Views;
 public sealed class WorldProjectorTests
 {
     [Fact]
+    public void PerspectiveFocalLength_MatchesNativeSixtyDegreeVerticalFov()
+    {
+        var focal = WorldProjector.PerspectiveFocalLength(600f);
+
+        Assert.Equal(300f / MathF.Tan(MathF.PI / 6f), focal, 4);
+        Assert.True(focal > 500f); // Guards against the old implicit 90° FOV.
+    }
+
+    [Fact]
     public void Project_OriginAtCameraTarget_ProjectsToViewportCenter()
     {
         WorldProjector.ComputeCameraBasis(

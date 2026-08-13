@@ -669,6 +669,12 @@ public static class NativeEngineBridge
     private static extern void _GetEntityTransform(UInt32 entityId,
         [Out] float[] position, [Out] float[] rotation, [Out] float[] scale);
 
+    [DllImport("PrimalEngine", EntryPoint = "GetEntityOrientation", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GetEntityOrientation(UInt32 entityId, [Out] float[] xyz);
+
+    [DllImport("PrimalEngine", EntryPoint = "SetEntityOrientation", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _SetEntityOrientation(UInt32 entityId, float[] xyz);
+
     public static (float x, float y, float z) GetEntityPosition(uint entityId)
     {
         if (!_isLoaded) return (0, 0, 0);
@@ -683,6 +689,37 @@ public static class NativeEngineBridge
             Logger.Error($"GetEntityPosition({entityId:X}) failed", ex);
             return (0, 0, 0);
         }
+    }
+
+    /// <summary>Read the entity's forward orientation vector (local +Z
+    /// axis in world space). The engine normalises this to a unit
+    /// length internally so callers may pass any non-zero vector and
+    /// the result is well-defined.</summary>
+    public static (float x, float y, float z) GetEntityOrientation(uint entityId)
+    {
+        if (!_isLoaded) return (0, 0, 0);
+        try
+        {
+            float[] xyz = new float[3];
+            _GetEntityOrientation(entityId, xyz);
+            return (xyz[0], xyz[1], xyz[2]);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"GetEntityOrientation({entityId:X}) failed", ex);
+            return (0, 0, 0);
+        }
+    }
+
+    /// <summary>Write the entity's forward orientation vector. The
+    /// engine normalises to a unit length. Other axes (right, up)
+    /// are derived from this and the world up.</summary>
+    public static bool SetEntityOrientation(uint entityId, float[] xyz)
+    {
+        if (!_isLoaded || entityId == 0 || entityId == InvalidEntityId) return false;
+        if (xyz == null || xyz.Length < 3) return false;
+        try { return _SetEntityOrientation(entityId, xyz) != 0; }
+        catch (Exception ex) { Logger.Error("SetEntityOrientation failed", ex); return false; }
     }
 
     // Create a translated copy of an RHI-registered mesh, register it as a

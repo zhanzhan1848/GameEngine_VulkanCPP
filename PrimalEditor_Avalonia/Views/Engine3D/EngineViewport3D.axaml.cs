@@ -31,6 +31,9 @@ public partial class EngineViewport3D : UserControl
     public bool IsLookingThroughSceneCamera => _lookThroughSceneEntityId != 0;
 
     private readonly LightIconRenderer _sceneIconRenderer = new();
+    private bool _gizmoVisible;
+    private (float x, float y, float z) _gizmoTarget;
+    private GizmoOverlay.GizmoMode _gizmoMode = GizmoOverlay.GizmoMode.Translate;
 
     // Orbit camera state. The camera is always looking at `_cameraTarget`
     // from a distance `_cameraDistance`, with `_cameraYaw` (around world up)
@@ -449,7 +452,11 @@ public partial class EngineViewport3D : UserControl
             // The render loop is UI-thread-only and the native debug queue
             // is mutex-protected, so helpers can safely be submitted just
             // before this frame drains the queue.
-            _sceneIconRenderer.DrawSceneIcons(_scene ?? GetActiveSceneForIconRenderer());
+            _sceneIconRenderer.DrawEditorVisuals(
+                _scene ?? GetActiveSceneForIconRenderer(),
+                _gizmoVisible,
+                _gizmoTarget,
+                _gizmoMode);
 
             var surfaceId = (uint)_host.SurfaceId;
             // Render through the editor's Track A camera by default
@@ -607,7 +614,10 @@ public partial class EngineViewport3D : UserControl
         }
         if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
         {
-            gizmo.UpdateCamera(_cameraYaw, _cameraPitch, _cameraDistance, (float)Bounds.Width, (float)Bounds.Height);
+            gizmo.UpdateCamera(
+                _cameraYaw, _cameraPitch, _cameraDistance,
+                _cameraTarget[0], _cameraTarget[1], _cameraTarget[2],
+                (float)Bounds.Width, (float)Bounds.Height);
         }
         _sceneIconRenderer.UpdateCamera(
             _cameraYaw, _cameraPitch, _cameraDistance,
@@ -617,6 +627,7 @@ public partial class EngineViewport3D : UserControl
     /// <summary>Move the gizmo anchor to <paramref name="worldX/Y/Z"/>.</summary>
     public void SetGizmoTarget(float worldX, float worldY, float worldZ)
     {
+        _gizmoTarget = (worldX, worldY, worldZ);
         if (this.FindControl<ViewportOverlay>("Overlay") is ViewportOverlay overlay)
         {
             overlay.GizmoTarget = (worldX, worldY, worldZ);
@@ -625,6 +636,25 @@ public partial class EngineViewport3D : UserControl
         {
             gizmo.SetTarget(worldX, worldY, worldZ);
         }
+    }
+
+    public void SetGizmoVisible(bool visible)
+    {
+        _gizmoVisible = visible;
+        if (this.FindControl<ViewportOverlay>("Overlay") is ViewportOverlay overlay)
+            overlay.ShowGizmo = visible;
+        if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
+        {
+            gizmo.IsVisibleInViewport = visible;
+            gizmo.InvalidateVisual();
+        }
+    }
+
+    public void SetGizmoMode(GizmoOverlay.GizmoMode mode)
+    {
+        _gizmoMode = mode;
+        if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
+            gizmo.Mode = mode;
     }
 
     /// <summary>Subscribe to gizmo drag. The handler receives (axis, delta) where
@@ -689,6 +719,10 @@ public partial class EngineViewport3D : UserControl
         {
             if (gizmo.TryStartDrag(point.Position))
             {
+                // Gizmo owns this pointer sequence. Camera drag state must not
+                // remain armed after release, otherwise the next plain pointer
+                // movement can rotate the view without a button held.
+                _activeButton = Avalonia.Input.MouseButton.None;
                 // Capture the pointer so that PointerMoved / PointerReleased
                 // keep firing even when the cursor leaves the viewport bounds
                 // (e.g. user drags past the edge of the render surface).
@@ -760,6 +794,23 @@ public partial class EngineViewport3D : UserControl
         _lastPointer = p;
         if (dx == 0f && dy == 0f) return;
 
+        if (IsLookingThroughSceneCamera)
+        {
+            ApplyLookThroughDrag(dx, dy);
+        }
+        else
+        {
+            ApplyEditorDrag(dx, dy);
+        }
+        e.Handled = true;
+    }
+
+    /// <summary>Editor-camera drag (LMB orbit, RMB pan). The editor camera
+    /// is a private Track A camera used when no scene Camera is selected.
+    /// Its orbit state (_cameraYaw/_cameraPitch/_cameraTarget/_cameraDistance)
+    /// lives on this viewport and is independent of any scene entity.</summary>
+    private void ApplyEditorDrag(float dx, float dy)
+    {
         if (_activeButton == Avalonia.Input.MouseButton.Left)
         {
             // Orbit: horizontal drag = yaw, vertical drag = pitch.
@@ -792,7 +843,68 @@ public partial class EngineViewport3D : UserControl
             _cameraTarget[2] += screenUp[2] * dy * panScale;
         }
         ApplyCameraTransform();
-        e.Handled = true;
+    }
+
+    /// <summary>Look-through-scene-camera drag (LMB orbit around the
+    /// scene camera's current view, RMB dolly). The scene Camera
+    /// entity's transform is mutated in place. The editor's orbit
+    /// state continues to update in the background so switching back
+    /// to editor mode is seamless.</summary>
+    private void ApplyLookThroughDrag(float dx, float dy)
+    {
+        if (NativeEngineBridge.IsLoaded == false) return;
+        var pos = NativeEngineBridge.GetEntityPosition(_lookThroughSceneEntityId);
+        var ori = NativeEngineBridge.GetEntityOrientation(_lookThroughSceneEntityId);
+
+        if (_activeButton == Avalonia.Input.MouseButton.Left)
+        {
+            // Orbit: derive yaw/pitch from the scene camera's current
+            // orientation, apply the drag delta, write back the resulting
+            // Euler angles. We use the same kOrbitSpeed as the editor
+            // camera so the feel is consistent across modes.
+            float yaw = MathF.Atan2(ori.x, ori.z);
+            float horiz = MathF.Sqrt(ori.x * ori.x + ori.z * ori.z);
+            float pitch = MathF.Atan2(ori.y, horiz);
+            yaw -= dx * kOrbitSpeed;
+            pitch -= dy * kOrbitSpeed;
+            if (pitch < kMinPitch) pitch = kMinPitch;
+            if (pitch > kMaxPitch) pitch = kMaxPitch;
+            // Reconstruct forward direction from new yaw/pitch. The
+            // engine stores orientation as a forward vector (not Euler),
+            // so this update keeps the entity's transform conventions.
+            float cy = MathF.Cos(yaw);
+            float sy = MathF.Sin(yaw);
+            float cp = MathF.Cos(pitch);
+            float sp = MathF.Sin(pitch);
+            NativeEngineBridge.SetEntityOrientation(
+                _lookThroughSceneEntityId, new[] { sy * cp, sp, cy * cp });
+            _ = pos; // suppress unused
+        }
+        else if (_activeButton == Avalonia.Input.MouseButton.Right)
+        {
+            // Dolly: move the scene camera along its forward direction.
+            // Distance is approximated by the length of the forward
+            // vector the orientation encodes; for a unit forward the
+            // sign of the forward z component gives forward vs back.
+            float dollySpeed = _cameraDistance * kPanSpeed;
+            float fx = ori.x, fy = ori.y, fz = ori.z;
+            float flen = MathF.Sqrt(fx * fx + fy * fy + fz * fz);
+            if (flen > 1e-4f) { fx /= flen; fy /= flen; fz /= flen; }
+            // Drag down (dy > 0) pulls camera forward, drag up pushes back.
+            // Negative dy means moving up on screen = pushing camera forward.
+            pos.x += -dy * fx * dollySpeed;
+            pos.y += -dy * fy * dollySpeed;
+            pos.z += -dy * fz * dollySpeed;
+            // Roll over X axis is unused; the scene camera is rigid-body
+            // (rotation is encoded in its forward vector). Pass zeros.
+            NativeEngineBridge.SetEntityTransform(
+                _lookThroughSceneEntityId,
+                new[] { pos.x, pos.y, pos.z },
+                new[] { ori.x, ori.y, ori.z },
+                new[] { 1f, 1f, 1f });
+        }
+        // The editor camera underneath is left in place; orbit / pan on
+        // the editor state continue so switching back is seamless.
     }
 
     private void OnPointerReleased(object? sender, Avalonia.Input.PointerReleasedEventArgs e)
@@ -800,6 +912,7 @@ public partial class EngineViewport3D : UserControl
         if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo && gizmo.IsDragging)
         {
             gizmo.EndDrag();
+            _activeButton = Avalonia.Input.MouseButton.None;
             // Release the pointer capture acquired in OnPointerPressed so
             // normal event routing resumes after the drag ends.
             e.Pointer.Capture(null);
@@ -818,15 +931,53 @@ public partial class EngineViewport3D : UserControl
     private void OnPointerWheelChanged(object? sender, Avalonia.Input.PointerWheelEventArgs e)
     {
         if (!_viewportInitialized) return;
-        // Wheel up (DeltaY < 0) = zoom in (decrease distance). We translate
-        // the wheel notch count into a multiplicative distance change so the
-        // zoom feels uniform regardless of the user's wheel sensitivity.
-        float steps = (float)e.Delta.Y;
-        float factor = MathF.Pow(1f - kWheelZoomStep, steps);
-        _cameraDistance *= factor;
-        if (_cameraDistance < kMinDistance) _cameraDistance = kMinDistance;
-        if (_cameraDistance > kMaxDistance) _cameraDistance = kMaxDistance;
-        ApplyCameraTransform();
+        // Use the dominant axis: a real mouse wheel on a mouse sends
+        // (0, ±step). A trackpad pinch or two-finger scroll sends both
+        // axes — vertical (DeltaY) for forward/back, horizontal (DeltaX)
+        // for side-to-side. Treating the larger-magnitude axis as the
+        // zoom delta gives a single gesture that "scrolls in" or
+        // "scrolls out" the camera no matter which direction the
+        // fingers move, which is what the user expects on a touchpad.
+        // Falls back to dy if both are zero (some trackpads emit a
+        // near-zero event for inertial scroll end).
+        float dx = (float)e.Delta.X;
+        float dy = (float)e.Delta.Y;
+        float steps = MathF.Abs(dy) >= MathF.Abs(dx) ? dy : dx;
+        if (MathF.Abs(steps) < 0.001f) { e.Handled = true; return; }
+
+        if (IsLookingThroughSceneCamera)
+        {
+            // Wheel = dolly the scene camera along its forward direction.
+            // In editor mode the wheel zooms; in look-through mode it
+            // dollies the same scene camera the drag dollies, so the
+            // feel is consistent (touchpad gestures map to camera
+            // position changes, not abstract orbit distance).
+            if (!NativeEngineBridge.IsLoaded) return;
+            var pos = NativeEngineBridge.GetEntityPosition(_lookThroughSceneEntityId);
+            var ori = NativeEngineBridge.GetEntityOrientation(_lookThroughSceneEntityId);
+            float fx = ori.x, fy = ori.y, fz = ori.z;
+            float flen = MathF.Sqrt(fx * fx + fy * fy + fz * fz);
+            if (flen > 1e-4f) { fx /= flen; fy /= flen; fz /= flen; }
+            // Wheel up (steps < 0) = move forward along forward axis.
+            float dollyAmount = -steps * 0.5f;  // 0.5 world units per notch
+            pos.x += fx * dollyAmount;
+            pos.y += fy * dollyAmount;
+            pos.z += fz * dollyAmount;
+            NativeEngineBridge.SetEntityTransform(
+                _lookThroughSceneEntityId,
+                new[] { pos.x, pos.y, pos.z },
+                new[] { ori.x, ori.y, ori.z },
+                new[] { 1f, 1f, 1f });
+        }
+        else
+        {
+            // Editor mode: wheel zooms (changes the orbit distance).
+            float factor = MathF.Pow(1f - kWheelZoomStep, steps);
+            _cameraDistance *= factor;
+            if (_cameraDistance < kMinDistance) _cameraDistance = kMinDistance;
+            if (_cameraDistance > kMaxDistance) _cameraDistance = kMaxDistance;
+            ApplyCameraTransform();
+        }
         e.Handled = true;
     }
 
@@ -1004,7 +1155,7 @@ public partial class EngineViewport3D : UserControl
         }
         else
         {
-            float focal = MathF.Min(viewportWidth, viewportHeight) * 0.5f;
+            float focal = WorldProjector.PerspectiveFocalLength(viewportHeight);
             ux = (screenX - viewportWidth * 0.5f) / focal;
             vy = -(screenY - viewportHeight * 0.5f) / focal; // invert Y
             depth = 1f;

@@ -1844,18 +1844,12 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
             if (!geom.is_valid()) continue;
             const auto& pts = geom.tessellate();
             if (pts.size() < 2) continue;
-            line_renderer_.AddLines(pts.data(), static_cast<u32>(pts.size()));
+            line_renderer_.AddLines(pts.data(), static_cast<u32>(pts.size()), 0x33FF66u);
         }
         if (has_debug_lines) {
-            // 转成紧凑 position 数组 —— color (rgb) 暂时不传。
-            frame_debug_positions_.clear();
-            frame_debug_positions_.reserve(frame_local_debug_lines_.size() * 2);
             for (const auto& l : frame_local_debug_lines_) {
-                frame_debug_positions_.push_back(l.a);
-                frame_debug_positions_.push_back(l.b);
+                line_renderer_.AddLine(l.a, l.b, l.rgb);
             }
-            line_renderer_.AddLines(frame_debug_positions_.data(),
-                                    static_cast<u32>(frame_debug_positions_.size()));
         }
 
         RenderPassDesc rpDesc{};
@@ -1872,7 +1866,7 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
         math::m4x4 viewProj = proj_matrix * view_matrix;
-        line_renderer_.Render(cmd, viewProj);
+        line_renderer_.Render(cmd, viewProj, backbuffer_format);
 
         cmd->EndRenderPass();
     }

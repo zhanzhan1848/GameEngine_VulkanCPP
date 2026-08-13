@@ -318,7 +318,6 @@ private:
     // Frame-local staging for debug draw lines drained from debug_draw::queue().
     // Reused across frames to avoid reallocations.
     std::vector<debug_draw::DebugLine> frame_local_debug_lines_;
-    std::vector<math::v3>              frame_debug_positions_;
 };
 
 } // namespace primal::graphics

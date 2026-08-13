@@ -292,6 +292,12 @@ add_subdirectory(EngineTest)
 # 设置构建顺序依赖
 add_dependencies(ContentTools Engine)
 add_dependencies(EngineDLL Engine ContentTools)
+if(APPLE)
+    # EngineDLL hosts the editor render/present path. Keep its runtime Metal
+    # shader blob in step with shader source changes so a normal native build
+    # cannot leave the Avalonia app presenting through a stale metallib.
+    add_dependencies(EngineDLL BuildEngineShaderBlob)
+endif()
 
 # 配置安装规则
 install(TARGETS Engine EngineDLL ContentTools

@@ -40,6 +40,10 @@
                 <Separator Margin="6,0"/>
                 <Button Content="Primitive Mesh…" Click="OnCreatePrimitiveMeshClick" Padding="10,2"/>
                 <Separator Margin="6,0"/>
+                <Button Content="W Move" Click="OnTranslateModeClick" Padding="8,2" ToolTip.Tip="Translate gizmo (W)"/>
+                <Button Content="E Rotate" Click="OnRotateModeClick" Padding="8,2" ToolTip.Tip="Rotate gizmo (E)"/>
+                <Button Content="R Scale" Click="OnScaleModeClick" Padding="8,2" ToolTip.Tip="Scale gizmo (R)"/>
+                <Separator Margin="6,0"/>
                 <CheckBox Name="OrthoToggle" Content="Ortho" VerticalAlignment="Center"
                           Click="OnOrthoToggleClick"/>
             </StackPanel>

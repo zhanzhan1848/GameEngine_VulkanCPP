@@ -12,6 +12,23 @@ namespace PrimalEditor_Avalonia.Views.Engine3D;
 /// </summary>
 public static class WorldProjector
 {
+    public const float EditorVerticalFieldOfViewDegrees = 60f;
+
+    /// <summary>
+    /// Pixel focal length matching the native editor camera's vertical FOV.
+    /// Perspective projection is based on viewport height, not the smaller
+    /// viewport dimension; using min(width,height)/2 implicitly selected a
+    /// 90-degree FOV and displaced managed gizmo hit tests from Metal output.
+    /// </summary>
+    public static float PerspectiveFocalLength(
+        float viewportHeight,
+        float verticalFieldOfViewDegrees = EditorVerticalFieldOfViewDegrees)
+    {
+        if (viewportHeight <= 0f) return 0f;
+        var halfFovRadians = verticalFieldOfViewDegrees * MathF.PI / 360f;
+        return viewportHeight * 0.5f / MathF.Tan(halfFovRadians);
+    }
+
     /// <summary>
     /// Cached camera basis: world-space camera position + right/up/forward
     /// unit vectors. Computed once per frame from the editor orbit

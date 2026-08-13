@@ -361,15 +361,25 @@ public class PropertiesViewModel : ViewModelBase
         // shows the pre-gizmo values until the user re-selects the
         // entity (which rebuilds MSTransform and incidentally refreshes).
         Transform?.Refresh();
+        NotifyTransformPropertiesChanged();
+    }
+
+    private void NotifyTransformPropertiesChanged()
+    {
+        // PropertiesView binds to these forwarding properties rather than to
+        // MSTransform directly. Refreshing MSTransform alone therefore cannot
+        // make Avalonia re-read the values after an external mutation such as
+        // a gizmo drag.
+        OnPropertyChanged(nameof(PosX));   OnPropertyChanged(nameof(PosY));   OnPropertyChanged(nameof(PosZ));
+        OnPropertyChanged(nameof(RotX));   OnPropertyChanged(nameof(RotY));   OnPropertyChanged(nameof(RotZ));
+        OnPropertyChanged(nameof(ScaleX)); OnPropertyChanged(nameof(ScaleY)); OnPropertyChanged(nameof(ScaleZ));
     }
 
     private void UpdateFromEntities()
     {
         OnPropertyChanged(nameof(EntityName));
         OnPropertyChanged(nameof(IsEnabled));
-        OnPropertyChanged(nameof(PosX));   OnPropertyChanged(nameof(PosY));   OnPropertyChanged(nameof(PosZ));
-        OnPropertyChanged(nameof(RotX));   OnPropertyChanged(nameof(RotY));   OnPropertyChanged(nameof(RotZ));
-        OnPropertyChanged(nameof(ScaleX)); OnPropertyChanged(nameof(ScaleY)); OnPropertyChanged(nameof(ScaleZ));
+        NotifyTransformPropertiesChanged();
 
         Light?.Refresh();
         Camera?.Refresh();

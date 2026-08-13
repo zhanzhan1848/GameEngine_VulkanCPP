@@ -55,7 +55,7 @@ public class ViewportOverlay : Control
         var b = Bounds;
         if (b.Width <= 4 || b.Height <= 4) return;
         float w = (float)b.Width, h = (float)b.Height;
-        float focal = MathF.Min(w, h) * 0.5f;
+        float focal = WorldProjector.PerspectiveFocalLength(h);
         WorldProjector.ComputeCameraBasis(
             CameraTarget.x, CameraTarget.y, CameraTarget.z,
             CameraYaw, CameraPitch, CameraDistance,

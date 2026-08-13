@@ -29,6 +29,8 @@ namespace id_eng = ::primal::id;
 
 EDITOR_INTERFACE u32 CreateCamera(u32 entity_id, f32 fov, f32 aspect, f32 near_z, f32 far_z)
 {
+    std::fprintf(stderr, "[CreateCamera] entry: entity_id=0x%x fov=%.3f aspect=%.3f near=%.3f far=%.3f\n",
+                 entity_id, fov, aspect, near_z, far_z);
     if (entity_id == id_eng::invalid_id) {
         std::fprintf(stderr, "[CreateCamera] invalid entity_id\n");
         return id_eng::invalid_id;
@@ -46,7 +48,10 @@ EDITOR_INTERFACE u32 CreateCamera(u32 entity_id, f32 fov, f32 aspect, f32 near_z
     info.far_z = far_z;
 
     primal::graphics::camera cam = primal::graphics::create_camera(info);
-    return static_cast<u32>(cam.get_id());
+    auto cid = static_cast<u32>(cam.get_id());
+    std::fprintf(stderr, "[CreateCamera] result cam.get_id()=0x%x is_valid=%d\n",
+                 cid, cam.is_valid() ? 1 : 0);
+    return cid;
 }
 
 EDITOR_INTERFACE void RemoveCamera(u32 cam_id)

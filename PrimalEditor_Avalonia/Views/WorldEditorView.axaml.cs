@@ -113,10 +113,12 @@ namespace PrimalEditor_Avalonia.Views;
         var sel = _vm.SelectedEntities;
         if (sel.Length == 1 && sel[0].GetTransform() is { } t)
         {
+            _viewport.SetGizmoVisible(true);
             _viewport.SetGizmoTarget(t.PositionX, t.PositionY, t.PositionZ);
         }
         else
         {
+            _viewport.SetGizmoVisible(false);
             _viewport.SetGizmoTarget(0f, 0f, 0f);
         }
     }
@@ -482,6 +484,15 @@ namespace PrimalEditor_Avalonia.Views;
         }
     }
 
+    private void OnTranslateModeClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e) =>
+        _viewport?.SetGizmoMode(GizmoOverlay.GizmoMode.Translate);
+
+    private void OnRotateModeClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e) =>
+        _viewport?.SetGizmoMode(GizmoOverlay.GizmoMode.Rotate);
+
+    private void OnScaleModeClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e) =>
+        _viewport?.SetGizmoMode(GizmoOverlay.GizmoMode.Scale);
+
     private void OnBuildClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not WorldEditorViewModel vm) return;
@@ -562,6 +573,24 @@ namespace PrimalEditor_Avalonia.Views;
 
     private void OnWorldEditorKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
     {
+        if (e.Key == Avalonia.Input.Key.W)
+        {
+            _viewport?.SetGizmoMode(GizmoOverlay.GizmoMode.Translate);
+            e.Handled = true;
+            return;
+        }
+        if (e.Key == Avalonia.Input.Key.E)
+        {
+            _viewport?.SetGizmoMode(GizmoOverlay.GizmoMode.Rotate);
+            e.Handled = true;
+            return;
+        }
+        if (e.Key == Avalonia.Input.Key.R)
+        {
+            _viewport?.SetGizmoMode(GizmoOverlay.GizmoMode.Scale);
+            e.Handled = true;
+            return;
+        }
         // F = focus the selected entity. When no entity is selected,
         // do nothing — the focused child (e.g. EngineViewport3D) will
         // handle the F key for its own "reset view" semantics.
