@@ -63,6 +63,18 @@ public:
     void SetShadowInfo(const ShadowViewInfo& info) { shadowInfo_ = info; }
 
     /**
+     * @brief Mark this view as the editor camera's view. When set, the
+     * ECS Camera sync layer must not overwrite view/projection — the
+     * editor drives the camera directly (orbit/pan/zoom) and any
+     * scene Camera entity would steal the matrices every frame.
+     * Defaults to false so existing callers behave unchanged.
+     */
+    void SetIsEditorCamera(bool value) { isEditorCamera_ = value; }
+
+    /// <summary>Preferred ECS camera entity for a scene-camera view.</summary>
+    void SetSceneCameraEntityId(id::id_type value) { sceneCameraEntityId_ = value; }
+
+    /**
      * @brief 设置视图矩阵
      * @param view 视图矩阵
      */
@@ -97,12 +109,16 @@ public:
     const math::m4x4& GetViewProjectionMatrix() const { return viewProjectionMatrix_; }
     const rhi::Frustum& GetFrustum() const { return frustum_; }
     const utl::vector<const RenderProxy*>& GetVisibleProxies() const { return visibleProxies_; }
+    bool IsEditorCamera() const { return isEditorCamera_; }
+    id::id_type GetSceneCameraEntityId() const { return sceneCameraEntityId_; }
 
 private:
     ViewType type_{ViewType::Main};
     rhi::ViewportDesc viewport_;
     rhi::Rect scissor_;
     ShadowViewInfo shadowInfo_;
+    bool isEditorCamera_{false};
+    id::id_type sceneCameraEntityId_{id::invalid_id};
 
     math::m4x4 viewMatrix_;
     math::m4x4 projectionMatrix_;

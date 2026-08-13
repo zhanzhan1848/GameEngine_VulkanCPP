@@ -117,6 +117,8 @@ public partial class App : Application
                 var path = browser.SelectedProjectPath;
                 if (path == null)
                 {
+                    ShowOpenError("No project file was selected.");
+                    ReopenProjectBrowser(desktop, mainWindow, vm);
                     return;
                 }
                 var bundles = AutoSaveRecoveryService.DiscoverBundles(
@@ -127,6 +129,15 @@ public partial class App : Application
                     var opened = OpenProject.Open(path);
                     if (opened == null)
                     {
+                        // OpenProject.Open already logged the underlying
+                        // cause (file not found, migration failed, manifest
+                        // invalid). Surface a user-facing message and re-open
+                        // the browser so the user can pick a different
+                        // project. Returning here would leave the app with
+                        // zero visible windows and Avalonia's
+                        // OnLastWindowClose shutdown would exit the process.
+                        ShowOpenError($"Could not open project:\n{path}");
+                        ReopenProjectBrowser(desktop, mainWindow, vm);
                         return;
                     }
                     vm.Project = opened;
@@ -164,6 +175,39 @@ public partial class App : Application
         mainWindow.Show();
         mainWindow.WindowState = Avalonia.Controls.WindowState.Normal;
         mainWindow.Activate();
+    }
+
+    /// <summary>
+    /// Show a non-fatal error to the user. We use <see cref="ILogger"/>
+    /// rather than <c>ErrorDialog.ShowAsync</c> because at the point
+    /// this is called the editor has no visible main window yet
+    /// (MainWindow is shown only on the success path), and the dialog's
+    /// owner-fallback resolves to <c>desktop.MainWindow</c> which is
+    /// still null. The Logger output reaches the in-process console
+    /// (visible when launched from a terminal) and the optional
+    /// <c>EditorLog.txt</c> sink in the user's project directory.
+    /// </summary>
+    private static void ShowOpenError(string message)
+    {
+        Logger.Error(message);
+    }
+
+    /// <summary>
+    /// Open the project browser again so the user can pick a different
+    /// project after a load failure. Necessary because the previous
+    /// browser was closed (the only window) when its OnOpenSelected /
+    /// OnNewCreated handler fired — without this, the user would
+    /// be staring at a frozen "Engine tick stopped" state with no way
+    /// to recover.
+    /// </summary>
+    private static void ReopenProjectBrowser(
+        IClassicDesktopStyleApplicationLifetime desktop,
+        MainWindow mainWindow,
+        MainWindowViewModel vm)
+    {
+        var browser = new ProjectBrowserView(new ProjectBrowserViewModel());
+        browser.Closed += (_, _) => OnProjectBrowserClosed(desktop, browser, vm, mainWindow);
+        browser.Show();
     }
 
     private void OnExit()

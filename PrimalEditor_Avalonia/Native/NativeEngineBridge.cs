@@ -599,9 +599,9 @@ public static class NativeEngineBridge
 
     public static uint CreateEntity(float x, float y, float z)
     {
-        if (!_isLoaded) return 0;
+        if (!_isLoaded) return InvalidEntityId;
         try { return _CreateEntity(x, y, z); }
-        catch (Exception ex) { Logger.Error("CreateEntity failed", ex); return 0; }
+        catch (Exception ex) { Logger.Error("CreateEntity failed", ex); return InvalidEntityId; }
     }
 
     [DllImport("PrimalEngine", EntryPoint = "CreateCamera", CallingConvention = CallingConvention.Cdecl)]
@@ -609,9 +609,9 @@ public static class NativeEngineBridge
 
     public static uint CreateCamera(uint entityId, float fov, float aspect, float nearZ, float farZ)
     {
-        if (!_isLoaded) return 0;
+        if (!_isLoaded) return InvalidCameraId;
         try { return _CreateCamera(entityId, fov, aspect, nearZ, farZ); }
-        catch (Exception ex) { Logger.Error("CreateCamera failed", ex); return 0; }
+        catch (Exception ex) { Logger.Error("CreateCamera failed", ex); return InvalidCameraId; }
     }
 
     [DllImport("PrimalEngine", EntryPoint = "SetEntityCameraAspectRatio", CallingConvention = CallingConvention.Cdecl)]
@@ -749,10 +749,15 @@ public static class NativeEngineBridge
     // the viewport. Only the invalid_id sentinel marks failure.
     public const UInt64 InvalidContentId = 0x00000000FFFFFFFFUL;
     public const UInt32 InvalidEntityId = 0xFFFFFFFFu;
+    // CreateCamera / CreateRenderTarget return 0xFFFFFFFF on failure
+    // (matches the engine's id::invalid_id). Used by callers that want
+    // a clearer name than comparing to the magic constant directly.
+    public const UInt32 InvalidCameraId = 0xFFFFFFFFu;
 
     // True iff the handle is not the native failure sentinel. 0 is valid.
     public static bool IsValidHandle(UInt64 handle) => handle != InvalidContentId;
     public static bool IsValidEntity(UInt32 entityId) => entityId != InvalidEntityId;
+    public static bool IsValidCamera(UInt32 cameraId) => cameraId != InvalidCameraId;
 
     [DllImport("PrimalEngine", EntryPoint = "ProceduralMeshDestroy", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _ProceduralMeshDestroy(UInt64 contentId);
@@ -1034,6 +1039,79 @@ public static class NativeEngineBridge
         try { _FlushGPU(); } catch (Exception ex) { Logger.Error("FlushGPU failed", ex); }
     }
 
+    // --- Debug-draw helpers (editor gizmos) ---
+
+    [DllImport("PrimalEngine", EntryPoint = "DrawDebugBoxWireframe", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _DrawDebugBoxWireframe(
+        float cx, float cy, float cz, float ex, float ey, float ez, uint rgb);
+
+    public static void DrawDebugBoxWireframe(
+        float cx, float cy, float cz, float ex, float ey, float ez,
+        byte r, byte g, byte b)
+    {
+        if (!_isLoaded) return;
+        uint packed = ((uint)r << 16) | ((uint)g << 8) | b;
+        try { _DrawDebugBoxWireframe(cx, cy, cz, ex, ey, ez, packed); }
+        catch (Exception exc) { Logger.Error("DrawDebugBoxWireframe failed", exc); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "DrawDebugWorldQuad", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _DrawDebugWorldQuad(
+        float x0, float y0, float z0,
+        float x1, float y1, float z1,
+        float x2, float y2, float z2,
+        float x3, float y3, float z3,
+        uint rgb);
+
+    public static void DrawDebugWorldQuad(
+        float x0, float y0, float z0,
+        float x1, float y1, float z1,
+        float x2, float y2, float z2,
+        float x3, float y3, float z3,
+        byte r, byte g, byte b)
+    {
+        if (!_isLoaded) return;
+        uint packed = ((uint)r << 16) | ((uint)g << 8) | b;
+        try { _DrawDebugWorldQuad(x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3, packed); }
+        catch (Exception ex) { Logger.Error("DrawDebugWorldQuad failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "DrawDebugLightBulb", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _DrawDebugLightBulb(
+        float cx, float cy, float cz, float radius, float rayLength, uint rgb);
+
+    public static void DrawDebugLightBulb(
+        float cx, float cy, float cz, float radius, float rayLength,
+        byte r, byte g, byte b)
+    {
+        if (!_isLoaded) return;
+        uint packed = ((uint)r << 16) | ((uint)g << 8) | b;
+        try { _DrawDebugLightBulb(cx, cy, cz, radius, rayLength, packed); }
+        catch (Exception ex) { Logger.Error("DrawDebugLightBulb failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "ClearDebugLines", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _ClearDebugLines();
+
+    public static void ClearDebugLines()
+    {
+        if (!_isLoaded) return;
+        try { _ClearDebugLines(); } catch (Exception ex) { Logger.Error("ClearDebugLines failed", ex); }
+    }
+
+    // --- Scene environment push ---
+
+    [DllImport("PrimalEngine", EntryPoint = "UpdateSceneEnvironment", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _UpdateSceneEnvironment(float[] params24);
+
+    public static bool UpdateSceneEnvironment(float[] p)
+    {
+        if (!_isLoaded) return false;
+        if (p == null || p.Length < 24) return false;
+        try { return _UpdateSceneEnvironment(p) != 0; }
+        catch (Exception ex) { Logger.Error("UpdateSceneEnvironment failed", ex); return false; }
+    }
+
     public static bool SaveRenderTargetAsPng(UInt64 handle, string path)
     {
         if (!_isLoaded || handle == 0) return false;
@@ -1044,6 +1122,12 @@ public static class NativeEngineBridge
 
     [DllImport("PrimalEngine", EntryPoint = "PipelineRenderFrame", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _PipelineRenderFrame(UInt64 targetHandle, uint cameraId, uint surfaceId);
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineRenderFrameForEditorCamera", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineRenderFrameForEditorCamera(UInt64 targetHandle, uint cameraId, uint surfaceId);
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineRenderFrameForSceneCamera", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineRenderFrameForSceneCamera(UInt64 targetHandle, uint cameraId, uint surfaceId, uint sceneCameraEntityId);
 
     [DllImport("PrimalEngine", EntryPoint = "BlitRenderTargetToSurface", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _BlitRenderTargetToSurface(UInt64 targetHandle, uint surfaceId);
@@ -1056,6 +1140,26 @@ public static class NativeEngineBridge
         if (!_isLoaded || targetHandle == 0 || cameraId == 0xFFFFFFFFu) return false;
         try { return _PipelineRenderFrame(targetHandle, cameraId, surfaceId) != 0; }
         catch (Exception ex) { Logger.Error("PipelineRenderFrame failed", ex); return false; }
+    }
+
+    /// <summary>Same as <see cref="PipelineRenderFrame"/> but tags the resulting
+    /// RenderView as the editor camera so the ECS Camera sync layer does not
+    /// overwrite the editor's orbit/pan/zoom matrices with a scene Camera
+    /// entity. Call this from the 3D viewport's render tick (which uses the
+    /// editor's per-frame camera), NOT for any in-game / scene render.</summary>
+    public static bool PipelineRenderFrameForEditorCamera(UInt64 targetHandle, uint cameraId, uint surfaceId)
+    {
+        if (!_isLoaded || targetHandle == 0 || cameraId == 0xFFFFFFFFu) return false;
+        try { return _PipelineRenderFrameForEditorCamera(targetHandle, cameraId, surfaceId) != 0; }
+        catch (Exception ex) { Logger.Error("PipelineRenderFrameForEditorCamera failed", ex); return false; }
+    }
+
+    public static bool PipelineRenderFrameForSceneCamera(UInt64 targetHandle, uint cameraId, uint surfaceId, uint sceneCameraEntityId)
+    {
+        if (!_isLoaded || targetHandle == 0 || cameraId == InvalidCameraId ||
+            sceneCameraEntityId == 0 || sceneCameraEntityId == InvalidEntityId) return false;
+        try { return _PipelineRenderFrameForSceneCamera(targetHandle, cameraId, surfaceId, sceneCameraEntityId) != 0; }
+        catch (Exception ex) { Logger.Error("PipelineRenderFrameForSceneCamera failed", ex); return false; }
     }
 
     public static bool BlitRenderTargetToSurface(UInt64 targetHandle, uint surfaceId)

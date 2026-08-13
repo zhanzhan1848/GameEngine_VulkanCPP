@@ -79,4 +79,41 @@ public partial class PropertiesView : UserControl
         ProjectContextLocator.Current?.MarkDirty();
         ProjectContextLocator.Current?.ActiveScene?.MarkDirty();
     }
+
+    /// <summary>
+    /// Enter key on a transform TextBox: move keyboard focus away so
+    /// the TextBox's TwoWay binding commits the typed value to the
+    /// source via the default LostFocus trigger. Escape does the same
+    /// (reverts to the pre-edit source value).
+    /// </summary>
+    private void OnTransformTextBoxKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+    {
+        if (sender is not TextBox tb) return;
+        if (e.Key == Avalonia.Input.Key.Enter || e.Key == Avalonia.Input.Key.Escape)
+        {
+            // Moving focus to the parent panel triggers the TextBox's
+            // LostFocus, which flushes the TwoWay binding. Enter
+            // commits the new value; Escape reverts to the source
+            // value (Avalonia's default LostFocus revert behaviour).
+            this.Focus();
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// "Look Through This Camera" / "Restore Editor Camera" button click.
+    /// Toggles the viewport's render mode. The button only appears in
+    /// the panel when a Camera entity is selected — see
+    /// <see cref="PropertiesViewModel.HasCameraComponent"/>.
+    /// </summary>
+    private void OnLookThroughCameraClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not PropertiesViewModel vm) return;
+        vm.OnLookThroughCameraClicked();
+    }
+
+    private void OnSetMainCameraClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is PropertiesViewModel vm) vm.OnSetMainCameraClicked();
+    }
 }

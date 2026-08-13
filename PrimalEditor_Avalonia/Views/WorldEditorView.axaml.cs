@@ -5,6 +5,7 @@ using Avalonia.Markup.Xaml;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.Content;
+using PrimalEditor_Avalonia.Entities;
 using PrimalEditor_Avalonia.Native;
 using PrimalEditor_Avalonia.ViewModels;
 using PrimalEditor_Avalonia.Views.Engine3D;
@@ -46,16 +47,78 @@ namespace PrimalEditor_Avalonia.Views;
             _viewport.EntityPicked -= OnEntityPicked;
             _viewport.GizmoDrag -= OnGizmoDrag;
         }
-        if (_vm != null) _vm.PickerCandidatesChanged -= OnPickerCandidatesChanged;
+        if (_vm != null)
+        {
+            _vm.PickerCandidatesChanged -= OnPickerCandidatesChanged;
+            // Move the gizmo when the user picks a different entity
+            // (via the picker OR the hierarchy tree). Without this the
+            // gizmo stays on the previously-selected entity, and
+            // dragging it pushes the wrong one.
+            _vm.PropertyChanged -= OnViewModelPropertyChanged;
+        }
         _vm = DataContext as WorldEditorViewModel;
         _viewport = this.FindControl<EngineViewport3D>("WorldViewport");
-        if (_vm != null) _vm.PickerCandidatesChanged += OnPickerCandidatesChanged;
+        if (_vm != null)
+        {
+            _vm.PickerCandidatesChanged += OnPickerCandidatesChanged;
+            _vm.PropertyChanged += OnViewModelPropertyChanged;
+
+            // Wire the look-through-scene-camera callbacks so the
+            // Properties panel's "Look Through This Camera" button can
+            // route to the viewport without taking a hard dependency
+            // on EngineViewport3D from the VM (the VM is shared across
+            // many views; only this view has a viewport).
+            _vm.Properties.LookThroughCameraCallback = id =>
+            {
+                _viewport?.LookThroughCamera(id);
+                _vm.Properties.NotifyLookThroughChanged();
+            };
+            _vm.Properties.IsLookingThroughCameraQuery =
+                id => _viewport != null && _viewport.IsLookingThroughSceneCamera
+                      && _viewport.LookThroughSceneEntityId == id;
+            _vm.Properties.SetMainCameraCallback = () =>
+            {
+                if (_vm.ActiveScene == null || _vm.SelectedEntities.Length != 1) return;
+                _vm.ActiveScene.Environment.MainCameraEntityGuid = _vm.SelectedEntities[0].EntityGuid.Value;
+                _vm.ActiveScene.MarkDirty();
+                _vm.MarkProjectDirty();
+                _vm.Properties.NotifyMainCameraChanged();
+            };
+            _vm.Properties.IsMainCameraQuery = () =>
+                _vm.ActiveScene?.Environment.MainCameraEntityGuid ==
+                (_vm.SelectedEntities.Length == 1 ? _vm.SelectedEntities[0].EntityGuid.Value : null);
+        }
         if (_viewport != null)
         {
             _viewport.EntityPicked += OnEntityPicked;
             _viewport.GizmoDrag += OnGizmoDrag;
+            _viewport.SetScene(_vm?.ActiveScene);
         }
         RefreshPicker();
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (_vm == null || _viewport == null) return;
+        if (e.PropertyName == nameof(WorldEditorViewModel.ActiveScene))
+        {
+            _viewport.SetScene(_vm.ActiveScene);
+            return;
+        }
+        if (e.PropertyName != nameof(WorldEditorViewModel.SelectedEntities)) return;
+        // Mirror the gizmo to the newly selected entity's world position
+        // so the user can immediately drag the handles. If nothing is
+        // selected, fall back to the world origin (matches the camera
+        // pivot) so the gizmo is still visible / draggable in empty space.
+        var sel = _vm.SelectedEntities;
+        if (sel.Length == 1 && sel[0].GetTransform() is { } t)
+        {
+            _viewport.SetGizmoTarget(t.PositionX, t.PositionY, t.PositionZ);
+        }
+        else
+        {
+            _viewport.SetGizmoTarget(0f, 0f, 0f);
+        }
     }
 
     private void OnEntityPicked(object? sender, uint nativeEntityId)
@@ -89,35 +152,49 @@ namespace PrimalEditor_Avalonia.Views;
         _viewport.SetPickerCandidates(_vm.GetPickerCandidates());
     }
 
-    private void OnGizmoDrag(object? sender, (PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis axis, float delta) e)
+    private void OnGizmoDrag(object? sender, (PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoMode mode, PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis axis, float delta) e)
     {
         if (_vm == null || _vm.SelectedEntities.Length == 0) return;
-        if (!NativeEngineBridge.IsLoaded) return;
         var entity = _vm.SelectedEntities[0];
-        var nativeId = _vm.GetNativeEntityId(entity);
-        if (nativeId == 0) return;
+        var transform = entity.GetTransform();
+        if (transform == null) return;
 
-        // Convert the screen-space pixel delta from the gizmo to a
-        // world-space displacement along the selected axis. The
-        // CameraDistance controls how many world units each pixel
-        // represents (the further the camera, the more world per pixel).
-        var dist = _viewport?.CameraDistance ?? 12f;
-        var world = e.delta * dist;
-        // Screen +y points down, so a positive Y drag corresponds to
-        // a negative world-Y translation. GizmoOverlay's delta is
-        // already sign-flipped for Y, so we just multiply by +1 here.
-        var pos = NativeEngineBridge.GetEntityPosition(nativeId);
-        float newX = pos.x, newY = pos.y, newZ = pos.z;
-        switch (e.axis)
+        var axis = e.axis;
+        var delta = e.delta;
+
+        switch (e.mode)
         {
-            case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.X: newX += world; break;
-            case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.Y: newY += world; break;
-            case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.Z: newZ += world; break;
+            case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoMode.Translate:
+                switch (axis)
+                {
+                    case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.X: transform.PositionX += delta; break;
+                    case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.Y: transform.PositionY += delta; break;
+                    case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.Z: transform.PositionZ += delta; break;
+                }
+                break;
+            case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoMode.Rotate:
+                switch (axis)
+                {
+                    case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.X: transform.RotationX += delta; break;
+                    case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.Y: transform.RotationY += delta; break;
+                    case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.Z: transform.RotationZ += delta; break;
+                }
+                break;
+            case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoMode.Scale:
+                float ClampScale(float v) => v < 0.01f ? 0.01f : (v > 100f ? 100f : v);
+                switch (axis)
+                {
+                    case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.X: transform.ScaleX = ClampScale(transform.ScaleX * delta); break;
+                    case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.Y: transform.ScaleY = ClampScale(transform.ScaleY * delta); break;
+                    case PrimalEditor_Avalonia.Views.Engine3D.GizmoOverlay.GizmoAxis.Z: transform.ScaleZ = ClampScale(transform.ScaleZ * delta); break;
+                }
+                break;
         }
-        float[] newPos = { newX, newY, newZ };
-        float[] rot = { 0f, 0f, 0f };
-        float[] scl = { 1f, 1f, 1f };
-        NativeEngineBridge.SetEntityTransform(nativeId, newPos, rot, scl);
+
+        _vm.PushTransformsToNative(new[] { entity });
+        _vm.Properties?.RefreshFromTransform(transform);
+        _vm.MarkProjectDirty();
+        _viewport?.SetGizmoTarget(transform.PositionX, transform.PositionY, transform.PositionZ);
     }
 
     private void InitializeComponent()
@@ -157,6 +234,14 @@ namespace PrimalEditor_Avalonia.Views;
             if (vm.Properties != null)
             {
                 vm.Properties.Entities = selected;
+                // Tell the Properties VM the native id of the single
+                // selected entity so it can update the look-through
+                // button label ("Look Through This Camera" vs.
+                // "Restore Editor Camera"). 0 when nothing or multi.
+                uint nativeId = selected.Length == 1
+                    ? vm.GetNativeEntityId(selected[0])
+                    : 0u;
+                vm.Properties.RefreshEntityContext(nativeId);
             }
         }
     }
@@ -169,6 +254,60 @@ namespace PrimalEditor_Avalonia.Views;
         };
         var window = TopLevel.GetTopLevel(this) as Window;
         if (window != null) await dlg.ShowDialog<bool?>(window);
+    }
+
+    private async void OnAddEntityKindClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is not Avalonia.Controls.Button { Tag: EntityFactoryDescriptor descriptor }) return;
+        if (DataContext is not WorldEditorViewModel vm) return;
+
+        if (descriptor.RequiresAssetSelection)
+        {
+            // Prop / Asset-selected kinds open a file picker filtered to
+            // mesh formats. The user picks an asset, the picker flows
+            // through DropAssetAsync which creates the entity and binds
+            // it to the chosen mesh GUID. No special case in the
+            // descriptor beyond RequiresAssetSelection = true.
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel?.StorageProvider is { } storage)
+            {
+                var filters = new System.Collections.Generic.List<Avalonia.Platform.Storage.FilePickerFileType>
+                {
+                    new Avalonia.Platform.Storage.FilePickerFileType("Mesh assets")
+                    {
+                        Patterns = new System.Collections.Generic.List<string>
+                        {
+                            "*.mesh", "*.obj", "*.fbx", "*.gltf", "*.glb"
+                        }
+                    }
+                };
+                var options = new Avalonia.Platform.Storage.FilePickerOpenOptions
+                {
+                    Title = $"Select a mesh for {descriptor.DisplayName}",
+                    AllowMultiple = false,
+                    FileTypeFilter = filters
+                };
+                var files = await storage.OpenFilePickerAsync(options);
+                if (files == null || files.Count == 0) return;
+                var picked = files[0];
+                var path = picked.Path.LocalPath;
+                var info = PrimalEditor_Avalonia.Content.AssetRegistry.Get(path) ?? new PrimalEditor_Avalonia.Content.AssetInfo
+                {
+                    FullPath = path,
+                    Type = PrimalEditor_Avalonia.Content.ContentHelper.GetAssetType(path)
+                };
+                try { await vm.DropAssetAsync(info, 0f, 0f, 0f); }
+                catch (System.Exception ex) { PrimalEditor_Avalonia.Common.Logger.Error($"{descriptor.DisplayName} drop failed", ex); }
+                return;
+            }
+        }
+
+        // The Character/Light/Camera/Empty kinds go through the standard
+        // factory path: descriptor.CreateEntity() + parent under selection
+        // + SceneSynchronizer.SyncEntity (the same flow as the legacy
+        // "+ Entity" button, just driven by the descriptor instead of
+        // a hard-coded Transform).
+        vm.CreateEntityFromFactory(descriptor);
     }
 
     private void OnAddEntityClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -202,6 +341,14 @@ namespace PrimalEditor_Avalonia.Views;
 
             vm.UndoRedo.Add(new AddEntityAction(vm, entity));
             vm.SelectedEntities = new[] { entity };
+            // Mirror the toolbar path: push the entity into the native
+            // engine so the editor viewport sees it. Without this the
+            // hierarchy shows the entity but the render surface stays
+            // empty.
+            if (PrimalEditor_Avalonia.Native.NativeEngineBridge.IsLoaded)
+            {
+                vm.SceneSynchronizer.SyncEntity(entity);
+            }
             Logger.Info($"Added entity: {entity.Name}" + (parent != null ? $" (child of {parent.Name})" : ""));
         }
     }

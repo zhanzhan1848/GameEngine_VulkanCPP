@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
@@ -8,7 +9,9 @@ using Dock.Model.Mvvm.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.Content;
+using PrimalEditor_Avalonia.Entities;
 using PrimalEditor_Avalonia.GameProject;
+using PrimalEditor_Avalonia.GameProject.Identifiers;
 using PrimalEditor_Avalonia.Native;
 using PrimalEditor_Avalonia.ViewModels;
 
@@ -156,6 +159,11 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
                     {
                         SceneSynchronizer.Sync(_activeScene);
                     }
+                    SceneEnvironmentViewModel.Attach(_activeScene.Environment);
+                }
+                else
+                {
+                    SceneEnvironmentViewModel.Attach(null);
                 }
                 OnPropertyChanged(nameof(ActiveScene));
             }
@@ -167,6 +175,22 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
     internal RuntimeMaterialMap RuntimeMaterialMap { get; } = new();
     internal SceneRuntimeSynchronizer SceneSynchronizer { get; }
 
+    /// <summary>
+    /// Toolbar data source. Bound by <c>WorldEditorView.axaml</c>'s
+    /// <c>ItemsControl</c> so each entry renders one toolbar button.
+    /// Adding a new entity kind = one row in <see cref="EntityFactory"/>;
+    /// no view edits required.
+    /// </summary>
+    public IReadOnlyList<EntityFactoryDescriptor> EntityFactoryItems => EntityFactory.All;
+
+    /// <summary>
+    /// Inspector-side view model for scene environment (ambient / fog /
+    /// skybox / tone mapping). Bound by <c>EnvironmentView.axaml</c>;
+    /// forwards every property change to the native engine via
+    /// <see cref="NativeEngineBridge.UpdateSceneEnvironment"/>.
+    /// </summary>
+    public SceneEnvironmentViewModel SceneEnvironmentViewModel { get; } = new();
+
     public WorldEditorViewModel()
     {
         SceneSynchronizer = new SceneRuntimeSynchronizer(
@@ -174,6 +198,50 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
             RuntimeEntityMap,
             RuntimeAssetMap,
             RuntimeMaterialMap);
+    }
+
+    /// <summary>
+    /// Create a new entity from the given factory descriptor, parent
+    /// it under the current selection (or the scene root), register
+    /// undo, and push the entity to the native engine. Returns the
+    /// new entity on success, null if the scene is missing.
+    /// </summary>
+    public GameEntity? CreateEntityFromFactory(EntityFactoryDescriptor descriptor)
+    {
+        if (descriptor == null) return null;
+        if (ActiveScene == null)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                $"Cannot add {descriptor.DisplayName}: no active scene. Open a project first.");
+            return null;
+        }
+
+        var entity = descriptor.CreateEntity();
+        var parent = SelectedEntities.Length == 1 ? SelectedEntities[0] : null;
+        if (parent != null)
+        {
+            entity.Name = $"{parent.Name}_Child_{parent.Children.Count + 1}";
+            parent.Children.Add(entity);
+            entity.Parent = parent;
+        }
+        else
+        {
+            ActiveScene.Entities.Add(entity);
+            entity.ParentScene = ActiveScene;
+        }
+
+        Entities.Add(entity);
+        UndoRedo.Add(new AddEntityAction(this, entity));
+        SelectedEntities = new[] { entity };
+        MarkProjectDirty();
+
+        if (NativeEngineBridge.IsLoaded)
+        {
+            SceneSynchronizer.SyncEntity(entity);
+        }
+
+        PrimalEditor_Avalonia.Common.Logger.Info($"Added {descriptor.DisplayName}: {entity.Name}");
+        return entity;
     }
 
     public string DebugMessage
@@ -269,20 +337,45 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         _activeScene?.MarkDirty();
     }
 
-    // Native entity id <-> C# GameEntity mapping. Kept here (not on
-    // GameEntity) to keep the data model free of platform-specific
-    // fields. The view pulls the live list to feed ViewportPicker.
-    private readonly System.Collections.Generic.Dictionary<GameEntity, uint> _entityNativeIds = new();
-
-    public void RegisterNativeEntityId(GameEntity entity, uint nativeId)
+    /// <summary>
+    /// Push the current Transform values of the given entities into
+    /// the native engine. Called by the gizmo drag handler and the
+    /// inspector after they mutate the C# source of truth.
+    /// </summary>
+    public void PushTransformsToNative(IEnumerable<GameEntity> entities)
     {
-        if (entity == null || nativeId == 0 || nativeId == ulong.MaxValue) return;
-        _entityNativeIds[entity] = nativeId;
-        NotifyPickerChanged();
+        if (!NativeEngineBridge.IsLoaded) return;
+        foreach (var e in entities)
+        {
+            var t = e.GetTransform();
+            if (t == null) continue;
+            var nativeId = GetNativeEntityId(e);
+            if (nativeId == 0) continue;
+            NativeEngineBridge.SetEntityTransform(nativeId,
+                new[] { t.PositionX, t.PositionY, t.PositionZ },
+                new[] { t.RotationX, t.RotationY, t.RotationZ },
+                new[] { t.ScaleX, t.ScaleY, t.ScaleZ });
+        }
     }
 
-    public uint GetNativeEntityId(GameEntity? entity)
-        => entity != null && _entityNativeIds.TryGetValue(entity, out var id) ? id : 0u;
+    // Native entity id <-> C# GameEntity mapping. RuntimeEntityMap is the
+// single source of truth — both SceneRuntimeSynchronizer and the legacy
+// async LoadEntityAsync path write into it, so GetPickerCandidates and
+// the write-back paths (gizmo, inspector) can never drift on different
+// dictionaries.
+public void RegisterNativeEntityId(GameEntity entity, uint nativeId)
+{
+    if (entity == null || nativeId == 0 || nativeId == ulong.MaxValue) return;
+    RuntimeEntityMap.Register(entity.EntityGuid, nativeId);
+    NotifyPickerChanged();
+}
+
+public uint GetNativeEntityId(GameEntity? entity)
+{
+    if (entity == null) return 0u;
+    if (entity.EntityGuid.Value == Guid.Empty) return 0u;
+    return RuntimeEntityMap.GetEntityId(entity.EntityGuid) ?? 0u;
+}
 
     public System.Collections.Generic.IReadOnlyList<(uint id, PrimalEditor_Avalonia.Views.Engine3D.ViewportPicker.AABB bounds)>? GetPickerCandidates()
     {
@@ -291,7 +384,8 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         var list = new System.Collections.Generic.List<(uint, PrimalEditor_Avalonia.Views.Engine3D.ViewportPicker.AABB)>();
         foreach (var entity in _activeScene.Entities)
         {
-            if (!_entityNativeIds.TryGetValue(entity, out var id) || id == 0) continue;
+            var id = GetNativeEntityId(entity);
+            if (id == 0) continue;
             var pos = NativeEngineBridge.GetEntityPosition(id);
             // Default AABB: 1m cube around the entity's position. We do
             // not query the engine for actual mesh bounds here — that
@@ -358,17 +452,12 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
                 PrimalEditor_Avalonia.Common.Logger.Warning($"DropAsset: import failed (status={finalStatus})");
                 return null;
             }
-            var meshEntityId = NativeEngineBridge.PipelineRegisterMeshEntity(finalMeshId, null);
-            if (meshEntityId == 0 || meshEntityId == ulong.MaxValue)
-            {
-                PrimalEditor_Avalonia.Common.Logger.Warning("DropAsset: PipelineRegisterMeshEntity returned invalid id");
-                return null;
-            }
-            // The native meshEntityId lives in the engine's content system;
-            // ECS-side binding happens via EngineSync.PushScene. We do not
-            // store the native id on the C# GameEntity to keep the data
-            // model free of platform-specific fields.
-            RegisterNativeEntityId(entity, (uint)meshEntityId);
+            // Pre-register the cooked content id so SceneSynchronizer.SyncEntity
+            // can pick it up without re-importing the asset. The import above
+            // already paid the cost; reusing the result here keeps a single
+            // mesh registered against the AssetGuid.
+            SceneSynchronizer.RegisterPreImportedMesh(
+                new AssetGuid(info.Guid), finalMeshId);
         }
         else
         {
@@ -380,6 +469,11 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         UndoRedo.Add(action);
         action.Redo();
         SelectedEntities = new[] { entity };
+        // SyncEntity does the actual native push (entity, mesh bind with
+        // the default white PBR material, picker registration). Replacing
+        // the old direct PipelineRegisterMeshEntity call closes the gap
+        // where dropped assets rendered with no material.
+        if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
         PrimalEditor_Avalonia.Common.Logger.Info($"Dropped asset: {info.FileName} → entity {entity.Name}");
         return entity;
     }
@@ -388,7 +482,7 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
     /// Re-import every entity in the active scene whose AssetPath is
     /// non-empty. Each successful import produces a fresh native
     /// mesh content id which is registered against the C# entity in
-    /// <see cref="_entityNativeIds"/>. The editor's transform gizmo
+    /// <see cref="RuntimeEntityMap"/>. The editor's transform gizmo
     /// can then write back to the engine without the user having to
     /// re-drag the asset.
     /// </summary>

@@ -517,7 +517,13 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     // 在读 view.GetViewMatrix() 之前先让 ECS Camera 组件覆盖 RenderView 的矩阵。
     // 如果场景里没有 Camera entity，SyncCamerasFromECS no-op，view 保留上游 caller
     // 设置的矩阵（保持旧行为兼容）。
-    scene_sync::SyncCamerasFromECS(view);
+    //
+    // Editor camera 旁路：当 view.IsEditorCamera() 为 true 时，跳过 ECS 同步，
+    // 否则场景里的 Camera entity 会每帧把 Editor Camera 的 view/projection
+    // 覆盖掉，导致 orbit/pan/zoom 在画面上完全不可见。
+    if (!view.IsEditorCamera()) {
+        scene_sync::SyncCamerasFromECS(view, view.GetSceneCameraEntityId());
+    }
 
     view_matrix_ = view.GetViewMatrix();
     proj_matrix_ = view.GetProjectionMatrix();

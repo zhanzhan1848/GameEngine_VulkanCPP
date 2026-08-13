@@ -9,6 +9,14 @@
   <Grid>
     <views:MTKViewHost Name="MTKHostView" />
     <views:ViewportOverlay Name="Overlay" IsHitTestVisible="False" />
-    <views:GizmoOverlay Name="Gizmo" />
+    <views:GizmoOverlay Name="Gizmo" IsHitTestVisible="False" />
+    <!-- Transparent Border on top to capture pointer events. The
+         NativeControlHost's wrapper NSView eats mouse events at the
+         AppKit level on macOS; without this overlay Border, Avalonia's
+         PointerPressed/Moved/Released never fire and the user can't
+         orbit/pan/zoom or drag gizmos. Background=Transparent makes
+         the Border participate in hit-testing while being visually
+         invisible. -->
+    <Border Name="InputCapture" Background="Transparent" />
   </Grid>
 </UserControl>

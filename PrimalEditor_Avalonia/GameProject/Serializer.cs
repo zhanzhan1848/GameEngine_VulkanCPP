@@ -173,6 +173,8 @@ public static class Serializer
                 scene.Entities.Clear();
                 foreach (var entity in loaded.Entities)
                     scene.Entities.Add(entity);
+                CopyEnvironment(loaded.Environment, scene.Environment);
+                scene.EditorCamera.CopyFrom(loaded.EditorCamera);
             }
             catch (Exception ex)
             {
@@ -191,7 +193,45 @@ public static class Serializer
         {
             SceneGuid = scene.Guid,
             Name = scene.Name,
-            Entities = entities
+            Entities = entities,
+            Environment = ToEnvironmentDocument(scene.Environment),
+            EditorCamera = ToEditorCameraDocument(scene.EditorCamera),
+        };
+    }
+
+    private static EditorCameraDocument ToEditorCameraDocument(EditorCameraState camera) => new()
+    {
+        TargetX = camera.TargetX,
+        TargetY = camera.TargetY,
+        TargetZ = camera.TargetZ,
+        Distance = camera.Distance,
+        Yaw = camera.Yaw,
+        Pitch = camera.Pitch,
+    };
+
+    private static SceneEnvironmentDocument ToEnvironmentDocument(SceneEnvironment env)
+    {
+        if (env == null) return new SceneEnvironmentDocument();
+        return new SceneEnvironmentDocument
+        {
+            AmbientR = env.AmbientR,
+            AmbientG = env.AmbientG,
+            AmbientB = env.AmbientB,
+            AmbientIntensity = env.AmbientIntensity,
+            FogEnabled = env.FogEnabled,
+            FogR = env.FogR,
+            FogG = env.FogG,
+            FogB = env.FogB,
+            FogNear = env.FogNear,
+            FogFar = env.FogFar,
+            FogDensity = env.FogDensity,
+            SkyboxEnabled = env.SkyboxEnabled,
+            SkyR = env.SkyR,
+            SkyG = env.SkyG,
+            SkyB = env.SkyB,
+            ToneMapping = env.ToneMapping.ToString(),
+            Exposure = env.Exposure,
+            MainCameraEntityGuid = env.MainCameraEntityGuid?.ToString("D"),
         };
     }
 
@@ -222,6 +262,9 @@ public static class Serializer
                     MaterialOverrideComponent overrideComp => JsonSerializer.SerializeToElement(overrideComp, SceneDocument.JsonOptions),
                     LightComponent light => JsonSerializer.SerializeToElement(light, SceneDocument.JsonOptions),
                     CameraComponent camera => JsonSerializer.SerializeToElement(camera, SceneDocument.JsonOptions),
+                    EntityMetadata metadata => JsonSerializer.SerializeToElement(metadata, SceneDocument.JsonOptions),
+                    RotateScriptComponent rotate => JsonSerializer.SerializeToElement(rotate, SceneDocument.JsonOptions),
+                    PatrolScriptComponent patrol => JsonSerializer.SerializeToElement(patrol, SceneDocument.JsonOptions),
                     PrimalEditor_Avalonia.Components.PrefabInstanceComponent prefabInstance => JsonSerializer.SerializeToElement(prefabInstance, SceneDocument.JsonOptions),
                     PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent crossScene => JsonSerializer.SerializeToElement(crossScene, SceneDocument.JsonOptions),
                     _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
@@ -252,6 +295,9 @@ public static class Serializer
             MaterialOverrideComponent => "materialOverride",
             LightComponent => "light",
             CameraComponent => "camera",
+            EntityMetadata => "metadata",
+            RotateScriptComponent => "scriptRotate",
+            PatrolScriptComponent => "scriptPatrol",
             PrimalEditor_Avalonia.Components.PrefabInstanceComponent => "prefabInstance",
             PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent => "crossSceneReference",
             _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
@@ -264,6 +310,9 @@ public static class Serializer
         {
             Guid = document.SceneGuid
         };
+
+        ApplyEnvironment(scene.Environment, document.Environment);
+        ApplyEditorCamera(scene.EditorCamera, document.EditorCamera);
 
         var entityMap = new Dictionary<EntityGuid, GameEntity>();
 
@@ -299,6 +348,45 @@ public static class Serializer
         return scene;
     }
 
+    private static void ApplyEnvironment(SceneEnvironment target, SceneEnvironmentDocument? source)
+    {
+        if (source == null) return;
+        target.AmbientR = source.AmbientR;
+        target.AmbientG = source.AmbientG;
+        target.AmbientB = source.AmbientB;
+        target.AmbientIntensity = source.AmbientIntensity;
+        target.FogEnabled = source.FogEnabled;
+        target.FogR = source.FogR;
+        target.FogG = source.FogG;
+        target.FogB = source.FogB;
+        target.FogNear = source.FogNear;
+        target.FogFar = source.FogFar;
+        target.FogDensity = source.FogDensity;
+        target.SkyboxEnabled = source.SkyboxEnabled;
+        target.SkyR = source.SkyR;
+        target.SkyG = source.SkyG;
+        target.SkyB = source.SkyB;
+        if (Enum.TryParse<ToneMappingMode>(source.ToneMapping, out var tm)) target.ToneMapping = tm;
+        target.Exposure = source.Exposure;
+        target.MainCameraEntityGuid = Guid.TryParse(source.MainCameraEntityGuid, out var mainCameraGuid)
+            ? mainCameraGuid
+            : null;
+    }
+
+    private static void CopyEnvironment(SceneEnvironment source, SceneEnvironment target)
+        => ApplyEnvironment(target, ToEnvironmentDocument(source));
+
+    private static void ApplyEditorCamera(EditorCameraState target, EditorCameraDocument? source)
+    {
+        if (source == null) return;
+        target.TargetX = source.TargetX;
+        target.TargetY = source.TargetY;
+        target.TargetZ = source.TargetZ;
+        target.Distance = source.Distance > 0f ? source.Distance : 12f;
+        target.Yaw = source.Yaw;
+        target.Pitch = source.Pitch;
+    }
+
     private static Component? DeserializeComponent(ComponentDocument componentDoc)
     {
         return componentDoc.Type.ToLowerInvariant() switch
@@ -308,6 +396,9 @@ public static class Serializer
             "materialoverride" => JsonSerializer.Deserialize<MaterialOverrideComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "light" => JsonSerializer.Deserialize<LightComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "camera" => JsonSerializer.Deserialize<CameraComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "metadata" => JsonSerializer.Deserialize<EntityMetadata>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "scriptrotate" => JsonSerializer.Deserialize<RotateScriptComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "scriptpatrol" => JsonSerializer.Deserialize<PatrolScriptComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "prefabinstance" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.PrefabInstanceComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "crossscenereference" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             _ => throw new NotSupportedException($"Unknown component type discriminator: '{componentDoc.Type}'")

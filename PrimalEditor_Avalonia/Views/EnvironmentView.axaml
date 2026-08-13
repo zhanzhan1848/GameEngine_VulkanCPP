@@ -1,0 +1,115 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+             x:Class="PrimalEditor_Avalonia.Views.EnvironmentView"
+             x:DataType="vm:SceneEnvironmentViewModel"
+             Background="{StaticResource VoidBrush}">
+
+    <ScrollViewer>
+        <StackPanel Margin="12" Spacing="6" IsEnabled="{Binding HasScene}">
+
+            <TextBlock Text="SCENE ENVIRONMENT"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="13" LetterSpacing="1"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Margin="0,0,0,8"/>
+
+            <TextBlock Text="Persisted with the scene (.scene JSON). Edits are pushed to the native renderer on every change."
+                       FontFamily="{StaticResource FontMono}"
+                       FontSize="10"
+                       TextWrapping="Wrap"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       Margin="0,0,0,8"/>
+
+            <TextBlock Text="AMBIENT LIGHT"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,8,0,4"/>
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto" Margin="0,2">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Color RGB" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                    <TextBox Text="{Binding AmbientR, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding AmbientG, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding AmbientB, Mode=TwoWay}" Width="60"/>
+                </StackPanel>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Intensity" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                <TextBox  Grid.Row="1" Grid.Column="1" Text="{Binding AmbientIntensity, Mode=TwoWay}"/>
+            </Grid>
+
+            <TextBlock Text="FOG"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,12,0,4"/>
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" Margin="0,2">
+                <CheckBox Grid.Row="0" Grid.Column="1" Content="Enabled"
+                          IsChecked="{Binding FogEnabled, Mode=TwoWay}"
+                          Margin="0,0,0,4"/>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Color RGB" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                    <TextBox Text="{Binding FogR, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding FogG, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding FogB, Mode=TwoWay}" Width="60"/>
+                </StackPanel>
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Near / Far" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                    <TextBox Text="{Binding FogNear, Mode=TwoWay}" Width="80"/>
+                    <TextBox Text="{Binding FogFar, Mode=TwoWay}" Width="80"/>
+                </StackPanel>
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Density" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                <TextBox  Grid.Row="3" Grid.Column="1" Text="{Binding FogDensity, Mode=TwoWay}"/>
+            </Grid>
+
+            <TextBlock Text="SKYBOX"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,12,0,4"/>
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto" Margin="0,2">
+                <CheckBox Grid.Row="0" Grid.Column="1" Content="Enabled"
+                          IsChecked="{Binding SkyboxEnabled, Mode=TwoWay}"
+                          Margin="0,0,0,4"/>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Color RGB" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                    <TextBox Text="{Binding SkyR, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding SkyG, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding SkyB, Mode=TwoWay}" Width="60"/>
+                </StackPanel>
+            </Grid>
+
+            <TextBlock Text="TONE MAPPING"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,12,0,4"/>
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto" Margin="0,2">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Mode" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                <ComboBox Grid.Row="0" Grid.Column="1"
+                          ItemsSource="{Binding ToneMappingOptions}"
+                          SelectedItem="{Binding ToneMapping}"/>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Exposure" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                <TextBox  Grid.Row="1" Grid.Column="1" Text="{Binding Exposure, Mode=TwoWay}"/>
+            </Grid>
+
+            <TextBlock Text="STATUS"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       Margin="0,12,0,4"/>
+            <TextBlock Text="{Binding StatusMessage}"
+                       FontFamily="{StaticResource FontMono}"
+                       FontSize="10"
+                       TextWrapping="Wrap"
+                       Foreground="{StaticResource AmberBrush}"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

@@ -1,5 +1,6 @@
 using System;
 using Avalonia.Controls;
+using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.Views;
@@ -14,20 +15,33 @@ public partial class OpenProjectView : UserControl
         InitializeComponent();
     }
 
-    private void OnBrowseClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    private async void OnBrowseClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is OpenProjectViewModel vm)
         {
-            vm.BrowseForFile();
+            await vm.BrowseForFileAsync(TopLevel.GetTopLevel(this));
         }
     }
 
-    private void OnRemoveClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    private async void OnRemoveClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (DataContext is OpenProjectViewModel vm)
-        {
-            vm.RemoveSelected();
-        }
+        if (DataContext is not OpenProjectViewModel vm) return;
+        if (vm.SelectedProject == null) return;
+        if (TopLevel.GetTopLevel(this) is not Window owner) return;
+
+        var root = DeleteProject.ResolveProjectRoot(vm.SelectedProject.Path);
+        var missing = root == null;
+        var message = missing
+            ? $"'{vm.SelectedProject.Name}' was not found on disk. Remove it from the recent projects list?"
+            : $"Delete '{vm.SelectedProject.Name}' and everything in it?\n\n{root}\n\n" +
+              "The entire project folder will be permanently deleted. This cannot be undone.";
+
+        var dlg = ConfirmDialog.CreateDestructive(
+            "Remove project", message, missing ? "Remove" : "Delete");
+        var result = await dlg.ShowDialogAsync(owner);
+        if (result != ConfirmResult.Discard) return;
+
+        vm.RemoveSelected();
     }
 
     private void OnCancelClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)

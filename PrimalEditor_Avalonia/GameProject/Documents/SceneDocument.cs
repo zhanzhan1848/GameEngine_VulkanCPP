@@ -23,6 +23,18 @@ public sealed class SceneDocument
     [JsonPropertyName("Entities")]
     public List<EntityDocument> Entities { get; set; } = new();
 
+    /// <summary>
+    /// Scene-level environment. Optional in JSON — missing field
+    /// yields a default-constructed instance. <see cref="IsValid"/>
+    /// intentionally ignores this field so old v2 scenes keep loading
+    /// after this addition (the schema is unchanged at version 2).
+    /// </summary>
+    [JsonPropertyName("Environment")]
+    public SceneEnvironmentDocument Environment { get; set; } = new();
+
+    [JsonPropertyName("EditorCamera")]
+    public EditorCameraDocument EditorCamera { get; set; } = new();
+
     [JsonIgnore]
     public bool IsValid =>
         SchemaVersion == CurrentSchemaVersion &&

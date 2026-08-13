@@ -45,6 +45,25 @@ public interface INativeEngineBridgeLike
     /// <see cref="CreateMaterial"/>.
     /// </summary>
     void SetEntityMesh(uint entityId, ulong geometryContentId, uint[] materialRuntimeIds, uint materialCount);
+
+    /// <summary>
+    /// Allocate the engine's built-in default white PBR material. Used
+    /// as a fallback when the user hasn't picked a shader — the editor
+    /// has no Material system yet, so every unbound mesh renders with
+    /// this. Returns 0 / invalid id when the engine cannot satisfy.
+    /// </summary>
+    ulong CreateDefaultMaterial();
+
+    /// <summary>
+    /// Procedurally cook a primitive mesh (sphere, cube, capsule, …)
+    /// and return its RHI content id. The id is valid until
+    /// <see cref="ProceduralMeshDestroy"/> is called. Used by the
+    /// editor to ship placeholder geometry for entities the user
+    /// has created but hasn't assigned a real mesh yet.
+    /// </summary>
+    ulong ProceduralMeshCreate(uint meshType, float[] parameters);
+
+    void ProceduralMeshDestroy(ulong contentId);
 }
 
 public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
@@ -140,5 +159,24 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
         {
             Logger.Warning($"NativeEngineBridgeAdapter: PipelineRegisterMeshEntity returned invalid id for entity={entityId}");
         }
+    }
+
+    public ulong CreateDefaultMaterial()
+    {
+        if (!NativeEngineBridge.IsLoaded) return 0;
+        return NativeEngineBridge.CreateDefaultMaterial();
+    }
+
+    public ulong ProceduralMeshCreate(uint meshType, float[] parameters)
+    {
+        if (!NativeEngineBridge.IsLoaded) return 0;
+        return NativeEngineBridge.ProceduralMeshCreate(meshType, parameters);
+    }
+
+    public void ProceduralMeshDestroy(ulong contentId)
+    {
+        if (!NativeEngineBridge.IsLoaded) return;
+        if (contentId == 0 || contentId == NativeEngineBridge.InvalidContentId) return;
+        NativeEngineBridge.ProceduralMeshDestroy(contentId);
     }
 }

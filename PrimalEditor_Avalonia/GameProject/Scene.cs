@@ -49,6 +49,13 @@ public class Scene : ViewModelBase, IDirtyTrackable
     public ObservableCollection<GameEntity> Entities { get; set; } = new();
 
     [JsonIgnore]
+    public SceneEnvironment Environment { get; } = new SceneEnvironment();
+
+    /// <summary>Editor-only viewport camera, persisted per scene.</summary>
+    [JsonIgnore]
+    public EditorCameraState EditorCamera { get; } = new EditorCameraState();
+
+    [JsonIgnore]
     public bool IsDirty
     {
         get => _isDirty;

@@ -22,7 +22,7 @@ namespace primal::graphics {
         // 这样既不破坏旧的 graphics::create_camera 路径，也允许 Editor 用 ECS Camera 组件驱动渲染。
         //
         // 注意：本函数**不是线程安全**的 —— 必须在渲染线程的同一帧内调用，与 SyncLightsFromECS 同一时机。
-        void SyncCamerasFromECS(RenderView& view);
+        void SyncCamerasFromECS(RenderView& view, id::id_type preferred_entity_id = id::invalid_id);
 
     } // namespace scene_sync
 } // namespace primal::graphics

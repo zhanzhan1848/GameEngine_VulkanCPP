@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
+using PrimalEditor_Avalonia.Native;
 using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.ViewModels;
@@ -47,8 +48,110 @@ public class PropertiesViewModel : ViewModelBase
     public MSCamera? Camera { get; private set; }
     public MSMeshRenderer? MeshRenderer { get; private set; }
 
-    public System.Collections.ObjectModel.ObservableCollection<MaterialOverrideViewModel> MaterialOverrides { get; }
-        = new System.Collections.ObjectModel.ObservableCollection<MaterialOverrideViewModel>();
+    /// <summary>True when the selected entity has a CameraComponent — the
+    /// "Look Through This Camera" button is visible iff true.</summary>
+    public bool HasCameraComponent => Camera != null;
+
+    /// <summary>"Look Through This Camera" or "Restore Editor Camera"
+    /// depending on whether the viewport is currently rendering through
+    /// this entity. Bound to the Properties panel button.</summary>
+    public string LookThroughButtonLabel { get; private set; } = "Look Through This Camera";
+    public string MainCameraButtonLabel { get; private set; } = "Set as Main Camera";
+
+    /// <summary>Native entity id of the currently selected entity, or 0
+    /// when nothing is selected. Set by <see cref="RefreshEntityContext"/>
+    /// when the panel binds to a new selection.</summary>
+    public uint SelectedEntityNativeId { get; private set; }
+
+    public System.Collections.ObjectModel.ObservableCollection<MaterialOverrideViewModel> MaterialOverrides { get; } = new System.Collections.ObjectModel.ObservableCollection<MaterialOverrideViewModel>();
+
+    /// <summary>Called by the view after constructing this VM so it can
+    /// route LookThroughCamera requests back to the viewport. Set via
+    /// dependency injection (the WorldEditorView passes a delegate that
+    /// forwards to the EngineViewport3D).</summary>
+    public System.Action<uint>? LookThroughCameraCallback { get; set; }
+
+    /// <summary>Called by the view after constructing this VM. Forwards to
+    /// the viewport so the panel can ask "are we currently looking
+    /// through the selected entity?".</summary>
+    public System.Func<uint, bool>? IsLookingThroughCameraQuery { get; set; }
+    public System.Action? SetMainCameraCallback { get; set; }
+    public System.Func<bool>? IsMainCameraQuery { get; set; }
+
+    public void RefreshEntityContext(uint selectedNativeId)
+    {
+        SelectedEntityNativeId = selectedNativeId;
+        UpdateLookThroughLabel();
+        UpdateMainCameraLabel();
+    }
+
+    private void UpdateLookThroughLabel()
+    {
+        if (SelectedEntityNativeId == 0 || IsLookingThroughCameraQuery == null)
+        {
+            LookThroughButtonLabel = "Look Through This Camera";
+            OnPropertyChanged(nameof(LookThroughButtonLabel));
+            return;
+        }
+        LookThroughButtonLabel = IsLookingThroughCameraQuery(SelectedEntityNativeId)
+            ? "Restore Editor Camera"
+            : "Look Through This Camera";
+        OnPropertyChanged(nameof(LookThroughButtonLabel));
+    }
+
+    /// <summary>Called from the view's button click handler. Toggles the
+    /// viewport's "look through this entity" state. If already looking
+    /// through this entity, switches back to the editor camera.</summary>
+    public void OnLookThroughCameraClicked()
+    {
+        if (SelectedEntityNativeId == 0 || LookThroughCameraCallback == null) return;
+        if (IsLookingThroughCameraQuery != null
+            && IsLookingThroughCameraQuery(SelectedEntityNativeId))
+        {
+            // Already looking through this one → switch back to editor.
+            LookThroughCameraCallback(0u);
+        }
+        else
+        {
+            LookThroughCameraCallback(SelectedEntityNativeId);
+        }
+        UpdateLookThroughLabel();
+    }
+
+    /// <summary>Called from the view whenever the viewport's look-through
+    /// state changes externally (e.g. another panel or shortcut). Re-runs
+    /// the label refresh so the button text matches reality.</summary>
+    public void NotifyLookThroughChanged()
+    {
+        UpdateLookThroughLabel();
+    }
+
+    public void OnSetMainCameraClicked()
+    {
+        if (SelectedEntityNativeId == 0) return;
+        SetMainCameraCallback?.Invoke();
+        UpdateMainCameraLabel();
+    }
+
+    public void NotifyMainCameraChanged() => UpdateMainCameraLabel();
+
+    private void UpdateMainCameraLabel()
+    {
+        MainCameraButtonLabel = IsMainCameraQuery?.Invoke() == true
+            ? "Main Camera"
+            : "Set as Main Camera";
+        OnPropertyChanged(nameof(MainCameraButtonLabel));
+    }
+
+    /// <summary>Stable list the Light.Type ComboBox binds against. Exposed
+    /// here (not on MSLight) so the binding source survives across
+    /// selection changes — MSLight is rebuilt every time the user picks
+/// <summary>Stable list the Light.Type ComboBox binds against. Exposed
+    /// here (not on MSLight) so the binding source survives across
+    /// selection changes — MSLight is rebuilt every time the user picks
+    /// a new entity, which would invalidate any ItemsSource bound to a
+    /// view-model property on it.</summary>
+    public IReadOnlyList<LightType> LightTypeOptions { get; } = new[] { LightType.Directional, LightType.Point, LightType.Spot };
 
     public GameEntity[] Entities
     {
@@ -144,6 +247,42 @@ public class PropertiesViewModel : ViewModelBase
             undoRedo.Add(new MultiEntityTransformAction(oldDataList, newDataList));
             MarkProjectDirty();
         }
+
+        // Mirror the C# transform into the native engine so the render
+        // surface reflects the new value immediately. Without this the
+        // gizmo would update on the next SceneSynced() tick (which only
+        // fires on ActiveScene changes), leaving the viewport showing
+        // the stale position until the user clicks away and back.
+        PushTransformsToNative();
+    }
+
+    private void PushTransformsToNative()
+    {
+        var selected = _msEntity.SelectedEntities;
+        if (selected.Count == 0) return;
+        if (!NativeEngineBridge.IsLoaded) return;
+        // Walk the same MainWindow data-context chain as TryGetUndoRedo
+        // so we hit the same WorldEditorViewModel instance the rest of
+        // the editor talks to. There's no cross-view-model service
+        // locator in the editor yet, so this duplicated lookup is the
+        // simplest reliable path.
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        var worldEditor = lifetime?.MainWindow?.DataContext is MainWindowViewModel mainVm
+            ? mainVm.WorldEditor
+            : null;
+        if (worldEditor == null) return;
+        foreach (var entity in selected)
+        {
+            var t = entity.GetTransform();
+            if (t == null) continue;
+            var nativeId = worldEditor.GetNativeEntityId(entity);
+            if (nativeId == 0) continue;
+            float[] pos = { t.PositionX, t.PositionY, t.PositionZ };
+            float[] rot = { t.RotationX, t.RotationY, t.RotationZ };
+            float[] scl = { t.ScaleX, t.ScaleY, t.ScaleZ };
+            NativeEngineBridge.SetEntityTransform(nativeId, pos, rot, scl);
+        }
     }
 
     private void MarkProjectDirty()
@@ -207,6 +346,23 @@ public class PropertiesViewModel : ViewModelBase
         return null;
     }
 
+    /// <summary>
+    /// Re-fire PropertyChanged for the 9 transform properties so the
+    /// inspector TextBoxes re-read from the MSTransform wrapper.
+    /// Called by the gizmo drag handler after it mutates the
+    /// underlying Transform component in place.
+    /// </summary>
+    public void RefreshFromTransform(Components.Transform t)
+    {
+        if (_msEntity.SelectedEntities.Count != 1) return;
+        if (!ReferenceEquals(_msEntity.SelectedEntities[0].GetTransform(), t)) return;
+        // Re-pull the backing values from the underlying Transform so
+        // the panel reflects the new state. Without this the panel
+        // shows the pre-gizmo values until the user re-selects the
+        // entity (which rebuilds MSTransform and incidentally refreshes).
+        Transform?.Refresh();
+    }
+
     private void UpdateFromEntities()
     {
         OnPropertyChanged(nameof(EntityName));
@@ -221,6 +377,7 @@ public class PropertiesViewModel : ViewModelBase
         OnPropertyChanged(nameof(Light));
         OnPropertyChanged(nameof(Camera));
         OnPropertyChanged(nameof(MeshRenderer));
+        OnPropertyChanged(nameof(HasCameraComponent));
 
         MixedValueMessage = _msEntity.SelectedEntities.Count > 1
             ? "Multiple entities selected - showing first value or '-' for mixed"

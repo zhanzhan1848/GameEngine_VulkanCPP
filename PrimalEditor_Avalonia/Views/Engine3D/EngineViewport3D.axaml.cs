@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.Native;
 
 namespace PrimalEditor_Avalonia.Views.Engine3D;
@@ -12,10 +13,28 @@ namespace PrimalEditor_Avalonia.Views.Engine3D;
 public partial class EngineViewport3D : UserControl
 {
     private IEditorViewportHost? _host;
-    private uint _cameraId;
-    private uint _cameraEntityId;  // entity the camera is bound to; mutated by orbit/pan/zoom
+    private uint _cameraId = NativeEngineBridge.InvalidCameraId;
+    private uint _cameraEntityId = NativeEngineBridge.InvalidEntityId;  // entity the camera is bound to; mutated by orbit/pan/zoom
     private bool _viewportInitialized;
     private float _animTime;
+
+    // When non-zero, the viewport renders through a scene Camera entity's
+    // CameraComponent instead of the editor's Track A camera. The
+    // render frame's entry point switches from
+    // PipelineRenderFrameForEditorCamera (which sets IsEditorCamera=true and
+    // skips SyncCamerasFromECS) to PipelineRenderFrame (which lets
+    // SyncCamerasFromECS pick the scene camera's matrices). Orbit / pan
+    // / zoom are still applied to the editor camera underneath so
+    // switching back is seamless.
+    private uint _lookThroughSceneEntityId;
+    public uint LookThroughSceneEntityId => _lookThroughSceneEntityId;
+    public bool IsLookingThroughSceneCamera => _lookThroughSceneEntityId != 0;
+
+    // Per-frame icon overlay (light gizmo billboards, etc.) that draws
+    // into the engine framebuffer. Update its camera basis alongside
+    // GizmoOverlay so its world→screen projection matches the gizmo
+    // handles the user can grab.
+    private readonly LightIconRenderer _lightIconRenderer = new();
 
     // Orbit camera state. The camera is always looking at `_cameraTarget`
     // from a distance `_cameraDistance`, with `_cameraYaw` (around world up)
@@ -70,6 +89,8 @@ public partial class EngineViewport3D : UserControl
     // asked for comes for free from Avalonia's input routing.
     private Avalonia.Input.MouseButton _activeButton;  // 0 = none
     private Avalonia.Point _lastPointer;
+    private Border? _inputCapture;
+    private Scene? _scene;
 
     // Selection state lives on the C# side now. The previous C++ bridge exposed
     // EditorSelectEntity / EditorGetSelectedEntity / EditorClearScene but those
@@ -79,13 +100,21 @@ public partial class EngineViewport3D : UserControl
     public EngineViewport3D()
     {
         InitializeComponent();
+        ConnectGizmo();
         AttachedToVisualTree += OnAttached;
         DetachedFromVisualTree += OnDetached;
         LayoutUpdated += OnLayoutUpdated;
-        PointerPressed += OnPointerPressed;
-        PointerMoved += OnPointerMoved;
-        PointerReleased += OnPointerReleased;
-        PointerWheelChanged += OnPointerWheelChanged;
+        // Register on the transparent topmost overlay itself. NativeControlHost
+        // owns a real NSView on macOS; relying on bubbling from that native view
+        // is unreliable and was the reason mouse/trackpad input appeared dead.
+        _inputCapture = this.FindControl<Border>("InputCapture");
+        if (_inputCapture != null)
+        {
+            _inputCapture.PointerPressed += OnPointerPressed;
+            _inputCapture.PointerMoved += OnPointerMoved;
+            _inputCapture.PointerReleased += OnPointerReleased;
+            _inputCapture.PointerWheelChanged += OnPointerWheelChanged;
+        }
         KeyDown += OnKeyDown;
         Focusable = true;
     }
@@ -168,16 +197,13 @@ public partial class EngineViewport3D : UserControl
 
             // Set up a default editor camera so the forward pipeline has
             // a view to render from. Scene content (entities, lights,
-            // render items) is set up via RenderPipelineAPI / EntityAPI.
+            // render items) is pushed separately by SceneRuntimeSynchronizer
+            // whenever the user opens a scene or adds / edits an entity.
             _cameraId = CreateEditorCamera(width, height);
-            if (_cameraId != 0)
+            if (NativeEngineBridge.IsValidCamera(_cameraId))
             {
                 Logger.Info($"Editor camera {_cameraId} created");
             }
-
-            // Populate a small test scene so the viewport renders something
-            // more interesting than the post-process clear color.
-            CreateTestScene();
 
             // Push the initial orbit state to the engine so the camera
             // starts at the expected default view.
@@ -197,6 +223,19 @@ public partial class EngineViewport3D : UserControl
 
             _viewportInitialized = true;
             ShowPlaceholder(false);
+
+            // Re-sync the active scene NOW that the render pipeline
+            // exists. The initial SceneSynchronizer.Sync ran inside
+            // WorldEditorViewModel.ActiveScene setter when the project
+            // opened — at that point CreateStandardRenderPipeline had
+            // NOT been called yet, so the C++ entities were created
+            // without a pipeline to manage them. Calling Sync again
+            // here tears down those orphan entities and re-creates
+            // them with the pipeline active, which avoids the
+            // "mutex lock failed: Invalid argument" crash inside
+            // PipelineRenderFrame on the first frame.
+            ResyncActiveScene();
+
             StartRenderLoop();
 
             Logger.Info($"3D viewport initialized via {_host.Name} forward pipeline");
@@ -217,9 +256,14 @@ public partial class EngineViewport3D : UserControl
         }
     }
 
-    // Create a default editor camera pointing at the origin. Returns the
-    // camera id (0 on failure). Uses ResourceAPI::CreateCamera which takes
-    // flat scalars — no struct marshaling needed.
+    // Create a default editor camera for THIS viewport. Returns the
+    // camera id (0 on failure). Uses ResourceAPI::CreateCamera which
+    // creates a Track A graphics::camera wrapping a fresh entity — the
+    // entity's transform drives MetalCamera::update() and feeds
+    // view/projection into the render view. The render pipeline tags
+    // views built from this id as IsEditorCamera=true so ECS Camera
+    // sync does not overwrite its matrices when a scene Camera entity
+    // exists.
     private uint CreateEditorCamera(int width, int height)
     {
         // ResourceAPI::CreateCamera stores fov in Camera::field_of_view, but
@@ -227,148 +271,31 @@ public partial class EngineViewport3D : UserControl
         // createPerspectiveFovLH — i.e. the engine treats the value as a
         // fraction of π, not radians. 60° → fov = 60° / 180° = 1/3.
         _cameraEntityId = NativeEngineBridge.CreateEntity(0f, 1f, -12f);
+        if (_cameraEntityId == NativeEngineBridge.InvalidEntityId)
+        {
+            Logger.Warning($"Editor camera: CreateEntity returned 0x{_cameraEntityId:X} — orbit/zoom disabled");
+            return 0;
+        }
         const float fov = 1f / 3f;
         float aspect = (float)width / (float)height;
         const float nearZ = 0.1f;
         const float farZ = 1000.0f;
-        return NativeEngineBridge.CreateCamera(_cameraEntityId, fov, aspect, nearZ, farZ);
+        var cameraId = NativeEngineBridge.CreateCamera(_cameraEntityId, fov, aspect, nearZ, farZ);
+        if (!NativeEngineBridge.IsValidCamera(cameraId))
+        {
+            Logger.Warning($"Editor camera: CreateCamera returned 0x{cameraId:X} — orbit/zoom disabled");
+            return 0;
+        }
+        return cameraId;
     }
-
-    // Populate the world with a simple test scene. NOTE: We intentionally do
-    // NOT call AddRenderItem here. The native AddRenderItem asserts
-    // material_count > 0 && material_ids != null, and the C ABI has no
-    // way to associate a legacy material with a StandardRenderPipeline mesh
-    // entity — ForwardSceneRenderer uses its internal default materials
-    // when RegisterMeshResource is called with no texture ids. See the
-    // comment at the top of CreateTestScene for why we use a single shared
-    // RHI geometry with per-sphere entity transforms instead.
-    private void CreateTestScene()
-    {
-        const uint kSphereType = 0;
-        float[] sphereParams = { 0.5f, 24, 16 };
-        UInt64 sphereGeom = NativeEngineBridge.ProceduralMeshCreate(kSphereType, sphereParams);
-        if (!NativeEngineBridge.IsValidHandle(sphereGeom))
-        {
-            Logger.Warning($"ProceduralMeshCreate(Sphere) returned 0x{sphereGeom:X} (invalid) — skipping test scene");
-            return;
-        }
-        Logger.Info($"sphere geometry allocated at slot {sphereGeom} (0x{sphereGeom:X16})");
-        _testSceneGeometry = sphereGeom;
-
-        // StandardRenderPipeline::RegisterMeshEntity creates an ECS entity with
-        // an identity transform — distinct spheres need distinct entity
-        // transforms, not distinct geometry blobs. The previous
-        // CreateTranslatedProceduralMesh workaround baked offsets into the
-        // vertex buffer; that path is legacy-only and produces RHI ids that
-        // ForwardSceneRenderer::RegisterMeshResource can't resolve.
-        float[] xs = { -6.0f, -2.0f, 2.0f, 6.0f };
-        for (int i = 0; i < 4; ++i)
-        {
-            UInt64 meshEntity = NativeEngineBridge.PipelineRegisterMeshEntity(sphereGeom, (UInt64[]?)null);
-            if (meshEntity == 0 || meshEntity == UInt64.MaxValue)
-            {
-                Logger.Warning($"PipelineRegisterMeshEntity returned 0x{meshEntity:X} (invalid) — sphere {i} skipped");
-                continue;
-            }
-            // Push world position via ECS transform component. SetEntityTransform
-            // treats rotation as Euler angles (EngineAPI calls euler_to_quat),
-            // not a quaternion — pass all-zero for identity orientation.
-            float[] pos = { xs[i], 0f, 0f };
-            float[] rot = { 0f, 0f, 0f };
-            float[] scl = { 1f, 1f, 1f };
-            NativeEngineBridge.SetEntityTransform((uint)meshEntity, pos, rot, scl);
-
-            _testSceneRenderItems.Add(meshEntity);
-            Logger.Info($"[DBG_SPHERE] sphere {i}: geom=0x{sphereGeom:X} meshEntity=0x{meshEntity:X} pos=({xs[i]},0,0)");
-        }
-
-        byte[] sunDesc = new byte[NativeEngineBridge.PipelineLightDescSize];
-        WritePipelineLightDesc(sunDesc,
-            type: 0,
-            r: 1.0f, g: 1.0f, b: 1.0f,
-            intensity: 5.0f,
-            posX: 0f, posY: 3f, posZ: 0f,
-            dirX: 0.3f, dirY: -1.0f, dirZ: 0.2f,
-            range: 0f, umbra: 0f, penumbra: 0f,
-            enabled: 1);
-        UInt64 lightId = NativeEngineBridge.PipelineRegisterLightEntity(sunDesc);
-        if (lightId != 0 && lightId != UInt64.MaxValue)
-        {
-            _testSceneLights.Add(lightId);
-            Logger.Info("Test scene directional light added (intensity=5)");
-        }
-    }
-
-    // Mirrors EngineDLL/PipelineLightDesc.h layout (64 bytes):
-    //   u32 type; f32 color[3]; f32 intensity;
-    //   f32 position[3]; f32 direction[3];
-    //   f32 range; f32 umbra; f32 penumbra;
-    //   u32 is_enabled; u32 _pad[3];
-    private static void WritePipelineLightDesc(
-        byte[] buf,
-        uint type, float r, float g, float b, float intensity,
-        float posX, float posY, float posZ,
-        float dirX, float dirY, float dirZ,
-        float range, float umbra, float penumbra,
-        uint enabled)
-    {
-        int o = 0;
-        BitConverter.GetBytes(type).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(r).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(g).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(b).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(intensity).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(posX).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(posY).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(posZ).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(dirX).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(dirY).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(dirZ).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(range).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(umbra).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(penumbra).CopyTo(buf, o); o += 4;
-        BitConverter.GetBytes(enabled).CopyTo(buf, o); o += 4;
-    }
-
-    private void DestroyTestScene()
-    {
-        foreach (var meshEntity in _testSceneRenderItems)
-        {
-            NativeEngineBridge.PipelineUnregisterMeshEntity(meshEntity);
-        }
-        _testSceneRenderItems.Clear();
-
-        foreach (var lightId in _testSceneLights)
-        {
-            NativeEngineBridge.PipelineUnregisterLightEntity(lightId);
-        }
-        _testSceneLights.Clear();
-
-        if (_renderTarget != 0)
-        {
-            NativeEngineBridge.DestroyRenderTarget(_renderTarget);
-            _renderTarget = 0;
-        }
-
-        if (_testSceneGeometry != 0 && _testSceneGeometry != NativeEngineBridge.InvalidContentId)
-        {
-            NativeEngineBridge.ProceduralMeshDestroy(_testSceneGeometry);
-            _testSceneGeometry = 0;
-        }
-
-        _testSceneEntities.Clear();
-    }
-
-    private UInt64 _testSceneGeometry;
-    private readonly System.Collections.Generic.List<uint> _testSceneEntities = new();
-    private readonly System.Collections.Generic.List<UInt64> _testSceneRenderItems = new();
-    private readonly System.Collections.Generic.List<UInt64> _testSceneLights = new();
     private UInt64 _renderTarget;
     private int _renderTargetWidth;
     private int _renderTargetHeight;
 
     private DispatcherTimer? _renderTimer;
+    private DispatcherTimer? _uiRefreshTimer;
     private DateTime _lastTick;
+    private int _renderInProgress;
     private uint _nativeRenderLoopId;
 
     // Tracks every live native render loop id so App.OnExit can Destroy
@@ -380,26 +307,68 @@ public partial class EngineViewport3D : UserControl
 
     private void StartRenderLoop()
     {
-        if (_nativeRenderLoopId != 0) return;
+        if (_renderTimer != null) return;
         _lastTick = DateTime.UtcNow;
-        _nativeRenderLoopId = NativeEngineBridge.EditorRenderLoop.Start(60, OnNativeFrame);
-        if (_nativeRenderLoopId != 0)
-        {
-            s_liveLoopIds.Add(_nativeRenderLoopId);
-            Logger.Info("Editor render loop started (60Hz native, RHI forward pipeline)");
-            return;
-        }
+
+        // Only use the Avalonia DispatcherTimer. The native 60Hz render
+        // loop (EditorRenderLoop.Start + GCD timer + InvokeAsync) races
+        // with the timer on the C++ mutex inside PipelineRenderFrame,
+        // causing "mutex lock failed: Invalid argument" crashes. The
+        // DispatcherTimer runs entirely on the UI thread — no
+        // cross-thread marshalling, no mutex contention, no crash.
         _renderTimer = new DispatcherTimer(DispatcherPriority.Render)
         {
             Interval = TimeSpan.FromMilliseconds(33)
         };
         _renderTimer.Tick += OnRenderTick;
         _renderTimer.Start();
-        Logger.Warning("Native render loop unavailable — fell back to DispatcherTimer 30Hz");
+        Logger.Info("Render loop started (DispatcherTimer 30Hz, UI thread only)");
+    }
+
+    /// <summary>
+    /// A standalone Avalonia timer that forces a render frame + overlay
+    /// repaint at 30Hz. Only runs when the native render loop is NOT
+    /// active — the native loop already calls OnRenderFrameCore at 60Hz
+    /// via OnNativeFrame, so running both simultaneously causes a
+    /// mutex lock failure inside the C++ renderer (two threads enter
+    /// PipelineRenderFrame at the same time).
+    /// </summary>
+    private void StartUIRefreshTimer()
+    {
+        // If the native loop is running, don't start the fallback —
+        // it would race the native thread and crash with
+        // "mutex lock failed: Invalid argument".
+        if (_nativeRenderLoopId != 0) return;
+
+        _uiRefreshTimer = new DispatcherTimer(DispatcherPriority.Normal)
+        {
+            Interval = TimeSpan.FromMilliseconds(33)
+        };
+        _uiRefreshTimer.Tick += (_, _) =>
+        {
+            if (!_viewportInitialized) return;
+            OnRenderFrameCore(0.033f);
+            InvalidateOverlays();
+        };
+        _uiRefreshTimer.Start();
+        Logger.Info("UI refresh timer started (30Hz fallback, native loop not running)");
+    }
+
+    private void StopUIRefreshTimer()
+    {
+        _uiRefreshTimer?.Stop();
+        _uiRefreshTimer = null;
+    }
+
+    private void InvalidateOverlays()
+    {
+        if (this.FindControl<ViewportOverlay>("Overlay") is ViewportOverlay ov) ov.InvalidateVisual();
+        if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gz) gz.InvalidateVisual();
     }
 
     private void StopRenderLoop()
     {
+        StopUIRefreshTimer();
         if (_nativeRenderLoopId != 0)
         {
             // Stop invalidates the timer but the C++ slot in g_render_loops
@@ -466,19 +435,90 @@ public partial class EngineViewport3D : UserControl
         if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return;
         if (_renderTarget == 0) return;
         if (_host == null || !_host.IsReady) return;
-        if (_testSceneRenderItems.Count == 0) return;
-        _animTime += dt;
+        if (!NativeEngineBridge.IsValidCamera(_cameraId)) return;
 
-        var surfaceId = (uint)_host.SurfaceId;
-        NativeEngineBridge.PipelineRenderFrame(_renderTarget, _cameraId, surfaceId);
-        NativeEngineBridge.BlitRenderTargetToSurface(_renderTarget, surfaceId);
+        // PipelineRenderFrame is NOT thread-safe — the C++ renderer
+        // uses a mutex internally that throws "mutex lock failed:
+        // Invalid argument" when two threads enter simultaneously.
+        // Both the native 60Hz loop (via InvokeAsync) and the
+        // DispatcherTimer fallback land on the UI thread, but
+        // InvokeAsync re-entrancy can still cause overlap. The lock
+        // is a no-op on the fast path (no contention) and a
+        // correctness guard on the slow path.
+        if (System.Threading.Interlocked.CompareExchange(ref _renderInProgress, 1, 0) != 0) return;
+        try
+        {
+            _animTime += dt;
+
+            // TEMPORARILY DISABLED: LightIconRenderer.DrawSceneIcons
+            // calls ClearDebugLines + DrawDebugWorldQuad + DrawDebugLightBulb
+            // which interact with the C++ debug-draw queue. If
+            // PipelineRenderFrame drains the same queue from a job-system
+            // worker thread, the mutex inside debug_draw can fail with
+            // "Invalid argument". Comment out until the threading model
+            // is verified safe.
+            // var activeScene = GetActiveSceneForIconRenderer();
+            // if (activeScene != null) _lightIconRenderer.DrawSceneIcons(activeScene);
+
+            var surfaceId = (uint)_host.SurfaceId;
+            // Render through the editor's Track A camera by default
+            // (IsEditorCamera=true, SyncCamerasFromECS bypassed). When the
+            // user picks a scene Camera entity via LookThroughCamera, route
+            // through the legacy entry so SyncCamerasFromECS picks that
+            // entity's CameraComponent + Transform for the view matrices.
+            if (IsLookingThroughSceneCamera)
+            {
+                NativeEngineBridge.PipelineRenderFrameForSceneCamera(
+                    _renderTarget, _cameraId, surfaceId, _lookThroughSceneEntityId);
+            }
+            else
+            {
+                NativeEngineBridge.PipelineRenderFrameForEditorCamera(_renderTarget, _cameraId, surfaceId);
+            }
+            NativeEngineBridge.BlitRenderTargetToSurface(_renderTarget, surfaceId);
+
+            SyncOverlay();
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _renderInProgress, 0);
+        }
+    }
+
+    private void ResyncActiveScene()
+    {
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        if (lifetime?.MainWindow?.DataContext is not ViewModels.MainWindowViewModel mainVm) return;
+        var weVm = mainVm.WorldEditor;
+        if (weVm?.ActiveScene == null) return;
+        weVm.SceneSynchronizer.Sync(weVm.ActiveScene);
+        Logger.Info("Active scene re-synced after render pipeline creation");
+    }
+
+    /// <summary>
+    /// Walk the MainWindow data-context chain to find the active scene.
+    /// Returns null when the editor's MainWindow isn't constructed yet
+    /// (first frames after engine init) — LightIconRenderer handles null
+    /// gracefully.
+    /// </summary>
+    private GameProject.Scene? GetActiveSceneForIconRenderer()
+    {
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        var main = lifetime?.MainWindow?.DataContext as ViewModels.MainWindowViewModel;
+        return main?.WorldEditor?.ActiveScene;
     }
 
     private void OnDetached(object? sender, VisualTreeAttachmentEventArgs e)
     {
         StopRenderLoop();
         LayoutUpdated -= OnLayoutUpdated;
-        DestroyTestScene();
+        if (_renderTarget != 0)
+        {
+            NativeEngineBridge.DestroyRenderTarget(_renderTarget);
+            _renderTarget = 0;
+        }
         _host?.Destroy();
         _viewportInitialized = false;
     }
@@ -552,7 +592,7 @@ public partial class EngineViewport3D : UserControl
             // Camera aspect ratio must follow the surface aspect so the
             // projected view doesn't stretch on resize. The constructor
             // captured the initial aspect; update it here.
-            if (_cameraEntityId != 0 && width > 0 && height > 0)
+            if (_cameraEntityId != NativeEngineBridge.InvalidEntityId && width > 0 && height > 0)
             {
                 NativeEngineBridge.SetEntityCameraAspectRatio(_cameraEntityId, (float)width / height);
             }
@@ -577,6 +617,7 @@ public partial class EngineViewport3D : UserControl
         {
             gizmo.UpdateCamera(_cameraYaw, _cameraPitch, _cameraDistance, (float)Bounds.Width, (float)Bounds.Height);
         }
+        _lightIconRenderer.UpdateCamera(_cameraYaw, _cameraPitch, _cameraDistance);
     }
 
     /// <summary>Move the gizmo anchor to <paramref name="worldX/Y/Z"/>.</summary>
@@ -595,7 +636,7 @@ public partial class EngineViewport3D : UserControl
     /// <summary>Subscribe to gizmo drag. The handler receives (axis, delta) where
     /// delta is a screen-space unit. The handler is responsible for
     /// translating delta to world-space and updating the selected entity.</summary>
-    public event System.EventHandler<(GizmoOverlay.GizmoAxis axis, float delta)>? GizmoDrag;
+    public event System.EventHandler<(GizmoOverlay.GizmoMode mode, GizmoOverlay.GizmoAxis axis, float delta)>? GizmoDrag;
 
     private void ConnectGizmo()
     {
@@ -652,9 +693,15 @@ public partial class EngineViewport3D : UserControl
         if (_activeButton == Avalonia.Input.MouseButton.Left
             && this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
         {
-            gizmo.OnPointerPressed(point.Position);
-            if (gizmo.IsDragging)
+            if (gizmo.TryStartDrag(point.Position))
             {
+                // Capture the pointer so that PointerMoved / PointerReleased
+                // keep firing even when the cursor leaves the viewport bounds
+                // (e.g. user drags past the edge of the render surface).
+                // Without capture, Avalonia stops routing PointerMoved to this
+                // control when the cursor exits Bounds, leaving the gizmo in
+                // a permanent _dragging=true state.
+                e.Pointer.Capture(_inputCapture is not null ? _inputCapture : this);
                 Focus();
                 e.Handled = true;
                 return;
@@ -662,8 +709,12 @@ public partial class EngineViewport3D : UserControl
         }
 
         // Left click: ray-pick an entity. If a hit is found, raise
-        // EntityPicked and skip the orbit-camera path so the click
-        // doesn't accidentally rotate the view.
+        // EntityPicked for the click event but still allow orbit-on-drag
+        // — the previous behaviour cleared _activeButton immediately,
+        // forcing the user to start drag from empty space. We now pick
+        // on press and keep _activeButton = Left, so dragging after the
+        // pick still orbits. The pick event fires once at press time and
+        // the drag (orbit) takes over from the same press.
         if (_activeButton == Avalonia.Input.MouseButton.Left && _entityCandidates != null)
         {
             var (ox, oy, oz, dx, dy, dz) = ScreenToRay(
@@ -673,14 +724,14 @@ public partial class EngineViewport3D : UserControl
             if (hit.HasValue)
             {
                 EntityPicked?.Invoke(this, hit.Value.EntityId);
-                _activeButton = Avalonia.Input.MouseButton.None;
-                Focus();
-                e.Handled = true;
-                return;
+                // Keep _activeButton = Left so the subsequent drag orbits
+                // the camera instead of doing nothing. Selection already
+                // fired on press; the drag is purely a view operation.
             }
         }
 
         _lastPointer = point.Position;
+        e.Pointer.Capture(_inputCapture is not null ? _inputCapture : this);
         Focus();
         e.Handled = true;
     }
@@ -702,10 +753,9 @@ public partial class EngineViewport3D : UserControl
 
     private void OnPointerMoved(object? sender, Avalonia.Input.PointerEventArgs e)
     {
-        try { System.IO.File.AppendAllText("/tmp/wheel.log", $"[MOVE] button={_activeButton} pos={e.GetCurrentPoint(this).Position} timestamp={DateTime.UtcNow:HH:mm:ss.fff}\n"); } catch {}
         if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo && gizmo.IsDragging)
         {
-            gizmo.OnPointerMoved(e.GetCurrentPoint(this).Position);
+            gizmo.DragDelta(e.GetCurrentPoint(this).Position);
             e.Handled = true;
             return;
         }
@@ -757,20 +807,24 @@ public partial class EngineViewport3D : UserControl
     {
         if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo && gizmo.IsDragging)
         {
-            gizmo.OnPointerReleased();
+            gizmo.EndDrag();
+            // Release the pointer capture acquired in OnPointerPressed so
+            // normal event routing resumes after the drag ends.
+            e.Pointer.Capture(null);
             e.Handled = true;
             return;
         }
         if (e.InitialPressMouseButton == _activeButton)
         {
             _activeButton = Avalonia.Input.MouseButton.None;
+            e.Pointer.Capture(null);
+            Logger.Info($"Editor camera updated: yaw={_cameraYaw:0.###}, pitch={_cameraPitch:0.###}, distance={_cameraDistance:0.###}");
             e.Handled = true;
         }
     }
 
     private void OnPointerWheelChanged(object? sender, Avalonia.Input.PointerWheelEventArgs e)
     {
-        try { System.IO.File.AppendAllText("/tmp/wheel.log", $"[WHEEL] delta=({e.Delta.X},{e.Delta.Y}) kind={e.KeyModifiers} timestamp={DateTime.UtcNow:HH:mm:ss.fff}\n"); } catch {}
         if (!_viewportInitialized) return;
         // Wheel up (DeltaY < 0) = zoom in (decrease distance). We translate
         // the wheel notch count into a multiplicative distance change so the
@@ -818,6 +872,7 @@ public partial class EngineViewport3D : UserControl
         float[] rot = new[] { 0f, _cameraPitch, _cameraYaw };
         float[] scl = new[] { 1f, 1f, 1f };
         NativeEngineBridge.SetEntityTransform(_cameraEntityId, pos, rot, scl);
+        SaveEditorCameraState();
     }
 
     private static float[] Cross(float[] a, float[] b) => new[]
@@ -868,6 +923,70 @@ public partial class EngineViewport3D : UserControl
         ApplyCameraTransform();
         SetGizmoTarget(pos.x, pos.y, pos.z);
         Logger.Info($"Focus on entity {entityId} at ({pos.x:0.##},{pos.y:0.##},{pos.z:0.##})");
+    }
+
+    /// <summary>
+    /// Switch the viewport into "look through this scene Camera" mode. The
+    /// next render frame uses the legacy <c>PipelineRenderFrame</c> entry
+    /// (without the editor-camera flag) so <c>SyncCamerasFromECS</c> runs
+    /// and reads this entity's CameraComponent + Transform. Pass
+    /// <paramref name="entityId"/> = 0 to return to editor-camera mode.
+    /// The editor's orbit / pan / zoom continue to update the underlying
+    /// Track A camera so switching back restores the user's last view.
+    /// </summary>
+    public void LookThroughCamera(uint entityId)
+    {
+        if (entityId == 0 || entityId == NativeEngineBridge.InvalidEntityId)
+        {
+            _lookThroughSceneEntityId = 0;
+            Logger.Info("Viewport camera mode: editor (default)");
+        }
+        else
+        {
+            _lookThroughSceneEntityId = entityId;
+            if (Bounds.Width > 0 && Bounds.Height > 0)
+                NativeEngineBridge.SetEntityCameraAspectRatio(entityId, (float)Bounds.Width / (float)Bounds.Height);
+            Logger.Info($"Viewport camera mode: scene Camera entity {entityId}");
+        }
+    }
+
+    /// <summary>Attach the scene whose editor camera this viewport edits.</summary>
+    public void SetScene(Scene? scene)
+    {
+        if (ReferenceEquals(_scene, scene)) return;
+        SaveEditorCameraState();
+        _scene = scene;
+        _lookThroughSceneEntityId = 0;
+        if (_scene != null)
+        {
+            var camera = _scene.EditorCamera;
+            _cameraTarget = new[] { camera.TargetX, camera.TargetY, camera.TargetZ };
+            _cameraDistance = Math.Clamp(camera.Distance, kMinDistance, kMaxDistance);
+            _cameraYaw = camera.Yaw;
+            _cameraPitch = Math.Clamp(camera.Pitch, kMinPitch, kMaxPitch);
+        }
+        ApplyCameraTransform();
+        SyncOverlay();
+    }
+
+    private void SaveEditorCameraState()
+    {
+        if (_scene == null) return;
+        var camera = _scene.EditorCamera;
+        var changed = camera.TargetX != _cameraTarget[0] ||
+                      camera.TargetY != _cameraTarget[1] ||
+                      camera.TargetZ != _cameraTarget[2] ||
+                      camera.Distance != _cameraDistance ||
+                      camera.Yaw != _cameraYaw ||
+                      camera.Pitch != _cameraPitch;
+        if (!changed) return;
+        camera.TargetX = _cameraTarget[0];
+        camera.TargetY = _cameraTarget[1];
+        camera.TargetZ = _cameraTarget[2];
+        camera.Distance = _cameraDistance;
+        camera.Yaw = _cameraYaw;
+        camera.Pitch = _cameraPitch;
+        _scene.MarkDirty();
     }
 
     /// <summary>

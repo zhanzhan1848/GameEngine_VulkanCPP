@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Avalonia.Controls;
 using Avalonia.Platform.Storage;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.GameProject;
@@ -102,11 +103,35 @@ public class OpenProjectViewModel : ViewModelBase
 
     public async void BrowseForFile()
     {
-        var topLevel = Avalonia.Application.Current?.ApplicationLifetime is
-            Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
-            ? desktop.MainWindow : null;
+        await BrowseForFileAsync(null);
+    }
 
-        if (topLevel == null) return;
+    internal static TopLevel? ResolveFallbackTopLevel()
+    {
+        if (Avalonia.Application.Current?.ApplicationLifetime is
+            Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            return desktop.MainWindow
+                ?? desktop.Windows.FirstOrDefault(w => w.IsVisible);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Show the project file picker. The owner must be passed in by the
+    /// view: the project browser runs before the app has a MainWindow, so
+    /// resolving the top level from the application lifetime yields null
+    /// and the picker never opens.
+    /// </summary>
+    public async Task BrowseForFileAsync(TopLevel? owner)
+    {
+        var topLevel = owner ?? ResolveFallbackTopLevel();
+        if (topLevel == null)
+        {
+            ErrorMessage = "Unable to open the file picker.";
+            return;
+        }
 
         var options = new FilePickerOpenOptions
         {
@@ -132,15 +157,38 @@ public class OpenProjectViewModel : ViewModelBase
         }
     }
 
+    /// <summary>
+    /// Drop the selected project from the recent list and delete its folder
+    /// from disk. The caller is responsible for confirming with the user
+    /// first; this method does not prompt.
+    /// </summary>
     public void RemoveSelected()
     {
-        if (SelectedProject != null)
+        if (SelectedProject == null)
         {
-            _recentManager.RecentProjects.Remove(SelectedProject.Path);
-            _recentManager.Save();
-            RefreshRecentProjects();
-            SelectedProject = null;
+            return;
         }
+
+        var path = SelectedProject.Path;
+        ErrorMessage = string.Empty;
+
+        try
+        {
+            DeleteProject.DeleteProjectFolder(path);
+        }
+        catch (System.Exception ex)
+        {
+            // The recent-list entry stays put so the user can retry or
+            // clean up by hand; removing it would hide a project that is
+            // still on disk.
+            ErrorMessage = $"Could not delete project files: {ex.Message}";
+            return;
+        }
+
+        _recentManager.RecentProjects.Remove(path);
+        _recentManager.Save();
+        RefreshRecentProjects();
+        SelectedProject = null;
     }
 
     public string? GetSelectedProjectPath()

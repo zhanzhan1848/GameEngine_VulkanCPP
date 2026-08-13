@@ -15,11 +15,11 @@ public partial class NewProjectView : UserControl
         InitializeComponent();
     }
 
-    private void OnBrowseClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    private async void OnBrowseClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is NewProjectViewModel vm)
         {
-            vm.BrowseForPath();
+            await vm.BrowseForPathAsync(TopLevel.GetTopLevel(this));
         }
     }
 

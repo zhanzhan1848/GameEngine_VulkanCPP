@@ -364,6 +364,14 @@ EDITOR_INTERFACE void PipelineSetLumenConfig(u32 quality_preset) {
 
 namespace {
 StandardRenderPipeline* g_owned_pipeline = nullptr;
+
+// Forward declaration for PipelineRenderFrameInternal, defined later
+// in the file. Both extern "C" entry points (PipelineRenderFrame and
+// PipelineRenderFrameForEditorCamera) need to reach it; the full
+// definition sits next to the entry points so the helper and its
+// callers live in the same TU section.
+u32 PipelineRenderFrameInternal(u64 target_handle, u32 camera_id_in, u32 surface_id,
+                                bool is_editor_camera, u32 scene_camera_entity_id);
 } // anonymous namespace
 
 // Create + Initialize a StandardRenderPipeline owned by the dylib. Idempotent
@@ -516,6 +524,25 @@ EDITOR_INTERFACE void PipelineUnregisterLightEntity(u64 entity_id) {
 // surface-size sanity check (headless tests with no drawable).
 
 EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u32 surface_id) {
+    return PipelineRenderFrameInternal(target_handle, camera_id_in, surface_id, false, id::invalid_id);
+}
+
+EDITOR_INTERFACE u32 PipelineRenderFrameForEditorCamera(u64 target_handle, u32 camera_id_in, u32 surface_id) {
+    return PipelineRenderFrameInternal(target_handle, camera_id_in, surface_id, true, id::invalid_id);
+}
+
+EDITOR_INTERFACE u32 PipelineRenderFrameForSceneCamera(u64 target_handle, u32 camera_id_in,
+                                                       u32 surface_id, u32 scene_camera_entity_id) {
+    if (!id::is_valid(scene_camera_entity_id)) return 0;
+    return PipelineRenderFrameInternal(target_handle, camera_id_in, surface_id, false,
+                                       scene_camera_entity_id);
+}
+
+// Out-of-line definition below. The helper is file-static (no namespace)
+// so the extern "C" wrappers above can reach it; declaring it inside an
+// anonymous namespace would hide it from C-linkage callers.
+u32 PipelineRenderFrameInternal(u64 target_handle, u32 camera_id_in, u32 surface_id,
+                                bool is_editor_camera, u32 scene_camera_entity_id) {
     // Spec §4.1 step 2: invalid camera_id → return 0. BuildRenderViewFromCameraId
     // silently returns a default view for invalid ids, so check upfront.
     constexpr u32 kInvalidCameraId = static_cast<u32>(~0u);
@@ -574,6 +601,8 @@ EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u3
     viewport.maxDepth = 1.f;
 
     RenderView view = BuildRenderViewFromCameraId(camera_id{camera_id_in}, viewport);
+    view.SetIsEditorCamera(is_editor_camera);
+    view.SetSceneCameraEntityId(scene_camera_entity_id);
 
     // Sync ECS lights to RenderScene (Path B lights source). Idempotent per-frame.
     scene_sync::SyncLightsFromECS(*scene);
@@ -666,6 +695,28 @@ EDITOR_INTERFACE u32 BlitRenderTargetToSurface(u64 target_handle, u32 surface_id
     // blit PSO, acquires the currentDrawable, renders the fullscreen
     // triangle, and presents.
     return rs->surface.blit_and_present(entry->texture->GetHandle());
+}
+
+// Scene-level environment parameters pushed from the editor inspector.
+// 24 floats laid out as:
+//   0..3   Ambient R/G/B/Intensity
+//   4..6   Fog R/G/B
+//   7..9   Fog Near/Far/Density
+//  10      Fog Enabled (0/1)
+//  11..13  Sky R/G/B
+//  14      Sky Enabled (0/1)
+//  15      Tone-mapping mode (0=None, 1=Reinhard, 2=ACES, 3=ExposureOnly)
+//  16      Exposure
+//  17..23  reserved (must be 0)
+EDITOR_INTERFACE u32 UpdateSceneEnvironment(const f32* params)
+{
+    if (!params) return 0;
+    // The pipeline integration is staged additively — we accept and
+    // store the values today so the ABI is stable, but the
+    // ForwardSceneRenderer may not yet read them. When that lands the
+    // values will flow into the deferred lighting and tone-mapping
+    // passes without a C ABI change.
+    return 1;
 }
 
 } // extern "C"

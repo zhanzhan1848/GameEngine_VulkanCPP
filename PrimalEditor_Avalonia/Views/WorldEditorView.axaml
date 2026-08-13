@@ -3,6 +3,7 @@
              xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
              xmlns:views="using:PrimalEditor_Avalonia.Views"
              xmlns:views3d="using:PrimalEditor_Avalonia.Views.Engine3D"
+             xmlns:entities="using:PrimalEditor_Avalonia.Entities"
              xmlns:conv="using:PrimalEditor_Avalonia.Converters"
              xmlns:self="using:PrimalEditor_Avalonia.Views"
              xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
@@ -74,6 +75,37 @@
                                     </DataTemplate>
                                 </ComboBox.ItemTemplate>
                             </ComboBox>
+
+                            <!-- Toolbar driven by EntityFactory. Adding a new
+                                 entity kind = one row in EntityFactory; the
+                                 view layer is intentionally declarative.
+                                 Wrapped in ScrollViewer so narrow Hierarchy
+                                 widths (260 px column) don't hide Camera /
+                                 Character / Prop buttons off-screen. -->
+                            <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                          VerticalScrollBarVisibility="Disabled">
+                                <ItemsControl ItemsSource="{Binding EntityFactoryItems}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="4"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate DataType="entities:EntityFactoryDescriptor">
+                                            <Button Tag="{Binding}"
+                                                    Click="OnAddEntityKindClick"
+                                                    ToolTip.Tip="{Binding Tooltip}"
+                                                    Padding="8,2">
+                                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                                    <TextBlock Text="{Binding IconGlyph}"/>
+                                                    <TextBlock Text="{Binding DisplayName}"/>
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+
                             <Grid ColumnDefinitions="*,Auto,Auto">
                                 <TextBlock Grid.Column="0" Text="HIERARCHY"
                                            FontFamily="{StaticResource FontDisplay}"

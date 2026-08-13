@@ -25,6 +25,20 @@ public partial class ConfirmDialog : Window
         return dlg;
     }
 
+    /// <summary>
+    /// A two-button confirm/cancel dialog for destructive actions, where
+    /// the three-way save/discard/cancel wording would be nonsense.
+    /// Confirming returns <see cref="ConfirmResult.Discard"/>.
+    /// </summary>
+    public static ConfirmDialog CreateDestructive(string title, string message, string confirmText)
+    {
+        var dlg = Create(title, message);
+        dlg.SaveButton.IsVisible = false;
+        dlg.DiscardButton.Content = confirmText;
+        dlg.DiscardButton.IsDefault = true;
+        return dlg;
+    }
+
     public async System.Threading.Tasks.Task<ConfirmResult?> ShowDialogAsync(Window owner)
     {
         return await ShowDialogCoreAsync(owner);

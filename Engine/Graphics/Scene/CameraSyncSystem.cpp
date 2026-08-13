@@ -21,9 +21,46 @@
 
 namespace primal::graphics::scene_sync {
 
-void SyncCamerasFromECS(RenderView& view) {
+void SyncCamerasFromECS(RenderView& view, id::id_type preferred_entity_id) {
     const u64 count = game_entity::entity_count();
     const component_mask camera_mask = bit_mask(component_bit::Camera);
+
+    auto apply_camera = [&](game_entity::entity_id eid) -> bool {
+        if (!game_entity::is_alive(eid)) return false;
+        if ((game_entity::get_component_mask(eid) & camera_mask) == 0) return false;
+
+        primal::camera::component cc{
+            primal::camera::camera_component_id{ static_cast<id::id_type>(eid) }
+        };
+        if (!cc.is_valid()) return false;
+
+        math::m4x4 world, inv_world_unused;
+        transform::get_transform_matrices(eid, world, inv_world_unused);
+        const math::m4x4 view_matrix = rhi::math::Inverse(world);
+
+        math::m4x4 proj_matrix;
+        if (cc.projection_type() == graphics::camera::perspective) {
+            proj_matrix = rhi::math::MatrixPerspective(cc.field_of_view(),
+                                                       cc.aspect_ratio(),
+                                                       cc.near_z(),
+                                                       cc.far_z());
+        } else {
+            proj_matrix = math::createOrthographicLH(cc.view_width(),
+                                                      cc.view_height(),
+                                                      cc.near_z(),
+                                                      cc.far_z());
+        }
+        view.SetViewMatrix(view_matrix);
+        view.SetProjectionMatrix(proj_matrix);
+        return true;
+    };
+
+    // Explicit viewport/runtime selection wins. This makes camera switching
+    // deterministic instead of silently rendering through the first camera.
+    if (id::is_valid(preferred_entity_id) &&
+        apply_camera(game_entity::entity_id{preferred_entity_id})) {
+        return;
+    }
 
     // 选取第一个 alive 的 Camera entity（按 entity_index 升序）作为 "main camera"。
     // 找不到就 no-op — RenderView 保留上游 caller 设置的矩阵。
@@ -34,42 +71,7 @@ void SyncCamerasFromECS(RenderView& view) {
         const component_mask mask = game_entity::get_component_mask(eid);
         if ((mask & camera_mask) == 0) continue;
 
-        // 找到了 — 构造 ECS Camera 组件 handle。
-        // 注意：必须是 primal::camera::component（ECS 组件），不是
-        // primal::graphics::camera（旧 platform_interface handle）。
-        primal::camera::component cc{
-            primal::camera::camera_component_id{ static_cast<id::id_type>(eid) }
-        };
-        if (!cc.is_valid()) return;  // 不太可能，但防御性返回避免后续崩溃
-
-        // View matrix = inverse of camera entity's world matrix.
-        // 注意：transform::get_transform_matrices 给出的 inv_world 在某些 entity 状态下
-        // 会被填成 NaN（LightSyncSystem 只用 world，没用 inv_world，所以这个 bug 一直没暴露）。
-        // 这里我们只取 world，自己算 inverse —— 对正常 Transform 来说 world 是可逆的。
-        math::m4x4 world, inv_world_unused;
-        transform::get_transform_matrices(eid, world, inv_world_unused);
-        const math::m4x4 view_matrix = rhi::math::Inverse(world);
-
-        // Projection matrix 从原始组件参数现场构造。
-        math::m4x4 proj_matrix;
-        const graphics::camera::type ptype = cc.projection_type();
-        if (ptype == graphics::camera::perspective) {
-            proj_matrix = rhi::math::MatrixPerspective(cc.field_of_view(),
-                                                       cc.aspect_ratio(),
-                                                       cc.near_z(),
-                                                       cc.far_z());
-        } else {
-            // Orthographic：Camera.cpp 把 ortho 的 width 存在 fovs[]、height 存在 aspects[]，
-            // 通过 view_width()/view_height() 暴露。
-            proj_matrix = math::createOrthographicLH(cc.view_width(),
-                                                      cc.view_height(),
-                                                      cc.near_z(),
-                                                      cc.far_z());
-        }
-
-        view.SetViewMatrix(view_matrix);
-        view.SetProjectionMatrix(proj_matrix);
-        return;  // 第一个 Camera 胜出，无需继续遍历
+        if (apply_camera(eid)) return;
     }
     // 没有 Camera entity — no-op。
 }

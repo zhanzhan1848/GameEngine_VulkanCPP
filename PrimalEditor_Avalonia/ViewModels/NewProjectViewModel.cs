@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Avalonia.Controls;
 using Avalonia.Platform.Storage;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.GameProject;
@@ -95,11 +96,23 @@ public class NewProjectViewModel : ViewModelBase
 
     public async void BrowseForPath()
     {
-        var topLevel = Avalonia.Application.Current?.ApplicationLifetime is
-            Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
-            ? desktop.MainWindow : null;
+        await BrowseForPathAsync(null);
+    }
 
-        if (topLevel == null) return;
+    /// <summary>
+    /// Show the folder picker. The owner must be passed in by the view:
+    /// the project browser runs before the app has a MainWindow, so
+    /// resolving the top level from the application lifetime yields null
+    /// and the picker never opens.
+    /// </summary>
+    public async Task BrowseForPathAsync(TopLevel? owner)
+    {
+        var topLevel = owner ?? OpenProjectViewModel.ResolveFallbackTopLevel();
+        if (topLevel == null)
+        {
+            ErrorMessage = "Unable to open the folder picker.";
+            return;
+        }
 
         var options = new FolderPickerOpenOptions
         {

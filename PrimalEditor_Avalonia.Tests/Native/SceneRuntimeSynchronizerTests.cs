@@ -68,6 +68,23 @@ public sealed class SceneRuntimeSynchronizerTests
         {
             Calls.Add($"setMesh({entityId},{materialCount})");
         }
+
+        public ulong CreateDefaultMaterial()
+        {
+            Calls.Add("createDefaultMaterial");
+            return 0xFEEDFACEUL;
+        }
+
+        public ulong ProceduralMeshCreate(uint meshType, float[] parameters)
+        {
+            Calls.Add($"proceduralCreate({meshType})");
+            return 0xBEEFCAFEUL;
+        }
+
+        public void ProceduralMeshDestroy(ulong contentId)
+        {
+            Calls.Add($"proceduralDestroy({contentId})");
+        }
     }
 
     private static (SceneRuntimeSynchronizer synchronizer, RuntimeEntityMap entities, RuntimeAssetMap assets, RuntimeMaterialMap materials, FakeBridge bridge) Build(bool loaded = true)

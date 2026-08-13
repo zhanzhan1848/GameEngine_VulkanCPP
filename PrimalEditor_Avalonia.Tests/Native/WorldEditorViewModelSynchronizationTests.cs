@@ -64,5 +64,8 @@ public sealed class WorldEditorViewModelSynchronizationTests
         public ulong ImportMesh(string cookedPath) { ImportMeshCalled = true; return 0xDEADBEEFUL; }
         public uint CreateMaterial(AssetGuid shaderGuid) => ++NextEntityId;
         public void SetEntityMesh(uint entityId, ulong geometryContentId, uint[] materialRuntimeIds, uint materialCount) => SetEntityMeshCalled = true;
+        public ulong CreateDefaultMaterial() => 0xABCDEFUL;
+        public ulong ProceduralMeshCreate(uint meshType, float[] parameters) => 0xCAFEUL;
+        public void ProceduralMeshDestroy(ulong contentId) { }
     }
 }

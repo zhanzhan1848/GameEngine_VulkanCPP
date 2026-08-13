@@ -13,9 +13,9 @@
                        FontFamily="{StaticResource FontUI}"
                        Foreground="{StaticResource PrimaryTextBrush}"/>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
-                <Button Content="Cancel" Click="OnCancelClick" Width="90" IsCancel="True"/>
-                <Button Content="Don't Save" Click="OnDiscardClick" Width="110" Classes="danger"/>
-                <Button Content="Save..." Click="OnSaveClick" Width="90" IsDefault="True" Classes="accent"/>
+                <Button x:Name="CancelButton" Content="Cancel" Click="OnCancelClick" Width="90" IsCancel="True"/>
+                <Button x:Name="DiscardButton" Content="Don't Save" Click="OnDiscardClick" Width="110" Classes="danger"/>
+                <Button x:Name="SaveButton" Content="Save..." Click="OnSaveClick" Width="90" IsDefault="True" Classes="accent"/>
             </StackPanel>
         </StackPanel>
     </Border>
