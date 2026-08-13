@@ -1041,6 +1041,21 @@ public static class NativeEngineBridge
 
     // --- Debug-draw helpers (editor gizmos) ---
 
+    [DllImport("PrimalEngine", EntryPoint = "DrawDebugLine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _DrawDebugLine(
+        float x0, float y0, float z0, float x1, float y1, float z1, uint rgb);
+
+    public static void DrawDebugLine(
+        float x0, float y0, float z0,
+        float x1, float y1, float z1,
+        byte r, byte g, byte b)
+    {
+        if (!_isLoaded) return;
+        uint packed = ((uint)r << 16) | ((uint)g << 8) | b;
+        try { _DrawDebugLine(x0, y0, z0, x1, y1, z1, packed); }
+        catch (Exception ex) { Logger.Error("DrawDebugLine failed", ex); }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "DrawDebugBoxWireframe", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _DrawDebugBoxWireframe(
         float cx, float cy, float cz, float ex, float ey, float ez, uint rgb);

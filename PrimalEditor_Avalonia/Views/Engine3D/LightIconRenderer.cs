@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.Native;
@@ -7,26 +6,18 @@ namespace PrimalEditor_Avalonia.Views.Engine3D;
 
 /// <summary>
 /// Editor-side icon overlay rendered into the engine framebuffer
-/// (not into Avalonia's 2D tree). The editor owns the camera math, so
-/// it computes the billboard corners itself and asks the engine to
-/// draw the world-space quads via the debug-draw C ABI — keeping the
-/// icons in lockstep with the rendered scene.
+/// (not into Avalonia's 2D tree), so the helpers stay visible above the
+/// native Metal surface on macOS.
 ///
-/// Currently draws one icon per <see cref="LightComponent"/> in the
-/// active scene. The icon is "always face the camera" by anchoring
-/// the quad on a camera-facing basis computed from the editor orbit
-/// camera state (same math as GizmoOverlay's projection).
+/// Draws transform-aware wire icons for Light and Camera components.
 /// </summary>
 public sealed class LightIconRenderer
 {
     private readonly WorldProjector.Basis _cameraBasis = new();
 
     /// <summary>
-    /// Recompute the camera basis. Call once per frame before
-    /// <see cref="DrawSceneIcons"/>; the editor's per-frame layout
-    /// (orbit yaw/pitch/distance) feeds the basis used to project the
-    /// billboards. We don't pull the camera state ourselves so the
-    /// engine viewport remains the single source of truth.
+    /// Keep the editor camera basis available for future billboard-style
+    /// helpers. Transform-aware Light and Camera wire icons are world-space.
     /// </summary>
     public void UpdateCamera(float yaw, float pitch, float distance,
         float targetX = 0f, float targetY = 0f, float targetZ = 0f)
@@ -38,69 +29,79 @@ public sealed class LightIconRenderer
     }
 
     /// <summary>
-    /// Draw all icon glyphs for the active scene's lights. Safe to
+    /// Draw all Light and Camera icon glyphs for the active scene. Safe to
     /// call every frame; the C ABI is no-op when the engine isn't
     /// loaded.
     /// </summary>
     public void DrawSceneIcons(Scene? scene)
     {
         if (scene == null) return;
+        NativeEngineBridge.ClearDebugLines();
 
-        foreach (var entity in scene.Entities)
+        void Segment(Transform transform,
+            (float x, float y, float z) a,
+            (float x, float y, float z) b,
+            byte r, byte g, byte blue)
         {
-            var light = entity.GetComponent<LightComponent>();
-            if (light == null) continue;
-            var t = entity.GetTransform();
-            if (t == null) continue;
+            var wa = SceneIconGeometry.TransformPoint(transform, a.x, a.y, a.z);
+            var wb = SceneIconGeometry.TransformPoint(transform, b.x, b.y, b.z);
+            NativeEngineBridge.DrawDebugLine(
+                wa.x, wa.y, wa.z, wb.x, wb.y, wb.z, r, g, blue);
+        }
 
-            // Billboard quad. Sized in world units so the icon doesn't
-            // shrink when the camera dollies in. 0.6u square looks like
-            // a small flag at the light's position.
-            DrawBillboard(t.PositionX, t.PositionY, t.PositionZ, 0.6f, 0.6f, 255, 220, 80);
-
-            // Light-bulb: short rays make the light directionality obvious.
-            // Directional lights have a natural axis to draw along;
-            // point/spot lights just radiate outward.
-            if (light.LightType == LightType.Directional)
+        void DrawLight(Transform transform)
+        {
+            const int sides = 12;
+            for (var i = 0; i < sides; i++)
             {
-                NativeEngineBridge.DrawDebugLightBulb(
-                    t.PositionX, t.PositionY, t.PositionZ,
-                    radius: 0.05f, rayLength: 0.4f, 255, 220, 80);
-            }
-            else
-            {
-                NativeEngineBridge.DrawDebugLightBulb(
-                    t.PositionX, t.PositionY, t.PositionZ,
-                    radius: 0.18f, rayLength: 0.35f, 255, 220, 80);
+                var a = i * System.MathF.Tau / sides;
+                var b = (i + 1) * System.MathF.Tau / sides;
+                Segment(transform,
+                    (System.MathF.Cos(a) * 0.22f, System.MathF.Sin(a) * 0.22f, 0),
+                    (System.MathF.Cos(b) * 0.22f, System.MathF.Sin(b) * 0.22f, 0),
+                    255, 214, 64);
+                if ((i & 1) == 0)
+                    Segment(transform,
+                        (System.MathF.Cos(a) * 0.31f, System.MathF.Sin(a) * 0.31f, 0),
+                        (System.MathF.Cos(a) * 0.48f, System.MathF.Sin(a) * 0.48f, 0),
+                        255, 214, 64);
             }
         }
-    }
 
-    /// <summary>
-    /// Draw a flat quad facing the camera at the world-space center.
-    /// The quad lives in world space but its orientation tracks the
-    /// editor camera each frame.
-    /// </summary>
-    private void DrawBillboard(
-        float cx, float cy, float cz,
-        float halfW, float halfH,
-        byte r, byte g, byte b)
-    {
-        var basis = _cameraBasis;
-        float x0 = cx + (-halfW) * basis.RightX + (-halfH) * basis.UpX;
-        float y0 = cy + (-halfW) * basis.RightY + (-halfH) * basis.UpY;
-        float z0 = cz + (-halfW) * basis.RightZ + (-halfH) * basis.UpZ;
-        float x1 = cx + (+halfW) * basis.RightX + (-halfH) * basis.UpX;
-        float y1 = cy + (+halfW) * basis.RightY + (-halfH) * basis.UpY;
-        float z1 = cz + (+halfW) * basis.RightZ + (-halfH) * basis.UpZ;
-        float x2 = cx + (+halfW) * basis.RightX + (+halfH) * basis.UpX;
-        float y2 = cy + (+halfW) * basis.RightY + (+halfH) * basis.UpY;
-        float z2 = cz + (+halfW) * basis.RightZ + (+halfH) * basis.UpZ;
-        float x3 = cx + (-halfW) * basis.RightX + (+halfH) * basis.UpX;
-        float y3 = cy + (-halfW) * basis.RightY + (+halfH) * basis.UpY;
-        float z3 = cz + (-halfW) * basis.RightZ + (+halfH) * basis.UpZ;
+        void DrawCamera(Transform transform)
+        {
+            var near = new[]
+            {
+                (-0.28f, -0.20f, 0.10f), (0.28f, -0.20f, 0.10f),
+                (0.28f, 0.20f, 0.10f), (-0.28f, 0.20f, 0.10f),
+            };
+            var far = new[]
+            {
+                (-0.48f, -0.34f, -0.72f), (0.48f, -0.34f, -0.72f),
+                (0.48f, 0.34f, -0.72f), (-0.48f, 0.34f, -0.72f),
+            };
+            for (var i = 0; i < 4; i++)
+            {
+                Segment(transform, near[i], near[(i + 1) % 4], 78, 205, 255);
+                Segment(transform, far[i], far[(i + 1) % 4], 78, 205, 255);
+                Segment(transform, near[i], far[i], 78, 205, 255);
+            }
+            Segment(transform, (-0.16f, 0.20f, 0.10f), (0, 0.38f, 0.10f), 78, 205, 255);
+            Segment(transform, (0, 0.38f, 0.10f), (0.16f, 0.20f, 0.10f), 78, 205, 255);
+        }
 
-        NativeEngineBridge.DrawDebugWorldQuad(
-            x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g, b);
+        void Visit(GameEntity entity)
+        {
+            if (!entity.IsEnabled) return;
+            var transform = entity.GetTransform();
+            if (transform != null)
+            {
+                if (entity.GetComponent<LightComponent>() != null) DrawLight(transform);
+                if (entity.GetComponent<CameraComponent>() != null) DrawCamera(transform);
+            }
+            foreach (var child in entity.Children) Visit(child);
+        }
+
+        foreach (var entity in scene.Entities) Visit(entity);
     }
 }

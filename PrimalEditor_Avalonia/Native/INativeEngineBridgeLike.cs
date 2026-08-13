@@ -68,6 +68,7 @@ public interface INativeEngineBridgeLike
 
 public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
 {
+    private readonly Dictionary<uint, ulong> _pipelineMeshEntities = new();
     /// <summary>How long ImportMesh waits for an async cook to land before
     /// giving up and returning 0. Editor scenes tolerate a few seconds
     /// here; gameplay pre-warm runs should pre-import.</summary>
@@ -80,10 +81,19 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
 
     public uint CreateEntity(float x, float y, float z) => NativeEngineBridge.CreateEntity(x, y, z);
 
-    public void DestroyEntity(uint entityId) => NativeEngineBridge.PipelineUnregisterMeshEntity(entityId);
+    public void DestroyEntity(uint entityId)
+    {
+        if (_pipelineMeshEntities.Remove(entityId, out var meshEntityId))
+            NativeEngineBridge.PipelineUnregisterMeshEntity(meshEntityId);
+        NativeEngineBridge.RemoveGameEntity(entityId);
+    }
 
-    public void SetEntityTransform(uint entityId, float[] position, float[] rotation, float[] scale) =>
+    public void SetEntityTransform(uint entityId, float[] position, float[] rotation, float[] scale)
+    {
         NativeEngineBridge.SetEntityTransform(entityId, position, rotation, scale);
+        if (_pipelineMeshEntities.TryGetValue(entityId, out var meshEntityId))
+            NativeEngineBridge.SetEntityTransform((uint)meshEntityId, position, rotation, scale);
+    }
 
     public uint AddEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) =>
         NativeEngineBridge.AddEntityLight(entityId, lightType, intensity, colorRgb, range, umbraRad, penumbraRad, isEnabled);
@@ -135,7 +145,8 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
     public void SetEntityMesh(uint entityId, ulong geometryContentId, uint[] materialRuntimeIds, uint materialCount)
     {
         if (!NativeEngineBridge.IsLoaded) return;
-        if (entityId == 0 || geometryContentId == 0 || geometryContentId == NativeEngineBridge.InvalidContentId) return;
+        if (entityId == NativeEngineBridge.InvalidEntityId ||
+            geometryContentId == NativeEngineBridge.InvalidContentId) return;
 
         // PipelineRegisterMeshEntity takes the texture/material runtime
         // ids as ulong[]. The interface exposes uint[] for symmetry
@@ -152,13 +163,18 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
         // id rather than re-using the editor-side handle — the C++ side
         // matches geometry id, not entity tag. Register and log so the
         // caller can store the result for teardown.
+        if (_pipelineMeshEntities.Remove(entityId, out var oldMeshEntityId))
+            NativeEngineBridge.PipelineUnregisterMeshEntity(oldMeshEntityId);
+
         var meshEntityId = textures != null && textures.Length > 0
             ? NativeEngineBridge.PipelineRegisterMeshEntity(geometryContentId, textures)
             : NativeEngineBridge.PipelineRegisterMeshEntity(geometryContentId, null);
-        if (meshEntityId == 0 || meshEntityId == NativeEngineBridge.InvalidEntityId)
+        if (meshEntityId == NativeEngineBridge.InvalidEntityId)
         {
             Logger.Warning($"NativeEngineBridgeAdapter: PipelineRegisterMeshEntity returned invalid id for entity={entityId}");
+            return;
         }
+        _pipelineMeshEntities[entityId] = meshEntityId;
     }
 
     public ulong CreateDefaultMaterial()
@@ -176,7 +192,7 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
     public void ProceduralMeshDestroy(ulong contentId)
     {
         if (!NativeEngineBridge.IsLoaded) return;
-        if (contentId == 0 || contentId == NativeEngineBridge.InvalidContentId) return;
+        if (contentId == NativeEngineBridge.InvalidContentId) return;
         NativeEngineBridge.ProceduralMeshDestroy(contentId);
     }
 }

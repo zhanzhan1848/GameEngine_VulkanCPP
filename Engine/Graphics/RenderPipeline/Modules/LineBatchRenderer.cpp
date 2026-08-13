@@ -3,6 +3,7 @@
 #include "CommonHeaders.h"
 #include <fstream>
 #include <iostream>
+#include <filesystem>
 
 namespace primal::graphics {
 
@@ -17,12 +18,13 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     device_ = device;
 
     // Load shaders
-    const char* shader_path =
-        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Forward/Line.metal";
+    const std::filesystem::path shader_path =
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+        "Metal/shaders/Forward/Line.metal";
 
     std::ifstream file(shader_path, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
-        std::cerr << "[LineBatchRenderer] Failed to open shader: " << shader_path << std::endl;
+        std::cerr << "[LineBatchRenderer] Failed to open shader: " << shader_path.string() << std::endl;
         return false;
     }
     const size_t file_size = static_cast<size_t>(file.tellg());

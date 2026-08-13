@@ -5,6 +5,7 @@
 #include "../Engine/Components/Transform.h"
 #include "../Engine/Components/Mesh.h"
 #include "../Engine/Components/Script.h"
+#include "EngineAPI/GameEntity_impl.h"
 
 using namespace primal;
 
@@ -238,6 +239,19 @@ EDITOR_INTERFACE void SetEntityMesh(id::id_type id, id::id_type geometry_content
 	if (!id::is_valid(id)) return;
 	game_entity::entity entity{ entity_from_id(id) };
 	if (!entity.is_valid()) return;
+	if (!id::is_valid(geometry_content_id) || !material_ids || material_count == 0) return;
+
+	// Editor entities are created with Transform + Script only. The first
+	// mesh assignment must attach the ECS Mesh component; subsequent calls
+	// replace its geometry/material binding in place.
+	if (!entity.Has<component::Mesh>()) {
+		mesh::init_info info{};
+		info.geometry_content_id = geometry_content_id;
+		info.material_ids = material_ids;
+		info.material_count = material_count;
+		entity.Add<component::Mesh>(info);
+		return;
+	}
 	mesh::component mc{ entity.mesh() };
 	if (!mc.is_valid()) return;
 	mesh::set_geometry(mc, geometry_content_id, material_ids, material_count);

@@ -8,12 +8,15 @@ namespace PrimalEditor_Avalonia.Tests.Entities;
 public sealed class EntityFactoryTests
 {
     [Fact]
-    public void All_ContainsAllFiveBaseKinds()
+    public void All_ContainsBaseAndBuiltinKinds()
     {
         var kinds = EntityFactory.All.Select(d => d.Kind).ToHashSet();
         Assert.Contains(EntityKind.Empty, kinds);
         Assert.Contains(EntityKind.Character, kinds);
         Assert.Contains(EntityKind.Prop, kinds);
+        Assert.Contains(EntityKind.Sphere, kinds);
+        Assert.Contains(EntityKind.Box, kinds);
+        Assert.Contains(EntityKind.Plane, kinds);
         Assert.Contains(EntityKind.Light, kinds);
         Assert.Contains(EntityKind.Camera, kinds);
     }
@@ -47,6 +50,19 @@ public sealed class EntityFactoryTests
         var entity = EntityFactory.Find(EntityKind.Character)!.CreateEntity();
         Assert.NotNull(entity.GetComponent<MeshRendererComponent>());
         Assert.IsType<Transform>(entity.Components[0]);
+        Assert.Equal(BuiltinMeshKind.Capsule, entity.GetComponent<MeshRendererComponent>()!.BuiltinMesh);
+    }
+
+    [Theory]
+    [InlineData(EntityKind.Sphere, BuiltinMeshKind.Sphere)]
+    [InlineData(EntityKind.Box, BuiltinMeshKind.Box)]
+    [InlineData(EntityKind.Plane, BuiltinMeshKind.Plane)]
+    public void BuiltinMeshKinds_AttachExpectedProceduralMesh(EntityKind kind, BuiltinMeshKind mesh)
+    {
+        var entity = EntityFactory.Find(kind)!.CreateEntity();
+        Assert.IsType<Transform>(entity.Components[0]);
+        Assert.Equal(mesh, entity.GetComponent<MeshRendererComponent>()!.BuiltinMesh);
+        Assert.Equal(System.Guid.Empty, entity.GetComponent<MeshRendererComponent>()!.MeshGuid.Value);
     }
 
     [Fact]

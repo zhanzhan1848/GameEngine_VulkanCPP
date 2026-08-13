@@ -367,4 +367,19 @@ public sealed class SceneDocumentTests
         Assert.True(loadedEnabled.IsEnabled);
         Assert.False(loadedDisabled.IsEnabled);
     }
+
+    [Fact]
+    public void SceneDocument_PreservesBuiltinMeshKind()
+    {
+        var entity = new GameEntity("Plane");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new MeshRendererComponent { BuiltinMesh = BuiltinMeshKind.Plane });
+        var scene = new Scene("Builtins") { Entities = { entity } };
+
+        var loaded = Serializer.FromSceneDocument(Serializer.ToSceneDocument(scene));
+
+        Assert.Equal(
+            BuiltinMeshKind.Plane,
+            loaded.Entities.Single().GetComponent<MeshRendererComponent>()!.BuiltinMesh);
+    }
 }

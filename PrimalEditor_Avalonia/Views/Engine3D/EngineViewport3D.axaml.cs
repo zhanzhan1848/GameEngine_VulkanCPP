@@ -30,11 +30,7 @@ public partial class EngineViewport3D : UserControl
     public uint LookThroughSceneEntityId => _lookThroughSceneEntityId;
     public bool IsLookingThroughSceneCamera => _lookThroughSceneEntityId != 0;
 
-    // Per-frame icon overlay (light gizmo billboards, etc.) that draws
-    // into the engine framebuffer. Update its camera basis alongside
-    // GizmoOverlay so its world→screen projection matches the gizmo
-    // handles the user can grab.
-    private readonly LightIconRenderer _lightIconRenderer = new();
+    private readonly LightIconRenderer _sceneIconRenderer = new();
 
     // Orbit camera state. The camera is always looking at `_cameraTarget`
     // from a distance `_cameraDistance`, with `_cameraYaw` (around world up)
@@ -43,7 +39,7 @@ public partial class EngineViewport3D : UserControl
     // changes.
     private float[] _cameraTarget = new float[] { 0f, 0f, 0f };
     private float _cameraDistance = 12f;
-    private float _cameraYaw = 0f;       // radians; 0 = looking down -Z (camera at +Z relative to target)
+    private float _cameraYaw = 0f;       // radians; 0 = looking down +Z (camera at -Z relative to target)
     private float _cameraPitch = 0f;     // radians; 0 = level with target
     private const float kMinPitch = -1.4f;  // ~-80°, prevent gimbal flip
     private const float kMaxPitch =  1.4f;  // ~+80°
@@ -450,15 +446,10 @@ public partial class EngineViewport3D : UserControl
         {
             _animTime += dt;
 
-            // TEMPORARILY DISABLED: LightIconRenderer.DrawSceneIcons
-            // calls ClearDebugLines + DrawDebugWorldQuad + DrawDebugLightBulb
-            // which interact with the C++ debug-draw queue. If
-            // PipelineRenderFrame drains the same queue from a job-system
-            // worker thread, the mutex inside debug_draw can fail with
-            // "Invalid argument". Comment out until the threading model
-            // is verified safe.
-            // var activeScene = GetActiveSceneForIconRenderer();
-            // if (activeScene != null) _lightIconRenderer.DrawSceneIcons(activeScene);
+            // The render loop is UI-thread-only and the native debug queue
+            // is mutex-protected, so helpers can safely be submitted just
+            // before this frame drains the queue.
+            _sceneIconRenderer.DrawSceneIcons(_scene ?? GetActiveSceneForIconRenderer());
 
             var surfaceId = (uint)_host.SurfaceId;
             // Render through the editor's Track A camera by default
@@ -612,12 +603,15 @@ public partial class EngineViewport3D : UserControl
             overlay.CameraPitch = _cameraPitch;
             overlay.CameraDistance = _cameraDistance;
             overlay.CameraTarget = (_cameraTarget[0], _cameraTarget[1], _cameraTarget[2]);
+            overlay.Scene = _scene ?? GetActiveSceneForIconRenderer();
         }
         if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
         {
             gizmo.UpdateCamera(_cameraYaw, _cameraPitch, _cameraDistance, (float)Bounds.Width, (float)Bounds.Height);
         }
-        _lightIconRenderer.UpdateCamera(_cameraYaw, _cameraPitch, _cameraDistance);
+        _sceneIconRenderer.UpdateCamera(
+            _cameraYaw, _cameraPitch, _cameraDistance,
+            _cameraTarget[0], _cameraTarget[1], _cameraTarget[2]);
     }
 
     /// <summary>Move the gizmo anchor to <paramref name="worldX/Y/Z"/>.</summary>
@@ -784,13 +778,11 @@ public partial class EngineViewport3D : UserControl
             float sy = MathF.Sin(_cameraYaw);
             float cp = MathF.Cos(_cameraPitch);
             float sp = MathF.Sin(_cameraPitch);
-            // forward = (sy*cp, sp, cy*cp) (camera looks at -forward, away
-            // from the target). right = normalize(cross(forward, up)).
+            // forward = (sy*cp, sp, cy*cp), from camera to target.
             float[] forward = new[] { sy * cp, sp, cy * cp };
             float[] worldUp = new[] { 0f, 1f, 0f };
-            float[] right = Normalize(Cross(forward, worldUp));
-            // screen-up = cross(right, forward)
-            float[] screenUp = Normalize(Cross(right, forward));
+            float[] right = Normalize(Cross(worldUp, forward));
+            float[] screenUp = Normalize(Cross(forward, right));
             float panScale = _cameraDistance * kPanSpeed;
             _cameraTarget[0] -= right[0] * dx * panScale;
             _cameraTarget[1] -= right[1] * dx * panScale;
@@ -845,31 +837,13 @@ public partial class EngineViewport3D : UserControl
     private void ApplyCameraTransform()
     {
         if (_cameraEntityId == NativeEngineBridge.InvalidEntityId) return;
-        float cy = MathF.Cos(_cameraYaw);
-        float sy = MathF.Sin(_cameraYaw);
-        float cp = MathF.Cos(_cameraPitch);
-        float sp = MathF.Sin(_cameraPitch);
-        // Position: orbit sphere around _cameraTarget. Yaw=0 puts the
-        // camera at -Z relative to the target (matching the original
-        // "camera back along -Z" default).
-        float ox = -sy * cp;
-        float oy = -sp;
-        float oz = -cy * cp;
-        float[] pos = new[]
-        {
-            _cameraTarget[0] + ox * _cameraDistance,
-            _cameraTarget[1] + oy * _cameraDistance,
-            _cameraTarget[2] + oz * _cameraDistance,
-        };
-        // The engine's euler_to_quat on macOS (clang path) takes
-        // [roll, pitch, yaw] in that order, with the quat built as
-        // quat_z * quat_y * quat_x (apply X first, then Y, then Z in the
-        // local frame). To make the entity's default +Z forward direction
-        // point back at the target, we set pitch = +_cameraPitch (the
-        // camera should pitch UP to look down at a target below, and
-        // pitch DOWN to look up — the Y rotation around the camera's
-        // right axis maps to that), and yaw = +_cameraYaw.
-        float[] rot = new[] { 0f, _cameraPitch, _cameraYaw };
+        WorldProjector.ComputeCameraTransform(
+            _cameraTarget[0], _cameraTarget[1], _cameraTarget[2],
+            _cameraYaw, _cameraPitch, _cameraDistance,
+            out var posX, out var posY, out var posZ,
+            out var rotX, out var rotY, out var rotZ);
+        float[] pos = new[] { posX, posY, posZ };
+        float[] rot = new[] { rotX, rotY, rotZ };
         float[] scl = new[] { 1f, 1f, 1f };
         NativeEngineBridge.SetEntityTransform(_cameraEntityId, pos, rot, scl);
         SaveEditorCameraState();
@@ -999,13 +973,13 @@ public partial class EngineViewport3D : UserControl
         float sy = MathF.Sin(_cameraYaw);
         float cp = MathF.Cos(_cameraPitch);
         float sp = MathF.Sin(_cameraPitch);
-        // forward = (sy*cp, sp, cy*cp) (camera looks at -forward).
+        // Forward points from the camera to its orbit target.
         float[] forward = new[] { sy * cp, sp, cy * cp };
         float[] worldUp = new[] { 0f, 1f, 0f };
-        float[] right = new[] { forward[1] * worldUp[2] - forward[2] * worldUp[1], forward[2] * worldUp[0] - forward[0] * worldUp[2], forward[0] * worldUp[1] - forward[1] * worldUp[0] };
+        float[] right = Cross(worldUp, forward);
         float rlen = MathF.Sqrt(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
         if (rlen > 1e-6f) { right[0] /= rlen; right[1] /= rlen; right[2] /= rlen; }
-        float[] screenUp = new[] { right[1] * forward[2] - right[2] * forward[1], right[2] * forward[0] - right[0] * forward[2], right[0] * forward[1] - right[1] * forward[0] };
+        float[] screenUp = Cross(forward, right);
 
         // Camera position: in perspective mode the camera orbits at
         // target - forward*distance; in orthographic mode the camera

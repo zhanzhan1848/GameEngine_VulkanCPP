@@ -20,6 +20,15 @@ public enum EntityKind
     /// <summary>Prop: chosen-from-browser mesh + Transform + MeshRenderer.</summary>
     Prop,
 
+    /// <summary>Built-in procedural sphere.</summary>
+    Sphere,
+
+    /// <summary>Built-in procedural box.</summary>
+    Box,
+
+    /// <summary>Built-in procedural ground plane.</summary>
+    Plane,
+
     /// <summary>Point light with default params, editable in Inspector.</summary>
     Light,
 

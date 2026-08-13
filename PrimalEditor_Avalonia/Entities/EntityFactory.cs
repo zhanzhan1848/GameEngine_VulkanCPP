@@ -34,6 +34,9 @@ public static class EntityFactory
     {
         var characterCount = 0;
         var propCount = 0;
+        var sphereCount = 0;
+        var boxCount = 0;
+        var planeCount = 0;
         var lightCount = 0;
         var cameraCount = 0;
 
@@ -58,11 +61,7 @@ public static class EntityFactory
                     var n = System.Threading.Interlocked.Increment(ref characterCount);
                     var entity = new GameEntity($"Character_{n}");
                     entity.Components.Add(new Transform());
-                    // MeshRenderer.MeshGuid left empty; PrimitiveMeshView
-                    // cooks + assigns a capsule in a follow-up flow.
-                    // Until that lands, the entity has no visual mesh
-                    // — same as today's blank Entity.
-                    entity.Components.Add(new MeshRendererComponent());
+                    entity.Components.Add(new MeshRendererComponent { BuiltinMesh = BuiltinMeshKind.Capsule });
                     return entity;
                 }),
 
@@ -81,6 +80,15 @@ public static class EntityFactory
                     return entity;
                 },
                 RequiresAssetSelection: true),
+
+            CreateBuiltinDescriptor(EntityKind.Sphere, "Sphere", "●", "Built-in procedural sphere",
+                BuiltinMeshKind.Sphere, () => System.Threading.Interlocked.Increment(ref sphereCount)),
+
+            CreateBuiltinDescriptor(EntityKind.Box, "Box", "▣", "Built-in procedural box",
+                BuiltinMeshKind.Box, () => System.Threading.Interlocked.Increment(ref boxCount)),
+
+            CreateBuiltinDescriptor(EntityKind.Plane, "Plane", "▱", "Built-in procedural plane",
+                BuiltinMeshKind.Plane, () => System.Threading.Interlocked.Increment(ref planeCount)),
 
             new EntityFactoryDescriptor(
                 EntityKind.Light,
@@ -112,6 +120,29 @@ public static class EntityFactory
                     return entity;
                 }),
         };
+    }
+
+    private static EntityFactoryDescriptor CreateBuiltinDescriptor(
+        EntityKind kind,
+        string displayName,
+        string glyph,
+        string tooltip,
+        BuiltinMeshKind mesh,
+        Func<int> nextNumber)
+    {
+        return new EntityFactoryDescriptor(
+            kind,
+            displayName,
+            glyph,
+            tooltip,
+            new[] { "transform", "meshRenderer" },
+            () =>
+            {
+                var entity = new GameEntity($"{displayName}_{nextNumber()}");
+                entity.Components.Add(new Transform());
+                entity.Components.Add(new MeshRendererComponent { BuiltinMesh = mesh });
+                return entity;
+            });
     }
 
     public static EntityFactoryDescriptor? Find(EntityKind kind)

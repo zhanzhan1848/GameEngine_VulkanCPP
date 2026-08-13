@@ -19,7 +19,14 @@ public sealed class SceneRuntimeSynchronizer
     private readonly RuntimeMaterialMap _materials;
     private readonly List<GameEntity> _live = new();
     private ulong _defaultMaterialId;
-    private ulong _builtinSphereGeometryId;
+    private readonly Dictionary<BuiltinMeshKind, ulong> _builtinGeometryIds = new();
+    private readonly Dictionary<EditorHelperKind, ulong> _editorHelperGeometryIds = new();
+
+    private enum EditorHelperKind
+    {
+        Light,
+        Camera,
+    }
 
     public SceneRuntimeSynchronizer(
         INativeEngineBridgeLike bridge,
@@ -59,12 +66,20 @@ public sealed class SceneRuntimeSynchronizer
         _assets.Clear();
         _materials.Clear();
         _defaultMaterialId = 0;
-        if (_builtinSphereGeometryId != 0 && _builtinSphereGeometryId != NativeEngineBridge.InvalidContentId)
+        foreach (var geometryId in _builtinGeometryIds.Values)
         {
-            try { _bridge.ProceduralMeshDestroy(_builtinSphereGeometryId); }
+            if (geometryId == NativeEngineBridge.InvalidContentId) continue;
+            try { _bridge.ProceduralMeshDestroy(geometryId); }
             catch { /* ignore: engine might be torn down already */ }
         }
-        _builtinSphereGeometryId = 0;
+        _builtinGeometryIds.Clear();
+        foreach (var geometryId in _editorHelperGeometryIds.Values)
+        {
+            if (geometryId == NativeEngineBridge.InvalidContentId) continue;
+            try { _bridge.ProceduralMeshDestroy(geometryId); }
+            catch { /* ignore: engine might be torn down already */ }
+        }
+        _editorHelperGeometryIds.Clear();
     }
 
     public void Sync(Scene scene)
@@ -141,24 +156,20 @@ public sealed class SceneRuntimeSynchronizer
 
             if (_entities.GetEntityId(entity.EntityGuid) is not { } runtimeId) continue;
             var meshContentId = _assets.GetContentId(meshRenderer.MeshGuid);
-            ulong finalMeshContentId = 0;
+            ulong? finalMeshContentId = null;
             if (meshContentId.HasValue && meshContentId.Value != NativeEngineBridge.InvalidContentId)
             {
                 finalMeshContentId = meshContentId.Value;
             }
-            else if (meshRenderer.MeshGuid.Value == Guid.Empty)
+            else if (meshRenderer.MeshGuid.Value == Guid.Empty &&
+                     meshRenderer.BuiltinMesh != BuiltinMeshKind.None)
             {
-                // Toolbar-built entities (Character, etc.) ship with an
-                // empty MeshGuid — use the built-in placeholder sphere so
-                // they render with the default white PBR material.
-                // The user can later drag a real .mesh onto the entity
-                // and SyncEntity will pick up the new guid on the next
-                // call.
-                var sphereGeom = EnsureBuiltinSphereGeometry();
-                if (sphereGeom != 0 && sphereGeom != NativeEngineBridge.InvalidContentId)
-                    finalMeshContentId = sphereGeom;
+                // Built-in toolbar entities intentionally have no asset
+                // GUID; resolve their persisted procedural mesh kind.
+                finalMeshContentId = EnsureBuiltinGeometry(meshRenderer.BuiltinMesh);
             }
-            if (finalMeshContentId == 0) continue;
+            if (!finalMeshContentId.HasValue ||
+                finalMeshContentId.Value == NativeEngineBridge.InvalidContentId) continue;
 
             var materialIds = meshRenderer.MaterialGuids
                 .Select(EnsureMaterial)
@@ -168,7 +179,7 @@ public sealed class SceneRuntimeSynchronizer
             {
                 materialIds = new uint[] { (uint)_defaultMaterialId };
             }
-            _bridge.SetEntityMesh(runtimeId, finalMeshContentId, materialIds, (uint)materialIds.Length);
+            _bridge.SetEntityMesh(runtimeId, finalMeshContentId.Value, materialIds, (uint)materialIds.Length);
         }
 
         foreach (var entity in _live)
@@ -191,12 +202,15 @@ public sealed class SceneRuntimeSynchronizer
             {
                 _bridge.AddEntityCamera(runtimeId,
                     (uint)camera.Projection,
-                    camera.FieldOfViewDegrees * (MathF.PI / 180f),
+                    // Graphics backends store FOV as a fraction of PI.
+                    camera.FieldOfViewDegrees / 180f,
                     aspectRatio: 1.0f,
                     nearZ: camera.NearPlane,
                     farZ: camera.FarPlane,
                     upVector: new[] { 0f, 1f, 0f });
             }
+
+            BindEditorHelperMesh(entity, runtimeId);
 
             var transform = entity.GetTransform();
             if (transform is null) continue;
@@ -243,20 +257,72 @@ public sealed class SceneRuntimeSynchronizer
     }
 
     /// <summary>
-    /// Lazily cook a small unit sphere on the native side. The id is
-    /// cached and reused for every entity whose MeshGuid equals
-    /// <c>Guid.Empty</c>. The procedural mesh lives at the RHI content
-    /// system level (not on disk) — it's recreated on every
+    /// Lazily create and cache one native procedural geometry resource per
+    /// built-in kind. These resources live at the RHI content system level
+    /// (not on disk) and are recreated on every
     /// <see cref="Sync"/> / scene activation.
     /// </summary>
-    private ulong EnsureBuiltinSphereGeometry()
+    private ulong EnsureBuiltinGeometry(BuiltinMeshKind kind)
     {
-        if (_builtinSphereGeometryId != 0 && _builtinSphereGeometryId != NativeEngineBridge.InvalidContentId)
-            return _builtinSphereGeometryId;
-        const uint kSphereType = 0;
-        var sphereParams = new float[] { 0.5f, 16, 12 };
-        _builtinSphereGeometryId = _bridge.ProceduralMeshCreate(kSphereType, sphereParams);
-        return _builtinSphereGeometryId;
+        if (kind == BuiltinMeshKind.None) return 0;
+        if (_builtinGeometryIds.TryGetValue(kind, out var existing) &&
+            existing != NativeEngineBridge.InvalidContentId)
+            return existing;
+
+        var (meshType, parameters) = kind switch
+        {
+            BuiltinMeshKind.Sphere => (0u, new float[] { 0.5f, 24f, 16f }),
+            BuiltinMeshKind.Box => (3u, new float[] { 1f, 1f, 1f }),
+            BuiltinMeshKind.Plane => (9u, new float[] { 2f, 2f, 1f, 1f }),
+            BuiltinMeshKind.Capsule => (5u, new float[] { 0.5f, 1f, 20f, 8f }),
+            _ => (uint.MaxValue, System.Array.Empty<float>()),
+        };
+        if (meshType == uint.MaxValue) return 0;
+
+        var geometryId = _bridge.ProceduralMeshCreate(meshType, parameters);
+        _builtinGeometryIds[kind] = geometryId;
+        return geometryId;
+    }
+
+    /// <summary>
+    /// Light and Camera entities need a dependable native-surface glyph.
+    /// The managed overlay sits behind NSView-backed Metal surfaces on macOS,
+    /// so a small editor-only mesh is registered in addition to the wire icon.
+    /// It is mapped to the source runtime entity by the bridge and therefore
+    /// receives every subsequent position/rotation/scale update.
+    /// </summary>
+    private void BindEditorHelperMesh(GameEntity entity, uint runtimeId)
+    {
+        // Do not replace a real renderer attached to a multi-component entity.
+        if (entity.GetComponent<MeshRendererComponent>() != null) return;
+
+        EditorHelperKind? kind = entity.GetComponent<CameraComponent>() != null
+            ? EditorHelperKind.Camera
+            : entity.GetComponent<LightComponent>() != null
+                ? EditorHelperKind.Light
+                : null;
+        if (!kind.HasValue) return;
+
+        if (!_editorHelperGeometryIds.TryGetValue(kind.Value, out var geometryId) ||
+            geometryId == NativeEngineBridge.InvalidContentId)
+        {
+            // Light: compact sphere glyph. Camera: a rectangular camera body.
+            var (meshType, parameters) = kind.Value switch
+            {
+                EditorHelperKind.Light => (0u, new float[] { 0.36f, 16f, 12f }),
+                EditorHelperKind.Camera => (3u, new float[] { 0.62f, 0.42f, 0.78f }),
+                _ => (uint.MaxValue, System.Array.Empty<float>()),
+            };
+            if (meshType == uint.MaxValue) return;
+            geometryId = _bridge.ProceduralMeshCreate(meshType, parameters);
+            _editorHelperGeometryIds[kind.Value] = geometryId;
+        }
+
+        if (geometryId == NativeEngineBridge.InvalidContentId) return;
+        var materials = _defaultMaterialId != 0
+            ? new uint[] { (uint)_defaultMaterialId }
+            : System.Array.Empty<uint>();
+        _bridge.SetEntityMesh(runtimeId, geometryId, materials, (uint)materials.Length);
     }
 
     /// <summary>
@@ -315,20 +381,18 @@ public sealed class SceneRuntimeSynchronizer
                 _bridge.SetEntityMesh(runtimeId, meshContentId, materials, (uint)materials.Length);
             }
             else if (meshRenderer != null
-                && meshRenderer.MeshGuid.Value == Guid.Empty)
+                && meshRenderer.MeshGuid.Value == Guid.Empty
+                && meshRenderer.BuiltinMesh != BuiltinMeshKind.None)
             {
-                // Empty MeshGuid on a mesh renderer = "use the built-in
-                // placeholder sphere". This is the contract the toolbar
-                // uses for Character entities; the user can later drag a
-                // real .mesh onto the entity and SyncEntity will pick up
-                // the new guid on the next call.
-                var sphereGeom = EnsureBuiltinSphereGeometry();
-                if (sphereGeom != 0 && sphereGeom != NativeEngineBridge.InvalidContentId)
+                // A persisted built-in kind takes the procedural path when
+                // no disk-backed mesh asset is assigned.
+                var geometryId = EnsureBuiltinGeometry(meshRenderer.BuiltinMesh);
+                if (geometryId != NativeEngineBridge.InvalidContentId)
                 {
                     var materials = _defaultMaterialId != 0
                         ? new uint[] { (uint)_defaultMaterialId }
                         : System.Array.Empty<uint>();
-                    _bridge.SetEntityMesh(runtimeId, sphereGeom, materials, (uint)materials.Length);
+                    _bridge.SetEntityMesh(runtimeId, geometryId, materials, (uint)materials.Length);
                 }
             }
 
@@ -348,12 +412,14 @@ public sealed class SceneRuntimeSynchronizer
             {
                 _bridge.AddEntityCamera(runtimeId,
                     (uint)camera.Projection,
-                    camera.FieldOfViewDegrees,
+                    camera.FieldOfViewDegrees / 180f,
                     aspectRatio: 1.0f,
                     nearZ: camera.NearPlane,
                     farZ: camera.FarPlane,
                     upVector: new[] { 0f, 1f, 0f });
             }
+
+            BindEditorHelperMesh(entity, runtimeId);
 
             if (position != null)
             {

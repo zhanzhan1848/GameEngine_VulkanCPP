@@ -24,7 +24,7 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
         // empty after the toolbar buttons run.
         var entity = new GameEntity("Character_1");
         entity.Components.Add(new Transform { PositionX = 1, PositionY = 2, PositionZ = 3 });
-        entity.Components.Add(new MeshRendererComponent()); // empty MeshGuid
+        entity.Components.Add(new MeshRendererComponent { BuiltinMesh = BuiltinMeshKind.Sphere });
         scene.Entities.Add(entity);
 
         sync.SyncEntity(entity);
@@ -36,22 +36,36 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
     }
 
     [Fact]
-    public void SyncEntity_WithNoMeshRenderer_DoesNotCreateBuiltinSphere()
+    public void SyncEntity_LightWithoutMeshRenderer_BindsEditorHelperMesh()
     {
         var (sync, entities, _, _, bridge) = Build();
         var scene = new Scene("Main");
         sync.Sync(scene);
 
-        var initialSphereCount = bridge.Calls.Count(c => c.StartsWith("proceduralCreate("));
-        // Light-only entity: no MeshRenderer, so the synchronizer must
-        // not allocate the placeholder sphere.
         var entity = new GameEntity("Light_1");
         entity.Components.Add(new Transform());
         entity.Components.Add(new LightComponent());
         scene.Entities.Add(entity);
         sync.SyncEntity(entity);
 
-        Assert.Equal(initialSphereCount, bridge.Calls.Count(c => c.StartsWith("proceduralCreate(")));
+        Assert.Contains("proceduralCreate(0)", bridge.Calls);
+        Assert.Contains(bridge.Calls, c => c.StartsWith("setMesh("));
+        Assert.Contains(bridge.Calls, c => c.StartsWith("transform("));
+    }
+
+    [Fact]
+    public void SyncEntity_CameraWithoutMeshRenderer_BindsEditorHelperMesh()
+    {
+        var (sync, _, _, _, bridge) = Build();
+        var entity = new GameEntity("Camera_1");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new CameraComponent());
+
+        sync.SyncEntity(entity);
+
+        Assert.Contains("proceduralCreate(3)", bridge.Calls);
+        Assert.Contains(bridge.Calls, c => c.StartsWith("setMesh("));
+        Assert.Contains(bridge.Calls, c => c.StartsWith("transform("));
     }
 
     [Fact]
@@ -62,7 +76,7 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
         // Trigger sphere creation via an entity with empty MeshGuid.
         var entity = new GameEntity("Char");
         entity.Components.Add(new Transform());
-        entity.Components.Add(new MeshRendererComponent());
+        entity.Components.Add(new MeshRendererComponent { BuiltinMesh = BuiltinMeshKind.Sphere });
         scene.Entities.Add(entity);
         sync.Sync(scene);
         sync.SyncEntity(entity);
@@ -71,6 +85,52 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
         // leaks across scene activations.
         sync.Teardown();
         Assert.True(bridge.Calls.Any(c => c.StartsWith("proceduralDestroy(")));
+    }
+
+    [Theory]
+    [InlineData(BuiltinMeshKind.Sphere, 0u)]
+    [InlineData(BuiltinMeshKind.Box, 3u)]
+    [InlineData(BuiltinMeshKind.Plane, 9u)]
+    [InlineData(BuiltinMeshKind.Capsule, 5u)]
+    public void SyncEntity_BuiltinMesh_UsesMatchingProceduralType(BuiltinMeshKind kind, uint expectedType)
+    {
+        var (sync, _, _, _, bridge) = Build();
+        var entity = new GameEntity(kind.ToString());
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new MeshRendererComponent { BuiltinMesh = kind });
+
+        sync.SyncEntity(entity);
+
+        Assert.Contains($"proceduralCreate({expectedType})", bridge.Calls);
+        Assert.Contains(bridge.Calls, c => c.StartsWith("setMesh("));
+    }
+
+    [Fact]
+    public void SyncEntity_EmptyRendererWithoutBuiltin_DoesNotCreateProceduralMesh()
+    {
+        var (sync, _, _, _, bridge) = Build();
+        var entity = new GameEntity("Empty renderer");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new MeshRendererComponent());
+
+        sync.SyncEntity(entity);
+
+        Assert.DoesNotContain(bridge.Calls, c => c.StartsWith("proceduralCreate("));
+        Assert.DoesNotContain(bridge.Calls, c => c.StartsWith("setMesh("));
+    }
+
+    [Fact]
+    public void SyncEntity_BuiltinMesh_AcceptsNativeSlotZero()
+    {
+        var (sync, _, _, _, bridge) = Build();
+        bridge.ProceduralResult = 0;
+        var entity = new GameEntity("First native mesh");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new MeshRendererComponent { BuiltinMesh = BuiltinMeshKind.Sphere });
+
+        sync.SyncEntity(entity);
+
+        Assert.Contains(bridge.Calls, c => c.StartsWith("setMesh("));
     }
 
     [Fact]
@@ -122,6 +182,7 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
         public uint NextMaterialId { get; set; } = 100;
         public System.Collections.Generic.HashSet<uint> Alive { get; } = new();
         public System.Collections.Generic.List<string> Calls { get; } = new();
+        public ulong ProceduralResult { get; set; } = 0xBEEFCAFEUL;
 
         public uint CreateEntity(float x, float y, float z)
         {
@@ -139,7 +200,7 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
         public uint CreateMaterial(AssetGuid shaderGuid) { Calls.Add("material"); return NextMaterialId++; }
         public void SetEntityMesh(uint entityId, ulong geometryContentId, uint[] materialRuntimeIds, uint materialCount) { Calls.Add($"setMesh({entityId},{materialCount})"); }
         public ulong CreateDefaultMaterial() { Calls.Add("createDefaultMaterial"); return 0xFEEDFACEUL; }
-        public ulong ProceduralMeshCreate(uint meshType, float[] parameters) { Calls.Add($"proceduralCreate({meshType})"); return 0xBEEFCAFEUL; }
+        public ulong ProceduralMeshCreate(uint meshType, float[] parameters) { Calls.Add($"proceduralCreate({meshType})"); return ProceduralResult; }
         public void ProceduralMeshDestroy(ulong contentId) { Calls.Add($"proceduralDestroy({contentId})"); }
     }
 }

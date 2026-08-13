@@ -2,6 +2,9 @@ using System;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
+using PrimalEditor_Avalonia.Components;
+using PrimalEditor_Avalonia.GameProject;
+using EntityTransform = PrimalEditor_Avalonia.Components.Transform;
 
 namespace PrimalEditor_Avalonia.Views.Engine3D;
 
@@ -18,6 +21,9 @@ namespace PrimalEditor_Avalonia.Views.Engine3D;
 /// </summary>
 public class ViewportOverlay : Control
 {
+    /// <summary>Scene whose Light and Camera helpers are shown.</summary>
+    public Scene? Scene { get; set; }
+
     /// <summary>World position of the gizmo target (selected entity).</summary>
     public (float x, float y, float z) GizmoTarget { get; set; } = (0, 0, 0);
 
@@ -50,25 +56,13 @@ public class ViewportOverlay : Control
         if (b.Width <= 4 || b.Height <= 4) return;
         float w = (float)b.Width, h = (float)b.Height;
         float focal = MathF.Min(w, h) * 0.5f;
-        float cyA = MathF.Cos(CameraYaw), syA = MathF.Sin(CameraYaw);
-        float cpA = MathF.Cos(CameraPitch), spA = MathF.Sin(CameraPitch);
-        // Camera forward: yaw=0 → -Z (camera at +Z relative to target).
-        float ox = -syA * cpA, oy = -spA, oz = -cyA * cpA;
-        // Camera position in world.
-        float camX = CameraTarget.x - ox * CameraDistance;
-        float camY = CameraTarget.y - oy * CameraDistance;
-        float camZ = CameraTarget.z - oz * CameraDistance;
-        // Camera basis (right, up, forward) for projecting world XZ to screen.
-        float[] forward = new[] { ox, oy, oz };
-        float[] worldUp = new[] { 0f, 1f, 0f };
-        float rx = forward[1] * worldUp[2] - forward[2] * worldUp[1];
-        float ry = forward[2] * worldUp[0] - forward[0] * worldUp[2];
-        float rz = forward[0] * worldUp[1] - forward[1] * worldUp[0];
-        float rlen = MathF.Sqrt(rx * rx + ry * ry + rz * rz);
-        if (rlen > 1e-6f) { rx /= rlen; ry /= rlen; rz /= rlen; }
-        float ux = ry * forward[2] - rz * forward[1];
-        float uy = rz * forward[0] - rx * forward[2];
-        float uz = rx * forward[1] - ry * forward[0];
+        WorldProjector.ComputeCameraBasis(
+            CameraTarget.x, CameraTarget.y, CameraTarget.z,
+            CameraYaw, CameraPitch, CameraDistance,
+            out var camX, out var camY, out var camZ,
+            out var rx, out var ry, out var rz,
+            out var ux, out var uy, out var uz,
+            out var fx, out var fy, out var fz);
         // Project a world-space point to screen coords.
         // Returns null if the point is behind the camera (z >= 0).
         (float sx, float sy)? Project(float px, float py, float pz)
@@ -76,7 +70,7 @@ public class ViewportOverlay : Control
             float dx = px - camX, dy = py - camY, dz = pz - camZ;
             float cu = dx * rx + dy * ry + dz * rz;
             float cv = dx * ux + dy * uy + dz * uz;
-            float cw = dx * forward[0] + dy * forward[1] + dz * forward[2];
+            float cw = dx * fx + dy * fy + dz * fz;
             if (cw < 0.05f) return null;
             return (w * 0.5f + (cu / cw) * focal, h * 0.5f - (cv / cw) * focal);
         }
@@ -123,6 +117,8 @@ public class ViewportOverlay : Control
             }
         }
 
+        DrawSceneIcons(ctx, Project);
+
         if (ShowGizmo)
         {
             // Gizmo is anchored at GizmoTarget in world space, projected to screen.
@@ -136,8 +132,88 @@ public class ViewportOverlay : Control
                 var zPen = new Pen(new SolidColorBrush(Color.FromRgb(80, 120, 220)), 2);
                 ctx.DrawLine(xPen, new Point(gx, gy), new Point(gx + len, gy));
                 ctx.DrawLine(yPen, new Point(gx, gy), new Point(gx, gy - len));
-                ctx.DrawLine(zPen, new Point(gx, gy), new Point(gx + len * 0.6f * ox, gy + len * 0.6f * oy));
+                ctx.DrawLine(zPen, new Point(gx, gy), new Point(gx + len * 0.6f * fx, gy + len * 0.6f * fy));
             }
         }
+    }
+
+    private void DrawSceneIcons(
+        DrawingContext ctx,
+        Func<float, float, float, (float sx, float sy)?> project)
+    {
+        if (Scene == null) return;
+
+        var lightPen = new Pen(new SolidColorBrush(Color.FromRgb(255, 214, 64)), 2);
+        var cameraPen = new Pen(new SolidColorBrush(Color.FromRgb(78, 205, 255)), 2);
+
+        void Segment(EntityTransform t, Pen pen,
+            (float x, float y, float z) a,
+            (float x, float y, float z) b)
+        {
+            var wa = SceneIconGeometry.TransformPoint(t, a.x, a.y, a.z);
+            var wb = SceneIconGeometry.TransformPoint(t, b.x, b.y, b.z);
+            var sa = project(wa.x, wa.y, wa.z);
+            var sb = project(wb.x, wb.y, wb.z);
+            if (sa.HasValue && sb.HasValue)
+                ctx.DrawLine(pen, new Point(sa.Value.sx, sa.Value.sy), new Point(sb.Value.sx, sb.Value.sy));
+        }
+
+        void DrawLight(EntityTransform t)
+        {
+            const int sides = 12;
+            const float radius = 0.22f;
+            const float rayInner = 0.31f;
+            const float rayOuter = 0.48f;
+            for (var i = 0; i < sides; i++)
+            {
+                var a = i * MathF.Tau / sides;
+                var b = (i + 1) * MathF.Tau / sides;
+                Segment(t, lightPen,
+                    (MathF.Cos(a) * radius, MathF.Sin(a) * radius, 0),
+                    (MathF.Cos(b) * radius, MathF.Sin(b) * radius, 0));
+                if ((i & 1) == 0)
+                {
+                    Segment(t, lightPen,
+                        (MathF.Cos(a) * rayInner, MathF.Sin(a) * rayInner, 0),
+                        (MathF.Cos(a) * rayOuter, MathF.Sin(a) * rayOuter, 0));
+                }
+            }
+        }
+
+        void DrawCamera(EntityTransform t)
+        {
+            var near = new[]
+            {
+                (-0.28f, -0.20f, 0.10f), (0.28f, -0.20f, 0.10f),
+                (0.28f, 0.20f, 0.10f), (-0.28f, 0.20f, 0.10f),
+            };
+            var far = new[]
+            {
+                (-0.48f, -0.34f, -0.72f), (0.48f, -0.34f, -0.72f),
+                (0.48f, 0.34f, -0.72f), (-0.48f, 0.34f, -0.72f),
+            };
+            for (var i = 0; i < 4; i++)
+            {
+                Segment(t, cameraPen, near[i], near[(i + 1) % 4]);
+                Segment(t, cameraPen, far[i], far[(i + 1) % 4]);
+                Segment(t, cameraPen, near[i], far[i]);
+            }
+            Segment(t, cameraPen, (-0.16f, 0.20f, 0.10f), (0, 0.38f, 0.10f));
+            Segment(t, cameraPen, (0, 0.38f, 0.10f), (0.16f, 0.20f, 0.10f));
+        }
+
+        void Visit(GameEntity entity)
+        {
+            if (!entity.IsEnabled) return;
+            var transform = entity.GetTransform();
+            if (transform != null)
+            {
+                if (entity.GetComponent<LightComponent>() != null) DrawLight(transform);
+                if (entity.GetComponent<CameraComponent>() != null) DrawCamera(transform);
+            }
+            foreach (var child in entity.Children) Visit(child);
+        }
+
+        foreach (var entity in Scene.Entities) Visit(entity);
     }
 }

@@ -81,24 +81,47 @@ public static class WorldProjector
     {
         float cyA = MathF.Cos(yaw), syA = MathF.Sin(yaw);
         float cpA = MathF.Cos(pitch), spA = MathF.Sin(pitch);
-        // Camera forward (yaw=0 → -Z).
-        fx = -syA * cpA;
-        fy = -spA;
-        fz = -cyA * cpA;
+        // The native transform system rotates the entity's local +Z axis to
+        // obtain its forward direction. Keep the editor orbit camera on that
+        // same convention so rendering, overlays and picking agree.
+        fx = syA * cpA;
+        fy = spA;
+        fz = cyA * cpA;
         // Camera position.
         camX = targetX - fx * distance;
         camY = targetY - fy * distance;
         camZ = targetZ - fz * distance;
-        // Right = normalize(forward × worldUp).
-        float wUpX = 0f, wUpY = 1f, wUpZ = 0f;
-        rx = fy * wUpZ - fz * wUpY;
-        ry = fz * wUpX - fx * wUpZ;
-        rz = fx * wUpY - fy * wUpX;
+        // Right = normalize(worldUp × forward). At yaw=0 this is +X.
+        rx = fz;
+        ry = 0f;
+        rz = -fx;
         float rlen = MathF.Sqrt(rx * rx + ry * ry + rz * rz);
         if (rlen > 1e-6f) { rx /= rlen; ry /= rlen; rz /= rlen; }
-        // Up = right × forward.
-        ux = ry * fz - rz * fy;
-        uy = rz * fx - rx * fz;
-        uz = rx * fy - ry * fx;
+        // Up = forward × right.
+        ux = fy * rz - fz * ry;
+        uy = fz * rx - fx * rz;
+        uz = fx * ry - fy * rx;
+    }
+
+    /// <summary>
+    /// Convert editor orbit state into the position and XYZ Euler rotation
+    /// expected by SetEntityTransform. The native transform's local +Z axis
+    /// points from the resulting camera position back to the orbit target.
+    /// </summary>
+    public static void ComputeCameraTransform(
+        float targetX, float targetY, float targetZ,
+        float yaw, float pitch, float distance,
+        out float posX, out float posY, out float posZ,
+        out float rotX, out float rotY, out float rotZ)
+    {
+        ComputeCameraBasis(
+            targetX, targetY, targetZ, yaw, pitch, distance,
+            out posX, out posY, out posZ,
+            out _, out _, out _,
+            out _, out _, out _,
+            out _, out _, out _);
+        rotX = -pitch;
+        rotY = yaw;
+        rotZ = 0f;
     }
 }

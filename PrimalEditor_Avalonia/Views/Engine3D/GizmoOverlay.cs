@@ -149,7 +149,7 @@ public class GizmoOverlay : Control
     {
         var (_, pitch, distance, _, _) = _camera;
         var yaw = _camera.yaw;
-        return (-MathF.Sin(yaw) * MathF.Cos(pitch), -MathF.Sin(pitch));
+        return (MathF.Sin(yaw) * MathF.Cos(pitch), MathF.Sin(pitch));
     }
 
     public bool TryStartDrag(Point p)
