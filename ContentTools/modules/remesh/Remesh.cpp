@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cfloat>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -146,6 +147,24 @@ u32 split_long_edges_only(SurfaceMesh& m, AttributeChannels& attrs,
                 }
             }
             m.split(e, vnew);
+
+            // A split must never move its inserted vertex away from the
+            // midpoint supplied above. Check after the topology mutation so
+            // property-container corruption cannot silently reach the blob.
+            const auto& inserted = m.position(vnew);
+            const f32 ex = std::fabs(inserted[0] - mid[0]);
+            const f32 ey = std::fabs(inserted[1] - mid[1]);
+            const f32 ez = std::fabs(inserted[2] - mid[2]);
+            const f32 scale = std::max({1.f, std::fabs(mid[0]),
+                                       std::fabs(mid[1]), std::fabs(mid[2])});
+            const f32 tolerance = scale * 8.f * FLT_EPSILON;
+            if (!std::isfinite(inserted[0]) ||
+                !std::isfinite(inserted[1]) ||
+                !std::isfinite(inserted[2]) ||
+                ex > tolerance || ey > tolerance || ez > tolerance) {
+                throw std::runtime_error(
+                    "remesh: split vertex escaped its source-edge midpoint");
+            }
             ++splits_this_pass;
         }
         total_splits += splits_this_pass;
@@ -153,9 +172,16 @@ u32 split_long_edges_only(SurfaceMesh& m, AttributeChannels& attrs,
     return total_splits;
 }
 
-SurfaceMesh to_pmp(const ProcessableMesh& ir, AttributeChannels& attrs,
-                   const std::vector<bool>& keep_mask) {
-    SurfaceMesh m;
+// Populate a caller-owned mesh. AttributeChannels stores PMP property handles,
+// which point into the owning SurfaceMesh's property containers. Returning the
+// mesh by value while exporting those handles makes them dangle whenever the
+// return is copied (SurfaceMesh has a deep-copying copy constructor and no move
+// constructor). Subsequent attribute writes can then corrupt unrelated vertex
+// properties, including v:point. Keeping ownership in the caller makes the
+// handle lifetime explicit and independent of copy-elision optimizations.
+void to_pmp(const ProcessableMesh& ir, SurfaceMesh& m,
+            AttributeChannels& attrs,
+            const std::vector<bool>& keep_mask) {
     m.reserve(static_cast<unsigned>(ir.positions.size()),
               static_cast<unsigned>(ir.positions.size() * 3),
               static_cast<unsigned>(ir.indices.size() / 3));
@@ -226,7 +252,6 @@ SurfaceMesh to_pmp(const ProcessableMesh& ir, AttributeChannels& attrs,
         if (m.is_isolated(v)) m.delete_vertex(v);
     }
     m.garbage_collection();
-    return m;
 }
 
 void from_pmp(const SurfaceMesh& m, const AttributeChannels& attrs,
@@ -506,7 +531,8 @@ bool Run(ProcessableMesh& io, const Params& params,
             " non-manifold face(s) before processing (pmp requires 2-manifold input)",
             "remesh"});
     }
-    SurfaceMesh m = to_pmp(io, attrs, keep_mask);
+    SurfaceMesh m;
+    to_pmp(io, m, attrs, keep_mask);
     // Use split-only long-edge bisection instead of uniform_remeshing.
     // uniform_remeshing's collapse_short_edges over-collapses small triangles
     // on multi-scale meshes (184 zero_bounds on Sponza). Split-only preserves

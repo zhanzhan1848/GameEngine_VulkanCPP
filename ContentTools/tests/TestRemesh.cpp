@@ -96,6 +96,19 @@ ProcessableMesh make_uv_sphere(u32 stacks = 16, u32 slices = 16) {
 
 u32 face_count(const ProcessableMesh& m) { return (u32)m.indices.size() / 3; }
 
+bool positions_are_finite_and_inside(const ProcessableMesh& m,
+                                     const v3& bmin, const v3& bmax) {
+    for (const auto& p : m.positions) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+            return false;
+        if (p.x < bmin.x || p.x > bmax.x ||
+            p.y < bmin.y || p.y > bmax.y ||
+            p.z < bmin.z || p.z > bmax.z)
+            return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 // --- Isotropic ------------------------------------------------------------
@@ -113,18 +126,20 @@ bool test_isotropic_preserves_face_count_at_native_edge_length() {
     return true;
 }
 
-bool test_isotropic_halves_face_count_at_2x_edge_length() {
-    // Doubling target edge length should produce fewer triangles. uniform_remeshing
-    // isn't exact on a bounded plane, but we expect *some* reduction.
+bool test_isotropic_keeps_topology_above_native_edge_length() {
+    // The current remesher is split-only: a target longer than every existing
+    // edge must leave the topology unchanged rather than collapsing edges.
     ProcessableMesh m = make_plane_grid(4);
     const u32 faces_before = face_count(m);
+    const u32 vertices_before = (u32)m.positions.size();
     Params p;
     p.mode = Mode::Isotropic;
     p.target_edge_length = 2.0f;
     p.iterations = 5;
     primal::utl::vector<ErrorReport> errs;
     if (!Run(m, p, errs)) return false;
-    return face_count(m) < faces_before;
+    return face_count(m) == faces_before &&
+           m.positions.size() == vertices_before;
 }
 
 // --- Adaptive -------------------------------------------------------------
@@ -138,6 +153,38 @@ bool test_adaptive_runs_without_crash() {
     primal::utl::vector<ErrorReport> errs;
     if (!Run(m, p, errs)) return false;
     return face_count(m) > 0;
+}
+
+bool test_split_vertices_stay_inside_source_bounds_with_attributes() {
+    // Exercise several splits in one pass and every interpolated property.
+    // A split midpoint must remain inside the source mesh's axis-aligned
+    // bounds. This catches dangling PMP property handles corrupting v:point.
+    ProcessableMesh m = make_plane_grid(4);
+    for (u32 i = 0; i < (u32)m.positions.size(); ++i) {
+        const auto& p = m.positions[i];
+        m.normals.emplace_back(v3{0.f, 0.f, 1.f});
+        m.tangents.emplace_back(v4{1.f, 0.f, 0.f, 1.f});
+        m.colors.emplace_back(v3{p.x * 0.25f, p.y * 0.25f, 0.5f});
+    }
+    m.uv_sets.resize(1);
+    for (const auto& p : m.positions)
+        m.uv_sets[0].coords.emplace_back(v2{p.x * 0.25f, p.y * 0.25f});
+
+    const u32 vertices_before = (u32)m.positions.size();
+    Params p;
+    p.mode = Mode::Isotropic;
+    p.target_edge_length = 0.6f;
+    primal::utl::vector<ErrorReport> errs;
+    if (!Run(m, p, errs)) return false;
+    if (m.positions.size() <= vertices_before) return false;
+    if (m.normals.size() != m.positions.size() ||
+        m.tangents.size() != m.positions.size() ||
+        m.colors.size() != m.positions.size() ||
+        m.uv_sets.empty() ||
+        m.uv_sets[0].coords.size() != m.positions.size())
+        return false;
+    return positions_are_finite_and_inside(
+        m, v3{0.f, 0.f, 0.f}, v3{4.f, 4.f, 0.f});
 }
 
 // --- Decimate (qslim) -----------------------------------------------------
@@ -206,8 +253,9 @@ struct Case { const char* name; bool (*fn)(); };
 int main() {
     const Case cases[] = {
         CASE(test_isotropic_preserves_face_count_at_native_edge_length),
-        CASE(test_isotropic_halves_face_count_at_2x_edge_length),
+        CASE(test_isotropic_keeps_topology_above_native_edge_length),
         CASE(test_adaptive_runs_without_crash),
+        CASE(test_split_vertices_stay_inside_source_bounds_with_attributes),
         CASE(test_decimate_halves_face_count),
         CASE(test_decimate_drops_aux_attributes_with_warning),
         CASE(test_empty_mesh_returns_warning),
