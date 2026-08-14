@@ -284,6 +284,47 @@ bool test_subdivide_no_auto_derive_leaves_raw() {
     return found_non_unit || m.normals.size() != m.positions.size();
 }
 
+// ---- SDF resolution (sdf_params) ----------------------------------------
+
+// generate_sdf's grid resolution is caller-controlled via sdf_params. The
+// default must stay 32 (legacy Geometry.cpp path + runtime blob consumers
+// were built around 32³), while a custom value must reach PackedMesh.sdf.
+
+bool test_sdf_default_resolution_32() {
+    ProcessableScene s = make_cube_scene();
+    Config cfg;
+    cfg.enable_lod = false;
+    cfg.enable_meshlet = false;
+    cfg.enable_sdf = true;
+    Result out;
+    Run(std::move(s), cfg, out);
+
+    if (out.packed.empty()) return false;
+    const auto& sdf = out.packed[0].sdf;
+    return sdf.resolution[0] == 32 && sdf.resolution[1] == 32 &&
+           sdf.resolution[2] == 32 &&
+           sdf.data.size() == 32u * 32u * 32u;
+}
+
+bool test_sdf_custom_resolution() {
+    ProcessableScene s = make_cube_scene();
+    Config cfg;
+    cfg.enable_lod = false;
+    cfg.enable_meshlet = false;
+    cfg.enable_sdf = true;
+    cfg.sdf_params.resolution = 16;
+    Result out;
+    Run(std::move(s), cfg, out);
+
+    if (out.packed.empty()) return false;
+    const auto& sdf = out.packed[0].sdf;
+    return sdf.resolution[0] == 16 && sdf.resolution[1] == 16 &&
+           sdf.resolution[2] == 16 &&
+           sdf.data.size() == 16u * 16u * 16u &&
+           sdf.voxels.size() == 16u * 16u * 16u &&
+           sdf.vector_field.size() == 16u * 16u * 16u * 4u;
+}
+
 // ---- Test runner --------------------------------------------------------
 
 struct Case { const char* name; bool (*fn)(); };
@@ -301,6 +342,8 @@ int main() {
         CASE(test_empty_scene_returns_warning_no_crash),
         CASE(test_subdivide_auto_derive_fills_normals),
         CASE(test_subdivide_no_auto_derive_leaves_raw),
+        CASE(test_sdf_default_resolution_32),
+        CASE(test_sdf_custom_resolution),
     };
 
     int passed = 0, failed = 0;
