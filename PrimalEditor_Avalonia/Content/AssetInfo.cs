@@ -57,6 +57,7 @@ public sealed class AssetInfo : INotifyPropertyChanged
     public List<AssetInfo> Children { get; set; } = new();
 
     private bool _isExpanded;
+    private double _thumbnailColumnOffset;
 
     /// <summary>
     /// Whether the container's children are currently expanded in the
@@ -70,6 +71,22 @@ public sealed class AssetInfo : INotifyPropertyChanged
         {
             if (_isExpanded == value) return;
             _isExpanded = value;
+            OnPropertyChanged();
+        }
+    }
+
+    /// <summary>
+    /// Transient horizontal slot used by the thumbnail panel while this
+    /// model's expanded content spans the full browser row.
+    /// </summary>
+    [JsonIgnore]
+    public double ThumbnailColumnOffset
+    {
+        get => _thumbnailColumnOffset;
+        internal set
+        {
+            if (Math.Abs(_thumbnailColumnOffset - value) < 0.01) return;
+            _thumbnailColumnOffset = value;
             OnPropertyChanged();
         }
     }

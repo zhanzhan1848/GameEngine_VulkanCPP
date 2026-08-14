@@ -146,6 +146,7 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
                 // explicitly during creation, never from a scene-swap.
                 SceneSynchronizer.Teardown();
                 _activeScene = value;
+                SelectedEntities = System.Array.Empty<GameEntity>();
                 _allEntities.Clear();
                 Entities.Clear();
                 if (_activeScene != null)
@@ -198,11 +199,14 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
             RuntimeEntityMap,
             RuntimeAssetMap,
             RuntimeMaterialMap);
+        Properties.PushTransformsToNativeCallback = PushTransformsToNative;
+        Properties.MarkProjectDirtyCallback = MarkProjectDirty;
+        Properties.UndoRedoQuery = () => UndoRedo;
     }
 
     /// <summary>
     /// Create a new entity from the given factory descriptor, parent
-    /// it under the current selection (or the scene root), register
+    /// it at the scene root, register
     /// undo, and push the entity to the native engine. Returns the
     /// new entity on success, null if the scene is missing.
     /// </summary>
@@ -217,20 +221,12 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         }
 
         var entity = descriptor.CreateEntity();
-        var parent = SelectedEntities.Length == 1 ? SelectedEntities[0] : null;
-        if (parent != null)
-        {
-            entity.Name = $"{parent.Name}_Child_{parent.Children.Count + 1}";
-            parent.Children.Add(entity);
-            entity.Parent = parent;
-        }
-        else
-        {
-            ActiveScene.Entities.Add(entity);
-            entity.ParentScene = ActiveScene;
-        }
-
-        Entities.Add(entity);
+        // Creation buttons always add a root entity. Using the current
+        // selection as an implicit parent made every subsequent creation a
+        // child of the object created immediately before it (because creation
+        // also selects the new object). Parenting must be an explicit hierarchy
+        // operation, never a side effect of selection.
+        AddEntity(entity);
         UndoRedo.Add(new AddEntityAction(this, entity));
         SelectedEntities = new[] { entity };
         MarkProjectDirty();
@@ -263,7 +259,8 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         {
             _activeScene.Entities.Add(entity);
             entity.ParentScene = _activeScene;
-            Entities.Add(entity);
+            if (!_allEntities.Contains(entity)) _allEntities.Add(entity);
+            if (!Entities.Contains(entity)) Entities.Add(entity);
         }
         else if (entity.Parent != null && !entity.Parent.Children.Contains(entity))
         {
@@ -282,6 +279,7 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         {
             entity.ParentScene.Entities.Remove(entity);
             Entities.Remove(entity);
+            _allEntities.Remove(entity);
         }
         entity.Parent = null;
         entity.ParentScene = null;
@@ -344,18 +342,7 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
     /// </summary>
     public void PushTransformsToNative(IEnumerable<GameEntity> entities)
     {
-        if (!NativeEngineBridge.IsLoaded) return;
-        foreach (var e in entities)
-        {
-            var t = e.GetTransform();
-            if (t == null) continue;
-            var nativeId = GetNativeEntityId(e);
-            if (nativeId == 0) continue;
-            NativeEngineBridge.SetEntityTransform(nativeId,
-                new[] { t.PositionX, t.PositionY, t.PositionZ },
-                new[] { t.RotationX, t.RotationY, t.RotationZ },
-                new[] { t.ScaleX, t.ScaleY, t.ScaleZ });
-        }
+        SceneSynchronizer.PushTransforms(entities);
     }
 
     // Native entity id <-> C# GameEntity mapping. RuntimeEntityMap is the
@@ -382,7 +369,7 @@ public uint GetNativeEntityId(GameEntity? entity)
         if (_activeScene == null) return null;
         if (!NativeEngineBridge.IsLoaded) return null;
         var list = new System.Collections.Generic.List<(uint, PrimalEditor_Avalonia.Views.Engine3D.ViewportPicker.AABB)>();
-        foreach (var entity in _activeScene.Entities)
+        foreach (var entity in EnumerateSceneEntities(_activeScene.Entities))
         {
             var id = GetNativeEntityId(entity);
             if (id == 0) continue;
@@ -398,6 +385,16 @@ public uint GetNativeEntityId(GameEntity? entity)
                 pos.x + half, pos.y + half, pos.z + half)));
         }
         return list;
+    }
+
+    private static IEnumerable<GameEntity> EnumerateSceneEntities(IEnumerable<GameEntity> roots)
+    {
+        foreach (var entity in roots)
+        {
+            yield return entity;
+            foreach (var child in EnumerateSceneEntities(entity.Children))
+                yield return child;
+        }
     }
 
     public event System.EventHandler? PickerCandidatesChanged;

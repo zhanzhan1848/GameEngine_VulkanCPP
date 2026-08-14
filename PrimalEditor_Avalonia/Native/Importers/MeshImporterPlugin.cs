@@ -63,7 +63,8 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
         if (!NativeEngineBridge.IsLoaded)
             return new ImportedAsset { SourcePath = request.SourcePath, DestinationPath = destPath, Type = AssetType.Mesh, Success = true };
 
-        var cookOk = await Task.Run(() => NativeEngineBridge.CookMesh(request.SourcePath, cookedPath, settings), ct);
+        var pod = settings.ToPOD();
+        var cookOk = await Task.Run(() => NativeEngineBridge.CookMeshWithPipeline(request.SourcePath, cookedPath, pod), ct);
         if (!cookOk)
         {
             return new ImportedAsset
@@ -74,6 +75,14 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
                 Success = false,
                 ErrorMessage = "ContentTools cooking failed",
             };
+        }
+
+        if (pod.ValidationErrors > 0 || pod.ValidationWarnings > 0)
+        {
+            Logger.Warning(
+                $"Mesh import: {Path.GetFileName(request.SourcePath)} cooked with " +
+                $"{pod.ValidationErrors} validation errors and {pod.ValidationWarnings} warnings " +
+                $"(meshes={pod.MeshCount}, meshlets={pod.MeshletCount}).");
         }
 
         var requestId = NativeEngineBridge.ImportMesh(cookedPath);

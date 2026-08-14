@@ -118,7 +118,7 @@
                                            VerticalAlignment="Center"/>
                                 <Button Grid.Column="1" Content="+" Click="OnAddEntityClick"
                                         Width="28" Height="22" Padding="0" Margin="2,0"
-                                        ToolTip.Tip="Add Child Entity"/>
+                                        ToolTip.Tip="Add Entity"/>
                                 <Button Grid.Column="2" Content="×" Click="OnDeleteEntityClick"
                                         Width="28" Height="22" Padding="0" Margin="2,0,0,0"
                                         ToolTip.Tip="Delete Selected"/>

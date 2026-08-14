@@ -175,20 +175,36 @@
                              SelectedItem="{Binding SelectedFile}"
                              DoubleTapped="OnFileDoubleClick"
                              IsVisible="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.IsThumbnails}}"
-                             Background="Transparent" BorderThickness="0" Padding="6">
+                             Background="Transparent" BorderThickness="0" Padding="6"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                         <ListBox.ItemsPanel>
                             <ItemsPanelTemplate>
-                                <WrapPanel Orientation="Horizontal"/>
+                                <views:AssetThumbnailPanel HorizontalAlignment="Stretch"
+                                                           VerticalAlignment="Top"/>
                             </ItemsPanelTemplate>
                         </ListBox.ItemsPanel>
                         <ListBox.Styles>
                             <Style Selector="ListBoxItem">
-                                <Setter Property="Width" Value="160"/>
                                 <Setter Property="MinHeight" Value="150"/>
                                 <Setter Property="VerticalAlignment" Value="Top"/>
                                 <Setter Property="VerticalContentAlignment" Value="Top"/>
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                                 <Setter Property="Padding" Value="4"/>
                                 <Setter Property="Margin" Value="3"/>
+                                <!-- The Fluent ListBoxItem template paints selection inside its
+                                     own presenter, so setting Background on ListBoxItem does not
+                                     remove the oversized blue block. Thumbnail cards provide
+                                     their own border; use a neutral presenter for this list. -->
+                                <Setter Property="Template">
+                                    <ControlTemplate>
+                                        <ContentPresenter Content="{TemplateBinding Content}"
+                                                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                                                          Padding="{TemplateBinding Padding}"
+                                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                                          Background="Transparent"/>
+                                    </ControlTemplate>
+                                </Setter>
                             </Style>
                         </ListBox.Styles>
                         <ListBox.ItemTemplate>
@@ -218,61 +234,84 @@
                                         </StackPanel>
                                     </Border>
 
-<!-- Container asset (.model.json): its model tile plus submesh
-                                         tiles flow inline with the rest of the grid — no wrapper
-                                         box. The submeshes visually push the next siblings down
-                                         because the WrapPanel treats them as additional items. -->
-                                    <StackPanel IsVisible="{Binding IsContainer}" Width="140">
+                                    <!-- The custom outer panel gives an expanded model the full
+                                         browser width.  Its tile is translated back to the slot
+                                         it occupied before expansion; children then start on a
+                                         separate full-width row and wrap horizontally. -->
+                                    <StackPanel IsVisible="{Binding IsContainer}">
                                         <Border Width="140" Height="150"
                                                 BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
                                                 Background="{StaticResource VoidBrush}"
-                                                ClipToBounds="True">
-                                            <StackPanel HorizontalAlignment="Center">
-                                                <Panel Width="96" Height="96" Margin="0,4,0,0">
-                                                    <Path Width="48" Height="48" Stretch="Uniform"
-                                                          Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
-                                                          Fill="{StaticResource ElectricBlueBrush}"
-                                                          HorizontalAlignment="Center"
-                                                          VerticalAlignment="Center"/>
-                                                </Panel>
-                                                <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
-                                                           MaxWidth="130" TextAlignment="Center"
-                                                           Classes="mono"
-                                                           HorizontalAlignment="Center" Margin="0,6,0,0"
-                                                           ToolTip.Tip="{Binding FullPath}"/>
-                                            </StackPanel>
+                                                ClipToBounds="True"
+                                                HorizontalAlignment="Left"
+                                                PointerPressed="OnContainerTilePointerPressed">
+                                            <Border.RenderTransform>
+                                                <TranslateTransform X="{Binding ThumbnailColumnOffset}"/>
+                                            </Border.RenderTransform>
+                                            <Grid>
+                                                <StackPanel HorizontalAlignment="Center">
+                                                    <Panel Width="96" Height="96" Margin="0,4,0,0">
+                                                        <Path Width="48" Height="48" Stretch="Uniform"
+                                                              Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
+                                                              Fill="{StaticResource ElectricBlueBrush}"
+                                                              HorizontalAlignment="Center"
+                                                              VerticalAlignment="Center"/>
+                                                    </Panel>
+                                                    <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
+                                                               MaxWidth="130" TextAlignment="Center"
+                                                               Classes="mono"
+                                                               HorizontalAlignment="Center" Margin="0,6,0,0"
+                                                               ToolTip.Tip="{Binding FullPath}"/>
+                                                </StackPanel>
+                                                <Button HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                        Width="26" Height="26" Margin="0,4,4,0" Padding="0"
+                                                        Tag="{Binding}" Click="OnContainerToggleClick"
+                                                        ToolTip.Tip="Expand or collapse LODs and submeshes">
+                                                    <Panel Width="12" Height="12">
+                                                        <Path Data="M2,4 L10,4 L6,9 Z" Fill="{StaticResource ElectricBlueBrush}"
+                                                              IsVisible="{Binding IsExpanded}" Stretch="Uniform"/>
+                                                        <Path Data="M4,2 L9,6 L4,10 Z" Fill="{StaticResource ElectricBlueBrush}"
+                                                              IsVisible="{Binding !IsExpanded}" Stretch="Uniform"/>
+                                                    </Panel>
+                                                </Button>
+                                            </Grid>
                                         </Border>
-                                        <ItemsControl ItemsSource="{Binding Children}" Margin="0,6,0,0"
-                                                    IsVisible="{Binding IsExpanded}">
-                                            <ItemsControl.ItemsPanel>
-                                                <ItemsPanelTemplate>
-                                                    <WrapPanel Orientation="Horizontal"/>
-                                                </ItemsPanelTemplate>
-                                            </ItemsControl.ItemsPanel>
-                                            <ItemsControl.ItemTemplate>
-                                                <DataTemplate>
-                                                    <Border Width="140" Height="150"
-                                                            BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
-                                                            Background="{StaticResource VoidBrush}"
-                                                            ClipToBounds="True">
-                                                        <StackPanel HorizontalAlignment="Center">
-                                                            <Panel Width="96" Height="96" Margin="0,4,0,0">
-                                                                <Path Width="48" Height="48" Stretch="Uniform"
-                                                                      Data="M0,0 L40,0 L40,40 L0,40 Z M10,10 L30,10 L20,30 Z"
-                                                                      Fill="{StaticResource ElectricBlueBrush}"
-                                                                      HorizontalAlignment="Center"
-                                                                      VerticalAlignment="Center"/>
-                                                            </Panel>
-                                                            <TextBlock Text="{Binding FileName}"
-                                                                       TextTrimming="CharacterEllipsis"
-                                                                       MaxWidth="130" TextAlignment="Center"
-                                                                       Classes="mono"
-                                                                       HorizontalAlignment="Center" Margin="0,6,0,0"/>
-                                                        </StackPanel>
-                                                    </Border>
-                                                </DataTemplate>
-                                            </ItemsControl.ItemTemplate>
-                                        </ItemsControl>
+                                        <Border Margin="0,6,0,0" Padding="7"
+                                                IsVisible="{Binding IsExpanded}"
+                                                Background="#090D17"
+                                                BorderBrush="#26364D" BorderThickness="1"
+                                                CornerRadius="3">
+                                            <ItemsControl ItemsSource="{Binding Children}">
+                                                <ItemsControl.ItemsPanel>
+                                                    <ItemsPanelTemplate>
+                                                        <WrapPanel Orientation="Horizontal"/>
+                                                    </ItemsPanelTemplate>
+                                                </ItemsControl.ItemsPanel>
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate x:DataType="content:AssetInfo">
+                                                        <Border Width="140" Height="150" Margin="3"
+                                                                BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
+                                                                Background="{StaticResource VoidBrush}"
+                                                                ClipToBounds="True">
+                                                            <StackPanel HorizontalAlignment="Center">
+                                                                <Panel Width="96" Height="96" Margin="0,4,0,0">
+                                                                    <Path Width="48" Height="48" Stretch="Uniform"
+                                                                          Data="{StaticResource MeshIconGeometry}"
+                                                                          Fill="{StaticResource ElectricBlueBrush}"
+                                                                          HorizontalAlignment="Center"
+                                                                          VerticalAlignment="Center"/>
+                                                                </Panel>
+                                                                <TextBlock Text="{Binding FileName}"
+                                                                           TextTrimming="CharacterEllipsis"
+                                                                           MaxWidth="130" TextAlignment="Center"
+                                                                           Classes="mono"
+                                                                           HorizontalAlignment="Center" Margin="0,6,0,0"/>
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </Border>
                                     </StackPanel>
                                 </Panel>
                             </DataTemplate>

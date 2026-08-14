@@ -43,7 +43,7 @@ public partial class EngineViewport3D : UserControl
     private float[] _cameraTarget = new float[] { 0f, 0f, 0f };
     private float _cameraDistance = 12f;
     private float _cameraYaw = 0f;       // radians; 0 = looking down +Z (camera at -Z relative to target)
-    private float _cameraPitch = 0f;     // radians; 0 = level with target
+    private float _cameraPitch = EditorCameraState.DefaultPitch;
     private const float kMinPitch = -1.4f;  // ~-80°, prevent gimbal flip
     private const float kMaxPitch =  1.4f;  // ~+80°
     private const float kMinDistance = 0.5f;
@@ -125,6 +125,7 @@ public partial class EngineViewport3D : UserControl
 
     private void OnAttached(object? sender, VisualTreeAttachmentEventArgs e)
     {
+        _isAttached = true;
         if (_viewportInitialized) return;
         if (!NativeEngineBridge.IsLoaded)
         {
@@ -140,9 +141,12 @@ public partial class EngineViewport3D : UserControl
     }
 
     private bool _pendingInit;
+    private bool _isAttached;
+    private DispatcherTimer? _retryTimer;
 
     private bool TryInitializeFromLayout()
     {
+        if (!_isAttached) return false;
         if (_viewportInitialized) return true;
         if (!NativeEngineBridge.IsLoaded) return false;
 
@@ -510,6 +514,10 @@ public partial class EngineViewport3D : UserControl
 
     private void OnDetached(object? sender, VisualTreeAttachmentEventArgs e)
     {
+        _isAttached = false;
+        _pendingInit = false;
+        _retryTimer?.Stop();
+        _retryTimer = null;
         StopRenderLoop();
         LayoutUpdated -= OnLayoutUpdated;
         if (_renderTarget != 0)
@@ -685,17 +693,19 @@ public partial class EngineViewport3D : UserControl
     private int _retryCount;
     private void ScheduleRetry()
     {
-        if (_retryCount > 200) return;
+        if (!_isAttached || _retryCount > 200) return;
         _retryCount++;
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
-        timer.Tick += (s, e) =>
+        _retryTimer?.Stop();
+        _retryTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        _retryTimer.Tick += (s, e) =>
         {
-            timer.Stop();
-            if (_viewportInitialized) return;
+            _retryTimer?.Stop();
+            _retryTimer = null;
+            if (!_isAttached || _viewportInitialized) return;
             if (TryInitializeFromLayout()) return;
             ScheduleRetry();
         };
-        timer.Start();
+        _retryTimer.Start();
     }
 
     private void ShowPlaceholder(bool show)
@@ -1026,7 +1036,7 @@ public partial class EngineViewport3D : UserControl
             _cameraTarget = new float[] { 0f, 0f, 0f };
             _cameraDistance = 12f;
             _cameraYaw = 0f;
-            _cameraPitch = 0f;
+            _cameraPitch = EditorCameraState.DefaultPitch;
             ApplyCameraTransform();
             Logger.Info("Camera reset to default view (F)");
             e.Handled = true;
@@ -1085,6 +1095,7 @@ public partial class EngineViewport3D : UserControl
         if (_scene != null)
         {
             var camera = _scene.EditorCamera;
+            camera.UpgradeLegacyDefaultView();
             _cameraTarget = new[] { camera.TargetX, camera.TargetY, camera.TargetZ };
             _cameraDistance = Math.Clamp(camera.Distance, kMinDistance, kMaxDistance);
             _cameraYaw = camera.Yaw;

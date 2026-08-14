@@ -37,7 +37,7 @@ public sealed class SceneRuntimeSynchronizerTests
 
         public void SetEntityTransform(uint entityId, float[] position, float[] rotation, float[] scale)
         {
-            Calls.Add($"transform({entityId})");
+            Calls.Add($"transform({entityId},{position[0]:0.##},{position[1]:0.##},{position[2]:0.##})");
         }
 
         public uint AddEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled)
@@ -168,6 +168,28 @@ public sealed class SceneRuntimeSynchronizerTests
 
         Assert.Null(entities.GetEntityId(entity.EntityGuid));
         Assert.Empty(bridge.Calls);
+    }
+
+    [Fact]
+    public void PushTransforms_UsesOwningBridgeWithMappedRuntimeEntity()
+    {
+        var (sync, entities, _, _, bridge) = Build();
+        var scene = new Scene("Main");
+        var entity = new GameEntity("Plane");
+        var transform = new Transform();
+        entity.Components.Add(transform);
+        scene.Entities.Add(entity);
+        sync.Sync(scene);
+        var runtimeId = entities.GetEntityId(entity.EntityGuid);
+        Assert.NotNull(runtimeId);
+        bridge.Calls.Clear();
+
+        transform.PositionX = 2f;
+        transform.PositionY = 3f;
+        transform.PositionZ = 4f;
+        sync.PushTransforms(new[] { entity });
+
+        Assert.Equal(new[] { $"transform({runtimeId},2,3,4)" }, bridge.Calls);
     }
 
     [Fact]

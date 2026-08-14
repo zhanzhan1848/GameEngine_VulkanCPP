@@ -1,9 +1,11 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using PrimalEditor_Avalonia.Content;
+using PrimalEditor_Avalonia.Import.Settings;
 using PrimalEditor_Avalonia.Native.Importers;
 
 namespace PrimalEditor_Avalonia.Import;
@@ -28,7 +30,27 @@ public partial class ImportSettingsDialog : Window
             : $"Import {files.Count} files ({plugin.DisplayName})";
         _acceptedSettings = defaults;
         PanelContent = plugin.CreatePanel(defaults);
+
+        // The geometry panel gates pipeline-section visibility on whether any
+        // of the selected files is a format ContentTools' pipeline path
+        // supports. Other plugins' VMs don't have this concept, so we only
+        // touch GeometryImportPanelViewModel.
+        if (PanelContent.DataContext is GeometryImportPanelViewModel geoVm)
+        {
+            geoVm.PipelineAvailable = HasAnySupportedPipelineFormat(files);
+        }
+
         DataContext = this;
+    }
+
+    private static bool HasAnySupportedPipelineFormat(IReadOnlyList<string> files)
+    {
+        for (int i = 0; i < files.Count; ++i)
+        {
+            var ext = Path.GetExtension(files[i]).ToLowerInvariant();
+            if (ext == ".fbx" || ext == ".obj") return true;
+        }
+        return false;
     }
 
     public static async Task<(bool accepted, IAssetImportSettings? settings)> ShowAsync(

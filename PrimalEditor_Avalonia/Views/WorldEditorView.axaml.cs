@@ -106,6 +106,7 @@ namespace PrimalEditor_Avalonia.Views;
             return;
         }
         if (e.PropertyName != nameof(WorldEditorViewModel.SelectedEntities)) return;
+        SyncHierarchySelection();
         // Mirror the gizmo to the newly selected entity's world position
         // so the user can immediately drag the handles. If nothing is
         // selected, fall back to the world origin (matches the camera
@@ -120,6 +121,28 @@ namespace PrimalEditor_Avalonia.Views;
         {
             _viewport.SetGizmoVisible(false);
             _viewport.SetGizmoTarget(0f, 0f, 0f);
+        }
+    }
+
+    private bool _syncingHierarchySelection;
+
+    private void SyncHierarchySelection()
+    {
+        if (_vm == null || _syncingHierarchySelection) return;
+        if (this.FindControl<TreeView>("HierarchyTree") is not { } tree) return;
+
+        _syncingHierarchySelection = true;
+        try
+        {
+            tree.SelectedItems.Clear();
+            foreach (var entity in _vm.SelectedEntities)
+                tree.SelectedItems.Add(entity);
+            if (_vm.SelectedEntities.Length == 1)
+                tree.ScrollIntoView(_vm.SelectedEntities[0]);
+        }
+        finally
+        {
+            _syncingHierarchySelection = false;
         }
     }
 
@@ -229,6 +252,7 @@ namespace PrimalEditor_Avalonia.Views;
 
     private void OnTreeSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
+        if (_syncingHierarchySelection) return;
         if (DataContext is WorldEditorViewModel vm && sender is TreeView treeView)
         {
             var selected = treeView.SelectedItems.OfType<GameEntity>().ToArray();
@@ -316,42 +340,8 @@ namespace PrimalEditor_Avalonia.Views;
     {
         if (DataContext is WorldEditorViewModel vm)
         {
-            if (vm.ActiveScene == null)
-            {
-                Logger.Warning("Cannot add entity: no active scene. Open a project first.");
-                return;
-            }
-
-            var parent = vm.SelectedEntities.Length == 1 ? vm.SelectedEntities[0] : null;
-            var entityName = parent != null
-                ? $"{parent.Name}_Child_{parent.Children.Count + 1}"
-                : $"Entity_{vm.Entities.Count + 1}";
-
-            var entity = new GameEntity(entityName);
-            entity.Components.Add(new Transform());
-
-            if (parent != null)
-            {
-                parent.Children.Add(entity);
-                entity.Parent = parent;
-            }
-            else
-            {
-                vm.ActiveScene.Entities.Add(entity);
-                entity.ParentScene = vm.ActiveScene;
-            }
-
-            vm.UndoRedo.Add(new AddEntityAction(vm, entity));
-            vm.SelectedEntities = new[] { entity };
-            // Mirror the toolbar path: push the entity into the native
-            // engine so the editor viewport sees it. Without this the
-            // hierarchy shows the entity but the render surface stays
-            // empty.
-            if (PrimalEditor_Avalonia.Native.NativeEngineBridge.IsLoaded)
-            {
-                vm.SceneSynchronizer.SyncEntity(entity);
-            }
-            Logger.Info($"Added entity: {entity.Name}" + (parent != null ? $" (child of {parent.Name})" : ""));
+            var descriptor = EntityFactory.Find(EntityKind.Empty);
+            if (descriptor != null) vm.CreateEntityFromFactory(descriptor);
         }
     }
 

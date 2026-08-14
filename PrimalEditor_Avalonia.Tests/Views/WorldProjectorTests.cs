@@ -103,6 +103,48 @@ public sealed class WorldProjectorTests
         Assert.True(sp!.Value.sy < 300f);  // up = smaller sy
     }
 
+    [Fact]
+    public void DefaultEditorPitch_ViewsGroundGridFromAbove()
+    {
+        WorldProjector.ComputeCameraBasis(
+            targetX: 0, targetY: 0, targetZ: 0,
+            yaw: 0, pitch: PrimalEditor_Avalonia.GameProject.EditorCameraState.DefaultPitch, distance: 12,
+            out var camX, out var camY, out var camZ,
+            out var rx, out var ry, out var rz,
+            out var ux, out var uy, out var uz,
+            out var fx, out var fy, out var fz);
+
+        Assert.True(camY > 0f);
+        var nearGrid = WorldProjector.Project(
+            0, 0, -4, camX, camY, camZ,
+            rx, ry, rz, ux, uy, uz, fx, fy, fz,
+            800, 600, 500);
+        var farGrid = WorldProjector.Project(
+            0, 0, 4, camX, camY, camZ,
+            rx, ry, rz, ux, uy, uz, fx, fy, fz,
+            800, 600, 500);
+
+        Assert.NotNull(nearGrid);
+        Assert.NotNull(farGrid);
+        Assert.NotEqual(nearGrid!.Value.sy, farGrid!.Value.sy);
+    }
+
+    [Fact]
+    public void LegacyFlatDefaultCamera_IsUpgradedButCustomLevelViewIsPreserved()
+    {
+        var legacy = new PrimalEditor_Avalonia.GameProject.EditorCameraState { Pitch = 0f };
+        legacy.UpgradeLegacyDefaultView();
+        Assert.Equal(PrimalEditor_Avalonia.GameProject.EditorCameraState.DefaultPitch, legacy.Pitch);
+
+        var custom = new PrimalEditor_Avalonia.GameProject.EditorCameraState
+        {
+            TargetX = 1f,
+            Pitch = 0f,
+        };
+        custom.UpgradeLegacyDefaultView();
+        Assert.Equal(0f, custom.Pitch);
+    }
+
     [Theory]
     [InlineData(0.0f, 0.0f)]
     [InlineData(0.75f, 0.35f)]

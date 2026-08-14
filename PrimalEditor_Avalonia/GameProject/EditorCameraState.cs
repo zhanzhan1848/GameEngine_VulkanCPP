@@ -8,12 +8,13 @@ namespace PrimalEditor_Avalonia.GameProject;
 /// </summary>
 public sealed class EditorCameraState : ViewModelBase
 {
+    public const float DefaultPitch = -0.43633232f; // -25 degrees: view the XZ grid from above
     private float _targetX;
     private float _targetY;
     private float _targetZ;
     private float _distance = 12f;
     private float _yaw;
-    private float _pitch;
+    private float _pitch = DefaultPitch;
 
     public float TargetX { get => _targetX; set => Set(ref _targetX, value); }
     public float TargetY { get => _targetY; set => Set(ref _targetY, value); }
@@ -30,6 +31,20 @@ public sealed class EditorCameraState : ViewModelBase
         Distance = source.Distance;
         Yaw = source.Yaw;
         Pitch = source.Pitch;
+    }
+
+    /// <summary>
+    /// Scenes saved before the angled editor-camera default used an all-zero
+    /// orbit with distance 12. Upgrade only that exact untouched state so a
+    /// deliberately level camera is not changed.
+    /// </summary>
+    public void UpgradeLegacyDefaultView()
+    {
+        if (TargetX == 0f && TargetY == 0f && TargetZ == 0f &&
+            Distance == 12f && Yaw == 0f && Pitch == 0f)
+        {
+            Pitch = DefaultPitch;
+        }
     }
 
     private void Set(ref float field, float value)

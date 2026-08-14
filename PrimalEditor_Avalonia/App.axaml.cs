@@ -221,6 +221,14 @@ public partial class App : Application
         EngineTick.Stop();
         if (NativeEngineBridge.IsLoaded)
         {
+            // Unregister mesh entities while the render pipeline and content
+            // system still exist. A late layout/init retry must never attempt
+            // PipelineRegisterMeshEntity after these systems begin shutdown.
+            if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop &&
+                desktop.MainWindow?.DataContext is MainWindowViewModel mainVm)
+            {
+                try { mainVm.WorldEditor.SceneSynchronizer.Teardown(); } catch { }
+            }
             foreach (var loopId in PrimalEditor_Avalonia.Views.Engine3D.EngineViewport3D.LiveNativeLoopIds.ToArray())
             {
                 try { NativeEngineBridge.EditorRenderLoop.Destroy(loopId); } catch { }

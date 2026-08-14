@@ -54,6 +54,30 @@ public sealed class SceneRuntimeSynchronizer
 
     public bool IsBridgeAvailable => _bridge.IsLoaded;
 
+    /// <summary>
+    /// Pushes editor-side transform changes through the same bridge instance
+    /// that registered the entity's render resources. The production adapter
+    /// mirrors this update to the separate pipeline mesh entity created by
+    /// PipelineRegisterMeshEntity; calling NativeEngineBridge directly would
+    /// update only the source ECS entity and leave the visible mesh at its old
+    /// transform.
+    /// </summary>
+    public void PushTransforms(IEnumerable<GameEntity> entities)
+    {
+        if (!_bridge.IsLoaded) return;
+        foreach (var entity in entities)
+        {
+            var transform = entity.GetTransform();
+            if (transform is null) continue;
+            if (_entities.GetEntityId(entity.EntityGuid) is not { } runtimeId) continue;
+
+            _bridge.SetEntityTransform(runtimeId,
+                new[] { transform.PositionX, transform.PositionY, transform.PositionZ },
+                new[] { transform.RotationX, transform.RotationY, transform.RotationZ },
+                new[] { transform.ScaleX, transform.ScaleY, transform.ScaleZ });
+        }
+    }
+
     public void Teardown()
     {
         foreach (var entity in _live)

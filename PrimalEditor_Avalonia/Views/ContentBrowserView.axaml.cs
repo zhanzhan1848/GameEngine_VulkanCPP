@@ -179,11 +179,9 @@ public partial class ContentBrowserView : UserControl
 
         if (selected.IsContainer)
         {
-            // Container row (.model.json): toggle expansion so the
-            // submesh tiles appear inline below, and preview the parent.
-            selected.IsExpanded = !selected.IsExpanded;
-            // SetAssetAndRefresh resets SelectedSubmeshIndex to 0 inside
-            // Refresh(), so we apply the index *after* the refresh.
+            // Selecting a model previews it. Expansion is controlled by the
+            // tile/arrow handlers so keyboard selection and the arrow button
+            // cannot accidentally toggle the state twice.
             vm.PreviewViewModel.SetAssetAndRefresh(selected);
             vm.PreviewViewModel.SelectedSubmeshIndex = 0;
             return;
@@ -208,6 +206,42 @@ public partial class ContentBrowserView : UserControl
         // content and double-click navigates into them instead.
         if (selected.IsFolder) return;
         vm.PreviewViewModel.Asset = selected;
+    }
+
+    private void OnContainerTilePointerPressed(object? sender, Avalonia.Input.PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        // The arrow is a real Button and owns its click. Do not also toggle
+        // from the containing tile when that button originated the event.
+        if (e.Source is Button) return;
+        if (sender is Control { DataContext: AssetInfo info })
+        {
+            ToggleContainer(info);
+            e.Handled = true;
+        }
+    }
+
+    private void OnContainerToggleClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: AssetInfo info })
+            ToggleContainer(info);
+        e.Handled = true;
+    }
+
+    private void ToggleContainer(AssetInfo info)
+    {
+        if (DataContext is not ContentBrowserViewModel vm) return;
+
+        foreach (var candidate in AssetRegistry.Assets)
+        {
+            if (candidate.IsContainer && candidate != info && candidate.IsExpanded)
+                candidate.IsExpanded = false;
+        }
+
+        info.IsExpanded = !info.IsExpanded;
+        vm.SelectedFile = info;
+        vm.PreviewViewModel.SetAssetAndRefresh(info);
+        vm.PreviewViewModel.SelectedSubmeshIndex = 0;
     }
 
     private static AssetInfo? FindParentOf(AssetInfo child)

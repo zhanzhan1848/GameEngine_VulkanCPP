@@ -78,6 +78,13 @@ public class PropertiesViewModel : ViewModelBase
     public System.Action? SetMainCameraCallback { get; set; }
     public System.Func<bool>? IsMainCameraQuery { get; set; }
 
+    // Injected by the owning WorldEditorViewModel. Inspector write-back must
+    // not depend on finding a particular TopLevel/DataContext while docking
+    // or window teardown is changing the visual tree.
+    public System.Action<System.Collections.Generic.IEnumerable<GameEntity>>? PushTransformsToNativeCallback { get; set; }
+    public System.Action? MarkProjectDirtyCallback { get; set; }
+    public System.Func<UndoRedo?>? UndoRedoQuery { get; set; }
+
     public void RefreshEntityContext(uint selectedNativeId)
     {
         SelectedEntityNativeId = selectedNativeId;
@@ -229,24 +236,17 @@ public class PropertiesViewModel : ViewModelBase
         // Capture snapshot BEFORE applying the change so the old state is the
         // pre-change transform, and the new state is the post-change one.
         var undoRedo = TryGetUndoRedo();
-        if (undoRedo == null || undoRedo.IsUndoingOrRedoing)
-        {
-            // Undo/Redo path: apply change, no record.
-            applyChange();
-            OnPropertyChanged(propertyName);
-            return;
-        }
-
         var oldDataList = SnapshotSelected();
         applyChange();
         var newDataList = SnapshotSelected();
         OnPropertyChanged(propertyName);
 
-        if (oldDataList.Count == 0 || HasAnyChange(oldDataList, newDataList))
+        var changed = oldDataList.Count == 0 || HasAnyChange(oldDataList, newDataList);
+        if (changed && undoRedo != null && !undoRedo.IsUndoingOrRedoing)
         {
             undoRedo.Add(new MultiEntityTransformAction(oldDataList, newDataList));
-            MarkProjectDirty();
         }
+        if (changed) MarkProjectDirty();
 
         // Mirror the C# transform into the native engine so the render
         // surface reflects the new value immediately. Without this the
@@ -260,6 +260,11 @@ public class PropertiesViewModel : ViewModelBase
     {
         var selected = _msEntity.SelectedEntities;
         if (selected.Count == 0) return;
+        if (PushTransformsToNativeCallback != null)
+        {
+            PushTransformsToNativeCallback(selected);
+            return;
+        }
         if (!NativeEngineBridge.IsLoaded) return;
         // Walk the same MainWindow data-context chain as TryGetUndoRedo
         // so we hit the same WorldEditorViewModel instance the rest of
@@ -287,6 +292,11 @@ public class PropertiesViewModel : ViewModelBase
 
     private void MarkProjectDirty()
     {
+        if (MarkProjectDirtyCallback != null)
+        {
+            MarkProjectDirtyCallback();
+            return;
+        }
         if (Avalonia.Application.Current?.ApplicationLifetime is
             Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
             && desktop.MainWindow?.DataContext is MainWindowViewModel mainVm
@@ -337,6 +347,7 @@ public class PropertiesViewModel : ViewModelBase
 
     private UndoRedo? TryGetUndoRedo()
     {
+        if (UndoRedoQuery != null) return UndoRedoQuery();
         if (Avalonia.Application.Current?.ApplicationLifetime is
             Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
             && desktop.MainWindow?.DataContext is MainWindowViewModel mainVm)

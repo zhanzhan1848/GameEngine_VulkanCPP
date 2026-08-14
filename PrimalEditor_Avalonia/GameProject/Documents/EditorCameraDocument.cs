@@ -9,5 +9,5 @@ public sealed class EditorCameraDocument
     [JsonPropertyName("TargetZ")] public float TargetZ { get; set; }
     [JsonPropertyName("Distance")] public float Distance { get; set; } = 12f;
     [JsonPropertyName("Yaw")] public float Yaw { get; set; }
-    [JsonPropertyName("Pitch")] public float Pitch { get; set; }
+    [JsonPropertyName("Pitch")] public float Pitch { get; set; } = EditorCameraState.DefaultPitch;
 }

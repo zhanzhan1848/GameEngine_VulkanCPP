@@ -25,6 +25,15 @@ public static class NativeEngineBridge
     public static string? LoadedPath { get; private set; }
     public static string? LoadError { get; private set; }
 
+    static NativeEngineBridge()
+    {
+        // Fail fast on ABI drift. If the C# POD mirror doesn't match the
+        // C++ struct's size, every CookMeshWithPipeline call would silently
+        // mis-parse the parameters — surfaces as garbage output that takes
+        // an afternoon to diagnose. Better to crash here.
+        AIAssetPipelineSettings.AssertSize();
+    }
+
     /// <summary>
     /// Load the native engine library (libPrimalEngine.dylib / .so / .dll).
     /// The library must be in the search path or absolute path provided.
@@ -1475,6 +1484,16 @@ public static class NativeEngineBridge
         [MarshalAs(UnmanagedType.U1)] bool import_animations,
         [MarshalAs(UnmanagedType.U1)] bool coalesce_meshes);
 
+    // CookMeshWithPipeline: Phase 2 M13. Takes a fully-populated
+    // ai_asset_pipeline_params by value (Sequential layout, 208 bytes).
+    // C# caller builds the struct from GeometryImportSettings; the native
+    // side runs ProcessAIAsset then writes .mesh + .model.json sidecar.
+    [DllImport("libContentTools", EntryPoint = "CookMeshWithPipeline", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern uint _CookMeshWithPipeline(
+        IntPtr input,
+        IntPtr output,
+        AIAssetPipelineSettings settings);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct TextureCookResult
     {
@@ -1613,6 +1632,24 @@ public static class NativeEngineBridge
                 settings.CoalesceMeshes) != 0;
         }
         catch (Exception ex) { Logger.Error("CookMesh failed", ex); return false; }
+    }
+
+    /// <summary>
+    /// Cook a mesh through the AssetPipeline (Phase 2 M13). The supplied
+    /// settings carry every ContentTools parameter — legacy FBX/OBJ parse
+    /// flags AND every pipeline module enable flag + tuning param. Returns
+    /// true on success, false on cook failure or native bridge error.
+    /// </summary>
+    public static bool CookMeshWithPipeline(string input, string output, AIAssetPipelineSettings settings)
+    {
+        if (!_isLoaded) return false;
+        try
+        {
+            var i = MarshalUtf8(input);
+            var o = MarshalUtf8(output);
+            return _CookMeshWithPipeline(i, o, settings) != 0;
+        }
+        catch (Exception ex) { Logger.Error("CookMeshWithPipeline failed", ex); return false; }
     }
 
     public enum CookTextureStatus

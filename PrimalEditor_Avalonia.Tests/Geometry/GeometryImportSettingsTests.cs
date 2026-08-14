@@ -1,6 +1,8 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using PrimalEditor_Avalonia.Editors.Geometry;
+using PrimalEditor_Avalonia.Native;
 using Xunit;
 
 namespace PrimalEditor_Avalonia.Tests.Geometry;
@@ -164,5 +166,102 @@ public sealed class GeometryImportSettingsTests
         Assert.False(dst.ImportEmbeddedTextures);
         Assert.False(dst.ImportAnimations);
         Assert.True(dst.CoalesceMeshes);
+    }
+
+    [Fact]
+    public void AIAssetPipelineSettings_size_matches_expected_ABI_size()
+    {
+        // Catches field-order or type drift between the C# mirror and the
+        // C++ ai_asset_pipeline_params POD in ContentTools.cpp. If this
+        // fails, do NOT run the editor — every CookMeshWithPipeline call
+        // would silently mis-parse parameters.
+        AIAssetPipelineSettings.AssertSize();
+    }
+
+    [Fact]
+    public void ToPOD_packs_legacy_settings_into_ABI_struct()
+    {
+        var s = new GeometryImportSettings
+        {
+            SmoothingAngle = 91.5f,
+            CalculateNormals = false,
+            CalculateTangents = true,
+            ReverseHandedness = true,
+            ImportEmbeddedTextures = true,
+            ImportAnimations = false,
+            CoalesceMeshes = false,
+        };
+
+        var pod = s.ToPOD();
+
+        Assert.Equal(91.5f, pod.LegacySmoothingAngle);
+        Assert.Equal(0, pod.LegacyCalculateNormals);
+        Assert.Equal(1, pod.LegacyCalculateTangents);
+        Assert.Equal(1, pod.LegacyReverseHandedness);
+        Assert.Equal(1, pod.LegacyImportEmbeddedTextures);
+        Assert.Equal(0, pod.LegacyImportAnimations);
+        Assert.Equal(0, pod.LegacyCoalesceMeshes);
+
+        // Output fields must be 0 — caller populates them via ToPOD, the
+        // native side overwrites them with the actual counts after the cook.
+        Assert.Equal(0u, pod.MeshCount);
+        Assert.Equal(0u, pod.MeshletCount);
+        Assert.Equal(0u, pod.ValidationErrors);
+        Assert.Equal(0u, pod.ValidationWarnings);
+    }
+
+    [Fact]
+    public void ToPOD_packs_pipeline_settings_into_ABI_struct()
+    {
+        var s = new GeometryImportSettings
+        {
+            EnableRepair = true,
+            EnableRemesh = false,
+            EnableSubdivide = true,
+            EnableUvatlas = true,
+            EnableLod = true,
+            EnableMeshlet = true,
+            EnableCollision = false,
+            EnableDerive = true,
+            AutoDeriveAfterSubdivide = false,
+            EnableSdf = true,
+            SubdivideScheme = PipelineSubdivideScheme.CatmullClark,
+            SubdivideLevels = 3,
+            DeriveNormalMode = PipelineDeriveNormalMode.Smooth,
+            DeriveTangentMode = PipelineDeriveTangentMode.None,
+            DeriveFacetedAngleDeg = 45f,
+            LodRatio = 0.4f,
+            LodMaxLevels = 4,
+            MinVerticesForLod = 1000,
+            MeshletMaxVertices = 192,
+            MeshletMaxTriangles = 96,
+            CollisionMaxHulls = 16,
+        };
+
+        var pod = s.ToPOD();
+
+        Assert.Equal(1, pod.EnableRepair);
+        Assert.Equal(0, pod.EnableRemesh);
+        Assert.Equal(1, pod.EnableSubdivide);
+        Assert.Equal(1, pod.EnableUvatlas);
+        Assert.Equal(1, pod.EnableLod);
+        Assert.Equal(1, pod.EnableMeshlet);
+        Assert.Equal(0, pod.EnableCollision);
+        Assert.Equal(1, pod.EnableDerive);
+        Assert.Equal(0, pod.AutoDeriveAfterSubdivide);
+        Assert.Equal(1, pod.EnableSdf);
+
+        Assert.Equal((byte)PipelineSubdivideScheme.CatmullClark, pod.SubdivideScheme);
+        Assert.Equal(3u, pod.SubdivideLevels);
+        Assert.Equal((byte)PipelineDeriveNormalMode.Smooth, pod.DeriveNormalMode);
+        Assert.Equal((byte)PipelineDeriveTangentMode.None, pod.DeriveTangentMode);
+        Assert.Equal(45f, pod.DeriveFacetedAngleDeg);
+
+        Assert.Equal(0.4f, pod.LodRatio);
+        Assert.Equal(4u, pod.LodMaxLevels);
+        Assert.Equal(1000u, pod.MinVerticesForLod);
+        Assert.Equal(192u, pod.MeshletMaxVertices);
+        Assert.Equal(96u, pod.MeshletMaxTriangles);
+        Assert.Equal(16u, pod.CollisionMaxHulls);
     }
 }

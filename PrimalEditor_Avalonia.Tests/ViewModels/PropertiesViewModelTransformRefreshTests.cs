@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.ViewModels;
 using Xunit;
@@ -7,6 +8,25 @@ namespace PrimalEditor_Avalonia.Tests.ViewModels;
 
 public sealed class PropertiesViewModelTransformRefreshTests
 {
+    [Fact]
+    public void InspectorEdit_UsesOwnerWritebackCallbackWithoutMainWindowLookup()
+    {
+        var entity = new GameEntity("Cube");
+        entity.Components.Add(new Transform());
+        var properties = new PropertiesViewModel { Entities = new[] { entity } };
+        GameEntity[]? pushed = null;
+        var dirty = false;
+        properties.PushTransformsToNativeCallback = entities => pushed = entities.ToArray();
+        properties.MarkProjectDirtyCallback = () => dirty = true;
+        properties.UndoRedoQuery = () => null;
+
+        properties.PosX = 17f;
+
+        Assert.Equal(17f, entity.GetTransform()!.PositionX);
+        Assert.Equal(new[] { entity }, pushed);
+        Assert.True(dirty);
+    }
+
     [Fact]
     public void RefreshFromTransform_NotifiesInspectorForwardingProperties()
     {
