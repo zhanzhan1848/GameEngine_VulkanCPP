@@ -68,12 +68,52 @@ void SyncCamerasFromECS(RenderView& view, id::id_type preferred_entity_id) {
         const game_entity::entity_id eid = game_entity::entity_id_from_index(static_cast<u32>(i));
         if (!game_entity::is_alive(eid)) continue;
 
-        const component_mask mask = game_entity::get_component_mask(eid);
-        if ((mask & camera_mask) == 0) continue;
+const component_mask mask = game_entity::get_component_mask(eid);
+if ((mask & camera_mask) == 0) continue;
 
-        if (apply_camera(eid)) return;
-    }
-    // 没有 Camera entity — no-op。
+// 找到了 — 构造 ECS Camera 组件 handle。
+// 注意：必须是 primal::camera::component（ECS 组件），不是
+// primal::graphics::camera（旧 platform_interface handle）。
+primal::camera::component cc{
+    primal::camera::camera_component_id{ static_cast<id::id_type>(eid) }
+};
+if (!cc.is_valid()) return;  // 不太可能，但防御性返回避免后续崩溃
+
+// View matrix = inverse of camera entity's world matrix.
+// 注意：transform::get_transform_matrices 给出的 inv_world 在某些 entity 状态下
+// 会被填成 NaN（LightSyncSystem 只用 world，没用 inv_world，所以这个 bug 一直没暴露）。
+// 这里我们只取 world，自己算 inverse —— 对正常 Transform 来说 world 是可逆的。
+math::m4x4 world, inv_world_unused;
+transform::get_transform_matrices(eid, world, inv_world_unused);
+const math::m4x4 view_matrix = rhi::math::Inverse(world);
+
+// Projection matrix 从原始组件参数现场构造。
+math::m4x4 proj_matrix;
+const graphics::camera::type ptype = cc.projection_type();
+if (ptype == graphics::camera::perspective) {
+    proj_matrix = rhi::math::MatrixPerspective(cc.field_of_view(),
+                                               cc.aspect_ratio(),
+                                               cc.near_z(),
+                                               cc.far_z());
+} else
+#if !defined(__EMSCRIPTEN__)
+{
+    // Orthographic：Camera.cpp 把 ortho 的 width 存在 fovs[]、height 存在 aspects[]，
+    // 通过 view_width()/view_height() 暴露。
+    proj_matrix = math::createOrthographicLH(cc.view_width(),
+                                              cc.view_height(),
+                                              cc.near_z(),
+                                              cc.far_z());
+}
+#else
+; // WASM build lacks simd-based orthographic helper — perspective-only.
+#endif
+
+view.SetViewMatrix(view_matrix);
+view.SetProjectionMatrix(proj_matrix);
+return;  // 第一个 Camera 胜出，无需继续遍历
+}
+// 没有 Camera entity — no-op。
 }
 
 } // namespace primal::graphics::scene_sync

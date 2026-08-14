@@ -27,6 +27,17 @@ public:
         flags_ = flags_ | RGResourceFlags::Imported;
     }
 
+    /**
+     * @brief 设置导入资源的初始 GPU 状态
+     * @details 用于 ImportTexture/ImportBuffer 时显式声明资源在导入时的真实状态。
+     *          RenderGraph::InsertBarriers 会基于此插入正确的 from-initial-state barrier。
+     *          不设置则默认 Unknown,RG 只能生成 beforeState=Unknown 的 barrier,
+     *          在 Metal Render encoder 中是 no-op,跨 encoder 类型(Compute→Render)可能
+     *          无法正确同步,导致采样到 stale/clear 数据。
+     */
+    void SetInitialState(rhi::ResourceState state) { initialState_ = state; }
+    rhi::ResourceState GetInitialState() const { return initialState_; }
+
     // 获取实际的 GPU 资源 (如果已分配)
     rhi::ResourceHandle GetPhysicalHandle() const { return physicalHandle_; }
     void SetPhysicalHandle(rhi::ResourceHandle handle) { physicalHandle_ = handle; }
@@ -39,7 +50,7 @@ public:
     void SetLastPass(RenderGraphPass* pass) { lastPass_ = pass; }
     RenderGraphPass* GetFirstPass() const { return firstPass_; }
     RenderGraphPass* GetLastPass() const { return lastPass_; }
-    
+
     void SetProducer(RenderGraphPass* pass) { producer_ = pass; }
     RenderGraphPass* GetProducer() const { return producer_; }
 
@@ -54,6 +65,9 @@ protected:
     RGResourceFlags flags_ = RGResourceFlags::None;
 
     rhi::ResourceHandle physicalHandle_ = rhi::handles::INVALID_RESOURCE; // 实际分配或导入的资源句柄
+
+    // 导入资源在导入时的真实 GPU 状态(Unknown 表示调用方未声明,RG 视为不可靠)
+    rhi::ResourceState initialState_ = rhi::ResourceState::Unknown;
 
     // 生命周期信息
     RenderGraphPass* firstPass_ = nullptr;

@@ -112,6 +112,16 @@ public:
     void SetConfig(const CullingConfig& config) { config_ = config; }
     void SetLODBias(float bias) { config_.lod_bias = bias; }
 
+    // Debug bypass for the gray-white bug investigation. When true, the next
+    // Execute() call will set CullingConstants.force_pass_all = 1, which stage4
+    // of GPUCullingPipeline.wgsl consumes to skip the instance-visibility check
+    // and the far-plane cluster cull. Effect: all clusters from all instances
+    // survive the culling pipeline and reach DrawIndirect. Use to bisect whether
+    // the gray-white bug originates in stage4's visibility/far-plane logic or
+    // downstream (stage5 occlusion, stage6/7 compact+indirect, or post-cull).
+    void SetForcePassAll(bool enabled) { force_pass_all_debug_ = enabled; }
+    bool IsForcePassAll() const { return force_pass_all_debug_; }
+
     // Set HZB System for occlusion culling
     void SetHZBSystem(class HZBSystem* hzb_system) {
         hzb_system_ = hzb_system;
@@ -204,6 +214,10 @@ private:
     bool backface_descriptor_sets_created_{ false };
     bool hzb_bindings_updated_{ false };
     u32 matrix_print_count_{ 0 };
+
+    // Reflects CullingConstants.force_pass_all for the diagnostic toggle.
+    // Default false so production behavior is unchanged.
+    bool force_pass_all_debug_{false};
 
     // Culling constants structure matching Metal shader layout
     struct CullingConstants {

@@ -22,6 +22,8 @@
 #include "MetalDescriptorSetLayout.h"
 #include "MetalPipelineLayout.h"
 #include "MetalRenderPass.h"
+#include "MetalStagingAllocator.h"
+#include "Neural/MetalNeuralWrapper.h"
 #include "../../Core/RHIDevice.h"
 #include "../../Core/RHIAllocator.h"
 #include "../../Core/RHIAdaptiveMemoryPool.h"
@@ -69,6 +71,19 @@ public:
      * @brief 获取传输队列
      */
     MTL::CommandQueue* GetTransferQueue() const { return transferQueue_; }
+
+    /**
+     * @brief 获取 staging allocator (per-frame ring pool)
+     * @details Used by MetalBuffer/MetalTexture slow paths to avoid blocking
+     *          waitUntilCompleted on Private-storage updates. Allocator must
+     *          be initialized before any UpdateBufferData/UpdateTextureData call.
+     */
+    MetalStagingAllocator& GetStagingAllocator() { return stagingAllocator_; }
+
+    /**
+     * @brief 获取 MTL4 神经渲染 wrapper(detect-only 占位)
+     */
+    MetalNeuralWrapper& GetNeuralWrapper() { return neuralWrapper_; }
 
     /**
      * @brief 获取缓冲区对象 (内部使用)
@@ -280,6 +295,7 @@ protected:
     // 内存管理辅助
     void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size);
     void unmapBufferImpl(ResourceHandle handle);
+    void setBufferDirtySizeImpl(ResourceHandle handle, u64 size) { (void)handle; (void)size; }
     void destroyTextureImpl(ResourceHandle handle);
 
     /**
@@ -316,6 +332,12 @@ private:
     // === 显存管理 ===
     class RHIAdaptiveMemoryPool* memoryPool_{nullptr}; ///< 自适应内存池 (Shared)
     MTL::Heap* heap_{nullptr};                         ///< Metal堆 (Shared)
+
+    // Per-frame staging allocator (eliminates waitUntilCompleted from slow paths)
+    MetalStagingAllocator stagingAllocator_;
+
+    // MTL4 / 神经渲染 wrapper(detect-only 占位)
+    MetalNeuralWrapper neuralWrapper_;
     
     std::atomic<u32> currentFrameIndex_{0};             ///< 当前帧索引
     

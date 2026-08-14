@@ -1,9 +1,19 @@
 #include "StaticProbeVolume.h"
 
+#include <cmath>
 #include <cstring>
 #include <fstream>
 
 namespace primal::graphics::lumen {
+
+static constexpr float PI_F{3.14159265358979323846f};
+// SH9 DC coefficient for a uniform radiance L projected over the sphere:
+// L_0 = (1/4π) ∫ L · Y_0 dΩ = L · 4π · Y_0 = L · 4π / (2√π) = L · 2√π
+// Higher SH bands integrate to zero, so only L0 is non-zero.
+static inline math::v3 UniformSkySH0(const math::v3& sky_color) {
+    const float sh0_scale = 2.0f * std::sqrt(PI_F);
+    return math::v3{sky_color.x * sh0_scale, sky_color.y * sh0_scale, sky_color.z * sh0_scale};
+}
 
 // ============================================================================
 // Initialize / Shutdown
@@ -311,6 +321,62 @@ bool StaticProbeVolume::LoadFromFile(const char* path) {
 
     is_loaded_ = true;
     return true;
+}
+
+// ============================================================================
+// FillWithSkySeed — uniform sky seed (no ray tracing)
+// ============================================================================
+// Bypass the CPU BVH bake on WASM where ASYNCIFY + single-threaded JS makes
+// the full bake take 20+ minutes. The runtime DDGI trace in Mode 11
+// converges from any non-zero seed within ~60 frames, and Mode 10 displays
+// this seed as uniform ambient sky light.
+//
+// Intensity: seed uses sky_color × kSeedAttenuation rather than raw sky.
+// Full-sky L0 reconstructed via shDot4 returns exactly sky_color, and
+// DeferredLighting_Meshlet.wgsl applies `color += albedo × indirect` — so
+// a raw-sky seed adds ~0.5 × sky per pixel even on indoor surfaces, which
+// reads as bright as direct sunlight. The 0.15 attenuation gives subtle
+// ambient (~7% of full sky after albedo) that Mode 11 brightens via trace
+// convergence and Mode 10 leaves as a dim flat fill.
+void StaticProbeVolume::FillWithSkySeed(const math::v3& sky_color, float ray_max_distance) {
+    const u32 pc = ProbeCount();
+    if (pc == 0) return;
+
+    constexpr float kSeedAttenuation = 0.15f;
+    const math::v3 attenuated_sky{
+        sky_color.x * kSeedAttenuation,
+        sky_color.y * kSeedAttenuation,
+        sky_color.z * kSeedAttenuation};
+    const math::v3 sh0 = UniformSkySH0(attenuated_sky);
+
+    // Irradiance + sky_sh: L0 = sky_color * 2*sqrt(pi), L1..L8 = 0
+    for (u32 p = 0; p < pc; ++p) {
+        irradiance_data_[p * 9 + 0] = sh0;
+        for (u32 i = 1; i < 9; ++i) {
+            irradiance_data_[p * 9 + i] = math::v3{0.0f};
+        }
+        sky_sh_data_[p * 9 + 0] = sh0;
+        for (u32 i = 1; i < 9; ++i) {
+            sky_sh_data_[p * 9 + i] = math::v3{0.0f};
+        }
+    }
+
+    // Depth: no occlusion → max distance, zero variance
+    for (u32 p = 0; p < pc; ++p) {
+        for (u32 oct = 0; oct < 64; ++oct) {
+            depth_mean_data_[p * 64 + oct] = ray_max_distance;
+            depth_var_data_[p * 64 + oct] = 0.0f;
+        }
+        sky_factor_data_[p] = 1.0f;
+    }
+
+    // Global sky SH (9 coeffs) — L0 only
+    for (u32 i = 0; i < 9; ++i) {
+        sky_sh_[i] = (i == 0) ? sh0 : math::v3{0.0f};
+    }
+
+    is_loaded_ = true;
+    gpu_uploaded_ = false;
 }
 
 } // namespace primal::graphics::lumen

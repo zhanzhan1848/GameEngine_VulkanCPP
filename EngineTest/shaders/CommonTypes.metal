@@ -1,3 +1,5 @@
+#ifndef COMMON_TYPES_METAL
+#define COMMON_TYPES_METAL
 
 #define USE_BOUNDING_SPHERES 1
 #define SHADOWING_MAPPING 1
@@ -173,3 +175,4 @@ static_assert((sizeof(LightParameters) % 16) == 0, "Make sure LightParameters is
 // static_assert((sizeof(LightCullingLightInfo) % 16) == 0, "Make sure LightCullingLightInfo is formatted in 16-byte chunks without any implicit padding.");
 static_assert((sizeof(DirectionalLightParameters) % 16) == 0, "Make sure DirectionalLightParameters is formatted in 16-byte chunks without any implicit padding.");
 #endif
+#endif // COMMON_TYPES_METAL

@@ -1,3 +1,5 @@
+- 请使用第一性原理思考。你不能总是假设我非常清楚自己想要什么和该怎么得到。请保持审慎，从原始需求和问题出发，如果动机和目标不清晰，停下来和我讨论。如果目标清晰但是路径不是最短，告诉我，并且建议更好的办法
+
 ## Workflow Orchestration(工作流编排)
 
 ### 1.Plan Mode Default (计划模式优先)
@@ -45,3 +47,13 @@
 - Simplicity First: Make every change as simple as possible. Impact minimal code.
 - No Laziness: Find root causes. No temporary fixes. Senior developer standards.
 - Minimal Impact: Changes should only touch what's necessary. Avoid introducing bugs.
+- Core Layer as Capability Provider (核心层只提供能力): 核心层(`Engine/Core`、`Engine/Components`、`Engine/Graphics` 等所有引擎核心模块)统一作为能力提供者,不实现应用逻辑。所有能力通过稳定接口暴露给 UI 层、外部脚本层、外部绑定去组合使用。所有核心模块的设计与开发必须遵循此原则。
+
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)

@@ -424,10 +424,10 @@ bool TestNaniteStreamingPipeline::InitializeWindowAndRenderSystem() {
 
     renderWidth_ = window_.width();
     renderHeight_ = window_.height();
-#ifdef __APPLE__
-    renderWidth_ *= 2;
-    renderHeight_ *= 2;
-#endif
+    // NOTE: previously did `renderWidth_ *= 2` on Apple for retina backing, but MTKView
+    // resets drawableSize to bounds.size * contentsScale after window becomes key,
+    // leaving drawable at logical size (1280x720) while render targets are 2x (2560x1440).
+    // The mismatch trips Metal debug's SetScissor validation. Render at logical size for now.
 
     graphics::RenderSystemInitInfo sysInfo;
     sysInfo.device = device_;
@@ -724,6 +724,33 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
         return false;
     }
 
+    // === No-Tonemap Blit Pipeline (samples LDR input directly, no tonemap/gamma) ===
+    // Used by mode 6 mode_diag_=1 where input is fusion_output_ (already tonemapped by fragmentFusion).
+    // Using fragmentBlit here would double-tonemap and crush spatial variation to near-uniform gray.
+    {
+        const shader_file_info noTonemap_ps_info{ "DeferredLighting.metal", "fragmentBlitNoTonemap", shader_type::pixel };
+        if (CompileShader(noTonemap_ps_info)) {
+            primal::graphics::rhi::GraphicsPipelineDesc noTonemapDesc{};
+            noTonemapDesc.layout = blit_layout_;
+            noTonemapDesc.vertexShader = shaderVariantMap[std::string(blit_vs_info.file_name) + ":" + blit_vs_info.function];
+            noTonemapDesc.pixelShader = shaderVariantMap[std::string(noTonemap_ps_info.file_name) + ":" + noTonemap_ps_info.function];
+            noTonemapDesc.renderTargetFormats[0] = primal::graphics::rhi::DataFormat::BGRA8_UNorm;
+            noTonemapDesc.renderTargetCount = 1;
+            noTonemapDesc.depthStencilFormat = primal::graphics::rhi::DataFormat::Unknown;
+            noTonemapDesc.enableDepthTest = false;
+            noTonemapDesc.enableDepthWrite = false;
+            noTonemapDesc.cullMode = primal::graphics::rhi::CullMode::None;
+            noTonemapDesc.vertexAttributes.clear();
+            noTonemapDesc.vertexBindings.clear();
+            blit_no_tonemap_pipeline_ = device_->CreateGraphicsPipeline(noTonemapDesc);
+            if (blit_no_tonemap_pipeline_ == primal::graphics::rhi::handles::INVALID_PIPELINE) {
+                std::cerr << "[TestNanite] Warning: Failed to create blit_no_tonemap pipeline (falling back to blit_pipeline_ for mode 6)" << std::endl;
+            }
+        } else {
+            std::cerr << "[TestNanite] Warning: Failed to compile fragmentBlitNoTonemap" << std::endl;
+        }
+    }
+
     //std::cout << "[TestNanite] Blit Pipeline initialized successfully" << std::endl;
 
     // === Composite Blit Pipeline (scene + SSGI) ===
@@ -823,13 +850,13 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
             }
         }
 
-        // Pass 2: Final fusion (2 texture bindings, BGRA8 output)
+        // Pass 2: Final fusion (3 texture bindings: scene, indirect, volumeScatter; BGRA8 output)
         if (fusion_ok) {
-            primal::graphics::rhi::DescriptorSetLayoutBinding fus_bindings[2];
-            for (u32 i = 0; i < 2; ++i)
+            primal::graphics::rhi::DescriptorSetLayoutBinding fus_bindings[3];
+            for (u32 i = 0; i < 3; ++i)
                 fus_bindings[i] = { i, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr };
 
-            primal::graphics::rhi::DescriptorSetLayoutDesc fus_set_desc{ .bindingCount = 2, .bindings = fus_bindings };
+            primal::graphics::rhi::DescriptorSetLayoutDesc fus_set_desc{ .bindingCount = 3, .bindings = fus_bindings };
             fusion_fragment_set_layout_ = device_->CreateDescriptorSetLayout(fus_set_desc);
 
             primal::graphics::rhi::PipelineLayoutDesc fus_pl_desc{ .setLayoutCount = 1, .setLayouts = &fusion_fragment_set_layout_ };
@@ -856,7 +883,7 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
                     primal::graphics::rhi::DescriptorSetDesc dsDesc{ .layout = fusion_fragment_set_layout_ };
                     fusion_fragment_descriptor_set_[b] = device_->CreateDescriptorSet(dsDesc);
                 }
-                // Full-res fusion output
+                // Full-res fusion output (LDR: fragmentFusion tonemaps once)
                 TextureDesc outputDesc{};
                 outputDesc.size = {renderWidth_, renderHeight_, 1};
                 outputDesc.format = DataFormat::BGRA8_UNorm;
@@ -1114,6 +1141,18 @@ bool TestNaniteStreamingPipeline::InitializeSSGIPipeline() {
             reinterpret_cast<unsigned char*>(&blackPixel), true);
         if (ssgi_black_texture_ == handles::INVALID_RESOURCE) {
             std::cerr << "[LumenSSGI] Warning: Failed to create black fallback texture" << std::endl;
+        }
+    }
+
+    // 2b. Create volume scatter fallback texture (0,0,0,1) for fragmentFusion shader
+    // Shader: (scene + indirect) * vol.a + vol.rgb ; vol.a=1 passes through scene+indirect
+    // u32 little-endian RGBA8/BGRA8 byte layout: 0x00 0x00 0x00 0xFF → rgb=0, a=1
+    {
+        u32 volPixel = 0xFF000000;
+        volume_scatter_fallback_texture_ = CreateTextureFromData(device_, 1, 1,
+            reinterpret_cast<unsigned char*>(&volPixel), true);
+        if (volume_scatter_fallback_texture_ == handles::INVALID_RESOURCE) {
+            std::cerr << "[LumenSSGI] Warning: Failed to create volume scatter fallback texture" << std::endl;
         }
     }
 
@@ -2882,7 +2921,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     // changes the light direction, causing walls to go black (NdotL <= 0).
     // lightForward: the direction light TRAVELS (emission direction, e.g. downward).
     // Shader expects lightPos.xyz = direction FROM surface TO light (opposite of emission).
-    primal::math::v3 lightForward = Normalize(primal::math::v3{-0.9f, 1.5f, -0.8f});
+    primal::math::v3 lightForward = Normalize(primal::math::v3{-0.9f, -1.5f, -0.8f});
     primal::math::v4 sharedLightPos{-lightForward.x, -lightForward.y, -lightForward.z, 0.0f}; // w=0 = directional, negate for "to light"
     primal::math::v3 sharedLightDir = lightForward; // Emission direction for shadow camera lookAt
     primal::math::v3 sharedLightUp = {0.0f, 1.0f, 0.0f};
@@ -3462,12 +3501,52 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
     rendergraph::RGResourceHandle deferredOutputRG;
     if (currentDeferredTex != rhi::handles::INVALID_RESOURCE) {
-        deferredOutputRG = graph.ImportResource("DeferredOutput", currentDeferredTex);
+        // 三缓冲纹理: 上一帧 FinalBlit 读完离开 ShaderResource 状态
+        // 显式声明 initialState 让 RG 插入正确的 SR→RT 转换 barrier (macOS 26 SDK
+        // 不再为 imported texture 自动推断 beforeState)
+        deferredOutputRG = graph.ImportResource("DeferredOutput", currentDeferredTex,
+                                                  rhi::ResourceState::ShaderResource);
     }
     // Import delayed texture for fusion reading
     rendergraph::RGResourceHandle delayedOutputRG;
     if (delayedDeferredTex != rhi::handles::INVALID_RESOURCE && delayedDeferredTex != currentDeferredTex) {
-        delayedOutputRG = graph.ImportResource("DeferredOutputDelayed", delayedDeferredTex);
+        delayedOutputRG = graph.ImportResource("DeferredOutputDelayed", delayedDeferredTex,
+                                                rhi::ResourceState::ShaderResource);
+    }
+
+    // CRITICAL: Import GBuffer depth so DeferredLighting can declare a read of it.
+    // Without this, the render graph inserts no barrier between GBuffer depth write
+    // and DeferredLighting's depth sample. macOS 26 SDK Metal tracks resources more
+    // strictly than macOS 14 — without an explicit RG read declaration, the GPU reads
+    // stale (clear-value 1.0) depth, causing every fragment to discard_fragment()
+    // → fully black deferred output.
+    rendergraph::RGResourceHandle deferredDepthRG;
+    if (gpuDrawPipeline_) {
+        auto depthTex = gpuDrawPipeline_->GetGBufferDepthSampleable();
+        if (depthTex != rhi::handles::INVALID_RESOURCE) {
+            // GBuffer depth 由 gpuDrawPipeline 在帧首作为 DepthStencil 写入,导入时是 DepthStencil 状态
+            deferredDepthRG = graph.ImportResource("GBufferDepth_Deferred", depthTex,
+                                                     rhi::ResourceState::DepthStencil);
+        }
+    }
+    // Also import GBuffer albedo/normal/ORM textures for the same reason.
+    rendergraph::RGResourceHandle deferredAlbedoRG;
+    rendergraph::RGResourceHandle deferredNormalRG;
+    rendergraph::RGResourceHandle deferredOrmRG;
+    if (gpuDrawPipeline_) {
+        auto albedoTex = gpuDrawPipeline_->GetGBufferAlbedo();
+        auto normalTex = gpuDrawPipeline_->GetGBufferNormal();
+        auto ormTex = gpuDrawPipeline_->GetGBufferORM();
+        // GBuffer 颜色附件由 GBuffer pass 写为 RenderTarget
+        if (albedoTex != rhi::handles::INVALID_RESOURCE)
+            deferredAlbedoRG = graph.ImportResource("GBufferAlbedo_Deferred", albedoTex,
+                                                      rhi::ResourceState::RenderTarget);
+        if (normalTex != rhi::handles::INVALID_RESOURCE)
+            deferredNormalRG = graph.ImportResource("GBufferNormal_Deferred", normalTex,
+                                                      rhi::ResourceState::RenderTarget);
+        if (ormTex != rhi::handles::INVALID_RESOURCE)
+            deferredOrmRG = graph.ImportResource("GBufferORM_Deferred", ormTex,
+                                                   rhi::ResourceState::RenderTarget);
     }
 
     if (deferred_pipeline_ != rhi::handles::INVALID_PIPELINE &&
@@ -3482,12 +3561,27 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         graph.AddPass<DeferredPassData>("DeferredLighting",
             graphics::rendergraph::RGPassType::Graphics,
             graphics::rendergraph::RGPassCategory::Lighting,
-            [deferredOutputRG, shadowVisibilityRG](DeferredPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+            [deferredOutputRG, shadowVisibilityRG,
+             deferredDepthRG, deferredAlbedoRG, deferredNormalRG, deferredOrmRG](DeferredPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
                 data.output = builder.Write(deferredOutputRG, rhi::ResourceState::RenderTarget);
 
                 // Read pre-filtered shadow visibility from ShadowFilter pass
                 if (shadowVisibilityRG.IsValid()) {
                     builder.Read(shadowVisibilityRG, rhi::ResourceState::ShaderResource);
+                }
+                // Declare depth + GBuffer reads so the RG inserts proper barriers
+                // after GBuffer write (fixes stale-depth-on-sample after macOS 26 SDK upgrade).
+                if (deferredDepthRG.IsValid()) {
+                    builder.Read(deferredDepthRG, rhi::ResourceState::ShaderResource);
+                }
+                if (deferredAlbedoRG.IsValid()) {
+                    builder.Read(deferredAlbedoRG, rhi::ResourceState::ShaderResource);
+                }
+                if (deferredNormalRG.IsValid()) {
+                    builder.Read(deferredNormalRG, rhi::ResourceState::ShaderResource);
+                }
+                if (deferredOrmRG.IsValid()) {
+                    builder.Read(deferredOrmRG, rhi::ResourceState::ShaderResource);
                 }
 
                 graphics::rendergraph::RGRenderPassDesc rpDesc;
@@ -5040,7 +5134,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             }
         );
 
-        // Import full-res fusion output
+        // Import full-res fusion output (LDR tonemapped by fragmentFusion)
         rhi::TextureDesc fusionOutputDesc{};
         fusionOutputDesc.size = {renderWidth_, renderHeight_, 1};
         fusionOutputDesc.format = DataFormat::BGRA8_UNorm;
@@ -5081,11 +5175,14 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 cmd->SetViewport({ {0, 0}, {static_cast<float>(renderWidth_), static_cast<float>(renderHeight_)}, 0, 1 });
                 cmd->SetScissor({ {0, 0}, {renderWidth_, renderHeight_} });
 
-                DescriptorData params[2] = {
+                // Shader expects 3 textures (sceneColor, indirectColor, volumeScatter).
+                // Bind fallback (0,0,0,1) so vol.a=1 passes scene+indirect through.
+                DescriptorData params[3] = {
                     { 0, DescriptorType::SampledImage, sceneHandle },
                     { 1, DescriptorType::SampledImage, indirectHandle },
+                    { 2, DescriptorType::SampledImage, volume_scatter_fallback_texture_ },
                 };
-                UpdateDescriptorSet(device_, fusion_fragment_descriptor_set_[cbIdx], params, 2);
+                UpdateDescriptorSet(device_, fusion_fragment_descriptor_set_[cbIdx], params, 3);
                 cmd->BindGraphicsPipeline(fusion_fragment_pipeline_);
                 const rhi::DescriptorSetHandle gfx_sets[] = { fusion_fragment_descriptor_set_[cbIdx] };
                 cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, fusion_fragment_layout_, 0, 1, gfx_sets, 0, nullptr);
@@ -5329,7 +5426,12 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     }
                     DescriptorData blit_params[1] = { { 0, DescriptorType::SampledImage, fusionOut } };
                     UpdateDescriptorSet(device_, blit_descriptor_set_[cbIdx], blit_params, 1);
-                    cmd->BindGraphicsPipeline(blit_pipeline_);
+                    // Use blit_no_tonemap_pipeline_ because fusion_output_ is already tonemapped
+                    // by fragmentFusion. Using blit_pipeline_ (fragmentBlit) would tonemap again,
+                    // crushing spatial variation to near-uniform gray.
+                    rhi::PipelineHandle pipe = (blit_no_tonemap_pipeline_ != rhi::handles::INVALID_PIPELINE)
+                        ? blit_no_tonemap_pipeline_ : blit_pipeline_;
+                    cmd->BindGraphicsPipeline(pipe);
                     const rhi::DescriptorSetHandle blit_sets[] = { blit_descriptor_set_[cbIdx] };
                     cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, blit_layout_, 0, 1, blit_sets, 0, nullptr);
                     cmd->Draw(3, 0, 1, 0);
@@ -5408,8 +5510,12 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             // Mode 2: Scene only — simple blit of scene color
             // Mode 4: Albedo only — blit raw GBuffer albedo (no lighting)
             // Mode 5: Screen Probe GI — blit screen probe output directly
+            // Note: RG auto-barrier handles SR transitions for imported textures
+            // (engine fix: ImportTexture/ImportResource now accepts initialState,
+            //  see RenderGraph.cpp:InsertBarriers for the from-initial-state logic).
             if (ssgiVisMode_ == 2 || ssgiVisMode_ == 4 || ssgiVisMode_ == 5 || !data.ssgi_input.IsValid()) {
                 ResourceHandle blitTex = inputHandle;
+
                 // Mode 4: use raw GBuffer albedo instead of lit scene
                 if (ssgiVisMode_ == 4) {
                     auto albedoTex = gpuDrawPipeline_->GetGBufferAlbedo();
@@ -5417,6 +5523,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         // GBuffer albedo was written as RenderTarget by SceneRender.
                         // Must transition to ShaderResource before sampling in blit,
                         // otherwise Apple Silicon GPU faults on the state mismatch.
+                        // (This texture is not RG-tracked, so RG can't auto-barrier.)
                         rhi::ResourceBarrier albedoBarrier{};
                         albedoBarrier.resource = albedoTex;
                         albedoBarrier.beforeState = rhi::ResourceState::RenderTarget;
@@ -5426,12 +5533,19 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                         blitTex = albedoTex;
                     }
                 }
-                // Mode 5: use screen probe GI output
+                // Mode 5: use screen probe GI output (compute-written UAV)
                 if (ssgiVisMode_ == 5 && screenProbeGIPass_ && screenProbeGIPass_->IsInitialized()) {
                     auto spTex = screenProbeGIPass_->GetOutputTexture();
-                    // CHAIN TEST: try GBuffer depth instead to verify blit can display any texture
-                    // blitTex = gpuDrawPipeline_->GetGBufferDepthSampleable();
-                    blitTex = spTex;  // Use SPGI output
+                    if (spTex != rhi::handles::INVALID_RESOURCE) {
+                        // SPGI output is external to this RG — need explicit barrier.
+                        rhi::ResourceBarrier spBarrier{};
+                        spBarrier.resource = spTex;
+                        spBarrier.beforeState = rhi::ResourceState::UnorderedAccess;
+                        spBarrier.afterState = rhi::ResourceState::ShaderResource;
+                        spBarrier.subresource = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&spBarrier, 1);
+                    }
+                    blitTex = spTex;
                 }
                 DescriptorData blit_params[1] = {
                     { .binding = 0, .type = DescriptorType::SampledImage, .resource = blitTex }

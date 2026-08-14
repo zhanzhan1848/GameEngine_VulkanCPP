@@ -14,6 +14,13 @@ set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS"
 # 包含子目录
 add_subdirectory(UnitTests)
 add_subdirectory(IntegrationTests)
+# Lua backend test requires third_party/lua submodule sources. Skip if missing
+# (e.g. offline environments where submodule cannot be cloned).
+if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/lua/lapi.c")
+    add_subdirectory(IntegrationTests/ScriptLuaBackend)
+else()
+    message(WARNING "third_party/lua/lapi.c not found — skipping ScriptLuaBackend tests (submodule not initialized).")
+endif()
 
 # 创建自定义目标来运行所有测试
 add_custom_target(run_all_tests

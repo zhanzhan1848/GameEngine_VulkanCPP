@@ -136,6 +136,8 @@ bool read_file(std::filesystem::path path, std::unique_ptr<u8[]>& data, u64& siz
 
 bool test_initialize()
 {
+	script::initialize();
+
 	// 尝试编译着色器，如果失败则自动重试几次
 	constexpr int max_retries = 3;
 	int retry_count = 0;
@@ -255,6 +257,8 @@ void test_shutdown()
 	// 先 graphics::shutdown() (释放 metal::core 对 _external_device 的 retain + 所有 Metal 资源)
 	// 再 shutdown_rhi() (释放 rhi::MetalDevice 对 mtlDevice_ 的所有权)
 	graphics::shutdown_rhi();
+
+	script::shutdown();
 }
 
 bool Engine_Test::initialize()

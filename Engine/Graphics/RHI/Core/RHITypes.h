@@ -551,7 +551,8 @@ enum class DescriptorType : u8 {
     StorageBuffer = 8,
     UniformBufferDynamic = 9,
     StorageBufferDynamic = 10,
-    InputAttachment = 11
+    InputAttachment = 11,
+    SampledDepthImage = 12
 };
 
 /**
@@ -564,6 +565,14 @@ struct DescriptorSetLayoutBinding {
     ShaderStage stageFlags{ ShaderStage::Unknown };
     const SamplerHandle* immutableSamplers{ nullptr };
     DescriptorBindingFlags flags{ DescriptorBindingFlags::None };
+    DataFormat format{ DataFormat::RGBA16_Float }; // For StorageImage bindings in Dawn backend
+    bool readonly{ false }; // true = StorageImage read-only access (Dawn: ReadOnly vs WriteOnly)
+    bool isArray{ false }; // true = StorageImage/2DArray view dimension
+    bool isCube{ false }; // true = SampledImage uses Cube view dimension
+    bool is3D{ false }; // true = SampledImage/StorageImage uses 3D view dimension (texture_3d)
+    bool unfilterableFloat{ false }; // true = SampledImage uses UnfilterableFloat sample type (required for R32Float in WebGPU)
+    bool isNonFiltering{ false }; // true = Sampler uses NonFiltering binding type (required to sample depth textures in WebGPU)
+    u64 minBindingSize{ 0 }; // For buffer types: minimum buffer size (0 = infer from shader)
 };
 
 /**
@@ -836,14 +845,10 @@ struct Rect {
  * @brief 清除值联合体
  */
 struct ClearValue {
-    union {
-        math::v4 color;      ///< 颜色清除值 (r, g, b, a)
-        struct {
-            float depth;     ///< 深度清除值
-            u32 stencil; ///< 模板清除值
-        };
-        math::v4 depthStencil; ///< 深度模板清除值
-    };
+    math::v4 color{0, 0, 0, 0};
+    float depth{1.0f};
+    u32 stencil{0};
+    math::v4 depthStencil{1.0f, 0, 0, 1.0f};
 };
 
 /**

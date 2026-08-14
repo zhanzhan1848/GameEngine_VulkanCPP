@@ -17,6 +17,14 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     if (initialized_) return true;
     device_ = device;
 
+#ifdef __EMSCRIPTEN__
+    // LineBatchRenderer is a debug overlay and is not yet ported to WGSL.
+    // Mark initialized so the renderer doesn't keep retrying; draw calls
+    // become no-ops. ForwardSceneRenderer::Initialize ignores our return
+    // value anyway, but we keep the contract honest.
+    initialized_ = true;
+    return true;
+#else
     // Load shaders
     const std::filesystem::path shader_path =
         std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
@@ -101,6 +109,7 @@ bool LineBatchRenderer::create_pipeline(DataFormat target_format) {
 
     pipeline_target_format_ = target_format;
     return true;
+#endif
 }
 
 void LineBatchRenderer::Shutdown() {
@@ -143,8 +152,13 @@ void LineBatchRenderer::AddLine(const math::v3& a, const math::v3& b, u32 rgb) {
 void LineBatchRenderer::Render(RHICommandBuffer* cmd, const math::m4x4& view_proj,
                                DataFormat target_format) {
     if (!initialized_ || line_vertices_.empty()) return;
+#ifdef __EMSCRIPTEN__
+    // WASM build skips pipeline creation — nothing to draw.
+    return;
+#else
     if ((pipeline_ == handles::INVALID_PIPELINE || pipeline_target_format_ != target_format) &&
         !create_pipeline(target_format)) return;
+#endif
 
     const u32 vertex_count = static_cast<u32>(line_vertices_.size());
 

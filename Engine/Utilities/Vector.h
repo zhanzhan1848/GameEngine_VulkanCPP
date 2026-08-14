@@ -1,5 +1,6 @@
 #pragma once
 #include "CommonHeaders.h"
+#include <type_traits>
 
 namespace primal::utl
 {
@@ -170,14 +171,37 @@ namespace primal::utl
 		{
 			if (new_capacity > _capacity)
 			{
-				// NOTE: realoc() will automatically copy the data in the buffer
-				//		 if a new region of memory is allocated.
-				void* new_buffer{ realloc(_data, new_capacity * sizeof(T)) };
-				assert(new_buffer);
-				if (new_buffer)
+				if constexpr (std::is_trivially_copyable_v<T> || !std::is_move_constructible_v<T>)
 				{
-					_data = static_cast<T*>(new_buffer);
-					_capacity = new_capacity;
+					// Trivially copyable: realloc's bitwise copy is safe and efficient.
+					// Non-move-constructible (e.g. Metal RHI types with deleted copy/move):
+					// these are "trivially relocatable" in practice, so realloc works.
+					void* new_buffer{ realloc(_data, new_capacity * sizeof(T)) };
+					assert(new_buffer);
+					if (new_buffer)
+					{
+						_data = static_cast<T*>(new_buffer);
+						_capacity = new_capacity;
+					}
+				}
+				else
+				{
+					// Move-constructible but not trivially copyable (std::unique_ptr,
+					// std::string, etc.): realloc's bitwise copy is UB because it frees
+					// old memory without running destructors, leaving dangling pointers.
+					T* new_buffer{ static_cast<T*>(malloc(new_capacity * sizeof(T))) };
+					assert(new_buffer);
+					if (new_buffer)
+					{
+						for (u64 i = 0; i < _size; ++i)
+						{
+							new (std::addressof(new_buffer[i])) T(std::move(_data[i]));
+							if constexpr (destruct) _data[i].~T();
+						}
+						if (_data) free(_data);
+						_data = new_buffer;
+						_capacity = new_capacity;
+					}
 				}
 			}
 		}
@@ -393,7 +417,7 @@ namespace primal::utl
 		}
 
 		// Indexing operator. Returns a reference to the item at specified index.
-		[[nodiscard]] constexpr T& operator[](u64 index) 
+		[[nodiscard]] constexpr T& operator[](u64 index)
 		{
 			assert(_data && index < _size);
 			return _data[index];

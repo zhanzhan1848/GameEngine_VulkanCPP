@@ -295,7 +295,7 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view) {
 
     // Forward Rendering
     const auto& swapDesc = swapChain_->GetDesc();
-    forwardRenderer_.Render(cmdBuffer, scene, view, backBuffer, depthStencilTexture_, materialInstances_, currentFrameIndex_, swapDesc.width, swapDesc.height);
+    forwardRenderer_.Render(cmdBuffer, scene, view, backBuffer, rhi::handles::INVALID_RESOURCE, depthStencilTexture_, materialInstances_, currentFrameIndex_, swapDesc.width, swapDesc.height);
     cmdBuffer->End();
     auto recordEnd = std::chrono::high_resolution_clock::now();
     

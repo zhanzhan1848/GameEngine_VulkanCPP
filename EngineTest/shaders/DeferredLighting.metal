@@ -561,18 +561,22 @@ fragment float4 fragmentFusionIndirect(
     if (ssao <= 0.0f) ssao = 1.0f;
     float ao = pow(ssao, 1.5f);
 
-    float3 ssgi_irr  = ssgi4.rgb;
-    float  ssgi_hit  = ssgi4.a;
-    float  ssgi_conf = saturate(1.0f - ssgi_hit / 2.0f);
+    // SSGI alpha encodes average hit distance in world units (range 0..max_trace_distance,
+    // default 30). Older formula `1 - hit/2.0` saturated to 0 for any non-trivial hit,
+    // zeroing SSGI contribution. Match fragmentBlitComposite (mode 0): use raw irradiance.
+    float3 ssgi_irr = ssgi4.rgb;
+
     albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
-    float3 indirect = albedo * (ddgi * 0.08f + spgi * 0.5f + ssgi_irr * ssgi_conf * 0.3f);
+    float3 indirect = albedo * (ddgi * 0.08f + spgi * 0.5f + ssgi_irr * 0.3f);
     indirect *= ao;
 
     return float4(indirect, 1.0f);
 }
 
 // Fusion Pass 2 (full-res): scene + pre-combined indirect + volume scatter → tonemapped output
+// Tonemap happens here (single tonemap). FinalBlit's mode 6 path uses fragmentBlitNoTonemap
+// to sample this LDR result directly, avoiding double-tonemap.
 fragment float4 fragmentFusion(
     VertexOut in [[stage_in]],
     texture2d<float> sceneColor    [[texture(0)]],
@@ -584,12 +588,22 @@ fragment float4 fragmentFusion(
     float3 indirect = indirectColor.sample(s, in.uv).rgb;
     float4 vol     = volumeScatter.sample(s, in.uv);
 
-    // Beer-Lambert: attenuate scene by transmittance, add scattered light
     float3 result = (scene + indirect) * vol.a + vol.rgb;
     result = clamp(result, float3(0.0f), float3(64.0f));
     result = toneMap(result);
 
     return float4(result, 1.0f);
+}
+
+// Blit variant that samples LDR input directly (no tonemap, no gamma).
+// Used by FinalBlit for mode 6 mode_diag_=1, where input is fusion_output_ already tonemapped.
+fragment float4 fragmentBlitNoTonemap(
+    VertexOut in [[stage_in]],
+    texture2d<float> inputTex [[texture(0)]])
+{
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+    float3 color = inputTex.sample(s, in.uv).rgb;
+    return float4(color, 1.0);
 }
 
 // Pass 1: compute indirect lighting from GI sources (DDGI + SPGI + SSGI)

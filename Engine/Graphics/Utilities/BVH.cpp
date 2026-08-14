@@ -88,36 +88,95 @@ namespace primal::graphics::utl
         extent.y = bbox.max.y - bbox.min.y;
         extent.z = bbox.max.z - bbox.min.z;
 
-        int axis = 0;
-        if (extent.y > extent.x) axis = 1;
-        if (extent.z > extent.x && extent.z > extent.y) axis = 2;
+        // Try axes in decreasing-extent order. The previous code picked only
+        // the single longest axis; for clustered geometry (e.g. Sponza's
+        // statuary, where many triangle centers land on one side of the bbox
+        // midpoint) the median partition can fail and the function would bail,
+        // leaving one giant leaf. Observed on Sponza: max_leaf=129865 with
+        // only 2085 nodes — every ray through that leaf did ~130k triangle
+        // tests, which presented as a frozen application.
+        int axes[3];
+        if (extent.x >= extent.y && extent.x >= extent.z) {
+            axes[0] = 0;
+            axes[1] = (extent.y >= extent.z) ? 1 : 2;
+            axes[2] = (extent.y >= extent.z) ? 2 : 1;
+        } else if (extent.y >= extent.z) {
+            axes[0] = 1;
+            axes[1] = (extent.x >= extent.z) ? 0 : 2;
+            axes[2] = (extent.x >= extent.z) ? 2 : 0;
+        } else {
+            axes[0] = 2;
+            axes[1] = (extent.x >= extent.y) ? 0 : 1;
+            axes[2] = (extent.x >= extent.y) ? 1 : 0;
+        }
 
-        float split_pos = (axis == 0) ? (bbox.min.x + bbox.max.x) * 0.5f :
-                          (axis == 1) ? (bbox.min.y + bbox.max.y) * 0.5f :
-                                        (bbox.min.z + bbox.max.z) * 0.5f;
+        int i = (int)first_prim;
+        int j = (int)first_prim + (int)count - 1;
+        int chosen_axis = axes[0];
+        bool split_ok = false;
 
-        int i = first_prim;
-        int j = first_prim + count - 1;
-
-        while (i <= j)
+        for (int a = 0; a < 3; ++a)
         {
-            u32 tri_idx = m_primitive_indices[i];
-            float pos = (axis == 0) ? m_triangles[tri_idx].center.x :
-                        (axis == 1) ? m_triangles[tri_idx].center.y :
-                                      m_triangles[tri_idx].center.z;
+            int axis = axes[a];
+            float split_pos = (axis == 0) ? (bbox.min.x + bbox.max.x) * 0.5f :
+                              (axis == 1) ? (bbox.min.y + bbox.max.y) * 0.5f :
+                                            (bbox.min.z + bbox.max.z) * 0.5f;
 
-            if (pos < split_pos)
+            // Reset cursors for each attempt.
+            i = (int)first_prim;
+            j = (int)first_prim + (int)count - 1;
+
+            while (i <= j)
             {
-                i++;
+                u32 tri_idx = m_primitive_indices[i];
+                float pos = (axis == 0) ? m_triangles[tri_idx].center.x :
+                            (axis == 1) ? m_triangles[tri_idx].center.y :
+                                          m_triangles[tri_idx].center.z;
+
+                if (pos < split_pos)
+                {
+                    i++;
+                }
+                else
+                {
+                    std::swap(m_primitive_indices[i], m_primitive_indices[j]);
+                    j--;
+                }
             }
-            else
+
+            u32 left_count = (u32)(i - (int)first_prim);
+            if (left_count != 0 && left_count != count)
             {
-                std::swap(m_primitive_indices[i], m_primitive_indices[j]);
-                j--;
+                chosen_axis = axis;
+                split_ok = true;
+                break;
             }
         }
 
-        u32 left_count = i - first_prim;
+        if (!split_ok)
+        {
+            // All 3 axes failed median partition (triangle centers cluster on
+            // one side of every midpoint). Force a balanced split by sorting
+            // along the longest axis and cutting at the middle index. This
+            // guarantees progress: left_count is always in (0, count).
+            std::sort(m_primitive_indices.begin() + first_prim,
+                      m_primitive_indices.begin() + first_prim + count,
+                      [this, axes](u32 a, u32 b) {
+                          float pa = (axes[0] == 0) ? m_triangles[a].center.x :
+                                     (axes[0] == 1) ? m_triangles[a].center.y :
+                                                       m_triangles[a].center.z;
+                          float pb = (axes[0] == 0) ? m_triangles[b].center.x :
+                                     (axes[0] == 1) ? m_triangles[b].center.y :
+                                                       m_triangles[b].center.z;
+                          return pa < pb;
+                      });
+            i = (int)first_prim + (int)count / 2;
+            chosen_axis = axes[0];
+        }
+
+        u32 left_count = (u32)(i - (int)first_prim);
+        // Defensive: should never trigger after the fallback above, but keep
+        // the guard to prevent infinite recursion if the sort ever regresses.
         if (left_count == 0 || left_count == count) return;
 
         u32 left_idx = (u32)m_nodes.size();
@@ -127,13 +186,15 @@ namespace primal::graphics::utl
 
         m_nodes[left_idx].first_primitive = first_prim;
         m_nodes[left_idx].primitive_count = left_count;
-        
-        m_nodes[right_idx].first_primitive = i;
+
+        m_nodes[right_idx].first_primitive = (u32)i;
         m_nodes[right_idx].primitive_count = count - left_count;
 
         m_nodes[node_index].left = left_idx;
         m_nodes[node_index].right = right_idx;
         m_nodes[node_index].primitive_count = 0;
+
+        (void)chosen_axis;
 
         UpdateNodeBounds(left_idx);
         Subdivide(left_idx);
@@ -212,7 +273,7 @@ namespace primal::graphics::utl
     bool BVH::IntersectAny(const Ray& ray, float max_dist) const
     {
         if (m_nodes.empty()) return false;
-        
+
         // Local hit info for this check
         HitInfo hit;
         hit.t = max_dist;
@@ -255,6 +316,39 @@ namespace primal::graphics::utl
             }
         }
         return false;
+    }
+
+    BVH::Stats BVH::GetStats() const
+    {
+        Stats s{0, 0, 0, 0, 0};
+        if (m_nodes.empty()) return s;
+
+        // Depth-first walk with an explicit stack of (node_idx, depth).
+        struct StackEntry { u32 idx; u32 depth; };
+        StackEntry stack[128];
+        u32 stack_ptr = 0;
+        stack[stack_ptr++] = {0, 1};
+
+        while (stack_ptr > 0)
+        {
+            StackEntry e = stack[--stack_ptr];
+            const BVHNode& n = m_nodes[e.idx];
+            ++s.node_count;
+            if (n.IsLeaf())
+            {
+                ++s.leaf_count;
+                if (n.primitive_count > s.max_leaf_size) s.max_leaf_size = n.primitive_count;
+                s.total_prims += n.primitive_count;
+            }
+            if (e.depth > s.max_depth) s.max_depth = e.depth;
+            if (n.left != u32_invalid_id && n.primitive_count == 0) {
+                stack[stack_ptr++] = {n.left, e.depth + 1};
+            }
+            if (n.right != u32_invalid_id && n.primitive_count == 0) {
+                stack[stack_ptr++] = {n.right, e.depth + 1};
+            }
+        }
+        return s;
     }
 
     bool BVH::IntersectAABB(const Ray& ray, const AABB& aabb, float& t_enter) const

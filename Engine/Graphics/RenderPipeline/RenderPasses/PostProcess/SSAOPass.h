@@ -6,7 +6,7 @@ namespace primal::graphics::rendergraph {
     class RenderGraph;
 }
 
-namespace primal::graphics::PostProcess {
+namespace primal::graphics {
 
 using namespace rendergraph;
 
@@ -14,10 +14,13 @@ struct SSAOPassData {
     RGResourceHandle ssaoOutput;
 };
 
-/**
- * @brief Adds a Screen Space Ambient Occlusion (SSAO/SSDO) Pass
- * @details Uses Compute Shader to calculate occlusion based on Depth and Normal
- */
-const SSAOPassData& AddSSAOPass(RenderGraph& graph, RGResourceHandle normalDepth, RGResourceHandle albedo);
+namespace PostProcess {
 
-} // namespace primal::graphics::PostProcess
+const SSAOPassData& AddSSAOPass(RenderGraph& graph, RGResourceHandle depthTexture,
+                                  u32 width, u32 height, u32 frameIndex,
+                                  const math::m4x4& projMatrix, const math::m4x4& invProjMatrix);
+
+void ShutdownSSAOPass();
+
+} // namespace PostProcess
+} // namespace primal::graphics

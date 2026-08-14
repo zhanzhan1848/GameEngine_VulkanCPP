@@ -1,0 +1,73 @@
+#version 450 core
+
+// T4.6.5 part 17.4 — Vulkan port of EngineTest/shaders/VisibilityBufferResolve.metal
+// Compute kernel. Source fn is `main`; -e renames the SPIR-V entry point to
+// `ComputeMain` so the C++ loader finds it.
+//
+// Bindings (mirror Metal):
+//   texture(0): R32UINT visibility buffer  (uniform texel buffer / sampled image)
+//   texture(1): R32FLOAT depth buffer       (sampled image)
+//   texture(2): RGBA8 output color          (storage image, write-only)
+//   buffer(0):  UBO  DrawConstants
+//   buffer(1):  SSBO ClusterData[]
+
+struct ClusterData {
+    uint cluster_id;
+    vec3 center;
+    float radius;
+    uint primitive_count;
+    uint vertex_offset;
+    uint index_offset;
+};
+
+struct DrawConstants {
+    mat4 view_matrix;
+    mat4 proj_matrix;
+    mat4 world_matrix;
+    uint view_width;
+    uint view_height;
+    uint meshlet_count;
+    uint _pad;
+};
+
+layout(set = 0, binding = 0) uniform usampler2D visibility_buffer;
+layout(set = 0, binding = 1) uniform sampler2D depth_buffer;
+layout(set = 0, binding = 2, rgba8) writeonly uniform image2D output_color;
+layout(set = 0, binding = 3) uniform ConstantsBlock {
+    DrawConstants constants;
+} dc;
+layout(set = 0, binding = 4) readonly buffer ClusterBuffer {
+    ClusterData clusters[];
+} clusterData;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    ivec2 tex_size = imageSize(output_color);
+    if (gid.x >= uint(tex_size.x) || gid.y >= uint(tex_size.y)) {
+        return;
+    }
+
+    // T4.6.5 part 22.1 FIX: gid is integer pixel coordinate, not normalized UV.
+    // Metal texture.read(uint2) uses integer coords; the GLSL port mistakenly
+    // used texture(sampler, vec2) which expects normalized [0,1] UV — sampling
+    // at vec2(0..63) wraps/repeats and never hits the actual pixel data, so
+    // resolve output stays at the background-blue branch.
+    uint visibility_data = texelFetch(visibility_buffer, ivec2(gid), 0).r;
+    uint triangle_id = visibility_data & 0x00FFFFFFu;
+    uint material_id = (visibility_data >> 24u) & 0xFFu;
+
+    float depth = texelFetch(depth_buffer, ivec2(gid), 0).r;
+
+    vec4 final_color = vec4(0.0, 0.2, 0.4, 1.0);
+
+    if (triangle_id != 0u && depth < 1.0) {
+        float material_color = float(material_id) / 255.0;
+        final_color = vec4(material_color, 0.5, 1.0 - material_color, 1.0);
+        float depth_shading = 1.0 - depth;
+        final_color.rgb *= depth_shading;
+    }
+
+    imageStore(output_color, ivec2(gid), final_color);
+}

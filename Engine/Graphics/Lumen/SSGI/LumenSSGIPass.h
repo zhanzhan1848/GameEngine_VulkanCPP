@@ -17,7 +17,8 @@ namespace primal::graphics::lumen {
 /// SSGI quality / performance tuning parameters.
 struct SSGIParams {
     u32   ray_count = 4;
-    float radius = 2.0f;
+    float radius = 2.0f;              ///< Spatial filter kernel radius (world units)
+    float max_trace_distance = 30.0f; ///< Ray march cap (world units) — decoupled from filter radius
     float thickness = 0.25f;
     float temporal_feedback = 0.93f;
     float filter_sigma_depth = 10.0f;

@@ -27,7 +27,25 @@ struct window_init_info
 }
 #endif // _WIN64
 
-#ifdef __linux__
+#ifdef __EMSCRIPTEN__
+
+namespace primal::platform {
+
+using window_proc = void*;
+using window_handle = void*;
+
+struct window_init_info
+{
+    window_proc     callback{ nullptr };
+    window_handle   parent{ nullptr };
+    const char*     caption{ nullptr };
+    s32             left{ 0 };
+    s32             top{ 0 };
+    s32             width{ 1280 };
+    s32             height{ 720 };
+};
+}
+#elif defined(__linux__)
 #include <X11/Xlib.h>
 #include <stdlib.h>
 

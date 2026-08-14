@@ -61,6 +61,7 @@ namespace constants {
 template<typename T>
 float dot(const T& a, const T& b) {
     float result = 0.0f;
+#if defined(__APPLE__)
     if constexpr (std::is_same_v<T, simd::float3>) {
         result = a.x * b.x + a.y * b.y + a.z * b.z;
     } else if constexpr (std::is_same_v<T, simd::float4>) {
@@ -68,12 +69,17 @@ float dot(const T& a, const T& b) {
     } else if constexpr (std::is_same_v<T, simd::float2>) {
         result = a.x * b.x + a.y * b.y;
     } else {
-        // 通用实现，假设支持[]
         constexpr int size = sizeof(T) / sizeof(float);
         for (int i = 0; i < size; ++i) {
             result += a[i] * b[i];
         }
     }
+#else
+    constexpr int size = sizeof(T) / sizeof(float);
+    for (int i = 0; i < size; ++i) {
+        result += a[i] * b[i];
+    }
+#endif
     return result;
 }
 
@@ -218,11 +224,12 @@ inline m4x4 MatrixIdentity() {
 #elif defined(_WIN32)
     return DirectX::XMMatrixIdentity();
 #else
-    // 默认实现：手动构造单位矩阵
-    m4x4 result{};
-    // 根据具体的m4x4类型进行初始化
-    // 这里假设m4x4有合适的构造函数或成员访问方式
-    return result;
+    return m4x4{
+        v4{1.0f, 0.0f, 0.0f, 0.0f},
+        v4{0.0f, 1.0f, 0.0f, 0.0f},
+        v4{0.0f, 0.0f, 1.0f, 0.0f},
+        v4{0.0f, 0.0f, 0.0f, 1.0f}
+    };
 #endif
 }
 
@@ -358,7 +365,7 @@ inline m4x4 CreatePerspectiveMatrix(float fovY, float aspect, float nearPlane, f
         v4{0.0f, 1.0f / tanHalfFov, 0.0f, 0.0f},
         v4{0.0f, 0.0f, farPlane / (nearPlane - farPlane), -1.0f},
         v4{0.0f, 0.0f, (nearPlane * farPlane) / (nearPlane - farPlane), 0.0f}
-    }; // Note: This is Metal-compatible [0,1] depth range
+    }; // Metal/Dawn [0,1] depth range. column 3 w=0: clip.w = -z_view
 }
 
 /**
@@ -395,22 +402,10 @@ inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
     v3 right = Normalize(Cross(forward, up));
     v3 newUp = Cross(right, forward);
 
-    // Metal uses column-major storage, so we need to construct the matrix accordingly
-    // The view matrix should be:
-    // [ right.x   right.y   right.z   -dot(right, eye)    ]
-    // [ newUp.x   newUp.y   newUp.z   -dot(newUp, eye)   ]
-    // [ -forward.x -forward.y -forward.z  dot(forward, eye) ]
-    // [ 0         0         0          1                  ]
-
-    // In column-major format, each column is stored as a v4
-    // Row-major view matrix (rows are basis vectors):
-    // Row 0: [ right.x    right.y    right.z    -dot(right, eye)   ]
-    // Row 1: [ newUp.x    newUp.y    newUp.z    -dot(newUp, eye)   ]
-    // Row 2: [-forward.x -forward.y -forward.z   dot(forward, eye) ]
-    // Row 3: [ 0          0          0           1                  ]
-    //
-    // simd::float4x4 stores columns: m4x4{col0, col1, col2, col3}
-    // where col_i = {row0[i], row1[i], row2[i], row3[i]}
+    // Column-major storage: each v4 is a COLUMN of the view matrix.
+    // The standard view matrix rows are: [right | newUp | -forward | translation]
+    // Transposing to column-major: column j = (row0[j], row1[j], row2[j], row3[j])
+    // simd::float4x4 stores columns: m4x4{col0, col1, col2, col3}.
     return m4x4{
         v4{right.x, newUp.x, -forward.x, 0.0f},
         v4{right.y, newUp.y, -forward.y, 0.0f},
@@ -670,10 +665,13 @@ inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ)
 #elif defined(_WIN32)
     return DirectX::XMMatrixPerspectiveFovLH(fovY, aspect, nearZ, farZ);
 #else
-    // 默认实现：手动构造透视矩阵
-    m4x4 result{};
-    // 这里需要根据具体的m4x4类型手动构造
-    return result;
+    float f = 1.0f / std::tanf(fovY * 0.5f);
+    return m4x4{
+        v4{f / aspect, 0.0f, 0.0f, 0.0f},
+        v4{0.0f, f, 0.0f, 0.0f},
+        v4{0.0f, 0.0f, farZ / (nearZ - farZ), -1.0f},
+        v4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 0.0f}
+    };
 #endif
 }
 
@@ -691,10 +689,12 @@ inline m4x4 MatrixTranslation(const v3& translation) {
 #elif defined(_WIN32)
     return DirectX::XMMatrixTranslation(translation.x, translation.y, translation.z);
 #else
-    // 默认实现：手动构造平移矩阵
-    m4x4 result{};
-    // 这里需要根据具体的m4x4类型手动构造
-    return result;
+    return m4x4{
+        v4{1.0f, 0.0f, 0.0f, 0.0f},
+        v4{0.0f, 1.0f, 0.0f, 0.0f},
+        v4{0.0f, 0.0f, 1.0f, 0.0f},
+        v4{translation.x, translation.y, translation.z, 1.0f}
+    };
 #endif
 }
 

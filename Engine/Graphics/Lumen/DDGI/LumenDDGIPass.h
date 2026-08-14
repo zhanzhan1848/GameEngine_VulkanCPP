@@ -3,6 +3,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
+#include "Graphics/Dawn/DawnDebugParams.h"
 #include <vector>
 
 namespace primal::graphics::rhi {
@@ -108,7 +109,10 @@ struct DDGIVolumeData {
     u32      SdfResolutions[3];       // offset 256
     u32      SdfCascadeCount;         // offset 268
     math::v4 LightDirection;          // offset 272: xyz = light dir, w unused
-    math::v4 LightColor;              // offset 288: xyz = light color, w unused
+    math::v4 LightColor;              // offset 288: xyz = light color, w = intensity
+    // Mode 11 (MeshletDynamicDDGI) canonical radiance inputs — match bake's ProbeBakingScene
+    math::v4 SkyColor;                // offset 304: xyz = sky color, w unused
+    math::v4 Albedo;                  // offset 320: xyz = uniform albedo, w unused
 };
 
 // ============================================================================
@@ -175,6 +179,19 @@ public:
 
     // Set static probe volume for initialization from bake data
     void SetStaticProbeVolume(StaticProbeVolume* volume) { static_volume_ = volume; }
+
+    // Mode 11 (MeshletDynamicDDGI): when true, runtime TraceRays/UpdateIrradiance/
+    // UpdateDepth run every frame even when a static_volume_ is loaded. The static
+    // data still seeds the history buffers (InitializeProbesFromStatic copies it
+    // into all 3 triple-buffered irradiance_buffers_), then runtime traces EMA-
+    // blend toward canonical dynamic DDGI. Mode 10 leaves this false to preserve
+    // the static bake indefinitely.
+    void SetDynamicMode(bool enabled) { dynamic_mode_ = enabled; }
+
+    // Live-tunable debug params (WASM sidebar). Indices 4..6 of DawnDebugParams
+    // map to SkyColor intensity, Albedo intensity, ProbeHysteresis. Values are
+    // consumed in AddPass when uploading DDGIVolumeData to the GPU.
+    void SetDawnDebugParams(const DawnDebugParams& params) { dawnDebugParams_ = params; }
 
     // Accessor for confidence buffer (for Task 5 later)
     rhi::ResourceHandle GetConfidenceBuffer(u32 frame_idx = 0) const {
@@ -275,6 +292,10 @@ private:
 
     // Probe state tracking (importance-based partial update)
     std::vector<DDGIProbeState> probe_states_;
+    // Triple-buffered: CPU writes frameIdx's copy while GPU reads previous frames' copies.
+    // Single-buffer caused an intermittent CPU-GPU race — CPU overwrote the update list
+    // while GPU threads were still reading it from the prior frame's dispatch, corrupting
+    // probe index lookups and producing screen-filling solid color in Mode 10.
     rhi::ResourceHandle probe_update_list_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
@@ -283,6 +304,14 @@ private:
 
     // Static probe volume reference (for initialization from bake data)
     StaticProbeVolume* static_volume_{nullptr};
+
+    // Mode 11 flag — see SetDynamicMode comment. False = Mode 10 (static-bake only).
+    bool dynamic_mode_{false};
+
+    // Live-tunable debug params (WASM sidebar). Only indices 4..6 are read
+    // here: SkyColor intensity, Albedo intensity, ProbeHysteresis. Applied
+    // in AddPass when uploading DDGIVolumeData.
+    DawnDebugParams dawnDebugParams_{};
 
     // Confidence buffers (triple-buffered to avoid read-write race with GI Gather)
     rhi::ResourceHandle confidence_buffers_[3]{

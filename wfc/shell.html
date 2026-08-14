@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Game Engine - WFC Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0f0f1a;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Header */
+    #header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      background: #16162a;
+      border-bottom: 1px solid #2a2a4a;
+      flex-shrink: 0;
+    }
+
+    #header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #00d4ff;
+    }
+
+    #header .subtitle {
+      font-size: 12px;
+      color: #666;
+    }
+
+    #controls-info {
+      font-size: 12px;
+      color: #888;
+      text-align: right;
+      line-height: 1.5;
+    }
+
+    #controls-info kbd {
+      display: inline-block;
+      background: #2a2a4a;
+      border: 1px solid #444;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 11px;
+      color: #ccc;
+    }
+
+    /* Main row: canvas area + debug sidebar */
+    #main-row {
+      flex: 1;
+      display: flex;
+      flex-direction: row;
+      min-height: 0;
+    }
+
+    /* Canvas area */
+    #canvas-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+      position: relative;
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    #canvas {
+      display: block;
+      background: #000;
+    }
+
+    /* Debug panel sidebar */
+    #debugPanel {
+      width: 320px;
+      background: rgba(15, 15, 25, 0.95);
+      color: #e0e0e0;
+      padding: 14px 16px;
+      overflow-y: auto;
+      font-size: 13px;
+      border-left: 1px solid #2a2a40;
+      flex-shrink: 0;
+    }
+
+    #debugPanel h3 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      color: #00d4ff;
+    }
+
+    #debugPanel h4 {
+      margin: 14px 0 6px;
+      font-size: 13px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid #2a2a40;
+      padding-bottom: 3px;
+    }
+
+    #debugPanel hr {
+      border: 0;
+      border-top: 1px solid #2a2a40;
+      margin: 14px 0 4px;
+    }
+
+    #debugPanel label {
+      display: block;
+      margin-bottom: 10px;
+      line-height: 1.5;
+    }
+
+    #debugPanel .val {
+      display: inline-block;
+      min-width: 38px;
+      text-align: right;
+      color: #00d4ff;
+      font-family: monospace;
+      font-size: 12px;
+      float: right;
+    }
+
+    #debugPanel input[type="range"] {
+      width: 100%;
+      margin-top: 3px;
+      accent-color: #00d4ff;
+    }
+
+    #debugPanel .kv-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 6px;
+      line-height: 1.4;
+    }
+
+    #debugPanel .kv-label {
+      color: #888;
+      font-size: 12px;
+    }
+
+    #debugPanel .kv-val {
+      color: #00d4ff;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 12px;
+      text-align: right;
+    }
+
+    #debugPanel kbd {
+      display: inline-block;
+      background: #2a2a4a;
+      border: 1px solid #444;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 11px;
+      color: #ccc;
+      margin: 0 1px;
+    }
+
+    #debugPanel .hint {
+      color: #888;
+      font-size: 11px;
+      margin-top: 2px;
+      line-height: 1.7;
+    }
+
+    #debugPanel .btn-row {
+      display: flex;
+      gap: 4px;
+      margin-top: 4px;
+      flex-wrap: wrap;
+    }
+
+    #debugPanel .btn {
+      flex: 1 1 0;
+      min-width: 60px;
+      padding: 5px 8px;
+      background: #2a2a4a;
+      color: #ccc;
+      border: 1px solid #444;
+      border-radius: 3px;
+      font-size: 11px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s, color 0.15s;
+      text-align: center;
+    }
+
+    #debugPanel .btn:hover {
+      background: #3a3a5a;
+      color: #fff;
+    }
+
+    #debugPanel .btn.active {
+      background: #00d4ff;
+      color: #0f0f1a;
+      border-color: #00d4ff;
+      font-weight: 600;
+    }
+
+    #debugPanel .btn-reseed {
+      background: #4a2a2a;
+      border-color: #6a3a3a;
+    }
+
+    #debugPanel .btn-reseed:hover {
+      background: #5a3a3a;
+    }
+
+    #debugPanel .btn-reroll {
+      background: #2a4a2a;
+      border-color: #3a6a3a;
+    }
+
+    #debugPanel .btn-reroll:hover {
+      background: #3a5a3a;
+    }
+
+    #debugPanel input[type="range"].grid-slider {
+      width: 100%;
+      margin-top: 2px;
+      accent-color: #00d4ff;
+    }
+
+    #debugPanel select.wfc-select {
+      width: 100%;
+      padding: 5px 8px;
+      background: #2a2a4a;
+      color: #ccc;
+      border: 1px solid #444;
+      border-radius: 3px;
+      font-size: 11px;
+      font-family: inherit;
+      cursor: pointer;
+      margin-top: 4px;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+
+    #debugPanel select.wfc-select:hover {
+      background: #3a3a5a;
+      color: #fff;
+    }
+
+    #debugPanel select.wfc-select:focus {
+      outline: none;
+      border-color: #00d4ff;
+      color: #fff;
+    }
+
+    /* Loading overlay */
+    #loading-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 15, 26, 0.95);
+      z-index: 10;
+      transition: opacity 0.6s ease;
+    }
+
+    #loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #loading-overlay .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid #2a2a4a;
+      border-top-color: #00d4ff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 20px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Progress bar */
+    #progress-wrap {
+      width: 320px;
+      max-width: 80%;
+    }
+
+    #progress-bar {
+      width: 100%;
+      height: 4px;
+      background: #2a2a4a;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    #progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #00d4ff, #00ff88);
+      border-radius: 2px;
+      transition: width 0.3s ease;
+    }
+
+    #progress-text {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #888;
+      text-align: center;
+    }
+
+    /* Status bar */
+    #status-bar {
+      padding: 6px 20px;
+      background: #16162a;
+      border-top: 1px solid #2a2a4a;
+      font-size: 12px;
+      color: #666;
+      display: flex;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    /* Error overlay */
+    #error-overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 15, 26, 0.98);
+      z-index: 20;
+      padding: 40px;
+    }
+
+    #error-overlay .icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    #error-overlay h2 {
+      color: #ff4444;
+      font-size: 22px;
+      margin-bottom: 12px;
+    }
+
+    #error-overlay p {
+      color: #aaa;
+      max-width: 480px;
+      text-align: center;
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    #error-overlay .browser-list {
+      margin-top: 16px;
+      font-size: 13px;
+      color: #666;
+    }
+
+    #error-overlay .browser-list a {
+      color: #00d4ff;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div id="header">
+    <div>
+      <h1>Game Engine WebGPU Demo</h1>
+      <div class="subtitle">Dawn WebGPU Backend / Emscripten WASM</div>
+    </div>
+    <div id="controls-info">
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>Arrow Keys</kbd> Move Camera / 移动镜头<br>
+      Mouse Drag to Look Around / 鼠标拖拽旋转视角
+    </div>
+  </div>
+
+  <!-- Main row: canvas + sidebar -->
+  <div id="main-row">
+    <!-- Canvas area -->
+    <div id="canvas-wrap">
+      <canvas id="canvas" width="1280" height="720" tabindex="0"></canvas>
+
+      <!-- WFC showcase HUD: anchored to canvas top-left so it doesn't
+           overlap the page header logo. pointer-events:none so it never
+           blocks canvas mouse-drag camera rotation. -->
+      <div id="wfc-hud" style="
+          position: absolute;
+          top: 12px;
+          left: 12px;
+          padding: 8px 12px;
+          background: rgba(15, 15, 26, 0.75);
+          color: #e0e0e0;
+          font-family: 'SF Mono', Menlo, Consolas, monospace;
+          font-size: 12px;
+          line-height: 1.6;
+          border-radius: 4px;
+          border: 1px solid #2a2a4a;
+          pointer-events: none;
+          z-index: 100;
+      ">
+        <div id="wfc-hud-observer">Observer: MinEntropy</div>
+        <div id="wfc-hud-origin">Origin: Center</div>
+      </div>
+
+      <!-- Loading overlay -->
+      <div id="loading-overlay">
+        <div class="spinner"></div>
+        <div id="progress-wrap">
+          <div id="progress-bar">
+            <div id="progress-fill"></div>
+          </div>
+          <div id="progress-text">Initializing... / 初始化中...</div>
+        </div>
+      </div>
+
+      <!-- Error overlay -->
+      <div id="error-overlay">
+        <div class="icon">&#9888;</div>
+        <h2>WebGPU Not Available</h2>
+        <p>
+          Your browser does not support WebGPU.<br>
+          WebGPU is required to run this demo.<br>
+          <br>
+          浏览器不支持 WebGPU，无法运行此演示。
+        </p>
+        <div class="browser-list">
+          Supported browsers / 支持的浏览器:<br>
+          <a href="https://www.google.com/chrome/">Chrome 113+</a> |
+          <a href="https://www.microsoft.com/edge">Edge 113+</a> |
+          Firefox Nightly (with <code>dom.webgpu.enabled</code>)
+        </div>
+      </div>
+    </div>
+
+    <!-- Debug panel sidebar -->
+    <aside id="debugPanel">
+      <h3>WFC Parameters</h3>
+      <div id="modeInfo" class="hint">Wave Function Collapse — Kenney Dungeon Tiles</div>
+
+      <h4>Observer Strategy</h4>
+      <select id="wfc-observer-select" class="wfc-select">
+        <option value="0">MinEntropy</option>
+        <option value="1">Distance From Origin</option>
+      </select>
+
+      <h4>Origin Preset</h4>
+      <select id="wfc-origin-select" class="wfc-select">
+        <option value="0">Center</option>
+        <option value="1">Corner</option>
+        <option value="2">Bottom Center</option>
+      </select>
+      <div class="hint">
+        Origin applies only when observer = Distance.
+      </div>
+
+      <h4>Tile Source</h4>
+      <select id="wfc-style-select" class="wfc-select">
+        <!-- Options populated by populateStyleDropdown() once the WASM
+             module is ready. The trailing option is a static "Compose…"
+             entry that toggles the multi-select panel below. -->
+      </select>
+      <div class="hint">
+        Each style is a composable tile source. Select "Compose…" to
+        mix multiple styles in one solve.
+      </div>
+
+      <div id="wfc-compose-panel" style="display:none; margin-top: 8px;">
+        <div class="hint">Pick one or more styles to compose:</div>
+        <div id="wfc-compose-checkboxes"></div>
+        <div class="btn-row" style="margin-top: 6px;">
+          <button type="button" class="btn btn-reseed" id="wfc-compose-apply">Apply</button>
+          <button type="button" class="btn btn-reroll" id="wfc-compose-cancel">Cancel</button>
+        </div>
+      </div>
+
+      <h4>Grid Dimensions</h4>
+      <div class="kv-row">
+        <span class="kv-label">Width (X) <span class="kv-val" id="wfc-grid-w-val">16</span></span>
+      </div>
+      <input type="range" class="grid-slider" id="wfc-grid-w-slider" min="4" max="64" step="1" value="16">
+
+      <div class="kv-row" style="margin-top: 8px;">
+        <span class="kv-label">Height (Y) <span class="kv-val" id="wfc-grid-h-val">4</span></span>
+      </div>
+      <input type="range" class="grid-slider" id="wfc-grid-h-slider" min="1" max="32" step="1" value="4">
+
+      <div class="kv-row" style="margin-top: 8px;">
+        <span class="kv-label">Depth (Z) <span class="kv-val" id="wfc-grid-d-val">16</span></span>
+      </div>
+      <input type="range" class="grid-slider" id="wfc-grid-d-slider" min="4" max="64" step="1" value="16">
+
+      <h4>Random Seed</h4>
+      <div class="kv-row">
+        <span class="kv-label">Seed</span>
+        <span class="kv-val" id="wfc-seed">—</span>
+      </div>
+      <div class="btn-row">
+        <button type="button" class="btn btn-reseed" id="wfc-reseed-same">Reseed Same</button>
+        <button type="button" class="btn btn-reroll" id="wfc-reseed-new">Reroll New</button>
+      </div>
+
+      <hr>
+      <h4>Camera</h4>
+      <div class="hint">
+        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> — move<br>
+        <kbd>Q</kbd> / <kbd>E</kbd> — down / up<br>
+        <kbd>Shift</kbd> — sprint (3×)<br>
+        <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> — look
+      </div>
+    </aside>
+  </div>
+
+  <!-- Status bar -->
+  <div id="status-bar">
+    <span id="status-left">Ready</span>
+    <span id="status-right"></span>
+  </div>
+
+  <script>
+    (function() {
+      var errorOverlay = document.getElementById('error-overlay');
+      var loadingOverlay = document.getElementById('loading-overlay');
+      var progressFill = document.getElementById('progress-fill');
+      var progressText = document.getElementById('progress-text');
+      var statusLeft = document.getElementById('status-left');
+      var statusRight = document.getElementById('status-right');
+      var canvas = document.getElementById('canvas');
+
+      // WebGPU check
+      if (!navigator.gpu) {
+        errorOverlay.style.display = 'flex';
+        loadingOverlay.style.display = 'none';
+        statusLeft.textContent = 'Error: WebGPU not supported';
+        return;
+      }
+
+      // Resize canvas to fit container while maintaining 16:9 aspect ratio.
+      // Sidebar takes 320px from the right; canvas-wrap gets the remainder.
+      function resizeCanvas() {
+        var wrap = document.getElementById('canvas-wrap');
+        var maxW = wrap.clientWidth;
+        var maxH = wrap.clientHeight;
+        var aspect = 16 / 9;
+
+        var w = maxW;
+        var h = w / aspect;
+        if (h > maxH) {
+          h = maxH;
+          w = h * aspect;
+        }
+
+        canvas.style.width = Math.floor(w) + 'px';
+        canvas.style.height = Math.floor(h) + 'px';
+      }
+
+      window.addEventListener('resize', resizeCanvas);
+      resizeCanvas();
+
+      // Update progress
+      function setProgress(pct, text) {
+        progressFill.style.width = pct + '%';
+        if (text) progressText.textContent = text;
+      }
+
+      // Status helpers (can be called from WASM via ccall or from JS)
+      window.setStatus = function(text) {
+        statusLeft.textContent = text;
+      };
+
+      // WFC HUD helper — called by the WASM binary on every state change.
+      // obs:    "MinEntropy" | "DistanceFromOrigin"
+      // origin: "Center" | "Corner" | "BottomCenter"
+      // gw/gh/gd: grid width/height/depth
+      // seed:   current rng_seed (decimal u32)
+      window.setWfcHud = function(obs, origin, gw, gh, gd, seed) {
+        var obsEl = document.getElementById('wfc-hud-observer');
+        var orgEl = document.getElementById('wfc-hud-origin');
+        if (obsEl) obsEl.textContent = 'Observer: ' + obs;
+        if (orgEl) orgEl.textContent = 'Origin: ' + origin;
+
+        // Sync dropdowns + slider values + labels.
+        var obsIdx = (obs === 'DistanceFromOrigin') ? 1 : 0;
+        var originIdx = (origin === 'Corner') ? 1 : (origin === 'BottomCenter' ? 2 : 0);
+        var obsSel = document.getElementById('wfc-observer-select');
+        if (obsSel) obsSel.value = String(obsIdx);
+        var orgSel = document.getElementById('wfc-origin-select');
+        if (orgSel) orgSel.value = String(originIdx);
+
+        function setSlider(id, val, labelId) {
+          var s = document.getElementById(id);
+          if (s && parseInt(s.value) !== parseInt(val)) s.value = val;
+          var lbl = document.getElementById(labelId);
+          if (lbl) lbl.textContent = val;
+        }
+        setSlider('wfc-grid-w-slider', gw, 'wfc-grid-w-val');
+        setSlider('wfc-grid-h-slider', gh, 'wfc-grid-h-val');
+        setSlider('wfc-grid-d-slider', gd, 'wfc-grid-d-val');
+
+        // seed is u32 — render as unsigned hex (compact, easier to compare).
+        var seedUnsigned = seed >>> 0;
+        var seedEl = document.getElementById('wfc-seed');
+        if (seedEl) seedEl.textContent = '0x' + seedUnsigned.toString(16).toUpperCase().padStart(8, '0');
+      };
+
+      // WFC panel wiring — call into WASM C ABI exports.
+      // Each handler uses ccall (synchronous) so the pending action is
+      // latched before the handler returns. The actual reseed happens on
+      // the next frame in HandleGridEditKeys().
+      function wfcCall(name, argTypes, args) {
+        if (typeof Module === 'undefined' || !Module.ccall) return;
+        try { Module.ccall(name, null, argTypes, args); } catch (e) { console.warn(e); }
+      }
+
+      function wfcCallRet(name, retType, argTypes, args) {
+        if (typeof Module === 'undefined' || !Module.ccall) return 0;
+        try { return Module.ccall(name, retType, argTypes, args); } catch (e) { console.warn(e); return 0; }
+      }
+
+      function wireWfcPanel() {
+        // C++ Initialize() already called window.setWfcHud with the live
+        // initial state (obs/origin/grid/seed). The setWfcHud hook keeps
+        // buttons + sliders in sync whenever C++ re-emits. Here we only
+        // attach event handlers — no read-back needed.
+
+        // Observer dropdown
+        var obsSel = document.getElementById('wfc-observer-select');
+        if (obsSel) {
+          obsSel.addEventListener('change', function() {
+            wfcCall('wfc_set_observer', ['number'], [parseInt(obsSel.value)]);
+          });
+        }
+
+        // Origin dropdown
+        var orgSel = document.getElementById('wfc-origin-select');
+        if (orgSel) {
+          orgSel.addEventListener('change', function() {
+            wfcCall('wfc_set_origin', ['number'], [parseInt(orgSel.value)]);
+          });
+        }
+
+        // Tile source / style dropdown — populated from
+        // WFCTileStyleRegistry via wfc_get_style_count/_display_name.
+        // Selecting a real style index calls wfc_compose([index], 1) and
+        // hides the compose panel; selecting "Compose…" (-1) shows the
+        // multi-select panel instead.
+        var styleSel = document.getElementById('wfc-style-select');
+        var composePanel = document.getElementById('wfc-compose-panel');
+        var composeBoxes = document.getElementById('wfc-compose-checkboxes');
+
+        // Cached signature ("idx:name;...|activeCSV") to detect whether the
+        // dropdown / checkboxes actually need a rebuild. Skips the innerHTML
+        // rewrite when nothing changed so we don't interrupt a user's open
+        // select popup or checkbox interaction.
+        var lastStyleSig = '';
+
+        function readActiveSet() {
+          var active = {};
+          var n = Module.ccall('wfc_get_active_style_count', 'number', [], []);
+          for (var i = 0; i < n; ++i) {
+            active[Module.ccall('wfc_get_active_style',
+                                'number', ['number'], [i])] = true;
+          }
+          return active;
+        }
+
+        function populateStyleDropdown() {
+          if (!styleSel) return;
+          var count = Module.ccall('wfc_get_style_count', 'number', [], []);
+          var active = readActiveSet();
+          var activeCount = 0;
+          for (var k in active) { if (active.hasOwnProperty(k)) ++activeCount; }
+
+          // Build signature for this state; skip rebuild if unchanged.
+          var sig = '';
+          for (var i = 0; i < count; ++i) {
+            sig += i + ':' + Module.ccall('wfc_get_style_display_name',
+                                          'string', ['number'], [i]) + ';';
+          }
+          sig += '|';
+          for (var j = 0; j < count; ++j) {
+            if (active[j]) sig += j + ',';
+          }
+          if (sig === lastStyleSig) return;
+          lastStyleSig = sig;
+
+          styleSel.innerHTML = '';
+          for (var i = 0; i < count; ++i) {
+            var name = Module.ccall('wfc_get_style_display_name',
+                                    'string', ['number'], [i]);
+            var opt = document.createElement('option');
+            opt.value = String(i);
+            opt.textContent = name;
+            styleSel.appendChild(opt);
+          }
+          var compose = document.createElement('option');
+          compose.value = '-1';
+          compose.textContent = 'Compose…';
+          styleSel.appendChild(compose);
+
+          // If only one style is active, show it as selected. If multiple,
+          // show "Compose…" since the active set isn't a single dropdown entry.
+          if (activeCount === 1) {
+            for (var k = 0; k < count; ++k) {
+              if (active[k]) { styleSel.value = String(k); break; }
+            }
+          } else if (activeCount > 1) {
+            styleSel.value = '-1';
+          }
+
+          // Rebuild the compose panel checkboxes to match.
+          if (composeBoxes) {
+            composeBoxes.innerHTML = '';
+            for (var j = 0; j < count; ++j) {
+              var label = document.createElement('label');
+              label.style.display = 'block';
+              var cb = document.createElement('input');
+              cb.type = 'checkbox';
+              cb.value = String(j);
+              cb.checked = !!active[j];
+              label.appendChild(cb);
+              label.appendChild(document.createTextNode(' ' + Module.ccall(
+                  'wfc_get_style_display_name', 'string', ['number'], [j])));
+              composeBoxes.appendChild(label);
+            }
+          }
+        }
+
+        if (styleSel) {
+          styleSel.addEventListener('change', function() {
+            var v = parseInt(styleSel.value);
+            if (v === -1) {
+              if (composePanel) composePanel.style.display = '';
+            } else {
+              if (composePanel) composePanel.style.display = 'none';
+              // Single-style compose: allocate 1 i32 on the WASM heap and
+              // pass (ptr, count=1) to wfc_compose.
+              var ptr = Module._malloc(4);
+              if (ptr) {
+                Module.setValue(ptr, v, 'i32');
+                try {
+                  Module.ccall('wfc_compose', 'number',
+                               ['number', 'number'], [ptr, 1]);
+                } finally {
+                  Module._free(ptr);
+                }
+              }
+            }
+          });
+        }
+        var applyBtn = document.getElementById('wfc-compose-apply');
+        if (applyBtn) applyBtn.addEventListener('click', function() {
+          if (!composeBoxes) return;
+          var cbs = composeBoxes.querySelectorAll('input[type=checkbox]');
+          var picked = [];
+          for (var i = 0; i < cbs.length; ++i) {
+            if (cbs[i].checked) picked.push(parseInt(cbs[i].value));
+          }
+          if (picked.length === 0) return;
+          // Allocate i32 array on WASM heap, write indices, call wfc_compose.
+          var n = picked.length;
+          var ptr = Module._malloc(n * 4);
+          if (!ptr) return;
+          for (var i = 0; i < n; ++i) {
+            Module.setValue(ptr + i * 4, picked[i], 'i32');
+          }
+          try {
+            Module.ccall('wfc_compose', 'number',
+                         ['number', 'number'], [ptr, n]);
+          } finally {
+            Module._free(ptr);
+          }
+          if (composePanel) composePanel.style.display = 'none';
+        });
+        var cancelBtn = document.getElementById('wfc-compose-cancel');
+        if (cancelBtn) cancelBtn.addEventListener('click', function() {
+          if (composePanel) composePanel.style.display = 'none';
+          // Re-sync dropdown to the current active set.
+          populateStyleDropdown();
+        });
+
+        // Initial population — also called again after a successful compose
+        // so the dropdown reflects the active set.
+        populateStyleDropdown();
+
+        // Periodic re-sync (every ~500ms) so M-hotkey preset cycling on the
+        // C side keeps the dropdown + checkboxes in sync.
+        setInterval(populateStyleDropdown, 500);
+
+        // Grid sliders — fire on change (release) to avoid reseed spam
+        // while dragging. 'input' updates the value label live.
+        function bindSlider(sliderId, valLabelId, fnName) {
+          var s = document.getElementById(sliderId);
+          var lbl = document.getElementById(valLabelId);
+          if (!s) return;
+          s.addEventListener('input', function() {
+            if (lbl) lbl.textContent = s.value;
+          });
+          s.addEventListener('change', function() {
+            wfcCall(fnName, ['number'], [parseInt(s.value)]);
+          });
+        }
+        bindSlider('wfc-grid-w-slider', 'wfc-grid-w-val', 'wfc_set_grid_w');
+        bindSlider('wfc-grid-h-slider', 'wfc-grid-h-val', 'wfc_set_grid_h');
+        bindSlider('wfc-grid-d-slider', 'wfc-grid-d-val', 'wfc_set_grid_d');
+
+        // Reseed buttons
+        var reseedSame = document.getElementById('wfc-reseed-same');
+        if (reseedSame) reseedSame.addEventListener('click', function() {
+          wfcCall('wfc_reseed_same', [], []);
+        });
+        var reseedNew = document.getElementById('wfc-reseed-new');
+        if (reseedNew) reseedNew.addEventListener('click', function() {
+          wfcCall('wfc_reseed_new', [], []);
+        });
+      }
+
+      // Wire after the WASM module is ready (ccall available).
+      // Use a small poll loop — Module.onRuntimeInitialized is set by
+      // Emscripten boilerplate we don't control here.
+      var wireTries = 0;
+      function tryWire() {
+        if (typeof Module !== 'undefined' && Module.ccall) {
+          wireWfcPanel();
+        } else if (++wireTries < 100) {
+          setTimeout(tryWire, 100);
+        }
+      }
+      tryWire();
+
+      window.hideLoading = function() {
+        loadingOverlay.classList.add('hidden');
+        statusLeft.textContent = 'Running';
+        // Notify parent launcher (if any) that this iframe's demo is ready.
+        // The launcher listens for this message and calls FRAME.focus() so
+        // keyboard events (WASD/QE) fire without an initial click.
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: 'wfc-loaded' }, '*');
+        }
+        // When accessed directly (not via launcher iframe), give the canvas
+        // focus so keyboard events fire immediately. tabindex on canvas
+        // element makes it focusable.
+        var c = document.getElementById('canvas');
+        if (c && c.focus) { try { c.focus(); } catch (e) {} }
+      };
+
+      // FPS counter
+      var frameCount = 0;
+      var lastFpsTime = performance.now();
+      function updateFps() {
+        frameCount++;
+        var now = performance.now();
+        if (now - lastFpsTime >= 1000) {
+          var fps = Math.round(frameCount * 1000 / (now - lastFpsTime));
+          statusRight.textContent = fps + ' FPS';
+          frameCount = 0;
+          lastFpsTime = now;
+        }
+        requestAnimationFrame(updateFps);
+      }
+      requestAnimationFrame(updateFps);
+
+      // Emscripten module config
+      // We fetch all needed files (shaders + assets) at runtime into MEMFS so
+      // the page loads instantly (no 400MB+ data file). The file list comes
+      // from wasm_manifest.js, which CMake regenerates on every build.
+      //
+      // Note: the IIFE that defines Module runs *before* the manifest script
+      // loads (manifest is appended dynamically). The preRun callback runs
+      // much later, so we resolve the asset list lazily inside stageAssets().
+      function getAssetList() {
+        if (window.WASM_MANIFEST) {
+          return (window.WASM_MANIFEST.shaders || []).concat(window.WASM_MANIFEST.assets || []);
+        }
+        // Sponza.model is embedded, fallback list only needs textures
+        return [];
+      }
+
+      function fetchAndStage(item) {
+        return new Promise(function(resolve) {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', item.url, true);
+          xhr.responseType = 'arraybuffer';
+          xhr.onload = function() {
+            if (xhr.status === 200) {
+              try {
+                var dir = item.fsPath.substring(0, item.fsPath.lastIndexOf('/'));
+                if (dir && dir !== '' && !FS.analyzePath(dir).exists) {
+                  FS.mkdirTree(dir);
+                }
+                FS.writeFile(item.fsPath, new Uint8Array(xhr.response));
+              } catch (err) {
+                console.warn('[Assets] Failed to stage ' + item.fsPath + ':', err);
+              }
+            }
+            resolve();
+          };
+          xhr.onerror = function() { resolve(); };
+          xhr.send();
+        });
+      }
+
+      // Sponza.model is embedded directly in the WASM binary (--embed-file in
+      // CMakeLists.txt), so it's already in MEMFS before main() runs.
+      // Textures are fetched in preRun so they're available before main() starts.
+      function stageAllAssets() {
+        var list = getAssetList();
+        var textures = list.filter(function(item) {
+          return item.fsPath !== '/assets/Sponza.model';
+        });
+        console.log('[Assets] Pre-fetching ' + textures.length + ' textures before main()');
+        setProgress(10, 'Loading textures 0/' + textures.length);
+
+        addRunDependency('textures');
+
+        var concurrency = 8;
+        var idx = 0;
+        var completed = 0;
+        function next() {
+          if (idx >= textures.length) return;
+          var current = idx++;
+          fetchAndStage(textures[current]).then(function() {
+            completed++;
+            if (completed % 5 === 0 || completed === textures.length) {
+              var pct = Math.round(10 + (completed / textures.length) * 80);
+              setProgress(pct, 'Loading textures ' + completed + '/' + textures.length);
+            }
+            if (completed === textures.length) {
+              console.log('[Assets] All ' + textures.length + ' textures staged');
+              setProgress(90, 'Initializing engine...');
+              removeRunDependency('textures');
+            }
+            next();
+          });
+        }
+        for (var i = 0; i < Math.min(concurrency, textures.length); i++) {
+          next();
+        }
+      }
+
+      var Module = {
+        preRun: [function() {
+          stageAllAssets();
+        }],
+        postRun: [function() {
+          // Loading overlay hidden by C++ after GPU texture upload.
+          // setWfcHud is wired via EXPORTED_FUNCTIONS in CMakeLists.txt —
+          // no postRun override needed.
+        }],
+        print: function(text) {
+          console.log('[WASM]', text);
+        },
+        printErr: function(text) {
+          console.error('[WASM]', text);
+          window.setStatus(text);
+        },
+        canvas: canvas,
+        setStatus: function(text) {
+          if (text) {
+            setProgress(95, text);
+          }
+        },
+        totalDependencies: 0,
+        monitorRunDependencies: function(left) {
+          this.totalDependencies = Math.max(this.totalDependencies, left);
+          if (left) {
+            var d = this.totalDependencies - left;
+            var pct = Math.round(d / this.totalDependencies * 100);
+            setProgress(pct, 'WASM loading (' + d + '/' + this.totalDependencies + ')...');
+          } else {
+            setProgress(95, 'WASM ready. / WASM 已就绪');
+          }
+        }
+      };
+
+      window.Module = Module;
+
+      // Load the asset manifest (auto-generated by CMake, lists all WGSL
+      // shaders + Sponza assets the WASM module will need at runtime)
+      var manifestScript = document.createElement('script');
+      manifestScript.src = 'wasm_manifest.js';
+      manifestScript.onload = function() {
+        // Once manifest is loaded, kick off the Emscripten module
+        setProgress(10, 'Loading engine... / 加载引擎...');
+        var script = document.createElement('script');
+        script.src = 'TestKenneyTilePreviewWASM.js';
+        script.onload = function() {
+          setProgress(15, 'Engine loaded. / 引擎已加载');
+        };
+        script.onerror = function() {
+          setProgress(0, 'Failed to load TestKenneyTilePreviewWASM.js / 加载失败');
+          statusLeft.textContent = 'Error: Failed to load WASM module';
+        };
+        document.body.appendChild(script);
+      };
+      manifestScript.onerror = function() {
+        statusLeft.textContent = 'Error: Failed to load asset manifest';
+      };
+      document.body.appendChild(manifestScript);
+    })();
+  </script>
+
+</body>
+</html>

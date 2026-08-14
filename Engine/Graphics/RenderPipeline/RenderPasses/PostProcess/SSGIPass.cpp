@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHIShaderCommon.h"
 #include "Graphics/RHI/Core/RHICommand.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include <fstream>
 #include <sstream>
 
@@ -49,7 +50,9 @@ const SSGIPassData& AddSSGIPass(RenderGraph& graph, RGResourceHandle normalDepth
 
             if (s_SSGIPipeline == handles::INVALID_PIPELINE) {
                 auto& device = builder.GetGraph().GetDevice();
-                std::string shaderSource = LoadShaderSource("Engine/Graphics/Metal/shaders/SSGIShader.metal");
+                auto platform = device.GetPlatform();
+                std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "SSGIShader");
+                std::string shaderSource = LoadShaderSource(shaderPath);
                 
                 if (!shaderSource.empty()) {
                     ShaderHandle computeShader = device.CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Compute, "ssgi_pass");

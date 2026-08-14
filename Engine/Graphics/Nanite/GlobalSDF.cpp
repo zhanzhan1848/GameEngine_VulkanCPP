@@ -2,7 +2,10 @@
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
 #include "../RHI/Core/RHIMath.h"
+#include "../Dawn/ShaderLoader.h"
+#if !defined(__EMSCRIPTEN__)
 #include "../RHI/Platforms/Metal/MetalDevice.h"
+#endif
 #include "Graphics/Field/FieldRegistry.h"
 #include <algorithm>
 #include <chrono>
@@ -42,11 +45,25 @@ bool GlobalSDF::Initialize(rhi::RHIDeviceBase* device, const GlobalSDFConfig& co
     if (!CreateCascades()) {
         return false;
     }
-    
+
     if (!CreateGlobalTexture()) {
         return false;
     }
-    
+
+    // F4: verify all cascade textures and the global texture are non-INVALID.
+    // CreateCascades/CreateGlobalTexture already return false on allocation
+    // failure, but belt-and-suspenders guards against silent regressions.
+    init_resources_valid_ = true;
+    for (const auto& cascade : cascades_) {
+        if (cascade.sdf_texture == rhi::handles::INVALID_RESOURCE) {
+            init_resources_valid_ = false;
+            break;
+        }
+    }
+    if (global_sdf_texture_ == rhi::handles::INVALID_RESOURCE) {
+        init_resources_valid_ = false;
+    }
+
     initialized_ = true;
     RegisterToFieldRegistry();
     return true;
@@ -204,7 +221,22 @@ void GlobalSDF::UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& sn
         return;
     }
 
-    cascade.origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
+    // Mark re-voxelization needed only when the snapped grid cell changes.
+    // For static scenes this is rare (cascade_size is 60/120/240m), so the
+    // per-frame voxelization cost collapses to ~0 after the initial fill.
+    // Without this guard, needs_voxelization stays true forever (default at
+    // init) and TestDawnForwardRenderer's `if (CascadeNeedsVoxelization(c))`
+    // dispatches a 262K-invocation compute shader EVERY FRAME for EACH of
+    // the 3 cascades. This was the Mode 11 WASM perf cliff: 4 FPS → expected
+    // 100+ FPS once restored.
+    math::v3 new_origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
+    if (!cascade.ever_voxelized
+        || new_origin.x != cascade.origin.x
+        || new_origin.y != cascade.origin.y
+        || new_origin.z != cascade.origin.z) {
+        cascade.needs_voxelization = true;
+    }
+    cascade.origin = new_origin;
 }
 
 void GlobalSDF::MergeCascades() {
@@ -240,7 +272,7 @@ bool GlobalSDF::AllocateTexture(rhi::ResourceHandle& handle, u32 resolution, u32
     desc.size = {resolution, resolution, resolution};
     desc.mipLevels = mip_levels;
     desc.arraySize = 1;
-    desc.format = rhi::DataFormat::R16_Float;
+    desc.format = rhi::DataFormat::R32_Float;
     desc.type = rhi::TextureType::Texture3D;
     desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
     desc.memoryUsage = rhi::GPUMemoryUsage::Static;
@@ -339,6 +371,11 @@ const SDFCascade& GlobalSDF::GetCascade(u32 index) const {
     return cascades_[index];
 }
 
+bool GlobalSDF::CascadeNeedsVoxelization(u32 index) const {
+    if (index >= cascades_.size()) return false;
+    return cascades_[index].needs_voxelization;
+}
+
 // ============================================================================
 // Shader loading (same pattern as LumenDDGIPass)
 // ============================================================================
@@ -356,7 +393,29 @@ static std::string ReadFileToString(const std::string& path) {
     return ss.str();
 }
 
-static std::vector<u8> LoadShaderSource(const char* name) {
+static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* device) {
+    auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+    if (platform == rhi::RHIPlatform::Dawn) {
+        // dawn::LoadWGSL has two overloads (ShaderLoader.h):
+        //   WASM:   LoadWGSL(const char* name) — kShaderMap + MEMFS fallback at
+        //           /Engine/Graphics/Dawn/shaders/{name}.wgsl
+        //   Native: LoadWGSL(const std::string& path) — opens filesystem path as-is
+        // Nanite/ shaders live in Engine/Graphics/Dawn/shaders/Nanite/, so both
+        // paths must prepend the subdirectory.
+        std::string src;
+#ifdef __EMSCRIPTEN__
+        std::string fullName = std::string("Nanite/") + name;
+        src = dawn::LoadWGSL(fullName.c_str());
+#else
+        std::string path = std::string("Engine/Graphics/Dawn/shaders/Nanite/") + name + ".wgsl";
+        src = dawn::LoadWGSL(path);
+#endif
+        if (src.empty()) {
+            std::cerr << "[GlobalSDF] Failed to load WGSL shader: " << name << std::endl;
+            return {};
+        }
+        return std::vector<u8>(src.begin(), src.end());
+    }
     std::string path = SDF_SHADER_DIR + std::string(name) + ".metal";
     std::string source = ReadFileToString(path);
     if (source.empty()) {
@@ -413,9 +472,15 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     vox_resources_ = resources;
 
     // Load shader source
-    auto code = LoadShaderSource("GlobalSDFVoxelization");
+    auto code = LoadShaderSource("GlobalSDFVoxelization", device_);
     if (code.empty()) {
         std::cerr << "[GlobalSDF] Failed to load voxelization shader" << std::endl;
+        // F4: shader/pipeline creation failed — IsInitialized() must return false
+        // so consumers don't proceed with corrupt state. Shutdown() releases the
+        // partial texture resources (already created in Initialize()), then we
+        // clear both flags so Shutdown() can be called again safely if needed.
+        Shutdown();
+        init_resources_valid_ = false;
         return false;
     }
 
@@ -423,12 +488,42 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
                                          rhi::ShaderStage::Compute, "voxelize_sdf");
     if (shader == rhi::handles::INVALID_SHADER) {
         std::cerr << "[GlobalSDF] Failed to compile voxelization shader" << std::endl;
+        Shutdown();
+        init_resources_valid_ = false;
         return false;
     }
 
     // Create descriptor set layout
     // Metal: texture(0) = SDF output, buffer(0..6) = cascade + geometry data
-    {
+    //        (Metal has separate texture/buffer namespaces — indices can overlap)
+    // WebGPU: single namespace — texture + UBO + 6 SSBOs use bindings 0..7
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    if (isDawn) {
+        // WebGPU/WGSL bindings — see GlobalSDFVoxelization.wgsl header comment.
+        // F2 (2026-07-13): storage texture is R32Float 3D (was RGBA16Float 2D).
+        // All storage buffers are read-only in WGSL (`var<storage, read>`) — must
+        // mark readonly=true or Dawn validation rejects the pipeline.
+        rhi::DescriptorSetLayoutBinding bindings[] = {
+            {0, rhi::DescriptorType::StorageImage,  1, rhi::ShaderStage::Compute, nullptr},  // sdf_output
+            {1, rhi::DescriptorType::UniformBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // CascadeUniforms
+            {2, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // vertex_positions
+            {3, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // meshlets
+            {4, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // meshlet_vertex_indices
+            {5, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // meshlet_triangle_indices
+            {6, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // cluster_map
+            {7, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr},  // instance_data
+        };
+        bindings[0].format = rhi::DataFormat::R32_Float;
+        bindings[0].is3D   = true;
+        bindings[2].readonly = true;
+        bindings[3].readonly = true;
+        bindings[4].readonly = true;
+        bindings[5].readonly = true;
+        bindings[6].readonly = true;
+        bindings[7].readonly = true;
+        rhi::DescriptorSetLayoutDesc layoutDesc{8, bindings};
+        vox_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    } else {
         rhi::DescriptorSetLayoutBinding bindings[] = {
             // Texture
             {0, rhi::DescriptorType::StorageImage,  1, rhi::ShaderStage::Compute, nullptr},
@@ -464,6 +559,8 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
 
     if (vox_pipeline_ == rhi::handles::INVALID_PIPELINE) {
         std::cerr << "[GlobalSDF] Failed to create voxelization pipeline" << std::endl;
+        Shutdown();
+        init_resources_valid_ = false;
         return false;
     }
 
@@ -522,7 +619,7 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
         ++s_dv_calls;
     }
 
-    const auto& cascade = cascades_[cascade_index];
+    auto& cascade = cascades_[cascade_index];
     if (!cascade.is_valid || cascade.sdf_texture == rhi::handles::INVALID_RESOURCE) return;
 
     // Strategy path — preferred when a provider is plugged in (e.g., editor_mode
@@ -579,20 +676,36 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
     }
 
     // Update descriptor set
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
     {
-        DescriptorData params[] = {
-            // Texture (SDF output)
-            {0, rhi::DescriptorType::StorageImage, cascade.sdf_texture},
-            // Buffers
-            {0, rhi::DescriptorType::UniformBuffer, vox_cascade_cb_[frameIdx]},
-            {1, rhi::DescriptorType::StorageBuffer, vox_resources_.vertex_buffer},
-            {2, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_buffer},
-            {3, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_vertices_buffer},
-            {4, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_triangles_buffer},
-            {5, rhi::DescriptorType::StorageBuffer, vox_resources_.cluster_map_buffer},
-            {6, rhi::DescriptorType::StorageBuffer, vox_resources_.instance_data_buffer},
-        };
-        UpdateDescriptorSet(device_, vox_descriptor_sets_[frameIdx], params, 8);
+        if (isDawn) {
+            // WebGPU/WGSL bindings: 0=texture, 1=UBO, 2-7=SSBOs (matches WGSL header).
+            DescriptorData params[] = {
+                {0, rhi::DescriptorType::StorageImage,   cascade.sdf_texture},
+                {1, rhi::DescriptorType::UniformBuffer,  vox_cascade_cb_[frameIdx]},
+                {2, rhi::DescriptorType::StorageBuffer,  vox_resources_.vertex_buffer},
+                {3, rhi::DescriptorType::StorageBuffer,  vox_resources_.meshlet_buffer},
+                {4, rhi::DescriptorType::StorageBuffer,  vox_resources_.meshlet_vertices_buffer},
+                {5, rhi::DescriptorType::StorageBuffer,  vox_resources_.meshlet_triangles_buffer},
+                {6, rhi::DescriptorType::StorageBuffer,  vox_resources_.cluster_map_buffer},
+                {7, rhi::DescriptorType::StorageBuffer,  vox_resources_.instance_data_buffer},
+            };
+            UpdateDescriptorSet(device_, vox_descriptor_sets_[frameIdx], params, 8);
+        } else {
+            DescriptorData params[] = {
+                // Texture (SDF output)
+                {0, rhi::DescriptorType::StorageImage, cascade.sdf_texture},
+                // Buffers
+                {0, rhi::DescriptorType::UniformBuffer, vox_cascade_cb_[frameIdx]},
+                {1, rhi::DescriptorType::StorageBuffer, vox_resources_.vertex_buffer},
+                {2, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_buffer},
+                {3, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_vertices_buffer},
+                {4, rhi::DescriptorType::StorageBuffer, vox_resources_.meshlet_triangles_buffer},
+                {5, rhi::DescriptorType::StorageBuffer, vox_resources_.cluster_map_buffer},
+                {6, rhi::DescriptorType::StorageBuffer, vox_resources_.instance_data_buffer},
+            };
+            UpdateDescriptorSet(device_, vox_descriptor_sets_[frameIdx], params, 8);
+        }
     }
 
     // Bind and dispatch
@@ -606,6 +719,13 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
     u32 gy = (res + 3) / 4;
     u32 gz = (res + 3) / 4;
     cmd->Dispatch(gx, gy, gz);
+
+    // Record the dispatch for this cascade and mark it satisfied until the
+    // next origin snap. One-shot semantics: each origin change records exactly
+    // one dispatch. Without this, needs_voxelization stays true forever and
+    // TestDawnForwardRenderer re-dispatches every frame.
+    cascade.needs_voxelization = false;
+    cascade.ever_voxelized     = true;
 
     // Barrier: SDF texture UAV → SRV (for DDGI trace to read)
     {
@@ -702,8 +822,12 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
         // producing two singleton instances. The dylib registers, the static
         // reads — lookup fails. MetalDevice::GetCommandBuffer routes through
         // the device's own allocator and is singleton-free.
+#if defined(__EMSCRIPTEN__)
+        auto* cmd = rhi::GetCommandBuffer(cmdHandle);
+#else
         auto* metal_dev = dynamic_cast<rhi::MetalDevice*>(device_);
         auto* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmdHandle) : nullptr;
+#endif
         if (!cmd) { all_ok = false; continue; }
 
         cmd->Begin();

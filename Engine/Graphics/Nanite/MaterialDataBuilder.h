@@ -77,7 +77,10 @@ public:
 
     static void CreatePlaceholderTextures(
         TextureArrayBuildContext& ctx,
-        rhi::RHIDeviceBase* device
+        rhi::RHIDeviceBase* device,
+        rhi::DataFormat albedo_fmt,
+        rhi::DataFormat normal_fmt,
+        rhi::DataFormat orm_fmt
     );
 
     static bool CreateTextureArray(

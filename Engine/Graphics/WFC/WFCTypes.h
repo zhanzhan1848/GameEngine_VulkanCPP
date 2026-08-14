@@ -1,0 +1,121 @@
+// Engine/Graphics/WFC/WFCTypes.h
+#pragma once
+
+#include "../../Common/CommonHeaders.h"
+#include "../../Common/Id.h"
+#include "../../Geometry/GeometryTypes.h"
+#include "../../Utilities/MathTypes.h"
+#include "WFCCategory.h"
+
+namespace primal::graphics::wfc {
+
+// Strong-typed IDs via DEFINE_TYPED_ID (debug strong type, release alias to u32)
+DEFINE_TYPED_ID(wfc_tile_id);
+DEFINE_TYPED_ID(wfc_cell_id);
+DEFINE_TYPED_ID(wfc_socket_id);
+
+// Socket encoding: 6 faces × 8 bits = 48 bits used, packed in u64
+// Future-proof: leaves 16 bits for half-tile or sub-face variants
+using SocketEncoding = u64;
+
+constexpr u64 SOCKET_ENCODING_INVALID = 0xFFFFFFFFFFFFFFFFULL;
+
+// Grid coordinate (signed to allow offset grids later)
+struct WFCGridCoord {
+    s32 x;
+    s32 y;
+    s32 z;
+
+    bool operator==(const WFCGridCoord& other) const {
+        return x == other.x && y == other.y && z == other.z;
+    }
+    bool operator!=(const WFCGridCoord& other) const { return !(*this == other); }
+};
+
+// Tile prototype (registry entry)
+struct WFCTile {
+    static constexpr u32 MaxVariants = 4;   // Phase C.1: 4 variants per tile (packing 16×4)
+
+    wfc_tile_id      id;
+    const char*      name;                  // static-lifetime string (no engine string type)
+    geometry::geometry_id mesh_handles[MaxVariants];  // per-variant geometry (X1)
+    SocketEncoding   sockets[MaxVariants];             // per-variant socket encoding
+    math::v3         bounds_extents;        // 16-byte aligned (simd::float3)
+    WFCCategory      category{WFCCategory::Primitive};  // Phase C.1: thematic group (Primitive/Ruins/...)
+    u32              variant_count;
+    bool             is_organic;
+    bool             is_rotationally_symmetric;
+    u8               _pad[6];               // tail pad to 16-byte alignment
+};
+
+// sizeof(WFCTile) recomputed after Phase C.1 Task 4 refactor (MaxVariants 32 → 4,
+// mesh_handle → mesh_handles[MaxVariants]). alignof=16 (driven by v3 / simd::float3).
+static_assert(sizeof(WFCTile) == 96, "WFCTile layout drifted");
+
+// Per-cell wave state (kept small for cache efficiency)
+struct WFCCell {
+    // Phase C.1 Mixed: widened from u64 (64 candidates) to u64[4] (256 candidates).
+    // Capacity supports 64 tiles × 4 variants = 256, see WFCTileRegistry::MaxTiles.
+    static constexpr u32 kMaskWords       = 4;   // 4 × u64 = 256-bit candidate set
+    // Legacy name for the candidate bit budget, retained for WaveGrid/WFCSolver.
+    // Value bumped 64 → 256 in Phase C.1 Mixed (was the old single-u64 bit count;
+    // now equals kMaskWords * 64). To be removed after Task 3 migrates callers.
+    static constexpr u32 MaxTileCandidates = kMaskWords * 64;
+
+    // Bitset of currently-possible tile variants, split across kMaskWords u64 words.
+    // Bit i lives in word (i / 64), bit (i % 64). See WFCTileRegistry helpers.
+    u64              candidate_mask[kMaskWords];
+    u32              candidate_count;
+    u8               entropy;               // popcount approx for fast compare
+    bool             collapsed;
+    wfc_tile_id      collapsed_tile;
+    u32              collapsed_variant;
+    u8               _pad[4];               // align to 8 bytes
+};
+
+// Recorded solve step (used by Phase A.2 solver, defined here for StepBuffer)
+enum class WFCStepKind : u8 {
+    Collapse   = 0,
+    Propagate  = 1,
+    Restart    = 2,
+};
+
+struct WFCStep {
+    WFCStepKind      kind;
+    WFCGridCoord     coord;
+    wfc_tile_id      tile;       // valid when kind == Collapse
+    u32              variant;    // valid when kind == Collapse
+    u32              cell_count; // valid when kind == Propagate
+    u32              generation; // valid when kind == Restart
+};
+
+// Face directions for 3D adjacency (6 faces of a cube)
+// Order: +X, -X, +Y, -Y, +Z, -Z
+enum class WFCFace : u8 {
+    PosX = 0,
+    NegX = 1,
+    PosY = 2,
+    NegY = 3,
+    PosZ = 4,
+    NegZ = 5,
+};
+
+constexpr u32 WFC_FACE_COUNT_3D = 6;
+constexpr u32 WFC_FACE_COUNT_2D = 4;   // 2D uses +X, -X, +Y, -Y (no Z)
+
+// Opposite face helper for adjacency lookup
+constexpr WFCFace OppositeFace(WFCFace f) {
+    // Pairs: PosX<->NegX, PosY<->NegY, PosZ<->NegZ
+    // Even values (0,2,4) → +1; odd values → -1
+    u32 v = static_cast<u32>(f);
+    return static_cast<WFCFace>(v ^ 1);
+}
+
+static_assert(static_cast<u32>(WFCFace::PosX) == 0 && static_cast<u32>(WFCFace::NegX) == 1,
+              "WFCFace must maintain +/- pair ordering for OppositeFace XOR trick");
+static_assert(static_cast<u32>(WFCFace::PosY) == 2 && static_cast<u32>(WFCFace::NegY) == 3,
+              "WFCFace must maintain +/- pair ordering for OppositeFace XOR trick");
+static_assert(static_cast<u32>(WFCFace::PosZ) == 4 && static_cast<u32>(WFCFace::NegZ) == 5,
+              "WFCFace must maintain +/- pair ordering for OppositeFace XOR trick");
+
+} // namespace primal::graphics::wfc

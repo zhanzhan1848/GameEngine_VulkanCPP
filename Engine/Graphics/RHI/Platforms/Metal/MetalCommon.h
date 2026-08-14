@@ -2,6 +2,8 @@
 
 #include "Engine/Common/CommonHeaders.h"
 
+#ifdef __APPLE__
+
 // 仅在 .cpp 文件中开启实现宏，头文件只声明类型
 #if defined(RHI_METAL_IMPLEMENTATION)
     #define NS_PRIVATE_IMPLEMENTATION
@@ -14,3 +16,5 @@
 #include <Metal/Metal.hpp>
 #include <MetalKit/MetalKit.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+
+#endif // __APPLE__

@@ -322,7 +322,7 @@ float3 CalculateLighting(Surface S, float3 L, float3 V, float3 lightColor)
 {
     const float NoL = clamp(dot(S.Normal, L), 0.f, 1.f);
     // 确保PI不为零，避免除零错误
-    const float invPI = 1.0f / max(PI, 1e-6f);
+    const float invPI = 1.0f / max(3.1415926535897932384626433832795f, 1e-6f);
 	return PhongBRDF(S.Normal, L, V, S.BaseColor, 1.f, (1 - S.PerceptualRoughness) * 100.f) * (NoL * invPI) * lightColor;
 }
 

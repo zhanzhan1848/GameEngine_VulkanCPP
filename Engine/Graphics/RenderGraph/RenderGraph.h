@@ -48,18 +48,29 @@ public:
 
     /**
      * @brief 导入外部资源 (已废弃，请使用 ImportTexture 或 ImportBuffer)
+     * @param initialState 资源在导入时的真实 GPU 状态。Unknown 表示调用方未声明,
+     *                     RG 无法生成正确的 from-initial-state barrier。
+     *                     对于已知状态(如刚被作为 RenderTarget 写入)的导入资源,
+     *                     应显式传入以保障跨 encoder 同步。
      */
-    RGResourceHandle ImportResource(const std::string& name, rhi::ResourceHandle resource);
+    RGResourceHandle ImportResource(const std::string& name, rhi::ResourceHandle resource,
+                                    rhi::ResourceState initialState = rhi::ResourceState::Unknown);
 
     /**
      * @brief 导入外部纹理
+     * @param initialState 纹理在导入时的真实 GPU 状态(如 RenderTarget / UnorderedAccess / ShaderResource)
      */
-    RGResourceHandle ImportTexture(const std::string& name, rhi::ResourceHandle resource, const rhi::TextureDesc& desc);
-    
+    RGResourceHandle ImportTexture(const std::string& name, rhi::ResourceHandle resource,
+                                    const rhi::TextureDesc& desc,
+                                    rhi::ResourceState initialState = rhi::ResourceState::Unknown);
+
     /**
      * @brief 导入外部缓冲区
+     * @param initialState 缓冲区在导入时的真实 GPU 状态
      */
-    RGResourceHandle ImportBuffer(const std::string& name, rhi::ResourceHandle resource, const rhi::BufferDesc& desc);
+    RGResourceHandle ImportBuffer(const std::string& name, rhi::ResourceHandle resource,
+                                   const rhi::BufferDesc& desc,
+                                   rhi::ResourceState initialState = rhi::ResourceState::Unknown);
 
     /**
      * @brief 获取输出资源 (标记为 Output，防止被剔除)
@@ -91,6 +102,7 @@ public:
 
     // 获取上一帧各Pass的GPU耗时 (ms)
     const std::unordered_map<std::string, double>& GetPassExecutionTimes() const { return passExecutionTimes_; }
+    size_t GetPoolSize() const { return resourcePool_.size(); }
 
 private:
     void CleanupPool();

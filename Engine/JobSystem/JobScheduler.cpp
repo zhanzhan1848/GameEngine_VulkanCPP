@@ -65,13 +65,20 @@ bool JobScheduler::Initialize()
     // Start worker threads
     _is_running.store(true);
     _is_shutting_down.store(false);
-    
+
+#ifndef __EMSCRIPTEN__
+    // WASM build runs without pthreads (-s USE_PTHREADS=0); std::thread
+    // constructor throws system_error(ENOSYS) and -fno-exceptions turns it
+    // into abort(). JobSystem is initialized but no workers spawn —
+    // submitted jobs queue and run inline via ProcessMainThreadJobs.
+    // TestDawnForwardRenderer doesn't submit any jobs, so this is safe.
     for (u32 i = 0; i < _worker_count; ++i)
     {
         _workers[i]->is_running.store(true);
         _workers[i]->thread = std::thread(&JobScheduler::WorkerLoop, this, i);
     }
-    
+#endif
+
     return true;
 }
 

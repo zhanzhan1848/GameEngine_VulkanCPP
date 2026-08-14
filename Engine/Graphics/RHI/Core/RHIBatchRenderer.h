@@ -116,7 +116,7 @@ struct RenderItem {
                    instanceCount(1), startInstance(0), depth(0.0f), materialID(0),
                    visibilityMask(0xFF), isInstanced(false) {
         worldMatrix = math::MatrixIdentity();
-        color = simd::float4{1.0f, 1.0f, 1.0f, 1.0f};
+        color = math::v4{1.0f, 1.0f, 1.0f, 1.0f};
     }
 };
 

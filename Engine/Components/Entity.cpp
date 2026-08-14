@@ -129,7 +129,9 @@ namespace primal::game_entity {
 		}
 		if (mask & bit_mask(component_bit::Particle))
 		{
+			#ifndef DISABLE_PARTICLE_SYSTEM
 			particle::remove_for_entity(id);
+			#endif
 		}
 		if (mask & bit_mask(component_bit::Cluster))
 		{

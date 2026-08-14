@@ -61,6 +61,13 @@ bool MetalDevice::initializeImpl() {
 
     initializeMemoryPool();
 
+    // Initialize per-frame staging allocator (eliminates waitUntilCompleted from
+    // Private-storage upload slow paths)
+    stagingAllocator_.Initialize(mtlDevice_, transferQueue_);
+
+    // Detect MTL4 / neural-rendering availability (placeholder — no resources allocated)
+    neuralWrapper_.Initialize(mtlDevice_);
+
     // 预分配资源以避免多线程扩容导致指针失效
     // 尤其是 CommandBuffer，在多线程渲染中非常关键
     // 同时分配其他资源以防止 Resize 导致的指针失效 (因为 ResourceManager 缓存了指针)
@@ -101,6 +108,12 @@ void MetalDevice::shutdownImpl() {
     gc_.Shutdown();
 
     shutdownMemoryPool();
+
+    // Shutdown staging allocator before queues are released (it references transferQueue_)
+    stagingAllocator_.Shutdown();
+
+    // Neural wrapper is detect-only — shutdown is a no-op, but call for symmetry
+    neuralWrapper_.Shutdown();
 
     if (transferQueue_) {
         transferQueue_->release();
@@ -225,7 +238,10 @@ void MetalDevice::waitIdleImpl() const {
 }
 
 void MetalDevice::beginFrameImpl() {
-    // 帧开始逻辑
+    // Rotate staging pool to the next frame slot. RenderSystem has already
+    // waited on the per-frame fence for frame N-FRAME_COUNT, so the pool we're
+    // about to reclaim is GPU-safe to overwrite.
+    stagingAllocator_.BeginFrame();
 }
 
 void MetalDevice::endFrameImpl() {
@@ -372,7 +388,7 @@ bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
         if (info.signalSemaphore != handles::INVALID_SYNC) {
             cmdBuf->AddSignalSemaphore(info.signalSemaphore, 1);
         }
-        
+
         if (info.signalFence != handles::INVALID_SYNC) {
             MetalSync* sync = GetSync(info.signalFence);
             if (sync && sync->GetNativeEvent()) {
@@ -384,10 +400,17 @@ bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
                  }
             }
         }
-        
+
+        // Encode all pending staging blits for this frame BEFORE the user's
+        // render/compute passes so subsequent passes see the uploaded data.
+        // EncodePendingBlits is a no-op when there are no pending blits.
+        if (cmdBuf->mtlCommandBuffer_) {
+            stagingAllocator_.EncodePendingBlits(cmdBuf->mtlCommandBuffer_);
+        }
+
         return cmdBuf->Submit();
     }
-    return false; 
+    return false;
 }
 
 SyncHandle MetalDevice::createSyncImpl() {

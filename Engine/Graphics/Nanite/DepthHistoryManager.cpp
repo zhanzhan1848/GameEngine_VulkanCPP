@@ -1,6 +1,7 @@
 #include "DepthHistoryManager.h"
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
+#include "../Dawn/ShaderLoader.h"
 #include <iostream>
 #include <fstream>
 
@@ -235,14 +236,23 @@ bool DepthHistoryManager::CreateCopyPipeline() {
     if (depth_copy_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
 
     // Load HZBGeneration shader (contains copy_depth_to_hzb_mip0 entry point)
+    std::string code;
+#ifdef __EMSCRIPTEN__
+    code = primal::graphics::dawn::LoadWGSL("HZBGeneration");
+    if (code.empty()) {
+        std::cerr << "[DepthHistoryManager] Failed to load HZBGeneration.wgsl from MEMFS" << std::endl;
+        return false;
+    }
+#else
     std::string shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/HZBGeneration.metal";
     std::ifstream file(shaderPath);
     if (!file.is_open()) {
         std::cerr << "[DepthHistoryManager] Failed to open shader: " << shaderPath << std::endl;
         return false;
     }
-    std::string code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    code.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
+#endif
 
     auto shader = device_->CreateShader(code.data(), code.size(), rhi::ShaderStage::Compute, "copy_depth_to_hzb_mip0");
     if (shader == rhi::handles::INVALID_SHADER) {

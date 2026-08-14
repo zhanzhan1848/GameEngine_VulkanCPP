@@ -2,7 +2,9 @@
 #include "Engine/JobSystem/JobSystem.h"
 #include "Engine/Utilities/SphericalHarmonics.h"
 
+#include <chrono>
 #include <cmath>
+#include <iostream>
 #include <memory>
 
 namespace primal::graphics::lumen {
@@ -105,9 +107,21 @@ static inline float Dot3(v3 a, v3 b)
 }
 
 // ---------------------------------------------------------------------------
-// BakeDirectLighting — MC ray tracing for one probe
 // ---------------------------------------------------------------------------
-/*static*/ void StaticProbeBaker::BakeDirectLighting(
+// BakeProbeRadiance — single-bounce indirect radiance SH per probe
+// ---------------------------------------------------------------------------
+// For each ray from the probe:
+//   - If the ray hits scene geometry, compute the geometric normal from the
+//     hit triangle's vertices, gather direct irradiance (sun, shadow-ray
+//     gated) and sky irradiance (single upward shadow ray) at the hit point,
+//     then convert to outgoing reflected radiance via the Lambertian BRDF
+//     (albedo / PI) * (E_direct + E_sky).
+//   - If the ray escapes, the probe sees the sky directly; use sky_color.
+//
+// Result is projected into SH9 with 4*PI/N_rays MC normalization. NO cosine
+// convolution — output is radiance SH, matching the runtime convention used
+// by DDGIUpdateIrradiance.wgsl and the shDot4 reconstruction in DDGIGIGather.
+/*static*/ void StaticProbeBaker::BakeProbeRadiance(
     StaticProbeVolume& volume,
     const utl::BVH& bvh,
     const ProbeBakingScene& scene,
@@ -117,14 +131,15 @@ static inline float Dot3(v3 a, v3 b)
     const u32 dim_x = volume.GridDimX();
     const u32 dim_y = volume.GridDimY();
     const u32 dim_z = volume.GridDimZ();
-    const float spacing = volume.Spacing();
-    const v3 origin = volume.Origin();
 
-    const v3 probe_pos = ProbeWorldPos(probe_index, dim_x, dim_y, dim_z, origin, spacing);
-    const v3 light_dir = NormalizeSafe(scene.light_direction);
+    const v3 probe_pos = ProbeWorldPos(probe_index, dim_x, dim_y, dim_z,
+                                       volume.Origin(), volume.Spacing());
+    const v3 light_dir  = NormalizeSafe(scene.light_direction);
+    const v3 to_light   = v3{-light_dir.x, -light_dir.y, -light_dir.z};
+    const v3 sky_up     = v3{0.0f, 1.0f, 0.0f};
+    const float inv_pi  = 1.0f / PI;
     const u32 ray_count = params.rays_per_probe;
 
-    // Accumulate SH coefficients for radiance
     SH9Color radiance_sh;
     radiance_sh.Reset();
 
@@ -133,78 +148,109 @@ static inline float Dot3(v3 a, v3 b)
     for (u32 r = 0; r < ray_count; ++r) {
         const v3 dir = FibonacciDirection(r, ray_count);
 
-        // Trace ray against scene geometry
         BVHRay ray(probe_pos, dir);
         ray.t_max = params.ray_max_distance;
         BVHHitInfo hit;
-        bool hit_result = bvh.Intersect(ray, hit);
 
-        v3 radiance{0.0f, 0.0f, 0.0f};
+        v3 L{0.0f, 0.0f, 0.0f};
 
-        if (hit_result) {
-            // Compute direct lighting: N dot L
-            // Approximate normal as (0,1,0) since BVH HitInfo doesn't carry normal data.
-            // The triangle normal could be computed from vertices, but the BVH doesn't
-            // expose triangle vertex data in the public interface.
-            v3 normal{0.0f, 1.0f, 0.0f};
-            float ndl = Dot3(normal, v3{-light_dir.x, -light_dir.y, -light_dir.z});
-            ndl = std::max(0.0f, ndl);
+        if (bvh.Intersect(ray, hit)) {
+            // Triangle vertices via hit.triangle_index (= BVH original_index = i in Build loop).
+            // BVH::Triangle struct is private; we look up through the scene's index/vertex arrays.
+            const u32 tri_idx = hit.triangle_index;
+            const u32 i0 = scene.indices[tri_idx * 3 + 0];
+            const u32 i1 = scene.indices[tri_idx * 3 + 1];
+            const u32 i2 = scene.indices[tri_idx * 3 + 2];
+            const v3 v0 = scene.vertices[i0];
+            const v3 v1 = scene.vertices[i1];
+            const v3 v2 = scene.vertices[i2];
 
-            // Direct lighting contribution
-            radiance.x = scene.light_color.x * scene.light_intensity * ndl;
-            radiance.y = scene.light_color.y * scene.light_intensity * ndl;
-            radiance.z = scene.light_color.z * scene.light_intensity * ndl;
+            // Geometric normal via cross product of triangle edges
+            const v3 edge1{v1.x - v0.x, v1.y - v0.y, v1.z - v0.z};
+            const v3 edge2{v2.x - v0.x, v2.y - v0.y, v2.z - v0.z};
+            const v3 normal = NormalizeSafe(v3{
+                edge1.y * edge2.z - edge1.z * edge2.y,
+                edge1.z * edge2.x - edge1.x * edge2.z,
+                edge1.x * edge2.y - edge1.y * edge2.x});
 
-            // Shadow check: trace from hit point to light
-            // Compute approximate hit position
-            v3 hit_pos{
+            const v3 hit_pos{
                 probe_pos.x + dir.x * hit.t,
                 probe_pos.y + dir.y * hit.t,
-                probe_pos.z + dir.z * hit.t
+                probe_pos.z + dir.z * hit.t,
             };
-            // Offset along normal to avoid self-intersection
-            v3 shadow_origin{
+            // Offset along normal to avoid self-intersection on subsequent rays
+            const v3 offset_pos{
                 hit_pos.x + normal.x * 0.01f,
                 hit_pos.y + normal.y * 0.01f,
-                hit_pos.z + normal.z * 0.01f
-            };
-            BVHRay shadow_ray(shadow_origin, v3{-light_dir.x, -light_dir.y, -light_dir.z});
-            shadow_ray.t_max = params.ray_max_distance;
+                hit_pos.z + normal.z * 0.01f};
 
-            if (bvh.IntersectAny(shadow_ray, params.ray_max_distance)) {
-                // In shadow — no direct lighting
-                radiance = v3{0.0f, 0.0f, 0.0f};
+            // --- Direct irradiance at hit point (sun, with shadow ray) ---
+            const float ndl = std::max(0.0f, Dot3(normal, to_light));
+            v3 E_direct{0.0f, 0.0f, 0.0f};
+            if (ndl > 0.0f) {
+                BVHRay shadow_ray(offset_pos, to_light);
+                shadow_ray.t_max = params.ray_max_distance;
+                if (!bvh.IntersectAny(shadow_ray, params.ray_max_distance)) {
+                    E_direct = v3{
+                        scene.light_color.x * scene.light_intensity * ndl,
+                        scene.light_color.y * scene.light_intensity * ndl,
+                        scene.light_color.z * scene.light_intensity * ndl};
+                }
             }
+
+            // --- Sky irradiance at hit point (single upward shadow ray) ---
+            // Binary sky visibility along +Y. Crude but correct for the dominant
+            // sky direction in Sponza (open sky above); covered arches correctly
+            // read zero sky because the upward ray hits the arch ceiling.
+            v3 E_sky{0.0f, 0.0f, 0.0f};
+            BVHRay sky_ray(offset_pos, sky_up);
+            sky_ray.t_max = params.ray_max_distance;
+            if (!bvh.IntersectAny(sky_ray, params.ray_max_distance)) {
+                // Hemispherical sky contribution modulated by NdotUp — surfaces
+                // facing up receive full sky, vertical/horizontal surfaces less.
+                const float sky_ndl = std::max(0.0f, normal.y);
+                E_sky = v3{
+                    scene.sky_color.x * sky_ndl,
+                    scene.sky_color.y * sky_ndl,
+                    scene.sky_color.z * sky_ndl};
+            }
+
+            // --- Lambertian reflected radiance toward probe ---
+            // L_out = (albedo / PI) * (E_direct + E_sky)
+            const v3 total_E{
+                E_direct.x + E_sky.x,
+                E_direct.y + E_sky.y,
+                E_direct.z + E_sky.z};
+            L = v3{
+                scene.albedo.x * inv_pi * total_E.x,
+                scene.albedo.y * inv_pi * total_E.y,
+                scene.albedo.z * inv_pi * total_E.z};
         } else {
-            // Ray missed — use sky color as ambient
-            radiance = scene.sky_color;
+            // Ray escaped the scene — probe sees sky directly
+            L = scene.sky_color;
         }
 
-        // Project radiance into SH
+        // Project L into SH9
         EvalSHBasis(dir, basis);
         for (int i = 0; i < 9; ++i) {
-            radiance_sh.coeffs[i].x += radiance.x * basis.coeffs[i];
-            radiance_sh.coeffs[i].y += radiance.y * basis.coeffs[i];
-            radiance_sh.coeffs[i].z += radiance.z * basis.coeffs[i];
+            radiance_sh.coeffs[i].x += L.x * basis.coeffs[i];
+            radiance_sh.coeffs[i].y += L.y * basis.coeffs[i];
+            radiance_sh.coeffs[i].z += L.z * basis.coeffs[i];
         }
     }
 
-    // Normalize: weight = 4*PI / N (uniform sampling PDF = 1/(4*PI))
+    // MC normalize: PDF = 1/(4*PI), so weight = 4*PI / N
     const float weight = 4.0f * PI / (float)ray_count;
     for (int i = 0; i < 9; ++i) {
         radiance_sh.coeffs[i].x *= weight;
         radiance_sh.coeffs[i].y *= weight;
         radiance_sh.coeffs[i].z *= weight;
     }
-
-    // Write to irradiance data: apply cosine convolution for irradiance
-    SH9Color irradiance_sh;
-    irradiance_sh.Reset();
-    ConvolveCosineLobe(radiance_sh, irradiance_sh);
+    // No ConvolveCosineLobe — output is radiance SH (matches runtime).
 
     math::v3* irradiance = volume.GetIrradianceData() + probe_index * 9;
     for (int i = 0; i < 9; ++i) {
-        irradiance[i] = irradiance_sh.coeffs[i];
+        irradiance[i] = radiance_sh.coeffs[i];
     }
 }
 
@@ -464,7 +510,9 @@ static inline float Dot3(v3 a, v3 b)
 /*static*/ bool StaticProbeBaker::Bake(
     StaticProbeVolume& volume,
     const ProbeBakingScene& scene,
-    const ProbeBakingParams& params)
+    const ProbeBakingParams& params,
+    BakeProgressFn on_progress,
+    void* progress_user_data)
 {
     const u32 probe_count = volume.ProbeCount();
     if (probe_count == 0) return false;
@@ -477,34 +525,80 @@ static inline float Dot3(v3 a, v3 b)
     primal::utl::vector<math::v3> verts(scene.vertices, scene.vertices + scene.vertex_count);
     primal::utl::vector<u32> idx(scene.indices, scene.indices + scene.index_count);
 
+    auto t_bvh_start = std::chrono::steady_clock::now();
     auto bvh = std::make_shared<utl::BVH>();
     bvh->Build(verts, idx);
+    auto t_bvh_end = std::chrono::steady_clock::now();
+    double bvh_seconds = std::chrono::duration<double>(t_bvh_end - t_bvh_start).count();
 
-    // --- Phase 1: MC Direct Lighting (parallel per probe) ---
-    // Capture bvh by shared_ptr for thread safety
+    // Diagnostic: print BVH quality + first-vertex sample so we can spot
+    // degenerate builds (e.g. from byte-stride mismatches in the caller)
+    // without resorting to a debugger. A well-built BVH has max_leaf_size
+    // in the single digits and max_depth ~log2(triangles).
+    auto stats = bvh->GetStats();
+    std::cout << "[Bake] BVH build: " << bvh_seconds << "s   nodes=" << stats.node_count
+              << " leaves=" << stats.leaf_count
+              << " max_leaf=" << stats.max_leaf_size
+              << " max_depth=" << stats.max_depth
+              << " tris=" << stats.total_prims << std::endl;
+    if (scene.vertex_count >= 3) {
+        std::cout << "[Bake] First 3 vertices: v0=("
+                  << scene.vertices[0].x << "," << scene.vertices[0].y << "," << scene.vertices[0].z << ") v1=("
+                  << scene.vertices[1].x << "," << scene.vertices[1].y << "," << scene.vertices[1].z << ") v2=("
+                  << scene.vertices[2].x << "," << scene.vertices[2].y << "," << scene.vertices[2].z << ")"
+                  << std::endl;
+    }
+
+    // --- Phase 1: Probe radiance SH bake (parallel per probe) ---
+    // Single-bounce indirect radiance: sky + Lambertian surface bounce.
+    // No direct sun leak, no multi-bounce, no ConvolveCosineLobe — outputs
+    // radiance SH matching the runtime DDGIUpdateIrradiance.wgsl convention.
+    //
+    // Process in chunks of kProbeChunk so the optional on_progress callback
+    // (used by WASM to pump the browser event loop via emscripten_sleep) gets
+    // called frequently enough to keep the page responsive. Native builds
+    // pass nullptr and still benefit from ParallelFor's worker pool inside
+    // each chunk.
     auto bvh_ref = bvh;
-    auto handle1 = jobsystem::JobSystem::ParallelFor(probe_count,
-        [&volume, bvh_ref, &scene, &params](u32 i) {
-            BakeDirectLighting(volume, *bvh_ref, scene, params, i);
-        });
-    jobsystem::JobSystem::Wait(handle1);
+    std::cout << "[Bake] Phase 1: BakeProbeRadiance over " << probe_count
+              << " probes (" << params.rays_per_probe << " rays each)..." << std::flush;
+    auto t1_start = std::chrono::steady_clock::now();
+    constexpr u32 kProbeChunk = 32;
+    for (u32 base = 0; base < probe_count; base += kProbeChunk) {
+        const u32 end = (probe_count - base < kProbeChunk) ? probe_count : (base + kProbeChunk);
+        auto handle1 = jobsystem::JobSystem::ParallelFor(end - base,
+            [&volume, bvh_ref, &scene, &params, base](u32 i) {
+                BakeProbeRadiance(volume, *bvh_ref, scene, params, base + i);
+            });
+        jobsystem::JobSystem::Wait(handle1);
+        if (on_progress) on_progress(progress_user_data, "radiance", end, probe_count);
+    }
+    auto t1_end = std::chrono::steady_clock::now();
+    std::cout << " done in " << std::chrono::duration<double>(t1_end - t1_start).count() << "s" << std::endl;
 
-    // --- Phase 2: Sequential SH Propagation (iterative bounce) ---
-    PropagateBounce(volume, params);
-
-    // --- Phase 3: Visibility + Sky Factor (parallel per probe) ---
-    auto handle3 = jobsystem::JobSystem::ParallelFor(probe_count,
-        [&volume, bvh_ref, &scene, &params](u32 i) {
-            BakeVisibility(volume, *bvh_ref, scene, params, i);
-        });
-    jobsystem::JobSystem::Wait(handle3);
-
-    // --- Phase 4: Sky SH (parallel per probe) ---
-    auto handle4 = jobsystem::JobSystem::ParallelFor(probe_count,
-        [&volume, &scene, &params](u32 i) {
-            BakeSkySH(volume, scene, params, i);
-        });
-    jobsystem::JobSystem::Wait(handle4);
+    // --- Phase 2: Visibility + Sky Factor (parallel per probe) ---
+    // Octahedral depth + sky factor — still consumed at runtime by GIGather.
+    // Skipped on WASM (params.skip_visibility) where the runtime DDGI trace
+    // overwrites these buffers before they're read and the 5x ray cost would
+    // make the bake take tens of minutes on single-threaded JS.
+    if (!params.skip_visibility) {
+        std::cout << "[Bake] Phase 2: BakeVisibility over " << probe_count
+                  << " probes (64+256 rays each)..." << std::flush;
+        auto t3_start = std::chrono::steady_clock::now();
+        for (u32 base = 0; base < probe_count; base += kProbeChunk) {
+            const u32 end = (probe_count - base < kProbeChunk) ? probe_count : (base + kProbeChunk);
+            auto handle3 = jobsystem::JobSystem::ParallelFor(end - base,
+                [&volume, bvh_ref, &scene, &params, base](u32 i) {
+                    BakeVisibility(volume, *bvh_ref, scene, params, base + i);
+                });
+            jobsystem::JobSystem::Wait(handle3);
+            if (on_progress) on_progress(progress_user_data, "visibility", end, probe_count);
+        }
+        auto t3_end = std::chrono::steady_clock::now();
+        std::cout << " done in " << std::chrono::duration<double>(t3_end - t3_start).count() << "s" << std::endl;
+    } else {
+        std::cout << "[Bake] Phase 2: BakeVisibility SKIPPED (params.skip_visibility=true)" << std::endl;
+    }
 
     volume.MarkLoaded();
     return true;

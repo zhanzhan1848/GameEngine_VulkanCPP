@@ -12,7 +12,9 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHITypes.h"
+#if !defined(__EMSCRIPTEN__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#endif
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/RenderPipeline/StreamingMesh.h"
 
@@ -647,8 +649,12 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
         return empty;
     }
     // ODR workaround (see GlobalSDF.cpp DebugFill): bypass the global singleton.
+#if defined(__EMSCRIPTEN__)
+    RHICommandBuffer* cmd = rhi::GetCommandBuffer(cmd_handle);
+#else
     auto* metal_dev = dynamic_cast<MetalDevice*>(device_);
     RHICommandBuffer* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmd_handle) : nullptr;
+#endif
     if (!cmd) {
         device_->DestroyDescriptorSet(classify_ds);
         device_->DestroyDescriptorSet(emit_vertices_ds);
@@ -1103,8 +1109,12 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
     // CommandBufferManager singleton has two instances — dylib registers,
     // static reads, lookup returns nullptr, Begin() segfaults. MetalDevice's
     // own allocator is singleton-free.
+#if defined(__EMSCRIPTEN__)
+    RHICommandBuffer* cmd = rhi::GetCommandBuffer(cmd_handle);
+#else
     auto* metal_dev = dynamic_cast<MetalDevice*>(device_);
     RHICommandBuffer* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmd_handle) : nullptr;
+#endif
     if (!cmd) {
         device_->DestroyDescriptorSet(fill_scalar_ds);
         device_->DestroyDescriptorSet(classify_ds);

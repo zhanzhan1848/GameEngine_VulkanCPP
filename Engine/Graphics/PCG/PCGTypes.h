@@ -42,6 +42,9 @@ enum class PCGAttr : u8 {
     RotationY,  // Y-axis rotation in radians
     MeshIndex,  // Assigned mesh slot index (0-based)
     TechniqueIndex, // ShaderTechnique enum value (as f32)
+    BaseColorR, // Linear-RGB tint (0 = unset → factory defaults to 1.0)
+    BaseColorG,
+    BaseColorB,
     Count       // Total number of attributes (used as default stride)
 };
 

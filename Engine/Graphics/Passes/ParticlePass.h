@@ -101,14 +101,19 @@ private:
 
 namespace primal::graphics {
 
+// Stub types used when DISABLE_PARTICLE_SYSTEM is defined.
+namespace particles {
+enum class blend_mode : u8 {};
+}
+
 class ParticlePass {
 public:
     ParticlePass() = default;
     ~ParticlePass() = default;
-    
+
     bool initialize(rhi::RHIDeviceBase*) { return true; }
     void shutdown() {}
-    
+
     void execute(rhi::RHICommandBuffer*, u32, const math::m4x4&, const math::m4x4&) {}
     void set_blend_mode(particles::blend_mode) {}
     void set_depth_write_enabled(bool) {}

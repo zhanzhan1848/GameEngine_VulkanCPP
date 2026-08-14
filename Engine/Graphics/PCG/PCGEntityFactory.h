@@ -71,6 +71,21 @@ public:
             u32 tech_val = static_cast<u32>(points.GetAttr(i, PCGAttr::TechniqueIndex));
             mat_info.technique = static_cast<graphics::ShaderTechnique>(
                 std::min(tech_val, static_cast<u32>(graphics::ShaderTechnique::Count) - 1));
+
+            // Per-point tint. WFCOutput writes linear-RGB into BaseColorR/G/B
+            // for ruins tiles; primitives leave the slots at 0 (init default),
+            // which we map to 1.0 so the GBuffer shader's albedo multiplier
+            // stays neutral white for untinted points.
+            f32 cr = points.GetAttr(i, PCGAttr::BaseColorR);
+            f32 cg = points.GetAttr(i, PCGAttr::BaseColorG);
+            f32 cb = points.GetAttr(i, PCGAttr::BaseColorB);
+            if (cr == 0.0f) cr = 1.0f;
+            if (cg == 0.0f) cg = 1.0f;
+            if (cb == 0.0f) cb = 1.0f;
+            mat_info.base_color[0] = cr;
+            mat_info.base_color[1] = cg;
+            mat_info.base_color[2] = cb;
+            mat_info.base_color[3] = 1.0f;
             entity_info.material = &mat_info;
 
             game_entity::entity entity = game_entity::create(entity_info);

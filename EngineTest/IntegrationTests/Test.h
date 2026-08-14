@@ -58,10 +58,10 @@
 #ifndef TEST_FIELD_DRIVEN_SCATTER
 #define TEST_FIELD_DRIVEN_SCATTER 0
 #endif
-
 class Test
 {
 public:
+    virtual ~Test() = default;
 #ifdef _WIN64
     virtual bool initialize() = 0;
     virtual void run() = 0;

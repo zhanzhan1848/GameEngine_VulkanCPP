@@ -423,8 +423,325 @@ if(APPLE)
     setup_test_target(TestPipelineRenderFrame)
     target_link_libraries(TestPipelineRenderFrame PRIVATE EngineDLL ${CMAKE_DL_LIBS})
 
+    # 29. TestWFC3DParametric (WFC Phase A.3 Task 11: end-to-end integration test)
+    # Headless, no GPU. Exercises the full parametric WFC pipeline:
+    #   WFCTileCatalog::Populate -> WFCSolver (multi-tile) -> WFCOutput::ConsumeSteps
+    # Wired as a standalone block (mirrors UnitTests/Graphics/WFC/CMakeLists pattern)
+    # rather than via setup_test_target, to avoid pulling Cocoa/Metal frameworks and
+    # shader-asset POST_BUILD copies that the WFC path does not need.
+    add_executable(TestWFC3DParametric
+        Graphics/WFC/TestWFC3DParametric.cpp
+    )
+    target_include_directories(TestWFC3DParametric PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFC3DParametric PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFC3DParametric COMMAND TestWFC3DParametric)
+    set_target_properties(TestWFC3DParametric PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFC3DParametric PRIVATE DEBUG _DEBUG)
+
+    # 30. TestWFCRendering (WFC Phase A.4 Task 2: Metal window + empty render loop)
+    # Mirrors TestPCGScatter pattern: Main.cpp + TestWFCRendering.cpp + MacKeyboard.mm.
+    # setup_test_target pulls Cocoa/Metal frameworks and shader-asset POST_BUILD copies
+    # that the live Metal pipeline requires (unlike the headless TestWFC3DParametric).
+    add_executable(TestWFCRendering
+        "Main.cpp"
+        "Graphics/WFC/TestWFCRendering.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestWFCRendering)
+    target_include_directories(TestWFCRendering PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC
+    )
+    target_compile_definitions(TestWFCRendering PRIVATE "TEST_WFC_RENDERING=1" "TEST_RENDERER=0")
+
+    # 31. TestWFCRendering2DSmoke (Phase B.1: same sources, WFC_MODE_2D_SMOKE=1 define)
+    # CI smoke variant: Initialize() starts in 2D mode (4x4x1 grid) so the 2D
+    # collapse path is exercised without interactive input. Mirrors the
+    # TestWFCRendering target exactly except for the extra compile definition.
+    add_executable(TestWFCRendering2DSmoke
+        "Main.cpp"
+        "Graphics/WFC/TestWFCRendering.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestWFCRendering2DSmoke)
+    target_include_directories(TestWFCRendering2DSmoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC
+    )
+    target_compile_definitions(TestWFCRendering2DSmoke PRIVATE
+        "TEST_WFC_RENDERING=1" "TEST_RENDERER=0" "WFC_MODE_2D_SMOKE=1")
+
+    # 32. TestWFCStreaming (WFC Phase B.2 Task 4: streaming invariant test)
+    # Asserts 4x4x4 streaming completes in <240 frames with 64 total collapses.
+    # Same scaffolding as TestWFCRendering (Main.cpp + MacKeyboard.mm) so the
+    # windowed Metal pipeline is available even though the test doesn't poll keys.
+    add_executable(TestWFCStreaming
+        "Main.cpp"
+        "Graphics/WFC/TestWFCStreaming.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestWFCStreaming)
+    target_include_directories(TestWFCStreaming PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC
+    )
+    target_compile_definitions(TestWFCStreaming PRIVATE "TEST_WFC_STREAMING=1" "TEST_RENDERER=0")
+
+    # 33. TestWFCCategorySolve (WFC Phase C.1 T23: category-mask integration test)
+    # Headless, no GPU. Verifies that solving a 4×2×4 grid with
+    # active_category_mask=Ruins produces a grid where every collapsed cell
+    # holds a Ruins-category tile — proving the T5 PopulateAllCandidates
+    # category-mask plumbing flows through end-to-end.
+    # Wired as a standalone block mirroring TestWFC3DParametric (block 29).
+    add_executable(TestWFCCategorySolve
+        Graphics/WFC/TestWFCCategorySolve.cpp
+    )
+    target_include_directories(TestWFCCategorySolve PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCCategorySolve PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCCategorySolve COMMAND TestWFCCategorySolve)
+    set_target_properties(TestWFCCategorySolve PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCCategorySolve PRIVATE DEBUG _DEBUG)
+
+    # 34. TestWFCRuinsAdjacencyConsistency (WFC Phase C.1 T24)
+    # Headless, no GPU. Verifies every (tile, variant, face) has >= 1 partner
+    # so the solver can never dead-lock on a zero-adjacency cell.
+    add_executable(TestWFCRuinsAdjacencyConsistency
+        Graphics/WFC/TestWFCRuinsAdjacencyConsistency.cpp
+    )
+    target_include_directories(TestWFCRuinsAdjacencyConsistency PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCRuinsAdjacencyConsistency PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCRuinsAdjacencyConsistency
+             COMMAND TestWFCRuinsAdjacencyConsistency)
+    set_target_properties(TestWFCRuinsAdjacencyConsistency PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCRuinsAdjacencyConsistency PRIVATE DEBUG _DEBUG)
+
+    # 35. TestWFCRuinsSolveSmall (WFC Phase C.1 T25)
+    # Headless, no GPU. Small 3×3×3 Ruins-only solve that requires all 27
+    # cells to collapse to a Ruins-category tile. Tighter than T23: catches
+    # partial-collapse/GivenUp that surfaces only after several cells are
+    # already fixed in place (the failure mode T25 exposed in the catalog).
+    add_executable(TestWFCRuinsSolveSmall
+        Graphics/WFC/TestWFCRuinsSolveSmall.cpp
+    )
+    target_include_directories(TestWFCRuinsSolveSmall PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCRuinsSolveSmall PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCRuinsSolveSmall
+             COMMAND TestWFCRuinsSolveSmall)
+    set_target_properties(TestWFCRuinsSolveSmall PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCRuinsSolveSmall PRIVATE DEBUG _DEBUG)
+
+    # 36. TestWFCRuinsMixedCategories (WFC Phase C.1 T26)
+    # Headless, no GPU. 6×3×6 Primitive+Ruins mixed solve: asserts collapse
+    # completes and primitive share lands in [10%, 50%]. Loose smoke test
+    # catches catastrophic regressions (cube wildcard removed, ruins-only
+    # bias wiping primitives, etc.).
+    add_executable(TestWFCRuinsMixedCategories
+        Graphics/WFC/TestWFCRuinsMixedCategories.cpp
+    )
+    target_include_directories(TestWFCRuinsMixedCategories PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCRuinsMixedCategories PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCRuinsMixedCategories
+             COMMAND TestWFCRuinsMixedCategories)
+    set_target_properties(TestWFCRuinsMixedCategories PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCRuinsMixedCategories PRIVATE DEBUG _DEBUG)
+
+    # 37. TestWFCRuinsRestart (WFC Phase C.1 T26)
+    # Headless, no GPU. 8×4×8 Ruins-only solve on seed=0xDEAD1: asserts the
+    # solver either completes the full 256-cell collapse or restarts ≥ 1
+    # generation. Validates RestartPolicy fires under deadlocks.
+    add_executable(TestWFCRuinsRestart
+        Graphics/WFC/TestWFCRuinsRestart.cpp
+    )
+    target_include_directories(TestWFCRuinsRestart PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+    )
+    target_link_libraries(TestWFCRuinsRestart PRIVATE Engine)
+    add_test(NAME Engine_Integration_Tests_TestWFCRuinsRestart
+             COMMAND TestWFCRuinsRestart)
+    set_target_properties(TestWFCRuinsRestart PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
+        FOLDER "EngineTest/IntegrationTests")
+    target_compile_definitions(TestWFCRuinsRestart PRIVATE DEBUG _DEBUG)
+
+    # 38. TestWFCRuinsRendering (WFC Phase C.1 T27 visual smoke binary)
+    # Live Metal window + StandardRenderPipeline. Boots engine, registers 15
+    # catalog meshes (5 primitive + 10 ruins placeholders), runs an 8×4×8
+    # ruins-only solver to completion, spawns collapsed cells as ECS entities,
+    # renders kHeadlessFrameCap frames, exits. Smoke asserts ≥ 50 cells
+    # collapsed; visual quality is human-reviewed.
+    add_executable(TestWFCRuinsRendering
+        "Main.cpp"
+        "Graphics/WFC/TestWFCRuinsRendering.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestWFCRuinsRendering)
+    target_include_directories(TestWFCRuinsRendering PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC
+    )
+    target_compile_definitions(TestWFCRuinsRendering PRIVATE "TEST_WFC_RUINS_RENDERING=1" "TEST_RENDERER=0")
+
+    # 39. TestKenneyTilePreview (Kenney dungeon tile asset-pack preview)
+    # Live Metal window + StandardRenderPipeline. Loads every .engine_mesh in
+    # EngineTest/assets/Processed/kenney_dungeon_tiles/ via KenneyTileCatalog
+    # (application-layer loader, NOT engine core), places tiles in an 8×5 grid
+    # at cell_size=4m, spawns ECS entities via PCGEntityFactory, renders
+    # kHeadlessFrameCap=120 frames, exits. Smoke asserts ≥ 1 tile loaded AND
+    # spawned; visual quality is human-reviewed.
+    add_executable(TestKenneyTilePreview
+        "Main.cpp"
+        "Graphics/WFC/TestKenneyTilePreview.cpp"
+        "Graphics/WFC/KenneyTileCatalog.cpp"
+        "Graphics/WFC/Styles/KenneyDungeonStyle.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestKenneyTilePreview)
+    target_include_directories(TestKenneyTilePreview PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/WFC/Styles
+    )
+    target_compile_definitions(TestKenneyTilePreview PRIVATE "TEST_KENNEY_TILE_PREVIEW=1" "TEST_RENDERER=0")
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall TestWFCRuinsMixedCategories TestWFCRuinsRestart TestWFCRuinsRendering TestKenneyTilePreview)
+
+    # 12. TestDawnRenderer (WebGPU)
+    if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)
+        set(DAWN_ROOT_DIR ${CMAKE_SOURCE_DIR}/third_party/dawn)
+        add_executable(TestDawnRenderer
+            "TestDawnMain.cpp"
+            "TestDawnRenderer.cpp"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnRenderer)
+        target_compile_definitions(TestDawnRenderer PRIVATE "TEST_DAWN_RENDERER=1" "ENABLE_WEBGPU=1")
+        target_include_directories(TestDawnRenderer PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnRenderer PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnRenderer)
+
+        # 13. TestDawnRenderingWindow (WebGPU windowed rendering)
+        add_executable(TestDawnRenderingWindow
+            "Main.cpp"
+            "TestDawnRendering.cpp"
+            "MacKeyboard.mm"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnRenderingWindow)
+        target_compile_definitions(TestDawnRenderingWindow PRIVATE "TEST_DAWN_RENDERING=1" "ENABLE_WEBGPU=1")
+        target_include_directories(TestDawnRenderingWindow PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnRenderingWindow PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnRenderingWindow)
+
+        # 14. TestDawnSponza (WebGPU Sponza rendering)
+        add_executable(TestDawnSponza
+            "Main.cpp"
+            "TestDawnSponza.cpp"
+            "MacKeyboard.mm"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnSponza)
+        target_compile_definitions(TestDawnSponza PRIVATE "TEST_DAWN_SPONZA=1" "ENABLE_WEBGPU=1")
+        target_include_directories(TestDawnSponza PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnSponza PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnSponza)
+
+        # 15. TestDawnRenderGraph (WebGPU RenderGraph integration)
+        add_executable(TestDawnRenderGraph
+            "Main.cpp"
+            "TestDawnRenderGraph.cpp"
+            "MacKeyboard.mm"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnRenderGraph)
+        target_compile_definitions(TestDawnRenderGraph PRIVATE "TEST_DAWN_RENDERGRAPH=1" "ENABLE_WEBGPU=1")
+        target_include_directories(TestDawnRenderGraph PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderGraph"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnRenderGraph PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnRenderGraph)
+
+        # 16. TestDawnForwardRenderer (ForwardRenderer on Dawn)
+        add_executable(TestDawnForwardRenderer
+            "Main.cpp"
+            "TestDawnForwardRenderer.cpp"
+            "MacKeyboard.mm"
+            ${COMMON_HEADERS}
+        )
+        setup_test_target(TestDawnForwardRenderer)
+        target_compile_definitions(TestDawnForwardRenderer PRIVATE "TEST_DAWN_FORWARD_RENDERER=1" "ENABLE_WEBGPU=1" "$<$<BOOL:${DISABLE_PARTICLE_SYSTEM}>:DISABLE_PARTICLE_SYSTEM=1>")
+        target_include_directories(TestDawnForwardRenderer PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderGraph"
+            "${DAWN_ROOT_DIR}/include"
+            "${DAWN_ROOT_DIR}/src/include"
+            "${DAWN_ROOT_DIR}/gen"
+        )
+        target_link_libraries(TestDawnForwardRenderer PRIVATE webgpu_dawn)
+        add_dependencies(IntegrationTests TestDawnForwardRenderer)
+    endif()
 
 elseif(WIN32)
     # Windows下使用 TestRenderer

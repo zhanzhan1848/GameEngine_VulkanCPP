@@ -46,7 +46,10 @@ struct ScreenProbeGlobalData {
 
 constant float PI = 3.14159265358979323846f;
 constant float GOLDEN_RATIO = 1.618033988749895f;
-constant uint  MAX_SDF_STEPS = 4;
+// Was 4 — way too few for sphere tracing. Most rays failed to converge within
+// 4 steps and reported "miss", producing extremely dim SPGI output.
+// 32 gives rays enough iterations to actually reach geometry within maxDist.
+constant uint  MAX_SDF_STEPS = 32;
 
 // ============================================================================
 // Screen Probe SDF trace wrapper
@@ -59,7 +62,9 @@ static float screenProbeSampleBestSDF(float3 pos,
     constant ScreenProbeGlobalData& global)
 {
     return sampleBestSDF_elseIf(pos, sdf0, sdf1, sdf2,
-        global.sdf_origins, global.sdf_extents, uint(global.sdf_resolutions.w));
+        global.sdf_origins[0], global.sdf_origins[1], global.sdf_origins[2],
+        global.sdf_extents[0], global.sdf_extents[1], global.sdf_extents[2],
+        uint(global.sdf_resolutions.w));
 }
 
 // ============================================================================
@@ -85,12 +90,7 @@ static float3 orientAroundNormal(float3 dir, float3 normal) {
 // ============================================================================
 // Sphere tracing through GlobalSDF
 // ============================================================================
-
-struct SDFHitResult {
-    bool   hit;
-    float3 position;
-    float  distance;
-};
+// SDFHitResult struct and sampleBestSDF_elseIf are provided by SDFTraceCommon.metal.
 
 static SDFHitResult traceSDF(float3 origin, float3 direction, float maxDist,
     texture3d<float, access::sample> sdf0,

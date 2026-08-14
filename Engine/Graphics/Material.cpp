@@ -1,6 +1,7 @@
 #include "Material.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include <cstring>
+#include <iostream>
 
 namespace primal::graphics {
 
@@ -138,9 +139,9 @@ rhi::PipelineHandle Material::GetPipeline(rhi::RHIDeviceBase* device, rhi::Rende
     for (auto& [stage, entry] : stageMap) {
         if (entry.handle == rhi::handles::INVALID_SHADER && !entry.bytecode.empty()) {
             entry.handle = device->CreateShader(
-                entry.bytecode.data(), 
-                entry.bytecode.size(), 
-                stage, 
+                entry.bytecode.data(),
+                entry.bytecode.size(),
+                stage,
                 entry.entryPoint.c_str()
             );
         }

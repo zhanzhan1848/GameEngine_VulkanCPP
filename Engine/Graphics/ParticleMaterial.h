@@ -87,18 +87,25 @@ u32 get_cached_count();
 
 namespace primal::graphics {
 
+// Stub types used when DISABLE_PARTICLE_SYSTEM is defined — particles::blend_mode
+// and particles::emitter_config are not visible (ParticleTypes.h guards them).
+namespace particles {
+enum class blend_mode : u8 {};
+struct emitter_config {};
+}
+
 class ParticleMaterial {
 public:
     ParticleMaterial() = default;
     ~ParticleMaterial() = default;
-    
+
     void set_blend_mode(particles::blend_mode) {}
     void set_base_texture(rhi::ResourceHandle) {}
     void set_texture_sheet(u32, u32, f32) {}
     void set_depth_write_enabled(bool) {}
     void set_receive_shadows(bool) {}
     void set_soft_particles(bool, f32 = 1.0f) {}
-    
+
     bool initialize(rhi::RHIDeviceBase*) { return true; }
     void shutdown() {}
 };

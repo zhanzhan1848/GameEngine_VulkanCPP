@@ -1,6 +1,15 @@
 #include "StandardRenderPipeline.h"
+#include "Graphics/RenderPipeline/RenderPasses/ForwardPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/SSAOPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/BloomPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/ToneMappingPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/HZBPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/VelocityPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.h"
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
+#include "Graphics/RHI/Core/RHICommand.h"
+#include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Graphics/Nanite/GPUCullingPipeline.h"
 #include "Graphics/Nanite/NaniteStreamingManager.h"
@@ -220,6 +229,12 @@ void StandardRenderPipeline::SetEditorMode(bool enabled) {
 }
 
 void StandardRenderPipeline::InitializeSubsystems() {
+#ifndef __EMSCRIPTEN__
+    // --- Meshlet/Nanite subsystems (not yet ported to WASM/Dawn WGSL) ---
+    // The WFC demo runs in editor mode (ForwardSceneRenderer path) which is
+    // self-contained and does not touch any of the subsystems below. Skipping
+    // their init avoids cascading pipeline-creation failures from missing
+    // meshlet WGSL shaders (ClusterBinning, VisibilityBuffer, etc.).
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
     if (!gpuDraw.IsInitialized()) {
         nanite::BinningConfig binningConfig{};
@@ -330,6 +345,7 @@ void StandardRenderPipeline::InitializeSubsystems() {
 
     // --- Lumen passes ---
     InitializeLumenPasses();
+#endif // !__EMSCRIPTEN__
 
     // --- Forward renderer (editor mode) ---
     forward_renderer_ = std::make_unique<ForwardSceneRenderer>();

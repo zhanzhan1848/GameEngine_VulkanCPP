@@ -371,76 +371,36 @@ bool MetalTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     
     // Check storage mode
     if (mtlTexture_->storageMode() == MTL::StorageModePrivate) {
-        // Use Staging Buffer
+        // 异步路径: per-frame staging pool + deferred blit (encoded by MetalDevice::submitImpl)
         MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
-        MTL::Device* mtlDevice = metalDevice.GetNativeDevice();
-        
-        // Create staging buffer
-        MTL::Buffer* stagingBuffer = mtlDevice->newBuffer(size, MTL::ResourceStorageModeShared);
-        if (!stagingBuffer) {
-            std::cerr << "[MetalTexture] Failed to create staging buffer. Size: " << size << std::endl;
-            return false;
-        }
-        
-        // Copy data to staging buffer
-        memcpy(stagingBuffer->contents(), data, size);
-        
-        // Create command buffer and blit encoder
-        MTL::CommandQueue* queue = metalDevice.GetTransferQueue();
-        if (!queue) {
-            std::cerr << "[MetalTexture] Transfer queue is null" << std::endl;
-            stagingBuffer->release();
+        MetalStagingAllocator& allocator = metalDevice.GetStagingAllocator();
+
+        if (!allocator.IsInitialized()) {
+            std::cerr << "[MetalTexture] Staging allocator not initialized" << std::endl;
             return false;
         }
 
-        MTL::CommandBuffer* cmdBuffer = queue->commandBuffer();
-        if (!cmdBuffer) {
-            std::cerr << "[MetalTexture] Failed to create command buffer" << std::endl;
-            stagingBuffer->release();
+        MetalStagingAllocator::Allocation alloc = allocator.Allocate(size, 256);
+        if (alloc.overflow) {
+            std::cerr << "[MetalTexture] Staging pool overflow, size=" << size << std::endl;
             return false;
         }
 
-        MTL::BlitCommandEncoder* blitEncoder = cmdBuffer->blitCommandEncoder();
-        if (!blitEncoder) {
-            std::cerr << "[MetalTexture] Failed to create blit encoder" << std::endl;
-            // cmdBuffer->release(); // Autoreleased
-            stagingBuffer->release();
-            return false;
-        }
-        
-        // Copy from buffer to texture
+        std::memcpy(alloc.cpuPtr, data, size);
+
         MTL::Size sourceSize = MTL::Size::Make(textureDesc_.size.x, textureDesc_.size.y, 1);
-        
-        // Blit copy
-        blitEncoder->copyFromBuffer(
-            stagingBuffer,
-            0,
-            bytesPerRow,
-            bytesPerImage,
-            sourceSize,
-            mtlTexture_,
-            0,
-            0,
-            MTL::Origin::Make(0, 0, 0)
-        );
-        
-        blitEncoder->endEncoding();
-        
-        // Add completion handler to release staging buffer
-        // Note: In C++ Metal-cpp, we need to handle object lifetime carefully.
-        // We can release stagingBuffer after command buffer completion.
-        // Or simply wait here for synchronous update (easiest for now).
-        
-        cmdBuffer->commit();
-        cmdBuffer->waitUntilCompleted();
-        
-        stagingBuffer->release();
+        allocator.QueueBlit_Texture(alloc, mtlTexture_,
+                                    /*mipLevel=*/0, /*slice=*/0,
+                                    /*origin=*/0, 0, 0,
+                                    /* dimensions matching sourceSize */
+                                    textureDesc_.size.x, textureDesc_.size.y, 1,
+                                    bytesPerRow, bytesPerImage);
     } else {
         // Shared or Managed: use replaceRegion
         MTL::Region region = MTL::Region::Make2D(0, 0, textureDesc_.size.x, textureDesc_.size.y);
         mtlTexture_->replaceRegion(region, 0, data, bytesPerRow);
     }
-    
+
     return true;
 }
 

@@ -49,51 +49,74 @@ void RenderGraph::Clear() {
 
 void RenderGraph::CleanupPool() {
     // Keep resources for some frames to reduce thrashing
-    const u64 kKeepFrames = 30; 
-    
-    // Manually iterate and erase since custom vector might not support remove_if+erase(iterator)
-    for (size_t i = 0; i < resourcePool_.size(); ) {
-        const auto& res = resourcePool_[i];
-        if (currentFrame_ > res.lastUsedFrame + kKeepFrames) {
-            if (res.isTexture) {
-                device_.DestroyTexture(res.handle);
+    const u64 kKeepFrames = 3;
+
+    // Dawn/WebGPU: DestroyTexture is immediate (no GPU fence defer).
+    // Destroying pooled textures while GPU still references them corrupts
+    // the DawnTexture free list. Since all passes run every frame with
+    // fixed parameters, the pool stabilizes quickly — just keep everything.
+    bool isDawn = (device_.GetPlatform() == rhi::RHIPlatform::Dawn);
+    if (isDawn) return;
+
+    // Destroy expired resources and compact the pool using move-assignment.
+    // utl::vector::erase() uses memcpy internally, which is UB for
+    // PooledResource (contains TextureDesc with std::string).
+    size_t writeIdx = 0;
+    for (size_t readIdx = 0; readIdx < resourcePool_.size(); ++readIdx) {
+        if (currentFrame_ > resourcePool_[readIdx].lastUsedFrame + kKeepFrames) {
+            if (resourcePool_[readIdx].isTexture) {
+                device_.DestroyTexture(resourcePool_[readIdx].handle);
             } else {
-                device_.DestroyBuffer(res.handle);
+                device_.DestroyBuffer(resourcePool_[readIdx].handle);
             }
-            resourcePool_.erase(i);
         } else {
-            ++i;
+            if (writeIdx != readIdx) {
+                resourcePool_[writeIdx] = std::move(resourcePool_[readIdx]);
+            }
+            ++writeIdx;
         }
+    }
+    // Shrink to actual size by erasing trailing elements from the end
+    while (resourcePool_.size() > writeIdx) {
+        resourcePool_.erase_unordered(resourcePool_.size() - 1);
     }
 }
 
-RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::ResourceHandle resource) {
+RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::ResourceHandle resource,
+                                              rhi::ResourceState initialState) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphResource>(name, handle, RGResourceType::Unknown);
     rgResource->SetImportedResource(resource);
-    
+    rgResource->SetInitialState(initialState);
+
     resources_.push_back(std::move(rgResource));
     resourceMap_[name] = handle;
     return handle;
 }
 
-RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::ResourceHandle resource, const rhi::TextureDesc& desc) {
+RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::ResourceHandle resource,
+                                             const rhi::TextureDesc& desc,
+                                             rhi::ResourceState initialState) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphTexture>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
-    
+    rgResource->SetInitialState(initialState);
+
     resources_.push_back(std::move(rgResource));
     resourceMap_[name] = handle;
     return handle;
 }
 
-RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::ResourceHandle resource, const rhi::BufferDesc& desc) {
+RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::ResourceHandle resource,
+                                            const rhi::BufferDesc& desc,
+                                            rhi::ResourceState initialState) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
     auto rgResource = std::make_unique<RenderGraphBuffer>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
-    
+    rgResource->SetInitialState(initialState);
+
     resources_.push_back(std::move(rgResource));
     resourceMap_[name] = handle;
     return handle;
@@ -421,7 +444,18 @@ void RenderGraph::AllocateResources() {
 void RenderGraph::InsertBarriers() {
     // 追踪每个资源的当前状态
     // index -> state
+    // 对导入资源,优先用 SetInitialState 设置的真实状态;否则保持 Unknown
+    // (Unknown 在 Metal Render encoder 中是 no-op,跨 encoder 类型可能失去同步保障)
     utl::vector<rhi::ResourceState> resourceStates(resources_.size() + 1, rhi::ResourceState::Unknown);
+    for (size_t i = 0; i < resources_.size(); ++i) {
+        const auto& res = resources_[i];
+        if (HasFlag(res->GetFlags(), RGResourceFlags::Imported)) {
+            rhi::ResourceState init = res->GetInitialState();
+            if (init != rhi::ResourceState::Unknown) {
+                resourceStates[i + 1] = init;
+            }
+        }
+    }
 
     for (auto* pass : activePasses_) {
         // 处理输入资源 (Read)
@@ -568,7 +602,6 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
 
         // std::cout << "RenderGraph: Executing Pass " << pass->GetName() << std::endl;
         pass->Execute(context);
-        // std::cout << "RenderGraph: Finished Pass " << pass->GetName() << std::endl;
 
         if (hasRenderPass) {
             cmdBuffer->EndRenderPass();
