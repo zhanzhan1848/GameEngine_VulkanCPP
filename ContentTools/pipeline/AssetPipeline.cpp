@@ -97,7 +97,7 @@ void build_packed_for_mesh(const ProcessableMesh& m,
             }
             bridge.indices.resize(w);
         }
-        generate_sdf(bridge);
+        generate_sdf(bridge, cfg.sdf_params.resolution);
         pm.sdf = std::move(bridge.sdf);
     }
 

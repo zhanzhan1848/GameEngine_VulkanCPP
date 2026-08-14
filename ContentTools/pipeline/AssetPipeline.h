@@ -23,6 +23,7 @@
 #include "common/ProcessableMesh.h"
 #include "common/PipelineTypes.h"
 #include "common/ErrorReport.h"
+#include "common/SDF.h"
 #include "modules/repair/Repair.h"
 #include "modules/remesh/Remesh.h"
 #include "modules/subdivide/Subdivide.h"
@@ -69,6 +70,7 @@ struct Config {
     lod::Params             lod_params;
     meshlet::Params         meshlet_params;
     collision::Params       collision_params;
+    sdf::Params             sdf_params;
 };
 
 // All outputs from a single Run. `packed` parallels `scene.lods[*].meshes[*]`
@@ -86,7 +88,8 @@ struct Result {
 // but Run itself does not throw — caller decides per-error policy.
 //
 // SDF generation (enable_sdf) reuses the legacy Geometry.cpp code path
-// via SDF.h's generate_sdf. It requires building a temporary mesh struct
+// via SDF.h's generate_sdf; grid resolution comes from cfg.sdf_params
+// (default 32). It requires building a temporary mesh struct
 // from ProcessableMesh; the cost is O(num_vertices) per mesh.
 void Run(ProcessableScene&& in, const Config& cfg, Result& out);
 
