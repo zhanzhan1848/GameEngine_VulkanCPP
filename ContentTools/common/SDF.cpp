@@ -224,13 +224,34 @@ void generate_sdf(mesh& m) {
                 }
 
                 f32 dist = std::sqrt(min_dist_sq);
-                // Guard against NaN/Inf from degenerate post-remesh geometry
-                // (e.g. collapsed vertices). pack_float<16> asserts
-                // f <= max && f >= min, which fails on NaN. Clamp to valid
-                // range so a single bad mesh doesn't abort the whole pipeline.
                 if (!std::isfinite(dist) || dist > max_dim) dist = max_dim;
                 u32 idx = z * res * res + y * res + x;
-                m.sdf.data[idx] = math::pack_float<16>(dist, 0.0f, max_dim);
+
+                // Inside/outside test via +X ray casting across ALL triangles.
+                u32 intersectionCount = 0;
+                for (u32 i = 0; i < num_indices; i += 3) {
+                    math::v3 v0 = m.vertices[m.indices[i]].position;
+                    math::v3 v1 = m.vertices[m.indices[i + 1]].position;
+                    math::v3 v2 = m.vertices[m.indices[i + 2]].position;
+                    math::v3 edge1 = v1 - v0;
+                    math::v3 edge2 = v2 - v0;
+                    math::v3 rayDir{1.0f, 0.0f, 0.0f};
+                    math::v3 h = Cross(rayDir, edge2);
+                    f32 a = Dot(edge1, h);
+                    if (a > -1e-10f && a < 1e-10f) continue;
+                    f32 f = 1.0f / a;
+                    math::v3 s = p - v0;
+                    f32 u = f * Dot(s, h);
+                    if (u < 0.0f || u > 1.0f) continue;
+                    math::v3 q = Cross(s, edge1);
+                    f32 vRay = f * Dot(rayDir, q);
+                    if (vRay < 0.0f || u + vRay > 1.0f) continue;
+                    f32 t_ray = f * Dot(edge2, q);
+                    if (t_ray > 1e-6f) intersectionCount++;
+                }
+                bool inside = (intersectionCount % 2 == 1);
+                f32 signedDist = inside ? -dist : dist;
+                m.sdf.data[idx] = math::pack_float<16>(signedDist + max_dim, 0.0f, max_dim * 2.0f);
 
                 f32 voxel_diag = Length(step);
                 m.sdf.voxels[idx] = (dist < voxel_diag * 0.5f) ? 255 : 0;
