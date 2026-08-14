@@ -1,6 +1,5 @@
 #include "ToolsCommon.h"
 #include "Geometry.h"
-#include "../Engine/Utilities/Utilities.h"
 #include "pipeline/Validator.h"
 #include "pipeline/SceneBlobReader.h"
 #include "pipeline/SceneBlobWriter.h"
@@ -94,9 +93,9 @@ struct ai_asset_pipeline_params
 // writer + path derivation used by CookMeshWithSettings / WriteModelSidecar.
 namespace {
 
-using namespace primal::tools;
+using namespace primal::utl;
 
-void append_json_escaped(primal::utl::vector<char>& out, const std::string& s)
+void append_json_escaped(utl::vector<char>& out, const std::string& s)
 {
     out.emplace_back('"');
     for (char c : s)
@@ -132,10 +131,10 @@ u32 write_model_sidecar(const u8* buffer, u32 buffer_size, const char* sidecar_p
 {
     if (!buffer || buffer_size == 0 || !sidecar_path) return 0;
 
-    primal::utl::vector<submesh_meta> metas;
+    utl::vector<submesh_meta> metas;
     if (!extract_submesh_metadata(buffer, buffer_size, metas)) return 0;
 
-    primal::utl::vector<char> json;
+    utl::vector<char> json;
     json.reserve(256 + metas.size() * 96);
 
     const char* header =
@@ -353,7 +352,7 @@ bool any_opt_in_module_on(const ai_asset_pipeline_params& p) {
 bool run_pipeline_and_reencode(ai_asset_pipeline_params* p) {
     // Step 1: decode the legacy blob into ProcessableScene IR.
     ProcessableScene scene;
-    primal::utl::vector<ErrorReport> decode_errs;
+    utl::vector<ErrorReport> decode_errs;
     if (!DecodeScene(*p->out_data, scene, decode_errs)) {
         std::cerr << "ProcessAIAsset: DecodeScene failed; falling back to legacy buffer\n";
         for (const auto& e : decode_errs) {
@@ -384,7 +383,7 @@ bool run_pipeline_and_reencode(ai_asset_pipeline_params* p) {
         std::cerr << "ProcessAIAsset: alloc failed for " << new_size << " bytes\n";
         return false;
     }
-    primal::utl::blob_stream_writer blob{new_buffer, new_size};
+    utl::blob_stream_writer blob{new_buffer, new_size};
     SerializeScene(result.scene.name, result.scene.materials,
                    result.packed, blob);
     if (blob.position() != new_buffer + new_size) {
