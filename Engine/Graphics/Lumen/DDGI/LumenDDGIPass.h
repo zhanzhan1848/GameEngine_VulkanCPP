@@ -42,7 +42,7 @@ struct DDGIRuntimeParams {
     float irradiance_temporal_weight = 0.02f;   // EMA alpha for irradiance
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
     float ray_max_distance = 50.0f;             // Must reach geometry across probe grid
-    u32   max_probes_per_frame = 512;            // Max probes updated per frame (importance-based)
+    u32   max_probes_per_frame = 16384;          // Update ALL probes every frame (no flicker)
 };
 
 /// Per-frame camera data that the caller must provide.
@@ -212,6 +212,19 @@ public:
     // irradiance update pass on irradiance_buffers_.
     void ClearSurfaceCacheResources();
 
+    // --- Offline SDF data source ---
+    // When set, DDGI trace uses this pre-built high-resolution SDF volume
+    // instead of the runtime GlobalSDF cascades. The volume stores unsigned
+    // distances; traceSDF uses adaptive first-hit marching.
+    void SetOfflineSDFSource(rhi::ResourceHandle texture,
+                             math::v3 origin, math::v3 extent, u32 resolution) {
+        offline_sdf_texture_ = texture;
+        offline_sdf_origin_ = origin;
+        offline_sdf_extent_ = extent;
+        offline_sdf_resolution_ = resolution;
+        has_offline_sdf_ = (texture != rhi::handles::INVALID_RESOURCE && resolution > 0);
+    }
+
 private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
@@ -326,6 +339,13 @@ private:
     u32                 sc_atlas_size_ = 0;
     u32                 sc_lookup_count_ = 0;
     bool                sc_enabled_ = false;
+
+    // Offline SDF data source (replaces GlobalSDF cascades when active)
+    bool                has_offline_sdf_{ false };
+    rhi::ResourceHandle offline_sdf_texture_{ rhi::handles::INVALID_RESOURCE };
+    math::v3            offline_sdf_origin_{ 0, 0, 0 };
+    math::v3            offline_sdf_extent_{ 0, 0, 0 };
+    u32                 offline_sdf_resolution_{ 0 };
 };
 
 } // namespace primal::graphics::lumen

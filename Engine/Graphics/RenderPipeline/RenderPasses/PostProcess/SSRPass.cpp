@@ -35,14 +35,14 @@ static u32 s_TemporalSetIdx[MAX_FRAMES] = {};
 static ResourceHandle s_TemporalParamsBuf[MAX_FRAMES] = {};
 static void* s_TemporalParamsMapped[MAX_FRAMES] = {};
 
-// === Composite pipeline ===
-static PipelineHandle s_CompositePipeline = handles::INVALID_PIPELINE;
-static PipelineLayoutHandle s_CompositeLayout = handles::INVALID_PIPELINE_LAYOUT;
-static DescriptorSetLayoutHandle s_CompositeDSL = handles::INVALID_RESOURCE;
-static DescriptorSetHandle s_CompositeSets[MAX_FRAMES][MAX_SETS] = {};
-static u32 s_CompositeSetIdx[MAX_FRAMES] = {};
-static ResourceHandle s_CompositeParamsBuf[MAX_FRAMES] = {};
-static void* s_CompositeParamsMapped[MAX_FRAMES] = {};
+// === Upsample (was Composite) pipeline ===
+static PipelineHandle s_UpsamplePipeline = handles::INVALID_PIPELINE;
+static PipelineLayoutHandle s_UpsampleLayout = handles::INVALID_PIPELINE_LAYOUT;
+static DescriptorSetLayoutHandle s_UpsampleDSL = handles::INVALID_RESOURCE;
+static DescriptorSetHandle s_UpsampleSets[MAX_FRAMES][MAX_SETS] = {};
+static u32 s_UpsampleSetIdx[MAX_FRAMES] = {};
+static ResourceHandle s_UpsampleParamsBuf[MAX_FRAMES] = {};
+static void* s_UpsampleParamsMapped[MAX_FRAMES] = {};
 
 // === Persistent textures ===
 static ResourceHandle s_TraceTexture = handles::INVALID_RESOURCE;       // half-res RGBA16F
@@ -51,47 +51,101 @@ static ResourceHandle s_TemporalHistory[MAX_FRAMES] = {                 // half-
     handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE
 };
 
-static std::string LoadShaderSource(const std::string& path) {
-#ifdef __EMSCRIPTEN__
-    auto lastSlash = path.find_last_of('/');
-    auto lastDot = path.find_last_of('.');
-    if (lastSlash != std::string::npos && lastDot != std::string::npos && lastDot > lastSlash) {
-        return dawn::LoadWGSL(path.substr(lastSlash + 1, lastDot - lastSlash - 1).c_str());
+// ============================================================================
+// Shader loading — platform-branched.
+//   Vulkan: load precompiled .spv bytecode (Vulkan has no runtime GLSL compile).
+//   Metal/Dawn: load source text for runtime compilation.
+// ============================================================================
+
+// Load a shader as either binary SPIR-V (Vulkan) or source text (Metal/Dawn).
+// For Vulkan, returns the raw bytecode and *outIsBinary=true.
+// For Metal/Dawn, returns the source text and *outIsBinary=false.
+static std::vector<u8> LoadShaderBytes(RHIPlatform platform, const char* shaderName,
+                                       const char* lumenDir, bool* outIsBinary) {
+    *outIsBinary = (platform == RHIPlatform::Vulkan);
+
+    if (platform == RHIPlatform::Vulkan) {
+        // Lumen SSR shaders live in Engine/Graphics/Vulkan/shaders/Lumen/SSR*.comp.spv
+        std::string relPath = std::string(lumenDir) + shaderName + ".comp.spv";
+        const std::vector<std::string> candidates = {
+            relPath,
+            "Engine/Graphics/Vulkan/shaders/Lumen/" + std::string(shaderName) + ".comp.spv",
+        };
+        for (const auto& path : candidates) {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
+            return bytecode;
+        }
+        std::cerr << "[SSR] Failed to load SPIR-V: " << shaderName
+                  << " (tried " << relPath << ")" << std::endl;
+        return {};
     }
-    return "";
+
+    // Metal / Dawn: source text. Pack into vector<u8> for uniform handling.
+    std::string path;
+    std::string src;
+#ifdef __EMSCRIPTEN__
+    // Dawn/WGSL on web: use the Dawn shader loader.
+    auto lastSlash = std::string(lumenDir).find_last_of('/');
+    path = std::string(shaderName);
+    src = dawn::LoadWGSL(shaderName);
 #else
+    path = utils::ShaderRegistry::GetShaderPath(platform, shaderName);
     std::ifstream file(path);
-    if (!file.is_open()) return "";
+    if (!file.is_open()) {
+        std::cerr << "[SSR] Shader empty: " << shaderName << " (path=" << path << ")" << std::endl;
+        return {};
+    }
     std::stringstream buffer;
     buffer << file.rdbuf();
-    return buffer.str();
+    src = buffer.str();
 #endif
+    return std::vector<u8>(src.begin(), src.end());
 }
 
 static bool EnsurePipelines(RHIDeviceBase& device) {
     if (s_TracePipeline != handles::INVALID_PIPELINE) return true;
 
     auto platform = device.GetPlatform();
+    // Lumen shader subdir for Metal; Vulkan uses explicit Lumen/ path in LoadShaderBytes.
+    const char* lumenDir = (platform == RHIPlatform::Metal)
+                           ? "Engine/Graphics/Metal/shaders/Lumen/"
+                           : "Engine/Graphics/Dawn/shaders/";
 
     auto loadShader = [&](const char* name, const char* entry) -> ShaderHandle {
-        std::string path = utils::ShaderRegistry::GetShaderPath(platform, name);
-        std::string src = LoadShaderSource(path);
-        if (src.empty()) {
-            std::cerr << "[SSR] Shader empty: " << name << " (path=" << path << ")" << std::endl;
+        bool isBinary = false;
+        auto bytes = LoadShaderBytes(platform, name, lumenDir, &isBinary);
+        if (bytes.empty()) {
+            std::cerr << "[SSR] Shader empty: " << name << std::endl;
             return handles::INVALID_SHADER;
         }
-        ShaderHandle h = device.CreateShader(src.data(), src.size(), ShaderStage::Compute, entry);
+        ShaderHandle h = device.CreateShader(bytes.data(), bytes.size(),
+                                             ShaderStage::Compute, entry);
         std::cerr << "[SSR] LoadShader " << name << " -> handle=" << static_cast<u64>(h)
-                  << " (src=" << src.size() << " bytes)" << std::endl;
+                  << " (size=" << bytes.size() << " binary=" << isBinary << ")" << std::endl;
         return h;
     };
 
-    ShaderHandle traceCS = loadShader("SSRTrace", "ssr_trace");
-    ShaderHandle temporalCS = loadShader("SSRTemporal", "ssr_temporal");
-    ShaderHandle compositeCS = loadShader("SSRComposite", "ssr_composite");
+    // Metal shader names: SSRPass.metal has the trace entry, SSRComposite.metal has upsample.
+    // The Metal trace entry is "ssr_trace" in SSRPass.metal; temporal is "ssr_temporal" in
+    // SSRTemporal.metal; upsample is "ssr_composite" in SSRComposite.metal.
+    // ShaderRegistry resolves "SSRPass" → SSRPass.metal, "SSRTemporal" → SSRTemporal.metal,
+    // "SSRComposite" → SSRComposite.metal. For Vulkan/Dawn we use the same names so the
+    // Lumen/ subdir lookup works.
+    const char* traceName    = (platform == RHIPlatform::Vulkan) ? "SSRTrace"     : "SSRPass";
+    const char* temporalName = (platform == RHIPlatform::Vulkan) ? "SSRTemporal"  : "SSRTemporal";
+    const char* upsampleName = (platform == RHIPlatform::Vulkan) ? "SSRComposite" : "SSRComposite";
+
+    ShaderHandle traceCS    = loadShader(traceName,    "ssr_trace");
+    ShaderHandle temporalCS = loadShader(temporalName, "ssr_temporal");
+    ShaderHandle upsampleCS = loadShader(upsampleName, "ssr_composite");
 
     if (traceCS == handles::INVALID_SHADER || temporalCS == handles::INVALID_SHADER ||
-        compositeCS == handles::INVALID_SHADER) {
+        upsampleCS == handles::INVALID_SHADER) {
         std::cerr << "[SSR] Shader compilation failed — aborting pipeline creation" << std::endl;
         return false;
     }
@@ -110,18 +164,20 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
         return {pipeline, layout};
     };
 
-    // Trace DSL: depth + hzb + color + output + uniform
+    // Trace DSL: depth + hzb + color + orm + output + uniform
+    //   (matches SSRTrace.comp: 0=depth, 1=hzb, 2=color, 3=orm, 4=output, 5=params)
     {
-        DescriptorSetLayoutBinding bindings[5]{};
+        DescriptorSetLayoutBinding bindings[6]{};
         bindings[0] = {0, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute};
-        bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Compute};
-        bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Compute};
-        bindings[3] = {3, DescriptorType::StorageImage, 1, ShaderStage::Compute};
-        bindings[4] = {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute};
-        bindings[4].minBindingSize = 192;
+        bindings[1] = {1, DescriptorType::SampledImage,      1, ShaderStage::Compute};
+        bindings[2] = {2, DescriptorType::SampledImage,      1, ShaderStage::Compute};
+        bindings[3] = {3, DescriptorType::SampledImage,      1, ShaderStage::Compute};  // ORM
+        bindings[4] = {4, DescriptorType::StorageImage,      1, ShaderStage::Compute};
+        bindings[5] = {5, DescriptorType::UniformBuffer,     1, ShaderStage::Compute};
+        bindings[5].minBindingSize = 192;
 
         DescriptorSetLayoutDesc dslDesc;
-        dslDesc.bindingCount = 5;
+        dslDesc.bindingCount = 6;
         dslDesc.bindings = bindings;
         s_TraceDSL = device.CreateDescriptorSetLayout(dslDesc);
         auto [p, l] = createPipeline(traceCS, s_TraceDSL);
@@ -129,12 +185,13 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     }
 
     // Temporal DSL: spatial + history + velocity + output + uniform
+    //   (matches SSRTemporal.comp: 0=trace, 1=history, 2=velocity, 3=output, 4=params)
     {
         DescriptorSetLayoutBinding bindings[5]{};
-        bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Compute};
-        bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Compute};
-        bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Compute};
-        bindings[3] = {3, DescriptorType::StorageImage, 1, ShaderStage::Compute};
+        bindings[0] = {0, DescriptorType::SampledImage,  1, ShaderStage::Compute};
+        bindings[1] = {1, DescriptorType::SampledImage,  1, ShaderStage::Compute};
+        bindings[2] = {2, DescriptorType::SampledImage,  1, ShaderStage::Compute};
+        bindings[3] = {3, DescriptorType::StorageImage,  1, ShaderStage::Compute};
         bindings[4] = {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute};
         bindings[4].minBindingSize = 32;
 
@@ -146,22 +203,22 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
         s_TemporalPipeline = p; s_TemporalLayout = l;
     }
 
-    // Composite DSL: hdr + ssr + depth + output + uniform
+    // Upsample DSL: ssr_halfres + orm + output + uniform
+    //   (matches SSRComposite.comp: 0=ssr, 1=orm, 2=output, 3=params)
     {
-        DescriptorSetLayoutBinding bindings[5]{};
-        bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Compute};
-        bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Compute};
-        bindings[2] = {2, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute};
-        bindings[3] = {3, DescriptorType::StorageImage, 1, ShaderStage::Compute};
-        bindings[4] = {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute};
-        bindings[4].minBindingSize = sizeof(math::m4x4) + 32;  // header + invProj
+        DescriptorSetLayoutBinding bindings[4]{};
+        bindings[0] = {0, DescriptorType::SampledImage,  1, ShaderStage::Compute};
+        bindings[1] = {1, DescriptorType::SampledImage,  1, ShaderStage::Compute};  // ORM
+        bindings[2] = {2, DescriptorType::StorageImage,  1, ShaderStage::Compute};
+        bindings[3] = {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute};
+        bindings[3].minBindingSize = 32;
 
         DescriptorSetLayoutDesc dslDesc;
-        dslDesc.bindingCount = 5;
+        dslDesc.bindingCount = 4;
         dslDesc.bindings = bindings;
-        s_CompositeDSL = device.CreateDescriptorSetLayout(dslDesc);
-        auto [p, l] = createPipeline(compositeCS, s_CompositeDSL);
-        s_CompositePipeline = p; s_CompositeLayout = l;
+        s_UpsampleDSL = device.CreateDescriptorSetLayout(dslDesc);
+        auto [p, l] = createPipeline(upsampleCS, s_UpsampleDSL);
+        s_UpsamplePipeline = p; s_UpsampleLayout = l;
     }
 
     auto createBufs = [&](ResourceHandle (&bufs)[MAX_FRAMES], void* (&mapped)[MAX_FRAMES], u64 size) {
@@ -176,9 +233,9 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
         }
     };
 
-    createBufs(s_TraceParamsBuf, s_TraceParamsMapped, 192);
+    createBufs(s_TraceParamsBuf,    s_TraceParamsMapped,    192);
     createBufs(s_TemporalParamsBuf, s_TemporalParamsMapped, 32);
-    createBufs(s_CompositeParamsBuf, s_CompositeParamsMapped, sizeof(math::m4x4) + 32);
+    createBufs(s_UpsampleParamsBuf, s_UpsampleParamsMapped, 32);
 
     auto createSets = [&](DescriptorSetHandle (&pool)[MAX_FRAMES][MAX_SETS], DescriptorSetLayoutHandle dsl) {
         for (u32 i = 0; i < MAX_FRAMES; ++i)
@@ -189,13 +246,13 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
             }
     };
 
-    createSets(s_TraceSets, s_TraceDSL);
+    createSets(s_TraceSets,    s_TraceDSL);
     createSets(s_TemporalSets, s_TemporalDSL);
-    createSets(s_CompositeSets, s_CompositeDSL);
+    createSets(s_UpsampleSets, s_UpsampleDSL);
 
     std::cerr << "[SSR] Pipelines created — trace=" << static_cast<u64>(s_TracePipeline)
               << " temporal=" << static_cast<u64>(s_TemporalPipeline)
-              << " composite=" << static_cast<u64>(s_CompositePipeline) << std::endl;
+              << " upsample=" << static_cast<u64>(s_UpsamplePipeline) << std::endl;
 
     return true;
 }
@@ -227,12 +284,15 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
     RGResourceHandle depthTexture,
     RGResourceHandle hzbTexture,
     RGResourceHandle velocityTexture,
+    RGResourceHandle gbufferOrmTexture,
     u32 width, u32 height, u32 frameIndex,
-    const math::m4x4& proj, const math::m4x4& invProj) {
+    const math::m4x4& proj, const math::m4x4& invProj,
+    const SSRConfig& ssrCfg) {
+
     u32 fi = frameIndex % MAX_FRAMES;
     s_TraceSetIdx[fi] = 0;
     s_TemporalSetIdx[fi] = 0;
-    s_CompositeSetIdx[fi] = 0;
+    s_UpsampleSetIdx[fi] = 0;
 
     static bool s_firstAddCall = true;
     if (s_firstAddCall) {
@@ -242,7 +302,8 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                   << " hdrValid=" << (hdrTexture != kInvalidRGResourceHandle)
                   << " depthValid=" << (depthTexture != kInvalidRGResourceHandle)
                   << " hzbValid=" << (hzbTexture != kInvalidRGResourceHandle)
-                  << " velValid=" << (velocityTexture != kInvalidRGResourceHandle) << std::endl;
+                  << " velValid=" << (velocityTexture != kInvalidRGResourceHandle)
+                  << " ormValid=" << (gbufferOrmTexture != kInvalidRGResourceHandle) << std::endl;
     }
 
     auto& device = graph.GetDevice();
@@ -262,6 +323,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
             builder.Read(depthTexture, ResourceState::ShaderResource);
             builder.Read(hzbTexture, ResourceState::ShaderResource);
             builder.Read(velocityTexture, ResourceState::ShaderResource);
+            builder.Read(gbufferOrmTexture, ResourceState::ShaderResource);
 
             TextureDesc outDesc;
             outDesc.size = {width, height, 1};
@@ -269,11 +331,11 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
             outDesc.type = TextureType::Texture2D;
             outDesc.mipLevels = 1;
             outDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource;
-            data.outputColor = builder.CreateTexture("SSR_OutputHDR", outDesc, ResourceState::UnorderedAccess);
+            data.outputColor = builder.CreateTexture("SSR_Reflection", outDesc, ResourceState::UnorderedAccess);
         },
-        [hdrTexture, depthTexture, hzbTexture, velocityTexture,
+        [hdrTexture, depthTexture, hzbTexture, velocityTexture, gbufferOrmTexture,
          width, height, halfW, halfH, fi, histIdx,
-         hzbMipLevels, proj, invProj, frameIndex]
+         hzbMipLevels, proj, invProj, frameIndex, ssrCfg]
          (const SSRPassData& data, RenderGraphContext& context) {
             static u32 s_execCount = 0;
             bool logThisFrame = (s_execCount < 3u);
@@ -283,7 +345,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                 std::cerr << "[SSR] Execute frame=" << frameIndex
                           << " tracePipe=" << static_cast<u64>(s_TracePipeline)
                           << " temporalPipe=" << static_cast<u64>(s_TemporalPipeline)
-                          << " compositePipe=" << static_cast<u64>(s_CompositePipeline) << std::endl;
+                          << " upsamplePipe=" << static_cast<u64>(s_UpsamplePipeline) << std::endl;
             }
 
             if (s_TracePipeline == handles::INVALID_PIPELINE) {
@@ -300,10 +362,11 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                 return r ? r->GetPhysicalHandle() : handles::INVALID_RESOURCE;
             };
 
-            ResourceHandle hdrHandle = resolveTex(hdrTexture);
-            ResourceHandle depthHandle = resolveTex(depthTexture);
-            ResourceHandle hzbHandle = resolveTex(hzbTexture);
+            ResourceHandle hdrHandle      = resolveTex(hdrTexture);
+            ResourceHandle depthHandle    = resolveTex(depthTexture);
+            ResourceHandle hzbHandle      = resolveTex(hzbTexture);
             ResourceHandle velocityHandle = resolveTex(velocityTexture);
+            ResourceHandle ormHandle      = resolveTex(gbufferOrmTexture);
             auto* outRes = context.graph->GetResource(data.outputColor);
             ResourceHandle outPhys = outRes ? outRes->GetPhysicalHandle() : handles::INVALID_RESOURCE;
 
@@ -312,6 +375,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                           << " depth=" << static_cast<u64>(depthHandle)
                           << " hzb=" << static_cast<u64>(hzbHandle)
                           << " vel=" << static_cast<u64>(velocityHandle)
+                          << " orm=" << static_cast<u64>(ormHandle)
                           << " out=" << static_cast<u64>(outPhys)
                           << " traceTex=" << static_cast<u64>(s_TraceTexture)
                           << " temporalTex=" << static_cast<u64>(s_TemporalTexture)
@@ -326,6 +390,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
 
             // ============================================================
             // Sub-pass 1: Trace (half-res)
+            //   bindings: 0=depth, 1=hzb, 2=color, 3=orm, 4=output, 5=params
             // ============================================================
             {
                 struct TraceParamsCPU {
@@ -343,7 +408,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                     u32         _pad1;
                 };
                 static_assert(sizeof(TraceParamsCPU) == 192,
-                              "TraceParamsCPU must be 192 bytes (16-byte aligned for WGSL uniform)");
+                              "TraceParamsCPU must be 192 bytes (16-byte aligned for uniform)");
 
                 if (s_TraceParamsMapped[fi]) {
                     auto* p = static_cast<TraceParamsCPU*>(s_TraceParamsMapped[fi]);
@@ -351,8 +416,8 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                     p->proj = proj;
                     p->screenSize = {(f32)width, (f32)height, 1.0f / width, 1.0f / height};
                     p->halfScreenSize = {(f32)halfW, (f32)halfH, 1.0f / halfW, 1.0f / halfH};
-                    p->maxDistance = 50.0f;
-                    p->thickness = 2.0f;
+                    p->maxDistance = ssrCfg.max_trace_distance;
+                    p->thickness = ssrCfg.thickness;
                     p->nearPlane = 0.1f;
                     p->farPlane = 1000.0f;
                     p->hzbMipLevels = hzbMipLevels;
@@ -368,11 +433,12 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                 DescriptorImageInfo depthInfo; depthInfo.imageView = depthHandle;
                 DescriptorImageInfo hzbInfo; hzbInfo.imageView = hzbHandle;
                 DescriptorImageInfo hdrInfo; hdrInfo.imageView = hdrHandle;
+                DescriptorImageInfo ormInfo; ormInfo.imageView = ormHandle;
                 DescriptorImageInfo outInfo; outInfo.imageView = s_TraceTexture;
                 DescriptorBufferInfo bufInfo; bufInfo.buffer = s_TraceParamsBuf[fi]; bufInfo.offset = 0;
                 bufInfo.range = sizeof(TraceParamsCPU);
 
-                WriteDescriptorSet writes[5];
+                WriteDescriptorSet writes[6];
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
                 writes[0].descriptorType = DescriptorType::SampledDepthImage; writes[0].imageInfo = &depthInfo;
                 writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
@@ -380,11 +446,13 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                 writes[2].dstSet = ds; writes[2].dstBinding = 2; writes[2].descriptorCount = 1;
                 writes[2].descriptorType = DescriptorType::SampledImage; writes[2].imageInfo = &hdrInfo;
                 writes[3].dstSet = ds; writes[3].dstBinding = 3; writes[3].descriptorCount = 1;
-                writes[3].descriptorType = DescriptorType::StorageImage; writes[3].imageInfo = &outInfo;
+                writes[3].descriptorType = DescriptorType::SampledImage; writes[3].imageInfo = &ormInfo;
                 writes[4].dstSet = ds; writes[4].dstBinding = 4; writes[4].descriptorCount = 1;
-                writes[4].descriptorType = DescriptorType::UniformBuffer; writes[4].bufferInfo = &bufInfo;
+                writes[4].descriptorType = DescriptorType::StorageImage; writes[4].imageInfo = &outInfo;
+                writes[5].dstSet = ds; writes[5].dstBinding = 5; writes[5].descriptorCount = 1;
+                writes[5].descriptorType = DescriptorType::UniformBuffer; writes[5].bufferInfo = &bufInfo;
 
-                device.UpdateDescriptorSets(5, writes);
+                device.UpdateDescriptorSets(6, writes);
 
                 cmd->BindComputePipeline(s_TracePipeline);
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, s_TraceLayout, 0, 1, &ds, 0, nullptr);
@@ -403,6 +471,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
 
             // ============================================================
             // Sub-pass 2: Temporal (half-res)
+            //   bindings: 0=spatial(trace), 1=history, 2=velocity, 3=output, 4=params
             // ============================================================
             if (s_TemporalPipeline != handles::INVALID_PIPELINE &&
                 s_TemporalHistory[histIdx] != handles::INVALID_RESOURCE) {
@@ -419,7 +488,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
 
                 if (s_TemporalParamsMapped[fi]) {
                     auto* p = static_cast<TemporalParamsCPU*>(s_TemporalParamsMapped[fi]);
-                    p->feedback = 0.8f;
+                    p->feedback = ssrCfg.temporal_feedback;
                     p->halfWidth = halfW;
                     p->halfHeight = halfH;
                     p->fullWidth = width;
@@ -469,65 +538,57 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
             }
 
             // ============================================================
-            // Sub-pass 3: Composite (full-res) — write into RG output texture
+            // Sub-pass 3: Upsample (full-res) — write reflection color into RG output
+            //   bindings: 0=ssr_halfres, 1=orm, 2=output, 3=params
             // ============================================================
             {
-                struct CompositeParamsCPU {
+                struct UpsampleParamsCPU {
                     u32 screenWidth;
                     u32 screenHeight;
                     u32 halfWidth;
                     u32 halfHeight;
-                    f32 fresnelPower;
+                    f32 maxRoughness;
                     f32 reflectionStrength;
-                    u32 debugMode;
-                    u32 _pad1;
-                    math::m4x4 invProj;
+                    f32 _pad0;
+                    f32 _pad1;
                 };
 
-                static_assert(sizeof(CompositeParamsCPU) <= 256,
-                              "Composite params must fit in setBytes limit");
-
-                if (s_CompositeParamsMapped[fi]) {
-                    auto* p = static_cast<CompositeParamsCPU*>(s_CompositeParamsMapped[fi]);
+                if (s_UpsampleParamsMapped[fi]) {
+                    auto* p = static_cast<UpsampleParamsCPU*>(s_UpsampleParamsMapped[fi]);
                     p->screenWidth = width;
                     p->screenHeight = height;
                     p->halfWidth = halfW;
                     p->halfHeight = halfH;
-                    p->fresnelPower = 3.0f;
-                    p->reflectionStrength = 0.7f;
-                    p->debugMode = 0u;   // normal composite path
-                    p->_pad1 = 0;
-                    p->invProj = invProj;
-                    device.SetBufferDirtySize(s_CompositeParamsBuf[fi], sizeof(CompositeParamsCPU));
+                    p->maxRoughness = ssrCfg.max_roughness;
+                    p->reflectionStrength = ssrCfg.reflection_strength;
+                    p->_pad0 = 0; p->_pad1 = 0;
+                    device.SetBufferDirtySize(s_UpsampleParamsBuf[fi], sizeof(UpsampleParamsCPU));
                 }
 
-                u32 idx = s_CompositeSetIdx[fi]++;
-                if (idx >= MAX_SETS) { idx = 0; s_CompositeSetIdx[fi] = 1; }
-                DescriptorSetHandle ds = s_CompositeSets[fi][idx];
+                u32 idx = s_UpsampleSetIdx[fi]++;
+                if (idx >= MAX_SETS) { idx = 0; s_UpsampleSetIdx[fi] = 1; }
+                DescriptorSetHandle ds = s_UpsampleSets[fi][idx];
 
-                DescriptorImageInfo hdrInfo; hdrInfo.imageView = hdrHandle;
                 DescriptorImageInfo ssrInfo; ssrInfo.imageView = s_TemporalTexture;
-                DescriptorImageInfo depthInfo; depthInfo.imageView = depthHandle;
+                DescriptorImageInfo ormInfo; ormInfo.imageView = ormHandle;
                 DescriptorImageInfo outInfo; outInfo.imageView = outPhys;
-                DescriptorBufferInfo bufInfo; bufInfo.buffer = s_CompositeParamsBuf[fi]; bufInfo.offset = 0;
-                bufInfo.range = sizeof(CompositeParamsCPU);
+                DescriptorBufferInfo bufInfo; bufInfo.buffer = s_UpsampleParamsBuf[fi]; bufInfo.offset = 0;
+                bufInfo.range = sizeof(UpsampleParamsCPU);
 
-                WriteDescriptorSet writes[5];
+                WriteDescriptorSet writes[4];
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
-                writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &hdrInfo;
+                writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &ssrInfo;
                 writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
-                writes[1].descriptorType = DescriptorType::SampledImage; writes[1].imageInfo = &ssrInfo;
+                writes[1].descriptorType = DescriptorType::SampledImage; writes[1].imageInfo = &ormInfo;
                 writes[2].dstSet = ds; writes[2].dstBinding = 2; writes[2].descriptorCount = 1;
-                writes[2].descriptorType = DescriptorType::SampledDepthImage; writes[2].imageInfo = &depthInfo;
+                writes[2].descriptorType = DescriptorType::StorageImage; writes[2].imageInfo = &outInfo;
                 writes[3].dstSet = ds; writes[3].dstBinding = 3; writes[3].descriptorCount = 1;
-                writes[3].descriptorType = DescriptorType::StorageImage; writes[3].imageInfo = &outInfo;
-                writes[4].dstSet = ds; writes[4].dstBinding = 4; writes[4].descriptorCount = 1;
-                writes[4].descriptorType = DescriptorType::UniformBuffer; writes[4].bufferInfo = &bufInfo;
+                writes[3].descriptorType = DescriptorType::UniformBuffer; writes[3].bufferInfo = &bufInfo;
 
-                device.UpdateDescriptorSets(5, writes);
+                device.UpdateDescriptorSets(4, writes);
 
-                cmd->BindComputePipeline(s_CompositePipeline);
-                cmd->BindDescriptorSets(PipelineBindPoint::Compute, s_CompositeLayout, 0, 1, &ds, 0, nullptr);
+                cmd->BindComputePipeline(s_UpsamplePipeline);
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, s_UpsampleLayout, 0, 1, &ds, 0, nullptr);
                 cmd->Dispatch((width + TG - 1) / TG, (height + TG - 1) / TG, 1);
             }
 
@@ -543,7 +604,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
             blitRegion.dstOffsets[1] = {(s32)halfW, (s32)halfH, 1};
             cmd->BlitTexture(s_TemporalTexture, s_TemporalHistory[fi], &blitRegion, 1, FilterMode::Nearest);
 
-            // Barrier: SSR output → SRV (for downstream passes)
+            // Barrier: SSR output → SRV (for downstream FusionComposite)
             {
                 ResourceBarrier b{};
                 b.resource = outPhys;
@@ -555,7 +616,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
 
             if (logThisFrame) {
                 std::cerr << "[SSR] Execute complete frame=" << frameIndex
-                          << " dispatched trace+temporal+composite+blit" << std::endl;
+                          << " dispatched trace+temporal+upsample+blit" << std::endl;
             }
         }
     );

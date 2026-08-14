@@ -1,0 +1,267 @@
+#version 450 core
+// Vulkan Lumen SSR Trace — GLSL port of SSRTrace.wgsl.
+// Entry point: ssr_trace  (glslangValidator -V SSRTrace.comp -e ssr_trace -o SSRTrace.spv)
+//
+// Half-resolution compute: Hi-Z ray march for the reflection ray.
+//   1. Reads full-res depth, reconstructs view position + normal (ddx/ddy neighbors)
+//   2. Reads ORM texture .g (roughness); early-out on rough surfaces (no reflection)
+//   3. Reflects the view ray around the normal, marches through the HZB pyramid
+//   4. Back-face rejects, depth-aware bilinear color fetch at the hit
+//   5. Outputs RGBA16F: RGB = reflection color (pre-Fresnel), A = hit confidence mask
+//
+// Flat descriptor bindings:
+//   binding 0 = SampledDepthImage  depthTex   (full-res)
+//   binding 1 = SampledImage       hzbTex     (mip chain)
+//   binding 2 = SampledImage       colorTex   (TAA-resolved HDR)
+//   binding 3 = SampledImage       ormTex     (AO.r, Roughness.g, Metallic.b)
+//   binding 4 = StorageImage       ssrOutput  (half-res RGBA16F)
+//   binding 5 = UniformBuffer      params
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --- Bindings ---
+layout(set = 0, binding = 0) uniform texture2D depthTex;
+layout(set = 0, binding = 1) uniform texture2D hzbTex;
+layout(set = 0, binding = 2) uniform texture2D colorTex;
+layout(set = 0, binding = 3) uniform texture2D ormTex;
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2D ssrOutput;
+
+layout(set = 0, binding = 5, std140) uniform SSRTraceParams {
+    mat4 invProj;
+    mat4 proj;
+    vec4 screenSize;       // full-res: x=width, y=height, z=1/width, w=1/height
+    vec4 halfScreenSize;   // half-res: x=halfW, y=halfH, z=1/halfW, w=1/halfH
+    float maxDistance;
+    float thickness;
+    float nearPlane;
+    float farPlane;
+    uint  hzbMipLevels;
+    uint  frameIndex;
+    uint  _pad0;
+    uint  _pad1;
+} params;
+
+// Extra params (passed via a second UBO slot reuse — here folded into the same struct
+// via trailing floats; kept minimal to match C++ TraceParamsCPU layout).
+const uint MAX_STEPS = 128u;
+
+float ndcDepthToLinear(float ndcDepth) {
+    return (2.0 * params.nearPlane * params.farPlane) /
+           (params.farPlane + params.nearPlane - ndcDepth * (params.farPlane - params.nearPlane));
+}
+
+vec3 reconstructViewPos(vec2 uv, float ndcDepth) {
+    float ndcX = uv.x * 2.0 - 1.0;
+    float ndcY = 1.0 - uv.y * 2.0;
+    vec4 clipPos = vec4(ndcX, ndcY, ndcDepth, 1.0);
+    vec4 viewPos4 = params.invProj * clipPos;
+    vec3 vp = viewPos4.xyz / viewPos4.w;
+    return vec3(vp.x, vp.y, -vp.z);
+}
+
+vec3 reconstructViewNormal(ivec2 pixel, vec2 uv, float depth) {
+    vec2 ts = params.screenSize.zw;
+    int px = clamp(pixel.x, 1, int(params.screenSize.x) - 2);
+    int py = clamp(pixel.y, 1, int(params.screenSize.y) - 2);
+
+    float dL = texelFetch(depthTex, ivec2(px - 1, py), 0).r;
+    float dR = texelFetch(depthTex, ivec2(px + 1, py), 0).r;
+    float dU = texelFetch(depthTex, ivec2(px, py - 1), 0).r;
+    float dD = texelFetch(depthTex, ivec2(px, py + 1), 0).r;
+
+    vec3 pL = reconstructViewPos(vec2(uv.x - ts.x, uv.y), dL);
+    vec3 pR = reconstructViewPos(vec2(uv.x + ts.x, uv.y), dR);
+    vec3 pU = reconstructViewPos(vec2(uv.x, uv.y - ts.y), dU);
+    vec3 pD = reconstructViewPos(vec2(uv.x, uv.y + ts.y), dD);
+
+    // Cross product sign is ambiguous from depth alone — force the normal to face
+    // the camera. In this view convention visible points have +Z, so camera-facing
+    // normals have -Z. Flip if needed.
+    vec3 n = normalize(cross(pD - pU, pR - pL));
+    if (n.z > 0.0) n = -n;
+    return n;
+}
+
+vec3 viewToScreen(vec3 viewPos) {
+    vec4 clipPos = params.proj * vec4(viewPos.x, viewPos.y, -viewPos.z, 1.0);
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    return vec3(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y, ndc.z);
+}
+
+// Depth-aware bilinear color sample: if the depth spread across the 2x2 tap quad
+// exceeds the thickness tolerance, the taps straddle a silhouette edge and the
+// color is unreliable (smears bright edge pixels against background → white lines).
+vec3 sampleColorDepthAware(vec2 uv) {
+    ivec2 dims = textureSize(colorTex, 0);
+    vec2 coord = uv * vec2(dims) - 0.5;
+    int bx = clamp(int(floor(coord.x)), 0, dims.x - 1);
+    int by = clamp(int(floor(coord.y)), 0, dims.y - 1);
+    int bx1 = min(bx + 1, dims.x - 1);
+    int by1 = min(by + 1, dims.y - 1);
+
+    ivec2 p00 = ivec2(bx,   by);
+    ivec2 p10 = ivec2(bx1,  by);
+    ivec2 p01 = ivec2(bx,   by1);
+    ivec2 p11 = ivec2(bx1,  by1);
+
+    float d00 = ndcDepthToLinear(texelFetch(depthTex, p00, 0).r);
+    float d10 = ndcDepthToLinear(texelFetch(depthTex, p10, 0).r);
+    float d01 = ndcDepthToLinear(texelFetch(depthTex, p01, 0).r);
+    float d11 = ndcDepthToLinear(texelFetch(depthTex, p11, 0).r);
+
+    float dMin = min(min(d00, d10), min(d01, d11));
+    float dMax = max(max(d00, d10), max(d01, d11));
+    if (dMax - dMin > params.thickness) {
+        return vec3(0.0);
+    }
+
+    vec3 c00 = texelFetch(colorTex, p00, 0).rgb;
+    vec3 c10 = texelFetch(colorTex, p10, 0).rgb;
+    vec3 c01 = texelFetch(colorTex, p01, 0).rgb;
+    vec3 c11 = texelFetch(colorTex, p11, 0).rgb;
+
+    float fx = clamp(fract(coord.x), 0.0, 1.0);
+    float fy = clamp(fract(coord.y), 0.0, 1.0);
+    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
+// HZB ray march — fixed view-space step with source-UV self-hit skip.
+struct TraceResult { bool hit; vec2 hitUV; float hitDist; };
+
+TraceResult traceRayHZB(vec3 rayOriginView, vec3 rayDirView, vec2 sourceUV) {
+    TraceResult result;
+    result.hit = false;
+
+    float stepSize = params.maxDistance / float(MAX_STEPS);
+    float t = 0.0;
+    uint mip = 1u;
+
+    for (uint step_i = 0u; step_i < MAX_STEPS; step_i++) {
+        t += stepSize;
+        if (t > params.maxDistance) break;
+
+        vec3 rayPos = rayOriginView + rayDirView * t;
+        vec3 screen = viewToScreen(rayPos);
+        vec2 sampleUV = screen.xy;
+
+        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 ||
+            sampleUV.y < 0.0 || sampleUV.y > 1.0) break;
+        if (rayPos.z < params.nearPlane) continue;
+
+        // Skip source surface (within 2 pixels) to reduce self-hit noise.
+        float dpx = abs(sampleUV.x - sourceUV.x) * params.screenSize.x;
+        float dpy = abs(sampleUV.y - sourceUV.y) * params.screenSize.y;
+        if (max(dpx, dpy) < 2.0) continue;
+
+        ivec2 mipDims = textureSize(hzbTex, int(mip));
+        ivec2 mipCoord = clamp(ivec2(sampleUV * vec2(mipDims)), ivec2(0), mipDims - ivec2(1));
+
+        float sceneDepthNDC = texelFetch(hzbTex, mipCoord, int(mip)).r;
+        float sceneDepthLinear = ndcDepthToLinear(sceneDepthNDC);
+        float rayDepthLinear = rayPos.z;
+
+        if (rayDepthLinear > sceneDepthLinear) {
+            if (mip == 0u) {
+                if (rayDepthLinear <= sceneDepthLinear + params.thickness) {
+                    result.hit = true;
+                    result.hitUV = sampleUV;
+                    result.hitDist = t;
+                    break;
+                }
+            } else {
+                t -= stepSize;
+                mip = mip - 1u;
+            }
+        } else {
+            mip = min(mip + 1u, params.hzbMipLevels - 1u);
+        }
+    }
+    return result;
+}
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    uvec2 halfDims = uvec2(params.halfScreenSize.xy);
+    if (gid.x >= halfDims.x || gid.y >= halfDims.y) return;
+
+    uvec2 halfPos = gid.xy;
+    ivec2 fullPos = ivec2(halfPos) * 2;
+    ivec2 fullDims = ivec2(params.screenSize.xy);
+
+    if (fullPos.x >= fullDims.x || fullPos.y >= fullDims.y) {
+        imageStore(ssrOutput, ivec2(halfPos), vec4(0.0));
+        return;
+    }
+
+    float depth = texelFetch(depthTex, fullPos, 0).r;
+    float linearDepth = ndcDepthToLinear(depth);
+
+    // Sky / near / far cull — no reflections there.
+    if (depth >= 0.9999 || linearDepth < params.nearPlane ||
+        linearDepth > params.farPlane * 0.999) {
+        imageStore(ssrOutput, ivec2(halfPos), vec4(0.0));
+        return;
+    }
+
+    // ORM-based roughness early-out: rough surfaces do not reflect.
+    // maxRoughness is folded into the trace via a compile-time-ish gate using a
+    // uniform; we read it from the ormTex .g channel and compare against a
+    // constant threshold. The actual max_roughness value is applied in composite;
+    // here we use a hard cutoff at 0.98 to skip only fully-rough pixels and leave
+    // the soft falloff to the composite stage.
+    float roughness = texelFetch(ormTex, fullPos, 0).g;
+    if (roughness > 0.98) {
+        imageStore(ssrOutput, ivec2(halfPos), vec4(0.0));
+        return;
+    }
+
+    vec2 pixelUV = (vec2(fullPos) + 0.5) / params.screenSize.xy;
+    vec3 viewPos = reconstructViewPos(pixelUV, depth);
+    vec3 viewNormal = reconstructViewNormal(fullPos, pixelUV, depth);
+
+    // Reflection ray: reflect view ray around normal.
+    vec3 toCamera = normalize(-viewPos);
+    vec3 reflDir = reflect(-toCamera, viewNormal);
+
+    // NdotV == dot(reflDir, viewNormal). Below 0 the surface is back-facing; cull.
+    float NdotV = dot(reflDir, viewNormal);
+    if (NdotV <= 0.0) {
+        imageStore(ssrOutput, ivec2(halfPos), vec4(0.0));
+        return;
+    }
+
+    // Push origin along the normal — more at grazing angles to avoid self-hit.
+    float rayOffset = max(0.05, 0.05 / max(NdotV, 0.3));
+    vec3 rayOrigin = viewPos + viewNormal * rayOffset;
+
+    TraceResult tr = traceRayHZB(rayOrigin, reflDir, pixelUV);
+
+    if (tr.hit) {
+        // Back-face rejection at the hit pixel.
+        uint hitPxX = clamp(uint(tr.hitUV.x * params.screenSize.x), 1u, uint(params.screenSize.x) - 2u);
+        uint hitPxY = clamp(uint(tr.hitUV.y * params.screenSize.y), 1u, uint(params.screenSize.y) - 2u);
+        ivec2 hitPx = ivec2(hitPxX, hitPxY);
+        float hitDepth = texelFetch(depthTex, hitPx, 0).r;
+        vec3 hitNormal = reconstructViewNormal(hitPx, tr.hitUV, hitDepth);
+        if (dot(hitNormal, -reflDir) <= 0.0) {
+            imageStore(ssrOutput, ivec2(halfPos), vec4(0.0));
+            return;
+        }
+
+        vec3 hitColor = sampleColorDepthAware(tr.hitUV);
+
+        float distFade = 1.0 - smoothstep(params.maxDistance * 0.6, params.maxDistance, tr.hitDist);
+        vec2 edgeDist = min(tr.hitUV, 1.0 - tr.hitUV);
+        float edgeFade = smoothstep(0.0, 0.1, min(edgeDist.x, edgeDist.y));
+
+        // Grazing-angle fade: kills stripe regions on perpendicular walls.
+        float grazingFade = smoothstep(0.2, 0.5, NdotV);
+
+        float strength = distFade * edgeFade * grazingFade;
+        imageStore(ssrOutput, ivec2(halfPos), vec4(hitColor.rgb * strength, strength));
+    } else {
+        imageStore(ssrOutput, ivec2(halfPos), vec4(0.0));
+    }
+}

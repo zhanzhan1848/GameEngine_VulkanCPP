@@ -13,11 +13,13 @@
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
 #include "Engine/Graphics/RHI/Systems/RenderSystem.h"
 #include "Engine/Graphics/RHI/Components/RHICamera.h"
+#include <chrono>
 #include "Engine/Graphics/RHI/Utils/IBLPrecomputer.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
 #include "Engine/Graphics/RenderScene.h"
 #include "Engine/Graphics/RenderView.h"
 #include "Engine/Graphics/Lumen/LumenTypes.h"
+#include "Engine/Graphics/Nanite/OfflineSDFMerger.h"
 #include "Engine/Graphics/SceneDataAdapter.h"
 #include "Engine/Graphics/Material.h"
 #include "Engine/Graphics/MaterialInstance.h"
@@ -79,6 +81,9 @@ private:
     std::shared_ptr<primal::graphics::Material> sharedMaterial_;
     primal::graphics::nanite::GPUMaterialRegistry* materialRegistry_{nullptr};
 
+    // Offline SDF merger — loads per-mesh SDF from pipeline model for visualization.
+    primal::graphics::nanite::OfflineSDFMerger* offlineSDFMerger_{nullptr};
+
     // Cached handles for cleanup.
     primal::graphics::rhi::ResourceHandle fallbackDiffuse_{primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::ResourceHandle fallbackNormal_{primal::graphics::rhi::handles::INVALID_RESOURCE};
@@ -110,6 +115,7 @@ private:
     // view_.SetViewMatrix(camera_.GetViewMatrix()) + view_.UpdateFrustum().
     primal::graphics::rhi::RHICamera camera_;
     bool cameraInitialized_{false};
+    std::chrono::steady_clock::time_point lastFrameTime_;
 
     // T4.6.5 part 30.13 (X5 fix): per-swapchain-image render-done semaphores.
     // Validation hint (VUID-vkQueueSubmit-pSignalSemaphores-00067): "Swapchain

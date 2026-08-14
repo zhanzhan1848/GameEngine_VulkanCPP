@@ -156,8 +156,14 @@ void main() {
         return;
     }
 
-    // Vulkan NDC: Z in [0,1], Y NOT flipped (engine convention).
-    vec2 ndc = vec2(fullUV.x * 2.0 - 1.0, fullUV.y * 2.0 - 1.0);
+    // T4.6.5 part 40.2: flip Y in NDC to match naga's auto-inserted
+    // OpFNegate on gl_Position.y in GBuffer.wgsl vertex shader. After
+    // naga Y-negate, framebuffer pixel (0,0) [Vulkan BOTTOM] contains world
+    // Y+ content. fullUV.y=0 → samples world Y+ depth → must reconstruct
+    // world Y+ → needs ndc.y=+1. Old formula `fullUV.y*2-1` gave -1 →
+    // reconstructed world Y- → wrong cascade lookup → shadows tracked
+    // camera movement. Reference: Dawn CommonFunction.wgsl:51.
+    vec2 ndc = vec2(fullUV.x * 2.0 - 1.0, 1.0 - fullUV.y * 2.0);
     vec4 clipPos = vec4(ndc, depth, 1.0);
     vec4 worldPos4 = inv_view_proj * clipPos;
     vec3 worldPos = worldPos4.xyz / max(worldPos4.w, 1e-6);
@@ -171,11 +177,12 @@ void main() {
     vec3 sc0 = clip0.xyz / max(clip0.w, 1e-6);
     sc0.x = sc0.x * 0.5 + 0.5;
     // T4.6.5 part 40.1: Y-flip to match naga's auto-inserted OpFNegate on
-    // gl_Position.y in ShadowDepth.wgsl vertex shader. Rasterizer writes
-    // world-Y=+5 (clip y=+1) to framebuffer TOP; sampling at UV y=0 returns
-    // that row. So for receiver with clip y=+1, we need UV y=0 (not 1).
-    // Old code `cy*0.5+0.5` produced UV y=1 for cy=+1 → sampled mirrored
-    // world position → inverted/wrong shadows.
+    // gl_Position.y in ShadowDepth.wgsl vertex shader. After Y-negate,
+    // shadow-map framebuffer pixel (0,0) [Vulkan BOTTOM] contains world Y+
+    // in light space; sampling at UV y=0 returns world Y+ depth. So for a
+    // receiver with positive clip-space y (world Y+ in cascade space), we
+    // need UV y=0 (not 1). Old code `cy*0.5+0.5` produced UV y=1 for cy=+1
+    // → sampled world Y- depth → inverted shadow comparison.
     sc0.y = 0.5 - sc0.y * 0.5;
 
     if (sc0.x >= 0.0 && sc0.x <= 1.0 && sc0.y >= 0.0 && sc0.y <= 1.0 &&

@@ -225,13 +225,6 @@ void GlobalSDF::UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& sn
     }
 
     // Mark re-voxelization needed only when the snapped grid cell changes.
-    // For static scenes this is rare (cascade_size is 60/120/240m), so the
-    // per-frame voxelization cost collapses to ~0 after the initial fill.
-    // Without this guard, needs_voxelization stays true forever (default at
-    // init) and TestDawnForwardRenderer's `if (CascadeNeedsVoxelization(c))`
-    // dispatches a 262K-invocation compute shader EVERY FRAME for EACH of
-    // the 3 cascades. This was the Mode 11 WASM perf cliff: 4 FPS → expected
-    // 100+ FPS once restored.
     math::v3 new_origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
     if (!cascade.ever_voxelized
         || new_origin.x != cascade.origin.x
@@ -746,7 +739,17 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
         }
     }
 
-    // Bind and dispatch
+    // Pre-barrier: ensure SDF texture is in GENERAL (UAV) layout for storage write.
+    {
+        rhi::ResourceBarrier preBarrier{};
+        preBarrier.resource = cascade.sdf_texture;
+        preBarrier.beforeState = rhi::ResourceState::ShaderResource;
+        preBarrier.afterState = rhi::ResourceState::UnorderedAccess;
+        preBarrier.subresource = 0xFFFFFFFF;
+        preBarrier.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&preBarrier, 1);
+    }
+
     cmd->BindComputePipeline(vox_pipeline_);
     const rhi::DescriptorSetHandle sets[] = { vox_descriptor_sets_[frameIdx] };
     cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, vox_layout_, 0, 1, sets, 0, nullptr);

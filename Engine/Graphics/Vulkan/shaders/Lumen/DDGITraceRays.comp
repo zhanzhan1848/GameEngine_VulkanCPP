@@ -1,0 +1,505 @@
+#version 450 core
+// DDGITraceRays.comp — Vulkan Lumen hand-written GLSL port of DDGITraceRays.wgsl
+// (Mode 11 canonical). Entry point: ddgi_trace_rays
+//   (glslangValidator --source-entrypoint main -e ddgi_trace_rays)
+//
+// Each thread traces one ray from one probe through the GlobalSDF volume.
+// At hit, computes canonical DDGI outgoing radiance:
+//   L_out = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev * feedback)
+//
+// Why GLSL (not naga-compiled WGSL): the WGSL DDGIVolumeData uniform struct
+// contains array<vec4<f32>, 3> fields (SdfOrigins/VoxelSizes/Extents). naga
+// emits these as spvUnsafeArray, which MoltenVK cannot consume inside a uniform
+// struct. GLSL std140 handles vec4[3] natively. Same pattern as SSAOTrace.comp
+// and DDGIGIGather.comp.
+//
+// Flat descriptor bindings (matches LumenDDGIPass.cpp:339-350 Vulkan branch):
+//   binding 0 = SampledImage (texture3D)  sdf_cascade_0
+//   binding 1 = SampledImage (texture3D)  sdf_cascade_1
+//   binding 2 = SampledImage (texture3D)  sdf_cascade_2
+//   binding 3 = SampledImage (texture2D)  prev_frame_color (declared, not sampled)
+//   binding 4 = UniformBuffer             GlobalShaderData
+//   binding 5 = UniformBuffer             DDGIVolumeData
+//   binding 6 = StorageBuffer (rw)        ray_buffer
+//   binding 7 = StorageBuffer (ro)        probeUpdateList
+//   binding 8 = StorageBuffer (ro)        irradiance_history
+//   binding 9 = SampledImage (texture2D)  gbuffer_albedo
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ----------------------------------------------------------------------------
+// Bindings (flat — see header)
+// ----------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture3D sdf_cascade_0;
+layout(set = 0, binding = 1) uniform texture3D sdf_cascade_1;
+layout(set = 0, binding = 2) uniform texture3D sdf_cascade_2;
+layout(set = 0, binding = 3) uniform texture2D prev_frame_color;  // DeferredLighting HDR output (actual lit scene)
+
+// GlobalShaderData UBO — mirrors C++ RHIShaderCommon.h / WGSL GlobalShaderData.
+layout(set = 0, binding = 4, std140) uniform GlobalShaderData {
+    mat4 View;
+    mat4 Projection;
+    mat4 InvProjection;
+    mat4 ViewProjection;
+    mat4 PreviousViewProjection;
+    mat4 InvViewProjection;
+    vec4 CameraPositionAndViewWidth;
+    vec4 CameraDirectionAndViewHeight;
+    uint NumDirectionalLights;
+    float DeltaTime;
+    float FrameCount;
+    uint  _padding;
+} globalData;
+
+// DDGIVolumeData UBO — byte-for-byte match with C++ LumenDDGIPass.h
+// DDGIVolumeData (336 bytes). All offsets reproduced via explicit pad fields.
+// std140: vec4 = 16B, float/uint/int = 4B, vec4[3] = 48B (no per-element pad).
+layout(set = 0, binding = 5, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    float _pad_before_relocation;   //  88
+    int   ProbeRelocationShiftX;    //  92
+    int   ProbeRelocationShiftY;    //  96
+    int   ProbeRelocationShiftZ;    // 100
+    float _pad_to_sdf_0;            // 104
+    float _pad_to_sdf_1;            // 108
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288  (.w = intensity)
+    vec4  SkyColor;                 // 304  (Mode 11)
+    vec4  Albedo;                   // 320  (Mode 11)
+} volume;
+
+// DDGIRayData — storage buffer element. Packed as vec4 (16B stride).
+struct DDGIRayData {
+    vec4 radiance_and_dist;  // xyz = radiance, w = hit_distance
+};
+
+layout(set = 0, binding = 6) buffer RayBuffer {
+    DDGIRayData ray_buffer[];
+};
+layout(set = 0, binding = 7) readonly buffer ProbeUpdateList {
+    uint probeUpdateList[];
+};
+// Previous-frame irradiance for canonical L_i_prev lookup (packed float[],
+// 27 floats/probe, 12-byte stride).
+layout(set = 0, binding = 8) readonly buffer IrradianceHistory {
+    float irradiance_history[];
+};
+// Mode 11 per-vertex albedo: GBuffer albedo at SDF hit position.
+layout(set = 0, binding = 9) uniform texture2D gbuffer_albedo;
+
+// ----------------------------------------------------------------------------
+// Constants
+// ----------------------------------------------------------------------------
+const uint DDGI_MAX_SDF_STEPS = 32u;
+const float _C0 = 0.282095;
+const float _C1 = 0.488603;
+
+// ----------------------------------------------------------------------------
+// SDFHitResult (local struct)
+// ----------------------------------------------------------------------------
+struct SDFHitResult {
+    uint hit;
+    float distance;
+    vec3 position;
+    vec3 normal;
+};
+
+// ----------------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------------
+
+uvec3 ddgiGetProbeCounts() {
+    return volume.ProbeCounts.xyz;
+}
+
+vec3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex) {
+    const float INV_PHI = 0.6180339887498948482;
+    const float PI_VAL  = 3.14159265358979323846;
+    float u = fract((float(rayIndex) + 0.5) * INV_PHI);
+    float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
+    float theta = 2.0 * PI_VAL * u;
+    float phi   = acos(1.0 - 2.0 * v);
+    float sinPhi = sin(phi);
+    return vec3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
+}
+
+uvec3 ddgiProbeGridCoord(uint probeIdx, uvec3 counts) {
+    uint pz  = probeIdx / (counts.x * counts.y);
+    uint rem = probeIdx % (counts.x * counts.y);
+    uint py  = rem / counts.x;
+    uint px  = rem % counts.x;
+    return uvec3(px, py, pz);
+}
+
+vec3 ddgiProbeWorldPos(uvec3 gc, vec3 origin, float spacing) {
+    return origin + vec3(float(gc.x), float(gc.y), float(gc.z)) * spacing;
+}
+
+uint sdfCascadeCount() {
+    return volume.SdfResolutionsAndCount.w;
+}
+
+float sampleSDFCascade(texture3D sdfTexture,
+                       vec3 worldPos,
+                       vec3 cascadeOrigin,
+                       vec3 cascadeExtent,
+                       uint resolution) {
+    vec3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 ||
+        uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) {
+        return 1.0e10;
+    }
+    int resI = int(resolution);
+    int tx = clamp(int(uvw.x * float(resI)), 0, resI - 1);
+    int ty = clamp(int(uvw.y * float(resI)), 0, resI - 1);
+    int tz = clamp(int(uvw.z * float(resI)), 0, resI - 1);
+    return texelFetch(sdfTexture, ivec3(tx, ty, tz), 0).r;
+}
+
+bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
+    vec3 local = pos - origin;
+    return local.x >= 0.0 && local.x < extent.x &&
+           local.y >= 0.0 && local.y < extent.y &&
+           local.z >= 0.0 && local.z < extent.z;
+}
+
+float sampleBestSDF(vec3 pos) {
+    float d = 1.0e10;
+    uint cc = sdfCascadeCount();
+    if (cc > 0u && isInsideCascade(pos, volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz)) {
+        d = min(d, sampleSDFCascade(sdf_cascade_0, pos, volume.SdfOrigins[0].xyz,
+                                    volume.SdfExtents[0].xyz,
+                                    volume.SdfResolutionsAndCount.x));
+    }
+    if (cc > 1u && isInsideCascade(pos, volume.SdfOrigins[1].xyz, volume.SdfExtents[1].xyz)) {
+        d = min(d, sampleSDFCascade(sdf_cascade_1, pos, volume.SdfOrigins[1].xyz,
+                                    volume.SdfExtents[1].xyz,
+                                    volume.SdfResolutionsAndCount.y));
+    }
+    if (cc > 2u && isInsideCascade(pos, volume.SdfOrigins[2].xyz, volume.SdfExtents[2].xyz)) {
+        d = min(d, sampleSDFCascade(sdf_cascade_2, pos, volume.SdfOrigins[2].xyz,
+                                    volume.SdfExtents[2].xyz,
+                                    volume.SdfResolutionsAndCount.z));
+    }
+    return d;
+}
+
+SDFHitResult traceSDF(vec3 rayOrigin, vec3 rayDir, float maxDist) {
+    SDFHitResult result;
+    result.hit = 0u;
+    result.position = rayOrigin;
+    result.distance = maxDist;
+    result.normal = vec3(0.0);
+
+    float t = 0.0;
+    const float minStep = 0.01;
+    uint cc = sdfCascadeCount();
+
+    // When cascade count = 1, the SDF is likely an unsigned distance field
+    // (offline baked). Use adaptive first-hit march instead of sphere tracing
+    // to avoid stepping through surfaces.
+    bool unsignedMode = (cc == 1u);
+    float voxelSize = volume.SdfVoxelSizes[0].x;
+    float hitThreshold = unsignedMode ? (voxelSize * 0.75) : (voxelSize * 0.5);
+
+    for (uint step = 0u; step < DDGI_MAX_SDF_STEPS; step++) {
+        vec3 pos = rayOrigin + rayDir * t;
+
+        float minDist = 1.0e10;
+        bool insideAny = false;
+
+        if (cc > 0u && isInsideCascade(pos, volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz)) {
+            minDist = min(minDist, sampleSDFCascade(sdf_cascade_0, pos,
+                volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz,
+                volume.SdfResolutionsAndCount.x));
+            insideAny = true;
+        }
+        if (cc > 1u && isInsideCascade(pos, volume.SdfOrigins[1].xyz, volume.SdfExtents[1].xyz)) {
+            minDist = min(minDist, sampleSDFCascade(sdf_cascade_1, pos,
+                volume.SdfOrigins[1].xyz, volume.SdfExtents[1].xyz,
+                volume.SdfResolutionsAndCount.y));
+            insideAny = true;
+        }
+        if (cc > 2u && isInsideCascade(pos, volume.SdfOrigins[2].xyz, volume.SdfExtents[2].xyz)) {
+            minDist = min(minDist, sampleSDFCascade(sdf_cascade_2, pos,
+                volume.SdfOrigins[2].xyz, volume.SdfExtents[2].xyz,
+                volume.SdfResolutionsAndCount.z));
+            insideAny = true;
+        }
+
+        if (!insideAny) {
+            uint coarsest = min(2u, cc - 1u);
+            t += volume.SdfExtents[coarsest].x * 0.1;
+            if (t > maxDist) break;
+            continue;
+        }
+
+        if (minDist < hitThreshold) {
+            result.hit = 1u;
+            result.position = pos;
+            result.distance = t;
+
+            float eps = max(voxelSize * 1.5, 0.01);
+            vec3 gradient = vec3(
+                sampleBestSDF(pos + vec3(eps, 0.0, 0.0)) -
+                sampleBestSDF(pos - vec3(eps, 0.0, 0.0)),
+                sampleBestSDF(pos + vec3(0.0, eps, 0.0)) -
+                sampleBestSDF(pos - vec3(0.0, eps, 0.0)),
+                sampleBestSDF(pos + vec3(0.0, 0.0, eps)) -
+                sampleBestSDF(pos - vec3(0.0, 0.0, eps))
+            );
+            float glen = length(gradient);
+            result.normal = (glen > 1e-8) ? gradient / glen : vec3(0.0, 1.0, 0.0);
+            return result;
+        }
+
+        if (unsignedMode) {
+            // Adaptive first-hit march: step by a fraction of the distance,
+            // capped to avoid overshooting thin features.
+            float step = min(minDist * 0.9, voxelSize * 4.0);
+            t += max(step, voxelSize * 0.5);
+        } else {
+            t += max(minDist, minStep);
+        }
+        if (t > maxDist) break;
+    }
+
+    return result;
+}
+
+// ----------------------------------------------------------------------------
+// Tetrahedral 4-probe SH interpolation (ported from DDGIGIGather.wgsl)
+// ----------------------------------------------------------------------------
+struct TetraResult {
+    uint pi[4];
+    float bw[4];
+};
+
+TetraResult tetrahedral(vec3 gp, uvec3 gd) {
+    TetraResult r;
+    uvec3 b0 = clamp(uvec3(floor(gp)), uvec3(0u), gd - 1u);
+    uvec3 b1 = min(b0 + 1u, gd - 1u);
+    uint gx  = gd.x;
+    uint gxy = gd.x * gd.y;
+
+    uint p[8];
+    p[0] = b0.x + b0.y * gx + b0.z * gxy;
+    p[1] = b1.x + b0.y * gx + b0.z * gxy;
+    p[2] = b0.x + b1.y * gx + b0.z * gxy;
+    p[3] = b1.x + b1.y * gx + b0.z * gxy;
+    p[4] = b0.x + b0.y * gx + b1.z * gxy;
+    p[5] = b1.x + b0.y * gx + b1.z * gxy;
+    p[6] = b0.x + b1.y * gx + b1.z * gxy;
+    p[7] = b1.x + b1.y * gx + b1.z * gxy;
+
+    float fx = fract(gp.x);
+    float fy = fract(gp.y);
+    float fz = fract(gp.z);
+
+    if (fx >= fy && fy >= fz) {
+        r.pi[0] = p[0]; r.pi[1] = p[1]; r.pi[2] = p[3]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fx; r.bw[1] = fx - fy; r.bw[2] = fy - fz; r.bw[3] = fz;
+    } else if (fx >= fz && fz >= fy) {
+        r.pi[0] = p[0]; r.pi[1] = p[1]; r.pi[2] = p[5]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fx; r.bw[1] = fx - fz; r.bw[2] = fz - fy; r.bw[3] = fy;
+    } else if (fy >= fx && fx >= fz) {
+        r.pi[0] = p[0]; r.pi[1] = p[2]; r.pi[2] = p[3]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fy; r.bw[1] = fy - fx; r.bw[2] = fx - fz; r.bw[3] = fz;
+    } else if (fy >= fz && fz >= fx) {
+        r.pi[0] = p[0]; r.pi[1] = p[2]; r.pi[2] = p[6]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fy; r.bw[1] = fy - fz; r.bw[2] = fz - fx; r.bw[3] = fx;
+    } else if (fz >= fx && fx >= fy) {
+        r.pi[0] = p[0]; r.pi[1] = p[4]; r.pi[2] = p[5]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fz; r.bw[1] = fz - fx; r.bw[2] = fx - fy; r.bw[3] = fy;
+    } else {
+        r.pi[0] = p[0]; r.pi[1] = p[4]; r.pi[2] = p[6]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fz; r.bw[1] = fz - fy; r.bw[2] = fy - fx; r.bw[3] = fx;
+    }
+
+    for (uint i = 0u; i < 4u; i++) {
+        r.bw[i] = max(r.bw[i], 0.0);
+    }
+    return r;
+}
+
+// L0+L1 SH dot product (4 coefficients).
+vec3 shDot4(vec3 c[4], vec3 d) {
+    return c[0] * _C0
+         + c[1] * (-_C1 * d.y)
+         + c[2] * ( _C1 * d.z)
+         + c[3] * (-_C1 * d.x);
+}
+
+// ----------------------------------------------------------------------------
+// Previous-frame probe grid sample at SDF hit position
+// ----------------------------------------------------------------------------
+vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
+    vec3 origin  = volume.ProbeOrigin.xyz;
+    float spacing = volume.ProbeSpacing;
+    uvec3 counts  = ddgiGetProbeCounts();
+    vec3 gp       = (pos - origin) / spacing;
+    vec3 gridMax  = vec3(float(counts.x - 1u),
+                         float(counts.y - 1u),
+                         float(counts.z - 1u));
+    if (any(lessThan(gp, vec3(0.0))) || any(greaterThan(gp, gridMax))) {
+        return vec3(0.0);
+    }
+
+    TetraResult tet = tetrahedral(gp, counts);
+
+    vec3 result = vec3(0.0);
+    float totalWeight = 0.0;
+
+    // vec4 stride: 9 coeffs/probe * 4 floats/coeff = 36 floats/probe.
+    // irradiance_history is declared as float[] but data is laid out as vec4[9] per probe
+    // (matching UpdateIrradiance's vec4 write and GIGather's vec4 read).
+    for (uint p = 0u; p < 4u; p++) {
+        if (tet.bw[p] < 0.001) continue;
+        uint base = tet.pi[p] * 36u;
+        vec3 sh[4];
+        for (uint i = 0u; i < 4u; i++) {
+            uint cb_i = base + i * 4u;
+            sh[i] = vec3(irradiance_history[cb_i + 0u],
+                         irradiance_history[cb_i + 1u],
+                         irradiance_history[cb_i + 2u]);
+        }
+        vec3 irradiance = shDot4(sh, N);
+        result += irradiance * tet.bw[p];
+        totalWeight += tet.bw[p];
+    }
+
+    if (totalWeight > 0.0) {
+        return result / totalWeight;
+    }
+    return vec3(0.0);
+}
+
+// ----------------------------------------------------------------------------
+// Hit-position -> prev_frame_color lookup (actual scene radiance from
+// DeferredLighting HDR output). This is the physically correct GI light
+// source: instead of hand-computing E_direct + E_sky (which ignores shadows,
+// IBL, PBR), we sample the previous frame's fully-lit result at the hit point.
+// Falls back to SkyColor when the hit is outside the camera frustum.
+// ----------------------------------------------------------------------------
+vec3 sampleHitRadiance(vec3 hitPos) {
+    vec4 clip = globalData.ViewProjection * vec4(hitPos, 1.0);
+    if (clip.w <= 0.0) {
+        return volume.SkyColor.xyz;
+    }
+    vec3 ndc = clip.xyz / clip.w;
+    if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return volume.SkyColor.xyz;
+    }
+    // V-flip: Vulkan NDC Y is up, texture origin is top-left (Y-down).
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    ivec2 dims = textureSize(prev_frame_color, 0);
+    int tx = clamp(int(uv.x * float(dims.x)), 0, dims.x - 1);
+    int ty = clamp(int(uv.y * float(dims.y)), 0, dims.y - 1);
+    return texelFetch(prev_frame_color, ivec2(tx, ty), 0).rgb;
+}
+
+// ----------------------------------------------------------------------------
+// Hit-position -> GBuffer albedo lookup (canonical per-surface albedo)
+// ----------------------------------------------------------------------------
+vec3 sampleHitAlbedo(vec3 hitPos) {
+    vec4 clip = globalData.ViewProjection * vec4(hitPos, 1.0);
+    if (clip.w <= 0.0) {
+        return volume.Albedo.xyz;
+    }
+    vec3 ndc = clip.xyz / clip.w;
+    // Frustum cull: Vulkan NDC x/y in [-1, 1], z in [0, 1].
+    if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return volume.Albedo.xyz;
+    }
+    // V-flip: Vulkan NDC is Y-down (origin bottom-left), texture (0,0) top-left.
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5,
+                   1.0 - (ndc.y * 0.5 + 0.5));
+    ivec2 dims = textureSize(gbuffer_albedo, 0);
+    int tx = clamp(int(uv.x * float(dims.x)), 0, dims.x - 1);
+    int ty = clamp(int(uv.y * float(dims.y)), 0, dims.y - 1);
+    return texelFetch(gbuffer_albedo, ivec2(tx, ty), 0).rgb;
+}
+
+// ----------------------------------------------------------------------------
+// Main Kernel: ddgi_trace_rays
+// ----------------------------------------------------------------------------
+void ddgi_trace_rays() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint totalRays = volume.ProbeUpdateCount * volume.RaysPerProbe;
+    if (gid >= totalRays) {
+        return;
+    }
+
+    uint localProbeIdx = gid / volume.RaysPerProbe;
+    uint localRayIdx  = gid % volume.RaysPerProbe;
+
+    uint probeIdx = probeUpdateList[localProbeIdx];
+
+    uvec3 counts = ddgiGetProbeCounts();
+    uvec3 gc = ddgiProbeGridCoord(probeIdx, counts);
+    vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
+
+    vec3 rayDir = ddgiRayDirection(localRayIdx, volume.RaysPerProbe, volume.FrameIndex);
+
+    SDFHitResult hit = traceSDF(
+        probePos, rayDir, volume.RayMaxDistance);
+
+    DDGIRayData result;
+
+    if (hit.hit != 0u) {
+        // Use self-computed direct lighting (NOT screen-space sampling).
+        // This is camera-independent — probe values only depend on geometry
+        // (normal/position) and light parameters, not on current camera view.
+        // Matches Metal DDGI trace approach.
+        vec3 N = hit.normal;
+        const float PI_VAL = 3.14159265358979;
+
+        // Direct light at hit point (directional light + NdotL).
+        vec3 L = normalize(-volume.LightDirection.xyz);
+        float NdotL = max(0.0, dot(N, L));
+        vec3 E_direct = volume.LightColor.xyz * volume.LightColor.w * NdotL;
+
+        // Sky ambient — hemisphere-weighted sky color.
+        float NdotUp = max(0.0, N.y);
+        vec3 E_sky = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp);
+
+        // Multi-bounce feedback from previous-frame probe grid.
+        vec3 L_i_prev = samplePrevProbeGrid(hit.position, N);
+        vec3 albedo = volume.Albedo.xyz;
+
+        // DDGI stores outgoing radiance at hit point: direct + sky + bounce.
+        // Direct lighting is needed as seed for multi-bounce — without it,
+        // probes never accumulate bounced direct light.
+        // FusionIndirect then scales this down so it supplements (not replaces)
+        // DeferredLighting's direct result.
+        vec3 L_out = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.85);
+        result.radiance_and_dist = vec4(L_out, hit.distance);
+    } else {
+        // Miss: ray escaped to sky.
+        result.radiance_and_dist = vec4(volume.SkyColor.xyz, -1.0);
+    }
+
+    ray_buffer[probeIdx * volume.RaysPerProbe + localRayIdx] = result;
+}

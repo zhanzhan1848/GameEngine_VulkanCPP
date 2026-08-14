@@ -22,6 +22,13 @@ struct FusionInputs {
     rhi::ResourceHandle ssao_tex{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle gbuffer_albedo{rhi::handles::INVALID_RESOURCE};
 
+    // SSR reflection color (RGBA16_Float: RGB=reflection, A=reflection strength mask).
+    // May be invalid if SSR is disabled — FusionComposite falls back to black.
+    rendergraph::RGResourceHandle ssr_rg{};
+    rhi::ResourceHandle ssr_tex{rhi::handles::INVALID_RESOURCE};
+    // GBuffer ORM (AO.r, Roughness.g, Metallic.b) — used to attenuate SSR by roughness.
+    rhi::ResourceHandle gbuffer_orm{rhi::handles::INVALID_RESOURCE};
+
     // Volume scatter (RGBA16_Float: RGB=scatter, A=transmittance)
     rendergraph::RGResourceHandle volume_scatter_rg{};
     rhi::ResourceHandle volume_scatter_tex{rhi::handles::INVALID_RESOURCE};
@@ -80,6 +87,9 @@ private:
 
     // Shared vertex shader (full-screen triangle)
     rhi::ShaderHandle vertex_shader_{rhi::handles::INVALID_SHADER};
+
+    // Vulkan-only: explicit linear-clamp sampler (Metal uses implicit samplers).
+    rhi::SamplerHandle default_sampler_{rhi::handles::INVALID_SAMPLER};
 
     // 1x1 identity texture for volume scatter fallback: RGBA = (0,0,0,1)
     rhi::ResourceHandle volume_identity_tex_{rhi::handles::INVALID_RESOURCE};

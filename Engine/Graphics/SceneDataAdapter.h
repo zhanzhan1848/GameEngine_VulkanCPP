@@ -101,7 +101,11 @@ public:
     std::shared_ptr<Material> LoadMaterial(rhi::RHIDeviceBase* device, const void* data, u32 size);
 
 private:
-    // 内部辅助类和函数将在cpp中实现
+    /// Parse the asset-pipeline-phase1 model format (scene_name first,
+    /// 3-field materials, LOD groups with names, meshlet+SDF per mesh).
+    /// Returns empty vector on failure (caller falls back to old format).
+    utl::vector<SceneDataMeshInfo> LoadPipelineFormat(
+        rhi::RHIDeviceBase* device, const void* data, u32 size);
 };
 
 } // namespace primal::graphics

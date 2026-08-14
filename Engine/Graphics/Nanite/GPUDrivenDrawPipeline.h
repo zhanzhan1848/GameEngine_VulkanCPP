@@ -360,7 +360,7 @@ private:
     math::m4x4 prev_view_matrix_;   // Previous frame view matrix for velocity
     math::m4x4 prev_proj_matrix_;   // Previous frame proj matrix for velocity
     bool has_prev_frame_{ false };   // Whether previous frame data is available
-    u32 meshlet_debug_mode_{ 0 };   // 0=off, 1=meshlet, 2=triangle, 3=mesh (mirrors DrawConstants.debug_mode)
+    u32 meshlet_debug_mode_{ 0 };   // Normal rendering
     GPURenderMode render_mode_{ GPURenderMode::GBuffer };  // T4.6.5 part 39
     u32 vertex_count_{ 0 };
     u32 index_count_{ 0 };

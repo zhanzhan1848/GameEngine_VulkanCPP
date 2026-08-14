@@ -462,10 +462,32 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     shaderHandles.deferred_ps = deferredFs;
     shaderHandles.blit_vs = blitVs;
     shaderHandles.blit_ps = blitFs;
+
+    // Phase 2: load Fusion + GIGather SPIR-V shaders so SSAO/DDGI output can be
+    // composited into the final image. Without these, fusion_module_ stays null
+    // and SSAO's output is never consumed → all-black render.
+    auto fusionIndirectBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/FusionIndirect.frag.spv");
+    auto fusionCompositeBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/FusionComposite.frag.spv");
+    auto giGatherBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather.comp.spv");
+    if (!fusionIndirectBytes.empty()) {
+        shaderHandles.fusion_indirect_ps = fx.base->CreateShader(
+            fusionIndirectBytes.data(), fusionIndirectBytes.size(), ShaderStage::Pixel, "fusion_indirect");
+    }
+    if (!fusionCompositeBytes.empty()) {
+        shaderHandles.fusion_composite_ps = fx.base->CreateShader(
+            fusionCompositeBytes.data(), fusionCompositeBytes.size(), ShaderStage::Pixel, "fusion_composite");
+    }
+    if (!giGatherBytes.empty()) {
+        shaderHandles.gi_gather = fx.base->CreateShader(
+            giGatherBytes.data(), giGatherBytes.size(), ShaderStage::Compute, "ddgi_gi_gather");
+    }
     pipeline.SetShaderHandles(shaderHandles);
 
-    // Default LumenConfig — disables most Lumen modules.
+    // Phase 2 test: Medium preset enables SSAO + SSGI + DDGI + Fusion.
+    // SSGI (Phase 3) and DDGI (MoltenVK spvUnsafeArray issue) Initialize fails
+    // gracefully — their passes stay null but Fusion still composites SSAO.
     lumen::LumenConfig lumenConfig{};
+    lumenConfig.quality = lumen::LumenQualityPreset::Medium;
     pipeline.SetLumenConfig(lumenConfig);
 
     // -------------------------------------------------------------
@@ -710,6 +732,74 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     std::cout << "[Part26] Invoking StandardRenderPipeline::Render()..." << std::endl;
     pipeline.Render(scene, view, renderTarget, rtDesc);
     std::cout << "[Part26] Render() returned." << std::endl;
+
+    // === GBuffer diagnostic dump (Phase 2 debugging) ===
+    // Dump Nanite GBuffer albedo + depth to BMP to isolate whether the all-black
+    // output comes from GBuffer (Nanite raster) or DeferredLighting.
+    {
+        auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
+        rhi::ResourceHandle gbAlbedo = gpuDraw.GetGBufferAlbedo();
+        rhi::ResourceHandle gbDepth = gpuDraw.GetGBufferDepthSampleable();
+
+        auto dumpTexture = [&](rhi::ResourceHandle tex, const char* name, bool isDepth) {
+            if (tex == rhi::handles::INVALID_RESOURCE) {
+                std::cerr << "[GBufferDump] " << name << " = INVALID" << std::endl;
+                return;
+            }
+            BufferDesc dbDesc{};
+            dbDesc.size = W * H * 4;
+            dbDesc.type = BufferType::Raw;
+            dbDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+            rhi::ResourceHandle db = fx.base->CreateBuffer(dbDesc);
+
+            CommandBufferHandle dcmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+            auto* vdcmd = fx.vk->GetCommandBuffer(dcmd);
+            vdcmd->Reset(); vdcmd->Begin();
+            rhi::ResourceBarrier b{};
+            b.resource = tex; b.beforeState = rhi::ResourceState::ShaderResource;
+            b.afterState = rhi::ResourceState::CopySource;
+            b.subresource = 0xFFFFFFFF; b.queueFamily = 0xFFFFFFFF;
+            vdcmd->InsertBarrier(&b, 1);
+            rhi::BufferTextureCopyRegion dr{};
+            dr.imageSubresource = {0, 0, 1};
+            dr.imageExtent = {W, H, 1};
+            vdcmd->CopyTextureToBuffer(tex, db, &dr, 1);
+            vdcmd->End(); vdcmd->Submit(0); vdcmd->WaitForCompletion();
+            fx.base->DestroyCommandBuffer(dcmd);
+
+            auto* dmapped = static_cast<u8*>(fx.base->MapBuffer(db, 0, W * H * 4));
+            if (dmapped) {
+                std::string fn = std::string("gbuffer_") + name + ".bmp";
+                std::ofstream bmp(fn, std::ios::binary);
+                if (bmp.is_open()) {
+                    u32 fs = 54 + W * H * 4;
+                    u8 hdr[54] = {};
+                    hdr[0]='B'; hdr[1]='M';
+                    hdr[2]=fs&0xFF; hdr[3]=(fs>>8)&0xFF;
+                    hdr[10]=54; hdr[14]=40;
+                    hdr[18]=W&0xFF; hdr[19]=(W>>8)&0xFF;
+                    hdr[22]=H&0xFF; hdr[23]=(H>>8)&0xFF;
+                    hdr[26]=1; hdr[28]=32;
+                    bmp.write(reinterpret_cast<const char*>(hdr), 54);
+                    for (u32 y = H; y-- > 0;) bmp.write(reinterpret_cast<const char*>(&dmapped[y*W*4]), W*4);
+                    bmp.close();
+                    // Count non-zero pixels
+                    u32 nz = 0;
+                    for (u32 i = 0; i < W*H*4; ++i) if (dmapped[i]) ++nz;
+                    std::cout << "[GBufferDump] " << name << " saved (" << fn << "), nonZeroBytes=" << nz << "/" << (W*H*4) << std::endl;
+                }
+                fx.base->UnmapBuffer(db);
+            }
+            fx.base->DestroyBuffer(db);
+        };
+        dumpTexture(gbAlbedo, "albedo", false);
+        dumpTexture(gbDepth, "depth", true);
+
+        // Also dump DeferredLighting output if available
+        // DeferredLightingModule output is RGBA16F at full res
+        // Accessing via deferred_module_ is private, so we skip — the renderTarget
+        // dump below already captures what FinalBlit produced.
+    }
 
     // Readback via CopyTextureToBuffer.
     constexpr u64 kBytes = (u64)W * H * 4;

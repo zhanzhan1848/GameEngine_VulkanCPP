@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
 
 namespace primal::graphics {
 
@@ -90,13 +91,14 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         {4, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
         {5, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
         {6, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
+        {7, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // SSAO
         {8, DescriptorType::Sampler,       1, ShaderStage::Pixel, nullptr},
         {9, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
         {10, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
         {11, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
         {12, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
     };
-    set_layout_ = device->CreateDescriptorSetLayout({12, bindings});
+    set_layout_ = device->CreateDescriptorSetLayout({13, bindings});
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
     // Triple-buffered output textures (RGBA16_Float for HDR)
@@ -335,6 +337,13 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
             ResourceHandle ormTex = validOrFallback(inputs.gpu_draw_pipeline->GetGBufferORM(), fallback_tex_);
             ResourceHandle depthTex = validOrFallback(depthSampleable, fallback_tex_);
             ResourceHandle shadowVisTex = validOrFallback(inputs.shadow_visibility_tex, fallback_tex_);
+            // SSAO filter output — binding 7. When SSAO pass is absent, fall back
+            // to white (1.0 = unoccluded) so ambient is unchanged.
+            ResourceHandle ssaoTex = fallback_tex_;
+            if (inputs.ssao_pass && inputs.ssao_pass->IsInitialized()) {
+                ResourceHandle ft = inputs.ssao_pass->GetFilterTexture();
+                if (ft != handles::INVALID_RESOURCE) ssaoTex = ft;
+            }
 
             DescData params[] = {
                 {0, DescriptorType::UniformBuffer, view_cb_[cbIdx]},
@@ -344,6 +353,7 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                 {4, DescriptorType::SampledImage, ormTex},
                 {5, DescriptorType::SampledImage, depthTex},
                 {6, DescriptorType::SampledImage, shadowVisTex},
+                {7, DescriptorType::SampledImage, ssaoTex},
                 {8, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},
                 {9, DescriptorType::SampledImage, fallback_tex_},
                 // T4.6.5 part 37: IBL bindings 10/11/12. Fall back to the 1x1
@@ -356,7 +366,7 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                 {12, DescriptorType::SampledImage,
                  validOrFallback(ibl_brdf_lut_, fallback_tex_)},
             };
-            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 12);
+            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 13);
 
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});

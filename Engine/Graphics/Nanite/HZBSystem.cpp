@@ -708,20 +708,11 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 
     }
 
-    // Vulkan: validation tracks every bound StorageImage descriptor against the
-    // image's final layout at vkQueueSubmit time. StorageImage descriptor
-    // imageLayout must be GENERAL per VUID-04152; the post-dispatch transitions
-    // above leave mips in SHADER_READ_ONLY_OPTIMAL, mismatching the descriptors.
-    // Transition all mips back to GENERAL to satisfy the submit-time check.
-    // (Downstream passes that sample hzb_texture_ must re-transition to
-    // ShaderResource before their SampledImage dispatches.)
-    if (isVulkan) {
-        for (u32 m = 0; m < mip_levels_; ++m) {
-            emitImageBarrier(hzb_texture_, m,
-                             rhi::ResourceState::ShaderResource,
-                             rhi::ResourceState::UnorderedAccess);
-        }
-    }
+    // HZB build complete — leave all mips in ShaderResource (SHADER_READ_ONLY_OPTIMAL).
+    // Downstream passes (SSGI/DDGI/GIGather/culling) read HZB as SampledImage.
+    // Previous code transitioned back to GENERAL to satisfy a VUID-04152 check,
+    // but this caused per-mip layout tracking conflicts with InsertBarrier.
+    // The descriptors that were GENERAL are no longer bound after build completes.
 
     for (auto view : temporaryViews) device_->DestroyTexture(view);
     for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);

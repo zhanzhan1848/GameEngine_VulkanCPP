@@ -1,0 +1,205 @@
+#version 450 core
+// SDFVisualization.comp — GlobalSDF visualization via compute shader.
+// Mirrors the texture3D + texelFetch pattern from DDGITraceRays.comp.
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture3D sdf_cascade_0;
+layout(set = 0, binding = 1) uniform texture3D sdf_cascade_1;
+layout(set = 0, binding = 2) uniform texture3D sdf_cascade_2;
+layout(set = 0, binding = 3, rgba8) writeonly uniform image2D output_image;
+
+layout(set = 0, binding = 4, std140) uniform SDFVizUniforms {
+    vec4  SdfOrigins[3];
+    vec4  SdfExtents[3];
+    vec4  SdfVoxelSizes[3];
+    uvec4 SdfResolutionsAndCount;
+    vec4  CameraPosAndMaxDist;
+    vec4  CameraForward;
+    vec4  CameraRight;
+    vec4  CameraUp;
+    vec4  LightDirAndIntensity;
+    vec4  FovAndAspect;
+} uniforms;
+
+// ---------------------------------------------------------------------------
+// SDF sampling — copied from DDGITraceRays.comp.
+// ---------------------------------------------------------------------------
+float sampleSDFCascade(texture3D sdfTexture, vec3 worldPos,
+                       vec3 cascadeOrigin, vec3 cascadeExtent, uint resolution) {
+    vec3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 ||
+        uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) return 1.0e10;
+    int resI = int(resolution);
+    int tx = clamp(int(uvw.x * float(resI)), 0, resI - 1);
+    int ty = clamp(int(uvw.y * float(resI)), 0, resI - 1);
+    int tz = clamp(int(uvw.z * float(resI)), 0, resI - 1);
+    float d = texelFetch(sdfTexture, ivec3(tx, ty, tz), 0).r;
+    return d;
+}
+
+bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
+    vec3 local = pos - origin;
+    return local.x >= 0.0 && local.x < extent.x &&
+           local.y >= 0.0 && local.y < extent.y &&
+           local.z >= 0.0 && local.z < extent.z;
+}
+
+float sampleBestSDF(vec3 pos) {
+    float d = 1.0e10;
+    uint cc = uniforms.SdfResolutionsAndCount.w;
+    if (cc > 0u && isInsideCascade(pos, uniforms.SdfOrigins[0].xyz, uniforms.SdfExtents[0].xyz))
+        d = min(d, sampleSDFCascade(sdf_cascade_0, pos, uniforms.SdfOrigins[0].xyz, uniforms.SdfExtents[0].xyz, uniforms.SdfResolutionsAndCount.x));
+    if (cc > 1u && isInsideCascade(pos, uniforms.SdfOrigins[1].xyz, uniforms.SdfExtents[1].xyz))
+        d = min(d, sampleSDFCascade(sdf_cascade_1, pos, uniforms.SdfOrigins[1].xyz, uniforms.SdfExtents[1].xyz, uniforms.SdfResolutionsAndCount.y));
+    if (cc > 2u && isInsideCascade(pos, uniforms.SdfOrigins[2].xyz, uniforms.SdfExtents[2].xyz))
+        d = min(d, sampleSDFCascade(sdf_cascade_2, pos, uniforms.SdfOrigins[2].xyz, uniforms.SdfExtents[2].xyz, uniforms.SdfResolutionsAndCount.z));
+    return d;
+}
+
+const uint MAX_STEPS = 48u;
+
+struct HitResult { bool hit; vec3 position; float distance; };
+
+HitResult traceSDF(vec3 rayOrigin, vec3 rayDir, float maxDist) {
+    HitResult r;
+    r.hit = false;
+    r.position = rayOrigin;
+    r.distance = maxDist;
+    // Start tracing a small distance ahead to avoid false hits at the camera.
+    float t = max(uniforms.SdfVoxelSizes[0].x * 2.0, 0.5);
+    const float minStep = 0.05;
+    uint cc = uniforms.SdfResolutionsAndCount.w;
+    // Skip voxels that read exactly 0 — these are likely uninitialized
+    // texture memory rather than actual surface (the voxelizer writes
+    // positive distances; 0.0 means "never written").
+    float prevDist = 1e10;
+    for (uint step = 0u; step < MAX_STEPS; step++) {
+        vec3 pos = rayOrigin + rayDir * t;
+        float minDist = 1.0e10;
+        bool insideAny = false;
+        if (cc > 0u && isInsideCascade(pos, uniforms.SdfOrigins[0].xyz, uniforms.SdfExtents[0].xyz)) {
+            minDist = min(minDist, sampleSDFCascade(sdf_cascade_0, pos, uniforms.SdfOrigins[0].xyz, uniforms.SdfExtents[0].xyz, uniforms.SdfResolutionsAndCount.x));
+            insideAny = true;
+        }
+        if (cc > 1u && isInsideCascade(pos, uniforms.SdfOrigins[1].xyz, uniforms.SdfExtents[1].xyz)) {
+            minDist = min(minDist, sampleSDFCascade(sdf_cascade_1, pos, uniforms.SdfOrigins[1].xyz, uniforms.SdfExtents[1].xyz, uniforms.SdfResolutionsAndCount.y));
+            insideAny = true;
+        }
+        if (cc > 2u && isInsideCascade(pos, uniforms.SdfOrigins[2].xyz, uniforms.SdfExtents[2].xyz)) {
+            minDist = min(minDist, sampleSDFCascade(sdf_cascade_2, pos, uniforms.SdfOrigins[2].xyz, uniforms.SdfExtents[2].xyz, uniforms.SdfResolutionsAndCount.z));
+            insideAny = true;
+        }
+        if (!insideAny) {
+            uint coarsest = min(2u, cc - 1u);
+            t += uniforms.SdfExtents[coarsest].x * 0.1;
+            if (t > maxDist) break;
+            continue;
+        }
+        float hitThreshold = max(uniforms.SdfVoxelSizes[0].x * 0.5, 0.01);
+        if (minDist < hitThreshold) {
+            r.hit = true;
+            r.position = pos;
+            r.distance = t;
+            return r;
+        }
+        t += max(minDist, minStep);
+        if (t > maxDist) break;
+    }
+    return r;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imgSize = imageSize(output_image);
+    if (pixel.x >= imgSize.x || pixel.y >= imgSize.y) return;
+
+    vec3 camPos   = uniforms.CameraPosAndMaxDist.xyz;
+    float maxDist = uniforms.CameraPosAndMaxDist.w;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(imgSize);
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0);
+
+    float tanHalf = uniforms.FovAndAspect.x;
+    float aspect  = uniforms.FovAndAspect.y;
+    vec3 forward  = uniforms.CameraForward.xyz;
+    vec3 right    = uniforms.CameraRight.xyz;
+    vec3 up       = uniforms.CameraUp.xyz;
+
+    vec3 rayDir = normalize(forward + ndc.x * tanHalf * aspect * right
+                                  + ndc.y * tanHalf * up);
+
+    HitResult hit = traceSDF(camPos, rayDir, maxDist);
+
+    vec3 color;
+    if (!hit.hit) {
+        // Sky.
+        float skyT = clamp(rayDir.y * 0.5 + 0.5, 0.0, 1.0);
+        color = mix(vec3(0.01, 0.01, 0.02), vec3(0.08, 0.10, 0.15), skyT);
+    } else {
+        // ---- Normal via SDF gradient ----
+        // Use a larger epsilon proportional to the cascade that likely
+        // contains this hit point, for a more stable gradient.
+        float eps = max(uniforms.SdfVoxelSizes[0].x * 2.0, 0.05);
+        vec3 gradient = vec3(
+            sampleBestSDF(hit.position + vec3(eps, 0.0, 0.0)) -
+            sampleBestSDF(hit.position - vec3(eps, 0.0, 0.0)),
+            sampleBestSDF(hit.position + vec3(0.0, eps, 0.0)) -
+            sampleBestSDF(hit.position - vec3(0.0, eps, 0.0)),
+            sampleBestSDF(hit.position + vec3(0.0, 0.0, eps)) -
+            sampleBestSDF(hit.position - vec3(0.0, 0.0, eps))
+        );
+        float glen = length(gradient);
+        vec3 normal = (glen > 1e-8) ? gradient / glen : vec3(0.0, 1.0, 0.0);
+
+        // View direction (from hit point toward camera).
+        vec3 viewDir = -rayDir;
+
+        // ---- Key light (directional) ----
+        vec3 keyDir   = normalize(uniforms.LightDirAndIntensity.xyz);
+        float keyDiff = max(dot(normal, -keyDir), 0.0);
+
+        // ---- Fill light ----
+        vec3 fillDir   = normalize(vec3(-keyDir.x * 0.5, keyDir.y * 0.3, -keyDir.z * 0.5));
+        float fillDiff = max(dot(normal, -fillDir), 0.0) * 0.3;
+
+        // ---- Specular (Blinn-Phong) ----
+        vec3 halfV = normalize(-keyDir + viewDir);
+        float spec = pow(max(dot(normal, halfV), 0.0), 32.0) * 0.4;
+
+        // ---- Fresnel rim ----
+        float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.0);
+        vec3 rimColor = vec3(0.4, 0.6, 1.0) * fresnel * 0.5;
+
+        // ---- Base color from normal ----
+        vec3 baseColor = normal * 0.5 + 0.5;
+
+        // ---- Shading ----
+        float ambient = 0.12;
+        color = baseColor * (ambient + keyDiff * 0.65 + fillDiff)
+              + vec3(1.0, 0.95, 0.8) * spec
+              + rimColor;
+
+        // ---- Depth visualization ----
+        // Encode trace distance as a visible heat color so the 3D depth
+        // structure of the SDF volume is clearly distinguishable.
+        float depthT = clamp(hit.distance / max(maxDist, 0.001), 0.0, 1.0);
+        // Inverse so near=bright, far=dark.
+        float depthInv = 1.0 - depthT;
+        vec3 depthColor = vec3(
+            depthInv,                    // R: near=1, far=0
+            depthInv * depthInv * 0.7,   // G: falls off faster
+            depthT * 0.5                 // B: far gets some blue
+        );
+        color = color * 0.55 + depthColor * 0.45;
+
+        // DEBUG: overlay world-position to verify spatial alignment.
+        // Uncomment to see XYZ position mapped to RGB (scaled by ~1/40).
+        // color = mix(color, fract(hit.position.xyz / 40.0), 0.5);
+    }
+
+    imageStore(output_image, pixel, vec4(color, 1.0));
+}

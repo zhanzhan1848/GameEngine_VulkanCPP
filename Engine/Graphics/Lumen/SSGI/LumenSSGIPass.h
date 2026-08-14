@@ -16,16 +16,16 @@ namespace primal::graphics::lumen {
 
 /// SSGI quality / performance tuning parameters.
 struct SSGIParams {
-    u32   ray_count = 4;
+    u32   ray_count = 8;
     float radius = 2.0f;              ///< Spatial filter kernel radius (world units)
     float max_trace_distance = 30.0f; ///< Ray march cap (world units) — decoupled from filter radius
     float thickness = 0.25f;
-    float temporal_feedback = 0.93f;
+    float temporal_feedback = 0.95f;
     float filter_sigma_depth = 10.0f;
     float filter_sigma_normal = 16.0f;
     float filter_sigma_hit_dist = 8.0f;
     float filter_sigma_spatial = 2.5f;
-    u32   filter_kernel_radius = 2;
+    u32   filter_kernel_radius = 3;
 };
 
 /// Per-frame camera data that the caller must provide.

@@ -1,0 +1,88 @@
+#version 450 core
+// Vulkan Lumen SSR Composite (Upsample) — GLSL rewrite of SSRComposite.wgsl.
+// Entry point: ssr_composite  (glslangValidator -V SSRComposite.comp -e ssr_composite -o SSRComposite.spv)
+//
+// Semantic change from the old SSRComposite: this pass NO LONGER reads HDR or
+// blends reflections into the scene. It is a pure half-res → full-res upsample
+// that outputs the reflection color (RGBA16F: RGB=reflection, A=strength mask).
+// The actual additive blend into HDR happens in FusionComposite.frag, which
+// reads this texture and attenuates by GBuffer roughness.
+//
+//   1. Bilinear-upsamples the half-res temporally-stable SSR to full-res
+//   2. Reads full-res ORM .g (roughness) to attenuate reflection strength
+//      (smooth surfaces reflect strongly, rough surfaces fade out)
+//   3. Outputs RGBA16F: RGB = reflection color, A = reflection strength
+//
+// Flat descriptor bindings:
+//   binding 0 = SampledImage  ssrTex   (half-res temporal output)
+//   binding 1 = SampledImage  ormTex   (full-res: AO.r, Roughness.g, Metallic.b)
+//   binding 2 = StorageImage  outTex   (full-res RGBA16F)
+//   binding 3 = UniformBuffer params
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D ssrTex;
+layout(set = 0, binding = 1) uniform texture2D ormTex;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D outTex;
+
+layout(set = 0, binding = 3, std140) uniform SSRCompositeParams {
+    uint  screenWidth;
+    uint  screenHeight;
+    uint  halfWidth;
+    uint  halfHeight;
+    float maxRoughness;        // roughness above which reflection is fully suppressed
+    float reflectionStrength;  // global reflection strength multiplier
+    float _pad0;
+    float _pad1;
+} params;
+
+vec4 sampleBilinear(texture2D tex, vec2 uv, ivec2 dims) {
+    vec2 coord = uv * vec2(dims) - 0.5;
+    ivec2 base = ivec2(int(floor(coord.x)), int(floor(coord.y)));
+    vec2 frac_ = fract(coord);
+    ivec2 maxCoord = dims - ivec2(1);
+
+    ivec2 c00 = clamp(base,               ivec2(0), maxCoord);
+    ivec2 c10 = clamp(base + ivec2(1, 0), ivec2(0), maxCoord);
+    ivec2 c01 = clamp(base + ivec2(0, 1), ivec2(0), maxCoord);
+    ivec2 c11 = clamp(base + ivec2(1, 1), ivec2(0), maxCoord);
+
+    vec4 h00 = texelFetch(tex, c00, 0);
+    vec4 h10 = texelFetch(tex, c10, 0);
+    vec4 h01 = texelFetch(tex, c01, 0);
+    vec4 h11 = texelFetch(tex, c11, 0);
+
+    float fx = clamp(frac_.x, 0.0, 1.0);
+    float fy = clamp(frac_.y, 0.0, 1.0);
+
+    return h00 * (1.0 - fx) * (1.0 - fy)
+         + h10 * fx * (1.0 - fy)
+         + h01 * (1.0 - fx) * fy
+         + h11 * fx * fy;
+}
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    if (gid.x >= params.screenWidth || gid.y >= params.screenHeight) return;
+
+    ivec2 pixel = ivec2(gid.xy);
+
+    // Upsample SSR from half-res. UV computed from full-res pixel / full-res dims.
+    vec2 fullUV = (vec2(pixel) + 0.5) / vec2(float(params.screenWidth), float(params.screenHeight));
+    ivec2 halfDims = ivec2(params.halfWidth, params.halfHeight);
+    vec4 ssr = sampleBilinear(ssrTex, fullUV, halfDims);
+
+    // Read full-res ORM and attenuate by roughness. maxRoughness defines the
+    // upper bound of the soft falloff; below 0.5×maxRoughness reflection is full.
+    float roughness = texelFetch(ormTex, pixel, 0).g;
+    float roughFade = 1.0 - smoothstep(params.maxRoughness * 0.5, params.maxRoughness, roughness);
+
+    // ssr.a is the accumulated hit confidence from trace+temporal. Multiply by
+    // roughness fade and global strength to get the final reflection strength.
+    float strength = ssr.a * roughFade * params.reflectionStrength;
+    vec3 reflection = ssr.rgb * strength;
+
+    imageStore(outTex, pixel, vec4(reflection, strength));
+}

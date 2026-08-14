@@ -6,6 +6,7 @@
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/HZBPass.h"
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/VelocityPass.h"
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/SSRPass.h"
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -230,6 +231,7 @@ bool StandardRenderPipeline::IsPassActive(RenderPassID pass) const {
         case RenderPassID::SurfaceCache:     return surface_cache_pass_ && surface_cache_pass_->IsInitialized();
         case RenderPassID::SCDDGIIntegration:return sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_;
         case RenderPassID::SSGI:             return ssgi_pass_ && ssgi_pass_->IsInitialized();
+        case RenderPassID::SSR:              return settings_.quality.enable_ssr;
         case RenderPassID::ScreenProbes:     return screen_probe_pass_ && screen_probe_pass_->IsInitialized();
         case RenderPassID::GIGather:         return gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized();
         case RenderPassID::VolumePass:       return (volume_pass_ && volume_pass_->IsInitialized()) ||
@@ -327,10 +329,36 @@ void StandardRenderPipeline::InitializeSubsystems() {
     scene_snapshot_ = std::make_unique<RenderSceneSnapshot>();
     scene_snapshot_->Initialize(device_);
 
-    // Global SDF
+    // Global SDF — use larger cascades to cover the full Sponza scene.
     auto& globalSDF = nanite::GlobalSDF::Get();
     if (!globalSDF.IsInitialized()) {
-        globalSDF.Initialize(device_);
+        // SDF cascade tuned for Sponza: voxel 1.0 × res 80 = 80 units cascade 0
+        nanite::GlobalSDFConfig sdfConfig;
+        sdfConfig.cascade_count = 3;
+        sdfConfig.base_resolution = 80;
+        sdfConfig.cascade_scale_factor = 2;
+        sdfConfig.voxel_size_base = 1.0f;
+        globalSDF.Initialize(device_, sdfConfig);
+    }
+
+    // Initialize GlobalSDF voxelization pipeline from Nanite mesh buffers.
+    // This enables DDGI SDF ray tracing — without it, SDF cascades are empty
+    // and DDGI trace produces no directional indirect light.
+    if (globalSDF.IsInitialized() && gpuDraw.IsInitialized()) {
+        nanite::SDFVoxelizationResources voxResources;
+        voxResources.vertex_buffer = gpuDraw.GetGlobalVertexBuffer();
+        voxResources.meshlet_buffer = gpuDraw.GetGlobalMeshletBuffer();
+        voxResources.meshlet_vertices_buffer = gpuDraw.GetGlobalMeshletVerticesBuffer();
+        voxResources.meshlet_triangles_buffer = gpuDraw.GetGlobalMeshletTrianglesBuffer();
+        voxResources.cluster_map_buffer = gpuDraw.GetClusterMapBuffer();
+        voxResources.instance_data_buffer = gpuDraw.GetGlobalInstanceDataBuffer();
+        voxResources.num_instances = 0;
+        std::cerr << "[SDF_INIT] vb=" << voxResources.vertex_buffer
+                  << " mb=" << voxResources.meshlet_buffer
+                  << " cmb=" << voxResources.cluster_map_buffer
+                  << " ready_before=" << globalSDF.IsVoxelizationReady() << std::endl;
+        globalSDF.InitVoxelization(voxResources);
+        std::cerr << "[SDF_INIT] ready_after=" << globalSDF.IsVoxelizationReady() << std::endl;
     }
 
     // PCG SDF readback — matches cascade 0 resolution
@@ -361,6 +389,13 @@ void StandardRenderPipeline::InitializeSubsystems() {
 
     final_blit_module_ = std::make_unique<FinalBlitModule>();
     final_blit_module_->Initialize(device_, blit_vs_, blit_ps_);
+
+    // SDF visualization module (toggled at runtime via SetSDFVisualization).
+    // Reuses the fullscreen triangle vertex shader (blit_vs_).
+    if (sdf_viz_ps_ != handles::INVALID_SHADER) {
+        sdf_viz_module_ = std::make_unique<SDFVisualizationModule>();
+        sdf_viz_module_->Initialize(device_, blit_vs_, sdf_viz_ps_);
+    }
 
     if (settings_.quality.enable_ddgi && gi_gather_shader_ != handles::INVALID_SHADER) {
         gi_gather_module_ = std::make_unique<GIGatherModule>();
@@ -403,6 +438,7 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (fusion_module_) { fusion_module_->Shutdown(); fusion_module_.reset(); }
     if (gi_gather_module_) { gi_gather_module_->Shutdown(); gi_gather_module_.reset(); }
     if (final_blit_module_) { final_blit_module_->Shutdown(); final_blit_module_.reset(); }
+    if (sdf_viz_module_) { sdf_viz_module_->Shutdown(); sdf_viz_module_.reset(); }
     if (deferred_module_) { deferred_module_->Shutdown(); deferred_module_.reset(); }
     if (shadow_module_) { shadow_module_->Shutdown(); shadow_module_.reset(); }
 
@@ -440,7 +476,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
 
     // DDGI
-    if (settings_.quality.enable_ddgi && !isVulkan) {
+    if (settings_.quality.enable_ddgi) {
         ddgi_pass_ = std::make_unique<lumen::LumenDDGIPass>();
         lumen::DDGIRuntimeParams ddgiParams{};
         ddgiParams.probe_count_x = config.ddgi_probe_count_x;
@@ -454,11 +490,16 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         if (!ddgi_pass_->Initialize(device_, ddgiParams)) {
             std::cerr << "[Lumen] DDGI init failed" << std::endl;
             ddgi_pass_.reset();
+        } else {
+            // Enable dynamic mode (Mode 11) — runtime SDF trace over static-bake.
+            // Without this, DDGI stays in Mode 10 (static-bake only) and never
+            // traces the GlobalSDF, producing no dynamic indirect light.
+            ddgi_pass_->SetDynamicMode(true);
         }
     }
 
     // SSAO
-    if (settings_.quality.enable_ssao && !isVulkan) {
+    if (settings_.quality.enable_ssao) {
         ssao_pass_ = std::make_unique<lumen::LumenSSAOPass>();
         lumen::SSAOParams ssaoParams{};
         ssaoParams.radius = config.gtao_radius;
@@ -472,7 +513,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     }
 
     // SSGI
-    if (settings_.quality.enable_ssgi && !isVulkan) {
+    if (settings_.quality.enable_ssgi) {
         ssgi_pass_ = std::make_unique<lumen::LumenSSGIPass>();
         lumen::SSGIParams ssgiParams{};
         if (!ssgi_pass_->Initialize(device_, render_width_, render_height_, ssgiParams)) {
@@ -921,6 +962,38 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
                 gpuDraw.Execute(cmd, *data.scene_snapshot, data.view_matrix, data.proj_matrix,
                                 cullingResults, static_cast<u32>(data.frame_count), data.buffer_index);
+
+                // Step 1d: GlobalSDF voxelization — inline after NaniteSceneRender
+                // (mesh buffers are now populated for this frame).
+                {
+                    static int s_vox_check = 0;
+                    if (s_vox_check < 3) {
+                        auto& gsdf = nanite::GlobalSDF::Get();
+                        std::cout << "[VOX_CHECK] sceneRender done, sdfInit=" << gsdf.IsInitialized()
+                                  << " voxReady=" << gsdf.IsVoxelizationReady()
+                                  << " cascade0Needs=" << (gsdf.GetConfig().cascade_count > 0 ? "check" : "n/a")
+                                  << std::endl;
+                        s_vox_check++;
+                    }
+                }
+                auto& globalSDF = nanite::GlobalSDF::Get();
+                if (globalSDF.IsInitialized()) {
+                    nanite::SDFVoxelizationResources voxResources;
+                    voxResources.vertex_buffer = gpuDraw.GetGlobalVertexBuffer();
+                    voxResources.meshlet_buffer = gpuDraw.GetGlobalMeshletBuffer();
+                    voxResources.meshlet_vertices_buffer = gpuDraw.GetGlobalMeshletVerticesBuffer();
+                    voxResources.meshlet_triangles_buffer = gpuDraw.GetGlobalMeshletTrianglesBuffer();
+                    voxResources.cluster_map_buffer = gpuDraw.GetClusterMapBuffer();
+                    voxResources.instance_data_buffer = gpuDraw.GetGlobalInstanceDataBuffer();
+                    voxResources.num_instances = data.scene_snapshot ? data.scene_snapshot->GetInstanceCount() : 0;
+                    globalSDF.SetVoxelizationResources(voxResources);
+
+                    for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
+                        if (globalSDF.CascadeNeedsVoxelization(c)) {
+                            globalSDF.DispatchVoxelization(cmd, c);
+                        }
+                    }
+                }
             }
         );
 
@@ -939,6 +1012,53 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                     hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), ctx.cmdBuffer);
                 }
             );
+        }
+
+        // Step 1d: GlobalSDF voxelization
+        {
+            auto& globalSDF = nanite::GlobalSDF::Get();
+            // Always register the pass if SDF is initialized — buffer handles
+            // are refreshed inside the execute lambda.
+            if (globalSDF.IsInitialized()) {
+                graph.AddPass<NanitePassData>(
+                    "GlobalSDF_Voxelization",
+                    RGPassType::Compute,
+                    [&](NanitePassData& data, RenderGraphBuilder& builder) {
+                        builder.SideEffect();
+                        data.buffer_index = cbIdx;
+                    },
+                    [this](const NanitePassData& data, RenderGraphContext& ctx) {
+                        auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
+                        auto& globalSDF = nanite::GlobalSDF::Get();
+                        if (!gpuDraw.IsInitialized()) return;
+
+                        static int s_vox_diag = 0;
+                        if (s_vox_diag < 5) {
+                            std::cerr << "[SDF_VOX] pass executing, ready=" << globalSDF.IsVoxelizationReady()
+                                      << " instances=" << (scene_snapshot_ ? scene_snapshot_->GetInstanceCount() : 0)
+                                      << std::endl;
+                            s_vox_diag++;
+                        }
+
+                        // Refresh buffer handles each frame (may change with streaming)
+                        nanite::SDFVoxelizationResources voxResources;
+                        voxResources.vertex_buffer = gpuDraw.GetGlobalVertexBuffer();
+                        voxResources.meshlet_buffer = gpuDraw.GetGlobalMeshletBuffer();
+                        voxResources.meshlet_vertices_buffer = gpuDraw.GetGlobalMeshletVerticesBuffer();
+                        voxResources.meshlet_triangles_buffer = gpuDraw.GetGlobalMeshletTrianglesBuffer();
+                        voxResources.cluster_map_buffer = gpuDraw.GetClusterMapBuffer();
+                        voxResources.instance_data_buffer = gpuDraw.GetGlobalInstanceDataBuffer();
+                        voxResources.num_instances = scene_snapshot_ ? scene_snapshot_->GetInstanceCount() : 0;
+                        globalSDF.SetVoxelizationResources(voxResources);
+
+                        for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
+                            if (globalSDF.CascadeNeedsVoxelization(c)) {
+                                globalSDF.DispatchVoxelization(ctx.cmdBuffer, c);
+                            }
+                        }
+                    }
+                );
+            }
         }
     }
 
@@ -997,7 +1117,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
         DeferredLightingInputs deferredIn;
         deferredIn.gpu_draw_pipeline = &gpuDraw;
-        deferredIn.ssao_pass = nullptr;
+        deferredIn.ssao_pass = ssao_pass_.get();
         deferredIn.view_matrix = view_matrix_;
         deferredIn.proj_matrix = proj_matrix_;
         deferredIn.camera_position = camera_position_;
@@ -1206,6 +1326,32 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
+    // Step 8.5: SSR (Screen-Space Reflections)
+    // ========================================================================
+    // SSR traces reflection rays through the HZB, temporally accumulates, then
+    // upsamples to full-res with roughness attenuation. The output is a pure
+    // reflection-color texture that FusionComposite blends additively into the
+    // scene. GBuffer ORM (.g=roughness, .b=metallic) gates reflection strength.
+    PostProcess::SSRPassData ssrOut;
+    if (settings_.quality.enable_ssr && frameCount_ > 0) {
+        RGResourceHandle hdrSSR;
+        if (deferredOut.deferred_output_rg.IsValid()) {
+            hdrSSR = deferredOut.deferred_output_rg;
+        } else if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
+            hdrSSR = graph.ImportResource("SSR_HdrSource", deferredOut.deferred_output_tex);
+        }
+        auto depthSSR = graph.ImportResource("GBufferDepth_SSR", gpuDraw.GetGBufferDepthSampleable());
+        auto hzbSSR   = graph.ImportResource("HZBTexture_SSR", hzb_system_->GetHZBTexture());
+        auto velSSR   = graph.ImportResource("GBufferVelocity_SSR", gpuDraw.GetGBufferVelocity());
+        auto ormSSR   = graph.ImportResource("GBufferORM_SSR", gpuDraw.GetGBufferORM());
+
+        math::m4x4 invProj = Inverse(proj_matrix_);
+        ssrOut = PostProcess::AddSSRPass(graph, hdrSSR, depthSSR, hzbSSR, velSSR, ormSSR,
+            render_width_, render_height_, static_cast<u32>(frameCount_),
+            proj_matrix_, invProj, settings_.ssr);
+    }
+
+    // ========================================================================
     // Step 9: Screen Probe GI
     // ========================================================================
 
@@ -1259,7 +1405,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     FusionOutputs fusionOut;
-    if (fusion_module_ && settings_.quality.enable_ssgi) {
+    if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr)) {
         FusionInputs fusionIn;
         fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
         fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
@@ -1272,6 +1418,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
         fusionIn.ssao_rg = ssaoOut.ssao_output;
         fusionIn.ssao_tex = ssao_pass_ ? ssao_pass_->GetFilterTexture() : black_texture_;
+        fusionIn.ssr_rg = ssrOut.outputColor;
+        fusionIn.ssr_tex = handles::INVALID_RESOURCE;  // RG-resolved inside module
+        fusionIn.gbuffer_orm = gpuDraw.GetGBufferORM();
         fusionIn.volume_scatter_rg = volumeOut.volume_scatter;
         fusionIn.volume_scatter_tex = handles::INVALID_RESOURCE; // RG-resolved inside module
         fusionIn.current_buffer_index = cbIdx;
@@ -1283,9 +1432,34 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
     // ========================================================================
     // Step 11: Final Blit → BackBuffer
+    //         (or SDF Visualization if toggled on)
     // ========================================================================
 
-    if (final_blit_module_) {
+    if (sdf_visualization_enabled_ && sdf_viz_module_ && sdf_viz_module_->IsInitialized()) {
+        // SDF visualization replaces the normal scene output.
+        SDFVisualizationInputs vizIn;
+        vizIn.backbuffer_rg = graph.ImportResource("BackBuffer", backBuffer);
+        vizIn.current_buffer_index = cbIdx;
+        vizIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+        vizIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        vizIn.camera_position = { camera_position_.x, camera_position_.y,
+                                  camera_position_.z, 0.0f };
+        vizIn.view_matrix = view_matrix_;
+        vizIn.proj_matrix = proj_matrix_;
+        vizIn.light_direction = { settings_.lighting.light_direction.x,
+                                  settings_.lighting.light_direction.y,
+                                  settings_.lighting.light_direction.z, 0.0f };
+        vizIn.light_intensity = 3.0f;
+        // Use offline SDF if available; otherwise fall back to GlobalSDF cascades.
+        if (has_offline_sdf_) {
+            vizIn.use_offline_sdf = true;
+            vizIn.offline_sdf_texture = offline_sdf_texture_;
+            vizIn.offline_sdf_origin = offline_sdf_origin_;
+            vizIn.offline_sdf_extent = offline_sdf_extent_;
+            vizIn.offline_sdf_resolution = offline_sdf_resolution_;
+        }
+        sdf_viz_module_->AddPass(graph, vizIn);
+    } else if (final_blit_module_) {
         FinalBlitInputs blitIn;
         if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = fusionOut.output_rg;
@@ -1374,6 +1548,30 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                         cullingResults, static_cast<u32>(frameCount_), cbIdx);
     }
 
+    // GlobalSDF voxelization — fill SDF cascades from Nanite mesh data so
+    // DDGI can do SDF ray tracing. Must run AFTER gpuDraw.Execute (mesh
+    // buffers populated) and BEFORE DDGI trace.
+    {
+        auto& globalSDF = nanite::GlobalSDF::Get();
+        if (globalSDF.IsInitialized() && globalSDF.IsVoxelizationReady()) {
+            nanite::SDFVoxelizationResources voxResources;
+            voxResources.vertex_buffer = gpuDraw.GetGlobalVertexBuffer();
+            voxResources.meshlet_buffer = gpuDraw.GetGlobalMeshletBuffer();
+            voxResources.meshlet_vertices_buffer = gpuDraw.GetGlobalMeshletVerticesBuffer();
+            voxResources.meshlet_triangles_buffer = gpuDraw.GetGlobalMeshletTrianglesBuffer();
+            voxResources.cluster_map_buffer = gpuDraw.GetClusterMapBuffer();
+            voxResources.instance_data_buffer = gpuDraw.GetGlobalInstanceDataBuffer();
+            voxResources.num_instances = scene_snapshot_ ? scene_snapshot_->GetInstanceCount() : 0;
+            globalSDF.SetVoxelizationResources(voxResources);
+
+            for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
+                if (globalSDF.CascadeNeedsVoxelization(c)) {
+                    globalSDF.DispatchVoxelization(cmd, c);
+                }
+            }
+        }
+    }
+
     // T4.6.5 part 39: Stage2/Stage3 mutual exclusion. In VisibilityBufferOnly
     // mode, Stage3 is skipped (gpuDraw.Execute gates internally). Downstream
     // passes that read GBuffer RTs must also be skipped — their input handles
@@ -1390,6 +1588,44 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     // next frame's Stage5 has correct occluder depths.
     if (hzb_system_ && hzb_system_->IsReady() && gpuDraw.IsInitialized()) {
         hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), cmd);
+    }
+
+    // ========================================================================
+    // SDF Visualization early-out: when toggled on, skip the entire
+    // GBuffer/Deferred/Fusion pipeline and render ONLY the fullscreen SDF
+    // ray-march pass. This avoids resource-state conflicts with passes whose
+    // outputs would otherwise have no downstream consumer.
+    // ========================================================================
+    if (sdf_visualization_enabled_ && sdf_viz_module_ && sdf_viz_module_->IsInitialized()) {
+        renderGraph_->Clear();
+        auto& graph = *renderGraph_;
+
+        SDFVisualizationInputs vizIn;
+        vizIn.backbuffer_rg = graph.ImportResource("BackBuffer", target);
+        vizIn.current_buffer_index = cbIdx;
+        vizIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+        vizIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        vizIn.camera_position = { camera_position_.x, camera_position_.y,
+                                  camera_position_.z, 0.0f };
+        vizIn.view_matrix = view_matrix_;
+        vizIn.proj_matrix = proj_matrix_;
+        vizIn.light_direction = { settings_.lighting.light_direction.x,
+                                  settings_.lighting.light_direction.y,
+                                  settings_.lighting.light_direction.z, 0.0f };
+        vizIn.light_intensity = 3.0f;
+        // Use offline SDF if available; otherwise fall back to GlobalSDF cascades.
+        if (has_offline_sdf_) {
+            vizIn.use_offline_sdf = true;
+            vizIn.offline_sdf_texture = offline_sdf_texture_;
+            vizIn.offline_sdf_origin = offline_sdf_origin_;
+            vizIn.offline_sdf_extent = offline_sdf_extent_;
+            vizIn.offline_sdf_resolution = offline_sdf_resolution_;
+        }
+        sdf_viz_module_->AddPass(graph, vizIn);
+
+        graph.Compile();
+        graph.Execute(cmd);
+        return;
     }
 
     // After draw: Shadow + Deferred + FinalBlit via RenderGraph.
@@ -1427,7 +1663,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         // Deferred Lighting — lightPos = direction TO light = -lightDir
         DeferredLightingInputs deferredIn;
         deferredIn.gpu_draw_pipeline = &gpuDraw;
-        deferredIn.ssao_pass = nullptr;
+        deferredIn.ssao_pass = ssao_pass_.get();
         deferredIn.view_matrix = view_matrix_;
         deferredIn.proj_matrix = proj_matrix_;
         deferredIn.camera_position = camera_position_;
@@ -1654,6 +1890,28 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             volumeOut = volume_pass_->AddPass(graph, volIn);
         }
 
+        // --- SSR (Screen-Space Reflections) ---
+        // Trace → Temporal → Upsample. Output is a pure reflection-color texture
+        // (RGBA16F: RGB=reflection, A=strength). FusionComposite blends it in.
+        PostProcess::SSRPassData ssrOutRWCB;
+        if (settings_.quality.enable_ssr && frameCount_ > 0) {
+            RGResourceHandle hdrSSR;
+            if (deferredOut.deferred_output_rg.IsValid()) {
+                hdrSSR = deferredOut.deferred_output_rg;
+            } else if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
+                hdrSSR = graph.ImportResource("SSR_HdrSource", deferredOut.deferred_output_tex);
+            }
+            auto depthSSR = graph.ImportResource("GBufferDepth_SSR", gpuDraw.GetGBufferDepthSampleable());
+            auto hzbSSR   = graph.ImportResource("HZBTexture_SSR", hzb_system_->GetHZBTexture());
+            auto velSSR   = graph.ImportResource("GBufferVelocity_SSR", gpuDraw.GetGBufferVelocity());
+            auto ormSSR   = graph.ImportResource("GBufferORM_SSR", gpuDraw.GetGBufferORM());
+
+            math::m4x4 invProjRWCB = Inverse(proj_matrix_);
+            ssrOutRWCB = PostProcess::AddSSRPass(graph, hdrSSR, depthSSR, hzbSSR, velSSR, ormSSR,
+                render_width_, render_height_, static_cast<u32>(frameCount_),
+                proj_matrix_, invProjRWCB, settings_.ssr);
+        }
+
         // --- Fluid Render ---
         fluid::FluidOutput fluidOut;
         if (fluid_render_pass_ && fluid_render_pass_->IsInitialized()) {
@@ -1693,7 +1951,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- FusionComposite ---
         FusionOutputs fusionOut;
-        if (fusion_module_ && settings_.quality.enable_ssgi) {
+        if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr)) {
             FusionInputs fusionIn;
             fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
             fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
@@ -1706,6 +1964,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
             fusionIn.ssao_rg = ssaoOut.ssao_output;
             fusionIn.ssao_tex = ssao_pass_ ? ssao_pass_->GetFilterTexture() : black_texture_;
+            fusionIn.ssr_rg = ssrOutRWCB.outputColor;
+            fusionIn.ssr_tex = handles::INVALID_RESOURCE;
+            fusionIn.gbuffer_orm = gpuDraw.GetGBufferORM();
             fusionIn.current_buffer_index = cbIdx;
             fusionIn.render_width = render_width_;
             fusionIn.render_height = render_height_;
@@ -1717,6 +1978,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- Final Blit → backbuffer ---
         FinalBlitInputs blitIn;
+        static int s_fusion_check = 0;
+        if (s_fusion_check < 3) {
+            std::cerr << "[BLIT_CHECK] fusionOut.tex=" << fusionOut.output_tex
+                      << " deferredOut.tex=" << deferredOut.deferred_output_tex
+                      << " enable_ssgi=" << settings_.quality.enable_ssgi
+                      << " fusion_module=" << (fusion_module_ ? "exists" : "null")
+                      << std::endl;
+            s_fusion_check++;
+        }
         if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = fusionOut.output_rg;
             blitIn.input_tex = fusionOut.output_tex;

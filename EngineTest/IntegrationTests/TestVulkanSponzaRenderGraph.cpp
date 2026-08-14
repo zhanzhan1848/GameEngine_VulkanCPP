@@ -21,6 +21,7 @@
 // target_link_libraries(... Engine ContentTools) in setup_test_target.
 #include "Engine/Content/ContentToEngine.h"
 #include "Engine/Content/AsyncResourceLoader.h"
+#include "Engine/Graphics/Nanite/OfflineSDFMerger.h"
 
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
@@ -371,12 +372,40 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     handles.blit_vs = blitVs;
     handles.blit_ps = blitFs;
     handles.shadow_filter = shadowFilter;
+
+    // GI shaders: Fusion (indirect + composite pixel shaders) + GIGather (compute).
+    auto fusionIndirectBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/FusionIndirect.frag.spv");
+    auto fusionCompositeBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/FusionComposite.frag.spv");
+    auto giGatherBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather.comp.spv");
+    if (!fusionIndirectBytes.empty())
+        handles.fusion_indirect_ps = device_->CreateShader(
+            fusionIndirectBytes.data(), fusionIndirectBytes.size(), ShaderStage::Pixel, "fusion_indirect");
+    if (!fusionCompositeBytes.empty())
+        handles.fusion_composite_ps = device_->CreateShader(
+            fusionCompositeBytes.data(), fusionCompositeBytes.size(), ShaderStage::Pixel, "fusion_composite");
+    if (!giGatherBytes.empty())
+        handles.gi_gather = device_->CreateShader(
+            giGatherBytes.data(), giGatherBytes.size(), ShaderStage::Compute, "ddgi_gi_gather");
+
+    // SDF visualization fullscreen shader (toggled at runtime via F6).
+    auto sdfVizBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Debug/SDFVisualization.frag.spv");
+    if (!sdfVizBytes.empty())
+        handles.sdf_viz_ps = device_->CreateShader(
+            sdfVizBytes.data(), sdfVizBytes.size(), ShaderStage::Pixel, "main");
+
     pipeline_->SetShaderHandles(handles);
 
-    // Default LumenConfig disables most Lumen modules. Triggers
-    // InitializeSubsystems() which creates the deferred/blit/shadow/etc.
-    // modules + the GPUDrivenDrawPipeline singleton.
-    pipeline_->SetLumenConfig(lumen::LumenConfig{});
+    // Medium preset: SSAO + DDGI + Fusion. Fusion now outputs HDR (no tonemap),
+    // FinalBlit does the single tonemap pass.
+    lumen::LumenConfig lumenConfig{};
+    lumenConfig.quality = lumen::LumenQualityPreset::Medium;
+    pipeline_->SetLumenConfig(lumenConfig);
+
+    // Enable SSR (Screen-Space Reflections) — traces reflection rays through the
+    // HZB, temporally accumulates, upsamples with roughness attenuation, then
+    // FusionComposite blends the reflection color additively into the scene.
+    pipeline_->SetPassEnabled(RenderPassID::SSR, true);
+
     subsystemsInitialized_ = true;
     return true;
 }
@@ -384,7 +413,8 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
 bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     const std::string baseDir =
         "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
-    const std::string modelPath = baseDir + "Sponza.model";
+    // Try pipeline model (high-precision per-mesh SDF) first, fall back to old.
+    std::string modelPath = baseDir + "Sponza.model";
     std::ifstream file(modelPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         std::cerr << "[Part30.4] Failed to open " << modelPath << std::endl;
@@ -639,6 +669,31 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     // so even without this marker the abort is gone — but skipping the
     // redundant call keeps the diagnostic log clean.
     (void)texSampler_;
+
+    // Load offline per-mesh SDF from pipeline model for SDF visualization.
+    {
+        offlineSDFMerger_ = new primal::graphics::nanite::OfflineSDFMerger();
+        std::string pipeModelPath = baseDir + "Sponza_pipeline.model";
+        u32 sdfCount = offlineSDFMerger_->LoadFromPipelineModel(pipeModelPath.c_str());
+        if (sdfCount > 0) {
+            offlineSDFMerger_->BuildAndUpload(device_);
+            std::cerr << "[Part30.4] Offline SDF loaded: " << sdfCount
+                      << " meshes, texture=" << offlineSDFMerger_->IsValid() << std::endl;
+        } else {
+            std::cerr << "[Part30.4] No offline SDF data found (pipeline model missing?)" << std::endl;
+            delete offlineSDFMerger_;
+            offlineSDFMerger_ = nullptr;
+        }
+    }
+
+    // Wire offline SDF into the render pipeline for F6 visualization.
+    if (offlineSDFMerger_ && offlineSDFMerger_->IsValid()) {
+        pipeline_->SetOfflineSDFSource(
+            offlineSDFMerger_->GetTexture(),
+            offlineSDFMerger_->GetOrigin(),
+            offlineSDFMerger_->GetExtent(),
+            offlineSDFMerger_->GetResolution());
+    }
 
     // Directional light + camera (TestDawnForwardRenderer defaults).
     RenderLight sunLight;
@@ -1025,11 +1080,56 @@ void TestVulkanSponzaRenderGraph::Run() {
     // and Sponza test yaw = 180°. Pitch -16.67° = -0.291 rad. Per-frame dt is
     // 1/60 since RenderTestRunner fires Run() at 60 FPS via CFRunLoopTimer.
     if (!cameraInitialized_) {
-        camera_.Initialize({0.0f, 5.0f, -10.0f}, {-16.67f, 90.0f, 0.0f});
+        // Match Metal TestSponzaRenderGraph init: position {0,5,0}, rotation {0,0,0}.
+        camera_.Initialize({0.0f, 5.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
         camera_.SetSpeed(10.0f, 0.1f);
         cameraInitialized_ = true;
+        lastFrameTime_ = std::chrono::steady_clock::now();
     }
-    camera_.Update(1.0f / 60.0f);
+    // Measure real dt like Metal TestSponzaRenderGraph (not hardcoded 1/60).
+    auto currentTime = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(currentTime - lastFrameTime_).count();
+    lastFrameTime_ = currentTime;
+
+    // Arrow key camera orientation (test-local, not in core RHICamera).
+    // Left/Right = yaw, Up/Down = pitch. Complements WASD move + right-mouse-look.
+    {
+        using namespace primal::input;
+        input_value arrow;
+        const float lookSpeed = 60.0f; // deg/sec
+        float yawDelta = 0.0f, pitchDelta = 0.0f;
+        get(input_source::keyboard, input_code::key_left, arrow);
+        if (arrow.current.x > 0.0f) yawDelta -= lookSpeed * dt;
+        get(input_source::keyboard, input_code::key_right, arrow);
+        if (arrow.current.x > 0.0f) yawDelta += lookSpeed * dt;
+        get(input_source::keyboard, input_code::key_up, arrow);
+        if (arrow.current.x > 0.0f) pitchDelta += lookSpeed * dt;
+        get(input_source::keyboard, input_code::key_down, arrow);
+        if (arrow.current.x > 0.0f) pitchDelta -= lookSpeed * dt;
+        if (yawDelta != 0.0f || pitchDelta != 0.0f) {
+            auto rot = camera_.GetRotation();
+            rot.y += yawDelta;
+            rot.x += pitchDelta;
+            if (rot.x > 89.0f) rot.x = 89.0f;
+            if (rot.x < -89.0f) rot.x = -89.0f;
+            camera_.Initialize(camera_.GetPosition(), rot);
+        }
+    }
+
+    // F6: toggle GlobalSDF fullscreen visualization (ray-march against cascades).
+    {
+        using namespace primal::input;
+        input_value f6;
+        get(input_source::keyboard, input_code::key_f6, f6);
+        if (f6.current.x > 0.0f && f6.previous.x == 0.0f) {
+            bool enabled = !pipeline_->IsSDFVisualizationEnabled();
+            pipeline_->SetSDFVisualization(enabled);
+            std::cout << "[SDF_VIZ] GlobalSDF visualization: "
+                      << (enabled ? "ON" : "OFF") << std::endl;
+        }
+    }
+
+    camera_.Update(dt);
     view_.SetViewMatrix(camera_.GetViewMatrix());
     view_.UpdateFrustum();
     view_.Cull(scene_);
@@ -1121,6 +1221,74 @@ void TestVulkanSponzaRenderGraph::Run() {
     device_->Submit(submitInfo);
 
     renderSystem_.EndFrame(renderDoneSem);
+
+    // DEBUG: capture frame 60 to PPM for visual inspection of SSGI/SSR.
+    // Runs AFTER Present — uses a dedicated one-shot command buffer so it
+    // doesn't interfere with the per-frame render loop.
+    if (frameCount_ == 2) {
+        u32 capW = targetDesc.size.x;
+        u32 capH = targetDesc.size.y;
+        BufferDesc sbDesc{};
+        sbDesc.size = (u64)capW * capH * 4;
+        sbDesc.usage = GPUMemoryUsage::Staging;
+        sbDesc.memoryUsage = GPUMemoryUsage::Staging;
+        ResourceHandle stagingBuf = device_->CreateBuffer(sbDesc);
+
+        auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        if (capCmdHandle != handles::INVALID_COMMAND_BUFFER) {
+            auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+            capCmd->Begin();
+
+            // Swapchain image is in PRESENT_SRC after EndFrame. Transition to
+            // CopySource so we can read it back.
+            ResourceBarrier toCopy{};
+            toCopy.resource = backBuffer;
+            toCopy.beforeState = ResourceState::Present;
+            toCopy.afterState = ResourceState::CopySource;
+            toCopy.subresource = 0xFFFFFFFF;
+            capCmd->InsertBarrier(&toCopy, 1);
+
+            BufferTextureCopyRegion region{};
+            region.bufferOffset = 0;
+            region.bufferRowLength = capW;
+            region.imageSubresource = {0, 0, 1};
+            region.imageExtent = {capW, capH, 1};
+            capCmd->CopyTextureToBuffer(backBuffer, stagingBuf, &region, 1);
+
+            ResourceBarrier toPresent{};
+            toPresent.resource = backBuffer;
+            toPresent.beforeState = ResourceState::CopySource;
+            toPresent.afterState = ResourceState::Present;
+            toPresent.subresource = 0xFFFFFFFF;
+            capCmd->InsertBarrier(&toPresent, 1);
+
+            capCmd->End();
+            capCmd->Submit();
+            capCmd->WaitForCompletion();
+            device_->DestroyCommandBuffer(capCmdHandle);
+        }
+
+        auto* mapped = static_cast<u8*>(device_->MapBuffer(stagingBuf));
+        if (mapped) {
+            std::string ppmPath = "/tmp/sponza_frame" + std::to_string(frameCount_) + ".ppm";
+            std::ofstream ppm(ppmPath, std::ios::binary);
+            ppm << "P6\n" << capW << " " << capH << "\n255\n";
+            for (u32 y = 0; y < capH; ++y) {
+                for (u32 x = 0; x < capW; ++x) {
+                    u8* p = mapped + (y * capW + x) * 4;
+                    // BGRA8 → RGB
+                    ppm.write(reinterpret_cast<const char*>(&p[2]), 1);
+                    ppm.write(reinterpret_cast<const char*>(&p[1]), 1);
+                    ppm.write(reinterpret_cast<const char*>(&p[0]), 1);
+                }
+            }
+            device_->UnmapBuffer(stagingBuf);
+            std::cerr << "[DEBUG] Frame " << frameCount_ << " captured to " << ppmPath << " ("
+                      << capW << "x" << capH << ")" << std::endl;
+        }
+        device_->DestroyBuffer(stagingBuf);
+    }
+
     frameCount_++;
 }
 

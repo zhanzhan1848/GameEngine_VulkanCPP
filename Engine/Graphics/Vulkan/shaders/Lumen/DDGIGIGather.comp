@@ -1,0 +1,338 @@
+#version 450 core
+// Vulkan Lumen GIGather — GLSL port of DDGIGIGather.metal (8-probe trilinear + L2 SH + cross bilateral).
+// Entry point: ddgi_gi_gather  (glslangValidator --source-entrypoint main -e ddgi_gi_gather)
+//
+// Phase 2 of Vulkan Lumen port (decision D7: hand-written GLSL replicating Metal 13-binding,
+// including static probe support). See Docs/2026-08-09-vulkan-lumen-gi-port-design.md §5.3.
+//
+// Flat descriptor bindings:
+//   binding 0  = SampledDepthImage  gbuffer_depth
+//   binding 1  = SampledImage       gbuffer_normal
+//   binding 2  = StorageImage(rgba16f) output_tex  (half-res GI)
+//   binding 3  = SampledImage       history_tex    (temporal)
+//   binding 4  = UniformBuffer      invViewProj (4 vec4 = 64B)
+//   binding 5  = UniformBuffer      probeOriginSpacing (origin.xyz + spacing.w)
+//   binding 6  = UniformBuffer      probeCounts (xyz)
+//   binding 7  = StorageBuffer(ro)  staticSkySH (9 float3)
+//   binding 8  = StorageBuffer(ro)  staticSkyFactor (float per probe)
+//   binding 9  = UniformBuffer      staticProbeParams (StaticProbeData)
+//   binding 10 = StorageBuffer(ro)  confidenceBuffer
+//   binding 11 = StorageBuffer(ro)  irradianceBuffer (9 float3 per probe)
+//   binding 12 = StorageBuffer(ro)  ddgiDepthBuffer (128 floats per probe)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat 0..12)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture2D gbuffer_depth;
+layout(set = 0, binding = 1) uniform texture2D gbuffer_normal;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D output_tex;
+layout(set = 0, binding = 3) uniform texture2D history_tex; // unused (temporal disabled)
+
+layout(set = 0, binding = 4, std140) uniform ViewCB {
+    vec4 viewRows[4];  // invViewProj as 4 vec4 rows (column-major matrix)
+};
+layout(set = 0, binding = 5, std140) uniform ProbeOriginSpacing {
+    vec4 probeOriginSpacing;  // xyz=origin, w=spacing
+};
+layout(set = 0, binding = 6, std140) uniform ProbeCounts {
+    vec4 probeCounts;  // xyz=counts, w=unused
+};
+
+layout(set = 0, binding = 7) readonly buffer StaticSkySHBuf {
+    vec4 staticSkySH[9];  // 9 SH coeffs (rgb stored as xyz of vec4)
+};
+layout(set = 0, binding = 8) readonly buffer StaticSkyFactorBuf {
+    float staticSkyFactor[];
+};
+
+struct GPUStaticProbeData {
+    vec4  gridOrigin;     // xyz origin, w spacing
+    uvec3 gridCounts;
+    float _pad0;
+    vec4  skySH[9];
+};
+
+layout(set = 0, binding = 9, std140) uniform StaticProbeCB {
+    GPUStaticProbeData staticProbe;
+};
+
+layout(set = 0, binding = 10) readonly buffer ConfidenceBuf {
+    float confidenceBuffer[];
+};
+layout(set = 0, binding = 11) readonly buffer IrradianceBuf {
+    vec4 irradianceBuffer[];  // 9 vec4 per probe (rgb in xyz)
+};
+layout(set = 0, binding = 12) readonly buffer DDGIDepthBuf {
+    float ddgiDepthBuffer[];
+};
+
+// --------------------------------------------------------------------------------
+// Constants
+// --------------------------------------------------------------------------------
+#define TG_PROBE_COUNT 8
+#define SH_COEFF_COUNT 9
+#define TILE_SIZE 8
+#define DEPTH_RES 8
+#define DEPTH_TEXELS 64
+#define DEPTH_FLOATS_PER_PROBE 128u
+
+// --------------------------------------------------------------------------------
+// Shared memory (threadgroup)
+// --------------------------------------------------------------------------------
+struct TGProbe {
+    vec3 sh[SH_COEFF_COUNT];
+};
+shared TGProbe tg_probes[TG_PROBE_COUNT];
+shared float tg_depth_map[TG_PROBE_COUNT * DEPTH_FLOATS_PER_PROBE];
+shared uvec3 tg_cellMin;
+shared bool tg_cellFound;
+shared uint tg_probe_idx[TG_PROBE_COUNT];
+shared uint tg_probe_depth_base[TG_PROBE_COUNT];
+shared float tg_skyFactor[TG_PROBE_COUNT];
+shared vec3 tg_indirect[TILE_SIZE * TILE_SIZE];
+shared float tg_pixelDepth[TILE_SIZE * TILE_SIZE];
+
+// --------------------------------------------------------------------------------
+// Helpers (ported from DDGIGIGather.metal)
+// --------------------------------------------------------------------------------
+vec2 gatherOctEncode(vec3 d) {
+    float l1norm = abs(d.x) + abs(d.y) + abs(d.z);
+    vec2 uv = d.xy / l1norm;
+    if (d.z < 0.0) {
+        uv = (1.0 - abs(uv.yx)) * mix(vec2(-1.0), vec2(1.0), greaterThanEqual(uv.xy, vec2(0.0)));
+    }
+    return uv * 0.5 + 0.5;
+}
+
+vec2 sampleOctDepthTG(int probeOffset, vec3 dir) {
+    vec2 uv = gatherOctEncode(dir);
+    ivec2 texel = ivec2(clamp(uint(uv.x * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)),
+                         clamp(uint(uv.y * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)));
+    int idx = texel.y * DEPTH_RES + texel.x;
+    int base = probeOffset;
+    return vec2(tg_depth_map[base + idx],
+                tg_depth_map[base + int(DEPTH_TEXELS) + idx]);
+}
+
+vec3 evalSH9Shared(int probeIdx, vec3 d) {
+    vec3 sh[9];
+    for (int i = 0; i < 9; ++i) sh[i] = tg_probes[probeIdx].sh[i];
+    float x = d.x, y = d.y, z = d.z;
+    float x2 = x*x, y2 = y*y, z2 = z*z;
+    return sh[0] * 0.28209479177
+         + sh[1] * (0.48860251190 * y)
+         + sh[2] * (0.48860251190 * z)
+         + sh[3] * (0.48860251190 * x)
+         + sh[4] * (1.09254843059 * y * x)
+         + sh[5] * (1.09254843059 * y * z)
+         + sh[6] * (1.09254843059 * z * x)
+         + sh[7] * (0.31539156525 * (3.0 * z2 - 1.0))
+         + sh[8] * (0.54627421530 * (x2 - y2));
+}
+
+vec3 shDot9Float4(vec4 sh[9], vec3 d) {
+    vec3 r = sh[0].xyz * 0.28209479177;
+    r += sh[1].xyz * (0.48860251190 * d.x);
+    r += sh[2].xyz * (0.48860251190 * d.y);
+    r += sh[3].xyz * (0.48860251190 * d.z);
+    float x2 = d.x * d.x, y2 = d.y * d.y, z2 = d.z * d.z;
+    r += sh[4].xyz * (1.09254843059 * d.x * d.y);
+    r += sh[5].xyz * (1.09254843059 * d.y * d.z);
+    r += sh[6].xyz * (1.09254843059 * d.z * d.x);
+    r += sh[7].xyz * (0.31539156525 * (3.0 * z2 - 1.0));
+    r += sh[8].xyz * (0.54627421530 * (x2 - y2));
+    return r;
+}
+
+float visibilityWeight(float distToProbe, float mean, float variance, float spacing) {
+    float dist = max(distToProbe - mean, 0.0);
+    if (variance < 0.0001) return 1.0;
+    float cheb = variance / (variance + dist * dist);
+    return clamp(max(cheb * 2.0, 0.2), 0.0, 1.0);
+}
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void ddgi_gi_gather() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    uvec2 tidInGroup = gl_LocalInvocationID.xy;
+    uvec2 groupSize = gl_WorkGroupSize.xy;
+
+    ivec2 outSize = imageSize(output_tex);
+    uint width = uint(outSize.x);
+    uint height = uint(outSize.y);
+    uint localIdx = tidInGroup.y * groupSize.x + tidInGroup.x;
+
+    // Phase 0: cooperative loading setup
+    bool inBounds = (tid.x < width && tid.y < height);
+    float depth = 0.0;
+    vec2 uv = vec2(0.0);
+    vec3 worldPos = vec3(0.0);
+    vec3 normal = vec3(0.0, 1.0, 0.0);
+    vec3 gp = vec3(0.0);
+    bool isActive = false;
+
+    if (inBounds) {
+        uv = (vec2(tid) + 0.5) / vec2(width, height);
+        // GBuffer is full-res, GIGather output is half-res. Use UV-based texelFetch
+        // with full-res dimensions to sample the correct GBuffer pixel.
+        ivec2 fullResSize = textureSize(gbuffer_depth, 0);
+        ivec2 fullTexel = ivec2(vec2(fullResSize) * uv);
+        depth = texelFetch(gbuffer_depth, fullTexel, 0).r;
+        if (depth < 1.0) {
+            // Reconstruct invViewProj from 4 vec4 rows (column-major)
+            mat4 invVP = mat4(viewRows[0], viewRows[1], viewRows[2], viewRows[3]);
+            vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+            vec4 worldPosH = invVP * vec4(ndc, depth, 1.0);
+            worldPos = worldPosH.xyz / worldPosH.w;
+
+            ivec2 fullNormSize = textureSize(gbuffer_normal, 0);
+            ivec2 fullNormTexel = ivec2(vec2(fullNormSize) * uv);
+            vec3 n = texelFetch(gbuffer_normal, fullNormTexel, 0).xyz;
+            n = normalize(n * 2.0 - 1.0);
+            // GLSL has no isnormal() on vec3; check components
+            if (!isnan(n.x) && !isnan(n.y) && !isnan(n.z))
+                normal = n;
+
+            vec3 origin = probeOriginSpacing.xyz;
+            float spacing = probeOriginSpacing.w;
+            gp = (worldPos - origin) / spacing;
+
+            vec3 gridMax = vec3(probeCounts.x - 1.0, probeCounts.y - 1.0, probeCounts.z - 1.0);
+            isActive = all(greaterThanEqual(gp, vec3(0.0))) && all(lessThanEqual(gp, gridMax));
+        }
+    }
+
+    // Determine grid cell from first isActive thread
+    if (localIdx == 0u) {
+        tg_cellFound = false;
+        tg_cellMin = uvec3(0u);
+    }
+    barrier();
+
+    if (localIdx < 8u && isActive && !tg_cellFound) {
+        tg_cellMin = uvec3(clamp(floor(gp), vec3(0.0),
+                                vec3(probeCounts.x - 1.0, probeCounts.y - 1.0, probeCounts.z - 1.0)));
+        tg_cellFound = true;
+    }
+    barrier();
+
+    uvec3 counts = uvec3(probeCounts.xyz);
+
+    // Phase 0a: compute probe indices + depth offsets
+    if (localIdx < 8u) {
+        uint cx = (localIdx & 1u) != 0u ? min(tg_cellMin.x + 1u, counts.x - 1u) : tg_cellMin.x;
+        uint cy = (localIdx & 2u) != 0u ? min(tg_cellMin.y + 1u, counts.y - 1u) : tg_cellMin.y;
+        uint cz = (localIdx & 4u) != 0u ? min(tg_cellMin.z + 1u, counts.z - 1u) : tg_cellMin.z;
+        uint pIdx = cx + cy * counts.x + cz * counts.x * counts.y;
+        tg_probe_idx[localIdx] = pIdx;
+        tg_probe_depth_base[localIdx] = pIdx * DEPTH_FLOATS_PER_PROBE;
+    }
+    barrier();
+
+    // Phase 0b: cooperative irradiance load (72 float3 = 72 vec4 slots, 9 per probe × 8 probes)
+    {
+        uint probe = localIdx / 9u;
+        uint shIdx = localIdx % 9u;
+        if (probe < TG_PROBE_COUNT) {
+            uint pIdx = tg_probe_idx[probe];
+            tg_probes[probe].sh[shIdx] = irradianceBuffer[pIdx * 9u + shIdx].xyz;
+        }
+    }
+    // Second load: threads 0-7 load [63..71] — but 63/9=7,sh0 already loaded by thread 63.
+    // Metal loads 64..71 which is probe 7 sh 1-8. Thread 63 (64-1) loads probe 7 sh 0.
+    // GLSL: threads 0-7 load probe 7 sh 1-8 (indices 64..71 → probe 64/9=7, sh 64%9=1..8)
+    if (localIdx < 8u) {
+        uint idx = 64u + localIdx;
+        uint probe = idx / 9u;
+        uint shIdx = idx % 9u;
+        if (probe < uint(TG_PROBE_COUNT) && shIdx < uint(SH_COEFF_COUNT)) {
+            uint pIdx = tg_probe_idx[probe];
+            tg_probes[probe].sh[shIdx] = irradianceBuffer[pIdx * 9u + shIdx].xyz;
+        }
+        tg_skyFactor[localIdx] = staticSkyFactor[tg_probe_idx[localIdx]];
+    }
+    barrier();
+
+    // Phase 0c: cooperative depth load (1024 floats / 64 threads = 16 per thread)
+    for (uint j = 0u; j < 16u; ++j) {
+        uint linearIdx = localIdx * 16u + j;
+        uint probe = linearIdx / DEPTH_FLOATS_PER_PROBE;
+        uint offsetInProbe = linearIdx % DEPTH_FLOATS_PER_PROBE;
+        float val = ddgiDepthBuffer[tg_probe_depth_base[probe] + offsetInProbe];
+        tg_depth_map[probe * DEPTH_FLOATS_PER_PROBE + offsetInProbe] = val;
+    }
+    barrier();
+
+    // Phase 1: per-pixel trilinear interpolation
+    if (inBounds && !isActive) {
+        // Outside probe grid: output dim ambient instead of pure black.
+        imageStore(output_tex, ivec2(tid), vec4(0.03, 0.03, 0.035, 1.0));
+    }
+
+    if (isActive) {
+        // Direct trilinear interpolation — no cooperative loading.
+        // Each thread independently reads irradiance_buffer for its 8 surrounding probes.
+        uvec3 b0 = clamp(uvec3(floor(gp)), uvec3(0u), counts - 1u);
+        uvec3 b1 = min(b0 + 1u, counts - 1u);
+        vec3 fracGp = fract(gp);
+        float fx = fracGp.x, fy = fracGp.y, fz = fracGp.z;
+
+        float tw[8];
+        tw[0] = (1.0 - fx) * (1.0 - fy) * (1.0 - fz);
+        tw[1] = fx           * (1.0 - fy) * (1.0 - fz);
+        tw[2] = (1.0 - fx) * fy           * (1.0 - fz);
+        tw[3] = fx           * fy           * (1.0 - fz);
+        tw[4] = (1.0 - fx) * (1.0 - fy) * fz;
+        tw[5] = fx           * (1.0 - fy) * fz;
+        tw[6] = (1.0 - fx) * fy           * fz;
+        tw[7] = fx           * fy           * fz;
+
+        uvec3 pc[8];
+        pc[0] = uvec3(b0.x, b0.y, b0.z); pc[1] = uvec3(b1.x, b0.y, b0.z);
+        pc[2] = uvec3(b0.x, b1.y, b0.z); pc[3] = uvec3(b1.x, b1.y, b0.z);
+        pc[4] = uvec3(b0.x, b0.y, b1.z); pc[5] = uvec3(b1.x, b0.y, b1.z);
+        pc[6] = uvec3(b0.x, b1.y, b1.z); pc[7] = uvec3(b1.x, b1.y, b1.z);
+
+        // SH reconstruction coefficients
+        // Full SH9 reconstruction coefficients (L0+L1+L2)
+        const float SH_C0   = 0.28209479;
+        const float SH_C1   = 0.48860251;
+        const float SH_C2_0 = 1.09254843;  // xy
+        const float SH_C2_1 = 0.31539157;  // 3zz-1
+        const float SH_C2_2 = 0.54627421;  // xx-yy
+        float nx = normal.x, ny = normal.y, nz = normal.z;
+        float nxy = nx*ny, nyz = ny*nz, nzx = nz*nx;
+        float nxx = nx*nx, nyy = ny*ny, nzz = nz*nz;
+
+        vec3 result = vec3(0.0);
+        float totalW = 0.0;
+        for (int p = 0; p < 8; ++p) {
+            if (tw[p] < 0.01) continue;
+            uint pIdx = pc[p].x + pc[p].y * counts.x + pc[p].z * counts.x * counts.y;
+            vec3 sh[9];
+            for (int i = 0; i < 9; ++i)
+                sh[i] = irradianceBuffer[pIdx * 9u + uint(i)].xyz;
+            // SH9 reconstruction with cosine-lobe convolution
+            vec3 irr = sh[0] * SH_C0
+                     + sh[1] * (SH_C1 * ny)
+                     + sh[2] * (SH_C1 * nz)
+                     + sh[3] * (SH_C1 * nx)
+                     + sh[4] * (SH_C2_0 * nxy)
+                     + sh[5] * (SH_C2_0 * nyz)
+                     + sh[6] * (SH_C2_0 * nzx)
+                     + sh[7] * (SH_C2_1 * (3.0*nzz - 1.0))
+                     + sh[8] * (SH_C2_2 * (nxx - nyy));
+            result += irr * tw[p];
+            totalW += tw[p];
+        }
+        if (totalW > 0.0) result /= totalW;
+        result = max(result, vec3(0.02, 0.02, 0.025));
+        imageStore(output_tex, ivec2(tid), vec4(result, 1.0));
+    }
+}

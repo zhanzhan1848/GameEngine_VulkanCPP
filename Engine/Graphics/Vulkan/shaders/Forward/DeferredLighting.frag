@@ -36,6 +36,16 @@
 
 const float PI = 3.14159265358979;
 
+// T4.6.5 part 40.3: visual contrast tuning.
+//   - DIRECT_INTENSITY: boosts direct light so lit regions read brighter.
+//   - IBL_INTENSITY: scales overall IBL ambient (was 1.0 → too flat / wash).
+//   - SHADOW_AMBIENT_SCALE: ambient is multiplied by
+//     mix(SHADOW_AMBIENT_SCALE, 1.0, shadowVisibility), so shadowed pixels
+//     get only SHADOW_AMBIENT_SCALE × IBL_INTENSITY → shadows read darker.
+const float DIRECT_INTENSITY   = 2.5;
+const float IBL_INTENSITY      = 0.15;   // lowered: IBL was too bright (wrong cube view binding makes samples unpredictable)
+const float SHADOW_AMBIENT_SCALE = 0.05; // crushed: shadowed pixels get very little ambient for darker shadows
+
 layout(set = 0, binding = 0) uniform ViewData {
     mat4 viewProjection;
     mat4 invViewProjection;
@@ -61,6 +71,7 @@ layout(set = 0, binding = 3) uniform texture2D normalTex;
 layout(set = 0, binding = 4) uniform texture2D ormTex;
 layout(set = 0, binding = 5) uniform texture2D depthTex;
 layout(set = 0, binding = 6) uniform texture2D shadowVisTex;
+layout(set = 0, binding = 7) uniform texture2D ssaoTex;   // SSAO filter output (R16F, 1.0=unoccluded)
 layout(set = 0, binding = 8) uniform sampler defaultSampler;
 layout(set = 0, binding = 9) uniform texture2D fallbackTex;  // unused
 // T4.6.5 part 37: IBL resources (cube + 2D).
@@ -129,7 +140,10 @@ void main() {
 
     // Decode GBuffer.
     vec3 N = normalize(normalEnc * 2.0 - 1.0);
-    float ao = orm.r;
+    // SSAO: read filter output at full-res. If SSAO pass is disabled, texture
+    // falls back to white (1.0 = unoccluded) — no darkening.
+    vec4 ssao = texture(sampler2D(ssaoTex, defaultSampler), inUv);
+    float ao = (ssao.r > 0.0) ? ssao.r : 1.0;
     float roughness = max(orm.g, 0.04);
     float metallic = orm.b;
 
@@ -157,7 +171,8 @@ void main() {
     // Shadow visibility from ShadowMapModule's pre-filtered texture.
     float shadowVisibility = texture(sampler2D(shadowVisTex, defaultSampler), inUv).r;
 
-    vec3 Lo = (diffuse + specular) * lightColor.rgb * NdotL * shadowVisibility;
+    vec3 Lo = (diffuse + specular) * lightColor.rgb * NdotL * shadowVisibility
+            * DIRECT_INTENSITY;
 
     // T4.6.5 part 37: IBL ambient (image-based lighting).
     // Mirror Metal fragmentLighting_v3 lines 270-287. Cube samples use the
@@ -178,7 +193,11 @@ void main() {
                         vec2(max(dot(N, V), 0.0), roughness)).rg;
     vec3 specularIBL = prefilteredColor * (Fil * brdf.x + brdf.y);
 
-    vec3 ambient = (kDil * diffuseIBL + specularIBL) * ao;
+    // T4.6.5 part 40.3: scale overall IBL down, and further crush ambient in
+    // shadowed pixels so the shadow side reads darker against lit regions.
+    float ambientVisibility = mix(SHADOW_AMBIENT_SCALE, 1.0, shadowVisibility);
+    vec3 ambient = (kDil * diffuseIBL + specularIBL) * ao
+                 * IBL_INTENSITY * ambientVisibility;
 
     outColor = vec4(Lo + ambient, 1.0);
 }

@@ -64,10 +64,23 @@ public:
     /// RHIResource 基类的 ResourceDesc::size 是 u64 字节数,无法承载这些信息)
     const TextureDesc& GetTextureDesc() const { return texDesc_; }
 
-    /// 当前 image layout — barrier 计算需要它(Per-mip 简化:全局 layout,
-    /// 不支持 per-mip layout 跟踪,Mipmap 生成会自己显式跟踪)
-    VkImageLayout GetCurrentLayout() const { return currentLayout_; }
-    void SetCurrentLayout(VkImageLayout l) { currentLayout_ = l; }
+    /// 当前 image layout — barrier 计算需要它。
+    /// For multi-mip textures (mipLevels > 1), returns mip 0's layout from
+    /// mipLayouts_ (managed by TransitionImageLayout). For single-mip, uses
+    /// the global currentLayout_ set by InsertBarrier/BeginRenderPass.
+    VkImageLayout GetCurrentLayout() const {
+        if (!mipLayouts_.empty()) {
+            return mipLayouts_[0] != VK_IMAGE_LAYOUT_UNDEFINED ? mipLayouts_[0] : currentLayout_;
+        }
+        return currentLayout_;
+    }
+    void SetCurrentLayout(VkImageLayout l) {
+        currentLayout_ = l;
+        // Keep mipLayouts_ in sync — InsertBarrier uses this for oldLayout.
+        if (!mipLayouts_.empty()) {
+            for (auto& ml : mipLayouts_) ml = l;
+        }
+    }
 
     /// 当前 mip layout 数组(GenerateMipmaps 用)
     VkImageLayout GetMipLayout(u32 mip) const {

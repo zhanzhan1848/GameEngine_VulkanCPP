@@ -5,6 +5,7 @@
 #include "Graphics/RenderGraph/RenderGraphResource.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -48,6 +49,7 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
             bufferInfos[i].range = ~0ull;
             writes[i].bufferInfo = &bufferInfos[i];
         } else if (params[i].type == DescriptorType::SampledImage ||
+                   params[i].type == DescriptorType::SampledDepthImage ||
                    params[i].type == DescriptorType::StorageImage ||
                    params[i].type == DescriptorType::CombinedImageSampler ||
                    params[i].type == DescriptorType::Sampler) {
@@ -119,7 +121,44 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
     return out.str();
 }
 
-static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
+static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char* shaderName) {
+    // T4.6.5 part 33 / Phase 1 Vulkan Lumen port: platform-aware loader.
+    //   Metal:  reads .metal source + #include resolution (unchanged).
+    //   Vulkan: reads precompiled .comp.spv binary from
+    //           Engine/Graphics/Vulkan/shaders/Lumen/<name>.comp.spv
+    //           (hand-written GLSL, compiled by build_spv.sh — see
+    //           Docs/2026-08-09-vulkan-lumen-gi-port-design.md §Phase 1).
+    //   Dawn:   falls through to Metal path (WGSL variant handled elsewhere).
+    const auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        const std::string relPath =
+            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
+        // CWD-relative first (works when shaders bundled next to test binary),
+        // then worktree source root (matches GPUDrivenDrawPipeline.cpp:85-88).
+        const std::vector<std::string> candidates = {
+            relPath,
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+        };
+        for (const auto& path : candidates) {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[LumenSSAO] Failed to read SPIR-V: " << path << std::endl;
+                return {};
+            }
+            return bytecode;
+        }
+        std::cerr << "[LumenSSAO] Failed to load SPIR-V shader: " << shaderName
+                  << "\n  tried: " << candidates[0]
+                  << "\n  tried: " << candidates[1] << std::endl;
+        return {};
+    }
+
+    // Metal path (unchanged)
     std::string shaderPath = LUMEN_SHADER_DIR + shaderName + ".metal";
 
     std::string source = ReadFileToString(shaderPath);
@@ -159,15 +198,11 @@ bool LumenSSAOPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
                                const SSAOParams& params) {
     if (initialized_) return true;
 
-    // T4.6.3: Lumen SSAO deferred on Vulkan — CreateDescriptorSetLayouts() uses
-    // Metal's overlapping texture/buffer binding idiom (rejected by Vulkan), and
-    // no SPIR-V ports of the SSAO shaders exist yet. See LumenDDGIPass::Initialize
-    // for the full rationale.
-    if (device && device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
-        std::cerr << "[LumenSSAO] Skipped on Vulkan (deferred — needs SPIR-V ports + "
-                     "non-overlapping descriptor bindings)" << std::endl;
-        return false;
-    }
+    // Phase 1 Vulkan Lumen port: SSAO now active on Vulkan. The two original
+    // blockers are resolved — (1) SPIR-V ports exist (SSAOTrace.comp.spv /
+    // SSAOFilter.comp.spv via build_spv.sh), (2) CreateDescriptorSetLayouts()
+    // has a Vulkan flat-binding branch. See
+    // Docs/2026-08-09-vulkan-lumen-gi-port-design.md §Phase 1.
 
     device_ = device;
     render_width_ = render_width;
@@ -200,24 +235,44 @@ void LumenSSAOPass::Shutdown() {
 // ============================================================================
 
 void LumenSSAOPass::CreateDescriptorSetLayouts() {
-    // --- Trace: 2 sampled + 1 storage + 2 UBO ---
-    {
+    const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+
+    // --- Trace: textures + storage + UBOs ---
+    // Vulkan: flat bindings 0..4 (depth as SampledDepthImage — separate type
+    //   from color SampledImage, per HZBSystem.cpp:143-155).
+    // Metal: overlapping texture/buffer namespaces (unchanged).
+    if (isVk) {
         DescriptorSetLayoutBinding traceBindings[] = {
-            // Textures (sampled)
+            {0, DescriptorType::SampledImage,     1, ShaderStage::Compute, nullptr},   // normal
+            {1, DescriptorType::SampledDepthImage,1, ShaderStage::Compute, nullptr},   // depth
+            {2, DescriptorType::StorageImage,     1, ShaderStage::Compute, nullptr},   // output
+            {3, DescriptorType::UniformBuffer,    1, ShaderStage::Compute, nullptr},   // GlobalShaderData
+            {4, DescriptorType::UniformBuffer,    1, ShaderStage::Compute, nullptr},   // SSAOTraceParams
+        };
+        trace_set_layout_ = device_->CreateDescriptorSetLayout({5, traceBindings});
+    } else {
+        DescriptorSetLayoutBinding traceBindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // normal
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth
-            // Texture (storage)
             {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // output
-            // Buffers (separate Metal namespace)
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // SSAOTraceParams
         };
-        DescriptorSetLayoutDesc layoutDesc{5, traceBindings};
-        trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        trace_set_layout_ = device_->CreateDescriptorSetLayout({5, traceBindings});
     }
 
     // --- Filter: 3 sampled + 1 storage + 2 UBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding filterBindings[] = {
+            {0, DescriptorType::SampledImage,     1, ShaderStage::Compute, nullptr},   // ssao half-res
+            {1, DescriptorType::SampledImage,     1, ShaderStage::Compute, nullptr},   // normal
+            {2, DescriptorType::SampledDepthImage,1, ShaderStage::Compute, nullptr},   // depth
+            {3, DescriptorType::StorageImage,     1, ShaderStage::Compute, nullptr},   // output
+            {4, DescriptorType::UniformBuffer,    1, ShaderStage::Compute, nullptr},   // GlobalShaderData
+            {5, DescriptorType::UniformBuffer,    1, ShaderStage::Compute, nullptr},   // FilterParams
+        };
+        filter_set_layout_ = device_->CreateDescriptorSetLayout({6, filterBindings});
+    } else {
         DescriptorSetLayoutBinding filterBindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // ssao half-res
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // normal
@@ -226,14 +281,13 @@ void LumenSSAOPass::CreateDescriptorSetLayouts() {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // FilterParams
         };
-        DescriptorSetLayoutDesc layoutDesc{6, filterBindings};
-        filter_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        filter_set_layout_ = device_->CreateDescriptorSetLayout({6, filterBindings});
     }
 }
 
 void LumenSSAOPass::CreatePipelines() {
     auto CompileShader = [&](const char* name, const char* entry) -> ShaderHandle {
-        auto code = LoadShaderBytecode(name);
+        auto code = LoadShaderBytecode(device_, name);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
@@ -316,7 +370,7 @@ void LumenSSAOPass::CreatePersistentTextures() {
         TextureDesc desc{};
         desc.size = {half_w, half_h, 1};
         desc.format = DataFormat::R16_Float;
-        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopySource;
         trace_texture_ = device_->CreateTexture(desc);
     }
 
@@ -325,7 +379,7 @@ void LumenSSAOPass::CreatePersistentTextures() {
         TextureDesc desc{};
         desc.size = {render_width_, render_height_, 1};
         desc.format = DataFormat::R16_Float;
-        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopySource;
         filter_texture_ = device_->CreateTexture(desc);
     }
 }
@@ -367,6 +421,7 @@ LumenSSAOOutput LumenSSAOPass::AddPass(
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
 
+            const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
             u32 frameIdx = current_frame_index % 3;
             u32 half_w = render_width_ / 2;
             u32 half_h = render_height_ / 2;
@@ -458,10 +513,10 @@ LumenSSAOOutput LumenSSAOPass::AddPass(
 
                 DescriptorData traceDesc[] = {
                     {0, DescriptorType::SampledImage,  normalTex},
-                    {1, DescriptorType::SampledImage,  depthTex},
+                    {1, isVk ? DescriptorType::SampledDepthImage : DescriptorType::SampledImage, depthTex},
                     {2, DescriptorType::StorageImage,  trace_texture_},
-                    {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {1, DescriptorType::UniformBuffer, trace_params_cb_[frameIdx]},
+                    {isVk ? 3u : 0u, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                    {isVk ? 4u : 1u, DescriptorType::UniformBuffer, trace_params_cb_[frameIdx]},
                 };
                 UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceDesc, 5);
 
@@ -513,10 +568,10 @@ LumenSSAOOutput LumenSSAOPass::AddPass(
                 DescriptorData filterDesc[] = {
                     {0, DescriptorType::SampledImage,  trace_texture_},
                     {1, DescriptorType::SampledImage,  normalTex},
-                    {2, DescriptorType::SampledImage,  depthTex},
+                    {2, isVk ? DescriptorType::SampledDepthImage : DescriptorType::SampledImage, depthTex},
                     {3, DescriptorType::StorageImage,  filter_texture_},
-                    {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {1, DescriptorType::UniformBuffer, filter_params_cb_[frameIdx]},
+                    {isVk ? 4u : 0u, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                    {isVk ? 5u : 1u, DescriptorType::UniformBuffer, filter_params_cb_[frameIdx]},
                 };
                 UpdateDescriptorSet(device_, filter_ds_[frameIdx], filterDesc, 6);
 
@@ -527,6 +582,18 @@ LumenSSAOOutput LumenSSAOPass::AddPass(
                 u32 gx = (render_width_ + TG - 1) / TG;
                 u32 gy = (render_height_ + TG - 1) / TG;
                 cmd->Dispatch(gx, gy, 1);
+            }
+
+            // D5 barrier: filter UAV -> SRV so downstream FusionComposite and
+            // readback can sample. Metal handles this implicitly at encoder
+            // boundaries; Vulkan needs an explicit barrier.
+            {
+                ResourceBarrier barrier{};
+                barrier.resource = filter_texture_;
+                barrier.beforeState = ResourceState::UnorderedAccess;
+                barrier.afterState = ResourceState::ShaderResource;
+                barrier.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&barrier, 1);
             }
 
         }

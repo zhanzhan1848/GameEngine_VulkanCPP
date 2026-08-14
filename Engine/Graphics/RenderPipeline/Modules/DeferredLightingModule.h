@@ -7,11 +7,11 @@ namespace primal::graphics {
 namespace rendergraph { class RenderGraph; }
 
 namespace nanite { class GPUDrivenDrawPipeline; }
-class SSAOPass;
+namespace lumen { class LumenSSAOPass; }
 
 struct DeferredLightingInputs {
     nanite::GPUDrivenDrawPipeline* gpu_draw_pipeline = nullptr;
-    SSAOPass* ssao_pass = nullptr;
+    lumen::LumenSSAOPass* ssao_pass = nullptr;
 
     math::m4x4 view_matrix{};
     math::m4x4 proj_matrix{};

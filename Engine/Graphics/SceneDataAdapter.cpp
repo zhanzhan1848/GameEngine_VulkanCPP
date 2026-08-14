@@ -81,9 +81,34 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
     utl::vector<SceneDataMeshInfo> result;
     if (!data || !device) return result;
 
-    // std::cout << "SceneDataAdapter::LoadRenderItemData: Start. Size=" << size << std::endl;
+    // ========================================================================
+    // Pipeline model format (asset-pipeline-phase1):
+    //   [u32 scene_name_len][scene_name]
+    //   [u32 num_materials] × ([u32 name_len][name][u32 diff_len][diffuse][u32 norm_len][normal])
+    //   [u32 num_lods] × ([u32 lod_name_len][lod_name][u32 mesh_count] × pack_mesh_data)
+    //
+    // Detect: first u32 is a plausible scene name length (1-200), and the
+    // string at that offset is printable ASCII.
+    // ========================================================================
+    // Pipeline model format: some pipeline tools prepend a u32(0) before
+    // the standard scene data. If the first u32 is 0, skip it so the old
+    // parser sees the standard format.
+    const u8* parseData = static_cast<const u8*>(data);
+    u32 parseSize = size;
+    if (size >= 8) {
+        u32 firstU32 = *reinterpret_cast<const u32*>(parseData);
+        if (firstU32 == 0) {
+            parseData += 4;
+            parseSize -= 4;
+        }
+    }
 
-    BlobReader reader(static_cast<const u8*>(data), size);
+    // --- Old format parser below ---
+
+    BlobReader reader(parseData, parseSize);
+    // Use parseData for all raw pointer access in the old parser.
+    data = parseData;
+    size = parseSize;
 
     // DEBUG: Dump first 16 integers
     const u32* debugPtr = reinterpret_cast<const u32*>(reader.GetCurrentPtr());
@@ -205,20 +230,40 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
     // 2. lod_count
     if (reader.Remaining() < 4) return result;
     u32 lodCount = reader.Read<u32>();
-    // std::cout << "lodCount: " << lodCount << std::endl;
-    
+
+    // Both old and pipeline formats have thresholds.
     utl::vector<float> thresholds(lodCount);
     if (reader.Remaining() < sizeof(float) * lodCount) return result;
     reader.Read(thresholds.data(), sizeof(float) * lodCount);
 
-    // Skip lod_offsets
-    if (reader.Remaining() < sizeof(u32) * lodCount) return result;
-    reader.Skip(sizeof(u32) * lodCount);
-    
+    // Pipeline format detection: after thresholds, old format has lod_offsets
+    // array (N u32s). Pipeline format goes directly to mesh_count (large).
+    // Only pipeline models have lodCount==1; old Sponza has lodCount==381+.
+    bool isPipelineFormat = false;
+    if (lodCount == 1 && reader.Remaining() >= 4) {
+        u32 peekVal = *reinterpret_cast<const u32*>(
+            static_cast<const u8*>(data) + reader.GetOffset());
+        if (peekVal > 50 && peekVal < 500000) {
+            isPipelineFormat = true;
+        }
+    }
+
+    if (!isPipelineFormat) {
+        // Old format: skip lod_offsets array.
+        if (reader.Remaining() < sizeof(u32) * lodCount) return result;
+        reader.Skip(sizeof(u32) * lodCount);
+    }
+
     for (u32 lod = 0; lod < lodCount; ++lod) {
-        if (reader.Remaining() < 8) break;
-        u32 submeshCount = reader.Read<u32>();
-        u32 sizeOfSubmeshes = reader.Read<u32>(); // Read and use variable to avoid skip confusion
+        u32 submeshCount;
+        if (isPipelineFormat) {
+            // Pipeline: mesh_count directly (no lod_offsets, no sizeOfSubmeshes).
+            submeshCount = reader.Read<u32>();
+        } else {
+            if (reader.Remaining() < 8) break;
+            submeshCount = reader.Read<u32>();
+            [[maybe_unused]] u32 sizeOfSubmeshes = reader.Read<u32>();
+        }
         
         // std::cout << "LOD " << lod << ": SubmeshCount=" << submeshCount << ", SizeOfSubmeshes=" << sizeOfSubmeshes << std::endl;
 
@@ -227,7 +272,16 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         int failedCount = 0;
 
         for (u32 i = 0; i < submeshCount; ++i) {
-             if (reader.Remaining() < 4) break;
+             if (reader.Remaining() < 4) {
+                 std::cerr << "[SceneData] Stopping at mesh " << i << "/" << submeshCount
+                           << " — insufficient remaining data (" << reader.Remaining() << ")" << std::endl;
+                 break;
+             }
+             // Progress log for large meshes
+             if (submeshCount > 100 && (i % 200 == 0)) {
+                 std::cerr << "[SceneData] Processing mesh " << i << "/" << submeshCount
+                           << " remaining=" << reader.Remaining() << std::endl;
+             }
              
              // =====================================================================
              // COMPACT FORMAT DETECTION (Geometry.cpp output format)
@@ -243,9 +297,30 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              u32 primitiveTopology = 4; // TriangleList
              std::string meshName;
              bool isCompactFormat = false;
+             u32 meshLodId = 0xFFFFFFFF; // default = LOD 0
              
              // Read first value and try to detect format
              u32 firstVal = reader.Read<u32>();
+
+             // Debug: log first mesh header for pipeline format diagnosis.
+             if (lod == 0 && i == 0) {
+                 std::cerr << "[SceneData] First mesh: firstVal=" << firstVal
+                           << " remaining=" << reader.Remaining() << std::endl;
+             }
+             // Debug: peek at first 3 mesh headers WITHOUT advancing reader.
+             if (lod == 0 && i < 3 && firstVal > 0 && firstVal < 200) {
+                 const u8* peek = static_cast<const u8*>(reader.GetCurrentPtr());
+                 size_t rem = reader.Remaining();
+                 if (rem >= firstVal + 36) {
+                     std::string dbgName(reinterpret_cast<const char*>(peek), firstVal);
+                     const u32* u32p = reinterpret_cast<const u32*>(peek + firstVal);
+                     std::cerr << "[SceneData] mesh " << i << ": name=\"" << dbgName
+                               << "\" lodId=" << u32p[0] << " matIdx=" << (s32)u32p[1]
+                               << " elemSize=" << u32p[2] << " elemType=" << u32p[3]
+                               << " verts=" << u32p[4] << " idxSize=" << u32p[5]
+                               << " idxCount=" << u32p[6] << std::endl;
+                 }
+             }
              
              // Check if firstVal could be a name length (Compact format)
              // Name length should be reasonable (0-200 chars)
@@ -267,6 +342,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                      reader.Skip(firstVal);
                      
                      u32 lodId = reader.Read<u32>();
+                     meshLodId = lodId;
                      materialIndex = (s32)reader.Read<u32>();
                      elementSize = reader.Read<u32>();
                      elementsType = reader.Read<u32>();
@@ -349,18 +425,21 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // indexSize already defined above (line 199)
              u32 indexBufferSize = indexSize * indexCount;
              
-             // Alignment (Match MeshCPU.cpp align16 logic which aligns absolute offset)
+             // Alignment: old format (MeshCPU.cpp) uses 16-byte alignment for
+             // position and element buffers. Pipeline format (pack_mesh_data)
+             // writes buffers tightly packed with NO padding.
              size_t currentOffset = reader.GetOffset();
-             
+
              u32 posPadding = 0;
-             if (vertexCount > 0) {
+             u32 elemPadding = 0;
+             if (!isPipelineFormat && vertexCount > 0) {
                  size_t endPos = currentOffset + positionSize;
                  size_t alignedEndPos = (endPos + 15) & ~15;
                  posPadding = (u32)(alignedEndPos - endPos);
              }
              
-             u32 elemPadding = 0;
-             if (elementBufferSize > 0) {
+             // elemPadding already initialized to 0 above.
+             if (!isPipelineFormat && elementBufferSize > 0) {
                  size_t currentElemOffset = currentOffset + positionSize + posPadding;
                  size_t endElem = currentElemOffset + elementBufferSize;
                  size_t alignedEndElem = (endElem + 15) & ~15;
@@ -373,9 +452,13 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              const u8* idxPtr = elemPtr + elementBufferSize + elemPadding;
              
              // Skip data in reader
-             u32 totalSize = positionSize + posPadding + elementBufferSize + elemPadding + indexBufferSize;
-             if (reader.Remaining() < totalSize) {
-                 std::cerr << "Incomplete submesh data. Skipping remaining LOD." << std::endl;
+            u32 totalSize = positionSize + posPadding + elementBufferSize + elemPadding + indexBufferSize;
+            if (reader.Remaining() < totalSize) {
+                std::cerr << "Incomplete submesh data at LOD " << lod << " mesh " << i
+                          << ": need " << totalSize << " (pos=" << positionSize
+                          << "+pad=" << posPadding << "+elem=" << elementBufferSize
+                          << "+epad=" << elemPadding << "+idx=" << indexBufferSize
+                          << ") but only " << reader.Remaining() << " remaining" << std::endl;
                  // Skip whatever remains in this LOD to avoid corrupting reader position
                  if (reader.Remaining() > 0) {
                      reader.Skip(reader.Remaining());
@@ -518,6 +601,17 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  // If not SDF, don't consume - it might be next submesh data
              }
              
+             // Pipeline format LOD filtering: the pipeline model contains
+             // multiple LODs per mesh (lodId 0xFFFFFFFF=LOD0, 1=LOD1, etc).
+             // Only create RenderMesh for LOD 0 to avoid memory exhaustion
+             // from 1519 meshes (393 base × ~4 LODs).
+             bool skipThisMesh = isPipelineFormat &&
+                 (meshLodId != 0xFFFFFFFF && meshLodId != 0);
+
+             if (skipThisMesh) {
+                 continue;
+             }
+
              // Register mesh asset to content system
              id::id_type meshEntityId = content::register_mesh_asset(meshAsset);
              
@@ -1159,6 +1253,219 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
 
     std::cout << "[SceneDataAdapter::ImportResources] Imported " << result.meshes.size()
               << " mesh resources" << std::endl;
+    return result;
+}
+
+// ============================================================================
+// Pipeline format parser (asset-pipeline-phase1).
+// Format:
+//   [u32 scene_name_len][scene_name]
+//   [u32 num_materials] × ([u32 nlen][name][u32 dlen][diffuse][u32 nlen][normal])
+//   [u32 num_lods] × ([u32 lnen][lod_name][u32 mesh_count] × pack_mesh_data)
+//
+// pack_mesh_data format (same as Compact Format in old parser):
+//   [u32 name_len][name][u32 lod_id][u32 mat_idx][u32 elem_size][u32 elem_type]
+//   [u32 vert_count][u32 idx_size][u32 idx_count][f32 lod_threshold]
+//   [pos_buffer][elem_buffer][idx_buffer]
+//   [u32 magic_mshl][meshlets...]
+//   [u32 magic_sdf][sdf data...]
+// ============================================================================
+utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
+    rhi::RHIDeviceBase* device, const void* data, u32 size) {
+
+    utl::vector<SceneDataMeshInfo> result;
+    BlobReader reader(static_cast<const u8*>(data), size);
+
+    // Helper lambdas for safe reading.
+    auto readU32 = [&]() -> u32 {
+        if (reader.Remaining() < 4) return 0xFFFFFFFF;
+        return reader.Read<u32>();
+    };
+    auto readF32 = [&]() -> float {
+        if (reader.Remaining() < 4) return 0.f;
+        float v; reader.Read(&v, 4); return v;
+    };
+    auto readString = [&]() -> std::string {
+        u32 len = readU32();
+        if (len > 10000 || reader.Remaining() < len) return {};
+        std::string s(reinterpret_cast<const char*>(reader.GetCurrentPtr()), len);
+        reader.Skip(len);
+        return s;
+    };
+    auto skipBytes = [&](u32 n) -> bool {
+        if (reader.Remaining() < n) return false;
+        reader.Skip(n);
+        return true;
+    };
+
+    // 1. Scene name
+    std::string sceneName = readString();
+    if (sceneName.empty()) return {};
+
+    // 2. Materials (3 fields each: name, diffuse, normal)
+    u32 numMaterials = readU32();
+    if (numMaterials > 10000) return {};
+
+    struct MatInfo { std::string name, diffuse, normal; };
+    utl::vector<MatInfo> materials(numMaterials);
+    for (u32 i = 0; i < numMaterials; ++i) {
+        materials[i].name = readString();
+        materials[i].diffuse = readString();
+        materials[i].normal = readString();
+    }
+
+    // Create Material + MaterialInstance objects (mirrors old parser).
+    utl::vector<std::shared_ptr<Material>> matObjs(numMaterials);
+    utl::vector<std::shared_ptr<MaterialInstance>> matInsts(numMaterials);
+    for (u32 i = 0; i < numMaterials; ++i) {
+        auto mat = std::make_shared<Material>();
+        auto matInst = std::make_shared<MaterialInstance>(mat.get());
+        if (matInst->Initialize(device)) {
+            matObjs[i] = mat;
+            matInsts[i] = matInst;
+        }
+    }
+
+    // 3. LOD groups
+    u32 numLods = readU32();
+    if (numLods > 100 || numLods == 0) return {};
+
+    constexpr u32 TARGET_VERTEX_STRIDE = 32;
+    constexpr u32 TARGET_ELEMENT_SIZE = 20;
+
+    for (u32 lod = 0; lod < numLods; ++lod) {
+        std::string lodName = readString();
+        u32 meshCount = readU32();
+        if (meshCount > 100000) return {};
+
+        for (u32 m = 0; m < meshCount; ++m) {
+            if (reader.Remaining() < 4) break;
+
+            // --- pack_mesh_data (Compact Format) ---
+            std::string meshName = readString();
+            u32 lodId = readU32();
+            s32 matIdx = (s32)readU32();
+            u32 elemSize = readU32();
+            u32 elemType = readU32();
+            u32 vertCount = readU32();
+            u32 idxSize = readU32();
+            u32 idxCount = readU32();
+            float lodThreshold = readF32();
+
+            // Validate
+            if (vertCount == 0 || vertCount > 10000000 ||
+                idxCount == 0 || idxCount > 30000000 ||
+                (idxSize != 2 && idxSize != 4)) {
+                std::cerr << "[Pipeline] Bad mesh header at LOD " << lod
+                          << " mesh " << m << std::endl;
+                return result; // partial result
+            }
+
+            // Buffers
+            u32 posSize = 12 * vertCount;
+            u32 elemBufSize = elemSize * vertCount;
+            u32 idxBufSize = idxSize * idxCount;
+
+            // Alignment: position and element buffers are 16-byte aligned.
+            auto align16 = [](u32 v) { return (v + 15) & ~15; };
+            u32 posAligned = align16(posSize);
+            u32 elemAligned = align16(elemBufSize);
+
+            if (reader.Remaining() < posAligned + elemAligned + idxBufSize) {
+                std::cerr << "[Pipeline] Insufficient data for mesh buffers at LOD "
+                          << lod << " mesh " << m << std::endl;
+                return result;
+            }
+
+            const u8* posPtr = static_cast<const u8*>(reader.GetCurrentPtr());
+            reader.Skip(posAligned);
+            const u8* elemPtr = static_cast<const u8*>(reader.GetCurrentPtr());
+            reader.Skip(elemAligned);
+            const u8* idxPtr = static_cast<const u8*>(reader.GetCurrentPtr());
+            reader.Skip(idxBufSize);
+
+            // Skip meshlet data (MSHL magic + counts + data).
+            u32 magicMshl = readU32();
+            if (magicMshl == 0x4C48534D) { // "MSHL"
+                u32 meshletCount = readU32();
+                if (meshletCount > 0) skipBytes(meshletCount * 64); // sizeof(meshlet) ≈ 64
+                u32 mvCount = readU32();
+                if (mvCount > 0) skipBytes(mvCount * 4);
+                u32 mtCount = readU32();
+                if (mtCount > 0) skipBytes(mtCount); // u8 per triangle index
+            }
+
+            // Skip SDF data (SDF magic + header + data).
+            u32 magicSdf = readU32();
+            if (magicSdf == 0x20464453) { // "SDF "
+                skipBytes(12 + 24); // resolution[3] + bounds_min[3] + bounds_max[3]
+                u32 sdfSize = readU32();
+                if (sdfSize > 0) skipBytes(sdfSize * 2);
+                u32 voxSize = readU32();
+                if (voxSize > 0) skipBytes(voxSize);
+                u32 vfSize = readU32();
+                if (vfSize > 0) skipBytes(vfSize * 2);
+            }
+
+            // --- Create RenderMesh (same as old parser) ---
+            // Interleave position + element data into TARGET_VERTEX_STRIDE.
+            utl::vector<u8> interleaved(vertCount * TARGET_VERTEX_STRIDE, 0);
+            for (u32 v = 0; v < vertCount; ++v) {
+                u8* dst = interleaved.data() + v * TARGET_VERTEX_STRIDE;
+                memcpy(dst, posPtr + v * 12, 12);
+                if (elemSize > 0) {
+                    u32 copySize = std::min(elemSize, TARGET_ELEMENT_SIZE);
+                    memcpy(dst + 12, elemPtr + v * elemSize, copySize);
+                }
+            }
+
+            // Register mesh asset (for SDF/meshlet debug support).
+            rhi::RHIMeshAsset meshAsset;
+            meshAsset.lod_id = lodId;
+            meshAsset.material_idx = (matIdx >= 0) ? matIdx : 0;
+            meshAsset.lod_threshold = lodThreshold;
+            meshAsset.index_size = idxSize;
+            meshAsset.num_vertices = vertCount;
+            meshAsset.num_indices = idxCount;
+            meshAsset.elements_type = elemType;
+            meshAsset.position_buffer.resize(posSize);
+            memcpy(meshAsset.position_buffer.data(), posPtr, posSize);
+            meshAsset.element_buffer.resize(elemBufSize);
+            memcpy(meshAsset.element_buffer.data(), elemPtr, elemBufSize);
+            meshAsset.index_buffer.resize(idxBufSize);
+            memcpy(meshAsset.index_buffer.data(), idxPtr, idxBufSize);
+
+            id::id_type meshEntityId = content::register_mesh_asset(meshAsset);
+
+            RenderMesh* mesh = new RenderMesh();
+            rhi::DataIndexType idxType = (idxSize == 2)
+                ? rhi::DataIndexType::UInt16 : rhi::DataIndexType::UInt32;
+
+            if (mesh->Create(device, meshEntityId,
+                             interleaved.data(), vertCount, TARGET_VERTEX_STRIDE,
+                             idxPtr, idxCount, idxType)) {
+                SceneDataMeshInfo info;
+                info.mesh = mesh;
+                info.meshEntityId = meshEntityId;
+                info.lodId = lodId;
+                info.lodThreshold = lodThreshold;
+                info.materialIndex = matIdx;
+                info.name = meshName;
+                if (matIdx >= 0 && (size_t)matIdx < matInsts.size())
+                    info.materialInstance = matInsts[matIdx];
+                if (matIdx >= 0 && (size_t)matIdx < matObjs.size())
+                    info.material = matObjs[matIdx];
+                if (matIdx >= 0 && (size_t)matIdx < materials.size()) {
+                    info.diffuseTexturePath = materials[matIdx].diffuse;
+                    info.normalTexturePath = materials[matIdx].normal;
+                }
+                result.push_back(info);
+            } else {
+                delete mesh;
+            }
+        }
+    }
+
     return result;
 }
 

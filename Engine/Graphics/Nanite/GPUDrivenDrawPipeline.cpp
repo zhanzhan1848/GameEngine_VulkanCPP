@@ -915,25 +915,30 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         // std::cout << "[GPUDrivenDrawPipeline] Visibility Buffer shaders not found" << std::endl;
     }
     
-    // Load GPU Driven Draw shaders for the main rendering pipeline
-    auto gpuDrawVertexShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_vertex_shader", device_);
-    auto gpuDrawFragmentShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_fragment_shader", device_);
+    // Load GPU Driven Draw shaders (original WGSL-converted SPV).
+    std::vector<u8> gpuDrawVertexShaderCode;
+    std::vector<u8> gpuDrawFragmentShaderCode;
+    gpuDrawVertexShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_vertex_shader", device_);
+    gpuDrawFragmentShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_fragment_shader", device_);
 
     if (!gpuDrawVertexShaderCode.empty() && !gpuDrawFragmentShaderCode.empty()) {
         // std::cout << "[GPUDrivenDrawPipeline] Loaded GPU Draw shaders (" << gpuDrawVertexShaderCode.size()
         //           << " VS bytes, " << gpuDrawFragmentShaderCode.size() << " FS bytes)" << std::endl;
 
+        const char* vsEntry = "gpu_driven_vertex_shader";
+        const char* fsEntry = "gpu_driven_fragment_shader";
+
         rhi::ShaderHandle gpuDrawVS = device_->CreateShader(
             gpuDrawVertexShaderCode.data(),
             gpuDrawVertexShaderCode.size(),
             rhi::ShaderStage::Vertex,
-            "gpu_driven_vertex_shader"
+            vsEntry
         );
         rhi::ShaderHandle gpuDrawFS = device_->CreateShader(
             gpuDrawFragmentShaderCode.data(),
             gpuDrawFragmentShaderCode.size(),
             rhi::ShaderStage::Pixel,
-            "gpu_driven_fragment_shader"
+            fsEntry
         );
 
         // std::cout << "[GPUDrivenDrawPipeline] VS handle: " << gpuDrawVS << ", FS handle: " << gpuDrawFS << std::endl;
@@ -1360,8 +1365,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     meshletVerticesDesc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed to Dynamic
     global_meshlet_vertices_buffer_ = device_->CreateBuffer(meshletVerticesDesc);
 
-    // Meshlet Triangles (Local Indices)
-    // WebGPU requires storage buffer sizes to be multiples of 4. Pad up.
+    // Meshlet Triangles (Local Indices) — byte-packed u8.
     rhi::BufferDesc meshletTrianglesDesc{};
     const u32 triangleBytesPadded = (totalTriangles + 3u) & ~3u;
     meshletTrianglesDesc.size = triangleBytesPadded;
@@ -1398,6 +1402,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     utl::vector<u32> mergedVertices;
     mergedVertices.reserve(totalVertices);
 
+    // Meshlet triangle indices (byte-packed u8).
     utl::vector<u8> mergedTriangles;
     mergedTriangles.reserve(totalTriangles);
 
@@ -1620,7 +1625,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
                 currentTriangleOffset += (u32)meshAsset.meshlet_triangles.size();
             }
             currentPositionOffset += posCount;
-            
+
             processedGeometries.insert(instance.geometry_id);
         }
     }
@@ -2241,7 +2246,9 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
     // 2. Resolve read_buffer_index + per-frame buffers FIRST.
     // compact_cluster_ids (visible cluster list) changes every frame, so the
     // descriptor set must be rewritten unconditionally — not one-shot.
-    u32 read_buffer_index = (buffer_index + frame_resources_.size() - 1) % frame_resources_.size();
+    // Same-frame read: culling and visibility raster are sequenced in the same
+    // command buffer (pipeline barrier guarantees ordering).
+    u32 read_buffer_index = buffer_index;
     rhi::ResourceHandle indirectBuffer = rhi::handles::INVALID_RESOURCE;
     if (culling_pipeline_) {
         indirectBuffer = culling_pipeline_->GetIndirectBuffer(read_buffer_index);
@@ -2403,7 +2410,13 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     // from buffer[N] when frame N+3's Stage 0 resets it. Reading from buffer[(N+1)%3]
     // (1-frame delay) ensures the GPU has finished reading before we write again.
     // This is the standard triple-buffer synchronization pattern.
-    u32 read_buffer_index = (buffer_index + frame_resources_.size() - 1) % frame_resources_.size();
+    //
+    // HOWEVER: within a single command buffer (Vulkan RG path), the culling pass
+    // and draw pass are sequenced by pipeline barriers — reading the SAME frame's
+    // culling results is safe and correct. The N-1 delay was a Metal remnant that
+    // caused the first frame to read uninitialized indirect args (slot N-1 never
+    // written), producing near-empty GBuffer. Use buffer_index (same-frame read).
+    u32 read_buffer_index = buffer_index;
 
     rhi::DescriptorSetHandle globalDrawDS = currentFrame.global_draw_descriptor_set;
     rhi::ResourceHandle cameraConstBuffer = currentFrame.camera_constants_buffer;

@@ -13,6 +13,7 @@
 #include "Engine/Graphics/Dawn/ShaderLoader.h"  // for dawn::LoadWGSL
 #include "Graphics/Field/FieldRegistry.h"
 #include "Graphics/Field/FieldView.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -166,6 +167,33 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
         return std::vector<u8>(src.begin(), src.end());
     }
 
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        // Phase 2 Vulkan Lumen port: load precompiled SPIR-V from
+        // Engine/Graphics/Vulkan/shaders/Lumen/<name>.comp.spv (hand-written
+        // GLSL compiled by build_spv.sh). Uses .comp.spv to distinguish from
+        // the broken naga WGSL .spv products (spvUnsafeArray MoltenVK issue).
+        const std::string relPath =
+            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
+        const std::vector<std::string> candidates = {
+            relPath,
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+        };
+        for (const auto& path : candidates) {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[LumenDDGI] Failed to read SPIR-V: " << path << std::endl;
+                return {};
+            }
+            return bytecode;
+        }
+        std::cerr << "[LumenDDGI] Failed to load SPIR-V: " << shaderName << std::endl;
+        return {};
+    }
+
     // Metal path (unchanged): file read + #include resolution + /tmp/ dump
     std::string shaderPath = DDGI_SHADER_DIR + shaderName + ".metal";
 
@@ -219,21 +247,11 @@ LumenDDGIPass::~LumenDDGIPass() {
 bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& params) {
     if (initialized_) return true;
 
-    // T4.6.3: Lumen DDGI deferred on Vulkan. Two blockers:
-    //   1. CreateDescriptorSetLayouts() Metal branch uses overlapping texture/buffer
-    //      binding numbers (Metal's [[texture(N)]] / [[buffer(N)]] namespaces are
-    //      independent). Vulkan forbids duplicate binding numbers in a single
-    //      VkDescriptorSetLayout (VUID-VkDescriptorSetLayoutCreateInfo-binding-00279).
-    //   2. No SPIR-V ports of DDGITraceRays / DDGIUpdateIrradiance / DDGIUpdateDepth
-    //      exist yet (LoadShaderBytecode returns empty → CreatePipelines no-ops but
-    //      pipelines stay INVALID).
-    // Skipping cleanly here lets StandardRenderPipeline probe InitializeSubsystems
-    // complete; full Lumen port is multi-session scope (see plan T4.4+ deferred).
-    if (device && device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
-        std::cerr << "[LumenDDGI] Skipped on Vulkan (deferred — needs SPIR-V ports + "
-                     "non-overlapping descriptor bindings)" << std::endl;
-        return false;
-    }
+    // Phase 2 Vulkan Lumen port: DDGI now active on Vulkan. The two original
+    // blockers are resolved — (1) SPIR-V ports exist (DDGITraceRays.spv /
+    // DDGIUpdateIrradiance.spv / DDGIUpdateDepth.spv via build_spv.sh naga),
+    // (2) CreateDescriptorSetLayouts() has a Vulkan flat-binding branch.
+    // See Docs/2026-08-09-vulkan-lumen-gi-port-design.md §Phase 2.
 
     device_ = device;
     params_ = params;
@@ -278,6 +296,8 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
         // three DDGI compute shaders.
         updateListDesc.type = BufferType::Structured;
         updateListDesc.usage = GPUMemoryUsage::Dynamic;
+        updateListDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        updateListDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
         for (u32 i = 0; i < 3; ++i) {
             probe_update_list_buffers_[i] = device_->CreateBuffer(updateListDesc);
         }
@@ -311,12 +331,14 @@ void LumenDDGIPass::Shutdown() {
 
 void LumenDDGIPass::CreateDescriptorSetLayouts() {
     // --- Trace: platform-branched ---
-    // Dawn (WASM): sequential 0..9, no texture/buffer collision, includes gbuffer_albedo for Mode 11.
+    // Dawn/Vulkan (WGSL→SPIR-V): sequential 0..9, no texture/buffer collision, includes gbuffer_albedo for Mode 11.
     // Metal: texture/buffer namespaces overlap (idiomatic Metal), includes Surface Cache bindings.
     {
-        bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
-        if (isDawn) {
-            // Dawn: sequential engine bindings 0..9 matching WGSL
+        const auto platform = device_->GetPlatform();
+        const bool useFlatBindings = (platform == rhi::RHIPlatform::Dawn ||
+                                      platform == rhi::RHIPlatform::Vulkan);
+        if (useFlatBindings) {
+            // Dawn/Vulkan: sequential engine bindings 0..9 matching WGSL
             // (no texture/buffer collision -> no silent remap)
             DescriptorSetLayoutBinding traceBindings[] = {
                 {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
@@ -409,8 +431,11 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- SDF Trace: texture3D-only + minimal buffer reads ---
-    // Apple Silicon stable: only 4 texture3D reads per thread, no Surface Cache buffer mixing
-    {
+    // Apple Silicon stable: only 4 texture3D reads per thread, no Surface Cache buffer mixing.
+    // Skip on Vulkan/Dawn — split-pass has no WGSL entry, pipeline stays INVALID.
+    const bool skipSplitPass = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    if (!skipSplitPass) {
         DescriptorSetLayoutBinding sdfTraceBindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
@@ -435,7 +460,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- Finalize: buffer-only + texture2D (no texture3D) ---
-    {
+    // Skip on Vulkan/Dawn — split-pass has no WGSL entry.
+    if (!skipSplitPass) {
         DescriptorSetLayoutBinding finalizeBindings[] = {
             {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // lighting_atlas
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
@@ -459,14 +485,22 @@ void LumenDDGIPass::CreatePipelines() {
 
     // Compile shaders
     auto traceShader = CompileShader("DDGITraceRays", "ddgi_trace_rays");
-    auto sdfTraceShader = CompileShader("DDGITraceRays", "ddgi_trace_sdf");
-    auto finalizeShader = CompileShader("DDGITraceRays", "ddgi_trace_finalize");
     auto irradianceShader = CompileShader("DDGIUpdateIrradiance", "ddgi_update_irradiance");
     auto depthShader = CompileShader("DDGIUpdateDepth", "ddgi_update_depth");
 
+    // Split-pass shaders (ddgi_trace_sdf / ddgi_trace_finalize) are Metal-only
+    // Apple Silicon optimizations. Dawn and Vulkan use the unified ddgi_trace_rays
+    // WGSL entry — split-pass entries don't exist in WGSL. Only compile them on
+    // Metal (matching the pipeline-creation guard below at :550).
+    const bool isMetalOrVkSplit = (device_->GetPlatform() == rhi::RHIPlatform::Metal);
+    ShaderHandle sdfTraceShader = handles::INVALID_SHADER;
+    ShaderHandle finalizeShader = handles::INVALID_SHADER;
+    if (isMetalOrVkSplit) {
+        sdfTraceShader = CompileShader("DDGITraceRays", "ddgi_trace_sdf");
+        finalizeShader = CompileShader("DDGITraceRays", "ddgi_trace_finalize");
+    }
+
     if (traceShader == handles::INVALID_SHADER ||
-        sdfTraceShader == handles::INVALID_SHADER ||
-        finalizeShader == handles::INVALID_SHADER ||
         irradianceShader == handles::INVALID_SHADER ||
         depthShader == handles::INVALID_SHADER) {
         std::cerr << "[LumenDDGI] Shader compilation failed" << std::endl;
@@ -474,6 +508,8 @@ void LumenDDGIPass::CreatePipelines() {
     }
 
     // Create pipeline layouts
+    const bool skipSplitPass = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                device_->GetPlatform() == rhi::RHIPlatform::Dawn);
     {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
@@ -492,13 +528,13 @@ void LumenDDGIPass::CreatePipelines() {
         plDesc.setLayouts = &depth_set_layout_;
         depth_layout_ = device_->CreatePipelineLayout(plDesc);
     }
-    {
+    if (!skipSplitPass) {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &sdf_trace_set_layout_;
         sdf_trace_layout_ = device_->CreatePipelineLayout(plDesc);
     }
-    {
+    if (!skipSplitPass) {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &finalize_set_layout_;
@@ -513,6 +549,9 @@ void LumenDDGIPass::CreatePipelines() {
         pipeDesc.layout = trace_layout_;
         pipeDesc.threadGroupSize = {64, 1, 1};
         trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+        if (trace_pipeline_ == handles::INVALID_PIPELINE) {
+            std::cerr << "[LumenDDGI] trace_pipeline_ creation FAILED (shader compile or layout mismatch)" << std::endl;
+        }
     }
     // SDF trace (split pass 1) + Finalize (split pass 2) — Apple Silicon optimization
     // that splits texture3D-only tracing from buffer-only card search.
@@ -530,7 +569,8 @@ void LumenDDGIPass::CreatePipelines() {
     // trace_pipeline_ path below, which uses ddgi_trace_rays (entry that
     // exists in WGSL).
     const bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
-    if (!isDawn) {
+    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    if (!isDawn && !isVulkan) {
         // SDF trace (split pass 1): texture3D-only, (8,8,1) threadgroup
         {
             ComputePipelineDesc pipeDesc{};
@@ -598,6 +638,7 @@ void LumenDDGIPass::CreateConstantBuffers() {
             desc.type = BufferType::Constant;
             desc.usage = GPUMemoryUsage::Dynamic;
             desc.memoryUsage = GPUMemoryUsage::Dynamic;
+            desc.bindFlags = static_cast<u32>(BufferUsageFlags::Uniform);
             cbs[i] = device_->CreateBuffer(desc);
         }
     };
@@ -613,7 +654,9 @@ void LumenDDGIPass::CreateProbeTextures() {
 
     // Irradiance storage buffers: each probe stores 9 SH3 coefficients (float3 each)
     u32 totalProbes = nx * ny * nz;
-    u64 irradianceSize = (u64)totalProbes * 9 * sizeof(float) * 3;
+    // 9 SH coeffs per probe, stored as vec4 (16B each) to match GIGather's
+    // vec4 irradianceBuffer[] declaration. Total = 9 * 16 = 144 bytes/probe.
+    u64 irradianceSize = (u64)totalProbes * 9 * sizeof(math::v4);
 
     for (int i = 0; i < 3; i++) {
         BufferDesc desc{};
@@ -621,8 +664,9 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.structured.elementCount = totalProbes * 9 * 3;
-        desc.structured.elementStride = sizeof(float);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.structured.elementCount = totalProbes * 9;
+        desc.structured.elementStride = sizeof(math::v4);
         irradiance_buffers_[i] = device_->CreateBuffer(desc);
 
         // NOTE: No zero-init here — InitializeProbesFromStatic() will fill
@@ -645,6 +689,7 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
         desc.structured.elementCount = totalProbes * DDGI_FLOATS_PER_PROBE;
         desc.structured.elementStride = sizeof(float);
         depth_buffers_[i] = device_->CreateBuffer(desc);
@@ -671,6 +716,7 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
         desc.structured.elementCount = totalProbes * 4;
         desc.structured.elementStride = sizeof(float);
 
@@ -701,6 +747,7 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
         desc.structured.elementCount = totalProbes * params_.rays_per_probe;
         desc.structured.elementStride = sizeof(DDGIRayData);
         ray_data_buffer_ = device_->CreateBuffer(desc);
@@ -822,18 +869,24 @@ void LumenDDGIPass::InitializeProbesFromStatic() {
     }
 
 sky_estimate:
-    // No bake data or dimension mismatch: sky estimate fallback
+    // No bake data or dimension mismatch: sky estimate fallback.
+    // Use low-intensity neutral gray instead of blue sky color — the blue sky
+    // estimate (0.5,0.7,1.0)*pi produced an unreasonable cyan glow when DDGI
+    // trace fails (MoltenVK spvUnsafeArray on Vulkan). Neutral gray at low
+    // intensity approximates ambient bounce without visible color cast.
     // Must use float* (not math::v3*) — buffer is 12 bytes/element, math::v3 is 16 bytes.
-    math::v3 skyL0 = math::v3{0.5f, 0.7f, 1.0f} * 3.14159265f; // sky color * pi
+    math::v3 skyL0 = math::v3{0.03f, 0.03f, 0.035f}; // dim neutral ambient
     for (int f = 0; f < 3; f++) {
-        u64 irrSize = (u64)probeCount * 9 * 3 * sizeof(float);
+        // vec4 layout: 9 coeffs × 4 floats = 36 floats per probe
+        u64 irrSize = (u64)probeCount * 9 * sizeof(math::v4);
         float* mapped = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]));
         if (mapped) {
             memset(mapped, 0, irrSize);
             for (u32 p = 0; p < probeCount; p++) {
-                mapped[p * 27 + 0] = skyL0.x;
-                mapped[p * 27 + 1] = skyL0.y;
-                mapped[p * 27 + 2] = skyL0.z;
+                // L0 coeff = vec4(skyL0.xyz, 0)
+                mapped[p * 36 + 0] = skyL0.x;
+                mapped[p * 36 + 1] = skyL0.y;
+                mapped[p * 36 + 2] = skyL0.z;
             }
             device_->UnmapBuffer(irradiance_buffers_[f]);
         }
@@ -893,6 +946,10 @@ void LumenDDGIPass::ClearSurfaceCacheResources() {
 bool LumenDDGIPass::UpdateProbeOrigin(const math::v3& camera_position)
 {
     if (!initialized_) return false;
+
+    // Static scene: lock probe origin at initial center position (set in Initialize).
+    // Do not follow camera — prevents SDF/probe mismatch and multi-bounce instability.
+    return false;
 
     float spacing = params_.probe_spacing;
     // Snap camera to grid: only shifts when camera crosses a spacing boundary
@@ -971,6 +1028,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
         [prev_frame_color, irradianceOutHandle, irradianceHistHandle,
          depthOutHandle, depthHistHandle, sc_lighting_atlas](
             LumenDDGIData& data, RenderGraphBuilder& builder) {
+            builder.SideEffect(); // prevent RG culling — outputs go to imported buffers
             // Read previous frame color (for lighting lookup during trace)
             builder.Read(prev_frame_color, ResourceState::ShaderResource);
 
@@ -999,6 +1057,14 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             const LumenDDGIData& data, RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
+
+            static int s_ddgi_exec = 0;
+            if (s_ddgi_exec < 3) {
+                std::cerr << "[DDGI_EXEC] frame " << s_ddgi_exec
+                          << " dynamic=" << dynamic_mode_
+                          << " initialized=" << initialized_ << std::endl;
+                s_ddgi_exec++;
+            }
 
             // === [Mode11 Perf] per-section timing instrumentation ===
             // Tracks CPU-side encoding/upload time within the Execute lambda.
@@ -1048,20 +1114,47 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
             ResourceHandle prevColorTex = ResolveTexture(prev_frame_color);
 
-            // Resolve SDF cascade textures from GlobalSDF
-            auto& sdf = nanite::GlobalSDF::Get();
-            bool sdfAvailable = sdf.IsInitialized();
+            // Resolve SDF cascade textures from GlobalSDF, or use offline SDF if set.
             ResourceHandle sdfTextures[3] = {
                 handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE
             };
-            if (sdfAvailable) {
-                for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
-                    const auto& cascade = sdf.GetCascade(c);
-                    if (cascade.sdf_texture != handles::INVALID_RESOURCE)
-                        sdfTextures[c] = cascade.sdf_texture;
-                }
-                // Must have at least cascade 0 with a valid texture
+            bool sdfAvailable = false;
+
+            if (has_offline_sdf_) {
+                // Offline SDF mode: single high-res volume replaces all cascades.
+                sdfTextures[0] = offline_sdf_texture_;
+                sdfTextures[1] = offline_sdf_texture_; // alias to keep descriptor valid
+                sdfTextures[2] = offline_sdf_texture_;
                 sdfAvailable = (sdfTextures[0] != handles::INVALID_RESOURCE);
+            } else {
+                auto& sdf = nanite::GlobalSDF::Get();
+                sdfAvailable = sdf.IsInitialized();
+                if (sdfAvailable) {
+                    for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
+                        const auto& cascade = sdf.GetCascade(c);
+                        if (cascade.sdf_texture != handles::INVALID_RESOURCE)
+                            sdfTextures[c] = cascade.sdf_texture;
+                    }
+                    sdfAvailable = (sdfTextures[0] != handles::INVALID_RESOURCE);
+                }
+            }
+
+            // Ensure SDF cascade textures are in SHADER_READ_ONLY layout for trace.
+            // DispatchVoxelization (in RenderWithCommandBuffer, before this RG)
+            // leaves them in SHADER_READ_ONLY after its UAV→SRV barrier, but
+            // the layout tracking may be stale. Force transition to be safe.
+            if (sdfAvailable) {
+                for (u32 c = 0; c < 3u; ++c) {
+                    if (sdfTextures[c] != handles::INVALID_RESOURCE) {
+                        ResourceBarrier sdfBarrier{};
+                        sdfBarrier.resource = sdfTextures[c];
+                        sdfBarrier.beforeState = ResourceState::ShaderResource;
+                        sdfBarrier.afterState = ResourceState::ShaderResource;
+                        sdfBarrier.subresource = 0xFFFFFFFF;
+                        sdfBarrier.queueFamily = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&sdfBarrier, 1);
+                    }
+                }
             }
 
             // Mode 11 per-vertex albedo: GBuffer albedo from GPUDrivenDrawPipeline.
@@ -1208,7 +1301,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.FrameIndex = camera_data.frame_index;
                     vd.RayMaxDistance = params_.ray_max_distance;
                     vd.ProbeHysteresis = dawnDebugParams_.probeHysteresis;
-                    vd.TemporalAlpha = 0.1f;
+                    vd.TemporalAlpha = 1.0f; // DEBUG: full overwrite (no EMA) to see immediate effect
                     vd.LightDirection = {camera_data.light_direction.x,
                                          camera_data.light_direction.y,
                                          camera_data.light_direction.z, 0.0f};
@@ -1228,17 +1321,28 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.SkyColor = {sky * 0.85f, sky * 0.85f, sky * 1.0f, 0.0f};
                     vd.Albedo   = {alb, alb, alb, 0.0f};
 
-                    // Fill SDF cascade data from GlobalSDF (matches reference path —
-                    // FieldRegistry indirection was returning count=0 on WASM where
-                    // the registry isn't populated by the test harness).
-                    for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
-                        const auto& cascade = sdf.GetCascade(c);
-                        vd.SdfOrigins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
-                        vd.SdfVoxelSizes[c] = {cascade.voxel_size, 0.0f, 0.0f, 0.0f};
-                        vd.SdfExtents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
-                        vd.SdfResolutions[c] = cascade.resolution;
+                    // Fill SDF cascade data — offline SDF or runtime GlobalSDF.
+                    if (has_offline_sdf_) {
+                        vd.SdfOrigins[0] = {offline_sdf_origin_.x, offline_sdf_origin_.y,
+                                            offline_sdf_origin_.z, 0.0f};
+                        vd.SdfExtents[0] = {offline_sdf_extent_.x, offline_sdf_extent_.y,
+                                            offline_sdf_extent_.z, 0.0f};
+                        float maxExt = std::max({offline_sdf_extent_.x, offline_sdf_extent_.y,
+                                                 offline_sdf_extent_.z});
+                        vd.SdfVoxelSizes[0] = {maxExt / (float)offline_sdf_resolution_, 0, 0, 0};
+                        vd.SdfResolutions[0] = offline_sdf_resolution_;
+                        vd.SdfCascadeCount = 1;
+                    } else {
+                        auto& sdf = nanite::GlobalSDF::Get();
+                        for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
+                            const auto& cascade = sdf.GetCascade(c);
+                            vd.SdfOrigins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
+                            vd.SdfVoxelSizes[c] = {cascade.voxel_size, 0.0f, 0.0f, 0.0f};
+                            vd.SdfExtents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
+                            vd.SdfResolutions[c] = cascade.resolution;
+                        }
+                        vd.SdfCascadeCount = sdf.GetConfig().cascade_count;
                     }
-                    vd.SdfCascadeCount = sdf.GetConfig().cascade_count;
 
                     vd.ProbeUpdateCount = updateCount;  // matches actual dispatch count
                     vd.ProbeRelocationShift[0] = relocation_shift_[0];
@@ -1440,7 +1544,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 // Platform-branch: Dawn uses sequential 0..9 (added GBuffer albedo
                 // at binding 9 for Mode 11); Metal uses overlap (textures 0..3 +
                 // buffers 0..6 with SC bindings 5/6).
-                bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+                bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                               device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
                 DescriptorData traceParams[11];
                 u32 traceParamCount = 0;
                 if (isDawn) {
@@ -1526,6 +1631,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // ================================================================
             if (irradiance_pipeline_ != handles::INVALID_PIPELINE &&
                 irradiance_buffers_[outIdx] != handles::INVALID_RESOURCE) {
+                static int s_irr_diag = 0;
+                if (s_irr_diag < 3) { std::cerr << "[DDGI_IRR] exec " << s_irr_diag << std::endl; s_irr_diag++; }
                 // Update irradiance descriptor set
                 DescriptorData irradianceParams[] = {
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},

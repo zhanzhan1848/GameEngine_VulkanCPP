@@ -1,0 +1,167 @@
+#version 450 core
+// Vulkan Lumen SSGI Temporal Accumulation — GLSL port of SSGITemporal.metal.
+// Entry point: ssgi_temporal
+//   (glslangValidator -V --source-entrypoint main SSGITemporal.comp
+//    -e ssgi_temporal -o SSGITemporal.comp.spv)
+//
+// Full-resolution compute:
+//   1. Reads full-res spatially filtered SSGI
+//   2. Reprojects using velocity buffer to find previous-frame UV
+//   3. Samples history buffer at reprojected UV with bilinear interpolation
+//   4. Clamps history via variance clipping (mean + 2σ on 3x3 neighborhood)
+//   5. Detects disocclusion via depth comparison (no normal needed)
+//   6. Exponential blend: result = mix(current, clamped_history, feedback)
+//
+// Flat descriptor bindings:
+//   binding 0 = SampledImage      ssgi_spatial    (full-res spatial filter output)
+//   binding 1 = SampledImage      ssgi_history    (full-res prev-frame temporal)
+//   binding 2 = SampledImage      velocity_buffer (full-res motion vectors)
+//   binding 3 = SampledDepthImage gbuffer_depth   (full-res)
+//   binding 4 = StorageImage      ssgi_output     (full-res RGBA16F)
+//   binding 5 = UniformBuffer     params
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D ssgi_spatial;
+layout(set = 0, binding = 1) uniform texture2D ssgi_history;
+layout(set = 0, binding = 2) uniform texture2D velocity_buffer;
+layout(set = 0, binding = 3) uniform texture2D gbuffer_depth;
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2D ssgi_output;
+
+layout(set = 0, binding = 5, std140) uniform TemporalParams {
+    float feedback;       // Temporal feedback weight (default 0.9 = 90% history)
+    uint  full_width;
+    uint  full_height;
+    uint  _pad0;
+} params;
+
+vec4 sampleBilinear(texture2D tex, vec2 uv, ivec2 dims) {
+    vec2 coord = uv * vec2(dims) - 0.5;
+    ivec2 base = ivec2(int(floor(coord.x)), int(floor(coord.y)));
+    vec2 f = fract(coord);
+    ivec2 maxCoord = dims - ivec2(1);
+
+    ivec2 c00 = clamp(base,               ivec2(0), maxCoord);
+    ivec2 c10 = clamp(base + ivec2(1, 0), ivec2(0), maxCoord);
+    ivec2 c01 = clamp(base + ivec2(0, 1), ivec2(0), maxCoord);
+    ivec2 c11 = clamp(base + ivec2(1, 1), ivec2(0), maxCoord);
+
+    vec4 h00 = texelFetch(tex, c00, 0);
+    vec4 h10 = texelFetch(tex, c10, 0);
+    vec4 h01 = texelFetch(tex, c01, 0);
+    vec4 h11 = texelFetch(tex, c11, 0);
+
+    return h00 * (1.0 - f.x) * (1.0 - f.y)
+         + h10 * f.x * (1.0 - f.y)
+         + h01 * (1.0 - f.x) * f.y
+         + h11 * f.x * f.y;
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    ivec2 pixel_pos = ivec2(gid);
+
+    if (pixel_pos.x >= int(params.full_width) || pixel_pos.y >= int(params.full_height)) {
+        return;
+    }
+
+    vec2 pixel_uv = (vec2(pixel_pos) + 0.5) / vec2(params.full_width, params.full_height);
+
+    float depth_ndc = texelFetch(gbuffer_depth, pixel_pos, 0).r;
+
+    // --- Step 1: Read full-res spatially filtered SSGI ---
+    vec4 current_ssgi_4 = texelFetch(ssgi_spatial, pixel_pos, 0);
+    vec3 current_ssgi = current_ssgi_4.rgb;
+    float current_hit_dist = current_ssgi_4.a;
+
+    // --- Step 2: Velocity reprojection ---
+    // Read velocity and apply a dead-zone: very small velocities (from
+    // half-res quantization noise or float imprecision) cause per-frame
+    // jitter in the reprojected history position, perceived as a "swimming"
+    // or shifting SSGI pattern even when the camera is static.
+    vec2 velocity = texelFetch(velocity_buffer, pixel_pos, 0).rg;
+    float velMag = length(velocity);
+    if (velMag < 0.002) velocity = vec2(0.0);
+
+    vec2 prev_uv;
+    prev_uv.x = pixel_uv.x - velocity.x;
+    prev_uv.y = pixel_uv.y + velocity.y;
+
+    // --- Step 3: Sample history at reprojected UV ---
+    vec2 edge_dist = min(prev_uv, 1.0 - prev_uv);
+    bool in_bounds = (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
+                      prev_uv.y >= 0.0 && prev_uv.y <= 1.0);
+
+    vec3 history_ssgi = vec3(0.0);
+    float history_hit_dist = 0.0;
+    bool valid_history = false;
+
+    if (in_bounds) {
+        ivec2 histDims = textureSize(ssgi_history, 0);
+        vec4 hist_bilinear = sampleBilinear(ssgi_history, prev_uv, histDims);
+        history_ssgi = hist_bilinear.rgb;
+        history_hit_dist = hist_bilinear.a;
+        valid_history = true;
+    }
+
+    if (!valid_history) {
+        imageStore(ssgi_output, pixel_pos, vec4(current_ssgi, current_hit_dist));
+        return;
+    }
+
+    // --- Step 4: Variance clipping on 3x3 neighborhood ---
+    vec3 neighborhood_sum = current_ssgi;
+    vec3 neighborhood_sum2 = current_ssgi * current_ssgi;
+    int neighborhood_count = 1;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 neighbor_pos = pixel_pos + ivec2(dx, dy);
+            if (neighbor_pos.x < 0 || neighbor_pos.y < 0 ||
+                neighbor_pos.x >= int(params.full_width) ||
+                neighbor_pos.y >= int(params.full_height)) {
+                continue;
+            }
+            vec3 neighbor_ssgi = texelFetch(ssgi_spatial, neighbor_pos, 0).rgb;
+            neighborhood_sum  += neighbor_ssgi;
+            neighborhood_sum2 += neighbor_ssgi * neighbor_ssgi;
+            neighborhood_count++;
+        }
+    }
+
+    float fcount = float(neighborhood_count);
+    vec3 mean = neighborhood_sum / fcount;
+    vec3 variance = abs(neighborhood_sum2 / fcount - mean * mean);
+    vec3 sigma = sqrt(max(variance, vec3(0.0)));
+    vec3 sigma_floor = max(abs(mean) * 0.1, vec3(0.01));
+    vec3 aabb_min = mean - sigma * 2.0 - sigma_floor;
+    vec3 aabb_max = mean + sigma * 2.0 + sigma_floor;
+
+    vec3 clamped_history = clamp(history_ssgi, aabb_min, aabb_max);
+
+    // --- Step 5: Disocclusion detection (depth-only) + screen-edge fade ---
+    float disocclusion_fade = 1.0;
+    if (in_bounds) {
+        ivec2 hist_pixel = clamp(ivec2(prev_uv * vec2(params.full_width, params.full_height)),
+                                 ivec2(0), ivec2(int(params.full_width) - 1, int(params.full_height) - 1));
+        float hist_depth = texelFetch(gbuffer_depth, hist_pixel, 0).r;
+        float depth_diff = abs(depth_ndc - hist_depth);
+        disocclusion_fade = clamp((0.02 - depth_diff) / 0.015, 0.0, 1.0);
+    }
+
+    float edge_fade = smoothstep(0.0, 0.05, min(edge_dist.x, edge_dist.y));
+
+    // --- Step 6: Confidence-modulated exponential blend ---
+    float hit_confidence = clamp(1.0 - current_hit_dist / 2.0, 0.0, 1.0);
+    float confidence_scale = mix(0.6, 1.0, hit_confidence);
+
+    float effective_feedback = params.feedback * edge_fade * disocclusion_fade * confidence_scale;
+
+    vec3 result_color = mix(current_ssgi, clamped_history, effective_feedback);
+    float result_dist = mix(current_hit_dist, history_hit_dist, effective_feedback);
+
+    imageStore(ssgi_output, pixel_pos, vec4(result_color, result_dist));
+}

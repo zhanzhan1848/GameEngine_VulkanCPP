@@ -508,6 +508,32 @@ if(ENABLE_VULKAN)
                 $<TARGET_FILE_DIR:TestVulkanStandardPipelineSmoke>/Engine/Graphics/Metal/shaders
     )
 
+    # Phase 1 Vulkan Lumen/GI port: LumenSSAOPass smoke.
+    # Validates hand-written GLSL SPIR-V (SSAOTrace.comp.spv / SSAOFilter.comp.spv)
+    # initializes + executes on Vulkan with zero validation errors.
+    # See Docs/2026-08-09-vulkan-lumen-gi-port-design.md §Phase 1.
+    add_executable(TestVulkanLumenSSAO
+        RHI/Core/TestVulkanLumenSSAO.cpp
+    )
+    target_include_directories(TestVulkanLumenSSAO PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanLumenSSAO PRIVATE Engine)
+    target_compile_definitions(TestVulkanLumenSSAO PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanLumenSSAO COMMAND TestVulkanLumenSSAO)
+    set_target_properties(TestVulkanLumenSSAO PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanLumenSSAO POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+                $<TARGET_FILE_DIR:TestVulkanLumenSSAO>/Engine/Graphics/Vulkan/shaders
+    )
+
     # Phase 4b-T3.5b: IBL Equirectangular → Cube (compute).
     add_executable(TestVulkanIBL_Equirect
         RHI/Core/TestVulkanIBL_Equirect.cpp

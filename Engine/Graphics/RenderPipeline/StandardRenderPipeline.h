@@ -19,6 +19,7 @@
 #include "Graphics/RenderPipeline/Modules/ShadowMapModule.h"
 #include "Graphics/RenderPipeline/Modules/DeferredLightingModule.h"
 #include "Graphics/RenderPipeline/Modules/FinalBlitModule.h"
+#include "Graphics/RenderPipeline/Modules/SDFVisualizationModule.h"
 #include "Graphics/RenderPipeline/Modules/GIGatherModule.h"
 #include "Graphics/RenderPipeline/Modules/FusionCompositeModule.h"
 #include "Graphics/RenderPipeline/Modules/SCDDGIIntegrationModule.h"
@@ -102,6 +103,7 @@ public:
         rhi::ShaderHandle fusion_composite_ps{rhi::handles::INVALID_SHADER};
         rhi::ShaderHandle sc_card_radiance{rhi::handles::INVALID_SHADER};
         rhi::ShaderHandle sc_probe_irradiance{rhi::handles::INVALID_SHADER};
+        rhi::ShaderHandle sdf_viz_ps{rhi::handles::INVALID_SHADER};
     };
 
     void SetShaderHandles(const ShaderHandles& handles) {
@@ -115,6 +117,7 @@ public:
         fusion_composite_ps_ = handles.fusion_composite_ps;
         sc_card_radiance_shader_ = handles.sc_card_radiance;
         sc_probe_irradiance_shader_ = handles.sc_probe_irradiance;
+        sdf_viz_ps_ = handles.sdf_viz_ps;
     }
 
     /// T4.6.5 part 37: IBL resources (Tier 5 visual fidelity). Pass output of
@@ -141,6 +144,27 @@ public:
         return forward_renderer_->LoadScene(model_path);
     }
     ForwardSceneRenderer* GetForwardRenderer() const { return forward_renderer_.get(); }
+
+    /// Toggle fullscreen GlobalSDF visualization (replaces FinalBlit output).
+    /// Cheap per-frame bool — does NOT trigger pipeline re-initialization.
+    void SetSDFVisualization(bool enabled) { sdf_visualization_enabled_ = enabled; }
+    bool IsSDFVisualizationEnabled() const { return sdf_visualization_enabled_; }
+
+    // --- Offline SDF data source for SDF visualization ---
+    // When set, SDF visualization uses this pre-built global SDF texture
+    // instead of the runtime GlobalSDF cascades.
+    void SetOfflineSDFSource(rhi::ResourceHandle texture,
+                             math::v3 origin, math::v3 extent, u32 resolution) {
+        offline_sdf_texture_ = texture;
+        offline_sdf_origin_ = origin;
+        offline_sdf_extent_ = extent;
+        offline_sdf_resolution_ = resolution;
+        has_offline_sdf_ = (texture != rhi::handles::INVALID_RESOURCE);
+        // Forward to DDGI pass so it uses the same high-res SDF for ray tracing.
+        if (ddgi_pass_) {
+            ddgi_pass_->SetOfflineSDFSource(texture, origin, extent, resolution);
+        }
+    }
 
     // --- PCG Entity integration (Phase 3c/3d) ---
     void SetPCGEntities(std::vector<id::id_type> entity_ids,
@@ -290,6 +314,7 @@ private:
     std::unique_ptr<GIGatherModule> gi_gather_module_;
     std::unique_ptr<FusionCompositeModule> fusion_module_;
     std::unique_ptr<SCDDGIIntegrationModule> sc_ddgi_module_;
+    std::unique_ptr<SDFVisualizationModule> sdf_viz_module_;
 
     // --- Shader compilation cache ---
     rhi::ShaderHandle shadow_filter_shader_{rhi::handles::INVALID_SHADER};
@@ -302,6 +327,18 @@ private:
     rhi::ShaderHandle fusion_composite_ps_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle sc_card_radiance_shader_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle sc_probe_irradiance_shader_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle sdf_viz_ps_{rhi::handles::INVALID_SHADER};
+
+    /// When true, the pipeline outputs a fullscreen GlobalSDF ray-march view
+    /// instead of the normal FinalBlit scene.  Cheap per-frame toggle.
+    bool sdf_visualization_enabled_{false};
+
+    // Offline SDF data source for SDF visualization.
+    bool has_offline_sdf_{false};
+    rhi::ResourceHandle offline_sdf_texture_{rhi::handles::INVALID_RESOURCE};
+    math::v3 offline_sdf_origin_{0, 0, 0};
+    math::v3 offline_sdf_extent_{0, 0, 0};
+    u32 offline_sdf_resolution_{0};
 
     // --- Utility textures ---
     rhi::ResourceHandle black_texture_{rhi::handles::INVALID_RESOURCE};

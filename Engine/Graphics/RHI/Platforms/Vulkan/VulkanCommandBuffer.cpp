@@ -506,17 +506,76 @@ void VulkanCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 bar
         VulkanTexture* tex = vk.GetTexture(rb.resource);
         if (!tex) continue;
 
-        vulkan::VkLayoutAccess srcLA = vulkan::ResourceStateToVkLayout(rb.beforeState);
         vulkan::VkLayoutAccess dstLA = vulkan::ResourceStateToVkLayout(rb.afterState);
+
+        // Determine oldLayout: for per-mip barriers (subresource != 0xFFFFFFFF),
+        // use the per-mip layout from mipLayouts_. For full-resource barriers,
+        // use the global GetCurrentLayout().
+        VkImageLayout oldLayout;
+        if (rb.subresource != 0xFFFFFFFF && tex->GetTextureDesc().mipLevels > 1) {
+            oldLayout = tex->GetMipLayout(rb.subresource);
+        } else {
+            oldLayout = tex->GetCurrentLayout();
+        }
+        VkImageLayout newLayout = dstLA.layout;
+
+        // If old == new, skip this barrier (no-op, avoids validation warning).
+        if (oldLayout == newLayout) {
+            if (rb.subresource != 0xFFFFFFFF && tex->GetTextureDesc().mipLevels > 1) {
+                tex->SetMipLayout(rb.subresource, newLayout);
+            } else {
+                tex->SetCurrentLayout(newLayout);
+            }
+            continue;
+        }
+
+        // Derive src access mask from the actual old layout for correct
+        // synchronization. Map VkImageLayout → access mask + stage directly.
+        VkAccessFlags srcAccess = 0;
+        VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        switch (oldLayout) {
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+                srcAccess = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+                srcAccess = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                srcStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+                srcAccess = VK_ACCESS_SHADER_READ_BIT;
+                srcStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+                srcAccess = VK_ACCESS_TRANSFER_READ_BIT;
+                srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+                srcAccess = VK_ACCESS_TRANSFER_WRITE_BIT;
+                srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_GENERAL:
+                srcAccess = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_UNDEFINED:
+                srcAccess = 0;
+                srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+                break;
+            default:
+                srcAccess = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+                srcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                break;
+        }
 
         VkImageMemoryBarrier b{};
         b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = tex->GetNativeImage();
-        b.oldLayout = srcLA.layout;
-        b.newLayout = dstLA.layout;
-        b.srcAccessMask = srcLA.access;
+        b.oldLayout = oldLayout;
+        b.newLayout = newLayout;
+        b.srcAccessMask = srcAccess;
         b.dstAccessMask = dstLA.access;
         b.subresourceRange.aspectMask = tex->GetAspectMask();
         b.subresourceRange.baseMipLevel = (rb.subresource == 0xFFFFFFFF) ? 0 : rb.subresource;
@@ -525,7 +584,12 @@ void VulkanCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 bar
         b.subresourceRange.layerCount   = VK_REMAINING_ARRAY_LAYERS;
         imgBarriers.push_back(b);
 
-        tex->SetCurrentLayout(dstLA.layout);
+        // Update tracked layout: per-mip for specific mip, global for all-mip.
+        if (rb.subresource != 0xFFFFFFFF && tex->GetTextureDesc().mipLevels > 1) {
+            tex->SetMipLayout(rb.subresource, newLayout);
+        } else {
+            tex->SetCurrentLayout(newLayout);
+        }
     }
 
     if (!imgBarriers.empty()) {
@@ -670,6 +734,7 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     std::vector<VkAttachmentReference> colorRefs;
     std::vector<VkClearValue> clears;
     std::vector<VkImageView> fbAttachments;
+    pendingAttachments_.clear();
 
     const u32 colorCount = static_cast<u32>(desc.colorAttachments.size());
     colorRefs.reserve(colorCount);
@@ -701,6 +766,7 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
         d.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         attachments.push_back(d);
         colorRefs.push_back({ i, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+        pendingAttachments_.push_back({tex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
 
         VkClearValue cv{};
         cv.color.float32[0] = a.clearValue.color.x;
@@ -740,6 +806,7 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
             attachments.push_back(d);
             depthRef.attachment = colorCount;
             depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            pendingAttachments_.push_back({tex, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL});
 
             VkClearValue cv{};
             cv.depthStencil.depth = a.clearValue.depth;
@@ -852,6 +919,15 @@ void VulkanCommandBuffer::EndRenderPass() {
     if (scope_ != Scope::RenderPass) return;
     vkCmdEndRenderPass(cmdBuffer_);
     scope_ = Scope::None;
+
+    // Update tracked layouts: the Vulkan render pass performed implicit
+    // layout transitions to finalLayout for each attachment. The texture's
+    // currentLayout_ must reflect this so subsequent InsertBarrier calls
+    // use the correct oldLayout.
+    for (const auto& att : pendingAttachments_) {
+        if (att.tex) att.tex->SetCurrentLayout(att.finalLayout);
+    }
+    pendingAttachments_.clear();
 
     // 销毁临时 rp/fb(它们是 BeginRenderPass 内部创建的)
     if (pendingRenderPass_ != VK_NULL_HANDLE || pendingFramebuffer_ != VK_NULL_HANDLE) {

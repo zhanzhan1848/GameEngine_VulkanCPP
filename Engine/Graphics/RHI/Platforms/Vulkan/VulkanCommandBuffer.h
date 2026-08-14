@@ -123,6 +123,12 @@ private:
     VkRenderPass       pendingRenderPass_{VK_NULL_HANDLE};
     VkFramebuffer      pendingFramebuffer_{VK_NULL_HANDLE};
     VkPipelineLayout   boundPipelineLayout_{VK_NULL_HANDLE};  // BindGraphicsPipeline 设置
+
+    // Tracks attachment textures + their finalLayouts so EndRenderPass can
+    // update currentLayout_ (Vulkan render pass does implicit layout transitions
+    // that the texture tracking must reflect).
+    struct PendingAttachment { VulkanTexture* tex; VkImageLayout finalLayout; };
+    std::vector<PendingAttachment> pendingAttachments_;
 };
 
 } // namespace primal::graphics::rhi

@@ -4,6 +4,7 @@
 #include "Graphics/RenderGraph/RenderGraphPass.h"
 #include "Graphics/RenderGraph/RenderGraphResource.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include <fstream>
 #include <iostream>
@@ -48,6 +49,7 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
             bufferInfos[i].range = ~0ull;
             writes[i].bufferInfo = &bufferInfos[i];
         } else if (params[i].type == DescriptorType::SampledImage ||
+                   params[i].type == DescriptorType::SampledDepthImage ||
                    params[i].type == DescriptorType::StorageImage ||
                    params[i].type == DescriptorType::CombinedImageSampler ||
                    params[i].type == DescriptorType::Sampler) {
@@ -128,7 +130,34 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
     return out.str();
 }
 
-static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
+static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char* shaderName) {
+    auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        // All SSGI shaders are hand-written GLSL compiled to .comp.spv in Lumen/.
+        std::string relPath = utils::ShaderRegistry::GetShaderBaseDir(platform) +
+                              "Lumen/" + shaderName + ".comp.spv";
+        const std::vector<std::string> candidates = {
+            relPath,
+            "Engine/Graphics/Vulkan/shaders/Lumen/" + std::string(shaderName) + ".comp.spv",
+        };
+        for (const auto& path : candidates) {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[LumenSSGI] Failed to read SPIR-V: " << path << std::endl;
+                return {};
+            }
+            return bytecode;
+        }
+        std::cerr << "[LumenSSGI] Failed to load SPIR-V: " << shaderName << std::endl;
+        return {};
+    }
+
+    // Metal path (unchanged)
     std::string shaderPath = LUMEN_SHADER_DIR + shaderName + ".metal";
 
     std::string source = ReadFileToString(shaderPath);
@@ -174,15 +203,8 @@ bool LumenSSGIPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
                                const SSGIParams& params) {
     if (initialized_) return true;
 
-    // T4.6.3: Lumen SSGI deferred on Vulkan — CreateDescriptorSetLayouts() uses
-    // Metal's overlapping texture/buffer binding idiom (rejected by Vulkan), and
-    // no SPIR-V ports of the SSGI shaders exist yet. See LumenDDGIPass::Initialize
-    // for the full rationale.
-    if (device && device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
-        std::cerr << "[LumenSSGI] Skipped on Vulkan (deferred — needs SPIR-V ports + "
-                     "non-overlapping descriptor bindings)" << std::endl;
-        return false;
-    }
+    // Phase 3: SSGI now active on Vulkan. WGSL shaders compile cleanly via naga
+    // (no spvUnsafeArray issue). Descriptor layouts use flat bindings matching WGSL.
 
     device_ = device;
     render_width_ = render_width;
@@ -226,72 +248,107 @@ void LumenSSGIPass::Shutdown() {
 // ============================================================================
 
 void LumenSSGIPass::CreateDescriptorSetLayouts() {
-    // --- Trace: 4 sampled + 1 storage + 2 UBO ---
-    // Metal uses SEPARATE binding namespaces for textures and buffers.
-    // [[texture(N)]] and [[buffer(N)]] are independent.
-    // So binding 0 can be used for BOTH texture(0) and buffer(0).
-    {
+    // --- Descriptor layouts: platform-branched ---
+    // Metal: overlapping texture/buffer namespaces.
+    // Vulkan/Dawn: flat sequential bindings matching WGSL @binding(N).
+    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+
+    // --- Trace ---
+    if (isVk) {
+        // GLSL SSGITrace.comp: 0=normal, 1=depth, 2=hzb, 3=prevColor, 4=output, 5=GlobalShaderData, 6=SSGIParams
+        DescriptorSetLayoutBinding b[] = {
+            {0, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},
+            {4, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},
+            {5, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},
+            {6, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},
+        };
+        trace_set_layout_ = device_->CreateDescriptorSetLayout({7, b});
+    } else {
         DescriptorSetLayoutBinding traceBindings[] = {
-            // Textures (sampled)
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // normal
-            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth
-            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // hzb
-            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev_color
-            // Texture (storage)
-            {4, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // output
-            // Buffers (separate Metal namespace)
-            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
-            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // SSGIParams
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {4, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
         };
-        DescriptorSetLayoutDesc layoutDesc{7, traceBindings};
-        trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        trace_set_layout_ = device_->CreateDescriptorSetLayout({7, traceBindings});
     }
 
-    // --- Temporal: 5 sampled + 1 storage + 2 UBO ---
-    {
+    // --- Temporal ---
+    if (isVk) {
+        // WGSL SSGITemporal: 0=spatial, 1=history, 2=velocity, 3=depth, 4=output(storage), 5=params
+        DescriptorSetLayoutBinding b[] = {
+            {0, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},
+            {4, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},
+            {5, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},
+        };
+        temporal_set_layout_ = device_->CreateDescriptorSetLayout({6, b});
+    } else {
         DescriptorSetLayoutBinding temporalBindings[] = {
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // spatial filter output (full-res)
-            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // history
-            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // velocity
-            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth
-            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // normal
-            {5, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // output
-            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
-            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // TemporalParams
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {5, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
         };
-        DescriptorSetLayoutDesc layoutDesc{8, temporalBindings};
-        temporal_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        temporal_set_layout_ = device_->CreateDescriptorSetLayout({8, temporalBindings});
     }
 
-    // --- Filter: 3 sampled + 1 storage + 2 UBO ---
-    {
+    // --- Filter ---
+    if (isVk) {
+        // WGSL SSGIFilter: 0=input(half-res), 1=depth, 2=output(storage), 3=params
+        DescriptorSetLayoutBinding b[] = {
+            {0, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},
+        };
+        filter_set_layout_ = device_->CreateDescriptorSetLayout({4, b});
+    } else {
         DescriptorSetLayoutBinding filterBindings[] = {
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // trace output (half-res)
-            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // normal
-            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // depth
-            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // output
-            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
-            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // FilterParams
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
         };
-        DescriptorSetLayoutDesc layoutDesc{6, filterBindings};
-        filter_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        filter_set_layout_ = device_->CreateDescriptorSetLayout({6, filterBindings});
     }
 
-    // --- Half-res Denoise: 1 sampled + 1 storage + 1 UBO ---
-    {
-        DescriptorSetLayoutBinding denoiseBindings[] = {
-            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // trace input (half-res)
-            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},   // denoised output (half-res)
-            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // HalfResDenoiseParams
+    // --- Half-res Denoise ---
+    if (isVk) {
+        // WGSL SSGIHalfResDenoise: 0=input, 1=output(storage), 2=params
+        DescriptorSetLayoutBinding b[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
         };
-        DescriptorSetLayoutDesc layoutDesc{3, denoiseBindings};
-        halfres_denoise_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        halfres_denoise_set_layout_ = device_->CreateDescriptorSetLayout({3, b});
+    } else {
+        DescriptorSetLayoutBinding denoiseBindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+        };
+        halfres_denoise_set_layout_ = device_->CreateDescriptorSetLayout({3, denoiseBindings});
     }
 }
 
 void LumenSSGIPass::CreatePipelines() {
     auto CompileShader = [&](const char* name, const char* entry) -> ShaderHandle {
-        auto code = LoadShaderBytecode(name);
+        auto code = LoadShaderBytecode(device_, name);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
@@ -400,9 +457,9 @@ void LumenSSGIPass::CreateConstantBuffers() {
     };
 
     CreateCBs(global_cb_, 512);          // GlobalShaderData (432 bytes, padded)
-    CreateCBs(params_cb_, 48);           // SSGIParams
-    CreateCBs(temporal_params_cb_, 32);  // TemporalParams
-    CreateCBs(filter_params_cb_, 32);    // FilterParams (20 bytes + padding)
+    CreateCBs(params_cb_, 48);           // SSGIParams (Metal/GLSL layout, no matrices)
+    CreateCBs(temporal_params_cb_, 32);  // SSGITemporalParams (16B + pad)
+    CreateCBs(filter_params_cb_, 32);    // FilterParams (Metal layout)
     CreateCBs(halfres_denoise_cb_, 32);  // HalfResDenoiseParams (16 bytes + padding)
 }
 
@@ -478,8 +535,17 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
     auto temporalHistHandle = graph.ImportResource(
         "LumenSSGI_TemporalHist_" + std::to_string(histIdx), temporal_textures_[histIdx]);
 
-    // Store the temporal output handle for external use (final output after temporal accumulation)
+    // Store output handle — the temporally accumulated texture is the final
+    // SSGI result on all backends (trace → denoise → filter → temporal).
     output.ssgi_output = temporalOutHandle;
+
+    static int s_out = 0;
+    if (s_out < 3) {
+        std::cerr << "[SSGI_OUT] temporalOutHandle_valid=" << temporalOutHandle.IsValid()
+                  << " output_valid=" << output.ssgi_output.IsValid()
+                  << " trace_texture=" << trace_texture_ << std::endl;
+        s_out++;
+    }
 
     graph.AddPass<LumenSSGIData>("LumenSSGI",
         RGPassType::Compute, RGPassCategory::Lighting,
@@ -492,6 +558,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
          temporalHistHandle, filterHandle](
             LumenSSGIData& data, RenderGraphBuilder& builder) {
             // Read all input textures
+            builder.SideEffect();
             builder.Read(gbuffer_normal,   ResourceState::ShaderResource);
             builder.Read(gbuffer_depth,    ResourceState::ShaderResource);
             builder.Read(gbuffer_velocity, ResourceState::ShaderResource);
@@ -513,6 +580,13 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
          hzb_texture, prev_frame_color, outIdx, histIdx](
             const LumenSSGIData& data, RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
+            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+            static int s_ssgi_exec = 0;
+            if (s_ssgi_exec < 3) { std::cerr << "[SSGI_EXEC] frame " << s_ssgi_exec
+                << " trace=" << (trace_pipeline_ != handles::INVALID_PIPELINE ? "OK" : "INVALID")
+                << " filter=" << (filter_pipeline_ != handles::INVALID_PIPELINE ? "OK" : "INVALID")
+                << " temporal=" << (temporal_pipeline_ != handles::INVALID_PIPELINE ? "OK" : "INVALID")
+                << std::endl; s_ssgi_exec++; }
             if (!cmd) return;
 
             u32 frameIdx = current_frame_index % 3;
@@ -532,6 +606,18 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             ResourceHandle velocityTex   = ResolveTexture(gbuffer_velocity);
             ResourceHandle hzbTex        = ResolveTexture(hzb_texture);
             ResourceHandle prevColorTex  = ResolveTexture(prev_frame_color);
+
+            // Force HZB texture to ShaderResource layout (all mips).
+            // HZBSystem's per-mip transitions may leave some mips in UNDEFINED.
+            if (hzbTex != handles::INVALID_RESOURCE) {
+                ResourceBarrier hzbBar{};
+                hzbBar.resource = hzbTex;
+                hzbBar.beforeState = ResourceState::ShaderResource;
+                hzbBar.afterState = ResourceState::ShaderResource;
+                hzbBar.subresource = 0xFFFFFFFF;
+                hzbBar.queueFamily = 0xFFFFFFFF;
+                cmd->InsertBarrier(&hzbBar, 1);
+            }
 
             // DEBUG: Log SSGI dimensions and resource validity (every 120 frames)
             static u32 dbgFrame = 0;
@@ -605,6 +691,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             if (trace_pipeline_ != handles::INVALID_PIPELINE &&
                 trace_texture_ != handles::INVALID_RESOURCE) {
                 // Upload SSGIParams
+                // SSGIParams: matches Metal/GLSL layout (no matrices — from GlobalShaderData)
                 struct SSGIParamsData {
                     u32   ray_count;
                     float radius;
@@ -633,17 +720,30 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                 }
 
                 // Update descriptor set
-                DescriptorData traceParams[] = {
-                    {0, DescriptorType::SampledImage,  normalTex},
-                    {1, DescriptorType::SampledImage,  depthTex},
-                    {2, DescriptorType::SampledImage,  hzbTex},
-                    {3, DescriptorType::SampledImage,  prevColorTex},
-                    {4, DescriptorType::StorageImage,  trace_texture_},
-                    // Metal: buffers use separate binding namespace from textures
-                    {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {1, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
-                };
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 7);
+                if (isVk) {
+                    // GLSL flat: 0=normal, 1=depth, 2=hzb, 3=prevColor, 4=output, 5=GlobalShaderData, 6=SSGIParams
+                    DescriptorData traceParams[] = {
+                        {0, DescriptorType::SampledImage,      normalTex},
+                        {1, DescriptorType::SampledDepthImage, depthTex},
+                        {2, DescriptorType::SampledImage,      hzbTex},
+                        {3, DescriptorType::SampledImage,      prevColorTex},
+                        {4, DescriptorType::StorageImage,      trace_texture_},
+                        {5, DescriptorType::UniformBuffer,     global_cb_[frameIdx]},
+                        {6, DescriptorType::UniformBuffer,     params_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 7);
+                } else {
+                    DescriptorData traceParams[] = {
+                        {0, DescriptorType::SampledImage,  normalTex},
+                        {1, DescriptorType::SampledImage,  depthTex},
+                        {2, DescriptorType::SampledImage,  hzbTex},
+                        {3, DescriptorType::SampledImage,  prevColorTex},
+                        {4, DescriptorType::StorageImage,  trace_texture_},
+                        {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                        {1, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 7);
+                }
 
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
@@ -700,12 +800,21 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                     device_->UnmapBuffer(halfres_denoise_cb_[frameIdx]);
                 }
 
-                DescriptorData denoiseParamsDesc[] = {
-                    {0, DescriptorType::SampledImage,  trace_texture_},
-                    {1, DescriptorType::StorageImage,  trace_denoised_texture_},
-                    {0, DescriptorType::UniformBuffer, halfres_denoise_cb_[frameIdx]},
-                };
-                UpdateDescriptorSet(device_, halfres_denoise_ds_[frameIdx], denoiseParamsDesc, 3);
+                if (isVk) {
+                    DescriptorData d[] = {
+                        {0, DescriptorType::SampledImage,  trace_texture_},
+                        {1, DescriptorType::StorageImage,  trace_denoised_texture_},
+                        {2, DescriptorType::UniformBuffer, halfres_denoise_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, halfres_denoise_ds_[frameIdx], d, 3);
+                } else {
+                    DescriptorData denoiseParamsDesc[] = {
+                        {0, DescriptorType::SampledImage,  trace_texture_},
+                        {1, DescriptorType::StorageImage,  trace_denoised_texture_},
+                        {0, DescriptorType::UniformBuffer, halfres_denoise_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, halfres_denoise_ds_[frameIdx], denoiseParamsDesc, 3);
+                }
 
                 cmd->BindComputePipeline(halfres_denoise_pipeline_);
                 const DescriptorSetHandle denoiseSets[] = { halfres_denoise_ds_[frameIdx] };
@@ -752,16 +861,26 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                     device_->UnmapBuffer(filter_params_cb_[frameIdx]);
                 }
 
-                DescriptorData filterParamsDesc[] = {
-                    {0, DescriptorType::SampledImage,  filterInputTexture},         // half-res trace (bilinear)
-                    {1, DescriptorType::SampledImage,  normalTex},
-                    {2, DescriptorType::SampledImage,  depthTex},
-                    {3, DescriptorType::StorageImage,  filter_texture_},          // full-res output
-                    // Metal: buffers use separate binding namespace
-                    {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {1, DescriptorType::UniformBuffer, filter_params_cb_[frameIdx]},
-                };
-                UpdateDescriptorSet(device_, filter_ds_[frameIdx], filterParamsDesc, 6);
+                if (isVk) {
+                    // WGSL flat: 0=input, 1=depth, 2=output, 3=params
+                    DescriptorData d[] = {
+                        {0, DescriptorType::SampledImage,      filterInputTexture},
+                        {1, DescriptorType::SampledDepthImage, depthTex},
+                        {2, DescriptorType::StorageImage,      filter_texture_},
+                        {3, DescriptorType::UniformBuffer,     filter_params_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, filter_ds_[frameIdx], d, 4);
+                } else {
+                    DescriptorData filterParamsDesc[] = {
+                        {0, DescriptorType::SampledImage,  filterInputTexture},
+                        {1, DescriptorType::SampledImage,  normalTex},
+                        {2, DescriptorType::SampledImage,  depthTex},
+                        {3, DescriptorType::StorageImage,  filter_texture_},
+                        {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                        {1, DescriptorType::UniformBuffer, filter_params_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, filter_ds_[frameIdx], filterParamsDesc, 6);
+                }
 
                 cmd->BindComputePipeline(filter_pipeline_);
                 const DescriptorSetHandle sets[] = { filter_ds_[frameIdx] };
@@ -800,18 +919,30 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                     device_->UnmapBuffer(temporal_params_cb_[frameIdx]);
                 }
 
-                DescriptorData temporalParamsDesc[] = {
-                    {0, DescriptorType::SampledImage,  filter_texture_},              // full-res spatial output
-                    {1, DescriptorType::SampledImage,  temporal_textures_[histIdx]},  // history
-                    {2, DescriptorType::SampledImage,  velocityTex},                  // velocity
-                    {3, DescriptorType::SampledImage,  depthTex},                     // depth
-                    {4, DescriptorType::SampledImage,  normalTex},                    // normal
-                    {5, DescriptorType::StorageImage,  temporal_textures_[outIdx]},   // output
-                    // Metal: buffers use separate binding namespace
-                    {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {1, DescriptorType::UniformBuffer, temporal_params_cb_[frameIdx]},
-                };
-                UpdateDescriptorSet(device_, temporal_ds_[frameIdx], temporalParamsDesc, 8);
+                if (isVk) {
+                    // WGSL flat: 0=spatial, 1=history, 2=velocity, 3=depth, 4=output, 5=params
+                    DescriptorData d[] = {
+                        {0, DescriptorType::SampledImage,      filter_texture_},
+                        {1, DescriptorType::SampledImage,      temporal_textures_[histIdx]},
+                        {2, DescriptorType::SampledImage,      velocityTex},
+                        {3, DescriptorType::SampledDepthImage, depthTex},
+                        {4, DescriptorType::StorageImage,      temporal_textures_[outIdx]},
+                        {5, DescriptorType::UniformBuffer,     temporal_params_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, temporal_ds_[frameIdx], d, 6);
+                } else {
+                    DescriptorData temporalParamsDesc[] = {
+                        {0, DescriptorType::SampledImage,  filter_texture_},
+                        {1, DescriptorType::SampledImage,  temporal_textures_[histIdx]},
+                        {2, DescriptorType::SampledImage,  velocityTex},
+                        {3, DescriptorType::SampledImage,  depthTex},
+                        {4, DescriptorType::SampledImage,  normalTex},
+                        {5, DescriptorType::StorageImage,  temporal_textures_[outIdx]},
+                        {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                        {1, DescriptorType::UniformBuffer, temporal_params_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, temporal_ds_[frameIdx], temporalParamsDesc, 8);
+                }
 
                 cmd->BindComputePipeline(temporal_pipeline_);
                 const DescriptorSetHandle sets[] = { temporal_ds_[frameIdx] };
