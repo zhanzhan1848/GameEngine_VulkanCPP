@@ -521,7 +521,6 @@ endif()
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
     )
-endif()
 
 # 打印配置信息
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
