@@ -74,8 +74,13 @@ math::v3 closest_point_triangle(const math::v3& p, const math::v3& a,
 
 namespace primal::tools {
 
-void generate_sdf(mesh& m) {
-    constexpr u32 res = 32;
+void generate_sdf(mesh& m, u32 resolution) {
+    // Clamp caller-supplied resolution: 0 = "use default". Upper bound 256
+    // keeps memory sane (res³ cells × 11 bytes ≈ 190MB at the cap).
+    if (resolution == 0) resolution = 32;
+    resolution = std::clamp(resolution, 4u, 256u);
+
+    const u32 res = resolution;
     m.sdf.resolution[0] = res;
     m.sdf.resolution[1] = res;
     m.sdf.resolution[2] = res;
