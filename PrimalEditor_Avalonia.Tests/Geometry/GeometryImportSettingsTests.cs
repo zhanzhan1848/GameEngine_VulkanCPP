@@ -225,6 +225,7 @@ public sealed class GeometryImportSettingsTests
             EnableDerive = true,
             AutoDeriveAfterSubdivide = false,
             EnableSdf = true,
+            SdfGridResolution = 64,
             SubdivideScheme = PipelineSubdivideScheme.CatmullClark,
             SubdivideLevels = 3,
             DeriveNormalMode = PipelineDeriveNormalMode.Smooth,
@@ -250,6 +251,7 @@ public sealed class GeometryImportSettingsTests
         Assert.Equal(1, pod.EnableDerive);
         Assert.Equal(0, pod.AutoDeriveAfterSubdivide);
         Assert.Equal(1, pod.EnableSdf);
+        Assert.Equal(64u, pod.SdfGridResolution);
 
         Assert.Equal((byte)PipelineSubdivideScheme.CatmullClark, pod.SubdivideScheme);
         Assert.Equal(3u, pod.SubdivideLevels);

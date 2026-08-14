@@ -4,6 +4,10 @@
 
 namespace primal::graphics::metal::camera
 {
+    // Destroy every live platform camera before the Metal backend and its
+    // process-lifetime free-list are torn down.
+    void shutdown();
+
     // Refresh the camera's view/projection matrices from the camera entity's
     // current world transform. Free function so platform_interface wiring
     // (MetalInterface.cpp) can take its address without going through

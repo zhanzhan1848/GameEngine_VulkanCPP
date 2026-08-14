@@ -3,9 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
-using System.Threading.Tasks;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.GameProject;
@@ -18,6 +15,12 @@ sealed class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
+        {
+            if (eventArgs.ExceptionObject is Exception ex)
+                WriteStartupCrashLog(ex);
+        };
+
         if (args.Length > 0 && args[0] == "--verify-serialization")
         {
             RunSerializationVerification();
@@ -46,17 +49,35 @@ sealed class Program
         // every render pass.
         AnchorWorkingDirectoryToExecutable();
 
-        // Workaround for AvaloniaUI/Avalonia#18895: CVDisplayLink creation
-        // can fail immediately when the active display is in a low-power or
-        // Power Nap state, causing "Native error code is: -6661" on startup.
-        // Retry until a display link is available, then release it so Avalonia
-        // can create its own during AppBuilder.Setup().
-        if (OperatingSystem.IsMacOS())
+        try
         {
-            AwaitDisplayLink().GetAwaiter().GetResult();
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
         }
+        catch (Exception ex)
+        {
+            // LaunchServices does not attach a terminal to a .app, so an
+            // otherwise useful managed startup exception is lost and macOS
+            // only reports the subsequent CoreCLR SIGABRT. Persist the real
+            // exception before rethrowing it for the normal crash report.
+            string crashLog = WriteStartupCrashLog(ex);
+            Console.Error.WriteLine($"[Avalonia] Startup failed; details: {crashLog}");
+            throw;
+        }
+    }
 
-        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    private static string WriteStartupCrashLog(Exception ex)
+    {
+        string crashLog = Path.Combine(
+            Path.GetTempPath(), "PrimalEditor_Avalonia-startup-crash.log");
+        try
+        {
+            File.WriteAllText(crashLog, $"{DateTimeOffset.Now:O}{Environment.NewLine}{ex}");
+        }
+        catch
+        {
+            // Never mask the original startup failure with logging I/O.
+        }
+        return crashLog;
     }
 
     // Build the test scene used by the Avalonia editor (EngineViewport3D) and
@@ -258,35 +279,6 @@ sealed class Program
         {
             Console.Error.WriteLine($"[Avalonia] Could not pin cwd to BaseDirectory: {ex.Message}");
         }
-    }
-
-    [SupportedOSPlatform("macos")]
-    private static async Task AwaitDisplayLink()
-    {
-        const string CoreVideoLibrary = "/System/Library/Frameworks/CoreVideo.framework/CoreVideo";
-        [DllImport(CoreVideoLibrary)]
-        static extern int CVDisplayLinkCreateWithActiveCGDisplays(out IntPtr displayLinkOut);
-        [DllImport(CoreVideoLibrary)]
-        static extern void CVDisplayLinkRelease(IntPtr displayLink);
-
-        const int kMaxAttempts = 20;  // 10s wallclock budget before yielding
-        IntPtr displayLink;
-        int attempts = 0;
-        while (CVDisplayLinkCreateWithActiveCGDisplays(out displayLink) != 0)
-        {
-            attempts++;
-            if (attempts == 1)
-                Console.Error.WriteLine("[Avalonia] CVDisplayLink unavailable, retrying every 500ms (Avalonia issue #18895 workaround)");
-            if (attempts >= kMaxAttempts)
-            {
-                Console.Error.WriteLine($"[Avalonia] CVDisplayLink unavailable after {attempts} attempts; proceeding without it. Avalonia may still work.");
-                return;
-            }
-            await Task.Delay(500);
-        }
-        if (attempts > 0)
-            Console.Error.WriteLine($"[Avalonia] CVDisplayLink available after {attempts} retries");
-        CVDisplayLinkRelease(displayLink);
     }
 
     public static AppBuilder BuildAvaloniaApp()

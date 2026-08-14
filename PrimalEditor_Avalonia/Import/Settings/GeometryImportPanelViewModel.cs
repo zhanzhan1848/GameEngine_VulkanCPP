@@ -96,6 +96,7 @@ public sealed class GeometryImportPanelViewModel : ImportSettingsViewModelBase
     public bool EnableDerive { get => _settings.EnableDerive; set { _settings.EnableDerive = value; OnPropertyChanged(); } }
     public bool AutoDeriveAfterSubdivide { get => _settings.AutoDeriveAfterSubdivide; set { _settings.AutoDeriveAfterSubdivide = value; OnPropertyChanged(); } }
     public bool EnableSdf { get => _settings.EnableSdf; set { _settings.EnableSdf = value; OnPropertyChanged(); } }
+    public uint SdfGridResolution { get => _settings.SdfGridResolution; set { _settings.SdfGridResolution = value; OnPropertyChanged(); } }
 
     public PipelineSubdivideScheme SubdivideScheme { get => _settings.SubdivideScheme; set { _settings.SubdivideScheme = value; OnPropertyChanged(); } }
     public uint SubdivideLevels { get => _settings.SubdivideLevels; set { _settings.SubdivideLevels = value; OnPropertyChanged(); } }

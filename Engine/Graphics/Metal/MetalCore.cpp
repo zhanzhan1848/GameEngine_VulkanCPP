@@ -347,11 +347,12 @@ namespace primal::graphics::metal::core
         fx::shutdown();
         taa::shutdown();
         ssao::shutdown();
-        ssgi::shutdown();
-        gpass::shutdown();
-        shader::shutdown();
+		ssgi::shutdown();
+		gpass::shutdown();
+		shader::shutdown();
+		camera::shutdown();
 
-        for (u32 i{ 0 }; i < frame_buffer_count; ++i)
+		for (u32 i{ 0 }; i < frame_buffer_count; ++i)
 		{
 			constants_buffer[i].release();
 		}

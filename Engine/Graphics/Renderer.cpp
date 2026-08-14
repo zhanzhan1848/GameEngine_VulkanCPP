@@ -475,7 +475,10 @@ namespace primal::graphics
 
 	id::id_type add_material(material_init_info info)
 	{
-		assert(gfx.resources.add_material);
+		// Editor windows can finish dispatching close callbacks while the
+		// graphics backend is already tearing down. Material creation is a
+		// fallible resource operation (callers handle invalid_id), so do not
+		// turn that lifecycle race into a process-wide SIGABRT in debug builds.
 		if (!gfx.resources.add_material) return id::invalid_id;
 		return gfx.resources.add_material(info);
 	}

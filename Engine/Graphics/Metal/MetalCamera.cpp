@@ -295,6 +295,15 @@ namespace primal::graphics::metal::camera
 		return graphics::camera{ camera_id{ cameras.add(info) } };
 	}
 
+	void shutdown()
+	{
+		for (u32 i = 0; i < cameras.capacity(); ++i)
+		{
+			if (cameras.is_valid(i)) cameras.remove(i);
+		}
+		cameras.clear();
+	}
+
 	void remove(camera_id id)
 	{
 		assert(id::is_valid(id));

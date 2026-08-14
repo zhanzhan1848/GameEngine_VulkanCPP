@@ -46,6 +46,7 @@ public class GeometryImportSettings : IAssetImportSettings
     public bool EnableDerive { get; set; } = false;
     public bool AutoDeriveAfterSubdivide { get; set; } = true;
     public bool EnableSdf { get; set; } = true;
+    public uint SdfGridResolution { get; set; } = 32;
 
     public PipelineSubdivideScheme SubdivideScheme { get; set; } = PipelineSubdivideScheme.Loop;
     public uint SubdivideLevels { get; set; } = 1;
@@ -172,6 +173,7 @@ public class GeometryImportSettings : IAssetImportSettings
         ReadBool(settings, "EnableDerive", v => EnableDerive = v);
         ReadBool(settings, "AutoDeriveAfterSubdivide", v => AutoDeriveAfterSubdivide = v);
         ReadBool(settings, "EnableSdf", v => EnableSdf = v);
+        ReadUInt(settings, "SdfGridResolution", v => SdfGridResolution = v);
 
         // Subdivide
         ReadInt(settings, "SubdivideScheme", v => SubdivideScheme = (PipelineSubdivideScheme)v);
@@ -264,6 +266,7 @@ public class GeometryImportSettings : IAssetImportSettings
             ["EnableDerive"] = EnableDerive,
             ["AutoDeriveAfterSubdivide"] = AutoDeriveAfterSubdivide,
             ["EnableSdf"] = EnableSdf,
+            ["SdfGridResolution"] = SdfGridResolution,
             // Subdivide
             ["SubdivideScheme"] = (int)SubdivideScheme,
             ["SubdivideLevels"] = SubdivideLevels,
@@ -399,6 +402,7 @@ public class GeometryImportSettings : IAssetImportSettings
             CollisionConvexhullDownsampling = CollisionConvexhullDownsampling,
 
             EnableSdf                  = (byte)(EnableSdf ? 1 : 0),
+            SdfGridResolution         = SdfGridResolution,
         };
     }
 

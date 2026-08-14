@@ -221,6 +221,12 @@
       <Expander Header="SDF (signed distance field, baked into .mesh)" IsExpanded="False">
         <StackPanel Spacing="4">
           <CheckBox Content="Enable SDF" IsChecked="{Binding EnableSdf}"/>
+          <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding ShowAdvanced}">
+            <TextBlock VerticalAlignment="Center" Text="Grid resolution (per axis):"/>
+            <NumericUpDown Value="{Binding SdfGridResolution}"
+                            Minimum="4" Maximum="256" Increment="8"
+                            ToolTip.Tip="Voxel grid is resolution^3 cells. Memory and cost scale cubically: 32 to ~400KB, 128 to ~25MB, 256 to ~190MB per mesh."/>
+          </StackPanel>
           <TextBlock TextWrapping="Wrap" Foreground="Gray"
                      Text="Slow path for large meshes. SDF data is consumed by GPU-side surface cache / Nanite. Disable for prototype iteration."/>
         </StackPanel>

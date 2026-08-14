@@ -3,6 +3,7 @@
 #include "CommonHeaders.h"
 #include "AssetAPI.h"
 #include "../Engine/Content/AsyncResourceLoader.h"
+#include "../Engine/Content/ContentToEngine.h"
 #include "../Engine/Content/ContentLoader.h"
 #include "../Content/ContentToEngine.h"
 #include "../Engine/Graphics/SceneDataAdapter.h"
@@ -53,9 +54,15 @@ extern "C" {
     EDITOR_INTERFACE void ShutdownAssetSystem()
     {
         primal::content::AsyncResourceLoader::Shutdown();
-        std::lock_guard<std::mutex> lock(g_mesh_requests_mutex);
-        g_mesh_requests.clear();
-        g_next_mesh_request_id.store(1u);
+        {
+            std::lock_guard<std::mutex> lock(g_mesh_requests_mutex);
+            g_mesh_requests.clear();
+            g_next_mesh_request_id.store(1u);
+        }
+        // Content registries own GPU meshes and RHIMeshAsset free-list slots.
+        // Release them while the graphics device is still alive; otherwise
+        // process-exit static destructors abort on non-empty free lists.
+        primal::content::shutdown();
     }
 
     EDITOR_INTERFACE u32 ImportTexture(const char* path, primal::content::TextureImportResult* out_result)
@@ -197,6 +204,7 @@ extern "C" {
 #include "CommonHeaders.h"
 #include "AssetAPI.h"
 #include "../Engine/Content/AsyncResourceLoader.h"
+#include "../Engine/Content/ContentToEngine.h"
 #include "../Engine/Content/ContentLoader.h"
 #include "../Engine/Graphics/SceneDataAdapter.h"
 #include <atomic>
@@ -245,9 +253,15 @@ extern "C" {
     EDITOR_INTERFACE void ShutdownAssetSystem()
     {
         primal::content::AsyncResourceLoader::Shutdown();
-        std::lock_guard<std::mutex> lock(g_mesh_requests_mutex);
-        g_mesh_requests.clear();
-        g_next_mesh_request_id.store(1u);
+        {
+            std::lock_guard<std::mutex> lock(g_mesh_requests_mutex);
+            g_mesh_requests.clear();
+            g_next_mesh_request_id.store(1u);
+        }
+        // Content registries own GPU meshes and RHIMeshAsset free-list slots.
+        // Release them while the graphics device is still alive; otherwise
+        // process-exit static destructors abort on non-empty free lists.
+        primal::content::shutdown();
     }
 
     EDITOR_INTERFACE u32 ImportTexture(const char* path, primal::content::TextureImportResult* out_result)

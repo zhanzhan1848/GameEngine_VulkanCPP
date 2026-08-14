@@ -42,39 +42,90 @@ fi
 # builds with the standard out-of-source flow inside the worktree.
 WT_NATIVE_DIR="$PROJ_DIR/../Darwin/$CONFIG"
 
+# Darwin/Debug/ is where `cmake --build build-wt` ACTUALLY writes: the
+# project uses a single-config CMake generator (Unix Makefiles) with
+# CMAKE_BUILD_TYPE force-set to "Debug" in the top-level CMakeLists.txt.
+# Single-config generators ignore --config silently, so $CONFIG above
+# (typically DebugEditor) only affects this script's copy path — not the
+# build's output location. The dylib in Darwin/<Config>/ is either
+# empty or a leftover from an older multi-config setup, and copying it
+# to the .app bundle silently loads stale code. We treat Darwin/Debug/
+# as the canonical build output and prefer it whenever it has the dylibs
+# we're looking for.
+WT_DEBUG_DIR="$PROJ_DIR/../Darwin/Debug"
+
 # Pick the first existing directory for the dylib source.
 NATIVE_LIB_DIR=""
 LIB_SRC_LABEL=""
-if [[ -d "$WT_NATIVE_DIR" ]]; then
+if [[ -d "$WT_NATIVE_DIR" ]] && ! [[ -d "$WT_DEBUG_DIR" ]]; then
   NATIVE_LIB_DIR="$WT_NATIVE_DIR"
   LIB_SRC_LABEL="worktree"
-elif [[ -d "$REPO_ROOT/Darwin/$CONFIG" ]]; then
+elif [[ -d "$REPO_ROOT/Darwin/$CONFIG" ]] && ! [[ -d "$WT_DEBUG_DIR" ]]; then
   NATIVE_LIB_DIR="$REPO_ROOT/Darwin/$CONFIG"
   LIB_SRC_LABEL="main checkout"
   echo "[build_app] WARNING: using main-checkout dylib at $NATIVE_LIB_DIR; the current worktree's edits are NOT running" >&2
   echo "[build_app]   worktree path tried: $WT_NATIVE_DIR" >&2
   echo "[build_app]   build it inside the worktree with: cmake --build build-wt --config $CONFIG" >&2
-else
+fi
+
+# When Darwin/Debug/ exists alongside Darwin/<Config>/, it almost
+# certainly contains the real build output (single-config generator,
+# CMAKE_BUILD_TYPE=Debug). Prefer it. The symbol-presence check
+# guards against the rare case where Debug/ was built before a
+# newly-added ABI symbol was introduced — if Debug/ is missing the
+# expected symbol AND the <Config>/ copy has it, fall back to <Config>/.
+#
+# "Expected symbol" anchor: CookMeshWithPipeline is the most recent
+# ABI addition to libContentTools. If it exists in the dylib, the
+# dylib was linked from current sources. We pick the dylib that
+# has it. This is a per-call O(1) `nm` lookup (~1ms on macOS); the
+# benefit (correct dylib loaded into the editor every time) far
+# outweighs the cost.
+if [[ -z "$NATIVE_LIB_DIR" && -d "$WT_DEBUG_DIR" ]]; then
+  NATIVE_LIB_DIR="$WT_DEBUG_DIR"
+  LIB_SRC_LABEL="worktree"
+fi
+if [[ "$NATIVE_LIB_DIR" == "$WT_NATIVE_DIR" && -d "$WT_DEBUG_DIR" ]]; then
+  cfg_has=$({ nm -gU "$WT_NATIVE_DIR/libContentTools.dylib" 2>/dev/null | grep -c CookMeshWithPipeline; } 2>/dev/null || echo 0)
+  dbg_has=$({ nm -gU "$WT_DEBUG_DIR/libContentTools.dylib" 2>/dev/null | grep -c CookMeshWithPipeline; } 2>/dev/null || echo 0)
+  if [[ "$cfg_has" -eq 0 && "$dbg_has" -gt 0 ]]; then
+    echo "[build_app] WARNING: $WT_NATIVE_DIR/libContentTools.dylib is stale (missing recent ABI symbols); using $WT_DEBUG_DIR" >&2
+    echo "[build_app]   rebuild inside the worktree to refresh $WT_NATIVE_DIR:" >&2
+    echo "[build_app]     $PROJ_DIR/build/build_engine.sh $CONFIG" >&2
+    NATIVE_LIB_DIR="$WT_DEBUG_DIR"
+    LIB_SRC_LABEL="worktree (Debug fallback — $CONFIG dylib was stale)"
+  fi
+fi
+
+# Last-resort fallbacks for setups that don't have Darwin/Debug/ (older
+# multi-config trees before CMAKE_BUILD_TYPE was forced to Debug).
+if [[ -z "$NATIVE_LIB_DIR" && -d "$WT_NATIVE_DIR" ]]; then
+  NATIVE_LIB_DIR="$WT_NATIVE_DIR"
+  LIB_SRC_LABEL="worktree"
+fi
+if [[ -z "$NATIVE_LIB_DIR" && -d "$REPO_ROOT/Darwin/$CONFIG" ]]; then
+  NATIVE_LIB_DIR="$REPO_ROOT/Darwin/$CONFIG"
+  LIB_SRC_LABEL="main checkout"
+  echo "[build_app] WARNING: using main-checkout dylib at $NATIVE_LIB_DIR; the current worktree's edits are NOT running" >&2
+fi
+
+if [[ -z "$NATIVE_LIB_DIR" ]]; then
   echo "[build_app] ERROR: native dylib not found in either:" >&2
-  echo "[build_app]   worktree: $WT_NATIVE_DIR" >&2
+  echo "[build_app]   worktree: $WT_NATIVE_DIR or $WT_DEBUG_DIR" >&2
   echo "[build_app]   main:     $REPO_ROOT/Darwin/$CONFIG" >&2
-  echo "[build_app]   build the engine first (cmake --build build-wt --config $CONFIG inside the worktree)" >&2
+  echo "[build_app]   build the engine first (cmake --build build-wt inside the worktree)" >&2
   exit 1
 fi
 echo "[build_app] repo root:  $REPO_ROOT"
 echo "[build_app] native lib: $NATIVE_LIB_DIR (source: $LIB_SRC_LABEL)"
 
-# Staleness check: if any tracked C++ source under ContentTools/ or
-# EngineDLL/ is newer than the corresponding dylib in WT_NATIVE_DIR,
-# the editor will load stale code on next launch. Warn (but don't fail)
-# so the user notices and can rebuild. We don't fail because the user
-# may have intentionally skipped a rebuild (e.g. only editing XAML).
-#
-# WT_ROOT is the root of the tree that owns WT_NATIVE_DIR (worktree
-# root in worktree setups, main checkout root otherwise). Source dirs
-# are looked up under WT_ROOT, not PROJ_DIR.
+# Source-tree staleness scan: warns when someone edits ContentTools/
+# or EngineDLL/ source without running `cmake --build` at all. The
+# mtime-based symbol check above can't catch that case (neither copy
+# of the dylib has the new symbol yet because nothing was rebuilt).
+# Just warn; can't pick a better copy.
 WT_ROOT="$(cd "$PROJ_DIR/.." && pwd -P)"
-if [[ "$LIB_SRC_LABEL" == "worktree" && -d "$WT_NATIVE_DIR" ]]; then
+if [[ "$LIB_SRC_LABEL" == worktree* && -d "$NATIVE_LIB_DIR" ]]; then
   stale=0
   for dylib in libEngineDLL.dylib libContentTools.dylib; do
     src_dir=""
@@ -83,16 +134,17 @@ if [[ "$LIB_SRC_LABEL" == "worktree" && -d "$WT_NATIVE_DIR" ]]; then
       libContentTools.dylib) src_dir="ContentTools" ;;
     esac
     [[ -z "$src_dir" ]] && continue
-    dylib_path="$WT_NATIVE_DIR/$dylib"
+    dylib_path="$NATIVE_LIB_DIR/$dylib"
     [[ -f "$dylib_path" ]] || continue
     newer_count="$(find "$WT_ROOT/$src_dir" \( -name '*.cpp' -o -name '*.mm' \) \
                     -newer "$dylib_path" -print -quit 2>/dev/null | wc -l | tr -d ' ')"
     if [[ -n "$newer_count" && "$newer_count" != "0" ]]; then
-      echo "[build_app] WARNING: $dylib in $WT_NATIVE_DIR is older than at least one source under $src_dir/" >&2
       stale=1
+      break
     fi
   done
   if [[ "$stale" == "1" ]]; then
+    echo "[build_app] WARNING: $NATIVE_LIB_DIR dylibs are older than at least one source under ContentTools/ or EngineDLL/" >&2
     echo "[build_app]   rebuild before launching the editor:" >&2
     echo "[build_app]     $PROJ_DIR/build/build_engine.sh $CONFIG" >&2
     echo "[build_app]   (continuing anyway — the dylib may still be runnable; this is a warning, not an error)" >&2
@@ -204,6 +256,19 @@ if [[ -d "$NATIVE_LIB_DIR" ]]; then
   #   1. <worktree>/build-wt/shaders/metal/        (cmake --build build-wt path)
   #   2. <worktree>/Darwin/<Config>/shaders/metal/ (premake/legacy path)
   #   3. <main checkout>/Darwin/<Config>/shaders/metal/   (last-resort; WARNING)
+  # Keep the worktree shader output in sync with its source. Otherwise this
+  # script can find a valid but stale main-checkout metallib and silently run
+  # old viewport coordinate logic even though the C# app came from this
+  # worktree.
+  WT_SHADER_BUILD_DIR="$WT_ROOT/build-wt"
+  WT_BLIT_SOURCE="$WT_ROOT/Engine/Graphics/Metal/shaders/BlitToDrawable.metal"
+  WT_BLIT_OUTPUT="$WT_SHADER_BUILD_DIR/shaders/metal/BlitToDrawable.metallib"
+  if [[ -d "$WT_SHADER_BUILD_DIR" ]] &&
+     { [[ ! -f "$WT_BLIT_OUTPUT" ]] || [[ "$WT_BLIT_SOURCE" -nt "$WT_BLIT_OUTPUT" ]]; }; then
+    echo "[build_app] rebuilding worktree Metal shaders (missing or stale BlitToDrawable.metallib)"
+    cmake --build "$WT_SHADER_BUILD_DIR" --target BuildEngineShaderBlob -j2
+  fi
+
   for metallib in shaders.metallib BlitToDrawable.metallib; do
     found=0
     for src in \

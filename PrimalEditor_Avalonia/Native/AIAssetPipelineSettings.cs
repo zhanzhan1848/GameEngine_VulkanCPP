@@ -111,6 +111,7 @@ public struct AIAssetPipelineSettings
 
     // -- SDF --
     public byte EnableSdf;
+    public uint SdfGridResolution;  // 0 = use default (32); clamped to [4, 256] inside generate_sdf
 
     /// <summary>
     /// Asserts <see cref="Marshal.SizeOf{T}"/> matches the C++ struct size.
