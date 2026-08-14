@@ -422,3 +422,7 @@ worktrees/
 wfc/*.wasm
 wfc/*.js
 wfc/*.data
+
+# CMake-generated engine config (contains machine-specific build paths)
+# Regenerated from EngineConfig.h.in on every configure; must not be tracked.
+Engine/Common/EngineConfig.h
